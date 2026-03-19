@@ -1,0 +1,15 @@
+__pycache__/
+.pytest_cache/
+*.py[cod]
+
+runtime_logs/
+projects/
+jobs/
+demo_output/
+voice_bank/
+
+tools/caddy/
+
+autodub.local.json
+remote_workbench.local.json
+voice_registry.json

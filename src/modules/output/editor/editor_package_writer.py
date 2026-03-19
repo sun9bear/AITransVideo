@@ -1,0 +1,599 @@
+from __future__ import annotations
+
+from collections import Counter
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import tempfile
+
+from pydub import AudioSegment
+from pydub.effects import normalize
+
+from modules.output.editor.editor_package_models import (
+    ALIGNMENT_METHOD_LABELS,
+    AlignedSegment,
+    ProjectOutput,
+    ProjectOutputResult,
+)
+
+
+class EditorPackageWriter:
+    """Write the editor-facing project deliverables for a dubbing run."""
+
+    _MAX_SUBTITLE_CHARS = 40
+    _MIN_SUBTITLE_DURATION_MS = 800
+
+    def write(self, output: ProjectOutput) -> ProjectOutputResult:
+        output_root = self._resolve_output_root(output)
+        output_root.mkdir(parents=True, exist_ok=True)
+
+        segment_paths = self._copy_segment_files(output)
+        dubbed_audio_path = self._compose_full_audio(output, segment_paths)
+        ambient_audio_path = self._export_ambient_audio(output)
+        subtitles_path = self._write_srt(output)
+        background_sounds_path = self._detect_background_sounds(output)
+        alignment_report_path = self._write_alignment_report(output)
+
+        return ProjectOutputResult(
+            dubbed_audio_path=dubbed_audio_path,
+            ambient_audio_path=ambient_audio_path,
+            segments_dir=str((output_root / "segments").resolve(strict=False)),
+            segment_count=len(output.segments),
+            subtitles_path=subtitles_path,
+            background_sounds_path=background_sounds_path,
+            alignment_report_path=alignment_report_path,
+            needs_review_count=sum(1 for segment in output.segments if segment.needs_review),
+        )
+
+    def _copy_segment_files(self, output: ProjectOutput) -> dict[int, str]:
+        segments_root = self._resolve_output_root(output) / "segments"
+        segments_root.mkdir(parents=True, exist_ok=True)
+
+        copied_paths: dict[int, str] = {}
+        for segment in self._sorted_segments(output):
+            source_path = Path(segment.aligned_audio_path).resolve(strict=False)
+            if not source_path.exists():
+                raise FileNotFoundError(f"缺少对齐后音频文件：{source_path}")
+            speaker_dir = segments_root / segment.speaker_id
+            speaker_dir.mkdir(parents=True, exist_ok=True)
+            destination_path = speaker_dir / (
+                f"segment_{segment.segment_id:03d}_"
+                f"{self._format_filename_timestamp(segment.start_ms)}_"
+                f"{self._format_filename_timestamp(segment.end_ms)}.wav"
+            )
+            shutil.copy2(source_path, destination_path)
+            self._trim_segment_audio_to_slot(destination_path, segment)
+            copied_path = Path(self._ensure_jianying_compatible(str(destination_path))).resolve(strict=False)
+            if not copied_path.exists():
+                raise FileNotFoundError(f"导出分段音频失败：{copied_path}")
+            copied_paths[segment.segment_id] = str(copied_path)
+        return copied_paths
+
+    def _compose_full_audio(self, output: ProjectOutput, segment_paths: dict[int, str]) -> str:
+        output_root = self._resolve_output_root(output)
+        output_root.mkdir(parents=True, exist_ok=True)
+        output_path = output_root / "dubbed_audio_complete.wav"
+        try:
+            self._compose_full_audio_with_ffmpeg(output, segment_paths, output_path)
+        except FileNotFoundError:
+            full_audio = (
+                AudioSegment.silent(
+                    duration=output.total_duration_ms,
+                    frame_rate=44_100,
+                )
+                .set_channels(2)
+                .set_sample_width(2)
+            )
+            for segment in self._sorted_segments(output):
+                dubbed = AudioSegment.from_wav(segment_paths[segment.segment_id])
+                full_audio = full_audio.overlay(dubbed, position=segment.start_ms)
+            full_audio.export(output_path, format="wav")
+
+        self._normalize_full_output_audio(output_path)
+        return self._ensure_jianying_compatible(str(output_path))
+
+    def _export_ambient_audio(self, output: ProjectOutput) -> str:
+        output_root = self._resolve_output_root(output)
+        output_root.mkdir(parents=True, exist_ok=True)
+        ambient_source_path = Path(output.output_dir).resolve(strict=False) / "audio" / "ambient.wav"
+        output_path = output_root / "ambient_audio.wav"
+
+        if ambient_source_path.exists():
+            shutil.copy2(ambient_source_path, output_path)
+            return self._ensure_jianying_compatible(str(output_path))
+
+        ambient_audio = (
+            AudioSegment.silent(duration=output.total_duration_ms, frame_rate=44_100)
+            .set_channels(2)
+            .set_sample_width(2)
+        )
+        ambient_audio.export(output_path, format="wav")
+        return str(output_path.resolve(strict=False))
+
+    def _compose_full_audio_with_ffmpeg(
+        self,
+        output: ProjectOutput,
+        segment_paths: dict[int, str],
+        output_path: Path,
+    ) -> None:
+        duration_seconds = max(output.total_duration_ms, 0) / 1000
+        command = [
+            "ffmpeg",
+            "-f",
+            "lavfi",
+            "-t",
+            f"{duration_seconds:.3f}",
+            "-i",
+            "anullsrc=r=44100:cl=stereo",
+        ]
+
+        segments = self._sorted_segments(output)
+        for segment in segments:
+            command.extend(["-i", segment_paths[segment.segment_id]])
+
+        filter_lines = ["[0:a]aformat=sample_fmts=s16:sample_rates=44100:channel_layouts=stereo[base]"]
+        mix_inputs = ["[base]"]
+        for input_index, segment in enumerate(segments, start=1):
+            delay_ms = max(segment.start_ms, 0)
+            filter_lines.append(
+                f"[{input_index}:a]"
+                "aformat=sample_fmts=s16:sample_rates=44100:channel_layouts=stereo,"
+                f"adelay={delay_ms}|{delay_ms}[seg{input_index}]"
+            )
+            mix_inputs.append(f"[seg{input_index}]")
+
+        if mix_inputs == ["[base]"]:
+            filter_lines.append("[base]anull[mix]")
+        else:
+            filter_lines.append(
+                "".join(mix_inputs)
+                + (
+                    f"amix=inputs={len(mix_inputs)}:duration=first:"
+                    "dropout_transition=0:normalize=0[mix]"
+                )
+            )
+
+        filter_script_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                suffix=".ffmpeg-filter",
+                prefix="compose_",
+                dir=output_path.parent,
+                delete=False,
+            ) as handle:
+                filter_script_path = Path(handle.name).resolve(strict=False)
+                handle.write(";\n".join(filter_lines))
+
+            command.extend(
+                [
+                    "-filter_complex_script",
+                    str(filter_script_path),
+                    "-map",
+                    "[mix]",
+                    "-acodec",
+                    "pcm_s16le",
+                    "-ar",
+                    "44100",
+                    "-ac",
+                    "2",
+                    "-y",
+                    str(output_path),
+                ]
+            )
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        finally:
+            if filter_script_path is not None:
+                filter_script_path.unlink(missing_ok=True)
+
+        if result.returncode != 0:
+            stderr = (result.stderr or "").strip()
+            raise RuntimeError(f"ffmpeg 合成完整配音失败：{stderr}")
+
+    def _normalize_full_output_audio(self, output_path: Path) -> None:
+        if not output_path.exists():
+            return
+
+        audio = AudioSegment.from_wav(output_path)
+        if audio.rms == 0 or audio.max_dBFS == float("-inf") or audio.max_dBFS >= -3.0:
+            return
+
+        normalized_audio = normalize(audio, headroom=1.0)
+        normalized_audio.export(output_path, format="wav")
+        print("[S6] 完整配音响度校正完成")
+
+    def _write_srt(self, output: ProjectOutput) -> str:
+        output_root = self._resolve_output_root(output)
+        output_root.mkdir(parents=True, exist_ok=True)
+
+        blocks: list[str] = []
+        subtitle_index = 1
+        for segment in self._sorted_segments(output):
+            for start_ms, end_ms, text in self._split_segment_into_subtitles(segment):
+                blocks.append(
+                    "\n".join(
+                        [
+                            str(subtitle_index),
+                            f"{self._format_srt_timestamp(start_ms)} --> "
+                            f"{self._format_srt_timestamp(end_ms)}",
+                            text,
+                        ]
+                    )
+                )
+                subtitle_index += 1
+
+        serialized = "\n\n".join(blocks)
+        if serialized:
+            serialized += "\n"
+
+        output_path = output_root / "subtitles.srt"
+        output_path.write_text(serialized, encoding="utf-8")
+        return str(output_path.resolve(strict=False))
+
+    def _detect_background_sounds(self, output: ProjectOutput) -> str:
+        output_root = self._resolve_output_root(output)
+        output_root.mkdir(parents=True, exist_ok=True)
+
+        gaps = self._collect_gaps(output)
+        reference_audio_path = self._resolve_background_reference_audio_path(output)
+        original_audio = AudioSegment.from_wav(reference_audio_path) if reference_audio_path is not None else None
+
+        findings: list[str] = []
+        if original_audio is None:
+            for gap_start_ms, gap_end_ms in gaps:
+                findings.append(
+                    f"{self._format_gap_timestamp(gap_start_ms)} → {self._format_gap_timestamp(gap_end_ms)}  "
+                    "[未检测：缺少 original.wav]"
+                )
+        else:
+            for gap_start_ms, gap_end_ms in gaps:
+                gap_audio = original_audio[gap_start_ms:gap_end_ms]
+                if gap_audio.rms == 0:
+                    continue
+                gap_dbfs = gap_audio.dBFS
+                if gap_dbfs > -40:
+                    findings.append(
+                        f"{self._format_gap_timestamp(gap_start_ms)} → {self._format_gap_timestamp(gap_end_ms)}  "
+                        f"[RMS: {round(gap_dbfs)}dBFS，可能是掌声/笑声/音效]"
+                    )
+
+        lines = [
+            "背景声检测报告",
+            "==============",
+            "建议：对原视频音轨整体静音后，单独恢复以下片段的音量。",
+            "",
+            "检测到背景声的片段：",
+        ]
+        if findings:
+            lines.extend(findings)
+        else:
+            lines.append("（如未检测到背景声，此处为空）")
+        lines.extend(
+            [
+                "",
+                "操作方法：",
+                '在剪映中选中原视频音轨 → 点击"分割" → 只对上述时间段恢复音量 → 其余部分保持静音。',
+            ]
+        )
+
+        output_path = output_root / "background_sounds.txt"
+        output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return str(output_path.resolve(strict=False))
+
+    def _resolve_background_reference_audio_path(self, output: ProjectOutput) -> Path | None:
+        audio_root = Path(output.output_dir).resolve(strict=False) / "audio"
+        ambient_audio_path = audio_root / "ambient.wav"
+        if ambient_audio_path.exists():
+            return ambient_audio_path
+
+        original_audio_path = audio_root / "original.wav"
+        if original_audio_path.exists():
+            return original_audio_path
+        return None
+
+    def _write_alignment_report(self, output: ProjectOutput) -> str:
+        output_root = self._resolve_output_root(output)
+        output_root.mkdir(parents=True, exist_ok=True)
+
+        segments = self._sorted_segments(output)
+        speaker_counts: dict[str, int] = {}
+        speaker_names: dict[str, str] = {}
+        for segment in segments:
+            speaker_counts[segment.speaker_id] = speaker_counts.get(segment.speaker_id, 0) + 1
+            speaker_names.setdefault(segment.speaker_id, segment.display_name)
+
+        method_counts = Counter(segment.alignment_method for segment in segments)
+        review_segments = [segment for segment in segments if segment.needs_review]
+        total_segments = len(segments)
+
+        lines = [
+            "对齐质量报告",
+            "============",
+            f"视频：{output.video_title}",
+            f"总段数：{total_segments}段",
+        ]
+        for speaker_id in sorted(speaker_counts):
+            speaker_label = self._format_speaker_label(speaker_id)
+            display_name = speaker_names[speaker_id]
+            lines.append(f"{speaker_label}（{display_name}）：{speaker_counts[speaker_id]}段")
+
+        lines.extend(["", "对齐方式统计："])
+        for method in ("direct", "dsp", "rewrite_direct", "rewrite_dsp", "force_dsp"):
+            count = method_counts.get(method, 0)
+            percentage = round((count / total_segments) * 100) if total_segments else 0
+            lines.append(f"  {ALIGNMENT_METHOD_LABELS[method]}：{count}段（{percentage}%）")
+
+        lines.append("")
+        if review_segments:
+            lines.append(f"⚠️ 需要手工检查的段落（共{len(review_segments)}段）：")
+            for segment in review_segments:
+                lines.append(
+                    "  "
+                    f"segment_{segment.segment_id:03d}  "
+                    f"{self._format_speaker_label(segment.speaker_id)}  "
+                    f"{self._format_clock_timestamp(segment.start_ms)} → {self._format_clock_timestamp(segment.end_ms)}  "
+                    f"[{self._build_review_reason(segment)}]"
+                )
+        else:
+            lines.append("全部自动对齐完成")
+
+        output_path = output_root / "alignment_report.txt"
+        output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return str(output_path.resolve(strict=False))
+
+    def _resolve_output_root(self, output: ProjectOutput) -> Path:
+        return Path(output.output_dir).resolve(strict=False) / "output"
+
+    def _ensure_jianying_compatible(self, wav_path: str) -> str:
+        source_path = Path(wav_path).resolve(strict=False)
+        if not source_path.exists():
+            return str(source_path)
+
+        try:
+            audio = AudioSegment.from_wav(source_path)
+            if audio.frame_rate == 44_100 and audio.channels == 2 and audio.sample_width == 2:
+                return str(source_path)
+        except Exception:
+            pass
+
+        temp_source_path = source_path.with_name(f"{source_path.stem}.__jianying_source__{source_path.suffix}")
+        if temp_source_path.exists():
+            temp_source_path.unlink()
+
+        shutil.move(str(source_path), str(temp_source_path))
+        try:
+            result = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-i",
+                    str(temp_source_path),
+                    "-acodec",
+                    "pcm_s16le",
+                    "-ar",
+                    "44100",
+                    "-ac",
+                    "2",
+                    "-y",
+                    str(source_path),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except FileNotFoundError:
+            shutil.move(str(temp_source_path), str(source_path))
+            print(f"[警告] 未找到 ffmpeg，保留原始 WAV：{source_path}")
+            return str(source_path)
+
+        if result.returncode != 0:
+            if source_path.exists():
+                source_path.unlink()
+            shutil.move(str(temp_source_path), str(source_path))
+            stderr = (result.stderr or "").strip()
+            print(f"[警告] ffmpeg 转码失败，保留原始 WAV：{source_path} {stderr}")
+            return str(source_path)
+
+        temp_source_path.unlink(missing_ok=True)
+        return str(source_path)
+
+    def _trim_segment_audio_to_slot(self, wav_path: Path, segment: AlignedSegment) -> None:
+        slot_duration_ms = max(0, int(segment.end_ms) - int(segment.start_ms))
+        if slot_duration_ms <= 0 or not wav_path.exists():
+            return
+
+        try:
+            audio = AudioSegment.from_wav(wav_path)
+        except Exception:
+            return
+
+        if len(audio) <= slot_duration_ms:
+            return
+
+        trimmed = audio[:slot_duration_ms]
+        if slot_duration_ms >= 120:
+            trimmed = trimmed.fade_out(min(40, max(10, slot_duration_ms // 20)))
+        trimmed.export(wav_path, format="wav")
+
+    def _sorted_segments(self, output: ProjectOutput) -> list[AlignedSegment]:
+        return sorted(output.segments, key=lambda segment: (segment.start_ms, segment.segment_id))
+
+    def _split_segment_into_subtitles(self, segment: AlignedSegment) -> list[tuple[int, int, str]]:
+        raw_chunks = self._split_subtitle_text(segment.cn_text)
+        if not raw_chunks:
+            text = segment.cn_text.strip()
+            if not text:
+                return []
+            return [(segment.start_ms, segment.end_ms, text)]
+
+        chunks = self._merge_short_subtitle_chunks(raw_chunks, segment.end_ms - segment.start_ms)
+        weights = [self._subtitle_weight(chunk) for chunk in chunks]
+        total_weight = sum(weights) or len(chunks)
+        total_duration_ms = max(segment.end_ms - segment.start_ms, len(chunks))
+
+        subtitle_entries: list[tuple[int, int, str]] = []
+        cursor = segment.start_ms
+        accumulated_weight = 0
+        for index, chunk in enumerate(chunks):
+            accumulated_weight += weights[index] or 1
+            if index == len(chunks) - 1:
+                end_ms = segment.end_ms
+            else:
+                ratio = accumulated_weight / total_weight
+                end_ms = segment.start_ms + int(total_duration_ms * ratio)
+                end_ms = max(end_ms, cursor + 1)
+                remaining_slots = len(chunks) - index - 1
+                max_end = segment.end_ms - remaining_slots
+                end_ms = min(end_ms, max_end)
+            subtitle_entries.append((cursor, end_ms, chunk))
+            cursor = end_ms
+        return subtitle_entries
+
+    def _split_subtitle_text(self, text: str) -> list[str]:
+        normalized = re.sub(r"\s+", "", text).strip()
+        if not normalized:
+            return []
+
+        strong_parts = self._split_with_delimiters(normalized, r"(……|[。！？；])")
+        chunks: list[str] = []
+        for part in strong_parts:
+            if self._subtitle_weight(part) <= self._MAX_SUBTITLE_CHARS:
+                chunks.append(part)
+                continue
+
+            weak_parts = self._split_with_delimiters(part, r"([，、])")
+            for weak_part in weak_parts:
+                if self._subtitle_weight(weak_part) <= self._MAX_SUBTITLE_CHARS:
+                    chunks.append(weak_part)
+                    continue
+                chunks.extend(self._hard_split_text(weak_part, self._MAX_SUBTITLE_CHARS))
+        return [chunk for chunk in chunks if chunk]
+
+    def _merge_short_subtitle_chunks(self, chunks: list[str], total_duration_ms: int) -> list[str]:
+        merged = list(chunks)
+        while len(merged) > 1:
+            weights = [self._subtitle_weight(chunk) for chunk in merged]
+            total_weight = sum(weights) or len(merged)
+            durations = [
+                max(1, int(total_duration_ms * ((weight or 1) / total_weight)))
+                for weight in weights
+            ]
+
+            short_index = next(
+                (index for index, duration in enumerate(durations) if duration < self._MIN_SUBTITLE_DURATION_MS),
+                None,
+            )
+            if short_index is None:
+                break
+
+            if short_index == 0:
+                merge_index = 1
+            elif short_index == len(merged) - 1:
+                merge_index = short_index - 1
+            else:
+                left_duration = durations[short_index - 1]
+                right_duration = durations[short_index + 1]
+                merge_index = short_index - 1 if left_duration <= right_duration else short_index + 1
+
+            if merge_index < short_index:
+                merged[merge_index] = merged[merge_index] + merged[short_index]
+                merged.pop(short_index)
+            else:
+                merged[short_index] = merged[short_index] + merged[merge_index]
+                merged.pop(merge_index)
+        return merged
+
+    def _split_with_delimiters(self, text: str, delimiter_pattern: str) -> list[str]:
+        if not text:
+            return []
+        pieces = re.split(delimiter_pattern, text)
+        chunks: list[str] = []
+        current = ""
+        for piece in pieces:
+            if not piece:
+                continue
+            current += piece
+            if re.fullmatch(delimiter_pattern, piece):
+                chunks.append(current)
+                current = ""
+        if current:
+            chunks.append(current)
+        return chunks
+
+    def _hard_split_text(self, text: str, max_chars: int) -> list[str]:
+        stripped = text.strip()
+        if not stripped:
+            return []
+        return [stripped[index:index + max_chars] for index in range(0, len(stripped), max_chars)]
+
+    def _subtitle_weight(self, text: str) -> int:
+        cleaned = re.sub(r"[^\u4e00-\u9fff\u3400-\u4dbfa-zA-Z0-9]", "", text)
+        return len(cleaned) or len(text.strip())
+
+    def _collect_gaps(self, output: ProjectOutput) -> list[tuple[int, int]]:
+        segments = self._sorted_segments(output)
+        if not segments:
+            return [(0, output.total_duration_ms)] if output.total_duration_ms >= 500 else []
+
+        gaps: list[tuple[int, int]] = []
+        cursor_ms = 0
+        for segment in segments:
+            if segment.start_ms - cursor_ms >= 500:
+                gaps.append((cursor_ms, segment.start_ms))
+            cursor_ms = max(cursor_ms, segment.end_ms)
+        if output.total_duration_ms - cursor_ms >= 500:
+            gaps.append((cursor_ms, output.total_duration_ms))
+        return gaps
+
+    def _format_filename_timestamp(self, ms: int) -> str:
+        total_seconds = max(ms, 0) // 1000
+        minutes = total_seconds // 60
+        seconds = total_seconds % 60
+        return f"{minutes:02d}m{seconds:02d}s"
+
+    def _format_srt_timestamp(self, ms: int) -> str:
+        total_ms = max(ms, 0)
+        hours = total_ms // 3_600_000
+        minutes = (total_ms % 3_600_000) // 60_000
+        seconds = (total_ms % 60_000) // 1_000
+        milliseconds = total_ms % 1_000
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d},{milliseconds:03d}"
+
+    def _format_gap_timestamp(self, ms: int) -> str:
+        total_ms = max(ms, 0)
+        total_seconds = total_ms // 1_000
+        minutes = total_seconds // 60
+        seconds = total_seconds % 60
+        milliseconds = total_ms % 1_000
+        return f"{minutes:02d}:{seconds:02d}.{milliseconds:03d}"
+
+    def _format_clock_timestamp(self, ms: int) -> str:
+        total_seconds = max(ms, 0) // 1_000
+        hours = total_seconds // 3_600
+        minutes = (total_seconds % 3_600) // 60
+        seconds = total_seconds % 60
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+    def _format_speaker_label(self, speaker_id: str) -> str:
+        normalized = speaker_id.strip().lower()
+        if normalized.startswith("speaker_"):
+            suffix = normalized.split("_", 1)[1]
+            if len(suffix) == 1 and suffix.isalpha():
+                return f"Speaker {suffix.upper()}"
+            return f"Speaker {suffix.replace('_', ' ').title()}"
+        return speaker_id
+
+    def _build_review_reason(self, segment: AlignedSegment) -> str:
+        if segment.alignment_method == "force_dsp":
+            return "强制DSP，变速幅度过大"
+        if segment.alignment_method in {"rewrite_direct", "rewrite_dsp"}:
+            return "Gemini重写后仍建议复查"
+        if segment.alignment_method == "dsp":
+            return "DSP变速，请复查节奏"
+        return "已标记人工复查"
