@@ -45,8 +45,8 @@ export async function submitTranslationJob(
       job_type: 'localize_video',
       output_target: 'editor',
       source: {
-        type: 'youtube_url',
-        value: input.youtubeUrl,
+        type: input.sourceType ?? 'youtube_url',
+        value: input.sourceType === 'local_file' ? (input.localFilePath ?? '') : input.youtubeUrl,
       },
       speakers: input.speakers,
       voice_a: input.voiceA,

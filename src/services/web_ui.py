@@ -6869,6 +6869,9 @@ def _build_web_ui_handler() -> type[BaseHTTPRequestHandler]:
         def do_POST(self) -> None:  # noqa: N802
             try:
                 parsed_path = urlparse(self.path)
+                if parsed_path.path == "/api/upload-video":
+                    self._handle_video_upload()
+                    return
                 if parsed_path.path == "/api/run":
                     payload = self._read_json()
                     snapshot = self.server.job_manager.start_job(  # type: ignore[attr-defined]
@@ -7247,6 +7250,65 @@ def _build_web_ui_handler() -> type[BaseHTTPRequestHandler]:
 
         def log_message(self, format: str, *args: object) -> None:
             return
+
+        def _handle_video_upload(self) -> None:
+            content_type = self.headers.get("Content-Type", "")
+            if "multipart/form-data" not in content_type:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"error": "需要 multipart/form-data 格式上传。"})
+                return
+
+            content_length = int(self.headers.get("Content-Length") or "0")
+            if content_length <= 0:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"error": "上传文件不能为空。"})
+                return
+
+            # 限制最大 2GB
+            max_size = 2 * 1024 * 1024 * 1024
+            if content_length > max_size:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"error": "文件太大，最大支持 2GB。"})
+                return
+
+            import cgi
+            import tempfile as _tempfile
+
+            form = cgi.FieldStorage(
+                fp=self.rfile,
+                headers=self.headers,
+                environ={
+                    "REQUEST_METHOD": "POST",
+                    "CONTENT_TYPE": content_type,
+                    "CONTENT_LENGTH": str(content_length),
+                },
+            )
+            file_item = form["file"] if "file" in form else None
+            if file_item is None or not hasattr(file_item, "file"):
+                self._write_json(HTTPStatus.BAD_REQUEST, {"error": "未找到上传文件字段 'file'。"})
+                return
+
+            original_filename = getattr(file_item, "filename", "uploaded_video.mp4") or "uploaded_video.mp4"
+            upload_dir = Path(
+                getattr(self.server.job_manager, "project_root", None) or "."  # type: ignore[attr-defined]
+            ) / "uploads"
+            upload_dir.mkdir(parents=True, exist_ok=True)
+
+            # 用时间戳避免文件名冲突
+            import time as _time
+            safe_name = re.sub(r"[^\w.\-]", "_", original_filename)
+            dest_path = upload_dir / f"{int(_time.time())}_{safe_name}"
+
+            with open(dest_path, "wb") as dest_file:
+                while True:
+                    chunk = file_item.file.read(1024 * 1024)  # 1MB chunks
+                    if not chunk:
+                        break
+                    dest_file.write(chunk)
+
+            file_size_mb = dest_path.stat().st_size / (1024 * 1024)
+            self._write_json(HTTPStatus.OK, {
+                "file_path": str(dest_path),
+                "file_name": original_filename,
+                "file_size_mb": round(file_size_mb, 2),
+            })
 
         def _read_json(self) -> dict[str, object]:
             content_length = int(self.headers.get("Content-Length") or "0")

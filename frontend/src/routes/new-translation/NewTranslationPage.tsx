@@ -19,7 +19,12 @@ const MANUAL_INPUT = '__manual__'
 
 export function NewTranslationPage() {
   const navigate = useNavigate()
+  const [sourceType, setSourceType] = useState<'youtube_url' | 'local_file'>('youtube_url')
   const [youtubeUrl, setYoutubeUrl] = useState('')
+  const [uploadedFilePath, setUploadedFilePath] = useState('')
+  const [uploadFileName, setUploadFileName] = useState('')
+  const [isUploading, setIsUploading] = useState(false)
+  const [uploadProgress, setUploadProgress] = useState('')
   const [speakers, setSpeakers] = useState<'1' | '2' | 'auto'>('auto')
   const [voiceA, setVoiceA] = useState('')
   const [voiceB, setVoiceB] = useState('')
@@ -35,7 +40,9 @@ export function NewTranslationPage() {
   )
   const [submitMessage, setSubmitMessage] = useState<string | null>(null)
 
-  const validationError = validateYoutubeUrl(youtubeUrl)
+  const validationError = sourceType === 'youtube_url'
+    ? validateYoutubeUrl(youtubeUrl)
+    : (!uploadedFilePath ? '请先上传视频文件。' : null)
   const isBlockedByActiveJob = Boolean(activeJob)
 
   const loadActiveJob = async (silent = false) => {
@@ -85,8 +92,10 @@ export function NewTranslationPage() {
         speakers,
         voiceA: normalizeOptionalText(voiceA),
         voiceB: normalizeOptionalText(voiceB),
-        youtubeUrl: youtubeUrl.trim(),
-        transcriptionMethod,
+        youtubeUrl: sourceType === 'youtube_url' ? youtubeUrl.trim() : '',
+        sourceType,
+        localFilePath: sourceType === 'local_file' ? uploadedFilePath : undefined,
+        transcriptionMethod: sourceType === 'local_file' ? 'assemblyai' : transcriptionMethod,
       })
 
       setActiveJob(createdJob)
@@ -170,33 +179,126 @@ export function NewTranslationPage() {
             </p>
           </div>
 
-          <div className="space-y-2">
-            <label className="form-label" htmlFor="youtube-url">
-              YouTube 链接
-            </label>
-            <input
-              className="form-input"
-              disabled={isBlockedByActiveJob || submitState === 'submitting'}
-              id="youtube-url"
-              onChange={(event) => {
-                setYoutubeUrl(event.target.value)
-                if (submitState !== 'idle') {
-                  setSubmitState('idle')
-                  setSubmitMessage(null)
-                }
-              }}
-              placeholder="https://www.youtube.com/watch?v=..."
-              type="url"
-              value={youtubeUrl}
-            />
-            <p
-              className={[
-                'text-sm',
-                validationError ? 'text-coral-700' : 'text-ink-900/60',
-              ].join(' ')}
-            >
-              {validationError ?? '当前只支持有效的 YouTube 链接。'}
-            </p>
+          <div className="space-y-3">
+            <div className="flex gap-3">
+              <button
+                className={[
+                  'rounded-full px-4 py-2 text-sm font-semibold transition',
+                  sourceType === 'youtube_url'
+                    ? 'bg-ink-950 text-white'
+                    : 'bg-ink-950/5 text-ink-900/70 hover:bg-ink-950/10',
+                ].join(' ')}
+                onClick={() => setSourceType('youtube_url')}
+                type="button"
+              >
+                YouTube 链接
+              </button>
+              <button
+                className={[
+                  'rounded-full px-4 py-2 text-sm font-semibold transition',
+                  sourceType === 'local_file'
+                    ? 'bg-ink-950 text-white'
+                    : 'bg-ink-950/5 text-ink-900/70 hover:bg-ink-950/10',
+                ].join(' ')}
+                onClick={() => setSourceType('local_file')}
+                type="button"
+              >
+                上传视频
+              </button>
+            </div>
+
+            {sourceType === 'youtube_url' ? (
+              <div className="space-y-2">
+                <label className="form-label" htmlFor="youtube-url">
+                  YouTube 链接
+                </label>
+                <input
+                  className="form-input"
+                  disabled={isBlockedByActiveJob || submitState === 'submitting'}
+                  id="youtube-url"
+                  onChange={(event) => {
+                    setYoutubeUrl(event.target.value)
+                    if (submitState !== 'idle') {
+                      setSubmitState('idle')
+                      setSubmitMessage(null)
+                    }
+                  }}
+                  placeholder="https://www.youtube.com/watch?v=..."
+                  type="url"
+                  value={youtubeUrl}
+                />
+                <p
+                  className={[
+                    'text-sm',
+                    validationError ? 'text-coral-700' : 'text-ink-900/60',
+                  ].join(' ')}
+                >
+                  {validationError ?? '当前只支持有效的 YouTube 链接。'}
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <label className="form-label" htmlFor="video-upload">
+                  选择视频文件
+                </label>
+                {uploadedFilePath ? (
+                  <div className="flex items-center gap-3 rounded-2xl border border-mint-500/20 bg-mint-500/5 px-4 py-3">
+                    <span className="text-sm font-medium text-mint-700">{uploadFileName}</span>
+                    <button
+                      className="text-xs text-ink-900/50 hover:text-coral-700"
+                      onClick={() => {
+                        setUploadedFilePath('')
+                        setUploadFileName('')
+                      }}
+                      type="button"
+                    >
+                      移除
+                    </button>
+                  </div>
+                ) : (
+                  <input
+                    accept="video/*"
+                    className="form-input"
+                    disabled={isBlockedByActiveJob || submitState === 'submitting' || isUploading}
+                    id="video-upload"
+                    onChange={async (event) => {
+                      const file = event.target.files?.[0]
+                      if (!file) return
+                      setIsUploading(true)
+                      setUploadProgress(`正在上传 ${file.name}...`)
+                      try {
+                        const formData = new FormData()
+                        formData.append('file', file)
+                        const response = await fetch('/web-ui-api/api/upload-video', {
+                          method: 'POST',
+                          body: formData,
+                        })
+                        if (!response.ok) {
+                          const err = await response.json().catch(() => ({ error: '上传失败' }))
+                          throw new Error(err.error || '上传失败')
+                        }
+                        const result = await response.json()
+                        setUploadedFilePath(result.file_path)
+                        setUploadFileName(file.name)
+                        setUploadProgress('')
+                      } catch (err) {
+                        setUploadProgress(err instanceof Error ? err.message : '上传失败')
+                      } finally {
+                        setIsUploading(false)
+                      }
+                    }}
+                    type="file"
+                  />
+                )}
+                {uploadProgress ? (
+                  <p className="text-sm text-ink-900/60">{uploadProgress}</p>
+                ) : !uploadedFilePath ? (
+                  <p className="text-sm text-ink-900/60">
+                    支持 MP4、MOV、AVI 等常见视频格式，最大 2GB。
+                  </p>
+                ) : null}
+              </div>
+            )}
           </div>
 
           <div className="grid gap-4 md:grid-cols-4">
