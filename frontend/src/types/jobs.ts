@@ -130,6 +130,7 @@ export interface CreateTranslationJobInput {
   speakers: '1' | '2' | 'auto'
   voiceA?: string
   voiceB?: string
+  transcriptionMethod?: 'assemblyai' | 'gemini'
 }
 
 export const ACTIVE_JOB_STATUSES: readonly JobStatus[] = [

@@ -373,10 +373,26 @@ class ProcessPipeline:
             translator = GeminiTranslator(**translator_kwargs)
 
             transcript_path = (final_project_dir / "transcript" / "transcript.json").resolve(strict=False)
+            transcription_method = getattr(config, "transcription_method", None) or "assemblyai"
+
             if transcript_path.exists():
                 print("[S1] 已有转录结果，跳过转录")
                 media_execution_mode = "cache_restore_full"
                 transcript_result = self._load_transcript_result(transcript_path)
+            elif transcription_method == "gemini":
+                print("[S1] 使用 Gemini 多模态转录...")
+                media_execution_mode = "fresh_run"
+                from services.gemini.transcriber import GeminiTranscriber
+                gemini_transcriber = GeminiTranscriber(
+                    api_key=str(gemini_config.get("api_key", "") or os.environ.get("GEMINI_API_KEY", "")),
+                )
+                transcript_result = gemini_transcriber.transcribe(
+                    normalized_url,
+                    str(final_project_dir / "transcript"),
+                    speaker_labels=normalized_speakers in {"auto", 2},
+                    speakers_expected=2 if normalized_speakers == 2 else None,
+                )
+                print(f"[S1] Gemini 转录完成：共 {len(transcript_result.lines)} 条")
             else:
                 print("[S1] 转录音频...")
                 media_execution_mode = "fresh_run"
@@ -388,13 +404,13 @@ class ProcessPipeline:
                 )
                 print(f"[S1] 完成：共 {len(transcript_result.lines)} 条转录")
 
-                if transcript_result.lines:
-                    detected_language = self._detect_transcript_language(transcript_result.lines)
-                    if detected_language != "en":
-                        raise ValueError(
-                            f"当前只支持英文视频翻译。检测到转录稿语言为非英文"
-                            f"（英文字符占比过低）。请确认输入的视频是英文内容。"
-                        )
+            if media_execution_mode == "fresh_run" and transcript_result.lines:
+                detected_language = self._detect_transcript_language(transcript_result.lines)
+                if detected_language != "en":
+                    raise ValueError(
+                        f"当前只支持英文视频翻译。检测到转录稿语言为非英文"
+                        f"（英文字符占比过低）。请确认输入的视频是英文内容。"
+                    )
 
             if transcript_path.exists() and not transcript_result.lines:
                 print(f"[S1] 完成：共 {len(transcript_result.lines)} 条转录")

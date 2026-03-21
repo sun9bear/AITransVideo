@@ -51,6 +51,7 @@ export async function submitTranslationJob(
       speakers: input.speakers,
       voice_a: input.voiceA,
       voice_b: input.voiceB,
+      transcription_method: input.transcriptionMethod ?? 'assemblyai',
     },
   })
 

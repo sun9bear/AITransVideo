@@ -25,6 +25,7 @@ export function NewTranslationPage() {
   const [speakers, setSpeakers] = useState<'1' | '2' | 'auto'>('auto')
   const [voiceA, setVoiceA] = useState('')
   const [voiceB, setVoiceB] = useState('')
+  const [transcriptionMethod, setTranscriptionMethod] = useState<'assemblyai' | 'gemini'>('assemblyai')
   const [voiceAMode, setVoiceAMode] = useState<'select' | 'manual'>('select')
   const [voiceBMode, setVoiceBMode] = useState<'select' | 'manual'>('select')
   const [savedVoices, setSavedVoices] = useState<VoiceLibraryEntry[]>([])
@@ -87,6 +88,7 @@ export function NewTranslationPage() {
         voiceA: normalizeOptionalText(voiceA),
         voiceB: normalizeOptionalText(voiceB),
         youtubeUrl: youtubeUrl.trim(),
+        transcriptionMethod,
       })
 
       setActiveJob(createdJob)
@@ -199,7 +201,25 @@ export function NewTranslationPage() {
             </p>
           </div>
 
-          <div className="grid gap-4 md:grid-cols-3">
+          <div className="grid gap-4 md:grid-cols-4">
+            <div className="space-y-2">
+              <label className="form-label" htmlFor="transcription-method">
+                转录方案
+              </label>
+              <select
+                className="form-input"
+                disabled={isBlockedByActiveJob || submitState === 'submitting'}
+                id="transcription-method"
+                onChange={(event) => {
+                  setTranscriptionMethod(event.target.value as 'assemblyai' | 'gemini')
+                }}
+                value={transcriptionMethod}
+              >
+                <option value="assemblyai">AssemblyAI</option>
+                <option value="gemini">Gemini 多模态（≤30分钟）</option>
+              </select>
+            </div>
+
             <div className="space-y-2">
               <label className="form-label" htmlFor="speakers">
                 说话人数
