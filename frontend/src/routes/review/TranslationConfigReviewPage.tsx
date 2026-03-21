@@ -138,7 +138,7 @@ export function TranslationConfigReviewPage() {
         </section>
       ) : null}
 
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,1.08fr)_minmax(320px,0.92fr)]">
+      <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(240px,0.3fr)]">
         <div className="space-y-6">
           <section className="surface-card space-y-5 p-6">
             <div className="space-y-2">

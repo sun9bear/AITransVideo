@@ -326,7 +326,7 @@ export function VoiceReviewPage() {
       ) : null}
 
       {!hasAdvanced ? (
-        <div className="grid gap-6 xl:grid-cols-[minmax(0,1.08fr)_minmax(320px,0.92fr)]">
+        <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(240px,0.3fr)]">
           <section className="surface-card p-5">
             <div className="space-y-1">
               <h3 className="text-lg font-semibold text-ink-950">待确认说话人音色</h3>

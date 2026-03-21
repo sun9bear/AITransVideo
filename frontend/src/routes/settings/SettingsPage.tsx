@@ -100,7 +100,7 @@ export function SettingsPage() {
         </div>
       </section>
 
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
+      <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
         <div className="space-y-6">
           <ConfigSummaryCard
             description="完成以下四步即可拿到翻译配音视频。"

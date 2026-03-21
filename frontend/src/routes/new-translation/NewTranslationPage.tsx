@@ -161,7 +161,7 @@ export function NewTranslationPage() {
         </section>
       )}
 
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,1.08fr)_minmax(320px,0.92fr)]">
+      <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(260px,0.35fr)]">
         <form className="surface-card space-y-6 p-6" onSubmit={handleSubmit}>
           <div className="space-y-2">
             <h3 className="text-xl font-semibold text-ink-950">任务输入</h3>

@@ -247,7 +247,7 @@ export function CurrentTaskPage() {
         ) : null}
 
         <div className={isWaitingForReview ? 'pointer-events-none opacity-40' : ''}>
-          <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(320px,0.92fr)]">
+          <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(280px,0.38fr)]">
             <div className="space-y-6">
               <StageProgress items={stageItems} />
 
