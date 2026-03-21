@@ -14,8 +14,8 @@ FIRST_REWRITE_TARGET_RATIO_WINDOWS = {
     "expand": (0.88, 1.08),
 }
 LATER_REWRITE_TARGET_RATIO_WINDOWS = {
-    "shrink": (0.95, 1.10),
-    "expand": (0.90, 1.05),
+    "shrink": (0.97, 1.07),
+    "expand": (0.93, 1.03),
 }
 SEVERE_EXPAND_REWRITE_MIN_TARGET_MS = 20_000
 SEVERE_EXPAND_REWRITE_MAX_RATIO = 0.55

@@ -79,8 +79,9 @@ DEFAULT_PLACEHOLDER_SPEAKER_NAMES = {
 }
 FAILED_SEGMENT_SEMANTIC_SPLIT_MIN_TARGET_MS = 45_000
 FAILED_SEGMENT_SEMANTIC_SPLIT_MIN_RATIO = 0.28
-PRE_TTS_REWRITE_MIN_TARGET_MS = 20_000
-PRE_TTS_REWRITE_OVERSHOOT_RATIO = 0.30
+PRE_TTS_REWRITE_MIN_TARGET_MS = 8_000
+PRE_TTS_REWRITE_OVERSHOOT_RATIO = 0.20
+PRE_TTS_REWRITE_UNDERSHOOT_RATIO = 0.25
 PRE_ALIGNMENT_SEMANTIC_SPLIT_OVERSHOOT_RATIO = 0.30
 SEVERE_PRE_ALIGNMENT_SEMANTIC_SPLIT_MIN_TARGET_MS = 30_000
 SEVERE_PRE_ALIGNMENT_SEMANTIC_SPLIT_OVERSHOOT_RATIO = 0.35
@@ -1440,7 +1441,18 @@ class ProcessPipeline:
                 continue
 
             overshoot_ratio = (estimated_duration_ms - target_duration_ms) / target_duration_ms
-            if overshoot_ratio < PRE_TTS_REWRITE_OVERSHOOT_RATIO:
+            undershoot_ratio = (target_duration_ms - estimated_duration_ms) / target_duration_ms
+
+            needs_rewrite = False
+            rewrite_label = ""
+            if overshoot_ratio >= PRE_TTS_REWRITE_OVERSHOOT_RATIO:
+                needs_rewrite = True
+                rewrite_label = "overshoot"
+            elif undershoot_ratio > PRE_TTS_REWRITE_UNDERSHOOT_RATIO:
+                needs_rewrite = True
+                rewrite_label = "undershoot"
+
+            if not needs_rewrite:
                 continue
 
             rewritten_text = rewriter.rewrite_for_duration(
@@ -1457,7 +1469,7 @@ class ProcessPipeline:
             segment.rewrite_count += 1
             rewritten_count += 1
             print(
-                f"[S4] Pre-TTS rewrite segment_{segment.segment_id:03d}: "
+                f"[S4] Pre-TTS rewrite ({rewrite_label}) segment_{segment.segment_id:03d}: "
                 f"estimate {estimated_duration_ms}ms -> target {target_duration_ms}ms"
             )
 
