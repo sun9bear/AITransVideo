@@ -16,12 +16,14 @@ REVIEW_STATUS_REJECTED = "rejected"
 REVIEW_STATUS_SKIPPED = "skipped"
 
 SPEAKER_REVIEW_STAGE = "speaker_review"
+TRANSLATION_CONFIG_REVIEW_STAGE = "translation_config_review"
 TRANSLATION_REVIEW_STAGE = "translation_review"
 VOICE_REVIEW_STAGE = "voice_review"
 AUDIO_ALIGNMENT_REVIEW_STAGE = "audio_alignment_review"
 
 REVIEW_STAGE_TAB_MAP = {
     SPEAKER_REVIEW_STAGE: "review",
+    TRANSLATION_CONFIG_REVIEW_STAGE: "translation-config",
     TRANSLATION_REVIEW_STAGE: "translation",
     VOICE_REVIEW_STAGE: "voice-library",
     AUDIO_ALIGNMENT_REVIEW_STAGE: "audio-alignment",

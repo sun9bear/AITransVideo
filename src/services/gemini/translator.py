@@ -35,8 +35,8 @@ TRANSLATION_CHECKPOINT_VERSION = 1
 DEFAULT_DYNAMIC_DENSITY_MIN = 0.65
 DEFAULT_DYNAMIC_DENSITY_MAX = 1.50
 DEFAULT_SPEAKER_REFERENCE_MIN_SAMPLES = 3
-DEFAULT_TRANSLATION_LENGTH_UNDERSHOOT_FACTOR = 0.9
-DEFAULT_TRANSLATION_LENGTH_OVERSHOOT_FACTOR = 1.1
+DEFAULT_TRANSLATION_LENGTH_UNDERSHOOT_FACTOR = 0.5
+DEFAULT_TRANSLATION_LENGTH_OVERSHOOT_FACTOR = 2.0
 DEFAULT_ALIAS_RETRY_ATTEMPTS_BEFORE_FALLBACK = 1
 SPEAKER_INFER_PROMPT_TEMPLATE_CONTEXT_TOKEN = "__CONTEXT_EXCERPT__"
 SPEAKER_INFER_PROMPT_TEMPLATE_EXPECTED_OUTPUT_TOKEN = "__EXPECTED_OUTPUT_JSON__"
@@ -71,24 +71,22 @@ DEFAULT_TRANSLATION_PROMPT_TEMPLATE = """你是专业的视频配音翻译专家
 - 标题：__VIDEO_TITLE__
 - 来源：__YOUTUBE_URL__
 
-这些翻译将直接用于中文 TTS 配音，请特别注意：
-1. 每段中文文本的配音时长应与原视频对应段落时长大致相当。
-2. 请根据每段给出的 target_duration_seconds 和 min_chars ~ max_chars 控制翻译长度。
-3. 字数范围是软约束，不需要机械贴合；优先保证自然、准确、口语化。
-4. 宁可适度意译、精简表达，也不要逐字直译导致明显过长。
-5. 如果原文信息密度高，可用更紧凑的中文表达方式保留核心信息。
-6. 翻译结果将用于配音，不要写成书面字幕腔，要适合人声朗读。
-7. 所有人物姓名必须优先使用中文常见译名，不要保留英文人名。
+这些翻译将直接用于中文 TTS 配音，核心目标是让中文配音时长与原英文段落时长大致一致。请特别注意：
+1. 每段都标注了 target_duration_seconds（原文段落时长），翻译时请自然地控制中文长度，使配音时长接近该目标。
+2. 不要机械地按字数公式凑字，而是根据原文的语速节奏、信息密度来判断中文应该翻多长。
+3. 宁可适度意译、精简表达，也不要逐字直译导致配音明显超时。
+4. 如果原文信息密度高，可用更紧凑的中文表达方式保留核心信息。
+5. 翻译结果将用于配音，不要写成书面字幕腔，要适合人声朗读。
+6. 所有人物姓名必须优先使用中文常见译名，不要保留英文人名。
    例如：Elon Musk -> 埃隆·马斯克，Sam Altman -> 萨姆·奥特曼，Naval Ravikant -> 纳瓦尔·拉维坎特。
-8. 公司、产品、品牌、模型名称若已有常见中文译法，优先使用中文；若没有稳定中文译法，可保留原文。
+7. 公司、产品、品牌、模型名称若已有常见中文译法，优先使用中文；若没有稳定中文译法，可保留原文。
 __SPEAKER_INSTRUCTION____STRICT_LENGTH_INSTRUCTION__补充要求：在不影响自然度的前提下，可适度保留原文中的口语连接词、语气词和缓冲表达，以维持更接近原说话节奏；但不要为了凑字数生硬添加无意义填充词。
-10. 每个 segment 独立翻译，但要保持上下文连贯。
-11. 只输出 JSON，不要任何其他文字。
+9. 每个 segment 独立翻译，但要保持上下文连贯。
+10. 只输出 JSON，不要任何其他文字。
 
 每个 segment 都提供了：
-- target_duration_seconds：目标配音时长（秒）
-- target_chars：按 4.5 字/秒估算的目标中文字数
-- min_chars ~ max_chars：建议中文字数范围（软约束）
+- target_duration_seconds：原文段落时长（秒），中文配音时长应尽量接近
+- min_chars ~ max_chars：建议中文字数范围（仅供参考，不是硬性约束）
 
 输入（JSON数组）：
 __GROUPS_JSON__

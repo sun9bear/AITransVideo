@@ -16,6 +16,7 @@ export type PublicStage =
   | 'legacy_process_output'
   | 'media_understanding'
   | 'speaker_review'
+  | 'translation_config_review'
   | 'translation_review'
   | 'voice_review'
 

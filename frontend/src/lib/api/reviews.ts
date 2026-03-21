@@ -509,6 +509,47 @@ function projectDirEquals(left: string, right: string) {
   return normalizeProjectDir(left) === normalizeProjectDir(right)
 }
 
+export async function getTranslationConfigReview(jobId: string) {
+  const [payload, job] = await Promise.all([
+    webUiApiClient.get<ApiWebUiStateResponse>('/api/state'),
+    getJob(jobId),
+  ])
+
+  const reviewFlow = payload.results?.review_flow
+  const configStage = reviewFlow?.stages?.translation_config_review
+  const stagePayload = (configStage?.payload ?? {}) as Record<string, unknown>
+
+  return {
+    jobId: job.id,
+    projectDir: job.projectDir ?? '',
+    segmentCount: typeof stagePayload.segment_count === 'number' ? stagePayload.segment_count : 0,
+    availableModels: Array.isArray(stagePayload.available_models)
+      ? (stagePayload.available_models as Array<{ alias: string; provider: string; model_name: string }>)
+      : [],
+    currentModel: typeof stagePayload.current_model === 'string' ? stagePayload.current_model : '',
+    currentPromptTemplate: typeof stagePayload.current_prompt_template === 'string'
+      ? stagePayload.current_prompt_template
+      : '',
+  }
+}
+
+export async function approveTranslationConfigReview(input: {
+  jobId: string
+  projectDir: string
+  selectedModel: string
+  promptTemplate: string
+  savePrompt: boolean
+}) {
+  return webUiApiClient.post('/api/review/translation-config/approve', {
+    body: {
+      project_dir: input.projectDir,
+      selected_model: input.selectedModel,
+      prompt_template: input.promptTemplate,
+      save_prompt: input.savePrompt,
+    },
+  })
+}
+
 function normalizeProjectDir(value: string) {
   return value.trim().replaceAll('\\', '/').replace(/\/+$/, '').toLowerCase()
 }

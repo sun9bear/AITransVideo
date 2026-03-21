@@ -38,6 +38,7 @@ from services.review_state import (
     REVIEW_STATUS_PENDING,
     REVIEW_STATUS_SKIPPED,
     SPEAKER_REVIEW_STAGE,
+    TRANSLATION_CONFIG_REVIEW_STAGE,
     TRANSLATION_REVIEW_STAGE,
     VOICE_REVIEW_STAGE,
     ReviewStateManager,
@@ -558,10 +559,13 @@ class JobAPIBackedJobManager:
             if current_snapshot.status == "cancelled":
                 return current_snapshot.to_dict()
 
+        if tracked_job_id is None or current_snapshot.status not in ACTIVE_JOB_STATUSES:
+            discovered_job_id = self._discover_job_id()
+            if discovered_job_id is not None:
+                tracked_job_id = discovered_job_id
+
         if tracked_job_id is None:
-            tracked_job_id = self._discover_job_id()
-            if tracked_job_id is None:
-                return current_snapshot.to_dict()
+            return current_snapshot.to_dict()
 
         try:
             job_payload = self._request_json("GET", f"/jobs/{tracked_job_id}", None)
@@ -6795,32 +6799,32 @@ def _build_web_ui_handler() -> type[BaseHTTPRequestHandler]:
             if parsed_path.path == "/api/result-download":
                 query = parse_qs(parsed_path.query)
                 requested_project_dir = str((query.get("project_dir") or [""])[0]).strip()
+                requested_job_id = str((query.get("job_id") or [""])[0]).strip()
                 requested_key = str((query.get("key") or [""])[0]).strip()
-                if not requested_project_dir:
-                    self._write_json(
-                        HTTPStatus.BAD_REQUEST,
-                        {"error": "project_dir query parameter is required"},
-                    )
-                    return
                 if not requested_key:
                     self._write_json(
                         HTTPStatus.BAD_REQUEST,
                         {"error": "key query parameter is required"},
                     )
                     return
-                project_root = self.server.job_manager.project_root.resolve(strict=False)  # type: ignore[attr-defined]
-                projects_root = (project_root / "projects").resolve(strict=False)
-                candidate_project_dir = Path(requested_project_dir).expanduser().resolve(strict=False)
-                if not _path_is_within_root(candidate_project_dir, projects_root):
+                manager = self.server.job_manager  # type: ignore[attr-defined]
+                project_root = manager.project_root.resolve(strict=False)
+                resolved_project_dir_text = requested_project_dir or _resolve_project_dir_by_job_id(
+                    manager=manager,
+                    job_id=requested_job_id,
+                )
+                if not resolved_project_dir_text:
                     self._write_json(
-                        HTTPStatus.FORBIDDEN,
-                        {"error": "Requested project is outside projects root."},
+                        HTTPStatus.BAD_REQUEST,
+                        {
+                            "error": "project_dir or job_id query parameter is required",
+                        },
                     )
                     return
                 try:
                     download_path = _resolve_public_result_download_path(
                         project_root=project_root,
-                        project_dir=candidate_project_dir,
+                        project_dir=Path(resolved_project_dir_text).expanduser().resolve(strict=False),
                         download_key=requested_key,
                     )
                 except ValueError as exc:
@@ -7130,6 +7134,48 @@ def _build_web_ui_handler() -> type[BaseHTTPRequestHandler]:
                         manager=self.server.job_manager  # type: ignore[attr-defined]
                     )
                     self._write_json(HTTPStatus.OK, snapshot)
+                    return
+                if parsed_path.path == "/api/review/translation-config/approve":
+                    payload = self._read_json()
+                    project_dir = _resolve_authoritative_review_project_dir(
+                        manager=self.server.job_manager,  # type: ignore[attr-defined]
+                        requested_project_dir=payload.get("project_dir"),
+                        expected_stage=TRANSLATION_CONFIG_REVIEW_STAGE,
+                        require_waiting_review=True,
+                    )
+                    # Save selected model and prompt to review state
+                    review_state_path = Path(project_dir) / "review_state.json"
+                    review_state_manager = ReviewStateManager(review_state_path)
+                    review_state_manager.set_stage(
+                        TRANSLATION_CONFIG_REVIEW_STAGE,
+                        status=REVIEW_STATUS_APPROVED,
+                        payload={
+                            "selected_model": payload.get("selected_model"),
+                            "prompt_template": payload.get("prompt_template"),
+                        },
+                    )
+                    # Optionally persist prompt to config
+                    if payload.get("save_prompt"):
+                        try:
+                            save_web_ui_settings(
+                                translation_model_alias=str(payload.get("selected_model") or ""),
+                                translation_prompt_template=payload.get("prompt_template"),
+                                provider_api_keys={},
+                            )
+                        except Exception:
+                            pass  # Non-critical: prompt save failure shouldn't block flow
+                    snapshot = self.server.job_manager.continue_after_review(  # type: ignore[attr-defined]
+                        expected_stage=TRANSLATION_CONFIG_REVIEW_STAGE
+                    )
+                    self._write_json(
+                        HTTPStatus.OK,
+                        {
+                            **build_web_ui_snapshot(  # type: ignore[arg-type]
+                                manager=self.server.job_manager  # type: ignore[attr-defined]
+                            ),
+                            "job": snapshot,
+                        },
+                    )
                     return
                 if parsed_path.path == "/api/review/translation/approve":
                     payload = self._read_json()
@@ -7658,8 +7704,16 @@ def _resolve_public_result_download_path(
     if normalized_key not in PUBLIC_RESULT_DOWNLOAD_KEYS:
         raise ValueError(f"Requested download key is not allowed: {normalized_key}")
 
-    resolved_project_dir = project_dir.resolve(strict=False)
     projects_root = (project_root / "projects").resolve(strict=False)
+    resolved_project_dir = _resolve_project_dir_under_projects_root(
+        project_dir=project_dir,
+        projects_root=projects_root,
+    )
+    if resolved_project_dir is None:
+        raise ValueError("Requested project is outside projects root.")
+
+    resolved_project_dir = resolved_project_dir.resolve(strict=False)
+    projects_root = projects_root.resolve(strict=False)
     if not _path_is_within_root(resolved_project_dir, projects_root):
         raise ValueError("Requested project is outside projects root.")
 
@@ -7681,6 +7735,59 @@ def _resolve_public_result_download_path(
     if not _path_is_within_root(candidate_path, resolved_project_dir):
         raise ValueError("Resolved download path is outside the project directory.")
     return candidate_path
+
+
+def _resolve_project_dir_by_job_id(
+    *,
+    manager: ProcessJobManager | JobAPIBackedJobManager,
+    job_id: str,
+) -> str | None:
+    normalized_job_id = job_id.strip()
+    if not normalized_job_id:
+        return None
+
+    if isinstance(manager, JobAPIBackedJobManager):
+        try:
+            payload = manager._request_json("GET", f"/jobs/{normalized_job_id}", None)
+        except (JobAPIRequestError, ConnectionError):
+            return None
+        return _normalize_optional_text(payload.get("project_dir"))
+
+    snapshot = manager.snapshot()
+    snapshot_job_id = _normalize_optional_text(snapshot.get("job_id"))
+    if snapshot_job_id != normalized_job_id:
+        return None
+    return _normalize_optional_text(snapshot.get("project_dir"))
+
+
+def _resolve_project_dir_under_projects_root(
+    *,
+    project_dir: Path,
+    projects_root: Path,
+) -> Path | None:
+    normalized_projects_root = projects_root.resolve(strict=False)
+    resolved_project_dir = project_dir.resolve(strict=False)
+    if _path_is_within_root(resolved_project_dir, normalized_projects_root):
+        return resolved_project_dir
+
+    relative_candidate = _extract_relative_path_after_projects_segment(resolved_project_dir)
+    if relative_candidate is None:
+        return None
+    rewritten_project_dir = (normalized_projects_root / relative_candidate).resolve(strict=False)
+    if not _path_is_within_root(rewritten_project_dir, normalized_projects_root):
+        return None
+    return rewritten_project_dir
+
+
+def _extract_relative_path_after_projects_segment(path: Path) -> Path | None:
+    parts = path.parts
+    projects_index = -1
+    for index, value in enumerate(parts):
+        if value == "projects":
+            projects_index = index
+    if projects_index < 0 or projects_index + 1 >= len(parts):
+        return None
+    return Path(*parts[projects_index + 1 :])
 
 
 def _resolve_artifact_path(

@@ -53,6 +53,7 @@ from services.review_state import (
     REVIEW_STATUS_APPROVED,
     REVIEW_STATUS_PENDING,
     SPEAKER_REVIEW_STAGE,
+    TRANSLATION_CONFIG_REVIEW_STAGE,
     TRANSLATION_REVIEW_STAGE,
     VOICE_REVIEW_STAGE,
     ReviewStateManager,
@@ -387,6 +388,14 @@ class ProcessPipeline:
                 )
                 print(f"[S1] 完成：共 {len(transcript_result.lines)} 条转录")
 
+                if transcript_result.lines:
+                    detected_language = self._detect_transcript_language(transcript_result.lines)
+                    if detected_language != "en":
+                        raise ValueError(
+                            f"当前只支持英文视频翻译。检测到转录稿语言为非英文"
+                            f"（英文字符占比过低）。请确认输入的视频是英文内容。"
+                        )
+
             if transcript_path.exists() and not transcript_result.lines:
                 print(f"[S1] 完成：共 {len(transcript_result.lines)} 条转录")
 
@@ -641,6 +650,55 @@ class ProcessPipeline:
                     stage=VOICE_REVIEW_STAGE,
                     message=review_message,
                 )
+
+            # --- translation_config_review gate ---
+            approved_translation_config = self._get_approved_review_payload(
+                review_state_manager,
+                TRANSLATION_CONFIG_REVIEW_STAGE,
+            )
+            if (
+                config.wait_for_review
+                and not s3_cache_hit
+                and approved_translation_config is None
+            ):
+                review_state_manager.set_stage(
+                    TRANSLATION_CONFIG_REVIEW_STAGE,
+                    status=REVIEW_STATUS_PENDING,
+                    payload=self._build_translation_config_review_payload(
+                        transcript_result=transcript_result,
+                        translator=translator,
+                    ),
+                    activate=True,
+                )
+                review_message = "等待确认翻译配置（模型和提示词），再开始翻译。"
+                print(f"[S3] {review_message}")
+                state_manager.set_stage(
+                    current_stage_name,
+                    StageStatus.RUNNING,
+                    {"execution_mode": "waiting_for_translation_config"},
+                )
+                current_stage_name = None
+                print(
+                    self._build_web_review_marker(
+                        stage=TRANSLATION_CONFIG_REVIEW_STAGE,
+                        project_dir=final_project_dir,
+                        message=review_message,
+                    )
+                )
+                return self._build_paused_result(
+                    project_dir=final_project_dir,
+                    stage=TRANSLATION_CONFIG_REVIEW_STAGE,
+                    message=review_message,
+                )
+
+            # Apply translation config from approved review if available
+            if approved_translation_config is not None:
+                selected_model = approved_translation_config.get("selected_model")
+                custom_prompt = approved_translation_config.get("prompt_template")
+                if selected_model:
+                    print(f"[S3] 用户选择翻译模型：{selected_model}")
+                if custom_prompt:
+                    print("[S3] 用户提供了自定义翻译提示词。")
 
             if s3_cache_hit:
                 self._apply_runtime_voice_overrides(
@@ -1094,6 +1152,38 @@ class ProcessPipeline:
         speaker_name_b = _normalize_optional_text(speaker_names.get("speaker_b")) or fallback_speaker_b
         return speaker_name_a, speaker_name_b
 
+    def _build_translation_config_review_payload(
+        self,
+        transcript_result: TranscriptResult,
+        translator: GeminiTranslator,
+    ) -> dict[str, object]:
+        available_models = []
+        llm_router = getattr(translator, "llm_router", None)
+        if llm_router is not None:
+            model_configs = getattr(llm_router, "model_configs", {})
+            if isinstance(model_configs, dict):
+                for alias, config in model_configs.items():
+                    provider = config.get("provider", "") if isinstance(config, dict) else ""
+                    model_name = config.get("model_name", alias) if isinstance(config, dict) else alias
+                    available_models.append({
+                        "alias": alias,
+                        "provider": provider,
+                        "model_name": model_name,
+                    })
+
+        current_model = getattr(translator, "model_name", None) or "unknown"
+        current_prompt = getattr(translator, "_effective_translation_prompt_template", None)
+        if current_prompt is None:
+            from services.gemini.translator import get_effective_translation_prompt_template
+            current_prompt = get_effective_translation_prompt_template()
+
+        return {
+            "segment_count": len(transcript_result.lines),
+            "available_models": available_models,
+            "current_model": current_model,
+            "current_prompt_template": current_prompt,
+        }
+
     def _build_translation_review_payload(
         self,
         translation_result: TranslationResult,
@@ -1142,6 +1232,29 @@ class ProcessPipeline:
         if normalized_value in {"1", "2"}:
             return int(normalized_value)
         raise ValueError("当前仅支持 --speakers 1、2 或 auto。")
+
+    def _detect_transcript_language(
+        self,
+        lines: list[TranscriptLine],
+        sample_limit: int = 20,
+        english_threshold: float = 0.6,
+    ) -> str:
+        """Detect language from early transcript lines. Returns 'en' or 'unknown'."""
+        sample_lines = lines[:sample_limit]
+        combined_text = " ".join(
+            str(line.source_text).strip() for line in sample_lines if line.source_text
+        )
+        if not combined_text:
+            return "en"  # Empty transcript, let downstream handle it
+
+        ascii_letters = sum(1 for ch in combined_text if ch.isascii() and ch.isalpha())
+        total_letters = sum(1 for ch in combined_text if ch.isalpha())
+        if total_letters == 0:
+            return "en"  # No letters at all, skip detection
+
+        english_ratio = ascii_letters / total_letters
+        print(f"[S1] 语言检测：英文字符占比 {english_ratio:.0%}（阈值 {english_threshold:.0%}）")
+        return "en" if english_ratio >= english_threshold else "unknown"
 
     def _detect_speaker_ids(self, lines: list[TranscriptLine]) -> list[str]:
         speaker_ids: list[str] = []

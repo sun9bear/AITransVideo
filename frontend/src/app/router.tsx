@@ -7,6 +7,7 @@ import { NewTranslationPage } from '@/routes/new-translation/NewTranslationPage'
 import { NotFoundPage } from '@/routes/not-found/NotFoundPage'
 import { ProjectDetailPage } from '@/routes/project-detail/ProjectDetailPage'
 import { SpeakerReviewPage } from '@/routes/review/SpeakerReviewPage'
+import { TranslationConfigReviewPage } from '@/routes/review/TranslationConfigReviewPage'
 import { SettingsPage } from '@/routes/settings/SettingsPage'
 import { TranslationReviewPage } from '@/routes/review/TranslationReviewPage'
 import { VoiceLibraryPage } from '@/routes/voices/VoiceLibraryPage'
@@ -50,6 +51,10 @@ export const router = createBrowserRouter(
         {
           path: 'reviews/:jobId/speaker',
           element: <SpeakerReviewPage />,
+        },
+        {
+          path: 'reviews/:jobId/translation-config',
+          element: <TranslationConfigReviewPage />,
         },
         {
           path: 'reviews/:jobId/translation',
