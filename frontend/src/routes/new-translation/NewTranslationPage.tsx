@@ -1,11 +1,9 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-
-import { ConfigSummaryCard } from '@/components/ConfigSummaryCard'
-import { EmptyState } from '@/components/EmptyState'
 import { StatusBadge } from '@/components/StatusBadge'
 import { getJobDisplayTitle, getStageLabel } from '@/features/jobs/presentation'
 import { ApiError } from '@/lib/api/client'
+import { estimateCosts, formatCostCny } from '@/lib/cost/estimator'
 import { getCurrentJob, submitTranslationJob } from '@/lib/api/jobs'
 import { getVoiceLibrary, type VoiceLibraryEntry } from '@/lib/api/voiceLibrary'
 import { usePollingTask } from '@/lib/react/usePollingTask'
@@ -215,8 +213,8 @@ export function NewTranslationPage() {
                 }}
                 value={transcriptionMethod}
               >
-                <option value="assemblyai">AssemblyAI</option>
-                <option value="gemini">Gemini 多模态（≤30分钟）</option>
+                <option value="assemblyai">AssemblyAI（音频上传转录）</option>
+                <option value="gemini">Gemini 3.1 多模态（≤30分钟，无需上传）</option>
               </select>
             </div>
 
@@ -308,39 +306,7 @@ export function NewTranslationPage() {
         </form>
 
         <div className="space-y-6">
-          <ConfigSummaryCard
-            description="创建页首屏只保留任务能否立即开始以及下一步会发生什么。"
-            items={[
-              {
-                label: '输入类型',
-                value: 'YouTube 链接',
-                hint: '当前只支持公开视频链接。',
-              },
-              {
-                label: '任务模式',
-                value: '单活跃任务',
-                hint: '创建前会先检查当前是否已有进行中的任务。',
-              },
-              {
-                label: '音色输入',
-                value: '按任务填写',
-                hint: '音色 A / 音色 B 可留空，交给后端现有逻辑处理。',
-              },
-              {
-                label: '创建后下一步',
-                value: '自动跳转到当前任务',
-                hint: '审核和进展都会集中在当前任务页提示。',
-              },
-            ]}
-            title="创建前说明"
-          />
-
-          {!activeJob && !guardError && !isLoadingGuard ? (
-            <EmptyState
-              description="首屏已经满足创建任务所需信息，填写链接后即可开始。"
-              title="准备就绪"
-            />
-          ) : null}
+          <CostEstimatePanel transcriptionMethod={transcriptionMethod} />
         </div>
       </div>
     </div>
@@ -445,6 +411,55 @@ function VoiceField({
         <option value={MANUAL_INPUT}>手动输入 Voice ID...</option>
       </select>
     </div>
+  )
+}
+
+function CostEstimatePanel({
+  transcriptionMethod,
+}: {
+  transcriptionMethod: 'assemblyai' | 'gemini'
+}) {
+  const estimates = [3, 10, 30]
+
+  return (
+    <section className="surface-card p-5">
+      <div className="space-y-2">
+        <h3 className="text-lg font-semibold text-ink-950">费用预估</h3>
+        <p className="text-sm text-ink-900/60">
+          根据视频时长和当前选择的模型预估，仅供参考。
+        </p>
+      </div>
+      <div className="mt-4 space-y-4">
+        {estimates.map((minutes) => {
+          const result = estimateCosts({
+            videoDurationMinutes: minutes,
+            transcriptionMethod,
+            needsVoiceClone: true,
+            speakerCount: 1,
+          })
+          return (
+            <div key={minutes} className="rounded-2xl border border-ink-950/8 bg-sand-50/60 p-3">
+              <p className="text-sm font-semibold text-ink-950">{minutes} 分钟视频</p>
+              <div className="mt-2 space-y-1">
+                {result.stages.map((stage) => (
+                  <div key={stage.stage} className="flex justify-between text-xs text-ink-900/60">
+                    <span>{stage.label}（{stage.model}）</span>
+                    <span>{formatCostCny(stage.estimatedCostCny)}</span>
+                  </div>
+                ))}
+                <div className="mt-1 flex justify-between border-t border-ink-950/8 pt-1 text-sm font-semibold text-ink-950">
+                  <span>预估总计</span>
+                  <span>{formatCostCny(result.totalCny)}</span>
+                </div>
+              </div>
+            </div>
+          )
+        })}
+      </div>
+      <p className="mt-3 text-xs text-ink-900/45">
+        实际费用取决于视频内容和处理结果，以上仅为参考值。已有音色可跳过克隆费用。
+      </p>
+    </section>
   )
 }
 

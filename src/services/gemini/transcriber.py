@@ -20,7 +20,12 @@ from typing import Any
 from services.assemblyai.transcriber import TranscriptLine, TranscriptResult
 
 
-DEFAULT_GEMINI_TRANSCRIPTION_MODEL = "gemini-2.5-flash"
+DEFAULT_GEMINI_TRANSCRIPTION_MODEL = "gemini-3.1-flash-lite-preview"
+
+AVAILABLE_TRANSCRIPTION_MODELS = [
+    {"alias": "gemini-3.1-flash-lite-preview", "label": "Gemini 3.1 Flash Lite", "input_price_per_mtok": 0.15, "output_price_per_mtok": 0.60},
+    {"alias": "gemini-3.1-pro-preview", "label": "Gemini 3.1 Pro", "input_price_per_mtok": 1.25, "output_price_per_mtok": 10.0},
+]
 DEFAULT_MAX_OUTPUT_TOKENS = 65536
 DEFAULT_TEMPERATURE = 0.2
 DEFAULT_TIMEOUT_MS = 300_000  # 5 minutes for long videos
