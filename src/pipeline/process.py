@@ -104,6 +104,7 @@ class ProcessConfig:
     speaker_b_name: str = "Speaker B"
     skip_review: bool = False
     wait_for_review: bool = False
+    transcription_method: str = "assemblyai"
 
 
 @dataclass(slots=True)
@@ -600,47 +601,93 @@ class ProcessPipeline:
                 translation_result = None
 
             voice_registry_path = self._resolve_voice_registry_path()
-            try:
-                if voice_id_a is None:
-                    voice_id_a = self._resolve_or_auto_clone_voice(
-                        speaker_id="speaker_a",
-                        transcript_result=transcript_result,
-                        audio_path=source_audio_path,
-                        final_project_dir=final_project_dir,
-                        speaker_name=speaker_name_a,
-                        voice_registry_path=voice_registry_path,
-                        tts_config=tts_config,
-                        skip_voice_registry_lookup=(
-                            effective_speakers == 1
-                            and self._is_default_placeholder_speaker_name(
-                                speaker_id="speaker_a",
-                                speaker_name=speaker_name_a,
-                            )
-                        ),
-                    )
 
-                if effective_speakers == 2 and voice_id_b is None:
-                    voice_id_b = self._resolve_or_auto_clone_voice(
-                        speaker_id="speaker_b",
-                        transcript_result=transcript_result,
-                        audio_path=source_audio_path,
-                        final_project_dir=final_project_dir,
-                        speaker_name=speaker_name_b,
-                        voice_registry_path=voice_registry_path,
-                        tts_config=tts_config,
-                        skip_voice_registry_lookup=False,
-                    )
-            except VoiceReviewRequiredError as exc:
-                if not config.wait_for_review:
-                    raise
+            # --- voice_review gate (always triggered) ---
+            approved_voice_review = self._get_approved_review_payload(
+                review_state_manager,
+                VOICE_REVIEW_STAGE,
+            )
+            if approved_voice_review is not None:
+                # Apply approved voice selections
+                approved_voice_a = _normalize_optional_text(approved_voice_review.get("voice_id_a"))
+                approved_voice_b = _normalize_optional_text(approved_voice_review.get("voice_id_b"))
+                if approved_voice_a:
+                    voice_id_a = approved_voice_a
+                    print(f"[S2] 用户确认 Speaker A 音色: {voice_id_a}")
+                if approved_voice_b:
+                    voice_id_b = approved_voice_b
+                    print(f"[S2] 用户确认 Speaker B 音色: {voice_id_b}")
+            elif config.wait_for_review:
+                # Only do registry lookup — NO auto-cloning before voice review.
+                # Let the user decide whether to clone, use existing, or input Voice ID.
+                from services.voice_registry import VoiceRegistry, VoiceResolver
+                registry = VoiceRegistry(str(voice_registry_path))
+                resolver = VoiceResolver(registry)
+
+                # Check registry for existing voices
+                resolution_a = resolver.resolve("speaker_a")
+                if resolution_a.resolved and resolution_a.voice_id:
+                    voice_id_a = resolution_a.voice_id
+                    print(f"[S2] Speaker A 音色库匹配: {voice_id_a}")
+                else:
+                    print("[S2] Speaker A 音色库未匹配")
+
+                resolution_b = None
+                if effective_speakers == 2:
+                    resolution_b = resolver.resolve("speaker_b")
+                    if resolution_b.resolved and resolution_b.voice_id:
+                        voice_id_b = resolution_b.voice_id
+                        print(f"[S2] Speaker B 音色库匹配: {voice_id_b}")
+                    else:
+                        print("[S2] Speaker B 音色库未匹配")
+
+                # Resolve sample paths for potential cloning
+                sample_dir = final_project_dir / "voice_samples" if final_project_dir else None
+                sample_path_a = None
+                sample_path_b = None
+                if sample_dir and sample_dir.exists():
+                    for f in sample_dir.iterdir():
+                        if f.is_file() and f.suffix == ".wav":
+                            fname = f.name.lower()
+                            if not sample_path_a:
+                                sample_path_a = str(f)
+                            elif not sample_path_b:
+                                sample_path_b = str(f)
+
+                # Build speaker info for voice review
+                speaker_voice_info = []
+                speaker_voice_info.append({
+                    "speaker_id": "speaker_a",
+                    "speaker_label": "Speaker A",
+                    "speaker_name": speaker_name_a or "Speaker A",
+                    "voice_arg_name": voice_id_a,
+                    "sample_path": sample_path_a,
+                    "sample_duration_s": 0.0,
+                    "silence_ratio": 0.0,
+                    "auto_resolved_voice_id": voice_id_a,
+                })
+                if effective_speakers == 2:
+                    speaker_voice_info.append({
+                        "speaker_id": "speaker_b",
+                        "speaker_label": "Speaker B",
+                        "speaker_name": speaker_name_b or "Speaker B",
+                        "voice_arg_name": voice_id_b,
+                        "sample_path": sample_path_b or sample_path_a,
+                        "sample_duration_s": 0.0,
+                        "silence_ratio": 0.0,
+                        "auto_resolved_voice_id": voice_id_b,
+                    })
+
                 self._write_transcript_result(transcript_result)
-                review_message = (
-                    f"{exc.speaker_label} 样本不足，等待在 Web UI 选择音色、输入 Voice ID，或取消任务。"
-                )
+                review_message = "请确认各发言人的音色配置，可试听、克隆或手动输入 Voice ID。"
                 review_state_manager.set_stage(
                     VOICE_REVIEW_STAGE,
                     status=REVIEW_STATUS_PENDING,
-                    payload=self._build_voice_review_payload(exc),
+                    payload={
+                        "reason": "voice_confirmation",
+                        "message": review_message,
+                        "speakers": speaker_voice_info,
+                    },
                     activate=True,
                 )
                 print(f"[S2] {review_message}")
@@ -666,6 +713,33 @@ class ProcessPipeline:
                     stage=VOICE_REVIEW_STAGE,
                     message=review_message,
                 )
+            else:
+                # Non-interactive mode: try auto-resolve, fail on error
+                try:
+                    if voice_id_a is None:
+                        voice_id_a = self._resolve_or_auto_clone_voice(
+                            speaker_id="speaker_a",
+                            transcript_result=transcript_result,
+                            audio_path=source_audio_path,
+                            final_project_dir=final_project_dir,
+                            speaker_name=speaker_name_a,
+                            voice_registry_path=voice_registry_path,
+                            tts_config=tts_config,
+                            skip_voice_registry_lookup=False,
+                        )
+                    if effective_speakers == 2 and voice_id_b is None:
+                        voice_id_b = self._resolve_or_auto_clone_voice(
+                            speaker_id="speaker_b",
+                            transcript_result=transcript_result,
+                            audio_path=source_audio_path,
+                            final_project_dir=final_project_dir,
+                            speaker_name=speaker_name_b,
+                            voice_registry_path=voice_registry_path,
+                            tts_config=tts_config,
+                            skip_voice_registry_lookup=False,
+                        )
+                except VoiceReviewRequiredError:
+                    raise
 
             # --- translation_config_review gate ---
             approved_translation_config = self._get_approved_review_payload(

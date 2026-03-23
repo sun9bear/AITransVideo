@@ -4,6 +4,7 @@ import { Link, useParams } from 'react-router-dom'
 import { ConfigSummaryCard } from '@/components/ConfigSummaryCard'
 import { EmptyState } from '@/components/EmptyState'
 import { StatusBadge } from '@/components/StatusBadge'
+import { Toast } from '@/components/Toast'
 import {
   getReviewPageMessage,
   getStageLabel,
@@ -11,7 +12,7 @@ import {
 } from '@/features/jobs/presentation'
 import { ApiError } from '@/lib/api/client'
 import { getJob } from '@/lib/api/jobs'
-import { approveTranslationReview, getTranslationReview } from '@/lib/api/reviews'
+import { approveTranslationReview, getTranslationReview, splitSegment } from '@/lib/api/reviews'
 import { usePollingTask } from '@/lib/react/usePollingTask'
 import { ACTIVE_JOB_STATUSES, type JobSummary } from '@/types/jobs'
 import type { TranslationReviewResource } from '@/types/reviews'
@@ -32,6 +33,13 @@ export function TranslationReviewPage() {
   const jobId = params.jobId?.trim() ?? ''
   const [resource, setResource] = useState<TranslationReviewResource | null>(null)
   const [segments, setSegments] = useState<TranslationSegmentState>({})
+  const [segmentSpeakers, setSegmentSpeakers] = useState<Record<string, string>>({})
+  const [splittingSegmentId, setSplittingSegmentId] = useState<string | null>(null)
+  const [splitSourcePos, setSplitSourcePos] = useState(0)
+  const [splitCnPos, setSplitCnPos] = useState(0)
+  const [splitSpeakerA, setSplitSpeakerA] = useState('')
+  const [splitSpeakerB, setSplitSpeakerB] = useState('')
+  const [isSplitting, setIsSplitting] = useState(false)
   const [submittedJob, setSubmittedJob] = useState<JobSummary | null>(null)
   const [pageSize, setPageSize] = useState(20)
   const [page, setPage] = useState(1)
@@ -143,6 +151,7 @@ export function TranslationReviewPage() {
       const result = await approveTranslationReview({
         jobId,
         projectDir: resource.projectDir,
+        segmentSpeakers,
         segments: Object.fromEntries(
           resource.items.map((item) => {
             const current = segments[item.segmentId] ?? {
@@ -290,6 +299,7 @@ export function TranslationReviewPage() {
                   disabled={currentPage <= 1}
                   onClick={() => {
                     setPage((currentValue) => Math.max(1, currentValue - 1))
+                    window.scrollTo({ top: 0, behavior: 'smooth' })
                   }}
                   type="button"
                 >
@@ -300,6 +310,7 @@ export function TranslationReviewPage() {
                   disabled={currentPage >= totalPages}
                   onClick={() => {
                     setPage((currentValue) => Math.min(totalPages, currentValue + 1))
+                    window.scrollTo({ top: 0, behavior: 'smooth' })
                   }}
                   type="button"
                 >
@@ -311,12 +322,7 @@ export function TranslationReviewPage() {
         </section>
       ) : null}
 
-      {submitError ? (
-        <section className="notice-panel border border-coral-500/20 bg-coral-500/8">
-          <p className="text-sm font-semibold text-coral-700">提交翻译审核失败</p>
-          <p className="mt-2 text-sm text-coral-700/85">{submitError}</p>
-        </section>
-      ) : null}
+      <Toast message={submitError} onClose={() => setSubmitError(null)} />
 
       {hasAdvanced && submittedJob ? (
         <section className="surface-card p-6">
@@ -377,11 +383,62 @@ export function TranslationReviewPage() {
                     className="rounded-3xl border border-ink-950/8 bg-sand-50/70 p-4"
                   >
                     <div className="flex flex-wrap items-center justify-between gap-3">
-                      <div>
+                      <div className="flex items-center gap-3">
                         <p className="eyebrow">片段 {item.segmentId}</p>
-                        <p className="mt-1 text-sm font-semibold text-ink-950">
-                          {item.displayName || item.speakerId}
-                        </p>
+                        {resource.speakerOptions.length > 1 ? (
+                          <select
+                            className="form-input min-w-[140px] py-1 text-sm font-semibold"
+                            onChange={(event) => {
+                              const nextSpeakerId = event.currentTarget.value
+                              const currentSpeakerId = segmentSpeakers[item.segmentId] ?? item.speakerId
+                              if (nextSpeakerId === currentSpeakerId) return
+
+                              // Ask if user wants to swap all subsequent segments
+                              const currentIdx = resource.items.findIndex((i) => i.segmentId === item.segmentId)
+                              const subsequentItems = resource.items.slice(currentIdx)
+                              const hasMultipleSpeakers = resource.speakerOptions.length > 1
+                              const affectedCount = subsequentItems.filter((i) => {
+                                const spk = segmentSpeakers[i.segmentId] ?? i.speakerId
+                                return spk === currentSpeakerId || spk === nextSpeakerId
+                              }).length
+
+                              if (hasMultipleSpeakers && affectedCount > 1 && window.confirm(
+                                `是否将后续所有 "${resource.speakerOptions.find(o => o.id === currentSpeakerId)?.displayName || currentSpeakerId}" 替换为 "${resource.speakerOptions.find(o => o.id === nextSpeakerId)?.displayName || nextSpeakerId}"，同时互换？\n\n将影响从当前片段起的 ${affectedCount} 个片段。\n\n点击"确定"批量互换，"取消"仅修改当前片段。`
+                              )) {
+                                // Batch swap: A→B, B→A for all subsequent segments
+                                setSegmentSpeakers((current) => {
+                                  const updated = { ...current }
+                                  for (const sub of subsequentItems) {
+                                    const subSpeaker = updated[sub.segmentId] ?? sub.speakerId
+                                    if (subSpeaker === currentSpeakerId) {
+                                      updated[sub.segmentId] = nextSpeakerId
+                                    } else if (subSpeaker === nextSpeakerId) {
+                                      updated[sub.segmentId] = currentSpeakerId
+                                    }
+                                  }
+                                  return updated
+                                })
+                              } else {
+                                // Single change
+                                setSegmentSpeakers((current) => ({
+                                  ...current,
+                                  [item.segmentId]: nextSpeakerId,
+                                }))
+                              }
+                            }}
+                            value={segmentSpeakers[item.segmentId] ?? item.speakerId}
+                          >
+                            {resource.speakerOptions.map((option) => (
+                              <option key={option.id} value={option.id}>
+                                {option.displayName}
+                              </option>
+                            ))}
+                          </select>
+                        ) : (
+                          <p className="text-sm font-semibold text-ink-950">
+                            {item.displayName || item.speakerId}
+                          </p>
+                        )}
                       </div>
                       <span className="rounded-full bg-sand-100 px-3 py-1 text-xs font-semibold text-ink-900/65">
                         {item.reviewUpdatedAt ? formatDateTime(item.reviewUpdatedAt) : '待确认'}
@@ -397,9 +454,9 @@ export function TranslationReviewPage() {
                       </div>
 
                       <label className="space-y-2">
-                        <span className="form-label">中文译文</span>
+                        <span className="form-label">配音文本</span>
                         <textarea
-                          className="form-input min-h-[132px] resize-y"
+                          className="form-input min-h-[48px] resize-y"
                           onChange={(event) => {
                             const nextValue = event.currentTarget.value
                             setSegments((currentState) => ({
@@ -407,28 +464,21 @@ export function TranslationReviewPage() {
                               [item.segmentId]: {
                                 ...(currentState[item.segmentId] ?? current),
                                 cnText: nextValue,
-                                updatedAt: new Date().toISOString(),
-                              },
-                            }))
-                          }}
-                          value={current.cnText}
-                        />
-                      </label>
-
-                      <label className="space-y-2">
-                        <span className="form-label">配音文本</span>
-                        <textarea
-                          className="form-input min-h-[132px] resize-y"
-                          onChange={(event) => {
-                            const nextValue = event.currentTarget.value
-                            setSegments((currentState) => ({
-                              ...currentState,
-                              [item.segmentId]: {
-                                ...(currentState[item.segmentId] ?? current),
                                 ttsCnText: nextValue,
                                 updatedAt: new Date().toISOString(),
                               },
                             }))
+                          }}
+                          onInput={(event) => {
+                            const el = event.currentTarget
+                            el.style.height = 'auto'
+                            el.style.height = `${el.scrollHeight}px`
+                          }}
+                          ref={(el) => {
+                            if (el) {
+                              el.style.height = 'auto'
+                              el.style.height = `${el.scrollHeight}px`
+                            }
                           }}
                           value={current.ttsCnText}
                         />
@@ -477,6 +527,144 @@ export function TranslationReviewPage() {
                           </div>
                         </label>
                       </div>
+
+                      {/* Split segment button */}
+                      <div className="flex justify-end">
+                        <button
+                          className="text-xs text-ink-900/50 hover:text-ink-900/80 underline"
+                          onClick={() => {
+                            if (splittingSegmentId === item.segmentId) {
+                              setSplittingSegmentId(null)
+                            } else {
+                              setSplittingSegmentId(item.segmentId)
+                              setSplitSourcePos(Math.floor((item.sourceText || '').length / 2))
+                              setSplitCnPos(Math.floor((current.cnText || '').length / 2))
+                              setSplitSpeakerA(segmentSpeakers[item.segmentId] ?? item.speakerId)
+                              setSplitSpeakerB(resource.speakerOptions.length > 1
+                                ? resource.speakerOptions.find(o => o.id !== item.speakerId)?.id ?? item.speakerId
+                                : item.speakerId)
+                            }
+                          }}
+                          type="button"
+                        >
+                          {splittingSegmentId === item.segmentId ? '取消拆分' : '拆分片段'}
+                        </button>
+                      </div>
+
+                      {/* Split panel */}
+                      {splittingSegmentId === item.segmentId ? (
+                        <div className="rounded-2xl border-2 border-amber-400/40 bg-amber-50/50 p-4 space-y-4">
+                          <p className="text-sm font-semibold text-ink-950">拆分片段 {item.segmentId}</p>
+                          <p className="text-xs text-ink-900/60">
+                            在原文中选择拆分位置，系统会将该片段拆成两段，各自分配不同的发言人。
+                          </p>
+
+                          <div className="space-y-2">
+                            <p className="form-label">原文拆分位置（字符位置: {splitSourcePos}）</p>
+                            <input
+                              className="w-full"
+                              max={(item.sourceText || '').length}
+                              min={1}
+                              onChange={(e) => {
+                                const pos = Number(e.currentTarget.value)
+                                setSplitSourcePos(pos)
+                              }}
+                              type="range"
+                              value={splitSourcePos}
+                            />
+                            <div className="grid grid-cols-2 gap-2 text-xs">
+                              <div className="rounded-xl bg-white/80 p-2 border border-ink-950/8">
+                                <p className="font-semibold text-ink-900/60 mb-1">片段 A</p>
+                                <p className="text-ink-900/80">{(item.sourceText || '').slice(0, splitSourcePos)}</p>
+                              </div>
+                              <div className="rounded-xl bg-white/80 p-2 border border-ink-950/8">
+                                <p className="font-semibold text-ink-900/60 mb-1">片段 B</p>
+                                <p className="text-ink-900/80">{(item.sourceText || '').slice(splitSourcePos)}</p>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="space-y-2">
+                            <p className="form-label">中文译文拆分位置（字符位置: {splitCnPos}）</p>
+                            <input
+                              className="w-full"
+                              max={(current.cnText || '').length}
+                              min={1}
+                              onChange={(e) => setSplitCnPos(Number(e.currentTarget.value))}
+                              type="range"
+                              value={splitCnPos}
+                            />
+                            <div className="grid grid-cols-2 gap-2 text-xs">
+                              <div className="rounded-xl bg-white/80 p-2 border border-ink-950/8">
+                                <p className="text-ink-900/80">{(current.cnText || '').slice(0, splitCnPos)}</p>
+                              </div>
+                              <div className="rounded-xl bg-white/80 p-2 border border-ink-950/8">
+                                <p className="text-ink-900/80">{(current.cnText || '').slice(splitCnPos)}</p>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-3">
+                            <label className="space-y-1">
+                              <span className="form-label">片段 A 发言人</span>
+                              <select
+                                className="form-input text-sm"
+                                onChange={(e) => setSplitSpeakerA(e.currentTarget.value)}
+                                value={splitSpeakerA}
+                              >
+                                {resource.speakerOptions.map((option) => (
+                                  <option key={option.id} value={option.id}>{option.displayName}</option>
+                                ))}
+                              </select>
+                            </label>
+                            <label className="space-y-1">
+                              <span className="form-label">片段 B 发言人</span>
+                              <select
+                                className="form-input text-sm"
+                                onChange={(e) => setSplitSpeakerB(e.currentTarget.value)}
+                                value={splitSpeakerB}
+                              >
+                                {resource.speakerOptions.map((option) => (
+                                  <option key={option.id} value={option.id}>{option.displayName}</option>
+                                ))}
+                              </select>
+                            </label>
+                          </div>
+
+                          <button
+                            className="primary-button text-sm"
+                            disabled={isSplitting}
+                            onClick={async () => {
+                              setIsSplitting(true)
+                              try {
+                                const result = await splitSegment({
+                                  projectDir: resource.projectDir,
+                                  segmentId: item.segmentId,
+                                  splitSourceIndex: splitSourcePos,
+                                  splitCnIndex: splitCnPos,
+                                  speakerA: splitSpeakerA,
+                                  speakerB: splitSpeakerB,
+                                  stage: 'translation_review',
+                                  pendingSpeakerChanges: segmentSpeakers,
+                                })
+                                if (result.success) {
+                                  // Reload the entire page to get fresh data
+                                  window.location.reload()
+                                  return
+                                }
+                                setSubmitError('拆分未生效，请检查片段数据。')
+                              } catch (error) {
+                                setSubmitError(`拆分失败: ${getErrorMessage(error)}`)
+                              } finally {
+                                setIsSplitting(false)
+                              }
+                            }}
+                            type="button"
+                          >
+                            {isSplitting ? '拆分中...' : '确认拆分'}
+                          </button>
+                        </div>
+                      ) : null}
                     </div>
                   </article>
                 )

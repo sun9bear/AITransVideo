@@ -15,7 +15,7 @@ const speakerOptions = [
   { label: '2 人', value: '2' },
 ] as const
 
-const MANUAL_INPUT = '__manual__'
+// Voice selection moved to voice_review stage
 
 export function NewTranslationPage() {
   const navigate = useNavigate()
@@ -26,11 +26,9 @@ export function NewTranslationPage() {
   const [isUploading, setIsUploading] = useState(false)
   const [uploadProgress, setUploadProgress] = useState('')
   const [speakers, setSpeakers] = useState<'1' | '2' | 'auto'>('auto')
-  const [voiceA, setVoiceA] = useState('')
-  const [voiceB, setVoiceB] = useState('')
+  const [voiceA] = useState('')
+  const [voiceB] = useState('')
   const [transcriptionMethod, setTranscriptionMethod] = useState<'assemblyai' | 'gemini'>('assemblyai')
-  const [voiceAMode, setVoiceAMode] = useState<'select' | 'manual'>('select')
-  const [voiceBMode, setVoiceBMode] = useState<'select' | 'manual'>('select')
   const [savedVoices, setSavedVoices] = useState<VoiceLibraryEntry[]>([])
   const [activeJob, setActiveJob] = useState<JobSummary | null>(null)
   const [isLoadingGuard, setIsLoadingGuard] = useState(true)
@@ -341,32 +339,11 @@ export function NewTranslationPage() {
               </select>
             </div>
 
-            <VoiceField
-              disabled={isBlockedByActiveJob || submitState === 'submitting'}
-              id="voice-a"
-              label="音色 A"
-              mode={voiceAMode}
-              onChange={setVoiceA}
-              onModeChange={setVoiceAMode}
-              savedVoices={savedVoices}
-              value={voiceA}
-            />
-
-            <VoiceField
-              disabled={isBlockedByActiveJob || submitState === 'submitting'}
-              id="voice-b"
-              label="音色 B"
-              mode={voiceBMode}
-              onChange={setVoiceB}
-              onModeChange={setVoiceBMode}
-              savedVoices={savedVoices}
-              value={voiceB}
-            />
           </div>
 
           {savedVoices.length > 0 ? (
             <p className="text-sm text-ink-900/60">
-              选择已有音色可节省克隆费用（每次克隆 ¥9.9）。
+              音色将在后续"音色确认"阶段配置，可选择已有音色或克隆新音色。
             </p>
           ) : null}
 
@@ -411,107 +388,6 @@ export function NewTranslationPage() {
           <CostEstimatePanel transcriptionMethod={transcriptionMethod} />
         </div>
       </div>
-    </div>
-  )
-}
-
-function VoiceField({
-  disabled,
-  id,
-  label,
-  mode,
-  onChange,
-  onModeChange,
-  savedVoices,
-  value,
-}: {
-  disabled: boolean
-  id: string
-  label: string
-  mode: 'manual' | 'select'
-  onChange: (value: string) => void
-  onModeChange: (mode: 'manual' | 'select') => void
-  savedVoices: VoiceLibraryEntry[]
-  value: string
-}) {
-  const clonedVoices = savedVoices.filter((v) => v.voiceType === 'cloned')
-  const builtinVoices = savedVoices.filter((v) => v.voiceType !== 'cloned')
-  const hasVoices = savedVoices.length > 0
-
-  if (!hasVoices || mode === 'manual') {
-    return (
-      <div className="space-y-2">
-        <label className="form-label" htmlFor={id}>
-          {label}
-        </label>
-        <input
-          className="form-input"
-          disabled={disabled}
-          id={id}
-          onChange={(event) => {
-            onChange(event.target.value)
-          }}
-          placeholder="可留空"
-          type="text"
-          value={value}
-        />
-        {hasVoices ? (
-          <button
-            className="text-xs text-sky-700 hover:underline"
-            onClick={() => {
-              onModeChange('select')
-              onChange('')
-            }}
-            type="button"
-          >
-            从已有音色选择
-          </button>
-        ) : null}
-      </div>
-    )
-  }
-
-  return (
-    <div className="space-y-2">
-      <label className="form-label" htmlFor={id}>
-        {label}
-      </label>
-      <select
-        className="form-input"
-        disabled={disabled}
-        id={id}
-        onChange={(event) => {
-          if (event.target.value === MANUAL_INPUT) {
-            onModeChange('manual')
-            onChange('')
-            return
-          }
-          onChange(event.target.value)
-        }}
-        value={value}
-      >
-        <option value="">可留空（自动处理）</option>
-        {clonedVoices.length > 0 ? (
-          <optgroup label="克隆音色">
-            {clonedVoices.map((v) => (
-              <option key={v.voiceId} value={v.voiceId}>
-                {v.label ?? v.voiceId}
-                {v.speakerName ? ` (${v.speakerName})` : ''}
-              </option>
-            ))}
-          </optgroup>
-        ) : null}
-        {builtinVoices.length > 0 ? (
-          <optgroup label="内置音色">
-            {builtinVoices.map((v) => (
-              <option key={v.voiceId} value={v.voiceId}>
-                {v.label ?? v.voiceId}
-              </option>
-            ))}
-          </optgroup>
-        ) : null}
-        <option value={MANUAL_INPUT}>手动输入 Voice ID...</option>
-      </select>
     </div>
   )
 }

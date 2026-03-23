@@ -1,40 +1,45 @@
-import { useEffect, useState, type Dispatch, type SetStateAction } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 
-import { ConfigSummaryCard } from '@/components/ConfigSummaryCard'
 import { EmptyState } from '@/components/EmptyState'
 import { StatusBadge } from '@/components/StatusBadge'
-import {
-  getReviewPageMessage,
-  getStageLabel,
-  getUserFacingProgressMessage,
-} from '@/features/jobs/presentation'
+import { Toast } from '@/components/Toast'
+import { getStageLabel } from '@/features/jobs/presentation'
 import { ApiError } from '@/lib/api/client'
 import { getJob } from '@/lib/api/jobs'
 import {
   approveVoiceReview,
-  bindVoiceReviewDefault,
+  cloneVoiceForReview,
   getVoiceReview,
-  registerVoiceReviewManual,
+  previewVoice,
 } from '@/lib/api/reviews'
+import { getVoiceLibrary, type VoiceLibraryEntry } from '@/lib/api/voiceLibrary'
 import { usePollingTask } from '@/lib/react/usePollingTask'
 import { ACTIVE_JOB_STATUSES, type JobSummary } from '@/types/jobs'
 import type { VoiceReviewResource, VoiceReviewSpeaker } from '@/types/reviews'
 
+interface SpeakerVoiceState {
+  voiceId: string
+  manualVoiceId: string
+  isCloning: boolean
+  isPreviewing: boolean
+  cloneError: string | null
+  previewError: string | null
+}
+
 export function VoiceReviewPage() {
   const params = useParams()
+  const navigate = useNavigate()
   const jobId = params.jobId?.trim() ?? ''
   const [resource, setResource] = useState<VoiceReviewResource | null>(null)
-  const [selectedVoiceIds, setSelectedVoiceIds] = useState<Record<string, string>>({})
-  const [manualVoiceIds, setManualVoiceIds] = useState<Record<string, string>>({})
+  const [speakerStates, setSpeakerStates] = useState<Record<string, SpeakerVoiceState>>({})
+  const [allVoices, setAllVoices] = useState<VoiceLibraryEntry[]>([])
   const [submittedJob, setSubmittedJob] = useState<JobSummary | null>(null)
-  const [bindingSpeakerId, setBindingSpeakerId] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [pageError, setPageError] = useState<string | null>(null)
   const [submitError, setSubmitError] = useState<string | null>(null)
-  const [bindingError, setBindingError] = useState<string | null>(null)
-  const [bindingStatus, setBindingStatus] = useState<string | null>(null)
+  const audioRef = useRef<HTMLAudioElement | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -49,50 +54,60 @@ export function VoiceReviewPage() {
       setIsLoading(true)
       try {
         const nextResource = await getVoiceReview(jobId)
-        if (cancelled) {
-          return
-        }
+        if (cancelled) return
 
-        syncVoiceReviewState({
-          nextResource,
-          setManualVoiceIds,
-          setResource,
-          setSelectedVoiceIds,
-        })
-        setSubmittedJob(null)
+        setResource(nextResource)
+        // Load all voices from voice library for the dropdown
+        try {
+          const lib = await getVoiceLibrary()
+          setAllVoices(lib.voices)
+        } catch {
+          // non-critical, dropdown will just be empty
+        }
+        // Initialize speaker states
+        const states: Record<string, SpeakerVoiceState> = {}
+        for (const speaker of nextResource.speakers) {
+          states[speaker.speakerId] = {
+            voiceId: speaker.resolvedVoiceId || speaker.defaultVoiceId || '',
+            manualVoiceId: '',
+            isCloning: false,
+            isPreviewing: false,
+            cloneError: null,
+            previewError: null,
+          }
+        }
+        setSpeakerStates(states)
         setPageError(null)
-        setBindingError(null)
-        setBindingStatus(null)
       } catch (error) {
         if (!cancelled) {
+          // Fallback: redirect to translation-config if voice review unavailable
+          try {
+            const job = await getJob(jobId)
+            if (job.status === 'waiting_for_review') {
+              navigate(`/reviews/${jobId}/translation-config`, { replace: true })
+              return
+            }
+          } catch {
+            // ignore
+          }
           setPageError(getErrorMessage(error))
         }
       } finally {
-        if (!cancelled) {
-          setIsLoading(false)
-        }
+        if (!cancelled) setIsLoading(false)
       }
     }
 
     void load()
-
-    return () => {
-      cancelled = true
-    }
-  }, [jobId])
+    return () => { cancelled = true }
+  }, [jobId, navigate])
 
   usePollingTask(
     async () => {
-      if (!jobId) {
-        return
-      }
-
+      if (!jobId) return
       try {
         const nextJob = await getJob(jobId)
         setSubmittedJob(nextJob)
-      } catch {
-        return
-      }
+      } catch { return }
     },
     {
       enabled: Boolean(submittedJob && ACTIVE_JOB_STATUSES.includes(submittedJob.status)),
@@ -101,88 +116,85 @@ export function VoiceReviewPage() {
     },
   )
 
-  const activeJob = submittedJob ?? resource?.job ?? null
-  const hasAdvanced =
-    submittedJob !== null &&
-    (submittedJob.status !== 'waiting_for_review' || submittedJob.currentStage !== 'voice_review')
-  const unresolvedCount = resource
-    ? resource.speakers.filter((speaker) => !hasUsableBinding(speaker)).length
-    : 0
+  const updateSpeakerState = useCallback(
+    (speakerId: string, update: Partial<SpeakerVoiceState>) => {
+      setSpeakerStates((prev) => ({
+        ...prev,
+        [speakerId]: { ...prev[speakerId], ...update },
+      }))
+    },
+    [],
+  )
 
-  const applyUpdatedResource = (nextResource: VoiceReviewResource) => {
-    syncVoiceReviewState({
-      nextResource,
-      setManualVoiceIds,
-      setResource,
-      setSelectedVoiceIds,
-    })
-  }
+  const handlePreview = useCallback(
+    async (speakerId: string, voiceId: string) => {
+      if (!voiceId) return
+      updateSpeakerState(speakerId, { isPreviewing: true, previewError: null })
+      try {
+        const result = await previewVoice(voiceId, speakerId)
+        if (result.audioBase64 && audioRef.current) {
+          audioRef.current.src = `data:audio/wav;base64,${result.audioBase64}`
+          audioRef.current.play()
+        }
+      } catch (error) {
+        updateSpeakerState(speakerId, { previewError: getErrorMessage(error) })
+      } finally {
+        updateSpeakerState(speakerId, { isPreviewing: false })
+      }
+    },
+    [updateSpeakerState],
+  )
 
-  const handleSetDefault = async (speaker: VoiceReviewSpeaker) => {
-    const voiceId = (selectedVoiceIds[speaker.speakerId] ?? '').trim()
-    if (!voiceId) {
-      setBindingError(`请先为 ${speaker.speakerName} 选择一个可用音色。`)
-      setBindingStatus(null)
-      return
-    }
-
-    setBindingSpeakerId(speaker.speakerId)
-    setBindingError(null)
-    setBindingStatus(null)
-    try {
-      const nextResource = await bindVoiceReviewDefault({
-        jobId,
-        speakerId: speaker.speakerId,
-        voiceId,
-      })
-      applyUpdatedResource(nextResource)
-      setBindingStatus(`已更新 ${speaker.speakerName} 的默认音色。`)
-    } catch (error) {
-      setBindingError(getErrorMessage(error))
-    } finally {
-      setBindingSpeakerId(null)
-    }
-  }
-
-  const handleRegisterManual = async (speaker: VoiceReviewSpeaker) => {
-    const voiceId = (manualVoiceIds[speaker.speakerId] ?? '').trim()
-    if (!voiceId) {
-      setBindingError(`请先输入 ${speaker.speakerName} 的 Voice ID。`)
-      setBindingStatus(null)
-      return
-    }
-
-    setBindingSpeakerId(speaker.speakerId)
-    setBindingError(null)
-    setBindingStatus(null)
-    try {
-      const nextResource = await registerVoiceReviewManual({
-        jobId,
-        samplePath: speaker.samplePath,
-        speakerId: speaker.speakerId,
-        speakerName: speaker.speakerName,
-        voiceId,
-      })
-      applyUpdatedResource(nextResource)
-      setBindingStatus(`已绑定 ${speaker.speakerName} 的手动 Voice ID。`)
-    } catch (error) {
-      setBindingError(getErrorMessage(error))
-    } finally {
-      setBindingSpeakerId(null)
-    }
-  }
+  const handleClone = useCallback(
+    async (speaker: VoiceReviewSpeaker) => {
+      updateSpeakerState(speaker.speakerId, { isCloning: true, cloneError: null })
+      try {
+        const result = await cloneVoiceForReview(
+          speaker.speakerId,
+          speaker.speakerName,
+          speaker.samplePath || '',
+          resource?.projectDir,
+        )
+        updateSpeakerState(speaker.speakerId, {
+          voiceId: result.voiceId,
+          isCloning: false,
+        })
+        // Refresh voice library dropdown
+        try {
+          const lib = await getVoiceLibrary()
+          setAllVoices(lib.voices)
+        } catch {
+          // non-critical
+        }
+      } catch (error) {
+        updateSpeakerState(speaker.speakerId, {
+          isCloning: false,
+          cloneError: getErrorMessage(error),
+        })
+      }
+    },
+    [updateSpeakerState],
+  )
 
   const handleApprove = async () => {
-    if (!resource) {
-      return
-    }
-
+    if (!resource) return
     setIsSubmitting(true)
     setSubmitError(null)
     try {
+      const voiceIdA = speakerStates['speaker_a']?.voiceId || speakerStates['speaker_a']?.manualVoiceId || ''
+      const voiceIdB = speakerStates['speaker_b']?.voiceId || speakerStates['speaker_b']?.manualVoiceId || ''
+
+      if (!voiceIdA) {
+        setSubmitError('Speaker A 的音色尚未配置。')
+        setIsSubmitting(false)
+        return
+      }
+
       const result = await approveVoiceReview({
         jobId,
         projectDir: resource.projectDir,
+        voiceIdA: voiceIdA,
+        voiceIdB: voiceIdB || undefined,
       })
       setSubmittedJob(result.job)
     } catch (error) {
@@ -191,6 +203,12 @@ export function VoiceReviewPage() {
       setIsSubmitting(false)
     }
   }
+
+  const activeJob = submittedJob ?? resource?.job ?? null
+  const hasAdvanced =
+    submittedJob !== null &&
+    (submittedJob.status !== 'waiting_for_review' ||
+      submittedJob.currentStage !== 'voice_review')
 
   if (!jobId) {
     return (
@@ -204,12 +222,7 @@ export function VoiceReviewPage() {
   }
 
   if (isLoading && !resource && !pageError) {
-    return (
-      <EmptyState
-        description="正在读取当前音色确认内容..."
-        title="音色确认加载中"
-      />
-    )
+    return <EmptyState description="正在读取音色确认内容..." title="音色确认加载中" />
   }
 
   if (pageError && !resource) {
@@ -236,6 +249,9 @@ export function VoiceReviewPage() {
 
   return (
     <div className="space-y-6">
+      {/* Hidden audio element for preview playback */}
+      <audio ref={audioRef} className="hidden" />
+
       {!hasAdvanced ? (
         <section className="sticky top-4 z-20 surface-card p-5 shadow-[0_24px_60px_-42px_rgba(25,37,47,0.6)]">
           <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
@@ -243,389 +259,221 @@ export function VoiceReviewPage() {
               <div className="flex flex-wrap items-center gap-3">
                 <h2 className="text-2xl font-semibold text-ink-950">音色确认</h2>
                 <StatusBadge status={activeJob?.status ?? resource.job.status} />
-                <span className="rounded-full bg-sand-100 px-3 py-1 text-xs font-semibold text-ink-900/65">
-                  待处理 {resource.speakers.length} 位说话人
-                </span>
               </div>
               <p className="text-sm leading-6 text-ink-900/75">
-                {getReviewPageMessage('voice_review', resource.activeMessage)}
-              </p>
-              <p className="text-sm font-medium text-ink-900/60">
-                当前必须完成：为所有待处理说话人形成可用音色绑定后再继续。
+                请确认各发言人的音色配置。可以试听已有音色、克隆新音色，或手动输入 Voice ID。
               </p>
             </div>
-
             <div className="flex flex-wrap gap-3">
               <button
                 className="primary-button"
                 disabled={isSubmitting}
-                onClick={() => {
-                  void handleApprove()
-                }}
+                onClick={() => { void handleApprove() }}
                 type="button"
               >
-                {isSubmitting ? '提交中...' : '确认音色并继续'}
+                {isSubmitting ? '提交中...' : '确认并继续'}
               </button>
               <Link className="secondary-button" to="/tasks/current">
                 返回当前任务
-              </Link>
-              <Link className="secondary-button" to={`/projects/${jobId}`}>
-                查看项目详情
               </Link>
             </div>
           </div>
         </section>
       ) : null}
 
-      {submitError ? (
-        <section className="notice-panel border border-coral-500/20 bg-coral-500/8">
-          <p className="text-sm font-semibold text-coral-700">提交音色确认失败</p>
-          <p className="mt-2 text-sm text-coral-700/85">{submitError}</p>
-        </section>
-      ) : null}
-
-      {bindingError ? (
-        <section className="notice-panel border border-coral-500/20 bg-coral-500/8">
-          <p className="text-sm font-semibold text-coral-700">更新音色绑定失败</p>
-          <p className="mt-2 text-sm text-coral-700/85">{bindingError}</p>
-        </section>
-      ) : null}
-
-      {bindingStatus ? (
-        <section className="notice-panel border border-ink-950/10 bg-sand-50/85">
-          <p className="text-sm font-semibold text-ink-950">音色绑定已更新</p>
-          <p className="mt-2 text-sm text-ink-900/70">{bindingStatus}</p>
-        </section>
-      ) : null}
+      <Toast message={submitError} onClose={() => setSubmitError(null)} />
 
       {hasAdvanced && submittedJob ? (
         <section className="surface-card p-6">
           <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
             <div className="space-y-2">
-              <p className="eyebrow">审核已提交</p>
+              <p className="eyebrow">音色已确认</p>
               <h3 className="text-xl font-semibold text-ink-950">音色确认已完成</h3>
               <p className="text-sm leading-6 text-ink-900/70">
                 当前任务已推进到 {getStageLabel(submittedJob.currentStage)}。
-                {getUserFacingProgressMessage(submittedJob.progressMessage)
-                  ? ` ${getUserFacingProgressMessage(submittedJob.progressMessage)}`
-                  : ''}
               </p>
             </div>
             <StatusBadge status={submittedJob.status} />
           </div>
-
           <div className="mt-5 flex flex-wrap gap-3">
             <Link className="secondary-button" to="/tasks/current">
               返回当前任务
-            </Link>
-            <Link className="secondary-button" to={`/projects/${jobId}`}>
-              查看项目详情
             </Link>
           </div>
         </section>
       ) : null}
 
       {!hasAdvanced ? (
-        <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(240px,0.3fr)]">
-          <section className="surface-card p-5">
-            <div className="space-y-1">
-              <h3 className="text-lg font-semibold text-ink-950">待确认说话人音色</h3>
-              <p className="muted-copy">
-                首屏优先呈现需要逐位确认的绑定操作，概览与说明放到侧边栏。
-              </p>
-            </div>
+        <div className="space-y-4">
+          {resource.speakers.map((speaker) => {
+            const state = speakerStates[speaker.speakerId]
+            if (!state) return null
+            const hasVoice = Boolean(state.voiceId)
 
-            <div className="mt-5 space-y-4">
-              {resource.speakers.map((speaker) => {
-                const availableVoiceId = selectedVoiceIds[speaker.speakerId] ?? ''
-                const manualVoiceId = manualVoiceIds[speaker.speakerId] ?? ''
-                const isBinding = bindingSpeakerId === speaker.speakerId
+            return (
+              <article
+                key={speaker.speakerId}
+                className="surface-card p-5 space-y-4"
+              >
+                {/* Header */}
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <p className="eyebrow">{speaker.speakerLabel || speaker.speakerId}</p>
+                    <h3 className="text-lg font-semibold text-ink-950">
+                      {speaker.speakerName}
+                    </h3>
+                  </div>
+                  <span className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                    hasVoice
+                      ? 'bg-emerald-100 text-emerald-700'
+                      : 'bg-amber-100 text-amber-700'
+                  }`}>
+                    {hasVoice ? '✓ 已配置音色' : '⚠ 需要配置音色'}
+                  </span>
+                </div>
 
-                return (
-                  <article
-                    key={speaker.speakerId}
-                    className="rounded-3xl border border-ink-950/8 bg-sand-50/70 p-4"
-                  >
-                    <div className="flex flex-wrap items-center justify-between gap-3">
+                {/* Current selected voice with preview */}
+                {hasVoice ? (
+                  <div className="rounded-2xl border border-emerald-200 bg-emerald-50/50 p-4">
+                    <div className="flex items-center justify-between">
                       <div>
-                        <p className="eyebrow">{speaker.speakerLabel ?? speaker.speakerId}</p>
-                        <p className="mt-1 text-sm font-semibold text-ink-950">
-                          {speaker.speakerName}
+                        <p className="text-sm font-medium text-ink-900/70">当前选择</p>
+                        <p className="text-sm font-semibold text-ink-950">
+                          {allVoices.find(v => v.voiceId === state.voiceId)?.label
+                            || allVoices.find(v => v.voiceId === state.voiceId)?.speakerName
+                            || state.voiceId}
                         </p>
+                        <p className="text-xs font-mono text-ink-900/40">{state.voiceId}</p>
                       </div>
-                      <span className="rounded-full bg-sand-100 px-3 py-1 text-xs font-semibold text-ink-900/65">
-                        {speaker.resolvedStatus ?? '待确认'}
-                      </span>
+                      <button
+                        className="secondary-button text-sm px-4 py-2"
+                        disabled={state.isPreviewing}
+                        onClick={() => { void handlePreview(speaker.speakerId, state.voiceId) }}
+                        type="button"
+                      >
+                        {state.isPreviewing ? '试听中...' : '▶ 试听当前音色'}
+                      </button>
                     </div>
+                    {state.previewError ? (
+                      <p className="mt-2 text-xs text-coral-600">{state.previewError}</p>
+                    ) : null}
+                  </div>
+                ) : null}
 
-                    <div className="mt-4 grid gap-4 md:grid-cols-2">
-                      <div className="rounded-2xl border border-ink-950/8 bg-white/75 px-4 py-3">
-                        <p className="form-label">当前结果</p>
-                        <p className="mt-2 break-all text-sm font-medium text-ink-950">
-                          {speaker.resolvedLabel ?? speaker.resolvedVoiceId ?? '-'}
-                        </p>
-                        <p className="mt-1 text-sm text-ink-900/65">
-                          {[
-                            speaker.resolvedStatus,
-                            speaker.resolvedSource,
-                            speaker.resolvedVoiceType,
-                          ]
-                            .filter(Boolean)
-                            .join(' / ') || '-'}
-                        </p>
+                {/* Three ways to select voice — always all available */}
+                <div className="space-y-3">
+
+                  {/* Way 1: Select from voice library (dropdown) */}
+                  <div className="rounded-2xl border border-ink-950/8 bg-white/75 p-4 space-y-2">
+                    <p className="form-label">方式一：从音色库选择</p>
+                    {allVoices.length > 0 ? (
+                      <div className="flex gap-2">
+                        <select
+                          className="form-input flex-1 text-sm"
+                          onChange={(e) => {
+                            const vid = e.currentTarget.value
+                            if (vid) {
+                              updateSpeakerState(speaker.speakerId, { voiceId: vid })
+                            }
+                          }}
+                          value={state.voiceId}
+                        >
+                          <option value="">— 请选择音色 —</option>
+                          {allVoices.map((voice) => (
+                            <option key={voice.voiceId} value={voice.voiceId}>
+                              {voice.speakerName ? `${voice.speakerName} - ` : ''}{voice.label || voice.voiceId}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          className="secondary-button text-sm px-4"
+                          disabled={!state.voiceId || state.isPreviewing}
+                          onClick={() => { void handlePreview(speaker.speakerId, state.voiceId) }}
+                          type="button"
+                        >
+                          {state.isPreviewing ? '...' : '试听'}
+                        </button>
                       </div>
-                      <div className="rounded-2xl border border-ink-950/8 bg-white/75 px-4 py-3">
-                        <p className="form-label">默认音色</p>
-                        <p className="mt-2 break-all text-sm font-medium text-ink-950">
-                          {speaker.defaultVoiceId ?? '-'}
-                        </p>
-                        <p className="mt-1 text-sm text-ink-900/65">
-                          类型：{speaker.defaultVoiceType ?? '-'}
-                        </p>
-                      </div>
+                    ) : (
+                      <p className="text-xs text-ink-900/50">
+                        音色库中暂无已有音色
+                      </p>
+                    )}
+                  </div>
+
+                  {/* Way 2: Clone voice */}
+                  <div className="rounded-2xl border border-ink-950/8 bg-white/75 p-4 space-y-2">
+                    <p className="form-label">方式二：克隆音色（每次 ¥9.9）</p>
+                    <p className="text-xs text-ink-900/50">
+                      从视频中自动提取发言人音频样本并克隆
+                    </p>
+                    <button
+                      className="primary-button text-sm"
+                      disabled={state.isCloning}
+                      onClick={() => { void handleClone(speaker) }}
+                      type="button"
+                    >
+                      {state.isCloning ? '正在采样并克隆，请稍候...' : '🎤 克隆音色'}
+                    </button>
+                    {state.cloneError ? (
+                      <p className="text-xs text-coral-600">{state.cloneError}</p>
+                    ) : null}
+                  </div>
+
+                  {/* Way 3: Manual Voice ID */}
+                  <div className="rounded-2xl border border-ink-950/8 bg-white/75 p-4 space-y-2">
+                    <p className="form-label">方式三：手动输入 Voice ID</p>
+                    <div className="flex gap-2">
+                      <input
+                        className="form-input flex-1 text-sm"
+                        onChange={(e) => {
+                          updateSpeakerState(speaker.speakerId, {
+                            manualVoiceId: e.currentTarget.value,
+                          })
+                        }}
+                        placeholder="vt_speaker_xxx_xxx"
+                        value={state.manualVoiceId}
+                      />
+                      <button
+                        className="secondary-button text-sm px-3"
+                        disabled={!state.manualVoiceId.trim()}
+                        onClick={() => {
+                          const vid = state.manualVoiceId.trim()
+                          if (vid) {
+                            updateSpeakerState(speaker.speakerId, {
+                              voiceId: vid,
+                            })
+                          }
+                        }}
+                        type="button"
+                      >
+                        应用
+                      </button>
+                      <button
+                        className="secondary-button text-sm px-3"
+                        disabled={!state.manualVoiceId.trim() || state.isPreviewing}
+                        onClick={() => {
+                          const vid = state.manualVoiceId.trim()
+                          if (vid) { void handlePreview(speaker.speakerId, vid) }
+                        }}
+                        type="button"
+                      >
+                        试听
+                      </button>
                     </div>
-
-                    <div className="mt-4 space-y-3">
-                      <div className="space-y-2">
-                        <p className="form-label">可用音色 ({speaker.availableVoices.length})</p>
-                        {speaker.availableVoices.length > 0 ? (
-                          <>
-                            <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
-                              <select
-                                className="form-input"
-                                onChange={(event) => {
-                                  const nextVoiceId = event.currentTarget.value
-                                  setSelectedVoiceIds((current) => ({
-                                    ...current,
-                                    [speaker.speakerId]: nextVoiceId,
-                                  }))
-                                }}
-                                value={availableVoiceId}
-                              >
-                                <option value="">请选择一个可用音色</option>
-                                {speaker.availableVoices.map((voice) => (
-                                  <option key={voice.voiceId} value={voice.voiceId}>
-                                    {voice.label ?? voice.voiceId}
-                                  </option>
-                                ))}
-                              </select>
-                              <button
-                                className="secondary-button"
-                                disabled={isBinding}
-                                onClick={() => {
-                                  void handleSetDefault(speaker)
-                                }}
-                                type="button"
-                              >
-                                {isBinding ? '绑定中...' : '设为该说话人的默认音色'}
-                              </button>
-                            </div>
-
-                            <div className="grid gap-3">
-                              {speaker.availableVoices.map((voice) => {
-                                const isDefault = speaker.defaultVoiceId === voice.voiceId
-                                const isResolved = speaker.resolvedVoiceId === voice.voiceId
-
-                                return (
-                                  <div
-                                    key={`${speaker.speakerId}-${voice.voiceId}`}
-                                    className="rounded-2xl border border-ink-950/8 bg-white/75 px-4 py-3"
-                                  >
-                                    <div className="flex flex-wrap items-center justify-between gap-2">
-                                      <p className="text-sm font-semibold text-ink-950">
-                                        {voice.label ?? voice.voiceId}
-                                      </p>
-                                      <span className="rounded-full bg-sand-100 px-3 py-1 text-xs font-semibold text-ink-900/65">
-                                        {voice.voiceType ?? '未知类型'}
-                                      </span>
-                                    </div>
-                                    <p className="mt-2 break-all text-sm text-ink-900/70">
-                                      {voice.voiceId}
-                                    </p>
-                                    <p className="mt-2 text-sm text-ink-900/60">
-                                      {[voice.provider, voice.ttsProvider, voice.platform]
-                                        .filter(Boolean)
-                                        .join(' / ') || '-'}
-                                    </p>
-                                    <p className="mt-2 text-sm text-ink-900/60">
-                                      {[
-                                        isDefault ? '默认' : null,
-                                        isResolved ? '当前结果' : null,
-                                        voice.verificationStatus,
-                                      ]
-                                        .filter(Boolean)
-                                        .join(' / ') || '可用'}
-                                    </p>
-                                  </div>
-                                )
-                              })}
-                            </div>
-                          </>
-                        ) : (
-                          <div className="rounded-2xl border border-dashed border-ink-950/12 bg-white/70 px-4 py-4 text-sm text-ink-900/65">
-                            当前没有可直接选择的已注册音色，可改用手动 Voice ID 绑定。
-                          </div>
-                        )}
-                      </div>
-
-                      <div className="rounded-2xl border border-ink-950/8 bg-white/75 px-4 py-4">
-                        <p className="form-label">手动 Voice ID</p>
-                        <div className="mt-3 flex flex-col gap-3 lg:flex-row lg:items-center">
-                          <input
-                            className="form-input"
-                            onChange={(event) => {
-                              const nextValue = event.currentTarget.value
-                              setManualVoiceIds((current) => ({
-                                ...current,
-                                [speaker.speakerId]: nextValue,
-                              }))
-                            }}
-                            placeholder="输入现有 Voice ID"
-                            value={manualVoiceId}
-                          />
-                          <button
-                            className="secondary-button"
-                            disabled={isBinding}
-                            onClick={() => {
-                              void handleRegisterManual(speaker)
-                            }}
-                            type="button"
-                          >
-                            {isBinding ? '绑定中...' : '使用这个 Voice ID'}
-                          </button>
-                        </div>
-                      </div>
-
-                      <details className="rounded-2xl border border-ink-950/8 bg-white/75 px-4 py-4">
-                        <summary className="cursor-pointer text-sm font-semibold text-ink-950">
-                          查看采样与次级信息
-                        </summary>
-                        <div className="mt-4 grid gap-4 md:grid-cols-2">
-                          <div>
-                            <p className="form-label">入口参数</p>
-                            <p className="mt-2 text-sm text-ink-900/80">
-                              {speaker.voiceArgName ?? '-'}
-                            </p>
-                          </div>
-                          <div>
-                            <p className="form-label">示例音频路径</p>
-                            <p className="mt-2 break-all text-sm text-ink-900/80">
-                              {speaker.samplePath ?? '-'}
-                            </p>
-                          </div>
-                          <div>
-                            <p className="form-label">示例时长</p>
-                            <p className="mt-2 text-sm text-ink-900/80">
-                              {formatSeconds(speaker.sampleDurationS)}
-                            </p>
-                          </div>
-                          <div>
-                            <p className="form-label">静音占比</p>
-                            <p className="mt-2 text-sm text-ink-900/80">
-                              {formatPercent(speaker.silenceRatio)}
-                            </p>
-                          </div>
-                        </div>
-                      </details>
-                    </div>
-                  </article>
-                )
-              })}
-            </div>
-          </section>
-
-          <div className="space-y-6">
-            <ConfigSummaryCard
-              description="侧边栏只保留整体状态和是否还能提交。"
-              items={[
-                {
-                  label: '当前阶段',
-                  value: getStageLabel(resource.job.currentStage),
-                },
-                {
-                  label: '待处理说话人',
-                  value: String(resource.speakers.length),
-                },
-                {
-                  label: '未完成绑定',
-                  value: String(unresolvedCount),
-                  hint:
-                    unresolvedCount > 0
-                      ? '仍有说话人没有形成可用绑定时，提交会被后端拒绝。'
-                      : '当前所有说话人都已有可用绑定，可直接提交。',
-                },
-              ]}
-              title="审核概览"
-            />
-          </div>
+                  </div>
+                </div>
+              </article>
+            )
+          })}
         </div>
       ) : null}
     </div>
   )
 }
 
-function syncVoiceReviewState({
-  nextResource,
-  setManualVoiceIds,
-  setResource,
-  setSelectedVoiceIds,
-}: {
-  nextResource: VoiceReviewResource
-  setManualVoiceIds: Dispatch<SetStateAction<Record<string, string>>>
-  setResource: Dispatch<SetStateAction<VoiceReviewResource | null>>
-  setSelectedVoiceIds: Dispatch<SetStateAction<Record<string, string>>>
-}) {
-  setResource(nextResource)
-  setSelectedVoiceIds((current) =>
-    Object.fromEntries(
-      nextResource.speakers.map((speaker) => {
-        const candidateIds = new Set(speaker.availableVoices.map((voice) => voice.voiceId))
-        const currentValue = current[speaker.speakerId] ?? ''
-        const preferredValue =
-          speaker.defaultVoiceId ??
-          speaker.resolvedVoiceId ??
-          speaker.availableVoices[0]?.voiceId ??
-          ''
-
-        return [
-          speaker.speakerId,
-          currentValue && candidateIds.has(currentValue) ? currentValue : preferredValue,
-        ]
-      }),
-    ),
-  )
-  setManualVoiceIds((current) =>
-    Object.fromEntries(
-      nextResource.speakers.map((speaker) => [speaker.speakerId, current[speaker.speakerId] ?? '']),
-    ),
-  )
-}
-
-function hasUsableBinding(speaker: VoiceReviewSpeaker) {
-  return Boolean(normalizeText(speaker.resolvedVoiceId) ?? normalizeText(speaker.defaultVoiceId))
-}
-
-function formatSeconds(value: number) {
-  return `${value.toFixed(2)}s`
-}
-
-function formatPercent(value: number) {
-  return `${(value * 100).toFixed(1)}%`
-}
-
-function normalizeText(value: string | null | undefined) {
-  const normalized = value?.trim()
-  return normalized || null
-}
-
 function getErrorMessage(error: unknown) {
-  if (error instanceof ApiError) {
-    return error.message
-  }
-
-  if (error instanceof Error) {
-    return error.message
-  }
-
+  if (error instanceof ApiError) return error.message
+  if (error instanceof Error) return error.message
   return '请求失败，请稍后重试。'
 }

@@ -64,7 +64,20 @@ export function getReviewActionForJob(
   stage: PublicStage | null,
   jobId: string | null,
 ) {
-  const normalizedStage = normalizeReviewStage(reviewGate?.stage) ?? normalizeReviewStage(stage)
+  // Check reviewGate.tab to detect mismatched stage
+  const gateTab = typeof reviewGate?.tab === 'string' ? reviewGate.tab : null
+  const tabToStage: Record<string, ReviewStage> = {
+    'translation-config': 'translation_config_review',
+    'review': 'speaker_review',
+    'translation': 'translation_review',
+    'voice': 'voice_review',
+  }
+  const stageFromTab = gateTab ? tabToStage[gateTab] : null
+  const gateStage = normalizeReviewStage(reviewGate?.stage)
+  const resolvedGateStage = (stageFromTab && gateStage && stageFromTab !== gateStage)
+    ? stageFromTab
+    : gateStage
+  const normalizedStage = resolvedGateStage ?? normalizeReviewStage(stage)
   const fallbackHref = buildBackendUrl(resolveWebUiBaseUrl(), '/')
   const nativeRoute = buildNativeReviewRoute(normalizedStage, jobId)
   const href = nativeRoute ?? fallbackHref

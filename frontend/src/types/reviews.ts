@@ -56,6 +56,7 @@ export interface TranslationReviewResource {
   job: JobSummary
   pageSizeOptions: number[]
   projectDir: string
+  speakerOptions: ReviewSpeakerOption[]
 }
 
 export interface VoiceReviewAvailableVoice {
@@ -120,6 +121,7 @@ export interface SpeakerReviewApprovalInput {
 export interface TranslationReviewApprovalInput {
   jobId: string
   projectDir: string
+  segmentSpeakers?: Record<string, string>
   segments: Record<
     string,
     {

@@ -10,7 +10,7 @@ from services.voice_clone import VoiceCloneConfig
 from services.state_manager import utc_now_iso
 
 
-DEFAULT_VOICE_VERIFICATION_SAMPLE_TEXT = "你好，这是一条 AutoDub 音色验证样例。"
+DEFAULT_VOICE_VERIFICATION_SAMPLE_TEXT = "您好，很高兴能为您提供视频服务。请选择您感兴趣的音色，让我们一起开启视频翻译的奇妙之旅吧。"
 
 
 class VoiceAssetVerificationError(Exception):

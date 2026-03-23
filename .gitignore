@@ -1,15 +1,50 @@
+# Python
 __pycache__/
 .pytest_cache/
 *.py[cod]
+*.egg-info/
+venv/
+.venv/
 
+# Node / Frontend
+node_modules/
+dist/
+.next/
+.vite/
+*.tsbuildinfo
+
+# Runtime data
 runtime_logs/
 projects/
 jobs/
 demo_output/
 voice_bank/
+uploads/
 
-tools/caddy/
-
+# Config (secrets)
+.env
+.env.*
 autodub.local.json
 remote_workbench.local.json
 voice_registry.json
+
+# Build artifacts
+tools/caddy/
+*.tar.gz
+
+# Temp files
+tmp_remote_env
+tmp_remote_env.bak_*
+tmp_playwright/
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*

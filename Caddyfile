@@ -1,0 +1,43 @@
+{
+    admin off
+}
+
+{$AUTODUB_PUBLIC_HOST} {
+    tls internal
+
+    encode zstd gzip
+
+    log {
+        output file /var/log/aivideotrans/public-entry.access.log {
+            roll_keep 10
+            roll_keep_for 168h
+        }
+        format json
+    }
+
+    # Auth is handled by Gateway (session-based), not Caddy basic_auth
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
+
+    # API and auth traffic → Gateway
+    @api_routes {
+        path /api/*
+        path /job-api/*
+        path /web-ui-api/*
+        path /auth/*
+        path /gateway/*
+    }
+    handle @api_routes {
+        reverse_proxy 127.0.0.1:8880
+    }
+
+    # Everything else → Next.js
+    handle {
+        reverse_proxy 127.0.0.1:3000
+    }
+}

@@ -82,28 +82,68 @@ export async function approveSpeakerReview(
   }
 }
 
+export interface SplitSegmentInput {
+  projectDir: string
+  segmentId: string
+  splitSourceIndex: number
+  splitCnIndex: number
+  speakerA: string
+  speakerB: string
+  stage: 'translation_review' | 'speaker_review'
+  pendingSpeakerChanges?: Record<string, string>
+}
+
+export async function splitSegment(
+  input: SplitSegmentInput,
+): Promise<{ success: boolean }> {
+  const body: Record<string, unknown> = {
+    project_dir: input.projectDir,
+    segment_id: input.segmentId,
+    split_source_index: input.splitSourceIndex,
+    split_cn_index: input.splitCnIndex,
+    speaker_a: input.speakerA,
+    speaker_b: input.speakerB,
+    stage: input.stage,
+  }
+
+  if (input.pendingSpeakerChanges && Object.keys(input.pendingSpeakerChanges).length > 0) {
+    body.pending_speaker_changes = input.pendingSpeakerChanges
+  }
+
+  const result = await webUiApiClient.post<{ split_result: { success: boolean } }>(
+    '/api/review/split-segment',
+    { body },
+  )
+
+  return { success: result.split_result?.success ?? false }
+}
+
 export async function approveTranslationReview(
   input: TranslationReviewApprovalInput,
 ): Promise<ReviewJobTransition> {
+  const body: Record<string, unknown> = {
+    project_dir: input.projectDir,
+    segments: Object.fromEntries(
+      Object.entries(input.segments).map(([segmentId, entry]) => [
+        segmentId,
+        {
+          cn_text: entry.cnText,
+          tts_cn_text: entry.ttsCnText,
+          translation_confirmed: entry.translationConfirmed,
+          rewrite_requested: entry.rewriteRequested,
+          updated_at: entry.updatedAt,
+        },
+      ]),
+    ),
+  }
+
+  if (input.segmentSpeakers && Object.keys(input.segmentSpeakers).length > 0) {
+    body.segment_speakers = input.segmentSpeakers
+  }
+
   await webUiApiClient.post<ApiWebUiStateResponse>(
     '/api/review/translation/approve',
-    {
-      body: {
-        project_dir: input.projectDir,
-        segments: Object.fromEntries(
-          Object.entries(input.segments).map(([segmentId, entry]) => [
-            segmentId,
-            {
-              cn_text: entry.cnText,
-              tts_cn_text: entry.ttsCnText,
-              translation_confirmed: entry.translationConfirmed,
-              rewrite_requested: entry.rewriteRequested,
-              updated_at: entry.updatedAt,
-            },
-          ]),
-        ),
-      },
-    },
+    { body },
   )
 
   return {
@@ -146,13 +186,15 @@ export async function registerVoiceReviewManual(
 }
 
 export async function approveVoiceReview(
-  input: VoiceReviewApprovalInput,
+  input: VoiceReviewApprovalInput & { voiceIdA?: string; voiceIdB?: string },
 ): Promise<ReviewJobTransition> {
   await webUiApiClient.post<ApiWebUiStateResponse>(
     '/api/review/voice/approve',
     {
       body: {
         project_dir: input.projectDir,
+        voice_id_a: input.voiceIdA,
+        voice_id_b: input.voiceIdB,
       },
     },
   )
@@ -160,6 +202,48 @@ export async function approveVoiceReview(
   return {
     job: await getJob(input.jobId),
   }
+}
+
+export async function previewVoice(
+  voiceId: string,
+  speakerId?: string,
+): Promise<{ audioBase64: string; audioFormat: string }> {
+  const result = await webUiApiClient.post<{
+    success: boolean
+    audio_base64: string
+    audio_format: string
+  }>('/api/review/voice/preview', {
+    body: {
+      voice_id: voiceId,
+      speaker_id: speakerId ?? 'preview',
+    },
+  })
+
+  return {
+    audioBase64: result.audio_base64,
+    audioFormat: result.audio_format,
+  }
+}
+
+export async function cloneVoiceForReview(
+  speakerId: string,
+  speakerName: string,
+  samplePath: string,
+  projectDir?: string,
+): Promise<{ voiceId: string }> {
+  const body: Record<string, unknown> = {
+    speaker_id: speakerId,
+    speaker_name: speakerName,
+  }
+  if (samplePath) body.sample_path = samplePath
+  if (projectDir) body.project_dir = projectDir
+
+  const result = await webUiApiClient.post<{
+    success: boolean
+    voice_id: string
+  }>('/api/review/voice/clone', { body })
+
+  return { voiceId: result.voice_id }
 }
 
 export function buildLegacyReviewFallbackUrl() {
@@ -215,6 +299,11 @@ function toTranslationReviewResource(
     translationConfirmed: Boolean(item.translation_confirmed),
     ttsCnText: item.tts_cn_text || item.cn_text,
   }))
+  const payloadOptions = getSpeakerOptions(payload)
+  const speakerOptions = mergeSpeakerOptions(payloadOptions, items.map((item) => ({
+    speakerId: item.speakerId,
+    displayName: item.displayName,
+  })))
   const projectDir = resolveProjectDir(payload, job.projectDir)
 
   return {
@@ -225,6 +314,7 @@ function toTranslationReviewResource(
     job,
     pageSizeOptions: resolvePageSizeOptions(section?.page_size_options),
     projectDir,
+    speakerOptions,
   }
 }
 
@@ -433,7 +523,7 @@ function getSpeakerOptions(payload: ApiWebUiStateResponse) {
 
 function mergeSpeakerOptions(
   stageOptions: Array<ReviewSpeakerOption | null>,
-  items: SpeakerReviewItem[],
+  items: Array<{ speakerId: string; displayName: string }>,
 ) {
   const deduped = new Map<string, ReviewSpeakerOption>()
 

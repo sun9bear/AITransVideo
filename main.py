@@ -162,6 +162,7 @@ def parse_process_args(argv: list[str]) -> ProcessConfig:
     parser.add_argument("--resume-from", default=None, help="断点续跑起始 Stage（预留）")
     parser.add_argument("--skip-review", action="store_true", help="跳过Gemini说话人审核步骤")
     parser.add_argument("--wait-for-review", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--transcription-method", default="assemblyai", choices=["assemblyai", "gemini"], help="转录方案：assemblyai（默认）| gemini")
     parsed = parser.parse_args(argv[2:])
     return ProcessConfig(
         youtube_url=parsed.youtube_url,
@@ -174,6 +175,7 @@ def parse_process_args(argv: list[str]) -> ProcessConfig:
         resume_from=parsed.resume_from,
         skip_review=parsed.skip_review,
         wait_for_review=parsed.wait_for_review,
+        transcription_method=parsed.transcription_method,
     )
 
 
@@ -956,16 +958,6 @@ def run_process_command(argv: list[str]) -> None:
         raise SystemExit(f"process failed: {exc}") from exc
 
     if result.status == "waiting_for_review":
-        print("========================================")
-        print("  AIVideoTrans 等待人工确认")
-        print("========================================")
-        print(f"  项目目录：{result.project_dir}")
-        if result.paused_review_stage:
-            print(f"  待确认阶段：{result.paused_review_stage}")
-        if result.paused_review_message:
-            print(f"  提示：{result.paused_review_message}")
-        print("")
-        print("  请回到 Web UI 完成确认，确认后流程会继续。")
         return
 
     project_dir = Path(result.project_dir).resolve(strict=False)

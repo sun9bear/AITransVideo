@@ -1,0 +1,136 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${APP_IMAGE_NAME:-aivideotrans-app:linux-baseline}
+    container_name: ${APP_CONTAINER_NAME:-aivideotrans-app}
+    network_mode: host
+    restart: unless-stopped
+    env_file:
+      - /opt/aivideotrans/config/.env
+    environment:
+      AIVIDEOTRANS_CONFIG_DIR: /opt/aivideotrans/config
+      AIVIDEOTRANS_JOBS_DIR: /opt/aivideotrans/app/jobs
+      AIVIDEOTRANS_PROJECTS_DIR: /opt/aivideotrans/app/projects
+      AIVIDEOTRANS_RUNTIME_LOGS_DIR: /opt/aivideotrans/data/runtime_logs
+      ASSEMBLYAI_API_KEY: ${ASSEMBLYAI_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      AUTODUB_TTS_API_KEY: ${AUTODUB_TTS_API_KEY:-}
+    volumes:
+      - type: bind
+        source: ${AIVIDEOTRANS_ROOT}/config
+        target: /opt/aivideotrans/config
+      - type: bind
+        source: ${AIVIDEOTRANS_ROOT}/data/projects
+        target: /opt/aivideotrans/app/projects
+      - type: bind
+        source: ${AIVIDEOTRANS_ROOT}/data/jobs
+        target: /opt/aivideotrans/app/jobs
+      - type: bind
+        source: ${AIVIDEOTRANS_ROOT}/data/runtime_logs
+        target: /opt/aivideotrans/data/runtime_logs
+    healthcheck:
+      test: ["CMD", "python", "scripts/linux_remote_workbench_preflight.py", "app-health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: aivideotrans-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: aivideotrans
+      POSTGRES_USER: avt
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-avt_dev_2026}
+    network_mode: host
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U avt -d aivideotrans"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  next:
+    build:
+      context: ./frontend-next
+      dockerfile: Dockerfile
+    image: aivideotrans-next:latest
+    container_name: aivideotrans-next
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      PORT: "3000"
+      HOSTNAME: "0.0.0.0"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    image: aivideotrans-gateway:latest
+    container_name: aivideotrans-gateway
+    network_mode: host
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      AVT_WEB_UI_UPSTREAM: "http://127.0.0.1:8876"
+      AVT_JOB_API_UPSTREAM: "http://127.0.0.1:8877"
+      AVT_GATEWAY_HOST: "0.0.0.0"
+      AVT_GATEWAY_PORT: "8880"
+      AVT_AUTH_REQUIRED: "false"
+      AVT_DATABASE_URL: "postgresql+asyncpg://avt:${PG_PASSWORD:-avt_dev_2026}@127.0.0.1:5432/aivideotrans"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8880/gateway/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  caddy:
+    image: ${CADDY_IMAGE_NAME:-caddy:2.9.1}
+    container_name: ${CADDY_CONTAINER_NAME:-aivideotrans-caddy}
+    network_mode: host
+    restart: unless-stopped
+    depends_on:
+      gateway:
+        condition: service_healthy
+    env_file:
+      - ${AIVIDEOTRANS_ROOT}/config/.env
+    volumes:
+      - type: bind
+        source: ${AIVIDEOTRANS_ROOT}/caddy/Caddyfile
+        target: /etc/caddy/Caddyfile
+        read_only: true
+      - type: bind
+        source: ${AIVIDEOTRANS_ROOT}/caddy/data
+        target: /data
+      - type: bind
+        source: ${AIVIDEOTRANS_ROOT}/caddy/config
+        target: /config
+      - type: bind
+        source: ${AIVIDEOTRANS_ROOT}/data/runtime_logs
+        target: /var/log/aivideotrans
+    healthcheck:
+      test: ["CMD", "caddy", "validate", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  pgdata:

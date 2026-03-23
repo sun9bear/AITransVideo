@@ -11,27 +11,27 @@ const stageSequence = [
     key: 'media_understanding',
   },
   {
-    description: '仅在需要时出现，确认说话人后才能继续。',
+    description: '确认说话人归属。',
     key: 'speaker_review',
+  },
+  {
+    description: '确认各发言人音色配置。',
+    key: 'voice_review',
   },
   {
     description: '选择翻译模型和提示词。',
     key: 'translation_config_review',
   },
   {
-    description: '仅在需要时出现，确认翻译后才能继续。',
+    description: '确认翻译内容。',
     key: 'translation_review',
   },
   {
-    description: '仅在需要时出现，确认音色后才能继续。',
-    key: 'voice_review',
-  },
-  {
-    description: '生成草稿、配音和结果摘要。',
+    description: '生成配音和对齐。',
     key: 'draft',
   },
   {
-    description: '产出可查看结果和可下载文件。',
+    description: '产出结果和可下载文件。',
     key: 'legacy_process_output',
   },
 ] as const satisfies readonly {

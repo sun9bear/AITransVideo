@@ -11,7 +11,8 @@ import {
 } from '@/features/jobs/presentation'
 import { ApiError } from '@/lib/api/client'
 import { getJob } from '@/lib/api/jobs'
-import { approveSpeakerReview, getSpeakerReview } from '@/lib/api/reviews'
+import { Toast } from '@/components/Toast'
+import { approveSpeakerReview, getSpeakerReview, splitSegment } from '@/lib/api/reviews'
 import { usePollingTask } from '@/lib/react/usePollingTask'
 import { ACTIVE_JOB_STATUSES, type JobSummary } from '@/types/jobs'
 import type { SpeakerReviewResource } from '@/types/reviews'
@@ -39,6 +40,11 @@ export function SpeakerReviewPage() {
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [pageError, setPageError] = useState<string | null>(null)
   const [submitError, setSubmitError] = useState<string | null>(null)
+  const [splittingSegmentId, setSplittingSegmentId] = useState<string | null>(null)
+  const [splitSourcePos, setSplitSourcePos] = useState(0)
+  const [splitSpeakerA, setSplitSpeakerA] = useState('')
+  const [splitSpeakerB, setSplitSpeakerB] = useState('')
+  const [isSplitting, setIsSplitting] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -293,6 +299,7 @@ export function SpeakerReviewPage() {
                   disabled={currentPage <= 1}
                   onClick={() => {
                     setPage((currentValue) => Math.max(1, currentValue - 1))
+                    window.scrollTo({ top: 0, behavior: 'smooth' })
                   }}
                   type="button"
                 >
@@ -303,6 +310,7 @@ export function SpeakerReviewPage() {
                   disabled={currentPage >= totalPages}
                   onClick={() => {
                     setPage((currentValue) => Math.min(totalPages, currentValue + 1))
+                    window.scrollTo({ top: 0, behavior: 'smooth' })
                   }}
                   type="button"
                 >
@@ -314,12 +322,7 @@ export function SpeakerReviewPage() {
         </section>
       ) : null}
 
-      {submitError ? (
-        <section className="notice-panel border border-coral-500/20 bg-coral-500/8">
-          <p className="text-sm font-semibold text-coral-700">提交说话人审核失败</p>
-          <p className="mt-2 text-sm text-coral-700/85">{submitError}</p>
-        </section>
-      ) : null}
+      <Toast message={submitError} onClose={() => setSubmitError(null)} />
 
       {hasAdvanced && submittedJob ? (
         <section className="surface-card p-6">
@@ -355,16 +358,8 @@ export function SpeakerReviewPage() {
       ) : null}
 
       {!hasAdvanced ? (
-        <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(240px,0.3fr)]">
-          <section className="surface-card p-5">
-            <div className="space-y-1">
-              <h3 className="text-lg font-semibold text-ink-950">待确认片段</h3>
-              <p className="muted-copy">
-                首屏优先显示真正需要逐条处理的片段内容，名称设置和概览放到侧边次级区。
-              </p>
-            </div>
-
-            <div className="mt-5 space-y-4">
+        <div className="space-y-4">
+            <div className="space-y-4">
               {visibleItems.map((item) => {
                 const confirmation = confirmations[item.segmentId] ?? {
                   speakerConfirmed: item.speakerConfirmed,
@@ -375,47 +370,46 @@ export function SpeakerReviewPage() {
                 return (
                   <article
                     key={item.segmentId}
-                    className="rounded-3xl border border-ink-950/8 bg-sand-50/70 p-4"
+                    className="rounded-2xl border border-ink-950/8 bg-sand-50/70 p-4"
                   >
-                    <div className="flex flex-wrap items-center justify-between gap-3">
-                      <div>
-                        <p className="eyebrow">片段 {item.segmentId}</p>
-                        <p className="mt-1 text-sm font-semibold text-ink-950">
-                          当前显示名称：{speakerNames[item.speakerId] ?? item.displayName}
-                        </p>
-                      </div>
-                      <span className="rounded-full bg-sand-100 px-3 py-1 text-xs font-semibold text-ink-900/65">
-                        {item.reviewUpdatedAt ? formatDateTime(item.reviewUpdatedAt) : '待确认'}
-                      </span>
-                    </div>
-
-                    <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
-                      <div className="space-y-2">
-                        <p className="form-label">原文</p>
-                        <div className="rounded-2xl border border-ink-950/8 bg-white/75 px-4 py-3 text-sm leading-6 text-ink-900/80">
-                          {item.sourceText || '-'}
-                        </div>
-                      </div>
-
-                      <div className="space-y-2">
-                        <p className="form-label">当前转写</p>
-                        <div className="rounded-2xl border border-ink-950/8 bg-white/75 px-4 py-3 text-sm leading-6 text-ink-900/80">
-                          {item.transcriptText || '-'}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)]">
-                      <label className="space-y-2">
-                        <span className="form-label">说话人归属</span>
-                        <select
+                    <div className="flex flex-wrap items-center gap-3">
+                      <span className="text-xs font-medium text-ink-900/50">片段 {item.segmentId}</span>
+                      <select
                           className="form-input"
                           onChange={(event) => {
                             const nextSpeakerId = event.currentTarget.value
-                            setSegmentSpeakers((current) => ({
-                              ...current,
-                              [item.segmentId]: nextSpeakerId,
-                            }))
+                            const currentSpeakerId = segmentSpeakers[item.segmentId] ?? item.speakerId
+                            if (nextSpeakerId === currentSpeakerId) return
+
+                            const currentIdx = resource.items.findIndex((i) => i.segmentId === item.segmentId)
+                            const subsequentItems = resource.items.slice(currentIdx)
+                            const hasMultipleSpeakers = resource.speakerOptions.length > 1
+                            const affectedCount = subsequentItems.filter((i) => {
+                              const spk = segmentSpeakers[i.segmentId] ?? i.speakerId
+                              return spk === currentSpeakerId || spk === nextSpeakerId
+                            }).length
+
+                            if (hasMultipleSpeakers && affectedCount > 1 && window.confirm(
+                              `是否将后续所有 "${speakerNames[currentSpeakerId] ?? currentSpeakerId}" 替换为 "${speakerNames[nextSpeakerId] ?? nextSpeakerId}"，同时互换？\n\n将影响从当前片段起的 ${affectedCount} 个片段。\n\n点击"确定"批量互换，"取消"仅修改当前片段。`
+                            )) {
+                              setSegmentSpeakers((current) => {
+                                const updated = { ...current }
+                                for (const sub of subsequentItems) {
+                                  const subSpeaker = updated[sub.segmentId] ?? sub.speakerId
+                                  if (subSpeaker === currentSpeakerId) {
+                                    updated[sub.segmentId] = nextSpeakerId
+                                  } else if (subSpeaker === nextSpeakerId) {
+                                    updated[sub.segmentId] = currentSpeakerId
+                                  }
+                                }
+                                return updated
+                              })
+                            } else {
+                              setSegmentSpeakers((current) => ({
+                                ...current,
+                                [item.segmentId]: nextSpeakerId,
+                              }))
+                            }
                           }}
                           value={segmentSpeakers[item.segmentId] ?? item.speakerId}
                         >
@@ -425,51 +419,113 @@ export function SpeakerReviewPage() {
                             </option>
                           ))}
                         </select>
-                      </label>
-
-                      <div className="grid gap-3 sm:grid-cols-2">
-                        <label className="rounded-2xl border border-ink-950/8 bg-white/75 px-4 py-3 text-sm text-ink-900/75">
-                          <div className="flex items-center gap-3">
-                            <input
-                              checked={confirmation.speakerConfirmed}
-                              onChange={(event) => {
-                                const checked = event.currentTarget.checked
-                                setConfirmations((current) => ({
-                                  ...current,
-                                  [item.segmentId]: {
-                                    ...(current[item.segmentId] ?? confirmation),
-                                    speakerConfirmed: checked,
-                                    updatedAt: new Date().toISOString(),
-                                  },
-                                }))
-                              }}
-                              type="checkbox"
-                            />
-                            <span>说话人已确认</span>
-                          </div>
-                        </label>
-
-                        <label className="rounded-2xl border border-ink-950/8 bg-white/75 px-4 py-3 text-sm text-ink-900/75">
-                          <div className="flex items-center gap-3">
-                            <input
-                              checked={confirmation.transcriptConfirmed}
-                              onChange={(event) => {
-                                const checked = event.currentTarget.checked
-                                setConfirmations((current) => ({
-                                  ...current,
-                                  [item.segmentId]: {
-                                    ...(current[item.segmentId] ?? confirmation),
-                                    transcriptConfirmed: checked,
-                                    updatedAt: new Date().toISOString(),
-                                  },
-                                }))
-                              }}
-                              type="checkbox"
-                            />
-                            <span>转写已确认</span>
-                          </div>
-                        </label>
+                      <div className="flex-1" />
+                      <div className="flex items-center">
+                        <button
+                          className="text-xs text-ink-900/50 hover:text-ink-900/80 underline"
+                          onClick={() => {
+                            if (splittingSegmentId === item.segmentId) {
+                              setSplittingSegmentId(null)
+                            } else {
+                              setSplittingSegmentId(item.segmentId)
+                              setSplitSourcePos(Math.floor((item.sourceText || '').length / 2))
+                              setSplitSpeakerA(segmentSpeakers[item.segmentId] ?? item.speakerId)
+                              setSplitSpeakerB(resource.speakerOptions.length > 1
+                                ? resource.speakerOptions.find(o => o.id !== (segmentSpeakers[item.segmentId] ?? item.speakerId))?.id ?? item.speakerId
+                                : item.speakerId)
+                            }
+                          }}
+                          type="button"
+                        >
+                          {splittingSegmentId === item.segmentId ? '取消拆分' : '拆分片段'}
+                        </button>
                       </div>
+
+                      {splittingSegmentId === item.segmentId ? (
+                        <div className="rounded-2xl border-2 border-amber-400/40 bg-amber-50/50 p-4 space-y-4">
+                          <p className="text-sm font-semibold text-ink-950">拆分片段 {item.segmentId}</p>
+
+                          <div className="space-y-2">
+                            <p className="form-label">原文拆分位置（字符: {splitSourcePos}）</p>
+                            <input
+                              className="w-full"
+                              max={(item.sourceText || '').length}
+                              min={1}
+                              onChange={(e) => setSplitSourcePos(Number(e.currentTarget.value))}
+                              type="range"
+                              value={splitSourcePos}
+                            />
+                            <div className="grid grid-cols-2 gap-2 text-xs">
+                              <div className="rounded-xl bg-white/80 p-2 border border-ink-950/8">
+                                <p className="font-semibold text-ink-900/60 mb-1">片段 A</p>
+                                <p className="text-ink-900/80">{(item.sourceText || '').slice(0, splitSourcePos)}</p>
+                              </div>
+                              <div className="rounded-xl bg-white/80 p-2 border border-ink-950/8">
+                                <p className="font-semibold text-ink-900/60 mb-1">片段 B</p>
+                                <p className="text-ink-900/80">{(item.sourceText || '').slice(splitSourcePos)}</p>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-3">
+                            <label className="space-y-1">
+                              <span className="form-label">片段 A 发言人</span>
+                              <select
+                                className="form-input text-sm"
+                                onChange={(e) => setSplitSpeakerA(e.currentTarget.value)}
+                                value={splitSpeakerA}
+                              >
+                                {resource.speakerOptions.map((option) => (
+                                  <option key={option.id} value={option.id}>{speakerNames[option.id] ?? option.displayName}</option>
+                                ))}
+                              </select>
+                            </label>
+                            <label className="space-y-1">
+                              <span className="form-label">片段 B 发言人</span>
+                              <select
+                                className="form-input text-sm"
+                                onChange={(e) => setSplitSpeakerB(e.currentTarget.value)}
+                                value={splitSpeakerB}
+                              >
+                                {resource.speakerOptions.map((option) => (
+                                  <option key={option.id} value={option.id}>{speakerNames[option.id] ?? option.displayName}</option>
+                                ))}
+                              </select>
+                            </label>
+                          </div>
+
+                          <button
+                            className="primary-button text-sm"
+                            disabled={isSplitting}
+                            onClick={async () => {
+                              setIsSplitting(true)
+                              try {
+                                const result = await splitSegment({
+                                  projectDir: resource.projectDir,
+                                  segmentId: item.segmentId,
+                                  splitSourceIndex: splitSourcePos,
+                                  splitCnIndex: 0,
+                                  speakerA: splitSpeakerA,
+                                  speakerB: splitSpeakerB,
+                                  stage: 'speaker_review',
+                                })
+                                if (result.success) {
+                                  window.location.reload()
+                                  return
+                                }
+                                setSubmitError('拆分未生效，请检查片段数据。')
+                              } catch (error) {
+                                setSubmitError(`拆分失败: ${error instanceof Error ? error.message : '未知错误'}`)
+                              } finally {
+                                setIsSplitting(false)
+                              }
+                            }}
+                            type="button"
+                          >
+                            {isSplitting ? '拆分中...' : '确认拆分'}
+                          </button>
+                        </div>
+                      ) : null}
                     </div>
                   </article>
                 )
