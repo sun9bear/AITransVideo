@@ -20,9 +20,13 @@ from auth import (
     register_handler,
     require_auth,
 )
+import logging
+from sqlalchemy import select
 from config import settings
-from database import engine
-from models import Base, User
+from database import async_session, engine
+from models import Base, Job, Session as SessionModel, User
+
+logger = logging.getLogger(__name__)
 from job_intercept import (
     intercept_create_job,
     intercept_delete_job,
@@ -61,6 +65,63 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# --- Middleware: auto-reconcile job records on every /job-api/ request ---
+
+@app.middleware("http")
+async def reconcile_job_middleware(request: Request, call_next):
+    """After proxying /job-api/jobs/{id}, check if job exists in PostgreSQL.
+
+    If not, auto-insert for the current user. This middleware runs AFTER
+    the response is generated, so it doesn't block the user.
+    Works regardless of which route handler processed the request.
+    """
+    response = await call_next(request)
+
+    # Only reconcile on successful GET /job-api/jobs/{job_id} requests
+    path = request.url.path
+    if (
+        request.method == "GET"
+        and path.startswith("/job-api/jobs/job_")
+        and response.status_code == 200
+        and settings.auth_required
+    ):
+        import re as _re
+        match = _re.match(r"^/job-api/jobs/(job_[a-f0-9]+)(?:/|$)", path)
+        if match:
+            job_id = match.group(1)
+            try:
+                session_id = request.cookies.get("session_id", "")
+                if session_id:
+                    async with async_session() as db:
+                        # Find user from session
+                        result = await db.execute(
+                            select(SessionModel).where(SessionModel.session_id == session_id)
+                        )
+                        sess = result.scalar_one_or_none()
+                        if sess is not None:
+                            # Check if job already in DB
+                            existing = await db.execute(
+                                select(Job).where(Job.job_id == job_id)
+                            )
+                            if existing.scalar_one_or_none() is None:
+                                job = Job(
+                                    job_id=job_id,
+                                    user_id=sess.user_id,
+                                    source_type="youtube_url",
+                                    source_ref="",
+                                    title="",
+                                    speakers="auto",
+                                    status="running",
+                                )
+                                db.add(job)
+                                await db.commit()
+                                logger.info("Middleware reconciled job %s for user %s", job_id, sess.user_id)
+            except Exception:
+                pass  # Never block user request due to reconciliation failure
+
+    return response
 
 
 # --- Health check ---
