@@ -11,6 +11,8 @@ from urllib import error, request
 from pydub import AudioSegment
 
 from services.gemini.translator import DubbingSegment
+from utils.atomic_io import atomic_write_bytes, is_valid_output
+from services.tts.rate_limiter import RateLimiter
 
 try:
     import requests
@@ -81,7 +83,29 @@ class TTSGenerator:
 
         results: list[TTSResult] = []
         total_segments = len(segments)
+        rate_limiter = RateLimiter(rpm=20)
         for index, segment in enumerate(segments, start=1):
+            output_path = output_root / f"segment_{segment.segment_id:03d}_{segment.speaker_id}.wav"
+            if is_valid_output(str(output_path)):
+                print(f"[TTS] 跳过已完成段 {index}/{total_segments}")
+                duration_ms = len(AudioSegment.from_wav(output_path))
+                result = TTSResult(
+                    segment_id=segment.segment_id,
+                    audio_path=str(output_path.resolve(strict=False)),
+                    duration_ms=duration_ms,
+                    voice_id=segment.voice_id,
+                )
+                segment.tts_audio_path = result.audio_path
+                segment.actual_duration_ms = result.duration_ms
+                if segment.target_duration_ms > 0:
+                    segment.alignment_ratio = result.duration_ms / segment.target_duration_ms
+                else:
+                    segment.alignment_ratio = 0.0
+                results.append(result)
+                if total_segments > 0 and (index % 5 == 0 or index == total_segments):
+                    print(f"[S4] TTS进度：{index}/{total_segments} 段")
+                continue
+            rate_limiter.wait()
             result = self._generate_one(segment, str(output_root))
             segment.tts_audio_path = result.audio_path
             segment.actual_duration_ms = result.duration_ms
@@ -151,7 +175,7 @@ class TTSGenerator:
 
         output_path = output_root / f"segment_{segment.segment_id:03d}_{segment.speaker_id}.wav"
         try:
-            output_path.write_bytes(audio_bytes)
+            atomic_write_bytes(str(output_path), audio_bytes)
             duration_ms = len(AudioSegment.from_wav(output_path))
         except OSError as exc:
             raise TTSGenerationError(f"Failed to write or read TTS audio output: {output_path}") from exc
