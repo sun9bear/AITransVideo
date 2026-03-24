@@ -315,6 +315,13 @@ def _post_json(
     raise TTSGenerationError("MiniMax TTS request failed: unknown error")
 
 
+def choose_tts_strategy(total_segments: int, video_duration_min: float) -> str:
+    """根据视频参数选择 TTS 策略。"""
+    if video_duration_min <= 30 and total_segments <= 100:
+        return "sync"
+    return "async"
+
+
 def _build_tts_endpoint(base_url: str) -> str:
     normalized = base_url.rstrip("/")
     if normalized.endswith("/v1/t2a_v2"):
