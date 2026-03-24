@@ -285,7 +285,7 @@ def _build_transcription_config(
         return aai.TranscriptionConfig(**kwargs)
 
 
-_MAX_SINGLE_UTTERANCE_DURATION_MS = 30_000  # 30 seconds — split overlong utterances
+_MAX_SINGLE_UTTERANCE_DURATION_MS = 45_000  # 45 seconds — split overlong utterances
 _MERGE_MAX_DURATION_MS = 30_000  # merge sentences until 30s
 _MERGE_PAUSE_THRESHOLD_MS = 1_500  # split on pauses > 1.5s
 
@@ -376,12 +376,28 @@ def _try_llm_segmentation(raw_lines: list[TranscriptLine]) -> list[TranscriptLin
 
 
 def _build_lines_from_utterances_with_split(utterances: list[Any]) -> list[TranscriptLine]:
-    """Build transcript lines from utterances, splitting overlong ones mechanically.
+    """Build transcript lines from utterances, splitting overlong ones using word-level pauses.
 
     For multi-speaker videos: preserves speaker info from every utterance.
     If an individual utterance exceeds _MAX_SINGLE_UTTERANCE_DURATION_MS,
-    split it at sentence boundaries while keeping the original speaker label.
+    split it at the longest word-level pause (using word timestamps for accuracy).
     """
+    # Build a word-level index keyed by (speaker, start_ms) for pause-based splitting
+    word_index: dict[str, list[dict]] = {}  # speaker -> sorted words
+    for utt in utterances:
+        spk = _normalize_optional_text(getattr(utt, "speaker", None)) or "A"
+        words = list(getattr(utt, "words", []) or [])
+        if not words:
+            continue
+        if spk not in word_index:
+            word_index[spk] = []
+        for w in words:
+            word_index[spk].append({
+                "text": getattr(w, "text", "") or "",
+                "start": _coerce_int(getattr(w, "start", None), default=0),
+                "end": _coerce_int(getattr(w, "end", None), default=0),
+            })
+
     raw_lines = _build_lines_from_utterances(utterances)
     if not raw_lines:
         return raw_lines
@@ -400,11 +416,16 @@ def _build_lines_from_utterances_with_split(utterances: list[Any]) -> list[Trans
             ))
             continue
 
-        # Split overlong utterance at sentence boundaries
-        import re
-        sentences = re.split(r'(?<=[.!?])\s+', line.source_text)
-        if len(sentences) <= 1:
-            # Can't split further, keep as-is
+        # Find words belonging to this utterance (by time range)
+        spk_label = line.speaker_label or "A"
+        all_words = word_index.get(spk_label, [])
+        utt_words = [
+            w for w in all_words
+            if w["start"] >= line.start_ms - 100 and w["end"] <= line.end_ms + 100
+        ]
+
+        if len(utt_words) < 4:
+            # Not enough words to split meaningfully
             result.append(TranscriptLine(
                 index=len(result) + 1,
                 start_ms=line.start_ms,
@@ -415,50 +436,108 @@ def _build_lines_from_utterances_with_split(utterances: list[Any]) -> list[Trans
             ))
             continue
 
-        # Distribute time proportionally by character count
-        total_chars = sum(len(s) for s in sentences)
-        if total_chars == 0:
-            total_chars = 1
-        current_ms = line.start_ms
-        # Merge sentences into chunks of ~30s
-        chunk_texts: list[str] = []
-        chunk_start_ms = current_ms
-        chunk_chars = 0
-
-        for sent in sentences:
-            sent_duration_ms = int(duration_ms * len(sent) / total_chars)
-            chunk_texts.append(sent)
-            chunk_chars += len(sent)
-            chunk_end_ms = current_ms + sent_duration_ms
-            current_ms = chunk_end_ms
-
-            chunk_duration = chunk_end_ms - chunk_start_ms
-            if chunk_duration >= _MERGE_MAX_DURATION_MS:
-                result.append(TranscriptLine(
-                    index=len(result) + 1,
-                    start_ms=chunk_start_ms,
-                    end_ms=min(chunk_end_ms, line.end_ms),
-                    speaker_id=line.speaker_id,
-                    speaker_label=line.speaker_label,
-                    source_text=" ".join(chunk_texts),
-                ))
-                chunk_texts = []
-                chunk_start_ms = chunk_end_ms
-                chunk_chars = 0
-
-        # Flush remaining
-        if chunk_texts:
+        # Split using word-level pauses: find all gaps, split at longest pauses
+        # that result in chunks under _MERGE_MAX_DURATION_MS
+        chunks = _split_words_by_pause(utt_words, line, max_chunk_ms=_MERGE_MAX_DURATION_MS)
+        for chunk_start_ms, chunk_end_ms, chunk_text in chunks:
             result.append(TranscriptLine(
                 index=len(result) + 1,
                 start_ms=chunk_start_ms,
-                end_ms=line.end_ms,
+                end_ms=chunk_end_ms,
                 speaker_id=line.speaker_id,
                 speaker_label=line.speaker_label,
-                source_text=" ".join(chunk_texts),
+                source_text=chunk_text,
             ))
 
     print(f"[S1] 多说话人分段: {len(utterances)} utterances → {len(result)} lines（保留说话人标签）")
     return result
+
+
+def _split_words_by_pause(
+    words: list[dict],
+    line: "TranscriptLine",
+    max_chunk_ms: int = 30_000,
+) -> list[tuple[int, int, str]]:
+    """Split a sequence of words into chunks at the longest pauses.
+
+    Returns list of (start_ms, end_ms, text) tuples.
+    Prefers splitting at sentence-ending punctuation + long pause.
+    """
+    import re
+
+    if not words:
+        return [(line.start_ms, line.end_ms, line.source_text)]
+
+    # Build gaps between consecutive words
+    gaps: list[tuple[int, int, int]] = []  # (word_index, gap_ms, is_sentence_end)
+    for i in range(len(words) - 1):
+        gap_ms = max(0, words[i + 1]["start"] - words[i]["end"])
+        # Check if current word ends a sentence
+        is_sentence_end = 1 if re.search(r'[.!?]["\')]*$', words[i]["text"]) else 0
+        gaps.append((i, gap_ms, is_sentence_end))
+
+    # Sort gaps by priority: sentence-ending pauses first, then by gap length
+    sorted_gaps = sorted(gaps, key=lambda g: (g[2], g[1]), reverse=True)
+
+    # Greedily pick split points that create chunks under max_chunk_ms
+    split_indices: set[int] = set()
+    for word_idx, gap_ms, is_sent_end in sorted_gaps:
+        # Only split if it would help reduce a too-long chunk
+        split_indices.add(word_idx)
+        # Check if all resulting chunks are under max_chunk_ms
+        if _all_chunks_under_limit(words, split_indices, max_chunk_ms):
+            break
+        # If adding this split doesn't help yet, keep adding more
+
+    # If no good splits found, fall back to splitting at the single longest gap
+    if not _all_chunks_under_limit(words, split_indices, max_chunk_ms):
+        if sorted_gaps:
+            split_indices = {sorted_gaps[0][0]}
+
+    # Build chunks from split points
+    split_list = sorted(split_indices)
+    chunks: list[tuple[int, int, str]] = []
+    chunk_start = 0
+
+    for split_at in split_list:
+        chunk_words = words[chunk_start:split_at + 1]
+        if chunk_words:
+            text = " ".join(w["text"] for w in chunk_words)
+            start_ms = chunk_words[0]["start"]
+            end_ms = chunk_words[-1]["end"]
+            chunks.append((start_ms, end_ms, text))
+        chunk_start = split_at + 1
+
+    # Remaining words
+    if chunk_start < len(words):
+        chunk_words = words[chunk_start:]
+        text = " ".join(w["text"] for w in chunk_words)
+        start_ms = chunk_words[0]["start"]
+        end_ms = chunk_words[-1]["end"]
+        chunks.append((start_ms, end_ms, text))
+
+    return chunks if chunks else [(line.start_ms, line.end_ms, line.source_text)]
+
+
+def _all_chunks_under_limit(words: list[dict], split_indices: set[int], max_ms: int) -> bool:
+    """Check if splitting at given indices produces all chunks under max_ms."""
+    splits = sorted(split_indices)
+    prev = 0
+    for s in splits:
+        chunk = words[prev:s + 1]
+        if chunk:
+            dur = chunk[-1]["end"] - chunk[0]["start"]
+            if dur > max_ms:
+                return False
+        prev = s + 1
+    # Check last chunk
+    if prev < len(words):
+        chunk = words[prev:]
+        if chunk:
+            dur = chunk[-1]["end"] - chunk[0]["start"]
+            if dur > max_ms:
+                return False
+    return True
 
 
 def _utterances_well_segmented(utterances: list[Any]) -> bool:
