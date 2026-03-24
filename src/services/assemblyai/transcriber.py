@@ -293,10 +293,24 @@ _MERGE_PAUSE_THRESHOLD_MS = 1_500  # split on pauses > 1.5s
 def _build_transcript_lines(transcript: Any, *, speaker_labels: bool) -> list[TranscriptLine]:
     if speaker_labels:
         utterances = list(getattr(transcript, "utterances", []) or [])
-        if utterances and _utterances_well_segmented(utterances):
-            return _build_lines_from_utterances(utterances)
+        if utterances:
+            # 多说话人检测
+            speaker_ids = set()
+            for utt in utterances:
+                spk = _normalize_optional_text(getattr(utt, "speaker", None))
+                if spk:
+                    speaker_ids.add(spk)
+            is_multi_speaker = len(speaker_ids) > 1
 
-    # Utterances not usable — build sentence-level lines first.
+            if is_multi_speaker:
+                # 多说话人：始终使用 utterances 保留说话人信息
+                # 对超长 utterance 做机械拆分，但不丢弃 speaker 标签
+                return _build_lines_from_utterances_with_split(utterances)
+
+            if _utterances_well_segmented(utterances):
+                return _build_lines_from_utterances(utterances)
+
+    # 单说话人或无 utterances — build sentence-level lines first.
     words = list(getattr(transcript, "words", []) or [])
     sentences = list(getattr(transcript, "sentences", []) or [])
 
@@ -359,6 +373,92 @@ def _try_llm_segmentation(raw_lines: list[TranscriptLine]) -> list[TranscriptLin
         logging.getLogger(__name__).exception("LLM segmentation import/call failed")
 
     return None
+
+
+def _build_lines_from_utterances_with_split(utterances: list[Any]) -> list[TranscriptLine]:
+    """Build transcript lines from utterances, splitting overlong ones mechanically.
+
+    For multi-speaker videos: preserves speaker info from every utterance.
+    If an individual utterance exceeds _MAX_SINGLE_UTTERANCE_DURATION_MS,
+    split it at sentence boundaries while keeping the original speaker label.
+    """
+    raw_lines = _build_lines_from_utterances(utterances)
+    if not raw_lines:
+        return raw_lines
+
+    result: list[TranscriptLine] = []
+    for line in raw_lines:
+        duration_ms = line.end_ms - line.start_ms
+        if duration_ms <= _MAX_SINGLE_UTTERANCE_DURATION_MS:
+            result.append(TranscriptLine(
+                index=len(result) + 1,
+                start_ms=line.start_ms,
+                end_ms=line.end_ms,
+                speaker_id=line.speaker_id,
+                speaker_label=line.speaker_label,
+                source_text=line.source_text,
+            ))
+            continue
+
+        # Split overlong utterance at sentence boundaries
+        import re
+        sentences = re.split(r'(?<=[.!?])\s+', line.source_text)
+        if len(sentences) <= 1:
+            # Can't split further, keep as-is
+            result.append(TranscriptLine(
+                index=len(result) + 1,
+                start_ms=line.start_ms,
+                end_ms=line.end_ms,
+                speaker_id=line.speaker_id,
+                speaker_label=line.speaker_label,
+                source_text=line.source_text,
+            ))
+            continue
+
+        # Distribute time proportionally by character count
+        total_chars = sum(len(s) for s in sentences)
+        if total_chars == 0:
+            total_chars = 1
+        current_ms = line.start_ms
+        # Merge sentences into chunks of ~30s
+        chunk_texts: list[str] = []
+        chunk_start_ms = current_ms
+        chunk_chars = 0
+
+        for sent in sentences:
+            sent_duration_ms = int(duration_ms * len(sent) / total_chars)
+            chunk_texts.append(sent)
+            chunk_chars += len(sent)
+            chunk_end_ms = current_ms + sent_duration_ms
+            current_ms = chunk_end_ms
+
+            chunk_duration = chunk_end_ms - chunk_start_ms
+            if chunk_duration >= _MERGE_MAX_DURATION_MS:
+                result.append(TranscriptLine(
+                    index=len(result) + 1,
+                    start_ms=chunk_start_ms,
+                    end_ms=min(chunk_end_ms, line.end_ms),
+                    speaker_id=line.speaker_id,
+                    speaker_label=line.speaker_label,
+                    source_text=" ".join(chunk_texts),
+                ))
+                chunk_texts = []
+                chunk_start_ms = chunk_end_ms
+                chunk_chars = 0
+
+        # Flush remaining
+        if chunk_texts:
+            result.append(TranscriptLine(
+                index=len(result) + 1,
+                start_ms=chunk_start_ms,
+                end_ms=line.end_ms,
+                speaker_id=line.speaker_id,
+                speaker_label=line.speaker_label,
+                source_text=" ".join(chunk_texts),
+            ))
+
+    print(f"[S1] 多说话人分段: {len(utterances)} utterances → {len(result)} lines（保留说话人标签）")
+    return result
 
 
 def _utterances_well_segmented(utterances: list[Any]) -> bool:
