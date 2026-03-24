@@ -1359,37 +1359,30 @@ def _text_weight(text: str) -> int:
 
 
 def _build_groups(lines: list[TranscriptLine], *, max_segment_duration_ms: int) -> list[dict[str, object]]:
+    """Build translation groups from transcript lines.
+
+    Each transcript line becomes one translation group (1:1 mapping).
+    No merging — transcript stage already handles proper segmentation.
+    """
     if not lines:
         return []
 
-    normalized_max_duration_ms = max(1, int(max_segment_duration_ms))
-    speaker_groups = _split_lines_by_speaker_and_pause(
-        lines,
-        same_speaker_pause_split_ms=DEFAULT_SAME_SPEAKER_PAUSE_SPLIT_MS,
-    )
-
     groups: list[dict[str, object]] = []
-    segment_id = 1
-    for speaker_group in speaker_groups:
-        for chunk in _split_group_by_duration(
-            speaker_group,
-            max_segment_duration_ms=normalized_max_duration_ms,
-        ):
-            start_ms = chunk[0].start_ms
-            end_ms = chunk[-1].end_ms
-            target_duration_ms = max(0, end_ms - start_ms)
-            groups.append(
-                {
-                    "segment_id": segment_id,
-                    "speaker_id": chunk[0].speaker_id,
-                    "start_ms": start_ms,
-                    "end_ms": end_ms,
-                    "target_duration_ms": target_duration_ms,
-                    "target_duration_seconds": round(target_duration_ms / 1000, 1),
-                    "source_text": _merge_source_text(chunk),
-                }
-            )
-            segment_id += 1
+    for segment_id, line in enumerate(lines, start=1):
+        start_ms = line.start_ms
+        end_ms = line.end_ms
+        target_duration_ms = max(0, end_ms - start_ms)
+        groups.append(
+            {
+                "segment_id": segment_id,
+                "speaker_id": line.speaker_id,
+                "start_ms": start_ms,
+                "end_ms": end_ms,
+                "target_duration_ms": target_duration_ms,
+                "target_duration_seconds": round(target_duration_ms / 1000, 1),
+                "source_text": line.source_text,
+            }
+        )
     if not groups:
         return []
 
