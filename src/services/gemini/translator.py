@@ -519,35 +519,43 @@ class GeminiTranslator:
         if len(lines) == 0 or len(speaker_ids) <= 1:
             return lines
 
-        review_input = [
-            {
-                "index": line.index,
-                "speaker_id": line.speaker_id,
-                "start_ms": line.start_ms,
-                "end_ms": line.end_ms,
-                "text": line.source_text,
-            }
-            for line in lines
-        ]
-        prompt = self._build_review_prompt(review_input, speaker_names, video_title, youtube_url)
+        # 分批审核（每批最多 50 行，避免 prompt 过长导致 Gemini 忽略后面的内容）
+        REVIEW_BATCH_SIZE = 50
+        all_corrections: list[dict] = []
 
-        try:
-            response_text = self._call_task_with_fallback(
-                "s2_review",
-                prompt,
-                json_mode=True,
-                validator=self._validate_review_response,
-            )
-            corrections = self._parse_review_response(response_text, lines)
-        except Exception as exc:
-            print(f"[S2] Gemini审核失败，保留原始标注：{exc}")
-            return lines
+        for batch_start in range(0, len(lines), REVIEW_BATCH_SIZE):
+            batch = lines[batch_start:batch_start + REVIEW_BATCH_SIZE]
+            review_input = [
+                {
+                    "index": line.index,
+                    "speaker_id": line.speaker_id,
+                    "start_ms": line.start_ms,
+                    "end_ms": line.end_ms,
+                    "text": line.source_text[:300],  # 截断超长文本，减少 tokens
+                }
+                for line in batch
+            ]
+            prompt = self._build_review_prompt(review_input, speaker_names, video_title, youtube_url)
 
-        if not corrections:
+            try:
+                response_text = self._call_task_with_fallback(
+                    "s2_review",
+                    prompt,
+                    json_mode=True,
+                    validator=self._validate_review_response,
+                )
+                batch_corrections = self._parse_review_response(response_text, batch)
+                if batch_corrections:
+                    all_corrections.extend(batch_corrections)
+            except Exception as exc:
+                print(f"[S2] Gemini审核第 {batch_start//REVIEW_BATCH_SIZE + 1} 批失败：{exc}")
+                continue
+
+        if not all_corrections:
             return lines
 
         corrected_lines = list(lines)
-        for correction in corrections:
+        for correction in all_corrections:
             index = correction.get("index")
             new_speaker_id = correction.get("corrected_speaker_id", "")
             if not isinstance(index, int):
@@ -593,26 +601,30 @@ class GeminiTranslator:
         speaker_a_name = speaker_names.get("speaker_a", "Speaker A")
         speaker_b_name = speaker_names.get("speaker_b", "Speaker B")
         return (
-            "你是一位专业的访谈转录审核专家。以下是一段两人访谈的转录稿，由语音识别系统自动标注了说话人身份。\n\n"
+            "你是一位专业的访谈转录审核专家。以下是一段两人访谈的转录稿片段，由语音识别系统自动标注了说话人身份。\n\n"
             "视频信息：\n"
             f"- 标题：{video_title}\n"
             f"- 来源：{youtube_url}\n\n"
             "说话人信息：\n"
-            f"- Speaker A: {speaker_a_name}\n"
-            f"- Speaker B: {speaker_b_name}\n\n"
-            "请根据对话逻辑、上下文以及你对该视频、频道或说话人的了解，检查每句话的说话人标注是否正确。常见错误包括：\n"
-            '1. 短促回应（如"Yeah"、"Right"、"Mm-hmm"）可能被错误分配给提问者而非回答者\n'
-            "2. 对话轮次中，回答被错误标成了提问者的发言\n"
-            "3. 同一个人的连续发言被错误拆分给了两个人\n"
-            "4. 如果你了解这个节目或说话人，请利用这些知识判断谁更可能说出某句话\n\n"
+            f"- speaker_a: {speaker_a_name}\n"
+            f"- speaker_b: {speaker_b_name}\n\n"
+            "请仔细逐条检查每句话的说话人标注是否正确。常见错误包括：\n"
+            "1. 短促回应（如 Yeah, Right, Sure, Mm-hmm, Of course）经常被错误分配\n"
+            "2. 长段落中混合了两个人的话（旁白+提问，或回答+追问）\n"
+            "3. 回答被错误标成提问者，或反之\n"
+            "4. 同一人的连续发言被拆给两个人\n\n"
+            "判断技巧：\n"
+            "- 采访中主持人提问（短句，问号），嘉宾回答（长段，陈述句）\n"
+            "- 旁白介绍通常是主持人的声音\n"
+            "- 利用你对该节目或说话人的了解来判断\n\n"
             "输入转录稿：\n"
             f"{json.dumps(review_input, ensure_ascii=False, indent=2)}\n\n"
-            "请只输出需要纠正的条目，JSON数组格式：\n"
+            "请输出需要纠正的条目，JSON 数组格式：\n"
             "[\n"
-            '  {"index": 3, "corrected_speaker_id": "speaker_b", "reason": "这是对前一个问题的简短回应，应该是回答者"}\n'
+            '  {"index": 3, "corrected_speaker_id": "speaker_b", "reason": "简短回应，应属于回答者"}\n'
             "]\n\n"
-            "如果所有标注都正确，输出空数组：[]\n"
-            "只输出JSON数组，不要任何其他文字。"
+            "如果所有标注都正确，输出空数组 []\n"
+            "只输出 JSON 数组，不要其他文字。请务必仔细检查每一条。"
         )
 
     def _call_gemini_with_retry(
