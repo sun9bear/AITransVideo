@@ -1358,24 +1358,19 @@ def _text_weight(text: str) -> int:
     return max(1, alnum_weight or len(normalized_text))
 
 
-_MIN_STANDALONE_SEGMENT_MS = 5_000  # 段落 <5 秒才允许合并到相邻同 speaker 段
-
-
 def _build_groups(lines: list[TranscriptLine], *, max_segment_duration_ms: int) -> list[dict[str, object]]:
     """Build translation groups from transcript lines.
 
-    Mostly 1:1 mapping. Only merges very short segments (<5s) with adjacent
-    same-speaker segments to provide translation context. Normal segments
-    (≥5s) are never merged — transcript stage already handles segmentation.
+    1:1 mapping — each transcript line becomes one translation group.
+    No merging. Transcript stage (5-layer split) already handles segmentation.
+    AssemblyAI utterances are already "one person's continuous speech",
+    so even short segments like "Yeah, sure." are complete utterances.
     """
     if not lines:
         return []
 
-    # Light merge: only combine very short same-speaker segments
-    merged_lines = _light_merge_short_segments(lines)
-
     groups: list[dict[str, object]] = []
-    for segment_id, line in enumerate(merged_lines, start=1):
+    for segment_id, line in enumerate(lines, start=1):
         start_ms = line.start_ms
         end_ms = line.end_ms
         target_duration_ms = max(0, end_ms - start_ms)
