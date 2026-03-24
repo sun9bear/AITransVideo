@@ -110,14 +110,14 @@ export function SpeakerReviewPanel({ jobId, onAdvanced }: SpeakerReviewPanelProp
 
       {/* Speaker name editing */}
       <section className="surface-card p-5">
-        <h3 className="text-lg font-semibold text-white/90 mb-4">说话人名称</h3>
+        <h3 className="text-lg font-semibold text-foreground mb-4">说话人名称</h3>
         <div className="flex flex-wrap gap-4">
           {resource.speakerOptions.map((option) => (
             <label key={option.id} className="flex items-center gap-2">
-              <span className="text-sm font-medium text-white/50">{option.id}</span>
-              <div className="group rounded-xl border border-white/8 bg-white/5 transition hover:border-primary/30 focus-within:border-primary/40">
+              <span className="text-sm font-medium text-muted-foreground">{option.id}</span>
+              <div className="group rounded-xl border border-border bg-muted/30 transition hover:border-primary/30 focus-within:border-primary/40">
                 <input
-                  className="w-48 rounded-xl bg-transparent px-3 py-2 text-sm text-white/90 focus:outline-none"
+                  className="w-48 rounded-xl bg-transparent px-3 py-2 text-sm text-foreground focus:outline-none"
                   onChange={(e) => setSpeakerNames((c) => ({ ...c, [option.id]: e.currentTarget.value }))}
                   value={speakerNames[option.id] ?? option.displayName}
                 />
@@ -139,10 +139,10 @@ export function SpeakerReviewPanel({ jobId, onAdvanced }: SpeakerReviewPanelProp
       {/* Segment list */}
       <div className="space-y-4">
         {visibleItems.map((item) => (
-          <article key={item.segmentId} className="rounded-2xl border border-white/10 bg-white/[0.03] p-5">
+          <article key={item.segmentId} className="rounded-2xl border border-border bg-card p-5">
             {/* Header */}
             <div className="flex flex-wrap items-center gap-3">
-              <p className="text-xs font-semibold uppercase tracking-wider text-white/40">片段 {item.segmentId}</p>
+              <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">片段 {item.segmentId}</p>
               <button
                 className="ml-auto rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-3 py-1 text-xs font-medium text-cyan-400 transition hover:bg-cyan-500/20 hover:border-cyan-500/50"
                 onClick={() => {
@@ -166,15 +166,15 @@ export function SpeakerReviewPanel({ jobId, onAdvanced }: SpeakerReviewPanelProp
             </div>
 
             {/* Source text */}
-            <div className="mt-3 rounded-xl border border-white/8 bg-white/5 px-4 py-3 text-sm leading-6 text-white/70">
+            <div className="mt-3 rounded-xl border border-border bg-muted/30 px-4 py-3 text-sm leading-6 text-foreground/70">
               {item.sourceText || '-'}
             </div>
 
             {/* Speaker select */}
             <div className="mt-3 flex items-center gap-3">
-              <span className="text-xs font-medium text-white/40">说话人</span>
+              <span className="text-xs font-medium text-muted-foreground">说话人</span>
               <select
-                className="form-input border border-primary/30 bg-primary/5 text-sm font-medium text-white/90"
+                className="form-input border border-primary/30 bg-primary/5 text-sm font-medium text-foreground"
                 onChange={(event) => {
                   const nextSpeakerId = event.currentTarget.value
                   const currentSpeakerId = segmentSpeakers[item.segmentId] ?? item.speakerId
@@ -213,18 +213,18 @@ export function SpeakerReviewPanel({ jobId, onAdvanced }: SpeakerReviewPanelProp
             {/* Split panel */}
             {splittingSegmentId === item.segmentId ? (
               <div className="mt-3 rounded-xl border-2 border-amber-500/20 bg-amber-500/5 p-4 space-y-4">
-                <p className="text-sm font-semibold text-white/90">拆分片段 {item.segmentId}</p>
+                <p className="text-sm font-semibold text-foreground">拆分片段 {item.segmentId}</p>
                 <div className="space-y-2">
-                  <p className="text-xs font-medium text-white/50">原文拆分位置（{splitSourcePos}）</p>
+                  <p className="text-xs font-medium text-muted-foreground">原文拆分位置（{splitSourcePos}）</p>
                   <input className="w-full" max={(item.sourceText || '').length} min={1} onChange={(e) => setSplitSourcePos(Number(e.currentTarget.value))} type="range" value={splitSourcePos} />
                   <div className="grid grid-cols-2 gap-2 text-xs">
-                    <div className="rounded-lg bg-white/5 p-2 border border-white/10"><p className="font-semibold text-white/50 mb-1">A</p><p className="text-white/70">{(item.sourceText || '').slice(0, splitSourcePos)}</p></div>
-                    <div className="rounded-lg bg-white/5 p-2 border border-white/10"><p className="font-semibold text-white/50 mb-1">B</p><p className="text-white/70">{(item.sourceText || '').slice(splitSourcePos)}</p></div>
+                    <div className="rounded-lg bg-muted/30 p-2 border border-border"><p className="font-semibold text-muted-foreground mb-1">A</p><p className="text-foreground/70">{(item.sourceText || '').slice(0, splitSourcePos)}</p></div>
+                    <div className="rounded-lg bg-muted/30 p-2 border border-border"><p className="font-semibold text-muted-foreground mb-1">B</p><p className="text-foreground/70">{(item.sourceText || '').slice(splitSourcePos)}</p></div>
                   </div>
                 </div>
                 <div className="grid grid-cols-2 gap-3">
-                  <label className="space-y-1"><span className="text-xs font-medium text-white/50">A 发言人</span><select className="form-input text-sm" onChange={(e) => setSplitSpeakerA(e.currentTarget.value)} value={splitSpeakerA}>{resource.speakerOptions.map((o) => <option key={o.id} value={o.id}>{speakerNames[o.id] ?? o.displayName}</option>)}</select></label>
-                  <label className="space-y-1"><span className="text-xs font-medium text-white/50">B 发言人</span><select className="form-input text-sm" onChange={(e) => setSplitSpeakerB(e.currentTarget.value)} value={splitSpeakerB}>{resource.speakerOptions.map((o) => <option key={o.id} value={o.id}>{speakerNames[o.id] ?? o.displayName}</option>)}</select></label>
+                  <label className="space-y-1"><span className="text-xs font-medium text-muted-foreground">A 发言人</span><select className="form-input text-sm" onChange={(e) => setSplitSpeakerA(e.currentTarget.value)} value={splitSpeakerA}>{resource.speakerOptions.map((o) => <option key={o.id} value={o.id}>{speakerNames[o.id] ?? o.displayName}</option>)}</select></label>
+                  <label className="space-y-1"><span className="text-xs font-medium text-muted-foreground">B 发言人</span><select className="form-input text-sm" onChange={(e) => setSplitSpeakerB(e.currentTarget.value)} value={splitSpeakerB}>{resource.speakerOptions.map((o) => <option key={o.id} value={o.id}>{speakerNames[o.id] ?? o.displayName}</option>)}</select></label>
                 </div>
                 <button className="inline-flex rounded-lg bg-primary/80 px-4 py-2 text-sm font-semibold text-white transition hover:bg-primary disabled:opacity-50" disabled={isSplitting} onClick={async () => {
                   setIsSplitting(true)
@@ -291,8 +291,8 @@ function Pagination({
         </select>
       </label>
       <div className="flex gap-2">
-        <button className="rounded-lg border border-white/10 bg-white/5 px-4 py-2 text-xs text-white/60 transition hover:bg-white/10 disabled:opacity-30" disabled={currentPage <= 1} onClick={() => { onPageChange(Math.max(1, currentPage - 1)); window.scrollTo({ top: 0, behavior: 'smooth' }) }} type="button">上一页</button>
-        <button className="rounded-lg border border-white/10 bg-white/5 px-4 py-2 text-xs text-white/60 transition hover:bg-white/10 disabled:opacity-30" disabled={currentPage >= totalPages} onClick={() => { onPageChange(Math.min(totalPages, currentPage + 1)); window.scrollTo({ top: 0, behavior: 'smooth' }) }} type="button">下一页</button>
+        <button className="rounded-lg border border-border bg-muted/30 px-4 py-2 text-xs text-muted-foreground transition hover:bg-muted/50 disabled:opacity-30" disabled={currentPage <= 1} onClick={() => { onPageChange(Math.max(1, currentPage - 1)); window.scrollTo({ top: 0, behavior: 'smooth' }) }} type="button">上一页</button>
+        <button className="rounded-lg border border-border bg-muted/30 px-4 py-2 text-xs text-muted-foreground transition hover:bg-muted/50 disabled:opacity-30" disabled={currentPage >= totalPages} onClick={() => { onPageChange(Math.min(totalPages, currentPage + 1)); window.scrollTo({ top: 0, behavior: 'smooth' }) }} type="button">下一页</button>
       </div>
     </div>
   )

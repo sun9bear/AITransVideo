@@ -24,9 +24,10 @@ interface SpeakerVoiceState {
 interface VoiceReviewPanelProps {
   jobId: string
   onAdvanced: () => void
+  onLoadError?: () => void
 }
 
-export function VoiceReviewPanel({ jobId, onAdvanced }: VoiceReviewPanelProps) {
+export function VoiceReviewPanel({ jobId, onAdvanced, onLoadError }: VoiceReviewPanelProps) {
   const [resource, setResource] = useState<VoiceReviewResource | null>(null)
   const [speakerStates, setSpeakerStates] = useState<Record<string, SpeakerVoiceState>>({})
   const [allVoices, setAllVoices] = useState<VoiceLibraryEntry[]>([])
@@ -55,13 +56,16 @@ export function VoiceReviewPanel({ jobId, onAdvanced }: VoiceReviewPanelProps) {
         setSpeakerStates(states)
         setPageError(null)
       } catch (error) {
-        if (!cancelled) setPageError(getErrorMessage(error))
+        if (!cancelled) {
+          setPageError(getErrorMessage(error))
+        }
       } finally {
         if (!cancelled) setIsLoading(false)
       }
     }
     void load()
     return () => { cancelled = true }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- onLoadError is stable from parent
   }, [jobId])
 
   const updateSpeakerState = useCallback((speakerId: string, update: Partial<SpeakerVoiceState>) => {
@@ -149,12 +153,12 @@ export function VoiceReviewPanel({ jobId, onAdvanced }: VoiceReviewPanelProps) {
           const hasVoice = Boolean(state.voiceId)
 
           return (
-            <article key={speaker.speakerId} className="rounded-2xl border border-white/10 bg-white/[0.03] p-5 space-y-4">
+            <article key={speaker.speakerId} className="rounded-2xl border border-border bg-card p-5 space-y-4">
               {/* Header */}
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
-                  <p className="text-xs font-semibold uppercase tracking-wider text-white/40">{speaker.speakerLabel || speaker.speakerId}</p>
-                  <h3 className="text-lg font-semibold text-white/90">{speaker.speakerName}</h3>
+                  <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{speaker.speakerLabel || speaker.speakerId}</p>
+                  <h3 className="text-lg font-semibold text-foreground">{speaker.speakerName}</h3>
                 </div>
                 <span className={`rounded-full px-3 py-1 text-xs font-semibold ${hasVoice ? 'bg-emerald-500/15 text-emerald-400' : 'bg-amber-500/15 text-amber-400'}`}>
                   {hasVoice ? '已配置' : '待配置'}
@@ -166,11 +170,11 @@ export function VoiceReviewPanel({ jobId, onAdvanced }: VoiceReviewPanelProps) {
                 <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-4">
                   <div className="flex items-center justify-between gap-3">
                     <div>
-                      <p className="text-xs text-white/40">当前选择</p>
-                      <p className="text-sm font-semibold text-white/90">
+                      <p className="text-xs text-muted-foreground">当前选择</p>
+                      <p className="text-sm font-semibold text-foreground">
                         {allVoices.find(v => v.voiceId === state.voiceId)?.label || allVoices.find(v => v.voiceId === state.voiceId)?.speakerName || state.voiceId}
                       </p>
-                      <p className="text-xs font-mono text-white/30">{state.voiceId}</p>
+                      <p className="text-xs font-mono text-muted-foreground/60">{state.voiceId}</p>
                     </div>
                     <button
                       className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-4 py-2 text-xs font-medium text-cyan-400 transition hover:bg-cyan-500/20 disabled:opacity-50"
@@ -188,12 +192,12 @@ export function VoiceReviewPanel({ jobId, onAdvanced }: VoiceReviewPanelProps) {
               {/* Three ways */}
               <div className="space-y-3">
                 {/* Way 1: Library */}
-                <div className="rounded-xl border border-white/8 bg-white/5 p-4 space-y-2">
-                  <p className="text-xs font-medium text-white/50">方式一：从音色库选择</p>
+                <div className="rounded-xl border border-border bg-muted/30 p-4 space-y-2">
+                  <p className="text-xs font-medium text-muted-foreground">方式一：从音色库选择</p>
                   {allVoices.length > 0 ? (
                     <div className="flex gap-2">
-                      <div className="group flex-1 rounded-lg border border-white/8 bg-white/5 transition hover:border-primary/30 focus-within:border-primary/40">
-                        <select className="w-full rounded-lg bg-transparent px-3 py-2 text-sm text-white/90 focus:outline-none" onChange={(e) => { if (e.currentTarget.value) updateSpeakerState(speaker.speakerId, { voiceId: e.currentTarget.value }) }} value={state.voiceId}>
+                      <div className="group flex-1 rounded-lg border border-border bg-muted/30 transition hover:border-primary/30 focus-within:border-primary/40">
+                        <select className="w-full rounded-lg bg-transparent px-3 py-2 text-sm text-foreground focus:outline-none" onChange={(e) => { if (e.currentTarget.value) updateSpeakerState(speaker.speakerId, { voiceId: e.currentTarget.value }) }} value={state.voiceId}>
                           <option value="">— 请选择 —</option>
                           {allVoices.map((v) => <option key={v.voiceId} value={v.voiceId}>{v.speakerName ? `${v.speakerName} - ` : ''}{v.label || v.voiceId}</option>)}
                         </select>
@@ -203,14 +207,14 @@ export function VoiceReviewPanel({ jobId, onAdvanced }: VoiceReviewPanelProps) {
                       </button>
                     </div>
                   ) : (
-                    <p className="text-xs text-white/30">音色库中暂无已有音色</p>
+                    <p className="text-xs text-muted-foreground/60">音色库中暂无已有音色</p>
                   )}
                 </div>
 
                 {/* Way 2: Clone */}
-                <div className="rounded-xl border border-white/8 bg-white/5 p-4 space-y-2">
-                  <p className="text-xs font-medium text-white/50">方式二：克隆音色（每次 ¥9.9）</p>
-                  <p className="text-xs text-white/30">从视频中自动提取发言人音频样本并克隆</p>
+                <div className="rounded-xl border border-border bg-muted/30 p-4 space-y-2">
+                  <p className="text-xs font-medium text-muted-foreground">方式二：克隆音色（每次 ¥9.9）</p>
+                  <p className="text-xs text-muted-foreground/60">从视频中自动提取发言人音频样本并克隆</p>
                   <button
                     className="inline-flex rounded-lg bg-primary/80 px-4 py-2 text-sm font-semibold text-white transition hover:bg-primary disabled:opacity-50"
                     disabled={state.isCloning}
@@ -223,13 +227,13 @@ export function VoiceReviewPanel({ jobId, onAdvanced }: VoiceReviewPanelProps) {
                 </div>
 
                 {/* Way 3: Manual */}
-                <div className="rounded-xl border border-white/8 bg-white/5 p-4 space-y-2">
-                  <p className="text-xs font-medium text-white/50">方式三：手动输入 Voice ID</p>
+                <div className="rounded-xl border border-border bg-muted/30 p-4 space-y-2">
+                  <p className="text-xs font-medium text-muted-foreground">方式三：手动输入 Voice ID</p>
                   <div className="flex gap-2">
-                    <div className="group flex-1 rounded-lg border border-white/8 bg-white/5 transition hover:border-primary/30 focus-within:border-primary/40">
-                      <input className="w-full rounded-lg bg-transparent px-3 py-2 text-sm text-white/90 placeholder:text-white/30 focus:outline-none" onChange={(e) => updateSpeakerState(speaker.speakerId, { manualVoiceId: e.currentTarget.value })} placeholder="vt_speaker_xxx" value={state.manualVoiceId} />
+                    <div className="group flex-1 rounded-lg border border-border bg-muted/30 transition hover:border-primary/30 focus-within:border-primary/40">
+                      <input className="w-full rounded-lg bg-transparent px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none" onChange={(e) => updateSpeakerState(speaker.speakerId, { manualVoiceId: e.currentTarget.value })} placeholder="vt_speaker_xxx" value={state.manualVoiceId} />
                     </div>
-                    <button className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs text-white/60 transition hover:bg-white/10 disabled:opacity-30" disabled={!state.manualVoiceId.trim()} onClick={() => { const vid = state.manualVoiceId.trim(); if (vid) updateSpeakerState(speaker.speakerId, { voiceId: vid }) }} type="button">应用</button>
+                    <button className="rounded-lg border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground transition hover:bg-muted/50 disabled:opacity-30" disabled={!state.manualVoiceId.trim()} onClick={() => { const vid = state.manualVoiceId.trim(); if (vid) updateSpeakerState(speaker.speakerId, { voiceId: vid }) }} type="button">应用</button>
                     <button className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-3 py-2 text-xs font-medium text-cyan-400 transition hover:bg-cyan-500/20 disabled:opacity-50" disabled={!state.manualVoiceId.trim() || state.isPreviewing} onClick={() => { const vid = state.manualVoiceId.trim(); if (vid) void handlePreview(speaker.speakerId, vid) }} type="button">试听</button>
                   </div>
                 </div>

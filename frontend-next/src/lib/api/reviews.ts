@@ -251,6 +251,35 @@ export async function cancelCurrentJob(): Promise<{ success: boolean }> {
   return { success: result.success ?? true }
 }
 
+export async function deleteJob(jobId: string): Promise<{ success: boolean }> {
+  // Call gateway's /api/job/delete directly (not via webUiApiClient)
+  // so the gateway can also clean up PostgreSQL records
+  const resp = await fetch('/api/job/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ job_id: jobId }),
+  })
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({ detail: '删除失败' }))
+    throw new Error(err.detail || '删除失败')
+  }
+  return { success: true }
+}
+
+export async function getWebUiActiveStage(): Promise<string | null> {
+  try {
+    const payload = await webUiApiClient.get<ApiWebUiStateResponse>('/api/state')
+    const activeStage = payload.results?.review_flow?.active_stage
+    if (typeof activeStage === 'string' && activeStage) return activeStage
+    const gateStage = payload.job?.review_gate?.stage
+    if (typeof gateStage === 'string' && gateStage) return gateStage
+    return null
+  } catch {
+    return null
+  }
+}
+
 export function buildLegacyReviewFallbackUrl() {
   return buildBackendUrl(resolveWebUiBaseUrl(), '/')
 }

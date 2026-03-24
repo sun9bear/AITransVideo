@@ -89,6 +89,7 @@ export const DOWNLOADABLE_ARTIFACT_KEYS = [
   'translation.segments',
   'editor.subtitles',
   'editor.dubbed_audio_complete',
+  'editor.tts_segments_zip',
   'publish.dubbed_video',
 ] as const
 

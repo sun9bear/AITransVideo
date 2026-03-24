@@ -98,10 +98,10 @@ export function TranslationConfigPanel({ jobId, onAdvanced }: TranslationConfigP
         <div className="space-y-5">
           {/* Model select */}
           <div>
-            <span className="text-xs font-medium text-white/40 mb-2 block">翻译模型</span>
-            <div className="group rounded-xl border border-white/8 bg-white/5 transition hover:border-primary/30 focus-within:border-primary/40">
+            <span className="text-xs font-medium text-muted-foreground mb-2 block">翻译模型</span>
+            <div className="group rounded-xl border border-border bg-muted/30 transition hover:border-primary/30 focus-within:border-primary/40">
               <select
-                className="w-full rounded-xl bg-transparent px-4 py-3 text-sm text-white/90 focus:outline-none"
+                className="w-full rounded-xl bg-transparent px-4 py-3 text-sm text-foreground focus:outline-none"
                 disabled={submitState === 'submitting'}
                 onChange={(e) => setSelectedModel(e.target.value)}
                 value={selectedModel}
@@ -118,16 +118,16 @@ export function TranslationConfigPanel({ jobId, onAdvanced }: TranslationConfigP
 
           {/* Prompt template */}
           <div>
-            <span className="text-xs font-medium text-white/40 mb-2 block">翻译提示词</span>
-            <div className="group rounded-xl border border-white/8 bg-white/5 transition hover:border-primary/30 focus-within:border-primary/40">
+            <span className="text-xs font-medium text-muted-foreground mb-2 block">翻译提示词</span>
+            <div className="group rounded-xl border border-border bg-muted/30 transition hover:border-primary/30 focus-within:border-primary/40">
               <textarea
-                className="w-full min-h-[300px] rounded-xl bg-transparent px-4 py-3 font-mono text-xs leading-relaxed text-white/90 placeholder:text-white/30 focus:outline-none"
+                className="w-full min-h-[300px] rounded-xl bg-transparent px-4 py-3 font-mono text-xs leading-relaxed text-foreground placeholder:text-muted-foreground/60 focus:outline-none"
                 disabled={submitState === 'submitting'}
                 onChange={(e) => setPromptTemplate(e.target.value)}
                 value={promptTemplate}
               />
             </div>
-            <p className="mt-2 text-xs text-white/30">
+            <p className="mt-2 text-xs text-muted-foreground/60">
               提示词中的 __GROUPS_JSON__ 等占位符会在翻译时自动替换，请勿删除。
             </p>
           </div>
@@ -136,20 +136,20 @@ export function TranslationConfigPanel({ jobId, onAdvanced }: TranslationConfigP
           <label className="flex items-center gap-3">
             <input
               checked={savePrompt}
-              className="h-4 w-4 rounded border-white/20 bg-white/5"
+              className="h-4 w-4 rounded border-white/20 bg-muted/30"
               disabled={submitState === 'submitting'}
               onChange={(e) => setSavePrompt(e.target.checked)}
               type="checkbox"
             />
-            <span className="text-sm text-white/50">保存提示词到配置（下次新任务自动使用）</span>
+            <span className="text-sm text-muted-foreground">保存提示词到配置（下次新任务自动使用）</span>
           </label>
         </div>
 
         {/* Sidebar */}
         <div>
-          <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-5">
-            <h3 className="text-lg font-semibold text-white/90">任务概览</h3>
-            <div className="mt-3 space-y-2 text-sm text-white/50">
+          <div className="rounded-2xl border border-border bg-card p-5">
+            <h3 className="text-lg font-semibold text-foreground">任务概览</h3>
+            <div className="mt-3 space-y-2 text-sm text-muted-foreground">
               <p>待翻译段落：{configData?.segmentCount ?? '-'} 段</p>
               <p>当前模型：{selectedModel || '-'}</p>
             </div>

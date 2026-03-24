@@ -80,13 +80,13 @@
   --chart-4: oklch(0.7 0.15 55);
   --chart-5: oklch(0.55 0.2 25);
   --radius: 0.625rem;
-  --sidebar: oklch(0.12 0.02 260);
-  --sidebar-foreground: oklch(0.9 0.01 260);
+  --sidebar: oklch(0.96 0.005 260);
+  --sidebar-foreground: oklch(0.25 0.02 260);
   --sidebar-primary: oklch(0.55 0.24 285);
   --sidebar-primary-foreground: oklch(0.98 0 0);
-  --sidebar-accent: oklch(0.18 0.02 260);
-  --sidebar-accent-foreground: oklch(0.9 0.01 260);
-  --sidebar-border: oklch(0.2 0.02 260);
+  --sidebar-accent: oklch(0.92 0.01 285);
+  --sidebar-accent-foreground: oklch(0.25 0.02 260);
+  --sidebar-border: oklch(0.88 0.005 260);
   --sidebar-ring: oklch(0.55 0.24 285);
 }
 
@@ -135,6 +135,49 @@
   html {
     @apply font-sans;
   }
+}
+
+/* ==========================================
+   Semantic utility classes for light/dark
+   Use these instead of hardcoded white/black
+   ========================================== */
+
+/* Card / panel surface */
+.surface-panel {
+  border-radius: var(--radius-2xl);
+  border: 1px solid var(--border);
+  background-color: var(--card);
+}
+
+/* Text hierarchy */
+.text-heading { color: var(--foreground); }
+.text-body { color: var(--foreground); opacity: 0.85; }
+.text-dim { color: var(--muted-foreground); }
+.text-faint { color: var(--muted-foreground); opacity: 0.6; }
+
+/* Interactive surfaces */
+.input-surface {
+  border-radius: var(--radius-xl);
+  border: 1px solid var(--border);
+  background-color: var(--input);
+  transition: border-color 0.15s;
+}
+.input-surface:hover { border-color: var(--primary); border-opacity: 0.3; }
+.input-surface:focus-within { border-color: var(--primary); border-opacity: 0.4; }
+
+/* Badge variants */
+.badge-status {
+  border-radius: 9999px;
+  padding: 0.25rem 0.75rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+/* Eyebrow label */
+.label-eyebrow {
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--muted-foreground);
 }
 
 /* Extended palette for direct use */

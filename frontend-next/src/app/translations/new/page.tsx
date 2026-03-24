@@ -1,17 +1,8 @@
 "use client"
 
 import { useEffect, useState, type FormEvent } from "react"
-import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { toast } from "sonner"
-
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Badge } from "@/components/ui/badge"
-import { Separator } from "@/components/ui/separator"
 
 import { StatusBadge } from "@/components/status-badge"
 import { getJobDisplayTitle, getStageLabel } from "@/features/jobs/presentation"
@@ -71,7 +62,6 @@ export default function NewTranslationPage() {
       toast.error(validationError)
       return
     }
-
     setSubmitState("submitting")
     try {
       const createdJob = await submitTranslationJob({
@@ -106,7 +96,7 @@ export default function NewTranslationPage() {
       {/* Header */}
       <div className="flex items-start justify-between">
         <div>
-          <h1 className="text-2xl font-bold font-heading">新建翻译</h1>
+          <h1 className="text-2xl font-bold font-heading text-foreground">新建翻译</h1>
           <p className="text-sm text-muted-foreground mt-1">
             填写视频来源与参数，创建翻译配音任务。
           </p>
@@ -116,19 +106,26 @@ export default function NewTranslationPage() {
 
       {/* Active job guard */}
       {activeJob ? (
-        <Card className="border-amber-500/20 bg-amber-500/5">
-          <CardContent className="pt-6">
-            <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-              <div className="space-y-1">
-                <p className="text-xs font-semibold text-amber-400">当前有未完成的任务</p>
-                <p className="font-semibold">请先完成或取消当前任务，再创建新的翻译。</p>
-                <p className="text-sm text-muted-foreground">
-                  {getJobDisplayTitle(activeJob)} · {getStageLabel(activeJob.currentStage)}
-                </p>
-              </div>
-              <div className="flex gap-2">
-                <Button onClick={() => router.push(`/workspace/${activeJob.id}`)}>去处理当前任务</Button>
-                <Button variant="outline" className="border-red-500/30 text-red-400 hover:bg-red-500/10" onClick={async () => {
+        <section className="rounded-2xl border border-amber-500/20 bg-amber-500/5 p-5">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div className="space-y-1">
+              <p className="text-xs font-semibold text-amber-400">当前有未完成的任务</p>
+              <p className="font-semibold text-foreground">请先完成或取消当前任务，再创建新的翻译。</p>
+              <p className="text-sm text-muted-foreground">
+                {getJobDisplayTitle(activeJob)} · {getStageLabel(activeJob.currentStage)}
+              </p>
+            </div>
+            <div className="flex gap-2">
+              <button
+                className="inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-primary to-primary/80 px-5 py-2 text-sm font-semibold text-white shadow-lg shadow-primary/25 transition hover:shadow-primary/40 hover:brightness-110"
+                onClick={() => router.push(`/workspace/${activeJob.id}`)}
+                type="button"
+              >
+                去处理当前任务
+              </button>
+              <button
+                className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-2 text-sm font-medium text-red-400 transition hover:bg-red-500/20"
+                onClick={async () => {
                   if (!window.confirm('确定要取消当前任务吗？')) return
                   try {
                     const { cancelCurrentJob } = await import('@/lib/api/reviews')
@@ -136,47 +133,46 @@ export default function NewTranslationPage() {
                     setActiveJob(null)
                     toast.success('任务已取消，现在可以创建新任务。')
                   } catch { toast.error('取消失败，请稍后重试。') }
-                }}>取消该任务</Button>
-              </div>
+                }}
+                type="button"
+              >
+                取消该任务
+              </button>
             </div>
-          </CardContent>
-        </Card>
+          </div>
+        </section>
       ) : null}
 
       <div className="grid gap-6 xl:grid-cols-[1fr_320px]">
         {/* Form */}
-        <Card>
-          <CardHeader>
-            <CardTitle>任务输入</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <form className="space-y-6" onSubmit={handleSubmit}>
-              {/* Source type toggle */}
-              <div className="flex gap-2">
-                <Button
-                  type="button"
-                  variant={sourceType === "youtube_url" ? "default" : "outline"}
-                  size="sm"
-                  onClick={() => setSourceType("youtube_url")}
-                >
-                  YouTube 链接
-                </Button>
-                <Button
-                  type="button"
-                  variant={sourceType === "local_file" ? "default" : "outline"}
-                  size="sm"
-                  onClick={() => setSourceType("local_file")}
-                >
-                  上传视频
-                </Button>
-              </div>
+        <section className="rounded-2xl border border-border bg-card p-6">
+          <h2 className="text-lg font-semibold text-foreground mb-5">任务输入</h2>
+          <form className="space-y-6" onSubmit={handleSubmit}>
+            {/* Source type toggle */}
+            <div className="flex gap-2">
+              <button
+                type="button"
+                className={`rounded-lg px-4 py-2 text-sm font-medium transition ${sourceType === "youtube_url" ? "bg-primary text-white" : "border border-border bg-muted/30 text-muted-foreground hover:bg-muted/50"}`}
+                onClick={() => setSourceType("youtube_url")}
+              >
+                YouTube 链接
+              </button>
+              <button
+                type="button"
+                className={`rounded-lg px-4 py-2 text-sm font-medium transition ${sourceType === "local_file" ? "bg-primary text-white" : "border border-border bg-muted/30 text-muted-foreground hover:bg-muted/50"}`}
+                onClick={() => setSourceType("local_file")}
+              >
+                上传视频
+              </button>
+            </div>
 
-              {/* YouTube URL input */}
-              {sourceType === "youtube_url" ? (
-                <div className="space-y-2">
-                  <Label htmlFor="youtube-url">YouTube 链接</Label>
-                  <Input
-                    id="youtube-url"
+            {/* YouTube URL input */}
+            {sourceType === "youtube_url" ? (
+              <div className="space-y-2">
+                <span className="text-xs font-medium text-muted-foreground block">YouTube 链接</span>
+                <div className="group rounded-xl border border-border bg-muted/30 transition hover:border-primary/30 focus-within:border-primary/40">
+                  <input
+                    className="w-full rounded-xl bg-transparent px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none"
                     type="url"
                     placeholder="https://www.youtube.com/watch?v=..."
                     value={youtubeUrl}
@@ -186,27 +182,29 @@ export default function NewTranslationPage() {
                     }}
                     disabled={isBlockedByActiveJob || submitState === "submitting"}
                   />
-                  {validationError ? (
-                    <p className="text-sm text-destructive">{validationError}</p>
-                  ) : null}
                 </div>
-              ) : (
-                <div className="space-y-2">
-                  <Label htmlFor="video-upload">选择视频文件</Label>
-                  {uploadedFilePath ? (
-                    <div className="flex items-center gap-3 rounded-lg border border-success/30 bg-success/10 px-4 py-3">
-                      <span className="text-sm font-medium text-success">{uploadFileName}</span>
-                      <button
-                        className="text-xs text-muted-foreground hover:text-destructive"
-                        onClick={() => { setUploadedFilePath(""); setUploadFileName("") }}
-                        type="button"
-                      >
-                        移除
-                      </button>
-                    </div>
-                  ) : (
-                    <Input
-                      id="video-upload"
+                {validationError && youtubeUrl ? (
+                  <p className="text-xs text-red-400">{validationError}</p>
+                ) : null}
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <span className="text-xs font-medium text-muted-foreground block">选择视频文件</span>
+                {uploadedFilePath ? (
+                  <div className="flex items-center gap-3 rounded-xl border border-emerald-500/20 bg-emerald-500/5 px-4 py-3">
+                    <span className="text-sm font-medium text-emerald-400">{uploadFileName}</span>
+                    <button
+                      className="text-xs text-muted-foreground hover:text-red-400 transition"
+                      onClick={() => { setUploadedFilePath(""); setUploadFileName("") }}
+                      type="button"
+                    >
+                      移除
+                    </button>
+                  </div>
+                ) : (
+                  <div className="group rounded-xl border border-border bg-muted/30 transition hover:border-primary/30 focus-within:border-primary/40">
+                    <input
+                      className="w-full rounded-xl bg-transparent px-4 py-3 text-sm text-foreground file:mr-3 file:rounded-lg file:border-0 file:bg-primary/20 file:px-3 file:py-1 file:text-xs file:font-medium file:text-primary focus:outline-none"
                       type="file"
                       accept="video/*"
                       disabled={isBlockedByActiveJob || submitState === "submitting" || isUploading}
@@ -237,65 +235,65 @@ export default function NewTranslationPage() {
                         }
                       }}
                     />
-                  )}
-                  {uploadProgress ? (
-                    <p className="text-sm text-muted-foreground">{uploadProgress}</p>
-                  ) : null}
-                </div>
-              )}
+                  </div>
+                )}
+                {uploadProgress ? (
+                  <p className="text-xs text-muted-foreground">{uploadProgress}</p>
+                ) : null}
+              </div>
+            )}
 
-              <Separator />
+            <div className="h-px bg-muted/40" />
 
-              {/* Options */}
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div className="space-y-2">
-                  <Label>转录方案</Label>
-                  <Select
+            {/* Options */}
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <span className="text-xs font-medium text-muted-foreground block">转录方案</span>
+                <div className="group rounded-xl border border-border bg-muted/30 transition hover:border-primary/30 focus-within:border-primary/40">
+                  <select
+                    className="w-full rounded-xl bg-transparent px-4 py-3 text-sm text-foreground focus:outline-none"
                     value={transcriptionMethod}
-                    onValueChange={(v) => setTranscriptionMethod(v as "assemblyai" | "gemini")}
+                    onChange={(e) => setTranscriptionMethod(e.target.value as "assemblyai" | "gemini")}
                     disabled={isBlockedByActiveJob || submitState === "submitting"}
                   >
-                    <SelectTrigger><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="assemblyai">AssemblyAI（音频上传）</SelectItem>
-                      <SelectItem value="gemini">Gemini 多模态（≤30分钟）</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-
-                <div className="space-y-2">
-                  <Label>说话人数</Label>
-                  <Select
-                    value={speakers}
-                    onValueChange={(v) => setSpeakers(v as "1" | "2" | "auto")}
-                    disabled={isBlockedByActiveJob || submitState === "submitting"}
-                  >
-                    <SelectTrigger><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="auto">自动</SelectItem>
-                      <SelectItem value="1">1 人</SelectItem>
-                      <SelectItem value="2">2 人</SelectItem>
-                    </SelectContent>
-                  </Select>
+                    <option value="assemblyai">AssemblyAI（音频上传）</option>
+                    <option value="gemini">Gemini 多模态（≤30分钟）</option>
+                  </select>
                 </div>
               </div>
 
-              {savedVoices.length > 0 ? (
-                <p className="text-sm text-muted-foreground">
-                  音色将在后续"音色确认"阶段配置，可选择已有音色或克隆新音色。
-                </p>
-              ) : null}
+              <div className="space-y-2">
+                <span className="text-xs font-medium text-muted-foreground block">说话人数</span>
+                <div className="group rounded-xl border border-border bg-muted/30 transition hover:border-primary/30 focus-within:border-primary/40">
+                  <select
+                    className="w-full rounded-xl bg-transparent px-4 py-3 text-sm text-foreground focus:outline-none"
+                    value={speakers}
+                    onChange={(e) => setSpeakers(e.target.value as "1" | "2" | "auto")}
+                    disabled={isBlockedByActiveJob || submitState === "submitting"}
+                  >
+                    <option value="auto">自动</option>
+                    <option value="1">1 人</option>
+                    <option value="2">2 人</option>
+                  </select>
+                </div>
+              </div>
+            </div>
 
-              <Button
-                type="submit"
-                disabled={Boolean(validationError) || isBlockedByActiveJob || submitState === "submitting" || isLoadingGuard}
-                className="w-full sm:w-auto bg-gradient-to-r from-violet-600 to-violet-500 hover:from-violet-500 hover:to-violet-400 text-white shadow-lg shadow-violet-500/25"
-              >
-                {submitState === "submitting" ? "创建中..." : "创建任务"}
-              </Button>
-            </form>
-          </CardContent>
-        </Card>
+            {savedVoices.length > 0 ? (
+              <p className="text-xs text-muted-foreground/60">
+                音色将在后续"音色确认"阶段配置，可选择已有音色或克隆新音色。
+              </p>
+            ) : null}
+
+            <button
+              type="submit"
+              disabled={Boolean(validationError) || isBlockedByActiveJob || submitState === "submitting" || isLoadingGuard}
+              className="inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-primary to-primary/80 px-6 py-2.5 text-sm font-semibold text-white shadow-lg shadow-primary/25 transition hover:shadow-primary/40 hover:brightness-110 disabled:opacity-50"
+            >
+              {submitState === "submitting" ? "创建中..." : "创建任务"}
+            </button>
+          </form>
+        </section>
 
         {/* Cost estimate */}
         <CostEstimatePanel transcriptionMethod={transcriptionMethod} />
@@ -307,12 +305,10 @@ export default function NewTranslationPage() {
 function CostEstimatePanel({ transcriptionMethod }: { transcriptionMethod: "assemblyai" | "gemini" }) {
   const estimates = [3, 10, 30]
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-base">费用预估</CardTitle>
-        <p className="text-xs text-muted-foreground">根据视频时长预估，仅供参考。</p>
-      </CardHeader>
-      <CardContent className="space-y-3">
+    <section className="rounded-2xl border border-border bg-card p-5 h-fit">
+      <h3 className="text-base font-semibold text-foreground">费用预估</h3>
+      <p className="text-xs text-muted-foreground/60 mt-1">根据视频时长预估，仅供参考。</p>
+      <div className="mt-4 space-y-3">
         {estimates.map((minutes) => {
           const result = estimateCosts({
             videoDurationMinutes: minutes,
@@ -321,27 +317,27 @@ function CostEstimatePanel({ transcriptionMethod }: { transcriptionMethod: "asse
             speakerCount: 1,
           })
           return (
-            <div key={minutes} className="rounded-lg border p-3 space-y-1 tabular-nums">
-              <p className="text-sm font-semibold">{minutes} 分钟视频</p>
+            <div key={minutes} className="rounded-xl border border-border bg-muted/30 p-3 space-y-1 tabular-nums">
+              <p className="text-sm font-semibold text-foreground/80">{minutes} 分钟视频</p>
               {result.stages.map((stage) => (
                 <div key={stage.stage} className="flex justify-between text-xs text-muted-foreground">
                   <span>{stage.label}（{stage.model}）</span>
                   <span>{formatCostCny(stage.estimatedCostCny)}</span>
                 </div>
               ))}
-              <Separator className="my-1" />
-              <div className="flex justify-between text-sm font-semibold">
+              <div className="h-px bg-muted/40 my-1" />
+              <div className="flex justify-between text-sm font-semibold text-foreground/80">
                 <span>预估总计</span>
                 <span>{formatCostCny(result.totalCny)}</span>
               </div>
             </div>
           )
         })}
-        <p className="text-xs text-muted-foreground">
+        <p className="text-xs text-muted-foreground/60">
           实际费用取决于视频内容和处理结果。已有音色可跳过克隆费用。
         </p>
-      </CardContent>
-    </Card>
+      </div>
+    </section>
   )
 }
 

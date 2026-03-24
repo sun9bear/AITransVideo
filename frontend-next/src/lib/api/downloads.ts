@@ -24,6 +24,16 @@ export function buildResultDownloadUrl(
     return null
   }
 
+  // TTS segments zip has its own endpoint
+  if (downloadKey === 'editor.tts_segments_zip') {
+    if (!jobId) return null
+    const ttsQuery = new URLSearchParams({ job_id: jobId })
+    return buildBackendUrl(
+      resolveWebUiBaseUrl(),
+      `/api/tts-segments-zip?${ttsQuery.toString()}`,
+    )
+  }
+
   const query = new URLSearchParams({ key: downloadKey })
 
   if (jobId) {

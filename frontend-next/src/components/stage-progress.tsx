@@ -4,7 +4,7 @@ const stateStyles = {
   complete: "bg-primary text-white",
   current: "bg-cyan-500 text-white ring-2 ring-cyan-500/30",
   error: "bg-red-500 text-white",
-  upcoming: "bg-white/10 text-white/40",
+  upcoming: "bg-white/10 text-muted-foreground",
 } as const
 
 const connectorStyles = {
@@ -15,10 +15,10 @@ const connectorStyles = {
 } as const
 
 const labelStyles = {
-  complete: "text-white/60",
+  complete: "text-muted-foreground",
   current: "text-cyan-400 font-semibold",
   error: "text-red-400 font-semibold",
-  upcoming: "text-white/30",
+  upcoming: "text-muted-foreground/60",
 } as const
 
 export function StageProgress({ items }: { items: readonly StageProgressItem[] }) {

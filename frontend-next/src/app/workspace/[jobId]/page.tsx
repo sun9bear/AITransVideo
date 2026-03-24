@@ -31,11 +31,12 @@ import {
   getProjectArtifacts,
   getProjectResultSummary,
 } from '@/lib/api/jobs'
-import { cancelCurrentJob } from '@/lib/api/reviews'
+import { cancelCurrentJob, getWebUiActiveStage } from '@/lib/api/reviews'
 import { usePollingTask } from '@/lib/react/usePollingTask'
 import {
   type JobLogEntry,
   type JobSummary,
+  type PublicStage,
   type ResultDownloadItem,
 } from '@/types/jobs'
 
@@ -50,19 +51,22 @@ export default function WorkspacePage() {
   const [isLoading, setIsLoading] = useState(true)
   const [pageError, setPageError] = useState<string | null>(null)
   const [isCancelling, setIsCancelling] = useState(false)
+  const [webUiStage, setWebUiStage] = useState<string | null>(null)
 
   const loadJob = async (silent = false) => {
     if (!jobId) return
     if (!silent) setIsLoading(true)
     try {
-      const [nextJob, nextLogs, nextDownloads] = await Promise.all([
+      const [nextJob, nextLogs, nextDownloads, activeStage] = await Promise.all([
         getJob(jobId),
         getJobLogs(jobId),
         getProjectArtifacts(jobId).catch(() => []),
+        getWebUiActiveStage(),
       ])
       setJob(nextJob)
       setLogs(nextLogs)
       setDownloads(nextDownloads)
+      if (activeStage) setWebUiStage(activeStage)
       setPageError(null)
     } catch (error) {
       setPageError(getErrorMessage(error))
@@ -103,7 +107,6 @@ export default function WorkspacePage() {
     return <EmptyState actionLabel="新建翻译" actionTo="/translations/new" description="找不到该任务。" title="任务不存在" />
   }
 
-  const stageItems = buildStageProgress(job.status, job.currentStage)
   const isWaitingForReview = job.status === 'waiting_for_review'
   const isProcessing = job.status === 'running' || job.status === 'queued'
   const isSucceeded = job.status === 'succeeded'
@@ -112,6 +115,12 @@ export default function WorkspacePage() {
   const secondaryLabel = getJobSecondaryLabel(job)
   const availableDownloadCount = downloads.filter((i) => i.available).length
 
+  // Use Web UI's active stage when available (more accurate than Job API's currentStage)
+  const effectiveReviewStage = webUiStage ?? job.currentStage
+  // Use effective stage for progress bar and labels
+  const effectiveStage = (isWaitingForReview && effectiveReviewStage) ? effectiveReviewStage as PublicStage : job.currentStage
+  const stageItems = buildStageProgress(job.status, effectiveStage)
+
   return (
     <div className="space-y-6">
       {/* ===== Fixed Header: Job Info ===== */}
@@ -119,12 +128,12 @@ export default function WorkspacePage() {
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div className="space-y-2 min-w-0">
             <p className="eyebrow">工作区</p>
-            <h1 className="text-2xl font-bold text-ink-950 dark:text-white/95 truncate">{displayTitle}</h1>
+            <h1 className="text-2xl font-bold text-ink-950 dark:text-foreground truncate">{displayTitle}</h1>
             <p className="text-sm text-muted-foreground">{secondaryLabel}</p>
           </div>
           <div className="flex items-center gap-3 shrink-0">
             <StatusBadge status={job.status} />
-            <Link className="rounded-lg border border-white/10 bg-white/5 px-4 py-2 text-xs text-white/60 transition hover:bg-white/10" href={`/projects/${jobId}`}>项目详情</Link>
+            <Link className="rounded-lg border border-border bg-muted/30 px-4 py-2 text-xs text-muted-foreground transition hover:bg-muted/50" href={`/projects/${jobId}`}>项目详情</Link>
             {(isWaitingForReview || isProcessing) ? (
               <button
                 className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-2 text-xs font-medium text-red-400 transition hover:bg-red-500/20 hover:border-red-500/50 disabled:opacity-50"
@@ -147,7 +156,7 @@ export default function WorkspacePage() {
         <div className="mt-3 text-sm text-muted-foreground">
           {isWaitingForReview ? (
             <span className="text-amber-600 dark:text-amber-400 font-medium">
-              当前需要处理：{getStageLabel(job.currentStage)}
+              当前需要处理：{getStageLabel(effectiveStage)}
             </span>
           ) : isProcessing ? (
             <span>{getUserFacingProgressMessage(job.progressMessage) ?? '任务正在处理中...'}</span>
@@ -165,8 +174,8 @@ export default function WorkspacePage() {
       {isProcessing ? (
         <section className="surface-card p-8 text-center">
           <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-3 border-primary border-t-transparent" />
-          <h3 className="text-lg font-semibold text-ink-950 dark:text-white/90">
-            正在处理 · {getStageLabel(job.currentStage)}
+          <h3 className="text-lg font-semibold text-ink-950 dark:text-foreground">
+            正在处理 · {getStageLabel(effectiveStage)}
           </h3>
           <p className="mt-2 text-sm text-muted-foreground">
             {getUserFacingProgressMessage(job.progressMessage) ?? '任务正在后台处理，页面会自动刷新...'}
@@ -174,20 +183,20 @@ export default function WorkspacePage() {
         </section>
       ) : null}
 
-      {/* Review panels */}
-      {isWaitingForReview && job.currentStage === 'speaker_review' ? (
+      {/* Review panels — use Web UI's active stage for accuracy */}
+      {isWaitingForReview && effectiveReviewStage === 'speaker_review' ? (
         <SpeakerReviewPanel jobId={jobId} onAdvanced={handleAdvanced} />
       ) : null}
 
-      {isWaitingForReview && job.currentStage === 'voice_review' ? (
+      {isWaitingForReview && effectiveReviewStage === 'voice_review' ? (
         <VoiceReviewPanel jobId={jobId} onAdvanced={handleAdvanced} />
       ) : null}
 
-      {isWaitingForReview && job.currentStage === 'translation_config_review' ? (
+      {isWaitingForReview && effectiveReviewStage === 'translation_config_review' ? (
         <TranslationConfigPanel jobId={jobId} onAdvanced={handleAdvanced} />
       ) : null}
 
-      {isWaitingForReview && job.currentStage === 'translation_review' ? (
+      {isWaitingForReview && effectiveReviewStage === 'translation_review' ? (
         <TranslationReviewPanel jobId={jobId} onAdvanced={handleAdvanced} />
       ) : null}
 
@@ -201,7 +210,7 @@ export default function WorkspacePage() {
             {getErrorSummaryMessage(job.errorSummary)}
           </p>
           <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-3 dark:border-amber-500/20 dark:bg-amber-500/5">
-            <p className="text-sm font-medium text-ink-950 dark:text-white/80">建议</p>
+            <p className="text-sm font-medium text-ink-950 dark:text-foreground/80">建议</p>
             <p className="text-sm text-muted-foreground">{getErrorCategory(job.errorSummary).suggestion}</p>
           </div>
           <div className="mt-4 flex gap-2">

@@ -23,6 +23,7 @@ import {
 const downloadLabels = {
   'editor.dubbed_audio_complete': '完整配音音频',
   'editor.subtitles': '字幕文件',
+  'editor.tts_segments_zip': '分段配音音频（ZIP）',
   'manifest.file': '项目清单（JSON）',
   'publish.dubbed_video': '成品视频',
   'translation.segments': '翻译分段（JSON）',
@@ -36,6 +37,10 @@ const downloadDescriptions = {
   'editor.subtitles': {
     available: '适合单独查看或继续编辑字幕。',
     unavailable: '字幕文件还没有生成。',
+  },
+  'editor.tts_segments_zip': {
+    available: '每段配音的独立音频文件，打包下载。',
+    unavailable: '分段配音音频还没有生成。',
   },
   'manifest.file': {
     available: '用于查看当前项目清单。',
@@ -54,6 +59,7 @@ const downloadDescriptions = {
 const downloadDisplayOrder = [
   'publish.dubbed_video',
   'editor.dubbed_audio_complete',
+  'editor.tts_segments_zip',
   'editor.subtitles',
   'translation.segments',
   'manifest.file',
@@ -133,7 +139,7 @@ export function toResultDownloadItems(payload: ApiJobArtifactsResponse): ResultD
       } => Boolean(artifact),
     )
 
-  return orderedArtifacts.map((artifact) => ({
+  const items = orderedArtifacts.map((artifact) => ({
     available: artifact.exists,
     description: artifact.exists
       ? downloadDescriptions[artifact.key].available
@@ -148,6 +154,34 @@ export function toResultDownloadItems(payload: ApiJobArtifactsResponse): ResultD
     key: artifact.key,
     label: downloadLabels[artifact.key],
   }))
+
+  // Add TTS segments zip entry (virtual — not in backend artifacts, on-demand zip)
+  const hasDubbedAudio = filteredArtifacts.some(
+    (a) => a.key === 'editor.dubbed_audio_complete' && a.exists,
+  )
+  if (hasDubbedAudio && payload.job_id) {
+    const ttsKey = 'editor.tts_segments_zip' as const
+    const ttsItem = {
+      available: true,
+      description: downloadDescriptions[ttsKey].available,
+      downloadUrl: buildResultDownloadUrl({
+        downloadKey: ttsKey,
+        jobId: payload.job_id,
+        projectDir: payload.project_dir,
+      }),
+      key: ttsKey,
+      label: downloadLabels[ttsKey],
+    }
+    // Insert after dubbed_audio_complete
+    const dubbedIdx = items.findIndex((i) => i.key === 'editor.dubbed_audio_complete')
+    if (dubbedIdx >= 0) {
+      items.splice(dubbedIdx + 1, 0, ttsItem)
+    } else {
+      items.push(ttsItem)
+    }
+  }
+
+  return items
 }
 
 function toResultOutput(payload: ApiResultOutput): ResultOutput {

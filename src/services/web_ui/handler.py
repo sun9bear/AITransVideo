@@ -103,6 +103,41 @@ def _build_web_ui_handler() -> type[BaseHTTPRequestHandler]:
                     download_name=download_path.name,
                 )
                 return
+            if parsed_path.path == "/api/tts-segments-zip":
+                query = parse_qs(parsed_path.query)
+                requested_job_id = str((query.get("job_id") or [""])[0]).strip()
+                if not requested_job_id:
+                    self._write_json(HTTPStatus.BAD_REQUEST, {"error": "job_id is required"})
+                    return
+                manager = self.server.job_manager  # type: ignore[attr-defined]
+                resolved_project_dir_text = _resolve_project_dir_by_job_id(
+                    manager=manager, job_id=requested_job_id,
+                )
+                if not resolved_project_dir_text:
+                    self._write_json(HTTPStatus.NOT_FOUND, {"error": "Project not found"})
+                    return
+                project_dir = Path(resolved_project_dir_text).expanduser().resolve(strict=False)
+                tts_dir = project_dir / "tts"
+                if not tts_dir.is_dir():
+                    self._write_json(HTTPStatus.NOT_FOUND, {"error": "TTS segments not found"})
+                    return
+                aligned_files = sorted(tts_dir.glob("*_aligned.wav"))
+                if not aligned_files:
+                    self._write_json(HTTPStatus.NOT_FOUND, {"error": "No aligned TTS segments"})
+                    return
+                import io
+                import zipfile
+                buf = io.BytesIO()
+                with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for f in aligned_files:
+                        zf.write(f, f.name)
+                zip_bytes = buf.getvalue()
+                self._write_binary(
+                    HTTPStatus.OK, zip_bytes,
+                    content_type="application/zip",
+                    download_name=f"tts_segments_{requested_job_id[:12]}.zip",
+                )
+                return
             if parsed_path.path == "/api/project-file":
                 query = parse_qs(parsed_path.query)
                 requested_path = str((query.get("path") or [""])[0]).strip()
@@ -570,6 +605,12 @@ def _build_web_ui_handler() -> type[BaseHTTPRequestHandler]:
                         },
                     )
                     return
+                if parsed_path.path == "/api/job/delete":
+                    payload = self._read_json()
+                    job_id = str(payload.get("job_id", "")).strip()
+                    result = self._delete_job(job_id)
+                    self._write_json(HTTPStatus.OK, {"success": True, **result})
+                    return
                 if parsed_path.path == "/api/review/translation/save":
                     payload = self._read_json()
                     project_dir = _resolve_authoritative_review_project_dir(
@@ -797,6 +838,55 @@ def _build_web_ui_handler() -> type[BaseHTTPRequestHandler]:
                 "file_name": original_filename,
                 "file_size_mb": round(file_size_mb, 2),
             })
+
+        def _delete_job(self, job_id: str) -> dict[str, object]:
+            """Delete a specific job: remove project files and job store entry."""
+            import os
+            import shutil
+
+            jobs_dir = os.environ.get("AIVIDEOTRANS_JOBS_DIR", "/opt/aivideotrans/app/jobs")
+            jobs_path = Path(jobs_dir)
+
+            if not job_id:
+                raise ValueError("缺少 job_id 参数。")
+
+            job_file = jobs_path / f"{job_id}.json"
+            events_file = jobs_path / f"{job_id}.events.jsonl"
+
+            if not job_file.exists():
+                raise ValueError(f"任务 {job_id} 不存在。")
+
+            # Read job data to find project_dir
+            try:
+                data = json.loads(job_file.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+
+            project_dir = data.get("project_dir")
+
+            # If job is active, cancel it first
+            if data.get("status") in ("waiting_for_review", "running", "queued"):
+                data["status"] = "cancelled"
+                data["current_stage"] = "failed"
+                job_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+            # Remove project directory
+            if project_dir:
+                project_path = Path(project_dir)
+                if project_path.is_dir():
+                    shutil.rmtree(project_path, ignore_errors=True)
+
+            # Remove job files
+            try:
+                job_file.unlink(missing_ok=True)
+            except Exception:
+                pass
+            try:
+                events_file.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+            return {"job_id": job_id, "message": "项目已删除。"}
 
         def _force_cancel_active_job(self) -> dict[str, object]:
             """Fallback cancel: scan job store files, mark active jobs as cancelled, clean up project."""

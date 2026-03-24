@@ -15,6 +15,11 @@ def run_web_ui_server(
     web_ui_url = f"http://{host}:{port}"
     print(f"{WEB_UI_TITLE} \u5df2\u542f\u52a8\uff1a{web_ui_url}")
     print(f"\u914d\u7f6e\u6587\u4ef6\uff1a{server.config_path}")  # type: ignore[attr-defined]
+
+    # Start background cleanup thread for expired projects
+    from .cleanup import start_cleanup_thread
+    start_cleanup_thread()
+
     _open_browser(web_ui_url)
     try:
         server.serve_forever()

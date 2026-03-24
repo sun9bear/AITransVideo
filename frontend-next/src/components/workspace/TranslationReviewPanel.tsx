@@ -149,10 +149,10 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
             }
 
             return (
-              <article key={item.segmentId} className="rounded-2xl border border-white/10 bg-white/[0.03] p-5">
+              <article key={item.segmentId} className="rounded-2xl border border-border bg-card p-5">
                 {/* Header: segment id + speaker */}
                 <div className="flex flex-wrap items-center gap-3">
-                  <p className="text-xs font-semibold uppercase tracking-wider text-white/40">片段 {item.segmentId}</p>
+                  <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">片段 {item.segmentId}</p>
                   {resource.speakerOptions.length > 1 ? (
                     <select
                       className="form-input min-w-[140px] py-1 text-sm font-semibold"
@@ -188,7 +188,7 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
                       {resource.speakerOptions.map((o) => <option key={o.id} value={o.id}>{o.displayName}</option>)}
                     </select>
                   ) : (
-                    <p className="text-sm font-semibold text-white/90">{item.displayName || item.speakerId}</p>
+                    <p className="text-sm font-semibold text-foreground">{item.displayName || item.speakerId}</p>
                   )}
                   <button
                     className="ml-auto rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-3 py-1 text-xs font-medium text-cyan-400 transition hover:bg-cyan-500/20 hover:border-cyan-500/50"
@@ -208,16 +208,16 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
                 </div>
 
                 {/* Source text */}
-                <div className="mt-3 rounded-xl border border-white/8 bg-white/5 px-4 py-3 text-sm leading-6 text-white/70">
+                <div className="mt-3 rounded-xl border border-border bg-muted/30 px-4 py-3 text-sm leading-6 text-foreground/70">
                   {item.sourceText || '-'}
                 </div>
 
                 {/* Translation textarea — styled like source block, hover highlight */}
                 <div className="mt-3">
-                  <span className="text-xs font-medium text-white/40 mb-1 block">译文</span>
-                  <div className="group rounded-xl border border-white/8 bg-white/5 transition hover:border-primary/30 hover:bg-primary/5 focus-within:border-primary/40 focus-within:bg-primary/5">
+                  <span className="text-xs font-medium text-muted-foreground mb-1 block">译文</span>
+                  <div className="group rounded-xl border border-border bg-muted/30 transition hover:border-primary/30 hover:bg-primary/5 focus-within:border-primary/40 focus-within:bg-primary/5">
                     <textarea
-                      className="w-full min-h-[48px] resize-y rounded-xl bg-transparent px-4 py-3 text-sm leading-6 text-white/90 placeholder:text-white/30 focus:outline-none"
+                      className="w-full min-h-[48px] resize-y rounded-xl bg-transparent px-4 py-3 text-sm leading-6 text-foreground placeholder:text-muted-foreground/60 focus:outline-none"
                       onChange={(event) => {
                         const v = event.currentTarget.value
                         setSegments((s) => ({ ...s, [item.segmentId]: { ...(s[item.segmentId] ?? current), cnText: v, ttsCnText: v, updatedAt: new Date().toISOString() } }))
@@ -231,21 +231,21 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
 
                 {splittingSegmentId === item.segmentId ? (
                   <div className="mt-3 rounded-xl border-2 border-amber-500/20 bg-amber-500/5 p-4 space-y-4">
-                    <p className="text-sm font-semibold text-white/90">拆分片段 {item.segmentId}</p>
+                    <p className="text-sm font-semibold text-foreground">拆分片段 {item.segmentId}</p>
                     <div className="space-y-2">
                       <p className="form-label">原文拆分位置（{splitSourcePos}）</p>
                       <input className="w-full" max={(item.sourceText || '').length} min={1} onChange={(e) => setSplitSourcePos(Number(e.currentTarget.value))} type="range" value={splitSourcePos} />
                       <div className="grid grid-cols-2 gap-2 text-xs">
-                        <div className="rounded-lg bg-white/5 p-2 border border-white/10"><p className="text-white/70">{(item.sourceText || '').slice(0, splitSourcePos)}</p></div>
-                        <div className="rounded-lg bg-white/5 p-2 border border-white/10"><p className="text-white/70">{(item.sourceText || '').slice(splitSourcePos)}</p></div>
+                        <div className="rounded-lg bg-muted/30 p-2 border border-border"><p className="text-foreground/70">{(item.sourceText || '').slice(0, splitSourcePos)}</p></div>
+                        <div className="rounded-lg bg-muted/30 p-2 border border-border"><p className="text-foreground/70">{(item.sourceText || '').slice(splitSourcePos)}</p></div>
                       </div>
                     </div>
                     <div className="space-y-2">
                       <p className="form-label">译文拆分位置（{splitCnPos}）</p>
                       <input className="w-full" max={(current.cnText || '').length} min={1} onChange={(e) => setSplitCnPos(Number(e.currentTarget.value))} type="range" value={splitCnPos} />
                       <div className="grid grid-cols-2 gap-2 text-xs">
-                        <div className="rounded-lg bg-white/5 p-2 border border-white/10"><p className="text-white/70">{(current.cnText || '').slice(0, splitCnPos)}</p></div>
-                        <div className="rounded-lg bg-white/5 p-2 border border-white/10"><p className="text-white/70">{(current.cnText || '').slice(splitCnPos)}</p></div>
+                        <div className="rounded-lg bg-muted/30 p-2 border border-border"><p className="text-foreground/70">{(current.cnText || '').slice(0, splitCnPos)}</p></div>
+                        <div className="rounded-lg bg-muted/30 p-2 border border-border"><p className="text-foreground/70">{(current.cnText || '').slice(splitCnPos)}</p></div>
                       </div>
                     </div>
                     <div className="grid grid-cols-2 gap-3">

@@ -25,6 +25,7 @@ from database import engine
 from models import Base, User
 from job_intercept import (
     intercept_create_job,
+    intercept_delete_job,
     intercept_get_job,
     intercept_job_subresource,
     intercept_list_jobs,
@@ -81,6 +82,7 @@ app.get("/auth/me")(me_handler)
 
 app.get("/api/result-download")(intercept_result_download)
 app.get("/api/project-file")(intercept_project_file)
+app.post("/api/job/delete")(intercept_delete_job)
 
 
 # --- Proxy: Web UI API catch-all (/api/*) ---
