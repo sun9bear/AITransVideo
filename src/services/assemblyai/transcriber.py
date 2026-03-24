@@ -285,7 +285,7 @@ def _build_transcription_config(
         return aai.TranscriptionConfig(**kwargs)
 
 
-_MAX_SINGLE_UTTERANCE_DURATION_MS = 60_000  # 60 seconds
+_MAX_SINGLE_UTTERANCE_DURATION_MS = 30_000  # 30 seconds — split overlong utterances
 _MERGE_MAX_DURATION_MS = 30_000  # merge sentences until 30s
 _MERGE_PAUSE_THRESHOLD_MS = 1_500  # split on pauses > 1.5s
 
