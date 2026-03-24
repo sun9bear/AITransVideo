@@ -43,7 +43,7 @@ const navGroups = [
     label: "账户",
     items: [
       { label: "通知", href: "/notifications", icon: Bell },
-      { label: "账户设置", href: "/account", icon: User },
+      { label: "账户设置", href: "/settings", icon: User },
       { label: "帮助中心", href: "/help", icon: HelpCircle },
     ],
   },
