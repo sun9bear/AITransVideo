@@ -3,10 +3,9 @@
   "configurations": [
     {
       "name": "frontend-dev",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev", "--", "--port", "4180"],
-      "port": 4180,
-      "cwd": "D:/Claude/AIVideoTrans_Codex_web_mvp/frontend-next"
+      "runtimeExecutable": "C:/Program Files/nodejs/npx.cmd",
+      "runtimeArgs": ["next", "dev", "--port", "4180"],
+      "port": 4180
     }
   ]
 }

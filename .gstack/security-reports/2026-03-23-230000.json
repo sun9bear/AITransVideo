@@ -1,0 +1,40 @@
+{
+  "version": "2.0.0",
+  "date": "2026-03-23T23:00:00Z",
+  "mode": "daily",
+  "scope": "full",
+  "diff_mode": false,
+  "phases_run": [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14],
+  "attack_surface": {
+    "code": {"public_endpoints": 5, "authenticated": 8, "admin": 0, "api": 13, "uploads": 1, "integrations": 4, "background_jobs": 1, "websockets": 0},
+    "infrastructure": {"ci_workflows": 0, "webhook_receivers": 0, "container_configs": 4, "iac_configs": 0, "deploy_targets": 2, "secret_management": "env vars"}
+  },
+  "findings": [
+    {"id":1,"severity":"CRITICAL","confidence":9,"status":"VERIFIED","phase":9,"phase_name":"OWASP A05","category":"OWASP A05","fingerprint":"cors-wildcard-credentials","title":"CORS allow_origins=['*'] with allow_credentials=True","file":"gateway/main.py","line":54,"description":"Wildcard CORS with credentials allows any origin to make authenticated requests","exploit_scenario":"1. Attacker creates evil.com 2. User visits evil.com while logged into your app 3. evil.com JS reads session cookie and calls your API 4. Attacker steals user data","impact":"Full account takeover via cross-origin requests","recommendation":"Replace allow_origins=['*'] with explicit list of allowed origins"},
+    {"id":2,"severity":"CRITICAL","confidence":9,"status":"VERIFIED","phase":9,"phase_name":"OWASP A01","category":"OWASP A01","fingerprint":"auth-disabled-default","title":"AVT_AUTH_REQUIRED defaults to false - all endpoints unprotected","file":"gateway/config.py","line":21,"description":"auth_required=False by default means all job creation, file access, and API endpoints are open","exploit_scenario":"1. Deploy with default config 2. Anyone on the internet can create jobs, download results, access all data 3. No ownership checks enforced","impact":"Unauthorized access to all user data and system resources","recommendation":"Change default to auth_required=True, require explicit opt-out"},
+    {"id":3,"severity":"CRITICAL","confidence":10,"status":"VERIFIED","phase":2,"phase_name":"Secrets Archaeology","category":"Secrets","fingerprint":"plaintext-prod-creds-disk","title":"Production credentials in plaintext on disk","file":"test_login.py","line":0,"description":"test_login.py contains production email/password for aivideotrans.site. tmp_playwright/*.js files contain HTTP basic auth password. Both untracked but not gitignored.","exploit_scenario":"1. Developer runs git add . 2. Credentials committed to git history permanently 3. Anyone with repo access has prod credentials","impact":"Production account compromise","recommendation":"Delete test_login.py, rotate password for production, add to .gitignore"},
+    {"id":4,"severity":"HIGH","confidence":9,"status":"VERIFIED","phase":2,"phase_name":"Secrets Archaeology","category":"Secrets","fingerprint":"pg-default-password-committed","title":"PostgreSQL default password hardcoded in docker-compose.yml","file":"docker-compose.yml","line":48,"description":"POSTGRES_PASSWORD: ${PG_PASSWORD:-avt_dev_2026} commits a guessable password with network_mode: host exposing port 5432","exploit_scenario":"1. Attacker scans port 5432 2. Connects with avt/avt_dev_2026 3. Full DB access (users, sessions, jobs)","impact":"Full database compromise including password hashes and session tokens","recommendation":"Remove default, require PG_PASSWORD env var, add to .env only"},
+    {"id":5,"severity":"HIGH","confidence":10,"status":"VERIFIED","phase":5,"phase_name":"Infrastructure","category":"Infrastructure","fingerprint":"containers-run-as-root","title":"Both Dockerfiles run as root — no USER directive","file":"gateway/Dockerfile","line":0,"description":"gateway and frontend-next containers run as root. Combined with network_mode: host, a container breakout gives full host access","exploit_scenario":"1. RCE vulnerability in gateway or frontend 2. Attacker gets root shell in container 3. network_mode: host = full host network access","impact":"Host system compromise","recommendation":"Add USER directives to both Dockerfiles"},
+    {"id":6,"severity":"HIGH","confidence":10,"status":"VERIFIED","phase":4,"phase_name":"CI/CD","category":"CI/CD","fingerprint":"no-ci-cd-pipeline","title":"No CI/CD pipeline — no automated security scanning","file":"(repo root)","line":0,"description":"No GitHub Actions, no GitLab CI, no CI of any kind. No automated dependency audit, no SAST, no secret scanning.","exploit_scenario":"Vulnerable dependency ships to production undetected","impact":"Silent security regressions","recommendation":"Add minimal CI with npm audit + pip-audit + secret scanning"},
+    {"id":7,"severity":"HIGH","confidence":9,"status":"VERIFIED","phase":3,"phase_name":"Supply Chain","category":"Supply Chain","fingerprint":"lockfile-not-committed","title":"frontend-next/package-lock.json never committed","file":"frontend-next/package-lock.json","line":0,"description":"Lockfile exists on disk but not in git. npm ci in Dockerfile resolves whatever registry serves at build time.","exploit_scenario":"1. Compromised npm package publishes malicious patch 2. Next Docker build pulls it 3. Malicious code in production","impact":"Supply chain attack vector","recommendation":"git add frontend-next/package-lock.json && git commit"},
+    {"id":8,"severity":"HIGH","confidence":9,"status":"VERIFIED","phase":9,"phase_name":"OWASP A07","category":"OWASP A07","fingerprint":"weak-password-policy","title":"Password minimum length is only 6 characters","file":"gateway/auth.py","line":124,"description":"Only validation: len(password) < 6. No complexity requirements, no breach checking, no rate limiting on login.","exploit_scenario":"1. User sets password '123456' 2. Attacker brute-forces common passwords 3. No rate limit blocks the attack","impact":"Account compromise via brute force","recommendation":"Require 8+ chars, add login rate limiting, check HaveIBeenPwned"},
+    {"id":9,"severity":"MEDIUM","confidence":8,"status":"VERIFIED","phase":5,"phase_name":"Infrastructure","category":"Infrastructure","fingerprint":"no-dockerignore","title":"No .dockerignore — .env files baked into Docker images","file":"gateway/Dockerfile","line":8,"description":"COPY . . without .dockerignore includes any .env, __pycache__, test files in the image layer","exploit_scenario":"1. Dev has local .env with API keys 2. docker build bakes it into image layer 3. Anyone with image access can extract secrets","impact":"Secret leakage via Docker image layers","recommendation":"Create .dockerignore files for gateway/ and frontend-next/"},
+    {"id":10,"severity":"MEDIUM","confidence":8,"status":"VERIFIED","phase":5,"phase_name":"Infrastructure","category":"Infrastructure","fingerprint":"network-mode-host","title":"All containers use network_mode: host","file":"docker-compose.yml","line":8,"description":"Every service binds to host network. PostgreSQL 5432, gateway 8880, app 8876/8877 all directly reachable.","exploit_scenario":"1. Attacker scans server ports 2. Directly connects to backend APIs bypassing gateway auth entirely","impact":"Auth bypass by connecting directly to upstream services","recommendation":"Use Docker bridge network, only expose Caddy port 443"}
+  ],
+  "supply_chain_summary": {
+    "direct_deps": 48, "transitive_deps": 0,
+    "critical_cves": 0, "high_cves": 0,
+    "install_scripts": 0, "lockfile_present": true, "lockfile_tracked": false,
+    "tools_skipped": ["npm audit", "pip-audit"]
+  },
+  "filter_stats": {
+    "candidates_scanned": 28, "hard_exclusion_filtered": 8,
+    "confidence_gate_filtered": 10, "verification_filtered": 0, "reported": 10
+  },
+  "totals": {"critical": 3, "high": 5, "medium": 2, "tentative": 0},
+  "trend": {
+    "prior_report_date": null,
+    "resolved": 0, "persistent": 0, "new": 10,
+    "direction": "first_run"
+  }
+}
