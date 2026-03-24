@@ -103,7 +103,10 @@ async def proxy_web_ui(
     )
 
 
-# --- Job API intercept routes (specific routes before catch-all) ---
+# --- Job API routes ---
+# All /job-api/* routes go through intercept functions.
+# The catch-all is LAST and uses a different path pattern to avoid
+# swallowing the specific routes (FastAPI {path:path} bug).
 
 app.get("/job-api/jobs")(intercept_list_jobs)
 app.post("/job-api/jobs")(intercept_create_job)
@@ -116,13 +119,15 @@ app.api_route(
 )(intercept_job_subresource)
 
 
-# --- Proxy: Job API catch-all (/job-api/*) ---
+# --- Proxy: Job API catch-all (non-jobs paths only) ---
+# NOTE: /job-api/jobs* are handled by intercept functions above.
+# This only handles other /job-api/ endpoints (if any).
 
 @app.api_route(
     "/job-api/{path:path}",
-    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    methods=["PUT", "DELETE", "PATCH", "OPTIONS"],
 )
-async def proxy_job_api(
+async def proxy_job_api_other(
     request: Request,
     path: str,
     _user: User | None = Depends(require_auth),
