@@ -150,7 +150,42 @@ async def intercept_get_job(
     db: AsyncSession = Depends(get_db),
     user: User | None = Depends(require_auth),
 ) -> Response:
-    """GET /job-api/jobs/{job_id} — verify ownership, then forward."""
+    """GET /job-api/jobs/{job_id} — auto-reconcile if missing, verify ownership, then forward."""
+    # Auto-reconcile: if job_id not in DB but user is authenticated, claim it
+    if user is not None:
+        try:
+            existing = await db.execute(select(Job).where(Job.job_id == job_id))
+            if existing.scalar_one_or_none() is None:
+                # Forward first to get job data, then record
+                upstream_response = await proxy_request(
+                    request=request,
+                    upstream_base=settings.job_api_upstream,
+                    strip_prefix="/job-api",
+                )
+                if upstream_response.status_code == 200:
+                    try:
+                        job_data = json.loads(upstream_response.body)
+                        job = Job(
+                            job_id=job_id,
+                            user_id=user.id,
+                            source_type=job_data.get("source_type", "youtube_url"),
+                            source_ref=job_data.get("source_ref", ""),
+                            title=job_data.get("title", ""),
+                            speakers=job_data.get("speakers", "auto"),
+                            status=job_data.get("status", "running"),
+                            current_stage=job_data.get("current_stage"),
+                            project_dir=job_data.get("project_dir"),
+                        )
+                        db.add(job)
+                        await db.commit()
+                        logger.info("Auto-reconciled job %s via get_job for user %s", job_id, user.id)
+                    except Exception:
+                        await db.rollback()
+                        logger.exception("Failed to auto-reconcile job %s via get_job", job_id)
+                return upstream_response
+        except Exception:
+            logger.exception("Error in get_job auto-reconcile check for %s", job_id)
+
     await _verify_job_ownership(job_id, db, user)
     return await proxy_request(
         request=request,
