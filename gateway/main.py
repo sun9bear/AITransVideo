@@ -77,6 +77,11 @@ async def reconcile_job_middleware(request: Request, call_next):
     the response is generated, so it doesn't block the user.
     Works regardless of which route handler processed the request.
     """
+    # Write to file on EVERY request to prove middleware runs
+    with open("/tmp/middleware_trace.log", "a") as _mf:
+        _mf.write(f"{request.method} {request.url.path}\n")
+        _mf.flush()
+
     response = await call_next(request)
 
     # Only reconcile on successful GET /job-api/jobs/{job_id} requests
@@ -118,8 +123,8 @@ async def reconcile_job_middleware(request: Request, call_next):
                                 db.add(job)
                                 await db.commit()
                                 logger.info("Middleware reconciled job %s for user %s", job_id, sess.user_id)
-            except Exception:
-                pass  # Never block user request due to reconciliation failure
+            except Exception as _reconcile_err:
+                logger.warning("Reconcile middleware error for %s: %s", job_id, _reconcile_err)
 
     return response
 

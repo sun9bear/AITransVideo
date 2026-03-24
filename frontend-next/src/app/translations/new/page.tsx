@@ -77,6 +77,8 @@ export default function NewTranslationPage() {
       setActiveJob(createdJob)
       setSubmitState("success")
       toast.success(`任务已创建：${getJobDisplayTitle(createdJob)}`)
+      // Store latest job ID for /tasks/current fallback
+      try { localStorage.setItem('avt_latest_job_id', createdJob.id) } catch {}
       router.push(`/workspace/${createdJob.id}`)
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
