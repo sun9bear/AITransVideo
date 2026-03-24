@@ -123,7 +123,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   <Link
                     key={item.href}
                     href={item.href}
-                    className={`flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-all ${
+                    className={`flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition-all ${
                       isActive
                         ? "bg-primary/15 text-primary font-medium"
                         : "text-muted-foreground hover:bg-accent hover:text-foreground"
