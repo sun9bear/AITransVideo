@@ -321,7 +321,7 @@ function CostEstimatePanel({ transcriptionMethod }: { transcriptionMethod: "asse
             speakerCount: 1,
           })
           return (
-            <div key={minutes} className="rounded-lg border p-3 space-y-1">
+            <div key={minutes} className="rounded-lg border p-3 space-y-1 tabular-nums">
               <p className="text-sm font-semibold">{minutes} 分钟视频</p>
               {result.stages.map((stage) => (
                 <div key={stage.stage} className="flex justify-between text-xs text-muted-foreground">
