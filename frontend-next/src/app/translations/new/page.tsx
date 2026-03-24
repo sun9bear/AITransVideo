@@ -77,7 +77,7 @@ export default function NewTranslationPage() {
       setActiveJob(createdJob)
       setSubmitState("success")
       toast.success(`任务已创建：${getJobDisplayTitle(createdJob)}`)
-      router.push("/tasks/current")
+      router.push(`/workspace/${createdJob.id}`)
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
         await loadActiveJob(true)
