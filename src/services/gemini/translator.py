@@ -1358,17 +1358,24 @@ def _text_weight(text: str) -> int:
     return max(1, alnum_weight or len(normalized_text))
 
 
+_MIN_STANDALONE_SEGMENT_MS = 5_000  # 段落 <5 秒才允许合并到相邻同 speaker 段
+
+
 def _build_groups(lines: list[TranscriptLine], *, max_segment_duration_ms: int) -> list[dict[str, object]]:
     """Build translation groups from transcript lines.
 
-    Each transcript line becomes one translation group (1:1 mapping).
-    No merging — transcript stage already handles proper segmentation.
+    Mostly 1:1 mapping. Only merges very short segments (<5s) with adjacent
+    same-speaker segments to provide translation context. Normal segments
+    (≥5s) are never merged — transcript stage already handles segmentation.
     """
     if not lines:
         return []
 
+    # Light merge: only combine very short same-speaker segments
+    merged_lines = _light_merge_short_segments(lines)
+
     groups: list[dict[str, object]] = []
-    for segment_id, line in enumerate(lines, start=1):
+    for segment_id, line in enumerate(merged_lines, start=1):
         start_ms = line.start_ms
         end_ms = line.end_ms
         target_duration_ms = max(0, end_ms - start_ms)
@@ -1426,6 +1433,74 @@ def _build_groups(lines: list[TranscriptLine], *, max_segment_duration_ms: int) 
         group["min_chars"] = min_chars
         group["max_chars"] = max_chars
     return groups
+
+
+def _light_merge_short_segments(lines: list[TranscriptLine]) -> list[TranscriptLine]:
+    """Merge very short segments (<5s) into adjacent same-speaker segments.
+
+    Only merges if:
+    - The short segment has the same speaker as its neighbor
+    - The merged result would not exceed 45 seconds
+    Normal segments (≥5s) are never touched.
+    """
+    if len(lines) <= 1:
+        return list(lines)
+
+    result: list[TranscriptLine] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        dur = line.end_ms - line.start_ms
+
+        # If this segment is short and same speaker as previous, merge into previous
+        if (
+            dur < _MIN_STANDALONE_SEGMENT_MS
+            and result
+            and result[-1].speaker_id == line.speaker_id
+            and (result[-1].end_ms - result[-1].start_ms + dur) <= 45_000
+        ):
+            prev = result[-1]
+            result[-1] = TranscriptLine(
+                index=prev.index,
+                start_ms=prev.start_ms,
+                end_ms=line.end_ms,
+                speaker_id=prev.speaker_id,
+                speaker_label=prev.speaker_label,
+                source_text=prev.source_text + " " + line.source_text,
+            )
+        # If this segment is short and same speaker as NEXT, merge into next
+        elif (
+            dur < _MIN_STANDALONE_SEGMENT_MS
+            and i + 1 < len(lines)
+            and lines[i + 1].speaker_id == line.speaker_id
+            and (dur + lines[i + 1].end_ms - lines[i + 1].start_ms) <= 45_000
+        ):
+            next_line = lines[i + 1]
+            result.append(TranscriptLine(
+                index=len(result) + 1,
+                start_ms=line.start_ms,
+                end_ms=next_line.end_ms,
+                speaker_id=line.speaker_id,
+                speaker_label=line.speaker_label,
+                source_text=line.source_text + " " + next_line.source_text,
+            ))
+            i += 2  # skip next line (already merged)
+            continue
+        else:
+            result.append(line)
+        i += 1
+
+    # Re-index
+    for idx, line in enumerate(result):
+        result[idx] = TranscriptLine(
+            index=idx + 1,
+            start_ms=line.start_ms,
+            end_ms=line.end_ms,
+            speaker_id=line.speaker_id,
+            speaker_label=line.speaker_label,
+            source_text=line.source_text,
+        )
+    return result
 
 
 def _split_lines_by_speaker_and_pause(
