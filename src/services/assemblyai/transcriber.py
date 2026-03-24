@@ -376,14 +376,20 @@ def _try_llm_segmentation(raw_lines: list[TranscriptLine]) -> list[TranscriptLin
 
 
 def _build_lines_from_utterances_with_split(utterances: list[Any]) -> list[TranscriptLine]:
-    """Build transcript lines from utterances, splitting overlong ones using word-level pauses.
+    """Build transcript lines from utterances with 5-layer hierarchical splitting.
 
     For multi-speaker videos: preserves speaker info from every utterance.
-    If an individual utterance exceeds _MAX_SINGLE_UTTERANCE_DURATION_MS,
-    split it at the longest word-level pause (using word timestamps for accuracy).
+    Uses word-level timestamps for precise pause-based splitting.
+
+    Splitting layers (applied sequentially, each layer processes ALL lines):
+      Layer 1: >15s + pauses ≥3s → split at ALL ≥3s pauses
+      Layer 2: >45s + pauses ≥2s → split at the LONGEST ≥2s pause (bisect)
+      Layer 3: >90s + pauses ≥2s → split at the LONGEST ≥2s pause (bisect again)
+      Layer 4: >300s → send to Gemini for semantic splitting
+      Layer 5: >300s (final check) → send to Gemini again if still too long
     """
-    # Build a word-level index keyed by (speaker, start_ms) for pause-based splitting
-    word_index: dict[str, list[dict]] = {}  # speaker -> sorted words
+    # Build word-level index: speaker_label -> list of word dicts
+    word_index: dict[str, list[dict]] = {}
     for utt in utterances:
         spk = _normalize_optional_text(getattr(utt, "speaker", None)) or "A"
         words = list(getattr(utt, "words", []) or [])
@@ -402,142 +408,231 @@ def _build_lines_from_utterances_with_split(utterances: list[Any]) -> list[Trans
     if not raw_lines:
         return raw_lines
 
-    result: list[TranscriptLine] = []
-    for line in raw_lines:
-        duration_ms = line.end_ms - line.start_ms
-        if duration_ms <= _MAX_SINGLE_UTTERANCE_DURATION_MS:
-            result.append(TranscriptLine(
-                index=len(result) + 1,
-                start_ms=line.start_ms,
-                end_ms=line.end_ms,
-                speaker_id=line.speaker_id,
-                speaker_label=line.speaker_label,
-                source_text=line.source_text,
-            ))
-            continue
-
-        # Find words belonging to this utterance (by time range)
+    def _get_words_for_line(line: TranscriptLine) -> list[dict]:
         spk_label = line.speaker_label or "A"
         all_words = word_index.get(spk_label, [])
-        utt_words = [
+        return [
             w for w in all_words
             if w["start"] >= line.start_ms - 100 and w["end"] <= line.end_ms + 100
         ]
 
-        if len(utt_words) < 4:
-            # Not enough words to split meaningfully
-            result.append(TranscriptLine(
-                index=len(result) + 1,
-                start_ms=line.start_ms,
-                end_ms=line.end_ms,
-                speaker_id=line.speaker_id,
-                speaker_label=line.speaker_label,
-                source_text=line.source_text,
-            ))
+    # --- Layer 1: >15s + pauses ≥3s → split at ALL ≥3s pauses ---
+    lines_l1: list[TranscriptLine] = []
+    for line in raw_lines:
+        dur = line.end_ms - line.start_ms
+        if dur <= 15_000:
+            lines_l1.append(line)
             continue
+        words = _get_words_for_line(line)
+        if len(words) < 4:
+            lines_l1.append(line)
+            continue
+        chunks = _split_at_all_pauses(words, line, min_pause_ms=3000)
+        if len(chunks) > 1:
+            lines_l1.extend(chunks)
+        else:
+            lines_l1.append(line)
 
-        # Split using word-level pauses: find all gaps, split at longest pauses
-        # that result in chunks under _MERGE_MAX_DURATION_MS
-        chunks = _split_words_by_pause(utt_words, line, max_chunk_ms=_MERGE_MAX_DURATION_MS)
-        for chunk_start_ms, chunk_end_ms, chunk_text in chunks:
-            result.append(TranscriptLine(
-                index=len(result) + 1,
-                start_ms=chunk_start_ms,
-                end_ms=chunk_end_ms,
-                speaker_id=line.speaker_id,
-                speaker_label=line.speaker_label,
-                source_text=chunk_text,
-            ))
+    # --- Layer 2: >45s + pauses ≥2s → split at LONGEST ≥2s pause ---
+    lines_l2: list[TranscriptLine] = []
+    for line in lines_l1:
+        dur = line.end_ms - line.start_ms
+        if dur <= 45_000:
+            lines_l2.append(line)
+            continue
+        words = _get_words_for_line(line)
+        if len(words) < 4:
+            lines_l2.append(line)
+            continue
+        chunks = _split_at_longest_pause(words, line, min_pause_ms=2000)
+        lines_l2.extend(chunks)
 
-    print(f"[S1] 多说话人分段: {len(utterances)} utterances → {len(result)} lines（保留说话人标签）")
+    # --- Layer 3: >90s + pauses ≥1.5s → split at LONGEST ≥1.5s pause ---
+    lines_l3: list[TranscriptLine] = []
+    for line in lines_l2:
+        dur = line.end_ms - line.start_ms
+        if dur <= 90_000:
+            lines_l3.append(line)
+            continue
+        words = _get_words_for_line(line)
+        if len(words) < 4:
+            lines_l3.append(line)
+            continue
+        chunks = _split_at_longest_pause(words, line, min_pause_ms=1500)
+        lines_l3.extend(chunks)
+
+    # --- Layer 4: >300s → Gemini semantic split ---
+    lines_l4: list[TranscriptLine] = []
+    for line in lines_l3:
+        dur = line.end_ms - line.start_ms
+        if dur <= 300_000:
+            lines_l4.append(line)
+            continue
+        gemini_chunks = _try_llm_split_single_line(line)
+        if gemini_chunks and len(gemini_chunks) > 1:
+            lines_l4.extend(gemini_chunks)
+        else:
+            lines_l4.append(line)
+
+    # --- Layer 5: >300s final check → Gemini again ---
+    lines_l5: list[TranscriptLine] = []
+    for line in lines_l4:
+        dur = line.end_ms - line.start_ms
+        if dur <= 300_000:
+            lines_l5.append(line)
+            continue
+        gemini_chunks = _try_llm_split_single_line(line)
+        if gemini_chunks and len(gemini_chunks) > 1:
+            lines_l5.extend(gemini_chunks)
+        else:
+            lines_l5.append(line)
+
+    # Re-index
+    result: list[TranscriptLine] = []
+    for line in lines_l5:
+        result.append(TranscriptLine(
+            index=len(result) + 1,
+            start_ms=line.start_ms,
+            end_ms=line.end_ms,
+            speaker_id=line.speaker_id,
+            speaker_label=line.speaker_label,
+            source_text=line.source_text,
+        ))
+
+    print(f"[S1] 多说话人 5 层拆分: {len(utterances)} utterances → {len(result)} lines")
+    long_remaining = sum(1 for l in result if (l.end_ms - l.start_ms) > 300_000)
+    if long_remaining:
+        print(f"[S1] ⚠ 仍有 {long_remaining} 段超过 300 秒")
     return result
 
 
-def _split_words_by_pause(
+def _split_at_all_pauses(
     words: list[dict],
-    line: "TranscriptLine",
-    max_chunk_ms: int = 30_000,
-) -> list[tuple[int, int, str]]:
-    """Split a sequence of words into chunks at the longest pauses.
+    line: TranscriptLine,
+    min_pause_ms: int,
+) -> list[TranscriptLine]:
+    """Split words at ALL pauses >= min_pause_ms. Returns list of TranscriptLine."""
+    if len(words) < 2:
+        return [line]
 
-    Returns list of (start_ms, end_ms, text) tuples.
-    Prefers splitting at sentence-ending punctuation + long pause.
-    """
-    import re
-
-    if not words:
-        return [(line.start_ms, line.end_ms, line.source_text)]
-
-    # Build gaps between consecutive words
-    gaps: list[tuple[int, int, int]] = []  # (word_index, gap_ms, is_sentence_end)
+    split_indices: list[int] = []
     for i in range(len(words) - 1):
-        gap_ms = max(0, words[i + 1]["start"] - words[i]["end"])
-        # Check if current word ends a sentence
-        is_sentence_end = 1 if re.search(r'[.!?]["\')]*$', words[i]["text"]) else 0
-        gaps.append((i, gap_ms, is_sentence_end))
+        gap = max(0, words[i + 1]["start"] - words[i]["end"])
+        if gap >= min_pause_ms:
+            split_indices.append(i)
 
-    # Sort gaps by priority: sentence-ending pauses first, then by gap length
-    sorted_gaps = sorted(gaps, key=lambda g: (g[2], g[1]), reverse=True)
+    if not split_indices:
+        return [line]
 
-    # Greedily pick split points that create chunks under max_chunk_ms
-    split_indices: set[int] = set()
-    for word_idx, gap_ms, is_sent_end in sorted_gaps:
-        # Only split if it would help reduce a too-long chunk
-        split_indices.add(word_idx)
-        # Check if all resulting chunks are under max_chunk_ms
-        if _all_chunks_under_limit(words, split_indices, max_chunk_ms):
-            break
-        # If adding this split doesn't help yet, keep adding more
-
-    # If no good splits found, fall back to splitting at the single longest gap
-    if not _all_chunks_under_limit(words, split_indices, max_chunk_ms):
-        if sorted_gaps:
-            split_indices = {sorted_gaps[0][0]}
-
-    # Build chunks from split points
-    split_list = sorted(split_indices)
-    chunks: list[tuple[int, int, str]] = []
-    chunk_start = 0
-
-    for split_at in split_list:
-        chunk_words = words[chunk_start:split_at + 1]
-        if chunk_words:
-            text = " ".join(w["text"] for w in chunk_words)
-            start_ms = chunk_words[0]["start"]
-            end_ms = chunk_words[-1]["end"]
-            chunks.append((start_ms, end_ms, text))
-        chunk_start = split_at + 1
-
-    # Remaining words
-    if chunk_start < len(words):
-        chunk_words = words[chunk_start:]
-        text = " ".join(w["text"] for w in chunk_words)
-        start_ms = chunk_words[0]["start"]
-        end_ms = chunk_words[-1]["end"]
-        chunks.append((start_ms, end_ms, text))
-
-    return chunks if chunks else [(line.start_ms, line.end_ms, line.source_text)]
+    return _build_lines_from_split_indices(words, split_indices, line)
 
 
-def _all_chunks_under_limit(words: list[dict], split_indices: set[int], max_ms: int) -> bool:
-    """Check if splitting at given indices produces all chunks under max_ms."""
-    splits = sorted(split_indices)
+def _split_at_longest_pause(
+    words: list[dict],
+    line: TranscriptLine,
+    min_pause_ms: int,
+) -> list[TranscriptLine]:
+    """Split words at the single LONGEST pause >= min_pause_ms. Bisects the line."""
+    if len(words) < 2:
+        return [line]
+
+    best_idx = -1
+    best_gap = 0
+    for i in range(len(words) - 1):
+        gap = max(0, words[i + 1]["start"] - words[i]["end"])
+        if gap >= min_pause_ms and gap > best_gap:
+            best_gap = gap
+            best_idx = i
+
+    if best_idx < 0:
+        return [line]
+
+    return _build_lines_from_split_indices(words, [best_idx], line)
+
+
+def _build_lines_from_split_indices(
+    words: list[dict],
+    split_indices: list[int],
+    template_line: TranscriptLine,
+) -> list[TranscriptLine]:
+    """Build TranscriptLine list from words split at given indices."""
+    result: list[TranscriptLine] = []
     prev = 0
-    for s in splits:
-        chunk = words[prev:s + 1]
+    for idx in sorted(split_indices):
+        chunk = words[prev:idx + 1]
         if chunk:
-            dur = chunk[-1]["end"] - chunk[0]["start"]
-            if dur > max_ms:
-                return False
-        prev = s + 1
-    # Check last chunk
+            result.append(TranscriptLine(
+                index=0,  # will be re-indexed later
+                start_ms=chunk[0]["start"],
+                end_ms=chunk[-1]["end"],
+                speaker_id=template_line.speaker_id,
+                speaker_label=template_line.speaker_label,
+                source_text=" ".join(w["text"] for w in chunk),
+            ))
+        prev = idx + 1
+    # Remaining
     if prev < len(words):
         chunk = words[prev:]
         if chunk:
-            dur = chunk[-1]["end"] - chunk[0]["start"]
-            if dur > max_ms:
-                return False
-    return True
+            result.append(TranscriptLine(
+                index=0,
+                start_ms=chunk[0]["start"],
+                end_ms=chunk[-1]["end"],
+                speaker_id=template_line.speaker_id,
+                speaker_label=template_line.speaker_label,
+                source_text=" ".join(w["text"] for w in chunk),
+            ))
+    return result if result else [template_line]
+
+
+def _try_llm_split_single_line(line: TranscriptLine) -> list[TranscriptLine] | None:
+    """Try to split a single overlong line using Gemini semantic segmentation."""
+    try:
+        from services.assemblyai.semantic_segmenter import (
+            TimestampedSentence,
+            segment_with_llm,
+        )
+        import re
+        # Split text into sentences for the LLM
+        sentences_text = re.split(r'(?<=[.!?])\s+', line.source_text)
+        if len(sentences_text) <= 1:
+            return None
+
+        # Distribute timestamps proportionally
+        total_chars = sum(len(s) for s in sentences_text) or 1
+        dur = line.end_ms - line.start_ms
+        ts_sentences = []
+        cur_ms = line.start_ms
+        for s in sentences_text:
+            s_dur = int(dur * len(s) / total_chars)
+            ts_sentences.append(TimestampedSentence(
+                start_ms=cur_ms, end_ms=cur_ms + s_dur,
+                speaker_id=line.speaker_id, speaker_label=line.speaker_label,
+                text=s,
+            ))
+            cur_ms += s_dur
+
+        result = segment_with_llm(
+            ts_sentences,
+            speaker_id=line.speaker_id,
+            speaker_label=line.speaker_label,
+        )
+        if result and len(result) > 1:
+            return [
+                TranscriptLine(
+                    index=0,
+                    start_ms=item["start_ms"],
+                    end_ms=item["end_ms"],
+                    speaker_id=item["speaker_id"],
+                    speaker_label=item["speaker_label"],
+                    source_text=item["source_text"],
+                )
+                for item in result
+            ]
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("LLM split for single line failed")
+    return None
 
 
 def _utterances_well_segmented(utterances: list[Any]) -> bool:
