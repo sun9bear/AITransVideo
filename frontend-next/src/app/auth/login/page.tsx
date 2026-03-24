@@ -72,7 +72,7 @@ function LoginForm() {
       </div>
       <Button
         type="submit"
-        className="w-full h-11 bg-gradient-to-r from-violet-600 to-violet-500 hover:from-violet-500 hover:to-violet-400 text-white font-medium shadow-lg shadow-violet-500/25 transition-all"
+        className="w-full h-11 bg-primary hover:bg-primary/90 text-white font-medium shadow-lg shadow-primary/20 transition-all"
         disabled={isSubmitting}
       >
         {isSubmitting ? "登录中..." : "登录"}
@@ -93,7 +93,7 @@ export default function LoginPage() {
       <div className="relative w-full max-w-md">
         {/* Logo */}
         <div className="mb-8 text-center">
-          <div className="mx-auto mb-4 h-14 w-14 rounded-2xl bg-gradient-to-br from-violet-500 to-cyan-500 flex items-center justify-center shadow-lg shadow-violet-500/25">
+          <div className="mx-auto mb-4 h-14 w-14 rounded-2xl bg-primary flex items-center justify-center shadow-lg shadow-primary/20">
             <span className="text-xl font-bold text-white font-heading">AI</span>
           </div>
           <h1 className="text-2xl font-bold text-on-surface font-heading">AIVideoTrans</h1>
