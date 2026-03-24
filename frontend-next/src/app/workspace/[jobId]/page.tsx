@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
 
@@ -24,7 +24,7 @@ import {
   getUserFacingProgressMessage,
 } from '@/features/jobs/presentation'
 import { buildStageProgress } from '@/features/jobs/stageMetadata'
-import { ApiError } from '@/lib/api/client'
+import { getErrorMessage } from '@/lib/api/errors'
 import {
   getJob,
   getJobLogs,
@@ -40,6 +40,21 @@ import {
   type ResultDownloadItem,
 } from '@/types/jobs'
 
+function sendBrowserNotification(status: string, title: string) {
+  if (typeof window === 'undefined' || !('Notification' in window)) return
+  if (Notification.permission !== 'granted') return
+
+  const messages: Record<string, { title: string; body: string }> = {
+    succeeded: { title: '任务完成', body: `${title} 已完成，点击查看结果` },
+    failed: { title: '任务失败', body: `${title} 处理失败，点击查看详情` },
+    cancelled: { title: '任务已取消', body: `${title} 已被取消` },
+  }
+  const msg = messages[status]
+  if (msg) {
+    try { new Notification(msg.title, { body: msg.body }) } catch { /* ignore */ }
+  }
+}
+
 export default function WorkspacePage() {
   const params = useParams()
   const router = useRouter()
@@ -52,6 +67,7 @@ export default function WorkspacePage() {
   const [pageError, setPageError] = useState<string | null>(null)
   const [isCancelling, setIsCancelling] = useState(false)
   const [webUiStage, setWebUiStage] = useState<string | null>(null)
+  const prevStatusRef = useRef<string | null>(null)
 
   const loadJob = async (silent = false) => {
     if (!jobId) return
@@ -64,6 +80,13 @@ export default function WorkspacePage() {
         getWebUiActiveStage(),
       ])
       setJob(nextJob)
+      // 检测状态变化，发送浏览器通知
+      if (prevStatusRef.current &&
+          prevStatusRef.current !== nextJob.status &&
+          (nextJob.status === 'succeeded' || nextJob.status === 'failed' || nextJob.status === 'cancelled')) {
+        sendBrowserNotification(nextJob.status, getJobDisplayTitle(nextJob))
+      }
+      prevStatusRef.current = nextJob.status
       setLogs(nextLogs)
       setDownloads(nextDownloads)
       if (activeStage) setWebUiStage(activeStage)
@@ -76,6 +99,14 @@ export default function WorkspacePage() {
   }
 
   usePollingTask(() => loadJob(!isLoading), { intervalMs: 4000 })
+
+  useEffect(() => {
+    if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'default') {
+      // 延迟 5 秒请求，避免页面加载时弹出
+      const timer = setTimeout(() => { void Notification.requestPermission() }, 5000)
+      return () => clearTimeout(timer)
+    }
+  }, [])
 
   // Called by review panels after approval to refresh job state
   const handleAdvanced = () => {
@@ -98,7 +129,7 @@ export default function WorkspacePage() {
     return <EmptyState actionLabel="返回当前任务" actionTo="/tasks/current" description="缺少任务标识。" title="无法打开工作区" />
   }
   if (isLoading && !job && !pageError) {
-    return <EmptyState description="正在加载工作区..." title="加载中" />
+    return <EmptyState description="正在加载工作区…" title="加载中" />
   }
   if (pageError && !job) {
     return <EmptyState actionLabel="返回当前任务" actionTo="/tasks/current" description={pageError} title="无法加载工作区" />
@@ -128,7 +159,7 @@ export default function WorkspacePage() {
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div className="space-y-2 min-w-0">
             <p className="eyebrow">工作区</p>
-            <h1 className="text-2xl font-bold text-ink-950 dark:text-foreground truncate">{displayTitle}</h1>
+            <h1 className="text-2xl font-bold text-foreground truncate">{displayTitle}</h1>
             <p className="text-sm text-muted-foreground">{secondaryLabel}</p>
           </div>
           <div className="flex items-center gap-3 shrink-0">
@@ -141,7 +172,7 @@ export default function WorkspacePage() {
                 onClick={() => { void handleCancel() }}
                 type="button"
               >
-                {isCancelling ? '取消中...' : '取消任务'}
+                {isCancelling ? '取消中…' : '取消任务'}
               </button>
             ) : null}
           </div>
@@ -159,7 +190,7 @@ export default function WorkspacePage() {
               当前需要处理：{getStageLabel(effectiveStage)}
             </span>
           ) : isProcessing ? (
-            <span>{getUserFacingProgressMessage(job.progressMessage) ?? '任务正在处理中...'}</span>
+            <span>{getUserFacingProgressMessage(job.progressMessage) ?? '任务正在处理中…'}</span>
           ) : isSucceeded ? (
             <span className="text-emerald-600 dark:text-emerald-400 font-medium">任务已完成</span>
           ) : isFailed ? (
@@ -174,11 +205,11 @@ export default function WorkspacePage() {
       {isProcessing ? (
         <section className="surface-card p-8 text-center">
           <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-3 border-primary border-t-transparent" />
-          <h3 className="text-lg font-semibold text-ink-950 dark:text-foreground">
+          <h3 className="text-lg font-semibold text-foreground">
             正在处理 · {getStageLabel(effectiveStage)}
           </h3>
           <p className="mt-2 text-sm text-muted-foreground">
-            {getUserFacingProgressMessage(job.progressMessage) ?? '任务正在后台处理，页面会自动刷新...'}
+            {getUserFacingProgressMessage(job.progressMessage) ?? '任务正在后台处理，页面会自动刷新…'}
           </p>
         </section>
       ) : null}
@@ -210,7 +241,7 @@ export default function WorkspacePage() {
             {getErrorSummaryMessage(job.errorSummary)}
           </p>
           <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-3 dark:border-amber-500/20 dark:bg-amber-500/5">
-            <p className="text-sm font-medium text-ink-950 dark:text-foreground/80">建议</p>
+            <p className="text-sm font-medium text-foreground/80">建议</p>
             <p className="text-sm text-muted-foreground">{getErrorCategory(job.errorSummary).suggestion}</p>
           </div>
           <div className="mt-4 flex gap-2">
@@ -232,10 +263,4 @@ export default function WorkspacePage() {
       />
     </div>
   )
-}
-
-function getErrorMessage(error: unknown) {
-  if (error instanceof ApiError) return error.message
-  if (error instanceof Error) return error.message
-  return '请求失败，请稍后重试。'
 }
