@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import time
 from typing import Any
 
@@ -179,12 +180,16 @@ class AssemblyAITranscriber:
 
         try:
             print(f"[S1] 音频文件较大（{file_size_mb:.0f}MB），生成MP3上传优化文件")
-            audio = AudioSegment.from_file(str(source_path))
-            optimized_audio = audio.set_channels(1).set_frame_rate(DEFAULT_UPLOAD_MP3_FRAME_RATE)
-            optimized_audio.export(
-                str(upload_path),
-                format="mp3",
-                bitrate=DEFAULT_UPLOAD_MP3_BITRATE,
+            subprocess.run(
+                [
+                    "ffmpeg", "-i", str(source_path),
+                    "-ac", "1",
+                    "-ar", str(DEFAULT_UPLOAD_MP3_FRAME_RATE),
+                    "-b:a", DEFAULT_UPLOAD_MP3_BITRATE,
+                    "-f", "mp3", str(upload_path), "-y",
+                ],
+                check=True,
+                capture_output=True,
             )
             return str(upload_path.resolve(strict=False))
         except Exception as exc:
