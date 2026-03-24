@@ -22,7 +22,8 @@ DEFAULT_SDK_BACKEND = "google-genai"
 LEGACY_SDK_BACKEND = "google-generativeai"
 DEFAULT_TEMPERATURE = 0.3
 DEFAULT_MAX_OUTPUT_TOKENS = 8192
-DEFAULT_BATCH_SIZE = 5
+DEFAULT_BATCH_SIZE = 15
+PARALLEL_WORKERS = 3
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 120
 DEFAULT_MAX_RETRIES = 2
 DEFAULT_PRE_SPLIT_MAX_LINE_DURATION_MS = 60_000
@@ -628,7 +629,7 @@ class GeminiTranslator:
                 return self._call_google_genai(prompt, json_mode=json_mode, model_name=model_name)
             except Exception as exc:
                 if attempt < DEFAULT_MAX_RETRIES:
-                    wait_seconds = 5 * (attempt + 1)
+                    wait_seconds = min(60, 5 * (2 ** attempt))  # 5s, 10s, 20s, 40s, 60s
                     print(
                         f"[S3] Gemini请求失败，{wait_seconds}秒后重试"
                         f"（{attempt + 1}/{DEFAULT_MAX_RETRIES}）: {exc}"
