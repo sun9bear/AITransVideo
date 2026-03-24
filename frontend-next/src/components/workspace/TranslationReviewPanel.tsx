@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 
-import { ApiError } from '@/lib/api/client'
+import { getErrorMessage } from '@/lib/api/errors'
 import { approveTranslationReview, getTranslationReview, splitSegment } from '@/lib/api/reviews'
 import type { TranslationReviewResource } from '@/types/reviews'
 
@@ -104,7 +104,7 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
   }
 
   if (isLoading && !resource) {
-    return <PanelLoading message="正在读取翻译审核内容..." />
+    return <PanelLoading message="正在读取翻译审核内容…" />
   }
   if (pageError && !resource) {
     return <PanelError message={pageError} />
@@ -125,7 +125,7 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
           onClick={() => { void handleApprove() }}
           type="button"
         >
-          {isSubmitting ? '提交中...' : '✓ 确认并继续'}
+          {isSubmitting ? '提交中…' : '✓ 确认并继续'}
         </button>
       </div>
 
@@ -217,7 +217,7 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
                   <span className="text-xs font-medium text-muted-foreground mb-1 block">译文</span>
                   <div className="group rounded-xl border border-border bg-muted/30 transition hover:border-primary/30 hover:bg-primary/5 focus-within:border-primary/40 focus-within:bg-primary/5">
                     <textarea
-                      className="w-full min-h-[48px] resize-y rounded-xl bg-transparent px-4 py-3 text-sm leading-6 text-foreground placeholder:text-muted-foreground/60 focus:outline-none"
+                      className="w-full min-h-[2lh] resize-none rounded-xl bg-transparent px-4 py-2 text-sm leading-6 text-foreground placeholder:text-muted-foreground/60 focus:outline-none input-focus-ring overflow-hidden"
                       onChange={(event) => {
                         const v = event.currentTarget.value
                         setSegments((s) => ({ ...s, [item.segmentId]: { ...(s[item.segmentId] ?? current), cnText: v, ttsCnText: v, updatedAt: new Date().toISOString() } }))
@@ -275,7 +275,7 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
                         setSubmitError('拆分未生效。')
                       } catch (error) { setSubmitError(`拆分失败: ${getErrorMessage(error)}`) } finally { setIsSplitting(false) }
                     }} type="button">
-                      {isSplitting ? '拆分中...' : '确认拆分'}
+                      {isSplitting ? '拆分中…' : '确认拆分'}
                     </button>
                   </div>
                 ) : null}
@@ -345,10 +345,4 @@ function formatDateTime(value: string) {
   const parsed = new Date(value)
   if (Number.isNaN(parsed.getTime())) return value
   return new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' }).format(parsed)
-}
-
-function getErrorMessage(error: unknown) {
-  if (error instanceof ApiError) return error.message
-  if (error instanceof Error) return error.message
-  return '请求失败，请稍后重试。'
 }
