@@ -36,6 +36,11 @@ tools/caddy/
 tmp_remote_env
 tmp_remote_env.bak_*
 tmp_playwright/
+test_login.py
+ssh_upload.py
+
+# Claude Code
+.claude/
 
 # IDE / OS
 .vscode/

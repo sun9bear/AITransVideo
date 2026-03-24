@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
 from fastapi import Cookie, Depends, HTTPException, Response
 from pydantic import BaseModel, EmailStr
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+logger = logging.getLogger(__name__)
 
 from config import settings
 from database import get_db
@@ -55,6 +58,16 @@ def generate_session_token() -> str:
 
 
 async def create_session(db: AsyncSession, user_id, response: Response) -> str:
+    # Opportunistic cleanup: purge expired sessions (all users)
+    try:
+        await db.execute(
+            delete(Session).where(Session.expires_at <= datetime.now(timezone.utc))
+        )
+        await db.flush()
+    except Exception:
+        logger.debug("Failed to purge expired sessions", exc_info=True)
+        await db.rollback()
+
     token = generate_session_token()
     expires_at = datetime.now(timezone.utc) + timedelta(days=settings.session_expire_days)
     session = Session(user_id=user_id, token=token, expires_at=expires_at)
@@ -92,20 +105,22 @@ async def get_current_user(
         return None
 
     result = await db.execute(
-        select(User).where(User.id == session.user_id, User.is_active == True)
+        select(User).where(User.id == session.user_id, User.is_active.is_(True))
     )
     return result.scalar_one_or_none()
 
 
 async def require_auth(
     user: User | None = Depends(get_current_user),
-) -> User:
-    """Dependency that requires authentication when AUTH_REQUIRED=true."""
+) -> User | None:
+    """Dependency that requires authentication when AUTH_REQUIRED=true.
+
+    Returns the User if authenticated, or None if auth is not required
+    and no session is present. Raises 401 when auth is required but
+    no valid session exists.
+    """
     if settings.auth_required and user is None:
         raise HTTPException(status_code=401, detail="未登录")
-    # When auth not required, return a dummy user or None
-    if user is None:
-        return None
     return user
 
 

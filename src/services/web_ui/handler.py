@@ -554,6 +554,22 @@ def _build_web_ui_handler() -> type[BaseHTTPRequestHandler]:
                         },
                     )
                     return
+                if parsed_path.path == "/api/job/cancel":
+                    try:
+                        snapshot = self.server.job_manager.cancel_waiting_review(  # type: ignore[attr-defined]
+                            expected_stage=None
+                        )
+                    except ValueError:
+                        # Web UI manager might be out of sync — try to cancel via job store directly
+                        snapshot = self._force_cancel_active_job()
+                    self._write_json(
+                        HTTPStatus.OK,
+                        {
+                            "success": True,
+                            "job": snapshot,
+                        },
+                    )
+                    return
                 if parsed_path.path == "/api/review/translation/save":
                     payload = self._read_json()
                     project_dir = _resolve_authoritative_review_project_dir(
@@ -781,6 +797,76 @@ def _build_web_ui_handler() -> type[BaseHTTPRequestHandler]:
                 "file_name": original_filename,
                 "file_size_mb": round(file_size_mb, 2),
             })
+
+        def _force_cancel_active_job(self) -> dict[str, object]:
+            """Fallback cancel: scan job store files, mark active jobs as cancelled, clean up project."""
+            import os
+            import shutil
+
+            jobs_dir = os.environ.get("AIVIDEOTRANS_JOBS_DIR", "/opt/aivideotrans/app/jobs")
+            projects_dir = os.environ.get("AIVIDEOTRANS_PROJECTS_DIR", "/opt/aivideotrans/app/projects")
+            jobs_path = Path(jobs_dir)
+            if not jobs_path.is_dir():
+                raise ValueError("当前没有可取消的任务。")
+
+            cancelled_any = False
+            for job_file in jobs_path.glob("*.json"):
+                if job_file.name.endswith(".events.jsonl"):
+                    continue
+                try:
+                    data = json.loads(job_file.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if data.get("status") in ("waiting_for_review", "running", "queued"):
+                    project_dir = data.get("project_dir")
+                    data["status"] = "cancelled"
+                    data["current_stage"] = "failed"
+                    job_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                    cancelled_any = True
+
+                    # Clean up project directory (downloads, intermediate files)
+                    if project_dir:
+                        project_path = Path(project_dir)
+                        if project_path.is_dir():
+                            try:
+                                shutil.rmtree(project_path, ignore_errors=True)
+                            except Exception:
+                                pass
+
+            if not cancelled_any:
+                raise ValueError("当前没有可取消的任务。")
+
+            # Reset the web UI manager's internal snapshot
+            try:
+                manager = self.server.job_manager  # type: ignore[attr-defined]
+                if hasattr(manager, "_snapshot") and hasattr(manager, "_lock"):
+                    with manager._lock:
+                        old_snapshot = manager._snapshot
+                        if hasattr(old_snapshot, "job_id") and old_snapshot.job_id:
+                            if hasattr(manager, "_ignored_job_ids"):
+                                manager._ignored_job_ids.add(old_snapshot.job_id)
+                        manager._snapshot = type(old_snapshot)(
+                            job_id=None,
+                            status="idle",
+                            youtube_url="",
+                            speakers=getattr(old_snapshot, "speakers", "auto"),
+                            voice_a=None,
+                            voice_b=None,
+                            translation_model_alias=getattr(old_snapshot, "translation_model_alias", None),
+                            project_dir=None,
+                            current_stage=None,
+                            current_message="任务已取消。",
+                            started_at=None,
+                            completed_at=None,
+                            returncode=None,
+                            logs=[],
+                            review_gate=None,
+                            control_mode=getattr(old_snapshot, "control_mode", "job_api"),
+                        )
+            except Exception:
+                pass
+
+            return {"status": "cancelled", "message": "任务已取消。"}
 
         def _read_json(self) -> dict[str, object]:
             content_length = int(self.headers.get("Content-Length") or "0")

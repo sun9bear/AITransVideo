@@ -9,6 +9,29 @@ from __future__ import annotations
 import httpx
 from fastapi import Request, Response
 
+# Shared client — initialised/closed via app lifespan in main.py
+_client: httpx.AsyncClient | None = None
+
+
+def get_client() -> httpx.AsyncClient:
+    """Return the shared httpx client. Raises if not initialised."""
+    if _client is None:
+        raise RuntimeError("httpx client not initialised — call init_client() first")
+    return _client
+
+
+def init_client() -> httpx.AsyncClient:
+    global _client
+    _client = httpx.AsyncClient(timeout=httpx.Timeout(300.0))
+    return _client
+
+
+async def close_client() -> None:
+    global _client
+    if _client is not None:
+        await _client.aclose()
+        _client = None
+
 
 async def proxy_request(
     request: Request,
@@ -37,13 +60,13 @@ async def proxy_request(
         if k.lower() not in skip_headers
     }
 
-    async with httpx.AsyncClient(timeout=httpx.Timeout(300.0)) as client:
-        upstream_response = await client.request(
-            method=request.method,
-            url=upstream_url,
-            headers=headers,
-            content=body,
-        )
+    client = get_client()
+    upstream_response = await client.request(
+        method=request.method,
+        url=upstream_url,
+        headers=headers,
+        content=body,
+    )
 
     # Build response, preserving upstream status and headers
     response_headers = dict(upstream_response.headers)

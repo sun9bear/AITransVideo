@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import subprocess
 import time
+from urllib.parse import urlparse
 
 import yt_dlp
 from services import config_loader
@@ -12,6 +13,39 @@ from services import config_loader
 
 class DownloadError(Exception):
     pass
+
+
+# --- URL 安全校验 ---
+
+_ALLOWED_DOMAINS: set[str] = {
+    "youtube.com",
+    "www.youtube.com",
+    "m.youtube.com",
+    "youtu.be",
+    "music.youtube.com",
+    "bilibili.com",
+    "www.bilibili.com",
+}
+
+
+def validate_video_url(url: str) -> None:
+    """校验 URL 协议和域名白名单，防止 SSRF。"""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise DownloadError(
+            f"不支持的 URL 协议: {parsed.scheme!r}，仅允许 http/https"
+        )
+    hostname = (parsed.hostname or "").lower()
+    if not hostname:
+        raise DownloadError("URL 缺少域名")
+    # 匹配域名本身或其父域
+    if not any(
+        hostname == d or hostname.endswith("." + d) for d in _ALLOWED_DOMAINS
+    ):
+        raise DownloadError(
+            f"不允许的视频源域名: {hostname}，"
+            f"仅支持: {', '.join(sorted(_ALLOWED_DOMAINS))}"
+        )
 
 
 @dataclass(slots=True)
@@ -67,6 +101,7 @@ class YouTubeDownloader:
     metadata_filename: str = "download_metadata.json"
 
     def download(self, request: DownloadRequest) -> DownloadResult:
+        validate_video_url(request.url)
         output_root = Path(request.output_dir).resolve(strict=False)
         video_dir = output_root / "video"
         audio_dir = output_root / "audio"

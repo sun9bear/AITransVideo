@@ -280,27 +280,134 @@ def _build_transcription_config(
         return aai.TranscriptionConfig(**kwargs)
 
 
+_MAX_SINGLE_UTTERANCE_DURATION_MS = 60_000  # 60 seconds
+_MERGE_MAX_DURATION_MS = 30_000  # merge sentences until 30s
+_MERGE_PAUSE_THRESHOLD_MS = 1_500  # split on pauses > 1.5s
+
+
 def _build_transcript_lines(transcript: Any, *, speaker_labels: bool) -> list[TranscriptLine]:
     if speaker_labels:
         utterances = list(getattr(transcript, "utterances", []) or [])
-        if utterances:
+        if utterances and _utterances_well_segmented(utterances):
             return _build_lines_from_utterances(utterances)
 
-    sentences = list(getattr(transcript, "sentences", []) or [])
+    # Utterances not usable — build sentence-level lines first.
     words = list(getattr(transcript, "words", []) or [])
+    sentences = list(getattr(transcript, "sentences", []) or [])
 
-    if speaker_labels:
-        word_lines, _ = _build_lines_from_words(words, speaker_labels=True)
-        if word_lines:
-            return word_lines
-        return _build_lines_from_sentences(sentences, speaker_labels=True)
-
-    word_lines, saw_sentence_punctuation = _build_lines_from_words(words, speaker_labels=False)
-    if word_lines and saw_sentence_punctuation:
-        return word_lines
+    raw_lines: list[TranscriptLine] = []
     if sentences:
-        return _build_lines_from_sentences(sentences, speaker_labels=False)
-    return word_lines
+        raw_lines = _build_lines_from_sentences(sentences, speaker_labels=speaker_labels)
+    if not raw_lines:
+        raw_lines, _ = _build_lines_from_words(words, speaker_labels=speaker_labels)
+
+    if len(raw_lines) <= 1:
+        return raw_lines
+
+    # Try LLM semantic segmentation (Gemini) — falls back to mechanical merge on failure
+    llm_lines = _try_llm_segmentation(raw_lines)
+    if llm_lines:
+        return llm_lines
+
+    return _merge_short_lines(raw_lines)
+
+
+def _try_llm_segmentation(raw_lines: list[TranscriptLine]) -> list[TranscriptLine] | None:
+    """Attempt to use Gemini for semantic paragraph segmentation."""
+    try:
+        from services.assemblyai.semantic_segmenter import (
+            TimestampedSentence,
+            segment_with_llm,
+        )
+
+        sentences = [
+            TimestampedSentence(
+                start_ms=line.start_ms,
+                end_ms=line.end_ms,
+                speaker_id=line.speaker_id,
+                speaker_label=line.speaker_label,
+                text=line.source_text,
+            )
+            for line in raw_lines
+        ]
+
+        result = segment_with_llm(
+            sentences,
+            speaker_id=raw_lines[0].speaker_id,
+            speaker_label=raw_lines[0].speaker_label,
+        )
+
+        if result:
+            return [
+                TranscriptLine(
+                    index=item["index"],
+                    start_ms=item["start_ms"],
+                    end_ms=item["end_ms"],
+                    speaker_id=item["speaker_id"],
+                    speaker_label=item["speaker_label"],
+                    source_text=item["source_text"],
+                )
+                for item in result
+            ]
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("LLM segmentation import/call failed")
+
+    return None
+
+
+def _utterances_well_segmented(utterances: list[Any]) -> bool:
+    """Utterances are fine unless any single one exceeds the duration threshold."""
+    for utt in utterances:
+        start = _coerce_int(getattr(utt, "start", None), default=0)
+        end = _coerce_int(getattr(utt, "end", None), default=start)
+        if (end - start) > _MAX_SINGLE_UTTERANCE_DURATION_MS:
+            return False
+    return True
+
+
+def _merge_short_lines(lines: list[TranscriptLine]) -> list[TranscriptLine]:
+    """Merge consecutive same-speaker lines into chunks based on duration and pauses."""
+    if not lines:
+        return lines
+
+    merged: list[TranscriptLine] = []
+    group_start_ms = lines[0].start_ms
+    group_end_ms = lines[0].end_ms
+    group_speaker_id = lines[0].speaker_id
+    group_speaker_label = lines[0].speaker_label
+    group_texts: list[str] = [lines[0].source_text]
+
+    def flush_group() -> None:
+        nonlocal group_start_ms, group_end_ms, group_speaker_id, group_speaker_label, group_texts
+        if group_texts:
+            merged.append(TranscriptLine(
+                index=len(merged) + 1,
+                start_ms=group_start_ms,
+                end_ms=group_end_ms,
+                speaker_id=group_speaker_id,
+                speaker_label=group_speaker_label,
+                source_text=" ".join(group_texts),
+            ))
+        group_texts = []
+
+    for line in lines[1:]:
+        gap_ms = max(0, line.start_ms - group_end_ms)
+        group_duration_ms = line.end_ms - group_start_ms
+        speaker_changed = line.speaker_id != group_speaker_id
+
+        # Split conditions: speaker change, long pause, or duration exceeded
+        if speaker_changed or gap_ms >= _MERGE_PAUSE_THRESHOLD_MS or group_duration_ms >= _MERGE_MAX_DURATION_MS:
+            flush_group()
+            group_start_ms = line.start_ms
+            group_speaker_id = line.speaker_id
+            group_speaker_label = line.speaker_label
+
+        group_texts.append(line.source_text)
+        group_end_ms = line.end_ms
+
+    flush_group()
+    return merged
 
 
 def _build_lines_from_sentences(sentences: list[Any], *, speaker_labels: bool) -> list[TranscriptLine]:

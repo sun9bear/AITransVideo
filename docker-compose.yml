@@ -45,7 +45,7 @@ services:
     environment:
       POSTGRES_DB: aivideotrans
       POSTGRES_USER: avt
-      POSTGRES_PASSWORD: ${PG_PASSWORD:-avt_dev_2026}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?PG_PASSWORD 必须在 .env 中设置}
     network_mode: host
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -92,8 +92,9 @@ services:
       AVT_JOB_API_UPSTREAM: "http://127.0.0.1:8877"
       AVT_GATEWAY_HOST: "0.0.0.0"
       AVT_GATEWAY_PORT: "8880"
-      AVT_AUTH_REQUIRED: "false"
-      AVT_DATABASE_URL: "postgresql+asyncpg://avt:${PG_PASSWORD:-avt_dev_2026}@127.0.0.1:5432/aivideotrans"
+      AVT_AUTH_REQUIRED: "true"
+      AVT_PG_PASSWORD: "${PG_PASSWORD:?PG_PASSWORD 必须在 .env 中设置}"
+      AVT_DATABASE_URL: ""
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8880/gateway/health')"]
       interval: 15s

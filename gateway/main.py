@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, Response
+from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from auth import (
@@ -18,10 +18,11 @@ from auth import (
     logout_handler,
     me_handler,
     register_handler,
+    require_auth,
 )
 from config import settings
 from database import engine
-from models import Base
+from models import Base, User
 from job_intercept import (
     intercept_create_job,
     intercept_get_job,
@@ -30,15 +31,18 @@ from job_intercept import (
     intercept_project_file,
     intercept_result_download,
 )
-from proxy import proxy_request
+from proxy import close_client, init_client, proxy_request
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Create tables on startup (dev convenience; use Alembic in production)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    # Dev convenience: auto-create tables. In production use Alembic migrations.
+    if not settings.auth_required:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+    init_client()
     yield
+    await close_client()
     await engine.dispose()
 
 
@@ -51,7 +55,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[o.strip() for o in settings.cors_origins.split(",") if o.strip()],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -85,7 +89,11 @@ app.get("/api/project-file")(intercept_project_file)
     "/api/{path:path}",
     methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
 )
-async def proxy_web_ui(request: Request, path: str) -> Response:
+async def proxy_web_ui(
+    request: Request,
+    path: str,
+    _user: User | None = Depends(require_auth),
+) -> Response:
     return await proxy_request(
         request=request,
         upstream_base=settings.web_ui_upstream,
@@ -112,7 +120,11 @@ app.api_route(
     "/job-api/{path:path}",
     methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
 )
-async def proxy_job_api(request: Request, path: str) -> Response:
+async def proxy_job_api(
+    request: Request,
+    path: str,
+    _user: User | None = Depends(require_auth),
+) -> Response:
     return await proxy_request(
         request=request,
         upstream_base=settings.job_api_upstream,
@@ -126,7 +138,11 @@ async def proxy_job_api(request: Request, path: str) -> Response:
     "/web-ui-api/{path:path}",
     methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
 )
-async def proxy_web_ui_legacy(request: Request, path: str) -> Response:
+async def proxy_web_ui_legacy(
+    request: Request,
+    path: str,
+    _user: User | None = Depends(require_auth),
+) -> Response:
     return await proxy_request(
         request=request,
         upstream_base=settings.web_ui_upstream,

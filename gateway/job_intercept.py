@@ -13,15 +13,13 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
-
 from fastapi import Depends, HTTPException, Request, Response
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 
-from auth import get_current_user, require_auth
+from auth import require_auth
 from config import settings
 from database import get_db
 from models import Job, User
@@ -31,7 +29,7 @@ from proxy import proxy_request
 async def intercept_list_jobs(
     request: Request,
     db: AsyncSession = Depends(get_db),
-    user: User | None = Depends(get_current_user),
+    user: User | None = Depends(require_auth),
 ) -> Response:
     """GET /job-api/jobs — forward to upstream, then filter by user_id."""
     upstream_response = await proxy_request(
@@ -69,7 +67,7 @@ async def intercept_list_jobs(
 async def intercept_create_job(
     request: Request,
     db: AsyncSession = Depends(get_db),
-    user: User | None = Depends(get_current_user),
+    user: User | None = Depends(require_auth),
 ) -> Response:
     """POST /job-api/jobs — forward to upstream, then record in DB."""
     # Forward to upstream first
@@ -80,7 +78,8 @@ async def intercept_create_job(
     )
 
     # If successful, record the job in DB
-    if upstream_response.status_code in (200, 201) and user is not None:
+    job_id = None
+    if upstream_response.status_code in (200, 201, 202) and user is not None:
         try:
             data = json.loads(upstream_response.body)
             job_data = data.get("job") or data
@@ -112,7 +111,7 @@ async def intercept_get_job(
     request: Request,
     job_id: str,
     db: AsyncSession = Depends(get_db),
-    user: User | None = Depends(get_current_user),
+    user: User | None = Depends(require_auth),
 ) -> Response:
     """GET /job-api/jobs/{job_id} — verify ownership, then forward."""
     await _verify_job_ownership(job_id, db, user)
@@ -128,7 +127,7 @@ async def intercept_job_subresource(
     job_id: str,
     subpath: str,
     db: AsyncSession = Depends(get_db),
-    user: User | None = Depends(get_current_user),
+    user: User | None = Depends(require_auth),
 ) -> Response:
     """GET/POST /job-api/jobs/{job_id}/{subpath} — verify ownership, then forward.
 
@@ -157,12 +156,14 @@ async def _verify_job_ownership(
         result2 = await db.execute(select(Job).where(Job.job_id == job_id))
         if result2.scalar_one_or_none() is not None:
             raise HTTPException(status_code=403, detail="无权访问此任务")
+        else:
+            logger.warning("Job %s not found in DB — allowing access (legacy job?)", job_id)
 
 
 async def intercept_result_download(
     request: Request,
     db: AsyncSession = Depends(get_db),
-    user: User | None = Depends(get_current_user),
+    user: User | None = Depends(require_auth),
 ) -> Response:
     """GET /api/result-download — verify job ownership before proxying."""
     job_id = request.query_params.get("job_id")
@@ -179,29 +180,37 @@ async def intercept_result_download(
 async def intercept_project_file(
     request: Request,
     db: AsyncSession = Depends(get_db),
-    user: User | None = Depends(get_current_user),
+    user: User | None = Depends(require_auth),
 ) -> Response:
-    """GET /api/project-file — verify ownership via project_dir matching."""
+    """GET /api/project-file — verify ownership via path segment matching.
+
+    Security: fail-closed — if no job_id segment matches, deny access.
+    """
     if settings.auth_required and user is not None:
         path = request.query_params.get("path", "")
-        # Try to find a job whose project_dir is a prefix of the requested path
-        result = await db.execute(
-            select(Job.user_id).where(Job.project_dir.isnot(None))
-        )
-        rows = result.all()
-        for row in rows:
-            # If we can't determine ownership, allow (fail open for legacy jobs)
-            pass
+        if not path:
+            raise HTTPException(status_code=400, detail="缺少 path 参数")
 
-        # For safety: if path contains a job_id-like segment, check ownership
-        # The path format is typically: /path/to/projects/{job_id}/...
-        for segment in path.replace("\\", "/").split("/"):
-            result = await db.execute(select(Job).where(Job.job_id == segment))
-            job = result.scalar_one_or_none()
-            if job is not None:
-                if job.user_id != user.id:
-                    raise HTTPException(status_code=403, detail="无权访问此文件")
-                break  # Found matching job, ownership verified
+        # Collect non-empty path segments, then batch-query DB
+        segments = [s for s in path.replace("\\", "/").split("/") if s]
+        if not segments:
+            raise HTTPException(status_code=403, detail="无法验证文件归属，拒绝访问")
+
+        result = await db.execute(
+            select(Job.job_id, Job.user_id).where(Job.job_id.in_(segments))
+        )
+        matched_jobs = result.all()
+
+        ownership_verified = False
+        for job_id, owner_id in matched_jobs:
+            if owner_id != user.id:
+                raise HTTPException(status_code=403, detail="无权访问此文件")
+            ownership_verified = True
+            break
+
+        # Fail-closed: no matching job_id found → deny
+        if not ownership_verified:
+            raise HTTPException(status_code=403, detail="无法验证文件归属，拒绝访问")
 
     return await proxy_request(
         request=request,
@@ -210,23 +219,3 @@ async def intercept_project_file(
     )
 
 
-async def sync_job_status(
-    job_id: str,
-    status: str,
-    current_stage: str | None,
-    db: AsyncSession,
-) -> None:
-    """Update job status in DB (called after upstream responses)."""
-    try:
-        await db.execute(
-            update(Job)
-            .where(Job.job_id == job_id)
-            .values(
-                status=status,
-                current_stage=current_stage,
-                updated_at=datetime.now(timezone.utc),
-            )
-        )
-        await db.commit()
-    except Exception:
-        logger.exception("Failed to sync job status for %s", job_id)
