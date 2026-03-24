@@ -7,6 +7,7 @@ import { toast } from "sonner"
 import { StatusBadge } from "@/components/status-badge"
 import { getJobDisplayTitle, getStageLabel } from "@/features/jobs/presentation"
 import { ApiError } from "@/lib/api/client"
+import { getErrorMessage } from '@/lib/api/errors'
 import { estimateCosts, formatCostCny } from "@/lib/cost/estimator"
 import { getCurrentJob, submitTranslationJob } from "@/lib/api/jobs"
 import { getVoiceLibrary, type VoiceLibraryEntry } from "@/lib/api/voiceLibrary"
@@ -172,9 +173,9 @@ export default function NewTranslationPage() {
                 <span className="text-xs font-medium text-muted-foreground block">YouTube 链接</span>
                 <div className="group rounded-xl border border-border bg-muted/30 transition hover:border-primary/30 focus-within:border-primary/40">
                   <input
-                    className="w-full rounded-xl bg-transparent px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none"
+                    className="w-full rounded-xl bg-transparent px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none input-focus-ring"
                     type="url"
-                    placeholder="https://www.youtube.com/watch?v=..."
+                    placeholder="https://www.youtube.com/watch?v=…"
                     value={youtubeUrl}
                     onChange={(e) => {
                       setYoutubeUrl(e.target.value)
@@ -204,7 +205,7 @@ export default function NewTranslationPage() {
                 ) : (
                   <div className="group rounded-xl border border-border bg-muted/30 transition hover:border-primary/30 focus-within:border-primary/40">
                     <input
-                      className="w-full rounded-xl bg-transparent px-4 py-3 text-sm text-foreground file:mr-3 file:rounded-lg file:border-0 file:bg-primary/20 file:px-3 file:py-1 file:text-xs file:font-medium file:text-primary focus:outline-none"
+                      className="w-full rounded-xl bg-transparent px-4 py-3 text-sm text-foreground file:mr-3 file:rounded-lg file:border-0 file:bg-primary/20 file:px-3 file:py-1 file:text-xs file:font-medium file:text-primary focus:outline-none input-focus-ring"
                       type="file"
                       accept="video/*"
                       disabled={isBlockedByActiveJob || submitState === "submitting" || isUploading}
@@ -212,7 +213,7 @@ export default function NewTranslationPage() {
                         const file = event.target.files?.[0]
                         if (!file) return
                         setIsUploading(true)
-                        setUploadProgress(`正在上传 ${file.name}...`)
+                        setUploadProgress(`正在上传 ${file.name}…`)
                         try {
                           const formData = new FormData()
                           formData.append("file", file)
@@ -251,7 +252,7 @@ export default function NewTranslationPage() {
                 <span className="text-xs font-medium text-muted-foreground block">转录方案</span>
                 <div className="group rounded-xl border border-border bg-muted/30 transition hover:border-primary/30 focus-within:border-primary/40">
                   <select
-                    className="w-full rounded-xl bg-transparent px-4 py-3 text-sm text-foreground focus:outline-none"
+                    className="w-full rounded-xl bg-transparent px-4 py-3 text-sm text-foreground focus:outline-none input-focus-ring"
                     value={transcriptionMethod}
                     onChange={(e) => setTranscriptionMethod(e.target.value as "assemblyai" | "gemini")}
                     disabled={isBlockedByActiveJob || submitState === "submitting"}
@@ -266,7 +267,7 @@ export default function NewTranslationPage() {
                 <span className="text-xs font-medium text-muted-foreground block">说话人数</span>
                 <div className="group rounded-xl border border-border bg-muted/30 transition hover:border-primary/30 focus-within:border-primary/40">
                   <select
-                    className="w-full rounded-xl bg-transparent px-4 py-3 text-sm text-foreground focus:outline-none"
+                    className="w-full rounded-xl bg-transparent px-4 py-3 text-sm text-foreground focus:outline-none input-focus-ring"
                     value={speakers}
                     onChange={(e) => setSpeakers(e.target.value as "1" | "2" | "auto")}
                     disabled={isBlockedByActiveJob || submitState === "submitting"}
@@ -285,12 +286,24 @@ export default function NewTranslationPage() {
               </p>
             ) : null}
 
+            {/* 长视频提示 */}
+            <div className="rounded-xl border border-blue-500/20 bg-blue-500/5 p-4 text-sm text-blue-400/80">
+              <p className="font-medium text-blue-400 mb-1">处理时长参考</p>
+              <ul className="space-y-1 text-xs">
+                <li>10 分钟以内：约 5-15 分钟</li>
+                <li>10-30 分钟：约 15-45 分钟</li>
+                <li>30-60 分钟：约 1-2 小时（长视频，处理完成后将通知您）</li>
+                <li>60 分钟以上：约 2-4 小时（超长视频，建议分段处理）</li>
+              </ul>
+              <p className="mt-2 text-xs text-muted-foreground">超过 3 小时的视频暂不支持，请裁剪后重试。</p>
+            </div>
+
             <button
               type="submit"
               disabled={Boolean(validationError) || isBlockedByActiveJob || submitState === "submitting" || isLoadingGuard}
               className="inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-primary to-primary/80 px-6 py-2.5 text-sm font-semibold text-white shadow-lg shadow-primary/25 transition hover:shadow-primary/40 hover:brightness-110 disabled:opacity-50"
             >
-              {submitState === "submitting" ? "创建中..." : "创建任务"}
+              {submitState === "submitting" ? "创建中…" : "创建任务"}
             </button>
           </form>
         </section>
@@ -353,10 +366,4 @@ function validateYoutubeUrl(value: string) {
   } catch {
     return "请输入有效的链接。"
   }
-}
-
-function getErrorMessage(error: unknown) {
-  if (error instanceof ApiError) return error.message
-  if (error instanceof Error) return error.message
-  return "请求失败，请稍后重试。"
 }
