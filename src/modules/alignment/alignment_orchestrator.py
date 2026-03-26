@@ -2,6 +2,8 @@ from dataclasses import dataclass
 import logging
 from typing import Protocol
 
+from src.utils.atomic_io import atomic_write_bytes, is_valid_output
+
 from core.enums import BlockStatus
 from core.exceptions import (
     TTSConfigurationError,
@@ -61,6 +63,20 @@ class AlignmentOrchestrator:
     def process_block(self, block: SemanticBlock) -> SemanticBlock:
         if block.target_duration_ms <= 0:
             return self._fail_block(block, "Target duration must be positive.")
+
+        # Checkpoint: 如果 aligned_audio_path 已存在且有效，跳过 TTS + 对齐，直接返回
+        if block.aligned_audio_path and is_valid_output(block.aligned_audio_path):
+            logger.info(
+                "Block %s 已有对齐音频，跳过 TTS（checkpoint）: %s",
+                block.block_id,
+                block.aligned_audio_path,
+            )
+            if block.status not in (
+                BlockStatus.ALIGN_DONE.value,
+                BlockStatus.ALIGN_DONE_FALLBACK.value,
+            ):
+                block.status = BlockStatus.ALIGN_DONE.value
+            return block
 
         while True:
             try:

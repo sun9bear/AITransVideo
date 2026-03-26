@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
+from admin_settings import router as admin_router
 from auth import (
     LoginRequest,
     RegisterRequest,
@@ -20,9 +21,13 @@ from auth import (
     register_handler,
     require_auth,
 )
+import logging
+
 from config import settings
 from database import engine
-from models import Base, User
+from models import Base
+
+logger = logging.getLogger(__name__)
 from job_intercept import (
     intercept_create_job,
     intercept_delete_job,
@@ -63,6 +68,12 @@ app.add_middleware(
 )
 
 
+# reconcile_job_middleware removed (2026-03-26).
+# Reason: Had stale cookie/token field names (session_id vs avt_session/token).
+# Owner binding is now handled solely by intercept_create_job at job creation time.
+# No auto-claim of orphan jobs in list or get endpoints.
+
+
 # --- Health check ---
 
 @app.get("/gateway/health")
@@ -76,6 +87,11 @@ app.post("/auth/register")(register_handler)
 app.post("/auth/login")(login_handler)
 app.post("/auth/logout")(logout_handler)
 app.get("/auth/me")(me_handler)
+
+
+# --- Admin settings routes (before catch-all) ---
+
+app.include_router(admin_router)
 
 
 # --- Web UI API intercept routes (before catch-all) ---
@@ -103,7 +119,10 @@ async def proxy_web_ui(
     )
 
 
-# --- Job API intercept routes (specific routes before catch-all) ---
+# --- Job API routes ---
+# All /job-api/* routes go through intercept functions.
+# The catch-all is LAST and uses a different path pattern to avoid
+# swallowing the specific routes (FastAPI {path:path} bug).
 
 app.get("/job-api/jobs")(intercept_list_jobs)
 app.post("/job-api/jobs")(intercept_create_job)
@@ -116,13 +135,15 @@ app.api_route(
 )(intercept_job_subresource)
 
 
-# --- Proxy: Job API catch-all (/job-api/*) ---
+# --- Proxy: Job API catch-all (non-jobs paths only) ---
+# NOTE: /job-api/jobs* are handled by intercept functions above.
+# This only handles other /job-api/ endpoints (if any).
 
 @app.api_route(
     "/job-api/{path:path}",
-    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    methods=["PUT", "DELETE", "PATCH", "OPTIONS"],
 )
-async def proxy_job_api(
+async def proxy_job_api_other(
     request: Request,
     path: str,
     _user: User | None = Depends(require_auth),

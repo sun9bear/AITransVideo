@@ -2,10 +2,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import re
 import shutil
 import tempfile
+
+# Load .env file if present (for API keys not in container env)
+_ENV_FILE = Path("/opt/aivideotrans/config/.env")
+if _ENV_FILE.exists():
+    for _line in _ENV_FILE.read_text().splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _key, _, _val = _line.partition("=")
+            if _key.strip() and _key.strip() not in os.environ:
+                os.environ[_key.strip()] = _val.strip()
 from typing import Callable, TypeVar
 
 from core.enums import OutputTarget, StageStatus
@@ -26,7 +37,6 @@ from modules.workflow.project_shape_helpers import (
 )
 from modules.workflow.workflow_result import WorkflowBuildResult
 from modules.workflow.stage_helpers import build_artifacts_payload
-from pydub import AudioSegment
 from services import config_loader
 from services.alignment.aligner import PostTTSBudgetTracker, SegmentAligner
 from services.audio.separator import AudioSeparationError, AudioSeparationResult
@@ -70,6 +80,7 @@ from services.voice.sample_extractor import (
     VoiceSampleExtractor,
 )
 from services.voice.voice_lookup import VoiceLookupError, lookup_voice_ids
+from utils.audio_utils import measure_duration_ms as _ffprobe_duration_ms
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -90,6 +101,109 @@ FAILED_SEGMENT_SEMANTIC_SPLIT_PATTERN = re.compile(r"(?<=[。！？!?；;])\s*")
 FAILED_SEGMENT_SOURCE_SPLIT_PATTERN = re.compile(r"(?<=[.!?;])\s+")
 
 T = TypeVar("T")
+
+_ADMIN_SETTINGS_PATH = "/opt/aivideotrans/config/admin_settings.json"
+
+
+def _should_skip_translation_config() -> bool:
+    """Check if translation config should be auto-approved for normal users."""
+    try:
+        if os.path.exists(_ADMIN_SETTINGS_PATH):
+            with open(_ADMIN_SETTINGS_PATH) as f:
+                settings = json.load(f)
+            return bool(settings.get("skip_translation_config_for_users", True))
+    except Exception:
+        pass
+    return True  # Default: skip for users
+
+
+def _should_skip_all_reviews() -> bool:
+    """Check if all review gates should be skipped (free user / full-auto mode).
+
+    When True, the pipeline runs fully automatically:
+    speaker review → auto-approve, voice review → auto-assign,
+    translation config → auto-select, translation review → skip.
+    """
+    try:
+        if os.path.exists(_ADMIN_SETTINGS_PATH):
+            with open(_ADMIN_SETTINGS_PATH) as f:
+                settings = json.load(f)
+            return bool(settings.get("skip_all_reviews_for_free_users", True))
+    except Exception:
+        pass
+    return True  # Default: full-auto for free users
+
+
+def _get_default_translation_model() -> str:
+    """Get default translation model from admin settings."""
+    try:
+        if os.path.exists(_ADMIN_SETTINGS_PATH):
+            with open(_ADMIN_SETTINGS_PATH) as f:
+                settings = json.load(f)
+            return str(settings.get("translation_model", "deepseek"))
+    except Exception:
+        pass
+    return "deepseek"
+
+
+FREE_USER_MAX_DURATION_MINUTES = 10
+
+
+def _is_pre_tts_rewrite_enabled() -> bool:
+    """Check if pre-TTS rewrite is enabled from admin settings."""
+    try:
+        if os.path.exists(_ADMIN_SETTINGS_PATH):
+            with open(_ADMIN_SETTINGS_PATH) as f:
+                settings = json.load(f)
+            return bool(settings.get("enable_pre_tts_rewrite", True))
+    except Exception:
+        pass
+    return True  # Default: enabled
+
+
+def _get_free_user_max_duration() -> float:
+    """Get max video duration in minutes for free users from admin settings."""
+    try:
+        if os.path.exists(_ADMIN_SETTINGS_PATH):
+            with open(_ADMIN_SETTINGS_PATH) as f:
+                settings = json.load(f)
+            return float(settings.get("free_user_max_duration_minutes", FREE_USER_MAX_DURATION_MINUTES))
+    except Exception:
+        pass
+    return FREE_USER_MAX_DURATION_MINUTES
+
+
+def _check_duration_limit(duration_ms: int) -> None:
+    """Check video duration against free user limit. Raise if exceeded."""
+    if not _should_skip_all_reviews():
+        return  # Paid users: no limit enforced here
+    max_minutes = _get_free_user_max_duration()
+    actual_minutes = duration_ms / 60_000
+    if actual_minutes > max_minutes:
+        raise RuntimeError(
+            f"视频时长 {actual_minutes:.1f} 分钟超出免费用户限制（{max_minutes:.0f} 分钟）。"
+            f"请使用更短的视频，或升级到付费版本。"
+        )
+    print(f"[S1] 视频时长 {actual_minutes:.1f} 分钟，免费限制 {max_minutes:.0f} 分钟内。")
+
+
+def _check_disk_space(project_dir: Path, estimated_duration_minutes: float) -> None:
+    """Check if enough disk space for processing."""
+    estimated_gb = estimated_duration_minutes * 0.035  # ~35 MB/min
+    free_gb = shutil.disk_usage(project_dir).free / (1024**3)
+    if free_gb < estimated_gb * 1.5:
+        raise RuntimeError(
+            f"磁盘空间不足：需要约 {estimated_gb:.1f}GB，当前可用 {free_gb:.1f}GB"
+        )
+    print(f"[S1] 磁盘空间检查: 需要约 {estimated_gb:.1f}GB, 可用 {free_gb:.1f}GB ✓")
+
+
+def _cleanup_upload_mp3(project_dir: Path) -> None:
+    """Delete the temporary MP3 created for AssemblyAI upload."""
+    upload_mp3 = project_dir / "audio" / "original_upload.mp3"
+    if upload_mp3.exists():
+        upload_mp3.unlink()
+        print("[S1] 清理临时上传文件 original_upload.mp3")
 
 
 @dataclass(slots=True)
@@ -336,8 +450,7 @@ class ProcessPipeline:
                 ambient_audio_path=ambient_audio_path,
             )
 
-            actual_audio = AudioSegment.from_wav(str(source_audio_path))
-            actual_duration_ms = len(actual_audio)
+            actual_duration_ms = _ffprobe_duration_ms(source_audio_path)
             print(
                 f"[S0] 完成：标题={download_result.video_title}，"
                 f"时长={round(download_result.duration_ms / 1000, 2)}秒"
@@ -346,6 +459,12 @@ class ProcessPipeline:
                 f"[S0] 音频实际时长：{round(actual_duration_ms / 1000, 2)}秒"
                 f"（yt-dlp报告：{round(download_result.duration_ms / 1000, 2)}秒）"
             )
+
+            # --- 免费用户时长限制 ---
+            _check_duration_limit(actual_duration_ms)
+
+            # --- 磁盘空间预检 ---
+            _check_disk_space(final_project_dir, actual_duration_ms / 60_000)
 
             transcriber = AssemblyAITranscriber(
                 str(assemblyai_config["api_key"]),
@@ -416,6 +535,9 @@ class ProcessPipeline:
             if transcript_path.exists() and not transcript_result.lines:
                 print(f"[S1] 完成：共 {len(transcript_result.lines)} 条转录")
 
+            # --- 清理转录上传临时文件 ---
+            _cleanup_upload_mp3(final_project_dir)
+
             if normalized_speakers == "auto":
                 detected_speaker_ids = self._detect_speaker_ids(transcript_result.lines)
                 detected_count = len(detected_speaker_ids)
@@ -457,81 +579,97 @@ class ProcessPipeline:
                 speaker_name=speaker_name_b,
             )
 
-            if effective_speakers in {1, 2} and (
-                speaker_name_a_is_placeholder or speaker_name_b_is_placeholder
-            ):
-                infer_speaker_names = getattr(translator, "infer_speaker_names", None)
-                if callable(infer_speaker_names):
-                    print("[S2] Inferring speaker identities...")
-                    inferred_speaker_names = infer_speaker_names(
-                        transcript_result.lines,
-                        num_speakers=effective_speakers,
-                        video_title=download_result.video_title,
-                        youtube_url=normalized_url,
-                        video_description=download_result.description,
-                    )
-                    if speaker_name_a_is_placeholder:
-                        speaker_name_a = inferred_speaker_names.get("speaker_a", speaker_name_a)
-                    if speaker_name_b_is_placeholder:
-                        speaker_name_b = inferred_speaker_names.get("speaker_b", speaker_name_b)
+            # --- Unified LLM transcript review (replaces 4 separate calls) ---
+            _review_glossary: dict[str, str] = {}
+            _review_speaker_styles: dict[str, dict] = {}
 
-                    print("[S2] Speaker identity result:")
-                    print(f"  Speaker A -> {speaker_name_a}")
-                    if effective_speakers == 2:
-                        print(f"  Speaker B -> {speaker_name_b}")
-                else:
-                    print("[S2] Speaker inference unavailable, keeping configured speaker names.")
+            if not s3_cache_hit:  # Always run LLM review (not a user review gate)
+                print("[S2] Running unified LLM transcript review (audio + text)...")
+                try:
+                    from src.services.transcript_reviewer import review_transcript
 
-            if effective_speakers == 2:
-                if s3_cache_hit:
-                    print("[S2] Translation cache hit, skipping speaker review.")
-                elif not config.skip_review:
-                    print("[S2] Reviewing speaker labels...")
-                    transcript_result_before_review = transcript_result
-                    reviewed_lines = translator.review_speaker_labels(
+                    # Load words data for split point estimation
+                    _words_data: list[dict] | None = None
+                    try:
+                        import json as _json
+                        raw_path = transcript_result.raw_response_path
+                        if raw_path and Path(raw_path).exists():
+                            with open(raw_path) as _f:
+                                _raw = _json.load(_f)
+                            _words_data = _raw.get("words")
+                    except Exception:
+                        pass
+
+                    review_result = review_transcript(
                         transcript_result.lines,
-                        {
-                            "speaker_a": speaker_name_a,
-                            "speaker_b": speaker_name_b,
-                        },
+                        audio_path=source_audio_path if source_audio_path.exists() else None,
                         video_title=download_result.video_title,
-                        youtube_url=normalized_url,
+                        video_url=normalized_url,
+                        words_data=_words_data,
                     )
-                    corrections = sum(
-                        1
-                        for orig, rev in zip(
-                            transcript_result_before_review.lines,
-                            reviewed_lines,
-                        )
-                        if orig.speaker_id != rev.speaker_id
-                    )
-                    if corrections > 0:
-                        print(f"[S2] Corrected {corrections} speaker label(s).")
-                        for orig, rev in zip(
-                            transcript_result_before_review.lines,
-                            reviewed_lines,
-                        ):
-                            if orig.speaker_id != rev.speaker_id:
-                                duration_seconds = round((orig.end_ms - orig.start_ms) / 1000, 1)
-                                time_minutes = orig.start_ms // 60000
-                                time_seconds = (orig.start_ms % 60000) // 1000
-                                print(
-                                    f"    #{orig.index} ({time_minutes:02d}:{time_seconds:02d}, "
-                                    f"{duration_seconds}s) {orig.speaker_id} -> {rev.speaker_id}: "
-                                    f"\"{orig.source_text[:50]}\""
-                                )
-                        transcript_result = TranscriptResult(
-                            lines=reviewed_lines,
-                            total_duration_ms=transcript_result.total_duration_ms,
-                            language=transcript_result.language,
-                            raw_response_path=transcript_result.raw_response_path,
-                            structured_transcript_path=transcript_result.structured_transcript_path,
-                        )
-                        self._write_transcript_result(transcript_result)
+
+                    if review_result is not None:
+                        # Update speaker names from review
+                        for spk_id, spk_info in review_result.speakers.items():
+                            name = spk_info.get("name", "")
+                            if name:
+                                if spk_id == "speaker_a" and speaker_name_a_is_placeholder:
+                                    speaker_name_a = name
+                                elif spk_id == "speaker_b" and speaker_name_b_is_placeholder:
+                                    speaker_name_b = name
+
+                        print("[S2] Speaker identity result:")
+                        print(f"  Speaker A -> {speaker_name_a}")
+                        if effective_speakers == 2:
+                            print(f"  Speaker B -> {speaker_name_b}")
+
+                        # Apply corrections to transcript
+                        if review_result.corrections_applied > 0:
+                            print(f"[S2] Applied {review_result.corrections_applied} correction(s).")
+                            for orig, rev in zip(transcript_result.lines, review_result.lines):
+                                if orig.speaker_id != rev.speaker_id:
+                                    duration_seconds = round((orig.end_ms - orig.start_ms) / 1000, 1)
+                                    time_minutes = orig.start_ms // 60000
+                                    time_seconds = (orig.start_ms % 60000) // 1000
+                                    print(
+                                        f"    #{orig.index} ({time_minutes:02d}:{time_seconds:02d}, "
+                                        f"{duration_seconds}s) {orig.speaker_id} -> {rev.speaker_id}: "
+                                        f"\"{orig.source_text[:50]}\""
+                                    )
+                            transcript_result = TranscriptResult(
+                                lines=review_result.lines,
+                                total_duration_ms=transcript_result.total_duration_ms,
+                                language=transcript_result.language,
+                                raw_response_path=transcript_result.raw_response_path,
+                                structured_transcript_path=transcript_result.structured_transcript_path,
+                            )
+                            self._write_transcript_result(transcript_result)
+
+                        # Save glossary and styles for translation stage
+                        _review_glossary = review_result.glossary
+                        _review_speaker_styles = review_result.speakers
+
+                        print(f"[S2] Glossary: {len(_review_glossary)} terms")
+                        print(f"[S2] Lines: {len(transcript_result.lines)} (was {len(review_result.lines)})")
                     else:
-                        print("[S2] Speaker labels look correct.")
-                else:
-                    print("[S2] Skipping speaker review (--skip-review).")
+                        print("[S2] Unified review returned None, falling back to legacy...")
+                        # Fallback: use old separate calls
+                        self._legacy_speaker_inference_and_review(
+                            translator, transcript_result, effective_speakers,
+                            speaker_name_a, speaker_name_b, speaker_name_a_is_placeholder,
+                            speaker_name_b_is_placeholder, download_result, normalized_url,
+                        )
+                except Exception as exc:
+                    print(f"[S2] Unified review failed ({exc}), falling back to legacy...")
+                    self._legacy_speaker_inference_and_review(
+                        translator, transcript_result, effective_speakers,
+                        speaker_name_a, speaker_name_b, speaker_name_a_is_placeholder,
+                        speaker_name_b_is_placeholder, download_result, normalized_url,
+                    )
+            elif s3_cache_hit:
+                print("[S2] Translation cache hit, skipping review.")
+            else:
+                print("[S2] Skipping review (--skip-review).")
 
             approved_speaker_review = self._get_approved_review_payload(
                 review_state_manager,
@@ -550,42 +688,10 @@ class ProcessPipeline:
                 self._write_transcript_result(transcript_result)
                 print("[S2] Applied approved speaker review overrides.")
             elif config.wait_for_review:
+                # Unified review: skip speaker review pause, auto-approve
+                # Speaker adjustments merged into translation review
                 self._write_transcript_result(transcript_result)
-                review_state_manager.set_stage(
-                    SPEAKER_REVIEW_STAGE,
-                    status=REVIEW_STATUS_PENDING,
-                    payload=self._build_speaker_review_payload(
-                        transcript_result=transcript_result,
-                        speaker_name_a=speaker_name_a,
-                        speaker_name_b=speaker_name_b,
-                        effective_speakers=effective_speakers,
-                    ),
-                    activate=True,
-                )
-                review_message = "等待在 Web UI 确认说话人名字和分段归属。"
-                print(f"[S2] {review_message}")
-                state_manager.set_stage(
-                    current_stage_name,
-                    StageStatus.DONE,
-                    self._build_media_understanding_stage_payload(
-                        transcript_result=transcript_result,
-                        effective_speakers=effective_speakers,
-                        execution_mode=media_execution_mode,
-                    ),
-                )
-                current_stage_name = None
-                print(
-                    self._build_web_review_marker(
-                        stage=SPEAKER_REVIEW_STAGE,
-                        project_dir=final_project_dir,
-                        message=review_message,
-                    )
-                )
-                return self._build_paused_result(
-                    project_dir=final_project_dir,
-                    stage=SPEAKER_REVIEW_STAGE,
-                    message=review_message,
-                )
+                print("[S2] 说话人审核已合并到统一审核，自动跳过。")
 
             if s3_cache_hit:
                 print("[S3] 已有翻译结果，跳过翻译")
@@ -618,101 +724,21 @@ class ProcessPipeline:
                     voice_id_b = approved_voice_b
                     print(f"[S2] 用户确认 Speaker B 音色: {voice_id_b}")
             elif config.wait_for_review:
-                # Only do registry lookup — NO auto-cloning before voice review.
-                # Let the user decide whether to clone, use existing, or input Voice ID.
+                # Unified review: skip voice review pause, auto-assign from registry
                 from services.voice_registry import VoiceRegistry, VoiceResolver
                 registry = VoiceRegistry(str(voice_registry_path))
                 resolver = VoiceResolver(registry)
-
-                # Check registry for existing voices
                 resolution_a = resolver.resolve("speaker_a")
                 if resolution_a.resolved and resolution_a.voice_id:
                     voice_id_a = resolution_a.voice_id
-                    print(f"[S2] Speaker A 音色库匹配: {voice_id_a}")
-                else:
-                    print("[S2] Speaker A 音色库未匹配")
-
+                    print(f"[S2] Speaker A 音色自动匹配: {voice_id_a}")
                 resolution_b = None
                 if effective_speakers == 2:
                     resolution_b = resolver.resolve("speaker_b")
                     if resolution_b.resolved and resolution_b.voice_id:
                         voice_id_b = resolution_b.voice_id
-                        print(f"[S2] Speaker B 音色库匹配: {voice_id_b}")
-                    else:
-                        print("[S2] Speaker B 音色库未匹配")
-
-                # Resolve sample paths for potential cloning
-                sample_dir = final_project_dir / "voice_samples" if final_project_dir else None
-                sample_path_a = None
-                sample_path_b = None
-                if sample_dir and sample_dir.exists():
-                    for f in sample_dir.iterdir():
-                        if f.is_file() and f.suffix == ".wav":
-                            fname = f.name.lower()
-                            if not sample_path_a:
-                                sample_path_a = str(f)
-                            elif not sample_path_b:
-                                sample_path_b = str(f)
-
-                # Build speaker info for voice review
-                speaker_voice_info = []
-                speaker_voice_info.append({
-                    "speaker_id": "speaker_a",
-                    "speaker_label": "Speaker A",
-                    "speaker_name": speaker_name_a or "Speaker A",
-                    "voice_arg_name": voice_id_a,
-                    "sample_path": sample_path_a,
-                    "sample_duration_s": 0.0,
-                    "silence_ratio": 0.0,
-                    "auto_resolved_voice_id": voice_id_a,
-                })
-                if effective_speakers == 2:
-                    speaker_voice_info.append({
-                        "speaker_id": "speaker_b",
-                        "speaker_label": "Speaker B",
-                        "speaker_name": speaker_name_b or "Speaker B",
-                        "voice_arg_name": voice_id_b,
-                        "sample_path": sample_path_b or sample_path_a,
-                        "sample_duration_s": 0.0,
-                        "silence_ratio": 0.0,
-                        "auto_resolved_voice_id": voice_id_b,
-                    })
-
-                self._write_transcript_result(transcript_result)
-                review_message = "请确认各发言人的音色配置，可试听、克隆或手动输入 Voice ID。"
-                review_state_manager.set_stage(
-                    VOICE_REVIEW_STAGE,
-                    status=REVIEW_STATUS_PENDING,
-                    payload={
-                        "reason": "voice_confirmation",
-                        "message": review_message,
-                        "speakers": speaker_voice_info,
-                    },
-                    activate=True,
-                )
-                print(f"[S2] {review_message}")
-                state_manager.set_stage(
-                    current_stage_name,
-                    StageStatus.DONE,
-                    self._build_media_understanding_stage_payload(
-                        transcript_result=transcript_result,
-                        effective_speakers=effective_speakers,
-                        execution_mode=media_execution_mode,
-                    ),
-                )
-                current_stage_name = None
-                print(
-                    self._build_web_review_marker(
-                        stage=VOICE_REVIEW_STAGE,
-                        project_dir=final_project_dir,
-                        message=review_message,
-                    )
-                )
-                return self._build_paused_result(
-                    project_dir=final_project_dir,
-                    stage=VOICE_REVIEW_STAGE,
-                    message=review_message,
-                )
+                        print(f"[S2] Speaker B 音色自动匹配: {voice_id_b}")
+                print("[S2] 音色审核已合并到统一审核，自动跳过。")
             else:
                 # Non-interactive mode: try auto-resolve, fail on error
                 try:
@@ -751,35 +777,44 @@ class ProcessPipeline:
                 and not s3_cache_hit
                 and approved_translation_config is None
             ):
-                review_state_manager.set_stage(
-                    TRANSLATION_CONFIG_REVIEW_STAGE,
-                    status=REVIEW_STATUS_PENDING,
-                    payload=self._build_translation_config_review_payload(
-                        transcript_result=transcript_result,
-                        translator=translator,
-                    ),
-                    activate=True,
-                )
-                review_message = "等待确认翻译配置（模型和提示词），再开始翻译。"
-                print(f"[S3] {review_message}")
-                state_manager.set_stage(
-                    current_stage_name,
-                    StageStatus.RUNNING,
-                    {"execution_mode": "waiting_for_translation_config"},
-                )
-                current_stage_name = None
-                print(
-                    self._build_web_review_marker(
-                        stage=TRANSLATION_CONFIG_REVIEW_STAGE,
+                # Auto-skip translation config review if admin settings say so
+                if _should_skip_translation_config():
+                    default_model = _get_default_translation_model()
+                    print(f"[S3] 自动使用默认翻译模型: {default_model}")
+                    approved_translation_config = {
+                        "selected_model": default_model,
+                        "prompt_template": None,
+                    }
+                else:
+                    review_state_manager.set_stage(
+                        TRANSLATION_CONFIG_REVIEW_STAGE,
+                        status=REVIEW_STATUS_PENDING,
+                        payload=self._build_translation_config_review_payload(
+                            transcript_result=transcript_result,
+                            translator=translator,
+                        ),
+                        activate=True,
+                    )
+                    review_message = "等待确认翻译配置（模型和提示词），再开始翻译。"
+                    print(f"[S3] {review_message}")
+                    state_manager.set_stage(
+                        current_stage_name,
+                        StageStatus.RUNNING,
+                        {"execution_mode": "waiting_for_translation_config"},
+                    )
+                    current_stage_name = None
+                    print(
+                        self._build_web_review_marker(
+                            stage=TRANSLATION_CONFIG_REVIEW_STAGE,
+                            project_dir=final_project_dir,
+                            message=review_message,
+                        )
+                    )
+                    return self._build_paused_result(
                         project_dir=final_project_dir,
+                        stage=TRANSLATION_CONFIG_REVIEW_STAGE,
                         message=review_message,
                     )
-                )
-                return self._build_paused_result(
-                    project_dir=final_project_dir,
-                    stage=TRANSLATION_CONFIG_REVIEW_STAGE,
-                    message=review_message,
-                )
 
             # Apply translation config from approved review if available
             if approved_translation_config is not None:
@@ -809,6 +844,7 @@ class ProcessPipeline:
                     display_name_b=speaker_name_b if effective_speakers == 2 else None,
                     video_title=download_result.video_title,
                     youtube_url=normalized_url,
+                    glossary=_review_glossary or None,
                 )
                 print(f"[S3] 完成：共 {translation_result.total_segments} 段")
 
@@ -849,36 +885,47 @@ class ProcessPipeline:
             elif config.wait_for_review:
                 if approved_translation_review is not None and not reuse_approved_translation_review:
                     print("[S3] Ignoring stale approved translation review from a previous run.")
-                self._write_segments_snapshot(translation_result)
-                review_state_manager.set_stage(
-                    TRANSLATION_REVIEW_STAGE,
-                    status=REVIEW_STATUS_PENDING,
-                    payload=self._build_translation_review_payload(translation_result),
-                    activate=True,
-                )
-                review_message = "等待在 Web UI 确认翻译稿，再继续 TTS 和对齐。"
-                print(f"[S3] {review_message}")
-                state_manager.set_stage(
-                    current_stage_name,
-                    StageStatus.DONE,
-                    self._build_translation_stage_payload(
-                        translation_result=translation_result,
-                        execution_mode=translation_execution_mode,
-                    ),
-                )
-                current_stage_name = None
-                print(
-                    self._build_web_review_marker(
-                        stage=TRANSLATION_REVIEW_STAGE,
+                # Check if we should skip translation review (free user / full-auto mode)
+                if _should_skip_all_reviews():
+                    self._write_segments_snapshot(translation_result)
+                    print("[S3] 免费用户全自动模式，跳过翻译审核。")
+                else:
+                    self._write_segments_snapshot(translation_result)
+                    _unified_review_payload = self._build_translation_review_payload(translation_result)
+                    _unified_review_payload["speaker_name_a"] = speaker_name_a
+                    _unified_review_payload["speaker_name_b"] = speaker_name_b
+                    _unified_review_payload["voice_id_a"] = voice_id_a
+                    _unified_review_payload["voice_id_b"] = voice_id_b or ""
+                    _unified_review_payload["effective_speakers"] = effective_speakers
+                    review_state_manager.set_stage(
+                        TRANSLATION_REVIEW_STAGE,
+                        status=REVIEW_STATUS_PENDING,
+                        payload=_unified_review_payload,
+                        activate=True,
+                    )
+                    review_message = "等待在 Web UI 确认翻译稿，再继续 TTS 和对齐。"
+                    print(f"[S3] {review_message}")
+                    state_manager.set_stage(
+                        current_stage_name,
+                        StageStatus.DONE,
+                        self._build_translation_stage_payload(
+                            translation_result=translation_result,
+                            execution_mode=translation_execution_mode,
+                        ),
+                    )
+                    current_stage_name = None
+                    print(
+                        self._build_web_review_marker(
+                            stage=TRANSLATION_REVIEW_STAGE,
+                            project_dir=final_project_dir,
+                            message=review_message,
+                        )
+                    )
+                    return self._build_paused_result(
                         project_dir=final_project_dir,
+                        stage=TRANSLATION_REVIEW_STAGE,
                         message=review_message,
                     )
-                )
-                return self._build_paused_result(
-                    project_dir=final_project_dir,
-                    stage=TRANSLATION_REVIEW_STAGE,
-                    message=review_message,
-                )
 
             state_manager.set_stage(
                 current_stage_name,
@@ -896,6 +943,27 @@ class ProcessPipeline:
                     "execution_mode": "legacy_process",
                 },
             )
+            # Inject voice_description from LLM review into segments for MiMo TTS
+            # Combine speaker name + voice description for better TTS accuracy
+            if _review_speaker_styles:
+                for segment in translation_result.segments:
+                    spk_info = _review_speaker_styles.get(segment.speaker_id, {})
+                    name = spk_info.get("name", "")
+                    vd = spk_info.get("voice_description", "")
+                    # Combine: "Becky Quick (CNBC主持人): 中年女性，声音清晰专业..."
+                    if name and vd:
+                        segment.voice_description = f"{name}: {vd}"
+                    elif vd:
+                        segment.voice_description = vd
+                    elif name:
+                        segment.voice_description = name
+                print(f"[S4] 注入音色描述：{len(_review_speaker_styles)} 个说话人")
+                for spk_id, spk_info in _review_speaker_styles.items():
+                    name = spk_info.get("name", "")
+                    vd = spk_info.get("voice_description", "")
+                    combined = f"{name}: {vd}" if name and vd else vd or name
+                    print(f"  {spk_id}: {combined[:80]}{'...' if len(combined) > 80 else ''}")
+
             tts_generator = TTSGenerator(tts_config)
             tts_dir = (final_project_dir / "tts").resolve(strict=False)
             rewriter_kwargs: dict[str, object] = {}
@@ -943,18 +1011,21 @@ class ProcessPipeline:
                 else:
                     print("[S4] 所有TTS音频已缓存，跳过生成")
             else:
-                pre_tts_rewriter = GeminiRewriter(translator, **rewriter_kwargs)
-                pre_tts_rewrite_count = self._pre_rewrite_obvious_overshoot_segments_before_tts(
-                    segments=translation_result.segments,
-                    rewriter=pre_tts_rewriter,
-                    chars_per_second=pre_tts_rewriter.chars_per_second,
-                    chars_per_second_by_speaker=pre_tts_rewriter.chars_per_second_by_speaker,
-                )
-                if pre_tts_rewrite_count > 0:
-                    print(
-                        f"[S4] Pre-rewrote {pre_tts_rewrite_count} obvious long segment(s) "
-                        "before TTS generation."
+                if _is_pre_tts_rewrite_enabled():
+                    pre_tts_rewriter = GeminiRewriter(translator, **rewriter_kwargs)
+                    pre_tts_rewrite_count = self._pre_rewrite_obvious_overshoot_segments_before_tts(
+                        segments=translation_result.segments,
+                        rewriter=pre_tts_rewriter,
+                        chars_per_second=pre_tts_rewriter.chars_per_second,
+                        chars_per_second_by_speaker=pre_tts_rewriter.chars_per_second_by_speaker,
                     )
+                    if pre_tts_rewrite_count > 0:
+                        print(
+                            f"[S4] Pre-rewrote {pre_tts_rewrite_count} obvious long segment(s) "
+                            "before TTS generation."
+                        )
+                else:
+                    print("[S4] Pre-TTS 预重写已关闭（管理员设置）")
                 print("[S4] 生成TTS音频...")
                 tts_results = tts_generator.generate_all(
                     translation_result.segments,
@@ -1458,9 +1529,8 @@ class ProcessPipeline:
                 segments_needing_tts.append(segment)
                 continue
 
-            cached_audio = AudioSegment.from_wav(str(cached_path))
             segment.tts_audio_path = str(cached_path.resolve(strict=False))
-            segment.actual_duration_ms = len(cached_audio)
+            segment.actual_duration_ms = _ffprobe_duration_ms(cached_path)
             segment.tts_cn_text = segment.tts_cn_text or segment.cn_text
             if segment.target_duration_ms > 0:
                 segment.alignment_ratio = segment.actual_duration_ms / segment.target_duration_ms
@@ -1570,6 +1640,63 @@ class ProcessPipeline:
         )
         print(f"[S2] {speaker_label} 已写入音色库")
         return voice_id
+
+    def _legacy_speaker_inference_and_review(
+        self,
+        translator,
+        transcript_result,
+        effective_speakers,
+        speaker_name_a,
+        speaker_name_b,
+        speaker_name_a_is_placeholder,
+        speaker_name_b_is_placeholder,
+        download_result,
+        normalized_url,
+    ):
+        """Fallback: use old separate LLM calls for speaker inference + review."""
+        if effective_speakers in {1, 2} and (
+            speaker_name_a_is_placeholder or speaker_name_b_is_placeholder
+        ):
+            infer_fn = getattr(translator, "infer_speaker_names", None)
+            if callable(infer_fn):
+                print("[S2-legacy] Inferring speaker identities...")
+                inferred = infer_fn(
+                    transcript_result.lines,
+                    num_speakers=effective_speakers,
+                    video_title=download_result.video_title,
+                    youtube_url=normalized_url,
+                    video_description=download_result.description,
+                )
+                if speaker_name_a_is_placeholder:
+                    speaker_name_a = inferred.get("speaker_a", speaker_name_a)
+                if speaker_name_b_is_placeholder:
+                    speaker_name_b = inferred.get("speaker_b", speaker_name_b)
+                print(f"[S2-legacy] Speaker A -> {speaker_name_a}")
+                if effective_speakers == 2:
+                    print(f"[S2-legacy] Speaker B -> {speaker_name_b}")
+
+        if effective_speakers == 2:
+            print("[S2-legacy] Reviewing speaker labels...")
+            reviewed = translator.review_speaker_labels(
+                transcript_result.lines,
+                {"speaker_a": speaker_name_a, "speaker_b": speaker_name_b},
+                video_title=download_result.video_title,
+                youtube_url=normalized_url,
+            )
+            corrections = sum(
+                1 for o, r in zip(transcript_result.lines, reviewed)
+                if o.speaker_id != r.speaker_id
+            )
+            if corrections > 0:
+                print(f"[S2-legacy] Corrected {corrections} speaker label(s).")
+                transcript_result = TranscriptResult(
+                    lines=reviewed,
+                    total_duration_ms=transcript_result.total_duration_ms,
+                    language=transcript_result.language,
+                    raw_response_path=transcript_result.raw_response_path,
+                    structured_transcript_path=transcript_result.structured_transcript_path,
+                )
+                self._write_transcript_result(transcript_result)
 
     def _is_default_placeholder_speaker_name(self, *, speaker_id: str, speaker_name: str) -> bool:
         normalized_speaker_id = speaker_id.strip().casefold()
@@ -1734,7 +1861,7 @@ class ProcessPipeline:
             tts_audio_path = Path(str(segment.tts_audio_path or "")).resolve(strict=False)
             if not tts_audio_path.exists():
                 return False
-            actual_duration_ms = len(AudioSegment.from_wav(str(tts_audio_path)))
+            actual_duration_ms = _ffprobe_duration_ms(tts_audio_path)
             segment.actual_duration_ms = actual_duration_ms
             segment.alignment_ratio = actual_duration_ms / target_duration_ms
 
@@ -1891,7 +2018,7 @@ class ProcessPipeline:
         if not tts_audio_path.exists():
             return
 
-        current_actual_duration_ms = len(AudioSegment.from_wav(str(tts_audio_path)))
+        current_actual_duration_ms = _ffprobe_duration_ms(tts_audio_path)
         child_segment.actual_duration_ms = current_actual_duration_ms
         if child_segment.target_duration_ms > 0:
             child_segment.alignment_ratio = current_actual_duration_ms / child_segment.target_duration_ms
@@ -1915,7 +2042,7 @@ class ProcessPipeline:
 
             refreshed_tts_path = Path(str(child_segment.tts_audio_path or "")).resolve(strict=False)
             if refreshed_tts_path.exists():
-                refreshed_duration_ms = len(AudioSegment.from_wav(str(refreshed_tts_path)))
+                refreshed_duration_ms = _ffprobe_duration_ms(refreshed_tts_path)
                 child_segment.actual_duration_ms = refreshed_duration_ms
                 if child_segment.target_duration_ms > 0:
                     child_segment.alignment_ratio = (

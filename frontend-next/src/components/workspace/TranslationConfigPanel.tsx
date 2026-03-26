@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 
-import { ApiError } from '@/lib/api/client'
+import { getErrorMessage } from '@/lib/api/errors'
 import { approveTranslationConfigReview, getTranslationConfigReview } from '@/lib/api/reviews'
 import { usePollingTask } from '@/lib/react/usePollingTask'
 
@@ -69,7 +69,7 @@ export function TranslationConfigPanel({ jobId, onAdvanced }: TranslationConfigP
   }
 
   if (isLoading && !configData && !pageError) {
-    return <PanelLoading message="正在读取翻译配置信息..." />
+    return <PanelLoading message="正在读取翻译配置信息…" />
   }
   if (pageError && !configData) {
     return <PanelError message={pageError} />
@@ -87,7 +87,7 @@ export function TranslationConfigPanel({ jobId, onAdvanced }: TranslationConfigP
           onClick={() => { void handleSubmit() }}
           type="button"
         >
-          {submitState === 'submitting' ? '确认中...' : '✓ 确认并开始翻译'}
+          {submitState === 'submitting' ? '确认中…' : '✓ 确认并开始翻译'}
         </button>
       </div>
 
@@ -101,7 +101,7 @@ export function TranslationConfigPanel({ jobId, onAdvanced }: TranslationConfigP
             <span className="text-xs font-medium text-muted-foreground mb-2 block">翻译模型</span>
             <div className="group rounded-xl border border-border bg-muted/30 transition hover:border-primary/30 focus-within:border-primary/40">
               <select
-                className="w-full rounded-xl bg-transparent px-4 py-3 text-sm text-foreground focus:outline-none"
+                className="w-full rounded-xl bg-transparent px-4 py-3 text-sm text-foreground focus:outline-none input-focus-ring"
                 disabled={submitState === 'submitting'}
                 onChange={(e) => setSelectedModel(e.target.value)}
                 value={selectedModel}
@@ -121,7 +121,7 @@ export function TranslationConfigPanel({ jobId, onAdvanced }: TranslationConfigP
             <span className="text-xs font-medium text-muted-foreground mb-2 block">翻译提示词</span>
             <div className="group rounded-xl border border-border bg-muted/30 transition hover:border-primary/30 focus-within:border-primary/40">
               <textarea
-                className="w-full min-h-[300px] rounded-xl bg-transparent px-4 py-3 font-mono text-xs leading-relaxed text-foreground placeholder:text-muted-foreground/60 focus:outline-none"
+                className="w-full min-h-[300px] rounded-xl bg-transparent px-4 py-3 font-mono text-xs leading-relaxed text-foreground placeholder:text-muted-foreground/60 focus:outline-none input-focus-ring"
                 disabled={submitState === 'submitting'}
                 onChange={(e) => setPromptTemplate(e.target.value)}
                 value={promptTemplate}
@@ -183,10 +183,4 @@ function ErrorBanner({ message }: { message: string }) {
       {message}
     </div>
   )
-}
-
-function getErrorMessage(error: unknown) {
-  if (error instanceof ApiError) return error.message
-  if (error instanceof Error) return error.message
-  return '请求失败，请稍后重试。'
 }

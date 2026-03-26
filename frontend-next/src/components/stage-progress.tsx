@@ -31,7 +31,7 @@ export function StageProgress({ items }: { items: readonly StageProgressItem[] }
               className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-semibold ${stateStyles[item.state]}`}
               title={item.description}
             >
-              {item.state === "complete" ? "✓" : index + 1}
+              {item.state === "complete" ? <span aria-hidden="true">✓</span> : index + 1}
             </div>
             <span className={`text-[10px] leading-tight text-center whitespace-nowrap ${labelStyles[item.state]}`}>
               {item.label}

@@ -7,6 +7,7 @@ import { toast } from "sonner"
 import { StatusBadge } from "@/components/status-badge"
 import { getJobDisplayTitle, getStageLabel } from "@/features/jobs/presentation"
 import { ApiError } from "@/lib/api/client"
+import { getErrorMessage } from '@/lib/api/errors'
 import { estimateCosts, formatCostCny } from "@/lib/cost/estimator"
 import { getCurrentJob, submitTranslationJob } from "@/lib/api/jobs"
 import { getVoiceLibrary, type VoiceLibraryEntry } from "@/lib/api/voiceLibrary"
@@ -76,7 +77,9 @@ export default function NewTranslationPage() {
       setActiveJob(createdJob)
       setSubmitState("success")
       toast.success(`任务已创建：${getJobDisplayTitle(createdJob)}`)
-      router.push("/tasks/current")
+      // Store latest job ID for /tasks/current fallback
+      try { localStorage.setItem('avt_latest_job_id', createdJob.id) } catch {}
+      router.push(`/workspace/${createdJob.id}`)
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
         await loadActiveJob(true)
@@ -172,9 +175,9 @@ export default function NewTranslationPage() {
                 <span className="text-xs font-medium text-muted-foreground block">YouTube 链接</span>
                 <div className="group rounded-xl border border-border bg-muted/30 transition hover:border-primary/30 focus-within:border-primary/40">
                   <input
-                    className="w-full rounded-xl bg-transparent px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none"
+                    className="w-full rounded-xl bg-transparent px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none input-focus-ring"
                     type="url"
-                    placeholder="https://www.youtube.com/watch?v=..."
+                    placeholder="https://www.youtube.com/watch?v=…"
                     value={youtubeUrl}
                     onChange={(e) => {
                       setYoutubeUrl(e.target.value)
@@ -204,7 +207,7 @@ export default function NewTranslationPage() {
                 ) : (
                   <div className="group rounded-xl border border-border bg-muted/30 transition hover:border-primary/30 focus-within:border-primary/40">
                     <input
-                      className="w-full rounded-xl bg-transparent px-4 py-3 text-sm text-foreground file:mr-3 file:rounded-lg file:border-0 file:bg-primary/20 file:px-3 file:py-1 file:text-xs file:font-medium file:text-primary focus:outline-none"
+                      className="w-full rounded-xl bg-transparent px-4 py-3 text-sm text-foreground file:mr-3 file:rounded-lg file:border-0 file:bg-primary/20 file:px-3 file:py-1 file:text-xs file:font-medium file:text-primary focus:outline-none input-focus-ring"
                       type="file"
                       accept="video/*"
                       disabled={isBlockedByActiveJob || submitState === "submitting" || isUploading}
@@ -212,7 +215,7 @@ export default function NewTranslationPage() {
                         const file = event.target.files?.[0]
                         if (!file) return
                         setIsUploading(true)
-                        setUploadProgress(`正在上传 ${file.name}...`)
+                        setUploadProgress(`正在上传 ${file.name}…`)
                         try {
                           const formData = new FormData()
                           formData.append("file", file)
@@ -245,13 +248,53 @@ export default function NewTranslationPage() {
 
             <div className="h-px bg-muted/40" />
 
+            {/* Service plan selection */}
+            <div className="space-y-3">
+              <span className="text-xs font-medium text-muted-foreground block">服务方案</span>
+              <div className="grid gap-3 sm:grid-cols-2">
+                {/* Express plan - free users can select */}
+                <button
+                  type="button"
+                  className="relative rounded-xl border-2 border-primary/50 bg-primary/5 p-4 text-left transition hover:border-primary/70 ring-2 ring-primary/20"
+                  disabled={isBlockedByActiveJob || submitState === "submitting"}
+                >
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="text-lg">⚡</span>
+                    <span className="text-sm font-semibold text-foreground">快捷版</span>
+                    <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-400">免费</span>
+                  </div>
+                  <p className="text-xs text-muted-foreground leading-relaxed">自动生成，无需任何操作。AI 自动识别说话人、翻译、配音，快速便捷。</p>
+                  <div className="absolute top-3 right-3 h-4 w-4 rounded-full bg-primary flex items-center justify-center">
+                    <svg className="h-2.5 w-2.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                  </div>
+                </button>
+
+                {/* Pro plan - locked for free users */}
+                <div
+                  className="relative rounded-xl border border-border bg-muted/20 p-4 text-left opacity-60 cursor-not-allowed"
+                >
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="text-lg">🎯</span>
+                    <span className="text-sm font-semibold text-foreground">专业版</span>
+                    <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold text-amber-400">付费</span>
+                  </div>
+                  <p className="text-xs text-muted-foreground leading-relaxed">翻译文稿可审核编辑，支持克隆原声音色，更高质量的定制化配音。</p>
+                  <div className="absolute top-3 right-3 rounded-full bg-muted/50 px-2 py-0.5 text-[10px] text-muted-foreground">
+                    即将开放
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="h-px bg-muted/40" />
+
             {/* Options */}
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-2">
                 <span className="text-xs font-medium text-muted-foreground block">转录方案</span>
                 <div className="group rounded-xl border border-border bg-muted/30 transition hover:border-primary/30 focus-within:border-primary/40">
                   <select
-                    className="w-full rounded-xl bg-transparent px-4 py-3 text-sm text-foreground focus:outline-none"
+                    className="w-full rounded-xl bg-transparent px-4 py-3 text-sm text-foreground focus:outline-none input-focus-ring"
                     value={transcriptionMethod}
                     onChange={(e) => setTranscriptionMethod(e.target.value as "assemblyai" | "gemini")}
                     disabled={isBlockedByActiveJob || submitState === "submitting"}
@@ -266,7 +309,7 @@ export default function NewTranslationPage() {
                 <span className="text-xs font-medium text-muted-foreground block">说话人数</span>
                 <div className="group rounded-xl border border-border bg-muted/30 transition hover:border-primary/30 focus-within:border-primary/40">
                   <select
-                    className="w-full rounded-xl bg-transparent px-4 py-3 text-sm text-foreground focus:outline-none"
+                    className="w-full rounded-xl bg-transparent px-4 py-3 text-sm text-foreground focus:outline-none input-focus-ring"
                     value={speakers}
                     onChange={(e) => setSpeakers(e.target.value as "1" | "2" | "auto")}
                     disabled={isBlockedByActiveJob || submitState === "submitting"}
@@ -279,18 +322,30 @@ export default function NewTranslationPage() {
               </div>
             </div>
 
-            {savedVoices.length > 0 ? (
-              <p className="text-xs text-muted-foreground/60">
-                音色将在后续"音色确认"阶段配置，可选择已有音色或克隆新音色。
-              </p>
-            ) : null}
+            <p className="text-xs text-muted-foreground/60">
+              快捷版将自动完成全部流程，无需人工操作。升级专业版后可审核译文、克隆原声音色。
+            </p>
+
+            {/* 长视频提示 */}
+            <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4">
+              <p className="text-sm font-medium text-amber-400 mb-2">处理时长参考</p>
+              <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-xs text-muted-foreground">
+                <span>≤15 分钟</span><span className="text-emerald-400">约 10-20 分钟</span>
+                <span>15-30 分钟</span><span className="text-foreground/70">约 20-45 分钟</span>
+                <span>30-60 分钟</span><span className="text-amber-400">约 1-2 小时</span>
+                <span>60-120 分钟</span><span className="text-orange-400">约 2-4 小时</span>
+                <span>120-180 分钟</span><span className="text-red-400">约 3-5 小时</span>
+                <span>&gt;180 分钟</span><span className="text-red-500 font-medium">暂不支持</span>
+              </div>
+              <p className="mt-2 text-xs text-muted-foreground/60">长视频处理完成后将通过浏览器推送通知您。超过 3 小时的视频请裁剪后重试。</p>
+            </div>
 
             <button
               type="submit"
               disabled={Boolean(validationError) || isBlockedByActiveJob || submitState === "submitting" || isLoadingGuard}
               className="inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-primary to-primary/80 px-6 py-2.5 text-sm font-semibold text-white shadow-lg shadow-primary/25 transition hover:shadow-primary/40 hover:brightness-110 disabled:opacity-50"
             >
-              {submitState === "submitting" ? "创建中..." : "创建任务"}
+              {submitState === "submitting" ? "创建中…" : "创建任务"}
             </button>
           </form>
         </section>
@@ -353,10 +408,4 @@ function validateYoutubeUrl(value: string) {
   } catch {
     return "请输入有效的链接。"
   }
-}
-
-function getErrorMessage(error: unknown) {
-  if (error instanceof ApiError) return error.message
-  if (error instanceof Error) return error.message
-  return "请求失败，请稍后重试。"
 }

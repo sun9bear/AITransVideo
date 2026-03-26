@@ -22,14 +22,15 @@ DEFAULT_SDK_BACKEND = "google-genai"
 LEGACY_SDK_BACKEND = "google-generativeai"
 DEFAULT_TEMPERATURE = 0.3
 DEFAULT_MAX_OUTPUT_TOKENS = 8192
-DEFAULT_BATCH_SIZE = 5
+DEFAULT_BATCH_SIZE = 15
+PARALLEL_WORKERS = 3
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 120
 DEFAULT_MAX_RETRIES = 2
 DEFAULT_PRE_SPLIT_MAX_LINE_DURATION_MS = 60_000
 DEFAULT_PRE_SPLIT_MAX_LINE_CHARS = 2_000
 DEFAULT_MIN_SUBLINE_DURATION_MS = 1_500
-DEFAULT_MAX_SEGMENT_DURATION_MS = 90_000
-DEFAULT_SAME_SPEAKER_PAUSE_SPLIT_MS = 3_000
+DEFAULT_MAX_SEGMENT_DURATION_MS = 45_000  # 不超过 45 秒/段（与转录拆分阈值一致）
+DEFAULT_SAME_SPEAKER_PAUSE_SPLIT_MS = 1_500  # 同 speaker 停顿 ≥1.5s 也分段（保留转录拆分）
 DEFAULT_ESTIMATED_TTS_CHARS_PER_SECOND = 4.5
 TRANSLATION_CHECKPOINT_VERSION = 1
 DEFAULT_DYNAMIC_DENSITY_MIN = 0.65
@@ -45,6 +46,7 @@ TRANSLATION_PROMPT_TEMPLATE_VIDEO_TITLE_TOKEN = "__VIDEO_TITLE__"
 TRANSLATION_PROMPT_TEMPLATE_YOUTUBE_URL_TOKEN = "__YOUTUBE_URL__"
 TRANSLATION_PROMPT_TEMPLATE_SPEAKER_INSTRUCTION_TOKEN = "__SPEAKER_INSTRUCTION__"
 TRANSLATION_PROMPT_TEMPLATE_STRICT_LENGTH_TOKEN = "__STRICT_LENGTH_INSTRUCTION__"
+TRANSLATION_PROMPT_TEMPLATE_GLOSSARY_TOKEN = "__GLOSSARY_SECTION__"
 REWRITE_PROMPT_TEMPLATE_TEXT_TOKEN = "__TTS_CN_TEXT__"
 REWRITE_PROMPT_TEMPLATE_SOURCE_TEXT_TOKEN = "__SOURCE_TEXT__"
 REWRITE_PROMPT_TEMPLATE_DIRECTION_TOKEN = "__DIRECTION_DESC__"
@@ -70,7 +72,7 @@ DEFAULT_TRANSLATION_PROMPT_TEMPLATE = """你是专业的视频配音翻译专家
 视频信息：
 - 标题：__VIDEO_TITLE__
 - 来源：__YOUTUBE_URL__
-
+__GLOSSARY_SECTION__
 这些翻译将直接用于中文 TTS 配音，核心目标是让中文配音时长与原英文段落时长大致一致。请特别注意：
 1. 每段都标注了 target_duration_seconds（原文段落时长），翻译时请自然地控制中文长度，使配音时长接近该目标。
 2. 不要机械地按字数公式凑字，而是根据原文的语速节奏、信息密度来判断中文应该翻多长。
@@ -150,6 +152,7 @@ class DubbingSegment:
     alignment_method: str = ""
     rewrite_count: int = 0
     needs_review: bool = False
+    voice_description: str = ""
 
 
 @dataclass(slots=True)
@@ -225,6 +228,7 @@ class GeminiTranslator:
         display_name_b: str | None = None,
         video_title: str = "",
         youtube_url: str = "",
+        glossary: dict[str, str] | None = None,
     ) -> TranslationResult:
         output_root = Path(output_dir).resolve(strict=False)
         output_root.mkdir(parents=True, exist_ok=True)
@@ -238,8 +242,16 @@ class GeminiTranslator:
         normalized_display_name = _normalize_optional_text(display_name) or "Speaker A"
         normalized_voice_id_b = _normalize_optional_text(voice_id_b)
         normalized_display_name_b = _normalize_optional_text(display_name_b) or "Speaker B"
-        lines = self._pre_split_long_lines(lines)
+        # _pre_split_long_lines removed — S1 3-layer split + S2 LLM review
+        # already ensures segments are ≤45s. No need for translator to re-split.
         groups = _build_groups(lines, max_segment_duration_ms=max_segment_duration_ms)
+
+        # Save glossary to translation/glossary.json for reference
+        effective_glossary = glossary if glossary else {}
+        if effective_glossary:
+            glossary_path = output_root / "glossary.json"
+            _write_json(glossary_path, effective_glossary)
+            print(f"[S3] 术语表已保存：{len(effective_glossary)} 条 -> {glossary_path}")
 
         if not groups:
             result = TranslationResult(segments=[], total_segments=0, output_path=str(output_path))
@@ -270,6 +282,7 @@ class GeminiTranslator:
                     batch,
                     video_title=video_title,
                     youtube_url=youtube_url,
+                    glossary=effective_glossary,
                 )
             )
             self._write_translation_checkpoint(
@@ -518,35 +531,43 @@ class GeminiTranslator:
         if len(lines) == 0 or len(speaker_ids) <= 1:
             return lines
 
-        review_input = [
-            {
-                "index": line.index,
-                "speaker_id": line.speaker_id,
-                "start_ms": line.start_ms,
-                "end_ms": line.end_ms,
-                "text": line.source_text,
-            }
-            for line in lines
-        ]
-        prompt = self._build_review_prompt(review_input, speaker_names, video_title, youtube_url)
+        # 分批审核（每批最多 50 行，避免 prompt 过长导致 Gemini 忽略后面的内容）
+        REVIEW_BATCH_SIZE = 50
+        all_corrections: list[dict] = []
 
-        try:
-            response_text = self._call_task_with_fallback(
-                "s2_review",
-                prompt,
-                json_mode=True,
-                validator=self._validate_review_response,
-            )
-            corrections = self._parse_review_response(response_text, lines)
-        except Exception as exc:
-            print(f"[S2] Gemini审核失败，保留原始标注：{exc}")
-            return lines
+        for batch_start in range(0, len(lines), REVIEW_BATCH_SIZE):
+            batch = lines[batch_start:batch_start + REVIEW_BATCH_SIZE]
+            review_input = [
+                {
+                    "index": line.index,
+                    "speaker_id": line.speaker_id,
+                    "start_ms": line.start_ms,
+                    "end_ms": line.end_ms,
+                    "text": line.source_text[:300],  # 截断超长文本，减少 tokens
+                }
+                for line in batch
+            ]
+            prompt = self._build_review_prompt(review_input, speaker_names, video_title, youtube_url)
 
-        if not corrections:
+            try:
+                response_text = self._call_task_with_fallback(
+                    "s2_review",
+                    prompt,
+                    json_mode=True,
+                    validator=self._validate_review_response,
+                )
+                batch_corrections = self._parse_review_response(response_text, batch)
+                if batch_corrections:
+                    all_corrections.extend(batch_corrections)
+            except Exception as exc:
+                print(f"[S2] Gemini审核第 {batch_start//REVIEW_BATCH_SIZE + 1} 批失败：{exc}")
+                continue
+
+        if not all_corrections:
             return lines
 
         corrected_lines = list(lines)
-        for correction in corrections:
+        for correction in all_corrections:
             index = correction.get("index")
             new_speaker_id = correction.get("corrected_speaker_id", "")
             if not isinstance(index, int):
@@ -592,26 +613,30 @@ class GeminiTranslator:
         speaker_a_name = speaker_names.get("speaker_a", "Speaker A")
         speaker_b_name = speaker_names.get("speaker_b", "Speaker B")
         return (
-            "你是一位专业的访谈转录审核专家。以下是一段两人访谈的转录稿，由语音识别系统自动标注了说话人身份。\n\n"
+            "你是一位专业的访谈转录审核专家。以下是一段两人访谈的转录稿片段，由语音识别系统自动标注了说话人身份。\n\n"
             "视频信息：\n"
             f"- 标题：{video_title}\n"
             f"- 来源：{youtube_url}\n\n"
             "说话人信息：\n"
-            f"- Speaker A: {speaker_a_name}\n"
-            f"- Speaker B: {speaker_b_name}\n\n"
-            "请根据对话逻辑、上下文以及你对该视频、频道或说话人的了解，检查每句话的说话人标注是否正确。常见错误包括：\n"
-            '1. 短促回应（如"Yeah"、"Right"、"Mm-hmm"）可能被错误分配给提问者而非回答者\n'
-            "2. 对话轮次中，回答被错误标成了提问者的发言\n"
-            "3. 同一个人的连续发言被错误拆分给了两个人\n"
-            "4. 如果你了解这个节目或说话人，请利用这些知识判断谁更可能说出某句话\n\n"
+            f"- speaker_a: {speaker_a_name}\n"
+            f"- speaker_b: {speaker_b_name}\n\n"
+            "请仔细逐条检查每句话的说话人标注是否正确。常见错误包括：\n"
+            "1. 短促回应（如 Yeah, Right, Sure, Mm-hmm, Of course）经常被错误分配\n"
+            "2. 长段落中混合了两个人的话（旁白+提问，或回答+追问）\n"
+            "3. 回答被错误标成提问者，或反之\n"
+            "4. 同一人的连续发言被拆给两个人\n\n"
+            "判断技巧：\n"
+            "- 采访中主持人提问（短句，问号），嘉宾回答（长段，陈述句）\n"
+            "- 旁白介绍通常是主持人的声音\n"
+            "- 利用你对该节目或说话人的了解来判断\n\n"
             "输入转录稿：\n"
             f"{json.dumps(review_input, ensure_ascii=False, indent=2)}\n\n"
-            "请只输出需要纠正的条目，JSON数组格式：\n"
+            "请输出需要纠正的条目，JSON 数组格式：\n"
             "[\n"
-            '  {"index": 3, "corrected_speaker_id": "speaker_b", "reason": "这是对前一个问题的简短回应，应该是回答者"}\n'
+            '  {"index": 3, "corrected_speaker_id": "speaker_b", "reason": "简短回应，应属于回答者"}\n'
             "]\n\n"
-            "如果所有标注都正确，输出空数组：[]\n"
-            "只输出JSON数组，不要任何其他文字。"
+            "如果所有标注都正确，输出空数组 []\n"
+            "只输出 JSON 数组，不要其他文字。请务必仔细检查每一条。"
         )
 
     def _call_gemini_with_retry(
@@ -628,7 +653,7 @@ class GeminiTranslator:
                 return self._call_google_genai(prompt, json_mode=json_mode, model_name=model_name)
             except Exception as exc:
                 if attempt < DEFAULT_MAX_RETRIES:
-                    wait_seconds = 5 * (attempt + 1)
+                    wait_seconds = min(60, 5 * (2 ** attempt))  # 5s, 10s, 20s, 40s, 60s
                     print(
                         f"[S3] Gemini请求失败，{wait_seconds}秒后重试"
                         f"（{attempt + 1}/{DEFAULT_MAX_RETRIES}）: {exc}"
@@ -768,6 +793,7 @@ class GeminiTranslator:
         *,
         video_title: str = "",
         youtube_url: str = "",
+        glossary: dict[str, str] | None = None,
         strict_length_control: bool = False,
     ) -> str:
         groups_json = json.dumps(groups, ensure_ascii=False, indent=2)
@@ -782,12 +808,17 @@ class GeminiTranslator:
             if len(speaker_ids) > 1
             else ""
         )
+        glossary_section = ""
+        if glossary:
+            glossary_lines = "\n".join(f"{k} → {v}" for k, v in glossary.items())
+            glossary_section = f"\n术语表（请严格遵循以下翻译）：\n{glossary_lines}\n"
         normalized_video_title = _normalize_optional_text(video_title) or "未提供"
         normalized_youtube_url = _normalize_optional_text(youtube_url) or "未提供"
         return (
             self.translation_prompt_template
             .replace(TRANSLATION_PROMPT_TEMPLATE_VIDEO_TITLE_TOKEN, normalized_video_title)
             .replace(TRANSLATION_PROMPT_TEMPLATE_YOUTUBE_URL_TOKEN, normalized_youtube_url)
+            .replace(TRANSLATION_PROMPT_TEMPLATE_GLOSSARY_TOKEN, glossary_section)
             .replace(TRANSLATION_PROMPT_TEMPLATE_SPEAKER_INSTRUCTION_TOKEN, speaker_instruction)
             .replace(TRANSLATION_PROMPT_TEMPLATE_STRICT_LENGTH_TOKEN, strict_length_instruction)
             .replace(TRANSLATION_PROMPT_TEMPLATE_GROUPS_TOKEN, groups_json)
@@ -831,11 +862,13 @@ class GeminiTranslator:
         *,
         video_title: str,
         youtube_url: str,
+        glossary: dict[str, str] | None = None,
     ) -> list[dict]:
         prompt = self._build_prompt(
             batch,
             video_title=video_title,
             youtube_url=youtube_url,
+            glossary=glossary,
         )
         response_text = self._call_task_with_fallback(
             "s3_translate",
@@ -852,6 +885,7 @@ class GeminiTranslator:
             batch,
             video_title=video_title,
             youtube_url=youtube_url,
+            glossary=glossary,
             strict_length_control=True,
         )
         retry_response_text = self._call_task_with_fallback(
@@ -1346,37 +1380,32 @@ def _text_weight(text: str) -> int:
 
 
 def _build_groups(lines: list[TranscriptLine], *, max_segment_duration_ms: int) -> list[dict[str, object]]:
+    """Build translation groups from transcript lines.
+
+    1:1 mapping — each transcript line becomes one translation group.
+    No merging. Transcript stage (5-layer split) already handles segmentation.
+    AssemblyAI utterances are already "one person's continuous speech",
+    so even short segments like "Yeah, sure." are complete utterances.
+    """
     if not lines:
         return []
 
-    normalized_max_duration_ms = max(1, int(max_segment_duration_ms))
-    speaker_groups = _split_lines_by_speaker_and_pause(
-        lines,
-        same_speaker_pause_split_ms=DEFAULT_SAME_SPEAKER_PAUSE_SPLIT_MS,
-    )
-
     groups: list[dict[str, object]] = []
-    segment_id = 1
-    for speaker_group in speaker_groups:
-        for chunk in _split_group_by_duration(
-            speaker_group,
-            max_segment_duration_ms=normalized_max_duration_ms,
-        ):
-            start_ms = chunk[0].start_ms
-            end_ms = chunk[-1].end_ms
-            target_duration_ms = max(0, end_ms - start_ms)
-            groups.append(
-                {
-                    "segment_id": segment_id,
-                    "speaker_id": chunk[0].speaker_id,
-                    "start_ms": start_ms,
-                    "end_ms": end_ms,
-                    "target_duration_ms": target_duration_ms,
-                    "target_duration_seconds": round(target_duration_ms / 1000, 1),
-                    "source_text": _merge_source_text(chunk),
-                }
-            )
-            segment_id += 1
+    for segment_id, line in enumerate(lines, start=1):
+        start_ms = line.start_ms
+        end_ms = line.end_ms
+        target_duration_ms = max(0, end_ms - start_ms)
+        groups.append(
+            {
+                "segment_id": segment_id,
+                "speaker_id": line.speaker_id,
+                "start_ms": start_ms,
+                "end_ms": end_ms,
+                "target_duration_ms": target_duration_ms,
+                "target_duration_seconds": round(target_duration_ms / 1000, 1),
+                "source_text": line.source_text,
+            }
+        )
     if not groups:
         return []
 
@@ -1420,6 +1449,74 @@ def _build_groups(lines: list[TranscriptLine], *, max_segment_duration_ms: int) 
         group["min_chars"] = min_chars
         group["max_chars"] = max_chars
     return groups
+
+
+def _light_merge_short_segments(lines: list[TranscriptLine]) -> list[TranscriptLine]:
+    """Merge very short segments (<5s) into adjacent same-speaker segments.
+
+    Only merges if:
+    - The short segment has the same speaker as its neighbor
+    - The merged result would not exceed 45 seconds
+    Normal segments (≥5s) are never touched.
+    """
+    if len(lines) <= 1:
+        return list(lines)
+
+    result: list[TranscriptLine] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        dur = line.end_ms - line.start_ms
+
+        # If this segment is short and same speaker as previous, merge into previous
+        if (
+            dur < _MIN_STANDALONE_SEGMENT_MS
+            and result
+            and result[-1].speaker_id == line.speaker_id
+            and (result[-1].end_ms - result[-1].start_ms + dur) <= 45_000
+        ):
+            prev = result[-1]
+            result[-1] = TranscriptLine(
+                index=prev.index,
+                start_ms=prev.start_ms,
+                end_ms=line.end_ms,
+                speaker_id=prev.speaker_id,
+                speaker_label=prev.speaker_label,
+                source_text=prev.source_text + " " + line.source_text,
+            )
+        # If this segment is short and same speaker as NEXT, merge into next
+        elif (
+            dur < _MIN_STANDALONE_SEGMENT_MS
+            and i + 1 < len(lines)
+            and lines[i + 1].speaker_id == line.speaker_id
+            and (dur + lines[i + 1].end_ms - lines[i + 1].start_ms) <= 45_000
+        ):
+            next_line = lines[i + 1]
+            result.append(TranscriptLine(
+                index=len(result) + 1,
+                start_ms=line.start_ms,
+                end_ms=next_line.end_ms,
+                speaker_id=line.speaker_id,
+                speaker_label=line.speaker_label,
+                source_text=line.source_text + " " + next_line.source_text,
+            ))
+            i += 2  # skip next line (already merged)
+            continue
+        else:
+            result.append(line)
+        i += 1
+
+    # Re-index
+    for idx, line in enumerate(result):
+        result[idx] = TranscriptLine(
+            index=idx + 1,
+            start_ms=line.start_ms,
+            end_ms=line.end_ms,
+            speaker_id=line.speaker_id,
+            speaker_label=line.speaker_label,
+            source_text=line.source_text,
+        )
+    return result
 
 
 def _split_lines_by_speaker_and_pause(

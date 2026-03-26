@@ -34,7 +34,7 @@ function LoginForm() {
         toast.error(data.detail || "登录失败")
         return
       }
-      toast.success("登录成功，正在跳转...")
+      toast.success("登录成功，正在跳转…")
       await new Promise((r) => setTimeout(r, 300))
       window.location.replace(redirectTo)
     } catch {
@@ -51,10 +51,12 @@ function LoginForm() {
         <Input
           id="email"
           type="email"
-          placeholder="your@email.com"
+          placeholder="your@email.com…"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
           className="h-11 bg-surface-high border-border text-foreground placeholder:text-muted-foreground/50 focus:border-violet-500 focus:ring-violet-500/20"
+          autoComplete="email"
+          spellCheck={false}
           required
         />
       </div>
@@ -63,10 +65,11 @@ function LoginForm() {
         <Input
           id="password"
           type="password"
-          placeholder="输入密码"
+          placeholder="输入密码…"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
           className="h-11 bg-surface-high border-border text-foreground placeholder:text-muted-foreground/50 focus:border-violet-500 focus:ring-violet-500/20"
+          autoComplete="current-password"
           required
         />
       </div>
@@ -75,7 +78,7 @@ function LoginForm() {
         className="w-full h-11 bg-primary hover:bg-primary/90 text-white font-medium shadow-lg shadow-primary/20 transition-all"
         disabled={isSubmitting}
       >
-        {isSubmitting ? "登录中..." : "登录"}
+        {isSubmitting ? "登录中…" : "登录"}
       </Button>
     </form>
   )

@@ -25,9 +25,9 @@ DEFAULT_TEMPERATURE = 0.3
 DEFAULT_MAX_OUTPUT_TOKENS = 8192
 DEFAULT_TIMEOUT_SECONDS = 120.0
 DEFAULT_SHARED_TEXT_ROUTE = [
+    "deepseek_chat",
     "gemini_3_1_flash_lite_preview",
     DEFAULT_DEFAULT_LLM_ALIAS,
-    "deepseek_chat",
     "gpt_41",
 ]
 S3_SYNCED_TASKS = ("s2_infer", "s2_review", "s5_rewrite")

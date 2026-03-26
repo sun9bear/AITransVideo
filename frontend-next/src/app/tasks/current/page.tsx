@@ -5,8 +5,9 @@ import { useRouter } from "next/navigation"
 
 import { EmptyState } from "@/components/empty-state"
 import { selectCurrentTaskJob } from "@/features/jobs/selectors"
-import { ApiError } from "@/lib/api/client"
-import { listJobs } from "@/lib/api/jobs"
+import { getErrorMessage } from '@/lib/api/errors'
+import { getJob, listJobs } from "@/lib/api/jobs"
+import { ACTIVE_JOB_STATUSES } from "@/types/jobs"
 
 export default function CurrentTaskPage() {
   const router = useRouter()
@@ -17,14 +18,34 @@ export default function CurrentTaskPage() {
     let cancelled = false
     const load = async () => {
       try {
+        // 1. Try listJobs via gateway (filtered by user)
         const jobs = await listJobs()
         if (cancelled) return
         const selectedJob = selectCurrentTaskJob(jobs)
         if (selectedJob) {
           router.replace(`/workspace/${selectedJob.id}`)
-        } else {
-          setIsLoading(false)
+          return
         }
+
+        // 2. Fallback: check localStorage for latest job ID
+        const latestJobId = typeof window !== 'undefined'
+          ? localStorage.getItem('avt_latest_job_id')
+          : null
+        if (latestJobId) {
+          try {
+            const latestJob = await getJob(latestJobId)
+            if (cancelled) return
+            if (ACTIVE_JOB_STATUSES.includes(latestJob.status)) {
+              router.replace(`/workspace/${latestJob.id}`)
+              return
+            }
+          } catch {
+            // Job might not exist anymore, clear stale ID
+            try { localStorage.removeItem('avt_latest_job_id') } catch {}
+          }
+        }
+
+        setIsLoading(false)
       } catch (error) {
         if (!cancelled) {
           setPageError(getErrorMessage(error))
@@ -37,7 +58,7 @@ export default function CurrentTaskPage() {
   }, [router])
 
   if (isLoading && !pageError) {
-    return <EmptyState description="正在查找当前任务..." title="加载中" />
+    return <EmptyState description="正在查找当前任务…" title="加载中" />
   }
 
   if (pageError) {
@@ -59,10 +80,4 @@ export default function CurrentTaskPage() {
       title="当前没有任务"
     />
   )
-}
-
-function getErrorMessage(error: unknown) {
-  if (error instanceof ApiError) return error.message
-  if (error instanceof Error) return error.message
-  return "请求失败，请稍后重试。"
 }

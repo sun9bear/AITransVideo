@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import threading
 import time
 from typing import Any
 from urllib import error, request
 
-from pydub import AudioSegment
-
 from services.gemini.translator import DubbingSegment
+from utils.audio_utils import measure_duration_ms as _ffprobe_duration_ms
+from utils.atomic_io import atomic_write_bytes, is_valid_output
+from services.tts.rate_limiter import RateLimiter
+from services.tts.tts_strategy import get_tts_provider, get_tts_rpm
 
 try:
     import requests
@@ -24,8 +28,8 @@ DEFAULT_BASE_URL = "https://api.minimaxi.com"
 DEFAULT_MODEL = "speech-2.8-turbo"
 DEFAULT_AUDIO_FORMAT = "wav"
 DEFAULT_TIMEOUT_SECONDS = 60
-DEFAULT_MAX_RETRIES = 2
-DEFAULT_RETRY_BACKOFF_SECONDS = 0.5
+DEFAULT_MAX_RETRIES = 5
+DEFAULT_RETRY_BACKOFF_SECONDS = 5.0
 
 
 class TTSGenerationError(Exception):
@@ -71,6 +75,11 @@ class TTSGenerator:
             retry_backoff_seconds=max(0.0, float(config.retry_backoff_seconds)),
         )
 
+    # ≤100 segments: sequential (simple, reliable)
+    # >100 segments: 3-worker parallel (3x throughput for long videos)
+    _PARALLEL_THRESHOLD = 100
+    _PARALLEL_WORKERS = 3
+
     def generate_all(
         self,
         segments: list[DubbingSegment],
@@ -79,20 +88,188 @@ class TTSGenerator:
         output_root = Path(output_dir).resolve(strict=False)
         output_root.mkdir(parents=True, exist_ok=True)
 
-        results: list[TTSResult] = []
         total_segments = len(segments)
+
+        # Count how many actually need generation (not cached)
+        pending_count = sum(
+            1 for seg in segments
+            if not is_valid_output(
+                str(output_root / f"segment_{seg.segment_id:03d}_{seg.speaker_id}.wav")
+            )
+        )
+
+        if pending_count > self._PARALLEL_THRESHOLD:
+            print(f"[S4] {pending_count} 段待生成，启用 {self._PARALLEL_WORKERS} 路并行 TTS")
+            return self._generate_all_parallel(segments, output_root, total_segments)
+
+        return self._generate_all_sequential(segments, output_root, total_segments)
+
+    def _get_rate_limiter(self) -> RateLimiter:
+        """Get rate limiter with provider-appropriate RPM."""
+        provider = get_tts_provider()
+        rpm = get_tts_rpm(provider)
+        return RateLimiter(rpm=rpm)
+
+    def _generate_all_sequential(
+        self,
+        segments: list[DubbingSegment],
+        output_root: Path,
+        total_segments: int,
+    ) -> list[TTSResult]:
+        """Sequential TTS generation with rate limiting (Tier 1: ≤30min videos)."""
+        results: list[TTSResult] = []
+        rate_limiter = self._get_rate_limiter()
         for index, segment in enumerate(segments, start=1):
-            result = self._generate_one(segment, str(output_root))
-            segment.tts_audio_path = result.audio_path
-            segment.actual_duration_ms = result.duration_ms
-            if segment.target_duration_ms > 0:
-                segment.alignment_ratio = result.duration_ms / segment.target_duration_ms
-            else:
-                segment.alignment_ratio = 0.0
+            result = self._process_segment(segment, output_root, index, total_segments, rate_limiter)
             results.append(result)
-            if total_segments > 0 and (index % 5 == 0 or index == total_segments):
-                print(f"[S4] TTS进度：{index}/{total_segments} 段")
         return results
+
+    def _generate_all_parallel(
+        self,
+        segments: list[DubbingSegment],
+        output_root: Path,
+        total_segments: int,
+    ) -> list[TTSResult]:
+        """Parallel TTS generation with shared rate limiter (Tier 2/3: >30min videos)."""
+        # Shared rate limiter across all workers (20 RPM total, not per worker)
+        rate_limiter = RateLimiter(rpm=20)
+        completed_count = 0
+        completed_lock = threading.Lock()
+        results_dict: dict[int, TTSResult] = {}
+
+        def _worker(index: int, segment: DubbingSegment) -> tuple[int, TTSResult]:
+            nonlocal completed_count
+            result = self._process_segment(segment, output_root, index, total_segments, rate_limiter, quiet=True)
+            with completed_lock:
+                completed_count += 1
+                if completed_count % 15 == 0 or completed_count == total_segments:
+                    print(f"[S4] TTS 进度: {completed_count}/{total_segments} 段")
+            return segment.segment_id, result
+
+        with ThreadPoolExecutor(max_workers=self._PARALLEL_WORKERS) as executor:
+            futures = {
+                executor.submit(_worker, idx, seg): seg.segment_id
+                for idx, seg in enumerate(segments, start=1)
+            }
+            for future in as_completed(futures):
+                seg_id = futures[future]
+                try:
+                    _, result = future.result()
+                    results_dict[seg_id] = result
+                except Exception as exc:
+                    print(f"[S4] TTS 段 {seg_id} 失败: {exc}")
+                    raise
+
+        # Return results in original segment order
+        return [results_dict[seg.segment_id] for seg in segments]
+
+    def _process_segment(
+        self,
+        segment: DubbingSegment,
+        output_root: Path,
+        index: int,
+        total_segments: int,
+        rate_limiter: RateLimiter,
+        quiet: bool = False,
+    ) -> TTSResult:
+        """Process a single segment: check cache → rate limit → generate → update segment."""
+        output_path = output_root / f"segment_{segment.segment_id:03d}_{segment.speaker_id}.wav"
+
+        if is_valid_output(str(output_path)):
+            if not quiet:
+                print(f"[TTS] 跳过已完成段 {index}/{total_segments}")
+            duration_ms = _ffprobe_duration_ms(output_path)
+            result = TTSResult(
+                segment_id=segment.segment_id,
+                audio_path=str(output_path.resolve(strict=False)),
+                duration_ms=duration_ms,
+                voice_id=segment.voice_id,
+            )
+        else:
+            rate_limiter.wait()
+            result = self._generate_one_with_backoff(segment, str(output_root))
+
+        segment.tts_audio_path = result.audio_path
+        segment.actual_duration_ms = result.duration_ms
+        if segment.target_duration_ms > 0:
+            segment.alignment_ratio = result.duration_ms / segment.target_duration_ms
+        else:
+            segment.alignment_ratio = 0.0
+
+        if not quiet and total_segments > 0 and (index % 15 == 0 or index == total_segments):
+            print(f"[S4] TTS 进度: {index}/{total_segments} 段")
+
+        return result
+
+    # Outer retry backoff schedule (seconds) for _generate_one failures.
+    # Each _generate_one call already does its own inner retries via _post_json;
+    # this outer layer handles persistent 429/503 rate-limit / overload scenarios.
+    _OUTER_BACKOFF_SCHEDULE = [5, 10, 20, 40, 60]
+    _OUTER_PAUSE_SECONDS = 300  # 5-minute cooldown after exhausting backoff
+
+    def _generate_one_mimo(
+        self,
+        segment: DubbingSegment,
+        tts_text: str,
+        output_root: Path,
+    ) -> TTSResult:
+        """Generate TTS via MiMo-V2-TTS API."""
+        from services.tts.mimo_tts_provider import synthesize as mimo_synthesize
+
+        output_path = output_root / f"segment_{segment.segment_id:03d}_{segment.speaker_id}.wav"
+
+        # Use voice_description from Gemini review for natural voice control
+        # Falls back to default_zh if no description available
+        mimo_voice = getattr(segment, "voice_description", "") or "default_zh"
+
+        audio_bytes = mimo_synthesize(text=tts_text, voice_id=mimo_voice)
+        atomic_write_bytes(str(output_path), audio_bytes)
+        duration_ms = _ffprobe_duration_ms(output_path)
+
+        return TTSResult(
+            segment_id=segment.segment_id,
+            audio_path=str(output_path.resolve(strict=False)),
+            duration_ms=duration_ms,
+            voice_id=segment.voice_id,
+        )
+
+    def _generate_one_with_backoff(
+        self,
+        segment: DubbingSegment,
+        output_dir: str,
+    ) -> TTSResult:
+        """Wrap _generate_one with exponential backoff + pause-and-resume degradation."""
+        max_attempts = len(self._OUTER_BACKOFF_SCHEDULE)
+        last_error: Exception | None = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return self._generate_one(segment, output_dir)
+            except TTSGenerationError as exc:
+                last_error = exc
+                if attempt < max_attempts:
+                    wait = self._OUTER_BACKOFF_SCHEDULE[attempt - 1]
+                    print(
+                        f"[S4] TTS 段 {segment.segment_id} 失败，"
+                        f"{wait}s 后重试 ({attempt}/{max_attempts})..."
+                    )
+                    time.sleep(wait)
+
+        # All normal attempts exhausted — pause 5 minutes then try once more
+        print(
+            f"[S4] TTS 段 {segment.segment_id} 连续 {max_attempts} 次失败，"
+            f"暂停 {self._OUTER_PAUSE_SECONDS}s 后最后重试..."
+        )
+        time.sleep(self._OUTER_PAUSE_SECONDS)
+
+        try:
+            return self._generate_one(segment, output_dir)
+        except TTSGenerationError:
+            # Final failure — let the caller handle it (checkpoint already saved)
+            raise TTSGenerationError(
+                f"TTS 段 {segment.segment_id} 在 {max_attempts} 次重试 + "
+                f"{self._OUTER_PAUSE_SECONDS}s 暂停后仍然失败: {last_error}"
+            ) from last_error
 
     def _generate_one(
         self,
@@ -102,10 +279,16 @@ class TTSGenerator:
         output_root = Path(output_dir).resolve(strict=False)
         output_root.mkdir(parents=True, exist_ok=True)
 
-        endpoint = _build_tts_endpoint(self.config.base_url)
         tts_text = _normalize_optional_text(segment.tts_cn_text) or _normalize_optional_text(segment.cn_text)
         if tts_text is None:
             raise TTSGenerationError("segment.tts_cn_text or segment.cn_text is required.")
+
+        # Dispatch to MiMo TTS if configured
+        provider = get_tts_provider()
+        if provider == "mimo":
+            return self._generate_one_mimo(segment, tts_text, output_root)
+
+        endpoint = _build_tts_endpoint(self.config.base_url)
         payload = {
             "model": self.config.model,
             "text": tts_text,
@@ -151,8 +334,8 @@ class TTSGenerator:
 
         output_path = output_root / f"segment_{segment.segment_id:03d}_{segment.speaker_id}.wav"
         try:
-            output_path.write_bytes(audio_bytes)
-            duration_ms = len(AudioSegment.from_wav(output_path))
+            atomic_write_bytes(str(output_path), audio_bytes)
+            duration_ms = _ffprobe_duration_ms(output_path)
         except OSError as exc:
             raise TTSGenerationError(f"Failed to write or read TTS audio output: {output_path}") from exc
         except Exception as exc:
@@ -280,7 +463,7 @@ def _post_json(
             last_error = TTSGenerationError(f"MiniMax TTS request failed: {exc}")
 
         if attempt < max_retries and last_error is not None:
-            wait_seconds = retry_backoff_seconds * (2 ** attempt)
+            wait_seconds = min(retry_backoff_seconds * (2 ** attempt), 60.0)
             print(
                 f"[S4] MiniMax请求失败，{wait_seconds:g}秒后重试（{attempt + 1}/{max_retries}）：{last_error}"
             )
@@ -289,6 +472,13 @@ def _post_json(
             raise last_error
 
     raise TTSGenerationError("MiniMax TTS request failed: unknown error")
+
+
+def choose_tts_strategy(total_segments: int, video_duration_min: float) -> str:
+    """根据视频参数选择 TTS 策略。"""
+    if video_duration_min <= 30 and total_segments <= 100:
+        return "sync"
+    return "async"
 
 
 def _build_tts_endpoint(base_url: str) -> str:
