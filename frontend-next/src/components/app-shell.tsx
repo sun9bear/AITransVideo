@@ -21,6 +21,7 @@ import {
   X,
   Sun,
   Moon,
+  Settings2,
 } from "lucide-react"
 
 const navGroups = [
@@ -45,6 +46,13 @@ const navGroups = [
       { label: "通知", href: "/notifications", icon: Bell },
       { label: "账户设置", href: "/settings", icon: User },
       { label: "帮助中心", href: "/help", icon: HelpCircle },
+    ],
+  },
+  {
+    label: "管理",
+    adminOnly: true,
+    items: [
+      { label: "系统设置", href: "/admin/settings", icon: Settings2 },
     ],
   },
 ]
@@ -104,7 +112,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
       {/* Nav groups */}
       <nav className="flex-1 overflow-y-auto py-3 px-2 space-y-4">
-        {navGroups.map((group) => (
+        {navGroups.filter((group) => {
+          if ('adminOnly' in group && (group as any).adminOnly) {
+            return user?.display_name === 'Admin' || user?.email?.includes('admin')
+          }
+          return true
+        }).map((group) => (
           <div key={group.label}>
             {!collapsed && (
               <p className="px-3 mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-sidebar-foreground/40">
@@ -148,8 +161,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           size={collapsed ? "icon" : "sm"}
           className={`${collapsed ? "w-full" : "w-full justify-start gap-2"} text-muted-foreground hover:text-foreground`}
           onClick={() => setDarkMode(!darkMode)}
+          aria-label={darkMode ? "切换到浅色模式" : "切换到深色模式"}
         >
-          {darkMode ? <Sun className="h-4 w-4 shrink-0" /> : <Moon className="h-4 w-4 shrink-0" />}
+          {darkMode ? <Sun className="h-4 w-4 shrink-0" aria-hidden="true" /> : <Moon className="h-4 w-4 shrink-0" aria-hidden="true" />}
           {!collapsed && <span className="text-xs">{darkMode ? "浅色模式" : "深色模式"}</span>}
         </Button>
 
@@ -196,7 +210,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
       {/* Sidebar — desktop */}
       <aside
-        className={`hidden lg:flex sticky top-0 h-screen flex-col border-r border-border bg-sidebar transition-all duration-200 ${
+        className={`hidden lg:flex sticky top-0 h-screen flex-col border-r border-border bg-sidebar transition-[width] duration-200 ${
           collapsed ? "w-16" : "w-56"
         }`}
       >
@@ -205,8 +219,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <button
           className="absolute -right-3 top-20 z-10 flex h-6 w-6 items-center justify-center rounded-full border border-border bg-card text-muted-foreground hover:text-foreground shadow-sm"
           onClick={() => setCollapsed(!collapsed)}
+          aria-label={collapsed ? "展开侧边栏" : "收起侧边栏"}
         >
-          {collapsed ? <ChevronRight className="h-3 w-3" /> : <ChevronLeft className="h-3 w-3" />}
+          {collapsed ? <ChevronRight className="h-3 w-3" aria-hidden="true" /> : <ChevronLeft className="h-3 w-3" aria-hidden="true" />}
         </button>
       </aside>
 
@@ -219,8 +234,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <button
           className="absolute right-2 top-3 z-10 flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground"
           onClick={() => setMobileOpen(false)}
+          aria-label="关闭侧边栏"
         >
-          <X className="h-5 w-5" />
+          <X className="h-5 w-5" aria-hidden="true" />
         </button>
         {sidebarContent}
       </aside>
@@ -236,8 +252,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               size="icon"
               className="lg:hidden h-8 w-8 text-muted-foreground"
               onClick={() => setMobileOpen(true)}
+              aria-label="打开菜单"
             >
-              <Menu className="h-5 w-5" />
+              <Menu className="h-5 w-5" aria-hidden="true" />
             </Button>
             {/* Breadcrumb-style page indicator */}
             <span className="text-sm font-medium text-foreground font-heading">
@@ -259,7 +276,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </header>
 
         {/* Page content */}
-        <main className="flex-1 p-4 lg:p-6">
+        <main id="main-content" className="flex-1 p-4 lg:p-6">
           {children}
         </main>
       </div>

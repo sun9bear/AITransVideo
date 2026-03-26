@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 
-import { ApiError } from '@/lib/api/client'
+import { getErrorMessage } from '@/lib/api/errors'
 import {
   approveVoiceReview,
   cloneVoiceForReview,
@@ -117,7 +117,7 @@ export function VoiceReviewPanel({ jobId, onAdvanced, onLoadError }: VoiceReview
   }
 
   if (isLoading && !resource) {
-    return <PanelLoading message="正在读取音色确认内容..." />
+    return <PanelLoading message="正在读取音色确认内容…" />
   }
   if (pageError && !resource) {
     return <PanelError message={pageError} />
@@ -140,7 +140,7 @@ export function VoiceReviewPanel({ jobId, onAdvanced, onLoadError }: VoiceReview
           onClick={() => { void handleApprove() }}
           type="button"
         >
-          {isSubmitting ? '提交中...' : '✓ 确认并继续'}
+          {isSubmitting ? '提交中…' : '✓ 确认并继续'}
         </button>
       </div>
 
@@ -182,7 +182,7 @@ export function VoiceReviewPanel({ jobId, onAdvanced, onLoadError }: VoiceReview
                       onClick={() => { void handlePreview(speaker.speakerId, state.voiceId) }}
                       type="button"
                     >
-                      {state.isPreviewing ? '试听中...' : '试听'}
+                      {state.isPreviewing ? '试听中…' : '试听'}
                     </button>
                   </div>
                   {state.previewError ? <p className="mt-2 text-xs text-red-400">{state.previewError}</p> : null}
@@ -197,13 +197,13 @@ export function VoiceReviewPanel({ jobId, onAdvanced, onLoadError }: VoiceReview
                   {allVoices.length > 0 ? (
                     <div className="flex gap-2">
                       <div className="group flex-1 rounded-lg border border-border bg-muted/30 transition hover:border-primary/30 focus-within:border-primary/40">
-                        <select className="w-full rounded-lg bg-transparent px-3 py-2 text-sm text-foreground focus:outline-none" onChange={(e) => { if (e.currentTarget.value) updateSpeakerState(speaker.speakerId, { voiceId: e.currentTarget.value }) }} value={state.voiceId}>
+                        <select className="w-full rounded-lg bg-transparent px-3 py-2 text-sm text-foreground focus:outline-none input-focus-ring" onChange={(e) => { if (e.currentTarget.value) updateSpeakerState(speaker.speakerId, { voiceId: e.currentTarget.value }) }} value={state.voiceId}>
                           <option value="">— 请选择 —</option>
                           {allVoices.map((v) => <option key={v.voiceId} value={v.voiceId}>{v.speakerName ? `${v.speakerName} - ` : ''}{v.label || v.voiceId}</option>)}
                         </select>
                       </div>
                       <button className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-3 py-2 text-xs font-medium text-cyan-400 transition hover:bg-cyan-500/20 disabled:opacity-50" disabled={!state.voiceId || state.isPreviewing} onClick={() => { void handlePreview(speaker.speakerId, state.voiceId) }} type="button">
-                        {state.isPreviewing ? '...' : '试听'}
+                        {state.isPreviewing ? '…' : '试听'}
                       </button>
                     </div>
                   ) : (
@@ -221,7 +221,7 @@ export function VoiceReviewPanel({ jobId, onAdvanced, onLoadError }: VoiceReview
                     onClick={() => { void handleClone(speaker) }}
                     type="button"
                   >
-                    {state.isCloning ? '正在采样并克隆...' : '克隆音色'}
+                    {state.isCloning ? '正在采样并克隆…' : '克隆音色'}
                   </button>
                   {state.cloneError ? <p className="text-xs text-red-400">{state.cloneError}</p> : null}
                 </div>
@@ -231,7 +231,7 @@ export function VoiceReviewPanel({ jobId, onAdvanced, onLoadError }: VoiceReview
                   <p className="text-xs font-medium text-muted-foreground">方式三：手动输入 Voice ID</p>
                   <div className="flex gap-2">
                     <div className="group flex-1 rounded-lg border border-border bg-muted/30 transition hover:border-primary/30 focus-within:border-primary/40">
-                      <input className="w-full rounded-lg bg-transparent px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none" onChange={(e) => updateSpeakerState(speaker.speakerId, { manualVoiceId: e.currentTarget.value })} placeholder="vt_speaker_xxx" value={state.manualVoiceId} />
+                      <input className="w-full rounded-lg bg-transparent px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none input-focus-ring" onChange={(e) => updateSpeakerState(speaker.speakerId, { manualVoiceId: e.currentTarget.value })} placeholder="vt_speaker_xxx…" value={state.manualVoiceId} />
                     </div>
                     <button className="rounded-lg border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground transition hover:bg-muted/50 disabled:opacity-30" disabled={!state.manualVoiceId.trim()} onClick={() => { const vid = state.manualVoiceId.trim(); if (vid) updateSpeakerState(speaker.speakerId, { voiceId: vid }) }} type="button">应用</button>
                     <button className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-3 py-2 text-xs font-medium text-cyan-400 transition hover:bg-cyan-500/20 disabled:opacity-50" disabled={!state.manualVoiceId.trim() || state.isPreviewing} onClick={() => { const vid = state.manualVoiceId.trim(); if (vid) void handlePreview(speaker.speakerId, vid) }} type="button">试听</button>
@@ -269,10 +269,4 @@ function ErrorBanner({ message }: { message: string }) {
       {message}
     </div>
   )
-}
-
-function getErrorMessage(error: unknown) {
-  if (error instanceof ApiError) return error.message
-  if (error instanceof Error) return error.message
-  return '请求失败，请稍后重试。'
 }

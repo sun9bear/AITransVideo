@@ -113,9 +113,9 @@ function DownloadRow({ item, isPrimary }: { item: ResultDownloadItem; isPrimary:
         <p className="mt-2 text-sm text-muted-foreground">{item.description}</p>
         {downloading ? (
           <div className="mt-2 flex items-center gap-2">
-            <div className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+            <div className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-primary border-t-transparent" aria-hidden="true" />
             <span className="text-xs text-primary/80">
-              {isZip ? '资源打包中，即将开始下载，请勿重复点击...' : '即将开始下载，请勿重复点击...'}
+              {isZip ? '资源打包中，即将开始下载…请勿重复点击…' : '即将开始下载…请勿重复点击…'}
             </span>
           </div>
         ) : null}
@@ -128,7 +128,7 @@ function DownloadRow({ item, isPrimary }: { item: ResultDownloadItem; isPrimary:
           onClick={handleClick}
           type="button"
         >
-          {downloading ? (isZip ? '打包中...' : '下载中...') : '下载文件'}
+          {downloading ? (isZip ? '打包中…' : '下载中…') : '下载文件'}
         </button>
       ) : (
         <span className="inline-flex shrink-0 rounded-full bg-muted/40 px-4 py-2 text-sm font-semibold text-muted-foreground">

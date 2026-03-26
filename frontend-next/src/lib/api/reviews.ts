@@ -332,6 +332,8 @@ function toTranslationReviewResource(
     speakerId: item.speaker_id,
     translationConfirmed: Boolean(item.translation_confirmed),
     ttsCnText: item.tts_cn_text || item.cn_text,
+    startMs: typeof item.start_ms === 'number' ? item.start_ms : 0,
+    endMs: typeof item.end_ms === 'number' ? item.end_ms : 0,
   }))
   const payloadOptions = getSpeakerOptions(payload)
   const speakerOptions = mergeSpeakerOptions(payloadOptions, items.map((item) => ({

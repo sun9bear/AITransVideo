@@ -9,9 +9,6 @@ import subprocess
 import time
 from typing import Any
 
-from pydub import AudioSegment
-
-
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_AUTODUB_LOCAL_CONFIG_PATH = PROJECT_ROOT / "autodub.local.json"
 DEFAULT_LANGUAGE_CODE = "en"
@@ -310,7 +307,7 @@ def _build_transcript_lines(transcript: Any, *, speaker_labels: bool) -> list[Tr
             if _utterances_well_segmented(utterances):
                 return _build_lines_from_utterances(utterances)
 
-    # 单说话人或无 utterances — build sentence-level lines first.
+    # 单说话人或无 utterances — build sentence-level lines, then 3-layer split
     words = list(getattr(transcript, "words", []) or [])
     sentences = list(getattr(transcript, "sentences", []) or [])
 
@@ -323,94 +320,42 @@ def _build_transcript_lines(transcript: Any, *, speaker_labels: bool) -> list[Tr
     if len(raw_lines) <= 1:
         return raw_lines
 
-    # Try LLM semantic segmentation (Gemini) — falls back to mechanical merge on failure
-    llm_lines = _try_llm_segmentation(raw_lines)
-    if llm_lines:
-        return llm_lines
+    # Merge sentences into reasonable segments using _merge_short_lines first,
+    # then apply 3-layer mechanical split (same as multi-speaker path)
+    merged_lines = _merge_short_lines(raw_lines)
 
-    return _merge_short_lines(raw_lines)
-
-
-def _try_llm_segmentation(raw_lines: list[TranscriptLine]) -> list[TranscriptLine] | None:
-    """Attempt to use Gemini for semantic paragraph segmentation."""
-    try:
-        from services.assemblyai.semantic_segmenter import (
-            TimestampedSentence,
-            segment_with_llm,
-        )
-
-        sentences = [
-            TimestampedSentence(
-                start_ms=line.start_ms,
-                end_ms=line.end_ms,
-                speaker_id=line.speaker_id,
-                speaker_label=line.speaker_label,
-                text=line.source_text,
-            )
-            for line in raw_lines
-        ]
-
-        result = segment_with_llm(
-            sentences,
-            speaker_id=raw_lines[0].speaker_id,
-            speaker_label=raw_lines[0].speaker_label,
-        )
-
-        if result:
-            return [
-                TranscriptLine(
-                    index=item["index"],
-                    start_ms=item["start_ms"],
-                    end_ms=item["end_ms"],
-                    speaker_id=item["speaker_id"],
-                    speaker_label=item["speaker_label"],
-                    source_text=item["source_text"],
-                )
-                for item in result
-            ]
-    except Exception:
-        import logging
-        logging.getLogger(__name__).exception("LLM segmentation import/call failed")
-
-    return None
+    # Build global word index for 3-layer split
+    all_words = [
+        {
+            "text": getattr(w, "text", "") or (w.get("text", "") if isinstance(w, dict) else ""),
+            "start": _coerce_int(getattr(w, "start", None) if hasattr(w, "start") else w.get("start"), default=0),
+            "end": _coerce_int(getattr(w, "end", None) if hasattr(w, "end") else w.get("end"), default=0),
+        }
+        for w in words
+    ]
+    result = _apply_3layer_split(merged_lines, all_words)
+    print(f"[S1] 单说话人 3 层拆分: {len(raw_lines)} sentences → {len(merged_lines)} merged → {len(result)} lines")
+    return result
 
 
-def _build_lines_from_utterances_with_split(utterances: list[Any]) -> list[TranscriptLine]:
-    """Build transcript lines from utterances with 5-layer hierarchical splitting.
+## _try_llm_segmentation removed — LLM semantic split now handled by
+## unified transcript reviewer (src/services/transcript_reviewer.py) in S2.
 
-    For multi-speaker videos: preserves speaker info from every utterance.
-    Uses word-level timestamps for precise pause-based splitting.
 
-    Splitting layers (applied sequentially, each layer processes ALL lines):
+def _apply_3layer_split(lines: list[TranscriptLine], all_words: list[dict]) -> list[TranscriptLine]:
+    """Apply 3-layer hierarchical splitting using word-level pause detection.
+
+    Shared by both multi-speaker and single-speaker paths.
+
+    Layers (applied sequentially):
       Layer 1: >15s + pauses ≥3s → split at ALL ≥3s pauses
       Layer 2: >45s + pauses ≥2s → split at the LONGEST ≥2s pause (bisect)
-      Layer 3: >90s + pauses ≥2s → split at the LONGEST ≥2s pause (bisect again)
-      Layer 4: >300s → send to Gemini for semantic splitting
-      Layer 5: >300s (final check) → send to Gemini again if still too long
+      Layer 3: >90s + pauses ≥1.5s → split at the LONGEST ≥1.5s pause (bisect again)
     """
-    # Build word-level index: speaker_label -> list of word dicts
-    word_index: dict[str, list[dict]] = {}
-    for utt in utterances:
-        spk = _normalize_optional_text(getattr(utt, "speaker", None)) or "A"
-        words = list(getattr(utt, "words", []) or [])
-        if not words:
-            continue
-        if spk not in word_index:
-            word_index[spk] = []
-        for w in words:
-            word_index[spk].append({
-                "text": getattr(w, "text", "") or "",
-                "start": _coerce_int(getattr(w, "start", None), default=0),
-                "end": _coerce_int(getattr(w, "end", None), default=0),
-            })
-
-    raw_lines = _build_lines_from_utterances(utterances)
-    if not raw_lines:
-        return raw_lines
+    if not lines:
+        return lines
 
     def _get_words_for_line(line: TranscriptLine) -> list[dict]:
-        spk_label = line.speaker_label or "A"
-        all_words = word_index.get(spk_label, [])
         return [
             w for w in all_words
             if w["start"] >= line.start_ms - 100 and w["end"] <= line.end_ms + 100
@@ -418,7 +363,7 @@ def _build_lines_from_utterances_with_split(utterances: list[Any]) -> list[Trans
 
     # --- Layer 1: >15s + pauses ≥3s → split at ALL ≥3s pauses ---
     lines_l1: list[TranscriptLine] = []
-    for line in raw_lines:
+    for line in lines:
         dur = line.end_ms - line.start_ms
         if dur <= 15_000:
             lines_l1.append(line)
@@ -461,35 +406,9 @@ def _build_lines_from_utterances_with_split(utterances: list[Any]) -> list[Trans
         chunks = _split_at_longest_pause(words, line, min_pause_ms=1500)
         lines_l3.extend(chunks)
 
-    # --- Layer 4: >300s → Gemini semantic split ---
-    lines_l4: list[TranscriptLine] = []
-    for line in lines_l3:
-        dur = line.end_ms - line.start_ms
-        if dur <= 300_000:
-            lines_l4.append(line)
-            continue
-        gemini_chunks = _try_llm_split_single_line(line)
-        if gemini_chunks and len(gemini_chunks) > 1:
-            lines_l4.extend(gemini_chunks)
-        else:
-            lines_l4.append(line)
-
-    # --- Layer 5: >300s final check → Gemini again ---
-    lines_l5: list[TranscriptLine] = []
-    for line in lines_l4:
-        dur = line.end_ms - line.start_ms
-        if dur <= 300_000:
-            lines_l5.append(line)
-            continue
-        gemini_chunks = _try_llm_split_single_line(line)
-        if gemini_chunks and len(gemini_chunks) > 1:
-            lines_l5.extend(gemini_chunks)
-        else:
-            lines_l5.append(line)
-
     # Re-index
     result: list[TranscriptLine] = []
-    for line in lines_l5:
+    for line in lines_l3:
         result.append(TranscriptLine(
             index=len(result) + 1,
             start_ms=line.start_ms,
@@ -499,7 +418,32 @@ def _build_lines_from_utterances_with_split(utterances: list[Any]) -> list[Trans
             source_text=line.source_text,
         ))
 
-    print(f"[S1] 多说话人 5 层拆分: {len(utterances)} utterances → {len(result)} lines")
+    return result
+
+
+def _build_lines_from_utterances_with_split(utterances: list[Any]) -> list[TranscriptLine]:
+    """Build transcript lines from utterances with 3-layer hierarchical splitting.
+
+    For multi-speaker videos: preserves speaker info from every utterance.
+    Uses word-level timestamps for precise pause-based splitting.
+    """
+    # Build flat word list from all utterances
+    all_words: list[dict] = []
+    for utt in utterances:
+        words = list(getattr(utt, "words", []) or [])
+        for w in words:
+            all_words.append({
+                "text": getattr(w, "text", "") or "",
+                "start": _coerce_int(getattr(w, "start", None), default=0),
+                "end": _coerce_int(getattr(w, "end", None), default=0),
+            })
+
+    raw_lines = _build_lines_from_utterances(utterances)
+    if not raw_lines:
+        return raw_lines
+
+    result = _apply_3layer_split(raw_lines, all_words)
+    print(f"[S1] 多说话人 3 层拆分: {len(utterances)} utterances → {len(result)} lines")
     long_remaining = sum(1 for l in result if (l.end_ms - l.start_ms) > 300_000)
     if long_remaining:
         print(f"[S1] ⚠ 仍有 {long_remaining} 段超过 300 秒")
@@ -583,56 +527,6 @@ def _build_lines_from_split_indices(
                 source_text=" ".join(w["text"] for w in chunk),
             ))
     return result if result else [template_line]
-
-
-def _try_llm_split_single_line(line: TranscriptLine) -> list[TranscriptLine] | None:
-    """Try to split a single overlong line using Gemini semantic segmentation."""
-    try:
-        from services.assemblyai.semantic_segmenter import (
-            TimestampedSentence,
-            segment_with_llm,
-        )
-        import re
-        # Split text into sentences for the LLM
-        sentences_text = re.split(r'(?<=[.!?])\s+', line.source_text)
-        if len(sentences_text) <= 1:
-            return None
-
-        # Distribute timestamps proportionally
-        total_chars = sum(len(s) for s in sentences_text) or 1
-        dur = line.end_ms - line.start_ms
-        ts_sentences = []
-        cur_ms = line.start_ms
-        for s in sentences_text:
-            s_dur = int(dur * len(s) / total_chars)
-            ts_sentences.append(TimestampedSentence(
-                start_ms=cur_ms, end_ms=cur_ms + s_dur,
-                speaker_id=line.speaker_id, speaker_label=line.speaker_label,
-                text=s,
-            ))
-            cur_ms += s_dur
-
-        result = segment_with_llm(
-            ts_sentences,
-            speaker_id=line.speaker_id,
-            speaker_label=line.speaker_label,
-        )
-        if result and len(result) > 1:
-            return [
-                TranscriptLine(
-                    index=0,
-                    start_ms=item["start_ms"],
-                    end_ms=item["end_ms"],
-                    speaker_id=item["speaker_id"],
-                    speaker_label=item["speaker_label"],
-                    source_text=item["source_text"],
-                )
-                for item in result
-            ]
-    except Exception:
-        import logging
-        logging.getLogger(__name__).exception("LLM split for single line failed")
-    return None
 
 
 def _utterances_well_segmented(utterances: list[Any]) -> bool:

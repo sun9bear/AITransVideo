@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
+from admin_settings import router as admin_router
 from auth import (
     LoginRequest,
     RegisterRequest,
@@ -21,10 +22,10 @@ from auth import (
     require_auth,
 )
 import logging
-from sqlalchemy import select
+
 from config import settings
-from database import async_session, engine
-from models import Base, Job, Session as SessionModel, User
+from database import engine
+from models import Base
 
 logger = logging.getLogger(__name__)
 from job_intercept import (
@@ -67,66 +68,10 @@ app.add_middleware(
 )
 
 
-# --- Middleware: auto-reconcile job records on every /job-api/ request ---
-
-@app.middleware("http")
-async def reconcile_job_middleware(request: Request, call_next):
-    """After proxying /job-api/jobs/{id}, check if job exists in PostgreSQL.
-
-    If not, auto-insert for the current user. This middleware runs AFTER
-    the response is generated, so it doesn't block the user.
-    Works regardless of which route handler processed the request.
-    """
-    # Write to file on EVERY request to prove middleware runs
-    with open("/tmp/middleware_trace.log", "a") as _mf:
-        _mf.write(f"{request.method} {request.url.path}\n")
-        _mf.flush()
-
-    response = await call_next(request)
-
-    # Only reconcile on successful GET /job-api/jobs/{job_id} requests
-    path = request.url.path
-    if (
-        request.method == "GET"
-        and path.startswith("/job-api/jobs/job_")
-        and response.status_code == 200
-        and settings.auth_required
-    ):
-        import re as _re
-        match = _re.match(r"^/job-api/jobs/(job_[a-f0-9]+)(?:/|$)", path)
-        if match:
-            job_id = match.group(1)
-            try:
-                session_id = request.cookies.get("session_id", "")
-                if session_id:
-                    async with async_session() as db:
-                        # Find user from session
-                        result = await db.execute(
-                            select(SessionModel).where(SessionModel.session_id == session_id)
-                        )
-                        sess = result.scalar_one_or_none()
-                        if sess is not None:
-                            # Check if job already in DB
-                            existing = await db.execute(
-                                select(Job).where(Job.job_id == job_id)
-                            )
-                            if existing.scalar_one_or_none() is None:
-                                job = Job(
-                                    job_id=job_id,
-                                    user_id=sess.user_id,
-                                    source_type="youtube_url",
-                                    source_ref="",
-                                    title="",
-                                    speakers="auto",
-                                    status="running",
-                                )
-                                db.add(job)
-                                await db.commit()
-                                logger.info("Middleware reconciled job %s for user %s", job_id, sess.user_id)
-            except Exception as _reconcile_err:
-                logger.warning("Reconcile middleware error for %s: %s", job_id, _reconcile_err)
-
-    return response
+# reconcile_job_middleware removed (2026-03-26).
+# Reason: Had stale cookie/token field names (session_id vs avt_session/token).
+# Owner binding is now handled solely by intercept_create_job at job creation time.
+# No auto-claim of orphan jobs in list or get endpoints.
 
 
 # --- Health check ---
@@ -142,6 +87,11 @@ app.post("/auth/register")(register_handler)
 app.post("/auth/login")(login_handler)
 app.post("/auth/logout")(logout_handler)
 app.get("/auth/me")(me_handler)
+
+
+# --- Admin settings routes (before catch-all) ---
+
+app.include_router(admin_router)
 
 
 # --- Web UI API intercept routes (before catch-all) ---

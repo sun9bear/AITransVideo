@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import logging
 from fastapi import Depends, HTTPException, Request, Response
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
@@ -55,31 +55,39 @@ async def intercept_list_jobs(
         result_user = await db.execute(select(Job.job_id).where(Job.user_id == user.id))
         user_job_ids = {row[0] for row in result_user.all()}
 
-        # Auto-reconcile: if upstream has jobs not in DB at all, claim them for current user
-        for j in all_jobs:
-            jid = j.get("job_id")
-            if jid and jid not in all_db_job_ids:
-                try:
-                    job = Job(
-                        job_id=jid,
-                        user_id=user.id,
-                        source_type=j.get("source_type", "youtube_url"),
-                        source_ref=j.get("youtube_url") or j.get("source_ref", ""),
-                        title=j.get("title", ""),
-                        speakers=j.get("speakers", "auto"),
-                        status=j.get("status", "queued"),
-                        current_stage=j.get("current_stage"),
-                        project_dir=j.get("project_dir"),
-                    )
-                    db.add(job)
-                    await db.commit()
-                    user_job_ids.add(jid)
-                    logger.info("Auto-reconciled orphan job %s → user %s", jid, user.id)
-                except Exception:
-                    logger.exception("Failed to auto-reconcile job %s", jid)
-                    await db.rollback()
+        # Log orphan jobs but do NOT auto-claim
+        orphan_ids = [j.get("job_id") for j in all_jobs if j.get("job_id") and j.get("job_id") not in all_db_job_ids]
+        if orphan_ids:
+            print(f"[GATEWAY] ⚠ {len(orphan_ids)} orphan job(s) not in DB: {orphan_ids[:5]}", flush=True)
 
+        # Sync status from upstream to DB for this user's jobs
+        upstream_by_id = {j.get("job_id"): j for j in all_jobs if j.get("job_id")}
+        for jid in user_job_ids:
+            upstream_job = upstream_by_id.get(jid)
+            if upstream_job:
+                upstream_status = upstream_job.get("status", "")
+                upstream_stage = upstream_job.get("current_stage")
+                try:
+                    await db.execute(
+                        select(Job).where(Job.job_id == jid)  # just to trigger lazy load
+                    )
+                    from sqlalchemy import update
+                    await db.execute(
+                        update(Job).where(Job.job_id == jid).values(
+                            status=upstream_status,
+                            current_stage=upstream_stage,
+                        )
+                    )
+                except Exception:
+                    pass
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+
+        # Only return jobs that belong to this user in DB
         filtered_jobs = [j for j in all_jobs if j.get("job_id") in user_job_ids]
+        print(f"[GATEWAY] list_jobs: upstream={len(all_jobs)}, db_user={len(user_job_ids)}, returning={len(filtered_jobs)}", flush=True)
         data["jobs"] = filtered_jobs
 
         return Response(
@@ -87,9 +95,16 @@ async def intercept_list_jobs(
             status_code=200,
             headers={"content-type": "application/json"},
         )
-    except Exception:
-        logger.exception("Failed to filter jobs by user_id")
+    except Exception as exc:
+        import traceback
+        print(f"[GATEWAY] ❌ Failed to filter jobs: {exc}", flush=True)
+        print(f"[GATEWAY] ❌ Traceback: {traceback.format_exc()}", flush=True)
         return upstream_response
+
+
+FREE_USER_MAX_CONCURRENT = 1
+PLUS_USER_MAX_CONCURRENT = 3
+PRO_USER_MAX_CONCURRENT = 10
 
 
 async def intercept_create_job(
@@ -97,8 +112,28 @@ async def intercept_create_job(
     db: AsyncSession = Depends(get_db),
     user: User | None = Depends(require_auth),
 ) -> Response:
-    """POST /job-api/jobs — forward to upstream, then record in DB."""
-    # Forward to upstream first
+    """POST /job-api/jobs — check per-user concurrency, forward to upstream, record in DB."""
+    # Per-user concurrency check
+    if user:
+        active_count_result = await db.execute(
+            select(func.count()).where(
+                Job.user_id == user.id,
+                Job.status.in_(["queued", "running", "waiting_for_review"]),
+            )
+        )
+        active_count = active_count_result.scalar() or 0
+        # TODO: check user tier for different limits
+        max_concurrent = FREE_USER_MAX_CONCURRENT
+        if active_count >= max_concurrent:
+            return Response(
+                content=json.dumps({
+                    "detail": f"当前有未完成的任务（{active_count}个），请先完成或取消后再创建新翻译。"
+                }, ensure_ascii=False),
+                status_code=409,
+                headers={"content-type": "application/json"},
+            )
+
+    # Forward to upstream
     upstream_response = await proxy_request(
         request=request,
         upstream_base=settings.job_api_upstream,
@@ -107,14 +142,16 @@ async def intercept_create_job(
 
     # If successful, record the job in DB
     job_id = None
-    logger.info("intercept_create_job: upstream status=%s, user=%s", upstream_response.status_code, user.id if user else None)
+    print(f"[GATEWAY] intercept_create_job: upstream status={upstream_response.status_code}, user={user.id if user else None}", flush=True)
     if upstream_response.status_code in (200, 201, 202) and user is not None:
         try:
-            data = json.loads(upstream_response.body)
+            raw_body = upstream_response.body
+            print(f"[GATEWAY] intercept_create_job: response body length={len(raw_body)}, first 200 chars={raw_body[:200]}", flush=True)
+            data = json.loads(raw_body)
             # Upstream may return {"job": {...}} or {"job_id": "...", ...}
             job_data = data.get("job") or data
             job_id = job_data.get("job_id")
-            logger.info("intercept_create_job: parsed job_id=%s from upstream response", job_id)
+            print(f"[GATEWAY] intercept_create_job: parsed job_id={job_id}", flush=True)
             if job_id:
                 existing = await db.execute(select(Job).where(Job.job_id == job_id))
                 if existing.scalar_one_or_none() is None:
@@ -131,15 +168,21 @@ async def intercept_create_job(
                     )
                     db.add(job)
                     await db.commit()
-                    logger.info("intercept_create_job: recorded job %s for user %s", job_id, user.id)
+                    print(f"[GATEWAY] ✅ Job {job_id} recorded in DB for user {user.id}", flush=True)
                 else:
-                    logger.info("intercept_create_job: job %s already in DB", job_id)
+                    print(f"[GATEWAY] Job {job_id} already in DB, skipping", flush=True)
             else:
-                logger.warning("intercept_create_job: no job_id in upstream response: %s", list(job_data.keys())[:10])
-        except Exception:
-            logger.exception("Failed to record job %s in DB", job_id)
+                print(f"[GATEWAY] ⚠ No job_id in upstream response. Keys: {list(job_data.keys())[:10]}", flush=True)
+        except Exception as exc:
+            import traceback
+            print(f"[GATEWAY] ❌ Failed to record job {job_id} in DB: {exc}", flush=True)
+            print(f"[GATEWAY] ❌ Traceback: {traceback.format_exc()}", flush=True)
+            try:
+                await db.rollback()
+            except Exception:
+                pass
     elif upstream_response.status_code not in (200, 201, 202):
-        logger.info("intercept_create_job: upstream rejected with status %s", upstream_response.status_code)
+        print(f"[GATEWAY] intercept_create_job: upstream rejected with status {upstream_response.status_code}", flush=True)
 
     return upstream_response
 
@@ -150,42 +193,7 @@ async def intercept_get_job(
     db: AsyncSession = Depends(get_db),
     user: User | None = Depends(require_auth),
 ) -> Response:
-    """GET /job-api/jobs/{job_id} — auto-reconcile if missing, verify ownership, then forward."""
-    # Auto-reconcile: if job_id not in DB but user is authenticated, claim it
-    if user is not None:
-        try:
-            existing = await db.execute(select(Job).where(Job.job_id == job_id))
-            if existing.scalar_one_or_none() is None:
-                # Forward first to get job data, then record
-                upstream_response = await proxy_request(
-                    request=request,
-                    upstream_base=settings.job_api_upstream,
-                    strip_prefix="/job-api",
-                )
-                if upstream_response.status_code == 200:
-                    try:
-                        job_data = json.loads(upstream_response.body)
-                        job = Job(
-                            job_id=job_id,
-                            user_id=user.id,
-                            source_type=job_data.get("source_type", "youtube_url"),
-                            source_ref=job_data.get("source_ref", ""),
-                            title=job_data.get("title", ""),
-                            speakers=job_data.get("speakers", "auto"),
-                            status=job_data.get("status", "running"),
-                            current_stage=job_data.get("current_stage"),
-                            project_dir=job_data.get("project_dir"),
-                        )
-                        db.add(job)
-                        await db.commit()
-                        logger.info("Auto-reconciled job %s via get_job for user %s", job_id, user.id)
-                    except Exception:
-                        await db.rollback()
-                        logger.exception("Failed to auto-reconcile job %s via get_job", job_id)
-                return upstream_response
-        except Exception:
-            logger.exception("Error in get_job auto-reconcile check for %s", job_id)
-
+    """GET /job-api/jobs/{job_id} — verify ownership, then forward. No auto-claim."""
     await _verify_job_ownership(job_id, db, user)
     return await proxy_request(
         request=request,

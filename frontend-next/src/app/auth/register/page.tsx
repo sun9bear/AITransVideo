@@ -75,10 +75,12 @@ export default function RegisterPage() {
               <Input
                 id="email"
                 type="email"
-                placeholder="your@email.com"
+                placeholder="your@email.com…"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 className={inputClass}
+                autoComplete="email"
+                spellCheck={false}
                 required
               />
             </div>
@@ -86,10 +88,11 @@ export default function RegisterPage() {
               <Label htmlFor="display-name" className="text-sm text-on-surface-dim">昵称（可选）</Label>
               <Input
                 id="display-name"
-                placeholder="你的昵称"
+                placeholder="你的昵称…"
                 value={displayName}
                 onChange={(e) => setDisplayName(e.target.value)}
                 className={inputClass}
+                autoComplete="name"
               />
             </div>
             <div className="space-y-2">
@@ -97,10 +100,11 @@ export default function RegisterPage() {
               <Input
                 id="password"
                 type="password"
-                placeholder="至少 6 位"
+                placeholder="至少 6 位…"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 className={inputClass}
+                autoComplete="new-password"
                 required
               />
             </div>
@@ -109,7 +113,7 @@ export default function RegisterPage() {
               className="w-full h-11 bg-gradient-to-r from-violet-600 to-violet-500 hover:from-violet-500 hover:to-violet-400 text-white font-medium shadow-lg shadow-violet-500/25 transition-all"
               disabled={isSubmitting}
             >
-              {isSubmitting ? "注册中..." : "注册"}
+              {isSubmitting ? "注册中…" : "注册"}
             </Button>
           </form>
 

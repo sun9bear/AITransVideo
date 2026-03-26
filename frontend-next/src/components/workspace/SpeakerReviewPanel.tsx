@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 
-import { ApiError } from '@/lib/api/client'
+import { getErrorMessage } from '@/lib/api/errors'
 import { approveSpeakerReview, getSpeakerReview, splitSegment } from '@/lib/api/reviews'
 import type { SpeakerReviewResource } from '@/types/reviews'
 
@@ -80,7 +80,7 @@ export function SpeakerReviewPanel({ jobId, onAdvanced }: SpeakerReviewPanelProp
   }
 
   if (isLoading && !resource) {
-    return <PanelLoading message="正在读取说话人审核内容..." />
+    return <PanelLoading message="正在读取说话人审核内容…" />
   }
   if (pageError && !resource) {
     return <PanelError message={pageError} />
@@ -102,7 +102,7 @@ export function SpeakerReviewPanel({ jobId, onAdvanced }: SpeakerReviewPanelProp
           onClick={() => { void handleApprove() }}
           type="button"
         >
-          {isSubmitting ? '提交中...' : '✓ 确认并继续'}
+          {isSubmitting ? '提交中…' : '✓ 确认并继续'}
         </button>
       </div>
 
@@ -117,7 +117,7 @@ export function SpeakerReviewPanel({ jobId, onAdvanced }: SpeakerReviewPanelProp
               <span className="text-sm font-medium text-muted-foreground">{option.id}</span>
               <div className="group rounded-xl border border-border bg-muted/30 transition hover:border-primary/30 focus-within:border-primary/40">
                 <input
-                  className="w-48 rounded-xl bg-transparent px-3 py-2 text-sm text-foreground focus:outline-none"
+                  className="w-48 rounded-xl bg-transparent px-3 py-2 text-sm text-foreground focus:outline-none input-focus-ring"
                   onChange={(e) => setSpeakerNames((c) => ({ ...c, [option.id]: e.currentTarget.value }))}
                   value={speakerNames[option.id] ?? option.displayName}
                 />
@@ -234,7 +234,7 @@ export function SpeakerReviewPanel({ jobId, onAdvanced }: SpeakerReviewPanelProp
                     setSubmitError('拆分未生效。')
                   } catch (error) { setSubmitError(`拆分失败: ${getErrorMessage(error)}`) } finally { setIsSplitting(false) }
                 }} type="button">
-                  {isSplitting ? '拆分中...' : '确认拆分'}
+                  {isSplitting ? '拆分中…' : '确认拆分'}
                 </button>
               </div>
             ) : null}
@@ -296,10 +296,4 @@ function Pagination({
       </div>
     </div>
   )
-}
-
-function getErrorMessage(error: unknown) {
-  if (error instanceof ApiError) return error.message
-  if (error instanceof Error) return error.message
-  return '请求失败，请稍后重试。'
 }

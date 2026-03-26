@@ -15,7 +15,7 @@ export default function VoiceLibraryPage() {
       .finally(() => setIsLoading(false))
   }, [])
 
-  if (isLoading) return <EmptyState title="加载中" description="正在加载音色库..." />
+  if (isLoading) return <EmptyState title="加载中" description="正在加载音色库…" />
   if (!summary || summary.voices.length === 0) {
     return <EmptyState title="音色库为空" description="在翻译任务中克隆音色后会自动保存到这里。" actionLabel="新建翻译" actionTo="/translations/new" />
   }

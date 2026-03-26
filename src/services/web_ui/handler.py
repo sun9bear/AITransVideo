@@ -457,6 +457,91 @@ def _build_web_ui_handler() -> type[BaseHTTPRequestHandler]:
                         },
                     )
                     return
+                if parsed_path.path == "/api/review/preview-segment":
+                    payload = self._read_json()
+                    segment_id = payload.get("segment_id")
+                    source_start_ms = payload.get("source_start_ms")
+                    source_end_ms = payload.get("source_end_ms")
+                    cn_text = _normalize_optional_text(payload.get("cn_text"))
+                    voice_id = _normalize_optional_text(payload.get("voice_id"))
+                    job_id = _normalize_optional_text(payload.get("job_id"))
+
+                    import base64
+                    import subprocess
+
+                    source_audio_b64 = ""
+                    tts_audio_b64 = ""
+
+                    # --- Source audio clip extraction via ffmpeg ---
+                    if source_start_ms is not None and source_end_ms is not None:
+                        try:
+                            project_dir: Path | None = None
+                            if job_id:
+                                pd_text = _resolve_project_dir_by_job_id(
+                                    manager=self.server.job_manager,  # type: ignore[attr-defined]
+                                    job_id=job_id,
+                                )
+                                if pd_text:
+                                    project_dir = Path(pd_text).expanduser().resolve(strict=False)
+                            if project_dir is None:
+                                project_dir = _resolve_authoritative_review_project_dir(
+                                    manager=self.server.job_manager,  # type: ignore[attr-defined]
+                                    requested_project_dir=payload.get("project_dir"),
+                                )
+                            source_audio = project_dir / "audio" / "speech_for_asr.wav"
+                            if not source_audio.exists():
+                                source_audio = project_dir / "audio" / "original.wav"
+                            if source_audio.exists():
+                                start_s = float(source_start_ms) / 1000.0
+                                end_s = float(source_end_ms) / 1000.0
+                                result = subprocess.run(
+                                    [
+                                        "ffmpeg", "-y",
+                                        "-i", str(source_audio),
+                                        "-ss", f"{start_s:.3f}",
+                                        "-to", f"{end_s:.3f}",
+                                        "-acodec", "pcm_s16le",
+                                        "-ar", "16000",
+                                        "-ac", "1",
+                                        "-f", "wav",
+                                        "pipe:1",
+                                    ],
+                                    capture_output=True,
+                                    timeout=30,
+                                )
+                                if result.returncode == 0 and result.stdout:
+                                    source_audio_b64 = base64.b64encode(result.stdout).decode("ascii")
+                        except Exception as exc:
+                            print(f"[preview-segment] source audio extraction failed: {exc}")
+
+                    # --- TTS preview generation ---
+                    if cn_text and voice_id:
+                        try:
+                            config_path = self.server.job_manager.config_path  # type: ignore[attr-defined]
+                            from services.voice_asset import VoiceAssetVerifier
+                            verifier = VoiceAssetVerifier.from_env(config_path=config_path)
+                            tts_result = verifier.verify_voice(
+                                speaker_id="preview",
+                                voice_id=voice_id,
+                                sample_text=cn_text,
+                            )
+                            if tts_result.output_path and Path(tts_result.output_path).exists():
+                                tts_audio_b64 = base64.b64encode(
+                                    Path(tts_result.output_path).read_bytes()
+                                ).decode("ascii")
+                        except Exception as exc:
+                            print(f"[preview-segment] TTS preview failed: {exc}")
+
+                    self._write_json(
+                        HTTPStatus.OK,
+                        {
+                            "source_audio_base64": source_audio_b64,
+                            "tts_audio_base64": tts_audio_b64,
+                            "source_format": "wav",
+                            "tts_format": "wav",
+                        },
+                    )
+                    return
                 if parsed_path.path == "/api/review/voice/clone":
                     payload = self._read_json()
                     speaker_id = _normalize_optional_text(payload.get("speaker_id"))

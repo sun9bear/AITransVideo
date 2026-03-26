@@ -248,6 +248,46 @@ export default function NewTranslationPage() {
 
             <div className="h-px bg-muted/40" />
 
+            {/* Service plan selection */}
+            <div className="space-y-3">
+              <span className="text-xs font-medium text-muted-foreground block">服务方案</span>
+              <div className="grid gap-3 sm:grid-cols-2">
+                {/* Express plan - free users can select */}
+                <button
+                  type="button"
+                  className="relative rounded-xl border-2 border-primary/50 bg-primary/5 p-4 text-left transition hover:border-primary/70 ring-2 ring-primary/20"
+                  disabled={isBlockedByActiveJob || submitState === "submitting"}
+                >
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="text-lg">⚡</span>
+                    <span className="text-sm font-semibold text-foreground">快捷版</span>
+                    <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-400">免费</span>
+                  </div>
+                  <p className="text-xs text-muted-foreground leading-relaxed">自动生成，无需任何操作。AI 自动识别说话人、翻译、配音，快速便捷。</p>
+                  <div className="absolute top-3 right-3 h-4 w-4 rounded-full bg-primary flex items-center justify-center">
+                    <svg className="h-2.5 w-2.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                  </div>
+                </button>
+
+                {/* Pro plan - locked for free users */}
+                <div
+                  className="relative rounded-xl border border-border bg-muted/20 p-4 text-left opacity-60 cursor-not-allowed"
+                >
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="text-lg">🎯</span>
+                    <span className="text-sm font-semibold text-foreground">专业版</span>
+                    <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold text-amber-400">付费</span>
+                  </div>
+                  <p className="text-xs text-muted-foreground leading-relaxed">翻译文稿可审核编辑，支持克隆原声音色，更高质量的定制化配音。</p>
+                  <div className="absolute top-3 right-3 rounded-full bg-muted/50 px-2 py-0.5 text-[10px] text-muted-foreground">
+                    即将开放
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="h-px bg-muted/40" />
+
             {/* Options */}
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-2">
@@ -282,22 +322,22 @@ export default function NewTranslationPage() {
               </div>
             </div>
 
-            {savedVoices.length > 0 ? (
-              <p className="text-xs text-muted-foreground/60">
-                音色将在后续"音色确认"阶段配置，可选择已有音色或克隆新音色。
-              </p>
-            ) : null}
+            <p className="text-xs text-muted-foreground/60">
+              快捷版将自动完成全部流程，无需人工操作。升级专业版后可审核译文、克隆原声音色。
+            </p>
 
             {/* 长视频提示 */}
-            <div className="rounded-xl border border-blue-500/20 bg-blue-500/5 p-4 text-sm text-blue-400/80">
-              <p className="font-medium text-blue-400 mb-1">处理时长参考</p>
-              <ul className="space-y-1 text-xs">
-                <li>10 分钟以内：约 5-15 分钟</li>
-                <li>10-30 分钟：约 15-45 分钟</li>
-                <li>30-60 分钟：约 1-2 小时（长视频，处理完成后将通知您）</li>
-                <li>60 分钟以上：约 2-4 小时（超长视频，建议分段处理）</li>
-              </ul>
-              <p className="mt-2 text-xs text-muted-foreground">超过 3 小时的视频暂不支持，请裁剪后重试。</p>
+            <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4">
+              <p className="text-sm font-medium text-amber-400 mb-2">处理时长参考</p>
+              <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-xs text-muted-foreground">
+                <span>≤15 分钟</span><span className="text-emerald-400">约 10-20 分钟</span>
+                <span>15-30 分钟</span><span className="text-foreground/70">约 20-45 分钟</span>
+                <span>30-60 分钟</span><span className="text-amber-400">约 1-2 小时</span>
+                <span>60-120 分钟</span><span className="text-orange-400">约 2-4 小时</span>
+                <span>120-180 分钟</span><span className="text-red-400">约 3-5 小时</span>
+                <span>&gt;180 分钟</span><span className="text-red-500 font-medium">暂不支持</span>
+              </div>
+              <p className="mt-2 text-xs text-muted-foreground/60">长视频处理完成后将通过浏览器推送通知您。超过 3 小时的视频请裁剪后重试。</p>
             </div>
 
             <button

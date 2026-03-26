@@ -31,6 +31,8 @@ export interface TranslationReviewItem {
   translationConfirmed: boolean
   rewriteRequested: boolean
   reviewUpdatedAt: string | null
+  startMs: number
+  endMs: number
 }
 
 export interface ReviewJobTransition {

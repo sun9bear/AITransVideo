@@ -1,20 +1,55 @@
 "use client"
 
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { getErrorMessage } from '@/lib/api/errors'
-import { approveTranslationReview, getTranslationReview, splitSegment } from '@/lib/api/reviews'
+import {
+  approveTranslationReview,
+  cloneVoiceForReview,
+  getTranslationReview,
+  splitSegment,
+} from '@/lib/api/reviews'
+import { getVoiceLibrary, type VoiceLibraryEntry } from '@/lib/api/voiceLibrary'
 import type { TranslationReviewResource } from '@/types/reviews'
+
+/* ---------- Preview API ---------- */
+
+async function previewSegment(params: {
+  segment_id: number
+  source_start_ms: number
+  source_end_ms: number
+  cn_text: string
+  voice_id: string
+}): Promise<{ tts_audio_base64: string }> {
+  const resp = await fetch('/api/review/preview-segment', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(params),
+  })
+  if (!resp.ok) throw new Error('试听失败')
+  return resp.json()
+}
+
+/* ---------- Types ---------- */
 
 type TranslationSegmentState = Record<
   string,
   { cnText: string; rewriteRequested: boolean; translationConfirmed: boolean; ttsCnText: string; updatedAt: string }
 >
 
+interface SpeakerVoiceConfig {
+  voiceId: string
+  isCloning: boolean
+  cloneError: string | null
+}
+
 interface TranslationReviewPanelProps {
   jobId: string
   onAdvanced: () => void
 }
+
+/* ---------- Main Component ---------- */
 
 export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewPanelProps) {
   const [resource, setResource] = useState<TranslationReviewResource | null>(null)
@@ -32,6 +67,16 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [pageError, setPageError] = useState<string | null>(null)
   const [submitError, setSubmitError] = useState<string | null>(null)
+
+  // Speaker voice config
+  const [speakerVoices, setSpeakerVoices] = useState<Record<string, SpeakerVoiceConfig>>({})
+  const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({})
+  const [allVoices, setAllVoices] = useState<VoiceLibraryEntry[]>([])
+
+  // Preview state per segment
+  const [previewingSegmentId, setPreviewingSegmentId] = useState<string | null>(null)
+  const [previewError, setPreviewError] = useState<Record<string, string>>({})
+  const audioRef = useRef<HTMLAudioElement | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -57,6 +102,25 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
             ]),
           ),
         )
+
+        // Initialize speaker names from speakerOptions
+        setSpeakerNames(
+          Object.fromEntries(nextResource.speakerOptions.map((o) => [o.id, o.displayName])),
+        )
+
+        // Initialize voice configs per speaker (empty initially)
+        const voiceConfigs: Record<string, SpeakerVoiceConfig> = {}
+        for (const option of nextResource.speakerOptions) {
+          voiceConfigs[option.id] = { voiceId: '', isCloning: false, cloneError: null }
+        }
+        setSpeakerVoices(voiceConfigs)
+
+        // Load voice library
+        try {
+          const lib = await getVoiceLibrary()
+          if (!cancelled) setAllVoices(lib.voices)
+        } catch { /* non-critical */ }
+
         setPageError(null)
       } catch (error) {
         if (!cancelled) setPageError(getErrorMessage(error))
@@ -67,6 +131,76 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
     void load()
     return () => { cancelled = true }
   }, [jobId])
+
+  // Compute eligible preview segments: for each speaker, first 2 segments with duration > 5s
+  const eligiblePreviewSegments = useMemo(() => {
+    if (!resource) return new Set<string>()
+    const eligible = new Set<string>()
+    const speakerCounts: Record<string, number> = {}
+
+    for (const item of resource.items) {
+      const spk = segmentSpeakers[item.segmentId] ?? item.speakerId
+      const durationMs = item.endMs - item.startMs
+      if (durationMs <= 5000) continue
+      const count = speakerCounts[spk] ?? 0
+      if (count >= 2) continue
+      speakerCounts[spk] = count + 1
+      eligible.add(item.segmentId)
+    }
+
+    return eligible
+  }, [resource, segmentSpeakers])
+
+  const updateSpeakerVoice = useCallback((speakerId: string, update: Partial<SpeakerVoiceConfig>) => {
+    setSpeakerVoices((prev) => ({ ...prev, [speakerId]: { ...prev[speakerId], ...update } }))
+  }, [])
+
+  const handleClone = useCallback(async (speakerId: string) => {
+    if (!resource) return
+    updateSpeakerVoice(speakerId, { isCloning: true, cloneError: null })
+    try {
+      const name = speakerNames[speakerId] ?? speakerId
+      const result = await cloneVoiceForReview(speakerId, name, '', resource.projectDir)
+      updateSpeakerVoice(speakerId, { voiceId: result.voiceId, isCloning: false })
+      try { const lib = await getVoiceLibrary(); setAllVoices(lib.voices) } catch { /* non-critical */ }
+    } catch (error) {
+      updateSpeakerVoice(speakerId, { isCloning: false, cloneError: getErrorMessage(error) })
+    }
+  }, [resource, speakerNames, updateSpeakerVoice])
+
+  const handlePreviewSegment = useCallback(async (segmentId: string) => {
+    if (!resource) return
+    const item = resource.items.find((i) => i.segmentId === segmentId)
+    if (!item) return
+    const spk = segmentSpeakers[segmentId] ?? item.speakerId
+    const voiceId = speakerVoices[spk]?.voiceId
+    if (!voiceId) {
+      setPreviewError((prev) => ({ ...prev, [segmentId]: '请先为该说话人选择音色' }))
+      return
+    }
+    const currentSegment = segments[segmentId]
+    const cnText = currentSegment?.cnText ?? item.cnText
+
+    setPreviewingSegmentId(segmentId)
+    setPreviewError((prev) => { const n = { ...prev }; delete n[segmentId]; return n })
+    try {
+      const result = await previewSegment({
+        segment_id: Number(segmentId),
+        source_start_ms: item.startMs,
+        source_end_ms: item.endMs,
+        cn_text: cnText,
+        voice_id: voiceId,
+      })
+      if (result.tts_audio_base64 && audioRef.current) {
+        audioRef.current.src = `data:audio/wav;base64,${result.tts_audio_base64}`
+        audioRef.current.play()
+      }
+    } catch (error) {
+      setPreviewError((prev) => ({ ...prev, [segmentId]: getErrorMessage(error) }))
+    } finally {
+      setPreviewingSegmentId(null)
+    }
+  }, [resource, segmentSpeakers, speakerVoices, segments])
 
   const totalItems = resource?.items.length ?? 0
   const totalPages = Math.max(1, Math.ceil(totalItems / pageSize))
@@ -104,7 +238,7 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
   }
 
   if (isLoading && !resource) {
-    return <PanelLoading message="正在读取翻译审核内容…" />
+    return <PanelLoading message="正在读取翻译审核内容..." />
   }
   if (pageError && !resource) {
     return <PanelError message={pageError} />
@@ -115,6 +249,9 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
 
   return (
     <div className="space-y-5">
+      <audio ref={audioRef} className="hidden" />
+
+      {/* Action bar */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-sm text-muted-foreground">
           确认翻译与配音文本，共 {resource.items.length} 条。
@@ -125,12 +262,74 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
           onClick={() => { void handleApprove() }}
           type="button"
         >
-          {isSubmitting ? '提交中…' : '✓ 确认并继续'}
+          {isSubmitting ? '提交中...' : '确认并继续'}
         </button>
       </div>
 
       {submitError ? <ErrorBanner message={submitError} /> : null}
 
+      {/* Speaker Configuration Section */}
+      <section className="surface-card p-5">
+        <h3 className="text-lg font-semibold text-foreground mb-4">说话人配置</h3>
+        <div className="space-y-3">
+          {resource.speakerOptions.map((option) => {
+            const voiceConfig = speakerVoices[option.id]
+            return (
+              <div key={option.id} className="flex flex-wrap items-center gap-3">
+                {/* Speaker name input */}
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground shrink-0">
+                    {option.id}
+                  </span>
+                  <div className="group rounded-lg border border-border bg-muted/30 transition hover:border-primary/30 focus-within:border-primary/40">
+                    <input
+                      className="w-36 rounded-lg bg-transparent px-3 py-2 text-sm text-foreground focus:outline-none input-focus-ring"
+                      onChange={(e) => setSpeakerNames((prev) => ({ ...prev, [option.id]: e.currentTarget.value }))}
+                      placeholder="名称"
+                      value={speakerNames[option.id] ?? option.displayName}
+                    />
+                  </div>
+                </div>
+
+                {/* Voice select */}
+                <div className="flex items-center gap-2 min-w-0 flex-1">
+                  <span className="text-xs text-muted-foreground shrink-0">音色:</span>
+                  <div className="group flex-1 min-w-[160px] max-w-xs rounded-lg border border-border bg-muted/30 transition hover:border-primary/30 focus-within:border-primary/40">
+                    <select
+                      className="w-full rounded-lg bg-transparent px-3 py-2 text-sm text-foreground focus:outline-none input-focus-ring"
+                      onChange={(e) => { if (e.currentTarget.value) updateSpeakerVoice(option.id, { voiceId: e.currentTarget.value }) }}
+                      value={voiceConfig?.voiceId ?? ''}
+                    >
+                      <option value="">-- 请选择 --</option>
+                      {allVoices.map((v) => (
+                        <option key={v.voiceId} value={v.voiceId}>
+                          {v.speakerName ? `${v.speakerName} - ` : ''}{v.label || v.voiceId}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                {/* Clone button */}
+                <button
+                  className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-3 py-2 text-xs font-medium text-cyan-400 transition hover:bg-cyan-500/20 hover:border-cyan-500/50 disabled:opacity-50 shrink-0"
+                  disabled={voiceConfig?.isCloning}
+                  onClick={() => { void handleClone(option.id) }}
+                  type="button"
+                >
+                  {voiceConfig?.isCloning ? '克隆中...' : '克隆'}
+                </button>
+
+                {voiceConfig?.cloneError ? (
+                  <span className="text-xs text-red-400">{voiceConfig.cloneError}</span>
+                ) : null}
+              </div>
+            )
+          })}
+        </div>
+      </section>
+
+      {/* Pagination */}
       {hasPagination ? (
         <Pagination
           currentPage={currentPage} pageSize={pageSize} pageSizeOptions={resource.pageSizeOptions}
@@ -139,6 +338,7 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
         />
       ) : null}
 
+      {/* Segment list */}
       <section className="surface-card p-5">
         <div className="space-y-4">
           {visibleItems.map((item) => {
@@ -147,10 +347,13 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
               translationConfirmed: item.translationConfirmed, ttsCnText: item.ttsCnText,
               updatedAt: item.reviewUpdatedAt ?? '',
             }
+            const isEligibleForPreview = eligiblePreviewSegments.has(item.segmentId)
+            const isPreviewingThis = previewingSegmentId === item.segmentId
+            const segPreviewError = previewError[item.segmentId]
 
             return (
               <article key={item.segmentId} className="rounded-2xl border border-border bg-card p-5">
-                {/* Header: segment id + speaker */}
+                {/* Header: segment id + speaker + actions */}
                 <div className="flex flex-wrap items-center gap-3">
                   <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">片段 {item.segmentId}</p>
                   {resource.speakerOptions.length > 1 ? (
@@ -185,34 +388,55 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
                       }}
                       value={segmentSpeakers[item.segmentId] ?? item.speakerId}
                     >
-                      {resource.speakerOptions.map((o) => <option key={o.id} value={o.id}>{o.displayName}</option>)}
+                      {resource.speakerOptions.map((o) => <option key={o.id} value={o.id}>{speakerNames[o.id] ?? o.displayName}</option>)}
                     </select>
                   ) : (
-                    <p className="text-sm font-semibold text-foreground">{item.displayName || item.speakerId}</p>
+                    <p className="text-sm font-semibold text-foreground">{speakerNames[item.speakerId] ?? (item.displayName || item.speakerId)}</p>
                   )}
-                  <button
-                    className="ml-auto rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-3 py-1 text-xs font-medium text-cyan-400 transition hover:bg-cyan-500/20 hover:border-cyan-500/50"
-                    onClick={() => {
-                      if (splittingSegmentId === item.segmentId) { setSplittingSegmentId(null) } else {
-                        setSplittingSegmentId(item.segmentId)
-                        setSplitSourcePos(Math.floor((item.sourceText || '').length / 2))
-                        setSplitCnPos(Math.floor((current.cnText || '').length / 2))
-                        setSplitSpeakerA(segmentSpeakers[item.segmentId] ?? item.speakerId)
-                        setSplitSpeakerB(resource.speakerOptions.length > 1 ? resource.speakerOptions.find(o => o.id !== item.speakerId)?.id ?? item.speakerId : item.speakerId)
-                      }
-                    }}
-                    type="button"
-                  >
-                    {splittingSegmentId === item.segmentId ? '取消拆分' : '拆分'}
-                  </button>
+
+                  <div className="ml-auto flex items-center gap-2">
+                    {/* Preview button */}
+                    {isEligibleForPreview ? (
+                      <button
+                        className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-400 transition hover:bg-emerald-500/20 hover:border-emerald-500/50 disabled:opacity-50"
+                        disabled={isPreviewingThis}
+                        onClick={() => { void handlePreviewSegment(item.segmentId) }}
+                        type="button"
+                      >
+                        {isPreviewingThis ? '生成中...' : '试听配音'}
+                      </button>
+                    ) : null}
+
+                    {/* Split button */}
+                    <button
+                      className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-3 py-1 text-xs font-medium text-cyan-400 transition hover:bg-cyan-500/20 hover:border-cyan-500/50"
+                      onClick={() => {
+                        if (splittingSegmentId === item.segmentId) { setSplittingSegmentId(null) } else {
+                          setSplittingSegmentId(item.segmentId)
+                          setSplitSourcePos(Math.floor((item.sourceText || '').length / 2))
+                          setSplitCnPos(Math.floor((current.cnText || '').length / 2))
+                          setSplitSpeakerA(segmentSpeakers[item.segmentId] ?? item.speakerId)
+                          setSplitSpeakerB(resource.speakerOptions.length > 1 ? resource.speakerOptions.find(o => o.id !== item.speakerId)?.id ?? item.speakerId : item.speakerId)
+                        }
+                      }}
+                      type="button"
+                    >
+                      {splittingSegmentId === item.segmentId ? '取消拆分' : '拆分'}
+                    </button>
+                  </div>
                 </div>
+
+                {/* Preview error */}
+                {segPreviewError ? (
+                  <p className="mt-1 text-xs text-red-400">{segPreviewError}</p>
+                ) : null}
 
                 {/* Source text */}
                 <div className="mt-3 rounded-xl border border-border bg-muted/30 px-4 py-3 text-sm leading-6 text-foreground/70">
                   {item.sourceText || '-'}
                 </div>
 
-                {/* Translation textarea — styled like source block, hover highlight */}
+                {/* Translation textarea */}
                 <div className="mt-3">
                   <span className="text-xs font-medium text-muted-foreground mb-1 block">译文</span>
                   <div className="group rounded-xl border border-border bg-muted/30 transition hover:border-primary/30 hover:bg-primary/5 focus-within:border-primary/40 focus-within:bg-primary/5">
@@ -229,6 +453,7 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
                   </div>
                 </div>
 
+                {/* Split panel */}
                 {splittingSegmentId === item.segmentId ? (
                   <div className="mt-3 rounded-xl border-2 border-amber-500/20 bg-amber-500/5 p-4 space-y-4">
                     <p className="text-sm font-semibold text-foreground">拆分片段 {item.segmentId}</p>
@@ -252,13 +477,13 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
                       <label className="space-y-1">
                         <span className="form-label">片段 A 发言人</span>
                         <select className="form-input text-sm" onChange={(e) => setSplitSpeakerA(e.currentTarget.value)} value={splitSpeakerA}>
-                          {resource.speakerOptions.map((o) => <option key={o.id} value={o.id}>{o.displayName}</option>)}
+                          {resource.speakerOptions.map((o) => <option key={o.id} value={o.id}>{speakerNames[o.id] ?? o.displayName}</option>)}
                         </select>
                       </label>
                       <label className="space-y-1">
                         <span className="form-label">片段 B 发言人</span>
                         <select className="form-input text-sm" onChange={(e) => setSplitSpeakerB(e.currentTarget.value)} value={splitSpeakerB}>
-                          {resource.speakerOptions.map((o) => <option key={o.id} value={o.id}>{o.displayName}</option>)}
+                          {resource.speakerOptions.map((o) => <option key={o.id} value={o.id}>{speakerNames[o.id] ?? o.displayName}</option>)}
                         </select>
                       </label>
                     </div>
@@ -275,7 +500,7 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
                         setSubmitError('拆分未生效。')
                       } catch (error) { setSubmitError(`拆分失败: ${getErrorMessage(error)}`) } finally { setIsSplitting(false) }
                     }} type="button">
-                      {isSplitting ? '拆分中…' : '确认拆分'}
+                      {isSplitting ? '拆分中...' : '确认拆分'}
                     </button>
                   </div>
                 ) : null}
@@ -339,10 +564,4 @@ function Pagination({
       </div>
     </div>
   )
-}
-
-function formatDateTime(value: string) {
-  const parsed = new Date(value)
-  if (Number.isNaN(parsed.getTime())) return value
-  return new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' }).format(parsed)
 }

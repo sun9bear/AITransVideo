@@ -46,6 +46,7 @@ TRANSLATION_PROMPT_TEMPLATE_VIDEO_TITLE_TOKEN = "__VIDEO_TITLE__"
 TRANSLATION_PROMPT_TEMPLATE_YOUTUBE_URL_TOKEN = "__YOUTUBE_URL__"
 TRANSLATION_PROMPT_TEMPLATE_SPEAKER_INSTRUCTION_TOKEN = "__SPEAKER_INSTRUCTION__"
 TRANSLATION_PROMPT_TEMPLATE_STRICT_LENGTH_TOKEN = "__STRICT_LENGTH_INSTRUCTION__"
+TRANSLATION_PROMPT_TEMPLATE_GLOSSARY_TOKEN = "__GLOSSARY_SECTION__"
 REWRITE_PROMPT_TEMPLATE_TEXT_TOKEN = "__TTS_CN_TEXT__"
 REWRITE_PROMPT_TEMPLATE_SOURCE_TEXT_TOKEN = "__SOURCE_TEXT__"
 REWRITE_PROMPT_TEMPLATE_DIRECTION_TOKEN = "__DIRECTION_DESC__"
@@ -71,7 +72,7 @@ DEFAULT_TRANSLATION_PROMPT_TEMPLATE = """你是专业的视频配音翻译专家
 视频信息：
 - 标题：__VIDEO_TITLE__
 - 来源：__YOUTUBE_URL__
-
+__GLOSSARY_SECTION__
 这些翻译将直接用于中文 TTS 配音，核心目标是让中文配音时长与原英文段落时长大致一致。请特别注意：
 1. 每段都标注了 target_duration_seconds（原文段落时长），翻译时请自然地控制中文长度，使配音时长接近该目标。
 2. 不要机械地按字数公式凑字，而是根据原文的语速节奏、信息密度来判断中文应该翻多长。
@@ -151,6 +152,7 @@ class DubbingSegment:
     alignment_method: str = ""
     rewrite_count: int = 0
     needs_review: bool = False
+    voice_description: str = ""
 
 
 @dataclass(slots=True)
@@ -226,6 +228,7 @@ class GeminiTranslator:
         display_name_b: str | None = None,
         video_title: str = "",
         youtube_url: str = "",
+        glossary: dict[str, str] | None = None,
     ) -> TranslationResult:
         output_root = Path(output_dir).resolve(strict=False)
         output_root.mkdir(parents=True, exist_ok=True)
@@ -239,8 +242,16 @@ class GeminiTranslator:
         normalized_display_name = _normalize_optional_text(display_name) or "Speaker A"
         normalized_voice_id_b = _normalize_optional_text(voice_id_b)
         normalized_display_name_b = _normalize_optional_text(display_name_b) or "Speaker B"
-        lines = self._pre_split_long_lines(lines)
+        # _pre_split_long_lines removed — S1 3-layer split + S2 LLM review
+        # already ensures segments are ≤45s. No need for translator to re-split.
         groups = _build_groups(lines, max_segment_duration_ms=max_segment_duration_ms)
+
+        # Save glossary to translation/glossary.json for reference
+        effective_glossary = glossary if glossary else {}
+        if effective_glossary:
+            glossary_path = output_root / "glossary.json"
+            _write_json(glossary_path, effective_glossary)
+            print(f"[S3] 术语表已保存：{len(effective_glossary)} 条 -> {glossary_path}")
 
         if not groups:
             result = TranslationResult(segments=[], total_segments=0, output_path=str(output_path))
@@ -271,6 +282,7 @@ class GeminiTranslator:
                     batch,
                     video_title=video_title,
                     youtube_url=youtube_url,
+                    glossary=effective_glossary,
                 )
             )
             self._write_translation_checkpoint(
@@ -781,6 +793,7 @@ class GeminiTranslator:
         *,
         video_title: str = "",
         youtube_url: str = "",
+        glossary: dict[str, str] | None = None,
         strict_length_control: bool = False,
     ) -> str:
         groups_json = json.dumps(groups, ensure_ascii=False, indent=2)
@@ -795,12 +808,17 @@ class GeminiTranslator:
             if len(speaker_ids) > 1
             else ""
         )
+        glossary_section = ""
+        if glossary:
+            glossary_lines = "\n".join(f"{k} → {v}" for k, v in glossary.items())
+            glossary_section = f"\n术语表（请严格遵循以下翻译）：\n{glossary_lines}\n"
         normalized_video_title = _normalize_optional_text(video_title) or "未提供"
         normalized_youtube_url = _normalize_optional_text(youtube_url) or "未提供"
         return (
             self.translation_prompt_template
             .replace(TRANSLATION_PROMPT_TEMPLATE_VIDEO_TITLE_TOKEN, normalized_video_title)
             .replace(TRANSLATION_PROMPT_TEMPLATE_YOUTUBE_URL_TOKEN, normalized_youtube_url)
+            .replace(TRANSLATION_PROMPT_TEMPLATE_GLOSSARY_TOKEN, glossary_section)
             .replace(TRANSLATION_PROMPT_TEMPLATE_SPEAKER_INSTRUCTION_TOKEN, speaker_instruction)
             .replace(TRANSLATION_PROMPT_TEMPLATE_STRICT_LENGTH_TOKEN, strict_length_instruction)
             .replace(TRANSLATION_PROMPT_TEMPLATE_GROUPS_TOKEN, groups_json)
@@ -844,11 +862,13 @@ class GeminiTranslator:
         *,
         video_title: str,
         youtube_url: str,
+        glossary: dict[str, str] | None = None,
     ) -> list[dict]:
         prompt = self._build_prompt(
             batch,
             video_title=video_title,
             youtube_url=youtube_url,
+            glossary=glossary,
         )
         response_text = self._call_task_with_fallback(
             "s3_translate",
@@ -865,6 +885,7 @@ class GeminiTranslator:
             batch,
             video_title=video_title,
             youtube_url=youtube_url,
+            glossary=glossary,
             strict_length_control=True,
         )
         retry_response_text = self._call_task_with_fallback(

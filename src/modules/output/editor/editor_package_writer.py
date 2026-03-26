@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import json
 from pathlib import Path
 import re
 import shutil
@@ -103,12 +104,28 @@ class EditorPackageWriter:
             shutil.copy2(ambient_source_path, output_path)
             return self._ensure_jianying_compatible(str(output_path))
 
-        ambient_audio = (
-            AudioSegment.silent(duration=output.total_duration_ms, frame_rate=44_100)
-            .set_channels(2)
-            .set_sample_width(2)
-        )
-        ambient_audio.export(output_path, format="wav")
+        duration_seconds = max(output.total_duration_ms, 0) / 1000
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-f", "lavfi",
+                    "-t", f"{duration_seconds:.3f}",
+                    "-i", "anullsrc=r=44100:cl=stereo",
+                    "-acodec", "pcm_s16le",
+                    "-ar", "44100", "-ac", "2",
+                    "-y", str(output_path),
+                ],
+                capture_output=True, check=True,
+            )
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            # Fallback to pydub if ffmpeg unavailable
+            ambient_audio = (
+                AudioSegment.silent(duration=output.total_duration_ms, frame_rate=44_100)
+                .set_channels(2)
+                .set_sample_width(2)
+            )
+            ambient_audio.export(output_path, format="wav")
         return str(output_path.resolve(strict=False))
 
     def _compose_full_audio_with_ffmpeg(
@@ -357,8 +374,22 @@ class EditorPackageWriter:
             return str(source_path)
 
         try:
-            audio = AudioSegment.from_wav(source_path)
-            if audio.frame_rate == 44_100 and audio.channels == 2 and audio.sample_width == 2:
+            probe_result = subprocess.run(
+                [
+                    "ffprobe", "-v", "error",
+                    "-select_streams", "a:0",
+                    "-show_entries", "stream=sample_rate,channels,bits_per_sample",
+                    "-of", "json",
+                    str(source_path),
+                ],
+                capture_output=True, text=True, check=True,
+            )
+            stream = json.loads(probe_result.stdout).get("streams", [{}])[0]
+            if (
+                str(stream.get("sample_rate")) == "44100"
+                and int(stream.get("channels", 0)) == 2
+                and int(stream.get("bits_per_sample", 0)) == 16
+            ):
                 return str(source_path)
         except Exception:
             pass

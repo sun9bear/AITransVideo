@@ -4,9 +4,9 @@ from pathlib import Path
 import shutil
 import subprocess
 
-from pydub import AudioSegment
-
 from modules.output.project_output import AlignedSegment
+from utils.audio_utils import measure_duration_ms as _ffprobe_duration_ms
+from utils.atomic_io import is_valid_output
 from services.gemini.translator import DubbingSegment
 
 FIRST_REWRITE_TARGET_RATIO_WINDOWS = {
@@ -97,7 +97,37 @@ class SegmentAligner:
     ) -> list[AlignedSegment]:
         output_root = Path(output_dir).resolve(strict=False)
         output_root.mkdir(parents=True, exist_ok=True)
-        return [self._align_one(segment, str(output_root)) for segment in segments]
+
+        results: list[AlignedSegment] = []
+        total_segments = len(segments)
+        for index, segment in enumerate(segments, start=1):
+            output_path = output_root / f"segment_{segment.segment_id:03d}_aligned.wav"
+            if is_valid_output(str(output_path)):
+                print(f"[S5] 跳过已完成的对齐段 {index}/{total_segments}")
+                duration_ms = _ffprobe_duration_ms(output_path)
+                target_duration_ms = int(segment.target_duration_ms)
+                segment.aligned_audio_path = str(output_path)
+                segment.actual_duration_ms = duration_ms
+                segment.alignment_ratio = duration_ms / target_duration_ms if target_duration_ms > 0 else 0.0
+                results.append(AlignedSegment(
+                    segment_id=segment.segment_id,
+                    speaker_id=segment.speaker_id,
+                    display_name=segment.display_name,
+                    start_ms=segment.start_ms,
+                    end_ms=segment.end_ms,
+                    cn_text=segment.cn_text,
+                    aligned_audio_path=str(output_path),
+                    actual_duration_ms=duration_ms,
+                    alignment_method="checkpoint",
+                    needs_review=False,
+                ))
+                if total_segments > 0 and (index % 15 == 0 or index == total_segments):
+                    print(f"[S5] 对齐进度: {index}/{total_segments} 段")
+                continue
+            results.append(self._align_one(segment, str(output_root)))
+            if total_segments > 0 and (index % 15 == 0 or index == total_segments):
+                print(f"[S5] 对齐进度: {index}/{total_segments} 段")
+        return results
 
     def _align_one(
         self,
@@ -511,7 +541,7 @@ def _resolve_existing_audio_path(path: str | None) -> Path:
 
 
 def _measure_wav_duration_ms(path: str | Path) -> int:
-    return len(AudioSegment.from_wav(path))
+    return _ffprobe_duration_ms(path)
 
 
 def _build_atempo_filter(speed_ratio: float) -> str:

@@ -16,5 +16,5 @@ export default function VoiceReviewRedirect() {
     }
   }, [jobId, router])
 
-  return <EmptyState description="正在跳转到工作区..." title="页面已迁移" />
+  return <EmptyState description="正在跳转到工作区…" title="页面已迁移" />
 }

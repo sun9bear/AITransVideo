@@ -9,12 +9,7 @@ import { StatusBadge } from '@/components/status-badge'
 import { StageProgress } from '@/components/stage-progress'
 import { LogViewer } from '@/components/log-viewer'
 import { ResultDownloadList } from '@/components/result-download-list'
-import {
-  SpeakerReviewPanel,
-  TranslationReviewPanel,
-  TranslationConfigPanel,
-  VoiceReviewPanel,
-} from '@/components/workspace'
+import { TranslationReviewPanel } from '@/components/workspace'
 import {
   getErrorCategory,
   getErrorSummaryMessage,
@@ -214,21 +209,22 @@ export default function WorkspacePage() {
         </section>
       ) : null}
 
-      {/* Review panels — use Web UI's active stage for accuracy */}
-      {isWaitingForReview && effectiveReviewStage === 'speaker_review' ? (
-        <SpeakerReviewPanel jobId={jobId} onAdvanced={handleAdvanced} />
-      ) : null}
-
-      {isWaitingForReview && effectiveReviewStage === 'voice_review' ? (
-        <VoiceReviewPanel jobId={jobId} onAdvanced={handleAdvanced} />
-      ) : null}
-
-      {isWaitingForReview && effectiveReviewStage === 'translation_config_review' ? (
-        <TranslationConfigPanel jobId={jobId} onAdvanced={handleAdvanced} />
-      ) : null}
-
+      {/* Unified review panel — combines speaker, voice, and translation review */}
       {isWaitingForReview && effectiveReviewStage === 'translation_review' ? (
         <TranslationReviewPanel jobId={jobId} onAdvanced={handleAdvanced} />
+      ) : null}
+
+      {/* Auto-processing stages (speaker/voice/translation_config are now automatic) */}
+      {isWaitingForReview && (effectiveReviewStage === 'speaker_review' || effectiveReviewStage === 'voice_review' || effectiveReviewStage === 'translation_config_review') ? (
+        <section className="surface-card p-8 text-center">
+          <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-3 border-primary border-t-transparent" />
+          <h3 className="text-lg font-semibold text-foreground">正在自动处理</h3>
+          <p className="mt-2 text-sm text-muted-foreground">
+            {effectiveReviewStage === 'speaker_review' ? '说话人识别中，即将自动进入下一步…' :
+             effectiveReviewStage === 'voice_review' ? '音色自动匹配中…' :
+             '翻译配置已自动确认，正在继续处理…'}
+          </p>
+        </section>
       ) : null}
 
       {/* Error state */}
