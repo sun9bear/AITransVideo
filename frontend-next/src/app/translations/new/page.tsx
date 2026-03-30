@@ -8,6 +8,7 @@ import { StatusBadge } from "@/components/status-badge"
 import { getJobDisplayTitle, getStageLabel } from "@/features/jobs/presentation"
 import { ApiError } from "@/lib/api/client"
 import { getErrorMessage } from '@/lib/api/errors'
+import { getEntitlements, type UserEntitlements } from "@/lib/api/entitlements"
 import { estimateCosts, formatCostCny } from "@/lib/cost/estimator"
 import { getCurrentJob, submitTranslationJob } from "@/lib/api/jobs"
 import { getVoiceLibrary, type VoiceLibraryEntry } from "@/lib/api/voiceLibrary"
@@ -24,6 +25,8 @@ export default function NewTranslationPage() {
   const [uploadProgress, setUploadProgress] = useState("")
   const [speakers, setSpeakers] = useState<"1" | "2" | "auto">("auto")
   const [transcriptionMethod, setTranscriptionMethod] = useState<"assemblyai" | "gemini">("assemblyai")
+  const [serviceMode, setServiceMode] = useState<"express" | "studio">("express")
+  const [entitlements, setEntitlements] = useState<UserEntitlements | null>(null)
   const [savedVoices, setSavedVoices] = useState<VoiceLibraryEntry[]>([])
   const [activeJob, setActiveJob] = useState<JobSummary | null>(null)
   const [isLoadingGuard, setIsLoadingGuard] = useState(true)
@@ -55,6 +58,9 @@ export default function NewTranslationPage() {
     getVoiceLibrary()
       .then((lib) => setSavedVoices(lib.voices))
       .catch(() => {})
+    getEntitlements()
+      .then((ent) => setEntitlements(ent))
+      .catch(() => {})
   }, [])
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -73,6 +79,7 @@ export default function NewTranslationPage() {
         sourceType,
         localFilePath: sourceType === "local_file" ? uploadedFilePath : undefined,
         transcriptionMethod: sourceType === "local_file" ? "assemblyai" : transcriptionMethod,
+        service_mode: serviceMode,
       })
       setActiveJob(createdJob)
       setSubmitState("success")
@@ -250,40 +257,68 @@ export default function NewTranslationPage() {
 
             {/* Service plan selection */}
             <div className="space-y-3">
-              <span className="text-xs font-medium text-muted-foreground block">服务方案</span>
+              <span className="text-xs font-medium text-muted-foreground block">任务方案</span>
               <div className="grid gap-3 sm:grid-cols-2">
-                {/* Express plan - free users can select */}
+                {/* Express mode */}
                 <button
                   type="button"
-                  className="relative rounded-xl border-2 border-primary/50 bg-primary/5 p-4 text-left transition hover:border-primary/70 ring-2 ring-primary/20"
+                  className={`relative rounded-xl border-2 p-4 text-left transition ${serviceMode === "express" ? "border-primary/50 bg-primary/5 ring-2 ring-primary/20" : "border-border bg-muted/20 hover:border-primary/30"}`}
                   disabled={isBlockedByActiveJob || submitState === "submitting"}
+                  onClick={() => setServiceMode("express")}
                 >
                   <div className="flex items-center gap-2 mb-2">
-                    <span className="text-lg">⚡</span>
                     <span className="text-sm font-semibold text-foreground">快捷版</span>
-                    <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-400">免费</span>
+                    <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-400">Express</span>
                   </div>
-                  <p className="text-xs text-muted-foreground leading-relaxed">自动生成，无需任何操作。AI 自动识别说话人、翻译、配音，快速便捷。</p>
-                  <div className="absolute top-3 right-3 h-4 w-4 rounded-full bg-primary flex items-center justify-center">
-                    <svg className="h-2.5 w-2.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
-                  </div>
+                  <p className="text-xs text-muted-foreground leading-relaxed">全自动流程，AI 识别说话人、翻译、配音，无需人工操作。</p>
+                  {serviceMode === "express" && (
+                    <div className="absolute top-3 right-3 h-4 w-4 rounded-full bg-primary flex items-center justify-center">
+                      <svg className="h-2.5 w-2.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                    </div>
+                  )}
                 </button>
 
-                {/* Pro plan - locked for free users */}
-                <div
-                  className="relative rounded-xl border border-border bg-muted/20 p-4 text-left opacity-60 cursor-not-allowed"
-                >
-                  <div className="flex items-center gap-2 mb-2">
-                    <span className="text-lg">🎯</span>
-                    <span className="text-sm font-semibold text-foreground">专业版</span>
-                    <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold text-amber-400">付费</span>
-                  </div>
-                  <p className="text-xs text-muted-foreground leading-relaxed">翻译文稿可审核编辑，支持克隆原声音色，更高质量的定制化配音。</p>
-                  <div className="absolute top-3 right-3 rounded-full bg-muted/50 px-2 py-0.5 text-[10px] text-muted-foreground">
-                    即将开放
-                  </div>
-                </div>
+                {/* Studio mode — locked unless plan allows it */}
+                {(() => {
+                  const studioAllowed = entitlements?.limits.allowed_service_modes.includes("studio") ?? false
+                  return studioAllowed ? (
+                    <button
+                      type="button"
+                      className={`relative rounded-xl border-2 p-4 text-left transition ${serviceMode === "studio" ? "border-primary/50 bg-primary/5 ring-2 ring-primary/20" : "border-border bg-muted/20 hover:border-primary/30"}`}
+                      disabled={isBlockedByActiveJob || submitState === "submitting"}
+                      onClick={() => setServiceMode("studio")}
+                    >
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className="text-sm font-semibold text-foreground">工作台版</span>
+                        <span className="rounded-full bg-cyan-500/15 px-2 py-0.5 text-[10px] font-semibold text-cyan-400">Studio</span>
+                      </div>
+                      <p className="text-xs text-muted-foreground leading-relaxed">可审核译文、克隆原声音色，更高质量的定制化配音。</p>
+                      {serviceMode === "studio" && (
+                        <div className="absolute top-3 right-3 h-4 w-4 rounded-full bg-primary flex items-center justify-center">
+                          <svg className="h-2.5 w-2.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                        </div>
+                      )}
+                    </button>
+                  ) : (
+                    <div className="relative rounded-xl border border-border bg-muted/20 p-4 text-left opacity-60 cursor-not-allowed">
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className="text-sm font-semibold text-foreground">工作台版</span>
+                        <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold text-amber-400">Studio</span>
+                      </div>
+                      <p className="text-xs text-muted-foreground leading-relaxed">可审核译文、克隆原声音色，更高质量的定制化配音。</p>
+                      <div className="absolute top-3 right-3 rounded-full bg-muted/50 px-2 py-0.5 text-[10px] text-muted-foreground">
+                        {entitlements?.ui.allow_upgrade ? "升级解锁" : "即将开放"}
+                      </div>
+                    </div>
+                  )
+                })()}
               </div>
+              {/* Quota info for free users */}
+              {entitlements?.plan_code === "free" && entitlements.limits.free_jobs_quota_remaining != null && (
+                <p className="text-xs text-muted-foreground">
+                  免费额度：已用 {entitlements.limits.free_jobs_quota_used ?? 0} / {entitlements.limits.free_jobs_quota_total ?? 5} 次
+                </p>
+              )}
             </div>
 
             <div className="h-px bg-muted/40" />
@@ -323,7 +358,7 @@ export default function NewTranslationPage() {
             </div>
 
             <p className="text-xs text-muted-foreground/60">
-              快捷版将自动完成全部流程，无需人工操作。升级专业版后可审核译文、克隆原声音色。
+              快捷版自动完成全部流程，无需人工操作。工作台版可审核译文、克隆原声音色。
             </p>
 
             {/* 长视频提示 */}

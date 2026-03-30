@@ -15,8 +15,8 @@ from sqlalchemy import select, delete as sa_delete
 
 from auth import get_current_user
 from config import settings as app_settings
-from database import async_session
-from models import Job, User
+from database import async_session, get_db
+from models import AdminAuditLog, Job, User
 
 logger = logging.getLogger(__name__)
 
@@ -35,13 +35,19 @@ class AdminSettings(BaseModel):
     skip_all_reviews_for_free_users: bool = True   # Free users: fully automatic pipeline
     free_user_max_duration_minutes: float = 10.0   # Max video duration for free users (minutes)
     enable_pre_tts_rewrite: bool = True            # Pre-TTS rewrite to match target duration
+    express_tts_provider: str = "cosyvoice"        # Default TTS provider for express mode
+    studio_tts_provider: str = "minimax"           # Default TTS provider for studio mode
 
 
 # --- Helpers ---
 
 def _is_admin(user: User) -> bool:
-    """Simple admin check: email == 'admin' or display_name == 'Admin'."""
-    return user.email == "admin" or user.display_name == "Admin"
+    """Check admin via role field only.
+
+    After running Alembic 002, all users get role='user' by default.
+    To bootstrap an admin: UPDATE users SET role='admin' WHERE email='your-admin@example.com';
+    """
+    return (getattr(user, "role", None) or "user") == "admin"
 
 
 def _require_admin(user: User | None) -> User:
@@ -179,13 +185,16 @@ async def cancel_job(
         shutil.rmtree(project_dir, ignore_errors=True)
         logger.info("Removed project dir: %s", project_dir)
 
-    # (d) Update status in PostgreSQL
+    # (d) Update status in PostgreSQL + release quota
     async with async_session() as db:
         row = (await db.execute(
             select(Job).where(Job.job_id == job_id)
         )).scalar_one_or_none()
         if row:
             row.status = "cancelled"
+            # Release reserved quota
+            from quota import release_quota
+            await release_quota(db, row)
             await db.commit()
 
     # (e) Delete job JSON file from Job API store
@@ -235,9 +244,215 @@ async def delete_job(
         job_file.unlink(missing_ok=True)
         logger.info("Removed job file: %s", job_file)
 
-    # Delete PostgreSQL record
+    # Release quota then delete PostgreSQL record
     async with async_session() as db:
+        row = (await db.execute(
+            select(Job).where(Job.job_id == job_id)
+        )).scalar_one_or_none()
+        if row:
+            from quota import release_quota
+            await release_quota(db, row)
         await db.execute(sa_delete(Job).where(Job.job_id == job_id))
         await db.commit()
 
     return {"success": True, "deleted": True}
+
+
+# ---------------------------------------------------------------------------
+# User management endpoints
+# ---------------------------------------------------------------------------
+
+VALID_ROLES = {"user", "admin"}
+VALID_PLAN_CODES = {"free", "plus", "pro"}
+
+
+@router.get("/users")
+async def list_users(
+    user: User | None = Depends(get_current_user),
+) -> dict:
+    """List all users with role, plan, quota, and active job count."""
+    _require_admin(user)
+
+    async with async_session() as db:
+        # Users
+        users_result = await db.execute(select(User).order_by(User.created_at.desc()))
+        users = users_result.scalars().all()
+
+        # Active job counts per user
+        from sqlalchemy import func
+        active_counts_result = await db.execute(
+            select(Job.user_id, func.count())
+            .where(Job.status.in_(["queued", "running", "waiting_for_review"]))
+            .group_by(Job.user_id)
+        )
+        active_counts = {str(row[0]): row[1] for row in active_counts_result.all()}
+
+        # Total job counts per user
+        total_counts_result = await db.execute(
+            select(Job.user_id, func.count())
+            .group_by(Job.user_id)
+        )
+        total_counts = {str(row[0]): row[1] for row in total_counts_result.all()}
+
+    return {
+        "users": [
+            {
+                "id": str(u.id),
+                "email": u.email,
+                "display_name": u.display_name,
+                "role": u.role,
+                "plan_code": u.plan_code,
+                "free_jobs_quota_total": u.free_jobs_quota_total,
+                "free_jobs_quota_used": u.free_jobs_quota_used,
+                "is_active": u.is_active,
+                "active_jobs": active_counts.get(str(u.id), 0),
+                "total_jobs": total_counts.get(str(u.id), 0),
+                "created_at": u.created_at.isoformat() if u.created_at else None,
+            }
+            for u in users
+        ]
+    }
+
+
+class UpdateEntitlementsRequest(BaseModel):
+    role: str | None = None
+    plan_code: str | None = None
+    free_jobs_quota_total: int | None = None
+    free_jobs_quota_used: int | None = None
+
+
+@router.patch("/users/{user_id}/entitlements")
+async def update_user_entitlements(
+    user_id: str,
+    body: UpdateEntitlementsRequest,
+    user: User | None = Depends(get_current_user),
+) -> dict:
+    """Update a user's role, plan_code, or quota. Writes audit log."""
+    admin = _require_admin(user)
+
+    async with async_session() as db:
+        result = await db.execute(select(User).where(User.id == user_id))
+        target = result.scalar_one_or_none()
+        if target is None:
+            raise HTTPException(status_code=404, detail="用户不存在")
+
+        changes = []
+
+        # --- Role change ---
+        if body.role is not None and body.role != target.role:
+            if body.role not in VALID_ROLES:
+                raise HTTPException(status_code=400, detail=f"无效的 role: {body.role}")
+            # Guard: prevent demoting the last admin
+            if target.role == "admin" and body.role != "admin":
+                from sqlalchemy import func as sa_func
+                admin_count_result = await db.execute(
+                    select(sa_func.count()).where(User.role == "admin")
+                )
+                admin_count = admin_count_result.scalar() or 0
+                if admin_count <= 1:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="无法降级：系统中至少需要保留一个管理员。"
+                    )
+            old_val = target.role
+            target.role = body.role
+            changes.append(("update_role", "role", old_val, body.role))
+
+        # --- Plan change ---
+        if body.plan_code is not None and body.plan_code != target.plan_code:
+            if body.plan_code not in VALID_PLAN_CODES:
+                raise HTTPException(status_code=400, detail=f"无效的 plan_code: {body.plan_code}")
+            old_val = target.plan_code
+            target.plan_code = body.plan_code
+            changes.append(("update_plan_code", "plan_code", old_val, body.plan_code))
+
+        # --- Quota adjustments with boundary validation ---
+        new_total = body.free_jobs_quota_total if body.free_jobs_quota_total is not None else target.free_jobs_quota_total
+        new_used = body.free_jobs_quota_used if body.free_jobs_quota_used is not None else target.free_jobs_quota_used
+        if new_total < 0:
+            raise HTTPException(status_code=400, detail="free_jobs_quota_total 不能为负数")
+        if new_used < 0:
+            raise HTTPException(status_code=400, detail="free_jobs_quota_used 不能为负数")
+        if new_used > new_total:
+            raise HTTPException(
+                status_code=400,
+                detail=f"free_jobs_quota_used ({new_used}) 不能大于 free_jobs_quota_total ({new_total})"
+            )
+
+        if body.free_jobs_quota_total is not None and body.free_jobs_quota_total != target.free_jobs_quota_total:
+            old_val = str(target.free_jobs_quota_total)
+            target.free_jobs_quota_total = body.free_jobs_quota_total
+            changes.append(("adjust_quota", "free_jobs_quota_total", old_val, str(body.free_jobs_quota_total)))
+
+        if body.free_jobs_quota_used is not None and body.free_jobs_quota_used != target.free_jobs_quota_used:
+            old_val = str(target.free_jobs_quota_used)
+            target.free_jobs_quota_used = body.free_jobs_quota_used
+            changes.append(("adjust_quota", "free_jobs_quota_used", old_val, str(body.free_jobs_quota_used)))
+
+        if not changes:
+            return {"updated": False, "message": "无变更"}
+
+        # Write audit log entries
+        for action, field, old_v, new_v in changes:
+            db.add(AdminAuditLog(
+                admin_user_id=admin.id,
+                target_user_id=target.id,
+                action=action,
+                field_name=field,
+                old_value=old_v,
+                new_value=new_v,
+            ))
+
+        await db.commit()
+        logger.info("Admin %s updated user %s: %s", admin.email, target.email,
+                     "; ".join(f"{f}: {o}->{n}" for _, f, o, n in changes))
+
+        return {
+            "updated": True,
+            "user": {
+                "id": str(target.id),
+                "email": target.email,
+                "role": target.role,
+                "plan_code": target.plan_code,
+                "free_jobs_quota_total": target.free_jobs_quota_total,
+                "free_jobs_quota_used": target.free_jobs_quota_used,
+            },
+            "changes": [
+                {"field": f, "old": o, "new": n}
+                for _, f, o, n in changes
+            ],
+        }
+
+
+@router.get("/users/{user_id}/audit-log")
+async def get_user_audit_log(
+    user_id: str,
+    user: User | None = Depends(get_current_user),
+) -> dict:
+    """Get audit log entries for a specific user."""
+    _require_admin(user)
+
+    async with async_session() as db:
+        result = await db.execute(
+            select(AdminAuditLog, User.email.label("admin_email"))
+            .outerjoin(User, AdminAuditLog.admin_user_id == User.id)
+            .where(AdminAuditLog.target_user_id == user_id)
+            .order_by(AdminAuditLog.created_at.desc())
+            .limit(50)
+        )
+        rows = result.all()
+
+    return {
+        "entries": [
+            {
+                "id": str(entry.id),
+                "admin_email": admin_email,
+                "action": entry.action,
+                "field_name": entry.field_name,
+                "old_value": entry.old_value,
+                "new_value": entry.new_value,
+                "created_at": entry.created_at.isoformat() if entry.created_at else None,
+            }
+            for entry, admin_email in rows
+        ]
+    }

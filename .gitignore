@@ -33,6 +33,7 @@ tools/caddy/
 *.tar.gz
 
 # Temp files
+tmp_*
 tmp_remote_env
 tmp_remote_env.bak_*
 tmp_playwright/

@@ -40,6 +40,22 @@
 - 本阶段不处理剪映工程兼容性问题
 - 本阶段不实现团队组织、邀请协作、企业发票等扩展能力
 
+### 2.3 概念词汇表
+
+为避免“套餐 / 角色 / 方案”继续混用，本设计统一以下术语：
+
+| 英文 | 中文 | 值域 | 说明 |
+| --- | --- | --- | --- |
+| `plan_code` | 套餐 | `free` / `plus` / `pro` | 用户当前购买或分配到的权益等级 |
+| `role` | 角色 | `user` / `admin` | 用户系统权限，决定是否拥有后台与豁免能力 |
+| `service_mode` | 任务方案 | `express` / `studio` | 单个任务的运行模式，由用户在创建任务时选择 |
+
+其中：
+
+- `plan_code` 决定“能不能创建某种任务”
+- `service_mode` 决定“该任务按什么策略运行”
+- `role` 决定“是否拥有管理员豁免和后台权限”
+
 ## 3. 设计原则
 
 ### 3.1 会员权益与执行策略解耦
@@ -414,11 +430,35 @@ Phase 4 需要最小审计表，记录管理员对用户权益的人工修改。
 
 ## 7. API 边界
 
-### 7.1 前端读取权益
+### 7.1 前端读取身份与权益
+
+#### `GET /auth/me`
+
+该接口只返回当前登录态对应的身份信息，用于 App Shell、头像区、管理员角标等轻量展示。
+
+建议返回：
+
+```json
+{
+  "user": {
+    "id": "uuid",
+    "email": "user@example.com",
+    "display_name": "Demo User",
+    "role": "user",
+    "created_at": "2026-03-29T08:00:00+08:00"
+  }
+}
+```
+
+职责边界：
+
+- 返回身份信息
+- 可包含 `role`
+- 不承担套餐额度、可用方案、剩余额度等权益计算职责
 
 #### `GET /api/me/entitlements`
 
-返回当前用户的前端可见权益信息。
+返回当前用户的前端可见权益信息，用于新建任务页、用量页与支付升级引导。
 
 返回字段建议：
 
@@ -560,6 +600,14 @@ Gateway 不应只返回自然语言字符串，必须返回结构化错误码，
 2. 如果实际时长超出当前任务创建时允许的上限，并且角色不是 `admin`
 3. 将任务标记为失败
 4. 若 `jobs.quota_state='reserved'`，则只释放一次配额
+
+时长探测实现建议：
+
+- 本地上传优先复用上传阶段保存的 metadata
+- YouTube URL 优先使用 `yt-dlp --dump-json --no-download`
+- Gateway 对轻量 probe 设置 5 秒超时
+- 超时或 probe 失败时，回退到 `estimated_duration_seconds` 做初步放行
+- 最终以 Pipeline S0 回写的真实 metadata 作为硬校验依据
 
 ### 7.5 管理后台
 
@@ -737,10 +785,11 @@ Gateway 不应只返回自然语言字符串，必须返回结构化错误码，
 2. Gateway 完成并发校验
 3. Gateway 增加结构化错误码响应
 4. Gateway 基于 `estimated_duration_seconds` 或轻量 probe 做初步时长校验
-5. Gateway 生成并写入完整任务快照
-6. Job API / Job Store 补齐字段保存
-7. 增加内部 source metadata 回调
-8. Pipeline 清除 legacy `admin_settings` 的套餐判定逻辑
+5. 对 YouTube metadata probe 使用 `yt-dlp --dump-json --no-download`，并设置 5 秒超时
+6. Gateway 生成并写入完整任务快照
+7. Job API / Job Store 补齐字段保存
+8. 增加内部 source metadata 回调
+9. Pipeline 清除 legacy `admin_settings` 的套餐判定逻辑
 
 ### Phase 3: 轻量配额闭环
 
@@ -833,7 +882,9 @@ Gateway 不应只返回自然语言字符串，必须返回结构化错误码，
 缓解：
 
 - 创建时只做轻量预估或 metadata probe
+- YouTube metadata probe 使用 `yt-dlp --dump-json --no-download` 并设置 5 秒超时
 - 本地上传优先复用上传阶段保存的 metadata
+- 超时或 probe 失败时回退到 `estimated_duration_seconds`
 - Pipeline S0 再回写真实时长，作为最终校验依据
 - 真实时长超限时失败并释放预扣额度
 

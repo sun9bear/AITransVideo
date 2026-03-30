@@ -107,6 +107,7 @@ class ProcessJobRunner:
         self.run_timeout_seconds = run_timeout_seconds
         self._lock = threading.Lock()
         self._processes: dict[str, subprocess.Popen[str]] = {}
+        self._deleted_jobs: set[str] = set()
 
     def start(self, job: JobRecord, *, continue_existing: bool = False) -> JobRecord:
         timestamp = utc_now_iso()
@@ -199,6 +200,22 @@ class ProcessJobRunner:
                 return False
             return process.poll() is None
 
+    def stop_process(self, job_id: str) -> bool:
+        """Kill a running process for the given job_id. Returns True if a process was killed.
+
+        Also marks the job as deleted so _finalize_process won't write it back.
+        """
+        with self._lock:
+            self._deleted_jobs.add(job_id)
+            process = self._processes.get(job_id)
+        if process is None or process.poll() is not None:
+            return False
+        self._kill_process(process)
+        process.wait(timeout=5)
+        with self._lock:
+            self._processes.pop(job_id, None)
+        return True
+
     def _build_command(self, job: JobRecord, *, continue_existing: bool) -> list[str]:
         command = [
             self.python_executable,
@@ -218,6 +235,8 @@ class ProcessJobRunner:
             command.extend(["--project-dir", job.project_dir])
         if getattr(job, "transcription_method", None) and job.transcription_method != "assemblyai":
             command.extend(["--transcription-method", job.transcription_method])
+        if job.job_id:
+            command.extend(["--job-id", job.job_id])
         return command
 
     def _monitor_process(self, job_id: str, process: subprocess.Popen[str]) -> None:
@@ -240,6 +259,9 @@ class ProcessJobRunner:
         self._finalize_process(job_id, returncode)
 
     def _record_line(self, job_id: str, line: str) -> None:
+        with self._lock:
+            if job_id in self._deleted_jobs:
+                return
         current_job = self.store.require_job(job_id)
         detected_project_dir = _parse_project_dir_from_line(line, self.project_root)
         review_gate = _parse_web_review_marker(line)
@@ -312,6 +334,10 @@ class ProcessJobRunner:
         )
 
     def _finalize_process(self, job_id: str, returncode: int) -> None:
+        with self._lock:
+            if job_id in self._deleted_jobs:
+                self._deleted_jobs.discard(job_id)
+                return
         current_job = self.store.require_job(job_id)
         if current_job.status == JOB_STATUS_WAITING_FOR_REVIEW and returncode == 0:
             return

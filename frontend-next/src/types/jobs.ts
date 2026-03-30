@@ -134,6 +134,7 @@ export interface CreateTranslationJobInput {
   transcriptionMethod?: 'assemblyai' | 'gemini'
   sourceType?: 'youtube_url' | 'local_file'
   localFilePath?: string
+  service_mode?: 'express' | 'studio'
 }
 
 export const ACTIVE_JOB_STATUSES: readonly JobStatus[] = [

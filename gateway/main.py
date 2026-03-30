@@ -12,6 +12,8 @@ from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from admin_settings import router as admin_router
+from billing import router as billing_router
+from entitlements import router as entitlements_router
 from auth import (
     LoginRequest,
     RegisterRequest,
@@ -36,6 +38,7 @@ from job_intercept import (
     intercept_list_jobs,
     intercept_project_file,
     intercept_result_download,
+    update_source_metadata,
 )
 from proxy import close_client, init_client, proxy_request
 
@@ -92,6 +95,8 @@ app.get("/auth/me")(me_handler)
 # --- Admin settings routes (before catch-all) ---
 
 app.include_router(admin_router)
+app.include_router(billing_router)
+app.include_router(entitlements_router)
 
 
 # --- Web UI API intercept routes (before catch-all) ---
@@ -127,6 +132,7 @@ async def proxy_web_ui(
 app.get("/job-api/jobs")(intercept_list_jobs)
 app.post("/job-api/jobs")(intercept_create_job)
 app.get("/job-api/jobs/{job_id}")(intercept_get_job)
+app.post("/job-api/jobs/{job_id}/source-metadata")(update_source_metadata)
 
 # Job sub-resources: logs, artifacts, result-summary, continue, etc.
 app.api_route(

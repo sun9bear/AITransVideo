@@ -11,6 +11,8 @@ interface AdminSettings {
   skip_all_reviews_for_free_users: boolean
   free_user_max_duration_minutes: number
   enable_pre_tts_rewrite: boolean
+  express_tts_provider: string
+  studio_tts_provider: string
 }
 
 const DEFAULT_SETTINGS: AdminSettings = {
@@ -21,11 +23,22 @@ const DEFAULT_SETTINGS: AdminSettings = {
   skip_all_reviews_for_free_users: true,
   enable_pre_tts_rewrite: true,
   free_user_max_duration_minutes: 10,
+  express_tts_provider: 'cosyvoice',
+  studio_tts_provider: 'minimax',
 }
 
 const TTS_OPTIONS = [
   { value: 'minimax', label: 'MiniMax Speech 2.8', description: '成熟稳定，¥0.20/千字，RPM 20' },
   { value: 'mimo', label: 'MiMo-V2-TTS（小米）', description: '限时免费，RPM 100，自然语言风格控制' },
+]
+
+const EXPRESS_TTS_OPTIONS = [
+  { value: 'cosyvoice', label: 'CosyVoice', description: '阿里通义，快速合成，适合快捷版' },
+  { value: 'mimo', label: 'MiMo-V2-TTS（小米）', description: '限时免费，RPM 100，自然语言风格控制' },
+]
+
+const STUDIO_TTS_OPTIONS = [
+  { value: 'minimax', label: 'MiniMax Speech 2.8', description: '成熟稳定，¥0.20/千字，支持音色克隆' },
 ]
 
 const REVIEW_OPTIONS = [
@@ -128,6 +141,30 @@ export default function AdminSettingsPage() {
           options={TTS_OPTIONS}
           value={settings.tts_provider}
           onChange={(v) => setSettings((s) => ({ ...s, tts_provider: v }))}
+        />
+      </SettingSection>
+
+      {/* Express TTS Provider */}
+      <SettingSection
+        title="快捷版 TTS 引擎"
+        description="快捷版（express）任务使用的语音合成服务"
+      >
+        <RadioGroup
+          options={EXPRESS_TTS_OPTIONS}
+          value={settings.express_tts_provider}
+          onChange={(v) => setSettings((s) => ({ ...s, express_tts_provider: v }))}
+        />
+      </SettingSection>
+
+      {/* Studio TTS Provider */}
+      <SettingSection
+        title="工作台版 TTS 引擎"
+        description="工作台版（Studio）任务使用的语音合成服务"
+      >
+        <RadioGroup
+          options={STUDIO_TTS_OPTIONS}
+          value={settings.studio_tts_provider}
+          onChange={(v) => setSettings((s) => ({ ...s, studio_tts_provider: v }))}
         />
       </SettingSection>
 
