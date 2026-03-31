@@ -24,15 +24,12 @@ except ImportError:  # pragma: no cover
 
 DEFAULT_MIMO_BASE_URL = "https://api.xiaomimimo.com/v1/chat/completions"
 DEFAULT_MIMO_MODEL = "mimo-v2-tts"
-DEFAULT_MIMO_VOICE = "default_zh"
+DEFAULT_MIMO_VOICE = "mimo_default"  # Official preset; style via <style> tag in content
 DEFAULT_MIMO_AUDIO_FORMAT = "wav"
 DEFAULT_MIMO_TIMEOUT_SECONDS = 60
 DEFAULT_MIMO_MAX_RETRIES = 5
 DEFAULT_MIMO_RETRY_BACKOFF_SECONDS = 3.0
 DEFAULT_MIMO_RPM = 100
-
-# Valid MiMo voice IDs
-MIMO_VOICES = {"mimo_default", "default_zh", "default_en"}
 
 
 class MiMoTTSError(Exception):
@@ -80,15 +77,24 @@ def synthesize(
             "MiMo API key is required. Set MIMO_API_KEY env var or pass api_key."
         )
 
-    if voice_id not in MIMO_VOICES:
-        print(f"[MiMo-TTS] Warning: unknown voice_id '{voice_id}', using '{DEFAULT_MIMO_VOICE}'")
-        voice_id = DEFAULT_MIMO_VOICE
+    # MiMo TTS uses chat completions with modalities=["audio"].
+    # Voice style control: user message = style instruction, assistant message = text to speak.
+    # Style control via <style> tag in assistant content (official recommended approach).
+    # voice_id here is the normalized style description, not a preset ID.
+    style = voice_id.strip() if voice_id else ""
+    print(f"[MiMo-TTS] style={style[:60] or '(none)'}, text={text[:40]}...", flush=True)
+
+    # Build assistant content: <style>描述</style>正文
+    if style:
+        assistant_content = f"<style>{style}</style>{text}"
+    else:
+        assistant_content = text
 
     payload = {
         "model": model,
-        "messages": [{"role": "assistant", "content": text}],
+        "messages": [{"role": "assistant", "content": assistant_content}],
         "modalities": ["audio"],
-        "audio": {"voice": voice_id, "format": audio_format},
+        "audio": {"voice": DEFAULT_MIMO_VOICE, "format": audio_format},
     }
 
     response_data = _post_json(
@@ -104,15 +110,12 @@ def synthesize(
     choices = response_data.get("choices")
     if not isinstance(choices, list) or len(choices) == 0:
         raise MiMoTTSError("MiMo TTS response missing choices array.")
-
     message = choices[0].get("message")
     if not isinstance(message, dict):
         raise MiMoTTSError("MiMo TTS response missing choices[0].message.")
-
     audio_obj = message.get("audio")
     if not isinstance(audio_obj, dict):
         raise MiMoTTSError("MiMo TTS response missing choices[0].message.audio.")
-
     audio_b64 = audio_obj.get("data")
     if not audio_b64 or not isinstance(audio_b64, str):
         raise MiMoTTSError("MiMo TTS response missing audio.data (base64).")
@@ -133,6 +136,57 @@ def synthesize(
 # ---------------------------------------------------------------------------
 # HTTP helpers
 # ---------------------------------------------------------------------------
+
+def _post_audio(
+    *,
+    endpoint: str,
+    api_key: str,
+    payload: dict[str, Any],
+    timeout_seconds: float,
+    max_retries: int,
+    retry_backoff_seconds: float,
+) -> bytes:
+    """POST to MiMo audio.speech API, returns raw audio bytes."""
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    last_error: MiMoTTSError | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            if _requests_lib is not None:
+                resp = _requests_lib.post(
+                    endpoint, headers=headers, data=body_bytes, timeout=timeout_seconds,
+                )
+                if resp.status_code != 200:
+                    raise MiMoTTSError(f"MiMo TTS HTTP error: status_code={resp.status_code}, body={resp.text[:200]}")
+                return resp.content
+            else:
+                req = request.Request(endpoint, data=body_bytes, headers=headers, method="POST")
+                with request.urlopen(req, timeout=timeout_seconds) as http_resp:
+                    return http_resp.read()
+        except MiMoTTSError as exc:
+            last_error = exc
+            if not _is_retryable(exc):
+                raise
+            if attempt < max_retries:
+                wait = min(retry_backoff_seconds * (2 ** attempt), 60.0)
+                print(f"[MiMo-TTS] 请求失败，{wait:g}s 后重试（{attempt + 1}/{max_retries}）：{exc}", flush=True)
+                time.sleep(wait)
+        except Exception as exc:
+            last_error = MiMoTTSError(str(exc))
+            if attempt < max_retries:
+                wait = min(retry_backoff_seconds * (2 ** attempt), 60.0)
+                time.sleep(wait)
+            else:
+                raise last_error from exc
+
+    if last_error is not None:
+        raise last_error
+    raise MiMoTTSError("MiMo TTS request failed: unknown error")
+
 
 def _post_json(
     *,

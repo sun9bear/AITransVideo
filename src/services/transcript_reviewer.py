@@ -27,6 +27,11 @@ _MAX_MERGE_DURATION_MS = 180_000
 _MAX_EDIT_DISTANCE_RATIO = 0.3
 _MIN_SPLIT_DURATION_MS = 15_000
 _MAX_PAUSE_FOR_MERGE_MS = 2_000
+_SHORT_QUESTION_MAX_MS = 4_000
+_SHORT_BACKCHANNEL_MAX_MS = 1_200
+_ANSWER_MIN_MS = 2_500
+_ANSWER_CONTINUATION_MIN_MS = 1_500
+_NO_AUTO_FLIP_IF_LONGER_THAN_MS = 2_000
 
 _MIMO_OMNI_MODEL = "mimo-v2-omni"
 _MIMO_OMNI_API_URL = "https://api.xiaomimimo.com/v1/chat/completions"
@@ -53,7 +58,7 @@ def _get_review_model() -> str:
 @dataclass
 class ReviewResult:
     """Output of unified transcript review."""
-    speakers: dict[str, dict[str, str]]  # {"speaker_a": {"name": "...", "role": "...", "style": "...", "voice_description": "..."}}
+    speakers: dict[str, dict[str, str]]  # {"speaker_a": {"name": "...", "gender": "male/female", "age_group": "young/middle/elderly", "role": "...", "style": "...", "voice_description": "..."}}
     glossary: dict[str, str]             # {"English term": "中文翻译"}
     corrections_applied: int
     lines: list[Any]                     # Updated TranscriptLine objects
@@ -67,13 +72,24 @@ REVIEW_PROMPT_TEMPLATE = """\
 
 ## 审校任务（一次性完成）
 
-1. **识别说话人身份**：根据音频声音特征、视频标题、对话内容推断每个 speaker 的真实姓名和角色。
-2. **纠正说话人标注**：听音频分辨说话人，修正标注错误。常见错误：
-   - 短促回应（Yeah, Sure）被分给了错误的人
+1. **识别说话人身份**：根据音频声音特征、视频标题、对话内容推断每个 speaker 的真实姓名和角色。姓名统一使用中文（如 Charlie Munger → 查理·芒格，Becky Quick → 贝基·奎克）。
+2. **纠正说话人标注**：听音频分辨说话人，修正标注错误。
+
+   **⚠ 采访场景全局角色锁定（最高优先级）**：
+   - 先通读全部转录稿，判断这是否是采访/对话场景
+   - 如果是：先确定谁是"主持人/提问者"、谁是"受访者/回答者"
+   - 然后统一检查：所有提问句应归属主持人，所有回答句应归属受访者
+   - 如果发现同一人的连续回答被交替标成 A 和 B，必须统一纠正
+   - 关键判断标准：语义角色（提问 vs 回答）> ASR 给出的 speaker 标签
+
+   **常见 ASR 错误模式**：
+   - 短促回应（Yeah, Sure, Right, 嗯, 对）被分给了错误的人
    - A-B-A 快速交叉（中间 B 实际是 A 的延续）
    - 旁白/介绍被标成了被采访者
+   - **同一人连续回答被错误切换 speaker**：受访者说了一长段话，ASR 因中间停顿把后半段标成了另一个人。判断标准：如果上一句是提问，接下来连续几句都是回答同一个问题，它们应该属于同一个 speaker（受访者），即使 ASR 标了不同的 speaker
    - **插话/抢话**：主持人在受访者说话中途插入提问，ASR 容易把插话段标成受访者。听音频中的声音重叠和音色变化来判断
    - **被打断后继续**：受访者被打断后继续之前的话，ASR 可能标成新的说话人
+   - **短促 backchannel vs 长回答**：主持人的"Yeah, sure"（backchannel）和受访者的长段回答要区别对待。backchannel 通常只有 1-3 个词且时长 <2 秒
 3. **修正转录文本**：
    - 去除重复内容（同一句出现在相邻段落）
    - 修正 ASR 错误（对照音频）
@@ -82,7 +98,8 @@ REVIEW_PROMPT_TEMPLATE = """\
 5. **拆分超长段落**：超过 60 秒的段落，在语义断点处拆分为 15-45 秒。
 6. **生成术语表**：提取人名、专有术语的中文翻译。
 7. **分析说话风格**：每个说话人的语气、口头禅特点（给翻译参考）。
-8. **描述音色特征**：听音频，为每个说话人输出一段自然语言音色描述（用于 TTS 语音合成），包括性别、年龄段、音调高低、语速快慢、声音质感（如低沉/清亮/沙哑）、情感特点等。
+8. **描述音色特征**：听音频，为每个说话人输出一段自然语言音色描述（用于 TTS 语音合成），包括音调高低、语速快慢、声音质感（如低沉/清亮/沙哑）、情感特点等。
+9. **标注性别和年龄段**：每个说话人必须标注 gender（"male" 或 "female"）和 age_group（"young"、"middle"、"elderly"）。
 
 只输出有问题的行。没问题的不用管。
 
@@ -90,8 +107,8 @@ REVIEW_PROMPT_TEMPLATE = """\
 
 {{
   "speakers": {{
-    "speaker_a": {{"name": "姓名", "role": "角色", "style": "语气描述", "voice_description": "中年女性，声音清晰专业，语速适中，略带温和的采访语气"}},
-    "speaker_b": {{"name": "姓名", "role": "角色", "style": "语气描述", "voice_description": "年迈男性，声音低沉沙哑，语速缓慢，带有智慧感和幽默感"}}
+    "speaker_a": {{"name": "中文姓名", "gender": "female", "age_group": "middle", "role": "角色", "style": "语气描述", "voice_description": "声音清晰专业，语速适中，略带温和的采访语气"}},
+    "speaker_b": {{"name": "中文姓名", "gender": "male", "age_group": "elderly", "role": "角色", "style": "语气描述", "voice_description": "声音低沉沙哑，语速缓慢，带有智慧感和幽默感"}}
   }},
   "glossary": {{
     "English term": "中文翻译",
@@ -178,6 +195,10 @@ def review_transcript(
     updated_lines, applied_count = _apply_corrections(
         lines, corrections, words_data=words_data
     )
+
+    # Conservative post-pass for 2-speaker interview transcripts only.
+    updated_lines, sanity_applied = _apply_interview_sanity_check(updated_lines, speakers)
+    applied_count += sanity_applied
 
     # Final safety: ensure no segment > 180s
     final_lines = _enforce_max_duration(updated_lines, words_data=words_data)
@@ -583,6 +604,251 @@ def _apply_corrections(
             continue
 
     return working_lines, applied
+
+
+def _apply_interview_sanity_check(
+    lines: list,
+    speakers: dict[str, dict[str, str]] | None,
+) -> tuple[list, int]:
+    """Apply conservative speaker fixes for clear two-party interview patterns."""
+    from src.services.assemblyai.transcriber import TranscriptLine
+
+    if not lines or not speakers:
+        return list(lines), 0
+
+    interview_roles = _resolve_interview_roles(speakers)
+    if interview_roles is None:
+        return list(lines), 0
+
+    host_speaker, guest_speaker = interview_roles
+    adjusted_lines = list(lines)
+    applied = 0
+
+    for idx, line in enumerate(adjusted_lines):
+        duration_ms = max(0, line.end_ms - line.start_ms)
+        text = line.source_text.strip()
+        if not text:
+            continue
+
+        if _contains_named_utterance(text):
+            logger.info(
+                "[S2][sanity] line %d: keep %s (named utterance, conservative)",
+                line.index,
+                line.speaker_id,
+            )
+            continue
+
+        current_speaker = line.speaker_id
+        target_speaker = current_speaker
+        reason = ""
+
+        if _is_short_question(text, duration_ms):
+            target_speaker = host_speaker
+            reason = "short question => host"
+        elif _is_short_backchannel(text, duration_ms):
+            target_speaker = host_speaker
+            reason = "short backchannel => host"
+        elif _is_first_person_answer(text, duration_ms):
+            target_speaker = guest_speaker
+            reason = "first-person answer => guest"
+        elif _is_answer_continuation(
+            lines=adjusted_lines,
+            position=idx,
+            host_speaker=host_speaker,
+            guest_speaker=guest_speaker,
+        ):
+            target_speaker = guest_speaker
+            reason = "answer continuation => guest"
+        elif duration_ms > _NO_AUTO_FLIP_IF_LONGER_THAN_MS:
+            logger.info(
+                "[S2][sanity] line %d: keep %s (long sentence, conservative)",
+                line.index,
+                line.speaker_id,
+            )
+            continue
+
+        if target_speaker == current_speaker or not reason:
+            continue
+
+        adjusted_lines[idx] = TranscriptLine(
+            index=line.index,
+            start_ms=line.start_ms,
+            end_ms=line.end_ms,
+            speaker_id=target_speaker,
+            speaker_label=target_speaker.replace("speaker_", "").upper(),
+            source_text=line.source_text,
+        )
+        logger.info(
+            "[S2][sanity] line %d: %s -> %s (%s)",
+            line.index,
+            current_speaker,
+            target_speaker,
+            reason,
+        )
+        applied += 1
+
+    return adjusted_lines, applied
+
+
+def _resolve_interview_roles(
+    speakers: dict[str, dict[str, str]],
+) -> tuple[str, str] | None:
+    if len(speakers) != 2:
+        return None
+
+    host_speaker: str | None = None
+    guest_speaker: str | None = None
+    for speaker_id, profile in speakers.items():
+        role_text = " ".join(
+            str(profile.get(key, "")).strip().lower()
+            for key in ("role", "style", "voice_description")
+        )
+        if any(token in role_text for token in ("host", "interviewer", "anchor", "主持", "采访", "访谈")):
+            host_speaker = speaker_id
+        if any(token in role_text for token in ("guest", "interviewee", "受访", "嘉宾")):
+            guest_speaker = speaker_id
+
+    if host_speaker and guest_speaker and host_speaker != guest_speaker:
+        return host_speaker, guest_speaker
+    return None
+
+
+def _is_short_question(text: str, duration_ms: int) -> bool:
+    lowered = text.strip().lower()
+    if duration_ms > _SHORT_QUESTION_MAX_MS:
+        return False
+    if "?" in text or "？" in text:
+        return True
+
+    patterns = (
+        "what",
+        "why",
+        "how",
+        "which",
+        "when",
+        "do you",
+        "did you",
+        "was it",
+        "is it",
+        "what was",
+        "what do you",
+        "which means what",
+        "什么",
+        "为什么",
+        "怎么",
+        "你觉得",
+        "你会",
+        "那你",
+        "那您",
+        "什么意思",
+        "怎么看",
+    )
+    return any(token in lowered for token in patterns)
+
+
+def _is_first_person_answer(text: str, duration_ms: int) -> bool:
+    if duration_ms < _ANSWER_MIN_MS:
+        return False
+    lowered = text.strip().lower()
+    patterns = (
+        "i think",
+        "i mean",
+        "i guess",
+        "well, i",
+        "well i",
+        " my ",
+        " we ",
+        "for me",
+        "我觉得",
+        "我认为",
+        "我想",
+        "我的",
+        "我们",
+        "对我来说",
+        "老实说",
+    )
+    padded = f" {lowered} "
+    return any(token in padded or token in lowered for token in patterns)
+
+
+def _is_short_backchannel(text: str, duration_ms: int) -> bool:
+    if duration_ms > _SHORT_BACKCHANNEL_MAX_MS:
+        return False
+
+    normalized = text.strip().lower()
+    normalized = re.sub(r"[.?!,;:\u3002\uff01\uff1f\uff0c\uff1b\uff1a]+$", "", normalized).strip()
+    if not normalized:
+        return False
+
+    tokens = {
+        "yes",
+        "yeah",
+        "right",
+        "sure",
+        "okay",
+        "ok",
+        "uh-huh",
+        "mm-hmm",
+        "嗯",
+        "对",
+        "对啊",
+        "是",
+        "是啊",
+        "好",
+    }
+    return normalized in tokens
+
+
+def _is_answer_continuation(
+    *,
+    lines: list,
+    position: int,
+    host_speaker: str,
+    guest_speaker: str,
+) -> bool:
+    current = lines[position]
+    duration_ms = max(0, current.end_ms - current.start_ms)
+    if duration_ms < _ANSWER_CONTINUATION_MIN_MS:
+        return False
+    if _is_short_question(current.source_text, duration_ms):
+        return False
+
+    previous = lines[position - 1] if position > 0 else None
+    if previous is None or previous.speaker_id != guest_speaker:
+        return False
+
+    lowered = current.source_text.strip().lower()
+    continuation_tokens = (
+        "and",
+        "but",
+        "so",
+        "because",
+        "well",
+        "yeah",
+        "yes, but",
+        "i mean",
+        "而且",
+        "但是",
+        "所以",
+        "因为",
+        "其实",
+        "嗯",
+        "对",
+        "是的",
+        "我觉得",
+    )
+    if any(lowered.startswith(token) for token in continuation_tokens):
+        return True
+    return False
+
+
+def _contains_named_utterance(text: str) -> bool:
+    stripped = text.strip()
+    if re.search(r"(?:thanks|thank you|hi|hello|hey)[,\s]+[A-Z][a-z]{2,}\b", stripped, re.I):
+        return True
+    if re.search(r",\s*[A-Z][a-z]{2,}\b", stripped):
+        return True
+    return False
 
 
 def _enforce_max_duration(
