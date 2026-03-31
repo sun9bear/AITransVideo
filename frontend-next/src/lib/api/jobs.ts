@@ -13,7 +13,6 @@ import type {
   ApiJobResultSummary,
 } from '@/types/api'
 import {
-  ACTIVE_JOB_STATUSES,
   type CreateTranslationJobInput,
   type JobLogEntry,
   type JobSummary,
@@ -25,11 +24,6 @@ import {
 export async function listJobs(): Promise<JobSummary[]> {
   const payload = await apiClient.get<ApiJobListResponse>('/jobs')
   return payload.jobs.map(toJobSummary)
-}
-
-export async function getCurrentJob(): Promise<JobSummary | null> {
-  const jobs = await listJobs()
-  return jobs.find((job) => ACTIVE_JOB_STATUSES.includes(job.status)) ?? null
 }
 
 export async function getJob(jobId: string): Promise<JobSummary> {
@@ -46,12 +40,13 @@ export async function submitTranslationJob(
       output_target: 'editor',
       source: {
         type: input.sourceType ?? 'youtube_url',
-        value: input.sourceType === 'local_file' ? (input.localFilePath ?? '') : input.youtubeUrl,
+        value: input.sourceType === 'local_video' ? (input.localFilePath ?? '') : input.youtubeUrl,
       },
       speakers: input.speakers,
       voice_a: input.voiceA,
       voice_b: input.voiceB,
       transcription_method: input.transcriptionMethod ?? 'assemblyai',
+      service_mode: input.service_mode ?? 'express',
     },
   })
 

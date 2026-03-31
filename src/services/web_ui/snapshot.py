@@ -16,6 +16,18 @@ from .project_resolver import _build_results_snapshot
 from .voice_library import _build_voice_library_snapshot
 
 
+def _get_cosyvoice_endpoint_modes() -> tuple[str, str]:
+    """Return (runtime_mode, offline_mode) for snapshot."""
+    try:
+        from services.tts.cosyvoice_endpoint_config import (
+            get_offline_endpoint_mode,
+            get_runtime_endpoint_mode,
+        )
+        return get_runtime_endpoint_mode(), get_offline_endpoint_mode()
+    except Exception:
+        return "international", "mainland"
+
+
 def build_web_ui_snapshot(
     *,
     manager: object,
@@ -72,6 +84,8 @@ def build_web_ui_snapshot(
             "translation_prompt_source": prompt_templates["s3_translate"]["source"],
             "rewrite_prompt_template": prompt_templates["s5_rewrite"]["template"],
             "rewrite_prompt_source": prompt_templates["s5_rewrite"]["source"],
+            "cosyvoice_runtime_endpoint_mode": _get_cosyvoice_endpoint_modes()[0],
+            "cosyvoice_offline_endpoint_mode": _get_cosyvoice_endpoint_modes()[1],
         },
         "job": job_snapshot,
         "results": results_snapshot,

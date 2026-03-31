@@ -84,6 +84,7 @@ from utils.audio_utils import measure_duration_ms as _ffprobe_duration_ms
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECTS_ROOT_ENV_VAR = "AIVIDEOTRANS_PROJECTS_DIR"
 DEFAULT_SPEAKER_TTS_CALIBRATION_MIN_SAMPLES = 3
 DEFAULT_PLACEHOLDER_SPEAKER_NAMES = {
     "speaker_a": {"speaker a", "speaker_a"},
@@ -105,33 +106,9 @@ T = TypeVar("T")
 _ADMIN_SETTINGS_PATH = "/opt/aivideotrans/config/admin_settings.json"
 
 
-def _should_skip_translation_config() -> bool:
-    """Check if translation config should be auto-approved for normal users."""
-    try:
-        if os.path.exists(_ADMIN_SETTINGS_PATH):
-            with open(_ADMIN_SETTINGS_PATH) as f:
-                settings = json.load(f)
-            return bool(settings.get("skip_translation_config_for_users", True))
-    except Exception:
-        pass
-    return True  # Default: skip for users
-
-
-def _should_skip_all_reviews() -> bool:
-    """Check if all review gates should be skipped (free user / full-auto mode).
-
-    When True, the pipeline runs fully automatically:
-    speaker review → auto-approve, voice review → auto-assign,
-    translation config → auto-select, translation review → skip.
-    """
-    try:
-        if os.path.exists(_ADMIN_SETTINGS_PATH):
-            with open(_ADMIN_SETTINGS_PATH) as f:
-                settings = json.load(f)
-            return bool(settings.get("skip_all_reviews_for_free_users", True))
-    except Exception:
-        pass
-    return True  # Default: full-auto for free users
+# _should_skip_translation_config / _should_skip_all_reviews removed —
+# decision now comes from the job record's snapshot fields
+# (job_requires_review, job_service_mode).  See run() below.
 
 
 def _get_default_translation_model() -> str:
@@ -146,7 +123,25 @@ def _get_default_translation_model() -> str:
     return "deepseek"
 
 
-FREE_USER_MAX_DURATION_MINUTES = 10
+def _report_source_metadata(job_id: str, duration_seconds: float, title: str | None = None) -> None:
+    """Best-effort callback to Gateway /job-api/jobs/{job_id}/source-metadata."""
+    import urllib.request
+    gateway_base = os.environ.get("AVT_GATEWAY_URL", "http://localhost:8880")
+    url = f"{gateway_base}/job-api/jobs/{job_id}/source-metadata"
+    body: dict = {"source_duration_seconds": duration_seconds}
+    if title:
+        body["title"] = title
+    try:
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            print(f"[S0] Reported source metadata to gateway: {resp.status}", flush=True)
+    except Exception as e:
+        print(f"[S0] Warning: failed to report source metadata: {e}", flush=True)
 
 
 def _is_pre_tts_rewrite_enabled() -> bool:
@@ -161,30 +156,44 @@ def _is_pre_tts_rewrite_enabled() -> bool:
     return True  # Default: enabled
 
 
-def _get_free_user_max_duration() -> float:
-    """Get max video duration in minutes for free users from admin settings."""
-    try:
-        if os.path.exists(_ADMIN_SETTINGS_PATH):
-            with open(_ADMIN_SETTINGS_PATH) as f:
-                settings = json.load(f)
-            return float(settings.get("free_user_max_duration_minutes", FREE_USER_MAX_DURATION_MINUTES))
-    except Exception:
-        pass
-    return FREE_USER_MAX_DURATION_MINUTES
+# Plan-based max duration (minutes).  Mirrors PLAN_CATALOG in gateway.
+# The pipeline uses these only as a hard safety-net; the primary check
+# is done by Gateway at job-creation time.
+_PLAN_MAX_DURATION_MINUTES = {
+    "free": 10,
+    "plus": 60,
+    "pro": 180,
+}
 
 
-def _check_duration_limit(duration_ms: int) -> None:
-    """Check video duration against free user limit. Raise if exceeded."""
-    if not _should_skip_all_reviews():
-        return  # Paid users: no limit enforced here
-    max_minutes = _get_free_user_max_duration()
+def _resolve_projects_root() -> Path:
+    configured_root = os.environ.get(PROJECTS_ROOT_ENV_VAR, "").strip()
+    if configured_root:
+        return Path(configured_root).expanduser().resolve(strict=False)
+    return (PROJECT_ROOT / "projects").resolve(strict=False)
+
+
+def _check_duration_limit(
+    duration_ms: int,
+    *,
+    plan_code_snapshot: str = "free",
+    role_snapshot: str = "user",
+) -> None:
+    """Check video duration against plan-based limit from snapshot.
+
+    Admin users bypass the check entirely.  The primary validation is done
+    by Gateway at creation time; this is a hard safety-net inside the pipeline.
+    """
+    if role_snapshot == "admin":
+        return
+    max_minutes = _PLAN_MAX_DURATION_MINUTES.get(plan_code_snapshot, 10)
     actual_minutes = duration_ms / 60_000
     if actual_minutes > max_minutes:
         raise RuntimeError(
-            f"视频时长 {actual_minutes:.1f} 分钟超出免费用户限制（{max_minutes:.0f} 分钟）。"
-            f"请使用更短的视频，或升级到付费版本。"
+            f"视频时长 {actual_minutes:.1f} 分钟超出套餐上限（{max_minutes:.0f} 分钟）。"
+            f"请使用更短的视频，或升级套餐。"
         )
-    print(f"[S1] 视频时长 {actual_minutes:.1f} 分钟，免费限制 {max_minutes:.0f} 分钟内。")
+    print(f"[S1] 视频时长 {actual_minutes:.1f} 分钟，套餐限制 {max_minutes:.0f} 分钟内。")
 
 
 def _check_disk_space(project_dir: Path, estimated_duration_minutes: float) -> None:
@@ -208,7 +217,7 @@ def _cleanup_upload_mp3(project_dir: Path) -> None:
 
 @dataclass(slots=True)
 class ProcessConfig:
-    youtube_url: str
+    youtube_url: str = ""
     voice_a: str | None = None
     speaker_a_name: str = "Speaker A"
     speakers: int | str = "auto"
@@ -219,6 +228,41 @@ class ProcessConfig:
     skip_review: bool = False
     wait_for_review: bool = False
     transcription_method: str = "assemblyai"
+    job_id: str | None = None  # Job API job_id（由 process_runner 传入）
+    job_record: object | None = None  # DB job row with policy snapshot fields
+    source_type: str = ""
+    source_ref: str = ""
+
+    def __post_init__(self) -> None:
+        """Normalize source fields for backward compatibility.
+
+        Rules:
+        - If only ``youtube_url`` is given (legacy callers), derive
+          ``source_type="youtube_url"`` and ``source_ref=youtube_url``.
+        - If ``source_type``/``source_ref`` are given explicitly, back-fill
+          ``youtube_url`` when the source is a YouTube URL (so existing
+          pipeline code that reads ``config.youtube_url`` keeps working).
+        - ``source_type``/``source_ref`` always take precedence over the
+          positional ``youtube_url`` when both are provided.
+        """
+        st = (self.source_type or "").strip()
+        sr = (self.source_ref or "").strip()
+        yt = (self.youtube_url or "").strip()
+
+        if st and sr:
+            # Explicit source wins — always override youtube_url
+            self.source_type = st
+            self.source_ref = sr
+            if st == "youtube_url":
+                self.youtube_url = sr
+            else:
+                self.youtube_url = ""
+        elif yt:
+            # Legacy caller only gave youtube_url
+            self.source_type = "youtube_url"
+            self.source_ref = yt
+            self.youtube_url = yt
+        # else: both empty — will be caught by pipeline validation
 
 
 @dataclass(slots=True)
@@ -288,13 +332,15 @@ class ProcessPipeline:
         self.project_builder = project_builder or ProjectBuilder()
 
     def run(self, config: ProcessConfig) -> ProcessResult:
+        source_type = config.source_type or "youtube_url"
+        source_ref = config.source_ref or config.youtube_url or ""
         normalized_url = config.youtube_url.strip()
         normalized_voice_a = config.voice_a.strip() if isinstance(config.voice_a, str) else None
         normalized_voice_b = config.voice_b.strip() if isinstance(config.voice_b, str) else None
         normalized_speakers = self._normalize_speakers(config.speakers)
 
-        if not normalized_url:
-            raise ValueError("youtube_url 不能为空。")
+        if not source_ref.strip():
+            raise ValueError("source_ref 不能为空。")
 
         assemblyai_config = self._load_stage_config("AssemblyAI", load_assemblyai_config)
         gemini_config = self._load_stage_config("Gemini", load_gemini_config)
@@ -303,7 +349,41 @@ class ProcessPipeline:
         youtube_download_config = load_youtube_download_config()
         llm_router = LLMRouter(llm_fallback_config)
 
-        projects_root = PROJECT_ROOT / "projects"
+        # --- Read job policy snapshot --------------------------------
+        _jr = config.job_record
+        # If no job_record passed, load precisely by job_id from Job API store
+        if _jr is None and config.job_id:
+            try:
+                from services.jobs.store import JobStore
+                _store = JobStore(PROJECT_ROOT / "jobs")
+                _job_record = _store.load_job(config.job_id)
+                if _job_record is not None:
+                    _jr = _job_record.to_dict()
+                    config.job_record = _jr
+                    print(f"[PIPELINE] Loaded job snapshot for {config.job_id}: service_mode={_jr.get('service_mode')}, tts_provider={_jr.get('tts_provider')}", flush=True)
+                else:
+                    print(f"[PIPELINE] Warning: job {config.job_id} not found in store", flush=True)
+            except Exception as e:
+                print(f"[PIPELINE] Warning: failed to load job {config.job_id}: {type(e).__name__}: {e}", flush=True)
+        elif _jr is None:
+            print("[PIPELINE] Warning: no job_id provided, snapshot unavailable — using defaults", flush=True)
+
+        def _snap(key, default=None):
+            if isinstance(_jr, dict):
+                v = _jr.get(key)
+            else:
+                v = getattr(_jr, key, None)
+            return v if v is not None else default
+
+        job_service_mode = _snap('service_mode', 'express')
+        job_tts_provider = _snap('tts_provider', 'cosyvoice')
+        job_requires_review = _snap('requires_review', False)
+        job_voice_strategy = _snap('voice_strategy', 'preset_mapping')
+        job_plan_code = _snap('plan_code_snapshot', 'free')
+        job_role = _snap('role_snapshot', 'user')
+        # -------------------------------------------------------------
+
+        projects_root = _resolve_projects_root()
         projects_root.mkdir(parents=True, exist_ok=True)
 
         explicit_project_dir = (
@@ -311,18 +391,12 @@ class ProcessPipeline:
             if config.project_dir is not None
             else None
         )
-        existing_project_dir = (
-            None
-            if explicit_project_dir is not None
-            else self._find_existing_project_by_url(normalized_url)
-        )
 
+        # Workspace selection: explicit project_dir wins; otherwise create fresh dir.
+        # No longer reusing old project directories based on URL match.
         if explicit_project_dir is not None:
             working_project_dir = explicit_project_dir
             final_project_dir = explicit_project_dir
-        elif existing_project_dir is not None:
-            working_project_dir = existing_project_dir
-            final_project_dir = existing_project_dir
         else:
             working_project_dir = Path(
                 tempfile.mkdtemp(prefix="_process_", dir=projects_root)
@@ -334,75 +408,83 @@ class ProcessPipeline:
 
         try:
             current_project_dir = final_project_dir
-            video_path = (current_project_dir / "video" / "original.mp4").resolve(strict=False)
-            source_audio_path = (current_project_dir / "audio" / "original.wav").resolve(strict=False)
 
-            if video_path.exists() and source_audio_path.exists():
-                print("[S0] 已有下载缓存，跳过下载")
-                ingestion_execution_mode = "cache_restore_full"
-                download_result = self._load_download_result(
-                    current_project_dir,
-                    fallback_url=normalized_url,
-                )
-            else:
-                print("[S0] 下载视频...")
-                ingestion_execution_mode = "fresh_run"
-                download_result = YouTubeDownloader().download(
-                    DownloadRequest(
-                        url=normalized_url,
-                        output_dir=str(working_project_dir),
-                        cookies_from_browser=_normalize_optional_text(
-                            youtube_download_config.get("cookies_from_browser")
-                        ),
-                        cookie_file=_normalize_optional_text(
-                            youtube_download_config.get("cookie_file")
-                        ),
-                        max_retries=_coerce_int(
-                            youtube_download_config.get("max_retries"),
-                            default=2,
-                        ),
-                        retry_backoff_seconds=_coerce_float(
-                            youtube_download_config.get("retry_backoff_seconds"),
-                            default=1.5,
-                        ),
+            if source_type in ("local_video", "local_audio"):
+                # --- Local source ingest ---
+                download_result, video_path, source_audio_path, ingestion_execution_mode = (
+                    self._ingest_local_source(
+                        source_type=source_type,
+                        source_ref=source_ref,
+                        project_dir=final_project_dir,
                     )
                 )
+            else:
+                # --- YouTube ingest (existing logic) ---
+                video_path = (current_project_dir / "video" / "original.mp4").resolve(strict=False)
+                source_audio_path = (current_project_dir / "audio" / "original.wav").resolve(strict=False)
 
-                if explicit_project_dir is None and working_project_dir.name.startswith("_process_"):
-                    resolved_project_dir = Path(
-                        self._resolve_project_dir(config, download_result.video_title)
-                    ).resolve(strict=False)
-                    if resolved_project_dir != working_project_dir:
-                        if resolved_project_dir.exists():
-                            existing_metadata = self._load_download_metadata(resolved_project_dir)
-                            if str(existing_metadata.get("url") or "").strip() == normalized_url:
-                                print(f"[S0] 项目目录已存在，继续使用：{resolved_project_dir}")
-                                if working_project_dir.exists():
-                                    shutil.rmtree(working_project_dir, ignore_errors=True)
-                            else:
+                if video_path.exists() and source_audio_path.exists():
+                    print("[S0] 已有下载缓存，跳过下载")
+                    ingestion_execution_mode = "cache_restore_full"
+                    download_result = self._load_download_result(
+                        current_project_dir,
+                        fallback_url=normalized_url,
+                    )
+                else:
+                    print("[S0] 下载视频...")
+                    ingestion_execution_mode = "fresh_run"
+                    download_result = YouTubeDownloader().download(
+                        DownloadRequest(
+                            url=normalized_url,
+                            output_dir=str(working_project_dir),
+                            cookies_from_browser=_normalize_optional_text(
+                                youtube_download_config.get("cookies_from_browser")
+                            ),
+                            cookie_file=_normalize_optional_text(
+                                youtube_download_config.get("cookie_file")
+                            ),
+                            max_retries=_coerce_int(
+                                youtube_download_config.get("max_retries"),
+                                default=2,
+                            ),
+                            retry_backoff_seconds=_coerce_float(
+                                youtube_download_config.get("retry_backoff_seconds"),
+                                default=1.5,
+                            ),
+                        )
+                    )
+
+                    if explicit_project_dir is None and working_project_dir.name.startswith("_process_"):
+                        resolved_project_dir = Path(
+                            self._resolve_project_dir(config, download_result.video_title)
+                        ).resolve(strict=False)
+                        if resolved_project_dir != working_project_dir:
+                            if resolved_project_dir.exists():
+                                # Slug dir already taken — keep the temp dir to avoid sharing
                                 print(
-                                    "[S0] 目标目录已存在且不属于当前 URL，保留临时项目目录："
+                                    f"[S0] 目标目录已被占用，保留临时目录："
                                     f"{working_project_dir}"
                                 )
                                 resolved_project_dir = working_project_dir
+                            else:
+                                resolved_project_dir.parent.mkdir(parents=True, exist_ok=True)
+                                shutil.move(str(working_project_dir), str(resolved_project_dir))
+                            final_project_dir = resolved_project_dir
                         else:
-                            resolved_project_dir.parent.mkdir(parents=True, exist_ok=True)
-                            shutil.move(str(working_project_dir), str(resolved_project_dir))
-                        final_project_dir = resolved_project_dir
+                            final_project_dir = working_project_dir
                     else:
-                        final_project_dir = working_project_dir
-                else:
-                    final_project_dir = current_project_dir
+                        final_project_dir = current_project_dir
 
-                download_result = self._load_download_result(
-                    final_project_dir,
-                    fallback_url=normalized_url,
-                    fallback_title=download_result.video_title,
-                    fallback_duration_ms=download_result.duration_ms,
-                )
+                    download_result = self._load_download_result(
+                        final_project_dir,
+                        fallback_url=normalized_url,
+                        fallback_title=download_result.video_title,
+                        fallback_duration_ms=download_result.duration_ms,
+                    )
 
-            video_path = (final_project_dir / "video" / "original.mp4").resolve(strict=False)
-            source_audio_path = (final_project_dir / "audio" / "original.wav").resolve(strict=False)
+                video_path = (final_project_dir / "video" / "original.mp4").resolve(strict=False)
+                source_audio_path = (final_project_dir / "audio" / "original.wav").resolve(strict=False)
+
             review_state_manager = ReviewStateManager(final_project_dir / "review_state.json")
             state_manager = StateManager(str(final_project_dir / "project_state.json"))
             state_manager.set_project(final_project_dir.name)
@@ -415,6 +497,7 @@ class ProcessPipeline:
                     video_path=video_path,
                     source_audio_path=source_audio_path,
                     execution_mode=ingestion_execution_mode,
+                    source_type=source_type,
                 ),
             )
             current_stage_name = "audio_preparation"
@@ -442,6 +525,8 @@ class ProcessPipeline:
             current_stage_name = None
             self._refresh_download_metadata(
                 final_project_dir=final_project_dir,
+                video_path=video_path,
+                source_audio_path=source_audio_path,
                 video_title=download_result.video_title,
                 duration_ms=download_result.duration_ms,
                 url=download_result.url,
@@ -460,8 +545,16 @@ class ProcessPipeline:
                 f"（yt-dlp报告：{round(download_result.duration_ms / 1000, 2)}秒）"
             )
 
-            # --- 免费用户时长限制 ---
-            _check_duration_limit(actual_duration_ms)
+            # --- 套餐时长限制 (snapshot-based, Gateway 主检查的安全网) ---
+            _check_duration_limit(
+                actual_duration_ms,
+                plan_code_snapshot=job_plan_code,
+                role_snapshot=job_role,
+            )
+
+            # --- Report actual duration to Gateway (best-effort) ---
+            if config.job_id:
+                _report_source_metadata(config.job_id, actual_duration_ms / 1000, download_result.video_title)
 
             # --- 磁盘空间预检 ---
             _check_disk_space(final_project_dir, actual_duration_ms / 60_000)
@@ -702,6 +795,19 @@ class ProcessPipeline:
                     fallback_speaker_a=speaker_name_a,
                     fallback_speaker_b=speaker_name_b,
                 )
+                if self._segments_missing_review_speaker_styles(translation_result.segments):
+                    _review_speaker_styles = self._recover_review_speaker_styles(
+                        transcript_result=transcript_result,
+                        source_audio_path=source_audio_path,
+                        video_title=download_result.video_title,
+                        video_url=normalized_url,
+                    )
+                    self._apply_review_speaker_styles_to_segments(
+                        translation_result.segments,
+                        _review_speaker_styles,
+                    )
+                    if _review_speaker_styles:
+                        self._write_segments_snapshot(translation_result)
             else:
                 translation_execution_mode = "fresh_run"
                 translation_result = None
@@ -777,8 +883,8 @@ class ProcessPipeline:
                 and not s3_cache_hit
                 and approved_translation_config is None
             ):
-                # Auto-skip translation config review if admin settings say so
-                if _should_skip_translation_config():
+                # Auto-skip translation config review when job doesn't require review
+                if not job_requires_review:
                     default_model = _get_default_translation_model()
                     print(f"[S3] 自动使用默认翻译模型: {default_model}")
                     approved_translation_config = {
@@ -848,6 +954,13 @@ class ProcessPipeline:
                 )
                 print(f"[S3] 完成：共 {translation_result.total_segments} 段")
 
+            self._apply_review_speaker_styles_to_segments(
+                translation_result.segments,
+                _review_speaker_styles,
+            )
+            self._log_review_speaker_styles(_review_speaker_styles)
+            _review_speaker_styles = {}
+
             state_manager.set_stage(
                 current_stage_name,
                 StageStatus.DONE,
@@ -868,7 +981,6 @@ class ProcessPipeline:
 
             reuse_approved_translation_review = self._should_reuse_approved_translation_review(
                 explicit_project_dir=explicit_project_dir,
-                existing_project_dir=existing_project_dir,
                 wait_for_review=config.wait_for_review,
             )
             approved_translation_review = self._get_approved_review_payload(
@@ -885,10 +997,10 @@ class ProcessPipeline:
             elif config.wait_for_review:
                 if approved_translation_review is not None and not reuse_approved_translation_review:
                     print("[S3] Ignoring stale approved translation review from a previous run.")
-                # Check if we should skip translation review (free user / full-auto mode)
-                if _should_skip_all_reviews():
+                # Check if we should skip translation review (express / no-review mode)
+                if not job_requires_review:
                     self._write_segments_snapshot(translation_result)
-                    print("[S3] 免费用户全自动模式，跳过翻译审核。")
+                    print("[S3] Express 模式（无需审核），跳过翻译审核。")
                 else:
                     self._write_segments_snapshot(translation_result)
                     _unified_review_payload = self._build_translation_review_payload(translation_result)
@@ -943,28 +1055,29 @@ class ProcessPipeline:
                     "execution_mode": "legacy_process",
                 },
             )
-            # Inject voice_description from LLM review into segments for MiMo TTS
-            # Combine speaker name + voice description for better TTS accuracy
+            # Inject voice metadata from LLM review into segments for TTS voice selection
             if _review_speaker_styles:
+                from services.tts.cosyvoice_voice_selector import infer_persona_style, infer_energy_level
                 for segment in translation_result.segments:
                     spk_info = _review_speaker_styles.get(segment.speaker_id, {})
-                    name = spk_info.get("name", "")
                     vd = spk_info.get("voice_description", "")
-                    # Combine: "Becky Quick (CNBC主持人): 中年女性，声音清晰专业..."
-                    if name and vd:
-                        segment.voice_description = f"{name}: {vd}"
-                    elif vd:
-                        segment.voice_description = vd
-                    elif name:
-                        segment.voice_description = name
-                print(f"[S4] 注入音色描述：{len(_review_speaker_styles)} 个说话人")
+                    segment.voice_description = vd
+                    segment.gender = spk_info.get("gender", "")
+                    segment.age_group = spk_info.get("age_group", "")
+                    # Inject persona_style / energy_level: prefer reviewer output, fallback to local inference
+                    segment.persona_style = spk_info.get("persona_style", "") or infer_persona_style(vd)
+                    segment.energy_level = spk_info.get("energy_level", "") or infer_energy_level(vd)
+                print(f"[S4] 注入音色描述：{len(_review_speaker_styles)} 个说话人", flush=True)
                 for spk_id, spk_info in _review_speaker_styles.items():
                     name = spk_info.get("name", "")
                     vd = spk_info.get("voice_description", "")
-                    combined = f"{name}: {vd}" if name and vd else vd or name
-                    print(f"  {spk_id}: {combined[:80]}{'...' if len(combined) > 80 else ''}")
+                    gender = spk_info.get("gender", "")
+                    age = spk_info.get("age_group", "")
+                    ps = spk_info.get("persona_style", "") or infer_persona_style(vd)
+                    el = spk_info.get("energy_level", "") or infer_energy_level(vd)
+                    print(f"  {spk_id} ({name}, {gender}/{age}, persona={ps}, energy={el}): {vd[:80]}", flush=True)
 
-            tts_generator = TTSGenerator(tts_config)
+            tts_generator = TTSGenerator(tts_config, job_record=config.job_record)
             tts_dir = (final_project_dir / "tts").resolve(strict=False)
             rewriter_kwargs: dict[str, object] = {}
             custom_rewrite_prompt_template = gemini_config.get("rewrite_prompt_template")
@@ -1125,6 +1238,7 @@ class ProcessPipeline:
                 total_duration_ms=actual_duration_ms,
                 segments=translation_result.segments,
                 stage_snapshot=state_manager.load().get("stages", {}),
+                source_type=source_type,
             )
             output_bundle = self._dispatch_process_output_bundle(
                 project_dir=final_project_dir,
@@ -1227,13 +1341,11 @@ class ProcessPipeline:
         self,
         *,
         explicit_project_dir: Path | None,
-        existing_project_dir: Path | None,
         wait_for_review: bool,
     ) -> bool:
-        # Fresh Web UI runs do not pass --project-dir. If we matched an old
-        # project only by URL, its historical translation approval should not
-        # silently skip the current human confirmation step.
-        if wait_for_review and explicit_project_dir is None and existing_project_dir is not None:
+        # When running via Web UI (wait_for_review=True) without an explicit
+        # project dir, always require fresh human review.
+        if wait_for_review and explicit_project_dir is None:
             return False
         return True
 
@@ -1367,20 +1479,6 @@ class ProcessPipeline:
             "segment_count": translation_result.total_segments,
         }
 
-    def _find_existing_project_by_url(self, youtube_url: str) -> Path | None:
-        projects_root = (PROJECT_ROOT / "projects").resolve(strict=False)
-        if not projects_root.exists():
-            return None
-
-        for candidate in projects_root.iterdir():
-            if not candidate.is_dir():
-                continue
-            metadata = self._load_download_metadata(candidate)
-            cached_url = str(metadata.get("url") or "").strip()
-            if cached_url and cached_url == youtube_url:
-                return candidate.resolve(strict=False)
-        return None
-
     def _normalize_speakers(self, value: int | str) -> int | str:
         if isinstance(value, int):
             if value in {1, 2}:
@@ -1444,8 +1542,19 @@ class ProcessPipeline:
         fallback_duration_ms: int = 0,
     ) -> DownloadResult:
         metadata = self._load_download_metadata(project_dir)
-        video_path = (project_dir / "video" / "original.mp4").resolve(strict=False)
-        audio_path = (project_dir / "audio" / "original.wav").resolve(strict=False)
+        # Prefer persisted real paths; fall back to legacy fixed names
+        video_path_str = _normalize_optional_text(metadata.get("video_path"))
+        audio_path_str = _normalize_optional_text(metadata.get("audio_path"))
+        video_path = (
+            Path(video_path_str).resolve(strict=False)
+            if video_path_str
+            else (project_dir / "video" / "original.mp4").resolve(strict=False)
+        )
+        audio_path = (
+            Path(audio_path_str).resolve(strict=False)
+            if audio_path_str
+            else (project_dir / "audio" / "original.wav").resolve(strict=False)
+        )
         return DownloadResult(
             video_path=str(video_path),
             audio_path=str(audio_path),
@@ -1474,6 +1583,113 @@ class ProcessPipeline:
             total_segments=_coerce_int(payload.get("total_segments"), default=len(segments)),
             output_path=str(segments_path.resolve(strict=False)),
         )
+
+    def _apply_review_speaker_styles_to_segments(
+        self,
+        segments: list[DubbingSegment],
+        speaker_styles: dict[str, dict[str, object]],
+    ) -> None:
+        if not speaker_styles:
+            return
+        from services.tts.cosyvoice_voice_selector import infer_energy_level, infer_persona_style
+
+        for segment in segments:
+            speaker_info = speaker_styles.get(segment.speaker_id, {})
+            voice_description = str(speaker_info.get("voice_description", "") or "")
+            segment.voice_description = voice_description
+            segment.gender = str(speaker_info.get("gender", "") or "")
+            segment.age_group = str(speaker_info.get("age_group", "") or "")
+            segment.persona_style = str(
+                speaker_info.get("persona_style", "") or infer_persona_style(voice_description)
+            )
+            segment.energy_level = str(
+                speaker_info.get("energy_level", "") or infer_energy_level(voice_description)
+            )
+
+    def _log_review_speaker_styles(
+        self,
+        speaker_styles: dict[str, dict[str, object]],
+    ) -> None:
+        if not speaker_styles:
+            return
+        from services.tts.cosyvoice_voice_selector import infer_energy_level, infer_persona_style
+
+        print(f"[S4] 注入音色描述：{len(speaker_styles)} 个说话人", flush=True)
+        for speaker_id, speaker_info in speaker_styles.items():
+            name = str(speaker_info.get("name", "") or "")
+            voice_description = str(speaker_info.get("voice_description", "") or "")
+            gender = str(speaker_info.get("gender", "") or "")
+            age_group = str(speaker_info.get("age_group", "") or "")
+            persona_style = str(
+                speaker_info.get("persona_style", "") or infer_persona_style(voice_description)
+            )
+            energy_level = str(
+                speaker_info.get("energy_level", "") or infer_energy_level(voice_description)
+            )
+            print(
+                f"  {speaker_id} ({name}, {gender}/{age_group}, persona={persona_style}, "
+                f"energy={energy_level}): {voice_description[:80]}",
+                flush=True,
+            )
+
+    def _segments_missing_review_speaker_styles(
+        self,
+        segments: list[DubbingSegment],
+    ) -> bool:
+        for segment in segments:
+            if not any(
+                (
+                    getattr(segment, "voice_description", ""),
+                    getattr(segment, "gender", ""),
+                    getattr(segment, "age_group", ""),
+                    getattr(segment, "persona_style", ""),
+                    getattr(segment, "energy_level", ""),
+                )
+            ):
+                return True
+        return False
+
+    def _recover_review_speaker_styles(
+        self,
+        *,
+        transcript_result: TranscriptResult,
+        source_audio_path: Path,
+        video_title: str,
+        video_url: str,
+    ) -> dict[str, dict[str, object]]:
+        print("[S2] Cached translation missing voice metadata; rerunning transcript review.", flush=True)
+        try:
+            from src.services.transcript_reviewer import review_transcript
+
+            words_data: list[dict] | None = None
+            try:
+                raw_path = transcript_result.raw_response_path
+                if raw_path and Path(raw_path).exists():
+                    with open(raw_path, encoding="utf-8") as raw_file:
+                        raw_payload = json.load(raw_file)
+                    words_data = raw_payload.get("words")
+            except Exception:
+                words_data = None
+
+            review_result = review_transcript(
+                transcript_result.lines,
+                audio_path=source_audio_path if source_audio_path.exists() else None,
+                video_title=video_title,
+                video_url=video_url,
+                words_data=words_data,
+            )
+        except Exception as exc:
+            print(
+                f"[S2] Cached voice metadata recovery failed ({type(exc).__name__}: {exc}).",
+                flush=True,
+            )
+            return {}
+
+        if review_result is None or not review_result.speakers:
+            print("[S2] Cached voice metadata recovery returned no speaker styles.", flush=True)
+            return {}
+
+        return review_result.speakers
 
     def _resolve_cached_display_names(
         self,
@@ -1995,6 +2211,11 @@ class ProcessPipeline:
                     speaker_id=segment.speaker_id,
                     display_name=segment.display_name,
                     voice_id=segment.voice_id,
+                    voice_description=getattr(segment, "voice_description", ""),
+                    gender=getattr(segment, "gender", ""),
+                    age_group=getattr(segment, "age_group", ""),
+                    persona_style=getattr(segment, "persona_style", ""),
+                    energy_level=getattr(segment, "energy_level", ""),
                     start_ms=start_ms,
                     end_ms=end_ms,
                     target_duration_ms=end_ms - start_ms,
@@ -2094,6 +2315,7 @@ class ProcessPipeline:
         total_duration_ms: int,
         segments: list[DubbingSegment],
         stage_snapshot: dict[str, object],
+        source_type: str = "youtube_url",
     ) -> WorkflowBuildResult:
         artifact_index = self._build_process_artifact_index(
             project_dir=project_dir,
@@ -2110,6 +2332,7 @@ class ProcessPipeline:
                 youtube_url=youtube_url,
                 download_result=download_result,
                 total_duration_ms=total_duration_ms,
+                source_type=source_type,
             ),
             artifact_index=artifact_index,
             stage_snapshot=stage_snapshot,
@@ -2170,11 +2393,17 @@ class ProcessPipeline:
         youtube_url: str,
         download_result: DownloadResult,
         total_duration_ms: int,
+        source_type: str = "youtube_url",
     ) -> dict[str, object]:
+        # Use real video/audio path from download_result for local sources
+        if source_type in ("local_video", "local_audio"):
+            source_path = download_result.video_path if source_type == "local_video" else download_result.audio_path
+        else:
+            source_path = str((project_dir / "video" / "original.mp4").resolve(strict=False))
         return build_canonical_source_info(
-            source_kind="youtube_url",
-            locator=youtube_url,
-            source_path=str((project_dir / "video" / "original.mp4").resolve(strict=False)),
+            source_kind=source_type,
+            locator=download_result.url,
+            source_path=source_path,
             metadata={
                 "video_title": download_result.video_title,
                 "duration_ms": total_duration_ms,
@@ -2244,19 +2473,20 @@ class ProcessPipeline:
         video_path: Path,
         source_audio_path: Path,
         execution_mode: str,
+        source_type: str = "youtube_url",
     ) -> dict[str, object]:
         metadata_path = final_project_dir / "download_metadata.json"
         return {
             "execution_mode": execution_mode,
-            "source_kind": "youtube_url",
+            "source_kind": source_type,
             "locator": download_result.url,
             "title": download_result.video_title,
             "duration_ms": int(download_result.duration_ms),
             "artifacts": build_artifacts_payload(
                 kind="ingestion_assets",
                 file_paths=[
-                    str(video_path.resolve(strict=False)),
-                    str(source_audio_path.resolve(strict=False)),
+                    str(video_path.resolve(strict=False)) if video_path.exists() else None,
+                    str(source_audio_path.resolve(strict=False)) if source_audio_path.exists() else None,
                     str(metadata_path.resolve(strict=False)) if metadata_path.exists() else None,
                 ],
             ),
@@ -2516,6 +2746,13 @@ class ProcessPipeline:
                             "alignment_method": segment.alignment_method,
                             "rewrite_count": segment.rewrite_count,
                             "needs_review": segment.needs_review,
+                            "voice_description": segment.voice_description,
+                            "gender": segment.gender,
+                            "age_group": segment.age_group,
+                            "persona_style": segment.persona_style,
+                            "energy_level": segment.energy_level,
+                            "selected_voice": segment.selected_voice,
+                            "match_confidence": segment.match_confidence,
                         }
                         for segment in translation_result.segments
                     ],
@@ -2527,6 +2764,92 @@ class ProcessPipeline:
             ),
             encoding="utf-8",
         )
+
+    def _ingest_local_source(
+        self,
+        *,
+        source_type: str,
+        source_ref: str,
+        project_dir: Path,
+    ) -> tuple[DownloadResult, Path, Path]:
+        """Ingest a local video or audio file into the workspace.
+
+        Returns (download_result, video_path, source_audio_path, execution_mode).
+        """
+        source_path = Path(source_ref).resolve(strict=False)
+        if not source_path.exists():
+            raise FileNotFoundError(f"本地来源文件不存在: {source_ref}")
+
+        video_dir = project_dir / "video"
+        audio_dir = project_dir / "audio"
+        video_dir.mkdir(parents=True, exist_ok=True)
+        audio_dir.mkdir(parents=True, exist_ok=True)
+
+        if source_type == "local_video":
+            print(f"[S0] 使用本地视频: {source_ref}")
+            # Copy/link video into workspace preserving original extension
+            workspace_video = video_dir / f"original{source_path.suffix or '.mp4'}"
+            if not workspace_video.exists():
+                shutil.copy2(str(source_path), str(workspace_video))
+            video_path = workspace_video.resolve(strict=False)
+            # Extract audio from video
+            workspace_audio = audio_dir / "original.wav"
+            if not workspace_audio.exists():
+                self._extract_audio_from_video(video_path, workspace_audio)
+            source_audio_path = workspace_audio.resolve(strict=False)
+        else:
+            # local_audio — no video file
+            print(f"[S0] 使用本地音频: {source_ref}")
+            workspace_audio = audio_dir / f"original{source_path.suffix or '.wav'}"
+            if not workspace_audio.exists():
+                shutil.copy2(str(source_path), str(workspace_audio))
+            source_audio_path = workspace_audio.resolve(strict=False)
+            video_path = project_dir / "video" / "original.mp4"  # placeholder, won't exist
+
+        # Build a DownloadResult-compatible object for downstream compatibility
+        title = source_path.stem or "local_source"
+        duration_ms = _ffprobe_duration_ms(source_audio_path) if source_audio_path.exists() else 0
+        download_result = DownloadResult(
+            video_path=str(video_path),
+            audio_path=str(source_audio_path),
+            video_title=title,
+            duration_ms=duration_ms,
+            url=source_ref,
+            description="",
+        )
+
+        # Write download_metadata.json for compatibility
+        metadata_path = project_dir / "download_metadata.json"
+        metadata_path.write_text(
+            json.dumps(
+                {
+                    "source_type": source_type,
+                    "url": source_ref,
+                    "video_title": title,
+                    "duration_ms": duration_ms,
+                    "video_path": str(video_path),
+                    "audio_path": str(source_audio_path),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        return download_result, video_path, source_audio_path, "local_ingest"
+
+    @staticmethod
+    def _extract_audio_from_video(video_path: Path, output_audio_path: Path) -> None:
+        """Extract audio track from video using ffmpeg."""
+        import subprocess
+        cmd = [
+            "ffmpeg", "-i", str(video_path),
+            "-vn", "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "1",
+            "-y", str(output_audio_path),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg 音频提取失败: {result.stderr[:500]}")
 
     def _ensure_separated_audio_assets(
         self,
@@ -2551,6 +2874,8 @@ class ProcessPipeline:
         self,
         *,
         final_project_dir: Path,
+        video_path: Path,
+        source_audio_path: Path,
         video_title: str,
         duration_ms: int,
         url: str,
@@ -2570,8 +2895,8 @@ class ProcessPipeline:
 
         metadata.update(
             {
-                "video_path": str((final_project_dir / "video" / "original.mp4").resolve(strict=False)),
-                "audio_path": str((final_project_dir / "audio" / "original.wav").resolve(strict=False)),
+                "video_path": str(video_path.resolve(strict=False)),
+                "audio_path": str(source_audio_path.resolve(strict=False)),
                 "speech_audio_path": str(speech_audio_path.resolve(strict=False)),
                 "ambient_audio_path": str(ambient_audio_path.resolve(strict=False)),
                 "video_title": video_title,
@@ -2593,7 +2918,7 @@ class ProcessPipeline:
         normalized_title = re.sub(r"[^a-z0-9\s]+", " ", normalized_title)
         normalized_title = re.sub(r"\s+", "_", normalized_title).strip("_")
         slug = (normalized_title or "untitled_video")[:50].rstrip("_") or "untitled_video"
-        return str((PROJECT_ROOT / "projects" / slug).resolve(strict=False))
+        return str((_resolve_projects_root() / slug).resolve(strict=False))
 
     def _load_stage_config(self, label: str, loader: Callable[[], T]) -> T:
         try:

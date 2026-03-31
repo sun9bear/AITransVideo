@@ -3,8 +3,8 @@
   "configurations": [
     {
       "name": "frontend-dev",
-      "runtimeExecutable": "C:/Program Files/nodejs/npx.cmd",
-      "runtimeArgs": ["next", "dev", "--port", "4180"],
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["frontend-next/node_modules/next/dist/bin/next", "dev", "frontend-next", "--port", "4180"],
       "port": 4180
     }
   ]

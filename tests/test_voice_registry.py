@@ -262,3 +262,28 @@ def test_voice_registry_records_failed_voice_verification_without_losing_voice(t
     assert profile.voices[0].verification_status == "failed"
     assert profile.voices[0].last_verification_success is False
     assert profile.voices[0].last_verification_error == "provider timed out"
+
+
+def test_voice_registry_set_default_voice_auto_registers_official_cosyvoice_builtin(
+    tmp_path: Path,
+) -> None:
+    registry = VoiceRegistry(str(tmp_path / "voice_registry.json"))
+    resolver = VoiceResolver(registry)
+    registry.register_voice(
+        "speaker_host",
+        speaker_name="Host",
+        voice_id="clone_host_001",
+        voice_type="cloned",
+        provider="minimax",
+        label="Host Clone",
+        created_at="2026-03-13T08:30:00+00:00",
+    )
+
+    profile = registry.set_default_voice("speaker_host", "longshu_v3")
+    resolution = resolver.resolve("speaker_host", tts_provider="cosyvoice", platform="dashscope")
+
+    assert profile.default_voice_id == "longshu_v3"
+    assert profile.default_voice_type == "builtin"
+    assert any(voice.voice_id == "longshu_v3" and voice.tts_provider == "cosyvoice" for voice in profile.voices)
+    assert resolution.source == "speaker_default_builtin"
+    assert resolution.voice_id == "longshu_v3"

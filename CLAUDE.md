@@ -67,6 +67,33 @@ Production frontend: Next.js standalone build served by Caddy.
 
 两台远程主机统一通过 `D:\daili\scripts\` 下的 `*-Via-154.cmd` 脚本部署。
 
+#### ⚠️ 容器代码部署注意
+
+`aivideotrans-app` 容器的 `/opt/aivideotrans/app/` **不是 bind mount**。
+主机上修改该路径下的文件**对容器不可见**。只有以下目录是 bind mount：
+- `/opt/aivideotrans/config` → config
+- `/opt/aivideotrans/data/projects` → projects
+- `/opt/aivideotrans/data/jobs` → jobs
+
+**部署 Python 代码到容器必须用 `docker cp` + `docker restart`：**
+```bash
+docker cp <file> aivideotrans-app:/opt/aivideotrans/app/<path>
+docker restart aivideotrans-app
+```
+
+**做任何应用层结论前，先验证容器内运行态代码来源：**
+```bash
+docker exec aivideotrans-app python -c "import inspect; from <module> import <cls>; print(inspect.getsource(<cls>.<method>))"
+```
+
+**开发期代码热更新模式（2026-03-30 启用）：**
+docker-compose.yml 已配置 `src/`、`main.py`、`scripts/` 的 bind mount。
+主机修改代码后只需 `docker restart aivideotrans-app`。
+
+**⚠️ 项目接近完成时，必须切回镜像不可变模式：**
+删除 docker-compose.yml 中标注"开发期代码热更新 bind mount"的 3 个 volume 条目，
+改为 `docker-compose build app` + `docker-compose up -d app`。
+
 ## Key Conventions
 
 - 所有 UI 文本和沟通用中文

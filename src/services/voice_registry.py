@@ -7,6 +7,7 @@ from typing import Any
 
 from core.exceptions import StateError
 from services.state_manager import utc_now_iso
+from services.tts.cosyvoice_voice_catalog import build_cosyvoice_v3_flash_builtin_voice_option
 
 
 VOICE_TYPES = {"cloned", "builtin"}
@@ -366,8 +367,23 @@ class VoiceRegistry:
 
         voice_payload = self._find_voice_payload(speaker_payload, normalized_voice_id)
         if voice_payload is None:
-            raise ValueError(
-                f"Voice not found for speaker_id={normalized_speaker_id} voice_id={normalized_voice_id}"
+            catalog_voice = build_cosyvoice_v3_flash_builtin_voice_option(normalized_voice_id)
+            if catalog_voice is None:
+                raise ValueError(
+                    f"Voice not found for speaker_id={normalized_speaker_id} voice_id={normalized_voice_id}"
+                )
+            return self.register_voice(
+                normalized_speaker_id,
+                speaker_name=_read_optional_string(speaker_payload, "speaker_name"),
+                voice_id=str(catalog_voice["voice_id"]),
+                voice_type="builtin",
+                provider=str(catalog_voice["provider"]),
+                tts_provider=_read_optional_string(catalog_voice, "tts_provider"),
+                platform=_read_optional_string(catalog_voice, "platform"),
+                label=str(catalog_voice["label"]),
+                created_at=_read_optional_string(catalog_voice, "created_at"),
+                notes=_read_optional_string(catalog_voice, "notes"),
+                set_default=True,
             )
 
         speaker_payload["default_voice_id"] = normalized_voice_id

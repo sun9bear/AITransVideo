@@ -62,9 +62,9 @@ PROCESS_RUN_TIMEOUT_SECONDS = TIMEOUT_TIERS["tier2"]  # 默认 6 小时（兼容
 
 STAGE_LOG_PATTERN = re.compile(r"^\[(S[0-9]+)\]\s*(.*)$")
 DOWNLOAD_PROGRESS_PATTERN = re.compile(r"^\[download\]\s*(.+)$", re.IGNORECASE)
-# A1 is validated in the current Windows local runtime, so stdout path inference
-# intentionally looks for Windows-style absolute paths only.
+# Path inference patterns for both Windows and POSIX absolute paths in stdout logs.
 WINDOWS_PATH_PATTERN = re.compile(r"([A-Za-z]:[\\/][^\r\n]+)")
+POSIX_PATH_PATTERN = re.compile(r"(/[a-zA-Z0-9_][^\r\n\s]*)")
 STAGE_CODE_MAP = {
     "S0": STAGE_INGESTION,
     "S1": STAGE_MEDIA_UNDERSTANDING,
@@ -107,6 +107,7 @@ class ProcessJobRunner:
         self.run_timeout_seconds = run_timeout_seconds
         self._lock = threading.Lock()
         self._processes: dict[str, subprocess.Popen[str]] = {}
+        self._deleted_jobs: set[str] = set()
 
     def start(self, job: JobRecord, *, continue_existing: bool = False) -> JobRecord:
         timestamp = utc_now_iso()
@@ -199,12 +200,31 @@ class ProcessJobRunner:
                 return False
             return process.poll() is None
 
+    def stop_process(self, job_id: str) -> bool:
+        """Kill a running process for the given job_id. Returns True if a process was killed.
+
+        Also marks the job as deleted so _finalize_process won't write it back.
+        """
+        with self._lock:
+            self._deleted_jobs.add(job_id)
+            process = self._processes.get(job_id)
+        if process is None or process.poll() is not None:
+            return False
+        self._kill_process(process)
+        process.wait(timeout=5)
+        with self._lock:
+            self._processes.pop(job_id, None)
+        return True
+
     def _build_command(self, job: JobRecord, *, continue_existing: bool) -> list[str]:
         command = [
             self.python_executable,
             "-u",
             str(MAIN_PY_PATH),
             "process",
+            "--source-type",
+            job.source_type or "youtube_url",
+            "--source-ref",
             job.source_ref,
             "--speakers",
             job.speakers,
@@ -214,10 +234,19 @@ class ProcessJobRunner:
             command.extend(["--voice-a", job.voice_a])
         if job.voice_b:
             command.extend(["--voice-b", job.voice_b])
-        if continue_existing and job.project_dir:
-            command.extend(["--project-dir", job.project_dir])
+        # --project-dir: continue uses project_dir; new job uses workspace_dir
+        if continue_existing:
+            project_dir = job.project_dir or getattr(job, "workspace_dir", None)
+            if project_dir:
+                command.extend(["--project-dir", project_dir])
+        else:
+            workspace_dir = getattr(job, "workspace_dir", None)
+            if workspace_dir:
+                command.extend(["--project-dir", workspace_dir])
         if getattr(job, "transcription_method", None) and job.transcription_method != "assemblyai":
             command.extend(["--transcription-method", job.transcription_method])
+        if job.job_id:
+            command.extend(["--job-id", job.job_id])
         return command
 
     def _monitor_process(self, job_id: str, process: subprocess.Popen[str]) -> None:
@@ -240,6 +269,9 @@ class ProcessJobRunner:
         self._finalize_process(job_id, returncode)
 
     def _record_line(self, job_id: str, line: str) -> None:
+        with self._lock:
+            if job_id in self._deleted_jobs:
+                return
         current_job = self.store.require_job(job_id)
         detected_project_dir = _parse_project_dir_from_line(line, self.project_root)
         review_gate = _parse_web_review_marker(line)
@@ -312,6 +344,10 @@ class ProcessJobRunner:
         )
 
     def _finalize_process(self, job_id: str, returncode: int) -> None:
+        with self._lock:
+            if job_id in self._deleted_jobs:
+                self._deleted_jobs.discard(job_id)
+                return
         current_job = self.store.require_job(job_id)
         if current_job.status == JOB_STATUS_WAITING_FOR_REVIEW and returncode == 0:
             return
@@ -320,6 +356,7 @@ class ProcessJobRunner:
             project_root=self.project_root,
             source_ref=current_job.source_ref,
             preferred_project_dir=current_job.project_dir,
+            workspace_dir=getattr(current_job, "workspace_dir", None),
         )
         manifest_path = _resolve_manifest_path(resolved_project_dir)
         fallback_summary = _resolve_fallback_summary(
@@ -474,14 +511,30 @@ def _parse_web_review_marker(line: str) -> dict[str, object] | None:
 
 
 def _parse_project_dir_from_line(line: str, project_root: Path) -> str | None:
+    # Try Windows paths first, then POSIX
     path_candidates = WINDOWS_PATH_PATTERN.findall(line)
+    is_posix = False
+    if not path_candidates:
+        path_candidates = POSIX_PATH_PATTERN.findall(line)
+        is_posix = True
     if not path_candidates:
         return None
 
-    normalized_candidate = _normalize_path_text(path_candidates[-1], project_root)
+    raw_candidate = path_candidates[-1].rstrip()
+
+    if is_posix:
+        # POSIX paths from container logs — preserve as-is, do not resolve
+        # through Windows Path which would mangle /opt → D:\opt
+        import posixpath
+        basename = posixpath.basename(raw_candidate)
+        if basename.lower() == "output":
+            return posixpath.dirname(raw_candidate)
+        return raw_candidate
+
+    # Windows path — use existing normalize logic
+    normalized_candidate = _normalize_path_text(raw_candidate, project_root)
     if normalized_candidate is None:
         return None
-
     candidate_path = Path(normalized_candidate).resolve(strict=False)
     if candidate_path.name.lower() == "output":
         return str(candidate_path.parent)
@@ -505,45 +558,77 @@ def _resolve_job_project_dir(
     project_root: Path,
     source_ref: str,
     preferred_project_dir: str | None,
+    workspace_dir: str | None = None,
 ) -> Path | None:
+    # Priority 1: project_dir (already resolved by previous run or log parsing)
     if preferred_project_dir:
         candidate = Path(preferred_project_dir).expanduser().resolve(strict=False)
         if candidate.exists():
             return candidate
 
-    projects_root = (project_root / "projects").resolve(strict=False)
-    if not projects_root.exists():
-        return None
+    # Priority 2: workspace_dir (new architecture: projects/<user_id>/<job_id>/)
+    if workspace_dir:
+        candidate = Path(workspace_dir).expanduser().resolve(strict=False)
+        if candidate.exists():
+            return candidate
+
+    # Priority 3 (legacy fallback): search by source_ref in project roots
+    candidate_roots: list[Path] = []
+    local_projects = (project_root / "projects").resolve(strict=False)
+    if local_projects.exists():
+        candidate_roots.append(local_projects)
+    # Linux container layout: project_root=/opt/.../app, data at /opt/.../data/projects
+    sibling_data_projects = (project_root.parent / "data" / "projects").resolve(strict=False)
+    if sibling_data_projects.exists() and sibling_data_projects != local_projects:
+        candidate_roots.append(sibling_data_projects)
 
     matching_projects: list[tuple[float, Path]] = []
-    for candidate in projects_root.iterdir():
-        if not candidate.is_dir():
-            continue
-        metadata_path = candidate / "download_metadata.json"
-        if not metadata_path.exists():
-            continue
-        try:
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        cached_url = str(metadata.get("url") or "").strip()
-        if cached_url != source_ref:
-            continue
+    for projects_root in candidate_roots:
+        for candidate in _iter_project_dirs(projects_root):
+            metadata_path = candidate / "download_metadata.json"
+            if not metadata_path.exists():
+                continue
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            cached_url = str(metadata.get("url") or "").strip()
+            if cached_url != source_ref:
+                continue
 
-        project_state_path = candidate / "project_state.json"
-        manifest_path = candidate / "manifest.json"
-        ordering_mtime = max(
-            metadata_path.stat().st_mtime,
-            project_state_path.stat().st_mtime if project_state_path.exists() else 0.0,
-            manifest_path.stat().st_mtime if manifest_path.exists() else 0.0,
-            candidate.stat().st_mtime,
-        )
-        matching_projects.append((ordering_mtime, candidate.resolve(strict=False)))
+            project_state_path = candidate / "project_state.json"
+            manifest_path = candidate / "manifest.json"
+            ordering_mtime = max(
+                metadata_path.stat().st_mtime,
+                project_state_path.stat().st_mtime if project_state_path.exists() else 0.0,
+                manifest_path.stat().st_mtime if manifest_path.exists() else 0.0,
+                candidate.stat().st_mtime,
+            )
+            matching_projects.append((ordering_mtime, candidate.resolve(strict=False)))
 
     if not matching_projects:
         return None
     matching_projects.sort(key=lambda item: item[0], reverse=True)
     return matching_projects[0][1]
+
+
+def _iter_project_dirs(projects_root: Path):
+    """Yield immediate subdirectories that look like project dirs.
+
+    Handles both flat layout (projects/<slug>/) and user-isolated layout
+    (projects/<user_id>/<job_id>/).
+    """
+    for child in projects_root.iterdir():
+        if not child.is_dir():
+            continue
+        # Check if child itself is a project (has download_metadata.json)
+        if (child / "download_metadata.json").exists():
+            yield child
+        else:
+            # Could be a user_id directory containing job dirs
+            for grandchild in child.iterdir():
+                if grandchild.is_dir():
+                    yield grandchild
 
 
 def _resolve_manifest_path(project_dir: Path | None) -> str | None:

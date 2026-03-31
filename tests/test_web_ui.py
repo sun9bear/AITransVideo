@@ -9,10 +9,12 @@ import threading
 import time
 from urllib.error import HTTPError
 from urllib.parse import quote
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 import pytest
 
+import services.tts.cosyvoice_provider as cosyvoice_provider_module
+import services.web_ui.voice_library as voice_library_module
 from services.web_ui import (
     JobAPIRequestError,
     JobAPIBackedJobManager,
@@ -117,6 +119,25 @@ def _request_server_bytes(url: str) -> tuple[int, bytes, dict[str, str]]:
             return response.status, response.read(), dict(response.headers.items())
     except HTTPError as exc:
         return exc.code, exc.read(), dict(exc.headers.items())
+
+
+def _request_server_json(
+    url: str,
+    *,
+    method: str,
+    payload: dict[str, object],
+) -> tuple[int, dict[str, object]]:
+    request = Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method=method,
+    )
+    try:
+        with urlopen(request) as response:
+            return response.status, json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode("utf-8"))
 
 
 def _write_test_process_project(
@@ -1412,6 +1433,159 @@ def test_build_web_ui_snapshot_includes_active_voice_review_details(tmp_path: Pa
     assert snapshot["results"]["voice_library"]["active_review"]["speakers"][0]["resolved_voice_id"] == "clone_a_001"
 
 
+def test_build_web_ui_snapshot_includes_official_cosyvoice_builtin_catalog(tmp_path: Path) -> None:
+    config_path = tmp_path / "autodub.local.json"
+    _write_test_config(config_path)
+    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    config_payload["tts"] = {"provider": "cosyvoice"}
+    config_path.write_text(json.dumps(config_payload, ensure_ascii=False), encoding="utf-8")
+    _write_test_voice_registry(tmp_path)
+    project_dir = _write_test_process_project(
+        tmp_path,
+        project_name="cosyvoice_catalog_snapshot",
+        youtube_url="https://www.youtube.com/watch?v=cosyvoice-catalog",
+    )
+    manager = ProcessJobManager(project_root=tmp_path, config_path=config_path)
+    manager._snapshot = ProcessJobSnapshot(
+        job_id="job-cosyvoice-catalog",
+        status="idle",
+        youtube_url="https://www.youtube.com/watch?v=cosyvoice-catalog",
+        speakers="2",
+        voice_a=None,
+        voice_b=None,
+        translation_model_alias="gemini_3_1_flash_lite_preview",
+        project_dir=str(project_dir.resolve(strict=False)),
+        current_stage="S2",
+        current_message="voice library",
+        started_at="2026-03-18T00:00:00Z",
+        completed_at=None,
+        returncode=0,
+        logs=[],
+    )
+
+    snapshot = build_web_ui_snapshot(manager=manager)
+    builtin_options = snapshot["results"]["voice_library"]["builtin_voice_options"]
+    builtin_voice_ids = {str(option["voice_id"]) for option in builtin_options}
+
+    assert "longanyang" in builtin_voice_ids
+    assert "longshu_v3" in builtin_voice_ids
+    assert "loongbella_v3" in builtin_voice_ids
+    assert snapshot["results"]["voice_library"]["builtin_voice_count"] >= 70
+
+
+def test_build_web_ui_snapshot_marks_cosyvoice_builtin_compatibility(tmp_path: Path) -> None:
+    config_path = tmp_path / "autodub.local.json"
+    _write_test_config(config_path)
+    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    config_payload["tts"] = {"provider": "cosyvoice"}
+    config_path.write_text(json.dumps(config_payload, ensure_ascii=False), encoding="utf-8")
+    _write_test_voice_registry(tmp_path)
+    project_dir = _write_test_process_project(
+        tmp_path,
+        project_name="cosyvoice_compatibility_snapshot",
+        youtube_url="https://www.youtube.com/watch?v=cosyvoice-compatibility",
+    )
+    manager = ProcessJobManager(project_root=tmp_path, config_path=config_path)
+    manager._snapshot = ProcessJobSnapshot(
+        job_id="job-cosyvoice-compatibility",
+        status="idle",
+        youtube_url="https://www.youtube.com/watch?v=cosyvoice-compatibility",
+        speakers="2",
+        voice_a=None,
+        voice_b=None,
+        translation_model_alias="gemini_3_1_flash_lite_preview",
+        project_dir=str(project_dir.resolve(strict=False)),
+        current_stage="S2",
+        current_message="voice library",
+        started_at="2026-03-18T00:00:00Z",
+        completed_at=None,
+        returncode=0,
+        logs=[],
+    )
+
+    snapshot = build_web_ui_snapshot(manager=manager)
+    runtime_context = snapshot["results"]["voice_library"]["builtin_voice_runtime_context"]
+    longshu = next(
+        option
+        for option in snapshot["results"]["voice_library"]["builtin_voice_options"]
+        if option["voice_id"] == "longshu_v3"
+    )
+
+    assert runtime_context["active_provider"] == "cosyvoice"
+    assert runtime_context["active_model"] == "cosyvoice-v3-flash"
+    assert runtime_context["deployment_mode"] == "international"
+    assert longshu["compatibility_status"] == "compatible"
+    assert longshu["compatibility_reason"] == "compatible_with_current_cosyvoice_runtime"
+
+
+def test_build_web_ui_snapshot_marks_incompatible_cosyvoice_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config_path = tmp_path / "autodub.local.json"
+    _write_test_config(config_path)
+    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    config_payload["tts"] = {"provider": "cosyvoice"}
+    config_path.write_text(json.dumps(config_payload, ensure_ascii=False), encoding="utf-8")
+    _write_test_voice_registry(tmp_path)
+    project_dir = _write_test_process_project(
+        tmp_path,
+        project_name="cosyvoice_incompatible_model",
+        youtube_url="https://www.youtube.com/watch?v=cosyvoice-incompatible",
+    )
+    manager = ProcessJobManager(project_root=tmp_path, config_path=config_path)
+    manager._snapshot = ProcessJobSnapshot(
+        job_id="job-cosyvoice-incompatible-model",
+        status="idle",
+        youtube_url="https://www.youtube.com/watch?v=cosyvoice-incompatible",
+        speakers="2",
+        voice_a=None,
+        voice_b=None,
+        translation_model_alias="gemini_3_1_flash_lite_preview",
+        project_dir=str(project_dir.resolve(strict=False)),
+        current_stage="S2",
+        current_message="voice library",
+        started_at="2026-03-18T00:00:00Z",
+        completed_at=None,
+        returncode=0,
+        logs=[],
+    )
+    monkeypatch.setattr(cosyvoice_provider_module, "DEFAULT_MODEL", "cosyvoice-v3-plus")
+    monkeypatch.setattr(voice_library_module, "cosyvoice_provider", cosyvoice_provider_module)
+
+    snapshot = build_web_ui_snapshot(manager=manager)
+    longshu = next(
+        option
+        for option in snapshot["results"]["voice_library"]["builtin_voice_options"]
+        if option["voice_id"] == "longshu_v3"
+    )
+
+    assert longshu["compatibility_status"] == "incompatible"
+    assert "cosyvoice-v3-plus" in str(longshu["compatibility_reason"])
+
+
+def test_voice_library_project_default_rejects_incompatible_cosyvoice_builtin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "autodub.local.json"
+    _write_test_config(config_path)
+    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    config_payload["tts"] = {"provider": "cosyvoice"}
+    config_path.write_text(json.dumps(config_payload, ensure_ascii=False), encoding="utf-8")
+    manager = ProcessJobManager(project_root=tmp_path, config_path=config_path)
+    server = create_web_ui_server(job_manager=manager, port=0)
+    monkeypatch.setattr(cosyvoice_provider_module, "DEFAULT_MODEL", "cosyvoice-v3-plus")
+    monkeypatch.setattr(voice_library_module, "cosyvoice_provider", cosyvoice_provider_module)
+
+    with _running_server(server) as base_url:
+        status, payload = _request_server_json(
+            f"{base_url}/api/voice-library/set-project-default-builtin",
+            method="POST",
+            payload={"voice_id": "longshu_v3"},
+        )
+
+    assert status == HTTPStatus.BAD_REQUEST
+    assert "cosyvoice-v3-plus" in str(payload["error"])
+
+
 def test_build_web_ui_snapshot_prefers_manifest_artifact_paths_for_results_outputs(tmp_path: Path) -> None:
     config_path = tmp_path / "autodub.local.json"
     _write_test_config(config_path)
@@ -2174,3 +2348,82 @@ def test_save_web_ui_settings_rejects_s5_prompt_without_required_tokens(tmp_path
             provider_api_keys={},
             config_path=config_path,
         )
+
+
+# ===================================================================
+# Upload path isolation tests
+# ===================================================================
+
+def _build_multipart_upload(filename: str, content: bytes) -> tuple[bytes, str]:
+    """Build a minimal multipart/form-data body with a single file field."""
+    boundary = "----TestBoundary12345"
+    parts = []
+    parts.append(f"--{boundary}\r\n".encode())
+    parts.append(f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'.encode())
+    parts.append(b"Content-Type: application/octet-stream\r\n\r\n")
+    parts.append(content)
+    parts.append(f"\r\n--{boundary}--\r\n".encode())
+    body = b"".join(parts)
+    content_type = f"multipart/form-data; boundary={boundary}"
+    return body, content_type
+
+
+def test_upload_with_user_id_header_writes_to_isolated_path(tmp_path: Path) -> None:
+    """When X-User-Id header is present, file lands in uploads/<user_id>/..."""
+    config_path = tmp_path / "autodub.local.json"
+    _write_test_config(config_path)
+    server = create_web_ui_server(host="127.0.0.1", port=0)
+    server.job_manager = type("FakeManager", (), {"project_root": str(tmp_path)})()
+
+    with _running_server(server) as base_url:
+        body, ct = _build_multipart_upload("test video.mp4", b"fake video data")
+        req = Request(
+            f"{base_url}/api/upload-video",
+            data=body,
+            headers={
+                "Content-Type": ct,
+                "X-User-Id": "42",
+            },
+            method="POST",
+        )
+        with urlopen(req) as response:
+            result = json.loads(response.read().decode("utf-8"))
+
+    file_path = result["file_path"]
+    # Must be under uploads/42/
+    assert "/42/" in file_path.replace("\\", "/") or "\\42\\" in file_path
+    # Must NOT use timestamp naming — should have uuid-based upload_id
+    import os
+    basename = os.path.basename(file_path)
+    # basename format: <upload_id>_<safe_name>
+    assert "test_video.mp4" in basename
+    # 32-char hex uuid prefix
+    upload_id_part = basename.split("_")[0]
+    assert len(upload_id_part) == 32
+    # File actually exists with correct content
+    assert Path(file_path).read_bytes() == b"fake video data"
+    assert result["file_name"] == "test video.mp4"
+
+
+def test_upload_without_user_id_header_falls_back_to_global_uploads(tmp_path: Path) -> None:
+    """Without X-User-Id header (direct-connect mode), file lands in uploads/."""
+    config_path = tmp_path / "autodub.local.json"
+    _write_test_config(config_path)
+    server = create_web_ui_server(host="127.0.0.1", port=0)
+    server.job_manager = type("FakeManager", (), {"project_root": str(tmp_path)})()
+
+    with _running_server(server) as base_url:
+        body, ct = _build_multipart_upload("fallback.mp4", b"fallback data")
+        req = Request(
+            f"{base_url}/api/upload-video",
+            data=body,
+            headers={"Content-Type": ct},
+            method="POST",
+        )
+        with urlopen(req) as response:
+            result = json.loads(response.read().decode("utf-8"))
+
+    file_path = result["file_path"]
+    # Should be under uploads/ but NOT user-scoped
+    assert "uploads" in file_path.replace("\\", "/")
+    assert Path(file_path).read_bytes() == b"fallback data"

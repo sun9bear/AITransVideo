@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from core.exceptions import StateError
@@ -9,6 +10,15 @@ from services.review_state import (
     VOICE_REVIEW_STAGE,
     ReviewStateManager,
 )
+from services.tts import cosyvoice_provider
+from services.tts.cosyvoice_voice_catalog import (
+    COSYVOICE_PLATFORM,
+    COSYVOICE_TTS_PROVIDER,
+    COSYVOICE_V3_FLASH_MODEL,
+    build_cosyvoice_v3_flash_builtin_voice_option,
+    list_cosyvoice_v3_flash_builtin_voice_options,
+)
+from services.tts.tts_strategy import get_tts_provider
 from services.voice_registry import SpeakerVoiceProfile, VoiceRegistry, VoiceResolver
 
 from .config_helpers import _normalize_optional_text
@@ -31,6 +41,7 @@ def _build_voice_library_snapshot(
         "speaker_count": 0,
         "voice_count": 0,
         "builtin_voice_count": 0,
+        "builtin_voice_runtime_context": None,
         "project_default_builtin_voice": None,
         "builtin_voice_options": [],
         "active_review": None,
@@ -46,6 +57,7 @@ def _build_voice_library_snapshot(
         return snapshot
 
     resolver = VoiceResolver(registry)
+    builtin_voice_runtime_context = _build_builtin_voice_runtime_context(config_path=config_path)
     speakers_payload = registry_data.get("speakers", {})
     registry_speakers: list[dict[str, object]] = []
     builtin_voice_options: list[dict[str, object]] = []
@@ -96,14 +108,30 @@ def _build_voice_library_snapshot(
             str(item.get("voice_id") or "").lower(),
         )
     )
+    if get_tts_provider(config_path) == "cosyvoice":
+        builtin_voice_options = _merge_builtin_voice_options(
+            builtin_voice_options,
+            list_cosyvoice_v3_flash_builtin_voice_options(),
+        )
+    builtin_voice_options = [
+        _annotate_builtin_voice_option(
+            option,
+            runtime_context=builtin_voice_runtime_context,
+        )
+        for option in builtin_voice_options
+    ]
     project_default_builtin_voice = registry.get_project_default_builtin_voice()
     snapshot.update(
         {
             "speaker_count": len(registry_speakers),
             "voice_count": total_voice_count,
             "builtin_voice_count": len(builtin_voice_options),
+            "builtin_voice_runtime_context": builtin_voice_runtime_context,
             "project_default_builtin_voice": (
-                project_default_builtin_voice.to_dict()
+                _annotate_builtin_voice_option(
+                    project_default_builtin_voice.to_dict(),
+                    runtime_context=builtin_voice_runtime_context,
+                )
                 if project_default_builtin_voice is not None
                 else None
             ),
@@ -267,6 +295,7 @@ def _find_builtin_voice_option(
     *,
     registry: VoiceRegistry,
     voice_id: str,
+    config_path: Path | None = None,
 ) -> dict[str, object] | None:
     registry_data = registry.load()
     speakers_payload = registry_data.get("speakers", {})
@@ -281,7 +310,7 @@ def _find_builtin_voice_option(
         profile = SpeakerVoiceProfile.from_dict(str(speaker_id), speaker_payload)
         for voice in profile.voices:
             if voice.voice_type == "builtin" and voice.voice_id == normalized_voice_id:
-                return {
+                option = {
                     "voice_id": voice.voice_id,
                     "provider": voice.provider,
                     "tts_provider": voice.tts_provider,
@@ -290,4 +319,134 @@ def _find_builtin_voice_option(
                     "created_at": voice.created_at,
                     "notes": voice.notes,
                 }
-    return None
+                if config_path is not None:
+                    return _annotate_builtin_voice_option(
+                        option,
+                        runtime_context=_build_builtin_voice_runtime_context(config_path=config_path),
+                    )
+                return option
+    option = build_cosyvoice_v3_flash_builtin_voice_option(normalized_voice_id)
+    if option is None or config_path is None:
+        return option
+    return _annotate_builtin_voice_option(
+        option,
+        runtime_context=_build_builtin_voice_runtime_context(config_path=config_path),
+    )
+
+
+def _assert_builtin_voice_selection_allowed(option: dict[str, object] | None) -> None:
+    if option is None:
+        return
+    if str(option.get("compatibility_status") or "").strip().lower() != "incompatible":
+        return
+    voice_id = str(option.get("voice_id") or "").strip() or "(unknown)"
+    reason = str(option.get("compatibility_reason") or "").strip() or "incompatible_with_current_runtime"
+    raise ValueError(f"builtin voice_id={voice_id} is incompatible with current TTS runtime: {reason}")
+
+
+def _merge_builtin_voice_options(
+    existing_options: list[dict[str, object]],
+    catalog_options: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    merged_options = list(existing_options)
+    seen_voice_ids = {
+        str(option.get("voice_id") or "").strip()
+        for option in existing_options
+        if str(option.get("voice_id") or "").strip()
+    }
+    for option in catalog_options:
+        voice_id = str(option.get("voice_id") or "").strip()
+        if not voice_id or voice_id in seen_voice_ids:
+            continue
+        merged_options.append(option)
+        seen_voice_ids.add(voice_id)
+    merged_options.sort(
+        key=lambda item: (
+            str(item.get("speaker_name") or item.get("speaker_id") or "").lower(),
+            str(item.get("label") or "").lower(),
+            str(item.get("voice_id") or "").lower(),
+        )
+    )
+    return merged_options
+
+
+def _build_builtin_voice_runtime_context(*, config_path: Path) -> dict[str, object]:
+    active_provider = get_tts_provider(config_path)
+    runtime_context: dict[str, object] = {
+        "active_provider": active_provider,
+        "active_model": None,
+        "deployment_mode": None,
+        "ws_url": None,
+        "ws_url_source": None,
+    }
+    if active_provider != "cosyvoice":
+        return runtime_context
+
+    explicit_ws_url = os.environ.get("DASHSCOPE_WS_URL", "").strip()
+    runtime_context.update(
+        {
+            "active_model": cosyvoice_provider.DEFAULT_MODEL,
+            "deployment_mode": cosyvoice_provider._resolve_deployment_mode(),
+            "ws_url": cosyvoice_provider._resolve_ws_url(),
+            "ws_url_source": "env_override" if explicit_ws_url else "deployment_mode_default",
+        }
+    )
+    return runtime_context
+
+
+def _annotate_builtin_voice_option(
+    option: dict[str, object],
+    *,
+    runtime_context: dict[str, object],
+) -> dict[str, object]:
+    annotated = dict(option)
+    compatibility_status, compatibility_reason = _resolve_builtin_voice_compatibility(
+        annotated,
+        runtime_context=runtime_context,
+    )
+    annotated["compatibility_status"] = compatibility_status
+    annotated["compatibility_reason"] = compatibility_reason
+    return annotated
+
+
+def _resolve_builtin_voice_compatibility(
+    option: dict[str, object],
+    *,
+    runtime_context: dict[str, object],
+) -> tuple[str, str]:
+    active_provider = str(runtime_context.get("active_provider") or "").strip().lower()
+    voice_tts_provider = str(option.get("tts_provider") or "").strip().lower()
+    voice_platform = str(option.get("platform") or "").strip().lower()
+    catalog_model = str(option.get("catalog_model") or "").strip().lower()
+
+    if active_provider == "cosyvoice":
+        active_model = str(runtime_context.get("active_model") or "").strip().lower()
+        if voice_tts_provider and voice_tts_provider != COSYVOICE_TTS_PROVIDER:
+            return (
+                "incompatible",
+                f"builtin voice uses tts_provider={voice_tts_provider}, current provider is cosyvoice",
+            )
+        if voice_platform and voice_platform != COSYVOICE_PLATFORM:
+            return (
+                "incompatible",
+                f"builtin voice uses platform={voice_platform}, current platform is {COSYVOICE_PLATFORM}",
+            )
+        if catalog_model and catalog_model != active_model:
+            return (
+                "incompatible",
+                f"voice catalog targets {catalog_model}, current model is {active_model}",
+            )
+        return ("compatible", "compatible_with_current_cosyvoice_runtime")
+
+    if active_provider == "minimax":
+        if voice_tts_provider in {"", "minimax_tts"}:
+            return ("compatible", "compatible_with_current_minimax_runtime")
+        return (
+            "incompatible",
+            f"builtin voice uses tts_provider={voice_tts_provider or 'unknown'}, current provider is minimax",
+        )
+
+    if active_provider == "mimo":
+        return ("incompatible", "mimo_runtime_does_not_support_builtin_voice_ids")
+
+    return ("unknown", "runtime_provider_unknown")

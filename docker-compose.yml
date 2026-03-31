@@ -19,6 +19,21 @@ services:
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       AUTODUB_TTS_API_KEY: ${AUTODUB_TTS_API_KEY:-}
     volumes:
+      # --- 开发期代码热更新 bind mount ---
+      # 主机代码目录直接映射到容器内，修改后 docker restart 即可生效。
+      # ⚠️ 项目接近完成时切回镜像不可变模式：删除下面 3 个 code mount，
+      #    改为 docker-compose build app + docker-compose up -d app。
+      #    参见 docs/FREE_VS_PAID_TTS_ROUTING_STATUS_AND_RECOVERY_PLAN.md
+      - type: bind
+        source: ${AIVIDEOTRANS_ROOT}/app/src
+        target: /opt/aivideotrans/app/src
+      - type: bind
+        source: ${AIVIDEOTRANS_ROOT}/app/main.py
+        target: /opt/aivideotrans/app/main.py
+      - type: bind
+        source: ${AIVIDEOTRANS_ROOT}/app/scripts
+        target: /opt/aivideotrans/app/scripts
+      # --- 数据持久化 bind mount（始终保留） ---
       - type: bind
         source: ${AIVIDEOTRANS_ROOT}/config
         target: /opt/aivideotrans/config

@@ -12,6 +12,8 @@ from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from admin_settings import router as admin_router
+from billing import router as billing_router
+from entitlements import router as entitlements_router
 from auth import (
     LoginRequest,
     RegisterRequest,
@@ -36,6 +38,7 @@ from job_intercept import (
     intercept_list_jobs,
     intercept_project_file,
     intercept_result_download,
+    update_source_metadata,
 )
 from proxy import close_client, init_client, proxy_request
 
@@ -92,6 +95,8 @@ app.get("/auth/me")(me_handler)
 # --- Admin settings routes (before catch-all) ---
 
 app.include_router(admin_router)
+app.include_router(billing_router)
+app.include_router(entitlements_router)
 
 
 # --- Web UI API intercept routes (before catch-all) ---
@@ -99,6 +104,15 @@ app.include_router(admin_router)
 app.get("/api/result-download")(intercept_result_download)
 app.get("/api/project-file")(intercept_project_file)
 app.post("/api/job/delete")(intercept_delete_job)
+
+
+# --- Helpers ---
+
+def _user_id_headers(user) -> dict[str, str] | None:
+    """Build internal identity headers for Web UI proxy routes."""
+    if user is not None:
+        return {"x-user-id": str(user.id)}
+    return None
 
 
 # --- Proxy: Web UI API catch-all (/api/*) ---
@@ -116,6 +130,7 @@ async def proxy_web_ui(
         request=request,
         upstream_base=settings.web_ui_upstream,
         strip_prefix="",
+        extra_headers=_user_id_headers(_user),
     )
 
 
@@ -127,6 +142,7 @@ async def proxy_web_ui(
 app.get("/job-api/jobs")(intercept_list_jobs)
 app.post("/job-api/jobs")(intercept_create_job)
 app.get("/job-api/jobs/{job_id}")(intercept_get_job)
+app.post("/job-api/jobs/{job_id}/source-metadata")(update_source_metadata)
 
 # Job sub-resources: logs, artifacts, result-summary, continue, etc.
 app.api_route(
@@ -170,6 +186,7 @@ async def proxy_web_ui_legacy(
         request=request,
         upstream_base=settings.web_ui_upstream,
         strip_prefix="/web-ui-api",
+        extra_headers=_user_id_headers(_user),
     )
 
 

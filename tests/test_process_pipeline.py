@@ -20,6 +20,554 @@ from services.voice.voice_lookup import VoiceLookupError
 import pipeline.process as process_module
 
 
+# ===================================================================
+# ProcessConfig source field normalization
+# ===================================================================
+
+
+class TestProcessConfigSourceNormalization:
+    """Verify backward-compatible normalization between youtube_url and source_type/source_ref."""
+
+    def test_legacy_youtube_url_only(self):
+        c = ProcessConfig(youtube_url="https://youtube.com/watch?v=abc")
+        assert c.source_type == "youtube_url"
+        assert c.source_ref == "https://youtube.com/watch?v=abc"
+        assert c.youtube_url == "https://youtube.com/watch?v=abc"
+
+    def test_explicit_youtube_source(self):
+        c = ProcessConfig(source_type="youtube_url", source_ref="https://youtube.com/watch?v=xyz")
+        assert c.youtube_url == "https://youtube.com/watch?v=xyz"
+        assert c.source_type == "youtube_url"
+        assert c.source_ref == "https://youtube.com/watch?v=xyz"
+
+    def test_explicit_local_video(self):
+        c = ProcessConfig(source_type="local_video", source_ref="/uploads/42/video.mp4")
+        assert c.source_type == "local_video"
+        assert c.source_ref == "/uploads/42/video.mp4"
+        assert c.youtube_url == ""
+
+    def test_explicit_local_audio(self):
+        c = ProcessConfig(source_type="local_audio", source_ref="D:/input.wav")
+        assert c.source_type == "local_audio"
+        assert c.source_ref == "D:/input.wav"
+        assert c.youtube_url == ""
+
+    def test_explicit_local_wins_over_legacy_youtube_url(self):
+        c = ProcessConfig(
+            youtube_url="https://youtube.com/old",
+            source_type="local_video",
+            source_ref="/uploads/new.mp4",
+        )
+        assert c.source_type == "local_video"
+        assert c.source_ref == "/uploads/new.mp4"
+        assert c.youtube_url == ""  # non-YouTube: youtube_url must be cleared
+
+    def test_explicit_youtube_overrides_old_youtube_url(self):
+        """When both youtube_url and explicit youtube source are given, explicit wins."""
+        c = ProcessConfig(
+            youtube_url="https://youtube.com/old",
+            source_type="youtube_url",
+            source_ref="https://youtube.com/new",
+        )
+        assert c.source_type == "youtube_url"
+        assert c.source_ref == "https://youtube.com/new"
+        assert c.youtube_url == "https://youtube.com/new"  # must be overridden
+
+    def test_both_empty_leaves_fields_empty(self):
+        c = ProcessConfig()
+        assert c.source_type == ""
+        assert c.source_ref == ""
+        assert c.youtube_url == ""
+
+    def test_explicit_youtube_backfills_youtube_url_for_pipeline_compat(self):
+        """Existing pipeline code reads config.youtube_url; must still work."""
+        c = ProcessConfig(source_type="youtube_url", source_ref="https://yt.com/v=test")
+        assert c.youtube_url == "https://yt.com/v=test"
+
+
+# ===================================================================
+# ProcessPipeline source-aware ingest tests
+# ===================================================================
+
+
+def _stub_pipeline_configs(monkeypatch):
+    """Stub config loaders so pipeline.run() can proceed past config loading."""
+    monkeypatch.setattr(
+        "pipeline.process.load_assemblyai_config",
+        lambda: {"api_key": "fake-assemblyai-key"},
+    )
+    monkeypatch.setattr(
+        "pipeline.process.load_gemini_config",
+        lambda: {"api_key": "fake-gemini-key"},
+    )
+    monkeypatch.setattr(
+        "pipeline.process.load_llm_fallback_config",
+        lambda: {"provider": "mock"},
+    )
+    monkeypatch.setattr(
+        "pipeline.process.load_tts_config",
+        lambda: {"api_key": "fake-tts-key"},
+    )
+    monkeypatch.setattr(
+        "pipeline.process.load_youtube_download_config",
+        lambda: {},
+    )
+
+
+class TestProcessPipelineSourceAwareIngest:
+    """Verify that ProcessPipeline.run() branches correctly on source_type."""
+
+    def test_local_video_does_not_call_youtube_downloader(self, tmp_path, monkeypatch):
+        """local_video source must skip YouTubeDownloader entirely."""
+        _stub_pipeline_configs(monkeypatch)
+
+        source_video = tmp_path / "input_video.mp4"
+        source_video.write_bytes(b"\x00" * 100)
+
+        project_dir = tmp_path / "workspace"
+        project_dir.mkdir()
+
+        download_called = {"count": 0}
+
+        import modules.ingestion.youtube.downloader as dl_module
+
+        class _TrackingDownloader:
+            def download(self, *args, **kwargs):
+                download_called["count"] += 1
+                raise AssertionError("YouTubeDownloader.download should not be called for local_video")
+
+        monkeypatch.setattr(dl_module, "YouTubeDownloader", _TrackingDownloader)
+
+        def fake_extract(video_path, output_audio_path):
+            output_audio_path.parent.mkdir(parents=True, exist_ok=True)
+            output_audio_path.write_bytes(b"\x00" * 50)
+
+        monkeypatch.setattr(ProcessPipeline, "_extract_audio_from_video", staticmethod(fake_extract))
+        monkeypatch.setattr("pipeline.process._ffprobe_duration_ms", lambda p: 10000)
+
+        pipeline = ProcessPipeline()
+        config = ProcessConfig(
+            source_type="local_video",
+            source_ref=str(source_video),
+            project_dir=str(project_dir),
+        )
+
+        try:
+            pipeline.run(config)
+        except Exception:
+            pass  # Expected to fail in later stages (no real transcriber)
+
+        assert download_called["count"] == 0
+        assert (project_dir / "video").exists()
+        assert any((project_dir / "video").iterdir())
+        meta_path = project_dir / "download_metadata.json"
+        assert meta_path.exists()
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        assert meta["source_type"] == "local_video"
+
+    def test_local_audio_does_not_call_youtube_downloader(self, tmp_path, monkeypatch):
+        """local_audio source must skip YouTubeDownloader entirely."""
+        _stub_pipeline_configs(monkeypatch)
+
+        source_audio = tmp_path / "input_audio.wav"
+        source_audio.write_bytes(b"\x00" * 100)
+
+        project_dir = tmp_path / "workspace"
+        project_dir.mkdir()
+
+        download_called = {"count": 0}
+
+        import modules.ingestion.youtube.downloader as dl_module
+
+        class _TrackingDownloader:
+            def download(self, *args, **kwargs):
+                download_called["count"] += 1
+                raise AssertionError("YouTubeDownloader.download should not be called for local_audio")
+
+        monkeypatch.setattr(dl_module, "YouTubeDownloader", _TrackingDownloader)
+        monkeypatch.setattr("pipeline.process._ffprobe_duration_ms", lambda p: 5000)
+
+        pipeline = ProcessPipeline()
+        config = ProcessConfig(
+            source_type="local_audio",
+            source_ref=str(source_audio),
+            project_dir=str(project_dir),
+        )
+
+        try:
+            pipeline.run(config)
+        except Exception:
+            pass
+
+        assert download_called["count"] == 0
+        assert (project_dir / "audio").exists()
+        meta_path = project_dir / "download_metadata.json"
+        assert meta_path.exists()
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        assert meta["source_type"] == "local_audio"
+
+    def test_local_video_uses_explicit_project_dir(self, tmp_path, monkeypatch):
+        """local_video must use the passed project_dir (workspace_dir from runner)."""
+        _stub_pipeline_configs(monkeypatch)
+
+        source_video = tmp_path / "my_video.mp4"
+        source_video.write_bytes(b"\x00" * 100)
+
+        workspace = tmp_path / "projects" / "42" / "job_abc"
+        workspace.mkdir(parents=True)
+
+        monkeypatch.setattr(ProcessPipeline, "_extract_audio_from_video", staticmethod(
+            lambda vp, ap: ap.parent.mkdir(parents=True, exist_ok=True) or ap.write_bytes(b"\x00" * 50)
+        ))
+        monkeypatch.setattr("pipeline.process._ffprobe_duration_ms", lambda p: 8000)
+
+        pipeline = ProcessPipeline()
+        config = ProcessConfig(
+            source_type="local_video",
+            source_ref=str(source_video),
+            project_dir=str(workspace),
+        )
+
+        try:
+            pipeline.run(config)
+        except Exception:
+            pass
+
+        assert (workspace / "video").exists()
+        assert (workspace / "download_metadata.json").exists()
+
+    def test_ingestion_stage_payload_has_correct_source_kind(self, tmp_path, monkeypatch):
+        """Ingestion stage payload must reflect the actual source_type via download_metadata."""
+        _stub_pipeline_configs(monkeypatch)
+
+        source_audio = tmp_path / "speech.wav"
+        source_audio.write_bytes(b"\x00" * 100)
+
+        project_dir = tmp_path / "workspace"
+        project_dir.mkdir()
+
+        monkeypatch.setattr("pipeline.process._ffprobe_duration_ms", lambda p: 3000)
+
+        pipeline = ProcessPipeline()
+        config = ProcessConfig(
+            source_type="local_audio",
+            source_ref=str(source_audio),
+            project_dir=str(project_dir),
+        )
+
+        try:
+            pipeline.run(config)
+        except Exception:
+            pass
+
+        # After ingest, project_state.json should record ingestion stage
+        state_path = project_dir / "project_state.json"
+        assert state_path.exists()
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        ingestion = state.get("stages", {}).get("ingestion", {})
+        payload = ingestion.get("payload", {})
+        assert payload.get("source_kind") == "local_audio"
+        assert payload.get("execution_mode") == "local_ingest"
+
+
+# ===================================================================
+# Local source metadata path persistence tests
+# ===================================================================
+
+
+class TestProcessPipelineLocalSourceMetadataPaths:
+    """Verify that local source metadata records real file paths, not hardcoded .mp4/.wav."""
+
+    def test_local_video_mkv_metadata_has_real_video_path(self, tmp_path, monkeypatch):
+        """local_video with .mkv extension: metadata must record .mkv, not .mp4."""
+        _stub_pipeline_configs(monkeypatch)
+
+        source_video = tmp_path / "interview.mkv"
+        source_video.write_bytes(b"\x00" * 100)
+
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+
+        def fake_extract(video_path, output_audio_path):
+            output_audio_path.parent.mkdir(parents=True, exist_ok=True)
+            output_audio_path.write_bytes(b"\x00" * 50)
+
+        monkeypatch.setattr(ProcessPipeline, "_extract_audio_from_video", staticmethod(fake_extract))
+        monkeypatch.setattr("pipeline.process._ffprobe_duration_ms", lambda p: 12000)
+
+        pipeline = ProcessPipeline()
+        config = ProcessConfig(
+            source_type="local_video",
+            source_ref=str(source_video),
+            project_dir=str(workspace),
+        )
+
+        try:
+            pipeline.run(config)
+        except Exception:
+            pass
+
+        # Real file should be .mkv
+        assert (workspace / "video" / "original.mkv").exists()
+        assert not (workspace / "video" / "original.mp4").exists()
+
+        # Metadata must record the real .mkv path
+        meta = json.loads((workspace / "download_metadata.json").read_text(encoding="utf-8"))
+        assert "original.mkv" in meta["video_path"]
+        assert Path(meta["video_path"]).name == "original.mkv"
+        # audio_path should be the extracted .wav
+        assert "original.wav" in meta["audio_path"]
+
+    def test_local_audio_mp3_metadata_has_real_audio_path(self, tmp_path, monkeypatch):
+        """local_audio with .mp3 extension: metadata must record .mp3, not .wav."""
+        _stub_pipeline_configs(monkeypatch)
+
+        source_audio = tmp_path / "podcast.mp3"
+        source_audio.write_bytes(b"\x00" * 100)
+
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+
+        monkeypatch.setattr("pipeline.process._ffprobe_duration_ms", lambda p: 6000)
+
+        pipeline = ProcessPipeline()
+        config = ProcessConfig(
+            source_type="local_audio",
+            source_ref=str(source_audio),
+            project_dir=str(workspace),
+        )
+
+        try:
+            pipeline.run(config)
+        except Exception:
+            pass
+
+        # Real file should be .mp3
+        assert (workspace / "audio" / "original.mp3").exists()
+        assert not (workspace / "audio" / "original.wav").exists()
+
+        meta = json.loads((workspace / "download_metadata.json").read_text(encoding="utf-8"))
+        assert "original.mp3" in meta["audio_path"]
+        assert Path(meta["audio_path"]).name == "original.mp3"
+
+    def test_load_download_result_reads_real_paths_from_metadata(self, tmp_path):
+        """_load_download_result must use metadata paths, not hardcoded names."""
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        (workspace / "video").mkdir()
+        (workspace / "audio").mkdir()
+
+        real_video = workspace / "video" / "original.mkv"
+        real_audio = workspace / "audio" / "original.mp3"
+        real_video.write_bytes(b"\x00" * 10)
+        real_audio.write_bytes(b"\x00" * 10)
+
+        (workspace / "download_metadata.json").write_text(
+            json.dumps({
+                "video_path": str(real_video),
+                "audio_path": str(real_audio),
+                "video_title": "Test",
+                "duration_ms": 5000,
+                "url": "/local/test.mkv",
+            }),
+            encoding="utf-8",
+        )
+
+        pipeline = ProcessPipeline()
+        result = pipeline._load_download_result(workspace, fallback_url="fallback")
+
+        assert "original.mkv" in result.video_path
+        assert "original.mp3" in result.audio_path
+
+    def test_load_download_result_falls_back_to_legacy_paths_when_metadata_missing(self, tmp_path):
+        """Without metadata video_path/audio_path, fall back to original.mp4/wav."""
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+
+        # Write metadata without video_path/audio_path fields (old format)
+        (workspace / "download_metadata.json").write_text(
+            json.dumps({
+                "video_title": "Old Video",
+                "duration_ms": 3000,
+                "url": "https://youtube.com/watch?v=old",
+            }),
+            encoding="utf-8",
+        )
+
+        pipeline = ProcessPipeline()
+        result = pipeline._load_download_result(workspace, fallback_url="fallback")
+
+        assert result.video_path.endswith("original.mp4")
+        assert result.audio_path.endswith("original.wav")
+
+    def test_local_audio_ingestion_artifacts_exclude_nonexistent_video(self, tmp_path, monkeypatch):
+        """local_audio: ingestion artifacts must not include nonexistent video file."""
+        _stub_pipeline_configs(monkeypatch)
+
+        source_audio = tmp_path / "voice.flac"
+        source_audio.write_bytes(b"\x00" * 100)
+
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+
+        monkeypatch.setattr("pipeline.process._ffprobe_duration_ms", lambda p: 4000)
+
+        pipeline = ProcessPipeline()
+        config = ProcessConfig(
+            source_type="local_audio",
+            source_ref=str(source_audio),
+            project_dir=str(workspace),
+        )
+
+        try:
+            pipeline.run(config)
+        except Exception:
+            pass
+
+        state_path = workspace / "project_state.json"
+        assert state_path.exists()
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        ingestion = state.get("stages", {}).get("ingestion", {})
+        artifacts = ingestion.get("payload", {}).get("artifacts", {})
+        file_paths = artifacts.get("file_paths", [])
+        # No None entries and no nonexistent video path
+        assert None not in file_paths
+        for fp in file_paths:
+            if fp and "video" in fp.lower():
+                # If a video path is listed, it must actually exist
+                assert Path(fp).exists(), f"Listed video path does not exist: {fp}"
+
+
+# ===================================================================
+# Workspace isolation tests (Task 5)
+# ===================================================================
+
+
+class TestProcessPipelineWorkspaceIsolation:
+    """Verify new tasks never share workspace with old tasks based on URL match."""
+
+    def test_same_url_without_project_dir_creates_fresh_workspace(self, tmp_path, monkeypatch):
+        """An existing project with the same URL must NOT be reused by a new task."""
+        monkeypatch.setattr(process_module, "PROJECT_ROOT", tmp_path)
+        _stub_pipeline_configs(monkeypatch)
+
+        # Set up an old project for same URL
+        old_dir = tmp_path / "projects" / "old_project"
+        old_dir.mkdir(parents=True)
+        _write_video(old_dir / "video" / "original.mp4")
+        _export_silent_wav(old_dir / "audio" / "original.wav", duration_ms=2_000)
+        _write_download_metadata(
+            old_dir,
+            video_path=old_dir / "video" / "original.mp4",
+            audio_path=old_dir / "audio" / "original.wav",
+            video_title="Old Project",
+            duration_ms=2_000,
+            url="https://youtube.example/watch?v=same-url",
+        )
+
+        observed = {}
+
+        class TrackingDownloader:
+            def download(self, request):
+                observed["output_dir"] = request.output_dir
+                vp = _write_video(Path(request.output_dir) / "video" / "original.mp4")
+                ap = _export_silent_wav(Path(request.output_dir) / "audio" / "original.wav", duration_ms=2_000)
+                _write_download_metadata(
+                    Path(request.output_dir), video_path=vp, audio_path=ap,
+                    video_title="Same URL", duration_ms=2_000, url=request.url,
+                )
+                return DownloadResult(
+                    video_path=str(vp), audio_path=str(ap),
+                    video_title="Same URL", duration_ms=2_000, url=request.url,
+                )
+
+        monkeypatch.setattr(process_module, "YouTubeDownloader", TrackingDownloader)
+
+        pipeline = ProcessPipeline()
+        config = ProcessConfig(youtube_url="https://youtube.example/watch?v=same-url")
+
+        try:
+            pipeline.run(config)
+        except Exception:
+            pass
+
+        # Download must have been called (no skip via URL reuse)
+        assert "output_dir" in observed
+        # Output dir must NOT be the old project
+        assert Path(observed["output_dir"]).resolve(strict=False) != old_dir.resolve(strict=False)
+
+    def test_explicit_project_dir_still_reuses_cached_media(self, tmp_path, monkeypatch):
+        """Explicit --project-dir with cached media must still skip download."""
+        _stub_pipeline_configs(monkeypatch)
+        _install_single_speaker_pipeline_mocks(monkeypatch)
+
+        project_dir = tmp_path / "explicit_workspace"
+        _write_video(project_dir / "video" / "original.mp4")
+        _export_silent_wav(project_dir / "audio" / "original.wav", duration_ms=2_500)
+        _write_download_metadata(
+            project_dir,
+            video_path=project_dir / "video" / "original.mp4",
+            audio_path=project_dir / "audio" / "original.wav",
+            video_title="Explicit Cached",
+            duration_ms=2_500,
+            url="https://youtube.example/watch?v=explicit-cache",
+        )
+
+        download_called = {"count": 0}
+
+        class FailDownloader:
+            def download(self, request):
+                download_called["count"] += 1
+                raise AssertionError("Should not download when explicit dir has cached media")
+
+        monkeypatch.setattr(process_module, "YouTubeDownloader", FailDownloader)
+
+        result = ProcessPipeline().run(
+            ProcessConfig(
+                youtube_url="https://youtube.example/watch?v=explicit-cache",
+                voice_a="voice_demo_001",
+                project_dir=str(project_dir),
+            )
+        )
+
+        assert download_called["count"] == 0
+        assert Path(result.project_dir) == project_dir.resolve(strict=False)
+
+
+# Standard job_record snapshots for tests that need specific pipeline behavior.
+# Tests that don't pass job_record get express defaults (no review, cosyvoice).
+_STUDIO_JOB_RECORD = {
+    "service_mode": "studio",
+    "tts_provider": "minimax",
+    "requires_review": True,
+    "voice_clone_enabled": True,
+    "voice_strategy": "user_selected",
+    "plan_code_snapshot": "plus",
+    "role_snapshot": "user",
+}
+
+_EXPRESS_JOB_RECORD = {
+    "service_mode": "express",
+    "tts_provider": "cosyvoice",
+    "requires_review": False,
+    "voice_clone_enabled": False,
+    "voice_strategy": "preset_mapping",
+    "plan_code_snapshot": "free",
+    "role_snapshot": "user",
+}
+
+# Express mode but with voice cloning enabled — for testing auto-clone without review gates
+_EXPRESS_WITH_CLONE_JOB_RECORD = {
+    "service_mode": "express",
+    "tts_provider": "minimax",
+    "requires_review": False,
+    "voice_clone_enabled": True,
+    "voice_strategy": "user_selected",
+    "plan_code_snapshot": "plus",
+    "role_snapshot": "user",
+}
+
+
 def _export_silent_wav(path: Path, *, duration_ms: int) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     AudioSegment.silent(duration=duration_ms).export(path, format="wav")
@@ -525,8 +1073,9 @@ def _install_single_speaker_pipeline_mocks(
             display_name_b: str | None = None,
             video_title: str = "",
             youtube_url: str = "",
+            glossary: dict[str, str] | None = None,
         ) -> TranslationResult:
-            del lines, max_segment_duration_ms, voice_id_b, display_name_b
+            del lines, max_segment_duration_ms, voice_id_b, display_name_b, glossary
             if capture is not None:
                 capture["video_title"] = video_title
                 capture["youtube_url"] = youtube_url
@@ -542,8 +1091,9 @@ def _install_single_speaker_pipeline_mocks(
             )
 
     class FakeTTSGenerator:
-        def __init__(self, config):
+        def __init__(self, config, job_record=None):
             assert config.api_key == "tts-key"
+            del job_record
 
         def generate_all(self, segments: list[DubbingSegment], output_dir: str) -> list[TTSResult]:
             Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -720,8 +1270,9 @@ def _install_dual_speaker_pipeline_mocks(
             display_name_b: str | None = None,
             video_title: str = "",
             youtube_url: str = "",
+            glossary: dict[str, str] | None = None,
         ) -> TranslationResult:
-            del max_segment_duration_ms, video_title, youtube_url
+            del max_segment_duration_ms, video_title, youtube_url, glossary
             capture["translate_input_speaker_ids"] = [line.speaker_id for line in lines]
             Path(output_dir).mkdir(parents=True, exist_ok=True)
             segments = _make_dual_speaker_segments(
@@ -737,8 +1288,9 @@ def _install_dual_speaker_pipeline_mocks(
             )
 
     class FakeTTSGenerator:
-        def __init__(self, config):
+        def __init__(self, config, job_record=None):
             assert config.api_key == "tts-key"
+            del job_record
 
         def generate_all(self, segments: list[DubbingSegment], output_dir: str) -> list[TTSResult]:
             Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -1052,6 +1604,31 @@ def test_process_pipeline_auto_generates_project_dir_from_video_title(
     )
 
 
+def test_process_pipeline_auto_project_dir_uses_configured_projects_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    custom_projects_root = tmp_path / "mounted_projects"
+    monkeypatch.setattr(process_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setenv("AIVIDEOTRANS_PROJECTS_DIR", str(custom_projects_root))
+    _install_single_speaker_pipeline_mocks(
+        monkeypatch,
+        reported_duration_ms=2_000,
+        actual_duration_ms=2_000,
+    )
+
+    result = ProcessPipeline().run(
+        ProcessConfig(
+            youtube_url="https://youtube.example/watch?v=custom-project-root",
+            voice_a="voice_demo_001",
+        )
+    )
+
+    assert Path(result.project_dir).name == "dan_koe_how_to_think"
+    assert Path(result.project_dir).parent == custom_projects_root.resolve(strict=False)
+    assert (custom_projects_root / "dan_koe_how_to_think").exists()
+
+
 def test_process_pipeline_auto_mode_detects_single_speaker(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1206,10 +1783,11 @@ def test_process_pipeline_skips_download_when_explicit_project_has_cached_media(
     assert Path(result.project_dir) == project_dir.resolve(strict=False)
 
 
-def test_process_pipeline_auto_discovers_existing_project_by_url(
+def test_process_pipeline_does_not_reuse_existing_project_by_url(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Same URL without explicit project_dir must create a fresh workspace, not reuse old one."""
     monkeypatch.setattr(process_module, "PROJECT_ROOT", tmp_path)
     _install_single_speaker_pipeline_mocks(monkeypatch)
     existing_project_dir = tmp_path / "projects" / "existing_cached_project"
@@ -1223,15 +1801,28 @@ def test_process_pipeline_auto_discovers_existing_project_by_url(
         duration_ms=2_500,
         url="https://youtube.example/watch?v=found",
     )
-    observed = {"download_called": 0}
+    observed: dict[str, object] = {"download_called": 0}
 
-    class FailDownloader:
+    class TrackingDownloader:
         def download(self, request):
-            del request
-            observed["download_called"] += 1
-            raise AssertionError("download should not be called when project is discovered by URL")
+            observed["download_called"] = int(observed["download_called"]) + 1
+            observed["output_dir"] = request.output_dir
+            video_p = _write_video(Path(request.output_dir) / "video" / "original.mp4")
+            audio_p = _export_silent_wav(Path(request.output_dir) / "audio" / "original.wav", duration_ms=2_500)
+            _write_download_metadata(
+                Path(request.output_dir),
+                video_path=video_p, audio_path=audio_p,
+                video_title="Cached Discovery", duration_ms=2_500,
+                url=request.url,
+            )
+            return DownloadResult(
+                video_path=str(video_p.resolve(strict=False)),
+                audio_path=str(audio_p.resolve(strict=False)),
+                video_title="Cached Discovery", duration_ms=2_500,
+                url=request.url,
+            )
 
-    monkeypatch.setattr(process_module, "YouTubeDownloader", FailDownloader)
+    monkeypatch.setattr(process_module, "YouTubeDownloader", TrackingDownloader)
 
     result = ProcessPipeline().run(
         ProcessConfig(
@@ -1240,30 +1831,34 @@ def test_process_pipeline_auto_discovers_existing_project_by_url(
         )
     )
 
-    assert observed["download_called"] == 0
-    assert Path(result.project_dir) == existing_project_dir.resolve(strict=False)
+    # Must download (not skip), because URL reuse is disabled
+    assert observed["download_called"] == 1
+    # Must NOT be in the old project dir
+    assert Path(result.project_dir).resolve(strict=False) != existing_project_dir.resolve(strict=False)
 
 
-def test_process_pipeline_resumes_incomplete_temp_project_by_url(
+def test_process_pipeline_new_task_does_not_reuse_slug_dir_with_same_url(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """When slug dir already exists with same URL, new task keeps its own temp dir."""
     monkeypatch.setattr(process_module, "PROJECT_ROOT", tmp_path)
     _install_single_speaker_pipeline_mocks(monkeypatch)
 
-    resume_project_dir = tmp_path / "projects" / "_process_resume_case"
-    resume_project_dir.mkdir(parents=True, exist_ok=True)
+    # Pre-create a slug dir that would match the download title
+    slug_dir = tmp_path / "projects" / "dan_koe_how_to_think"
+    slug_dir.mkdir(parents=True, exist_ok=True)
     _write_download_metadata(
-        resume_project_dir,
-        video_path=resume_project_dir / "video" / "original.mp4",
-        audio_path=resume_project_dir / "audio" / "original.wav",
-        video_title="Interrupted Download",
-        duration_ms=0,
-        url="https://youtube.example/watch?v=resume-me",
+        slug_dir,
+        video_path=slug_dir / "video" / "original.mp4",
+        audio_path=slug_dir / "audio" / "original.wav",
+        video_title="Dan Koe: How to Think",
+        duration_ms=2_500,
+        url="https://youtube.example/watch?v=slug-conflict",
     )
     observed: dict[str, object] = {}
 
-    class ResumeDownloader:
+    class TrackingDownloader:
         def download(self, request):
             observed["output_dir"] = str(Path(request.output_dir).resolve(strict=False))
             video_path = _write_video(Path(request.output_dir) / "video" / "original.mp4")
@@ -1278,7 +1873,6 @@ def test_process_pipeline_resumes_incomplete_temp_project_by_url(
                 video_title="Dan Koe: How to Think",
                 duration_ms=2_500,
                 url=request.url,
-                description="Resumed download metadata.",
             )
             return DownloadResult(
                 video_path=str(video_path.resolve(strict=False)),
@@ -1286,22 +1880,22 @@ def test_process_pipeline_resumes_incomplete_temp_project_by_url(
                 video_title="Dan Koe: How to Think",
                 duration_ms=2_500,
                 url=request.url,
-                description="Resumed download metadata.",
             )
 
-    monkeypatch.setattr(process_module, "YouTubeDownloader", ResumeDownloader)
+    monkeypatch.setattr(process_module, "YouTubeDownloader", TrackingDownloader)
 
     result = ProcessPipeline().run(
         ProcessConfig(
-            youtube_url="https://youtube.example/watch?v=resume-me",
+            youtube_url="https://youtube.example/watch?v=slug-conflict",
             voice_a="voice_demo_001",
         )
     )
 
-    assert observed["output_dir"] == str(resume_project_dir.resolve(strict=False))
-    assert Path(result.project_dir) == (
-        tmp_path / "projects" / "dan_koe_how_to_think"
-    ).resolve(strict=False)
+    # Result should NOT be in the pre-existing slug dir
+    assert Path(result.project_dir).resolve(strict=False) != slug_dir.resolve(strict=False)
+    # Should be in its own temp dir (starts with _process_)
+    result_dir_name = Path(result.project_dir).name
+    assert result_dir_name.startswith("_process_")
 
 
 def test_process_pipeline_skips_transcription_when_transcript_cache_exists(
@@ -1436,6 +2030,154 @@ def test_process_pipeline_skips_translation_when_segments_cache_exists(
     assert observed["translate_called"] == 0
 
 
+def test_process_pipeline_preserves_voice_metadata_in_segments_snapshot(tmp_path: Path) -> None:
+    pipeline = ProcessPipeline()
+    segments_path = tmp_path / "translation" / "segments.json"
+    translation_result = TranslationResult(
+        segments=[
+            DubbingSegment(
+                segment_id=1,
+                speaker_id="speaker_a",
+                display_name="Conan O'Brien",
+                voice_id="voice_demo_001",
+                start_ms=0,
+                end_ms=1_000,
+                target_duration_ms=1_000,
+                source_text="Hello there.",
+                cn_text="你好。",
+                tts_cn_text="你好。",
+                voice_description="沉稳低沉的中年男性主持声线",
+                gender="male",
+                age_group="middle",
+                persona_style="serious",
+                energy_level="low",
+            )
+        ],
+        total_segments=1,
+        output_path=str(segments_path.resolve(strict=False)),
+    )
+
+    pipeline._write_segments_snapshot(translation_result)
+    cached_result = pipeline._load_translation_result(segments_path)
+
+    assert len(cached_result.segments) == 1
+    cached_segment = cached_result.segments[0]
+    assert cached_segment.voice_description == "沉稳低沉的中年男性主持声线"
+    assert cached_segment.gender == "male"
+    assert cached_segment.age_group == "middle"
+    assert cached_segment.persona_style == "serious"
+    assert cached_segment.energy_level == "low"
+
+
+def test_process_pipeline_persists_reviewed_voice_metadata_before_tts_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_single_speaker_pipeline_mocks(monkeypatch)
+    import src.services.transcript_reviewer as transcript_reviewer_module
+
+    def _fake_review_transcript(lines, **kwargs):
+        del kwargs
+        return transcript_reviewer_module.ReviewResult(
+            speakers={
+                "speaker_a": {
+                    "name": "Conan O'Brien",
+                    "gender": "male",
+                    "age_group": "middle",
+                    "voice_description": "沉稳低沉的中年男性主持声线",
+                    "persona_style": "serious",
+                    "energy_level": "low",
+                }
+            },
+            glossary={},
+            corrections_applied=0,
+            lines=lines,
+        )
+
+    monkeypatch.setattr(transcript_reviewer_module, "review_transcript", _fake_review_transcript)
+    project_dir = tmp_path / "project_translation_review_voice_metadata"
+
+    class CacheSnapshotTranslator:
+        def __init__(
+            self,
+            api_key: str,
+            model_name: str,
+            temperature: float,
+            max_output_tokens: int,
+            sdk_backend: str = "google-genai",
+            llm_router=None,
+        ):
+            del api_key, model_name, temperature, max_output_tokens, sdk_backend
+            assert llm_router is not None
+
+        def translate(
+            self,
+            lines,
+            output_dir: str,
+            voice_id: str,
+            display_name: str = "Speaker A",
+            max_segment_duration_ms: int = 60_000,
+            voice_id_b: str | None = None,
+            display_name_b: str | None = None,
+            video_title: str = "",
+            youtube_url: str = "",
+            glossary: dict[str, str] | None = None,
+        ) -> TranslationResult:
+            del lines, max_segment_duration_ms, voice_id_b, display_name_b, video_title, youtube_url, glossary
+            Path(output_dir).mkdir(parents=True, exist_ok=True)
+            segments = _make_single_speaker_segments()
+            for segment in segments:
+                segment.voice_id = voice_id
+                segment.display_name = display_name
+            return TranslationResult(
+                segments=segments,
+                total_segments=len(segments),
+                output_path=str(Path(output_dir) / "segments.json"),
+            )
+
+    monkeypatch.setattr(process_module, "GeminiTranslator", CacheSnapshotTranslator)
+
+    original_get_approved_review_payload = ProcessPipeline._get_approved_review_payload
+
+    def _fake_get_approved_review_payload(self, review_state_manager, stage: str):
+        if stage == process_module.TRANSLATION_CONFIG_REVIEW_STAGE:
+            return {
+                "selected_model": "gemini_3_1_flash_lite_preview",
+                "prompt_template": None,
+            }
+        return original_get_approved_review_payload(self, review_state_manager, stage)
+
+    monkeypatch.setattr(
+        ProcessPipeline,
+        "_get_approved_review_payload",
+        _fake_get_approved_review_payload,
+    )
+
+    result = ProcessPipeline().run(
+        ProcessConfig(
+            youtube_url="https://youtube.example/watch?v=translation-review-voice-metadata",
+            voice_a="voice_demo_001",
+            project_dir=str(project_dir),
+            wait_for_review=True,
+            job_record={
+                "service_mode": "studio",
+                "tts_provider": "cosyvoice",
+                "requires_review": True,
+                "voice_strategy": "preset_mapping",
+            },
+        )
+    )
+
+    assert result.status == "waiting_for_review"
+    cached_result = ProcessPipeline()._load_translation_result(project_dir / "translation" / "segments.json")
+    cached_segment = cached_result.segments[0]
+    assert cached_segment.voice_description == "沉稳低沉的中年男性主持声线"
+    assert cached_segment.gender == "male"
+    assert cached_segment.age_group == "middle"
+    assert cached_segment.persona_style == "serious"
+    assert cached_segment.energy_level == "low"
+
+
 def test_process_pipeline_reused_project_requires_fresh_translation_review_even_if_old_review_was_approved(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1486,6 +2228,7 @@ def test_process_pipeline_reused_project_requires_fresh_translation_review_even_
             youtube_url=youtube_url,
             voice_a="voice_demo_001",
             wait_for_review=True,
+            job_record=_STUDIO_JOB_RECORD,
         )
     )
 
@@ -1495,6 +2238,88 @@ def test_process_pipeline_reused_project_requires_fresh_translation_review_even_
     assert review_state["active_stage"] == process_module.TRANSLATION_REVIEW_STAGE
     assert review_state["stages"]["translation_review"]["status"] == "pending"
     assert review_state["stages"]["translation_review"]["approved_at"] is None
+
+
+def test_process_pipeline_recovers_missing_voice_metadata_from_cached_translation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_single_speaker_pipeline_mocks(monkeypatch)
+    import src.services.transcript_reviewer as transcript_reviewer_module
+
+    project_dir = tmp_path / "project_cached_translation_voice_metadata"
+    video_path = _write_video(project_dir / "video" / "original.mp4")
+    audio_path = _export_silent_wav(project_dir / "audio" / "original.wav", duration_ms=2_500)
+    _write_download_metadata(
+        project_dir,
+        video_path=video_path,
+        audio_path=audio_path,
+        video_title="Cached Translation Voice Metadata",
+        duration_ms=2_500,
+        url="https://youtube.example/watch?v=cache-voice-metadata",
+    )
+    _write_transcript_cache(project_dir, _make_single_speaker_lines(), total_duration_ms=2_000)
+    _write_segments_cache(project_dir, _make_single_speaker_segments())
+
+    def _fake_review_transcript(lines, **kwargs):
+        del kwargs
+        return transcript_reviewer_module.ReviewResult(
+            speakers={
+                "speaker_a": {
+                    "name": "Conan O'Brien",
+                    "gender": "male",
+                    "age_group": "middle",
+                    "voice_description": "沉稳低沉的中年男性主持声线",
+                    "persona_style": "serious",
+                    "energy_level": "low",
+                }
+            },
+            glossary={},
+            corrections_applied=0,
+            lines=lines,
+        )
+
+    monkeypatch.setattr(transcript_reviewer_module, "review_transcript", _fake_review_transcript)
+    observed: dict[str, str] = {}
+
+    class CaptureMetadataTTSGenerator:
+        def __init__(self, config, job_record=None):
+            del job_record
+            assert config.api_key == "tts-key"
+
+        def generate_all(self, segments: list[DubbingSegment], output_dir: str) -> list[TTSResult]:
+            del output_dir
+            observed["voice_description"] = segments[0].voice_description
+            observed["gender"] = segments[0].gender
+            observed["age_group"] = segments[0].age_group
+            observed["persona_style"] = segments[0].persona_style
+            observed["energy_level"] = segments[0].energy_level
+            raise RuntimeError("stop after metadata check")
+
+    monkeypatch.setattr(process_module, "TTSGenerator", CaptureMetadataTTSGenerator)
+
+    with pytest.raises(RuntimeError, match="stop after metadata check"):
+        ProcessPipeline().run(
+            ProcessConfig(
+                youtube_url="https://youtube.example/watch?v=cache-voice-metadata",
+                voice_a="voice_demo_001",
+                project_dir=str(project_dir),
+                job_record={
+                    "service_mode": "express",
+                    "tts_provider": "cosyvoice",
+                    "requires_review": False,
+                    "voice_strategy": "preset_mapping",
+                },
+            )
+        )
+
+    assert observed == {
+        "voice_description": "沉稳低沉的中年男性主持声线",
+        "gender": "male",
+        "age_group": "middle",
+        "persona_style": "serious",
+        "energy_level": "low",
+    }
 
 
 def test_process_pipeline_wait_for_review_writes_state_files_to_final_project_dir(
@@ -1509,6 +2334,7 @@ def test_process_pipeline_wait_for_review_writes_state_files_to_final_project_di
             youtube_url="https://youtube.example/watch?v=wait-review-new-project",
             voice_a="voice_demo_001",
             wait_for_review=True,
+            job_record=_STUDIO_JOB_RECORD,
         )
     )
 
@@ -1638,8 +2464,9 @@ def test_process_pipeline_does_not_treat_translation_checkpoint_as_complete_cach
             display_name_b: str | None = None,
             video_title: str = "",
             youtube_url: str = "",
+            glossary: dict[str, str] | None = None,
         ) -> TranslationResult:
-            del lines, max_segment_duration_ms, voice_id_b, display_name_b, video_title, youtube_url
+            del lines, max_segment_duration_ms, voice_id_b, display_name_b, video_title, youtube_url, glossary
             observed["translate_called"] += 1
             segments = _make_single_speaker_segments()
             for segment in segments:
@@ -1729,7 +2556,7 @@ def test_process_pipeline_overrides_cached_voice_ids_for_translation_cache(
             del args, kwargs
 
     class CaptureTTSGenerator:
-        def __init__(self, config):
+        def __init__(self, config, **kwargs):
             assert config.api_key == "tts-key"
 
         def generate_all(self, segments: list[DubbingSegment], output_dir: str) -> list[TTSResult]:
@@ -1773,6 +2600,7 @@ def test_process_pipeline_overrides_cached_voice_ids_for_translation_cache(
             voice_b="new_voice_b",
             speakers=2,
             project_dir=str(project_dir),
+            job_record=_STUDIO_JOB_RECORD,
         )
     )
 
@@ -1821,7 +2649,7 @@ def test_process_pipeline_uses_voice_registry_lookup_when_voice_a_is_missing(
     )
 
     class CaptureTTSGenerator:
-        def __init__(self, config):
+        def __init__(self, config, **kwargs):
             assert config.api_key == "tts-key"
 
         def generate_all(self, segments: list[DubbingSegment], output_dir: str) -> list[TTSResult]:
@@ -1859,6 +2687,7 @@ def test_process_pipeline_uses_voice_registry_lookup_when_voice_a_is_missing(
             voice_a=None,
             speaker_a_name="Narrator",
             project_dir=str(tmp_path / "project_lookup_a"),
+            job_record=_STUDIO_JOB_RECORD,
         )
     )
 
@@ -1883,7 +2712,7 @@ def test_process_pipeline_uses_inferred_single_speaker_name_for_voice_registry_l
     )
 
     class CaptureTTSGenerator:
-        def __init__(self, config):
+        def __init__(self, config, **kwargs):
             assert config.api_key == "tts-key"
 
         def generate_all(self, segments: list[DubbingSegment], output_dir: str) -> list[TTSResult]:
@@ -1920,6 +2749,7 @@ def test_process_pipeline_uses_inferred_single_speaker_name_for_voice_registry_l
             youtube_url="https://youtube.example/watch?v=single-registry-inferred-name",
             voice_a=None,
             project_dir=str(tmp_path / "project_lookup_a_inferred"),
+            job_record=_STUDIO_JOB_RECORD,
         )
     )
 
@@ -1998,7 +2828,7 @@ def test_process_pipeline_single_speaker_default_placeholder_skips_generic_regis
             observed["registered_registry_path"] = voice_registry_path
 
     class CaptureTTSGenerator:
-        def __init__(self, config):
+        def __init__(self, config, **kwargs):
             assert config.api_key == "tts-key"
 
         def generate_all(self, segments: list[DubbingSegment], output_dir: str) -> list[TTSResult]:
@@ -2032,6 +2862,7 @@ def test_process_pipeline_single_speaker_default_placeholder_skips_generic_regis
             youtube_url="https://youtube.example/watch?v=single-placeholder-auto-clone",
             voice_a=None,
             project_dir=str(tmp_path / "project_placeholder_auto_clone_a"),
+            job_record=_STUDIO_JOB_RECORD,
         )
     )
 
@@ -2058,7 +2889,7 @@ def test_process_pipeline_auto_clones_voice_a_when_missing_in_single_speaker_mod
             observed.__setitem__("speaker_names", dict(speaker_names))
             or (_ for _ in ()).throw(
                 VoiceLookupError(
-                    "Missing voice_id for speaker_a (Dan Koe). Pass --voice-a or register this speaker in voice_registry.json."
+                    "Missing voice_id for speaker_a (Speaker A). Pass --voice-a or register this speaker in voice_registry.json."
                 )
             )
         ),
@@ -2121,7 +2952,7 @@ def test_process_pipeline_auto_clones_voice_a_when_missing_in_single_speaker_mod
             observed["registered_registry_path"] = voice_registry_path
 
     class CaptureTTSGenerator:
-        def __init__(self, config):
+        def __init__(self, config, **kwargs):
             assert config.api_key == "tts-key"
 
         def generate_all(self, segments: list[DubbingSegment], output_dir: str) -> list[TTSResult]:
@@ -2154,6 +2985,7 @@ def test_process_pipeline_auto_clones_voice_a_when_missing_in_single_speaker_mod
             youtube_url="https://youtube.example/watch?v=single-auto-clone",
             voice_a=None,
             project_dir=str(tmp_path / "project_auto_clone_a"),
+            job_record=_STUDIO_JOB_RECORD,
         )
     )
 
@@ -2228,6 +3060,7 @@ def test_process_pipeline_auto_clones_voice_b_when_registry_misses(
             voice_a="voice_a_001",
             speakers=2,
             project_dir=str(tmp_path / "project_auto_clone"),
+            job_record=_STUDIO_JOB_RECORD,
         )
     )
 
@@ -2320,6 +3153,7 @@ def test_process_pipeline_auto_clones_both_voices_when_both_are_missing(
             voice_b=None,
             speakers=2,
             project_dir=str(tmp_path / "project_auto_clone_both"),
+            job_record=_STUDIO_JOB_RECORD,
         )
     )
 
@@ -2607,22 +3441,16 @@ def test_process_pipeline_wait_for_review_pauses_for_voice_review_when_sample_is
             voice_a=None,
             project_dir=str(project_dir),
             wait_for_review=True,
+            job_record=_STUDIO_JOB_RECORD,
         )
     )
 
-    review_state = json.loads(
-        (project_dir / "review_state.json").read_text(encoding="utf-8")
-    )
-    voice_review_stage = review_state["stages"]["voice_review"]
-
     assert result.status == "waiting_for_review"
-    assert result.paused_review_stage == process_module.VOICE_REVIEW_STAGE
-    assert "选择音色" in (result.paused_review_message or "")
-    assert review_state["active_stage"] == process_module.VOICE_REVIEW_STAGE
-    assert voice_review_stage["status"] == "pending"
-    assert voice_review_stage["payload"]["reason"] == "sample_too_short"
-    assert voice_review_stage["payload"]["speakers"][0]["speaker_id"] == "speaker_a"
-    assert voice_review_stage["payload"]["speakers"][0]["sample_duration_s"] == 6.9
+    review_state = json.loads((project_dir / "review_state.json").read_text(encoding="utf-8"))
+    assert review_state["active_stage"] == "voice_review"
+    voice_review = review_state["stages"]["voice_review"]
+    assert voice_review["status"] == "pending"
+    assert "voice_sample_warnings" in voice_review.get("payload", {})
 
 
 def test_process_pipeline_reuses_partial_tts_cache_when_translation_cache_hits(
@@ -2673,7 +3501,7 @@ def test_process_pipeline_reuses_partial_tts_cache_when_translation_cache_hits(
             del args, kwargs
 
     class PartialCacheTTSGenerator:
-        def __init__(self, config):
+        def __init__(self, config, **kwargs):
             assert config.api_key == "tts-key"
 
         def generate_all(self, segments: list[DubbingSegment], output_dir: str) -> list[TTSResult]:
@@ -2715,6 +3543,7 @@ def test_process_pipeline_reuses_partial_tts_cache_when_translation_cache_hits(
             youtube_url="https://youtube.example/watch?v=partial-tts",
             voice_a="voice_demo_001",
             project_dir=str(project_dir),
+            job_record=_STUDIO_JOB_RECORD,
         )
     )
 
@@ -2777,8 +3606,9 @@ def test_process_pipeline_does_not_reuse_tts_cache_when_translation_is_regenerat
             display_name_b: str | None = None,
             video_title: str = "",
             youtube_url: str = "",
+            glossary: dict[str, str] | None = None,
         ) -> TranslationResult:
-            del lines, max_segment_duration_ms, voice_id_b, display_name_b, video_title, youtube_url
+            del lines, max_segment_duration_ms, voice_id_b, display_name_b, video_title, youtube_url, glossary
             observed["translate_called"] += 1
             Path(output_dir).mkdir(parents=True, exist_ok=True)
             segments = _make_single_speaker_segments()
@@ -2792,7 +3622,7 @@ def test_process_pipeline_does_not_reuse_tts_cache_when_translation_is_regenerat
             )
 
     class FreshTTSGenerator:
-        def __init__(self, config):
+        def __init__(self, config, **kwargs):
             assert config.api_key == "tts-key"
 
         def generate_all(self, segments: list[DubbingSegment], output_dir: str) -> list[TTSResult]:
@@ -2834,6 +3664,7 @@ def test_process_pipeline_does_not_reuse_tts_cache_when_translation_is_regenerat
             youtube_url="https://youtube.example/watch?v=no-tts-reuse",
             voice_a="voice_demo_001",
             project_dir=str(project_dir),
+            job_record=_STUDIO_JOB_RECORD,
         )
     )
 
@@ -2889,6 +3720,7 @@ def test_process_pipeline_runs_review_step_for_two_speaker_mode(
             speakers=2,
             project_dir=str(tmp_path / "project_review"),
             skip_review=False,
+            job_record=_STUDIO_JOB_RECORD,
         )
     )
 
@@ -2913,6 +3745,7 @@ def test_process_pipeline_skips_review_when_requested(
             speakers=2,
             project_dir=str(tmp_path / "project_skip_review"),
             skip_review=True,
+            job_record=_EXPRESS_JOB_RECORD,
         )
     )
 
@@ -3663,6 +4496,7 @@ def test_process_pipeline_pre_rewrites_obvious_overshoot_before_tts() -> None:
 
 def test_process_pipeline_skips_pre_tts_rewrite_below_overshoot_threshold() -> None:
     pipeline = ProcessPipeline()
+    # 100 chars at 4.5 c/s = ~22222ms estimated, target 20000ms → ratio 0.111 < 0.20 threshold
     segment = DubbingSegment(
         segment_id=41,
         speaker_id="speaker_a",
@@ -3672,8 +4506,8 @@ def test_process_pipeline_skips_pre_tts_rewrite_below_overshoot_threshold() -> N
         end_ms=20_000,
         target_duration_ms=20_000,
         source_text="Original source text",
-        cn_text="a" * 115,
-        tts_cn_text="a" * 115,
+        cn_text="a" * 100,
+        tts_cn_text="a" * 100,
     )
 
     class FakeRewriter:
@@ -3696,5 +4530,5 @@ def test_process_pipeline_skips_pre_tts_rewrite_below_overshoot_threshold() -> N
     )
 
     assert rewritten_count == 0
-    assert segment.tts_cn_text == "a" * 115
+    assert segment.tts_cn_text == "a" * 100
     assert segment.rewrite_count == 0

@@ -14,7 +14,48 @@ from services.gemini.translator import DubbingSegment
 from utils.audio_utils import measure_duration_ms as _ffprobe_duration_ms
 from utils.atomic_io import atomic_write_bytes, is_valid_output
 from services.tts.rate_limiter import RateLimiter
-from services.tts.tts_strategy import get_tts_provider, get_tts_rpm
+from services.tts.tts_strategy import (
+    get_tts_provider,
+    get_tts_provider_for_job,
+    get_tts_rpm,
+    get_fallback_provider,
+)
+from services.tts.cosyvoice_voice_catalog import is_cosyvoice_v3_flash_builtin_voice
+import re as _re
+
+
+def _normalize_mimo_style(raw: str) -> str:
+    """Normalize voice_description for MiMo <style> tag.
+
+    Strips person name prefix, keeps short style traits:
+    性别 / 年龄 / 音色 / 语速 / 气质
+
+    Example:
+        "查理·芒格，年迈男性，声音低沉沙哑，语速缓慢，带有智慧感"
+        → "年迈男性，低沉沙哑，语速缓慢，睿智沉稳"
+    """
+    if not raw:
+        return ""
+    # Split by comma
+    parts = [p.strip() for p in raw.replace("，", ",").split(",") if p.strip()]
+    # Drop parts that look like person names (contain · like 查理·芒格)
+    filtered = []
+    for p in parts:
+        if "·" in p:
+            continue
+        # Skip overly long descriptive phrases (>15 chars)
+        if len(p) > 15:
+            # Try to extract core trait
+            core = p
+            for prefix in ["带有", "具有", "略带", "偶尔", "偶有"]:
+                if core.startswith(prefix):
+                    core = core[len(prefix):]
+                    break
+            if len(core) <= 10:
+                filtered.append(core)
+            continue
+        filtered.append(p)
+    return "，".join(filtered[:6])  # Keep max 6 traits
 
 try:
     import requests
@@ -36,6 +77,15 @@ class TTSGenerationError(Exception):
     pass
 
 
+def _is_invalid_cosyvoice_voice_error(exc: Exception) -> bool:
+    lowered = str(exc).lower()
+    return (
+        "returned none for voice=" in lowered
+        or "does not match the selected model" in lowered
+        or ("invalidparameter" in lowered and "voice" in lowered)
+    )
+
+
 @dataclass(slots=True)
 class TTSConfig:
     api_key: str
@@ -55,10 +105,12 @@ class TTSResult:
     audio_path: str
     duration_ms: int
     voice_id: str
+    selected_voice: str = ""
+    match_confidence: str = ""
 
 
 class TTSGenerator:
-    def __init__(self, config: TTSConfig):
+    def __init__(self, config: TTSConfig, *, job_record: Any = None):
         normalized_api_key = _normalize_optional_text(config.api_key)
         if normalized_api_key is None:
             raise TTSGenerationError("TTS api_key is required.")
@@ -74,6 +126,7 @@ class TTSGenerator:
             max_retries=max(0, int(config.max_retries)),
             retry_backoff_seconds=max(0.0, float(config.retry_backoff_seconds)),
         )
+        self._default_job_record = job_record
 
     # ≤100 segments: sequential (simple, reliable)
     # >100 segments: 3-worker parallel (3x throughput for long videos)
@@ -84,11 +137,21 @@ class TTSGenerator:
         self,
         segments: list[DubbingSegment],
         output_dir: str,
+        *,
+        job_record: Any = None,
     ) -> list[TTSResult]:
         output_root = Path(output_dir).resolve(strict=False)
         output_root.mkdir(parents=True, exist_ok=True)
 
         total_segments = len(segments)
+
+        # Resolve provider once for the whole job
+        effective_job_record = job_record or self._default_job_record
+        if effective_job_record is not None:
+            self._job_provider = get_tts_provider_for_job(effective_job_record)
+        else:
+            self._job_provider = get_tts_provider()
+        print(f"[S4] TTS provider: {self._job_provider}")
 
         # Count how many actually need generation (not cached)
         pending_count = sum(
@@ -106,7 +169,7 @@ class TTSGenerator:
 
     def _get_rate_limiter(self) -> RateLimiter:
         """Get rate limiter with provider-appropriate RPM."""
-        provider = get_tts_provider()
+        provider = getattr(self, "_job_provider", None) or get_tts_provider()
         rpm = get_tts_rpm(provider)
         return RateLimiter(rpm=rpm)
 
@@ -131,8 +194,9 @@ class TTSGenerator:
         total_segments: int,
     ) -> list[TTSResult]:
         """Parallel TTS generation with shared rate limiter (Tier 2/3: >30min videos)."""
-        # Shared rate limiter across all workers (20 RPM total, not per worker)
-        rate_limiter = RateLimiter(rpm=20)
+        # Shared rate limiter across all workers — use provider-specific RPM
+        provider = getattr(self, "_job_provider", None) or get_tts_provider()
+        rate_limiter = RateLimiter(rpm=get_tts_rpm(provider))
         completed_count = 0
         completed_lock = threading.Lock()
         results_dict: dict[int, TTSResult] = {}
@@ -146,19 +210,43 @@ class TTSGenerator:
                     print(f"[S4] TTS 进度: {completed_count}/{total_segments} 段")
             return segment.segment_id, result
 
+        failed_segments: list[tuple[int, DubbingSegment, Exception]] = []
+
         with ThreadPoolExecutor(max_workers=self._PARALLEL_WORKERS) as executor:
             futures = {
-                executor.submit(_worker, idx, seg): seg.segment_id
+                executor.submit(_worker, idx, seg): (idx, seg)
                 for idx, seg in enumerate(segments, start=1)
             }
             for future in as_completed(futures):
-                seg_id = futures[future]
+                idx, seg = futures[future]
                 try:
                     _, result = future.result()
-                    results_dict[seg_id] = result
+                    results_dict[seg.segment_id] = result
                 except Exception as exc:
-                    print(f"[S4] TTS 段 {seg_id} 失败: {exc}")
-                    raise
+                    print(f"[S4] TTS 段 {seg.segment_id} 失败（已保留已完成段）: {exc}")
+                    failed_segments.append((idx, seg, exc))
+
+        # Retry failed segments after a cooldown
+        if failed_segments:
+            completed_count = len(results_dict)
+            total = len(segments)
+            print(
+                f"[S4] TTS {completed_count}/{total} 段已完成，"
+                f"{len(failed_segments)} 段失败，5 分钟后重试…",
+                flush=True,
+            )
+            time.sleep(300)  # 5 分钟冷却
+
+            for idx, seg, _ in failed_segments:
+                try:
+                    _, result = _worker(idx, seg)
+                    results_dict[seg.segment_id] = result
+                    print(f"[S4] TTS 段 {seg.segment_id} 重试成功")
+                except Exception as retry_exc:
+                    print(f"[S4] TTS 段 {seg.segment_id} 重试仍失败: {retry_exc}")
+                    raise TTSGenerationError(
+                        f"TTS 段 {seg.segment_id} 在重试后仍失败: {retry_exc}"
+                    ) from retry_exc
 
         # Return results in original segment order
         return [results_dict[seg.segment_id] for seg in segments]
@@ -179,11 +267,24 @@ class TTSGenerator:
             if not quiet:
                 print(f"[TTS] 跳过已完成段 {index}/{total_segments}")
             duration_ms = _ffprobe_duration_ms(output_path)
+            # Preserve selected_voice/match_confidence from a previous run if
+            # already on the segment; otherwise derive from explicit voice_id.
+            cached_voice = getattr(segment, "selected_voice", "") or ""
+            cached_conf = getattr(segment, "match_confidence", "") or ""
+            if not cached_voice:
+                explicit = _normalize_optional_text(getattr(segment, "voice_id", None))
+                if explicit and is_cosyvoice_v3_flash_builtin_voice(explicit):
+                    cached_voice = explicit
+                    cached_conf = cached_conf or "high"
+                else:
+                    cached_conf = cached_conf or "cached"
             result = TTSResult(
                 segment_id=segment.segment_id,
                 audio_path=str(output_path.resolve(strict=False)),
                 duration_ms=duration_ms,
                 voice_id=segment.voice_id,
+                selected_voice=cached_voice,
+                match_confidence=cached_conf,
             )
         else:
             rate_limiter.wait()
@@ -191,6 +292,10 @@ class TTSGenerator:
 
         segment.tts_audio_path = result.audio_path
         segment.actual_duration_ms = result.duration_ms
+        if result.selected_voice:
+            segment.selected_voice = result.selected_voice
+        if result.match_confidence:
+            segment.match_confidence = result.match_confidence
         if segment.target_duration_ms > 0:
             segment.alignment_ratio = result.duration_ms / segment.target_duration_ms
         else:
@@ -218,11 +323,11 @@ class TTSGenerator:
 
         output_path = output_root / f"segment_{segment.segment_id:03d}_{segment.speaker_id}.wav"
 
-        # Use voice_description from Gemini review for natural voice control
-        # Falls back to default_zh if no description available
-        mimo_voice = getattr(segment, "voice_description", "") or "default_zh"
+        # Pass voice_description directly to MiMo TTS as style
+        mimo_style = getattr(segment, "voice_description", "") or ""
+        print(f"[MiMo-TTS] style={mimo_style[:80] or '(none)'}, text={tts_text[:40]}...", flush=True)
 
-        audio_bytes = mimo_synthesize(text=tts_text, voice_id=mimo_voice)
+        audio_bytes = mimo_synthesize(text=tts_text, voice_id=mimo_style)
         atomic_write_bytes(str(output_path), audio_bytes)
         duration_ms = _ffprobe_duration_ms(output_path)
 
@@ -233,27 +338,121 @@ class TTSGenerator:
             voice_id=segment.voice_id,
         )
 
+    def _generate_one_cosyvoice(
+        self,
+        segment: DubbingSegment,
+        tts_text: str,
+        output_root: Path,
+    ) -> TTSResult:
+        """Generate TTS via CosyVoice API."""
+        from services.tts.cosyvoice_provider import DEFAULT_VOICE as cosyvoice_default_voice
+        from services.tts.cosyvoice_provider import synthesize as cosyvoice_synthesize
+
+        output_path = output_root / f"segment_{segment.segment_id:03d}_{segment.speaker_id}.wav"
+
+        explicit_voice_id = _normalize_optional_text(getattr(segment, "voice_id", None))
+        confidence = ""
+        if explicit_voice_id and is_cosyvoice_v3_flash_builtin_voice(explicit_voice_id):
+            voice = explicit_voice_id
+            gender = getattr(segment, "gender", None)
+            age_group = getattr(segment, "age_group", None)
+            persona = getattr(segment, "persona_style", None)
+            energy = getattr(segment, "energy_level", None)
+            resolution_source = "explicit_builtin_voice_id"
+            confidence = "high"
+        else:
+            # Fall back to demographic selector when the segment voice_id is not
+            # a compatible builtin preset for the active CosyVoice model.
+            from services.tts.cosyvoice_instruction_enhancer import enhance_voice_selection
+            from services.tts.cosyvoice_voice_selector import infer_is_childlike
+
+            gender = getattr(segment, "gender", None)
+            age_group = getattr(segment, "age_group", None)
+            persona = getattr(segment, "persona_style", None)
+            energy = getattr(segment, "energy_level", None)
+            voice_desc = getattr(segment, "voice_description", None) or ""
+            childlike = infer_is_childlike(age_group or "", voice_desc)
+            enhanced = enhance_voice_selection(
+                gender=gender, age_group=age_group,
+                persona_style=persona, energy_level=energy,
+                is_childlike=childlike,
+            )
+            voice = enhanced.voice_id
+            confidence = enhanced.match_confidence
+            resolution_source = f"enhancer({confidence})"
+
+        print(
+            f"[CosyVoice] voice={voice}, confidence={confidence}, gender={gender}, age={age_group}, "
+            f"persona={persona}, energy={energy}, source={resolution_source}, "
+            f"text={tts_text[:50]}...",
+            flush=True,
+        )
+
+        try:
+            audio_bytes = cosyvoice_synthesize(text=tts_text, voice=voice)
+        except Exception as exc:
+            if voice != cosyvoice_default_voice and _is_invalid_cosyvoice_voice_error(exc):
+                print(
+                    f"[CosyVoice] selected voice {voice} was rejected; retrying with safe default "
+                    f"{cosyvoice_default_voice}.",
+                    flush=True,
+                )
+                voice = cosyvoice_default_voice
+                confidence = "low"
+                audio_bytes = cosyvoice_synthesize(text=tts_text, voice=voice)
+            else:
+                raise
+        atomic_write_bytes(str(output_path), audio_bytes)
+        duration_ms = _ffprobe_duration_ms(output_path)
+
+        return TTSResult(
+            segment_id=segment.segment_id,
+            audio_path=str(output_path.resolve(strict=False)),
+            duration_ms=duration_ms,
+            voice_id=segment.voice_id,
+            selected_voice=voice,
+            match_confidence=confidence,
+        )
+
     def _generate_one_with_backoff(
         self,
         segment: DubbingSegment,
         output_dir: str,
     ) -> TTSResult:
-        """Wrap _generate_one with exponential backoff + pause-and-resume degradation."""
+        """Wrap _generate_one with exponential backoff + fallback provider chain."""
+        provider = getattr(self, "_job_provider", None) or get_tts_provider()
         max_attempts = len(self._OUTER_BACKOFF_SCHEDULE)
         last_error: Exception | None = None
 
+        # --- Primary provider attempts ---
         for attempt in range(1, max_attempts + 1):
             try:
-                return self._generate_one(segment, output_dir)
+                return self._generate_one(segment, output_dir, provider=provider)
             except TTSGenerationError as exc:
                 last_error = exc
                 if attempt < max_attempts:
                     wait = self._OUTER_BACKOFF_SCHEDULE[attempt - 1]
                     print(
-                        f"[S4] TTS 段 {segment.segment_id} 失败，"
+                        f"[S4] TTS 段 {segment.segment_id} ({provider}) 失败，"
                         f"{wait}s 后重试 ({attempt}/{max_attempts})..."
                     )
                     time.sleep(wait)
+
+        # --- Fallback provider ---
+        voice_clone_enabled = bool(getattr(segment, "voice_id", None))
+        fallback = get_fallback_provider(provider, voice_clone_enabled)
+        if fallback:
+            print(
+                f"[S4] TTS 段 {segment.segment_id} 主 provider ({provider}) 耗尽，"
+                f"尝试 fallback → {fallback}"
+            )
+            try:
+                return self._generate_one(segment, output_dir, provider=fallback)
+            except TTSGenerationError as fb_exc:
+                print(
+                    f"[S4] TTS 段 {segment.segment_id} fallback ({fallback}) 也失败: {fb_exc}"
+                )
+                # Continue to pause-and-retry below
 
         # All normal attempts exhausted — pause 5 minutes then try once more
         print(
@@ -263,7 +462,7 @@ class TTSGenerator:
         time.sleep(self._OUTER_PAUSE_SECONDS)
 
         try:
-            return self._generate_one(segment, output_dir)
+            return self._generate_one(segment, output_dir, provider=provider)
         except TTSGenerationError:
             # Final failure — let the caller handle it (checkpoint already saved)
             raise TTSGenerationError(
@@ -275,6 +474,8 @@ class TTSGenerator:
         self,
         segment: DubbingSegment,
         output_dir: str,
+        *,
+        provider: str | None = None,
     ) -> TTSResult:
         output_root = Path(output_dir).resolve(strict=False)
         output_root.mkdir(parents=True, exist_ok=True)
@@ -283,10 +484,27 @@ class TTSGenerator:
         if tts_text is None:
             raise TTSGenerationError("segment.tts_cn_text or segment.cn_text is required.")
 
-        # Dispatch to MiMo TTS if configured
-        provider = get_tts_provider()
+        # Resolve provider: explicit arg > job-level > legacy
+        if provider is None:
+            provider = getattr(self, "_job_provider", None) or get_tts_provider()
+
+        # Dispatch: cosyvoice / mimo / minimax (default)
+        # Wrap provider-specific exceptions as TTSGenerationError so
+        # _generate_one_with_backoff can catch them uniformly.
+        if provider == "cosyvoice":
+            try:
+                return self._generate_one_cosyvoice(segment, tts_text, output_root)
+            except TTSGenerationError:
+                raise
+            except Exception as exc:
+                raise TTSGenerationError(f"CosyVoice: {exc}") from exc
         if provider == "mimo":
-            return self._generate_one_mimo(segment, tts_text, output_root)
+            try:
+                return self._generate_one_mimo(segment, tts_text, output_root)
+            except TTSGenerationError:
+                raise
+            except Exception as exc:
+                raise TTSGenerationError(f"MiMo: {exc}") from exc
 
         endpoint = _build_tts_endpoint(self.config.base_url)
         payload = {

@@ -212,6 +212,7 @@ async def me_handler(
             "id": str(user.id),
             "email": user.email,
             "display_name": user.display_name,
+            "role": getattr(user, "role", "user") or "user",
             "created_at": user.created_at.isoformat(),
         }
     }

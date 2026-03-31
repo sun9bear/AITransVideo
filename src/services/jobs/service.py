@@ -1,0 +1,271 @@
+from __future__ import annotations
+
+from dataclasses import replace
+from pathlib import Path
+from uuid import uuid4
+
+from services.job_paths import build_workspace_dir
+from services.jobs.events import EVENT_LEVEL_ERROR, EVENT_TYPE_STATUS, JobEvent
+from services.jobs.models import (
+    ACTIVE_JOB_STATUSES,
+    JOB_STATUS_FAILED,
+    JOB_STATUS_QUEUED,
+    JOB_STATUS_RUNNING,
+    JOB_STATUS_WAITING_FOR_REVIEW,
+    JOB_TYPE_LOCALIZE_VIDEO,
+    OUTPUT_TARGET_EDITOR,
+    SOURCE_TYPE_YOUTUBE_URL,
+    SUPPORTED_SOURCE_TYPES,
+    STAGE_FAILED,
+    JobRecord,
+)
+from services.jobs.process_runner import ProcessJobRunner, is_review_stage_approved
+from services.jobs.read_surface import build_job_artifacts_payload, build_job_result_summary
+from services.jobs.store import JobStore
+from services.state_manager import utc_now_iso
+
+
+class JobServiceError(Exception):
+    """Base error for the A1 job service."""
+
+
+class JobNotFoundError(JobServiceError):
+    """Raised when a job_id does not exist."""
+
+
+class JobConflictError(JobServiceError):
+    """Raised when a lifecycle action conflicts with the current job state."""
+
+
+class UnsupportedJobRequestError(JobServiceError):
+    """Raised when a request is outside the A1 public contract."""
+
+
+class JobService:
+    def __init__(
+        self,
+        *,
+        store: JobStore,
+        runner: ProcessJobRunner,
+    ) -> None:
+        self.store = store
+        self.runner = runner
+
+    def submit_job(
+        self,
+        *,
+        source_type: str,
+        source_ref: str,
+        output_target: str = OUTPUT_TARGET_EDITOR,
+        job_type: str = JOB_TYPE_LOCALIZE_VIDEO,
+        speakers: str = "auto",
+        voice_a: str | None = None,
+        voice_b: str | None = None,
+        transcription_method: str | None = None,
+        service_mode: str | None = None,
+        tts_provider: str | None = None,
+        tts_model: str | None = None,
+        requires_review: bool | None = None,
+        voice_clone_enabled: bool | None = None,
+        voice_strategy: str | None = None,
+        plan_code_snapshot: str | None = None,
+        role_snapshot: str | None = None,
+        source_duration_seconds: float | None = None,
+        estimated_duration_seconds: float | None = None,
+        quota_cost: int | None = None,
+        quota_state: str = "none",
+        create_idempotency_key: str | None = None,
+        user_id: str | None = None,
+        source_content_hash: str | None = None,
+    ) -> JobRecord:
+        normalized_source_type = str(source_type).strip()
+        normalized_source_ref = str(source_ref).strip()
+        normalized_output_target = str(output_target).strip().lower()
+        normalized_job_type = str(job_type).strip()
+        normalized_speakers = str(speakers).strip().lower() or "auto"
+        normalized_voice_a = str(voice_a or "").strip() or None
+        normalized_voice_b = str(voice_b or "").strip() or None
+        normalized_transcription_method = str(transcription_method or "assemblyai").strip().lower()
+
+        if normalized_job_type != JOB_TYPE_LOCALIZE_VIDEO:
+            raise UnsupportedJobRequestError(f"unsupported job_type: {normalized_job_type}")
+        if normalized_source_type not in SUPPORTED_SOURCE_TYPES:
+            raise UnsupportedJobRequestError(f"unsupported source_type: {normalized_source_type}")
+        if not normalized_source_ref:
+            raise UnsupportedJobRequestError("source.value is required")
+        if normalized_output_target != OUTPUT_TARGET_EDITOR:
+            raise UnsupportedJobRequestError(f"unsupported output_target: {normalized_output_target}")
+        if normalized_speakers not in {"auto", "1", "2"}:
+            raise UnsupportedJobRequestError(f"unsupported speakers: {normalized_speakers}")
+
+        # Concurrency control is enforced at gateway layer (per-user plan limits).
+        # Job API no longer rejects new submissions due to globally active jobs,
+        # but still reaps stale jobs (no live worker process) on submit.
+        self._reap_stale_jobs()
+
+        timestamp = utc_now_iso()
+        job_id = f"job_{uuid4().hex}"
+        workspace_dir = build_workspace_dir(user_id, job_id) if user_id else None
+        record = JobRecord(
+            job_id=job_id,
+            job_type=normalized_job_type,
+            source_type=normalized_source_type,
+            source_ref=normalized_source_ref,
+            output_target=normalized_output_target,
+            speakers=normalized_speakers,
+            voice_a=normalized_voice_a,
+            voice_b=normalized_voice_b,
+            status=JOB_STATUS_QUEUED,
+            current_stage=None,
+            progress_message="Job queued.",
+            created_at=timestamp,
+            updated_at=timestamp,
+            transcription_method=normalized_transcription_method,
+            service_mode=service_mode,
+            tts_provider=tts_provider,
+            tts_model=tts_model,
+            requires_review=requires_review,
+            voice_clone_enabled=voice_clone_enabled,
+            voice_strategy=voice_strategy,
+            plan_code_snapshot=plan_code_snapshot,
+            role_snapshot=role_snapshot,
+            source_duration_seconds=source_duration_seconds,
+            estimated_duration_seconds=estimated_duration_seconds,
+            quota_cost=quota_cost,
+            quota_state=quota_state or "none",
+            create_idempotency_key=create_idempotency_key,
+            user_id=user_id,
+            workspace_dir=workspace_dir,
+            source_content_hash=source_content_hash,
+        )
+        self.store.save_job(record)
+        self.store.append_event(
+            record.job_id,
+            JobEvent(
+                job_id=record.job_id,
+                event_type=EVENT_TYPE_STATUS,
+                created_at=timestamp,
+                status=record.status,
+                message=record.progress_message,
+            ),
+        )
+        self.runner.start(record)
+        return self.require_job(record.job_id)
+
+    def continue_job(self, job_id: str) -> JobRecord:
+        record = self.require_job(job_id)
+        if record.status != JOB_STATUS_WAITING_FOR_REVIEW:
+            raise JobConflictError(f"job {job_id} is not waiting_for_review")
+        if record.project_dir is None:
+            raise JobConflictError(f"job {job_id} has no project_dir to continue")
+        review_gate = dict(record.review_gate or {})
+        review_stage = str(review_gate.get("stage") or "").strip()
+        if not review_stage:
+            raise JobConflictError(f"job {job_id} has no review gate summary")
+        if not is_review_stage_approved(record.project_dir, review_stage):
+            raise JobConflictError(
+                f"review stage {review_stage} is not approved for job {job_id}"
+            )
+
+        # Concurrency control is enforced at gateway layer.
+
+        self.runner.start(record, continue_existing=True)
+        return self.require_job(job_id)
+
+    def cancel_and_delete_job(self, job_id: str) -> bool:
+        """Stop any running process and delete the job record. Returns True if the job existed."""
+        self.runner.stop_process(job_id)
+        return self.store.delete_job(job_id)
+
+    def get_job(self, job_id: str) -> JobRecord | None:
+        return self.store.load_job(job_id)
+
+    def require_job(self, job_id: str) -> JobRecord:
+        try:
+            return self.store.require_job(job_id)
+        except KeyError as exc:
+            raise JobNotFoundError(str(exc)) from exc
+
+    def list_jobs(self, *, limit: int | None = 20) -> list[JobRecord]:
+        return self.store.list_jobs(limit=limit)
+
+    def read_logs(self, job_id: str) -> list[JobEvent]:
+        self.require_job(job_id)
+        return self.store.load_events(job_id)
+
+    def get_result_summary(self, job_id: str) -> dict[str, object]:
+        return build_job_result_summary(self.require_job(job_id))
+
+    def get_artifacts(self, job_id: str) -> dict[str, object]:
+        return build_job_artifacts_payload(self.require_job(job_id))
+
+    def _reap_stale_jobs(self) -> None:
+        """Mark stale queued/running jobs (no live worker) as failed."""
+        for record in self.store.list_jobs(limit=None):
+            if record.status in {JOB_STATUS_QUEUED, JOB_STATUS_RUNNING}:
+                if self._is_stale_process_backed_active_job(record):
+                    self._mark_stale_active_job_failed(record)
+
+    def _find_active_job(self, *, exclude_job_id: str | None = None) -> JobRecord | None:
+        for record in self.store.list_jobs(limit=None):
+            if exclude_job_id is not None and record.job_id == exclude_job_id:
+                continue
+            if record.status in ACTIVE_JOB_STATUSES:
+                if self._is_stale_process_backed_active_job(record):
+                    self._mark_stale_active_job_failed(record)
+                    continue
+                return record
+        return None
+
+    def _is_stale_process_backed_active_job(self, record: JobRecord) -> bool:
+        if record.status not in {JOB_STATUS_QUEUED, JOB_STATUS_RUNNING}:
+            return False
+        return not self.runner.is_process_active(record.job_id)
+
+    def _mark_stale_active_job_failed(self, record: JobRecord) -> JobRecord:
+        timestamp = utc_now_iso()
+        error_message = "Recovered stale active job without a live worker process."
+        next_record = replace(
+            record,
+            status=JOB_STATUS_FAILED,
+            current_stage=STAGE_FAILED,
+            progress_message=error_message,
+            updated_at=timestamp,
+            completed_at=timestamp,
+            error_summary={
+                "stage": STAGE_FAILED,
+                "error_type": "stale_active_job",
+                "message": error_message,
+            },
+            review_gate=None,
+        )
+        self.store.save_job(next_record)
+        self.store.append_event(
+            record.job_id,
+            JobEvent(
+                job_id=record.job_id,
+                event_type=EVENT_TYPE_STATUS,
+                created_at=timestamp,
+                stage=next_record.current_stage,
+                status=next_record.status,
+                level=EVENT_LEVEL_ERROR,
+                message=next_record.progress_message,
+            ),
+        )
+        return next_record
+
+
+def build_default_job_service(
+    *,
+    project_root: Path,
+    jobs_root: Path | None = None,
+    python_executable: str | None = None,
+) -> JobService:
+    resolved_jobs_root = (jobs_root or (project_root / "jobs")).resolve(strict=False)
+    store = JobStore(resolved_jobs_root)
+    runner = ProcessJobRunner(
+        store=store,
+        project_root=project_root,
+        python_executable=python_executable,
+    )
+    return JobService(store=store, runner=runner)

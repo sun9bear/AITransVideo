@@ -132,8 +132,9 @@ export interface CreateTranslationJobInput {
   voiceA?: string
   voiceB?: string
   transcriptionMethod?: 'assemblyai' | 'gemini'
-  sourceType?: 'youtube_url' | 'local_file'
+  sourceType?: 'youtube_url' | 'local_video'
   localFilePath?: string
+  service_mode?: 'express' | 'studio'
 }
 
 export const ACTIVE_JOB_STATUSES: readonly JobStatus[] = [

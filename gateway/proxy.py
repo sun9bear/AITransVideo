@@ -37,8 +37,17 @@ async def proxy_request(
     request: Request,
     upstream_base: str,
     strip_prefix: str = "",
+    override_body: bytes | None = None,
+    extra_headers: dict[str, str] | None = None,
 ) -> Response:
-    """Forward a request to an upstream service and return its response."""
+    """Forward a request to an upstream service and return its response.
+
+    Args:
+        override_body: If provided, use this as the request body instead of
+                       the original request body.
+        extra_headers: If provided, merge these headers into the forwarded
+                       request (e.g. internal ``X-User-Id``).
+    """
 
     # Build upstream URL
     path = request.url.path
@@ -49,8 +58,8 @@ async def proxy_request(
     if query:
         upstream_url = f"{upstream_url}?{query}"
 
-    # Read request body
-    body = await request.body()
+    # Read request body (use override if provided)
+    body = override_body if override_body is not None else await request.body()
 
     # Forward headers (skip hop-by-hop)
     skip_headers = {"host", "connection", "transfer-encoding", "keep-alive"}
@@ -59,6 +68,12 @@ async def proxy_request(
         for k, v in request.headers.items()
         if k.lower() not in skip_headers
     }
+    # Update content-length if body was overridden
+    if override_body is not None:
+        headers["content-length"] = str(len(body))
+    # Merge internal headers (e.g. X-User-Id for upstream identity)
+    if extra_headers:
+        headers.update(extra_headers)
 
     client = get_client()
     upstream_response = await client.request(

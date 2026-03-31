@@ -153,6 +153,12 @@ class DubbingSegment:
     rewrite_count: int = 0
     needs_review: bool = False
     voice_description: str = ""
+    gender: str = ""           # "male" / "female" — from transcript reviewer
+    age_group: str = ""        # "young" / "middle" / "elderly" — from transcript reviewer
+    persona_style: str = ""    # "professional" / "warm" / "serious" / "energetic"
+    energy_level: str = ""     # "low" / "medium" / "high"
+    selected_voice: str = ""   # actual voice used for TTS (populated after TTS generation)
+    match_confidence: str = "" # "high" / "medium" / "low" (populated after TTS generation)
 
 
 @dataclass(slots=True)

@@ -141,9 +141,27 @@ class JobAPICommandArgs:
 def parse_process_args(argv: list[str]) -> ProcessConfig:
     parser = argparse.ArgumentParser(
         prog="python main.py process",
-        description="YouTube URL → 全自动生成配音素材包",
+        description="视频来源 → 全自动生成配音素材包",
     )
-    parser.add_argument("youtube_url", help="YouTube 视频 URL")
+    # Legacy positional: youtube_url (optional when --source-type/--source-ref used)
+    parser.add_argument(
+        "youtube_url",
+        nargs="?",
+        default="",
+        help="YouTube 视频 URL（旧入口；新入口请用 --source-type/--source-ref）",
+    )
+    # New explicit source parameters (must be used as a pair)
+    parser.add_argument(
+        "--source-type",
+        default=None,
+        choices=["youtube_url", "local_video", "local_audio"],
+        help="来源类型：youtube_url | local_video | local_audio（须与 --source-ref 一起使用）",
+    )
+    parser.add_argument(
+        "--source-ref",
+        default=None,
+        help="来源引用：YouTube URL 或本地文件路径（须与 --source-type 一起使用）",
+    )
     parser.add_argument(
         "--voice-a",
         required=False,
@@ -163,9 +181,24 @@ def parse_process_args(argv: list[str]) -> ProcessConfig:
     parser.add_argument("--skip-review", action="store_true", help="跳过Gemini说话人审核步骤")
     parser.add_argument("--wait-for-review", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--transcription-method", default="assemblyai", choices=["assemblyai", "gemini"], help="转录方案：assemblyai（默认）| gemini")
+    parser.add_argument("--job-id", default=None, help=argparse.SUPPRESS)
     parsed = parser.parse_args(argv[2:])
+
+    # Validate: --source-type and --source-ref must be used as a pair
+    has_st = parsed.source_type is not None
+    has_sr = parsed.source_ref is not None
+    if has_st != has_sr:
+        missing = "--source-ref" if has_st else "--source-type"
+        parser.error(f"--source-type 和 --source-ref 必须一起使用（缺少 {missing}）")
+
+    source_type = (parsed.source_type or "").strip()
+    source_ref = (parsed.source_ref or "").strip()
+    youtube_url = (parsed.youtube_url or "").strip()
+
     return ProcessConfig(
-        youtube_url=parsed.youtube_url,
+        youtube_url=youtube_url,
+        source_type=source_type,
+        source_ref=source_ref,
         voice_a=parsed.voice_a,
         voice_b=parsed.voice_b,
         speaker_a_name=parsed.speaker_a,
@@ -176,6 +209,7 @@ def parse_process_args(argv: list[str]) -> ProcessConfig:
         skip_review=parsed.skip_review,
         wait_for_review=parsed.wait_for_review,
         transcription_method=parsed.transcription_method,
+        job_id=parsed.job_id,
     )
 
 
@@ -952,6 +986,7 @@ def run_process_command(argv: list[str]) -> None:
     """Keep the legacy process command stable while workflow dispatch converges."""
 
     config = parse_process_args(argv)
+
     try:
         result = ProcessPipeline().run(config)
     except Exception as exc:

@@ -8,15 +8,16 @@ import { StatusBadge } from "@/components/status-badge"
 import { getJobDisplayTitle, getStageLabel } from "@/features/jobs/presentation"
 import { ApiError } from "@/lib/api/client"
 import { getErrorMessage } from '@/lib/api/errors'
+import { getEntitlements, type UserEntitlements } from "@/lib/api/entitlements"
 import { estimateCosts, formatCostCny } from "@/lib/cost/estimator"
-import { getCurrentJob, submitTranslationJob } from "@/lib/api/jobs"
+import { listJobs, submitTranslationJob } from "@/lib/api/jobs"
 import { getVoiceLibrary, type VoiceLibraryEntry } from "@/lib/api/voiceLibrary"
 import { usePollingTask } from "@/lib/react/usePollingTask"
-import type { JobSummary } from "@/types/jobs"
+import { ACTIVE_JOB_STATUSES, type JobSummary } from "@/types/jobs"
 
 export default function NewTranslationPage() {
   const router = useRouter()
-  const [sourceType, setSourceType] = useState<"youtube_url" | "local_file">("youtube_url")
+  const [sourceType, setSourceType] = useState<"youtube_url" | "local_video">("youtube_url")
   const [youtubeUrl, setYoutubeUrl] = useState("")
   const [uploadedFilePath, setUploadedFilePath] = useState("")
   const [uploadFileName, setUploadFileName] = useState("")
@@ -24,8 +25,10 @@ export default function NewTranslationPage() {
   const [uploadProgress, setUploadProgress] = useState("")
   const [speakers, setSpeakers] = useState<"1" | "2" | "auto">("auto")
   const [transcriptionMethod, setTranscriptionMethod] = useState<"assemblyai" | "gemini">("assemblyai")
+  const [serviceMode, setServiceMode] = useState<"express" | "studio">("express")
+  const [entitlements, setEntitlements] = useState<UserEntitlements | null>(null)
   const [savedVoices, setSavedVoices] = useState<VoiceLibraryEntry[]>([])
-  const [activeJob, setActiveJob] = useState<JobSummary | null>(null)
+  const [activeJobs, setActiveJobs] = useState<JobSummary[]>([])
   const [isLoadingGuard, setIsLoadingGuard] = useState(true)
   const [submitState, setSubmitState] = useState<"error" | "idle" | "submitting" | "success">("idle")
 
@@ -35,13 +38,19 @@ export default function NewTranslationPage() {
       : !uploadedFilePath
         ? "请先上传视频文件。"
         : null
-  const isBlockedByActiveJob = Boolean(activeJob)
 
-  const loadActiveJob = async (silent = false) => {
+  const maxConcurrentJobs = entitlements?.limits.max_concurrent_jobs ?? 1
+  const activeJobCount = activeJobs.length
+  const isBlockedByConcurrency = activeJobCount >= maxConcurrentJobs
+  // For UI display: show the most recent active job if blocked
+  const latestActiveJob = activeJobs.length > 0 ? activeJobs[0] : null
+
+  const loadActiveJobs = async (silent = false) => {
     if (!silent) setIsLoadingGuard(true)
     try {
-      const nextJob = await getCurrentJob()
-      setActiveJob(nextJob)
+      const allJobs = await listJobs()
+      const active = allJobs.filter((j) => ACTIVE_JOB_STATUSES.includes(j.status))
+      setActiveJobs(active)
     } catch {
       // ignore
     } finally {
@@ -49,11 +58,14 @@ export default function NewTranslationPage() {
     }
   }
 
-  usePollingTask(() => loadActiveJob(!isLoadingGuard), { intervalMs: 5000 })
+  usePollingTask(() => loadActiveJobs(!isLoadingGuard), { intervalMs: 5000 })
 
   useEffect(() => {
     getVoiceLibrary()
       .then((lib) => setSavedVoices(lib.voices))
+      .catch(() => {})
+    getEntitlements()
+      .then((ent) => setEntitlements(ent))
       .catch(() => {})
   }, [])
 
@@ -71,10 +83,11 @@ export default function NewTranslationPage() {
         voiceB: undefined,
         youtubeUrl: sourceType === "youtube_url" ? youtubeUrl.trim() : "",
         sourceType,
-        localFilePath: sourceType === "local_file" ? uploadedFilePath : undefined,
-        transcriptionMethod: sourceType === "local_file" ? "assemblyai" : transcriptionMethod,
+        localFilePath: sourceType === "local_video" ? uploadedFilePath : undefined,
+        transcriptionMethod: sourceType === "local_video" ? "assemblyai" : transcriptionMethod,
+        service_mode: serviceMode,
       })
-      setActiveJob(createdJob)
+      setActiveJobs((prev) => [createdJob, ...prev])
       setSubmitState("success")
       toast.success(`任务已创建：${getJobDisplayTitle(createdJob)}`)
       // Store latest job ID for /tasks/current fallback
@@ -82,7 +95,7 @@ export default function NewTranslationPage() {
       router.push(`/workspace/${createdJob.id}`)
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
-        await loadActiveJob(true)
+        await loadActiveJobs(true)
       }
       setSubmitState("error")
       const msg = getErrorMessage(error)
@@ -104,44 +117,46 @@ export default function NewTranslationPage() {
             填写视频来源与参数，创建翻译配音任务。
           </p>
         </div>
-        {activeJob ? <StatusBadge status={activeJob.status} /> : null}
+        {latestActiveJob ? <StatusBadge status={latestActiveJob.status} /> : null}
       </div>
 
-      {/* Active job guard */}
-      {activeJob ? (
+      {/* Concurrency limit guard */}
+      {isBlockedByConcurrency && latestActiveJob ? (
         <section className="rounded-2xl border border-amber-500/20 bg-amber-500/5 p-5">
           <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
             <div className="space-y-1">
-              <p className="text-xs font-semibold text-amber-400">当前有未完成的任务</p>
+              <p className="text-xs font-semibold text-amber-400">
+                已达到并发上限（{activeJobCount}/{maxConcurrentJobs}）
+              </p>
               <p className="font-semibold text-foreground">请先完成或取消当前任务，再创建新的翻译。</p>
               <p className="text-sm text-muted-foreground">
-                {getJobDisplayTitle(activeJob)} · {getStageLabel(activeJob.currentStage)}
+                {getJobDisplayTitle(latestActiveJob)} · {getStageLabel(latestActiveJob.currentStage)}
               </p>
             </div>
             <div className="flex gap-2">
               <button
                 className="inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-primary to-primary/80 px-5 py-2 text-sm font-semibold text-white shadow-lg shadow-primary/25 transition hover:shadow-primary/40 hover:brightness-110"
-                onClick={() => router.push(`/workspace/${activeJob.id}`)}
+                onClick={() => router.push(`/workspace/${latestActiveJob.id}`)}
                 type="button"
               >
                 去处理当前任务
               </button>
-              <button
-                className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-2 text-sm font-medium text-red-400 transition hover:bg-red-500/20"
-                onClick={async () => {
-                  if (!window.confirm('确定要取消当前任务吗？')) return
-                  try {
-                    const { cancelCurrentJob } = await import('@/lib/api/reviews')
-                    await cancelCurrentJob()
-                    setActiveJob(null)
-                    toast.success('任务已取消，现在可以创建新任务。')
-                  } catch { toast.error('取消失败，请稍后重试。') }
-                }}
-                type="button"
-              >
-                取消该任务
-              </button>
             </div>
+          </div>
+        </section>
+      ) : activeJobCount > 0 && latestActiveJob ? (
+        <section className="rounded-2xl border border-border bg-muted/20 p-4">
+          <div className="flex items-center justify-between">
+            <p className="text-sm text-muted-foreground">
+              当前有 {activeJobCount} 个进行中的任务，仍可创建新任务（上限 {maxConcurrentJobs}）。
+            </p>
+            <button
+              className="text-xs text-primary hover:underline"
+              onClick={() => router.push(`/workspace/${latestActiveJob.id}`)}
+              type="button"
+            >
+              查看任务
+            </button>
           </div>
         </section>
       ) : null}
@@ -162,8 +177,8 @@ export default function NewTranslationPage() {
               </button>
               <button
                 type="button"
-                className={`rounded-lg px-4 py-2 text-sm font-medium transition ${sourceType === "local_file" ? "bg-primary text-white" : "border border-border bg-muted/30 text-muted-foreground hover:bg-muted/50"}`}
-                onClick={() => setSourceType("local_file")}
+                className={`rounded-lg px-4 py-2 text-sm font-medium transition ${sourceType === "local_video" ? "bg-primary text-white" : "border border-border bg-muted/30 text-muted-foreground hover:bg-muted/50"}`}
+                onClick={() => setSourceType("local_video")}
               >
                 上传视频
               </button>
@@ -183,7 +198,7 @@ export default function NewTranslationPage() {
                       setYoutubeUrl(e.target.value)
                       if (submitState !== "idle") setSubmitState("idle")
                     }}
-                    disabled={isBlockedByActiveJob || submitState === "submitting"}
+                    disabled={isBlockedByConcurrency || submitState === "submitting"}
                   />
                 </div>
                 {validationError && youtubeUrl ? (
@@ -210,7 +225,7 @@ export default function NewTranslationPage() {
                       className="w-full rounded-xl bg-transparent px-4 py-3 text-sm text-foreground file:mr-3 file:rounded-lg file:border-0 file:bg-primary/20 file:px-3 file:py-1 file:text-xs file:font-medium file:text-primary focus:outline-none input-focus-ring"
                       type="file"
                       accept="video/*"
-                      disabled={isBlockedByActiveJob || submitState === "submitting" || isUploading}
+                      disabled={isBlockedByConcurrency || submitState === "submitting" || isUploading}
                       onChange={async (event) => {
                         const file = event.target.files?.[0]
                         if (!file) return
@@ -250,40 +265,68 @@ export default function NewTranslationPage() {
 
             {/* Service plan selection */}
             <div className="space-y-3">
-              <span className="text-xs font-medium text-muted-foreground block">服务方案</span>
+              <span className="text-xs font-medium text-muted-foreground block">任务方案</span>
               <div className="grid gap-3 sm:grid-cols-2">
-                {/* Express plan - free users can select */}
+                {/* Express mode */}
                 <button
                   type="button"
-                  className="relative rounded-xl border-2 border-primary/50 bg-primary/5 p-4 text-left transition hover:border-primary/70 ring-2 ring-primary/20"
-                  disabled={isBlockedByActiveJob || submitState === "submitting"}
+                  className={`relative rounded-xl border-2 p-4 text-left transition ${serviceMode === "express" ? "border-primary/50 bg-primary/5 ring-2 ring-primary/20" : "border-border bg-muted/20 hover:border-primary/30"}`}
+                  disabled={isBlockedByConcurrency || submitState === "submitting"}
+                  onClick={() => setServiceMode("express")}
                 >
                   <div className="flex items-center gap-2 mb-2">
-                    <span className="text-lg">⚡</span>
                     <span className="text-sm font-semibold text-foreground">快捷版</span>
-                    <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-400">免费</span>
+                    <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-400">Express</span>
                   </div>
-                  <p className="text-xs text-muted-foreground leading-relaxed">自动生成，无需任何操作。AI 自动识别说话人、翻译、配音，快速便捷。</p>
-                  <div className="absolute top-3 right-3 h-4 w-4 rounded-full bg-primary flex items-center justify-center">
-                    <svg className="h-2.5 w-2.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
-                  </div>
+                  <p className="text-xs text-muted-foreground leading-relaxed">全自动流程，AI 识别说话人、翻译、配音，无需人工操作。</p>
+                  {serviceMode === "express" && (
+                    <div className="absolute top-3 right-3 h-4 w-4 rounded-full bg-primary flex items-center justify-center">
+                      <svg className="h-2.5 w-2.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                    </div>
+                  )}
                 </button>
 
-                {/* Pro plan - locked for free users */}
-                <div
-                  className="relative rounded-xl border border-border bg-muted/20 p-4 text-left opacity-60 cursor-not-allowed"
-                >
-                  <div className="flex items-center gap-2 mb-2">
-                    <span className="text-lg">🎯</span>
-                    <span className="text-sm font-semibold text-foreground">专业版</span>
-                    <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold text-amber-400">付费</span>
-                  </div>
-                  <p className="text-xs text-muted-foreground leading-relaxed">翻译文稿可审核编辑，支持克隆原声音色，更高质量的定制化配音。</p>
-                  <div className="absolute top-3 right-3 rounded-full bg-muted/50 px-2 py-0.5 text-[10px] text-muted-foreground">
-                    即将开放
-                  </div>
-                </div>
+                {/* Studio mode — locked unless plan allows it */}
+                {(() => {
+                  const studioAllowed = entitlements?.limits.allowed_service_modes.includes("studio") ?? false
+                  return studioAllowed ? (
+                    <button
+                      type="button"
+                      className={`relative rounded-xl border-2 p-4 text-left transition ${serviceMode === "studio" ? "border-primary/50 bg-primary/5 ring-2 ring-primary/20" : "border-border bg-muted/20 hover:border-primary/30"}`}
+                      disabled={isBlockedByConcurrency || submitState === "submitting"}
+                      onClick={() => setServiceMode("studio")}
+                    >
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className="text-sm font-semibold text-foreground">工作台版</span>
+                        <span className="rounded-full bg-cyan-500/15 px-2 py-0.5 text-[10px] font-semibold text-cyan-400">Studio</span>
+                      </div>
+                      <p className="text-xs text-muted-foreground leading-relaxed">可审核译文、克隆原声音色，更高质量的定制化配音。</p>
+                      {serviceMode === "studio" && (
+                        <div className="absolute top-3 right-3 h-4 w-4 rounded-full bg-primary flex items-center justify-center">
+                          <svg className="h-2.5 w-2.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                        </div>
+                      )}
+                    </button>
+                  ) : (
+                    <div className="relative rounded-xl border border-border bg-muted/20 p-4 text-left opacity-60 cursor-not-allowed">
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className="text-sm font-semibold text-foreground">工作台版</span>
+                        <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold text-amber-400">Studio</span>
+                      </div>
+                      <p className="text-xs text-muted-foreground leading-relaxed">可审核译文、克隆原声音色，更高质量的定制化配音。</p>
+                      <div className="absolute top-3 right-3 rounded-full bg-muted/50 px-2 py-0.5 text-[10px] text-muted-foreground">
+                        {entitlements?.ui.allow_upgrade ? "升级解锁" : "即将开放"}
+                      </div>
+                    </div>
+                  )
+                })()}
               </div>
+              {/* Quota info for free users */}
+              {entitlements?.plan_code === "free" && entitlements.limits.free_jobs_quota_remaining != null && (
+                <p className="text-xs text-muted-foreground">
+                  免费额度：已用 {entitlements.limits.free_jobs_quota_used ?? 0} / {entitlements.limits.free_jobs_quota_total ?? 5} 次
+                </p>
+              )}
             </div>
 
             <div className="h-px bg-muted/40" />
@@ -297,7 +340,7 @@ export default function NewTranslationPage() {
                     className="w-full rounded-xl bg-transparent px-4 py-3 text-sm text-foreground focus:outline-none input-focus-ring"
                     value={transcriptionMethod}
                     onChange={(e) => setTranscriptionMethod(e.target.value as "assemblyai" | "gemini")}
-                    disabled={isBlockedByActiveJob || submitState === "submitting"}
+                    disabled={isBlockedByConcurrency || submitState === "submitting"}
                   >
                     <option value="assemblyai">AssemblyAI（音频上传）</option>
                     <option value="gemini">Gemini 多模态（≤30分钟）</option>
@@ -312,7 +355,7 @@ export default function NewTranslationPage() {
                     className="w-full rounded-xl bg-transparent px-4 py-3 text-sm text-foreground focus:outline-none input-focus-ring"
                     value={speakers}
                     onChange={(e) => setSpeakers(e.target.value as "1" | "2" | "auto")}
-                    disabled={isBlockedByActiveJob || submitState === "submitting"}
+                    disabled={isBlockedByConcurrency || submitState === "submitting"}
                   >
                     <option value="auto">自动</option>
                     <option value="1">1 人</option>
@@ -323,7 +366,7 @@ export default function NewTranslationPage() {
             </div>
 
             <p className="text-xs text-muted-foreground/60">
-              快捷版将自动完成全部流程，无需人工操作。升级专业版后可审核译文、克隆原声音色。
+              快捷版自动完成全部流程，无需人工操作。工作台版可审核译文、克隆原声音色。
             </p>
 
             {/* 长视频提示 */}
@@ -342,7 +385,7 @@ export default function NewTranslationPage() {
 
             <button
               type="submit"
-              disabled={Boolean(validationError) || isBlockedByActiveJob || submitState === "submitting" || isLoadingGuard}
+              disabled={Boolean(validationError) || isBlockedByConcurrency || submitState === "submitting" || isLoadingGuard}
               className="inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-primary to-primary/80 px-6 py-2.5 text-sm font-semibold text-white shadow-lg shadow-primary/25 transition hover:shadow-primary/40 hover:brightness-110 disabled:opacity-50"
             >
               {submitState === "submitting" ? "创建中…" : "创建任务"}
