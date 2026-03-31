@@ -106,6 +106,15 @@ app.get("/api/project-file")(intercept_project_file)
 app.post("/api/job/delete")(intercept_delete_job)
 
 
+# --- Helpers ---
+
+def _user_id_headers(user) -> dict[str, str] | None:
+    """Build internal identity headers for Web UI proxy routes."""
+    if user is not None:
+        return {"x-user-id": str(user.id)}
+    return None
+
+
 # --- Proxy: Web UI API catch-all (/api/*) ---
 
 @app.api_route(
@@ -121,6 +130,7 @@ async def proxy_web_ui(
         request=request,
         upstream_base=settings.web_ui_upstream,
         strip_prefix="",
+        extra_headers=_user_id_headers(_user),
     )
 
 
@@ -176,6 +186,7 @@ async def proxy_web_ui_legacy(
         request=request,
         upstream_base=settings.web_ui_upstream,
         strip_prefix="/web-ui-api",
+        extra_headers=_user_id_headers(_user),
     )
 
 

@@ -237,6 +237,8 @@ class TestCreateJobSuccess:
         assert captured_body["estimated_duration_seconds"] == 300
         assert captured_body["quota_state"] == "none"
         assert captured_body["create_idempotency_key"] is not None
+        # user_id injected for workspace isolation
+        assert captured_body["user_id"] == "uid-1"
 
     def test_yt_dlp_probe_populates_estimated_duration(self):
         """When frontend doesn't send duration, yt-dlp probe fills it."""
@@ -461,6 +463,8 @@ class TestJobServiceStoreRoundTrip:
             quota_cost=1,
             quota_state="reserved",
             create_idempotency_key="idem-test-001",
+            user_id="42",
+            source_content_hash="sha256:abc123",
         )
 
         # Load back from disk
@@ -479,3 +483,6 @@ class TestJobServiceStoreRoundTrip:
         assert loaded.quota_cost == 1
         assert loaded.quota_state == "reserved"
         assert loaded.create_idempotency_key == "idem-test-001"
+        assert loaded.user_id == "42"
+        assert loaded.workspace_dir == "projects/42/" + job.job_id
+        assert loaded.source_content_hash == "sha256:abc123"

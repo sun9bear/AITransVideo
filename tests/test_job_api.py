@@ -177,30 +177,45 @@ def test_job_api_continue_reuses_existing_review_semantics(tmp_path: Path) -> No
         thread.join(timeout=5)
 
 
-def test_job_api_returns_400_for_unsupported_a1_source_type(tmp_path: Path) -> None:
-    _service, server, thread = _build_server(tmp_path, plans=[])
+def test_job_api_accepts_local_audio_source_type(tmp_path: Path) -> None:
+    """local_audio is now a supported source type; Job API should accept it."""
+    youtube_url = "D:/input.wav"
+    project_dir = write_process_project(
+        tmp_path,
+        project_name="local_audio_api_project",
+        youtube_url=youtube_url,
+    )
+    service, server, thread = _build_server(
+        tmp_path,
+        plans=[
+            {
+                "lines": [f"[S6] Done {project_dir / 'output'}"],
+                "returncode": 0,
+            }
+        ],
+    )
     base_url = f"http://127.0.0.1:{server.server_port}"
 
     try:
-        try:
-            _request_json(
-                "POST",
-                f"{base_url}/jobs",
-                {
-                    "job_type": "localize_video",
-                    "source": {
-                        "type": "local_audio",
-                        "value": "D:/input.wav",
-                    },
-                    "output_target": "editor",
+        status, created = _request_json(
+            "POST",
+            f"{base_url}/jobs",
+            {
+                "job_type": "localize_video",
+                "source": {
+                    "type": "local_audio",
+                    "value": youtube_url,
                 },
-            )
-        except HTTPError as exc:
-            assert exc.code == HTTPStatus.BAD_REQUEST
-            payload = json.loads(exc.read().decode("utf-8"))
-            assert "unsupported source_type" in payload["error"]
-        else:
-            raise AssertionError("Expected A1 unsupported source_type to return 400.")
+                "output_target": "editor",
+            },
+        )
+        job_id = created["job_id"]
+        wait_for(lambda: service.require_job(job_id).status in ("succeeded", "failed"))
+
+        assert status == HTTPStatus.ACCEPTED
+        loaded = service.require_job(job_id)
+        assert loaded.source_type == "local_audio"
+        assert loaded.source_ref == youtube_url
     finally:
         server.shutdown()
         server.server_close()

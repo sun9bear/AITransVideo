@@ -271,12 +271,19 @@ def test_job_service_continue_treats_invalid_review_state_as_not_approved(tmp_pa
         service.continue_job(waiting.job_id)
 
 
-def test_job_service_rejects_second_submit_while_first_job_is_active(tmp_path: Path) -> None:
-    youtube_url = "https://youtube.example/watch?v=job-single-active"
+def test_job_service_allows_second_submit_while_first_job_is_active(tmp_path: Path) -> None:
+    """Concurrency control is now at gateway layer; Job API allows parallel jobs."""
+    youtube_url = "https://youtube.example/watch?v=job-concurrent"
     project_dir = write_process_project(
         tmp_path,
-        project_name="job_single_active",
+        project_name="job_concurrent_first",
         youtube_url=youtube_url,
+    )
+    second_url = "https://youtube.example/watch?v=second-job"
+    second_project_dir = write_process_project(
+        tmp_path,
+        project_name="job_concurrent_second",
+        youtube_url=second_url,
     )
     escaped_project_dir_text = str(project_dir.resolve(strict=False)).replace("\\", "\\\\")
     service, _popen_factory = _build_service(
@@ -291,18 +298,23 @@ def test_job_service_rejects_second_submit_while_first_job_is_active(tmp_path: P
                     ),
                 ],
                 "returncode": 0,
-            }
+            },
+            {
+                "lines": [
+                    f"[S6] Done {second_project_dir / 'output'}",
+                ],
+                "returncode": 0,
+            },
         ],
     )
 
-    created = service.submit_job(source_type="youtube_url", source_ref=youtube_url)
-    _wait_for_job_status(service, created.job_id, JOB_STATUS_WAITING_FOR_REVIEW)
+    first = service.submit_job(source_type="youtube_url", source_ref=youtube_url)
+    _wait_for_job_status(service, first.job_id, JOB_STATUS_WAITING_FOR_REVIEW)
 
-    with pytest.raises(JobConflictError, match="still active"):
-        service.submit_job(
-            source_type="youtube_url",
-            source_ref="https://youtube.example/watch?v=another-job",
-        )
+    # Second submit should succeed — no global single-active gate
+    second = service.submit_job(source_type="youtube_url", source_ref=second_url)
+    _wait_for_job_status(service, second.job_id, JOB_STATUS_SUCCEEDED)
+    assert first.job_id != second.job_id
 
 
 def test_job_service_reaps_stale_running_job_without_live_process_before_new_submit(
@@ -364,11 +376,28 @@ def test_job_service_reaps_stale_running_job_without_live_process_before_new_sub
     assert recovered_events[-1].message == "Recovered stale active job without a live worker process."
 
 
-def test_job_service_rejects_unsupported_source_type_in_a1_public_contract(tmp_path: Path) -> None:
-    service, _popen_factory = _build_service(tmp_path, plans=[])
+def test_job_service_accepts_local_audio_source_type(tmp_path: Path) -> None:
+    """local_audio is a supported source type and should be accepted by submit_job."""
+    project_dir = write_process_project(
+        tmp_path,
+        project_name="local_audio_project",
+        youtube_url="D:/input.wav",
+    )
+    service, _popen_factory = _build_service(
+        tmp_path,
+        plans=[
+            {
+                "lines": [f"[S6] Done {project_dir / 'output'}"],
+                "returncode": 0,
+            }
+        ],
+    )
 
-    with pytest.raises(UnsupportedJobRequestError, match="unsupported source_type"):
-        service.submit_job(source_type="local_audio", source_ref="D:/input.wav")
+    created = service.submit_job(source_type="local_audio", source_ref="D:/input.wav")
+    completed = _wait_for_job_status(service, created.job_id, JOB_STATUS_SUCCEEDED)
+
+    assert completed.source_type == "local_audio"
+    assert completed.source_ref == "D:/input.wav"
 
 
 def test_job_service_rejects_unsupported_speakers_value(tmp_path: Path) -> None:

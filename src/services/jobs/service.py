@@ -4,6 +4,7 @@ from dataclasses import replace
 from pathlib import Path
 from uuid import uuid4
 
+from services.job_paths import build_workspace_dir
 from services.jobs.events import EVENT_LEVEL_ERROR, EVENT_TYPE_STATUS, JobEvent
 from services.jobs.models import (
     ACTIVE_JOB_STATUSES,
@@ -74,6 +75,8 @@ class JobService:
         quota_cost: int | None = None,
         quota_state: str = "none",
         create_idempotency_key: str | None = None,
+        user_id: str | None = None,
+        source_content_hash: str | None = None,
     ) -> JobRecord:
         normalized_source_type = str(source_type).strip()
         normalized_source_ref = str(source_ref).strip()
@@ -95,15 +98,16 @@ class JobService:
         if normalized_speakers not in {"auto", "1", "2"}:
             raise UnsupportedJobRequestError(f"unsupported speakers: {normalized_speakers}")
 
-        conflicting_job = self._find_active_job()
-        if conflicting_job is not None:
-            raise JobConflictError(
-                f"job {conflicting_job.job_id} is still active with status {conflicting_job.status}"
-            )
+        # Concurrency control is enforced at gateway layer (per-user plan limits).
+        # Job API no longer rejects new submissions due to globally active jobs,
+        # but still reaps stale jobs (no live worker process) on submit.
+        self._reap_stale_jobs()
 
         timestamp = utc_now_iso()
+        job_id = f"job_{uuid4().hex}"
+        workspace_dir = build_workspace_dir(user_id, job_id) if user_id else None
         record = JobRecord(
-            job_id=f"job_{uuid4().hex}",
+            job_id=job_id,
             job_type=normalized_job_type,
             source_type=normalized_source_type,
             source_ref=normalized_source_ref,
@@ -130,6 +134,9 @@ class JobService:
             quota_cost=quota_cost,
             quota_state=quota_state or "none",
             create_idempotency_key=create_idempotency_key,
+            user_id=user_id,
+            workspace_dir=workspace_dir,
+            source_content_hash=source_content_hash,
         )
         self.store.save_job(record)
         self.store.append_event(
@@ -160,11 +167,7 @@ class JobService:
                 f"review stage {review_stage} is not approved for job {job_id}"
             )
 
-        conflicting_job = self._find_active_job(exclude_job_id=job_id)
-        if conflicting_job is not None:
-            raise JobConflictError(
-                f"job {conflicting_job.job_id} is still active with status {conflicting_job.status}"
-            )
+        # Concurrency control is enforced at gateway layer.
 
         self.runner.start(record, continue_existing=True)
         return self.require_job(job_id)
@@ -195,6 +198,13 @@ class JobService:
 
     def get_artifacts(self, job_id: str) -> dict[str, object]:
         return build_job_artifacts_payload(self.require_job(job_id))
+
+    def _reap_stale_jobs(self) -> None:
+        """Mark stale queued/running jobs (no live worker) as failed."""
+        for record in self.store.list_jobs(limit=None):
+            if record.status in {JOB_STATUS_QUEUED, JOB_STATUS_RUNNING}:
+                if self._is_stale_process_backed_active_job(record):
+                    self._mark_stale_active_job_failed(record)
 
     def _find_active_job(self, *, exclude_job_id: str | None = None) -> JobRecord | None:
         for record in self.store.list_jobs(limit=None):

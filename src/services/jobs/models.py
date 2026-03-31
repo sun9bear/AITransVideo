@@ -104,6 +104,9 @@ class JobRecord:
     quota_cost: int | None = None
     quota_state: str = "none"
     create_idempotency_key: str | None = None
+    user_id: str | None = None
+    workspace_dir: str | None = None
+    source_content_hash: str | None = None
 
     def __post_init__(self) -> None:
         self.job_id = str(self.job_id).strip()
@@ -126,6 +129,9 @@ class JobRecord:
         self.review_gate = _copy_optional_dict(self.review_gate)
         self.error_summary = _copy_optional_dict(self.error_summary)
         self.fallback_summary = _copy_optional_dict(self.fallback_summary)
+        self.user_id = _normalize_optional_text(self.user_id)
+        self.workspace_dir = _normalize_optional_text(self.workspace_dir)
+        self.source_content_hash = _normalize_optional_text(self.source_content_hash)
 
         if not self.job_id:
             raise ValueError("job_id is required")
@@ -170,6 +176,7 @@ class JobRecord:
             "review_gate": _serialize_optional_dict(self.review_gate),
             "error_summary": _serialize_optional_dict(self.error_summary),
             "fallback_summary": _serialize_optional_dict(self.fallback_summary),
+            "transcription_method": self.transcription_method,
             "service_mode": self.service_mode,
             "tts_provider": self.tts_provider,
             "tts_model": self.tts_model,
@@ -183,6 +190,9 @@ class JobRecord:
             "quota_cost": self.quota_cost,
             "quota_state": self.quota_state,
             "create_idempotency_key": self.create_idempotency_key,
+            "user_id": self.user_id,
+            "workspace_dir": self.workspace_dir,
+            "source_content_hash": self.source_content_hash,
         }
 
     @classmethod
@@ -208,6 +218,7 @@ class JobRecord:
             review_gate=payload.get("review_gate"),
             error_summary=payload.get("error_summary"),
             fallback_summary=payload.get("fallback_summary"),
+            transcription_method=payload.get("transcription_method", "assemblyai"),
             service_mode=payload.get("service_mode"),
             tts_provider=payload.get("tts_provider"),
             tts_model=payload.get("tts_model"),
@@ -221,6 +232,9 @@ class JobRecord:
             quota_cost=payload.get("quota_cost"),
             quota_state=payload.get("quota_state", "none"),
             create_idempotency_key=payload.get("create_idempotency_key"),
+            user_id=payload.get("user_id"),
+            workspace_dir=payload.get("workspace_dir"),
+            source_content_hash=payload.get("source_content_hash"),
         )
 
 

@@ -38,12 +38,15 @@ async def proxy_request(
     upstream_base: str,
     strip_prefix: str = "",
     override_body: bytes | None = None,
+    extra_headers: dict[str, str] | None = None,
 ) -> Response:
     """Forward a request to an upstream service and return its response.
 
     Args:
         override_body: If provided, use this as the request body instead of
                        the original request body.
+        extra_headers: If provided, merge these headers into the forwarded
+                       request (e.g. internal ``X-User-Id``).
     """
 
     # Build upstream URL
@@ -68,6 +71,9 @@ async def proxy_request(
     # Update content-length if body was overridden
     if override_body is not None:
         headers["content-length"] = str(len(body))
+    # Merge internal headers (e.g. X-User-Id for upstream identity)
+    if extra_headers:
+        headers.update(extra_headers)
 
     client = get_client()
     upstream_response = await client.request(

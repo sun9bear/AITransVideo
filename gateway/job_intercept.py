@@ -337,6 +337,9 @@ async def intercept_create_job(
     request_data["estimated_duration_seconds"] = estimated_duration_seconds
     request_data["quota_state"] = "none"
     request_data["create_idempotency_key"] = idempotency_key
+    # Inject user_id so Job API can build user-isolated workspace_dir
+    if user is not None:
+        request_data["user_id"] = str(user.id)
 
     # Forward to upstream with modified body
     upstream_response = await proxy_request(

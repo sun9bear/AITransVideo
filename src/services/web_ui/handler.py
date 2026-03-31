@@ -936,7 +936,7 @@ def _build_web_ui_handler() -> type[BaseHTTPRequestHandler]:
                 return
 
             import cgi
-            import tempfile as _tempfile
+            import uuid as _uuid
 
             form = cgi.FieldStorage(
                 fp=self.rfile,
@@ -953,15 +953,23 @@ def _build_web_ui_handler() -> type[BaseHTTPRequestHandler]:
                 return
 
             original_filename = getattr(file_item, "filename", "uploaded_video.mp4") or "uploaded_video.mp4"
-            upload_dir = Path(
+            uploads_root = Path(
                 getattr(self.server.job_manager, "project_root", None) or "."  # type: ignore[attr-defined]
-            ) / "uploads"
-            upload_dir.mkdir(parents=True, exist_ok=True)
+            )
+            upload_id = _uuid.uuid4().hex
 
-            # 用时间戳避免文件名冲突
-            import time as _time
-            safe_name = re.sub(r"[^\w.\-]", "_", original_filename)
-            dest_path = upload_dir / f"{int(_time.time())}_{safe_name}"
+            # Trusted user_id from gateway X-User-Id header (set by proxy)
+            user_id = self.headers.get("X-User-Id")
+            if user_id:
+                from services.job_paths import build_upload_path
+                rel_path = build_upload_path(user_id, upload_id, original_filename)
+                dest_path = uploads_root / rel_path
+            else:
+                # Direct-connect fallback (no gateway): global uploads dir
+                safe_name = re.sub(r"[^\w.\-]", "_", original_filename)
+                dest_path = uploads_root / "uploads" / f"{upload_id}_{safe_name}"
+
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
 
             with open(dest_path, "wb") as dest_file:
                 while True:

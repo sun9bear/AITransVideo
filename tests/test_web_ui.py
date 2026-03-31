@@ -2348,3 +2348,82 @@ def test_save_web_ui_settings_rejects_s5_prompt_without_required_tokens(tmp_path
             provider_api_keys={},
             config_path=config_path,
         )
+
+
+# ===================================================================
+# Upload path isolation tests
+# ===================================================================
+
+def _build_multipart_upload(filename: str, content: bytes) -> tuple[bytes, str]:
+    """Build a minimal multipart/form-data body with a single file field."""
+    boundary = "----TestBoundary12345"
+    parts = []
+    parts.append(f"--{boundary}\r\n".encode())
+    parts.append(f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'.encode())
+    parts.append(b"Content-Type: application/octet-stream\r\n\r\n")
+    parts.append(content)
+    parts.append(f"\r\n--{boundary}--\r\n".encode())
+    body = b"".join(parts)
+    content_type = f"multipart/form-data; boundary={boundary}"
+    return body, content_type
+
+
+def test_upload_with_user_id_header_writes_to_isolated_path(tmp_path: Path) -> None:
+    """When X-User-Id header is present, file lands in uploads/<user_id>/..."""
+    config_path = tmp_path / "autodub.local.json"
+    _write_test_config(config_path)
+    server = create_web_ui_server(host="127.0.0.1", port=0)
+    server.job_manager = type("FakeManager", (), {"project_root": str(tmp_path)})()
+
+    with _running_server(server) as base_url:
+        body, ct = _build_multipart_upload("test video.mp4", b"fake video data")
+        req = Request(
+            f"{base_url}/api/upload-video",
+            data=body,
+            headers={
+                "Content-Type": ct,
+                "X-User-Id": "42",
+            },
+            method="POST",
+        )
+        with urlopen(req) as response:
+            result = json.loads(response.read().decode("utf-8"))
+
+    file_path = result["file_path"]
+    # Must be under uploads/42/
+    assert "/42/" in file_path.replace("\\", "/") or "\\42\\" in file_path
+    # Must NOT use timestamp naming — should have uuid-based upload_id
+    import os
+    basename = os.path.basename(file_path)
+    # basename format: <upload_id>_<safe_name>
+    assert "test_video.mp4" in basename
+    # 32-char hex uuid prefix
+    upload_id_part = basename.split("_")[0]
+    assert len(upload_id_part) == 32
+    # File actually exists with correct content
+    assert Path(file_path).read_bytes() == b"fake video data"
+    assert result["file_name"] == "test video.mp4"
+
+
+def test_upload_without_user_id_header_falls_back_to_global_uploads(tmp_path: Path) -> None:
+    """Without X-User-Id header (direct-connect mode), file lands in uploads/."""
+    config_path = tmp_path / "autodub.local.json"
+    _write_test_config(config_path)
+    server = create_web_ui_server(host="127.0.0.1", port=0)
+    server.job_manager = type("FakeManager", (), {"project_root": str(tmp_path)})()
+
+    with _running_server(server) as base_url:
+        body, ct = _build_multipart_upload("fallback.mp4", b"fallback data")
+        req = Request(
+            f"{base_url}/api/upload-video",
+            data=body,
+            headers={"Content-Type": ct},
+            method="POST",
+        )
+        with urlopen(req) as response:
+            result = json.loads(response.read().decode("utf-8"))
+
+    file_path = result["file_path"]
+    # Should be under uploads/ but NOT user-scoped
+    assert "uploads" in file_path.replace("\\", "/")
+    assert Path(file_path).read_bytes() == b"fallback data"

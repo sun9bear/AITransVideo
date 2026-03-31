@@ -36,6 +36,9 @@ class TestJobRecordSnapshotFields:
             quota_cost=1,
             quota_state="none",
             create_idempotency_key="idem-key-001",
+            user_id="42",
+            workspace_dir="projects/42/test-001",
+            source_content_hash="sha256:abc123",
         )
         job = JobRecord.from_dict(payload)
         d = job.to_dict()
@@ -53,6 +56,9 @@ class TestJobRecordSnapshotFields:
         assert d["quota_cost"] == 1
         assert d["quota_state"] == "none"
         assert d["create_idempotency_key"] == "idem-key-001"
+        assert d["user_id"] == "42"
+        assert d["workspace_dir"] == "projects/42/test-001"
+        assert d["source_content_hash"] == "sha256:abc123"
 
     def test_missing_optional_fields_default_correctly(self):
         payload = _make_job()
@@ -64,6 +70,9 @@ class TestJobRecordSnapshotFields:
         assert d["quota_state"] == "none"
         assert d["create_idempotency_key"] is None
         assert d["estimated_duration_seconds"] is None
+        assert d["user_id"] is None
+        assert d["workspace_dir"] is None
+        assert d["source_content_hash"] is None
 
     def test_quota_state_defaults_to_none(self):
         job = JobRecord.from_dict(_make_job())
@@ -78,3 +87,17 @@ class TestJobRecordSnapshotFields:
         job1 = JobRecord.from_dict(payload)
         job2 = JobRecord.from_dict(job1.to_dict())
         assert job1.to_dict() == job2.to_dict()
+
+    def test_transcription_method_round_trip(self):
+        payload = _make_job(transcription_method="gemini")
+        job = JobRecord.from_dict(payload)
+        assert job.transcription_method == "gemini"
+        d = job.to_dict()
+        assert d["transcription_method"] == "gemini"
+        job2 = JobRecord.from_dict(d)
+        assert job2.transcription_method == "gemini"
+
+    def test_transcription_method_defaults_to_assemblyai(self):
+        payload = _make_job()
+        job = JobRecord.from_dict(payload)
+        assert job.transcription_method == "assemblyai"

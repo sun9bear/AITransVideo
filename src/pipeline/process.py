@@ -217,7 +217,7 @@ def _cleanup_upload_mp3(project_dir: Path) -> None:
 
 @dataclass(slots=True)
 class ProcessConfig:
-    youtube_url: str
+    youtube_url: str = ""
     voice_a: str | None = None
     speaker_a_name: str = "Speaker A"
     speakers: int | str = "auto"
@@ -230,6 +230,39 @@ class ProcessConfig:
     transcription_method: str = "assemblyai"
     job_id: str | None = None  # Job API job_id（由 process_runner 传入）
     job_record: object | None = None  # DB job row with policy snapshot fields
+    source_type: str = ""
+    source_ref: str = ""
+
+    def __post_init__(self) -> None:
+        """Normalize source fields for backward compatibility.
+
+        Rules:
+        - If only ``youtube_url`` is given (legacy callers), derive
+          ``source_type="youtube_url"`` and ``source_ref=youtube_url``.
+        - If ``source_type``/``source_ref`` are given explicitly, back-fill
+          ``youtube_url`` when the source is a YouTube URL (so existing
+          pipeline code that reads ``config.youtube_url`` keeps working).
+        - ``source_type``/``source_ref`` always take precedence over the
+          positional ``youtube_url`` when both are provided.
+        """
+        st = (self.source_type or "").strip()
+        sr = (self.source_ref or "").strip()
+        yt = (self.youtube_url or "").strip()
+
+        if st and sr:
+            # Explicit source wins — always override youtube_url
+            self.source_type = st
+            self.source_ref = sr
+            if st == "youtube_url":
+                self.youtube_url = sr
+            else:
+                self.youtube_url = ""
+        elif yt:
+            # Legacy caller only gave youtube_url
+            self.source_type = "youtube_url"
+            self.source_ref = yt
+            self.youtube_url = yt
+        # else: both empty — will be caught by pipeline validation
 
 
 @dataclass(slots=True)
@@ -299,13 +332,15 @@ class ProcessPipeline:
         self.project_builder = project_builder or ProjectBuilder()
 
     def run(self, config: ProcessConfig) -> ProcessResult:
+        source_type = config.source_type or "youtube_url"
+        source_ref = config.source_ref or config.youtube_url or ""
         normalized_url = config.youtube_url.strip()
         normalized_voice_a = config.voice_a.strip() if isinstance(config.voice_a, str) else None
         normalized_voice_b = config.voice_b.strip() if isinstance(config.voice_b, str) else None
         normalized_speakers = self._normalize_speakers(config.speakers)
 
-        if not normalized_url:
-            raise ValueError("youtube_url 不能为空。")
+        if not source_ref.strip():
+            raise ValueError("source_ref 不能为空。")
 
         assemblyai_config = self._load_stage_config("AssemblyAI", load_assemblyai_config)
         gemini_config = self._load_stage_config("Gemini", load_gemini_config)
@@ -356,18 +391,12 @@ class ProcessPipeline:
             if config.project_dir is not None
             else None
         )
-        existing_project_dir = (
-            None
-            if explicit_project_dir is not None
-            else self._find_existing_project_by_url(normalized_url)
-        )
 
+        # Workspace selection: explicit project_dir wins; otherwise create fresh dir.
+        # No longer reusing old project directories based on URL match.
         if explicit_project_dir is not None:
             working_project_dir = explicit_project_dir
             final_project_dir = explicit_project_dir
-        elif existing_project_dir is not None:
-            working_project_dir = existing_project_dir
-            final_project_dir = existing_project_dir
         else:
             working_project_dir = Path(
                 tempfile.mkdtemp(prefix="_process_", dir=projects_root)
@@ -379,75 +408,83 @@ class ProcessPipeline:
 
         try:
             current_project_dir = final_project_dir
-            video_path = (current_project_dir / "video" / "original.mp4").resolve(strict=False)
-            source_audio_path = (current_project_dir / "audio" / "original.wav").resolve(strict=False)
 
-            if video_path.exists() and source_audio_path.exists():
-                print("[S0] 已有下载缓存，跳过下载")
-                ingestion_execution_mode = "cache_restore_full"
-                download_result = self._load_download_result(
-                    current_project_dir,
-                    fallback_url=normalized_url,
-                )
-            else:
-                print("[S0] 下载视频...")
-                ingestion_execution_mode = "fresh_run"
-                download_result = YouTubeDownloader().download(
-                    DownloadRequest(
-                        url=normalized_url,
-                        output_dir=str(working_project_dir),
-                        cookies_from_browser=_normalize_optional_text(
-                            youtube_download_config.get("cookies_from_browser")
-                        ),
-                        cookie_file=_normalize_optional_text(
-                            youtube_download_config.get("cookie_file")
-                        ),
-                        max_retries=_coerce_int(
-                            youtube_download_config.get("max_retries"),
-                            default=2,
-                        ),
-                        retry_backoff_seconds=_coerce_float(
-                            youtube_download_config.get("retry_backoff_seconds"),
-                            default=1.5,
-                        ),
+            if source_type in ("local_video", "local_audio"):
+                # --- Local source ingest ---
+                download_result, video_path, source_audio_path, ingestion_execution_mode = (
+                    self._ingest_local_source(
+                        source_type=source_type,
+                        source_ref=source_ref,
+                        project_dir=final_project_dir,
                     )
                 )
+            else:
+                # --- YouTube ingest (existing logic) ---
+                video_path = (current_project_dir / "video" / "original.mp4").resolve(strict=False)
+                source_audio_path = (current_project_dir / "audio" / "original.wav").resolve(strict=False)
 
-                if explicit_project_dir is None and working_project_dir.name.startswith("_process_"):
-                    resolved_project_dir = Path(
-                        self._resolve_project_dir(config, download_result.video_title)
-                    ).resolve(strict=False)
-                    if resolved_project_dir != working_project_dir:
-                        if resolved_project_dir.exists():
-                            existing_metadata = self._load_download_metadata(resolved_project_dir)
-                            if str(existing_metadata.get("url") or "").strip() == normalized_url:
-                                print(f"[S0] 项目目录已存在，继续使用：{resolved_project_dir}")
-                                if working_project_dir.exists():
-                                    shutil.rmtree(working_project_dir, ignore_errors=True)
-                            else:
+                if video_path.exists() and source_audio_path.exists():
+                    print("[S0] 已有下载缓存，跳过下载")
+                    ingestion_execution_mode = "cache_restore_full"
+                    download_result = self._load_download_result(
+                        current_project_dir,
+                        fallback_url=normalized_url,
+                    )
+                else:
+                    print("[S0] 下载视频...")
+                    ingestion_execution_mode = "fresh_run"
+                    download_result = YouTubeDownloader().download(
+                        DownloadRequest(
+                            url=normalized_url,
+                            output_dir=str(working_project_dir),
+                            cookies_from_browser=_normalize_optional_text(
+                                youtube_download_config.get("cookies_from_browser")
+                            ),
+                            cookie_file=_normalize_optional_text(
+                                youtube_download_config.get("cookie_file")
+                            ),
+                            max_retries=_coerce_int(
+                                youtube_download_config.get("max_retries"),
+                                default=2,
+                            ),
+                            retry_backoff_seconds=_coerce_float(
+                                youtube_download_config.get("retry_backoff_seconds"),
+                                default=1.5,
+                            ),
+                        )
+                    )
+
+                    if explicit_project_dir is None and working_project_dir.name.startswith("_process_"):
+                        resolved_project_dir = Path(
+                            self._resolve_project_dir(config, download_result.video_title)
+                        ).resolve(strict=False)
+                        if resolved_project_dir != working_project_dir:
+                            if resolved_project_dir.exists():
+                                # Slug dir already taken — keep the temp dir to avoid sharing
                                 print(
-                                    "[S0] 目标目录已存在且不属于当前 URL，保留临时项目目录："
+                                    f"[S0] 目标目录已被占用，保留临时目录："
                                     f"{working_project_dir}"
                                 )
                                 resolved_project_dir = working_project_dir
+                            else:
+                                resolved_project_dir.parent.mkdir(parents=True, exist_ok=True)
+                                shutil.move(str(working_project_dir), str(resolved_project_dir))
+                            final_project_dir = resolved_project_dir
                         else:
-                            resolved_project_dir.parent.mkdir(parents=True, exist_ok=True)
-                            shutil.move(str(working_project_dir), str(resolved_project_dir))
-                        final_project_dir = resolved_project_dir
+                            final_project_dir = working_project_dir
                     else:
-                        final_project_dir = working_project_dir
-                else:
-                    final_project_dir = current_project_dir
+                        final_project_dir = current_project_dir
 
-                download_result = self._load_download_result(
-                    final_project_dir,
-                    fallback_url=normalized_url,
-                    fallback_title=download_result.video_title,
-                    fallback_duration_ms=download_result.duration_ms,
-                )
+                    download_result = self._load_download_result(
+                        final_project_dir,
+                        fallback_url=normalized_url,
+                        fallback_title=download_result.video_title,
+                        fallback_duration_ms=download_result.duration_ms,
+                    )
 
-            video_path = (final_project_dir / "video" / "original.mp4").resolve(strict=False)
-            source_audio_path = (final_project_dir / "audio" / "original.wav").resolve(strict=False)
+                video_path = (final_project_dir / "video" / "original.mp4").resolve(strict=False)
+                source_audio_path = (final_project_dir / "audio" / "original.wav").resolve(strict=False)
+
             review_state_manager = ReviewStateManager(final_project_dir / "review_state.json")
             state_manager = StateManager(str(final_project_dir / "project_state.json"))
             state_manager.set_project(final_project_dir.name)
@@ -460,6 +497,7 @@ class ProcessPipeline:
                     video_path=video_path,
                     source_audio_path=source_audio_path,
                     execution_mode=ingestion_execution_mode,
+                    source_type=source_type,
                 ),
             )
             current_stage_name = "audio_preparation"
@@ -487,6 +525,8 @@ class ProcessPipeline:
             current_stage_name = None
             self._refresh_download_metadata(
                 final_project_dir=final_project_dir,
+                video_path=video_path,
+                source_audio_path=source_audio_path,
                 video_title=download_result.video_title,
                 duration_ms=download_result.duration_ms,
                 url=download_result.url,
@@ -941,7 +981,6 @@ class ProcessPipeline:
 
             reuse_approved_translation_review = self._should_reuse_approved_translation_review(
                 explicit_project_dir=explicit_project_dir,
-                existing_project_dir=existing_project_dir,
                 wait_for_review=config.wait_for_review,
             )
             approved_translation_review = self._get_approved_review_payload(
@@ -1199,6 +1238,7 @@ class ProcessPipeline:
                 total_duration_ms=actual_duration_ms,
                 segments=translation_result.segments,
                 stage_snapshot=state_manager.load().get("stages", {}),
+                source_type=source_type,
             )
             output_bundle = self._dispatch_process_output_bundle(
                 project_dir=final_project_dir,
@@ -1301,13 +1341,11 @@ class ProcessPipeline:
         self,
         *,
         explicit_project_dir: Path | None,
-        existing_project_dir: Path | None,
         wait_for_review: bool,
     ) -> bool:
-        # Fresh Web UI runs do not pass --project-dir. If we matched an old
-        # project only by URL, its historical translation approval should not
-        # silently skip the current human confirmation step.
-        if wait_for_review and explicit_project_dir is None and existing_project_dir is not None:
+        # When running via Web UI (wait_for_review=True) without an explicit
+        # project dir, always require fresh human review.
+        if wait_for_review and explicit_project_dir is None:
             return False
         return True
 
@@ -1441,20 +1479,6 @@ class ProcessPipeline:
             "segment_count": translation_result.total_segments,
         }
 
-    def _find_existing_project_by_url(self, youtube_url: str) -> Path | None:
-        projects_root = _resolve_projects_root()
-        if not projects_root.exists():
-            return None
-
-        for candidate in projects_root.iterdir():
-            if not candidate.is_dir():
-                continue
-            metadata = self._load_download_metadata(candidate)
-            cached_url = str(metadata.get("url") or "").strip()
-            if cached_url and cached_url == youtube_url:
-                return candidate.resolve(strict=False)
-        return None
-
     def _normalize_speakers(self, value: int | str) -> int | str:
         if isinstance(value, int):
             if value in {1, 2}:
@@ -1518,8 +1542,19 @@ class ProcessPipeline:
         fallback_duration_ms: int = 0,
     ) -> DownloadResult:
         metadata = self._load_download_metadata(project_dir)
-        video_path = (project_dir / "video" / "original.mp4").resolve(strict=False)
-        audio_path = (project_dir / "audio" / "original.wav").resolve(strict=False)
+        # Prefer persisted real paths; fall back to legacy fixed names
+        video_path_str = _normalize_optional_text(metadata.get("video_path"))
+        audio_path_str = _normalize_optional_text(metadata.get("audio_path"))
+        video_path = (
+            Path(video_path_str).resolve(strict=False)
+            if video_path_str
+            else (project_dir / "video" / "original.mp4").resolve(strict=False)
+        )
+        audio_path = (
+            Path(audio_path_str).resolve(strict=False)
+            if audio_path_str
+            else (project_dir / "audio" / "original.wav").resolve(strict=False)
+        )
         return DownloadResult(
             video_path=str(video_path),
             audio_path=str(audio_path),
@@ -2280,6 +2315,7 @@ class ProcessPipeline:
         total_duration_ms: int,
         segments: list[DubbingSegment],
         stage_snapshot: dict[str, object],
+        source_type: str = "youtube_url",
     ) -> WorkflowBuildResult:
         artifact_index = self._build_process_artifact_index(
             project_dir=project_dir,
@@ -2296,6 +2332,7 @@ class ProcessPipeline:
                 youtube_url=youtube_url,
                 download_result=download_result,
                 total_duration_ms=total_duration_ms,
+                source_type=source_type,
             ),
             artifact_index=artifact_index,
             stage_snapshot=stage_snapshot,
@@ -2356,11 +2393,17 @@ class ProcessPipeline:
         youtube_url: str,
         download_result: DownloadResult,
         total_duration_ms: int,
+        source_type: str = "youtube_url",
     ) -> dict[str, object]:
+        # Use real video/audio path from download_result for local sources
+        if source_type in ("local_video", "local_audio"):
+            source_path = download_result.video_path if source_type == "local_video" else download_result.audio_path
+        else:
+            source_path = str((project_dir / "video" / "original.mp4").resolve(strict=False))
         return build_canonical_source_info(
-            source_kind="youtube_url",
-            locator=youtube_url,
-            source_path=str((project_dir / "video" / "original.mp4").resolve(strict=False)),
+            source_kind=source_type,
+            locator=download_result.url,
+            source_path=source_path,
             metadata={
                 "video_title": download_result.video_title,
                 "duration_ms": total_duration_ms,
@@ -2430,19 +2473,20 @@ class ProcessPipeline:
         video_path: Path,
         source_audio_path: Path,
         execution_mode: str,
+        source_type: str = "youtube_url",
     ) -> dict[str, object]:
         metadata_path = final_project_dir / "download_metadata.json"
         return {
             "execution_mode": execution_mode,
-            "source_kind": "youtube_url",
+            "source_kind": source_type,
             "locator": download_result.url,
             "title": download_result.video_title,
             "duration_ms": int(download_result.duration_ms),
             "artifacts": build_artifacts_payload(
                 kind="ingestion_assets",
                 file_paths=[
-                    str(video_path.resolve(strict=False)),
-                    str(source_audio_path.resolve(strict=False)),
+                    str(video_path.resolve(strict=False)) if video_path.exists() else None,
+                    str(source_audio_path.resolve(strict=False)) if source_audio_path.exists() else None,
                     str(metadata_path.resolve(strict=False)) if metadata_path.exists() else None,
                 ],
             ),
@@ -2721,6 +2765,92 @@ class ProcessPipeline:
             encoding="utf-8",
         )
 
+    def _ingest_local_source(
+        self,
+        *,
+        source_type: str,
+        source_ref: str,
+        project_dir: Path,
+    ) -> tuple[DownloadResult, Path, Path]:
+        """Ingest a local video or audio file into the workspace.
+
+        Returns (download_result, video_path, source_audio_path, execution_mode).
+        """
+        source_path = Path(source_ref).resolve(strict=False)
+        if not source_path.exists():
+            raise FileNotFoundError(f"本地来源文件不存在: {source_ref}")
+
+        video_dir = project_dir / "video"
+        audio_dir = project_dir / "audio"
+        video_dir.mkdir(parents=True, exist_ok=True)
+        audio_dir.mkdir(parents=True, exist_ok=True)
+
+        if source_type == "local_video":
+            print(f"[S0] 使用本地视频: {source_ref}")
+            # Copy/link video into workspace preserving original extension
+            workspace_video = video_dir / f"original{source_path.suffix or '.mp4'}"
+            if not workspace_video.exists():
+                shutil.copy2(str(source_path), str(workspace_video))
+            video_path = workspace_video.resolve(strict=False)
+            # Extract audio from video
+            workspace_audio = audio_dir / "original.wav"
+            if not workspace_audio.exists():
+                self._extract_audio_from_video(video_path, workspace_audio)
+            source_audio_path = workspace_audio.resolve(strict=False)
+        else:
+            # local_audio — no video file
+            print(f"[S0] 使用本地音频: {source_ref}")
+            workspace_audio = audio_dir / f"original{source_path.suffix or '.wav'}"
+            if not workspace_audio.exists():
+                shutil.copy2(str(source_path), str(workspace_audio))
+            source_audio_path = workspace_audio.resolve(strict=False)
+            video_path = project_dir / "video" / "original.mp4"  # placeholder, won't exist
+
+        # Build a DownloadResult-compatible object for downstream compatibility
+        title = source_path.stem or "local_source"
+        duration_ms = _ffprobe_duration_ms(source_audio_path) if source_audio_path.exists() else 0
+        download_result = DownloadResult(
+            video_path=str(video_path),
+            audio_path=str(source_audio_path),
+            video_title=title,
+            duration_ms=duration_ms,
+            url=source_ref,
+            description="",
+        )
+
+        # Write download_metadata.json for compatibility
+        metadata_path = project_dir / "download_metadata.json"
+        metadata_path.write_text(
+            json.dumps(
+                {
+                    "source_type": source_type,
+                    "url": source_ref,
+                    "video_title": title,
+                    "duration_ms": duration_ms,
+                    "video_path": str(video_path),
+                    "audio_path": str(source_audio_path),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        return download_result, video_path, source_audio_path, "local_ingest"
+
+    @staticmethod
+    def _extract_audio_from_video(video_path: Path, output_audio_path: Path) -> None:
+        """Extract audio track from video using ffmpeg."""
+        import subprocess
+        cmd = [
+            "ffmpeg", "-i", str(video_path),
+            "-vn", "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "1",
+            "-y", str(output_audio_path),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg 音频提取失败: {result.stderr[:500]}")
+
     def _ensure_separated_audio_assets(
         self,
         *,
@@ -2744,6 +2874,8 @@ class ProcessPipeline:
         self,
         *,
         final_project_dir: Path,
+        video_path: Path,
+        source_audio_path: Path,
         video_title: str,
         duration_ms: int,
         url: str,
@@ -2763,8 +2895,8 @@ class ProcessPipeline:
 
         metadata.update(
             {
-                "video_path": str((final_project_dir / "video" / "original.mp4").resolve(strict=False)),
-                "audio_path": str((final_project_dir / "audio" / "original.wav").resolve(strict=False)),
+                "video_path": str(video_path.resolve(strict=False)),
+                "audio_path": str(source_audio_path.resolve(strict=False)),
                 "speech_audio_path": str(speech_audio_path.resolve(strict=False)),
                 "ambient_audio_path": str(ambient_audio_path.resolve(strict=False)),
                 "video_title": video_title,

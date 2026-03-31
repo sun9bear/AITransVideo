@@ -121,6 +121,8 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
                         quota_cost=parsed_quota,
                         quota_state=str(payload.get("quota_state") or "none").strip(),
                         create_idempotency_key=str(payload["create_idempotency_key"]).strip() if payload.get("create_idempotency_key") else None,
+                        user_id=str(payload["user_id"]).strip() if payload.get("user_id") else None,
+                        source_content_hash=str(payload["source_content_hash"]).strip() if payload.get("source_content_hash") else None,
                     )
                     self._write_json(HTTPStatus.ACCEPTED, job.to_dict())
                     return

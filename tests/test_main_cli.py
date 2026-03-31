@@ -104,3 +104,97 @@ def test_run_process_command_shuts_down_tts_runtime_after_failure(
         main.run_process_command(["main.py", "process", "https://example.test/video"])
 
     assert cleanup_calls == ["done"]
+
+
+# ===================================================================
+# parse_process_args — CLI source parameter tests
+# ===================================================================
+
+
+class TestParseProcessArgsSourceParams:
+    """Verify legacy positional, new explicit, and mixed CLI source args."""
+
+    def test_legacy_positional_youtube_url(self):
+        config = main.parse_process_args(
+            ["main.py", "process", "https://youtube.com/watch?v=abc"]
+        )
+        assert config.youtube_url == "https://youtube.com/watch?v=abc"
+        assert config.source_type == "youtube_url"
+        assert config.source_ref == "https://youtube.com/watch?v=abc"
+
+    def test_explicit_youtube_url(self):
+        config = main.parse_process_args(
+            ["main.py", "process",
+             "--source-type", "youtube_url",
+             "--source-ref", "https://youtube.com/watch?v=xyz"]
+        )
+        assert config.source_type == "youtube_url"
+        assert config.source_ref == "https://youtube.com/watch?v=xyz"
+        # Back-filled for legacy pipeline compat
+        assert config.youtube_url == "https://youtube.com/watch?v=xyz"
+
+    def test_explicit_local_video(self):
+        config = main.parse_process_args(
+            ["main.py", "process",
+             "--source-type", "local_video",
+             "--source-ref", "/uploads/42/abc_video.mp4"]
+        )
+        assert config.source_type == "local_video"
+        assert config.source_ref == "/uploads/42/abc_video.mp4"
+        # youtube_url should be empty — not a YouTube source
+        assert config.youtube_url == ""
+
+    def test_explicit_local_audio(self):
+        config = main.parse_process_args(
+            ["main.py", "process",
+             "--source-type", "local_audio",
+             "--source-ref", "D:/input.wav"]
+        )
+        assert config.source_type == "local_audio"
+        assert config.source_ref == "D:/input.wav"
+
+    def test_explicit_takes_precedence_over_positional(self):
+        """When both positional and explicit are given, explicit wins."""
+        config = main.parse_process_args(
+            ["main.py", "process", "https://youtube.com/old",
+             "--source-type", "local_video",
+             "--source-ref", "/uploads/new.mp4"]
+        )
+        assert config.source_type == "local_video"
+        assert config.source_ref == "/uploads/new.mp4"
+        assert config.youtube_url == ""  # non-YouTube: youtube_url cleared
+
+    def test_explicit_youtube_overrides_positional_youtube_url(self):
+        """Explicit --source-ref must override the positional youtube_url compat field."""
+        config = main.parse_process_args(
+            ["main.py", "process", "https://youtube.com/old",
+             "--source-type", "youtube_url",
+             "--source-ref", "https://youtube.com/new"]
+        )
+        assert config.source_type == "youtube_url"
+        assert config.source_ref == "https://youtube.com/new"
+        assert config.youtube_url == "https://youtube.com/new"
+
+    def test_only_source_type_without_source_ref_is_rejected(self):
+        with pytest.raises(SystemExit):
+            main.parse_process_args(
+                ["main.py", "process", "--source-type", "local_video"]
+            )
+
+    def test_only_source_ref_without_source_type_is_rejected(self):
+        with pytest.raises(SystemExit):
+            main.parse_process_args(
+                ["main.py", "process", "--source-ref", "/tmp/x.mp4"]
+            )
+
+    def test_legacy_with_other_flags(self):
+        config = main.parse_process_args(
+            ["main.py", "process", "https://youtube.com/watch?v=test",
+             "--speakers", "2", "--voice-a", "voice-001",
+             "--job-id", "job_abc"]
+        )
+        assert config.source_type == "youtube_url"
+        assert config.source_ref == "https://youtube.com/watch?v=test"
+        assert config.speakers == "2"
+        assert config.voice_a == "voice-001"
+        assert config.job_id == "job_abc"

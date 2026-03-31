@@ -20,6 +20,520 @@ from services.voice.voice_lookup import VoiceLookupError
 import pipeline.process as process_module
 
 
+# ===================================================================
+# ProcessConfig source field normalization
+# ===================================================================
+
+
+class TestProcessConfigSourceNormalization:
+    """Verify backward-compatible normalization between youtube_url and source_type/source_ref."""
+
+    def test_legacy_youtube_url_only(self):
+        c = ProcessConfig(youtube_url="https://youtube.com/watch?v=abc")
+        assert c.source_type == "youtube_url"
+        assert c.source_ref == "https://youtube.com/watch?v=abc"
+        assert c.youtube_url == "https://youtube.com/watch?v=abc"
+
+    def test_explicit_youtube_source(self):
+        c = ProcessConfig(source_type="youtube_url", source_ref="https://youtube.com/watch?v=xyz")
+        assert c.youtube_url == "https://youtube.com/watch?v=xyz"
+        assert c.source_type == "youtube_url"
+        assert c.source_ref == "https://youtube.com/watch?v=xyz"
+
+    def test_explicit_local_video(self):
+        c = ProcessConfig(source_type="local_video", source_ref="/uploads/42/video.mp4")
+        assert c.source_type == "local_video"
+        assert c.source_ref == "/uploads/42/video.mp4"
+        assert c.youtube_url == ""
+
+    def test_explicit_local_audio(self):
+        c = ProcessConfig(source_type="local_audio", source_ref="D:/input.wav")
+        assert c.source_type == "local_audio"
+        assert c.source_ref == "D:/input.wav"
+        assert c.youtube_url == ""
+
+    def test_explicit_local_wins_over_legacy_youtube_url(self):
+        c = ProcessConfig(
+            youtube_url="https://youtube.com/old",
+            source_type="local_video",
+            source_ref="/uploads/new.mp4",
+        )
+        assert c.source_type == "local_video"
+        assert c.source_ref == "/uploads/new.mp4"
+        assert c.youtube_url == ""  # non-YouTube: youtube_url must be cleared
+
+    def test_explicit_youtube_overrides_old_youtube_url(self):
+        """When both youtube_url and explicit youtube source are given, explicit wins."""
+        c = ProcessConfig(
+            youtube_url="https://youtube.com/old",
+            source_type="youtube_url",
+            source_ref="https://youtube.com/new",
+        )
+        assert c.source_type == "youtube_url"
+        assert c.source_ref == "https://youtube.com/new"
+        assert c.youtube_url == "https://youtube.com/new"  # must be overridden
+
+    def test_both_empty_leaves_fields_empty(self):
+        c = ProcessConfig()
+        assert c.source_type == ""
+        assert c.source_ref == ""
+        assert c.youtube_url == ""
+
+    def test_explicit_youtube_backfills_youtube_url_for_pipeline_compat(self):
+        """Existing pipeline code reads config.youtube_url; must still work."""
+        c = ProcessConfig(source_type="youtube_url", source_ref="https://yt.com/v=test")
+        assert c.youtube_url == "https://yt.com/v=test"
+
+
+# ===================================================================
+# ProcessPipeline source-aware ingest tests
+# ===================================================================
+
+
+def _stub_pipeline_configs(monkeypatch):
+    """Stub config loaders so pipeline.run() can proceed past config loading."""
+    monkeypatch.setattr(
+        "pipeline.process.load_assemblyai_config",
+        lambda: {"api_key": "fake-assemblyai-key"},
+    )
+    monkeypatch.setattr(
+        "pipeline.process.load_gemini_config",
+        lambda: {"api_key": "fake-gemini-key"},
+    )
+    monkeypatch.setattr(
+        "pipeline.process.load_llm_fallback_config",
+        lambda: {"provider": "mock"},
+    )
+    monkeypatch.setattr(
+        "pipeline.process.load_tts_config",
+        lambda: {"api_key": "fake-tts-key"},
+    )
+    monkeypatch.setattr(
+        "pipeline.process.load_youtube_download_config",
+        lambda: {},
+    )
+
+
+class TestProcessPipelineSourceAwareIngest:
+    """Verify that ProcessPipeline.run() branches correctly on source_type."""
+
+    def test_local_video_does_not_call_youtube_downloader(self, tmp_path, monkeypatch):
+        """local_video source must skip YouTubeDownloader entirely."""
+        _stub_pipeline_configs(monkeypatch)
+
+        source_video = tmp_path / "input_video.mp4"
+        source_video.write_bytes(b"\x00" * 100)
+
+        project_dir = tmp_path / "workspace"
+        project_dir.mkdir()
+
+        download_called = {"count": 0}
+
+        import modules.ingestion.youtube.downloader as dl_module
+
+        class _TrackingDownloader:
+            def download(self, *args, **kwargs):
+                download_called["count"] += 1
+                raise AssertionError("YouTubeDownloader.download should not be called for local_video")
+
+        monkeypatch.setattr(dl_module, "YouTubeDownloader", _TrackingDownloader)
+
+        def fake_extract(video_path, output_audio_path):
+            output_audio_path.parent.mkdir(parents=True, exist_ok=True)
+            output_audio_path.write_bytes(b"\x00" * 50)
+
+        monkeypatch.setattr(ProcessPipeline, "_extract_audio_from_video", staticmethod(fake_extract))
+        monkeypatch.setattr("pipeline.process._ffprobe_duration_ms", lambda p: 10000)
+
+        pipeline = ProcessPipeline()
+        config = ProcessConfig(
+            source_type="local_video",
+            source_ref=str(source_video),
+            project_dir=str(project_dir),
+        )
+
+        try:
+            pipeline.run(config)
+        except Exception:
+            pass  # Expected to fail in later stages (no real transcriber)
+
+        assert download_called["count"] == 0
+        assert (project_dir / "video").exists()
+        assert any((project_dir / "video").iterdir())
+        meta_path = project_dir / "download_metadata.json"
+        assert meta_path.exists()
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        assert meta["source_type"] == "local_video"
+
+    def test_local_audio_does_not_call_youtube_downloader(self, tmp_path, monkeypatch):
+        """local_audio source must skip YouTubeDownloader entirely."""
+        _stub_pipeline_configs(monkeypatch)
+
+        source_audio = tmp_path / "input_audio.wav"
+        source_audio.write_bytes(b"\x00" * 100)
+
+        project_dir = tmp_path / "workspace"
+        project_dir.mkdir()
+
+        download_called = {"count": 0}
+
+        import modules.ingestion.youtube.downloader as dl_module
+
+        class _TrackingDownloader:
+            def download(self, *args, **kwargs):
+                download_called["count"] += 1
+                raise AssertionError("YouTubeDownloader.download should not be called for local_audio")
+
+        monkeypatch.setattr(dl_module, "YouTubeDownloader", _TrackingDownloader)
+        monkeypatch.setattr("pipeline.process._ffprobe_duration_ms", lambda p: 5000)
+
+        pipeline = ProcessPipeline()
+        config = ProcessConfig(
+            source_type="local_audio",
+            source_ref=str(source_audio),
+            project_dir=str(project_dir),
+        )
+
+        try:
+            pipeline.run(config)
+        except Exception:
+            pass
+
+        assert download_called["count"] == 0
+        assert (project_dir / "audio").exists()
+        meta_path = project_dir / "download_metadata.json"
+        assert meta_path.exists()
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        assert meta["source_type"] == "local_audio"
+
+    def test_local_video_uses_explicit_project_dir(self, tmp_path, monkeypatch):
+        """local_video must use the passed project_dir (workspace_dir from runner)."""
+        _stub_pipeline_configs(monkeypatch)
+
+        source_video = tmp_path / "my_video.mp4"
+        source_video.write_bytes(b"\x00" * 100)
+
+        workspace = tmp_path / "projects" / "42" / "job_abc"
+        workspace.mkdir(parents=True)
+
+        monkeypatch.setattr(ProcessPipeline, "_extract_audio_from_video", staticmethod(
+            lambda vp, ap: ap.parent.mkdir(parents=True, exist_ok=True) or ap.write_bytes(b"\x00" * 50)
+        ))
+        monkeypatch.setattr("pipeline.process._ffprobe_duration_ms", lambda p: 8000)
+
+        pipeline = ProcessPipeline()
+        config = ProcessConfig(
+            source_type="local_video",
+            source_ref=str(source_video),
+            project_dir=str(workspace),
+        )
+
+        try:
+            pipeline.run(config)
+        except Exception:
+            pass
+
+        assert (workspace / "video").exists()
+        assert (workspace / "download_metadata.json").exists()
+
+    def test_ingestion_stage_payload_has_correct_source_kind(self, tmp_path, monkeypatch):
+        """Ingestion stage payload must reflect the actual source_type via download_metadata."""
+        _stub_pipeline_configs(monkeypatch)
+
+        source_audio = tmp_path / "speech.wav"
+        source_audio.write_bytes(b"\x00" * 100)
+
+        project_dir = tmp_path / "workspace"
+        project_dir.mkdir()
+
+        monkeypatch.setattr("pipeline.process._ffprobe_duration_ms", lambda p: 3000)
+
+        pipeline = ProcessPipeline()
+        config = ProcessConfig(
+            source_type="local_audio",
+            source_ref=str(source_audio),
+            project_dir=str(project_dir),
+        )
+
+        try:
+            pipeline.run(config)
+        except Exception:
+            pass
+
+        # After ingest, project_state.json should record ingestion stage
+        state_path = project_dir / "project_state.json"
+        assert state_path.exists()
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        ingestion = state.get("stages", {}).get("ingestion", {})
+        payload = ingestion.get("payload", {})
+        assert payload.get("source_kind") == "local_audio"
+        assert payload.get("execution_mode") == "local_ingest"
+
+
+# ===================================================================
+# Local source metadata path persistence tests
+# ===================================================================
+
+
+class TestProcessPipelineLocalSourceMetadataPaths:
+    """Verify that local source metadata records real file paths, not hardcoded .mp4/.wav."""
+
+    def test_local_video_mkv_metadata_has_real_video_path(self, tmp_path, monkeypatch):
+        """local_video with .mkv extension: metadata must record .mkv, not .mp4."""
+        _stub_pipeline_configs(monkeypatch)
+
+        source_video = tmp_path / "interview.mkv"
+        source_video.write_bytes(b"\x00" * 100)
+
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+
+        def fake_extract(video_path, output_audio_path):
+            output_audio_path.parent.mkdir(parents=True, exist_ok=True)
+            output_audio_path.write_bytes(b"\x00" * 50)
+
+        monkeypatch.setattr(ProcessPipeline, "_extract_audio_from_video", staticmethod(fake_extract))
+        monkeypatch.setattr("pipeline.process._ffprobe_duration_ms", lambda p: 12000)
+
+        pipeline = ProcessPipeline()
+        config = ProcessConfig(
+            source_type="local_video",
+            source_ref=str(source_video),
+            project_dir=str(workspace),
+        )
+
+        try:
+            pipeline.run(config)
+        except Exception:
+            pass
+
+        # Real file should be .mkv
+        assert (workspace / "video" / "original.mkv").exists()
+        assert not (workspace / "video" / "original.mp4").exists()
+
+        # Metadata must record the real .mkv path
+        meta = json.loads((workspace / "download_metadata.json").read_text(encoding="utf-8"))
+        assert "original.mkv" in meta["video_path"]
+        assert Path(meta["video_path"]).name == "original.mkv"
+        # audio_path should be the extracted .wav
+        assert "original.wav" in meta["audio_path"]
+
+    def test_local_audio_mp3_metadata_has_real_audio_path(self, tmp_path, monkeypatch):
+        """local_audio with .mp3 extension: metadata must record .mp3, not .wav."""
+        _stub_pipeline_configs(monkeypatch)
+
+        source_audio = tmp_path / "podcast.mp3"
+        source_audio.write_bytes(b"\x00" * 100)
+
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+
+        monkeypatch.setattr("pipeline.process._ffprobe_duration_ms", lambda p: 6000)
+
+        pipeline = ProcessPipeline()
+        config = ProcessConfig(
+            source_type="local_audio",
+            source_ref=str(source_audio),
+            project_dir=str(workspace),
+        )
+
+        try:
+            pipeline.run(config)
+        except Exception:
+            pass
+
+        # Real file should be .mp3
+        assert (workspace / "audio" / "original.mp3").exists()
+        assert not (workspace / "audio" / "original.wav").exists()
+
+        meta = json.loads((workspace / "download_metadata.json").read_text(encoding="utf-8"))
+        assert "original.mp3" in meta["audio_path"]
+        assert Path(meta["audio_path"]).name == "original.mp3"
+
+    def test_load_download_result_reads_real_paths_from_metadata(self, tmp_path):
+        """_load_download_result must use metadata paths, not hardcoded names."""
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        (workspace / "video").mkdir()
+        (workspace / "audio").mkdir()
+
+        real_video = workspace / "video" / "original.mkv"
+        real_audio = workspace / "audio" / "original.mp3"
+        real_video.write_bytes(b"\x00" * 10)
+        real_audio.write_bytes(b"\x00" * 10)
+
+        (workspace / "download_metadata.json").write_text(
+            json.dumps({
+                "video_path": str(real_video),
+                "audio_path": str(real_audio),
+                "video_title": "Test",
+                "duration_ms": 5000,
+                "url": "/local/test.mkv",
+            }),
+            encoding="utf-8",
+        )
+
+        pipeline = ProcessPipeline()
+        result = pipeline._load_download_result(workspace, fallback_url="fallback")
+
+        assert "original.mkv" in result.video_path
+        assert "original.mp3" in result.audio_path
+
+    def test_load_download_result_falls_back_to_legacy_paths_when_metadata_missing(self, tmp_path):
+        """Without metadata video_path/audio_path, fall back to original.mp4/wav."""
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+
+        # Write metadata without video_path/audio_path fields (old format)
+        (workspace / "download_metadata.json").write_text(
+            json.dumps({
+                "video_title": "Old Video",
+                "duration_ms": 3000,
+                "url": "https://youtube.com/watch?v=old",
+            }),
+            encoding="utf-8",
+        )
+
+        pipeline = ProcessPipeline()
+        result = pipeline._load_download_result(workspace, fallback_url="fallback")
+
+        assert result.video_path.endswith("original.mp4")
+        assert result.audio_path.endswith("original.wav")
+
+    def test_local_audio_ingestion_artifacts_exclude_nonexistent_video(self, tmp_path, monkeypatch):
+        """local_audio: ingestion artifacts must not include nonexistent video file."""
+        _stub_pipeline_configs(monkeypatch)
+
+        source_audio = tmp_path / "voice.flac"
+        source_audio.write_bytes(b"\x00" * 100)
+
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+
+        monkeypatch.setattr("pipeline.process._ffprobe_duration_ms", lambda p: 4000)
+
+        pipeline = ProcessPipeline()
+        config = ProcessConfig(
+            source_type="local_audio",
+            source_ref=str(source_audio),
+            project_dir=str(workspace),
+        )
+
+        try:
+            pipeline.run(config)
+        except Exception:
+            pass
+
+        state_path = workspace / "project_state.json"
+        assert state_path.exists()
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        ingestion = state.get("stages", {}).get("ingestion", {})
+        artifacts = ingestion.get("payload", {}).get("artifacts", {})
+        file_paths = artifacts.get("file_paths", [])
+        # No None entries and no nonexistent video path
+        assert None not in file_paths
+        for fp in file_paths:
+            if fp and "video" in fp.lower():
+                # If a video path is listed, it must actually exist
+                assert Path(fp).exists(), f"Listed video path does not exist: {fp}"
+
+
+# ===================================================================
+# Workspace isolation tests (Task 5)
+# ===================================================================
+
+
+class TestProcessPipelineWorkspaceIsolation:
+    """Verify new tasks never share workspace with old tasks based on URL match."""
+
+    def test_same_url_without_project_dir_creates_fresh_workspace(self, tmp_path, monkeypatch):
+        """An existing project with the same URL must NOT be reused by a new task."""
+        monkeypatch.setattr(process_module, "PROJECT_ROOT", tmp_path)
+        _stub_pipeline_configs(monkeypatch)
+
+        # Set up an old project for same URL
+        old_dir = tmp_path / "projects" / "old_project"
+        old_dir.mkdir(parents=True)
+        _write_video(old_dir / "video" / "original.mp4")
+        _export_silent_wav(old_dir / "audio" / "original.wav", duration_ms=2_000)
+        _write_download_metadata(
+            old_dir,
+            video_path=old_dir / "video" / "original.mp4",
+            audio_path=old_dir / "audio" / "original.wav",
+            video_title="Old Project",
+            duration_ms=2_000,
+            url="https://youtube.example/watch?v=same-url",
+        )
+
+        observed = {}
+
+        class TrackingDownloader:
+            def download(self, request):
+                observed["output_dir"] = request.output_dir
+                vp = _write_video(Path(request.output_dir) / "video" / "original.mp4")
+                ap = _export_silent_wav(Path(request.output_dir) / "audio" / "original.wav", duration_ms=2_000)
+                _write_download_metadata(
+                    Path(request.output_dir), video_path=vp, audio_path=ap,
+                    video_title="Same URL", duration_ms=2_000, url=request.url,
+                )
+                return DownloadResult(
+                    video_path=str(vp), audio_path=str(ap),
+                    video_title="Same URL", duration_ms=2_000, url=request.url,
+                )
+
+        monkeypatch.setattr(process_module, "YouTubeDownloader", TrackingDownloader)
+
+        pipeline = ProcessPipeline()
+        config = ProcessConfig(youtube_url="https://youtube.example/watch?v=same-url")
+
+        try:
+            pipeline.run(config)
+        except Exception:
+            pass
+
+        # Download must have been called (no skip via URL reuse)
+        assert "output_dir" in observed
+        # Output dir must NOT be the old project
+        assert Path(observed["output_dir"]).resolve(strict=False) != old_dir.resolve(strict=False)
+
+    def test_explicit_project_dir_still_reuses_cached_media(self, tmp_path, monkeypatch):
+        """Explicit --project-dir with cached media must still skip download."""
+        _stub_pipeline_configs(monkeypatch)
+        _install_single_speaker_pipeline_mocks(monkeypatch)
+
+        project_dir = tmp_path / "explicit_workspace"
+        _write_video(project_dir / "video" / "original.mp4")
+        _export_silent_wav(project_dir / "audio" / "original.wav", duration_ms=2_500)
+        _write_download_metadata(
+            project_dir,
+            video_path=project_dir / "video" / "original.mp4",
+            audio_path=project_dir / "audio" / "original.wav",
+            video_title="Explicit Cached",
+            duration_ms=2_500,
+            url="https://youtube.example/watch?v=explicit-cache",
+        )
+
+        download_called = {"count": 0}
+
+        class FailDownloader:
+            def download(self, request):
+                download_called["count"] += 1
+                raise AssertionError("Should not download when explicit dir has cached media")
+
+        monkeypatch.setattr(process_module, "YouTubeDownloader", FailDownloader)
+
+        result = ProcessPipeline().run(
+            ProcessConfig(
+                youtube_url="https://youtube.example/watch?v=explicit-cache",
+                voice_a="voice_demo_001",
+                project_dir=str(project_dir),
+            )
+        )
+
+        assert download_called["count"] == 0
+        assert Path(result.project_dir) == project_dir.resolve(strict=False)
+
+
 # Standard job_record snapshots for tests that need specific pipeline behavior.
 # Tests that don't pass job_record get express defaults (no review, cosyvoice).
 _STUDIO_JOB_RECORD = {
@@ -1269,10 +1783,11 @@ def test_process_pipeline_skips_download_when_explicit_project_has_cached_media(
     assert Path(result.project_dir) == project_dir.resolve(strict=False)
 
 
-def test_process_pipeline_auto_discovers_existing_project_by_url(
+def test_process_pipeline_does_not_reuse_existing_project_by_url(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Same URL without explicit project_dir must create a fresh workspace, not reuse old one."""
     monkeypatch.setattr(process_module, "PROJECT_ROOT", tmp_path)
     _install_single_speaker_pipeline_mocks(monkeypatch)
     existing_project_dir = tmp_path / "projects" / "existing_cached_project"
@@ -1286,15 +1801,28 @@ def test_process_pipeline_auto_discovers_existing_project_by_url(
         duration_ms=2_500,
         url="https://youtube.example/watch?v=found",
     )
-    observed = {"download_called": 0}
+    observed: dict[str, object] = {"download_called": 0}
 
-    class FailDownloader:
+    class TrackingDownloader:
         def download(self, request):
-            del request
-            observed["download_called"] += 1
-            raise AssertionError("download should not be called when project is discovered by URL")
+            observed["download_called"] = int(observed["download_called"]) + 1
+            observed["output_dir"] = request.output_dir
+            video_p = _write_video(Path(request.output_dir) / "video" / "original.mp4")
+            audio_p = _export_silent_wav(Path(request.output_dir) / "audio" / "original.wav", duration_ms=2_500)
+            _write_download_metadata(
+                Path(request.output_dir),
+                video_path=video_p, audio_path=audio_p,
+                video_title="Cached Discovery", duration_ms=2_500,
+                url=request.url,
+            )
+            return DownloadResult(
+                video_path=str(video_p.resolve(strict=False)),
+                audio_path=str(audio_p.resolve(strict=False)),
+                video_title="Cached Discovery", duration_ms=2_500,
+                url=request.url,
+            )
 
-    monkeypatch.setattr(process_module, "YouTubeDownloader", FailDownloader)
+    monkeypatch.setattr(process_module, "YouTubeDownloader", TrackingDownloader)
 
     result = ProcessPipeline().run(
         ProcessConfig(
@@ -1303,30 +1831,34 @@ def test_process_pipeline_auto_discovers_existing_project_by_url(
         )
     )
 
-    assert observed["download_called"] == 0
-    assert Path(result.project_dir) == existing_project_dir.resolve(strict=False)
+    # Must download (not skip), because URL reuse is disabled
+    assert observed["download_called"] == 1
+    # Must NOT be in the old project dir
+    assert Path(result.project_dir).resolve(strict=False) != existing_project_dir.resolve(strict=False)
 
 
-def test_process_pipeline_resumes_incomplete_temp_project_by_url(
+def test_process_pipeline_new_task_does_not_reuse_slug_dir_with_same_url(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """When slug dir already exists with same URL, new task keeps its own temp dir."""
     monkeypatch.setattr(process_module, "PROJECT_ROOT", tmp_path)
     _install_single_speaker_pipeline_mocks(monkeypatch)
 
-    resume_project_dir = tmp_path / "projects" / "_process_resume_case"
-    resume_project_dir.mkdir(parents=True, exist_ok=True)
+    # Pre-create a slug dir that would match the download title
+    slug_dir = tmp_path / "projects" / "dan_koe_how_to_think"
+    slug_dir.mkdir(parents=True, exist_ok=True)
     _write_download_metadata(
-        resume_project_dir,
-        video_path=resume_project_dir / "video" / "original.mp4",
-        audio_path=resume_project_dir / "audio" / "original.wav",
-        video_title="Interrupted Download",
-        duration_ms=0,
-        url="https://youtube.example/watch?v=resume-me",
+        slug_dir,
+        video_path=slug_dir / "video" / "original.mp4",
+        audio_path=slug_dir / "audio" / "original.wav",
+        video_title="Dan Koe: How to Think",
+        duration_ms=2_500,
+        url="https://youtube.example/watch?v=slug-conflict",
     )
     observed: dict[str, object] = {}
 
-    class ResumeDownloader:
+    class TrackingDownloader:
         def download(self, request):
             observed["output_dir"] = str(Path(request.output_dir).resolve(strict=False))
             video_path = _write_video(Path(request.output_dir) / "video" / "original.mp4")
@@ -1341,7 +1873,6 @@ def test_process_pipeline_resumes_incomplete_temp_project_by_url(
                 video_title="Dan Koe: How to Think",
                 duration_ms=2_500,
                 url=request.url,
-                description="Resumed download metadata.",
             )
             return DownloadResult(
                 video_path=str(video_path.resolve(strict=False)),
@@ -1349,22 +1880,22 @@ def test_process_pipeline_resumes_incomplete_temp_project_by_url(
                 video_title="Dan Koe: How to Think",
                 duration_ms=2_500,
                 url=request.url,
-                description="Resumed download metadata.",
             )
 
-    monkeypatch.setattr(process_module, "YouTubeDownloader", ResumeDownloader)
+    monkeypatch.setattr(process_module, "YouTubeDownloader", TrackingDownloader)
 
     result = ProcessPipeline().run(
         ProcessConfig(
-            youtube_url="https://youtube.example/watch?v=resume-me",
+            youtube_url="https://youtube.example/watch?v=slug-conflict",
             voice_a="voice_demo_001",
         )
     )
 
-    assert observed["output_dir"] == str(resume_project_dir.resolve(strict=False))
-    assert Path(result.project_dir) == (
-        tmp_path / "projects" / "dan_koe_how_to_think"
-    ).resolve(strict=False)
+    # Result should NOT be in the pre-existing slug dir
+    assert Path(result.project_dir).resolve(strict=False) != slug_dir.resolve(strict=False)
+    # Should be in its own temp dir (starts with _process_)
+    result_dir_name = Path(result.project_dir).name
+    assert result_dir_name.startswith("_process_")
 
 
 def test_process_pipeline_skips_transcription_when_transcript_cache_exists(
