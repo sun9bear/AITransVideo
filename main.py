@@ -163,6 +163,7 @@ def parse_process_args(argv: list[str]) -> ProcessConfig:
     parser.add_argument("--skip-review", action="store_true", help="跳过Gemini说话人审核步骤")
     parser.add_argument("--wait-for-review", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--transcription-method", default="assemblyai", choices=["assemblyai", "gemini"], help="转录方案：assemblyai（默认）| gemini")
+    parser.add_argument("--job-id", default=None, help=argparse.SUPPRESS)
     parsed = parser.parse_args(argv[2:])
     return ProcessConfig(
         youtube_url=parsed.youtube_url,
@@ -176,6 +177,7 @@ def parse_process_args(argv: list[str]) -> ProcessConfig:
         skip_review=parsed.skip_review,
         wait_for_review=parsed.wait_for_review,
         transcription_method=parsed.transcription_method,
+        job_id=parsed.job_id,
     )
 
 
@@ -952,6 +954,7 @@ def run_process_command(argv: list[str]) -> None:
     """Keep the legacy process command stable while workflow dispatch converges."""
 
     config = parse_process_args(argv)
+
     try:
         result = ProcessPipeline().run(config)
     except Exception as exc:

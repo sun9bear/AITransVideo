@@ -10,6 +10,7 @@ from services.tts.tts_generator import (
     TTSConfig,
     TTSGenerationError,
     TTSGenerator,
+    TTSResult,
     load_tts_config,
 )
 import services.tts.tts_generator as tts_generator_module
@@ -371,6 +372,126 @@ def test_tts_generator_retries_transient_request_failures(
     assert "MiniMax请求失败，0.5秒后重试（1/2）" in captured
 
 
+def test_tts_generator_does_not_fallback_from_cosyvoice_to_mimo(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generator = TTSGenerator(TTSConfig(api_key="secret"))
+    generator._job_provider = "cosyvoice"
+    generator._OUTER_BACKOFF_SCHEDULE = [0]
+    generator._OUTER_PAUSE_SECONDS = 0
+
+    attempted_providers: list[str] = []
+
+    def _fake_generate_one(segment, output_dir, *, provider=None):
+        attempted_providers.append(str(provider))
+        if len(attempted_providers) == 1:
+            raise TTSGenerationError("primary failed")
+        return TTSResult(
+            segment_id=segment.segment_id,
+            audio_path=str(tmp_path / "tts" / "segment.wav"),
+            duration_ms=800,
+            voice_id=segment.voice_id,
+        )
+
+    monkeypatch.setattr(generator, "_generate_one", _fake_generate_one)
+    monkeypatch.setattr(tts_generator_module.time, "sleep", lambda seconds: None)
+
+    result = generator._generate_one_with_backoff(
+        _build_segment(segment_id=1),
+        str(tmp_path / "tts"),
+    )
+
+    assert result.duration_ms == 800
+    assert attempted_providers == ["cosyvoice", "cosyvoice"]
+
+
+def test_tts_generator_retries_invalid_cosyvoice_voice_with_safe_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import services.tts.cosyvoice_provider as cosyvoice_provider_module
+    import services.tts.cosyvoice_voice_selector as cosyvoice_voice_selector_module
+    import services.tts.cosyvoice_instruction_enhancer as enhancer_module
+    from services.tts.cosyvoice_instruction_enhancer import EnhancedVoiceResult
+
+    wav_bytes = _build_wav_bytes(duration_ms=700)
+    attempts: list[str] = []
+    segment = _build_segment(segment_id=1)
+    segment.gender = "male"
+    segment.age_group = "middle"
+    segment.persona_style = ""
+    segment.energy_level = ""
+
+    # Mock the enhancer to return longsanshu_v3 (which will be rejected by the provider)
+    monkeypatch.setattr(
+        enhancer_module,
+        "enhance_voice_selection",
+        lambda **kw: EnhancedVoiceResult(
+            voice_id="longsanshu_v3", match_reason="test", match_score=0.60,
+            match_confidence="medium", backup_voices=(), instruction=None, instruct_supported=False,
+        ),
+    )
+
+    def _fake_cosyvoice_synthesize(*, text: str, voice: str, model: str = "cosyvoice-v3-flash", api_key=None) -> bytes:
+        del text, model, api_key
+        attempts.append(voice)
+        if voice == "longsanshu_v3":
+            raise cosyvoice_provider_module.CosyVoiceTTSError(
+                "DashScope SDK returned None for voice=longsanshu_v3, model=cosyvoice-v3-flash. "
+                "This usually means the voice parameter does not match the selected model."
+            )
+        assert voice == cosyvoice_provider_module.DEFAULT_VOICE
+        return wav_bytes
+
+    monkeypatch.setattr(cosyvoice_provider_module, "synthesize", _fake_cosyvoice_synthesize)
+
+    result = TTSGenerator(TTSConfig(api_key="secret"))._generate_one(
+        segment,
+        str(tmp_path / "tts"),
+        provider="cosyvoice",
+    )
+
+    assert result.duration_ms > 0
+    assert attempts == ["longsanshu_v3", cosyvoice_provider_module.DEFAULT_VOICE]
+
+
+def test_tts_generator_prefers_explicit_cosyvoice_builtin_voice_id_over_selector(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import services.tts.cosyvoice_provider as cosyvoice_provider_module
+    import services.tts.cosyvoice_instruction_enhancer as enhancer_module
+
+    wav_bytes = _build_wav_bytes(duration_ms=650)
+    attempts: list[str] = []
+    segment = _build_segment(segment_id=1, voice_id="longshu_v3")
+    segment.gender = "female"
+    segment.age_group = "young"
+    segment.persona_style = "energetic"
+    segment.energy_level = "high"
+
+    def _unexpected_enhancer(**kwargs):
+        raise AssertionError("explicit builtin cosyvoice voice_id should bypass enhancer")
+
+    def _fake_cosyvoice_synthesize(*, text: str, voice: str, model: str = "cosyvoice-v3-flash", api_key=None) -> bytes:
+        del text, model, api_key
+        attempts.append(voice)
+        return wav_bytes
+
+    monkeypatch.setattr(enhancer_module, "enhance_voice_selection", _unexpected_enhancer)
+    monkeypatch.setattr(cosyvoice_provider_module, "synthesize", _fake_cosyvoice_synthesize)
+
+    result = TTSGenerator(TTSConfig(api_key="secret"))._generate_one(
+        segment,
+        str(tmp_path / "tts"),
+        provider="cosyvoice",
+    )
+
+    assert result.duration_ms > 0
+    assert attempts == ["longshu_v3"]
+
+
 def test_load_tts_config_reads_retry_settings(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -396,3 +517,237 @@ def test_load_tts_config_reads_retry_settings(
     assert config.timeout_seconds == 45
     assert config.max_retries == 5
     assert config.retry_backoff_seconds == 2.5
+
+
+def test_cosyvoice_enhancer_path_populates_selected_voice_and_confidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify that _generate_one_cosyvoice uses the enhancer and writes
+    selected_voice + match_confidence into TTSResult."""
+    import services.tts.cosyvoice_provider as cosyvoice_provider_module
+
+    wav_bytes = _build_wav_bytes(duration_ms=600)
+    attempts: list[str] = []
+
+    # Segment with non-builtin voice_id triggers enhancer path
+    segment = _build_segment(segment_id=1, voice_id="some_cloned_voice")
+    segment.gender = "female"
+    segment.age_group = "middle"
+    segment.persona_style = "warm"
+    segment.energy_level = "medium"
+
+    def _fake_synthesize(*, text, voice, model="cosyvoice-v3-flash", api_key=None):
+        attempts.append(voice)
+        return wav_bytes
+
+    monkeypatch.setattr(cosyvoice_provider_module, "synthesize", _fake_synthesize)
+
+    result = TTSGenerator(TTSConfig(api_key="secret"))._generate_one(
+        segment,
+        str(tmp_path / "tts"),
+        provider="cosyvoice",
+    )
+
+    # Enhancer should select longanwen_v3 (female, middle, warm → style override)
+    assert result.selected_voice == "longanwen_v3"
+    assert result.match_confidence == "high"
+    assert attempts == ["longanwen_v3"]
+
+
+def test_cosyvoice_explicit_builtin_voice_populates_selected_voice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify that explicit builtin voice_id still populates selected_voice."""
+    import services.tts.cosyvoice_provider as cosyvoice_provider_module
+
+    wav_bytes = _build_wav_bytes(duration_ms=600)
+
+    def _fake_synthesize(*, text, voice, model="cosyvoice-v3-flash", api_key=None):
+        return wav_bytes
+
+    monkeypatch.setattr(cosyvoice_provider_module, "synthesize", _fake_synthesize)
+
+    segment = _build_segment(segment_id=1, voice_id="longshu_v3")
+    result = TTSGenerator(TTSConfig(api_key="secret"))._generate_one(
+        segment,
+        str(tmp_path / "tts"),
+        provider="cosyvoice",
+    )
+
+    assert result.selected_voice == "longshu_v3"
+    assert result.match_confidence == "high"
+
+
+def test_cosyvoice_childlike_segment_routes_to_child_voice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify that childlike segment metadata routes to a child voice."""
+    import services.tts.cosyvoice_provider as cosyvoice_provider_module
+
+    wav_bytes = _build_wav_bytes(duration_ms=600)
+    attempts: list[str] = []
+
+    segment = _build_segment(segment_id=1, voice_id="nonexistent")
+    segment.gender = "child"
+    segment.age_group = "young"
+
+    def _fake_synthesize(*, text, voice, model="cosyvoice-v3-flash", api_key=None):
+        attempts.append(voice)
+        return wav_bytes
+
+    monkeypatch.setattr(cosyvoice_provider_module, "synthesize", _fake_synthesize)
+
+    result = TTSGenerator(TTSConfig(api_key="secret"))._generate_one(
+        segment,
+        str(tmp_path / "tts"),
+        provider="cosyvoice",
+    )
+
+    assert result.selected_voice == "longhuhu_v3"
+    assert result.match_confidence == "medium"
+    assert attempts == ["longhuhu_v3"]
+
+
+def test_cosyvoice_childlike_inferred_from_voice_description(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify that voice_description containing childlike keywords triggers child routing."""
+    import services.tts.cosyvoice_provider as cosyvoice_provider_module
+
+    wav_bytes = _build_wav_bytes(duration_ms=600)
+    attempts: list[str] = []
+
+    # gender=female but voice_description says "小朋友" → should infer childlike
+    segment = _build_segment(segment_id=1, voice_id="nonexistent")
+    segment.gender = "female"
+    segment.age_group = "young"
+    segment.voice_description = "活泼的小朋友童声"
+
+    def _fake_synthesize(*, text, voice, model="cosyvoice-v3-flash", api_key=None):
+        attempts.append(voice)
+        return wav_bytes
+
+    monkeypatch.setattr(cosyvoice_provider_module, "synthesize", _fake_synthesize)
+
+    result = TTSGenerator(TTSConfig(api_key="secret"))._generate_one(
+        segment,
+        str(tmp_path / "tts"),
+        provider="cosyvoice",
+    )
+
+    # infer_is_childlike("young", "活泼的小朋友童声") → True → routes to child voice
+    assert result.selected_voice == "longhuhu_v3"
+    assert attempts == ["longhuhu_v3"]
+
+
+def test_cosyvoice_result_written_back_to_segment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify that selected_voice and match_confidence are written back to segment."""
+    import services.tts.cosyvoice_provider as cosyvoice_provider_module
+
+    wav_bytes = _build_wav_bytes(duration_ms=600)
+
+    segment = _build_segment(segment_id=1, voice_id="nonexistent")
+    segment.gender = "female"
+    segment.age_group = "middle"
+    segment.persona_style = "warm"
+
+    def _fake_synthesize(*, text, voice, model="cosyvoice-v3-flash", api_key=None):
+        return wav_bytes
+
+    monkeypatch.setattr(cosyvoice_provider_module, "synthesize", _fake_synthesize)
+    monkeypatch.setattr(tts_generator_module, "get_tts_provider", lambda: "cosyvoice")
+
+    gen = TTSGenerator(TTSConfig(api_key="secret"))
+    gen.generate_all([segment], str(tmp_path / "tts"))
+
+    # After generate_all, segment should have the fields populated
+    assert segment.selected_voice == "longanwen_v3"
+    assert segment.match_confidence == "high"
+
+
+def test_non_childlike_adult_not_affected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify that normal adult segments are not affected by childlike inference."""
+    import services.tts.cosyvoice_provider as cosyvoice_provider_module
+
+    wav_bytes = _build_wav_bytes(duration_ms=600)
+
+    segment = _build_segment(segment_id=1, voice_id="nonexistent")
+    segment.gender = "male"
+    segment.age_group = "elderly"
+    segment.voice_description = "沧桑岁月的老人声"
+
+    def _fake_synthesize(*, text, voice, model="cosyvoice-v3-flash", api_key=None):
+        return wav_bytes
+
+    monkeypatch.setattr(cosyvoice_provider_module, "synthesize", _fake_synthesize)
+
+    result = TTSGenerator(TTSConfig(api_key="secret"))._generate_one(
+        segment, str(tmp_path / "tts"), provider="cosyvoice",
+    )
+
+    assert result.selected_voice == "longlaobo_v3"
+    assert result.match_confidence == "medium"
+
+
+def test_cache_hit_preserves_selected_voice_from_segment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify cache-hit path keeps selected_voice/match_confidence from segment."""
+    tts_dir = tmp_path / "tts"
+    tts_dir.mkdir()
+
+    # Pre-create a valid cached wav file
+    wav_bytes = _build_wav_bytes(duration_ms=500)
+    cached_path = tts_dir / "segment_001_speaker_a.wav"
+    cached_path.write_bytes(wav_bytes)
+
+    segment = _build_segment(segment_id=1)
+    # Simulate fields already populated from a previous run
+    segment.selected_voice = "longanwen_v3"
+    segment.match_confidence = "high"
+
+    monkeypatch.setattr(tts_generator_module, "get_tts_provider", lambda: "cosyvoice")
+
+    gen = TTSGenerator(TTSConfig(api_key="secret"))
+    results = gen.generate_all([segment], str(tts_dir))
+
+    assert len(results) == 1
+    assert results[0].selected_voice == "longanwen_v3"
+    assert results[0].match_confidence == "high"
+    assert segment.selected_voice == "longanwen_v3"
+    assert segment.match_confidence == "high"
+
+
+def test_cache_hit_derives_from_explicit_builtin_voice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify cache-hit derives selected_voice from explicit builtin voice_id when segment fields are empty."""
+    tts_dir = tmp_path / "tts"
+    tts_dir.mkdir()
+
+    wav_bytes = _build_wav_bytes(duration_ms=500)
+    cached_path = tts_dir / "segment_001_speaker_a.wav"
+    cached_path.write_bytes(wav_bytes)
+
+    segment = _build_segment(segment_id=1, voice_id="longshu_v3")
+    # selected_voice/match_confidence are empty (first resume after upgrade)
+
+    monkeypatch.setattr(tts_generator_module, "get_tts_provider", lambda: "cosyvoice")
+
+    gen = TTSGenerator(TTSConfig(api_key="secret"))
+    results = gen.generate_all([segment], str(tts_dir))
+
+    assert results[0].selected_voice == "longshu_v3"
+    assert results[0].match_confidence == "high"

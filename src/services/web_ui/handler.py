@@ -41,7 +41,11 @@ from .translation_review import (
     _save_translation_review_submission,
     _split_segment,
 )
-from .voice_library import _find_builtin_voice_option, _resolve_voice_registry_path
+from .voice_library import (
+    _assert_builtin_voice_selection_allowed,
+    _find_builtin_voice_option,
+    _resolve_voice_registry_path,
+)
 
 
 def _build_web_ui_handler() -> type[BaseHTTPRequestHandler]:
@@ -208,7 +212,14 @@ def _build_web_ui_handler() -> type[BaseHTTPRequestHandler]:
                         project_root=self.server.job_manager.project_root,  # type: ignore[attr-defined]
                         config_path=self.server.job_manager.config_path,  # type: ignore[attr-defined]
                     )
-                    VoiceRegistry(str(registry_path)).set_default_voice(speaker_id, voice_id)
+                    registry = VoiceRegistry(str(registry_path))
+                    builtin_voice = _find_builtin_voice_option(
+                        registry=registry,
+                        config_path=self.server.job_manager.config_path,  # type: ignore[attr-defined]
+                        voice_id=voice_id,
+                    )
+                    _assert_builtin_voice_selection_allowed(builtin_voice)
+                    registry.set_default_voice(speaker_id, voice_id)
                     snapshot = build_web_ui_snapshot(  # type: ignore[arg-type]
                         manager=self.server.job_manager  # type: ignore[attr-defined]
                     )
@@ -253,9 +264,14 @@ def _build_web_ui_handler() -> type[BaseHTTPRequestHandler]:
                         config_path=self.server.job_manager.config_path,  # type: ignore[attr-defined]
                     )
                     registry = VoiceRegistry(str(registry_path))
-                    builtin_voice = _find_builtin_voice_option(registry=registry, voice_id=voice_id)
+                    builtin_voice = _find_builtin_voice_option(
+                        registry=registry,
+                        config_path=self.server.job_manager.config_path,  # type: ignore[attr-defined]
+                        voice_id=voice_id,
+                    )
                     if builtin_voice is None:
                         raise ValueError(f"\u672a\u627e\u5230 builtin voice_id={voice_id}")
+                    _assert_builtin_voice_selection_allowed(builtin_voice)
                     registry.set_project_default_builtin_voice(
                         voice_id=str(builtin_voice["voice_id"]),
                         provider=str(builtin_voice["provider"]),
@@ -338,22 +354,47 @@ def _build_web_ui_handler() -> type[BaseHTTPRequestHandler]:
 
                     # If user provided voice IDs directly, use those
                     if user_voice_id_a or user_voice_id_b:
+                        registry_path = _resolve_voice_registry_path(
+                            project_root=self.server.job_manager.project_root,  # type: ignore[attr-defined]
+                            config_path=self.server.job_manager.config_path,  # type: ignore[attr-defined]
+                        )
+                        registry = VoiceRegistry(str(registry_path))
                         resolved_speakers = []
                         if user_voice_id_a:
+                            builtin_voice_a = _find_builtin_voice_option(
+                                registry=registry,
+                                config_path=self.server.job_manager.config_path,  # type: ignore[attr-defined]
+                                voice_id=user_voice_id_a,
+                            )
+                            _assert_builtin_voice_selection_allowed(builtin_voice_a)
                             resolved_speakers.append({
                                 "speaker_id": "speaker_a",
                                 "voice_id": user_voice_id_a,
-                                "voice_type": "cloned",
-                                "label": "User confirmed",
-                                "source": "voice_review",
+                                "voice_type": "builtin" if builtin_voice_a is not None else "cloned",
+                                "label": (
+                                    str(builtin_voice_a.get("label") or "User confirmed")
+                                    if builtin_voice_a is not None
+                                    else "User confirmed"
+                                ),
+                                "source": "voice_review_builtin" if builtin_voice_a is not None else "voice_review",
                             })
                         if user_voice_id_b:
+                            builtin_voice_b = _find_builtin_voice_option(
+                                registry=registry,
+                                config_path=self.server.job_manager.config_path,  # type: ignore[attr-defined]
+                                voice_id=user_voice_id_b,
+                            )
+                            _assert_builtin_voice_selection_allowed(builtin_voice_b)
                             resolved_speakers.append({
                                 "speaker_id": "speaker_b",
                                 "voice_id": user_voice_id_b,
-                                "voice_type": "cloned",
-                                "label": "User confirmed",
-                                "source": "voice_review",
+                                "voice_type": "builtin" if builtin_voice_b is not None else "cloned",
+                                "label": (
+                                    str(builtin_voice_b.get("label") or "User confirmed")
+                                    if builtin_voice_b is not None
+                                    else "User confirmed"
+                                ),
+                                "source": "voice_review_builtin" if builtin_voice_b is not None else "voice_review",
                             })
                         review_state_manager.set_stage(
                             VOICE_REVIEW_STAGE,
@@ -822,6 +863,18 @@ def _build_web_ui_handler() -> type[BaseHTTPRequestHandler]:
                     return
                 if parsed_path.path == "/api/settings":
                     payload = self._read_json()
+                    # Persist CosyVoice endpoint mode if provided
+                    _cv_runtime = _normalize_optional_text(payload.get("cosyvoice_runtime_endpoint_mode"))
+                    _cv_offline = _normalize_optional_text(payload.get("cosyvoice_offline_endpoint_mode"))
+                    if _cv_runtime or _cv_offline:
+                        from services.tts.cosyvoice_endpoint_config import (
+                            set_offline_endpoint_mode,
+                            set_runtime_endpoint_mode,
+                        )
+                        if _cv_runtime:
+                            set_runtime_endpoint_mode(_cv_runtime)
+                        if _cv_offline:
+                            set_offline_endpoint_mode(_cv_offline)
                     updated_route = save_web_ui_settings(
                         translation_model_alias=str(payload.get("translation_model_alias") or ""),
                         speaker_infer_prompt_template=_normalize_optional_text(

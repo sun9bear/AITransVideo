@@ -13,6 +13,8 @@ interface AdminSettings {
   enable_pre_tts_rewrite: boolean
   express_tts_provider: string
   studio_tts_provider: string
+  cosyvoice_runtime_endpoint_mode: string
+  cosyvoice_offline_endpoint_mode: string
 }
 
 const DEFAULT_SETTINGS: AdminSettings = {
@@ -25,6 +27,8 @@ const DEFAULT_SETTINGS: AdminSettings = {
   free_user_max_duration_minutes: 10,
   express_tts_provider: 'cosyvoice',
   studio_tts_provider: 'minimax',
+  cosyvoice_runtime_endpoint_mode: 'international',
+  cosyvoice_offline_endpoint_mode: 'mainland',
 }
 
 const TTS_OPTIONS = [
@@ -39,6 +43,11 @@ const EXPRESS_TTS_OPTIONS = [
 
 const STUDIO_TTS_OPTIONS = [
   { value: 'minimax', label: 'MiniMax Speech 2.8', description: '成熟稳定，¥0.20/千字，支持音色克隆' },
+]
+
+const COSYVOICE_ENDPOINT_OPTIONS = [
+  { value: 'international', label: '国际端点', description: '新加坡节点，延迟低（1-2s），支持 10 个核心音色' },
+  { value: 'mainland', label: '国内端点', description: '中国大陆节点，延迟较高（3-7s），支持全部 59 个音色' },
 ]
 
 const REVIEW_OPTIONS = [
@@ -68,7 +77,9 @@ export default function AdminSettingsPage() {
         }
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
         const data = await resp.json()
-        setSettings({ ...DEFAULT_SETTINGS, ...data })
+        // Gateway returns { settings: {...} } envelope
+        const payload = data?.settings ?? data ?? {}
+        setSettings({ ...DEFAULT_SETTINGS, ...payload })
       })
       .catch((err) => setError(`加载设置失败: ${err.message}`))
       .finally(() => setIsLoading(false))
@@ -141,6 +152,7 @@ export default function AdminSettingsPage() {
           options={TTS_OPTIONS}
           value={settings.tts_provider}
           onChange={(v) => setSettings((s) => ({ ...s, tts_provider: v }))}
+          name="tts_provider"
         />
       </SettingSection>
 
@@ -153,6 +165,7 @@ export default function AdminSettingsPage() {
           options={EXPRESS_TTS_OPTIONS}
           value={settings.express_tts_provider}
           onChange={(v) => setSettings((s) => ({ ...s, express_tts_provider: v }))}
+          name="express_tts_provider"
         />
       </SettingSection>
 
@@ -165,6 +178,7 @@ export default function AdminSettingsPage() {
           options={STUDIO_TTS_OPTIONS}
           value={settings.studio_tts_provider}
           onChange={(v) => setSettings((s) => ({ ...s, studio_tts_provider: v }))}
+          name="studio_tts_provider"
         />
       </SettingSection>
 
@@ -177,6 +191,7 @@ export default function AdminSettingsPage() {
           options={REVIEW_OPTIONS}
           value={settings.review_model}
           onChange={(v) => setSettings((s) => ({ ...s, review_model: v }))}
+          name="review_model"
         />
       </SettingSection>
 
@@ -189,6 +204,7 @@ export default function AdminSettingsPage() {
           options={TRANSLATION_OPTIONS}
           value={settings.translation_model}
           onChange={(v) => setSettings((s) => ({ ...s, translation_model: v }))}
+          name="translation_model"
         />
       </SettingSection>
 
@@ -207,7 +223,7 @@ export default function AdminSettingsPage() {
           <div>
             <p className="text-sm font-medium text-foreground">普通用户跳过翻译配置阶段</p>
             <p className="text-xs text-muted-foreground mt-1">
-              开启后，普通用户不会看到"翻译配置"审核步骤，直接使用上面设置的默认翻译模型。
+              开启后，普通用户不会看到翻译配置审核步骤，直接使用上面设置的默认翻译模型。
             </p>
           </div>
         </label>
@@ -265,6 +281,39 @@ export default function AdminSettingsPage() {
         </div>
       </SettingSection>
 
+      {/* CosyVoice Endpoint Settings */}
+      <SettingSection
+        title="CosyVoice 端点配置"
+        description="控制 CosyVoice 语音合成的服务端点。运行时端点影响实际配音生成，离线端点用于音色分析和建库。"
+      >
+        <div className="space-y-4">
+          <div>
+            <p className="text-sm font-medium text-foreground mb-2">运行时端点（Runtime）</p>
+            <p className="text-xs text-muted-foreground mb-3">
+              用于 express / CosyVoice 实际生产调用。默认国际端点，延迟低但音色覆盖有限。
+            </p>
+            <RadioGroup
+              options={COSYVOICE_ENDPOINT_OPTIONS}
+              value={settings.cosyvoice_runtime_endpoint_mode}
+              onChange={(v) => setSettings((s) => ({ ...s, cosyvoice_runtime_endpoint_mode: v }))}
+              name="cosyvoice_runtime_endpoint"
+            />
+          </div>
+          <div className="border-t border-border pt-4">
+            <p className="text-sm font-medium text-foreground mb-2">离线端点（Offline）</p>
+            <p className="text-xs text-muted-foreground mb-3">
+              用于 calibration / profiling / 离线建库。默认国内端点，音色覆盖完整。
+            </p>
+            <RadioGroup
+              options={COSYVOICE_ENDPOINT_OPTIONS}
+              value={settings.cosyvoice_offline_endpoint_mode}
+              onChange={(v) => setSettings((s) => ({ ...s, cosyvoice_offline_endpoint_mode: v }))}
+              name="cosyvoice_offline_endpoint"
+            />
+          </div>
+        </div>
+      </SettingSection>
+
       {/* Save button */}
       <div className="flex gap-3 pt-4 border-t border-border">
         <button
@@ -309,11 +358,14 @@ function RadioGroup({
   options,
   value,
   onChange,
+  name,
 }: {
   options: { value: string; label: string; description: string }[]
   value: string
   onChange: (v: string) => void
+  name?: string
 }) {
+  const groupName = name ?? options.map((o) => o.value).join('-')
   return (
     <div className="space-y-2">
       {options.map((opt) => (
@@ -327,7 +379,7 @@ function RadioGroup({
         >
           <input
             type="radio"
-            name={opt.value}
+            name={groupName}
             checked={value === opt.value}
             onChange={() => onChange(opt.value)}
             className="mt-0.5 h-4 w-4 border-border"

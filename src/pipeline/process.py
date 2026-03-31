@@ -514,7 +514,7 @@ class ProcessPipeline:
 
             # --- Report actual duration to Gateway (best-effort) ---
             if config.job_id:
-                _report_source_metadata(config.job_id, actual_duration_ms / 1000, download_result.title)
+                _report_source_metadata(config.job_id, actual_duration_ms / 1000, download_result.video_title)
 
             # --- 磁盘空间预检 ---
             _check_disk_space(final_project_dir, actual_duration_ms / 60_000)
@@ -2707,6 +2707,8 @@ class ProcessPipeline:
                             "age_group": segment.age_group,
                             "persona_style": segment.persona_style,
                             "energy_level": segment.energy_level,
+                            "selected_voice": segment.selected_voice,
+                            "match_confidence": segment.match_confidence,
                         }
                         for segment in translation_result.segments
                     ],

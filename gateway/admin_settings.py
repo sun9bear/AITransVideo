@@ -10,7 +10,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy import select, delete as sa_delete
 
 from auth import get_current_user
@@ -27,6 +27,9 @@ router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 # --- Settings schema ---
 
+_VALID_ENDPOINT_MODES = {"international", "mainland"}
+
+
 class AdminSettings(BaseModel):
     tts_provider: str = "minimax"          # "minimax" or "mimo"
     review_model: str = "gemini"           # "gemini" or "mimo_omni"
@@ -37,6 +40,16 @@ class AdminSettings(BaseModel):
     enable_pre_tts_rewrite: bool = True            # Pre-TTS rewrite to match target duration
     express_tts_provider: str = "cosyvoice"        # Default TTS provider for express mode
     studio_tts_provider: str = "minimax"           # Default TTS provider for studio mode
+    cosyvoice_runtime_endpoint_mode: str = "international"  # CosyVoice runtime: "international" or "mainland"
+    cosyvoice_offline_endpoint_mode: str = "mainland"       # CosyVoice offline: "international" or "mainland"
+
+    @field_validator("cosyvoice_runtime_endpoint_mode", "cosyvoice_offline_endpoint_mode")
+    @classmethod
+    def validate_endpoint_mode(cls, v: str) -> str:
+        normalized = v.strip().lower()
+        if normalized not in _VALID_ENDPOINT_MODES:
+            raise ValueError(f"端点模式必须是 {sorted(_VALID_ENDPOINT_MODES)} 之一，收到: {v!r}")
+        return normalized
 
 
 # --- Helpers ---
