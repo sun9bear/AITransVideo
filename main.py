@@ -73,7 +73,8 @@ from services.voice_asset import (
 )
 from services.tts_provider import RealTTSProviderConfig, TTSProviderSelectionConfig, resolve_tts_provider
 from services.tts_service import MockTTSConfig, MockTTSService
-from services.web_ui import WEB_UI_DEFAULT_PORT, WebUICommandArgs, run_web_ui_server
+# web_ui standalone server removed in Phase 4 (8876 deprecation).
+# Only helpers still used by Job API are retained in services.web_ui.
 from services.voice_clone import (
     MiniMaxVoiceCloneClient,
     VoiceCloneAPIError,
@@ -930,23 +931,16 @@ def run_control_panel_command(argv: list[str]) -> None:
 
 
 def run_web_ui_command(argv: list[str]) -> None:
-    parsed_args = parse_web_ui_args(argv)
-    try:
-        run_web_ui_server(port=parsed_args.port)
-    except OSError as exc:
-        error_details = str(exc)
-        if getattr(exc, "winerror", None) == 10048 or "Address already in use" in error_details:
-            raise SystemExit(
-                "web-ui failed: port "
-                f"{parsed_args.port} is already in use. "
-                "A previous Web UI instance may still be running. "
-                "Close the old process or use a different port, for example: "
-                f"python main.py web-ui {parsed_args.port + 1}"
-            ) from exc
-        raise SystemExit(
-            "web-ui failed: could not start local server. "
-            f"Details: {exc}"
-        ) from exc
+    """Deprecated: the standalone Web UI server (port 8876) has been removed.
+
+    All functionality has been migrated to Job API (8877) and Gateway (8880).
+    Use ``python main.py job-api`` instead.
+    """
+    raise SystemExit(
+        "web-ui 命令已废弃。Web UI 独立服务 (8876) 已下线。\n"
+        "所有功能已迁移到 Job API (8877) 和 Gateway (8880)。\n"
+        "请使用: python main.py job-api"
+    )
 
 
 def run_job_api_command(argv: list[str]) -> None:
@@ -1252,24 +1246,6 @@ def parse_control_panel_args(argv: list[str]) -> ControlPanelCommandArgs:
     return ControlPanelCommandArgs(port=resolved_port)
 
 
-def parse_web_ui_args(argv: list[str]) -> WebUICommandArgs:
-    if len(argv) == 2:
-        return WebUICommandArgs()
-    if len(argv) > 3:
-        raise SystemExit(
-            _build_web_ui_usage("web-ui accepts at most one optional <port> argument.")
-        )
-
-    try:
-        resolved_port = int(argv[2])
-    except ValueError as exc:
-        raise SystemExit(_build_web_ui_usage("web-ui <port> must be an integer.")) from exc
-
-    if resolved_port <= 0:
-        raise SystemExit(_build_web_ui_usage("web-ui <port> must be positive."))
-    return WebUICommandArgs(port=resolved_port)
-
-
 def parse_job_api_args(argv: list[str]) -> JobAPICommandArgs:
     if len(argv) == 2:
         return JobAPICommandArgs()
@@ -1362,7 +1338,7 @@ def _build_main_usage(error_message: str | None = None) -> str:
         "  python main.py process <youtube_url> [--voice-a <voice_id>] [--voice-b <voice_id>] [--speaker-a <name>] [--speaker-b <name>] [--speakers auto|1|2] [--project-dir <path>] [--resume-from <stage>]",
         f"  python main.py control-panel [port]  # default port: {CONTROL_PANEL_DEFAULT_PORT}",
         f"  python main.py job-api [port]  # default port: {JOB_API_DEFAULT_PORT}",
-        f"  python main.py web-ui [port]  # default port: {WEB_UI_DEFAULT_PORT}",
+        "  python main.py web-ui          # (deprecated — prints deprecation notice)",
         "  python main.py local-audio-demo <local_audio_path> [translation_mode] [tts_mode] [--output editor|publish|both]",
         "  python main.py local-video-demo <local_video_path> [translation_mode] [tts_mode] [--output editor|publish|both]",
         "  python main.py voice-registry show <speaker_id>",
@@ -1401,21 +1377,6 @@ def _build_job_api_usage(error_message: str | None = None) -> str:
         "  A1 enforces single-active-job semantics on this local store.",
         "  This is a local integration surface, not a production-grade public service.",
         f"  Jobs are stored under: {PROJECT_ROOT / 'jobs'}",
-    ]
-    if error_message:
-        usage_lines.append(f"Error: {error_message}")
-    return "\n".join(usage_lines)
-
-
-def _build_web_ui_usage(error_message: str | None = None) -> str:
-    usage_lines = [
-        "Usage: python main.py web-ui [port]",
-        "Notes:",
-        "  Starts the lightweight processing Web UI for YouTube URL input, speaker selection,",
-        "  translation-model selection, and live process progress.",
-        "  Default host is 127.0.0.1.",
-        f"  Default port is {WEB_UI_DEFAULT_PORT}.",
-        f"  Local config path: {PROJECT_ROOT / 'autodub.local.json'}",
     ]
     if error_message:
         usage_lines.append(f"Error: {error_message}")

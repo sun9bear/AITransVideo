@@ -103,7 +103,6 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      AVT_WEB_UI_UPSTREAM: "http://127.0.0.1:8876"
       AVT_JOB_API_UPSTREAM: "http://127.0.0.1:8877"
       AVT_GATEWAY_HOST: "0.0.0.0"
       AVT_GATEWAY_PORT: "8880"

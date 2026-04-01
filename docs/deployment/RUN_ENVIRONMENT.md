@@ -110,19 +110,21 @@ Run from the repository root.
 python main.py --help
 ```
 
-### Start Web UI
+### Start services (Docker Compose deployment)
 
-```bash
-python main.py web-ui
-```
+Current architecture uses Gateway + Job API + Next.js frontend:
 
-Default URL:
+| Service | Port | Purpose |
+|---------|------|---------|
+| Gateway | 8880 | Auth, routing, proxy |
+| Job API | 8877 | Job CRUD, status, logs, artifacts |
+| Next.js | 3000 | Frontend pages |
 
-- `http://127.0.0.1:8876`
+> Note: Web UI (8876) has been deprecated. All functionality has been migrated to the services above.
 
-### Start remote workbench P1 services
+### Start remote workbench services
 
-Remote-workbench P1 now uses:
+Remote-workbench now uses:
 
 - runtime config: `remote_workbench.local.json`
 - startup script: `scripts/start_remote_workbench.ps1`
@@ -134,24 +136,19 @@ Start Job API only:
 powershell -ExecutionPolicy Bypass -File scripts/start_remote_workbench.ps1 -Service job-api
 ```
 
-Start Web UI only:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/start_remote_workbench.ps1 -Service web-ui
-```
-
-Start both local services:
+Start all local services:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/start_remote_workbench.ps1 -Service all
 ```
 
-### Start public entry (P2 / Caddy)
+### Start public entry (Caddy)
 
-P2 now uses a single public-entry solution:
+Public entry uses:
 
-- `Caddy` for HTTPS + `basic_auth` + reverse proxy
-- reverse proxy target: `127.0.0.1:8876`
+- `Caddy` for HTTPS + reverse proxy
+- API traffic reverse proxy target: `127.0.0.1:8880` (Gateway)
+- Page traffic reverse proxy target: `127.0.0.1:3000` (Next.js)
 - `Job API` and `control-panel` remain localhost-only
 
 Before starting public entry:
@@ -255,7 +252,7 @@ python main.py local-video-demo <local_video_path> [translation_mode] [tts_mode]
 ### Most stable today
 
 - `process`
-- `web-ui`
+- Gateway + Job API + Next.js (Docker Compose)
 - `control-panel`
 - `python -m pytest -q`
 

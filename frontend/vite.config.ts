@@ -21,16 +21,13 @@ export default defineConfig(({ mode }) => {
     server: {
       host: '127.0.0.1',
       port: 4173,
+      // ARCHIVED: This Vite frontend is deprecated. Use frontend-next/ instead.
+      // The /web-ui-api proxy (8876) has been removed. Only /job-api remains for reference.
       proxy: {
         '/job-api': {
           target: 'http://127.0.0.1:8877',
           changeOrigin: true,
           rewrite: (requestPath) => requestPath.replace(/^\/job-api/, ''),
-        },
-        '/web-ui-api': {
-          target: 'http://127.0.0.1:8876',
-          changeOrigin: true,
-          rewrite: (requestPath) => requestPath.replace(/^\/web-ui-api/, ''),
         },
       },
     },

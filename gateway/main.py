@@ -32,12 +32,10 @@ from models import Base
 logger = logging.getLogger(__name__)
 from job_intercept import (
     intercept_create_job,
-    intercept_delete_job,
+    intercept_delete_job_v2,
     intercept_get_job,
     intercept_job_subresource,
     intercept_list_jobs,
-    intercept_project_file,
-    intercept_result_download,
     update_source_metadata,
 )
 from proxy import close_client, init_client, proxy_request
@@ -99,39 +97,18 @@ app.include_router(billing_router)
 app.include_router(entitlements_router)
 
 
-# --- Web UI API intercept routes (before catch-all) ---
+# --- Gateway-native upload endpoint (before catch-all) ---
 
-app.get("/api/result-download")(intercept_result_download)
-app.get("/api/project-file")(intercept_project_file)
-app.post("/api/job/delete")(intercept_delete_job)
+from upload import handle_upload_video
 
 
-# --- Helpers ---
-
-def _user_id_headers(user) -> dict[str, str] | None:
-    """Build internal identity headers for Web UI proxy routes."""
-    if user is not None:
-        return {"x-user-id": str(user.id)}
-    return None
-
-
-# --- Proxy: Web UI API catch-all (/api/*) ---
-
-@app.api_route(
-    "/api/{path:path}",
-    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-)
-async def proxy_web_ui(
+async def _gateway_upload_video(
     request: Request,
-    path: str,
     _user: User | None = Depends(require_auth),
 ) -> Response:
-    return await proxy_request(
-        request=request,
-        upstream_base=settings.web_ui_upstream,
-        strip_prefix="",
-        extra_headers=_user_id_headers(_user),
-    )
+    return await handle_upload_video(request, user=_user)
+
+app.post("/gateway/upload-video")(_gateway_upload_video)
 
 
 # --- Job API routes ---
@@ -142,9 +119,10 @@ async def proxy_web_ui(
 app.get("/job-api/jobs")(intercept_list_jobs)
 app.post("/job-api/jobs")(intercept_create_job)
 app.get("/job-api/jobs/{job_id}")(intercept_get_job)
+app.delete("/job-api/jobs/{job_id}")(intercept_delete_job_v2)
 app.post("/job-api/jobs/{job_id}/source-metadata")(update_source_metadata)
 
-# Job sub-resources: logs, artifacts, result-summary, continue, etc.
+# Job sub-resources: logs, artifacts, result-summary, continue, review/*, download/*, etc.
 app.api_route(
     "/job-api/jobs/{job_id}/{subpath:path}",
     methods=["GET", "POST"],
@@ -153,11 +131,11 @@ app.api_route(
 
 # --- Proxy: Job API catch-all (non-jobs paths only) ---
 # NOTE: /job-api/jobs* are handled by intercept functions above.
-# This only handles other /job-api/ endpoints (if any).
+# This also handles global endpoints like /job-api/voice-library.
 
 @app.api_route(
     "/job-api/{path:path}",
-    methods=["PUT", "DELETE", "PATCH", "OPTIONS"],
+    methods=["GET", "PUT", "DELETE", "PATCH", "OPTIONS"],
 )
 async def proxy_job_api_other(
     request: Request,
@@ -168,25 +146,6 @@ async def proxy_job_api_other(
         request=request,
         upstream_base=settings.job_api_upstream,
         strip_prefix="/job-api",
-    )
-
-
-# --- Proxy: Web UI API (legacy /web-ui-api/*) ---
-
-@app.api_route(
-    "/web-ui-api/{path:path}",
-    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-)
-async def proxy_web_ui_legacy(
-    request: Request,
-    path: str,
-    _user: User | None = Depends(require_auth),
-) -> Response:
-    return await proxy_request(
-        request=request,
-        upstream_base=settings.web_ui_upstream,
-        strip_prefix="/web-ui-api",
-        extra_headers=_user_id_headers(_user),
     )
 
 

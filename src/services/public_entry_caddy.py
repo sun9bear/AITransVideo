@@ -22,7 +22,8 @@ class CaddyPublicEntryPlan:
     executable_path: Path
     site_host: str
     https_url: str
-    upstream: str
+    gateway_upstream: str
+    frontend_upstream: str
     generated_caddyfile_path: Path
     access_log_path: Path
     basic_auth_username_env: str
@@ -58,7 +59,8 @@ def build_caddy_public_entry_plan(runtime_config: RemoteWorkbenchRuntimeConfig) 
         executable_path=executable_path,
         site_host=site_host,
         https_url=https_url,
-        upstream=f"{runtime_config.web_ui.host}:{runtime_config.web_ui.port}",
+        gateway_upstream=f"{runtime_config.gateway.host}:{runtime_config.gateway.port}",
+        frontend_upstream=f"{runtime_config.frontend.host}:{runtime_config.frontend.port}",
         generated_caddyfile_path=generated_caddyfile_path,
         access_log_path=access_log_path,
         basic_auth_username_env=username_env,
@@ -68,8 +70,6 @@ def build_caddy_public_entry_plan(runtime_config: RemoteWorkbenchRuntimeConfig) 
 
 def render_caddyfile(plan: CaddyPublicEntryPlan) -> str:
     access_log_path = plan.access_log_path.resolve(strict=False).as_posix()
-    username_placeholder = _build_caddy_env_placeholder(plan.basic_auth_username_env)
-    password_hash_placeholder = _build_caddy_env_placeholder(plan.basic_auth_password_hash_env)
     return "\n".join(
         [
             "{",
@@ -96,7 +96,21 @@ def render_caddyfile(plan: CaddyPublicEntryPlan) -> str:
             '        Referrer-Policy "strict-origin-when-cross-origin"',
             "    }",
             "",
-            f"    reverse_proxy {plan.upstream}",
+            "    # API and auth traffic -> Gateway",
+            "    @api_routes {",
+            "        path /api/*",
+            "        path /job-api/*",
+            "        path /auth/*",
+            "        path /gateway/*",
+            "    }",
+            "    handle @api_routes {",
+            f"        reverse_proxy {plan.gateway_upstream}",
+            "    }",
+            "",
+            "    # Everything else -> Next.js frontend",
+            "    handle {",
+            f"        reverse_proxy {plan.frontend_upstream}",
+            "    }",
             "}",
             "",
         ]
@@ -137,7 +151,7 @@ def validate_caddy_auth_environment(
     *,
     env: dict[str, str] | None = None,
 ) -> None:
-    resolved_env = env or dict(os.environ)
+    resolved_env = dict(os.environ) if env is None else env
     missing_names = [
         env_name
         for env_name in (plan.basic_auth_username_env, plan.basic_auth_password_hash_env)
@@ -202,7 +216,8 @@ def check_caddy_public_entry(runtime_config: RemoteWorkbenchRuntimeConfig) -> in
     print(f"Caddy executable: {plan.executable_path}")
     print(f"Generated Caddyfile: {plan.generated_caddyfile_path}")
     print(f"Access log: {plan.access_log_path}")
-    print(f"Reverse proxy upstream: {plan.upstream}")
+    print(f"API upstream (Gateway): {plan.gateway_upstream}")
+    print(f"Page upstream (Next.js): {plan.frontend_upstream}")
     return 0
 
 
@@ -222,7 +237,8 @@ def run_caddy_public_entry(runtime_config: RemoteWorkbenchRuntimeConfig) -> int:
     print(f"Caddy executable: {plan.executable_path}")
     print(f"Generated Caddyfile: {plan.generated_caddyfile_path}")
     print(f"Access log: {plan.access_log_path}")
-    print(f"Reverse proxy upstream: {plan.upstream}")
+    print(f"API upstream (Gateway): {plan.gateway_upstream}")
+    print(f"Page upstream (Next.js): {plan.frontend_upstream}")
     return int(process.wait())
 
 

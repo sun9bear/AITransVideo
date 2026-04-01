@@ -53,14 +53,16 @@ def test_parse_job_api_args_rejects_non_integer_port() -> None:
         main.parse_job_api_args(["main.py", "job-api", "not-a-port"])
 
 
-def test_run_process_command_shuts_down_tts_runtime_after_success(
+def test_run_process_command_completes_successfully(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
-    cleanup_calls: list[str] = []
+    """run_process_command calls ProcessPipeline.run() and prints completion summary."""
+    run_calls: list[object] = []
 
     class _FakePipeline:
         def run(self, config):
+            run_calls.append(config)
             return type(
                 "Result",
                 (),
@@ -77,20 +79,22 @@ def test_run_process_command_shuts_down_tts_runtime_after_success(
                 },
             )()
 
+    printed_lines: list[str] = []
+
     monkeypatch.setattr(main, "parse_process_args", lambda argv: object())
     monkeypatch.setattr(main, "ProcessPipeline", _FakePipeline)
-    monkeypatch.setattr(main, "_shutdown_cli_tts_runtimes", lambda: cleanup_calls.append("done"))
-    monkeypatch.setattr(builtins, "print", lambda *args, **kwargs: None)
+    monkeypatch.setattr(builtins, "print", lambda *args, **kwargs: printed_lines.append(" ".join(str(a) for a in args)))
 
     main.run_process_command(["main.py", "process", "https://example.test/video"])
 
-    assert cleanup_calls == ["done"]
+    assert len(run_calls) == 1, "ProcessPipeline.run() should be called exactly once"
+    assert any("处理完成" in line for line in printed_lines), "completion summary should be printed"
 
 
-def test_run_process_command_shuts_down_tts_runtime_after_failure(
+def test_run_process_command_raises_on_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    cleanup_calls: list[str] = []
+    """run_process_command wraps pipeline exceptions in SystemExit."""
 
     class _FakePipeline:
         def run(self, config):
@@ -98,12 +102,9 @@ def test_run_process_command_shuts_down_tts_runtime_after_failure(
 
     monkeypatch.setattr(main, "parse_process_args", lambda argv: object())
     monkeypatch.setattr(main, "ProcessPipeline", _FakePipeline)
-    monkeypatch.setattr(main, "_shutdown_cli_tts_runtimes", lambda: cleanup_calls.append("done"))
 
     with pytest.raises(SystemExit, match="process failed: boom"):
         main.run_process_command(["main.py", "process", "https://example.test/video"])
-
-    assert cleanup_calls == ["done"]
 
 
 # ===================================================================

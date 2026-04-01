@@ -1,4 +1,4 @@
-import { buildBackendUrl, resolveWebUiBaseUrl } from '@/lib/api/config'
+import { buildBackendUrl, resolveJobApiBaseUrl } from '@/lib/api/config'
 import { DOWNLOADABLE_ARTIFACT_KEYS, type DownloadableArtifactKey } from '@/types/jobs'
 
 type BuildResultDownloadUrlInput = {
@@ -12,12 +12,9 @@ export function buildResultDownloadUrl(
 ) {
   const downloadKey = input.downloadKey
   const jobId = input.jobId?.trim() ?? ''
-  const projectDir = input.projectDir?.trim() ?? ''
 
-  if (!projectDir) {
-    if (!jobId) {
-      return null
-    }
+  if (!jobId) {
+    return null
   }
 
   if (!DOWNLOADABLE_ARTIFACT_KEYS.includes(downloadKey)) {
@@ -26,27 +23,14 @@ export function buildResultDownloadUrl(
 
   // TTS segments zip has its own endpoint
   if (downloadKey === 'editor.tts_segments_zip') {
-    if (!jobId) return null
-    const ttsQuery = new URLSearchParams({ job_id: jobId })
     return buildBackendUrl(
-      resolveWebUiBaseUrl(),
-      `/api/tts-segments-zip?${ttsQuery.toString()}`,
+      resolveJobApiBaseUrl(),
+      `/jobs/${jobId}/tts-segments-zip`,
     )
   }
 
-  const query = new URLSearchParams({ key: downloadKey })
-
-  if (jobId) {
-    query.set('job_id', jobId)
-  }
-
-  if (projectDir) {
-    // Backward compatibility for legacy web-ui download resolver.
-    query.set('project_dir', projectDir)
-  }
-
   return buildBackendUrl(
-    resolveWebUiBaseUrl(),
-    `/api/result-download?${query.toString()}`,
+    resolveJobApiBaseUrl(),
+    `/jobs/${jobId}/download/${downloadKey}`,
   )
 }

@@ -26,7 +26,7 @@ import {
   getProjectArtifacts,
   getProjectResultSummary,
 } from '@/lib/api/jobs'
-import { cancelCurrentJob, getWebUiActiveStage } from '@/lib/api/reviews'
+import { cancelJob } from '@/lib/api/reviews'
 import { usePollingTask } from '@/lib/react/usePollingTask'
 import {
   type JobLogEntry,
@@ -68,11 +68,10 @@ export default function WorkspacePage() {
     if (!jobId) return
     if (!silent) setIsLoading(true)
     try {
-      const [nextJob, nextLogs, nextDownloads, activeStage] = await Promise.all([
+      const [nextJob, nextLogs, nextDownloads] = await Promise.all([
         getJob(jobId),
         getJobLogs(jobId),
         getProjectArtifacts(jobId).catch(() => []),
-        getWebUiActiveStage(),
       ])
       setJob(nextJob)
       // 检测状态变化，发送浏览器通知
@@ -84,7 +83,10 @@ export default function WorkspacePage() {
       prevStatusRef.current = nextJob.status
       setLogs(nextLogs)
       setDownloads(nextDownloads)
-      if (activeStage) setWebUiStage(activeStage)
+      // Derive review stage from the job's own review_gate (job-scoped, no global /api/state)
+      const gateStage = typeof nextJob.reviewGate?.stage === 'string' ? nextJob.reviewGate.stage : null
+      const derivedStage = gateStage ?? nextJob.currentStage ?? null
+      if (derivedStage) setWebUiStage(derivedStage)
       setPageError(null)
     } catch (error) {
       setPageError(getErrorMessage(error))
@@ -112,7 +114,7 @@ export default function WorkspacePage() {
     if (!window.confirm('确定要取消当前任务吗？取消后可以创建新的翻译任务。')) return
     setIsCancelling(true)
     try {
-      await cancelCurrentJob()
+      await cancelJob(jobId)
       router.push('/translations/new')
     } catch (error) {
       setPageError(getErrorMessage(error))

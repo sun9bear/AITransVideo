@@ -21,8 +21,6 @@ DEFAULT_RUNTIME_LOGS_DIR = Path(
 DEFAULT_AUTODUB_CONFIG_PATH = Path(
     os.environ.get("AUTODUB_LOCAL_CONFIG_PATH", "/opt/aivideotrans/app/autodub.local.json")
 )
-DEFAULT_WEB_UI_HOST = "127.0.0.1"
-DEFAULT_WEB_UI_PORT = 8876
 DEFAULT_JOB_API_HOST = "127.0.0.1"
 DEFAULT_JOB_API_PORT = 8877
 ALLOWED_LOCAL_HOSTS = {"127.0.0.1", "localhost"}
@@ -90,7 +88,6 @@ def run_app_preflight(args: argparse.Namespace) -> int:
         print(f"Optional autodub config not found: {autodub_config_path}")
 
     print(f"Runtime config: {runtime_config.path}")
-    print(f"Web UI binding: {runtime_config.web_ui.base_url}")
     print(f"Job API binding: {runtime_config.job_api.base_url}")
     print(f"Projects dir writable: {projects_dir}")
     print(f"Jobs dir writable: {jobs_dir}")
@@ -103,20 +100,18 @@ def run_app_health(args: argparse.Namespace) -> int:
     deadline = time.monotonic() + args.timeout
 
     while time.monotonic() < deadline:
-        web_ui_ok = _probe_listener(runtime_config.web_ui.host, runtime_config.web_ui.port)
         job_api_ok = _probe_listener(runtime_config.job_api.host, runtime_config.job_api.port)
-        if web_ui_ok and job_api_ok:
+        if job_api_ok:
             print(
                 "App health passed: "
-                f"Web UI {runtime_config.web_ui.base_url}, "
                 f"Job API {runtime_config.job_api.base_url}"
             )
             return 0
         time.sleep(0.5)
 
     raise SystemExit(
-        "App health failed: listeners were not reachable on "
-        f"{runtime_config.web_ui.base_url} and {runtime_config.job_api.base_url} "
+        "App health failed: Job API listener was not reachable on "
+        f"{runtime_config.job_api.base_url} "
         f"within {args.timeout:.1f}s."
     )
 
@@ -154,12 +149,10 @@ class RuntimeConfig:
         self,
         *,
         path: Path,
-        web_ui: ServiceBinding,
         job_api: ServiceBinding,
         runtime_logs_dir: Path,
     ) -> None:
         self.path = path
-        self.web_ui = web_ui
         self.job_api = job_api
         self.runtime_logs_dir = runtime_logs_dir
 
@@ -174,12 +167,6 @@ def load_runtime_config(config_path: Path) -> RuntimeConfig:
         raise SystemExit(f"Runtime config {config_path} must contain a top-level JSON object.")
 
     config_root = config_path.parent
-    web_ui = _load_binding(
-        payload.get("web_ui"),
-        section_name="web_ui",
-        default_host=DEFAULT_WEB_UI_HOST,
-        default_port=DEFAULT_WEB_UI_PORT,
-    )
     job_api = _load_binding(
         payload.get("job_api"),
         section_name="job_api",
@@ -191,7 +178,6 @@ def load_runtime_config(config_path: Path) -> RuntimeConfig:
 
     return RuntimeConfig(
         path=config_path,
-        web_ui=web_ui,
         job_api=job_api,
         runtime_logs_dir=runtime_logs_dir,
     )

@@ -7,29 +7,11 @@ import {
   approveTranslationReview,
   cloneVoiceForReview,
   getTranslationReview,
+  previewSegmentForJob,
   splitSegment,
 } from '@/lib/api/reviews'
 import { getVoiceLibrary, type VoiceLibraryEntry } from '@/lib/api/voiceLibrary'
 import type { TranslationReviewResource } from '@/types/reviews'
-
-/* ---------- Preview API ---------- */
-
-async function previewSegment(params: {
-  segment_id: number
-  source_start_ms: number
-  source_end_ms: number
-  cn_text: string
-  voice_id: string
-}): Promise<{ tts_audio_base64: string }> {
-  const resp = await fetch('/api/review/preview-segment', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'include',
-    body: JSON.stringify(params),
-  })
-  if (!resp.ok) throw new Error('试听失败')
-  return resp.json()
-}
 
 /* ---------- Types ---------- */
 
@@ -160,13 +142,13 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
     updateSpeakerVoice(speakerId, { isCloning: true, cloneError: null })
     try {
       const name = speakerNames[speakerId] ?? speakerId
-      const result = await cloneVoiceForReview(speakerId, name, '', resource.projectDir)
+      const result = await cloneVoiceForReview(speakerId, name, '', resource.projectDir, jobId)
       updateSpeakerVoice(speakerId, { voiceId: result.voiceId, isCloning: false })
       try { const lib = await getVoiceLibrary(); setAllVoices(lib.voices) } catch { /* non-critical */ }
     } catch (error) {
       updateSpeakerVoice(speakerId, { isCloning: false, cloneError: getErrorMessage(error) })
     }
-  }, [resource, speakerNames, updateSpeakerVoice])
+  }, [jobId, resource, speakerNames, updateSpeakerVoice])
 
   const handlePreviewSegment = useCallback(async (segmentId: string) => {
     if (!resource) return
@@ -184,15 +166,15 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
     setPreviewingSegmentId(segmentId)
     setPreviewError((prev) => { const n = { ...prev }; delete n[segmentId]; return n })
     try {
-      const result = await previewSegment({
-        segment_id: Number(segmentId),
-        source_start_ms: item.startMs,
-        source_end_ms: item.endMs,
-        cn_text: cnText,
-        voice_id: voiceId,
+      const result = await previewSegmentForJob(jobId, {
+        segmentId: Number(segmentId),
+        sourceStartMs: item.startMs,
+        sourceEndMs: item.endMs,
+        cnText: cnText,
+        voiceId: voiceId,
       })
-      if (result.tts_audio_base64 && audioRef.current) {
-        audioRef.current.src = `data:audio/wav;base64,${result.tts_audio_base64}`
+      if (result.ttsAudioBase64 && audioRef.current) {
+        audioRef.current.src = `data:audio/wav;base64,${result.ttsAudioBase64}`
         audioRef.current.play()
       }
     } catch (error) {
@@ -200,7 +182,7 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
     } finally {
       setPreviewingSegmentId(null)
     }
-  }, [resource, segmentSpeakers, speakerVoices, segments])
+  }, [jobId, resource, segmentSpeakers, speakerVoices, segments])
 
   const totalItems = resource?.items.length ?? 0
   const totalPages = Math.max(1, Math.ceil(totalItems / pageSize))
@@ -491,7 +473,7 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
                       setIsSplitting(true)
                       try {
                         const result = await splitSegment({
-                          projectDir: resource.projectDir, segmentId: item.segmentId,
+                          jobId, projectDir: resource.projectDir, segmentId: item.segmentId,
                           splitSourceIndex: splitSourcePos, splitCnIndex: splitCnPos,
                           speakerA: splitSpeakerA, speakerB: splitSpeakerB,
                           stage: 'translation_review', pendingSpeakerChanges: segmentSpeakers,

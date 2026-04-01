@@ -42,11 +42,13 @@ def test_load_remote_workbench_runtime_config_uses_defaults_and_relative_logs(tm
     config = load_remote_workbench_runtime_config(config_path)
 
     assert config.path == config_path.resolve(strict=False)
-    assert config.web_ui.host == "127.0.0.1"
-    assert config.web_ui.port == 8876
     assert config.job_api.host == "127.0.0.1"
     assert config.job_api.port == 8877
     assert config.job_api_base_url == "http://127.0.0.1:8877"
+    assert config.gateway.host == "127.0.0.1"
+    assert config.gateway.port == 8880
+    assert config.frontend.host == "127.0.0.1"
+    assert config.frontend.port == 3000
     assert config.control_panel.enabled is True
     assert config.control_panel.binding.host == "127.0.0.1"
     assert config.control_panel.binding.port == 8765
@@ -70,7 +72,7 @@ def test_load_remote_workbench_runtime_config_rejects_non_local_bindings(tmp_pat
     config_path.write_text(
         json.dumps(
             {
-                "web_ui": {
+                "job_api": {
                     "host": "0.0.0.0",
                 }
             },

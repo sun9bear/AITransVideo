@@ -6,7 +6,7 @@ Gateway intercepts job-related requests to:
 3. Verify job ownership for single-job operations
 4. Sync job metadata to PostgreSQL (dual-write)
 
-The upstream Job API (8877) and Web UI (8876) remain unchanged.
+The upstream Job API (8877) is the sole backend service.
 """
 
 from __future__ import annotations
@@ -450,7 +450,7 @@ async def intercept_job_subresource(
 ) -> Response:
     """GET/POST /job-api/jobs/{job_id}/{subpath} — verify ownership, then forward.
 
-    Covers: logs, artifacts, result-summary, continue, etc.
+    Covers: logs, artifacts, result-summary, continue, review/*, download/*, etc.
     """
     await _verify_job_ownership(job_id, db, user)
     return await proxy_request(
@@ -458,6 +458,42 @@ async def intercept_job_subresource(
         upstream_base=settings.job_api_upstream,
         strip_prefix="/job-api",
     )
+
+
+async def intercept_delete_job_v2(
+    request: Request,
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(require_auth),
+) -> Response:
+    """DELETE /job-api/jobs/{job_id} — verify ownership, forward to Job API, then cleanup quota + PostgreSQL.
+
+    Phase 3: replaces the old POST /api/job/delete flow for active callers.
+    """
+    await _verify_job_ownership(job_id, db, user)
+
+    # Forward DELETE to Job API
+    upstream_response = await proxy_request(
+        request=request,
+        upstream_base=settings.job_api_upstream,
+        strip_prefix="/job-api",
+    )
+
+    # If upstream succeeded, release quota then remove from PostgreSQL
+    if upstream_response.status_code == 200:
+        try:
+            result = await db.execute(select(Job).where(Job.job_id == job_id))
+            job_row = result.scalar_one_or_none()
+            if job_row is not None:
+                from quota import release_quota as _release_quota
+                await _release_quota(db, job_row)
+            await db.execute(delete(Job).where(Job.job_id == job_id))
+            await db.commit()
+            logger.info("Deleted job %s from PostgreSQL (quota released)", job_id)
+        except Exception:
+            logger.exception("Failed to delete job %s from PostgreSQL", job_id)
+
+    return upstream_response
 
 
 async def _verify_job_ownership(
@@ -477,108 +513,6 @@ async def _verify_job_ownership(
             raise HTTPException(status_code=403, detail="无权访问此任务")
         else:
             logger.warning("Job %s not found in DB — allowing access (legacy job?)", job_id)
-
-
-async def intercept_result_download(
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-    user: User | None = Depends(require_auth),
-) -> Response:
-    """GET /api/result-download — verify job ownership before proxying."""
-    job_id = request.query_params.get("job_id")
-    if job_id:
-        await _verify_job_ownership(job_id, db, user)
-
-    return await proxy_request(
-        request=request,
-        upstream_base=settings.web_ui_upstream,
-        strip_prefix="",
-    )
-
-
-async def intercept_delete_job(
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-    user: User | None = Depends(require_auth),
-) -> Response:
-    """POST /api/job/delete — verify ownership, proxy to web_ui, then clean PostgreSQL."""
-    # Parse job_id from request body
-    body = await request.body()
-    job_id = None
-    try:
-        data = json.loads(body)
-        job_id = data.get("job_id", "").strip()
-    except Exception:
-        pass
-
-    # Verify ownership if we have a job_id
-    if job_id and settings.auth_required and user is not None:
-        await _verify_job_ownership(job_id, db, user)
-
-    # Forward to upstream web_ui
-    upstream_response = await proxy_request(
-        request=request,
-        upstream_base=settings.web_ui_upstream,
-        strip_prefix="",
-    )
-
-    # If upstream succeeded, release quota then remove from PostgreSQL
-    if upstream_response.status_code == 200 and job_id:
-        try:
-            result = await db.execute(select(Job).where(Job.job_id == job_id))
-            job_row = result.scalar_one_or_none()
-            if job_row is not None:
-                from quota import release_quota as _release_quota
-                await _release_quota(db, job_row)
-            await db.execute(delete(Job).where(Job.job_id == job_id))
-            await db.commit()
-            logger.info("Deleted job %s from PostgreSQL (quota released)", job_id)
-        except Exception:
-            logger.exception("Failed to delete job %s from PostgreSQL", job_id)
-
-    return upstream_response
-
-
-async def intercept_project_file(
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-    user: User | None = Depends(require_auth),
-) -> Response:
-    """GET /api/project-file — verify ownership via path segment matching.
-
-    Security: fail-closed — if no job_id segment matches, deny access.
-    """
-    if settings.auth_required and user is not None:
-        path = request.query_params.get("path", "")
-        if not path:
-            raise HTTPException(status_code=400, detail="缺少 path 参数")
-
-        # Collect non-empty path segments, then batch-query DB
-        segments = [s for s in path.replace("\\", "/").split("/") if s]
-        if not segments:
-            raise HTTPException(status_code=403, detail="无法验证文件归属，拒绝访问")
-
-        result = await db.execute(
-            select(Job.job_id, Job.user_id).where(Job.job_id.in_(segments))
-        )
-        matched_jobs = result.all()
-
-        ownership_verified = False
-        for job_id, owner_id in matched_jobs:
-            if owner_id != user.id:
-                raise HTTPException(status_code=403, detail="无权访问此文件")
-            ownership_verified = True
-            break
-
-        # Fail-closed: no matching job_id found → deny
-        if not ownership_verified:
-            raise HTTPException(status_code=403, detail="无法验证文件归属，拒绝访问")
-
-    return await proxy_request(
-        request=request,
-        upstream_base=settings.web_ui_upstream,
-        strip_prefix="",
-    )
 
 
 async def update_source_metadata(

@@ -7,12 +7,15 @@ from urllib.parse import urlparse
 
 from services.control_panel import CONTROL_PANEL_DEFAULT_PORT
 from services.jobs.api import JOB_API_DEFAULT_HOST, JOB_API_DEFAULT_PORT
-from services.web_ui import WEB_UI_DEFAULT_HOST, WEB_UI_DEFAULT_PORT
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_REMOTE_WORKBENCH_CONFIG_PATH = PROJECT_ROOT / "remote_workbench.local.json"
 DEFAULT_RUNTIME_LOGS_DIR_NAME = "runtime_logs"
+DEFAULT_GATEWAY_HOST = "127.0.0.1"
+DEFAULT_GATEWAY_PORT = 8880
+DEFAULT_FRONTEND_HOST = "127.0.0.1"
+DEFAULT_FRONTEND_PORT = 3000
 _ALLOWED_LOCAL_HOSTS = {"127.0.0.1", "localhost"}
 
 
@@ -54,8 +57,9 @@ class PublicEntryRuntimeConfig:
 @dataclass(frozen=True, slots=True)
 class RemoteWorkbenchRuntimeConfig:
     path: Path
-    web_ui: ServiceBinding
     job_api: ServiceBinding
+    gateway: ServiceBinding
+    frontend: ServiceBinding
     control_panel: ControlPanelRuntimeConfig
     public_entry: PublicEntryRuntimeConfig
     runtime_logs_dir: Path
@@ -72,21 +76,27 @@ def load_remote_workbench_runtime_config(
     payload = _load_config_payload(resolved_path)
     config_root = resolved_path.parent
 
-    web_ui_binding = _load_service_binding(
-        payload.get("web_ui"),
-        default_host=WEB_UI_DEFAULT_HOST,
-        default_port=WEB_UI_DEFAULT_PORT,
-        section_name="web_ui",
-    )
     job_api_binding = _load_service_binding(
         payload.get("job_api"),
         default_host=JOB_API_DEFAULT_HOST,
         default_port=JOB_API_DEFAULT_PORT,
         section_name="job_api",
     )
+    gateway_binding = _load_service_binding(
+        payload.get("gateway"),
+        default_host=DEFAULT_GATEWAY_HOST,
+        default_port=DEFAULT_GATEWAY_PORT,
+        section_name="gateway",
+    )
+    frontend_binding = _load_service_binding(
+        payload.get("frontend"),
+        default_host=DEFAULT_FRONTEND_HOST,
+        default_port=DEFAULT_FRONTEND_PORT,
+        section_name="frontend",
+    )
     control_panel_binding = _load_service_binding(
         payload.get("control_panel"),
-        default_host=WEB_UI_DEFAULT_HOST,
+        default_host=JOB_API_DEFAULT_HOST,
         default_port=CONTROL_PANEL_DEFAULT_PORT,
         section_name="control_panel",
     )
@@ -112,8 +122,9 @@ def load_remote_workbench_runtime_config(
 
     return RemoteWorkbenchRuntimeConfig(
         path=resolved_path,
-        web_ui=web_ui_binding,
         job_api=job_api_binding,
+        gateway=gateway_binding,
+        frontend=frontend_binding,
         control_panel=ControlPanelRuntimeConfig(
             enabled=_coerce_bool(control_panel_section.get("enabled"), default=False, section_name="control_panel.enabled"),
             binding=control_panel_binding,

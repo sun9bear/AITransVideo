@@ -1,6 +1,5 @@
-import { ApiClient } from '@/lib/api/client'
-import { resolveWebUiBaseUrl } from '@/lib/api/config'
-import type { ApiWebUiStateResponse, ApiWebUiVoiceLibrarySnapshot } from '@/types/api'
+import { apiClient } from '@/lib/api/client'
+import type { ApiWebUiVoiceLibrarySnapshot } from '@/types/api'
 
 export interface VoiceLibraryEntry {
   voiceId: string
@@ -24,11 +23,9 @@ export interface VoiceLibrarySummary {
   voices: VoiceLibraryEntry[]
 }
 
-const webUiApiClient = new ApiClient(resolveWebUiBaseUrl())
-
 export async function getVoiceLibrary(): Promise<VoiceLibrarySummary> {
-  const payload = await webUiApiClient.get<ApiWebUiStateResponse>('/api/state')
-  return toVoiceLibrarySummary(payload.results.voice_library)
+  const snapshot = await apiClient.get<ApiWebUiVoiceLibrarySnapshot>('/voice-library')
+  return toVoiceLibrarySummary(snapshot)
 }
 
 function toVoiceLibrarySummary(snapshot: ApiWebUiVoiceLibrarySnapshot): VoiceLibrarySummary {

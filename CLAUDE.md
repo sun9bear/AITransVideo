@@ -31,13 +31,14 @@ python -m pytest tests/
 
 ## Architecture
 
-### Two Backend APIs (proxied by Gateway)
+### Backend API (proxied by Gateway)
 
 | API | Gateway Route | Backend Port | Purpose |
 |-----|--------------|-------------|---------|
-| Job API | `/job-api/*` | 8877 | Job CRUD, status, logs, artifacts |
-| Web UI API | `/api/*` | 8876 | Review state, voice library, approvals |
-| Gateway | all routes | 8880 | Auth, job ownership, proxy |
+| Job API | `/job-api/*` | 8877 | Job CRUD, status, logs, artifacts, review state, voice library, downloads |
+| Gateway | all routes | 8880 | Auth, job ownership, proxy, native upload |
+
+> **Note:** Web UI API (port 8876) 已在 Phase 4 下线。所有功能已迁移到 Job API 和 Gateway。
 
 ### Frontend: `frontend-next/src/`
 

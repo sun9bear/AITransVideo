@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import io
+import mimetypes
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
-from urllib.parse import urlparse
+from pathlib import Path
+from urllib.parse import quote, urlparse
+import zipfile
 
 from services.jobs.service import (
     JobConflictError,
@@ -64,6 +68,69 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
                     self._write_json(
                         HTTPStatus.OK,
                         service.get_artifacts(path_parts[1]),
+                    )
+                    return
+                # --- Phase 1: review-state (job-scoped, strict) ---
+                if len(path_parts) == 3 and path_parts[0] == "jobs" and path_parts[2] == "review-state":
+                    job_id = path_parts[1]
+                    record = service.require_job(job_id)
+                    project_dir = _require_project_dir(record)
+                    self._write_json(
+                        HTTPStatus.OK,
+                        _build_review_state_for_job(record, project_dir=project_dir, project_root=service.runner.project_root),
+                    )
+                    return
+                # --- Phase 1: key-based download ---
+                if len(path_parts) == 4 and path_parts[0] == "jobs" and path_parts[2] == "download":
+                    job_id = path_parts[1]
+                    download_key = path_parts[3]
+                    record = service.require_job(job_id)
+                    project_dir = _require_project_dir(record)
+                    download_path = _resolve_download_path(
+                        project_root=service.runner.project_root,
+                        project_dir=project_dir,
+                        download_key=download_key,
+                    )
+                    if download_path is None:
+                        self._write_json(HTTPStatus.NOT_FOUND, {"error": "Requested download was not found."})
+                        return
+                    content_type = mimetypes.guess_type(str(download_path))[0] or "application/octet-stream"
+                    self._write_binary(
+                        HTTPStatus.OK,
+                        download_path.read_bytes(),
+                        content_type=content_type,
+                        download_name=download_path.name,
+                    )
+                    return
+                # --- Phase 1: tts-segments-zip ---
+                if len(path_parts) == 3 and path_parts[0] == "jobs" and path_parts[2] == "tts-segments-zip":
+                    job_id = path_parts[1]
+                    record = service.require_job(job_id)
+                    project_dir = _require_project_dir(record)
+                    tts_dir = project_dir / "tts"
+                    if not tts_dir.is_dir():
+                        self._write_json(HTTPStatus.NOT_FOUND, {"error": "TTS segments not found"})
+                        return
+                    aligned_files = sorted(tts_dir.glob("*_aligned.wav"))
+                    if not aligned_files:
+                        self._write_json(HTTPStatus.NOT_FOUND, {"error": "No aligned TTS segments"})
+                        return
+                    buf = io.BytesIO()
+                    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                        for f in aligned_files:
+                            zf.write(f, f.name)
+                    self._write_binary(
+                        HTTPStatus.OK,
+                        buf.getvalue(),
+                        content_type="application/zip",
+                        download_name=f"tts_segments_{job_id[:12]}.zip",
+                    )
+                    return
+                # --- Phase 1: voice-library (global) ---
+                if path_parts == ["voice-library"]:
+                    self._write_json(
+                        HTTPStatus.OK,
+                        _build_global_voice_library(project_root=service.runner.project_root),
                     )
                     return
                 self._write_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
@@ -130,6 +197,101 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
                     job = service.continue_job(path_parts[1])
                     self._write_json(HTTPStatus.ACCEPTED, job.to_dict())
                     return
+                # --- Phase 2: review write endpoints ---
+                if (len(path_parts) >= 4 and path_parts[0] == "jobs"
+                        and path_parts[2] == "review"):
+                    job_id = path_parts[1]
+                    record = service.require_job(job_id)
+                    project_dir = _require_project_dir(record)
+                    review_subpath = "/".join(path_parts[3:])
+
+                    if review_subpath == "translation/approve":
+                        _require_review_gate(record, expected_stage="translation_review")
+                        payload = self._read_json_payload()
+                        from services.jobs.review_actions import approve_translation
+                        approve_translation(
+                            project_dir=project_dir,
+                            segments_payload=payload.get("segments"),
+                            segment_speakers=payload.get("segment_speakers") if isinstance(payload.get("segment_speakers"), dict) else None,
+                        )
+                        # Continue the job after approval
+                        continued = service.continue_job(job_id)
+                        self._write_json(HTTPStatus.OK, {"success": True, "job": continued.to_dict()})
+                        return
+
+                    if review_subpath == "split-segment":
+                        _require_waiting_for_review(record)
+                        payload = self._read_json_payload()
+                        from services.jobs.review_actions import split_segment
+                        result = split_segment(
+                            project_dir=project_dir,
+                            stage=str(payload.get("stage", "translation_review")),
+                            segment_id=payload.get("segment_id"),
+                            split_source_index=int(payload["split_source_index"]) if payload.get("split_source_index") is not None else None,
+                            split_cn_index=int(payload["split_cn_index"]) if payload.get("split_cn_index") is not None else None,
+                            speaker_a=str(payload["speaker_a"]).strip() if payload.get("speaker_a") else None,
+                            speaker_b=str(payload["speaker_b"]).strip() if payload.get("speaker_b") else None,
+                            pending_speaker_changes=payload.get("pending_speaker_changes") if isinstance(payload.get("pending_speaker_changes"), dict) else None,
+                        )
+                        self._write_json(HTTPStatus.OK, {"success": True, "split_result": result})
+                        return
+
+                    if review_subpath == "preview-segment":
+                        _require_waiting_for_review(record)
+                        payload = self._read_json_payload()
+                        from services.jobs.review_actions import preview_segment
+                        from services import config_loader
+                        result = preview_segment(
+                            project_dir=project_dir,
+                            segment_id=payload.get("segment_id"),
+                            source_start_ms=float(payload["source_start_ms"]) if payload.get("source_start_ms") is not None else None,
+                            source_end_ms=float(payload["source_end_ms"]) if payload.get("source_end_ms") is not None else None,
+                            cn_text=str(payload.get("cn_text", "")),
+                            voice_id=str(payload.get("voice_id", "")),
+                            config_path=config_loader.DEFAULT_AUTODUB_LOCAL_CONFIG_PATH,
+                        )
+                        self._write_json(HTTPStatus.OK, result)
+                        return
+
+                    if review_subpath == "voice/clone":
+                        _require_waiting_for_review(record)
+                        payload = self._read_json_payload()
+                        from services.jobs.review_actions import clone_voice
+                        from services import config_loader
+                        result = clone_voice(
+                            project_dir=project_dir,
+                            speaker_id=str(payload.get("speaker_id", "")).strip(),
+                            speaker_name=str(payload.get("speaker_name", "")).strip() or None,
+                            sample_path=str(payload.get("sample_path", "")).strip() or None,
+                            config_path=config_loader.DEFAULT_AUTODUB_LOCAL_CONFIG_PATH,
+                            project_root=service.runner.project_root,
+                        )
+                        self._write_json(HTTPStatus.OK, result)
+                        return
+
+                    self._write_json(HTTPStatus.NOT_FOUND, {"error": f"Unknown review action: {review_subpath}"})
+                    return
+                # --- Phase 1: job-scoped cancel ---
+                if len(path_parts) == 3 and path_parts[0] == "jobs" and path_parts[2] == "cancel":
+                    job_id = path_parts[1]
+                    record = service.require_job(job_id)
+                    if record.status not in ("queued", "running", "waiting_for_review"):
+                        raise JobConflictError(f"job {job_id} is not in a cancellable state (current: {record.status})")
+                    service.runner.stop_process(job_id)
+                    from dataclasses import replace as _replace
+                    from services.state_manager import utc_now_iso
+                    timestamp = utc_now_iso()
+                    cancelled_record = _replace(
+                        record,
+                        status="cancelled",
+                        current_stage="failed",
+                        progress_message="Job cancelled by user.",
+                        updated_at=timestamp,
+                        completed_at=timestamp,
+                    )
+                    service.store.save_job(cancelled_record)
+                    self._write_json(HTTPStatus.OK, {"success": True, "job": cancelled_record.to_dict()})
+                    return
                 self._write_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
             except JobNotFoundError as exc:
                 self._write_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
@@ -180,4 +342,148 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
             self.end_headers()
             self.wfile.write(serialized_payload)
 
+        def _write_binary(
+            self,
+            status: HTTPStatus,
+            payload: bytes,
+            *,
+            content_type: str,
+            download_name: str | None = None,
+        ) -> None:
+            self.send_response(status.value)
+            self.send_header("Content-Type", content_type)
+            if download_name:
+                self.send_header(
+                    "Content-Disposition",
+                    f"attachment; filename*=UTF-8''{quote(download_name)}",
+                )
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
     return JobAPIHandler
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 helper functions (handler-level, not in JobService)
+# ---------------------------------------------------------------------------
+
+def _require_waiting_for_review(record: object) -> None:
+    """Verify that the job is in waiting_for_review status. Raises JobConflictError if not."""
+    status = str(getattr(record, "status", "")).strip()
+    if status != "waiting_for_review":
+        raise JobConflictError(
+            f"Job {getattr(record, 'job_id', '?')} is not waiting_for_review (current: {status})"
+        )
+
+
+def _require_review_gate(record: object, *, expected_stage: str) -> None:
+    """Verify that the job is in waiting_for_review AND its review_gate matches the expected stage.
+
+    Raises JobConflictError if the job is not in the correct review state.
+    Must be called BEFORE any disk writes to prevent writing to a job in the wrong state.
+    """
+    _require_waiting_for_review(record)
+    review_gate = getattr(record, "review_gate", None)
+    if not isinstance(review_gate, dict):
+        raise JobConflictError(
+            f"Job {getattr(record, 'job_id', '?')} has no review_gate"
+        )
+    gate_stage = str(review_gate.get("stage", "")).strip()
+    if gate_stage != expected_stage:
+        raise JobConflictError(
+            f"Job {getattr(record, 'job_id', '?')} review gate is '{gate_stage}', expected '{expected_stage}'"
+        )
+
+
+def _require_project_dir(record: object) -> Path:
+    """Extract and validate project_dir from a JobRecord."""
+    project_dir_text = getattr(record, "project_dir", None)
+    if not project_dir_text or not str(project_dir_text).strip():
+        raise JobNotFoundError(f"Job {getattr(record, 'job_id', '?')} has no project_dir")
+    project_dir = Path(str(project_dir_text)).resolve(strict=False)
+    if not project_dir.exists():
+        raise JobNotFoundError(f"Project directory does not exist: {project_dir}")
+    return project_dir
+
+
+def _build_review_state_for_job(
+    record: object,
+    *,
+    project_dir: Path,
+    project_root: Path,
+) -> dict[str, object]:
+    """Build review state for a specific job using its verified project_dir.
+
+    Strict job-scoped: does NOT fall back to youtube_url matching.
+    The caller must have already validated project_dir via _require_project_dir().
+    """
+    from services.web_ui.project_resolver import _build_results_snapshot
+    from services.web_ui.voice_library import _build_voice_library_snapshot
+    from services import config_loader
+
+    job_id = getattr(record, "job_id", "")
+    config_path = config_loader.DEFAULT_AUTODUB_LOCAL_CONFIG_PATH
+
+    # Build job_snapshot with explicit project_dir only.
+    # Deliberately omit youtube_url to prevent _resolve_project_dir_for_results
+    # from falling back to URL-based matching of other projects.
+    job_snapshot: dict[str, object] = {
+        "job_id": job_id,
+        "status": getattr(record, "status", ""),
+        "project_dir": str(project_dir),
+        "review_gate": getattr(record, "review_gate", None),
+    }
+
+    results_snapshot = _build_results_snapshot(
+        project_root=project_root,
+        job_snapshot=job_snapshot,
+    )
+
+    transcript_items = []
+    if isinstance(results_snapshot.get("transcript_review"), dict):
+        transcript_items = list(results_snapshot["transcript_review"].get("items", []))
+
+    voice_library_snapshot = _build_voice_library_snapshot(
+        project_root=project_root,
+        config_path=config_path,
+        project_dir=project_dir,
+        transcript_items=transcript_items,
+    )
+    results_snapshot["voice_library"] = voice_library_snapshot
+
+    return {
+        "job_id": job_id,
+        "status": getattr(record, "status", ""),
+        "review_gate": getattr(record, "review_gate", None),
+        "results": results_snapshot,
+    }
+
+
+def _resolve_download_path(
+    *,
+    project_root: Path,
+    project_dir: Path,
+    download_key: str,
+) -> Path | None:
+    """Resolve a whitelisted download key to a file path."""
+    from services.web_ui.project_resolver import _resolve_public_result_download_path
+    return _resolve_public_result_download_path(
+        project_root=project_root,
+        project_dir=project_dir,
+        download_key=download_key,
+    )
+
+
+def _build_global_voice_library(*, project_root: Path) -> dict[str, object]:
+    """Build the global voice library snapshot (not job-scoped)."""
+    from services.web_ui.voice_library import _build_voice_library_snapshot
+    from services import config_loader
+
+    config_path = config_loader.DEFAULT_AUTODUB_LOCAL_CONFIG_PATH
+    return _build_voice_library_snapshot(
+        project_root=project_root,
+        config_path=config_path,
+        project_dir=None,
+        transcript_items=[],
+    )

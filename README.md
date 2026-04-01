@@ -60,15 +60,17 @@ Last updated: 2026-03-18
 python main.py --help
 ```
 
-### 启动 Web UI
+### 启动服务（Docker Compose 部署）
 
-```bash
-python main.py web-ui
-```
+当前架构已迁移到 Gateway + Job API + Next.js 前端：
 
-默认地址：
+| 服务 | 端口 | 说明 |
+|------|------|------|
+| Gateway | 8880 | 统一入口：认证、路由、代理 |
+| Job API | 8877 | 任务 CRUD、状态、日志、产物 |
+| Next.js | 3000 | 前端页面 |
 
-- [http://127.0.0.1:8876](http://127.0.0.1:8876)
+> 注：Web UI (8876) 已在 Phase 4 废弃，所有功能已迁移到上述服务。
 
 ### 启动 control panel
 

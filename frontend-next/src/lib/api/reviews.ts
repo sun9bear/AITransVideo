@@ -1,88 +1,37 @@
-import { ApiClient } from '@/lib/api/client'
-import { buildBackendUrl, resolveWebUiBaseUrl } from '@/lib/api/config'
+import { apiClient } from '@/lib/api/client'
 import { getJob } from '@/lib/api/jobs'
 import type { ApiWebUiStateResponse } from '@/types/api'
 import type { JobSummary } from '@/types/jobs'
 import type {
   NativeReviewStage,
-  ReviewJobTransition,
   ReviewSpeakerOption,
-  SpeakerReviewApprovalInput,
-  SpeakerReviewItem,
-  SpeakerReviewResource,
+  ReviewJobTransition,
   TranslationReviewApprovalInput,
   TranslationReviewItem,
   TranslationReviewResource,
-  VoiceReviewApprovalInput,
-  VoiceReviewAvailableVoice,
-  VoiceReviewDefaultBindingInput,
-  VoiceReviewManualBindingInput,
-  VoiceReviewResource,
-  VoiceReviewSpeaker,
 } from '@/types/reviews'
-
-const webUiApiClient = new ApiClient(resolveWebUiBaseUrl())
-
-export async function getSpeakerReview(
-  jobId: string,
-): Promise<SpeakerReviewResource> {
-  const [payload, job] = await Promise.all([
-    webUiApiClient.get<ApiWebUiStateResponse>('/api/state'),
-    getJob(jobId),
-  ])
-  return toSpeakerReviewResource(payload, job)
-}
 
 export async function getTranslationReview(
   jobId: string,
 ): Promise<TranslationReviewResource> {
-  const [payload, job] = await Promise.all([
-    webUiApiClient.get<ApiWebUiStateResponse>('/api/state'),
+  const [reviewState, job] = await Promise.all([
+    apiClient.get<{ job_id: string; status: string; review_gate: Record<string, unknown> | null; results: ApiWebUiStateResponse['results'] }>(`/jobs/${jobId}/review-state`),
     getJob(jobId),
   ])
-  return toTranslationReviewResource(payload, job)
-}
-
-export async function getVoiceReview(
-  jobId: string,
-): Promise<VoiceReviewResource> {
-  const [payload, job] = await Promise.all([
-    webUiApiClient.get<ApiWebUiStateResponse>('/api/state'),
-    getJob(jobId),
-  ])
-  return toVoiceReviewResource(payload, job)
-}
-
-export async function approveSpeakerReview(
-  input: SpeakerReviewApprovalInput,
-): Promise<ReviewJobTransition> {
-  await webUiApiClient.post<ApiWebUiStateResponse>(
-    '/api/review/speaker/approve',
-    {
-      body: {
-        project_dir: input.projectDir,
-        speaker_names: input.speakerNames,
-        segment_speakers: input.segmentSpeakers,
-        confirmations: Object.fromEntries(
-          Object.entries(input.confirmations).map(([segmentId, entry]) => [
-            segmentId,
-            {
-              speaker_confirmed: entry.speakerConfirmed,
-              transcript_confirmed: entry.transcriptConfirmed,
-              updated_at: entry.updatedAt,
-            },
-          ]),
-        ),
-      },
-    },
-  )
-
-  return {
-    job: await getJob(input.jobId),
-  }
+  // Adapt the narrower Job API response to the legacy payload shape
+  // Adapt narrower Job API review-state to legacy ApiWebUiStateResponse shape.
+  // Only the fields actually used by toTranslationReviewResource are populated.
+  const adapted = {
+    meta: { title: '', config_path: '', project_root: '' },
+    settings: {},
+    job: { status: reviewState.status, review_gate: reviewState.review_gate, project_dir: reviewState.results?.project_dir },
+    results: reviewState.results,
+  } as unknown as ApiWebUiStateResponse
+  return toTranslationReviewResource(adapted, job)
 }
 
 export interface SplitSegmentInput {
+  jobId: string
   projectDir: string
   segmentId: string
   splitSourceIndex: number
@@ -97,7 +46,6 @@ export async function splitSegment(
   input: SplitSegmentInput,
 ): Promise<{ success: boolean }> {
   const body: Record<string, unknown> = {
-    project_dir: input.projectDir,
     segment_id: input.segmentId,
     split_source_index: input.splitSourceIndex,
     split_cn_index: input.splitCnIndex,
@@ -110,19 +58,18 @@ export async function splitSegment(
     body.pending_speaker_changes = input.pendingSpeakerChanges
   }
 
-  const result = await webUiApiClient.post<{ split_result: { success: boolean } }>(
-    '/api/review/split-segment',
+  const result = await apiClient.post<{ success: boolean; split_result: { success: boolean } }>(
+    `/jobs/${input.jobId}/review/split-segment`,
     { body },
   )
 
-  return { success: result.split_result?.success ?? false }
+  return { success: result.split_result?.success ?? result.success ?? false }
 }
 
 export async function approveTranslationReview(
   input: TranslationReviewApprovalInput,
 ): Promise<ReviewJobTransition> {
   const body: Record<string, unknown> = {
-    project_dir: input.projectDir,
     segments: Object.fromEntries(
       Object.entries(input.segments).map(([segmentId, entry]) => [
         segmentId,
@@ -141,8 +88,8 @@ export async function approveTranslationReview(
     body.segment_speakers = input.segmentSpeakers
   }
 
-  await webUiApiClient.post<ApiWebUiStateResponse>(
-    '/api/review/translation/approve',
+  await apiClient.post<{ success: boolean; job: Record<string, unknown> }>(
+    `/jobs/${input.jobId}/review/translation/approve`,
     { body },
   )
 
@@ -151,170 +98,81 @@ export async function approveTranslationReview(
   }
 }
 
-export async function bindVoiceReviewDefault(
-  input: VoiceReviewDefaultBindingInput,
-): Promise<VoiceReviewResource> {
-  await webUiApiClient.post<ApiWebUiStateResponse>(
-    '/api/voice-library/set-default',
-    {
-      body: {
-        speaker_id: input.speakerId,
-        voice_id: input.voiceId,
-      },
-    },
-  )
-
-  return getVoiceReview(input.jobId)
-}
-
-export async function registerVoiceReviewManual(
-  input: VoiceReviewManualBindingInput,
-): Promise<VoiceReviewResource> {
-  await webUiApiClient.post<ApiWebUiStateResponse>(
-    '/api/voice-library/register-manual',
-    {
-      body: {
-        sample_path: input.samplePath,
-        speaker_id: input.speakerId,
-        speaker_name: input.speakerName,
-        voice_id: input.voiceId,
-      },
-    },
-  )
-
-  return getVoiceReview(input.jobId)
-}
-
-export async function approveVoiceReview(
-  input: VoiceReviewApprovalInput & { voiceIdA?: string; voiceIdB?: string },
-): Promise<ReviewJobTransition> {
-  await webUiApiClient.post<ApiWebUiStateResponse>(
-    '/api/review/voice/approve',
-    {
-      body: {
-        project_dir: input.projectDir,
-        voice_id_a: input.voiceIdA,
-        voice_id_b: input.voiceIdB,
-      },
-    },
-  )
-
-  return {
-    job: await getJob(input.jobId),
-  }
-}
-
-export async function previewVoice(
-  voiceId: string,
-  speakerId?: string,
-): Promise<{ audioBase64: string; audioFormat: string }> {
-  const result = await webUiApiClient.post<{
-    success: boolean
-    audio_base64: string
-    audio_format: string
-  }>('/api/review/voice/preview', {
-    body: {
-      voice_id: voiceId,
-      speaker_id: speakerId ?? 'preview',
-    },
-  })
-
-  return {
-    audioBase64: result.audio_base64,
-    audioFormat: result.audio_format,
-  }
-}
-
 export async function cloneVoiceForReview(
   speakerId: string,
   speakerName: string,
   samplePath: string,
   projectDir?: string,
+  jobId?: string,
 ): Promise<{ voiceId: string }> {
   const body: Record<string, unknown> = {
     speaker_id: speakerId,
     speaker_name: speakerName,
   }
   if (samplePath) body.sample_path = samplePath
-  if (projectDir) body.project_dir = projectDir
 
-  const result = await webUiApiClient.post<{
-    success: boolean
-    voice_id: string
-  }>('/api/review/voice/clone', { body })
+  if (!jobId) {
+    throw new Error('jobId is required for cloneVoiceForReview')
+  }
 
+  const result = await apiClient.post<{ success: boolean; voice_id: string }>(
+    `/jobs/${jobId}/review/voice/clone`,
+    { body },
+  )
   return { voiceId: result.voice_id }
 }
 
-export async function cancelCurrentJob(): Promise<{ success: boolean }> {
-  const result = await webUiApiClient.post<{ success: boolean }>('/api/job/cancel', { body: {} })
+export async function cancelJob(jobId: string): Promise<{ success: boolean }> {
+  const result = await apiClient.post<{ success: boolean }>(`/jobs/${jobId}/cancel`, { body: {} })
   return { success: result.success ?? true }
 }
 
 export async function deleteJob(jobId: string): Promise<{ success: boolean }> {
-  // Call gateway's /api/job/delete directly (not via webUiApiClient)
-  // so the gateway can also clean up PostgreSQL records
-  const resp = await fetch('/api/job/delete', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+  // Use job-scoped DELETE via Gateway intercept (ownership + quota + PG cleanup)
+  const resp = await fetch(`/job-api/jobs/${encodeURIComponent(jobId)}`, {
+    method: 'DELETE',
     credentials: 'include',
-    body: JSON.stringify({ job_id: jobId }),
   })
   if (!resp.ok) {
-    const err = await resp.json().catch(() => ({ detail: '删除失败' }))
-    throw new Error(err.detail || '删除失败')
+    const err = await resp.json().catch(() => ({ error: '删除失败' }))
+    throw new Error(err.error || err.detail || '删除失败')
   }
   return { success: true }
 }
 
-export async function getWebUiActiveStage(): Promise<string | null> {
-  try {
-    const payload = await webUiApiClient.get<ApiWebUiStateResponse>('/api/state')
-    const activeStage = payload.results?.review_flow?.active_stage
-    if (typeof activeStage === 'string' && activeStage) return activeStage
-    const gateStage = payload.job?.review_gate?.stage
-    if (typeof gateStage === 'string' && gateStage) return gateStage
-    return null
-  } catch {
-    return null
-  }
-}
-
-export function buildLegacyReviewFallbackUrl() {
-  return buildBackendUrl(resolveWebUiBaseUrl(), '/')
-}
-
-function toSpeakerReviewResource(
-  payload: ApiWebUiStateResponse,
-  expectedJob: JobSummary,
-): SpeakerReviewResource {
-  const job = toExpectedReviewJob(payload, expectedJob, 'speaker_review')
-  const section = payload.results.transcript_review
-  const items = payload.results.transcript_review.items.map<SpeakerReviewItem>((item) => ({
-    displayName: item.display_name,
-    reviewUpdatedAt: normalizeText(item.review_updated_at),
-    segmentId: String(item.segment_id),
-    sourceText: item.source_text,
-    speakerConfirmed: Boolean(item.speaker_confirmed),
-    speakerId: item.speaker_id,
-    transcriptConfirmed: Boolean(item.transcript_confirmed),
-    transcriptText: item.cn_text,
-  }))
-  const payloadOptions = getSpeakerOptions(payload)
-  const speakerOptions = mergeSpeakerOptions(payloadOptions, items)
-  const projectDir = resolveProjectDir(payload, job.projectDir)
-
+export async function previewSegmentForJob(
+  jobId: string,
+  params: {
+    segmentId: number
+    sourceStartMs: number
+    sourceEndMs: number
+    cnText: string
+    voiceId: string
+  },
+): Promise<{ ttsAudioBase64: string; sourceAudioBase64: string }> {
+  const result = await apiClient.post<{
+    tts_audio_base64: string
+    source_audio_base64: string
+    source_format: string
+    tts_format: string
+  }>(`/jobs/${jobId}/review/preview-segment`, {
+    body: {
+      segment_id: params.segmentId,
+      source_start_ms: params.sourceStartMs,
+      source_end_ms: params.sourceEndMs,
+      cn_text: params.cnText,
+      voice_id: params.voiceId,
+    },
+  })
   return {
-    activeMessage: resolveActiveReviewMessage(payload),
-    defaultPageSize: resolveDefaultPageSize(section?.default_page_size),
-    fallbackHref: buildLegacyReviewFallbackUrl(),
-    items,
-    job,
-    pageSizeOptions: resolvePageSizeOptions(section?.page_size_options),
-    projectDir,
-    speakerOptions,
+    ttsAudioBase64: result.tts_audio_base64,
+    sourceAudioBase64: result.source_audio_base64,
   }
 }
+
+// ---------------------------------------------------------------------------
+// Internal helpers used by getTranslationReview
+// ---------------------------------------------------------------------------
 
 function toTranslationReviewResource(
   payload: ApiWebUiStateResponse,
@@ -345,81 +203,12 @@ function toTranslationReviewResource(
   return {
     activeMessage: resolveActiveReviewMessage(payload),
     defaultPageSize: resolveDefaultPageSize(section?.default_page_size),
-    fallbackHref: buildLegacyReviewFallbackUrl(),
+    fallbackHref: '/workspace',
     items,
     job,
     pageSizeOptions: resolvePageSizeOptions(section?.page_size_options),
     projectDir,
     speakerOptions,
-  }
-}
-
-function toVoiceReviewResource(
-  payload: ApiWebUiStateResponse,
-  expectedJob: JobSummary,
-): VoiceReviewResource {
-  const job = toExpectedReviewJob(payload, expectedJob, 'voice_review')
-  const voiceReview = payload.results.voice_library.active_review
-
-  if (!voiceReview) {
-    throw new Error('当前 voice review 快照不可用。')
-  }
-
-  const projectDir = resolveProjectDir(payload, job.projectDir)
-  const speakers = voiceReview.speakers.map<VoiceReviewSpeaker>((speaker) => ({
-    speakerId: speaker.speaker_id,
-    speakerLabel: normalizeText(speaker.speaker_label),
-    speakerName: normalizeText(speaker.speaker_name) ?? speaker.speaker_id,
-    voiceArgName: normalizeText(speaker.voice_arg_name),
-    samplePath: normalizeText(speaker.sample_path),
-    sampleDurationS: Number.isFinite(speaker.sample_duration_s)
-      ? speaker.sample_duration_s
-      : 0,
-    silenceRatio: Number.isFinite(speaker.silence_ratio) ? speaker.silence_ratio : 0,
-    defaultVoiceId: normalizeText(speaker.default_voice_id),
-    defaultVoiceType: normalizeText(speaker.default_voice_type),
-    resolvedStatus: normalizeText(speaker.resolved_status),
-    resolvedSource: normalizeText(speaker.resolved_source),
-    resolvedVoiceId: normalizeText(speaker.resolved_voice_id),
-    resolvedVoiceType: normalizeText(speaker.resolved_voice_type),
-    resolvedLabel: normalizeText(speaker.resolved_label),
-    availableVoices: speaker.available_voices
-      .map<VoiceReviewAvailableVoice | null>((voice) => {
-        const voiceId = normalizeText(voice.voice_id)
-        if (!voiceId) {
-          return null
-        }
-
-        return {
-          voiceId,
-          voiceType: normalizeText(voice.voice_type),
-          provider: normalizeText(voice.provider),
-          ttsProvider: normalizeText(voice.tts_provider),
-          platform: normalizeText(voice.platform),
-          label: normalizeText(voice.label),
-          createdAt: normalizeText(voice.created_at),
-          sourceAudioPath: normalizeText(voice.source_audio_path),
-          notes: normalizeText(voice.notes),
-          verificationStatus: normalizeText(voice.verification_status),
-          lastVerifiedAt: normalizeText(voice.last_verified_at),
-          lastVerificationSuccess:
-            typeof voice.last_verification_success === 'boolean'
-              ? voice.last_verification_success
-              : null,
-          lastVerificationAudioPath: normalizeText(voice.last_verification_audio_path),
-          lastVerificationError: normalizeText(voice.last_verification_error),
-        }
-      })
-      .filter((voice): voice is VoiceReviewAvailableVoice => voice !== null),
-  }))
-
-  return {
-    activeMessage: normalizeText(voiceReview.message) ?? resolveActiveReviewMessage(payload),
-    fallbackHref: buildLegacyReviewFallbackUrl(),
-    job,
-    projectDir,
-    reason: normalizeText(voiceReview.reason),
-    speakers,
   }
 }
 
@@ -633,47 +422,6 @@ function normalizeNativeReviewStage(value: unknown): NativeReviewStage | null {
 
 function projectDirEquals(left: string, right: string) {
   return normalizeProjectDir(left) === normalizeProjectDir(right)
-}
-
-export async function getTranslationConfigReview(jobId: string) {
-  const [payload, job] = await Promise.all([
-    webUiApiClient.get<ApiWebUiStateResponse>('/api/state'),
-    getJob(jobId),
-  ])
-
-  const reviewFlow = payload.results?.review_flow
-  const configStage = reviewFlow?.stages?.translation_config_review
-  const stagePayload = (configStage?.payload ?? {}) as Record<string, unknown>
-
-  return {
-    jobId: job.id,
-    projectDir: job.projectDir ?? '',
-    segmentCount: typeof stagePayload.segment_count === 'number' ? stagePayload.segment_count : 0,
-    availableModels: Array.isArray(stagePayload.available_models)
-      ? (stagePayload.available_models as Array<{ alias: string; provider: string; model_name: string }>)
-      : [],
-    currentModel: typeof stagePayload.current_model === 'string' ? stagePayload.current_model : '',
-    currentPromptTemplate: typeof stagePayload.current_prompt_template === 'string'
-      ? stagePayload.current_prompt_template
-      : '',
-  }
-}
-
-export async function approveTranslationConfigReview(input: {
-  jobId: string
-  projectDir: string
-  selectedModel: string
-  promptTemplate: string
-  savePrompt: boolean
-}) {
-  return webUiApiClient.post('/api/review/translation-config/approve', {
-    body: {
-      project_dir: input.projectDir,
-      selected_model: input.selectedModel,
-      prompt_template: input.promptTemplate,
-      save_prompt: input.savePrompt,
-    },
-  })
 }
 
 function normalizeProjectDir(value: string) {

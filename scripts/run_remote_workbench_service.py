@@ -23,7 +23,6 @@ from services.remote_workbench_runtime import (
     DEFAULT_REMOTE_WORKBENCH_CONFIG_PATH,
     load_remote_workbench_runtime_config,
 )
-from services.web_ui import JobAPIBackedJobManager, create_web_ui_server
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -33,7 +32,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "service",
-        choices=("job-api", "web-ui", "control-panel", "public-entry"),
+        choices=("job-api", "control-panel", "public-entry"),
         help="Service name to run.",
     )
     parser.add_argument(
@@ -54,8 +53,6 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.service == "job-api":
             return _run_job_api(runtime_config)
-        if args.service == "web-ui":
-            return _run_web_ui(runtime_config)
         if args.service == "public-entry":
             if args.check_only:
                 return check_caddy_public_entry(runtime_config)
@@ -80,31 +77,6 @@ def _run_job_api(runtime_config) -> int:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nStopping Job API...")
-    finally:
-        server.server_close()
-    return 0
-
-
-def _run_web_ui(runtime_config) -> int:
-    job_manager = JobAPIBackedJobManager(
-        project_root=PROJECT_ROOT,
-        config_path=config_loader.DEFAULT_AUTODUB_LOCAL_CONFIG_PATH,
-        job_api_base_url=runtime_config.job_api_base_url,
-    )
-    server = create_web_ui_server(
-        host=runtime_config.web_ui.host,
-        port=runtime_config.web_ui.port,
-        job_manager=job_manager,
-    )
-    print(f"Web UI started at {runtime_config.web_ui.base_url}")
-    print(f"Remote workbench config: {runtime_config.path}")
-    print(f"Job API base URL: {runtime_config.job_api_base_url}")
-    print(f"Runtime logs dir: {runtime_config.runtime_logs_dir}")
-    print(f"Local config: {server.config_path}")
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\nStopping Web UI...")
     finally:
         server.server_close()
     return 0

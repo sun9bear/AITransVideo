@@ -20,12 +20,13 @@ It should now be treated as the accepted Windows stable-baseline validation refe
 
 ## 部署后验收前检查项
 
-- `powershell -ExecutionPolicy Bypass -File scripts/start_remote_workbench.ps1 -Service all` 如遇 `127.0.0.1:8876` 已被旧 `python main.py web-ui` 占用，必须 fail fast，而不是继续把公网入口接到错误模式
-- `Web UI` 只监听 `127.0.0.1:8876`
+- `powershell -ExecutionPolicy Bypass -File scripts/start_remote_workbench.ps1 -Service all` 如遇端口已被占用，必须 fail fast
+- `Gateway` 只监听 `127.0.0.1:8880`
 - `Job API` 只监听 `127.0.0.1:8877`
+- `Next.js` 只监听 `127.0.0.1:3000`
 - `control-panel` 如启用，也只监听 `127.0.0.1:8765`
 - 公网入口可通过 HTTPS 访问，并且先经过认证
-- 不能从公网直接访问 `8876`、`8877`、`8765`
+- 不能从公网直接访问 `8880`、`8877`、`3000`、`8765`
 - 仓库下 `jobs/`、`projects/` 可正常写入
 
 ## 一条真实任务的端到端验收步骤
@@ -49,7 +50,7 @@ It should now be treated as the accepted Windows stable-baseline validation refe
 
 - 页面能明确显示任务进入 `waiting_for_review`
 - 页面能看到当前 `review_gate` 或等价的待确认状态
-- 触发 review 时，`127.0.0.1:8876` 当前监听者必须是 `run_remote_workbench_service.py web-ui`，不能是旧 `main.py web-ui`
+- 触发 review 时，Gateway (`127.0.0.1:8880`) 必须正常运行并代理到 Job API
 - 执行 continue 后，任务应以同一个 `job_id` 恢复，而不是生成新任务
 - continue 后状态应从 `waiting_for_review` 回到 `running` 或最终终态
 - 如果本地检查文件，`review_state.json` 的审批语义应与现有仓库保持一致

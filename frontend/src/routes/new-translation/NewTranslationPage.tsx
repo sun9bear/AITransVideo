@@ -267,7 +267,7 @@ export function NewTranslationPage() {
                       try {
                         const formData = new FormData()
                         formData.append('file', file)
-                        const response = await fetch('/web-ui-api/api/upload-video', {
+                        const response = await fetch('/gateway/upload-video', {
                           method: 'POST',
                           body: formData,
                         })

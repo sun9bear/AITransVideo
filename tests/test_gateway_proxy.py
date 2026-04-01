@@ -1,6 +1,6 @@
 """Tests for gateway proxy header injection (X-User-Id for Web UI routes).
 
-Verifies that both /api/* and /web-ui-api/* proxy routes inject x-user-id
+Verifies gateway proxy header injection behavior for /job-api/* routes
 when an authenticated user is present, and that /job-api/* does NOT.
 
 Uses importlib to load gateway/main.py under a unique module name,
@@ -54,90 +54,7 @@ def _make_user(user_id="42"):
 
 
 # ===================================================================
-# _user_id_headers helper
-# ===================================================================
-
-class TestUserIdHeaders:
-    def test_returns_header_for_authenticated_user(self):
-        result = gw._user_id_headers(_make_user("42"))
-        assert result == {"x-user-id": "42"}
-
-    def test_returns_none_for_no_user(self):
-        assert gw._user_id_headers(None) is None
-
-
-# ===================================================================
-# proxy_web_ui (/api/*) injects x-user-id
-# ===================================================================
-
-class TestProxyWebUiHeaderInjection:
-    def test_api_route_injects_user_id(self):
-        """GET /api/upload-video → upstream receives x-user-id header."""
-        captured_kwargs = {}
-
-        async def fake_proxy(**kwargs):
-            captured_kwargs.update(kwargs)
-            from fastapi import Response as FR
-            return FR(content=b'{"ok":true}', status_code=200)
-
-        user = _make_user("99")
-        with patch.object(gw, "proxy_request", side_effect=fake_proxy):
-            _run(gw.proxy_web_ui(MagicMock(), "api/upload-video", user))
-
-        assert captured_kwargs["extra_headers"] == {"x-user-id": "99"}
-        assert captured_kwargs["strip_prefix"] == ""
-
-    def test_api_route_no_user_no_header(self):
-        captured_kwargs = {}
-
-        async def fake_proxy(**kwargs):
-            captured_kwargs.update(kwargs)
-            from fastapi import Response as FR
-            return FR(content=b'{"ok":true}', status_code=200)
-
-        with patch.object(gw, "proxy_request", side_effect=fake_proxy):
-            _run(gw.proxy_web_ui(MagicMock(), "api/state", None))
-
-        assert captured_kwargs["extra_headers"] is None
-
-
-# ===================================================================
-# proxy_web_ui_legacy (/web-ui-api/*) injects x-user-id
-# ===================================================================
-
-class TestProxyWebUiLegacyHeaderInjection:
-    def test_legacy_route_injects_user_id(self):
-        """POST /web-ui-api/api/upload-video → upstream receives x-user-id."""
-        captured_kwargs = {}
-
-        async def fake_proxy(**kwargs):
-            captured_kwargs.update(kwargs)
-            from fastapi import Response as FR
-            return FR(content=b'{"ok":true}', status_code=200)
-
-        user = _make_user("77")
-        with patch.object(gw, "proxy_request", side_effect=fake_proxy):
-            _run(gw.proxy_web_ui_legacy(MagicMock(), "api/upload-video", user))
-
-        assert captured_kwargs["extra_headers"] == {"x-user-id": "77"}
-        assert captured_kwargs["strip_prefix"] == "/web-ui-api"
-
-    def test_legacy_route_no_user_no_header(self):
-        captured_kwargs = {}
-
-        async def fake_proxy(**kwargs):
-            captured_kwargs.update(kwargs)
-            from fastapi import Response as FR
-            return FR(content=b'{"ok":true}', status_code=200)
-
-        with patch.object(gw, "proxy_request", side_effect=fake_proxy):
-            _run(gw.proxy_web_ui_legacy(MagicMock(), "api/state", None))
-
-        assert captured_kwargs["extra_headers"] is None
-
-
-# ===================================================================
-# /job-api/* does NOT get x-user-id injected
+# /job-api/* proxy does NOT inject x-user-id
 # ===================================================================
 
 class TestJobApiNoHeaderInjection:

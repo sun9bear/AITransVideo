@@ -40,10 +40,9 @@
 | `AUTODUB_TTS_CLONE_*` 或与 TTS 共用的 clone 配置 | 条件必需 | 环境变量或本地配置 | 当前真实自动 clone 链路需要时才构成阻断 |
 | `youtube.cookie_file` 或 `youtube.cookies_from_browser` | 条件必需 | 本地配置文件 | 不是所有视频都需要，但受限视频会真实阻断下载 |
 | `ffmpeg` 在 `PATH` 中可用 | 必需 | 运行环境 | 缺失会阻断下载后抽音与媒体处理 |
-| `/job-api/* -> 8877` | Linux / 公网部署必需 | 反向代理配置 | 新前端读取任务和详情必须可达 |
-| `/web-ui-api/* -> 8876` | Linux / 公网部署必需 | 反向代理配置 | 新前端跳旧 Web UI review 入口必须可达 |
-| `/api/* -> 8876` 兼容反代 | Linux / 公网部署必需 | 反向代理配置 | 旧 Web UI 页面内部固定请求 `/api/*` |
-| 旧 Web UI 跟随当前 active review job | Linux / 公网部署必需 | 后端/部署行为约束 | 否则 review 跳转会落到历史旧任务 |
+| `/job-api/* -> 8877` | Linux / 公网部署必需 | 反向代理配置 | 前端读取任务和详情必须可达 |
+| `/api/* -> 8880` (Gateway) | Linux / 公网部署必需 | 反向代理配置 | Gateway 原生端点（admin 等）必须可达 |
+| Gateway (8880) 作为统一入口 | Linux / 公网部署必需 | 反向代理配置 | 所有 API 流量经由 Gateway 认证和路由 |
 | `AUTODUB_PUBLIC_ENTRY_USERNAME` / `AUTODUB_PUBLIC_ENTRY_PASSWORD_HASH` | 公网入口必需 | 环境变量 | 只影响公网 Basic Auth 入口，不影响本地 localhost 运行 |
 
 ## 2. 每项配置缺失时，用户最应该看到什么提示
@@ -60,7 +59,7 @@
 | Voice clone 配置缺失 | “当前链路需要 voice clone，但相关配置缺失。” |
 | YouTube cookies 缺失且视频要求登录/反爬验证 | “当前视频需要有效 YouTube cookies，请补充 `cookie_file` 或浏览器 cookies 配置。” |
 | `ffmpeg` 缺失 | “本机缺少 `ffmpeg`，当前无法完成媒体抽音与处理。” |
-| `/api/*` 或 review 反代缺失 | “review 入口链路未正确部署；这是部署问题，不是页面问题。” |
+| Gateway 或 `/job-api/*` 反代缺失 | “API 入口链路未正确部署；这是部署问题，不是页面问题。” |
 | 公网 Basic Auth 环境变量缺失 | “公网入口未完成认证配置，请先完成部署侧环境变量设置。” |
 
 ## 3. 这些提示应该落在哪个页面或检查环节
@@ -70,7 +69,7 @@
 | 本地配置文件解析错误 | 运行前检查 |
 | `remote_workbench.local.json` 无效 | 运行前检查 |
 | 公网 Basic Auth 缺失 | 运行前检查 |
-| Caddy / 反代链路缺失 | 运行前检查 |
+| Caddy / Gateway 反代链路缺失 | 运行前检查 |
 | `ffmpeg` 缺失 | 运行前检查 |
 | `ASSEMBLYAI_API_KEY` 缺失 | 新建翻译页前置提示；若仍进入运行，则当前任务页 / 项目详情页标记为“运行配置问题” |
 | 翻译 provider key 缺失 | 新建翻译页前置提示；若仍进入运行，则当前任务页 / 项目详情页标记为“运行配置问题” |
@@ -79,8 +78,7 @@
 | Voice 解析失败（含 registry / clone 无法完成） | 当前任务页 / 项目详情页明确标记为“运行配置问题”或“需要 review 处理” |
 | Voice clone 配置缺失 | 新建翻译页不前置暴露系统级参数；若后端自动链路需要且失败，则当前任务页 / 项目详情页标记为“运行配置问题” |
 | YouTube cookies 缺失 | 新建翻译页给“条件性提醒”；真正触发下载失败时在当前任务页 / 项目详情页明确提示 |
-| review 入口反代错误 | 运行前检查；页面只需提示“review 入口不可达是部署问题” |
-| 旧 Web UI 未跟随 active review job | 运行前检查或 smoke check；页面只需提示“review 入口状态异常，不是当前页面数据缺失” |
+| Gateway / API 入口反代错误 | 运行前检查；页面只需提示”API 入口不可达是部署问题” |
 
 ## 4. 哪些属于页面问题，哪些属于现网配置问题
 
@@ -88,7 +86,7 @@
 
 - 新前端没有把配置类错误标成“运行配置问题”
 - 当前任务页或项目详情页不能正确显示后端已返回的错误摘要
-- review 入口文案、跳转、状态回看与真实后端能力不一致
+- review 入口文案、状态回看与真实后端能力不一致
 - 新建翻译页若把 `base_url` / `model_name` 这类系统级参数错误地下放到任务表单，属于职责越界
 - 新建翻译页若把“未设置 `voice_id`”误判成硬性阻断，而不是交给后端自动决策，也属于页面问题
 - 页面把部署问题误导成“任务不存在”或“页面空态”
@@ -100,6 +98,5 @@
 - 缺少受限视频所需 cookies
 - 缺少 `ffmpeg`
 - `autodub.local.json` 或 `remote_workbench.local.json` 非法
-- `/job-api/*`、`/web-ui-api/*`、`/api/*` 反代缺失
+- `/job-api/*`、`/api/*` 反代缺失（所有 API 流量经由 Gateway 8880）
 - 公网 Basic Auth 环境变量缺失
-- 旧 Web UI 没有跟随当前 active review job

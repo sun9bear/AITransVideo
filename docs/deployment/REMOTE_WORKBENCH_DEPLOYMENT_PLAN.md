@@ -6,38 +6,44 @@ Last updated: 2026-03-18
 
 - 当前阶段只面向 `Windows 单机、自用、可公网访问但有最小安全边界` 的远程网页工作台。
 - 现有仓库仍以本地 Python 进程为运行基础，不引入数据库、队列、多 worker 或容器编排。
-- 公网只进入 Web UI；Job API 继续只给本机 Web UI 使用。
+- 公网只进入 Gateway；Job API 继续只给 Gateway 内部代理使用。
 
 ## 服务拓扑
 
 推荐的最小拓扑：
 
-`公网 HTTPS 入口 -> 本机 Web UI (127.0.0.1:8876) -> 本机 Job API (127.0.0.1:8877) -> process-backed runner -> projects/ + jobs/`
+`公网 HTTPS 入口 (Caddy) -> Gateway (127.0.0.1:8880) -> Job API (127.0.0.1:8877) -> process-backed runner -> projects/ + jobs/`
+`公网 HTTPS 入口 (Caddy) -> Next.js (127.0.0.1:3000)` (前端页面)
 
 补充说明：
 
-- `Web UI`
-  - 当前默认地址：`127.0.0.1:8876`
-  - 负责提交任务、轮询状态、review continue、展示结果摘要
+- `Gateway`
+  - 当前默认地址：`127.0.0.1:8880`
+  - 负责认证、路由代理、任务拦截与计划配额
 - `Job API`
   - 当前默认地址：`127.0.0.1:8877`
   - 负责 `POST /jobs`、状态读取、日志读取、continue、result-summary、artifacts
+- `Next.js 前端`
+  - 当前默认地址：`127.0.0.1:3000`
+  - 负责提交任务、轮询状态、review、展示结果摘要
 - `control-panel`
   - 当前默认地址：`127.0.0.1:8765`
   - 不属于公网远程工作台入口，保持本机使用或按需启动
 
+> 注：Web UI (8876) 已废弃，不再作为独立服务。
+
 ## localhost 绑定原则
 
-- `Web UI`、`Job API`、`control-panel` 都继续绑定 `127.0.0.1`。
+- `Gateway`、`Job API`、`Next.js`、`control-panel` 都继续绑定 `127.0.0.1`。
 - 不把应用服务直接绑定到 `0.0.0.0`。
-- 远程访问能力只通过最前面的公网入口转发到 `Web UI`。
+- 远程访问能力只通过最前面的公网入口转发到 `Gateway` 和 `Next.js`。
 
 ## 公网入口位置
 
 - 公网入口应位于应用前面，承担：
   - HTTPS 终止
   - 最小认证
-  - 只把请求转发到 `127.0.0.1:8876`
+  - API 请求转发到 `127.0.0.1:8880` (Gateway)，页面请求转发到 `127.0.0.1:3000` (Next.js)
 - 公网入口不应直接转发到 `Job API` 或 `control-panel`。
 - P2 当前已落地的单一入口方案是：
   - `Caddy` 作为公网 HTTPS + 最小认证 + reverse proxy 入口
@@ -49,10 +55,11 @@ Last updated: 2026-03-18
 - 公网可见：
   - 只保留 Caddy 的 HTTPS 入口端口
 - 本机服务端口：
-  - `Web UI`: `127.0.0.1:8876`
+  - `Gateway`: `127.0.0.1:8880`
   - `Job API`: `127.0.0.1:8877`
+  - `Next.js`: `127.0.0.1:3000`
   - `control-panel`: `127.0.0.1:8765`
-- Windows 防火墙应明确阻断外部对 `8876`、`8877`、`8765` 的直连。
+- Windows 防火墙应明确阻断外部对 `8880`、`8877`、`3000`、`8765` 的直连。
 - 若使用 Caddy 自动证书，公网通常还需要让 `80/443` 到达 Caddy，而不是到达应用本机端口。
 
 ## Windows 上的启动 / 常驻 / 日志落点建议
@@ -64,7 +71,8 @@ Last updated: 2026-03-18
   - `remote_workbench.local.json`
 - 最小常驻建议：
   - 常驻 `Job API`
-  - 常驻 `Web UI`
+  - 常驻 `Gateway`
+  - 常驻 `Next.js` 前端
   - 常驻公网入口组件
   - `control-panel` 按需启动，不作为远程入口必需组件
 

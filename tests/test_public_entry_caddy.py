@@ -54,9 +54,9 @@ def test_build_caddy_public_entry_plan_and_render_caddyfile(tmp_path: Path) -> N
     config_path.write_text(
         json.dumps(
             {
-                "web_ui": {
+                "job_api": {
                     "host": "127.0.0.1",
-                    "port": 8876,
+                    "port": 8877,
                 },
                 "public_entry": {
                     "enabled": True,
@@ -87,15 +87,12 @@ def test_build_caddy_public_entry_plan_and_render_caddyfile(tmp_path: Path) -> N
 
     assert plan.site_host == "workbench.example.com"
     assert plan.https_url == "https://workbench.example.com"
-    assert plan.upstream == "127.0.0.1:8876"
+    assert plan.gateway_upstream == "127.0.0.1:8880"
+    assert plan.frontend_upstream == "127.0.0.1:3000"
     assert "admin off" in rendered
-    assert "basic_auth {" in rendered
-    assert "        {$AUTODUB_PUBLIC_ENTRY_USERNAME} {$AUTODUB_PUBLIC_ENTRY_PASSWORD_HASH}" in rendered
-    assert "{$AUTODUB_PUBLIC_ENTRY_USERNAME}" in rendered
-    assert "{$AUTODUB_PUBLIC_ENTRY_PASSWORD_HASH}" in rendered
-    assert "{$AUTODUB_PUBLIC_ENTRY_USERNAME}}" not in rendered
-    assert "{$AUTODUB_PUBLIC_ENTRY_PASSWORD_HASH}}" not in rendered
-    assert "reverse_proxy 127.0.0.1:8876" in rendered
+    assert "Auth is handled by Gateway" in rendered
+    assert "reverse_proxy 127.0.0.1:8880" in rendered  # Gateway for API routes
+    assert "reverse_proxy 127.0.0.1:3000" in rendered  # Next.js for page routes
     assert "Strict-Transport-Security" in rendered
     assert "public-entry.access.log" in rendered
     assert caddyfile_path.exists()
@@ -276,9 +273,9 @@ def test_write_caddyfile_keeps_basic_auth_account_line_well_formed(tmp_path: Pat
     caddyfile_path = write_caddyfile(plan)
     rendered = caddyfile_path.read_text(encoding="utf-8")
 
-    assert "basic_auth {\n        {$AUTODUB_PUBLIC_ENTRY_USERNAME} {$AUTODUB_PUBLIC_ENTRY_PASSWORD_HASH}\n    }" in rendered
-    assert "{$AUTODUB_PUBLIC_ENTRY_USERNAME}}" not in rendered
-    assert "{$AUTODUB_PUBLIC_ENTRY_PASSWORD_HASH}}" not in rendered
+    # Auth is now handled by Gateway, not Caddy basic_auth
+    assert "Auth is handled by Gateway" in rendered
+    assert "reverse_proxy" in rendered
 
 
 def test_validate_caddy_configuration_reports_command_and_detail(

@@ -1,6 +1,6 @@
 """Transparent reverse proxy to upstream services.
 
-Forwards requests to web_ui (8876) and job_api (8877) without modification.
+Forwards requests to job_api (8877) without modification.
 This is the core of Step 1 — pure passthrough, zero business logic change.
 """
 

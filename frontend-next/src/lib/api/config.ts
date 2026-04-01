@@ -1,21 +1,10 @@
 const defaultJobApiBaseUrl = '/job-api'
-const defaultWebUiBaseUrl = '/web-ui-api'
 
 export function resolveJobApiBaseUrl() {
   const configuredBaseUrl = process.env.NEXT_PUBLIC_JOB_API_BASE_URL?.trim()
 
   if (!configuredBaseUrl) {
     return defaultJobApiBaseUrl
-  }
-
-  return configuredBaseUrl.replace(/\/+$/, '')
-}
-
-export function resolveWebUiBaseUrl() {
-  const configuredBaseUrl = process.env.NEXT_PUBLIC_WEB_UI_BASE_URL?.trim()
-
-  if (!configuredBaseUrl) {
-    return defaultWebUiBaseUrl
   }
 
   return configuredBaseUrl.replace(/\/+$/, '')

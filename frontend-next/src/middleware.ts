@@ -12,7 +12,6 @@ export function middleware(request: NextRequest) {
     publicPaths.some((p) => pathname.startsWith(p)) ||
     pathname.startsWith("/api/") ||
     pathname.startsWith("/job-api/") ||
-    pathname.startsWith("/web-ui-api/") ||
     pathname.startsWith("/auth/") ||
     pathname.startsWith("/gateway/") ||
     pathname.startsWith("/_next/") ||
@@ -38,6 +37,6 @@ export function middleware(request: NextRequest) {
 export const config = {
   matcher: [
     // Match all paths except static files and API routes
-    "/((?!_next/static|_next/image|favicon.ico|job-api|web-ui-api|api/).*)",
+    "/((?!_next/static|_next/image|favicon.ico|job-api|api/).*)",
   ],
 }

@@ -10,8 +10,8 @@
 - **部署形态**：Linux 单机
 - **长期运行方式**：systemd + Docker Compose（推荐）
 - **公网入口**：Caddy
-- **对外暴露**：仅 Web UI
-- **内部使用**：Job API 仅容器内网 / 本机访问
+- **对外暴露**：仅 HTTPS (Caddy -> Gateway + Next.js)
+- **内部使用**：Job API、Gateway、PostgreSQL 仅容器内网 / 本机访问
 
 ---
 
@@ -63,17 +63,28 @@
 
 ### 4.1 app service
 职责：
-- 提供 Web UI
-- 提供 Job API
+- 提供 Job API (8877)
 - 执行 process-backed runtime
 - 读写 `projects/` / `jobs/` / `runtime_logs/`
 
-### 4.2 caddy service
+### 4.2 gateway service
+职责：
+- 统一 API 入口 (8880)
+- 认证（session-based）
+- 路由代理到 Job API
+- 任务拦截与计划配额
+
+### 4.3 frontend service (Next.js)
+职责：
+- 前端页面 (3000)
+
+### 4.4 caddy service
 职责：
 - HTTPS 入口
-- Basic Auth（若继续沿用当前边界）
-- reverse proxy 到 Web UI
+- reverse proxy 到 Gateway (API) 和 Next.js (页面)
 - access log
+
+> 注：Web UI (8876) 已废弃，不再作为独立服务。
 
 ---
 
@@ -85,13 +96,14 @@
 - `443`：Caddy HTTPS 入口
 
 ### 本机 / 容器内网
-- `8876`：Web UI
+- `8880`：Gateway（统一 API 入口）
 - `8877`：Job API
-- `8765`：control-panel（如仍保留，默认不公网暴露）
+- `3000`：Next.js 前端
+- `5432`：PostgreSQL
 
 ### 防火墙原则
 - 仅开放 `443`
-- `8876` / `8877` / `8765` 不直接对公网开放
+- `8880` / `8877` / `3000` / `5432` 不直接对公网开放
 
 ---
 
@@ -99,9 +111,9 @@
 
 建议配置至少包含：
 
-- Web UI 监听地址与端口
-- Job API 监听地址与端口
-- control-panel 是否启用
+- Gateway 监听地址与端口 (8880)
+- Job API 监听地址与端口 (8877)
+- Next.js 前端监听端口 (3000)
 - public entry 配置
 - runtime log 目录
 - Basic Auth 用户名与哈希（通过环境变量）
@@ -116,8 +128,8 @@
 ### 7.1 runtime logs
 - app stdout/stderr
 - job-api stdout/stderr
-- web-ui stdout/stderr
-- control-panel stdout/stderr（如启用）
+- gateway stdout/stderr
+- frontend stdout/stderr
 
 ### 7.2 access logs
 - Caddy access log
@@ -155,4 +167,4 @@
 
 ## 10. 一句话基线
 
-**Linux 部署基线 = Ubuntu Server 24.04 LTS + 单机 + app + caddy + 仅 Web UI 公网入口 + Job API 内部访问。**
+**Linux 部署基线 = Ubuntu Server 24.04 LTS + 单机 + app + gateway + frontend + caddy + PostgreSQL + 仅 HTTPS 公网入口。**

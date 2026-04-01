@@ -8,8 +8,7 @@ from pydantic_settings import BaseSettings
 class GatewaySettings(BaseSettings):
     """All gateway configuration comes from environment variables."""
 
-    # Upstream services (existing, not modified)
-    web_ui_upstream: str = "http://127.0.0.1:8876"
+    # Upstream services
     job_api_upstream: str = "http://127.0.0.1:8877"
 
     # Gateway server

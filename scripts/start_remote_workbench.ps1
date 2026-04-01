@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("all", "job-api", "web-ui", "control-panel", "public-entry")]
+    [ValidateSet("all", "job-api", "control-panel", "public-entry")]
     [string]$Service = "all",
     [string]$ConfigPath = "",
     [switch]$CheckOnly
@@ -107,7 +107,6 @@ function Get-ServiceStartupMarker {
 
     switch ($ServiceName) {
         "job-api" { return "Job API started at" }
-        "web-ui" { return "Web UI started at" }
         "control-panel" { return "Control panel started at" }
         "public-entry" { return "Public entry started at" }
         default { return "" }
@@ -121,7 +120,6 @@ function Get-ServiceConfiguredPort {
 
     switch ($ServiceName) {
         "job-api" { return [int]$config.job_api.port }
-        "web-ui" { return [int]$config.web_ui.port }
         "control-panel" {
             if ($config.control_panel -and $config.control_panel.binding -and $config.control_panel.binding.port) {
                 return [int]$config.control_panel.binding.port
@@ -156,15 +154,6 @@ function Get-ServiceStartupFailureDetail {
     } else {
         $null
     }
-    $normalizedCommandLine = [string]$listenerInfo.command_line
-    if (
-        $ServiceName -eq "web-ui" -and
-        -not [string]::IsNullOrWhiteSpace($normalizedCommandLine) -and
-        $normalizedCommandLine -match '(?i)\bmain\.py\b.*\bweb-ui\b'
-    ) {
-        return "Port $Port is already occupied by the legacy Web UI process. $(Format-ListeningProcessInfo -ProcessInfo $listenerInfo) Stop the old `"python main.py web-ui`" listener before starting the remote workbench stack."
-    }
-
     $detailParts = @()
     if ($listenerInfo) {
         $detailParts += "Current listener: $(Format-ListeningProcessInfo -ProcessInfo $listenerInfo)"
@@ -179,31 +168,6 @@ function Get-ServiceStartupFailureDetail {
         return "No additional startup detail was captured."
     }
     return ($detailParts -join " ")
-}
-
-function Assert-WebUiListenerMatchesStartedService {
-    param(
-        [object]$ServiceInfo
-    )
-
-    $listenerInfo = Get-ListeningProcessInfo -Port ([int]$config.web_ui.port)
-    if (-not $listenerInfo) {
-        throw "Web UI startup validation failed: port $($config.web_ui.port) is not listening after startup."
-    }
-
-    if ([int]$listenerInfo.pid -ne [int]$ServiceInfo.pid) {
-        $detail = Get-ServiceStartupFailureDetail -ServiceName "web-ui" -ServiceInfo $ServiceInfo -Port ([int]$config.web_ui.port)
-        throw "Web UI startup validation failed: port $($config.web_ui.port) is owned by PID $($listenerInfo.pid), not the Web UI process started by this invocation (PID $($ServiceInfo.pid)). $detail"
-    }
-
-    $normalizedCommandLine = [string]$listenerInfo.command_line
-    if (
-        [string]::IsNullOrWhiteSpace($normalizedCommandLine) -or
-        $normalizedCommandLine -notmatch '(?i)run_remote_workbench_service\.py.*\bweb-ui\b'
-    ) {
-        $detail = Get-ServiceStartupFailureDetail -ServiceName "web-ui" -ServiceInfo $ServiceInfo -Port ([int]$config.web_ui.port)
-        throw "Web UI startup validation failed: port $($config.web_ui.port) is not serving the expected remote-workbench Web UI process. $detail"
-    }
 }
 
 function Wait-WorkbenchServiceStartup {
@@ -227,9 +191,6 @@ function Wait-WorkbenchServiceStartup {
             ""
         }
         if ($stdoutText -like "*$startupMarker*") {
-            if ($ServiceInfo.service -eq "web-ui") {
-                Assert-WebUiListenerMatchesStartedService -ServiceInfo $ServiceInfo
-            }
             return
         }
 
@@ -319,10 +280,6 @@ try {
             $jobApiService = Start-WorkbenchService -ServiceName "job-api"
             $startedServices += $jobApiService
             Wait-WorkbenchServiceStartup -ServiceInfo $jobApiService
-
-            $webUiService = Start-WorkbenchService -ServiceName "web-ui"
-            $startedServices += $webUiService
-            Wait-WorkbenchServiceStartup -ServiceInfo $webUiService
 
             if ($config.control_panel -and $config.control_panel.enabled -eq $true) {
                 $controlPanelService = Start-WorkbenchService -ServiceName "control-panel"

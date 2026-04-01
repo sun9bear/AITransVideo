@@ -28,7 +28,6 @@
     @api_routes {
         path /api/*
         path /job-api/*
-        path /web-ui-api/*
         path /auth/*
         path /gateway/*
     }

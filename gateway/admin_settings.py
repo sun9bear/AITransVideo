@@ -117,7 +117,6 @@ async def update_admin_settings(
 # ---------------------------------------------------------------------------
 
 JOB_API_BASE = "http://localhost:8877"
-WEB_UI_API_BASE = "http://localhost:8876"
 JOBS_STORE_DIR = Path("/opt/aivideotrans/data/jobs")
 
 
@@ -175,14 +174,11 @@ async def cancel_job(
     _require_admin(user)
 
     async with httpx.AsyncClient(timeout=30) as client:
-        # (a) Tell web UI API to cancel
+        # (a) Cancel via Job API
         try:
-            await client.post(
-                f"{WEB_UI_API_BASE}/api/job/cancel",
-                json={"job_id": job_id},
-            )
+            await client.post(f"{JOB_API_BASE}/jobs/{job_id}/cancel")
         except Exception as exc:
-            logger.warning("Web UI cancel call failed for %s: %s", job_id, exc)
+            logger.warning("Job API cancel call failed for %s: %s", job_id, exc)
 
         # (b) Get project_dir from Job API
         project_dir: str | None = None
@@ -228,14 +224,16 @@ async def delete_job(
     _require_admin(user)
 
     async with httpx.AsyncClient(timeout=30) as client:
-        # Cancel via web UI API
+        # Cancel via Job API then delete
         try:
-            await client.post(
-                f"{WEB_UI_API_BASE}/api/job/cancel",
-                json={"job_id": job_id},
-            )
+            await client.post(f"{JOB_API_BASE}/jobs/{job_id}/cancel")
         except Exception as exc:
-            logger.warning("Web UI cancel call failed for %s: %s", job_id, exc)
+            logger.warning("Job API cancel call failed for %s: %s", job_id, exc)
+
+        try:
+            await client.delete(f"{JOB_API_BASE}/jobs/{job_id}")
+        except Exception as exc:
+            logger.warning("Job API delete call failed for %s: %s", job_id, exc)
 
         # Get project_dir from Job API
         project_dir: str | None = None
