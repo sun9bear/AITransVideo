@@ -80,6 +80,8 @@ class SemanticBlock:
     error_type: str | None = None
     merged_literal_cn_text: str = ""
     merged_tts_cn_text: str = ""
+    alignment_method: str = "direct"
+    needs_review: bool = False
 
     def __post_init__(self) -> None:
         self.merged_cn_text = self.merged_cn_text.strip()

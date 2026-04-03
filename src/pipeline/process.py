@@ -20,7 +20,7 @@ if _ENV_FILE.exists():
 from typing import Callable, TypeVar
 
 from core.enums import OutputTarget, StageStatus
-from core.models import SubtitleLine
+from core.models import SemanticBlock, SubtitleLine
 from modules.ingestion.youtube.downloader import (
     DownloadRequest,
     DownloadResult,
@@ -302,29 +302,6 @@ class VoiceReviewRequiredError(AutoCloneError):
         self.sample_metrics = sample_metrics
 
 
-@dataclass(slots=True)
-class _ProcessOutputAlignedBlock:
-    segment_id: int
-    block_id: str
-    speaker_id: str
-    speaker_name: str | None
-    original_srt_indices: list[int]
-    first_start_ms: int
-    last_end_ms: int
-    target_duration_ms: int
-    merged_cn_text: str
-    actual_audio_duration_ms: int = 0
-    rewrite_count: int = 0
-    tts_audio_path: str | None = None
-    aligned_audio_path: str | None = None
-    status: str = "align_done"
-    alignment_method: str = "direct"
-    needs_review: bool = False
-
-    def get_preferred_cn_text_for_caption(self) -> str:
-        return self.merged_cn_text.strip()
-
-
 class ProcessPipeline:
     """Legacy compatibility pipeline: YouTube URL -> editor-facing dubbing bundle."""
 
@@ -361,12 +338,16 @@ class ProcessPipeline:
                     _jr = _job_record.to_dict()
                     config.job_record = _jr
                     print(f"[PIPELINE] Loaded job snapshot for {config.job_id}: service_mode={_jr.get('service_mode')}, tts_provider={_jr.get('tts_provider')}", flush=True)
+                    print(f"[PIPELINE] Snapshot: OK (job_id={config.job_id}, service_mode={_jr.get('service_mode')}, tts_provider={_jr.get('tts_provider')})", flush=True)
                 else:
-                    print(f"[PIPELINE] Warning: job {config.job_id} not found in store", flush=True)
+                    print(f"[PIPELINE] Warning: job {config.job_id} not found in store — snapshot unavailable, using defaults", flush=True)
+                    print(f"[PIPELINE] Snapshot: MISSING (job_id={config.job_id}, reason=not_found_in_store)", flush=True)
             except Exception as e:
                 print(f"[PIPELINE] Warning: failed to load job {config.job_id}: {type(e).__name__}: {e}", flush=True)
+                print(f"[PIPELINE] Snapshot: FAILED (job_id={config.job_id}, reason={type(e).__name__})", flush=True)
         elif _jr is None:
             print("[PIPELINE] Warning: no job_id provided, snapshot unavailable — using defaults", flush=True)
+            print("[PIPELINE] Snapshot: UNAVAILABLE (no job_id provided)", flush=True)
 
         def _snap(key, default=None):
             if isinstance(_jr, dict):
@@ -752,6 +733,13 @@ class ProcessPipeline:
                             speaker_name_a, speaker_name_b, speaker_name_a_is_placeholder,
                             speaker_name_b_is_placeholder, download_result, normalized_url,
                         )
+                        # Minimal speaker profiling — fill gender/age so matcher doesn't blind-fallback
+                        if not _review_speaker_styles:
+                            _review_speaker_styles = self._fallback_minimal_speaker_styles(
+                                effective_speakers=effective_speakers,
+                                speaker_name_a=speaker_name_a,
+                                speaker_name_b=speaker_name_b,
+                            )
                 except Exception as exc:
                     print(f"[S2] Unified review failed ({exc}), falling back to legacy...")
                     self._legacy_speaker_inference_and_review(
@@ -759,6 +747,13 @@ class ProcessPipeline:
                         speaker_name_a, speaker_name_b, speaker_name_a_is_placeholder,
                         speaker_name_b_is_placeholder, download_result, normalized_url,
                     )
+                    # Minimal speaker profiling — fill gender/age so matcher doesn't blind-fallback
+                    if not _review_speaker_styles:
+                        _review_speaker_styles = self._fallback_minimal_speaker_styles(
+                            effective_speakers=effective_speakers,
+                            speaker_name_a=speaker_name_a,
+                            speaker_name_b=speaker_name_b,
+                        )
             elif s3_cache_hit:
                 print("[S2] Translation cache hit, skipping review.")
             else:
@@ -1914,6 +1909,45 @@ class ProcessPipeline:
                 )
                 self._write_transcript_result(transcript_result)
 
+    @staticmethod
+    def _fallback_minimal_speaker_styles(
+        *,
+        effective_speakers: int,
+        speaker_name_a: str,
+        speaker_name_b: str,
+    ) -> dict[str, dict]:
+        """Generate minimal speaker_styles when unified review is completely unavailable.
+
+        Only fills ``gender`` and ``age_group`` using the simplest possible
+        heuristic (default to "male" / "middle").  The ``_source`` field marks
+        these entries as low-confidence rule-based fallbacks so that downstream
+        consumers (e.g. voice matcher) can distinguish them from LLM review output.
+
+        This is intentionally *not* a smart name-lookup system — it's the absolute
+        minimum to prevent the voice matcher from receiving empty gender fields and
+        falling back to a single default voice for all speakers.
+        """
+        styles: dict[str, dict] = {}
+
+        # Default assumption: male / middle.  Crude, but better than empty.
+        for spk_id, spk_name in [("speaker_a", speaker_name_a), ("speaker_b", speaker_name_b)]:
+            if effective_speakers == 1 and spk_id == "speaker_b":
+                continue
+            styles[spk_id] = {
+                "name": spk_name,
+                "gender": "male",
+                "age_group": "middle",
+                "voice_description": "",
+                "_source": "fallback_minimal",
+            }
+
+        print(
+            f"[S2-fallback] Minimal speaker profiling: {len(styles)} speaker(s) "
+            f"(gender=male, age_group=middle, source=fallback_minimal)",
+            flush=True,
+        )
+        return styles
+
     def _is_default_placeholder_speaker_name(self, *, speaker_id: str, speaker_name: str) -> bool:
         normalized_speaker_id = speaker_id.strip().casefold()
         normalized_name = " ".join(speaker_name.strip().replace("_", " ").split()).casefold()
@@ -2440,12 +2474,11 @@ class ProcessPipeline:
     def _build_process_output_blocks(
         self,
         segments: list[DubbingSegment],
-    ) -> list[_ProcessOutputAlignedBlock]:
-        blocks: list[_ProcessOutputAlignedBlock] = []
+    ) -> list[SemanticBlock]:
+        blocks: list[SemanticBlock] = []
         for segment in segments:
             blocks.append(
-                _ProcessOutputAlignedBlock(
-                    segment_id=int(segment.segment_id),
+                SemanticBlock(
                     block_id=f"segment_{int(segment.segment_id):03d}",
                     speaker_id=segment.speaker_id,
                     speaker_name=segment.display_name,
