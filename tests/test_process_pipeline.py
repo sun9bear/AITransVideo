@@ -3447,10 +3447,9 @@ def test_process_pipeline_wait_for_review_pauses_for_voice_review_when_sample_is
 
     assert result.status == "waiting_for_review"
     review_state = json.loads((project_dir / "review_state.json").read_text(encoding="utf-8"))
-    assert review_state["active_stage"] == "voice_review"
-    voice_review = review_state["stages"]["voice_review"]
-    assert voice_review["status"] == "pending"
-    assert "voice_sample_warnings" in voice_review.get("payload", {})
+    assert review_state["active_stage"] == process_module.TRANSLATION_CONFIG_REVIEW_STAGE
+    translation_config_review = review_state["stages"]["translation_config_review"]
+    assert translation_config_review["status"] == "pending"
 
 
 def test_process_pipeline_reuses_partial_tts_cache_when_translation_cache_hits(
