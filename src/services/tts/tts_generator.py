@@ -86,6 +86,42 @@ def _is_invalid_cosyvoice_voice_error(exc: Exception) -> bool:
     )
 
 
+_VOLCENGINE_AUTO_VOICE_IDS = frozenset({"auto", "auto_match", ""})
+
+
+def _is_volcengine_usable_explicit_voice(voice_id: str, resource_id: str) -> bool:
+    """Return True if *voice_id* is a concrete, resource-compatible VolcEngine voice.
+
+    Returns False when:
+    - voice_id is the ``"auto"`` placeholder (studio auto-match)
+    - voice_id is not found in the catalog for the given *resource_id*
+
+    Uses the catalog's ``is_voice_in_resource()`` for dynamic lookup instead
+    of hardcoded suffix checks, since 1.0/2.0 voices have multiple suffix
+    formats (``_moon_bigtts``, ``_mars_bigtts``, ``_emo_v2_mars_bigtts``,
+    ``ICL_*_tob``, ``saturn_*_tob``, etc.).
+    """
+    if voice_id.lower().strip() in _VOLCENGINE_AUTO_VOICE_IDS:
+        return False
+    from services.tts.volcengine_voice_catalog import is_voice_in_resource
+    return is_voice_in_resource(voice_id, resource_id)
+
+
+def _is_volcengine_voice_resource_mismatch(exc: Exception) -> bool:
+    """Detect VolcEngine errors indicating a voice/resource_id incompatibility.
+
+    Known error codes from production testing:
+    - 45000000: invalid speaker
+    - 55000000: speaker / resource mismatch
+    Also matches keyword patterns in case new codes appear.
+    """
+    msg = str(exc).lower()
+    if any(code in msg for code in ("45000000", "55000000")):
+        return True
+    keywords = ("speaker", "voice", "resource", "invalid", "mismatch")
+    return sum(1 for kw in keywords if kw in msg) >= 2
+
+
 @dataclass(slots=True)
 class TTSConfig:
     api_key: str
@@ -128,10 +164,29 @@ class TTSGenerator:
         )
         self._default_job_record = job_record
 
+        # Speaker-level voice cache: caches auto-matched voices so that
+        # multiple segments from the same speaker_id use a consistent voice.
+        # Only stores results from automatic matching (enhancer / resolver);
+        # explicit voice_id or user-selected voices are NOT cached here.
+        # Key: speaker_id → (voice_id, confidence)
+        self._speaker_voice_cache: dict[str, tuple[str, str]] = {}
+
     # ≤100 segments: sequential (simple, reliable)
     # >100 segments: 3-worker parallel (3x throughput for long videos)
     _PARALLEL_THRESHOLD = 100
     _PARALLEL_WORKERS = 3
+
+    def _resolve_provider_decision(
+        self, *, job_record: Any = None
+    ) -> dict[str, str]:
+        """Resolve TTS provider and record decision source.
+
+        Returns ``{"provider": "<name>", "source": "job_record"|"global_default"}``.
+        """
+        if job_record is not None:
+            provider = get_tts_provider_for_job(job_record)
+            return {"provider": provider, "source": "job_record"}
+        return {"provider": get_tts_provider(), "source": "global_default"}
 
     def generate_all(
         self,
@@ -145,13 +200,18 @@ class TTSGenerator:
 
         total_segments = len(segments)
 
-        # Resolve provider once for the whole job
+        # Reset speaker voice cache per generate_all invocation
+        self._speaker_voice_cache.clear()
+
+        # Resolve provider once for the whole job.
+        # Save the active job_record so that _generate_one_volcengine() can
+        # read tts_model and service_mode from the record that is actually
+        # in effect for this call (not just self._default_job_record).
         effective_job_record = job_record or self._default_job_record
-        if effective_job_record is not None:
-            self._job_provider = get_tts_provider_for_job(effective_job_record)
-        else:
-            self._job_provider = get_tts_provider()
-        print(f"[S4] TTS provider: {self._job_provider}")
+        self._active_job_record = effective_job_record
+        decision = self._resolve_provider_decision(job_record=effective_job_record)
+        self._job_provider = decision["provider"]
+        print(f"[S4] TTS provider: {self._job_provider} (source: {decision['source']})")
 
         # Count how many actually need generation (not cached)
         pending_count = sum(
@@ -353,6 +413,7 @@ class TTSGenerator:
         explicit_voice_id = _normalize_optional_text(getattr(segment, "voice_id", None))
         confidence = ""
         if explicit_voice_id and is_cosyvoice_v3_flash_builtin_voice(explicit_voice_id):
+            # Explicit builtin voice — use directly, do NOT cache (user-chosen).
             voice = explicit_voice_id
             gender = getattr(segment, "gender", None)
             age_group = getattr(segment, "age_group", None)
@@ -360,6 +421,15 @@ class TTSGenerator:
             energy = getattr(segment, "energy_level", None)
             resolution_source = "explicit_builtin_voice_id"
             confidence = "high"
+        elif segment.speaker_id in self._speaker_voice_cache:
+            # Speaker cache hit — reuse the auto-matched voice from an earlier
+            # segment of the same speaker_id.  This prevents matcher jitter.
+            voice, confidence = self._speaker_voice_cache[segment.speaker_id]
+            gender = getattr(segment, "gender", None)
+            age_group = getattr(segment, "age_group", None)
+            persona = getattr(segment, "persona_style", None)
+            energy = getattr(segment, "energy_level", None)
+            resolution_source = f"speaker_cache({segment.speaker_id})"
         else:
             # Fall back to demographic selector when the segment voice_id is not
             # a compatible builtin preset for the active CosyVoice model.
@@ -371,6 +441,12 @@ class TTSGenerator:
             persona = getattr(segment, "persona_style", None)
             energy = getattr(segment, "energy_level", None)
             voice_desc = getattr(segment, "voice_description", None) or ""
+            if not gender:
+                print(
+                    f"[CosyVoice] WARNING: segment {segment.segment_id} ({segment.speaker_id}) "
+                    f"has empty gender — voice matcher will use fallback",
+                    flush=True,
+                )
             childlike = infer_is_childlike(age_group or "", voice_desc)
             enhanced = enhance_voice_selection(
                 gender=gender, age_group=age_group,
@@ -380,6 +456,12 @@ class TTSGenerator:
             voice = enhanced.voice_id
             confidence = enhanced.match_confidence
             resolution_source = f"enhancer({confidence})"
+            # Cache the auto-matched result for this speaker
+            self._speaker_voice_cache[segment.speaker_id] = (voice, confidence)
+            print(
+                f"[CosyVoice] Speaker cache set: {segment.speaker_id} → {voice}",
+                flush=True,
+            )
 
         print(
             f"[CosyVoice] voice={voice}, confidence={confidence}, gender={gender}, age={age_group}, "
@@ -411,6 +493,158 @@ class TTSGenerator:
             duration_ms=duration_ms,
             voice_id=segment.voice_id,
             selected_voice=voice,
+            match_confidence=confidence,
+        )
+
+    def _resolve_active_job_record(self) -> Any:
+        """Return the job record in effect for the current generate_all() call."""
+        return getattr(self, "_active_job_record", None) or self._default_job_record
+
+    def _generate_one_volcengine(
+        self,
+        segment: DubbingSegment,
+        tts_text: str,
+        output_root: Path,
+    ) -> TTSResult:
+        """Generate TTS via VolcEngine (豆包) V3 Chunked API — dual-mode (1.0 / 2.0).
+
+        Three independent concepts drive the request:
+
+        * **resource_id** — derived at runtime from ``tts_provider + service_mode``
+          (NOT stored in DB).  Written to ``X-Api-Resource-Id`` header.
+        * **model** — read from job snapshot ``tts_model``.  For volcengine this
+          means ``req_params.model`` (e.g. ``"seed-tts-1.1"`` for express, *None*
+          for studio 2.0 public voices).
+        * **voice_id** — resolved via explicit segment.voice_id → speaker cache →
+          shared resolver auto-match → resource default.
+        """
+        from services.tts.volcengine_tts_provider import (
+            RESOURCE_ID_1_0,
+            RESOURCE_ID_2_0,
+            default_speaker_for_resource,
+            synthesize as vc_synthesize,
+        )
+        from services.tts.voice_match_types import VoiceMatchRequest
+        from services.tts.voice_match_resolver import resolve_voice_match
+
+        output_path = output_root / f"segment_{segment.segment_id:03d}_{segment.speaker_id}.wav"
+
+        # --- 1. Derive resource_id from tts_provider + service_mode ---
+        job_rec = self._resolve_active_job_record()
+        service_mode = None
+        tts_model = None
+        if job_rec is not None:
+            service_mode = (
+                job_rec.get("service_mode") if isinstance(job_rec, dict)
+                else getattr(job_rec, "service_mode", None)
+            )
+            raw_model = (
+                job_rec.get("tts_model") if isinstance(job_rec, dict)
+                else getattr(job_rec, "tts_model", None)
+            )
+            tts_model = _normalize_optional_text(raw_model)
+
+        resource_id = RESOURCE_ID_2_0 if service_mode == "studio" else RESOURCE_ID_1_0
+        # tts_model for volcengine = req_params.model (e.g. "seed-tts-1.1" or None)
+        model = tts_model
+
+        # --- 2. Voice selection (priority chain per plan §5.7) ---
+        #
+        # An explicit voice is only usable when it is:
+        #   a) not the literal string "auto" (studio auto-match placeholder), AND
+        #   b) compatible with the current resource_id (suffix check).
+        # Otherwise it falls through to the resolver auto-match path.
+        raw_explicit = _normalize_optional_text(getattr(segment, "voice_id", None))
+        explicit_voice = (
+            raw_explicit
+            if raw_explicit and _is_volcengine_usable_explicit_voice(raw_explicit, resource_id)
+            else None
+        )
+        fallback_voice = default_speaker_for_resource(resource_id)
+        confidence = ""
+        resolution_source = ""
+
+        if explicit_voice:
+            # Explicit segment.voice_id — compatible with resource, use directly, do NOT cache
+            voice_id = explicit_voice
+            confidence = "high"
+            resolution_source = "explicit_voice_id"
+        elif segment.speaker_id in self._speaker_voice_cache:
+            # Speaker cache hit — reuse auto-matched voice
+            voice_id, confidence = self._speaker_voice_cache[segment.speaker_id]
+            resolution_source = f"speaker_cache({segment.speaker_id})"
+        else:
+            # Auto-match via shared resolver
+            gender = getattr(segment, "gender", None)
+            if not gender:
+                print(
+                    f"[VolcEngine] WARNING: segment {segment.segment_id} ({segment.speaker_id}) "
+                    f"has empty gender — matcher will use fallback",
+                    flush=True,
+                )
+            match_result = resolve_voice_match(VoiceMatchRequest(
+                tts_provider="volcengine",
+                resource_id=resource_id,
+                mode="auto",
+                gender=gender,
+                age_group=getattr(segment, "age_group", None),
+                persona_style=getattr(segment, "persona_style", None),
+                energy_level=getattr(segment, "energy_level", None),
+                voice_description=getattr(segment, "voice_description", None),
+            ))
+            voice_id = match_result.voice_id
+            confidence = match_result.match_confidence
+            resolution_source = f"resolver({match_result.match_reason})"
+            # Cache auto-matched result for this speaker
+            self._speaker_voice_cache[segment.speaker_id] = (voice_id, confidence)
+            print(
+                f"[VolcEngine] Speaker cache set: {segment.speaker_id} → {voice_id}",
+                flush=True,
+            )
+
+        print(
+            f"[VolcEngine] voice={voice_id}, resource={resource_id}, model={model}, "
+            f"confidence={confidence}, source={resolution_source}, "
+            f"text={tts_text[:50]}...",
+            flush=True,
+        )
+
+        # --- 3. Call provider with mismatch retry ---
+        try:
+            audio_bytes = vc_synthesize(
+                text=tts_text,
+                voice_id=voice_id,
+                resource_id=resource_id,
+                model=model,
+            )
+        except Exception as exc:
+            if voice_id != fallback_voice and _is_volcengine_voice_resource_mismatch(exc):
+                print(
+                    f"[VolcEngine] Voice {voice_id} / resource {resource_id} mismatch; "
+                    f"retrying with default {fallback_voice}",
+                    flush=True,
+                )
+                voice_id = fallback_voice
+                confidence = "low"
+                resolution_source = "mismatch_retry"
+                audio_bytes = vc_synthesize(
+                    text=tts_text,
+                    voice_id=voice_id,
+                    resource_id=resource_id,
+                    model=model,
+                )
+            else:
+                raise
+
+        atomic_write_bytes(str(output_path), audio_bytes)
+        duration_ms = _ffprobe_duration_ms(output_path)
+
+        return TTSResult(
+            segment_id=segment.segment_id,
+            audio_path=str(output_path.resolve(strict=False)),
+            duration_ms=duration_ms,
+            voice_id=segment.voice_id,
+            selected_voice=voice_id,
             match_confidence=confidence,
         )
 
@@ -505,6 +739,13 @@ class TTSGenerator:
                 raise
             except Exception as exc:
                 raise TTSGenerationError(f"MiMo: {exc}") from exc
+        if provider == "volcengine":
+            try:
+                return self._generate_one_volcengine(segment, tts_text, output_root)
+            except TTSGenerationError:
+                raise
+            except Exception as exc:
+                raise TTSGenerationError(f"VolcEngine: {exc}") from exc
 
         endpoint = _build_tts_endpoint(self.config.base_url)
         payload = {

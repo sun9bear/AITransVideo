@@ -19,14 +19,7 @@ RUN apt-get update \
 
 COPY . /opt/aivideotrans/app
 
-RUN pip install --no-cache-dir \
-        assemblyai \
-        "dashscope>=1.25.2" \
-        google-genai \
-        pydub \
-        requests \
-        websocket-client \
-        "yt-dlp[default]" \
+RUN pip install --no-cache-dir . \
     && curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh \
     && /usr/local/bin/deno --version \
     && chmod +x \

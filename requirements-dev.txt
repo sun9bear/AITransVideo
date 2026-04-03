@@ -1,0 +1,10 @@
+# Dev/test entry point — installs the root project (with all runtime
+# dependencies from pyproject.toml) plus the [dev] extras (pytest, etc.).
+#
+# Usage:
+#   pip install -r requirements-dev.txt
+#
+# This is equivalent to:
+#   pip install -e ".[dev]"
+
+-e .[dev]
