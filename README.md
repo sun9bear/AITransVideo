@@ -1,6 +1,6 @@
 # AIVideoTrans
 
-Last updated: 2026-03-18
+Last updated: 2026-04-03
 
 ## 项目是什么
 
@@ -20,35 +20,29 @@ Last updated: 2026-03-18
 
 ## 当前状态
 
-- Phase 1 重构已经收口
-- canonical workflow/build 层已经存在
-- `OutputDispatcher` 和 `manifest.json` 已落地
-- `process` 仍然是最完整的 YouTube 兼容入口
-- `publish` 当前只应表述为 minimal publish capability
-- Web UI 已经进入“本地审校工作台”阶段，但不是当前主扩张方向
-- 最新已验证基线：
-  - `pytest -q` -> `474 passed, 2 warnings`
-  - `python main.py --help` 能打印帮助，但当前仍经由 `SystemExit` 路径退出，退出码为 `1`
+- 商业化 Phase 0-5 已放行（配额、Admin、支付基础设施）
+- canonical workflow/build 层已落地：`ProjectBuilder` → `OutputDispatcher`
+- `process` 仍是最完整的 YouTube 兼容壳，已通过 shared helpers 产出 `SemanticBlock`
+- 前端主线为 `frontend-next/`（Next.js 16 + React 19）
+- 详细快速入门见 [`docs/QUICKSTART.md`](docs/QUICKSTART.md)
 
 ## 推荐阅读顺序
 
-如果是第一次接手，建议按这个顺序读：
+新协作者请先阅读 [`docs/QUICKSTART.md`](docs/QUICKSTART.md)，其中包含完整的推荐阅读顺序和历史文档边界说明。
 
-1. `CURRENT_PROJECT_STATUS.md`
-2. `NEXT_EXECUTION_PRIORITY.md`
-3. `PROCESS_WORKFLOW_CONVERGENCE.md`
-4. `RUN_ENVIRONMENT.md`
-5. `WEB_UI_STATUS.md`
-6. `REFACTOR_PHASE1_SUMMARY.md`
-7. `AIVideoTrans_Codex_执行版总文档_最终版.md`
-8. `docs/archive/README.md`
+## 安装依赖
 
-说明：
+根目录 Python 依赖声明在 `pyproject.toml` 中。
 
-- `README.md` 现在只保留项目总览、运行入口和当前边界
-- 详细收敛路线放在 `PROCESS_WORKFLOW_CONVERGENCE.md`
-- 当前唯一优先项放在 `NEXT_EXECUTION_PRIORITY.md`
-- 历史演化细节与旧阶段说明放到 `docs/archive/`
+```bash
+# 安装运行时依赖 + 开发依赖
+pip install -e ".[dev]"
+
+# 或只安装运行时依赖
+pip install -e .
+```
+
+> `gateway/` 的依赖独立管理，见 `gateway/requirements.txt`。
 
 ## 如何运行
 
@@ -131,19 +125,10 @@ python main.py local-video-demo <local_video_path> [translation_mode] [tts_mode]
 - 下一轮大工作不应继续铺更多 UI 能力
 - 先做 `process -> workflow/output` convergence 更重要
 
-## 相关文档角色
+## 相关文档
 
-- `CURRENT_PROJECT_STATUS.md`
-  - 当前事实快照
-- `NEXT_EXECUTION_PRIORITY.md`
-  - 下一轮唯一优先项
-- `PROCESS_WORKFLOW_CONVERGENCE.md`
-  - `process` 渐进接入新主线的详细路线
-- `RUN_ENVIRONMENT.md`
-  - 当前运行环境与依赖说明
-- `WEB_UI_STATUS.md`
-  - Web UI 当前完成度与暂停点
-- `REFACTOR_PHASE1_SUMMARY.md`
-  - Phase 1 收口总结
-- `docs/archive/README.md`
-  - 历史文档入口
+- [`docs/QUICKSTART.md`](docs/QUICKSTART.md) — 新协作者第一入口
+- `CLAUDE.md` — Claude Code 协作约束
+- `AGENTS.md` — 架构规则与 sprint 约束
+- `docs/acceptance/` — 各阶段验收记录
+- `docs/archive/` — 历史文档

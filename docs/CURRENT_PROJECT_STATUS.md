@@ -1,8 +1,13 @@
 # CURRENT_PROJECT_STATUS
 
-Last updated: 2026-03-19
+> **本文档是历史快照，冻结于 2026-03-19（Phase A 单机自用阶段）。**
+> 不代表当前 HEAD 的实际状态。当前入口请阅读 [`docs/QUICKSTART.md`](QUICKSTART.md)。
 
-## Current Status
+---
+
+以下内容为 2026-03-19 时的原始记录，保留作为历史背景：
+
+## Current Status (as of 2026-03-19)
 
 Current phase is closed and has been restored to a stable baseline.
 
@@ -15,7 +20,7 @@ Current phase is closed and has been restored to a stable baseline.
   Job API speaker/voice parameter effectiveness,
   public-entry startup health
 
-## Current Boundary
+## Current Boundary (as of 2026-03-19)
 
 - Windows single machine
 - self-use only
@@ -28,5 +33,5 @@ Current phase is closed and has been restored to a stable baseline.
 
 ## Freeze
 
-This repository is now frozen at the current-stage stable baseline.
-Any further work must start from a newly defined phase scope.
+This repository was frozen at the above stable baseline on 2026-03-19.
+Subsequent phases (commercialization Phase 0-5, stabilization plan) have since been executed.
