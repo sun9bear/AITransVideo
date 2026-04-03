@@ -101,3 +101,53 @@ class TestJobRecordSnapshotFields:
         payload = _make_job()
         job = JobRecord.from_dict(payload)
         assert job.transcription_method == "assemblyai"
+
+
+# ===================================================================
+# B2: volcengine tts_model round-trip
+# ===================================================================
+
+class TestVolcengineSnapshotRoundTrip:
+    """Verify volcengine-specific tts_model values survive serialization."""
+
+    def test_express_volcengine_tts_model_round_trip(self):
+        """tts_model='seed-tts-1.1' (volcengine express) round-trips correctly."""
+        payload = _make_job(
+            tts_provider="volcengine",
+            tts_model="seed-tts-1.1",
+            service_mode="express",
+            voice_clone_enabled=False,
+        )
+        job = JobRecord.from_dict(payload)
+        d = job.to_dict()
+        assert d["tts_provider"] == "volcengine"
+        assert d["tts_model"] == "seed-tts-1.1"
+        assert d["voice_clone_enabled"] is False
+
+        # Double round-trip
+        job2 = JobRecord.from_dict(d)
+        assert job2.tts_model == "seed-tts-1.1"
+
+    def test_studio_volcengine_tts_model_none_round_trip(self):
+        """tts_model=None (volcengine studio) round-trips as None."""
+        payload = _make_job(
+            tts_provider="volcengine",
+            tts_model=None,
+            service_mode="studio",
+            voice_clone_enabled=False,
+        )
+        job = JobRecord.from_dict(payload)
+        d = job.to_dict()
+        assert d["tts_provider"] == "volcengine"
+        assert d["tts_model"] is None
+        assert d["voice_clone_enabled"] is False
+
+    def test_no_tts_resource_id_field_exists(self):
+        """This round verifies we did NOT add a tts_resource_id field to JobRecord."""
+        payload = _make_job(tts_provider="volcengine", tts_model="seed-tts-1.1")
+        job = JobRecord.from_dict(payload)
+        assert not hasattr(job, "tts_resource_id"), (
+            "tts_resource_id should NOT exist on JobRecord in B2 (simplified plan)"
+        )
+        d = job.to_dict()
+        assert "tts_resource_id" not in d

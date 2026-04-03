@@ -21,7 +21,8 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 # Override URL from settings (env var takes precedence)
-config.set_main_option("sqlalchemy.url", settings.database_url)
+# Escape % in URL for configparser (password may contain URL-encoded special chars)
+config.set_main_option("sqlalchemy.url", settings.database_url.replace("%", "%%"))
 
 target_metadata = Base.metadata
 

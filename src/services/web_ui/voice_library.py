@@ -26,12 +26,27 @@ from .output_entries import _resolve_review_state_path
 from .utils import _coerce_float
 
 
+def get_volcengine_2_0_allowed_voice_ids() -> frozenset[str]:
+    """Return the set of VolcEngine 2.0 public voice_ids accepted for voice_review.
+
+    Phase 3: reads dynamically from Gateway DB (with static fallback).
+    """
+    try:
+        from services.tts.volcengine_voice_catalog import get_voices_for_resource
+        from services.tts.volcengine_tts_provider import RESOURCE_ID_2_0
+        return frozenset(v["voice_id"] for v in get_voices_for_resource(RESOURCE_ID_2_0))
+    except Exception:
+        return frozenset()
+
+
 def _build_voice_library_snapshot(
     *,
     project_root: Path,
     config_path: Path,
     project_dir: Path | None,
     transcript_items: list[dict[str, object]],
+    job_tts_provider: str | None = None,
+    job_service_mode: str | None = None,
 ) -> dict[str, object]:
     registry_path = _resolve_voice_registry_path(project_root=project_root, config_path=config_path)
     snapshot: dict[str, object] = {
@@ -140,6 +155,8 @@ def _build_voice_library_snapshot(
                 project_dir=project_dir,
                 registry=registry,
                 resolver=resolver,
+                job_tts_provider=job_tts_provider,
+                job_service_mode=job_service_mode,
             ),
             "current_project_speakers": _build_current_project_voice_bindings(
                 transcript_items=transcript_items,
@@ -173,6 +190,8 @@ def _build_active_voice_review_snapshot(
     project_dir: Path | None,
     registry: VoiceRegistry,
     resolver: VoiceResolver,
+    job_tts_provider: str | None = None,
+    job_service_mode: str | None = None,
 ) -> dict[str, object] | None:
     if project_dir is None:
         return None
@@ -219,6 +238,28 @@ def _build_active_voice_review_snapshot(
                 }
             )
 
+    # Only expose VolcEngine 2.0 public voice list when the current job
+    # actually uses volcengine + studio.  For express or non-volcengine jobs
+    # the list stays empty — the frontend skips the VoiceReviewPanel and
+    # falls through to auto-processing.
+    volcengine_2_0_voices: list[dict[str, object]] = []
+    if job_tts_provider == "volcengine" and job_service_mode == "studio":
+        try:
+            from services.tts.volcengine_voice_catalog import get_voices_for_resource
+            from services.tts.volcengine_tts_provider import RESOURCE_ID_2_0
+            volcengine_2_0_voices = [
+                {
+                    "voice_id": v["voice_id"],
+                    "display_name": v.get("display_name", v["voice_id"]),
+                    "gender": v.get("gender", ""),
+                    "age_group": v.get("age_group", ""),
+                    "persona_style": v.get("persona_style", ""),
+                }
+                for v in get_voices_for_resource(RESOURCE_ID_2_0)
+            ]
+        except Exception:
+            pass
+
     return {
         "stage": VOICE_REVIEW_STAGE,
         "status": stage_payload.get("status"),
@@ -227,6 +268,7 @@ def _build_active_voice_review_snapshot(
         or "",
         "reason": _normalize_optional_text(payload.get("reason")),
         "speakers": serialized_speakers,
+        "volcengine_2_0_voices": volcengine_2_0_voices,
     }
 
 

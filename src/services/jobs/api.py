@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 import mimetypes
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -271,6 +272,62 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
 
                     self._write_json(HTTPStatus.NOT_FOUND, {"error": f"Unknown review action: {review_subpath}"})
                     return
+                # --- Internal endpoints: require API key if configured ---
+                if path_parts and path_parts[0] == "internal":
+                    _internal_key = os.environ.get("AVT_INTERNAL_API_KEY", "").strip()
+                    if _internal_key:
+                        req_key = self.headers.get("X-Internal-Key", "").strip()
+                        if req_key != _internal_key:
+                            self._write_json(HTTPStatus.FORBIDDEN, {"error": "Invalid or missing X-Internal-Key"})
+                            return
+
+                # --- Internal: CosyVoice verify (TTS synthesis check) ---
+                if path_parts == ["internal", "voice-verify", "cosyvoice"]:
+                    payload = self._read_json_payload()
+                    voice_id = str(payload.get("voice_id", "")).strip()
+                    if not voice_id:
+                        raise ValueError("voice_id is required")
+                    test_text = str(payload.get("test_text", "这是一段验证音色可用性的测试。"))
+                    try:
+                        from services.tts.cosyvoice_provider import synthesize as cosy_synth
+                        wav_bytes = cosy_synth(text=test_text, voice=voice_id)
+                        ok = len(wav_bytes) > 1000
+                        self._write_json(HTTPStatus.OK, {
+                            "ok": ok,
+                            "bytes": len(wav_bytes),
+                            "error": None if ok else f"音频太短 ({len(wav_bytes)} bytes)",
+                        })
+                    except Exception as exc:
+                        self._write_json(HTTPStatus.OK, {
+                            "ok": False,
+                            "bytes": 0,
+                            "error": str(exc)[:500],
+                        })
+                    return
+
+                # --- Internal: voice label tasks ---
+                if path_parts == ["internal", "voice-label", "text"]:
+                    payload = self._read_json_payload()
+                    voices = payload.get("voices", [])
+                    if not isinstance(voices, list) or not voices:
+                        raise ValueError("voices must be a non-empty list of metadata dicts")
+                    from services.jobs.voice_label_tasks import run_text_labeling
+                    labels = run_text_labeling(voices)
+                    self._write_json(HTTPStatus.OK, {"ok": True, "labels": labels})
+                    return
+
+                if (len(path_parts) == 4
+                        and path_parts[:3] == ["internal", "voice-label", "audio"]):
+                    round_name = path_parts[3]
+                    payload = self._read_json_payload()
+                    voices = payload.get("voices", [])
+                    if not isinstance(voices, list) or not voices:
+                        raise ValueError("voices must be a non-empty list of metadata dicts")
+                    from services.jobs.voice_label_tasks import run_audio_profiling
+                    labels = run_audio_profiling(voices, round_name)
+                    self._write_json(HTTPStatus.OK, {"ok": True, "labels": labels})
+                    return
+
                 # --- Phase 1: job-scoped cancel ---
                 if len(path_parts) == 3 and path_parts[0] == "jobs" and path_parts[2] == "cancel":
                     job_id = path_parts[1]

@@ -22,6 +22,7 @@ import {
   Sun,
   Moon,
   Settings2,
+  AudioLines,
 } from "lucide-react"
 
 const navGroups = [
@@ -52,6 +53,7 @@ const navGroups = [
     label: "管理",
     adminOnly: true,
     items: [
+      { label: "音色管理", href: "/admin/voices", icon: AudioLines },
       { label: "系统设置", href: "/admin/settings", icon: Settings2 },
     ],
   },

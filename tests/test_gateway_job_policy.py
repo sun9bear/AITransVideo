@@ -41,7 +41,8 @@ def _make_user(*, role="user", plan_code="free", email="u@test.com"):
 # ===================================================================
 
 class TestComputeJobPolicy:
-    def test_express_free_user(self):
+    def test_express_default_cosyvoice(self):
+        """Default express provider from admin settings is cosyvoice."""
         p = compute_job_policy(_make_user(plan_code="free"), "express")
         assert p["service_mode"] == "express"
         assert p["tts_provider"] == "cosyvoice"
@@ -52,7 +53,7 @@ class TestComputeJobPolicy:
         assert p["plan_code_snapshot"] == "free"
         assert p["role_snapshot"] == "user"
 
-    def test_studio_plus_user(self):
+    def test_studio_default_minimax(self):
         p = compute_job_policy(_make_user(plan_code="plus"), "studio")
         assert p["service_mode"] == "studio"
         assert p["tts_provider"] == "minimax"
@@ -68,6 +69,132 @@ class TestComputeJobPolicy:
         p = compute_job_policy(_make_user(role="admin", plan_code="free"), "studio")
         assert p["tts_model"] == "speech-2.8-hd"
         assert p["role_snapshot"] == "admin"
+
+    # --- Admin settings driven provider selection ---
+
+    def test_express_volcengine_from_settings(self, monkeypatch):
+        """When admin sets express_tts_provider=volcengine, policy uses it."""
+        import admin_settings as admin_mod
+        original_load = admin_mod.load_settings
+
+        def mock_load():
+            s = original_load()
+            s.express_tts_provider = "volcengine"
+            return s
+
+        monkeypatch.setattr(admin_mod, "load_settings", mock_load)
+        p = compute_job_policy(_make_user(plan_code="free"), "express")
+        assert p["tts_provider"] == "volcengine"
+
+    def test_studio_volcengine_from_settings(self, monkeypatch):
+        """When admin sets studio_tts_provider=volcengine, policy uses it."""
+        import admin_settings as admin_mod
+        original_load = admin_mod.load_settings
+
+        def mock_load():
+            s = original_load()
+            s.studio_tts_provider = "volcengine"
+            return s
+
+        monkeypatch.setattr(admin_mod, "load_settings", mock_load)
+        p = compute_job_policy(_make_user(plan_code="plus"), "studio")
+        assert p["tts_provider"] == "volcengine"
+
+    def test_express_invalid_provider_falls_back_to_cosyvoice(self, monkeypatch):
+        """Invalid express provider value falls back to cosyvoice."""
+        import admin_settings as admin_mod
+        original_load = admin_mod.load_settings
+
+        def mock_load():
+            s = original_load()
+            s.express_tts_provider = "nonexistent_provider"
+            return s
+
+        monkeypatch.setattr(admin_mod, "load_settings", mock_load)
+        p = compute_job_policy(_make_user(plan_code="free"), "express")
+        assert p["tts_provider"] == "cosyvoice"
+
+    def test_studio_invalid_provider_falls_back_to_minimax(self, monkeypatch):
+        """Invalid studio provider value falls back to minimax."""
+        import admin_settings as admin_mod
+        original_load = admin_mod.load_settings
+
+        def mock_load():
+            s = original_load()
+            s.studio_tts_provider = "nonexistent_provider"
+            return s
+
+        monkeypatch.setattr(admin_mod, "load_settings", mock_load)
+        p = compute_job_policy(_make_user(plan_code="plus"), "studio")
+        assert p["tts_provider"] == "minimax"
+
+    # --- B2: volcengine dual-mode tts_model / voice_clone_enabled ---
+
+    def test_express_volcengine_model_seed_tts_1_1(self, monkeypatch):
+        """express + volcengine → tts_model = 'seed-tts-1.1' (req_params.model for 1.0)."""
+        import admin_settings as admin_mod
+        original_load = admin_mod.load_settings
+
+        def mock_load():
+            s = original_load()
+            s.express_tts_provider = "volcengine"
+            return s
+
+        monkeypatch.setattr(admin_mod, "load_settings", mock_load)
+        p = compute_job_policy(_make_user(plan_code="free"), "express")
+        assert p["tts_provider"] == "volcengine"
+        assert p["tts_model"] == "seed-tts-1.1"
+        assert p["voice_clone_enabled"] is False
+
+    def test_studio_volcengine_model_none(self, monkeypatch):
+        """studio + volcengine → tts_model is None (2.0 public voices don't need model)."""
+        import admin_settings as admin_mod
+        original_load = admin_mod.load_settings
+
+        def mock_load():
+            s = original_load()
+            s.studio_tts_provider = "volcengine"
+            return s
+
+        monkeypatch.setattr(admin_mod, "load_settings", mock_load)
+        p = compute_job_policy(_make_user(plan_code="plus"), "studio")
+        assert p["tts_provider"] == "volcengine"
+        assert p["tts_model"] is None
+
+    def test_studio_volcengine_clone_disabled(self, monkeypatch):
+        """studio + volcengine → voice_clone_enabled is False."""
+        import admin_settings as admin_mod
+        original_load = admin_mod.load_settings
+
+        def mock_load():
+            s = original_load()
+            s.studio_tts_provider = "volcengine"
+            return s
+
+        monkeypatch.setattr(admin_mod, "load_settings", mock_load)
+        p = compute_job_policy(_make_user(plan_code="plus"), "studio")
+        assert p["voice_clone_enabled"] is False
+
+    def test_non_volcengine_studio_unchanged(self, monkeypatch):
+        """studio + minimax → tts_model and voice_clone_enabled unchanged from before."""
+        import admin_settings as admin_mod
+        original_load = admin_mod.load_settings
+
+        def mock_load():
+            s = original_load()
+            s.studio_tts_provider = "minimax"
+            return s
+
+        monkeypatch.setattr(admin_mod, "load_settings", mock_load)
+        p = compute_job_policy(_make_user(plan_code="plus"), "studio")
+        assert p["tts_model"] == "speech-2.8-turbo"
+        assert p["voice_clone_enabled"] is True
+
+    def test_non_volcengine_express_unchanged(self):
+        """express + cosyvoice (default) → tts_model unchanged."""
+        p = compute_job_policy(_make_user(plan_code="free"), "express")
+        assert p["tts_model"] == "cosyvoice-v3-flash"
+        assert p["voice_clone_enabled"] is False
 
 
 # ===================================================================

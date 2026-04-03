@@ -9,6 +9,7 @@ import type {
   TranslationReviewApprovalInput,
   TranslationReviewItem,
   TranslationReviewResource,
+  VoiceReviewApprovalInput,
 } from '@/types/reviews'
 
 export async function getTranslationReview(
@@ -93,6 +94,24 @@ export async function approveTranslationReview(
     { body },
   )
 
+  return {
+    job: await getJob(input.jobId),
+  }
+}
+
+export async function approveVoiceReview(
+  input: VoiceReviewApprovalInput,
+): Promise<ReviewJobTransition> {
+  await apiClient.post<{ success: boolean }>(
+    `/jobs/${input.jobId}/review/voice/approve`,
+    {
+      body: {
+        project_dir: input.projectDir,
+        voice_id_a: input.voiceIdA,
+        voice_id_b: input.voiceIdB,
+      },
+    },
+  )
   return {
     job: await getJob(input.jobId),
   }

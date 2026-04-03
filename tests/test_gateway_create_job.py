@@ -486,3 +486,151 @@ class TestJobServiceStoreRoundTrip:
         assert loaded.user_id == "42"
         assert loaded.workspace_dir == "projects/42/" + job.job_id
         assert loaded.source_content_hash == "sha256:abc123"
+
+
+# ===================================================================
+# Admin-selected TTS provider flows through to upstream payload
+# ===================================================================
+
+class TestAdminSettingsTTSProvider:
+    def test_express_volcengine_injected_into_upstream(self):
+        """When admin sets express_tts_provider=volcengine, upstream payload has tts_provider=volcengine."""
+        import admin_settings as admin_mod
+
+        captured_body = {}
+
+        async def fake_proxy(*, request, upstream_base, strip_prefix, override_body=None):
+            if override_body:
+                captured_body.update(json.loads(override_body))
+            return _upstream_success()
+
+        req = _make_request({
+            "service_mode": "express",
+            "source": {"type": "youtube_url", "value": "https://youtube.com/watch?v=abc"},
+            "estimated_duration_seconds": 120,
+        })
+        user = _make_user(plan_code="free")
+        db = _make_db_session(active_job_count=0, user_for_quota=user)
+
+        original_load = admin_mod.load_settings
+
+        def mock_load():
+            s = original_load()
+            s.express_tts_provider = "volcengine"
+            return s
+
+        with patch("job_intercept.proxy_request", side_effect=fake_proxy):
+            with patch("job_intercept._probe_youtube_duration", return_value=None):
+                with patch.object(admin_mod, "load_settings", mock_load):
+                    resp = _run(intercept_create_job(req, db, user))
+
+        assert resp.status_code == 202
+        assert captured_body["tts_provider"] == "volcengine"
+
+    def test_studio_volcengine_injected_into_upstream(self):
+        """When admin sets studio_tts_provider=volcengine, upstream payload has tts_provider=volcengine."""
+        import admin_settings as admin_mod
+
+        captured_body = {}
+
+        async def fake_proxy(*, request, upstream_base, strip_prefix, override_body=None):
+            if override_body:
+                captured_body.update(json.loads(override_body))
+            return _upstream_success()
+
+        req = _make_request({
+            "service_mode": "studio",
+            "source": {"type": "youtube_url", "value": "https://youtube.com/watch?v=abc"},
+            "estimated_duration_seconds": 120,
+        })
+        user = _make_user(plan_code="plus")
+        db = _make_db_session(active_job_count=0, user_for_quota=user)
+
+        original_load = admin_mod.load_settings
+
+        def mock_load():
+            s = original_load()
+            s.studio_tts_provider = "volcengine"
+            return s
+
+        with patch("job_intercept.proxy_request", side_effect=fake_proxy):
+            with patch("job_intercept._probe_youtube_duration", return_value=None):
+                with patch.object(admin_mod, "load_settings", mock_load):
+                    resp = _run(intercept_create_job(req, db, user))
+
+        assert resp.status_code == 202
+        assert captured_body["tts_provider"] == "volcengine"
+
+
+# ===================================================================
+# B2: volcengine dual-mode snapshot in upstream payload
+# ===================================================================
+
+class TestVolcengineDualModeSnapshot:
+    def test_express_volcengine_snapshot_has_seed_tts_1_1(self):
+        """express + volcengine → tts_model='seed-tts-1.1', voice_clone_enabled=False."""
+        import admin_settings as admin_mod
+
+        captured_body = {}
+
+        async def fake_proxy(*, request, upstream_base, strip_prefix, override_body=None):
+            if override_body:
+                captured_body.update(json.loads(override_body))
+            return _upstream_success()
+
+        req = _make_request({
+            "service_mode": "express",
+            "source": {"type": "youtube_url", "value": "https://youtube.com/watch?v=abc"},
+        })
+        user = _make_user(plan_code="free")
+        db = _make_db_session(active_job_count=0, user_for_quota=user)
+        original_load = admin_mod.load_settings
+
+        def mock_load():
+            s = original_load()
+            s.express_tts_provider = "volcengine"
+            return s
+
+        with patch("job_intercept.proxy_request", side_effect=fake_proxy):
+            with patch("job_intercept._probe_youtube_duration", return_value=None):
+                with patch.object(admin_mod, "load_settings", mock_load):
+                    resp = _run(intercept_create_job(req, db, user))
+
+        assert resp.status_code == 202
+        assert captured_body["tts_provider"] == "volcengine"
+        assert captured_body["tts_model"] == "seed-tts-1.1"
+        assert captured_body["voice_clone_enabled"] is False
+
+    def test_studio_volcengine_snapshot_has_none_model(self):
+        """studio + volcengine → tts_model is None, voice_clone_enabled=False."""
+        import admin_settings as admin_mod
+
+        captured_body = {}
+
+        async def fake_proxy(*, request, upstream_base, strip_prefix, override_body=None):
+            if override_body:
+                captured_body.update(json.loads(override_body))
+            return _upstream_success()
+
+        req = _make_request({
+            "service_mode": "studio",
+            "source": {"type": "youtube_url", "value": "https://youtube.com/watch?v=abc"},
+        })
+        user = _make_user(plan_code="plus")
+        db = _make_db_session(active_job_count=0, user_for_quota=user)
+        original_load = admin_mod.load_settings
+
+        def mock_load():
+            s = original_load()
+            s.studio_tts_provider = "volcengine"
+            return s
+
+        with patch("job_intercept.proxy_request", side_effect=fake_proxy):
+            with patch("job_intercept._probe_youtube_duration", return_value=None):
+                with patch.object(admin_mod, "load_settings", mock_load):
+                    resp = _run(intercept_create_job(req, db, user))
+
+        assert resp.status_code == 202
+        assert captured_body["tts_provider"] == "volcengine"
+        assert captured_body["tts_model"] is None
+        assert captured_body["voice_clone_enabled"] is False

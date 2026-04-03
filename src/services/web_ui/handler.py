@@ -45,6 +45,7 @@ from .voice_library import (
     _assert_builtin_voice_selection_allowed,
     _find_builtin_voice_option,
     _resolve_voice_registry_path,
+    get_volcengine_2_0_allowed_voice_ids,
 )
 
 
@@ -348,54 +349,110 @@ def _build_web_ui_handler() -> type[BaseHTTPRequestHandler]:
                     if not isinstance(review_payload, dict):
                         review_payload = {}
 
-                    # Accept user-confirmed voice IDs from the new voice review flow
+                    # --- Gate: determine if this job is volcengine + studio ---
+                    job_snapshot = self.server.job_manager.snapshot()  # type: ignore[attr-defined]
+                    _job_tts_provider = _normalize_optional_text(
+                        job_snapshot.get("tts_provider") if isinstance(job_snapshot, dict)
+                        else getattr(job_snapshot, "tts_provider", None)
+                    ) if job_snapshot else None
+                    _job_service_mode = _normalize_optional_text(
+                        job_snapshot.get("service_mode") if isinstance(job_snapshot, dict)
+                        else getattr(job_snapshot, "service_mode", None)
+                    ) if job_snapshot else None
+                    _is_volcengine_studio = (_job_tts_provider == "volcengine" and _job_service_mode == "studio")
+
+                    # Accept user-confirmed voice IDs from the voice review flow.
+                    # Each speaker must have a selection: either a concrete voice_id
+                    # or the literal string "auto" (= let the matcher decide).
+                    # Missing selections are rejected to prevent bypass.
                     user_voice_id_a = _normalize_optional_text(payload.get("voice_id_a"))
                     user_voice_id_b = _normalize_optional_text(payload.get("voice_id_b"))
 
-                    # If user provided voice IDs directly, use those
-                    if user_voice_id_a or user_voice_id_b:
-                        registry_path = _resolve_voice_registry_path(
-                            project_root=self.server.job_manager.project_root,  # type: ignore[attr-defined]
-                            config_path=self.server.job_manager.config_path,  # type: ignore[attr-defined]
+                    # --- Validate: every speaker in the review must have a selection ---
+                    raw_speakers = review_payload.get("speakers", [])
+                    expected_speaker_ids = set()
+                    if isinstance(raw_speakers, list):
+                        for raw_spk in raw_speakers:
+                            if isinstance(raw_spk, dict):
+                                sid = str(raw_spk.get("speaker_id") or "").strip()
+                                if sid:
+                                    expected_speaker_ids.add(sid)
+                    if not expected_speaker_ids:
+                        expected_speaker_ids = {"speaker_a"}
+
+                    provided = {}
+                    if user_voice_id_a:
+                        provided["speaker_a"] = user_voice_id_a
+                    if user_voice_id_b:
+                        provided["speaker_b"] = user_voice_id_b
+
+                    missing = expected_speaker_ids - set(provided.keys())
+                    if missing:
+                        raise ValueError(
+                            "每个说话人都必须选择音色或「自动匹配」。"
+                            f"未提供选择的: {', '.join(sorted(missing))}"
                         )
-                        registry = VoiceRegistry(str(registry_path))
+
+                    # If user provided voice IDs directly, use those.
+                    # "auto" is a valid selection — it tells the runtime to use
+                    # the shared voice matcher.  It is NOT looked up in the
+                    # builtin voice registry.
+                    if user_voice_id_a or user_voice_id_b:
+                        # Only allow VolcEngine 2.0 catalog voices for volcengine + studio jobs.
+                        # For other providers/modes, only "auto" and legacy builtin voices are accepted.
+                        vc_2_0_allowed = get_volcengine_2_0_allowed_voice_ids() if _is_volcengine_studio else frozenset()
+
                         resolved_speakers = []
-                        if user_voice_id_a:
-                            builtin_voice_a = _find_builtin_voice_option(
+                        for spk_id, voice_val in provided.items():
+                            if voice_val == "auto":
+                                resolved_speakers.append({
+                                    "speaker_id": spk_id,
+                                    "voice_id": "auto",
+                                    "voice_type": "auto",
+                                    "label": "自动匹配",
+                                    "source": "voice_review_auto",
+                                })
+                                continue
+
+                            # --- Concrete voice: try legacy builtin first ---
+                            registry_path = _resolve_voice_registry_path(
+                                project_root=self.server.job_manager.project_root,  # type: ignore[attr-defined]
+                                config_path=self.server.job_manager.config_path,  # type: ignore[attr-defined]
+                            )
+                            registry = VoiceRegistry(str(registry_path))
+                            builtin_voice = _find_builtin_voice_option(
                                 registry=registry,
                                 config_path=self.server.job_manager.config_path,  # type: ignore[attr-defined]
-                                voice_id=user_voice_id_a,
+                                voice_id=voice_val,
                             )
-                            _assert_builtin_voice_selection_allowed(builtin_voice_a)
-                            resolved_speakers.append({
-                                "speaker_id": "speaker_a",
-                                "voice_id": user_voice_id_a,
-                                "voice_type": "builtin" if builtin_voice_a is not None else "cloned",
-                                "label": (
-                                    str(builtin_voice_a.get("label") or "User confirmed")
-                                    if builtin_voice_a is not None
-                                    else "User confirmed"
-                                ),
-                                "source": "voice_review_builtin" if builtin_voice_a is not None else "voice_review",
-                            })
-                        if user_voice_id_b:
-                            builtin_voice_b = _find_builtin_voice_option(
-                                registry=registry,
-                                config_path=self.server.job_manager.config_path,  # type: ignore[attr-defined]
-                                voice_id=user_voice_id_b,
+                            if builtin_voice is not None:
+                                # Builtin found — enforce compatibility (do NOT swallow errors)
+                                _assert_builtin_voice_selection_allowed(builtin_voice)
+                                resolved_speakers.append({
+                                    "speaker_id": spk_id,
+                                    "voice_id": voice_val,
+                                    "voice_type": "builtin",
+                                    "label": str(builtin_voice.get("label") or voice_val),
+                                    "source": "voice_review_builtin",
+                                })
+                                continue
+
+                            # --- Not a builtin: check VolcEngine 2.0 catalog ---
+                            if voice_val in vc_2_0_allowed:
+                                resolved_speakers.append({
+                                    "speaker_id": spk_id,
+                                    "voice_id": voice_val,
+                                    "voice_type": "volcengine_2_0",
+                                    "label": voice_val,
+                                    "source": "voice_review_volcengine",
+                                })
+                                continue
+
+                            # --- Unknown voice: reject ---
+                            raise ValueError(
+                                f"音色 {voice_val!r} 不在可选范围内。"
+                                f"请选择豆包 2.0 公版音色或「自动匹配」。"
                             )
-                            _assert_builtin_voice_selection_allowed(builtin_voice_b)
-                            resolved_speakers.append({
-                                "speaker_id": "speaker_b",
-                                "voice_id": user_voice_id_b,
-                                "voice_type": "builtin" if builtin_voice_b is not None else "cloned",
-                                "label": (
-                                    str(builtin_voice_b.get("label") or "User confirmed")
-                                    if builtin_voice_b is not None
-                                    else "User confirmed"
-                                ),
-                                "source": "voice_review_builtin" if builtin_voice_b is not None else "voice_review",
-                            })
                         review_state_manager.set_stage(
                             VOICE_REVIEW_STAGE,
                             status=REVIEW_STATUS_APPROVED,

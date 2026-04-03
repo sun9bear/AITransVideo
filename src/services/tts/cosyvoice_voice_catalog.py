@@ -151,23 +151,87 @@ def build_cosyvoice_v3_flash_builtin_voice_option(voice_id: str) -> dict[str, ob
     }
 
 
-def list_matchable_cosyvoice_voices() -> list[dict[str, str | bool]]:
-    """Return only voices in the B1 active matching pool (matchable=True)."""
+# ---------------------------------------------------------------------------
+# Static fallback functions
+# ---------------------------------------------------------------------------
+
+def _static_matchable() -> list[dict[str, str | bool]]:
     return [dict(item) for item in _COSYVOICE_V3_FLASH_VOICES if item.get("matchable", True)]
+
+
+def _static_endpoint_available(mode: str) -> list[dict[str, str | bool]]:
+    from services.tts.cosyvoice_endpoint_config import is_voice_available
+    return [
+        dict(item) for item in _COSYVOICE_V3_FLASH_VOICES
+        if item.get("matchable", True) and is_voice_available(str(item["voice_id"]), mode)
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Dynamic catalog via Gateway internal API (same pattern as VolcEngine Phase 3)
+# ---------------------------------------------------------------------------
+
+import logging as _logging
+import time as _time
+
+import requests as _requests
+
+_logger = _logging.getLogger(__name__)
+
+_GATEWAY_URL = "http://127.0.0.1:8880/api/internal/voice-catalog"
+_CACHE_TTL = 60.0  # seconds
+
+# Cache: key → (voices, default_voice_id, timestamp)
+_cosy_cache: dict[str, tuple[list[dict], str, float]] = {}
+
+
+def _fetch_cosyvoice_from_gateway(endpoint_mode: str | None = None) -> tuple[list[dict], str]:
+    """Fetch CosyVoice catalog from Gateway internal API."""
+    params: dict[str, str] = {"provider": "cosyvoice"}
+    if endpoint_mode:
+        params["endpoint_mode"] = endpoint_mode
+
+    resp = _requests.get(_GATEWAY_URL, params=params, timeout=5.0)
+    resp.raise_for_status()
+    data = resp.json()
+    return data["voices"], data["default_voice_id"]
+
+
+def _load_cosyvoice_dynamic(cache_key: str, endpoint_mode: str | None = None) -> list[dict]:
+    """Load from Gateway with cache + static fallback."""
+    cached = _cosy_cache.get(cache_key)
+    if cached and (_time.time() - cached[2]) < _CACHE_TTL:
+        return cached[0]
+
+    try:
+        voices, default_vid = _fetch_cosyvoice_from_gateway(endpoint_mode)
+        _cosy_cache[cache_key] = (voices, default_vid, _time.time())
+        return voices
+    except Exception as exc:
+        _logger.warning("Gateway CosyVoice catalog 不可用 (%s), fallback 到静态列表", exc)
+        if endpoint_mode:
+            return _static_endpoint_available(endpoint_mode)
+        return _static_matchable()
+
+
+# ---------------------------------------------------------------------------
+# Public API — same signatures, now dynamic
+# ---------------------------------------------------------------------------
+
+def list_matchable_cosyvoice_voices() -> list[dict[str, str | bool]]:
+    """Return only voices in the B1 active matching pool (matchable=True).
+
+    Phase 3: reads from Gateway DB with 60s cache + static fallback.
+    """
+    return _load_cosyvoice_dynamic("all_matchable")
 
 
 def list_endpoint_available_voices(mode: str) -> list[dict[str, str | bool]]:
     """Return matchable voices available on the given endpoint mode.
 
-    For 'mainland': all matchable voices (full pool).
-    For 'international': only voices confirmed available on the intl endpoint.
+    Phase 3: reads from Gateway DB with endpoint_mode filter + 60s cache + static fallback.
     """
-    from services.tts.cosyvoice_endpoint_config import is_voice_available
-
-    return [
-        dict(item) for item in _COSYVOICE_V3_FLASH_VOICES
-        if item.get("matchable", True) and is_voice_available(str(item["voice_id"]), mode)
-    ]
+    return _load_cosyvoice_dynamic(f"endpoint_{mode}", endpoint_mode=mode)
 
 
 def list_cosyvoice_v3_flash_builtin_voice_options() -> list[dict[str, object]]:

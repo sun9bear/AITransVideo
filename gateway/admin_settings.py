@@ -32,7 +32,7 @@ _VALID_ENDPOINT_MODES = {"international", "mainland"}
 
 class AdminSettings(BaseModel):
     tts_provider: str = "minimax"          # "minimax" or "mimo"
-    review_model: str = "gemini"           # "gemini" or "mimo_omni"
+    review_model: str = "gemini_pro"       # "gemini_pro" (highest quality) | "gemini" (low cost) | "mimo_omni"
     translation_model: str = "deepseek"    # "deepseek" or "gemini"
     skip_translation_config_for_users: bool = True  # Normal users skip translation config step
     skip_all_reviews_for_free_users: bool = True   # Free users: fully automatic pipeline

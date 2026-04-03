@@ -19,7 +19,7 @@ interface AdminSettings {
 
 const DEFAULT_SETTINGS: AdminSettings = {
   tts_provider: 'minimax',
-  review_model: 'gemini',
+  review_model: 'gemini_pro',
   translation_model: 'deepseek',
   skip_translation_config_for_users: true,
   skip_all_reviews_for_free_users: true,
@@ -34,15 +34,18 @@ const DEFAULT_SETTINGS: AdminSettings = {
 const TTS_OPTIONS = [
   { value: 'minimax', label: 'MiniMax Speech 2.8', description: '成熟稳定，¥0.20/千字，RPM 20' },
   { value: 'mimo', label: 'MiMo-V2-TTS（小米）', description: '限时免费，RPM 100，自然语言风格控制' },
+  { value: 'volcengine', label: '豆包语音合成 2.0（V3）', description: '火山引擎 V3 流式接口，300+音色，¥3/万字符，自动情感表达' },
 ]
 
 const EXPRESS_TTS_OPTIONS = [
   { value: 'cosyvoice', label: 'CosyVoice', description: '阿里通义，快速合成，适合快捷版' },
   { value: 'mimo', label: 'MiMo-V2-TTS（小米）', description: '限时免费，RPM 100，自然语言风格控制' },
+  { value: 'volcengine', label: '豆包语音合成 2.0（V3）', description: '火山引擎 V3 流式接口，300+音色，¥3/万字符，快捷版升级选项' },
 ]
 
 const STUDIO_TTS_OPTIONS = [
   { value: 'minimax', label: 'MiniMax Speech 2.8', description: '成熟稳定，¥0.20/千字，支持音色克隆' },
+  { value: 'volcengine', label: '豆包语音合成 2.0（V3）', description: '火山引擎 V3 流式接口，300+音色，¥3/万字符，自动情感表达' },
 ]
 
 const COSYVOICE_ENDPOINT_OPTIONS = [
@@ -51,8 +54,9 @@ const COSYVOICE_ENDPOINT_OPTIONS = [
 ]
 
 const REVIEW_OPTIONS = [
-  { value: 'gemini', label: 'Gemini 3.1 Flash Lite', description: '稳定，支持音频多模态，¥0.35/次' },
-  { value: 'mimo_omni', label: 'MiMo-V2-Omni（小米）', description: '全模态感知，$0.40/M tokens' },
+  { value: 'gemini_pro', label: 'Gemini 3.1 Pro（推荐）', description: '最高质量，音频多模态，¥2.4/小时音频' },
+  { value: 'gemini', label: 'Gemini 2.5 Flash Lite', description: '低成本，音频多模态，¥0.27/小时音频' },
+  { value: 'mimo_omni', label: 'MiMo-V2-Omni（小米）', description: '纯文本审校，不支持音频' },
 ]
 
 const TRANSLATION_OPTIONS = [

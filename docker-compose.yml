@@ -109,6 +109,9 @@ services:
       AVT_AUTH_REQUIRED: "true"
       AVT_PG_PASSWORD: "${PG_PASSWORD:?PG_PASSWORD 必须在 .env 中设置}"
       AVT_DATABASE_URL: ""
+      # VolcEngine TTS credentials — needed for voice catalog verify
+      VOLCENGINE_TTS_APP_ID: "${VOLCENGINE_TTS_APP_ID:-}"
+      VOLCENGINE_TTS_ACCESS_KEY: "${VOLCENGINE_TTS_ACCESS_KEY:-}"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8880/gateway/health')"]
       interval: 15s

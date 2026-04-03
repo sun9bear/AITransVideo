@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import urllib.request
 import urllib.error
 from dataclasses import dataclass
@@ -20,9 +21,34 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_REVIEWER_MODEL = "gemini-2.5-flash-lite"
+# ---------------------------------------------------------------------------
+# Review model mapping — single source of truth for API model IDs
+# ---------------------------------------------------------------------------
+# Admin settings store *logical* names (gemini_pro, gemini, mimo_omni).
+# This map resolves them to real API model IDs.  If an upstream provider
+# renames a model, update ONLY this dict — no other call-site should
+# hard-code raw model ID strings.
+_MODEL_MAP: dict[str, str] = {
+    "gemini_pro": "gemini-3.1-pro-preview",   # highest quality, ~¥2.4/h audio
+    "gemini": "gemini-2.5-flash-lite",         # low cost, ~¥0.27/h audio
+    "mimo_omni": "mimo-v2-omni",               # text-only alternative
+}
+_DEFAULT_REVIEW_MODEL = "gemini_pro"  # logical name, resolved via _MODEL_MAP
+
+_MIMO_OMNI_API_URL = "https://api.xiaomimimo.com/v1/chat/completions"
+
 _MAX_LINES_PER_BATCH = 200
 _BATCH_OVERLAP = 20
+
+# Audio preprocessing for review
+_REVIEW_AUDIO_SAMPLE_RATE = 16_000    # 16 kHz — sufficient for speech analysis
+_REVIEW_AUDIO_CHANNELS = 1            # mono
+_REVIEW_AUDIO_BITRATE = "32k"         # 32 kbps opus — ~4 KB/s, transparent for speech
+_REVIEW_AUDIO_BITRATE_AGGRESSIVE = "16k"  # fallback if first upload fails
+_REVIEW_AUDIO_CLIP_PADDING_MS = 10_000    # ±10 s padding for batch-local clips
+# Threshold: ≤20 min → whole compressed audio reused per batch;
+#            >20 min → batch-local clips to avoid redundant audio tokens.
+_REVIEW_AUDIO_WHOLE_FILE_THRESHOLD_MS = 20 * 60 * 1_000  # 20 minutes
 _MAX_MERGE_DURATION_MS = 180_000
 _MAX_EDIT_DISTANCE_RATIO = 0.3
 _MIN_SPLIT_DURATION_MS = 15_000
@@ -33,16 +59,160 @@ _ANSWER_MIN_MS = 2_500
 _ANSWER_CONTINUATION_MIN_MS = 1_500
 _NO_AUTO_FLIP_IF_LONGER_THAN_MS = 2_000
 
-_MIMO_OMNI_MODEL = "mimo-v2-omni"
-_MIMO_OMNI_API_URL = "https://api.xiaomimimo.com/v1/chat/completions"
+# Gemini explicit cache requires at least 32 768 input tokens.
+# 20 min audio ≈ 38 400 tokens (32 tok/s × 1200 s), safely above the threshold.
+# Shorter audio may not qualify — the code will fall back to plain upload.
+_GEMINI_MIN_CACHE_TOKENS = 32_768
+
+
+def _resolve_model_id(logical_name: str) -> str:
+    """Resolve a logical review model name to its API model ID.
+
+    Falls back to the default model if the name is unknown.
+    """
+    if logical_name in _MODEL_MAP:
+        return _MODEL_MAP[logical_name]
+    logger.warning("[Review] Unknown review model %r, falling back to %s", logical_name, _DEFAULT_REVIEW_MODEL)
+    return _MODEL_MAP[_DEFAULT_REVIEW_MODEL]
+
+
+# ---------------------------------------------------------------------------
+# Audio preprocessing for review
+# ---------------------------------------------------------------------------
+
+def _prepare_review_audio(
+    audio_path: Path,
+    tmp_dir: Path,
+    *,
+    bitrate: str = _REVIEW_AUDIO_BITRATE,
+) -> Path:
+    """Compress audio to a lightweight format suitable for LLM review upload.
+
+    Output: 16 kHz mono opus/ogg at the given *bitrate*.
+    A 45-min WAV (~450 MB) compresses to ~10 MB at 32 kbps.
+
+    Returns the path to the compressed file.
+    Raises ``AudioPreprocessError`` if ffmpeg fails.
+    """
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    out_path = tmp_dir / "review_audio.ogg"
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(audio_path),
+        "-ac", str(_REVIEW_AUDIO_CHANNELS),
+        "-ar", str(_REVIEW_AUDIO_SAMPLE_RATE),
+        "-c:a", "libopus",
+        "-b:a", bitrate,
+        str(out_path),
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=600)
+    except FileNotFoundError as exc:
+        raise AudioPreprocessError("ffmpeg not found on PATH") from exc
+    except Exception as exc:
+        raise AudioPreprocessError(f"Audio compression failed: {exc}") from exc
+
+    if not out_path.exists() or out_path.stat().st_size == 0:
+        raise AudioPreprocessError("Compressed audio file is empty or missing")
+
+    logger.info(
+        "[Review] Audio compressed: %s → %s (%.1f MB → %.1f MB)",
+        audio_path.name, out_path.name,
+        audio_path.stat().st_size / (1024 * 1024),
+        out_path.stat().st_size / (1024 * 1024),
+    )
+    return out_path
+
+
+def _prepare_review_audio_clip(
+    audio_path: Path,
+    tmp_dir: Path,
+    *,
+    start_ms: int,
+    end_ms: int,
+    clip_index: int = 0,
+    bitrate: str = _REVIEW_AUDIO_BITRATE,
+) -> Path:
+    """Extract a time-range clip from audio and compress it for review.
+
+    The clip covers [start_ms - padding, end_ms + padding], clamped to [0, ∞).
+    Returns path to the compressed clip.
+    """
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    out_path = tmp_dir / f"review_clip_{clip_index:03d}.ogg"
+
+    padded_start_ms = max(0, start_ms - _REVIEW_AUDIO_CLIP_PADDING_MS)
+    padded_end_ms = end_ms + _REVIEW_AUDIO_CLIP_PADDING_MS
+    duration_ms = padded_end_ms - padded_start_ms
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-ss", f"{padded_start_ms / 1000:.3f}",
+        "-i", str(audio_path),
+        "-t", f"{duration_ms / 1000:.3f}",
+        "-ac", str(_REVIEW_AUDIO_CHANNELS),
+        "-ar", str(_REVIEW_AUDIO_SAMPLE_RATE),
+        "-c:a", "libopus",
+        "-b:a", bitrate,
+        str(out_path),
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=300)
+    except FileNotFoundError as exc:
+        raise AudioPreprocessError("ffmpeg not found on PATH") from exc
+    except Exception as exc:
+        raise AudioPreprocessError(f"Audio clip extraction failed: {exc}") from exc
+
+    if not out_path.exists() or out_path.stat().st_size == 0:
+        raise AudioPreprocessError(f"Compressed audio clip {clip_index} is empty or missing")
+
+    logger.info(
+        "[Review] Audio clip %d: %.1fs–%.1fs → %s (%.1f MB)",
+        clip_index,
+        padded_start_ms / 1000, padded_end_ms / 1000,
+        out_path.name,
+        out_path.stat().st_size / (1024 * 1024),
+    )
+    return out_path
+
+
+def _get_audio_duration_ms(audio_path: Path) -> int | None:
+    """Get audio duration in milliseconds using ffprobe. Returns None on failure."""
+    try:
+        from utils.audio_utils import measure_duration_ms
+        return measure_duration_ms(audio_path)
+    except Exception as exc:
+        logger.warning("[Review] Failed to probe audio duration: %s", exc)
+        return None
+
+
+class AudioPreprocessError(Exception):
+    """Raised when review audio preprocessing fails."""
+
+
+def _try_compress_audio(audio_path: Path, tmp_dir: Path | None) -> Path | None:
+    """Best-effort compress: try normal bitrate, then aggressive, then give up."""
+    if tmp_dir is None:
+        tmp_dir = audio_path.parent / ".review_tmp"
+    try:
+        return _prepare_review_audio(audio_path, tmp_dir)
+    except AudioPreprocessError as exc:
+        logger.warning("[Review] Audio compression failed (%s), trying aggressive...", exc)
+    try:
+        return _prepare_review_audio(audio_path, tmp_dir, bitrate=_REVIEW_AUDIO_BITRATE_AGGRESSIVE)
+    except AudioPreprocessError as exc2:
+        logger.warning("[Review] Aggressive compression also failed: %s", exc2)
+    return None
 
 
 def _get_review_model() -> str:
-    """Get review model from admin settings or env.
+    """Get the logical review model name from admin settings or env.
 
-    Returns 'gemini' or 'mimo_omni'.
+    Returns a logical name such as ``"gemini_pro"``, ``"gemini"``, or
+    ``"mimo_omni"``.  Use :func:`_resolve_model_id` to convert to an API
+    model ID string.
     """
-    model = os.environ.get("REVIEW_MODEL", "gemini")
+    model = os.environ.get("REVIEW_MODEL", _DEFAULT_REVIEW_MODEL)
     # Also check admin settings file
     try:
         settings_path = "/opt/aivideotrans/config/admin_settings.json"
@@ -64,17 +234,14 @@ class ReviewResult:
     lines: list[Any]                     # Updated TranscriptLine objects
 
 
-REVIEW_PROMPT_TEMPLATE = """\
-你是转录审校专家。听音频、对照转录稿，输出修改指令 JSON。
+# ---------------------------------------------------------------------------
+# Prompt templates — audio vs text-only
+# ---------------------------------------------------------------------------
 
-视频标题：{video_title}
-视频链接：{video_url}
+# Shared sections (interview-specific speaker correction rules, output format)
+# are factored into constants to avoid duplication.
 
-## 审校任务（一次性完成）
-
-1. **识别说话人身份**：根据音频声音特征、视频标题、对话内容推断每个 speaker 的真实姓名和角色。姓名统一使用中文（如 Charlie Munger → 查理·芒格，Becky Quick → 贝基·奎克）。
-2. **纠正说话人标注**：听音频分辨说话人，修正标注错误。
-
+_PROMPT_SPEAKER_CORRECTION_RULES_AUDIO = """\
    **⚠ 采访场景全局角色锁定（最高优先级）**：
    - 先通读全部转录稿，判断这是否是采访/对话场景
    - 如果是：先确定谁是"主持人/提问者"、谁是"受访者/回答者"
@@ -89,20 +256,26 @@ REVIEW_PROMPT_TEMPLATE = """\
    - **同一人连续回答被错误切换 speaker**：受访者说了一长段话，ASR 因中间停顿把后半段标成了另一个人。判断标准：如果上一句是提问，接下来连续几句都是回答同一个问题，它们应该属于同一个 speaker（受访者），即使 ASR 标了不同的 speaker
    - **插话/抢话**：主持人在受访者说话中途插入提问，ASR 容易把插话段标成受访者。听音频中的声音重叠和音色变化来判断
    - **被打断后继续**：受访者被打断后继续之前的话，ASR 可能标成新的说话人
-   - **短促 backchannel vs 长回答**：主持人的"Yeah, sure"（backchannel）和受访者的长段回答要区别对待。backchannel 通常只有 1-3 个词且时长 <2 秒
-3. **修正转录文本**：
-   - 去除重复内容（同一句出现在相邻段落）
-   - 修正 ASR 错误（对照音频）
-   - 不改变原文意思
-4. **合并误拆段落**：仅当相邻段落因说话人标注错误被误拆时才合并（A-B-A 模式且中间段极短）。不要合并因自然停顿分开的段落。
-5. **拆分超长段落**：超过 60 秒的段落，在语义断点处拆分为 15-45 秒。
-6. **生成术语表**：提取人名、专有术语的中文翻译。
-7. **分析说话风格**：每个说话人的语气、口头禅特点（给翻译参考）。
-8. **描述音色特征**：听音频，为每个说话人输出一段自然语言音色描述（用于 TTS 语音合成），包括音调高低、语速快慢、声音质感（如低沉/清亮/沙哑）、情感特点等。
-9. **标注性别和年龄段**：每个说话人必须标注 gender（"male" 或 "female"）和 age_group（"young"、"middle"、"elderly"）。
+   - **短促 backchannel vs 长回答**：主持人的"Yeah, sure"（backchannel）和受访者的长段回答要区别对待。backchannel 通常只有 1-3 个词且时长 <2 秒"""
 
-只输出有问题的行。没问题的不用管。
+_PROMPT_SPEAKER_CORRECTION_RULES_TEXT = """\
+   **⚠ 采访场景全局角色锁定（最高优先级）**：
+   - 先通读全部转录稿，判断这是否是采访/对话场景
+   - 如果是：先确定谁是"主持人/提问者"、谁是"受访者/回答者"
+   - 然后统一检查：所有提问句应归属主持人，所有回答句应归属受访者
+   - 如果发现同一人的连续回答被交替标成 A 和 B，必须统一纠正
+   - 关键判断标准：语义角色（提问 vs 回答）> ASR 给出的 speaker 标签
 
+   **常见 ASR 错误模式**：
+   - 短促回应（Yeah, Sure, Right, 嗯, 对）被分给了错误的人
+   - A-B-A 快速交叉（中间 B 实际是 A 的延续）
+   - 旁白/介绍被标成了被采访者
+   - **同一人连续回答被错误切换 speaker**：受访者说了一长段话，ASR 因中间停顿把后半段标成了另一个人。判断标准：如果上一句是提问，接下来连续几句都是回答同一个问题，它们应该属于同一个 speaker（受访者），即使 ASR 标了不同的 speaker
+   - **插话/抢话**：主持人在受访者说话中途插入提问，ASR 容易把插话段标成受访者。根据对话语义和时间间隔来判断
+   - **被打断后继续**：受访者被打断后继续之前的话，ASR 可能标成新的说话人
+   - **短促 backchannel vs 长回答**：主持人的"Yeah, sure"（backchannel）和受访者的长段回答要区别对待。backchannel 通常只有 1-3 个词且时长 <2 秒"""
+
+_PROMPT_OUTPUT_FORMAT = """\
 ## 输出 JSON 格式（严格遵循，不要添加其他字段）
 
 {{
@@ -120,11 +293,90 @@ REVIEW_PROMPT_TEMPLATE = """\
     {{"action": "split", "index": 1, "at_text": "断点文本", "reason": "原因"}},
     {{"action": "fix_text", "index": 98, "old": "错误文本", "new": "正确文本", "reason": "原因"}}
   ]
-}}
+}}"""
+
+_REVIEW_PROMPT_WITH_AUDIO = """\
+你是转录审校专家。听音频、对照转录稿，输出修改指令 JSON。
+
+视频标题：{video_title}
+视频链接：{video_url}
+
+## 审校任务（一次性完成）
+
+1. **识别说话人身份**：根据音频声音特征、视频标题、对话内容推断每个 speaker 的真实姓名和角色。姓名统一使用中文（如 Charlie Munger → 查理·芒格，Becky Quick → 贝基·奎克）。
+2. **纠正说话人标注**：听音频分辨说话人，修正标注错误。
+
+""" + _PROMPT_SPEAKER_CORRECTION_RULES_AUDIO + """
+3. **修正转录文本**：
+   - 去除重复内容（同一句出现在相邻段落）
+   - 修正 ASR 错误（对照音频）
+   - 不改变原文意思
+4. **合并误拆段落**：仅当相邻段落因说话人标注错误被误拆时才合并（A-B-A 模式且中间段极短）。不要合并因自然停顿分开的段落。
+5. **拆分超长段落**：超过 60 秒的段落，在语义断点处拆分为 15-45 秒。
+6. **生成术语表**：提取人名、专有术语的中文翻译。
+7. **分析说话风格**：每个说话人的语气、口头禅特点（给翻译参考）。
+8. **描述音色特征**：听音频，为每个说话人输出一段自然语言音色描述（用于 TTS 语音合成），包括音调高低、语速快慢、声音质感（如低沉/清亮/沙哑）、情感特点等。
+9. **标注性别和年龄段**：每个说话人必须标注 gender（"male" 或 "female"）和 age_group（"young"、"middle"、"elderly"）。gender 和 age_group 不可为空。
+
+只输出有问题的行。没问题的不用管。
+
+""" + _PROMPT_OUTPUT_FORMAT + """
 
 ## 转录稿（{line_count} 行）
 
 {transcript_body}"""
+
+_REVIEW_PROMPT_TEXT_ONLY = """\
+你是转录审校专家。**本次没有提供音频**，请根据对话内容、说话人姓名、角色关系和语境进行分析。
+
+视频标题：{video_title}
+视频链接：{video_url}
+
+## 审校任务（一次性完成）
+
+1. **识别说话人身份**：根据视频标题、对话内容推断每个 speaker 的真实姓名和角色。姓名统一使用中文（如 Charlie Munger → 查理·芒格，Becky Quick → 贝基·奎克）。
+2. **纠正说话人标注**：根据对话语义和角色关系推断说话人，修正标注错误。
+
+""" + _PROMPT_SPEAKER_CORRECTION_RULES_TEXT + """
+3. **修正转录文本**：
+   - 去除重复内容（同一句出现在相邻段落）
+   - 修正明显的 ASR 错误（根据上下文推断）
+   - 不改变原文意思
+4. **合并误拆段落**：仅当相邻段落因说话人标注错误被误拆时才合并（A-B-A 模式且中间段极短）。不要合并因自然停顿分开的段落。
+5. **拆分超长段落**：超过 60 秒的段落，在语义断点处拆分为 15-45 秒。
+6. **生成术语表**：提取人名、专有术语的中文翻译。
+7. **分析说话风格**：每个说话人的语气特点（给翻译参考）。
+8. **描述配音风格建议**：根据说话人的角色、身份和对话风格，建议适合的中文配音声音风格（用于 TTS 语音合成选择参考），例如"建议使用低沉稳重的男声"。注意：本次分析基于文本推断，未听到实际音频。
+9. **标注性别和年龄段**：每个说话人必须标注 gender（"male" 或 "female"）和 age_group（"young"、"middle"、"elderly"）。gender 和 age_group 不可为空。请根据姓名和对话内容推断。
+
+只输出有问题的行。没问题的不用管。
+
+""" + _PROMPT_OUTPUT_FORMAT + """
+
+## 转录稿（{line_count} 行）
+
+{transcript_body}"""
+
+# Keep backward-compatible name for any external references
+REVIEW_PROMPT_TEMPLATE = _REVIEW_PROMPT_WITH_AUDIO
+
+
+def _format_prompt(
+    *,
+    has_audio: bool,
+    video_title: str,
+    video_url: str,
+    line_count: int,
+    transcript_body: str,
+) -> str:
+    """Select and format the appropriate prompt template."""
+    template = _REVIEW_PROMPT_WITH_AUDIO if has_audio else _REVIEW_PROMPT_TEXT_ONLY
+    return template.format(
+        video_title=video_title or "(unknown)",
+        video_url=video_url or "(unknown)",
+        line_count=line_count,
+        transcript_body=transcript_body,
+    )
 
 
 def review_transcript(
@@ -163,6 +415,35 @@ def review_transcript(
     if not lines:
         return None
 
+    # --- Audio strategy: probe duration FIRST, then decide compression path ---
+    original_audio: Path | None = None
+    review_tmp_dir: Path | None = None
+    audio_duration_ms: int | None = None
+
+    if audio_path and Path(audio_path).exists():
+        original_audio = Path(audio_path)
+        review_tmp_dir = original_audio.parent / ".review_tmp"
+        audio_duration_ms = _get_audio_duration_ms(original_audio)
+
+    use_whole_audio = (
+        audio_duration_ms is not None
+        and audio_duration_ms <= _REVIEW_AUDIO_WHOLE_FILE_THRESHOLD_MS
+    )
+
+    # Only compress the whole file when we plan to reuse it across batches
+    # (≤20 min). For >20 min the batched-review path generates per-batch clips
+    # directly from the original, so a full-file compression would be wasted work.
+    compressed_audio: Path | None = None
+    if original_audio and use_whole_audio:
+        compressed_audio = _try_compress_audio(original_audio, review_tmp_dir)
+
+    # For single-batch (≤200 lines) non-batched path, always try to provide audio.
+    # If it's a short file we already have compressed_audio; if it's longer we
+    # compress on demand here (single call, not repeated per batch).
+    single_batch_audio: Path | None = compressed_audio
+    if original_audio and single_batch_audio is None and len(lines) <= _MAX_LINES_PER_BATCH:
+        single_batch_audio = _try_compress_audio(original_audio, review_tmp_dir)
+
     # Build transcript body
     transcript_body = _build_transcript_body(lines)
 
@@ -172,7 +453,7 @@ def review_transcript(
             api_key=api_key,
             transcript_body=transcript_body,
             line_count=len(lines),
-            audio_path=audio_path,
+            audio_path=single_batch_audio,
             video_title=video_title,
             video_url=video_url,
             review_model=review_model,
@@ -181,11 +462,14 @@ def review_transcript(
             return None
         speakers, glossary, corrections = result
     else:
-        # Batch processing
+        # Batch processing with audio strategy based on duration
         speakers, glossary, corrections = _batched_review(
             api_key=api_key,
             lines=lines,
-            audio_path=audio_path,
+            original_audio_path=original_audio,
+            compressed_audio_path=compressed_audio,
+            audio_duration_ms=audio_duration_ms,
+            review_tmp_dir=review_tmp_dir,
             video_title=video_title,
             video_url=video_url,
             review_model=review_model,
@@ -239,20 +523,31 @@ def _call_review(
     transcript_body: str,
     line_count: int,
     audio_path: str | Path | None,
+    cached_content_name: str | None = None,
     video_title: str,
     video_url: str,
     review_model: str = "gemini",
 ) -> tuple[dict, dict, list] | None:
-    """Single LLM call for review. Dispatches to Gemini or MiMo Omni."""
-    prompt = REVIEW_PROMPT_TEMPLATE.format(
-        video_title=video_title or "(unknown)",
-        video_url=video_url or "(unknown)",
-        line_count=line_count,
-        transcript_body=transcript_body,
-    )
+    """Single LLM call for review. Dispatches to Gemini or MiMo Omni.
 
-    if review_model == "mimo_omni":
-        return _call_review_mimo_omni(api_key=api_key, prompt=prompt)
+    If *cached_content_name* is provided (explicit cache hit for whole-audio),
+    the audio is referenced from cache instead of being uploaded again.
+    """
+
+    # Resolve logical model name → API model ID
+    api_model_id = _resolve_model_id(review_model)
+    is_mimo = review_model == "mimo_omni"
+
+    if is_mimo:
+        # MiMo Omni is text-only — always use no-audio prompt
+        prompt = _format_prompt(
+            has_audio=False,
+            video_title=video_title,
+            video_url=video_url,
+            line_count=line_count,
+            transcript_body=transcript_body,
+        )
+        return _call_review_mimo_omni(api_key=api_key, prompt=prompt, model_id=api_model_id)
 
     try:
         genai = _load_genai()
@@ -260,32 +555,56 @@ def _call_review(
         client = genai.Client(api_key=api_key)
 
         contents: list = []
+        has_audio = False
+        generate_kwargs: dict[str, Any] = {}
 
-        # Upload audio for multimodal review
-        if audio_path and Path(audio_path).exists():
+        # Audio-first: always try to provide audio when available.
+        # Priority: cached content > upload compressed file.
+        if cached_content_name:
+            # Use explicit cache — audio already uploaded & cached
+            generate_kwargs["cached_content"] = cached_content_name
+            has_audio = True
+            logger.info("[Review] Using cached audio content")
+        elif audio_path and Path(audio_path).exists():
             audio_path = Path(audio_path)
-            file_size_mb = audio_path.stat().st_size / (1024 * 1024)
-            if file_size_mb <= 200:  # Gemini file upload limit
-                try:
-                    logger.info("Uploading audio for multimodal review (%dMB)...", int(file_size_mb))
-                    audio_file = client.files.upload(file=audio_path)
-                    contents.append(audio_file)
-                    logger.info("Audio uploaded successfully")
-                except Exception as e:
-                    logger.warning("Audio upload failed, falling back to text-only: %s", e)
-            else:
-                logger.warning("Audio too large (%dMB), using text-only review", int(file_size_mb))
+            try:
+                file_size_mb = audio_path.stat().st_size / (1024 * 1024)
+                logger.info(
+                    "[Review] Uploading audio for multimodal review (%s, %.1f MB)...",
+                    audio_path.name, file_size_mb,
+                )
+                audio_file = client.files.upload(file=audio_path)
+                contents.append(audio_file)
+                has_audio = True
+                logger.info("[Review] Audio uploaded successfully")
+            except Exception as e:
+                logger.warning("[Review] Audio upload failed: %s", e)
 
+        if not has_audio and audio_path:
+            logger.warning(
+                "[Review] Proceeding WITHOUT audio — speaker profiling "
+                "quality (gender/age/voice_description) will be degraded"
+            )
+
+        # Select prompt template based on whether audio is available
+        prompt = _format_prompt(
+            has_audio=has_audio,
+            video_title=video_title,
+            video_url=video_url,
+            line_count=line_count,
+            transcript_body=transcript_body,
+        )
         contents.append(prompt)
 
         response = client.models.generate_content(
-            model=_REVIEWER_MODEL,
+            model=api_model_id,
             contents=contents,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 temperature=0.1,
                 max_output_tokens=8192,
             ),
+            **generate_kwargs,
         )
 
         response_text = _extract_text(response)
@@ -299,8 +618,8 @@ def _call_review(
         corrections = payload.get("corrections", [])
 
         logger.info(
-            "Review response: %d speakers, %d glossary terms, %d corrections",
-            len(speakers), len(glossary), len(corrections),
+            "Review response: %d speakers, %d glossary terms, %d corrections (audio=%s)",
+            len(speakers), len(glossary), len(corrections), has_audio,
         )
         return speakers, glossary, corrections
 
@@ -313,10 +632,12 @@ def _call_review_mimo_omni(
     *,
     api_key: str,
     prompt: str,
+    model_id: str = "",
 ) -> tuple[dict, dict, list] | None:
     """Call MiMo-V2-Omni API for text-only review (OpenAI-compatible endpoint)."""
+    effective_model = model_id or _MODEL_MAP.get("mimo_omni", "mimo-v2-omni")
     payload = {
-        "model": _MIMO_OMNI_MODEL,
+        "model": effective_model,
         "messages": [{"role": "user", "content": prompt}],
         "response_format": {"type": "json_object"},
         "temperature": 0.1,
@@ -369,18 +690,54 @@ def _batched_review(
     *,
     api_key: str,
     lines: list,
-    audio_path: str | Path | None,
+    original_audio_path: Path | None,
+    compressed_audio_path: Path | None,
+    audio_duration_ms: int | None,
+    review_tmp_dir: Path | None,
     video_title: str,
     video_url: str,
     review_model: str = "gemini",
 ) -> tuple[dict, dict, list]:
-    """Process large transcripts in batches with overlap."""
+    """Process large transcripts in batches with overlap.
+
+    Audio strategy (per plan §4.2):
+    - ≤20 min total duration: every batch receives the same compressed
+      whole-file audio.  We first attempt to create a Gemini explicit cache
+      for this audio; if that fails (e.g. token count too low) we fall back
+      to passing the same compressed file to each batch call.
+    - >20 min: each batch receives a batch-local clip generated directly
+      from the *original* audio (no whole-file compression).
+    """
     all_corrections: list = []
     speakers: dict = {}
     glossary: dict = {}
 
     batch_size = _MAX_LINES_PER_BATCH
     overlap = _BATCH_OVERLAP
+
+    use_whole_audio = (
+        audio_duration_ms is not None
+        and audio_duration_ms <= _REVIEW_AUDIO_WHOLE_FILE_THRESHOLD_MS
+        and compressed_audio_path is not None
+    )
+
+    strategy = "whole_audio" if use_whole_audio else "batch_local_clip"
+    if audio_duration_ms is not None:
+        logger.info(
+            "[Review] Batched review: duration=%.0fs, strategy=%s",
+            audio_duration_ms / 1000, strategy,
+        )
+
+    # --- ≤20 min: try explicit caching for the compressed whole audio ---
+    cached_content_name: str | None = None
+    if use_whole_audio and review_model not in ("mimo_omni",):
+        cached_content_name = _try_create_audio_cache(
+            api_key=api_key,
+            audio_path=compressed_audio_path,
+            review_model=review_model,
+        )
+        if cached_content_name:
+            logger.info("[Review] Using explicit audio cache: %s", cached_content_name)
 
     batch_num = 0
     offset = 0
@@ -391,15 +748,33 @@ def _batched_review(
 
         logger.info("Review batch %d: lines %d-%d", batch_num, offset + 1, end)
 
-        # For audio, calculate time range of this batch
-        batch_audio_path = audio_path  # Pass full audio; Gemini handles seeking
+        # Resolve audio for this batch
+        batch_audio: Path | None = None
+        if use_whole_audio:
+            # ≤20 min: reuse same compressed audio for every batch
+            batch_audio = compressed_audio_path
+        elif original_audio_path and original_audio_path.exists() and review_tmp_dir:
+            # >20 min: extract batch-local clip directly from original audio
+            batch_start_ms = batch[0].start_ms
+            batch_end_ms = batch[-1].end_ms
+            try:
+                batch_audio = _prepare_review_audio_clip(
+                    original_audio_path,
+                    review_tmp_dir,
+                    start_ms=batch_start_ms,
+                    end_ms=batch_end_ms,
+                    clip_index=batch_num,
+                )
+            except AudioPreprocessError as exc:
+                logger.warning("[Review] Batch %d clip failed: %s", batch_num, exc)
 
         transcript_body = _build_transcript_body(batch)
         result = _call_review(
             api_key=api_key,
             transcript_body=transcript_body,
             line_count=len(batch),
-            audio_path=batch_audio_path if batch_num == 1 else None,  # Only first batch gets audio
+            audio_path=batch_audio,
+            cached_content_name=cached_content_name,
             video_title=video_title,
             video_url=video_url,
             review_model=review_model,
@@ -416,6 +791,53 @@ def _batched_review(
         offset = end - overlap if end < len(lines) else end
 
     return speakers, glossary, all_corrections
+
+
+def _try_create_audio_cache(
+    *,
+    api_key: str,
+    audio_path: Path | None,
+    review_model: str = "",
+) -> str | None:
+    """Attempt to create a Gemini explicit cache for the given audio file.
+
+    Returns the cache resource name (str) on success, or None if caching
+    is unavailable, the audio has too few tokens, or the SDK call fails.
+    """
+    if audio_path is None or not audio_path.exists():
+        return None
+    api_model_id = _resolve_model_id(review_model) if review_model else _MODEL_MAP[_DEFAULT_REVIEW_MODEL]
+    try:
+        genai = _load_genai()
+        types = _load_genai_types()
+        client = genai.Client(api_key=api_key)
+
+        uploaded = client.files.upload(file=audio_path)
+
+        # Count tokens to check we meet the minimum threshold
+        token_count_resp = client.models.count_tokens(
+            model=api_model_id,
+            contents=[uploaded],
+        )
+        total_tokens = getattr(token_count_resp, "total_tokens", 0) or 0
+        if total_tokens < _GEMINI_MIN_CACHE_TOKENS:
+            logger.info(
+                "[Review] Audio has %d tokens, below cache minimum %d — skipping cache",
+                total_tokens, _GEMINI_MIN_CACHE_TOKENS,
+            )
+            return None
+
+        cached = client.caches.create(
+            model=api_model_id,
+            config=types.CreateCachedContentConfig(
+                contents=[uploaded],
+                display_name="review-audio-cache",
+            ),
+        )
+        return cached.name
+    except Exception as exc:
+        logger.warning("[Review] Explicit audio cache creation failed: %s", exc)
+        return None
 
 
 def _apply_corrections(

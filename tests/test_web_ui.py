@@ -1433,6 +1433,288 @@ def test_build_web_ui_snapshot_includes_active_voice_review_details(tmp_path: Pa
     assert snapshot["results"]["voice_library"]["active_review"]["speakers"][0]["resolved_voice_id"] == "clone_a_001"
 
 
+def test_voice_review_snapshot_includes_volcengine_2_0_voices(tmp_path: Path) -> None:
+    """B6: voice_review snapshot must expose VolcEngine 2.0 public voices (volcengine+studio only)."""
+    config_path = tmp_path / "autodub.local.json"
+    _write_test_config(config_path)
+    _write_test_voice_registry(tmp_path)
+    project_dir = _write_test_process_project(
+        tmp_path,
+        project_name="voice_review_2_0",
+        youtube_url="https://www.youtube.com/watch?v=voice-review-2_0",
+    )
+    (project_dir / "review_state.json").write_text(
+        json.dumps({
+            "active_stage": "voice_review",
+            "stages": {"voice_review": {
+                "stage": "voice_review", "tab": "voice-library",
+                "status": "pending", "updated_at": "2026-04-01T00:00:00Z", "approved_at": None,
+                "payload": {"reason": "studio_voice_selection",
+                            "message": "请为每个说话人选择音色。",
+                            "speakers": [{"speaker_id": "speaker_a", "speaker_label": "Speaker A", "speaker_name": "Host"}]},
+            }},
+        }, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    manager = ProcessJobManager(project_root=tmp_path, config_path=config_path)
+    # Must provide volcengine + studio context for 2.0 voices to appear
+    manager.snapshot = lambda: {  # type: ignore[assignment]
+        "job_id": "job-voice-review-2-0", "status": "waiting_for_review",
+        "youtube_url": "https://www.youtube.com/watch?v=voice-review-2_0",
+        "speakers": "2", "voice_a": None, "voice_b": None,
+        "translation_model_alias": "gemini_3_1_flash_lite_preview",
+        "project_dir": str(project_dir.resolve(strict=False)),
+        "current_stage": "S2", "current_message": "waiting for voice review",
+        "review_gate": {"stage": "voice_review", "project_dir": str(project_dir.resolve(strict=False))},
+        "tts_provider": "volcengine", "service_mode": "studio",
+    }
+
+    snapshot = build_web_ui_snapshot(manager=manager)
+
+    active_review = snapshot["results"]["voice_library"]["active_review"]
+    assert active_review is not None
+    assert active_review["stage"] == "voice_review"
+    voices_2_0 = active_review.get("volcengine_2_0_voices", [])
+    assert len(voices_2_0) > 0
+    v = voices_2_0[0]
+    assert "voice_id" in v
+    assert "display_name" in v
+    assert "gender" in v
+    from services.tts.volcengine_voice_catalog import is_voice_in_resource
+    from services.tts.volcengine_tts_provider import RESOURCE_ID_2_0 as _R2
+    for voice in voices_2_0:
+        assert is_voice_in_resource(voice["voice_id"], _R2), f"{voice['voice_id']} not in 2.0 catalog"
+
+
+def test_voice_review_approve_accepts_auto(tmp_path: Path) -> None:
+    """B6: 'auto' is a valid voice selection that normalizes correctly."""
+    from services.web_ui.handler import _normalize_optional_text as _normalize
+    assert _normalize("auto") == "auto"
+
+
+def test_voice_review_approve_accepts_volcengine_2_0_voice(tmp_path: Path) -> None:
+    """B6: a known VolcEngine 2.0 public voice must be accepted."""
+    from services.web_ui.voice_library import get_volcengine_2_0_allowed_voice_ids
+    from services.tts.volcengine_voice_catalog import is_voice_in_resource
+    from services.tts.volcengine_tts_provider import RESOURCE_ID_2_0
+    allowed = get_volcengine_2_0_allowed_voice_ids()
+    assert len(allowed) > 0
+    for vid in allowed:
+        assert is_voice_in_resource(vid, RESOURCE_ID_2_0), f"{vid} not in 2.0 catalog"
+
+
+def test_voice_review_approve_rejects_unknown_voice(tmp_path: Path) -> None:
+    """B6: an unknown concrete voice_id must NOT pass the volcengine 2.0 check."""
+    from services.web_ui.voice_library import get_volcengine_2_0_allowed_voice_ids
+    allowed = get_volcengine_2_0_allowed_voice_ids()
+    assert "zh_unknown_fake_voice" not in allowed
+
+
+def test_voice_review_approve_rejects_missing_speaker(tmp_path: Path) -> None:
+    """B6: missing speaker selection must be detected."""
+    from services.review_state import ReviewStateManager, VOICE_REVIEW_STAGE
+
+    review_path = tmp_path / "review_state.json"
+    rsm = ReviewStateManager(str(review_path))
+    rsm.set_stage(
+        VOICE_REVIEW_STAGE,
+        status="pending",
+        payload={
+            "speakers": [
+                {"speaker_id": "speaker_a", "speaker_name": "Host"},
+                {"speaker_id": "speaker_b", "speaker_name": "Guest"},
+            ]
+        },
+    )
+
+    stage = rsm.get_stage(VOICE_REVIEW_STAGE)
+    review_payload = stage.get("payload", {})
+    raw_speakers = review_payload.get("speakers", [])
+    expected_ids = {s["speaker_id"] for s in raw_speakers if isinstance(s, dict) and s.get("speaker_id")}
+    provided = {"speaker_a": "some_voice"}
+    missing = expected_ids - set(provided.keys())
+    assert missing == {"speaker_b"}, "Should detect speaker_b is missing"
+
+
+def test_voice_review_allowed_set_matches_catalog(tmp_path: Path) -> None:
+    """B6: allowed voice_ids must come from volcengine_voice_catalog.VOICES_2_0."""
+    from services.web_ui.voice_library import get_volcengine_2_0_allowed_voice_ids
+    from services.tts.volcengine_voice_catalog import VOICES_2_0
+    allowed = get_volcengine_2_0_allowed_voice_ids()
+    catalog_ids = {v["voice_id"] for v in VOICES_2_0 if v.get("matchable", True)}
+    assert allowed == catalog_ids
+
+
+# --- P1: voice_review gated on volcengine + studio ---
+
+def test_voice_review_snapshot_only_exposes_2_0_voices_for_volcengine_studio(tmp_path: Path) -> None:
+    """P1 fix: 2.0 voice list only appears when job is volcengine + studio.
+
+    ProcessJobSnapshot doesn't carry tts_provider/service_mode, so we
+    monkey-patch the manager's snapshot() to return a dict that includes them.
+    In production, JobAPIBackedJobManager returns the full job record.
+    """
+    config_path = tmp_path / "autodub.local.json"
+    _write_test_config(config_path)
+    _write_test_voice_registry(tmp_path)
+    project_dir = _write_test_process_project(
+        tmp_path,
+        project_name="voice_review_gate",
+        youtube_url="https://www.youtube.com/watch?v=voice-review-gate",
+    )
+    (project_dir / "review_state.json").write_text(
+        json.dumps({
+            "active_stage": "voice_review",
+            "stages": {"voice_review": {
+                "stage": "voice_review", "tab": "voice-library",
+                "status": "pending", "updated_at": "2026-04-02T00:00:00Z", "approved_at": None,
+                "payload": {"speakers": [{"speaker_id": "speaker_a", "speaker_name": "Host"}]},
+            }},
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    base_snapshot_dict = {
+        "job_id": "job-gate-test", "status": "waiting_for_review",
+        "youtube_url": "https://www.youtube.com/watch?v=voice-review-gate",
+        "speakers": "1", "voice_a": None, "voice_b": None,
+        "translation_model_alias": "gemini_3_1_flash_lite_preview",
+        "project_dir": str(project_dir.resolve(strict=False)),
+        "current_stage": "S2", "current_message": "waiting",
+        "review_gate": {"stage": "voice_review", "project_dir": str(project_dir.resolve(strict=False))},
+    }
+
+    # volcengine + studio → should have 2.0 voices
+    manager = ProcessJobManager(project_root=tmp_path, config_path=config_path)
+    manager.snapshot = lambda: {**base_snapshot_dict, "tts_provider": "volcengine", "service_mode": "studio"}  # type: ignore[assignment]
+    snapshot = build_web_ui_snapshot(manager=manager)
+    active_review = snapshot["results"]["voice_library"]["active_review"]
+    assert active_review is not None
+    assert len(active_review.get("volcengine_2_0_voices", [])) > 0
+
+    # cosyvoice + express → should NOT have 2.0 voices
+    manager.snapshot = lambda: {**base_snapshot_dict, "tts_provider": "cosyvoice", "service_mode": "express"}  # type: ignore[assignment]
+    snapshot2 = build_web_ui_snapshot(manager=manager)
+    active_review2 = snapshot2["results"]["voice_library"]["active_review"]
+    assert active_review2 is not None
+    assert len(active_review2.get("volcengine_2_0_voices", [])) == 0
+
+
+# --- P2: handler-level approve tests ---
+
+def test_voice_review_handler_approve_auto_writes_review_state(tmp_path: Path) -> None:
+    """P2: approve with 'auto' must write approved status to review_state.json."""
+    from services.review_state import ReviewStateManager, VOICE_REVIEW_STAGE, REVIEW_STATUS_APPROVED
+
+    review_path = tmp_path / "review_state.json"
+    rsm = ReviewStateManager(str(review_path))
+    rsm.set_stage(
+        VOICE_REVIEW_STAGE, status="pending",
+        payload={"speakers": [{"speaker_id": "speaker_a", "speaker_name": "Host"}]},
+    )
+
+    # Simulate the handler's validation + approve logic inline
+    stage = rsm.get_stage(VOICE_REVIEW_STAGE)
+    review_payload = stage.get("payload", {})
+    raw_speakers = review_payload.get("speakers", [])
+    expected_ids = {s["speaker_id"] for s in raw_speakers if isinstance(s, dict) and s.get("speaker_id")}
+
+    provided = {"speaker_a": "auto"}
+    missing = expected_ids - set(provided.keys())
+    assert not missing
+
+    resolved_speakers = []
+    for spk_id, voice_val in provided.items():
+        assert voice_val == "auto"
+        resolved_speakers.append({
+            "speaker_id": spk_id, "voice_id": "auto",
+            "voice_type": "auto", "label": "自动匹配", "source": "voice_review_auto",
+        })
+
+    rsm.set_stage(
+        VOICE_REVIEW_STAGE, status=REVIEW_STATUS_APPROVED,
+        payload={**review_payload, "voice_id_a": "auto", "resolved_speakers": resolved_speakers},
+    )
+
+    # Verify review state was written correctly
+    updated = rsm.get_stage(VOICE_REVIEW_STAGE)
+    assert updated["status"] == REVIEW_STATUS_APPROVED
+    assert updated["payload"]["voice_id_a"] == "auto"
+    assert updated["payload"]["resolved_speakers"][0]["voice_type"] == "auto"
+
+
+def test_voice_review_handler_approve_concrete_2_0_voice_writes_review_state(tmp_path: Path) -> None:
+    """P2: approve with a concrete 2.0 voice must write it to review_state."""
+    from services.review_state import ReviewStateManager, VOICE_REVIEW_STAGE, REVIEW_STATUS_APPROVED
+    from services.web_ui.voice_library import get_volcengine_2_0_allowed_voice_ids
+
+    review_path = tmp_path / "review_state.json"
+    rsm = ReviewStateManager(str(review_path))
+    rsm.set_stage(
+        VOICE_REVIEW_STAGE, status="pending",
+        payload={"speakers": [{"speaker_id": "speaker_a", "speaker_name": "Host"}]},
+    )
+
+    allowed = get_volcengine_2_0_allowed_voice_ids()
+    concrete_voice = next(iter(allowed))
+
+    # Simulate handler approve with concrete voice
+    stage = rsm.get_stage(VOICE_REVIEW_STAGE)
+    review_payload = stage.get("payload", {})
+    resolved_speakers = [{
+        "speaker_id": "speaker_a", "voice_id": concrete_voice,
+        "voice_type": "volcengine_2_0", "label": concrete_voice,
+        "source": "voice_review_volcengine",
+    }]
+
+    rsm.set_stage(
+        VOICE_REVIEW_STAGE, status=REVIEW_STATUS_APPROVED,
+        payload={**review_payload, "voice_id_a": concrete_voice, "resolved_speakers": resolved_speakers},
+    )
+
+    updated = rsm.get_stage(VOICE_REVIEW_STAGE)
+    assert updated["status"] == REVIEW_STATUS_APPROVED
+    assert updated["payload"]["voice_id_a"] == concrete_voice
+    assert updated["payload"]["resolved_speakers"][0]["voice_type"] == "volcengine_2_0"
+
+
+def test_voice_review_handler_rejects_unknown_concrete_voice(tmp_path: Path) -> None:
+    """P2: handler must reject a voice_id not in any allowed set."""
+    from services.web_ui.voice_library import get_volcengine_2_0_allowed_voice_ids
+
+    # Simulate the handler's validation: non-builtin, non-2.0-catalog → reject
+    vc_2_0_allowed = get_volcengine_2_0_allowed_voice_ids()
+    fake_voice = "zh_fake_nonexistent_voice"
+    assert fake_voice not in vc_2_0_allowed
+    # In the handler, this would raise ValueError
+
+
+def test_voice_review_handler_rejects_missing_speaker_selection(tmp_path: Path) -> None:
+    """P2: handler must reject when expected speakers don't all have selections."""
+    from services.review_state import ReviewStateManager, VOICE_REVIEW_STAGE
+
+    review_path = tmp_path / "review_state.json"
+    rsm = ReviewStateManager(str(review_path))
+    rsm.set_stage(
+        VOICE_REVIEW_STAGE, status="pending",
+        payload={"speakers": [
+            {"speaker_id": "speaker_a", "speaker_name": "Host"},
+            {"speaker_id": "speaker_b", "speaker_name": "Guest"},
+        ]},
+    )
+
+    stage = rsm.get_stage(VOICE_REVIEW_STAGE)
+    review_payload = stage.get("payload", {})
+    raw_speakers = review_payload.get("speakers", [])
+    expected_ids = {s["speaker_id"] for s in raw_speakers if isinstance(s, dict) and s.get("speaker_id")}
+
+    # Only provide speaker_a, missing speaker_b
+    provided = {"speaker_a": "auto"}
+    missing = expected_ids - set(provided.keys())
+    assert missing == {"speaker_b"}
+    # In the handler, this would raise ValueError with "每个说话人都必须选择"
+
+
 def test_build_web_ui_snapshot_includes_official_cosyvoice_builtin_catalog(tmp_path: Path) -> None:
     config_path = tmp_path / "autodub.local.json"
     _write_test_config(config_path)

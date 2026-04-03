@@ -20,7 +20,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "autodub.local.json"
 ADMIN_SETTINGS_PATH = Path("/opt/aivideotrans/config/admin_settings.json")
 
-VALID_PROVIDERS = {"minimax", "mimo", "cosyvoice"}
+VALID_PROVIDERS = {"minimax", "mimo", "cosyvoice", "volcengine"}
 DEFAULT_PROVIDER = "minimax"
 
 # ---------------------------------------------------------------------------
@@ -30,6 +30,7 @@ _PROVIDER_RPM: dict[str, int] = {
     "cosyvoice": 180,   # ~3 RPS
     "minimax": 20,
     "mimo": 100,
+    "volcengine": 60,   # 初始保守值，官方默认 10 并发，待压测修正
 }
 
 
@@ -54,6 +55,10 @@ def get_tts_rpm(provider: str) -> int:
     return _PROVIDER_RPM.get(provider, 20)
 
 
+# Alias for clarity
+get_provider_rpm = get_tts_rpm
+
+
 def get_fallback_provider(provider: str, voice_clone_enabled: bool = False) -> str | None:
     """Return the fallback provider to try when *provider* fails.
 
@@ -64,6 +69,8 @@ def get_fallback_provider(provider: str, voice_clone_enabled: bool = False) -> s
     if provider == "minimax":
         if voice_clone_enabled:
             return None          # cloning is minimax-only, no fallback
+        return "cosyvoice"
+    if provider == "volcengine":
         return "cosyvoice"
     # mimo → no fallback
     return None

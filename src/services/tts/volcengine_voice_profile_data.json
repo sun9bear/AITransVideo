@@ -1,0 +1,352 @@
+{
+  "zh_female_tianxinxiaomei_emo_v2_mars_bigtts": {
+    "pitch_level": "high",
+    "warmth": "medium",
+    "authority": "medium",
+    "intimacy": "low",
+    "energy_level": "medium",
+    "brightness": "high",
+    "maturity": "young",
+    "delivery_style": "explainer",
+    "texture_tags": [
+      "crisp",
+      "steady"
+    ],
+    "childlike": false,
+    "_rounds": 1
+  },
+  "zh_female_gaolengyujie_emo_v2_mars_bigtts": {
+    "pitch_level": "high",
+    "warmth": "high",
+    "authority": "low",
+    "intimacy": "high",
+    "energy_level": "medium",
+    "brightness": "high",
+    "maturity": "young",
+    "delivery_style": "companion",
+    "texture_tags": [
+      "crisp",
+      "soft"
+    ],
+    "childlike": false,
+    "_rounds": 1
+  },
+  "zh_male_guangzhoudege_emo_mars_bigtts": {
+    "pitch_level": "high",
+    "warmth": "high",
+    "authority": "low",
+    "intimacy": "high",
+    "energy_level": "high",
+    "brightness": "high",
+    "maturity": "adult",
+    "delivery_style": "companion",
+    "childlike": false,
+    "texture_tags": [
+      "soft",
+      "steady",
+      "magnetic"
+    ],
+    "_rounds": 2
+  },
+  "zh_male_jingqiangkanye_emo_mars_bigtts": {
+    "pitch_level": "low",
+    "warmth": "medium",
+    "authority": "low",
+    "intimacy": "medium",
+    "energy_level": "high",
+    "brightness": "high",
+    "maturity": "adult",
+    "delivery_style": "explainer",
+    "childlike": false,
+    "texture_tags": [
+      "steady",
+      "magnetic",
+      "crisp"
+    ],
+    "_rounds": 3
+  },
+  "zh_male_yourougongzi_emo_v2_mars_bigtts": {
+    "pitch_level": "low",
+    "warmth": "high",
+    "authority": "low",
+    "intimacy": "high",
+    "energy_level": "medium",
+    "brightness": "low",
+    "maturity": "adult",
+    "delivery_style": "companion",
+    "texture_tags": [
+      "magnetic",
+      "soft",
+      "steady"
+    ],
+    "childlike": false,
+    "_rounds": 1
+  },
+  "zh_male_junlangnanyou_emo_v2_mars_bigtts": {
+    "pitch_level": "low",
+    "warmth": "high",
+    "authority": "low",
+    "intimacy": "high",
+    "energy_level": "medium",
+    "brightness": "medium",
+    "maturity": "adult",
+    "delivery_style": "narration",
+    "childlike": false,
+    "texture_tags": [
+      "steady",
+      "magnetic",
+      "crisp"
+    ],
+    "_rounds": 3
+  },
+  "zh_male_beijingxiaoye_emo_v2_mars_bigtts": {
+    "pitch_level": "low",
+    "warmth": "high",
+    "authority": "low",
+    "intimacy": "high",
+    "energy_level": "high",
+    "brightness": "high",
+    "maturity": "adult",
+    "delivery_style": "companion",
+    "childlike": false,
+    "texture_tags": [
+      "steady",
+      "soft",
+      "magnetic"
+    ],
+    "_rounds": 2
+  },
+  "zh_female_roumeinvyou_emo_v2_mars_bigtts": {
+    "pitch_level": "high",
+    "warmth": "high",
+    "authority": "medium",
+    "intimacy": "high",
+    "energy_level": "medium",
+    "brightness": "high",
+    "maturity": "young",
+    "delivery_style": "explainer",
+    "childlike": false,
+    "texture_tags": [
+      "soft",
+      "airy",
+      "crisp"
+    ],
+    "_rounds": 2
+  },
+  "zh_male_yangguangqingnian_emo_v2_mars_bigtts": {
+    "pitch_level": "mid",
+    "warmth": "high",
+    "authority": "low",
+    "intimacy": "high",
+    "energy_level": "high",
+    "brightness": "high",
+    "maturity": "young",
+    "delivery_style": "companion",
+    "texture_tags": [
+      "crisp",
+      "soft"
+    ],
+    "childlike": false,
+    "_rounds": 1
+  },
+  "zh_female_meilinvyou_emo_v2_mars_bigtts": {
+    "pitch_level": "high",
+    "warmth": "high",
+    "authority": "medium",
+    "intimacy": "high",
+    "energy_level": "medium",
+    "brightness": "medium",
+    "maturity": "young",
+    "delivery_style": "narration",
+    "childlike": false,
+    "texture_tags": [
+      "steady",
+      "soft",
+      "airy"
+    ],
+    "_rounds": 2
+  },
+  "zh_female_shuangkuaisisi_emo_v2_mars_bigtts": {
+    "pitch_level": "high",
+    "warmth": "medium",
+    "authority": "low",
+    "intimacy": "medium",
+    "energy_level": "high",
+    "brightness": "high",
+    "maturity": "young",
+    "delivery_style": "explainer",
+    "childlike": false,
+    "texture_tags": [
+      "soft",
+      "steady",
+      "crisp"
+    ],
+    "_rounds": 3
+  },
+  "en_female_skye_emo_v2_mars_bigtts": {
+    "pitch_level": "high",
+    "warmth": "high",
+    "authority": "low",
+    "intimacy": "medium",
+    "energy_level": "high",
+    "brightness": "high",
+    "maturity": "young",
+    "delivery_style": "explainer",
+    "childlike": false,
+    "texture_tags": [
+      "crisp",
+      "soft",
+      "airy"
+    ],
+    "_rounds": 3
+  },
+  "en_male_sylus_emo_v2_mars_bigtts": {
+    "pitch_level": "low",
+    "warmth": "high",
+    "authority": "high",
+    "intimacy": "high",
+    "energy_level": "medium",
+    "brightness": "medium",
+    "maturity": "adult",
+    "delivery_style": "companion",
+    "childlike": false,
+    "texture_tags": [
+      "steady",
+      "magnetic"
+    ],
+    "_rounds": 2
+  },
+  "en_male_corey_emo_v2_mars_bigtts": {
+    "pitch_level": "mid",
+    "warmth": "high",
+    "authority": "medium",
+    "intimacy": "high",
+    "energy_level": "medium",
+    "brightness": "medium",
+    "maturity": "adult",
+    "delivery_style": "companion",
+    "childlike": false,
+    "texture_tags": [
+      "steady",
+      "soft",
+      "crisp"
+    ],
+    "_rounds": 2
+  },
+  "en_female_nadia_tips_emo_v2_mars_bigtts": {
+    "pitch_level": "high",
+    "warmth": "high",
+    "authority": "low",
+    "intimacy": "high",
+    "energy_level": "high",
+    "brightness": "medium",
+    "maturity": "adult",
+    "delivery_style": "companion",
+    "childlike": false,
+    "texture_tags": [
+      "soft",
+      "steady",
+      "crisp"
+    ],
+    "_rounds": 2
+  },
+  "zh_female_yingyujiaoyu_mars_bigtts": {
+    "pitch_level": "mid",
+    "warmth": "high",
+    "authority": "medium",
+    "intimacy": "high",
+    "energy_level": "medium",
+    "brightness": "medium",
+    "maturity": "adult",
+    "delivery_style": "explainer",
+    "childlike": false,
+    "texture_tags": [
+      "steady",
+      "soft",
+      "crisp"
+    ],
+    "_rounds": 2
+  },
+  "ICL_zh_female_wenrounvshen_239eff5e8ffa_tob": {
+    "pitch_level": "high",
+    "warmth": "high",
+    "authority": "low",
+    "intimacy": "high",
+    "energy_level": "high",
+    "brightness": "high",
+    "maturity": "young",
+    "delivery_style": "companion",
+    "childlike": false,
+    "texture_tags": [
+      "soft",
+      "airy",
+      "crisp"
+    ],
+    "_rounds": 2
+  },
+  "zh_female_vv_mars_bigtts": {
+    "pitch_level": "high",
+    "warmth": "high",
+    "authority": "low",
+    "intimacy": "high",
+    "energy_level": "high",
+    "brightness": "high",
+    "maturity": "young",
+    "delivery_style": "companion",
+    "texture_tags": [
+      "crisp",
+      "soft"
+    ],
+    "childlike": false,
+    "_rounds": 1
+  },
+  "zh_female_qinqienvsheng_moon_bigtts": {
+    "pitch_level": "high",
+    "warmth": "medium",
+    "authority": "medium",
+    "intimacy": "low",
+    "energy_level": "medium",
+    "brightness": "high",
+    "maturity": "young",
+    "delivery_style": "narration",
+    "texture_tags": [
+      "crisp",
+      "steady"
+    ],
+    "childlike": false,
+    "_rounds": 1
+  },
+  "ICL_zh_male_shenmi_v1_tob": {
+    "pitch_level": "low",
+    "warmth": "high",
+    "authority": "low",
+    "intimacy": "high",
+    "energy_level": "medium",
+    "brightness": "medium",
+    "maturity": "adult",
+    "delivery_style": "companion",
+    "childlike": false,
+    "texture_tags": [
+      "soft",
+      "steady",
+      "magnetic"
+    ],
+    "_rounds": 2
+  },
+  "ICL_zh_female_wuxi_tob": {
+    "pitch_level": "high",
+    "warmth": "high",
+    "authority": "low",
+    "intimacy": "high",
+    "energy_level": "medium",
+    "brightness": "high",
+    "maturity": "child",
+    "delivery_style": "storyteller",
+    "texture_tags": [
+      "soft",
+      "crisp"
+    ],
+    "childlike": true,
+    "_rounds": 1
+  }
+}

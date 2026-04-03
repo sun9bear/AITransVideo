@@ -1,3 +1,13 @@
+from unittest.mock import patch
+
+import pytest
+
+# Mock Gateway HTTP calls to prevent real requests during tests
+@pytest.fixture(autouse=True)
+def _mock_gateway_calls():
+    with patch("services.tts.cosyvoice_voice_catalog._fetch_cosyvoice_from_gateway", side_effect=ConnectionError("test")):
+        yield
+
 from services.tts.cosyvoice_voice_selector import (
     VoiceMatchResult,
     infer_is_childlike,

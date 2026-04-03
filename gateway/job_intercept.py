@@ -70,32 +70,77 @@ PLAN_CATALOG = {
 }
 
 
+# Gateway-local allowed TTS providers (no cross-layer import from tts_strategy)
+_VALID_EXPRESS_PROVIDERS = {"cosyvoice", "mimo", "volcengine"}
+_VALID_STUDIO_PROVIDERS = {"minimax", "mimo", "volcengine"}
+_DEFAULT_EXPRESS_PROVIDER = "cosyvoice"
+_DEFAULT_STUDIO_PROVIDER = "minimax"
+
+
 def compute_job_policy(user, service_mode: str) -> dict:
-    """Compute job execution policy based on user role, plan, and service mode."""
+    """Compute job execution policy based on user role, plan, and service mode.
+
+    TTS provider is read from admin settings (express_tts_provider / studio_tts_provider).
+    Invalid values fall back to defaults (cosyvoice / minimax).
+
+    Note on ``tts_model`` semantics — this field means different things per provider:
+
+    * **minimax**: MiniMax model name (``speech-2.8-hd`` / ``speech-2.8-turbo``)
+    * **cosyvoice**: CosyVoice model name (``cosyvoice-v3-flash``)
+    * **volcengine**: value for ``req_params.model`` in the V3 API body
+      (``seed-tts-1.1`` for express / *None* for studio 2.0 public voices).
+      The ``resource_id`` (``seed-tts-1.0`` vs ``seed-tts-2.0``) is **not** stored
+      in the snapshot — it is derived at runtime by the Generator layer from
+      ``tts_provider + service_mode``.
+    """
+    from admin_settings import load_settings
+
     role = getattr(user, "role", "user") or "user"
     plan = getattr(user, "plan_code", "free") or "free"
 
     # Admin bypasses all limits
     is_admin = role == "admin"
 
+    admin = load_settings()
+
     if service_mode == "studio":
-        tts_model = "speech-2.8-hd" if (plan == "pro" or is_admin) else "speech-2.8-turbo"
+        configured_provider = (admin.studio_tts_provider or "").strip().lower()
+        tts_provider = configured_provider if configured_provider in _VALID_STUDIO_PROVIDERS else _DEFAULT_STUDIO_PROVIDER
+
+        if tts_provider == "volcengine":
+            # 豆包 2.0 — public voices do not need req_params.model;
+            # voice cloning not supported on 2.0 (reserved for future seed-icl-2.0).
+            tts_model = None
+            voice_clone_enabled = False
+        else:
+            tts_model = "speech-2.8-hd" if (plan == "pro" or is_admin) else "speech-2.8-turbo"
+            voice_clone_enabled = True
+
         return {
             "service_mode": "studio",
-            "tts_provider": "minimax",
+            "tts_provider": tts_provider,
             "tts_model": tts_model,
             "requires_review": True,
-            "voice_clone_enabled": True,
+            "voice_clone_enabled": voice_clone_enabled,
             "voice_strategy": "user_selected",
             "plan_code_snapshot": plan,
             "role_snapshot": role,
         }
     else:
         # Default: express
+        configured_provider = (admin.express_tts_provider or "").strip().lower()
+        tts_provider = configured_provider if configured_provider in _VALID_EXPRESS_PROVIDERS else _DEFAULT_EXPRESS_PROVIDER
+
+        if tts_provider == "volcengine":
+            # 豆包 1.0 — use seed-tts-1.1 for improved quality / latency.
+            tts_model = "seed-tts-1.1"
+        else:
+            tts_model = "cosyvoice-v3-flash"
+
         return {
             "service_mode": "express",
-            "tts_provider": "cosyvoice",
-            "tts_model": "cosyvoice-v3-flash",
+            "tts_provider": tts_provider,
+            "tts_model": tts_model,
             "requires_review": False,
             "voice_clone_enabled": False,
             "voice_strategy": "preset_mapping",

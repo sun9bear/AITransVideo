@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from admin_settings import router as admin_router
 from billing import router as billing_router
 from entitlements import router as entitlements_router
+from voice_catalog_api import router as voice_catalog_router, internal_router as voice_catalog_internal_router
 from auth import (
     LoginRequest,
     RegisterRequest,
@@ -48,6 +49,17 @@ async def lifespan(app: FastAPI):
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
     init_client()
+    # Recover stale label tasks from previous Gateway crash
+    try:
+        from label_task_queue import recover_stale_tasks
+        from database import async_session
+        async with async_session() as db:
+            recovered = await recover_stale_tasks(db)
+            if recovered:
+                import logging
+                logging.getLogger(__name__).info("Recovered %d stale label tasks", recovered)
+    except Exception:
+        pass  # Table may not exist yet before migration
     yield
     await close_client()
     await engine.dispose()
@@ -95,6 +107,8 @@ app.get("/auth/me")(me_handler)
 app.include_router(admin_router)
 app.include_router(billing_router)
 app.include_router(entitlements_router)
+app.include_router(voice_catalog_router)
+app.include_router(voice_catalog_internal_router)
 
 
 # --- Gateway-native upload endpoint (before catch-all) ---

@@ -53,6 +53,8 @@ def build_web_ui_snapshot(
         transcript_items=list(results_snapshot.get("transcript_review", {}).get("items", []))
         if isinstance(results_snapshot.get("transcript_review"), dict)
         else [],
+        job_tts_provider=_normalize_optional_text(job_snapshot.get("tts_provider") if isinstance(job_snapshot, dict) else getattr(job_snapshot, "tts_provider", None)),
+        job_service_mode=_normalize_optional_text(job_snapshot.get("service_mode") if isinstance(job_snapshot, dict) else getattr(job_snapshot, "service_mode", None)),
     )
     results_snapshot["voice_library"] = voice_library_snapshot
     return {

@@ -153,4 +153,14 @@ export interface VoiceReviewManualBindingInput {
 export interface VoiceReviewApprovalInput {
   jobId: string
   projectDir: string
+  voiceIdA: string | null
+  voiceIdB: string | null
+}
+
+export interface VolcEngineStudioVoiceOption {
+  voiceId: string
+  displayName: string
+  gender: string
+  ageGroup: string
+  personaStyle: string
 }

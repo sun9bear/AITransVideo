@@ -208,6 +208,13 @@ export interface ApiWebUiVoiceReviewSnapshot {
   message: string | null
   reason: string | null
   speakers: ApiWebUiVoiceReviewSpeakerSnapshot[]
+  volcengine_2_0_voices?: Array<{
+    voice_id: string
+    display_name: string
+    gender: string
+    age_group: string
+    persona_style: string
+  }>
 }
 
 export interface ApiWebUiVoiceLibrarySnapshot {
