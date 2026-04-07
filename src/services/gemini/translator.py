@@ -219,15 +219,15 @@ class GeminiTranslator:
             self.model = legacy_sdk.GenerativeModel(self.model_name)
             return
 
-        genai_module = _load_google_genai_sdk()
-        self.client = genai_module.Client(api_key=normalized_api_key)
+        from services.gemini.client_factory import create_gemini_client
+        self.client = create_gemini_client(api_key=normalized_api_key)
         self._types_module = _load_google_genai_types()
 
     def translate(
         self,
         lines: list[TranscriptLine],
         output_dir: str,
-        voice_id: str,
+        voice_id: str | None,
         display_name: str = "Speaker A",
         max_segment_duration_ms: int = DEFAULT_MAX_SEGMENT_DURATION_MS,
         voice_id_b: str | None = None,
@@ -241,9 +241,10 @@ class GeminiTranslator:
         output_path = (output_root / "segments.json").resolve(strict=False)
         checkpoint_path = (output_root / "segments.checkpoint.json").resolve(strict=False)
 
-        normalized_voice_id = _normalize_optional_text(voice_id)
-        if normalized_voice_id is None:
-            raise TranslationError("voice_id is required.")
+        # voice_id is only used as passthrough metadata to DubbingSegment.voice_id.
+        # When absent (e.g. studio flow where voice matching is deferred to TTS time),
+        # use "auto" placeholder so TTS stage can resolve via the matcher.
+        normalized_voice_id = _normalize_optional_text(voice_id) or "auto"
 
         normalized_display_name = _normalize_optional_text(display_name) or "Speaker A"
         normalized_voice_id_b = _normalize_optional_text(voice_id_b)
@@ -1673,9 +1674,9 @@ def _resolve_segment_voice_assignment(
 ) -> tuple[str, str]:
     normalized_speaker_id = speaker_id.strip().lower()
     if normalized_speaker_id == "speaker_b":
-        if voice_id_b is None:
-            raise TranslationError("voice_id_b is required for speaker_b segments.")
-        return voice_id_b, display_name_b
+        # voice_id_b may be absent in studio flow where TTS defers voice matching.
+        # Fall back to "auto" so TTS stage can resolve via the matcher.
+        return (voice_id_b or "auto"), display_name_b
     return voice_id, display_name
 
 

@@ -68,7 +68,8 @@ def profile_voice_with_gemini(
         print("[error] GEMINI_API_KEY not set", file=sys.stderr)
         return None
 
-    client = genai.Client(api_key=key)
+    from services.gemini.client_factory import create_gemini_client
+    client = create_gemini_client(api_key=key)
     mime_type = "audio/wav"
 
     contents: list = []

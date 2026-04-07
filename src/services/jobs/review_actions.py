@@ -14,9 +14,37 @@ from pathlib import Path
 from services.jobs.models import JOB_STATUS_WAITING_FOR_REVIEW
 from services.review_state import (
     REVIEW_STATUS_APPROVED,
+    TRANSLATION_CONFIG_REVIEW_STAGE,
     TRANSLATION_REVIEW_STAGE,
     ReviewStateManager,
 )
+
+
+def approve_translation_config(
+    *,
+    project_dir: Path,
+    selected_model: str | None,
+    prompt_template: str | None,
+) -> dict[str, object]:
+    """Approve translation-config review (model + prompt selection).
+
+    Writes the selected_model / prompt_template into the project's
+    review_state.json under translation_config_review, then marks it APPROVED
+    so the paused pipeline subprocess resumes.
+    """
+    review_state_path = Path(project_dir) / "review_state.json"
+    manager = ReviewStateManager(review_state_path)
+    payload: dict[str, object] = {}
+    if selected_model:
+        payload["selected_model"] = str(selected_model).strip()
+    if prompt_template is not None:
+        payload["prompt_template"] = prompt_template
+    manager.set_stage(
+        TRANSLATION_CONFIG_REVIEW_STAGE,
+        status=REVIEW_STATUS_APPROVED,
+        payload=payload,
+    )
+    return {"stage": TRANSLATION_CONFIG_REVIEW_STAGE, "payload": payload}
 
 
 def approve_translation(
@@ -123,8 +151,8 @@ def preview_segment(
     # Part 2: TTS preview
     if cn_text and voice_id:
         try:
-            from services.tts.voice_asset_verifier import VoiceAssetVerifier
-            verifier = VoiceAssetVerifier.from_env(config_path)
+            from services.voice_asset import VoiceAssetVerifier
+            verifier = VoiceAssetVerifier.from_env(config_path=config_path)
             verify_result = verifier.verify_voice(
                 speaker_id="preview",
                 voice_id=voice_id,
@@ -133,8 +161,21 @@ def preview_segment(
             output_path = getattr(verify_result, "output_path", None)
             if output_path and Path(output_path).exists():
                 tts_audio_b64 = base64.b64encode(Path(output_path).read_bytes()).decode("ascii")
-        except Exception:
-            pass
+            else:
+                import sys
+                print(
+                    f"[preview_segment] verify_voice returned no output_path for "
+                    f"voice_id={voice_id!r} (result={verify_result!r})",
+                    file=sys.stderr, flush=True,
+                )
+        except Exception as exc:
+            import sys, traceback
+            print(
+                f"[preview_segment] TTS preview failed for voice_id={voice_id!r}: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr, flush=True,
+            )
+            traceback.print_exc(file=sys.stderr)
 
     return {
         "source_audio_base64": source_audio_b64,

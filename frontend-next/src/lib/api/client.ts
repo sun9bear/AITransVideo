@@ -55,8 +55,10 @@ export class ApiClient {
 
     if (!response.ok) {
       const message =
-        payload && typeof payload === 'object' && 'error' in payload
-          ? String(payload.error)
+        payload && typeof payload === 'object' && 'message' in payload
+          ? String(payload.message)
+          : payload && typeof payload === 'object' && 'error' in payload
+            ? String(payload.error)
           : `API request failed with status ${response.status}`
       throw new ApiError(message, response.status, payload)
     }

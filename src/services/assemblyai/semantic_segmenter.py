@@ -123,8 +123,8 @@ def segment_with_llm(
     prompt = SEGMENT_PROMPT_TEMPLATE.format(transcript_body=transcript_body)
 
     try:
-        genai = _load_genai()
-        client = genai.Client(api_key=api_key)
+        from services.gemini.client_factory import create_gemini_client
+        client = create_gemini_client(api_key=api_key)
         types = _load_genai_types()
 
         response = client.models.generate_content(

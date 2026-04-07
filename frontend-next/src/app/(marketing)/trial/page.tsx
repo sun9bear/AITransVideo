@@ -1,0 +1,75 @@
+import type { Metadata } from "next"
+import { ShieldCheck, ArrowRight } from "lucide-react"
+import { TrialDetails } from "@/components/marketing/trial-details"
+import { PrimaryCta } from "@/components/marketing/primary-cta"
+import { LinkButton } from "@/components/marketing/link-button"
+
+export const metadata: Metadata = {
+  title: "免费试用 · AIVideoTrans",
+  description: "免费试用 AIVideoTrans 的完整视频翻译配音工作流，无需绑卡，试用结束不会自动扣费。",
+}
+
+/**
+ * `/trial` — marketing landing page for trial conversion.
+ *
+ * IMPORTANT: this is NOT the Task 3 phone/SMS auth page. It is a marketing
+ * surface whose only job is to explain trial value, establish trust, and hand
+ * the visitor off to the existing `/auth/register` flow.
+ *
+ * Numeric trial facts (days / source_minutes / Studio inclusion) come from the
+ * gateway `GET /api/plans` response and are only rendered when frozen === true.
+ * See `<TrialDetails />` for the boundary logic.
+ */
+export default function TrialPage() {
+  return (
+    <>
+      <section className="marketing-reading-surface pt-16 pb-8 sm:pt-20">
+        <div className="mx-auto max-w-5xl px-4 sm:px-6 lg:px-8">
+          <div className="max-w-2xl">
+            <div className="inline-flex items-center gap-2 rounded-full border border-primary/30 bg-primary/5 px-3 py-1 text-xs font-semibold text-primary">
+              <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />
+              无需绑卡
+            </div>
+            <h1 className="mt-5 text-4xl font-bold tracking-tight text-foreground sm:text-5xl">
+              先免费体验，再决定是否升级
+            </h1>
+            <p className="mt-5 zh-body-lg text-muted-foreground">
+              注册即享 7 天试用，含 20 分钟源视频额度与 Studio 精校模式。亲自验证对齐质量与配音自然度。试用结束后不会自动扣费，也不会锁定你的项目数据。
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section className="marketing-reading-surface pb-20 sm:pb-24">
+        <div className="mx-auto max-w-5xl px-4 sm:px-6 lg:px-8">
+          <div className="grid gap-10 lg:grid-cols-5 lg:gap-16">
+            <div className="lg:col-span-3">
+              <TrialDetails />
+            </div>
+
+            <aside className="lg:col-span-2" aria-label="开始试用">
+              <div className="sticky top-24 rounded-2xl border border-border bg-card p-6 shadow-sm">
+                <h2 className="text-xl font-semibold text-foreground">立即开始</h2>
+                <p className="mt-2 text-sm text-muted-foreground">
+                  创建账户即可查看并领取你的试用额度，整个过程不超过一分钟。
+                </p>
+                <div className="mt-6 space-y-3">
+                  <PrimaryCta className="w-full" />
+                  <LinkButton href="/pricing" variant="outline" className="w-full gap-1.5">
+                    先看看定价
+                    <ArrowRight className="h-4 w-4" aria-hidden="true" />
+                  </LinkButton>
+                </div>
+                <div className="mt-6 space-y-2 border-t border-border pt-5 text-xs text-muted-foreground">
+                  <p>· 无需绑定支付方式</p>
+                  <p>· 试用结束不会自动扣费</p>
+                  <p>· 项目数据始终保留在你的账户中</p>
+                </div>
+              </div>
+            </aside>
+          </div>
+        </div>
+      </section>
+    </>
+  )
+}

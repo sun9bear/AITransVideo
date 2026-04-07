@@ -1,12 +1,17 @@
-"""User entitlements API: plan limits, quota, allowed service modes."""
+"""User entitlements API: plan limits, quota, allowed service modes.
+
+Trial-aware (P3 fix): when a user is within an active trial window,
+``get_effective_plan_gate`` from ``plan_catalog`` elevates their capabilities
+(Studio, Plus-tier duration/concurrency) while ``user.plan_code`` stays "free".
+"""
 
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 
 from auth import get_current_user
-from job_intercept import PLAN_CATALOG
 from models import User
+from plan_catalog import get_effective_plan_gate, is_user_in_active_trial
 
 router = APIRouter(tags=["entitlements"])
 
@@ -22,8 +27,10 @@ async def get_entitlements(
     role = getattr(user, "role", "user") or "user"
     plan = getattr(user, "plan_code", "free") or "free"
     is_admin = role == "admin"
+    in_trial = is_user_in_active_trial(user)
 
-    plan_info = PLAN_CATALOG.get(plan, PLAN_CATALOG["free"])
+    # Use trial-aware plan gate so Trial users get Studio + elevated limits.
+    plan_info = get_effective_plan_gate(user)
 
     quota_total = getattr(user, "free_jobs_quota_total", 5)
     quota_used = getattr(user, "free_jobs_quota_used", 0)
@@ -43,6 +50,7 @@ async def get_entitlements(
             "ui": {
                 "show_admin_badge": True,
                 "allow_upgrade": False,
+                "in_trial": False,
             },
         }
 
@@ -53,12 +61,13 @@ async def get_entitlements(
             "max_duration_minutes": plan_info["max_duration_minutes"],
             "max_concurrent_jobs": plan_info["max_concurrent_jobs"],
             "allowed_service_modes": plan_info["allowed_service_modes"],
-            "free_jobs_quota_total": quota_total if plan == "free" else None,
-            "free_jobs_quota_used": quota_used if plan == "free" else None,
-            "free_jobs_quota_remaining": (quota_total - quota_used) if plan == "free" else None,
+            "free_jobs_quota_total": quota_total if plan == "free" and not in_trial else None,
+            "free_jobs_quota_used": quota_used if plan == "free" and not in_trial else None,
+            "free_jobs_quota_remaining": (quota_total - quota_used) if plan == "free" and not in_trial else None,
         },
         "ui": {
             "show_admin_badge": False,
             "allow_upgrade": plan != "pro",
+            "in_trial": in_trial,
         },
     }

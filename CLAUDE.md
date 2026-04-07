@@ -8,6 +8,36 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **直接在 main 分支上修改**，不要新建分支
 - 这是一个单人开发项目，不需要分支隔离
 
+## CRITICAL: 付费 API 不能自动调用
+
+**硬性约束：任何涉及付费外部 API 的代码路径都必须由用户显式触发，禁止在 fallback / 兜底 / 异常恢复路径里静默调用。**
+
+受约束的 API 类别：
+- **Voice Clone**：MiniMax voice cloning / 其他厂商的声音克隆（每次调用都有显著费用，且会占用账户额度）
+- **TTS 合成**：MiniMax TTS / VolcEngine TTS / CosyVoice TTS（大量调用时费用可观）
+- **LLM 付费推理**：Gemini / DeepSeek / 其他付费模型（批量调用费用会快速累积）
+- **ASR 转录**：AssemblyAI / 其他付费转录
+- **任何按量计费的第三方 API**
+
+禁止的模式：
+- ❌ 在 `except Exception:` 分支自动 fallback 到付费 API
+- ❌ 在 "找不到数据时自动 X" 的兜底逻辑里调用付费 API
+- ❌ 在 "用户没选择时默认帮他做 X" 的便利逻辑里调用付费 API
+- ❌ 在 batch / loop / retry 里无上限调用付费 API
+
+允许的模式：
+- ✅ 用户在前端显式点击按钮触发（例如 "克隆音色" 按钮）
+- ✅ 用户在 API payload 里显式传入 `action: clone` 等指令
+- ✅ 运行时路径中已经存在的、用户知情的付费调用（例如 TTS 合成本来就是 pipeline 的必经步骤）
+- ✅ 管理员在 admin 后台明确配置后的自动化流程
+
+修复付费 API 相关 bug 时的准则：
+- 不要用 "自动调另一个付费 API 来绕过失败" 作为修复方案
+- 优先方案：让失败显式暴露给用户，由用户决定下一步
+- 次选方案：提供免费 / 本地的 fallback（例如预设音色而非克隆音色）
+
+**曾发生的教训：** 2026-04-05 曾因在 S2 说话人审核的 fallback 路径加了自动克隆逻辑，导致 MiniMax 账户余额被两次 clone 调用耗尽。用户多次强调 "克隆应该用户主动决定" 之后才发现问题。此类失误不得重复。
+
 ## Project Overview
 
 多用户视频翻译/配音 SaaS 工作台。React (Next.js) 前端 + Python 后端，通过 FastAPI Gateway 连接。

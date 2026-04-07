@@ -28,7 +28,10 @@ class RegisterRequest(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    email: EmailStr
+    # A1: "account" field accepts phone number OR email address.
+    # Field kept named "email" for backward compat with legacy clients,
+    # but the handler resolves it against both User.email and User.phone_number.
+    email: str
     password: str
 
 
@@ -131,7 +134,24 @@ async def register_handler(
     response: Response,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    # Check if email already exists
+    """Public email registration is CLOSED as of Task 3.
+
+    The phone-first flow at `POST /auth/phone/send-code` +
+    `POST /auth/phone/verify-code` is now the only supported public
+    registration path. We keep this handler in place (and keep accepting a
+    well-formed request body) so legacy clients get an actionable error
+    instead of a 404 or a confusing schema-validation crash.
+
+    `AVT_EMAIL_REGISTRATION_ENABLED=true` can re-open this path for emergency
+    operator use, but the default is `false` and production must leave it so.
+    """
+    if not settings.email_registration_enabled:
+        raise HTTPException(
+            status_code=403,
+            detail="邮箱注册已关闭,请使用手机号验证码注册",
+        )
+
+    # --- Legacy fallback path (only reachable when explicitly re-enabled) ---
     result = await db.execute(select(User).where(User.email == body.email))
     if result.scalar_one_or_none():
         raise HTTPException(status_code=409, detail="该邮箱已注册")
@@ -153,7 +173,7 @@ async def register_handler(
     return {
         "user": {
             "id": str(user.id),
-            "email": user.email,
+            "email": user.email or "",
             "display_name": user.display_name,
         }
     }
@@ -164,11 +184,41 @@ async def login_handler(
     response: Response,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    result = await db.execute(select(User).where(User.email == body.email))
+    """Unified account + password login (A1 rewrite).
+
+    The "email" field now serves as a generic "account" field that accepts:
+    - Phone number (11-digit CN mobile) → queries User.phone_number
+    - Email address → queries User.email (legacy accounts)
+
+    This keeps backward compat for old email users while letting phone-
+    registered users log in with phone + password from the same form.
+    """
+    account = (body.email or "").strip()
+    if not account:
+        raise HTTPException(status_code=400, detail="请输入账号")
+
+    # Determine if the account looks like a phone number or email.
+    import re
+    normalized_account = re.sub(r"[\s\-\(\)]+", "", account)
+    if normalized_account.startswith("+86"):
+        normalized_account = normalized_account[3:]
+    elif normalized_account.startswith("86") and len(normalized_account) == 13:
+        normalized_account = normalized_account[2:]
+
+    is_phone = bool(re.match(r"^1[3-9]\d{9}$", normalized_account))
+
+    if is_phone:
+        result = await db.execute(
+            select(User).where(User.phone_number == normalized_account)
+        )
+    else:
+        result = await db.execute(
+            select(User).where(User.email == account)
+        )
     user = result.scalar_one_or_none()
 
-    if not user or not verify_password(body.password, user.password_hash):
-        raise HTTPException(status_code=401, detail="邮箱或密码错误")
+    if not user or not user.password_hash or not verify_password(body.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="账号或密码错误")
 
     if not user.is_active:
         raise HTTPException(status_code=403, detail="账户已禁用")
@@ -178,8 +228,9 @@ async def login_handler(
     return {
         "user": {
             "id": str(user.id),
-            "email": user.email,
+            "email": user.email or "",
             "display_name": user.display_name,
+            "phone_number": getattr(user, "phone_number", None),
         }
     }
 
@@ -210,9 +261,12 @@ async def me_handler(
     return {
         "user": {
             "id": str(user.id),
-            "email": user.email,
+            # Phone-only users have no email on file. Return "" so existing
+            # frontend consumers that expect a string don't crash.
+            "email": user.email or "",
             "display_name": user.display_name,
             "role": getattr(user, "role", "user") or "user",
+            "phone_number": getattr(user, "phone_number", None),
             "created_at": user.created_at.isoformat(),
         }
     }

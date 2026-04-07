@@ -220,6 +220,20 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
                         self._write_json(HTTPStatus.OK, {"success": True, "job": continued.to_dict()})
                         return
 
+                    if review_subpath == "translation-config/approve":
+                        _require_review_gate(record, expected_stage="translation_config_review")
+                        payload = self._read_json_payload()
+                        from services.jobs.review_actions import approve_translation_config
+                        approve_translation_config(
+                            project_dir=project_dir,
+                            selected_model=str(payload.get("selected_model", "")).strip() or None,
+                            prompt_template=payload.get("prompt_template"),
+                        )
+                        # Continue the job after approval
+                        continued = service.continue_job(job_id)
+                        self._write_json(HTTPStatus.OK, {"success": True, "job": continued.to_dict()})
+                        return
+
                     if review_subpath == "split-segment":
                         _require_waiting_for_review(record)
                         payload = self._read_json_payload()

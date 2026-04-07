@@ -4,6 +4,7 @@ import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { useEffect, useState } from "react"
 import { toast } from "sonner"
+import { useSession } from "@/components/providers/session-provider"
 import { Button } from "@/components/ui/button"
 import {
   PlusCircle,
@@ -25,7 +26,19 @@ import {
   AudioLines,
 } from "lucide-react"
 
-const navGroups = [
+type NavItem = {
+  label: string
+  href: string
+  icon: typeof PlusCircle
+}
+
+type NavGroup = {
+  label: string
+  items: NavItem[]
+  adminOnly?: boolean
+}
+
+const navGroups: NavGroup[] = [
   {
     label: "工作流",
     items: [
@@ -61,17 +74,10 @@ const navGroups = [
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
+  const { user } = useSession()
   const [collapsed, setCollapsed] = useState(false)
   const [mobileOpen, setMobileOpen] = useState(false)
   const [darkMode, setDarkMode] = useState(true)
-  const [user, setUser] = useState<{ display_name: string; email: string } | null>(null)
-
-  useEffect(() => {
-    fetch("/auth/me", { credentials: "include" })
-      .then((r) => r.json())
-      .then((d) => { if (d.user) setUser(d.user) })
-      .catch(() => {})
-  }, [])
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", darkMode)
@@ -79,18 +85,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   // Close mobile sidebar on route change
   useEffect(() => {
-    setMobileOpen(false)
+    const frame = window.requestAnimationFrame(() => setMobileOpen(false))
+    return () => window.cancelAnimationFrame(frame)
   }, [pathname])
 
   const handleLogout = async () => {
     await fetch("/auth/logout", { method: "POST", credentials: "include" })
     toast.success("已登出")
     window.location.href = "/auth/login"
-  }
-
-  // Auth pages: clean layout without sidebar/header
-  if (pathname.startsWith("/auth/")) {
-    return <>{children}</>
   }
 
   const sidebarContent = (
@@ -115,8 +117,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       {/* Nav groups */}
       <nav className="flex-1 overflow-y-auto py-3 px-2 space-y-4">
         {navGroups.filter((group) => {
-          if ('adminOnly' in group && (group as any).adminOnly) {
-            return user?.display_name === 'Admin' || user?.email?.includes('admin')
+          if (group.adminOnly) {
+            return user?.role === 'admin'
           }
           return true
         }).map((group) => (

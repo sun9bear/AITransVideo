@@ -1,0 +1,298 @@
+"""Central source of truth for plan / pricing / entitlement facts.
+
+This module is the single place where plan definitions, prices, and trial rules live.
+Both ``billing.py`` and ``job_intercept.py`` consume from here. Frontend reads via the
+public ``GET /api/plans`` endpoint exposed below.
+
+Design principles:
+- Lightweight: plain frozen dataclasses + a module-level dict. No registry, no DI.
+- Replaceable: legacy views (``get_legacy_plan_gate_dict`` / ``get_legacy_price_table``)
+  let existing consumers keep their import surface while the truth moves here.
+- Testable: the plans-endpoint body is extracted to ``_build_plans_response`` so it
+  can be asserted without spinning up FastAPI.
+
+Trial / Pricing frozen status (2026-04-06, H1 decision):
+- All pricing and Trial facts are now **frozen** by project-owner approval.
+- ``TRIAL_CONFIG["frozen"]`` is ``True``. Frozen Trial rules:
+  - 7 days, 20 source minutes, Studio included
+  - Requires phone + captcha + risk control
+  - Same phone only once; same IP only once (lifetime)
+  - No auto-charge; expires to Free
+- Pricing: Plus ¥99/269/999 (monthly/quarterly/annual),
+  Pro ¥299/799/2999. Plus 45-min cap, Pro 5 concurrent.
+- Changes to any of these values require explicit project-owner re-approval.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+from fastapi import APIRouter
+
+
+# ---------------------------------------------------------------------------
+# Plan definitions
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PlanPrice:
+    """CNY fen (分) prices for a given billing period. ``None`` means unavailable."""
+
+    monthly_cny_fen: int | None
+    quarterly_cny_fen: int | None
+    annual_cny_fen: int | None
+
+
+@dataclass(frozen=True)
+class PlanDefinition:
+    """All facts about a single plan tier.
+
+    Gate fields (``max_duration_minutes`` / ``max_concurrent_jobs`` /
+    ``allowed_service_modes``) are consumed by ``job_intercept.py``. Pricing is
+    consumed by ``billing.py``. ``self_serve`` controls whether the frontend offers
+    an in-app upgrade CTA for this tier.
+    """
+
+    code: str
+    display_name: str
+    max_duration_minutes: int
+    max_concurrent_jobs: int
+    allowed_service_modes: tuple[str, ...]
+    free_quota_total: int | None
+    price: PlanPrice | None
+    self_serve: bool
+
+
+# The authoritative plan table. Values frozen by project-owner decision H1
+# (2026-04-06). Changes require explicit project-owner re-approval.
+PLANS: dict[str, PlanDefinition] = {
+    "free": PlanDefinition(
+        code="free",
+        display_name="Free",
+        max_duration_minutes=10,
+        max_concurrent_jobs=1,
+        allowed_service_modes=("express",),
+        free_quota_total=5,
+        price=None,
+        self_serve=False,
+    ),
+    "plus": PlanDefinition(
+        code="plus",
+        display_name="Plus",
+        max_duration_minutes=45,
+        max_concurrent_jobs=3,
+        allowed_service_modes=("express", "studio"),
+        free_quota_total=None,
+        price=PlanPrice(
+            monthly_cny_fen=9900,      # ¥99 / 月
+            quarterly_cny_fen=26900,   # ¥269 / 季
+            annual_cny_fen=99900,      # ¥999 / 年
+        ),
+        self_serve=True,
+    ),
+    "pro": PlanDefinition(
+        code="pro",
+        display_name="Pro",
+        max_duration_minutes=180,
+        max_concurrent_jobs=5,
+        allowed_service_modes=("express", "studio"),
+        free_quota_total=None,
+        price=PlanPrice(
+            monthly_cny_fen=29900,     # ¥299 / 月
+            quarterly_cny_fen=79900,   # ¥799 / 季
+            annual_cny_fen=299900,     # ¥2999 / 年
+        ),
+        self_serve=True,
+    ),
+}
+
+
+VALID_BILLING_PERIODS: tuple[str, ...] = ("monthly", "quarterly", "annual")
+
+
+# ---------------------------------------------------------------------------
+# Trial configuration — FROZEN by project-owner decision H1 (2026-04-06)
+# ---------------------------------------------------------------------------
+
+TRIAL_CONFIG: dict[str, Any] = {
+    "frozen": True,
+    "days": 7,
+    "source_minutes": 20,
+    "includes_studio": True,
+    "phone_required": True,
+    "auto_charge": False,
+    "fallback_plan": "free",
+    "notes": (
+        "Trial facts frozen 2026-04-06. 7 days, 20 source minutes, Studio included. "
+        "Requires phone + captcha + risk control. Same phone only once. Same IP only once. "
+        "Expires to Free. No auto-charge."
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
+# Helpers (consumed by billing.py / job_intercept.py / tests)
+# ---------------------------------------------------------------------------
+
+
+def list_plan_codes() -> list[str]:
+    return list(PLANS.keys())
+
+
+def get_plan(code: str) -> PlanDefinition:
+    """Return the plan definition, falling back to ``free`` if unknown."""
+    return PLANS.get(code, PLANS["free"])
+
+
+def get_price(plan_code: str, billing_period: str) -> int | None:
+    """Return the price in CNY fen, or ``None`` if unavailable."""
+    plan = PLANS.get(plan_code)
+    if plan is None or plan.price is None:
+        return None
+    if billing_period == "monthly":
+        return plan.price.monthly_cny_fen
+    if billing_period == "quarterly":
+        return plan.price.quarterly_cny_fen
+    if billing_period == "annual":
+        return plan.price.annual_cny_fen
+    return None
+
+
+def valid_target_plan_codes() -> set[str]:
+    """Plan codes that can be the *target* of a paid upgrade (i.e. priced plans)."""
+    return {code for code, plan in PLANS.items() if plan.price is not None}
+
+
+def is_user_in_active_trial(user) -> bool:
+    """Return True if the user is currently within a valid trial window.
+
+    Checks ``trial_granted_at`` and ``trial_ends_at`` on the user object.
+    Does NOT check ``plan_code`` — trial is a temporary overlay, not a tier.
+    """
+    from datetime import datetime, timezone
+
+    granted = getattr(user, "trial_granted_at", None)
+    ends = getattr(user, "trial_ends_at", None)
+    if not granted or not ends:
+        return False
+    now = datetime.now(timezone.utc)
+    return now < ends
+
+
+def get_effective_plan_gate(user) -> dict[str, Any]:
+    """Return the plan gate dict for this user, accounting for active trial.
+
+    If the user is in an active trial window, their capabilities are elevated
+    to match ``TRIAL_CONFIG`` rules (Studio included, Plus-like duration/
+    concurrency) while ``user.plan_code`` stays ``"free"``. This keeps trial
+    as a temporary overlay, not a paid tier.
+
+    Consumers (``entitlements.py``, ``job_intercept.py``) should call this
+    instead of directly reading ``PLAN_CATALOG[user.plan_code]``.
+    """
+    plan_code = getattr(user, "plan_code", "free") or "free"
+    base = get_legacy_plan_gate_dict().get(plan_code, get_legacy_plan_gate_dict()["free"])
+
+    if is_user_in_active_trial(user) and TRIAL_CONFIG.get("frozen"):
+        # Overlay trial capabilities on top of the base plan.
+        # Trial includes Studio and gets Plus-tier duration/concurrency limits.
+        plus_gate = get_legacy_plan_gate_dict().get("plus", base)
+        return {
+            "max_duration_minutes": plus_gate["max_duration_minutes"],
+            "max_concurrent_jobs": plus_gate["max_concurrent_jobs"],
+            "allowed_service_modes": list(plus_gate["allowed_service_modes"]),
+            # Preserve free_quota_total if present in base (trial doesn't change quota)
+            **({k: base[k] for k in ("free_quota_total",) if k in base}),
+        }
+
+    return dict(base)
+
+
+def get_legacy_plan_gate_dict() -> dict[str, dict[str, Any]]:
+    """Return the legacy ``PLAN_CATALOG`` shape historically exposed by ``job_intercept``.
+
+    Kept so existing call sites and tests that import ``PLAN_CATALOG`` from
+    ``job_intercept`` keep working while the underlying truth moves here.
+    """
+    result: dict[str, dict[str, Any]] = {}
+    for code, plan in PLANS.items():
+        entry: dict[str, Any] = {
+            "max_duration_minutes": plan.max_duration_minutes,
+            "max_concurrent_jobs": plan.max_concurrent_jobs,
+            "allowed_service_modes": list(plan.allowed_service_modes),
+        }
+        if plan.free_quota_total is not None:
+            entry["free_quota_total"] = plan.free_quota_total
+        result[code] = entry
+    return result
+
+
+def get_legacy_price_table() -> dict[tuple[str, str], int]:
+    """Return the legacy ``PLAN_PRICES_CNY`` shape historically exposed by ``billing``."""
+    result: dict[tuple[str, str], int] = {}
+    for code, plan in PLANS.items():
+        if plan.price is None:
+            continue
+        if plan.price.monthly_cny_fen is not None:
+            result[(code, "monthly")] = plan.price.monthly_cny_fen
+        if plan.price.quarterly_cny_fen is not None:
+            result[(code, "quarterly")] = plan.price.quarterly_cny_fen
+        if plan.price.annual_cny_fen is not None:
+            result[(code, "annual")] = plan.price.annual_cny_fen
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Public API — GET /api/plans
+# ---------------------------------------------------------------------------
+
+
+router = APIRouter(prefix="/api", tags=["plans"])
+
+
+def _plan_to_public_dict(plan: PlanDefinition) -> dict[str, Any]:
+    """Serialize a plan for the public ``/api/plans`` response.
+
+    All fields here are safe to show anonymously. See the API contract doc at
+    ``docs/specs/2026-04-04-pricing-and-plans-api-contract.md``.
+    """
+    if plan.price is None:
+        price_payload: dict[str, int | None] | None = None
+    else:
+        price_payload = {
+            "monthly": plan.price.monthly_cny_fen,
+            "quarterly": plan.price.quarterly_cny_fen,
+            "annual": plan.price.annual_cny_fen,
+        }
+    entry: dict[str, Any] = {
+        "code": plan.code,
+        "display_name": plan.display_name,
+        "max_duration_minutes": plan.max_duration_minutes,
+        "max_concurrent_jobs": plan.max_concurrent_jobs,
+        "allowed_service_modes": list(plan.allowed_service_modes),
+        "self_serve": plan.self_serve,
+        "price_cny_fen": price_payload,
+    }
+    if plan.free_quota_total is not None:
+        entry["free_quota_total"] = plan.free_quota_total
+    return entry
+
+
+def _build_plans_response() -> dict[str, Any]:
+    """Build the ``/api/plans`` response dict (extracted for unit testing)."""
+    return {
+        "plans": [_plan_to_public_dict(plan) for plan in PLANS.values()],
+        "trial": dict(TRIAL_CONFIG),
+    }
+
+
+@router.get("/plans")
+async def get_plans_endpoint() -> dict[str, Any]:
+    """Public (no-auth) plan catalog for the marketing / pricing UI.
+
+    This endpoint is intentionally unauthenticated — it is the only supported way
+    for an anonymous marketing visitor to obtain pricing and plan entitlements.
+    Do not add ``Depends(require_auth)`` here.
+    """
+    return _build_plans_response()

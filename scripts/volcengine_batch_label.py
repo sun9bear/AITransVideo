@@ -90,9 +90,9 @@ def main():
     batches = [voice_inputs[i:i+BATCH_SIZE] for i in range(0, len(voice_inputs), BATCH_SIZE)]
 
     import importlib
-    genai = importlib.import_module("google.genai")
+    from services.gemini.client_factory import create_gemini_client
     types = importlib.import_module("google.genai.types")
-    client = genai.Client(api_key=api_key)
+    client = create_gemini_client(api_key=api_key)
 
     for batch_idx, batch in enumerate(batches):
         print(f"Batch {batch_idx + 1}/{len(batches)}: {len(batch)} voices...")
@@ -170,9 +170,9 @@ def main_targeted(voices: list[dict]) -> dict[str, dict]:
         return {}
 
     import importlib
-    genai = importlib.import_module("google.genai")
+    from services.gemini.client_factory import create_gemini_client
     types = importlib.import_module("google.genai.types")
-    client = genai.Client(api_key=api_key)
+    client = create_gemini_client(api_key=api_key)
 
     results: dict[str, dict] = {}
     batches = [voice_inputs[i:i+BATCH_SIZE] for i in range(0, len(voice_inputs), BATCH_SIZE)]

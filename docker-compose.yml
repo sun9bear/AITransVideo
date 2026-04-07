@@ -16,8 +16,13 @@ services:
       AIVIDEOTRANS_RUNTIME_LOGS_DIR: /opt/aivideotrans/data/runtime_logs
       ASSEMBLYAI_API_KEY: ${ASSEMBLYAI_API_KEY:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      VERTEX_AI_EXPRESS_KEY: ${VERTEX_AI_EXPRESS_KEY:-}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       AUTODUB_TTS_API_KEY: ${AUTODUB_TTS_API_KEY:-}
+      # Vertex AI (Gemini) — service account auth
+      GOOGLE_APPLICATION_CREDENTIALS: "/opt/aivideotrans/config/gcp-service-account.json"
+      GOOGLE_CLOUD_PROJECT: "${GOOGLE_CLOUD_PROJECT:-gen-lang-client-0200199358}"
+      GOOGLE_CLOUD_LOCATION: "${GOOGLE_CLOUD_LOCATION:-global}"
     volumes:
       # --- 开发期代码热更新 bind mount ---
       # 主机代码目录直接映射到容器内，修改后 docker restart 即可生效。
@@ -75,6 +80,9 @@ services:
     build:
       context: ./frontend-next
       dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_CAPTCHA_PROVIDER: "${NEXT_PUBLIC_CAPTCHA_PROVIDER:-fake}"
+        NEXT_PUBLIC_TURNSTILE_SITE_KEY: "${NEXT_PUBLIC_TURNSTILE_SITE_KEY:-}"
     image: aivideotrans-next:latest
     container_name: aivideotrans-next
     network_mode: host
@@ -109,6 +117,17 @@ services:
       AVT_AUTH_REQUIRED: "true"
       AVT_PG_PASSWORD: "${PG_PASSWORD:?PG_PASSWORD 必须在 .env 中设置}"
       AVT_DATABASE_URL: ""
+      # --- Captcha (Cloudflare Turnstile) ---
+      AVT_CAPTCHA_PROVIDER: "${AVT_CAPTCHA_PROVIDER:-fake}"
+      AVT_TURNSTILE_SECRET_KEY: "${AVT_TURNSTILE_SECRET_KEY:-}"
+      # --- Aliyun SMS credentials (shared with FC relay) ---
+      AVT_ALIYUN_SMS_ACCESS_KEY_ID: "${AVT_ALIYUN_SMS_ACCESS_KEY_ID:-}"
+      AVT_ALIYUN_SMS_ACCESS_KEY_SECRET: "${AVT_ALIYUN_SMS_ACCESS_KEY_SECRET:-}"
+      # --- SMS (Aliyun) ---
+      AVT_SMS_PROVIDER: "${AVT_SMS_PROVIDER:-fake}"
+      AVT_ALIYUN_SMS_RELAY_URL: "${AVT_ALIYUN_SMS_RELAY_URL:-}"
+      AVT_ALIYUN_SMS_RELAY_USER: "${AVT_ALIYUN_SMS_RELAY_USER:-}"
+      AVT_ALIYUN_SMS_RELAY_PASS: "${AVT_ALIYUN_SMS_RELAY_PASS:-}"
       # VolcEngine TTS credentials — needed for voice catalog verify
       VOLCENGINE_TTS_APP_ID: "${VOLCENGINE_TTS_APP_ID:-}"
       VOLCENGINE_TTS_ACCESS_KEY: "${VOLCENGINE_TTS_ACCESS_KEY:-}"

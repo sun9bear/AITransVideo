@@ -190,27 +190,96 @@ class StripeProvider(_StubProvider):
         return mapping.get(provider_status, provider_status)
 
 
-class AlipayProvider(_StubProvider):
-    """Alipay provider — stub for Sprint 1.
+class AlipayProvider:
+    """Alipay payment provider (Task 5 integration boundary).
 
-    Sprint 2 implementation notes:
-    - create_checkout: generate alipay.trade.page.pay URL
-    - verify_signature: RSA2 signature verification with alipay public key
-    - parse_webhook: parse form-encoded notify body
-    - map_status: TRADE_SUCCESS -> "paid", TRADE_CLOSED -> "cancelled"
+    This provider is **env-gated**: it reports `operational = True` only when
+    the full Alipay merchant config is present in the environment. Locally, in
+    tests, and in any environment that doesn't set `AVT_ALIPAY_*`, the provider
+    stays non-operational so the fake path remains the default safe route.
+
+    The heavy lifting (config loading, status mapping, checkout URL building,
+    webhook parsing, signature verification) lives in
+    `gateway/payment_provider_alipay.py` to keep this module small and its
+    import surface stable.
     """
 
+    name = "alipay"
+
     def __init__(self) -> None:
-        super().__init__("alipay")
+        # Defer the env read so tests that toggle `AVT_ALIPAY_*` at runtime
+        # see fresh config per instance. Registry singletons are also fine
+        # because the gateway process doesn't rotate merchant credentials.
+        from payment_provider_alipay import AlipayConfig
+        self._config: "AlipayConfig | None" = AlipayConfig.from_env()
+
+    @property
+    def operational(self) -> bool:
+        # Truthfulness gate (T5 minor revision):
+        #
+        # Being `operational` means we can ACTUALLY take money and settle it.
+        # Env presence is necessary but not sufficient — `payment_provider_alipay`
+        # has a `_ALIPAY_LIVE_READY` flag that stays False until both the
+        # signed-checkout path and the verified-signature path are genuinely
+        # implemented. Until someone flips that flag, Alipay stays visible in
+        # the provider list but marked `operational: false`, and `/api/billing/
+        # checkout-config` will not make it the default provider.
+        from payment_provider_alipay import is_alipay_live_ready
+        return is_alipay_live_ready()
+
+    def create_checkout(
+        self,
+        *,
+        order_id: str,
+        amount_cny: int,
+        target_plan_code: str,
+        billing_period: str,
+    ) -> CheckoutResult:
+        if self._config is None:
+            raise NotImplementedError(
+                "支付渠道 alipay 尚未配置,请先设置 AVT_ALIPAY_* 环境变量"
+            )
+        from payment_provider_alipay import build_checkout_url
+        checkout_url = build_checkout_url(
+            self._config,
+            order_id=order_id,
+            amount_cny=amount_cny,
+            target_plan_code=target_plan_code,
+            billing_period=billing_period,
+        )
+        # Alipay assigns its own trade_no asynchronously on notify; we don't
+        # have it at checkout-create time, so provider_order_id stays None.
+        return CheckoutResult(checkout_url=checkout_url, provider_order_id=None)
+
+    def verify_signature(self, raw_body: bytes, headers: dict[str, str]) -> bool:
+        from payment_provider_alipay import verify_alipay_signature
+        return verify_alipay_signature(self._config, raw_body, headers)
+
+    def parse_webhook(self, raw_body: bytes) -> NormalizedWebhookEvent:
+        from payment_provider_alipay import map_alipay_status, parse_alipay_notify
+        parsed = parse_alipay_notify(raw_body)
+        new_status = map_alipay_status(parsed.trade_status)
+        # Pick a sensible event_type based on the mapped new_status so the
+        # core settlement code's logging stays informative.
+        if new_status == "paid":
+            event_type = "payment.success"
+        elif new_status == "cancelled":
+            event_type = "payment.cancelled"
+        elif new_status == "refunded":
+            event_type = "payment.refunded"
+        else:
+            event_type = f"payment.{new_status}"
+        return NormalizedWebhookEvent(
+            provider_event_id=parsed.provider_event_id,
+            event_type=event_type,
+            order_id=parsed.order_id,
+            new_status=new_status,
+            raw_payload=dict(parsed.raw),
+        )
 
     def map_status(self, provider_status: str) -> str:
-        mapping = {
-            "TRADE_SUCCESS": "paid",
-            "TRADE_FINISHED": "paid",
-            "TRADE_CLOSED": "cancelled",
-            "WAIT_BUYER_PAY": "pending",
-        }
-        return mapping.get(provider_status, provider_status)
+        from payment_provider_alipay import map_alipay_status
+        return map_alipay_status(provider_status)
 
 
 class WechatPayProvider(_StubProvider):

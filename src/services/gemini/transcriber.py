@@ -82,8 +82,9 @@ class GeminiTranscriber:
         self.max_output_tokens = max_output_tokens
         self.temperature = temperature
 
+        from services.gemini.client_factory import create_gemini_client
         genai_module = _load_genai_sdk()
-        self.client = genai_module.Client(api_key=normalized_api_key)
+        self.client = create_gemini_client(api_key=normalized_api_key)
         self._genai = genai_module
         self._types = _load_genai_types()
 

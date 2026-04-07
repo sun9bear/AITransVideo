@@ -229,8 +229,8 @@ class TestPlanCatalog:
 
     def test_plus_plan_allows_studio(self):
         assert "studio" in PLAN_CATALOG["plus"]["allowed_service_modes"]
-        assert PLAN_CATALOG["plus"]["max_duration_minutes"] == 60
+        assert PLAN_CATALOG["plus"]["max_duration_minutes"] == 45
 
     def test_pro_plan_limits(self):
         assert PLAN_CATALOG["pro"]["max_duration_minutes"] == 180
-        assert PLAN_CATALOG["pro"]["max_concurrent_jobs"] == 10
+        assert PLAN_CATALOG["pro"]["max_concurrent_jobs"] == 5

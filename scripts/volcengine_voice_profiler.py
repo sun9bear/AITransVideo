@@ -118,19 +118,26 @@ def synthesize_calibration(voice_id: str, resource_id: str, text: str, round_num
 def profile_audio(audio_path: Path, api_key: str, *, max_retries: int = 3) -> dict | None:
     """Send audio to Gemini for profiling. Returns profile dict or None.
 
+    Uses inline_data (base64) for Vertex AI compatibility instead of
+    files.upload() which only works with AI Studio.
+
     Retries on rate-limit (429) and transient errors with exponential backoff.
     """
     import importlib
-    genai = importlib.import_module("google.genai")
+    import base64
+    from services.gemini.client_factory import create_gemini_client
     types = importlib.import_module("google.genai.types")
-    client = genai.Client(api_key=api_key)
+    client = create_gemini_client(api_key=api_key)
+
+    # Read audio as inline data (works with both Vertex AI and AI Studio)
+    audio_bytes = audio_path.read_bytes()
+    audio_part = types.Part.from_bytes(data=audio_bytes, mime_type="audio/wav")
 
     for attempt in range(max_retries + 1):
         try:
-            audio_file = client.files.upload(file=audio_path)
             response = client.models.generate_content(
                 model="gemini-3.1-pro-preview",
-                contents=[audio_file, GEMINI_PROFILE_PROMPT],
+                contents=[audio_part, GEMINI_PROFILE_PROMPT],
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
                     temperature=0.1,

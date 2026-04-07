@@ -190,7 +190,8 @@ def _call_gemini(prompt: str) -> str:
         # Fallback to REST API
         return _call_gemini_rest(prompt, api_key)
 
-    client = genai.Client(api_key=api_key)
+    from services.gemini.client_factory import create_gemini_client
+    client = create_gemini_client(api_key=api_key)
     response = client.models.generate_content(
         model=DEFAULT_MODEL,
         contents=prompt,

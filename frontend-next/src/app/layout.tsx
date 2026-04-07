@@ -1,7 +1,7 @@
 import type { Metadata } from "next"
 import "./globals.css"
 import { Toaster } from "@/components/ui/sonner"
-import { AppShell } from "@/components/app-shell"
+import { SessionProvider } from "@/components/providers/session-provider"
 
 export const metadata: Metadata = {
   title: "AIVideoTrans",
@@ -25,7 +25,9 @@ export default function RootLayout({
       </head>
       <body className="min-h-full bg-background">
         <a href="#main-content" className="skip-to-main">跳到主内容</a>
-        <AppShell>{children}</AppShell>
+        <SessionProvider>
+          {children}
+        </SessionProvider>
         <Toaster position="top-center" richColors />
       </body>
     </html>

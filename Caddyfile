@@ -24,11 +24,28 @@
         Referrer-Policy "strict-origin-when-cross-origin"
     }
 
-    # API and auth traffic → Gateway
+    # Auth frontend pages → Next.js (must come before auth API catch-all)
+    @auth_pages {
+        path /auth/login /auth/register /auth/forgot-password
+        method GET
+    }
+    handle @auth_pages {
+        reverse_proxy 127.0.0.1:3000
+    }
+
+    # Auth API endpoints → Gateway
+    @auth_api {
+        path /auth/login /auth/logout /auth/register /auth/me
+        path /auth/phone/* /auth/captcha/*
+    }
+    handle @auth_api {
+        reverse_proxy 127.0.0.1:8880
+    }
+
+    # Other API traffic → Gateway
     @api_routes {
         path /api/*
         path /job-api/*
-        path /auth/*
         path /gateway/*
     }
     handle @api_routes {

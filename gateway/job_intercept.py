@@ -50,24 +50,12 @@ def _error_response(
 
 
 # --- Plan catalog ---
-PLAN_CATALOG = {
-    "free": {
-        "max_duration_minutes": 10,
-        "max_concurrent_jobs": 1,
-        "allowed_service_modes": ["express"],
-        "free_quota_total": 5,
-    },
-    "plus": {
-        "max_duration_minutes": 60,
-        "max_concurrent_jobs": 3,
-        "allowed_service_modes": ["express", "studio"],
-    },
-    "pro": {
-        "max_duration_minutes": 180,
-        "max_concurrent_jobs": 10,
-        "allowed_service_modes": ["express", "studio"],
-    },
-}
+# The authoritative plan gate facts now live in ``plan_catalog.py``. The module-level
+# ``PLAN_CATALOG`` name is preserved as a backward-compatible view so existing imports
+# (including ``tests/test_gateway_job_policy.py``) keep working without change.
+from plan_catalog import get_legacy_plan_gate_dict  # noqa: E402
+
+PLAN_CATALOG = get_legacy_plan_gate_dict()
 
 
 # Gateway-local allowed TTS providers (no cross-layer import from tts_strategy)
@@ -287,7 +275,11 @@ async def intercept_create_job(
     user_role = getattr(user, "role", "user") or "user" if user else "user"
     user_plan = getattr(user, "plan_code", "free") or "free" if user else "free"
     is_admin = user_role == "admin"
-    plan_info = PLAN_CATALOG.get(user_plan, PLAN_CATALOG["free"])
+    # Trial-aware plan gate (P3): if user is in active trial window, elevate
+    # capabilities to Plus-tier (Studio, higher duration/concurrency) without
+    # changing plan_code. Falls back to PLAN_CATALOG for non-trial users.
+    from plan_catalog import get_effective_plan_gate
+    plan_info = get_effective_plan_gate(user) if user else PLAN_CATALOG.get("free", PLAN_CATALOG["free"])
 
     # --- 1. Validate service_mode ---
     if user and not is_admin:

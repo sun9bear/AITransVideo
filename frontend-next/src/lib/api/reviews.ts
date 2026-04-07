@@ -67,6 +67,23 @@ export async function splitSegment(
   return { success: result.split_result?.success ?? result.success ?? false }
 }
 
+export async function approveTranslationConfigReview(
+  jobId: string,
+  input?: { selectedModel?: string; promptTemplate?: string | null },
+): Promise<ReviewJobTransition> {
+  const body: Record<string, unknown> = {}
+  if (input?.selectedModel) body.selected_model = input.selectedModel
+  if (input?.promptTemplate !== undefined) body.prompt_template = input.promptTemplate
+
+  await apiClient.post<{ success: boolean }>(
+    `/jobs/${jobId}/review/translation-config/approve`,
+    { body },
+  )
+  return {
+    job: await getJob(jobId),
+  }
+}
+
 export async function approveTranslationReview(
   input: TranslationReviewApprovalInput,
 ): Promise<ReviewJobTransition> {
@@ -187,6 +204,31 @@ export async function previewSegmentForJob(
     ttsAudioBase64: result.tts_audio_base64,
     sourceAudioBase64: result.source_audio_base64,
   }
+}
+
+// Source-only audio preview (no TTS). Passes empty voice_id so backend
+// skips TTS synthesis and only extracts the source clip via ffmpeg.
+export async function previewSourceAudioForJob(
+  jobId: string,
+  params: {
+    segmentId: number
+    sourceStartMs: number
+    sourceEndMs: number
+  },
+): Promise<{ sourceAudioBase64: string }> {
+  const result = await apiClient.post<{
+    source_audio_base64: string
+    source_format: string
+  }>(`/jobs/${jobId}/review/preview-segment`, {
+    body: {
+      segment_id: params.segmentId,
+      source_start_ms: params.sourceStartMs,
+      source_end_ms: params.sourceEndMs,
+      cn_text: '',
+      voice_id: '',
+    },
+  })
+  return { sourceAudioBase64: result.source_audio_base64 }
 }
 
 // ---------------------------------------------------------------------------

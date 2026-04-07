@@ -552,7 +552,8 @@ def _call_review(
     try:
         genai = _load_genai()
         types = _load_genai_types()
-        client = genai.Client(api_key=api_key)
+        from services.gemini.client_factory import create_gemini_client
+        client = create_gemini_client(api_key=api_key)
 
         contents: list = []
         has_audio = False
@@ -810,7 +811,8 @@ def _try_create_audio_cache(
     try:
         genai = _load_genai()
         types = _load_genai_types()
-        client = genai.Client(api_key=api_key)
+        from services.gemini.client_factory import create_gemini_client
+        client = create_gemini_client(api_key=api_key)
 
         uploaded = client.files.upload(file=audio_path)
 

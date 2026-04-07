@@ -18,31 +18,42 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth import get_current_user
 from database import get_db
-from models import AdminAuditLog, PaymentOrder, PaymentWebhookEvent, User
+from models import (
+    AdminAuditLog,
+    BillingInvoice,
+    PaymentOrder,
+    PaymentWebhookEvent,
+    User,
+)
 from payment_providers import get_provider, is_provider_operational, list_providers
+from plan_catalog import (
+    VALID_BILLING_PERIODS as _CATALOG_BILLING_PERIODS,
+    get_legacy_price_table,
+    get_price,
+    valid_target_plan_codes,
+)
+from subscriptions import (
+    record_invoice_for_order,
+    upsert_active_subscription,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/billing", tags=["billing"])
 
-VALID_TARGET_PLANS = {"plus", "pro"}
-VALID_BILLING_PERIODS = {"monthly", "quarterly", "annual"}
-
-# Price table (in fen / 分)
-PLAN_PRICES_CNY = {
-    ("plus", "monthly"): 6900,     # ¥69/月
-    ("plus", "quarterly"): 17900,  # ¥179/季
-    ("plus", "annual"): 59900,     # ¥599/年
-    ("pro", "monthly"): 29900,     # ¥299/月
-    ("pro", "quarterly"): 79900,   # ¥799/季
-    ("pro", "annual"): 259900,     # ¥2599/年
-}
+# Derived views over the plan_catalog source of truth. These module-level names are
+# preserved so existing tests and call sites keep working; the actual facts live in
+# plan_catalog.py and must not be hardcoded again here.
+VALID_TARGET_PLANS: set[str] = valid_target_plan_codes()
+VALID_BILLING_PERIODS: set[str] = set(_CATALOG_BILLING_PERIODS)
+PLAN_PRICES_CNY: dict[tuple[str, str], int] = get_legacy_price_table()
 
 ORDER_EXPIRY_MINUTES = 30
 
@@ -93,8 +104,7 @@ async def create_order(
             detail=f"当前套餐({current_plan})已等于或高于目标套餐({body.target_plan_code})"
         )
 
-    price_key = (body.target_plan_code, body.billing_period)
-    amount = PLAN_PRICES_CNY.get(price_key, 0)
+    amount = get_price(body.target_plan_code, body.billing_period) or 0
     if amount <= 0:
         raise HTTPException(status_code=400, detail="无法确定价格")
 
@@ -183,20 +193,175 @@ async def get_order(
     }
 
 
-# --- Fake pay endpoint ---
+# --- Checkout config (Task 5) ---
 
-@router.post("/fake-pay/{order_id}")
-async def fake_pay(
-    order_id: str,
-    db: AsyncSession = Depends(get_db),
+
+_PROVIDER_DISPLAY_NAMES: dict[str, str] = {
+    "fake": "测试支付",
+    "alipay": "支付宝",
+    "wechatpay": "微信支付",
+    "stripe": "Stripe",
+}
+
+
+def _display_name(provider_code: str) -> str:
+    return _PROVIDER_DISPLAY_NAMES.get(provider_code, provider_code)
+
+
+@router.get("/checkout-config")
+async def get_checkout_config(
+    user: User | None = Depends(get_current_user),
 ) -> dict:
-    """Simulate a successful payment via fake provider adapter."""
+    """Return the list of checkout providers currently usable by this gateway.
+
+    Gateway owns provider availability (Task 5 §"Gateway owns provider
+    availability"). The frontend must read this endpoint rather than deciding
+    operational state from env vars or hardcoded client-side logic.
+
+    Availability rule used here:
+    - every known provider is listed with its `operational` flag
+    - `default_provider` is the first operational provider in preference order
+      [alipay, wechatpay, stripe, fake]
+    - if nothing else is operational, `fake` is the default (local dev safety)
+
+    Pricing facts are NOT returned here. Prices continue to come from
+    `/api/plans`. This endpoint is strictly about "can we currently charge a
+    card via X" — nothing more.
+    """
+    if user is None:
+        raise HTTPException(status_code=401, detail="未登录")
+
+    preference = ["alipay", "wechatpay", "stripe", "fake"]
+    all_providers = list_providers()
+
+    providers_payload: list[dict] = []
+    # Emit in preference order so the frontend's default pick (first entry)
+    # matches `default_provider` without extra sorting on the client.
+    for code in preference:
+        if code in all_providers:
+            providers_payload.append(
+                {
+                    "code": code,
+                    "display_name": _display_name(code),
+                    "operational": is_provider_operational(code),
+                }
+            )
+    # Surface any provider not in the preference list (future providers) at
+    # the end, keeping the contract open to additions.
+    for code in all_providers:
+        if code not in preference:
+            providers_payload.append(
+                {
+                    "code": code,
+                    "display_name": _display_name(code),
+                    "operational": is_provider_operational(code),
+                }
+            )
+
+    default_provider = next(
+        (p["code"] for p in providers_payload if p["operational"]),
+        "fake",
+    )
+
+    return {
+        "default_provider": default_provider,
+        "providers": providers_payload,
+    }
+
+
+# --- Billing history (Task 4) ---
+
+
+def _serialize_invoice(invoice: BillingInvoice) -> dict:
+    return {
+        "id": str(invoice.id),
+        "subscription_id": (
+            str(invoice.subscription_id) if invoice.subscription_id else None
+        ),
+        "payment_order_id": str(invoice.payment_order_id),
+        "provider": invoice.provider,
+        "provider_order_id": invoice.provider_order_id,
+        "plan_code": invoice.plan_code,
+        "billing_period": invoice.billing_period,
+        "amount_cny": invoice.amount_cny,
+        "currency": invoice.currency,
+        "status": invoice.status,
+        "issued_at": invoice.issued_at.isoformat() if invoice.issued_at else None,
+        "paid_at": invoice.paid_at.isoformat() if invoice.paid_at else None,
+        "created_at": (
+            invoice.created_at.isoformat() if invoice.created_at else None
+        ),
+    }
+
+
+@router.get("/history")
+async def list_billing_history(
+    db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(get_current_user),
+) -> dict:
+    """Return the current user's billing invoice history, newest first.
+
+    Authenticated endpoint. Scoped strictly to `user.id` — admins do NOT get
+    a tenant-wide view from this path; that belongs to a separate admin
+    endpoint (out of Task 4 scope).
+
+    No pagination framework, no filters, no export. Task 6 Billing UI can
+    consume this directly.
+    """
+    if user is None:
+        raise HTTPException(status_code=401, detail="未登录")
+
+    result = await db.execute(
+        select(BillingInvoice)
+        .where(BillingInvoice.user_id == user.id)
+        .order_by(BillingInvoice.created_at.desc())
+    )
+    invoices = list(result.scalars().all())
+    return {"invoices": [_serialize_invoice(inv) for inv in invoices]}
+
+
+# --- Fake pay endpoint ---
+#
+# The fake provider returns `/api/billing/fake-pay/{order_id}` as its
+# `checkout_url`. The frontend hands this URL off via `window.location.href`,
+# which produces a **GET** navigation. Prior to the T5 minor revision only a
+# POST handler existed here, so the normal browser path 405'd. We expose both:
+#
+#   POST /fake-pay/{order_id}  → JSON result, for programmatic callers / tests
+#   GET  /fake-pay/{order_id}  → settles + 303 redirect back into the app
+#
+# Both routes share `_run_fake_payment` so the settlement logic stays single-
+# sourced.
+
+
+async def _run_fake_payment(order_id: str, db: AsyncSession) -> dict:
+    """Run the fake-pay settlement flow for an order.
+
+    Returns a dict with `{ok, settled, order_id, already_settled, not_found}`.
+    Callers translate that into JSON (POST) or a redirect (GET).
+    """
     result = await db.execute(select(PaymentOrder).where(PaymentOrder.id == order_id))
     order = result.scalar_one_or_none()
     if order is None:
-        raise HTTPException(status_code=404, detail="订单不存在")
+        return {
+            "ok": False,
+            "settled": False,
+            "order_id": order_id,
+            "not_found": True,
+            "already_settled": False,
+        }
     if order.status not in ("created", "pending"):
-        raise HTTPException(status_code=409, detail=f"订单状态({order.status})不可支付")
+        # Non-fatal for the browser flow — a duplicate click on the checkout
+        # link is a normal user error, not a 500. The GET handler will still
+        # redirect the user back to `/settings/billing` so they can see the
+        # current state.
+        return {
+            "ok": True,
+            "settled": False,
+            "order_id": str(order.id),
+            "not_found": False,
+            "already_settled": True,
+        }
 
     fake_event_id = f"fake_evt_{uuid.uuid4().hex[:12]}"
     settled = await _process_payment_event(
@@ -209,8 +374,74 @@ async def fake_pay(
         signature_valid=True,  # fake provider: signature always valid
         raw_payload={"simulated": True, "order_id": str(order.id)},
     )
+    return {
+        "ok": True,
+        "settled": settled,
+        "order_id": str(order.id),
+        "not_found": False,
+        "already_settled": False,
+    }
 
-    return {"ok": True, "settled": settled, "order_id": str(order.id)}
+
+@router.post("/fake-pay/{order_id}")
+async def fake_pay(
+    order_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Simulate a successful payment via fake provider adapter (JSON path).
+
+    Preserves the original POST contract: returns JSON and raises HTTP 404/409
+    on not-found / already-terminal orders so programmatic callers (tests,
+    scripts) still see structured errors.
+    """
+    result = await _run_fake_payment(order_id, db)
+    if result["not_found"]:
+        raise HTTPException(status_code=404, detail="订单不存在")
+    if result["already_settled"]:
+        raise HTTPException(status_code=409, detail="订单已处理,无法重复支付")
+    return {
+        "ok": result["ok"],
+        "settled": result["settled"],
+        "order_id": result["order_id"],
+    }
+
+
+@router.get("/fake-pay/{order_id}")
+async def fake_pay_browser(
+    order_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> RedirectResponse:
+    """Browser-navigable fake-pay endpoint.
+
+    Matches the URL that `FakeProvider.create_checkout` returns as its
+    `checkout_url`. This exists so the default local/test checkout loop works
+    end-to-end from inside `/settings/billing`:
+
+      1. User clicks "立即支付" in `<CheckoutCard>`
+      2. Frontend `POST /api/billing/orders` → receives `checkout_url`
+      3. Frontend `window.location.href = checkout_url` → GET this endpoint
+      4. We settle the order and 303-redirect back to `/settings/billing` with
+         a status query param so the page can toast / refresh subscription state.
+
+    Never raises 404/409 to the browser — always lands the user back in-app
+    with a status that the billing page can render. HTTP 303 "See Other" is
+    the correct redirect for a GET that performs a write-then-navigate.
+    """
+    result = await _run_fake_payment(order_id, db)
+    if result["not_found"]:
+        return RedirectResponse(
+            url="/settings/billing?status=error&reason=order_not_found",
+            status_code=303,
+        )
+    if result["already_settled"]:
+        return RedirectResponse(
+            url="/settings/billing?status=already_settled",
+            status_code=303,
+        )
+    return RedirectResponse(
+        url="/settings/billing?status=paid",
+        status_code=303,
+    )
 
 
 # --- Webhook endpoint (provider-dispatched) ---
@@ -347,8 +578,16 @@ async def _process_payment_event(
         logger.warning("Webhook for unknown order %s", order_id)
         return False
 
-    # Only process if order is not already in terminal state
-    if order.status in ("paid", "refunded", "cancelled"):
+    # Terminal-state guard.
+    #
+    # Most combinations of (current order status, new status) are replays and
+    # must short-circuit to preserve webhook idempotency. The single exception
+    # is the paid → refunded transition, which a real provider refund callback
+    # depends on to keep `billing_invoices.status` truthful. Without allowing
+    # that transition here, a later refund webhook would be silently rejected
+    # and billing history would lie.
+    _is_paid_to_refund = order.status == "paid" and new_status == "refunded"
+    if order.status in ("paid", "refunded", "cancelled") and not _is_paid_to_refund:
         event.processed = True
         event.error_message = f"Order already in terminal state: {order.status}"
         event.processed_at = now
@@ -374,10 +613,32 @@ async def _process_payment_event(
     entitlements_updated = False
 
     if new_status == "paid":
-        # Upgrade user plan
+        # --- Task 4 settlement order ---
+        # 1. PaymentOrder status was already updated above.
+        # 2. Write or update BillingInvoice (idempotent via unique
+        #    `payment_order_id`; duplicate callbacks find the existing row).
+        # 3. Create or update the user's active Subscription row.
+        # 4. Only THEN update `user.plan_code` — the compatibility projection
+        #    current gates still rely on. `subscriptions` is the canonical
+        #    paid-state record; `user.plan_code` mirrors it so
+        #    `entitlements.py` and `job_intercept.py` don't need to change.
         user_result = await db.execute(select(User).where(User.id == order.user_id))
         user = user_result.scalar_one_or_none()
+
+        invoice = await record_invoice_for_order(
+            db, order=order, settled_at=now, status="paid"
+        )
+
         if user is not None:
+            subscription = await upsert_active_subscription(
+                db, user=user, order=order, paid_at=now
+            )
+            # Link invoice ↔ subscription so later Billing UI can render the
+            # relationship without guessing. `flush` so the auto-generated PK
+            # on a brand-new subscription row is available here.
+            await db.flush()
+            invoice.subscription_id = subscription.id
+
             old_plan = user.plan_code
             if old_plan != order.target_plan_code:
                 user.plan_code = order.target_plan_code
@@ -392,6 +653,22 @@ async def _process_payment_event(
                 entitlements_updated = True
                 logger.info("User %s upgraded %s → %s via payment order %s",
                             user.id, old_plan, order.target_plan_code, order_id)
+
+    elif new_status == "refunded":
+        # Refund truth layer (Task 4 minor revision): update billing history
+        # to reflect the refund. We deliberately do NOT touch:
+        #   - the user's active Subscription row (cancellation UX is Task 5/6)
+        #   - `user.plan_code` (entitlement rollback UX is Task 5/6)
+        # Only `billing_invoices.status` is made truthful here.
+        await record_invoice_for_order(
+            db, order=order, settled_at=now, status="refunded"
+        )
+
+    elif new_status == "failed":
+        # Keep billing history honest for failed settlement attempts.
+        await record_invoice_for_order(
+            db, order=order, settled_at=now, status="failed"
+        )
 
     event.processed = True
     event.processed_at = now

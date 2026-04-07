@@ -66,12 +66,75 @@ def _make_user(*, role="user", plan_code="free", uid=None):
     )
 
 
+def _make_order_ns(
+    *,
+    order_id="order-1",
+    user_id="uid-1",
+    target_plan_code="plus",
+    billing_period="monthly",
+    provider="fake",
+    amount_cny=6900,
+    status="pending",
+    provider_order_id=None,
+):
+    """Mock PaymentOrder namespace enriched with Task 4 fields.
+
+    Task 4 settlement writes a BillingInvoice row keyed on the order, so the
+    order mock must expose `billing_period / provider / amount_cny / currency`
+    for `upsert_invoice_for_paid_order` to read.
+    """
+    return SimpleNamespace(
+        id=order_id,
+        user_id=user_id,
+        target_plan_code=target_plan_code,
+        billing_period=billing_period,
+        provider=provider,
+        provider_order_id=provider_order_id,
+        amount_cny=amount_cny,
+        currency="CNY",
+        status=status,
+        paid_at=None,
+        updated_at=None,
+    )
+
+
 def _make_db():
     db = AsyncMock()
     db.add = MagicMock()
     db.commit = AsyncMock()
+    db.flush = AsyncMock()
     db.refresh = AsyncMock()
     return db
+
+
+def _paid_event_execute(*, order, user):
+    """Build an `async db.execute` that replays the Task 4 settlement path.
+
+    Sequence of `db.execute` calls in `_process_payment_event` on a paid event:
+      1. PaymentWebhookEvent dedup lookup   → None (new event)
+      2. PaymentOrder lookup                → `order`
+      3. User lookup                        → `user`
+      4. BillingInvoice lookup              → None (new invoice)
+      5. Subscription lookup                → None (new subscription)
+    """
+    none_a = MagicMock(); none_a.scalar_one_or_none.return_value = None
+    order_res = MagicMock(); order_res.scalar_one_or_none.return_value = order
+    user_res = MagicMock(); user_res.scalar_one_or_none.return_value = user
+    none_invoice = MagicMock(); none_invoice.scalar_one_or_none.return_value = None
+    none_sub = MagicMock(); none_sub.scalar_one_or_none.return_value = None
+    sequence = [none_a, order_res, user_res, none_invoice, none_sub]
+    idx = {"n": 0}
+
+    async def _execute(*a, **kw):
+        i = idx["n"]
+        idx["n"] += 1
+        if i < len(sequence):
+            return sequence[i]
+        # Any additional calls past the happy-path sequence return an empty row.
+        extra = MagicMock(); extra.scalar_one_or_none.return_value = None
+        return extra
+
+    return _execute
 
 
 # ===================================================================
@@ -317,22 +380,9 @@ class TestReceiveWebhook:
     def test_fake_provider_webhook_with_valid_signature(self):
         """Fake provider verify_signature returns True → event settles."""
         user = _make_user(plan_code="free", uid="uid-1")
-        order = SimpleNamespace(
-            id="order-1", user_id="uid-1", target_plan_code="plus",
-            status="pending", paid_at=None, updated_at=None,
-        )
+        order = _make_order_ns()
         db = _make_db()
-        none_result = MagicMock(); none_result.scalar_one_or_none.return_value = None
-        order_result = MagicMock(); order_result.scalar_one_or_none.return_value = order
-        user_result = MagicMock(); user_result.scalar_one_or_none.return_value = user
-
-        call_n = {"n": 0}
-        async def smart_execute(*a, **kw):
-            call_n["n"] += 1
-            if call_n["n"] == 1: return none_result
-            if call_n["n"] == 2: return order_result
-            return user_result
-        db.execute = smart_execute
+        db.execute = _paid_event_execute(order=order, user=user)
 
         req = self._make_request({
             "provider_event_id": "fake-wh-1",
@@ -388,21 +438,9 @@ class TestReceiveWebhook:
 class TestProcessPaymentEvent:
     def test_verified_payment_upgrades_plan(self):
         user = _make_user(plan_code="free", uid="uid-1")
-        order = SimpleNamespace(
-            id="order-1", user_id="uid-1", target_plan_code="plus",
-            status="pending", paid_at=None, updated_at=None,
-        )
+        order = _make_order_ns()
         db = _make_db()
-        none_result = MagicMock(); none_result.scalar_one_or_none.return_value = None
-        order_result = MagicMock(); order_result.scalar_one_or_none.return_value = order
-        user_result = MagicMock(); user_result.scalar_one_or_none.return_value = user
-        call_n = {"n": 0}
-        async def smart_execute(*a, **kw):
-            call_n["n"] += 1
-            if call_n["n"] == 1: return none_result
-            if call_n["n"] == 2: return order_result
-            return user_result
-        db.execute = smart_execute
+        db.execute = _paid_event_execute(order=order, user=user)
 
         settled = _run(_process_payment_event(
             db=db, provider="fake", provider_event_id="evt-1",
@@ -412,6 +450,10 @@ class TestProcessPaymentEvent:
         assert settled is True
         assert user.plan_code == "plus"
         assert order.status == "paid"
+        # Task 4: a BillingInvoice and a Subscription row must have been added.
+        added_types = {type(call.args[0]).__name__ for call in db.add.call_args_list}
+        assert "BillingInvoice" in added_types
+        assert "Subscription" in added_types
 
     def test_unverified_does_not_settle(self):
         user = _make_user(plan_code="free", uid="uid-1")
@@ -499,21 +541,9 @@ class TestProcessPaymentEvent:
 
     def test_payment_does_not_touch_job_snapshots(self):
         user = _make_user(plan_code="free", uid="uid-1")
-        order = SimpleNamespace(
-            id="order-1", user_id="uid-1", target_plan_code="plus",
-            status="pending", paid_at=None, updated_at=None,
-        )
+        order = _make_order_ns()
         db = _make_db()
-        none_result = MagicMock(); none_result.scalar_one_or_none.return_value = None
-        order_result = MagicMock(); order_result.scalar_one_or_none.return_value = order
-        user_result = MagicMock(); user_result.scalar_one_or_none.return_value = user
-        call_n = {"n": 0}
-        async def smart_execute(*a, **kw):
-            call_n["n"] += 1
-            if call_n["n"] == 1: return none_result
-            if call_n["n"] == 2: return order_result
-            return user_result
-        db.execute = smart_execute
+        db.execute = _paid_event_execute(order=order, user=user)
 
         _run(_process_payment_event(
             db=db, provider="fake", provider_event_id="evt-snap",
@@ -546,3 +576,307 @@ class TestConstants:
 
     def test_valid_billing_periods(self):
         assert VALID_BILLING_PERIODS == {"monthly", "quarterly", "annual"}
+
+
+# ===================================================================
+# GET /api/billing/checkout-config — Task 5
+# ===================================================================
+
+
+class TestCheckoutConfig:
+    """Gateway-owned provider availability endpoint.
+
+    Keeps the frontend from reading `AVT_ALIPAY_*` env vars or hardcoding
+    provider selection logic. `default_provider` is deterministic given the
+    current registry state and alipay-config presence.
+    """
+
+    def _run_get_config(self, user):
+        from billing import get_checkout_config
+        return _run(get_checkout_config(user=user))
+
+    def test_rejects_unauthenticated(self):
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as exc_info:
+            self._run_get_config(user=None)
+        assert exc_info.value.status_code == 401
+
+    def test_fake_is_default_when_alipay_unconfigured(self, monkeypatch):
+        # Scrub Alipay env to force non-operational state, then rebuild the
+        # provider registry so the fresh AlipayProvider picks up the clean env.
+        import payment_providers
+        for var in (
+            "AVT_ALIPAY_APP_ID",
+            "AVT_ALIPAY_APP_PRIVATE_KEY",
+            "AVT_ALIPAY_PUBLIC_KEY",
+            "AVT_ALIPAY_NOTIFY_URL",
+            "AVT_ALIPAY_RETURN_URL",
+            "AVT_ALIPAY_GATEWAY_URL",
+        ):
+            monkeypatch.delenv(var, raising=False)
+        payment_providers._PROVIDERS = {}
+
+        user = _make_user(plan_code="free")
+        result = self._run_get_config(user=user)
+        assert result["default_provider"] == "fake"
+        codes = {p["code"] for p in result["providers"]}
+        assert "fake" in codes
+        assert "alipay" in codes
+        # Operational flags reflect the current environment.
+        for entry in result["providers"]:
+            if entry["code"] == "fake":
+                assert entry["operational"] is True
+            if entry["code"] == "alipay":
+                assert entry["operational"] is False
+
+    def test_alipay_env_alone_does_not_make_it_default(self, monkeypatch):
+        """T5 minor revision: truthfulness gate.
+
+        Even with complete AVT_ALIPAY_* env vars, Alipay MUST NOT become the
+        default provider until `_ALIPAY_LIVE_READY` is flipped in
+        `payment_provider_alipay.py`. The frontend should keep routing users
+        into the fake safe path whenever the real signing implementation is
+        still a stub.
+        """
+        import payment_providers
+        monkeypatch.setenv("AVT_ALIPAY_APP_ID", "app-id")
+        monkeypatch.setenv("AVT_ALIPAY_APP_PRIVATE_KEY", "pk")
+        monkeypatch.setenv("AVT_ALIPAY_PUBLIC_KEY", "apk")
+        monkeypatch.setenv(
+            "AVT_ALIPAY_NOTIFY_URL", "https://example.test/api/billing/webhooks/alipay"
+        )
+        payment_providers._PROVIDERS = {}
+
+        user = _make_user(plan_code="free")
+        result = self._run_get_config(user=user)
+        # The T5 minor fix: Alipay is still listed but NOT the default.
+        assert result["default_provider"] == "fake"
+        alipay_entry = next(
+            p for p in result["providers"] if p["code"] == "alipay"
+        )
+        assert alipay_entry["operational"] is False
+
+    def test_alipay_becomes_default_when_live_ready_flag_flipped(self, monkeypatch):
+        """Positive counterpart: once signing ships and someone flips
+        `_ALIPAY_LIVE_READY = True`, Alipay does become the default.
+
+        Keeps the "fully implemented path" exercised so future regressions
+        in the preference ordering are caught.
+        """
+        import payment_provider_alipay
+        import payment_providers
+        monkeypatch.setenv("AVT_ALIPAY_APP_ID", "app-id")
+        monkeypatch.setenv("AVT_ALIPAY_APP_PRIVATE_KEY", "pk")
+        monkeypatch.setenv("AVT_ALIPAY_PUBLIC_KEY", "apk")
+        monkeypatch.setenv(
+            "AVT_ALIPAY_NOTIFY_URL", "https://example.test/api/billing/webhooks/alipay"
+        )
+        monkeypatch.setattr(payment_provider_alipay, "_ALIPAY_LIVE_READY", True)
+        payment_providers._PROVIDERS = {}
+
+        user = _make_user(plan_code="free")
+        result = self._run_get_config(user=user)
+        assert result["default_provider"] == "alipay"
+        codes_in_order = [p["code"] for p in result["providers"]]
+        assert codes_in_order.index("alipay") < codes_in_order.index("fake")
+
+    def test_display_names_are_chinese_first(self, monkeypatch):
+        import payment_providers
+        for var in ("AVT_ALIPAY_APP_ID", "AVT_ALIPAY_APP_PRIVATE_KEY",
+                    "AVT_ALIPAY_PUBLIC_KEY", "AVT_ALIPAY_NOTIFY_URL"):
+            monkeypatch.delenv(var, raising=False)
+        payment_providers._PROVIDERS = {}
+        user = _make_user(plan_code="free")
+        result = self._run_get_config(user=user)
+        names = {p["code"]: p["display_name"] for p in result["providers"]}
+        assert names["fake"] == "测试支付"
+        assert names["alipay"] == "支付宝"
+        assert names["wechatpay"] == "微信支付"
+
+    def test_no_pricing_facts_leak_into_checkout_config(self, monkeypatch):
+        import payment_providers
+        payment_providers._PROVIDERS = {}
+        user = _make_user(plan_code="free")
+        result = self._run_get_config(user=user)
+        # Response shape is strictly {default_provider, providers} — no prices.
+        assert set(result.keys()) == {"default_provider", "providers"}
+        for entry in result["providers"]:
+            assert "price" not in entry
+            assert "amount_cny" not in entry
+            assert "plan_code" not in entry
+
+
+# ===================================================================
+# Alipay non-operational path (create_order rejection) — Task 5
+# ===================================================================
+
+
+class TestCreateOrderAlipayGate:
+    """create_order must refuse to issue an order against a non-operational
+    provider. This is the server-side guard behind any frontend CTA gating.
+    """
+
+    def _make_order_db(self):
+        db = _make_db()
+        db.flush = AsyncMock()
+        return db
+
+    def test_alipay_rejected_cleanly_when_unconfigured(self, monkeypatch):
+        import payment_providers
+        from fastapi import HTTPException
+        for var in ("AVT_ALIPAY_APP_ID", "AVT_ALIPAY_APP_PRIVATE_KEY",
+                    "AVT_ALIPAY_PUBLIC_KEY", "AVT_ALIPAY_NOTIFY_URL"):
+            monkeypatch.delenv(var, raising=False)
+        payment_providers._PROVIDERS = {}
+
+        user = _make_user(plan_code="free")
+        db = self._make_order_db()
+        body = CreateOrderRequest(target_plan_code="plus", provider="alipay")
+        with pytest.raises(HTTPException) as exc_info:
+            _run(create_order(body, db, user))
+        assert exc_info.value.status_code == 501
+        # No order row should have been committed.
+        db.commit.assert_not_awaited()
+
+    def test_alipay_rejected_even_when_env_complete_but_flag_not_flipped(
+        self, monkeypatch
+    ):
+        """T5 minor revision: the server-side create_order guard must reject
+        Alipay orders as long as `_ALIPAY_LIVE_READY = False`, even if env
+        vars happen to be present. Prevents the "env alone = operational"
+        regression at the order-creation boundary.
+        """
+        import payment_providers
+        from fastapi import HTTPException
+        monkeypatch.setenv("AVT_ALIPAY_APP_ID", "app-id")
+        monkeypatch.setenv("AVT_ALIPAY_APP_PRIVATE_KEY", "pk")
+        monkeypatch.setenv("AVT_ALIPAY_PUBLIC_KEY", "apk")
+        monkeypatch.setenv(
+            "AVT_ALIPAY_NOTIFY_URL", "https://example.test/api/billing/webhooks/alipay"
+        )
+        payment_providers._PROVIDERS = {}
+
+        user = _make_user(plan_code="free")
+        db = self._make_order_db()
+        body = CreateOrderRequest(target_plan_code="plus", provider="alipay")
+        with pytest.raises(HTTPException) as exc_info:
+            _run(create_order(body, db, user))
+        assert exc_info.value.status_code == 501
+        db.commit.assert_not_awaited()
+
+
+# ===================================================================
+# GET /api/billing/fake-pay/{order_id} — browser handoff (T5 minor rev)
+# ===================================================================
+
+
+class TestFakePayBrowserRedirect:
+    """The default fake checkout loop must be usable in a real browser.
+
+    `FakeProvider.create_checkout` returns `/api/billing/fake-pay/{order_id}`
+    as the checkout URL. The frontend hands off via `window.location.href`,
+    which issues a GET. Prior to this revision the route only existed as POST,
+    so the user hit 405 and dead-ended. The GET variant below must:
+
+      1. settle the order via the same core logic as the POST path
+      2. respond with a 303 redirect back to `/settings/billing`
+      3. never surface a raw JSON body to the browser
+    """
+
+    def _make_db_with_order(self, order):
+        none_a = MagicMock(); none_a.scalar_one_or_none.return_value = None
+        order_res = MagicMock(); order_res.scalar_one_or_none.return_value = order
+
+        calls = {"n": 0}
+
+        async def execute(*args, **kwargs):
+            calls["n"] += 1
+            # First call: PaymentOrder lookup in fake-pay handler.
+            # Then the _process_payment_event chain (dedup + order + user + invoice + sub).
+            if calls["n"] == 1:
+                return order_res
+            if calls["n"] == 2:
+                return none_a  # dedup check
+            if calls["n"] == 3:
+                return order_res  # order re-lookup inside _process_payment_event
+            # Subsequent calls return None to keep the chain happy.
+            empty = MagicMock(); empty.scalar_one_or_none.return_value = None
+            return empty
+
+        db = _make_db()
+        db.execute = execute
+        db.flush = AsyncMock()
+        return db
+
+    def test_get_handler_redirects_to_billing_on_success(self):
+        from fastapi.responses import RedirectResponse
+        from billing import fake_pay_browser
+
+        order = _make_order_ns(status="pending")
+        db = self._make_db_with_order(order)
+        response = _run(fake_pay_browser("order-1", db))
+        assert isinstance(response, RedirectResponse)
+        assert response.status_code == 303
+        assert response.headers["location"] == "/settings/billing?status=paid"
+
+    def test_get_handler_never_returns_json_or_raises(self):
+        """The browser path must not leak JSON or raise HTTPException.
+
+        Programmatic callers go through the POST handler which still raises
+        404/409 on not-found / already-terminal orders. The GET browser path
+        absorbs those cases into a redirect with a status query param so the
+        user always lands back inside the app.
+        """
+        from fastapi.responses import RedirectResponse
+        from billing import fake_pay_browser
+
+        # Case 1: order not found → redirect with error reason.
+        db_none = _make_db()
+        none_res = MagicMock(); none_res.scalar_one_or_none.return_value = None
+        db_none.execute = AsyncMock(return_value=none_res)
+        resp1 = _run(fake_pay_browser("ghost-order", db_none))
+        assert isinstance(resp1, RedirectResponse)
+        assert resp1.status_code == 303
+        assert "order_not_found" in resp1.headers["location"]
+        assert resp1.headers["location"].startswith("/settings/billing")
+
+        # Case 2: order already paid → redirect with already_settled marker.
+        db_paid = _make_db()
+        order_paid = _make_order_ns(status="paid")
+        paid_res = MagicMock(); paid_res.scalar_one_or_none.return_value = order_paid
+        db_paid.execute = AsyncMock(return_value=paid_res)
+        resp2 = _run(fake_pay_browser("order-1", db_paid))
+        assert isinstance(resp2, RedirectResponse)
+        assert resp2.status_code == 303
+        assert "already_settled" in resp2.headers["location"]
+
+    def test_post_handler_still_returns_json_for_programmatic_callers(self):
+        """POST path preserves its original JSON contract.
+
+        Tests and scripts that drive the fake-pay flow programmatically should
+        keep getting `{"ok": True, "settled": ..., "order_id": ...}`.
+        """
+        from billing import fake_pay
+
+        order = _make_order_ns(status="pending")
+        db = self._make_db_with_order(order)
+        result = _run(fake_pay("order-1", db))
+        assert result["ok"] is True
+        assert result["order_id"] == "order-1"
+        assert "settled" in result
+
+    def test_fake_provider_checkout_url_matches_get_route(self):
+        """The URL FakeProvider returns must match the GET endpoint path.
+
+        If anyone ever changes `FakeProvider.create_checkout` to return a
+        different URL shape, the frontend handoff would break again. Lock the
+        contract with a simple string match.
+        """
+        fake = FakeProvider()
+        result = fake.create_checkout(
+            order_id="order-xyz",
+            amount_cny=6900,
+            target_plan_code="plus",
+            billing_period="monthly",
+        )
+        assert result.checkout_url == "/api/billing/fake-pay/order-xyz"

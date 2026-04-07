@@ -57,13 +57,15 @@ def select_volcengine_voice_match(
     persona_style: str | None = None,
     energy_level: str | None = None,
 ) -> VoiceMatchResult:
-    """Select the best VolcEngine voice for the given demographics.
+    """Select the best VolcEngine voice using profile-based rerank.
 
-    Resolution order (B1 baseline):
-    1. Try (gender, age_bucket, persona_style) exact match in pool
-    2. Try (gender, age_bucket) match
-    3. Try gender-only match
-    4. Fallback to resource default safe voice
+    New flow (profile-first, 2026-04-03):
+    1. Filter pool by gender (male / female / child)
+    2. Rerank ALL same-gender candidates using 4-dimension profile scoring
+    3. Return top-scored voice + remaining as backups
+
+    For child: if child pool < 3 voices, expand with childlike=true voices
+    from other genders.
 
     Parameters
     ----------
@@ -95,88 +97,63 @@ def select_volcengine_voice_match(
     age_bucket = _resolve_age_bucket(age_group)
     persona = (persona_style or "").lower().strip()
 
-    # --- 1. Style override: gender + age_bucket + persona_style ---
-    if persona and age_bucket:
-        candidates = [
-            v for v in pool
-            if v["gender"] == g
-            and _resolve_age_bucket(str(v.get("age_group", ""))) == age_bucket
-            and (v.get("persona_style", "") or "").lower().strip() == persona
-        ]
-        if candidates:
-            voice = candidates[0]
-            backups = _pick_backups(pool, g, voice["voice_id"])
-            best, remaining = _try_rerank_with_profiles(
-                voice["voice_id"], backups, g, age_bucket or "", persona, resource_id=resource_id,
-            )
-            logger.info(
-                "[VolcEngine-matcher] style_override: %s (gender=%s, age=%s, persona=%s, resource=%s)",
-                best, g, age_bucket, persona, resource_id,
-            )
-            return VoiceMatchResult(
-                voice_id=best,
-                match_reason=f"style_override({g},{age_bucket},{persona})",
-                match_score=0.85,
-                match_confidence="high",
-                backup_voices=remaining,
-            )
-
-    # --- 2. Base map: gender + age_bucket ---
-    if age_bucket:
-        candidates = [
-            v for v in pool
-            if v["gender"] == g
-            and _resolve_age_bucket(str(v.get("age_group", ""))) == age_bucket
-        ]
-        if candidates:
-            voice = candidates[0]
-            backups = _pick_backups(pool, g, voice["voice_id"])
-            best, remaining = _try_rerank_with_profiles(
-                voice["voice_id"], backups, g, age_bucket, resource_id=resource_id,
-            )
-            logger.info(
-                "[VolcEngine-matcher] base_age: %s (gender=%s, age=%s, resource=%s)",
-                best, g, age_bucket, resource_id,
-            )
-            return VoiceMatchResult(
-                voice_id=best,
-                match_reason=f"base_age({g},{age_bucket})",
-                match_score=0.60,
-                match_confidence="medium",
-                backup_voices=remaining,
-            )
-
-    # --- 3. Gender-only ---
+    # --- Step 1: Gender filter ---
     candidates = [v for v in pool if v["gender"] == g]
-    if candidates:
-        voice = candidates[0]
-        backups = _pick_backups(pool, g, voice["voice_id"])
-        best, remaining = _try_rerank_with_profiles(
-            voice["voice_id"], backups, g, "", resource_id=resource_id,
-        )
+
+    # Child expansion: if child pool too small, add childlike=true from other genders
+    if g == "child" and len(candidates) < 3:
+        profiles = _load_profiles(resource_id)
+        childlike_extras = [
+            v for v in pool
+            if v["gender"] != "child"
+            and v["voice_id"] in profiles
+            and profiles[v["voice_id"]].get("childlike") is True
+        ]
+        candidates.extend(childlike_extras)
+        if childlike_extras:
+            logger.info(
+                "[VolcEngine-matcher] child pool expanded: %d child + %d childlike",
+                len(candidates) - len(childlike_extras), len(childlike_extras),
+            )
+
+    if not candidates:
         logger.info(
-            "[VolcEngine-matcher] gender_only: %s (gender=%s, resource=%s)",
-            best, g, resource_id,
+            "[VolcEngine-matcher] fallback: %s (gender=%s no candidates, resource=%s)",
+            default_voice, g, resource_id,
         )
         return VoiceMatchResult(
-            voice_id=best,
-            match_reason=f"gender_only({g})",
-            match_score=0.40,
+            voice_id=default_voice,
+            match_reason=f"fallback(no_candidates,gender={g},resource={resource_id})",
+            match_score=0.20,
             match_confidence="low",
-            backup_voices=remaining,
+            backup_voices=(),
         )
 
-    # --- 4. Ultimate fallback ---
+    # --- Step 2: Rerank all same-gender candidates via profile scoring ---
+    primary = candidates[0]["voice_id"]
+    all_backup_ids = tuple(v["voice_id"] for v in candidates[1:])
+
+    best, remaining = _try_rerank_with_profiles(
+        primary, all_backup_ids, g, age_bucket or "", persona,
+        resource_id=resource_id,
+    )
+
+    # Determine confidence based on profile availability
+    profiles = _load_profiles(resource_id)
+    best_has_profile = best in profiles and bool(profiles[best])
+    confidence = "high" if best_has_profile else "medium"
+
     logger.info(
-        "[VolcEngine-matcher] fallback: %s (gender=%s unrecognized, resource=%s)",
-        default_voice, g, resource_id,
+        "[VolcEngine-matcher] profile_rerank: %s (gender=%s, age=%s, persona=%s, "
+        "pool=%d, resource=%s, confidence=%s)",
+        best, g, age_bucket, persona, len(candidates), resource_id, confidence,
     )
     return VoiceMatchResult(
-        voice_id=default_voice,
-        match_reason=f"fallback(unrecognized_gender={g},resource={resource_id})",
-        match_score=0.20,
-        match_confidence="low",
-        backup_voices=(),
+        voice_id=best,
+        match_reason=f"profile_rerank({g},pool={len(candidates)})",
+        match_score=0.80 if best_has_profile else 0.50,
+        match_confidence=confidence,
+        backup_voices=remaining[:5],
     )
 
 

@@ -825,21 +825,13 @@ class ProcessPipeline:
                     voice_id_b = approved_voice_b
                     print(f"[S2] 用户确认 Speaker B 音色: {voice_id_b}")
             elif config.wait_for_review:
-                # Unified review: skip voice review pause, auto-assign from registry
-                from services.voice_registry import VoiceRegistry, VoiceResolver
-                registry = VoiceRegistry(str(voice_registry_path))
-                resolver = VoiceResolver(registry)
-                resolution_a = resolver.resolve("speaker_a")
-                if resolution_a.resolved and resolution_a.voice_id:
-                    voice_id_a = resolution_a.voice_id
-                    print(f"[S2] Speaker A 音色自动匹配: {voice_id_a}")
-                resolution_b = None
-                if effective_speakers == 2:
-                    resolution_b = resolver.resolve("speaker_b")
-                    if resolution_b.resolved and resolution_b.voice_id:
-                        voice_id_b = resolution_b.voice_id
-                        print(f"[S2] Speaker B 音色自动匹配: {voice_id_b}")
-                print("[S2] 音色审核已合并到统一审核，自动跳过。")
+                # Unified review: defer voice selection to stage 6 (translation_review).
+                # Do NOT auto-clone or hit the voice_registry here. Keep voice_id_a /
+                # voice_id_b as None so translator uses the "auto" placeholder
+                # and the real voice resolution happens at stage 6 when the user
+                # clicks "克隆" or picks a preset voice in the unified review UI.
+                # This prevents unnecessary voice clone API costs during S2.
+                print("[S2] 音色选择已延迟到统一审核，S2 自动跳过。")
             else:
                 # Non-interactive mode: try auto-resolve, fail on error
                 try:

@@ -127,6 +127,16 @@ class TestReserveQuota:
         assert job.quota_state == "reserved"
         assert user.free_jobs_quota_used == 0  # counter untouched
 
+    def test_reserve_admin_free_user_marks_reserved_no_counter(self):
+        user = _make_user(role="admin", plan_code="free", quota_total=5, quota_used=5)
+        db = _mock_db_returning(user)
+        job = _make_job(quota_state="none")
+
+        ok = _run(reserve_quota(db, "uid-1", job))
+        assert ok is True
+        assert job.quota_state == "reserved"
+        assert user.free_jobs_quota_used == 5  # admin should not consume free quota
+
 
 class TestCommitQuota:
     def test_commit_from_reserved(self):
@@ -345,6 +355,28 @@ class TestCreateJobQuotaIntegration:
         assert resp.status_code == 202
         # Plus user quota counter stays 0
         assert user.free_jobs_quota_used == 0
+
+    def test_admin_free_user_with_exhausted_quota_still_succeeds(self):
+        user = _make_user(role="admin", plan_code="free", quota_total=5, quota_used=5)
+        req = self._make_request({
+            "service_mode": "express",
+            "source": {"type": "youtube_url", "value": "https://youtube.com/watch?v=x"},
+        })
+        db = self._make_db(user, active_count=0)
+
+        success_body = json.dumps({"job_id": "job_admin", "status": "queued"}).encode()
+
+        async def fake_proxy(**kw):
+            from fastapi import Response as FR
+            return FR(content=success_body, status_code=202,
+                      headers={"content-type": "application/json"})
+
+        with patch("job_intercept.proxy_request", side_effect=fake_proxy):
+            with patch("job_intercept._probe_youtube_duration", return_value=None):
+                resp = _run(intercept_create_job(req, db, user))
+
+        assert resp.status_code == 202
+        assert user.free_jobs_quota_used == 5  # unchanged for admin
 
     def test_reserve_failure_after_upstream_success_returns_quota_exhausted(self):
         """If upstream creates the job but reserve_quota fails, Gateway returns 403."""

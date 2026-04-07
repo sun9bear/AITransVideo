@@ -8,6 +8,7 @@ import {
   cloneVoiceForReview,
   getTranslationReview,
   previewSegmentForJob,
+  previewSourceAudioForJob,
   splitSegment,
 } from '@/lib/api/reviews'
 import { getVoiceLibrary, type VoiceLibraryEntry } from '@/lib/api/voiceLibrary'
@@ -149,6 +150,32 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
       updateSpeakerVoice(speakerId, { isCloning: false, cloneError: getErrorMessage(error) })
     }
   }, [jobId, resource, speakerNames, updateSpeakerVoice])
+
+  const handlePreviewSource = useCallback(async (segmentId: string) => {
+    if (!resource) return
+    const item = resource.items.find((i) => i.segmentId === segmentId)
+    if (!item) return
+
+    setPreviewingSegmentId(segmentId)
+    setPreviewError((prev) => { const n = { ...prev }; delete n[segmentId]; return n })
+    try {
+      const result = await previewSourceAudioForJob(jobId, {
+        segmentId: Number(segmentId),
+        sourceStartMs: item.startMs,
+        sourceEndMs: item.endMs,
+      })
+      if (result.sourceAudioBase64 && audioRef.current) {
+        audioRef.current.src = `data:audio/wav;base64,${result.sourceAudioBase64}`
+        void audioRef.current.play()
+      } else {
+        setPreviewError((prev) => ({ ...prev, [segmentId]: '原文音频提取失败，请确认项目源音频存在' }))
+      }
+    } catch (error) {
+      setPreviewError((prev) => ({ ...prev, [segmentId]: getErrorMessage(error) }))
+    } finally {
+      setPreviewingSegmentId(null)
+    }
+  }, [jobId, resource])
 
   const handlePreviewSegment = useCallback(async (segmentId: string) => {
     if (!resource) return
@@ -377,18 +404,6 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
                   )}
 
                   <div className="ml-auto flex items-center gap-2">
-                    {/* Preview button */}
-                    {isEligibleForPreview ? (
-                      <button
-                        className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-400 transition hover:bg-emerald-500/20 hover:border-emerald-500/50 disabled:opacity-50"
-                        disabled={isPreviewingThis}
-                        onClick={() => { void handlePreviewSegment(item.segmentId) }}
-                        type="button"
-                      >
-                        {isPreviewingThis ? '生成中...' : '试听配音'}
-                      </button>
-                    ) : null}
-
                     {/* Split button */}
                     <button
                       className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-3 py-1 text-xs font-medium text-cyan-400 transition hover:bg-cyan-500/20 hover:border-cyan-500/50"
@@ -413,14 +428,41 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
                   <p className="mt-1 text-xs text-red-400">{segPreviewError}</p>
                 ) : null}
 
-                {/* Source text */}
-                <div className="mt-3 rounded-xl border border-border bg-muted/30 px-4 py-3 text-sm leading-6 text-foreground/70">
-                  {item.sourceText || '-'}
+                {/* Source text + play source button */}
+                <div className="mt-3">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs font-medium text-muted-foreground">原文</span>
+                    <button
+                      className="rounded-lg border border-sky-500/30 bg-sky-500/10 px-3 py-1 text-xs font-medium text-sky-400 transition hover:bg-sky-500/20 hover:border-sky-500/50 disabled:opacity-50"
+                      disabled={isPreviewingThis}
+                      onClick={() => { void handlePreviewSource(item.segmentId) }}
+                      type="button"
+                      title="播放该段的原始音频（用于核对发言人）"
+                    >
+                      {isPreviewingThis ? '加载中...' : '▶ 播放原文'}
+                    </button>
+                  </div>
+                  <div className="rounded-xl border border-border bg-muted/30 px-4 py-3 text-sm leading-6 text-foreground/70">
+                    {item.sourceText || '-'}
+                  </div>
                 </div>
 
-                {/* Translation textarea */}
+                {/* Translation textarea + preview tts button */}
                 <div className="mt-3">
-                  <span className="text-xs font-medium text-muted-foreground mb-1 block">译文</span>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs font-medium text-muted-foreground">译文</span>
+                    {isEligibleForPreview ? (
+                      <button
+                        className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-400 transition hover:bg-emerald-500/20 hover:border-emerald-500/50 disabled:opacity-50"
+                        disabled={isPreviewingThis}
+                        onClick={() => { void handlePreviewSegment(item.segmentId) }}
+                        type="button"
+                        title="生成并播放该段译文的 TTS 配音"
+                      >
+                        {isPreviewingThis ? '生成中...' : '▶ 试听配音'}
+                      </button>
+                    ) : null}
+                  </div>
                   <div className="group rounded-xl border border-border bg-muted/30 transition hover:border-primary/30 hover:bg-primary/5 focus-within:border-primary/40 focus-within:bg-primary/5">
                     <textarea
                       className="w-full min-h-[2lh] resize-none rounded-xl bg-transparent px-4 py-2 text-sm leading-6 text-foreground placeholder:text-muted-foreground/60 focus:outline-none input-focus-ring overflow-hidden"
@@ -491,6 +533,15 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
           })}
         </div>
       </section>
+
+      {/* Pagination (bottom) */}
+      {hasPagination ? (
+        <Pagination
+          currentPage={currentPage} pageSize={pageSize} pageSizeOptions={resource.pageSizeOptions}
+          totalItems={totalItems} totalPages={totalPages}
+          onPageChange={setPage} onPageSizeChange={(s) => { setPageSize(s); setPage(1) }}
+        />
+      ) : null}
     </div>
   )
 }

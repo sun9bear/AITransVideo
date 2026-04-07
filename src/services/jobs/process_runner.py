@@ -31,6 +31,7 @@ from services.jobs.models import (
     STAGE_LEGACY_PROCESS_OUTPUT,
     STAGE_MEDIA_UNDERSTANDING,
     STAGE_SPEAKER_REVIEW,
+    STAGE_TRANSLATION_CONFIG_REVIEW,
     STAGE_TRANSLATION_REVIEW,
     STAGE_VOICE_REVIEW,
 )
@@ -79,6 +80,7 @@ INTERNAL_STAGE_MAP = {
     "audio_preparation": STAGE_INGESTION,
     "media_understanding": STAGE_MEDIA_UNDERSTANDING,
     "speaker_review": STAGE_SPEAKER_REVIEW,
+    "translation_config_review": STAGE_TRANSLATION_CONFIG_REVIEW,
     "translation": STAGE_TRANSLATION_REVIEW,
     "translation_review": STAGE_TRANSLATION_REVIEW,
     "voice_review": STAGE_VOICE_REVIEW,

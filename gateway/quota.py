@@ -57,9 +57,10 @@ async def reserve_quota(db: AsyncSession, user_id, job: Job) -> bool:
     if user is None:
         return False
 
+    role = getattr(user, "role", "user") or "user"
     plan = getattr(user, "plan_code", "free") or "free"
-    if plan != "free":
-        # Non-free plans: mark reserved but don't touch quota counters
+    if role == "admin" or plan != "free":
+        # Admins and non-free plans bypass free-quota counters.
         job.quota_state = "reserved"
         return True
 

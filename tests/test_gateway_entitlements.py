@@ -122,7 +122,7 @@ class TestEntitlements:
 
         assert result["plan_code"] == "plus"
         limits = result["limits"]
-        assert limits["max_duration_minutes"] == 60
+        assert limits["max_duration_minutes"] == 45
         assert limits["max_concurrent_jobs"] == 3
         assert "express" in limits["allowed_service_modes"]
         assert "studio" in limits["allowed_service_modes"]
@@ -137,7 +137,7 @@ class TestEntitlements:
         assert result["plan_code"] == "pro"
         limits = result["limits"]
         assert limits["max_duration_minutes"] == 180
-        assert limits["max_concurrent_jobs"] == 10
+        assert limits["max_concurrent_jobs"] == 5
         assert "studio" in limits["allowed_service_modes"]
         assert result["ui"]["allow_upgrade"] is False
 
