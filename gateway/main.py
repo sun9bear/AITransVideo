@@ -14,6 +14,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from admin_settings import router as admin_router
 from auth_phone import router as auth_phone_router, captcha_router
 from billing import router as billing_router
+from credits_observability import router as credits_observability_router
+from credits_read import router as credits_read_router
 from entitlements import router as entitlements_router
 from plan_catalog import router as plan_catalog_router
 from subscriptions import router as subscriptions_router
@@ -40,6 +42,7 @@ from job_intercept import (
     intercept_get_job,
     intercept_job_subresource,
     intercept_list_jobs,
+    update_job_metering,
     update_source_metadata,
 )
 from proxy import close_client, init_client, proxy_request
@@ -111,6 +114,8 @@ app.include_router(captcha_router)
 
 app.include_router(admin_router)
 app.include_router(billing_router)
+app.include_router(credits_observability_router)
+app.include_router(credits_read_router)
 app.include_router(entitlements_router)
 app.include_router(plan_catalog_router)
 app.include_router(subscriptions_router)
@@ -142,6 +147,7 @@ app.post("/job-api/jobs")(intercept_create_job)
 app.get("/job-api/jobs/{job_id}")(intercept_get_job)
 app.delete("/job-api/jobs/{job_id}")(intercept_delete_job_v2)
 app.post("/job-api/jobs/{job_id}/source-metadata")(update_source_metadata)
+app.post("/job-api/jobs/{job_id}/metering")(update_job_metering)
 
 # Job sub-resources: logs, artifacts, result-summary, continue, review/*, download/*, etc.
 app.api_route(

@@ -162,6 +162,30 @@ class Job(Base):
         String(16), nullable=False, server_default="none"
     )  # "none" | "reserved" | "committed" | "released"
 
+    # --- V3-0 observation fields (shadow metering) ---
+    estimated_minutes: Mapped[float | None] = mapped_column(Float, nullable=True)
+    actual_minutes: Mapped[float | None] = mapped_column(Float, nullable=True)
+    metering_snapshot: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # metering_snapshot schema:
+    #
+    # --- LIVE (written by Gateway in V3-0/V3-1) ---
+    #   "credits_estimated": int     # shadow estimate at reserve time
+    #   "credits_actual": int        # shadow actual at capture time
+    #   "service_mode": str          # "express" | "studio" (from job policy)
+    #   "tts_provider": str          # from job policy snapshot
+    #   "tts_model": str             # from job policy snapshot
+    #
+    # --- LIVE (written by Pipeline via POST /metering, V3-4) ---
+    #   "final_cn_chars": int        # total CN chars in final translation
+    #   "rewrite_triggered": bool    # whether any segment was rewritten
+    #   "rewrite_count": int         # total rewrite operations
+    #
+    # --- LIVE_PARTIAL (V3-5: MiniMax/CosyVoice/VolcEngine; MiMo excluded) ---
+    #   "tts_billed_chars": int      # provider billed chars (2x for MiniMax/CosyVoice, 1x for VolcEngine, 0 for MiMo)
+    #
+    # --- LIVE (V3-6: from compute_job_policy, current value: "standard") ---
+    #   "quality_tier": str          # from policy at create time; "standard" | "high" | "flagship"
+
 
 class AdminAuditLog(Base):
     """Audit trail for admin actions on user entitlements."""
@@ -388,6 +412,113 @@ class BillingInvoice(Base):
         nullable=False,
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+# ---------------------------------------------------------------------------
+# V3 Credits System — Shadow Mode (V3-0 / V3-1)
+# ---------------------------------------------------------------------------
+
+
+class CreditsBucket(Base):
+    """Per-source credit pool for a user.
+
+    Each bucket tracks credits from a single source (free grant, trial grant,
+    subscription allowance, top-up purchase, admin adjustment). Multiple buckets
+    may coexist for one user; consumption priority is enforced by
+    ``credits_service`` based on ``bucket_type`` + ``service_mode``.
+
+    V3-1 shadow mode: buckets are written and queryable but do NOT gate job
+    execution. V2 quota / billing / entitlements remain the production truth.
+    """
+
+    __tablename__ = "credits_buckets"
+    __table_args__ = (
+        Index("idx_credits_buckets_user_id", "user_id"),
+        Index("idx_credits_buckets_type", "bucket_type"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+    bucket_type: Mapped[str] = mapped_column(
+        String(32), nullable=False
+    )  # "free" | "trial" | "subscription" | "topup" | "manual_adjustment"
+    granted: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    remaining: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reserved: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    source_label: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )  # e.g. "plus", "pro", "topup_1000"
+    related_order_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    related_subscription_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+class CreditsLedger(Base):
+    """Immutable audit trail for every credit movement.
+
+    Each row records a single atomic change to a bucket's balance. The full
+    history of a user's credits can be reconstructed by replaying ledger entries
+    in ``created_at`` order.
+
+    V3-1 shadow mode: ledger entries are written alongside V2 quota transitions
+    but do NOT affect job gating, billing, or entitlements.
+    """
+
+    __tablename__ = "credits_ledger"
+    __table_args__ = (
+        Index("idx_credits_ledger_user_id", "user_id"),
+        Index("idx_credits_ledger_bucket_id", "bucket_id"),
+        Index("idx_credits_ledger_direction", "direction"),
+        Index("idx_credits_ledger_created_at", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+    bucket_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("credits_buckets.id"), nullable=False
+    )
+    direction: Mapped[str] = mapped_column(
+        String(16), nullable=False
+    )  # "grant" | "reserve" | "capture" | "release" | "refund" | "rollback"
+    credits_delta: Mapped[int] = mapped_column(Integer, nullable=False)
+    balance_after: Mapped[int] = mapped_column(Integer, nullable=False)
+    related_job_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    related_order_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    related_subscription_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    reason_code: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="unspecified"
+    )
+    metadata_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
     )
 
 

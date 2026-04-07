@@ -651,6 +651,18 @@ async def _process_payment_event(
                     new_value=order.target_plan_code,
                 ))
                 entitlements_updated = True
+
+            # V3-1 shadow: create subscription credits bucket (best-effort)
+            try:
+                from credits_service import ensure_subscription_bucket
+                period_end = subscription.current_period_end if subscription else None
+                await ensure_subscription_bucket(
+                    db, user_id=user.id, plan_code=order.target_plan_code,
+                    related_order_id=order.id, related_subscription_id=subscription.id,
+                    expires_at=period_end,
+                )
+            except Exception:
+                logger.warning("V3 shadow subscription grant failed (non-fatal)")
                 logger.info("User %s upgraded %s → %s via payment order %s",
                             user.id, old_plan, order.target_plan_code, order_id)
 

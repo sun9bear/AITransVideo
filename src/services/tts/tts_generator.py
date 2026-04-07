@@ -143,6 +143,7 @@ class TTSResult:
     voice_id: str
     selected_voice: str = ""
     match_confidence: str = ""
+    billed_chars: int = 0  # V3-5: actual chars submitted to TTS provider
 
 
 class TTSGenerator:
@@ -718,6 +719,12 @@ class TTSGenerator:
         if tts_text is None:
             raise TTSGenerationError("segment.tts_cn_text or segment.cn_text is required.")
 
+        # V3-5: record billed chars per provider's billing unit.
+        # Frozen V3 doc: MiniMax and CosyVoice bill "1 汉字 = 2 计费字符".
+        # VolcEngine bills on raw character count (no multiplier).
+        # MiMo bills on tokens (not chars) — billed_chars left as 0 (unknown).
+        _cn_chars = len(tts_text)
+
         # Resolve provider: explicit arg > job-level > legacy
         if provider is None:
             provider = getattr(self, "_job_provider", None) or get_tts_provider()
@@ -727,21 +734,28 @@ class TTSGenerator:
         # _generate_one_with_backoff can catch them uniformly.
         if provider == "cosyvoice":
             try:
-                return self._generate_one_cosyvoice(segment, tts_text, output_root)
+                result = self._generate_one_cosyvoice(segment, tts_text, output_root)
+                result.billed_chars = _cn_chars * 2  # 阿里云百炼: 1 汉字 = 2 计费字符
+                return result
             except TTSGenerationError:
                 raise
             except Exception as exc:
                 raise TTSGenerationError(f"CosyVoice: {exc}") from exc
         if provider == "mimo":
             try:
-                return self._generate_one_mimo(segment, tts_text, output_root)
+                result = self._generate_one_mimo(segment, tts_text, output_root)
+                # MiMo: token-based billing, truthful billed_chars unavailable
+                # result.billed_chars stays 0 (default)
+                return result
             except TTSGenerationError:
                 raise
             except Exception as exc:
                 raise TTSGenerationError(f"MiMo: {exc}") from exc
         if provider == "volcengine":
             try:
-                return self._generate_one_volcengine(segment, tts_text, output_root)
+                result = self._generate_one_volcengine(segment, tts_text, output_root)
+                result.billed_chars = _cn_chars  # VolcEngine: direct char billing
+                return result
             except TTSGenerationError:
                 raise
             except Exception as exc:
@@ -805,6 +819,7 @@ class TTSGenerator:
             audio_path=str(output_path.resolve(strict=False)),
             duration_ms=duration_ms,
             voice_id=segment.voice_id,
+            billed_chars=_cn_chars * 2,  # MiniMax: 1 汉字 = 2 计费字符
         )
 
 

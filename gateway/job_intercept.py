@@ -26,6 +26,7 @@ from database import get_db
 from models import Job, User
 from proxy import proxy_request
 from quota import check_quota, reserve_quota, settle_job_quota, TERMINAL_STATUSES
+from credits_service import estimate_credits, shadow_reserve, shadow_release, shadow_capture, shadow_safe
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +114,10 @@ def compute_job_policy(user, service_mode: str) -> dict:
             "voice_strategy": "user_selected",
             "plan_code_snapshot": plan,
             "role_snapshot": role,
+            # V3-6: single authoritative quality_tier source.
+            # Current state: all jobs are "standard". When multi-tier
+            # is productized, this is the one place to change.
+            "quality_tier": "standard",
         }
     else:
         # Default: express
@@ -134,6 +139,7 @@ def compute_job_policy(user, service_mode: str) -> dict:
             "voice_strategy": "preset_mapping",
             "plan_code_snapshot": plan,
             "role_snapshot": role,
+            "quality_tier": "standard",
         }
 
 
@@ -220,6 +226,38 @@ async def intercept_list_jobs(
                         # Settle quota when transitioning to terminal status
                         if upstream_status in TERMINAL_STATUSES and old_status not in TERMINAL_STATUSES:
                             await settle_job_quota(db, db_job, upstream_status)
+                            # V3-1 shadow settle (best-effort)
+                            try:
+                                if upstream_status == "succeeded":
+                                    actual_min = None
+                                    src_dur = getattr(db_job, "source_duration_seconds", None)
+                                    if src_dur:
+                                        actual_min = src_dur / 60.0
+                                    db_job.actual_minutes = actual_min
+                                    # Read quality_tier from saved snapshot (single truth source)
+                                    _saved_tier = (db_job.metering_snapshot or {}).get("quality_tier", "standard")
+                                    shadow_credits = estimate_credits(
+                                        actual_min or db_job.estimated_minutes,
+                                        service_mode=db_job.service_mode or "express",
+                                        quality_tier=_saved_tier,
+                                    )
+                                    snap = db_job.metering_snapshot or {}
+                                    snap["credits_actual"] = shadow_credits
+                                    db_job.metering_snapshot = snap
+                                    await shadow_safe(
+                                        shadow_capture,
+                                        db, user_id=db_job.user_id, job_id=jid,
+                                        actual_credits=shadow_credits,
+                                        service_mode=db_job.service_mode or "express",
+                                    )
+                                else:
+                                    # failed / cancelled → release
+                                    await shadow_safe(
+                                        shadow_release,
+                                        db, user_id=db_job.user_id, job_id=jid,
+                                    )
+                            except Exception as _se:
+                                logger.warning("V3 shadow settle failed for %s: %s", jid, _se)
                 except Exception:
                     pass
         try:
@@ -440,6 +478,37 @@ async def intercept_create_job(
                     await db.commit()
                     logger.info("Job %s recorded (mode=%s, plan=%s, quota=%s)",
                                 job_id, service_mode, user_plan, job.quota_state)
+
+                    # --- V3-0/V3-1: Shadow metering + reserve (best-effort) ---
+                    try:
+                        est_min = (estimated_duration_seconds / 60.0) if estimated_duration_seconds else None
+                        job.estimated_minutes = est_min
+                        # Shadow reserve: consume quality_tier from policy (single truth source)
+                        _quality_tier = policy.get("quality_tier", "standard")
+                        shadow_credits = estimate_credits(
+                            est_min, service_mode=service_mode, quality_tier=_quality_tier,
+                        )
+                        if shadow_credits > 0:
+                            job.metering_snapshot = {
+                                "credits_estimated": shadow_credits,
+                                "service_mode": service_mode,
+                                "quality_tier": _quality_tier,
+                                "tts_provider": policy.get("tts_provider"),
+                                "tts_model": policy.get("tts_model"),
+                            }
+                            await shadow_safe(
+                                shadow_reserve,
+                                db, user_id=user.id, job_id=job_id,
+                                estimated_credits=shadow_credits,
+                                service_mode=service_mode,
+                            )
+                        await db.commit()
+                    except Exception as _shadow_exc:
+                        logger.warning("V3 shadow metering failed for job %s: %s (non-fatal)", job_id, _shadow_exc)
+                        try:
+                            await db.rollback()
+                        except Exception:
+                            pass
                 else:
                     logger.info("Job %s already in DB, skipping", job_id)
             else:
@@ -589,7 +658,12 @@ async def update_source_metadata(
 
     if actual_duration is not None:
         try:
-            job.source_duration_seconds = float(actual_duration)
+            dur_float = float(actual_duration)
+            job.source_duration_seconds = dur_float
+            # V3-0: write actual source duration to actual_minutes.
+            # estimated_minutes is preserved as the original pre-download estimate
+            # so we can later compare estimate vs. actual for calibration.
+            job.actual_minutes = dur_float / 60.0
         except (TypeError, ValueError):
             pass
     if title is not None:
@@ -602,6 +676,75 @@ async def update_source_metadata(
 
     logger.info("source-metadata updated for %s: duration=%s title=%s",
                 job_id, actual_duration, title)
+    return Response(
+        content=json.dumps({"ok": True}),
+        status_code=200,
+        headers={"content-type": "application/json"},
+    )
+
+
+async def update_job_metering(
+    request: Request,
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """POST /job-api/jobs/{job_id}/metering — internal callback from Pipeline.
+
+    Allows the pipeline to report metering fields after TTS/alignment completion:
+    - final_cn_chars: total Chinese characters in final translation
+    - rewrite_triggered: whether any segment was rewritten
+    - rewrite_count: total rewrite operations performed
+    - tts_billed_chars: total characters sent to TTS provider
+
+    These fields are merged into Job.metering_snapshot (JSONB).
+    Best-effort: failures do not affect job status.
+    """
+    body = await request.body()
+    try:
+        data = json.loads(body) if body else {}
+    except Exception:
+        data = {}
+
+    if not data:
+        return Response(
+            content=json.dumps({"error": "empty_body", "message": "请提供 metering 字段"}),
+            status_code=400,
+            headers={"content-type": "application/json"},
+        )
+
+    result = await db.execute(select(Job).where(Job.job_id == job_id))
+    job = result.scalar_one_or_none()
+    if job is None:
+        return Response(
+            content=json.dumps({"ok": True, "note": "job not in gateway DB, skipped"}),
+            status_code=200,
+            headers={"content-type": "application/json"},
+        )
+
+    # Merge incoming fields into existing metering_snapshot
+    snapshot = dict(job.metering_snapshot or {})
+    allowed_keys = {"final_cn_chars", "rewrite_triggered", "rewrite_count", "tts_billed_chars"}
+    updated_keys = []
+    for key in allowed_keys:
+        if key in data:
+            snapshot[key] = data[key]
+            updated_keys.append(key)
+
+    if not updated_keys:
+        return Response(
+            content=json.dumps({"ok": True, "note": "no recognized metering keys"}),
+            status_code=200,
+            headers={"content-type": "application/json"},
+        )
+
+    job.metering_snapshot = snapshot
+
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+
+    logger.info("metering updated for %s: %s", job_id, updated_keys)
     return Response(
         content=json.dumps({"ok": True}),
         status_code=200,

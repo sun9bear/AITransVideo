@@ -634,3 +634,196 @@ class TestVolcengineDualModeSnapshot:
         assert captured_body["tts_provider"] == "volcengine"
         assert captured_body["tts_model"] is None
         assert captured_body["voice_clone_enabled"] is False
+
+
+# ===================================================================
+# V3-6: quality_tier truth chain tests
+# ===================================================================
+
+
+class TestQualityTierTruthChain:
+    """Verify the quality_tier single-truth-source chain:
+    compute_job_policy → upstream payload → metering_snapshot → settle readback.
+    """
+
+    def test_create_path_injects_quality_tier_into_upstream_payload(self):
+        """intercept_create_job puts quality_tier from policy into upstream payload."""
+        captured_body = {}
+
+        async def fake_proxy(*, request, upstream_base, strip_prefix, override_body=None):
+            if override_body:
+                captured_body.update(json.loads(override_body))
+            return _upstream_success()
+
+        req = _make_request({
+            "service_mode": "express",
+            "source": {"type": "youtube_url", "value": "https://youtube.com/watch?v=qt"},
+            "estimated_duration_seconds": 120,
+        })
+        user = _make_user(plan_code="free")
+        db = _make_db_session(active_job_count=0, user_for_quota=user)
+
+        with patch("job_intercept.proxy_request", side_effect=fake_proxy):
+            with patch("job_intercept._probe_youtube_duration", return_value=None):
+                resp = _run(intercept_create_job(req, db, user))
+
+        assert resp.status_code == 202
+        # quality_tier must be present in upstream payload from policy
+        assert captured_body.get("quality_tier") == "standard"
+
+    def test_create_path_writes_quality_tier_into_metering_snapshot(self):
+        """Shadow metering snapshot must contain quality_tier from policy."""
+        captured_jobs = []
+
+        async def fake_proxy(*, request, upstream_base, strip_prefix, override_body=None):
+            return _upstream_success()
+
+        req = _make_request({
+            "service_mode": "express",
+            "source": {"type": "youtube_url", "value": "https://youtube.com/watch?v=qt2"},
+            "estimated_duration_seconds": 180,
+        })
+        user = _make_user(plan_code="free")
+        db = _make_db_session(active_job_count=0, user_for_quota=user)
+
+        original_add = db.add
+        def capture_add(obj):
+            captured_jobs.append(obj)
+            return original_add(obj)
+        db.add = capture_add
+
+        with patch("job_intercept.proxy_request", side_effect=fake_proxy):
+            with patch("job_intercept._probe_youtube_duration", return_value=None):
+                resp = _run(intercept_create_job(req, db, user))
+
+        assert resp.status_code == 202
+        # Find the Job object that was added to DB
+        from models import Job
+        job_objs = [o for o in captured_jobs if isinstance(o, Job)]
+        assert len(job_objs) >= 1
+        job = job_objs[0]
+        # metering_snapshot must exist (not None) and contain quality_tier
+        assert job.metering_snapshot is not None, "metering_snapshot must be written at create time"
+        assert job.metering_snapshot["quality_tier"] == "standard"
+
+    def test_create_reserve_consumes_policy_tier(self):
+        """Shadow reserve must call estimate_credits with the policy's quality_tier."""
+        async def fake_proxy(*, request, upstream_base, strip_prefix, override_body=None):
+            return _upstream_success()
+
+        req = _make_request({
+            "service_mode": "express",
+            "source": {"type": "youtube_url", "value": "https://youtube.com/watch?v=qt3"},
+            "estimated_duration_seconds": 300,
+        })
+        user = _make_user(plan_code="free")
+        db = _make_db_session(active_job_count=0, user_for_quota=user)
+
+        estimate_calls = []
+        original_estimate = __import__("credits_service").estimate_credits
+
+        def capture_estimate(minutes, service_mode="express", quality_tier="standard"):
+            estimate_calls.append({"minutes": minutes, "service_mode": service_mode, "quality_tier": quality_tier})
+            return original_estimate(minutes, service_mode, quality_tier)
+
+        with patch("job_intercept.proxy_request", side_effect=fake_proxy):
+            with patch("job_intercept._probe_youtube_duration", return_value=None):
+                with patch("job_intercept.estimate_credits", side_effect=capture_estimate):
+                    resp = _run(intercept_create_job(req, db, user))
+
+        assert resp.status_code == 202
+        # estimate_credits must have been called with quality_tier from policy
+        assert any(c["quality_tier"] == "standard" for c in estimate_calls)
+
+    def test_settle_reads_tier_from_snapshot_not_hardcoded(self):
+        """Terminal settle must read quality_tier from saved metering_snapshot.
+
+        Uses a non-default tier ('high') in the snapshot to prove readback is
+        from snapshot, not a re-hardcoded 'standard'. This is a test-only scenario
+        — current production only produces 'standard'.
+        """
+        from job_intercept import intercept_list_jobs
+
+        # Create a mock job with non-default quality_tier in snapshot
+        mock_job = SimpleNamespace(
+            job_id="job-settle-qt",
+            user_id="uid-1",
+            status="running",  # old status (not terminal)
+            current_stage="processing",
+            source_duration_seconds=300.0,
+            estimated_minutes=5.0,
+            actual_minutes=None,
+            service_mode="studio",
+            metering_snapshot={
+                "credits_estimated": 75,
+                "quality_tier": "high",  # non-default for test deniability
+            },
+            quota_state="reserved",
+        )
+
+        estimate_calls = []
+
+        def capture_estimate(minutes, service_mode="express", quality_tier="standard"):
+            estimate_calls.append({"quality_tier": quality_tier})
+            return 999  # dummy value
+
+        # Mock DB: user jobs query returns our job; upstream returns it as succeeded
+        db = AsyncMock()
+        call_n = {"n": 0}
+
+        async def smart_execute(*args, **kwargs):
+            call_n["n"] += 1
+            r = MagicMock()
+            if call_n["n"] == 1:
+                # all_db_job_ids
+                r.all.return_value = [("job-settle-qt",)]
+            elif call_n["n"] == 2:
+                # user_job_ids
+                r.all.return_value = [("job-settle-qt",)]
+            elif call_n["n"] == 3:
+                # select Job for status sync
+                r.scalar_one_or_none.return_value = mock_job
+            else:
+                r.scalar_one_or_none.return_value = None
+            return r
+
+        db.execute = smart_execute
+        db.commit = AsyncMock()
+        db.rollback = AsyncMock()
+
+        user = _make_user()
+
+        # Upstream response: job succeeded
+        upstream_body = json.dumps({
+            "jobs": [{
+                "job_id": "job-settle-qt",
+                "status": "succeeded",
+                "current_stage": None,
+            }]
+        }).encode()
+
+        req = MagicMock()
+        req.headers = {}
+        req.method = "GET"
+        req.url = MagicMock(); req.url.path = "/job-api/jobs"
+        req.query_params = {}
+
+        async def fake_proxy(*, request, upstream_base, strip_prefix):
+            return FastAPIResponse(
+                content=upstream_body, status_code=200,
+                headers={"content-type": "application/json"},
+            )
+
+        with patch("job_intercept.proxy_request", side_effect=fake_proxy):
+            with patch("job_intercept.estimate_credits", side_effect=capture_estimate):
+                with patch("job_intercept.settle_job_quota", new_callable=AsyncMock):
+                    with patch("job_intercept.shadow_safe", new_callable=AsyncMock):
+                        with patch("job_intercept.settings") as mock_settings:
+                            mock_settings.auth_required = True
+                            resp = _run(intercept_list_jobs(req, db, user))
+
+        # The settle path must have read 'high' from snapshot, not re-hardcoded 'standard'
+        settle_estimate = [c for c in estimate_calls if c["quality_tier"] == "high"]
+        assert len(settle_estimate) >= 1, (
+            f"settle must read quality_tier='high' from snapshot, got: {estimate_calls}"
+        )

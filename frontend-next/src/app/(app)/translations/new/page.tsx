@@ -394,29 +394,59 @@ export default function NewTranslationPage() {
         </section>
 
         {/* Cost estimate */}
-        <CostEstimatePanel transcriptionMethod={transcriptionMethod} />
+        <CostEstimatePanel transcriptionMethod={transcriptionMethod} serviceMode={serviceMode} />
       </div>
     </div>
   )
 }
 
-function CostEstimatePanel({ transcriptionMethod }: { transcriptionMethod: "assemblyai" | "gemini" }) {
-  const estimates = [3, 10, 30]
+function CostEstimatePanel({ transcriptionMethod, serviceMode }: { transcriptionMethod: "assemblyai" | "gemini"; serviceMode: "express" | "studio" }) {
+  const durations = [3, 10, 30]
+  // Fetch credits estimates from Gateway (source of truth)
+  const [creditsMap, setCreditsMap] = useState<Record<number, number>>({})
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      const results: Record<number, number> = {}
+      await Promise.all(
+        durations.map(async (m) => {
+          try {
+            const res = await fetch(`/api/credits/estimate?minutes=${m}&service_mode=${serviceMode}&quality_tier=standard`)
+            if (res.ok) {
+              const data = await res.json()
+              results[m] = data.estimated_credits
+            }
+          } catch { /* shadow — non-fatal */ }
+        }),
+      )
+      if (!cancelled) setCreditsMap(results)
+    })()
+    return () => { cancelled = true }
+  }, [serviceMode])
+
   return (
     <section className="rounded-2xl border border-border bg-card p-5 h-fit">
       <h3 className="text-base font-semibold text-foreground">费用预估</h3>
       <p className="text-xs text-muted-foreground/60 mt-1">根据视频时长预估，仅供参考。</p>
       <div className="mt-4 space-y-3">
-        {estimates.map((minutes) => {
+        {durations.map((minutes) => {
           const result = estimateCosts({
             videoDurationMinutes: minutes,
             transcriptionMethod,
             needsVoiceClone: true,
             speakerCount: 1,
           })
+          const creditsEstimate = creditsMap[minutes]
           return (
             <div key={minutes} className="rounded-xl border border-border bg-muted/30 p-3 space-y-1 tabular-nums">
-              <p className="text-sm font-semibold text-foreground/80">{minutes} 分钟视频</p>
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-semibold text-foreground/80">{minutes} 分钟视频</p>
+                {creditsEstimate != null && (
+                  <span className="text-xs font-medium text-primary bg-primary/10 rounded-full px-2 py-0.5">
+                    ~{creditsEstimate} 点
+                  </span>
+                )}
+              </div>
               {result.stages.map((stage) => (
                 <div key={stage.stage} className="flex justify-between text-xs text-muted-foreground">
                   <span>{stage.label}（{stage.model}）</span>
@@ -432,7 +462,8 @@ function CostEstimatePanel({ transcriptionMethod }: { transcriptionMethod: "asse
           )
         })}
         <p className="text-xs text-muted-foreground/60">
-          实际费用取决于视频内容和处理结果。已有音色可跳过克隆费用。
+          点数预估由服务端计算（{serviceMode === "studio" ? "工作台" : "快捷"}模式），
+          实际费用取决于视频内容和处理结果。
         </p>
       </div>
     </section>

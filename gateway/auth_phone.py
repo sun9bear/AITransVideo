@@ -307,6 +307,12 @@ async def verify_code_endpoint(
                 trial_days = TRIAL_CONFIG.get("days", 7)
                 user.trial_ends_at = now + timedelta(days=trial_days)
                 await risk_control.record_ip_trial_grant_db(db, client_ip)
+                # V3-1 shadow: create trial credits bucket (best-effort)
+                try:
+                    from credits_service import ensure_trial_bucket
+                    await ensure_trial_bucket(db, user.id, user.trial_ends_at)
+                except Exception:
+                    pass  # shadow — never block auth
 
         await db.flush()
         await db.commit()
@@ -399,14 +405,26 @@ async def complete_registration_endpoint(
     # Trial bookkeeping — only at registration completion, not at verify-code.
     client_ip = reg.client_ip
     ip_eligible = await risk_control.check_ip_trial_eligible_db(db, client_ip)
+    trial_granted = False
     if not risk_control.is_virtual_segment(phone) and ip_eligible:
         from plan_catalog import TRIAL_CONFIG
         user.trial_granted_at = now
         trial_days = TRIAL_CONFIG.get("days", 7)
         user.trial_ends_at = now + timedelta(days=trial_days)
         await risk_control.record_ip_trial_grant_db(db, client_ip)
+        trial_granted = True
 
     await db.flush()
+
+    # V3-1 shadow: create free + trial credits buckets (best-effort)
+    try:
+        from credits_service import ensure_free_bucket, ensure_trial_bucket
+        await ensure_free_bucket(db, user.id)
+        if trial_granted:
+            await ensure_trial_bucket(db, user.id, user.trial_ends_at)
+    except Exception:
+        pass  # shadow — never block registration
+
     await db.commit()
     await db.refresh(user)
 

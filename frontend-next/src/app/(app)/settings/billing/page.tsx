@@ -33,6 +33,7 @@ import { Button } from "@/components/ui/button"
 import { BillingStatusBanner } from "@/components/billing/billing-status-banner"
 import { CheckoutCard } from "@/components/billing/checkout-card"
 import { OrderHistory } from "@/components/billing/order-history"
+import { CreditsSummary } from "@/components/billing/credits-summary"
 import { SubscriptionSummary } from "@/components/billing/subscription-summary"
 import { getPlans } from "@/lib/billing/get-plans"
 import { getMySubscription } from "@/lib/billing/get-subscription"
@@ -137,6 +138,7 @@ export default function BillingPage() {
       {state.status === "ready" && (
         <>
           <SubscriptionSummary subscription={state.subscription} />
+          <CreditsSummary />
           <CheckoutCard
             plans={state.plans}
             subscription={state.subscription}

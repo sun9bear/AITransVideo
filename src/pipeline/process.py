@@ -144,6 +144,62 @@ def _report_source_metadata(job_id: str, duration_seconds: float, title: str | N
         print(f"[S0] Warning: failed to report source metadata: {e}", flush=True)
 
 
+def _report_job_metering(job_id: str, segments: list, *, tts_billed_chars: int | None = None) -> None:
+    """Best-effort callback to Gateway /job-api/jobs/{job_id}/metering.
+
+    Computes and reports pipeline metering fields from real segment objects.
+    Supports both ``DubbingSegment`` (real pipeline path) and ``SemanticBlock``
+    (legacy/alternative path) by checking for available text fields.
+
+    Text field priority (matches TTS consumption):
+      1. ``tts_cn_text`` — preferred: the actual text sent to TTS
+      2. ``cn_text`` — fallback: the translation text
+      3. ``merged_cn_text`` — compat: SemanticBlock's text field
+
+    Reports:
+    - final_cn_chars: total Chinese characters in final translated text
+    - rewrite_triggered: whether any segment had rewrite_count > 0
+    - rewrite_count: total rewrite operations across all segments
+    - tts_billed_chars: total chars submitted to TTS provider (from TTSResult.billed_chars)
+    """
+    import urllib.request
+    gateway_base = os.environ.get("AVT_GATEWAY_URL", "http://localhost:8880")
+    url = f"{gateway_base}/job-api/jobs/{job_id}/metering"
+
+    try:
+        total_cn_chars = 0
+        total_rewrite_count = 0
+        for seg in segments:
+            # Priority: tts_cn_text > cn_text > merged_cn_text
+            text = getattr(seg, "tts_cn_text", "") or ""
+            if not text:
+                text = getattr(seg, "cn_text", "") or ""
+            if not text:
+                text = getattr(seg, "merged_cn_text", "") or ""
+            total_cn_chars += len(text)
+            total_rewrite_count += getattr(seg, "rewrite_count", 0)
+
+        body: dict = {
+            "final_cn_chars": total_cn_chars,
+            "rewrite_triggered": total_rewrite_count > 0,
+            "rewrite_count": total_rewrite_count,
+        }
+        # V3-5: include tts_billed_chars only if truthfully available from TTS layer
+        if tts_billed_chars is not None:
+            body["tts_billed_chars"] = tts_billed_chars
+
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            print(f"[metering] Reported job metering to gateway: {resp.status}", flush=True)
+    except Exception as e:
+        print(f"[metering] Warning: failed to report job metering: {e}", flush=True)
+
+
 def _is_pre_tts_rewrite_enabled() -> bool:
     """Check if pre-TTS rewrite is enabled from admin settings."""
     try:
@@ -1242,6 +1298,19 @@ class ProcessPipeline:
             )
             current_stage_name = None
             print(f"[S6] 完成：输出目录 {final_project_dir / 'output'}")
+
+            # V3-4/V3-5: report pipeline metering to Gateway (best-effort)
+            if config.job_id and hasattr(translation_result, "segments"):
+                # V3-5: sum billed_chars from TTSResult (truthful TTS-layer source)
+                _tts_billed = None
+                try:
+                    _tts_billed = sum(getattr(r, "billed_chars", 0) for r in tts_results)
+                except Exception:
+                    pass
+                _report_job_metering(
+                    config.job_id, translation_result.segments,
+                    tts_billed_chars=_tts_billed if _tts_billed else None,
+                )
         except Exception as exc:
             stage_label = _classify_failed_stage(exc)
             if state_manager is not None and current_stage_name is not None:

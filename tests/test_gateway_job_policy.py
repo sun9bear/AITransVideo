@@ -70,6 +70,17 @@ class TestComputeJobPolicy:
         assert p["tts_model"] == "speech-2.8-hd"
         assert p["role_snapshot"] == "admin"
 
+    def test_quality_tier_is_standard_for_all_modes(self):
+        """V3-6: quality_tier is always 'standard' in current policy (single truth source)."""
+        for mode in ("express", "studio"):
+            p = compute_job_policy(_make_user(plan_code="plus"), mode)
+            assert p["quality_tier"] == "standard", f"quality_tier for {mode} should be 'standard'"
+
+    def test_quality_tier_present_in_policy(self):
+        """V3-6: quality_tier must be present in policy output."""
+        p = compute_job_policy(_make_user(plan_code="free"), "express")
+        assert "quality_tier" in p
+
     # --- Admin settings driven provider selection ---
 
     def test_express_volcengine_from_settings(self, monkeypatch):

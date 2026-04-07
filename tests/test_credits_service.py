@@ -1,0 +1,594 @@
+"""Tests for V3-1 shadow credits service.
+
+Tests the credits_service module in isolation using mock DB sessions.
+Validates: grant, reserve, capture, release, rollback, priority ordering,
+and the shadow_safe failure isolation guarantee.
+"""
+from __future__ import annotations
+
+import asyncio
+import sys
+import types
+import uuid
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+_gateway_dir = str(__import__("pathlib").Path(__file__).resolve().parent.parent / "gateway")
+if _gateway_dir not in sys.path:
+    sys.path.insert(0, _gateway_dir)
+
+# Stub database module before importing credits_service
+_fake_database = types.ModuleType("database")
+_fake_database.get_db = MagicMock()
+_fake_database.engine = MagicMock()
+_fake_database.async_session = MagicMock()
+sys.modules.setdefault("database", _fake_database)
+
+from credits_service import (
+    BUCKET_PRIORITY,
+    DEBIT_RATES,
+    estimate_credits,
+    shadow_grant,
+    shadow_reserve,
+    shadow_release,
+    shadow_capture,
+    shadow_rollback,
+    shadow_safe,
+    _pick_buckets_by_priority,
+)
+from models import CreditsBucket, CreditsLedger
+
+
+def _run(coro):
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+def _make_bucket(
+    *,
+    bucket_type="free",
+    granted=500,
+    remaining=500,
+    reserved=0,
+    user_id=None,
+    bucket_id=None,
+    expires_at=None,
+):
+    b = SimpleNamespace(
+        id=bucket_id or uuid.uuid4(),
+        user_id=user_id or uuid.uuid4(),
+        bucket_type=bucket_type,
+        granted=granted,
+        remaining=remaining,
+        reserved=reserved,
+        expires_at=expires_at,
+        source_label=None,
+        related_order_id=None,
+        related_subscription_id=None,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    return b
+
+
+# ===================================================================
+# estimate_credits
+# ===================================================================
+
+
+class TestEstimateCredits:
+    def test_express_standard(self):
+        assert estimate_credits(5.0, "express", "standard") == 50  # 5 * 10
+
+    def test_studio_high(self):
+        assert estimate_credits(2.0, "studio", "high") == 60  # 2 * 30
+
+    def test_studio_flagship(self):
+        assert estimate_credits(1.0, "studio", "flagship") == 50
+
+    def test_none_minutes_returns_zero(self):
+        assert estimate_credits(None) == 0
+
+    def test_zero_minutes_returns_zero(self):
+        assert estimate_credits(0.0) == 0
+
+    def test_small_duration_rounds_up_to_1(self):
+        # 0.05 * 10 = 0.5 → round → 0, but max(1, ...) → 1
+        assert estimate_credits(0.05, "express", "standard") == 1
+
+    def test_unknown_tier_uses_default(self):
+        assert estimate_credits(3.0, "express", "unknown_tier") == 30  # 3 * 10 default
+
+
+# ===================================================================
+# Bucket priority ordering
+# ===================================================================
+
+
+class TestBucketPriority:
+    def test_express_priority_order(self):
+        free = _make_bucket(bucket_type="free")
+        trial = _make_bucket(bucket_type="trial")
+        sub = _make_bucket(bucket_type="subscription")
+        topup = _make_bucket(bucket_type="topup")
+
+        ordered = _pick_buckets_by_priority([trial, topup, free, sub], "express")
+        types = [b.bucket_type for b in ordered]
+        assert types == ["free", "subscription", "topup", "trial"]
+
+    def test_studio_priority_order(self):
+        free = _make_bucket(bucket_type="free")
+        trial = _make_bucket(bucket_type="trial")
+        sub = _make_bucket(bucket_type="subscription")
+        topup = _make_bucket(bucket_type="topup")
+
+        ordered = _pick_buckets_by_priority([free, topup, trial, sub], "studio")
+        types = [b.bucket_type for b in ordered]
+        assert types == ["trial", "subscription", "topup", "free"]
+
+
+# ===================================================================
+# shadow_grant
+# ===================================================================
+
+
+class TestShadowGrant:
+    def test_grant_creates_bucket_and_ledger(self):
+        db = AsyncMock()
+        db.flush = AsyncMock()
+        added_objects = []
+        db.add = lambda obj: added_objects.append(obj)
+
+        user_id = uuid.uuid4()
+        result = _run(shadow_grant(
+            db, user_id=user_id, bucket_type="free", amount=500,
+            source_label="free_grant", reason_code="registration",
+        ))
+
+        assert result is not None
+        assert result.granted == 500
+        assert result.remaining == 500
+        assert result.reserved == 0
+        assert result.bucket_type == "free"
+        # Should have added bucket + ledger entry
+        assert len(added_objects) == 2  # bucket (via db.add in model init) + ledger
+        ledger = added_objects[1]
+        assert ledger.direction == "grant"
+        assert ledger.credits_delta == 500
+        assert ledger.balance_after == 500
+
+    def test_grant_invalid_bucket_type_returns_none(self):
+        db = AsyncMock()
+        result = _run(shadow_grant(db, user_id=uuid.uuid4(), bucket_type="invalid", amount=100))
+        assert result is None
+
+    def test_grant_exception_returns_none(self):
+        db = AsyncMock()
+        db.flush = AsyncMock(side_effect=RuntimeError("DB down"))
+        db.add = MagicMock()
+        result = _run(shadow_grant(db, user_id=uuid.uuid4(), bucket_type="free", amount=100))
+        assert result is None
+
+
+# ===================================================================
+# shadow_reserve
+# ===================================================================
+
+
+class TestShadowReserve:
+    def _db_with_buckets(self, buckets):
+        """Create a mock DB that returns given buckets on select."""
+        db = AsyncMock()
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = buckets
+        db.execute = AsyncMock(return_value=result)
+        added = []
+        db.add = lambda obj: added.append(obj)
+        db._added = added
+        return db
+
+    def test_reserve_deducts_from_highest_priority(self):
+        uid = uuid.uuid4()
+        free_bucket = _make_bucket(bucket_type="free", remaining=500, reserved=0, user_id=uid)
+        sub_bucket = _make_bucket(bucket_type="subscription", remaining=3500, reserved=0, user_id=uid)
+        db = self._db_with_buckets([free_bucket, sub_bucket])
+
+        entries = _run(shadow_reserve(
+            db, user_id=uid, job_id="job-1", estimated_credits=100, service_mode="express",
+        ))
+
+        assert len(entries) == 1
+        # Express priority: free first
+        assert free_bucket.reserved == 100
+        assert sub_bucket.reserved == 0
+
+    def test_reserve_spans_multiple_buckets(self):
+        uid = uuid.uuid4()
+        free_bucket = _make_bucket(bucket_type="free", remaining=50, reserved=0, user_id=uid)
+        sub_bucket = _make_bucket(bucket_type="subscription", remaining=3500, reserved=0, user_id=uid)
+        db = self._db_with_buckets([free_bucket, sub_bucket])
+
+        entries = _run(shadow_reserve(
+            db, user_id=uid, job_id="job-1", estimated_credits=100, service_mode="express",
+        ))
+
+        assert len(entries) == 2
+        assert free_bucket.reserved == 50
+        assert sub_bucket.reserved == 50
+
+    def test_reserve_zero_credits_returns_empty(self):
+        db = AsyncMock()
+        entries = _run(shadow_reserve(db, user_id=uuid.uuid4(), job_id="j", estimated_credits=0))
+        assert entries == []
+
+    def test_reserve_insufficient_balance_still_records(self):
+        uid = uuid.uuid4()
+        free_bucket = _make_bucket(bucket_type="free", remaining=30, reserved=0, user_id=uid)
+        db = self._db_with_buckets([free_bucket])
+
+        entries = _run(shadow_reserve(
+            db, user_id=uid, job_id="job-1", estimated_credits=100, service_mode="express",
+        ))
+
+        # Should still reserve what's available (shadow mode, no gating)
+        assert len(entries) == 1
+        assert free_bucket.reserved == 30
+
+    def test_reserve_exception_returns_empty(self):
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=RuntimeError("DB error"))
+        entries = _run(shadow_reserve(
+            db, user_id=uuid.uuid4(), job_id="j", estimated_credits=50,
+        ))
+        assert entries == []
+
+
+# ===================================================================
+# shadow_release
+# ===================================================================
+
+
+class TestShadowRelease:
+    def test_release_refunds_reserved(self):
+        uid = uuid.uuid4()
+        bucket_id = uuid.uuid4()
+        bucket = _make_bucket(bucket_type="free", remaining=400, reserved=100, user_id=uid, bucket_id=bucket_id)
+
+        # Mock: find reserve ledger entries, then find the bucket
+        reserve_entry = SimpleNamespace(
+            id=uuid.uuid4(), bucket_id=bucket_id, credits_delta=-100,
+        )
+
+        db = AsyncMock()
+        call_n = {"n": 0}
+
+        async def smart_execute(*args, **kwargs):
+            call_n["n"] += 1
+            if call_n["n"] == 1:
+                # Reserve entries query
+                r = MagicMock()
+                r.scalars.return_value.all.return_value = [reserve_entry]
+                return r
+            else:
+                # Bucket lookup
+                r = MagicMock()
+                r.scalar_one_or_none.return_value = bucket
+                return r
+
+        db.execute = smart_execute
+        added = []
+        db.add = lambda obj: added.append(obj)
+
+        entries = _run(shadow_release(db, user_id=uid, job_id="job-1"))
+
+        assert len(entries) == 1
+        assert entries[0].direction == "release"
+        assert entries[0].credits_delta == 100
+        assert bucket.reserved == 0
+
+    def test_release_no_reserves_returns_empty(self):
+        db = AsyncMock()
+        r = MagicMock()
+        r.scalars.return_value.all.return_value = []
+        db.execute = AsyncMock(return_value=r)
+
+        entries = _run(shadow_release(db, user_id=uuid.uuid4(), job_id="j"))
+        assert entries == []
+
+
+# ===================================================================
+# shadow_capture — correctness tests (minor revision 1.1)
+# ===================================================================
+
+
+from credits_service import shadow_capture  # noqa: E402
+
+
+class TestShadowCapture:
+    """Tests that shadow_capture fully settles ALL reserve entries.
+
+    Key invariant: after capture, no reserve entry may leave dangling
+    bucket.reserved. Every reserve must become capture, release, or both.
+    """
+
+    def _db_for_capture(self, reserve_entries, buckets_by_id):
+        """Create a mock DB returning reserve_entries then bucket lookups."""
+        db = AsyncMock()
+        call_n = {"n": 0}
+
+        async def smart_execute(*args, **kwargs):
+            call_n["n"] += 1
+            if call_n["n"] == 1:
+                # First call: select reserve ledger entries
+                r = MagicMock()
+                r.scalars.return_value.all.return_value = reserve_entries
+                return r
+            else:
+                # Subsequent calls: bucket lookups by id
+                # Extract bucket_id from the query
+                for bid, bucket in buckets_by_id.items():
+                    # Return whichever bucket matches; simplified mock
+                    pass
+                # We need to figure out which bucket is being queried.
+                # In the simplified mock, return based on call order.
+                # Since entries are processed in order, track which entry
+                # we're on.
+                entry_idx = call_n["n"] - 2  # 0-indexed after first call
+                if entry_idx < len(reserve_entries):
+                    bid = reserve_entries[entry_idx].bucket_id
+                else:
+                    bid = None
+                r = MagicMock()
+                r.scalar_one_or_none.return_value = buckets_by_id.get(bid)
+                return r
+
+        db.execute = smart_execute
+        added = []
+        db.add = lambda obj: added.append(obj)
+        db._added = added
+        return db
+
+    def test_actual_less_than_reserved_two_entries_no_dangling(self):
+        """actual=80, reserved=60+40=100. Excess 20 released from last entry.
+
+        Entry A (bucket_free, 60): fully captured (60)
+        Entry B (bucket_sub, 40): 20 captured + 20 released
+        Both buckets must have reserved=0 after.
+        """
+        uid = uuid.uuid4()
+        bid_free = uuid.uuid4()
+        bid_sub = uuid.uuid4()
+
+        bucket_free = _make_bucket(
+            bucket_type="free", remaining=500, reserved=60,
+            user_id=uid, bucket_id=bid_free,
+        )
+        bucket_sub = _make_bucket(
+            bucket_type="subscription", remaining=3500, reserved=40,
+            user_id=uid, bucket_id=bid_sub,
+        )
+
+        re_a = SimpleNamespace(id=uuid.uuid4(), bucket_id=bid_free, credits_delta=-60)
+        re_b = SimpleNamespace(id=uuid.uuid4(), bucket_id=bid_sub, credits_delta=-40)
+
+        db = self._db_for_capture([re_a, re_b], {bid_free: bucket_free, bid_sub: bucket_sub})
+
+        entries = _run(shadow_capture(
+            db, user_id=uid, job_id="job-cap-1", actual_credits=80,
+        ))
+
+        # All reserve entries must be settled
+        directions = [e.direction for e in entries]
+        assert "capture" in directions
+
+        # No dangling reserved on either bucket
+        assert bucket_free.reserved == 0, f"bucket_free.reserved={bucket_free.reserved}"
+        assert bucket_sub.reserved == 0, f"bucket_sub.reserved={bucket_sub.reserved}"
+
+        # Total captured should equal actual (80)
+        total_captured = sum(abs(e.credits_delta) for e in entries if e.direction == "capture")
+        total_released = sum(abs(e.credits_delta) for e in entries if e.direction == "release")
+        assert total_captured == 80
+        assert total_released == 20
+
+    def test_actual_less_than_reserved_single_entry(self):
+        """actual=30, reserved=50. Entry split: 30 captured + 20 released."""
+        uid = uuid.uuid4()
+        bid = uuid.uuid4()
+        bucket = _make_bucket(
+            bucket_type="free", remaining=500, reserved=50,
+            user_id=uid, bucket_id=bid,
+        )
+        re_a = SimpleNamespace(id=uuid.uuid4(), bucket_id=bid, credits_delta=-50)
+
+        db = self._db_for_capture([re_a], {bid: bucket})
+
+        entries = _run(shadow_capture(
+            db, user_id=uid, job_id="job-cap-2", actual_credits=30,
+        ))
+
+        assert bucket.reserved == 0
+        total_captured = sum(abs(e.credits_delta) for e in entries if e.direction == "capture")
+        total_released = sum(abs(e.credits_delta) for e in entries if e.direction == "release")
+        assert total_captured == 30
+        assert total_released == 20
+
+    def test_actual_equals_reserved_exact_match(self):
+        """actual=100, reserved=60+40=100. All captured, nothing released."""
+        uid = uuid.uuid4()
+        bid_a = uuid.uuid4()
+        bid_b = uuid.uuid4()
+        bucket_a = _make_bucket(bucket_type="free", remaining=500, reserved=60, user_id=uid, bucket_id=bid_a)
+        bucket_b = _make_bucket(bucket_type="subscription", remaining=3500, reserved=40, user_id=uid, bucket_id=bid_b)
+
+        re_a = SimpleNamespace(id=uuid.uuid4(), bucket_id=bid_a, credits_delta=-60)
+        re_b = SimpleNamespace(id=uuid.uuid4(), bucket_id=bid_b, credits_delta=-40)
+
+        db = self._db_for_capture([re_a, re_b], {bid_a: bucket_a, bid_b: bucket_b})
+
+        entries = _run(shadow_capture(
+            db, user_id=uid, job_id="job-cap-3", actual_credits=100,
+        ))
+
+        assert bucket_a.reserved == 0
+        assert bucket_b.reserved == 0
+        total_captured = sum(abs(e.credits_delta) for e in entries if e.direction == "capture")
+        total_released = sum(abs(e.credits_delta) for e in entries if e.direction == "release")
+        assert total_captured == 100
+        assert total_released == 0
+
+    def test_actual_zero_releases_all(self):
+        """actual=0, reserved=50. Everything released, nothing captured."""
+        uid = uuid.uuid4()
+        bid = uuid.uuid4()
+        bucket = _make_bucket(bucket_type="free", remaining=500, reserved=50, user_id=uid, bucket_id=bid)
+        re_a = SimpleNamespace(id=uuid.uuid4(), bucket_id=bid, credits_delta=-50)
+
+        db = self._db_for_capture([re_a], {bid: bucket})
+
+        entries = _run(shadow_capture(
+            db, user_id=uid, job_id="job-cap-4", actual_credits=0,
+        ))
+
+        assert bucket.reserved == 0
+        total_captured = sum(abs(e.credits_delta) for e in entries if e.direction == "capture")
+        total_released = sum(abs(e.credits_delta) for e in entries if e.direction == "release")
+        assert total_captured == 0
+        assert total_released == 50
+
+    def test_three_entries_partial_release_no_dangling(self):
+        """actual=90, reserved=40+30+50=120. Excess 30 released from last entries.
+
+        Reverse order: entry C (50) → release 30, capture 20; entry B (30) → full capture; entry A (40) → full capture.
+        All buckets reserved=0 after.
+        """
+        uid = uuid.uuid4()
+        bid_a, bid_b, bid_c = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+        bucket_a = _make_bucket(bucket_type="free", remaining=500, reserved=40, user_id=uid, bucket_id=bid_a)
+        bucket_b = _make_bucket(bucket_type="subscription", remaining=3000, reserved=30, user_id=uid, bucket_id=bid_b)
+        bucket_c = _make_bucket(bucket_type="topup", remaining=5000, reserved=50, user_id=uid, bucket_id=bid_c)
+
+        re_a = SimpleNamespace(id=uuid.uuid4(), bucket_id=bid_a, credits_delta=-40)
+        re_b = SimpleNamespace(id=uuid.uuid4(), bucket_id=bid_b, credits_delta=-30)
+        re_c = SimpleNamespace(id=uuid.uuid4(), bucket_id=bid_c, credits_delta=-50)
+
+        db = self._db_for_capture(
+            [re_a, re_b, re_c],
+            {bid_a: bucket_a, bid_b: bucket_b, bid_c: bucket_c},
+        )
+
+        entries = _run(shadow_capture(
+            db, user_id=uid, job_id="job-cap-5", actual_credits=90,
+        ))
+
+        assert bucket_a.reserved == 0
+        assert bucket_b.reserved == 0
+        assert bucket_c.reserved == 0
+        total_captured = sum(abs(e.credits_delta) for e in entries if e.direction == "capture")
+        total_released = sum(abs(e.credits_delta) for e in entries if e.direction == "release")
+        assert total_captured == 90
+        assert total_released == 30
+
+
+# ===================================================================
+# shadow_rollback
+# ===================================================================
+
+
+class TestShadowRollback:
+    def test_rollback_zeros_bucket(self):
+        uid = uuid.uuid4()
+        bucket_id = uuid.uuid4()
+        bucket = _make_bucket(
+            bucket_type="subscription", remaining=3000, reserved=500,
+            user_id=uid, bucket_id=bucket_id,
+        )
+
+        db = AsyncMock()
+        r = MagicMock()
+        r.scalar_one_or_none.return_value = bucket
+        db.execute = AsyncMock(return_value=r)
+        added = []
+        db.add = lambda obj: added.append(obj)
+
+        entry = _run(shadow_rollback(db, user_id=uid, bucket_id=bucket_id))
+
+        assert entry is not None
+        assert entry.direction == "rollback"
+        assert entry.credits_delta == -3000
+        assert bucket.remaining == 0
+        assert bucket.reserved == 0
+
+    def test_rollback_missing_bucket_returns_none(self):
+        db = AsyncMock()
+        r = MagicMock()
+        r.scalar_one_or_none.return_value = None
+        db.execute = AsyncMock(return_value=r)
+
+        entry = _run(shadow_rollback(db, user_id=uuid.uuid4(), bucket_id=uuid.uuid4()))
+        assert entry is None
+
+
+# ===================================================================
+# shadow_safe
+# ===================================================================
+
+
+class TestShadowSafe:
+    def test_success_returns_result(self):
+        async def ok_fn():
+            return 42
+        assert _run(shadow_safe(ok_fn)) == 42
+
+    def test_exception_returns_none(self):
+        async def bad_fn():
+            raise RuntimeError("boom")
+        assert _run(shadow_safe(bad_fn)) is None
+
+    def test_passes_args(self):
+        async def fn(a, b, c=None):
+            return (a, b, c)
+        assert _run(shadow_safe(fn, 1, 2, c=3)) == (1, 2, 3)
+
+
+# ===================================================================
+# Shadow failure isolation: V2 paths unaffected
+# ===================================================================
+
+
+class TestShadowFailureIsolation:
+    """Ensure that shadow service exceptions never propagate to callers."""
+
+    def test_grant_db_failure_is_swallowed(self):
+        db = AsyncMock()
+        db.add = MagicMock(side_effect=RuntimeError("connection lost"))
+        # Should not raise
+        result = _run(shadow_grant(db, user_id=uuid.uuid4(), bucket_type="free", amount=100))
+        assert result is None
+
+    def test_reserve_db_failure_is_swallowed(self):
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=RuntimeError("timeout"))
+        # Should not raise
+        entries = _run(shadow_reserve(
+            db, user_id=uuid.uuid4(), job_id="j", estimated_credits=50,
+        ))
+        assert entries == []
+
+    def test_release_db_failure_is_swallowed(self):
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=RuntimeError("timeout"))
+        entries = _run(shadow_release(db, user_id=uuid.uuid4(), job_id="j"))
+        assert entries == []
+
+    def test_rollback_db_failure_is_swallowed(self):
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=RuntimeError("timeout"))
+        entry = _run(shadow_rollback(db, user_id=uuid.uuid4(), bucket_id=uuid.uuid4()))
+        assert entry is None
