@@ -277,67 +277,6 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
 
       {submitError ? <ErrorBanner message={submitError} /> : null}
 
-      {/* Speaker Configuration Section */}
-      <section className="surface-card p-5">
-        <h3 className="text-lg font-semibold text-foreground mb-4">说话人配置</h3>
-        <div className="space-y-3">
-          {resource.speakerOptions.map((option) => {
-            const voiceConfig = speakerVoices[option.id]
-            return (
-              <div key={option.id} className="flex flex-wrap items-center gap-3">
-                {/* Speaker name input */}
-                <div className="flex items-center gap-2 min-w-0">
-                  <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground shrink-0">
-                    {option.id}
-                  </span>
-                  <div className="group rounded-lg border border-border bg-muted/30 transition hover:border-primary/30 focus-within:border-primary/40">
-                    <input
-                      className="w-36 rounded-lg bg-transparent px-3 py-2 text-sm text-foreground focus:outline-none input-focus-ring"
-                      onChange={(e) => setSpeakerNames((prev) => ({ ...prev, [option.id]: e.currentTarget.value }))}
-                      placeholder="名称"
-                      value={speakerNames[option.id] ?? option.displayName}
-                    />
-                  </div>
-                </div>
-
-                {/* Voice select */}
-                <div className="flex items-center gap-2 min-w-0 flex-1">
-                  <span className="text-xs text-muted-foreground shrink-0">音色:</span>
-                  <div className="group flex-1 min-w-[160px] max-w-xs rounded-lg border border-border bg-muted/30 transition hover:border-primary/30 focus-within:border-primary/40">
-                    <select
-                      className="w-full rounded-lg bg-transparent px-3 py-2 text-sm text-foreground focus:outline-none input-focus-ring"
-                      onChange={(e) => { if (e.currentTarget.value) updateSpeakerVoice(option.id, { voiceId: e.currentTarget.value }) }}
-                      value={voiceConfig?.voiceId ?? ''}
-                    >
-                      <option value="">-- 请选择 --</option>
-                      {allVoices.map((v) => (
-                        <option key={v.voiceId} value={v.voiceId}>
-                          {v.speakerName ? `${v.speakerName} - ` : ''}{v.label || v.voiceId}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
-
-                {/* Clone button */}
-                <button
-                  className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-3 py-2 text-xs font-medium text-cyan-400 transition hover:bg-cyan-500/20 hover:border-cyan-500/50 disabled:opacity-50 shrink-0"
-                  disabled={voiceConfig?.isCloning}
-                  onClick={() => { void handleClone(option.id) }}
-                  type="button"
-                >
-                  {voiceConfig?.isCloning ? '克隆中...' : '克隆'}
-                </button>
-
-                {voiceConfig?.cloneError ? (
-                  <span className="text-xs text-red-400">{voiceConfig.cloneError}</span>
-                ) : null}
-              </div>
-            )
-          })}
-        </div>
-      </section>
-
       {/* Pagination */}
       {hasPagination ? (
         <Pagination
@@ -372,28 +311,7 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
                         const nextSpeakerId = event.currentTarget.value
                         const currentSpeakerId = segmentSpeakers[item.segmentId] ?? item.speakerId
                         if (nextSpeakerId === currentSpeakerId) return
-                        const currentIdx = resource.items.findIndex((i) => i.segmentId === item.segmentId)
-                        const subsequentItems = resource.items.slice(currentIdx)
-                        const affectedCount = subsequentItems.filter((i) => {
-                          const spk = segmentSpeakers[i.segmentId] ?? i.speakerId
-                          return spk === currentSpeakerId || spk === nextSpeakerId
-                        }).length
-
-                        if (affectedCount > 1 && window.confirm(
-                          `是否将后续所有 "${resource.speakerOptions.find(o => o.id === currentSpeakerId)?.displayName || currentSpeakerId}" 替换为 "${resource.speakerOptions.find(o => o.id === nextSpeakerId)?.displayName || nextSpeakerId}"，同时互换？\n\n将影响 ${affectedCount} 个片段。\n\n确定=批量互换，取消=仅修改当前。`
-                        )) {
-                          setSegmentSpeakers((prev) => {
-                            const updated = { ...prev }
-                            for (const sub of subsequentItems) {
-                              const spk = updated[sub.segmentId] ?? sub.speakerId
-                              if (spk === currentSpeakerId) updated[sub.segmentId] = nextSpeakerId
-                              else if (spk === nextSpeakerId) updated[sub.segmentId] = currentSpeakerId
-                            }
-                            return updated
-                          })
-                        } else {
-                          setSegmentSpeakers((prev) => ({ ...prev, [item.segmentId]: nextSpeakerId }))
-                        }
+                        setSegmentSpeakers((prev) => ({ ...prev, [item.segmentId]: nextSpeakerId }))
                       }}
                       value={segmentSpeakers[item.segmentId] ?? item.speakerId}
                     >
@@ -451,17 +369,6 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
                 <div className="mt-3">
                   <div className="flex items-center justify-between mb-1">
                     <span className="text-xs font-medium text-muted-foreground">译文</span>
-                    {isEligibleForPreview ? (
-                      <button
-                        className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-400 transition hover:bg-emerald-500/20 hover:border-emerald-500/50 disabled:opacity-50"
-                        disabled={isPreviewingThis}
-                        onClick={() => { void handlePreviewSegment(item.segmentId) }}
-                        type="button"
-                        title="生成并播放该段译文的 TTS 配音"
-                      >
-                        {isPreviewingThis ? '生成中...' : '▶ 试听配音'}
-                      </button>
-                    ) : null}
                   </div>
                   <div className="group rounded-xl border border-border bg-muted/30 transition hover:border-primary/30 hover:bg-primary/5 focus-within:border-primary/40 focus-within:bg-primary/5">
                     <textarea

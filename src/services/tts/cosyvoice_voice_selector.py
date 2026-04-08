@@ -1,13 +1,16 @@
-"""CosyVoice v3 voice selector v2 — structured tag matching with style micro-tuning.
+"""CosyVoice v3 voice selector — shared combined_rerank + legacy fallback.
 
 All voice IDs are official cosyvoice-v3-flash presets from:
 https://help.aliyun.com/zh/model-studio/cosyvoice-voice-list
+
+Two public APIs:
+- ``select_cosyvoice_voice_match()``  — NEW: shared combined_rerank via Gateway profiles
+- ``select_voice_match()``            — LEGACY: hardcoded _BASE_MAP + B2 rerank (kept as fallback)
 """
 
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -420,4 +423,146 @@ def select_voice_match(
         match_score=0.20,
         match_confidence="low",
         backup_voices=(),
+    )
+
+
+# ---------------------------------------------------------------------------
+# NEW: Shared combined_rerank scoring via Gateway profiles
+# ---------------------------------------------------------------------------
+
+from services.tts.voice_match_types import VoiceMatchResult as SharedVoiceMatchResult
+
+
+def select_cosyvoice_voice_match(
+    *,
+    gender: str | None,
+    age_group: str | None = None,
+    persona_style: str | None = None,
+    energy_level: str | None = None,
+    is_childlike: bool = False,
+) -> SharedVoiceMatchResult:
+    """Select the best CosyVoice voice using shared combined_rerank.
+
+    Flow:
+    1. Load matchable voice pool from Gateway (with static fallback)
+    2. Filter by endpoint availability (international / mainland)
+    3. Filter by gender (with childlike override)
+    4. Score ALL candidates via combined_rerank (same as VolcEngine)
+    5. Return top-scored voice + backups
+
+    Falls back to legacy ``select_voice_match()`` when Gateway pool
+    is empty or scoring produces no results.
+    """
+    from services.tts.cosyvoice_endpoint_config import (
+        get_runtime_endpoint_mode,
+        is_voice_available,
+    )
+    from services.tts.cosyvoice_voice_catalog import list_matchable_cosyvoice_voices
+    from services.tts.voice_reranker import (
+        combined_rerank,
+        load_profiles,
+        resolve_age_bucket,
+        score_to_confidence,
+    )
+
+    effective_gender = "child" if is_childlike else gender
+    if not effective_gender:
+        logger.info("[CosyVoice-matcher] No gender, fallback=%s", FALLBACK_VOICE)
+        return SharedVoiceMatchResult(
+            voice_id=FALLBACK_VOICE,
+            match_reason="fallback(no_gender)",
+            match_score=0.20,
+            match_confidence="low",
+            backup_voices=(),
+        )
+
+    g = effective_gender.lower().strip()
+    age_bucket = resolve_age_bucket(age_group)
+    persona = (persona_style or "").lower().strip()
+    energy = (energy_level or "").lower().strip()
+
+    # --- Step 1: Load voice pool ---
+    endpoint_mode = get_runtime_endpoint_mode()
+    pool = list_matchable_cosyvoice_voices()
+
+    # --- Step 1b: Detect static fallback ---
+    # Static catalog entries lack Gateway-provided demographic tags
+    # (age_group, persona_style, energy_level).  When that happens the
+    # combined_rerank catalog-tag scoring is meaningless, so we fall
+    # back to the legacy deterministic matcher.
+    _has_catalog_tags = any(v.get("age_group") or v.get("persona_style") for v in pool[:5])
+    if not _has_catalog_tags:
+        logger.info(
+            "[CosyVoice-matcher] static fallback detected (no catalog tags), using legacy matcher",
+        )
+        legacy = select_voice_match(
+            gender, age_group=age_group, persona_style=persona_style,
+            energy_level=energy_level, is_childlike=is_childlike,
+        )
+        return SharedVoiceMatchResult(
+            voice_id=legacy.voice_id,
+            match_reason=f"legacy_fallback({legacy.match_reason})",
+            match_score=legacy.match_score,
+            match_confidence=legacy.match_confidence,
+            backup_voices=legacy.backup_voices,
+        )
+
+    # --- Step 2: Endpoint availability filter ---
+    pool = [v for v in pool if is_voice_available(str(v["voice_id"]), endpoint_mode)]
+
+    # --- Step 3: Gender filter ---
+    candidates = [v for v in pool if v.get("gender") == g]
+
+    # Child expansion: if pool is tiny, add childlike=true from other genders
+    if g == "child" and len(candidates) < 3:
+        profiles = load_profiles("cosyvoice", endpoint_mode=endpoint_mode)
+        childlike_extras = [
+            v for v in pool
+            if v.get("gender") != "child"
+            and v["voice_id"] in profiles
+            and profiles[v["voice_id"]].get("childlike") is True
+        ]
+        candidates.extend(childlike_extras)
+
+    if not candidates:
+        logger.info(
+            "[CosyVoice-matcher] no candidates for gender=%s, mode=%s, falling back to legacy",
+            g, endpoint_mode,
+        )
+        legacy = select_voice_match(
+            gender, age_group=age_group, persona_style=persona_style,
+            energy_level=energy_level, is_childlike=is_childlike,
+        )
+        return SharedVoiceMatchResult(
+            voice_id=legacy.voice_id,
+            match_reason=f"legacy_fallback({legacy.match_reason})",
+            match_score=legacy.match_score,
+            match_confidence=legacy.match_confidence,
+            backup_voices=legacy.backup_voices,
+        )
+
+    # --- Step 4: Combined scoring via shared reranker ---
+    profiles = load_profiles("cosyvoice", endpoint_mode=endpoint_mode)
+    scored = combined_rerank(
+        candidates, profiles,
+        gender=g, age_bucket=age_bucket, persona=persona, energy=energy,
+    )
+
+    best_vid = scored[0][0]
+    best_score = scored[0][1]
+    remaining = tuple(vid for vid, _ in scored[1:6])
+    confidence = score_to_confidence(best_score)
+
+    logger.info(
+        "[CosyVoice-matcher] combined_rerank: %s (score=%.2f, gender=%s, age=%s, persona=%s, "
+        "energy=%s, pool=%d, mode=%s, confidence=%s)",
+        best_vid, best_score, g, age_bucket, persona, energy,
+        len(candidates), endpoint_mode, confidence,
+    )
+    return SharedVoiceMatchResult(
+        voice_id=best_vid,
+        match_reason=f"combined_rerank({g},pool={len(candidates)})",
+        match_score=best_score,
+        match_confidence=confidence,
+        backup_voices=remaining,
     )

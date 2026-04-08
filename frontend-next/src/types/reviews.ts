@@ -4,6 +4,7 @@ export type NativeReviewStage =
   | 'speaker_review'
   | 'translation_review'
   | 'voice_review'
+  | 'voice_selection_review'
 
 export interface ReviewSpeakerOption {
   id: string
@@ -155,6 +156,55 @@ export interface VoiceReviewApprovalInput {
   projectDir: string
   voiceIdA: string | null
   voiceIdB: string | null
+}
+
+export interface VoiceSelectionSpeakerSegment {
+  segmentId: number
+  startMs: number
+  endMs: number
+  durationS: number
+  sourceText: string
+  audioUrl: string
+}
+
+export interface VoiceSelectionAutoMatchedVoice {
+  voiceId: string
+  label: string
+  matchConfidence: string
+}
+
+export interface VoiceSelectionSpeaker {
+  speakerId: string
+  speakerName: string
+  segmentCount: number
+  totalDurationS: number
+  autoMatchedVoice: VoiceSelectionAutoMatchedVoice | null
+  canClone: boolean
+  segments: VoiceSelectionSpeakerSegment[]
+}
+
+export interface VoiceSelectionAvailableVoice {
+  voiceId: string
+  label: string
+  gender: string
+  provider: string
+}
+
+export interface VoiceSelectionPayload {
+  message: string
+  ttsProvider: string
+  speakers: VoiceSelectionSpeaker[]
+  availableVoices: VoiceSelectionAvailableVoice[]
+  cloneCostCredits: number
+}
+
+export interface VoiceSelectionApprovalInput {
+  jobId: string
+  speakers: Array<{
+    speakerId: string
+    voiceId: string
+    voiceSource: 'catalog' | 'cloned' | 'auto_matched'
+  }>
 }
 
 export interface VolcEngineStudioVoiceOption {

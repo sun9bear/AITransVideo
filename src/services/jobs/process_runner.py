@@ -34,6 +34,7 @@ from services.jobs.models import (
     STAGE_TRANSLATION_CONFIG_REVIEW,
     STAGE_TRANSLATION_REVIEW,
     STAGE_VOICE_REVIEW,
+    STAGE_VOICE_SELECTION_REVIEW,
 )
 from services.jobs.store import JobStore
 from services.manifest_reader import load_manifest_payload
@@ -72,7 +73,7 @@ STAGE_CODE_MAP = {
     "S2": STAGE_SPEAKER_REVIEW,
     "S3": STAGE_TRANSLATION_REVIEW,
     "S4": STAGE_DRAFT,
-    "S5": STAGE_DRAFT,
+    "S5": STAGE_VOICE_SELECTION_REVIEW,
     "S6": STAGE_LEGACY_PROCESS_OUTPUT,
 }
 INTERNAL_STAGE_MAP = {
@@ -84,6 +85,8 @@ INTERNAL_STAGE_MAP = {
     "translation": STAGE_TRANSLATION_REVIEW,
     "translation_review": STAGE_TRANSLATION_REVIEW,
     "voice_review": STAGE_VOICE_REVIEW,
+    "voice_selection_review": STAGE_VOICE_SELECTION_REVIEW,
+    "voice_selection": STAGE_VOICE_SELECTION_REVIEW,
     "alignment": STAGE_DRAFT,
     "draft": STAGE_DRAFT,
     "legacy_process_output": STAGE_LEGACY_PROCESS_OUTPUT,

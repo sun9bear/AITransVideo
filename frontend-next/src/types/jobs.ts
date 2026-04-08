@@ -19,6 +19,7 @@ export type PublicStage =
   | 'translation_config_review'
   | 'translation_review'
   | 'voice_review'
+  | 'voice_selection_review'
 
 export type ReviewGate = Record<string, unknown>
 
@@ -128,7 +129,7 @@ export interface ProjectDetailResource {
 
 export interface CreateTranslationJobInput {
   youtubeUrl: string
-  speakers: '1' | '2' | 'auto'
+  speakers: string
   voiceA?: string
   voiceB?: string
   transcriptionMethod?: 'assemblyai' | 'gemini'

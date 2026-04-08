@@ -432,10 +432,9 @@ class TTSGenerator:
             energy = getattr(segment, "energy_level", None)
             resolution_source = f"speaker_cache({segment.speaker_id})"
         else:
-            # Fall back to demographic selector when the segment voice_id is not
-            # a compatible builtin preset for the active CosyVoice model.
-            from services.tts.cosyvoice_instruction_enhancer import enhance_voice_selection
-            from services.tts.cosyvoice_voice_selector import infer_is_childlike
+            # Auto-match via shared resolver (same pipeline as VolcEngine).
+            from services.tts.voice_match_resolver import resolve_voice_match
+            from services.tts.voice_match_types import VoiceMatchRequest
 
             gender = getattr(segment, "gender", None)
             age_group = getattr(segment, "age_group", None)
@@ -448,15 +447,18 @@ class TTSGenerator:
                     f"has empty gender — voice matcher will use fallback",
                     flush=True,
                 )
-            childlike = infer_is_childlike(age_group or "", voice_desc)
-            enhanced = enhance_voice_selection(
-                gender=gender, age_group=age_group,
-                persona_style=persona, energy_level=energy,
-                is_childlike=childlike,
-            )
-            voice = enhanced.voice_id
-            confidence = enhanced.match_confidence
-            resolution_source = f"enhancer({confidence})"
+            match_result = resolve_voice_match(VoiceMatchRequest(
+                tts_provider="cosyvoice",
+                mode="auto",
+                gender=gender,
+                age_group=age_group,
+                persona_style=persona,
+                energy_level=energy,
+                voice_description=voice_desc,
+            ))
+            voice = match_result.voice_id
+            confidence = match_result.match_confidence
+            resolution_source = f"resolver({match_result.match_reason})"
             # Cache the auto-matched result for this speaker
             self._speaker_voice_cache[segment.speaker_id] = (voice, confidence)
             print(

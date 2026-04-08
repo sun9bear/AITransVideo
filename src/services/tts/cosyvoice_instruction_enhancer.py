@@ -1,16 +1,17 @@
-"""CosyVoice instruction enhancer — wraps selector with optional instruction generation.
+"""CosyVoice instruction enhancer — wraps resolver with optional instruction generation.
 
-B1: instruction feature is gated OFF via static flag. Returns selector result
+B1: instruction feature is gated OFF via static flag. Returns resolver result
 with instruction=None. Extension point for future Instruct support once the
 DashScope endpoint enables it for the active model.
+
+Now delegates to ``select_cosyvoice_voice_match()`` (shared combined_rerank)
+instead of the legacy ``select_voice_match()`` hardcoded mapper.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Final
-
-from services.tts.cosyvoice_voice_selector import VoiceMatchResult, select_voice_match
 
 # Static feature gate — no runtime probe, no env var check.
 # Flip to True when the DashScope endpoint supports instruction
@@ -50,11 +51,13 @@ def enhance_voice_selection(
 ) -> EnhancedVoiceResult:
     """Select a voice and optionally generate an instruction string.
 
-    Delegates to select_voice_match() for the base voice selection, then
-    wraps the result with instruction metadata. In B1, instruction is
-    always None (INSTRUCT_ENABLED=False).
+    Delegates to ``select_cosyvoice_voice_match()`` (shared combined_rerank)
+    for the base voice selection, then wraps the result with instruction
+    metadata. In B1, instruction is always None (INSTRUCT_ENABLED=False).
     """
-    match = select_voice_match(
+    from services.tts.cosyvoice_voice_selector import select_cosyvoice_voice_match
+
+    match = select_cosyvoice_voice_match(
         gender=gender,
         age_group=age_group,
         persona_style=persona_style,

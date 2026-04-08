@@ -127,15 +127,32 @@ class TestUnknownProvider:
         with pytest.raises(UnsupportedProviderError, match="nonexistent_provider"):
             resolve_voice_match(req)
 
-    def test_cosyvoice_not_connected_raises(self) -> None:
-        """CosyVoice is not connected this round — should raise, not silently pass."""
-        req = VoiceMatchRequest(
-            tts_provider="cosyvoice",
-            mode="auto",
-            gender="female",
+    def test_cosyvoice_dispatches_to_selector(self) -> None:
+        """CosyVoice provider dispatches to _dispatch_cosyvoice → cosyvoice_voice_selector."""
+        import services.tts.voice_match_resolver as resolver_mod
+
+        fake_result = VoiceMatchResult(
+            voice_id="longanyang",
+            match_reason="test",
+            match_score=0.60,
+            match_confidence="medium",
+            backup_voices=(),
         )
-        with pytest.raises(UnsupportedProviderError, match="cosyvoice"):
-            resolve_voice_match(req)
+
+        with patch.object(
+            resolver_mod, "_dispatch_cosyvoice", return_value=fake_result,
+        ) as mock_dispatch:
+            req = VoiceMatchRequest(
+                tts_provider="cosyvoice",
+                mode="auto",
+                gender="female",
+                age_group="middle",
+                persona_style="warm",
+            )
+            result = resolve_voice_match(req)
+
+        assert result.voice_id == "longanyang"
+        mock_dispatch.assert_called_once_with(req)
 
 
 # ===================================================================

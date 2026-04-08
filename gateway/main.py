@@ -46,6 +46,7 @@ from job_intercept import (
     update_source_metadata,
 )
 from proxy import close_client, init_client, proxy_request
+from voice_selection_api import voice_clone_for_selection
 
 
 @asynccontextmanager
@@ -122,6 +123,10 @@ app.include_router(subscriptions_router)
 app.include_router(voice_catalog_router)
 app.include_router(voice_catalog_internal_router)
 
+from user_voice_api import router as user_voice_router, internal_router as user_voice_internal_router
+app.include_router(user_voice_router)
+app.include_router(user_voice_internal_router)
+
 
 # --- Gateway-native upload endpoint (before catch-all) ---
 
@@ -148,6 +153,7 @@ app.get("/job-api/jobs/{job_id}")(intercept_get_job)
 app.delete("/job-api/jobs/{job_id}")(intercept_delete_job_v2)
 app.post("/job-api/jobs/{job_id}/source-metadata")(update_source_metadata)
 app.post("/job-api/jobs/{job_id}/metering")(update_job_metering)
+app.post("/job-api/jobs/{job_id}/voice-clone")(voice_clone_for_selection)
 
 # Job sub-resources: logs, artifacts, result-summary, continue, review/*, download/*, etc.
 app.api_route(

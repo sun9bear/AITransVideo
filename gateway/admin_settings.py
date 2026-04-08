@@ -42,6 +42,7 @@ class AdminSettings(BaseModel):
     studio_tts_provider: str = "minimax"           # Default TTS provider for studio mode
     cosyvoice_runtime_endpoint_mode: str = "international"  # CosyVoice runtime: "international" or "mainland"
     cosyvoice_offline_endpoint_mode: str = "mainland"       # CosyVoice offline: "international" or "mainland"
+    voice_clone_cost_credits: int = 500                     # Credits cost per voice clone operation
 
     @field_validator("cosyvoice_runtime_endpoint_mode", "cosyvoice_offline_endpoint_mode")
     @classmethod

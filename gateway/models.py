@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -518,6 +518,38 @@ class CreditsLedger(Base):
     )
     metadata_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+
+
+class UserVoice(Base):
+    """Per-user personal voice library entry (MiniMax cloned voices)."""
+
+    __tablename__ = "user_voices"
+    __table_args__ = (
+        Index("idx_user_voices_user_id", "user_id"),
+        UniqueConstraint("user_id", "voice_id", name="uq_user_voices_user_voice"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    voice_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    voice_type: Mapped[str] = mapped_column(String(20), nullable=False, default="cloned")
+    provider: Mapped[str] = mapped_column(String(50), nullable=False, default="minimax_voice_clone")
+    tts_provider: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    platform: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    label: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    source_speaker_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
     )
 

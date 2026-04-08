@@ -307,7 +307,8 @@ function resolveActiveReviewStage(payload: ApiWebUiStateResponse) {
   if (
     activeStage === 'speaker_review' ||
     activeStage === 'translation_review' ||
-    activeStage === 'voice_review'
+    activeStage === 'voice_review' ||
+    activeStage === 'voice_selection_review'
   ) {
     return activeStage
   }
@@ -316,7 +317,8 @@ function resolveActiveReviewStage(payload: ApiWebUiStateResponse) {
   if (
     gateStage === 'speaker_review' ||
     gateStage === 'translation_review' ||
-    gateStage === 'voice_review'
+    gateStage === 'voice_review' ||
+    gateStage === 'voice_selection_review'
   ) {
     return gateStage
   }
@@ -442,6 +444,10 @@ function getReviewStageLabel(stage: NativeReviewStage) {
     return '音色确认'
   }
 
+  if (stage === 'voice_selection_review') {
+    return '音色选择'
+  }
+
   return '翻译审核'
 }
 
@@ -474,7 +480,7 @@ function resolvePageSizeOptions(value: unknown) {
 }
 
 function normalizeNativeReviewStage(value: unknown): NativeReviewStage | null {
-  if (value === 'speaker_review' || value === 'translation_review' || value === 'voice_review') {
+  if (value === 'speaker_review' || value === 'translation_review' || value === 'voice_review' || value === 'voice_selection_review') {
     return value
   }
 

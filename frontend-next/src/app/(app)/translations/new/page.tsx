@@ -9,7 +9,6 @@ import { getJobDisplayTitle, getStageLabel } from "@/features/jobs/presentation"
 import { ApiError } from "@/lib/api/client"
 import { getErrorMessage } from '@/lib/api/errors'
 import { getEntitlements, type UserEntitlements } from "@/lib/api/entitlements"
-import { estimateCosts, formatCostCny } from "@/lib/cost/estimator"
 import { listJobs, submitTranslationJob } from "@/lib/api/jobs"
 import { getVoiceLibrary, type VoiceLibraryEntry } from "@/lib/api/voiceLibrary"
 import { usePollingTask } from "@/lib/react/usePollingTask"
@@ -23,7 +22,7 @@ export default function NewTranslationPage() {
   const [uploadFileName, setUploadFileName] = useState("")
   const [isUploading, setIsUploading] = useState(false)
   const [uploadProgress, setUploadProgress] = useState("")
-  const [speakers, setSpeakers] = useState<"1" | "2" | "auto">("auto")
+  const [speakers, setSpeakers] = useState<string>("auto")
   const [transcriptionMethod, setTranscriptionMethod] = useState<"assemblyai" | "gemini">("assemblyai")
   const [serviceMode, setServiceMode] = useState<"express" | "studio">("express")
   const [entitlements, setEntitlements] = useState<UserEntitlements | null>(null)
@@ -354,12 +353,16 @@ export default function NewTranslationPage() {
                   <select
                     className="w-full rounded-xl bg-transparent px-4 py-3 text-sm text-foreground focus:outline-none input-focus-ring"
                     value={speakers}
-                    onChange={(e) => setSpeakers(e.target.value as "1" | "2" | "auto")}
+                    onChange={(e) => setSpeakers(e.target.value)}
                     disabled={isBlockedByConcurrency || submitState === "submitting"}
                   >
                     <option value="auto">自动</option>
                     <option value="1">1 人</option>
                     <option value="2">2 人</option>
+                    <option value="3">3 人</option>
+                    <option value="4">4 人</option>
+                    <option value="5">5 人</option>
+                    <option value="6">6 人</option>
                   </select>
                 </div>
               </div>
@@ -368,20 +371,6 @@ export default function NewTranslationPage() {
             <p className="text-xs text-muted-foreground/60">
               快捷版自动完成全部流程，无需人工操作。工作台版可审核译文、克隆原声音色。
             </p>
-
-            {/* 长视频提示 */}
-            <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4">
-              <p className="text-sm font-medium text-amber-400 mb-2">处理时长参考</p>
-              <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-xs text-muted-foreground">
-                <span>≤15 分钟</span><span className="text-emerald-400">约 10-20 分钟</span>
-                <span>15-30 分钟</span><span className="text-foreground/70">约 20-45 分钟</span>
-                <span>30-60 分钟</span><span className="text-amber-400">约 1-2 小时</span>
-                <span>60-120 分钟</span><span className="text-orange-400">约 2-4 小时</span>
-                <span>120-180 分钟</span><span className="text-red-400">约 3-5 小时</span>
-                <span>&gt;180 分钟</span><span className="text-red-500 font-medium">暂不支持</span>
-              </div>
-              <p className="mt-2 text-xs text-muted-foreground/60">长视频处理完成后将通过浏览器推送通知您。超过 3 小时的视频请裁剪后重试。</p>
-            </div>
 
             <button
               type="submit"
@@ -393,80 +382,8 @@ export default function NewTranslationPage() {
           </form>
         </section>
 
-        {/* Cost estimate */}
-        <CostEstimatePanel transcriptionMethod={transcriptionMethod} serviceMode={serviceMode} />
       </div>
     </div>
-  )
-}
-
-function CostEstimatePanel({ transcriptionMethod, serviceMode }: { transcriptionMethod: "assemblyai" | "gemini"; serviceMode: "express" | "studio" }) {
-  const durations = [3, 10, 30]
-  // Fetch credits estimates from Gateway (source of truth)
-  const [creditsMap, setCreditsMap] = useState<Record<number, number>>({})
-  useEffect(() => {
-    let cancelled = false
-    ;(async () => {
-      const results: Record<number, number> = {}
-      await Promise.all(
-        durations.map(async (m) => {
-          try {
-            const res = await fetch(`/api/credits/estimate?minutes=${m}&service_mode=${serviceMode}&quality_tier=standard`)
-            if (res.ok) {
-              const data = await res.json()
-              results[m] = data.estimated_credits
-            }
-          } catch { /* shadow — non-fatal */ }
-        }),
-      )
-      if (!cancelled) setCreditsMap(results)
-    })()
-    return () => { cancelled = true }
-  }, [serviceMode])
-
-  return (
-    <section className="rounded-2xl border border-border bg-card p-5 h-fit">
-      <h3 className="text-base font-semibold text-foreground">费用预估</h3>
-      <p className="text-xs text-muted-foreground/60 mt-1">根据视频时长预估，仅供参考。</p>
-      <div className="mt-4 space-y-3">
-        {durations.map((minutes) => {
-          const result = estimateCosts({
-            videoDurationMinutes: minutes,
-            transcriptionMethod,
-            needsVoiceClone: true,
-            speakerCount: 1,
-          })
-          const creditsEstimate = creditsMap[minutes]
-          return (
-            <div key={minutes} className="rounded-xl border border-border bg-muted/30 p-3 space-y-1 tabular-nums">
-              <div className="flex items-center justify-between">
-                <p className="text-sm font-semibold text-foreground/80">{minutes} 分钟视频</p>
-                {creditsEstimate != null && (
-                  <span className="text-xs font-medium text-primary bg-primary/10 rounded-full px-2 py-0.5">
-                    ~{creditsEstimate} 点
-                  </span>
-                )}
-              </div>
-              {result.stages.map((stage) => (
-                <div key={stage.stage} className="flex justify-between text-xs text-muted-foreground">
-                  <span>{stage.label}（{stage.model}）</span>
-                  <span>{formatCostCny(stage.estimatedCostCny)}</span>
-                </div>
-              ))}
-              <div className="h-px bg-muted/40 my-1" />
-              <div className="flex justify-between text-sm font-semibold text-foreground/80">
-                <span>预估总计</span>
-                <span>{formatCostCny(result.totalCny)}</span>
-              </div>
-            </div>
-          )
-        })}
-        <p className="text-xs text-muted-foreground/60">
-          点数预估由服务端计算（{serviceMode === "studio" ? "工作台" : "快捷"}模式），
-          实际费用取决于视频内容和处理结果。
-        </p>
-      </div>
-    </section>
   )
 }
 

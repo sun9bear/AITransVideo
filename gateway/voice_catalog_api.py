@@ -146,12 +146,14 @@ async def internal_voice_catalog(
     for v in voices:
         voice_labels = labels_by_voice.get(v.voice_id, {})
 
-        # Demographic fields: final > text
-        demo_label = None
-        for lt in _LABEL_PRIORITY:
-            if lt in voice_labels:
-                demo_label = voice_labels[lt]
-                break
+        # Demographic fields: field-level fallback final > text
+        demo_labels = [voice_labels.get(lt) for lt in _LABEL_PRIORITY if lt in voice_labels]
+        def _demo_field(field: str):
+            for lbl in demo_labels:
+                val = getattr(lbl, field, None)
+                if val is not None:
+                    return val
+            return None
 
         # Profile fields: final > audio_round3 > audio_round2 > audio_round1
         profile_label = None
@@ -164,20 +166,21 @@ async def internal_voice_catalog(
             "voice_id": v.voice_id,
             "display_name": v.display_name,
             "gender": v.gender,
-            "age_group": demo_label.age_group if demo_label else None,
-            "persona_style": demo_label.persona_style if demo_label else None,
-            "energy_level": demo_label.energy_level if demo_label else None,
+            "age_group": _demo_field("age_group"),
+            "persona_style": _demo_field("persona_style"),
+            "energy_level": _demo_field("energy_level"),
             "resource_id": resource_id or (v.provider_config or {}).get("resource_id"),
             "endpoint_modes": (v.provider_config or {}).get("endpoint_modes"),
             "scene": v.scene,
             "language": v.language,
             "matchable": True,
-            # Profile fields for B2 reranking
+            # Profile fields for reranking
             "pitch_level": profile_label.pitch_level if profile_label else None,
             "warmth": profile_label.warmth if profile_label else None,
             "maturity": profile_label.maturity if profile_label else None,
             "childlike": profile_label.childlike if profile_label else None,
             "texture_tags": profile_label.texture_tags if profile_label else None,
+            "delivery_style": profile_label.delivery_style if profile_label else None,
         })
 
     return {

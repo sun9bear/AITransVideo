@@ -9,7 +9,7 @@ import { StatusBadge } from '@/components/status-badge'
 import { StageProgress } from '@/components/stage-progress'
 import { LogViewer } from '@/components/log-viewer'
 import { ResultDownloadList } from '@/components/result-download-list'
-import { TranslationReviewPanel, VoiceReviewPanel } from '@/components/workspace'
+import { TranslationReviewPanel, VoiceReviewPanel, VoiceSelectionPanel } from '@/components/workspace'
 import {
   getErrorCategory,
   getErrorSummaryMessage,
@@ -240,6 +240,11 @@ export default function WorkspacePage() {
       {/* Voice review panel — only for volcengine + studio (panel detects via snapshot) */}
       {isWaitingForReview && effectiveReviewStage === 'voice_review' ? (
         <VoiceReviewPanel jobId={jobId} onAdvanced={handleAdvanced} />
+      ) : null}
+
+      {/* Voice selection review — Studio mode: per-speaker voice selection + clone */}
+      {isWaitingForReview && effectiveReviewStage === 'voice_selection_review' ? (
+        <VoiceSelectionPanel jobId={jobId} onAdvanced={handleAdvanced} />
       ) : null}
 
       {/* Auto-processing stages (speaker/translation_config are now automatic) */}

@@ -66,7 +66,12 @@ python -m pytest tests/
 | API | Gateway Route | Backend Port | Purpose |
 |-----|--------------|-------------|---------|
 | Job API | `/job-api/*` | 8877 | Job CRUD, status, logs, artifacts, review state, voice library, downloads |
-| Gateway | all routes | 8880 | Auth, job ownership, proxy, native upload |
+| Gateway | all routes | 8880 | Auth, job ownership, proxy, native upload, voice clone, user voices |
+
+Gateway 原生端点（不经过 Job API 代理）：
+- `POST /job-api/jobs/{job_id}/voice-clone` — 音色克隆（含 shadow credits）
+- `GET/POST/DELETE /gateway/user-voices` — 个人音色库 CRUD
+- `POST /internal/user-voices/expire` — 内部：标记音色过期
 
 > **Note:** Web UI API (port 8876) 已在 Phase 4 下线。所有功能已迁移到 Job API 和 Gateway。
 

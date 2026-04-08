@@ -19,6 +19,7 @@ SPEAKER_REVIEW_STAGE = "speaker_review"
 TRANSLATION_CONFIG_REVIEW_STAGE = "translation_config_review"
 TRANSLATION_REVIEW_STAGE = "translation_review"
 VOICE_REVIEW_STAGE = "voice_review"
+VOICE_SELECTION_REVIEW_STAGE = "voice_selection_review"
 AUDIO_ALIGNMENT_REVIEW_STAGE = "audio_alignment_review"
 
 REVIEW_STAGE_TAB_MAP = {
@@ -26,6 +27,7 @@ REVIEW_STAGE_TAB_MAP = {
     TRANSLATION_CONFIG_REVIEW_STAGE: "translation-config",
     TRANSLATION_REVIEW_STAGE: "translation",
     VOICE_REVIEW_STAGE: "voice-library",
+    VOICE_SELECTION_REVIEW_STAGE: "voice-selection",
     AUDIO_ALIGNMENT_REVIEW_STAGE: "audio-alignment",
 }
 

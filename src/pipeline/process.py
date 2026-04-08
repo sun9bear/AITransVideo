@@ -66,6 +66,7 @@ from services.review_state import (
     TRANSLATION_CONFIG_REVIEW_STAGE,
     TRANSLATION_REVIEW_STAGE,
     VOICE_REVIEW_STAGE,
+    VOICE_SELECTION_REVIEW_STAGE,
     ReviewStateManager,
 )
 from services.llm import LLMRouter, load_llm_fallback_config
@@ -639,8 +640,8 @@ class ProcessPipeline:
                 transcript_result = gemini_transcriber.transcribe(
                     normalized_url,
                     str(final_project_dir / "transcript"),
-                    speaker_labels=normalized_speakers in {"auto", 2},
-                    speakers_expected=2 if normalized_speakers == 2 else None,
+                    speaker_labels=normalized_speakers == "auto" or (isinstance(normalized_speakers, int) and normalized_speakers >= 2),
+                    speakers_expected=normalized_speakers if isinstance(normalized_speakers, int) and normalized_speakers >= 2 else None,
                 )
                 print(f"[S1] Gemini 转录完成：共 {len(transcript_result.lines)} 条")
             else:
@@ -649,8 +650,8 @@ class ProcessPipeline:
                 transcript_result = transcriber.transcribe(
                     str(speech_audio_path),
                     str(final_project_dir / "transcript"),
-                    speaker_labels=normalized_speakers in {"auto", 2},
-                    speakers_expected=2 if normalized_speakers == 2 else None,
+                    speaker_labels=normalized_speakers == "auto" or (isinstance(normalized_speakers, int) and normalized_speakers >= 2),
+                    speakers_expected=normalized_speakers if isinstance(normalized_speakers, int) and normalized_speakers >= 2 else None,
                 )
                 print(f"[S1] 完成：共 {len(transcript_result.lines)} 条转录")
 
@@ -675,13 +676,8 @@ class ProcessPipeline:
                 print(f"[S1] 自动识别到 {detected_count} 位说话人：{detected_summary}")
                 if detected_count <= 1:
                     effective_speakers = 1
-                elif detected_count == 2:
-                    effective_speakers = 2
                 else:
-                    raise ValueError(
-                        "自动识别到超过 2 位说话人，当前仅支持 1~2 位说话人自动配音。"
-                        f"检测结果：{detected_summary}"
-                    )
+                    effective_speakers = detected_count
             else:
                 effective_speakers = normalized_speakers
 
@@ -974,6 +970,18 @@ class ProcessPipeline:
                 if custom_prompt:
                     print("[S3] 用户提供了自定义翻译提示词。")
 
+            # Build speaker_voices dict for N-speaker support
+            _speaker_voices: dict[str, str] = {}
+            if voice_id_a:
+                _speaker_voices["speaker_a"] = voice_id_a
+            if voice_id_b:
+                _speaker_voices["speaker_b"] = voice_id_b
+            # For speakers beyond a/b, "auto" lets TTS matcher choose
+            if effective_speakers > 2:
+                for i in range(2, effective_speakers):
+                    spk_id = f"speaker_{chr(ord('a') + i)}"
+                    _speaker_voices.setdefault(spk_id, "auto")
+
             if s3_cache_hit:
                 self._apply_runtime_voice_overrides(
                     translation_result.segments,
@@ -981,6 +989,7 @@ class ProcessPipeline:
                     display_name_a=speaker_name_a,
                     voice_id_b=voice_id_b,
                     display_name_b=speaker_name_b,
+                    speaker_voices=_speaker_voices if effective_speakers > 2 else None,
                 )
             else:
                 print("[S3] 翻译文本...")
@@ -990,10 +999,11 @@ class ProcessPipeline:
                     voice_id=voice_id_a,
                     display_name=speaker_name_a,
                     voice_id_b=voice_id_b,
-                    display_name_b=speaker_name_b if effective_speakers == 2 else None,
+                    display_name_b=speaker_name_b if effective_speakers >= 2 else None,
                     video_title=download_result.video_title,
                     youtube_url=normalized_url,
                     glossary=_review_glossary or None,
+                    speaker_voices=_speaker_voices if effective_speakers > 2 else None,
                 )
                 print(f"[S3] 完成：共 {translation_result.total_segments} 段")
 
@@ -1002,7 +1012,6 @@ class ProcessPipeline:
                 _review_speaker_styles,
             )
             self._log_review_speaker_styles(_review_speaker_styles)
-            _review_speaker_styles = {}
 
             state_manager.set_stage(
                 current_stage_name,
@@ -1090,6 +1099,120 @@ class ProcessPipeline:
                     execution_mode=translation_execution_mode,
                 ),
             )
+
+            # --- voice_selection_review gate (Studio mode only) ---
+            approved_voice_selection = self._get_approved_review_payload(
+                review_state_manager,
+                VOICE_SELECTION_REVIEW_STAGE,
+            )
+            if approved_voice_selection is not None:
+                # Apply approved voice selections from N-speaker payload
+                sel_speakers = approved_voice_selection.get("speakers")
+                if isinstance(sel_speakers, list):
+                    for sp in sel_speakers:
+                        sp_id = sp.get("speaker_id", "")
+                        sp_voice = sp.get("voice_id", "")
+                        if sp_id and sp_voice:
+                            _speaker_voices[sp_id] = sp_voice
+                    # Backward compat: sync voice_id_a / voice_id_b
+                    voice_id_a = _speaker_voices.get("speaker_a", voice_id_a)
+                    voice_id_b = _speaker_voices.get("speaker_b", voice_id_b)
+                    print(f"[S5] 用户确认音色：{_speaker_voices}")
+                    # Apply selected voices to segments (voice_id was None during translation)
+                    self._apply_runtime_voice_overrides(
+                        translation_result.segments,
+                        voice_id_a=voice_id_a,
+                        display_name_a=speaker_name_a,
+                        voice_id_b=voice_id_b,
+                        display_name_b=speaker_name_b,
+                        speaker_voices=_speaker_voices,
+                    )
+            elif config.wait_for_review and job_requires_review and job_service_mode == "studio":
+                # Build voice selection review payload and pause
+                vs_payload = self._build_voice_selection_review_payload(
+                    transcript_result=transcript_result,
+                    translation_result=translation_result,
+                    tts_provider=job_tts_provider,
+                    service_mode=job_service_mode,
+                    source_audio_path=source_audio_path,
+                    effective_speakers=effective_speakers,
+                    speaker_names={
+                        "speaker_a": speaker_name_a,
+                        "speaker_b": speaker_name_b,
+                    },
+                    speaker_styles=_review_speaker_styles,
+                )
+                review_state_manager.set_stage(
+                    VOICE_SELECTION_REVIEW_STAGE,
+                    status=REVIEW_STATUS_PENDING,
+                    payload=vs_payload,
+                    activate=True,
+                )
+                review_message = "请为每位说话人选择或克隆配音音色"
+                print(f"[S5] {review_message}")
+                state_manager.set_stage(
+                    "voice_selection",
+                    StageStatus.RUNNING,
+                    {"execution_mode": "waiting_for_voice_selection"},
+                )
+                current_stage_name = None
+                print(
+                    self._build_web_review_marker(
+                        stage=VOICE_SELECTION_REVIEW_STAGE,
+                        project_dir=final_project_dir,
+                        message=review_message,
+                    )
+                )
+                return self._build_paused_result(
+                    project_dir=final_project_dir,
+                    stage=VOICE_SELECTION_REVIEW_STAGE,
+                    message=review_message,
+                )
+
+            # --- Pre-TTS voice validation (cloned voices only) ---
+            if config.wait_for_review and job_service_mode == "studio":
+                expired_voices = self._validate_cloned_voices(_speaker_voices)
+                if expired_voices:
+                    # Notify gateway to expire these voices (best-effort)
+                    for ev_id in expired_voices:
+                        self._notify_voice_expired(config.job_id, ev_id)
+                    # Rebuild payload with expired_voice_ids and return to voice selection
+                    vs_payload = self._build_voice_selection_review_payload(
+                        transcript_result=transcript_result,
+                        translation_result=translation_result,
+                        tts_provider=job_tts_provider,
+                        service_mode=job_service_mode,
+                        source_audio_path=source_audio_path,
+                        effective_speakers=effective_speakers,
+                        speaker_names={
+                            "speaker_a": speaker_name_a,
+                            "speaker_b": speaker_name_b,
+                        },
+                        speaker_styles=_review_speaker_styles,
+                    )
+                    vs_payload["expired_voice_ids"] = expired_voices
+                    vs_payload["validation_error"] = f"检测到 {len(expired_voices)} 个音色已失效，请重新选择"
+                    review_state_manager.set_stage(
+                        VOICE_SELECTION_REVIEW_STAGE,
+                        status=REVIEW_STATUS_PENDING,
+                        payload=vs_payload,
+                        activate=True,
+                    )
+                    review_message = f"检测到 {len(expired_voices)} 个音色已失效，请重新选择"
+                    print(f"[S5] {review_message}")
+                    print(
+                        self._build_web_review_marker(
+                            stage=VOICE_SELECTION_REVIEW_STAGE,
+                            project_dir=final_project_dir,
+                            message=review_message,
+                        )
+                    )
+                    return self._build_paused_result(
+                        project_dir=final_project_dir,
+                        stage=VOICE_SELECTION_REVIEW_STAGE,
+                        message=review_message,
+                    )
+
             current_stage_name = "alignment"
             state_manager.set_stage(
                 current_stage_name,
@@ -1513,6 +1636,190 @@ class ProcessPipeline:
             "current_prompt_template": current_prompt,
         }
 
+    def _validate_cloned_voices(self, speaker_voices: dict[str, str]) -> list[str]:
+        """Validate cloned voice IDs (vt_ prefix) via quick TTS test. Returns expired IDs."""
+        expired: list[str] = []
+        for spk_id, voice_id in speaker_voices.items():
+            if not voice_id.startswith("vt_"):
+                continue
+            try:
+                from services.voice_asset import VoiceAssetVerifier
+                verifier = VoiceAssetVerifier.from_env()
+                verifier.verify_voice(
+                    speaker_id="validate",
+                    voice_id=voice_id,
+                    sample_text="测试。",
+                )
+            except Exception as exc:
+                err_msg = str(exc).lower()
+                if "2054" in err_msg or "voice id not exist" in err_msg or "voice_id not exist" in err_msg:
+                    print(f"[S5] 音色 {voice_id} ({spk_id}) 已失效", flush=True)
+                    expired.append(voice_id)
+                else:
+                    # Non-expiry error (network, rate limit, etc.) — don't block
+                    print(f"[S5] 音色 {voice_id} ({spk_id}) 验证异常（非过期）: {str(exc)[:100]}", flush=True)
+        return expired
+
+    def _notify_voice_expired(self, job_id: str | None, voice_id: str) -> None:
+        """Best-effort notify gateway to mark voice as expired in user's library."""
+        if not job_id:
+            return
+        try:
+            from urllib import request as urllib_request
+            import json as _json
+            req = urllib_request.Request(
+                "http://127.0.0.1:8880/internal/user-voices/expire",
+                data=_json.dumps({"job_id": job_id, "voice_id": voice_id}).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            urllib_request.urlopen(req, timeout=5)
+        except Exception:
+            pass
+
+    def _build_voice_selection_review_payload(
+        self,
+        *,
+        transcript_result: TranscriptResult,
+        translation_result: TranslationResult,
+        tts_provider: str,
+        service_mode: str,
+        source_audio_path: str,
+        effective_speakers: int,
+        speaker_names: dict[str, str],
+        speaker_styles: dict[str, dict[str, str]] | None = None,
+    ) -> dict[str, object]:
+        """Build pending payload for voice_selection_review stage."""
+        # Collect per-speaker segment info from transcript
+        speaker_segments: dict[str, list[dict[str, object]]] = {}
+        for line in transcript_result.lines:
+            sid = line.speaker_id
+            speaker_segments.setdefault(sid, []).append({
+                "segment_id": line.index,
+                "start_ms": line.start_ms,
+                "end_ms": line.end_ms,
+                "duration_s": round((line.end_ms - line.start_ms) / 1000, 1),
+                "source_text": (line.source_text or "")[:200],
+            })
+
+        # Build available_voices list + auto-match per speaker for non-minimax providers
+        available_voices_list: list[dict[str, object]] = []
+        voice_display_names: dict[str, str] = {}  # voice_id → display label (for auto-match)
+        volc_resource = ""
+
+        if tts_provider == "volcengine":
+            from services.tts.volcengine_voice_catalog import get_voices_for_resource, RESOURCE_ID_1_0, RESOURCE_ID_2_0
+            # Studio uses 2.0, Express uses 1.0
+            volc_resource = RESOURCE_ID_2_0 if service_mode == "studio" else RESOURCE_ID_1_0
+            pool = get_voices_for_resource(volc_resource)
+            # Only Chinese voices for now
+            zh_prefixes = ("ICL_zh_", "zh_") if volc_resource == RESOURCE_ID_1_0 else ("zh_", "saturn_zh_")
+            zh_pool = [v for v in pool if str(v.get("voice_id", "")).startswith(zh_prefixes)]
+            for v in zh_pool:
+                vid = str(v.get("voice_id", ""))
+                label = str(v.get("display_name", vid))
+                voice_display_names[vid] = label
+                available_voices_list.append({
+                    "voice_id": vid,
+                    "label": label,
+                    "gender": str(v.get("gender", "")),
+                    "provider": "volcengine",
+                })
+
+        elif tts_provider == "cosyvoice":
+            from services.tts.cosyvoice_endpoint_config import get_runtime_endpoint_mode, is_voice_available
+            from services.tts.cosyvoice_voice_catalog import list_matchable_cosyvoice_voices
+            endpoint_mode = get_runtime_endpoint_mode()
+            cosy_pool = list_matchable_cosyvoice_voices()
+            for v in cosy_pool:
+                vid = str(v.get("voice_id", ""))
+                if not is_voice_available(vid, endpoint_mode):
+                    continue
+                label = str(v.get("display_name", v.get("name", vid)))
+                voice_display_names[vid] = label
+                available_voices_list.append({
+                    "voice_id": vid,
+                    "label": label,
+                    "gender": str(v.get("gender", "")),
+                    "provider": "cosyvoice",
+                })
+
+        # Unified auto-match helper (volcengine + cosyvoice via shared resolver)
+        def _auto_match(gender: str, age_group: str, persona: str, energy: str) -> dict[str, object] | None:
+            if tts_provider not in ("volcengine", "cosyvoice") or not gender:
+                return None
+            try:
+                from services.tts.voice_match_resolver import resolve_voice_match
+                from services.tts.voice_match_types import VoiceMatchRequest
+                result = resolve_voice_match(VoiceMatchRequest(
+                    tts_provider=tts_provider,
+                    resource_id=volc_resource or None,
+                    mode="auto",
+                    gender=gender,
+                    age_group=age_group,
+                    persona_style=persona,
+                    energy_level=energy,
+                ))
+                matched_name = voice_display_names.get(result.voice_id, result.voice_id)
+                return {"voice_id": result.voice_id, "label": matched_name, "match_confidence": result.match_confidence}
+            except Exception:
+                return None
+
+        # Get speaker profiles: prefer explicit speaker_styles, fallback to segment attributes
+        speaker_profiles: dict[str, dict[str, str]] = {}
+        if speaker_styles:
+            for sid, style in speaker_styles.items():
+                speaker_profiles[sid] = {
+                    "gender": style.get("gender", ""),
+                    "age_group": style.get("age_group", ""),
+                    "persona_style": style.get("persona_style", ""),
+                    "energy_level": style.get("energy_level", ""),
+                }
+        if not speaker_profiles:
+            # Fallback: read from segments (already injected by _apply_review_speaker_styles_to_segments)
+            for seg in translation_result.segments:
+                if seg.speaker_id not in speaker_profiles:
+                    g = getattr(seg, "gender", "") or ""
+                    if g:
+                        speaker_profiles[seg.speaker_id] = {
+                            "gender": g,
+                            "age_group": getattr(seg, "age_group", "") or "",
+                            "persona_style": getattr(seg, "persona_style", "") or "",
+                            "energy_level": getattr(seg, "energy_level", "") or "",
+                        }
+
+        speakers_payload: list[dict[str, object]] = []
+        for sid in sorted(speaker_segments.keys()):
+            segs = speaker_segments[sid]
+            total_dur = sum(float(s.get("duration_s", 0)) for s in segs)
+            segs_sorted = sorted(segs, key=lambda s: float(s.get("duration_s", 0)), reverse=True)
+            can_clone = total_dur >= 10 and tts_provider == "minimax"
+
+            # Auto-match for volcengine / cosyvoice
+            profile = speaker_profiles.get(sid, {})
+            auto_matched = _auto_match(
+                profile.get("gender", ""), profile.get("age_group", ""),
+                profile.get("persona_style", ""), profile.get("energy_level", ""),
+            )
+
+            speakers_payload.append({
+                "speaker_id": sid,
+                "speaker_name": speaker_names.get(sid, sid),
+                "segment_count": len(segs),
+                "total_duration_s": round(total_dur, 1),
+                "auto_matched_voice": auto_matched,
+                "can_clone": can_clone,
+                "segments": segs_sorted,
+            })
+
+        return {
+            "message": "请为每位说话人选择或克隆配音音色",
+            "tts_provider": tts_provider,
+            "speakers": speakers_payload,
+            "available_voices": available_voices_list,
+            "clone_cost_credits": 500,
+        }
+
     def _build_translation_review_payload(
         self,
         translation_result: TranslationResult,
@@ -1537,16 +1844,20 @@ class ProcessPipeline:
 
     def _normalize_speakers(self, value: int | str) -> int | str:
         if isinstance(value, int):
-            if value in {1, 2}:
+            if 1 <= value <= 10:
                 return value
-            raise ValueError("当前仅支持 --speakers 1、2 或 auto。")
+            raise ValueError("说话人数量范围为 1-10。")
 
         normalized_value = str(value).strip().lower()
         if normalized_value == "auto":
             return "auto"
-        if normalized_value in {"1", "2"}:
-            return int(normalized_value)
-        raise ValueError("当前仅支持 --speakers 1、2 或 auto。")
+        try:
+            int_val = int(normalized_value)
+            if 1 <= int_val <= 10:
+                return int_val
+        except ValueError:
+            pass
+        raise ValueError("说话人数量范围为 1-10 或 auto。")
 
     def _detect_transcript_language(
         self,
@@ -1771,15 +2082,20 @@ class ProcessPipeline:
         display_name_a: str,
         voice_id_b: str | None,
         display_name_b: str,
+        speaker_voices: dict[str, str] | None = None,
     ) -> None:
         for segment in segments:
-            if segment.speaker_id == "speaker_b":
+            # N-speaker: use speaker_voices dict if available
+            if speaker_voices and segment.speaker_id in speaker_voices:
+                segment.voice_id = speaker_voices[segment.speaker_id]
+            elif segment.speaker_id == "speaker_b":
                 if voice_id_b is not None:
                     segment.voice_id = voice_id_b
                 segment.display_name = display_name_b
-            else:
+            elif segment.speaker_id == "speaker_a":
                 segment.voice_id = voice_id_a
                 segment.display_name = display_name_a
+            # speaker_c+ without speaker_voices: leave voice_id as-is (auto-match)
 
     def _hydrate_cached_tts_segments(
         self,

@@ -134,6 +134,51 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
                         _build_global_voice_library(project_root=service.runner.project_root),
                     )
                     return
+                # --- speaker-audio: list segments ---
+                if (len(path_parts) == 4
+                        and path_parts[0] == "jobs"
+                        and path_parts[2] == "speaker-audio"):
+                    job_id = path_parts[1]
+                    speaker_id = path_parts[3]
+                    record = service.require_job(job_id)
+                    project_dir = _require_project_dir(record)
+                    from services.jobs.review_actions import get_speaker_audio_segments
+                    result = get_speaker_audio_segments(
+                        project_dir=project_dir,
+                        speaker_id=speaker_id,
+                    )
+                    # Fix audio_url with actual job_id
+                    for seg in result.get("segments", []):
+                        seg["audio_url"] = f"/job-api/jobs/{job_id}/speaker-audio/{speaker_id}/{seg['segment_id']}.wav"
+                    self._write_json(HTTPStatus.OK, result)
+                    return
+                # --- speaker-audio: serve WAV segment ---
+                if (len(path_parts) == 5
+                        and path_parts[0] == "jobs"
+                        and path_parts[2] == "speaker-audio"):
+                    import re
+                    job_id = path_parts[1]
+                    speaker_id = path_parts[3]
+                    seg_filename = path_parts[4]
+                    seg_match = re.match(r"^(\d+)\.wav$", seg_filename)
+                    if not seg_match:
+                        self._write_json(HTTPStatus.BAD_REQUEST, {"error": "无效的片段文件名"})
+                        return
+                    segment_id = int(seg_match.group(1))
+                    record = service.require_job(job_id)
+                    project_dir = _require_project_dir(record)
+                    from services.jobs.review_actions import extract_speaker_audio_segment
+                    wav_bytes = extract_speaker_audio_segment(
+                        project_dir=project_dir,
+                        speaker_id=speaker_id,
+                        segment_id=segment_id,
+                    )
+                    self._write_binary(
+                        HTTPStatus.OK,
+                        wav_bytes,
+                        content_type="audio/wav",
+                    )
+                    return
                 self._write_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
             except JobNotFoundError as exc:
                 self._write_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
@@ -268,6 +313,18 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
                         self._write_json(HTTPStatus.OK, result)
                         return
 
+                    if review_subpath == "voice/preview":
+                        _require_waiting_for_review(record)
+                        payload = self._read_json_payload()
+                        from services.jobs.review_actions import preview_voice
+                        from services import config_loader
+                        result = preview_voice(
+                            voice_id=str(payload.get("voice_id", "")).strip(),
+                            config_path=config_loader.DEFAULT_AUTODUB_LOCAL_CONFIG_PATH,
+                        )
+                        self._write_json(HTTPStatus.OK, result)
+                        return
+
                     if review_subpath == "voice/clone":
                         _require_waiting_for_review(record)
                         payload = self._read_json_payload()
@@ -282,6 +339,18 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
                             project_root=service.runner.project_root,
                         )
                         self._write_json(HTTPStatus.OK, result)
+                        return
+
+                    if review_subpath == "voice-selection/approve":
+                        _require_review_gate(record, expected_stage="voice_selection_review")
+                        payload = self._read_json_payload()
+                        from services.jobs.review_actions import approve_voice_selection
+                        approve_voice_selection(
+                            project_dir=project_dir,
+                            speakers=payload.get("speakers", []),
+                        )
+                        continued = service.continue_job(job_id)
+                        self._write_json(HTTPStatus.OK, {"success": True, "job": continued.to_dict()})
                         return
 
                     self._write_json(HTTPStatus.NOT_FOUND, {"error": f"Unknown review action: {review_subpath}"})

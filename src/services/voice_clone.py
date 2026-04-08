@@ -249,6 +249,7 @@ class MiniMaxVoiceCloneClient:
         speaker_id: str,
         speaker_name: str,
         source_audio_path: Path,
+        need_noise_reduction: bool = False,
     ) -> VoiceCloneResult:
         normalized_speaker_id = _normalize_required_text(speaker_id, field_name="speaker_id")
         normalized_speaker_name = _normalize_required_text(speaker_name, field_name="speaker_name")
@@ -259,6 +260,7 @@ class MiniMaxVoiceCloneClient:
             file_id=uploaded_file_id,
             speaker_id=normalized_speaker_id,
             speaker_name=normalized_speaker_name,
+            need_noise_reduction=need_noise_reduction,
         )
         return VoiceCloneResult(
             speaker_id=normalized_speaker_id,
@@ -340,14 +342,23 @@ class MiniMaxVoiceCloneClient:
             )
         return file_id
 
-    def _clone_voice(self, *, file_id: str, speaker_id: str, speaker_name: str) -> str:
+    def _clone_voice(
+        self,
+        *,
+        file_id: str,
+        speaker_id: str,
+        speaker_name: str,
+        need_noise_reduction: bool = False,
+    ) -> str:
         endpoint = self._build_endpoint("voice_clone")
         del speaker_name
         requested_voice_id = _build_requested_voice_id(speaker_id)
-        payload = {
+        payload: dict[str, object] = {
             "file_id": _coerce_clone_request_file_id(file_id),
             "voice_id": requested_voice_id,
         }
+        if need_noise_reduction:
+            payload["need_noise_reduction"] = True
         response_payload = self._post_json_request(
             endpoint=endpoint,
             payload=payload,

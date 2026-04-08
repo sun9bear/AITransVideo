@@ -40,7 +40,7 @@ const TTS_OPTIONS = [
 const EXPRESS_TTS_OPTIONS = [
   { value: 'cosyvoice', label: 'CosyVoice', description: '阿里通义，快速合成，适合快捷版' },
   { value: 'mimo', label: 'MiMo-V2-TTS（小米）', description: '限时免费，RPM 100，自然语言风格控制' },
-  { value: 'volcengine', label: '豆包语音合成 2.0（V3）', description: '火山引擎 V3 流式接口，300+音色，¥3/万字符，快捷版升级选项' },
+  { value: 'volcengine', label: '豆包语音合成 1.0', description: '火山引擎 V3 流式接口，100+音色，¥5/万字符' },
 ]
 
 const STUDIO_TTS_OPTIONS = [

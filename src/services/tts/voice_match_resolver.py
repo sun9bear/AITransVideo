@@ -2,15 +2,11 @@
 
 Entry point: ``resolve_voice_match(request)``
 
-Current dispatch table:
+Dispatch table:
 - ``mode="manual"``  → bypass matcher, return explicit voice directly
 - ``volcengine``     → ``volcengine_voice_selector.select_volcengine_voice_match()``
-- ``cosyvoice``      → NOT connected this round (uses its own direct path)
+- ``cosyvoice``      → ``cosyvoice_voice_selector.select_cosyvoice_voice_match()``
 - unknown provider   → raises ``UnsupportedProviderError``
-
-CosyVoice keeps its existing ``cosyvoice_voice_selector`` + ``cosyvoice_instruction_enhancer``
-call chain in ``tts_generator._generate_one_cosyvoice()``.  It will be migrated to this
-resolver in a future round.
 """
 
 from __future__ import annotations
@@ -64,21 +60,17 @@ def resolve_voice_match(request: VoiceMatchRequest) -> VoiceMatchResult:
     if request.tts_provider == "volcengine":
         return _dispatch_volcengine(request)
 
-    # Future: cosyvoice dispatch will go here.  For now CosyVoice uses its
-    # own direct path in tts_generator._generate_one_cosyvoice().
+    if request.tts_provider == "cosyvoice":
+        return _dispatch_cosyvoice(request)
 
     raise UnsupportedProviderError(
         f"Voice match resolver does not support provider {request.tts_provider!r}. "
-        f"Supported: volcengine (this round). CosyVoice uses its own direct path."
+        f"Supported: volcengine, cosyvoice."
     )
 
 
 def _dispatch_volcengine(request: VoiceMatchRequest) -> VoiceMatchResult:
-    """Dispatch to the VolcEngine voice selector.
-
-    Imports lazily to avoid circular dependencies and to keep the selector
-    as an independent module.
-    """
+    """Dispatch to the VolcEngine voice selector."""
     from services.tts.volcengine_voice_selector import select_volcengine_voice_match
 
     return select_volcengine_voice_match(
@@ -87,4 +79,26 @@ def _dispatch_volcengine(request: VoiceMatchRequest) -> VoiceMatchResult:
         age_group=request.age_group,
         persona_style=request.persona_style,
         energy_level=request.energy_level,
+    )
+
+
+def _dispatch_cosyvoice(request: VoiceMatchRequest) -> VoiceMatchResult:
+    """Dispatch to the CosyVoice voice selector."""
+    from services.tts.cosyvoice_voice_selector import (
+        infer_is_childlike,
+        select_cosyvoice_voice_match,
+    )
+
+    # Infer childlike from demographics + voice_description
+    is_childlike = infer_is_childlike(
+        request.age_group or "",
+        request.voice_description or "",
+    )
+
+    return select_cosyvoice_voice_match(
+        gender=request.gender,
+        age_group=request.age_group,
+        persona_style=request.persona_style,
+        energy_level=request.energy_level,
+        is_childlike=is_childlike,
     )

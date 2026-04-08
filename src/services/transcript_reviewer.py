@@ -242,46 +242,45 @@ class ReviewResult:
 # are factored into constants to avoid duplication.
 
 _PROMPT_SPEAKER_CORRECTION_RULES_AUDIO = """\
-   **⚠ 采访场景全局角色锁定（最高优先级）**：
-   - 先通读全部转录稿，判断这是否是采访/对话场景
-   - 如果是：先确定谁是"主持人/提问者"、谁是"受访者/回答者"
-   - 然后统一检查：所有提问句应归属主持人，所有回答句应归属受访者
-   - 如果发现同一人的连续回答被交替标成 A 和 B，必须统一纠正
-   - 关键判断标准：语义角色（提问 vs 回答）> ASR 给出的 speaker 标签
+   **⚠ 说话人纠正原则（最高优先级）**：
+   - 先通读全部转录稿，判断说话人数量和各自角色
+   - **保留 ASR 识别的所有不同说话人**，不要将不同的人合并为同一个 speaker
+   - 只纠正 ASR 明确标错的段落（根据音色判断同一人的话被标成了另一个人）
+   - 不要仅凭对话内容或角色推断就合并或重新分配说话人
+   - 关键判断标准：音色差异（听音频）> 对话上下文 > ASR 给出的 speaker 标签
 
    **常见 ASR 错误模式**：
    - 短促回应（Yeah, Sure, Right, 嗯, 对）被分给了错误的人
    - A-B-A 快速交叉（中间 B 实际是 A 的延续）
-   - 旁白/介绍被标成了被采访者
-   - **同一人连续回答被错误切换 speaker**：受访者说了一长段话，ASR 因中间停顿把后半段标成了另一个人。判断标准：如果上一句是提问，接下来连续几句都是回答同一个问题，它们应该属于同一个 speaker（受访者），即使 ASR 标了不同的 speaker
-   - **插话/抢话**：主持人在受访者说话中途插入提问，ASR 容易把插话段标成受访者。听音频中的声音重叠和音色变化来判断
-   - **被打断后继续**：受访者被打断后继续之前的话，ASR 可能标成新的说话人
-   - **短促 backchannel vs 长回答**：主持人的"Yeah, sure"（backchannel）和受访者的长段回答要区别对待。backchannel 通常只有 1-3 个词且时长 <2 秒"""
+   - **同一人连续说话被错误切换 speaker**：一个人说了一长段话，ASR 因中间停顿把后半段标成了另一个人。通过音色一致性判断它们属于同一个 speaker
+   - **插话/抢话**：某人在另一人说话中途插入，ASR 容易混淆归属。听音频中的声音重叠和音色变化来判断
+   - **被打断后继续**：说话人被打断后继续之前的话，ASR 可能标成新的说话人
+   - **短促 backchannel**："Yeah, sure" 等极短回应（1-3 词，<2 秒）容易被标错"""
 
 _PROMPT_SPEAKER_CORRECTION_RULES_TEXT = """\
-   **⚠ 采访场景全局角色锁定（最高优先级）**：
-   - 先通读全部转录稿，判断这是否是采访/对话场景
-   - 如果是：先确定谁是"主持人/提问者"、谁是"受访者/回答者"
-   - 然后统一检查：所有提问句应归属主持人，所有回答句应归属受访者
-   - 如果发现同一人的连续回答被交替标成 A 和 B，必须统一纠正
-   - 关键判断标准：语义角色（提问 vs 回答）> ASR 给出的 speaker 标签
+   **⚠ 说话人纠正原则（最高优先级）**：
+   - 先通读全部转录稿，判断说话人数量和各自角色
+   - **保留 ASR 识别的所有不同说话人**，不要将不同的人合并为同一个 speaker
+   - 只纠正 ASR 明确标错的段落（同一人的话被标成了另一个人）
+   - 不要仅凭对话内容或角色推断就合并或重新分配说话人
+   - 关键判断标准：对话上下文 > ASR 给出的 speaker 标签
 
    **常见 ASR 错误模式**：
    - 短促回应（Yeah, Sure, Right, 嗯, 对）被分给了错误的人
    - A-B-A 快速交叉（中间 B 实际是 A 的延续）
-   - 旁白/介绍被标成了被采访者
-   - **同一人连续回答被错误切换 speaker**：受访者说了一长段话，ASR 因中间停顿把后半段标成了另一个人。判断标准：如果上一句是提问，接下来连续几句都是回答同一个问题，它们应该属于同一个 speaker（受访者），即使 ASR 标了不同的 speaker
-   - **插话/抢话**：主持人在受访者说话中途插入提问，ASR 容易把插话段标成受访者。根据对话语义和时间间隔来判断
-   - **被打断后继续**：受访者被打断后继续之前的话，ASR 可能标成新的说话人
-   - **短促 backchannel vs 长回答**：主持人的"Yeah, sure"（backchannel）和受访者的长段回答要区别对待。backchannel 通常只有 1-3 个词且时长 <2 秒"""
+   - **同一人连续说话被错误切换 speaker**：一个人说了一长段话，ASR 因中间停顿把后半段标成了另一个人。判断标准：前后内容连贯、角色一致，应属于同一个 speaker
+   - **插话/抢话**：某人在另一人说话中途插入，ASR 容易混淆归属。根据对话语义和时间间隔来判断
+   - **被打断后继续**：说话人被打断后继续之前的话，ASR 可能标成新的说话人
+   - **短促 backchannel**："Yeah, sure" 等极短回应（1-3 词，<2 秒）容易被标错"""
 
 _PROMPT_OUTPUT_FORMAT = """\
 ## 输出 JSON 格式（严格遵循，不要添加其他字段）
 
 {{
   "speakers": {{
-    "speaker_a": {{"name": "中文姓名", "gender": "female", "age_group": "middle", "role": "角色", "style": "语气描述", "voice_description": "声音清晰专业，语速适中，略带温和的采访语气"}},
-    "speaker_b": {{"name": "中文姓名", "gender": "male", "age_group": "elderly", "role": "角色", "style": "语气描述", "voice_description": "声音低沉沙哑，语速缓慢，带有智慧感和幽默感"}}
+    "speaker_a": {{"name": "中文姓名", "gender": "female", "age_group": "middle", "role": "角色描述", "style": "语气描述", "voice_description": "声音清晰专业，语速适中"}},
+    "speaker_b": {{"name": "中文姓名", "gender": "male", "age_group": "elderly", "role": "角色描述", "style": "语气描述", "voice_description": "声音低沉沙哑，语速缓慢"}},
+    "speaker_c": {{"name": "中文姓名（如有第三位及更多说话人，都要列出）", "gender": "male", "age_group": "middle", "role": "角色描述", "style": "语气描述", "voice_description": "声音特征描述"}}
   }},
   "glossary": {{
     "English term": "中文翻译",
@@ -303,7 +302,12 @@ _REVIEW_PROMPT_WITH_AUDIO = """\
 
 ## 审校任务（一次性完成）
 
-1. **识别说话人身份**：根据音频声音特征、视频标题、对话内容推断每个 speaker 的真实姓名和角色。姓名统一使用中文（如 Charlie Munger → 查理·芒格，Becky Quick → 贝基·奎克）。
+1. **识别说话人身份**：
+   - 从视频标题、对话内容中查找所有被提及的人名（如 "Let's bring in Ryan Reilly" → 下一位说话人是 Ryan Reilly）
+   - 根据音频声音特征区分不同说话人，将人名与 speaker 对应
+   - **每个 speaker 都必须尽力识别真实姓名**，不要留空或用 "Speaker B" 代替。如果对话中有人被称呼或介绍，把名字关联到对应的 speaker
+   - 姓名统一使用中文（如 Warren Buffett → 沃伦·巴菲特，Becky Quick → 贝基·奎克）
+   - 如果实在无法确定姓名，标注为"未知说话人"并说明原因
 2. **纠正说话人标注**：听音频分辨说话人，修正标注错误。
 
 """ + _PROMPT_SPEAKER_CORRECTION_RULES_AUDIO + """
@@ -334,7 +338,12 @@ _REVIEW_PROMPT_TEXT_ONLY = """\
 
 ## 审校任务（一次性完成）
 
-1. **识别说话人身份**：根据视频标题、对话内容推断每个 speaker 的真实姓名和角色。姓名统一使用中文（如 Charlie Munger → 查理·芒格，Becky Quick → 贝基·奎克）。
+1. **识别说话人身份**：
+   - 从视频标题、对话内容中查找所有被提及的人名（如 "Let's bring in Ryan Reilly" → 下一位说话人是 Ryan Reilly）
+   - 根据对话上下文区分不同说话人，将人名与 speaker 对应
+   - **每个 speaker 都必须尽力识别真实姓名**，不要留空或用 "Speaker B" 代替
+   - 姓名统一使用中文（如 Warren Buffett → 沃伦·巴菲特，Becky Quick → 贝基·奎克）
+   - 如果实在无法确定姓名，标注为"未知说话人"并说明原因
 2. **纠正说话人标注**：根据对话语义和角色关系推断说话人，修正标注错误。
 
 """ + _PROMPT_SPEAKER_CORRECTION_RULES_TEXT + """
@@ -574,8 +583,22 @@ def _call_review(
                     "[Review] Uploading audio for multimodal review (%s, %.1f MB)...",
                     audio_path.name, file_size_mb,
                 )
-                audio_file = client.files.upload(file=audio_path)
-                contents.append(audio_file)
+                # Try files.upload (AI Studio) first, fallback to inline Part (Vertex AI)
+                try:
+                    audio_file = client.files.upload(file=audio_path)
+                    contents.append(audio_file)
+                except Exception as upload_exc:
+                    if "only supported in the Gemini Developer client" in str(upload_exc):
+                        # Vertex AI: use inline Part.from_bytes
+                        logger.info("[Review] Vertex AI mode — using inline audio Part")
+                        audio_bytes = audio_path.read_bytes()
+                        suffix = audio_path.suffix.lower()
+                        mime_map = {".wav": "audio/wav", ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".flac": "audio/flac", ".ogg": "audio/ogg"}
+                        mime_type = mime_map.get(suffix, "audio/wav")
+                        audio_part = types.Part.from_bytes(data=audio_bytes, mime_type=mime_type)
+                        contents.append(audio_part)
+                    else:
+                        raise
                 has_audio = True
                 logger.info("[Review] Audio uploaded successfully")
             except Exception as e:
@@ -865,7 +888,7 @@ def _apply_corrections(
             if action == "correct_speaker":
                 idx = c.get("index")
                 to = c.get("to", "")
-                if to not in {"speaker_a", "speaker_b"}:
+                if not re.match(r"^speaker_[a-z]$", to):
                     logger.warning("Invalid speaker_id '%s', skipping", to)
                     continue
                 pos = index_map.get(idx)

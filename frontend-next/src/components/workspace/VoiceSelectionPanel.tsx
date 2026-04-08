@@ -1,0 +1,714 @@
+"use client"
+
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+
+import { getErrorMessage } from '@/lib/api/errors'
+import { getJob } from '@/lib/api/jobs'
+import { getVoiceLibrary, type VoiceLibraryEntry } from '@/lib/api/voiceLibrary'
+import {
+  approveVoiceSelection,
+  cloneVoiceForSelection,
+  deleteUserVoice,
+  getSpeakerAudioSegments,
+  getUserVoices,
+  previewVoice,
+  type SpeakerAudioSegment,
+  type UserVoiceEntry,
+  type VoiceSelectionSpeakerApproval,
+} from '@/lib/api/voiceSelection'
+import { apiClient } from '@/lib/api/client'
+import type { ApiWebUiStateResponse } from '@/types/api'
+import type { JobSummary } from '@/types/jobs'
+
+/* ---------- Types ---------- */
+
+interface SpeakerPayload {
+  speakerId: string
+  speakerName: string
+  segmentCount: number
+  totalDurationS: number
+  canClone: boolean
+  autoMatchedVoice: { voiceId: string; label: string } | null
+}
+
+interface AvailableVoice {
+  voiceId: string
+  label: string
+  gender: string
+  provider: string
+}
+
+interface SpeakerVoiceState {
+  voiceId: string
+  voiceSource: 'catalog' | 'cloned' | 'auto_matched'
+  isCloning: boolean
+  cloneError: string | null
+}
+
+interface VoiceSelectionPanelProps {
+  jobId: string
+  onAdvanced: () => void
+}
+
+/* ---------- Main Component ---------- */
+
+export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelProps) {
+  const [speakers, setSpeakers] = useState<SpeakerPayload[]>([])
+  const [voiceLibrary, setVoiceLibrary] = useState<VoiceLibraryEntry[]>([])
+  const [personalVoices, setPersonalVoices] = useState<UserVoiceEntry[]>([])
+  const [availableVoices, setAvailableVoices] = useState<AvailableVoice[]>([])
+  const [voiceStates, setVoiceStates] = useState<Record<string, SpeakerVoiceState>>({})
+  const [ttsProvider, setTtsProvider] = useState('')
+  const [cloneCostCredits, setCloneCostCredits] = useState(500)
+  const [isLoading, setIsLoading] = useState(true)
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [cloneModalSpeaker, setCloneModalSpeaker] = useState<string | null>(null)
+  const [previewLoading, setPreviewLoading] = useState<Record<string, boolean>>({})
+  const [previewError, setPreviewError] = useState<Record<string, string | null>>({})
+  const [expiredVoiceIds, setExpiredVoiceIds] = useState<string[]>([])
+  const previewAudioRef = useRef<HTMLAudioElement | null>(null)
+
+  // Load review payload
+  useEffect(() => {
+    let cancelled = false
+
+    async function load() {
+      try {
+        setIsLoading(true)
+        setError(null)
+
+        const [reviewState, voices, userVoices] = await Promise.all([
+          apiClient.get<{
+            job_id: string
+            status: string
+            review_gate: Record<string, unknown> | null
+            results: ApiWebUiStateResponse['results']
+          }>(`/jobs/${jobId}/review-state`),
+          getVoiceLibrary().catch(() => ({ voices: [] as VoiceLibraryEntry[] })),
+          getUserVoices().catch(() => [] as UserVoiceEntry[]),
+        ])
+
+        if (cancelled) return
+
+        // Extract voice_selection_review stage payload
+        const stages = reviewState.results?.review_flow?.stages ?? {}
+        const vsStage = stages.voice_selection_review ?? null
+        const payload = vsStage?.payload ?? {}
+
+        const rawSpeakers = Array.isArray(payload.speakers) ? payload.speakers : []
+        const loadedSpeakers: SpeakerPayload[] = rawSpeakers.map((s: Record<string, unknown>) => ({
+          speakerId: String(s.speaker_id ?? ''),
+          speakerName: String(s.speaker_name ?? s.speaker_id ?? ''),
+          segmentCount: Number(s.segment_count ?? 0),
+          totalDurationS: Number(s.total_duration_s ?? 0),
+          canClone: Boolean(s.can_clone),
+          autoMatchedVoice: s.auto_matched_voice
+            ? { voiceId: String((s.auto_matched_voice as Record<string, unknown>).voice_id ?? ''), label: String((s.auto_matched_voice as Record<string, unknown>).label ?? '') }
+            : null,
+        })).filter((s: SpeakerPayload) => s.speakerId)
+
+        const loadedTtsProvider = String(payload.tts_provider ?? '')
+        setTtsProvider(loadedTtsProvider)
+        setCloneCostCredits(Number(payload.clone_cost_credits ?? 500))
+
+        // Parse available_voices from payload (for volcengine etc.)
+        const rawAvailableVoices = Array.isArray(payload.available_voices) ? payload.available_voices : []
+        const parsedAvailableVoices: AvailableVoice[] = rawAvailableVoices.map((v: Record<string, unknown>) => ({
+          voiceId: String(v.voice_id ?? ''),
+          label: String(v.label ?? v.voice_id ?? ''),
+          gender: String(v.gender ?? ''),
+          provider: String(v.provider ?? ''),
+        })).filter((v: AvailableVoice) => v.voiceId)
+        setAvailableVoices(parsedAvailableVoices)
+
+        // Check for expired voice IDs from pipeline validation
+        const payloadExpired = Array.isArray(payload.expired_voice_ids) ? payload.expired_voice_ids.map(String) : []
+        if (payloadExpired.length > 0) setExpiredVoiceIds(payloadExpired)
+
+        // Init voice states with auto-matched or empty (skip expired voices)
+        const initialStates: Record<string, SpeakerVoiceState> = {}
+        for (const sp of loadedSpeakers) {
+          if (sp.autoMatchedVoice && !payloadExpired.includes(sp.autoMatchedVoice.voiceId)) {
+            initialStates[sp.speakerId] = {
+              voiceId: sp.autoMatchedVoice.voiceId,
+              voiceSource: 'auto_matched',
+              isCloning: false,
+              cloneError: null,
+            }
+          } else {
+            initialStates[sp.speakerId] = {
+              voiceId: '',
+              voiceSource: 'catalog',
+              isCloning: false,
+              cloneError: null,
+            }
+          }
+        }
+
+        setSpeakers(loadedSpeakers)
+        setVoiceLibrary('voices' in voices ? (voices as { voices: VoiceLibraryEntry[] }).voices : [])
+        setPersonalVoices(userVoices)
+        setVoiceStates(initialStates)
+      } catch (err) {
+        if (!cancelled) setError(getErrorMessage(err))
+      } finally {
+        if (!cancelled) setIsLoading(false)
+      }
+    }
+
+    load()
+    return () => { cancelled = true }
+  }, [jobId])
+
+  const handleVoiceChange = useCallback((speakerId: string, voiceId: string) => {
+    setVoiceStates((prev) => ({
+      ...prev,
+      [speakerId]: { ...prev[speakerId], voiceId, voiceSource: 'catalog', cloneError: null },
+    }))
+  }, [])
+
+  const handleCloneComplete = useCallback((speakerId: string, voiceId: string) => {
+    setVoiceStates((prev) => ({
+      ...prev,
+      [speakerId]: { voiceId, voiceSource: 'cloned', isCloning: false, cloneError: null },
+    }))
+    setCloneModalSpeaker(null)
+    // Refresh personal voices to include the newly cloned voice
+    getUserVoices().then(setPersonalVoices).catch(() => {})
+  }, [])
+
+  const handlePreview = useCallback(async (speakerId: string) => {
+    const voiceId = voiceStates[speakerId]?.voiceId
+    if (!voiceId) return
+
+    // Cleanup previous audio
+    if (previewAudioRef.current) {
+      previewAudioRef.current.pause()
+      previewAudioRef.current = null
+    }
+
+    setPreviewLoading((p) => ({ ...p, [speakerId]: true }))
+    setPreviewError((p) => ({ ...p, [speakerId]: null }))
+
+    try {
+      const result = await previewVoice(jobId, voiceId)
+
+      if (result.expired) {
+        // Voice expired — remove from personal library and reset selection
+        setPreviewError((p) => ({ ...p, [speakerId]: '音色已失效，请重新选择' }))
+        setVoiceStates((prev) => ({
+          ...prev,
+          [speakerId]: { ...prev[speakerId], voiceId: '', voiceSource: 'catalog' },
+        }))
+        setExpiredVoiceIds((prev) => [...prev, voiceId])
+        // Delete from personal voice library
+        await deleteUserVoice(voiceId).catch(() => {})
+        setPersonalVoices((prev) => prev.filter((v) => v.voiceId !== voiceId))
+        return
+      }
+
+      if (result.error) {
+        setPreviewError((p) => ({ ...p, [speakerId]: result.error }))
+        return
+      }
+
+      if (result.audioBase64) {
+        const audio = new Audio(`data:audio/wav;base64,${result.audioBase64}`)
+        audio.onended = () => { previewAudioRef.current = null }
+        audio.play().catch(() => {})
+        previewAudioRef.current = audio
+      }
+    } catch (err) {
+      setPreviewError((p) => ({ ...p, [speakerId]: getErrorMessage(err) }))
+    } finally {
+      setPreviewLoading((p) => ({ ...p, [speakerId]: false }))
+    }
+  }, [voiceStates, jobId])
+
+  // Cleanup preview audio on unmount
+  useEffect(() => {
+    return () => {
+      if (previewAudioRef.current) {
+        previewAudioRef.current.pause()
+        previewAudioRef.current = null
+      }
+    }
+  }, [])
+
+  const allSelected = useMemo(() => {
+    return speakers.length > 0 && speakers.every((sp) => voiceStates[sp.speakerId]?.voiceId)
+  }, [speakers, voiceStates])
+
+  const anyCloning = useMemo(() => {
+    return Object.values(voiceStates).some((v) => v.isCloning)
+  }, [voiceStates])
+
+  const handleSubmit = useCallback(async () => {
+    if (!allSelected || isSubmitting) return
+    setIsSubmitting(true)
+    setError(null)
+    try {
+      const approvals: VoiceSelectionSpeakerApproval[] = speakers.map((sp) => ({
+        speakerId: sp.speakerId,
+        voiceId: voiceStates[sp.speakerId]?.voiceId ?? '',
+        voiceSource: voiceStates[sp.speakerId]?.voiceSource ?? 'catalog',
+      }))
+      await approveVoiceSelection(jobId, approvals)
+      onAdvanced()
+    } catch (err) {
+      setError(getErrorMessage(err))
+    } finally {
+      setIsSubmitting(false)
+    }
+  }, [allSelected, isSubmitting, speakers, voiceStates, jobId, onAdvanced])
+
+  if (isLoading) {
+    return (
+      <section className="surface-card p-8 text-center">
+        <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-3 border-teal-500 border-t-transparent" />
+        <h3 className="text-lg font-semibold text-foreground">加载音色选择...</h3>
+      </section>
+    )
+  }
+
+  if (error && speakers.length === 0) {
+    return (
+      <section className="surface-card p-6">
+        <p className="text-red-500">{error}</p>
+      </section>
+    )
+  }
+
+  const selectedSpeaker = speakers.find((s) => s.speakerId === cloneModalSpeaker) ?? null
+
+  return (
+    <>
+      <section className="surface-card p-6 space-y-6">
+        {/* Expired voices banner */}
+        {expiredVoiceIds.length > 0 ? (
+          <div className="rounded-lg border border-red-200 dark:border-red-500/20 bg-red-50 dark:bg-red-500/5 p-3">
+            <p className="text-sm text-red-600 dark:text-red-400">
+              检测到 {expiredVoiceIds.length} 个音色已失效，已从选项中移除。请重新选择音色。
+            </p>
+          </div>
+        ) : null}
+
+        {/* Header */}
+        <div className="space-y-1">
+          <h2 className="text-lg font-semibold text-foreground">音色选择</h2>
+          <p className="text-sm text-slate-500">请为每位说话人选择预设音色或克隆专属音色，确认后继续生成配音。</p>
+        </div>
+
+        {/* Speaker list */}
+        <div className="space-y-3">
+          {speakers.map((sp, index) => {
+            const state = voiceStates[sp.speakerId]
+            const statusLabel = state?.voiceSource === 'cloned'
+              ? '已克隆'
+              : state?.voiceId
+                ? '已选择'
+                : '待选择'
+            const statusColor = state?.voiceSource === 'cloned'
+              ? 'text-teal-600 dark:text-teal-400'
+              : state?.voiceId
+                ? 'text-emerald-600 dark:text-emerald-400'
+                : 'text-amber-600 dark:text-amber-400'
+
+            return (
+              <div key={sp.speakerId} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-800/30 p-4">
+                <div className="flex items-start gap-3">
+                  {/* Avatar */}
+                  <div className="flex h-10 w-10 items-center justify-center rounded-full bg-slate-200 dark:bg-slate-700 text-sm font-bold text-slate-600 dark:text-slate-300 shrink-0">
+                    {String.fromCharCode(65 + index)}
+                  </div>
+
+                  <div className="flex-1 min-w-0 space-y-2">
+                    {/* Name + status */}
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-medium text-foreground text-sm">{sp.speakerName}</span>
+                      <span className="text-xs text-slate-400">{sp.speakerId}</span>
+                      <span className="text-xs text-slate-400">{sp.segmentCount} 段 · {sp.totalDurationS.toFixed(1)}s</span>
+                      <span className={`text-xs font-medium ${statusColor}`}>{statusLabel}</span>
+                    </div>
+
+                    {/* Voice select + preview + clone */}
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <select
+                        className="h-8 rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 text-sm text-foreground min-w-[200px]"
+                        onChange={(e) => handleVoiceChange(sp.speakerId, e.target.value)}
+                        value={state?.voiceId ?? ''}
+                      >
+                        <option value="">-- 选择音色 --</option>
+                        {ttsProvider === 'minimax' ? (
+                          <>
+                            {personalVoices.filter((v) => !expiredVoiceIds.includes(v.voiceId)).length > 0 ? (
+                              <optgroup label="我的音色">
+                                {personalVoices
+                                  .filter((v) => !expiredVoiceIds.includes(v.voiceId))
+                                  .map((v) => (
+                                    <option key={v.voiceId} value={v.voiceId}>
+                                      {v.label || v.voiceId}
+                                    </option>
+                                  ))}
+                              </optgroup>
+                            ) : null}
+                            {voiceLibrary.filter((v) => !expiredVoiceIds.includes(v.voiceId) && !personalVoices.some((p) => p.voiceId === v.voiceId)).length > 0 ? (
+                              <optgroup label="音色库">
+                                {voiceLibrary
+                                  .filter((v) => !expiredVoiceIds.includes(v.voiceId) && !personalVoices.some((p) => p.voiceId === v.voiceId))
+                                  .map((v) => (
+                                    <option key={v.voiceId} value={v.voiceId}>
+                                      {v.label || v.voiceId} {v.speakerName ? `(${v.speakerName})` : ''}
+                                    </option>
+                                  ))}
+                              </optgroup>
+                            ) : null}
+                          </>
+                        ) : (
+                          <>
+                            {(() => {
+                              const maleVoices = availableVoices.filter((v) => v.gender === 'male')
+                              const femaleVoices = availableVoices.filter((v) => v.gender === 'female')
+                              const otherVoices = availableVoices.filter((v) => v.gender !== 'male' && v.gender !== 'female')
+                              return (
+                                <>
+                                  {femaleVoices.length > 0 ? (
+                                    <optgroup label="女声">
+                                      {femaleVoices.map((v) => <option key={v.voiceId} value={v.voiceId}>{v.label}</option>)}
+                                    </optgroup>
+                                  ) : null}
+                                  {maleVoices.length > 0 ? (
+                                    <optgroup label="男声">
+                                      {maleVoices.map((v) => <option key={v.voiceId} value={v.voiceId}>{v.label}</option>)}
+                                    </optgroup>
+                                  ) : null}
+                                  {otherVoices.length > 0 ? (
+                                    <optgroup label="其他">
+                                      {otherVoices.map((v) => <option key={v.voiceId} value={v.voiceId}>{v.label}</option>)}
+                                    </optgroup>
+                                  ) : null}
+                                </>
+                              )
+                            })()}
+                          </>
+                        )}
+                      </select>
+
+                      {/* Preview button */}
+                      {state?.voiceId ? (
+                        <button
+                          className="h-8 rounded border border-slate-300 dark:border-slate-600 px-3 text-xs font-medium text-slate-500 dark:text-slate-400 transition hover:bg-slate-100 dark:hover:bg-slate-700 disabled:opacity-50"
+                          disabled={previewLoading[sp.speakerId] || !state?.voiceId}
+                          onClick={() => { void handlePreview(sp.speakerId) }}
+                          type="button"
+                        >
+                          {previewLoading[sp.speakerId] ? '试听中...' : '试听'}
+                        </button>
+                      ) : null}
+
+                      {sp.canClone ? (
+                        <button
+                          className="h-8 rounded border border-teal-500/40 bg-teal-500/10 px-3 text-xs font-medium text-teal-600 dark:text-teal-400 transition hover:bg-teal-500/20 disabled:opacity-50"
+                          disabled={state?.isCloning}
+                          onClick={() => setCloneModalSpeaker(sp.speakerId)}
+                          type="button"
+                        >
+                          {state?.isCloning ? '克隆中...' : '克隆音色'}
+                        </button>
+                      ) : null}
+                    </div>
+
+                    {previewError[sp.speakerId] ? (
+                      <p className="text-xs text-red-500">{previewError[sp.speakerId]}</p>
+                    ) : null}
+                    {state?.cloneError ? (
+                      <p className="text-xs text-red-500">{state.cloneError}</p>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+
+        {/* Error */}
+        {error ? <p className="text-sm text-red-500">{error}</p> : null}
+
+        {/* Footer */}
+        <div className="flex items-center justify-between pt-2 border-t border-slate-200 dark:border-slate-700">
+          <span className="text-xs text-slate-400">
+            {speakers.filter((sp) => voiceStates[sp.speakerId]?.voiceId).length} / {speakers.length} 说话人已配置音色
+          </span>
+          <button
+            className="rounded-lg bg-teal-600 px-5 py-2 text-sm font-medium text-white transition hover:bg-teal-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            disabled={!allSelected || isSubmitting || anyCloning}
+            onClick={() => { void handleSubmit() }}
+            type="button"
+          >
+            {isSubmitting ? '确认中...' : '确认音色选择'}
+          </button>
+        </div>
+      </section>
+
+      {/* Clone Modal */}
+      {cloneModalSpeaker && selectedSpeaker ? (
+        <VoiceCloneModal
+          cloneCostCredits={cloneCostCredits}
+          jobId={jobId}
+          onClose={() => setCloneModalSpeaker(null)}
+          onComplete={handleCloneComplete}
+          speaker={selectedSpeaker}
+        />
+      ) : null}
+    </>
+  )
+}
+
+/* ---------- VoiceCloneModal ---------- */
+
+interface VoiceCloneModalProps {
+  jobId: string
+  speaker: SpeakerPayload
+  cloneCostCredits: number
+  onClose: () => void
+  onComplete: (speakerId: string, voiceId: string) => void
+}
+
+function VoiceCloneModal({ jobId, speaker, cloneCostCredits, onClose, onComplete }: VoiceCloneModalProps) {
+  const [segments, setSegments] = useState<SpeakerAudioSegment[]>([])
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
+  const [isLoading, setIsLoading] = useState(true)
+  const [isCloning, setIsCloning] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const audioRef = useRef<HTMLAudioElement | null>(null)
+  const [playingSegmentId, setPlayingSegmentId] = useState<number | null>(null)
+
+  // Load segments
+  useEffect(() => {
+    let cancelled = false
+
+    async function load() {
+      try {
+        setIsLoading(true)
+        const result = await getSpeakerAudioSegments(jobId, speaker.speakerId)
+        if (!cancelled) {
+          setSegments(result.segments)
+        }
+      } catch (err) {
+        if (!cancelled) setError(getErrorMessage(err))
+      } finally {
+        if (!cancelled) setIsLoading(false)
+      }
+    }
+
+    load()
+    return () => { cancelled = true }
+  }, [jobId, speaker.speakerId])
+
+  const selectedDuration = useMemo(() => {
+    return segments
+      .filter((s) => selectedIds.has(s.segmentId))
+      .reduce((sum, s) => sum + s.durationS, 0)
+  }, [segments, selectedIds])
+
+  const meetsMinDuration = selectedDuration >= 10
+  const exceedsMaxDuration = selectedDuration >= 300
+
+  const toggleSegment = useCallback((segmentId: number) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(segmentId)) {
+        next.delete(segmentId)
+      } else {
+        next.add(segmentId)
+      }
+      return next
+    })
+  }, [])
+
+  const autoSelect = useCallback(() => {
+    const sorted = [...segments].sort((a, b) => b.durationS - a.durationS)
+    const selected = new Set<number>()
+    let total = 0
+    for (const seg of sorted) {
+      if (total + seg.durationS >= 300) break
+      selected.add(seg.segmentId)
+      total += seg.durationS
+    }
+    setSelectedIds(selected)
+  }, [segments])
+
+  const playSegment = useCallback((seg: SpeakerAudioSegment) => {
+    if (audioRef.current) {
+      audioRef.current.pause()
+      audioRef.current = null
+    }
+    if (playingSegmentId === seg.segmentId) {
+      setPlayingSegmentId(null)
+      return
+    }
+    const audio = new Audio(seg.audioUrl)
+    audio.onended = () => setPlayingSegmentId(null)
+    audio.onerror = () => setPlayingSegmentId(null)
+    audio.play().catch(() => setPlayingSegmentId(null))
+    audioRef.current = audio
+    setPlayingSegmentId(seg.segmentId)
+  }, [playingSegmentId])
+
+  const handleClone = useCallback(async () => {
+    if (isCloning || !meetsMinDuration || exceedsMaxDuration) return
+    setIsCloning(true)
+    setError(null)
+    try {
+      const result = await cloneVoiceForSelection({
+        jobId,
+        speakerId: speaker.speakerId,
+        segmentIds: Array.from(selectedIds),
+      })
+      onComplete(speaker.speakerId, result.voiceId)
+    } catch (err) {
+      setError(getErrorMessage(err))
+    } finally {
+      setIsCloning(false)
+    }
+  }, [isCloning, meetsMinDuration, exceedsMaxDuration, jobId, speaker.speakerId, selectedIds, onComplete])
+
+  // Cleanup audio on unmount
+  useEffect(() => {
+    return () => {
+      if (audioRef.current) {
+        audioRef.current.pause()
+        audioRef.current = null
+      }
+    }
+  }, [])
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+      <div className="w-full max-w-2xl max-h-[85vh] flex flex-col rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 shadow-xl">
+        {/* Header */}
+        <div className="flex items-center justify-between p-4 border-b border-slate-200 dark:border-slate-700">
+          <h3 className="text-base font-semibold text-foreground">克隆音色 — {speaker.speakerName}</h3>
+          <button
+            className="text-slate-400 hover:text-foreground transition"
+            onClick={onClose}
+            type="button"
+          >
+            <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M6 18L18 6M6 6l12 12" strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} /></svg>
+          </button>
+        </div>
+
+        {/* Toolbar */}
+        <div className="flex items-center gap-3 p-4 border-b border-slate-100 dark:border-slate-800">
+          <button
+            className="h-7 rounded border border-teal-500/40 bg-teal-500/10 px-3 text-xs font-medium text-teal-600 dark:text-teal-400 transition hover:bg-teal-500/20"
+            onClick={autoSelect}
+            type="button"
+          >
+            自动选择
+          </button>
+          <span className="text-xs text-slate-400">从最长片段开始自动勾选，总时长 &lt; 300s</span>
+        </div>
+
+        {/* Selected stats */}
+        <div className="flex items-center gap-4 px-4 py-2 bg-slate-50/50 dark:bg-slate-800/30">
+          <span className="text-xs text-slate-500">
+            已选 <span className="font-medium text-foreground">{selectedIds.size}</span> 段
+          </span>
+          <span className="text-xs text-slate-500">
+            总时长 <span className={`font-medium ${exceedsMaxDuration ? 'text-red-500' : meetsMinDuration ? 'text-teal-600 dark:text-teal-400' : 'text-amber-500'}`}>
+              {selectedDuration.toFixed(1)}s
+            </span>
+          </span>
+          {!meetsMinDuration ? (
+            <span className="text-xs text-amber-500">至少需要 10s</span>
+          ) : exceedsMaxDuration ? (
+            <span className="text-xs text-red-500">不能超过 300s</span>
+          ) : (
+            <span className="text-xs text-teal-600 dark:text-teal-400">满足要求</span>
+          )}
+        </div>
+
+        {/* Segment list */}
+        <div className="flex-1 overflow-y-auto p-4 space-y-1">
+          {isLoading ? (
+            <div className="text-center py-8 text-sm text-slate-400">加载音频片段...</div>
+          ) : segments.length === 0 ? (
+            <div className="text-center py-8 text-sm text-slate-400">没有可用的音频片段</div>
+          ) : segments.map((seg) => {
+            const isSelected = selectedIds.has(seg.segmentId)
+            const isPlaying = playingSegmentId === seg.segmentId
+            return (
+              <div
+                className={`flex items-center gap-3 rounded-lg px-3 py-2 transition cursor-pointer ${
+                  isSelected
+                    ? 'bg-teal-50 dark:bg-teal-900/20 border border-teal-300 dark:border-teal-700'
+                    : 'border border-transparent hover:bg-slate-50 dark:hover:bg-slate-800/40'
+                }`}
+                key={seg.segmentId}
+                onClick={() => toggleSegment(seg.segmentId)}
+              >
+                {/* Checkbox */}
+                <div className={`h-4 w-4 rounded border-2 flex items-center justify-center shrink-0 ${
+                  isSelected ? 'border-teal-500 bg-teal-500' : 'border-slate-300 dark:border-slate-600'
+                }`}>
+                  {isSelected ? (
+                    <svg className="h-3 w-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path d="M5 13l4 4L19 7" strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} />
+                    </svg>
+                  ) : null}
+                </div>
+
+                {/* Play button */}
+                <button
+                  className="h-7 w-7 rounded-full border border-slate-300 dark:border-slate-600 flex items-center justify-center shrink-0 hover:bg-slate-100 dark:hover:bg-slate-700 transition"
+                  onClick={(e) => { e.stopPropagation(); playSegment(seg) }}
+                  type="button"
+                >
+                  {isPlaying ? (
+                    <svg className="h-3 w-3 text-teal-500" fill="currentColor" viewBox="0 0 24 24"><rect height="16" rx="1" width="4" x="6" y="4" /><rect height="16" rx="1" width="4" x="14" y="4" /></svg>
+                  ) : (
+                    <svg className="h-3 w-3 text-slate-500" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>
+                  )}
+                </button>
+
+                {/* Text */}
+                <span className="flex-1 text-xs text-foreground truncate">{seg.sourceText || `片段 ${seg.segmentId}`}</span>
+
+                {/* Duration */}
+                <span className="text-xs text-slate-400 shrink-0">{seg.durationS.toFixed(1)}s</span>
+              </div>
+            )
+          })}
+        </div>
+
+        {/* Footer */}
+        <div className="flex items-center justify-between p-4 border-t border-slate-200 dark:border-slate-700">
+          <span className="text-xs text-slate-400">
+            克隆费用：{cloneCostCredits} 点
+          </span>
+          <div className="flex items-center gap-2">
+            {error ? <span className="text-xs text-red-500 max-w-[200px] truncate">{error}</span> : null}
+            <button
+              className="h-8 rounded px-4 text-sm text-slate-500 transition hover:text-foreground"
+              disabled={isCloning}
+              onClick={onClose}
+              type="button"
+            >
+              取消
+            </button>
+            <button
+              className="h-8 rounded-lg bg-teal-600 px-4 text-sm font-medium text-white transition hover:bg-teal-700 disabled:opacity-50 disabled:cursor-not-allowed"
+              disabled={isCloning || !meetsMinDuration || exceedsMaxDuration}
+              onClick={() => { void handleClone() }}
+              type="button"
+            >
+              {isCloning ? '克隆中...' : '开始克隆'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}

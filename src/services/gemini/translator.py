@@ -235,6 +235,7 @@ class GeminiTranslator:
         video_title: str = "",
         youtube_url: str = "",
         glossary: dict[str, str] | None = None,
+        speaker_voices: dict[str, str] | None = None,
     ) -> TranslationResult:
         output_root = Path(output_dir).resolve(strict=False)
         output_root.mkdir(parents=True, exist_ok=True)
@@ -316,6 +317,7 @@ class GeminiTranslator:
                 display_name=normalized_display_name,
                 voice_id_b=normalized_voice_id_b,
                 display_name_b=normalized_display_name_b,
+                speaker_voices=speaker_voices,
             )
             segments.append(
                 DubbingSegment(
@@ -1671,11 +1673,18 @@ def _resolve_segment_voice_assignment(
     display_name: str,
     voice_id_b: str | None,
     display_name_b: str,
+    speaker_voices: dict[str, str] | None = None,
 ) -> tuple[str, str]:
     normalized_speaker_id = speaker_id.strip().lower()
+    # N-speaker support: if speaker_voices dict provided, look up by speaker_id
+    if speaker_voices and normalized_speaker_id in speaker_voices:
+        resolved_voice = speaker_voices[normalized_speaker_id]
+        # Generate display name from speaker_id (speaker_c → Speaker C)
+        suffix = normalized_speaker_id.replace("speaker_", "")
+        resolved_display = f"Speaker {suffix.upper()}" if len(suffix) == 1 else speaker_id
+        return resolved_voice, resolved_display
+    # Legacy 2-speaker path
     if normalized_speaker_id == "speaker_b":
-        # voice_id_b may be absent in studio flow where TTS defers voice matching.
-        # Fall back to "auto" so TTS stage can resolve via the matcher.
         return (voice_id_b or "auto"), display_name_b
     return voice_id, display_name
 
