@@ -256,8 +256,13 @@ def preview_voice(
     *,
     voice_id: str,
     config_path: Path,
+    tts_provider: str | None = None,
 ) -> dict[str, object]:
-    """Preview a voice by synthesizing test text. Supports MiniMax and VolcEngine."""
+    """Preview a voice by synthesizing test text.
+
+    Supports MiniMax (clone + official), CosyVoice, and VolcEngine.
+    Uses explicit *tts_provider* when given; falls back to voice_id detection.
+    """
     import base64
 
     if not voice_id or not voice_id.strip():
@@ -265,10 +270,19 @@ def preview_voice(
 
     voice_id = voice_id.strip()
 
-    if _is_volcengine_voice(voice_id):
+    # --- Route 1: VolcEngine ---
+    if tts_provider == "volcengine" or (not tts_provider and _is_volcengine_voice(voice_id)):
         return _preview_volcengine_voice(voice_id)
 
-    # MiniMax path (cloned voices)
+    # --- Route 2: CosyVoice ---
+    if tts_provider == "cosyvoice":
+        return _preview_cosyvoice_voice(voice_id)
+    if not tts_provider:
+        from services.tts.cosyvoice_voice_catalog import is_cosyvoice_v3_flash_builtin_voice
+        if is_cosyvoice_v3_flash_builtin_voice(voice_id):
+            return _preview_cosyvoice_voice(voice_id)
+
+    # --- Route 3: MiniMax (clone + official catalog) ---
     from services.voice_asset import (
         VoiceAssetVerifier,
         VoiceAssetVerificationRuntimeError,
@@ -315,6 +329,54 @@ def _preview_volcengine_voice(voice_id: str) -> dict[str, object]:
         return {"audio_base64": "", "format": "wav", "expired": False, "error": f"试听失败: {str(exc)[:200]}"}
 
 
+def _preview_cosyvoice_voice(voice_id: str) -> dict[str, object]:
+    """Preview a CosyVoice voice via DashScope TTS synthesis."""
+    import base64
+
+    try:
+        from services.tts.cosyvoice_provider import synthesize as cosy_synthesize
+
+        wav_bytes = cosy_synthesize(text=_PREVIEW_SAMPLE_TEXT, voice=voice_id)
+        if wav_bytes and len(wav_bytes) > 100:
+            audio_b64 = base64.b64encode(wav_bytes).decode("ascii")
+            return {"audio_base64": audio_b64, "format": "wav", "expired": False, "error": None}
+        return {"audio_base64": "", "format": "wav", "expired": False, "error": "生成的音频为空"}
+    except Exception as exc:
+        err_msg = str(exc).lower()
+        # CosyVoice returns 418 for unavailable voices on certain endpoints.
+        # This is NOT expiration (unlike MiniMax clone voices) — it's endpoint
+        # availability.  Report as error, NOT expired, so the frontend does not
+        # run user-voice cleanup logic on a builtin voice.
+        is_unavailable = "418" in err_msg or "not support" in err_msg
+        return {
+            "audio_base64": "", "format": "wav", "expired": False,
+            "error": "该音色在当前端点不可用，请切换端点或选择其他音色" if is_unavailable else f"试听失败: {str(exc)[:200]}",
+        }
+
+
+def _validate_voice_provider_compat(voice_id: str, tts_provider: str) -> None:
+    """Reject obvious voice_id / tts_provider mismatches at approval time.
+
+    CosyVoice and VolcEngine have recognisable voice_id patterns.
+    MiniMax accepts any ID (cloned voices, official catalog with mixed
+    formats like ``Wise_Woman``, ``moss_audio_xxx``, ``Chinese (Mandarin)_xxx``).
+    """
+    if tts_provider == "cosyvoice":
+        from services.tts.cosyvoice_voice_catalog import is_cosyvoice_v3_flash_builtin_voice
+        if not is_cosyvoice_v3_flash_builtin_voice(voice_id):
+            raise ValueError(
+                f"voice_id {voice_id!r} 不是 CosyVoice 音色。"
+                f"请选择 CosyVoice 音色或切换 TTS 引擎。"
+            )
+    elif tts_provider == "volcengine":
+        if not _is_volcengine_voice(voice_id):
+            raise ValueError(
+                f"voice_id {voice_id!r} 不是豆包音色。"
+                f"请选择豆包音色或切换 TTS 引擎。"
+            )
+    # minimax / "" → no strict check (heterogeneous ID formats)
+
+
 def approve_voice_selection(
     *,
     project_dir: Path,
@@ -327,6 +389,7 @@ def approve_voice_selection(
         raise ValueError("至少需要一个说话人的音色选择")
 
     _SPEAKER_ID_RE = re.compile(r"^speaker_[a-z0-9_]+$")
+    _VALID_TTS_PROVIDERS = {"minimax", "cosyvoice", "volcengine", ""}
     for sp in speakers:
         sid = sp.get("speaker_id", "")
         vid = sp.get("voice_id", "")
@@ -334,6 +397,15 @@ def approve_voice_selection(
             raise ValueError(f"每个说话人必须有 speaker_id 和 voice_id")
         if not _SPEAKER_ID_RE.match(sid):
             raise ValueError(f"无效的 speaker_id 格式: {sid}")
+        sp_prov = sp.get("tts_provider", "")
+        if sp_prov and sp_prov not in _VALID_TTS_PROVIDERS:
+            raise ValueError(f"无效的 tts_provider: {sp_prov!r}，支持: minimax, cosyvoice, volcengine")
+        # Validate voice_id / tts_provider compatibility.
+        # CosyVoice and VolcEngine have deterministic voice_id patterns;
+        # MiniMax is the default fallback (cloned voices + official catalog
+        # with heterogeneous ID formats — no strict pattern check).
+        if sp_prov and vid:
+            _validate_voice_provider_compat(vid, sp_prov)
 
     # Check no speaker is still cloning
     review_state_path = Path(project_dir) / "review_state.json"
@@ -361,6 +433,7 @@ def approve_voice_selection(
                 "speaker_id": sp["speaker_id"],
                 "voice_id": sp["voice_id"],
                 "voice_source": sp.get("voice_source", "catalog"),
+                "tts_provider": sp.get("tts_provider", ""),
             }
             for sp in speakers
         ]

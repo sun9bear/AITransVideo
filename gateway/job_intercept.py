@@ -61,7 +61,7 @@ PLAN_CATALOG = get_legacy_plan_gate_dict()
 
 # Gateway-local allowed TTS providers (no cross-layer import from tts_strategy)
 _VALID_EXPRESS_PROVIDERS = {"cosyvoice", "mimo", "volcengine"}
-_VALID_STUDIO_PROVIDERS = {"minimax", "mimo", "volcengine"}
+_VALID_STUDIO_PROVIDERS = {"minimax", "mimo", "volcengine", "cosyvoice"}
 _DEFAULT_EXPRESS_PROVIDER = "cosyvoice"
 _DEFAULT_STUDIO_PROVIDER = "minimax"
 

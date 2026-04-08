@@ -159,6 +159,7 @@ class DubbingSegment:
     energy_level: str = ""     # "low" / "medium" / "high"
     selected_voice: str = ""   # actual voice used for TTS (populated after TTS generation)
     match_confidence: str = "" # "high" / "medium" / "low" (populated after TTS generation)
+    tts_provider: str = ""     # per-speaker TTS provider override (set by voice_selection_review)
 
 
 @dataclass(slots=True)

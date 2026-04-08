@@ -321,6 +321,7 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
                         result = preview_voice(
                             voice_id=str(payload.get("voice_id", "")).strip(),
                             config_path=config_loader.DEFAULT_AUTODUB_LOCAL_CONFIG_PATH,
+                            tts_provider=str(payload.get("tts_provider", "")).strip() or None,
                         )
                         self._write_json(HTTPStatus.OK, result)
                         return

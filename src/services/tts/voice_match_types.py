@@ -57,6 +57,7 @@ class VoiceMatchRequest:
     energy_level: str | None = None
     voice_description: str | None = None
     explicit_voice_id: str | None = None
+    target_language: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

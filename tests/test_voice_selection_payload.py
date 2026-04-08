@@ -104,7 +104,7 @@ class TestPayloadCosyvoice:
 
 
 class TestPayloadMinimax:
-    """MiniMax should not crash (available_voices stays empty)."""
+    """MiniMax should populate available_voices from static catalog."""
 
     def test_minimax_builds_payload(self) -> None:
         proc = _get_pipeline_class().__new__(_get_pipeline_class())
@@ -118,4 +118,8 @@ class TestPayloadMinimax:
             speaker_names={"speaker_a": "Alice"},
         )
         assert payload["tts_provider"] == "minimax"
-        assert payload["available_voices"] == []
+        assert isinstance(payload["available_voices"], list)
+        assert len(payload["available_voices"]) > 0
+        # All should be Chinese voices
+        for v in payload["available_voices"]:
+            assert v["provider"] == "minimax"

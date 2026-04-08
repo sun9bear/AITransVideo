@@ -727,8 +727,11 @@ class TTSGenerator:
         # MiMo bills on tokens (not chars) — billed_chars left as 0 (unknown).
         _cn_chars = len(tts_text)
 
-        # Resolve provider: explicit arg > job-level > legacy
-        if provider is None:
+        # Resolve provider: segment override > explicit arg > job-level > legacy
+        segment_provider = getattr(segment, "tts_provider", None)
+        if segment_provider:
+            provider = segment_provider
+        elif provider is None:
             provider = getattr(self, "_job_provider", None) or get_tts_provider()
 
         # Dispatch: cosyvoice / mimo / minimax (default)
@@ -763,12 +766,62 @@ class TTSGenerator:
             except Exception as exc:
                 raise TTSGenerationError(f"VolcEngine: {exc}") from exc
 
+        # --- MiniMax voice resolution (same pattern as VolcEngine/CosyVoice) ---
+        explicit_voice = _normalize_optional_text(getattr(segment, "voice_id", None))
+        mm_confidence = ""
+        mm_resolution = ""
+
+        if explicit_voice and explicit_voice != "auto":
+            # Explicit voice_id — use directly, do NOT cache (user-chosen).
+            mm_voice = explicit_voice
+            mm_confidence = "high"
+            mm_resolution = "explicit_voice_id"
+        elif segment.speaker_id in self._speaker_voice_cache:
+            mm_voice, mm_confidence = self._speaker_voice_cache[segment.speaker_id]
+            mm_resolution = f"speaker_cache({segment.speaker_id})"
+        else:
+            # Auto-match via shared resolver
+            from services.tts.voice_match_resolver import resolve_voice_match
+            from services.tts.voice_match_types import VoiceMatchRequest
+
+            mm_gender = getattr(segment, "gender", None)
+            if not mm_gender:
+                print(
+                    f"[MiniMax] WARNING: segment {segment.segment_id} ({segment.speaker_id}) "
+                    f"has empty gender — matcher will use fallback",
+                    flush=True,
+                )
+            match_result = resolve_voice_match(VoiceMatchRequest(
+                tts_provider="minimax",
+                mode="auto",
+                gender=mm_gender,
+                age_group=getattr(segment, "age_group", None),
+                persona_style=getattr(segment, "persona_style", None),
+                energy_level=getattr(segment, "energy_level", None),
+                voice_description=getattr(segment, "voice_description", None),
+                target_language=getattr(segment, "target_language", None),
+            ))
+            mm_voice = match_result.voice_id
+            mm_confidence = match_result.match_confidence
+            mm_resolution = f"resolver({match_result.match_reason})"
+            self._speaker_voice_cache[segment.speaker_id] = (mm_voice, mm_confidence)
+            print(
+                f"[MiniMax] Speaker cache set: {segment.speaker_id} → {mm_voice}",
+                flush=True,
+            )
+
+        print(
+            f"[MiniMax] voice={mm_voice}, confidence={mm_confidence}, "
+            f"source={mm_resolution}, text={tts_text[:50]}...",
+            flush=True,
+        )
+
         endpoint = _build_tts_endpoint(self.config.base_url)
         payload = {
             "model": self.config.model,
             "text": tts_text,
             "voice_setting": {
-                "voice_id": segment.voice_id,
+                "voice_id": mm_voice,
                 "speed": self.config.speed,
                 "vol": self.config.vol,
             },
@@ -821,6 +874,8 @@ class TTSGenerator:
             audio_path=str(output_path.resolve(strict=False)),
             duration_ms=duration_ms,
             voice_id=segment.voice_id,
+            selected_voice=mm_voice,
+            match_confidence=mm_confidence,
             billed_chars=_cn_chars * 2,  # MiniMax: 1 汉字 = 2 计费字符
         )
 

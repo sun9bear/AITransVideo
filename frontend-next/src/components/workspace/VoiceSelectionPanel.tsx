@@ -29,6 +29,7 @@ interface SpeakerPayload {
   totalDurationS: number
   canClone: boolean
   autoMatchedVoice: { voiceId: string; label: string } | null
+  autoMatchedByProvider: Record<string, { voiceId: string; label: string; matchConfidence: string } | null>
 }
 
 interface AvailableVoice {
@@ -38,9 +39,16 @@ interface AvailableVoice {
   provider: string
 }
 
+interface ProviderInfo {
+  label: string
+  availableVoices: AvailableVoice[]
+  supportsClone: boolean
+}
+
 interface SpeakerVoiceState {
   voiceId: string
   voiceSource: 'catalog' | 'cloned' | 'auto_matched'
+  selectedProvider: string
   isCloning: boolean
   cloneError: string | null
 }
@@ -50,15 +58,25 @@ interface VoiceSelectionPanelProps {
   onAdvanced: () => void
 }
 
+const PROVIDER_TAB_ORDER = ['minimax', 'cosyvoice', 'volcengine'] as const
+const PROVIDER_SHORT_LABELS: Record<string, string> = {
+  minimax: 'MiniMax',
+  cosyvoice: 'CosyVoice',
+  volcengine: '豆包',
+}
+
 /* ---------- Main Component ---------- */
 
 export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelProps) {
   const [speakers, setSpeakers] = useState<SpeakerPayload[]>([])
   const [voiceLibrary, setVoiceLibrary] = useState<VoiceLibraryEntry[]>([])
   const [personalVoices, setPersonalVoices] = useState<UserVoiceEntry[]>([])
-  const [availableVoices, setAvailableVoices] = useState<AvailableVoice[]>([])
+  const [providerMap, setProviderMap] = useState<Record<string, ProviderInfo>>({})
+  // Backward compat: flat availableVoices for old payloads without all_providers
+  const [fallbackVoices, setFallbackVoices] = useState<AvailableVoice[]>([])
   const [voiceStates, setVoiceStates] = useState<Record<string, SpeakerVoiceState>>({})
-  const [ttsProvider, setTtsProvider] = useState('')
+  const [defaultProvider, setDefaultProvider] = useState('')
+  const [hasMultiProvider, setHasMultiProvider] = useState(false)
   const [cloneCostCredits, setCloneCostCredits] = useState(500)
   const [isLoading, setIsLoading] = useState(true)
   const [isSubmitting, setIsSubmitting] = useState(false)
@@ -96,53 +114,92 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
         const vsStage = stages.voice_selection_review ?? null
         const payload = vsStage?.payload ?? {}
 
+        // Parse speakers with per-provider auto-match
         const rawSpeakers = Array.isArray(payload.speakers) ? payload.speakers : []
-        const loadedSpeakers: SpeakerPayload[] = rawSpeakers.map((s: Record<string, unknown>) => ({
-          speakerId: String(s.speaker_id ?? ''),
-          speakerName: String(s.speaker_name ?? s.speaker_id ?? ''),
-          segmentCount: Number(s.segment_count ?? 0),
-          totalDurationS: Number(s.total_duration_s ?? 0),
-          canClone: Boolean(s.can_clone),
-          autoMatchedVoice: s.auto_matched_voice
-            ? { voiceId: String((s.auto_matched_voice as Record<string, unknown>).voice_id ?? ''), label: String((s.auto_matched_voice as Record<string, unknown>).label ?? '') }
-            : null,
-        })).filter((s: SpeakerPayload) => s.speakerId)
+        const loadedSpeakers: SpeakerPayload[] = rawSpeakers.map((s: Record<string, unknown>) => {
+          // Parse auto_matched_by_provider
+          const rawByProv = (s.auto_matched_by_provider ?? {}) as Record<string, Record<string, unknown> | null>
+          const amByProv: Record<string, { voiceId: string; label: string; matchConfidence: string } | null> = {}
+          for (const [prov, match] of Object.entries(rawByProv)) {
+            if (match && typeof match === 'object') {
+              amByProv[prov] = {
+                voiceId: String(match.voice_id ?? ''),
+                label: String(match.label ?? ''),
+                matchConfidence: String(match.match_confidence ?? ''),
+              }
+            } else {
+              amByProv[prov] = null
+            }
+          }
 
-        const loadedTtsProvider = String(payload.tts_provider ?? '')
-        setTtsProvider(loadedTtsProvider)
+          return {
+            speakerId: String(s.speaker_id ?? ''),
+            speakerName: String(s.speaker_name ?? s.speaker_id ?? ''),
+            segmentCount: Number(s.segment_count ?? 0),
+            totalDurationS: Number(s.total_duration_s ?? 0),
+            canClone: Boolean(s.can_clone),
+            autoMatchedVoice: s.auto_matched_voice
+              ? { voiceId: String((s.auto_matched_voice as Record<string, unknown>).voice_id ?? ''), label: String((s.auto_matched_voice as Record<string, unknown>).label ?? '') }
+              : null,
+            autoMatchedByProvider: amByProv,
+          }
+        }).filter((s: SpeakerPayload) => s.speakerId)
+
+        const loadedDefaultProvider = String(payload.tts_provider ?? '')
+        setDefaultProvider(loadedDefaultProvider)
         setCloneCostCredits(Number(payload.clone_cost_credits ?? 500))
 
-        // Parse available_voices from payload (for volcengine etc.)
+        // Parse all_providers (new three-engine payload)
+        const rawAllProviders = payload.all_providers as Record<string, Record<string, unknown>> | undefined
+        const multiProvider = !!rawAllProviders && Object.keys(rawAllProviders).length > 0
+        setHasMultiProvider(multiProvider)
+
+        if (multiProvider && rawAllProviders) {
+          const pm: Record<string, ProviderInfo> = {}
+          for (const [prov, info] of Object.entries(rawAllProviders)) {
+            const rawVoices = Array.isArray(info.available_voices) ? info.available_voices : []
+            pm[prov] = {
+              label: String(info.label ?? prov),
+              supportsClone: Boolean(info.supports_clone),
+              availableVoices: rawVoices.map((v: Record<string, unknown>) => ({
+                voiceId: String(v.voice_id ?? ''),
+                label: String(v.label ?? v.voice_id ?? ''),
+                gender: String(v.gender ?? ''),
+                provider: String(v.provider ?? prov),
+              })).filter((v: AvailableVoice) => v.voiceId),
+            }
+          }
+          setProviderMap(pm)
+        }
+
+        // Fallback: old single-provider available_voices
         const rawAvailableVoices = Array.isArray(payload.available_voices) ? payload.available_voices : []
-        const parsedAvailableVoices: AvailableVoice[] = rawAvailableVoices.map((v: Record<string, unknown>) => ({
+        setFallbackVoices(rawAvailableVoices.map((v: Record<string, unknown>) => ({
           voiceId: String(v.voice_id ?? ''),
           label: String(v.label ?? v.voice_id ?? ''),
           gender: String(v.gender ?? ''),
           provider: String(v.provider ?? ''),
-        })).filter((v: AvailableVoice) => v.voiceId)
-        setAvailableVoices(parsedAvailableVoices)
+        })).filter((v: AvailableVoice) => v.voiceId))
 
         // Check for expired voice IDs from pipeline validation
         const payloadExpired = Array.isArray(payload.expired_voice_ids) ? payload.expired_voice_ids.map(String) : []
         if (payloadExpired.length > 0) setExpiredVoiceIds(payloadExpired)
 
-        // Init voice states with auto-matched or empty (skip expired voices)
+        // Init voice states — per-speaker provider + auto-matched voice
         const initialStates: Record<string, SpeakerVoiceState> = {}
         for (const sp of loadedSpeakers) {
-          if (sp.autoMatchedVoice && !payloadExpired.includes(sp.autoMatchedVoice.voiceId)) {
-            initialStates[sp.speakerId] = {
-              voiceId: sp.autoMatchedVoice.voiceId,
-              voiceSource: 'auto_matched',
-              isCloning: false,
-              cloneError: null,
-            }
-          } else {
-            initialStates[sp.speakerId] = {
-              voiceId: '',
-              voiceSource: 'catalog',
-              isCloning: false,
-              cloneError: null,
-            }
+          const spProvider = loadedDefaultProvider
+          // Try per-provider auto-match first, then legacy auto_matched_voice
+          const provMatch = sp.autoMatchedByProvider[spProvider]
+          const autoVoice = provMatch?.voiceId || sp.autoMatchedVoice?.voiceId || ''
+          const isExpired = autoVoice && payloadExpired.includes(autoVoice)
+
+          initialStates[sp.speakerId] = {
+            voiceId: isExpired ? '' : autoVoice,
+            voiceSource: autoVoice && !isExpired ? 'auto_matched' : 'catalog',
+            selectedProvider: spProvider,
+            isCloning: false,
+            cloneError: null,
           }
         }
 
@@ -161,6 +218,26 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
     return () => { cancelled = true }
   }, [jobId])
 
+  const handleProviderChange = useCallback((speakerId: string, provider: string) => {
+    setVoiceStates((prev) => {
+      const current = prev[speakerId]
+      if (!current) return prev
+      // Find auto-matched voice for the new provider
+      const sp = speakers.find((s) => s.speakerId === speakerId)
+      const provMatch = sp?.autoMatchedByProvider[provider]
+      return {
+        ...prev,
+        [speakerId]: {
+          ...current,
+          selectedProvider: provider,
+          voiceId: provMatch?.voiceId ?? '',
+          voiceSource: provMatch?.voiceId ? 'auto_matched' : 'catalog',
+          cloneError: null,
+        },
+      }
+    })
+  }, [speakers])
+
   const handleVoiceChange = useCallback((speakerId: string, voiceId: string) => {
     setVoiceStates((prev) => ({
       ...prev,
@@ -171,18 +248,16 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
   const handleCloneComplete = useCallback((speakerId: string, voiceId: string) => {
     setVoiceStates((prev) => ({
       ...prev,
-      [speakerId]: { voiceId, voiceSource: 'cloned', isCloning: false, cloneError: null },
+      [speakerId]: { ...prev[speakerId], voiceId, voiceSource: 'cloned', isCloning: false, cloneError: null },
     }))
     setCloneModalSpeaker(null)
-    // Refresh personal voices to include the newly cloned voice
     getUserVoices().then(setPersonalVoices).catch(() => {})
   }, [])
 
   const handlePreview = useCallback(async (speakerId: string) => {
-    const voiceId = voiceStates[speakerId]?.voiceId
-    if (!voiceId) return
+    const state = voiceStates[speakerId]
+    if (!state?.voiceId) return
 
-    // Cleanup previous audio
     if (previewAudioRef.current) {
       previewAudioRef.current.pause()
       previewAudioRef.current = null
@@ -192,19 +267,17 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
     setPreviewError((p) => ({ ...p, [speakerId]: null }))
 
     try {
-      const result = await previewVoice(jobId, voiceId)
+      const result = await previewVoice(jobId, state.voiceId, { ttsProvider: state.selectedProvider })
 
       if (result.expired) {
-        // Voice expired — remove from personal library and reset selection
         setPreviewError((p) => ({ ...p, [speakerId]: '音色已失效，请重新选择' }))
         setVoiceStates((prev) => ({
           ...prev,
           [speakerId]: { ...prev[speakerId], voiceId: '', voiceSource: 'catalog' },
         }))
-        setExpiredVoiceIds((prev) => [...prev, voiceId])
-        // Delete from personal voice library
-        await deleteUserVoice(voiceId).catch(() => {})
-        setPersonalVoices((prev) => prev.filter((v) => v.voiceId !== voiceId))
+        setExpiredVoiceIds((prev) => [...prev, state.voiceId])
+        await deleteUserVoice(state.voiceId).catch(() => {})
+        setPersonalVoices((prev) => prev.filter((v) => v.voiceId !== state.voiceId))
         return
       }
 
@@ -226,7 +299,6 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
     }
   }, [voiceStates, jobId])
 
-  // Cleanup preview audio on unmount
   useEffect(() => {
     return () => {
       if (previewAudioRef.current) {
@@ -253,6 +325,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
         speakerId: sp.speakerId,
         voiceId: voiceStates[sp.speakerId]?.voiceId ?? '',
         voiceSource: voiceStates[sp.speakerId]?.voiceSource ?? 'catalog',
+        ttsProvider: voiceStates[sp.speakerId]?.selectedProvider ?? '',
       }))
       await approveVoiceSelection(jobId, approvals)
       onAdvanced()
@@ -262,6 +335,27 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
       setIsSubmitting(false)
     }
   }, [allSelected, isSubmitting, speakers, voiceStates, jobId, onAdvanced])
+
+  // Helper: get available voices for a speaker's currently selected provider
+  function getVoicesForSpeaker(speakerId: string): AvailableVoice[] {
+    const state = voiceStates[speakerId]
+    if (!state) return fallbackVoices
+    if (hasMultiProvider && providerMap[state.selectedProvider]) {
+      return providerMap[state.selectedProvider].availableVoices
+    }
+    return fallbackVoices
+  }
+
+  function canSpeakerClone(speakerId: string): boolean {
+    const sp = speakers.find((s) => s.speakerId === speakerId)
+    if (!sp?.canClone) return false
+    const state = voiceStates[speakerId]
+    if (!state) return false
+    if (hasMultiProvider) {
+      return providerMap[state.selectedProvider]?.supportsClone ?? false
+    }
+    return defaultProvider === 'minimax'
+  }
 
   if (isLoading) {
     return (
@@ -304,6 +398,9 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
         <div className="space-y-3">
           {speakers.map((sp, index) => {
             const state = voiceStates[sp.speakerId]
+            const currentProvider = state?.selectedProvider ?? defaultProvider
+            const voicesForProvider = getVoicesForSpeaker(sp.speakerId)
+            const showClone = canSpeakerClone(sp.speakerId)
             const statusLabel = state?.voiceSource === 'cloned'
               ? '已克隆'
               : state?.voiceId
@@ -332,6 +429,29 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                       <span className={`text-xs font-medium ${statusColor}`}>{statusLabel}</span>
                     </div>
 
+                    {/* Provider Tabs (only when multi-provider payload) */}
+                    {hasMultiProvider ? (
+                      <div className="flex gap-1">
+                        {PROVIDER_TAB_ORDER.filter((p) => !!providerMap[p]).map((prov) => {
+                          const isActive = currentProvider === prov
+                          return (
+                            <button
+                              key={prov}
+                              className={`h-7 rounded-md px-3 text-xs font-medium transition ${
+                                isActive
+                                  ? 'bg-teal-600 text-white'
+                                  : 'bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'
+                              }`}
+                              onClick={() => handleProviderChange(sp.speakerId, prov)}
+                              type="button"
+                            >
+                              {PROVIDER_SHORT_LABELS[prov] ?? prov}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    ) : null}
+
                     {/* Voice select + preview + clone */}
                     <div className="flex items-center gap-2 flex-wrap">
                       <select
@@ -340,7 +460,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                         value={state?.voiceId ?? ''}
                       >
                         <option value="">-- 选择音色 --</option>
-                        {ttsProvider === 'minimax' ? (
+                        {currentProvider === 'minimax' ? (
                           <>
                             {personalVoices.filter((v) => !expiredVoiceIds.includes(v.voiceId)).length > 0 ? (
                               <optgroup label="我的音色">
@@ -353,24 +473,20 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                                   ))}
                               </optgroup>
                             ) : null}
-                            {voiceLibrary.filter((v) => !expiredVoiceIds.includes(v.voiceId) && !personalVoices.some((p) => p.voiceId === v.voiceId)).length > 0 ? (
+                            {voicesForProvider.length > 0 ? (
                               <optgroup label="音色库">
-                                {voiceLibrary
-                                  .filter((v) => !expiredVoiceIds.includes(v.voiceId) && !personalVoices.some((p) => p.voiceId === v.voiceId))
-                                  .map((v) => (
-                                    <option key={v.voiceId} value={v.voiceId}>
-                                      {v.label || v.voiceId} {v.speakerName ? `(${v.speakerName})` : ''}
-                                    </option>
-                                  ))}
+                                {voicesForProvider.map((v) => (
+                                  <option key={v.voiceId} value={v.voiceId}>{v.label}</option>
+                                ))}
                               </optgroup>
                             ) : null}
                           </>
                         ) : (
                           <>
                             {(() => {
-                              const maleVoices = availableVoices.filter((v) => v.gender === 'male')
-                              const femaleVoices = availableVoices.filter((v) => v.gender === 'female')
-                              const otherVoices = availableVoices.filter((v) => v.gender !== 'male' && v.gender !== 'female')
+                              const maleVoices = voicesForProvider.filter((v) => v.gender === 'male')
+                              const femaleVoices = voicesForProvider.filter((v) => v.gender === 'female')
+                              const otherVoices = voicesForProvider.filter((v) => v.gender !== 'male' && v.gender !== 'female')
                               return (
                                 <>
                                   {femaleVoices.length > 0 ? (
@@ -407,7 +523,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                         </button>
                       ) : null}
 
-                      {sp.canClone ? (
+                      {showClone ? (
                         <button
                           className="h-8 rounded border border-teal-500/40 bg-teal-500/10 px-3 text-xs font-medium text-teal-600 dark:text-teal-400 transition hover:bg-teal-500/20 disabled:opacity-50"
                           disabled={state?.isCloning}
@@ -484,32 +600,25 @@ function VoiceCloneModal({ jobId, speaker, cloneCostCredits, onClose, onComplete
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const [playingSegmentId, setPlayingSegmentId] = useState<number | null>(null)
 
-  // Load segments
   useEffect(() => {
     let cancelled = false
-
     async function load() {
       try {
         setIsLoading(true)
         const result = await getSpeakerAudioSegments(jobId, speaker.speakerId)
-        if (!cancelled) {
-          setSegments(result.segments)
-        }
+        if (!cancelled) setSegments(result.segments)
       } catch (err) {
         if (!cancelled) setError(getErrorMessage(err))
       } finally {
         if (!cancelled) setIsLoading(false)
       }
     }
-
     load()
     return () => { cancelled = true }
   }, [jobId, speaker.speakerId])
 
   const selectedDuration = useMemo(() => {
-    return segments
-      .filter((s) => selectedIds.has(s.segmentId))
-      .reduce((sum, s) => sum + s.durationS, 0)
+    return segments.filter((s) => selectedIds.has(s.segmentId)).reduce((sum, s) => sum + s.durationS, 0)
   }, [segments, selectedIds])
 
   const meetsMinDuration = selectedDuration >= 10
@@ -518,11 +627,8 @@ function VoiceCloneModal({ jobId, speaker, cloneCostCredits, onClose, onComplete
   const toggleSegment = useCallback((segmentId: number) => {
     setSelectedIds((prev) => {
       const next = new Set(prev)
-      if (next.has(segmentId)) {
-        next.delete(segmentId)
-      } else {
-        next.add(segmentId)
-      }
+      if (next.has(segmentId)) next.delete(segmentId)
+      else next.add(segmentId)
       return next
     })
   }, [])
@@ -540,14 +646,8 @@ function VoiceCloneModal({ jobId, speaker, cloneCostCredits, onClose, onComplete
   }, [segments])
 
   const playSegment = useCallback((seg: SpeakerAudioSegment) => {
-    if (audioRef.current) {
-      audioRef.current.pause()
-      audioRef.current = null
-    }
-    if (playingSegmentId === seg.segmentId) {
-      setPlayingSegmentId(null)
-      return
-    }
+    if (audioRef.current) { audioRef.current.pause(); audioRef.current = null }
+    if (playingSegmentId === seg.segmentId) { setPlayingSegmentId(null); return }
     const audio = new Audio(seg.audioUrl)
     audio.onended = () => setPlayingSegmentId(null)
     audio.onerror = () => setPlayingSegmentId(null)
@@ -561,11 +661,7 @@ function VoiceCloneModal({ jobId, speaker, cloneCostCredits, onClose, onComplete
     setIsCloning(true)
     setError(null)
     try {
-      const result = await cloneVoiceForSelection({
-        jobId,
-        speakerId: speaker.speakerId,
-        segmentIds: Array.from(selectedIds),
-      })
+      const result = await cloneVoiceForSelection({ jobId, speakerId: speaker.speakerId, segmentIds: Array.from(selectedIds) })
       onComplete(speaker.speakerId, result.voiceId)
     } catch (err) {
       setError(getErrorMessage(err))
@@ -574,63 +670,28 @@ function VoiceCloneModal({ jobId, speaker, cloneCostCredits, onClose, onComplete
     }
   }, [isCloning, meetsMinDuration, exceedsMaxDuration, jobId, speaker.speakerId, selectedIds, onComplete])
 
-  // Cleanup audio on unmount
   useEffect(() => {
-    return () => {
-      if (audioRef.current) {
-        audioRef.current.pause()
-        audioRef.current = null
-      }
-    }
+    return () => { if (audioRef.current) { audioRef.current.pause(); audioRef.current = null } }
   }, [])
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
       <div className="w-full max-w-2xl max-h-[85vh] flex flex-col rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 shadow-xl">
-        {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-slate-200 dark:border-slate-700">
           <h3 className="text-base font-semibold text-foreground">克隆音色 — {speaker.speakerName}</h3>
-          <button
-            className="text-slate-400 hover:text-foreground transition"
-            onClick={onClose}
-            type="button"
-          >
+          <button className="text-slate-400 hover:text-foreground transition" onClick={onClose} type="button">
             <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M6 18L18 6M6 6l12 12" strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} /></svg>
           </button>
         </div>
-
-        {/* Toolbar */}
         <div className="flex items-center gap-3 p-4 border-b border-slate-100 dark:border-slate-800">
-          <button
-            className="h-7 rounded border border-teal-500/40 bg-teal-500/10 px-3 text-xs font-medium text-teal-600 dark:text-teal-400 transition hover:bg-teal-500/20"
-            onClick={autoSelect}
-            type="button"
-          >
-            自动选择
-          </button>
+          <button className="h-7 rounded border border-teal-500/40 bg-teal-500/10 px-3 text-xs font-medium text-teal-600 dark:text-teal-400 transition hover:bg-teal-500/20" onClick={autoSelect} type="button">自动选择</button>
           <span className="text-xs text-slate-400">从最长片段开始自动勾选，总时长 &lt; 300s</span>
         </div>
-
-        {/* Selected stats */}
         <div className="flex items-center gap-4 px-4 py-2 bg-slate-50/50 dark:bg-slate-800/30">
-          <span className="text-xs text-slate-500">
-            已选 <span className="font-medium text-foreground">{selectedIds.size}</span> 段
-          </span>
-          <span className="text-xs text-slate-500">
-            总时长 <span className={`font-medium ${exceedsMaxDuration ? 'text-red-500' : meetsMinDuration ? 'text-teal-600 dark:text-teal-400' : 'text-amber-500'}`}>
-              {selectedDuration.toFixed(1)}s
-            </span>
-          </span>
-          {!meetsMinDuration ? (
-            <span className="text-xs text-amber-500">至少需要 10s</span>
-          ) : exceedsMaxDuration ? (
-            <span className="text-xs text-red-500">不能超过 300s</span>
-          ) : (
-            <span className="text-xs text-teal-600 dark:text-teal-400">满足要求</span>
-          )}
+          <span className="text-xs text-slate-500">已选 <span className="font-medium text-foreground">{selectedIds.size}</span> 段</span>
+          <span className="text-xs text-slate-500">总时长 <span className={`font-medium ${exceedsMaxDuration ? 'text-red-500' : meetsMinDuration ? 'text-teal-600 dark:text-teal-400' : 'text-amber-500'}`}>{selectedDuration.toFixed(1)}s</span></span>
+          {!meetsMinDuration ? <span className="text-xs text-amber-500">至少需要 10s</span> : exceedsMaxDuration ? <span className="text-xs text-red-500">不能超过 300s</span> : <span className="text-xs text-teal-600 dark:text-teal-400">满足要求</span>}
         </div>
-
-        {/* Segment list */}
         <div className="flex-1 overflow-y-auto p-4 space-y-1">
           {isLoading ? (
             <div className="text-center py-8 text-sm text-slate-400">加载音频片段...</div>
@@ -640,72 +701,25 @@ function VoiceCloneModal({ jobId, speaker, cloneCostCredits, onClose, onComplete
             const isSelected = selectedIds.has(seg.segmentId)
             const isPlaying = playingSegmentId === seg.segmentId
             return (
-              <div
-                className={`flex items-center gap-3 rounded-lg px-3 py-2 transition cursor-pointer ${
-                  isSelected
-                    ? 'bg-teal-50 dark:bg-teal-900/20 border border-teal-300 dark:border-teal-700'
-                    : 'border border-transparent hover:bg-slate-50 dark:hover:bg-slate-800/40'
-                }`}
-                key={seg.segmentId}
-                onClick={() => toggleSegment(seg.segmentId)}
-              >
-                {/* Checkbox */}
-                <div className={`h-4 w-4 rounded border-2 flex items-center justify-center shrink-0 ${
-                  isSelected ? 'border-teal-500 bg-teal-500' : 'border-slate-300 dark:border-slate-600'
-                }`}>
-                  {isSelected ? (
-                    <svg className="h-3 w-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path d="M5 13l4 4L19 7" strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} />
-                    </svg>
-                  ) : null}
+              <div className={`flex items-center gap-3 rounded-lg px-3 py-2 transition cursor-pointer ${isSelected ? 'bg-teal-50 dark:bg-teal-900/20 border border-teal-300 dark:border-teal-700' : 'border border-transparent hover:bg-slate-50 dark:hover:bg-slate-800/40'}`} key={seg.segmentId} onClick={() => toggleSegment(seg.segmentId)}>
+                <div className={`h-4 w-4 rounded border-2 flex items-center justify-center shrink-0 ${isSelected ? 'border-teal-500 bg-teal-500' : 'border-slate-300 dark:border-slate-600'}`}>
+                  {isSelected ? <svg className="h-3 w-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7" strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} /></svg> : null}
                 </div>
-
-                {/* Play button */}
-                <button
-                  className="h-7 w-7 rounded-full border border-slate-300 dark:border-slate-600 flex items-center justify-center shrink-0 hover:bg-slate-100 dark:hover:bg-slate-700 transition"
-                  onClick={(e) => { e.stopPropagation(); playSegment(seg) }}
-                  type="button"
-                >
-                  {isPlaying ? (
-                    <svg className="h-3 w-3 text-teal-500" fill="currentColor" viewBox="0 0 24 24"><rect height="16" rx="1" width="4" x="6" y="4" /><rect height="16" rx="1" width="4" x="14" y="4" /></svg>
-                  ) : (
-                    <svg className="h-3 w-3 text-slate-500" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>
-                  )}
+                <button className="h-7 w-7 rounded-full border border-slate-300 dark:border-slate-600 flex items-center justify-center shrink-0 hover:bg-slate-100 dark:hover:bg-slate-700 transition" onClick={(e) => { e.stopPropagation(); playSegment(seg) }} type="button">
+                  {isPlaying ? <svg className="h-3 w-3 text-teal-500" fill="currentColor" viewBox="0 0 24 24"><rect height="16" rx="1" width="4" x="6" y="4" /><rect height="16" rx="1" width="4" x="14" y="4" /></svg> : <svg className="h-3 w-3 text-slate-500" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>}
                 </button>
-
-                {/* Text */}
                 <span className="flex-1 text-xs text-foreground truncate">{seg.sourceText || `片段 ${seg.segmentId}`}</span>
-
-                {/* Duration */}
                 <span className="text-xs text-slate-400 shrink-0">{seg.durationS.toFixed(1)}s</span>
               </div>
             )
           })}
         </div>
-
-        {/* Footer */}
         <div className="flex items-center justify-between p-4 border-t border-slate-200 dark:border-slate-700">
-          <span className="text-xs text-slate-400">
-            克隆费用：{cloneCostCredits} 点
-          </span>
+          <span className="text-xs text-slate-400">克隆费用：{cloneCostCredits} 点</span>
           <div className="flex items-center gap-2">
             {error ? <span className="text-xs text-red-500 max-w-[200px] truncate">{error}</span> : null}
-            <button
-              className="h-8 rounded px-4 text-sm text-slate-500 transition hover:text-foreground"
-              disabled={isCloning}
-              onClick={onClose}
-              type="button"
-            >
-              取消
-            </button>
-            <button
-              className="h-8 rounded-lg bg-teal-600 px-4 text-sm font-medium text-white transition hover:bg-teal-700 disabled:opacity-50 disabled:cursor-not-allowed"
-              disabled={isCloning || !meetsMinDuration || exceedsMaxDuration}
-              onClick={() => { void handleClone() }}
-              type="button"
-            >
-              {isCloning ? '克隆中...' : '开始克隆'}
-            </button>
+            <button className="h-8 rounded px-4 text-sm text-slate-500 transition hover:text-foreground" disabled={isCloning} onClick={onClose} type="button">取消</button>
+            <button className="h-8 rounded-lg bg-teal-600 px-4 text-sm font-medium text-white transition hover:bg-teal-700 disabled:opacity-50 disabled:cursor-not-allowed" disabled={isCloning || !meetsMinDuration || exceedsMaxDuration} onClick={() => { void handleClone() }} type="button">{isCloning ? '克隆中...' : '开始克隆'}</button>
           </div>
         </div>
       </div>

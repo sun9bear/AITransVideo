@@ -63,9 +63,12 @@ def resolve_voice_match(request: VoiceMatchRequest) -> VoiceMatchResult:
     if request.tts_provider == "cosyvoice":
         return _dispatch_cosyvoice(request)
 
+    if request.tts_provider == "minimax":
+        return _dispatch_minimax(request)
+
     raise UnsupportedProviderError(
         f"Voice match resolver does not support provider {request.tts_provider!r}. "
-        f"Supported: volcengine, cosyvoice."
+        f"Supported: volcengine, cosyvoice, minimax."
     )
 
 
@@ -101,4 +104,17 @@ def _dispatch_cosyvoice(request: VoiceMatchRequest) -> VoiceMatchResult:
         persona_style=request.persona_style,
         energy_level=request.energy_level,
         is_childlike=is_childlike,
+    )
+
+
+def _dispatch_minimax(request: VoiceMatchRequest) -> VoiceMatchResult:
+    """Dispatch to the MiniMax voice selector."""
+    from services.tts.minimax_voice_selector import select_minimax_voice_match
+
+    return select_minimax_voice_match(
+        gender=request.gender,
+        age_group=request.age_group,
+        persona_style=request.persona_style,
+        energy_level=request.energy_level,
+        target_language=request.target_language,
     )

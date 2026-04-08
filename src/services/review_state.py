@@ -18,7 +18,12 @@ REVIEW_STATUS_SKIPPED = "skipped"
 SPEAKER_REVIEW_STAGE = "speaker_review"
 TRANSLATION_CONFIG_REVIEW_STAGE = "translation_config_review"
 TRANSLATION_REVIEW_STAGE = "translation_review"
+# voice_review: Legacy recovery/fallback stage for historical short-sample
+# voice binding scenarios.  Does NOT carry the three-engine selection path.
 VOICE_REVIEW_STAGE = "voice_review"
+# voice_selection_review: Studio primary voice-selection stage.
+# Handles multi-speaker voice picking, preview, optional clone,
+# and per-speaker TTS provider selection (MiniMax / CosyVoice / VolcEngine).
 VOICE_SELECTION_REVIEW_STAGE = "voice_selection_review"
 AUDIO_ALIGNMENT_REVIEW_STAGE = "audio_alignment_review"
 

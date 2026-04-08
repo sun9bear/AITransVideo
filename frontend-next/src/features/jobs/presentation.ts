@@ -221,7 +221,7 @@ function buildNativeReviewRoute(stage: ReviewStage | null, jobId: string | null)
   }
 
   // All review stages now route to the unified workspace
-  if (stage === 'speaker_review' || stage === 'translation_config_review' || stage === 'translation_review' || stage === 'voice_review') {
+  if (stage === 'speaker_review' || stage === 'translation_config_review' || stage === 'translation_review' || stage === 'voice_review' || stage === 'voice_selection_review') {
     return `/workspace/${jobId}`
   }
 

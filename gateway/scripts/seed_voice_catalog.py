@@ -120,14 +120,136 @@ def _load_cosyvoice_profiles() -> dict[str, dict]:
     return {}
 
 
+# ---------------------------------------------------------------------------
+# MiniMax trait → profile dimension mapping
+# ---------------------------------------------------------------------------
+# These map MiniMax's 950 Chinese trait keywords to our reranker dimensions.
+# Coverage: top-60 traits by frequency (80%+ of all 1804 trait instances).
+# Substrings are used for fuzzy matching — e.g. "低沉" matches "低沉沙哑",
+# "低沉浑厚", "低沉厚实", "低沉磁性" etc.
+
+_MM_PITCH_MAP: dict[str, str] = {
+    # Substring → pitch_level
+    "低沉": "low", "浑厚": "low", "厚实": "low", "厚重": "low", "深沉": "low",
+    "清亮": "high", "清脆": "high", "明亮": "high", "高亢": "high",
+    "清澈": "high", "娇俏": "high", "甜美": "high", "清甜": "high",
+}
+
+_MM_TEXTURE_MAP: dict[str, list[str]] = {
+    # Substring → texture_tags
+    "磁性": ["magnetic"], "柔和": ["soft"], "沙哑": ["husky"],
+    "气声": ["airy"], "圆润": ["steady"], "粗砺": ["husky"],
+    "质感": ["steady"], "温润": ["soft"], "细腻": ["soft"],
+    "颗粒": ["husky"], "鼻音": ["husky"], "沧桑": ["husky"],
+}
+
+_MM_ENERGY_MAP: dict[str, str] = {
+    # Substring → energy_level
+    "活泼": "high", "轻快": "high", "热情": "high", "元气": "high",
+    "快速": "high", "急促": "high", "跳跃": "high", "充满活力": "high",
+    "欢脱": "high", "快言快语": "high",
+    "沉稳": "low", "从容": "low", "舒缓": "low", "慵懒": "low",
+    "不紧不慢": "low", "缓慢": "low", "平稳": "low",
+    "娓娓道来": "medium", "节奏适中": "medium", "自然": "medium",
+}
+
+_MM_PERSONA_MAP: dict[str, str] = {
+    # Substring → persona_style
+    "专业": "professional", "新闻": "professional", "客观": "professional",
+    "权威": "professional", "精准": "professional", "干练": "professional",
+    "严肃": "serious", "严谨": "serious", "冷峻": "serious", "霸道": "serious",
+    "温暖": "warm", "亲切": "warm", "治愈": "warm", "邻家": "warm",
+    "温柔": "warm", "陪伴": "warm", "居家": "warm",
+    "阳光": "energetic", "活力": "energetic", "热血": "energetic",
+    "知性": "professional", "博学": "professional",
+}
+
+_MM_DELIVERY_MAP: dict[str, str] = {
+    # Substring → delivery_style
+    "抑扬顿挫": "narration", "叙事": "narration", "播报": "narration",
+    "引人入胜": "storyteller", "戏剧": "storyteller", "故事": "storyteller",
+    "娓娓道来": "storyteller", "富有表现力": "storyteller",
+    "对话感": "companion", "陪伴": "companion", "亲密": "companion",
+    "随性": "companion", "闲聊": "companion",
+    "说服": "narration", "讲解": "explainer", "解说": "explainer",
+}
+
+_MM_MATURITY_MAP: dict[str, str] = {
+    "young": "young", "middle": "adult", "elderly": "elder", "child": "child",
+}
+
+
+def _infer_from_traits(traits: list[str], desc: str, mapping: dict[str, str]) -> str:
+    """Match the first keyword from mapping found in traits or description."""
+    text = " ".join(traits) + " " + desc
+    for keyword, value in mapping.items():
+        if keyword in text:
+            return value
+    return ""
+
+
+def _infer_texture_from_traits(traits: list[str], desc: str) -> list[str]:
+    """Extract texture_tags from traits via keyword matching."""
+    text = " ".join(traits) + " " + desc
+    tags: set[str] = set()
+    for keyword, values in _MM_TEXTURE_MAP.items():
+        if keyword in text:
+            tags.update(values)
+    return sorted(tags) if tags else []
+
+
+def _load_minimax_voices() -> list[dict]:
+    """Load MiniMax voices from exported JSON catalog with trait mapping."""
+    path = _repo_root / "src" / "services" / "tts" / "minimax_voice_catalog_604.json"
+    if not path.exists():
+        print(f"  WARNING: {path} not found, skipping MiniMax voices")
+        return []
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    voices = []
+    # Languages to mark as matchable (video dubbing primary targets)
+    matchable_langs = {"中文-普通话", "中文-粤语", "英语"}
+    for v in raw:
+        traits = v.get("traits", [])
+        desc = v.get("description", "")
+        age = v.get("age_group", "")
+        lang = v.get("language", "")
+        voices.append({
+            "voice_id": v["voice_id"],
+            "provider": "minimax",
+            "provider_config": {
+                "model": "speech-02-hd",
+                "accent": v.get("accent", ""),
+            },
+            "display_name": v.get("name", v["voice_id"]),
+            "gender": v.get("gender"),
+            "language": lang,
+            "scene": ", ".join(v.get("scene", [])),
+            "matchable": lang in matchable_langs,
+            "source": "seed_migration",
+            "notes": desc,
+            # Demographic labels (text)
+            "_age_group": age,
+            "_persona_style": _infer_from_traits(traits, desc, _MM_PERSONA_MAP),
+            "_energy_level": _infer_from_traits(traits, desc, _MM_ENERGY_MAP),
+            # Profile labels (audio_round1 equivalent from trait mapping)
+            "_pitch_level": _infer_from_traits(traits, desc, _MM_PITCH_MAP),
+            "_texture_tags": _infer_texture_from_traits(traits, desc),
+            "_delivery_style": _infer_from_traits(traits, desc, _MM_DELIVERY_MAP),
+            "_maturity": _MM_MATURITY_MAP.get(age, "adult") if age else "",
+            "_childlike": age == "child",
+        })
+    return voices
+
+
 def _build_seed_plan() -> dict:
     """Build the complete seed plan (voices + labels)."""
     vc_voices = _load_volcengine_voices()
     cv_voices = _load_cosyvoice_voices()
+    mm_voices = _load_minimax_voices()
     vc_profiles = _load_volcengine_profiles()
     cv_profiles = _load_cosyvoice_profiles()
 
-    all_voices = vc_voices + cv_voices
+    all_voices = vc_voices + cv_voices + mm_voices
 
     # Build text labels from inline catalog data
     text_labels = []
@@ -143,7 +265,7 @@ def _build_seed_plan() -> dict:
                 "energy_level": v["_energy_level"],
             })
 
-    # Build audio_round1 labels from profiles
+    # Build audio_round1 labels from profiles (VolcEngine + CosyVoice)
     profile_labels = []
     for vid, profile in {**vc_profiles, **cv_profiles}.items():
         profile_labels.append({
@@ -165,6 +287,32 @@ def _build_seed_plan() -> dict:
             "childlike": profile.get("childlike"),
         })
 
+    # Build final labels from MiniMax trait mapping (must be 'final' so
+    # profile fields like pitch_level/texture_tags are picked up by
+    # Gateway's _PROFILE_PRIORITY chain: final > audio_round3 > ... > audio_round1)
+    for v in mm_voices:
+        has_profile = (v.get("_pitch_level") or v.get("_texture_tags")
+                       or v.get("_delivery_style") or v.get("_maturity"))
+        if has_profile:
+            profile_labels.append({
+                "voice_id": v["voice_id"],
+                "label_type": "final",
+                "source_run_id": "seed-minimax-trait-mapping",
+                "labeled_by": "seed_migration",
+                "age_group": v["_age_group"],
+                "persona_style": v["_persona_style"],
+                "energy_level": v["_energy_level"],
+                "pitch_level": v.get("_pitch_level"),
+                "warmth": None,
+                "authority": None,
+                "intimacy": None,
+                "brightness": None,
+                "maturity": v.get("_maturity"),
+                "delivery_style": v.get("_delivery_style"),
+                "texture_tags": v.get("_texture_tags") or None,
+                "childlike": v.get("_childlike"),
+            })
+
     return {
         "voices": all_voices,
         "text_labels": text_labels,
@@ -181,14 +329,17 @@ def _print_plan(plan: dict) -> None:
     vc_1 = sum(1 for v in voices if v["provider"] == "volcengine" and v["provider_config"].get("resource_id") == "seed-tts-1.0")
     vc_2 = sum(1 for v in voices if v["provider"] == "volcengine" and v["provider_config"].get("resource_id") == "seed-tts-2.0")
     cv = sum(1 for v in voices if v["provider"] == "cosyvoice")
+    mm = sum(1 for v in voices if v["provider"] == "minimax")
+    mm_matchable = sum(1 for v in voices if v["provider"] == "minimax" and v["matchable"])
 
     print(f"Seed plan:")
     print(f"  voice_catalog: {len(voices)} voices")
     print(f"    VolcEngine 1.0: {vc_1}")
     print(f"    VolcEngine 2.0: {vc_2}")
     print(f"    CosyVoice: {cv}")
+    print(f"    MiniMax: {mm} ({mm_matchable} matchable)")
     print(f"  voice_labels (text): {len(text_labels)}")
-    print(f"  voice_labels (audio_round1 profiles): {len(profile_labels)}")
+    print(f"  voice_labels (profiles): {len(profile_labels)}")
     print(f"  Total labels: {len(text_labels) + len(profile_labels)}")
 
 

@@ -45,6 +45,7 @@ const EXPRESS_TTS_OPTIONS = [
 
 const STUDIO_TTS_OPTIONS = [
   { value: 'minimax', label: 'MiniMax Speech 2.8', description: '成熟稳定，¥0.20/千字，支持音色克隆' },
+  { value: 'cosyvoice', label: 'CosyVoice（阿里百炼）', description: '阿里百炼 v3-flash，~60中文音色，¥2/万字符' },
   { value: 'volcengine', label: '豆包语音合成 2.0（V3）', description: '火山引擎 V3 流式接口，300+音色，¥3/万字符，自动情感表达' },
 ]
 

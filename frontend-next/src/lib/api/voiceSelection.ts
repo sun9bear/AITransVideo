@@ -6,6 +6,7 @@ export interface VoiceSelectionSpeakerApproval {
   speakerId: string
   voiceId: string
   voiceSource: 'catalog' | 'cloned' | 'auto_matched'
+  ttsProvider?: string
 }
 
 export async function approveVoiceSelection(
@@ -20,6 +21,7 @@ export async function approveVoiceSelection(
           speaker_id: s.speakerId,
           voice_id: s.voiceId,
           voice_source: s.voiceSource,
+          tts_provider: s.ttsProvider ?? '',
         })),
       },
     },
@@ -72,13 +74,14 @@ export interface VoicePreviewResult {
 export async function previewVoice(
   jobId: string,
   voiceId: string,
+  options?: { ttsProvider?: string },
 ): Promise<VoicePreviewResult> {
   const result = await apiClient.post<{
     audio_base64: string
     expired: boolean
     error: string | null
   }>(`/jobs/${jobId}/review/voice/preview`, {
-    body: { voice_id: voiceId },
+    body: { voice_id: voiceId, tts_provider: options?.ttsProvider ?? '' },
   })
   return {
     audioBase64: result.audio_base64,

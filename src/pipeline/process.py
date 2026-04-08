@@ -1108,16 +1108,22 @@ class ProcessPipeline:
             if approved_voice_selection is not None:
                 # Apply approved voice selections from N-speaker payload
                 sel_speakers = approved_voice_selection.get("speakers")
+                _speaker_providers: dict[str, str] = {}
                 if isinstance(sel_speakers, list):
                     for sp in sel_speakers:
                         sp_id = sp.get("speaker_id", "")
                         sp_voice = sp.get("voice_id", "")
+                        sp_prov = sp.get("tts_provider", "")
                         if sp_id and sp_voice:
                             _speaker_voices[sp_id] = sp_voice
+                        if sp_id and sp_prov:
+                            _speaker_providers[sp_id] = sp_prov
                     # Backward compat: sync voice_id_a / voice_id_b
                     voice_id_a = _speaker_voices.get("speaker_a", voice_id_a)
                     voice_id_b = _speaker_voices.get("speaker_b", voice_id_b)
                     print(f"[S5] 用户确认音色：{_speaker_voices}")
+                    if _speaker_providers:
+                        print(f"[S5] 用户选择引擎：{_speaker_providers}")
                     # Apply selected voices to segments (voice_id was None during translation)
                     self._apply_runtime_voice_overrides(
                         translation_result.segments,
@@ -1126,6 +1132,7 @@ class ProcessPipeline:
                         voice_id_b=voice_id_b,
                         display_name_b=speaker_name_b,
                         speaker_voices=_speaker_voices,
+                        speaker_providers=_speaker_providers,
                     )
             elif config.wait_for_review and job_requires_review and job_service_mode == "studio":
                 # Build voice selection review payload and pause
@@ -1702,65 +1709,103 @@ class ProcessPipeline:
                 "source_text": (line.source_text or "")[:200],
             })
 
-        # Build available_voices list + auto-match per speaker for non-minimax providers
-        available_voices_list: list[dict[str, object]] = []
-        voice_display_names: dict[str, str] = {}  # voice_id → display label (for auto-match)
-        volc_resource = ""
+        # ---------------------------------------------------------------
+        # Build available_voices for ALL three providers (three-engine)
+        # ---------------------------------------------------------------
+        _PROVIDER_LABELS = {
+            "minimax": "MiniMax Speech 2.8",
+            "cosyvoice": "CosyVoice（阿里百炼）",
+            "volcengine": "豆包 2.0",
+        }
 
-        if tts_provider == "volcengine":
-            from services.tts.volcengine_voice_catalog import get_voices_for_resource, RESOURCE_ID_1_0, RESOURCE_ID_2_0
-            # Studio uses 2.0, Express uses 1.0
-            volc_resource = RESOURCE_ID_2_0 if service_mode == "studio" else RESOURCE_ID_1_0
-            pool = get_voices_for_resource(volc_resource)
-            # Only Chinese voices for now
-            zh_prefixes = ("ICL_zh_", "zh_") if volc_resource == RESOURCE_ID_1_0 else ("zh_", "saturn_zh_")
-            zh_pool = [v for v in pool if str(v.get("voice_id", "")).startswith(zh_prefixes)]
-            for v in zh_pool:
-                vid = str(v.get("voice_id", ""))
-                label = str(v.get("display_name", vid))
-                voice_display_names[vid] = label
-                available_voices_list.append({
-                    "voice_id": vid,
-                    "label": label,
-                    "gender": str(v.get("gender", "")),
-                    "provider": "volcengine",
-                })
+        def _build_provider_voices(prov: str) -> tuple[list[dict[str, object]], dict[str, str]]:
+            """Build available_voices list + display_name map for a single provider."""
+            voices: list[dict[str, object]] = []
+            display_map: dict[str, str] = {}
 
-        elif tts_provider == "cosyvoice":
-            from services.tts.cosyvoice_endpoint_config import get_runtime_endpoint_mode, is_voice_available
-            from services.tts.cosyvoice_voice_catalog import list_matchable_cosyvoice_voices
-            endpoint_mode = get_runtime_endpoint_mode()
-            cosy_pool = list_matchable_cosyvoice_voices()
-            for v in cosy_pool:
-                vid = str(v.get("voice_id", ""))
-                if not is_voice_available(vid, endpoint_mode):
-                    continue
-                label = str(v.get("display_name", v.get("name", vid)))
-                voice_display_names[vid] = label
-                available_voices_list.append({
-                    "voice_id": vid,
-                    "label": label,
-                    "gender": str(v.get("gender", "")),
-                    "provider": "cosyvoice",
-                })
+            if prov == "volcengine":
+                from services.tts.volcengine_voice_catalog import get_voices_for_resource, RESOURCE_ID_1_0, RESOURCE_ID_2_0
+                rid = RESOURCE_ID_2_0 if service_mode == "studio" else RESOURCE_ID_1_0
+                pool = get_voices_for_resource(rid)
+                zh_pfx = ("ICL_zh_", "zh_") if rid == RESOURCE_ID_1_0 else ("zh_", "saturn_zh_")
+                for v in pool:
+                    vid = str(v.get("voice_id", ""))
+                    if not vid.startswith(zh_pfx):
+                        continue
+                    lbl = str(v.get("display_name", vid))
+                    display_map[vid] = lbl
+                    voices.append({"voice_id": vid, "label": lbl, "gender": str(v.get("gender", "")), "provider": prov})
 
-        # Unified auto-match helper (volcengine + cosyvoice via shared resolver)
-        def _auto_match(gender: str, age_group: str, persona: str, energy: str) -> dict[str, object] | None:
-            if tts_provider not in ("volcengine", "cosyvoice") or not gender:
+            elif prov == "cosyvoice":
+                from services.tts.cosyvoice_endpoint_config import get_runtime_endpoint_mode, is_voice_available
+                from services.tts.cosyvoice_voice_catalog import list_matchable_cosyvoice_voices
+                ep_mode = get_runtime_endpoint_mode()
+                for v in list_matchable_cosyvoice_voices():
+                    vid = str(v.get("voice_id", ""))
+                    if not is_voice_available(vid, ep_mode):
+                        continue
+                    lbl = str(v.get("display_name", v.get("name", vid)))
+                    display_map[vid] = lbl
+                    voices.append({"voice_id": vid, "label": lbl, "gender": str(v.get("gender", "")), "provider": prov})
+
+            elif prov == "minimax":
+                from services.tts.minimax_voice_selector import _load_minimax_pool
+                for v in _load_minimax_pool():
+                    if v.get("language") not in ("中文-普通话", "中文-粤语"):
+                        continue
+                    vid = str(v.get("voice_id", ""))
+                    lbl = str(v.get("display_name", v.get("name", vid)))
+                    display_map[vid] = lbl
+                    voices.append({"voice_id": vid, "label": lbl, "gender": str(v.get("gender", "")), "provider": prov})
+
+            return voices, display_map
+
+        # Build all three providers
+        all_providers: dict[str, dict[str, object]] = {}
+        all_display_maps: dict[str, dict[str, str]] = {}
+        for prov in ("minimax", "cosyvoice", "volcengine"):
+            try:
+                voices, dmap = _build_provider_voices(prov)
+            except Exception:
+                voices, dmap = [], {}
+            all_display_maps[prov] = dmap
+            all_providers[prov] = {
+                "label": _PROVIDER_LABELS.get(prov, prov),
+                "available_voices": voices,
+                "supports_clone": prov == "minimax",
+            }
+
+        # Default provider voices (backward compat)
+        default_voices = all_providers.get(tts_provider, {}).get("available_voices", [])
+        default_display_map = all_display_maps.get(tts_provider, {})
+
+        # ---------------------------------------------------------------
+        # Auto-match helper — works for any provider
+        # ---------------------------------------------------------------
+        def _auto_match_for_provider(
+            prov: str, gender: str, age_group: str, persona: str, energy: str,
+        ) -> dict[str, object] | None:
+            if not gender:
                 return None
             try:
                 from services.tts.voice_match_resolver import resolve_voice_match
                 from services.tts.voice_match_types import VoiceMatchRequest
+                # VolcEngine needs resource_id
+                rid = None
+                if prov == "volcengine":
+                    from services.tts.volcengine_tts_provider import RESOURCE_ID_1_0, RESOURCE_ID_2_0
+                    rid = RESOURCE_ID_2_0 if service_mode == "studio" else RESOURCE_ID_1_0
                 result = resolve_voice_match(VoiceMatchRequest(
-                    tts_provider=tts_provider,
-                    resource_id=volc_resource or None,
+                    tts_provider=prov,
+                    resource_id=rid,
                     mode="auto",
                     gender=gender,
                     age_group=age_group,
                     persona_style=persona,
                     energy_level=energy,
                 ))
-                matched_name = voice_display_names.get(result.voice_id, result.voice_id)
+                dmap = all_display_maps.get(prov, {})
+                matched_name = dmap.get(result.voice_id, result.voice_id)
                 return {"voice_id": result.voice_id, "label": matched_name, "match_confidence": result.match_confidence}
             except Exception:
                 return None
@@ -1793,14 +1838,20 @@ class ProcessPipeline:
             segs = speaker_segments[sid]
             total_dur = sum(float(s.get("duration_s", 0)) for s in segs)
             segs_sorted = sorted(segs, key=lambda s: float(s.get("duration_s", 0)), reverse=True)
-            can_clone = total_dur >= 10 and tts_provider == "minimax"
+            can_clone = total_dur >= 10  # clone eligibility (MiniMax-only in frontend)
 
-            # Auto-match for volcengine / cosyvoice
+            # Auto-match: default provider (backward compat)
             profile = speaker_profiles.get(sid, {})
-            auto_matched = _auto_match(
-                profile.get("gender", ""), profile.get("age_group", ""),
-                profile.get("persona_style", ""), profile.get("energy_level", ""),
-            )
+            g = profile.get("gender", "")
+            ag = profile.get("age_group", "")
+            ps = profile.get("persona_style", "")
+            el = profile.get("energy_level", "")
+            auto_matched = _auto_match_for_provider(tts_provider, g, ag, ps, el)
+
+            # Auto-match: all three providers
+            auto_matched_by_provider: dict[str, object] = {}
+            for prov in ("minimax", "cosyvoice", "volcengine"):
+                auto_matched_by_provider[prov] = _auto_match_for_provider(prov, g, ag, ps, el)
 
             speakers_payload.append({
                 "speaker_id": sid,
@@ -1808,6 +1859,7 @@ class ProcessPipeline:
                 "segment_count": len(segs),
                 "total_duration_s": round(total_dur, 1),
                 "auto_matched_voice": auto_matched,
+                "auto_matched_by_provider": auto_matched_by_provider,
                 "can_clone": can_clone,
                 "segments": segs_sorted,
             })
@@ -1816,7 +1868,8 @@ class ProcessPipeline:
             "message": "请为每位说话人选择或克隆配音音色",
             "tts_provider": tts_provider,
             "speakers": speakers_payload,
-            "available_voices": available_voices_list,
+            "available_voices": default_voices,
+            "all_providers": all_providers,
             "clone_cost_credits": 500,
         }
 
@@ -2083,6 +2136,7 @@ class ProcessPipeline:
         voice_id_b: str | None,
         display_name_b: str,
         speaker_voices: dict[str, str] | None = None,
+        speaker_providers: dict[str, str] | None = None,
     ) -> None:
         for segment in segments:
             # N-speaker: use speaker_voices dict if available
@@ -2096,6 +2150,10 @@ class ProcessPipeline:
                 segment.voice_id = voice_id_a
                 segment.display_name = display_name_a
             # speaker_c+ without speaker_voices: leave voice_id as-is (auto-match)
+
+            # Per-speaker TTS provider override (three-engine voice selection)
+            if speaker_providers and segment.speaker_id in speaker_providers:
+                segment.tts_provider = speaker_providers[segment.speaker_id]
 
     def _hydrate_cached_tts_segments(
         self,
