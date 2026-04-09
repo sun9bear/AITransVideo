@@ -24,6 +24,7 @@ import {
   Moon,
   Settings2,
   AudioLines,
+  Wallet,
 } from "lucide-react"
 
 type NavItem = {
@@ -67,6 +68,7 @@ const navGroups: NavGroup[] = [
     adminOnly: true,
     items: [
       { label: "音色管理", href: "/admin/voices", icon: AudioLines },
+      { label: "定价管理", href: "/admin/pricing", icon: Wallet },
       { label: "系统设置", href: "/admin/settings", icon: Settings2 },
     ],
   },
