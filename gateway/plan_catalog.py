@@ -132,22 +132,90 @@ TRIAL_CONFIG: dict[str, Any] = {
 
 
 # ---------------------------------------------------------------------------
+# Runtime pricing bridge (lazy — avoids circular imports)
+# ---------------------------------------------------------------------------
+
+
+def _get_runtime_plans() -> dict[str, PlanDefinition]:
+    """Derive PlanDefinition dict from the runtime pricing payload.
+
+    Falls back to the module-level ``PLANS`` snapshot if the runtime layer
+    is unavailable (e.g. during early import or test isolation).
+    """
+    try:
+        from pricing_runtime import get_runtime_pricing
+
+        payload = get_runtime_pricing()
+        result: dict[str, PlanDefinition] = {}
+        for code, pc in payload.plans.items():
+            price: PlanPrice | None = None
+            if pc.price_cny_fen is not None:
+                price = PlanPrice(
+                    monthly_cny_fen=pc.price_cny_fen.monthly,
+                    quarterly_cny_fen=pc.price_cny_fen.quarterly,
+                    annual_cny_fen=pc.price_cny_fen.annual,
+                )
+            result[code] = PlanDefinition(
+                code=code,
+                display_name=pc.display_name,
+                max_duration_minutes=pc.max_duration_minutes,
+                max_concurrent_jobs=pc.max_concurrent_jobs,
+                allowed_service_modes=tuple(pc.allowed_service_modes),
+                free_quota_total=pc.free_quota_total,
+                price=price,
+                self_serve=pc.self_serve,
+            )
+        return result
+    except Exception:
+        return PLANS
+
+
+def _get_runtime_trial_config() -> dict[str, Any]:
+    """Derive trial config dict from the runtime pricing payload.
+
+    Falls back to the module-level ``TRIAL_CONFIG`` snapshot on failure.
+    The ``notes`` field is always sourced from the frozen ``TRIAL_CONFIG``
+    since it has no counterpart in ``TrialConfig``.
+    """
+    try:
+        from pricing_runtime import get_runtime_pricing
+
+        trial = get_runtime_pricing().trial
+        result: dict[str, Any] = {
+            "frozen": trial.frozen,
+            "days": trial.days,
+            "source_minutes": trial.source_minutes,
+            "includes_studio": trial.includes_studio,
+            "phone_required": trial.phone_required,
+            "auto_charge": trial.auto_charge,
+            "fallback_plan": trial.fallback_plan,
+        }
+        # Preserve the frozen notes string from the module-level constant
+        if "notes" in TRIAL_CONFIG:
+            result["notes"] = TRIAL_CONFIG["notes"]
+        return result
+    except Exception:
+        return TRIAL_CONFIG
+
+
+# ---------------------------------------------------------------------------
 # Helpers (consumed by billing.py / job_intercept.py / tests)
 # ---------------------------------------------------------------------------
 
 
 def list_plan_codes() -> list[str]:
-    return list(PLANS.keys())
+    return list(_get_runtime_plans().keys())
 
 
 def get_plan(code: str) -> PlanDefinition:
     """Return the plan definition, falling back to ``free`` if unknown."""
-    return PLANS.get(code, PLANS["free"])
+    plans = _get_runtime_plans()
+    return plans.get(code, plans["free"])
 
 
 def get_price(plan_code: str, billing_period: str) -> int | None:
     """Return the price in CNY fen, or ``None`` if unavailable."""
-    plan = PLANS.get(plan_code)
+    plan = _get_runtime_plans().get(plan_code)
     if plan is None or plan.price is None:
         return None
     if billing_period == "monthly":
@@ -161,7 +229,7 @@ def get_price(plan_code: str, billing_period: str) -> int | None:
 
 def valid_target_plan_codes() -> set[str]:
     """Plan codes that can be the *target* of a paid upgrade (i.e. priced plans)."""
-    return {code for code, plan in PLANS.items() if plan.price is not None}
+    return {code for code, plan in _get_runtime_plans().items() if plan.price is not None}
 
 
 def is_user_in_active_trial(user) -> bool:
@@ -194,7 +262,7 @@ def get_effective_plan_gate(user) -> dict[str, Any]:
     plan_code = getattr(user, "plan_code", "free") or "free"
     base = get_legacy_plan_gate_dict().get(plan_code, get_legacy_plan_gate_dict()["free"])
 
-    if is_user_in_active_trial(user) and TRIAL_CONFIG.get("frozen"):
+    if is_user_in_active_trial(user) and _get_runtime_trial_config().get("frozen"):
         # Overlay trial capabilities on top of the base plan.
         # Trial includes Studio and gets Plus-tier duration/concurrency limits.
         plus_gate = get_legacy_plan_gate_dict().get("plus", base)
@@ -216,7 +284,7 @@ def get_legacy_plan_gate_dict() -> dict[str, dict[str, Any]]:
     ``job_intercept`` keep working while the underlying truth moves here.
     """
     result: dict[str, dict[str, Any]] = {}
-    for code, plan in PLANS.items():
+    for code, plan in _get_runtime_plans().items():
         entry: dict[str, Any] = {
             "max_duration_minutes": plan.max_duration_minutes,
             "max_concurrent_jobs": plan.max_concurrent_jobs,
@@ -231,7 +299,7 @@ def get_legacy_plan_gate_dict() -> dict[str, dict[str, Any]]:
 def get_legacy_price_table() -> dict[tuple[str, str], int]:
     """Return the legacy ``PLAN_PRICES_CNY`` shape historically exposed by ``billing``."""
     result: dict[tuple[str, str], int] = {}
-    for code, plan in PLANS.items():
+    for code, plan in _get_runtime_plans().items():
         if plan.price is None:
             continue
         if plan.price.monthly_cny_fen is not None:
@@ -282,8 +350,8 @@ def _plan_to_public_dict(plan: PlanDefinition) -> dict[str, Any]:
 def _build_plans_response() -> dict[str, Any]:
     """Build the ``/api/plans`` response dict (extracted for unit testing)."""
     return {
-        "plans": [_plan_to_public_dict(plan) for plan in PLANS.values()],
-        "trial": dict(TRIAL_CONFIG),
+        "plans": [_plan_to_public_dict(plan) for plan in _get_runtime_plans().values()],
+        "trial": dict(_get_runtime_trial_config()),
     }
 
 

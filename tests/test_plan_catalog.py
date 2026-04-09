@@ -31,6 +31,8 @@ from plan_catalog import (  # noqa: E402
     VALID_BILLING_PERIODS,
     PlanDefinition,
     _build_plans_response,
+    _get_runtime_plans,
+    _get_runtime_trial_config,
     get_legacy_plan_gate_dict,
     get_legacy_price_table,
     get_plan,
@@ -247,3 +249,77 @@ class TestPlansResponsePayload:
         assert trial["days"] == 7
         assert trial["source_minutes"] == 20
         assert trial["includes_studio"] is True
+
+
+# ---------------------------------------------------------------------------
+# Runtime pricing bridge
+# ---------------------------------------------------------------------------
+
+
+class TestRuntimePricingBridge:
+    """Verify helpers reflect changes from the runtime pricing layer."""
+
+    def test_runtime_plans_match_frozen_snapshot(self):
+        """When runtime returns defaults, derived plans match the frozen PLANS."""
+        runtime = _get_runtime_plans()
+        assert set(runtime.keys()) == set(PLANS.keys())
+        for code in PLANS:
+            assert runtime[code].display_name == PLANS[code].display_name
+            assert runtime[code].max_duration_minutes == PLANS[code].max_duration_minutes
+
+    def test_runtime_trial_config_match_frozen_snapshot(self):
+        """When runtime returns defaults, derived trial matches TRIAL_CONFIG."""
+        runtime = _get_runtime_trial_config()
+        assert runtime["frozen"] is TRIAL_CONFIG["frozen"]
+        assert runtime["days"] == TRIAL_CONFIG["days"]
+        assert runtime["source_minutes"] == TRIAL_CONFIG["source_minutes"]
+        assert "notes" in runtime  # notes preserved from frozen constant
+
+    def test_get_price_reads_runtime_pricing(self, monkeypatch):
+        """When runtime pricing has different values, helpers reflect them."""
+        import pricing_runtime
+        from pricing_schema import PlanPriceConfig, build_default_pricing_payload
+
+        modified = build_default_pricing_payload()
+        # Construct a new PlanConfig with a changed monthly price
+        original_plus = modified.plans["plus"]
+        modified.plans["plus"] = original_plus.model_copy(
+            update={"price_cny_fen": PlanPriceConfig(
+                monthly=10900,
+                quarterly=original_plus.price_cny_fen.quarterly,
+                annual=original_plus.price_cny_fen.annual,
+            )}
+        )
+        monkeypatch.setattr(
+            pricing_runtime, "get_runtime_pricing",
+            lambda force_reload=False: modified,
+        )
+        assert get_price("plus", "monthly") == 10900
+        # Other prices unchanged
+        assert get_price("plus", "quarterly") == 26900
+
+    def test_build_plans_response_reads_runtime_trial(self, monkeypatch):
+        """Trial section in /api/plans reflects runtime trial config."""
+        import pricing_runtime
+        from pricing_schema import build_default_pricing_payload
+
+        modified = build_default_pricing_payload()
+        modified.trial.days = 14
+        monkeypatch.setattr(
+            pricing_runtime, "get_runtime_pricing",
+            lambda force_reload=False: modified,
+        )
+        resp = _build_plans_response()
+        assert resp["trial"]["days"] == 14
+
+    def test_fallback_to_frozen_on_runtime_error(self, monkeypatch):
+        """If runtime raises, helpers fall back to module-level PLANS."""
+        import pricing_runtime
+
+        def _boom(force_reload=False):
+            raise RuntimeError("runtime broken")
+
+        monkeypatch.setattr(pricing_runtime, "get_runtime_pricing", _boom)
+        # Should fall back gracefully
+        assert get_price("plus", "monthly") == 9900
+        assert set(list_plan_codes()) == {"free", "plus", "pro"}
