@@ -125,6 +125,7 @@ export interface TranslationReviewApprovalInput {
   jobId: string
   projectDir: string
   segmentSpeakers?: Record<string, string>
+  speakerNames?: Record<string, string>
   segments: Record<
     string,
     {

@@ -227,6 +227,7 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
         jobId,
         projectDir: resource.projectDir,
         segmentSpeakers,
+        speakerNames,
         segments: Object.fromEntries(
           resource.items.map((item) => {
             const current = segments[item.segmentId] ?? {
@@ -276,6 +277,37 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
       </div>
 
       {submitError ? <ErrorBanner message={submitError} /> : null}
+
+      {/* Speaker identity confirmation */}
+      {resource.speakerOptions.length > 1 ? (
+        <section className="surface-card p-4">
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <h3 className="text-sm font-semibold text-foreground">说话人确认</h3>
+              <span className="text-xs text-muted-foreground">确认每位说话人的名字，可直接修改</span>
+            </div>
+            <div className="flex flex-wrap gap-3">
+              {resource.speakerOptions.map((option, index) => (
+                <div key={option.id} className="flex items-center gap-2 rounded-lg border border-border bg-background px-3 py-2">
+                  <div className="flex h-7 w-7 items-center justify-center rounded-full bg-slate-200 dark:bg-slate-700 text-xs font-bold text-slate-600 dark:text-slate-300 shrink-0">
+                    {String.fromCharCode(65 + index)}
+                  </div>
+                  <input
+                    className="h-7 w-[140px] rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 text-sm text-foreground"
+                    value={speakerNames[option.id] ?? option.displayName}
+                    onChange={(e) => {
+                      const newName = e.target.value
+                      setSpeakerNames((prev) => ({ ...prev, [option.id]: newName }))
+                    }}
+                    placeholder={option.id}
+                  />
+                  <span className="text-xs text-muted-foreground">{option.id}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+      ) : null}
 
       {/* Pagination */}
       {hasPagination ? (

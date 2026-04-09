@@ -123,3 +123,40 @@ class TestPayloadMinimax:
         # All should be Chinese voices
         for v in payload["available_voices"]:
             assert v["provider"] == "minimax"
+
+
+class TestSpeakerNameMap:
+    def test_additional_speaker_names_survive_merged_map(self) -> None:
+        from pipeline.process import _merge_speaker_name_map
+
+        proc = _get_pipeline_class().__new__(_get_pipeline_class())
+        transcript_result = FakeTranscriptResult(
+            lines=[
+                FakeLine(index=1, speaker_id="speaker_a", source_text="Host line"),
+                FakeLine(index=2, speaker_id="speaker_c", source_text="Third speaker line"),
+            ]
+        )
+        translation_result = FakeTranslationResult(
+            segments=[
+                FakeSegment(speaker_id="speaker_a"),
+                FakeSegment(speaker_id="speaker_c"),
+            ]
+        )
+
+        payload = proc._build_voice_selection_review_payload(
+            transcript_result=transcript_result,
+            translation_result=translation_result,
+            tts_provider="minimax",
+            service_mode="studio",
+            source_audio_path="/tmp/src.wav",
+            effective_speakers=3,
+            speaker_names=_merge_speaker_name_map(
+                {"speaker_c": "Charlie"},
+                "Alice",
+                "Bob",
+            ),
+        )
+
+        speaker_map = {speaker["speaker_id"]: speaker["speaker_name"] for speaker in payload["speakers"]}
+        assert speaker_map["speaker_a"] == "Alice"
+        assert speaker_map["speaker_c"] == "Charlie"

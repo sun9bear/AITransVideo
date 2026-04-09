@@ -96,6 +96,49 @@ No Redux. Each page manages state via `useState` + API fetch. Job status polling
 - **CSS**: Tailwind v4, configured in `globals.css` via `@theme inline`
 - **Components**: shadcn/ui
 
+### S2 转录审校（三轮拆分，2026-04-09）
+
+`review_transcript()` 内部拆为三轮，对外接口和 `ReviewResult` 不变：
+- **Pass 1**（speaker）：音频+文本，只允许 `correct_speaker`，contract 过滤越界
+- **Pass 2**（text）：纯文本，只允许 `fix_text` / `split` + glossary，contract 过滤
+- **Pass 3**（voice profile）：per-speaker 音频片段 → 音色画像，在翻译审核后、音色选择前调用
+- **Fallback**：Pass 1/2 任一失败 → `legacy_review_transcript_single_pass()`；Pass 3 失败 → 不回滚
+- **MiMo Omni**：直接走 legacy 单次路径
+
+关键文件：
+- `src/services/transcript_reviewer.py` — `_review_pass1_speakers()` / `_review_pass2_text()` / `review_pass3_voice_profiles()`
+- `src/pipeline/process.py` — 编排入口 + Pass 3 调用点
+
+产物（每个任务 `transcript/` 下）：
+- `s2_pass1_result.json` / `s2_pass2_result.json` / `s2_pass3_result.json` — 各轮原始结果
+- `s2_review_result.json` — 聚合结果（排障首选）
+- `s2_review_raw_response.json` — Pass 1/2 原始模型输出
+- `s2_review_speaker_diff.json` — 各阶段 snapshot 对比
+
+### 快捷版（Express）音色策略
+
+非交互模式（`wait_for_review=False`）下：
+- **不做** registry lookup / auto-clone（避免付费 API 自动调用）
+- voice_id 留 None，由下游 `voice_reranker` 基于 S2 speaker profile 自动匹配预设音色
+- 用户显式传入 `voice_a` / `voice_b` 仍正常传递
+
+### TTS & Voice Matching
+
+三引擎统一音色匹配架构（2026-04-08）：
+- **统一 Reranker**: `voice_reranker.py` — provider-agnostic 9 维评分（age/persona/pitch/maturity/energy/delivery/childlike/texture）
+- **三 Provider**: MiniMax (604 音色, 41 语言) / CosyVoice (~60 中文) / VolcEngine 豆包 (1.0 ~300 / 2.0 ~30)
+- **Studio 三引擎选择**: `voice_selection_review` 阶段，每说话人可独立选择不同引擎音色，前端三 Tab 切换
+- **统一入口**: `voice_match_resolver.py` → dispatch 到各 provider selector → `combined_rerank()`
+- **DB 数据源**: Gateway `voice_catalog` + `voice_labels` 表，`/api/internal/voice-catalog` 端点
+
+关键文件：
+- `src/services/tts/voice_reranker.py` — 共享评分模块
+- `src/services/tts/minimax_voice_selector.py` — MiniMax selector（语言预过滤）
+- `src/services/tts/cosyvoice_voice_selector.py` — CosyVoice selector（endpoint 过滤 + legacy fallback）
+- `src/services/tts/volcengine_voice_selector.py` — VolcEngine selector
+- `src/services/tts/voice_match_resolver.py` — 统一 dispatch
+- `docs/plans/2026-04-08-three-engine-voice-selection-plan.md` — 详细方案文档
+
 ### Deployment
 
 Docker Compose: `app` (Python) + `postgres` + `gateway` (FastAPI) + `caddy` (HTTPS).

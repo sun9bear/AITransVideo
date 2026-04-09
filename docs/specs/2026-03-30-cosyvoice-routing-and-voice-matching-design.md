@@ -2,7 +2,13 @@
 
 **Date:** 2026-03-30
 
-**Status:** Draft
+**Status:** Superseded
+
+> **Note (2026-04-08):** CosyVoice 的硬编码映射表（`_BASE_MAP` + `_STYLE_OVERRIDES`）已被统一音色匹配模块（`voice_reranker.py`）替代。CosyVoice 现在与 VolcEngine、MiniMax 共用 `combined_rerank` 9 维评分。Studio 模式支持三引擎自由切换（per-speaker）。详见：
+> - `docs/plans/2026-04-08-cosyvoice-unified-matcher-handoff.md` — 统一匹配模块交接文档
+> - `docs/plans/2026-04-08-three-engine-voice-selection-plan.md` — 三引擎选择方案
+>
+> INV-2 不再成立：Studio 模式不再限定 minimax，可选 cosyvoice / volcengine。
 
 **Related Docs:**
 - `docs/FREE_VS_PAID_TTS_ROUTING_STATUS_AND_RECOVERY_PLAN.md`

@@ -46,7 +46,7 @@ from job_intercept import (
     update_source_metadata,
 )
 from proxy import close_client, init_client, proxy_request
-from voice_selection_api import voice_clone_for_selection
+from voice_selection_api import get_voice_selection_pricing, voice_clone_for_selection
 
 
 @asynccontextmanager
@@ -154,6 +154,7 @@ app.delete("/job-api/jobs/{job_id}")(intercept_delete_job_v2)
 app.post("/job-api/jobs/{job_id}/source-metadata")(update_source_metadata)
 app.post("/job-api/jobs/{job_id}/metering")(update_job_metering)
 app.post("/job-api/jobs/{job_id}/voice-clone")(voice_clone_for_selection)
+app.get("/api/voice-selection/pricing")(get_voice_selection_pricing)
 
 # Job sub-resources: logs, artifacts, result-summary, continue, review/*, download/*, etc.
 app.api_route(

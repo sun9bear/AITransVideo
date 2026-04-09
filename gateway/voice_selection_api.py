@@ -7,6 +7,7 @@ Endpoints:
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import json
 import logging
 import re
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 _SPEAKER_ID_RE = re.compile(r"^speaker_[a-z0-9_]+$")
 _SEGMENT_ID_RE = re.compile(r"^[1-9][0-9]*$")
+_CLONE_LOCK_TIMEOUT_SECONDS = 300
 
 
 async def _verify_job_ownership(
@@ -60,6 +62,121 @@ def _get_project_dir(job: Job | None) -> Path | None:
     if pd:
         return Path(pd)
     return None
+
+
+def _acquire_clone_lock(project_dir: Path, speaker_id: str) -> tuple[bool, str | None]:
+    """Mark a speaker as cloning in review_state, unless a fresh lock exists."""
+    from services.review_state import (
+        REVIEW_STATUS_PENDING,
+        VOICE_SELECTION_REVIEW_STAGE,
+        ReviewStateManager,
+    )
+
+    review_state_path = project_dir / "review_state.json"
+    if not review_state_path.exists():
+        return True, None
+
+    manager = ReviewStateManager(review_state_path)
+    stage = manager.get_stage(VOICE_SELECTION_REVIEW_STAGE)
+    if not stage or stage.get("status") != REVIEW_STATUS_PENDING:
+        return True, None
+
+    payload = dict(stage.get("payload") or {})
+    speakers = payload.get("speakers")
+    if not isinstance(speakers, list):
+        return True, None
+
+    now = datetime.now(timezone.utc)
+    for speaker in speakers:
+        if str(speaker.get("speaker_id", "")).strip() != speaker_id:
+            continue
+
+        cloning = speaker.get("cloning")
+        if isinstance(cloning, dict):
+            started_at_raw = cloning.get("started_at")
+            if isinstance(started_at_raw, str) and started_at_raw.strip():
+                try:
+                    started_at = datetime.fromisoformat(started_at_raw)
+                    if started_at.tzinfo is None:
+                        started_at = started_at.replace(tzinfo=timezone.utc)
+                    elapsed = (now - started_at).total_seconds()
+                    if elapsed < _CLONE_LOCK_TIMEOUT_SECONDS:
+                        return False, "该说话人正在克隆音色，请稍候重试"
+                except ValueError:
+                    logger.warning("Invalid clone lock timestamp for %s: %s", speaker_id, started_at_raw)
+
+        speaker["cloning"] = {"started_at": now.isoformat()}
+        manager.set_stage(
+            VOICE_SELECTION_REVIEW_STAGE,
+            status=stage.get("status", REVIEW_STATUS_PENDING),
+            payload=payload,
+        )
+        return True, None
+
+    return True, None
+
+
+def _clear_clone_lock(project_dir: Path, speaker_id: str) -> None:
+    """Remove the clone-in-progress marker for a speaker."""
+    from services.review_state import (
+        REVIEW_STATUS_PENDING,
+        VOICE_SELECTION_REVIEW_STAGE,
+        ReviewStateManager,
+    )
+
+    review_state_path = project_dir / "review_state.json"
+    if not review_state_path.exists():
+        return
+
+    manager = ReviewStateManager(review_state_path)
+    stage = manager.get_stage(VOICE_SELECTION_REVIEW_STAGE)
+    if not stage or stage.get("status") != REVIEW_STATUS_PENDING:
+        return
+
+    payload = dict(stage.get("payload") or {})
+    speakers = payload.get("speakers")
+    if not isinstance(speakers, list):
+        return
+
+    updated = False
+    for speaker in speakers:
+        if str(speaker.get("speaker_id", "")).strip() != speaker_id:
+            continue
+        if "cloning" in speaker:
+            speaker.pop("cloning", None)
+            updated = True
+        break
+
+    if updated:
+        manager.set_stage(
+            VOICE_SELECTION_REVIEW_STAGE,
+            status=stage.get("status", REVIEW_STATUS_PENDING),
+            payload=payload,
+        )
+
+
+async def get_voice_selection_pricing(
+    request: Request,
+    user: User | None = Depends(require_auth),
+) -> dict:
+    """Return credits-per-minute rates for voice selection display.
+
+    Values come from Gateway truth sources (DEBIT_RATES + admin_settings),
+    never from frontend hardcoded constants.
+    """
+    from credits_service import DEBIT_RATES
+
+    admin = load_settings()
+    return {
+        "service_mode": "studio",
+        "credits_per_minute": {
+            "volcengine": DEBIT_RATES.get(("studio", "standard"), 15),
+            "cosyvoice": DEBIT_RATES.get(("studio", "standard"), 15),
+            "minimax_turbo": DEBIT_RATES.get(("studio", "high"), 30),
+            "minimax_hd": DEBIT_RATES.get(("studio", "flagship"), 50),
+        },
+        "voice_clone_cost_credits": admin.voice_clone_cost_credits,
+    }
 
 
 async def voice_clone_for_selection(
@@ -116,129 +233,138 @@ async def voice_clone_for_selection(
         return _json_response(400, {"error": "no_project_dir", "message": "任务没有可用的项目目录"})
     project_dir = Path(project_dir_str)
 
-    # Load transcript to get segment timestamps
-    transcript_path = project_dir / "transcript" / "transcript.json"
-    if not transcript_path.exists():
-        return _json_response(400, {"error": "no_transcript", "message": "找不到转录文件"})
-
+    lock_acquired = False
     try:
-        transcript_data = json.loads(transcript_path.read_text(encoding="utf-8"))
-    except Exception:
-        return _json_response(500, {"error": "transcript_read_error", "message": "读取转录文件失败"})
+        lock_acquired, lock_message = _acquire_clone_lock(project_dir, speaker_id)
+        if not lock_acquired:
+            return _json_response(409, {"error": "clone_in_progress", "message": lock_message or "该说话人正在克隆音色，请稍候重试"})
 
-    lines = transcript_data if isinstance(transcript_data, list) else transcript_data.get("lines", [])
+        # Load transcript to get segment timestamps
+        transcript_path = project_dir / "transcript" / "transcript.json"
+        if not transcript_path.exists():
+            return _json_response(400, {"error": "no_transcript", "message": "找不到转录文件"})
 
-    # Filter segments for this speaker
-    selected_segments = []
-    for line in lines:
-        if not isinstance(line, dict):
-            continue
-        if str(line.get("speaker_id", "")).strip() != speaker_id:
-            continue
-        idx = line.get("index")
-        if idx in segment_ids:
-            selected_segments.append(line)
-
-    if not selected_segments:
-        return _json_response(400, {"error": "no_matching_segments", "message": "找不到匹配的音频片段"})
-
-    # Validate total duration
-    total_duration_s = sum(
-        (int(seg.get("end_ms", 0)) - int(seg.get("start_ms", 0))) / 1000.0
-        for seg in selected_segments
-    )
-    if total_duration_s < 10:
-        return _json_response(400, {"error": "insufficient_duration", "message": f"选中片段总时长 {total_duration_s:.1f}s，至少需要 10s"})
-    if total_duration_s >= 300:
-        return _json_response(400, {"error": "excessive_duration", "message": f"选中片段总时长 {total_duration_s:.1f}s，不能超过 300s"})
-
-    # Shadow reserve credits
-    admin_settings = load_settings()
-    clone_cost = admin_settings.voice_clone_cost_credits
-    user_id = user.id if user else None
-    reserve_id: str | None = None
-    if user_id:
-        reserve_result = await shadow_safe(
-            shadow_reserve,
-            user_id=user_id,
-            job_id=job_id,
-            amount=clone_cost,
-            reason_code="voice_clone",
-            metadata_json=json.dumps({"speaker_id": speaker_id}),
-            db=db,
-        )
-        reserve_id = reserve_result.get("reserve_id") if isinstance(reserve_result, dict) else None
-
-    # Find source audio
-    source_audio = None
-    for name in ("audio/speech_for_asr.wav", "audio/original.wav"):
-        candidate = project_dir / name
-        if candidate.exists():
-            source_audio = candidate
-            break
-    if source_audio is None:
-        if reserve_id and user_id:
-            await shadow_safe(shadow_release, reserve_id=reserve_id, db=db)
-        return _json_response(400, {"error": "no_source_audio", "message": "找不到源音频文件"})
-
-    # Concat selected segments via ffmpeg (run in executor to avoid blocking)
-    loop = asyncio.get_event_loop()
-    try:
-        concat_path = await loop.run_in_executor(
-            None,
-            _concat_segments_ffmpeg,
-            source_audio,
-            selected_segments,
-            project_dir,
-            speaker_id,
-        )
-    except Exception as exc:
-        logger.exception("ffmpeg concat failed for %s/%s", job_id, speaker_id)
-        if reserve_id and user_id:
-            await shadow_safe(shadow_release, reserve_id=reserve_id, db=db)
-        return _json_response(500, {"error": "concat_failed", "message": f"音频拼接失败: {str(exc)[:200]}"})
-
-    # Clone via MiniMax
-    try:
-        clone_result = await loop.run_in_executor(
-            None,
-            _clone_via_minimax,
-            concat_path,
-            speaker_id,
-        )
-    except Exception as exc:
-        logger.exception("MiniMax clone failed for %s/%s", job_id, speaker_id)
-        if reserve_id and user_id:
-            await shadow_safe(shadow_release, reserve_id=reserve_id, db=db)
-        return _json_response(500, {"error": "clone_failed", "message": f"克隆失败: {str(exc)[:200]}"})
-
-    # Shadow capture on success
-    if reserve_id and user_id:
-        await shadow_safe(shadow_capture, reserve_id=reserve_id, db=db)
-
-    # Write cloned voice to user's personal voice library
-    if user_id:
         try:
-            from user_voice_service import add_user_voice
-            await add_user_voice(
-                db,
-                user_id=user_id,
-                voice_id=clone_result,
-                label=f"{speaker_id} Clone",
-                provider="minimax_voice_clone",
-                tts_provider="minimax_tts",
-                platform="minimax_domestic",
-                source_speaker_id=speaker_id,
-                notes=f"从任务 {job_id} 克隆",
-            )
+            transcript_data = json.loads(transcript_path.read_text(encoding="utf-8"))
         except Exception:
-            logger.exception("Failed to save cloned voice to user library")
+            return _json_response(500, {"error": "transcript_read_error", "message": "读取转录文件失败"})
 
-    return _json_response(200, {
-        "voice_id": clone_result,
-        "status": "ready",
-        "speaker_id": speaker_id,
-    })
+        lines = transcript_data if isinstance(transcript_data, list) else transcript_data.get("lines", [])
+
+        # Filter segments for this speaker
+        selected_segments = []
+        for line in lines:
+            if not isinstance(line, dict):
+                continue
+            if str(line.get("speaker_id", "")).strip() != speaker_id:
+                continue
+            idx = line.get("index")
+            if idx in segment_ids:
+                selected_segments.append(line)
+
+        if not selected_segments:
+            return _json_response(400, {"error": "no_matching_segments", "message": "找不到匹配的音频片段"})
+
+        # Validate total duration
+        total_duration_s = sum(
+            (int(seg.get("end_ms", 0)) - int(seg.get("start_ms", 0))) / 1000.0
+            for seg in selected_segments
+        )
+        if total_duration_s < 10:
+            return _json_response(400, {"error": "insufficient_duration", "message": f"选中片段总时长 {total_duration_s:.1f}s，至少需要 10s"})
+        if total_duration_s >= 300:
+            return _json_response(400, {"error": "excessive_duration", "message": f"选中片段总时长 {total_duration_s:.1f}s，不能超过 300s"})
+
+        # Shadow reserve credits
+        admin_settings = load_settings()
+        clone_cost = admin_settings.voice_clone_cost_credits
+        user_id = user.id if user else None
+        reserve_id: str | None = None
+        if user_id:
+            reserve_result = await shadow_safe(
+                shadow_reserve,
+                user_id=user_id,
+                job_id=job_id,
+                amount=clone_cost,
+                reason_code="voice_clone",
+                metadata_json=json.dumps({"speaker_id": speaker_id}),
+                db=db,
+            )
+            reserve_id = reserve_result.get("reserve_id") if isinstance(reserve_result, dict) else None
+
+        # Find source audio
+        source_audio = None
+        for name in ("audio/speech_for_asr.wav", "audio/original.wav"):
+            candidate = project_dir / name
+            if candidate.exists():
+                source_audio = candidate
+                break
+        if source_audio is None:
+            if reserve_id and user_id:
+                await shadow_safe(shadow_release, reserve_id=reserve_id, db=db)
+            return _json_response(400, {"error": "no_source_audio", "message": "找不到源音频文件"})
+
+        # Concat selected segments via ffmpeg (run in executor to avoid blocking)
+        loop = asyncio.get_event_loop()
+        try:
+            concat_path = await loop.run_in_executor(
+                None,
+                _concat_segments_ffmpeg,
+                source_audio,
+                selected_segments,
+                project_dir,
+                speaker_id,
+            )
+        except Exception as exc:
+            logger.exception("ffmpeg concat failed for %s/%s", job_id, speaker_id)
+            if reserve_id and user_id:
+                await shadow_safe(shadow_release, reserve_id=reserve_id, db=db)
+            return _json_response(500, {"error": "concat_failed", "message": f"音频拼接失败: {str(exc)[:200]}"})
+
+        # Clone via MiniMax
+        try:
+            clone_result = await loop.run_in_executor(
+                None,
+                _clone_via_minimax,
+                concat_path,
+                speaker_id,
+            )
+        except Exception as exc:
+            logger.exception("MiniMax clone failed for %s/%s", job_id, speaker_id)
+            if reserve_id and user_id:
+                await shadow_safe(shadow_release, reserve_id=reserve_id, db=db)
+            return _json_response(500, {"error": "clone_failed", "message": f"克隆失败: {str(exc)[:200]}"})
+
+        # Shadow capture on success
+        if reserve_id and user_id:
+            await shadow_safe(shadow_capture, reserve_id=reserve_id, db=db)
+
+        # Write cloned voice to user's personal voice library
+        if user_id:
+            try:
+                from user_voice_service import add_user_voice
+                await add_user_voice(
+                    db,
+                    user_id=user_id,
+                    voice_id=clone_result,
+                    label=f"{speaker_id} Clone",
+                    provider="minimax_voice_clone",
+                    tts_provider="minimax_tts",
+                    platform="minimax_domestic",
+                    source_speaker_id=speaker_id,
+                    notes=f"从任务 {job_id} 克隆",
+                )
+            except Exception:
+                logger.exception("Failed to save cloned voice to user library")
+
+        return _json_response(200, {
+            "voice_id": clone_result,
+            "status": "ready",
+            "speaker_id": speaker_id,
+        })
+    finally:
+        if lock_acquired:
+            _clear_clone_lock(project_dir, speaker_id)
 
 
 def _concat_segments_ffmpeg(
