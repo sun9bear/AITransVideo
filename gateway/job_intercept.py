@@ -670,28 +670,36 @@ async def update_source_metadata(
             job.actual_minutes = dur_float / 60.0
 
             # V3 fix: if create-time had no estimated_duration, do late shadow reserve now
+            # Idempotency: check ledger for existing reserve before doing another one
             snap = job.metering_snapshot or {}
-            if snap.get("credits_estimated") is None and dur_float > 0:
+            if dur_float > 0:
                 try:
-                    _quality_tier = snap.get("quality_tier", "standard")
-                    _svc_mode = snap.get("service_mode") or job.service_mode or "express"
-                    late_credits = estimate_credits(
-                        dur_float / 60.0, service_mode=_svc_mode, quality_tier=_quality_tier,
+                    from models import CreditsLedger
+                    existing_reserve = await db.execute(
+                        select(CreditsLedger).where(
+                            CreditsLedger.related_job_id == job_id,
+                            CreditsLedger.direction == "reserve",
+                        ).limit(1)
                     )
-                    if late_credits > 0:
-                        snap["credits_estimated"] = late_credits
-                        # Force SQLAlchemy JSONB mutation detection with new dict
-                        job.metering_snapshot = dict(snap)
-                        # Ensure bucket exists before reserve
-                        await shadow_safe(ensure_free_bucket, db, job.user_id)
-                        # Late shadow reserve (best-effort)
-                        await shadow_safe(
-                            shadow_reserve,
-                            db, user_id=job.user_id, job_id=job_id,
-                            estimated_credits=late_credits,
-                            service_mode=_svc_mode,
+                    already_reserved = existing_reserve.scalar_one_or_none() is not None
+
+                    if not already_reserved:
+                        _quality_tier = snap.get("quality_tier", "standard")
+                        _svc_mode = snap.get("service_mode") or job.service_mode or "express"
+                        late_credits = estimate_credits(
+                            dur_float / 60.0, service_mode=_svc_mode, quality_tier=_quality_tier,
                         )
-                        logger.info("V3 late shadow reserve for %s: %d credits", job_id, late_credits)
+                        if late_credits > 0:
+                            snap["credits_estimated"] = late_credits
+                            job.metering_snapshot = dict(snap)
+                            await shadow_safe(ensure_free_bucket, db, job.user_id)
+                            await shadow_safe(
+                                shadow_reserve,
+                                db, user_id=job.user_id, job_id=job_id,
+                                estimated_credits=late_credits,
+                                service_mode=_svc_mode,
+                            )
+                            logger.info("V3 late shadow reserve for %s: %d credits", job_id, late_credits)
                 except Exception as _e:
                     logger.warning("V3 late shadow reserve failed for %s: %s (non-fatal)", job_id, _e)
         except (TypeError, ValueError):
