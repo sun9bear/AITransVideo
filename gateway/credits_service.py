@@ -35,7 +35,7 @@ from models import CreditsBucket, CreditsLedger
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Cost model constants (frozen V3 parameters)
+# Cost model constants (frozen V3 parameters — backward compat snapshots)
 # ---------------------------------------------------------------------------
 
 # Points per source minute by (service_mode, quality_tier)
@@ -67,6 +67,50 @@ GRANT_AMOUNTS: dict[str, int] = {
 
 
 # ---------------------------------------------------------------------------
+# Runtime pricing accessors — derive from pricing_runtime, fallback to frozen
+# ---------------------------------------------------------------------------
+
+
+def _get_runtime_debit_rates() -> dict[tuple[str, str], int]:
+    """Derive debit rates from runtime pricing, fallback to frozen constants."""
+    try:
+        from pricing_runtime import get_runtime_pricing
+        credits = get_runtime_pricing().credits
+        result: dict[tuple[str, str], int] = {}
+        for key, value in credits.debit_rates.items():
+            parts = key.split(".", 1)
+            if len(parts) == 2:
+                result[(parts[0], parts[1])] = value
+        return result if result else DEBIT_RATES
+    except Exception:
+        return DEBIT_RATES
+
+
+def _get_runtime_grant_amounts() -> dict[str, int]:
+    """Derive grant amounts from runtime pricing, fallback to frozen constants."""
+    try:
+        from pricing_runtime import get_runtime_pricing
+        payload = get_runtime_pricing()
+        result: dict[str, int] = {"free": payload.credits.free_grant_credits}
+        result["trial"] = payload.trial.grant_credits
+        for code, plan in payload.plans.items():
+            if plan.monthly_grant_credits is not None:
+                result[code] = plan.monthly_grant_credits
+        return result if result else GRANT_AMOUNTS
+    except Exception:
+        return GRANT_AMOUNTS
+
+
+def _get_runtime_bucket_priority() -> dict[str, list[str]]:
+    """Derive bucket priority from runtime pricing, fallback to frozen constants."""
+    try:
+        from pricing_runtime import get_runtime_pricing
+        return get_runtime_pricing().credits.bucket_priority
+    except Exception:
+        return BUCKET_PRIORITY
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -82,7 +126,8 @@ def estimate_credits(
     """
     if estimated_minutes is None or estimated_minutes <= 0:
         return 0
-    rate = DEBIT_RATES.get((service_mode, quality_tier), DEFAULT_DEBIT_RATE)
+    rates = _get_runtime_debit_rates()
+    rate = rates.get((service_mode, quality_tier), DEFAULT_DEBIT_RATE)
     return max(1, round(estimated_minutes * rate))
 
 
@@ -115,7 +160,8 @@ def _pick_buckets_by_priority(
     service_mode: str,
 ) -> list[CreditsBucket]:
     """Sort buckets by consumption priority for the given service mode."""
-    priority_order = BUCKET_PRIORITY.get(service_mode, BUCKET_PRIORITY["express"])
+    bp = _get_runtime_bucket_priority()
+    priority_order = bp.get(service_mode, bp.get("express", BUCKET_PRIORITY["express"]))
     type_rank = {t: i for i, t in enumerate(priority_order)}
     return sorted(buckets, key=lambda b: type_rank.get(b.bucket_type, 99))
 
@@ -543,7 +589,8 @@ async def ensure_free_bucket(db: AsyncSession, user_id) -> CreditsBucket | None:
         if existing is not None:
             return existing
 
-        amount = GRANT_AMOUNTS["free"]
+        grants = _get_runtime_grant_amounts()
+        amount = grants.get("free", GRANT_AMOUNTS["free"])
         return await shadow_grant(
             db, user_id=user_id, bucket_type="free", amount=amount,
             source_label="free", reason_code="free_registration",
@@ -574,7 +621,8 @@ async def ensure_trial_bucket(
         if existing is not None:
             return existing
 
-        amount = GRANT_AMOUNTS["trial"]
+        grants = _get_runtime_grant_amounts()
+        amount = grants.get("trial", GRANT_AMOUNTS["trial"])
         return await shadow_grant(
             db, user_id=user_id, bucket_type="trial", amount=amount,
             source_label="trial", expires_at=trial_ends_at,
@@ -603,7 +651,8 @@ async def ensure_subscription_bucket(
     Shadow mode: failures are logged, never block subscription settlement.
     """
     try:
-        amount = GRANT_AMOUNTS.get(plan_code, GRANT_AMOUNTS.get("plus", 3500))
+        grants = _get_runtime_grant_amounts()
+        amount = grants.get(plan_code, grants.get("plus", GRANT_AMOUNTS.get("plus", 3500)))
         return await shadow_grant(
             db, user_id=user_id, bucket_type="subscription", amount=amount,
             source_label=plan_code, expires_at=expires_at,
@@ -661,7 +710,8 @@ async def ensure_subscription_bucket_from_v2(
 
         # No bucket for this subscription yet — create one
         plan_code = active_sub.plan_code
-        amount = GRANT_AMOUNTS.get(plan_code, GRANT_AMOUNTS.get("plus", 3500))
+        grants = _get_runtime_grant_amounts()
+        amount = grants.get(plan_code, grants.get("plus", GRANT_AMOUNTS.get("plus", 3500)))
         expires_at = active_sub.current_period_end
 
         return await shadow_grant(
