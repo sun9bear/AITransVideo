@@ -79,6 +79,43 @@ class PricingPayload(BaseModel):
         return self
 
 
+def detect_frozen_field_changes(
+    old: PricingPayload, new: PricingPayload
+) -> list[str]:
+    """Compare two payloads and return list of changed frozen field paths.
+
+    Frozen fields:
+    - plans.*.price_cny_fen
+    - credits.debit_rates
+    - trial.days, trial.source_minutes, trial.grant_credits
+    """
+    changes: list[str] = []
+
+    # plans.*.price_cny_fen
+    all_plan_keys = set(old.plans.keys()) | set(new.plans.keys())
+    for key in sorted(all_plan_keys):
+        old_plan = old.plans.get(key)
+        new_plan = new.plans.get(key)
+        old_price = old_plan.price_cny_fen if old_plan else None
+        new_price = new_plan.price_cny_fen if new_plan else None
+        if old_price != new_price:
+            changes.append(f"plans.{key}.price_cny_fen")
+
+    # credits.debit_rates
+    if old.credits.debit_rates != new.credits.debit_rates:
+        changes.append("credits.debit_rates")
+
+    # trial frozen fields
+    if old.trial.days != new.trial.days:
+        changes.append("trial.days")
+    if old.trial.source_minutes != new.trial.source_minutes:
+        changes.append("trial.source_minutes")
+    if old.trial.grant_credits != new.trial.grant_credits:
+        changes.append("trial.grant_credits")
+
+    return changes
+
+
 def build_default_pricing_payload() -> PricingPayload:
     """Return the current frozen pricing payload with all default values."""
     return PricingPayload(
