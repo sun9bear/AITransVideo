@@ -19,7 +19,6 @@ from fastapi import Depends, HTTPException, Request, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from admin_settings import load_settings
 from auth import require_auth
 from config import settings
 from credits_service import shadow_capture, shadow_release, shadow_reserve, shadow_safe
@@ -31,6 +30,15 @@ logger = logging.getLogger(__name__)
 _SPEAKER_ID_RE = re.compile(r"^speaker_[a-z0-9_]+$")
 _SEGMENT_ID_RE = re.compile(r"^[1-9][0-9]*$")
 _CLONE_LOCK_TIMEOUT_SECONDS = 300
+
+
+def _get_clone_cost_credits() -> int:
+    """Read voice clone cost from runtime pricing, fallback to 500."""
+    try:
+        from pricing_runtime import get_runtime_pricing
+        return get_runtime_pricing().credits.voice_clone_cost_credits
+    except Exception:
+        return 500
 
 
 async def _verify_job_ownership(
@@ -161,12 +169,11 @@ async def get_voice_selection_pricing(
 ) -> dict:
     """Return credits-per-minute rates for voice selection display.
 
-    Values come from Gateway truth sources (DEBIT_RATES + admin_settings),
+    Values come from Gateway truth sources (pricing_runtime + DEBIT_RATES),
     never from frontend hardcoded constants.
     """
     from credits_service import DEBIT_RATES
 
-    admin = load_settings()
     return {
         "service_mode": "studio",
         "credits_per_minute": {
@@ -175,7 +182,7 @@ async def get_voice_selection_pricing(
             "minimax_turbo": DEBIT_RATES.get(("studio", "high"), 30),
             "minimax_hd": DEBIT_RATES.get(("studio", "flagship"), 50),
         },
-        "voice_clone_cost_credits": admin.voice_clone_cost_credits,
+        "voice_clone_cost_credits": _get_clone_cost_credits(),
     }
 
 
@@ -275,9 +282,8 @@ async def voice_clone_for_selection(
         if total_duration_s >= 300:
             return _json_response(400, {"error": "excessive_duration", "message": f"选中片段总时长 {total_duration_s:.1f}s，不能超过 300s"})
 
-        # Shadow reserve credits
-        admin_settings = load_settings()
-        clone_cost = admin_settings.voice_clone_cost_credits
+        # Shadow reserve credits (from runtime pricing, fallback 500)
+        clone_cost = _get_clone_cost_credits()
         user_id = user.id if user else None
         reserve_id: str | None = None
         if user_id:

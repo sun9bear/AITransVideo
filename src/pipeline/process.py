@@ -1935,8 +1935,26 @@ class ProcessPipeline:
             "speakers": speakers_payload,
             "available_voices": default_voices,
             "all_providers": all_providers,
-            "clone_cost_credits": 500,
+            "clone_cost_credits": self._get_clone_cost_credits(),
         }
+
+    @staticmethod
+    def _get_clone_cost_credits() -> int:
+        """Read clone cost from pricing runtime snapshot (shared config file).
+
+        The pipeline (app container) cannot import gateway modules directly,
+        so we read the same JSON file that the gateway writes.
+        """
+        try:
+            import json as _json
+            from pathlib import Path as _Path
+            runtime_file = _Path("/opt/aivideotrans/config/pricing_runtime.json")
+            if runtime_file.exists():
+                data = _json.loads(runtime_file.read_text(encoding="utf-8"))
+                return data.get("credits", {}).get("voice_clone_cost_credits", 500)
+        except Exception:
+            pass
+        return 500
 
     def _build_translation_review_payload(
         self,
