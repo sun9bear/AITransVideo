@@ -48,9 +48,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/billing", tags=["billing"])
 
-# Derived views over the plan_catalog source of truth. These module-level names are
-# preserved so existing tests and call sites keep working; the actual facts live in
-# plan_catalog.py and must not be hardcoded again here.
+# Frozen import-time snapshots kept for backward-compatible test imports.
+# Request-time code paths call the live functions (valid_target_plan_codes(),
+# get_price()) directly so they pick up runtime pricing changes.
 VALID_TARGET_PLANS: set[str] = valid_target_plan_codes()
 VALID_BILLING_PERIODS: set[str] = set(_CATALOG_BILLING_PERIODS)
 PLAN_PRICES_CNY: dict[tuple[str, str], int] = get_legacy_price_table()
@@ -78,7 +78,7 @@ async def create_order(
     if user is None:
         raise HTTPException(status_code=401, detail="未登录")
 
-    if body.target_plan_code not in VALID_TARGET_PLANS:
+    if body.target_plan_code not in valid_target_plan_codes():
         raise HTTPException(status_code=400, detail=f"无效的目标套餐: {body.target_plan_code}")
     if body.billing_period not in VALID_BILLING_PERIODS:
         raise HTTPException(status_code=400, detail=f"无效的计费周期: {body.billing_period}")

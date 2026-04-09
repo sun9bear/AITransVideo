@@ -55,8 +55,8 @@ def _error_response(
 
 # --- Plan catalog ---
 # The authoritative plan gate facts now live in ``plan_catalog.py``. The module-level
-# ``PLAN_CATALOG`` name is preserved as a backward-compatible view so existing imports
-# (including ``tests/test_gateway_job_policy.py``) keep working without change.
+# ``PLAN_CATALOG`` name is a frozen import-time snapshot preserved for backward-compatible
+# test imports. Request-time code calls the live functions directly.
 from plan_catalog import get_legacy_plan_gate_dict  # noqa: E402
 
 PLAN_CATALOG = get_legacy_plan_gate_dict()
@@ -320,7 +320,7 @@ async def intercept_create_job(
     # capabilities to Plus-tier (Studio, higher duration/concurrency) without
     # changing plan_code. Falls back to PLAN_CATALOG for non-trial users.
     from plan_catalog import get_effective_plan_gate
-    plan_info = get_effective_plan_gate(user) if user else PLAN_CATALOG.get("free", PLAN_CATALOG["free"])
+    plan_info = get_effective_plan_gate(user) if user else get_legacy_plan_gate_dict().get("free", {})
 
     # --- 1. Validate service_mode ---
     if user and not is_admin:
