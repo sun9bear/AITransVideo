@@ -105,6 +105,7 @@ FAILED_SEGMENT_SOURCE_SPLIT_PATTERN = re.compile(r"(?<=[.!?;])\s+")
 T = TypeVar("T")
 
 _ADMIN_SETTINGS_PATH = "/opt/aivideotrans/config/admin_settings.json"
+_SPEAKER_ID_PATTERN = re.compile(r"^speaker_[a-z0-9_]+$")
 
 
 # _should_skip_translation_config / _should_skip_all_reviews removed —
@@ -122,6 +123,34 @@ def _get_default_translation_model() -> str:
     except Exception:
         pass
     return "deepseek"
+
+
+def _is_valid_speaker_id(value: object) -> bool:
+    return isinstance(value, str) and _SPEAKER_ID_PATTERN.match(value.strip()) is not None
+
+
+def _default_speaker_display_name(speaker_id: str) -> str:
+    normalized_speaker_id = speaker_id.strip().lower()
+    if normalized_speaker_id == "speaker_a":
+        return "Speaker A"
+    if normalized_speaker_id == "speaker_b":
+        return "Speaker B"
+    if normalized_speaker_id.startswith("speaker_"):
+        suffix = normalized_speaker_id.replace("speaker_", "")
+        if len(suffix) == 1 and suffix.isalpha():
+            return f"Speaker {suffix.upper()}"
+    return speaker_id
+
+
+def _merge_speaker_name_map(
+    review_speaker_names: dict[str, str] | None,
+    speaker_name_a: str,
+    speaker_name_b: str,
+) -> dict[str, str]:
+    merged = dict(review_speaker_names or {})
+    merged["speaker_a"] = speaker_name_a
+    merged["speaker_b"] = speaker_name_b
+    return merged
 
 
 def _report_source_metadata(job_id: str, duration_seconds: float, title: str | None = None) -> None:
@@ -708,8 +737,13 @@ class ProcessPipeline:
             # --- Unified LLM transcript review (replaces 4 separate calls) ---
             _review_glossary: dict[str, str] = {}
             _review_speaker_styles: dict[str, dict] = {}
+            _review_speaker_names: dict[str, str] = {}  # all speakers including c+
 
-            if not s3_cache_hit:  # Always run LLM review (not a user review gate)
+            if s3_cache_hit:
+                print("[S2] Translation cache hit, skipping review.")
+            elif config.skip_review:
+                print("[S2] Skipping review (--skip-review).")
+            else:
                 print("[S2] Running unified LLM transcript review (audio + text)...")
                 try:
                     from src.services.transcript_reviewer import review_transcript
@@ -732,22 +766,33 @@ class ProcessPipeline:
                         video_title=download_result.video_title,
                         video_url=normalized_url,
                         words_data=_words_data,
+                        debug_output_dir=final_project_dir / "transcript",
                     )
 
                     if review_result is not None:
-                        # Update speaker names from review
+                        if review_result.debug_artifacts:
+                            print("[S2] Debug artifacts:")
+                            raw_debug_path = review_result.debug_artifacts.get("raw_response_path")
+                            diff_debug_path = review_result.debug_artifacts.get("speaker_diff_path")
+                            if raw_debug_path:
+                                print(f"  raw_response -> {raw_debug_path}")
+                            if diff_debug_path:
+                                print(f"  speaker_diff -> {diff_debug_path}")
+                        # Update speaker names from review (all speakers, not just A/B)
+                        _review_speaker_names: dict[str, str] = {}
                         for spk_id, spk_info in review_result.speakers.items():
                             name = spk_info.get("name", "")
                             if name:
+                                _review_speaker_names[spk_id] = name
                                 if spk_id == "speaker_a" and speaker_name_a_is_placeholder:
                                     speaker_name_a = name
                                 elif spk_id == "speaker_b" and speaker_name_b_is_placeholder:
                                     speaker_name_b = name
 
                         print("[S2] Speaker identity result:")
-                        print(f"  Speaker A -> {speaker_name_a}")
-                        if effective_speakers == 2:
-                            print(f"  Speaker B -> {speaker_name_b}")
+                        for spk_id in sorted(review_result.speakers.keys()):
+                            spk_name = _review_speaker_names.get(spk_id, spk_id)
+                            print(f"  {spk_id.replace('speaker_', 'Speaker ').replace('_', ' ').title()} -> {spk_name}")
 
                         # Apply corrections to transcript
                         if review_result.corrections_applied > 0:
@@ -780,10 +825,12 @@ class ProcessPipeline:
                     else:
                         print("[S2] Unified review returned None, falling back to legacy...")
                         # Fallback: use old separate calls
-                        self._legacy_speaker_inference_and_review(
-                            translator, transcript_result, effective_speakers,
-                            speaker_name_a, speaker_name_b, speaker_name_a_is_placeholder,
-                            speaker_name_b_is_placeholder, download_result, normalized_url,
+                        transcript_result, speaker_name_a, speaker_name_b = (
+                            self._legacy_speaker_inference_and_review(
+                                translator, transcript_result, effective_speakers,
+                                speaker_name_a, speaker_name_b, speaker_name_a_is_placeholder,
+                                speaker_name_b_is_placeholder, download_result, normalized_url,
+                            )
                         )
                         # Minimal speaker profiling — fill gender/age so matcher doesn't blind-fallback
                         if not _review_speaker_styles:
@@ -791,13 +838,16 @@ class ProcessPipeline:
                                 effective_speakers=effective_speakers,
                                 speaker_name_a=speaker_name_a,
                                 speaker_name_b=speaker_name_b,
+                                speaker_ids=self._detect_speaker_ids(transcript_result.lines),
                             )
                 except Exception as exc:
                     print(f"[S2] Unified review failed ({exc}), falling back to legacy...")
-                    self._legacy_speaker_inference_and_review(
-                        translator, transcript_result, effective_speakers,
-                        speaker_name_a, speaker_name_b, speaker_name_a_is_placeholder,
-                        speaker_name_b_is_placeholder, download_result, normalized_url,
+                    transcript_result, speaker_name_a, speaker_name_b = (
+                        self._legacy_speaker_inference_and_review(
+                            translator, transcript_result, effective_speakers,
+                            speaker_name_a, speaker_name_b, speaker_name_a_is_placeholder,
+                            speaker_name_b_is_placeholder, download_result, normalized_url,
+                        )
                     )
                     # Minimal speaker profiling — fill gender/age so matcher doesn't blind-fallback
                     if not _review_speaker_styles:
@@ -805,11 +855,8 @@ class ProcessPipeline:
                             effective_speakers=effective_speakers,
                             speaker_name_a=speaker_name_a,
                             speaker_name_b=speaker_name_b,
+                            speaker_ids=self._detect_speaker_ids(transcript_result.lines),
                         )
-            elif s3_cache_hit:
-                print("[S2] Translation cache hit, skipping review.")
-            else:
-                print("[S2] Skipping review (--skip-review).")
 
             approved_speaker_review = self._get_approved_review_payload(
                 review_state_manager,
@@ -885,32 +932,11 @@ class ProcessPipeline:
                 # This prevents unnecessary voice clone API costs during S2.
                 print("[S2] 音色选择已延迟到统一审核，S2 自动跳过。")
             else:
-                # Non-interactive mode: try auto-resolve, fail on error
-                try:
-                    if voice_id_a is None:
-                        voice_id_a = self._resolve_or_auto_clone_voice(
-                            speaker_id="speaker_a",
-                            transcript_result=transcript_result,
-                            audio_path=source_audio_path,
-                            final_project_dir=final_project_dir,
-                            speaker_name=speaker_name_a,
-                            voice_registry_path=voice_registry_path,
-                            tts_config=tts_config,
-                            skip_voice_registry_lookup=False,
-                        )
-                    if effective_speakers == 2 and voice_id_b is None:
-                        voice_id_b = self._resolve_or_auto_clone_voice(
-                            speaker_id="speaker_b",
-                            transcript_result=transcript_result,
-                            audio_path=source_audio_path,
-                            final_project_dir=final_project_dir,
-                            speaker_name=speaker_name_b,
-                            voice_registry_path=voice_registry_path,
-                            tts_config=tts_config,
-                            skip_voice_registry_lookup=False,
-                        )
-                except VoiceReviewRequiredError:
-                    raise
+                # Express (non-interactive) mode: skip registry lookup and auto-clone.
+                # Leave voice_id_a / voice_id_b as None — downstream TTS voice
+                # matcher will auto-select from the preset catalog based on S2
+                # speaker profiles (gender, age_group, voice_description).
+                print("[S2] 快捷模式：跳过音色库查找和自动克隆，由下游自动匹配音色。")
 
             # --- translation_config_review gate ---
             approved_translation_config = self._get_approved_review_payload(
@@ -1055,7 +1081,12 @@ class ProcessPipeline:
                     print("[S3] Express 模式（无需审核），跳过翻译审核。")
                 else:
                     self._write_segments_snapshot(translation_result)
-                    _unified_review_payload = self._build_translation_review_payload(translation_result)
+                    _all_speaker_names = _merge_speaker_name_map(
+                        _review_speaker_names,
+                        speaker_name_a,
+                        speaker_name_b,
+                    )
+                    _unified_review_payload = self._build_translation_review_payload(translation_result, speaker_names=_all_speaker_names)
                     _unified_review_payload["speaker_name_a"] = speaker_name_a
                     _unified_review_payload["speaker_name_b"] = speaker_name_b
                     _unified_review_payload["voice_id_a"] = voice_id_a
@@ -1100,6 +1131,32 @@ class ProcessPipeline:
                 ),
             )
 
+            # --- Pass 3: voice profiling (after translation review, before voice selection) ---
+            if _review_speaker_styles and not s3_cache_hit:
+                try:
+                    from src.services.transcript_reviewer import review_pass3_voice_profiles
+
+                    print("[S2.5] Running Pass 3: voice profiling...", flush=True)
+                    _pass3_profiles = review_pass3_voice_profiles(
+                        transcript_result.lines,
+                        source_audio_path=source_audio_path if source_audio_path.exists() else None,
+                        speakers=_review_speaker_styles,
+                        video_title=download_result.video_title,
+                        debug_output_dir=final_project_dir / "transcript",
+                    )
+                    # Merge Pass 3 profiles into _review_speaker_styles
+                    if _pass3_profiles:
+                        for spk_id, profile in _pass3_profiles.items():
+                            if spk_id in _review_speaker_styles:
+                                for key in ("voice_description", "gender", "age_group", "persona_style", "energy_level"):
+                                    val = profile.get(key, "")
+                                    if val:
+                                        _review_speaker_styles[spk_id][key] = val
+                        print(f"[S2.5] Pass 3 voice profiles: {len(_pass3_profiles)} speakers", flush=True)
+                except Exception as exc:
+                    print(f"[S2.5] Pass 3 failed (non-fatal): {exc}", flush=True)
+                    logger.warning("[S2.5] Pass 3 voice profiling failed: %s", exc)
+
             # --- voice_selection_review gate (Studio mode only) ---
             approved_voice_selection = self._get_approved_review_payload(
                 review_state_manager,
@@ -1143,10 +1200,11 @@ class ProcessPipeline:
                     service_mode=job_service_mode,
                     source_audio_path=source_audio_path,
                     effective_speakers=effective_speakers,
-                    speaker_names={
-                        "speaker_a": speaker_name_a,
-                        "speaker_b": speaker_name_b,
-                    },
+                    speaker_names=_merge_speaker_name_map(
+                        _review_speaker_names,
+                        speaker_name_a,
+                        speaker_name_b,
+                    ),
                     speaker_styles=_review_speaker_styles,
                 )
                 review_state_manager.set_stage(
@@ -1191,10 +1249,11 @@ class ProcessPipeline:
                         service_mode=job_service_mode,
                         source_audio_path=source_audio_path,
                         effective_speakers=effective_speakers,
-                        speaker_names={
-                            "speaker_a": speaker_name_a,
-                            "speaker_b": speaker_name_b,
-                        },
+                        speaker_names=_merge_speaker_name_map(
+                            _review_speaker_names,
+                            speaker_name_a,
+                            speaker_name_b,
+                        ),
                         speaker_styles=_review_speaker_styles,
                     )
                     vs_payload["expired_voice_ids"] = expired_voices
@@ -1543,9 +1602,15 @@ class ProcessPipeline:
         speaker_name_b: str,
         effective_speakers: int,
     ) -> dict[str, object]:
-        speaker_names = {"speaker_a": speaker_name_a}
-        if effective_speakers == 2:
-            speaker_names["speaker_b"] = speaker_name_b
+        detected_speaker_ids = self._detect_speaker_ids(transcript_result.lines)
+        speaker_names: dict[str, str] = {}
+        for speaker_id in detected_speaker_ids:
+            if speaker_id == "speaker_a":
+                speaker_names[speaker_id] = speaker_name_a or _default_speaker_display_name(speaker_id)
+            elif speaker_id == "speaker_b":
+                speaker_names[speaker_id] = speaker_name_b or _default_speaker_display_name(speaker_id)
+            else:
+                speaker_names[speaker_id] = _default_speaker_display_name(speaker_id)
         speaker_options = [
             {"speaker_id": speaker_id, "display_name": display_name}
             for speaker_id, display_name in speaker_names.items()
@@ -1573,7 +1638,7 @@ class ProcessPipeline:
             {
                 str(segment_id): str(speaker_id).strip()
                 for segment_id, speaker_id in reviewed_speaker_map.items()
-                if str(speaker_id).strip() in {"speaker_a", "speaker_b"}
+                if _is_valid_speaker_id(str(speaker_id).strip())
             }
             if isinstance(reviewed_speaker_map, dict)
             else {}
@@ -1876,13 +1941,16 @@ class ProcessPipeline:
     def _build_translation_review_payload(
         self,
         translation_result: TranslationResult,
+        speaker_names: dict[str, str] | None = None,
     ) -> dict[str, object]:
+        # Use reviewer names to override placeholder display_name in payload
+        resolved_names = speaker_names or {}
         return {
             "segments": {
                 str(segment.segment_id): {
                     "segment_id": segment.segment_id,
                     "speaker_id": segment.speaker_id,
-                    "display_name": segment.display_name,
+                    "display_name": resolved_names.get(segment.speaker_id, "") or segment.display_name,
                     "source_text": segment.source_text,
                     "cn_text": segment.cn_text,
                     "tts_cn_text": segment.tts_cn_text,
@@ -1893,6 +1961,7 @@ class ProcessPipeline:
                 for segment in translation_result.segments
             },
             "segment_count": translation_result.total_segments,
+            "speaker_names": resolved_names,
         }
 
     def _normalize_speakers(self, value: int | str) -> int | str:
@@ -2004,6 +2073,20 @@ class ProcessPipeline:
             output_path=str(segments_path.resolve(strict=False)),
         )
 
+    @staticmethod
+    def _is_placeholder_display_name(display_name: str, speaker_id: str) -> bool:
+        """Return True if display_name is a default placeholder (not user-set)."""
+        if not display_name:
+            return True
+        dn = display_name.strip()
+        # "Speaker A", "Speaker B", "Speaker C", ... are placeholders from translator
+        if dn.startswith("Speaker ") and len(dn) <= len("Speaker ZZ"):
+            return True
+        # Same as speaker_id itself
+        if dn == speaker_id:
+            return True
+        return False
+
     def _apply_review_speaker_styles_to_segments(
         self,
         segments: list[DubbingSegment],
@@ -2019,6 +2102,12 @@ class ProcessPipeline:
             segment.voice_description = voice_description
             segment.gender = str(speaker_info.get("gender", "") or "")
             segment.age_group = str(speaker_info.get("age_group", "") or "")
+            # Propagate reviewer name to display_name for all speakers (including c+).
+            # Overwrite default placeholders ("Speaker B", "Speaker C", etc.) but
+            # do NOT overwrite a user-confirmed custom name.
+            speaker_name = str(speaker_info.get("name", "") or "")
+            if speaker_name and self._is_placeholder_display_name(segment.display_name, segment.speaker_id):
+                segment.display_name = speaker_name
             segment.persona_style = str(
                 speaker_info.get("persona_style", "") or infer_persona_style(voice_description)
             )
@@ -2298,8 +2387,12 @@ class ProcessPipeline:
         speaker_name_b_is_placeholder,
         download_result,
         normalized_url,
-    ):
-        """Fallback: use old separate LLM calls for speaker inference + review."""
+    ) -> tuple:
+        """Fallback: use old separate LLM calls for speaker inference + review.
+
+        Returns (transcript_result, speaker_name_a, speaker_name_b) so the
+        caller can pick up the updated state.
+        """
         if effective_speakers in {1, 2} and (
             speaker_name_a_is_placeholder or speaker_name_b_is_placeholder
         ):
@@ -2344,12 +2437,15 @@ class ProcessPipeline:
                 )
                 self._write_transcript_result(transcript_result)
 
+        return transcript_result, speaker_name_a, speaker_name_b
+
     @staticmethod
     def _fallback_minimal_speaker_styles(
         *,
         effective_speakers: int,
         speaker_name_a: str,
         speaker_name_b: str,
+        speaker_ids: list[str] | None = None,
     ) -> dict[str, dict]:
         """Generate minimal speaker_styles when unified review is completely unavailable.
 
@@ -2363,11 +2459,26 @@ class ProcessPipeline:
         falling back to a single default voice for all speakers.
         """
         styles: dict[str, dict] = {}
+        resolved_speaker_ids = [
+            speaker_id
+            for speaker_id in (speaker_ids or [])
+            if _is_valid_speaker_id(speaker_id)
+        ]
+        if not resolved_speaker_ids:
+            max_speakers = max(1, int(effective_speakers))
+            resolved_speaker_ids = [
+                f"speaker_{chr(ord('a') + offset)}"
+                for offset in range(max_speakers)
+            ]
 
-        # Default assumption: male / middle.  Crude, but better than empty.
-        for spk_id, spk_name in [("speaker_a", speaker_name_a), ("speaker_b", speaker_name_b)]:
-            if effective_speakers == 1 and spk_id == "speaker_b":
-                continue
+        # Default assumption: male / middle. Crude, but better than empty.
+        for spk_id in resolved_speaker_ids:
+            if spk_id == "speaker_a":
+                spk_name = speaker_name_a or _default_speaker_display_name(spk_id)
+            elif spk_id == "speaker_b":
+                spk_name = speaker_name_b or _default_speaker_display_name(spk_id)
+            else:
+                spk_name = _default_speaker_display_name(spk_id)
             styles[spk_id] = {
                 "name": spk_name,
                 "gender": "male",

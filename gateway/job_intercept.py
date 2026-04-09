@@ -26,7 +26,10 @@ from database import get_db
 from models import Job, User
 from proxy import proxy_request
 from quota import check_quota, reserve_quota, settle_job_quota, TERMINAL_STATUSES
-from credits_service import estimate_credits, shadow_reserve, shadow_release, shadow_capture, shadow_safe
+from credits_service import (
+    ensure_free_bucket, estimate_credits,
+    shadow_reserve, shadow_release, shadow_capture, shadow_safe,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -485,17 +488,18 @@ async def intercept_create_job(
                         job.estimated_minutes = est_min
                         # Shadow reserve: consume quality_tier from policy (single truth source)
                         _quality_tier = policy.get("quality_tier", "standard")
+                        # Always write basic metering snapshot (even if duration unknown)
                         shadow_credits = estimate_credits(
                             est_min, service_mode=service_mode, quality_tier=_quality_tier,
                         )
+                        job.metering_snapshot = {
+                            "credits_estimated": shadow_credits if shadow_credits > 0 else None,
+                            "service_mode": service_mode,
+                            "quality_tier": _quality_tier,
+                            "tts_provider": policy.get("tts_provider"),
+                            "tts_model": policy.get("tts_model"),
+                        }
                         if shadow_credits > 0:
-                            job.metering_snapshot = {
-                                "credits_estimated": shadow_credits,
-                                "service_mode": service_mode,
-                                "quality_tier": _quality_tier,
-                                "tts_provider": policy.get("tts_provider"),
-                                "tts_model": policy.get("tts_model"),
-                            }
                             await shadow_safe(
                                 shadow_reserve,
                                 db, user_id=user.id, job_id=job_id,
@@ -664,6 +668,32 @@ async def update_source_metadata(
             # estimated_minutes is preserved as the original pre-download estimate
             # so we can later compare estimate vs. actual for calibration.
             job.actual_minutes = dur_float / 60.0
+
+            # V3 fix: if create-time had no estimated_duration, do late shadow reserve now
+            snap = job.metering_snapshot or {}
+            if snap.get("credits_estimated") is None and dur_float > 0:
+                try:
+                    _quality_tier = snap.get("quality_tier", "standard")
+                    _svc_mode = snap.get("service_mode") or job.service_mode or "express"
+                    late_credits = estimate_credits(
+                        dur_float / 60.0, service_mode=_svc_mode, quality_tier=_quality_tier,
+                    )
+                    if late_credits > 0:
+                        snap["credits_estimated"] = late_credits
+                        # Force SQLAlchemy JSONB mutation detection with new dict
+                        job.metering_snapshot = dict(snap)
+                        # Ensure bucket exists before reserve
+                        await shadow_safe(ensure_free_bucket, db, job.user_id)
+                        # Late shadow reserve (best-effort)
+                        await shadow_safe(
+                            shadow_reserve,
+                            db, user_id=job.user_id, job_id=job_id,
+                            estimated_credits=late_credits,
+                            service_mode=_svc_mode,
+                        )
+                        logger.info("V3 late shadow reserve for %s: %d credits", job_id, late_credits)
+                except Exception as _e:
+                    logger.warning("V3 late shadow reserve failed for %s: %s (non-fatal)", job_id, _e)
         except (TypeError, ValueError):
             pass
     if title is not None:
