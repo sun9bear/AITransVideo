@@ -221,6 +221,7 @@ export default function AdminPricingPage() {
           <PlansEditor
             plans={payload.plans}
             trial={payload.trial}
+            freeGrantCredits={payload.credits.free_grant_credits}
             frozen={frozen}
             onChange={(plans, trial) => {
               updateDraft("plans", plans)
@@ -228,7 +229,11 @@ export default function AdminPricingPage() {
             }}
           />
         ) : (
-          <PlansDisplay plans={payload.plans} trial={payload.trial} />
+          <PlansDisplay
+            plans={payload.plans}
+            trial={payload.trial}
+            freeGrantCredits={payload.credits.free_grant_credits}
+          />
         )}
       </SectionCard>
 
@@ -540,9 +545,11 @@ function NumberInput({
 function PlansDisplay({
   plans,
   trial,
+  freeGrantCredits,
 }: {
   plans: Record<string, PlanConfig>
   trial: TrialConfig
+  freeGrantCredits: number
 }) {
   return (
     <div className="space-y-4">
@@ -565,14 +572,12 @@ function PlansDisplay({
             )}
           </div>
           <div className="grid grid-cols-2 gap-x-6 text-sm">
-            <KvRow
-              label="免费额度"
-              value={
-                plan.free_quota_total !== null
-                  ? `${plan.free_quota_total} 分钟`
-                  : "无限"
-              }
-            />
+            {plan.free_quota_total !== null && (
+              <KvRow
+                label="免费任务额度"
+                value={`${plan.free_quota_total} 次`}
+              />
+            )}
             <KvRow
               label="最大时长"
               value={`${plan.max_duration_minutes} 分钟`}
@@ -608,7 +613,18 @@ function PlansDisplay({
                 frozen
               />
             )}
+            {key === "free" && (
+              <KvRow
+                label="赠送点数"
+                value={`${freeGrantCredits} 点`}
+              />
+            )}
           </div>
+          {key === "free" && (
+            <p className="mt-3 text-xs text-amber-400/90">
+              当前 Free 仍同时受旧任务额度与新点数赠送约束；V3 credits 真值切换后会进一步收口。
+            </p>
+          )}
         </div>
       ))}
 
@@ -654,11 +670,13 @@ function PlansDisplay({
 function PlansEditor({
   plans,
   trial,
+  freeGrantCredits,
   frozen,
   onChange,
 }: {
   plans: Record<string, PlanConfig>
   trial: TrialConfig
+  freeGrantCredits: number
   frozen: boolean
   onChange: (plans: Record<string, PlanConfig>, trial: TrialConfig) => void
 }) {
@@ -684,13 +702,23 @@ function PlansEditor({
               ({key})
             </span>
           </p>
-          <NumberInput
-            label="免费额度(分钟)"
-            value={plan.free_quota_total ?? 0}
-            onChange={(v) =>
-              updatePlan(key, { free_quota_total: v || null })
-            }
-          />
+          {plan.free_quota_total !== null && (
+            <>
+              <NumberInput
+                label="免费任务额度(次)"
+                value={plan.free_quota_total}
+                onChange={(v) =>
+                  updatePlan(key, { free_quota_total: v || null })
+                }
+              />
+              <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs text-amber-300/90">
+                <div>赠送点数：{freeGrantCredits} 点</div>
+                <div className="mt-1">
+                  Free 赠点请到“点数策略”中的“免费赠点”调整，避免重复真值。
+                </div>
+              </div>
+            </>
+          )}
           <NumberInput
             label="最大时长(分钟)"
             value={plan.max_duration_minutes}
@@ -801,7 +829,7 @@ function PlansEditor({
 function CreditsDisplay({ credits }: { credits: CreditsConfig }) {
   return (
     <div className="space-y-3">
-      <KvRow label="免费赠点" value={credits.free_grant_credits} />
+      <KvRow label="Free 用户赠点" value={credits.free_grant_credits} />
       <KvRow
         label="音色克隆成本"
         value={`${credits.voice_clone_cost_credits} 点`}
@@ -851,7 +879,7 @@ function CreditsEditor({
   return (
     <div className="space-y-3">
       <NumberInput
-        label="免费赠点"
+        label="Free 用户赠点"
         value={credits.free_grant_credits}
         onChange={(v) => onChange({ ...credits, free_grant_credits: v })}
       />
