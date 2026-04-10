@@ -113,16 +113,10 @@ _SPEAKER_ID_PATTERN = re.compile(r"^speaker_[a-z0-9_]+$")
 # (job_requires_review, job_service_mode).  See run() below.
 
 
-def _get_default_translation_model() -> str:
-    """Get default translation model from admin settings."""
-    try:
-        if os.path.exists(_ADMIN_SETTINGS_PATH):
-            with open(_ADMIN_SETTINGS_PATH) as f:
-                settings = json.load(f)
-            return str(settings.get("translation_model", "deepseek"))
-    except Exception:
-        pass
-    return "deepseek"
+def _get_default_translation_model(mode: str = "studio") -> str:
+    """Get default translation model from llm_registry."""
+    from services.llm_registry import get_prompt_model
+    return get_prompt_model(mode, "translate")
 
 
 def _is_valid_speaker_id(value: object) -> bool:
@@ -448,6 +442,7 @@ class ProcessPipeline:
         job_voice_strategy = _snap('voice_strategy', 'preset_mapping')
         job_plan_code = _snap('plan_code_snapshot', 'free')
         job_role = _snap('role_snapshot', 'user')
+        self._current_service_mode = job_service_mode  # for recovery paths
         # -------------------------------------------------------------
 
         projects_root = _resolve_projects_root()
@@ -651,6 +646,7 @@ class ProcessPipeline:
                     custom_translation_prompt_template
                 )
             translator = GeminiTranslator(**translator_kwargs)
+            translator._service_mode = job_service_mode  # enables llm_registry model selection
 
             transcript_path = (final_project_dir / "transcript" / "transcript.json").resolve(strict=False)
             transcription_method = getattr(config, "transcription_method", None) or "assemblyai"
@@ -739,11 +735,35 @@ class ProcessPipeline:
             _review_speaker_styles: dict[str, dict] = {}
             _review_speaker_names: dict[str, str] = {}  # all speakers including c+
 
+            # S2 cache: if review already ran (e.g. pipeline resumed after
+            # translation_config_review), restore results instead of re-running.
+            s2_result_path = (final_project_dir / "transcript" / "s2_review_result.json").resolve(strict=False)
+            s2_cache_hit = s2_result_path.exists() and not s3_cache_hit
+
             if s3_cache_hit:
                 print("[S2] Translation cache hit, skipping review.")
+            elif s2_cache_hit:
+                try:
+                    import json as _json_s2
+                    _s2_cached = _json_s2.loads(s2_result_path.read_text(encoding="utf-8"))
+                    _review_speaker_styles = _s2_cached.get("speakers", {})
+                    _review_glossary = _s2_cached.get("glossary", {})
+                    for spk_id, spk_info in _review_speaker_styles.items():
+                        name = spk_info.get("name", "")
+                        if name:
+                            _review_speaker_names[spk_id] = name
+                            if spk_id == "speaker_a" and speaker_name_a_is_placeholder:
+                                speaker_name_a = name
+                            elif spk_id == "speaker_b" and speaker_name_b_is_placeholder:
+                                speaker_name_b = name
+                    print(f"[S2] 已有审校结果，跳过重新审校（{len(_review_speaker_names)} 位说话人，{len(_review_glossary)} 条术语）")
+                except Exception as _s2_err:
+                    print(f"[S2] 加载缓存审校结果失败 ({_s2_err})，将重新审校...")
+                    s2_cache_hit = False
             elif config.skip_review:
                 print("[S2] Skipping review (--skip-review).")
-            else:
+
+            if not s3_cache_hit and not s2_cache_hit and not config.skip_review:
                 print("[S2] Running unified LLM transcript review (audio + text)...")
                 try:
                     from src.services.transcript_reviewer import review_transcript
@@ -760,6 +780,8 @@ class ProcessPipeline:
                     except Exception:
                         pass
 
+                    # Express mode: skip Pass 1 (speaker identification)
+                    _is_express = job_service_mode == "express"
                     review_result = review_transcript(
                         transcript_result.lines,
                         audio_path=source_audio_path if source_audio_path.exists() else None,
@@ -767,6 +789,8 @@ class ProcessPipeline:
                         video_url=normalized_url,
                         words_data=_words_data,
                         debug_output_dir=final_project_dir / "transcript",
+                        mode=job_service_mode,
+                        skip_pass1=_is_express,
                     )
 
                     if review_result is not None:
@@ -939,53 +963,22 @@ class ProcessPipeline:
                 print("[S2] 快捷模式：跳过音色库查找和自动克隆，由下游自动匹配音色。")
 
             # --- translation_config_review gate ---
+            # Previously this gate paused the pipeline and waited for user
+            # approval, but the frontend always auto-approved immediately.
+            # This caused the entire pipeline to restart from scratch (S0→S1→S2)
+            # just to process the auto-approval, wasting LLM API calls.
+            # Now we always auto-resolve with defaults and continue directly.
             approved_translation_config = self._get_approved_review_payload(
                 review_state_manager,
                 TRANSLATION_CONFIG_REVIEW_STAGE,
             )
-            if (
-                config.wait_for_review
-                and not s3_cache_hit
-                and approved_translation_config is None
-            ):
-                # Auto-skip translation config review when job doesn't require review
-                if not job_requires_review:
-                    default_model = _get_default_translation_model()
-                    print(f"[S3] 自动使用默认翻译模型: {default_model}")
-                    approved_translation_config = {
-                        "selected_model": default_model,
-                        "prompt_template": None,
-                    }
-                else:
-                    review_state_manager.set_stage(
-                        TRANSLATION_CONFIG_REVIEW_STAGE,
-                        status=REVIEW_STATUS_PENDING,
-                        payload=self._build_translation_config_review_payload(
-                            transcript_result=transcript_result,
-                            translator=translator,
-                        ),
-                        activate=True,
-                    )
-                    review_message = "等待确认翻译配置（模型和提示词），再开始翻译。"
-                    print(f"[S3] {review_message}")
-                    state_manager.set_stage(
-                        current_stage_name,
-                        StageStatus.RUNNING,
-                        {"execution_mode": "waiting_for_translation_config"},
-                    )
-                    current_stage_name = None
-                    print(
-                        self._build_web_review_marker(
-                            stage=TRANSLATION_CONFIG_REVIEW_STAGE,
-                            project_dir=final_project_dir,
-                            message=review_message,
-                        )
-                    )
-                    return self._build_paused_result(
-                        project_dir=final_project_dir,
-                        stage=TRANSLATION_CONFIG_REVIEW_STAGE,
-                        message=review_message,
-                    )
+            if approved_translation_config is None and not s3_cache_hit:
+                default_model = _get_default_translation_model()
+                print(f"[S3] 自动使用默认翻译模型: {default_model}")
+                approved_translation_config = {
+                    "selected_model": default_model,
+                    "prompt_template": None,
+                }
 
             # Apply translation config from approved review if available
             if approved_translation_config is not None:
@@ -1132,30 +1125,47 @@ class ProcessPipeline:
             )
 
             # --- Pass 3: voice profiling (after translation review, before voice selection) ---
-            if _review_speaker_styles and not s3_cache_hit:
-                try:
-                    from src.services.transcript_reviewer import review_pass3_voice_profiles
+            _pass3_cache_path = (final_project_dir / "transcript" / "s2_pass3_result.json").resolve(strict=False)
+            if _review_speaker_styles:
+                _pass3_profiles: dict | None = None
+                if _pass3_cache_path.exists():
+                    # Restore from cached Pass 3 result
+                    try:
+                        import json as _json
+                        _pass3_data = _json.loads(_pass3_cache_path.read_text(encoding="utf-8"))
+                        _pass3_profiles = _pass3_data.get("speaker_profiles", {})
+                        print(f"[S2.5] Pass 3 cache hit: {len(_pass3_profiles)} speaker profiles restored", flush=True)
+                    except Exception as exc:
+                        print(f"[S2.5] Pass 3 cache read failed: {exc}", flush=True)
+                if not _pass3_profiles:
+                    # Run Pass 3
+                    try:
+                        from src.services.transcript_reviewer import review_pass3_voice_profiles
 
-                    print("[S2.5] Running Pass 3: voice profiling...", flush=True)
-                    _pass3_profiles = review_pass3_voice_profiles(
-                        transcript_result.lines,
-                        source_audio_path=source_audio_path if source_audio_path.exists() else None,
-                        speakers=_review_speaker_styles,
-                        video_title=download_result.video_title,
-                        debug_output_dir=final_project_dir / "transcript",
-                    )
-                    # Merge Pass 3 profiles into _review_speaker_styles
-                    if _pass3_profiles:
-                        for spk_id, profile in _pass3_profiles.items():
-                            if spk_id in _review_speaker_styles:
-                                for key in ("voice_description", "gender", "age_group", "persona_style", "energy_level"):
-                                    val = profile.get(key, "")
-                                    if val:
-                                        _review_speaker_styles[spk_id][key] = val
-                        print(f"[S2.5] Pass 3 voice profiles: {len(_pass3_profiles)} speakers", flush=True)
-                except Exception as exc:
-                    print(f"[S2.5] Pass 3 failed (non-fatal): {exc}", flush=True)
-                    logger.warning("[S2.5] Pass 3 voice profiling failed: %s", exc)
+                        print("[S2.5] Running Pass 3: voice profiling...", flush=True)
+                        _pass3_profiles = review_pass3_voice_profiles(
+                            transcript_result.lines,
+                            source_audio_path=source_audio_path if source_audio_path.exists() else None,
+                            speakers=_review_speaker_styles,
+                            video_title=download_result.video_title,
+                            debug_output_dir=final_project_dir / "transcript",
+                        )
+                    except Exception as exc:
+                        print(f"[S2.5] Pass 3 failed (non-fatal): {exc}", flush=True)
+                        logger.warning("[S2.5] Pass 3 voice profiling failed: %s", exc)
+                # Merge Pass 3 profiles into _review_speaker_styles
+                # Pass 1 provides: name, role (identity fields only)
+                # Pass 3 provides: style, gender, age_group, voice_description, persona_style, energy_level
+                # Pass 3 is the sole source for all voice/style fields
+                if _pass3_profiles:
+                    for spk_id, profile in _pass3_profiles.items():
+                        if spk_id in _review_speaker_styles:
+                            existing = _review_speaker_styles[spk_id]
+                            for key in ("style", "voice_description", "gender", "age_group", "persona_style", "energy_level"):
+                                val = profile.get(key, "")
+                                if val:
+                                    existing[key] = val
+                    print(f"[S2.5] Pass 3 voice profiles: {len(_pass3_profiles)} speakers", flush=True)
 
             # --- voice_selection_review gate (Studio mode only) ---
             approved_voice_selection = self._get_approved_review_payload(
@@ -2184,39 +2194,27 @@ class ProcessPipeline:
         video_title: str,
         video_url: str,
     ) -> dict[str, dict[str, object]]:
-        print("[S2] Cached translation missing voice metadata; rerunning transcript review.", flush=True)
-        try:
-            from src.services.transcript_reviewer import review_transcript
-
-            words_data: list[dict] | None = None
+        # Try loading from cached s2_review_result.json first (avoids expensive LLM re-call).
+        # Voice fields (gender/age_group/persona/energy) are filled by Pass 3 later,
+        # so it's fine if they're empty here — no need to re-run S2 to get them.
+        s2_cache = Path(transcript_result.structured_transcript_path).parent / "s2_review_result.json"
+        if s2_cache.exists():
             try:
-                raw_path = transcript_result.raw_response_path
-                if raw_path and Path(raw_path).exists():
-                    with open(raw_path, encoding="utf-8") as raw_file:
-                        raw_payload = json.load(raw_file)
-                    words_data = raw_payload.get("words")
-            except Exception:
-                words_data = None
+                cached = json.loads(s2_cache.read_text(encoding="utf-8"))
+                speakers = cached.get("speakers", {})
+                if speakers:
+                    print(f"[S2] Restored speaker styles from cache ({len(speakers)} speakers).", flush=True)
+                    return speakers
+            except Exception as exc:
+                print(f"[S2] Failed to load cached s2_review_result.json: {exc}", flush=True)
 
-            review_result = review_transcript(
-                transcript_result.lines,
-                audio_path=source_audio_path if source_audio_path.exists() else None,
-                video_title=video_title,
-                video_url=video_url,
-                words_data=words_data,
-            )
-        except Exception as exc:
-            print(
-                f"[S2] Cached voice metadata recovery failed ({type(exc).__name__}: {exc}).",
-                flush=True,
-            )
-            return {}
-
-        if review_result is None or not review_result.speakers:
-            print("[S2] Cached voice metadata recovery returned no speaker styles.", flush=True)
-            return {}
-
-        return review_result.speakers
+        # Fallback: build minimal styles from transcript speaker IDs
+        print("[S2] No cached S2 result; using minimal speaker styles (Pass 3 will enrich later).", flush=True)
+        speaker_ids = list({line.speaker_id for line in transcript_result.lines if line.speaker_id})
+        return {
+            sid: {"name": sid.replace("speaker_", "Speaker ").replace("_", " ").title()}
+            for sid in sorted(speaker_ids)
+        }
 
     def _resolve_cached_display_names(
         self,

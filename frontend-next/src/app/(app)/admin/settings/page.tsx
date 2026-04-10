@@ -54,17 +54,7 @@ const COSYVOICE_ENDPOINT_OPTIONS = [
   { value: 'mainland', label: '国内端点', description: '中国大陆节点，延迟较高（3-7s），支持全部 59 个音色' },
 ]
 
-const REVIEW_OPTIONS = [
-  { value: 'gemini_pro', label: 'Gemini 3.1 Pro（推荐）', description: '最高质量，音频多模态，¥2.4/小时音频' },
-  { value: 'gemini', label: 'Gemini 2.5 Flash Lite', description: '低成本，音频多模态，¥0.27/小时音频' },
-  { value: 'mimo_omni', label: 'MiMo-V2-Omni（小米）', description: '纯文本审校，不支持音频' },
-]
-
-const TRANSLATION_OPTIONS = [
-  { value: 'deepseek', label: 'DeepSeek V3', description: '便宜，中文质量高，支持 prefix caching' },
-  { value: 'gemini', label: 'Gemini 3.1 Flash Lite', description: '快速，偶尔 503 限流' },
-  { value: 'gemini_pro', label: 'Gemini 3.1 Pro', description: '质量最高，成本较高' },
-]
+// REVIEW_OPTIONS and TRANSLATION_OPTIONS removed — model selection moved to /admin/prompts
 
 export default function AdminSettingsPage() {
   const [settings, setSettings] = useState<AdminSettings>(DEFAULT_SETTINGS)
@@ -187,30 +177,19 @@ export default function AdminSettingsPage() {
         />
       </SettingSection>
 
-      {/* Review Model */}
+      {/* Model management — moved to prompts page */}
       <SettingSection
-        title="转录审校模型"
-        description="用于说话人识别、文本校对、语义分段的多模态模型"
+        title="大模型配置"
+        description="审校模型和翻译模型现已移至「提示词管理」页面，支持工作台版/快捷版独立配置"
       >
-        <RadioGroup
-          options={REVIEW_OPTIONS}
-          value={settings.review_model}
-          onChange={(v) => setSettings((s) => ({ ...s, review_model: v }))}
-          name="review_model"
-        />
-      </SettingSection>
-
-      {/* Translation Model */}
-      <SettingSection
-        title="默认翻译模型"
-        description="翻译阶段使用的大语言模型"
-      >
-        <RadioGroup
-          options={TRANSLATION_OPTIONS}
-          value={settings.translation_model}
-          onChange={(v) => setSettings((s) => ({ ...s, translation_model: v }))}
-          name="translation_model"
-        />
+        <div className="rounded-xl border border-border bg-muted/30 p-4">
+          <a
+            href="/admin/prompts"
+            className="text-sm text-primary hover:underline"
+          >
+            前往「提示词 & 模型管理」→
+          </a>
+        </div>
       </SettingSection>
 
       {/* Skip translation config */}

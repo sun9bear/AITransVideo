@@ -105,6 +105,16 @@ services:
     container_name: aivideotrans-gateway
     network_mode: host
     restart: unless-stopped
+    volumes:
+      # Shared config directory (same as app — admin_settings.json, etc.)
+      - type: bind
+        source: ${AIVIDEOTRANS_ROOT}/config
+        target: /opt/aivideotrans/config
+      # llm_registry shared module — single source of truth for model metadata
+      - type: bind
+        source: ${AIVIDEOTRANS_ROOT}/app/src/services/llm_registry.py
+        target: /opt/aivideotrans/app/src/services/llm_registry.py
+        read_only: true
     depends_on:
       app:
         condition: service_healthy

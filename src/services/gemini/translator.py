@@ -13,6 +13,13 @@ from typing import Any
 
 from services.assemblyai.transcriber import TranscriptLine
 from services.llm import LLMProviderError, LLMRouter
+from services.llm_registry import (
+    MODEL_REGISTRY as _MODEL_REGISTRY,
+    get_api_key as _get_model_api_key,
+    get_prompt_model as _get_prompt_model,
+    resolve_model_id as _resolve_model_id,
+    get_fallback_candidates as _get_fallback_candidates,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -674,6 +681,126 @@ class GeminiTranslator:
                     f"Gemini请求失败（已重试{DEFAULT_MAX_RETRIES}次）: {exc}"
                 ) from exc
 
+    # ------------------------------------------------------------------
+    # llm_registry-based dispatch (replaces LLMRouter route decisions)
+    # ------------------------------------------------------------------
+
+    def _call_by_model(
+        self,
+        model_name: str,
+        prompt: str,
+        *,
+        json_mode: bool = False,
+    ) -> str:
+        """Call a specific model by logical name, dispatching by provider.
+
+        - gemini → existing _call_gemini_with_retry
+        - deepseek/openai → LLMRouter provider layer (generate_via_alias)
+        - mimo → OpenAI-compatible HTTP call
+        """
+        info = _MODEL_REGISTRY.get(model_name)
+        if info is None:
+            raise TranslationError(f"Unknown model: {model_name}")
+        provider = info["provider"]
+        api_model_id = info["api_model_id"]
+
+        if provider == "gemini":
+            return self._call_gemini_with_retry(prompt, json_mode=json_mode, model_name=api_model_id)
+
+        # Non-Gemini: use LLMRouter provider layer if available
+        api_key = _get_model_api_key(model_name)
+        if not api_key:
+            env_var = info.get("api_key_env", "")
+            raise TranslationError(
+                f"{model_name} API key not configured (check {env_var} or admin settings)"
+            )
+
+        if provider == "mimo":
+            return self._call_mimo_text(api_key=api_key, model_id=api_model_id, prompt=prompt, json_mode=json_mode)
+
+        # deepseek / openai — direct HTTP call (no LLMRouter indirection)
+        return self._call_openai_compatible(
+            api_key=api_key,
+            model_id=api_model_id,
+            provider=provider,
+            prompt=prompt,
+            json_mode=json_mode,
+        )
+
+    @staticmethod
+    def _call_mimo_text(
+        *,
+        api_key: str,
+        model_id: str,
+        prompt: str,
+        json_mode: bool = False,
+    ) -> str:
+        """Call MiMo via OpenAI-compatible HTTP API."""
+        import urllib.request
+        import urllib.error
+        url = "https://api.xiaomimimo.com/v1/chat/completions"
+        payload: dict[str, Any] = {
+            "model": model_id,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.3,
+            "max_tokens": 8192,
+        }
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+            return body["choices"][0]["message"]["content"]
+        except Exception as exc:
+            raise TranslationError(f"MiMo API call failed: {exc}") from exc
+
+    @staticmethod
+    def _call_openai_compatible(
+        *,
+        api_key: str,
+        model_id: str,
+        provider: str,
+        prompt: str,
+        json_mode: bool = False,
+    ) -> str:
+        """Direct call to OpenAI-compatible API (DeepSeek / OpenAI)."""
+        import urllib.request
+        import urllib.error
+        base_urls = {
+            "openai": "https://api.openai.com/v1",
+            "deepseek": "https://api.deepseek.com/v1",
+        }
+        base_url = base_urls.get(provider, base_urls["openai"])
+        url = f"{base_url}/chat/completions"
+        payload: dict[str, Any] = {
+            "model": model_id,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.3,
+            "max_tokens": 8192,
+        }
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+            return body["choices"][0]["message"]["content"]
+        except Exception as exc:
+            raise TranslationError(f"{provider} API call failed: {exc}") from exc
+
     def _call_task_with_fallback(
         self,
         task: str,
@@ -682,11 +809,45 @@ class GeminiTranslator:
         json_mode: bool = False,
         validator: Any | None = None,
     ) -> str:
+        # --- New path: llm_registry-based model selection ---
+        # Only active when _service_mode is explicitly set (by process.py).
+        # Without it, fall through to legacy LLMRouter path for backward compat.
+        prompt_key_map = {
+            "s3_translate": "translate",
+            "s5_rewrite": "rewrite",
+            "s2_infer": "translate",  # speaker inference uses same model as translate
+        }
+        prompt_key = prompt_key_map.get(task)
+        mode = getattr(self, "_service_mode", None)
+
+        if prompt_key and mode is not None:
+            model_name = _get_prompt_model(mode, prompt_key)
+            # Try primary model, then fallback candidates
+            models_to_try = [model_name] + _get_fallback_candidates(model_name, requires_audio=False)
+            last_error: Exception | None = None
+            for i, m in enumerate(models_to_try):
+                try:
+                    print(f"[LLM] {task} using {m} ({_resolve_model_id(m)})")
+                    response_text = self._call_by_model(m, prompt, json_mode=json_mode)
+                    if validator is not None:
+                        validator(response_text)
+                    return response_text
+                except (TranslationError, LLMProviderError) as exc:
+                    last_error = exc
+                    if i < len(models_to_try) - 1:
+                        next_m = models_to_try[i + 1]
+                        print(f"[LLM] {task} {m} failed, falling back to {next_m}: {exc}")
+                    continue
+            if last_error is not None:
+                raise TranslationError(str(last_error)) from last_error
+            raise TranslationError(f"No models available for task '{task}'.")
+
+        # --- Legacy path: LLMRouter fallback chain (for unmapped tasks) ---
         route = self.llm_router.get_route(task) if self.llm_router is not None else ["default_llm"]
         if not route:
             route = ["default_llm"]
 
-        last_error: Exception | None = None
+        last_error = None
         for index, alias in enumerate(route):
             model_config = self.llm_router.get_model_config(alias) if self.llm_router is not None else {}
             provider_name = _normalize_optional_text(model_config.get("provider"))
@@ -1065,6 +1226,15 @@ def validate_speaker_infer_prompt_template(template: str) -> str:
 def get_effective_translation_prompt_template(template: object | None = None) -> str:
     normalized_template = _normalize_optional_text(template)
     if normalized_template is None:
+        # Check admin override
+        try:
+            from src.services.transcript_reviewer import _get_admin_prompt_override
+            admin = _get_admin_prompt_override("translate")
+            if admin:
+                normalized_template = admin
+        except Exception:
+            pass
+    if normalized_template is None:
         return DEFAULT_TRANSLATION_PROMPT_TEMPLATE
     return validate_translation_prompt_template(normalized_template)
 
@@ -1079,6 +1249,15 @@ def validate_translation_prompt_template(template: str) -> str:
 
 def get_effective_rewrite_prompt_template(template: object | None = None) -> str:
     normalized_template = _normalize_optional_text(template)
+    if normalized_template is None:
+        # Check admin override
+        try:
+            from src.services.transcript_reviewer import _get_admin_prompt_override
+            admin = _get_admin_prompt_override("rewrite")
+            if admin:
+                normalized_template = admin
+        except Exception:
+            pass
     if normalized_template is None:
         return DEFAULT_REWRITE_PROMPT_TEMPLATE
     return validate_rewrite_prompt_template(normalized_template)

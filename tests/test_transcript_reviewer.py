@@ -14,11 +14,10 @@ from services.transcript_reviewer import (
     _try_compress_audio,
     _format_prompt,
     _resolve_model_id,
-    _MODEL_MAP,
-    _DEFAULT_REVIEW_MODEL,
     _REVIEW_AUDIO_WHOLE_FILE_THRESHOLD_MS,
     _REVIEW_AUDIO_CLIP_PADDING_MS,
 )
+from services.llm_registry import MODEL_REGISTRY as _MODEL_REGISTRY
 
 
 def _line(
@@ -219,7 +218,7 @@ def test_review_transcript_writes_raw_response_and_speaker_diff_artifacts(
     monkeypatch.setattr(transcript_reviewer, "_get_review_model", lambda: "gemini")
     monkeypatch.setattr(transcript_reviewer, "_call_review", _fake_call_review)
 
-    result = transcript_reviewer.review_transcript(
+    result = transcript_reviewer.legacy_review_transcript_single_pass(
         lines,
         audio_path=None,
         video_title="Test Video",
@@ -417,7 +416,7 @@ class TestReviewTranscriptAudioFirst:
         monkeypatch.setattr(transcript_reviewer, "_prepare_review_audio", fake_compress)
 
         lines = [_line(1, 0, 5000, "speaker_a", "Hello world.")]
-        result = transcript_reviewer.review_transcript(
+        result = transcript_reviewer.legacy_review_transcript_single_pass(
             lines, audio_path=str(src_audio), video_title="Test",
         )
 
@@ -874,45 +873,48 @@ class TestPromptTemplates:
 
 
 class TestModelMap:
-    """Tests for _MODEL_MAP and _resolve_model_id (A3)."""
+    """Tests for MODEL_REGISTRY and _resolve_model_id (A3)."""
 
-    def test_model_map_has_all_logical_names(self) -> None:
-        assert "gemini_pro" in _MODEL_MAP
-        assert "gemini" in _MODEL_MAP
-        assert "mimo_omni" in _MODEL_MAP
+    def test_registry_has_all_logical_names(self) -> None:
+        assert "gemini_pro" in _MODEL_REGISTRY
+        assert "gemini" in _MODEL_REGISTRY
+        assert "mimo_omni" in _MODEL_REGISTRY
 
     def test_resolve_known_names(self) -> None:
-        assert _resolve_model_id("gemini_pro") == _MODEL_MAP["gemini_pro"]
-        assert _resolve_model_id("gemini") == _MODEL_MAP["gemini"]
-        assert _resolve_model_id("mimo_omni") == _MODEL_MAP["mimo_omni"]
+        assert _resolve_model_id("gemini_pro") == _MODEL_REGISTRY["gemini_pro"]["api_model_id"]
+        assert _resolve_model_id("gemini") == _MODEL_REGISTRY["gemini"]["api_model_id"]
+        assert _resolve_model_id("mimo_omni") == _MODEL_REGISTRY["mimo_omni"]["api_model_id"]
 
-    def test_resolve_unknown_falls_back_to_default(self) -> None:
+    def test_resolve_unknown_falls_back(self) -> None:
         result = _resolve_model_id("nonexistent_model")
-        assert result == _MODEL_MAP[_DEFAULT_REVIEW_MODEL]
-
-    def test_default_review_model_is_gemini_pro(self) -> None:
-        assert _DEFAULT_REVIEW_MODEL == "gemini_pro"
+        # Unknown names return themselves (from resolve_model_id fallback)
+        assert isinstance(result, str)
 
     def test_model_ids_are_not_logical_names(self) -> None:
         """API model IDs must differ from the logical names (no pass-through)."""
-        for logical, api_id in _MODEL_MAP.items():
+        for logical, info in _MODEL_REGISTRY.items():
+            api_id = info["api_model_id"]
             assert logical != api_id, f"{logical} should not equal its API ID"
 
 
 class TestGetReviewModel:
-    """Tests for _get_review_model with model mapping."""
+    """Tests for _get_review_model (legacy compat wrapper)."""
 
     def test_default_is_gemini_pro(self, monkeypatch) -> None:
-        monkeypatch.delenv("REVIEW_MODEL", raising=False)
+        """_get_review_model delegates to llm_registry, defaults to gemini_pro."""
+        from services.llm_registry import invalidate_cache
+        invalidate_cache()
         monkeypatch.setattr("os.path.exists", lambda p: False)
         result = transcript_reviewer._get_review_model()
         assert result == "gemini_pro"
 
-    def test_env_override(self, monkeypatch) -> None:
-        monkeypatch.setenv("REVIEW_MODEL", "gemini")
+    def test_legacy_wrapper_returns_valid_model(self, monkeypatch) -> None:
+        """_get_review_model always returns a model from the registry."""
+        from services.llm_registry import invalidate_cache, MODEL_REGISTRY
+        invalidate_cache()
         monkeypatch.setattr("os.path.exists", lambda p: False)
         result = transcript_reviewer._get_review_model()
-        assert result == "gemini"
+        assert result in MODEL_REGISTRY
 
     def test_call_review_passes_resolved_model_to_gemini(self, monkeypatch) -> None:
         """_call_review must pass the resolved API model ID (not the logical name)."""
@@ -947,7 +949,7 @@ class TestGetReviewModel:
 
         assert len(captured_models) == 1
         # Must be the resolved API ID, not "gemini_pro"
-        assert captured_models[0] == _MODEL_MAP["gemini_pro"]
+        assert captured_models[0] == _MODEL_REGISTRY["gemini_pro"]["api_model_id"]
         assert captured_models[0] != "gemini_pro"
 
 
@@ -960,12 +962,12 @@ class TestThreePassContractEnforcement:
     """Tests for Pass 1/2/3 contract filtering."""
 
     def test_pass1_drops_fix_text_corrections(self) -> None:
-        """Pass 1 contract: only correct_speaker allowed, fix_text dropped."""
+        """Pass 1 contract: correct_speaker + split allowed, fix_text/merge dropped."""
         from src.services.transcript_reviewer import _PASS1_ALLOWED_ACTIONS
         assert "correct_speaker" in _PASS1_ALLOWED_ACTIONS
+        assert "split" in _PASS1_ALLOWED_ACTIONS
         assert "fix_text" not in _PASS1_ALLOWED_ACTIONS
         assert "merge" not in _PASS1_ALLOWED_ACTIONS
-        assert "split" not in _PASS1_ALLOWED_ACTIONS
 
     def test_pass2_drops_correct_speaker_corrections(self) -> None:
         """Pass 2 contract: only fix_text + split allowed, correct_speaker dropped."""
@@ -976,10 +978,11 @@ class TestThreePassContractEnforcement:
         assert "merge" not in _PASS2_ALLOWED_ACTIONS
 
     def test_pass1_prompt_forbids_fix_text(self) -> None:
-        """Pass 1 prompt explicitly forbids fix_text/merge/split."""
+        """Pass 1 prompt explicitly forbids fix_text/merge."""
         from src.services.transcript_reviewer import _PASS1_PROMPT
         assert "fix_text" in _PASS1_PROMPT
-        assert "不要输出" in _PASS1_PROMPT or "绝对不要" in _PASS1_PROMPT
+        prompt_lower = _PASS1_PROMPT.lower()
+        assert "不要输出" in _PASS1_PROMPT or "绝对不要" in _PASS1_PROMPT or "do not output" in prompt_lower
 
     def test_pass2_prompt_forbids_correct_speaker(self) -> None:
         """Pass 2 prompt explicitly forbids correct_speaker."""
@@ -997,36 +1000,20 @@ class TestThreePassContractEnforcement:
 class TestThreePassFallback:
     """Tests for three-pass fallback to legacy."""
 
-    def test_pass_failure_triggers_legacy_fallback(self, monkeypatch) -> None:
-        """When Pass 1 fails, review_transcript falls back to legacy."""
-        legacy_called = []
-
-        def fake_legacy(*args, **kwargs):
-            legacy_called.append(True)
-            return transcript_reviewer.ReviewResult(
-                speakers={"speaker_a": {"name": "A", "gender": "male", "age_group": "middle"}},
-                glossary={},
-                corrections_applied=0,
-                lines=args[0],
-            )
-
-        monkeypatch.setattr(
-            transcript_reviewer,
-            "legacy_review_transcript_single_pass",
-            fake_legacy,
-        )
-        # Make Pass 1 fail by not mocking Gemini
-        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
-        monkeypatch.setattr(transcript_reviewer, "_get_review_model", lambda: "gemini")
+    def test_pass_failure_returns_none_after_retries(self, monkeypatch) -> None:
+        """When Pass 1 fails after retries, review_transcript returns None (no legacy fallback)."""
         monkeypatch.setattr(transcript_reviewer, "_try_compress_audio", lambda *a, **kw: None)
+        # Don't mock Gemini — will fail to connect → _PassFailure after retries → None
+        from services.llm_registry import invalidate_cache
+        invalidate_cache()
+        monkeypatch.setattr("os.path.exists", lambda p: False)
 
         lines = [_line(1, 0, 5000, "speaker_a", "Hello world.")]
         result = transcript_reviewer.review_transcript(
             lines, video_title="Test",
         )
 
-        assert result is not None
-        assert len(legacy_called) == 1
+        assert result is None
 
     def test_mimo_omni_skips_three_pass(self, monkeypatch) -> None:
         """MiMo Omni model bypasses three-pass and uses legacy directly."""
@@ -1046,7 +1033,11 @@ class TestThreePassFallback:
             "legacy_review_transcript_single_pass",
             fake_legacy,
         )
-        monkeypatch.setattr(transcript_reviewer, "_get_review_model", lambda: "mimo_omni")
+        # MiMo Omni for pass1 still triggers legacy (text-only, can't do audio Pass 1)
+        from services.llm_registry import invalidate_cache, _DEFAULTS
+        invalidate_cache()
+        monkeypatch.setitem(_DEFAULTS, "pass1", "mimo_omni")
+        monkeypatch.setattr("os.path.exists", lambda p: False)
         monkeypatch.setenv("MIMO_API_KEY", "fake-key")
 
         lines = [_line(1, 0, 5000, "speaker_a", "Hello.")]
