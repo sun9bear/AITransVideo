@@ -143,8 +143,12 @@ def _merge_speaker_name_map(
     speaker_name_b: str,
 ) -> dict[str, str]:
     merged = dict(review_speaker_names or {})
-    merged["speaker_a"] = speaker_name_a
-    merged["speaker_b"] = speaker_name_b
+    # S2 review names take precedence; speaker_name_a/b are fallbacks only.
+    # In multi-speaker (>2) mode, speaker_name_b_is_placeholder is always
+    # False so speaker_name_b stays at "Speaker B" — using setdefault
+    # ensures the S2-identified name is not overwritten.
+    merged.setdefault("speaker_a", speaker_name_a)
+    merged.setdefault("speaker_b", speaker_name_b)
     return merged
 
 
