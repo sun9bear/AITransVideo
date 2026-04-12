@@ -9,8 +9,6 @@ from core.exceptions import WorkflowError
 from core.models import (
     SemanticBlock,
     SubtitleLine,
-    summarize_block_text_layers,
-    summarize_subtitle_text_layers,
 )
 from modules.alignment.alignment_orchestrator import AlignmentOrchestrator
 from modules.chunking.semantic_block_builder import SemanticBlockBuilder
@@ -654,7 +652,6 @@ class ProjectWorkflow:
         self.state_manager.set_stage(stage_name, StageStatus.RUNNING)
         try:
             blocks = self.block_builder.build(translated_lines)
-            text_layer_summary = summarize_block_text_layers(blocks)
             restore_audit = build_always_rerun_audit(
                 source_input_hash=_read_input_hash(self.state_manager),
                 artifact_paths=[],
@@ -665,9 +662,6 @@ class ProjectWorkflow:
                 StageStatus.DONE,
                 {
                     "block_count": len(blocks),
-                    "literal_text_layer_produced": text_layer_summary["literal_block_count"] > 0,
-                    "tts_text_layer_produced": text_layer_summary["tts_block_count"] > 0,
-                    "text_layer_summary": text_layer_summary,
                     "execution_mode": "fresh_build",
                     "artifacts": build_artifacts_payload(
                         kind="semantic_blocks",
@@ -706,32 +700,11 @@ class ProjectWorkflow:
                 target_line = translated_line_map.get(line_index)
                 if target_line is None or not spoken_text:
                     continue
-                target_line.tts_cn_text = spoken_text
+                target_line.cn_text = spoken_text
 
-        line_text_layer_summary = summarize_subtitle_text_layers(translated_lines)
-        block_text_layer_summary = summarize_block_text_layers(aligned_blocks)
         alignment_stage = self.state_manager.get_stage("alignment")
         if alignment_stage is None:
             return
-
-        updated_payload = dict(read_stage_payload(alignment_stage))
-        updated_payload["literal_text_layer_produced"] = (
-            block_text_layer_summary["literal_block_count"] > 0
-            or line_text_layer_summary["literal_line_count"] > 0
-        )
-        updated_payload["tts_text_layer_produced"] = (
-            block_text_layer_summary["tts_block_count"] > 0
-            or line_text_layer_summary["tts_line_count"] > 0
-        )
-        updated_payload["text_layer_summary"] = {
-            **block_text_layer_summary,
-            **line_text_layer_summary,
-        }
-        self.state_manager.set_stage(
-            "alignment",
-            alignment_stage["status"],
-            payload=updated_payload,
-        )
 
     def _run_draft_stage(
         self,

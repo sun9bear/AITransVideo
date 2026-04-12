@@ -43,14 +43,14 @@ class GeminiRewriter:
 
     def rewrite_for_duration(
         self,
-        tts_cn_text: str,
+        cn_text: str,
         actual_duration_ms: int,
         target_duration_ms: int,
         source_text: str = "",
         speaker_id: str | None = None,
     ) -> str:
         return self.rewrite_for_duration_with_profile(
-            tts_cn_text,
+            cn_text,
             actual_duration_ms=actual_duration_ms,
             target_duration_ms=target_duration_ms,
             source_text=source_text,
@@ -59,7 +59,7 @@ class GeminiRewriter:
 
     def rewrite_for_duration_with_profile(
         self,
-        tts_cn_text: str,
+        cn_text: str,
         *,
         actual_duration_ms: int,
         target_duration_ms: int,
@@ -68,7 +68,7 @@ class GeminiRewriter:
         preferred_min_ratio: float | None = None,
         preferred_max_ratio: float | None = None,
     ) -> str:
-        normalized_text = (tts_cn_text or "").strip()
+        normalized_text = (cn_text or "").strip()
         if not normalized_text:
             return normalized_text
         if target_duration_ms <= 0:
@@ -107,7 +107,7 @@ class GeminiRewriter:
 
     def _build_rewrite_prompt(
         self,
-        tts_cn_text: str,
+        cn_text: str,
         direction: str,
         current_chars: int,
         target_chars: int,
@@ -141,7 +141,7 @@ class GeminiRewriter:
             .replace(REWRITE_PROMPT_TEMPLATE_DIRECTION_TOKEN, direction_desc)
             .replace(REWRITE_PROMPT_TEMPLATE_DIRECTION_INSTRUCTION_TOKEN, instruction)
             .replace(REWRITE_PROMPT_TEMPLATE_CURRENT_CHARS_TOKEN, str(current_chars))
-            .replace(REWRITE_PROMPT_TEMPLATE_TEXT_TOKEN, tts_cn_text)
+            .replace(REWRITE_PROMPT_TEMPLATE_TEXT_TOKEN, cn_text)
             .replace(REWRITE_PROMPT_TEMPLATE_SOURCE_TEXT_TOKEN, normalized_source_text)
             .replace(REWRITE_PROMPT_TEMPLATE_TARGET_CHARS_TOKEN, str(target_chars))
             .replace(REWRITE_PROMPT_TEMPLATE_TARGET_LOWER_CHARS_TOKEN, str(target_lower_chars))

@@ -76,7 +76,7 @@ def test_alignment_succeeds_on_ideal_hit(tmp_path: Path) -> None:
     assert processed.actual_audio_duration_ms == 1_000
 
 
-def test_alignment_uses_explicit_block_tts_layer_for_spoken_text(tmp_path: Path) -> None:
+def test_alignment_uses_unified_block_cn_text_for_spoken_text(tmp_path: Path) -> None:
     orchestrator = _make_orchestrator(tmp_path)
     block = SemanticBlock(
         block_id="block_tts_layer",
@@ -86,10 +86,8 @@ def test_alignment_uses_explicit_block_tts_layer_for_spoken_text(tmp_path: Path)
         first_start_ms=0,
         last_end_ms=1_500,
         target_duration_ms=1_500,
-        merged_cn_text="c" * 30,
-        cn_line_texts=["t" * 15],
-        merged_literal_cn_text="l" * 30,
-        merged_tts_cn_text="t" * 15,
+        merged_cn_text="c" * 15,
+        cn_line_texts=["placeholder"],
     )
 
     processed = orchestrator.process_block(block)
@@ -97,7 +95,7 @@ def test_alignment_uses_explicit_block_tts_layer_for_spoken_text(tmp_path: Path)
     assert processed.status == BlockStatus.ALIGN_DONE.value
     assert processed.rewrite_count == 0
     assert processed.actual_audio_duration_ms == 1_500
-    assert processed.final_cn_lines == ["t" * 15]
+    assert processed.final_cn_lines == ["c" * 15]
 
 
 def test_alignment_uses_dsp_for_small_diff(tmp_path: Path) -> None:
@@ -123,9 +121,6 @@ def test_alignment_rewrites_for_large_diff_then_succeeds(tmp_path: Path) -> None
 
     assert processed.status == BlockStatus.ALIGN_DONE.value
     assert processed.rewrite_count == 1
-    assert processed.merged_tts_cn_text == processed.merged_cn_text
-    assert processed.merged_literal_cn_text != ""
-    assert processed.get_preferred_cn_text_for_caption() == processed.merged_tts_cn_text
     assert len(processed.merged_cn_text) == 10
     assert processed.actual_audio_duration_ms == 1_000
 

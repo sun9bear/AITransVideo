@@ -101,7 +101,7 @@ class CacheManager:
         model_name: str | None = None,
         version_context: dict[str, Any] | None = None,
     ) -> str:
-        selected_cn_text = block.get_preferred_cn_text_for_tts()
+        selected_cn_text = block.merged_cn_text
         payload = {
             "kind": "tts_block",
             "provider_name": provider_name,

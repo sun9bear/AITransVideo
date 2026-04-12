@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 
 from core.enums import StageStatus
 from core.exceptions import TranslationProviderUnavailableError, WorkflowError
-from core.models import SubtitleLine, summarize_subtitle_text_layers
+from core.models import SubtitleLine
 from core.retry import (
     build_retry_audit_payload,
     merge_retry_audit_payload,
@@ -148,8 +148,6 @@ class TranslationStageRunner:
                     **restore_audit,
                     "target_language": self.config.target_language,
                     "line_count": len(translated_lines),
-                    "literal_text_layer_produced": text_layer_summary["literal_line_count"] > 0,
-                    "tts_text_layer_produced": text_layer_summary["tts_line_count"] > 0,
                     "text_layer_summary": text_layer_summary,
                     "batch_count": len(batch_hashes),
                     "cache_hit_batches": cache_hit_batches,
@@ -207,12 +205,8 @@ class TranslationStageRunner:
                 {
                     **restore_audit,
                     "target_language": self.config.target_language,
-                    "literal_text_layer_produced": False,
-                    "tts_text_layer_produced": False,
                     "text_layer_summary": {
-                        "literal_line_count": 0,
-                        "tts_line_count": 0,
-                        "compat_line_count": 0,
+                        "cn_line_count": 0,
                     },
                     "fallback_stage": self.config.fallback_stage,
                     "runtime_fallback_enabled": self.config.runtime_fallback_enabled,
@@ -447,4 +441,6 @@ class TranslationStageRunner:
         return self.cache_manager.build_input_hash(subtitle_lines)
 
     def _summarize_text_layers(self, lines: list[SubtitleLine]) -> dict[str, int]:
-        return summarize_subtitle_text_layers(lines)
+        return {
+            "cn_line_count": sum(1 for line in lines if bool(line.cn_text.strip())),
+        }

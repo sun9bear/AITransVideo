@@ -1,4 +1,4 @@
-"""Tests for V3-4 pipeline metering writeback endpoint.
+﻿"""Tests for V3-4 pipeline metering writeback endpoint.
 
 Tests the update_job_metering handler and the pipeline _report_job_metering callback.
 """
@@ -150,8 +150,8 @@ class TestBilledCharsPerProvider:
     """V3-5 truth gap: verify per-provider billing multipliers at generator layer.
 
     These tests verify the billing rules match the frozen V3 doc:
-    - MiniMax: 1 汉字 = 2 计费字符
-    - CosyVoice: 1 汉字 = 2 计费字符
+    - MiniMax: 1 姹夊瓧 = 2 璁¤垂瀛楃
+    - CosyVoice: 1 姹夊瓧 = 2 璁¤垂瀛楃
     - VolcEngine: direct char billing (no multiplier)
     - MiMo: token-based, billed_chars = 0 (unknown)
     """
@@ -162,17 +162,22 @@ class TestBilledCharsPerProvider:
             sys.path.insert(0, _src_dir)
 
     def test_minimax_billed_chars_is_2x(self):
-        """MiniMax: 10 CN chars → 20 billed chars (2x multiplier)."""
+        """MiniMax: 10 CN chars -> 20 billed chars (2x multiplier)."""
         self._setup()
         from services.tts.tts_generator import TTSGenerator, TTSConfig, TTSResult
         from services.gemini.translator import DubbingSegment
         from unittest.mock import patch, MagicMock
 
         seg = DubbingSegment(
-            segment_id=1, speaker_id="spk_0", display_name="S",
-            voice_id="v1", start_ms=0, end_ms=3000, target_duration_ms=2800,
-            source_text="test", cn_text="十个中文字符的测试",
-            tts_cn_text="十个中文字符的测试",
+            segment_id=1,
+            speaker_id="spk_0",
+            display_name="S",
+            voice_id="v1",
+            start_ms=0,
+            end_ms=3000,
+            target_duration_ms=2800,
+            source_text="test",
+            cn_text="十个中文字符的测试",
         )
         assert len("十个中文字符的测试") == 9
 
@@ -190,21 +195,26 @@ class TestBilledCharsPerProvider:
             import tempfile
             result = gen._generate_one(seg, tempfile.gettempdir(), provider="minimax")
 
-        # Frozen doc: 1 汉字 = 2 计费字符
+        # Frozen doc: 1 姹夊瓧 = 2 璁¤垂瀛楃
         assert result.billed_chars == 9 * 2  # 18
 
     def test_cosyvoice_billed_chars_is_2x(self):
-        """CosyVoice: 5 CN chars → 10 billed chars (2x multiplier)."""
+        """CosyVoice: 5 CN chars 鈫?10 billed chars (2x multiplier)."""
         self._setup()
         from services.tts.tts_generator import TTSGenerator, TTSConfig, TTSResult
         from services.gemini.translator import DubbingSegment
         from unittest.mock import patch
 
         seg = DubbingSegment(
-            segment_id=1, speaker_id="spk_0", display_name="S",
-            voice_id="v1", start_ms=0, end_ms=3000, target_duration_ms=2800,
-            source_text="test", cn_text="五个字测试",
-            tts_cn_text="五个字测试",
+            segment_id=1,
+            speaker_id="spk_0",
+            display_name="S",
+            voice_id="v1",
+            start_ms=0,
+            end_ms=3000,
+            target_duration_ms=2800,
+            source_text="test",
+            cn_text="五个字测试",
         )
         assert len("五个字测试") == 5
 
@@ -219,7 +229,7 @@ class TestBilledCharsPerProvider:
         assert result.billed_chars == 5 * 2  # 10
 
     def test_volcengine_billed_chars_is_1x(self):
-        """VolcEngine: 7 CN chars → 7 billed chars (no multiplier)."""
+        """VolcEngine: 7 CN chars 鈫?7 billed chars (no multiplier)."""
         self._setup()
         from services.tts.tts_generator import TTSGenerator, TTSConfig, TTSResult
         from services.gemini.translator import DubbingSegment
@@ -228,10 +238,9 @@ class TestBilledCharsPerProvider:
         seg = DubbingSegment(
             segment_id=1, speaker_id="spk_0", display_name="S",
             voice_id="v1", start_ms=0, end_ms=3000, target_duration_ms=2800,
-            source_text="test", cn_text="七字豆包测试哦",
-            tts_cn_text="七字豆包测试哦",
+            source_text="test", cn_text="七字豆包测试呀",
         )
-        assert len("七字豆包测试哦") == 7
+        assert len("七字豆包测试呀") == 7
 
         from services.tts.tts_generator import TTSResult as TR
         fake_result = TR(segment_id=1, audio_path="/tmp/fake.wav", duration_ms=2500, voice_id="v1")
@@ -243,7 +252,7 @@ class TestBilledCharsPerProvider:
         assert result.billed_chars == 7  # direct, no multiplier
 
     def test_mimo_billed_chars_is_zero(self):
-        """MiMo: token-based billing → billed_chars stays 0 (unknown)."""
+        """MiMo: token-based billing 鈫?billed_chars stays 0 (unknown)."""
         self._setup()
         from services.tts.tts_generator import TTSGenerator, TTSConfig, TTSResult
         from services.gemini.translator import DubbingSegment
@@ -253,7 +262,6 @@ class TestBilledCharsPerProvider:
             segment_id=1, speaker_id="spk_0", display_name="S",
             voice_id="v1", start_ms=0, end_ms=3000, target_duration_ms=2800,
             source_text="test", cn_text="MiMo测试文本",
-            tts_cn_text="MiMo测试文本",
         )
 
         from services.tts.tts_generator import TTSResult as TR
@@ -305,7 +313,7 @@ class TestReportJobMeteringCallback:
         fn = self._setup()
         blocks = [
             SimpleNamespace(merged_cn_text="你好世界这是测试", rewrite_count=0),
-            SimpleNamespace(merged_cn_text="第二段文本更长一些", rewrite_count=2),
+            SimpleNamespace(merged_cn_text="第二段文本长一点哦", rewrite_count=2),
             SimpleNamespace(merged_cn_text="第三段", rewrite_count=0),
         ]
         body = self._capture_call(fn, "test-compat", blocks)
@@ -320,7 +328,7 @@ class TestReportJobMeteringCallback:
         """V3-5: tts_billed_chars passed from TTS generator layer."""
         fn = self._setup()
         blocks = [
-            SimpleNamespace(tts_cn_text="你好", cn_text="你好", rewrite_count=0),
+            SimpleNamespace(cn_text="你好", rewrite_count=0),
         ]
         body = self._capture_call_with_billed(fn, "test-billed", blocks, tts_billed_chars=42)
 
@@ -328,7 +336,7 @@ class TestReportJobMeteringCallback:
         assert body["final_cn_chars"] == 2
 
     def test_real_dubbing_segment_path(self):
-        """Real production path: DubbingSegment with tts_cn_text / cn_text."""
+        """Real production path: DubbingSegment with cn_text."""
         fn = self._setup()
         from services.gemini.translator import DubbingSegment
 
@@ -336,28 +344,26 @@ class TestReportJobMeteringCallback:
             DubbingSegment(
                 segment_id=1, speaker_id="spk_0", display_name="Speaker",
                 voice_id="v1", start_ms=0, end_ms=5000, target_duration_ms=4500,
-                source_text="Hello world", cn_text="你好世界",
-                tts_cn_text="你好世界呀",  # preferred over cn_text
+                source_text="Hello world", cn_text="你好世界呀",
                 rewrite_count=0,
             ),
             DubbingSegment(
                 segment_id=2, speaker_id="spk_0", display_name="Speaker",
                 voice_id="v1", start_ms=5000, end_ms=10000, target_duration_ms=4500,
                 source_text="Good morning", cn_text="早上好",
-                tts_cn_text="",  # empty → falls back to cn_text
                 rewrite_count=1,
             ),
         ]
 
         body = self._capture_call(fn, "test-real", segments)
 
-        # "你好世界呀" (5) + "早上好" (3) = 8
+        # "浣犲ソ涓栫晫鍛€" (5) + "鏃╀笂濂? (3) = 8
         assert body["final_cn_chars"] == 8
         assert body["rewrite_triggered"] is True
         assert body["rewrite_count"] == 1
 
     def test_real_dubbing_segment_no_rewrite(self):
-        """DubbingSegment with no rewrites → rewrite_triggered=False."""
+        """DubbingSegment with no rewrites 鈫?rewrite_triggered=False."""
         fn = self._setup()
         from services.gemini.translator import DubbingSegment
 
@@ -365,7 +371,6 @@ class TestReportJobMeteringCallback:
             segment_id=1, speaker_id="spk_0", display_name="S",
             voice_id="v1", start_ms=0, end_ms=3000, target_duration_ms=2800,
             source_text="Test", cn_text="测试文本",
-            tts_cn_text="测试文本",
             rewrite_count=0,
         )
         body = self._capture_call(fn, "test-no-rewrite", [seg])
@@ -373,3 +378,4 @@ class TestReportJobMeteringCallback:
         assert body["final_cn_chars"] == 4
         assert body["rewrite_triggered"] is False
         assert body["rewrite_count"] == 0
+

@@ -80,7 +80,7 @@ class AlignmentOrchestrator:
 
         while True:
             try:
-                selected_cn_text = block.get_preferred_cn_text_for_tts()
+                selected_cn_text = block.merged_cn_text
                 tts_audio_path = self.tts_service.synthesize(block)
                 block.tts_audio_path = tts_audio_path
                 block.actual_audio_duration_ms = self.audio_service.get_duration_ms(tts_audio_path)
@@ -124,8 +124,7 @@ class AlignmentOrchestrator:
                     actual_duration_ms=block.actual_audio_duration_ms,
                     target_duration_ms=block.target_duration_ms,
                 )
-                block.merged_tts_cn_text = rewritten_text
-                block.merged_cn_text = block.get_preferred_cn_text_for_tts()
+                block.merged_cn_text = rewritten_text
                 block.rewrite_count += 1
             except Exception as exc:
                 return self._fail_block(block, str(exc), exc)

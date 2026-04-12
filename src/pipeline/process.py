@@ -175,10 +175,7 @@ def _report_job_metering(job_id: str, segments: list, *, tts_billed_chars: int |
     Supports both ``DubbingSegment`` (real pipeline path) and ``SemanticBlock``
     (legacy/alternative path) by checking for available text fields.
 
-    Text field priority (matches TTS consumption):
-      1. ``tts_cn_text`` — preferred: the actual text sent to TTS
-      2. ``cn_text`` — fallback: the translation text
-      3. ``merged_cn_text`` — compat: SemanticBlock's text field
+    Text field: ``cn_text`` (DubbingSegment) or ``merged_cn_text`` (SemanticBlock).
 
     Reports:
     - final_cn_chars: total Chinese characters in final translated text
@@ -194,10 +191,7 @@ def _report_job_metering(job_id: str, segments: list, *, tts_billed_chars: int |
         total_cn_chars = 0
         total_rewrite_count = 0
         for seg in segments:
-            # Priority: tts_cn_text > cn_text > merged_cn_text
-            text = getattr(seg, "tts_cn_text", "") or ""
-            if not text:
-                text = getattr(seg, "cn_text", "") or ""
+            text = getattr(seg, "cn_text", "") or ""
             if not text:
                 text = getattr(seg, "merged_cn_text", "") or ""
             total_cn_chars += len(text)
@@ -1981,7 +1975,6 @@ class ProcessPipeline:
                     "display_name": resolved_names.get(segment.speaker_id, "") or segment.display_name,
                     "source_text": segment.source_text,
                     "cn_text": segment.cn_text,
-                    "tts_cn_text": segment.tts_cn_text,
                     "target_duration_ms": segment.target_duration_ms,
                     "rewrite_count": segment.rewrite_count,
                     "needs_review": segment.needs_review,
@@ -2282,7 +2275,7 @@ class ProcessPipeline:
 
             segment.tts_audio_path = str(cached_path.resolve(strict=False))
             segment.actual_duration_ms = _ffprobe_duration_ms(cached_path)
-            segment.tts_cn_text = segment.tts_cn_text or segment.cn_text
+            # tts_cn_text unified into cn_text — no fallback needed
             if segment.target_duration_ms > 0:
                 segment.alignment_ratio = segment.actual_duration_ms / segment.target_duration_ms
             else:
@@ -2568,7 +2561,7 @@ class ProcessPipeline:
             if target_duration_ms <= 0:
                 continue
 
-            current_text = (segment.tts_cn_text or segment.cn_text).strip()
+            current_text = segment.cn_text.strip()
             if not current_text:
                 continue
 
@@ -2607,7 +2600,7 @@ class ProcessPipeline:
             if not rewritten_text or rewritten_text == current_text:
                 continue
 
-            segment.tts_cn_text = rewritten_text
+            segment.cn_text = rewritten_text
             segment.rewrite_count += 1
             rewritten_count += 1
             print(
@@ -2770,35 +2763,31 @@ class ProcessPipeline:
         segment: DubbingSegment,
         next_segment_id: int,
     ) -> list[DubbingSegment] | None:
-        tts_text = (segment.tts_cn_text or segment.cn_text).strip()
-        if not tts_text:
+        cn_text = segment.cn_text.strip()
+        if not cn_text:
             return None
 
-        tts_chunks = self._split_text_for_failed_segment(tts_text, FAILED_SEGMENT_SEMANTIC_SPLIT_PATTERN)
-        if tts_chunks is None:
+        cn_chunks = self._split_text_for_failed_segment(cn_text, FAILED_SEGMENT_SEMANTIC_SPLIT_PATTERN)
+        if cn_chunks is None:
             return None
-
-        cn_chunks = self._split_text_for_failed_segment(segment.cn_text, FAILED_SEGMENT_SEMANTIC_SPLIT_PATTERN)
-        if cn_chunks is None or len(cn_chunks) != len(tts_chunks):
-            cn_chunks = list(tts_chunks)
 
         source_chunks = self._split_text_for_failed_segment(
             segment.source_text,
             FAILED_SEGMENT_SOURCE_SPLIT_PATTERN,
         )
-        if source_chunks is None or len(source_chunks) != len(tts_chunks):
-            source_chunks = [segment.source_text for _ in tts_chunks]
+        if source_chunks is None or len(source_chunks) != len(cn_chunks):
+            source_chunks = [segment.source_text for _ in cn_chunks]
 
         spans = self._allocate_semantic_split_spans(
             start_ms=segment.start_ms,
             end_ms=segment.end_ms,
-            weights=[self._semantic_split_weight(chunk) for chunk in tts_chunks],
+            weights=[self._semantic_split_weight(chunk) for chunk in cn_chunks],
         )
-        if spans is None or len(spans) != len(tts_chunks):
+        if spans is None or len(spans) != len(cn_chunks):
             return None
 
         child_segments: list[DubbingSegment] = []
-        for index, ((start_ms, end_ms), tts_chunk) in enumerate(zip(spans, tts_chunks)):
+        for index, ((start_ms, end_ms), cn_chunk) in enumerate(zip(spans, cn_chunks)):
             if end_ms <= start_ms:
                 return None
             child_segments.append(
@@ -2816,8 +2805,7 @@ class ProcessPipeline:
                     end_ms=end_ms,
                     target_duration_ms=end_ms - start_ms,
                     source_text=source_chunks[index],
-                    cn_text=cn_chunks[index],
-                    tts_cn_text=tts_chunk,
+                    cn_text=cn_chunk,
                 )
             )
         return child_segments
@@ -2842,7 +2830,7 @@ class ProcessPipeline:
         else:
             child_segment.alignment_ratio = 0.0
 
-        current_text = (child_segment.tts_cn_text or child_segment.cn_text).strip()
+        current_text = child_segment.cn_text.strip()
         rewritten_text = rewriter.rewrite_for_duration(
             current_text,
             actual_duration_ms=current_actual_duration_ms,
@@ -2853,7 +2841,7 @@ class ProcessPipeline:
         if rewritten_text and rewritten_text != current_text:
             if not post_tts_budget_tracker.try_consume_for_segment(child_segment, 1):
                 return
-            child_segment.tts_cn_text = rewritten_text
+            child_segment.cn_text = rewritten_text
             child_segment.rewrite_count += 1
             tts_generator.generate_all([child_segment], str(tts_dir))
 
@@ -3027,8 +3015,6 @@ class ProcessPipeline:
                     speaker_name=segment.display_name,
                     en_text=segment.source_text,
                     cn_text=segment.cn_text,
-                    literal_cn_text=segment.cn_text,
-                    tts_cn_text=segment.tts_cn_text,
                 )
             )
         return captions
@@ -3139,19 +3125,12 @@ class ProcessPipeline:
         translation_result: TranslationResult,
         execution_mode: str,
     ) -> dict[str, object]:
-        literal_line_count = sum(1 for segment in translation_result.segments if bool(segment.cn_text.strip()))
-        tts_line_count = sum(
-            1 for segment in translation_result.segments if bool((segment.tts_cn_text or "").strip())
-        )
+        cn_line_count = sum(1 for segment in translation_result.segments if bool(segment.cn_text.strip()))
         return {
             "execution_mode": execution_mode,
             "segment_count": translation_result.total_segments,
-            "literal_text_layer_produced": literal_line_count > 0,
-            "tts_text_layer_produced": tts_line_count > 0,
             "text_layer_summary": {
-                "literal_line_count": literal_line_count,
-                "tts_line_count": tts_line_count,
-                "compat_line_count": literal_line_count,
+                "cn_line_count": cn_line_count,
             },
             "artifacts": build_artifacts_payload(
                 kind="translation_segments",
@@ -3169,8 +3148,7 @@ class ProcessPipeline:
             "execution_mode": "legacy_process",
             "block_count": len(segments),
             "needs_review_count": needs_review_count,
-            "literal_text_layer_produced": any(bool(segment.cn_text.strip()) for segment in segments),
-            "tts_text_layer_produced": any(bool((segment.tts_cn_text or "").strip()) for segment in segments),
+            "cn_text_produced": any(bool(segment.cn_text.strip()) for segment in segments),
             "artifacts": build_artifacts_payload(
                 kind="aligned_audio",
                 file_paths=aligned_audio_paths,
@@ -3333,7 +3311,6 @@ class ProcessPipeline:
                             "target_duration_ms": segment.target_duration_ms,
                             "source_text": segment.source_text,
                             "cn_text": segment.cn_text,
-                            "tts_cn_text": segment.tts_cn_text,
                             "tts_audio_path": segment.tts_audio_path,
                             "aligned_audio_path": segment.aligned_audio_path,
                             "actual_duration_ms": segment.actual_duration_ms,
@@ -3530,7 +3507,7 @@ class ProcessPipeline:
     ) -> tuple[float, dict[str, float]]:
         global_estimator = TTSDurationEstimator(chars_per_second=4.5)
         global_samples = [
-            ((segment.tts_cn_text or segment.cn_text), segment.actual_duration_ms)
+            (segment.cn_text, segment.actual_duration_ms)
             for segment in segments
             if segment.actual_duration_ms > 0
         ]
@@ -3541,7 +3518,7 @@ class ProcessPipeline:
             if segment.actual_duration_ms <= 0:
                 continue
             speaker_samples.setdefault(segment.speaker_id, []).append(
-                ((segment.tts_cn_text or segment.cn_text), segment.actual_duration_ms)
+                (segment.cn_text, segment.actual_duration_ms)
             )
 
         chars_per_second_by_speaker: dict[str, float] = {}

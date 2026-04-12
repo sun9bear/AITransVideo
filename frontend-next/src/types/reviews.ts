@@ -28,7 +28,6 @@ export interface TranslationReviewItem {
   displayName: string
   sourceText: string
   cnText: string
-  ttsCnText: string
   translationConfirmed: boolean
   rewriteRequested: boolean
   reviewUpdatedAt: string | null
@@ -132,7 +131,6 @@ export interface TranslationReviewApprovalInput {
       cnText: string
       rewriteRequested: boolean
       translationConfirmed: boolean
-      ttsCnText: string
       updatedAt: string
     }
   >

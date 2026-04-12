@@ -388,19 +388,11 @@ def test_project_workflow_runs_to_draft_scaffold(tmp_path: Path) -> None:
         execution_mode="fresh_run",
         stage_name="alignment",
     )
-    assert translation_stage["payload"]["literal_text_layer_produced"] is True
-    assert translation_stage["payload"]["tts_text_layer_produced"] is False
     assert alignment_stage["payload"]["artifacts"]["file_count"] >= 1
     ingestion_stage = state_manager.get_stage("ingestion")
     chunking_stage = state_manager.get_stage("chunking")
     assert ingestion_stage is not None
     assert chunking_stage is not None
-    assert chunking_stage["payload"]["literal_text_layer_produced"] is True
-    assert alignment_stage["payload"]["literal_text_layer_produced"] is True
-    assert alignment_stage["payload"]["tts_text_layer_produced"] is True
-    assert alignment_stage["payload"]["text_layer_summary"]["literal_block_count"] == 1
-    assert alignment_stage["payload"]["text_layer_summary"]["tts_block_count"] == 1
-    assert alignment_stage["payload"]["text_layer_summary"]["tts_line_count"] == 2
     assert ingestion_stage["payload"]["rerun_reason"] == "source_provider_load_required"
     assert chunking_stage["payload"]["rerun_reason"] == "chunking_always_recomputed"
     assert result.stage_snapshot["draft"]["status"] == StageStatus.DONE.value

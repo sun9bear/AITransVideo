@@ -436,7 +436,7 @@ def test_real_translation_provider_parses_common_wrapped_shapes() -> None:
     assert parsed_double_wrapped_lines == ["M", "N"]
 
 
-def test_real_translation_provider_accepts_structured_line_output_and_pipeline_writes_literal_cn_text() -> None:
+def test_real_translation_provider_accepts_structured_line_output_and_pipeline_writes_cn_text() -> None:
     provider = OpenAICompatibleTranslationProvider(
         RealTranslationProviderConfig(
             enabled=True,
@@ -472,9 +472,7 @@ def test_real_translation_provider_accepts_structured_line_output_and_pipeline_w
     )
     translated_lines = pipeline.translate_lines(source_lines)
 
-    assert [line.literal_cn_text for line in translated_lines] == ["CN:Hello", "CN:World"]
     assert [line.cn_text for line in translated_lines] == ["CN:Hello", "CN:World"]
-    assert [line.tts_cn_text for line in translated_lines] == ["", ""]
 
 
 def test_real_translation_provider_rejects_line_count_mismatch() -> None:

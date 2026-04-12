@@ -88,9 +88,7 @@ def test_translation_pipeline_preserves_speaker_identity_fields() -> None:
 
     assert [line.speaker_id for line in translated] == ["speaker_a", "speaker_b"]
     assert [line.speaker_name for line in translated] == ["Host", "Host"]
-    assert [line.literal_cn_text for line in translated] == ["CN:First", "CN:Second"]
     assert [line.cn_text for line in translated] == ["CN:First", "CN:Second"]
-    assert [line.tts_cn_text for line in translated] == ["", ""]
 
 
 def test_translation_pipeline_rejects_empty_translated_text() -> None:
@@ -107,7 +105,6 @@ def test_translation_pipeline_strips_wrapper_formatting() -> None:
 
     translated = pipeline.translate_lines(_make_lines(2))
 
-    assert [line.literal_cn_text for line in translated] == ["CN:Line 1", "CN:Line 2"]
     assert [line.cn_text for line in translated] == ["CN:Line 1", "CN:Line 2"]
 
     processed_batch = pipeline.process_batch_output(
@@ -120,15 +117,13 @@ def test_translation_pipeline_strips_wrapper_formatting() -> None:
     assert processed_batch.action_counts["strip_markdown_wrapper"] == 1
 
 
-def test_translation_pipeline_writes_literal_cn_text_and_keeps_cn_text_as_compat_mirror() -> None:
+def test_translation_pipeline_writes_cn_text() -> None:
     router = TranslationChunkRouter(TranslationRouterConfig(batch_size=1, max_batch_size=1))
     pipeline = TranslationPipeline(router=router, translator=MockTranslator())
 
     translated = pipeline.translate_lines(_make_lines(1))
 
-    assert translated[0].literal_cn_text == "CN:Line 1"
     assert translated[0].cn_text == "CN:Line 1"
-    assert translated[0].tts_cn_text == ""
 
 
 def test_translation_pipeline_rejects_suspicious_explanatory_output() -> None:

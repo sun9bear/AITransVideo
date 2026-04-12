@@ -402,7 +402,7 @@ class OpenAICompatibleTTSProvider:
         self._retry_report = build_retry_audit_payload()
 
     def synthesize(self, block: SemanticBlock) -> str:
-        clean_text = block.get_preferred_cn_text_for_tts().strip()
+        clean_text = block.merged_cn_text.strip()
         if not clean_text:
             self._retry_report = build_retry_audit_payload()
             raise TTSProviderOutputError("Cannot synthesize empty block text.")
@@ -544,7 +544,7 @@ class OpenAICompatibleTTSProvider:
         block: SemanticBlock,
         resolved_voice: ResolvedTTSVoice,
     ) -> dict[str, object]:
-        clean_text = block.get_preferred_cn_text_for_tts().strip()
+        clean_text = block.merged_cn_text.strip()
         normalized_protocol = self.config.normalized_api_protocol()
         if normalized_protocol == "minimax_t2a_v2":
             return {

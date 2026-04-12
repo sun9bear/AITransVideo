@@ -20,7 +20,7 @@ class MockTTSService:
         self.config = config or MockTTSConfig()
 
     def synthesize(self, block: SemanticBlock) -> str:
-        selected_cn_text = block.get_preferred_cn_text_for_tts().strip()
+        selected_cn_text = block.merged_cn_text.strip()
         if not selected_cn_text:
             raise TTSError("Cannot synthesize empty block text.")
 

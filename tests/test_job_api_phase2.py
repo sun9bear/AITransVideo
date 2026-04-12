@@ -87,7 +87,7 @@ class TestTranslationApprove:
         # Prepare segments on disk
         segments = [
             {"segment_id": 1, "speaker_id": "speaker_a", "source_text": "Hello",
-             "cn_text": "你好", "tts_cn_text": "你好"},
+             "cn_text": "你好"},
         ]
         _write_segments_json(project_dir, segments)
 
@@ -108,7 +108,7 @@ class TestTranslationApprove:
 
             try:
                 status, result = _request_json("POST", f"{base_url}/jobs/{job_id}/review/translation/approve", {
-                    "segments": {"1": {"segment_id": 1, "cn_text": "你好世界", "tts_cn_text": "你好世界"}},
+                    "segments": {"1": {"segment_id": 1, "cn_text": "你好世界"}},
                     "project_dir": "/some/fake/dir",  # MUST be ignored
                 })
             except HTTPError as exc:
@@ -151,9 +151,9 @@ class TestTranslationApprove:
 
         segments = [
             {"segment_id": 1, "speaker_id": "speaker_a", "source_text": "Hello",
-             "cn_text": "你好", "tts_cn_text": "你好"},
+             "cn_text": "你好"},
             {"segment_id": 2, "speaker_id": "speaker_a", "source_text": "World",
-             "cn_text": "世界", "tts_cn_text": "世界"},
+             "cn_text": "世界"},
         ]
         _write_segments_json(project_dir, segments)
         _write_transcript_json(project_dir, [
@@ -180,7 +180,7 @@ class TestTranslationApprove:
 
             try:
                 status, result = _request_json("POST", f"{base_url}/jobs/{job_id}/review/translation/approve", {
-                    "segments": {"1": {"segment_id": 1, "cn_text": "你好世界", "tts_cn_text": "你好世界"}},
+                    "segments": {"1": {"segment_id": 1, "cn_text": "你好世界"}},
                     "segment_speakers": {"1": "speaker_b"},
                 })
             except HTTPError as exc:
@@ -201,7 +201,7 @@ class TestTranslationApprove:
 
         segments = [
             {"segment_id": 1, "speaker_id": "speaker_a", "source_text": "Hello",
-             "cn_text": "你好", "tts_cn_text": "你好"},
+             "cn_text": "你好"},
         ]
         _write_segments_json(project_dir, segments)
 
@@ -224,7 +224,7 @@ class TestTranslationApprove:
             # Try to approve on a succeeded job — must fail
             try:
                 _request_json("POST", f"{base_url}/jobs/{job_id}/review/translation/approve", {
-                    "segments": {"1": {"segment_id": 1, "cn_text": "被篡改的文本", "tts_cn_text": "被篡改的文本"}},
+                    "segments": {"1": {"segment_id": 1, "cn_text": "被篡改的文本"}},
                 })
             except HTTPError as exc:
                 assert exc.code == HTTPStatus.CONFLICT, f"Expected 409, got {exc.code}"
@@ -255,11 +255,11 @@ class TestSplitSegment:
         # Write segments and transcript that the split helper expects
         segments = [
             {"segment_id": 1, "speaker_id": "speaker_a", "source_text": "Hello World", "cn_text": "你好世界",
-             "tts_cn_text": "你好世界", "start_ms": 0, "end_ms": 2000, "target_duration_ms": 2000,
+             "start_ms": 0, "end_ms": 2000, "target_duration_ms": 2000,
              "tts_audio_path": None, "aligned_audio_path": None, "actual_duration_ms": 0,
              "alignment_ratio": 0.0, "alignment_method": "", "rewrite_count": 0, "needs_review": False},
             {"segment_id": 2, "speaker_id": "speaker_a", "source_text": "Goodbye", "cn_text": "再见",
-             "tts_cn_text": "再见", "start_ms": 2000, "end_ms": 4000, "target_duration_ms": 2000,
+             "start_ms": 2000, "end_ms": 4000, "target_duration_ms": 2000,
              "tts_audio_path": None, "aligned_audio_path": None, "actual_duration_ms": 0,
              "alignment_ratio": 0.0, "alignment_method": "", "rewrite_count": 0, "needs_review": False},
         ]
@@ -313,7 +313,7 @@ class TestSplitSegment:
 
         segments = [
             {"segment_id": 1, "speaker_id": "speaker_a", "source_text": "Hello World", "cn_text": "你好世界",
-             "tts_cn_text": "你好世界", "start_ms": 0, "end_ms": 2000, "target_duration_ms": 2000,
+             "start_ms": 0, "end_ms": 2000, "target_duration_ms": 2000,
              "tts_audio_path": None, "aligned_audio_path": None, "actual_duration_ms": 0,
              "alignment_ratio": 0.0, "alignment_method": "", "rewrite_count": 0, "needs_review": False},
         ]

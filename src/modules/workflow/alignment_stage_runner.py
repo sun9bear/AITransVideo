@@ -3,7 +3,7 @@ from pathlib import Path
 
 from core.enums import BlockStatus, StageStatus
 from core.exceptions import WorkflowError
-from core.models import SemanticBlock, summarize_block_text_layers
+from core.models import SemanticBlock
 from core.retry import read_provider_retry_report, reset_provider_retry_report
 from modules.alignment.alignment_orchestrator import AlignmentOrchestrator
 from modules.workflow.restore_policy import build_cache_restore_audit
@@ -117,8 +117,6 @@ class AlignmentStageRunner:
                             "actual_audio_duration_ms": block.actual_audio_duration_ms,
                             "rewrite_count": block.rewrite_count,
                             "merged_cn_text": block.merged_cn_text,
-                            "merged_literal_cn_text": block.merged_literal_cn_text,
-                            "merged_tts_cn_text": block.merged_tts_cn_text,
                             "final_cn_lines": block.final_cn_lines,
                             "status": block.status,
                             "provider_name": self.config.provider_name,
@@ -159,7 +157,6 @@ class AlignmentStageRunner:
                 artifact_paths=audio_paths,
                 reused_artifacts=reused_block_hashes,
             )
-            text_layer_summary = summarize_block_text_layers(aligned_blocks)
             payload = self._build_provider_run_report(
                 execution_mode=resolve_cache_execution_mode(cache_hit_blocks, len(blocks)),
                 retry_attempted=bool(retry_report["retry_attempted"]),
@@ -174,9 +171,6 @@ class AlignmentStageRunner:
                     "resolved_speaker_id": voice_audit_summary["resolved_speaker_id"],
                     "resolved_voice_id": voice_audit_summary["resolved_voice_id"],
                     "voice_resolution_source": voice_audit_summary["voice_resolution_source"],
-                    "literal_text_layer_produced": text_layer_summary["literal_block_count"] > 0,
-                    "tts_text_layer_produced": text_layer_summary["tts_block_count"] > 0,
-                    "text_layer_summary": text_layer_summary,
                     "block_count": len(aligned_blocks),
                     "cache_hit_blocks": cache_hit_blocks,
                     "fallback_stage": self.config.fallback_stage,
@@ -238,13 +232,6 @@ class AlignmentStageRunner:
                     "resolved_speaker_id": voice_audit_summary["resolved_speaker_id"],
                     "resolved_voice_id": voice_audit_summary["resolved_voice_id"],
                     "voice_resolution_source": voice_audit_summary["voice_resolution_source"],
-                    "literal_text_layer_produced": False,
-                    "tts_text_layer_produced": False,
-                    "text_layer_summary": {
-                        "literal_block_count": 0,
-                        "tts_block_count": 0,
-                        "compat_block_count": 0,
-                    },
                     "fallback_stage": self.config.fallback_stage,
                 }
             )
@@ -303,10 +290,6 @@ class AlignmentStageRunner:
         block.rewrite_count = int(payload.get("rewrite_count", 0))
         block.status = str(payload.get("status", BlockStatus.ALIGN_DONE.value))
         block.merged_cn_text = str(payload.get("merged_cn_text", block.merged_cn_text))
-        if "merged_literal_cn_text" in payload:
-            block.merged_literal_cn_text = str(payload.get("merged_literal_cn_text", block.merged_literal_cn_text))
-        if "merged_tts_cn_text" in payload:
-            block.merged_tts_cn_text = str(payload.get("merged_tts_cn_text", block.merged_tts_cn_text))
         block.error_type = None
         final_cn_lines = payload.get("final_cn_lines", [])
         if isinstance(final_cn_lines, list) and all(isinstance(text, str) for text in final_cn_lines):

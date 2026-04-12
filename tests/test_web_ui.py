@@ -190,7 +190,6 @@ def _write_test_process_project(
                 "display_name": "Speaker A",
                 "source_text": "Hello there",
                 "cn_text": "你好",
-                "tts_cn_text": "你好呀",
                 "alignment_method": "force_dsp",
                 "rewrite_count": 1,
                 "needs_review": True,
@@ -207,7 +206,6 @@ def _write_test_process_project(
                 "display_name": "Speaker B",
                 "source_text": "Thanks for joining",
                 "cn_text": "欢迎加入",
-                "tts_cn_text": "欢迎你加入",
                 "alignment_method": "dsp",
                 "rewrite_count": 0,
                 "needs_review": needs_review_count > 1,
@@ -224,7 +222,6 @@ def _write_test_process_project(
                 "display_name": "Speaker A",
                 "source_text": "This one is fine",
                 "cn_text": "这一段没问题",
-                "tts_cn_text": "这一段没问题",
                 "alignment_method": "direct",
                 "rewrite_count": 0,
                 "needs_review": False,
@@ -1311,7 +1308,7 @@ def test_build_web_ui_snapshot_includes_recent_results_and_needs_review_items(tm
         {"value": "speaker_b", "label": "Speaker B"},
     ]
     assert snapshot["results"]["needs_review"]["items"][0]["segment_id"] == 1
-    assert snapshot["results"]["needs_review"]["items"][0]["tts_cn_text"] == "你好呀"
+    assert snapshot["results"]["needs_review"]["items"][0]["cn_text"] == "你好呀"
     assert snapshot["results"]["transcript_review"]["total_items"] == 3
     assert snapshot["results"]["transcript_review"]["default_page_size"] == 20
     assert snapshot["results"]["transcript_review"]["page_size_options"] == [20, 50, 100]
@@ -1329,7 +1326,7 @@ def test_build_web_ui_snapshot_includes_recent_results_and_needs_review_items(tm
         {"value": "speaker_b", "label": "Speaker B"},
     ]
     assert snapshot["results"]["translation_review"]["items"][0]["cn_text"] == "你好"
-    assert snapshot["results"]["translation_review"]["items"][1]["tts_cn_text"] == "欢迎你加入"
+    assert snapshot["results"]["translation_review"]["items"][1]["cn_text"] == "欢迎你加入"
     assert snapshot["results"]["audio_alignment"]["total_items"] == 3
     assert snapshot["results"]["audio_alignment"]["default_page_size"] == 20
     assert snapshot["results"]["audio_alignment"]["page_size_options"] == [20, 50, 100]
@@ -2312,7 +2309,6 @@ def test_save_translation_review_submission_persists_review_state(tmp_path: Path
         translation_segments_payload={
             "1": {
                 "cn_text": "手工改过的翻译",
-                "tts_cn_text": "手工改过的配音文本",
                 "translation_confirmed": True,
             },
             "2": {
@@ -2328,11 +2324,11 @@ def test_save_translation_review_submission_persists_review_state(tmp_path: Path
     assert review_state["active_stage"] == "translation_review"
     assert translation_stage["status"] == "pending"
     assert normalized_payload["segments"]["1"]["cn_text"] == "手工改过的翻译"
-    assert normalized_payload["segments"]["1"]["tts_cn_text"] == "手工改过的配音文本"
+    assert normalized_payload["segments"]["1"]["cn_text"] == "手工改过的配音文本"
     assert normalized_payload["segments"]["1"]["translation_confirmed"] is True
     assert translation_stage["payload"]["segments"]["2"]["rewrite_requested"] is True
     assert translation_stage["payload"]["segments"]["2"]["cn_text"] == original_segments[1]["cn_text"]
-    assert translation_stage["payload"]["segments"]["2"]["tts_cn_text"] == original_segments[1]["tts_cn_text"]
+    assert translation_stage["payload"]["segments"]["2"]["cn_text"] == original_segments[1]["cn_text"]
 
 
 def test_approve_translation_review_submission_writes_segments_json(tmp_path: Path) -> None:
@@ -2347,7 +2343,6 @@ def test_approve_translation_review_submission_writes_segments_json(tmp_path: Pa
         translation_segments_payload={
             "1": {
                 "cn_text": "批准后的翻译",
-                "tts_cn_text": "批准后的配音文本",
                 "translation_confirmed": True,
                 "rewrite_requested": False,
             }
@@ -2364,7 +2359,7 @@ def test_approve_translation_review_submission_writes_segments_json(tmp_path: Pa
     assert review_state["active_stage"] is None
     assert review_state["stages"]["translation_review"]["status"] == "approved"
     assert first_segment["cn_text"] == "批准后的翻译"
-    assert first_segment["tts_cn_text"] == "批准后的配音文本"
+    assert first_segment["cn_text"] == "批准后的配音文本"
     assert "translation_confirmed" not in first_segment
     assert "rewrite_requested" not in first_segment
 
@@ -2449,7 +2444,6 @@ def test_build_web_ui_snapshot_applies_pending_translation_review_overrides(tmp_
         translation_segments_payload={
             "1": {
                 "cn_text": "快照里的翻译覆盖",
-                "tts_cn_text": "快照里的配音覆盖",
                 "translation_confirmed": True,
             }
         },
@@ -2459,7 +2453,7 @@ def test_build_web_ui_snapshot_applies_pending_translation_review_overrides(tmp_
     snapshot = build_web_ui_snapshot(manager=manager)
 
     assert snapshot["results"]["translation_review"]["items"][0]["cn_text"] == "快照里的翻译覆盖"
-    assert snapshot["results"]["translation_review"]["items"][0]["tts_cn_text"] == "快照里的配音覆盖"
+    assert snapshot["results"]["translation_review"]["items"][0]["cn_text"] == "快照里的配音覆盖"
     assert snapshot["results"]["translation_review"]["items"][0]["translation_confirmed"] is True
     assert snapshot["results"]["translation_review"]["confirmed_count"] == 1
     assert snapshot["results"]["review_flow"]["active_stage"] == "translation_review"

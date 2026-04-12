@@ -41,10 +41,6 @@ def _write_approved_translation_review_to_segments(
             if not isinstance(reviewed_segment, dict):
                 continue
             raw_segment["cn_text"] = _normalize_optional_text(reviewed_segment.get("cn_text")) or ""
-            raw_segment["tts_cn_text"] = (
-                _normalize_optional_text(reviewed_segment.get("tts_cn_text"))
-                or raw_segment["cn_text"]
-            )
 
     segments_path.write_text(
         json.dumps(translation_payload, ensure_ascii=False, indent=2),
@@ -236,7 +232,6 @@ def _split_segment(
                     if item_seg_id == seg_id_str:
                         source_text = str(item.get("source_text") or "")
                         cn_text = str(item.get("cn_text") or "")
-                        tts_cn_text = str(item.get("tts_cn_text") or "")
                         start_ms = int(item.get("start_ms") or 0)
                         end_ms = int(item.get("end_ms") or 0)
 
@@ -257,7 +252,6 @@ def _split_segment(
                         seg_a = {**item}
                         seg_a["source_text"] = source_text[:src_split_pos].strip()
                         seg_a["cn_text"] = cn_text[:cn_split_pos].strip()
-                        seg_a["tts_cn_text"] = tts_cn_text[:cn_split_pos].strip()
                         seg_a["end_ms"] = mid_ms
                         seg_a["target_duration_ms"] = target_dur_a
                         seg_a["tts_audio_path"] = None
@@ -273,7 +267,6 @@ def _split_segment(
                         seg_b = {**item}
                         seg_b["source_text"] = source_text[src_split_pos:].strip()
                         seg_b["cn_text"] = cn_text[cn_split_pos:].strip()
-                        seg_b["tts_cn_text"] = tts_cn_text[cn_split_pos:].strip()
                         seg_b["start_ms"] = mid_ms
                         seg_b["target_duration_ms"] = target_dur_b
                         seg_b["tts_audio_path"] = None

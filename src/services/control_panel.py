@@ -616,8 +616,7 @@ def render_control_panel_html() -> str:
       locator: "source locator",
       video_title: "video title",
       media_authoritative_path_kind: "authoritative 路径类型",
-      literal_text_layer_produced: "已产出 literal 文本层",
-      tts_text_layer_produced: "已产出 tts 文本层"
+      cn_text_produced: "已产出中文翻译文本"
     };
     const stageDisplayNames = {
       media_understanding: "media_understanding（媒体理解）",
@@ -861,8 +860,7 @@ def render_control_panel_html() -> str:
         ["output_root", run.output_root],
         ["input_path", run.input_path],
         ["media_authoritative_path_kind", run.provider_mode_summary?.media_authoritative_path_kind],
-        ["literal_text_layer_produced", run.provider_mode_summary?.literal_text_layer_produced],
-        ["tts_text_layer_produced", run.provider_mode_summary?.tts_text_layer_produced]
+        ["cn_text_produced", run.provider_mode_summary?.cn_text_produced]
       ]) {
         if (value === undefined || value === null || value === "") {
           continue;
@@ -1642,8 +1640,7 @@ def _sanitize_workbench_run(last_workbench_run: dict[str, object] | None) -> dic
             stage_name: {
                 "status": stage_payload.get("status"),
                 "execution_mode": stage_payload.get("execution_mode"),
-                "literal_text_layer_produced": stage_payload.get("literal_text_layer_produced"),
-                "tts_text_layer_produced": stage_payload.get("tts_text_layer_produced"),
+                "cn_text_produced": stage_payload.get("cn_text_produced"),
                 "authoritative_input_used": stage_payload.get("authoritative_input_used"),
                 "authoritative_path_kind": stage_payload.get("authoritative_path_kind"),
             }

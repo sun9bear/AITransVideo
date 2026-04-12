@@ -115,7 +115,6 @@ class VoiceAssetVerifier:
             last_end_ms=1_000,
             target_duration_ms=1_000,
             merged_cn_text=normalized_sample_text,
-            merged_tts_cn_text=normalized_sample_text,
         )
         try:
             output_path = provider.synthesize(block)

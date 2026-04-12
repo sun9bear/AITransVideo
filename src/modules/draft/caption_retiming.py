@@ -142,7 +142,7 @@ class CaptionRetimer:
         if block.cn_line_texts and len(block.cn_line_texts) == len(ordered_lines):
             return [text.strip() for text in block.cn_line_texts]
 
-        fallback_texts = [line.get_preferred_cn_text_for_caption().strip() for line in ordered_lines]
+        fallback_texts = [line.cn_text.strip() for line in ordered_lines]
         if any(fallback_texts):
             return fallback_texts
         raise DraftError(f"No caption texts available for block {block.block_id}.")

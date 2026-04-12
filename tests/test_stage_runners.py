@@ -205,15 +205,10 @@ def test_translation_stage_runner_matches_existing_behavior(tmp_path: Path) -> N
     translated_lines = runner.run(_make_source_lines())
     translation_stage = state_manager.get_stage("translation")
 
-    assert [line.literal_cn_text for line in translated_lines] == [
-        "CN:Welcome back.",
-        "CN:We are assembling a draft scaffold.",
-    ]
     assert [line.cn_text for line in translated_lines] == [
         "CN:Welcome back.",
         "CN:We are assembling a draft scaffold.",
     ]
-    assert [line.tts_cn_text for line in translated_lines] == ["", ""]
     assert translation_stage is not None
     assert translation_stage["status"] == StageStatus.DONE.value
     assert translation_stage["payload"]["cache_hit_batches"] == 0
@@ -227,12 +222,8 @@ def test_translation_stage_runner_matches_existing_behavior(tmp_path: Path) -> N
     assert translation_stage["payload"]["retry_candidate"] is None
     assert translation_stage["payload"]["final_error_type"] is None
     assert translation_stage["payload"]["final_error_message"] is None
-    assert translation_stage["payload"]["literal_text_layer_produced"] is True
-    assert translation_stage["payload"]["tts_text_layer_produced"] is False
     assert translation_stage["payload"]["text_layer_summary"] == {
-        "literal_line_count": 2,
-        "tts_line_count": 0,
-        "compat_line_count": 2,
+        "cn_line_count": 2,
     }
     assert translation_stage["payload"]["artifact_paths"] == []
     assert translation_stage["payload"]["reused_artifacts"] == []
@@ -263,7 +254,7 @@ def test_translation_stage_runner_supports_real_provider_context(tmp_path: Path)
     translated_lines = runner.run(_make_source_lines())
     translation_stage = state_manager.get_stage("translation")
 
-    assert [line.literal_cn_text for line in translated_lines] == [
+    assert [line.cn_text for line in translated_lines] == [
         "REAL:Welcome back.",
         "REAL:We are assembling a draft scaffold.",
     ]
@@ -274,8 +265,6 @@ def test_translation_stage_runner_supports_real_provider_context(tmp_path: Path)
     assert translation_stage is not None
     assert translation_stage["payload"]["provider_mode"] == "real"
     assert translation_stage["payload"]["model_name"] == "demo-model"
-    assert translation_stage["payload"]["literal_text_layer_produced"] is True
-    assert translation_stage["payload"]["tts_text_layer_produced"] is False
     assert translation_stage["payload"]["sanitizer_summary"]["sanitized_line_count"] == 2
     assert translation_stage["payload"]["sanitizer_summary"]["action_counts"]["strip_code_fence"] == 2
     assert translation_stage["payload"]["retry_attempted"] is False
@@ -307,7 +296,7 @@ def test_translation_stage_runner_records_retry_audit_fields_after_provider_reco
     translated_lines = runner.run(_make_source_lines())
     translation_stage = state_manager.get_stage("translation")
 
-    assert [line.literal_cn_text for line in translated_lines] == [
+    assert [line.cn_text for line in translated_lines] == [
         "CN_RETRY:Welcome back.",
         "CN_RETRY:We are assembling a draft scaffold.",
     ]
@@ -351,7 +340,7 @@ def test_translation_stage_runner_runtime_fallback_is_explicit_and_auditable(tmp
     translated_lines = runner.run(_make_source_lines())
     translation_stage = state_manager.get_stage("translation")
 
-    assert [line.literal_cn_text for line in translated_lines] == [
+    assert [line.cn_text for line in translated_lines] == [
         "CN:Welcome back.",
         "CN:We are assembling a draft scaffold.",
     ]
@@ -429,10 +418,6 @@ def test_alignment_stage_runner_matches_existing_behavior(tmp_path: Path) -> Non
     assert alignment_stage["payload"]["retry_candidate"] is None
     assert alignment_stage["payload"]["final_error_type"] is None
     assert alignment_stage["payload"]["final_error_message"] is None
-    assert alignment_stage["payload"]["literal_text_layer_produced"] is True
-    assert alignment_stage["payload"]["tts_text_layer_produced"] is True
-    assert alignment_stage["payload"]["text_layer_summary"]["literal_block_count"] == 1
-    assert alignment_stage["payload"]["text_layer_summary"]["tts_block_count"] == 1
     assert alignment_stage["payload"]["artifact_paths"]
     assert alignment_stage["payload"]["reused_artifacts"] == []
     assert alignment_stage["payload"]["restore_reason"] is None

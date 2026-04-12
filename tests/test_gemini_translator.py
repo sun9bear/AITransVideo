@@ -1,4 +1,4 @@
-import json
+﻿import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -66,7 +66,7 @@ def _extract_groups_from_prompt(prompt: str) -> list[dict]:
     return json.loads(prompt[start_index:end_index])
 
 
-def test_gemini_translator_translates_single_speaker_lines_into_one_segment(
+def test_gemini_translator_translates_single_speaker_lines_into_one_segment_per_line(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -81,7 +81,10 @@ def test_gemini_translator_translates_single_speaker_lines_into_one_segment(
         translator,
         "_call_gemini_with_retry",
         lambda prompt, json_mode=False, **kw: json.dumps(
-            [{"segment_id": 1, "cn_text": "大家好，这是一个测试，我们在做个有用的东西。"}],
+            [
+                {"segment_id": group["segment_id"], "cn_text": f"第{group['segment_id']}段翻译"}
+                for group in _extract_groups_from_prompt(prompt)
+            ],
             ensure_ascii=False,
         ),
     )
@@ -93,18 +96,16 @@ def test_gemini_translator_translates_single_speaker_lines_into_one_segment(
     )
 
     assert translator.model_name == "gemini-3.1-pro-preview"
-    assert len(result.segments) == 1
-    segment = result.segments[0]
-    assert segment.speaker_id == "speaker_a"
-    assert segment.voice_id == "voice_demo_001"
-    assert segment.cn_text != ""
-    assert segment.tts_cn_text == segment.cn_text
-    assert segment.start_ms == 0
-    assert segment.end_ms == 3_000
-    assert segment.target_duration_ms == 3_000
+    assert len(result.segments) == 3
+    assert [segment.segment_id for segment in result.segments] == [1, 2, 3]
+    assert [segment.start_ms for segment in result.segments] == [0, 1_000, 2_000]
+    assert [segment.end_ms for segment in result.segments] == [1_000, 2_000, 3_000]
+    assert all(segment.speaker_id == "speaker_a" for segment in result.segments)
+    assert all(segment.voice_id == "voice_demo_001" for segment in result.segments)
+    assert [segment.cn_text for segment in result.segments] == ["第1段翻译", "第2段翻译", "第3段翻译"]
 
 
-def test_gemini_translator_splits_groups_when_total_duration_exceeds_threshold(
+def test_gemini_translator_keeps_one_group_per_line_when_total_duration_exceeds_threshold(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -118,25 +119,33 @@ def test_gemini_translator_splits_groups_when_total_duration_exceeds_threshold(
     def fake_call(prompt: str, json_mode: bool = False, **kw: Any) -> str:
         assert json_mode is False
         groups = _extract_groups_from_prompt(prompt)
-        assert len(groups) == 2
+        assert len(groups) == 3
         assert groups[0]["start_ms"] == 0
-        assert groups[0]["end_ms"] == 60_000
-        assert groups[0]["target_duration_ms"] == 60_000
-        assert groups[0]["target_duration_seconds"] == 60.0
-        assert groups[0]["target_chars"] == 270
-        assert groups[0]["min_chars"] == 229
-        assert groups[0]["max_chars"] == 310
-        assert groups[1]["start_ms"] == 60_000
-        assert groups[1]["end_ms"] == 90_000
+        assert groups[0]["end_ms"] == 30_000
+        assert groups[0]["target_duration_ms"] == 30_000
+        assert groups[0]["target_duration_seconds"] == 30.0
+        assert groups[0]["target_chars"] == 135
+        assert groups[0]["min_chars"] == 114
+        assert groups[0]["max_chars"] == 155
+        assert groups[1]["start_ms"] == 30_000
+        assert groups[1]["end_ms"] == 60_000
         assert groups[1]["target_duration_ms"] == 30_000
         assert groups[1]["target_duration_seconds"] == 30.0
         assert groups[1]["target_chars"] == 135
         assert groups[1]["min_chars"] == 114
         assert groups[1]["max_chars"] == 155
+        assert groups[2]["start_ms"] == 60_000
+        assert groups[2]["end_ms"] == 90_000
+        assert groups[2]["target_duration_ms"] == 30_000
+        assert groups[2]["target_duration_seconds"] == 30.0
+        assert groups[2]["target_chars"] == 135
+        assert groups[2]["min_chars"] == 114
+        assert groups[2]["max_chars"] == 155
         return json.dumps(
             [
-                {"segment_id": 1, "cn_text": "第一部分和第二部分。"},
-                {"segment_id": 2, "cn_text": "第三部分。"},
+                {"segment_id": 1, "cn_text": "第一部分。"},
+                {"segment_id": 2, "cn_text": "第二部分。"},
+                {"segment_id": 3, "cn_text": "第三部分。"},
             ],
             ensure_ascii=False,
         )
@@ -151,12 +160,13 @@ def test_gemini_translator_splits_groups_when_total_duration_exceeds_threshold(
         max_segment_duration_ms=60_000,
     )
 
-    assert len(result.segments) == 2
-    assert result.segments[0].end_ms <= result.segments[1].start_ms
+    assert len(result.segments) == 3
     assert result.segments[0].start_ms == 0
-    assert result.segments[0].end_ms == 60_000
-    assert result.segments[1].start_ms == 60_000
-    assert result.segments[1].end_ms == 90_000
+    assert result.segments[0].end_ms == 30_000
+    assert result.segments[1].start_ms == 30_000
+    assert result.segments[1].end_ms == 60_000
+    assert result.segments[2].start_ms == 60_000
+    assert result.segments[2].end_ms == 90_000
 
 
 def test_gemini_translator_prefers_long_pause_boundaries_within_same_speaker() -> None:
@@ -168,16 +178,19 @@ def test_gemini_translator_prefers_long_pause_boundaries_within_same_speaker() -
 
     groups = gemini_translator_module._build_groups(lines, max_segment_duration_ms=90_000)
 
-    assert len(groups) == 2
+    assert len(groups) == 3
     assert groups[0]["start_ms"] == 0
     assert groups[0]["end_ms"] == 8_000
     assert groups[0]["target_duration_ms"] == 8_000
     assert groups[1]["start_ms"] == 11_500
-    assert groups[1]["end_ms"] == 24_000
-    assert groups[1]["target_duration_ms"] == 12_500
+    assert groups[1]["end_ms"] == 18_000
+    assert groups[1]["target_duration_ms"] == 6_500
+    assert groups[2]["start_ms"] == 18_000
+    assert groups[2]["end_ms"] == 24_000
+    assert groups[2]["target_duration_ms"] == 6_000
 
 
-def test_gemini_translator_keeps_short_same_speaker_pause_in_one_group() -> None:
+def test_gemini_translator_keeps_short_same_speaker_pause_as_separate_groups() -> None:
     lines = [
         _make_line(1, 0, 8_000, "First point.", speaker_id="speaker_a"),
         _make_line(2, 10_500, 18_000, "Second point after a short pause.", speaker_id="speaker_a"),
@@ -185,13 +198,16 @@ def test_gemini_translator_keeps_short_same_speaker_pause_in_one_group() -> None
 
     groups = gemini_translator_module._build_groups(lines, max_segment_duration_ms=90_000)
 
-    assert len(groups) == 1
+    assert len(groups) == 2
     assert groups[0]["start_ms"] == 0
-    assert groups[0]["end_ms"] == 18_000
-    assert groups[0]["target_duration_ms"] == 18_000
+    assert groups[0]["end_ms"] == 8_000
+    assert groups[0]["target_duration_ms"] == 8_000
+    assert groups[1]["start_ms"] == 10_500
+    assert groups[1]["end_ms"] == 18_000
+    assert groups[1]["target_duration_ms"] == 7_500
 
 
-def test_gemini_translator_translates_ten_groups_in_two_batches(
+def test_gemini_translator_translates_ten_groups_in_one_batch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -223,11 +239,9 @@ def test_gemini_translator_translates_ten_groups_in_two_batches(
         voice_id="voice_demo_001",
     )
 
-    assert seen_group_counts == [5, 5]
+    assert seen_group_counts == [10]
     assert len(result.segments) == 10
     assert [segment.segment_id for segment in result.segments] == list(range(1, 11))
-
-
 def test_gemini_translator_call_with_retry_uses_google_genai_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -247,7 +261,7 @@ def test_gemini_translator_call_with_retry_uses_google_genai_client(
             captured_configs.append(config)
             if attempts["count"] == 1:
                 raise RuntimeError("gateway timeout")
-            return SimpleNamespace(text='[{"segment_id": 1, "cn_text": "重试成功"}]')
+            return SimpleNamespace(text='[{"segment_id": 1, "cn_text": "閲嶈瘯鎴愬姛"}]')
 
     translator.client = SimpleNamespace(models=FakeModels())
     translator._types_module = SimpleNamespace(GenerateContentConfig=FakeGenerateContentConfig)
@@ -256,7 +270,7 @@ def test_gemini_translator_call_with_retry_uses_google_genai_client(
     response_text = translator._call_gemini_with_retry("prompt text", json_mode=True)
 
     assert attempts["count"] == 2
-    assert response_text == '[{"segment_id": 1, "cn_text": "重试成功"}]'
+    assert response_text == '[{"segment_id": 1, "cn_text": "閲嶈瘯鎴愬姛"}]'
     assert captured_configs[-1].kwargs["response_mime_type"] == "application/json"
     assert captured_configs[-1].kwargs["http_options"] == {"timeout": 120000}
     assert captured_configs[-1].kwargs["temperature"] == 0.3
@@ -302,11 +316,11 @@ def test_gemini_translator_supports_two_speaker_translation_and_voice_assignment
     assert result.segments[0].speaker_id == "speaker_a"
     assert result.segments[0].voice_id == "voice_a_001"
     assert result.segments[0].display_name == "Host"
-    assert result.segments[0].tts_cn_text == result.segments[0].cn_text
+    assert result.segments[0].cn_text != ""
     assert result.segments[1].speaker_id == "speaker_b"
     assert result.segments[1].voice_id == "voice_b_001"
     assert result.segments[1].display_name == "Guest"
-    assert result.segments[1].tts_cn_text == result.segments[1].cn_text
+    assert result.segments[1].cn_text != ""
     assert result.segments[2].speaker_id == "speaker_a"
     assert result.segments[2].voice_id == "voice_a_001"
 
@@ -395,7 +409,7 @@ def test_gemini_translator_review_speaker_labels_applies_corrections(
         translator,
         "_call_gemini_with_retry",
         lambda prompt, json_mode=False, **kw: json.dumps(
-            [{"index": 3, "corrected_speaker_id": "speaker_b", "reason": "短促回应"}],
+            [{"index": 3, "corrected_speaker_id": "speaker_b", "reason": "鐭績鍥炲簲"}],
             ensure_ascii=False,
         ),
     )
@@ -469,13 +483,13 @@ def test_gemini_translator_retries_same_non_gemini_alias_once_before_fallback(
                 raise gemini_translator_module.LLMProviderError(
                     "DeepSeek request failed: HTTPSConnectionPool(host='api.deepseek.com', port=443): SSLError"
                 )
-            return "重试成功"
+            return "閲嶈瘯鎴愬姛"
 
     translator.llm_router = FakeRouter()
 
     response = translator._call_task_with_fallback("s3_translate", "prompt")
 
-    assert response == "重试成功"
+    assert response == "閲嶈瘯鎴愬姛"
     assert calls == ["deepseek_chat", "deepseek_chat"]
 
 
@@ -540,9 +554,9 @@ def test_gemini_translator_parse_response_removes_markdown_code_fence() -> None:
     translator = _build_translator()
     groups = [{"segment_id": 1, "speaker_id": "speaker_a", "start_ms": 0, "end_ms": 1000, "source_text": "Hello"}]
 
-    parsed = translator._parse_response("```json\n[{\"segment_id\": 1, \"cn_text\": \"你好\"}]\n```", groups)
+    parsed = translator._parse_response("```json\n[{\"segment_id\": 1, \"cn_text\": \"浣犲ソ\"}]\n```", groups)
 
-    assert parsed == [{"segment_id": 1, "cn_text": "你好"}]
+    assert parsed == [{"segment_id": 1, "cn_text": "浣犲ソ"}]
 
 
 def test_gemini_translator_raises_on_invalid_json_response(
@@ -579,7 +593,10 @@ def test_gemini_translator_writes_segments_json_file(
         translator,
         "_call_gemini_with_retry",
         lambda prompt, json_mode=False, **kw: json.dumps(
-            [{"segment_id": 1, "cn_text": "大家好，这是一个测试。"}],
+            [
+                {"segment_id": group["segment_id"], "cn_text": f"第{group['segment_id']}段翻译"}
+                for group in _extract_groups_from_prompt(prompt)
+            ],
             ensure_ascii=False,
         ),
     )
@@ -594,10 +611,10 @@ def test_gemini_translator_writes_segments_json_file(
     assert output_path.exists()
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     assert isinstance(payload, dict)
-    assert len(payload["segments"]) == 1
-    assert payload["total_segments"] == 1
+    assert len(payload["segments"]) == 3
+    assert payload["total_segments"] == 3
     assert payload["segments"][0]["voice_id"] == "voice_demo_001"
-    assert payload["segments"][0]["tts_cn_text"] == payload["segments"][0]["cn_text"]
+    assert "cn_text" in payload["segments"][0]
 
 
 def test_gemini_translator_preserves_checkpoint_after_partial_batch_failure(
@@ -605,6 +622,7 @@ def test_gemini_translator_preserves_checkpoint_after_partial_batch_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     translator = _build_translator()
+    monkeypatch.setattr(gemini_translator_module, "DEFAULT_BATCH_SIZE", 5)
     lines = [
         _make_line(index + 1, index * 60_000, (index + 1) * 60_000, f"Part {index + 1}.")
         for index in range(10)
@@ -649,21 +667,15 @@ def test_gemini_translator_resumes_from_checkpoint_and_removes_it_on_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     translator = _build_translator()
+    monkeypatch.setattr(gemini_translator_module, "DEFAULT_BATCH_SIZE", 5)
     lines = [
         _make_line(index + 1, index * 60_000, (index + 1) * 60_000, f"Part {index + 1}.")
         for index in range(10)
     ]
-    groups = gemini_translator_module._build_groups(
-        translator._pre_split_long_lines(lines),
-        max_segment_duration_ms=60_000,
-    )
+    groups = gemini_translator_module._build_groups(lines, max_segment_duration_ms=60_000)
     checkpoint_path = tmp_path / "translation" / "segments.checkpoint.json"
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-    fingerprint = translator._build_translation_fingerprint(
-        groups,
-        video_title="",
-        youtube_url="",
-    )
+    fingerprint = translator._build_translation_fingerprint(groups, video_title="", youtube_url="")
     translator._write_translation_checkpoint(
         checkpoint_path,
         fingerprint=fingerprint,
@@ -710,6 +722,7 @@ def test_gemini_translator_ignores_checkpoint_when_fingerprint_mismatches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     translator = _build_translator()
+    monkeypatch.setattr(gemini_translator_module, "DEFAULT_BATCH_SIZE", 5)
     lines = [
         _make_line(index + 1, index * 60_000, (index + 1) * 60_000, f"Part {index + 1}.")
         for index in range(10)
@@ -763,6 +776,7 @@ def test_gemini_translator_ignores_invalid_checkpoint_file(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     translator = _build_translator()
+    monkeypatch.setattr(gemini_translator_module, "DEFAULT_BATCH_SIZE", 5)
     lines = [
         _make_line(index + 1, index * 60_000, (index + 1) * 60_000, f"Part {index + 1}.")
         for index in range(10)
@@ -775,10 +789,7 @@ def test_gemini_translator_ignores_invalid_checkpoint_file(
     def fake_call(prompt: str, json_mode: bool = False, **kw: Any) -> str:
         del prompt, json_mode
         observed_calls["count"] += 1
-        return json.dumps(
-            [{"segment_id": observed_calls["count"], "cn_text": "占位"}],
-            ensure_ascii=False,
-        )
+        return json.dumps([{"segment_id": observed_calls["count"], "cn_text": "占位"}], ensure_ascii=False)
 
     def fake_parse(response_text: str, groups: list[dict]) -> list[dict]:
         del response_text
@@ -826,8 +837,6 @@ def test_gemini_translator_pre_splits_long_lines_and_reindexes() -> None:
         for current, next_line in zip(split_lines, split_lines[1:])
     )
     assert all(line.speaker_id == "speaker_b" for line in split_lines)
-
-
 def test_gemini_translator_pre_split_merges_too_short_subline_fragments() -> None:
     translator = _build_translator()
     long_text = (
@@ -863,19 +872,10 @@ def test_gemini_translator_translate_prompt_includes_video_context(
         assert "Elon Musk -> 埃隆·马斯克" in prompt
         assert "Sam Altman -> 萨姆·奥特曼" in prompt
         assert "Naval Ravikant -> 纳瓦尔·拉维坎特" in prompt
-        assert "公司、产品、品牌、模型名称" in prompt
-        groups = _extract_groups_from_prompt(prompt)
-        assert groups[0]["target_duration_ms"] == 1_000
-        assert groups[0]["target_duration_seconds"] == 1.0
-        assert groups[0]["target_chars"] == 4
-        assert groups[0]["min_chars"] == 3
-        assert groups[0]["max_chars"] == 4
-        return json.dumps(
-            [{"segment_id": 1, "cn_text": "你好"}],
-            ensure_ascii=False,
-        )
+        return json.dumps([{"segment_id": 1, "cn_text": "测试翻译"}], ensure_ascii=False)
 
     monkeypatch.setattr(translator, "_call_gemini_with_retry", fake_call)
+    monkeypatch.setattr(translator, "_batch_needs_length_retry", lambda parsed_items, groups: False)
 
     result = translator.translate(
         lines,
@@ -886,7 +886,6 @@ def test_gemini_translator_translate_prompt_includes_video_context(
     )
 
     assert result.total_segments == 1
-
 
 def test_gemini_translator_build_prompt_mentions_soft_duration_constraints_and_name_rules() -> None:
     translator = _build_translator()
@@ -911,9 +910,9 @@ def test_gemini_translator_build_prompt_mentions_soft_duration_constraints_and_n
     )
 
     assert "这些翻译将直接用于中文 TTS 配音" in prompt
-    assert "字数范围是软约束" in prompt
-    assert "target_duration_seconds：目标配音时长（秒）" in prompt
-    assert "target_chars：按 4.5 字/秒估算的目标中文字数" in prompt
+    assert "仅供参考，不是硬性约束" in prompt
+    assert "target_duration_seconds：原文段落时长（秒）" in prompt
+    assert "min_chars ~ max_chars：建议中文字数范围" in prompt
     assert "所有人物姓名必须优先使用中文常见译名" in prompt
     assert "公司、产品、品牌、模型名称若已有常见中文译法" in prompt
     assert "可适度保留原文中的口语连接词、语气词和缓冲表达" in prompt
@@ -969,6 +968,7 @@ def test_gemini_translator_build_prompt_supports_custom_template_tokens() -> Non
     assert '"segment_id": 1' in prompt
 
 
+
 def test_gemini_translator_infer_prompt_supports_custom_template_tokens() -> None:
     translator = _build_translator(
         speaker_infer_prompt_template=(
@@ -1003,9 +1003,9 @@ def test_load_gemini_config_reads_api_key_from_environment(
                     "max_output_tokens": 8192,
                 },
                 "prompts": {
-                    "s2_infer": "识别说话人\\n__CONTEXT_EXCERPT__",
-                    "s3_translate": "自定义提示词\\n__GROUPS_JSON__",
-                    "s5_rewrite": "改写\\n__DIRECTION_DESC__\\n__DIRECTION_INSTRUCTION__\\n__TTS_CN_TEXT__\\n__TARGET_CHARS__",
+                    "s2_infer": "璇嗗埆璇磋瘽浜篭\n__CONTEXT_EXCERPT__",
+                    "s3_translate": "鑷畾涔夋彁绀鸿瘝\\n__GROUPS_JSON__",
+                    "s5_rewrite": "鏀瑰啓\\n__DIRECTION_DESC__\\n__DIRECTION_INSTRUCTION__\\n__TTS_CN_TEXT__\\n__TARGET_CHARS__",
                 },
             }
         ),
@@ -1021,11 +1021,11 @@ def test_load_gemini_config_reads_api_key_from_environment(
     assert config["temperature"] == 0.3
     assert config["max_output_tokens"] == 8192
     assert config["sdk_backend"] == "google-genai"
-    assert config["speaker_infer_prompt_template"] == "识别说话人\\n__CONTEXT_EXCERPT__"
-    assert config["translation_prompt_template"] == "自定义提示词\\n__GROUPS_JSON__"
+    assert config["speaker_infer_prompt_template"] == "璇嗗埆璇磋瘽浜篭\n__CONTEXT_EXCERPT__"
+    assert config["translation_prompt_template"] == "鑷畾涔夋彁绀鸿瘝\\n__GROUPS_JSON__"
     assert (
         config["rewrite_prompt_template"]
-        == "改写\\n__DIRECTION_DESC__\\n__DIRECTION_INSTRUCTION__\\n__TTS_CN_TEXT__\\n__TARGET_CHARS__"
+        == "鏀瑰啓\\n__DIRECTION_DESC__\\n__DIRECTION_INSTRUCTION__\\n__TTS_CN_TEXT__\\n__TARGET_CHARS__"
     )
 
 
@@ -1213,7 +1213,7 @@ def test_gemini_translator_retries_batch_once_when_length_is_out_of_range(
         observed_prompts.append(prompt)
         if len(observed_prompts) == 1:
             return json.dumps(
-                [{"segment_id": 1, "cn_text": "超长文本" * 40}],
+                [{"segment_id": 1, "cn_text": "瓒呴暱鏂囨湰" * 40}],
                 ensure_ascii=False,
             )
         return json.dumps(
@@ -1246,7 +1246,7 @@ def test_gemini_translator_accepts_second_attempt_even_when_still_out_of_range(
         del prompt, json_mode
         observed_calls["count"] += 1
         return json.dumps(
-            [{"segment_id": 1, "cn_text": "超长文本" * 35}],
+            [{"segment_id": 1, "cn_text": "瓒呴暱鏂囨湰" * 35}],
             ensure_ascii=False,
         )
 

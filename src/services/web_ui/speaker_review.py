@@ -126,7 +126,6 @@ def _load_transcript_review_items(project_dir: Path) -> list[dict[str, object]]:
                 "display_name": display_name,
                 "source_text": _normalize_optional_text(raw_line.get("source_text")) or "",
                 "cn_text": "",
-                "tts_cn_text": "",
                 "tts_audio_path": None,
                 "aligned_audio_path": None,
                 "alignment_method": "",
@@ -170,11 +169,8 @@ def _load_translation_review_items(project_dir: Path) -> list[dict[str, object]]
         translation_override = translation_segments.get(str(item.get("segment_id")))
         if isinstance(translation_override, dict):
             cn_text = _normalize_optional_text(translation_override.get("cn_text"))
-            tts_cn_text = _normalize_optional_text(translation_override.get("tts_cn_text"))
             if cn_text is not None:
                 item["cn_text"] = cn_text
-            if tts_cn_text is not None:
-                item["tts_cn_text"] = tts_cn_text
             item["translation_confirmed"] = bool(translation_override.get("translation_confirmed"))
             item["rewrite_requested"] = bool(translation_override.get("rewrite_requested"))
             item["review_updated_at"] = _normalize_optional_text(translation_override.get("updated_at")) or ""
@@ -241,11 +237,6 @@ def _normalize_translation_review_submission(
             or _normalize_optional_text(raw_segment.get("cn_text"))
             or ""
         )
-        tts_cn_text = (
-            _normalize_optional_text(submitted_entry.get("tts_cn_text"))
-            or _normalize_optional_text(raw_segment.get("tts_cn_text"))
-            or cn_text
-        )
 
         normalized_segments[segment_id] = {
             "segment_id": raw_segment_id,
@@ -253,7 +244,6 @@ def _normalize_translation_review_submission(
             "display_name": _normalize_optional_text(raw_segment.get("display_name")) or "",
             "source_text": _normalize_optional_text(raw_segment.get("source_text")) or "",
             "cn_text": cn_text,
-            "tts_cn_text": tts_cn_text,
             "target_duration_ms": int(raw_segment.get("target_duration_ms") or 0),
             "rewrite_count": int(raw_segment.get("rewrite_count") or 0),
             "needs_review": bool(raw_segment.get("needs_review")),

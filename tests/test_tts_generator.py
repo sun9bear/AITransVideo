@@ -22,7 +22,6 @@ def _build_segment(
     start_ms: int = 0,
     end_ms: int = 1_000,
     cn_text: str = "测试中文配音",
-    tts_cn_text: str | None = None,
     voice_id: str = "voice_demo_001",
 ) -> DubbingSegment:
     return DubbingSegment(
@@ -35,7 +34,6 @@ def _build_segment(
         target_duration_ms=end_ms - start_ms,
         source_text="Demo English text.",
         cn_text=cn_text,
-        tts_cn_text=cn_text if tts_cn_text is None else tts_cn_text,
     )
 
 
@@ -238,7 +236,7 @@ def test_tts_generator_decodes_hex_audio_and_writes_expected_wav_bytes(
     assert len(AudioSegment.from_wav(result.audio_path)) > 0
 
 
-def test_tts_generator_prefers_tts_cn_text_over_cn_text(
+def test_tts_generator_uses_cn_text(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -257,8 +255,7 @@ def test_tts_generator_prefers_tts_cn_text_over_cn_text(
     )
     segment = _build_segment(
         segment_id=1,
-        cn_text="字幕文本",
-        tts_cn_text="配音文本",
+        cn_text="配音文本",
     )
 
     TTSGenerator(TTSConfig(api_key="secret")).generate_all(

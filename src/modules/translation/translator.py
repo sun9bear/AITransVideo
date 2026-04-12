@@ -68,7 +68,7 @@ class TranslationPipeline:
     def merge_batch(self, lines: list[SubtitleLine], translated_texts: list[str]) -> list[SubtitleLine]:
         merged_lines: list[SubtitleLine] = []
         for line, translated_text in zip(lines, translated_texts):
-            literal_cn_text = translated_text.strip()
+            cn_text = translated_text.strip()
             merged_lines.append(
                 SubtitleLine(
                     index=line.index,
@@ -77,8 +77,7 @@ class TranslationPipeline:
                     speaker_id=line.speaker_id,
                     speaker_name=line.speaker_name,
                     en_text=line.en_text,
-                    cn_text=literal_cn_text,
-                    literal_cn_text=literal_cn_text,
+                    cn_text=cn_text,
                 )
             )
         return merged_lines

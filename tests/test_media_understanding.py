@@ -87,8 +87,6 @@ def test_attributed_transcript_normalizer_converts_to_subtitle_lines() -> None:
     assert subtitle_lines[0].speaker_name == "Host"
     assert subtitle_lines[0].en_text == "Welcome back."
     assert subtitle_lines[0].cn_text == ""
-    assert subtitle_lines[0].literal_cn_text == ""
-    assert subtitle_lines[0].tts_cn_text == ""
 
 
 def test_mock_media_understanding_provider_satisfies_protocol() -> None:

@@ -166,8 +166,6 @@ def build_stage_execution_summary(stage_snapshot: dict[str, Any] | None) -> dict
             "transcript_extraction_used": payload.get("transcript_extraction_used"),
             "attributed_transcript_normalized": payload.get("attributed_transcript_normalized"),
             "subtitle_line_bridge_applied": payload.get("subtitle_line_bridge_applied"),
-            "literal_text_layer_produced": payload.get("literal_text_layer_produced"),
-            "tts_text_layer_produced": payload.get("tts_text_layer_produced"),
             "text_layer_summary": payload.get("text_layer_summary"),
             "artifact_count": artifact_payload.get("file_count"),
         }

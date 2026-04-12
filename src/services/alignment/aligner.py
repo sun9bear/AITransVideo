@@ -212,7 +212,7 @@ class SegmentAligner:
         if self.rewriter is None or self.tts_generator is None:
             return None
 
-        best_tts_cn_text = (segment.tts_cn_text or segment.cn_text).strip()
+        best_cn_text = segment.cn_text.strip()
         best_tts_audio_path = segment.tts_audio_path
         best_actual_duration_ms = int(current_actual_duration_ms)
         best_alignment_ratio = (
@@ -229,7 +229,7 @@ class SegmentAligner:
         )
 
         for rewrite_attempt in range(self.max_rewrites):
-            current_text = (segment.tts_cn_text or segment.cn_text).strip()
+            current_text = segment.cn_text.strip()
             rewrite_direction = "shrink" if current_actual_duration_ms > target_duration_ms else "expand"
             if not self._can_consume_post_tts_budget(segment):
                 break
@@ -251,7 +251,7 @@ class SegmentAligner:
             if not self._consume_post_tts_budget(segment):
                 break
             attempted_rewrite = True
-            segment.tts_cn_text = rewritten_text
+            segment.cn_text = rewritten_text
             segment.rewrite_count += 1
             tts_result = self.tts_generator._generate_one(
                 segment,
@@ -272,7 +272,7 @@ class SegmentAligner:
                 attempt_index=rewrite_attempt,
             )
             if new_score < best_score:
-                best_tts_cn_text = rewritten_text
+                best_cn_text = rewritten_text
                 best_tts_audio_path = tts_result.audio_path
                 best_actual_duration_ms = new_actual_duration_ms
                 best_alignment_ratio = segment.alignment_ratio
@@ -304,7 +304,7 @@ class SegmentAligner:
             current_actual_duration_ms = new_actual_duration_ms
 
         if attempted_rewrite:
-            segment.tts_cn_text = best_tts_cn_text
+            segment.cn_text = best_cn_text
             segment.tts_audio_path = best_tts_audio_path
             segment.actual_duration_ms = best_actual_duration_ms
             segment.alignment_ratio = best_alignment_ratio

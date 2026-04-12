@@ -719,9 +719,9 @@ class TTSGenerator:
         output_root = Path(output_dir).resolve(strict=False)
         output_root.mkdir(parents=True, exist_ok=True)
 
-        tts_text = _normalize_optional_text(segment.tts_cn_text) or _normalize_optional_text(segment.cn_text)
+        tts_text = _normalize_optional_text(segment.cn_text)
         if tts_text is None:
-            raise TTSGenerationError("segment.tts_cn_text or segment.cn_text is required.")
+            raise TTSGenerationError("segment.cn_text is required.")
 
         # V3-5: record billed chars per provider's billing unit.
         # Frozen V3 doc: MiniMax and CosyVoice bill "1 汉字 = 2 计费字符".

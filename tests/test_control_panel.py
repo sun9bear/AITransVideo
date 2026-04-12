@@ -48,7 +48,7 @@ def test_sanitize_workbench_run_keeps_project_state_summary() -> None:
                 "draft": {
                     "status": "done",
                     "execution_mode": "fresh_write",
-                    "literal_text_layer_produced": True,
+                    "cn_text_produced": True,
                 }
             },
             "source_context": {

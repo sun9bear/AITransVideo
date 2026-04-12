@@ -93,7 +93,6 @@ export async function approveTranslationReview(
         segmentId,
         {
           cn_text: entry.cnText,
-          tts_cn_text: entry.ttsCnText,
           translation_confirmed: entry.translationConfirmed,
           rewrite_requested: entry.rewriteRequested,
           updated_at: entry.updatedAt,
@@ -253,7 +252,6 @@ function toTranslationReviewResource(
     sourceText: item.source_text,
     speakerId: item.speaker_id,
     translationConfirmed: Boolean(item.translation_confirmed),
-    ttsCnText: item.tts_cn_text || item.cn_text,
     startMs: typeof item.start_ms === 'number' ? item.start_ms : 0,
     endMs: typeof item.end_ms === 'number' ? item.end_ms : 0,
   }))

@@ -42,8 +42,8 @@ class SemanticBlockBuilder:
 
     def _should_split(self, current_group: list[SubtitleLine], next_line: SubtitleLine) -> bool:
         previous_line = current_group[-1]
-        previous_text = previous_line.get_preferred_cn_text_for_tts()
-        next_text = next_line.get_preferred_cn_text_for_tts()
+        previous_text = previous_line.cn_text
+        next_text = next_line.cn_text
         if next_line.speaker_id != previous_line.speaker_id:
             return True
 
@@ -61,7 +61,7 @@ class SemanticBlockBuilder:
         if merged_duration_ms > self.config.max_block_duration_ms:
             return True
 
-        merged_chars = sum(len(item.get_preferred_cn_text_for_tts().strip()) for item in current_group) + len(next_text.strip())
+        merged_chars = sum(len(item.cn_text.strip()) for item in current_group) + len(next_text.strip())
         if merged_chars > self.config.max_chars_per_block:
             return True
 
@@ -70,24 +70,11 @@ class SemanticBlockBuilder:
     def _make_block(self, group: list[SubtitleLine], block_number: int) -> SemanticBlock:
         first_line = group[0]
         last_line = group[-1]
-        merged_literal_cn_text = "".join(
-            line.get_literal_cn_text().strip()
+        merged_cn_text = "".join(
+            line.cn_text.strip()
             for line in group
-            if line.get_literal_cn_text().strip()
+            if line.cn_text.strip()
         )
-        has_tts_layer = any(line.tts_cn_text.strip() for line in group)
-        merged_tts_cn_text = ""
-        if has_tts_layer:
-            merged_tts_cn_text = "".join(
-                line.get_preferred_cn_text_for_tts().strip()
-                for line in group
-                if line.get_preferred_cn_text_for_tts().strip()
-            )
-
-        # Transitional compatibility: keep merged_cn_text mirroring the block text
-        # selected for downstream spoken-text consumers until they move to the
-        # explicit merged_literal_cn_text / merged_tts_cn_text layers.
-        merged_cn_text = merged_tts_cn_text or merged_literal_cn_text
 
         return SemanticBlock(
             block_id=f"block_{block_number:04d}",
@@ -98,8 +85,6 @@ class SemanticBlockBuilder:
             last_end_ms=last_line.end_ms,
             target_duration_ms=max(0, last_line.end_ms - first_line.start_ms),
             merged_cn_text=merged_cn_text,
-            merged_literal_cn_text=merged_literal_cn_text,
-            merged_tts_cn_text=merged_tts_cn_text,
-            cn_line_texts=[line.get_preferred_cn_text_for_caption() for line in group],
+            cn_line_texts=[line.cn_text for line in group],
             status=BlockStatus.PENDING.value,
         )

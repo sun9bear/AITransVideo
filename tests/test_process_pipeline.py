@@ -660,7 +660,7 @@ def _write_segments_cache(project_dir: Path, segments: list[DubbingSegment]) -> 
                         "target_duration_ms": segment.target_duration_ms,
                         "source_text": segment.source_text,
                         "cn_text": segment.cn_text,
-                        "tts_cn_text": segment.tts_cn_text,
+                        "cn_text": segment.cn_text,
                         "tts_audio_path": segment.tts_audio_path,
                         "aligned_audio_path": segment.aligned_audio_path,
                         "actual_duration_ms": segment.actual_duration_ms,
@@ -771,7 +771,6 @@ def _make_single_speaker_segments() -> list[DubbingSegment]:
             target_duration_ms=1_000,
             source_text="Hello there. This is a test.",
             cn_text="大家好，这是一个测试。",
-            tts_cn_text="大家好，这是一个测试。",
         ),
         DubbingSegment(
             segment_id=2,
@@ -783,7 +782,6 @@ def _make_single_speaker_segments() -> list[DubbingSegment]:
             target_duration_ms=1_000,
             source_text="Thanks for watching.",
             cn_text="感谢观看。",
-            tts_cn_text="感谢观看。",
         ),
     ]
 
@@ -806,7 +804,6 @@ def _make_dual_speaker_segments(
             target_duration_ms=1_000,
             source_text="Welcome back to the show.",
             cn_text="欢迎回到节目。",
-            tts_cn_text="欢迎回到节目。",
         ),
         DubbingSegment(
             segment_id=2,
@@ -818,7 +815,6 @@ def _make_dual_speaker_segments(
             target_duration_ms=1_000,
             source_text="Thanks for having me.",
             cn_text="感谢邀请。",
-            tts_cn_text="感谢邀请。",
         ),
     ]
 
@@ -839,7 +835,6 @@ def _make_many_single_speaker_segments(count: int) -> list[DubbingSegment]:
                 target_duration_ms=1_000,
                 source_text=f"Source {index + 1}",
                 cn_text=f"Cache text {index + 1}",
-                tts_cn_text=f"Cache text {index + 1}",
             )
         )
     return segments
@@ -2021,7 +2016,6 @@ def test_process_pipeline_preserves_voice_metadata_in_segments_snapshot(tmp_path
                 target_duration_ms=1_000,
                 source_text="Hello there.",
                 cn_text="你好。",
-                tts_cn_text="你好。",
                 voice_description="沉稳低沉的中年男性主持声线",
                 gender="male",
                 age_group="middle",
@@ -2434,7 +2428,7 @@ def test_process_pipeline_explicit_project_dir_reuses_approved_translation_revie
                 str(segment.segment_id): {
                     "segment_id": segment.segment_id,
                     "cn_text": segment.cn_text,
-                    "tts_cn_text": segment.tts_cn_text,
+                    "cn_text": segment.cn_text,
                 }
                 for segment in cached_segments
             },
@@ -3335,7 +3329,7 @@ def test_process_pipeline_calibrates_tts_duration_and_writes_rewrite_snapshot(
                     ).resolve(strict=False)
                 )
                 if segment.segment_id == 1:
-                    segment.tts_cn_text = "更适合配音的文本。"
+                    segment.cn_text = "更适合配音的文本。"
                     segment.rewrite_count = 1
                     segment.alignment_method = "rewrite_dsp"
                     segment.actual_duration_ms = 950
@@ -3392,7 +3386,7 @@ def test_process_pipeline_calibrates_tts_duration_and_writes_rewrite_snapshot(
         ("感谢观看。", 1000),
     ]
     assert segments_payload["segments"][0]["cn_text"] == "大家好，这是一个测试。"
-    assert segments_payload["segments"][0]["tts_cn_text"] == "更适合配音的文本。"
+    assert segments_payload["segments"][0]["cn_text"] == "更适合配音的文本。"
     assert segments_payload["segments"][0]["rewrite_count"] == 1
     assert segments_payload["segments"][0]["alignment_method"] == "rewrite_dsp"
 
@@ -3410,7 +3404,6 @@ def test_process_pipeline_calibrates_tts_duration_by_speaker_when_enough_samples
             target_duration_ms=1_000,
             source_text="A1",
             cn_text="甲甲甲甲",
-            tts_cn_text="甲甲甲甲",
             actual_duration_ms=1_000,
         ),
         DubbingSegment(
@@ -3423,7 +3416,6 @@ def test_process_pipeline_calibrates_tts_duration_by_speaker_when_enough_samples
             target_duration_ms=1_000,
             source_text="A2",
             cn_text="甲甲甲甲甲甲",
-            tts_cn_text="甲甲甲甲甲甲",
             actual_duration_ms=1_000,
         ),
         DubbingSegment(
@@ -3436,7 +3428,6 @@ def test_process_pipeline_calibrates_tts_duration_by_speaker_when_enough_samples
             target_duration_ms=1_000,
             source_text="A3",
             cn_text="甲甲甲甲甲",
-            tts_cn_text="甲甲甲甲甲",
             actual_duration_ms=1_000,
         ),
         DubbingSegment(
@@ -3449,7 +3440,6 @@ def test_process_pipeline_calibrates_tts_duration_by_speaker_when_enough_samples
             target_duration_ms=1_000,
             source_text="B1",
             cn_text="乙乙",
-            tts_cn_text="乙乙",
             actual_duration_ms=1_000,
         ),
         DubbingSegment(
@@ -3462,7 +3452,6 @@ def test_process_pipeline_calibrates_tts_duration_by_speaker_when_enough_samples
             target_duration_ms=1_000,
             source_text="B2",
             cn_text="乙乙乙",
-            tts_cn_text="乙乙乙",
             actual_duration_ms=1_000,
         ),
         DubbingSegment(
@@ -3475,7 +3464,6 @@ def test_process_pipeline_calibrates_tts_duration_by_speaker_when_enough_samples
             target_duration_ms=1_000,
             source_text="B3",
             cn_text="乙乙乙乙",
-            tts_cn_text="乙乙乙乙",
             actual_duration_ms=1_000,
         ),
     ]
@@ -3503,7 +3491,6 @@ def test_process_pipeline_attempts_semantic_split_repair_for_failed_long_segment
         target_duration_ms=60_000,
         source_text="First sentence. Second sentence. Third sentence. Fourth sentence.",
         cn_text="第一句。第二句。第三句。第四句。",
-        tts_cn_text="第一句。第二句。第三句。第四句。",
         tts_audio_path=str(long_tts_path.resolve(strict=False)),
         aligned_audio_path=str(long_tts_path.resolve(strict=False)),
         actual_duration_ms=78_000,
@@ -3516,7 +3503,7 @@ def test_process_pipeline_attempts_semantic_split_repair_for_failed_long_segment
 
     class FakeTTSGenerator:
         def generate_all(self, segments: list[DubbingSegment], output_dir: str) -> list[TTSResult]:
-            observed["tts_texts"] = [segment.tts_cn_text for segment in segments]
+            observed["tts_texts"] = [segment.cn_text for segment in segments]
             results: list[TTSResult] = []
             for segment in segments:
                 audio_path = _export_silent_wav(
@@ -3603,7 +3590,6 @@ def test_process_pipeline_skips_semantic_split_repair_without_clear_sentence_bou
         target_duration_ms=60_000,
         source_text="This is one very long sentence without a clean split point " * 3,
         cn_text="这是一个没有明确句号而且非常长的句子这是一个没有明确句号而且非常长的句子这是一个没有明确句号而且非常长的句子",
-        tts_cn_text="这是一个没有明确句号而且非常长的句子这是一个没有明确句号而且非常长的句子这是一个没有明确句号而且非常长的句子",
         tts_audio_path=str(long_tts_path.resolve(strict=False)),
         aligned_audio_path=str(long_tts_path.resolve(strict=False)),
         actual_duration_ms=70_000,
@@ -3641,7 +3627,6 @@ def test_process_pipeline_keeps_semantic_split_when_one_child_still_requires_for
         target_duration_ms=60_000,
         source_text="First sentence. Second sentence. Third sentence. Fourth sentence.",
         cn_text="第一句。第二句。第三句。第四句。",
-        tts_cn_text="第一句。第二句。第三句。第四句。",
         tts_audio_path=str(long_tts_path.resolve(strict=False)),
         aligned_audio_path=str(long_tts_path.resolve(strict=False)),
         actual_duration_ms=78_000,
@@ -3658,7 +3643,7 @@ def test_process_pipeline_keeps_semantic_split_when_one_child_still_requires_for
 
     class FakeTTSGenerator:
         def generate_all(self, segments: list[DubbingSegment], output_dir: str) -> list[TTSResult]:
-            observed["tts_calls"].append([(segment.segment_id, segment.tts_cn_text) for segment in segments])
+            observed["tts_calls"].append([(segment.segment_id, segment.cn_text) for segment in segments])
             results: list[TTSResult] = []
             for segment in segments:
                 if len(segments) == 1:
@@ -3686,14 +3671,14 @@ def test_process_pipeline_keeps_semantic_split_when_one_child_still_requires_for
     class FakeRewriter:
         def rewrite_for_duration(
             self,
-            tts_cn_text: str,
+            cn_text: str,
             actual_duration_ms: int,
             target_duration_ms: int,
             source_text: str = "",
             speaker_id: str | None = None,
         ) -> str:
             observed["rewrite_texts"].append(
-                (tts_cn_text, actual_duration_ms, target_duration_ms, source_text, speaker_id)
+                (cn_text, actual_duration_ms, target_duration_ms, source_text, speaker_id)
             )
             return "第三句。第四句。精简版。"
 
@@ -3785,7 +3770,6 @@ def test_process_pipeline_presplits_long_overshoot_segment_before_alignment(
         target_duration_ms=60_000,
         source_text="First sentence. Second sentence. Third sentence. Fourth sentence.",
         cn_text="第一句。第二句。第三句。第四句。",
-        tts_cn_text="第一句。第二句。第三句。第四句。",
         tts_audio_path=str(long_tts_path.resolve(strict=False)),
         actual_duration_ms=78_000,
         alignment_ratio=1.3,
@@ -3799,7 +3783,7 @@ def test_process_pipeline_presplits_long_overshoot_segment_before_alignment(
 
     class FakeTTSGenerator:
         def generate_all(self, segments: list[DubbingSegment], output_dir: str) -> list[TTSResult]:
-            observed["tts_calls"].append([(segment.segment_id, segment.tts_cn_text) for segment in segments])
+            observed["tts_calls"].append([(segment.segment_id, segment.cn_text) for segment in segments])
             results: list[TTSResult] = []
             for item in segments:
                 audio_path = _export_silent_wav(
@@ -3849,7 +3833,6 @@ def test_process_pipeline_does_not_presplit_long_segment_below_overshoot_thresho
         target_duration_ms=60_000,
         source_text="First sentence. Second sentence. Third sentence. Fourth sentence.",
         cn_text="第一句。第二句。第三句。第四句。",
-        tts_cn_text="第一句。第二句。第三句。第四句。",
         actual_duration_ms=77_000,
         alignment_ratio=77_000 / 60_000,
     )
@@ -3891,7 +3874,6 @@ def test_process_pipeline_presplits_severely_overshot_medium_long_segment_before
         target_duration_ms=30_000,
         source_text="First sentence. Second sentence. Third sentence. Fourth sentence.",
         cn_text="第一句。第二句。第三句。第四句。",
-        tts_cn_text="第一句。第二句。第三句。第四句。",
         tts_audio_path=str(long_tts_path.resolve(strict=False)),
         actual_duration_ms=43_000,
         alignment_ratio=43_000 / 30_000,
@@ -3905,7 +3887,7 @@ def test_process_pipeline_presplits_severely_overshot_medium_long_segment_before
 
     class FakeTTSGenerator:
         def generate_all(self, segments: list[DubbingSegment], output_dir: str) -> list[TTSResult]:
-            observed["tts_calls"].append([(segment.segment_id, segment.tts_cn_text) for segment in segments])
+            observed["tts_calls"].append([(segment.segment_id, segment.cn_text) for segment in segments])
             results: list[TTSResult] = []
             for item in segments:
                 audio_path = _export_silent_wav(
@@ -3953,7 +3935,6 @@ def test_process_pipeline_skips_semantic_split_repair_when_post_tts_budget_is_ex
         target_duration_ms=60_000,
         source_text="First sentence. Second sentence. Third sentence. Fourth sentence.",
         cn_text="第一句。第二句。第三句。第四句。",
-        tts_cn_text="第一句。第二句。第三句。第四句。",
         tts_audio_path=str(long_tts_path.resolve(strict=False)),
         aligned_audio_path=str(long_tts_path.resolve(strict=False)),
         actual_duration_ms=78_000,
@@ -3994,21 +3975,20 @@ def test_process_pipeline_pre_rewrites_obvious_overshoot_before_tts() -> None:
         target_duration_ms=20_000,
         source_text="Original source text",
         cn_text="a" * 120,
-        tts_cn_text="a" * 120,
     )
     observed: dict[str, object] = {}
 
     class FakeRewriter:
         def rewrite_for_duration(
             self,
-            tts_cn_text: str,
+            cn_text: str,
             actual_duration_ms: int,
             target_duration_ms: int,
             source_text: str = "",
             speaker_id: str | None = None,
         ) -> str:
             observed["args"] = (
-                tts_cn_text,
+                cn_text,
                 actual_duration_ms,
                 target_duration_ms,
                 source_text,
@@ -4025,7 +4005,7 @@ def test_process_pipeline_pre_rewrites_obvious_overshoot_before_tts() -> None:
 
     assert rewritten_count == 1
     assert observed["args"] == ("a" * 120, 26_666, 20_000, "Original source text", "speaker_a")
-    assert segment.tts_cn_text == "shortened text"
+    assert segment.cn_text == "shortened text"
     assert segment.rewrite_count == 1
 
 
@@ -4042,19 +4022,18 @@ def test_process_pipeline_skips_pre_tts_rewrite_below_overshoot_threshold() -> N
         target_duration_ms=20_000,
         source_text="Original source text",
         cn_text="a" * 100,
-        tts_cn_text="a" * 100,
     )
 
     class FakeRewriter:
         def rewrite_for_duration(
             self,
-            tts_cn_text: str,
+            cn_text: str,
             actual_duration_ms: int,
             target_duration_ms: int,
             source_text: str = "",
             speaker_id: str | None = None,
         ) -> str:
-            del tts_cn_text, actual_duration_ms, target_duration_ms, source_text, speaker_id
+            del cn_text, actual_duration_ms, target_duration_ms, source_text, speaker_id
             raise AssertionError("rewrite_for_duration should not be called below the pre-TTS threshold")
 
     rewritten_count = pipeline._pre_rewrite_obvious_overshoot_segments_before_tts(
@@ -4065,5 +4044,5 @@ def test_process_pipeline_skips_pre_tts_rewrite_below_overshoot_threshold() -> N
     )
 
     assert rewritten_count == 0
-    assert segment.tts_cn_text == "a" * 100
+    assert segment.cn_text == "a" * 100
     assert segment.rewrite_count == 0

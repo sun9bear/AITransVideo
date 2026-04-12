@@ -278,9 +278,6 @@ def test_output_dispatcher_preserves_explicit_segment_id_and_alignment_method(tm
         alignment_method: str
         needs_review: bool
 
-        def get_preferred_cn_text_for_caption(self) -> str:
-            return self.merged_cn_text
-
     class FakeEditorBackend:
         def __init__(self) -> None:
             self.outputs = []

@@ -142,7 +142,6 @@ export interface ApiWebUiReviewItem {
   display_name: string
   source_text: string
   cn_text: string
-  tts_cn_text: string
   speaker_confirmed: boolean
   transcript_confirmed: boolean
   translation_confirmed: boolean

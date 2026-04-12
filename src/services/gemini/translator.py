@@ -151,7 +151,6 @@ class DubbingSegment:
     target_duration_ms: int
     source_text: str
     cn_text: str
-    tts_cn_text: str = ""
     tts_audio_path: str | None = None
     aligned_audio_path: str | None = None
     actual_duration_ms: int = 0
@@ -338,7 +337,6 @@ class GeminiTranslator:
                     target_duration_ms=max(0, end_ms - start_ms),
                     source_text=str(group["source_text"]),
                     cn_text=normalized_cn_text,
-                    tts_cn_text=normalized_cn_text,
                 )
             )
 

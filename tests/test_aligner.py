@@ -36,8 +36,7 @@ def _build_segment(
         end_ms=end_ms,
         target_duration_ms=end_ms - start_ms,
         source_text="Demo source text.",
-        cn_text="demo cn text",
-        tts_cn_text="demo tts cn text",
+        cn_text="demo tts cn text",
         tts_audio_path=str(audio_path.resolve(strict=False)),
         actual_duration_ms=measured_duration_ms if actual_duration_ms is None else actual_duration_ms,
     )
@@ -142,6 +141,7 @@ def test_aligner_surfaces_missing_ffmpeg(tmp_path: Path, monkeypatch: pytest.Mon
         del args, kwargs
         raise FileNotFoundError("ffmpeg")
 
+    monkeypatch.setattr(aligner_module, "_measure_wav_duration_ms", lambda path: 17_000)
     monkeypatch.setattr(aligner_module.subprocess, "run", missing_ffmpeg)
 
     with pytest.raises(AlignmentError, match="Please install ffmpeg"):
@@ -162,6 +162,7 @@ def test_aligner_builds_chained_atempo_filter_for_extreme_ratio(
         shutil.copy2(input_path, Path(command[-1]))
         return subprocess.CompletedProcess(command, 0, "", "")
 
+    monkeypatch.setattr(aligner_module, "_measure_wav_duration_ms", lambda path: 1_000)
     monkeypatch.setattr(aligner_module.subprocess, "run", fake_run)
 
     output_path = SegmentAligner()._dsp_stretch(
@@ -216,14 +217,14 @@ def test_aligner_uses_rewrite_direct_when_rewrite_brings_duration_within_ideal_r
     class FakeRewriter:
         def rewrite_for_duration(
             self,
-            tts_cn_text: str,
+            cn_text: str,
             actual_duration_ms: int,
             target_duration_ms: int,
             source_text: str = "",
             speaker_id: str | None = None,
         ) -> str:
             assert speaker_id == "speaker_a"
-            assert tts_cn_text == "demo tts cn text"
+            assert cn_text == "demo tts cn text"
             assert actual_duration_ms == 13_000
             assert target_duration_ms == 10_000
             assert source_text == "Demo source text."
@@ -246,7 +247,7 @@ def test_aligner_uses_rewrite_direct_when_rewrite_brings_duration_within_ideal_r
 
     assert aligned.alignment_method == "rewrite_direct"
     assert aligned.needs_review is False
-    assert segment.tts_cn_text == "rewrite direct text"
+    assert segment.cn_text == "rewrite direct text"
     assert segment.rewrite_count == 1
 
 
@@ -259,14 +260,14 @@ def test_aligner_uses_rewrite_dsp_when_rewrite_brings_duration_within_dsp_range(
     class FakeRewriter:
         def rewrite_for_duration(
             self,
-            tts_cn_text: str,
+            cn_text: str,
             actual_duration_ms: int,
             target_duration_ms: int,
             source_text: str = "",
             speaker_id: str | None = None,
         ) -> str:
             assert speaker_id == "speaker_a"
-            del tts_cn_text, target_duration_ms
+            del cn_text, target_duration_ms
             assert actual_duration_ms == 25_000
             assert source_text == "Demo source text."
             return "rewrite dsp text"
@@ -288,7 +289,7 @@ def test_aligner_uses_rewrite_dsp_when_rewrite_brings_duration_within_dsp_range(
 
     assert aligned.alignment_method == "rewrite_dsp"
     assert aligned.needs_review is False
-    assert segment.tts_cn_text == "rewrite dsp text"
+    assert segment.cn_text == "rewrite dsp text"
     assert segment.rewrite_count == 1
 
 
@@ -302,13 +303,13 @@ def test_aligner_falls_back_to_force_dsp_after_max_rewrites(
     class FakeRewriter:
         def rewrite_for_duration(
             self,
-            tts_cn_text: str,
+            cn_text: str,
             actual_duration_ms: int,
             target_duration_ms: int,
             source_text: str = "",
             speaker_id: str | None = None,
         ) -> str:
-            del tts_cn_text, actual_duration_ms, target_duration_ms, source_text, speaker_id
+            del cn_text, actual_duration_ms, target_duration_ms, source_text, speaker_id
             rewrite_calls.append(1)
             return f"rewrite attempt {len(rewrite_calls)}"
 
@@ -353,13 +354,13 @@ def test_aligner_restores_best_rewrite_candidate_before_force_dsp_when_later_att
 
         def rewrite_for_duration(
             self,
-            tts_cn_text: str,
+            cn_text: str,
             actual_duration_ms: int,
             target_duration_ms: int,
             source_text: str = "",
             speaker_id: str | None = None,
         ) -> str:
-            del tts_cn_text, actual_duration_ms, target_duration_ms, source_text, speaker_id
+            del cn_text, actual_duration_ms, target_duration_ms, source_text, speaker_id
             return next(self._texts)
 
     class FakeTTSGenerator:
@@ -390,7 +391,7 @@ def test_aligner_restores_best_rewrite_candidate_before_force_dsp_when_later_att
     assert aligned.alignment_method == "force_dsp"
     assert aligned.needs_review is True
     assert segment.rewrite_count == 2
-    assert segment.tts_cn_text == "rewrite attempt 1"
+    assert segment.cn_text == "rewrite attempt 1"
     assert segment.tts_audio_path is not None
     assert Path(segment.tts_audio_path).name == "segment_001_rewrite_1.wav"
 
@@ -415,7 +416,7 @@ def test_aligner_skips_rewrite_for_short_targets(tmp_path: Path) -> None:
     class FailingRewriter:
         def rewrite_for_duration(
             self,
-            tts_cn_text: str,
+            cn_text: str,
             actual_duration_ms: int,
             target_duration_ms: int,
             source_text: str = "",
@@ -439,7 +440,7 @@ def test_aligner_skips_rewrite_for_extreme_ratio(tmp_path: Path) -> None:
     class FailingRewriter:
         def rewrite_for_duration(
             self,
-            tts_cn_text: str,
+            cn_text: str,
             actual_duration_ms: int,
             target_duration_ms: int,
             source_text: str = "",
@@ -469,7 +470,7 @@ def test_aligner_attempts_rewrite_for_long_severe_underflow_segments(tmp_path: P
     class FakeRewriter:
         def rewrite_for_duration_with_profile(
             self,
-            tts_cn_text: str,
+            cn_text: str,
             *,
             actual_duration_ms: int,
             target_duration_ms: int,
@@ -479,7 +480,7 @@ def test_aligner_attempts_rewrite_for_long_severe_underflow_segments(tmp_path: P
             preferred_max_ratio: float | None = None,
         ) -> str:
             observed["args"] = {
-                "tts_cn_text": tts_cn_text,
+                "cn_text": cn_text,
                 "actual_duration_ms": actual_duration_ms,
                 "target_duration_ms": target_duration_ms,
                 "source_text": source_text,
@@ -509,10 +510,10 @@ def test_aligner_attempts_rewrite_for_long_severe_underflow_segments(tmp_path: P
 
     assert aligned.alignment_method == "rewrite_dsp"
     assert aligned.needs_review is False
-    assert segment.tts_cn_text == "expanded rewrite"
+    assert segment.cn_text == "expanded rewrite"
     assert segment.rewrite_count == 1
     assert observed["args"] == {
-        "tts_cn_text": "demo tts cn text",
+        "cn_text": "demo tts cn text",
         "actual_duration_ms": 20_000,
         "target_duration_ms": 40_000,
         "source_text": "Demo source text.",
@@ -554,7 +555,7 @@ def test_aligner_requires_second_rewrite_when_shrink_overshoots_past_lower_bound
 
         def rewrite_for_duration_with_profile(
             self,
-            tts_cn_text: str,
+            cn_text: str,
             *,
             actual_duration_ms: int,
             target_duration_ms: int,
@@ -563,7 +564,7 @@ def test_aligner_requires_second_rewrite_when_shrink_overshoots_past_lower_bound
             preferred_min_ratio: float | None = None,
             preferred_max_ratio: float | None = None,
         ) -> str:
-            del tts_cn_text, source_text, speaker_id, preferred_min_ratio, preferred_max_ratio
+            del cn_text, source_text, speaker_id, preferred_min_ratio, preferred_max_ratio
             observed_calls.append((actual_duration_ms, target_duration_ms))
             return next(self._texts)
 
@@ -608,7 +609,7 @@ def test_aligner_requires_second_rewrite_when_expand_overshoots_upper_bound(
 
         def rewrite_for_duration_with_profile(
             self,
-            tts_cn_text: str,
+            cn_text: str,
             *,
             actual_duration_ms: int,
             target_duration_ms: int,
@@ -617,7 +618,7 @@ def test_aligner_requires_second_rewrite_when_expand_overshoots_upper_bound(
             preferred_min_ratio: float | None = None,
             preferred_max_ratio: float | None = None,
         ) -> str:
-            del tts_cn_text, source_text, speaker_id, preferred_min_ratio, preferred_max_ratio
+            del cn_text, source_text, speaker_id, preferred_min_ratio, preferred_max_ratio
             observed_calls.append((actual_duration_ms, target_duration_ms))
             return next(self._texts)
 

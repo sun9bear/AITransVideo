@@ -154,11 +154,9 @@ class OutputDispatcher:
 
     @staticmethod
     def _resolve_block_text(block: object) -> str:
-        preferred_text = getattr(block, "get_preferred_cn_text_for_caption", None)
-        if callable(preferred_text):
-            resolved = preferred_text()
-            if isinstance(resolved, str) and resolved.strip():
-                return resolved
+        merged = getattr(block, "merged_cn_text", None)
+        if isinstance(merged, str) and merged.strip():
+            return merged
 
         merged_cn_text = getattr(block, "merged_cn_text", "")
         if isinstance(merged_cn_text, str):

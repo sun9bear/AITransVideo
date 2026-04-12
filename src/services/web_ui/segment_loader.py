@@ -53,7 +53,6 @@ def _load_segment_items(project_dir: Path) -> list[dict[str, object]]:
                 "display_name": _normalize_optional_text(item.get("display_name")) or "Unknown speaker",
                 "source_text": _normalize_optional_text(item.get("source_text")) or "",
                 "cn_text": _normalize_optional_text(item.get("cn_text")) or "",
-                "tts_cn_text": _normalize_optional_text(item.get("tts_cn_text")) or "",
                 "tts_audio_path": _resolve_project_file_path(project_dir, item.get("tts_audio_path")),
                 "aligned_audio_path": _resolve_project_file_path(project_dir, item.get("aligned_audio_path")),
                 "alignment_method": _normalize_optional_text(item.get("alignment_method")) or "",
