@@ -26,7 +26,10 @@ from database import get_db
 from models import Job, User
 from proxy import proxy_request
 from quota import check_quota, reserve_quota, settle_job_quota, TERMINAL_STATUSES
-from credits_service import estimate_credits, shadow_reserve, shadow_release, shadow_capture, shadow_safe
+from credits_service import (
+    ensure_free_bucket, estimate_credits,
+    shadow_reserve, shadow_release, shadow_capture, shadow_safe,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -52,8 +55,8 @@ def _error_response(
 
 # --- Plan catalog ---
 # The authoritative plan gate facts now live in ``plan_catalog.py``. The module-level
-# ``PLAN_CATALOG`` name is preserved as a backward-compatible view so existing imports
-# (including ``tests/test_gateway_job_policy.py``) keep working without change.
+# ``PLAN_CATALOG`` name is a frozen import-time snapshot preserved for backward-compatible
+# test imports. Request-time code calls the live functions directly.
 from plan_catalog import get_legacy_plan_gate_dict  # noqa: E402
 
 PLAN_CATALOG = get_legacy_plan_gate_dict()
@@ -317,7 +320,7 @@ async def intercept_create_job(
     # capabilities to Plus-tier (Studio, higher duration/concurrency) without
     # changing plan_code. Falls back to PLAN_CATALOG for non-trial users.
     from plan_catalog import get_effective_plan_gate
-    plan_info = get_effective_plan_gate(user) if user else PLAN_CATALOG.get("free", PLAN_CATALOG["free"])
+    plan_info = get_effective_plan_gate(user) if user else get_legacy_plan_gate_dict().get("free", {})
 
     # --- 1. Validate service_mode ---
     if user and not is_admin:
@@ -485,17 +488,18 @@ async def intercept_create_job(
                         job.estimated_minutes = est_min
                         # Shadow reserve: consume quality_tier from policy (single truth source)
                         _quality_tier = policy.get("quality_tier", "standard")
+                        # Always write basic metering snapshot (even if duration unknown)
                         shadow_credits = estimate_credits(
                             est_min, service_mode=service_mode, quality_tier=_quality_tier,
                         )
+                        job.metering_snapshot = {
+                            "credits_estimated": shadow_credits if shadow_credits > 0 else None,
+                            "service_mode": service_mode,
+                            "quality_tier": _quality_tier,
+                            "tts_provider": policy.get("tts_provider"),
+                            "tts_model": policy.get("tts_model"),
+                        }
                         if shadow_credits > 0:
-                            job.metering_snapshot = {
-                                "credits_estimated": shadow_credits,
-                                "service_mode": service_mode,
-                                "quality_tier": _quality_tier,
-                                "tts_provider": policy.get("tts_provider"),
-                                "tts_model": policy.get("tts_model"),
-                            }
                             await shadow_safe(
                                 shadow_reserve,
                                 db, user_id=user.id, job_id=job_id,
@@ -664,6 +668,40 @@ async def update_source_metadata(
             # estimated_minutes is preserved as the original pre-download estimate
             # so we can later compare estimate vs. actual for calibration.
             job.actual_minutes = dur_float / 60.0
+
+            # V3 fix: if create-time had no estimated_duration, do late shadow reserve now
+            # Idempotency: check ledger for existing reserve before doing another one
+            snap = job.metering_snapshot or {}
+            if dur_float > 0:
+                try:
+                    from models import CreditsLedger
+                    existing_reserve = await db.execute(
+                        select(CreditsLedger).where(
+                            CreditsLedger.related_job_id == job_id,
+                            CreditsLedger.direction == "reserve",
+                        ).limit(1)
+                    )
+                    already_reserved = existing_reserve.scalar_one_or_none() is not None
+
+                    if not already_reserved:
+                        _quality_tier = snap.get("quality_tier", "standard")
+                        _svc_mode = snap.get("service_mode") or job.service_mode or "express"
+                        late_credits = estimate_credits(
+                            dur_float / 60.0, service_mode=_svc_mode, quality_tier=_quality_tier,
+                        )
+                        if late_credits > 0:
+                            snap["credits_estimated"] = late_credits
+                            job.metering_snapshot = dict(snap)
+                            await shadow_safe(ensure_free_bucket, db, job.user_id)
+                            await shadow_safe(
+                                shadow_reserve,
+                                db, user_id=job.user_id, job_id=job_id,
+                                estimated_credits=late_credits,
+                                service_mode=_svc_mode,
+                            )
+                            logger.info("V3 late shadow reserve for %s: %d credits", job_id, late_credits)
+                except Exception as _e:
+                    logger.warning("V3 late shadow reserve failed for %s: %s (non-fatal)", job_id, _e)
         except (TypeError, ValueError):
             pass
     if title is not None:

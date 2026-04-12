@@ -30,6 +30,7 @@ sys.modules.setdefault("database", _fake_database)
 from credits_service import (
     BUCKET_PRIORITY,
     DEBIT_RATES,
+    GRANT_AMOUNTS,
     estimate_credits,
     shadow_grant,
     shadow_reserve,
@@ -38,6 +39,9 @@ from credits_service import (
     shadow_rollback,
     shadow_safe,
     _pick_buckets_by_priority,
+    _get_runtime_debit_rates,
+    _get_runtime_grant_amounts,
+    _get_runtime_bucket_priority,
 )
 from models import CreditsBucket, CreditsLedger
 
@@ -592,3 +596,114 @@ class TestShadowFailureIsolation:
         db.execute = AsyncMock(side_effect=RuntimeError("timeout"))
         entry = _run(shadow_rollback(db, user_id=uuid.uuid4(), bucket_id=uuid.uuid4()))
         assert entry is None
+
+
+# ===================================================================
+# Runtime pricing derivation
+# ===================================================================
+
+
+class TestRuntimeDebitRates:
+    """Verify estimate_credits uses runtime debit rates when available."""
+
+    def test_estimate_credits_uses_runtime_debit_rate(self):
+        """Monkeypatch runtime pricing with a custom rate, verify estimate changes."""
+        from pricing_schema import build_default_pricing_payload
+
+        payload = build_default_pricing_payload()
+        # Override express.standard: 10 -> 20
+        payload.credits.debit_rates["express.standard"] = 20
+
+        fake_mod = types.ModuleType("pricing_runtime")
+        fake_mod.get_runtime_pricing = lambda **kw: payload
+        with patch.dict(sys.modules, {"pricing_runtime": fake_mod}):
+            result = estimate_credits(5.0, "express", "standard")
+            # 5 * 20 = 100 (not 5 * 10 = 50)
+            assert result == 100
+
+    def test_estimate_credits_fallback_on_runtime_error(self):
+        """When runtime pricing raises, estimate_credits falls back to frozen constants."""
+        def boom(**kw):
+            raise RuntimeError("pricing unavailable")
+
+        with patch.dict(sys.modules, {"pricing_runtime": types.ModuleType("pricing_runtime")}):
+            sys.modules["pricing_runtime"].get_runtime_pricing = boom
+            # Should fall back to frozen DEBIT_RATES: express.standard = 10
+            assert estimate_credits(5.0, "express", "standard") == 50
+
+    def test_get_runtime_debit_rates_parses_dotted_keys(self):
+        """_get_runtime_debit_rates converts 'mode.tier' strings to tuple keys."""
+        from pricing_schema import build_default_pricing_payload
+
+        payload = build_default_pricing_payload()
+        with patch.dict(sys.modules, {"pricing_runtime": types.ModuleType("pricing_runtime")}):
+            sys.modules["pricing_runtime"].get_runtime_pricing = lambda **kw: payload
+            rates = _get_runtime_debit_rates()
+            assert rates[("express", "standard")] == 10
+            assert rates[("studio", "flagship")] == 50
+
+
+class TestRuntimeGrantAmounts:
+    """Verify _get_runtime_grant_amounts derives correctly from default payload."""
+
+    def test_grant_amounts_from_runtime(self):
+        """Verify free, trial, plus, pro amounts all derived from runtime payload."""
+        from pricing_schema import build_default_pricing_payload
+
+        payload = build_default_pricing_payload()
+        with patch.dict(sys.modules, {"pricing_runtime": types.ModuleType("pricing_runtime")}):
+            sys.modules["pricing_runtime"].get_runtime_pricing = lambda **kw: payload
+            grants = _get_runtime_grant_amounts()
+            assert grants["free"] == 500   # credits.free_grant_credits
+            assert grants["trial"] == 300  # trial.grant_credits
+            assert grants["plus"] == 3500  # plans.plus.monthly_grant_credits
+            assert grants["pro"] == 12000  # plans.pro.monthly_grant_credits
+            # "free" plan has no monthly_grant_credits, should not overwrite
+            assert "free" in grants  # still present from credits config
+
+    def test_grant_amounts_with_custom_values(self):
+        """Override grant amounts in runtime payload, verify derivation."""
+        from pricing_schema import build_default_pricing_payload
+
+        payload = build_default_pricing_payload()
+        payload.credits.free_grant_credits = 999
+        payload.trial.grant_credits = 777
+
+        with patch.dict(sys.modules, {"pricing_runtime": types.ModuleType("pricing_runtime")}):
+            sys.modules["pricing_runtime"].get_runtime_pricing = lambda **kw: payload
+            grants = _get_runtime_grant_amounts()
+            assert grants["free"] == 999
+            assert grants["trial"] == 777
+
+    def test_grant_amounts_fallback_on_error(self):
+        """When runtime pricing raises, falls back to frozen GRANT_AMOUNTS."""
+        def boom(**kw):
+            raise RuntimeError("pricing unavailable")
+
+        with patch.dict(sys.modules, {"pricing_runtime": types.ModuleType("pricing_runtime")}):
+            sys.modules["pricing_runtime"].get_runtime_pricing = boom
+            grants = _get_runtime_grant_amounts()
+            assert grants == GRANT_AMOUNTS
+
+
+class TestRuntimeBucketPriority:
+    """Verify _get_runtime_bucket_priority derives from runtime pricing."""
+
+    def test_bucket_priority_from_runtime(self):
+        from pricing_schema import build_default_pricing_payload
+
+        payload = build_default_pricing_payload()
+        with patch.dict(sys.modules, {"pricing_runtime": types.ModuleType("pricing_runtime")}):
+            sys.modules["pricing_runtime"].get_runtime_pricing = lambda **kw: payload
+            bp = _get_runtime_bucket_priority()
+            assert bp["express"] == ["free", "subscription", "topup", "trial"]
+            assert bp["studio"] == ["trial", "subscription", "topup", "free"]
+
+    def test_bucket_priority_fallback_on_error(self):
+        def boom(**kw):
+            raise RuntimeError("pricing unavailable")
+
+        with patch.dict(sys.modules, {"pricing_runtime": types.ModuleType("pricing_runtime")}):
+            sys.modules["pricing_runtime"].get_runtime_pricing = boom
+            bp = _get_runtime_bucket_priority()
+            assert bp == BUCKET_PRIORITY

@@ -6,7 +6,18 @@ import json
 import logging
 import os
 import shutil
+import sys
 from pathlib import Path
+
+# Make src/ importable so we can reuse llm_registry (single source of truth).
+# In Docker, gateway runs in /opt/gateway/ while app code is in /opt/aivideotrans/app/src/.
+# Try multiple candidate paths; if none work, the import below will fall back gracefully.
+for _candidate in [
+    Path(__file__).resolve().parent.parent / "src",          # local dev: repo_root/src
+    Path("/opt/aivideotrans/app/src"),                       # Docker container
+]:
+    if _candidate.is_dir() and str(_candidate) not in sys.path:
+        sys.path.insert(0, str(_candidate))
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -42,7 +53,7 @@ class AdminSettings(BaseModel):
     studio_tts_provider: str = "minimax"           # Default TTS provider for studio mode
     cosyvoice_runtime_endpoint_mode: str = "international"  # CosyVoice runtime: "international" or "mainland"
     cosyvoice_offline_endpoint_mode: str = "mainland"       # CosyVoice offline: "international" or "mainland"
-    voice_clone_cost_credits: int = 500                     # Credits cost per voice clone operation
+    voice_clone_cost_credits: int = 500  # DEPRECATED: migrated to pricing_runtime. Kept for compat.
 
     @field_validator("cosyvoice_runtime_endpoint_mode", "cosyvoice_offline_endpoint_mode")
     @classmethod
@@ -84,10 +95,23 @@ def load_settings() -> AdminSettings:
 
 
 def save_settings(s: AdminSettings) -> None:
-    """Persist settings to JSON file, creating parent dirs if needed."""
+    """Persist settings to JSON file, merging with existing data.
+
+    Only overwrites the fields defined in AdminSettings.  Other keys
+    (review_prompts, prompt_models, provider_api_keys) are preserved.
+    """
     SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    # Load existing data to preserve non-AdminSettings fields
+    existing: dict = {}
+    if SETTINGS_FILE.exists():
+        try:
+            existing = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    # Merge: AdminSettings fields overwrite, other keys preserved
+    existing.update(s.model_dump())
     SETTINGS_FILE.write_text(
-        json.dumps(s.model_dump(), indent=2, ensure_ascii=False),
+        json.dumps(existing, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
     logger.info("Admin settings saved to %s", SETTINGS_FILE)
@@ -111,6 +135,533 @@ async def update_admin_settings(
     _require_admin(user)
     save_settings(body)
     return {"settings": body.model_dump()}
+
+
+# ---------------------------------------------------------------------------
+# Review prompts management
+# ---------------------------------------------------------------------------
+
+_PROMPT_KEYS = ("pass1", "pass2", "pass3", "translate", "rewrite")
+_MODE_KEYS = ("studio", "express")
+
+# ---------------------------------------------------------------------------
+# Model metadata — single source of truth from llm_registry
+# ---------------------------------------------------------------------------
+from services.llm_registry import (  # noqa: E402
+    MODEL_REGISTRY as _MODEL_REGISTRY,
+    get_available_models_for_prompt as _available_models_for_prompt,
+    get_all_models_with_status as _get_all_models_with_status,
+    invalidate_cache as _invalidate_llm_cache,
+)
+
+# Derive _ALL_MODELS from the shared registry (no second copy)
+_ALL_MODELS = [
+    {
+        "value": name,
+        "label": info["label"],
+        "cost_hint": info.get("cost_hint", ""),
+        "cost_rank": info.get("cost_rank", 99),
+        "supports_audio": info.get("supports_audio", False),
+    }
+    for name, info in _MODEL_REGISTRY.items()
+]
+
+_DEFAULT_MODELS = {
+    "studio": {"pass1": "gemini_pro", "pass2": "gemini", "pass3": "gemini_pro", "translate": "deepseek", "rewrite": "deepseek"},
+    "express": {"pass2": "gemini", "pass3": "gemini", "translate": "deepseek", "rewrite": "deepseek"},
+}
+
+_PROVIDER_KEY_ENVS = {
+    "deepseek": "DEEPSEEK_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "mimo": "MIMO_API_KEY",
+}
+
+# Gemini auth: managed by client_factory, not via provider_api_keys
+_GEMINI_AUTH_ENVS = ["GOOGLE_APPLICATION_CREDENTIALS", "VERTEX_AI_EXPRESS_KEY", "GEMINI_API_KEY"]
+
+
+def _mask_api_key(key: str) -> str:
+    """Return masked key: '****xxxx' or empty string."""
+    if not key or len(key) < 4:
+        return ""
+    return f"****{key[-4:]}"
+
+
+def _is_masked_key(value: str) -> bool:
+    """Detect if value looks like a masked key (e.g. '****abcd')."""
+    return bool(value) and value.startswith("****")
+_PROMPT_HISTORY_FILE = Path("/opt/aivideotrans/config/review_prompt_history.json")
+
+
+def _load_prompt_history() -> list[dict]:
+    """Load prompt version history."""
+    if _PROMPT_HISTORY_FILE.exists():
+        try:
+            return json.loads(_PROMPT_HISTORY_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return []
+
+
+def _save_prompt_history(history: list[dict]) -> None:
+    _PROMPT_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _PROMPT_HISTORY_FILE.write_text(
+        json.dumps(history, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+_DEFAULT_PROMPTS: dict[str, str] = {
+    "pass1": """\
+你是转录审校专家。根据音频和上下文，完成以下任务：
+
+1. **识别每个说话人的身份**：姓名和角色
+2. **纠正 ASR 的说话人标注错误**：听音频判断，标错的用 `correct_speaker` 修正
+3. **拆分混合发言段落**：如果一段音频中包含多个说话人，用 `split` 在切换点拆开，并用 `speaker_after` 标注后半段的说话人
+
+视频标题：{video_title}
+视频链接：{video_url}
+
+格式要求：
+- 姓名使用中文（如 Warren Buffett → 沃伦·巴菲特）
+- 多个未知说话人按编号区分：未知说话人1、未知说话人2
+- 保留所有已有的 speaker_id，不要删除
+- 只允许输出 `correct_speaker` 和 `split`，不要输出 `fix_text` / `merge`
+- 不要输出 gender、age_group、style（由后续音色分析阶段处理）
+
+输出 JSON，且只能输出 JSON：
+
+{{
+  "speakers": {{
+    "speaker_a": {{"name": "中文姓名", "role": "角色"}},
+    "speaker_b": {{"name": "中文姓名", "role": ""}}
+  }},
+  "corrections": [
+    {{"action": "correct_speaker", "index": 12, "to": "speaker_b", "reason": "原因"}},
+    {{"action": "split", "index": 2, "at_text": "切换点文本", "speaker_after": "speaker_a", "reason": "原因"}}
+  ]
+}}
+
+转录稿（{line_count} 行）：
+
+{transcript_body}""",
+
+    "pass2": """\
+你正在执行视频转录审校的 Pass 2。Pass 1 已经完成 speaker 识别与 speaker 纠正。
+你的唯一目标是：
+1. 修正文本文字错误
+2. 对过长段落做语义拆分
+3. 提取术语表
+
+你不是在做 speaker 重分配，不是在做音色描述，不是在做身份识别。
+
+输入信息：
+- 视频标题：{video_title}
+- 已校正 speaker 的转录文本：{transcript_body}
+- speakers 信息：{speakers_json}
+
+必须遵守的规则：
+1. 绝对不要修改任何 speaker_id
+2. 绝对不要输出 `correct_speaker`
+3. 不要输出 `merge`
+4. 只允许输出：
+   - `fix_text`
+   - `split`
+   - `glossary`
+5. `fix_text` 只修正明显 ASR 错误、重复、漏词、错词
+6. 不要改写语气，不要润色，不要重写内容
+7. 不要改变原文核心含义
+8. `split` 只用于过长段落（>60s），并且必须在自然语义断点切开
+9. 如果某段并不适合拆分，就不要强行拆分
+10. glossary 只收录稳定、值得后续翻译统一的专名、机构名、术语、人名
+
+输出 JSON，且只能输出 JSON：
+
+{{
+  "corrections": [
+    {{
+      "action": "fix_text",
+      "index": 5,
+      "old": "原错误文本",
+      "new": "修正后文本",
+      "reason": "简短说明"
+    }},
+    {{
+      "action": "split",
+      "index": 18,
+      "at_text": "建议切分点附近的文本",
+      "reason": "该段过长，需要在自然断点拆分"
+    }}
+  ],
+  "glossary": {{
+    "Berkshire Hathaway": "伯克希尔·哈撒韦",
+    "Greg Abel": "格雷格·艾贝尔"
+  }}
+}}
+
+转录稿（{line_count} 行）：
+
+{transcript_body}""",
+
+    "pass3": """\
+你正在执行视频音色画像分析的 Pass 3。
+前两个阶段已经完成 speaker 识别、speaker 纠正、文本修正与术语表提取。
+你的唯一目标是：根据每个 speaker 的代表性音频片段，生成适合 TTS 选音匹配的音色画像。
+
+你不是在做 speaker 纠正，不是在做文本修正，不是在做术语表。
+
+输入信息：
+- 视频标题：{video_title}
+- speaker 基础信息：{speakers_json}
+- 当前 speaker 列表：{speaker_ids}
+- 每个 speaker 的代表音频片段（单独提供）
+
+必须遵守的规则：
+1. 不要输出 corrections
+2. 不要输出 glossary
+3. 只输出每个 speaker 的音色画像
+4. voice_description 要面向 TTS 匹配，描述声音特征，不要写成人物背景介绍
+5. style 描述说话风格（如"专业、稳重"、"信息丰富、分析性强"）
+6. gender 只能是：male / female / unknown
+7. age_group 只能是：young / middle / elderly / unknown
+8. persona_style 尽量从以下集合中选最接近者：
+   - professional
+   - warm
+   - serious
+   - energetic
+   - calm
+9. energy_level 只能是：low / medium / high
+10. 不确定时可以输出 `unknown`，不要强猜
+
+输出 JSON，且只能输出 JSON：
+
+{{
+  "speaker_profiles": {{
+    "speaker_a": {{
+      "voice_description": "声音清晰、语速中等偏快、音高偏中高，整体专业且稳定",
+      "style": "专业、稳重",
+      "gender": "female",
+      "age_group": "middle",
+      "persona_style": "professional",
+      "energy_level": "medium"
+    }},
+    "speaker_b": {{
+      "voice_description": "声音偏低沉，语速较慢，带停顿感，整体沉稳",
+      "style": "沉稳、分析性强",
+      "gender": "male",
+      "age_group": "elderly",
+      "persona_style": "calm",
+      "energy_level": "low"
+    }}
+  }}
+}}""",
+
+    "translate": """\
+你是专业的视频配音翻译专家。任务是把英文视频转录稿翻译成自然流畅的中文口播文本。
+
+视频信息：
+- 标题：__VIDEO_TITLE__
+- 来源：__YOUTUBE_URL__
+__GLOSSARY_SECTION__
+核心目标是让中文配音时长与原英文段落时长大致一致。
+每段都标注了 target_duration_seconds，翻译时请控制中文长度使配音时长接近该目标。
+翻译结果将用于配音，要适合人声朗读，不要书面字幕腔。
+所有人物姓名必须优先使用中文常见译名。
+__SPEAKER_INSTRUCTION____STRICT_LENGTH_INSTRUCTION__
+输入（JSON数组）：
+__GROUPS_JSON__
+
+请输出JSON数组，格式如下（只输出JSON，不要markdown代码块）：
+[
+  {"segment_id": 1, "cn_text": "翻译后的中文文本"}
+]""",
+
+    "rewrite": """\
+你是专业的中文配音文本改写专家。
+
+任务：对当前文本进行__DIRECTION_DESC__，使其更适合目标配音时长。
+
+当前文本（__CURRENT_CHARS__字）：
+__TTS_CN_TEXT__
+
+英文原文（参考，不要直接翻译）：
+__SOURCE_TEXT__
+
+目标字数：约__TARGET_CHARS__字
+当前需要__DIRECTION_DESC__约__CHANGE_PCT__%
+
+要求：
+1. 保持原意不变
+2. __DIRECTION_INSTRUCTION__
+3. 保持自然口语化，适合视频配音
+4. 只输出改写后的中文文本，不要任何解释
+
+改写后的文本：""",
+}
+
+
+def _load_default_prompts() -> dict[str, str]:
+    return dict(_DEFAULT_PROMPTS)
+
+
+@router.get("/review-prompts")
+async def get_review_prompts(
+    user: User | None = Depends(get_current_user),
+) -> dict:
+    """Get current review prompt overrides + defaults + models + keys + version history."""
+    _require_admin(user)
+    full_data: dict = {}
+    if SETTINGS_FILE.exists():
+        try:
+            full_data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    prompts = full_data.get("review_prompts", {})
+    prompt_models = full_data.get("prompt_models", {})
+    provider_api_keys = full_data.get("provider_api_keys", {})
+
+    # API key status (env vars)
+    api_key_status: dict[str, bool] = {}
+    for env in _GEMINI_AUTH_ENVS:
+        api_key_status[env] = bool(os.environ.get(env, "").strip())
+    for provider, env in _PROVIDER_KEY_ENVS.items():
+        api_key_status[env] = bool(os.environ.get(env, "").strip())
+
+    # Gemini auth: check if any of the three cred sources is configured
+    gemini_configured = any(api_key_status.get(e, False) for e in _GEMINI_AUTH_ENVS)
+
+    history = _load_prompt_history()
+    return {
+        "prompts": {k: prompts.get(k, "") for k in _PROMPT_KEYS},
+        "defaults": _load_default_prompts(),
+        "models": {
+            mode: {k: prompt_models.get(mode, {}).get(k, _DEFAULT_MODELS.get(mode, {}).get(k, ""))
+                   for k in (_PROMPT_KEYS if mode == "studio" else ("pass2", "pass3", "translate", "rewrite"))}
+            for mode in _MODE_KEYS
+        },
+        "default_models": _DEFAULT_MODELS,
+        "provider_api_keys": {
+            provider: _mask_api_key(provider_api_keys.get(provider, ""))
+            for provider in _PROVIDER_KEY_ENVS
+        },
+        "api_key_status": api_key_status,
+        "gemini_configured": gemini_configured,
+        "available_models": {
+            k: _available_models_for_prompt(k) for k in _PROMPT_KEYS
+        },
+        "all_models": _get_all_models_with_status(),
+        "history": history,
+    }
+
+
+@router.post("/review-prompts")
+async def update_review_prompts(
+    body: dict,
+    user: User | None = Depends(get_current_user),
+) -> dict:
+    """Update review prompt overrides, models, and provider API keys.
+
+    Body::
+
+        {
+          "prompts": {"pass1": "...", ...},
+          "models": {"studio": {"pass1": "gemini_pro", ...}, "express": {...}},
+          "provider_api_keys": {"deepseek": "sk-xxx", ...},
+          "label": "版本标签"
+        }
+
+    Key write protocol for ``provider_api_keys``:
+    - field absent / null → keep current value
+    - "" (empty string) → clear override (revert to env var)
+    - "****xxxx" (masked) → rejected with 400
+    - non-empty string → set as new key
+    """
+    _require_admin(user)
+    incoming_prompts = body.get("prompts", {})
+    incoming_models = body.get("models")
+    incoming_keys = body.get("provider_api_keys")
+    label = body.get("label", "")
+    if not isinstance(incoming_prompts, dict):
+        raise HTTPException(status_code=400, detail="prompts must be a dict")
+
+    # Reject masked keys
+    if isinstance(incoming_keys, dict):
+        for provider, val in incoming_keys.items():
+            if isinstance(val, str) and _is_masked_key(val):
+                raise HTTPException(status_code=400, detail=f"拒绝：provider_api_keys.{provider} 包含脱敏值，请勿回传 '****...' 格式")
+
+    # Load existing settings
+    full_data: dict = {}
+    if SETTINGS_FILE.exists():
+        try:
+            full_data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    old_prompts = dict(full_data.get("review_prompts", {}))
+    old_models = dict(full_data.get("prompt_models", {}))
+
+    # Save current version to history — prompts + models, NOT keys
+    has_content = any(old_prompts.get(k) for k in _PROMPT_KEYS) or bool(old_models)
+    if has_content:
+        from datetime import datetime, timezone
+        history = _load_prompt_history()
+        history.append({
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+            "label": label or f"版本 {len(history) + 1}",
+            "prompts": {k: old_prompts.get(k, "") for k in _PROMPT_KEYS},
+            "models": old_models,
+        })
+        _save_prompt_history(history)
+
+    # Update prompt overrides
+    review_prompts = full_data.get("review_prompts", {})
+    if not isinstance(review_prompts, dict):
+        review_prompts = {}
+    for key in _PROMPT_KEYS:
+        val = incoming_prompts.get(key)
+        if val is not None:
+            if isinstance(val, str) and val.strip():
+                review_prompts[key] = val.strip()
+            else:
+                review_prompts.pop(key, None)
+    full_data["review_prompts"] = review_prompts
+
+    # Update model selections (with server-side capability validation)
+    if isinstance(incoming_models, dict):
+        _audio_only_prompts = {"pass1", "pass3"}
+        _audio_model_values = {m["value"] for m in _ALL_MODELS if m["supports_audio"]}
+        _all_model_values = {m["value"] for m in _ALL_MODELS}
+        for mode_key, mode_models in incoming_models.items():
+            if not isinstance(mode_models, dict):
+                continue
+            for prompt_key, model_val in mode_models.items():
+                if model_val and model_val not in _all_model_values:
+                    raise HTTPException(status_code=400, detail=f"未知模型: {model_val}")
+                if prompt_key in _audio_only_prompts and model_val and model_val not in _audio_model_values:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{prompt_key} 需要支持音频的模型，{model_val} 不支持音频输入",
+                    )
+        full_data["prompt_models"] = incoming_models
+
+    # Update provider API keys (keep/replace/clear protocol)
+    if isinstance(incoming_keys, dict):
+        current_keys = full_data.get("provider_api_keys", {})
+        if not isinstance(current_keys, dict):
+            current_keys = {}
+        for provider in _PROVIDER_KEY_ENVS:
+            val = incoming_keys.get(provider)
+            if val is None:
+                continue  # keep current
+            if val == "":
+                current_keys.pop(provider, None)  # clear
+            else:
+                current_keys[provider] = val  # replace
+        full_data["provider_api_keys"] = current_keys
+
+    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SETTINGS_FILE.write_text(
+        json.dumps(full_data, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    logger.info("Review prompts/models updated by admin %s", getattr(user, "email", "?"))
+
+    return {
+        "prompts": {k: review_prompts.get(k, "") for k in _PROMPT_KEYS},
+        "models": full_data.get("prompt_models", {}),
+        "history": _load_prompt_history(),
+    }
+
+
+@router.post("/model-toggle")
+async def toggle_model(
+    body: dict,
+    user: User | None = Depends(get_current_user),
+) -> dict:
+    """Enable or disable a model. Not stored in history.
+
+    Body: ``{"model": "mimo_omni", "enabled": false}``
+    """
+    _require_admin(user)
+    model_name = body.get("model", "")
+    enabled = body.get("enabled", True)
+    all_model_names = set(_MODEL_REGISTRY.keys())
+    if model_name not in all_model_names:
+        raise HTTPException(status_code=400, detail=f"未知模型: {model_name}")
+
+    # Load existing settings
+    full_data: dict = {}
+    if SETTINGS_FILE.exists():
+        try:
+            full_data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    disabled: list = full_data.get("disabled_models", [])
+    if not isinstance(disabled, list):
+        disabled = []
+
+    if enabled:
+        disabled = [m for m in disabled if m != model_name]
+    else:
+        if model_name not in disabled:
+            disabled.append(model_name)
+
+    full_data["disabled_models"] = disabled
+    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SETTINGS_FILE.write_text(
+        json.dumps(full_data, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    _invalidate_llm_cache()
+    logger.info("Model %s %s by admin %s", model_name, "enabled" if enabled else "disabled",
+                getattr(user, "email", "?"))
+    return {"all_models": _get_all_models_with_status()}
+
+
+@router.post("/review-prompts/restore")
+async def restore_review_prompts(
+    body: dict,
+    user: User | None = Depends(get_current_user),
+) -> dict:
+    """Restore prompts from a history version by index."""
+    _require_admin(user)
+    idx = body.get("index")
+    if idx is None or not isinstance(idx, int):
+        raise HTTPException(status_code=400, detail="index is required (integer)")
+
+    history = _load_prompt_history()
+    if idx < 0 or idx >= len(history):
+        raise HTTPException(status_code=404, detail=f"版本 {idx} 不存在")
+
+    version = history[idx]
+    # Restore prompts + models (if present in history), NOT keys
+    restore_body: dict = {
+        "prompts": version.get("prompts", {}),
+        "label": f"还原: {version.get('label', '')}",
+    }
+    if "models" in version:
+        restore_body["models"] = version["models"]
+    return await update_review_prompts(restore_body, user=user)
+
+
+@router.delete("/review-prompts/history/{index}")
+async def delete_prompt_history(
+    index: int,
+    user: User | None = Depends(get_current_user),
+) -> dict:
+    """Delete a specific history version."""
+    _require_admin(user)
+    history = _load_prompt_history()
+    if index < 0 or index >= len(history):
+        raise HTTPException(status_code=404, detail=f"版本 {index} 不存在")
+    deleted = history.pop(index)
+    _save_prompt_history(history)
+    logger.info("Prompt history version %d deleted by admin %s", index, getattr(user, "email", "?"))
+    return {"deleted": deleted, "history": history}
 
 
 # ---------------------------------------------------------------------------

@@ -318,9 +318,23 @@ def _preview_volcengine_voice(voice_id: str) -> dict[str, object]:
     import base64
 
     try:
-        from services.tts.volcengine_tts_provider import synthesize as volc_synthesize
+        from services.tts.volcengine_tts_provider import (
+            RESOURCE_ID_1_0,
+            RESOURCE_ID_2_0,
+            synthesize as volc_synthesize,
+        )
 
-        wav_bytes = volc_synthesize(text=_PREVIEW_SAMPLE_TEXT, voice_id=voice_id)
+        # Auto-detect resource_id from voice_id pattern:
+        # 2.0 voices: *_uranus_bigtts OR saturn_zh_* prefix
+        # 1.0 voices: everything else (*_moon_bigtts, *_mars_bigtts, ICL_zh_*)
+        is_2_0 = "uranus_bigtts" in voice_id or voice_id.startswith("saturn_zh_")
+        resource_id = RESOURCE_ID_2_0 if is_2_0 else RESOURCE_ID_1_0
+
+        wav_bytes = volc_synthesize(
+            text=_PREVIEW_SAMPLE_TEXT,
+            voice_id=voice_id,
+            resource_id=resource_id,
+        )
         if wav_bytes and len(wav_bytes) > 100:
             audio_b64 = base64.b64encode(wav_bytes).decode("ascii")
             return {"audio_base64": audio_b64, "format": "wav", "expired": False, "error": None}

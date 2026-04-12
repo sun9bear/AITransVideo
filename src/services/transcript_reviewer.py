@@ -13,27 +13,25 @@ import logging
 import os
 import re
 import subprocess
+import time
 import urllib.request
 import urllib.error
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Review model mapping — single source of truth for API model IDs
+# Model registry — import from shared llm_registry (single source of truth)
 # ---------------------------------------------------------------------------
-# Admin settings store *logical* names (gemini_pro, gemini, mimo_omni).
-# This map resolves them to real API model IDs.  If an upstream provider
-# renames a model, update ONLY this dict — no other call-site should
-# hard-code raw model ID strings.
-_MODEL_MAP: dict[str, str] = {
-    "gemini_pro": "gemini-3.1-pro-preview",   # highest quality, ~¥2.4/h audio
-    "gemini": "gemini-2.5-flash-lite",         # low cost, ~¥0.27/h audio
-    "mimo_omni": "mimo-v2-omni",               # text-only alternative
-}
-_DEFAULT_REVIEW_MODEL = "gemini_pro"  # logical name, resolved via _MODEL_MAP
+from services.llm_registry import (
+    MODEL_REGISTRY as _MODEL_REGISTRY,
+    get_api_key as _get_model_api_key,
+    get_prompt_model as _get_prompt_model,
+    resolve_model_id as _resolve_model_id_from_registry,
+    get_fallback_candidates,
+)
 
 _MIMO_OMNI_API_URL = "https://api.xiaomimimo.com/v1/chat/completions"
 
@@ -58,6 +56,7 @@ _SHORT_BACKCHANNEL_MAX_MS = 1_200
 _ANSWER_MIN_MS = 2_500
 _ANSWER_CONTINUATION_MIN_MS = 1_500
 _NO_AUTO_FLIP_IF_LONGER_THAN_MS = 2_000
+_SPEAKER_ID_PATTERN = re.compile(r"^speaker_[a-z0-9_]+$")
 
 # Gemini explicit cache requires at least 32 768 input tokens.
 # 20 min audio ≈ 38 400 tokens (32 tok/s × 1200 s), safely above the threshold.
@@ -66,14 +65,22 @@ _GEMINI_MIN_CACHE_TOKENS = 32_768
 
 
 def _resolve_model_id(logical_name: str) -> str:
-    """Resolve a logical review model name to its API model ID.
+    """Resolve a logical review model name to its API model ID."""
+    return _resolve_model_id_from_registry(logical_name)
 
-    Falls back to the default model if the name is unknown.
+
+def _create_review_client(api_key: str | None = None):
+    """Create a Gemini client for review.
+
+    Isolated as a module-level helper so tests can monkeypatch a single
+    function instead of reaching into ``google.genai`` internals.
+
+    When ``api_key`` is None, ``create_gemini_client`` uses its built-in
+    credential priority (GOOGLE_APPLICATION_CREDENTIALS → VERTEX_AI_EXPRESS_KEY
+    → GEMINI_API_KEY env var).
     """
-    if logical_name in _MODEL_MAP:
-        return _MODEL_MAP[logical_name]
-    logger.warning("[Review] Unknown review model %r, falling back to %s", logical_name, _DEFAULT_REVIEW_MODEL)
-    return _MODEL_MAP[_DEFAULT_REVIEW_MODEL]
+    from services.gemini.client_factory import create_gemini_client
+    return create_gemini_client(api_key=api_key)
 
 
 # ---------------------------------------------------------------------------
@@ -206,23 +213,37 @@ def _try_compress_audio(audio_path: Path, tmp_dir: Path | None) -> Path | None:
 
 
 def _get_review_model() -> str:
-    """Get the logical review model name from admin settings or env.
+    """Get the logical review model name — legacy compat wrapper.
 
-    Returns a logical name such as ``"gemini_pro"``, ``"gemini"``, or
-    ``"mimo_omni"``.  Use :func:`_resolve_model_id` to convert to an API
-    model ID string.
+    New code should use ``_get_prompt_model(mode, prompt_key)`` directly.
+    This wrapper exists for call-sites that haven't been migrated yet
+    (e.g. legacy_review_transcript_single_pass).
     """
-    model = os.environ.get("REVIEW_MODEL", _DEFAULT_REVIEW_MODEL)
-    # Also check admin settings file
+    return _get_prompt_model("studio", "pass1")
+
+
+def _get_admin_prompt_override(prompt_key: str) -> str | None:
+    """Load a prompt override from admin settings.
+
+    Admin can set custom prompts in admin_settings.json under the
+    ``"review_prompts"`` dict, keyed by prompt name
+    (``"pass1"``, ``"pass2"``, ``"pass3"``).
+
+    Returns the override string, or None if not configured.
+    """
     try:
         settings_path = "/opt/aivideotrans/config/admin_settings.json"
         if os.path.exists(settings_path):
             with open(settings_path) as f:
                 settings = json.load(f)
-            model = settings.get("review_model", model)
+            prompts = settings.get("review_prompts", {})
+            if isinstance(prompts, dict):
+                override = prompts.get(prompt_key, "")
+                if override and isinstance(override, str):
+                    return override
     except Exception:
         pass
-    return model
+    return None
 
 
 @dataclass
@@ -232,6 +253,234 @@ class ReviewResult:
     glossary: dict[str, str]             # {"English term": "中文翻译"}
     corrections_applied: int
     lines: list[Any]                     # Updated TranscriptLine objects
+    debug_artifacts: dict[str, str] = field(default_factory=dict)
+
+
+def _dump_retry_response(
+    debug_output_dir: str | Path | None,
+    pass_name: str,
+    attempt_idx: int,
+    label: str,
+    model_id: str,
+    response_text: str | None,
+    error: Exception | None,
+) -> None:
+    """Save each retry's raw response (including failures) for debugging."""
+    if debug_output_dir is None:
+        return
+    try:
+        out_dir = Path(debug_output_dir).resolve(strict=False)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"s2_{pass_name}_attempt{attempt_idx + 1}_{label}.json"
+        from datetime import datetime, timezone
+        payload = {
+            "pass": pass_name,
+            "attempt": attempt_idx + 1,
+            "label": label,
+            "model": model_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "success": error is None,
+            "error": str(error) if error else None,
+            "response_length": len(response_text) if response_text else 0,
+            "response_text": response_text,
+        }
+        (out_dir / filename).write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass  # never break the pipeline for debug logging
+
+
+def _detect_speaker_ids_from_lines(lines: list) -> list[str]:
+    """Extract unique speaker IDs from transcript lines, preserving order."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for line in lines:
+        sid = str(getattr(line, "speaker_id", "speaker_a"))
+        if sid not in seen:
+            seen.add(sid)
+            result.append(sid)
+    return result or ["speaker_a"]
+
+
+def _snapshot_lines(lines: list[Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "index": int(line.index),
+            "start_ms": int(line.start_ms),
+            "end_ms": int(line.end_ms),
+            "speaker_id": str(line.speaker_id),
+            "speaker_label": str(line.speaker_label),
+            "source_text": str(line.source_text),
+        }
+        for line in lines
+    ]
+
+
+def _build_speaker_diff_entries(
+    before_snapshot: list[dict[str, Any]],
+    after_snapshot: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Compare two snapshots for speaker changes using stable key matching.
+
+    When line counts differ (merge/split), positional zip is unreliable.
+    Instead, match lines by (start_ms, source_text prefix) as a stable key.
+    Unmatched lines are skipped — conservative: no false speaker diffs.
+    """
+    if len(before_snapshot) == len(after_snapshot):
+        # Same length: safe to use positional comparison
+        entries: list[dict[str, Any]] = []
+        for position, (before_line, after_line) in enumerate(zip(before_snapshot, after_snapshot)):
+            if before_line["speaker_id"] == after_line["speaker_id"]:
+                continue
+            entries.append(
+                {
+                    "position": position,
+                    "before_index": before_line["index"],
+                    "after_index": after_line["index"],
+                    "before_speaker_id": before_line["speaker_id"],
+                    "after_speaker_id": after_line["speaker_id"],
+                    "start_ms": before_line["start_ms"],
+                    "end_ms": before_line["end_ms"],
+                    "source_text": before_line["source_text"],
+                }
+            )
+        return entries
+
+    # Different length (merge/split happened): use start_ms key matching
+    after_by_start: dict[int, dict[str, Any]] = {}
+    for line in after_snapshot:
+        after_by_start.setdefault(line["start_ms"], line)
+
+    entries = []
+    for before_line in before_snapshot:
+        after_line = after_by_start.get(before_line["start_ms"])
+        if after_line is None:
+            continue  # line was merged away — skip, don't fabricate a diff
+        if before_line["speaker_id"] == after_line["speaker_id"]:
+            continue
+        entries.append(
+            {
+                "position": None,  # positional index not meaningful after merge/split
+                "before_index": before_line["index"],
+                "after_index": after_line["index"],
+                "before_speaker_id": before_line["speaker_id"],
+                "after_speaker_id": after_line["speaker_id"],
+                "start_ms": before_line["start_ms"],
+                "end_ms": before_line["end_ms"],
+                "source_text": before_line["source_text"],
+                "note": "matched_by_start_ms",
+            }
+        )
+    return entries
+
+
+def _write_review_debug_artifacts(
+    output_dir: str | Path,
+    *,
+    review_events: list[dict[str, Any]],
+    original_snapshot: list[dict[str, Any]],
+    after_corrections_snapshot: list[dict[str, Any]],
+    after_sanity_snapshot: list[dict[str, Any]],
+    final_snapshot: list[dict[str, Any]],
+    speakers: dict[str, dict[str, str]] | None = None,
+    glossary: dict[str, str] | None = None,
+    raw_corrections: list[dict] | None = None,
+    corrections_applied: int = 0,
+    sanity_applied: int = 0,
+    review_model: str = "",
+    has_audio: bool = False,
+) -> dict[str, str]:
+    output_root = Path(output_dir).resolve(strict=False)
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    raw_response_path = (output_root / "s2_review_raw_response.json").resolve(strict=False)
+    speaker_diff_path = (output_root / "s2_review_speaker_diff.json").resolve(strict=False)
+    result_path = (output_root / "s2_review_result.json").resolve(strict=False)
+    audit_path = (output_root / "s2_review_audit.json").resolve(strict=False)
+
+    # --- Existing: raw response ---
+    raw_response_path.write_text(
+        json.dumps({"events": review_events}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    # --- Existing: speaker diff ---
+    diff_payload = {
+        "line_counts": {
+            "original": len(original_snapshot),
+            "after_corrections": len(after_corrections_snapshot),
+            "after_sanity": len(after_sanity_snapshot),
+            "final": len(final_snapshot),
+        },
+        "speaker_diffs": {
+            "original_to_after_corrections": _build_speaker_diff_entries(
+                original_snapshot,
+                after_corrections_snapshot,
+            ),
+            "after_corrections_to_after_sanity": _build_speaker_diff_entries(
+                after_corrections_snapshot,
+                after_sanity_snapshot,
+            ),
+            "after_sanity_to_final": _build_speaker_diff_entries(
+                after_sanity_snapshot,
+                final_snapshot,
+            ),
+        },
+        "snapshots": {
+            "original": original_snapshot,
+            "after_corrections": after_corrections_snapshot,
+            "after_sanity": after_sanity_snapshot,
+            "final": final_snapshot,
+        },
+    }
+    speaker_diff_path.write_text(
+        json.dumps(diff_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    # --- NEW: structured result ---
+    result_payload = {
+        "version": 1,
+        "review_model": review_model,
+        "has_audio": has_audio,
+        "speakers": speakers or {},
+        "speaker_names": {k: v.get("name", "") for k, v in (speakers or {}).items()},
+        "glossary": glossary or {},
+        "raw_corrections": raw_corrections or [],
+        "corrections_applied": corrections_applied,
+        "sanity_applied": sanity_applied,
+        "line_counts": {
+            "original": len(original_snapshot),
+            "final": len(final_snapshot),
+        },
+    }
+    result_path.write_text(
+        json.dumps(result_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    # --- NEW: lightweight audit trail ---
+    # Records each speaker change with clear before/after and source
+    audit_events: list[dict[str, Any]] = []
+    for entry in _build_speaker_diff_entries(original_snapshot, after_corrections_snapshot):
+        audit_events.append({**entry, "source": "correction"})
+    for entry in _build_speaker_diff_entries(after_corrections_snapshot, after_sanity_snapshot):
+        audit_events.append({**entry, "source": "sanity_check"})
+    for entry in _build_speaker_diff_entries(after_sanity_snapshot, final_snapshot):
+        audit_events.append({**entry, "source": "post_processing"})
+    audit_path.write_text(
+        json.dumps({"audit_events": audit_events}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    return {
+        "raw_response_path": str(raw_response_path),
+        "speaker_diff_path": str(speaker_diff_path),
+        "result_path": str(result_path),
+        "audit_path": str(audit_path),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +497,8 @@ _PROMPT_SPEAKER_CORRECTION_RULES_AUDIO = """\
    - 只纠正 ASR 明确标错的段落（根据音色判断同一人的话被标成了另一个人）
    - 不要仅凭对话内容或角色推断就合并或重新分配说话人
    - 关键判断标准：音色差异（听音频）> 对话上下文 > ASR 给出的 speaker 标签
+   - **不确定时不要改**：如果你对某段话的说话人归属没有足够把握，保持 ASR 原始标注不变。宁可漏改，不可错改。错误的 correct_speaker 会导致后续 TTS 用错音色，代价远大于保留一个 ASR 标注不变
+   - **不要仅凭身份猜测重分配说话人**：例如"这段话在介绍巴菲特，所以一定是巴菲特说的"是错误推理。主持人介绍嘉宾时说的话仍然属于主持人
 
    **常见 ASR 错误模式**：
    - 短促回应（Yeah, Sure, Right, 嗯, 对）被分给了错误的人
@@ -264,6 +515,8 @@ _PROMPT_SPEAKER_CORRECTION_RULES_TEXT = """\
    - 只纠正 ASR 明确标错的段落（同一人的话被标成了另一个人）
    - 不要仅凭对话内容或角色推断就合并或重新分配说话人
    - 关键判断标准：对话上下文 > ASR 给出的 speaker 标签
+   - **不确定时不要改**：如果你对某段话的说话人归属没有足够把握，保持 ASR 原始标注不变。宁可漏改，不可错改。错误的 correct_speaker 会导致后续 TTS 用错音色，代价远大于保留一个 ASR 标注不变
+   - **不要仅凭身份猜测重分配说话人**：例如"这段话在介绍巴菲特，所以一定是巴菲特说的"是错误推理。主持人介绍嘉宾时说的话仍然属于主持人
 
    **常见 ASR 错误模式**：
    - 短促回应（Yeah, Sure, Right, 嗯, 对）被分给了错误的人
@@ -395,18 +648,1066 @@ def review_transcript(
     video_title: str = "",
     video_url: str = "",
     words_data: list[dict] | None = None,
+    debug_output_dir: str | Path | None = None,
+    mode: str = "studio",
+    skip_pass1: bool = False,
 ) -> ReviewResult | None:
-    """Run unified LLM transcript review.
+    """Unified entry point for LLM transcript review.
 
-    Args:
-        lines: list of TranscriptLine objects
-        audio_path: path to audio file for multimodal review
-        video_title: video title for context
-        video_url: video URL for context
-        words_data: word-level timing data for post-processing splits
+    Orchestrates Pass 1 (speaker) → Pass 2 (text).  Falls back to the
+    legacy single-pass path when either pass fails.
 
-    Returns:
-        ReviewResult with updated lines, or None on failure (caller should fallback).
+    Parameters
+    ----------
+    mode : "studio" | "express" — determines which model set to use.
+    skip_pass1 : if True, skip Pass 1 speaker identification (Express optimization).
+    """
+    try:
+        return _orchestrate_three_pass(
+            lines,
+            audio_path=audio_path,
+            video_title=video_title,
+            video_url=video_url,
+            words_data=words_data,
+            debug_output_dir=debug_output_dir,
+            mode=mode,
+            skip_pass1=skip_pass1,
+        )
+    except _PassFailure as exc:
+        logger.warning("[S2] Pass %s failed after retries: %s", exc.pass_name, exc)
+        return None
+    except Exception as exc:
+        logger.warning("[S2] Three-pass orchestrator failed: %s", exc)
+        return None
+
+
+class _PassFailure(Exception):
+    """Raised when Pass 1 or Pass 2 fails, triggering legacy fallback."""
+    def __init__(self, pass_name: str, reason: str = ""):
+        self.pass_name = pass_name
+        super().__init__(f"Pass {pass_name}: {reason}" if reason else f"Pass {pass_name} failed")
+
+
+def _orchestrate_three_pass(
+    lines: list,
+    *,
+    audio_path: str | Path | None = None,
+    video_title: str = "",
+    video_url: str = "",
+    words_data: list[dict] | None = None,
+    debug_output_dir: str | Path | None = None,
+    mode: str = "studio",
+    skip_pass1: bool = False,
+) -> ReviewResult | None:
+    """Internal orchestrator: Pass 1 (speakers) → Pass 2 (text) → aggregate.
+
+    Parameters
+    ----------
+    mode : "studio" | "express" — model set selection.
+    skip_pass1 : skip Pass 1 speaker identification (Express optimization).
+    """
+    # Resolve per-pass models from llm_registry
+    pass1_model = _get_prompt_model(mode, "pass1") if not skip_pass1 else None
+    pass2_model = _get_prompt_model(mode, "pass2")
+
+    # MiMo Omni for pass1 → legacy single-pass (text-only, no three-pass)
+    if pass1_model == "mimo_omni" and not skip_pass1:
+        return legacy_review_transcript_single_pass(
+            lines,
+            audio_path=audio_path,
+            video_title=video_title,
+            video_url=video_url,
+            words_data=words_data,
+            debug_output_dir=debug_output_dir,
+        )
+
+    if not lines:
+        return None
+
+    # --- Audio preparation (shared with Pass 1) ---
+    original_audio: Path | None = None
+    review_tmp_dir: Path | None = None
+    compressed_audio: Path | None = None
+
+    if not skip_pass1 and audio_path and Path(audio_path).exists():
+        original_audio = Path(audio_path)
+        review_tmp_dir = original_audio.parent / ".review_tmp"
+        compressed_audio = _try_compress_audio(original_audio, review_tmp_dir)
+
+    # --- Pass 1: Speaker identification + correction ---
+    if skip_pass1:
+        # Express optimization: use ASR speaker labels as-is
+        speaker_ids = _detect_speaker_ids_from_lines(lines)
+        pass1_result = {
+            "speakers": {sid: {"name": sid.replace("_", " ").title()} for sid in speaker_ids},
+            "corrections": [],
+            "raw_corrections": [],
+            "contract_violations": [],
+            "has_audio": False,
+            "response_text": "",
+            "parsed_payload": {},
+            "success_attempt_label": "skipped",
+            "success_attempt_model": None,
+        }
+        pass1_lines = lines
+        pass1_applied = 0
+        sanity_applied = 0
+        original_snapshot = _snapshot_lines(lines)
+        after_corrections_snapshot = original_snapshot
+        after_sanity_snapshot = original_snapshot
+        logger.info("[S2] Express mode: skipping Pass 1 (speaker identification)")
+    else:
+        # Pass 1 uses Gemini (audio required)
+        pass1_api_key = _get_model_api_key(pass1_model)
+        pass1_result = _review_pass1_speakers(
+            lines=lines,
+            api_key=pass1_api_key,
+            audio_path=compressed_audio,
+            video_title=video_title,
+            video_url=video_url,
+            review_model=pass1_model,
+            debug_output_dir=debug_output_dir,
+        )
+
+        # Apply Pass 1 corrections (correct_speaker only)
+        original_snapshot = _snapshot_lines(lines)
+        pass1_lines, pass1_applied = _apply_corrections(
+            lines, pass1_result["corrections"], words_data=words_data,
+        )
+        after_corrections_snapshot = _snapshot_lines(pass1_lines)
+
+        # Interview sanity check DISABLED — Pass 1 audio analysis is more
+        # accurate than text-based heuristics, and the rules were overriding
+        # correct LLM corrections (e.g. "I think" forced to guest).
+        sanity_applied = 0
+        after_sanity_snapshot = after_corrections_snapshot
+
+    # --- Pass 2: Text correction + split + glossary (no audio) ---
+    pass2_api_key = _get_model_api_key(pass2_model)
+    pass2_result = _review_pass2_text(
+        lines=pass1_lines,
+        speakers=pass1_result["speakers"],
+        api_key=pass2_api_key,
+        video_title=video_title,
+        review_model=pass2_model,
+        debug_output_dir=debug_output_dir,
+    )
+
+    # Apply Pass 2 corrections (fix_text + split only)
+    pass2_lines, pass2_applied = _apply_corrections(
+        pass1_lines, pass2_result["corrections"], words_data=words_data,
+    )
+
+    # Final safety: enforce max duration
+    final_lines = _enforce_max_duration(pass2_lines, words_data=words_data)
+
+    # Re-index
+    for i, line in enumerate(final_lines):
+        line.index = i + 1
+    final_snapshot = _snapshot_lines(final_lines)
+
+    total_applied = pass1_applied + sanity_applied + pass2_applied
+
+    # --- Write debug artifacts ---
+    debug_artifacts: dict[str, str] = {}
+    if debug_output_dir is not None:
+        output_root = Path(debug_output_dir).resolve(strict=False)
+        output_root.mkdir(parents=True, exist_ok=True)
+
+        # Pass 1 result
+        _p1_label = pass1_result.get("success_attempt_label", "primary")
+        _write_pass_artifact(output_root / "s2_pass1_result.json", {
+            "pass": "pass1_speakers",
+            "review_model": pass1_model or "(skipped)",
+            "skipped": skip_pass1,
+            "prompt_version": "v1",
+            "has_audio": original_audio is not None and not skip_pass1,
+            "fallback_used": _p1_label == "cheapest",
+            "success_attempt_label": _p1_label,
+            "success_attempt_model": pass1_result.get("success_attempt_model"),
+            "generated_at": _now_iso(),
+            "duration_ms": pass1_result.get("duration_ms"),
+            "attempts_count": pass1_result.get("attempts_count"),
+            "parse_failures": pass1_result.get("parse_failures"),
+            "speakers": pass1_result["speakers"],
+            "corrections": pass1_result["raw_corrections"],
+            "corrections_applied": pass1_applied,
+            "sanity_applied": sanity_applied,
+            "contract_violations": pass1_result.get("contract_violations", []),
+        })
+
+        # Pass 2 result
+        _p2_label = pass2_result.get("success_attempt_label", "primary")
+        _write_pass_artifact(output_root / "s2_pass2_result.json", {
+            "pass": "pass2_text",
+            "review_model": pass2_model,
+            "prompt_version": "v1",
+            "has_audio": False,
+            "fallback_used": _p2_label == "cheapest",
+            "success_attempt_label": _p2_label,
+            "success_attempt_model": pass2_result.get("success_attempt_model"),
+            "generated_at": _now_iso(),
+            "duration_ms": pass2_result.get("duration_ms"),
+            "attempts_count": pass2_result.get("attempts_count"),
+            "parse_failures": pass2_result.get("parse_failures"),
+            "glossary": pass2_result["glossary"],
+            "corrections": pass2_result["raw_corrections"],
+            "corrections_applied": pass2_applied,
+            "contract_violations": pass2_result.get("contract_violations", []),
+        })
+
+        # Build review_events from Pass 1/2 raw responses
+        review_events: list[dict[str, Any]] = []
+        review_events.append({
+            "pass": "pass1_speakers",
+            "model": _resolve_model_id(pass1_model) if pass1_model else "(skipped)",
+            "review_model": pass1_model or "(skipped)",
+            "has_audio": pass1_result.get("has_audio", False),
+            "response_text": pass1_result.get("response_text", ""),
+            "parsed_payload": pass1_result.get("parsed_payload", {}),
+        })
+        review_events.append({
+            "pass": "pass2_text",
+            "model": _resolve_model_id(pass2_model),
+            "review_model": pass2_model,
+            "has_audio": False,
+            "response_text": pass2_result.get("response_text", ""),
+            "parsed_payload": pass2_result.get("parsed_payload", {}),
+        })
+
+        # Aggregated result (same format as legacy, 排障首选)
+        debug_artifacts = _write_review_debug_artifacts(
+            debug_output_dir,
+            review_events=review_events,
+            original_snapshot=original_snapshot,
+            after_corrections_snapshot=after_corrections_snapshot,
+            after_sanity_snapshot=after_sanity_snapshot,
+            final_snapshot=final_snapshot,
+            speakers=pass1_result["speakers"],
+            glossary=pass2_result["glossary"],
+            raw_corrections=pass1_result["raw_corrections"] + pass2_result["raw_corrections"],
+            corrections_applied=total_applied - sanity_applied,
+            sanity_applied=sanity_applied,
+            review_model=pass1_model or pass2_model,
+            has_audio=original_audio is not None and not skip_pass1,
+        )
+
+    logger.info(
+        "[S2] Three-pass review: pass1=%d corrections (+%d sanity), pass2=%d corrections, %d→%d lines",
+        pass1_applied, sanity_applied, pass2_applied, len(lines), len(final_lines),
+    )
+
+    return ReviewResult(
+        speakers=pass1_result["speakers"],
+        glossary=pass2_result["glossary"],
+        corrections_applied=total_applied,
+        lines=final_lines,
+        debug_artifacts=debug_artifacts,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Pass 1: Speaker identification + correction
+# ---------------------------------------------------------------------------
+
+_PASS1_PROMPT = """\
+你是转录审校专家。根据音频和上下文，完成以下任务：
+
+1. **识别每个说话人的身份**：姓名和角色
+2. **纠正 ASR 的说话人标注错误**：听音频判断，标错的用 `correct_speaker` 修正
+3. **拆分混合发言段落**：如果一段音频中包含多个说话人，用 `split` 在切换点拆开，并用 `speaker_after` 标注后半段的说话人
+
+视频标题：{video_title}
+视频链接：{video_url}
+
+格式要求：
+- 姓名使用中文（如 Warren Buffett → 沃伦·巴菲特）
+- 多个未知说话人按编号区分：未知说话人1、未知说话人2
+- 保留所有已有的 speaker_id，不要删除
+- 只允许输出 `correct_speaker` 和 `split`，不要输出 `fix_text` / `merge`
+- 不要输出 gender、age_group、style（由后续音色分析阶段处理）
+
+输出 JSON，且只能输出 JSON：
+
+{{
+  "speakers": {{
+    "speaker_a": {{"name": "中文姓名", "role": "角色"}},
+    "speaker_b": {{"name": "中文姓名", "role": ""}}
+  }},
+  "corrections": [
+    {{"action": "correct_speaker", "index": 12, "to": "speaker_b", "reason": "原因"}},
+    {{"action": "split", "index": 2, "at_text": "切换点文本", "speaker_after": "speaker_a", "reason": "原因"}}
+  ]
+}}
+
+转录稿（{line_count} 行）：
+
+{transcript_body}"""
+
+_PASS1_ALLOWED_ACTIONS = frozenset({"correct_speaker", "split"})
+
+
+def _review_pass1_speakers(
+    *,
+    lines: list,
+    api_key: str,
+    audio_path: Path | None,
+    video_title: str,
+    video_url: str,
+    review_model: str,
+    debug_output_dir: str | Path | None = None,
+) -> dict:
+    """Pass 1: speaker identification + correct_speaker corrections.
+
+    Returns dict with keys: speakers, corrections, raw_corrections, contract_violations.
+    Raises ``_PassFailure`` on API / JSON / missing-field failure.
+    """
+    transcript_body = _build_transcript_body(lines)
+    prompt_template = _get_admin_prompt_override("pass1") or _PASS1_PROMPT
+    prompt = prompt_template.format(
+        video_title=video_title or "(unknown)",
+        video_url=video_url or "(unknown)",
+        line_count=len(lines),
+        transcript_body=transcript_body,
+    )
+
+    api_model_id = _resolve_model_id(review_model)
+    try:
+        types = _load_genai_types()
+        client = _create_review_client(api_key=api_key)
+
+        contents: list = []
+        has_audio = False
+
+        if audio_path and audio_path.exists():
+            try:
+                try:
+                    audio_file = client.files.upload(file=audio_path)
+                    contents.append(audio_file)
+                except Exception as upload_exc:
+                    if "only supported in the Gemini Developer client" in str(upload_exc):
+                        audio_bytes = audio_path.read_bytes()
+                        suffix = audio_path.suffix.lower()
+                        mime_map = {".wav": "audio/wav", ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".flac": "audio/flac", ".ogg": "audio/ogg"}
+                        mime_type = mime_map.get(suffix, "audio/wav")
+                        audio_part = types.Part.from_bytes(data=audio_bytes, mime_type=mime_type)
+                        contents.append(audio_part)
+                    else:
+                        raise
+                has_audio = True
+                logger.info("[S2][Pass1] Audio uploaded for speaker identification")
+            except Exception as e:
+                logger.warning("[S2][Pass1] Audio upload failed: %s", e)
+
+        contents.append(prompt)
+
+        # Retry strategy: same model × 2, then cheapest audio model × 1
+        _fallback_models = get_fallback_candidates(review_model, requires_audio=True)
+        _cheapest = _fallback_models[-1] if _fallback_models else None
+        _attempts = [
+            ("primary", api_model_id),
+            ("retry", api_model_id),
+        ]
+        if _cheapest and _cheapest != review_model:
+            _attempts.append(("cheapest", _resolve_model_id(_cheapest)))
+
+        _pass1_last_error: Exception | None = None
+        _parse_failure_count = 0
+        _t0 = time.monotonic()
+        for _idx, (_label, _model_id) in enumerate(_attempts):
+            try:
+                response = client.models.generate_content(
+                    model=_model_id,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0.1,
+                        max_output_tokens=8192,
+                    ),
+                )
+
+                response_text = _extract_text(response)
+                if not response_text:
+                    raise json.JSONDecodeError("empty response", "", 0)
+
+                payload = json.loads(response_text)
+                _dump_retry_response(debug_output_dir, "pass1", _idx, _label, _model_id, response_text, None)
+                if _label != "primary":
+                    logger.info("[S2][Pass1] Succeeded on %s attempt (model=%s)", _label, _model_id)
+                break  # success
+            except json.JSONDecodeError as exc:
+                _parse_failure_count += 1
+                _dump_retry_response(debug_output_dir, "pass1", _idx, _label, _model_id, response_text if 'response_text' in dir() else None, exc)
+                _pass1_last_error = exc
+                if _idx < len(_attempts) - 1:
+                    _next_label, _next_model = _attempts[_idx + 1]
+                    logger.warning("[S2][Pass1] JSON parse failed (%s, model=%s), next: %s (model=%s): %s",
+                                   _label, _model_id, _next_label, _next_model, exc)
+                    continue
+                raise _PassFailure("1", f"JSON parse error after {len(_attempts)} attempts: {exc}") from exc
+        else:
+            raise _PassFailure("1", f"all attempts failed: {_pass1_last_error}")
+    except _PassFailure:
+        raise
+    except Exception as exc:
+        raise _PassFailure("1", f"API call failed: {exc}") from exc
+
+    speakers = payload.get("speakers")
+    if not speakers or not isinstance(speakers, dict):
+        raise _PassFailure("1", "missing or invalid 'speakers' field")
+
+    # --- Contract enforcement: only correct_speaker allowed ---
+    raw_corrections = payload.get("corrections", [])
+    contract_violations: list[dict] = []
+    filtered_corrections: list[dict] = []
+
+    for c in raw_corrections:
+        action = c.get("action", "")
+        if action in _PASS1_ALLOWED_ACTIONS:
+            filtered_corrections.append(c)
+        else:
+            contract_violations.append({"dropped_action": action, "correction": c})
+            logger.warning("[S2][Pass1] Contract violation: dropped %s correction", action)
+
+    # Drop any glossary the model sneaked in
+    if "glossary" in payload:
+        contract_violations.append({"dropped_field": "glossary"})
+        logger.warning("[S2][Pass1] Contract violation: dropped glossary")
+
+    logger.info(
+        "[S2][Pass1] %d speakers, %d corrections (%d filtered), audio=%s",
+        len(speakers), len(filtered_corrections), len(contract_violations), has_audio,
+    )
+
+    _duration_ms = int((time.monotonic() - _t0) * 1000)
+    return {
+        "speakers": speakers,
+        "corrections": filtered_corrections,
+        "raw_corrections": raw_corrections,
+        "contract_violations": contract_violations,
+        "response_text": response_text,
+        "parsed_payload": payload,
+        "has_audio": has_audio,
+        "success_attempt_label": _label,
+        "success_attempt_model": _model_id,
+        "duration_ms": _duration_ms,
+        "attempts_count": _idx + 1,
+        "parse_failures": _parse_failure_count,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Pass 2: Text correction + split + glossary
+# ---------------------------------------------------------------------------
+
+_PASS2_PROMPT = """\
+你正在执行视频转录审校的 Pass 2。Pass 1 已经完成 speaker 识别与 speaker 纠正。
+你的唯一目标是：
+1. 修正文本文字错误
+2. 对过长段落做语义拆分
+3. 提取术语表
+
+你不是在做 speaker 重分配，不是在做音色描述，不是在做身份识别。
+
+输入信息：
+- 视频标题：{video_title}
+- 已校正 speaker 的转录文本：{transcript_body}
+- speakers 信息：{speakers_json}
+
+必须遵守的规则：
+1. 绝对不要修改任何 speaker_id
+2. 绝对不要输出 `correct_speaker`
+3. 不要输出 `merge`
+4. 只允许输出：
+   - `fix_text`
+   - `split`
+   - `glossary`
+5. `fix_text` 只修正明显 ASR 错误、重复、漏词、错词
+6. 不要改写语气，不要润色，不要重写内容
+7. 不要改变原文核心含义
+8. `split` 只用于过长段落（>60s），并且必须在自然语义断点切开
+9. 如果某段并不适合拆分，就不要强行拆分
+10. glossary 只收录稳定、值得后续翻译统一的专名、机构名、术语、人名
+
+输出 JSON，且只能输出 JSON：
+
+{{
+  "corrections": [
+    {{
+      "action": "fix_text",
+      "index": 5,
+      "old": "原错误文本",
+      "new": "修正后文本",
+      "reason": "简短说明"
+    }},
+    {{
+      "action": "split",
+      "index": 18,
+      "at_text": "建议切分点附近的文本",
+      "reason": "该段过长，需要在自然断点拆分"
+    }}
+  ],
+  "glossary": {{
+    "Berkshire Hathaway": "伯克希尔·哈撒韦",
+    "Greg Abel": "格雷格·艾贝尔"
+  }}
+}}
+
+转录稿（{line_count} 行）：
+
+{transcript_body}"""
+
+_PASS2_ALLOWED_ACTIONS = frozenset({"fix_text", "split"})
+
+
+def _call_text_llm(
+    *,
+    model_name: str,
+    api_key: str | None,
+    prompt: str,
+    max_output_tokens: int = 8192,
+) -> str:
+    """Call an LLM for text-only tasks, dispatching by provider.
+
+    Gemini → google-genai SDK;  MiMo → xiaomimimo API;
+    DeepSeek/OpenAI → OpenAI-compatible HTTP.
+    """
+    info = _MODEL_REGISTRY.get(model_name, {})
+    provider = info.get("provider", "gemini")
+    api_model_id = _resolve_model_id(model_name)
+
+    if provider == "gemini":
+        types = _load_genai_types()
+        client = _create_review_client(api_key=api_key)
+        response = client.models.generate_content(
+            model=api_model_id,
+            contents=[prompt],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.1,
+                max_output_tokens=max_output_tokens,
+            ),
+        )
+        return _extract_text(response) or ""
+
+    # Non-Gemini: OpenAI-compatible HTTP call
+    effective_key = api_key or ""
+    if not effective_key:
+        env_var = info.get("api_key_env", "")
+        effective_key = os.environ.get(env_var, "").strip() if env_var else ""
+    if not effective_key:
+        raise RuntimeError(f"{model_name} API key not configured")
+
+    if provider == "mimo":
+        url = _MIMO_OMNI_API_URL
+    elif provider == "deepseek":
+        url = "https://api.deepseek.com/v1/chat/completions"
+    else:
+        url = "https://api.openai.com/v1/chat/completions"
+
+    payload = {
+        "model": api_model_id,
+        "messages": [{"role": "user", "content": prompt}],
+        "response_format": {"type": "json_object"},
+        "temperature": 0.1,
+        "max_tokens": max_output_tokens,
+    }
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {effective_key}",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        body = json.loads(resp.read().decode("utf-8"))
+    return body["choices"][0]["message"]["content"]
+
+
+def _review_pass2_text(
+    *,
+    lines: list,
+    speakers: dict,
+    api_key: str | None,
+    video_title: str,
+    review_model: str,
+    debug_output_dir: str | Path | None = None,
+) -> dict:
+    """Pass 2: text correction + split + glossary.  Pure text, no audio.
+
+    Supports any provider (Gemini, DeepSeek, OpenAI, MiMo) via _call_text_llm.
+
+    Returns dict with keys: glossary, corrections, raw_corrections, contract_violations.
+    Raises ``_PassFailure`` on API / JSON failure.
+    """
+    transcript_body = _build_transcript_body(lines)
+    speakers_json = json.dumps(speakers, ensure_ascii=False, indent=2)
+    prompt_template = _get_admin_prompt_override("pass2") or _PASS2_PROMPT
+    prompt = prompt_template.format(
+        video_title=video_title or "(unknown)",
+        line_count=len(lines),
+        transcript_body=transcript_body,
+        speakers_json=speakers_json,
+    )
+
+    # Retry strategy: same model × 2, then cheapest text model × 1
+    _fallback_models = get_fallback_candidates(review_model, requires_audio=False)
+    _cheapest = _fallback_models[-1] if _fallback_models else None
+    _attempts_p2: list[tuple[str, str, str | None]] = [
+        ("primary", review_model, api_key),
+        ("retry", review_model, api_key),
+    ]
+    if _cheapest and _cheapest != review_model:
+        _attempts_p2.append(("cheapest", _cheapest, _get_model_api_key(_cheapest)))
+
+    _pass2_last_error: Exception | None = None
+    _parse_failure_count = 0
+    _t0 = time.monotonic()
+    payload: dict = {}
+    try:
+        for _idx, (_label, _model, _key) in enumerate(_attempts_p2):
+            try:
+                response_text = _call_text_llm(
+                    model_name=_model,
+                    api_key=_key,
+                    prompt=prompt,
+                    max_output_tokens=8192,
+                )
+                if not response_text:
+                    raise json.JSONDecodeError("empty response", "", 0)
+                payload = json.loads(response_text)
+                _dump_retry_response(debug_output_dir, "pass2", _idx, _label, _resolve_model_id(_model), response_text, None)
+                if _label != "primary":
+                    logger.info("[S2][Pass2] Succeeded on %s attempt (model=%s)", _label, _model)
+                break
+            except json.JSONDecodeError as exc:
+                _parse_failure_count += 1
+                _dump_retry_response(debug_output_dir, "pass2", _idx, _label, _resolve_model_id(_model), response_text if 'response_text' in dir() else None, exc)
+                _pass2_last_error = exc
+                if _idx < len(_attempts_p2) - 1:
+                    _next = _attempts_p2[_idx + 1]
+                    logger.warning("[S2][Pass2] JSON parse failed (%s, model=%s), next: %s (model=%s): %s",
+                                   _label, _model, _next[0], _next[1], exc)
+                    continue
+                raise _PassFailure("2", f"JSON parse error after {len(_attempts_p2)} attempts: {exc}") from exc
+        else:
+            raise _PassFailure("2", f"all attempts failed: {_pass2_last_error}")
+    except _PassFailure:
+        raise
+    except Exception as exc:
+        raise _PassFailure("2", f"API call failed: {exc}") from exc
+
+    # --- Contract enforcement: only fix_text + split allowed ---
+    raw_corrections = payload.get("corrections", [])
+    contract_violations: list[dict] = []
+    filtered_corrections: list[dict] = []
+
+    for c in raw_corrections:
+        action = c.get("action", "")
+        if action in _PASS2_ALLOWED_ACTIONS:
+            filtered_corrections.append(c)
+        else:
+            contract_violations.append({"dropped_action": action, "correction": c})
+            logger.warning("[S2][Pass2] Contract violation: dropped %s correction", action)
+
+    # Drop any speakers the model sneaked in
+    if "speakers" in payload:
+        contract_violations.append({"dropped_field": "speakers"})
+        logger.warning("[S2][Pass2] Contract violation: dropped speakers")
+
+    glossary = payload.get("glossary", {})
+    if not isinstance(glossary, dict):
+        glossary = {}
+
+    logger.info(
+        "[S2][Pass2] %d corrections (%d filtered), %d glossary terms",
+        len(filtered_corrections), len(contract_violations), len(glossary),
+    )
+
+    _duration_ms = int((time.monotonic() - _t0) * 1000)
+    return {
+        "glossary": glossary,
+        "corrections": filtered_corrections,
+        "raw_corrections": raw_corrections,
+        "contract_violations": contract_violations,
+        "response_text": response_text,
+        "parsed_payload": payload,
+        "success_attempt_label": _label,
+        "success_attempt_model": _resolve_model_id(_model),
+        "duration_ms": _duration_ms,
+        "attempts_count": _idx + 1,
+        "parse_failures": _parse_failure_count,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Pass 3: Voice profile (called separately from pipeline, after translation review)
+# ---------------------------------------------------------------------------
+
+_PASS3_PROMPT = """\
+你正在执行视频音色画像分析的 Pass 3。
+前两个阶段已经完成 speaker 识别、speaker 纠正、文本修正与术语表提取。
+你的唯一目标是：根据每个 speaker 的代表性音频片段，生成适合 TTS 选音匹配的音色画像。
+
+你不是在做 speaker 纠正，不是在做文本修正，不是在做术语表。
+
+输入信息：
+- 视频标题：{video_title}
+- speaker 基础信息：{speakers_json}
+- 当前 speaker 列表：{speaker_ids}
+- 每个 speaker 的代表音频片段（单独提供）
+
+必须遵守的规则：
+1. 不要输出 corrections
+2. 不要输出 glossary
+3. 只输出每个 speaker 的音色画像
+4. voice_description 要面向 TTS 匹配，描述声音特征，不要写成人物背景介绍
+5. style 描述说话风格（如"专业、稳重"、"信息丰富、分析性强"）
+6. gender 只能是：male / female / unknown
+7. age_group 只能是：young / middle / elderly / unknown
+8. persona_style 尽量从以下集合中选最接近者：
+   - professional
+   - warm
+   - serious
+   - energetic
+   - calm
+9. energy_level 只能是：low / medium / high
+10. 不确定时可以输出 `unknown`，不要强猜
+
+输出 JSON，且只能输出 JSON：
+
+{{
+  "speaker_profiles": {{
+    "speaker_a": {{
+      "voice_description": "声音清晰、语速中等偏快、音高偏中高，整体专业且稳定",
+      "style": "专业、稳重",
+      "gender": "female",
+      "age_group": "middle",
+      "persona_style": "professional",
+      "energy_level": "medium"
+    }},
+    "speaker_b": {{
+      "voice_description": "声音偏低沉，语速较慢，带停顿感，整体沉稳",
+      "style": "沉稳、分析性强",
+      "gender": "male",
+      "age_group": "elderly",
+      "persona_style": "calm",
+      "energy_level": "low"
+    }}
+  }}
+}}"""
+
+# Audio extraction constants for Pass 3
+_PASS3_MIN_CLIP_DURATION_S = 15
+_PASS3_MAX_CLIP_DURATION_S = 30
+_PASS3_AUDIO_BITRATE = "32k"
+
+
+def _extract_speaker_audio_clips(
+    lines: list,
+    source_audio: Path,
+    tmp_dir: Path,
+) -> dict[str, Path]:
+    """Extract representative audio clip for each speaker.
+
+    Strategy per speaker:
+    1. Find the longest continuous utterance
+    2. If <15s, concatenate adjacent same-speaker utterances until 15-30s
+    3. ffmpeg extract + compress to opus
+
+    Returns {speaker_id: clip_path}.
+    """
+    from collections import defaultdict
+
+    # Group utterances by speaker
+    speaker_utterances: dict[str, list[tuple[int, int]]] = defaultdict(list)
+    for line in lines:
+        speaker_utterances[line.speaker_id].append((line.start_ms, line.end_ms))
+
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    clips: dict[str, Path] = {}
+
+    for speaker_id, utterances in speaker_utterances.items():
+        # Sort by start time
+        utterances.sort()
+
+        # Find the longest single utterance
+        best_start, best_end = max(utterances, key=lambda u: u[1] - u[0])
+        best_duration_s = (best_end - best_start) / 1000
+
+        if best_duration_s < _PASS3_MIN_CLIP_DURATION_S and len(utterances) > 1:
+            # Extend by finding the densest cluster of utterances
+            # Start from the longest utterance and expand outward
+            best_idx = next(i for i, u in enumerate(utterances) if u == (best_start, best_end))
+            clip_start = best_start
+            clip_end = best_end
+
+            # Expand forward
+            for i in range(best_idx + 1, len(utterances)):
+                gap = utterances[i][0] - clip_end
+                if gap > 5000:  # skip if gap > 5s
+                    break
+                clip_end = utterances[i][1]
+                if (clip_end - clip_start) / 1000 >= _PASS3_MAX_CLIP_DURATION_S:
+                    break
+
+            # Expand backward if still short
+            if (clip_end - clip_start) / 1000 < _PASS3_MIN_CLIP_DURATION_S:
+                for i in range(best_idx - 1, -1, -1):
+                    gap = clip_start - utterances[i][1]
+                    if gap > 5000:
+                        break
+                    clip_start = utterances[i][0]
+                    if (clip_end - clip_start) / 1000 >= _PASS3_MAX_CLIP_DURATION_S:
+                        break
+
+            best_start, best_end = clip_start, clip_end
+
+        # Cap at max duration
+        if (best_end - best_start) / 1000 > _PASS3_MAX_CLIP_DURATION_S:
+            best_end = best_start + _PASS3_MAX_CLIP_DURATION_S * 1000
+
+        # Extract clip via ffmpeg
+        clip_path = tmp_dir / f"pass3_{speaker_id}.ogg"
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", f"{best_start / 1000:.3f}",
+            "-i", str(source_audio),
+            "-t", f"{(best_end - best_start) / 1000:.3f}",
+            "-ac", "1",
+            "-ar", "16000",
+            "-c:a", "libopus",
+            "-b:a", _PASS3_AUDIO_BITRATE,
+            str(clip_path),
+        ]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, timeout=120)
+            if clip_path.exists() and clip_path.stat().st_size > 0:
+                clips[speaker_id] = clip_path
+                logger.info(
+                    "[S2][Pass3] Extracted %s clip: %.1fs-%.1fs (%.1fs)",
+                    speaker_id, best_start / 1000, best_end / 1000,
+                    (best_end - best_start) / 1000,
+                )
+            else:
+                logger.warning("[S2][Pass3] Empty clip for %s", speaker_id)
+        except Exception as exc:
+            logger.warning("[S2][Pass3] Failed to extract clip for %s: %s", speaker_id, exc)
+
+    return clips
+
+
+def review_pass3_voice_profiles(
+    lines: list,
+    *,
+    source_audio_path: Path | None,
+    speakers: dict[str, dict],
+    video_title: str = "",
+    debug_output_dir: str | Path | None = None,
+) -> dict[str, dict]:
+    """Pass 3: voice profiling.  Called by pipeline after translation review.
+
+    Returns speaker_profiles dict: {speaker_id: {voice_description, gender, age_group, ...}}.
+    On failure, returns ``_fallback_minimal_speaker_styles(speakers)``.
+    """
+    review_model = _get_review_model()
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        logger.warning("[S2][Pass3] GEMINI_API_KEY not set, using fallback profiles")
+        return _fallback_minimal_speaker_styles(speakers)
+
+    if not source_audio_path or not source_audio_path.exists():
+        logger.warning("[S2][Pass3] No audio available, using fallback profiles")
+        return _fallback_minimal_speaker_styles(speakers)
+
+    if not lines or not speakers:
+        return _fallback_minimal_speaker_styles(speakers)
+
+    # Extract per-speaker audio clips
+    review_tmp_dir = source_audio_path.parent / ".review_tmp"
+    try:
+        clips = _extract_speaker_audio_clips(lines, source_audio_path, review_tmp_dir)
+    except Exception as exc:
+        logger.warning("[S2][Pass3] Audio extraction failed: %s", exc)
+        return _fallback_minimal_speaker_styles(speakers)
+
+    if not clips:
+        logger.warning("[S2][Pass3] No clips extracted, using fallback profiles")
+        return _fallback_minimal_speaker_styles(speakers)
+
+    # Build prompt
+    speaker_ids = list(speakers.keys())
+    speakers_json = json.dumps(speakers, ensure_ascii=False, indent=2)
+    prompt_template = _get_admin_prompt_override("pass3") or _PASS3_PROMPT
+    prompt = prompt_template.format(
+        video_title=video_title or "(unknown)",
+        speakers_json=speakers_json,
+        speaker_ids=", ".join(speaker_ids),
+    )
+
+    # Build contents: audio clips first, then prompt
+    api_model_id = _resolve_model_id(review_model)
+    try:
+        types = _load_genai_types()
+        client = _create_review_client(api_key=api_key)
+
+        contents: list = []
+        for spk_id in speaker_ids:
+            clip_path = clips.get(spk_id)
+            if clip_path and clip_path.exists():
+                try:
+                    try:
+                        audio_file = client.files.upload(file=clip_path)
+                        contents.append(f"[音频片段: {spk_id}]")
+                        contents.append(audio_file)
+                    except Exception as upload_exc:
+                        if "only supported in the Gemini Developer client" in str(upload_exc):
+                            audio_bytes = clip_path.read_bytes()
+                            audio_part = types.Part.from_bytes(data=audio_bytes, mime_type="audio/ogg")
+                            contents.append(f"[音频片段: {spk_id}]")
+                            contents.append(audio_part)
+                        else:
+                            raise
+                except Exception as e:
+                    logger.warning("[S2][Pass3] Failed to upload clip for %s: %s", spk_id, e)
+
+        contents.append(prompt)
+
+        # Retry strategy: same model × 2, then cheapest audio model × 1
+        _fallback_models = get_fallback_candidates(review_model, requires_audio=True)
+        _cheapest_p3 = _fallback_models[-1] if _fallback_models else None
+        _attempts_p3 = [
+            ("primary", api_model_id),
+            ("retry", api_model_id),
+        ]
+        if _cheapest_p3 and _cheapest_p3 != review_model:
+            _attempts_p3.append(("cheapest", _resolve_model_id(_cheapest_p3)))
+
+        _pass3_payload: dict = {}
+        _parse_failure_count_p3 = 0
+        _t0_p3 = time.monotonic()
+        for _idx, (_label, _model_id) in enumerate(_attempts_p3):
+            try:
+                response = client.models.generate_content(
+                    model=_model_id,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0.1,
+                        max_output_tokens=8192,
+                    ),
+                )
+                response_text = _extract_text(response)
+                if not response_text:
+                    raise json.JSONDecodeError("empty response", "", 0)
+                _pass3_payload = json.loads(response_text)
+                _dump_retry_response(debug_output_dir, "pass3", _idx, _label, _model_id, response_text, None)
+                if _label != "primary":
+                    logger.info("[S2][Pass3] Succeeded on %s attempt (model=%s)", _label, _model_id)
+                break
+            except json.JSONDecodeError as exc:
+                _parse_failure_count_p3 += 1
+                _dump_retry_response(debug_output_dir, "pass3", _idx, _label, _model_id, response_text if 'response_text' in dir() else None, exc)
+                if _idx < len(_attempts_p3) - 1:
+                    _next = _attempts_p3[_idx + 1]
+                    logger.warning("[S2][Pass3] JSON parse failed (%s, model=%s), next: %s (model=%s): %s",
+                                   _label, _model_id, _next[0], _next[1], exc)
+                    continue
+                logger.warning("[S2][Pass3] All %d attempts failed, using fallback: %s", len(_attempts_p3), exc)
+                return _fallback_minimal_speaker_styles(speakers)
+        else:
+            return _fallback_minimal_speaker_styles(speakers)
+        payload = _pass3_payload
+    except Exception as exc:
+        logger.warning("[S2][Pass3] API call failed: %s, using fallback", exc)
+        return _fallback_minimal_speaker_styles(speakers)
+
+    # --- Contract enforcement: only speaker_profiles allowed ---
+    profiles = payload.get("speaker_profiles", {})
+    contract_violations: list[dict] = []
+
+    if "corrections" in payload:
+        contract_violations.append({"dropped_field": "corrections"})
+        logger.warning("[S2][Pass3] Contract violation: dropped corrections")
+    if "glossary" in payload:
+        contract_violations.append({"dropped_field": "glossary"})
+        logger.warning("[S2][Pass3] Contract violation: dropped glossary")
+
+    if not profiles or not isinstance(profiles, dict):
+        logger.warning("[S2][Pass3] No speaker_profiles in response, using fallback")
+        return _fallback_minimal_speaker_styles(speakers)
+
+    # Write Pass 3 artifact
+    if debug_output_dir is not None:
+        output_root = Path(debug_output_dir).resolve(strict=False)
+        output_root.mkdir(parents=True, exist_ok=True)
+        _duration_ms_p3 = int((time.monotonic() - _t0_p3) * 1000)
+        _write_pass_artifact(output_root / "s2_pass3_result.json", {
+            "pass": "pass3_voice_profiles",
+            "review_model": review_model,
+            "prompt_version": "v1",
+            "has_audio": True,
+            "fallback_used": _label == "cheapest",
+            "success_attempt_label": _label,
+            "success_attempt_model": _model_id,
+            "generated_at": _now_iso(),
+            "duration_ms": _duration_ms_p3,
+            "attempts_count": _idx + 1,
+            "parse_failures": _parse_failure_count_p3,
+            "speaker_profiles": profiles,
+            "clips_extracted": list(clips.keys()),
+            "contract_violations": contract_violations,
+        })
+
+    logger.info("[S2][Pass3] Generated voice profiles for %d speakers", len(profiles))
+    return profiles
+
+
+def _fallback_minimal_speaker_styles(speakers: dict[str, dict]) -> dict[str, dict]:
+    """Generate minimal voice profiles from existing speaker info (no LLM call)."""
+    profiles: dict[str, dict] = {}
+    for spk_id, spk_info in speakers.items():
+        profiles[spk_id] = {
+            "voice_description": spk_info.get("voice_description", ""),
+            "gender": spk_info.get("gender", "unknown"),
+            "age_group": spk_info.get("age_group", "unknown"),
+            "persona_style": spk_info.get("style", ""),
+            "energy_level": spk_info.get("energy_level", "") or "medium",
+        }
+    return profiles
+
+
+def _write_pass_artifact(path: Path, payload: dict) -> None:
+    """Write a per-pass JSON artifact."""
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _now_iso() -> str:
+    """Current UTC time in ISO format."""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
+def legacy_review_transcript_single_pass(
+    lines: list,
+    *,
+    audio_path: str | Path | None = None,
+    video_title: str = "",
+    video_url: str = "",
+    words_data: list[dict] | None = None,
+    debug_output_dir: str | Path | None = None,
+) -> ReviewResult | None:
+    """Legacy single-pass review (fallback path).
+
+    This is the original ``review_transcript()`` logic preserved as-is.
+    Called when the three-pass orchestrator encounters a failure in Pass 1
+    or Pass 2, ensuring the pipeline always has a working fallback.
     """
     review_model = _get_review_model()
 
@@ -423,6 +1724,9 @@ def review_transcript(
 
     if not lines:
         return None
+
+    review_events: list[dict[str, Any]] = []
+    debug_artifacts: dict[str, str] = {}
 
     # --- Audio strategy: probe duration FIRST, then decide compression path ---
     original_audio: Path | None = None
@@ -466,6 +1770,8 @@ def review_transcript(
             video_title=video_title,
             video_url=video_url,
             review_model=review_model,
+            trace_sink=review_events,
+            trace_context={"call_type": "single"},
         )
         if result is None:
             return None
@@ -482,16 +1788,19 @@ def review_transcript(
             video_title=video_title,
             video_url=video_url,
             review_model=review_model,
+            trace_sink=review_events,
         )
 
     # Apply corrections with validation
+    original_snapshot = _snapshot_lines(lines)
     updated_lines, applied_count = _apply_corrections(
         lines, corrections, words_data=words_data
     )
+    after_corrections_snapshot = _snapshot_lines(updated_lines)
 
-    # Conservative post-pass for 2-speaker interview transcripts only.
-    updated_lines, sanity_applied = _apply_interview_sanity_check(updated_lines, speakers)
-    applied_count += sanity_applied
+    # Interview sanity check DISABLED — see comment in _orchestrate_three_pass.
+    sanity_applied = 0
+    after_sanity_snapshot = after_corrections_snapshot
 
     # Final safety: ensure no segment > 180s
     final_lines = _enforce_max_duration(updated_lines, words_data=words_data)
@@ -499,6 +1808,24 @@ def review_transcript(
     # Re-index
     for i, line in enumerate(final_lines):
         line.index = i + 1
+    final_snapshot = _snapshot_lines(final_lines)
+
+    if debug_output_dir is not None:
+        debug_artifacts = _write_review_debug_artifacts(
+            debug_output_dir,
+            review_events=review_events,
+            original_snapshot=original_snapshot,
+            after_corrections_snapshot=after_corrections_snapshot,
+            after_sanity_snapshot=after_sanity_snapshot,
+            final_snapshot=final_snapshot,
+            speakers=speakers,
+            glossary=glossary,
+            raw_corrections=corrections,
+            corrections_applied=applied_count - sanity_applied,
+            sanity_applied=sanity_applied,
+            review_model=review_model,
+            has_audio=original_audio is not None,
+        )
 
     logger.info(
         "Unified review: %d corrections applied, %d→%d lines, speakers=%s",
@@ -511,6 +1838,7 @@ def review_transcript(
         glossary=glossary,
         corrections_applied=applied_count,
         lines=final_lines,
+        debug_artifacts=debug_artifacts,
     )
 
 
@@ -536,6 +1864,8 @@ def _call_review(
     video_title: str,
     video_url: str,
     review_model: str = "gemini",
+    trace_sink: list[dict[str, Any]] | None = None,
+    trace_context: dict[str, Any] | None = None,
 ) -> tuple[dict, dict, list] | None:
     """Single LLM call for review. Dispatches to Gemini or MiMo Omni.
 
@@ -559,10 +1889,8 @@ def _call_review(
         return _call_review_mimo_omni(api_key=api_key, prompt=prompt, model_id=api_model_id)
 
     try:
-        genai = _load_genai()
         types = _load_genai_types()
-        from services.gemini.client_factory import create_gemini_client
-        client = create_gemini_client(api_key=api_key)
+        client = _create_review_client(api_key=api_key)
 
         contents: list = []
         has_audio = False
@@ -641,6 +1969,19 @@ def _call_review(
         glossary = payload.get("glossary", {})
         corrections = payload.get("corrections", [])
 
+        if trace_sink is not None:
+            event = {
+                "model": api_model_id,
+                "review_model": review_model,
+                "has_audio": has_audio,
+                "line_count": line_count,
+                "response_text": response_text,
+                "parsed_payload": payload,
+            }
+            if trace_context:
+                event.update(trace_context)
+            trace_sink.append(event)
+
         logger.info(
             "Review response: %d speakers, %d glossary terms, %d corrections (audio=%s)",
             len(speakers), len(glossary), len(corrections), has_audio,
@@ -659,7 +2000,7 @@ def _call_review_mimo_omni(
     model_id: str = "",
 ) -> tuple[dict, dict, list] | None:
     """Call MiMo-V2-Omni API for text-only review (OpenAI-compatible endpoint)."""
-    effective_model = model_id or _MODEL_MAP.get("mimo_omni", "mimo-v2-omni")
+    effective_model = model_id or _resolve_model_id("mimo_omni")
     payload = {
         "model": effective_model,
         "messages": [{"role": "user", "content": prompt}],
@@ -721,6 +2062,7 @@ def _batched_review(
     video_title: str,
     video_url: str,
     review_model: str = "gemini",
+    trace_sink: list[dict[str, Any]] | None = None,
 ) -> tuple[dict, dict, list]:
     """Process large transcripts in batches with overlap.
 
@@ -802,6 +2144,13 @@ def _batched_review(
             video_title=video_title,
             video_url=video_url,
             review_model=review_model,
+            trace_sink=trace_sink,
+            trace_context={
+                "call_type": "batch",
+                "batch_number": batch_num,
+                "batch_start_index": batch[0].index,
+                "batch_end_index": batch[-1].index,
+            },
         )
 
         if result is not None:
@@ -830,7 +2179,7 @@ def _try_create_audio_cache(
     """
     if audio_path is None or not audio_path.exists():
         return None
-    api_model_id = _resolve_model_id(review_model) if review_model else _MODEL_MAP[_DEFAULT_REVIEW_MODEL]
+    api_model_id = _resolve_model_id(review_model) if review_model else _resolve_model_id("gemini_pro")
     try:
         genai = _load_genai()
         types = _load_genai_types()
@@ -881,6 +2230,11 @@ def _apply_corrections(
     # Build index map for fast lookup
     index_map: dict[int, int] = {line.index: i for i, line in enumerate(working_lines)}
 
+    # Sort: correct_speaker first, then split, then fix_text last.
+    # This ensures split runs on original text before fix_text modifies it.
+    _ACTION_ORDER = {"correct_speaker": 0, "split": 1, "merge": 2, "fix_text": 3}
+    corrections = sorted(corrections, key=lambda c: _ACTION_ORDER.get(c.get("action", ""), 9))
+
     for c in corrections:
         try:
             action = c.get("action", "")
@@ -888,7 +2242,7 @@ def _apply_corrections(
             if action == "correct_speaker":
                 idx = c.get("index")
                 to = c.get("to", "")
-                if not re.match(r"^speaker_[a-z]$", to):
+                if not _SPEAKER_ID_PATTERN.match(to):
                     logger.warning("Invalid speaker_id '%s', skipping", to)
                     continue
                 pos = index_map.get(idx)
@@ -931,6 +2285,16 @@ def _apply_corrections(
                 if has_long_pause:
                     continue
 
+                # Reject merge across different speakers — never merge
+                # different people's words into one segment
+                merged_speakers = {working_lines[p].speaker_id for p in positions}
+                if len(merged_speakers) > 1:
+                    logger.warning(
+                        "Merge spans %d speakers %s, skipping",
+                        len(merged_speakers), merged_speakers,
+                    )
+                    continue
+
                 # Check merged duration
                 merged_duration = (
                     working_lines[positions[-1]].end_ms - working_lines[positions[0]].start_ms
@@ -948,7 +2312,7 @@ def _apply_corrections(
                     working_lines[p].source_text for p in positions
                 )
                 speaker = c.get("speaker", first.speaker_id)
-                if speaker not in {"speaker_a", "speaker_b"}:
+                if not _SPEAKER_ID_PATTERN.match(str(speaker)):
                     speaker = first.speaker_id
 
                 working_lines[positions[0]] = TranscriptLine(
@@ -987,10 +2351,13 @@ def _apply_corrections(
                 if split_pos <= 0:
                     continue
 
-                # Estimate time split proportionally
-                text_ratio = split_pos / max(len(line.source_text), 1)
-                split_ms = line.start_ms + int(
-                    (line.end_ms - line.start_ms) * text_ratio
+                # Estimate time split using word-level timing when available
+                split_ms = estimate_split_ms(
+                    start_ms=line.start_ms,
+                    end_ms=line.end_ms,
+                    source_text=line.source_text,
+                    split_char_pos=split_pos,
+                    words_data=words_data,
                 )
 
                 line_a = TranscriptLine(
@@ -1001,12 +2368,21 @@ def _apply_corrections(
                     speaker_label=line.speaker_label,
                     source_text=line.source_text[:split_pos].strip(),
                 )
+                # speaker_after: if provided and valid, the second half
+                # gets a different speaker (Pass 1 speaker-switch split)
+                split_speaker = line.speaker_id
+                split_label = line.speaker_label
+                speaker_after = c.get("speaker_after", "")
+                if speaker_after and _SPEAKER_ID_PATTERN.match(speaker_after):
+                    split_speaker = speaker_after
+                    split_label = speaker_after.replace("speaker_", "").upper()
+
                 line_b = TranscriptLine(
                     index=line.index + 1000,  # Temporary, will re-index
                     start_ms=split_ms,
                     end_ms=line.end_ms,
-                    speaker_id=line.speaker_id,
-                    speaker_label=line.speaker_label,
+                    speaker_id=split_speaker,
+                    speaker_label=split_label,
                     source_text=line.source_text[split_pos:].strip(),
                 )
 
@@ -1061,6 +2437,14 @@ def _apply_interview_sanity_check(
     from src.services.assemblyai.transcriber import TranscriptLine
 
     if not lines or not speakers:
+        return list(lines), 0
+
+    actual_speakers = {
+        str(line.speaker_id).strip()
+        for line in lines
+        if str(line.speaker_id).strip()
+    }
+    if len(actual_speakers) != 2:
         return list(lines), 0
 
     interview_roles = _resolve_interview_roles(speakers)
@@ -1380,6 +2764,90 @@ def _find_best_split_point(line, words_data: list[dict] | None) -> int | None:
             best_pos = segment_words[i].get("end", 0) + gap // 2
 
     return best_pos
+
+
+def estimate_split_ms(
+    *,
+    start_ms: int,
+    end_ms: int,
+    source_text: str,
+    split_char_pos: int,
+    words_data: list[dict] | None = None,
+) -> int:
+    """Estimate the audio timestamp for a text split position.
+
+    Uses word-level timing data when available for precise split points.
+    Falls back to text-ratio estimation when words_data is unavailable.
+
+    Args:
+        start_ms: segment start time in ms
+        end_ms: segment end time in ms
+        source_text: full source text of the segment
+        split_char_pos: character position in source_text where the split occurs
+        words_data: ASR word-level timing (each entry has 'start', 'end', 'text')
+
+    Returns:
+        Estimated split timestamp in ms, clamped to [start_ms+1, end_ms-1].
+    """
+    duration_ms = end_ms - start_ms
+
+    # Text-ratio estimation (always computed as baseline / fallback)
+    text_len = max(len(source_text), 1)
+    ratio = split_char_pos / text_len
+    ratio_ms = start_ms + int(duration_ms * ratio)
+
+    if words_data and split_char_pos > 0:
+        # Filter words within this segment's time range
+        seg_words = [
+            w for w in words_data
+            if w.get("start", 0) >= start_ms and w.get("end", 0) <= end_ms
+            and w.get("text", "").strip()
+        ]
+
+        if len(seg_words) >= 2:
+            # Walk through words and accumulate character positions to find
+            # the word boundary closest to split_char_pos
+            char_cursor = 0
+            best_word_idx = 0
+            best_char_diff = abs(split_char_pos)
+
+            for i, w in enumerate(seg_words):
+                word_text = w.get("text", "").strip()
+                # Try to find this word's approximate position in source_text
+                pos = source_text.lower().find(word_text.lower(), max(0, char_cursor - 5))
+                if pos >= 0:
+                    char_cursor = pos + len(word_text)
+                else:
+                    char_cursor += len(word_text) + 1
+
+                diff = abs(char_cursor - split_char_pos)
+                if diff < best_char_diff:
+                    best_char_diff = diff
+                    best_word_idx = i
+
+            # Split between best_word_idx and best_word_idx+1
+            if best_word_idx < len(seg_words) - 1:
+                word_end = seg_words[best_word_idx].get("end", 0)
+                next_start = seg_words[best_word_idx + 1].get("start", 0)
+                word_ms = word_end + (next_start - word_end) // 2
+            else:
+                word_ms = seg_words[best_word_idx].get("end", 0)
+
+            # Sanity check: if word-level result deviates >30% of segment
+            # duration from text-ratio estimate, the word matching may be
+            # unreliable — fall back to text-ratio
+            max_deviation_ms = int(duration_ms * 0.3)
+            if abs(word_ms - ratio_ms) <= max_deviation_ms:
+                return max(start_ms + 1, min(word_ms, end_ms - 1))
+            else:
+                logger.warning(
+                    "[Split] Word-level split %dms deviates %dms from text-ratio %dms "
+                    "(max %dms), falling back to text-ratio",
+                    word_ms, abs(word_ms - ratio_ms), ratio_ms, max_deviation_ms,
+                )
+
+    # Fallback: text-ratio estimation
+    return max(start_ms + 1, min(ratio_ms, end_ms - 1))
 
 
 def _snap_to_sentence_boundary(text: str, pos: int) -> int:

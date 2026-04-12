@@ -105,6 +105,9 @@ export async function approveTranslationReview(
   if (input.segmentSpeakers && Object.keys(input.segmentSpeakers).length > 0) {
     body.segment_speakers = input.segmentSpeakers
   }
+  if (input.speakerNames && Object.keys(input.speakerNames).length > 0) {
+    body.speaker_names = input.speakerNames
+  }
 
   await apiClient.post<{ success: boolean; job: Record<string, unknown> }>(
     `/jobs/${input.jobId}/review/translation/approve`,
@@ -255,9 +258,11 @@ function toTranslationReviewResource(
     endMs: typeof item.end_ms === 'number' ? item.end_ms : 0,
   }))
   const payloadOptions = getSpeakerOptions(payload)
+  // Read reviewer-identified speaker names from translation_review payload
+  const reviewerNames: Record<string, string> = (section as unknown as Record<string, unknown>)?.speaker_names as Record<string, string> ?? {}
   const speakerOptions = mergeSpeakerOptions(payloadOptions, items.map((item) => ({
     speakerId: item.speakerId,
-    displayName: item.displayName,
+    displayName: reviewerNames[item.speakerId] || item.displayName,
   })))
   const projectDir = resolveProjectDir(payload, job.projectDir)
 

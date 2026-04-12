@@ -161,3 +161,20 @@ export async function getSpeakerAudioSegments(
     totalDurationS: result.total_duration_s,
   }
 }
+
+export interface VoiceSelectionPricingResponse {
+  service_mode: string
+  credits_per_minute: {
+    volcengine: number
+    cosyvoice: number
+    minimax_turbo: number
+    minimax_hd: number
+  }
+  voice_clone_cost_credits: number
+}
+
+export async function getVoiceSelectionPricing(): Promise<VoiceSelectionPricingResponse> {
+  const resp = await fetch('/api/voice-selection/pricing', { credentials: 'include' })
+  if (!resp.ok) throw new Error(`pricing fetch failed: ${resp.status}`)
+  return resp.json()
+}

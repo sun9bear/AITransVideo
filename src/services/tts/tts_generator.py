@@ -548,8 +548,10 @@ class TTSGenerator:
             tts_model = _normalize_optional_text(raw_model)
 
         resource_id = RESOURCE_ID_2_0 if service_mode == "studio" else RESOURCE_ID_1_0
-        # tts_model for volcengine = req_params.model (e.g. "seed-tts-1.1" or None)
-        model = tts_model
+        # tts_model for volcengine = req_params.model (e.g. "seed-tts-1.1" or None).
+        # Ignore non-volcengine models (e.g. "speech-2.8-hd" from MiniMax jobs
+        # when per-speaker provider override switches to volcengine).
+        model = tts_model if tts_model and tts_model.startswith("seed-tts") else None
 
         # --- 2. Voice selection (priority chain per plan §5.7) ---
         #

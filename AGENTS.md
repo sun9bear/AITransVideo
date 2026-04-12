@@ -10,6 +10,14 @@ Build a Python workflow that outputs Jianying draft projects rather than rendere
 - Pipeline target is Jianying draft output, not direct rendered MP4 as the main deliverable.
 - Prefer minimal, testable, replaceable abstractions.
 
+## Project graphs
+- New sessions should read `docs/graphs/GITNEXUS_PROJECT_GRAPH.md` first, then enter the relevant subgraph by task.
+- Graph index: `docs/graphs/README.md`
+- Workflow core: `docs/graphs/GITNEXUS_WORKFLOW_CORE_GRAPH.md`
+- Commercialization: `docs/graphs/GITNEXUS_COMMERCIALIZATION_GRAPH.md`
+- Review flow: `docs/graphs/GITNEXUS_REVIEW_GRAPH.md`
+- Use these graph docs as the fast orientation layer before deeper code reads when the task is architecture-sensitive or the codebase is unfamiliar.
+
 ## Current execution-phase rules
 - Treat the current commercialization and frontend work as a staged v2 migration, not a big-bang rewrite.
 - Gateway is the source of truth for plan catalog, trial rules, prices, and entitlements. Frontend consumes these facts and must not become the final pricing or entitlement source of truth.

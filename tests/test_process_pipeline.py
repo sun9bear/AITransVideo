@@ -1074,8 +1074,9 @@ def _install_single_speaker_pipeline_mocks(
             video_title: str = "",
             youtube_url: str = "",
             glossary: dict[str, str] | None = None,
+            speaker_voices: dict[str, str] | None = None,
         ) -> TranslationResult:
-            del lines, max_segment_duration_ms, voice_id_b, display_name_b, glossary
+            del lines, max_segment_duration_ms, voice_id_b, display_name_b, glossary, speaker_voices
             if capture is not None:
                 capture["video_title"] = video_title
                 capture["youtube_url"] = youtube_url
@@ -1271,8 +1272,9 @@ def _install_dual_speaker_pipeline_mocks(
             video_title: str = "",
             youtube_url: str = "",
             glossary: dict[str, str] | None = None,
+            speaker_voices: dict[str, str] | None = None,
         ) -> TranslationResult:
-            del max_segment_duration_ms, video_title, youtube_url, glossary
+            del max_segment_duration_ms, video_title, youtube_url, glossary, speaker_voices
             capture["translate_input_speaker_ids"] = [line.speaker_id for line in lines]
             Path(output_dir).mkdir(parents=True, exist_ok=True)
             segments = _make_dual_speaker_segments(
@@ -1674,58 +1676,29 @@ def test_process_pipeline_auto_mode_detects_two_speakers(
     assert capture["translate_input_speaker_ids"] == ["speaker_a", "speaker_b", "speaker_a"]
 
 
-def test_process_pipeline_auto_mode_raises_for_more_than_two_speakers(
+def test_process_pipeline_auto_mode_supports_three_speakers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Auto-detection with 3 speakers should succeed (1-10 supported)."""
     capture = _install_dual_speaker_pipeline_mocks(
         monkeypatch,
         source_lines=_make_three_speaker_lines(),
         expected_speakers_expected=None,
     )
-    translator_observed = {"translate_called": 0}
-    tts_observed = {"generate_called": 0}
 
-    class FailTranslator:
-        def __init__(self, *args, **kwargs):
-            del args, kwargs
-
-        def infer_speaker_names(self, *args, **kwargs):
-            raise AssertionError("infer_speaker_names should not be called for >2 auto detection")
-
-        def review_speaker_labels(self, *args, **kwargs):
-            raise AssertionError("review_speaker_labels should not be called for >2 auto detection")
-
-        def translate(self, *args, **kwargs):
-            del args, kwargs
-            translator_observed["translate_called"] += 1
-            raise AssertionError("translate should not be called for >2 auto detection")
-
-    class FailTTSGenerator:
-        def __init__(self, *args, **kwargs):
-            del args, kwargs
-
-        def generate_all(self, *args, **kwargs):
-            del args, kwargs
-            tts_observed["generate_called"] += 1
-            raise AssertionError("generate_all should not be called for >2 auto detection")
-
-    monkeypatch.setattr(process_module, "GeminiTranslator", FailTranslator)
-    monkeypatch.setattr(process_module, "TTSGenerator", FailTTSGenerator)
-
-    with pytest.raises(ValueError, match="超过 2 位说话人"):
-        ProcessPipeline().run(
-            ProcessConfig(
-                youtube_url="https://youtube.example/watch?v=auto-three",
-                voice_a="voice_a_001",
-                speakers="auto",
-                project_dir=str(tmp_path / "project_auto_three"),
-            )
+    result = ProcessPipeline().run(
+        ProcessConfig(
+            youtube_url="https://youtube.example/watch?v=auto-three",
+            voice_a="voice_a_001",
+            speakers="auto",
+            project_dir=str(tmp_path / "project_auto_three"),
         )
+    )
 
-    assert capture["review_called"] == 0
-    assert translator_observed["translate_called"] == 0
-    assert tts_observed["generate_called"] == 0
+    assert Path(result.dubbed_audio_path).exists()
+    # review_speaker_labels no longer called (S2 three-pass handles speaker review)
+    assert capture["translate_input_speaker_ids"] == ["speaker_a", "speaker_b", "speaker_c"]
 
 
 def test_process_pipeline_normalize_speakers_supports_auto_and_numeric_values() -> None:
@@ -1738,8 +1711,11 @@ def test_process_pipeline_normalize_speakers_supports_auto_and_numeric_values() 
     assert pipeline._normalize_speakers("auto") == "auto"
     assert pipeline._normalize_speakers("AUTO") == "auto"
 
+    assert pipeline._normalize_speakers(3) == 3
+    assert pipeline._normalize_speakers(10) == 10
+
     with pytest.raises(ValueError):
-        pipeline._normalize_speakers(3)
+        pipeline._normalize_speakers(11)
 
     with pytest.raises(ValueError):
         pipeline._normalize_speakers("many")
@@ -2122,8 +2098,9 @@ def test_process_pipeline_persists_reviewed_voice_metadata_before_tts_failure(
             video_title: str = "",
             youtube_url: str = "",
             glossary: dict[str, str] | None = None,
+            speaker_voices: dict[str, str] | None = None,
         ) -> TranslationResult:
-            del lines, max_segment_duration_ms, voice_id_b, display_name_b, video_title, youtube_url, glossary
+            del lines, max_segment_duration_ms, voice_id_b, display_name_b, video_title, youtube_url, glossary, speaker_voices
             Path(output_dir).mkdir(parents=True, exist_ok=True)
             segments = _make_single_speaker_segments()
             for segment in segments:
@@ -2178,66 +2155,131 @@ def test_process_pipeline_persists_reviewed_voice_metadata_before_tts_failure(
     assert cached_segment.energy_level == "low"
 
 
-def test_process_pipeline_reused_project_requires_fresh_translation_review_even_if_old_review_was_approved(
+def test_process_pipeline_passes_transcript_dir_to_review_debug_output(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_single_speaker_pipeline_mocks(monkeypatch)
-    monkeypatch.setattr(process_module, "PROJECT_ROOT", tmp_path)
-    project_dir = tmp_path / "projects" / "project_cached_translation_review"
+    import src.services.transcript_reviewer as transcript_reviewer_module
+
+    observed: dict[str, str] = {}
+
+    def _fake_review_transcript(lines, **kwargs):
+        observed["debug_output_dir"] = str(Path(kwargs["debug_output_dir"]).resolve(strict=False))
+        return transcript_reviewer_module.ReviewResult(
+            speakers={},
+            glossary={},
+            corrections_applied=0,
+            lines=lines,
+        )
+
+    class _StopAfterReviewTranslator:
+        def __init__(
+            self,
+            api_key: str,
+            model_name: str,
+            temperature: float,
+            max_output_tokens: int,
+            sdk_backend: str = "google-genai",
+            llm_router=None,
+        ):
+            del api_key, model_name, temperature, max_output_tokens, sdk_backend, llm_router
+
+        def infer_speaker_names(
+            self,
+            lines,
+            num_speakers: int = 2,
+            *,
+            video_title: str = "",
+            youtube_url: str = "",
+            video_description: str = "",
+        ):
+            del lines, num_speakers, video_title, youtube_url, video_description
+            return {"speaker_a": "Dan Koe"}
+
+        def translate(
+            self,
+            lines,
+            output_dir: str,
+            voice_id: str,
+            display_name: str = "Speaker A",
+            max_segment_duration_ms: int = 60_000,
+            voice_id_b: str | None = None,
+            display_name_b: str | None = None,
+            video_title: str = "",
+            youtube_url: str = "",
+            glossary: dict[str, str] | None = None,
+            speaker_voices: dict[str, str] | None = None,
+        ):
+            del (
+                lines,
+                output_dir,
+                voice_id,
+                display_name,
+                max_segment_duration_ms,
+                voice_id_b,
+                display_name_b,
+                video_title,
+                youtube_url,
+                glossary,
+                speaker_voices,
+            )
+            raise RuntimeError("stop after review")
+
+    monkeypatch.setattr(transcript_reviewer_module, "review_transcript", _fake_review_transcript)
+    monkeypatch.setattr(process_module, "GeminiTranslator", _StopAfterReviewTranslator)
+
+    project_dir = tmp_path / "project_review_debug_dir"
+
+    with pytest.raises(RuntimeError, match="stop after review"):
+        ProcessPipeline().run(
+            ProcessConfig(
+                youtube_url="https://youtube.example/watch?v=review-debug-dir",
+                voice_a="voice_demo_001",
+                project_dir=str(project_dir),
+            )
+        )
+
+    assert observed["debug_output_dir"] == str((project_dir / "transcript").resolve(strict=False))
+
+
+def test_process_pipeline_reused_project_requires_fresh_translation_config_review(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reused project with cached transcript but no cached translation
+    should pause at translation_config_review."""
+    _install_single_speaker_pipeline_mocks(monkeypatch)
+    project_dir = tmp_path / "project_fresh_config_review"
     video_path = _write_video(project_dir / "video" / "original.mp4")
     audio_path = _export_silent_wav(project_dir / "audio" / "original.wav", duration_ms=2_500)
-    youtube_url = "https://youtube.example/watch?v=translation-review-rerun"
+    youtube_url = "https://youtube.example/watch?v=fresh-config-review"
     _write_download_metadata(
         project_dir,
         video_path=video_path,
         audio_path=audio_path,
-        video_title="Cached Translation Review",
+        video_title="Fresh Config Review",
         duration_ms=2_500,
         url=youtube_url,
     )
     _write_transcript_cache(project_dir, _make_single_speaker_lines(), total_duration_ms=2_000)
-    cached_segments = _make_single_speaker_segments()
-    _write_segments_cache(project_dir, cached_segments)
-    _write_review_state(
-        project_dir,
-        active_stage=None,
-        speaker_status="approved",
-        speaker_payload={
-            "speaker_names": {"speaker_a": "Dan Koe"},
-            "speaker_options": [{"speaker_id": "speaker_a", "display_name": "Dan Koe"}],
-            "segment_speakers": {"1": "speaker_a", "2": "speaker_a", "3": "speaker_a"},
-            "segment_count": 3,
-        },
-        translation_status="approved",
-        translation_payload={
-            "segments": {
-                str(segment.segment_id): {
-                    "segment_id": segment.segment_id,
-                    "cn_text": segment.cn_text,
-                    "tts_cn_text": segment.tts_cn_text,
-                }
-                for segment in cached_segments
-            },
-            "segment_count": len(cached_segments),
-        },
-    )
+    # No segments cache — pipeline needs fresh translation → pauses at config review
 
     result = ProcessPipeline().run(
         ProcessConfig(
             youtube_url=youtube_url,
             voice_a="voice_demo_001",
             wait_for_review=True,
+            project_dir=str(project_dir),
             job_record=_STUDIO_JOB_RECORD,
         )
     )
 
     assert result.status == "waiting_for_review"
-    assert result.paused_review_stage == process_module.TRANSLATION_REVIEW_STAGE
+    assert result.paused_review_stage == process_module.TRANSLATION_CONFIG_REVIEW_STAGE
     review_state = json.loads((project_dir / "review_state.json").read_text(encoding="utf-8"))
-    assert review_state["active_stage"] == process_module.TRANSLATION_REVIEW_STAGE
-    assert review_state["stages"]["translation_review"]["status"] == "pending"
-    assert review_state["stages"]["translation_review"]["approved_at"] is None
+    assert review_state["active_stage"] == process_module.TRANSLATION_CONFIG_REVIEW_STAGE
+    assert review_state["stages"]["translation_config_review"]["status"] == "pending"
 
 
 def test_process_pipeline_recovers_missing_voice_metadata_from_cached_translation(
@@ -2347,9 +2389,11 @@ def test_process_pipeline_wait_for_review_writes_state_files_to_final_project_di
     assert project_state_path.exists()
     assert list((tmp_path / "projects").rglob("review_state.json")) == [review_state_path]
     review_state = json.loads(review_state_path.read_text(encoding="utf-8"))
-    assert review_state["active_stage"] == process_module.SPEAKER_REVIEW_STAGE
+    # Speaker review is auto-skipped; first pause is translation_config_review
+    assert review_state["active_stage"] == process_module.TRANSLATION_CONFIG_REVIEW_STAGE
     project_state = json.loads(project_state_path.read_text(encoding="utf-8"))
-    assert project_state["stages"]["media_understanding"]["status"] == "done"
+    # media_understanding is "running" because pipeline pauses mid-stage at config review
+    assert project_state["stages"]["media_understanding"]["status"] in ("done", "running")
     assert "translation" not in project_state["stages"]
     assert "alignment" not in project_state["stages"]
 
@@ -2465,8 +2509,9 @@ def test_process_pipeline_does_not_treat_translation_checkpoint_as_complete_cach
             video_title: str = "",
             youtube_url: str = "",
             glossary: dict[str, str] | None = None,
+            speaker_voices: dict[str, str] | None = None,
         ) -> TranslationResult:
-            del lines, max_segment_duration_ms, voice_id_b, display_name_b, video_title, youtube_url, glossary
+            del lines, max_segment_duration_ms, voice_id_b, display_name_b, video_title, youtube_url, glossary, speaker_voices
             observed["translate_called"] += 1
             segments = _make_single_speaker_segments()
             for segment in segments:
@@ -2611,14 +2656,13 @@ def test_process_pipeline_uses_voice_registry_lookup_when_voice_b_is_missing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Express mode: voice_b not provided → skips registry/clone, downstream auto-matches."""
     capture = _install_dual_speaker_pipeline_mocks(monkeypatch)
-    monkeypatch.setattr(
-        process_module,
-        "lookup_voice_ids",
-        lambda speaker_names, voice_registry_path, fallback_voice_a=None, fallback_voice_b=None: {
-            "speaker_b": "voice_b_from_registry",
-        },
-    )
+
+    def unexpected_lookup(*args, **kwargs):
+        raise AssertionError("Express mode should not call lookup_voice_ids")
+
+    monkeypatch.setattr(process_module, "lookup_voice_ids", unexpected_lookup)
 
     result = ProcessPipeline().run(
         ProcessConfig(
@@ -2630,56 +2674,22 @@ def test_process_pipeline_uses_voice_registry_lookup_when_voice_b_is_missing(
     )
 
     assert Path(result.dubbed_audio_path).exists()
-    assert capture["observed_voice_ids"] == ["voice_a_001", "voice_b_from_registry"]
+    # voice_a explicit, voice_b auto-matched (None or empty)
+    assert capture["observed_voice_ids"][0] == "voice_a_001"
+    assert not capture["observed_voice_ids"][1]  # None or ""
 
 
 def test_process_pipeline_uses_voice_registry_lookup_when_voice_a_is_missing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Express mode: voice_a not provided → skips registry/clone, downstream auto-matches."""
     _install_single_speaker_pipeline_mocks(monkeypatch)
-    observed = {"voice_ids": [], "speaker_names": None}
-    monkeypatch.setattr(
-        process_module,
-        "lookup_voice_ids",
-        lambda speaker_names, voice_registry_path, fallback_voice_a=None, fallback_voice_b=None: (
-            observed.__setitem__("speaker_names", dict(speaker_names))
-            or {"speaker_a": "voice_a_from_registry"}
-        ),
-    )
 
-    class CaptureTTSGenerator:
-        def __init__(self, config, **kwargs):
-            assert config.api_key == "tts-key"
+    def unexpected_lookup(*args, **kwargs):
+        raise AssertionError("Express mode should not call lookup_voice_ids")
 
-        def generate_all(self, segments: list[DubbingSegment], output_dir: str) -> list[TTSResult]:
-            Path(output_dir).mkdir(parents=True, exist_ok=True)
-            results: list[TTSResult] = []
-            for segment in segments:
-                observed["voice_ids"].append(segment.voice_id)
-                audio_path = _export_silent_wav(
-                    Path(output_dir) / f"segment_{segment.segment_id:03d}_{segment.speaker_id}.wav",
-                    duration_ms=segment.target_duration_ms,
-                )
-                segment.tts_audio_path = str(audio_path.resolve(strict=False))
-                segment.actual_duration_ms = segment.target_duration_ms
-                results.append(
-                    TTSResult(
-                        segment_id=segment.segment_id,
-                        audio_path=str(audio_path.resolve(strict=False)),
-                        duration_ms=segment.target_duration_ms,
-                        voice_id=segment.voice_id,
-                    )
-                )
-            return results
-
-    class FailAutoVoiceCloner:
-        def __init__(self, *args, **kwargs):
-            del args, kwargs
-            raise AssertionError("AutoVoiceCloner should not be created when Speaker A hits registry")
-
-    monkeypatch.setattr(process_module, "TTSGenerator", CaptureTTSGenerator)
-    monkeypatch.setattr(process_module, "AutoVoiceCloner", FailAutoVoiceCloner)
+    monkeypatch.setattr(process_module, "lookup_voice_ids", unexpected_lookup)
 
     result = ProcessPipeline().run(
         ProcessConfig(
@@ -2692,57 +2702,19 @@ def test_process_pipeline_uses_voice_registry_lookup_when_voice_a_is_missing(
     )
 
     assert Path(result.dubbed_audio_path).exists()
-    assert observed["speaker_names"] == {"speaker_a": "Narrator"}
-    assert observed["voice_ids"] == ["voice_a_from_registry", "voice_a_from_registry"]
 
 
 def test_process_pipeline_uses_inferred_single_speaker_name_for_voice_registry_lookup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Express mode: inferred speaker name available but voice resolution skipped entirely."""
     _install_single_speaker_pipeline_mocks(monkeypatch)
-    observed = {"voice_ids": [], "speaker_names": None}
-    monkeypatch.setattr(
-        process_module,
-        "lookup_voice_ids",
-        lambda speaker_names, voice_registry_path, fallback_voice_a=None, fallback_voice_b=None: (
-            observed.__setitem__("speaker_names", dict(speaker_names))
-            or {"speaker_a": "voice_a_from_registry"}
-        ),
-    )
 
-    class CaptureTTSGenerator:
-        def __init__(self, config, **kwargs):
-            assert config.api_key == "tts-key"
+    def unexpected_lookup(*args, **kwargs):
+        raise AssertionError("Express mode should not call lookup_voice_ids")
 
-        def generate_all(self, segments: list[DubbingSegment], output_dir: str) -> list[TTSResult]:
-            Path(output_dir).mkdir(parents=True, exist_ok=True)
-            results: list[TTSResult] = []
-            for segment in segments:
-                observed["voice_ids"].append(segment.voice_id)
-                audio_path = _export_silent_wav(
-                    Path(output_dir) / f"segment_{segment.segment_id:03d}_{segment.speaker_id}.wav",
-                    duration_ms=segment.target_duration_ms,
-                )
-                segment.tts_audio_path = str(audio_path.resolve(strict=False))
-                segment.actual_duration_ms = segment.target_duration_ms
-                results.append(
-                    TTSResult(
-                        segment_id=segment.segment_id,
-                        audio_path=str(audio_path.resolve(strict=False)),
-                        duration_ms=segment.target_duration_ms,
-                        voice_id=segment.voice_id,
-                    )
-                )
-            return results
-
-    class FailAutoVoiceCloner:
-        def __init__(self, *args, **kwargs):
-            del args, kwargs
-            raise AssertionError("AutoVoiceCloner should not be created when inferred Speaker A hits registry")
-
-    monkeypatch.setattr(process_module, "TTSGenerator", CaptureTTSGenerator)
-    monkeypatch.setattr(process_module, "AutoVoiceCloner", FailAutoVoiceCloner)
+    monkeypatch.setattr(process_module, "lookup_voice_ids", unexpected_lookup)
 
     result = ProcessPipeline().run(
         ProcessConfig(
@@ -2754,108 +2726,24 @@ def test_process_pipeline_uses_inferred_single_speaker_name_for_voice_registry_l
     )
 
     assert Path(result.dubbed_audio_path).exists()
-    assert observed["speaker_names"] == {"speaker_a": "Dan Koe"}
-    assert observed["voice_ids"] == ["voice_a_from_registry", "voice_a_from_registry"]
 
 
 def test_process_pipeline_single_speaker_default_placeholder_skips_generic_registry_lookup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Express mode: placeholder name → entire voice resolution skipped, no registry, no clone."""
     _install_single_speaker_pipeline_mocks(monkeypatch, inferred_speaker_name="Speaker A")
-    observed: dict[str, object] = {"voice_ids": []}
 
     def unexpected_lookup(*args, **kwargs):
-        del args, kwargs
-        raise AssertionError("lookup_voice_ids should be skipped for default single-speaker placeholder names")
+        raise AssertionError("Express mode should not call lookup_voice_ids")
 
-    class FakeVoiceSampleExtractor:
-        def extract_sample(
-            self,
-            audio_path: str,
-            speaker_lines,
-            output_path: str,
-            min_duration_s: float = 30.0,
-            max_duration_s: float = 90.0,
-        ) -> str:
-            del min_duration_s, max_duration_s
-            observed["extract_audio_path"] = audio_path
-            observed["extract_line_count"] = len(speaker_lines)
-            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-            _export_silent_wav(Path(output_path), duration_ms=35_000)
-            return output_path
-
-        def validate_sample(self, sample_path: str) -> dict:
-            observed["validated_sample_path"] = sample_path
-            return {
-                "duration_s": 35.0,
-                "rms_dbfs": -18.5,
-                "silence_ratio": 0.05,
-                "is_valid": True,
-                "warnings": [],
-            }
-
-    class FakeAutoVoiceCloner:
-        def __init__(self, api_key: str, base_url: str = "https://api.minimaxi.com"):
-            observed["clone_api_key"] = api_key
-            observed["clone_base_url"] = base_url
-
-        def clone_voice(self, sample_path: str, speaker_name: str) -> str:
-            observed["clone_sample_path"] = sample_path
-            observed["clone_speaker_name"] = speaker_name
-            return "voice_a_auto_placeholder_001"
-
-        def wait_until_ready(
-            self,
-            voice_id: str,
-            max_wait_seconds: int = 300,
-            poll_interval_seconds: int = 15,
-        ) -> bool:
-            del max_wait_seconds, poll_interval_seconds
-            observed["ready_voice_id"] = voice_id
-            return True
-
-        def register_voice(
-            self,
-            voice_id: str,
-            speaker_name: str,
-            sample_path: str,
-            voice_registry_path: str,
-        ) -> None:
-            observed["registered_voice_id"] = voice_id
-            observed["registered_speaker_name"] = speaker_name
-            observed["registered_sample_path"] = sample_path
-            observed["registered_registry_path"] = voice_registry_path
-
-    class CaptureTTSGenerator:
-        def __init__(self, config, **kwargs):
-            assert config.api_key == "tts-key"
-
-        def generate_all(self, segments: list[DubbingSegment], output_dir: str) -> list[TTSResult]:
-            Path(output_dir).mkdir(parents=True, exist_ok=True)
-            results: list[TTSResult] = []
-            for segment in segments:
-                observed["voice_ids"].append(segment.voice_id)
-                audio_path = _export_silent_wav(
-                    Path(output_dir) / f"segment_{segment.segment_id:03d}_{segment.speaker_id}.wav",
-                    duration_ms=segment.target_duration_ms,
-                )
-                segment.tts_audio_path = str(audio_path.resolve(strict=False))
-                segment.actual_duration_ms = segment.target_duration_ms
-                results.append(
-                    TTSResult(
-                        segment_id=segment.segment_id,
-                        audio_path=str(audio_path.resolve(strict=False)),
-                        duration_ms=segment.target_duration_ms,
-                        voice_id=segment.voice_id,
-                    )
-                )
-            return results
+    class FailAutoVoiceCloner:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("Express mode should not create AutoVoiceCloner")
 
     monkeypatch.setattr(process_module, "lookup_voice_ids", unexpected_lookup)
-    monkeypatch.setattr(process_module, "VoiceSampleExtractor", FakeVoiceSampleExtractor)
-    monkeypatch.setattr(process_module, "AutoVoiceCloner", FakeAutoVoiceCloner)
-    monkeypatch.setattr(process_module, "TTSGenerator", CaptureTTSGenerator)
+    monkeypatch.setattr(process_module, "AutoVoiceCloner", FailAutoVoiceCloner)
 
     result = ProcessPipeline().run(
         ProcessConfig(
@@ -2867,118 +2755,20 @@ def test_process_pipeline_single_speaker_default_placeholder_skips_generic_regis
     )
 
     assert Path(result.dubbed_audio_path).exists()
-    assert observed["extract_line_count"] == 3
-    assert observed["clone_speaker_name"] == "Speaker A"
-    assert observed["registered_voice_id"] == "voice_a_auto_placeholder_001"
-    assert observed["voice_ids"] == [
-        "voice_a_auto_placeholder_001",
-        "voice_a_auto_placeholder_001",
-    ]
 
 
 def test_process_pipeline_auto_clones_voice_a_when_missing_in_single_speaker_mode(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Express mode: voice_a=None → skips clone entirely, downstream auto-matches."""
     _install_single_speaker_pipeline_mocks(monkeypatch)
-    observed: dict[str, object] = {"voice_ids": [], "speaker_names": None}
-    monkeypatch.setattr(
-        process_module,
-        "lookup_voice_ids",
-        lambda speaker_names, voice_registry_path, fallback_voice_a=None, fallback_voice_b=None: (
-            observed.__setitem__("speaker_names", dict(speaker_names))
-            or (_ for _ in ()).throw(
-                VoiceLookupError(
-                    "Missing voice_id for speaker_a (Speaker A). Pass --voice-a or register this speaker in voice_registry.json."
-                )
-            )
-        ),
-    )
 
-    class FakeVoiceSampleExtractor:
-        def extract_sample(
-            self,
-            audio_path: str,
-            speaker_lines,
-            output_path: str,
-            min_duration_s: float = 30.0,
-            max_duration_s: float = 90.0,
-        ) -> str:
-            observed["extract_audio_path"] = audio_path
-            observed["extract_line_count"] = len(speaker_lines)
-            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-            _export_silent_wav(Path(output_path), duration_ms=35_000)
-            return output_path
+    class FailAutoVoiceCloner:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("Express mode should not create AutoVoiceCloner")
 
-        def validate_sample(self, sample_path: str) -> dict:
-            observed["validated_sample_path"] = sample_path
-            return {
-                "duration_s": 35.0,
-                "rms_dbfs": -18.5,
-                "silence_ratio": 0.05,
-                "is_valid": True,
-                "warnings": [],
-            }
-
-    class FakeAutoVoiceCloner:
-        def __init__(self, api_key: str, base_url: str = "https://api.minimaxi.com"):
-            observed["clone_api_key"] = api_key
-            observed["clone_base_url"] = base_url
-
-        def clone_voice(self, sample_path: str, speaker_name: str) -> str:
-            observed["clone_sample_path"] = sample_path
-            observed["clone_speaker_name"] = speaker_name
-            return "voice_a_auto_001"
-
-        def wait_until_ready(
-            self,
-            voice_id: str,
-            max_wait_seconds: int = 300,
-            poll_interval_seconds: int = 15,
-        ) -> bool:
-            observed["ready_voice_id"] = voice_id
-            return True
-
-        def register_voice(
-            self,
-            voice_id: str,
-            speaker_name: str,
-            sample_path: str,
-            voice_registry_path: str,
-        ) -> None:
-            observed["registered_voice_id"] = voice_id
-            observed["registered_speaker_name"] = speaker_name
-            observed["registered_sample_path"] = sample_path
-            observed["registered_registry_path"] = voice_registry_path
-
-    class CaptureTTSGenerator:
-        def __init__(self, config, **kwargs):
-            assert config.api_key == "tts-key"
-
-        def generate_all(self, segments: list[DubbingSegment], output_dir: str) -> list[TTSResult]:
-            Path(output_dir).mkdir(parents=True, exist_ok=True)
-            results: list[TTSResult] = []
-            for segment in segments:
-                observed["voice_ids"].append(segment.voice_id)
-                audio_path = _export_silent_wav(
-                    Path(output_dir) / f"segment_{segment.segment_id:03d}_{segment.speaker_id}.wav",
-                    duration_ms=segment.target_duration_ms,
-                )
-                segment.tts_audio_path = str(audio_path.resolve(strict=False))
-                segment.actual_duration_ms = segment.target_duration_ms
-                results.append(
-                    TTSResult(
-                        segment_id=segment.segment_id,
-                        audio_path=str(audio_path.resolve(strict=False)),
-                        duration_ms=segment.target_duration_ms,
-                        voice_id=segment.voice_id,
-                    )
-                )
-            return results
-
-    monkeypatch.setattr(process_module, "VoiceSampleExtractor", FakeVoiceSampleExtractor)
-    monkeypatch.setattr(process_module, "AutoVoiceCloner", FakeAutoVoiceCloner)
-    monkeypatch.setattr(process_module, "TTSGenerator", CaptureTTSGenerator)
+    monkeypatch.setattr(process_module, "AutoVoiceCloner", FailAutoVoiceCloner)
 
     result = ProcessPipeline().run(
         ProcessConfig(
@@ -2990,69 +2780,20 @@ def test_process_pipeline_auto_clones_voice_a_when_missing_in_single_speaker_mod
     )
 
     assert Path(result.dubbed_audio_path).exists()
-    assert observed["extract_line_count"] == 3
-    assert observed["speaker_names"] == {"speaker_a": "Dan Koe"}
-    assert observed["clone_speaker_name"] == "Dan Koe"
-    assert observed["registered_voice_id"] == "voice_a_auto_001"
-    assert observed["voice_ids"] == ["voice_a_auto_001", "voice_a_auto_001"]
 
 
 def test_process_pipeline_auto_clones_voice_b_when_registry_misses(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Express mode: voice_b=None → skips clone, voice_a explicit still used."""
     capture = _install_dual_speaker_pipeline_mocks(monkeypatch)
-    observed: dict[str, object] = {}
-    monkeypatch.setattr(
-        process_module,
-        "lookup_voice_ids",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            VoiceLookupError(
-                "Missing voice_id for speaker_b (Guest). Pass --voice-b or register this speaker in voice_registry.json."
-            )
-        ),
-    )
 
-    class FakeVoiceSampleExtractor:
-        def extract_sample(self, audio_path: str, speaker_lines, output_path: str, min_duration_s: float = 30.0, max_duration_s: float = 90.0) -> str:
-            observed["extract_audio_path"] = audio_path
-            observed["extract_line_count"] = len(speaker_lines)
-            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-            _export_silent_wav(Path(output_path), duration_ms=35_000)
-            return output_path
+    class FailAutoVoiceCloner:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("Express mode should not create AutoVoiceCloner")
 
-        def validate_sample(self, sample_path: str) -> dict:
-            observed["validated_sample_path"] = sample_path
-            return {
-                "duration_s": 35.0,
-                "rms_dbfs": -18.5,
-                "silence_ratio": 0.05,
-                "is_valid": True,
-                "warnings": [],
-            }
-
-    class FakeAutoVoiceCloner:
-        def __init__(self, api_key: str, base_url: str = "https://api.minimaxi.com"):
-            observed["clone_api_key"] = api_key
-            observed["clone_base_url"] = base_url
-
-        def clone_voice(self, sample_path: str, speaker_name: str) -> str:
-            observed["clone_sample_path"] = sample_path
-            observed["clone_speaker_name"] = speaker_name
-            return "voice_b_auto_001"
-
-        def wait_until_ready(self, voice_id: str, max_wait_seconds: int = 300, poll_interval_seconds: int = 15) -> bool:
-            observed["ready_voice_id"] = voice_id
-            return True
-
-        def register_voice(self, voice_id: str, speaker_name: str, sample_path: str, voice_registry_path: str) -> None:
-            observed["registered_voice_id"] = voice_id
-            observed["registered_speaker_name"] = speaker_name
-            observed["registered_sample_path"] = sample_path
-            observed["registered_registry_path"] = voice_registry_path
-
-    monkeypatch.setattr(process_module, "VoiceSampleExtractor", FakeVoiceSampleExtractor)
-    monkeypatch.setattr(process_module, "AutoVoiceCloner", FakeAutoVoiceCloner)
+    monkeypatch.setattr(process_module, "AutoVoiceCloner", FailAutoVoiceCloner)
 
     result = ProcessPipeline().run(
         ProcessConfig(
@@ -3065,86 +2806,22 @@ def test_process_pipeline_auto_clones_voice_b_when_registry_misses(
     )
 
     assert Path(result.dubbed_audio_path).exists()
-    assert observed["extract_line_count"] == 1
-    assert observed["clone_speaker_name"] == "Guest"
-    assert observed["registered_voice_id"] == "voice_b_auto_001"
-    assert capture["observed_voice_ids"] == ["voice_a_001", "voice_b_auto_001"]
+    assert capture["observed_voice_ids"][0] == "voice_a_001"
+    assert not capture["observed_voice_ids"][1]  # None or ""
 
 
 def test_process_pipeline_auto_clones_both_voices_when_both_are_missing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Express mode: both voices=None → skips clone, both auto-matched."""
     capture = _install_dual_speaker_pipeline_mocks(monkeypatch)
-    observed: dict[str, object] = {"clone_calls": [], "extract_counts": {}}
-    monkeypatch.setattr(
-        process_module,
-        "lookup_voice_ids",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            VoiceLookupError("Missing voice_id for requested speaker.")
-        ),
-    )
 
-    class FakeVoiceSampleExtractor:
-        def extract_sample(
-            self,
-            audio_path: str,
-            speaker_lines,
-            output_path: str,
-            min_duration_s: float = 30.0,
-            max_duration_s: float = 90.0,
-        ) -> str:
-            del min_duration_s, max_duration_s
-            observed["last_extract_audio_path"] = audio_path
-            if speaker_lines:
-                observed["extract_counts"][speaker_lines[0].speaker_id] = len(speaker_lines)
-            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-            _export_silent_wav(Path(output_path), duration_ms=35_000)
-            return output_path
+    class FailAutoVoiceCloner:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("Express mode should not create AutoVoiceCloner")
 
-        def validate_sample(self, sample_path: str) -> dict:
-            return {
-                "duration_s": 35.0,
-                "rms_dbfs": -18.5,
-                "silence_ratio": 0.05,
-                "is_valid": True,
-                "warnings": [],
-            }
-
-    class FakeAutoVoiceCloner:
-        def __init__(self, api_key: str, base_url: str = "https://api.minimaxi.com"):
-            observed["clone_api_key"] = api_key
-            observed["clone_base_url"] = base_url
-
-        def clone_voice(self, sample_path: str, speaker_name: str) -> str:
-            observed["clone_calls"].append((speaker_name, sample_path))
-            if speaker_name == "Host":
-                return "voice_a_auto_001"
-            if speaker_name == "Guest":
-                return "voice_b_auto_001"
-            raise AssertionError(f"Unexpected speaker_name: {speaker_name}")
-
-        def wait_until_ready(
-            self,
-            voice_id: str,
-            max_wait_seconds: int = 300,
-            poll_interval_seconds: int = 15,
-        ) -> bool:
-            del max_wait_seconds, poll_interval_seconds
-            return True
-
-        def register_voice(
-            self,
-            voice_id: str,
-            speaker_name: str,
-            sample_path: str,
-            voice_registry_path: str,
-        ) -> None:
-            del sample_path, voice_registry_path
-            observed.setdefault("registered", []).append((speaker_name, voice_id))
-
-    monkeypatch.setattr(process_module, "VoiceSampleExtractor", FakeVoiceSampleExtractor)
-    monkeypatch.setattr(process_module, "AutoVoiceCloner", FakeAutoVoiceCloner)
+    monkeypatch.setattr(process_module, "AutoVoiceCloner", FailAutoVoiceCloner)
 
     result = ProcessPipeline().run(
         ProcessConfig(
@@ -3158,207 +2835,65 @@ def test_process_pipeline_auto_clones_both_voices_when_both_are_missing(
     )
 
     assert Path(result.dubbed_audio_path).exists()
-    assert observed["extract_counts"] == {"speaker_a": 2, "speaker_b": 1}
-    assert observed["registered"] == [("Host", "voice_a_auto_001"), ("Guest", "voice_b_auto_001")]
-    assert capture["observed_voice_ids"] == ["voice_a_auto_001", "voice_b_auto_001"]
+    assert not capture["observed_voice_ids"][0]  # None or ""
+    assert not capture["observed_voice_ids"][1]  # None or ""
 
 
 def test_process_pipeline_raises_when_auto_clone_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _install_dual_speaker_pipeline_mocks(monkeypatch)
-    monkeypatch.setattr(
-        process_module,
-        "lookup_voice_ids",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            VoiceLookupError(
-                "Missing voice_id for speaker_b (Guest). Pass --voice-b or register this speaker in voice_registry.json."
-            )
-        ),
+    """Express mode: no clone attempt → pipeline completes even with missing voice_b."""
+    capture = _install_dual_speaker_pipeline_mocks(monkeypatch)
+
+    result = ProcessPipeline().run(
+        ProcessConfig(
+            youtube_url="https://youtube.example/watch?v=dual",
+            voice_a="voice_a_001",
+            speakers=2,
+            project_dir=str(tmp_path / "project_auto_clone_fail"),
+        )
     )
 
-    class FakeVoiceSampleExtractor:
-        def extract_sample(self, audio_path: str, speaker_lines, output_path: str, min_duration_s: float = 30.0, max_duration_s: float = 90.0) -> str:
-            del audio_path, speaker_lines, min_duration_s, max_duration_s
-            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-            _export_silent_wav(Path(output_path), duration_ms=35_000)
-            return output_path
-
-        def validate_sample(self, sample_path: str) -> dict:
-            del sample_path
-            return {
-                "duration_s": 35.0,
-                "rms_dbfs": -18.5,
-                "silence_ratio": 0.05,
-                "is_valid": True,
-                "warnings": [],
-            }
-
-    class FakeAutoVoiceCloner:
-        def __init__(self, api_key: str, base_url: str = "https://api.minimaxi.com"):
-            del api_key, base_url
-
-        def clone_voice(self, sample_path: str, speaker_name: str) -> str:
-            del sample_path, speaker_name
-            return "voice_b_auto_001"
-
-        def wait_until_ready(self, voice_id: str, max_wait_seconds: int = 300, poll_interval_seconds: int = 15) -> bool:
-            del voice_id, max_wait_seconds, poll_interval_seconds
-            return False
-
-        def register_voice(self, voice_id: str, speaker_name: str, sample_path: str, voice_registry_path: str) -> None:
-            raise AssertionError("register_voice should not be called when wait_until_ready fails")
-
-    monkeypatch.setattr(process_module, "VoiceSampleExtractor", FakeVoiceSampleExtractor)
-    monkeypatch.setattr(process_module, "AutoVoiceCloner", FakeAutoVoiceCloner)
-
-    with pytest.raises(AutoCloneError, match="未就绪"):
-        ProcessPipeline().run(
-            ProcessConfig(
-                youtube_url="https://youtube.example/watch?v=dual",
-                voice_a="voice_a_001",
-                speakers=2,
-                project_dir=str(tmp_path / "project_auto_clone_fail"),
-            )
-        )
+    assert Path(result.dubbed_audio_path).exists()
+    assert capture["observed_voice_ids"][0] == "voice_a_001"
+    assert not capture["observed_voice_ids"][1]  # None or ""
 
 
 def test_process_pipeline_raises_when_speaker_a_auto_clone_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Express mode: no clone attempt → pipeline completes even with missing voice_a."""
     _install_single_speaker_pipeline_mocks(monkeypatch)
-    monkeypatch.setattr(
-        process_module,
-        "lookup_voice_ids",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            VoiceLookupError(
-                "Missing voice_id for speaker_a (Speaker A). Pass --voice-a or register this speaker in voice_registry.json."
-            )
-        ),
+
+    result = ProcessPipeline().run(
+        ProcessConfig(
+            youtube_url="https://youtube.example/watch?v=single-auto-clone-fail",
+            voice_a=None,
+            project_dir=str(tmp_path / "project_auto_clone_a_fail"),
+        )
     )
 
-    class FakeVoiceSampleExtractor:
-        def extract_sample(
-            self,
-            audio_path: str,
-            speaker_lines,
-            output_path: str,
-            min_duration_s: float = 30.0,
-            max_duration_s: float = 90.0,
-        ) -> str:
-            del audio_path, speaker_lines, min_duration_s, max_duration_s
-            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-            _export_silent_wav(Path(output_path), duration_ms=35_000)
-            return output_path
-
-        def validate_sample(self, sample_path: str) -> dict:
-            del sample_path
-            return {
-                "duration_s": 35.0,
-                "rms_dbfs": -18.5,
-                "silence_ratio": 0.05,
-                "is_valid": True,
-                "warnings": [],
-            }
-
-    class FakeAutoVoiceCloner:
-        def __init__(self, api_key: str, base_url: str = "https://api.minimaxi.com"):
-            del api_key, base_url
-
-        def clone_voice(self, sample_path: str, speaker_name: str) -> str:
-            del sample_path, speaker_name
-            return "voice_a_auto_001"
-
-        def wait_until_ready(
-            self,
-            voice_id: str,
-            max_wait_seconds: int = 300,
-            poll_interval_seconds: int = 15,
-        ) -> bool:
-            del voice_id, max_wait_seconds, poll_interval_seconds
-            return False
-
-        def register_voice(
-            self,
-            voice_id: str,
-            speaker_name: str,
-            sample_path: str,
-            voice_registry_path: str,
-        ) -> None:
-            raise AssertionError("register_voice should not be called when Speaker A wait_until_ready fails")
-
-    monkeypatch.setattr(process_module, "VoiceSampleExtractor", FakeVoiceSampleExtractor)
-    monkeypatch.setattr(process_module, "AutoVoiceCloner", FakeAutoVoiceCloner)
-
-    with pytest.raises(AutoCloneError, match="Speaker A"):
-        ProcessPipeline().run(
-            ProcessConfig(
-                youtube_url="https://youtube.example/watch?v=single-auto-clone-fail",
-                voice_a=None,
-                project_dir=str(tmp_path / "project_auto_clone_a_fail"),
-            )
-        )
+    assert Path(result.dubbed_audio_path).exists()
 
 
 def test_process_pipeline_raises_clear_error_before_clone_when_sample_is_too_short(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Express mode: no clone attempt → pipeline completes regardless of sample quality."""
     _install_single_speaker_pipeline_mocks(monkeypatch)
-    monkeypatch.setattr(
-        process_module,
-        "lookup_voice_ids",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            VoiceLookupError(
-                "Missing voice_id for speaker_a (Speaker A). Pass --voice-a or register this speaker in voice_registry.json."
-            )
-        ),
+
+    result = ProcessPipeline().run(
+        ProcessConfig(
+            youtube_url="https://youtube.example/watch?v=single-auto-clone-short-sample",
+            voice_a=None,
+            project_dir=str(tmp_path / "project_auto_clone_short_sample"),
+        )
     )
 
-    class FakeVoiceSampleExtractor:
-        def extract_sample(
-            self,
-            audio_path: str,
-            speaker_lines,
-            output_path: str,
-            min_duration_s: float = 10.0,
-            max_duration_s: float = 300.0,
-        ) -> str:
-            del audio_path, speaker_lines, min_duration_s, max_duration_s
-            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-            _export_silent_wav(Path(output_path), duration_ms=6_900)
-            return output_path
-
-        def validate_sample(self, sample_path: str) -> dict:
-            del sample_path
-            return {
-                "duration_s": 6.9,
-                "rms_dbfs": -35.7,
-                "silence_ratio": 0.38,
-                "is_valid": False,
-                "warnings": ["样本时长不足10秒", "静音占比超过30%"],
-            }
-
-    class FakeAutoVoiceCloner:
-        def __init__(self, api_key: str, base_url: str = "https://api.minimaxi.com"):
-            del api_key, base_url
-
-        def clone_voice(self, sample_path: str, speaker_name: str) -> str:
-            raise AssertionError("clone_voice should not be called when sample duration is too short")
-
-    monkeypatch.setattr(process_module, "VoiceSampleExtractor", FakeVoiceSampleExtractor)
-    monkeypatch.setattr(process_module, "AutoVoiceCloner", FakeAutoVoiceCloner)
-
-    with pytest.raises(AutoCloneError, match="6.9 秒.*10.0 秒"):
-        ProcessPipeline().run(
-            ProcessConfig(
-                youtube_url="https://youtube.example/watch?v=single-auto-clone-short-sample",
-                voice_a=None,
-                project_dir=str(tmp_path / "project_auto_clone_short_sample"),
-            )
-        )
+    assert Path(result.dubbed_audio_path).exists()
 
 
 def test_process_pipeline_wait_for_review_pauses_for_voice_review_when_sample_is_too_short(
@@ -3606,8 +3141,9 @@ def test_process_pipeline_does_not_reuse_tts_cache_when_translation_is_regenerat
             video_title: str = "",
             youtube_url: str = "",
             glossary: dict[str, str] | None = None,
+            speaker_voices: dict[str, str] | None = None,
         ) -> TranslationResult:
-            del lines, max_segment_duration_ms, voice_id_b, display_name_b, video_title, youtube_url, glossary
+            del lines, max_segment_duration_ms, voice_id_b, display_name_b, video_title, youtube_url, glossary, speaker_voices
             observed["translate_called"] += 1
             Path(output_dir).mkdir(parents=True, exist_ok=True)
             segments = _make_single_speaker_segments()

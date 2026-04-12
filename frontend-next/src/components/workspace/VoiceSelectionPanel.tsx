@@ -15,6 +15,8 @@ import {
   type SpeakerAudioSegment,
   type UserVoiceEntry,
   type VoiceSelectionSpeakerApproval,
+  getVoiceSelectionPricing,
+  type VoiceSelectionPricingResponse,
 } from '@/lib/api/voiceSelection'
 import { apiClient } from '@/lib/api/client'
 import type { ApiWebUiStateResponse } from '@/types/api'
@@ -49,6 +51,7 @@ interface SpeakerVoiceState {
   voiceId: string
   voiceSource: 'catalog' | 'cloned' | 'auto_matched'
   selectedProvider: string
+  minimaxModel: 'turbo' | 'hd'
   isCloning: boolean
   cloneError: string | null
 }
@@ -77,7 +80,8 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
   const [voiceStates, setVoiceStates] = useState<Record<string, SpeakerVoiceState>>({})
   const [defaultProvider, setDefaultProvider] = useState('')
   const [hasMultiProvider, setHasMultiProvider] = useState(false)
-  const [cloneCostCredits, setCloneCostCredits] = useState(500)
+  const [cloneCostCredits, setCloneCostCredits] = useState(0)
+  const [pricing, setPricing] = useState<VoiceSelectionPricingResponse | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -96,7 +100,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
         setIsLoading(true)
         setError(null)
 
-        const [reviewState, voices, userVoices] = await Promise.all([
+        const [reviewState, voices, userVoices, pricingResult] = await Promise.all([
           apiClient.get<{
             job_id: string
             status: string
@@ -105,6 +109,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
           }>(`/jobs/${jobId}/review-state`),
           getVoiceLibrary().catch(() => ({ voices: [] as VoiceLibraryEntry[] })),
           getUserVoices().catch(() => [] as UserVoiceEntry[]),
+          getVoiceSelectionPricing().catch(() => null as VoiceSelectionPricingResponse | null),
         ])
 
         if (cancelled) return
@@ -147,7 +152,12 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
 
         const loadedDefaultProvider = String(payload.tts_provider ?? '')
         setDefaultProvider(loadedDefaultProvider)
-        setCloneCostCredits(Number(payload.clone_cost_credits ?? 500))
+        // Pricing: Gateway truth only, no fallback to payload/hardcoded values
+        if (pricingResult) {
+          setPricing(pricingResult)
+          setCloneCostCredits(pricingResult.voice_clone_cost_credits)
+        }
+        // else: cloneCostCredits stays at initial 0, clone modal shows "扣点信息暂不可用"
 
         // Parse all_providers (new three-engine payload)
         const rawAllProviders = payload.all_providers as Record<string, Record<string, unknown>> | undefined
@@ -198,6 +208,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
             voiceId: isExpired ? '' : autoVoice,
             voiceSource: autoVoice && !isExpired ? 'auto_matched' : 'catalog',
             selectedProvider: spProvider,
+            minimaxModel: 'turbo',
             isCloning: false,
             cloneError: null,
           }
@@ -455,60 +466,48 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                     {/* Voice select + preview + clone */}
                     <div className="flex items-center gap-2 flex-wrap">
                       <select
-                        className="h-8 rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 text-sm text-foreground min-w-[200px]"
+                        className="h-8 rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 text-sm text-foreground w-[220px] truncate"
                         onChange={(e) => handleVoiceChange(sp.speakerId, e.target.value)}
                         value={state?.voiceId ?? ''}
                       >
                         <option value="">-- 选择音色 --</option>
-                        {currentProvider === 'minimax' ? (
-                          <>
-                            {personalVoices.filter((v) => !expiredVoiceIds.includes(v.voiceId)).length > 0 ? (
-                              <optgroup label="我的音色">
-                                {personalVoices
-                                  .filter((v) => !expiredVoiceIds.includes(v.voiceId))
-                                  .map((v) => (
-                                    <option key={v.voiceId} value={v.voiceId}>
-                                      {v.label || v.voiceId}
-                                    </option>
-                                  ))}
-                              </optgroup>
-                            ) : null}
-                            {voicesForProvider.length > 0 ? (
-                              <optgroup label="音色库">
-                                {voicesForProvider.map((v) => (
-                                  <option key={v.voiceId} value={v.voiceId}>{v.label}</option>
-                                ))}
-                              </optgroup>
-                            ) : null}
-                          </>
-                        ) : (
-                          <>
-                            {(() => {
-                              const maleVoices = voicesForProvider.filter((v) => v.gender === 'male')
-                              const femaleVoices = voicesForProvider.filter((v) => v.gender === 'female')
-                              const otherVoices = voicesForProvider.filter((v) => v.gender !== 'male' && v.gender !== 'female')
-                              return (
-                                <>
-                                  {femaleVoices.length > 0 ? (
-                                    <optgroup label="女声">
-                                      {femaleVoices.map((v) => <option key={v.voiceId} value={v.voiceId}>{v.label}</option>)}
-                                    </optgroup>
-                                  ) : null}
-                                  {maleVoices.length > 0 ? (
-                                    <optgroup label="男声">
-                                      {maleVoices.map((v) => <option key={v.voiceId} value={v.voiceId}>{v.label}</option>)}
-                                    </optgroup>
-                                  ) : null}
-                                  {otherVoices.length > 0 ? (
-                                    <optgroup label="其他">
-                                      {otherVoices.map((v) => <option key={v.voiceId} value={v.voiceId}>{v.label}</option>)}
-                                    </optgroup>
-                                  ) : null}
-                                </>
-                              )
-                            })()}
-                          </>
-                        )}
+                        {/* MiniMax: personal voices first, then catalog grouped by gender */}
+                        {currentProvider === 'minimax' && personalVoices.filter((v) => !expiredVoiceIds.includes(v.voiceId)).length > 0 ? (
+                          <optgroup label="我的音色">
+                            {personalVoices
+                              .filter((v) => !expiredVoiceIds.includes(v.voiceId))
+                              .map((v) => (
+                                <option key={v.voiceId} value={v.voiceId}>
+                                  {v.label || v.voiceId}
+                                </option>
+                              ))}
+                          </optgroup>
+                        ) : null}
+                        {/* All providers: catalog voices grouped by gender */}
+                        {(() => {
+                          const femaleVoices = voicesForProvider.filter((v) => v.gender === 'female')
+                          const maleVoices = voicesForProvider.filter((v) => v.gender === 'male')
+                          const otherVoices = voicesForProvider.filter((v) => v.gender !== 'male' && v.gender !== 'female')
+                          return (
+                            <>
+                              {femaleVoices.length > 0 ? (
+                                <optgroup label={`女声 (${femaleVoices.length})`}>
+                                  {femaleVoices.map((v) => <option key={v.voiceId} value={v.voiceId}>{v.label}</option>)}
+                                </optgroup>
+                              ) : null}
+                              {maleVoices.length > 0 ? (
+                                <optgroup label={`男声 (${maleVoices.length})`}>
+                                  {maleVoices.map((v) => <option key={v.voiceId} value={v.voiceId}>{v.label}</option>)}
+                                </optgroup>
+                              ) : null}
+                              {otherVoices.length > 0 ? (
+                                <optgroup label={`其他 (${otherVoices.length})`}>
+                                  {otherVoices.map((v) => <option key={v.voiceId} value={v.voiceId}>{v.label}</option>)}
+                                </optgroup>
+                              ) : null}
+                            </>
+                          )
+                        })()}
                       </select>
 
                       {/* Preview button */}
@@ -534,6 +533,43 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                         </button>
                       ) : null}
                     </div>
+
+                    {/* TTS quality tier + credits — reads from Gateway pricing */}
+                    {pricing ? (() => {
+                      const prov = currentProvider
+                      const cpm = pricing.credits_per_minute
+                      if (prov === 'minimax') {
+                        const model = state?.minimaxModel ?? 'turbo'
+                        return (
+                          <div className="flex items-center gap-4 flex-wrap">
+                            <label className="flex items-center gap-1.5 cursor-pointer" onClick={() => setVoiceStates((prev) => ({ ...prev, [sp.speakerId]: { ...prev[sp.speakerId], minimaxModel: 'turbo' } }))}>
+                              <span className={`flex h-3.5 w-3.5 items-center justify-center rounded-full border-2 ${model === 'turbo' ? 'border-teal-500' : 'border-slate-400 dark:border-slate-600'}`}>
+                                {model === 'turbo' ? <span className="h-1.5 w-1.5 rounded-full bg-teal-500" /> : null}
+                              </span>
+                              <span className="text-xs text-foreground">高级音质</span>
+                              <span className="text-xs text-slate-400">{cpm.minimax_turbo} 点/分钟</span>
+                            </label>
+                            <label className="flex items-center gap-1.5 cursor-pointer" onClick={() => setVoiceStates((prev) => ({ ...prev, [sp.speakerId]: { ...prev[sp.speakerId], minimaxModel: 'hd' } }))}>
+                              <span className={`flex h-3.5 w-3.5 items-center justify-center rounded-full border-2 ${model === 'hd' ? 'border-teal-500' : 'border-slate-400 dark:border-slate-600'}`}>
+                                {model === 'hd' ? <span className="h-1.5 w-1.5 rounded-full bg-teal-500" /> : null}
+                              </span>
+                              <span className="text-xs text-foreground">旗舰音质</span>
+                              <span className="text-xs text-slate-400">{cpm.minimax_hd} 点/分钟</span>
+                            </label>
+                          </div>
+                        )
+                      }
+                      const pts = prov === 'cosyvoice' ? cpm.cosyvoice : prov === 'volcengine' ? cpm.volcengine : null
+                      return pts != null ? (
+                        <div className="flex items-center gap-1.5">
+                          <span className="flex h-3.5 w-3.5 items-center justify-center rounded-full border-2 border-teal-500">
+                            <span className="h-1.5 w-1.5 rounded-full bg-teal-500" />
+                          </span>
+                          <span className="text-xs text-foreground">标准音质</span>
+                          <span className="text-xs text-slate-400">{pts} 点/分钟</span>
+                        </div>
+                      ) : null
+                    })() : null}
 
                     {previewError[sp.speakerId] ? (
                       <p className="text-xs text-red-500">{previewError[sp.speakerId]}</p>
@@ -715,7 +751,7 @@ function VoiceCloneModal({ jobId, speaker, cloneCostCredits, onClose, onComplete
           })}
         </div>
         <div className="flex items-center justify-between p-4 border-t border-slate-200 dark:border-slate-700">
-          <span className="text-xs text-slate-400">克隆费用：{cloneCostCredits} 点</span>
+          <span className="text-xs text-slate-400">{cloneCostCredits > 0 ? `克隆费用：${cloneCostCredits} 点` : '扣点信息暂不可用'}</span>
           <div className="flex items-center gap-2">
             {error ? <span className="text-xs text-red-500 max-w-[200px] truncate">{error}</span> : null}
             <button className="h-8 rounded px-4 text-sm text-slate-500 transition hover:text-foreground" disabled={isCloning} onClick={onClose} type="button">取消</button>

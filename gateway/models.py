@@ -554,6 +554,39 @@ class UserVoice(Base):
     )
 
 
+class PricingConfigVersion(Base):
+    """Versioned pricing configuration for admin publish/draft/archive workflow."""
+
+    __tablename__ = "pricing_config_versions"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False
+    )  # "active" | "draft" | "archived"
+    payload_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    change_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    activated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        Index("ix_pricing_config_versions_status", "status"),
+        Index("ix_pricing_config_versions_version", "version"),
+        Index("ix_pricing_config_versions_created_at", "created_at"),
+    )
+
+
 class Session(Base):
     __tablename__ = "sessions"
 

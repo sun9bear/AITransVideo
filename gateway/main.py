@@ -12,6 +12,9 @@ from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from admin_settings import router as admin_router
+from pricing_admin import router as pricing_admin_router
+from s2_monitor_api import router as s2_monitor_router
+from admin_job_monitor_api import router as admin_job_monitor_router
 from auth_phone import router as auth_phone_router, captcha_router
 from billing import router as billing_router
 from credits_observability import router as credits_observability_router
@@ -46,7 +49,7 @@ from job_intercept import (
     update_source_metadata,
 )
 from proxy import close_client, init_client, proxy_request
-from voice_selection_api import voice_clone_for_selection
+from voice_selection_api import get_voice_selection_pricing, voice_clone_for_selection
 
 
 @asynccontextmanager
@@ -67,6 +70,13 @@ async def lifespan(app: FastAPI):
                 logging.getLogger(__name__).info("Recovered %d stale label tasks", recovered)
     except Exception:
         pass  # Table may not exist yet before migration
+    # Seed pricing runtime
+    try:
+        from pricing_runtime import get_runtime_pricing
+        pricing = get_runtime_pricing(force_reload=True)
+        logger.info("[pricing] Runtime pricing loaded: version=%d", pricing.version)
+    except Exception:
+        logger.warning("[pricing] Failed to initialize pricing runtime, using defaults")
     yield
     await close_client()
     await engine.dispose()
@@ -114,6 +124,9 @@ app.include_router(captcha_router)
 # --- Admin settings routes (before catch-all) ---
 
 app.include_router(admin_router)
+app.include_router(pricing_admin_router)
+app.include_router(s2_monitor_router)
+app.include_router(admin_job_monitor_router)
 app.include_router(billing_router)
 app.include_router(credits_observability_router)
 app.include_router(credits_read_router)
@@ -154,6 +167,7 @@ app.delete("/job-api/jobs/{job_id}")(intercept_delete_job_v2)
 app.post("/job-api/jobs/{job_id}/source-metadata")(update_source_metadata)
 app.post("/job-api/jobs/{job_id}/metering")(update_job_metering)
 app.post("/job-api/jobs/{job_id}/voice-clone")(voice_clone_for_selection)
+app.get("/api/voice-selection/pricing")(get_voice_selection_pricing)
 
 # Job sub-resources: logs, artifacts, result-summary, continue, review/*, download/*, etc.
 app.api_route(

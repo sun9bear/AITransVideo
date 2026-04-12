@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -79,7 +80,7 @@ def test_gemini_translator_translates_single_speaker_lines_into_one_segment(
     monkeypatch.setattr(
         translator,
         "_call_gemini_with_retry",
-        lambda prompt, json_mode=False: json.dumps(
+        lambda prompt, json_mode=False, **kw: json.dumps(
             [{"segment_id": 1, "cn_text": "大家好，这是一个测试，我们在做个有用的东西。"}],
             ensure_ascii=False,
         ),
@@ -114,7 +115,7 @@ def test_gemini_translator_splits_groups_when_total_duration_exceeds_threshold(
         _make_line(3, 60_000, 90_000, "Part three."),
     ]
 
-    def fake_call(prompt: str, json_mode: bool = False) -> str:
+    def fake_call(prompt: str, json_mode: bool = False, **kw: Any) -> str:
         assert json_mode is False
         groups = _extract_groups_from_prompt(prompt)
         assert len(groups) == 2
@@ -201,7 +202,7 @@ def test_gemini_translator_translates_ten_groups_in_two_batches(
     ]
     seen_group_counts: list[int] = []
 
-    def fake_call(prompt: str, json_mode: bool = False) -> str:
+    def fake_call(prompt: str, json_mode: bool = False, **kw: Any) -> str:
         del json_mode
         groups = _extract_groups_from_prompt(prompt)
         seen_group_counts.append(len(groups))
@@ -273,7 +274,7 @@ def test_gemini_translator_supports_two_speaker_translation_and_voice_assignment
         _make_line(3, 20_000, 30_000, "Host follow-up.", speaker_id="speaker_a", speaker_label="A"),
     ]
 
-    def fake_call(prompt: str, json_mode: bool = False) -> str:
+    def fake_call(prompt: str, json_mode: bool = False, **kw: Any) -> str:
         del json_mode
         groups = _extract_groups_from_prompt(prompt)
         assert [group["speaker_id"] for group in groups] == ["speaker_a", "speaker_b", "speaker_a"]
@@ -321,7 +322,7 @@ def test_gemini_translator_infers_speaker_names(
     monkeypatch.setattr(
         translator,
         "_call_gemini_with_retry",
-        lambda prompt, json_mode=False: json.dumps(
+        lambda prompt, json_mode=False, **kw: json.dumps(
             {"speaker_a": "Interviewer", "speaker_b": "Dan Koe"},
             ensure_ascii=False,
         ),
@@ -343,7 +344,7 @@ def test_gemini_translator_infer_speaker_names_falls_back_on_invalid_response(
     monkeypatch.setattr(
         translator,
         "_call_gemini_with_retry",
-        lambda prompt, json_mode=False: "not json",
+        lambda prompt, json_mode=False, **kw: "not json",
     )
 
     inferred_names = translator.infer_speaker_names(lines, num_speakers=2)
@@ -361,7 +362,7 @@ def test_gemini_translator_infer_single_speaker_name_uses_video_context(
     ]
     observed: dict[str, object] = {}
 
-    def fake_call(prompt: str, json_mode: bool = False) -> str:
+    def fake_call(prompt: str, json_mode: bool = False, **kw: Any) -> str:
         observed["prompt"] = prompt
         assert json_mode is False
         return json.dumps({"speaker_a": "Dan Koe"}, ensure_ascii=False)
@@ -393,7 +394,7 @@ def test_gemini_translator_review_speaker_labels_applies_corrections(
     monkeypatch.setattr(
         translator,
         "_call_gemini_with_retry",
-        lambda prompt, json_mode=False: json.dumps(
+        lambda prompt, json_mode=False, **kw: json.dumps(
             [{"index": 3, "corrected_speaker_id": "speaker_b", "reason": "短促回应"}],
             ensure_ascii=False,
         ),
@@ -417,7 +418,7 @@ def test_gemini_translator_review_speaker_labels_keeps_original_when_no_correcti
 ) -> None:
     translator = _build_translator()
     lines = _make_review_lines()
-    monkeypatch.setattr(translator, "_call_gemini_with_retry", lambda prompt, json_mode=False: "[]")
+    monkeypatch.setattr(translator, "_call_gemini_with_retry", lambda prompt, json_mode=False, **kw: "[]")
 
     reviewed_lines = translator.review_speaker_labels(
         lines,
@@ -435,7 +436,7 @@ def test_gemini_translator_review_speaker_labels_degrades_on_invalid_response(
     monkeypatch.setattr(
         translator,
         "_call_gemini_with_retry",
-        lambda prompt, json_mode=False: "I cannot review this transcript",
+        lambda prompt, json_mode=False, **kw: "I cannot review this transcript",
     )
 
     reviewed_lines = translator.review_speaker_labels(
@@ -518,7 +519,7 @@ def test_gemini_translator_review_speaker_labels_ignores_invalid_items(
     monkeypatch.setattr(
         translator,
         "_call_gemini_with_retry",
-        lambda prompt, json_mode=False: json.dumps(
+        lambda prompt, json_mode=False, **kw: json.dumps(
             [
                 {"index": 99, "corrected_speaker_id": "speaker_b"},
                 {"index": "abc", "corrected_speaker_id": "speaker_a"},
@@ -553,7 +554,7 @@ def test_gemini_translator_raises_on_invalid_json_response(
     monkeypatch.setattr(
         translator,
         "_call_gemini_with_retry",
-        lambda prompt, json_mode=False: "I cannot translate this",
+        lambda prompt, json_mode=False, **kw: "I cannot translate this",
     )
 
     with pytest.raises(TranslationError, match="invalid JSON"):
@@ -577,7 +578,7 @@ def test_gemini_translator_writes_segments_json_file(
     monkeypatch.setattr(
         translator,
         "_call_gemini_with_retry",
-        lambda prompt, json_mode=False: json.dumps(
+        lambda prompt, json_mode=False, **kw: json.dumps(
             [{"segment_id": 1, "cn_text": "大家好，这是一个测试。"}],
             ensure_ascii=False,
         ),
@@ -610,7 +611,7 @@ def test_gemini_translator_preserves_checkpoint_after_partial_batch_failure(
     ]
     observed_calls = {"count": 0}
 
-    def fake_call(prompt: str, json_mode: bool = False) -> str:
+    def fake_call(prompt: str, json_mode: bool = False, **kw: Any) -> str:
         del json_mode
         observed_calls["count"] += 1
         groups = _extract_groups_from_prompt(prompt)
@@ -675,7 +676,7 @@ def test_gemini_translator_resumes_from_checkpoint_and_removes_it_on_success(
 
     seen_batch_segment_ids: list[list[int]] = []
 
-    def fake_call(prompt: str, json_mode: bool = False) -> str:
+    def fake_call(prompt: str, json_mode: bool = False, **kw: Any) -> str:
         del json_mode
         groups_in_prompt = _extract_groups_from_prompt(prompt)
         seen_batch_segment_ids.append([group["segment_id"] for group in groups_in_prompt])
@@ -732,7 +733,7 @@ def test_gemini_translator_ignores_checkpoint_when_fingerprint_mismatches(
     )
     seen_batch_segment_ids: list[list[int]] = []
 
-    def fake_call(prompt: str, json_mode: bool = False) -> str:
+    def fake_call(prompt: str, json_mode: bool = False, **kw: Any) -> str:
         del json_mode
         groups = _extract_groups_from_prompt(prompt)
         seen_batch_segment_ids.append([group["segment_id"] for group in groups])
@@ -771,7 +772,7 @@ def test_gemini_translator_ignores_invalid_checkpoint_file(
     checkpoint_path.write_text("{invalid json", encoding="utf-8")
     observed_calls = {"count": 0}
 
-    def fake_call(prompt: str, json_mode: bool = False) -> str:
+    def fake_call(prompt: str, json_mode: bool = False, **kw: Any) -> str:
         del prompt, json_mode
         observed_calls["count"] += 1
         return json.dumps(
@@ -853,7 +854,7 @@ def test_gemini_translator_translate_prompt_includes_video_context(
     translator = _build_translator()
     lines = [_make_line(1, 0, 1_000, "Hello there.")]
 
-    def fake_call(prompt: str, json_mode: bool = False) -> str:
+    def fake_call(prompt: str, json_mode: bool = False, **kw: Any) -> str:
         assert json_mode is False
         assert "标题：Demo Video" in prompt
         assert "来源：https://youtube.example/watch?v=demo" in prompt
@@ -1063,7 +1064,7 @@ def test_gemini_translator_returns_empty_result_without_calling_sdk_for_empty_in
     monkeypatch.setattr(
         translator,
         "_call_gemini_with_retry",
-        lambda prompt, json_mode=False: (_ for _ in ()).throw(
+        lambda prompt, json_mode=False, **kw: (_ for _ in ()).throw(
             AssertionError("Gemini should not be called for empty input")
         ),
     )
@@ -1207,7 +1208,7 @@ def test_gemini_translator_retries_batch_once_when_length_is_out_of_range(
     lines = [_make_line(1, 0, 10_000, "This segment has enough English words to need a more compact translation.")]
     observed_prompts: list[str] = []
 
-    def fake_call(prompt: str, json_mode: bool = False) -> str:
+    def fake_call(prompt: str, json_mode: bool = False, **kw: Any) -> str:
         del json_mode
         observed_prompts.append(prompt)
         if len(observed_prompts) == 1:
@@ -1241,7 +1242,7 @@ def test_gemini_translator_accepts_second_attempt_even_when_still_out_of_range(
     lines = [_make_line(1, 0, 10_000, "This segment still resists strict length control.")]
     observed_calls = {"count": 0}
 
-    def fake_call(prompt: str, json_mode: bool = False) -> str:
+    def fake_call(prompt: str, json_mode: bool = False, **kw: Any) -> str:
         del prompt, json_mode
         observed_calls["count"] += 1
         return json.dumps(
@@ -1288,7 +1289,7 @@ def test_gemini_translator_falls_back_to_secondary_model_on_provider_error(
     monkeypatch.setattr(
         translator,
         "_call_gemini_with_retry",
-        lambda prompt, json_mode=False: (_ for _ in ()).throw(TranslationError("Gemini cap hit")),
+        lambda prompt, json_mode=False, **kw: (_ for _ in ()).throw(TranslationError("Gemini cap hit")),
     )
     monkeypatch.setattr(translator, "_batch_needs_length_retry", lambda parsed_items, groups: False)
 
@@ -1370,7 +1371,7 @@ def test_gemini_translator_falls_back_when_primary_returns_invalid_json(
     translator = _build_translator(llm_router=FakeRouter())
     lines = [_make_line(1, 0, 5_000, "JSON fallback test.")]
 
-    monkeypatch.setattr(translator, "_call_gemini_with_retry", lambda prompt, json_mode=False: "{broken json")
+    monkeypatch.setattr(translator, "_call_gemini_with_retry", lambda prompt, json_mode=False, **kw: "{broken json")
     monkeypatch.setattr(translator, "_batch_needs_length_retry", lambda parsed_items, groups: False)
 
     result = translator.translate(

@@ -147,6 +147,16 @@ def _split_segment(
     speaker_a_id = _normalize_optional_text(speaker_a)
     speaker_b_id = _normalize_optional_text(speaker_b)
 
+    # Load word-level timing data for precise split point estimation
+    _words_data: list[dict] | None = None
+    try:
+        raw_response_path = project_dir / "transcript" / "raw_assemblyai.json"
+        if raw_response_path.exists():
+            _raw = json.loads(raw_response_path.read_text(encoding="utf-8"))
+            _words_data = _raw.get("words")
+    except Exception:
+        pass
+
     # --- Update transcript.json ---
     transcript_path = project_dir / "transcript" / "transcript.json"
     transcript_updated = False
@@ -165,9 +175,14 @@ def _split_segment(
                         text = str(raw_line.get("source_text") or raw_line.get("en_text") or "")
                         start_ms = int(raw_line.get("start_ms") or 0)
                         end_ms = int(raw_line.get("end_ms") or 0)
-                        total_len = max(len(text), 1)
-                        ratio = min(max(source_split / total_len, 0.05), 0.95)
-                        mid_ms = start_ms + int((end_ms - start_ms) * ratio)
+                        from src.services.transcript_reviewer import estimate_split_ms
+                        mid_ms = estimate_split_ms(
+                            start_ms=start_ms,
+                            end_ms=end_ms,
+                            source_text=text,
+                            split_char_pos=source_split,
+                            words_data=_words_data,
+                        )
 
                         line_a = {**raw_line}
                         line_a["source_text"] = text[:source_split].strip()
@@ -228,9 +243,14 @@ def _split_segment(
                         src_split_pos = source_split if source_split is not None else len(source_text) // 2
                         cn_split_pos = cn_split if cn_split is not None else len(cn_text) // 2
 
-                        total_src_len = max(len(source_text), 1)
-                        ratio = min(max(src_split_pos / total_src_len, 0.05), 0.95)
-                        mid_ms = start_ms + int((end_ms - start_ms) * ratio)
+                        from src.services.transcript_reviewer import estimate_split_ms
+                        mid_ms = estimate_split_ms(
+                            start_ms=start_ms,
+                            end_ms=end_ms,
+                            source_text=source_text,
+                            split_char_pos=src_split_pos,
+                            words_data=_words_data,
+                        )
                         target_dur_a = mid_ms - start_ms
                         target_dur_b = end_ms - mid_ms
 

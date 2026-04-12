@@ -105,6 +105,7 @@ FAILED_SEGMENT_SOURCE_SPLIT_PATTERN = re.compile(r"(?<=[.!?;])\s+")
 T = TypeVar("T")
 
 _ADMIN_SETTINGS_PATH = "/opt/aivideotrans/config/admin_settings.json"
+_SPEAKER_ID_PATTERN = re.compile(r"^speaker_[a-z0-9_]+$")
 
 
 # _should_skip_translation_config / _should_skip_all_reviews removed —
@@ -112,16 +113,38 @@ _ADMIN_SETTINGS_PATH = "/opt/aivideotrans/config/admin_settings.json"
 # (job_requires_review, job_service_mode).  See run() below.
 
 
-def _get_default_translation_model() -> str:
-    """Get default translation model from admin settings."""
-    try:
-        if os.path.exists(_ADMIN_SETTINGS_PATH):
-            with open(_ADMIN_SETTINGS_PATH) as f:
-                settings = json.load(f)
-            return str(settings.get("translation_model", "deepseek"))
-    except Exception:
-        pass
-    return "deepseek"
+def _get_default_translation_model(mode: str = "studio") -> str:
+    """Get default translation model from llm_registry."""
+    from services.llm_registry import get_prompt_model
+    return get_prompt_model(mode, "translate")
+
+
+def _is_valid_speaker_id(value: object) -> bool:
+    return isinstance(value, str) and _SPEAKER_ID_PATTERN.match(value.strip()) is not None
+
+
+def _default_speaker_display_name(speaker_id: str) -> str:
+    normalized_speaker_id = speaker_id.strip().lower()
+    if normalized_speaker_id == "speaker_a":
+        return "Speaker A"
+    if normalized_speaker_id == "speaker_b":
+        return "Speaker B"
+    if normalized_speaker_id.startswith("speaker_"):
+        suffix = normalized_speaker_id.replace("speaker_", "")
+        if len(suffix) == 1 and suffix.isalpha():
+            return f"Speaker {suffix.upper()}"
+    return speaker_id
+
+
+def _merge_speaker_name_map(
+    review_speaker_names: dict[str, str] | None,
+    speaker_name_a: str,
+    speaker_name_b: str,
+) -> dict[str, str]:
+    merged = dict(review_speaker_names or {})
+    merged["speaker_a"] = speaker_name_a
+    merged["speaker_b"] = speaker_name_b
+    return merged
 
 
 def _report_source_metadata(job_id: str, duration_seconds: float, title: str | None = None) -> None:
@@ -419,6 +442,7 @@ class ProcessPipeline:
         job_voice_strategy = _snap('voice_strategy', 'preset_mapping')
         job_plan_code = _snap('plan_code_snapshot', 'free')
         job_role = _snap('role_snapshot', 'user')
+        self._current_service_mode = job_service_mode  # for recovery paths
         # -------------------------------------------------------------
 
         projects_root = _resolve_projects_root()
@@ -622,6 +646,7 @@ class ProcessPipeline:
                     custom_translation_prompt_template
                 )
             translator = GeminiTranslator(**translator_kwargs)
+            translator._service_mode = job_service_mode  # enables llm_registry model selection
 
             transcript_path = (final_project_dir / "transcript" / "transcript.json").resolve(strict=False)
             transcription_method = getattr(config, "transcription_method", None) or "assemblyai"
@@ -708,8 +733,37 @@ class ProcessPipeline:
             # --- Unified LLM transcript review (replaces 4 separate calls) ---
             _review_glossary: dict[str, str] = {}
             _review_speaker_styles: dict[str, dict] = {}
+            _review_speaker_names: dict[str, str] = {}  # all speakers including c+
 
-            if not s3_cache_hit:  # Always run LLM review (not a user review gate)
+            # S2 cache: if review already ran (e.g. pipeline resumed after
+            # translation_config_review), restore results instead of re-running.
+            s2_result_path = (final_project_dir / "transcript" / "s2_review_result.json").resolve(strict=False)
+            s2_cache_hit = s2_result_path.exists() and not s3_cache_hit
+
+            if s3_cache_hit:
+                print("[S2] Translation cache hit, skipping review.")
+            elif s2_cache_hit:
+                try:
+                    import json as _json_s2
+                    _s2_cached = _json_s2.loads(s2_result_path.read_text(encoding="utf-8"))
+                    _review_speaker_styles = _s2_cached.get("speakers", {})
+                    _review_glossary = _s2_cached.get("glossary", {})
+                    for spk_id, spk_info in _review_speaker_styles.items():
+                        name = spk_info.get("name", "")
+                        if name:
+                            _review_speaker_names[spk_id] = name
+                            if spk_id == "speaker_a" and speaker_name_a_is_placeholder:
+                                speaker_name_a = name
+                            elif spk_id == "speaker_b" and speaker_name_b_is_placeholder:
+                                speaker_name_b = name
+                    print(f"[S2] 已有审校结果，跳过重新审校（{len(_review_speaker_names)} 位说话人，{len(_review_glossary)} 条术语）")
+                except Exception as _s2_err:
+                    print(f"[S2] 加载缓存审校结果失败 ({_s2_err})，将重新审校...")
+                    s2_cache_hit = False
+            elif config.skip_review:
+                print("[S2] Skipping review (--skip-review).")
+
+            if not s3_cache_hit and not s2_cache_hit and not config.skip_review:
                 print("[S2] Running unified LLM transcript review (audio + text)...")
                 try:
                     from src.services.transcript_reviewer import review_transcript
@@ -726,28 +780,43 @@ class ProcessPipeline:
                     except Exception:
                         pass
 
+                    # Express mode: skip Pass 1 (speaker identification)
+                    _is_express = job_service_mode == "express"
                     review_result = review_transcript(
                         transcript_result.lines,
                         audio_path=source_audio_path if source_audio_path.exists() else None,
                         video_title=download_result.video_title,
                         video_url=normalized_url,
                         words_data=_words_data,
+                        debug_output_dir=final_project_dir / "transcript",
+                        mode=job_service_mode,
+                        skip_pass1=_is_express,
                     )
 
                     if review_result is not None:
-                        # Update speaker names from review
+                        if review_result.debug_artifacts:
+                            print("[S2] Debug artifacts:")
+                            raw_debug_path = review_result.debug_artifacts.get("raw_response_path")
+                            diff_debug_path = review_result.debug_artifacts.get("speaker_diff_path")
+                            if raw_debug_path:
+                                print(f"  raw_response -> {raw_debug_path}")
+                            if diff_debug_path:
+                                print(f"  speaker_diff -> {diff_debug_path}")
+                        # Update speaker names from review (all speakers, not just A/B)
+                        _review_speaker_names: dict[str, str] = {}
                         for spk_id, spk_info in review_result.speakers.items():
                             name = spk_info.get("name", "")
                             if name:
+                                _review_speaker_names[spk_id] = name
                                 if spk_id == "speaker_a" and speaker_name_a_is_placeholder:
                                     speaker_name_a = name
                                 elif spk_id == "speaker_b" and speaker_name_b_is_placeholder:
                                     speaker_name_b = name
 
                         print("[S2] Speaker identity result:")
-                        print(f"  Speaker A -> {speaker_name_a}")
-                        if effective_speakers == 2:
-                            print(f"  Speaker B -> {speaker_name_b}")
+                        for spk_id in sorted(review_result.speakers.keys()):
+                            spk_name = _review_speaker_names.get(spk_id, spk_id)
+                            print(f"  {spk_id.replace('speaker_', 'Speaker ').replace('_', ' ').title()} -> {spk_name}")
 
                         # Apply corrections to transcript
                         if review_result.corrections_applied > 0:
@@ -780,10 +849,12 @@ class ProcessPipeline:
                     else:
                         print("[S2] Unified review returned None, falling back to legacy...")
                         # Fallback: use old separate calls
-                        self._legacy_speaker_inference_and_review(
-                            translator, transcript_result, effective_speakers,
-                            speaker_name_a, speaker_name_b, speaker_name_a_is_placeholder,
-                            speaker_name_b_is_placeholder, download_result, normalized_url,
+                        transcript_result, speaker_name_a, speaker_name_b = (
+                            self._legacy_speaker_inference_and_review(
+                                translator, transcript_result, effective_speakers,
+                                speaker_name_a, speaker_name_b, speaker_name_a_is_placeholder,
+                                speaker_name_b_is_placeholder, download_result, normalized_url,
+                            )
                         )
                         # Minimal speaker profiling — fill gender/age so matcher doesn't blind-fallback
                         if not _review_speaker_styles:
@@ -791,13 +862,16 @@ class ProcessPipeline:
                                 effective_speakers=effective_speakers,
                                 speaker_name_a=speaker_name_a,
                                 speaker_name_b=speaker_name_b,
+                                speaker_ids=self._detect_speaker_ids(transcript_result.lines),
                             )
                 except Exception as exc:
                     print(f"[S2] Unified review failed ({exc}), falling back to legacy...")
-                    self._legacy_speaker_inference_and_review(
-                        translator, transcript_result, effective_speakers,
-                        speaker_name_a, speaker_name_b, speaker_name_a_is_placeholder,
-                        speaker_name_b_is_placeholder, download_result, normalized_url,
+                    transcript_result, speaker_name_a, speaker_name_b = (
+                        self._legacy_speaker_inference_and_review(
+                            translator, transcript_result, effective_speakers,
+                            speaker_name_a, speaker_name_b, speaker_name_a_is_placeholder,
+                            speaker_name_b_is_placeholder, download_result, normalized_url,
+                        )
                     )
                     # Minimal speaker profiling — fill gender/age so matcher doesn't blind-fallback
                     if not _review_speaker_styles:
@@ -805,11 +879,8 @@ class ProcessPipeline:
                             effective_speakers=effective_speakers,
                             speaker_name_a=speaker_name_a,
                             speaker_name_b=speaker_name_b,
+                            speaker_ids=self._detect_speaker_ids(transcript_result.lines),
                         )
-            elif s3_cache_hit:
-                print("[S2] Translation cache hit, skipping review.")
-            else:
-                print("[S2] Skipping review (--skip-review).")
 
             approved_speaker_review = self._get_approved_review_payload(
                 review_state_manager,
@@ -885,81 +956,29 @@ class ProcessPipeline:
                 # This prevents unnecessary voice clone API costs during S2.
                 print("[S2] 音色选择已延迟到统一审核，S2 自动跳过。")
             else:
-                # Non-interactive mode: try auto-resolve, fail on error
-                try:
-                    if voice_id_a is None:
-                        voice_id_a = self._resolve_or_auto_clone_voice(
-                            speaker_id="speaker_a",
-                            transcript_result=transcript_result,
-                            audio_path=source_audio_path,
-                            final_project_dir=final_project_dir,
-                            speaker_name=speaker_name_a,
-                            voice_registry_path=voice_registry_path,
-                            tts_config=tts_config,
-                            skip_voice_registry_lookup=False,
-                        )
-                    if effective_speakers == 2 and voice_id_b is None:
-                        voice_id_b = self._resolve_or_auto_clone_voice(
-                            speaker_id="speaker_b",
-                            transcript_result=transcript_result,
-                            audio_path=source_audio_path,
-                            final_project_dir=final_project_dir,
-                            speaker_name=speaker_name_b,
-                            voice_registry_path=voice_registry_path,
-                            tts_config=tts_config,
-                            skip_voice_registry_lookup=False,
-                        )
-                except VoiceReviewRequiredError:
-                    raise
+                # Express (non-interactive) mode: skip registry lookup and auto-clone.
+                # Leave voice_id_a / voice_id_b as None — downstream TTS voice
+                # matcher will auto-select from the preset catalog based on S2
+                # speaker profiles (gender, age_group, voice_description).
+                print("[S2] 快捷模式：跳过音色库查找和自动克隆，由下游自动匹配音色。")
 
             # --- translation_config_review gate ---
+            # Previously this gate paused the pipeline and waited for user
+            # approval, but the frontend always auto-approved immediately.
+            # This caused the entire pipeline to restart from scratch (S0→S1→S2)
+            # just to process the auto-approval, wasting LLM API calls.
+            # Now we always auto-resolve with defaults and continue directly.
             approved_translation_config = self._get_approved_review_payload(
                 review_state_manager,
                 TRANSLATION_CONFIG_REVIEW_STAGE,
             )
-            if (
-                config.wait_for_review
-                and not s3_cache_hit
-                and approved_translation_config is None
-            ):
-                # Auto-skip translation config review when job doesn't require review
-                if not job_requires_review:
-                    default_model = _get_default_translation_model()
-                    print(f"[S3] 自动使用默认翻译模型: {default_model}")
-                    approved_translation_config = {
-                        "selected_model": default_model,
-                        "prompt_template": None,
-                    }
-                else:
-                    review_state_manager.set_stage(
-                        TRANSLATION_CONFIG_REVIEW_STAGE,
-                        status=REVIEW_STATUS_PENDING,
-                        payload=self._build_translation_config_review_payload(
-                            transcript_result=transcript_result,
-                            translator=translator,
-                        ),
-                        activate=True,
-                    )
-                    review_message = "等待确认翻译配置（模型和提示词），再开始翻译。"
-                    print(f"[S3] {review_message}")
-                    state_manager.set_stage(
-                        current_stage_name,
-                        StageStatus.RUNNING,
-                        {"execution_mode": "waiting_for_translation_config"},
-                    )
-                    current_stage_name = None
-                    print(
-                        self._build_web_review_marker(
-                            stage=TRANSLATION_CONFIG_REVIEW_STAGE,
-                            project_dir=final_project_dir,
-                            message=review_message,
-                        )
-                    )
-                    return self._build_paused_result(
-                        project_dir=final_project_dir,
-                        stage=TRANSLATION_CONFIG_REVIEW_STAGE,
-                        message=review_message,
-                    )
+            if approved_translation_config is None and not s3_cache_hit:
+                default_model = _get_default_translation_model()
+                print(f"[S3] 自动使用默认翻译模型: {default_model}")
+                approved_translation_config = {
+                    "selected_model": default_model,
+                    "prompt_template": None,
+                }
 
             # Apply translation config from approved review if available
             if approved_translation_config is not None:
@@ -1055,7 +1074,12 @@ class ProcessPipeline:
                     print("[S3] Express 模式（无需审核），跳过翻译审核。")
                 else:
                     self._write_segments_snapshot(translation_result)
-                    _unified_review_payload = self._build_translation_review_payload(translation_result)
+                    _all_speaker_names = _merge_speaker_name_map(
+                        _review_speaker_names,
+                        speaker_name_a,
+                        speaker_name_b,
+                    )
+                    _unified_review_payload = self._build_translation_review_payload(translation_result, speaker_names=_all_speaker_names)
                     _unified_review_payload["speaker_name_a"] = speaker_name_a
                     _unified_review_payload["speaker_name_b"] = speaker_name_b
                     _unified_review_payload["voice_id_a"] = voice_id_a
@@ -1100,6 +1124,49 @@ class ProcessPipeline:
                 ),
             )
 
+            # --- Pass 3: voice profiling (after translation review, before voice selection) ---
+            _pass3_cache_path = (final_project_dir / "transcript" / "s2_pass3_result.json").resolve(strict=False)
+            if _review_speaker_styles:
+                _pass3_profiles: dict | None = None
+                if _pass3_cache_path.exists():
+                    # Restore from cached Pass 3 result
+                    try:
+                        import json as _json
+                        _pass3_data = _json.loads(_pass3_cache_path.read_text(encoding="utf-8"))
+                        _pass3_profiles = _pass3_data.get("speaker_profiles", {})
+                        print(f"[S2.5] Pass 3 cache hit: {len(_pass3_profiles)} speaker profiles restored", flush=True)
+                    except Exception as exc:
+                        print(f"[S2.5] Pass 3 cache read failed: {exc}", flush=True)
+                if not _pass3_profiles:
+                    # Run Pass 3
+                    try:
+                        from src.services.transcript_reviewer import review_pass3_voice_profiles
+
+                        print("[S2.5] Running Pass 3: voice profiling...", flush=True)
+                        _pass3_profiles = review_pass3_voice_profiles(
+                            transcript_result.lines,
+                            source_audio_path=source_audio_path if source_audio_path.exists() else None,
+                            speakers=_review_speaker_styles,
+                            video_title=download_result.video_title,
+                            debug_output_dir=final_project_dir / "transcript",
+                        )
+                    except Exception as exc:
+                        print(f"[S2.5] Pass 3 failed (non-fatal): {exc}", flush=True)
+                        logger.warning("[S2.5] Pass 3 voice profiling failed: %s", exc)
+                # Merge Pass 3 profiles into _review_speaker_styles
+                # Pass 1 provides: name, role (identity fields only)
+                # Pass 3 provides: style, gender, age_group, voice_description, persona_style, energy_level
+                # Pass 3 is the sole source for all voice/style fields
+                if _pass3_profiles:
+                    for spk_id, profile in _pass3_profiles.items():
+                        if spk_id in _review_speaker_styles:
+                            existing = _review_speaker_styles[spk_id]
+                            for key in ("style", "voice_description", "gender", "age_group", "persona_style", "energy_level"):
+                                val = profile.get(key, "")
+                                if val:
+                                    existing[key] = val
+                    print(f"[S2.5] Pass 3 voice profiles: {len(_pass3_profiles)} speakers", flush=True)
+
             # --- voice_selection_review gate (Studio mode only) ---
             approved_voice_selection = self._get_approved_review_payload(
                 review_state_manager,
@@ -1143,10 +1210,11 @@ class ProcessPipeline:
                     service_mode=job_service_mode,
                     source_audio_path=source_audio_path,
                     effective_speakers=effective_speakers,
-                    speaker_names={
-                        "speaker_a": speaker_name_a,
-                        "speaker_b": speaker_name_b,
-                    },
+                    speaker_names=_merge_speaker_name_map(
+                        _review_speaker_names,
+                        speaker_name_a,
+                        speaker_name_b,
+                    ),
                     speaker_styles=_review_speaker_styles,
                 )
                 review_state_manager.set_stage(
@@ -1191,10 +1259,11 @@ class ProcessPipeline:
                         service_mode=job_service_mode,
                         source_audio_path=source_audio_path,
                         effective_speakers=effective_speakers,
-                        speaker_names={
-                            "speaker_a": speaker_name_a,
-                            "speaker_b": speaker_name_b,
-                        },
+                        speaker_names=_merge_speaker_name_map(
+                            _review_speaker_names,
+                            speaker_name_a,
+                            speaker_name_b,
+                        ),
                         speaker_styles=_review_speaker_styles,
                     )
                     vs_payload["expired_voice_ids"] = expired_voices
@@ -1543,9 +1612,15 @@ class ProcessPipeline:
         speaker_name_b: str,
         effective_speakers: int,
     ) -> dict[str, object]:
-        speaker_names = {"speaker_a": speaker_name_a}
-        if effective_speakers == 2:
-            speaker_names["speaker_b"] = speaker_name_b
+        detected_speaker_ids = self._detect_speaker_ids(transcript_result.lines)
+        speaker_names: dict[str, str] = {}
+        for speaker_id in detected_speaker_ids:
+            if speaker_id == "speaker_a":
+                speaker_names[speaker_id] = speaker_name_a or _default_speaker_display_name(speaker_id)
+            elif speaker_id == "speaker_b":
+                speaker_names[speaker_id] = speaker_name_b or _default_speaker_display_name(speaker_id)
+            else:
+                speaker_names[speaker_id] = _default_speaker_display_name(speaker_id)
         speaker_options = [
             {"speaker_id": speaker_id, "display_name": display_name}
             for speaker_id, display_name in speaker_names.items()
@@ -1573,7 +1648,7 @@ class ProcessPipeline:
             {
                 str(segment_id): str(speaker_id).strip()
                 for segment_id, speaker_id in reviewed_speaker_map.items()
-                if str(speaker_id).strip() in {"speaker_a", "speaker_b"}
+                if _is_valid_speaker_id(str(speaker_id).strip())
             }
             if isinstance(reviewed_speaker_map, dict)
             else {}
@@ -1870,19 +1945,40 @@ class ProcessPipeline:
             "speakers": speakers_payload,
             "available_voices": default_voices,
             "all_providers": all_providers,
-            "clone_cost_credits": 500,
+            "clone_cost_credits": self._get_clone_cost_credits(),
         }
+
+    @staticmethod
+    def _get_clone_cost_credits() -> int:
+        """Read clone cost from pricing runtime snapshot (shared config file).
+
+        The pipeline (app container) cannot import gateway modules directly,
+        so we read the same JSON file that the gateway writes.
+        """
+        try:
+            import json as _json
+            from pathlib import Path as _Path
+            runtime_file = _Path("/opt/aivideotrans/config/pricing_runtime.json")
+            if runtime_file.exists():
+                data = _json.loads(runtime_file.read_text(encoding="utf-8"))
+                return data.get("credits", {}).get("voice_clone_cost_credits", 500)
+        except Exception:
+            pass
+        return 500
 
     def _build_translation_review_payload(
         self,
         translation_result: TranslationResult,
+        speaker_names: dict[str, str] | None = None,
     ) -> dict[str, object]:
+        # Use reviewer names to override placeholder display_name in payload
+        resolved_names = speaker_names or {}
         return {
             "segments": {
                 str(segment.segment_id): {
                     "segment_id": segment.segment_id,
                     "speaker_id": segment.speaker_id,
-                    "display_name": segment.display_name,
+                    "display_name": resolved_names.get(segment.speaker_id, "") or segment.display_name,
                     "source_text": segment.source_text,
                     "cn_text": segment.cn_text,
                     "tts_cn_text": segment.tts_cn_text,
@@ -1893,6 +1989,7 @@ class ProcessPipeline:
                 for segment in translation_result.segments
             },
             "segment_count": translation_result.total_segments,
+            "speaker_names": resolved_names,
         }
 
     def _normalize_speakers(self, value: int | str) -> int | str:
@@ -2004,6 +2101,20 @@ class ProcessPipeline:
             output_path=str(segments_path.resolve(strict=False)),
         )
 
+    @staticmethod
+    def _is_placeholder_display_name(display_name: str, speaker_id: str) -> bool:
+        """Return True if display_name is a default placeholder (not user-set)."""
+        if not display_name:
+            return True
+        dn = display_name.strip()
+        # "Speaker A", "Speaker B", "Speaker C", ... are placeholders from translator
+        if dn.startswith("Speaker ") and len(dn) <= len("Speaker ZZ"):
+            return True
+        # Same as speaker_id itself
+        if dn == speaker_id:
+            return True
+        return False
+
     def _apply_review_speaker_styles_to_segments(
         self,
         segments: list[DubbingSegment],
@@ -2019,6 +2130,12 @@ class ProcessPipeline:
             segment.voice_description = voice_description
             segment.gender = str(speaker_info.get("gender", "") or "")
             segment.age_group = str(speaker_info.get("age_group", "") or "")
+            # Propagate reviewer name to display_name for all speakers (including c+).
+            # Overwrite default placeholders ("Speaker B", "Speaker C", etc.) but
+            # do NOT overwrite a user-confirmed custom name.
+            speaker_name = str(speaker_info.get("name", "") or "")
+            if speaker_name and self._is_placeholder_display_name(segment.display_name, segment.speaker_id):
+                segment.display_name = speaker_name
             segment.persona_style = str(
                 speaker_info.get("persona_style", "") or infer_persona_style(voice_description)
             )
@@ -2077,39 +2194,27 @@ class ProcessPipeline:
         video_title: str,
         video_url: str,
     ) -> dict[str, dict[str, object]]:
-        print("[S2] Cached translation missing voice metadata; rerunning transcript review.", flush=True)
-        try:
-            from src.services.transcript_reviewer import review_transcript
-
-            words_data: list[dict] | None = None
+        # Try loading from cached s2_review_result.json first (avoids expensive LLM re-call).
+        # Voice fields (gender/age_group/persona/energy) are filled by Pass 3 later,
+        # so it's fine if they're empty here — no need to re-run S2 to get them.
+        s2_cache = Path(transcript_result.structured_transcript_path).parent / "s2_review_result.json"
+        if s2_cache.exists():
             try:
-                raw_path = transcript_result.raw_response_path
-                if raw_path and Path(raw_path).exists():
-                    with open(raw_path, encoding="utf-8") as raw_file:
-                        raw_payload = json.load(raw_file)
-                    words_data = raw_payload.get("words")
-            except Exception:
-                words_data = None
+                cached = json.loads(s2_cache.read_text(encoding="utf-8"))
+                speakers = cached.get("speakers", {})
+                if speakers:
+                    print(f"[S2] Restored speaker styles from cache ({len(speakers)} speakers).", flush=True)
+                    return speakers
+            except Exception as exc:
+                print(f"[S2] Failed to load cached s2_review_result.json: {exc}", flush=True)
 
-            review_result = review_transcript(
-                transcript_result.lines,
-                audio_path=source_audio_path if source_audio_path.exists() else None,
-                video_title=video_title,
-                video_url=video_url,
-                words_data=words_data,
-            )
-        except Exception as exc:
-            print(
-                f"[S2] Cached voice metadata recovery failed ({type(exc).__name__}: {exc}).",
-                flush=True,
-            )
-            return {}
-
-        if review_result is None or not review_result.speakers:
-            print("[S2] Cached voice metadata recovery returned no speaker styles.", flush=True)
-            return {}
-
-        return review_result.speakers
+        # Fallback: build minimal styles from transcript speaker IDs
+        print("[S2] No cached S2 result; using minimal speaker styles (Pass 3 will enrich later).", flush=True)
+        speaker_ids = list({line.speaker_id for line in transcript_result.lines if line.speaker_id})
+        return {
+            sid: {"name": sid.replace("speaker_", "Speaker ").replace("_", " ").title()}
+            for sid in sorted(speaker_ids)
+        }
 
     def _resolve_cached_display_names(
         self,
@@ -2298,8 +2403,12 @@ class ProcessPipeline:
         speaker_name_b_is_placeholder,
         download_result,
         normalized_url,
-    ):
-        """Fallback: use old separate LLM calls for speaker inference + review."""
+    ) -> tuple:
+        """Fallback: use old separate LLM calls for speaker inference + review.
+
+        Returns (transcript_result, speaker_name_a, speaker_name_b) so the
+        caller can pick up the updated state.
+        """
         if effective_speakers in {1, 2} and (
             speaker_name_a_is_placeholder or speaker_name_b_is_placeholder
         ):
@@ -2344,12 +2453,15 @@ class ProcessPipeline:
                 )
                 self._write_transcript_result(transcript_result)
 
+        return transcript_result, speaker_name_a, speaker_name_b
+
     @staticmethod
     def _fallback_minimal_speaker_styles(
         *,
         effective_speakers: int,
         speaker_name_a: str,
         speaker_name_b: str,
+        speaker_ids: list[str] | None = None,
     ) -> dict[str, dict]:
         """Generate minimal speaker_styles when unified review is completely unavailable.
 
@@ -2363,11 +2475,26 @@ class ProcessPipeline:
         falling back to a single default voice for all speakers.
         """
         styles: dict[str, dict] = {}
+        resolved_speaker_ids = [
+            speaker_id
+            for speaker_id in (speaker_ids or [])
+            if _is_valid_speaker_id(speaker_id)
+        ]
+        if not resolved_speaker_ids:
+            max_speakers = max(1, int(effective_speakers))
+            resolved_speaker_ids = [
+                f"speaker_{chr(ord('a') + offset)}"
+                for offset in range(max_speakers)
+            ]
 
-        # Default assumption: male / middle.  Crude, but better than empty.
-        for spk_id, spk_name in [("speaker_a", speaker_name_a), ("speaker_b", speaker_name_b)]:
-            if effective_speakers == 1 and spk_id == "speaker_b":
-                continue
+        # Default assumption: male / middle. Crude, but better than empty.
+        for spk_id in resolved_speaker_ids:
+            if spk_id == "speaker_a":
+                spk_name = speaker_name_a or _default_speaker_display_name(spk_id)
+            elif spk_id == "speaker_b":
+                spk_name = speaker_name_b or _default_speaker_display_name(spk_id)
+            else:
+                spk_name = _default_speaker_display_name(spk_id)
             styles[spk_id] = {
                 "name": spk_name,
                 "gender": "male",
