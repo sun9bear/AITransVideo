@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useCallback, useRef } from "react"
+import { useState, useCallback, useRef, useEffect } from "react"
 import { Loader2, ClipboardList, Sparkles, ChevronDown } from "lucide-react"
 import { toast } from "sonner"
 import { usePollingTask } from "@/lib/react/usePollingTask"
@@ -122,7 +122,10 @@ export default function AdminJobsPage() {
     }
   }, [])
 
-  usePollingTask(() => loadJobs(true), { intervalMs: 10000 })
+  // Initial non-silent load (toggles loading spinner)
+  useEffect(() => { loadJobs() }, [loadJobs])
+  // Subsequent silent polling (no spinner flicker)
+  usePollingTask(() => loadJobs(true), { intervalMs: 10000, immediate: false })
 
   const handleRowClick = useCallback(async (jobId: string) => {
     // Abort any in-flight requests from previous row and reset stale state
