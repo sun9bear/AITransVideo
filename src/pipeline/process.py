@@ -53,6 +53,7 @@ from services.assemblyai.transcriber import (
 )
 from services.gemini.rewriter import GeminiRewriter
 from services.gemini.translator import (
+    DEFAULT_ESTIMATED_TTS_CHARS_PER_SECOND,
     DubbingSegment,
     GeminiTranslator,
     TranslationResult,
@@ -1129,6 +1130,37 @@ class ProcessPipeline:
                         message=review_message,
                     )
 
+            # --- S4-probe: Probe TTS calibration (before main translation) ---
+            # Runs for both Studio and Express modes — probe cost (~$0.02) is
+            # justified by downstream savings (fewer rewrites + force_dsp).
+            _probe_chars_per_second = DEFAULT_ESTIMATED_TTS_CHARS_PER_SECOND
+            _probe_chars_per_second_by_speaker: dict[str, float] = {}
+            if not s3_cache_hit:
+                try:
+                    _probe_tts_generator = TTSGenerator(tts_config, job_record=config.job_record)
+                    _probe_tts_dir = (final_project_dir / "tts").resolve(strict=False)
+                    _probe_tts_dir.mkdir(parents=True, exist_ok=True)
+                    _probe_chars_per_second, _probe_chars_per_second_by_speaker = (
+                        self._run_probe_tts_calibration(
+                            transcript_result.lines,
+                            translator,
+                            _probe_tts_generator,
+                            _probe_tts_dir,
+                            video_title=download_result.video_title,
+                            youtube_url=normalized_url,
+                            glossary=_review_glossary or None,
+                            speaker_voices=_speaker_voices if effective_speakers > 2 else None,
+                            speaker_providers=_speaker_providers or None,
+                            voice_id_a=voice_id_a,
+                            display_name_a=speaker_name_a,
+                            voice_id_b=voice_id_b,
+                            display_name_b=speaker_name_b if effective_speakers >= 2 else None,
+                        )
+                    )
+                except Exception as exc:
+                    print(f"[S4-probe] 探针校准整体异常（回退 4.5）：{exc}")
+                    logger.warning("[S4-probe] Probe calibration failed: %s", exc)
+
             # --- S3 Translation (voice already confirmed above) ---
             if s3_cache_hit:
                 self._apply_runtime_voice_overrides(
@@ -1138,6 +1170,7 @@ class ProcessPipeline:
                     voice_id_b=voice_id_b,
                     display_name_b=speaker_name_b,
                     speaker_voices=_speaker_voices if effective_speakers > 2 else None,
+                    speaker_providers=_speaker_providers or None,
                 )
             else:
                 print("[S3] 翻译文本...")
@@ -1152,7 +1185,15 @@ class ProcessPipeline:
                     youtube_url=normalized_url,
                     glossary=_review_glossary or None,
                     speaker_voices=_speaker_voices if effective_speakers > 2 else None,
+                    chars_per_second=_probe_chars_per_second,
+                    chars_per_second_by_speaker=_probe_chars_per_second_by_speaker or None,
                 )
+                # translate() creates fresh DubbingSegments without tts_provider;
+                # apply per-speaker TTS provider overrides from voice selection
+                if _speaker_providers:
+                    for seg in translation_result.segments:
+                        if seg.speaker_id in _speaker_providers:
+                            seg.tts_provider = _speaker_providers[seg.speaker_id]
                 print(f"[S3] 完成：共 {translation_result.total_segments} 段")
 
             self._apply_review_speaker_styles_to_segments(
@@ -3498,6 +3539,159 @@ class ProcessPipeline:
             chars_per_second_by_speaker[speaker_id] = speaker_estimator.chars_per_second
 
         return global_estimator.chars_per_second, chars_per_second_by_speaker
+
+    @staticmethod
+    def _select_probe_segments(
+        lines: list[TranscriptLine],
+        *,
+        min_duration_ms: int = 3_000,
+        max_duration_ms: int = 8_000,
+        per_speaker: int = 3,
+        min_total: int = 3,
+        max_total: int = 10,
+    ) -> list[TranscriptLine]:
+        """Select representative segments for probe TTS calibration.
+
+        Picks 2-3 segments per speaker (3-8s duration), avoiding the first and
+        last segments. Ensures min 3, max 10 total.
+        """
+        if len(lines) <= 2:
+            return []
+
+        # Filter: skip first/last, duration in range
+        candidates: list[TranscriptLine] = []
+        for i, line in enumerate(lines):
+            if i == 0 or i == len(lines) - 1:
+                continue
+            duration_ms = line.end_ms - line.start_ms
+            if min_duration_ms <= duration_ms <= max_duration_ms:
+                candidates.append(line)
+
+        if not candidates:
+            return []
+
+        # Group by speaker
+        by_speaker: dict[str, list[TranscriptLine]] = {}
+        for line in candidates:
+            by_speaker.setdefault(line.speaker_id, []).append(line)
+
+        # Pick evenly spaced segments per speaker
+        selected: list[TranscriptLine] = []
+        for speaker_lines in by_speaker.values():
+            count = min(per_speaker, len(speaker_lines))
+            if count == len(speaker_lines):
+                selected.extend(speaker_lines)
+            else:
+                step = len(speaker_lines) / count
+                for i in range(count):
+                    selected.append(speaker_lines[int(i * step)])
+
+        # Ensure min_total from remaining candidates
+        if len(selected) < min_total:
+            selected_set = set(id(s) for s in selected)
+            for line in candidates:
+                if id(line) not in selected_set:
+                    selected.append(line)
+                    selected_set.add(id(line))
+                if len(selected) >= min_total:
+                    break
+
+        # Cap at max_total
+        selected = selected[:max_total]
+
+        # Sort by original order
+        line_order = {id(line): i for i, line in enumerate(lines)}
+        selected.sort(key=lambda ln: line_order.get(id(ln), 0))
+
+        return selected
+
+    def _run_probe_tts_calibration(
+        self,
+        transcript_lines: list[TranscriptLine],
+        translator: "GeminiTranslator",
+        tts_generator: "TTSGenerator",
+        tts_dir: Path,
+        *,
+        video_title: str = "",
+        youtube_url: str = "",
+        glossary: dict[str, str] | None = None,
+        speaker_voices: dict[str, str] | None = None,
+        speaker_providers: dict[str, str] | None = None,
+        voice_id_a: str | None = None,
+        display_name_a: str = "Speaker A",
+        voice_id_b: str | None = None,
+        display_name_b: str | None = None,
+    ) -> tuple[float, dict[str, float]]:
+        """Run probe translation + TTS to calibrate chars_per_second.
+
+        Returns (global_chars_per_second, {speaker_id: chars_per_second}).
+        Falls back to DEFAULT 4.5 on any failure.
+        """
+        default_cps = 4.5
+
+        probe_lines = self._select_probe_segments(transcript_lines)
+        if not probe_lines:
+            print("[S4-probe] 无满足条件的探针段落，使用默认 4.5 字/秒")
+            return default_cps, {}
+
+        print(f"[S4-probe] 选取 {len(probe_lines)} 段探针段落进行校准")
+
+        # Probe translation (no char constraints)
+        try:
+            probe_segments = translator.translate_probe(
+                probe_lines,
+                video_title=video_title,
+                youtube_url=youtube_url,
+                glossary=glossary,
+                speaker_voices=speaker_voices,
+                voice_id=voice_id_a,
+                display_name=display_name_a,
+                voice_id_b=voice_id_b,
+                display_name_b=display_name_b,
+            )
+        except Exception as exc:
+            print(f"[S4-probe] 探针翻译失败（回退 4.5）：{exc}")
+            logger.warning("[S4-probe] Probe translation failed: %s", exc)
+            return default_cps, {}
+
+        if not probe_segments:
+            print("[S4-probe] 探针翻译无结果，使用默认 4.5 字/秒")
+            return default_cps, {}
+
+        # Apply per-speaker TTS provider so probe TTS uses the correct engine
+        if speaker_providers:
+            for seg in probe_segments:
+                if seg.speaker_id in speaker_providers:
+                    seg.tts_provider = speaker_providers[seg.speaker_id]
+
+        # Probe TTS — output to _probe subdirectory to avoid collision with main TTS
+        probe_tts_dir = (tts_dir / "_probe").resolve(strict=False)
+        probe_tts_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            tts_generator.generate_all(probe_segments, str(probe_tts_dir))
+        except Exception as exc:
+            print(f"[S4-probe] 探针 TTS 失败（回退 4.5）：{exc}")
+            logger.warning("[S4-probe] Probe TTS failed: %s", exc)
+            return default_cps, {}
+
+        # Calibrate from probe results
+        chars_per_second, chars_per_second_by_speaker = self._calibrate_tts_duration(
+            probe_segments,
+        )
+
+        # Sanity check — reject implausible values
+        if chars_per_second < 2.0 or chars_per_second > 8.0:
+            print(
+                f"[S4-probe] 校准值异常 ({chars_per_second:.2f} 字/秒)，"
+                "回退默认 4.5 字/秒"
+            )
+            return default_cps, {}
+
+        print(f"[S4-probe] 校准完成：global={chars_per_second:.2f} 字/秒")
+        for spk, cps in chars_per_second_by_speaker.items():
+            print(f"  {spk}: {cps:.2f} 字/秒")
+
+        return chars_per_second, chars_per_second_by_speaker
 
     def _resolve_voice_registry_path(self) -> str:
         project_config = config_loader.load_project_local_config()

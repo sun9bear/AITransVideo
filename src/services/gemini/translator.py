@@ -54,6 +54,38 @@ TRANSLATION_PROMPT_TEMPLATE_YOUTUBE_URL_TOKEN = "__YOUTUBE_URL__"
 TRANSLATION_PROMPT_TEMPLATE_SPEAKER_INSTRUCTION_TOKEN = "__SPEAKER_INSTRUCTION__"
 TRANSLATION_PROMPT_TEMPLATE_STRICT_LENGTH_TOKEN = "__STRICT_LENGTH_INSTRUCTION__"
 TRANSLATION_PROMPT_TEMPLATE_GLOSSARY_TOKEN = "__GLOSSARY_SECTION__"
+PROBE_TRANSLATION_PROMPT_TEMPLATE = """你是专业的视频配音翻译专家。任务是把英文视频转录稿翻译成自然流畅的中文口播文本。
+
+视频信息：
+- 标题：__VIDEO_TITLE__
+- 来源：__YOUTUBE_URL__
+__GLOSSARY_SECTION__
+这些翻译将直接用于中文 TTS 配音，核心目标是让中文配音时长与原英文段落时长大致一致。请特别注意：
+1. 每段都标注了 target_duration_seconds（原文段落时长），翻译时请自然地控制中文长度，使配音时长接近该目标。
+2. 不要机械地按字数公式凑字，而是根据原文的语速节奏、信息密度来判断中文应该翻多长。
+3. 宁可适度意译、精简表达，也不要逐字直译导致配音明显超时。
+4. 如果原文信息密度高，可用更紧凑的中文表达方式保留核心信息。
+5. 翻译结果将用于配音，不要写成书面字幕腔，要适合人声朗读。
+6. 所有人物姓名必须优先使用中文常见译名，不要保留英文人名。
+   例如：Elon Musk -> 埃隆·马斯克，Sam Altman -> 萨姆·奥特曼，Naval Ravikant -> 纳瓦尔·拉维坎特。
+7. 公司、产品、品牌、模型名称若已有常见中文译法，优先使用中文；若没有稳定中文译法，可保留原文。
+__SPEAKER_INSTRUCTION__补充要求：在不影响自然度的前提下，可适度保留原文中的口语连接词、语气词和缓冲表达，以维持更接近原说话节奏；但不要为了凑字数生硬添加无意义填充词。
+9. 每个 segment 独立翻译，但要保持上下文连贯。
+10. 只输出 JSON，不要任何其他文字。
+
+每个 segment 提供了 target_duration_seconds（原文段落时长），请凭语感自然翻译，使配音时长接近该目标。
+
+输入（JSON数组）：
+__GROUPS_JSON__
+
+请输出JSON数组，格式如下（只输出JSON，不要markdown代码块）：
+[
+  {
+    "segment_id": 1,
+    "cn_text": "翻译后的中文文本"
+  }
+]"""
+
 REWRITE_PROMPT_TEMPLATE_TEXT_TOKEN = "__TTS_CN_TEXT__"
 REWRITE_PROMPT_TEMPLATE_SOURCE_TEXT_TOKEN = "__SOURCE_TEXT__"
 REWRITE_PROMPT_TEMPLATE_DIRECTION_TOKEN = "__DIRECTION_DESC__"
@@ -243,6 +275,8 @@ class GeminiTranslator:
         youtube_url: str = "",
         glossary: dict[str, str] | None = None,
         speaker_voices: dict[str, str] | None = None,
+        chars_per_second: float = DEFAULT_ESTIMATED_TTS_CHARS_PER_SECOND,
+        chars_per_second_by_speaker: dict[str, float] | None = None,
     ) -> TranslationResult:
         output_root = Path(output_dir).resolve(strict=False)
         output_root.mkdir(parents=True, exist_ok=True)
@@ -259,7 +293,12 @@ class GeminiTranslator:
         normalized_display_name_b = _normalize_optional_text(display_name_b) or "Speaker B"
         # _pre_split_long_lines removed — S1 3-layer split + S2 LLM review
         # already ensures segments are ≤45s. No need for translator to re-split.
-        groups = _build_groups(lines, max_segment_duration_ms=max_segment_duration_ms)
+        groups = _build_groups(
+            lines,
+            max_segment_duration_ms=max_segment_duration_ms,
+            chars_per_second=chars_per_second,
+            chars_per_second_by_speaker=chars_per_second_by_speaker,
+        )
 
         # Save glossary to translation/glossary.json for reference
         effective_glossary = glossary if glossary else {}
@@ -349,6 +388,106 @@ class GeminiTranslator:
         if checkpoint_path.exists():
             checkpoint_path.unlink()
         return result
+
+    def translate_probe(
+        self,
+        lines: list[TranscriptLine],
+        *,
+        video_title: str = "",
+        youtube_url: str = "",
+        glossary: dict[str, str] | None = None,
+        speaker_voices: dict[str, str] | None = None,
+        voice_id: str | None = None,
+        display_name: str = "Speaker A",
+        voice_id_b: str | None = None,
+        display_name_b: str | None = None,
+    ) -> list[DubbingSegment]:
+        """Translate probe segments without char constraints for TTS calibration.
+
+        Uses PROBE_TRANSLATION_PROMPT_TEMPLATE which omits min_chars/max_chars,
+        so the LLM translates by feel guided only by target_duration_seconds.
+        No checkpointing, no length retry — probe batches are small (≤10 segments).
+        """
+        groups = _build_probe_groups(lines)
+        if not groups:
+            return []
+
+        effective_glossary = glossary if glossary else {}
+        prompt = self._build_probe_prompt(
+            groups,
+            video_title=video_title,
+            youtube_url=youtube_url,
+            glossary=effective_glossary,
+        )
+        response_text = self._call_task_with_fallback(
+            "s3_translate",
+            prompt,
+            json_mode=False,
+            validator=lambda text: self._parse_response(text, groups),
+        )
+        parsed_items = self._parse_response(response_text, groups)
+
+        normalized_voice_id = _normalize_optional_text(voice_id) or "auto"
+        normalized_display_name = _normalize_optional_text(display_name) or "Speaker A"
+        normalized_voice_id_b = _normalize_optional_text(voice_id_b)
+        normalized_display_name_b = _normalize_optional_text(display_name_b) or "Speaker B"
+
+        segments: list[DubbingSegment] = []
+        for group, item in zip(groups, parsed_items):
+            speaker_id = str(group["speaker_id"])
+            segment_voice_id, segment_display_name = _resolve_segment_voice_assignment(
+                speaker_id=speaker_id,
+                voice_id=normalized_voice_id,
+                display_name=normalized_display_name,
+                voice_id_b=normalized_voice_id_b,
+                display_name_b=normalized_display_name_b,
+                speaker_voices=speaker_voices,
+            )
+            line = lines[int(item["segment_id"]) - 1]
+            segments.append(
+                DubbingSegment(
+                    segment_id=int(item["segment_id"]),
+                    speaker_id=speaker_id,
+                    display_name=segment_display_name,
+                    voice_id=segment_voice_id,
+                    start_ms=line.start_ms,
+                    end_ms=line.end_ms,
+                    target_duration_ms=max(0, line.end_ms - line.start_ms),
+                    source_text=str(group["source_text"]),
+                    cn_text=str(item["cn_text"]).strip(),
+                )
+            )
+        return segments
+
+    def _build_probe_prompt(
+        self,
+        groups: list[dict],
+        *,
+        video_title: str = "",
+        youtube_url: str = "",
+        glossary: dict[str, str] | None = None,
+    ) -> str:
+        groups_json = json.dumps(groups, ensure_ascii=False, indent=2)
+        speaker_ids = {str(group.get("speaker_id", "")).strip() for group in groups}
+        speaker_instruction = (
+            "9. 这是双人访谈，请区分两个说话人的语气、措辞和交流关系。\n"
+            if len(speaker_ids) > 1
+            else ""
+        )
+        glossary_section = ""
+        if glossary:
+            glossary_lines = "\n".join(f"{k} → {v}" for k, v in glossary.items())
+            glossary_section = f"\n术语表（请严格遵循以下翻译）：\n{glossary_lines}\n"
+        normalized_video_title = _normalize_optional_text(video_title) or "未提供"
+        normalized_youtube_url = _normalize_optional_text(youtube_url) or "未提供"
+        return (
+            PROBE_TRANSLATION_PROMPT_TEMPLATE
+            .replace(TRANSLATION_PROMPT_TEMPLATE_VIDEO_TITLE_TOKEN, normalized_video_title)
+            .replace(TRANSLATION_PROMPT_TEMPLATE_YOUTUBE_URL_TOKEN, normalized_youtube_url)
+            .replace(TRANSLATION_PROMPT_TEMPLATE_GLOSSARY_TOKEN, glossary_section)
+            .replace(TRANSLATION_PROMPT_TEMPLATE_SPEAKER_INSTRUCTION_TOKEN, speaker_instruction)
+            .replace(TRANSLATION_PROMPT_TEMPLATE_GROUPS_TOKEN, groups_json)
+        )
 
     def _build_translation_fingerprint(
         self,
@@ -1566,13 +1705,44 @@ def _text_weight(text: str) -> int:
     return max(1, alnum_weight or len(normalized_text))
 
 
-def _build_groups(lines: list[TranscriptLine], *, max_segment_duration_ms: int) -> list[dict[str, object]]:
+def _build_probe_groups(lines: list[TranscriptLine]) -> list[dict[str, object]]:
+    """Build simplified translation groups for probe segments (no char estimates).
+
+    Probe groups deliberately omit min_chars/max_chars to avoid the 4.5 chars/sec
+    assumption polluting the calibration. The LLM translates by feel, guided only
+    by target_duration_seconds.
+    """
+    groups: list[dict[str, object]] = []
+    for segment_id, line in enumerate(lines, start=1):
+        target_duration_ms = max(0, line.end_ms - line.start_ms)
+        groups.append(
+            {
+                "segment_id": segment_id,
+                "speaker_id": line.speaker_id,
+                "target_duration_seconds": round(target_duration_ms / 1000, 1),
+                "source_text": line.source_text,
+            }
+        )
+    return groups
+
+
+def _build_groups(
+    lines: list[TranscriptLine],
+    *,
+    max_segment_duration_ms: int,
+    chars_per_second: float = DEFAULT_ESTIMATED_TTS_CHARS_PER_SECOND,
+    chars_per_second_by_speaker: dict[str, float] | None = None,
+) -> list[dict[str, object]]:
     """Build translation groups from transcript lines.
 
     1:1 mapping — each transcript line becomes one translation group.
     No merging. Transcript stage (5-layer split) already handles segmentation.
     AssemblyAI utterances are already "one person's continuous speech",
     so even short segments like "Yeah, sure." are complete utterances.
+
+    When chars_per_second / chars_per_second_by_speaker are provided (from probe
+    TTS calibration), they replace the default 4.5 assumption for target char
+    estimation.
     """
     if not lines:
         return []
@@ -1595,6 +1765,8 @@ def _build_groups(lines: list[TranscriptLine], *, max_segment_duration_ms: int) 
         )
     if not groups:
         return []
+
+    effective_cps_by_speaker = chars_per_second_by_speaker or {}
 
     for group in groups:
         source_text = str(group["source_text"])
@@ -1623,9 +1795,12 @@ def _build_groups(lines: list[TranscriptLine], *, max_segment_duration_ms: int) 
             reference_words_per_second=reference_words_per_second,
             reference_source=reference_source,
         )
+        # Use speaker-specific calibrated chars/sec if available, else global
+        effective_cps = effective_cps_by_speaker.get(speaker_id, chars_per_second)
         target_chars = _estimate_dynamic_target_chars(
             target_duration_ms=target_duration_ms,
             density_factor=density_factor,
+            chars_per_second=effective_cps,
         )
         min_chars, max_chars = _estimate_target_char_range(target_chars)
         group["reference_words_per_second"] = round(reference_words_per_second, 3)
@@ -1771,8 +1946,11 @@ def _merge_source_text(lines: list[TranscriptLine]) -> str:
     return " ".join(line.source_text.strip() for line in lines if line.source_text.strip()).strip()
 
 
-def _estimate_target_chars(target_duration_ms: int) -> int:
-    return max(1, int(target_duration_ms / 1000 * DEFAULT_ESTIMATED_TTS_CHARS_PER_SECOND))
+def _estimate_target_chars(
+    target_duration_ms: int,
+    chars_per_second: float = DEFAULT_ESTIMATED_TTS_CHARS_PER_SECOND,
+) -> int:
+    return max(1, int(target_duration_ms / 1000 * chars_per_second))
 
 
 def _count_source_words(source_text: str) -> int:
@@ -1832,8 +2010,9 @@ def _estimate_dynamic_target_chars(
     *,
     target_duration_ms: int,
     density_factor: float,
+    chars_per_second: float = DEFAULT_ESTIMATED_TTS_CHARS_PER_SECOND,
 ) -> int:
-    base_target_chars = _estimate_target_chars(target_duration_ms)
+    base_target_chars = _estimate_target_chars(target_duration_ms, chars_per_second)
     return max(1, int(base_target_chars * density_factor))
 
 
