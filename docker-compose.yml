@@ -132,6 +132,8 @@ services:
       AVT_AUTH_REQUIRED: "true"
       AVT_PG_PASSWORD: "${PG_PASSWORD:?PG_PASSWORD 必须在 .env 中设置}"
       AVT_DATABASE_URL: ""
+      # --- AI Analysis (DeepSeek) ---
+      DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-}"
       # --- Captcha (Cloudflare Turnstile) ---
       AVT_CAPTCHA_PROVIDER: "${AVT_CAPTCHA_PROVIDER:-fake}"
       AVT_TURNSTILE_SECRET_KEY: "${AVT_TURNSTILE_SECRET_KEY:-}"
