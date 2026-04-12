@@ -27,6 +27,7 @@ import {
   Wallet,
   MessageSquareText,
   Activity,
+  ClipboardList,
 } from "lucide-react"
 
 type NavItem = {
@@ -69,6 +70,7 @@ const navGroups: NavGroup[] = [
     label: "管理",
     adminOnly: true,
     items: [
+      { label: "任务管理", href: "/admin/jobs", icon: ClipboardList },
       { label: "音色管理", href: "/admin/voices", icon: AudioLines },
       { label: "模型管理", href: "/admin/prompts", icon: MessageSquareText },
       { label: "审校监控", href: "/admin/s2-monitor", icon: Activity },
