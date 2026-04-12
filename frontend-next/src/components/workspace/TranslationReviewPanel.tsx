@@ -79,7 +79,6 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
                 cnText: item.cnText,
                 rewriteRequested: item.rewriteRequested,
                 translationConfirmed: item.translationConfirmed,
-                cnText: item.cnText,
                 updatedAt: item.reviewUpdatedAt ?? '',
               },
             ]),
@@ -232,10 +231,10 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
           resource.items.map((item) => {
             const current = segments[item.segmentId] ?? {
               cnText: item.cnText, rewriteRequested: item.rewriteRequested,
-              translationConfirmed: item.translationConfirmed, cnText: item.cnText,
+              translationConfirmed: item.translationConfirmed,
               updatedAt: item.reviewUpdatedAt ?? '',
             }
-            return [item.segmentId, { cnText: current.cnText, rewriteRequested: current.rewriteRequested, translationConfirmed: current.translationConfirmed, cnText: current.cnText, updatedAt: current.updatedAt || now }]
+            return [item.segmentId, { cnText: current.cnText, rewriteRequested: current.rewriteRequested, translationConfirmed: current.translationConfirmed, updatedAt: current.updatedAt || now }]
           }),
         ),
       })
@@ -324,7 +323,7 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
           {visibleItems.map((item) => {
             const current = segments[item.segmentId] ?? {
               cnText: item.cnText, rewriteRequested: item.rewriteRequested,
-              translationConfirmed: item.translationConfirmed, cnText: item.cnText,
+              translationConfirmed: item.translationConfirmed,
               updatedAt: item.reviewUpdatedAt ?? '',
             }
             const isEligibleForPreview = eligiblePreviewSegments.has(item.segmentId)
@@ -407,7 +406,7 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
                       className="w-full min-h-[2lh] resize-none rounded-xl bg-transparent px-4 py-2 text-sm leading-6 text-foreground placeholder:text-muted-foreground/60 focus:outline-none input-focus-ring overflow-hidden"
                       onChange={(event) => {
                         const v = event.currentTarget.value
-                        setSegments((s) => ({ ...s, [item.segmentId]: { ...(s[item.segmentId] ?? current), cnText: v, cnText: v, updatedAt: new Date().toISOString() } }))
+                        setSegments((s) => ({ ...s, [item.segmentId]: { ...(s[item.segmentId] ?? current), cnText: v, updatedAt: new Date().toISOString() } }))
                       }}
                       onInput={(event) => { const el = event.currentTarget; el.style.height = 'auto'; el.style.height = `${el.scrollHeight}px` }}
                       ref={(el) => { if (el) { el.style.height = 'auto'; el.style.height = `${el.scrollHeight}px` } }}
