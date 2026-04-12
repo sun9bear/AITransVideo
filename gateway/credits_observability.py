@@ -338,9 +338,9 @@ async def credits_cost_metrics(
         ).where(window_filter, has_snapshot)
     )
     row = credits_result.one()
-    est_sum = row.est
-    act_sum = row.act
-    delta_pct = round((est_sum - act_sum) / act_sum * 100, 1) if act_sum else None
+    est_sum = int(row.est)
+    act_sum = int(row.act)
+    delta_pct = round(float((est_sum - act_sum) / act_sum * 100), 1) if act_sum else None
 
     # K 值（final_cn_chars / actual_minutes）— 百分位数
     k_expr = _safe_jsonb_float(Job.metering_snapshot, "final_cn_chars") / Job.actual_minutes
@@ -360,10 +360,10 @@ async def credits_cost_metrics(
     )
     k_row = k_result.one()
     k_actual = {
-        "avg": round(k_row.avg, 0) if k_row.avg else None,
-        "p50": round(k_row.p50, 0) if k_row.p50 else None,
-        "p75": round(k_row.p75, 0) if k_row.p75 else None,
-        "p90": round(k_row.p90, 0) if k_row.p90 else None,
+        "avg": round(float(k_row.avg), 0) if k_row.avg else None,
+        "p50": round(float(k_row.p50), 0) if k_row.p50 else None,
+        "p75": round(float(k_row.p75), 0) if k_row.p75 else None,
+        "p90": round(float(k_row.p90), 0) if k_row.p90 else None,
     }
 
     # Rewrite 率
@@ -377,8 +377,8 @@ async def credits_cost_metrics(
         ).where(window_filter, has_snapshot)
     )
     rw = rewrite_result.one()
-    rewrite_rate_pct = round(rw.with_rewrite / rw.total * 100, 1) if rw.total else None
-    rewrite_count_avg = round(rw.avg_count, 1) if rw.avg_count else None
+    rewrite_rate_pct = round(float(rw.with_rewrite / rw.total * 100), 1) if rw.total else None
+    rewrite_count_avg = round(float(rw.avg_count), 1) if rw.avg_count else None
 
     # 模式分布（使用 Job.service_mode 顶级列，有索引）
     mode_result = await db.execute(
@@ -399,7 +399,7 @@ async def credits_cost_metrics(
         ).where(window_filter, has_snapshot)
     )
     tts_row = tts_result.one()
-    tts_coverage_pct = round(tts_row.with_tts / tts_row.total * 100, 1) if tts_row.total else None
+    tts_coverage_pct = round(float(tts_row.with_tts / tts_row.total * 100), 1) if tts_row.total else None
 
     # 未闭环 job 数（按时间窗口过滤）
     _, _, unsettled = await _get_unsettled_job_ids(db, cutoff=cutoff)
@@ -460,10 +460,10 @@ async def credits_provider_breakdown(
             "provider": r.provider or "unknown",
             "model": r.model or "unknown",
             "job_count": r.job_count,
-            "total_minutes": round(r.total_minutes, 1) if r.total_minutes else 0,
-            "total_billed_chars": r.total_billed_chars or 0,
-            "avg_billed_per_min": round(r.avg_billed_per_min, 0) if r.avg_billed_per_min else None,
-            "avg_credits_per_min": round(r.avg_credits_per_min, 1) if r.avg_credits_per_min else None,
+            "total_minutes": round(float(r.total_minutes), 1) if r.total_minutes else 0,
+            "total_billed_chars": int(r.total_billed_chars) if r.total_billed_chars else 0,
+            "avg_billed_per_min": round(float(r.avg_billed_per_min), 0) if r.avg_billed_per_min else None,
+            "avg_credits_per_min": round(float(r.avg_credits_per_min), 1) if r.avg_credits_per_min else None,
         })
 
     return {
@@ -510,7 +510,7 @@ async def credits_outliers(
             "credits_estimated": r.credits_estimated,
             "credits_actual": r.credits_actual,
             "delta": r.delta,
-            "actual_minutes": round(r.actual_minutes, 1) if r.actual_minutes else None,
+            "actual_minutes": round(float(r.actual_minutes), 1) if r.actual_minutes else None,
         }
         for r in delta_result.all()
     ]
@@ -532,8 +532,8 @@ async def credits_outliers(
         {
             "job_id": r.job_id,
             "title": r.title or "",
-            "rewrite_count": r.rewrite_count,
-            "actual_minutes": round(r.actual_minutes, 1) if r.actual_minutes else None,
+            "rewrite_count": int(r.rewrite_count) if r.rewrite_count else None,
+            "actual_minutes": round(float(r.actual_minutes), 1) if r.actual_minutes else None,
         }
         for r in rw_result.all()
     ]
