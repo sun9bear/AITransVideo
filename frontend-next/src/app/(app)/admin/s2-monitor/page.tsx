@@ -3,8 +3,10 @@
 import { useEffect, useState, useCallback } from "react"
 import { toast } from "sonner"
 import {
+  ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid,
+} from "recharts"
+import {
   Activity,
-  AlertTriangle,
   ArrowDown,
   Check,
   ChevronLeft,
@@ -29,6 +31,9 @@ interface PassAggregate {
   avg_line_change?: number
   total_contract_violations: number
   models_used: Record<string, number>
+  avg_duration_ms?: number
+  total_parse_failures?: number
+  avg_attempts_to_success?: number
 }
 
 interface Pass3Aggregate {
@@ -38,6 +43,8 @@ interface Pass3Aggregate {
   avg_profiles_generated: number
   avg_clips_extracted: number
   total_contract_violations: number
+  avg_duration_ms?: number
+  total_parse_failures?: number
 }
 
 interface Aggregate {
@@ -48,6 +55,20 @@ interface Aggregate {
   pass1: PassAggregate
   pass2: PassAggregate
   pass3: Pass3Aggregate
+}
+
+interface DailyTrend {
+  date: string
+  job_count: number
+  three_pass_count: number
+  legacy_count: number
+  pass3_success_rate_pct: number | null
+  avg_corrections_p2: number
+}
+
+interface FilterOptions {
+  service_modes: string[]
+  review_models: string[]
 }
 
 interface JobSummary {
@@ -68,25 +89,34 @@ interface JobSummary {
   pass1_sanity?: number
   pass1_violations?: number
   pass1_has_audio?: boolean
+  pass1_duration_ms?: number
+  pass1_attempts_count?: number
+  pass1_parse_failures?: number
   pass2_model?: string
   pass2_model_downgrade?: boolean
   pass2_corrections?: number
   pass2_glossary_terms?: number
   pass2_violations?: number
+  pass2_duration_ms?: number
+  pass2_attempts_count?: number
+  pass2_parse_failures?: number
   pass3_success?: boolean
   pass3_profiles?: number
   pass3_clips?: number
   pass3_violations?: number
+  pass3_duration_ms?: number
   lines_before?: number
   lines_after?: number
 }
 
 interface S2StatsResponse {
-  filter: { days: number; limit: number; offset: number }
+  filter: { days: number; limit: number; offset: number; service_mode: string; review_model: string }
+  filter_options: FilterOptions
   total_jobs_in_range: number
   jobs_eligible: number
   jobs_not_eligible: number
   aggregate: Aggregate
+  daily_trends: DailyTrend[]
   jobs: JobSummary[]
 }
 
@@ -128,20 +158,37 @@ function shortId(id: string): string {
   return id.length > 10 ? id.slice(0, 8) + "..." : id
 }
 
+function fmtDuration(ms: number | undefined | null): string {
+  if (ms == null) return "-"
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`
+}
+
+function shortModel(m: string): string {
+  return m.replace("gemini-", "").replace("-preview", "")
+}
+
 const DAYS_OPTIONS = [
   { value: 7, label: "最近 7 天" },
   { value: 30, label: "最近 30 天" },
   { value: 365, label: "全部" },
 ]
 
+const selectClass = "bg-muted border border-border rounded px-3 py-1.5 text-sm"
+
 // ---------------------------------------------------------------------------
 // API
 // ---------------------------------------------------------------------------
 
-async function fetchS2Stats(days: number, limit: number, offset: number): Promise<S2StatsResponse> {
-  const resp = await fetch(`/api/admin/s2-stats?days=${days}&limit=${limit}&offset=${offset}`, {
-    credentials: "include",
+async function fetchS2Stats(
+  days: number, limit: number, offset: number,
+  serviceMode: string, reviewModel: string,
+): Promise<S2StatsResponse> {
+  const params = new URLSearchParams({
+    days: String(days), limit: String(limit), offset: String(offset),
   })
+  if (serviceMode && serviceMode !== "all") params.set("service_mode", serviceMode)
+  if (reviewModel) params.set("review_model", reviewModel)
+  const resp = await fetch(`/api/admin/s2-stats?${params}`, { credentials: "include" })
   if (resp.status === 403) throw new Error("需要管理员权限")
   if (!resp.ok) {
     const body = await resp.json().catch(() => ({}))
@@ -151,9 +198,7 @@ async function fetchS2Stats(days: number, limit: number, offset: number): Promis
 }
 
 async function fetchJobDetail(jobId: string): Promise<JobDetail> {
-  const resp = await fetch(`/api/admin/s2-stats/${jobId}`, {
-    credentials: "include",
-  })
+  const resp = await fetch(`/api/admin/s2-stats/${jobId}`, { credentials: "include" })
   if (!resp.ok) {
     const body = await resp.json().catch(() => ({}))
     throw new Error((body as { detail?: string }).detail || `HTTP ${resp.status}`)
@@ -177,6 +222,47 @@ function StatCard({ label, value, sub, warning }: {
   )
 }
 
+function TrendChart({ trends }: { trends: DailyTrend[] }) {
+  if (trends.length < 2) return null
+  return (
+    <div className="border border-border rounded-lg p-4">
+      <h3 className="text-sm font-semibold mb-3">每日趋势</h3>
+      <ResponsiveContainer width="100%" height={220}>
+        <AreaChart data={trends} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+          <XAxis
+            dataKey="date"
+            tick={{ fontSize: 11, fill: "#94a3b8" }}
+            tickFormatter={(v: string) => v.slice(5)}
+            stroke="#334155"
+          />
+          <YAxis tick={{ fontSize: 11, fill: "#94a3b8" }} stroke="#334155" />
+          <Tooltip
+            contentStyle={{
+              backgroundColor: "#1e293b",
+              border: "1px solid #334155",
+              color: "#e2e8f0",
+              borderRadius: 8,
+              fontSize: 12,
+            }}
+            labelFormatter={(v) => String(v)}
+          />
+          <Area
+            type="monotone" dataKey="job_count" name="任务数"
+            stroke="#8b5cf6" fill="#8b5cf6" fillOpacity={0.15}
+            strokeWidth={2}
+          />
+          <Area
+            type="monotone" dataKey="avg_corrections_p2" name="P2 平均修正"
+            stroke="#06b6d4" fill="#06b6d4" fillOpacity={0.1}
+            strokeWidth={2}
+          />
+        </AreaChart>
+      </ResponsiveContainer>
+    </div>
+  )
+}
+
 function AttemptChain({ attempts }: { attempts: AttemptInfo[] }) {
   if (!attempts.length) return <span className="text-muted-foreground text-xs">无 attempt 数据</span>
   return (
@@ -194,6 +280,21 @@ function AttemptChain({ attempts }: { attempts: AttemptInfo[] }) {
           </div>
         </div>
       ))}
+    </div>
+  )
+}
+
+function PassSummaryLine({ result }: { result: Record<string, unknown> | null }) {
+  if (!result) return null
+  const duration = result.duration_ms as number | undefined
+  const attempts = result.attempts_count as number | undefined
+  const failures = result.parse_failures as number | undefined
+  if (duration == null && attempts == null) return null
+  return (
+    <div className="text-xs text-muted-foreground flex gap-3 mt-1">
+      {duration != null && <span>耗时 {fmtDuration(duration)}</span>}
+      {attempts != null && <span>第 {attempts} 次成功</span>}
+      {(failures ?? 0) > 0 && <span className="text-yellow-400">JSON 解析失败 {failures} 次</span>}
     </div>
   )
 }
@@ -232,12 +333,15 @@ function DetailDrawer({ jobId, onClose }: { jobId: string; onClose: () => void }
                 <div key={pass} className="space-y-2">
                   <h4 className="text-sm font-semibold uppercase text-muted-foreground">{pass}</h4>
                   {data.result ? (
-                    <details className="text-xs">
-                      <summary className="cursor-pointer text-sm font-medium">Result</summary>
-                      <pre className="mt-1 p-2 bg-muted rounded text-xs overflow-x-auto max-h-60">
-                        {JSON.stringify(data.result, null, 2)}
-                      </pre>
-                    </details>
+                    <>
+                      <PassSummaryLine result={data.result} />
+                      <details className="text-xs">
+                        <summary className="cursor-pointer text-sm font-medium">Result JSON</summary>
+                        <pre className="mt-1 p-2 bg-muted rounded text-xs overflow-x-auto max-h-60">
+                          {JSON.stringify(data.result, null, 2)}
+                        </pre>
+                      </details>
+                    </>
                   ) : (
                     <div className="text-xs text-muted-foreground">无 result 文件</div>
                   )}
@@ -292,13 +396,15 @@ export default function S2MonitorPage() {
   const [forbidden, setForbidden] = useState(false)
   const [days, setDays] = useState(7)
   const [offset, setOffset] = useState(0)
+  const [serviceMode, setServiceMode] = useState("all")
+  const [reviewModel, setReviewModel] = useState("")
   const [selectedJob, setSelectedJob] = useState<string | null>(null)
   const pageSize = 50
 
   const loadData = useCallback(async () => {
     setLoading(true)
     try {
-      const result = await fetchS2Stats(days, pageSize, offset)
+      const result = await fetchS2Stats(days, pageSize, offset, serviceMode, reviewModel)
       setData(result)
     } catch (err) {
       if (err instanceof Error && err.message.includes("管理员")) {
@@ -309,7 +415,7 @@ export default function S2MonitorPage() {
     } finally {
       setLoading(false)
     }
-  }, [days, offset])
+  }, [days, offset, serviceMode, reviewModel])
 
   useEffect(() => { loadData() }, [loadData])
 
@@ -327,21 +433,47 @@ export default function S2MonitorPage() {
 
   return (
     <div className="max-w-6xl mx-auto p-6 space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
+      {/* Header + Filters */}
+      <div className="flex items-center justify-between flex-wrap gap-2">
         <div className="flex items-center gap-2">
           <Activity className="h-5 w-5 text-primary" />
           <h1 className="text-xl font-bold">S2 审校效果监控</h1>
         </div>
-        <select
-          value={days}
-          onChange={(e) => { setDays(Number(e.target.value)); setOffset(0) }}
-          className="bg-muted border border-border rounded px-3 py-1.5 text-sm"
-        >
-          {DAYS_OPTIONS.map((opt) => (
-            <option key={opt.value} value={opt.value}>{opt.label}</option>
-          ))}
-        </select>
+        <div className="flex items-center gap-2">
+          {/* Service mode filter */}
+          <select
+            value={serviceMode}
+            onChange={(e) => { setServiceMode(e.target.value); setOffset(0) }}
+            className={selectClass}
+          >
+            <option value="all">全部模式</option>
+            <option value="studio">精配</option>
+            <option value="express">快捷</option>
+          </select>
+          {/* Review model filter */}
+          {data?.filter_options?.review_models && data.filter_options.review_models.length > 0 && (
+            <select
+              value={reviewModel}
+              onChange={(e) => { setReviewModel(e.target.value); setOffset(0) }}
+              className={selectClass}
+            >
+              <option value="">全部模型</option>
+              {data.filter_options.review_models.map((m) => (
+                <option key={m} value={m}>{shortModel(m)}</option>
+              ))}
+            </select>
+          )}
+          {/* Time range */}
+          <select
+            value={days}
+            onChange={(e) => { setDays(Number(e.target.value)); setOffset(0) }}
+            className={selectClass}
+          >
+            {DAYS_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
+        </div>
       </div>
 
       {/* Loading */}
@@ -382,6 +514,7 @@ export default function S2MonitorPage() {
             />
           </div>
 
+          {/* Info bar */}
           <div className="flex flex-wrap gap-4 text-xs text-muted-foreground">
             {data!.jobs_not_eligible > 0 && (
               <span>不参与统计：{data!.jobs_not_eligible} 个任务（running/queued/cancelled）</span>
@@ -389,9 +522,26 @@ export default function S2MonitorPage() {
             {(agg.pass1.missing_artifact_count ?? 0) > 0 && (
               <span className="text-red-400">Pass 1 artifact 缺失：{agg.pass1.missing_artifact_count} 个任务</span>
             )}
+            {(agg.pass1.avg_duration_ms ?? 0) > 0 && (
+              <span>P1 平均耗时 {fmtDuration(agg.pass1.avg_duration_ms)}</span>
+            )}
+            {(agg.pass2.avg_duration_ms ?? 0) > 0 && (
+              <span>P2 平均耗时 {fmtDuration(agg.pass2.avg_duration_ms)}</span>
+            )}
+            {(agg.pass3.avg_duration_ms ?? 0) > 0 && (
+              <span>P3 平均耗时 {fmtDuration(agg.pass3.avg_duration_ms)}</span>
+            )}
+            {(agg.pass1.total_parse_failures ?? 0) + (agg.pass2.total_parse_failures ?? 0) > 0 && (
+              <span className="text-yellow-400">
+                JSON 解析失败 {(agg.pass1.total_parse_failures ?? 0) + (agg.pass2.total_parse_failures ?? 0)} 次
+              </span>
+            )}
           </div>
         </>
       )}
+
+      {/* Trend Chart */}
+      {data?.daily_trends && <TrendChart trends={data.daily_trends} />}
 
       {/* Job Table */}
       {data && data.jobs.length > 0 && (
@@ -441,7 +591,7 @@ export default function S2MonitorPage() {
                         <span className="text-red-400">(缺失)</span>
                       ) : (
                         <span>
-                          {(job.pass1_model || "").replace("gemini-", "").replace("-preview", "")}
+                          {shortModel(job.pass1_model || "")}
                           {job.pass1_model_downgrade && (
                             <ArrowDown className="inline h-3 w-3 ml-0.5 text-yellow-400" />
                           )}
