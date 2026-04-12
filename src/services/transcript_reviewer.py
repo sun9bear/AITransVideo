@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import subprocess
+import time
 import urllib.request
 import urllib.error
 from dataclasses import dataclass, field
@@ -745,6 +746,8 @@ def _orchestrate_three_pass(
             "has_audio": False,
             "response_text": "",
             "parsed_payload": {},
+            "success_attempt_label": "skipped",
+            "success_attempt_model": None,
         }
         pass1_lines = lines
         pass1_applied = 0
@@ -812,14 +815,20 @@ def _orchestrate_three_pass(
         output_root.mkdir(parents=True, exist_ok=True)
 
         # Pass 1 result
+        _p1_label = pass1_result.get("success_attempt_label", "primary")
         _write_pass_artifact(output_root / "s2_pass1_result.json", {
             "pass": "pass1_speakers",
             "review_model": pass1_model or "(skipped)",
             "skipped": skip_pass1,
             "prompt_version": "v1",
             "has_audio": original_audio is not None and not skip_pass1,
-            "fallback_used": False,
+            "fallback_used": _p1_label == "cheapest",
+            "success_attempt_label": _p1_label,
+            "success_attempt_model": pass1_result.get("success_attempt_model"),
             "generated_at": _now_iso(),
+            "duration_ms": pass1_result.get("duration_ms"),
+            "attempts_count": pass1_result.get("attempts_count"),
+            "parse_failures": pass1_result.get("parse_failures"),
             "speakers": pass1_result["speakers"],
             "corrections": pass1_result["raw_corrections"],
             "corrections_applied": pass1_applied,
@@ -828,13 +837,19 @@ def _orchestrate_three_pass(
         })
 
         # Pass 2 result
+        _p2_label = pass2_result.get("success_attempt_label", "primary")
         _write_pass_artifact(output_root / "s2_pass2_result.json", {
             "pass": "pass2_text",
             "review_model": pass2_model,
             "prompt_version": "v1",
             "has_audio": False,
-            "fallback_used": False,
+            "fallback_used": _p2_label == "cheapest",
+            "success_attempt_label": _p2_label,
+            "success_attempt_model": pass2_result.get("success_attempt_model"),
             "generated_at": _now_iso(),
+            "duration_ms": pass2_result.get("duration_ms"),
+            "attempts_count": pass2_result.get("attempts_count"),
+            "parse_failures": pass2_result.get("parse_failures"),
             "glossary": pass2_result["glossary"],
             "corrections": pass2_result["raw_corrections"],
             "corrections_applied": pass2_applied,
@@ -997,6 +1012,8 @@ def _review_pass1_speakers(
             _attempts.append(("cheapest", _resolve_model_id(_cheapest)))
 
         _pass1_last_error: Exception | None = None
+        _parse_failure_count = 0
+        _t0 = time.monotonic()
         for _idx, (_label, _model_id) in enumerate(_attempts):
             try:
                 response = client.models.generate_content(
@@ -1019,6 +1036,7 @@ def _review_pass1_speakers(
                     logger.info("[S2][Pass1] Succeeded on %s attempt (model=%s)", _label, _model_id)
                 break  # success
             except json.JSONDecodeError as exc:
+                _parse_failure_count += 1
                 _dump_retry_response(debug_output_dir, "pass1", _idx, _label, _model_id, response_text if 'response_text' in dir() else None, exc)
                 _pass1_last_error = exc
                 if _idx < len(_attempts) - 1:
@@ -1061,6 +1079,7 @@ def _review_pass1_speakers(
         len(speakers), len(filtered_corrections), len(contract_violations), has_audio,
     )
 
+    _duration_ms = int((time.monotonic() - _t0) * 1000)
     return {
         "speakers": speakers,
         "corrections": filtered_corrections,
@@ -1069,6 +1088,11 @@ def _review_pass1_speakers(
         "response_text": response_text,
         "parsed_payload": payload,
         "has_audio": has_audio,
+        "success_attempt_label": _label,
+        "success_attempt_model": _model_id,
+        "duration_ms": _duration_ms,
+        "attempts_count": _idx + 1,
+        "parse_failures": _parse_failure_count,
     }
 
 
@@ -1240,6 +1264,8 @@ def _review_pass2_text(
         _attempts_p2.append(("cheapest", _cheapest, _get_model_api_key(_cheapest)))
 
     _pass2_last_error: Exception | None = None
+    _parse_failure_count = 0
+    _t0 = time.monotonic()
     payload: dict = {}
     try:
         for _idx, (_label, _model, _key) in enumerate(_attempts_p2):
@@ -1258,6 +1284,7 @@ def _review_pass2_text(
                     logger.info("[S2][Pass2] Succeeded on %s attempt (model=%s)", _label, _model)
                 break
             except json.JSONDecodeError as exc:
+                _parse_failure_count += 1
                 _dump_retry_response(debug_output_dir, "pass2", _idx, _label, _resolve_model_id(_model), response_text if 'response_text' in dir() else None, exc)
                 _pass2_last_error = exc
                 if _idx < len(_attempts_p2) - 1:
@@ -1300,6 +1327,7 @@ def _review_pass2_text(
         len(filtered_corrections), len(contract_violations), len(glossary),
     )
 
+    _duration_ms = int((time.monotonic() - _t0) * 1000)
     return {
         "glossary": glossary,
         "corrections": filtered_corrections,
@@ -1307,6 +1335,11 @@ def _review_pass2_text(
         "contract_violations": contract_violations,
         "response_text": response_text,
         "parsed_payload": payload,
+        "success_attempt_label": _label,
+        "success_attempt_model": _resolve_model_id(_model),
+        "duration_ms": _duration_ms,
+        "attempts_count": _idx + 1,
+        "parse_failures": _parse_failure_count,
     }
 
 
@@ -1554,6 +1587,8 @@ def review_pass3_voice_profiles(
             _attempts_p3.append(("cheapest", _resolve_model_id(_cheapest_p3)))
 
         _pass3_payload: dict = {}
+        _parse_failure_count_p3 = 0
+        _t0_p3 = time.monotonic()
         for _idx, (_label, _model_id) in enumerate(_attempts_p3):
             try:
                 response = client.models.generate_content(
@@ -1574,6 +1609,7 @@ def review_pass3_voice_profiles(
                     logger.info("[S2][Pass3] Succeeded on %s attempt (model=%s)", _label, _model_id)
                 break
             except json.JSONDecodeError as exc:
+                _parse_failure_count_p3 += 1
                 _dump_retry_response(debug_output_dir, "pass3", _idx, _label, _model_id, response_text if 'response_text' in dir() else None, exc)
                 if _idx < len(_attempts_p3) - 1:
                     _next = _attempts_p3[_idx + 1]
@@ -1608,13 +1644,19 @@ def review_pass3_voice_profiles(
     if debug_output_dir is not None:
         output_root = Path(debug_output_dir).resolve(strict=False)
         output_root.mkdir(parents=True, exist_ok=True)
+        _duration_ms_p3 = int((time.monotonic() - _t0_p3) * 1000)
         _write_pass_artifact(output_root / "s2_pass3_result.json", {
             "pass": "pass3_voice_profiles",
             "review_model": review_model,
             "prompt_version": "v1",
             "has_audio": True,
-            "fallback_used": False,
+            "fallback_used": _label == "cheapest",
+            "success_attempt_label": _label,
+            "success_attempt_model": _model_id,
             "generated_at": _now_iso(),
+            "duration_ms": _duration_ms_p3,
+            "attempts_count": _idx + 1,
+            "parse_failures": _parse_failure_count_p3,
             "speaker_profiles": profiles,
             "clips_extracted": list(clips.keys()),
             "contract_violations": contract_violations,

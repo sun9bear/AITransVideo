@@ -16,7 +16,7 @@ dist/
 # Runtime data
 runtime_logs/
 projects/
-jobs/
+/jobs/
 demo_output/
 voice_bank/
 uploads/
@@ -57,3 +57,4 @@ npm-debug.log*
 .gstack/
 .tmp-job-api-debug/
 build/
+.gitnexus

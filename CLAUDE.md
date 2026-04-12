@@ -42,6 +42,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 多用户视频翻译/配音 SaaS 工作台。React (Next.js) 前端 + Python 后端，通过 FastAPI Gateway 连接。
 
+## Project Graphs
+
+- New sessions should read `docs/graphs/GITNEXUS_PROJECT_GRAPH.md` first, then enter the relevant subgraph by task.
+- Graph index: `docs/graphs/README.md`
+- Workflow core: `docs/graphs/GITNEXUS_WORKFLOW_CORE_GRAPH.md`
+- Commercialization: `docs/graphs/GITNEXUS_COMMERCIALIZATION_GRAPH.md`
+- Review flow: `docs/graphs/GITNEXUS_REVIEW_GRAPH.md`
+- Use these graph docs as the fast orientation layer before deeper code reads when the task is architecture-sensitive or the codebase is unfamiliar.
+
 ## Common Commands
 
 Frontend (Next.js) — 在 `frontend-next/` 目录下运行:

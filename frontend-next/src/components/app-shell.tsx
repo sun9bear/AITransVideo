@@ -26,6 +26,7 @@ import {
   AudioLines,
   Wallet,
   MessageSquareText,
+  Activity,
 } from "lucide-react"
 
 type NavItem = {
@@ -70,6 +71,7 @@ const navGroups: NavGroup[] = [
     items: [
       { label: "音色管理", href: "/admin/voices", icon: AudioLines },
       { label: "模型管理", href: "/admin/prompts", icon: MessageSquareText },
+      { label: "审校监控", href: "/admin/s2-monitor", icon: Activity },
       { label: "定价管理", href: "/admin/pricing", icon: Wallet },
       { label: "系统设置", href: "/admin/settings", icon: Settings2 },
     ],

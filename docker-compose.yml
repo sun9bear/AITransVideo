@@ -115,6 +115,11 @@ services:
         source: ${AIVIDEOTRANS_ROOT}/app/src/services/llm_registry.py
         target: /opt/aivideotrans/app/src/services/llm_registry.py
         read_only: true
+      # Project data — S2 monitor reads transcript artifacts (read-only)
+      - type: bind
+        source: ${AIVIDEOTRANS_ROOT}/data/projects
+        target: /opt/aivideotrans/data/projects
+        read_only: true
     depends_on:
       app:
         condition: service_healthy
