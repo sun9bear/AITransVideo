@@ -684,7 +684,8 @@ async def list_all_jobs(
         try:
             resp = await client.get(f"{JOB_API_BASE}/jobs")
             resp.raise_for_status()
-            upstream_jobs: list[dict] = resp.json()
+            data = resp.json()
+            upstream_jobs: list[dict] = data.get("jobs", data) if isinstance(data, dict) else data
         except Exception as exc:
             logger.error("Failed to fetch jobs from Job API: %s", exc)
             raise HTTPException(status_code=502, detail="无法获取任务列表")
