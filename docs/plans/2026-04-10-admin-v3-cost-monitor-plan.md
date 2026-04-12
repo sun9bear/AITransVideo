@@ -1,7 +1,7 @@
 # 方案三：V3 Shadow Credits 校准面板
 
 > 日期：2026-04-10
-> 状态：方案（待审批）
+> 状态：已实施（2026-04-12 commit 76b0f44）
 
 ---
 
@@ -439,3 +439,6 @@ WHERE metering_snapshot IS NOT NULL
 | 11 | provider-breakdown 用 job 默认 provider 但页面暗示是实际执行成本（Codex P1） | V1 明确标注"按 job 默认引擎"；§3.3 加真值边界说明；第二步规划 per-speaker 执行 provider 写回 |
 | 12 | 页面标题"成本监控"超出实际可观测范围（Codex P2） | 标题改为"Shadow Credits 校准"；页面顶部加 scope banner 说明不含外部 TTS/LLM/云成本；§1 新增监控范围边界 |
 | 13 | 路由 `/admin/metrics` 太泛，未来易冲突 | 改为 `/admin/credits-monitor` |
+| 14 | 未闭环指标不受时间窗口过滤，7 天视图混入历史数据（Codex 实施审核 P1） | `_get_unsettled_job_ids()` 新增可选 `cutoff` 参数；cost-metrics/outliers 传 cutoff；summary 保持全量 |
+| 15 | 新增 3 个端点无测试覆盖（Codex 实施审核 P2） | 新增 20 个测试：_parse_window 6 + cost-metrics 6 + provider-breakdown 4 + outliers 4，32 passed |
+| 16 | 前端 Summary 类型定义与后端返回结构完全不匹配（Opus 审核） | 重写全部 Summary 相关类型和渲染逻辑，对齐后端 /summary 实际返回结构 |
