@@ -1238,6 +1238,12 @@ class ProcessPipeline:
                 and reuse_approved_translation_review
             ):
                 translation_result = self._load_translation_result(segments_path)
+                # Re-apply per-speaker TTS provider: snapshot may predate the
+                # tts_provider field, or was written before voice selection.
+                if _speaker_providers:
+                    for seg in translation_result.segments:
+                        if seg.speaker_id in _speaker_providers:
+                            seg.tts_provider = _speaker_providers[seg.speaker_id]
                 print("[S3] Applied approved translation review snapshot.")
             elif config.wait_for_review:
                 if approved_translation_review is not None and not reuse_approved_translation_review:
@@ -3338,6 +3344,7 @@ class ProcessPipeline:
                             "energy_level": segment.energy_level,
                             "selected_voice": segment.selected_voice,
                             "match_confidence": segment.match_confidence,
+                            "tts_provider": segment.tts_provider,
                         }
                         for segment in translation_result.segments
                     ],
