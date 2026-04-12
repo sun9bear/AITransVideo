@@ -28,6 +28,7 @@ import {
   MessageSquareText,
   Activity,
   ClipboardList,
+  TrendingUp,
 } from "lucide-react"
 
 type NavItem = {
@@ -75,6 +76,7 @@ const navGroups: NavGroup[] = [
       { label: "模型管理", href: "/admin/prompts", icon: MessageSquareText },
       { label: "审校监控", href: "/admin/s2-monitor", icon: Activity },
       { label: "定价管理", href: "/admin/pricing", icon: Wallet },
+      { label: "点数校准", href: "/admin/credits-monitor", icon: TrendingUp },
       { label: "系统设置", href: "/admin/settings", icon: Settings2 },
     ],
   },

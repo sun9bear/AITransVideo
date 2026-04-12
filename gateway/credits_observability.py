@@ -5,7 +5,10 @@ shadow credits data (buckets, ledger, job metering) is being written correctly
 during the V3 pilot period.
 
 Endpoints:
-- GET /api/admin/credits/summary   — aggregate overview of buckets, ledger, metering
+- GET /api/admin/credits/summary           — aggregate overview of buckets, ledger, metering
+- GET /api/admin/credits/cost-metrics      — core cost calibration metrics (window param)
+- GET /api/admin/credits/provider-breakdown — provider distribution by job default engine
+- GET /api/admin/credits/outliers          — outlier jobs: delta, rewrite, unsettled, missing
 
 Auth: admin role required (same pattern as admin_settings.py).
 
@@ -14,9 +17,10 @@ This module does NOT gate job execution, modify data, or replace V2 truth.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import case, cast, func, select, String
+from sqlalchemy import Float, Integer, cast, func, select, String
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth import get_current_user
@@ -74,6 +78,10 @@ FIELD_STATUS = {
         "status": "LIVE",
         "source": "Pipeline S6 completion → _report_job_metering() → POST /metering",
     },
+    "metering_snapshot.rewrite_count": {
+        "status": "LIVE",
+        "source": "Pipeline S6 completion → _report_job_metering() → POST /metering",
+    },
     # --- LIVE (partial: MiniMax/CosyVoice/VolcEngine; MiMo excluded) ---
     "metering_snapshot.tts_billed_chars": {
         "status": "LIVE_PARTIAL",
@@ -91,6 +99,68 @@ FIELD_STATUS = {
         "source": "compute_job_policy() → metering_snapshot at create time; settle reads saved tier; current value: 'standard' for all jobs",
     },
 }
+
+
+# ---------------------------------------------------------------------------
+# Public helpers
+# ---------------------------------------------------------------------------
+
+def _parse_window(window: str = "7") -> tuple[int, datetime]:
+    """Parse window query param → (days, cutoff). Range 1-90, default 7."""
+    try:
+        days = max(1, min(90, int(window)))
+    except (ValueError, TypeError):
+        days = 7
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    return days, cutoff
+
+
+def _safe_jsonb_float(col, key):
+    """NULLIF(col->>'key', '')::float — safe cast, returns NULL on empty."""
+    return cast(func.nullif(col.op("->>")(key), ""), Float)
+
+
+def _safe_jsonb_int(col, key):
+    """NULLIF(col->>'key', '')::int — safe cast, returns NULL on empty."""
+    return cast(func.nullif(col.op("->>")(key), ""), Integer)
+
+
+async def _get_unsettled_job_ids(
+    db: AsyncSession,
+    cutoff: datetime | None = None,
+) -> tuple[set[str], set[str], set[str]]:
+    """Job IDs with reserve but no capture/release.
+
+    Args:
+        cutoff: if given, only consider ledger entries created after this time.
+                /summary uses None (full history); /cost-metrics and /outliers
+                pass the window cutoff so the result matches the displayed window.
+
+    Returns (reserve_ids, settle_ids, unsettled_ids).
+    """
+    reserve_where = [
+        CreditsLedger.direction == "reserve",
+        CreditsLedger.related_job_id.isnot(None),
+    ]
+    settle_where = [
+        CreditsLedger.direction.in_(["capture", "release"]),
+        CreditsLedger.related_job_id.isnot(None),
+        CreditsLedger.reason_code != "capture_additional",
+    ]
+    if cutoff is not None:
+        reserve_where.append(CreditsLedger.created_at > cutoff)
+        settle_where.append(CreditsLedger.created_at > cutoff)
+
+    reserve_result = await db.execute(
+        select(func.distinct(CreditsLedger.related_job_id)).where(*reserve_where)
+    )
+    reserve_ids = {r[0] for r in reserve_result.all()}
+    settle_result = await db.execute(
+        select(func.distinct(CreditsLedger.related_job_id)).where(*settle_where)
+    )
+    settle_ids = {r[0] for r in settle_result.all()}
+    unsettled_ids = reserve_ids - settle_ids
+    return reserve_ids, settle_ids, unsettled_ids
 
 
 def _require_admin(user: User | None) -> User:
@@ -215,25 +285,7 @@ async def credits_shadow_summary(
     }
 
     # --- Reserve/capture/release closeness check (set-diff) ---
-    # Collect distinct job-id sets, then compute the actual difference.
-    reserve_ids_result = await db.execute(
-        select(func.distinct(CreditsLedger.related_job_id)).where(
-            CreditsLedger.direction == "reserve",
-            CreditsLedger.related_job_id.isnot(None),
-        )
-    )
-    reserve_job_ids: set[str] = {row[0] for row in reserve_ids_result.all()}
-
-    settle_ids_result = await db.execute(
-        select(func.distinct(CreditsLedger.related_job_id)).where(
-            CreditsLedger.direction.in_(["capture", "release"]),
-            CreditsLedger.related_job_id.isnot(None),
-            CreditsLedger.reason_code != "capture_additional",
-        )
-    )
-    settle_job_ids: set[str] = {row[0] for row in settle_ids_result.all()}
-
-    unsettled_ids = reserve_job_ids - settle_job_ids
+    reserve_job_ids, settle_job_ids, unsettled_ids = await _get_unsettled_job_ids(db)
     closeness = {
         "jobs_with_reserve": len(reserve_job_ids),
         "jobs_with_settle": len(settle_job_ids & reserve_job_ids),
@@ -257,4 +309,265 @@ async def credits_shadow_summary(
         "metering": metering_summary,
         "reserve_capture_closeness": closeness,
         "field_status": FIELD_STATUS,
+    }
+
+
+@router.get("/cost-metrics")
+async def credits_cost_metrics(
+    window: str = "7",
+    db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(get_current_user),
+) -> dict:
+    """Core cost calibration metrics for shadow credits."""
+    _require_admin(user)
+    days, cutoff = _parse_window(window)
+    window_filter = Job.created_at > cutoff
+    has_snapshot = Job.metering_snapshot.isnot(None)
+
+    # jobs total
+    total_result = await db.execute(
+        select(func.count()).select_from(Job).where(window_filter)
+    )
+    jobs_total = total_result.scalar() or 0
+
+    # credits sums
+    credits_result = await db.execute(
+        select(
+            func.coalesce(func.sum(_safe_jsonb_int(Job.metering_snapshot, "credits_estimated")), 0).label("est"),
+            func.coalesce(func.sum(_safe_jsonb_int(Job.metering_snapshot, "credits_actual")), 0).label("act"),
+        ).where(window_filter, has_snapshot)
+    )
+    row = credits_result.one()
+    est_sum = row.est
+    act_sum = row.act
+    delta_pct = round((est_sum - act_sum) / act_sum * 100, 1) if act_sum else None
+
+    # K 值（final_cn_chars / actual_minutes）— 百分位数
+    k_expr = _safe_jsonb_float(Job.metering_snapshot, "final_cn_chars") / Job.actual_minutes
+    k_filter = [
+        window_filter,
+        has_snapshot,
+        Job.actual_minutes > 0,
+        Job.metering_snapshot.op("->>")("final_cn_chars").isnot(None),
+    ]
+    k_result = await db.execute(
+        select(
+            func.avg(k_expr).label("avg"),
+            func.percentile_cont(0.5).within_group(k_expr).label("p50"),
+            func.percentile_cont(0.75).within_group(k_expr).label("p75"),
+            func.percentile_cont(0.9).within_group(k_expr).label("p90"),
+        ).where(*k_filter)
+    )
+    k_row = k_result.one()
+    k_actual = {
+        "avg": round(k_row.avg, 0) if k_row.avg else None,
+        "p50": round(k_row.p50, 0) if k_row.p50 else None,
+        "p75": round(k_row.p75, 0) if k_row.p75 else None,
+        "p90": round(k_row.p90, 0) if k_row.p90 else None,
+    }
+
+    # Rewrite 率
+    rewrite_result = await db.execute(
+        select(
+            func.count().label("total"),
+            func.count().filter(
+                Job.metering_snapshot.op("->>")("rewrite_triggered") == "true"
+            ).label("with_rewrite"),
+            func.avg(_safe_jsonb_int(Job.metering_snapshot, "rewrite_count")).label("avg_count"),
+        ).where(window_filter, has_snapshot)
+    )
+    rw = rewrite_result.one()
+    rewrite_rate_pct = round(rw.with_rewrite / rw.total * 100, 1) if rw.total else None
+    rewrite_count_avg = round(rw.avg_count, 1) if rw.avg_count else None
+
+    # 模式分布（使用 Job.service_mode 顶级列，有索引）
+    mode_result = await db.execute(
+        select(
+            Job.service_mode,
+            func.count().label("count"),
+        ).where(window_filter).group_by(Job.service_mode)
+    )
+    service_mode_dist = {r.service_mode or "unknown": r.count for r in mode_result.all()}
+
+    # TTS 计费字符覆盖率
+    tts_result = await db.execute(
+        select(
+            func.count().label("total"),
+            func.count().filter(
+                Job.metering_snapshot.op("->>")("tts_billed_chars").isnot(None)
+            ).label("with_tts"),
+        ).where(window_filter, has_snapshot)
+    )
+    tts_row = tts_result.one()
+    tts_coverage_pct = round(tts_row.with_tts / tts_row.total * 100, 1) if tts_row.total else None
+
+    # 未闭环 job 数（按时间窗口过滤）
+    _, _, unsettled = await _get_unsettled_job_ids(db, cutoff=cutoff)
+    jobs_unsettled = len(unsettled)
+
+    return {
+        "window_days": days,
+        "jobs_total": jobs_total,
+        "credits_estimated_sum": est_sum,
+        "credits_actual_sum": act_sum,
+        "estimate_actual_delta_pct": delta_pct,
+        "k_actual": k_actual,
+        "rewrite_rate_pct": rewrite_rate_pct,
+        "rewrite_count_avg": rewrite_count_avg,
+        "service_mode_dist": service_mode_dist,
+        "tts_billed_chars_coverage_pct": tts_coverage_pct,
+        "jobs_unsettled": jobs_unsettled,
+    }
+
+
+@router.get("/provider-breakdown")
+async def credits_provider_breakdown(
+    window: str = "7",
+    db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(get_current_user),
+) -> dict:
+    """Provider distribution by job default engine."""
+    _require_admin(user)
+    days, cutoff = _parse_window(window)
+
+    # 使用 Job.tts_provider / Job.tts_model 顶级列（有索引，比 JSONB 取值快）
+    # 注意：这是 job 创建时的默认 provider，非实际执行 provider
+    result = await db.execute(
+        select(
+            Job.tts_provider.label("provider"),
+            Job.tts_model.label("model"),
+            func.count().label("job_count"),
+            func.coalesce(func.sum(Job.actual_minutes), 0).label("total_minutes"),
+            func.coalesce(func.sum(_safe_jsonb_int(Job.metering_snapshot, "tts_billed_chars")), 0).label("total_billed_chars"),
+            func.avg(
+                _safe_jsonb_float(Job.metering_snapshot, "tts_billed_chars") / func.nullif(Job.actual_minutes, 0)
+            ).label("avg_billed_per_min"),
+            func.avg(
+                _safe_jsonb_float(Job.metering_snapshot, "credits_actual") / func.nullif(Job.actual_minutes, 0)
+            ).label("avg_credits_per_min"),
+        )
+        .where(
+            Job.created_at > cutoff,
+            Job.metering_snapshot.isnot(None),
+        )
+        .group_by(Job.tts_provider, Job.tts_model)
+        .order_by(func.count().desc())
+    )
+
+    providers = []
+    for r in result.all():
+        providers.append({
+            "provider": r.provider or "unknown",
+            "model": r.model or "unknown",
+            "job_count": r.job_count,
+            "total_minutes": round(r.total_minutes, 1) if r.total_minutes else 0,
+            "total_billed_chars": r.total_billed_chars or 0,
+            "avg_billed_per_min": round(r.avg_billed_per_min, 0) if r.avg_billed_per_min else None,
+            "avg_credits_per_min": round(r.avg_credits_per_min, 1) if r.avg_credits_per_min else None,
+        })
+
+    return {
+        "window_days": days,
+        "providers": providers,
+    }
+
+
+@router.get("/outliers")
+async def credits_outliers(
+    window: str = "7",
+    db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(get_current_user),
+) -> dict:
+    """Outlier jobs: biggest estimate/actual delta, most rewrites, unsettled, missing fields."""
+    _require_admin(user)
+    days, cutoff = _parse_window(window)
+    window_filter = Job.created_at > cutoff
+    has_snapshot = Job.metering_snapshot.isnot(None)
+
+    est_col = _safe_jsonb_int(Job.metering_snapshot, "credits_estimated")
+    act_col = _safe_jsonb_int(Job.metering_snapshot, "credits_actual")
+
+    # 1. 预估/实扣偏差最大 Top 10
+    delta_result = await db.execute(
+        select(
+            Job.job_id,
+            Job.title,
+            Job.service_mode,
+            est_col.label("credits_estimated"),
+            act_col.label("credits_actual"),
+            (est_col - act_col).label("delta"),
+            Job.actual_minutes,
+        )
+        .where(window_filter, has_snapshot, est_col.isnot(None), act_col.isnot(None))
+        .order_by(func.abs(est_col - act_col).desc())
+        .limit(10)
+    )
+    estimate_actual_outliers = [
+        {
+            "job_id": r.job_id,
+            "title": r.title or "",
+            "service_mode": r.service_mode or "",
+            "credits_estimated": r.credits_estimated,
+            "credits_actual": r.credits_actual,
+            "delta": r.delta,
+            "actual_minutes": round(r.actual_minutes, 1) if r.actual_minutes else None,
+        }
+        for r in delta_result.all()
+    ]
+
+    # 2. Rewrite 次数最多 Top 10
+    rw_col = _safe_jsonb_int(Job.metering_snapshot, "rewrite_count")
+    rw_result = await db.execute(
+        select(
+            Job.job_id,
+            Job.title,
+            rw_col.label("rewrite_count"),
+            Job.actual_minutes,
+        )
+        .where(window_filter, has_snapshot, rw_col.isnot(None))
+        .order_by(rw_col.desc())
+        .limit(10)
+    )
+    rewrite_top = [
+        {
+            "job_id": r.job_id,
+            "title": r.title or "",
+            "rewrite_count": r.rewrite_count,
+            "actual_minutes": round(r.actual_minutes, 1) if r.actual_minutes else None,
+        }
+        for r in rw_result.all()
+    ]
+
+    # 3. 未闭环 jobs（按时间窗口过滤）
+    _, _, unsettled = await _get_unsettled_job_ids(db, cutoff=cutoff)
+
+    # 4. metering 缺字段 jobs（有 metering_snapshot 但缺关键字段）
+    missing_result = await db.execute(
+        select(
+            Job.job_id,
+            Job.metering_snapshot.op("->>")("final_cn_chars").label("final_cn_chars"),
+            Job.metering_snapshot.op("->>")("credits_actual").label("credits_actual"),
+        )
+        .where(
+            window_filter,
+            has_snapshot,
+            (Job.metering_snapshot.op("->>")("final_cn_chars").is_(None))
+            | (Job.metering_snapshot.op("->>")("credits_actual").is_(None)),
+        )
+    )
+    missing_fields_jobs = []
+    for r in missing_result.all():
+        missing = []
+        if r.final_cn_chars is None:
+            missing.append("final_cn_chars")
+        if r.credits_actual is None:
+            missing.append("credits_actual")
+        missing_fields_jobs.append({"job_id": r.job_id, "missing": missing})
+
+    return {
+        "window_days": days,
+        "estimate_actual_outliers": estimate_actual_outliers,
+        "rewrite_top": rewrite_top,
+        "unsettled_jobs": sorted(unsettled)[:20],
+        "missing_fields_jobs": missing_fields_jobs,
     }
