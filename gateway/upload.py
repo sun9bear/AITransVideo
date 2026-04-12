@@ -6,6 +6,7 @@ Does NOT proxy to 8876.
 """
 import os
 import re
+import shutil
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -73,10 +74,17 @@ async def handle_upload_video(
     if file_field is None:
         raise HTTPException(status_code=400, detail="Missing 'file' field in form data")
 
-    file_content = await file_field.read()
-    if not file_content:
+    # Determine file size via seek instead of reading entire content into memory.
+    # Starlette already spools large uploads to a temp file on disk;
+    # we copy from that temp file to the final path in 1 MB chunks.
+    file_obj = file_field.file
+    file_obj.seek(0, 2)
+    file_size = file_obj.tell()
+    file_obj.seek(0)
+
+    if file_size == 0:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
-    if len(file_content) > _MAX_UPLOAD_BYTES:
+    if file_size > _MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail=f"File too large (max {_MAX_UPLOAD_BYTES // (1024**3)} GB)")
 
     filename = getattr(file_field, "filename", None) or "unnamed_upload"
@@ -96,9 +104,10 @@ async def handle_upload_video(
         output_path = project_root / "uploads" / f"{upload_id}_{safe_name}"
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_bytes(file_content)
+    with open(output_path, "wb") as out:
+        shutil.copyfileobj(file_obj, out, length=1024 * 1024)
 
-    file_size_mb = round(len(file_content) / (1024 * 1024), 2)
+    file_size_mb = round(file_size / (1024 * 1024), 2)
 
     return JSONResponse(
         status_code=200,
