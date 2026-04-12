@@ -343,9 +343,9 @@ async def analyze_job_logs(
     """AI-powered log analysis for a job (admin only)."""
     _require_admin(user)
 
-    deepseek_key = os.environ.get("DEEPSEEK_API_KEY")
-    if not deepseek_key:
-        return {"error": "未配置 DEEPSEEK_API_KEY"}
+    openai_key = os.environ.get("OPENAI_API_KEY")
+    if not openai_key:
+        return {"error": "未配置 OPENAI_API_KEY"}
 
     # Parallel fetch: logs + job info + result-summary
     async with httpx.AsyncClient(timeout=15) as client:
@@ -392,28 +392,28 @@ async def analyze_job_logs(
         job_id, len(events), len(user_message),
     )
 
-    # Call DeepSeek
-    async with httpx.AsyncClient(timeout=90) as client:
+    # Call OpenAI GPT-5.4 thinking
+    async with httpx.AsyncClient(timeout=120) as client:
         try:
             resp = await client.post(
-                "https://api.deepseek.com/v1/chat/completions",
+                "https://api.openai.com/v1/chat/completions",
                 headers={
-                    "Authorization": f"Bearer {deepseek_key}",
+                    "Authorization": f"Bearer {openai_key}",
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": "deepseek-chat",
+                    "model": "gpt-5.4",
                     "messages": [
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "user", "content": user_message},
                     ],
-                    "temperature": 0.3,
+                    "reasoning_effort": "medium",
                     "response_format": {"type": "json_object"},
                 },
             )
             resp.raise_for_status()
         except Exception:
-            logger.exception("DeepSeek API call failed for job %s", job_id)
+            logger.exception("OpenAI API call failed for job %s", job_id)
             return {"error": "分析失败，请稍后重试"}
 
     # Parse and validate response
@@ -423,7 +423,7 @@ async def analyze_job_logs(
         parsed = json.loads(content)
         analysis = _validate_analysis(parsed)
     except (json.JSONDecodeError, KeyError, ValueError):
-        logger.warning("DeepSeek returned invalid JSON for job %s", job_id)
+        logger.warning("OpenAI returned invalid JSON for job %s", job_id)
         return {"error": "AI 返回格式异常，请重试"}
 
     return {"analysis": analysis}
