@@ -941,14 +941,6 @@ class ProcessPipeline:
                 if approved_voice_b:
                     voice_id_b = approved_voice_b
                     print(f"[S2] 用户确认 Speaker B 音色: {voice_id_b}")
-            elif config.wait_for_review:
-                # Unified review: defer voice selection to stage 6 (translation_review).
-                # Do NOT auto-clone or hit the voice_registry here. Keep voice_id_a /
-                # voice_id_b as None so translator uses the "auto" placeholder
-                # and the real voice resolution happens at stage 6 when the user
-                # clicks "克隆" or picks a preset voice in the unified review UI.
-                # This prevents unnecessary voice clone API costs during S2.
-                print("[S2] 音色选择已延迟到统一审核，S2 自动跳过。")
             else:
                 # Express (non-interactive) mode: skip registry lookup and auto-clone.
                 # Leave voice_id_a / voice_id_b as None — downstream TTS voice
@@ -995,6 +987,149 @@ class ProcessPipeline:
                     spk_id = f"speaker_{chr(ord('a') + i)}"
                     _speaker_voices.setdefault(spk_id, "auto")
 
+            # --- Pass 3: voice profiling (before voice selection, before translation) ---
+            _pass3_cache_path = (final_project_dir / "transcript" / "s2_pass3_result.json").resolve(strict=False)
+            if _review_speaker_styles:
+                _pass3_profiles: dict | None = None
+                if _pass3_cache_path.exists():
+                    try:
+                        import json as _json
+                        _pass3_data = _json.loads(_pass3_cache_path.read_text(encoding="utf-8"))
+                        _pass3_profiles = _pass3_data.get("speaker_profiles", {})
+                        print(f"[S2.5] Pass 3 cache hit: {len(_pass3_profiles)} speaker profiles restored", flush=True)
+                    except Exception as exc:
+                        print(f"[S2.5] Pass 3 cache read failed: {exc}", flush=True)
+                if not _pass3_profiles:
+                    try:
+                        from src.services.transcript_reviewer import review_pass3_voice_profiles
+
+                        print("[S2.5] Running Pass 3: voice profiling...", flush=True)
+                        _pass3_profiles = review_pass3_voice_profiles(
+                            transcript_result.lines,
+                            source_audio_path=source_audio_path if source_audio_path.exists() else None,
+                            speakers=_review_speaker_styles,
+                            video_title=download_result.video_title,
+                            debug_output_dir=final_project_dir / "transcript",
+                        )
+                    except Exception as exc:
+                        print(f"[S2.5] Pass 3 failed (non-fatal): {exc}", flush=True)
+                        logger.warning("[S2.5] Pass 3 voice profiling failed: %s", exc)
+                if _pass3_profiles:
+                    for spk_id, profile in _pass3_profiles.items():
+                        if spk_id in _review_speaker_styles:
+                            existing = _review_speaker_styles[spk_id]
+                            for key in ("style", "voice_description", "gender", "age_group", "persona_style", "energy_level"):
+                                val = profile.get(key, "")
+                                if val:
+                                    existing[key] = val
+                    print(f"[S2.5] Pass 3 voice profiles: {len(_pass3_profiles)} speakers", flush=True)
+
+            # --- voice_selection_review gate (Studio mode, BEFORE translation) ---
+            approved_voice_selection = self._get_approved_review_payload(
+                review_state_manager,
+                VOICE_SELECTION_REVIEW_STAGE,
+            )
+            _speaker_providers: dict[str, str] = {}
+            if approved_voice_selection is not None:
+                sel_speakers = approved_voice_selection.get("speakers")
+                if isinstance(sel_speakers, list):
+                    for sp in sel_speakers:
+                        sp_id = sp.get("speaker_id", "")
+                        sp_voice = sp.get("voice_id", "")
+                        sp_prov = sp.get("tts_provider", "")
+                        if sp_id and sp_voice:
+                            _speaker_voices[sp_id] = sp_voice
+                        if sp_id and sp_prov:
+                            _speaker_providers[sp_id] = sp_prov
+                    voice_id_a = _speaker_voices.get("speaker_a", voice_id_a)
+                    voice_id_b = _speaker_voices.get("speaker_b", voice_id_b)
+                    print(f"[S2.5] 用户确认音色：{_speaker_voices}")
+                    if _speaker_providers:
+                        print(f"[S2.5] 用户选择引擎：{_speaker_providers}")
+            elif config.wait_for_review and job_requires_review and job_service_mode == "studio":
+                vs_payload = self._build_voice_selection_review_payload(
+                    transcript_result=transcript_result,
+                    tts_provider=job_tts_provider,
+                    service_mode=job_service_mode,
+                    source_audio_path=source_audio_path,
+                    effective_speakers=effective_speakers,
+                    speaker_names=_merge_speaker_name_map(
+                        _review_speaker_names,
+                        speaker_name_a,
+                        speaker_name_b,
+                    ),
+                    speaker_styles=_review_speaker_styles,
+                )
+                review_state_manager.set_stage(
+                    VOICE_SELECTION_REVIEW_STAGE,
+                    status=REVIEW_STATUS_PENDING,
+                    payload=vs_payload,
+                    activate=True,
+                )
+                review_message = "请为每位说话人选择或克隆配音音色"
+                print(f"[S2.5] {review_message}")
+                state_manager.set_stage(
+                    "voice_selection",
+                    StageStatus.RUNNING,
+                    {"execution_mode": "waiting_for_voice_selection"},
+                )
+                current_stage_name = None
+                print(
+                    self._build_web_review_marker(
+                        stage=VOICE_SELECTION_REVIEW_STAGE,
+                        project_dir=final_project_dir,
+                        message=review_message,
+                    )
+                )
+                return self._build_paused_result(
+                    project_dir=final_project_dir,
+                    stage=VOICE_SELECTION_REVIEW_STAGE,
+                    message=review_message,
+                )
+
+            # --- Pre-TTS voice validation (cloned voices, before translation) ---
+            if config.wait_for_review and job_service_mode == "studio":
+                expired_voices = self._validate_cloned_voices(_speaker_voices)
+                if expired_voices:
+                    for ev_id in expired_voices:
+                        self._notify_voice_expired(config.job_id, ev_id)
+                    vs_payload = self._build_voice_selection_review_payload(
+                        transcript_result=transcript_result,
+                        tts_provider=job_tts_provider,
+                        service_mode=job_service_mode,
+                        source_audio_path=source_audio_path,
+                        effective_speakers=effective_speakers,
+                        speaker_names=_merge_speaker_name_map(
+                            _review_speaker_names,
+                            speaker_name_a,
+                            speaker_name_b,
+                        ),
+                        speaker_styles=_review_speaker_styles,
+                    )
+                    vs_payload["expired_voice_ids"] = expired_voices
+                    vs_payload["validation_error"] = f"检测到 {len(expired_voices)} 个音色已失效，请重新选择"
+                    review_state_manager.set_stage(
+                        VOICE_SELECTION_REVIEW_STAGE,
+                        status=REVIEW_STATUS_PENDING,
+                        payload=vs_payload,
+                        activate=True,
+                    )
+                    review_message = f"检测到 {len(expired_voices)} 个音色已失效，请重新选择"
+                    print(f"[S2.5] {review_message}")
+                    print(
+                        self._build_web_review_marker(
+                            stage=VOICE_SELECTION_REVIEW_STAGE,
+                            project_dir=final_project_dir,
+                            message=review_message,
+                        )
+                    )
+                    return self._build_paused_result(
+                        project_dir=final_project_dir,
+                        stage=VOICE_SELECTION_REVIEW_STAGE,
+                        message=review_message,
+                    )
+
+            # --- S3 Translation (voice already confirmed above) ---
             if s3_cache_hit:
                 self._apply_runtime_voice_overrides(
                     translation_result.segments,
@@ -1076,8 +1211,6 @@ class ProcessPipeline:
                     _unified_review_payload = self._build_translation_review_payload(translation_result, speaker_names=_all_speaker_names)
                     _unified_review_payload["speaker_name_a"] = speaker_name_a
                     _unified_review_payload["speaker_name_b"] = speaker_name_b
-                    _unified_review_payload["voice_id_a"] = voice_id_a
-                    _unified_review_payload["voice_id_b"] = voice_id_b or ""
                     _unified_review_payload["effective_speakers"] = effective_speakers
                     review_state_manager.set_stage(
                         TRANSLATION_REVIEW_STAGE,
@@ -1117,171 +1250,6 @@ class ProcessPipeline:
                     execution_mode=translation_execution_mode,
                 ),
             )
-
-            # --- Pass 3: voice profiling (after translation review, before voice selection) ---
-            _pass3_cache_path = (final_project_dir / "transcript" / "s2_pass3_result.json").resolve(strict=False)
-            if _review_speaker_styles:
-                _pass3_profiles: dict | None = None
-                if _pass3_cache_path.exists():
-                    # Restore from cached Pass 3 result
-                    try:
-                        import json as _json
-                        _pass3_data = _json.loads(_pass3_cache_path.read_text(encoding="utf-8"))
-                        _pass3_profiles = _pass3_data.get("speaker_profiles", {})
-                        print(f"[S2.5] Pass 3 cache hit: {len(_pass3_profiles)} speaker profiles restored", flush=True)
-                    except Exception as exc:
-                        print(f"[S2.5] Pass 3 cache read failed: {exc}", flush=True)
-                if not _pass3_profiles:
-                    # Run Pass 3
-                    try:
-                        from src.services.transcript_reviewer import review_pass3_voice_profiles
-
-                        print("[S2.5] Running Pass 3: voice profiling...", flush=True)
-                        _pass3_profiles = review_pass3_voice_profiles(
-                            transcript_result.lines,
-                            source_audio_path=source_audio_path if source_audio_path.exists() else None,
-                            speakers=_review_speaker_styles,
-                            video_title=download_result.video_title,
-                            debug_output_dir=final_project_dir / "transcript",
-                        )
-                    except Exception as exc:
-                        print(f"[S2.5] Pass 3 failed (non-fatal): {exc}", flush=True)
-                        logger.warning("[S2.5] Pass 3 voice profiling failed: %s", exc)
-                # Merge Pass 3 profiles into _review_speaker_styles
-                # Pass 1 provides: name, role (identity fields only)
-                # Pass 3 provides: style, gender, age_group, voice_description, persona_style, energy_level
-                # Pass 3 is the sole source for all voice/style fields
-                if _pass3_profiles:
-                    for spk_id, profile in _pass3_profiles.items():
-                        if spk_id in _review_speaker_styles:
-                            existing = _review_speaker_styles[spk_id]
-                            for key in ("style", "voice_description", "gender", "age_group", "persona_style", "energy_level"):
-                                val = profile.get(key, "")
-                                if val:
-                                    existing[key] = val
-                    print(f"[S2.5] Pass 3 voice profiles: {len(_pass3_profiles)} speakers", flush=True)
-
-            # --- voice_selection_review gate (Studio mode only) ---
-            approved_voice_selection = self._get_approved_review_payload(
-                review_state_manager,
-                VOICE_SELECTION_REVIEW_STAGE,
-            )
-            if approved_voice_selection is not None:
-                # Apply approved voice selections from N-speaker payload
-                sel_speakers = approved_voice_selection.get("speakers")
-                _speaker_providers: dict[str, str] = {}
-                if isinstance(sel_speakers, list):
-                    for sp in sel_speakers:
-                        sp_id = sp.get("speaker_id", "")
-                        sp_voice = sp.get("voice_id", "")
-                        sp_prov = sp.get("tts_provider", "")
-                        if sp_id and sp_voice:
-                            _speaker_voices[sp_id] = sp_voice
-                        if sp_id and sp_prov:
-                            _speaker_providers[sp_id] = sp_prov
-                    # Backward compat: sync voice_id_a / voice_id_b
-                    voice_id_a = _speaker_voices.get("speaker_a", voice_id_a)
-                    voice_id_b = _speaker_voices.get("speaker_b", voice_id_b)
-                    print(f"[S5] 用户确认音色：{_speaker_voices}")
-                    if _speaker_providers:
-                        print(f"[S5] 用户选择引擎：{_speaker_providers}")
-                    # Apply selected voices to segments (voice_id was None during translation)
-                    self._apply_runtime_voice_overrides(
-                        translation_result.segments,
-                        voice_id_a=voice_id_a,
-                        display_name_a=speaker_name_a,
-                        voice_id_b=voice_id_b,
-                        display_name_b=speaker_name_b,
-                        speaker_voices=_speaker_voices,
-                        speaker_providers=_speaker_providers,
-                    )
-            elif config.wait_for_review and job_requires_review and job_service_mode == "studio":
-                # Build voice selection review payload and pause
-                vs_payload = self._build_voice_selection_review_payload(
-                    transcript_result=transcript_result,
-                    translation_result=translation_result,
-                    tts_provider=job_tts_provider,
-                    service_mode=job_service_mode,
-                    source_audio_path=source_audio_path,
-                    effective_speakers=effective_speakers,
-                    speaker_names=_merge_speaker_name_map(
-                        _review_speaker_names,
-                        speaker_name_a,
-                        speaker_name_b,
-                    ),
-                    speaker_styles=_review_speaker_styles,
-                )
-                review_state_manager.set_stage(
-                    VOICE_SELECTION_REVIEW_STAGE,
-                    status=REVIEW_STATUS_PENDING,
-                    payload=vs_payload,
-                    activate=True,
-                )
-                review_message = "请为每位说话人选择或克隆配音音色"
-                print(f"[S5] {review_message}")
-                state_manager.set_stage(
-                    "voice_selection",
-                    StageStatus.RUNNING,
-                    {"execution_mode": "waiting_for_voice_selection"},
-                )
-                current_stage_name = None
-                print(
-                    self._build_web_review_marker(
-                        stage=VOICE_SELECTION_REVIEW_STAGE,
-                        project_dir=final_project_dir,
-                        message=review_message,
-                    )
-                )
-                return self._build_paused_result(
-                    project_dir=final_project_dir,
-                    stage=VOICE_SELECTION_REVIEW_STAGE,
-                    message=review_message,
-                )
-
-            # --- Pre-TTS voice validation (cloned voices only) ---
-            if config.wait_for_review and job_service_mode == "studio":
-                expired_voices = self._validate_cloned_voices(_speaker_voices)
-                if expired_voices:
-                    # Notify gateway to expire these voices (best-effort)
-                    for ev_id in expired_voices:
-                        self._notify_voice_expired(config.job_id, ev_id)
-                    # Rebuild payload with expired_voice_ids and return to voice selection
-                    vs_payload = self._build_voice_selection_review_payload(
-                        transcript_result=transcript_result,
-                        translation_result=translation_result,
-                        tts_provider=job_tts_provider,
-                        service_mode=job_service_mode,
-                        source_audio_path=source_audio_path,
-                        effective_speakers=effective_speakers,
-                        speaker_names=_merge_speaker_name_map(
-                            _review_speaker_names,
-                            speaker_name_a,
-                            speaker_name_b,
-                        ),
-                        speaker_styles=_review_speaker_styles,
-                    )
-                    vs_payload["expired_voice_ids"] = expired_voices
-                    vs_payload["validation_error"] = f"检测到 {len(expired_voices)} 个音色已失效，请重新选择"
-                    review_state_manager.set_stage(
-                        VOICE_SELECTION_REVIEW_STAGE,
-                        status=REVIEW_STATUS_PENDING,
-                        payload=vs_payload,
-                        activate=True,
-                    )
-                    review_message = f"检测到 {len(expired_voices)} 个音色已失效，请重新选择"
-                    print(f"[S5] {review_message}")
-                    print(
-                        self._build_web_review_marker(
-                            stage=VOICE_SELECTION_REVIEW_STAGE,
-                            project_dir=final_project_dir,
-                            message=review_message,
-                        )
-                    )
-                    return self._build_paused_result(
-                        project_dir=final_project_dir,
-                        stage=VOICE_SELECTION_REVIEW_STAGE,
-                        message=review_message,
-                    )
 
             current_stage_name = "alignment"
             state_manager.set_stage(
@@ -1757,7 +1725,7 @@ class ProcessPipeline:
         self,
         *,
         transcript_result: TranscriptResult,
-        translation_result: TranslationResult,
+        translation_result: TranslationResult | None = None,
         tts_provider: str,
         service_mode: str,
         source_audio_path: str,
@@ -1889,7 +1857,7 @@ class ProcessPipeline:
                     "persona_style": style.get("persona_style", ""),
                     "energy_level": style.get("energy_level", ""),
                 }
-        if not speaker_profiles:
+        if not speaker_profiles and translation_result is not None:
             # Fallback: read from segments (already injected by _apply_review_speaker_styles_to_segments)
             for seg in translation_result.segments:
                 if seg.speaker_id not in speaker_profiles:
