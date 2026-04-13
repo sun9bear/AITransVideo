@@ -35,6 +35,29 @@ from services.llm_registry import (
 
 _MIMO_OMNI_API_URL = "https://api.xiaomimimo.com/v1/chat/completions"
 
+_TRANSIENT_RETRY_WAIT_S = 3  # seconds to wait before retrying on transient error
+
+
+def _is_transient_error(exc: Exception) -> bool:
+    """Classify whether an exception is transient (worth retrying same model).
+
+    Transient: connection timeout, rate-limit (429), server errors (500/502/503).
+    Non-transient: JSON parse errors, empty responses, auth errors, etc.
+    """
+    if isinstance(exc, (ConnectionError, TimeoutError, OSError)):
+        return True
+    # urllib errors
+    if isinstance(exc, urllib.error.URLError):
+        # Socket timeout or unreachable
+        return True
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code in (429, 500, 502, 503, 504)
+    # google-genai SDK errors (wrapped in various exception types)
+    err_str = str(exc).lower()
+    if any(kw in err_str for kw in ("timeout", "429", "rate limit", "503", "502", "500", "unavailable", "connection")):
+        return True
+    return False
+
 _MAX_LINES_PER_BATCH = 200
 _BATCH_OVERLAP = 20
 
@@ -1001,52 +1024,103 @@ def _review_pass1_speakers(
 
         contents.append(prompt)
 
-        # Retry strategy: same model × 2, then cheapest audio model × 1
+        # Smart retry: transient errors → retry same model; output errors → fallback
         _fallback_models = get_fallback_candidates(review_model, requires_audio=True)
         _cheapest = _fallback_models[-1] if _fallback_models else None
-        _attempts = [
-            ("primary", api_model_id),
-            ("retry", api_model_id),
-        ]
+        _second_cheapest = _fallback_models[-2] if len(_fallback_models) >= 2 else None
+
+        # Build fallback chain: primary → (retry if transient) → cheapest → second_cheapest
+        _fallback_chain: list[tuple[str, str, str]] = []  # (label, model_name, provider)
         if _cheapest and _cheapest != review_model:
-            _attempts.append(("cheapest", _resolve_model_id(_cheapest)))
+            _fallback_chain.append(("cheapest", _cheapest, _MODEL_REGISTRY.get(_cheapest, {}).get("provider", "gemini")))
+        if _second_cheapest and _second_cheapest != review_model:
+            _fallback_chain.append(("2nd_cheapest", _second_cheapest, _MODEL_REGISTRY.get(_second_cheapest, {}).get("provider", "gemini")))
 
         _pass1_last_error: Exception | None = None
-        _parse_failure_count = 0
+        _retried_transient = False
         _t0 = time.monotonic()
-        for _idx, (_label, _model_id) in enumerate(_attempts):
-            try:
-                response = client.models.generate_content(
-                    model=_model_id,
-                    contents=contents,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        temperature=0.1,
-                        max_output_tokens=8192,
-                    ),
-                )
+        response_text: str | None = None
 
-                response_text = _extract_text(response)
-                if not response_text:
-                    raise json.JSONDecodeError("empty response", "", 0)
+        def _attempt_gemini(label: str, model_id: str) -> dict:
+            nonlocal response_text
+            response = client.models.generate_content(
+                model=model_id,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.1,
+                    max_output_tokens=8192,
+                ),
+            )
+            response_text = _extract_text(response)
+            if not response_text:
+                raise json.JSONDecodeError("empty response", "", 0)
+            result = json.loads(response_text)
+            _dump_retry_response(debug_output_dir, "pass1", 0, label, model_id, response_text, None)
+            return result
 
-                payload = json.loads(response_text)
-                _dump_retry_response(debug_output_dir, "pass1", _idx, _label, _model_id, response_text, None)
-                if _label != "primary":
-                    logger.info("[S2][Pass1] Succeeded on %s attempt (model=%s)", _label, _model_id)
-                break  # success
-            except json.JSONDecodeError as exc:
-                _parse_failure_count += 1
-                _dump_retry_response(debug_output_dir, "pass1", _idx, _label, _model_id, response_text if 'response_text' in dir() else None, exc)
-                _pass1_last_error = exc
-                if _idx < len(_attempts) - 1:
-                    _next_label, _next_model = _attempts[_idx + 1]
-                    logger.warning("[S2][Pass1] JSON parse failed (%s, model=%s), next: %s (model=%s): %s",
-                                   _label, _model_id, _next_label, _next_model, exc)
+        def _attempt_mimo(label: str, model_name: str) -> dict:
+            nonlocal response_text
+            mimo_key = _get_model_api_key("mimo_omni") or ""
+            mimo_model_id = _resolve_model_id(model_name)
+            response_text = _call_mimo_omni_raw(
+                api_key=mimo_key,
+                prompt=prompt,
+                model_id=mimo_model_id,
+                audio_paths=[audio_path] if audio_path and audio_path.exists() else None,
+            )
+            result = json.loads(response_text)
+            _dump_retry_response(debug_output_dir, "pass1", 0, label, mimo_model_id, response_text, None)
+            return result
+
+        # --- Primary attempt ---
+        try:
+            payload = _attempt_gemini("primary", api_model_id)
+        except Exception as exc:
+            _pass1_last_error = exc
+            _dump_retry_response(debug_output_dir, "pass1", 0, "primary", api_model_id, response_text, exc)
+
+            # Transient → retry same model once
+            if _is_transient_error(exc) and not _retried_transient:
+                _retried_transient = True
+                logger.warning("[S2][Pass1] Transient error (%s, model=%s), retrying in %ds: %s",
+                               "primary", api_model_id, _TRANSIENT_RETRY_WAIT_S, exc)
+                time.sleep(_TRANSIENT_RETRY_WAIT_S)
+                try:
+                    payload = _attempt_gemini("retry", api_model_id)
+                except Exception as retry_exc:
+                    _pass1_last_error = retry_exc
+                    _dump_retry_response(debug_output_dir, "pass1", 1, "retry", api_model_id, response_text, retry_exc)
+                    logger.warning("[S2][Pass1] Retry also failed (%s): %s", api_model_id, retry_exc)
+                    payload = None
+                else:
+                    logger.info("[S2][Pass1] Succeeded on retry (model=%s)", api_model_id)
+                    payload = payload  # already set
+            else:
+                logger.warning("[S2][Pass1] Output error (%s, model=%s), skipping retry: %s",
+                               "primary", api_model_id, exc)
+                payload = None
+
+        # --- Fallback chain ---
+        if payload is None:
+            for _fb_label, _fb_model, _fb_provider in _fallback_chain:
+                try:
+                    if _fb_provider == "mimo":
+                        payload = _attempt_mimo(_fb_label, _fb_model)
+                    else:
+                        _fb_model_id = _resolve_model_id(_fb_model)
+                        payload = _attempt_gemini(_fb_label, _fb_model_id)
+                    logger.info("[S2][Pass1] Succeeded on %s (model=%s)", _fb_label, _fb_model)
+                    break
+                except Exception as fb_exc:
+                    _pass1_last_error = fb_exc
+                    _dump_retry_response(debug_output_dir, "pass1", 0, _fb_label, _resolve_model_id(_fb_model), response_text, fb_exc)
+                    logger.warning("[S2][Pass1] %s failed (model=%s): %s", _fb_label, _fb_model, fb_exc)
                     continue
-                raise _PassFailure("1", f"JSON parse error after {len(_attempts)} attempts: {exc}") from exc
-        else:
+
+        if payload is None:
             raise _PassFailure("1", f"all attempts failed: {_pass1_last_error}")
+
     except _PassFailure:
         raise
     except Exception as exc:
@@ -1253,47 +1327,71 @@ def _review_pass2_text(
         speakers_json=speakers_json,
     )
 
-    # Retry strategy: same model × 2, then cheapest text model × 1
+    # Smart retry: transient → retry same model; output error → fallback
     _fallback_models = get_fallback_candidates(review_model, requires_audio=False)
     _cheapest = _fallback_models[-1] if _fallback_models else None
-    _attempts_p2: list[tuple[str, str, str | None]] = [
-        ("primary", review_model, api_key),
-        ("retry", review_model, api_key),
-    ]
+    _second_cheapest = _fallback_models[-2] if len(_fallback_models) >= 2 else None
+
+    _fallback_chain_p2: list[tuple[str, str]] = []
     if _cheapest and _cheapest != review_model:
-        _attempts_p2.append(("cheapest", _cheapest, _get_model_api_key(_cheapest)))
+        _fallback_chain_p2.append(("cheapest", _cheapest))
+    if _second_cheapest and _second_cheapest != review_model:
+        _fallback_chain_p2.append(("2nd_cheapest", _second_cheapest))
 
     _pass2_last_error: Exception | None = None
-    _parse_failure_count = 0
     _t0 = time.monotonic()
     payload: dict = {}
+    response_text: str | None = None
+
+    def _attempt_p2(label: str, model: str, key: str | None) -> dict:
+        nonlocal response_text
+        response_text = _call_text_llm(
+            model_name=model, api_key=key, prompt=prompt, max_output_tokens=8192,
+        )
+        if not response_text:
+            raise json.JSONDecodeError("empty response", "", 0)
+        result = json.loads(response_text)
+        _dump_retry_response(debug_output_dir, "pass2", 0, label, _resolve_model_id(model), response_text, None)
+        return result
+
     try:
-        for _idx, (_label, _model, _key) in enumerate(_attempts_p2):
-            try:
-                response_text = _call_text_llm(
-                    model_name=_model,
-                    api_key=_key,
-                    prompt=prompt,
-                    max_output_tokens=8192,
-                )
-                if not response_text:
-                    raise json.JSONDecodeError("empty response", "", 0)
-                payload = json.loads(response_text)
-                _dump_retry_response(debug_output_dir, "pass2", _idx, _label, _resolve_model_id(_model), response_text, None)
-                if _label != "primary":
-                    logger.info("[S2][Pass2] Succeeded on %s attempt (model=%s)", _label, _model)
-                break
-            except json.JSONDecodeError as exc:
-                _parse_failure_count += 1
-                _dump_retry_response(debug_output_dir, "pass2", _idx, _label, _resolve_model_id(_model), response_text if 'response_text' in dir() else None, exc)
-                _pass2_last_error = exc
-                if _idx < len(_attempts_p2) - 1:
-                    _next = _attempts_p2[_idx + 1]
-                    logger.warning("[S2][Pass2] JSON parse failed (%s, model=%s), next: %s (model=%s): %s",
-                                   _label, _model, _next[0], _next[1], exc)
-                    continue
-                raise _PassFailure("2", f"JSON parse error after {len(_attempts_p2)} attempts: {exc}") from exc
-        else:
+        # --- Primary attempt ---
+        try:
+            payload = _attempt_p2("primary", review_model, api_key)
+        except Exception as exc:
+            _pass2_last_error = exc
+            _dump_retry_response(debug_output_dir, "pass2", 0, "primary", _resolve_model_id(review_model), response_text, exc)
+
+            if _is_transient_error(exc):
+                logger.warning("[S2][Pass2] Transient error (%s), retrying in %ds: %s",
+                               review_model, _TRANSIENT_RETRY_WAIT_S, exc)
+                time.sleep(_TRANSIENT_RETRY_WAIT_S)
+                try:
+                    payload = _attempt_p2("retry", review_model, api_key)
+                    logger.info("[S2][Pass2] Succeeded on retry (model=%s)", review_model)
+                except Exception as retry_exc:
+                    _pass2_last_error = retry_exc
+                    _dump_retry_response(debug_output_dir, "pass2", 1, "retry", _resolve_model_id(review_model), response_text, retry_exc)
+                    logger.warning("[S2][Pass2] Retry failed (%s): %s", review_model, retry_exc)
+                    payload = {}
+            else:
+                logger.warning("[S2][Pass2] Output error (%s), skipping retry: %s", review_model, exc)
+                payload = {}
+
+        # --- Fallback chain ---
+        if not payload:
+            for _fb_label, _fb_model in _fallback_chain_p2:
+                _fb_key = _get_model_api_key(_fb_model)
+                try:
+                    payload = _attempt_p2(_fb_label, _fb_model, _fb_key)
+                    logger.info("[S2][Pass2] Succeeded on %s (model=%s)", _fb_label, _fb_model)
+                    break
+                except Exception as fb_exc:
+                    _pass2_last_error = fb_exc
+                    _dump_retry_response(debug_output_dir, "pass2", 0, _fb_label, _resolve_model_id(_fb_model), response_text, fb_exc)
+                    logger.warning("[S2][Pass2] %s failed (model=%s): %s", _fb_label, _fb_model, fb_exc)
+
+        if not payload:
             raise _PassFailure("2", f"all attempts failed: {_pass2_last_error}")
     except _PassFailure:
         raise
@@ -1576,51 +1674,90 @@ def review_pass3_voice_profiles(
 
         contents.append(prompt)
 
-        # Retry strategy: same model × 2, then cheapest audio model × 1
+        # Smart retry: transient → retry same model; output error → fallback
         _fallback_models = get_fallback_candidates(review_model, requires_audio=True)
         _cheapest_p3 = _fallback_models[-1] if _fallback_models else None
-        _attempts_p3 = [
-            ("primary", api_model_id),
-            ("retry", api_model_id),
-        ]
-        if _cheapest_p3 and _cheapest_p3 != review_model:
-            _attempts_p3.append(("cheapest", _resolve_model_id(_cheapest_p3)))
+        _second_cheapest_p3 = _fallback_models[-2] if len(_fallback_models) >= 2 else None
 
-        _pass3_payload: dict = {}
-        _parse_failure_count_p3 = 0
-        _t0_p3 = time.monotonic()
-        for _idx, (_label, _model_id) in enumerate(_attempts_p3):
-            try:
-                response = client.models.generate_content(
-                    model=_model_id,
-                    contents=contents,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        temperature=0.1,
-                        max_output_tokens=8192,
-                    ),
-                )
-                response_text = _extract_text(response)
-                if not response_text:
-                    raise json.JSONDecodeError("empty response", "", 0)
-                _pass3_payload = json.loads(response_text)
-                _dump_retry_response(debug_output_dir, "pass3", _idx, _label, _model_id, response_text, None)
-                if _label != "primary":
-                    logger.info("[S2][Pass3] Succeeded on %s attempt (model=%s)", _label, _model_id)
-                break
-            except json.JSONDecodeError as exc:
-                _parse_failure_count_p3 += 1
-                _dump_retry_response(debug_output_dir, "pass3", _idx, _label, _model_id, response_text if 'response_text' in dir() else None, exc)
-                if _idx < len(_attempts_p3) - 1:
-                    _next = _attempts_p3[_idx + 1]
-                    logger.warning("[S2][Pass3] JSON parse failed (%s, model=%s), next: %s (model=%s): %s",
-                                   _label, _model_id, _next[0], _next[1], exc)
-                    continue
-                logger.warning("[S2][Pass3] All %d attempts failed, using fallback: %s", len(_attempts_p3), exc)
-                return _fallback_minimal_speaker_styles(speakers)
-        else:
+        _fb_chain_p3: list[tuple[str, str, str]] = []
+        if _cheapest_p3 and _cheapest_p3 != review_model:
+            _fb_chain_p3.append(("cheapest", _cheapest_p3, _MODEL_REGISTRY.get(_cheapest_p3, {}).get("provider", "gemini")))
+        if _second_cheapest_p3 and _second_cheapest_p3 != review_model:
+            _fb_chain_p3.append(("2nd_cheapest", _second_cheapest_p3, _MODEL_REGISTRY.get(_second_cheapest_p3, {}).get("provider", "gemini")))
+
+        # Collect clip paths for mimo fallback
+        _clip_paths = [clips[sid] for sid in speaker_ids if sid in clips and clips[sid] and clips[sid].exists()]
+
+        response_text_p3: str | None = None
+
+        def _attempt_gemini_p3(label: str, model_id: str) -> dict:
+            nonlocal response_text_p3
+            resp = client.models.generate_content(
+                model=model_id, contents=contents,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json", temperature=0.1, max_output_tokens=8192,
+                ),
+            )
+            response_text_p3 = _extract_text(resp)
+            if not response_text_p3:
+                raise json.JSONDecodeError("empty response", "", 0)
+            result = json.loads(response_text_p3)
+            _dump_retry_response(debug_output_dir, "pass3", 0, label, model_id, response_text_p3, None)
+            return result
+
+        def _attempt_mimo_p3(label: str, model_name: str) -> dict:
+            nonlocal response_text_p3
+            mimo_key = _get_model_api_key("mimo_omni") or ""
+            response_text_p3 = _call_mimo_omni_raw(
+                api_key=mimo_key, prompt=prompt, model_id=_resolve_model_id(model_name),
+                audio_paths=_clip_paths or None,
+            )
+            result = json.loads(response_text_p3)
+            _dump_retry_response(debug_output_dir, "pass3", 0, label, _resolve_model_id(model_name), response_text_p3, None)
+            return result
+
+        payload: dict = {}
+        _pass3_last_error: Exception | None = None
+
+        # --- Primary attempt ---
+        try:
+            payload = _attempt_gemini_p3("primary", api_model_id)
+        except Exception as exc:
+            _pass3_last_error = exc
+            _dump_retry_response(debug_output_dir, "pass3", 0, "primary", api_model_id, response_text_p3, exc)
+
+            if _is_transient_error(exc):
+                logger.warning("[S2][Pass3] Transient error, retrying in %ds: %s", _TRANSIENT_RETRY_WAIT_S, exc)
+                time.sleep(_TRANSIENT_RETRY_WAIT_S)
+                try:
+                    payload = _attempt_gemini_p3("retry", api_model_id)
+                    logger.info("[S2][Pass3] Succeeded on retry (model=%s)", api_model_id)
+                except Exception as retry_exc:
+                    _pass3_last_error = retry_exc
+                    _dump_retry_response(debug_output_dir, "pass3", 1, "retry", api_model_id, response_text_p3, retry_exc)
+                    logger.warning("[S2][Pass3] Retry failed: %s", retry_exc)
+            else:
+                logger.warning("[S2][Pass3] Output error, skipping retry: %s", exc)
+
+        # --- Fallback chain ---
+        if not payload:
+            for _fb_label, _fb_model, _fb_prov in _fb_chain_p3:
+                try:
+                    if _fb_prov == "mimo":
+                        payload = _attempt_mimo_p3(_fb_label, _fb_model)
+                    else:
+                        payload = _attempt_gemini_p3(_fb_label, _resolve_model_id(_fb_model))
+                    logger.info("[S2][Pass3] Succeeded on %s (model=%s)", _fb_label, _fb_model)
+                    break
+                except Exception as fb_exc:
+                    _pass3_last_error = fb_exc
+                    _dump_retry_response(debug_output_dir, "pass3", 0, _fb_label, _resolve_model_id(_fb_model), response_text_p3, fb_exc)
+                    logger.warning("[S2][Pass3] %s failed (model=%s): %s", _fb_label, _fb_model, fb_exc)
+
+        if not payload:
+            logger.warning("[S2][Pass3] All attempts failed, using fallback profiles")
             return _fallback_minimal_speaker_styles(speakers)
-        payload = _pass3_payload
+
     except Exception as exc:
         logger.warning("[S2][Pass3] API call failed: %s, using fallback", exc)
         return _fallback_minimal_speaker_styles(speakers)
@@ -1878,15 +2015,21 @@ def _call_review(
     is_mimo = review_model == "mimo_omni"
 
     if is_mimo:
-        # MiMo Omni is text-only — always use no-audio prompt
+        # MiMo Omni now supports audio (multimodal)
+        _has_mimo_audio = audio_path is not None and audio_path.exists()
         prompt = _format_prompt(
-            has_audio=False,
+            has_audio=_has_mimo_audio,
             video_title=video_title,
             video_url=video_url,
             line_count=line_count,
             transcript_body=transcript_body,
         )
-        return _call_review_mimo_omni(api_key=api_key, prompt=prompt, model_id=api_model_id)
+        return _call_review_mimo_omni(
+            api_key=api_key,
+            prompt=prompt,
+            model_id=api_model_id,
+            audio_paths=[audio_path] if _has_mimo_audio else None,
+        )
 
     try:
         types = _load_genai_types()
@@ -1993,48 +2136,91 @@ def _call_review(
         return None
 
 
+def _call_mimo_omni_raw(
+    *,
+    api_key: str,
+    prompt: str,
+    model_id: str = "",
+    audio_paths: list[Path] | None = None,
+    max_tokens: int = 8192,
+) -> str:
+    """Call MiMo-V2-Omni API and return raw response text.
+
+    Supports multimodal input: when *audio_paths* is provided, audio files
+    are base64-encoded and sent as ``input_audio`` parts (OpenAI-compatible).
+    Raises on any failure so callers (retry loops) can classify errors.
+    """
+    import base64 as _b64
+
+    effective_model = model_id or _resolve_model_id("mimo_omni")
+
+    # Build message content — text-only or multimodal
+    if audio_paths:
+        _AUDIO_FMT = {"wav": "wav", "ogg": "ogg", "mp3": "mp3", "m4a": "mp4", "flac": "flac"}
+        content: list[dict[str, object]] = []
+        for ap in audio_paths:
+            if ap and ap.exists():
+                audio_b64 = _b64.b64encode(ap.read_bytes()).decode("utf-8")
+                fmt = _AUDIO_FMT.get(ap.suffix.lower().lstrip("."), "wav")
+                content.append({"type": "input_audio", "input_audio": {"data": audio_b64, "format": fmt}})
+        content.append({"type": "text", "text": prompt})
+        msg_content: object = content
+    else:
+        msg_content = prompt
+
+    payload = {
+        "model": effective_model,
+        "messages": [{"role": "user", "content": msg_content}],
+        "response_format": {"type": "json_object"},
+        "temperature": 0.1,
+        "max_tokens": max_tokens,
+    }
+
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        _MIMO_OMNI_API_URL,
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="POST",
+    )
+
+    with urllib.request.urlopen(req, timeout=300) as resp:
+        body = json.loads(resp.read().decode("utf-8"))
+
+    response_text = body["choices"][0]["message"]["content"]
+    if not response_text:
+        raise json.JSONDecodeError("empty response from MiMo", "", 0)
+
+    # Strip markdown fences if present
+    response_text = response_text.strip()
+    if response_text.startswith("```"):
+        response_text = re.sub(r"^```(?:json)?\s*", "", response_text)
+        response_text = re.sub(r"\s*```$", "", response_text)
+    return response_text
+
+
 def _call_review_mimo_omni(
     *,
     api_key: str,
     prompt: str,
     model_id: str = "",
+    audio_paths: list[Path] | None = None,
 ) -> tuple[dict, dict, list] | None:
-    """Call MiMo-V2-Omni API for text-only review (OpenAI-compatible endpoint)."""
-    effective_model = model_id or _resolve_model_id("mimo_omni")
-    payload = {
-        "model": effective_model,
-        "messages": [{"role": "user", "content": prompt}],
-        "response_format": {"type": "json_object"},
-        "temperature": 0.1,
-        "max_tokens": 8192,
-    }
+    """Call MiMo-V2-Omni API for review (legacy wrapper).
 
+    Supports audio when *audio_paths* is provided.
+    Returns (speakers, glossary, corrections) or None on failure.
+    """
     try:
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            _MIMO_OMNI_API_URL,
-            data=data,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-            },
-            method="POST",
+        response_text = _call_mimo_omni_raw(
+            api_key=api_key,
+            prompt=prompt,
+            model_id=model_id,
+            audio_paths=audio_paths,
         )
-
-        with urllib.request.urlopen(req, timeout=300) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
-
-        response_text = body["choices"][0]["message"]["content"]
-        if not response_text:
-            logger.warning("MiMo Omni review returned empty response")
-            return None
-
-        # Strip markdown fences if present
-        response_text = response_text.strip()
-        if response_text.startswith("```"):
-            response_text = re.sub(r"^```(?:json)?\s*", "", response_text)
-            response_text = re.sub(r"\s*```$", "", response_text)
-
         result = json.loads(response_text)
         speakers = result.get("speakers", {})
         glossary = result.get("glossary", {})

@@ -76,11 +76,11 @@ MODEL_REGISTRY: dict[str, dict[str, Any]] = {
         "label": "GPT-5.4（高质量）",
         "cost_hint": "约 ¥0.5/千 token",
     },
-    # MiMo (text-only, free)
+    # MiMo (omni-modal, free — supports text + image + audio + video)
     "mimo_omni": {
         "api_model_id": "mimo-v2-omni",
         "provider": "mimo",
-        "supports_audio": False,
+        "supports_audio": True,
         "api_key_env": "MIMO_API_KEY",
         "cost_rank": 1,
         "label": "MiMo-V2-Omni（免费）",
