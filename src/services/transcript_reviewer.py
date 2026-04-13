@@ -990,25 +990,17 @@ def _review_pass1_speakers(
         contents: list = []
         has_audio = False
 
+        _MIME_MAP = {".wav": "audio/wav", ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".flac": "audio/flac", ".ogg": "audio/ogg"}
         if audio_path and audio_path.exists():
             try:
-                try:
-                    audio_file = client.files.upload(file=audio_path)
-                    contents.append(audio_file)
-                except Exception as upload_exc:
-                    if "only supported in the Gemini Developer client" in str(upload_exc):
-                        audio_bytes = audio_path.read_bytes()
-                        suffix = audio_path.suffix.lower()
-                        mime_map = {".wav": "audio/wav", ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".flac": "audio/flac", ".ogg": "audio/ogg"}
-                        mime_type = mime_map.get(suffix, "audio/wav")
-                        audio_part = types.Part.from_bytes(data=audio_bytes, mime_type=mime_type)
-                        contents.append(audio_part)
-                    else:
-                        raise
+                audio_bytes = audio_path.read_bytes()
+                mime_type = _MIME_MAP.get(audio_path.suffix.lower(), "audio/wav")
+                audio_part = types.Part.from_bytes(data=audio_bytes, mime_type=mime_type)
+                contents.append(audio_part)
                 has_audio = True
-                logger.info("[S2][Pass1] Audio uploaded for speaker identification")
+                logger.info("[S2][Pass1] Audio loaded inline (%d KB)", len(audio_bytes) // 1024)
             except Exception as e:
-                logger.warning("[S2][Pass1] Audio upload failed: %s", e)
+                logger.warning("[S2][Pass1] Audio load failed: %s", e)
 
         contents.append(prompt)
 
@@ -1637,20 +1629,13 @@ def review_pass3_voice_profiles(
             clip_path = clips.get(spk_id)
             if clip_path and clip_path.exists():
                 try:
-                    try:
-                        audio_file = client.files.upload(file=clip_path)
-                        contents.append(f"[音频片段: {spk_id}]")
-                        contents.append(audio_file)
-                    except Exception as upload_exc:
-                        if "only supported in the Gemini Developer client" in str(upload_exc):
-                            audio_bytes = clip_path.read_bytes()
-                            audio_part = types.Part.from_bytes(data=audio_bytes, mime_type="audio/ogg")
-                            contents.append(f"[音频片段: {spk_id}]")
-                            contents.append(audio_part)
-                        else:
-                            raise
+                    audio_bytes = clip_path.read_bytes()
+                    mime_type = {".wav": "audio/wav", ".ogg": "audio/ogg", ".mp3": "audio/mpeg"}.get(clip_path.suffix.lower(), "audio/ogg")
+                    audio_part = types.Part.from_bytes(data=audio_bytes, mime_type=mime_type)
+                    contents.append(f"[音频片段: {spk_id}]")
+                    contents.append(audio_part)
                 except Exception as e:
-                    logger.warning("[S2][Pass3] Failed to upload clip for %s: %s", spk_id, e)
+                    logger.warning("[S2][Pass3] Failed to load clip for %s: %s", spk_id, e)
 
         contents.append(prompt)
 
@@ -2025,31 +2010,16 @@ def _call_review(
         elif audio_path and Path(audio_path).exists():
             audio_path = Path(audio_path)
             try:
-                file_size_mb = audio_path.stat().st_size / (1024 * 1024)
-                logger.info(
-                    "[Review] Uploading audio for multimodal review (%s, %.1f MB)...",
-                    audio_path.name, file_size_mb,
-                )
-                # Try files.upload (AI Studio) first, fallback to inline Part (Vertex AI)
-                try:
-                    audio_file = client.files.upload(file=audio_path)
-                    contents.append(audio_file)
-                except Exception as upload_exc:
-                    if "only supported in the Gemini Developer client" in str(upload_exc):
-                        # Vertex AI: use inline Part.from_bytes
-                        logger.info("[Review] Vertex AI mode — using inline audio Part")
-                        audio_bytes = audio_path.read_bytes()
-                        suffix = audio_path.suffix.lower()
-                        mime_map = {".wav": "audio/wav", ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".flac": "audio/flac", ".ogg": "audio/ogg"}
-                        mime_type = mime_map.get(suffix, "audio/wav")
-                        audio_part = types.Part.from_bytes(data=audio_bytes, mime_type=mime_type)
-                        contents.append(audio_part)
-                    else:
-                        raise
+                audio_bytes = audio_path.read_bytes()
+                file_size_mb = len(audio_bytes) / (1024 * 1024)
+                mime_map = {".wav": "audio/wav", ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".flac": "audio/flac", ".ogg": "audio/ogg"}
+                mime_type = mime_map.get(audio_path.suffix.lower(), "audio/wav")
+                audio_part = types.Part.from_bytes(data=audio_bytes, mime_type=mime_type)
+                contents.append(audio_part)
                 has_audio = True
-                logger.info("[Review] Audio uploaded successfully")
+                logger.info("[Review] Audio loaded inline (%s, %.1f MB)", audio_path.name, file_size_mb)
             except Exception as e:
-                logger.warning("[Review] Audio upload failed: %s", e)
+                logger.warning("[Review] Audio load failed: %s", e)
 
         if not has_audio and audio_path:
             logger.warning(
