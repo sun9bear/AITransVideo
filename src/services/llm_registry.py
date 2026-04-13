@@ -47,6 +47,15 @@ MODEL_REGISTRY: dict[str, dict[str, Any]] = {
         "label": "Gemini 2.5 Flash Lite（低成本）",
         "cost_hint": "¥0.27/h 音频",
     },
+    "gemini_31_flash_lite": {
+        "api_model_id": "gemini-3.1-flash-lite-preview",
+        "provider": "gemini",
+        "supports_audio": True,
+        "auth": "client_factory",
+        "cost_rank": 2,
+        "label": "Gemini 3.1 Flash Lite（快速稳定）",
+        "cost_hint": "¥0.25/百万 token",
+    },
     # DeepSeek (text-only)
     "deepseek": {
         "api_model_id": "deepseek-chat",

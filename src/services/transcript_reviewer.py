@@ -1029,7 +1029,7 @@ def _review_pass1_speakers(
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
                     temperature=0.1,
-                    max_output_tokens=8192,
+                    max_output_tokens=65536,
                 ),
             )
             response_text = _extract_text(response)
@@ -1215,7 +1215,7 @@ def _call_text_llm(
     model_name: str,
     api_key: str | None,
     prompt: str,
-    max_output_tokens: int = 8192,
+    max_output_tokens: int = 65536,
 ) -> str:
     """Call an LLM for text-only tasks, dispatching by provider.
 
@@ -1322,7 +1322,7 @@ def _review_pass2_text(
     def _attempt_p2(label: str, model: str, key: str | None) -> dict:
         nonlocal response_text
         response_text = _call_text_llm(
-            model_name=model, api_key=key, prompt=prompt, max_output_tokens=8192,
+            model_name=model, api_key=key, prompt=prompt, max_output_tokens=65536,
         )
         if not response_text:
             raise json.JSONDecodeError("empty response", "", 0)
@@ -1660,7 +1660,7 @@ def review_pass3_voice_profiles(
             resp = client.models.generate_content(
                 model=model_id, contents=contents,
                 config=types.GenerateContentConfig(
-                    response_mime_type="application/json", temperature=0.1, max_output_tokens=8192,
+                    response_mime_type="application/json", temperature=0.1, max_output_tokens=65536,
                 ),
             )
             response_text_p3 = _extract_text(resp)
@@ -2043,7 +2043,7 @@ def _call_review(
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 temperature=0.1,
-                max_output_tokens=8192,
+                max_output_tokens=65536,
             ),
             **generate_kwargs,
         )
