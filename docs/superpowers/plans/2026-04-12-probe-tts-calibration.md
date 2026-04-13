@@ -156,7 +156,19 @@ S2 审校
 
 ---
 
-## Phase 4: 翻译提示词优化
+## Phase 4: 翻译提示词优化（重新评估 2026-04-13）
+
+### 背景变化
+
+Probe 校准已上线，每个 speaker 有独立的 chars/sec 值，`min_chars`/`max_chars` 现在基于
+真实 TTS 语速计算而非固定 4.5。原方案部分步骤需调整：
+
+- **4.1 提示词收紧**：✅ 仍然需要。"仅供参考" 措辞太弱，现在 char range 已准确。
+- **4.2 JSON 精简**：✅ 仍然需要。内部字段（density_factor 等）是 token 浪费且干扰 LLM。
+- **4.3 重试阈值**：✅ 保留原方案。删除 UNDERSHOOT/OVERSHOOT factor，重试直接用 min/max。
+  probe 校准后 char range 已准确，超出即重试。
+- **4.4 范围可配置化**：✅ 保留。0.85/1.15 factor 从 admin_settings.json 读取，后台可调。
+- **4.5 重试提示词**：✅ 仍然需要。当前英文单行 → 改为中文具体指导。
 
 ### 改动范围
 
@@ -166,11 +178,23 @@ S2 审校
 
 ### 执行步骤
 
-- [ ] 4.1 修改 `DEFAULT_TRANSLATION_PROMPT_TEMPLATE` L98：`仅供参考，不是硬性约束` → `中文字数的目标范围，直接影响配音时长匹配度，请将译文字数控制在此范围内`。
-- [ ] 4.2 精简发给 LLM 的 JSON 字段：`_build_prompt` 中过滤掉 `density_factor`、`reference_words_per_second`、`source_word_count`、`source_words_per_second`、`dynamic_target_chars`、`target_chars`、`target_duration_ms` 等内部字段。注意 `_build_translation_fingerprint` 仍用完整 groups 不影响缓存。
-- [ ] 4.3 统一字数范围与重试阈值：删除 `DEFAULT_TRANSLATION_LENGTH_UNDERSHOOT_FACTOR` / `OVERSHOOT_FACTOR` 这套独立重试阈值。重试判断直接用 `min_chars` / `max_chars`——超出范围即重翻，不再有额外的宽松倍数。
-- [ ] 4.4 字数范围可配置化：`_estimate_target_char_range` 从 `admin_settings.json` 读取 `translation_char_range_min_factor`（默认 0.85）和 `translation_char_range_max_factor`（默认 1.15），管理员可根据实际 rewrite 率动态调整。
-- [ ] 4.5 改进重试提示词：从英文一句话改为中文具体指导（含偏长精简、偏短补充的操作建议）。
+- [ ] 4.1 收紧提示词字数引导：`DEFAULT_TRANSLATION_PROMPT_TEMPLATE` L130 中
+  `仅供参考，不是硬性约束` → `中文字数的目标范围，直接影响配音时长匹配度，请将译文字数控制在此范围内`。
+  同步更新 `_DEFAULT_PROMPTS["translate"]`（gateway/admin_settings.py）。
+- [ ] 4.2 精简发给 LLM 的 JSON 字段：`_build_prompt` 中过滤掉内部字段，只保留
+  LLM 需要的：`segment_id`、`speaker_id`、`source_text`、`target_duration_seconds`、
+  `min_chars`、`max_chars`。过滤掉：`density_factor`、`density_factor_source`、
+  `reference_words_per_second`、`source_word_count`、`source_words_per_second`、
+  `dynamic_target_chars`、`target_chars`、`target_duration_ms`、`start_ms`、`end_ms`。
+  注意 `_build_translation_fingerprint` 仍用完整 groups，不影响缓存。
+- [ ] 4.3 删除重试阈值 factor：移除 `DEFAULT_TRANSLATION_LENGTH_UNDERSHOOT_FACTOR`（0.5）和
+  `DEFAULT_TRANSLATION_LENGTH_OVERSHOOT_FACTOR`（2.0）。`_needs_translation_retry_for_length`
+  直接用 `min_chars` / `max_chars` 判断——超出范围即重试。probe 校准后 char range 已准确。
+- [ ] 4.4 字数范围可配置化：`_estimate_target_char_range` 从 `admin_settings.json` 读取
+  `translation_char_range_min_factor`（默认 0.85）和 `translation_char_range_max_factor`
+  （默认 1.15）。后台系统设置页或提示词管理页可调整。
+- [ ] 4.5 改进重试提示词：从英文 `"Keep this retry much closer to min_chars ~ max_chars"`
+  改为中文具体指导，区分偏长和偏短两种情况。
 - [ ] 4.6 Commit
 
 ---
