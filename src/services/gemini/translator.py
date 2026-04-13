@@ -43,8 +43,8 @@ TRANSLATION_CHECKPOINT_VERSION = 1
 DEFAULT_DYNAMIC_DENSITY_MIN = 0.65
 DEFAULT_DYNAMIC_DENSITY_MAX = 1.50
 DEFAULT_SPEAKER_REFERENCE_MIN_SAMPLES = 3
-DEFAULT_TRANSLATION_LENGTH_UNDERSHOOT_FACTOR = 0.5
-DEFAULT_TRANSLATION_LENGTH_OVERSHOOT_FACTOR = 2.0
+DEFAULT_TRANSLATION_LENGTH_UNDERSHOOT_FACTOR = 0.5  # deprecated — kept for reference
+DEFAULT_TRANSLATION_LENGTH_OVERSHOOT_FACTOR = 2.0  # deprecated — kept for reference
 DEFAULT_ALIAS_RETRY_ATTEMPTS_BEFORE_FALLBACK = 1
 SPEAKER_INFER_PROMPT_TEMPLATE_CONTEXT_TOKEN = "__CONTEXT_EXCERPT__"
 SPEAKER_INFER_PROMPT_TEMPLATE_EXPECTED_OUTPUT_TOKEN = "__EXPECTED_OUTPUT_JSON__"
@@ -127,7 +127,7 @@ __SPEAKER_INSTRUCTION____STRICT_LENGTH_INSTRUCTION__补充要求：在不影响�
 
 每个 segment 都提供了：
 - target_duration_seconds：原文段落时长（秒），中文配音时长应尽量接近
-- min_chars ~ max_chars：建议中文字数范围（仅供参考，不是硬性约束）
+- min_chars ~ max_chars：中文字数的目标范围，直接影响配音时长匹配度，请将译文字数控制在此范围内
 
 输入（JSON数组）：
 __GROUPS_JSON__
@@ -1096,6 +1096,12 @@ class GeminiTranslator:
         response = model.generate_content(prompt, **request_kwargs)
         return _extract_response_text(response)
 
+    # Fields sent to LLM; everything else is internal/cache-only.
+    _LLM_GROUP_FIELDS = frozenset({
+        "segment_id", "speaker_id", "source_text",
+        "target_duration_seconds", "min_chars", "max_chars",
+    })
+
     def _build_prompt(
         self,
         groups: list[dict],
@@ -1105,9 +1111,17 @@ class GeminiTranslator:
         glossary: dict[str, str] | None = None,
         strict_length_control: bool = False,
     ) -> str:
-        groups_json = json.dumps(groups, ensure_ascii=False, indent=2)
+        # Strip internal fields before sending to LLM (saves tokens, reduces noise).
+        # _build_translation_fingerprint uses the full groups, so caching is unaffected.
+        llm_groups = [
+            {k: v for k, v in g.items() if k in self._LLM_GROUP_FIELDS}
+            for g in groups
+        ]
+        groups_json = json.dumps(llm_groups, ensure_ascii=False, indent=2)
         strict_length_instruction = (
-            "12. Length reminder: the previous attempt missed the requested range. Keep this retry much closer to min_chars ~ max_chars.\n"
+            "12. 字数提醒：上一次翻译未达到 min_chars ~ max_chars 的字数要求。"
+            "如果偏长，请精简表达、删除冗余修饰；如果偏短，请适度补充细节、展开表述。"
+            "请严格将译文字数控制在 min_chars 到 max_chars 范围内。\n"
             if strict_length_control
             else ""
         )
@@ -1236,9 +1250,9 @@ class GeminiTranslator:
         max_chars: int,
     ) -> bool:
         actual_chars = self._count_cn_chars(cn_text)
-        lower_bound = max(1, int(min_chars * DEFAULT_TRANSLATION_LENGTH_UNDERSHOOT_FACTOR))
-        upper_bound = max(lower_bound, int(max_chars * DEFAULT_TRANSLATION_LENGTH_OVERSHOOT_FACTOR))
-        return actual_chars < lower_bound or actual_chars > upper_bound
+        # With probe-calibrated chars/sec, min_chars/max_chars are accurate.
+        # Retry if translation falls outside the target range.
+        return actual_chars < min_chars or actual_chars > max_chars
 
     def _parse_review_response(
         self,
@@ -2036,10 +2050,28 @@ def _estimate_dynamic_target_chars(
     return max(1, int(base_target_chars * density_factor))
 
 
+def _get_char_range_factors() -> tuple[float, float]:
+    """Load char range factors from admin settings, with defaults 0.85 / 1.15."""
+    try:
+        import os as _os
+        settings_path = "/opt/aivideotrans/config/admin_settings.json"
+        if _os.path.exists(settings_path):
+            with open(settings_path) as f:
+                settings = json.load(f)
+            min_f = float(settings.get("translation_char_range_min_factor", 0.85))
+            max_f = float(settings.get("translation_char_range_max_factor", 1.15))
+            if 0.5 <= min_f <= 1.0 and 1.0 <= max_f <= 2.0:
+                return min_f, max_f
+    except Exception:
+        pass
+    return 0.85, 1.15
+
+
 def _estimate_target_char_range(target_chars: int) -> tuple[int, int]:
     normalized_target_chars = max(1, int(target_chars))
-    min_chars = max(1, int(normalized_target_chars * 0.85))
-    max_chars = max(min_chars, int(normalized_target_chars * 1.15))
+    min_factor, max_factor = _get_char_range_factors()
+    min_chars = max(1, int(normalized_target_chars * min_factor))
+    max_chars = max(min_chars, int(normalized_target_chars * max_factor))
     return min_chars, max_chars
 
 
