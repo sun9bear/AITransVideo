@@ -2860,8 +2860,7 @@ class ProcessPipeline:
         for index, ((start_ms, end_ms), cn_chunk) in enumerate(zip(spans, cn_chunks)):
             if end_ms <= start_ms:
                 return None
-            child_segments.append(
-                DubbingSegment(
+            child = DubbingSegment(
                     segment_id=next_segment_id + index,
                     speaker_id=segment.speaker_id,
                     display_name=segment.display_name,
@@ -2877,7 +2876,10 @@ class ProcessPipeline:
                     source_text=source_chunks[index],
                     cn_text=cn_chunk,
                 )
-            )
+            # Inherit per-speaker TTS provider from parent
+            if getattr(segment, "tts_provider", None):
+                child.tts_provider = segment.tts_provider
+            child_segments.append(child)
         return child_segments
 
     def _retry_failed_semantic_child(
