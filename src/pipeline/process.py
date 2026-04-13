@@ -3575,6 +3575,8 @@ class ProcessPipeline:
     def _calibrate_tts_duration(
         self,
         segments: list[DubbingSegment],
+        *,
+        min_speaker_samples: int = DEFAULT_SPEAKER_TTS_CALIBRATION_MIN_SAMPLES,
     ) -> tuple[float, dict[str, float]]:
         global_estimator = TTSDurationEstimator(chars_per_second=4.5)
         global_samples = [
@@ -3594,7 +3596,7 @@ class ProcessPipeline:
 
         chars_per_second_by_speaker: dict[str, float] = {}
         for speaker_id, samples in speaker_samples.items():
-            if len(samples) < DEFAULT_SPEAKER_TTS_CALIBRATION_MIN_SAMPLES:
+            if len(samples) < min_speaker_samples:
                 continue
             speaker_estimator = TTSDurationEstimator(chars_per_second=global_estimator.chars_per_second)
             speaker_estimator.calibrate(samples)
@@ -4053,8 +4055,11 @@ class ProcessPipeline:
             return default_cps, {}
 
         # Calibrate from probe results
+        # Probe has few segments per speaker — use min_speaker_samples=1
+        # so even 1 sample produces per-speaker calibration (better than global fallback)
         chars_per_second, chars_per_second_by_speaker = self._calibrate_tts_duration(
             probe_segments,
+            min_speaker_samples=1,
         )
 
         # Sanity check — reject implausible values
