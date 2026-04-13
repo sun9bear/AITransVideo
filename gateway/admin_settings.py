@@ -141,7 +141,7 @@ async def update_admin_settings(
 # Review prompts management
 # ---------------------------------------------------------------------------
 
-_PROMPT_KEYS = ("pass1", "pass2", "pass3", "translate", "rewrite")
+_PROMPT_KEYS = ("pass1", "pass2", "pass3", "translate", "rewrite", "probe_translate")
 _MODE_KEYS = ("studio", "express")
 
 # ---------------------------------------------------------------------------
@@ -398,6 +398,38 @@ __SOURCE_TEXT__
 4. 只输出改写后的中文文本，不要任何解释
 
 改写后的文本：""",
+
+    "probe_translate": """你是专业的视频配音翻译专家。任务是把英文视频转录稿翻译成自然流畅的中文口播文本。
+
+视频信息：
+- 标题：__VIDEO_TITLE__
+- 来源：__YOUTUBE_URL__
+__GLOSSARY_SECTION__
+这些翻译将直接用于中文 TTS 配音，核心目标是让中文配音时长与原英文段落时长大致一致。请特别注意：
+1. 每段都标注了 target_duration_seconds（原文段落时长），翻译时请自然地控制中文长度，使配音时长接近该目标。
+2. 不要机械地按字数公式凑字，而是根据原文的语速节奏、信息密度来判断中文应该翻多长。
+3. 宁可适度意译、精简表达，也不要逐字直译导致配音明显超时。
+4. 如果原文信息密度高，可用更紧凑的中文表达方式保留核心信息。
+5. 翻译结果将用于配音，不要写成书面字幕腔，要适合人声朗读。
+6. 所有人物姓名必须优先使用中文常见译名，不要保留英文人名。
+   例如：Elon Musk -> 埃隆·马斯克，Sam Altman -> 萨姆·奥特曼，Naval Ravikant -> 纳瓦尔·拉维坎特。
+7. 公司、产品、品牌、模型名称若已有常见中文译法，优先使用中文；若没有稳定中文译法，可保留原文。
+__SPEAKER_INSTRUCTION__补充要求：在不影响自然度的前提下，可适度保留原文中的口语连接词、语气词和缓冲表达，以维持更接近原说话节奏；但不要为了凑字数生硬添加无意义填充词。
+9. 每个 segment 独立翻译，但要保持上下文连贯。
+10. 只输出 JSON，不要任何其他文字。
+
+每个 segment 提供了 target_duration_seconds（原文段落时长），请凭语感自然翻译，使配音时长接近该目标。
+
+输入（JSON数组）：
+__GROUPS_JSON__
+
+请输出JSON数组，格式如下（只输出JSON，不要markdown代码块）：
+[
+  {
+    "segment_id": 1,
+    "cn_text": "翻译后的中文文本"
+  }
+]""",
 }
 
 
@@ -438,7 +470,7 @@ async def get_review_prompts(
         "defaults": _load_default_prompts(),
         "models": {
             mode: {k: prompt_models.get(mode, {}).get(k, _DEFAULT_MODELS.get(mode, {}).get(k, ""))
-                   for k in (_PROMPT_KEYS if mode == "studio" else ("pass2", "pass3", "translate", "rewrite"))}
+                   for k in (_PROMPT_KEYS if mode == "studio" else ("pass2", "pass3", "translate", "rewrite", "probe_translate"))}
             for mode in _MODE_KEYS
         },
         "default_models": _DEFAULT_MODELS,

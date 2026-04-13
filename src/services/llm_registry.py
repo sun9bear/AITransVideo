@@ -95,6 +95,7 @@ _DEFAULTS: dict[str, str] = {
     "pass3": "gemini_pro",
     "translate": "deepseek",
     "rewrite": "deepseek",
+    "probe_translate": "deepseek",
 }
 
 # ---------------------------------------------------------------------------

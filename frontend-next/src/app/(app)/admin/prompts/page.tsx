@@ -9,6 +9,7 @@ interface PromptData {
   pass3: string
   translate: string
   rewrite: string
+  probe_translate: string
 }
 
 interface ModelOption {
@@ -36,9 +37,9 @@ interface HistoryVersion {
   models?: ModelsData
 }
 
-const PROMPT_KEYS = ['pass1', 'pass2', 'pass3', 'translate', 'rewrite'] as const
+const PROMPT_KEYS = ['pass1', 'pass2', 'pass3', 'translate', 'rewrite', 'probe_translate'] as const
 type PromptKey = typeof PROMPT_KEYS[number]
-const EXPRESS_PROMPT_KEYS = ['pass2', 'pass3', 'translate', 'rewrite'] as const
+const EXPRESS_PROMPT_KEYS = ['pass2', 'pass3', 'translate', 'rewrite', 'probe_translate'] as const
 
 const PROMPT_LABELS: Record<PromptKey, { title: string; desc: string; vars: string }> = {
   pass1: {
@@ -66,6 +67,11 @@ const PROMPT_LABELS: Record<PromptKey, { title: string; desc: string; vars: stri
     desc: 'TTS 文本长度调整，扩写或缩写以匹配目标配音时长',
     vars: '__TTS_CN_TEXT__ __SOURCE_TEXT__ __CURRENT_CHARS__ __TARGET_CHARS__ __DIRECTION_DESC__',
   },
+  probe_translate: {
+    title: '探针翻译提示词',
+    desc: '探针段落预翻译，用于 TTS 校准和音色试听（无字数约束，仅按时长引导）',
+    vars: '__VIDEO_TITLE__ __YOUTUBE_URL__ __GROUPS_JSON__ __GLOSSARY_SECTION__ __SPEAKER_INSTRUCTION__',
+  },
 }
 
 const PROVIDER_LABELS: Record<string, string> = {
@@ -74,7 +80,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   mimo: 'MiMo',
 }
 
-const EMPTY_PROMPTS: PromptData = { pass1: '', pass2: '', pass3: '', translate: '', rewrite: '' }
+const EMPTY_PROMPTS: PromptData = { pass1: '', pass2: '', pass3: '', translate: '', rewrite: '', probe_translate: '' }
 
 const API_BASE = '/api/admin/review-prompts'
 

@@ -480,8 +480,9 @@ class GeminiTranslator:
             glossary_section = f"\n术语表（请严格遵循以下翻译）：\n{glossary_lines}\n"
         normalized_video_title = _normalize_optional_text(video_title) or "未提供"
         normalized_youtube_url = _normalize_optional_text(youtube_url) or "未提供"
+        effective_template = get_effective_probe_translation_prompt_template()
         return (
-            PROBE_TRANSLATION_PROMPT_TEMPLATE
+            effective_template
             .replace(TRANSLATION_PROMPT_TEMPLATE_VIDEO_TITLE_TOKEN, normalized_video_title)
             .replace(TRANSLATION_PROMPT_TEMPLATE_YOUTUBE_URL_TOKEN, normalized_youtube_url)
             .replace(TRANSLATION_PROMPT_TEMPLATE_GLOSSARY_TOKEN, glossary_section)
@@ -1381,6 +1382,25 @@ def validate_translation_prompt_template(template: str) -> str:
         template,
         required_tokens=(TRANSLATION_PROMPT_TEMPLATE_GROUPS_TOKEN,),
         label="S3 翻译提示词",
+    )
+
+
+def get_effective_probe_translation_prompt_template(template: object | None = None) -> str:
+    normalized_template = _normalize_optional_text(template)
+    if normalized_template is None:
+        try:
+            from src.services.transcript_reviewer import _get_admin_prompt_override
+            admin = _get_admin_prompt_override("probe_translate")
+            if admin:
+                normalized_template = admin
+        except Exception:
+            pass
+    if normalized_template is None:
+        return PROBE_TRANSLATION_PROMPT_TEMPLATE
+    return _validate_prompt_template_tokens(
+        normalized_template,
+        required_tokens=(TRANSLATION_PROMPT_TEMPLATE_GROUPS_TOKEN,),
+        label="探针翻译提示词",
     )
 
 
