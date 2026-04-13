@@ -809,7 +809,7 @@ class ProcessPipeline:
                         words_data=_words_data,
                         debug_output_dir=final_project_dir / "transcript",
                         mode=job_service_mode,
-                        skip_pass1=_is_express,
+                        skip_pass1=False,
                     )
 
                     if review_result is not None:

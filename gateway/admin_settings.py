@@ -170,7 +170,7 @@ _ALL_MODELS = [
 
 _DEFAULT_MODELS = {
     "studio": {"pass1": "gemini_pro", "pass2": "gemini", "pass3": "gemini_pro", "translate": "deepseek", "rewrite": "deepseek"},
-    "express": {"pass2": "gemini", "pass3": "gemini", "translate": "deepseek", "rewrite": "deepseek"},
+    "express": {"pass1": "gemini", "pass2": "gemini", "pass3": "gemini", "translate": "deepseek", "rewrite": "deepseek"},
 }
 
 _PROVIDER_KEY_ENVS = {
@@ -472,7 +472,7 @@ async def get_review_prompts(
         "defaults": _load_default_prompts(),
         "models": {
             mode: {k: prompt_models.get(mode, {}).get(k, _DEFAULT_MODELS.get(mode, {}).get(k, ""))
-                   for k in (_PROMPT_KEYS if mode == "studio" else ("pass2", "pass3", "translate", "rewrite", "probe_translate"))}
+                   for k in _PROMPT_KEYS}
             for mode in _MODE_KEYS
         },
         "default_models": _DEFAULT_MODELS,

@@ -39,7 +39,7 @@ interface HistoryVersion {
 
 const PROMPT_KEYS = ['pass1', 'pass2', 'pass3', 'translate', 'rewrite', 'probe_translate'] as const
 type PromptKey = typeof PROMPT_KEYS[number]
-const EXPRESS_PROMPT_KEYS = ['pass2', 'pass3', 'translate', 'rewrite', 'probe_translate'] as const
+const EXPRESS_PROMPT_KEYS = ['pass1', 'pass2', 'pass3', 'translate', 'rewrite', 'probe_translate'] as const
 
 const PROMPT_LABELS: Record<PromptKey, { title: string; desc: string; vars: string }> = {
   pass1: {
@@ -316,11 +316,7 @@ export default function PromptsPage() {
               ))}
             </div>
 
-            {modeTab === 'express' && (
-              <div className="rounded-md border border-yellow-500/30 bg-yellow-500/5 px-4 py-3 text-sm text-yellow-600 dark:text-yellow-400">
-                快捷版跳过 Pass 1（说话人识别），直接使用 ASR 原始标注。
-              </div>
-            )}
+{/* Express Pass1 now enabled — same pipeline as Studio */}
 
             <div className="space-y-3">
               {promptKeysForMode.map(key => {
