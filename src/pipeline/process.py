@@ -3731,12 +3731,10 @@ class ProcessPipeline:
         for line in candidates:
             by_speaker.setdefault(line.speaker_id, []).append(line)
 
-        # Identify all speakers in transcript (excluding first/last)
-        all_speakers: set[str] = set()
-        for i, line in enumerate(lines):
-            if i == 0 or i == len(lines) - 1:
-                continue
-            all_speakers.add(line.speaker_id)
+        # Identify all speakers in transcript (include first/last so that
+        # speakers whose only segment is at the boundary still get a probe
+        # via the truncation fallback below).
+        all_speakers: set[str] = {line.speaker_id for line in lines}
 
         # Progressive fallback for speakers with no candidates
         for fallback_min in (10, 5):
@@ -3756,9 +3754,10 @@ class ProcessPipeline:
         if still_missing:
             from dataclasses import replace as _dc_replace
             for sid in still_missing:
+                # Include first/last segments — for speakers with only
+                # boundary segments, calibration coverage > intro avoidance
                 speaker_segs = [
-                    ln for i, ln in enumerate(lines)
-                    if ln.speaker_id == sid and 0 < i < len(lines) - 1
+                    ln for ln in lines if ln.speaker_id == sid
                 ]
                 if not speaker_segs:
                     continue

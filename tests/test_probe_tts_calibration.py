@@ -268,6 +268,21 @@ class TestSelectProbeSegments:
         # Should end at a sentence boundary
         assert text.rstrip().endswith((".", "?", "!", ",", ";"))
 
+    def test_truncation_covers_speaker_at_boundary(self):
+        """Speaker whose only segment is first or last line still gets a truncated probe."""
+        lines = [
+            _make_line(0, 0, 80000, speaker_id="intro", source_text=_words(120)),   # first — intro speaker
+            _make_line(1, 80000, 85000, speaker_id="a", source_text=_words(50)),
+            _make_line(2, 85000, 90000, speaker_id="a", source_text=_words(50)),
+            _make_line(3, 90000, 150000, speaker_id="outro", source_text=_words(100)),  # last — outro speaker
+        ]
+        result = self._select(lines)
+        # intro and outro speakers should get truncated probes
+        intro = [l for l in result if l.speaker_id == "intro"]
+        outro = [l for l in result if l.speaker_id == "outro"]
+        assert len(intro) == 1, "intro speaker (first line) should get a truncated probe"
+        assert len(outro) == 1, "outro speaker (last line) should get a truncated probe"
+
     def test_truncation_not_needed_within_60s(self):
         """50s segment should pass the relaxed 60s max_duration, no truncation."""
         lines = [
