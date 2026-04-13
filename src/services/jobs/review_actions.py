@@ -246,6 +246,23 @@ def clone_voice(
 
 
 _PREVIEW_SAMPLE_TEXT = "您好，很高兴能为您提供视频服务。请选择您感兴趣的音色，让我们一起开启视频翻译的奇妙之旅吧。"
+_MAX_PREVIEW_CHARS = 80
+_MIN_PREVIEW_CHARS = 10
+
+
+def _normalize_preview_text(text: str | None) -> str:
+    """Truncate probe text for preview TTS; fall back to default sample."""
+    if not text or len(text.strip()) < _MIN_PREVIEW_CHARS:
+        return _PREVIEW_SAMPLE_TEXT
+    text = text.strip()
+    if len(text) <= _MAX_PREVIEW_CHARS:
+        return text
+    # Try to break at natural punctuation within limit
+    for sep in ("。", "，", "、", "；", ",", " "):
+        pos = text.rfind(sep, 0, _MAX_PREVIEW_CHARS)
+        if pos >= _MIN_PREVIEW_CHARS:
+            return text[: pos + 1]
+    return text[:_MAX_PREVIEW_CHARS]
 
 
 def _is_volcengine_voice(voice_id: str) -> bool:
@@ -257,11 +274,13 @@ def preview_voice(
     voice_id: str,
     config_path: Path,
     tts_provider: str | None = None,
+    sample_text: str | None = None,
 ) -> dict[str, object]:
     """Preview a voice by synthesizing test text.
 
     Supports MiniMax (clone + official), CosyVoice, and VolcEngine.
     Uses explicit *tts_provider* when given; falls back to voice_id detection.
+    *sample_text* overrides the default preview text (truncated to safe length).
     """
     import base64
 
@@ -269,18 +288,19 @@ def preview_voice(
         raise ValueError("voice_id is required")
 
     voice_id = voice_id.strip()
+    effective_text = _normalize_preview_text(sample_text) if sample_text else _PREVIEW_SAMPLE_TEXT
 
     # --- Route 1: VolcEngine ---
     if tts_provider == "volcengine" or (not tts_provider and _is_volcengine_voice(voice_id)):
-        return _preview_volcengine_voice(voice_id)
+        return _preview_volcengine_voice(voice_id, text=effective_text)
 
     # --- Route 2: CosyVoice ---
     if tts_provider == "cosyvoice":
-        return _preview_cosyvoice_voice(voice_id)
+        return _preview_cosyvoice_voice(voice_id, text=effective_text)
     if not tts_provider:
         from services.tts.cosyvoice_voice_catalog import is_cosyvoice_v3_flash_builtin_voice
         if is_cosyvoice_v3_flash_builtin_voice(voice_id):
-            return _preview_cosyvoice_voice(voice_id)
+            return _preview_cosyvoice_voice(voice_id, text=effective_text)
 
     # --- Route 3: MiniMax (clone + official catalog) ---
     from services.voice_asset import (
@@ -293,7 +313,7 @@ def preview_voice(
         result = verifier.verify_voice(
             speaker_id="preview",
             voice_id=voice_id,
-            sample_text=_PREVIEW_SAMPLE_TEXT,
+            sample_text=effective_text,
         )
         output = Path(result.output_path)
         if output.exists() and output.stat().st_size > 0:
@@ -313,7 +333,7 @@ def preview_voice(
         return {"audio_base64": "", "format": "wav", "expired": False, "error": f"试听失败: {str(exc)[:200]}"}
 
 
-def _preview_volcengine_voice(voice_id: str) -> dict[str, object]:
+def _preview_volcengine_voice(voice_id: str, *, text: str = _PREVIEW_SAMPLE_TEXT) -> dict[str, object]:
     """Preview a VolcEngine voice via TTS synthesis."""
     import base64
 
@@ -331,7 +351,7 @@ def _preview_volcengine_voice(voice_id: str) -> dict[str, object]:
         resource_id = RESOURCE_ID_2_0 if is_2_0 else RESOURCE_ID_1_0
 
         wav_bytes = volc_synthesize(
-            text=_PREVIEW_SAMPLE_TEXT,
+            text=text,
             voice_id=voice_id,
             resource_id=resource_id,
         )
@@ -343,14 +363,14 @@ def _preview_volcengine_voice(voice_id: str) -> dict[str, object]:
         return {"audio_base64": "", "format": "wav", "expired": False, "error": f"试听失败: {str(exc)[:200]}"}
 
 
-def _preview_cosyvoice_voice(voice_id: str) -> dict[str, object]:
+def _preview_cosyvoice_voice(voice_id: str, *, text: str = _PREVIEW_SAMPLE_TEXT) -> dict[str, object]:
     """Preview a CosyVoice voice via DashScope TTS synthesis."""
     import base64
 
     try:
         from services.tts.cosyvoice_provider import synthesize as cosy_synthesize
 
-        wav_bytes = cosy_synthesize(text=_PREVIEW_SAMPLE_TEXT, voice=voice_id)
+        wav_bytes = cosy_synthesize(text=text, voice=voice_id)
         if wav_bytes and len(wav_bytes) > 100:
             audio_b64 = base64.b64encode(wav_bytes).decode("ascii")
             return {"audio_base64": audio_b64, "format": "wav", "expired": False, "error": None}

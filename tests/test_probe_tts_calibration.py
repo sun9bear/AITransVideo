@@ -3,7 +3,9 @@ calibrated _build_groups.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
@@ -38,8 +40,38 @@ def _make_line(
     )
 
 
+# Helper: generate text with N words
+def _words(n: int) -> str:
+    return " ".join(f"word{i}" for i in range(n))
+
+
 # ---------------------------------------------------------------------------
-# _select_probe_segments
+# _count_source_words
+# ---------------------------------------------------------------------------
+class TestCountSourceWords:
+    @staticmethod
+    def _count(text: str) -> int:
+        from pipeline.process import ProcessPipeline
+        return ProcessPipeline._count_source_words(text)
+
+    def test_empty(self):
+        assert self._count("") == 0
+
+    def test_english_words(self):
+        assert self._count("Hello world foo bar") == 4
+
+    def test_mixed_with_numbers(self):
+        assert self._count("I have 3 cats and 10 dogs") == 7
+
+    def test_contractions(self):
+        assert self._count("I'm don't they'll") == 3
+
+    def test_none_input(self):
+        assert self._count(None) == 0
+
+
+# ---------------------------------------------------------------------------
+# _select_probe_segments (hybrid word count + duration)
 # ---------------------------------------------------------------------------
 class TestSelectProbeSegments:
     """Tests for ProcessPipeline._select_probe_segments (static method)."""
@@ -54,16 +86,19 @@ class TestSelectProbeSegments:
 
     def test_too_few_lines_returns_empty(self):
         # Only 2 lines — first and last are excluded, so 0 candidates
-        lines = [_make_line(1, 0, 5000), _make_line(2, 5000, 10000)]
+        lines = [
+            _make_line(1, 0, 5000, source_text=_words(50)),
+            _make_line(2, 5000, 10000, source_text=_words(50)),
+        ]
         assert self._select(lines) == []
 
     def test_skips_first_and_last(self):
         lines = [
-            _make_line(1, 0, 5000),       # first — skipped
-            _make_line(2, 5000, 10000),    # middle, 5s — candidate
-            _make_line(3, 10000, 15000),   # middle, 5s — candidate
-            _make_line(4, 15000, 20000),   # middle, 5s — candidate
-            _make_line(5, 20000, 25000),   # last — skipped
+            _make_line(1, 0, 5000, source_text=_words(50)),      # first — skipped
+            _make_line(2, 5000, 10000, source_text=_words(50)),   # middle
+            _make_line(3, 10000, 15000, source_text=_words(50)),  # middle
+            _make_line(4, 15000, 20000, source_text=_words(50)),  # middle
+            _make_line(5, 20000, 25000, source_text=_words(50)),  # last — skipped
         ]
         result = self._select(lines)
         indices = [l.index for l in result]
@@ -71,14 +106,30 @@ class TestSelectProbeSegments:
         assert 5 not in indices
         assert len(result) == 3
 
+    def test_filters_by_word_count(self):
+        lines = [
+            _make_line(1, 0, 5000, source_text=_words(50)),       # first
+            _make_line(2, 5000, 10000, source_text=_words(5)),     # too few words
+            _make_line(3, 10000, 15000, source_text=_words(50)),   # good
+            _make_line(4, 15000, 20000, source_text=_words(150)),  # too many words
+            _make_line(5, 20000, 25000, source_text=_words(50)),   # good
+            _make_line(6, 25000, 30000, source_text=_words(50)),   # last
+        ]
+        result = self._select(lines)
+        indices = [l.index for l in result]
+        assert 2 not in indices  # too few words
+        assert 4 not in indices  # too many words
+        assert 3 in indices
+        assert 5 in indices
+
     def test_filters_by_duration(self):
         lines = [
-            _make_line(1, 0, 1000),        # first
-            _make_line(2, 1000, 2000),      # 1s — too short
-            _make_line(3, 2000, 7000),      # 5s — good
-            _make_line(4, 7000, 16000),     # 9s — too long
-            _make_line(5, 16000, 21000),    # 5s — good
-            _make_line(6, 21000, 26000),    # last
+            _make_line(1, 0, 1000, source_text=_words(50)),        # first
+            _make_line(2, 1000, 2000, source_text=_words(50)),     # 1s — too short
+            _make_line(3, 2000, 7000, source_text=_words(50)),     # 5s — good
+            _make_line(4, 7000, 23000, source_text=_words(50)),    # 16s — too long
+            _make_line(5, 23000, 28000, source_text=_words(50)),   # 5s — good
+            _make_line(6, 28000, 33000, source_text=_words(50)),   # last
         ]
         result = self._select(lines)
         indices = [l.index for l in result]
@@ -88,15 +139,14 @@ class TestSelectProbeSegments:
         assert 5 in indices
 
     def test_per_speaker_limit(self):
-        lines = [_make_line(0, 0, 1000)]  # first (skipped)
-        # 6 lines for speaker_a, 6 for speaker_b — all 5s each
+        lines = [_make_line(0, 0, 1000, source_text=_words(50))]  # first (skipped)
+        # 6 lines for speaker_a, 6 for speaker_b — all 5s, 50 words each
         for i in range(1, 13):
             spk = "speaker_a" if i <= 6 else "speaker_b"
-            lines.append(_make_line(i, i * 5000, (i + 1) * 5000, speaker_id=spk))
-        lines.append(_make_line(13, 65000, 70000))  # last (skipped)
+            lines.append(_make_line(i, i * 5000, (i + 1) * 5000, speaker_id=spk, source_text=_words(50)))
+        lines.append(_make_line(13, 65000, 70000, source_text=_words(50)))  # last (skipped)
 
         result = self._select(lines, per_speaker=3, max_total=10)
-        # Each speaker should contribute at most 3
         count_a = sum(1 for l in result if l.speaker_id == "speaker_a")
         count_b = sum(1 for l in result if l.speaker_id == "speaker_b")
         assert count_a <= 3
@@ -104,25 +154,215 @@ class TestSelectProbeSegments:
         assert len(result) <= 10
 
     def test_max_total_cap(self):
-        lines = [_make_line(0, 0, 1000)]
+        lines = [_make_line(0, 0, 1000, source_text=_words(50))]
         for i in range(1, 20):
-            lines.append(_make_line(i, i * 5000, (i + 1) * 5000))
-        lines.append(_make_line(20, 100000, 105000))
+            lines.append(_make_line(i, i * 5000, (i + 1) * 5000, source_text=_words(50)))
+        lines.append(_make_line(20, 100000, 105000, source_text=_words(50)))
 
         result = self._select(lines, max_total=5)
         assert len(result) <= 5
 
-    def test_min_total_backfill(self):
-        # Only 2 candidates from 1 speaker, min_total=3 not met — backfill
+    def test_max_words_per_speaker(self):
+        """Cumulative word count per speaker is capped at max_words_per_speaker."""
+        lines = [_make_line(0, 0, 1000, source_text=_words(50))]  # first
+        # 5 segments for speaker_a, each 80 words; max_words_per_speaker=200 → max 2
+        for i in range(1, 6):
+            lines.append(_make_line(i, i * 5000, (i + 1) * 5000, speaker_id="speaker_a", source_text=_words(80)))
+        lines.append(_make_line(6, 30000, 35000, source_text=_words(50)))  # last
+
+        result = self._select(lines, per_speaker=5, max_words_per_speaker=200)
+        count_a = sum(1 for l in result if l.speaker_id == "speaker_a")
+        total_words_a = sum(
+            len(l.source_text.split()) for l in result if l.speaker_id == "speaker_a"
+        )
+        assert total_words_a <= 200
+        assert count_a <= 2  # 2 * 80 = 160 < 200; 3 * 80 = 240 > 200
+
+    def test_prefers_mid_length(self):
+        """Segments near ideal mid (55 words) are preferred over edge cases."""
+        lines = [_make_line(0, 0, 1000, source_text=_words(50))]  # first
+        # Create segments with varying word counts
+        lines.append(_make_line(1, 5000, 10000, source_text=_words(25)))   # far from 55
+        lines.append(_make_line(2, 10000, 15000, source_text=_words(55)))  # exactly ideal
+        lines.append(_make_line(3, 15000, 20000, source_text=_words(90)))  # far from 55
+        lines.append(_make_line(4, 20000, 25000, source_text=_words(50)))  # close to ideal
+        lines.append(_make_line(5, 25000, 30000, source_text=_words(50)))  # last
+
+        result = self._select(lines, per_speaker=2)
+        indices = [l.index for l in result]
+        # Should pick index 2 (55 words) and index 4 (50 words) over 1 (25) and 3 (90)
+        assert 2 in indices
+        assert 4 in indices
+
+    def test_progressive_fallback(self):
+        """If a speaker has no candidates at min_words=20, fallback to lower thresholds."""
         lines = [
-            _make_line(1, 0, 1000),
-            _make_line(2, 1000, 5000, speaker_id="a"),
-            _make_line(3, 5000, 9000, speaker_id="a"),
-            _make_line(4, 9000, 13000, speaker_id="a"),
-            _make_line(5, 13000, 18000),
+            _make_line(0, 0, 1000, source_text=_words(50)),        # first
+            _make_line(1, 5000, 10000, speaker_id="a", source_text=_words(50)),  # speaker_a OK
+            _make_line(2, 10000, 15000, speaker_id="b", source_text=_words(8)),  # speaker_b: 8 words (< 20)
+            _make_line(3, 15000, 20000, source_text=_words(50)),   # last
         ]
-        result = self._select(lines, per_speaker=2, min_total=3)
-        assert len(result) >= 3
+        result = self._select(lines, min_words=20)
+        # speaker_b should be picked up via fallback (min_words=5)
+        spk_b = [l for l in result if l.speaker_id == "b"]
+        assert len(spk_b) == 1
+
+    def test_progressive_fallback_no_speaker_below_5_words(self):
+        """If speaker has < 5 words, fallback cannot pick them."""
+        lines = [
+            _make_line(0, 0, 1000, source_text=_words(50)),
+            _make_line(1, 5000, 10000, speaker_id="a", source_text=_words(50)),
+            _make_line(2, 10000, 15000, speaker_id="b", source_text=_words(3)),  # only 3 words
+            _make_line(3, 15000, 20000, source_text=_words(50)),
+        ]
+        result = self._select(lines, min_words=20)
+        spk_b = [l for l in result if l.speaker_id == "b"]
+        assert len(spk_b) == 0
+
+    def test_result_sorted_by_original_order(self):
+        """Selected segments should be sorted by their original order in lines."""
+        lines = [_make_line(0, 0, 1000, source_text=_words(50))]  # first
+        for i in range(1, 8):
+            lines.append(_make_line(i, i * 5000, (i + 1) * 5000, source_text=_words(50)))
+        lines.append(_make_line(8, 40000, 45000, source_text=_words(50)))  # last
+
+        result = self._select(lines, per_speaker=5)
+        indices = [l.index for l in result]
+        assert indices == sorted(indices)
+
+
+# ---------------------------------------------------------------------------
+# _normalize_preview_text
+# ---------------------------------------------------------------------------
+class TestNormalizePreviewText:
+    @staticmethod
+    def _normalize(text):
+        from services.jobs.review_actions import _normalize_preview_text
+        return _normalize_preview_text(text)
+
+    @staticmethod
+    def _default_text():
+        from services.jobs.review_actions import _PREVIEW_SAMPLE_TEXT
+        return _PREVIEW_SAMPLE_TEXT
+
+    def test_none_returns_default(self):
+        assert self._normalize(None) == self._default_text()
+
+    def test_empty_returns_default(self):
+        assert self._normalize("") == self._default_text()
+
+    def test_short_text_returns_default(self):
+        assert self._normalize("太短了") == self._default_text()
+
+    def test_text_within_limit_returned_as_is(self):
+        text = "这是一段合适长度的测试文本，用来验证试听功能是否正常工作。"
+        assert self._normalize(text) == text
+
+    def test_long_text_truncated_at_punctuation(self):
+        # Build text longer than 80 chars with punctuation
+        text = "第一段话在这里结束。" * 3 + "第二段话也很长，" * 5 + "超出限制了。"
+        result = self._normalize(text)
+        assert len(result) <= 80
+        # Should end at a punctuation mark
+        assert result[-1] in ("。", "，", "、", "；", ",", " ")
+
+    def test_long_text_no_punctuation_hard_cut(self):
+        text = "这" * 100  # No punctuation at all
+        result = self._normalize(text)
+        assert len(result) == 80
+
+    def test_whitespace_stripped(self):
+        text = "  这是一段有空格的文本内容测试  "
+        result = self._normalize(text)
+        assert not result.startswith(" ")
+        assert not result.endswith(" ")
+
+
+# ---------------------------------------------------------------------------
+# Probe cache: fingerprint + save/load
+# ---------------------------------------------------------------------------
+class TestProbeCache:
+    @staticmethod
+    def _fingerprint(lines, **kwargs):
+        from pipeline.process import ProcessPipeline
+        return ProcessPipeline._build_probe_fingerprint(lines, **kwargs)
+
+    @staticmethod
+    def _save(cache_path, segments, fingerprint):
+        from pipeline.process import ProcessPipeline
+        return ProcessPipeline._save_probe_cache(cache_path, segments, fingerprint)
+
+    @staticmethod
+    def _load(cache_path, expected_fingerprint):
+        from pipeline.process import ProcessPipeline
+        return ProcessPipeline._load_probe_cache(cache_path, expected_fingerprint)
+
+    def test_fingerprint_deterministic(self):
+        lines = [_make_line(1, 0, 5000, source_text="hello"), _make_line(2, 5000, 10000, source_text="world")]
+        fp1 = self._fingerprint(lines, model_name="gemini", glossary=None, video_title="t", youtube_url="u")
+        fp2 = self._fingerprint(lines, model_name="gemini", glossary=None, video_title="t", youtube_url="u")
+        assert fp1 == fp2
+
+    def test_fingerprint_changes_with_model(self):
+        lines = [_make_line(1, 0, 5000, source_text="hello")]
+        fp1 = self._fingerprint(lines, model_name="gemini", glossary=None, video_title="t", youtube_url="u")
+        fp2 = self._fingerprint(lines, model_name="deepseek", glossary=None, video_title="t", youtube_url="u")
+        assert fp1 != fp2
+
+    def test_fingerprint_changes_with_glossary(self):
+        lines = [_make_line(1, 0, 5000, source_text="hello")]
+        fp1 = self._fingerprint(lines, model_name="m", glossary=None, video_title="t", youtube_url="u")
+        fp2 = self._fingerprint(lines, model_name="m", glossary={"AI": "人工智能"}, video_title="t", youtube_url="u")
+        assert fp1 != fp2
+
+    def test_fingerprint_changes_with_duration(self):
+        """Timestamp changes must invalidate cache (probe uses target_duration_seconds)."""
+        lines_v1 = [_make_line(1, 0, 5000, source_text="hello")]
+        lines_v2 = [_make_line(1, 0, 6000, source_text="hello")]  # same text, different end_ms
+        fp1 = self._fingerprint(lines_v1, model_name="m", glossary=None, video_title="t", youtube_url="u")
+        fp2 = self._fingerprint(lines_v2, model_name="m", glossary=None, video_title="t", youtube_url="u")
+        assert fp1 != fp2
+
+    def test_save_and_load_round_trip(self, tmp_path):
+        from services.gemini.translator import DubbingSegment
+        seg = DubbingSegment(
+            segment_id=1, speaker_id="a", display_name="a", voice_id="",
+            source_text="hello", cn_text="你好",
+            start_ms=0, end_ms=5000, target_duration_ms=5000,
+        )
+        fp = "abc123"
+        cache_path = tmp_path / "translation" / "_probe_segments.json"
+        self._save(cache_path, [seg], fp)
+
+        loaded = self._load(cache_path, fp)
+        assert loaded is not None
+        assert len(loaded) == 1
+        assert loaded[0].segment_id == 1
+        assert loaded[0].cn_text == "你好"
+        assert loaded[0].speaker_id == "a"
+
+    def test_load_fingerprint_mismatch_returns_none(self, tmp_path):
+        from services.gemini.translator import DubbingSegment
+        seg = DubbingSegment(
+            segment_id=1, speaker_id="a", display_name="a", voice_id="",
+            source_text="hello", cn_text="你好",
+            start_ms=0, end_ms=5000, target_duration_ms=5000,
+        )
+        cache_path = tmp_path / "_probe_segments.json"
+        self._save(cache_path, [seg], "fp_v1")
+
+        loaded = self._load(cache_path, "fp_v2")
+        assert loaded is None
+
+    def test_load_missing_file_returns_none(self, tmp_path):
+        loaded = self._load(tmp_path / "nonexistent.json", "fp")
+        assert loaded is None
+
+    def test_load_corrupt_json_returns_none(self, tmp_path):
+        cache_path = tmp_path / "_probe.json"
+        cache_path.write_text("not json at all", encoding="utf-8")
+        loaded = self._load(cache_path, "fp")
+        assert loaded is None
 
 
 # ---------------------------------------------------------------------------

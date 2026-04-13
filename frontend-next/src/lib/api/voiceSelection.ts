@@ -74,14 +74,18 @@ export interface VoicePreviewResult {
 export async function previewVoice(
   jobId: string,
   voiceId: string,
-  options?: { ttsProvider?: string },
+  options?: { ttsProvider?: string; sampleText?: string },
 ): Promise<VoicePreviewResult> {
   const result = await apiClient.post<{
     audio_base64: string
     expired: boolean
     error: string | null
   }>(`/jobs/${jobId}/review/voice/preview`, {
-    body: { voice_id: voiceId, tts_provider: options?.ttsProvider ?? '' },
+    body: {
+      voice_id: voiceId,
+      tts_provider: options?.ttsProvider ?? '',
+      sample_text: options?.sampleText ?? '',
+    },
   })
   return {
     audioBase64: result.audio_base64,

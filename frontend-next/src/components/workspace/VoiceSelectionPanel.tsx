@@ -24,6 +24,12 @@ import type { JobSummary } from '@/types/jobs'
 
 /* ---------- Types ---------- */
 
+interface ProbeText {
+  segmentId: number
+  sourceText: string
+  cnText: string
+}
+
 interface SpeakerPayload {
   speakerId: string
   speakerName: string
@@ -32,6 +38,7 @@ interface SpeakerPayload {
   canClone: boolean
   autoMatchedVoice: { voiceId: string; label: string } | null
   autoMatchedByProvider: Record<string, { voiceId: string; label: string; matchConfidence: string } | null>
+  probeTexts: ProbeText[]
 }
 
 interface AvailableVoice {
@@ -147,6 +154,13 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
               ? { voiceId: String((s.auto_matched_voice as Record<string, unknown>).voice_id ?? ''), label: String((s.auto_matched_voice as Record<string, unknown>).label ?? '') }
               : null,
             autoMatchedByProvider: amByProv,
+            probeTexts: Array.isArray(s.probe_texts)
+              ? (s.probe_texts as Record<string, unknown>[]).map((pt) => ({
+                  segmentId: Number(pt.segment_id ?? 0),
+                  sourceText: String(pt.source_text ?? ''),
+                  cnText: String(pt.cn_text ?? ''),
+                }))
+              : [],
           }
         }).filter((s: SpeakerPayload) => s.speakerId)
 
@@ -278,7 +292,14 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
     setPreviewError((p) => ({ ...p, [speakerId]: null }))
 
     try {
-      const result = await previewVoice(jobId, state.voiceId, { ttsProvider: state.selectedProvider })
+      // Use probe translation text for preview if available
+      const speaker = speakers.find((sp) => sp.speakerId === speakerId)
+      const probeText = speaker?.probeTexts?.[0]?.cnText || undefined
+
+      const result = await previewVoice(jobId, state.voiceId, {
+        ttsProvider: state.selectedProvider,
+        sampleText: probeText,
+      })
 
       if (result.expired) {
         setPreviewError((p) => ({ ...p, [speakerId]: '音色已失效，请重新选择' }))
@@ -308,7 +329,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
     } finally {
       setPreviewLoading((p) => ({ ...p, [speakerId]: false }))
     }
-  }, [voiceStates, jobId])
+  }, [voiceStates, jobId, speakers])
 
   useEffect(() => {
     return () => {

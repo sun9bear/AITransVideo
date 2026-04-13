@@ -1029,6 +1029,27 @@ class ProcessPipeline:
                                     existing[key] = val
                     print(f"[S2.5] Pass 3 voice profiles: {len(_pass3_profiles)} speakers", flush=True)
 
+            # --- S4-probe Phase 1: 预翻译（音色确认前） ---
+            _probe_segments: list[DubbingSegment] = []
+            if not s3_cache_hit:
+                try:
+                    _probe_segments = self._run_probe_translation(
+                        transcript_result.lines,
+                        translator,
+                        cache_dir=final_project_dir / "translation",
+                        video_title=download_result.video_title,
+                        youtube_url=normalized_url,
+                        glossary=_review_glossary or None,
+                        speaker_voices=_speaker_voices if effective_speakers > 2 else None,
+                        voice_id_a=voice_id_a,
+                        display_name_a=speaker_name_a,
+                        voice_id_b=voice_id_b,
+                        display_name_b=speaker_name_b if effective_speakers >= 2 else None,
+                    )
+                except Exception as exc:
+                    print(f"[S4-probe] 探针翻译异常（非致命）：{exc}")
+                    logger.warning("[S4-probe] Probe translation failed: %s", exc)
+
             # --- voice_selection_review gate (Studio mode, BEFORE translation) ---
             approved_voice_selection = self._get_approved_review_payload(
                 review_state_manager,
@@ -1064,6 +1085,7 @@ class ProcessPipeline:
                         speaker_name_b,
                     ),
                     speaker_styles=_review_speaker_styles,
+                    probe_segments=_probe_segments or None,
                 )
                 review_state_manager.set_stage(
                     VOICE_SELECTION_REVIEW_STAGE,
@@ -1110,6 +1132,7 @@ class ProcessPipeline:
                             speaker_name_b,
                         ),
                         speaker_styles=_review_speaker_styles,
+                        probe_segments=_probe_segments or None,
                     )
                     vs_payload["expired_voice_ids"] = expired_voices
                     vs_payload["validation_error"] = f"检测到 {len(expired_voices)} 个音色已失效，请重新选择"
@@ -1134,35 +1157,31 @@ class ProcessPipeline:
                         message=review_message,
                     )
 
-            # --- S4-probe: Probe TTS calibration (before main translation) ---
+            # --- S4-probe Phase 2: TTS 校准（音色确认后） ---
             # Runs for both Studio and Express modes — probe cost (~$0.02) is
             # justified by downstream savings (fewer rewrites + force_dsp).
             _probe_chars_per_second = DEFAULT_ESTIMATED_TTS_CHARS_PER_SECOND
             _probe_chars_per_second_by_speaker: dict[str, float] = {}
-            if not s3_cache_hit:
+            if not s3_cache_hit and _probe_segments:
                 try:
                     _probe_tts_generator = TTSGenerator(tts_config, job_record=config.job_record)
                     _probe_tts_dir = (final_project_dir / "tts").resolve(strict=False)
                     _probe_tts_dir.mkdir(parents=True, exist_ok=True)
                     _probe_chars_per_second, _probe_chars_per_second_by_speaker = (
-                        self._run_probe_tts_calibration(
-                            transcript_result.lines,
-                            translator,
+                        self._run_probe_tts_and_calibrate(
+                            _probe_segments,
                             _probe_tts_generator,
                             _probe_tts_dir,
-                            video_title=download_result.video_title,
-                            youtube_url=normalized_url,
-                            glossary=_review_glossary or None,
-                            speaker_voices=_speaker_voices if effective_speakers > 2 else None,
-                            speaker_providers=_speaker_providers or None,
                             voice_id_a=voice_id_a,
                             display_name_a=speaker_name_a,
                             voice_id_b=voice_id_b,
-                            display_name_b=speaker_name_b if effective_speakers >= 2 else None,
+                            display_name_b=speaker_name_b,
+                            speaker_voices=_speaker_voices if effective_speakers > 2 else None,
+                            speaker_providers=_speaker_providers or None,
                         )
                     )
                 except Exception as exc:
-                    print(f"[S4-probe] 探针校准整体异常（回退 4.5）：{exc}")
+                    print(f"[S4-probe] 探针校准整体异常（回退 {DEFAULT_ESTIMATED_TTS_CHARS_PER_SECOND}）：{exc}")
                     logger.warning("[S4-probe] Probe calibration failed: %s", exc)
 
             # --- S3 Translation (voice already confirmed above) ---
@@ -1783,8 +1802,19 @@ class ProcessPipeline:
         effective_speakers: int,
         speaker_names: dict[str, str],
         speaker_styles: dict[str, dict[str, str]] | None = None,
+        probe_segments: list["DubbingSegment"] | None = None,
     ) -> dict[str, object]:
         """Build pending payload for voice_selection_review stage."""
+        # Build probe translation lookup: speaker_id -> list of probe texts
+        _probe_texts_by_speaker: dict[str, list[dict[str, str]]] = {}
+        if probe_segments:
+            for seg in probe_segments:
+                _probe_texts_by_speaker.setdefault(seg.speaker_id, []).append({
+                    "segment_id": seg.segment_id,
+                    "source_text": (seg.source_text or "")[:200],
+                    "cn_text": seg.cn_text or "",
+                })
+
         # Collect per-speaker segment info from transcript
         speaker_segments: dict[str, list[dict[str, object]]] = {}
         for line in transcript_result.lines:
@@ -1950,6 +1980,7 @@ class ProcessPipeline:
                 "auto_matched_by_provider": auto_matched_by_provider,
                 "can_clone": can_clone,
                 "segments": segs_sorted,
+                "probe_texts": _probe_texts_by_speaker.get(sid, []),
             })
 
         return {
@@ -3552,60 +3583,97 @@ class ProcessPipeline:
         return global_estimator.chars_per_second, chars_per_second_by_speaker
 
     @staticmethod
+    def _count_source_words(text: str) -> int:
+        """Count spoken words in source text (same logic as translator.py)."""
+        import re as _re
+        return len(_re.findall(r"[A-Za-z0-9']+", text or ""))
+
+    @staticmethod
     def _select_probe_segments(
         lines: list[TranscriptLine],
         *,
+        min_words: int = 20,
+        max_words: int = 100,
         min_duration_ms: int = 3_000,
-        max_duration_ms: int = 8_000,
+        max_duration_ms: int = 15_000,
         per_speaker: int = 3,
-        min_total: int = 3,
-        max_total: int = 10,
+        max_words_per_speaker: int = 200,
+        max_total: int = 15,
     ) -> list[TranscriptLine]:
         """Select representative segments for probe TTS calibration.
 
-        Picks 2-3 segments per speaker (3-8s duration), avoiding the first and
-        last segments. Ensures min 3, max 10 total.
+        Hybrid selection: word count primary (20-100 words) + duration guard
+        (3-15s). Picks up to 3 segments per speaker, preferring mid-length
+        segments (40-70 words). Skips first/last segments.
+
+        Progressive fallback: if a speaker has no candidates at min_words=20,
+        retries at 10, then 5.
         """
         if len(lines) <= 2:
             return []
 
-        # Filter: skip first/last, duration in range
-        candidates: list[TranscriptLine] = []
-        for i, line in enumerate(lines):
-            if i == 0 or i == len(lines) - 1:
-                continue
-            duration_ms = line.end_ms - line.start_ms
-            if min_duration_ms <= duration_ms <= max_duration_ms:
-                candidates.append(line)
+        _count_words = ProcessPipeline._count_source_words
 
-        if not candidates:
-            return []
+        # Build candidate pool: skip first/last, apply word + duration filters
+        def _filter_candidates(
+            _min_words: int,
+        ) -> list[TranscriptLine]:
+            result: list[TranscriptLine] = []
+            for i, line in enumerate(lines):
+                if i == 0 or i == len(lines) - 1:
+                    continue
+                wc = _count_words(line.source_text)
+                dur = line.end_ms - line.start_ms
+                if _min_words <= wc <= max_words and min_duration_ms <= dur <= max_duration_ms:
+                    result.append(line)
+            return result
+
+        candidates = _filter_candidates(min_words)
 
         # Group by speaker
         by_speaker: dict[str, list[TranscriptLine]] = {}
         for line in candidates:
             by_speaker.setdefault(line.speaker_id, []).append(line)
 
-        # Pick evenly spaced segments per speaker
+        # Identify all speakers in transcript (excluding first/last)
+        all_speakers: set[str] = set()
+        for i, line in enumerate(lines):
+            if i == 0 or i == len(lines) - 1:
+                continue
+            all_speakers.add(line.speaker_id)
+
+        # Progressive fallback for speakers with no candidates
+        for fallback_min in (10, 5):
+            missing = all_speakers - set(by_speaker.keys())
+            if not missing:
+                break
+            fallback = _filter_candidates(fallback_min)
+            for line in fallback:
+                if line.speaker_id in missing:
+                    by_speaker.setdefault(line.speaker_id, []).append(line)
+
+        if not by_speaker:
+            return []
+
+        # Per-speaker selection: prefer mid-length (40-70 words), evenly spaced
+        ideal_mid = 55  # midpoint of 40-70
         selected: list[TranscriptLine] = []
         for speaker_lines in by_speaker.values():
-            count = min(per_speaker, len(speaker_lines))
-            if count == len(speaker_lines):
-                selected.extend(speaker_lines)
-            else:
-                step = len(speaker_lines) / count
-                for i in range(count):
-                    selected.append(speaker_lines[int(i * step)])
-
-        # Ensure min_total from remaining candidates
-        if len(selected) < min_total:
-            selected_set = set(id(s) for s in selected)
-            for line in candidates:
-                if id(line) not in selected_set:
-                    selected.append(line)
-                    selected_set.add(id(line))
-                if len(selected) >= min_total:
+            # Sort by distance from ideal midpoint (prefer 40-70 word segments)
+            speaker_lines.sort(
+                key=lambda ln: abs(_count_words(ln.source_text) - ideal_mid),
+            )
+            picked: list[TranscriptLine] = []
+            cumulative_words = 0
+            for line in speaker_lines:
+                if len(picked) >= per_speaker:
                     break
+                wc = _count_words(line.source_text)
+                if cumulative_words + wc > max_words_per_speaker:
+                    continue
+                picked.append(line)
+                cumulative_words += wc
+            selected.extend(picked)
 
         # Cap at max_total
         selected = selected[:max_total]
@@ -3616,64 +3684,206 @@ class ProcessPipeline:
 
         return selected
 
-    def _run_probe_tts_calibration(
+    # ------------------------------------------------------------------
+    # Probe cache helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_probe_fingerprint(
+        probe_lines: list[TranscriptLine],
+        *,
+        model_name: str,
+        glossary: dict[str, str] | None,
+        video_title: str,
+        youtube_url: str,
+    ) -> str:
+        """Build a fingerprint for probe translation cache invalidation.
+
+        Includes segment durations because probe translation prompt uses
+        target_duration_seconds — timestamp changes invalidate the cache.
+        """
+        import hashlib as _hl
+        payload = {
+            "segment_ids": sorted(ln.index for ln in probe_lines),
+            "source_texts": [ln.source_text for ln in probe_lines],
+            "durations": [[ln.start_ms, ln.end_ms] for ln in probe_lines],
+            "model_name": model_name,
+            "glossary": glossary or {},
+            "video_title": video_title or "",
+            "youtube_url": youtube_url or "",
+        }
+        serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return _hl.sha256(serialized.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _save_probe_cache(
+        cache_path: Path,
+        segments: list["DubbingSegment"],
+        fingerprint: str,
+    ) -> None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            "fingerprint": fingerprint,
+            "segments": [
+                {
+                    "segment_id": s.segment_id,
+                    "speaker_id": s.speaker_id,
+                    "source_text": s.source_text,
+                    "cn_text": s.cn_text,
+                    "start_ms": s.start_ms,
+                    "end_ms": s.end_ms,
+                    "target_duration_ms": s.target_duration_ms,
+                }
+                for s in segments
+            ],
+        }
+        cache_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    @staticmethod
+    def _load_probe_cache(
+        cache_path: Path,
+        expected_fingerprint: str,
+    ) -> list["DubbingSegment"] | None:
+        """Load cached probe segments if fingerprint matches."""
+        if not cache_path.exists():
+            return None
+        try:
+            data = json.loads(cache_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if data.get("fingerprint") != expected_fingerprint:
+            return None
+        from services.gemini.translator import DubbingSegment
+        result: list[DubbingSegment] = []
+        for s in data.get("segments", []):
+            seg = DubbingSegment(
+                segment_id=s["segment_id"],
+                speaker_id=s.get("speaker_id", "speaker_a"),
+                display_name=s.get("speaker_id", "speaker_a"),
+                voice_id="",
+                source_text=s.get("source_text", ""),
+                cn_text=s.get("cn_text", ""),
+                start_ms=s.get("start_ms", 0),
+                end_ms=s.get("end_ms", 0),
+                target_duration_ms=s.get("target_duration_ms", 0),
+            )
+            result.append(seg)
+        return result if result else None
+
+    # ------------------------------------------------------------------
+    # Probe Phase 1: translation (before voice selection)
+    # ------------------------------------------------------------------
+
+    def _run_probe_translation(
         self,
         transcript_lines: list[TranscriptLine],
         translator: "GeminiTranslator",
-        tts_generator: "TTSGenerator",
-        tts_dir: Path,
         *,
+        cache_dir: Path | None = None,
         video_title: str = "",
         youtube_url: str = "",
         glossary: dict[str, str] | None = None,
         speaker_voices: dict[str, str] | None = None,
-        speaker_providers: dict[str, str] | None = None,
         voice_id_a: str | None = None,
         display_name_a: str = "Speaker A",
         voice_id_b: str | None = None,
         display_name_b: str | None = None,
+    ) -> list["DubbingSegment"]:
+        """Phase 1: Select probe segments and translate (no char constraints).
+
+        Returns list of DubbingSegments with cn_text populated.
+        Caches result with fingerprint for resume.
+        """
+        probe_lines = self._select_probe_segments(transcript_lines)
+        if not probe_lines:
+            print("[S4-probe] 无满足条件的探针段落")
+            return []
+
+        print(f"[S4-probe] 选取 {len(probe_lines)} 段探针段落")
+        for ln in probe_lines:
+            wc = self._count_source_words(ln.source_text)
+            dur_s = round((ln.end_ms - ln.start_ms) / 1000, 1)
+            print(f"  {ln.speaker_id}: seg#{ln.index} {wc}词 {dur_s}s")
+
+        fingerprint = self._build_probe_fingerprint(
+            probe_lines,
+            model_name=translator.model_name,
+            glossary=glossary,
+            video_title=video_title,
+            youtube_url=youtube_url,
+        )
+
+        # Try loading from cache (for resume after voice selection pause)
+        cache_path = cache_dir / "_probe_segments.json" if cache_dir else None
+        if cache_path:
+            cached = self._load_probe_cache(cache_path, fingerprint)
+            if cached:
+                print(f"[S4-probe] 从缓存加载 {len(cached)} 段探针翻译")
+                return cached
+
+        # Translate
+        probe_segments = translator.translate_probe(
+            probe_lines,
+            video_title=video_title,
+            youtube_url=youtube_url,
+            glossary=glossary,
+            speaker_voices=speaker_voices,
+            voice_id=voice_id_a,
+            display_name=display_name_a,
+            voice_id_b=voice_id_b,
+            display_name_b=display_name_b,
+        )
+
+        if not probe_segments:
+            print("[S4-probe] 探针翻译无结果")
+            return []
+
+        # Cache for resume
+        if cache_path:
+            try:
+                self._save_probe_cache(cache_path, probe_segments, fingerprint)
+            except Exception:
+                pass  # non-fatal
+
+        return probe_segments
+
+    # ------------------------------------------------------------------
+    # Probe Phase 2: TTS + calibration (after voice selection)
+    # ------------------------------------------------------------------
+
+    def _run_probe_tts_and_calibrate(
+        self,
+        probe_segments: list["DubbingSegment"],
+        tts_generator: "TTSGenerator",
+        tts_dir: Path,
+        *,
+        voice_id_a: str = "",
+        display_name_a: str = "",
+        voice_id_b: str | None = None,
+        display_name_b: str = "",
+        speaker_voices: dict[str, str] | None = None,
+        speaker_providers: dict[str, str] | None = None,
     ) -> tuple[float, dict[str, float]]:
-        """Run probe translation + TTS to calibrate chars_per_second.
+        """Phase 2: Run TTS on translated probe segments, then calibrate.
+
+        Applies user-confirmed voice_id + tts_provider before TTS so that
+        calibration runs on the exact voices the user selected.
 
         Returns (global_chars_per_second, {speaker_id: chars_per_second}).
         Falls back to DEFAULT 4.5 on any failure.
         """
-        default_cps = 4.5
+        default_cps = DEFAULT_ESTIMATED_TTS_CHARS_PER_SECOND
 
-        probe_lines = self._select_probe_segments(transcript_lines)
-        if not probe_lines:
-            print("[S4-probe] 无满足条件的探针段落，使用默认 4.5 字/秒")
-            return default_cps, {}
-
-        print(f"[S4-probe] 选取 {len(probe_lines)} 段探针段落进行校准")
-
-        # Probe translation (no char constraints)
-        try:
-            probe_segments = translator.translate_probe(
-                probe_lines,
-                video_title=video_title,
-                youtube_url=youtube_url,
-                glossary=glossary,
-                speaker_voices=speaker_voices,
-                voice_id=voice_id_a,
-                display_name=display_name_a,
-                voice_id_b=voice_id_b,
-                display_name_b=display_name_b,
-            )
-        except Exception as exc:
-            print(f"[S4-probe] 探针翻译失败（回退 4.5）：{exc}")
-            logger.warning("[S4-probe] Probe translation failed: %s", exc)
-            return default_cps, {}
-
-        if not probe_segments:
-            print("[S4-probe] 探针翻译无结果，使用默认 4.5 字/秒")
-            return default_cps, {}
-
-        # Apply per-speaker TTS provider so probe TTS uses the correct engine
-        if speaker_providers:
-            for seg in probe_segments:
-                if seg.speaker_id in speaker_providers:
-                    seg.tts_provider = speaker_providers[seg.speaker_id]
+        # Apply user-confirmed voice_id so probe TTS uses the correct voice
+        self._apply_runtime_voice_overrides(
+            probe_segments,
+            voice_id_a=voice_id_a,
+            display_name_a=display_name_a,
+            voice_id_b=voice_id_b,
+            display_name_b=display_name_b,
+            speaker_voices=speaker_voices,
+            speaker_providers=speaker_providers,
+        )
 
         # Probe TTS — output to _probe subdirectory to avoid collision with main TTS
         probe_tts_dir = (tts_dir / "_probe").resolve(strict=False)
@@ -3681,7 +3891,7 @@ class ProcessPipeline:
         try:
             tts_generator.generate_all(probe_segments, str(probe_tts_dir))
         except Exception as exc:
-            print(f"[S4-probe] 探针 TTS 失败（回退 4.5）：{exc}")
+            print(f"[S4-probe] 探针 TTS 失败（回退 {default_cps}）：{exc}")
             logger.warning("[S4-probe] Probe TTS failed: %s", exc)
             return default_cps, {}
 
@@ -3694,7 +3904,7 @@ class ProcessPipeline:
         if chars_per_second < 2.0 or chars_per_second > 8.0:
             print(
                 f"[S4-probe] 校准值异常 ({chars_per_second:.2f} 字/秒)，"
-                "回退默认 4.5 字/秒"
+                f"回退默认 {default_cps} 字/秒"
             )
             return default_cps, {}
 
