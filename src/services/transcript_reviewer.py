@@ -838,20 +838,14 @@ def _orchestrate_three_pass(
         output_root.mkdir(parents=True, exist_ok=True)
 
         # Pass 1 result
-        _p1_label = pass1_result.get("success_attempt_label", "primary")
         _write_pass_artifact(output_root / "s2_pass1_result.json", {
             "pass": "pass1_speakers",
             "review_model": pass1_model or "(skipped)",
             "skipped": skip_pass1,
             "prompt_version": "v1",
             "has_audio": original_audio is not None and not skip_pass1,
-            "fallback_used": _p1_label == "cheapest",
-            "success_attempt_label": _p1_label,
-            "success_attempt_model": pass1_result.get("success_attempt_model"),
             "generated_at": _now_iso(),
             "duration_ms": pass1_result.get("duration_ms"),
-            "attempts_count": pass1_result.get("attempts_count"),
-            "parse_failures": pass1_result.get("parse_failures"),
             "speakers": pass1_result["speakers"],
             "corrections": pass1_result["raw_corrections"],
             "corrections_applied": pass1_applied,
@@ -860,19 +854,13 @@ def _orchestrate_three_pass(
         })
 
         # Pass 2 result
-        _p2_label = pass2_result.get("success_attempt_label", "primary")
         _write_pass_artifact(output_root / "s2_pass2_result.json", {
             "pass": "pass2_text",
             "review_model": pass2_model,
             "prompt_version": "v1",
             "has_audio": False,
-            "fallback_used": _p2_label == "cheapest",
-            "success_attempt_label": _p2_label,
-            "success_attempt_model": pass2_result.get("success_attempt_model"),
             "generated_at": _now_iso(),
             "duration_ms": pass2_result.get("duration_ms"),
-            "attempts_count": pass2_result.get("attempts_count"),
-            "parse_failures": pass2_result.get("parse_failures"),
             "glossary": pass2_result["glossary"],
             "corrections": pass2_result["raw_corrections"],
             "corrections_applied": pass2_applied,
@@ -1162,11 +1150,7 @@ def _review_pass1_speakers(
         "response_text": response_text,
         "parsed_payload": payload,
         "has_audio": has_audio,
-        "success_attempt_label": _label,
-        "success_attempt_model": _model_id,
         "duration_ms": _duration_ms,
-        "attempts_count": _idx + 1,
-        "parse_failures": _parse_failure_count,
     }
 
 
@@ -1433,11 +1417,7 @@ def _review_pass2_text(
         "contract_violations": contract_violations,
         "response_text": response_text,
         "parsed_payload": payload,
-        "success_attempt_label": _label,
-        "success_attempt_model": _resolve_model_id(_model),
         "duration_ms": _duration_ms,
-        "attempts_count": _idx + 1,
-        "parse_failures": _parse_failure_count,
     }
 
 
@@ -1718,6 +1698,7 @@ def review_pass3_voice_profiles(
 
         payload: dict = {}
         _pass3_last_error: Exception | None = None
+        _t0_p3 = time.monotonic()
 
         # --- Primary attempt ---
         try:
@@ -1787,13 +1768,8 @@ def review_pass3_voice_profiles(
             "review_model": review_model,
             "prompt_version": "v1",
             "has_audio": True,
-            "fallback_used": _label == "cheapest",
-            "success_attempt_label": _label,
-            "success_attempt_model": _model_id,
             "generated_at": _now_iso(),
             "duration_ms": _duration_ms_p3,
-            "attempts_count": _idx + 1,
-            "parse_failures": _parse_failure_count_p3,
             "speaker_profiles": profiles,
             "clips_extracted": list(clips.keys()),
             "contract_violations": contract_violations,

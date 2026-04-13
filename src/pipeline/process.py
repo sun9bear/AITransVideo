@@ -1038,7 +1038,6 @@ class ProcessPipeline:
                         )
                     except Exception as exc:
                         print(f"[S2.5] Pass 3 failed (non-fatal): {exc}", flush=True)
-                        logger.warning("[S2.5] Pass 3 voice profiling failed: %s", exc)
                 if _pass3_profiles:
                     for spk_id, profile in _pass3_profiles.items():
                         if spk_id in _review_speaker_styles:
@@ -1068,7 +1067,7 @@ class ProcessPipeline:
                     )
                 except Exception as exc:
                     print(f"[S4-probe] 探针翻译异常（非致命）：{exc}")
-                    logger.warning("[S4-probe] Probe translation failed: %s", exc)
+                    # logger removed — process.py uses print() for logging
 
             # --- voice_selection_review gate (Studio mode, BEFORE translation) ---
             approved_voice_selection = self._get_approved_review_payload(
@@ -1202,7 +1201,6 @@ class ProcessPipeline:
                     )
                 except Exception as exc:
                     print(f"[S4-probe] 探针校准整体异常（回退 {DEFAULT_ESTIMATED_TTS_CHARS_PER_SECOND}）：{exc}")
-                    logger.warning("[S4-probe] Probe calibration failed: %s", exc)
 
             # --- S3 Translation (voice already confirmed above) ---
             if s3_cache_hit:
@@ -4052,7 +4050,6 @@ class ProcessPipeline:
             tts_generator.generate_all(probe_segments, str(probe_tts_dir))
         except Exception as exc:
             print(f"[S4-probe] 探针 TTS 失败（回退 {default_cps}）：{exc}")
-            logger.warning("[S4-probe] Probe TTS failed: %s", exc)
             return default_cps, {}
 
         # Calibrate from probe results
