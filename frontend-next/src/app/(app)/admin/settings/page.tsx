@@ -15,6 +15,8 @@ interface AdminSettings {
   studio_tts_provider: string
   cosyvoice_runtime_endpoint_mode: string
   cosyvoice_offline_endpoint_mode: string
+  translation_char_range_min_factor: number
+  translation_char_range_max_factor: number
 }
 
 const DEFAULT_SETTINGS: AdminSettings = {
@@ -29,6 +31,8 @@ const DEFAULT_SETTINGS: AdminSettings = {
   studio_tts_provider: 'minimax',
   cosyvoice_runtime_endpoint_mode: 'international',
   cosyvoice_offline_endpoint_mode: 'mainland',
+  translation_char_range_min_factor: 0.85,
+  translation_char_range_max_factor: 1.15,
 }
 
 const TTS_OPTIONS = [
@@ -261,6 +265,48 @@ export default function AdminSettingsPage() {
           </div>
           <p className="text-xs text-muted-foreground">
             超过此时长的视频将被拒绝处理。付费用户不受此限制。
+          </p>
+        </div>
+      </SettingSection>
+
+      {/* Translation Char Range */}
+      <SettingSection
+        title="翻译字数范围"
+        description="控制翻译阶段 min_chars / max_chars 的计算范围。probe 校准后 target_chars 已精准，此范围影响 LLM 翻译的字数容差和重试判断。"
+      >
+        <div className="rounded-xl border border-border bg-muted/30 p-4 space-y-4">
+          <div className="flex items-center gap-3">
+            <span className="text-sm font-medium text-foreground whitespace-nowrap">下限系数</span>
+            <div className="group rounded-lg border border-border bg-muted/30 transition hover:border-primary/30 focus-within:border-primary/40">
+              <input
+                type="number"
+                min={0.5}
+                max={1.0}
+                step={0.05}
+                value={settings.translation_char_range_min_factor}
+                onChange={(e) => setSettings((s) => ({ ...s, translation_char_range_min_factor: Number(e.target.value) || 0.85 }))}
+                className="w-20 rounded-lg bg-transparent px-3 py-2 text-sm text-foreground text-center focus:outline-none"
+              />
+            </div>
+            <span className="text-xs text-muted-foreground">min_chars = target_chars × {settings.translation_char_range_min_factor}</span>
+          </div>
+          <div className="flex items-center gap-3">
+            <span className="text-sm font-medium text-foreground whitespace-nowrap">上限系数</span>
+            <div className="group rounded-lg border border-border bg-muted/30 transition hover:border-primary/30 focus-within:border-primary/40">
+              <input
+                type="number"
+                min={1.0}
+                max={2.0}
+                step={0.05}
+                value={settings.translation_char_range_max_factor}
+                onChange={(e) => setSettings((s) => ({ ...s, translation_char_range_max_factor: Number(e.target.value) || 1.15 }))}
+                className="w-20 rounded-lg bg-transparent px-3 py-2 text-sm text-foreground text-center focus:outline-none"
+              />
+            </div>
+            <span className="text-xs text-muted-foreground">max_chars = target_chars × {settings.translation_char_range_max_factor}</span>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            范围越窄（如 0.90-1.10），翻译字数越精准但重试次数可能增加；范围越宽（如 0.80-1.20），翻译更宽松但配音时长匹配度降低。
           </p>
         </div>
       </SettingSection>
