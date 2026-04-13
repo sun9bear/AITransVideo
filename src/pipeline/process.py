@@ -381,6 +381,26 @@ class VoiceReviewRequiredError(AutoCloneError):
         self.sample_metrics = sample_metrics
 
 
+def _truncate_at_sentence(words: list[str], target_count: int) -> str:
+    """Truncate a word list at a sentence boundary near *target_count*.
+
+    Looks for sentence-ending punctuation (. ? !) working backward from
+    target_count. Falls back to comma/semicolon, then hard cut.
+    """
+    if len(words) <= target_count:
+        return " ".join(words)
+    # Look backward for sentence boundary
+    for i in range(target_count - 1, max(target_count // 2, 4), -1):
+        if words[i].endswith((".", "?", "!", "。", "？", "！")):
+            return " ".join(words[: i + 1])
+    # Fallback: comma / semicolon
+    for i in range(target_count - 1, max(target_count // 2, 4), -1):
+        if words[i].endswith((",", ";", "，", "；")):
+            return " ".join(words[: i + 1])
+    # Hard cut
+    return " ".join(words[:target_count])
+
+
 class ProcessPipeline:
     """Legacy compatibility pipeline: YouTube URL -> editor-facing dubbing bundle."""
 
@@ -3582,11 +3602,84 @@ class ProcessPipeline:
 
         return global_estimator.chars_per_second, chars_per_second_by_speaker
 
+    # ------------------------------------------------------------------
+    # Probe helpers: word counting, sentence-aware truncation, word timestamps
+    # ------------------------------------------------------------------
+
     @staticmethod
     def _count_source_words(text: str) -> int:
         """Count spoken words in source text (same logic as translator.py)."""
         import re as _re
         return len(_re.findall(r"[A-Za-z0-9']+", text or ""))
+
+    @staticmethod
+    def _load_raw_word_timestamps(project_dir: Path) -> list[dict[str, object]]:
+        """Load word-level timestamps from raw_assemblyai.json.
+
+        Returns list of {text: str, start: int(ms), end: int(ms)}.
+        Returns [] if file not found or unparseable.
+        """
+        raw_path = project_dir / "transcript" / "raw_assemblyai.json"
+        if not raw_path.exists():
+            return []
+        try:
+            data = json.loads(raw_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+        raw_words = data.get("words") or []
+        return [
+            {"text": str(w.get("text", "")), "start": int(w.get("start", 0)), "end": int(w.get("end", 0))}
+            for w in raw_words
+            if isinstance(w, dict) and w.get("start") is not None
+        ]
+
+    @staticmethod
+    def _refine_truncated_probe(
+        line: TranscriptLine,
+        raw_words: list[dict[str, object]],
+        target_words: int = 80,
+        min_duration_ms: int = 3_000,
+    ) -> TranscriptLine:
+        """Refine a truncated probe segment using word-level timestamps.
+
+        Finds words within the segment's time range, truncates at a sentence
+        boundary near *target_words*, and sets end_ms to the last word's
+        precise timestamp.
+        """
+        from dataclasses import replace as _dc_replace
+
+        # Find words belonging to this segment (within start_ms..end_ms)
+        seg_words = [
+            w for w in raw_words
+            if int(w["start"]) >= line.start_ms and int(w["end"]) <= line.end_ms
+        ]
+        if len(seg_words) < 5:
+            return line  # not enough words to refine
+
+        # Find sentence boundary near target_words
+        best_cut = min(target_words, len(seg_words))
+        # Look backward from target for sentence-ending punctuation
+        for i in range(min(best_cut, len(seg_words)) - 1, max(best_cut // 2, 4), -1):
+            word_text = str(seg_words[i]["text"])
+            if word_text.endswith((".", "?", "!", "。", "？", "！")):
+                best_cut = i + 1
+                break
+        else:
+            # No sentence boundary found; try comma/semicolon
+            for i in range(min(best_cut, len(seg_words)) - 1, max(best_cut // 2, 4), -1):
+                word_text = str(seg_words[i]["text"])
+                if word_text.endswith((",", ";", "，", "；")):
+                    best_cut = i + 1
+                    break
+
+        truncated_words = seg_words[:best_cut]
+        truncated_text = " ".join(str(w["text"]) for w in truncated_words)
+        precise_end_ms = int(truncated_words[-1]["end"])
+        # Ensure minimum duration
+        if precise_end_ms - line.start_ms < min_duration_ms:
+            precise_end_ms = line.start_ms + min_duration_ms
+
+        return _dc_replace(line, source_text=truncated_text, end_ms=precise_end_ms)
 
     @staticmethod
     def _select_probe_segments(
@@ -3595,19 +3688,22 @@ class ProcessPipeline:
         min_words: int = 20,
         max_words: int = 100,
         min_duration_ms: int = 3_000,
-        max_duration_ms: int = 15_000,
+        max_duration_ms: int = 60_000,
         per_speaker: int = 3,
         max_words_per_speaker: int = 200,
         max_total: int = 15,
+        truncate_words: int = 80,
     ) -> list[TranscriptLine]:
         """Select representative segments for probe TTS calibration.
 
         Hybrid selection: word count primary (20-100 words) + duration guard
-        (3-15s). Picks up to 3 segments per speaker, preferring mid-length
+        (3-60s). Picks up to 3 segments per speaker, preferring mid-length
         segments (40-70 words). Skips first/last segments.
 
         Progressive fallback: if a speaker has no candidates at min_words=20,
-        retries at 10, then 5.
+        retries at 10, then 5. If a speaker still has no candidates (e.g. all
+        their segments are too long), one segment is truncated to *truncate_words*
+        with proportionally adjusted duration — used for TTS calibration only.
         """
         if len(lines) <= 2:
             return []
@@ -3651,6 +3747,39 @@ class ProcessPipeline:
             for line in fallback:
                 if line.speaker_id in missing:
                     by_speaker.setdefault(line.speaker_id, []).append(line)
+
+        # Truncation fallback: ensure every speaker has at least one probe.
+        # For speakers with no candidates (segments too long / too many words),
+        # mark their best segment for truncation. Actual truncation with
+        # word-level timestamps is done later in _run_probe_translation.
+        still_missing = all_speakers - set(by_speaker.keys())
+        if still_missing:
+            from dataclasses import replace as _dc_replace
+            for sid in still_missing:
+                speaker_segs = [
+                    ln for i, ln in enumerate(lines)
+                    if ln.speaker_id == sid and 0 < i < len(lines) - 1
+                ]
+                if not speaker_segs:
+                    continue
+                # Pick the segment with most words (best calibration signal)
+                best = max(speaker_segs, key=lambda ln: _count_words(ln.source_text))
+                total_wc = _count_words(best.source_text)
+                if total_wc < 5:
+                    continue  # too little text even for truncation
+                # Proportional truncation (will be refined with word timestamps later)
+                import re as _re
+                target_wc = min(truncate_words, total_wc)
+                words_list = _re.findall(r"\S+", best.source_text or "")
+                # Try to break at sentence boundary near target_wc
+                truncated_text = _truncate_at_sentence(words_list, target_wc)
+                actual_wc = len(truncated_text.split())
+                ratio = actual_wc / max(len(words_list), 1)
+                orig_dur = best.end_ms - best.start_ms
+                adj_dur = max(int(orig_dur * ratio), min_duration_ms)
+                adj_end_ms = best.start_ms + adj_dur
+                synthetic = _dc_replace(best, source_text=truncated_text, end_ms=adj_end_ms)
+                by_speaker.setdefault(sid, []).append(synthetic)
 
         if not by_speaker:
             return []
@@ -3798,6 +3927,36 @@ class ProcessPipeline:
         if not probe_lines:
             print("[S4-probe] 无满足条件的探针段落")
             return []
+
+        # Refine truncated probes with word-level timestamps if available
+        project_dir = cache_dir.parent if cache_dir else None
+        if project_dir:
+            raw_words = self._load_raw_word_timestamps(project_dir)
+            if raw_words:
+                refined: list[TranscriptLine] = []
+                for ln in probe_lines:
+                    orig_dur = ln.end_ms - ln.start_ms
+                    wc = self._count_source_words(ln.source_text)
+                    # Detect truncated segments: text much shorter than duration implies
+                    # (normal speech ~2.5 words/sec; if wc < dur*1.5 it's probably truncated)
+                    # Simpler check: find original line and compare source_text
+                    orig_line = next(
+                        (l for l in transcript_lines if l.index == ln.index),
+                        None,
+                    )
+                    if orig_line and ln.source_text != orig_line.source_text:
+                        # This probe was truncated — refine with word timestamps
+                        refined_ln = self._refine_truncated_probe(
+                            orig_line, raw_words, target_words=80,
+                        )
+                        refined.append(refined_ln)
+                        print(f"  [S4-probe] 精确截断 seg#{ln.index}: "
+                              f"{self._count_source_words(refined_ln.source_text)}词 "
+                              f"{round((refined_ln.end_ms - refined_ln.start_ms) / 1000, 1)}s "
+                              f"(词级时间戳)")
+                    else:
+                        refined.append(ln)
+                probe_lines = refined
 
         print(f"[S4-probe] 选取 {len(probe_lines)} 段探针段落")
         for ln in probe_lines:

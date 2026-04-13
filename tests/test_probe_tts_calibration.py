@@ -124,12 +124,12 @@ class TestSelectProbeSegments:
 
     def test_filters_by_duration(self):
         lines = [
-            _make_line(1, 0, 1000, source_text=_words(50)),        # first
-            _make_line(2, 1000, 2000, source_text=_words(50)),     # 1s — too short
-            _make_line(3, 2000, 7000, source_text=_words(50)),     # 5s — good
-            _make_line(4, 7000, 23000, source_text=_words(50)),    # 16s — too long
-            _make_line(5, 23000, 28000, source_text=_words(50)),   # 5s — good
-            _make_line(6, 28000, 33000, source_text=_words(50)),   # last
+            _make_line(1, 0, 1000, source_text=_words(50)),         # first
+            _make_line(2, 1000, 2000, source_text=_words(50)),      # 1s — too short
+            _make_line(3, 2000, 7000, source_text=_words(50)),      # 5s — good
+            _make_line(4, 7000, 72000, source_text=_words(50)),     # 65s — too long (>60s)
+            _make_line(5, 72000, 77000, source_text=_words(50)),    # 5s — good
+            _make_line(6, 77000, 82000, source_text=_words(50)),    # last
         ]
         result = self._select(lines)
         indices = [l.index for l in result]
@@ -229,6 +229,121 @@ class TestSelectProbeSegments:
         result = self._select(lines, per_speaker=5)
         indices = [l.index for l in result]
         assert indices == sorted(indices)
+
+    def test_truncation_fallback_for_long_segment(self):
+        """Speaker with only very long segments gets a truncated probe."""
+        lines = [
+            _make_line(0, 0, 1000, source_text=_words(50)),           # first
+            _make_line(1, 5000, 10000, speaker_id="a", source_text=_words(50)),  # a: normal
+            _make_line(2, 10000, 135000, speaker_id="b", source_text=_words(200)),  # b: 125s, 200 words — too long
+            _make_line(3, 135000, 140000, source_text=_words(50)),     # last
+        ]
+        result = self._select(lines)
+        spk_b = [l for l in result if l.speaker_id == "b"]
+        assert len(spk_b) == 1
+        # Text should be truncated (< 200 words)
+        truncated_wc = len(spk_b[0].source_text.split())
+        assert truncated_wc <= 80
+        # Duration should be proportionally adjusted (not the full 125s)
+        dur = spk_b[0].end_ms - spk_b[0].start_ms
+        assert dur < 125000
+
+    def test_truncation_preserves_sentence_boundary(self):
+        """Truncated text should end at a sentence boundary when possible."""
+        # Build text with sentence boundaries
+        sentence1 = "The quick brown fox jumps over the lazy dog."
+        sentence2 = "She sells seashells by the seashore near the beach."
+        sentence3 = "A stitch in time saves nine and more beyond that."
+        long_text = f"{sentence1} {sentence2} {sentence3} " + _words(150)
+        lines = [
+            _make_line(0, 0, 1000, source_text=_words(50)),
+            _make_line(1, 5000, 10000, speaker_id="a", source_text=_words(50)),
+            _make_line(2, 10000, 200000, speaker_id="b", source_text=long_text),  # very long
+            _make_line(3, 200000, 205000, source_text=_words(50)),
+        ]
+        result = self._select(lines, truncate_words=30)
+        spk_b = [l for l in result if l.speaker_id == "b"]
+        assert len(spk_b) == 1
+        text = spk_b[0].source_text
+        # Should end at a sentence boundary
+        assert text.rstrip().endswith((".", "?", "!", ",", ";"))
+
+    def test_truncation_not_needed_within_60s(self):
+        """50s segment should pass the relaxed 60s max_duration, no truncation."""
+        lines = [
+            _make_line(0, 0, 1000, source_text=_words(50)),
+            _make_line(1, 5000, 10000, speaker_id="a", source_text=_words(50)),
+            _make_line(2, 10000, 60000, speaker_id="b", source_text=_words(80)),  # 50s, 80 words — within limits
+            _make_line(3, 60000, 65000, source_text=_words(50)),
+        ]
+        result = self._select(lines)
+        spk_b = [l for l in result if l.speaker_id == "b"]
+        assert len(spk_b) == 1
+        # Should NOT be truncated — original text preserved
+        assert len(spk_b[0].source_text.split()) == 80
+
+
+# ---------------------------------------------------------------------------
+# _truncate_at_sentence
+# ---------------------------------------------------------------------------
+class TestTruncateAtSentence:
+    @staticmethod
+    def _truncate(words, target):
+        from pipeline.process import _truncate_at_sentence
+        return _truncate_at_sentence(words, target)
+
+    def test_short_text_no_truncation(self):
+        words = ["hello", "world."]
+        assert self._truncate(words, 10) == "hello world."
+
+    def test_truncates_at_period(self):
+        words = "The quick fox. She sells seashells. More words here now".split()
+        result = self._truncate(words, 8)
+        assert result.endswith(".")
+        assert len(result.split()) <= 8
+
+    def test_truncates_at_comma_fallback(self):
+        words = "one two three four five six, seven eight nine ten eleven".split()
+        result = self._truncate(words, 8)
+        assert result.endswith(",")
+
+    def test_hard_cut_no_punctuation(self):
+        words = [f"w{i}" for i in range(20)]
+        result = self._truncate(words, 10)
+        assert len(result.split()) == 10
+
+
+# ---------------------------------------------------------------------------
+# _refine_truncated_probe
+# ---------------------------------------------------------------------------
+class TestRefineTruncatedProbe:
+    @staticmethod
+    def _refine(line, raw_words, **kwargs):
+        from pipeline.process import ProcessPipeline
+        return ProcessPipeline._refine_truncated_probe(line, raw_words, **kwargs)
+
+    def test_refines_with_word_timestamps(self):
+        # Simulate a 120s segment with word-level timestamps
+        raw_words = []
+        for i in range(200):
+            raw_words.append({"text": f"word{i}." if i == 49 else f"word{i}", "start": i * 600, "end": i * 600 + 500})
+        line = _make_line(1, 0, 120000, speaker_id="b", source_text=" ".join(f"word{i}" for i in range(200)))
+        result = self._refine(line, raw_words, target_words=80)
+        # Should truncate at word49 (has period) which is at ~50 words
+        assert result.end_ms == raw_words[49]["end"]  # precise timestamp
+        assert "word49." in result.source_text
+
+    def test_no_refinement_when_few_words(self):
+        raw_words = [{"text": "hi", "start": 0, "end": 500}]
+        line = _make_line(1, 0, 5000, source_text="hi")
+        result = self._refine(line, raw_words)
+        assert result.source_text == "hi"  # unchanged
+
+    def test_minimum_duration_enforced(self):
+        raw_words = [{"text": f"w{i}.", "start": i * 100, "end": i * 100 + 80} for i in range(20)]
+        line = _make_line(1, 0, 50000, source_text=" ".join(f"w{i}" for i in range(20)))
+        result = self._refine(line, raw_words, target_words=10, min_duration_ms=5000)
+        assert result.end_ms - result.start_ms >= 5000
 
 
 # ---------------------------------------------------------------------------
