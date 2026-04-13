@@ -1030,6 +1030,7 @@ def _review_pass1_speakers(
                     response_mime_type="application/json",
                     temperature=0.1,
                     max_output_tokens=65536,
+                    thinking_config=types.ThinkingConfig(thinking_budget=1024),
                 ),
             )
             response_text = _extract_text(response)
@@ -1236,6 +1237,7 @@ def _call_text_llm(
                 response_mime_type="application/json",
                 temperature=0.1,
                 max_output_tokens=max_output_tokens,
+                thinking_config=types.ThinkingConfig(thinking_budget=1024),
             ),
         )
         return _extract_text(response) or ""
@@ -1661,6 +1663,7 @@ def review_pass3_voice_profiles(
                 model=model_id, contents=contents,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json", temperature=0.1, max_output_tokens=65536,
+                    thinking_config=types.ThinkingConfig(thinking_budget=1024),
                 ),
             )
             response_text_p3 = _extract_text(resp)
@@ -2044,6 +2047,7 @@ def _call_review(
                 response_mime_type="application/json",
                 temperature=0.1,
                 max_output_tokens=65536,
+                thinking_config=types.ThinkingConfig(thinking_budget=1024),
             ),
             **generate_kwargs,
         )
