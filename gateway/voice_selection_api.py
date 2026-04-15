@@ -32,6 +32,67 @@ _SEGMENT_ID_RE = re.compile(r"^[1-9][0-9]*$")
 _CLONE_LOCK_TIMEOUT_SECONDS = 300
 
 
+def _resolve_speaker_display_name(rs: dict, speaker_id: str) -> str | None:
+    """Resolve a speaker's friendly display name (typically Chinese) from
+    review_state, used to label cloned voices in the user library.
+
+    Returns the trimmed name string, or None if no display name found.
+    Strategies are tried in order — current schema first, then legacy
+    fallback (so old review_state.json layouts keep working):
+
+    1. ``voice_selection_review.payload.speakers[i].speaker_name`` for the
+       matching ``speaker_id`` (current schema as of 2026-04-15)
+    2. ``translation_review.payload.segments[*].display_name`` for any
+       segment whose speaker_id matches
+    3. (legacy) ``payload.speaker_names`` dict in either review stage
+    4. (legacy) ``payload.speaker_name_a`` / ``speaker_name_b`` for the
+       binary-speaker case
+
+    Returning to fallback strategies prevents this function from breaking
+    if the review_state schema is rolled forward without updating callers.
+    """
+    if not isinstance(rs, dict):
+        return None
+    stages = rs.get("stages", {})
+    if not isinstance(stages, dict):
+        return None
+
+    # Strategy 1: voice_selection_review speakers[] (current schema)
+    vsr_payload = (stages.get("voice_selection_review") or {}).get("payload") or {}
+    for sp in (vsr_payload.get("speakers") or []):
+        if isinstance(sp, dict) and sp.get("speaker_id") == speaker_id:
+            name = sp.get("speaker_name")
+            if isinstance(name, str) and name.strip():
+                return name.strip()
+
+    # Strategy 2: translation_review per-segment display_name
+    tr_payload = (stages.get("translation_review") or {}).get("payload") or {}
+    segments = tr_payload.get("segments")
+    if isinstance(segments, dict):
+        for seg in segments.values():
+            if isinstance(seg, dict) and seg.get("speaker_id") == speaker_id:
+                name = seg.get("display_name")
+                if isinstance(name, str) and name.strip():
+                    return name.strip()
+
+    # Strategy 3 + 4: legacy fallback (older review_state schemas)
+    for stage_key in ("voice_selection_review", "translation_review"):
+        payload = (stages.get(stage_key) or {}).get("payload") or {}
+        name_map = payload.get("speaker_names")
+        if isinstance(name_map, dict):
+            candidate = name_map.get(speaker_id)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        direct_a = payload.get("speaker_name_a")
+        direct_b = payload.get("speaker_name_b")
+        if speaker_id == "speaker_a" and isinstance(direct_a, str) and direct_a.strip():
+            return direct_a.strip()
+        if speaker_id == "speaker_b" and isinstance(direct_b, str) and direct_b.strip():
+            return direct_b.strip()
+
+    return None
+
+
 def _get_clone_cost_credits() -> int:
     """Read voice clone cost from runtime pricing, fallback to 500."""
     try:
@@ -353,23 +414,9 @@ async def voice_clone_for_selection(
             review_state_path = project_dir / "review_state.json"
             if review_state_path.exists():
                 rs = json.loads(review_state_path.read_text(encoding="utf-8"))
-                stages = rs.get("stages", {})
-                for stage_key in ("voice_selection_review", "translation_review"):
-                    payload = (stages.get(stage_key) or {}).get("payload") or {}
-                    name_map = payload.get("speaker_names")
-                    if isinstance(name_map, dict):
-                        candidate = name_map.get(speaker_id)
-                        if isinstance(candidate, str) and candidate.strip():
-                            display_speaker_name = candidate.strip()
-                            break
-                    direct_a = payload.get("speaker_name_a")
-                    direct_b = payload.get("speaker_name_b")
-                    if speaker_id == "speaker_a" and isinstance(direct_a, str) and direct_a.strip():
-                        display_speaker_name = direct_a.strip()
-                        break
-                    if speaker_id == "speaker_b" and isinstance(direct_b, str) and direct_b.strip():
-                        display_speaker_name = direct_b.strip()
-                        break
+                resolved = _resolve_speaker_display_name(rs, speaker_id)
+                if resolved:
+                    display_speaker_name = resolved
         except Exception:
             logger.debug("Could not resolve speaker display name for %s", speaker_id, exc_info=True)
 
