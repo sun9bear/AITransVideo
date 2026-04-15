@@ -28,7 +28,12 @@ DEFAULT_MODEL_NAME = "gemini-3.1-pro-preview"
 DEFAULT_SDK_BACKEND = "google-genai"
 LEGACY_SDK_BACKEND = "google-generativeai"
 DEFAULT_TEMPERATURE = 0.3
-DEFAULT_MAX_OUTPUT_TOKENS = 8192
+# Gemini 3.1 Pro supports up to 65,536 output tokens (64K); the SDK default is
+# only 8,192 which gets truncated when (a) batch JSON is large or (b) thinking
+# tokens consume 20K+ of the budget. Bumped to 65,536 to match transcriber.py
+# and avoid "Gemini returned invalid JSON" fallbacks during long s3_translate
+# batches. (transcriber.py:29 also uses 65,536 for the same reason.)
+DEFAULT_MAX_OUTPUT_TOKENS = 65536
 DEFAULT_BATCH_SIZE = 15
 PARALLEL_WORKERS = 3
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 120
@@ -121,13 +126,32 @@ __GLOSSARY_SECTION__
 6. 所有人物姓名必须优先使用中文常见译名，不要保留英文人名。
    例如：Elon Musk -> 埃隆·马斯克，Sam Altman -> 萨姆·奥特曼，Naval Ravikant -> 纳瓦尔·拉维坎特。
 7. 公司、产品、品牌、模型名称若已有常见中文译法，优先使用中文；若没有稳定中文译法，可保留原文。
-__SPEAKER_INSTRUCTION____STRICT_LENGTH_INSTRUCTION__补充要求：在不影响自然度的前提下，可适度保留原文中的口语连接词、语气词和缓冲表达，以维持更接近原说话节奏；但不要为了凑字数生硬添加无意义填充词。
+__SPEAKER_INSTRUCTION____STRICT_LENGTH_INSTRUCTION__8. **保留口语化节奏（重要，影响 TTS 时长匹配）**：当原文有较多口头禅、语气词、思考停顿、重复表达时（典型如 "well..." / "you know" / "I mean" / "I would say" / "uh, um" / "kind of" / "sort of" / "you see" / 同义反复），中文译文应**适度保留**这些口语化元素，对应翻译为：
+   - 思考类 → "嗯"、"呃"、"我想说"、"这个嘛"
+   - 缓冲类 → "你知道的"、"我是说"、"怎么讲呢"、"应该说"
+   - 强调类 → "可以说"、"应该这么说"、"我是这么觉得的"
+   - 同义反复 → 适当保留"换句话说……"或者用近义词复述
+
+   **判断原则**：当 source_words_per_second 偏低（< 2.0 词/秒）或 target_duration_seconds 较长但原文信息量不大时，说明原说话人节奏慢、用了大量口语缓冲。这种情况下精简翻译会让 TTS 时长**远短于**目标，反而需要事后强制拉伸，破坏听感。**宁可让中文带点"啰嗦感"贴近原节奏，也不要为了"流畅"过度精简。**
 9. 每个 segment 独立翻译，但要保持上下文连贯。
 10. 只输出 JSON，不要任何其他文字。
 
-每个 segment 都提供了：
-- target_duration_seconds：原文段落时长（秒），中文配音时长应尽量接近
-- min_chars ~ max_chars：中文字数的目标范围，直接影响配音时长匹配度，请将译文字数控制在此范围内
+每个 segment 都提供了以下元数据（按约束强度排序）：
+
+**硬约束**（请严格遵守，超出会导致译文与原文长度严重失配）：
+- target_duration_seconds：原文段落时长（秒）
+- target_chars：本段建议的中文字数 = 原文英文词数 × 1.8（中英自然翻译比）。这是「保留原文信息密度的自然中文长度」。
+- min_chars ~ max_chars：target_chars 的 ±15% 浮动区间。译文字数请落在此区间内。
+
+**参考信息**（帮助你判断详略策略，不直接约束字数）：
+- source_words_per_second：原说话人的英文语速（词/秒）。值大表示信息密集；值小表示节奏宽松、口语词多。
+- voice_chars_per_second：选定中文音色的合成语速（字/秒）。**仅供参考**：当 voice_chars_per_second × target_duration_seconds 与 target_chars 接近时，TTS 合成时长会自然贴近目标；差距大时由后续阶段调整音色 speed 或拉伸对齐，无需你为此修改字数。
+- target_chars_hint：与 target_chars 同值（保留以兼容旧 prompt 自定义）。
+
+如何使用这些字段：
+- 原文信息密度高（source_words_per_second 偏高、或内容含大量数字/术语/专有名词）：译文字数可接近 max_chars，优先保留信息。
+- 原文节奏宽松（source_words_per_second 偏低、口语化连词多）：译文字数可接近 min_chars，但**仍要保留所有口头禅和语气词**（参见上面第 8 条），让译文自然铺满 target_duration。
+- 信息密度正常：按 target_chars 落笔，落在 min/max 区间内即可。
 
 输入（JSON数组）：
 __GROUPS_JSON__
@@ -198,6 +222,16 @@ class DubbingSegment:
     selected_voice: str = ""   # actual voice used for TTS (populated after TTS generation)
     match_confidence: str = "" # "high" / "medium" / "low" (populated after TTS generation)
     tts_provider: str = ""     # per-speaker TTS provider override (set by voice_selection_review)
+    # Phase 2 Task 0 metrics — translation-duration-alignment
+    catalog_hit: bool = False           # speaker's voice_id was found in voice_catalog with chars_per_second
+    first_pass_duration_ms: int = 0     # raw TTS output duration BEFORE any rewrite/DSP (snapshot at S5 entry)
+    first_pass_error_pct: float = 0.0   # (first_pass_duration_ms - target_duration_ms) / target_duration_ms (sign preserved)
+    dsp_speed_param: float = 1.0        # Task 1 will populate; 1.0 means "no speed adjustment / not yet implemented"
+    # CodeX P2-3: target Chinese chars/sec for the speaker, derived from
+    # source_words_per_second × 1.8.  Phase 2 voice match consumes this on
+    # the runtime auto-match path (tts_generator.py per-segment matching);
+    # 0.0 disables the speed dimension.
+    target_chars_per_second: float = 0.0
 
 
 @dataclass(slots=True)
@@ -365,6 +399,11 @@ class GeminiTranslator:
                 display_name_b=normalized_display_name_b,
                 speaker_voices=speaker_voices,
             )
+            # CodeX P2-3: stamp target_chars_per_second onto each segment so
+            # the runtime auto-match path in tts_generator can pass it into
+            # VoiceMatchRequest. Falls back to 0.0 when source_wps is unknown.
+            _src_wps = float(group.get("source_words_per_second") or 0.0)
+            _target_cps = round(_src_wps * 1.8, 3) if _src_wps > 0 else 0.0
             segments.append(
                 DubbingSegment(
                     segment_id=index,
@@ -376,6 +415,7 @@ class GeminiTranslator:
                     target_duration_ms=max(0, end_ms - start_ms),
                     source_text=str(group["source_text"]),
                     cn_text=normalized_cn_text,
+                    target_chars_per_second=_target_cps,
                 )
             )
 
@@ -1097,9 +1137,21 @@ class GeminiTranslator:
         return _extract_response_text(response)
 
     # Fields sent to LLM; everything else is internal/cache-only.
+    # v2.1 (translation-duration-alignment Phase 1): added natural-length
+    # hint + source/voice speed context so the LLM can reason about why the
+    # min/max envelope is what it is and how much slack it has.
+    # Explicitly NOT forwarded: start_ms / end_ms / target_duration_ms
+    # (redundant with target_duration_seconds), reference_words_per_second /
+    # density_factor / density_factor_source (internal derivation state).
     _LLM_GROUP_FIELDS = frozenset({
         "segment_id", "speaker_id", "source_text",
         "target_duration_seconds", "min_chars", "max_chars",
+        # --- v2.1 additions ---
+        "target_chars",
+        "target_chars_hint",
+        "source_word_count",
+        "source_words_per_second",
+        "voice_chars_per_second",
     })
 
     def _build_prompt(
@@ -1380,7 +1432,7 @@ def get_effective_translation_prompt_template(template: object | None = None) ->
     if normalized_template is None:
         # Check admin override
         try:
-            from src.services.transcript_reviewer import _get_admin_prompt_override
+            from services.transcript_reviewer import _get_admin_prompt_override
             admin = _get_admin_prompt_override("translate")
             if admin:
                 normalized_template = admin
@@ -1403,7 +1455,7 @@ def get_effective_probe_translation_prompt_template(template: object | None = No
     normalized_template = _normalize_optional_text(template)
     if normalized_template is None:
         try:
-            from src.services.transcript_reviewer import _get_admin_prompt_override
+            from services.transcript_reviewer import _get_admin_prompt_override
             admin = _get_admin_prompt_override("probe_translate")
             if admin:
                 normalized_template = admin
@@ -1423,7 +1475,7 @@ def get_effective_rewrite_prompt_template(template: object | None = None) -> str
     if normalized_template is None:
         # Check admin override
         try:
-            from src.services.transcript_reviewer import _get_admin_prompt_override
+            from services.transcript_reviewer import _get_admin_prompt_override
             admin = _get_admin_prompt_override("rewrite")
             if admin:
                 normalized_template = admin
@@ -1831,10 +1883,15 @@ def _build_groups(
         )
         # Use speaker-specific calibrated chars/sec if available, else global
         effective_cps = effective_cps_by_speaker.get(speaker_id, chars_per_second)
+        # Plan C: target_chars uses source_word_count × 1.8 (natural CN length),
+        # not voice_cps × duration. The voice_cps is still passed so the
+        # legacy fallback works when source_word_count is missing.
+        source_word_count = int(group.get("source_word_count") or 0)
         target_chars = _estimate_dynamic_target_chars(
             target_duration_ms=target_duration_ms,
             density_factor=density_factor,
             chars_per_second=effective_cps,
+            source_word_count=source_word_count,
         )
         min_chars, max_chars = _estimate_target_char_range(target_chars)
         group["reference_words_per_second"] = round(reference_words_per_second, 3)
@@ -1844,6 +1901,17 @@ def _build_groups(
         group["target_chars"] = target_chars
         group["min_chars"] = min_chars
         group["max_chars"] = max_chars
+        # Phase 1 (translation-duration-alignment): natural-length hint.
+        # target_chars_hint = English word count × 1.8 (empirical zh/en ratio).
+        # This is a SOFT reference for "natural Chinese length given the
+        # original content density", NOT a hard constraint. min/max_chars
+        # remain the binding duration envelope.
+        source_word_count = int(group.get("source_word_count") or 0)
+        group["target_chars_hint"] = max(1, int(round(source_word_count * 1.8)))
+        # Record the effective chars/sec used to derive min/max, so the LLM
+        # can see why the envelope is what it is. Comes from either the
+        # voice_catalog pre-calibrated value (Phase 1) or probe calibration.
+        group["voice_chars_per_second"] = round(float(effective_cps), 3)
     return groups
 
 
@@ -2029,15 +2097,26 @@ def _estimate_density_factor(
     reference_words_per_second: float,
     reference_source: str,
 ) -> tuple[float, str]:
-    if source_words_per_second <= 0 or reference_words_per_second <= 0:
-        return 1.0, "global"
+    """Plan C (2026-04-15): density adjustment is deprecated.
 
-    density_factor = source_words_per_second / reference_words_per_second
-    density_factor = min(
-        DEFAULT_DYNAMIC_DENSITY_MAX,
-        max(DEFAULT_DYNAMIC_DENSITY_MIN, density_factor),
-    )
-    return density_factor, reference_source
+    Why: Old behaviour scaled char budget by source_wps / reference_wps and
+    clamped to [0.65, 1.50].  The intent was "match information density",
+    but this conflicts with the dub-time-alignment hard constraint —
+    slow segments would get their char budget cut to 65-75% (Munger
+    segment_029: 126 → 95 chars), making TTS finish 24% short and
+    triggering pre-TTS rewrite that just expanded back to ~130 chars.
+    A wasted LLM round-trip with no real benefit.
+
+    The function still exists for compatibility but always returns 1.0.
+    Caller's ``reference_source`` is preserved for telemetry.
+    """
+    return 1.0, reference_source
+
+
+# Empirical English-word → Chinese-hanzi ratio for natural translation length.
+# Spans most factual/conversational content; Plan C uses this directly as the
+# canonical char budget instead of duration × voice_cps × density.
+_ENGLISH_TO_CHINESE_CHAR_RATIO: float = 1.8
 
 
 def _estimate_dynamic_target_chars(
@@ -2045,7 +2124,23 @@ def _estimate_dynamic_target_chars(
     target_duration_ms: int,
     density_factor: float,
     chars_per_second: float = DEFAULT_ESTIMATED_TTS_CHARS_PER_SECOND,
+    source_word_count: int = 0,
 ) -> int:
+    """Plan C: target_chars = source_word_count × 1.8 (×density), independent of voice_cps.
+
+    The ``chars_per_second`` argument is kept in the signature for backwards
+    compatibility (probe path, legacy callers) and is used as the fallback
+    basis when ``source_word_count`` is unknown / zero.
+
+    Under Plan C, production callers always pass ``source_word_count`` from
+    the source line, and ``density_factor`` is always 1.0 — yielding the
+    "natural Chinese length" that tracks information content rather than
+    voice physical speed.
+    """
+    if source_word_count > 0:
+        natural_chars = source_word_count * _ENGLISH_TO_CHINESE_CHAR_RATIO
+        return max(1, int(round(natural_chars * density_factor)))
+    # Fallback: probe groups (no source_word_count yet) or empty text.
     base_target_chars = _estimate_target_chars(target_duration_ms, chars_per_second)
     return max(1, int(base_target_chars * density_factor))
 
@@ -2217,3 +2312,56 @@ def _coerce_float(value: object, *, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 Task 0 — glossary preservation check
+# ---------------------------------------------------------------------------
+
+def check_glossary_preservation(
+    segments: list[DubbingSegment],
+    glossary: dict[str, str] | None,
+) -> dict[str, object]:
+    """Verify that each glossary value (Chinese term) appears at least once
+    across the translated cn_text of all segments.
+
+    The S3 prompt injects glossary as a hard constraint, but the LLM can
+    drop or alter terms. This post-translation check produces a metric
+    rather than blocking the pipeline — operators can spot regressions
+    via the admin job monitor.
+
+    Returns a dict with three keys:
+      - total_terms (int): how many terms the glossary contains
+      - preserved_terms (int): how many of those Chinese values appear
+          in at least one segment's cn_text
+      - missing_terms (list[str]): the Chinese values that never showed up
+          (capped at first 20 to keep payload small)
+
+    When the glossary is missing/empty, returns total=0 / preserved=0 /
+    missing=[] so the caller can compute a safe rate (1.0).
+    """
+    if not glossary:
+        return {"total_terms": 0, "preserved_terms": 0, "missing_terms": []}
+
+    # Collect Chinese values (the right-hand side of "English term → 中文译名")
+    targets = [str(v).strip() for v in glossary.values() if v and str(v).strip()]
+    if not targets:
+        return {"total_terms": 0, "preserved_terms": 0, "missing_terms": []}
+
+    # Concatenate all cn_text for whole-document scanning. Cheap O(N*M) where
+    # N=#segments, M=#terms; both small in practice (<100 each).
+    all_cn = "".join((seg.cn_text or "") for seg in segments)
+
+    preserved = 0
+    missing: list[str] = []
+    for term in targets:
+        if term in all_cn:
+            preserved += 1
+        else:
+            missing.append(term)
+
+    return {
+        "total_terms": len(targets),
+        "preserved_terms": preserved,
+        "missing_terms": missing[:20],
+    }

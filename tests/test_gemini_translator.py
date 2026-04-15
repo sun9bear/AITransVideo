@@ -6,7 +6,12 @@ from typing import Any
 import pytest
 
 from services.assemblyai.transcriber import TranscriptLine
-from services.gemini.translator import GeminiTranslator, TranslationError, load_gemini_config
+from services.gemini.translator import (
+    DEFAULT_MAX_OUTPUT_TOKENS,
+    GeminiTranslator,
+    TranslationError,
+    load_gemini_config,
+)
 import services.gemini.translator as gemini_translator_module
 
 
@@ -120,27 +125,22 @@ def test_gemini_translator_keeps_one_group_per_line_when_total_duration_exceeds_
         assert json_mode is False
         groups = _extract_groups_from_prompt(prompt)
         assert len(groups) == 3
-        assert groups[0]["start_ms"] == 0
-        assert groups[0]["end_ms"] == 30_000
-        assert groups[0]["target_duration_ms"] == 30_000
+        # v2.1: start_ms / end_ms / target_duration_ms are NOT forwarded to LLM
+        # (redundant with target_duration_seconds). _LLM_GROUP_FIELDS controls.
+        assert "start_ms" not in groups[0]
+        assert "end_ms" not in groups[0]
+        assert "target_duration_ms" not in groups[0]
+        # Plan C (2026-04-15): target_chars = source_word_count × 1.8,
+        # not duration × voice_cps. Each "Part X." line has 2 English words
+        # → 2 × 1.8 = 3.6 → round to 4. min/max are 0.85/1.15 of that.
         assert groups[0]["target_duration_seconds"] == 30.0
-        assert groups[0]["target_chars"] == 135
-        assert groups[0]["min_chars"] == 114
-        assert groups[0]["max_chars"] == 155
-        assert groups[1]["start_ms"] == 30_000
-        assert groups[1]["end_ms"] == 60_000
-        assert groups[1]["target_duration_ms"] == 30_000
+        assert groups[0]["target_chars"] == 4
+        assert groups[0]["min_chars"] == 3   # int(4 * 0.85) = 3
+        assert groups[0]["max_chars"] == 4   # int(4 * 1.15) = 4
         assert groups[1]["target_duration_seconds"] == 30.0
-        assert groups[1]["target_chars"] == 135
-        assert groups[1]["min_chars"] == 114
-        assert groups[1]["max_chars"] == 155
-        assert groups[2]["start_ms"] == 60_000
-        assert groups[2]["end_ms"] == 90_000
-        assert groups[2]["target_duration_ms"] == 30_000
+        assert groups[1]["target_chars"] == 4
         assert groups[2]["target_duration_seconds"] == 30.0
-        assert groups[2]["target_chars"] == 135
-        assert groups[2]["min_chars"] == 114
-        assert groups[2]["max_chars"] == 155
+        assert groups[2]["target_chars"] == 4
         return json.dumps(
             [
                 {"segment_id": 1, "cn_text": "第一部分。"},
@@ -274,7 +274,7 @@ def test_gemini_translator_call_with_retry_uses_google_genai_client(
     assert captured_configs[-1].kwargs["response_mime_type"] == "application/json"
     assert captured_configs[-1].kwargs["http_options"] == {"timeout": 120000}
     assert captured_configs[-1].kwargs["temperature"] == 0.3
-    assert captured_configs[-1].kwargs["max_output_tokens"] == 8192
+    assert captured_configs[-1].kwargs["max_output_tokens"] == DEFAULT_MAX_OUTPUT_TOKENS
 
 
 def test_gemini_translator_supports_two_speaker_translation_and_voice_assignment(
@@ -910,12 +910,18 @@ def test_gemini_translator_build_prompt_mentions_soft_duration_constraints_and_n
     )
 
     assert "这些翻译将直接用于中文 TTS 配音" in prompt
-    assert "仅供参考，不是硬性约束" in prompt
+    # v2.1 prompt distinguishes hard constraints from soft references.
+    # Plan C (2026-04-15) prompt updates: kept "硬约束" / "min_chars ~ max_chars",
+    # renamed "软参考" → "参考信息" since voice_cps no longer drives char budget.
+    assert "硬约束" in prompt
+    assert "参考信息" in prompt
     assert "target_duration_seconds：原文段落时长（秒）" in prompt
-    assert "min_chars ~ max_chars：建议中文字数范围" in prompt
+    assert "min_chars ~ max_chars" in prompt
     assert "所有人物姓名必须优先使用中文常见译名" in prompt
     assert "公司、产品、品牌、模型名称若已有常见中文译法" in prompt
-    assert "可适度保留原文中的口语连接词、语气词和缓冲表达" in prompt
+    # v2.2 prompt strengthens filler-preservation for slow speakers like Munger.
+    assert "保留口语化节奏" in prompt
+    assert "口头禅" in prompt
 
 
 def test_gemini_translator_build_prompt_supports_custom_template_tokens() -> None:
@@ -964,7 +970,9 @@ def test_gemini_translator_build_prompt_supports_custom_template_tokens() -> Non
     assert "标题=Demo Video" in prompt
     assert "链接=https://youtube.example/watch?v=demo" in prompt
     assert "这是双人访谈" in prompt
-    assert "Length reminder" in prompt
+    # v2.1: retry/strict_length prompt now uses Chinese "字数提醒" phrasing,
+    # not the English "Length reminder" of the legacy prompt.
+    assert "字数提醒" in prompt
     assert '"segment_id": 1' in prompt
 
 
@@ -1100,7 +1108,11 @@ def test_gemini_translator_builds_dynamic_target_chars_from_source_density() -> 
     assert groups[0]["target_chars"] == groups[0]["dynamic_target_chars"]
 
 
-def test_gemini_translator_clamps_density_factor_for_extreme_speech_rates() -> None:
+def test_gemini_translator_density_factor_always_one_under_plan_c() -> None:
+    """Plan C: density_factor is deprecated and always returns 1.0,
+    regardless of how slow/fast the segment is. The previous clamping
+    behaviour (0.65 / 1.5) actively hurt dub-time alignment for slow
+    segments — see Plan C rationale in translator.py."""
     lines = [
         _make_line(1, 0, 10_000, "Slow.", speaker_id="speaker_a"),
         _make_line(
@@ -1123,11 +1135,16 @@ def test_gemini_translator_clamps_density_factor_for_extreme_speech_rates() -> N
 
     groups = gemini_translator_module._build_groups(lines, max_segment_duration_ms=10_000)
 
-    assert groups[0]["density_factor"] == pytest.approx(0.65, abs=0.001)
-    assert groups[2]["density_factor"] == pytest.approx(1.5, abs=0.001)
+    # All segments — slow, normal, fast — must get density_factor 1.0.
+    assert groups[0]["density_factor"] == pytest.approx(1.0, abs=0.001)
+    assert groups[1]["density_factor"] == pytest.approx(1.0, abs=0.001)
+    assert groups[2]["density_factor"] == pytest.approx(1.0, abs=0.001)
 
 
 def test_gemini_translator_uses_speaker_specific_reference_words_per_second_when_available() -> None:
+    """Plan C: speaker-specific reference_wps is still computed and exposed
+    to the LLM as a soft hint, but density_factor is always 1.0 and
+    dynamic_target_chars now scales purely with source_word_count."""
     lines = [
         _make_line(1, 0, 10_000, "one two", speaker_id="speaker_a"),
         _make_line(2, 10_000, 20_000, "one two three", speaker_id="speaker_a"),
@@ -1140,13 +1157,19 @@ def test_gemini_translator_uses_speaker_specific_reference_words_per_second_when
     groups = gemini_translator_module._build_groups(lines, max_segment_duration_ms=10_000)
 
     assert len(groups) == 6
+    # Speaker-specific reference_wps is preserved (used as LLM telemetry).
     assert groups[0]["density_factor_source"] == "speaker"
     assert groups[3]["density_factor_source"] == "speaker"
     assert groups[0]["reference_words_per_second"] == pytest.approx(0.3, abs=0.001)
     assert groups[3]["reference_words_per_second"] == pytest.approx(0.6, abs=0.001)
+    # Plan C: density_factor always 1.0, regardless of speaker speed.
+    assert groups[0]["density_factor"] == pytest.approx(1.0, abs=0.001)
+    assert groups[5]["density_factor"] == pytest.approx(1.0, abs=0.001)
+    # Plan C: dynamic_target_chars scales with source_word_count.
+    # group[0] has 2 words → 4 chars; group[3] has 5 words → 9 chars.
+    assert groups[0]["dynamic_target_chars"] == round(2 * 1.8)  # = 4
+    assert groups[3]["dynamic_target_chars"] == round(5 * 1.8)  # = 9
     assert groups[0]["dynamic_target_chars"] < groups[3]["dynamic_target_chars"]
-    assert groups[0]["density_factor"] == pytest.approx(0.667, abs=0.001)
-    assert groups[5]["density_factor"] == pytest.approx(1.167, abs=0.001)
 
 
 def test_gemini_translator_falls_back_to_global_reference_when_speaker_samples_are_insufficient() -> None:
@@ -1182,6 +1205,8 @@ def test_gemini_translator_prompt_includes_dynamic_length_fields() -> None:
                 "density_factor": 1.0,
                 "dynamic_target_chars": 90,
                 "target_chars": 90,
+                "target_chars_hint": 14,
+                "voice_chars_per_second": 4.5,
                 "min_chars": 76,
                 "max_chars": 103,
                 "source_text": "Sam Altman spoke with Elon Musk about OpenAI.",
@@ -1192,12 +1217,23 @@ def test_gemini_translator_prompt_includes_dynamic_length_fields() -> None:
         strict_length_control=True,
     )
 
+    # v2.1 _LLM_GROUP_FIELDS: these fields SHOULD reach the LLM.
     assert "source_word_count" in prompt
     assert "source_words_per_second" in prompt
-    assert "reference_words_per_second" in prompt
-    assert "density_factor_source" in prompt
-    assert "dynamic_target_chars" in prompt
-    assert "Length reminder" in prompt
+    assert "target_chars" in prompt
+    assert "target_chars_hint" in prompt
+    assert "voice_chars_per_second" in prompt
+
+    # v2.1: internal derivation fields must NOT be leaked to the LLM.
+    assert "reference_words_per_second" not in prompt
+    assert "density_factor_source" not in prompt
+    assert "dynamic_target_chars" not in prompt
+    assert "start_ms" not in prompt
+    assert "end_ms" not in prompt
+    assert "target_duration_ms" not in prompt  # target_duration_seconds instead
+
+    # v2.1 retry phrasing is Chinese 字数提醒, not the legacy "Length reminder".
+    assert "字数提醒" in prompt
 
 
 def test_gemini_translator_retries_batch_once_when_length_is_out_of_range(
@@ -1230,7 +1266,8 @@ def test_gemini_translator_retries_batch_once_when_length_is_out_of_range(
     )
 
     assert len(observed_prompts) == 2
-    assert "Length reminder" in observed_prompts[1]
+    # v2.1: retry prompt phrased in Chinese ("字数提醒"), not "Length reminder".
+    assert "字数提醒" in observed_prompts[1]
     assert result.segments[0].cn_text == "这是一段更合适的中文配音稿。"
 
 

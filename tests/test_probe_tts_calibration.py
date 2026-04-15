@@ -537,63 +537,194 @@ class TestBuildGroupsWithCalibration:
         from services.gemini.translator import _build_groups
         return _build_groups(lines, max_segment_duration_ms=45_000, **kwargs)
 
-    def test_default_uses_4_5(self):
+    def test_target_chars_uses_natural_chinese_length(self):
+        # Plan C: target_chars = source_word_count × 1.8.
+        # "Hello world this is a test" = 6 words → 6 × 1.8 = 11 chars.
         lines = [_make_line(1, 0, 10_000, source_text="Hello world this is a test")]
         groups = self._build(lines)
-        # 10s * 4.5 = 45 base chars (before density adjustment)
-        # With density ≈ 1.0 for median-speed segment, target_chars ≈ 45
         assert len(groups) == 1
-        # Verify the target_chars is in the ballpark of 4.5 * 10 = 45
-        target = groups[0]["target_chars"]
-        assert 30 <= target <= 60  # allow density adjustment
+        assert groups[0]["target_chars"] == 11
 
-    def test_calibrated_changes_target_chars(self):
+    def test_voice_cps_no_longer_changes_target_chars(self):
+        # Plan C: voice_cps does NOT influence target_chars (the previous
+        # behaviour caused same-content / different-voice to get wildly
+        # different char budgets, which then forced pre-TTS rewrite).
         lines = [_make_line(1, 0, 10_000, source_text="Hello world this is a test")]
+        groups_slow = self._build(lines, chars_per_second=3.0)
         groups_default = self._build(lines)
         groups_fast = self._build(lines, chars_per_second=6.0)
-        # Faster TTS → more chars needed
-        assert groups_fast[0]["target_chars"] > groups_default[0]["target_chars"]
+        assert groups_slow[0]["target_chars"] == groups_default[0]["target_chars"] == groups_fast[0]["target_chars"]
 
-    def test_per_speaker_override(self):
+    def test_per_speaker_cps_no_longer_changes_target_chars(self):
+        # Plan C: even per-speaker cps overrides do NOT change target_chars
+        # for matching content. (Voice info is now passed to the LLM as a
+        # reference field, not used for char budget computation.)
         lines = [
             _make_line(1, 0, 10_000, speaker_id="spk_a", source_text="Hello world this is"),
-            _make_line(2, 10_000, 20_000, speaker_id="spk_b", source_text="Another test here now"),
+            _make_line(2, 10_000, 20_000, speaker_id="spk_b", source_text="Another test here too"),
         ]
         groups = self._build(
             lines,
             chars_per_second=4.5,
             chars_per_second_by_speaker={"spk_a": 6.0},
         )
-        # spk_a should get higher target_chars due to 6.0 override
-        # spk_b falls back to global 4.5
-        assert groups[0]["target_chars"] > groups[1]["target_chars"]
+        # Both speakers have 4 source words → 4 × 1.8 = 7 chars each.
+        assert groups[0]["target_chars"] == 7
+        assert groups[1]["target_chars"] == 7
 
 
 # ---------------------------------------------------------------------------
-# _estimate_dynamic_target_chars with chars_per_second
+# Plan C (2026-04-15): target_chars decoupled from voice_cps.
+#
+# Old contract: target_chars = duration × voice_cps × density_factor.
+# Problem: same source content produced wildly different char budgets
+# depending on the chosen voice (e.g. 71-word slow Munger segment got
+# 95 chars under cartoon_elder 4.10 cps but density 0.75 cap, which then
+# triggered pre-TTS rewrite to expand back to 130 chars — a wasted LLM call).
+#
+# New contract:
+#   target_chars = source_word_count × 1.8        (natural Chinese length)
+#   density_factor returns 1.0 always              (deprecated mechanism)
+#   voice_cps is passed to LLM as REFERENCE only   (not used for char budget)
 # ---------------------------------------------------------------------------
-class TestEstimateDynamicTargetCharsCalibrated:
+class TestDensityFactorAlwaysOne:
+    """Plan C: density_factor must always return 1.0; deprecated mechanism."""
+
+    @staticmethod
+    def _density(**kwargs):
+        from services.gemini.translator import _estimate_density_factor
+        return _estimate_density_factor(**kwargs)
+
+    def test_slow_segment_returns_one(self):
+        # Slow Munger segment: source_wps 2.31 vs reference 3.07 → old code
+        # would return 0.75. Plan C: must return 1.0.
+        df, _src = self._density(
+            source_words_per_second=2.31,
+            reference_words_per_second=3.07,
+            reference_source="speaker",
+        )
+        assert df == 1.0
+
+    def test_fast_segment_returns_one(self):
+        df, _src = self._density(
+            source_words_per_second=5.0,
+            reference_words_per_second=3.0,
+            reference_source="speaker",
+        )
+        assert df == 1.0
+
+    def test_normal_segment_returns_one(self):
+        df, _src = self._density(
+            source_words_per_second=3.0,
+            reference_words_per_second=3.0,
+            reference_source="speaker",
+        )
+        assert df == 1.0
+
+    def test_zero_inputs_still_return_one(self):
+        df, _src = self._density(
+            source_words_per_second=0.0,
+            reference_words_per_second=0.0,
+            reference_source="global",
+        )
+        assert df == 1.0
+
+
+class TestTargetCharsBasedOnSourceWordCount:
+    """Plan C: target_chars = source_word_count × 1.8, INDEPENDENT of voice_cps."""
+
     @staticmethod
     def _estimate(**kwargs):
         from services.gemini.translator import _estimate_dynamic_target_chars
         return _estimate_dynamic_target_chars(**kwargs)
 
-    def test_default_4_5(self):
-        result = self._estimate(target_duration_ms=10_000, density_factor=1.0)
-        assert result == 45  # 10s * 4.5
-
-    def test_custom_chars_per_second(self):
+    def test_uses_source_word_count_x_1_8(self):
+        # 71 English words → 128 Chinese chars (rounded)
         result = self._estimate(
-            target_duration_ms=10_000,
+            target_duration_ms=30_700,
             density_factor=1.0,
-            chars_per_second=6.0,
+            chars_per_second=4.10,
+            source_word_count=71,
         )
-        assert result == 60  # 10s * 6.0
+        assert result == 128  # round(71 * 1.8)
 
-    def test_density_factor_applied(self):
-        result = self._estimate(
-            target_duration_ms=10_000,
-            density_factor=0.8,
-            chars_per_second=5.0,
+    def test_voice_cps_does_not_change_target_chars(self):
+        # Same source, three different voices → identical char budget.
+        slow = self._estimate(
+            target_duration_ms=30_700, density_factor=1.0,
+            chars_per_second=3.04, source_word_count=71,
         )
-        assert result == 40  # 10s * 5.0 * 0.8
+        mid = self._estimate(
+            target_duration_ms=30_700, density_factor=1.0,
+            chars_per_second=4.10, source_word_count=71,
+        )
+        fast = self._estimate(
+            target_duration_ms=30_700, density_factor=1.0,
+            chars_per_second=5.50, source_word_count=71,
+        )
+        assert slow == mid == fast == 128
+
+    def test_density_factor_still_multiplied_when_provided(self):
+        # If a caller passes a non-1 density (e.g. legacy callsite), it's still
+        # honored mathematically — but production callers will get 1.0 from
+        # _estimate_density_factor, so this is just a contract guarantee.
+        result = self._estimate(
+            target_duration_ms=10_000, density_factor=0.5,
+            chars_per_second=4.10, source_word_count=20,
+        )
+        assert result == 18  # round(20 * 1.8 * 0.5)
+
+    def test_zero_source_words_falls_back_to_duration_estimate(self):
+        # Defensive: when source_word_count is unknown / zero (e.g. probe
+        # path with empty text), fall back to legacy duration × cps so the
+        # caller doesn't blow up with target_chars=0.
+        result = self._estimate(
+            target_duration_ms=10_000, density_factor=1.0,
+            chars_per_second=4.50, source_word_count=0,
+        )
+        assert result == 45  # 10s * 4.5 (legacy fallback)
+
+    def test_min_one_char(self):
+        # Ultra-short source still yields at least 1 char.
+        result = self._estimate(
+            target_duration_ms=500, density_factor=1.0,
+            chars_per_second=4.10, source_word_count=0,
+        )
+        assert result >= 1
+
+
+class TestMungerScenarioPlanC:
+    """Plan C end-to-end: Munger segment_029 should NOT trigger pre-TTS rewrite."""
+
+    @staticmethod
+    def _build(lines, **kwargs):
+        from services.gemini.translator import _build_groups
+        return _build_groups(lines, max_segment_duration_ms=45_000, **kwargs)
+
+    def test_munger_slow_segment_target_chars_independent_of_voice(self):
+        # Simulate Munger segment 029: 71 words / 30.7s → natural 128 chars.
+        # Should be the same whether we pass cartoon_elder (4.10) or
+        # storyteller (3.04) cps.
+        lines = [_make_line(1, 0, 30_700, source_text=_words(71))]
+
+        for cps in (3.04, 4.10, 5.50):
+            groups = self._build(lines, chars_per_second=cps)
+            assert groups[0]["target_chars"] == 128, (
+                f"voice cps {cps} should not affect target_chars under Plan C"
+            )
+            # min/max range tracks target_chars (default ±15%)
+            assert groups[0]["min_chars"] == 108  # round(128 * 0.85) = 108
+            assert groups[0]["max_chars"] == 147  # round(128 * 1.15) = 147
+
+    def test_pre_tts_estimate_aligns_with_target_under_plan_c(self):
+        # Under Plan C, LLM is told to write ~128 chars.  At cartoon_elder
+        # 4.10 cps that's TTS 31.2s vs target 30.7s → only +1.6% drift,
+        # well below the 25% undershoot / 20% overshoot pre-rewrite thresholds.
+        lines = [_make_line(1, 0, 30_700, source_text=_words(71))]
+        groups = self._build(lines, chars_per_second=4.10)
+        target_chars = groups[0]["target_chars"]
+        # Estimated TTS ms when LLM writes exactly target_chars:
+        estimated_tts_ms = int(target_chars / 4.10 * 1000)
+        # Acceptable drift band: well within pre-rewrite thresholds.
+        drift_pct = abs(estimated_tts_ms - 30_700) / 30_700
+        assert drift_pct < 0.10, f"drift {drift_pct*100:.1f}% should be < 10%"
