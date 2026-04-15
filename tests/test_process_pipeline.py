@@ -3489,6 +3489,119 @@ def test_process_pipeline_calibrates_tts_duration_by_speaker_when_enough_samples
     assert chars_per_second_by_speaker["speaker_b"] == pytest.approx(3.0, abs=0.001)
 
 
+def test_calibrate_tts_duration_normalizes_dsp_speed_param() -> None:
+    """Phase 2 Task 1 (2026-04-15): when ``dsp_speed_param`` is non-1.0,
+    ``_calibrate_tts_duration`` MUST multiply ``actual_duration_ms`` by
+    ``dsp_speed_param`` to recover the speed=1.0 baseline before computing
+    cps. Otherwise a segment that ran at speed=1.5 reports 33% shorter
+    duration, yielding a cps that is 33% too high — poisoning the
+    calibration whenever Phase 2 TTS speed is enabled.
+
+    Setup: speaker_a has 3 segments, all with cn_text of 5 hanzi and
+    actual_duration_ms=1_000ms but speed=1.5. The natural duration
+    (speed=1.0 equivalent) is 1_500ms, so the real cps is 5 / 1.5 = 3.333.
+    Without normalization the test would see 5.0 (= 5 / 1.0) and fail.
+    """
+    pipeline = ProcessPipeline()
+    segments = [
+        DubbingSegment(
+            segment_id=i,
+            speaker_id="speaker_a",
+            display_name="Speaker A",
+            voice_id="voice_a",
+            start_ms=(i - 1) * 1_000,
+            end_ms=i * 1_000,
+            target_duration_ms=1_000,
+            source_text=f"A{i}",
+            cn_text="甲甲甲甲甲",
+            actual_duration_ms=1_000,
+            dsp_speed_param=1.5,  # segment ran 50% faster than natural
+        )
+        for i in range(1, 4)
+    ]
+
+    global_cps, cps_by_speaker = pipeline._calibrate_tts_duration(segments)
+
+    # Natural duration 1500ms × 3 = 4500ms for 15 hanzi → cps = 3.333
+    assert global_cps == pytest.approx(3.333, abs=0.01)
+    assert cps_by_speaker["speaker_a"] == pytest.approx(3.333, abs=0.01)
+
+
+def test_calibrate_tts_duration_defaults_to_identity_when_speed_param_absent() -> None:
+    """Pre-Phase 2 segments (no dsp_speed_param set) use dataclass default
+    1.0, so the normalization is a no-op and the legacy path stays
+    byte-identical. Guards against regression in the legacy branch."""
+    pipeline = ProcessPipeline()
+    segments = [
+        DubbingSegment(
+            segment_id=i,
+            speaker_id="speaker_a",
+            display_name="Speaker A",
+            voice_id="voice_a",
+            start_ms=(i - 1) * 1_000,
+            end_ms=i * 1_000,
+            target_duration_ms=1_000,
+            source_text=f"A{i}",
+            cn_text="甲甲甲甲",  # 4 hanzi
+            actual_duration_ms=1_000,
+            # dsp_speed_param left at dataclass default (1.0)
+        )
+        for i in range(1, 4)
+    ]
+
+    global_cps, cps_by_speaker = pipeline._calibrate_tts_duration(segments)
+
+    assert global_cps == pytest.approx(4.0, abs=0.001)
+    assert cps_by_speaker["speaker_a"] == pytest.approx(4.0, abs=0.001)
+
+
+def test_calibrate_tts_duration_handles_invalid_speed_param() -> None:
+    """Guard against dsp_speed_param being 0.0 / negative / None — all
+    should fall back to 1.0 rather than produce infinite or negative cps."""
+    pipeline = ProcessPipeline()
+    segments = [
+        DubbingSegment(
+            segment_id=1,
+            speaker_id="speaker_a",
+            display_name="Speaker A",
+            voice_id="voice_a",
+            start_ms=0, end_ms=1_000,
+            target_duration_ms=1_000,
+            source_text="A1", cn_text="甲甲甲甲",
+            actual_duration_ms=1_000,
+            dsp_speed_param=0.0,  # invalid; should fall back to 1.0
+        ),
+        DubbingSegment(
+            segment_id=2,
+            speaker_id="speaker_a",
+            display_name="Speaker A",
+            voice_id="voice_a",
+            start_ms=1_000, end_ms=2_000,
+            target_duration_ms=1_000,
+            source_text="A2", cn_text="甲甲甲甲",
+            actual_duration_ms=1_000,
+            dsp_speed_param=-0.5,  # invalid; should fall back to 1.0
+        ),
+        DubbingSegment(
+            segment_id=3,
+            speaker_id="speaker_a",
+            display_name="Speaker A",
+            voice_id="voice_a",
+            start_ms=2_000, end_ms=3_000,
+            target_duration_ms=1_000,
+            source_text="A3", cn_text="甲甲甲甲",
+            actual_duration_ms=1_000,
+            dsp_speed_param=1.0,
+        ),
+    ]
+
+    global_cps, cps_by_speaker = pipeline._calibrate_tts_duration(segments)
+
+    # All 3 segments normalized to natural=1000ms, so cps = 4.0.
+    assert global_cps == pytest.approx(4.0, abs=0.001)
+    assert cps_by_speaker["speaker_a"] == pytest.approx(4.0, abs=0.001)
+
+
 def test_process_pipeline_attempts_semantic_split_repair_for_failed_long_segment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

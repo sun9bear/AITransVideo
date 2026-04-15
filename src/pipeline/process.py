@@ -4012,9 +4012,35 @@ class ProcessPipeline:
         *,
         min_speaker_samples: int = DEFAULT_SPEAKER_TTS_CALIBRATION_MIN_SAMPLES,
     ) -> tuple[float, dict[str, float]]:
+        """Recompute chars/sec from real TTS output, normalized by dsp_speed_param.
+
+        Phase 2 note (2026-04-15): ``segment.actual_duration_ms`` reflects
+        TTS output AFTER the provider has applied whatever speech_rate /
+        voice_setting.speed we asked for. Naively feeding that duration
+        into the estimator treats a speed-accelerated segment as if the
+        voice naturally speaks that fast — the resulting cps drifts high
+        whenever any segment used speed>1.0 (low whenever speed<1.0).
+
+        Fix: multiply duration by dsp_speed_param to recover the
+        "speed=1.0 equivalent" duration before calibrating. Pre-Phase 2
+        segments carry dsp_speed_param=1.0 (the dataclass default), so
+        this is a no-op for the legacy path.
+        """
+        def _natural_duration_ms(segment: DubbingSegment) -> int:
+            """Remove speech_rate/speed from actual_duration_ms.
+
+            For MiniMax voice_setting.speed, CosyVoice speech_rate, and
+            VolcEngine speech_rate (all already mapped back to a float
+            multiplier before storage), duration × speed = natural time.
+            """
+            speed = float(getattr(segment, "dsp_speed_param", 1.0) or 1.0)
+            if speed <= 0:
+                speed = 1.0
+            return int(round(segment.actual_duration_ms * speed))
+
         global_estimator = TTSDurationEstimator(chars_per_second=4.5)
         global_samples = [
-            (segment.cn_text, segment.actual_duration_ms)
+            (segment.cn_text, _natural_duration_ms(segment))
             for segment in segments
             if segment.actual_duration_ms > 0
         ]
@@ -4025,7 +4051,7 @@ class ProcessPipeline:
             if segment.actual_duration_ms <= 0:
                 continue
             speaker_samples.setdefault(segment.speaker_id, []).append(
-                (segment.cn_text, segment.actual_duration_ms)
+                (segment.cn_text, _natural_duration_ms(segment))
             )
 
         chars_per_second_by_speaker: dict[str, float] = {}
