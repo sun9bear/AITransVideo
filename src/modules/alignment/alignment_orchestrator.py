@@ -2,7 +2,7 @@ from dataclasses import dataclass
 import logging
 from typing import Protocol
 
-from src.utils.atomic_io import atomic_write_bytes, is_valid_output
+from utils.atomic_io import atomic_write_bytes, is_valid_output
 
 from core.enums import BlockStatus
 from core.exceptions import (

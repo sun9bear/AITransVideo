@@ -110,21 +110,38 @@ services:
       - type: bind
         source: ${AIVIDEOTRANS_ROOT}/config
         target: /opt/aivideotrans/config
-      # llm_registry shared module — single source of truth for model metadata
+      # Shared src/ tree (read-only) — gateway needs services.review_state,
+      # services.voice_clone for clone path, services.llm_registry for model
+      # metadata, services.transcript_reviewer / services.gemini.translator
+      # for admin prompt UI.  Was a single-file mount of llm_registry.py
+      # before; expanded to whole src/ to fix "ModuleNotFoundError:
+      # services.review_state" during voice clone (2026-04-15).
       - type: bind
-        source: ${AIVIDEOTRANS_ROOT}/app/src/services/llm_registry.py
-        target: /opt/aivideotrans/app/src/services/llm_registry.py
+        source: ${AIVIDEOTRANS_ROOT}/app/src
+        target: /opt/aivideotrans/app/src
         read_only: true
       # Project data — S2 monitor reads transcript artifacts (read-only)
       - type: bind
         source: ${AIVIDEOTRANS_ROOT}/data/projects
         target: /opt/aivideotrans/data/projects
         read_only: true
+      # Same data, mounted at the app-container path so gateway code that
+      # receives a project_dir from app (e.g. voice_selection_api during
+      # voice clone) can use the path verbatim without translation.
+      # Writable for clone path (writes speaker_audio/ + clone_sample.wav).
+      - type: bind
+        source: ${AIVIDEOTRANS_ROOT}/data/projects
+        target: /opt/aivideotrans/app/projects
     depends_on:
       app:
         condition: service_healthy
       postgres:
         condition: service_healthy
+    env_file:
+      # Shared with app — provides AUTODUB_TTS_API_KEY,
+      # AUTODUB_TTS_CLONE_BASE_URL, AUTODUB_TTS_BASE_URL etc. that
+      # voice_clone_for_selection needs for MiniMax voice clone API calls.
+      - /opt/aivideotrans/config/.env
     environment:
       AVT_JOB_API_UPSTREAM: "http://127.0.0.1:8877"
       AVT_GATEWAY_HOST: "0.0.0.0"

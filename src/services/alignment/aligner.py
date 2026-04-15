@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json as _json
 from pathlib import Path
 import shutil
 import subprocess
@@ -8,6 +9,26 @@ from modules.output.project_output import AlignedSegment
 from utils.audio_utils import measure_duration_ms as _ffprobe_duration_ms
 from utils.atomic_io import is_valid_output
 from services.gemini.translator import DubbingSegment
+
+
+# Phase 2 force-DSP override — admin-controlled, read at every alignment call
+# (cheap, file is small). Keeps aligner free of HTTP/gateway dependencies.
+_ADMIN_SETTINGS_PATH = Path("/opt/aivideotrans/config/admin_settings.json")
+
+
+def _is_force_dsp_alignment_enabled() -> bool:
+    """Read admin_settings.force_dsp_alignment. Defaults to False on any read
+    failure so the existing rewrite/dsp/direct decision tree stays in effect.
+    """
+    try:
+        if _ADMIN_SETTINGS_PATH.exists():
+            with _ADMIN_SETTINGS_PATH.open(encoding="utf-8") as f:
+                cfg = _json.load(f)
+            if isinstance(cfg, dict):
+                return bool(cfg.get("force_dsp_alignment", False))
+    except Exception:
+        pass
+    return False
 
 FIRST_REWRITE_TARGET_RATIO_WINDOWS = {
     "shrink": (0.95, 1.12),
@@ -147,12 +168,41 @@ class SegmentAligner:
             if int(segment.actual_duration_ms) > 0
             else _measure_wav_duration_ms(_resolve_existing_audio_path(segment.tts_audio_path))
         )
+        # Phase 2 Task 0 — snapshot first-pass duration BEFORE any rewrite/DSP.
+        # This is the raw TTS output as-is; any subsequent rewrite or DSP would
+        # overwrite segment.actual_duration_ms below, so we save it here once.
+        # `target_duration_ms > 0` is already guaranteed by the check above.
+        segment.first_pass_duration_ms = current_actual_duration_ms
+        segment.first_pass_error_pct = (
+            (current_actual_duration_ms - target_duration_ms) / target_duration_ms
+        )
+
         alignment_method = "force_dsp"
         needs_review = True
         aligned_duration_ms: int | None = None
 
-        decision = self._evaluate_alignment(current_actual_duration_ms, target_duration_ms)
-        if decision == "direct":
+        # Phase 2 force-DSP override — when admin enables `force_dsp_alignment`,
+        # bypass the rewrite/direct/dsp decision entirely and always stretch
+        # the raw TTS audio to the target duration. Trades quality for hard
+        # time alignment. Useful when LLM length control is unreliable AND
+        # the user prefers slight DSP artefact over rewrite churn.
+        force_dsp_user = _is_force_dsp_alignment_enabled()
+        if force_dsp_user:
+            input_path = _resolve_existing_audio_path(segment.tts_audio_path)
+            aligned_audio_path = self._dsp_stretch(
+                str(input_path), target_duration_ms, str(output_path),
+            )
+            alignment_method = "force_dsp_user"
+            needs_review = False
+            aligned_duration_ms = _measure_wav_duration_ms(Path(aligned_audio_path))
+            # Skip the decision tree, common post-processing below will pick up
+            # `aligned_duration_ms is not None` and write back to the segment.
+            decision = None
+        else:
+            decision = self._evaluate_alignment(current_actual_duration_ms, target_duration_ms)
+        if decision is None:
+            pass  # already handled by force_dsp branch above
+        elif decision == "direct":
             input_path = _resolve_existing_audio_path(segment.tts_audio_path)
             aligned_audio_path = self._direct_copy(str(input_path), str(output_path))
             alignment_method = "direct"

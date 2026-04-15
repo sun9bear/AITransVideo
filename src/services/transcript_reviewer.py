@@ -2357,7 +2357,7 @@ def _apply_corrections(
     words_data: list[dict] | None = None,
 ) -> tuple[list, int]:
     """Apply corrections with validation. Returns (updated_lines, applied_count)."""
-    from src.services.assemblyai.transcriber import TranscriptLine
+    from services.assemblyai.transcriber import TranscriptLine
 
     # Work on a copy
     working_lines = list(lines)
@@ -2570,7 +2570,7 @@ def _apply_interview_sanity_check(
     speakers: dict[str, dict[str, str]] | None,
 ) -> tuple[list, int]:
     """Apply conservative speaker fixes for clear two-party interview patterns."""
-    from src.services.assemblyai.transcriber import TranscriptLine
+    from services.assemblyai.transcriber import TranscriptLine
 
     if not lines or not speakers:
         return list(lines), 0
@@ -2825,7 +2825,7 @@ def _enforce_max_duration(
     words_data: list[dict] | None = None,
 ) -> list:
     """Final safety: split any segment exceeding max duration."""
-    from src.services.assemblyai.transcriber import TranscriptLine
+    from services.assemblyai.transcriber import TranscriptLine
 
     result: list = []
     for line in lines:

@@ -12,7 +12,7 @@ class ResumePoint:
     metadata: dict = field(default_factory=dict)
 
 def find_resume_point(project_dir: str) -> ResumePoint:
-    from src.utils.atomic_io import cleanup_tmp_files
+    from utils.atomic_io import cleanup_tmp_files
     cleanup_tmp_files(project_dir)
 
     def exists(relpath):

@@ -345,7 +345,34 @@ async def voice_clone_for_selection(
         if reserve_id and user_id:
             await shadow_safe(shadow_capture, reserve_id=reserve_id, db=db)
 
-        # Write cloned voice to user's personal voice library
+        # Write cloned voice to user's personal voice library.
+        # Resolve a friendly Chinese display name from review_state instead of
+        # the internal speaker_id (e.g. "查理·芒格 Clone" not "speaker_b Clone").
+        display_speaker_name: str = speaker_id
+        try:
+            review_state_path = project_dir / "review_state.json"
+            if review_state_path.exists():
+                rs = json.loads(review_state_path.read_text(encoding="utf-8"))
+                stages = rs.get("stages", {})
+                for stage_key in ("voice_selection_review", "translation_review"):
+                    payload = (stages.get(stage_key) or {}).get("payload") or {}
+                    name_map = payload.get("speaker_names")
+                    if isinstance(name_map, dict):
+                        candidate = name_map.get(speaker_id)
+                        if isinstance(candidate, str) and candidate.strip():
+                            display_speaker_name = candidate.strip()
+                            break
+                    direct_a = payload.get("speaker_name_a")
+                    direct_b = payload.get("speaker_name_b")
+                    if speaker_id == "speaker_a" and isinstance(direct_a, str) and direct_a.strip():
+                        display_speaker_name = direct_a.strip()
+                        break
+                    if speaker_id == "speaker_b" and isinstance(direct_b, str) and direct_b.strip():
+                        display_speaker_name = direct_b.strip()
+                        break
+        except Exception:
+            logger.debug("Could not resolve speaker display name for %s", speaker_id, exc_info=True)
+
         if user_id:
             try:
                 from user_voice_service import add_user_voice
@@ -353,7 +380,7 @@ async def voice_clone_for_selection(
                     db,
                     user_id=user_id,
                     voice_id=clone_result,
-                    label=f"{speaker_id} Clone",
+                    label=f"{display_speaker_name} Clone",
                     provider="minimax_voice_clone",
                     tts_provider="minimax_tts",
                     platform="minimax_domestic",
@@ -428,7 +455,11 @@ def _clone_via_minimax(concat_path: Path, speaker_id: str) -> str:
     from services.voice_clone import VoiceCloneConfig, MiniMaxVoiceCloneClient
     from services import config_loader
 
-    clone_config = VoiceCloneConfig.from_env(config_loader.DEFAULT_AUTODUB_LOCAL_CONFIG_PATH)
+    # IMPORTANT: VoiceCloneConfig.from_env(prefix, *, config_path) — the
+    # positional arg is the env-var prefix string. Passing a Path here makes
+    # the function look up env keys like "<path>CLONE_BASE_URL" which never
+    # exist, then raise "Voice clone base_url is required …". Use keyword.
+    clone_config = VoiceCloneConfig.from_env(config_path=config_loader.DEFAULT_AUTODUB_LOCAL_CONFIG_PATH)
     clone_client = MiniMaxVoiceCloneClient(clone_config)
     result = clone_client.create_voice_clone(
         speaker_id=speaker_id,

@@ -171,7 +171,7 @@ def _split_segment(
                         text = str(raw_line.get("source_text") or raw_line.get("en_text") or "")
                         start_ms = int(raw_line.get("start_ms") or 0)
                         end_ms = int(raw_line.get("end_ms") or 0)
-                        from src.services.transcript_reviewer import estimate_split_ms
+                        from services.transcript_reviewer import estimate_split_ms
                         mid_ms = estimate_split_ms(
                             start_ms=start_ms,
                             end_ms=end_ms,
@@ -238,7 +238,7 @@ def _split_segment(
                         src_split_pos = source_split if source_split is not None else len(source_text) // 2
                         cn_split_pos = cn_split if cn_split is not None else len(cn_text) // 2
 
-                        from src.services.transcript_reviewer import estimate_split_ms
+                        from services.transcript_reviewer import estimate_split_ms
                         mid_ms = estimate_split_ms(
                             start_ms=start_ms,
                             end_ms=end_ms,
