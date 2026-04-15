@@ -1453,8 +1453,51 @@ class ProcessPipeline:
                             speaker_providers=_speaker_providers or None,
                         )
                     )
+                    # Persist probe result so the next pipeline entry (cache-hit
+                    # rerun after translation_review approval) can reload the
+                    # calibrated cps instead of falling back to the 4.5 default.
+                    # Without this, cloned voices (which never hit voice_catalog)
+                    # poison pre-rewrite + Phase 2 speed_decision on every rerun.
+                    # Bug analysed in Job job_6673fdf6cb4d4cc6aedc70bc48f8828e
+                    # (2026-04-15): 17 spurious pre-rewrites + 30 S5 rewrites.
+                    try:
+                        from services.calibration_persistence import persist_probe_calibration
+                        persist_probe_calibration(
+                            (final_project_dir / "audio").resolve(strict=False),
+                            cps_global=_probe_chars_per_second,
+                            cps_by_speaker=_probe_chars_per_second_by_speaker,
+                            speaker_voices=_speaker_voices,
+                        )
+                    except Exception as _persist_exc:
+                        print(f"[S4-probe] 持久化校准结果失败（非致命）：{_persist_exc}")
                 except Exception as exc:
                     print(f"[S4-probe] 探针校准整体异常（回退 {DEFAULT_ESTIMATED_TTS_CHARS_PER_SECOND}）：{exc}")
+
+            # Cache-hit reload path: when re-entering after translation_review
+            # approval we skip both catalog lookup (clone voices not present)
+            # and probe TTS (skipped under s3_cache_hit). Reload the persisted
+            # calibration so pre-rewrite + Phase 2 speed see real cps values.
+            if (
+                not _catalog_cps_used
+                and s3_cache_hit
+                and _probe_chars_per_second == DEFAULT_ESTIMATED_TTS_CHARS_PER_SECOND
+            ):
+                try:
+                    from services.calibration_persistence import load_probe_calibration
+                    _loaded_global, _loaded_by_speaker = load_probe_calibration(
+                        (final_project_dir / "audio").resolve(strict=False),
+                        expected_voices=_speaker_voices,
+                    )
+                    if _loaded_global is not None:
+                        _probe_chars_per_second = _loaded_global
+                        _probe_chars_per_second_by_speaker = _loaded_by_speaker
+                        print(
+                            f"[S4-probe] cache-hit 加载持久化校准："
+                            f"global={_loaded_global:.3f} 字/秒，"
+                            f"speakers={list(_loaded_by_speaker.keys())}"
+                        )
+                except Exception as _load_exc:
+                    print(f"[S4-probe] 持久化校准加载失败（保持默认）：{_load_exc}")
 
             # --- S3 Translation (voice already confirmed above) ---
             if s3_cache_hit:
