@@ -129,7 +129,13 @@ def _build_headers(app_id: str, access_key: str, resource_id: str) -> dict[str, 
     }
 
 
-def _build_payload(text: str, speaker: str, *, model: str | None = None) -> dict[str, Any]:
+def _build_payload(
+    text: str,
+    speaker: str,
+    *,
+    model: str | None = None,
+    speech_rate: int = 0,
+) -> dict[str, Any]:
     """Build V3 request body.
 
     Parameters
@@ -143,6 +149,14 @@ def _build_payload(text: str, speaker: str, *, model: str | None = None) -> dict
         Optional model identifier (``req_params.model``).
         Only written to the payload when non-empty; omitting it lets the
         API use the default model for the selected resource.
+    speech_rate:
+        Integer in [-50, 100].  Positive speeds up, negative slows down.
+        Validated 2026-04-15: duration tracks ``1 / (1 + speech_rate/100)``
+        to within |err|<5% on both seed-tts-1.0 and 2.0.  Written to
+        ``audio_params.speech_rate`` only when non-zero so that pre-Phase 2
+        callers that don't pass a rate emit byte-identical payloads.
+        Caller is responsible for the speed→speech_rate mapping (see
+        ``services.tts.speed_decision.speed_to_volcengine_speech_rate``).
     """
     req_params: dict[str, Any] = {
         "speaker": speaker,
@@ -152,6 +166,8 @@ def _build_payload(text: str, speaker: str, *, model: str | None = None) -> dict
             "sample_rate": PCM_SAMPLE_RATE,
         },
     }
+    if speech_rate:
+        req_params["audio_params"]["speech_rate"] = int(speech_rate)
     if model:
         req_params["model"] = model
     return {
@@ -217,6 +233,7 @@ def synthesize(
     *,
     resource_id: str | None = None,
     model: str | None = None,
+    speech_rate: int = 0,
     endpoint: str = DEFAULT_ENDPOINT,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
 ) -> bytes:
@@ -237,6 +254,10 @@ def synthesize(
     model:
         Optional model identifier written to ``req_params.model``.
         Omitted from the payload when *None* or empty.
+    speech_rate:
+        Integer in [-50, 100]; default 0 (no adjustment, byte-identical
+        payload to pre-Phase 2). Positive speeds up, negative slows down.
+        See ``_build_payload`` for the empirical linearity evidence.
     endpoint:
         V3 API endpoint URL.
     timeout_seconds:
@@ -251,7 +272,12 @@ def synthesize(
     effective_resource_id = resource_id or env_resource_id
     effective_voice_id = voice_id or default_speaker_for_resource(effective_resource_id)
     headers = _build_headers(app_id, access_key, effective_resource_id)
-    payload = _build_payload(text.strip(), effective_voice_id, model=model)
+    payload = _build_payload(
+        text.strip(),
+        effective_voice_id,
+        model=model,
+        speech_rate=speech_rate,
+    )
 
     log_id = ""
     pcm_chunks: list[bytes] = []

@@ -204,3 +204,36 @@ def decide_tts_speed(
     speed = round(speed, 4)
     return SpeedDecision(speed=speed, reason="in_range",
                          estimated_ms=estimated_ms, ratio=ratio)
+
+
+# --- VolcEngine speech_rate mapping -----------------------------------------
+#
+# VolcEngine V3 ``audio_params.speech_rate`` is an integer in [-50, 100]:
+# positive values speed up (shorter audio), negative slow down. Empirical
+# validation on seed-tts-1.0 / seed-tts-2.0 (2026-04-15, see
+# ``scripts/test_volcengine_speech_rate.py`` + the Phase 2 handoff doc)
+# showed audio duration tracks ``1 / (1 + speech_rate/100)`` within
+# |err| < 5% — so a MiniMax-style speed multiplier maps cleanly to:
+#
+#     speech_rate = int(round((speed - 1) * 100))
+#
+# Examples: speed=1.15 -> +15, speed=0.85 -> -15, speed=1.30 -> +30.
+# Unlimited-mode speeds (0.5..2.0) saturate at VolcEngine's API envelope.
+_VOLCENGINE_SPEECH_RATE_MIN: Final[int] = -50
+_VOLCENGINE_SPEECH_RATE_MAX: Final[int] = 100
+
+
+def speed_to_volcengine_speech_rate(speed: float) -> int:
+    """Map a MiniMax-style speed multiplier to VolcEngine's speech_rate.
+
+    Returns 0 for speed=1.0 (baseline) and clamps to VolcEngine's
+    advertised envelope [-50, 100] so the provider never rejects
+    out-of-range values even under ``tts_speed_mode=unlimited``.
+
+    Invalid / non-numeric input yields 0 (safe no-op).
+    """
+    try:
+        raw = int(round((float(speed) - 1.0) * 100))
+    except (TypeError, ValueError):
+        return 0
+    return max(_VOLCENGINE_SPEECH_RATE_MIN, min(_VOLCENGINE_SPEECH_RATE_MAX, raw))

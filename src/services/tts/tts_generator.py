@@ -643,6 +643,51 @@ class TTSGenerator:
             flush=True,
         )
 
+        # --- Phase 2 Task 1 (VolcEngine branch, 2026-04-15): per-segment
+        # speech_rate. Mirrors the MiniMax path: reuse the speaker's cps
+        # (catalog or probe value piped in by pipeline.set_speaker_chars_per_second),
+        # call the shared decide_tts_speed decision tree, and map the
+        # MiniMax-style multiplier to VolcEngine's integer speech_rate.
+        # Empirically validated 2026-04-15: speed=1.15 -> speech_rate=+15
+        # produces a duration ratio within <2% of MiniMax's speed=1.15.
+        speaker_cps = self._chars_per_second_by_speaker.get(segment.speaker_id)
+        if speaker_cps is None:
+            speaker_cps = self._global_chars_per_second
+        try:
+            from services.tts.speed_decision import (
+                decide_tts_speed,
+                speed_to_volcengine_speech_rate,
+            )
+            decision = decide_tts_speed(
+                cn_text=tts_text,
+                target_duration_ms=int(getattr(segment, "target_duration_ms", 0) or 0),
+                chars_per_second=float(speaker_cps) if speaker_cps else None,
+            )
+        except Exception as exc:  # never let metric path break TTS
+            print(f"[VolcEngine] speed_decision exception (fallback 1.0): {exc}", flush=True)
+            from services.tts.speed_decision import SpeedDecision
+            decision = SpeedDecision(speed=1.0, reason="error", estimated_ms=0, ratio=0.0)
+
+        if decision.reason in ("disabled", "missing_inputs", "error"):
+            effective_speed = 1.0
+            speech_rate_param = 0
+        else:
+            effective_speed = float(decision.speed)
+            speech_rate_param = speed_to_volcengine_speech_rate(effective_speed)
+
+        # Stamp the metric on the segment for metering aggregation.
+        try:
+            segment.dsp_speed_param = effective_speed
+        except Exception:
+            pass
+
+        if decision.reason == "in_range":
+            print(
+                f"[VolcEngine] speed={effective_speed:.4f} -> speech_rate={speech_rate_param:+d} "
+                f"(ratio={decision.ratio:.3f}, est={decision.estimated_ms}ms)",
+                flush=True,
+            )
+
         # --- 3. Call provider with mismatch retry ---
         try:
             audio_bytes = vc_synthesize(
@@ -650,6 +695,7 @@ class TTSGenerator:
                 voice_id=voice_id,
                 resource_id=resource_id,
                 model=model,
+                speech_rate=speech_rate_param,
             )
         except Exception as exc:
             if voice_id != fallback_voice and _is_volcengine_voice_resource_mismatch(exc):
@@ -666,6 +712,7 @@ class TTSGenerator:
                     voice_id=voice_id,
                     resource_id=resource_id,
                     model=model,
+                    speech_rate=speech_rate_param,
                 )
             else:
                 raise

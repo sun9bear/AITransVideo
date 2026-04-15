@@ -483,6 +483,126 @@ def test_studio_style_call_without_model(monkeypatch: pytest.MonkeyPatch) -> Non
     assert captured["json"]["req_params"]["speaker"] == DEFAULT_SPEAKER_2_0
 
 
+# --- speech_rate (Phase 2 Task 1 VolcEngine branch, 2026-04-15) -------------
+
+def test_speech_rate_default_zero_omits_field(monkeypatch: pytest.MonkeyPatch) -> None:
+    """speech_rate not passed (default 0) must NOT appear in audio_params —
+    keeps the wire payload byte-identical to pre-Phase 2 callers."""
+    monkeypatch.setenv("VOLCENGINE_TTS_APP_ID", "app")
+    monkeypatch.setenv("VOLCENGINE_TTS_ACCESS_KEY", "key")
+
+    captured: dict = {}
+    pcm = _make_pcm_bytes(50)
+
+    def fake_post(url, *, headers=None, json=None, stream=False, timeout=None):
+        captured["json"] = json
+        return _make_streaming_response([
+            _make_chunk_line(0, pcm),
+            _make_chunk_line(20000000),
+        ])
+
+    monkeypatch.setattr(vc_module, "_do_post", fake_post)
+    synthesize("测试")
+    assert "speech_rate" not in captured["json"]["req_params"]["audio_params"]
+
+
+def test_speech_rate_explicit_zero_omits_field(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Passing speech_rate=0 explicitly must also omit the key (semantically
+    identical to omission; baseline rate = 0)."""
+    monkeypatch.setenv("VOLCENGINE_TTS_APP_ID", "app")
+    monkeypatch.setenv("VOLCENGINE_TTS_ACCESS_KEY", "key")
+
+    captured: dict = {}
+    pcm = _make_pcm_bytes(50)
+
+    def fake_post(url, *, headers=None, json=None, stream=False, timeout=None):
+        captured["json"] = json
+        return _make_streaming_response([
+            _make_chunk_line(0, pcm),
+            _make_chunk_line(20000000),
+        ])
+
+    monkeypatch.setattr(vc_module, "_do_post", fake_post)
+    synthesize("测试", speech_rate=0)
+    assert "speech_rate" not in captured["json"]["req_params"]["audio_params"]
+
+
+def test_speech_rate_positive_injected_as_int(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Positive speech_rate (speed up) appears in audio_params as int."""
+    monkeypatch.setenv("VOLCENGINE_TTS_APP_ID", "app")
+    monkeypatch.setenv("VOLCENGINE_TTS_ACCESS_KEY", "key")
+
+    captured: dict = {}
+    pcm = _make_pcm_bytes(50)
+
+    def fake_post(url, *, headers=None, json=None, stream=False, timeout=None):
+        captured["json"] = json
+        return _make_streaming_response([
+            _make_chunk_line(0, pcm),
+            _make_chunk_line(20000000),
+        ])
+
+    monkeypatch.setattr(vc_module, "_do_post", fake_post)
+    synthesize("测试", speech_rate=15)
+    audio_params = captured["json"]["req_params"]["audio_params"]
+    assert audio_params["speech_rate"] == 15
+    assert isinstance(audio_params["speech_rate"], int)
+
+
+def test_speech_rate_negative_injected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Negative speech_rate (slow down) appears in audio_params."""
+    monkeypatch.setenv("VOLCENGINE_TTS_APP_ID", "app")
+    monkeypatch.setenv("VOLCENGINE_TTS_ACCESS_KEY", "key")
+
+    captured: dict = {}
+    pcm = _make_pcm_bytes(50)
+
+    def fake_post(url, *, headers=None, json=None, stream=False, timeout=None):
+        captured["json"] = json
+        return _make_streaming_response([
+            _make_chunk_line(0, pcm),
+            _make_chunk_line(20000000),
+        ])
+
+    monkeypatch.setattr(vc_module, "_do_post", fake_post)
+    synthesize("测试", speech_rate=-30)
+    assert captured["json"]["req_params"]["audio_params"]["speech_rate"] == -30
+
+
+def test_speech_rate_orthogonal_to_model_and_resource(monkeypatch: pytest.MonkeyPatch) -> None:
+    """speech_rate coexists with model + resource_id without interference."""
+    monkeypatch.setenv("VOLCENGINE_TTS_APP_ID", "app")
+    monkeypatch.setenv("VOLCENGINE_TTS_ACCESS_KEY", "key")
+
+    captured: dict = {}
+    pcm = _make_pcm_bytes(50)
+
+    def fake_post(url, *, headers=None, json=None, stream=False, timeout=None):
+        captured["headers"] = dict(headers or {})
+        captured["json"] = json
+        return _make_streaming_response([
+            _make_chunk_line(0, pcm),
+            _make_chunk_line(20000000),
+        ])
+
+    monkeypatch.setattr(vc_module, "_do_post", fake_post)
+    synthesize(
+        "测试",
+        voice_id=DEFAULT_SPEAKER_1_0,
+        resource_id=RESOURCE_ID_1_0,
+        model=MODEL_1_0,
+        speech_rate=20,
+    )
+    rp = captured["json"]["req_params"]
+    assert captured["headers"]["X-Api-Resource-Id"] == "seed-tts-1.0"
+    assert rp["model"] == "seed-tts-1.1"
+    assert rp["speaker"] == DEFAULT_SPEAKER_1_0
+    assert rp["audio_params"]["speech_rate"] == 20
+    # Other audio_params fields must still be present and untouched.
+    assert rp["audio_params"]["format"] == "pcm"
+    assert rp["audio_params"]["sample_rate"] == 24000
+
+
 # --- B1.1: voice_id auto-resolves from effective resource_id ---
 
 def test_no_voice_id_with_resource_2_0_uses_2_0_default(monkeypatch: pytest.MonkeyPatch) -> None:

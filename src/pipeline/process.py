@@ -106,8 +106,11 @@ PRE_TTS_REWRITE_LISTEN_LIMIT_HIGH = 1.30
 PRE_TTS_REWRITE_LISTEN_LIMIT_LOW = 0.80
 # Providers with per-segment TTS speed wired up. CodeX P1-2: pre-rewrite
 # can only be safely skipped when the segment will go through one of these.
-# CosyVoice + VolcEngine have voice-match transit but no speed knob today.
-SPEED_AWARE_TTS_PROVIDERS: frozenset[str] = frozenset({"minimax"})
+# VolcEngine joined 2026-04-15 after scripts/test_volcengine_speech_rate.py
+# confirmed audio_params.speech_rate is honored within |err|<5% across
+# seed-tts-{1.0,2.0}. CosyVoice still has voice-match transit only, pending
+# a similar field validation test.
+SPEED_AWARE_TTS_PROVIDERS: frozenset[str] = frozenset({"minimax", "volcengine"})
 PRE_ALIGNMENT_SEMANTIC_SPLIT_OVERSHOOT_RATIO = 0.30
 SEVERE_PRE_ALIGNMENT_SEMANTIC_SPLIT_MIN_TARGET_MS = 30_000
 SEVERE_PRE_ALIGNMENT_SEMANTIC_SPLIT_OVERSHOOT_RATIO = 0.35
