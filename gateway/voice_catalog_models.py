@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -41,6 +41,14 @@ class VoiceCatalog(Base):
     source: Mapped[str] = mapped_column(String(50), nullable=False, server_default="manual")
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # --- Voice speed calibration (migration 012) ---
+    # Scalar fallback: average across calibrated models, or single-model value.
+    chars_per_second: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Per-model values, e.g. {"speech-2.8-turbo": 4.32, "speech-2.8-hd": 4.18}.
+    chars_per_second_by_model: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    speed_calibrated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc),
     )

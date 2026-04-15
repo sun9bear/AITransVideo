@@ -181,6 +181,13 @@ async def internal_voice_catalog(
             "childlike": profile_label.childlike if profile_label else None,
             "texture_tags": profile_label.texture_tags if profile_label else None,
             "delivery_style": profile_label.delivery_style if profile_label else None,
+            # Speed calibration (migration 012). NULL when not yet calibrated —
+            # runtime treats NULL as "fall back to probe".
+            "chars_per_second": v.chars_per_second,
+            "chars_per_second_by_model": v.chars_per_second_by_model,
+            "speed_calibrated_at": (
+                v.speed_calibrated_at.isoformat() if v.speed_calibrated_at else None
+            ),
         })
 
     return {
@@ -1026,6 +1033,12 @@ def _serialize_voice(
         "notes": voice.notes,
         "created_at": voice.created_at.isoformat() if voice.created_at else None,
         "updated_at": voice.updated_at.isoformat() if voice.updated_at else None,
+        # Speed calibration (migration 012)
+        "chars_per_second": voice.chars_per_second,
+        "chars_per_second_by_model": voice.chars_per_second_by_model,
+        "speed_calibrated_at": (
+            voice.speed_calibrated_at.isoformat() if voice.speed_calibrated_at else None
+        ),
         "label_status": {
             "text": label_summary.get("text", False),
             "audio_round1": label_summary.get("audio_round1", False),

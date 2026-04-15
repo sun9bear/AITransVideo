@@ -16,6 +16,30 @@ type AdminJob = {
   status: string
   current_stage: string
   created_at: string
+  // Phase 2 Task 0 — metering snapshot exposed via /api/admin/jobs.
+  // All fields are optional / best-effort; pipeline reports them at S6 completion.
+  metering_snapshot?: {
+    total_segments?: number
+    catalog_hit_count?: number
+    catalog_hit_rate?: number
+    skip_probe?: boolean
+    rewrite_count?: number
+    rewrite_triggered?: boolean
+    needs_review_count?: number
+    needs_review_rate?: number
+    first_pass_error_pct_avg?: number
+    first_pass_error_pct_p50?: number
+    first_pass_error_pct_p90?: number
+    first_pass_error_pct_n?: number
+    alignment_method_distribution?: Record<string, number>
+    speed_param_distribution?: Record<string, number>
+    glossary_total_terms?: number
+    glossary_preserved_terms?: number
+    term_preservation_rate?: number
+    missing_glossary_terms?: string[]
+    final_cn_chars?: number
+    tts_billed_chars?: number
+  }
 }
 
 type AnalysisTimelineItem = {
@@ -417,6 +441,9 @@ function JobRow({
         <tr>
           <td colSpan={7} className="p-0">
             <div className="border-b border-border bg-muted/5 px-5 py-4 space-y-4">
+              {/* Phase 2 Task 0 — Metrics panel */}
+              <MeteringPanel snapshot={job.metering_snapshot} />
+
               {/* Log viewer */}
               <div className="flex items-center justify-between">
                 <h3 className="text-sm font-semibold text-foreground">
@@ -576,4 +603,193 @@ function AnalysisPanel({ analysis }: { analysis: AnalysisResult }) {
       )}
     </div>
   )
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 Task 0 — Metering panel (catalog hit / rewrite / first-pass error)
+// Renders 6 mini-stat cards + alignment method distribution + glossary status.
+// All fields are optional; "—" shown when missing so that legacy jobs without
+// the new metering keys don't render as zeros.
+// ---------------------------------------------------------------------------
+
+function MeteringPanel({
+  snapshot,
+}: {
+  snapshot?: AdminJob["metering_snapshot"]
+}) {
+  if (!snapshot || Object.keys(snapshot).length === 0) {
+    return (
+      <div className="rounded-xl border border-border bg-muted/10 px-4 py-3 text-xs text-muted-foreground">
+        指标尚未上报（任务可能未运行至 S6，或为遗留 job）
+      </div>
+    )
+  }
+
+  const total = snapshot.total_segments ?? 0
+  const catalogPct = formatPct(snapshot.catalog_hit_rate)
+  const rewriteCount = snapshot.rewrite_count ?? 0
+  const rewriteRate = total > 0 ? rewriteCount / total : 0
+  const reviewPct = formatPct(snapshot.needs_review_rate)
+  const fpAvg = formatPct(snapshot.first_pass_error_pct_avg)
+  const fpP90 = formatPct(snapshot.first_pass_error_pct_p90)
+  const termPct = formatPct(snapshot.term_preservation_rate)
+
+  return (
+    <div className="rounded-xl border border-border bg-muted/10 px-4 py-3 space-y-3">
+      <h3 className="text-sm font-semibold text-foreground">任务指标</h3>
+
+      {/* Top metrics row */}
+      <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+        <MetricCard
+          label="总段数"
+          value={total.toString()}
+        />
+        <MetricCard
+          label="目录命中"
+          value={catalogPct}
+          tone={pickToneByRate(snapshot.catalog_hit_rate, 'higher_better')}
+          subtitle={snapshot.skip_probe ? '已跳过 probe' : '走 probe'}
+        />
+        <MetricCard
+          label="重写率"
+          value={`${(rewriteRate * 100).toFixed(1)}%`}
+          tone={pickToneByRate(rewriteRate, 'lower_better')}
+          subtitle={`${rewriteCount} 次`}
+        />
+        <MetricCard
+          label="需复核"
+          value={reviewPct}
+          tone={pickToneByRate(snapshot.needs_review_rate, 'lower_better')}
+          subtitle={`${snapshot.needs_review_count ?? 0} 段`}
+        />
+        <MetricCard
+          label="首轮误差均值"
+          value={fpAvg}
+          tone={pickToneByPct(snapshot.first_pass_error_pct_avg, 0.08, 0.15)}
+        />
+        <MetricCard
+          label="首轮误差 P90"
+          value={fpP90}
+          tone={pickToneByPct(snapshot.first_pass_error_pct_p90, 0.15, 0.25)}
+          subtitle={`n=${snapshot.first_pass_error_pct_n ?? 0}`}
+        />
+      </div>
+
+      {/* Alignment + speed distributions */}
+      {(snapshot.alignment_method_distribution ||
+        snapshot.speed_param_distribution) && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+          {snapshot.alignment_method_distribution && (
+            <div>
+              <span className="font-medium text-muted-foreground">对齐方式：</span>
+              {Object.entries(snapshot.alignment_method_distribution).map(([k, v]) => (
+                <span key={k} className="ml-2 inline-block rounded bg-muted/40 px-1.5 py-0.5">
+                  {k}={v}
+                </span>
+              ))}
+            </div>
+          )}
+          {snapshot.speed_param_distribution && (
+            <div>
+              <span className="font-medium text-muted-foreground">TTS speed：</span>
+              {Object.entries(snapshot.speed_param_distribution).map(([k, v]) => (
+                <span key={k} className="ml-2 inline-block rounded bg-muted/40 px-1.5 py-0.5">
+                  {k}={v}
+                </span>
+              ))}
+              <span className="ml-2 text-muted-foreground/70">(Task 1 启用后会有非默认值)</span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Glossary preservation */}
+      {snapshot.glossary_total_terms != null && snapshot.glossary_total_terms > 0 && (
+        <div className="text-xs">
+          <span className="font-medium text-muted-foreground">术语保留：</span>
+          <span
+            className={`ml-2 ${
+              (snapshot.term_preservation_rate ?? 0) >= 0.95
+                ? 'text-green-400'
+                : (snapshot.term_preservation_rate ?? 0) >= 0.8
+                ? 'text-amber-400'
+                : 'text-red-400'
+            }`}
+          >
+            {snapshot.glossary_preserved_terms ?? 0} / {snapshot.glossary_total_terms} ({termPct})
+          </span>
+          {snapshot.missing_glossary_terms && snapshot.missing_glossary_terms.length > 0 && (
+            <div className="mt-1 text-muted-foreground">
+              缺失：{snapshot.missing_glossary_terms.join('、')}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function MetricCard({
+  label,
+  value,
+  subtitle,
+  tone = 'neutral',
+}: {
+  label: string
+  value: string
+  subtitle?: string
+  tone?: 'good' | 'warn' | 'bad' | 'neutral'
+}) {
+  const toneClass =
+    tone === 'good'
+      ? 'border-green-500/30 bg-green-500/5'
+      : tone === 'warn'
+      ? 'border-amber-500/30 bg-amber-500/5'
+      : tone === 'bad'
+      ? 'border-red-500/30 bg-red-500/5'
+      : 'border-border bg-card'
+  return (
+    <div className={`rounded-lg border ${toneClass} px-2 py-2`}>
+      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+        {label}
+      </div>
+      <div className="text-sm font-semibold text-foreground mt-0.5">{value}</div>
+      {subtitle && (
+        <div className="text-[10px] text-muted-foreground mt-0.5">{subtitle}</div>
+      )}
+    </div>
+  )
+}
+
+function formatPct(v?: number | null): string {
+  if (v == null || Number.isNaN(v)) return '—'
+  return `${(v * 100).toFixed(1)}%`
+}
+
+function pickToneByRate(
+  v: number | null | undefined,
+  direction: 'higher_better' | 'lower_better'
+): 'good' | 'warn' | 'bad' | 'neutral' {
+  if (v == null) return 'neutral'
+  if (direction === 'higher_better') {
+    if (v >= 0.8) return 'good'
+    if (v >= 0.5) return 'warn'
+    return 'bad'
+  } else {
+    if (v <= 0.2) return 'good'
+    if (v <= 0.4) return 'warn'
+    return 'bad'
+  }
+}
+
+function pickToneByPct(
+  v: number | null | undefined,
+  warnThreshold: number,
+  badThreshold: number
+): 'good' | 'warn' | 'bad' | 'neutral' {
+  if (v == null) return 'neutral'
+  const abs = Math.abs(v)
+  if (abs <= warnThreshold) return 'good'
+  if (abs <= badThreshold) return 'warn'
+  return 'bad'
 }

@@ -72,6 +72,43 @@ function LabelBadge({ done }: { done: boolean }) {
     : <span className="inline-block w-2 h-2 rounded-full bg-zinc-600" title="未完成" />
 }
 
+function SpeedCell({ item }: { item: VoiceCatalogItem }) {
+  const cps = item.chars_per_second
+  if (cps == null) {
+    return <span className="text-zinc-500 text-xs">未标定</span>
+  }
+  // Speed categories (subjective tiers chosen after catalog calibration).
+  let tier = ''
+  let color = ''
+  if (cps < 3.5) { tier = '慢';  color = 'text-amber-400' }
+  else if (cps < 4.5) { tier = '中'; color = 'text-foreground/80' }
+  else { tier = '快'; color = 'text-cyan-400' }
+
+  const byModel = item.chars_per_second_by_model || null
+  const tooltip = byModel
+    ? Object.entries(byModel).map(([m, v]) => `${m}: ${v}`).join('\n')
+    : `单值：${cps}`
+  return (
+    <span className={`text-xs ${color}`} title={tooltip}>
+      {cps.toFixed(2)} <span className="text-muted-foreground">({tier})</span>
+    </span>
+  )
+}
+
+function formatRelativeCalibratedAt(ts: string | null | undefined): string {
+  if (!ts) return '-'
+  const d = new Date(ts)
+  if (Number.isNaN(d.getTime())) return '-'
+  const diffMs = Date.now() - d.getTime()
+  const day = 24 * 3600_000
+  if (diffMs < 0) return '刚刚'
+  if (diffMs < 3600_000) return `${Math.max(1, Math.floor(diffMs / 60_000))}分钟前`
+  if (diffMs < day) return `${Math.floor(diffMs / 3600_000)}小时前`
+  if (diffMs < 30 * day) return `${Math.floor(diffMs / day)}天前`
+  if (diffMs < 365 * day) return `${Math.floor(diffMs / (30 * day))}月前`
+  return `${Math.floor(diffMs / (365 * day))}年前`
+}
+
 function VerifyBadge({ item }: { item: VoiceCatalogItem }) {
   // seed 继承信任：仅当从未人工验证过时显示 seed
   if (item.is_verified && item.is_seed && item.verify_attempts === 0) {
@@ -799,15 +836,27 @@ export default function VoiceCatalogPage() {
               <th className="px-3 py-2 text-center font-medium text-muted-foreground">验证</th>
               <th className="px-3 py-2 text-center font-medium text-muted-foreground" title="text / audio1 / audio2 / audio3 / final">标注</th>
               <th className="px-3 py-2 text-left font-medium text-muted-foreground">Final 标签</th>
+              <th
+                className="px-3 py-2 text-center font-medium text-muted-foreground"
+                title="预标定的中文 TTS 语速（字/秒）。Pipeline 走 catalog lookup 时使用，避免 probe 校准的噪声"
+              >
+                语速
+              </th>
+              <th
+                className="px-3 py-2 text-center font-medium text-muted-foreground"
+                title="最近一次离线语速标定时间"
+              >
+                校准
+              </th>
               <th className="px-3 py-2 text-center font-medium text-muted-foreground">可匹配</th>
               <th className="px-3 py-2 text-center font-medium text-muted-foreground">操作</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-border">
             {isLoading ? (
-              <tr><td colSpan={11} className="px-3 py-8 text-center text-muted-foreground">加载中...</td></tr>
+              <tr><td colSpan={13} className="px-3 py-8 text-center text-muted-foreground">加载中...</td></tr>
             ) : items.length === 0 ? (
-              <tr><td colSpan={11} className="px-3 py-8 text-center text-muted-foreground">暂无数据</td></tr>
+              <tr><td colSpan={13} className="px-3 py-8 text-center text-muted-foreground">暂无数据</td></tr>
             ) : items.map((item) => (
               <tr key={item.voice_id} className="hover:bg-muted/30">
                 <td className="px-2 py-2 text-center">
@@ -838,6 +887,12 @@ export default function VoiceCatalogPage() {
                 </td>
                 <td className="px-3 py-2 max-w-[200px]">
                   <FinalLabelTags item={item} />
+                </td>
+                <td className="px-3 py-2 text-center">
+                  <SpeedCell item={item} />
+                </td>
+                <td className="px-3 py-2 text-center text-xs text-muted-foreground" title={item.speed_calibrated_at || ''}>
+                  {formatRelativeCalibratedAt(item.speed_calibrated_at)}
                 </td>
                 <td className="px-3 py-2 text-center">
                   {item.matchable

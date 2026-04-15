@@ -761,7 +761,21 @@ async def update_job_metering(
 
     # Merge incoming fields into existing metering_snapshot
     snapshot = dict(job.metering_snapshot or {})
-    allowed_keys = {"final_cn_chars", "rewrite_triggered", "rewrite_count", "tts_billed_chars"}
+    allowed_keys = {
+        # V3-4 baseline
+        "final_cn_chars", "rewrite_triggered", "rewrite_count",
+        # V3-5 partial
+        "tts_billed_chars",
+        # Phase 2 Task 0 — translation-duration-alignment metrics
+        "total_segments",
+        "catalog_hit_count", "catalog_hit_rate", "skip_probe",
+        "needs_review_count", "needs_review_rate",
+        "alignment_method_distribution", "speed_param_distribution",
+        "first_pass_error_pct_avg", "first_pass_error_pct_p50",
+        "first_pass_error_pct_p90", "first_pass_error_pct_n",
+        "glossary_total_terms", "glossary_preserved_terms",
+        "term_preservation_rate", "missing_glossary_terms",
+    }
     updated_keys = []
     for key in allowed_keys:
         if key in data:

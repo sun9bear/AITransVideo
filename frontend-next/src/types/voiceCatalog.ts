@@ -44,6 +44,14 @@ export interface VoiceCatalogItem {
   updated_at: string | null
   label_status: VoiceCatalogLabelStatus
   final_label: VoiceCatalogFinalLabel | null
+  // Voice speed calibration (migration 012, 2026-04-14).
+  // `chars_per_second` is the scalar "best guess" across all calibrated models;
+  // `chars_per_second_by_model` keeps per-model values, e.g.
+  //   { "speech-2.8-turbo": 4.13, "speech-2.8-hd": 4.05 }
+  // Both are null until offline calibration has been run.
+  chars_per_second?: number | null
+  chars_per_second_by_model?: Record<string, number> | null
+  speed_calibrated_at?: string | null
 }
 
 export interface VoiceCatalogLabel {
