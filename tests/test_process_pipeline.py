@@ -4187,6 +4187,126 @@ def test_pre_tts_rewrite_skip_disabled_for_provider_without_speed(monkeypatch: p
     assert rewrite_calls["n"] == 1
 
 
+def test_pre_tts_rewrite_skip_falls_back_to_job_provider_when_segment_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CodeX 2026-04-15 follow-up: single-engine VolcEngine jobs don't populate
+    ``segment.tts_provider`` (``_speaker_providers`` stays empty), but the TTS
+    runtime still routes the segment to VolcEngine via ``self._job_provider``.
+    The skip must mirror that fallback or it under-fires on the common path.
+    """
+    pipeline = ProcessPipeline()
+    # Same ratio 1.222 as the baseline skip test — inside listen-limit, so the
+    # only thing gating skip is provider resolution.
+    segment = DubbingSegment(
+        segment_id=46,
+        speaker_id="speaker_a",
+        display_name="x",
+        voice_id="voice_a",
+        start_ms=0,
+        end_ms=20_000,
+        target_duration_ms=20_000,
+        source_text="Original",
+        cn_text="a" * 110,
+        tts_provider="",  # ← single-engine job; no per-speaker override
+    )
+    from services.tts import speed_decision as _sd
+    monkeypatch.setattr(_sd, "_get_speed_clamp", lambda: (0.50, 2.00))
+    monkeypatch.setattr(_sd, "is_speed_adjustment_enabled", lambda: True)
+
+    class FakeRewriter:
+        def rewrite_for_duration(self, *args, **kwargs):
+            raise AssertionError("rewrite must NOT fire when job_provider is speed-aware")
+
+    rewritten_count = pipeline._pre_rewrite_obvious_overshoot_segments_before_tts(
+        segments=[segment],
+        rewriter=FakeRewriter(),  # type: ignore[arg-type]
+        chars_per_second=4.5,
+        chars_per_second_by_speaker={},
+        job_provider="volcengine",  # ← job-level provider populated here
+    )
+    assert rewritten_count == 0
+    assert segment.cn_text == "a" * 110
+    assert segment.rewrite_count == 0
+
+
+def test_pre_tts_rewrite_skip_job_provider_without_speed_still_rewrites(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Negative complement: a single-engine job on a provider without
+    per-segment speed wiring must not produce a false skip — legacy rewrite
+    path keeps running. Using the placeholder ``mimo`` provider (MiMo Omni
+    has no per-segment speed knob) so this stays negative even if more
+    providers gain speed support later."""
+    pipeline = ProcessPipeline()
+    segment = DubbingSegment(
+        segment_id=47,
+        speaker_id="speaker_a",
+        display_name="x",
+        voice_id="voice_a",
+        start_ms=0,
+        end_ms=20_000,
+        target_duration_ms=20_000,
+        source_text="Original",
+        cn_text="a" * 110,
+        tts_provider="",
+    )
+    from services.tts import speed_decision as _sd
+    monkeypatch.setattr(_sd, "_get_speed_clamp", lambda: (0.50, 2.00))
+    monkeypatch.setattr(_sd, "is_speed_adjustment_enabled", lambda: True)
+
+    rewrite_calls = {"n": 0}
+
+    class FakeRewriter:
+        def rewrite_for_duration(self, *args, **kwargs):
+            rewrite_calls["n"] += 1
+            return "shorter text"
+
+    rewritten_count = pipeline._pre_rewrite_obvious_overshoot_segments_before_tts(
+        segments=[segment],
+        rewriter=FakeRewriter(),  # type: ignore[arg-type]
+        chars_per_second=4.5,
+        chars_per_second_by_speaker={},
+        job_provider="mimo",  # ← not in SPEED_AWARE_TTS_PROVIDERS
+    )
+    # ratio 1.222 → overshoot 22% > 20% threshold → rewrite (provider not speed-aware)
+    assert rewritten_count == 1
+    assert rewrite_calls["n"] == 1
+
+
+def test_pre_tts_rewrite_skip_segment_provider_wins_over_job_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Segment-level override takes precedence over job-level provider, matching
+    ``TTSGenerator._generate_one``'s resolution order.  Here: segment says
+    minimax (speed-aware) but job says mimo (no speed knob) — skip fires
+    because the segment override wins.
+    """
+    pipeline = ProcessPipeline()
+    segment = DubbingSegment(
+        segment_id=48,
+        speaker_id="speaker_a",
+        display_name="x",
+        voice_id="voice_a",
+        start_ms=0,
+        end_ms=20_000,
+        target_duration_ms=20_000,
+        source_text="Original",
+        cn_text="a" * 110,
+        tts_provider="minimax",  # ← per-speaker override (speed-aware)
+    )
+    from services.tts import speed_decision as _sd
+    monkeypatch.setattr(_sd, "_get_speed_clamp", lambda: (0.50, 2.00))
+    monkeypatch.setattr(_sd, "is_speed_adjustment_enabled", lambda: True)
+
+    class FakeRewriter:
+        def rewrite_for_duration(self, *args, **kwargs):
+            raise AssertionError("rewrite must NOT fire — segment override is speed-aware")
+
+    rewritten_count = pipeline._pre_rewrite_obvious_overshoot_segments_before_tts(
+        segments=[segment],
+        rewriter=FakeRewriter(),  # type: ignore[arg-type]
+        chars_per_second=4.5,
+        chars_per_second_by_speaker={},
+        job_provider="mimo",  # ← job-level (ignored because segment set)
+    )
+    assert rewritten_count == 0
+
+
 def test_process_pipeline_skips_pre_tts_rewrite_below_overshoot_threshold() -> None:
     pipeline = ProcessPipeline()
     # 100 chars at 4.5 c/s = ~22222ms estimated, target 20000ms → ratio 0.111 < 0.20 threshold

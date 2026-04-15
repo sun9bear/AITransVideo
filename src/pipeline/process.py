@@ -1693,6 +1693,7 @@ class ProcessPipeline:
                     rewriter=pre_tts_rewriter,
                     chars_per_second=pre_tts_chars_per_second,
                     chars_per_second_by_speaker=pre_tts_chars_per_second_by_speaker,
+                    job_provider=getattr(tts_generator, "_job_provider", None),
                 )
                 if pre_tts_rewrite_count > 0:
                     print(
@@ -1719,6 +1720,7 @@ class ProcessPipeline:
                         rewriter=pre_tts_rewriter,
                         chars_per_second=pre_tts_rewriter.chars_per_second,
                         chars_per_second_by_speaker=pre_tts_rewriter.chars_per_second_by_speaker,
+                        job_provider=getattr(tts_generator, "_job_provider", None),
                     )
                     if pre_tts_rewrite_count > 0:
                         print(
@@ -3001,8 +3003,24 @@ class ProcessPipeline:
         rewriter: GeminiRewriter,
         chars_per_second: float,
         chars_per_second_by_speaker: dict[str, float],
+        job_provider: str | None = None,
     ) -> int:
+        """Pre-TTS LLM rewrite for obvious over/undershoots.
+
+        ``job_provider`` mirrors ``TTSGenerator._generate_one``'s provider
+        resolution chain so that pre-rewrite skip stays consistent with
+        the actual TTS code path:
+
+            effective_provider = segment.tts_provider or job_provider
+
+        Without this, a single-engine VolcEngine job (where
+        ``_speaker_providers`` is empty, so ``segment.tts_provider``
+        stays ``""``) would run VolcEngine speed at TTS time but the
+        rewrite skip would not fire — CodeX Phase 2 follow-up review
+        2026-04-15.
+        """
         rewritten_count = 0
+        job_provider_norm = (job_provider or "").strip().lower() or None
 
         for segment in segments:
             target_duration_ms = int(segment.target_duration_ms)
@@ -3032,9 +3050,14 @@ class ProcessPipeline:
             # rewrite call. Effective range = admin clamp ∩ listen-comfort
             # guardrail. CodeX P1-1 + P1-2: skip is gated on (a) admin
             # tts_speed_adjustment_enabled and (b) provider has speed knob
-            # wired (today: minimax only). Without these, speed won't run
-            # in TTS, so rewrite remains the only safety net.
+            # wired (minimax + volcengine as of 2026-04-15). The segment-level
+            # override takes precedence; falls back to the job-level provider
+            # so single-engine jobs (which don't populate segment.tts_provider)
+            # also benefit. Without these, speed won't run in TTS, so rewrite
+            # remains the only safety net.
             seg_provider = (getattr(segment, "tts_provider", "") or "").strip().lower()
+            if not seg_provider and job_provider_norm:
+                seg_provider = job_provider_norm
             try:
                 from services.tts.speed_decision import (
                     _get_speed_clamp,
