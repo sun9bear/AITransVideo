@@ -9,7 +9,8 @@ request.json:
         "text": "要合成的文本",
         "voice": "longanyang",
         "model": "cosyvoice-v3-flash",
-        "output_path": "/tmp/tts_output.wav"
+        "output_path": "/tmp/tts_output.wav",
+        "speech_rate": 1.0  # optional; DashScope SDK default is 1.0
     }
 
 stdout (single JSON line):
@@ -69,6 +70,13 @@ def main() -> int:
     output_path = req.get("output_path", "")
     # Optional: override endpoint mode from request (used by B2 offline tools)
     req_endpoint_mode = req.get("endpoint_mode", "")
+    # Phase 2 Task 1 (CosyVoice branch, 2026-04-15): optional speech_rate.
+    # Defaults to 1.0 (SDK default) so pre-existing callers that don't pass
+    # this field get byte-identical behaviour.
+    try:
+        speech_rate = float(req.get("speech_rate", 1.0))
+    except (TypeError, ValueError):
+        speech_rate = 1.0
 
     if not text or not text.strip():
         print(json.dumps({"ok": False, "error": "text is empty", "error_type": "ValueError"}), flush=True)
@@ -129,9 +137,22 @@ def main() -> int:
 
         audio_format = AudioFormat.WAV_22050HZ_MONO_16BIT
 
-        print(f"[helper] voice={voice} model={model} endpoint={ws_url}", file=sys.stderr, flush=True)
+        print(
+            f"[helper] voice={voice} model={model} endpoint={ws_url} speech_rate={speech_rate}",
+            file=sys.stderr, flush=True,
+        )
 
-        synthesizer = SpeechSynthesizer(model=model, voice=voice, format=audio_format)
+        # DashScope SpeechSynthesizer.__init__ accepts speech_rate as a float
+        # multiplier; default is 1.0. We pass it directly — the caller
+        # (tts_generator._generate_one_cosyvoice) is responsible for clamping
+        # via speed_decision.decide_tts_speed, which already honors the admin
+        # tts_speed_mode envelope.
+        synthesizer = SpeechSynthesizer(
+            model=model,
+            voice=voice,
+            format=audio_format,
+            speech_rate=speech_rate,
+        )
         try:
             audio = synthesizer.call(text)
         finally:

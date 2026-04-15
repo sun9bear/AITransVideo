@@ -108,9 +108,11 @@ PRE_TTS_REWRITE_LISTEN_LIMIT_LOW = 0.80
 # can only be safely skipped when the segment will go through one of these.
 # VolcEngine joined 2026-04-15 after scripts/test_volcengine_speech_rate.py
 # confirmed audio_params.speech_rate is honored within |err|<5% across
-# seed-tts-{1.0,2.0}. CosyVoice still has voice-match transit only, pending
-# a similar field validation test.
-SPEED_AWARE_TTS_PROVIDERS: frozenset[str] = frozenset({"minimax", "volcengine"})
+# seed-tts-{1.0,2.0}. CosyVoice joined same day — DashScope SDK inspect
+# confirmed SpeechSynthesizer(..., speech_rate=1.0) is a first-class param;
+# its semantics match MiniMax voice_setting.speed directly (0.5-2.0 float),
+# so no numeric mapping is needed.
+SPEED_AWARE_TTS_PROVIDERS: frozenset[str] = frozenset({"minimax", "volcengine", "cosyvoice"})
 PRE_ALIGNMENT_SEMANTIC_SPLIT_OVERSHOOT_RATIO = 0.30
 SEVERE_PRE_ALIGNMENT_SEMANTIC_SPLIT_MIN_TARGET_MS = 30_000
 SEVERE_PRE_ALIGNMENT_SEMANTIC_SPLIT_OVERSHOOT_RATIO = 0.35

@@ -499,8 +499,48 @@ class TTSGenerator:
             flush=True,
         )
 
+        # --- Phase 2 Task 1 (CosyVoice branch, 2026-04-15): per-segment speech_rate.
+        # DashScope SpeechSynthesizer accepts a float multiplier (default 1.0),
+        # identical semantics to MiniMax voice_setting.speed — so no mapping
+        # needed, just forward the decide_tts_speed output.
+        speaker_cps = self._chars_per_second_by_speaker.get(segment.speaker_id)
+        if speaker_cps is None:
+            speaker_cps = self._global_chars_per_second
         try:
-            audio_bytes = cosyvoice_synthesize(text=tts_text, voice=voice)
+            from services.tts.speed_decision import decide_tts_speed
+            decision = decide_tts_speed(
+                cn_text=tts_text,
+                target_duration_ms=int(getattr(segment, "target_duration_ms", 0) or 0),
+                chars_per_second=float(speaker_cps) if speaker_cps else None,
+            )
+        except Exception as exc:  # never let metric path break TTS
+            print(f"[CosyVoice] speed_decision exception (fallback 1.0): {exc}", flush=True)
+            from services.tts.speed_decision import SpeedDecision
+            decision = SpeedDecision(speed=1.0, reason="error", estimated_ms=0, ratio=0.0)
+
+        if decision.reason in ("disabled", "missing_inputs", "error"):
+            effective_speed = 1.0
+        else:
+            effective_speed = float(decision.speed)
+
+        try:
+            segment.dsp_speed_param = effective_speed
+        except Exception:
+            pass
+
+        if decision.reason == "in_range":
+            print(
+                f"[CosyVoice] speed={effective_speed:.4f} "
+                f"(ratio={decision.ratio:.3f}, est={decision.estimated_ms}ms)",
+                flush=True,
+            )
+
+        try:
+            audio_bytes = cosyvoice_synthesize(
+                text=tts_text,
+                voice=voice,
+                speech_rate=effective_speed,
+            )
         except Exception as exc:
             if voice != cosyvoice_default_voice and _is_invalid_cosyvoice_voice_error(exc):
                 print(
@@ -510,7 +550,11 @@ class TTSGenerator:
                 )
                 voice = cosyvoice_default_voice
                 confidence = "low"
-                audio_bytes = cosyvoice_synthesize(text=tts_text, voice=voice)
+                audio_bytes = cosyvoice_synthesize(
+                    text=tts_text,
+                    voice=voice,
+                    speech_rate=effective_speed,
+                )
             else:
                 raise
         atomic_write_bytes(str(output_path), audio_bytes)

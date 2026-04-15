@@ -4147,12 +4147,18 @@ def test_pre_tts_rewrite_skip_disabled_when_speed_flag_off(monkeypatch: pytest.M
 
 
 def test_pre_tts_rewrite_skip_disabled_for_provider_without_speed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """CodeX P1-2: only MiniMax has per-segment speed wiring today.
-    For CosyVoice / VolcEngine segments, the speed-aware skip MUST NOT
-    fire — they have no speed knob, so rewrite is still required."""
+    """CodeX P1-2: skip is provider-gated. For any segment whose provider is
+    NOT in ``SPEED_AWARE_TTS_PROVIDERS`` the skip must NOT fire — because
+    speed won't actually run, so rewrite stays the only safety net.
+
+    As of 2026-04-15 MiniMax + VolcEngine + CosyVoice all have speed wired,
+    so this test uses a placeholder provider name that is guaranteed to stay
+    outside the set; that way future additions don't silently break the
+    negative assertion.
+    """
     pipeline = ProcessPipeline()
-    # Ratio 1.222 cosyvoice segment, inside listen-limit — but cosyvoice
-    # has no speed support, so we must rewrite via legacy threshold.
+    # Ratio 1.222 on a provider that has no speed knob — inside listen-limit
+    # but must still hit the legacy 20% threshold and rewrite.
     segment = DubbingSegment(
         segment_id=45,
         speaker_id="speaker_a",
@@ -4163,7 +4169,7 @@ def test_pre_tts_rewrite_skip_disabled_for_provider_without_speed(monkeypatch: p
         target_duration_ms=20_000,
         source_text="Original",
         cn_text="a" * 110,
-        tts_provider="cosyvoice",  # ← speed not wired
+        tts_provider="mimo",  # ← MiMo Omni has no per-segment speed knob
     )
     from services.tts import speed_decision as _sd
     monkeypatch.setattr(_sd, "_get_speed_clamp", lambda: (0.50, 2.00))

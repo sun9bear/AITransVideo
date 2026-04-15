@@ -92,8 +92,15 @@ def _synthesize_once(
     text: str,
     voice: str,
     model: str,
+    speech_rate: float = 1.0,
 ) -> bytes:
-    """Run a single TTS call in an isolated helper subprocess."""
+    """Run a single TTS call in an isolated helper subprocess.
+
+    ``speech_rate`` is a multiplier matching DashScope SDK semantics
+    (default 1.0, range ~0.5-2.0). Only written into request.json when
+    different from 1.0 so that pre-Phase 2 callers emit byte-identical
+    request payloads.
+    """
     tmp_dir = tempfile.mkdtemp(prefix="cosyvoice_")
     request_path = os.path.join(tmp_dir, "request.json")
     output_path = os.path.join(tmp_dir, "output.wav")
@@ -105,6 +112,8 @@ def _synthesize_once(
         "output_path": output_path,
         "endpoint_mode": _resolve_deployment_mode(),
     }
+    if speech_rate != 1.0:
+        request_data["speech_rate"] = float(speech_rate)
     with open(request_path, "w", encoding="utf-8") as f:
         json.dump(request_data, f, ensure_ascii=False)
 
@@ -196,12 +205,15 @@ def synthesize(
     voice: str,
     model: str = DEFAULT_MODEL,
     api_key: str | None = None,
+    *,
+    speech_rate: float = 1.0,
 ) -> bytes:
     """Synthesize text to audio using CosyVoice via an isolated subprocess.
 
-    Interface is identical to the previous direct-call version.
+    Interface is a superset of the previous direct-call version.
     ``api_key`` is accepted for signature compatibility but ignored —
     the helper reads DASHSCOPE_API_KEY from the environment.
+    ``speech_rate`` is a DashScope-SDK-native multiplier (default 1.0).
     """
     if not text or not text.strip():
         raise CosyVoiceTTSError("Text must not be empty")
@@ -211,11 +223,12 @@ def synthesize(
     last_exc: Exception | None = None
     for attempt in range(MAX_RETRIES + 1):
         if attempt == 0:
-            logger.info("[CosyVoice] voice=%s, text=%s", voice, truncated)
+            logger.info("[CosyVoice] voice=%s, text=%s, speech_rate=%.4f", voice, truncated, speech_rate)
         else:
-            logger.info("[CosyVoice] voice=%s, text=%s (retry %d/%d)", voice, truncated, attempt, MAX_RETRIES)
+            logger.info("[CosyVoice] voice=%s, text=%s, speech_rate=%.4f (retry %d/%d)",
+                        voice, truncated, speech_rate, attempt, MAX_RETRIES)
         try:
-            audio = _synthesize_once(text, voice, model)
+            audio = _synthesize_once(text, voice, model, speech_rate=speech_rate)
             logger.info("[CosyVoice] success: %d bytes, voice=%s", len(audio), voice)
             return audio
         except CosyVoiceTTSError:
