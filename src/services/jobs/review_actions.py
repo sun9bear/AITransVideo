@@ -445,9 +445,10 @@ def approve_voice_selection(
     review_state_path = Path(project_dir) / "review_state.json"
     manager = ReviewStateManager(review_state_path)
     stage = manager.get_stage(VOICE_SELECTION_REVIEW_STAGE)
+    existing_payload: dict[str, object] = {}
     if stage:
-        payload = stage.get("payload") or {}
-        for sp_info in (payload.get("speakers") or []):
+        existing_payload = stage.get("payload") or {}
+        for sp_info in (existing_payload.get("speakers") or []):
             cloning = sp_info.get("cloning")
             if isinstance(cloning, dict) and cloning.get("started_at"):
                 import datetime
@@ -461,17 +462,31 @@ def approve_voice_selection(
                     if "正在克隆" in str(exc):
                         raise
 
-    approved_payload = {
-        "speakers": [
-            {
-                "speaker_id": sp["speaker_id"],
-                "voice_id": sp["voice_id"],
-                "voice_source": sp.get("voice_source", "catalog"),
-                "tts_provider": sp.get("tts_provider", ""),
-            }
-            for sp in speakers
-        ]
-    }
+    # Merge user's choices INTO the original payload instead of replacing it.
+    # The original payload carries per-speaker recommendation context that the
+    # frontend uses to surface "smart recommendation" lists in the dropdown
+    # (top 1 + top backups by combined_rerank score, Task 2).  Replacing the
+    # entire payload would erase that context once the user re-opens the page.
+    existing_speakers_by_id: dict[str, dict] = {}
+    for sp_info in (existing_payload.get("speakers") or []):
+        sid = str(sp_info.get("speaker_id", "")).strip()
+        if sid:
+            existing_speakers_by_id[sid] = dict(sp_info)
+
+    merged_speakers: list[dict[str, object]] = []
+    for sp in speakers:
+        sid = str(sp["speaker_id"]).strip()
+        base = dict(existing_speakers_by_id.get(sid, {}))
+        base["speaker_id"] = sid
+        base["voice_id"] = sp["voice_id"]
+        base["voice_source"] = sp.get("voice_source", "catalog")
+        base["tts_provider"] = sp.get("tts_provider", "")
+        # Drop any in-progress clone marker now that the user has approved.
+        base.pop("cloning", None)
+        merged_speakers.append(base)
+
+    approved_payload: dict[str, object] = dict(existing_payload)
+    approved_payload["speakers"] = merged_speakers
 
     manager.set_stage(
         VOICE_SELECTION_REVIEW_STAGE,

@@ -353,9 +353,14 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
                   )}
 
                   <div className="ml-auto flex items-center gap-2">
-                    {/* Split button */}
+                    {/* Split / Cancel-split toggle: distinct styles so cancel
+                        is visually obvious (amber filled vs cyan outline). */}
                     <button
-                      className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-3 py-1 text-xs font-medium text-cyan-400 transition hover:bg-cyan-500/20 hover:border-cyan-500/50"
+                      className={
+                        splittingSegmentId === item.segmentId
+                          ? 'rounded-lg border-2 border-amber-500 bg-amber-500 px-4 py-1.5 text-xs font-bold text-white transition hover:bg-amber-600 hover:border-amber-600 shadow-md'
+                          : 'rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-3 py-1 text-xs font-medium text-cyan-400 transition hover:bg-cyan-500/20 hover:border-cyan-500/50'
+                      }
                       onClick={() => {
                         if (splittingSegmentId === item.segmentId) { setSplittingSegmentId(null) } else {
                           setSplittingSegmentId(item.segmentId)
@@ -367,7 +372,7 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
                       }}
                       type="button"
                     >
-                      {splittingSegmentId === item.segmentId ? '取消拆分' : '拆分'}
+                      {splittingSegmentId === item.segmentId ? '✕ 取消拆分' : '拆分'}
                     </button>
                   </div>
                 </div>

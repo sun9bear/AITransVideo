@@ -191,6 +191,39 @@
   box-shadow: 0 0 0 2px var(--ring);
 }
 
+/* Primary action button — referenced by 10+ components but the CSS class
+   was previously missing, leaving buttons rendering as plain text.  Defined
+   here so all "primary-button" usages get the correct filled-button look. */
+.primary-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  border-radius: 0.5rem;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font-weight: 600;
+  font-size: 0.875rem;
+  border: none;
+  cursor: pointer;
+  transition: opacity 0.15s, transform 0.05s;
+  white-space: nowrap;
+}
+
+.primary-button:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.primary-button:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.primary-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* ==========================================
    Semantic utility classes for light/dark
    Use these instead of hardcoded white/black

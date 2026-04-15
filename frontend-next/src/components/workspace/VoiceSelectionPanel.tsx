@@ -37,7 +37,15 @@ interface SpeakerPayload {
   totalDurationS: number
   canClone: boolean
   autoMatchedVoice: { voiceId: string; label: string } | null
-  autoMatchedByProvider: Record<string, { voiceId: string; label: string; matchConfidence: string } | null>
+  autoMatchedByProvider: Record<
+    string,
+    {
+      voiceId: string
+      label: string
+      matchConfidence: string
+      backups: { voiceId: string; label: string }[]
+    } | null
+  >
   probeTexts: ProbeText[]
 }
 
@@ -46,6 +54,11 @@ interface AvailableVoice {
   label: string
   gender: string
   provider: string
+  // Voice speed calibration (Phase 1 of translation-duration-alignment).
+  // Null when voice is not yet calibrated (cloned voices, new voices, etc.);
+  // the runtime will fall back to probe calibration in that case.
+  charsPerSecond?: number | null
+  speedCalibratedAt?: string | null
 }
 
 interface ProviderInfo {
@@ -73,6 +86,19 @@ const PROVIDER_SHORT_LABELS: Record<string, string> = {
   minimax: 'MiniMax',
   cosyvoice: 'CosyVoice',
   volcengine: '豆包',
+}
+
+/** Build a dropdown label including speed calibration info when available. */
+function formatVoiceOptionLabel(v: AvailableVoice): string {
+  const base = v.label || v.voiceId
+  const cps = v.charsPerSecond
+  if (cps == null) {
+    return base
+  }
+  let tier = '中'
+  if (cps < 3.5) tier = '慢'
+  else if (cps >= 4.5) tier = '快'
+  return `${base} · ${cps.toFixed(1)}字/秒(${tier})`
 }
 
 /* ---------- Main Component ---------- */
@@ -129,15 +155,29 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
         // Parse speakers with per-provider auto-match
         const rawSpeakers = Array.isArray(payload.speakers) ? payload.speakers : []
         const loadedSpeakers: SpeakerPayload[] = rawSpeakers.map((s: Record<string, unknown>) => {
-          // Parse auto_matched_by_provider
+          // Parse auto_matched_by_provider (incl. backup_voices since Task 2)
           const rawByProv = (s.auto_matched_by_provider ?? {}) as Record<string, Record<string, unknown> | null>
-          const amByProv: Record<string, { voiceId: string; label: string; matchConfidence: string } | null> = {}
+          const amByProv: Record<
+            string,
+            { voiceId: string; label: string; matchConfidence: string; backups: { voiceId: string; label: string }[] } | null
+          > = {}
           for (const [prov, match] of Object.entries(rawByProv)) {
             if (match && typeof match === 'object') {
+              const rawBackups = Array.isArray(match.backup_voices) ? match.backup_voices : []
+              const backups = rawBackups
+                .map((b) => {
+                  if (b && typeof b === 'object') {
+                    const obj = b as Record<string, unknown>
+                    return { voiceId: String(obj.voice_id ?? ''), label: String(obj.label ?? '') }
+                  }
+                  return { voiceId: '', label: '' }
+                })
+                .filter((b: { voiceId: string }) => b.voiceId)
               amByProv[prov] = {
                 voiceId: String(match.voice_id ?? ''),
                 label: String(match.label ?? ''),
                 matchConfidence: String(match.match_confidence ?? ''),
+                backups,
               }
             } else {
               amByProv[prov] = null
@@ -190,6 +230,8 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                 label: String(v.label ?? v.voice_id ?? ''),
                 gender: String(v.gender ?? ''),
                 provider: String(v.provider ?? prov),
+                charsPerSecond: v.chars_per_second != null ? Number(v.chars_per_second) : null,
+                speedCalibratedAt: v.speed_calibrated_at != null ? String(v.speed_calibrated_at) : null,
               })).filter((v: AvailableVoice) => v.voiceId),
             }
           }
@@ -203,6 +245,8 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
           label: String(v.label ?? v.voice_id ?? ''),
           gender: String(v.gender ?? ''),
           provider: String(v.provider ?? ''),
+          charsPerSecond: v.chars_per_second != null ? Number(v.chars_per_second) : null,
+          speedCalibratedAt: v.speed_calibrated_at != null ? String(v.speed_calibrated_at) : null,
         })).filter((v: AvailableVoice) => v.voiceId))
 
         // Check for expired voice IDs from pipeline validation
@@ -492,6 +536,36 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                         value={state?.voiceId ?? ''}
                       >
                         <option value="">-- 选择音色 --</option>
+                        {/* Smart recommendations (Task 2): top match + backups, pinned to top */}
+                        {(() => {
+                          const provMatch = sp.autoMatchedByProvider[currentProvider]
+                          if (!provMatch?.voiceId) return null
+                          const voiceById = new Map(voicesForProvider.map((v) => [v.voiceId, v]))
+                          // Top match first, then backups (keep order, dedupe).
+                          const recIds: string[] = [provMatch.voiceId]
+                          for (const b of provMatch.backups) {
+                            if (!recIds.includes(b.voiceId)) recIds.push(b.voiceId)
+                          }
+                          if (recIds.length === 0) return null
+                          return (
+                            <optgroup label="🎯 智能推荐 (按匹配度排序)">
+                              {recIds.map((vid, i) => {
+                                const v = voiceById.get(vid)
+                                const fallbackLabel =
+                                  vid === provMatch.voiceId
+                                    ? provMatch.label
+                                    : provMatch.backups.find((b) => b.voiceId === vid)?.label || vid
+                                const baseLabel = v ? formatVoiceOptionLabel(v) : fallbackLabel
+                                const prefix = i === 0 ? '★ 自动匹配' : `#${i + 1} 推荐`
+                                return (
+                                  <option key={`rec-${vid}`} value={vid}>
+                                    {`${prefix} · ${baseLabel}`}
+                                  </option>
+                                )
+                              })}
+                            </optgroup>
+                          )
+                        })()}
                         {/* MiniMax: personal voices first, then catalog grouped by gender */}
                         {currentProvider === 'minimax' && personalVoices.filter((v) => !expiredVoiceIds.includes(v.voiceId)).length > 0 ? (
                           <optgroup label="我的音色">
@@ -513,17 +587,17 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                             <>
                               {femaleVoices.length > 0 ? (
                                 <optgroup label={`女声 (${femaleVoices.length})`}>
-                                  {femaleVoices.map((v) => <option key={v.voiceId} value={v.voiceId}>{v.label}</option>)}
+                                  {femaleVoices.map((v) => <option key={v.voiceId} value={v.voiceId}>{formatVoiceOptionLabel(v)}</option>)}
                                 </optgroup>
                               ) : null}
                               {maleVoices.length > 0 ? (
                                 <optgroup label={`男声 (${maleVoices.length})`}>
-                                  {maleVoices.map((v) => <option key={v.voiceId} value={v.voiceId}>{v.label}</option>)}
+                                  {maleVoices.map((v) => <option key={v.voiceId} value={v.voiceId}>{formatVoiceOptionLabel(v)}</option>)}
                                 </optgroup>
                               ) : null}
                               {otherVoices.length > 0 ? (
                                 <optgroup label={`其他 (${otherVoices.length})`}>
-                                  {otherVoices.map((v) => <option key={v.voiceId} value={v.voiceId}>{v.label}</option>)}
+                                  {otherVoices.map((v) => <option key={v.voiceId} value={v.voiceId}>{formatVoiceOptionLabel(v)}</option>)}
                                 </optgroup>
                               ) : null}
                             </>
