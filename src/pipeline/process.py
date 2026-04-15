@@ -97,6 +97,17 @@ FAILED_SEGMENT_SEMANTIC_SPLIT_MIN_RATIO = 0.28
 PRE_TTS_REWRITE_MIN_TARGET_MS = 8_000
 PRE_TTS_REWRITE_OVERSHOOT_RATIO = 0.20
 PRE_TTS_REWRITE_UNDERSHOOT_RATIO = 0.25
+# Plan-C+ (2026-04-15): when TTS speed can absorb the drift safely
+# (within both admin speed clamp AND a listen-comfort guardrail),
+# skip the pre-TTS rewrite — it would just be a wasted LLM call.
+# The listen-limit floor/ceiling protects against unlimited-mode making
+# TTS sound rushed or sluggish; ratios beyond it still rewrite.
+PRE_TTS_REWRITE_LISTEN_LIMIT_HIGH = 1.30
+PRE_TTS_REWRITE_LISTEN_LIMIT_LOW = 0.80
+# Providers with per-segment TTS speed wired up. CodeX P1-2: pre-rewrite
+# can only be safely skipped when the segment will go through one of these.
+# CosyVoice + VolcEngine have voice-match transit but no speed knob today.
+SPEED_AWARE_TTS_PROVIDERS: frozenset[str] = frozenset({"minimax"})
 PRE_ALIGNMENT_SEMANTIC_SPLIT_OVERSHOOT_RATIO = 0.30
 SEVERE_PRE_ALIGNMENT_SEMANTIC_SPLIT_MIN_TARGET_MS = 30_000
 SEVERE_PRE_ALIGNMENT_SEMANTIC_SPLIT_OVERSHOOT_RATIO = 0.35
@@ -173,7 +184,13 @@ def _report_source_metadata(job_id: str, duration_seconds: float, title: str | N
         print(f"[S0] Warning: failed to report source metadata: {e}", flush=True)
 
 
-def _report_job_metering(job_id: str, segments: list, *, tts_billed_chars: int | None = None) -> None:
+def _report_job_metering(
+    job_id: str,
+    segments: list,
+    *,
+    tts_billed_chars: int | None = None,
+    glossary: dict[str, str] | None = None,
+) -> None:
     """Best-effort callback to Gateway /job-api/jobs/{job_id}/metering.
 
     Computes and reports pipeline metering fields from real segment objects.
@@ -182,11 +199,24 @@ def _report_job_metering(job_id: str, segments: list, *, tts_billed_chars: int |
 
     Text field: ``cn_text`` (DubbingSegment) or ``merged_cn_text`` (SemanticBlock).
 
-    Reports:
+    Reports (V3-4 baseline + V3-5 partial + Phase 2 Task 0 metrics):
     - final_cn_chars: total Chinese characters in final translated text
     - rewrite_triggered: whether any segment had rewrite_count > 0
     - rewrite_count: total rewrite operations across all segments
     - tts_billed_chars: total chars submitted to TTS provider (from TTSResult.billed_chars)
+    - **Phase 2 Task 0**:
+      - total_segments: int
+      - catalog_hit_count: how many segments had a voice with catalog cps lookup
+      - catalog_hit_rate: catalog_hit_count / total_segments
+      - skip_probe: whether the entire job skipped probe TTS calibration (all-or-nothing)
+      - first_pass_error_pct_avg: avg of |first_pass_error_pct| across segments with valid value
+      - first_pass_error_pct_p50/p90: percentiles of |first_pass_error_pct|
+      - needs_review_count: segments with needs_review=True (post-alignment)
+      - needs_review_rate: needs_review_count / total_segments
+      - alignment_method_distribution: counts by method (direct/dsp/rewrite/force_dsp)
+      - speed_param_distribution: counts by speed param bucket (1.0 / [0.92,1.08] / outside) — Task 1 will populate
+      - term_preservation_rate: glossary terms appearing in final translation / total terms
+      - missing_glossary_terms: list (≤20) of Chinese terms that were dropped
     """
     import urllib.request
     gateway_base = os.environ.get("AVT_GATEWAY_URL", "http://localhost:8880")
@@ -195,21 +225,101 @@ def _report_job_metering(job_id: str, segments: list, *, tts_billed_chars: int |
     try:
         total_cn_chars = 0
         total_rewrite_count = 0
+        total_segments = 0
+        catalog_hit_count = 0
+        needs_review_count = 0
+        first_pass_errors_abs: list[float] = []
+        method_counts: dict[str, int] = {}
+        speed_counts: dict[str, int] = {"1.0": 0, "in_range": 0, "outside": 0}
+
         for seg in segments:
+            total_segments += 1
             text = getattr(seg, "cn_text", "") or ""
             if not text:
                 text = getattr(seg, "merged_cn_text", "") or ""
             total_cn_chars += len(text)
             total_rewrite_count += getattr(seg, "rewrite_count", 0)
 
+            # Phase 2 Task 0 — per-segment metric collection (best-effort:
+            # missing attributes are treated as defaults so that legacy paths
+            # like SemanticBlock continue to work without raising).
+            if getattr(seg, "catalog_hit", False):
+                catalog_hit_count += 1
+            if getattr(seg, "needs_review", False):
+                needs_review_count += 1
+
+            method = getattr(seg, "alignment_method", "") or ""
+            if method:
+                method_counts[method] = method_counts.get(method, 0) + 1
+
+            err = getattr(seg, "first_pass_error_pct", None)
+            if err is not None and err != 0.0:
+                first_pass_errors_abs.append(abs(float(err)))
+
+            speed = getattr(seg, "dsp_speed_param", 1.0) or 1.0
+            speed = float(speed)
+            if abs(speed - 1.0) < 1e-6:
+                speed_counts["1.0"] += 1
+            elif 0.92 <= speed <= 1.08:
+                speed_counts["in_range"] += 1
+            else:
+                speed_counts["outside"] += 1
+
         body: dict = {
             "final_cn_chars": total_cn_chars,
             "rewrite_triggered": total_rewrite_count > 0,
             "rewrite_count": total_rewrite_count,
+            # --- Phase 2 Task 0 fields ---
+            "total_segments": total_segments,
+            "catalog_hit_count": catalog_hit_count,
+            "catalog_hit_rate": (
+                round(catalog_hit_count / total_segments, 4)
+                if total_segments > 0 else 0.0
+            ),
+            # all-or-nothing: skip_probe is true iff every segment hit the catalog
+            "skip_probe": (total_segments > 0 and catalog_hit_count == total_segments),
+            "needs_review_count": needs_review_count,
+            "needs_review_rate": (
+                round(needs_review_count / total_segments, 4)
+                if total_segments > 0 else 0.0
+            ),
+            "alignment_method_distribution": method_counts,
+            "speed_param_distribution": speed_counts,
         }
+
+        # First-pass duration error stats (only when at least one segment has it).
+        if first_pass_errors_abs:
+            sorted_err = sorted(first_pass_errors_abs)
+            n = len(sorted_err)
+            p50 = sorted_err[n // 2]
+            p90_idx = max(0, int(n * 0.9) - 1) if n > 1 else 0
+            p90 = sorted_err[min(p90_idx, n - 1)]
+            body["first_pass_error_pct_avg"] = round(sum(sorted_err) / n, 4)
+            body["first_pass_error_pct_p50"] = round(p50, 4)
+            body["first_pass_error_pct_p90"] = round(p90, 4)
+            body["first_pass_error_pct_n"] = n
+
         # V3-5: include tts_billed_chars only if truthfully available from TTS layer
         if tts_billed_chars is not None:
             body["tts_billed_chars"] = tts_billed_chars
+
+        # Phase 2 Task 0 — glossary preservation check (best-effort)
+        if glossary:
+            try:
+                from services.gemini.translator import check_glossary_preservation
+                gloss = check_glossary_preservation(segments, glossary)
+                total_terms = int(gloss.get("total_terms", 0))
+                preserved = int(gloss.get("preserved_terms", 0))
+                body["glossary_total_terms"] = total_terms
+                body["glossary_preserved_terms"] = preserved
+                body["term_preservation_rate"] = (
+                    round(preserved / total_terms, 4) if total_terms > 0 else 1.0
+                )
+                missing = gloss.get("missing_terms", []) or []
+                if missing:
+                    body["missing_glossary_terms"] = missing
+            except Exception as gx:
+                print(f"[metering] glossary check failed (non-fatal): {gx}", flush=True)
 
         req = urllib.request.Request(
             url,
@@ -785,7 +895,7 @@ class ProcessPipeline:
             if not s3_cache_hit and not s2_cache_hit and not config.skip_review:
                 print("[S2] Running unified LLM transcript review (audio + text)...")
                 try:
-                    from src.services.transcript_reviewer import review_transcript
+                    from services.transcript_reviewer import review_transcript
 
                     # Load words data for split point estimation
                     _words_data: list[dict] | None = None
@@ -1026,7 +1136,7 @@ class ProcessPipeline:
                         print(f"[S2.5] Pass 3 cache read failed: {exc}", flush=True)
                 if not _pass3_profiles:
                     try:
-                        from src.services.transcript_reviewer import review_pass3_voice_profiles
+                        from services.transcript_reviewer import review_pass3_voice_profiles
 
                         print("[S2.5] Running Pass 3: voice profiling...", flush=True)
                         _pass3_profiles = review_pass3_voice_profiles(
@@ -1091,6 +1201,73 @@ class ProcessPipeline:
                     print(f"[S2.5] 用户确认音色：{_speaker_voices}")
                     if _speaker_providers:
                         print(f"[S2.5] 用户选择引擎：{_speaker_providers}")
+
+                    # Lazy migration: legacy approved payloads (created before
+                    # review_actions.py merge-instead-of-replace fix) lack the
+                    # `auto_matched_by_provider` recommendation context. The
+                    # frontend Smart-Recommendation dropdown can't render
+                    # backups without it.  Detect & rebuild once, then preserve
+                    # the user's choices on top.
+                    needs_refresh = (
+                        config.wait_for_review
+                        and job_service_mode == "studio"
+                        and not any(
+                            sp.get("auto_matched_by_provider")
+                            for sp in sel_speakers
+                            if isinstance(sp, dict)
+                        )
+                    )
+                    if needs_refresh:
+                        try:
+                            refreshed_payload = self._build_voice_selection_review_payload(
+                                transcript_result=transcript_result,
+                                tts_provider=job_tts_provider,
+                                service_mode=job_service_mode,
+                                source_audio_path=source_audio_path,
+                                effective_speakers=effective_speakers,
+                                speaker_names=_merge_speaker_name_map(
+                                    _review_speaker_names,
+                                    speaker_name_a,
+                                    speaker_name_b,
+                                ),
+                                speaker_styles=_review_speaker_styles,
+                                probe_segments=_probe_segments or None,
+                            )
+                            user_choice_by_sid = {
+                                str(sp.get("speaker_id", "")): sp
+                                for sp in sel_speakers
+                                if isinstance(sp, dict)
+                            }
+                            refreshed_speakers = []
+                            for sp in (refreshed_payload.get("speakers") or []):
+                                if not isinstance(sp, dict):
+                                    continue
+                                sid = str(sp.get("speaker_id", ""))
+                                merged = dict(sp)
+                                if sid in user_choice_by_sid:
+                                    user_sp = user_choice_by_sid[sid]
+                                    if user_sp.get("voice_id"):
+                                        merged["voice_id"] = user_sp.get("voice_id")
+                                    merged["voice_source"] = user_sp.get(
+                                        "voice_source", merged.get("voice_source", "auto_matched"),
+                                    )
+                                    if user_sp.get("tts_provider"):
+                                        merged["tts_provider"] = user_sp.get("tts_provider")
+                                refreshed_speakers.append(merged)
+                            refreshed_payload["speakers"] = refreshed_speakers
+                            review_state_manager.set_stage(
+                                VOICE_SELECTION_REVIEW_STAGE,
+                                status=REVIEW_STATUS_APPROVED,
+                                payload=refreshed_payload,
+                            )
+                            print(
+                                "[S2.5] Legacy payload migrated: rebuilt "
+                                "auto_matched_by_provider for smart-recommendation UI"
+                            )
+                        except Exception as exc:
+                            # Migration is best-effort; pipeline continues with
+                            # legacy payload (frontend just won't show backups).
+                            print(f"[S2.5] payload migration skipped: {exc}")
             elif config.wait_for_review and job_requires_review and job_service_mode == "studio":
                 vs_payload = self._build_voice_selection_review_payload(
                     transcript_result=transcript_result,
@@ -1181,7 +1358,79 @@ class ProcessPipeline:
             # justified by downstream savings (fewer rewrites + force_dsp).
             _probe_chars_per_second = DEFAULT_ESTIMATED_TTS_CHARS_PER_SECOND
             _probe_chars_per_second_by_speaker: dict[str, float] = {}
-            if not s3_cache_hit and _probe_segments:
+            _catalog_cps_used = False
+            # Phase 2 Task 0 — track which speakers had a catalog hit, even
+            # when the all-or-nothing policy ends up falling back to probe.
+            # This tells us how often the partial-hit case occurs.
+            _catalog_hit_speakers: set[str] = set()
+
+            # --- Speed catalog lookup (Phase 1 of translation-duration-alignment) ---
+            # Studio mode only, voice_selection already confirmed, all speakers
+            # have concrete voice_ids (not "auto"). On hit, skip probe entirely.
+            #
+            # NOTE: we intentionally DO NOT guard on `not s3_cache_hit` — the
+            # catalog lookup is a cheap in-memory-cached call and we need the
+            # result to stamp `segment.catalog_hit` even on cache-hit re-runs
+            # (Studio reruns AFTER translation_review have s3_cache_hit=True
+            # but still need correct metering flags).
+            # The actual "skip probe" decision below stays gated on cache.
+            if (
+                job_service_mode == "studio"
+                and _speaker_voices
+                and all(v and v != "auto" for v in _speaker_voices.values())
+            ):
+                try:
+                    from services.tts.voice_speed_catalog import lookup_per_speaker
+
+                    _catalog_global, _catalog_by_speaker = lookup_per_speaker(
+                        _speaker_voices,
+                        default_provider=job_tts_provider or "minimax",
+                        speaker_providers=_speaker_providers or None,
+                        tts_model=_snap('tts_model'),
+                    )
+                    if _catalog_by_speaker:
+                        # Always record per-speaker catalog hits so the metric
+                        # reflects partial-hit reality, even when fallback to probe
+                        # is triggered by the all-or-nothing policy.
+                        _catalog_hit_speakers = set(_catalog_by_speaker.keys())
+                    # skip-probe optimisation only makes sense on fresh translation;
+                    # cache-hit runs don't translate again and probe gating is moot.
+                    if (not s3_cache_hit
+                            and _catalog_by_speaker
+                            and len(_catalog_by_speaker) == len(_speaker_voices)):
+                        _probe_chars_per_second = _catalog_global
+                        _probe_chars_per_second_by_speaker = _catalog_by_speaker
+                        _catalog_cps_used = True
+                        print(f"[S4-catalog] 使用预标定音色语速，跳过 probe TTS 校准")
+                        print(f"[S4-catalog]   global: {_catalog_global:.3f} 字/秒")
+                        for _spk, _cps in _catalog_by_speaker.items():
+                            print(f"[S4-catalog]   {_spk}: {_cps:.3f} 字/秒")
+                    elif not s3_cache_hit and _catalog_by_speaker:
+                        _covered = len(_catalog_by_speaker)
+                        _total = len(_speaker_voices)
+                        print(
+                            f"[S4-catalog] 部分预标定命中（{_covered}/{_total}），"
+                            f"回退到 probe TTS 校准"
+                        )
+                    elif _catalog_by_speaker:
+                        # cache-hit 情况下记录一下 metric 命中数，但不打印长篇日志
+                        print(f"[S4-catalog] cache-hit 重跑：记录 catalog 命中 "
+                              f"{len(_catalog_by_speaker)}/{len(_speaker_voices)}（不参与 probe 决策）")
+                        # Phase 2 Task 1 fix: even on cache-hit re-runs, propagate
+                        # the catalog cps values into the variables that feed
+                        # tts_generator.set_speaker_chars_per_second(). Without this
+                        # the MiniMax per-segment speed_decision permanently sees
+                        # chars_per_second=None and returns "missing_inputs" → 1.0,
+                        # which silently kills Task 1 for every cache-hit run.
+                        if _catalog_global and _catalog_global > 0:
+                            _probe_chars_per_second = _catalog_global
+                        for _spk, _cps in _catalog_by_speaker.items():
+                            if _cps and _cps > 0:
+                                _probe_chars_per_second_by_speaker[_spk] = _cps
+                except Exception as exc:
+                    print(f"[S4-catalog] 目录查询异常（回退 probe）：{exc}")
+
+            if not _catalog_cps_used and not s3_cache_hit and _probe_segments:
                 try:
                     _probe_tts_generator = TTSGenerator(tts_config, job_record=config.job_record)
                     _probe_tts_dir = (final_project_dir / "tts").resolve(strict=False)
@@ -1236,6 +1485,38 @@ class ProcessPipeline:
                         if seg.speaker_id in _speaker_providers:
                             seg.tts_provider = _speaker_providers[seg.speaker_id]
                 print(f"[S3] 完成：共 {translation_result.total_segments} 段")
+
+            # Phase 2 Task 0 — stamp catalog_hit per segment for downstream metering.
+            # Applied to BOTH cache-hit and fresh-translation paths so the metric
+            # is consistent regardless of S3 cache state.  Note that translate()
+            # writes segments.json BEFORE returning, so when we mark catalog_hit
+            # here on the fresh-translation path it's not yet in the persisted
+            # JSON; we re-serialise below so subsequent cache-hit reruns keep it.
+            if _catalog_hit_speakers:
+                _segments_changed = False
+                for seg in translation_result.segments:
+                    if seg.speaker_id in _catalog_hit_speakers and not seg.catalog_hit:
+                        seg.catalog_hit = True
+                        _segments_changed = True
+                # Persist updated segments.json so next cache-hit run sees the flag.
+                if _segments_changed:
+                    try:
+                        from dataclasses import asdict
+                        _segments_path = (
+                            final_project_dir / "translation" / "segments.json"
+                        ).resolve(strict=False)
+                        if _segments_path.exists():
+                            _dump = {
+                                "segments": [asdict(s) for s in translation_result.segments],
+                                "total_segments": translation_result.total_segments,
+                                "output_path": translation_result.output_path,
+                            }
+                            _segments_path.write_text(
+                                json.dumps(_dump, ensure_ascii=False, indent=2),
+                                encoding="utf-8",
+                            )
+                    except Exception as _exc:
+                        print(f"[S4-catalog] segments.json 重写失败（非致命）：{_exc}")
 
             self._apply_review_speaker_styles_to_segments(
                 translation_result.segments,
@@ -1370,6 +1651,18 @@ class ProcessPipeline:
                     print(f"  {spk_id} ({name}, {gender}/{age}, persona={ps}, energy={el}): {vd[:80]}", flush=True)
 
             tts_generator = TTSGenerator(tts_config, job_record=config.job_record)
+            # Phase 2 Task 1 — pipe per-speaker chars/sec into TTS so MiniMax
+            # can compute per-segment voice_setting.speed (feature-flagged).
+            try:
+                tts_generator.set_speaker_chars_per_second(
+                    _probe_chars_per_second_by_speaker or None,
+                    global_cps=_probe_chars_per_second
+                    if _probe_chars_per_second != DEFAULT_ESTIMATED_TTS_CHARS_PER_SECOND
+                    else None,
+                )
+            except Exception as _exc:
+                # Defensive: if the new method is missing (rolling deploy), continue.
+                print(f"[S4] set_speaker_chars_per_second skipped: {_exc}", flush=True)
             tts_dir = (final_project_dir / "tts").resolve(strict=False)
             rewriter_kwargs: dict[str, object] = {}
             custom_rewrite_prompt_template = gemini_config.get("rewrite_prompt_template")
@@ -1548,6 +1841,34 @@ class ProcessPipeline:
             current_stage_name = None
             print(f"[S6] 完成：输出目录 {final_project_dir / 'output'}")
 
+            # Phase 2 Task 0 hotfix v2 — force-rewrite segments.json with the
+            # full DubbingSegment schema (including catalog_hit / dsp_speed_param /
+            # first_pass_duration_ms / first_pass_error_pct) RIGHT BEFORE we
+            # report metering. This guarantees:
+            #   1. the persisted JSON matches the in-memory metric values
+            #   2. the next run's cache-hit path can read these fields back
+            #   3. we don't depend on every upstream JSON writer (translator,
+            #      translation_review, speaker_review) preserving the schema
+            try:
+                from dataclasses import asdict
+                _segments_path = (
+                    final_project_dir / "translation" / "segments.json"
+                ).resolve(strict=False)
+                if _segments_path.exists() and hasattr(translation_result, "segments"):
+                    _dump = {
+                        "segments": [asdict(s) for s in translation_result.segments],
+                        "total_segments": getattr(translation_result, "total_segments",
+                                                  len(translation_result.segments)),
+                        "output_path": getattr(translation_result, "output_path", str(_segments_path)),
+                    }
+                    _segments_path.write_text(
+                        json.dumps(_dump, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                    print(f"[S6] segments.json final-rewrite OK ({len(_dump['segments'])} segs with full metric schema)")
+            except Exception as _exc:
+                print(f"[S6] segments.json final-rewrite skipped (non-fatal): {_exc}")
+
             # V3-4/V3-5: report pipeline metering to Gateway (best-effort)
             if config.job_id and hasattr(translation_result, "segments"):
                 # V3-5: sum billed_chars from TTSResult (truthful TTS-layer source)
@@ -1559,6 +1880,7 @@ class ProcessPipeline:
                 _report_job_metering(
                     config.job_id, translation_result.segments,
                     tts_billed_chars=_tts_billed if _tts_billed else None,
+                    glossary=_review_glossary or None,
                 )
         except Exception as exc:
             stage_label = _classify_failed_stage(exc)
@@ -1859,6 +2181,18 @@ class ProcessPipeline:
             voices: list[dict[str, object]] = []
             display_map: dict[str, str] = {}
 
+            def _voice_dict(v: dict, vid: str, lbl: str) -> dict[str, object]:
+                # Carry chars_per_second + speed_calibrated_at so the frontend
+                # dropdown can show "X.X 字/秒(慢/中/快)" badges (Phase 1 + Task 2).
+                return {
+                    "voice_id": vid,
+                    "label": lbl,
+                    "gender": str(v.get("gender", "")),
+                    "provider": prov,
+                    "chars_per_second": v.get("chars_per_second"),
+                    "speed_calibrated_at": v.get("speed_calibrated_at"),
+                }
+
             if prov == "volcengine":
                 from services.tts.volcengine_voice_catalog import get_voices_for_resource, RESOURCE_ID_1_0, RESOURCE_ID_2_0
                 rid = RESOURCE_ID_2_0 if service_mode == "studio" else RESOURCE_ID_1_0
@@ -1870,7 +2204,7 @@ class ProcessPipeline:
                         continue
                     lbl = str(v.get("display_name", vid))
                     display_map[vid] = lbl
-                    voices.append({"voice_id": vid, "label": lbl, "gender": str(v.get("gender", "")), "provider": prov})
+                    voices.append(_voice_dict(v, vid, lbl))
 
             elif prov == "cosyvoice":
                 from services.tts.cosyvoice_endpoint_config import get_runtime_endpoint_mode, is_voice_available
@@ -1882,7 +2216,7 @@ class ProcessPipeline:
                         continue
                     lbl = str(v.get("display_name", v.get("name", vid)))
                     display_map[vid] = lbl
-                    voices.append({"voice_id": vid, "label": lbl, "gender": str(v.get("gender", "")), "provider": prov})
+                    voices.append(_voice_dict(v, vid, lbl))
 
             elif prov == "minimax":
                 from services.tts.minimax_voice_selector import _load_minimax_pool
@@ -1892,7 +2226,7 @@ class ProcessPipeline:
                     vid = str(v.get("voice_id", ""))
                     lbl = str(v.get("display_name", v.get("name", vid)))
                     display_map[vid] = lbl
-                    voices.append({"voice_id": vid, "label": lbl, "gender": str(v.get("gender", "")), "provider": prov})
+                    voices.append(_voice_dict(v, vid, lbl))
 
             return voices, display_map
 
@@ -1920,6 +2254,7 @@ class ProcessPipeline:
         # ---------------------------------------------------------------
         def _auto_match_for_provider(
             prov: str, gender: str, age_group: str, persona: str, energy: str,
+            target_chars_per_second: float | None = None,
         ) -> dict[str, object] | None:
             if not gender:
                 return None
@@ -1939,12 +2274,51 @@ class ProcessPipeline:
                     age_group=age_group,
                     persona_style=persona,
                     energy_level=energy,
+                    target_chars_per_second=target_chars_per_second,
                 ))
                 dmap = all_display_maps.get(prov, {})
                 matched_name = dmap.get(result.voice_id, result.voice_id)
-                return {"voice_id": result.voice_id, "label": matched_name, "match_confidence": result.match_confidence}
+                # Task 2 UX: surface top backups so the dropdown can pin
+                # "smart recommendations" (top + backups) at the top.
+                backups: list[dict[str, str]] = []
+                for backup_vid in (result.backup_voices or [])[:5]:
+                    backups.append({
+                        "voice_id": backup_vid,
+                        "label": dmap.get(backup_vid, backup_vid),
+                    })
+                return {
+                    "voice_id": result.voice_id,
+                    "label": matched_name,
+                    "match_confidence": result.match_confidence,
+                    "backup_voices": backups,
+                }
             except Exception:
                 return None
+
+        # --- Task 2: per-speaker English words/sec for speed-aware voice matching ---
+        # Aggregate across the entire transcript so each speaker gets a single,
+        # robust estimate.  target_chars_per_second = words_per_second × 1.8
+        # (empirical EN→CN word-to-hanzi ratio).  Speakers with no valid data
+        # (0 words or 0 duration) fall through with target=None, disabling the
+        # speed dimension in the reranker (graceful degradation).
+        _speaker_word_totals: dict[str, int] = {}
+        _speaker_dur_ms_totals: dict[str, int] = {}
+        for _line in transcript_result.lines:
+            _w = self._count_source_words(_line.source_text or "")
+            _d = max(0, int(_line.end_ms - _line.start_ms))
+            if _w > 0 and _d > 0:
+                _speaker_word_totals[_line.speaker_id] = (
+                    _speaker_word_totals.get(_line.speaker_id, 0) + _w
+                )
+                _speaker_dur_ms_totals[_line.speaker_id] = (
+                    _speaker_dur_ms_totals.get(_line.speaker_id, 0) + _d
+                )
+        speaker_target_cps: dict[str, float] = {}
+        for _sid, _words in _speaker_word_totals.items():
+            _dur_s = _speaker_dur_ms_totals.get(_sid, 0) / 1000.0
+            if _dur_s > 0:
+                _wps = _words / _dur_s
+                speaker_target_cps[_sid] = round(_wps * 1.8, 2)
 
         # Get speaker profiles: prefer explicit speaker_styles, fallback to segment attributes
         speaker_profiles: dict[str, dict[str, str]] = {}
@@ -1982,12 +2356,17 @@ class ProcessPipeline:
             ag = profile.get("age_group", "")
             ps = profile.get("persona_style", "")
             el = profile.get("energy_level", "")
-            auto_matched = _auto_match_for_provider(tts_provider, g, ag, ps, el)
+            target_cps = speaker_target_cps.get(sid)
+            auto_matched = _auto_match_for_provider(
+                tts_provider, g, ag, ps, el, target_chars_per_second=target_cps,
+            )
 
             # Auto-match: all three providers
             auto_matched_by_provider: dict[str, object] = {}
             for prov in ("minimax", "cosyvoice", "volcengine"):
-                auto_matched_by_provider[prov] = _auto_match_for_provider(prov, g, ag, ps, el)
+                auto_matched_by_provider[prov] = _auto_match_for_provider(
+                    prov, g, ag, ps, el, target_chars_per_second=target_cps,
+                )
 
             speakers_payload.append({
                 "speaker_id": sid,
@@ -2645,6 +3024,33 @@ class ProcessPipeline:
 
             overshoot_ratio = (estimated_duration_ms - target_duration_ms) / target_duration_ms
             undershoot_ratio = (target_duration_ms - estimated_duration_ms) / target_duration_ms
+
+            # Plan-C+: if TTS speed can absorb the drift safely, skip the LLM
+            # rewrite call. Effective range = admin clamp ∩ listen-comfort
+            # guardrail. CodeX P1-1 + P1-2: skip is gated on (a) admin
+            # tts_speed_adjustment_enabled and (b) provider has speed knob
+            # wired (today: minimax only). Without these, speed won't run
+            # in TTS, so rewrite remains the only safety net.
+            seg_provider = (getattr(segment, "tts_provider", "") or "").strip().lower()
+            try:
+                from services.tts.speed_decision import (
+                    _get_speed_clamp,
+                    is_speed_adjustment_enabled,
+                )
+                _speed_runtime_ok = (
+                    is_speed_adjustment_enabled()
+                    and seg_provider in SPEED_AWARE_TTS_PROVIDERS
+                )
+                _smin, _smax = _get_speed_clamp() if _speed_runtime_ok else (1.0, 1.0)
+            except Exception:
+                _speed_runtime_ok = False
+                _smin, _smax = (1.0, 1.0)
+            if _speed_runtime_ok:
+                _eff_max = min(_smax, PRE_TTS_REWRITE_LISTEN_LIMIT_HIGH)
+                _eff_min = max(_smin, PRE_TTS_REWRITE_LISTEN_LIMIT_LOW)
+                ratio = estimated_duration_ms / target_duration_ms
+                if _eff_min <= ratio <= _eff_max:
+                    continue  # speed will handle it within listen-comfort range
 
             needs_rewrite = False
             rewrite_label = ""

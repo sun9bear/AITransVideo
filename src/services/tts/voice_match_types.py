@@ -58,6 +58,11 @@ class VoiceMatchRequest:
     voice_description: str | None = None
     explicit_voice_id: str | None = None
     target_language: str | None = None
+    # Task 2: target Chinese hanzi/sec (source_english_words_per_second × 1.8).
+    # None → speed dimension disabled.  Upstream callers that don't know the
+    # source speaker's rate should leave this as None; the reranker gracefully
+    # degrades.
+    target_chars_per_second: float | None = None
 
 
 @dataclass(frozen=True, slots=True)

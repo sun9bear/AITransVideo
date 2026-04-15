@@ -56,6 +56,36 @@ class AdminSettings(BaseModel):
     translation_char_range_min_factor: float = 0.85         # min_chars = target_chars * this
     translation_char_range_max_factor: float = 1.15         # max_chars = target_chars * this
     voice_clone_cost_credits: int = 500  # DEPRECATED: migrated to pricing_runtime. Kept for compat.
+    # --- Phase 2 Task 1 — translation-duration-alignment ---
+    # When enabled, MiniMax TTS calls receive a per-segment `speed` parameter
+    # in voice_setting (instead of the hardcoded 1.0). The decision is made
+    # in tts_generator from the segment's predicted vs target duration, with
+    # a hard clamp to [0.92, 1.08] (default mode) or [0.85, 1.15] (aggressive).
+    # Disabled by default until baseline metrics confirm we want it on.
+    tts_speed_adjustment_enabled: bool = False              # Task 1 master switch (MiniMax only for now)
+    tts_speed_mode: str = "default"                         # "default" / "aggressive" / "extreme" / "unlimited"
+    # CodeX P2-4: Task 2 voice-match speed dimension (W_SPEED in reranker).
+    # When OFF, combined_rerank ignores target_chars_per_second and falls
+    # back to the legacy 8-dimension persona/age/pitch scoring.  Default OFF
+    # for canary rollout — turn ON after observing speed_param_distribution
+    # and Munger-style backup-promotion is acceptable.
+    voice_match_speed_dimension_enabled: bool = False
+    # When True, S5 alignment skips rewrite entirely and runs DSP atempo on
+    # every TTS segment to force-match the original English duration.  Trades
+    # listening quality for guaranteed time alignment.  Useful for tightly
+    # synced content (subtitles, lip-sync) when LLM translation length
+    # control is unreliable.
+    force_dsp_alignment: bool = False
+
+    @field_validator("tts_speed_mode")
+    @classmethod
+    def validate_tts_speed_mode(cls, v: str) -> str:
+        normalized = v.strip().lower()
+        if normalized not in {"default", "aggressive", "extreme", "unlimited"}:
+            raise ValueError(
+                f"tts_speed_mode 必须是 'default' / 'aggressive' / 'extreme' / 'unlimited' 之一，收到: {v!r}"
+            )
+        return normalized
 
     @field_validator("cosyvoice_runtime_endpoint_mode", "cosyvoice_offline_endpoint_mode")
     @classmethod
@@ -436,7 +466,50 @@ __GROUPS_JSON__
 
 
 def _load_default_prompts() -> dict[str, str]:
-    return dict(_DEFAULT_PROMPTS)
+    """Return the runtime-authoritative default prompts.
+
+    Runtime prompts live inside the pipeline modules (``translator.py`` for
+    translate/rewrite/probe_translate, ``transcript_reviewer.py`` for
+    pass1/2/3).  To avoid the "two copies of default drift apart" bug
+    (documented in plans/translation-duration-alignment), this function
+    imports those modules at call time and overrides the gateway-local
+    ``_DEFAULT_PROMPTS`` copy with whatever the runtime is actually using.
+
+    If imports fail (e.g. missing dependencies inside the gateway container),
+    fall back to the gateway-local copy so the admin UI stays functional.
+    """
+    merged = dict(_DEFAULT_PROMPTS)
+    try:
+        from services.gemini.translator import (  # noqa: WPS433 — lazy import
+            DEFAULT_TRANSLATION_PROMPT_TEMPLATE,
+            DEFAULT_REWRITE_PROMPT_TEMPLATE,
+            PROBE_TRANSLATION_PROMPT_TEMPLATE,
+        )
+        merged["translate"] = DEFAULT_TRANSLATION_PROMPT_TEMPLATE
+        merged["rewrite"] = DEFAULT_REWRITE_PROMPT_TEMPLATE
+        merged["probe_translate"] = PROBE_TRANSLATION_PROMPT_TEMPLATE
+    except Exception as exc:  # pragma: no cover — import-guard only
+        logger.warning(
+            "Failed to import runtime translate/rewrite prompts — falling back "
+            "to gateway-local copy: %s",
+            exc,
+        )
+    try:
+        from services.transcript_reviewer import (  # noqa: WPS433 — lazy import
+            _PASS1_PROMPT,
+            _PASS2_PROMPT,
+            _PASS3_PROMPT,
+        )
+        merged["pass1"] = _PASS1_PROMPT
+        merged["pass2"] = _PASS2_PROMPT
+        merged["pass3"] = _PASS3_PROMPT
+    except Exception as exc:  # pragma: no cover — import-guard only
+        logger.warning(
+            "Failed to import runtime pass1/2/3 prompts — falling back to "
+            "gateway-local copy: %s",
+            exc,
+        )
+    return merged
 
 
 @router.get("/review-prompts")
@@ -725,9 +798,13 @@ async def list_all_jobs(
             raise HTTPException(status_code=502, detail="无法获取任务列表")
 
     # Build a lookup of user info from PostgreSQL
+    # Phase 2 Task 0 — also surface metering_snapshot so the admin frontend
+    # can show per-job catalog hit / rewrite / first-pass error metrics
+    # without an extra round-trip per job.
     async with async_session() as db:
         rows = (await db.execute(
             select(Job.job_id, Job.user_id, Job.status, Job.project_dir,
+                   Job.metering_snapshot,
                    User.email, User.display_name)
             .outerjoin(User, Job.user_id == User.id)
         )).all()
@@ -740,6 +817,7 @@ async def list_all_jobs(
             "project_dir": row.project_dir,
             "owner_email": row.email,
             "owner_display_name": row.display_name,
+            "metering_snapshot": row.metering_snapshot or {},
         }
 
     # Merge upstream job data with owner info

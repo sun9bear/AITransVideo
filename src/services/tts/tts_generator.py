@@ -172,6 +172,29 @@ class TTSGenerator:
         # Key: speaker_id → (voice_id, confidence)
         self._speaker_voice_cache: dict[str, tuple[str, str]] = {}
 
+        # Phase 2 Task 1 — per-speaker chars_per_second map for the speed
+        # decision logic. Populated by the pipeline after S4 catalog/probe
+        # calibration; left empty when caller hasn't set it (which makes
+        # speed_decision return missing_inputs and fall back to speed=1.0).
+        self._chars_per_second_by_speaker: dict[str, float] = {}
+        self._global_chars_per_second: float | None = None
+
+    def set_speaker_chars_per_second(
+        self,
+        per_speaker: dict[str, float] | None,
+        *,
+        global_cps: float | None = None,
+    ) -> None:
+        """Inject per-speaker chars/sec for the Task 1 speed decision.
+
+        Called by the pipeline right before generate_all() so the TTS
+        layer knows how fast each speaker's voice will read the text.
+        Safe to call with None / empty dict — speed adjustment will then
+        short-circuit to ``missing_inputs``.
+        """
+        self._chars_per_second_by_speaker = dict(per_speaker or {})
+        self._global_chars_per_second = global_cps
+
     # ≤100 segments: sequential (simple, reliable)
     # >100 segments: 3-worker parallel (3x throughput for long videos)
     _PARALLEL_THRESHOLD = 100
@@ -455,6 +478,9 @@ class TTSGenerator:
                 persona_style=persona,
                 energy_level=energy,
                 voice_description=voice_desc,
+                target_chars_per_second=(
+                    float(getattr(segment, "target_chars_per_second", 0.0)) or None
+                ),
             ))
             voice = match_result.voice_id
             confidence = match_result.match_confidence
@@ -596,6 +622,9 @@ class TTSGenerator:
                 persona_style=getattr(segment, "persona_style", None),
                 energy_level=getattr(segment, "energy_level", None),
                 voice_description=getattr(segment, "voice_description", None),
+                target_chars_per_second=(
+                    float(getattr(segment, "target_chars_per_second", 0.0)) or None
+                ),
             ))
             voice_id = match_result.voice_id
             confidence = match_result.match_confidence
@@ -802,6 +831,9 @@ class TTSGenerator:
                 energy_level=getattr(segment, "energy_level", None),
                 voice_description=getattr(segment, "voice_description", None),
                 target_language=getattr(segment, "target_language", None),
+                target_chars_per_second=(
+                    float(getattr(segment, "target_chars_per_second", 0.0)) or None
+                ),
             ))
             mm_voice = match_result.voice_id
             mm_confidence = match_result.match_confidence
@@ -818,13 +850,54 @@ class TTSGenerator:
             flush=True,
         )
 
+        # --- Phase 2 Task 1: per-segment speed decision (MiniMax only) ---
+        # Resolve the chars-per-second for this speaker (catalog or probe value
+        # piped in by pipeline.set_speaker_chars_per_second()), then ask
+        # speed_decision module whether to deviate from 1.0.  When the feature
+        # flag is off, the decision is "disabled" → speed stays self.config.speed.
+        speaker_cps = self._chars_per_second_by_speaker.get(segment.speaker_id)
+        if speaker_cps is None:
+            speaker_cps = self._global_chars_per_second
+        try:
+            from services.tts.speed_decision import decide_tts_speed
+            decision = decide_tts_speed(
+                cn_text=tts_text,
+                target_duration_ms=int(getattr(segment, "target_duration_ms", 0) or 0),
+                chars_per_second=float(speaker_cps) if speaker_cps else None,
+            )
+        except Exception as exc:  # never let metric path break TTS
+            print(f"[MiniMax] speed_decision exception (fallback 1.0): {exc}", flush=True)
+            from services.tts.speed_decision import SpeedDecision  # local import to avoid bootstrap cycles
+            decision = SpeedDecision(speed=1.0, reason="error", estimated_ms=0, ratio=0.0)
+
+        # When disabled or fallback, honor the global config speed (legacy behavior).
+        # When enabled and the decision returned a non-1.0 speed, use it.
+        if decision.reason in ("disabled", "missing_inputs", "error"):
+            effective_speed = float(self.config.speed)
+        else:
+            effective_speed = float(decision.speed)
+
+        # Stamp the metric on the segment so Task 0's metering aggregator
+        # can build the speed_param_distribution histogram.
+        try:
+            segment.dsp_speed_param = effective_speed
+        except Exception:
+            pass  # best-effort; ignore if segment is read-only somehow
+
+        if decision.reason in ("in_range",):
+            print(
+                f"[MiniMax] speed={effective_speed:.4f} (ratio={decision.ratio:.3f}, "
+                f"reason={decision.reason}, est={decision.estimated_ms}ms)",
+                flush=True,
+            )
+
         endpoint = _build_tts_endpoint(self.config.base_url)
         payload = {
             "model": self.config.model,
             "text": tts_text,
             "voice_setting": {
                 "voice_id": mm_voice,
-                "speed": self.config.speed,
+                "speed": effective_speed,
                 "vol": self.config.vol,
             },
             "audio_setting": {

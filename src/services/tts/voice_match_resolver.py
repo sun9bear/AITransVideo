@@ -82,6 +82,7 @@ def _dispatch_volcengine(request: VoiceMatchRequest) -> VoiceMatchResult:
         age_group=request.age_group,
         persona_style=request.persona_style,
         energy_level=request.energy_level,
+        target_chars_per_second=request.target_chars_per_second,
     )
 
 
@@ -104,6 +105,7 @@ def _dispatch_cosyvoice(request: VoiceMatchRequest) -> VoiceMatchResult:
         persona_style=request.persona_style,
         energy_level=request.energy_level,
         is_childlike=is_childlike,
+        target_chars_per_second=request.target_chars_per_second,
     )
 
 
@@ -117,4 +119,5 @@ def _dispatch_minimax(request: VoiceMatchRequest) -> VoiceMatchResult:
         persona_style=request.persona_style,
         energy_level=request.energy_level,
         target_language=request.target_language,
+        target_chars_per_second=request.target_chars_per_second,
     )

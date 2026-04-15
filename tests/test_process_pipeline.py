@@ -1070,6 +1070,8 @@ def _install_single_speaker_pipeline_mocks(
             youtube_url: str = "",
             glossary: dict[str, str] | None = None,
             speaker_voices: dict[str, str] | None = None,
+            chars_per_second: float | None = None,
+            chars_per_second_by_speaker: dict[str, float] | None = None,
         ) -> TranslationResult:
             del lines, max_segment_duration_ms, voice_id_b, display_name_b, glossary, speaker_voices
             if capture is not None:
@@ -1268,6 +1270,8 @@ def _install_dual_speaker_pipeline_mocks(
             youtube_url: str = "",
             glossary: dict[str, str] | None = None,
             speaker_voices: dict[str, str] | None = None,
+            chars_per_second: float | None = None,
+            chars_per_second_by_speaker: dict[str, float] | None = None,
         ) -> TranslationResult:
             del max_segment_duration_ms, video_title, youtube_url, glossary, speaker_voices
             capture["translate_input_speaker_ids"] = [line.speaker_id for line in lines]
@@ -2093,6 +2097,8 @@ def test_process_pipeline_persists_reviewed_voice_metadata_before_tts_failure(
             youtube_url: str = "",
             glossary: dict[str, str] | None = None,
             speaker_voices: dict[str, str] | None = None,
+            chars_per_second: float | None = None,
+            chars_per_second_by_speaker: dict[str, float] | None = None,
         ) -> TranslationResult:
             del lines, max_segment_duration_ms, voice_id_b, display_name_b, video_title, youtube_url, glossary, speaker_voices
             Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -2504,6 +2510,8 @@ def test_process_pipeline_does_not_treat_translation_checkpoint_as_complete_cach
             youtube_url: str = "",
             glossary: dict[str, str] | None = None,
             speaker_voices: dict[str, str] | None = None,
+            chars_per_second: float | None = None,
+            chars_per_second_by_speaker: dict[str, float] | None = None,
         ) -> TranslationResult:
             del lines, max_segment_duration_ms, voice_id_b, display_name_b, video_title, youtube_url, glossary, speaker_voices
             observed["translate_called"] += 1
@@ -3136,6 +3144,8 @@ def test_process_pipeline_does_not_reuse_tts_cache_when_translation_is_regenerat
             youtube_url: str = "",
             glossary: dict[str, str] | None = None,
             speaker_voices: dict[str, str] | None = None,
+            chars_per_second: float | None = None,
+            chars_per_second_by_speaker: dict[str, float] | None = None,
         ) -> TranslationResult:
             del lines, max_segment_duration_ms, voice_id_b, display_name_b, video_title, youtube_url, glossary, speaker_voices
             observed["translate_called"] += 1
@@ -3385,10 +3395,14 @@ def test_process_pipeline_calibrates_tts_duration_and_writes_rewrite_snapshot(
         ("大家好，这是一个测试。", 1000),
         ("感谢观看。", 1000),
     ]
-    assert segments_payload["segments"][0]["cn_text"] == "大家好，这是一个测试。"
+    # segments[0] is segment_id=1 → rewritten by FakeAligner (line 3341);
+    # segments[1] is segment_id=2 → kept as-is. Match the actual second
+    # segment text from _install_single_speaker_pipeline_mocks (probe sample
+    # "感谢观看。"). Original test had a typo on the first assert.
     assert segments_payload["segments"][0]["cn_text"] == "更适合配音的文本。"
     assert segments_payload["segments"][0]["rewrite_count"] == 1
     assert segments_payload["segments"][0]["alignment_method"] == "rewrite_dsp"
+    assert segments_payload["segments"][1]["cn_text"] == "感谢观看。"
 
 
 def test_process_pipeline_calibrates_tts_duration_by_speaker_when_enough_samples_exist() -> None:
@@ -4007,6 +4021,170 @@ def test_process_pipeline_pre_rewrites_obvious_overshoot_before_tts() -> None:
     assert observed["args"] == ("a" * 120, 26_666, 20_000, "Original source text", "speaker_a")
     assert segment.cn_text == "shortened text"
     assert segment.rewrite_count == 1
+
+
+def test_process_pipeline_skips_pre_tts_rewrite_when_speed_can_handle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Plan-C+: when TTS speed can absorb the drift safely (within both the
+    admin speed clamp AND a listen-comfort guardrail), pre-TTS rewrite is a
+    wasted LLM call — skip it.
+
+    Setup: 110 chars at 4.5 cps → estimate 24,444ms, target 20,000ms,
+    ratio 1.222.  Old logic rewrites (>20% threshold).  New logic with
+    unlimited mode (0.50-2.00) clamped by listen-limit 1.30 yields
+    effective_max = 1.30, ratio 1.222 < 1.30 → skip rewrite.
+    """
+    pipeline = ProcessPipeline()
+    segment = DubbingSegment(
+        segment_id=42,
+        speaker_id="speaker_a",
+        display_name="x",
+        voice_id="voice_a",
+        start_ms=0,
+        end_ms=20_000,
+        target_duration_ms=20_000,
+        source_text="Original",
+        cn_text="a" * 110,
+        tts_provider="minimax",  # CodeX P1-2: skip only fires for speed-aware providers
+    )
+    # Force unlimited-mode clamp + admin flag ON.
+    from services.tts import speed_decision as _sd
+    monkeypatch.setattr(_sd, "_get_speed_clamp", lambda: (0.50, 2.00))
+    monkeypatch.setattr(_sd, "is_speed_adjustment_enabled", lambda: True)
+
+    class FakeRewriter:
+        def rewrite_for_duration(self, *args, **kwargs):
+            raise AssertionError("rewrite must NOT be called when speed can handle")
+
+    rewritten_count = pipeline._pre_rewrite_obvious_overshoot_segments_before_tts(
+        segments=[segment],
+        rewriter=FakeRewriter(),  # type: ignore[arg-type]
+        chars_per_second=4.5,
+        chars_per_second_by_speaker={},
+    )
+    assert rewritten_count == 0
+    assert segment.cn_text == "a" * 110  # untouched
+    assert segment.rewrite_count == 0
+
+
+def test_process_pipeline_pre_tts_rewrite_when_speed_cant_handle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Plan-C+: when ratio exceeds the listen-comfort guardrail (>1.30),
+    even unlimited-mode speed can't handle it safely — rewrite must fire."""
+    pipeline = ProcessPipeline()
+    # 200 chars at 4.5 cps → estimate 44,444ms, target 30,000ms, ratio 1.481
+    segment = DubbingSegment(
+        segment_id=43,
+        speaker_id="speaker_a",
+        display_name="x",
+        voice_id="voice_a",
+        start_ms=0,
+        end_ms=30_000,
+        target_duration_ms=30_000,
+        source_text="Original",
+        cn_text="a" * 200,
+        tts_provider="minimax",
+    )
+    from services.tts import speed_decision as _sd
+    monkeypatch.setattr(_sd, "_get_speed_clamp", lambda: (0.50, 2.00))
+    monkeypatch.setattr(_sd, "is_speed_adjustment_enabled", lambda: True)
+
+    rewrite_calls = {"n": 0}
+
+    class FakeRewriter:
+        def rewrite_for_duration(self, *args, **kwargs):
+            rewrite_calls["n"] += 1
+            return "shorter text"
+
+    rewritten_count = pipeline._pre_rewrite_obvious_overshoot_segments_before_tts(
+        segments=[segment],
+        rewriter=FakeRewriter(),  # type: ignore[arg-type]
+        chars_per_second=4.5,
+        chars_per_second_by_speaker={},
+    )
+    assert rewritten_count == 1
+    assert rewrite_calls["n"] == 1
+    assert segment.cn_text == "shorter text"
+
+
+def test_pre_tts_rewrite_skip_disabled_when_speed_flag_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CodeX P1-1: when tts_speed_adjustment_enabled is False, the
+    speed-aware skip MUST NOT fire — speed won't actually run, so
+    rewrite remains the only safety net for over/under-shoot."""
+    pipeline = ProcessPipeline()
+    # Ratio 1.222 (110 chars / 4.5 cps / 20s target); inside listen-limit but
+    # speed is OFF, so we must still hit the legacy 20% threshold and rewrite.
+    segment = DubbingSegment(
+        segment_id=44,
+        speaker_id="speaker_a",
+        display_name="x",
+        voice_id="voice_a",
+        start_ms=0,
+        end_ms=20_000,
+        target_duration_ms=20_000,
+        source_text="Original",
+        cn_text="a" * 110,
+        tts_provider="minimax",
+    )
+    from services.tts import speed_decision as _sd
+    monkeypatch.setattr(_sd, "_get_speed_clamp", lambda: (0.50, 2.00))
+    monkeypatch.setattr(_sd, "is_speed_adjustment_enabled", lambda: False)  # ← OFF
+
+    rewrite_calls = {"n": 0}
+
+    class FakeRewriter:
+        def rewrite_for_duration(self, *args, **kwargs):
+            rewrite_calls["n"] += 1
+            return "shorter text"
+
+    rewritten_count = pipeline._pre_rewrite_obvious_overshoot_segments_before_tts(
+        segments=[segment],
+        rewriter=FakeRewriter(),  # type: ignore[arg-type]
+        chars_per_second=4.5,
+        chars_per_second_by_speaker={},
+    )
+    # ratio 1.222 → overshoot 22.2% > 20% threshold → rewrite (skip disabled)
+    assert rewritten_count == 1
+    assert rewrite_calls["n"] == 1
+
+
+def test_pre_tts_rewrite_skip_disabled_for_provider_without_speed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CodeX P1-2: only MiniMax has per-segment speed wiring today.
+    For CosyVoice / VolcEngine segments, the speed-aware skip MUST NOT
+    fire — they have no speed knob, so rewrite is still required."""
+    pipeline = ProcessPipeline()
+    # Ratio 1.222 cosyvoice segment, inside listen-limit — but cosyvoice
+    # has no speed support, so we must rewrite via legacy threshold.
+    segment = DubbingSegment(
+        segment_id=45,
+        speaker_id="speaker_a",
+        display_name="x",
+        voice_id="voice_a",
+        start_ms=0,
+        end_ms=20_000,
+        target_duration_ms=20_000,
+        source_text="Original",
+        cn_text="a" * 110,
+        tts_provider="cosyvoice",  # ← speed not wired
+    )
+    from services.tts import speed_decision as _sd
+    monkeypatch.setattr(_sd, "_get_speed_clamp", lambda: (0.50, 2.00))
+    monkeypatch.setattr(_sd, "is_speed_adjustment_enabled", lambda: True)
+
+    rewrite_calls = {"n": 0}
+
+    class FakeRewriter:
+        def rewrite_for_duration(self, *args, **kwargs):
+            rewrite_calls["n"] += 1
+            return "shorter text"
+
+    rewritten_count = pipeline._pre_rewrite_obvious_overshoot_segments_before_tts(
+        segments=[segment],
+        rewriter=FakeRewriter(),  # type: ignore[arg-type]
+        chars_per_second=4.5,
+        chars_per_second_by_speaker={},
+    )
+    # ratio 1.222 → overshoot 22% > 20% → rewrite (skip provider-gated off)
+    assert rewritten_count == 1
+    assert rewrite_calls["n"] == 1
 
 
 def test_process_pipeline_skips_pre_tts_rewrite_below_overshoot_threshold() -> None:

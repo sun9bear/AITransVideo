@@ -3,25 +3,41 @@
 Extracted from volcengine_voice_selector.py so that VolcEngine, CosyVoice,
 and future providers (MiniMax, etc.) share one scoring pipeline.
 
-Weight distribution (total 1.0, tuned for video dubbing):
+IMPORTANT — gender is already hard-filtered upstream (inside each provider
+selector, e.g. ``minimax_voice_selector.py``).  The reranker therefore
+scores within a same-gender candidate pool; new dimensions added here
+cannot cause gender mismatch.
+
+Weight distribution (total ~1.0, tuned for video dubbing):
 
   Catalog tags (0.40):
     age_group       0.22  — age perception is the strongest dubbing cue
     persona_style   0.18  — semantic style match
 
-  Profile labels (0.60):
+  Profile labels (0.50):
     pitch_level     0.20  — #1 perceptual dimension for listeners
     maturity        0.10  — acoustic age verification (cross-checks catalog)
     energy_level    0.10  — speaker energy alignment
-    delivery_style  0.08  — correlated with persona; kept low to avoid double-counting
-    childlike       0.07  — child-voice detection
-    texture_tags    0.05  — voice timbre match
+    delivery_style  0.06  — correlated with persona; kept low to avoid double-counting
+    childlike       0.04  — child-voice detection
+    texture_tags    0.03  — voice timbre match
+
+  Speech rate (adaptive 0.05–0.30) — Task 2 (2026-04-14):
+    speed_match     dyn   — match voice chars_per_second against target.
+                            Weight scales with how far the speaker's target
+                            deviates from the library-average baseline:
+                              < ±10% → 0.05 (let persona dominate)
+                              ±10–35% → linear 0.05 → 0.30
+                              > ±35% → 0.30 (extreme speakers like Munger)
+                            NULL-safe: voices without calibration get 0.
+                            target=None disables the dimension entirely.
 """
 
 from __future__ import annotations
 
 import logging
 import time
+from pathlib import Path
 from typing import Final
 
 import requests
@@ -106,9 +122,76 @@ W_PERSONA_ADJACENT: Final[float] = 0.07
 W_PITCH: Final[float] = 0.20
 W_MATURITY: Final[float] = 0.10
 W_ENERGY: Final[float] = 0.10
-W_DELIVERY: Final[float] = 0.08
-W_CHILDLIKE: Final[float] = 0.07
-W_TEXTURE: Final[float] = 0.05
+W_DELIVERY: Final[float] = 0.06   # was 0.08 — gave 0.02 to W_SPEED
+W_CHILDLIKE: Final[float] = 0.04  # was 0.07 — gave 0.03 to W_SPEED
+W_TEXTURE: Final[float] = 0.03    # was 0.05 — gave 0.02 to W_SPEED
+
+# Speech rate match (Task 2 — adaptive, scales with speaker deviation)
+W_SPEED: Final[float] = 0.10                 # legacy constant (default mid-band)
+W_SPEED_MIN: Final[float] = 0.05             # weight at deviation ≤ 10%
+W_SPEED_MAX: Final[float] = 0.30             # weight at deviation ≥ 35%
+W_SPEED_BASELINE_CPS: Final[float] = 4.20    # library-average chars/sec
+                                             # (mean across 173 calibrated voices,
+                                             #  ≈ "neutral Chinese listening pace")
+W_SPEED_DEVIATION_LOW: Final[float] = 0.10   # below this → minimal weight
+W_SPEED_DEVIATION_HIGH: Final[float] = 0.35  # above this → maximal weight
+
+
+_VOICE_MATCH_SPEED_DIMENSION_SETTINGS_PATH = Path("/opt/aivideotrans/config/admin_settings.json")
+
+
+def is_voice_match_speed_dimension_enabled() -> bool:
+    """CodeX P2-4: gate W_SPEED behind admin flag for canary rollout.
+
+    Defaults to False so the reranker falls back to the legacy 8-dimension
+    score until ops verifies the speed-dimension behaviour on real jobs.
+    """
+    try:
+        if _VOICE_MATCH_SPEED_DIMENSION_SETTINGS_PATH.exists():
+            import json
+            with _VOICE_MATCH_SPEED_DIMENSION_SETTINGS_PATH.open(encoding="utf-8") as f:
+                cfg = json.load(f)
+            if isinstance(cfg, dict):
+                return bool(cfg.get("voice_match_speed_dimension_enabled", False))
+    except Exception:
+        pass
+    return False
+
+
+def compute_w_speed(target_chars_per_second: float | None) -> tuple[float, float]:
+    """Adaptive W_SPEED: scale with how extreme the target speech rate is.
+
+    Speakers within ±10% of the library baseline (≈ 4.20 cps) get only a
+    light speed bonus — persona/age dimensions should dominate.  Extreme
+    speakers (Charlie Munger ~2.7 cps, fast podcasts ~6.3 cps) get the full
+    weight, so the few rare slow/fast voices in the catalog can rise to the
+    top of the recommendation list.
+
+    Returns
+    -------
+    (w_speed, deviation)
+        ``w_speed`` is the actual weight to apply; ``deviation`` is the
+        absolute relative gap between target and baseline (used for logging).
+        Both are 0 when the target is missing/invalid OR when the admin
+        feature flag voice_match_speed_dimension_enabled is False (CodeX P2-4).
+    """
+    # CodeX P2-4: respect the admin gate before doing any speed math.
+    if not is_voice_match_speed_dimension_enabled():
+        return 0.0, 0.0
+    if target_chars_per_second is None or target_chars_per_second <= 0:
+        return 0.0, 0.0
+    if W_SPEED_BASELINE_CPS <= 0:
+        return W_SPEED_MIN, 0.0
+    deviation = abs(target_chars_per_second - W_SPEED_BASELINE_CPS) / W_SPEED_BASELINE_CPS
+    if deviation <= W_SPEED_DEVIATION_LOW:
+        return W_SPEED_MIN, deviation
+    if deviation >= W_SPEED_DEVIATION_HIGH:
+        return W_SPEED_MAX, deviation
+    span = W_SPEED_DEVIATION_HIGH - W_SPEED_DEVIATION_LOW
+    weight_span = W_SPEED_MAX - W_SPEED_MIN
+    progress = (deviation - W_SPEED_DEVIATION_LOW) / span
+    return W_SPEED_MIN + progress * weight_span, deviation
+
 
 # Confidence thresholds
 CONFIDENCE_HIGH: Final[float] = 0.45
@@ -127,6 +210,7 @@ def combined_rerank(
     age_bucket: str,
     persona: str,
     energy: str,
+    target_chars_per_second: float | None = None,
 ) -> list[tuple[str, float]]:
     """Score and rank voice candidates using multi-dimensional matching.
 
@@ -134,19 +218,28 @@ def combined_rerank(
     ----------
     candidates:
         Voice dicts with at least ``voice_id``, and optionally
-        ``age_group``, ``persona_style``, ``energy_level``.
+        ``age_group``, ``persona_style``, ``energy_level``,
+        ``chars_per_second``.
     profiles:
         ``voice_id → profile_dict`` with profile fields
         (``pitch_level``, ``maturity``, ``childlike``, ``texture_tags``,
         ``delivery_style``, ``energy_level``).
     gender:
         Normalised speaker gender (``male`` / ``female`` / ``child``).
+        Caller **must** have pre-filtered *candidates* to this gender —
+        the reranker will not reject cross-gender voices.
     age_bucket:
         Normalised age bucket (``young`` / ``middle`` / ``elderly`` / ``""``).
     persona:
         Normalised persona style (``professional`` / ``warm`` / …).
     energy:
         Normalised energy level (``low`` / ``medium`` / ``high`` / ``""``).
+    target_chars_per_second:
+        Target speech rate in Chinese hanzi per second, typically
+        ``source_english_words_per_second × 1.8``.  When *None* the
+        speed dimension is disabled (all candidates score 0 on it).
+        Candidates without calibration (``chars_per_second`` is *None*)
+        also score 0 — no penalty, just no bonus.
 
     Returns
     -------
@@ -161,6 +254,13 @@ def combined_rerank(
     preferred_pitch = GENDER_PITCH.get(gender, {"mid"})
     preferred_texture = PERSONA_TEXTURE.get(persona, set())
     preferred_delivery = PERSONA_DELIVERY.get(persona, set())
+    effective_w_speed, speed_deviation = compute_w_speed(target_chars_per_second)
+    if effective_w_speed > 0:
+        logger.info(
+            "[reranker] adaptive W_SPEED=%.3f (target=%.2f cps, baseline=%.2f, deviation=%.1f%%)",
+            effective_w_speed, target_chars_per_second or 0.0,
+            W_SPEED_BASELINE_CPS, speed_deviation * 100,
+        )
 
     scored: list[tuple[str, float]] = []
     for v in candidates:
@@ -208,10 +308,24 @@ def combined_rerank(
         if p.get("childlike") is not None and p["childlike"] == is_child:
             score += W_CHILDLIKE
 
-        # Texture (0.05)
+        # Texture (W_TEXTURE)
         voice_textures = set(p.get("texture_tags") or [])
         if preferred_texture and voice_textures & preferred_texture:
             score += W_TEXTURE
+
+        # Speed match (adaptive W_SPEED) — Task 2
+        # Target comes from source speaker's English words/sec × 1.8.
+        # The weight itself adapts to how extreme the target is — see
+        # `compute_w_speed` above.  Graceful degradation: if either target
+        # or voice CPS is missing, this dimension contributes 0.
+        if effective_w_speed > 0:
+            v_cps = v.get("chars_per_second")
+            if isinstance(v_cps, (int, float)) and v_cps > 0:
+                diff_ratio = min(
+                    1.0,
+                    abs(float(v_cps) - (target_chars_per_second or 0.0)) / (target_chars_per_second or 1.0),
+                )
+                score += effective_w_speed * (1.0 - diff_ratio)
 
         scored.append((vid, score))
 

@@ -38,6 +38,7 @@ def select_volcengine_voice_match(
     age_group: str | None = None,
     persona_style: str | None = None,
     energy_level: str | None = None,
+    target_chars_per_second: float | None = None,
 ) -> VoiceMatchResult:
     """Select the best VolcEngine voice using shared combined_rerank.
 
@@ -108,6 +109,7 @@ def select_volcengine_voice_match(
     scored = combined_rerank(
         candidates, profiles,
         gender=g, age_bucket=age_bucket, persona=persona, energy=energy,
+        target_chars_per_second=target_chars_per_second,
     )
 
     best_vid = scored[0][0]

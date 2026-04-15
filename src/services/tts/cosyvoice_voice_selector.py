@@ -440,6 +440,7 @@ def select_cosyvoice_voice_match(
     persona_style: str | None = None,
     energy_level: str | None = None,
     is_childlike: bool = False,
+    target_chars_per_second: float | None = None,
 ) -> SharedVoiceMatchResult:
     """Select the best CosyVoice voice using shared combined_rerank.
 
@@ -546,6 +547,7 @@ def select_cosyvoice_voice_match(
     scored = combined_rerank(
         candidates, profiles,
         gender=g, age_bucket=age_bucket, persona=persona, energy=energy,
+        target_chars_per_second=target_chars_per_second,
     )
 
     best_vid = scored[0][0]

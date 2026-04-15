@@ -17,6 +17,17 @@ interface AdminSettings {
   cosyvoice_offline_endpoint_mode: string
   translation_char_range_min_factor: number
   translation_char_range_max_factor: number
+  // Phase 2 Task 1 — translation-duration-alignment
+  tts_speed_adjustment_enabled: boolean
+  tts_speed_mode: string
+  // Phase 2 force-DSP — when enabled, S5 alignment skips rewrite entirely
+  // and always DSP-stretches every TTS segment to the original English
+  // duration. Trades quality for guaranteed time alignment.
+  force_dsp_alignment: boolean
+  // Phase 2 Task 2 — voice match speed dimension (W_SPEED in reranker).
+  // When OFF, voice matching ignores target_chars_per_second and uses the
+  // legacy 8-dimension persona/age/pitch scoring. Default OFF for canary.
+  voice_match_speed_dimension_enabled: boolean
 }
 
 const DEFAULT_SETTINGS: AdminSettings = {
@@ -33,7 +44,18 @@ const DEFAULT_SETTINGS: AdminSettings = {
   cosyvoice_offline_endpoint_mode: 'mainland',
   translation_char_range_min_factor: 0.85,
   translation_char_range_max_factor: 1.15,
+  tts_speed_adjustment_enabled: false,
+  tts_speed_mode: 'default',
+  force_dsp_alignment: false,
+  voice_match_speed_dimension_enabled: false,
 }
+
+const TTS_SPEED_MODE_OPTIONS = [
+  { value: 'default',    label: '默认 ±8%',  description: '限幅 [0.92, 1.08]，听感无损（推荐）' },
+  { value: 'aggressive', label: '激进 ±15%', description: '限幅 [0.85, 1.15]，更大的对齐能力但可能有轻微失真' },
+  { value: 'extreme',    label: '极端 ±30%', description: '限幅 [0.70, 1.30]，明显的快/慢但仍可辨识，适合实验性数据' },
+  { value: 'unlimited',  label: '无限制 ±50%', description: '限幅 [0.50, 2.00]，仅 MiniMax API 硬边界，边缘明显失真' },
+]
 
 const TTS_OPTIONS = [
   { value: 'minimax', label: 'MiniMax Speech 2.8', description: '成熟稳定，¥0.20/千字，RPM 20' },
@@ -240,6 +262,100 @@ export default function AdminSettingsPage() {
             <p className="text-sm font-medium text-foreground">Pre-TTS 预重写</p>
             <p className="text-xs text-muted-foreground mt-1">
               TTS 生成前预估时长并重写不匹配的译文。关闭后由 TTS 后的对齐阶段统一处理，适合语速差异大的场景。
+            </p>
+          </div>
+        </label>
+
+        {/* Phase 2 Task 1 — translation-duration-alignment */}
+        <label className="flex items-center gap-3 rounded-xl border border-border bg-muted/30 p-4 cursor-pointer hover:bg-muted/50 transition">
+          <input
+            type="checkbox"
+            checked={settings.tts_speed_adjustment_enabled}
+            onChange={(e) => setSettings((s) => ({ ...s, tts_speed_adjustment_enabled: e.target.checked }))}
+            className="h-4 w-4 rounded border-border"
+          />
+          <div>
+            <p className="text-sm font-medium text-foreground">
+              TTS 语速微调
+              <span className="ml-2 inline-block rounded bg-purple-500/20 px-1.5 py-0.5 text-[10px] text-purple-400">
+                Phase 2 · MiniMax
+              </span>
+            </p>
+            <p className="text-xs text-muted-foreground mt-1">
+              开启后，MiniMax TTS 每段会根据预估 vs 目标时长自动调整 voice_setting.speed（限幅内），消化小幅误差、减少 S5 rewrite。
+              CosyVoice / VolcEngine 暂未接入，保持 1.0。
+            </p>
+            {settings.tts_speed_adjustment_enabled && (
+              <div className="mt-2 flex gap-2">
+                {TTS_SPEED_MODE_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    onClick={(e) => { e.preventDefault(); setSettings((s) => ({ ...s, tts_speed_mode: opt.value })) }}
+                    className={`rounded-lg border px-2.5 py-1 text-xs transition ${
+                      settings.tts_speed_mode === opt.value
+                        ? 'border-primary bg-primary/10 text-foreground'
+                        : 'border-border bg-muted/30 text-muted-foreground hover:bg-muted/50'
+                    }`}
+                    title={opt.description}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+                <span className="text-[11px] text-muted-foreground self-center ml-1">
+                  {TTS_SPEED_MODE_OPTIONS.find((o) => o.value === settings.tts_speed_mode)?.description || ''}
+                </span>
+              </div>
+            )}
+          </div>
+        </label>
+
+        {/* Phase 2 force-DSP override */}
+        <label className="flex items-center gap-3 rounded-xl border border-border bg-muted/30 p-4 cursor-pointer hover:bg-muted/50 transition">
+          <input
+            type="checkbox"
+            checked={settings.force_dsp_alignment}
+            onChange={(e) => setSettings((s) => ({ ...s, force_dsp_alignment: e.target.checked }))}
+            className="h-4 w-4 rounded border-border"
+          />
+          <div>
+            <p className="text-sm font-medium text-foreground">
+              强制 DSP 对齐
+              <span className="ml-2 inline-block rounded bg-orange-500/20 px-1.5 py-0.5 text-[10px] text-orange-400">
+                Phase 2 · 极端兜底
+              </span>
+            </p>
+            <p className="text-xs text-muted-foreground mt-1">
+              开启后，<b>S5 对齐阶段跳过 rewrite</b>，所有 TTS 段直接 DSP 拉伸/压缩到原英文时长。
+              一定能对齐，但语速差异大的段落会有 atempo 拉伸失真。适合"宁可有点怪也要严格同步"的内容
+              （字幕同步/口型对齐），或者上游翻译字数控制不可靠时的兜底方案。
+              <br />
+              <span className="text-amber-400">注意：开启后 rewrite 完全不生效，需复核率会变成 0%（因为强制对齐了），但音质需主观判断。</span>
+            </p>
+          </div>
+        </label>
+
+        {/* Phase 2 Task 2 — voice match speed dimension (灰度) */}
+        <label className="flex items-center gap-3 rounded-xl border border-border bg-muted/30 p-4 cursor-pointer hover:bg-muted/50 transition">
+          <input
+            type="checkbox"
+            checked={settings.voice_match_speed_dimension_enabled}
+            onChange={(e) => setSettings((s) => ({ ...s, voice_match_speed_dimension_enabled: e.target.checked }))}
+            className="h-4 w-4 rounded border-border"
+          />
+          <div>
+            <p className="text-sm font-medium text-foreground">
+              音色匹配启用语速维度
+              <span className="ml-2 inline-block rounded bg-cyan-500/20 px-1.5 py-0.5 text-[10px] text-cyan-400">
+                Phase 2 Task 2 · 灰度
+              </span>
+            </p>
+            <p className="text-xs text-muted-foreground mt-1">
+              开启后，音色匹配 reranker 加入 W_SPEED 自适应权重 (0.05–0.30)：根据 speaker 目标 cps 与库基线 (4.20) 偏离度，
+              把语速接近的音色推到推荐列表前列。<b>极端语速 speaker</b>（Munger 慢节奏 / 快 podcast）效果显著，
+              普通 speaker 行为不变。关闭时回退到原 8 维度评分。
+              <br />
+              <span className="text-amber-400">默认关闭：建议先观察 metrics（speed_param_distribution + first_pass_error_pct）一段真实数据再启用。</span>
             </p>
           </div>
         </label>
