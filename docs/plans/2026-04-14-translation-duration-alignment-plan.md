@@ -1,5 +1,13 @@
 # 翻译时长对齐系统化方案（方案 C+，v2.1 经 CodeX 两轮审核修订）
 
+> **实施状态**（2026-04-16 更新）：
+> - **Phase 1**：✅ 100% 完成并部署（2026-04-14）
+> - **Phase 2**：✅ 100% 完成并部署（2026-04-15，含三引擎 per-segment speed + CodeX 三轮审核修复）
+> - **Phase 3**：⏸️ 暂缓（Phase 2 实测 VolcEngine Job needs_review 0/13，效果已超预期，Phase 3 收益不足以支撑复杂度）
+> - **Phase 4**：✅ 100% 完成并部署（2026-04-15~16）
+> - **生产实测**：3 个真实 job 端到端通过（VolcEngine / CosyVoice / 克隆音色）
+> - **累计实测成本**：CNY 0.72
+>
 > **v2 变更**（2026-04-14）：基于 CodeX 第一轮审核反馈修订，关键修正：
 > 1. 翻译目标不再用 `english_words × 1.8` 替代现有 `target_chars/min/max` 硬约束，降级为 `hint`
 > 2. TTS speed 严格限幅，不再 `1/ratio` 动态算
@@ -124,19 +132,19 @@ Stage 3: 取 Stage 2 重排后的 top-1
 
 ## 三阶段实施路线
 
-### Phase 1：基础设施（音色语速数据 + prompt 补上下文）
-**工作量**：~1 周｜**预期 rewrite 率**：36-57% → **25-35%**（v2 保守调整）
+### Phase 1：基础设施（音色语速数据 + prompt 补上下文） — ✅ 完成
+**工作量**：~1 周｜**预期 rewrite 率**：36-57% → **25-35%**｜**实测**：23%（Job B 纯 MiniMax）
 
 **覆盖范围**：Studio 模式 voice_selection 已确认的 job（Express 保留现状）
 
-1. **DB Migration 012** — `voice_catalog` 加 `chars_per_second`（Float）、`chars_per_second_by_model`（JSONB）、`speed_calibrated_at`（TZ）
-2. **标定脚本** `gateway/scripts/calibrate_voice_speeds.py` + 标准文本文件 `standard_calibration_texts.py`
+1. ✅ **DB Migration 012** — `voice_catalog` 加 `chars_per_second`（Float）、`chars_per_second_by_model`（JSONB）、`speed_calibrated_at`（TZ）
+2. ✅ **标定脚本** `gateway/scripts/calibrate_voice_speeds.py` + 标准文本文件 `standard_calibration_texts.py`
    - 三段标准文本：T1 101 字（科技评测）、T2 153 字（纪录片旁白）、T3 204 字（创业演讲），含不同情绪
    - 标定范围：MiniMax Turbo/HD × 81、CosyVoice flash × 65、VolcEngine 2.0 × 33，共 260 组，¥54.2 一次性
    - CLI：`--provider` / `--voice-id` / `--model` / `--dry-run` / `--force`
-3. **voice_catalog 内部 API 返回 chars_per_second**（`gateway/voice_catalog_api.py:165`）
-4. **pipeline 查表替代 probe**（仅 Studio 已确认 voice_id 路径；Express 保留 probe fallback）
-5. **翻译 prompt 重构（v2 修正）**：
+3. ✅ **voice_catalog 内部 API 返回 chars_per_second**（`gateway/voice_catalog_api.py:165`）
+4. ✅ **pipeline 查表替代 probe**（仅 Studio 已确认 voice_id 路径；Express 保留 probe fallback）
+5. ✅ **翻译 prompt 重构（v2 修正）**：Plan C 改用 `source_word_count × 1.8`，density_factor 弃用
    - **保留现有字段**：`target_duration_seconds`、`target_chars`、`min_chars`、`max_chars`（硬约束不动）
    - **新增字段**：`english_words_per_second`（原说话人语速，给 LLM 判断内容密度）
    - **新增字段**：`catalog_chars_per_second`（音色预标定值，说明 min/max 的来源）
@@ -148,20 +156,20 @@ Stage 3: 取 Stage 2 重排后的 top-1
      - 信息密度高时可超过 hint 逼近 max；口语化内容可低于 hint 逼近 min
      ```
 
-### Phase 2：音色匹配加语速维度（top-K 内）+ TTS speed 限幅微调
-**工作量**：~1 周｜**预期 rewrite 率**：25-35% → **15-20%**（v2 保守调整）
+### Phase 2：音色匹配加语速维度（top-K 内）+ TTS speed 限幅微调 — ✅ 完成
+**工作量**：~1 周｜**预期 rewrite 率**：25-35% → **15-20%**｜**实测**：VolcEngine Job needs_review 0/13
 
-1. **`voice_reranker.py` 实现 top-K 内重排（v2 修正）**
-   - 不改现有 8 维度权重
-   - 新增 `rerank_by_speed(top_k_candidates, target_cps)` 函数
-   - 语速差异打分规则：≤5% +0.10 / 5-15% +0.05 / 15-30% ±0 / >30% -0.05
-   - 音色目录 chars_per_second 为 NULL 时跳过 Stage 2（平滑降级）
-2. **`VoiceMatchRequest` 加 `target_chars_per_second` 字段**（`voice_match_types.py`）
-3. **`process.py` 音色匹配调用点**（~1927-1942）传入 `english_words_per_second × 1.8` 作为目标 cps
-4. **TTS 三引擎接入 speed 参数**：
-   - **MiniMax**：`TTSConfig` 从全局 speed 改为 per-segment，payload `voice_setting.speed` 动态写入
-   - **CosyVoice**：helper script 参数加 `rate`（0.5-2.0），`synthesize()` 签名加 speed 参数
-   - **VolcEngine V3 单向流式**：**先写独立测试脚本验证** `audio_params.speech_rate`（-50~100）字段生效，通过后再接入主流程
+1. ✅ **`voice_reranker.py` adaptive W_SPEED（最终实现偏离方案 v2 的 top-K 二次重排，改为全局 adaptive 权重 0.05-0.30）**
+   - 权重随目标 cps 偏离基线的幅度自适应：±10% 内 0.05，±35% 以上 0.30
+   - admin gate `voice_match_speed_dimension_enabled` 灰度控制
+   - CodeX 审核 P2-4 要求的灰度开关
+2. ✅ **`VoiceMatchRequest` 加 `target_chars_per_second` 字段**（`voice_match_types.py`）
+3. ✅ **`process.py` 音色匹配调用点**传入 `english_words_per_second × 1.8` 作为目标 cps
+4. ✅ **TTS 三引擎接入 speed 参数**：
+   - **MiniMax**：per-segment `voice_setting.speed` 动态写入 ✅
+   - **CosyVoice**：DashScope `SpeechSynthesizer(speech_rate=...)` 接入 ✅（smoke 验证快速区间精度 <0.1%）
+   - **VolcEngine**：`audio_params.speech_rate` 接入 ✅（smoke 验证 seed-tts-{1.0, 2.0} 双 resource GO，映射 `speech_rate = int(round((speed-1)*100))`）
+   - 独立验证脚本：`scripts/test_volcengine_speech_rate.py` + `scripts/test_cosyvoice_speech_rate.py` ✅
 5. **TTS 前 speed 决策逻辑（v2 严格限幅 + v2.1 统一字符计数口径）**：
 
    **字符计数口径**：必须用 `TTSDurationEstimator` 既有的 `_NON_SPOKEN_CHAR_PATTERN` 去掉标点/空格/格式符后再算，与 `duration_estimator.py:13` 和 `rewriter.py:77` 保持一致。不要用 raw `len(cn_text)`，否则 speed 决策会被标点带偏，和下游 rewrite/校准口径不一致。
@@ -185,10 +193,16 @@ Stage 3: 取 Stage 2 重排后的 top-1
        走 rewrite / 标记需人工审核 / 建议用户换音色
    ```
 
-### Phase 3：多候选翻译 + 择优（v2 加语义守门）
+### Phase 3：多候选翻译 + 择优（v2 加语义守门） — ⏸️ 暂缓
 **工作量**：~1 周｜**预期 rewrite 率**：15-20% → **8-12%**（v2 保守调整，不承诺 <5%）
 
 > **定位**：锦上添花，不是止血第一刀。建议 Phase 1+2 观察效果后再决定是否做。
+>
+> **暂缓决定**（2026-04-16）：Phase 2 实测 VolcEngine Job 达到 needs_review 0/13（历史最优），
+> Phase 2 的三引擎 per-segment speed 已经把绝大部分误差消化在 TTS 层，pre-rewrite 触发率
+> 显著下降。Phase 3 的多候选 + 语义守门复杂度高（每段 +2 次 LLM call），收益相对有限。
+> 按方案 §335 的阶段性决策点判断，**Phase 3 可延后甚至不做**。
+> 如未来 rewrite 率再次上升（如新 content type 导致翻译质量波动），再启动。
 
 1. **翻译 prompt 改多候选输出**：每段产出 3 个候选（精炼/标准/丰满，字数约 0.85×/1.0×/1.15× 目标）
 2. **JSON schema 扩展**：LLM 输出结构加 `information_completeness` 字段
@@ -230,11 +244,20 @@ Stage 3: 取 Stage 2 重排后的 top-1
 5. **批量大小调整**：从 15 段降到 8-10 段（output tokens × 3）
 6. **兜底 rewrite**：择优后仍超 15% 才触发（极端情况）
 
-### Phase 4：UX（用户可感知部分，和 Phase 2 并行）
+### Phase 4：UX（用户可感知部分，和 Phase 2 并行） — ✅ 完成
 
-1. **音色库页面加"测试语速"按钮**（可选克隆音色标定）
-2. **音色选择面板显示语速标签**（"4.3 字/秒（中速）"+"原视频预估需要 Y 字/秒"）
-3. **选音色后端验证**：差异 >30% 弹窗警告
+1. ✅ **音色库页面加"测试语速"按钮**（可选克隆音色标定）
+   - Migration 013: user_voices 加 cps 字段
+   - `POST /gateway/user-voices/{id}/calibrate-speed` 端点（用户主动触发，CNY 0.06/次）
+   - `voice_speed_calibrator.py` 独立 helper（I/O 可注入，零依赖测试）
+   - Pipeline `lookup_per_speaker` 扩展 user_voices fallback（user_id 隔离 + 负缓存修复）
+   - Probe cps 持久化 `calibration_persistence.py`（解决 cache-hit 重跑 cps 丢失）
+   - 前端完整音色管理 UI：试听 / 编辑名称 / 复制 ID / 删除 / 添加音色 modal + 试听验证
+2. ✅ **音色选择面板显示语速标签**（"4.3 字/秒（中速）"）
+3. ✅ **选音色后端验证**：差异 >30% 弹窗警告
+   - 后端 speaker payload 加 `target_chars_per_second`
+   - 前端 `handleSubmit` 在 approve 前检查偏差 → confirm 对话框
+   - `voice_speed_mismatch_rate` metric 加入 metering
 
 ---
 
@@ -303,24 +326,26 @@ Stage 3: 取 Stage 2 重排后的 top-1
 **辅助指标**（不作为主评判）：
 - BLEU 分数（可选，内容类型差异大时易失真）
 
-### Metrics 新增（`gateway/admin_job_monitor_api.py`）
-- `rewrite_rate`：本 job rewrite 段数 / 总段数
-- `first_pass_duration_error_pct`（v2.1 新增）：**首轮 TTS 时长误差**（DSP/rewrite 之前），用于识别上游翻译 + TTS speed 层的真实收益，不被下游补救淹没
-- `final_duration_error_pct`：最终时长误差（经过所有补救后）
-- `speed_param_distribution`：speed=1.0 / (0.92, 1.08) / 激进区间 / 超限的段数分布
-- `voice_speed_mismatch_rate`：音色 chars/sec 和目标 chars/sec 偏差 >15% 的比例
-- `term_preservation_rate`：术语表命中率（v2.1 新增）
-- `number_preservation_rate`：数字保留率（v2.1 新增）
-- `translation_quality_flag_rate`（Phase 3）：information_completeness < 8 被标记的段数比例
+### Metrics 新增（`gateway/admin_job_monitor_api.py` + `pipeline/process.py:_report_job_metering`）
+- ✅ `rewrite_rate`：本 job rewrite 段数 / 总段数
+- ✅ `first_pass_duration_error_pct`（v2.1 新增）：**首轮 TTS 时长误差**（DSP/rewrite 之前）
+- ❌ `final_duration_error_pct`：最终时长误差（经过所有补救后）— 暂不做，first_pass 已够排障
+- ✅ `speed_param_distribution`：speed=1.0 / (0.92, 1.08) / 激进区间 / 超限的段数分布
+- ✅ `voice_speed_mismatch_rate`：音色 chars/sec 和目标 chars/sec 偏差 >15% 的比例（2026-04-16 加入）
+- 🟡 `term_preservation_rate`：术语表命中率 — 框架已有（glossary 比对），需人工验证
+- ❌ `number_preservation_rate`：数字保留率 — 暂不做，等有真实投诉再实现
+- N/A `translation_quality_flag_rate`（Phase 3）— Phase 3 暂缓
 
-### 回归防护
-- 保留 probe 校准路径作为任何新路径的 fallback（任一失败退回老流程）
-- Admin 开关控制新功能启用：
-  - `settings.voice_speed_calibration_enabled`
-  - `settings.voice_speed_rerank_enabled`
-  - `settings.tts_speed_adjustment_enabled`
-  - `settings.tts_speed_mode`（`default` / `aggressive`）
-  - `settings.multi_candidate_translation_enabled`
+### 回归防护 — ✅ 全部就位
+- ✅ 保留 probe 校准路径作为任何新路径的 fallback（任一失败退回老流程）
+- ✅ Admin 开关控制新功能启用：
+  - ✅ `settings.tts_speed_adjustment_enabled`（Task 1 主开关，默认 off）
+  - ✅ `settings.tts_speed_mode`（`default` / `aggressive` / `extreme` / `unlimited`）
+  - ✅ `settings.voice_match_speed_dimension_enabled`（W_SPEED 灰度，默认 off）
+  - ✅ `settings.force_dsp_alignment`（DSP 兜底开关）
+  - N/A `settings.multi_candidate_translation_enabled`（Phase 3 暂缓）
+- ✅ Probe cps 持久化（`calibration_persistence.py`）— cache-hit 重跑不丢 cps
+- ✅ Post-TTS calibration speed-normalized（`_calibrate_tts_duration` 乘 `dsp_speed_param`）
 
 ---
 

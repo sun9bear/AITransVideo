@@ -47,6 +47,9 @@ interface SpeakerPayload {
     } | null
   >
   probeTexts: ProbeText[]
+  // Target chars/sec for this speaker (source_english_words_per_second × 1.8).
+  // Used to warn when the selected voice's cps deviates >30%.
+  targetCharsPerSecond: number | null
 }
 
 interface AvailableVoice {
@@ -190,6 +193,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
             segmentCount: Number(s.segment_count ?? 0),
             totalDurationS: Number(s.total_duration_s ?? 0),
             canClone: Boolean(s.can_clone),
+            targetCharsPerSecond: s.target_chars_per_second != null ? Number(s.target_chars_per_second) : null,
             autoMatchedVoice: s.auto_matched_voice
               ? { voiceId: String((s.auto_matched_voice as Record<string, unknown>).voice_id ?? ''), label: String((s.auto_matched_voice as Record<string, unknown>).label ?? '') }
               : null,
@@ -394,6 +398,37 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
 
   const handleSubmit = useCallback(async () => {
     if (!allSelected || isSubmitting) return
+
+    // Phase 4: warn when selected voice cps deviates >30% from target
+    const mismatchWarnings: string[] = []
+    for (const sp of speakers) {
+      const targetCps = sp.targetCharsPerSecond
+      if (targetCps == null || targetCps <= 0) continue
+      const state = voiceStates[sp.speakerId]
+      if (!state?.voiceId) continue
+      // Find the selected voice's cps from the current provider's voice list
+      const voices = getVoicesForSpeaker(sp.speakerId)
+      const selectedVoice = voices.find((v) => v.voiceId === state.voiceId)
+      const voiceCps = selectedVoice?.charsPerSecond
+      if (voiceCps == null || voiceCps <= 0) continue
+      const deviation = Math.abs(voiceCps - targetCps) / targetCps
+      if (deviation > 0.30) {
+        const pct = Math.round(deviation * 100)
+        const fast = voiceCps > targetCps ? '快' : '慢'
+        mismatchWarnings.push(
+          `${sp.speakerName}：选定音色 ${voiceCps.toFixed(1)} 字/秒，` +
+          `比原说话人需要的 ${targetCps.toFixed(1)} 字/秒${fast} ${pct}%，` +
+          `配音可能需要大幅${voiceCps > targetCps ? '减速' : '加速'}。`
+        )
+      }
+    }
+    if (mismatchWarnings.length > 0) {
+      const msg = '以下说话人的音色语速和原视频差异较大：\n\n' +
+        mismatchWarnings.join('\n') +
+        '\n\n这可能导致配音听感不自然。是否继续？'
+      if (!window.confirm(msg)) return
+    }
+
     setIsSubmitting(true)
     setError(null)
     try {
@@ -410,7 +445,8 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
     } finally {
       setIsSubmitting(false)
     }
-  }, [allSelected, isSubmitting, speakers, voiceStates, jobId, onAdvanced])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allSelected, isSubmitting, speakers, voiceStates, jobId, onAdvanced, fallbackVoices, providerMap, hasMultiProvider])
 
   // Helper: get available voices for a speaker's currently selected provider
   function getVoicesForSpeaker(speakerId: string): AvailableVoice[] {

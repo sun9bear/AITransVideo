@@ -20,6 +20,7 @@ from user_voice_service import (
     fetch_user_voice,
     list_user_voices,
     mark_voice_expired,
+    update_user_voice_label,
     update_voice_speed_calibration,
 )
 
@@ -113,6 +114,85 @@ async def create_user_voice(
         notes=body.get("notes"),
     )
     return _json(200, {"ok": True, "voice": _voice_to_dict(voice)})
+
+
+@router.patch("/user-voices/{voice_id}")
+async def patch_user_voice(
+    voice_id: str,
+    request: Request,
+    user: User | None = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Update a user voice's mutable fields (currently: label only)."""
+    if user is None:
+        return _json(401, {"error": "unauthorized"})
+    body = await _read_body(request)
+    label = str(body.get("label", "")).strip()
+    if not label or len(label) > 200:
+        return _json(400, {"error": "label must be 1-200 chars"})
+    voice = await fetch_user_voice(db, user.id, voice_id)
+    if voice is None:
+        return _json(404, {"error": "voice_not_found"})
+    updated = await update_user_voice_label(db, voice, label=label)
+    return _json(200, {"ok": True, "voice": _voice_to_dict(updated)})
+
+
+@router.post("/user-voices/probe")
+async def probe_user_voice(
+    request: Request,
+    user: User | None = Depends(require_auth),
+) -> Response:
+    """Synthesize a short sample to verify a voice_id is usable + let the
+    user hear how it sounds. Returns base64-encoded WAV audio.
+
+    Body: {voice_id, label?, tts_provider?}
+    The voice does NOT need to exist in user_voices yet (supports the
+    "add voice" modal pre-validation flow).
+    """
+    if user is None:
+        return _json(401, {"error": "unauthorized"})
+    body = await _read_body(request)
+    voice_id = str(body.get("voice_id", "")).strip()
+    if not voice_id:
+        return _json(400, {"error": "voice_id is required"})
+    label = str(body.get("label", "")).strip() or voice_id
+    raw_provider = str(body.get("tts_provider", "")).strip() or None
+    provider = _normalize_tts_provider(raw_provider) if raw_provider else "minimax"
+    if provider is None:
+        return _json(400, {"error": "unsupported_provider"})
+    model = _DEFAULT_CALIBRATION_MODEL[provider]
+
+    sample_text = f"你好，我是{label}，欢迎使用视频翻译服务。"
+
+    from voice_speed_calibrator import _DEFAULT_SYNTH_FNS
+
+    synth_fn = _DEFAULT_SYNTH_FNS.get(provider)
+    if synth_fn is None:
+        return _json(400, {"error": f"no synth function for provider {provider}"})
+
+    import base64
+
+    try:
+        audio_bytes = await asyncio.to_thread(synth_fn, sample_text, voice_id, model)
+    except Exception as exc:
+        logger.warning("[probe] synth failed for voice %s: %s", voice_id, exc)
+        return _json(502, {
+            "error": "probe_failed",
+            "message": str(exc)[:300],
+        })
+
+    if not audio_bytes:
+        return _json(502, {"error": "probe_failed", "message": "empty audio"})
+
+    audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
+    return _json(200, {
+        "ok": True,
+        "audio_base64": audio_b64,
+        "audio_format": "wav",
+        "text": sample_text,
+        "voice_id": voice_id,
+        "provider": provider,
+    })
 
 
 @router.delete("/user-voices/{voice_id}")

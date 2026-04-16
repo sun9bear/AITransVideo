@@ -1,5 +1,4 @@
-import { apiClient } from '@/lib/api/client'
-import type { ApiWebUiVoiceLibrarySnapshot } from '@/types/api'
+// apiClient not needed — voice library now uses /gateway/user-voices directly.
 
 export interface VoiceLibraryEntry {
   voiceId: string
@@ -28,19 +27,13 @@ export interface VoiceLibrarySummary {
   voices: VoiceLibraryEntry[]
 }
 
-interface UserVoiceCalibrationEntry {
-  voice_id: string
-  chars_per_second: number | null
-  speed_calibrated_at: string | null
-}
-
 interface UserVoicesResponse {
-  voices?: UserVoiceCalibrationEntry[]
+  voices?: Array<Record<string, unknown>>
 }
 
 interface CalibrateSpeedResponse {
   ok: boolean
-  voice?: UserVoiceCalibrationEntry
+  voice?: Record<string, unknown>
   calibration?: {
     cps: number
     total_hanzi: number
@@ -54,38 +47,18 @@ interface CalibrateSpeedResponse {
 }
 
 export async function getVoiceLibrary(): Promise<VoiceLibrarySummary> {
-  // The legacy /voice-library endpoint is the source of truth for which
-  // voices the user has and how they map to speakers. /gateway/user-voices
-  // is the only place that carries the chars_per_second calibration. Fetch
-  // both and merge — the user-voices call is best-effort: if it fails we
-  // still render the library, just without cps badges.
-  const [snapshot, userVoiceCalibrations] = await Promise.all([
-    apiClient.get<ApiWebUiVoiceLibrarySnapshot>('/voice-library'),
-    fetchUserVoiceCalibrations().catch(() => new Map<string, { cps: number | null; calibratedAt: string | null }>()),
-  ])
-  return toVoiceLibrarySummary(snapshot, userVoiceCalibrations)
+  // Single source of truth: /gateway/user-voices returns the user's
+  // personal voice library with label, cps, and all metadata directly
+  // from the user_voices table. No longer merging with the legacy
+  // /voice-library endpoint — that was causing label edits to revert
+  // on refresh (PATCH writes user_voices but /voice-library reads from
+  // a different data source).
+  const resp = await fetch('/gateway/user-voices', { credentials: 'include' })
+  if (!resp.ok) throw new Error(`fetch user-voices failed: ${resp.status}`)
+  const data = (await resp.json()) as { voices?: Array<Record<string, unknown>> }
+  return toVoiceLibrarySummaryFromGateway(data?.voices ?? [])
 }
 
-async function fetchUserVoiceCalibrations(): Promise<
-  Map<string, { cps: number | null; calibratedAt: string | null }>
-> {
-  // /gateway/user-voices is gateway-native (not job-api proxy). Same
-  // raw-fetch pattern as frontend-next/src/lib/api/voiceSelection.ts:111.
-  const resp = await fetch('/gateway/user-voices', { credentials: 'include' })
-  if (!resp.ok) {
-    throw new Error(`fetch user-voices failed: ${resp.status}`)
-  }
-  const data = (await resp.json()) as UserVoicesResponse
-  const out = new Map<string, { cps: number | null; calibratedAt: string | null }>()
-  for (const v of data?.voices ?? []) {
-    if (!v?.voice_id) continue
-    out.set(v.voice_id, {
-      cps: typeof v.chars_per_second === 'number' ? v.chars_per_second : null,
-      calibratedAt: v.speed_calibrated_at ?? null,
-    })
-  }
-  return out
-}
 
 /**
  * Trigger speed calibration for a cloned voice.
@@ -98,6 +71,76 @@ async function fetchUserVoiceCalibrations(): Promise<
  * Throws an Error with the gateway-provided message when the API
  * returns a non-2xx status (so the page UI can surface it to the user).
  */
+/**
+ * Update the display label of a user voice.
+ */
+export async function updateVoiceLabel(voiceId: string, label: string): Promise<{ ok: boolean; voice?: Record<string, unknown> }> {
+  const resp = await fetch(
+    `/gateway/user-voices/${encodeURIComponent(voiceId)}`,
+    {
+      method: 'PATCH',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label }),
+    },
+  )
+  const data = await resp.json().catch(() => ({}))
+  if (!resp.ok) throw new Error(data?.message || data?.error || `PATCH failed (${resp.status})`)
+  return data
+}
+
+/**
+ * Add a new voice to the user's personal library.
+ */
+export async function addUserVoice(params: {
+  voice_id: string
+  label: string
+  tts_provider?: string
+  platform?: string
+}): Promise<{ ok: boolean; voice?: Record<string, unknown> }> {
+  const resp = await fetch('/gateway/user-voices', {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  })
+  const data = await resp.json().catch(() => ({}))
+  if (!resp.ok) throw new Error(data?.message || data?.error || `POST failed (${resp.status})`)
+  return data
+}
+
+export interface ProbeResult {
+  ok: boolean
+  audio_base64?: string
+  audio_format?: string
+  text?: string
+  voice_id?: string
+  error?: string
+  message?: string
+}
+
+/**
+ * Probe a voice_id — synthesize a short sample to verify usability
+ * and let the user hear how it sounds. Cost: ~CNY 0.006 per call.
+ */
+export async function probeVoice(voiceId: string, label?: string, ttsProvider?: string): Promise<ProbeResult> {
+  const resp = await fetch('/gateway/user-voices/probe', {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      voice_id: voiceId,
+      label: label || undefined,
+      tts_provider: ttsProvider || undefined,
+    }),
+  })
+  const data = (await resp.json().catch(() => ({}))) as ProbeResult
+  if (!resp.ok || !data?.ok) {
+    throw new Error(data?.message || data?.error || `probe failed (${resp.status})`)
+  }
+  return data
+}
+
 export async function calibrateVoiceSpeed(voiceId: string): Promise<CalibrateSpeedResponse> {
   const resp = await fetch(
     `/gateway/user-voices/${encodeURIComponent(voiceId)}/calibrate-speed`,
@@ -116,88 +159,42 @@ export async function calibrateVoiceSpeed(voiceId: string): Promise<CalibrateSpe
   return data
 }
 
-function toVoiceLibrarySummary(
-  snapshot: ApiWebUiVoiceLibrarySnapshot,
-  calibrations: Map<string, { cps: number | null; calibratedAt: string | null }>,
+function toVoiceLibrarySummaryFromGateway(
+  voices: Array<Record<string, unknown>>,
 ): VoiceLibrarySummary {
-  const seen = new Set<string>()
-  const voices: VoiceLibraryEntry[] = []
-
-  const cpsFor = (vid: string) => calibrations.get(vid) ?? { cps: null, calibratedAt: null }
-
-  for (const speaker of snapshot.speakers) {
-    const speakerId = asString(speaker.speaker_id)
-    const speakerName = asString(speaker.speaker_name) ?? asString(speaker.display_name)
-    const speakerVoices = asArray(speaker.voices)
-
-    for (const voice of speakerVoices) {
-      const voiceId = asString(voice.voice_id)
-      if (!voiceId || seen.has(voiceId)) {
-        continue
-      }
-      seen.add(voiceId)
-      const cal = cpsFor(voiceId)
-      voices.push({
-        voiceId,
-        voiceType: asString(voice.voice_type),
-        provider: asString(voice.provider),
-        ttsProvider: asString(voice.tts_provider),
-        platform: asString(voice.platform),
-        label: asString(voice.label),
-        createdAt: asString(voice.created_at),
-        notes: asString(voice.notes),
-        verificationStatus: asString(voice.verification_status),
-        speakerName,
-        speakerId,
-        charsPerSecond: cal.cps,
-        speedCalibratedAt: cal.calibratedAt,
-      })
-    }
-  }
-
-  for (const option of snapshot.builtin_voice_options) {
-    const voiceId = asString(option.voice_id)
-    if (!voiceId || seen.has(voiceId)) {
-      continue
-    }
-    seen.add(voiceId)
-    const cal = cpsFor(voiceId)
-    voices.push({
+  const entries: VoiceLibraryEntry[] = []
+  for (const v of voices) {
+    const voiceId = asString(v.voice_id)
+    if (!voiceId) continue
+    entries.push({
       voiceId,
-      voiceType: asString(option.voice_type) ?? 'builtin',
-      provider: asString(option.provider),
-      ttsProvider: asString(option.tts_provider),
-      platform: asString(option.platform),
-      label: asString(option.label),
-      createdAt: asString(option.created_at),
-      notes: asString(option.notes),
-      verificationStatus: asString(option.verification_status),
-      speakerName: asString(option.speaker_name),
-      speakerId: asString(option.speaker_id),
-      charsPerSecond: cal.cps,
-      speedCalibratedAt: cal.calibratedAt,
+      voiceType: asString(v.voice_type),
+      provider: asString(v.provider),
+      ttsProvider: asString(v.tts_provider),
+      platform: asString(v.platform),
+      label: asString(v.label),
+      createdAt: asString(v.created_at),
+      notes: asString(v.notes),
+      verificationStatus: null,
+      speakerName: asString(v.source_speaker_id),
+      speakerId: asString(v.source_speaker_id),
+      charsPerSecond: typeof v.chars_per_second === 'number' ? v.chars_per_second : null,
+      speedCalibratedAt: asString(v.speed_calibrated_at),
     })
   }
-
-  voices.sort((a, b) => {
-    const aIsCloned = a.voiceType === 'cloned' ? 0 : 1
-    const bIsCloned = b.voiceType === 'cloned' ? 0 : 1
-    if (aIsCloned !== bIsCloned) {
-      return aIsCloned - bIsCloned
-    }
-    const aTime = a.createdAt ? Date.parse(a.createdAt) : 0
-    const bTime = b.createdAt ? Date.parse(b.createdAt) : 0
-    return bTime - aTime
+  // Sort: newest first
+  entries.sort((a, b) => {
+    const at = a.createdAt ? Date.parse(a.createdAt) : 0
+    const bt = b.createdAt ? Date.parse(b.createdAt) : 0
+    return bt - at
   })
-
-  const clonedVoiceCount = voices.filter((v) => v.voiceType === 'cloned').length
-
+  const clonedCount = entries.filter((e) => e.voiceType === 'cloned').length
   return {
-    speakerCount: snapshot.speaker_count,
-    voiceCount: snapshot.voice_count,
-    builtinVoiceCount: snapshot.builtin_voice_count,
-    clonedVoiceCount,
-    voices,
+    speakerCount: 0,
+    voiceCount: entries.length,
+    builtinVoiceCount: entries.length - clonedCount,
+    clonedVoiceCount: clonedCount,
+    voices: entries,
   }
 }
 

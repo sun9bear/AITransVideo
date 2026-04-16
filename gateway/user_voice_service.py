@@ -113,6 +113,25 @@ async def mark_voice_expired(
     return True
 
 
+async def update_user_voice_label(
+    db: AsyncSession,
+    voice: UserVoice,
+    *,
+    label: str,
+) -> UserVoice:
+    """Update an already-fetched UserVoice's display label.
+
+    Caller must pass the row (e.g. from :func:`fetch_user_voice`) so
+    there's no double-SELECT on PATCH.
+    """
+    now = datetime.now(timezone.utc)
+    voice.label = label
+    voice.updated_at = now
+    await db.commit()
+    await db.refresh(voice)
+    return voice
+
+
 async def fetch_user_voice(
     db: AsyncSession,
     user_id: object,

@@ -292,6 +292,40 @@ def _report_job_metering(
             "speed_param_distribution": speed_counts,
         }
 
+        # voice_speed_mismatch_rate: fraction of segments whose voice cps
+        # deviates >15% from target (= source_english_wps × 1.8). Segments
+        # without target or voice cps are excluded from the denominator.
+        try:
+            mismatch_count = 0
+            mismatch_denom = 0
+            for seg in segments:
+                target_cps_val = float(getattr(seg, "target_chars_per_second", 0) or 0)
+                if target_cps_val <= 0:
+                    continue
+                # Use the voice's catalog/user_voices cps (via the probe-calibrated
+                # per-speaker value that was piped into the segment).
+                voice_cps_text = seg.cn_text if hasattr(seg, "cn_text") else ""
+                actual_dur = float(getattr(seg, "actual_duration_ms", 0) or 0)
+                speed_param = float(getattr(seg, "dsp_speed_param", 1.0) or 1.0)
+                if actual_dur <= 0 or not voice_cps_text:
+                    continue
+                # Compute voice's natural cps (normalize out speed adjustment)
+                natural_dur_s = (actual_dur * max(0.01, speed_param)) / 1000.0
+                spoken = sum(1 for ch in voice_cps_text if 0x4E00 <= ord(ch) <= 0x9FFF)
+                if spoken <= 0 or natural_dur_s <= 0:
+                    continue
+                voice_cps = spoken / natural_dur_s
+                mismatch_denom += 1
+                deviation = abs(voice_cps - target_cps_val) / target_cps_val
+                if deviation > 0.15:
+                    mismatch_count += 1
+            if mismatch_denom > 0:
+                body["voice_speed_mismatch_rate"] = round(mismatch_count / mismatch_denom, 4)
+                body["voice_speed_mismatch_count"] = mismatch_count
+                body["voice_speed_mismatch_segments"] = mismatch_denom
+        except Exception:
+            pass  # best-effort metric
+
         # First-pass duration error stats (only when at least one segment has it).
         if first_pass_errors_abs:
             sorted_err = sorted(first_pass_errors_abs)
@@ -2432,6 +2466,11 @@ class ProcessPipeline:
                 "can_clone": can_clone,
                 "segments": segs_sorted,
                 "probe_texts": _probe_texts_by_speaker.get(sid, []),
+                # Phase 4 UX: target cps for this speaker, derived from
+                # source_english_words_per_second × 1.8. The frontend uses
+                # this to warn users when their chosen voice's cps deviates
+                # >30% from the target (likely to cause heavy DSP stretching).
+                "target_chars_per_second": speaker_target_cps.get(sid),
             })
 
         return {
