@@ -546,6 +546,13 @@ class UserVoice(Base):
     source_speaker_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     expired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Voice speed calibration (migration 013). Populated when the user
+    # triggers POST /gateway/user-voices/{id}/calibrate-speed; NULL otherwise.
+    chars_per_second: Mapped[float | None] = mapped_column(Float, nullable=True)
+    chars_per_second_by_model: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    speed_calibrated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
     )

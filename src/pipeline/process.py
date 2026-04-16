@@ -1392,6 +1392,10 @@ class ProcessPipeline:
                         default_provider=job_tts_provider or "minimax",
                         speaker_providers=_speaker_providers or None,
                         tts_model=_snap('tts_model'),
+                        # Scopes the user_voices fallback to this job's owner.
+                        # Without this, a cloned voice_id could match rows from
+                        # a different user and leak their cps into this pipeline.
+                        user_id=_snap('user_id'),
                     )
                     if _catalog_by_speaker:
                         # Always record per-speaker catalog hits so the metric

@@ -111,3 +111,49 @@ async def mark_voice_expired(
     voice.updated_at = datetime.now(timezone.utc)
     await db.commit()
     return True
+
+
+async def fetch_user_voice(
+    db: AsyncSession,
+    user_id: object,
+    voice_id: str,
+) -> UserVoice | None:
+    """Look up a single voice owned by ``user_id``. Returns None if not found
+    or if the voice has been expired (mark_voice_expired)."""
+    result = await db.execute(
+        select(UserVoice).where(
+            UserVoice.user_id == user_id,
+            UserVoice.voice_id == voice_id,
+            UserVoice.expired_at.is_(None),
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def update_voice_speed_calibration(
+    db: AsyncSession,
+    voice: UserVoice,
+    *,
+    cps: float,
+    model_key: str | None = None,
+) -> UserVoice:
+    """Persist a speed-calibration result onto an already-fetched user voice.
+
+    Caller must pass the ``UserVoice`` row (e.g. from :func:`fetch_user_voice`)
+    so we don't re-SELECT the same row twice on every calibrate call.
+
+    ``model_key`` (e.g. "speech-2.8-turbo") is recorded in the per-model
+    JSONB; ``chars_per_second`` scalar always gets the latest value.
+    Re-calibrating one model preserves the other models' values.
+    """
+    now = datetime.now(timezone.utc)
+    voice.chars_per_second = float(cps)
+    voice.speed_calibrated_at = now
+    voice.updated_at = now
+    if model_key:
+        existing = dict(voice.chars_per_second_by_model or {})
+        existing[model_key] = float(cps)
+        voice.chars_per_second_by_model = existing
+    await db.commit()
+    await db.refresh(voice)
+    return voice
