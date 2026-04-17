@@ -6,8 +6,10 @@ export type SessionUser = {
   id: string
   display_name: string
   email: string
+  phone_number?: string
   role?: string
   plan_code?: string
+  created_at?: string
 }
 
 type SessionContextValue = {

@@ -22,7 +22,9 @@ import {
 
 const downloadLabels = {
   'editor.dubbed_audio_complete': '完整配音音频',
-  'editor.subtitles': '字幕文件',
+  'editor.subtitles': '中文字幕',
+  'editor.subtitles_en': '英文字幕',
+  'editor.subtitles_bilingual': '双语字幕',
   'editor.tts_segments_zip': '分段配音音频（ZIP）',
   'manifest.file': '项目清单（JSON）',
   'publish.dubbed_video': '成品视频',
@@ -35,8 +37,16 @@ const downloadDescriptions = {
     unavailable: '完整配音音频还没有生成。',
   },
   'editor.subtitles': {
-    available: '适合单独查看或继续编辑字幕。',
-    unavailable: '字幕文件还没有生成。',
+    available: '中文短句字幕，剪映风格。',
+    unavailable: '中文字幕还没有生成。',
+  },
+  'editor.subtitles_en': {
+    available: '英文短句字幕。',
+    unavailable: '英文字幕还没有生成。',
+  },
+  'editor.subtitles_bilingual': {
+    available: '中英双语对照字幕。',
+    unavailable: '双语字幕还没有生成。',
   },
   'editor.tts_segments_zip': {
     available: '每段配音的独立音频文件，打包下载。',
@@ -61,6 +71,8 @@ const downloadDisplayOrder = [
   'editor.dubbed_audio_complete',
   'editor.tts_segments_zip',
   'editor.subtitles',
+  'editor.subtitles_en',
+  'editor.subtitles_bilingual',
   'translation.segments',
   'manifest.file',
 ] as const

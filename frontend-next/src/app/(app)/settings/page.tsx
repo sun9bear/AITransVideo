@@ -1,52 +1,238 @@
 "use client"
 
+import { useState } from "react"
 import Link from "next/link"
+import { useRouter } from "next/navigation"
+import { useSession } from "@/components/providers/session-provider"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { toast } from "sonner"
+
+const PLAN_LABELS: Record<string, string> = {
+  free: "免费版",
+  plus: "Plus",
+  pro: "Pro",
+}
+
+function maskPhone(phone: string): string {
+  if (phone.length >= 7) {
+    return phone.slice(0, 3) + "****" + phone.slice(-4)
+  }
+  return phone
+}
 
 export default function SettingsPage() {
-  return (
-    <div className="space-y-6">
-      <h1 className="text-2xl font-bold">工作台</h1>
+  const { user, loading } = useSession()
+  const router = useRouter()
 
+  if (loading) {
+    return (
+      <div className="space-y-6">
+        <h1 className="text-2xl font-bold">账户设置</h1>
+        <div className="animate-pulse space-y-4">
+          <div className="h-40 rounded-lg bg-muted" />
+          <div className="h-40 rounded-lg bg-muted" />
+        </div>
+      </div>
+    )
+  }
+
+  if (!user) {
+    return (
+      <div className="space-y-6">
+        <h1 className="text-2xl font-bold">账户设置</h1>
+        <p className="text-muted-foreground">请先登录。</p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-6 max-w-2xl">
+      <h1 className="text-2xl font-bold">账户设置</h1>
+
+      {/* 个人信息 */}
       <Card>
         <CardHeader>
-          <CardTitle>快速开始</CardTitle>
+          <CardTitle className="text-base">个人信息</CardTitle>
         </CardHeader>
-        <CardContent className="space-y-4">
-          <p className="text-sm text-muted-foreground">完成以下四步即可拿到翻译配音视频。</p>
-          <div className="grid gap-3 sm:grid-cols-2">
-            <Step n={1} title="填写 YouTube 链接并创建翻译任务" desc="当前支持公开的 YouTube 视频链接。" />
-            <Step n={2} title="按提示完成审核" desc="系统会在关键节点暂停，请确认说话人、翻译和音色。" />
-            <Step n={3} title="等待处理完成" desc="配音、对齐和视频合成会自动完成。" />
-            <Step n={4} title="在项目详情页下载结果" desc="成品视频、配音音频和字幕文件都可以下载。" />
-          </div>
-          <div className="flex gap-2">
-            <Button><Link href="/translations/new">新建翻译</Link></Button>
-            <Button variant="outline"><Link href="/tasks/current">查看当前任务</Link></Button>
-          </div>
+        <CardContent className="space-y-3">
+          <InfoRow label="手机号" value={user.phone_number ? maskPhone(user.phone_number) : "未绑定"} />
+          <InfoRow label="邮箱" value={user.email || "未绑定"} />
+          <InfoRow label="显示名称" value={user.display_name || "—"} />
         </CardContent>
       </Card>
 
-      <div className="grid gap-6 md:grid-cols-2">
-        <Card>
-          <CardHeader><CardTitle className="text-base">快捷入口</CardTitle></CardHeader>
-          <CardContent className="space-y-2">
-            <Link href="/voices" className="block rounded-lg border p-3 text-sm hover:bg-muted transition">我的音色 →</Link>
-            <Link href="/projects" className="block rounded-lg border p-3 text-sm hover:bg-muted transition">我的项目 →</Link>
-          </CardContent>
-        </Card>
-      </div>
+      {/* 绑定邮箱 */}
+      {!user.email && <BindEmailCard />}
+
+      {/* 修改密码 */}
+      <ChangePasswordCard hasPassword={!!user.email} />
+
+      {/* 套餐信息 */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">套餐信息</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <InfoRow label="当前套餐" value={PLAN_LABELS[user.plan_code ?? "free"] ?? user.plan_code ?? "免费版"} />
+          <Link href="/settings/billing">
+            <Button variant="outline" size="sm">查看账单与订阅</Button>
+          </Link>
+        </CardContent>
+      </Card>
+
+      {/* 账户信息 */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">账户信息</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <InfoRow label="注册时间" value={user.created_at ? new Date(user.created_at).toLocaleDateString("zh-CN") : "—"} />
+          <InfoRow label="账户角色" value={user.role === "admin" ? "管理员" : "普通用户"} />
+          <InfoRow label="账户 ID" value={user.id.slice(0, 8) + "..."} />
+        </CardContent>
+      </Card>
+
+      {/* 退出登录 */}
+      <Card>
+        <CardContent className="pt-6">
+          <Button
+            variant="destructive"
+            onClick={async () => {
+              await fetch("/auth/logout", { method: "POST", credentials: "include" })
+              toast.success("已退出登录")
+              router.push("/auth")
+            }}
+          >
+            退出登录
+          </Button>
+        </CardContent>
+      </Card>
     </div>
   )
 }
 
-function Step({ n, title, desc }: { n: number; title: string; desc: string }) {
+function InfoRow({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-lg border p-3 space-y-1">
-      <p className="text-xs text-muted-foreground">第{n}步</p>
-      <p className="text-sm font-semibold">{title}</p>
-      <p className="text-xs text-muted-foreground">{desc}</p>
+    <div className="flex items-center justify-between text-sm">
+      <span className="text-muted-foreground">{label}</span>
+      <span>{value}</span>
     </div>
+  )
+}
+
+function ChangePasswordCard({ hasPassword }: { hasPassword: boolean }) {
+  const [oldPwd, setOldPwd] = useState("")
+  const [newPwd, setNewPwd] = useState("")
+  const [confirmPwd, setConfirmPwd] = useState("")
+  const [submitting, setSubmitting] = useState(false)
+
+  async function handleSubmit() {
+    if (newPwd.length < 6) {
+      toast.error("新密码长度至少 6 位")
+      return
+    }
+    if (newPwd !== confirmPwd) {
+      toast.error("两次输入的密码不一致")
+      return
+    }
+    setSubmitting(true)
+    try {
+      const res = await fetch("/api/account/change-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ old_password: oldPwd, new_password: newPwd }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.detail || "修改失败")
+      }
+      toast.success("密码修改成功")
+      setOldPwd("")
+      setNewPwd("")
+      setConfirmPwd("")
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "修改失败")
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">{hasPassword ? "修改密码" : "设置密码"}</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3 max-w-sm">
+        {hasPassword && (
+          <div className="space-y-1">
+            <Label htmlFor="old-pwd">当前密码</Label>
+            <Input id="old-pwd" type="password" value={oldPwd} onChange={(e) => setOldPwd(e.target.value)} />
+          </div>
+        )}
+        <div className="space-y-1">
+          <Label htmlFor="new-pwd">新密码</Label>
+          <Input id="new-pwd" type="password" value={newPwd} onChange={(e) => setNewPwd(e.target.value)} />
+        </div>
+        <div className="space-y-1">
+          <Label htmlFor="confirm-pwd">确认新密码</Label>
+          <Input id="confirm-pwd" type="password" value={confirmPwd} onChange={(e) => setConfirmPwd(e.target.value)} />
+        </div>
+        <Button size="sm" onClick={handleSubmit} disabled={submitting}>
+          {submitting ? "提交中..." : "保存"}
+        </Button>
+      </CardContent>
+    </Card>
+  )
+}
+
+function BindEmailCard() {
+  const [email, setEmail] = useState("")
+  const [submitting, setSubmitting] = useState(false)
+
+  async function handleSubmit() {
+    if (!email || !email.includes("@")) {
+      toast.error("请输入有效的邮箱地址")
+      return
+    }
+    setSubmitting(true)
+    try {
+      const res = await fetch("/api/account/bind-email", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ email }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.detail || "绑定失败")
+      }
+      toast.success("邮箱绑定成功")
+      window.location.reload()
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "绑定失败")
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">绑定邮箱</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3 max-w-sm">
+        <div className="space-y-1">
+          <Label htmlFor="bind-email">邮箱地址</Label>
+          <Input id="bind-email" type="email" placeholder="you@example.com" value={email} onChange={(e) => setEmail(e.target.value)} />
+        </div>
+        <Button size="sm" onClick={handleSubmit} disabled={submitting}>
+          {submitting ? "绑定中..." : "绑定"}
+        </Button>
+      </CardContent>
+    </Card>
   )
 }

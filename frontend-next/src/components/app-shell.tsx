@@ -7,9 +7,7 @@ import { toast } from "sonner"
 import { useSession } from "@/components/providers/session-provider"
 import { Button } from "@/components/ui/button"
 import {
-  PlusCircle,
-  ListChecks,
-  FolderOpen,
+  Video,
   Mic2,
   BarChart3,
   Bell,
@@ -29,12 +27,13 @@ import {
   Activity,
   ClipboardList,
   TrendingUp,
+  CreditCard,
 } from "lucide-react"
 
 type NavItem = {
   label: string
   href: string
-  icon: typeof PlusCircle
+  icon: typeof Video
 }
 
 type NavGroup = {
@@ -47,15 +46,13 @@ const navGroups: NavGroup[] = [
   {
     label: "工作流",
     items: [
-      { label: "新建翻译", href: "/translations/new", icon: PlusCircle },
-      { label: "当前任务", href: "/tasks/current", icon: ListChecks },
-      { label: "我的项目", href: "/projects", icon: FolderOpen },
+      { label: "视频翻译", href: "/projects", icon: Video },
+      { label: "我的音色", href: "/voices", icon: Mic2 },
     ],
   },
   {
     label: "资源",
     items: [
-      { label: "我的音色", href: "/voices", icon: Mic2 },
       { label: "用量统计", href: "/usage", icon: BarChart3 },
     ],
   },
@@ -63,6 +60,7 @@ const navGroups: NavGroup[] = [
     label: "账户",
     items: [
       { label: "通知", href: "/notifications", icon: Bell },
+      { label: "账单管理", href: "/settings/billing", icon: CreditCard },
       { label: "账户设置", href: "/settings", icon: User },
       { label: "帮助中心", href: "/help", icon: HelpCircle },
     ],
@@ -144,7 +142,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 const isActive =
                   pathname === item.href ||
                   (item.href !== "/" && pathname.startsWith(item.href)) ||
-                  (item.href === "/tasks/current" && pathname.startsWith("/workspace/"))
+                  (item.href === "/projects" && pathname.startsWith("/workspace/"))
 
                 return (
                   <Link

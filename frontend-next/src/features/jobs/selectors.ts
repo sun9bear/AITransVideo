@@ -16,6 +16,23 @@ export function selectCurrentTaskJob(jobs: readonly JobSummary[]) {
   return recentJob ?? null
 }
 
+export function selectActiveTaskJob(jobs: JobSummary[]): JobSummary | null {
+  // Only truly active statuses — NO fallback to "recent 1 hour" like selectCurrentTaskJob
+  const active = jobs.filter(j =>
+    ['running', 'queued', 'waiting_for_review'].includes(j.status)
+  )
+  if (active.length === 0) return null
+  // Priority: waiting_for_review > running > queued, then by most recent update
+  const priorityOrder = ['waiting_for_review', 'running', 'queued']
+  active.sort((a, b) => {
+    const pa = priorityOrder.indexOf(a.status)
+    const pb = priorityOrder.indexOf(b.status)
+    if (pa !== pb) return pa - pb
+    return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+  })
+  return active[0]
+}
+
 function getTimestampValue(value: string | null) {
   if (!value) {
     return 0

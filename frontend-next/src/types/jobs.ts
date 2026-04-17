@@ -89,6 +89,8 @@ export const DOWNLOADABLE_ARTIFACT_KEYS = [
   'manifest.file',
   'translation.segments',
   'editor.subtitles',
+  'editor.subtitles_en',
+  'editor.subtitles_bilingual',
   'editor.dubbed_audio_complete',
   'editor.tts_segments_zip',
   'publish.dubbed_video',

@@ -9,6 +9,7 @@ import { StatusBadge } from '@/components/status-badge'
 import { StageProgress } from '@/components/stage-progress'
 import { LogViewer } from '@/components/log-viewer'
 import { ResultDownloadList } from '@/components/result-download-list'
+import { ResultMediaCard } from '@/components/workspace/ResultMediaCard'
 import { TranslationReviewPanel, VoiceReviewPanel, VoiceSelectionPanel } from '@/components/workspace'
 import {
   getErrorCategory,
@@ -136,7 +137,7 @@ export default function WorkspacePage() {
     setIsCancelling(true)
     try {
       await cancelJob(jobId)
-      router.push('/translations/new')
+      router.push('/projects?new=1')
     } catch (error) {
       setPageError(getErrorMessage(error))
       setIsCancelling(false)
@@ -153,7 +154,7 @@ export default function WorkspacePage() {
     return <EmptyState actionLabel="返回当前任务" actionTo="/tasks/current" description={pageError} title="无法加载工作区" />
   }
   if (!job) {
-    return <EmptyState actionLabel="新建翻译" actionTo="/translations/new" description="找不到该任务。" title="任务不存在" />
+    return <EmptyState actionLabel="新建翻译" actionTo="/projects?new=1" description="找不到该任务。" title="任务不存在" />
   }
 
   const isWaitingForReview = job.status === 'waiting_for_review'
@@ -273,13 +274,25 @@ export default function WorkspacePage() {
             <p className="text-sm text-muted-foreground">{getErrorCategory(job.errorSummary).suggestion}</p>
           </div>
           <div className="mt-4 flex gap-2">
-            <Link className="secondary-button" href="/translations/new">重新创建任务</Link>
+            <Link className="secondary-button" href="/projects?new=1">重新创建任务</Link>
           </div>
         </section>
       ) : null}
 
-      {/* Completed: Downloads */}
-      {availableDownloadCount > 0 ? <ResultDownloadList items={downloads} /> : null}
+      {/* Completed: Media player + Downloads */}
+      {availableDownloadCount > 0 ? (
+        <>
+          <ResultMediaCard jobId={jobId} />
+          <details className="mt-2">
+            <summary className="cursor-pointer text-xs text-muted-foreground hover:text-foreground">
+              更多下载
+            </summary>
+            <div className="mt-2">
+              <ResultDownloadList items={downloads} />
+            </div>
+          </details>
+        </>
+      ) : null}
 
       {/* Logs */}
       <LogViewer
