@@ -3,7 +3,12 @@
 }
 
 {$AUTODUB_PUBLIC_HOST} {
-    tls internal
+    # Public cert via Let's Encrypt ACME. CADDY_EMAIL is the admin contact
+    # for rate-limit / expiration notifications — MUST be set in
+    # /opt/aivideotrans/config/.env on each deploy host. See .env.example.
+    # DO NOT revert to `tls internal` on a public domain — browsers do not
+    # trust Caddy's self-signed CA and HSTS makes the breakage un-bypassable.
+    tls {$CADDY_EMAIL}
 
     encode zstd gzip
 
