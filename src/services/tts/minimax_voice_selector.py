@@ -63,11 +63,15 @@ def _resolve_language(target_language: str | None) -> str:
 def _load_minimax_pool() -> list[dict]:
     """Load matchable MiniMax voices from Gateway (with static fallback)."""
     try:
+        import os
         import requests
+        key = os.environ.get("AVT_INTERNAL_API_KEY", "").strip()
+        headers = {"X-Internal-Key": key} if key else {}
         resp = requests.get(
             "http://127.0.0.1:8880/api/internal/voice-catalog",
             params={"provider": "minimax"},
             timeout=3.0,
+            headers=headers,
         )
         resp.raise_for_status()
         return resp.json().get("voices", [])

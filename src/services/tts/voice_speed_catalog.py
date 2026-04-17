@@ -26,6 +26,17 @@ _GATEWAY_URL = "http://127.0.0.1:8880/api/internal/voice-catalog"
 _USER_VOICES_GATEWAY_URL = "http://127.0.0.1:8880/api/internal/user-voices/by-voice-ids"
 _CACHE_TTL_SECONDS = 120.0
 
+
+def _internal_headers() -> dict[str, str]:
+    """Build X-Internal-Key header for /api/internal/* calls (T4).
+
+    Reads env at call time so the key can be set by orchestration after
+    this module is first imported.
+    """
+    import os
+    key = os.environ.get("AVT_INTERNAL_API_KEY", "").strip()
+    return {"X-Internal-Key": key} if key else {}
+
 # Sanity bounds live in a sibling zero-dependency module so the gateway
 # calibrator can import them without pulling in `requests`. Re-exported
 # here for backwards-compatibility with existing imports.
@@ -60,7 +71,7 @@ def _fetch_voices_cps(
     if cached and (time.time() - cached[1]) < _CACHE_TTL_SECONDS:
         return cached[0]
     try:
-        resp = requests.get(url, params=params, timeout=3.0)
+        resp = requests.get(url, params=params, timeout=3.0, headers=_internal_headers())
         resp.raise_for_status()
         data = resp.json()
         out: dict[str, dict] = {}

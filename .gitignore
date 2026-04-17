@@ -24,6 +24,8 @@ uploads/
 # Config (secrets)
 .env
 .env.*
+# But keep the (secret-free) template — host-level placeholders, no real values.
+!.env.example
 autodub.local.json
 remote_workbench.local.json
 voice_registry.json

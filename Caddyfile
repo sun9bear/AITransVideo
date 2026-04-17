@@ -41,6 +41,16 @@
         reverse_proxy 127.0.0.1:8880
     }
 
+    # Deny public access to internal-only endpoints (app↔gateway on localhost only).
+    # Must come BEFORE @api_routes to short-circuit reverse_proxy.
+    # Return 404 (not 403) to avoid confirming endpoint existence (enumeration defense).
+    @internal_block {
+        path /api/internal/*
+    }
+    handle @internal_block {
+        respond "Not Found" 404
+    }
+
     # Other API traffic → Gateway
     @api_routes {
         path /api/*

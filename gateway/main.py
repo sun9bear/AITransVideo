@@ -41,7 +41,7 @@ import logging
 from config import settings
 from database import engine, init_db
 from models import Base
-from startup_checks import validate_production_safety
+from startup_checks import validate_production_safety, validate_internal_api_key
 
 logger = logging.getLogger(__name__)
 from job_intercept import (
@@ -63,9 +63,13 @@ async def lifespan(app: FastAPI):
     # T6 — refuse prod + no-auth combination. Fail fast BEFORE touching DB
     # so misconfigured deploys surface immediately with a clear message.
     validate_production_safety(settings.env, settings.auth_required)
+    # T4 — refuse startup without AVT_INTERNAL_API_KEY. Internal endpoints
+    # require this to avoid fail-open misconfiguration. Runs before init_db
+    # so the error surfaces before we touch the database.
+    validate_internal_api_key(settings.internal_api_key)
     # T3 — DB credentials are resolved and engine is built here. Raises if
     # neither AVT_PG_PASSWORD nor AVT_DATABASE_URL is set (no more hardcoded
-    # avt:avt fallback). T4 will hook additional startup validations here.
+    # avt:avt fallback).
     init_db()
 
     # Dev convenience: auto-create tables. In production use Alembic migrations.

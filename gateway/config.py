@@ -24,6 +24,12 @@ class GatewaySettings(BaseSettings):
     pg_password: str = ""
     database_url: str = ""
 
+    # Internal API key (T4) — guards /api/internal/* endpoints.
+    # Set via AVT_INTERNAL_API_KEY. Startup (validate_internal_api_key) refuses
+    # to run if unset/too short; per-request dependency _require_internal_access
+    # re-reads this at request time so tests can monkeypatch it.
+    internal_api_key: str = ""
+
     # Auth (Step 2)
     auth_required: bool = True
     session_expire_days: int = 7

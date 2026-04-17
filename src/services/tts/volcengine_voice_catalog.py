@@ -464,12 +464,23 @@ _CACHE_TTL = 60.0  # seconds
 _cache: dict[str, tuple[list[VoiceEntry], str, frozenset[str], float]] = {}
 
 
+def _internal_headers() -> dict[str, str]:
+    """Build X-Internal-Key header for /api/internal/* calls (T4).
+
+    Reads env at call time so orchestration can set the key after import.
+    """
+    import os
+    key = os.environ.get("AVT_INTERNAL_API_KEY", "").strip()
+    return {"X-Internal-Key": key} if key else {}
+
+
 def _fetch_from_gateway(resource_id: str) -> tuple[list[VoiceEntry], str, frozenset[str]]:
     """Fetch voice catalog from Gateway internal API (synchronous)."""
     resp = _requests.get(
         _GATEWAY_URL,
         params={"provider": "volcengine", "resource_id": resource_id},
         timeout=5.0,
+        headers=_internal_headers(),
     )
     resp.raise_for_status()
     data = resp.json()

@@ -185,13 +185,23 @@ _CACHE_TTL = 60.0  # seconds
 _cosy_cache: dict[str, tuple[list[dict], str, float]] = {}
 
 
+def _internal_headers() -> dict[str, str]:
+    """Build X-Internal-Key header for /api/internal/* calls (T4).
+
+    Reads env at call time so orchestration can set the key after import.
+    """
+    import os
+    key = os.environ.get("AVT_INTERNAL_API_KEY", "").strip()
+    return {"X-Internal-Key": key} if key else {}
+
+
 def _fetch_cosyvoice_from_gateway(endpoint_mode: str | None = None) -> tuple[list[dict], str]:
     """Fetch CosyVoice catalog from Gateway internal API."""
     params: dict[str, str] = {"provider": "cosyvoice"}
     if endpoint_mode:
         params["endpoint_mode"] = endpoint_mode
 
-    resp = _requests.get(_GATEWAY_URL, params=params, timeout=5.0)
+    resp = _requests.get(_GATEWAY_URL, params=params, timeout=5.0, headers=_internal_headers())
     resp.raise_for_status()
     data = resp.json()
     return data["voices"], data["default_voice_id"]

@@ -19,3 +19,20 @@ def validate_production_safety(env: str, auth_required: bool) -> None:
             "Refusing to start: AVT_ENV=production requires AVT_AUTH_REQUIRED=true. "
             "Disabling auth in production would expose all jobs to anonymous access."
         )
+
+
+def validate_internal_api_key(key: str) -> None:
+    """Refuse to start if AVT_INTERNAL_API_KEY is unset or too short (T4).
+
+    Without a key, internal endpoints fail closed (the request-time check
+    returns 503), but that's noisy. Force operators to set it explicitly
+    so misconfigured deploys surface at startup, not at first 503.
+
+    Minimum 16 chars. 32+ random chars recommended (see .env.example).
+    """
+    if not key or len(key) < 16:
+        raise RuntimeError(
+            "Gateway startup refused: AVT_INTERNAL_API_KEY must be set "
+            "(minimum 16 chars, recommended: 32+ random chars). "
+            "Generate: `python -c 'import secrets; print(secrets.token_urlsafe(32))'`"
+        )

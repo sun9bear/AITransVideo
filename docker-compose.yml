@@ -19,6 +19,10 @@ services:
       VERTEX_AI_EXPRESS_KEY: ${VERTEX_AI_EXPRESS_KEY:-}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       AUTODUB_TTS_API_KEY: ${AUTODUB_TTS_API_KEY:-}
+      # T4 — shared-secret for /api/internal/* (app↔gateway loopback).
+      # Must be set (32+ chars). Gateway refuses to start without it; the app
+      # needs the same value to pass X-Internal-Key when calling gateway.
+      AVT_INTERNAL_API_KEY: ${AVT_INTERNAL_API_KEY:?AVT_INTERNAL_API_KEY 必须在 .env 中设置 (32+ chars)}
       # Vertex AI (Gemini) — service account auth
       GOOGLE_APPLICATION_CREDENTIALS: "/opt/aivideotrans/config/gcp-service-account.json"
       GOOGLE_CLOUD_PROJECT: "${GOOGLE_CLOUD_PROJECT:-gen-lang-client-0200199358}"
@@ -149,6 +153,9 @@ services:
       AVT_AUTH_REQUIRED: "true"
       AVT_PG_PASSWORD: "${PG_PASSWORD:?PG_PASSWORD 必须在 .env 中设置}"
       AVT_DATABASE_URL: ""
+      # T4 — shared-secret for /api/internal/* (app↔gateway loopback).
+      # Must be set (32+ chars). Gateway startup refuses to run without it.
+      AVT_INTERNAL_API_KEY: "${AVT_INTERNAL_API_KEY:?AVT_INTERNAL_API_KEY 必须在 .env 中设置 (32+ chars)}"
       # --- AI Analysis (GPT-5.4 thinking) ---
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       # --- Captcha (Cloudflare Turnstile) ---

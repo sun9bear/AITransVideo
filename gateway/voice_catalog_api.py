@@ -80,10 +80,43 @@ _VERIFIED_FALSE_SQL = text("""
 
 
 # ---------------------------------------------------------------------------
-# Phase 3: Internal endpoint for app runtime (no auth)
+# Phase 3: Internal endpoint for app runtime (loopback + shared-secret only)
 # ---------------------------------------------------------------------------
 
 internal_router = APIRouter(prefix="/api/internal", tags=["voice-catalog-internal"])
+
+
+async def _require_internal_access(request: Request) -> None:
+    """Unconditional internal-endpoint guard (T4).
+
+    Token is read from ``settings`` at request time (not module-import time),
+    so monkeypatch works in tests. Header name matches existing convention
+    (see voice_catalog_api.py ``_internal_headers()`` and
+    src/services/jobs/api.py): ``X-Internal-Key``.
+
+    The localhost check is a secondary safety net — the primary defense is
+    the Caddy-level block at ``Caddyfile @internal_block``. In production,
+    Caddy ensures public requests never reach here. If Caddy is bypassed
+    (direct gateway port access), this IP check still rejects non-loopback
+    clients.
+    """
+    # Import inside the function so monkeypatching ``settings.internal_api_key``
+    # in tests works regardless of import order.
+    from config import settings as _settings
+
+    # Primary: token must be configured AND match. No soft judgment.
+    key = _settings.internal_api_key
+    if not key:
+        # Defense in depth: if startup check didn't run (e.g. import-only),
+        # refuse rather than fail-open.
+        raise HTTPException(status_code=503, detail="Internal endpoint misconfigured")
+    provided = request.headers.get("X-Internal-Key", "")
+    if provided != key:
+        raise HTTPException(status_code=403, detail="Invalid or missing X-Internal-Key")
+    # Secondary: reject non-loopback source (belt-and-suspenders vs. Caddy block).
+    client_host = (request.client.host if request.client else "") or ""
+    if client_host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(status_code=403, detail="Non-loopback client not allowed")
 
 # Default voices per resource — constants, never change
 _DEFAULT_VOICES = {
@@ -98,7 +131,7 @@ _LABEL_PRIORITY = ("final", "text")
 _PROFILE_PRIORITY = ("final", "audio_round3", "audio_round2", "audio_round1")
 
 
-@internal_router.get("/voice-catalog")
+@internal_router.get("/voice-catalog", dependencies=[Depends(_require_internal_access)])
 async def internal_voice_catalog(
     provider: str = Query(..., description="Provider name"),
     resource_id: str | None = Query(None, description="Resource ID (e.g. seed-tts-1.0). Optional for CosyVoice."),
@@ -107,7 +140,10 @@ async def internal_voice_catalog(
 ) -> dict[str, Any]:
     """Return matchable + verified voices for app runtime.
 
-    No auth required — meant for localhost-only access from the app container.
+    Protected by ``_require_internal_access``:
+      - X-Internal-Key header must match ``settings.internal_api_key``
+      - client must be loopback (127.0.0.1 / ::1)
+      - Caddy blocks ``/api/internal/*`` from public ingress (primary defense)
     Returns voices with their best available demographic labels (final > text).
     """
     # Query matchable, non-archived, verified voices

@@ -351,6 +351,17 @@ _PROFILE_CACHE_TTL = 120.0  # seconds
 _GATEWAY_URL = "http://127.0.0.1:8880/api/internal/voice-catalog"
 
 
+def _internal_headers() -> dict[str, str]:
+    """Build X-Internal-Key header for /api/internal/* calls (T4).
+
+    Reads from env at call time (not import time) so the key can be set
+    by orchestration after this module is first imported.
+    """
+    import os
+    key = os.environ.get("AVT_INTERNAL_API_KEY", "").strip()
+    return {"X-Internal-Key": key} if key else {}
+
+
 def load_profiles(
     provider: str,
     resource_id: str | None = None,
@@ -374,7 +385,7 @@ def load_profiles(
         if endpoint_mode:
             params["endpoint_mode"] = endpoint_mode
 
-        resp = requests.get(_GATEWAY_URL, params=params, timeout=3.0)
+        resp = requests.get(_GATEWAY_URL, params=params, timeout=3.0, headers=_internal_headers())
         resp.raise_for_status()
         data = resp.json()
 

@@ -710,6 +710,37 @@ class TestParseImportLines:
 # ---------------------------------------------------------------------------
 
 class TestInternalVoiceCatalog:
+    # T4 — _require_internal_access reads settings.internal_api_key at request
+    # time and requires X-Internal-Key header to match. Tests use this fixed
+    # key + header pair.
+    _TEST_KEY = "test-internal-key-32-chars-xxxxxx"
+    _HDR = {"X-Internal-Key": _TEST_KEY}
+
+    @pytest.fixture(autouse=True)
+    def _set_internal_key(self, monkeypatch, voice_app):
+        # Configure the key settings expects, so _require_internal_access
+        # neither 503s (unset) nor 403s (mismatch).
+        from config import settings as _settings
+        monkeypatch.setattr(_settings, "internal_api_key", self._TEST_KEY)
+        # TestClient sets request.client.host to "testclient" (not 127.0.0.1),
+        # which the loopback check would reject. Override the dependency with
+        # a Header-based version that still enforces the key but skips the
+        # loopback check. In production, the primary defense is Caddy
+        # blocking /api/internal/* from public ingress.
+        from fastapi import Header, HTTPException
+        from voice_catalog_api import _require_internal_access
+
+        async def _require_internal_access_no_loopback(
+            x_internal_key: str | None = Header(default=None),
+        ) -> None:
+            key = _settings.internal_api_key
+            if not key:
+                raise HTTPException(status_code=503, detail="Internal endpoint misconfigured")
+            if (x_internal_key or "") != key:
+                raise HTTPException(status_code=403, detail="Invalid or missing X-Internal-Key")
+            # NB: Skip loopback check — TestClient is not 127.0.0.1.
+
+        voice_app.dependency_overrides[_require_internal_access] = _require_internal_access_no_loopback
 
     def _setup_db_for_internal(self, voice_app, voices, labels=None):
         """Mock DB for internal endpoint: voices query + labels query."""
@@ -736,7 +767,10 @@ class TestInternalVoiceCatalog:
         v2 = _make_voice(voice_id="zh_test_2", provider_config={"resource_id": "seed-tts-1.0"})
         self._setup_db_for_internal(voice_app, [v1, v2])
 
-        resp = client.get("/api/internal/voice-catalog?provider=volcengine&resource_id=seed-tts-1.0")
+        resp = client.get(
+            "/api/internal/voice-catalog?provider=volcengine&resource_id=seed-tts-1.0",
+            headers=self._HDR,
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert len(data["voices"]) == 2
@@ -748,31 +782,70 @@ class TestInternalVoiceCatalog:
         lbl = _make_label(voice_id="zh_test_1", label_type="text", age_group="young", persona_style="warm", energy_level="medium")
         self._setup_db_for_internal(voice_app, [v1], [lbl])
 
-        resp = client.get("/api/internal/voice-catalog?provider=volcengine&resource_id=seed-tts-2.0")
+        resp = client.get(
+            "/api/internal/voice-catalog?provider=volcengine&resource_id=seed-tts-2.0",
+            headers=self._HDR,
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert data["voices"][0]["age_group"] == "young"
         assert data["voices"][0]["persona_style"] == "warm"
         assert data["voices"][0]["energy_level"] == "medium"
 
-    def test_internal_endpoint_no_auth_required(self, voice_app, client) -> None:
-        """Internal endpoint should work without auth."""
+    def test_internal_endpoint_no_user_auth_required(self, voice_app, client) -> None:
+        """Internal endpoint should work without a user session (only shared-secret)."""
         voice_app.state.mock_user = None
         self._setup_db_for_internal(voice_app, [])
 
-        resp = client.get("/api/internal/voice-catalog?provider=volcengine&resource_id=seed-tts-1.0")
+        resp = client.get(
+            "/api/internal/voice-catalog?provider=volcengine&resource_id=seed-tts-1.0",
+            headers=self._HDR,
+        )
         assert resp.status_code == 200
 
     def test_internal_endpoint_default_voice_2_0(self, voice_app, client) -> None:
         self._setup_db_for_internal(voice_app, [])
 
-        resp = client.get("/api/internal/voice-catalog?provider=volcengine&resource_id=seed-tts-2.0")
+        resp = client.get(
+            "/api/internal/voice-catalog?provider=volcengine&resource_id=seed-tts-2.0",
+            headers=self._HDR,
+        )
         data = resp.json()
         assert data["default_voice_id"] == "zh_female_shuangkuaisisi_uranus_bigtts"
 
     def test_internal_endpoint_requires_params(self, voice_app, client) -> None:
-        resp = client.get("/api/internal/voice-catalog")
+        resp = client.get("/api/internal/voice-catalog", headers=self._HDR)
         assert resp.status_code == 422
+
+    # --- T4 access-control checks ---
+
+    def test_missing_key_returns_403(self, voice_app, client) -> None:
+        """No X-Internal-Key header -> 403."""
+        self._setup_db_for_internal(voice_app, [])
+        resp = client.get(
+            "/api/internal/voice-catalog?provider=volcengine&resource_id=seed-tts-1.0",
+        )
+        assert resp.status_code == 403
+
+    def test_wrong_key_returns_403(self, voice_app, client) -> None:
+        """Mismatched X-Internal-Key -> 403."""
+        self._setup_db_for_internal(voice_app, [])
+        resp = client.get(
+            "/api/internal/voice-catalog?provider=volcengine&resource_id=seed-tts-1.0",
+            headers={"X-Internal-Key": "wrong-key"},
+        )
+        assert resp.status_code == 403
+
+    def test_unset_key_returns_503(self, voice_app, client, monkeypatch) -> None:
+        """Settings key empty -> 503 (fail-closed, defense-in-depth)."""
+        from config import settings as _settings
+        monkeypatch.setattr(_settings, "internal_api_key", "")
+        self._setup_db_for_internal(voice_app, [])
+        resp = client.get(
+            "/api/internal/voice-catalog?provider=volcengine&resource_id=seed-tts-1.0",
+            headers=self._HDR,
+        )
+        assert resp.status_code == 503
 
 
 # ---------------------------------------------------------------------------
