@@ -930,19 +930,6 @@ def run_control_panel_command(argv: list[str]) -> None:
         ) from exc
 
 
-def run_web_ui_command(argv: list[str]) -> None:
-    """Deprecated: the standalone Web UI server (port 8876) has been removed.
-
-    All functionality has been migrated to Job API (8877) and Gateway (8880).
-    Use ``python main.py job-api`` instead.
-    """
-    raise SystemExit(
-        "web-ui 命令已废弃。Web UI 独立服务 (8876) 已下线。\n"
-        "所有功能已迁移到 Job API (8877) 和 Gateway (8880)。\n"
-        "请使用: python main.py job-api"
-    )
-
-
 def run_job_api_command(argv: list[str]) -> None:
     parsed_args = parse_job_api_args(argv)
     try:
@@ -1338,7 +1325,6 @@ def _build_main_usage(error_message: str | None = None) -> str:
         "  python main.py process <youtube_url> [--voice-a <voice_id>] [--voice-b <voice_id>] [--speaker-a <name>] [--speaker-b <name>] [--speakers auto|1|2] [--project-dir <path>] [--resume-from <stage>]",
         f"  python main.py control-panel [port]  # default port: {CONTROL_PANEL_DEFAULT_PORT}",
         f"  python main.py job-api [port]  # default port: {JOB_API_DEFAULT_PORT}",
-        "  python main.py web-ui          # (deprecated — prints deprecation notice)",
         "  python main.py local-audio-demo <local_audio_path> [translation_mode] [tts_mode] [--output editor|publish|both]",
         "  python main.py local-video-demo <local_video_path> [translation_mode] [tts_mode] [--output editor|publish|both]",
         "  python main.py voice-registry show <speaker_id>",
@@ -1824,9 +1810,6 @@ def main() -> None:
         return
     if command == "job-api":
         run_job_api_command(sys.argv)
-        return
-    if command == "web-ui":
-        run_web_ui_command(sys.argv)
         return
     # Legacy compatibility boundary: do not route this command through dispatcher yet.
     if command == "process":
