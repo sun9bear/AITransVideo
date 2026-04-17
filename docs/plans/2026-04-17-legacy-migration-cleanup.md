@@ -1315,6 +1315,7 @@ cd "D:/Claude/AIVideoTrans_Codex_web_mvp"
 
 | 推迟项 | 理由 | 将来触发条件 |
 |-------|------|-------------|
+| `llm_registry._cache` `threading.RLock` (T3.1b) | **T3.1a 审计（2026-04-17）证实无多线程并发访问路径**：pipeline 全单线程执行；Gateway FastAPI handlers 单线程 async event loop；TTS ThreadPoolExecutor 调用链与 llm_registry 无交集。加锁属 premature optimization | 若未来在 llm_registry 调用链里引入 ThreadPoolExecutor 或 threading.Thread 并行访问，重新启动 T3.1b |
 | `voice_registry.json` 迁 DB | 当前是项目级内置音色表，用户 clone 走 `UserVoice` 表，没有跨用户泄漏风险。迁 DB 是纯架构优化 | 若未来要支持"用户共享自己的音色给其他用户"功能时再做 |
 | `voice_bank/` 改 per-user | Job pipeline 不用它，只被 local workbench 访问 | 若生产 pipeline 开始用 voice_bank 作用户样本存储时再做 |
 | `src/services/control_panel.py` 删除 | 仍是本地开发工具（remote workbench 启动） | 若团队彻底切换到容器化本地开发时再删 |
