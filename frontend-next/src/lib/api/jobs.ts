@@ -37,7 +37,7 @@ export async function submitTranslationJob(
   const payload = await apiClient.post<ApiJobRecord>('/jobs', {
     body: {
       job_type: 'localize_video',
-      output_target: 'publish',
+      output_target: 'editor',
       source: {
         type: input.sourceType ?? 'youtube_url',
         value: input.sourceType === 'local_video' ? (input.localFilePath ?? '') : input.youtubeUrl,
