@@ -36,6 +36,7 @@ Weight distribution (total ~1.0, tuned for video dubbing):
 from __future__ import annotations
 
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Final
@@ -137,7 +138,9 @@ W_SPEED_DEVIATION_LOW: Final[float] = 0.10   # below this → minimal weight
 W_SPEED_DEVIATION_HIGH: Final[float] = 0.35  # above this → maximal weight
 
 
-_VOICE_MATCH_SPEED_DIMENSION_SETTINGS_PATH = Path("/opt/aivideotrans/config/admin_settings.json")
+_VOICE_MATCH_SPEED_DIMENSION_SETTINGS_PATH = Path(
+    os.environ.get("AIVIDEOTRANS_CONFIG_DIR", "/opt/aivideotrans/config")
+) / "admin_settings.json"
 
 
 def is_voice_match_speed_dimension_enabled() -> bool:

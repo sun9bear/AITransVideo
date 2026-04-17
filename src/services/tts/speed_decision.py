@@ -64,7 +64,9 @@ _SPEED_MAX_UNLIMITED: Final[float] = 2.00
 # Where the gateway writes its admin_settings.json on the production host.
 # Process.py uses the same path; we intentionally read directly rather than
 # round-trip to the gateway HTTP API to keep the TTS hot path latency-free.
-_ADMIN_SETTINGS_PATH = Path("/opt/aivideotrans/config/admin_settings.json")
+_ADMIN_SETTINGS_PATH = Path(
+    os.environ.get("AIVIDEOTRANS_CONFIG_DIR", "/opt/aivideotrans/config")
+) / "admin_settings.json"
 
 
 # --- Data classes ------------------------------------------------------------

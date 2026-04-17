@@ -9,7 +9,7 @@ import shutil
 import tempfile
 
 # Load .env file if present (for API keys not in container env)
-_ENV_FILE = Path("/opt/aivideotrans/config/.env")
+_ENV_FILE = Path(os.environ.get("AIVIDEOTRANS_CONFIG_DIR", "/opt/aivideotrans/config")) / ".env"
 if _ENV_FILE.exists():
     for _line in _ENV_FILE.read_text().splitlines():
         _line = _line.strip()
@@ -121,7 +121,10 @@ FAILED_SEGMENT_SOURCE_SPLIT_PATTERN = re.compile(r"(?<=[.!?;])\s+")
 
 T = TypeVar("T")
 
-_ADMIN_SETTINGS_PATH = "/opt/aivideotrans/config/admin_settings.json"
+_ADMIN_SETTINGS_PATH = str(
+    Path(os.environ.get("AIVIDEOTRANS_CONFIG_DIR", "/opt/aivideotrans/config"))
+    / "admin_settings.json"
+)
 _SPEAKER_ID_PATTERN = re.compile(r"^speaker_[a-z0-9_]+$")
 
 
@@ -2492,7 +2495,10 @@ class ProcessPipeline:
         try:
             import json as _json
             from pathlib import Path as _Path
-            runtime_file = _Path("/opt/aivideotrans/config/pricing_runtime.json")
+            import os as _os
+            runtime_file = _Path(
+                _os.environ.get("AIVIDEOTRANS_CONFIG_DIR", "/opt/aivideotrans/config")
+            ) / "pricing_runtime.json"
             if runtime_file.exists():
                 data = _json.loads(runtime_file.read_text(encoding="utf-8"))
                 return data.get("credits", {}).get("voice_clone_cost_credits", 500)

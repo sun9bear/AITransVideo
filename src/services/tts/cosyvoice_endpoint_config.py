@@ -35,7 +35,9 @@ _INTL_ALIASES: Final[frozenset[str]] = frozenset({"international", "intl"})
 _MAINLAND_ALIASES: Final[frozenset[str]] = frozenset({"mainland", "cn", "domestic"})
 
 # Settings file path (same as gateway admin_settings.py)
-_ADMIN_SETTINGS_PATH: Final[Path] = Path("/opt/aivideotrans/config/admin_settings.json")
+_ADMIN_SETTINGS_PATH: Final[Path] = Path(
+    os.environ.get("AIVIDEOTRANS_CONFIG_DIR", "/opt/aivideotrans/config")
+) / "admin_settings.json"
 
 # ---------------------------------------------------------------------------
 # Intl endpoint voice availability (audit node 10 results, 2026-03-30)

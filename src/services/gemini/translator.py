@@ -2154,7 +2154,10 @@ def _get_char_range_factors() -> tuple[float, float]:
     """Load char range factors from admin settings, with defaults 0.85 / 1.15."""
     try:
         import os as _os
-        settings_path = "/opt/aivideotrans/config/admin_settings.json"
+        settings_path = str(
+            Path(os.environ.get("AIVIDEOTRANS_CONFIG_DIR", "/opt/aivideotrans/config"))
+            / "admin_settings.json"
+        )
         if _os.path.exists(settings_path):
             with open(settings_path) as f:
                 settings = json.load(f)

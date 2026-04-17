@@ -111,7 +111,9 @@ _DEFAULTS: dict[str, str] = {
 # Settings cache (TTL-based to avoid repeated file reads in a single pipeline)
 # ---------------------------------------------------------------------------
 
-_SETTINGS_PATH = Path("/opt/aivideotrans/config/admin_settings.json")
+_SETTINGS_PATH = Path(
+    os.environ.get("AIVIDEOTRANS_CONFIG_DIR", "/opt/aivideotrans/config")
+) / "admin_settings.json"
 _cache: dict | None = None
 _cache_ts: float = 0
 _CACHE_TTL = 5.0  # seconds

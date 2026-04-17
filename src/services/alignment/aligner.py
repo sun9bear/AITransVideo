@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json as _json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -13,7 +14,9 @@ from services.gemini.translator import DubbingSegment
 
 # Phase 2 force-DSP override — admin-controlled, read at every alignment call
 # (cheap, file is small). Keeps aligner free of HTTP/gateway dependencies.
-_ADMIN_SETTINGS_PATH = Path("/opt/aivideotrans/config/admin_settings.json")
+_ADMIN_SETTINGS_PATH = Path(
+    os.environ.get("AIVIDEOTRANS_CONFIG_DIR", "/opt/aivideotrans/config")
+) / "admin_settings.json"
 
 
 def _is_force_dsp_alignment_enabled() -> bool:

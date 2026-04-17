@@ -255,7 +255,10 @@ def _get_admin_prompt_override(prompt_key: str) -> str | None:
     Returns the override string, or None if not configured.
     """
     try:
-        settings_path = "/opt/aivideotrans/config/admin_settings.json"
+        settings_path = str(
+            Path(os.environ.get("AIVIDEOTRANS_CONFIG_DIR", "/opt/aivideotrans/config"))
+            / "admin_settings.json"
+        )
         if os.path.exists(settings_path):
             with open(settings_path) as f:
                 settings = json.load(f)

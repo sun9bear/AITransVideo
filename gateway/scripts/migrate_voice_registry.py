@@ -7,6 +7,7 @@ Reads voice_registry.json from the app container's project root, extracts all
 cloned MiniMax voices, and inserts them for every existing user.
 """
 
+import os
 import asyncio
 import json
 import sys
@@ -22,7 +23,7 @@ from sqlalchemy import select
 
 REGISTRY_PATHS = [
     Path("/opt/aivideotrans/app/voice_registry.json"),
-    Path("/opt/aivideotrans/config/voice_registry.json"),
+    Path(os.environ.get("AIVIDEOTRANS_CONFIG_DIR", "/opt/aivideotrans/config")) / "voice_registry.json",
 ]
 
 

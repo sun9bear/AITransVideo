@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from threading import Lock
 
@@ -10,7 +11,9 @@ from pricing_schema import PricingPayload, build_default_pricing_payload
 logger = logging.getLogger(__name__)
 
 # Default path inside the Docker container config bind-mount
-PRICING_RUNTIME_FILE: Path = Path("/opt/aivideotrans/config/pricing_runtime.json")
+PRICING_RUNTIME_FILE: Path = Path(
+    os.environ.get("AIVIDEOTRANS_CONFIG_DIR", "/opt/aivideotrans/config")
+) / "pricing_runtime.json"
 
 _cache: PricingPayload | None = None
 _cache_lock = Lock()

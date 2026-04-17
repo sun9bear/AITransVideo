@@ -32,7 +32,9 @@ from models import AdminAuditLog, Job, User
 
 logger = logging.getLogger(__name__)
 
-SETTINGS_FILE = Path("/opt/aivideotrans/config/admin_settings.json")
+SETTINGS_FILE = Path(
+    os.environ.get("AIVIDEOTRANS_CONFIG_DIR", "/opt/aivideotrans/config")
+) / "admin_settings.json"
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -224,7 +226,9 @@ def _mask_api_key(key: str) -> str:
 def _is_masked_key(value: str) -> bool:
     """Detect if value looks like a masked key (e.g. '****abcd')."""
     return bool(value) and value.startswith("****")
-_PROMPT_HISTORY_FILE = Path("/opt/aivideotrans/config/review_prompt_history.json")
+_PROMPT_HISTORY_FILE = Path(
+    os.environ.get("AIVIDEOTRANS_CONFIG_DIR", "/opt/aivideotrans/config")
+) / "review_prompt_history.json"
 
 
 def _load_prompt_history() -> list[dict]:

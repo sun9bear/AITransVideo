@@ -18,7 +18,9 @@ from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "autodub.local.json"
-ADMIN_SETTINGS_PATH = Path("/opt/aivideotrans/config/admin_settings.json")
+ADMIN_SETTINGS_PATH = Path(
+    os.environ.get("AIVIDEOTRANS_CONFIG_DIR", "/opt/aivideotrans/config")
+) / "admin_settings.json"
 
 VALID_PROVIDERS = {"minimax", "mimo", "cosyvoice", "volcengine"}
 DEFAULT_PROVIDER = "minimax"
