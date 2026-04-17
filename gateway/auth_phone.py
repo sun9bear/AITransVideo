@@ -129,13 +129,13 @@ class VerifyCodeRequest(BaseModel):
 
 class CompleteRegistrationRequest(BaseModel):
     registration_token: str = Field(..., min_length=1, max_length=128)
-    password: str = Field(..., min_length=6, max_length=128)
+    password: str = Field(..., min_length=12, max_length=128)
 
 
 class ResetPasswordRequest(BaseModel):
     phone_number: str = Field(..., min_length=1, max_length=32)
     code: str = Field(..., min_length=1, max_length=16)
-    new_password: str = Field(..., min_length=6, max_length=128)
+    new_password: str = Field(..., min_length=12, max_length=128)
 
 
 # ---------------------------------------------------------------------------
@@ -389,8 +389,8 @@ async def complete_registration_endpoint(
     if existing.scalar_one_or_none() is not None:
         raise HTTPException(status_code=409, detail="该手机号已注册,请直接登录")
 
-    if len(body.password) < 6:
-        raise HTTPException(status_code=400, detail="密码至少 6 位")
+    if len(body.password) < 12:
+        raise HTTPException(status_code=400, detail="密码至少 12 位")
 
     # Create the user with password.
     user = User(
@@ -491,8 +491,8 @@ async def reset_password_endpoint(
     if not user.is_active:
         raise HTTPException(status_code=403, detail="账户已禁用")
 
-    if len(body.new_password) < 6:
-        raise HTTPException(status_code=400, detail="密码至少 6 位")
+    if len(body.new_password) < 12:
+        raise HTTPException(status_code=400, detail="密码至少 12 位")
 
     user.password_hash = hash_password(body.new_password)
     await db.commit()

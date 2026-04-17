@@ -126,8 +126,8 @@ export function PhoneLoginForm() {
 
   const handleSetPassword = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!password || password.length < 6) {
-      toast.error("密码至少 6 位")
+    if (!password || password.length < 12) {
+      toast.error("密码至少 12 位")
       return
     }
     if (password !== confirmPassword) {
@@ -308,7 +308,7 @@ export function PhoneLoginForm() {
             id="new-password"
             type="password"
             autoComplete="new-password"
-            placeholder="至少 6 位"
+            placeholder="至少 12 位"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             className="h-11 pl-10"

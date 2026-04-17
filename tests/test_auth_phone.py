@@ -672,7 +672,7 @@ class TestCompleteRegistration:
         with pytest.raises(HTTPException) as exc_info:
             _run(complete_registration_endpoint(
                 CompleteRegistrationRequest(
-                    registration_token="expired-token", password="pw123456"
+                    registration_token="expired-token", password="pw1234567890"
                 ),
                 _make_request(), Response(), db,
             ))
@@ -685,7 +685,7 @@ class TestCompleteRegistration:
         with pytest.raises(HTTPException) as exc_info:
             _run(complete_registration_endpoint(
                 CompleteRegistrationRequest(
-                    registration_token="used-token", password="pw123456"
+                    registration_token="used-token", password="pw1234567890"
                 ),
                 _make_request(), Response(), db,
             ))
@@ -699,14 +699,14 @@ class TestCompleteRegistration:
         with pytest.raises(HTTPException) as exc_info:
             _run(complete_registration_endpoint(
                 CompleteRegistrationRequest(
-                    registration_token="race-token", password="pw123456"
+                    registration_token="race-token", password="pw1234567890"
                 ),
                 _make_request(), Response(), db,
             ))
         assert exc_info.value.status_code == 409
 
     def test_short_password_rejected_by_pydantic(self):
-        """Pydantic rejects passwords < 6 chars before the handler runs."""
+        """Pydantic rejects passwords < 12 chars before the handler runs."""
         from pydantic import ValidationError
         with pytest.raises(ValidationError):
             CompleteRegistrationRequest(
@@ -785,7 +785,7 @@ class TestResetPassword:
             _run(reset_password_endpoint(
                 ResetPasswordRequest(
                     phone_number="13800138000", code="000000",
-                    new_password="newpw123456",
+                    new_password="newpw1234567",
                 ),
                 _make_request(), Response(), db,
             ))
@@ -799,7 +799,7 @@ class TestResetPassword:
             _run(reset_password_endpoint(
                 ResetPasswordRequest(
                     phone_number="13800138000", code="654321",
-                    new_password="newpw123456",
+                    new_password="newpw1234567",
                 ),
                 _make_request(), Response(), db,
             ))
@@ -815,14 +815,14 @@ class TestResetPassword:
             _run(reset_password_endpoint(
                 ResetPasswordRequest(
                     phone_number="13800138000", code="654321",
-                    new_password="newpw123456",
+                    new_password="newpw1234567",
                 ),
                 _make_request(), Response(), db,
             ))
         assert exc_info.value.status_code == 403
 
     def test_short_password_rejected_by_pydantic(self):
-        """Pydantic rejects passwords < 6 chars before the handler runs."""
+        """Pydantic rejects passwords < 12 chars before the handler runs."""
         from pydantic import ValidationError
         with pytest.raises(ValidationError):
             ResetPasswordRequest(

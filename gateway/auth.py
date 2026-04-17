@@ -81,7 +81,7 @@ async def create_session(db: AsyncSession, user_id, response: Response) -> str:
         key=settings.session_cookie_name,
         value=token,
         httponly=True,
-        samesite="lax",
+        samesite="strict",
         secure=True,
         max_age=settings.session_expire_days * 86400,
         path="/",
@@ -156,8 +156,8 @@ async def register_handler(
     if result.scalar_one_or_none():
         raise HTTPException(status_code=409, detail="该邮箱已注册")
 
-    if len(body.password) < 6:
-        raise HTTPException(status_code=400, detail="密码至少 6 位")
+    if len(body.password) < 12:
+        raise HTTPException(status_code=400, detail="密码至少 12 位")
 
     user = User(
         email=body.email,
@@ -287,8 +287,8 @@ async def change_password_handler(
 ) -> dict:
     if user is None:
         raise HTTPException(status_code=401, detail="未登录")
-    if not body.new_password or len(body.new_password) < 6:
-        raise HTTPException(status_code=400, detail="新密码长度至少 6 位")
+    if not body.new_password or len(body.new_password) < 12:
+        raise HTTPException(status_code=400, detail="新密码长度至少 12 位")
     # If user has a password, verify the old one
     if user.password_hash:
         if not body.old_password:

@@ -130,8 +130,8 @@ function ChangePasswordCard({ hasPassword }: { hasPassword: boolean }) {
   const [submitting, setSubmitting] = useState(false)
 
   async function handleSubmit() {
-    if (newPwd.length < 6) {
-      toast.error("新密码长度至少 6 位")
+    if (newPwd.length < 12) {
+      toast.error("新密码长度至少 12 位")
       return
     }
     if (newPwd !== confirmPwd) {

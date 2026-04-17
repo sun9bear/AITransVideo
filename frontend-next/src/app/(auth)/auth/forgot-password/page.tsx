@@ -63,8 +63,8 @@ export default function ForgotPasswordPage() {
       toast.error("请输入验证码")
       return
     }
-    if (newPassword.length < 6) {
-      toast.error("密码至少 6 位")
+    if (newPassword.length < 12) {
+      toast.error("密码至少 12 位")
       return
     }
     if (newPassword !== confirmPassword) {
@@ -188,7 +188,7 @@ export default function ForgotPasswordPage() {
                   id="new-pw"
                   type="password"
                   autoComplete="new-password"
-                  placeholder="至少 6 位"
+                  placeholder="至少 12 位"
                   value={newPassword}
                   onChange={(e) => setNewPassword(e.target.value)}
                   className="h-11 pl-10"
