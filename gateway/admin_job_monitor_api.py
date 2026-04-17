@@ -12,13 +12,17 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException
 
 from auth import get_current_user
+from config import settings
+from internal_auth import internal_headers
 from models import User
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/admin", tags=["admin-job-monitor"])
 
-JOB_API_BASE = "http://localhost:8877"
+# Job API upstream URL comes from gateway/config.py (env var AVT_JOB_API_UPSTREAM).
+# No module-level constant for the URL — always read settings.job_api_upstream
+# at call time so tests can monkeypatch without a module reload.
 
 
 # ---------------------------------------------------------------------------
@@ -44,9 +48,9 @@ async def admin_get_job_logs(
     """Get full event logs for any job (admin only)."""
     _require_admin(user)
 
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with httpx.AsyncClient(timeout=15, headers=internal_headers()) as client:
         try:
-            resp = await client.get(f"{JOB_API_BASE}/jobs/{job_id}/logs")
+            resp = await client.get(f"{settings.job_api_upstream}/jobs/{job_id}/logs")
             resp.raise_for_status()
             return resp.json()
         except httpx.HTTPStatusError as exc:
@@ -348,10 +352,10 @@ async def analyze_job_logs(
         return {"error": "未配置 OPENAI_API_KEY"}
 
     # Parallel fetch: logs + job info + result-summary
-    async with httpx.AsyncClient(timeout=15) as client:
-        logs_coro = client.get(f"{JOB_API_BASE}/jobs/{job_id}/logs")
-        job_coro = client.get(f"{JOB_API_BASE}/jobs/{job_id}")
-        result_coro = client.get(f"{JOB_API_BASE}/jobs/{job_id}/result-summary")
+    async with httpx.AsyncClient(timeout=15, headers=internal_headers()) as client:
+        logs_coro = client.get(f"{settings.job_api_upstream}/jobs/{job_id}/logs")
+        job_coro = client.get(f"{settings.job_api_upstream}/jobs/{job_id}")
+        result_coro = client.get(f"{settings.job_api_upstream}/jobs/{job_id}/result-summary")
 
         logs_resp, job_resp, result_resp = await asyncio.gather(
             logs_coro, job_coro, result_coro,

@@ -14,14 +14,17 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 
 from auth import get_current_user
+from config import settings
 from database import async_session
+from internal_auth import internal_headers
 from models import Job, User
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/admin", tags=["admin-s2-monitor"])
 
-JOB_API_BASE = "http://localhost:8877"
+# Job API upstream URL comes from gateway/config.py (settings.job_api_upstream,
+# env var AVT_JOB_API_UPSTREAM). Read at call time, not cached at import.
 JOBS_STORE_DIR = Path("/opt/aivideotrans/data/jobs")
 # Gateway bind-mount path for project data (read-only)
 PROJECTS_DATA_DIR = Path("/opt/aivideotrans/data/projects")
@@ -336,9 +339,9 @@ async def get_s2_stats(
     _require_admin(user)
 
     # 1. Fetch all jobs from Job API
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with httpx.AsyncClient(timeout=15, headers=internal_headers()) as client:
         try:
-            resp = await client.get(f"{JOB_API_BASE}/jobs")
+            resp = await client.get(f"{settings.job_api_upstream}/jobs")
             resp.raise_for_status()
             data = resp.json()
             upstream_jobs: list[dict] = data.get("jobs", data) if isinstance(data, dict) else data
@@ -499,9 +502,9 @@ async def get_s2_job_detail(
         )).scalar_one_or_none()
 
     if not project_dir:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=10, headers=internal_headers()) as client:
             try:
-                resp = await client.get(f"{JOB_API_BASE}/jobs/{job_id}")
+                resp = await client.get(f"{settings.job_api_upstream}/jobs/{job_id}")
                 if resp.status_code == 200:
                     job_data = resp.json()
                     project_dir = _derive_project_dir_from_manifest(job_data.get("manifest_path"))

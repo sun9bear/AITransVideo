@@ -21,7 +21,9 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth import get_current_user
+from config import settings
 from database import get_db
+from internal_auth import internal_headers as _internal_headers
 from models import User
 from voice_catalog_models import VoiceCatalog, VoiceLabel
 import label_task_queue
@@ -680,9 +682,9 @@ async def _run_label_task_bg(
 
             try:
                 if req.task_type == "trigger-text":
-                    url = f"{_APP_INTERNAL_URL}/internal/voice-label/text"
+                    url = f"{settings.job_api_upstream}/internal/voice-label/text"
                 else:
-                    url = f"{_APP_INTERNAL_URL}/internal/voice-label/audio/{req.round_name}"
+                    url = f"{settings.job_api_upstream}/internal/voice-label/audio/{req.round_name}"
 
                 async with httpx.AsyncClient(timeout=600.0, headers=_internal_headers()) as client:
                     resp = await client.post(url, json={"voices": chunk})
@@ -716,16 +718,9 @@ async def _run_label_task_bg(
             await label_task_queue.fail_task(db, task_id, str(exc)[:500])
 
 
-_APP_INTERNAL_URL = "http://127.0.0.1:8877"
-_INTERNAL_API_KEY = os.environ.get("AVT_INTERNAL_API_KEY", "").strip()
-
-
-def _internal_headers() -> dict[str, str]:
-    """Build headers for app internal API calls."""
-    h: dict[str, str] = {"Content-Type": "application/json"}
-    if _INTERNAL_API_KEY:
-        h["X-Internal-Key"] = _INTERNAL_API_KEY
-    return h
+# App internal API upstream: read from settings.job_api_upstream at call time
+# (env var AVT_JOB_API_UPSTREAM). X-Internal-Key header comes from the shared
+# gateway/internal_auth.py helper imported at the top of this module.
 
 
 class TriggerLabelRequest(BaseModel):
@@ -796,7 +791,7 @@ async def trigger_text_labeling(
     try:
         async with httpx.AsyncClient(timeout=300.0, headers=_internal_headers()) as client:
             resp = await client.post(
-                f"{_APP_INTERNAL_URL}/internal/voice-label/text",
+                f"{settings.job_api_upstream}/internal/voice-label/text",
                 json={"voices": metadata},
             )
         resp.raise_for_status()
@@ -843,7 +838,7 @@ async def trigger_audio_labeling(
     try:
         async with httpx.AsyncClient(timeout=600.0, headers=_internal_headers()) as client:
             resp = await client.post(
-                f"{_APP_INTERNAL_URL}/internal/voice-label/audio/{round_name}",
+                f"{settings.job_api_upstream}/internal/voice-label/audio/{round_name}",
                 json={"voices": metadata},
             )
         resp.raise_for_status()

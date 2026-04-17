@@ -27,6 +27,7 @@ from sqlalchemy import select, delete as sa_delete
 from auth import get_current_user
 from config import settings as app_settings
 from database import async_session, get_db
+from internal_auth import internal_headers
 from models import AdminAuditLog, Job, User
 
 logger = logging.getLogger(__name__)
@@ -775,7 +776,9 @@ async def delete_prompt_history(
 # Job management endpoints
 # ---------------------------------------------------------------------------
 
-JOB_API_BASE = "http://localhost:8877"
+# Job API upstream URL comes from gateway/config.py (settings.job_api_upstream,
+# env var AVT_JOB_API_UPSTREAM). No module-level constant — always read
+# app_settings.job_api_upstream at call time so tests can monkeypatch.
 JOBS_STORE_DIR = Path("/opt/aivideotrans/data/jobs")
 
 
@@ -787,9 +790,9 @@ async def list_all_jobs(
     _require_admin(user)
 
     # Fetch jobs from upstream Job API
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with httpx.AsyncClient(timeout=15, headers=internal_headers()) as client:
         try:
-            resp = await client.get(f"{JOB_API_BASE}/jobs")
+            resp = await client.get(f"{app_settings.job_api_upstream}/jobs")
             resp.raise_for_status()
             data = resp.json()
             upstream_jobs: list[dict] = data.get("jobs", data) if isinstance(data, dict) else data
@@ -838,17 +841,17 @@ async def cancel_job(
     """Cancel a job: stop processing, clean up files, mark cancelled in DB."""
     _require_admin(user)
 
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=30, headers=internal_headers()) as client:
         # (a) Cancel via Job API
         try:
-            await client.post(f"{JOB_API_BASE}/jobs/{job_id}/cancel")
+            await client.post(f"{app_settings.job_api_upstream}/jobs/{job_id}/cancel")
         except Exception as exc:
             logger.warning("Job API cancel call failed for %s: %s", job_id, exc)
 
         # (b) Get project_dir from Job API
         project_dir: str | None = None
         try:
-            resp = await client.get(f"{JOB_API_BASE}/jobs/{job_id}")
+            resp = await client.get(f"{app_settings.job_api_upstream}/jobs/{job_id}")
             if resp.status_code == 200:
                 project_dir = resp.json().get("project_dir")
         except Exception as exc:
@@ -888,22 +891,22 @@ async def delete_job(
     """Fully delete a job: cancel + remove PostgreSQL record."""
     _require_admin(user)
 
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=30, headers=internal_headers()) as client:
         # Cancel via Job API then delete
         try:
-            await client.post(f"{JOB_API_BASE}/jobs/{job_id}/cancel")
+            await client.post(f"{app_settings.job_api_upstream}/jobs/{job_id}/cancel")
         except Exception as exc:
             logger.warning("Job API cancel call failed for %s: %s", job_id, exc)
 
         try:
-            await client.delete(f"{JOB_API_BASE}/jobs/{job_id}")
+            await client.delete(f"{app_settings.job_api_upstream}/jobs/{job_id}")
         except Exception as exc:
             logger.warning("Job API delete call failed for %s: %s", job_id, exc)
 
         # Get project_dir from Job API
         project_dir: str | None = None
         try:
-            resp = await client.get(f"{JOB_API_BASE}/jobs/{job_id}")
+            resp = await client.get(f"{app_settings.job_api_upstream}/jobs/{job_id}")
             if resp.status_code == 200:
                 project_dir = resp.json().get("project_dir")
         except Exception as exc:

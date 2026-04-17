@@ -23,6 +23,9 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config import settings
+from internal_auth import internal_headers as _internal_headers
+
 from voice_catalog_models import VoiceCatalog, VoiceLabel
 
 logger = logging.getLogger(__name__)
@@ -270,15 +273,9 @@ class VerifySkipped(Exception):
     """
 
 
-_APP_INTERNAL_URL = "http://127.0.0.1:8877"
-_INTERNAL_API_KEY = os.environ.get("AVT_INTERNAL_API_KEY", "").strip()
-
-
-def _internal_headers() -> dict[str, str]:
-    h: dict[str, str] = {}
-    if _INTERNAL_API_KEY:
-        h["X-Internal-Key"] = _INTERNAL_API_KEY
-    return h
+# App internal API upstream: read from settings.job_api_upstream at call time
+# (env var AVT_JOB_API_UPSTREAM). X-Internal-Key header comes from the shared
+# gateway/internal_auth.py helper imported at the top of this module.
 
 
 async def verify_cosyvoice(voice_id: str, language: str = "zh") -> dict[str, Any]:
@@ -297,7 +294,7 @@ async def verify_cosyvoice(voice_id: str, language: str = "zh") -> dict[str, Any
     try:
         async with httpx.AsyncClient(timeout=30.0, headers=_internal_headers()) as client:
             resp = await client.post(
-                f"{_APP_INTERNAL_URL}/internal/voice-verify/cosyvoice",
+                f"{settings.job_api_upstream}/internal/voice-verify/cosyvoice",
                 json={"voice_id": voice_id, "test_text": test_text},
             )
         data = resp.json()
