@@ -62,6 +62,9 @@ class TestJobSubresourceRouting:
         "logs",
         "artifacts",
         "result-summary",
+        "stream/video",
+        "stream/audio",
+        "materials-availability",
     ])
     def test_get_post_subresources_hit_intercept(self, subpath):
         """GET/POST /job-api/jobs/{id}/{subpath} should match intercept_job_subresource."""
@@ -91,6 +94,57 @@ class TestDeleteJobRouting:
     def test_delete_does_not_hit_generic_catchall(self):
         endpoint = _find_route_endpoint(gw.app, "/job-api/jobs/job_test123", "DELETE")
         assert endpoint != "proxy_job_api_other"
+
+
+class TestMaterialsPackRouting:
+    """Verify materials-pack endpoint is Gateway-native (not proxied)."""
+
+    def test_materials_pack_post_resolves(self):
+        endpoint = _find_route_endpoint(gw.app, "/api/jobs/job_test123/materials-pack", "POST")
+        assert endpoint == "materials_pack_endpoint", (
+            f"POST /api/jobs/{{id}}/materials-pack matched '{endpoint}' instead of 'materials_pack_endpoint'"
+        )
+
+    def test_materials_pack_get_resolves(self):
+        endpoint = _find_route_endpoint(gw.app, "/api/jobs/job_test123/materials-pack", "GET")
+        assert endpoint == "materials_pack_endpoint", (
+            f"GET /api/jobs/{{id}}/materials-pack matched '{endpoint}' instead of 'materials_pack_endpoint'"
+        )
+
+
+class TestBackgroundTaskRouting:
+    """Verify /api/jobs/{id}/tasks/* endpoints are Gateway-native.
+
+    These paths serve Export Tasks v1 (materials_pack, generate_video).
+    They MUST resolve to their specific handlers — if any of them were
+    dispatched to a job-api proxy catch-all, the feature would 404 upstream.
+    """
+
+    def test_create_task_post(self):
+        endpoint = _find_route_endpoint(gw.app, "/api/jobs/job_test123/tasks", "POST")
+        assert endpoint == "create_task_endpoint", (
+            f"POST /api/jobs/{{id}}/tasks matched '{endpoint}'"
+        )
+
+    def test_latest_task_get(self):
+        endpoint = _find_route_endpoint(gw.app, "/api/jobs/job_test123/tasks/latest", "GET")
+        assert endpoint == "latest_task_endpoint", (
+            f"GET /api/jobs/{{id}}/tasks/latest matched '{endpoint}'"
+        )
+
+    def test_get_task(self):
+        endpoint = _find_route_endpoint(gw.app, "/api/jobs/job_test123/tasks/abc123", "GET")
+        assert endpoint == "get_task_endpoint", (
+            f"GET /api/jobs/{{id}}/tasks/{{task_id}} matched '{endpoint}'"
+        )
+
+    def test_task_download(self):
+        endpoint = _find_route_endpoint(
+            gw.app, "/api/jobs/job_test123/tasks/abc123/download", "GET",
+        )
+        assert endpoint == "download_task_artifact", (
+            f"GET /api/jobs/{{id}}/tasks/{{task_id}}/download matched '{endpoint}'"
+        )
 
 
 class TestVoiceLibraryRouting:

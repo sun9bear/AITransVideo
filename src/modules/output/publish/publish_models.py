@@ -10,6 +10,8 @@ class PublishRequest:
     dubbed_audio_path: str
     output_dir: str
     output_filename: str = "dubbed_video.mp4"
+    ambient_audio_path: str | None = None
+    ambient_volume_db: float = -12.0
 
 
 @dataclass(slots=True)

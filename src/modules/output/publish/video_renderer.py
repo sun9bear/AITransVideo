@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 import subprocess
 
 from core.exceptions import PublishError
@@ -9,6 +10,7 @@ from modules.output.publish.publish_models import PublishRequest, PublishResult
 
 
 CommandRunner = Callable[[list[str]], object]
+ProgressCallback = Callable[[dict[str, Any]], None]
 
 
 class VideoRenderer:
@@ -23,7 +25,21 @@ class VideoRenderer:
         self.ffmpeg_executable = ffmpeg_executable
         self.command_runner = command_runner or self._run_command
 
-    def render(self, request: PublishRequest) -> PublishResult:
+    def render(
+        self,
+        request: PublishRequest,
+        *,
+        progress_callback: ProgressCallback | None = None,
+    ) -> PublishResult:
+        def _notify(stage: str, percent: int) -> None:
+            if progress_callback is None:
+                return
+            try:
+                progress_callback({"stage": stage, "percent": percent})
+            except Exception:  # noqa: BLE001 — progress is advisory, never fail render
+                pass
+
+        _notify("starting", 5)
         original_video_path = self._require_existing_file_path(
             request.original_video_path,
             field_name="original_video_path",
@@ -40,26 +56,52 @@ class VideoRenderer:
         output_filename = request.output_filename.strip() or "dubbed_video.mp4"
         output_path = output_dir / output_filename
 
-        command = [
-            self.ffmpeg_executable,
-            "-y",
-            "-i",
-            str(original_video_path),
-            "-i",
-            str(dubbed_audio_path),
-            "-map",
-            "0:v:0",
-            "-map",
-            "1:a:0",
-            "-c:v",
-            "copy",
-            "-c:a",
-            "aac",
-            "-shortest",
-            "-movflags",
-            "+faststart",
-            str(output_path),
-        ]
+        # Check for ambient audio (background sounds separated during S0)
+        ambient_audio_path: Path | None = None
+        raw_ambient = getattr(request, "ambient_audio_path", None)
+        if raw_ambient and isinstance(raw_ambient, str) and raw_ambient.strip():
+            candidate = Path(raw_ambient.strip()).resolve(strict=False)
+            if candidate.exists() and candidate.is_file() and candidate.stat().st_size > 0:
+                ambient_audio_path = candidate
+
+        if ambient_audio_path is not None:
+            # Three-track mix: video + dubbed audio + ambient audio (lowered volume)
+            vol_db = getattr(request, "ambient_volume_db", -12.0)
+            command = [
+                self.ffmpeg_executable,
+                "-y",
+                "-i", str(original_video_path),
+                "-i", str(dubbed_audio_path),
+                "-i", str(ambient_audio_path),
+                "-filter_complex",
+                f"[1:a]aformat=sample_rates=44100:channel_layouts=stereo[dub];"
+                f"[2:a]aformat=sample_rates=44100:channel_layouts=stereo,"
+                f"volume={vol_db}dB[amb];"
+                f"[dub][amb]amix=inputs=2:duration=first:dropout_transition=2[aout]",
+                "-map", "0:v:0",
+                "-map", "[aout]",
+                "-c:v", "copy",
+                "-c:a", "aac",
+                "-shortest",
+                "-movflags", "+faststart",
+                str(output_path),
+            ]
+        else:
+            # Two-track: video + dubbed audio only (no ambient available)
+            command = [
+                self.ffmpeg_executable,
+                "-y",
+                "-i", str(original_video_path),
+                "-i", str(dubbed_audio_path),
+                "-map", "0:v:0",
+                "-map", "1:a:0",
+                "-c:v", "copy",
+                "-c:a", "aac",
+                "-shortest",
+                "-movflags", "+faststart",
+                str(output_path),
+            ]
+        _notify("muxing", 20)
         try:
             self.command_runner(command)
         except FileNotFoundError as exc:
@@ -73,8 +115,10 @@ class VideoRenderer:
         except OSError as exc:
             raise PublishError(f"Publish rendering could not start: {exc}") from exc
 
+        _notify("finalizing", 90)
         self._validate_rendered_output(output_path)
 
+        _notify("done", 100)
         return PublishResult(
             project_id=request.project_id,
             dubbed_video_path=str(output_path),

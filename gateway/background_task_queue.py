@@ -1,0 +1,290 @@
+"""Background task queue — DB-backed async export tasks.
+
+Used by Export Tasks v1 for ``materials_pack`` (zip) and ``generate_video``
+(FFmpeg mux coordination). See docs/plans/2026-04-16-background-task-system-plan.md.
+
+Design notes:
+- Single-process ``asyncio.create_task`` execution. Gateway restart marks
+  pending/running tasks as failed (stale recovery). Users retry manually.
+- ``params_fingerprint`` enables two things:
+  (1) Dedupe: creating a task with the same (job_id, task_type, fingerprint)
+      while an active one exists returns the existing task_id.
+  (2) State restore: the ``latest_active`` query returns a running task only
+      when the fingerprint matches — different params = different task.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import uuid
+from datetime import datetime, timezone
+from typing import Any
+
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from background_task_models import BackgroundTask
+
+logger = logging.getLogger(__name__)
+
+
+def compute_params_fingerprint(params: dict[str, Any]) -> str:
+    """Stable sha256 hex digest of params.
+
+    Serialization is deterministic AND matches the frontend's
+    ``computeParamsFingerprint`` (see ``frontend-next/src/lib/api/downloads.ts``):
+    - ``sort_keys=True`` — alphabetical key order
+    - ``ensure_ascii=False`` — unicode content passes through
+    - ``separators=(',', ':')`` — NO spaces (matches JS ``JSON.stringify``)
+    """
+    canonical = json.dumps(
+        params, sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+async def create_task(
+    db: AsyncSession,
+    *,
+    job_id: str,
+    user_id: uuid.UUID,
+    task_type: str,
+    params: dict[str, Any],
+) -> tuple[str, bool]:
+    """Create a task, or return an existing active one (same fingerprint).
+
+    Returns ``(task_id, created)`` where ``created`` is False if we returned
+    an existing active task.
+
+    Dedupe is guaranteed atomically by the partial unique index
+    ``idx_bg_tasks_active`` (see migration 014). We still do an optimistic
+    pre-check for the common fast path, but rely on ``IntegrityError`` as
+    the correctness barrier against concurrent creators.
+    """
+    fingerprint = compute_params_fingerprint(params)
+
+    # Fast path: already an active task for same fingerprint
+    existing = await _fetch_active(db, job_id=job_id, task_type=task_type, fingerprint=fingerprint)
+    if existing is not None:
+        return existing.id, False
+
+    task_id = uuid.uuid4().hex[:12]
+    task = BackgroundTask(
+        id=task_id,
+        job_id=job_id,
+        user_id=user_id,
+        task_type=task_type,
+        params=params,
+        params_fingerprint=fingerprint,
+        status="pending",
+    )
+    db.add(task)
+    try:
+        await db.flush()
+    except IntegrityError:
+        # Another concurrent creator won the race against the partial unique
+        # index. Roll back this transaction and return the existing row.
+        await db.rollback()
+        existing = await _fetch_active(
+            db, job_id=job_id, task_type=task_type, fingerprint=fingerprint,
+        )
+        if existing is None:
+            # Unique violation on some other column/constraint — not our race.
+            raise
+        return existing.id, False
+    return task_id, True
+
+
+async def get_task(
+    db: AsyncSession,
+    *,
+    task_id: str,
+    user_id: uuid.UUID | None = None,
+) -> dict[str, Any] | None:
+    """Fetch a task by id. When ``user_id`` is given, enforces ownership."""
+    stmt = select(BackgroundTask).where(BackgroundTask.id == task_id)
+    if user_id is not None:
+        stmt = stmt.where(BackgroundTask.user_id == user_id)
+    result = await db.execute(stmt)
+    task = result.scalar_one_or_none()
+    return _serialize(task) if task else None
+
+
+async def get_latest_active(
+    db: AsyncSession,
+    *,
+    job_id: str,
+    user_id: uuid.UUID,
+    task_type: str,
+    params_fingerprint: str | None = None,
+) -> dict[str, Any] | None:
+    """Return the latest pending/running task only (for polling)."""
+    return await _get_latest(
+        db,
+        job_id=job_id,
+        user_id=user_id,
+        task_type=task_type,
+        params_fingerprint=params_fingerprint,
+        statuses=("pending", "running"),
+    )
+
+
+async def get_latest(
+    db: AsyncSession,
+    *,
+    job_id: str,
+    user_id: uuid.UUID,
+    task_type: str,
+    params_fingerprint: str | None = None,
+    include_terminal: bool = True,
+) -> dict[str, Any] | None:
+    """Return the latest task regardless of status (for state restore on page load).
+
+    With ``include_terminal=True`` (default) this returns ``completed`` and
+    ``failed`` rows too, so the UI can restore the "素材包可下载" / "打包失败"
+    state after the user refreshed or reopened the browser. Pass False to
+    get the same semantics as ``get_latest_active``.
+    """
+    if include_terminal:
+        statuses = ("pending", "running", "completed", "failed")
+    else:
+        statuses = ("pending", "running")
+    return await _get_latest(
+        db,
+        job_id=job_id,
+        user_id=user_id,
+        task_type=task_type,
+        params_fingerprint=params_fingerprint,
+        statuses=statuses,
+    )
+
+
+async def _get_latest(
+    db: AsyncSession,
+    *,
+    job_id: str,
+    user_id: uuid.UUID,
+    task_type: str,
+    params_fingerprint: str | None,
+    statuses: tuple[str, ...],
+) -> dict[str, Any] | None:
+    stmt = (
+        select(BackgroundTask)
+        .where(BackgroundTask.job_id == job_id)
+        .where(BackgroundTask.user_id == user_id)
+        .where(BackgroundTask.task_type == task_type)
+        .where(BackgroundTask.status.in_(statuses))
+        .order_by(BackgroundTask.updated_at.desc())
+        .limit(1)
+    )
+    if params_fingerprint is not None:
+        stmt = stmt.where(BackgroundTask.params_fingerprint == params_fingerprint)
+    result = await db.execute(stmt)
+    task = result.scalar_one_or_none()
+    return _serialize(task) if task else None
+
+
+async def _fetch_active(
+    db: AsyncSession,
+    *,
+    job_id: str,
+    task_type: str,
+    fingerprint: str,
+) -> BackgroundTask | None:
+    stmt = (
+        select(BackgroundTask)
+        .where(BackgroundTask.job_id == job_id)
+        .where(BackgroundTask.task_type == task_type)
+        .where(BackgroundTask.params_fingerprint == fingerprint)
+        .where(BackgroundTask.status.in_(["pending", "running"]))
+        .limit(1)
+    )
+    result = await db.execute(stmt)
+    return result.scalar_one_or_none()
+
+
+async def mark_running(db: AsyncSession, task_id: str) -> None:
+    await db.execute(
+        update(BackgroundTask)
+        .where(BackgroundTask.id == task_id)
+        .values(status="running", updated_at=datetime.now(timezone.utc))
+    )
+    await db.commit()
+
+
+async def update_progress(db: AsyncSession, task_id: str, progress: dict[str, Any]) -> None:
+    await db.execute(
+        update(BackgroundTask)
+        .where(BackgroundTask.id == task_id)
+        .values(
+            status="running",
+            progress=progress,
+            updated_at=datetime.now(timezone.utc),
+        )
+    )
+    await db.commit()
+
+
+async def mark_completed(db: AsyncSession, task_id: str, result: dict[str, Any]) -> None:
+    await db.execute(
+        update(BackgroundTask)
+        .where(BackgroundTask.id == task_id)
+        .values(
+            status="completed",
+            result=result,
+            updated_at=datetime.now(timezone.utc),
+        )
+    )
+    await db.commit()
+
+
+async def mark_failed(db: AsyncSession, task_id: str, error: str) -> None:
+    await db.execute(
+        update(BackgroundTask)
+        .where(BackgroundTask.id == task_id)
+        .values(
+            status="failed",
+            error=error,
+            updated_at=datetime.now(timezone.utc),
+        )
+    )
+    await db.commit()
+
+
+async def recover_stale(db: AsyncSession) -> int:
+    """Mark running/pending tasks as failed on startup.
+
+    Both states are fatal after restart: ``pending`` means the
+    ``asyncio.create_task`` coroutine was never scheduled by the now-dead
+    process; ``running`` means it was mid-execution and lost.
+    """
+    result = await db.execute(
+        update(BackgroundTask)
+        .where(BackgroundTask.status.in_(["running", "pending"]))
+        .values(
+            status="failed",
+            error="Gateway 重启，任务中断",
+            updated_at=datetime.now(timezone.utc),
+        )
+    )
+    await db.commit()
+    return result.rowcount  # type: ignore[return-value]
+
+
+def _serialize(task: BackgroundTask) -> dict[str, Any]:
+    return {
+        "task_id": task.id,
+        "job_id": task.job_id,
+        "task_type": task.task_type,
+        "params": task.params,
+        "params_fingerprint": task.params_fingerprint,
+        "status": task.status,
+        "progress": task.progress,
+        "result": task.result,
+        "error": task.error,
+        "created_at": task.created_at.isoformat() if task.created_at else None,
+        "updated_at": task.updated_at.isoformat() if task.updated_at else None,
+    }

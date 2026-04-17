@@ -22,10 +22,14 @@ from credits_read import router as credits_read_router
 from entitlements import router as entitlements_router
 from plan_catalog import router as plan_catalog_router
 from subscriptions import router as subscriptions_router
+from materials_api import router as materials_router
+from background_task_api import router as background_task_router
 from voice_catalog_api import router as voice_catalog_router, internal_router as voice_catalog_internal_router
 from auth import (
     LoginRequest,
     RegisterRequest,
+    bind_email_handler,
+    change_password_handler,
     login_handler,
     logout_handler,
     me_handler,
@@ -68,6 +72,17 @@ async def lifespan(app: FastAPI):
             if recovered:
                 import logging
                 logging.getLogger(__name__).info("Recovered %d stale label tasks", recovered)
+    except Exception:
+        pass  # Table may not exist yet before migration
+
+    # Recover stale background tasks (materials_pack / generate_video)
+    try:
+        import background_task_queue as _bg_queue
+        from database import async_session as _async_session
+        async with _async_session() as db:
+            recovered_bg = await _bg_queue.recover_stale(db)
+            if recovered_bg:
+                logger.info("Recovered %d stale background tasks", recovered_bg)
     except Exception:
         pass  # Table may not exist yet before migration
     # Seed pricing runtime
@@ -117,6 +132,8 @@ app.post("/auth/register")(register_handler)
 app.post("/auth/login")(login_handler)
 app.post("/auth/logout")(logout_handler)
 app.get("/auth/me")(me_handler)
+app.post("/api/account/change-password")(change_password_handler)
+app.post("/api/account/bind-email")(bind_email_handler)
 app.include_router(auth_phone_router)
 app.include_router(captcha_router)
 
@@ -133,6 +150,10 @@ app.include_router(credits_read_router)
 app.include_router(entitlements_router)
 app.include_router(plan_catalog_router)
 app.include_router(subscriptions_router)
+app.include_router(materials_router)
+# Background task router — MUST precede any job-api proxy catch-all; it
+# serves /api/jobs/{id}/tasks/* which are Gateway-native (not proxied).
+app.include_router(background_task_router)
 app.include_router(voice_catalog_router)
 app.include_router(voice_catalog_internal_router)
 

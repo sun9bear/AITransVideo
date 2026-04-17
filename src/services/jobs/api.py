@@ -127,6 +127,88 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
                         download_name=f"tts_segments_{job_id[:12]}.zip",
                     )
                     return
+                # --- stream/{kind}: Range-aware media streaming ---
+                if (
+                    len(path_parts) == 4
+                    and path_parts[0] == "jobs"
+                    and path_parts[2] == "stream"
+                    and path_parts[3] in ("video", "audio")
+                ):
+                    job_id = path_parts[1]
+                    kind = path_parts[3]
+                    record = service.require_job(job_id)
+                    project_dir = _require_project_dir(record)
+                    artifact_key = (
+                        "publish.dubbed_video" if kind == "video"
+                        else "editor.dubbed_audio_complete"
+                    )
+                    file_path = _resolve_download_path(
+                        project_root=service.runner.project_root,
+                        project_dir=project_dir,
+                        download_key=artifact_key,
+                    )
+                    if file_path is None or not file_path.exists():
+                        self._write_json(HTTPStatus.NOT_FOUND, {"error": f"{kind} not found"})
+                        return
+                    content_type = "video/mp4" if kind == "video" else "audio/wav"
+                    self._write_stream(file_path, content_type=content_type)
+                    return
+
+                # --- materials-availability ---
+                if (
+                    len(path_parts) == 3
+                    and path_parts[0] == "jobs"
+                    and path_parts[2] == "materials-availability"
+                ):
+                    job_id = path_parts[1]
+                    record = service.require_job(job_id)
+                    project_dir = _require_project_dir(record)
+                    # Read manifest directly — don't use _resolve_download_path
+                    # which enforces PUBLIC_RESULT_DOWNLOAD_KEYS whitelist.
+                    from services.manifest_reader import (
+                        load_manifest_artifact_index,
+                        resolve_manifest_artifact_path,
+                    )
+                    artifact_index = load_manifest_artifact_index(project_dir=project_dir)
+                    _keys_map = {
+                        "source_video": "source.original_video",
+                        "dubbed_video": "publish.dubbed_video",
+                        "dubbed_audio": "editor.dubbed_audio_complete",
+                        "segments": "editor.segments_dir",
+                        "subtitles_zh": "editor.subtitles",
+                        "subtitles_en": "editor.subtitles_en",
+                        "subtitles_bilingual": "editor.subtitles_bilingual",
+                    }
+                    availability: dict[str, bool] = {}
+                    for ui_key, artifact_key in _keys_map.items():
+                        resolved = resolve_manifest_artifact_path(
+                            project_dir, artifact_key, artifact_index=artifact_index,
+                        )
+                        if ui_key == "segments":
+                            availability[ui_key] = resolved is not None and resolved.is_dir()
+                        else:
+                            availability[ui_key] = resolved is not None and resolved.exists()
+                    self._write_json(HTTPStatus.OK, availability)
+                    return
+
+                # --- generate-video status: read render_status.json ---
+                if (
+                    len(path_parts) == 4
+                    and path_parts[0] == "jobs"
+                    and path_parts[2] == "generate-video"
+                ):
+                    job_id = path_parts[1]
+                    render_task_id = path_parts[3]
+                    record = service.require_job(job_id)
+                    project_dir = _require_project_dir(record)
+                    from services.jobs.video_render_async import read_status
+                    status = read_status(project_dir, render_task_id)
+                    if status is None:
+                        self._write_json(HTTPStatus.NOT_FOUND, {"error": "render_status not found"})
+                        return
+                    self._write_json(HTTPStatus.OK, status)
+                    return
+
                 # --- Phase 1: voice-library (global) ---
                 if path_parts == ["voice-library"]:
                     self._write_json(
@@ -413,6 +495,80 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
                     self._write_json(HTTPStatus.OK, {"ok": True, "labels": labels})
                     return
 
+                # --- generate-video: start async video mux, return render_task_id ---
+                if (
+                    len(path_parts) == 3
+                    and path_parts[0] == "jobs"
+                    and path_parts[2] == "generate-video"
+                ):
+                    job_id = path_parts[1]
+                    record = service.require_job(job_id)
+                    project_dir = _require_project_dir(record)
+                    from services.manifest_reader import (
+                        load_manifest_artifact_index,
+                        resolve_manifest_artifact_path,
+                    )
+                    artifact_index = load_manifest_artifact_index(project_dir=project_dir)
+
+                    # Fast path: video already exists — no thread needed
+                    existing_video = resolve_manifest_artifact_path(
+                        project_dir, "publish.dubbed_video", artifact_index=artifact_index,
+                    )
+                    if existing_video and existing_video.exists() and existing_video.stat().st_size > 0:
+                        self._write_json(HTTPStatus.OK, {
+                            "success": True,
+                            "already_exists": True,
+                            "render_task_id": None,
+                            "path": str(existing_video),
+                        })
+                        return
+
+                    # Require source video and dubbed audio
+                    source_video = resolve_manifest_artifact_path(
+                        project_dir, "source.original_video", artifact_index=artifact_index,
+                    )
+                    dubbed_audio = resolve_manifest_artifact_path(
+                        project_dir, "editor.dubbed_audio_complete", artifact_index=artifact_index,
+                    )
+                    if not source_video or not source_video.exists():
+                        self._write_json(HTTPStatus.BAD_REQUEST, {"error": "缺少原始视频文件"})
+                        return
+                    if not dubbed_audio or not dubbed_audio.exists():
+                        self._write_json(HTTPStatus.BAD_REQUEST, {"error": "缺少配音音频文件"})
+                        return
+
+                    # Find ambient audio for background mixing
+                    ambient_audio = resolve_manifest_artifact_path(
+                        project_dir, "editor.ambient_audio", artifact_index=artifact_index,
+                    )
+                    if not ambient_audio or not ambient_audio.exists():
+                        ambient_audio = resolve_manifest_artifact_path(
+                            project_dir, "working.ambient_audio", artifact_index=artifact_index,
+                        )
+
+                    # Launch render thread; return task_id immediately
+                    from services.jobs.video_render_async import (
+                        new_render_task_id,
+                        start_render_thread,
+                    )
+                    render_task_id = new_render_task_id()
+                    manifest_path = project_dir / "manifest.json"
+                    start_render_thread(
+                        render_task_id=render_task_id,
+                        project_dir=project_dir,
+                        job_id=job_id,
+                        source_video=source_video,
+                        dubbed_audio=dubbed_audio,
+                        ambient_audio=ambient_audio if ambient_audio and ambient_audio.exists() else None,
+                        manifest_path=manifest_path,
+                    )
+                    self._write_json(HTTPStatus.ACCEPTED, {
+                        "success": True,
+                        "already_exists": False,
+                        "render_task_id": render_task_id,
+                    })
+                    return
+
                 # --- Phase 1: job-scoped cancel ---
                 if len(path_parts) == 3 and path_parts[0] == "jobs" and path_parts[2] == "cancel":
                     job_id = path_parts[1]
@@ -502,6 +658,51 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
+
+        def _write_stream(self, file_path: Path, *, content_type: str) -> None:
+            """Range-aware file streaming (no Content-Disposition: attachment)."""
+            file_size = file_path.stat().st_size
+            range_header = self.headers.get("Range")
+
+            if range_header and range_header.startswith("bytes="):
+                # Parse range: bytes=START-END or bytes=START-
+                range_spec = range_header[6:]
+                parts = range_spec.split("-", 1)
+                start = int(parts[0]) if parts[0] else 0
+                end = int(parts[1]) if parts[1] else file_size - 1
+                end = min(end, file_size - 1)
+                length = end - start + 1
+
+                self.send_response(206)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
+                self.send_header("Content-Length", str(length))
+                self.send_header("Accept-Ranges", "bytes")
+                self.end_headers()
+
+                with open(file_path, "rb") as f:
+                    f.seek(start)
+                    remaining = length
+                    while remaining > 0:
+                        chunk = f.read(min(remaining, 65536))
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        remaining -= len(chunk)
+            else:
+                # Full file
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(file_size))
+                self.send_header("Accept-Ranges", "bytes")
+                self.end_headers()
+
+                with open(file_path, "rb") as f:
+                    while True:
+                        chunk = f.read(65536)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
 
     return JobAPIHandler
 

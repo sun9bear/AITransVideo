@@ -16,4 +16,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest",
+    "pytest-asyncio",
+    # Async SQLite driver used by gateway DB-backed unit tests
+    # (tests/test_background_task_queue.py, tests/test_materials_pack_executor.py,
+    # tests/test_background_task_api.py).
+    "aiosqlite",
 ]

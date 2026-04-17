@@ -267,6 +267,60 @@ async def me_handler(
             "display_name": user.display_name,
             "role": getattr(user, "role", "user") or "user",
             "phone_number": getattr(user, "phone_number", None),
+            "plan_code": getattr(user, "plan_code", "free") or "free",
             "created_at": user.created_at.isoformat(),
         }
     }
+
+
+# --- Change password ---
+
+class ChangePasswordRequest(BaseModel):
+    old_password: str
+    new_password: str
+
+
+async def change_password_handler(
+    body: ChangePasswordRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(get_current_user),
+) -> dict:
+    if user is None:
+        raise HTTPException(status_code=401, detail="未登录")
+    if not body.new_password or len(body.new_password) < 6:
+        raise HTTPException(status_code=400, detail="新密码长度至少 6 位")
+    # If user has a password, verify the old one
+    if user.password_hash:
+        if not body.old_password:
+            raise HTTPException(status_code=400, detail="请输入当前密码")
+        if not verify_password(body.old_password, user.password_hash):
+            raise HTTPException(status_code=400, detail="当前密码错误")
+    # Set new password
+    user.password_hash = hash_password(body.new_password)
+    await db.commit()
+    return {"success": True}
+
+
+# --- Bind email ---
+
+class BindEmailRequest(BaseModel):
+    email: EmailStr
+
+
+async def bind_email_handler(
+    body: BindEmailRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(get_current_user),
+) -> dict:
+    if user is None:
+        raise HTTPException(status_code=401, detail="未登录")
+    email = body.email.strip().lower()
+    # Check if email is already taken by another user
+    existing = await db.execute(
+        select(User).where(User.email == email, User.id != user.id)
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="该邮箱已被其他账户使用")
+    user.email = email
+    await db.commit()
+    return {"success": True, "email": email}
