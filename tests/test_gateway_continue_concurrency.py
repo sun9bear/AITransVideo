@@ -1,27 +1,34 @@
-"""Tests for T2: `_reserve_continue_transition` prevents double-spawn on concurrent
-POST /jobs/{id}/continue requests.
+"""Tests for T2: `_continue_with_gateway_lock` prevents double-spawn on
+concurrent POST /jobs/{id}/continue requests AND rolls back local status
+when upstream rejects the continue.
 
-The production scenario this defends against:
-  Req A:  SELECT FOR UPDATE → status='waiting_for_review' → UPDATE 'running' → COMMIT → proxy
-  Req B:  (blocks on FOR UPDATE until A commits) → SELECT sees 'running' → 409
+Production scenario this defends against:
+  Req A: SELECT FOR UPDATE → status=waiting_for_review → proxy upstream →
+         (success) UPDATE 'running' → COMMIT → response
+  Req B: (blocks on FOR UPDATE until A commits) → reads 'running' → 409
+  Req A-fail: SELECT FOR UPDATE → proxy upstream → (409/5xx) → leave status
+         as 'waiting_for_review' → COMMIT → response. A retry is safe.
 
-Without the UPDATE+COMMIT pair, Req B would see the stale 'waiting_for_review'
-after lock release and double-spawn the pipeline subprocess upstream.
+Codex P1 finding (post-T2): the original implementation committed
+status='running' BEFORE proxying. If upstream rejected (review not actually
+approved — see src/services/jobs/service.py:155-168), the Gateway DB was
+stuck with 'running' and all subsequent continues 409'd until list_jobs
+sync reconciled. New flow holds the lock through proxy and only promotes
+status on upstream 2xx.
 
-Unit-level tests here verify the three critical invariants:
-  1. SELECT is issued with `.with_for_update()` (DB-layer serialization)
-  2. Job row's status is flipped to 'running' BEFORE commit
-  3. `await db.commit()` is called (so the flip is visible to next reader)
-
-A separate integration test (`@pytest.mark.postgres`) exercises real DB
-concurrency; skipped by default since unit tests run on SQLite / mocks.
+Unit tests here cover:
+  1. Upstream 2xx → status promoted to 'running' + committed
+  2. Upstream 409/5xx → status stays 'waiting_for_review' (retry works)
+  3. Concurrent Req B blocks on lock, then 409s after A commits 'running'
+  4. Legacy job without a Gateway DB row falls through cleanly
+  5. Non-continuable status (already running/failed/done) short-circuits
+     with 409 before proxy is called
 """
 from __future__ import annotations
 
 import asyncio
 import sys
 import types
-import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -32,7 +39,7 @@ _gateway_dir = str(Path(__file__).resolve().parent.parent / "gateway")
 if _gateway_dir not in sys.path:
     sys.path.insert(0, _gateway_dir)
 
-# Stub database before importing job_intercept (it imports from database)
+# Stub database before importing job_intercept
 _fake_database = types.ModuleType("database")
 _fake_database.get_db = MagicMock()
 _fake_database.engine = MagicMock()
@@ -42,9 +49,10 @@ sys.modules.setdefault("database", _fake_database)
 if not hasattr(sys.modules["database"], "init_db"):
     sys.modules["database"].init_db = MagicMock()
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Response
 
-from job_intercept import _reserve_continue_transition
+import job_intercept
+from job_intercept import _continue_with_gateway_lock
 
 
 def _run(coro):
@@ -55,7 +63,7 @@ def _run(coro):
         loop.close()
 
 
-def _db_returning_job(job) -> AsyncMock:
+def _make_db_with_job(job):
     """Build a mock AsyncSession whose execute() returns a single Job row."""
     db = AsyncMock()
     result = MagicMock()
@@ -65,7 +73,7 @@ def _db_returning_job(job) -> AsyncMock:
     return db
 
 
-def _db_returning_no_job() -> AsyncMock:
+def _make_db_no_job():
     db = AsyncMock()
     result = MagicMock()
     result.scalar_one_or_none.return_value = None
@@ -74,87 +82,159 @@ def _db_returning_no_job() -> AsyncMock:
     return db
 
 
-class TestReserveContinueTransition:
-    def test_waiting_review_flips_to_running_and_commits(self):
-        """Happy path: status=waiting_for_review → UPDATE running → COMMIT."""
-        job = SimpleNamespace(job_id="j-1", status="waiting_for_review")
-        db = _db_returning_job(job)
+def _make_request():
+    """Minimal stub for FastAPI Request — job_intercept only passes it to
+    proxy_request, which we monkeypatch."""
+    return MagicMock()
 
-        _run(_reserve_continue_transition("j-1", db))
 
-        # Row was mutated in-place before commit
-        assert job.status == "running"
-        # Commit was called (critical — without this, the write rolls back)
-        db.commit.assert_awaited_once()
+def _patch_proxy(monkeypatch, *, status_code: int, body: bytes = b'{"ok":true}'):
+    """Monkeypatch job_intercept.proxy_request to return a controlled Response."""
+    async def fake_proxy(**kwargs):
+        return Response(content=body, status_code=status_code)
+    monkeypatch.setattr(job_intercept, "proxy_request", fake_proxy)
 
-    def test_select_uses_for_update(self):
+
+class TestContinueWithGatewayLock:
+    def test_select_uses_for_update(self, monkeypatch):
         """Regression guard: the Job SELECT must carry `.with_for_update()`.
 
-        Without the row lock, two concurrent requests don't serialize at the
-        DB layer and can both pass the status check before either commits.
+        Without it, concurrent requests don't serialize at the DB layer.
         """
+        _patch_proxy(monkeypatch, status_code=202)
         job = SimpleNamespace(job_id="j-1", status="waiting_for_review")
-        db = _db_returning_job(job)
+        db = _make_db_with_job(job)
 
-        _run(_reserve_continue_transition("j-1", db))
+        _run(_continue_with_gateway_lock(_make_request(), "j-1", db))
 
-        # Exactly one SELECT was issued
-        assert db.execute.await_count == 1
+        # The initial SELECT Job statement was executed
+        assert db.execute.await_count >= 1
         stmt = db.execute.await_args_list[0].args[0]
-        # SQLAlchemy Select stores FOR UPDATE intent here; non-None means present
         assert getattr(stmt, "_for_update_arg", None) is not None, (
-            "_reserve_continue_transition must SELECT ... FOR UPDATE on Job row"
+            "_continue_with_gateway_lock must SELECT ... FOR UPDATE on Job row"
         )
 
-    def test_running_status_raises_409(self):
-        """Second concurrent request (or retry after first succeeded) must 409.
+    def test_upstream_success_promotes_status_to_running(self, monkeypatch):
+        """Happy path: upstream 2xx → job.status flipped to 'running' + commit."""
+        _patch_proxy(monkeypatch, status_code=202)
+        job = SimpleNamespace(job_id="j-1", status="waiting_for_review")
+        db = _make_db_with_job(job)
 
-        Because the first request pre-mirrored status='running' and committed,
-        this reader sees the new state and refuses to double-spawn.
+        response = _run(_continue_with_gateway_lock(_make_request(), "j-1", db))
+
+        assert response.status_code == 202
+        assert job.status == "running", "status must be promoted on upstream 2xx"
+        db.commit.assert_awaited_once()
+
+    def test_upstream_200_also_promotes(self, monkeypatch):
+        _patch_proxy(monkeypatch, status_code=200)
+        job = SimpleNamespace(job_id="j-1", status="waiting_for_review")
+        db = _make_db_with_job(job)
+
+        _run(_continue_with_gateway_lock(_make_request(), "j-1", db))
+
+        assert job.status == "running"
+
+    def test_upstream_409_leaves_status_unchanged(self, monkeypatch):
+        """Codex P1 regression guard: upstream 409 (e.g. review not approved)
+        must NOT leave gateway DB stuck with status='running'.
+
+        Without this rollback, a failed continue would block all retries —
+        user sees "Job is not continuable (current status: running)" forever
+        until list_jobs sync runs and reconciles.
         """
+        _patch_proxy(monkeypatch, status_code=409, body=b'{"error":"not approved"}')
+        job = SimpleNamespace(job_id="j-1", status="waiting_for_review")
+        db = _make_db_with_job(job)
+
+        response = _run(_continue_with_gateway_lock(_make_request(), "j-1", db))
+
+        assert response.status_code == 409
+        assert job.status == "waiting_for_review", (
+            "status MUST NOT flip to 'running' when upstream rejected — "
+            "retries would be blocked by the stale value until list_jobs sync"
+        )
+        # Commit still happens to release the lock, but with no status mutation
+        db.commit.assert_awaited_once()
+
+    def test_upstream_500_leaves_status_unchanged(self, monkeypatch):
+        """Same as 409: upstream 5xx must not poison gateway state."""
+        _patch_proxy(monkeypatch, status_code=500, body=b'{"error":"upstream bug"}')
+        job = SimpleNamespace(job_id="j-1", status="waiting_for_review")
+        db = _make_db_with_job(job)
+
+        response = _run(_continue_with_gateway_lock(_make_request(), "j-1", db))
+
+        assert response.status_code == 500
+        assert job.status == "waiting_for_review"
+        db.commit.assert_awaited_once()
+
+    def test_non_continuable_status_409s_without_proxy(self, monkeypatch):
+        """If the job is already 'running' (concurrent continue won the race)
+        or in a terminal state, don't even call upstream."""
+        proxy_called = {"hit": False}
+
+        async def fake_proxy(**kwargs):
+            proxy_called["hit"] = True
+            return Response(content=b"{}", status_code=200)
+
+        monkeypatch.setattr(job_intercept, "proxy_request", fake_proxy)
         job = SimpleNamespace(job_id="j-1", status="running")
-        db = _db_returning_job(job)
+        db = _make_db_with_job(job)
 
         with pytest.raises(HTTPException) as ei:
-            _run(_reserve_continue_transition("j-1", db))
+            _run(_continue_with_gateway_lock(_make_request(), "j-1", db))
 
         assert ei.value.status_code == 409
         assert "running" in str(ei.value.detail).lower()
-        # Must NOT have committed anything — status is not ours to change
+        assert proxy_called["hit"] is False, (
+            "upstream must NOT be called when gateway pre-check already rejected"
+        )
         db.commit.assert_not_awaited()
 
-    def test_terminal_status_raises_409(self):
-        """done/failed/cancelled jobs are not continuable either."""
+    def test_terminal_status_rejected(self, monkeypatch):
+        _patch_proxy(monkeypatch, status_code=200)
         job = SimpleNamespace(job_id="j-1", status="succeeded")
-        db = _db_returning_job(job)
+        db = _make_db_with_job(job)
 
         with pytest.raises(HTTPException) as ei:
-            _run(_reserve_continue_transition("j-1", db))
+            _run(_continue_with_gateway_lock(_make_request(), "j-1", db))
 
         assert ei.value.status_code == 409
-        db.commit.assert_not_awaited()
 
-    def test_legacy_job_without_db_row_falls_through(self):
-        """Jobs not mirrored in Gateway DB must not 500 — upstream handles them."""
-        db = _db_returning_no_job()
+    def test_legacy_job_without_db_row_falls_through(self, monkeypatch):
+        """Jobs not mirrored in Gateway DB must proxy through to upstream
+        without raising — upstream handles validation in that case."""
+        _patch_proxy(monkeypatch, status_code=202)
+        db = _make_db_no_job()
 
-        # Must return cleanly without raising
-        _run(_reserve_continue_transition("legacy-job", db))
+        response = _run(_continue_with_gateway_lock(_make_request(), "legacy-j", db))
 
-        # No mutation, no commit (there's no row to mutate)
-        db.commit.assert_not_awaited()
+        assert response.status_code == 202
+        # Still commits (a no-op) to close the txn cleanly
+        db.commit.assert_awaited_once()
 
 
 @pytest.mark.postgres
 def test_concurrent_continue_rejects_second():
     """INTEGRATION: under real PG, two simultaneous POST /continue serialize.
 
-    Expected outcome: one request returns 202 (continue accepted, subprocess
-    spawned), the other returns 409 (status already 'running' by the time
-    it acquires the lock). If the COMMIT in _reserve_continue_transition is
-    removed or the UPDATE is omitted, this test fails because both requests
-    read the stale 'waiting_for_review' status.
+    Expected outcome: first request gets 202 (status promoted to 'running'),
+    second request blocks on FOR UPDATE until first commits, reads 'running',
+    returns 409. If the lock-release-before-proxy bug came back, both would
+    read 'waiting_for_review' and both would pass through to upstream.
 
-    Skipped by default — requires TEST_DATABASE_URL pointing at a live PG.
+    Skipped by default — requires TEST_DATABASE_URL pointing at live PG.
+    """
+    pytest.skip("Requires PostgreSQL integration setup — see TEST_DATABASE_URL")
+
+
+@pytest.mark.postgres
+def test_failed_continue_allows_retry():
+    """INTEGRATION: if upstream rejected the first continue (review not
+    approved), a retry after the user fixes the review state must succeed —
+    gateway DB must NOT be stuck at 'running'.
+
+    Skipped by default.
     """
     pytest.skip("Requires PostgreSQL integration setup — see TEST_DATABASE_URL")

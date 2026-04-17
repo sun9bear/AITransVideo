@@ -13,16 +13,23 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 # Import models so Alembic sees them
 from models import Base  # noqa: F401
-from config import settings
+from config import resolve_database_url, settings
 
 config = context.config
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Override URL from settings (env var takes precedence)
+# T3 fix: settings.database_url is empty by design (lazy init pattern in
+# gateway/database.py). Call resolve_database_url() explicitly so Alembic
+# gets the real URL built from AVT_PG_PASSWORD / AVT_DATABASE_URL — the
+# standard compose setup uses AVT_PG_PASSWORD with empty AVT_DATABASE_URL,
+# so reading settings.database_url directly would produce an empty URL.
 # Escape % in URL for configparser (password may contain URL-encoded special chars)
-config.set_main_option("sqlalchemy.url", settings.database_url.replace("%", "%%"))
+config.set_main_option(
+    "sqlalchemy.url",
+    resolve_database_url(settings).replace("%", "%%"),
+)
 
 target_metadata = Base.metadata
 

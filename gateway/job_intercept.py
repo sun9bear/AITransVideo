@@ -565,11 +565,14 @@ async def intercept_job_subresource(
     await _verify_job_ownership(job_id, db, user)
 
     # T2: state-transition endpoints need concurrency control at Gateway layer.
-    # POST /continue atomically reserves the transition (lock + status flip +
-    # commit) before proxying, so a second concurrent continue cannot race in.
-    # Other subpaths (logs, artifacts, etc.) are read-mostly and skip this.
+    # For POST /continue we hold a row lock across the upstream proxy call so
+    # that (a) concurrent continues serialize at the DB, and (b) we only
+    # promote status to 'running' AFTER we see upstream accepted the continue.
+    # If upstream returns 409 / 5xx / times out, the row stays in
+    # 'waiting_for_review' — the user can retry without being blocked by a
+    # stale 'running' we wrote speculatively.
     if subpath == "continue" and request.method == "POST":
-        await _reserve_continue_transition(job_id, db)
+        return await _continue_with_gateway_lock(request, job_id, db)
 
     return await proxy_request(
         request=request,
@@ -578,46 +581,65 @@ async def intercept_job_subresource(
     )
 
 
-async def _reserve_continue_transition(job_id: str, db: AsyncSession) -> None:
-    """Atomically lock the Job row, verify it's continuable, flip status to
-    'running', and COMMIT the transition so concurrent continue requests
-    cannot double-spawn the pipeline subprocess.
+async def _continue_with_gateway_lock(
+    request: Request,
+    job_id: str,
+    db: AsyncSession,
+) -> Response:
+    """Acquire FOR UPDATE on the Job row, proxy /continue upstream, then
+    commit the status transition only if upstream accepted.
 
-    Order matters (each step depends on the previous committing):
-      1. SELECT ... FOR UPDATE  — serialize concurrent continues at DB layer
-      2. Assert status == 'waiting_for_review' — idempotent check
-      3. UPDATE status = 'running' — pre-mirror the upstream transition so
-         the next concurrent reader, once this txn commits, sees the new
-         state and bails out with 409
-      4. COMMIT — without this, the update is rolled back when the session
-         closes, defeating the whole scheme; a second request reading with
-         FOR UPDATE would still see 'waiting_for_review' and proceed
-      5. (caller proxies to upstream — lock and txn already released)
+    Flow:
+      1. SELECT ... FOR UPDATE on Job row (serializes concurrent continues).
+         Legacy jobs without a Gateway row skip the lock entirely; upstream
+         handles validation for them.
+      2. Assert status == 'waiting_for_review'. If not, raise 409 without
+         proxying — another continue already committed, or the job isn't
+         actually waiting.
+      3. Proxy upstream. Lock is still held because we haven't committed yet.
+         Concurrent requests block on FOR UPDATE until this function returns.
+      4. If upstream returned a 2xx, promote status to 'running' so the next
+         request (which will block on the lock and then read fresh state)
+         correctly rejects with 409.
+      5. If upstream returned a non-2xx, leave status alone — waiting_for_review
+         stays, so the user can retry continue without first waiting for
+         list_jobs to reconcile.
+      6. Commit (releases the lock regardless of upstream outcome).
 
-    Two behaviors we deliberately accept:
-    - Legacy jobs without a Gateway-side row fall through (no lock to take).
-      Upstream Job API handles validation in that case.
-    - If upstream Job API ultimately fails to continue, `Job.status` remains
-      'running' in Gateway DB until the next list_jobs sync reconciles it
-      to the real upstream state (typically 'failed'). This window is
-      acceptable in exchange for the concurrency guarantee.
+    Trade-off: the DB row lock is held through the proxy call (typically
+    sub-second for /continue). /continue is an infrequent endpoint so this
+    is an acceptable cost for correctness. If the proxy hangs, the lock
+    holds until that request times out — the failure mode here is isolated
+    to that single job_id's continue retries, not system-wide.
     """
     result = await db.execute(
         select(Job).where(Job.job_id == job_id).with_for_update()
     )
     job = result.scalar_one_or_none()
-    if job is None:
-        # Legacy job not mirrored in Gateway DB — let upstream handle validation.
-        return
-    if job.status != "waiting_for_review":
+    if job is not None and job.status != "waiting_for_review":
         raise HTTPException(
             status_code=409,
             detail=f"Job is not continuable (current status: {job.status})",
         )
-    # Pre-mirror: flip to 'running' so the next concurrent reader sees the
-    # transition after we commit.
-    job.status = "running"
+
+    # Lock is held; proxy upstream.
+    response = await proxy_request(
+        request=request,
+        upstream_base=settings.job_api_upstream,
+        strip_prefix="/job-api",
+    )
+
+    # Only promote status on upstream success. If upstream rejected (e.g.
+    # review not actually approved per service.py:155-168) or blew up, we
+    # leave the row in 'waiting_for_review' so retries work.
+    if job is not None and 200 <= response.status_code < 300:
+        job.status = "running"
+
+    # Commit either way — releases the FOR UPDATE lock. A no-op commit is
+    # cheap; the important thing is that no future request is blocked
+    # waiting on this txn.
     await db.commit()
+    return response
 
 
 async def intercept_delete_job_v2(

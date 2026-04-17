@@ -14,11 +14,17 @@ from pathlib import Path
 
 from sqlalchemy import select
 
-from database import async_session, engine
+from database import async_session, engine, init_db
 from models import Base, Job, User
 
 
 async def migrate(jobs_dir: str, admin_email: str) -> None:
+    # T3 fix: standalone scripts must explicitly init the DB — with the lazy
+    # init pattern in database.py, `engine` and `async_session` are proxies
+    # that raise RuntimeError unless init_db() has been called. In the main
+    # app this runs in the FastAPI lifespan; here we do it manually.
+    init_db()
+
     # Ensure tables exist
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
