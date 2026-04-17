@@ -42,6 +42,7 @@ ssh_upload.py
 
 # Claude Code
 .claude/
+.superpowers/
 
 # IDE / OS
 .vscode/

@@ -4,115 +4,105 @@
 
 ## 1. 范围
 
-这张子图只看人工审核相关链路，重点是：
+这张子图只看审核流，重点是：
 
-1. 审核阶段在状态层里如何定义。
-2. 前端审核页如何经 API 读取/提交。
-3. Pipeline 如何在各个 gate 前后挂起与恢复。
+- `ReviewStateManager` 与 stage 常量
+- 前端审核页 / 审核面板
+- review API
+- pipeline 的 gate / resume 关系
 
-## 2. GitNexus 聚类焦点
-
-| 聚类 | 符号数 | 代表成员 |
-| --- | ---: | --- |
-| Review | 19 | `SpeakerReviewPage.tsx`、`TranslationReviewPage.tsx`、`TranslationReviewPanel.tsx` |
-| Web_ui | 103 | `src/services/review_state.py`、`src/services/manifest_reader.py` |
-| Api | 156 | `frontend-next/src/lib/api/reviews.ts`、`frontend/src/lib/api/reviews.ts` |
-
-## 3. 审核流图
+## 2. 审核流主图
 
 ```mermaid
-graph LR
-    A["Pipeline / Process<br/>src/pipeline/process.py"] --> B["ReviewStateManager<br/>active_stage + stages payload"]
-    B --> C["speaker_review"]
-    C --> D["translation_config_review"]
-    D --> E["translation_review"]
-    E --> F["voice_selection_review<br/>Studio 主路径"]
-    E --> G["voice_review<br/>legacy fallback"]
-    F --> H["audio_alignment_review"]
-    G --> H
-    H --> I["恢复 pipeline 继续产出"]
+graph TD
+    ReviewState["Review State<br/>review_state.py"] --> Speaker["speaker_review"]
+    ReviewState --> Config["translation_config_review"]
+    ReviewState --> Translation["translation_review"]
+    ReviewState --> Voice["voice_review"]
+    ReviewState --> VoiceSelect["voice_selection_review"]
+    ReviewState --> AudioAlign["audio_alignment_review"]
 
-    J["SpeakerReviewPage<br/>TranslationReviewPage<br/>VoiceReviewPage<br/>TranslationReviewPanel"] --> K["reviews API layer"]
-    K --> B
-    K --> A
+    Speaker --> ReviewAPI["Frontend review API<br/>frontend-next + frontend"]
+    Config --> ReviewAPI
+    Translation --> ReviewAPI
+    Voice --> ReviewAPI
+    VoiceSelect --> ReviewAPI
+    AudioAlign --> ReviewAPI
+
+    ReviewAPI --> Pages["Review pages / panels<br/>TranslationReviewPanel / SpeakerReviewPage / VoiceReviewPage"]
+    ReviewAPI --> Gate["active stage / gate stage resolution"]
+    Gate --> Workflow["Workflow / pipeline resume"]
+    Workflow --> ReviewState
 ```
 
-## 4. 审核阶段真相
+## 3. 当前 stage 集合
 
-`src/services/review_state.py` 直接定义了审核阶段常量：
+`src/services/review_state.py` 当前显式定义：
 
-1. `speaker_review`
-2. `translation_config_review`
-3. `translation_review`
-4. `voice_review`
-5. `voice_selection_review`
-6. `audio_alignment_review`
+- `speaker_review`
+- `translation_config_review`
+- `translation_review`
+- `voice_review`
+- `voice_selection_review`
+- `audio_alignment_review`
 
-其中注释已经明确说明：
+同一个文件还给出 UI route 对应：
 
-1. `voice_review` 是历史恢复/短样本绑定场景的 legacy fallback。
-2. `voice_selection_review` 才是当前 Studio 主路径，承担多说话人选音、试听、可选 clone、以及按说话人选择 TTS provider。
+- `speaker_review -> review`
+- `translation_config_review -> translation-config`
+- `translation_review -> translation`
+- `voice_review -> voice-library`
+- `voice_selection_review -> voice-selection`
+- `audio_alignment_review -> audio-alignment`
 
-## 5. Pipeline 挂 gate 的证据
+这条映射说明 review 流已经不是单页单阶段，而是稳定的多阶段 gate 系统。
 
-在 `src/pipeline/process.py` 中，GitNexus 和源码搜索都能看到这些方法和 gate：
+## 4. 前端入口
 
-1. `_build_speaker_review_payload`
-2. `_apply_speaker_review_payload`
-3. `_build_translation_config_review_payload`
-4. `_build_translation_review_payload`
-5. `_build_voice_selection_review_payload`
-6. `VOICE_SELECTION_REVIEW_STAGE`
+### 4.1 新前端 review API
 
-同时，代码里明确存在：
+- `frontend-next/src/lib/api/reviews.ts` 提供 `getTranslationReview(...)`。
+- 同文件对 `speaker_review / translation_review / voice_review / voice_selection_review` 做 active stage 与 gate stage 判定。
+- `frontend-next/src/components/workspace/TranslationReviewPanel.tsx` 调用 `getTranslationReview(jobId)` 并提交 `stage: 'translation_review'`。
 
-1. `translation_config_review gate`
-2. `translation_review gate`
-3. `voice_selection_review gate (Studio mode only)`
+### 4.2 兼容旧 review 页面
 
-这说明审核流不是前端附属功能，而是 pipeline 主链上的显式暂停点。
+- `frontend/src/routes/review/SpeakerReviewPage.tsx` 调用 `getSpeakerReview(jobId)`。
+- `frontend/src/routes/review/VoiceReviewPage.tsx` 调用 `getVoiceReview(jobId)`。
 
-## 6. GitNexus 页面读取链
+这说明审核流当前处于迁移阶段：新旧前端表面并存，但 review state 仍由统一 stage 常量驱动。
 
-### 6.1 说话人审核页
+## 5. GitNexus 识别出的直接证据链
 
-GitNexus process：`SpeakerReviewPage → SerializeBody`
+GitNexus process 当前能直接识别出以下审核链路：
 
-1. `frontend/src/routes/review/SpeakerReviewPage.tsx`
-2. `load`
-3. `frontend/src/lib/api/reviews.ts:getSpeakerReview`
-4. `frontend-next/src/lib/api/client.ts:get`
-5. `frontend-next/src/lib/api/client.ts:request`
-6. `frontend-next/src/lib/api/client.ts:serializeBody`
+- `TranslationConfigReviewPage -> BuildBackendUrl`
+- `TranslationReviewPanel -> SerializeBody`
+- `SpeakerReviewPage -> SerializeBody`
+- `VoiceReviewPage -> SerializeBody`
 
-### 6.2 翻译审核面板
+这些 process 有两个价值：
 
-GitNexus process：`TranslationReviewPanel → SerializeBody`
+- 说明审核页不是静态页面，而是明确连到 request/buildUrl/serializeBody
+- 说明 review payload 的边界现在已经足够稳定，能被 GitNexus 提取成流程
 
-1. `frontend-next/src/components/workspace/TranslationReviewPanel.tsx`
-2. `load`
-3. `frontend-next/src/lib/api/reviews.ts:getTranslationReview`
-4. `frontend-next/src/lib/api/client.ts:get`
-5. `frontend-next/src/lib/api/client.ts:request`
-6. `frontend-next/src/lib/api/client.ts:serializeBody`
+## 6. 当前审核流边界
 
-### 6.3 音色审核页
+### 6.1 `voice_review` 与 `voice_selection_review` 并存
 
-GitNexus process：`VoiceReviewPage → SerializeBody`
+- `review_state.py` 注释明确说明：
+  `voice_review` 是 legacy recovery/fallback stage
+  `voice_selection_review` 是 Studio primary path
 
-1. `frontend/src/routes/review/VoiceReviewPage.tsx`
-2. `load`
-3. `frontend/src/lib/api/reviews.ts:getVoiceReview`
-4. `frontend-next/src/lib/api/client.ts:get`
-5. `frontend-next/src/lib/api/client.ts:request`
-6. `frontend-next/src/lib/api/client.ts:serializeBody`
+所以新功能设计应优先围绕 `voice_selection_review`，不要把 `voice_review` 误认为主路径。
 
-## 7. 审核流的当前结构判断
+### 6.2 review 是显式暂停恢复点
 
-从图谱和源码一起看，当前审核流有三个层次：
+`frontend-next/src/lib/api/reviews.ts` 中的 active stage / gate stage 判断，配合 pipeline 的等待状态，说明 review 仍是显式 `waiting_for_review` 边界，而不是后台静默穿透。
 
-1. 状态层：`ReviewStateManager` 负责持久化 `active_stage` 和每个 stage 的 payload/status。
-2. UI 层：老前端 `frontend/src/routes/review/*` 与新工作台 `frontend-next/src/components/workspace/*` 并存。
-3. 流程层：`src/pipeline/process.py` 在关键节点构建 payload、挂起等待审核、审批后恢复。
+## 7. 这张图适合回答什么问题
 
-这也是为什么审核图需要单独拆出来：它不是单一页面，而是一套“状态机 + 前端页 + pipeline gate”的组合。
+- 某个审核页对应的是哪个 stage
+- 为什么 review 流会暂停，以及恢复点在哪里
+- 新旧前端审核页是怎么同时挂在统一 review state 上的
+- `voice_review` 和 `voice_selection_review` 到底谁是主路径

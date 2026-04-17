@@ -49,6 +49,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Workflow core: `docs/graphs/GITNEXUS_WORKFLOW_CORE_GRAPH.md`
 - Commercialization: `docs/graphs/GITNEXUS_COMMERCIALIZATION_GRAPH.md`
 - Review flow: `docs/graphs/GITNEXUS_REVIEW_GRAPH.md`
+- Admin / Ops / Calibration: `docs/graphs/GITNEXUS_ADMIN_OPS_CALIBRATION_GRAPH.md`
 - Use these graph docs as the fast orientation layer before deeper code reads when the task is architecture-sensitive or the codebase is unfamiliar.
 
 ## Common Commands

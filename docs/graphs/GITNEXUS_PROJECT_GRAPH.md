@@ -2,8 +2,8 @@
 
 新会话建议先读本文件，再按任务进入对应子图。
 
-生成时间：2026-04-10  
-生成方式：基于当前仓库 `.gitnexus/` 索引与 GitNexus 本地查询结果整理
+生成时间：2026-04-16
+生成方式：基于当前仓库 `.gitnexus/` 最新索引与 GitNexus 本地查询结果整理
 
 ## 1. 图谱概览
 
@@ -11,171 +11,139 @@
 
 | 指标 | 数值 |
 | --- | ---: |
-| 文件数 | 740 |
-| 符号节点数 | 12,160 |
-| 关系边数 | 29,443 |
-| 聚类数 | 461 |
+| 文件数 | 796 |
+| 符号节点数 | 13,529 |
+| 关系边数 | 32,194 |
+| 聚类数 | 513 |
 | 执行流程数 | 300 |
-| 索引提交 | `05fb171` |
+| 索引提交 | `490cce8` |
+| 索引状态 | `up-to-date` |
 
-GitNexus 聚类显示，这个仓库的主骨架不是单一 Web 项目，而是一个围绕“视频翻译工作流 + Gateway 商业化 + 前端工作台”组合起来的多层系统。
+当前仓库已经从“单一视频处理脚本集合”演化为一个多层系统：
 
-为了可读性，下面的图谱刻意不展开最大的 `Tests` 聚类；GitNexus 实际上识别到 `Tests` 是全仓库最大的连接区块，说明当前项目的测试覆盖面很广，而且紧贴业务模块。
+- 工作流内核：`Ingestion -> Media Understanding -> Translation -> SemanticBlock -> TTS -> Alignment -> Caption Retiming -> Draft`
+- 商业化与权限边界：`Gateway pricing/runtime -> catalog/trial/credits/payment -> frontend marketing/auth/app`
+- 审核流：`ReviewStateManager -> review pages/panels -> gate/resume`
+- 管理与运维面：`admin pricing / S2 monitor / credits observability / job logs / voice speed calibration`
 
 ## 2. 主要功能区块
 
-下表为 GitNexus 聚类中最值得纳入架构图的区块：
+下表选取当前索引中最能代表架构主干的聚类：
 
 | 聚类 | 符号数 | 代表文件/成员 |
 | --- | ---: | --- |
-| Services | 381 | `main.py`、`src/services/transcript_reviewer.py`、`src/services/voice_clone.py`、`src/services/remote_workbench_runtime.py` |
-| Gateway | 242 | `gateway/plan_catalog.py`、`gateway/pricing_schema.py`、`gateway/billing.py`、`gateway/voice_catalog_models.py` |
-| Api | 156 | `frontend-next/src/lib/api/client.ts`、`frontend-next/src/lib/api/reviews.ts`、`frontend-next/src/lib/api/voiceSelection.ts` |
-| Web_ui | 103 | `src/services/review_state.py`、`src/services/manifest_reader.py`、`gateway/voice_selection_api.py` |
-| Workflow | 87 | `src/modules/workflow/project_workflow.py`、`src/modules/workflow/translation_stage_runner.py`、`src/pipeline/process.py` |
-| Ui | 83 | `frontend-next/src/components/ui/sidebar.tsx`、`frontend-next/src/components/ui/sheet.tsx` |
-| Media_understanding | 70 | 媒体理解与素材解析相关服务 |
-| Tts | 59 | `src/services/tts/voice_match_resolver.py`、`minimax_voice_selector.py`、`volcengine_voice_catalog.py` |
-| Draft | 51 | `src/modules/draft/draft_writer.py`、`caption_retiming.py`、`jianying_adapter.py` |
-| Translation | 48 | 翻译与翻译结果清洗相关模块 |
-| Alignment | 30 | `src/services/alignment/aligner.py`、`src/modules/alignment/alignment_orchestrator.py` |
-| Pipeline | 20 | `src/pipeline/process.py` 与阶段 payload/衔接逻辑 |
-| Ingestion | 19 | `src/modules/ingestion/providers.py`、`srt_loader.py`、`normalizer.py` |
-| Billing | 17 | `frontend-next/src/components/billing/*`、`frontend-next/src/lib/billing/*` |
-| Review | 19 | `frontend-next/src/components/workspace/TranslationReviewPanel.tsx`、`frontend/src/routes/review/*` |
-| Marketing | 12 | `frontend-next/src/components/marketing/*` |
+| Services | 344 | `src/services/transcript_reviewer.py`、`src/services/review_state.py`、`src/services/tts/voice_speed_catalog.py` |
+| Gateway | 248 | `gateway/main.py`、`gateway/plan_catalog.py`、`gateway/pricing_runtime.py`、`gateway/voice_speed_calibrator.py` |
+| Api | 161 | `frontend-next/src/lib/api/reviews.ts`、`frontend-next/src/lib/api/voiceLibrary.ts` |
+| Workflow | 147 | `src/modules/workflow/project_workflow.py`、`src/modules/workflow/alignment_stage_runner.py` |
+| Jobs | 123 | job 生命周期、事件与结果聚合相关逻辑 |
+| Web_ui | 98 | review/manifest/web bridge 相关逻辑 |
+| Tts | 60 | TTS provider、voice speed、voice selection 相关逻辑 |
+| Draft | 57 | `src/modules/draft/draft_writer.py`、`src/modules/draft/caption_retiming.py` |
+| Billing | 51 | credits、pricing、billing UI 与 runtime 连接 |
+| Translation | 49 | 翻译与译后结果整理 |
+| Alignment | 30 | DSP 对齐与 rewrite fallback |
+| Pipeline | 27 | `src/pipeline/process.py` 阶段衔接与 payload 处理 |
+| Ingestion | 19 | subtitle/provider normalization |
+| Review | 19 | review pages、review panel、review API |
+| Marketing | 14 | 定价、营销页、会话入口 |
+| Admin | 11 | 管理端 pricing surface |
+| S2-monitor | 9 | S2 审核效果监控 |
+| Credits-monitor | 8 | shadow credits 观测与核对 |
 
-## 3. 仓库结构图
+## 3. 子图入口
+
+- 图谱索引：`docs/graphs/README.md`
+- 工作流内核图：`docs/graphs/GITNEXUS_WORKFLOW_CORE_GRAPH.md`
+- 商业化图：`docs/graphs/GITNEXUS_COMMERCIALIZATION_GRAPH.md`
+- 审核流图：`docs/graphs/GITNEXUS_REVIEW_GRAPH.md`
+- Admin / Ops / Calibration 图：`docs/graphs/GITNEXUS_ADMIN_OPS_CALIBRATION_GRAPH.md`
+
+## 4. 仓库结构图
 
 ```mermaid
 graph TD
-    Marketing["Marketing<br/>frontend-next/src/components/marketing"] --> Api
-    Billing["Billing<br/>frontend-next/src/components/billing"] --> Api
-    Review["Review UI<br/>frontend-next + frontend/src/routes/review"] --> Api
-    Workspace["Workspace / Project UI<br/>frontend-next components + pages"] --> Api
+    Marketing["Marketing / Auth / App UI<br/>frontend-next"] --> Api
+    ReviewUI["Review UI<br/>frontend-next + frontend"] --> Api
+    AdminUI["Admin / Ops UI<br/>admin pricing + s2 monitor + credits monitor"] --> Api
+    VoiceUI["Voice Library / Probe / Calibrate"] --> Api
 
-    Api["Frontend API Layer<br/>frontend-next/src/lib/api<br/>frontend/src/lib/api"] --> Gateway
-    Api --> WebUI
+    Api["Frontend API Layer<br/>reviews.ts / voiceLibrary.ts / admin pricing API"] --> Gateway
+    Api --> WebBridge
 
-    Gateway["Gateway Truth Layer<br/>plan catalog / pricing / entitlements / voice catalog"] --> Workflow
-    WebUI["Review / Manifest Bridge<br/>src/services/review_state.py<br/>src/services/manifest_reader.py"] --> Workflow
+    Gateway["Gateway Truth + Control Layer<br/>pricing_runtime / plan_catalog / credits / payment / admin APIs"] --> Workflow
+    Gateway --> Ops["Ops + Calibration Services<br/>admin_job_monitor_api / s2_monitor_api / credits_observability / voice_speed_calibrator"]
+    WebBridge["Review / Manifest Bridge<br/>review_state / manifest / review payloads"] --> Workflow
 
-    Workflow["Workflow Orchestration<br/>src/modules/workflow<br/>src/pipeline/process.py"] --> Ingestion
+    Workflow["Workflow Orchestration<br/>project_workflow.py + process.py"] --> Ingestion
+    Workflow --> Media["Media Understanding"]
     Workflow --> Translation
+    Workflow --> Chunking["SemanticBlock Chunking"]
     Workflow --> TTS
     Workflow --> Alignment
+    Workflow --> Retiming["Caption Retiming"]
     Workflow --> Draft
 
-    Ingestion["Ingestion<br/>subtitle/provider normalization"] --> Translation
-    Translation["Translation / Media Understanding"] --> TTS
-    TTS["TTS / Voice Selection"] --> Alignment
-    Alignment["Alignment<br/>DSP first, rewrite fallback"] --> Draft
-    Draft["Jianying Draft Output<br/>src/modules/draft"] --> Artifacts["projects/ + build/ + output artifacts"]
+    Ingestion["Ingestion"] --> Media
+    Media --> Translation
+    Translation --> Chunking
+    Chunking --> TTS
+    TTS --> Alignment
+    Alignment --> Retiming
+    Retiming --> Draft
+    Draft["Jianying Draft Writer"] --> Artifacts["Draft Artifacts<br/>draft_content.json / draft_meta_info.json / jianying_like_export.json"]
 
-    Tests["Tests<br/>pytest"] -.覆盖与回归保护.-> Gateway
-    Tests -.覆盖与回归保护.-> Workflow
-    Tests -.覆盖与回归保护.-> Draft
-    Tests -.覆盖与回归保护.-> TTS
-    Tests -.覆盖与回归保护.-> Alignment
+    Ops --> Logs["Job logs / S2 artifacts / credits ledger / voice catalog"]
+    Logs --> Workflow
 ```
 
-## 4. 核心执行流图
+## 5. 核心证据链
 
-这张图按项目当前约束做了收敛：目标产物是剪映草稿，不是直接渲染 MP4。
+### 5.1 工作流主链不是按字幕行直接 TTS
 
-```mermaid
-graph LR
-    A["输入源<br/>视频 / 字幕 / 项目配置"] --> B["Ingestion<br/>载入与标准化"]
-    B --> C["Translation / Media Understanding<br/>转写、翻译、语义准备"]
-    C --> D["Review State / Web UI<br/>说话人、翻译、音色审核"]
-    D --> E["TTS by SemanticBlock<br/>音色选择与合成"]
-    E --> F["Alignment<br/>DSP 对齐优先<br/>必要时 rewrite loop"]
-    F --> G["Caption Retiming<br/>数学/确定性重定时"]
-    G --> H["Draft Writer<br/>JianyingAdapter + DraftWriter"]
-    H --> I["剪映草稿目录与素材清单"]
+- `src/modules/workflow/project_workflow.py` 的 `run_build()` 顺序明确是：
+  `ingestion -> audio preparation -> media understanding -> translation -> chunking -> alignment -> draft`
+- `chunking` 阶段产出的是 `SemanticBlock`，随后才进入 `_run_alignment_stage(blocks)`。
+- `src/modules/draft/caption_retiming.py` 的 `CaptionRetimer` 负责“按块内原始时间比例线性缩放”，说明字幕 retiming 仍是确定性数学逻辑，不是 LLM 驱动。
 
-    J["Gateway Truth<br/>套餐、试用、定价、权益"] -.驱动商业化事实.-> D
-    J -.驱动商业化事实.-> I
-```
+### 5.2 Gateway 仍然是商业事实真源
 
-## 5. GitNexus 直接证据
+- `gateway/main.py:lifespan` 启动时调用 `get_runtime_pricing(force_reload=True)`。
+- `gateway/pricing_runtime.py` 将 runtime pricing 读成 `PricingPayload`，缺省时回退到 `build_default_pricing_payload()`。
+- `gateway/plan_catalog.py` 再从 `get_runtime_pricing()` 读取 plan/trial，这条链说明 plan catalog 不是前端本地拼装。
+- GitNexus process 也给出直接链路：
+  `Lifespan -> PricingPayload`
+  `Shadow_capture -> PlanConfig`
+  `Intercept_list_jobs -> PlanConfig`
 
-下面这些流程是直接从 GitNexus 的 process 资源中读取的，不是手工猜测：
+### 5.3 审核流是显式 gate/resume，不是隐式穿透
 
-### 5.1 项目详情页到结果下载 URL
+- `src/services/review_state.py` 当前显式定义了：
+  `speaker_review`
+  `translation_config_review`
+  `translation_review`
+  `voice_review`
+  `voice_selection_review`
+  `audio_alignment_review`
+- `frontend-next/src/lib/api/reviews.ts` 对 `speaker_review / translation_review / voice_review / voice_selection_review` 进行 active stage 与 gate stage 判定。
+- GitNexus process 识别出前端审核页到请求序列化的链：
+  `TranslationConfigReviewPage -> BuildBackendUrl`
+  `TranslationReviewPanel -> SerializeBody`
+  `SpeakerReviewPage -> SerializeBody`
+  `VoiceReviewPage -> SerializeBody`
 
-`ProjectDetailPage → BuildBackendUrl`：
+### 5.4 新增了一条 Admin / Ops / Calibration 轴
 
-1. `frontend/src/routes/project-detail/ProjectDetailPage.tsx`
-2. `loadDetail`
-3. `frontend-next/src/lib/api/jobs.ts:getProjectDetail`
-4. `frontend-next/src/lib/api/jobs.ts:getProjectArtifacts`
-5. `frontend-next/src/lib/api/mappers.ts:toResultDownloadItems`
-6. `frontend-next/src/lib/api/downloads.ts:buildResultDownloadUrl`
-7. `frontend-next/src/lib/api/config.ts:buildBackendUrl`
+- `frontend-next/src/app/(app)/admin/pricing/page.tsx` 对接 `getAdminPricing()`、`publishPricing()`。
+- `frontend-next/src/app/(app)/admin/s2-monitor/page.tsx` 对接 `fetchS2Stats()`、`fetchJobDetail()`。
+- `frontend-next/src/app/(app)/admin/credits-monitor/page.tsx` 通过 `adminFetch()` 访问 `/api/admin/credits/*`。
+- `frontend-next/src/lib/api/voiceLibrary.ts` 暴露 `probeVoice()` 与 `calibrateVoiceSpeed()`。
+- `gateway/voice_speed_calibrator.py` 被抽成可复用单声线校准模块，既服务批量脚本，也服务 `POST /gateway/user-voices/{id}/calibrate-speed`。
+- `src/services/tts/voice_speed_catalog.py` 在 pipeline 端优先读取已校准 cps，缺失时才 fallback 到 probe-TTS。
 
-这说明前端项目详情页是通过统一 API/下载配置层接后端，而不是各页面各自拼接地址。
+## 6. 按任务选图
 
-### 5.2 翻译审核面板到 API 客户端
-
-`TranslationReviewPanel → SerializeBody`：
-
-1. `frontend-next/src/components/workspace/TranslationReviewPanel.tsx`
-2. `load`
-3. `frontend-next/src/lib/api/reviews.ts:getTranslationReview`
-4. `frontend-next/src/lib/api/client.ts:get`
-5. `frontend-next/src/lib/api/client.ts:request`
-6. `frontend-next/src/lib/api/client.ts:serializeBody`
-
-这说明审核流是独立前端面板 + 统一 API 客户端的模式。
-
-### 5.3 Gateway 套餐事实进入积分扣减
-
-`Shadow_capture → PlanConfig`：
-
-1. `gateway/credits_service.py:shadow_capture`
-2. `_pick_buckets_by_priority`
-3. `_get_runtime_bucket_priority`
-4. `gateway/pricing_runtime.py:get_runtime_pricing`
-5. `_load_from_file`
-6. `gateway/pricing_schema.py:build_default_pricing_payload`
-7. `gateway/pricing_schema.py:PlanConfig`
-
-这条链路很符合当前项目约束：Gateway 是定价、试用和权益事实的真源。
-
-### 5.4 对齐阶段的状态读取链
-
-`Run → StateError`：
-
-1. `src/modules/workflow/alignment_stage_runner.py:run`
-2. `_read_source_input_hash`
-3. `src/modules/workflow/stage_helpers.py:get_stage_payload_value`
-4. `src/services/state_manager.py:get_stage`
-5. `src/services/state_manager.py:load`
-6. `_normalize_state`
-7. `_normalize_status`
-8. `src/core/exceptions.py:StateError`
-
-这说明 workflow 的阶段状态不是散落在脚本里，而是有明确的状态管理和异常边界。
-
-## 6. 结论
-
-从 GitNexus 图谱看，这个仓库目前最核心的三根主轴是：
-
-1. `Workflow + Pipeline + Draft`：真正的视频翻译生产主链，终点是剪映草稿。
-2. `Gateway + Billing + Pricing`：商业化事实层，负责套餐、试用、权益与支付相关真相。
-3. `frontend-next / frontend + Api + Review`：营销、审核、工作台三类前端入口，通过统一 API 层连接 Gateway 和工作流。
-
-如果后续需要继续细化，我建议下一步用 GitNexus 再分别生成：
-
-1. “工作流内核图”：只展开 `Ingestion → Translation → TTS → Alignment → Draft`
-2. “商业化图”：只展开 `Marketing / Auth / Billing / Entitlements / Checkout / Webhook`
-3. “审核图”：只展开 `Speaker Review / Translation Review / Voice Review / ReviewState`
-
-## 7. 子图入口
-
-已经拆出的子图如下：
-
-1. `docs/graphs/GITNEXUS_WORKFLOW_CORE_GRAPH.md`
-2. `docs/graphs/GITNEXUS_COMMERCIALIZATION_GRAPH.md`
-3. `docs/graphs/GITNEXUS_REVIEW_GRAPH.md`
+- 要看主流程、阶段顺序、Jianying draft 输出：读 `GITNEXUS_WORKFLOW_CORE_GRAPH.md`
+- 要看 plan、trial、credits、payment、settings、pricing truth：读 `GITNEXUS_COMMERCIALIZATION_GRAPH.md`
+- 要看 review gate、前端审核页、暂停恢复：读 `GITNEXUS_REVIEW_GRAPH.md`
+- 要看 admin 定价、S2 监控、credits 观测、log 分析、voice calibration：读 `GITNEXUS_ADMIN_OPS_CALIBRATION_GRAPH.md`

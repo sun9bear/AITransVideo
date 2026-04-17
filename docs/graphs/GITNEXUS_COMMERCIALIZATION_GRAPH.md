@@ -6,109 +6,82 @@
 
 这张子图只看商业化相关链路，重点是：
 
-1. 营销页和账单页如何消费套餐事实。
-2. Gateway 如何作为计划、试用、定价、权益的真源。
-3. 当前支付接入为什么仍然保持“默认安全、可替换、可本地运行”。
+- 营销页、定价页、设置页、结账页
+- Gateway 侧的 pricing runtime、plan catalog、trial、credits、payment
+- 前端如何消费商业事实，而不是重定义商业事实
 
-## 2. GitNexus 聚类焦点
+不展开主流程内部实现，只保留与计费、套餐、权益相关的连接点。
 
-| 聚类 | 符号数 | 代表成员 |
-| --- | ---: | --- |
-| Gateway | 242 | `gateway/plan_catalog.py`、`pricing_schema.py`、`billing.py`、`models.py` |
-| Api | 156 | `frontend-next/src/lib/api/client.ts`、`voiceSelection.ts`、`reviews.ts` |
-| Marketing | 12 | `pricing-grid.tsx`、`trial-details.tsx`、`use-plans.ts`、`session-provider.tsx` |
-| Billing | 17 | `checkout-card.tsx`、`subscription-summary.tsx`、`get-credits.ts` |
-| Pricing | 10 | `frontend-next/src/app/(app)/admin/pricing/page.tsx` |
-
-## 3. 商业化图
+## 2. 商业化主图
 
 ```mermaid
-graph LR
-    A["Marketing<br/>PricingGrid / usePlans / TrialDetails"] --> B["Frontend API Layer<br/>frontend-next/src/lib/api"]
-    S["SessionProvider<br/>/auth/me"] --> A
-    U["In-app Billing UI<br/>CheckoutCard / CreditsSummary / SubscriptionSummary"] --> B
-    P["Admin Pricing Page<br/>PlansEditor / CreditsEditor / TopupEditor"] --> R
+graph TD
+    Marketing["Marketing / Pricing UI"] --> FrontAPI
+    Settings["Settings / Billing UI"] --> FrontAPI
+    Checkout["Checkout / Top-up UI"] --> FrontAPI
+    AdminPricing["Admin Pricing UI"] --> AdminAPI
 
-    B --> C["Gateway Truth Layer<br/>plan_catalog.py<br/>pricing_schema.py<br/>pricing_runtime.py"]
-    C --> D["Billing / Subscriptions / Entitlements<br/>billing.py / subscriptions.py / entitlements.py"]
-    D --> E["Payment Providers<br/>fake operational by default<br/>real providers env-gated or stubbed"]
-    C --> F["Credits / Job Intercept<br/>credits_service.py<br/>job_intercept.py"]
-    R["pricing_runtime.json<br/>runtime snapshot"] --> C
+    FrontAPI["Frontend API Layer<br/>plans / billing / session"] --> GatewayTruth
+    AdminAPI["Admin Pricing API"] --> GatewayTruth
 
-    F --> G["Job gating / metering / quota decisions"]
-    D --> H["用户套餐、账单、积分、权益结果"]
+    GatewayTruth["Gateway Truth Layer<br/>pricing_runtime / plan_catalog"] --> Trial["Trial Rules"]
+    GatewayTruth --> Plans["PlanConfig / PricingPayload"]
+    GatewayTruth --> Credits["credits_service / job_intercept"]
+    GatewayTruth --> Payment["payment providers / billing"]
+    GatewayTruth --> Session["auth / session / entitlement surfaces"]
+
+    Credits --> Ledger["credits buckets / ledger / metering"]
+    Payment --> Ledger
+    Session --> FrontAPI
 ```
 
-## 4. Gateway 真源证据
+## 3. 真源边界
 
-`gateway/plan_catalog.py` 的模块说明直接写明：
+### 3.1 runtime pricing 从 Gateway 启动时装载
 
-1. 这里是 plan / pricing / entitlement facts 的中心真源。
-2. `billing.py` 和 `job_intercept.py` 都从这里消费。
-3. 前端通过公开的 `/api/plans` 消费，而不是本地硬编码。
+- `gateway/main.py:lifespan` 在启动时调用 `get_runtime_pricing(force_reload=True)`。
+- `gateway/pricing_runtime.py` 使用 `PricingPayload` 承载 runtime pricing，并在缺失时回退到 `build_default_pricing_payload()`。
+- `gateway/plan_catalog.py` 从 `get_runtime_pricing()` 继续读取 `plans` 与 `trial`。
 
-这和当前项目规则完全一致：前端负责展示与消费事实，不负责重新定义事实。
+这条链说明套餐、试用规则、价格快照都应继续以 Gateway 为真源。
 
-## 5. GitNexus 证据链
+### 3.2 credits 估算和捕获依赖同一套 runtime pricing
 
-### 5.1 Gateway 启动时装载运行时定价
+- `gateway/credits_service.py` 中 `_get_runtime_debit_rates()`、`estimate_credits()`、`shadow_capture()` 都依赖 `get_runtime_pricing()`。
+- `gateway/job_intercept.py` 在拦截 job 创建和状态流转时调用 `estimate_credits()`。
+- GitNexus process 给出的直接链路是：
+  `Shadow_capture -> PlanConfig`
+  `Intercept_list_jobs -> PlanConfig`
 
-GitNexus process：`Lifespan → PricingPayload`
+因此 credits 估算也不能漂移到前端本地常量。
 
-1. `gateway/main.py:lifespan`
-2. `gateway/pricing_runtime.py:get_runtime_pricing`
-3. `_load_from_file`
-4. `gateway/pricing_schema.py:build_default_pricing_payload`
-5. `gateway/pricing_schema.py:PricingPayload`
+## 4. 前端消费方式
 
-这说明 Gateway 启动时就会把 runtime pricing 装进来，运行时事实优先于静态快照。
+### 4.1 营销与结账面只消费数值
 
-### 5.2 Job 列表拦截会读取当前套餐事实
+- `frontend-next/src/components/marketing/pricing-grid.tsx` 的注释明确要求价格事实来自 `/api/plans`。
+- `frontend-next/src/components/billing/checkout-card.tsx` 的注释明确要求 numeric facts 来自 Gateway。
+- `frontend-next/src/components/providers/session-provider.tsx` 与 settings/billing 页面承担的是会话和展示职责，不应成为定价事实源。
 
-GitNexus process：`Intercept_list_jobs → PlanConfig`
+### 4.2 admin pricing 是发布面，不是另一个真源
 
-1. `gateway/job_intercept.py:intercept_list_jobs`
-2. `gateway/credits_service.py:estimate_credits`
-3. `_get_runtime_debit_rates`
-4. `gateway/pricing_runtime.py:get_runtime_pricing`
-5. `_load_from_file`
-6. `gateway/pricing_schema.py:build_default_pricing_payload`
-7. `gateway/pricing_schema.py:PlanConfig`
+- `frontend-next/src/app/(app)/admin/pricing/page.tsx` 调用 `getAdminPricing()`、`savePricingDraft()`、`publishPricing()`。
+- GitNexus process 也识别出：
+  `AdminPricingPage -> ForbiddenError`
 
-这说明 Job 相关的额度、估算、拦截逻辑并不是独立维护一套规则，而是直接回到 runtime pricing 真源。
+这说明 admin pricing 是受权限控制的发布入口，但运行时事实仍回到 `pricing_runtime.py`。
 
-### 5.3 积分影子扣减同样回到套餐配置
+## 5. 当前商业化边界
 
-GitNexus process：`Shadow_capture → PlanConfig`
+从当前代码组织看，商业化是 staged v2 migration，而不是 big-bang rewrite：
 
-1. `gateway/credits_service.py:shadow_capture`
-2. `_pick_buckets_by_priority`
-3. `_get_runtime_bucket_priority`
-4. `gateway/pricing_runtime.py:get_runtime_pricing`
-5. `_load_from_file`
-6. `gateway/pricing_schema.py:build_default_pricing_payload`
-7. `gateway/pricing_schema.py:PlanConfig`
+- `Billing` 聚类已经扩大到 51 个符号，说明套餐、积分、支付、设置页的连接面明显增多。
+- 但逻辑主轴仍然围绕 `pricing_runtime -> plan_catalog -> credits_service -> payment`。
+- 尚未演化成“前端自持套餐定义 + 独立 entitlement engine”的结构。
 
-## 6. 前端消费事实证据
+## 6. 这张图适合回答什么问题
 
-前端营销页 `frontend-next/src/components/marketing/pricing-grid.tsx` 明确写了两条重要约束：
-
-1. 价格、分钟数、并发数都来自 `GET /api/plans`。
-2. API 不可用时显示空/错误状态，而不是本地兜底一个价格表。
-
-账单页 `frontend-next/src/components/billing/checkout-card.tsx` 也明确写了：
-
-1. 可买套餐来自 `/api/plans`。
-2. 默认支付渠道来自 `/api/billing/checkout-config`。
-3. 所有数值事实都来自 Gateway，前端不硬编码。
-
-## 7. 当前商业化边界
-
-从代码和 GitNexus 图谱一起看，当前阶段的商业化边界是：
-
-1. 套餐、试用、积分、权益真相在 Gateway。
-2. 前端以营销页、账单页、管理页的形式消费这些事实。
-3. 支付抽象已经建立，但默认仍以 `FakeProvider` 为安全主路径。
-4. 真实支付渠道保持 env-gated 或 stub，不进入默认本地主路径。
-
-这也符合仓库规则：`main.py` 和 `pytest` 必须能在干净本地环境运行。
+- 套餐、试用、价格和 credits 费率究竟谁是最终真源
+- 营销页和结账页应该读哪里，而不是自己写死什么
+- admin pricing 为什么是发布入口而不是第二套 pricing 系统
+- settings / session / billing 改造时哪些事实不能漂移出 Gateway

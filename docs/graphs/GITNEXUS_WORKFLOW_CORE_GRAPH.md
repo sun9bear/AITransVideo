@@ -4,103 +4,111 @@
 
 ## 1. 范围
 
-这张子图只看项目的生产主链，不展开营销、计费和管理后台。目标是回答两个问题：
+这张子图只看从输入到剪映草稿输出的工作流内核，重点是：
 
-1. 视频翻译主流程在代码里如何串起来。
-2. 为什么当前主产物是剪映草稿，而不是直接渲染 MP4。
+- `Ingestion`
+- `Media Understanding`
+- `Translation`
+- `SemanticBlock Chunking`
+- `TTS`
+- `Alignment`
+- `Caption Retiming`
+- `Draft Writer`
 
-## 2. GitNexus 聚类焦点
+不展开商业化、审核页 UI 和 admin 运维面，只保留和主流程强相关的桥接点。
 
-| 聚类 | 符号数 | 代表成员 |
-| --- | ---: | --- |
-| Workflow | 87 | `src/modules/workflow/project_workflow.py`、`translation_stage_runner.py`、`draft_stage_runner.py` |
-| Ingestion | 19 | `src/modules/ingestion/providers.py`、`srt_loader.py`、`normalizer.py` |
-| Media_understanding | 70 | `src/modules/media_understanding/providers.py`、`normalizer.py` |
-| Translation | 48 | `src/modules/translation/providers.py`、`sanitizer.py`、`validators.py` |
-| Pipeline | 20 | `src/pipeline/process.py` |
-| Tts | 59 | `src/services/tts/voice_match_resolver.py`、`minimax_voice_selector.py`、`volcengine_voice_catalog.py` |
-| Alignment | 30 | `src/services/alignment/aligner.py`、`src/modules/alignment/alignment_orchestrator.py` |
-| Draft | 51 | `src/modules/draft/draft_writer.py`、`caption_retiming.py`、`jianying_adapter.py` |
-
-## 3. 工作流内核图
+## 2. 工作流主图
 
 ```mermaid
-graph LR
-    A["输入源<br/>本地视频 / 本地音频 / SRT / 项目配置"] --> B["Ingestion<br/>SubtitleSourceProvider<br/>SRTSubtitleLoader / SubtitleNormalizer"]
-    B --> C["Media Understanding<br/>AttributedTranscriptNormalizer<br/>authoritative transcript path"]
-    C --> D["Translation<br/>TranslationPipeline<br/>providers / sanitizer / validators"]
-    D --> E["Chunking<br/>SemanticBlockBuilder"]
-    E --> F["TTS<br/>按 SemanticBlock 合成<br/>provider + voice resolver"]
-    F --> G["Alignment<br/>DSP first<br/>rewrite loop fallback"]
-    G --> H["Caption Retiming<br/>数学/确定性重定时"]
-    H --> I["Draft Writer<br/>DraftWriter + JianyingExportAdapter"]
-    I --> J["剪映草稿目录<br/>draft_content.json<br/>draft_meta_info.json<br/>jianying_like_export.json"]
+graph TD
+    Entry["ProjectWorkflow.run_build()"] --> Ingestion["Ingestion<br/>subtitle/provider normalization"]
+    Ingestion --> AudioPrep["Audio Preparation"]
+    AudioPrep --> Media["Media Understanding"]
+    Media --> Translation["Translation"]
+    Translation --> Chunking["SemanticBlock Chunking"]
+    Chunking --> Alignment["Alignment<br/>DSP first / rewrite fallback"]
+    Alignment --> Layering["Apply Alignment Text Layers"]
+    Layering --> Retiming["Caption Retiming<br/>deterministic math"]
+    Retiming --> Draft["Draft Writer"]
+    Draft --> Output["Jianying Draft Output<br/>draft_content.json / draft_meta_info.json / jianying_like_export.json"]
 
-    K["StateManager / stage payload"] -.阶段状态与恢复.-> D
-    K -.阶段状态与恢复.-> G
-    K -.阶段状态与恢复.-> I
+    Pipeline["src/pipeline/process.py"] --> Entry
+    TTS["TTS Providers / Voice Resolution"] --> Alignment
+    Chunking --> TTS
 ```
 
-## 4. 真实入口顺序
+## 3. 阶段顺序证据
 
-源码中的 `ProjectWorkflow.run_build()` 已经把主链顺序写死，顺序如下：
+`src/modules/workflow/project_workflow.py` 中 `run_build()` 的执行顺序是：
 
-1. `self._run_ingestion_stage()`
-2. `self._run_audio_preparation_stage()`
-3. `self._run_media_understanding_stage(subtitle_lines)`
-4. `self._run_translation_stage(source_lines)`
-5. `self._run_chunking_stage(translated_lines)`
-6. `self._run_alignment_stage(blocks)`
-7. `self._apply_alignment_text_layers(translated_lines, aligned_blocks)`
-8. `self._run_draft_stage(translated_lines, aligned_blocks)`
+1. `_run_ingestion_stage()`
+2. `_run_audio_preparation_stage()`
+3. `_run_media_understanding_stage(subtitle_lines)`
+4. `_run_translation_stage(source_lines)`
+5. `_run_chunking_stage(translated_lines)`
+6. `_run_alignment_stage(blocks)`
+7. `_apply_alignment_text_layers(translated_lines, aligned_blocks)`
+8. `_run_draft_stage(translated_lines, aligned_blocks)`
 
-这条顺序来自 `src/modules/workflow/project_workflow.py`，不是文档推断。
+这条链确认了几个架构事实：
 
-## 5. GitNexus 证据链
+- TTS 单位不是字幕行，而是 `SemanticBlock`
+- 对齐发生在 chunking 之后，不是翻译后直接出字幕
+- Draft 输出是流程终点，主交付物仍是剪映草稿，而不是直接 MP4
 
-### 5.1 Workflow 阶段状态读取链
+## 4. 模块职责拆分
 
-GitNexus process：`Run → StateError`
+### 4.1 Ingestion / Media Understanding / Translation
 
-1. `src/modules/workflow/alignment_stage_runner.py:run`
-2. `_read_source_input_hash`
-3. `src/modules/workflow/stage_helpers.py:get_stage_payload_value`
-4. `src/services/state_manager.py:get_stage`
-5. `src/services/state_manager.py:load`
-6. `_normalize_state`
-7. `_normalize_status`
-8. `src/core/exceptions.py:StateError`
+- `Ingestion` 聚类负责字幕、provider、输入归一化。
+- `Media_understanding` 聚类负责源内容理解和素材信息整理。
+- `Translation` 聚类负责翻译与译后结果清洗。
 
-这说明对齐阶段并不是黑盒脚本，而是显式依赖阶段状态和 payload 恢复机制。
+这三块共同决定后续 `SemanticBlock` 的语义切分边界。
 
-### 5.2 Draft 聚类的输出边界
+### 4.2 SemanticBlock -> TTS -> Alignment
 
-GitNexus 在 `Draft` 聚类中识别到的关键成员包括：
+- `project_workflow.py` 中 `_run_chunking_stage(translated_lines)` 直接产出 `list[SemanticBlock]`。
+- 之后 `_run_alignment_stage(blocks)` 消费的也是 `SemanticBlock`。
+- `Alignment` 聚类和 `src/services/alignment/aligner.py` 仍然代表“DSP first，rewrite second”的策略边界。
 
-1. `src/modules/draft/draft_writer.py:resolve_draft_dir`
-2. `src/modules/draft/draft_writer.py:load_existing_result`
-3. `src/modules/draft/draft_writer.py:build_project`
-4. `src/modules/draft/caption_retiming.py:retime_block`
-5. `src/modules/draft/jianying_adapter.py:adapt`
-6. `src/modules/draft/export_validator.py:_validate_track_segments`
+### 4.3 Caption Retiming -> Draft Writer
 
-这条链清楚说明：末端不是“直接导出 MP4”，而是“重定时字幕 + 构建草稿数据 + 适配剪映导出结构 + 校验”。
+- `src/modules/draft/caption_retiming.py` 的 `CaptionRetimer` 文档字符串明确写的是：
+  “Retimes captions by linearly scaling original intra-block timing.”
+- `CaptionRetimingConfig` 和 `RetimedCaption` 说明字幕时间是计算得出，不是 prompt 生成。
+- `src/modules/draft/draft_writer.py` 负责写出：
+  `draft_content.json`
+  `draft_meta_info.json`
+  `jianying_like_export.json`
 
-## 6. 架构不变量
+## 5. 关键链路
 
-这条主链在当前仓库里有几个非常稳定的不变量：
+### 5.1 Pipeline 阶段衔接
 
-1. TTS 单位是 `SemanticBlock`，不是字幕单行。
-2. 对齐策略是 DSP 优先，rewrite loop 只是 fallback。
-3. 字幕重定时是数学/确定性处理，不是 LLM 驱动。
-4. 主产物是剪映草稿目录与导出结构，不是直接渲染 MP4。
+GitNexus 的 `Pipeline` 聚类当前集中在 `src/pipeline/process.py` 附近，包含：
 
-## 7. 对代码的阅读建议
+- `_load_probe_cache`
+- `_run_probe_translation`
+- `_calibrate_tts_duration`
+- `_build_process_output_captions`
+- `_build_process_workflow_build_result`
 
-如果要沿这条线继续深挖，优先阅读顺序建议是：
+这说明 `process.py` 主要承担“阶段拼装和 payload 衔接”，而不是替代 `project_workflow.py` 本身。
 
-1. `src/modules/workflow/project_workflow.py`
-2. `src/modules/translation/providers.py`
-3. `src/services/alignment/aligner.py`
-4. `src/modules/draft/caption_retiming.py`
-5. `src/modules/draft/draft_writer.py`
+### 5.2 对齐后再生成字幕层
+
+`project_workflow.py` 在 `_run_alignment_stage(blocks)` 之后还有 `_apply_alignment_text_layers(...)`，随后才进入 `_run_draft_stage(...)`。
+
+这意味着：
+
+- 先得到块级对齐结果
+- 再把文本层和字幕层挂回去
+- 最后才进入草稿写出
+
+## 6. 这张图适合回答什么问题
+
+- 为什么 TTS 单位是 `SemanticBlock` 而不是 subtitle line
+- 为什么对齐要放在 chunking 之后
+- 为什么 subtitle retiming 仍然应该保持确定性逻辑
+- 为什么主输出是 Jianying draft，而不是直接 rendered MP4

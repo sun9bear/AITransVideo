@@ -35,8 +35,7 @@
 
     # Auth API endpoints → Gateway
     @auth_api {
-        path /auth/login /auth/logout /auth/register /auth/me
-        path /auth/phone/* /auth/captcha/*
+        path /auth/login /auth/logout /auth/register /auth/me /auth/phone/* /auth/captcha/*
     }
     handle @auth_api {
         reverse_proxy 127.0.0.1:8880
