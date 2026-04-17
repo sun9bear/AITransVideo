@@ -232,6 +232,11 @@ class DubbingSegment:
     # the runtime auto-match path (tts_generator.py per-segment matching);
     # 0.0 disables the speed dimension.
     target_chars_per_second: float = 0.0
+    # T7: when non-None, the primary TTS provider failed and this fallback
+    # provider produced the audio instead (e.g. "cosyvoice" when MiniMax
+    # exhausted). Mirrors TTSResult.fallback_used_provider and ends up in
+    # the segment manifest so users can audit voice substitutions.
+    fallback_used_provider: str | None = None
 
 
 @dataclass(slots=True)

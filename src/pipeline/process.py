@@ -3917,6 +3917,10 @@ class ProcessPipeline:
                             "selected_voice": segment.selected_voice,
                             "match_confidence": segment.match_confidence,
                             "tts_provider": segment.tts_provider,
+                            # T7: fallback provider when primary failed (None if
+                            # primary succeeded). Lets users audit voice
+                            # substitutions in the final manifest.
+                            "fallback_used_provider": segment.fallback_used_provider,
                         }
                         for segment in translation_result.segments
                     ],

@@ -3,12 +3,15 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 import json
+import logging
 import os
 from pathlib import Path
 import threading
 import time
 from typing import Any
 from urllib import error, request
+
+logger = logging.getLogger(__name__)
 
 from services.gemini.translator import DubbingSegment
 from utils.audio_utils import measure_duration_ms as _ffprobe_duration_ms
@@ -144,6 +147,11 @@ class TTSResult:
     selected_voice: str = ""
     match_confidence: str = ""
     billed_chars: int = 0  # V3-5: actual chars submitted to TTS provider
+    # T7: populated when primary provider failed and fallback (e.g. MiniMax →
+    # CosyVoice) produced the audio. None means primary succeeded; the string
+    # is the fallback provider name. Surfaces in segment manifest so users can
+    # audit which segments used a different voice than they selected.
+    fallback_used_provider: str | None = None
 
 
 class TTSGenerator:
@@ -380,6 +388,9 @@ class TTSGenerator:
             segment.selected_voice = result.selected_voice
         if result.match_confidence:
             segment.match_confidence = result.match_confidence
+        # T7: mirror fallback flag onto the segment so process.py's manifest
+        # dict picks it up alongside selected_voice / match_confidence.
+        segment.fallback_used_provider = result.fallback_used_provider
         if segment.target_duration_ms > 0:
             segment.alignment_ratio = result.duration_ms / segment.target_duration_ms
         else:
@@ -801,13 +812,32 @@ class TTSGenerator:
         voice_clone_enabled = bool(getattr(segment, "voice_id", None))
         fallback = get_fallback_provider(provider, voice_clone_enabled)
         if fallback:
+            # T7: user-visible warning AND structured log for traceability.
+            # The primary provider here is the one the user selected (e.g.
+            # MiniMax); silently switching to CosyVoice would alter the audio
+            # character without the user knowing. We can't easily change the
+            # fallback behavior itself this batch (would require surfacing the
+            # decision to the review UI), but we guarantee the substitution is
+            # discoverable: (a) structured log line for operators, (b) the
+            # returned TTSResult carries fallback_used_provider so downstream
+            # persistence (process.py segment manifest) records it.
+            logger.warning(
+                "tts_fallback_triggered segment=%s primary=%s fallback=%s reason=%s",
+                segment.segment_id, provider, fallback, last_error,
+            )
             print(
                 f"[S4] TTS 段 {segment.segment_id} 主 provider ({provider}) 耗尽，"
                 f"尝试 fallback → {fallback}"
             )
             try:
-                return self._generate_one(segment, output_dir, provider=fallback)
+                result = self._generate_one(segment, output_dir, provider=fallback)
+                result.fallback_used_provider = fallback
+                return result
             except TTSGenerationError as fb_exc:
+                logger.error(
+                    "tts_fallback_failed segment=%s fallback=%s error=%s",
+                    segment.segment_id, fallback, fb_exc,
+                )
                 print(
                     f"[S4] TTS 段 {segment.segment_id} fallback ({fallback}) 也失败: {fb_exc}"
                 )
