@@ -136,12 +136,24 @@ async def get_user_buckets(
     user_id,
     *,
     include_expired: bool = False,
+    for_update: bool = False,
 ) -> list[CreditsBucket]:
-    """Return all active buckets for a user, ordered by created_at."""
+    """Return all active buckets for a user, ordered by created_at.
+
+    for_update=True: acquire row-level locks via SELECT FOR UPDATE so concurrent
+    writers serialize at the DB layer. Callers that mutate bucket.reserved or
+    bucket.remaining (shadow_reserve, shadow_capture's additional-debit branch)
+    MUST pass for_update=True; otherwise two concurrent jobs can read the same
+    bucket state and both commit — losing one write.
+
+    Caller must be inside a transaction. No-op on SQLite (no row locking).
+    """
     now = datetime.now(timezone.utc)
     stmt = select(CreditsBucket).where(
         CreditsBucket.user_id == user_id,
     ).order_by(CreditsBucket.created_at)
+    if for_update:
+        stmt = stmt.with_for_update()
 
     result = await db.execute(stmt)
     buckets = list(result.scalars().all())
@@ -246,7 +258,10 @@ async def shadow_reserve(
         return []
 
     try:
-        buckets = await get_user_buckets(db, user_id)
+        # T1: acquire row locks on every bucket — concurrent reserves for the
+        # same user otherwise double-claim (two txns both read available=N,
+        # both commit bucket.reserved+=take, second write overwrites the first).
+        buckets = await get_user_buckets(db, user_id, for_update=True)
         ordered = _pick_buckets_by_priority(buckets, service_mode)
 
         remaining_to_reserve = estimated_credits
@@ -359,7 +374,9 @@ async def shadow_capture(
             # --- Phase 2: settle EVERY reserve entry (no dangling) ---
             for idx, re in enumerate(reserve_entries):
                 bucket_result = await db.execute(
-                    select(CreditsBucket).where(CreditsBucket.id == re.bucket_id)
+                    select(CreditsBucket)
+                    .where(CreditsBucket.id == re.bucket_id)
+                    .with_for_update()
                 )
                 bucket = bucket_result.scalar_one_or_none()
                 if bucket is None:
@@ -403,7 +420,9 @@ async def shadow_capture(
             # actual > reserved — capture all reserved, then debit additional
             for re in reserve_entries:
                 bucket_result = await db.execute(
-                    select(CreditsBucket).where(CreditsBucket.id == re.bucket_id)
+                    select(CreditsBucket)
+                    .where(CreditsBucket.id == re.bucket_id)
+                    .with_for_update()
                 )
                 bucket = bucket_result.scalar_one_or_none()
                 if bucket is None:
@@ -428,7 +447,7 @@ async def shadow_capture(
             # Additional debit for the excess
             additional = actual_credits - total_reserved
             if additional > 0:
-                buckets = await get_user_buckets(db, user_id)
+                buckets = await get_user_buckets(db, user_id, for_update=True)
                 ordered = _pick_buckets_by_priority(buckets, service_mode)
                 for bucket in ordered:
                     if additional <= 0:
@@ -486,7 +505,9 @@ async def shadow_release(
         entries: list[CreditsLedger] = []
         for re in reserve_entries:
             bucket_result = await db.execute(
-                select(CreditsBucket).where(CreditsBucket.id == re.bucket_id)
+                select(CreditsBucket)
+                .where(CreditsBucket.id == re.bucket_id)
+                .with_for_update()
             )
             bucket = bucket_result.scalar_one_or_none()
             if bucket is None:
@@ -532,10 +553,12 @@ async def shadow_rollback(
     """
     try:
         result = await db.execute(
-            select(CreditsBucket).where(
+            select(CreditsBucket)
+            .where(
                 CreditsBucket.id == bucket_id,
                 CreditsBucket.user_id == user_id,
             )
+            .with_for_update()
         )
         bucket = result.scalar_one_or_none()
         if bucket is None:
