@@ -55,13 +55,28 @@ class GatewaySettings(BaseSettings):
     model_config = {"env_prefix": "AVT_"}
 
 
-_raw = GatewaySettings()
-# Build database_url with URL-encoded password if not explicitly set
-if not _raw.database_url and _raw.pg_password:
-    _encoded_pw = quote_plus(_raw.pg_password)
-    _raw.database_url = (
-        f"postgresql+asyncpg://avt:{_encoded_pw}@127.0.0.1:5432/aivideotrans"
+def resolve_database_url(raw: GatewaySettings) -> str:
+    """Resolve final database URL or raise if no credentials provided.
+
+    Pure function — does NOT mutate raw or trigger at import time.
+    Caller must invoke this explicitly (typically at app startup).
+
+    Precedence: explicit raw.database_url → pg_password → refuse fallback.
+    """
+    if raw.database_url:
+        return raw.database_url
+    if raw.pg_password:
+        encoded = quote_plus(raw.pg_password)
+        return f"postgresql+asyncpg://avt:{encoded}@127.0.0.1:5432/aivideotrans"
+    raise RuntimeError(
+        "Gateway startup refused: neither AVT_PG_PASSWORD nor AVT_DATABASE_URL is set. "
+        "Refusing to fall back to default 'avt:avt' credentials. "
+        "Set AVT_PG_PASSWORD (preferred) or AVT_DATABASE_URL explicitly."
     )
-elif not _raw.database_url:
-    _raw.database_url = "postgresql+asyncpg://avt:avt@localhost:5432/aivideotrans"
-settings = _raw
+
+
+settings = GatewaySettings()
+# NOTE: database_url is NOT populated here. gateway/main.py is responsible
+# for calling resolve_database_url(settings) explicitly at startup. Import of
+# this module must not raise on missing creds, so tests can import config
+# in a clean env without side effects.

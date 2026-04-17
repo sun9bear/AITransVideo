@@ -39,7 +39,7 @@ from auth import (
 import logging
 
 from config import settings
-from database import engine
+from database import engine, init_db
 from models import Base
 
 logger = logging.getLogger(__name__)
@@ -58,6 +58,12 @@ from voice_selection_api import get_voice_selection_pricing, voice_clone_for_sel
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Startup-time validations and init:
+    # T3 — DB credentials are resolved and engine is built here. Raises if
+    # neither AVT_PG_PASSWORD nor AVT_DATABASE_URL is set (no more hardcoded
+    # avt:avt fallback). T4/T6 will hook additional startup validations here.
+    init_db()
+
     # Dev convenience: auto-create tables. In production use Alembic migrations.
     if not settings.auth_required:
         async with engine.begin() as conn:

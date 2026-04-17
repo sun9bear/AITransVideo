@@ -22,7 +22,13 @@ from unittest.mock import MagicMock
 _fake_database.get_db = MagicMock()
 _fake_database.engine = MagicMock()
 _fake_database.async_session = MagicMock()
+_fake_database.init_db = MagicMock()
 sys.modules.setdefault("database", _fake_database)
+# Another test file may have already stubbed 'database' via setdefault with
+# an older attribute set (pre-T3). Force-patch init_db onto whatever stub
+# lives in sys.modules so `from database import init_db` in main.py succeeds.
+if not hasattr(sys.modules["database"], "init_db"):
+    sys.modules["database"].init_db = MagicMock()
 
 # Load gateway/main.py
 _gw_main_path = Path(__file__).resolve().parent.parent / "gateway" / "main.py"
