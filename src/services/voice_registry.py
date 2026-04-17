@@ -6,6 +6,7 @@ import tempfile
 from typing import Any
 
 from core.exceptions import StateError
+from services._file_lock import file_lock
 from services.state_manager import utc_now_iso
 from services.tts.cosyvoice_voice_catalog import build_cosyvoice_v3_flash_builtin_voice_option
 
@@ -268,6 +269,46 @@ class VoiceRegistry:
         set_default: bool = False,
     ) -> SpeakerVoiceProfile:
         normalized_speaker_id = _normalize_required_text(speaker_id, field_name="speaker_id")
+        # T3.2: wrap load → modify → save so concurrent writers cannot lose
+        # each other's updates. save() already uses atomic os.replace, but
+        # that only guards the final write; without this lock, two threads
+        # can both read-same-state then race on overwriting.
+        with file_lock(self.registry_path):
+            return self._register_voice_locked(
+                normalized_speaker_id,
+                speaker_name=speaker_name,
+                voice_id=voice_id,
+                voice_type=voice_type,
+                provider=provider,
+                tts_provider=tts_provider,
+                platform=platform,
+                label=label,
+                created_at=created_at,
+                source_audio_path=source_audio_path,
+                notes=notes,
+                set_default=set_default,
+            )
+
+    def _register_voice_locked(
+        self,
+        normalized_speaker_id: str,
+        *,
+        speaker_name: str | None,
+        voice_id: str,
+        voice_type: str,
+        provider: str,
+        tts_provider: str | None,
+        platform: str | None,
+        label: str,
+        created_at: str | None,
+        source_audio_path: str | None,
+        notes: str | None,
+        set_default: bool,
+    ) -> SpeakerVoiceProfile:
+        """Inner register-voice implementation that assumes caller already
+        holds ``file_lock(self.registry_path)``. Exists so ``set_default_voice``
+        can delegate without double-acquire (file_lock is reentrant anyway,
+        but keeping the critical section shallow is clearer)."""
         registry_data = self.load()
         speakers = registry_data["speakers"]
         speaker_payload = speakers.setdefault(
@@ -338,58 +379,64 @@ class VoiceRegistry:
     ) -> SpeakerVoiceProfile:
         normalized_speaker_id = _normalize_required_text(speaker_id, field_name="speaker_id")
         normalized_voice_id = _normalize_required_text(voice_id, field_name="voice_id")
-        registry_data = self.load()
-        speaker_payload = registry_data["speakers"].get(normalized_speaker_id)
-        if not isinstance(speaker_payload, dict):
-            raise ValueError(f"Speaker not found for speaker_id={normalized_speaker_id}")
+        # T3.2: serialize load → modify → save against concurrent writers
+        with file_lock(self.registry_path):
+            registry_data = self.load()
+            speaker_payload = registry_data["speakers"].get(normalized_speaker_id)
+            if not isinstance(speaker_payload, dict):
+                raise ValueError(f"Speaker not found for speaker_id={normalized_speaker_id}")
 
-        voice_payload = self._find_voice_payload(speaker_payload, normalized_voice_id)
-        if voice_payload is None:
-            raise ValueError(
-                f"Voice not found for speaker_id={normalized_speaker_id} voice_id={normalized_voice_id}"
-            )
+            voice_payload = self._find_voice_payload(speaker_payload, normalized_voice_id)
+            if voice_payload is None:
+                raise ValueError(
+                    f"Voice not found for speaker_id={normalized_speaker_id} voice_id={normalized_voice_id}"
+                )
 
-        voice_payload["verification_status"] = "verified" if success else "failed"
-        voice_payload["last_verified_at"] = _normalize_optional_text(verified_at) or utc_now_iso()
-        voice_payload["last_verification_success"] = success
-        voice_payload["last_verification_audio_path"] = _normalize_optional_text(audio_path)
-        voice_payload["last_verification_error"] = None if success else _normalize_optional_text(error_message)
-        self.save(registry_data)
-        return self.get_speaker_profile(normalized_speaker_id) or SpeakerVoiceProfile(speaker_id=normalized_speaker_id)
+            voice_payload["verification_status"] = "verified" if success else "failed"
+            voice_payload["last_verified_at"] = _normalize_optional_text(verified_at) or utc_now_iso()
+            voice_payload["last_verification_success"] = success
+            voice_payload["last_verification_audio_path"] = _normalize_optional_text(audio_path)
+            voice_payload["last_verification_error"] = None if success else _normalize_optional_text(error_message)
+            self.save(registry_data)
+            return self.get_speaker_profile(normalized_speaker_id) or SpeakerVoiceProfile(speaker_id=normalized_speaker_id)
 
     def set_default_voice(self, speaker_id: str, voice_id: str) -> SpeakerVoiceProfile:
         normalized_speaker_id = _normalize_required_text(speaker_id, field_name="speaker_id")
         normalized_voice_id = _normalize_required_text(voice_id, field_name="voice_id")
-        registry_data = self.load()
-        speaker_payload = registry_data["speakers"].get(normalized_speaker_id)
-        if not isinstance(speaker_payload, dict):
-            raise ValueError(f"Speaker not found for speaker_id={normalized_speaker_id}")
+        # T3.2: serialize the whole operation, including the delegate to
+        # register_voice on the "voice not found, fall back to catalog" path.
+        # file_lock is reentrant so register_voice's own acquire is a no-op.
+        with file_lock(self.registry_path):
+            registry_data = self.load()
+            speaker_payload = registry_data["speakers"].get(normalized_speaker_id)
+            if not isinstance(speaker_payload, dict):
+                raise ValueError(f"Speaker not found for speaker_id={normalized_speaker_id}")
 
-        voice_payload = self._find_voice_payload(speaker_payload, normalized_voice_id)
-        if voice_payload is None:
-            catalog_voice = build_cosyvoice_v3_flash_builtin_voice_option(normalized_voice_id)
-            if catalog_voice is None:
-                raise ValueError(
-                    f"Voice not found for speaker_id={normalized_speaker_id} voice_id={normalized_voice_id}"
+            voice_payload = self._find_voice_payload(speaker_payload, normalized_voice_id)
+            if voice_payload is None:
+                catalog_voice = build_cosyvoice_v3_flash_builtin_voice_option(normalized_voice_id)
+                if catalog_voice is None:
+                    raise ValueError(
+                        f"Voice not found for speaker_id={normalized_speaker_id} voice_id={normalized_voice_id}"
+                    )
+                return self.register_voice(
+                    normalized_speaker_id,
+                    speaker_name=_read_optional_string(speaker_payload, "speaker_name"),
+                    voice_id=str(catalog_voice["voice_id"]),
+                    voice_type="builtin",
+                    provider=str(catalog_voice["provider"]),
+                    tts_provider=_read_optional_string(catalog_voice, "tts_provider"),
+                    platform=_read_optional_string(catalog_voice, "platform"),
+                    label=str(catalog_voice["label"]),
+                    created_at=_read_optional_string(catalog_voice, "created_at"),
+                    notes=_read_optional_string(catalog_voice, "notes"),
+                    set_default=True,
                 )
-            return self.register_voice(
-                normalized_speaker_id,
-                speaker_name=_read_optional_string(speaker_payload, "speaker_name"),
-                voice_id=str(catalog_voice["voice_id"]),
-                voice_type="builtin",
-                provider=str(catalog_voice["provider"]),
-                tts_provider=_read_optional_string(catalog_voice, "tts_provider"),
-                platform=_read_optional_string(catalog_voice, "platform"),
-                label=str(catalog_voice["label"]),
-                created_at=_read_optional_string(catalog_voice, "created_at"),
-                notes=_read_optional_string(catalog_voice, "notes"),
-                set_default=True,
-            )
 
-        speaker_payload["default_voice_id"] = normalized_voice_id
-        speaker_payload["default_voice_type"] = str(voice_payload.get("voice_type", "")).strip()
-        self.save(registry_data)
-        return self.get_speaker_profile(normalized_speaker_id) or SpeakerVoiceProfile(speaker_id=normalized_speaker_id)
+            speaker_payload["default_voice_id"] = normalized_voice_id
+            speaker_payload["default_voice_type"] = str(voice_payload.get("voice_type", "")).strip()
+            self.save(registry_data)
+            return self.get_speaker_profile(normalized_speaker_id) or SpeakerVoiceProfile(speaker_id=normalized_speaker_id)
 
     def set_project_default_builtin_voice(
         self,
@@ -411,9 +458,11 @@ class VoiceRegistry:
             created_at=created_at or utc_now_iso(),
             notes=notes,
         )
-        registry_data = self.load()
-        registry_data["project_defaults"]["default_builtin_voice"] = project_default_voice.to_dict()
-        self.save(registry_data)
+        # T3.2: serialize load → modify → save against concurrent writers
+        with file_lock(self.registry_path):
+            registry_data = self.load()
+            registry_data["project_defaults"]["default_builtin_voice"] = project_default_voice.to_dict()
+            self.save(registry_data)
         return project_default_voice
 
     def get_project_default_builtin_voice(self) -> ProjectDefaultVoice | None:
