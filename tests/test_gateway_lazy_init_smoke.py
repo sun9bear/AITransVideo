@@ -87,3 +87,40 @@ def test_resolve_database_url_works_with_pg_password_only(monkeypatch):
     assert "somesecret" in url
     # sanity: the URL is non-empty (so Alembic / init_db won't fail)
     assert len(url) > len("postgresql+asyncpg://avt:@:5432/aivideotrans")
+
+
+def test_compose_defaults_gateway_env_to_production():
+    """Regression guard for Codex P3 deployment gap:
+
+    The T6 `validate_production_safety` startup check only fires when
+    `AVT_ENV == "production"`. If the gateway service in docker-compose.yml
+    doesn't set AVT_ENV at all, Pydantic falls back to the class default
+    ("dev") and the guard is silently bypassed — defeating the whole
+    point of T6.
+
+    The repo-managed compose manifest IS the production deploy source of
+    truth (via Deploy-Via-154.cmd). So it must pin AVT_ENV to production
+    by default. Local dev overrides via their own .env.
+    """
+    compose = Path(__file__).resolve().parent.parent / "docker-compose.yml"
+    src = compose.read_text(encoding="utf-8")
+
+    # Must set AVT_ENV with a production-default fallback.
+    # Accept either `${AVT_ENV:-production}` (preferred, dev-friendly) or a
+    # hard-coded `"production"` string. Reject the absence of AVT_ENV entirely.
+    assert "AVT_ENV:" in src, (
+        "docker-compose.yml gateway service must set AVT_ENV. Without it, "
+        "GatewaySettings.env defaults to 'dev' and T6's production-safety "
+        "guard is silently disabled."
+    )
+    # Specifically: find the gateway service block and confirm AVT_ENV there
+    # resolves to 'production' by default (either hard-coded or via :-default).
+    assert (
+        "AVT_ENV: \"${AVT_ENV:-production}\"" in src
+        or "AVT_ENV: \"production\"" in src
+        or "AVT_ENV=production" in src  # allow shell-form if used elsewhere
+    ), (
+        "AVT_ENV in docker-compose.yml must default to 'production' "
+        "(e.g. ${AVT_ENV:-production}) so forgetting to set it in the "
+        "external .env doesn't silently disable the T6 safety guard."
+    )

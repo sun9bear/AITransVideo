@@ -151,6 +151,13 @@ services:
       AVT_GATEWAY_HOST: "0.0.0.0"
       AVT_GATEWAY_PORT: "8880"
       AVT_AUTH_REQUIRED: "true"
+      # T6 — default to production so the validate_production_safety startup
+      # guard fires by default. Local dev sets `AVT_ENV=dev` in their own
+      # .env to override (safe: the guard only refuses auth-disabled prod).
+      # This manifest is the production deploy source of truth; relying on
+      # operators to remember to set AVT_ENV in the external .env would
+      # silently disable the guard.
+      AVT_ENV: "${AVT_ENV:-production}"
       AVT_PG_PASSWORD: "${PG_PASSWORD:?PG_PASSWORD 必须在 .env 中设置}"
       AVT_DATABASE_URL: ""
       # T4 — shared-secret for /api/internal/* (app↔gateway loopback).
