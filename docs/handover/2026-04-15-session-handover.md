@@ -479,6 +479,8 @@ docs: 2026-04-15 会话交接 — Phase 2 主体 + CodeX 修复完成
    ↑ 这是旧 frontend 目录残留（已弃用 web_ui:8876），不该 commit
 ```
 
+> **[2026-04-17 后记]** `frontend/` 整个目录已在本日的清理方案 Phase 1 T1.1 里删除。上面这条建议已成历史记录；未来不会再碰到这种情况。Next.js 前端在 `frontend-next/`。
+
 ### Push & PR
 - 这是单人项目 + 直接 main 分支（CLAUDE.md 硬约束），**不开 PR，直接 push**
 - push 到 `origin/main` 即可

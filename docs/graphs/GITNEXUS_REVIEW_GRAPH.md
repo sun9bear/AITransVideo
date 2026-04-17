@@ -65,12 +65,14 @@ graph TD
 - 同文件对 `speaker_review / translation_review / voice_review / voice_selection_review` 做 active stage 与 gate stage 判定。
 - `frontend-next/src/components/workspace/TranslationReviewPanel.tsx` 调用 `getTranslationReview(jobId)` 并提交 `stage: 'translation_review'`。
 
-### 4.2 兼容旧 review 页面
+### 4.2 审核 UI 路径（2026-04-17 更新：旧 Vite 前端已删，仅保留 Next.js）
 
-- `frontend/src/routes/review/SpeakerReviewPage.tsx` 调用 `getSpeakerReview(jobId)`。
-- `frontend/src/routes/review/VoiceReviewPage.tsx` 调用 `getVoiceReview(jobId)`。
+- **Speaker review**: 已整合进 `frontend-next/` 的统一任务工作区组件，无独立页面。
+  （原 `frontend/src/routes/review/SpeakerReviewPage.tsx` 随 `frontend/` 整体于 2026-04-17 删除。）
+- **Voice review**: `frontend-next/src/components/workspace/VoiceReviewPanel.tsx` 调用 `getVoiceReview(jobId)`。
+  （原 `frontend/src/routes/review/VoiceReviewPage.tsx` 同上已删除。）
 
-这说明审核流当前处于迁移阶段：新旧前端表面并存，但 review state 仍由统一 stage 常量驱动。
+审核 review state 仍由统一 stage 常量驱动，前端只剩 Next.js 一份实现。
 
 ## 5. GitNexus 识别出的直接证据链
 
