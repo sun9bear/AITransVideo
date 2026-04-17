@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import logging
 import os
 import mimetypes
 from http import HTTPStatus
@@ -9,6 +10,8 @@ import json
 from pathlib import Path
 from urllib.parse import quote, urlparse
 import zipfile
+
+logger = logging.getLogger(__name__)
 
 from services.jobs.service import (
     JobConflictError,
@@ -271,7 +274,7 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
             except ValueError as exc:
                 self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             except Exception as exc:  # pragma: no cover
-                self._write_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
+                self._send_sanitized_error(exc)
 
         def do_POST(self) -> None:  # noqa: N802
             parsed_path = urlparse(self.path)
@@ -600,7 +603,7 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
             except ValueError as exc:
                 self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             except Exception as exc:  # pragma: no cover
-                self._write_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
+                self._send_sanitized_error(exc)
 
         def do_DELETE(self) -> None:  # noqa: N802
             parsed_path = urlparse(self.path)
@@ -615,7 +618,7 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
                     return
                 self._write_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
             except Exception as exc:  # pragma: no cover
-                self._write_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
+                self._send_sanitized_error(exc)
 
         def log_message(self, format: str, *args: object) -> None:  # noqa: A003
             del format, args
@@ -639,6 +642,26 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
             self.send_header("Content-Length", str(len(serialized_payload)))
             self.end_headers()
             self.wfile.write(serialized_payload)
+
+        def _send_sanitized_error(self, exc: Exception) -> None:
+            """Generic 500 response that never leaks internals.
+
+            Log full exception context (with stack trace) to the server log,
+            but return only a fixed user-facing message. Prevents str(exc)
+            from leaking DB DSNs, file paths, stack frames, or other
+            sensitive internals to the client.
+
+            Centralized so every `except Exception` fallback stays consistent
+            — one place to edit if we ever want to change error shape.
+            """
+            logger.exception(
+                "Unhandled exception in Job API handler path=%s method=%s",
+                self.path, self.command,
+            )
+            self._write_json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"error": "internal_error", "message": "服务器内部错误，请重试或联系管理员"},
+            )
 
         def _write_binary(
             self,
