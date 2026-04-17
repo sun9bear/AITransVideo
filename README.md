@@ -64,7 +64,7 @@ python main.py --help
 | Job API | 8877 | 任务 CRUD、状态、日志、产物 |
 | Next.js | 3000 | 前端页面 |
 
-> 注：Web UI (8876) 已在 Phase 4 废弃，所有功能已迁移到上述服务。
+> 注：Web UI (8876) 已在 Phase 4 废弃，`src/services/web_ui/server.py` 和 `handler.py` 在 2026-04-17 legacy migration cleanup 中彻底删除（见 `docs/plans/2026-04-17-legacy-migration-cleanup.md`）。所有功能已迁移到上述服务。
 
 ### 启动 control panel
 

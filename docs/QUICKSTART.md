@@ -1,6 +1,6 @@
 # AIVideoTrans 快速入门
 
-> 本文档是新协作者的第一入口。最后更新：2026-04-03。
+> 本文档是新协作者的第一入口。最后更新：2026-04-17（legacy migration cleanup 收尾）。
 
 ## 项目定位
 
@@ -14,7 +14,7 @@
 | Job API | 8877 | 任务 CRUD、状态、日志、产物、review |
 | Next.js | 3000 | 前端页面 |
 
-> Web UI (8876) 已在 Phase 4 废弃。所有功能已迁移到 Job API 和 Gateway。
+> Web UI (8876) 已在 Phase 4 废弃；`src/services/web_ui/server.py` 和 `handler.py` 已在 2026-04-17 legacy cleanup 彻底删除。所有 HTTP endpoint 功能已迁移到 Job API 和 Gateway。`services.web_ui` 包剩余 library 模块（`project_resolver` / `voice_library` / `translation_review` / `snapshot` / `job_managers` / `config_helpers` 等）仍被 Job API 引用。
 
 Pipeline 运行时架构：
 
@@ -28,7 +28,7 @@ Pipeline 运行时架构：
 
 `frontend-next/` 是当前唯一活跃的前端目录（Next.js 16 + React 19 + TypeScript + Tailwind v4 + shadcn/ui）。
 
-旧的 `frontend/` 目录如果存在，不是当前主线。
+旧的 `frontend/` 目录（Vite）已在 2026-04-17 legacy cleanup 彻底删除，现在只会看到 `frontend-next/`。
 
 ## 安装与运行
 

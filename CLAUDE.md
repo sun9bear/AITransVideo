@@ -83,7 +83,7 @@ Gateway 原生端点（不经过 Job API 代理）：
 - `GET/POST/DELETE /gateway/user-voices` — 个人音色库 CRUD
 - `POST /internal/user-voices/expire` — 内部：标记音色过期
 
-> **Note:** Web UI API (port 8876) 已在 Phase 4 下线。所有功能已迁移到 Job API 和 Gateway。
+> **Note:** Web UI API (port 8876) 已在 Phase 4 下线。`src/services/web_ui/server.py` 和 `handler.py` 在 2026-04-17 legacy cleanup 中彻底删除（`services.web_ui` 包只剩 `project_resolver` / `voice_library` / `translation_review` / `snapshot` / `job_managers` / `config_helpers` 等 library 模块，被 Job API 继续引用）。所有 HTTP endpoint 功能已迁移到 Job API 和 Gateway。
 
 ### Frontend: `frontend-next/src/`
 
@@ -182,6 +182,33 @@ docker-compose.yml 已配置 `src/`、`main.py`、`scripts/` 的 bind mount。
 **⚠️ 项目接近完成时，必须切回镜像不可变模式：**
 删除 docker-compose.yml 中标注"开发期代码热更新 bind mount"的 3 个 volume 条目，
 改为 `docker-compose build app` + `docker-compose up -d app`。
+
+## 2026-04-17 Legacy Migration Cleanup 遗产
+
+见 `docs/plans/2026-04-17-legacy-migration-cleanup.md`（方案）+ `tests/test_legacy_cleanup_guards.py`（契约级守卫）。4 Phase 12 commits 一次性收尾单机→Web 迁移，新增的运行时模块和约定：
+
+**新模块 / helper：**
+- `gateway/internal_auth.py` — 唯一 `internal_headers()` helper，gateway → Job API 内部调用统一用它注入 `X-Internal-Key`。admin 路由、voice-catalog / labeling 路径、CosyVoice verify 全走这个。**不要** 在各 gateway 文件里再写本地 `_internal_headers()` 副本。
+- `src/services/_file_lock.py` — 跨平台 reentrant file lock (threading.RLock + fcntl/msvcrt)。用于保护 JSON registry 的 load→modify→save 序列（`VoiceRegistry` 已经用了；未来其他 JSON state file 也应复用）。
+
+**env var 语义分工**（docker-compose.yml 已设；代码都按 `os.environ.get(NAME, "<prod default>")` 读）：
+- `AIVIDEOTRANS_CONFIG_DIR` → `/opt/aivideotrans/config`（admin_settings.json / pricing_runtime.json / .env 等都在这里）
+- `AIVIDEOTRANS_JOBS_DIR` → `/opt/aivideotrans/app/jobs`（Job API 的 JSON store）
+- `AIVIDEOTRANS_PROJECTS_DIR` → `/opt/aivideotrans/app/projects`
+- `AIVIDEOTRANS_RUNTIME_LOGS_DIR` → `/opt/aivideotrans/data/runtime_logs`
+- Windows 本地开发可在 `.env` 里覆盖指向 `D:/...` 下的目录，见 `.env.example`。
+
+**配置约定变更：**
+- Gateway 业务模块**不得**硬编码 `http://localhost:8877` 或 `http://127.0.0.1:8877`，一律用 `from config import settings` + `settings.job_api_upstream`。`config.py:12` 的 default 是唯一合法落点。回归守卫：`tests/test_legacy_cleanup_guards.py::test_gateway_business_modules_no_hardcoded_job_api_url`（AST-level 扫字符串字面量）。
+- `AVT_INTERNAL_API_KEY` 是必需 env，gateway 启动时 `startup_checks.validate_internal_api_key` 校验，最少 16 字符。生产部署前先 `secrets.token_urlsafe(32)` 生成。
+
+**已删除（不要再创建）：**
+- `frontend/`（旧 Vite）— `frontend-next/` 是唯一前端
+- `src/services/web_ui/server.py` + `handler.py` — 仅保留 library 模块（`project_resolver`、`voice_library`、`translation_review`、`snapshot`、`job_managers`、`config_helpers`、`speaker_review`）
+- `main.py` 的 `web-ui` 子命令 — 只剩 `control-panel` / `job-api` / `process` 等
+- 根 `projects/` 空目录、`build/`、`tmp_local_video_repro/`
+
+**永久回归守卫：** `tests/test_legacy_cleanup_guards.py` 10 个契约级测试（file existence + CLI 行为 + AST import graph + AST 字面量 + Caddyfile 结构）。任何回退会在 CI 立刻红。
 
 ## Key Conventions
 
