@@ -89,6 +89,32 @@ def test_resolve_database_url_works_with_pg_password_only(monkeypatch):
     assert len(url) > len("postgresql+asyncpg://avt:@:5432/aivideotrans")
 
 
+def test_list_jobs_mirrors_project_dir_from_upstream():
+    """Regression guard for the 2026-04-17 'project_dir stuck NULL' incident:
+
+    gateway/job_intercept.py:452 writes Job.project_dir at creation time, but
+    at that moment the pipeline hasn't assigned a project_dir yet — so all
+    rows were NULL in Gateway DB. Anything downstream that reads
+    Job.project_dir (background_task_api._resolve_project_dir, materials_api)
+    returned 404 "项目目录不存在" for every job.
+
+    The fix: inside intercept_list_jobs' upstream-status sync loop, mirror
+    project_dir from the upstream record alongside status/stage. If this
+    test fails, someone removed the mirror and the bug is back.
+    """
+    jif = Path(_gateway_dir) / "job_intercept.py"
+    src = jif.read_text(encoding="utf-8")
+    # The mirror writes to db_job.project_dir only when upstream reports a
+    # non-empty value — don't clobber a good DB value with a transient None.
+    assert "upstream_project_dir = upstream_job.get(\"project_dir\")" in src, (
+        "intercept_list_jobs must mirror upstream project_dir so background_task_api "
+        "and materials_api don't 404 on jobs where the create-time write was NULL."
+    )
+    assert "db_job.project_dir = upstream_project_dir" in src, (
+        "upstream_project_dir value is read but never assigned — the mirror is broken."
+    )
+
+
 def test_compose_defaults_gateway_env_to_production():
     """Regression guard for Codex P3 deployment gap:
 

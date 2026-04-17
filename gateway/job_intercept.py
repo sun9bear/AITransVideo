@@ -226,6 +226,17 @@ async def intercept_list_jobs(
                         old_status = db_job.status
                         db_job.status = upstream_status
                         db_job.current_stage = upstream_stage
+                        # B-fix: mirror project_dir from upstream once the pipeline
+                        # assigns it. The creation-time write at intercept_create_job
+                        # always gets None (pipeline hasn't run yet when the Gateway
+                        # mirror row is first inserted), so everything downstream
+                        # that reads Job.project_dir (background_task_api,
+                        # materials_api) would 404 without this backfill. Only
+                        # write if upstream reports a value — don't clobber a good
+                        # DB value with a transient upstream omission.
+                        upstream_project_dir = upstream_job.get("project_dir")
+                        if upstream_project_dir:
+                            db_job.project_dir = upstream_project_dir
                         # Settle quota when transitioning to terminal status
                         if upstream_status in TERMINAL_STATUSES and old_status not in TERMINAL_STATUSES:
                             await settle_job_quota(db, db_job, upstream_status)
