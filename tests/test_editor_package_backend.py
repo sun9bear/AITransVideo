@@ -30,6 +30,7 @@ def test_editor_package_backend_writes_editor_output_bundle(tmp_path: Path) -> N
                 start_ms=0,
                 end_ms=1_000,
                 cn_text="Editor backend output.",
+                en_text="Editor backend output.",
                 aligned_audio_path=str(source_audio),
                 actual_duration_ms=1_000,
                 alignment_method="direct",

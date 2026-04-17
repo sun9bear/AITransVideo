@@ -47,6 +47,7 @@ def _build_segment(
     start_ms: int,
     end_ms: int,
     cn_text: str,
+    en_text: str = "",
     aligned_audio_path: Path,
     alignment_method: str = "direct",
     needs_review: bool = False,
@@ -58,6 +59,7 @@ def _build_segment(
         start_ms=start_ms,
         end_ms=end_ms,
         cn_text=cn_text,
+        en_text=en_text,
         aligned_audio_path=str(aligned_audio_path),
         actual_duration_ms=end_ms - start_ms,
         alignment_method=alignment_method,
@@ -265,8 +267,8 @@ def test_project_output_srt_contains_hh_mm_ss_mmm_format_across_hours(tmp_path: 
         project_name="srt_cross_hour",
     )
 
-    srt_path = ProjectOutputWriter()._write_srt(output)
-    content = Path(srt_path).read_text(encoding="utf-8")
+    srt_paths = ProjectOutputWriter()._write_srt(output)
+    content = Path(srt_paths[0]).read_text(encoding="utf-8")
 
     assert "01:01:01,001 --> 01:01:02,500" in content
 
@@ -290,10 +292,11 @@ def test_project_output_srt_is_utf8_and_preserves_chinese_text(tmp_path: Path) -
         project_name="srt_utf8",
     )
 
-    srt_path = ProjectOutputWriter()._write_srt(output)
-    decoded = Path(srt_path).read_bytes().decode("utf-8")
+    srt_paths = ProjectOutputWriter()._write_srt(output)
+    decoded = Path(srt_paths[0]).read_bytes().decode("utf-8")
 
-    assert "今天我们来聊聊编码。" in decoded
+    # New subtitle rule: punctuation is stripped (JianYing style)
+    assert "今天我们来聊聊编码" in decoded
 
 
 def test_project_output_srt_splits_long_segment_into_short_entries(tmp_path: Path) -> None:
@@ -319,7 +322,7 @@ def test_project_output_srt_splits_long_segment_into_short_entries(tmp_path: Pat
         project_name="srt_split_long_segment",
     )
 
-    srt_path = Path(ProjectOutputWriter()._write_srt(output))
+    srt_path = Path(ProjectOutputWriter()._write_srt(output)[0])
     blocks = _parse_srt_blocks(srt_path)
 
     assert len(blocks) >= 3
@@ -346,7 +349,7 @@ def test_project_output_srt_hard_splits_long_text_without_punctuation(tmp_path: 
         project_name="srt_split_no_punctuation",
     )
 
-    srt_path = Path(ProjectOutputWriter()._write_srt(output))
+    srt_path = Path(ProjectOutputWriter()._write_srt(output)[0])
     blocks = _parse_srt_blocks(srt_path)
 
     assert len(blocks) >= 2
@@ -372,7 +375,7 @@ def test_project_output_srt_merges_too_short_subtitles(tmp_path: Path) -> None:
         project_name="srt_merge_short_entries",
     )
 
-    srt_path = Path(ProjectOutputWriter()._write_srt(output))
+    srt_path = Path(ProjectOutputWriter()._write_srt(output)[0])
     blocks = _parse_srt_blocks(srt_path)
 
     assert len(blocks) < 4
@@ -397,7 +400,7 @@ def test_project_output_srt_timings_are_monotonic_and_non_overlapping(tmp_path: 
         project_name="srt_timing_monotonic",
     )
 
-    srt_path = Path(ProjectOutputWriter()._write_srt(output))
+    srt_path = Path(ProjectOutputWriter()._write_srt(output)[0])
     blocks = _parse_srt_blocks(srt_path)
 
     previous_end = None

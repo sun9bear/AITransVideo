@@ -844,6 +844,9 @@ def _orchestrate_three_pass(
             "skipped": skip_pass1,
             "prompt_version": "v1",
             "has_audio": original_audio is not None and not skip_pass1,
+            "fallback_used": pass1_result.get("success_attempt_label", "primary") not in ("primary", "skipped"),
+            "success_attempt_label": pass1_result.get("success_attempt_label", "primary"),
+            "success_attempt_model": pass1_result.get("success_attempt_model"),
             "generated_at": _now_iso(),
             "duration_ms": pass1_result.get("duration_ms"),
             "speakers": pass1_result["speakers"],
@@ -859,6 +862,9 @@ def _orchestrate_three_pass(
             "review_model": pass2_model,
             "prompt_version": "v1",
             "has_audio": False,
+            "fallback_used": pass2_result.get("success_attempt_label", "primary") != "primary",
+            "success_attempt_label": pass2_result.get("success_attempt_label", "primary"),
+            "success_attempt_model": pass2_result.get("success_attempt_model"),
             "generated_at": _now_iso(),
             "duration_ms": pass2_result.get("duration_ms"),
             "glossary": pass2_result["glossary"],
@@ -1020,6 +1026,8 @@ def _review_pass1_speakers(
         _retried_transient = False
         _t0 = time.monotonic()
         response_text: str | None = None
+        _success_label = "primary"
+        _success_model = review_model
 
         def _attempt_gemini(label: str, model_id: str) -> dict:
             nonlocal response_text
@@ -1076,6 +1084,7 @@ def _review_pass1_speakers(
                     payload = None
                 else:
                     logger.info("[S2][Pass1] Succeeded on retry (model=%s)", api_model_id)
+                    _success_label = "retry"
                     payload = payload  # already set
             else:
                 logger.warning("[S2][Pass1] Output error (%s, model=%s), skipping retry: %s",
@@ -1092,6 +1101,8 @@ def _review_pass1_speakers(
                         _fb_model_id = _resolve_model_id(_fb_model)
                         payload = _attempt_gemini(_fb_label, _fb_model_id)
                     logger.info("[S2][Pass1] Succeeded on %s (model=%s)", _fb_label, _fb_model)
+                    _success_label = _fb_label
+                    _success_model = _fb_model
                     break
                 except Exception as fb_exc:
                     _pass1_last_error = fb_exc
@@ -1144,6 +1155,8 @@ def _review_pass1_speakers(
         "parsed_payload": payload,
         "has_audio": has_audio,
         "duration_ms": _duration_ms,
+        "success_attempt_label": _success_label,
+        "success_attempt_model": _success_model,
     }
 
 
@@ -1320,6 +1333,8 @@ def _review_pass2_text(
     _t0 = time.monotonic()
     payload: dict = {}
     response_text: str | None = None
+    _success_label = "primary"
+    _success_model = review_model
 
     def _attempt_p2(label: str, model: str, key: str | None) -> dict:
         nonlocal response_text
@@ -1346,6 +1361,7 @@ def _review_pass2_text(
                 time.sleep(_TRANSIENT_RETRY_WAIT_S)
                 try:
                     payload = _attempt_p2("retry", review_model, api_key)
+                    _success_label = "retry"
                     logger.info("[S2][Pass2] Succeeded on retry (model=%s)", review_model)
                 except Exception as retry_exc:
                     _pass2_last_error = retry_exc
@@ -1362,6 +1378,8 @@ def _review_pass2_text(
                 _fb_key = _get_model_api_key(_fb_model)
                 try:
                     payload = _attempt_p2(_fb_label, _fb_model, _fb_key)
+                    _success_label = _fb_label
+                    _success_model = _fb_model
                     logger.info("[S2][Pass2] Succeeded on %s (model=%s)", _fb_label, _fb_model)
                     break
                 except Exception as fb_exc:
@@ -1412,6 +1430,8 @@ def _review_pass2_text(
         "response_text": response_text,
         "parsed_payload": payload,
         "duration_ms": _duration_ms,
+        "success_attempt_label": _success_label,
+        "success_attempt_model": _success_model,
     }
 
 
@@ -1687,6 +1707,8 @@ def review_pass3_voice_profiles(
         payload: dict = {}
         _pass3_last_error: Exception | None = None
         _t0_p3 = time.monotonic()
+        _success_label_p3 = "primary"
+        _success_model_p3 = review_model
 
         # --- Primary attempt ---
         try:
@@ -1700,6 +1722,7 @@ def review_pass3_voice_profiles(
                 time.sleep(_TRANSIENT_RETRY_WAIT_S)
                 try:
                     payload = _attempt_gemini_p3("retry", api_model_id)
+                    _success_label_p3 = "retry"
                     logger.info("[S2][Pass3] Succeeded on retry (model=%s)", api_model_id)
                 except Exception as retry_exc:
                     _pass3_last_error = retry_exc
@@ -1716,6 +1739,8 @@ def review_pass3_voice_profiles(
                         payload = _attempt_mimo_p3(_fb_label, _fb_model)
                     else:
                         payload = _attempt_gemini_p3(_fb_label, _resolve_model_id(_fb_model))
+                    _success_label_p3 = _fb_label
+                    _success_model_p3 = _fb_model
                     logger.info("[S2][Pass3] Succeeded on %s (model=%s)", _fb_label, _fb_model)
                     break
                 except Exception as fb_exc:
@@ -1756,6 +1781,9 @@ def review_pass3_voice_profiles(
             "review_model": review_model,
             "prompt_version": "v1",
             "has_audio": True,
+            "fallback_used": _success_label_p3 != "primary",
+            "success_attempt_label": _success_label_p3,
+            "success_attempt_model": _success_model_p3,
             "generated_at": _now_iso(),
             "duration_ms": _duration_ms_p3,
             "speaker_profiles": profiles,

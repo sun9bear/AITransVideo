@@ -3467,6 +3467,7 @@ class ProcessPipeline:
                     start_ms=segment.start_ms,
                     end_ms=segment.end_ms,
                     cn_text=segment.cn_text,
+                    en_text=getattr(segment, "en_text", ""),
                     aligned_audio_path=str(segment.aligned_audio_path or ""),
                     actual_duration_ms=int(segment.actual_duration_ms),
                     alignment_method=segment.alignment_method,

@@ -87,6 +87,8 @@ class ManifestWriter:
                     "ambient_audio_path": editor_result.ambient_audio_path,
                     "segments_dir": editor_result.segments_dir,
                     "subtitles_path": editor_result.subtitles_path,
+                    "subtitles_en_path": editor_result.subtitles_en_path,
+                    "subtitles_bilingual_path": editor_result.subtitles_bilingual_path,
                     "alignment_report_path": editor_result.alignment_report_path,
                 }
                 if editor_result is not None

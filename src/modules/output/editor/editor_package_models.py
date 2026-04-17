@@ -20,6 +20,7 @@ class AlignedSegment:
     start_ms: int
     end_ms: int
     cn_text: str
+    en_text: str
     aligned_audio_path: str
     actual_duration_ms: int
     alignment_method: str
@@ -43,6 +44,8 @@ class ProjectOutputResult:
     segments_dir: str
     segment_count: int
     subtitles_path: str
+    subtitles_en_path: str
+    subtitles_bilingual_path: str
     background_sounds_path: str
     alignment_report_path: str
     needs_review_count: int

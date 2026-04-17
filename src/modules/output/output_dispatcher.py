@@ -50,12 +50,14 @@ class OutputDispatcher:
             if not original_video_path:
                 raise PublishError("Publish output requires source.original_video in ArtifactIndex.")
             assert editor_result is not None
+            ambient_path = artifact_index.get("editor.ambient_audio") or artifact_index.get("working.ambient_audio")
             publish_result = self.publish_backend.publish(
                 PublishRequest(
                     project_id=localized_project.project_id,
                     original_video_path=original_video_path,
                     dubbed_audio_path=editor_result.dubbed_audio_path,
                     output_dir=str((project_root / "publish").resolve(strict=False)),
+                    ambient_audio_path=ambient_path,
                 )
             )
             artifact_index.register("publish.dubbed_video", publish_result.dubbed_video_path)
@@ -125,6 +127,11 @@ class OutputDispatcher:
         )
 
     def _build_aligned_segments(self, localized_project: LocalizedProject) -> list[AlignedSegment]:
+        # Build caption index for en_text lookup
+        caption_map: dict[int, str] = {}
+        for cap in localized_project.captions:
+            caption_map[cap.index] = cap.en_text
+
         segments: list[AlignedSegment] = []
         for index, block in enumerate(localized_project.aligned_blocks, start=1):
             audio_path = (block.aligned_audio_path or block.tts_audio_path or "").strip()
@@ -136,6 +143,15 @@ class OutputDispatcher:
             fallback_duration_ms = max(block.last_end_ms - block.first_start_ms, block.target_duration_ms, 0)
             actual_duration_ms = int(block.actual_audio_duration_ms or fallback_duration_ms)
             end_ms = max(int(block.last_end_ms), start_ms + actual_duration_ms)
+
+            # Resolve en_text from captions via original_srt_indices
+            en_parts = []
+            for srt_idx in getattr(block, "original_srt_indices", []):
+                en = caption_map.get(srt_idx, "")
+                if en:
+                    en_parts.append(en)
+            en_text = " ".join(en_parts)
+
             segments.append(
                 AlignedSegment(
                     segment_id=segment_id,
@@ -144,6 +160,7 @@ class OutputDispatcher:
                     start_ms=start_ms,
                     end_ms=end_ms,
                     cn_text=self._resolve_block_text(block),
+                    en_text=en_text,
                     aligned_audio_path=audio_path,
                     actual_duration_ms=actual_duration_ms,
                     alignment_method=self._resolve_alignment_method(block),
@@ -212,5 +229,7 @@ class OutputDispatcher:
         artifact_index.register("editor.dubbed_audio_complete", result.dubbed_audio_path)
         artifact_index.register("editor.ambient_audio", result.ambient_audio_path)
         artifact_index.register("editor.subtitles", result.subtitles_path)
+        artifact_index.register("editor.subtitles_en", result.subtitles_en_path)
+        artifact_index.register("editor.subtitles_bilingual", result.subtitles_bilingual_path)
         artifact_index.register("editor.alignment_report", result.alignment_report_path)
         artifact_index.register("editor.segments_dir", result.segments_dir)

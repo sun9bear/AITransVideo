@@ -69,6 +69,8 @@ def test_build_run_summary_surfaces_manifest_and_publish_paths(tmp_path: Path) -
             segments_dir=str(tmp_path / "output" / "segments"),
             segment_count=1,
             subtitles_path=str(tmp_path / "output" / "subtitles.srt"),
+            subtitles_en_path=str(tmp_path / "output" / "subtitles_en.srt"),
+            subtitles_bilingual_path=str(tmp_path / "output" / "subtitles_bilingual.srt"),
             background_sounds_path=str(tmp_path / "output" / "background_sounds.txt"),
             alignment_report_path=str(tmp_path / "output" / "alignment_report.md"),
             needs_review_count=0,

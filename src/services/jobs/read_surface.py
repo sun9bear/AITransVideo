@@ -17,6 +17,8 @@ RESULT_OUTPUT_SPECS = (
     ("translation.segments", "translation_segments"),
     ("editor.dubbed_audio_complete", "dubbed_audio"),
     ("editor.subtitles", "subtitles"),
+    ("editor.subtitles_en", "subtitles_en"),
+    ("editor.subtitles_bilingual", "subtitles_bilingual"),
     ("publish.dubbed_video", "dubbed_video"),
 )
 

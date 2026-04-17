@@ -30,6 +30,8 @@ PUBLIC_RESULT_DOWNLOAD_KEYS = frozenset(
         RESULT_DOWNLOAD_KEY_MANIFEST,
         "translation.segments",
         "editor.subtitles",
+        "editor.subtitles_en",
+        "editor.subtitles_bilingual",
         "editor.dubbed_audio_complete",
         "publish.dubbed_video",
     }

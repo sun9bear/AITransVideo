@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
@@ -19,11 +20,30 @@ from modules.output.editor.editor_package_models import (
 )
 
 
+@dataclass(slots=True)
+class _SubtitleSlice:
+    """A single subtitle cue with both zh and en text sharing the same time range."""
+    start_ms: int
+    end_ms: int
+    zh_text: str
+    en_text: str
+
+
+# Punctuation to strip from display text
+_ZH_PUNCT = re.compile(r"[，。！？；：、…\.\!\?\,\;\:\"\"\'\'\(\)\[\]【】《》]")
+_EN_PUNCT = re.compile(r"[,\.\!\?\;\:\"\'\(\)\[\]]")
+# Split boundaries for Chinese
+_ZH_SPLIT_PATTERN = re.compile(r"(?<=[，。！？；：、…])")
+
+
 class EditorPackageWriter:
     """Write the editor-facing project deliverables for a dubbing run."""
 
+    _MAX_ZH_CHARS = 18
+    _MAX_EN_CHARS = 60
+    _MIN_SUBTITLE_DURATION_MS = 600
+    # Legacy constants kept for backward compat with _split_subtitle_text
     _MAX_SUBTITLE_CHARS = 40
-    _MIN_SUBTITLE_DURATION_MS = 800
 
     def write(self, output: ProjectOutput) -> ProjectOutputResult:
         output_root = self._resolve_output_root(output)
@@ -32,7 +52,7 @@ class EditorPackageWriter:
         segment_paths = self._copy_segment_files(output)
         dubbed_audio_path = self._compose_full_audio(output, segment_paths)
         ambient_audio_path = self._export_ambient_audio(output)
-        subtitles_path = self._write_srt(output)
+        subtitles_zh_path, subtitles_en_path, subtitles_bilingual_path = self._write_srt(output)
         background_sounds_path = self._detect_background_sounds(output)
         alignment_report_path = self._write_alignment_report(output)
 
@@ -41,7 +61,9 @@ class EditorPackageWriter:
             ambient_audio_path=ambient_audio_path,
             segments_dir=str((output_root / "segments").resolve(strict=False)),
             segment_count=len(output.segments),
-            subtitles_path=subtitles_path,
+            subtitles_path=subtitles_zh_path,
+            subtitles_en_path=subtitles_en_path,
+            subtitles_bilingual_path=subtitles_bilingual_path,
             background_sounds_path=background_sounds_path,
             alignment_report_path=alignment_report_path,
             needs_review_count=sum(1 for segment in output.segments if segment.needs_review),
@@ -226,31 +248,59 @@ class EditorPackageWriter:
         normalized_audio.export(output_path, format="wav")
         print("[S6] 完整配音响度校正完成")
 
-    def _write_srt(self, output: ProjectOutput) -> str:
+    def _write_srt(self, output: ProjectOutput) -> tuple[str, str, str]:
+        """Write 3 SRT files (zh, en, bilingual) and return their paths.
+
+        Also writes subtitles.srt as a copy of zh for backward compatibility.
+        Returns (zh_path, en_path, bilingual_path).
+        """
         output_root = self._resolve_output_root(output)
         output_root.mkdir(parents=True, exist_ok=True)
 
-        blocks: list[str] = []
-        subtitle_index = 1
+        # Build all subtitle slices from segments
+        all_slices: list[_SubtitleSlice] = []
         for segment in self._sorted_segments(output):
-            for start_ms, end_ms, text in self._split_segment_into_subtitles(segment):
-                blocks.append(
-                    "\n".join(
-                        [
-                            str(subtitle_index),
-                            f"{self._format_srt_timestamp(start_ms)} --> "
-                            f"{self._format_srt_timestamp(end_ms)}",
-                            text,
-                        ]
-                    )
-                )
-                subtitle_index += 1
+            all_slices.extend(self._build_subtitle_slices(segment))
 
+        # Write 3 SRT variants
+        zh_path = self._write_srt_file(
+            all_slices, lang="zh", output_path=output_root / "subtitles_zh.srt"
+        )
+        en_path = self._write_srt_file(
+            all_slices, lang="en", output_path=output_root / "subtitles_en.srt"
+        )
+        bilingual_path = self._write_srt_file(
+            all_slices, lang="bilingual", output_path=output_root / "subtitles_bilingual.srt"
+        )
+
+        # Backward compat: subtitles.srt = zh copy
+        compat_path = output_root / "subtitles.srt"
+        shutil.copy2(zh_path, compat_path)
+
+        return (zh_path, en_path, bilingual_path)
+
+    def _write_srt_file(
+        self, slices: list[_SubtitleSlice], *, lang: str, output_path: Path
+    ) -> str:
+        blocks: list[str] = []
+        for idx, s in enumerate(slices, start=1):
+            if lang == "zh":
+                text = s.zh_text
+            elif lang == "en":
+                text = s.en_text
+            else:  # bilingual
+                text = f"{s.en_text}\n{s.zh_text}"
+            if not text.strip():
+                continue
+            blocks.append(
+                f"{idx}\n"
+                f"{self._format_srt_timestamp(s.start_ms)} --> "
+                f"{self._format_srt_timestamp(s.end_ms)}\n"
+                f"{text}"
+            )
         serialized = "\n\n".join(blocks)
         if serialized:
             serialized += "\n"
-
-        output_path = output_root / "subtitles.srt"
         output_path.write_text(serialized, encoding="utf-8")
         return str(output_path.resolve(strict=False))
 
@@ -455,36 +505,118 @@ class EditorPackageWriter:
     def _sorted_segments(self, output: ProjectOutput) -> list[AlignedSegment]:
         return sorted(output.segments, key=lambda segment: (segment.start_ms, segment.segment_id))
 
-    def _split_segment_into_subtitles(self, segment: AlignedSegment) -> list[tuple[int, int, str]]:
-        raw_chunks = self._split_subtitle_text(segment.cn_text)
-        if not raw_chunks:
-            text = segment.cn_text.strip()
-            if not text:
-                return []
-            return [(segment.start_ms, segment.end_ms, text)]
+    def _build_subtitle_slices(self, segment: AlignedSegment) -> list[_SubtitleSlice]:
+        """Build subtitle slices with zh as primary split, en following proportionally."""
+        zh_raw = segment.cn_text.strip()
+        en_raw = (segment.en_text or "").strip()
+        if not zh_raw:
+            return []
 
-        chunks = self._merge_short_subtitle_chunks(raw_chunks, segment.end_ms - segment.start_ms)
-        weights = [self._subtitle_weight(chunk) for chunk in chunks]
-        total_weight = sum(weights) or len(chunks)
-        total_duration_ms = max(segment.end_ms - segment.start_ms, len(chunks))
+        # 1. Split Chinese text on punctuation boundaries
+        zh_chunks = self._split_zh_short_sentences(zh_raw)
+        if not zh_chunks:
+            zh_chunks = [_ZH_PUNCT.sub("", zh_raw)]
 
-        subtitle_entries: list[tuple[int, int, str]] = []
-        cursor = segment.start_ms
-        accumulated_weight = 0
-        for index, chunk in enumerate(chunks):
-            accumulated_weight += weights[index] or 1
-            if index == len(chunks) - 1:
-                end_ms = segment.end_ms
+        # 2. Merge chunks that would be too short in duration
+        zh_chunks = self._merge_short_subtitle_chunks(
+            zh_chunks, segment.end_ms - segment.start_ms
+        )
+
+        # 3. Strip punctuation from zh display
+        zh_chunks = [_ZH_PUNCT.sub("", c).strip() for c in zh_chunks]
+        zh_chunks = [c for c in zh_chunks if c]
+        if not zh_chunks:
+            return []
+
+        # 4. Split English into same number of slices by word count
+        en_chunks = self._split_en_to_match(en_raw, len(zh_chunks))
+
+        # 5. Distribute time proportionally by zh char count
+        slices = self._distribute_time(
+            zh_chunks, en_chunks, segment.start_ms, segment.end_ms
+        )
+        return slices
+
+    def _split_zh_short_sentences(self, text: str) -> list[str]:
+        """Split Chinese text into short sentences on punctuation boundaries."""
+        parts = _ZH_SPLIT_PATTERN.split(text)
+        parts = [p.strip() for p in parts if p.strip()]
+
+        # Second pass: split chunks > _MAX_ZH_CHARS
+        result: list[str] = []
+        for part in parts:
+            clean_len = len(_ZH_PUNCT.sub("", part))
+            if clean_len <= self._MAX_ZH_CHARS:
+                result.append(part)
             else:
-                ratio = accumulated_weight / total_weight
-                end_ms = segment.start_ms + int(total_duration_ms * ratio)
-                end_ms = max(end_ms, cursor + 1)
-                remaining_slots = len(chunks) - index - 1
-                max_end = segment.end_ms - remaining_slots
-                end_ms = min(end_ms, max_end)
-            subtitle_entries.append((cursor, end_ms, chunk))
-            cursor = end_ms
-        return subtitle_entries
+                # Hard split at max chars
+                stripped = _ZH_PUNCT.sub("", part)
+                for i in range(0, len(stripped), self._MAX_ZH_CHARS):
+                    chunk = stripped[i:i + self._MAX_ZH_CHARS]
+                    if chunk:
+                        result.append(chunk)
+        return result
+
+    def _split_en_to_match(self, en_text: str, n_slices: int) -> list[str]:
+        """Split English text into exactly n_slices by distributing words evenly."""
+        if n_slices <= 0:
+            return []
+        clean = _EN_PUNCT.sub("", en_text).strip()
+        if not clean:
+            return [""] * n_slices
+        words = clean.split()
+        if not words:
+            return [""] * n_slices
+        if n_slices == 1:
+            return [" ".join(words)]
+
+        # Distribute words proportionally
+        total = len(words)
+        chunks: list[str] = []
+        cursor = 0
+        for i in range(n_slices):
+            # How many words for this slice
+            share = round(total * (i + 1) / n_slices) - cursor
+            share = max(share, 1 if cursor < total else 0)
+            end = min(cursor + share, total)
+            chunks.append(" ".join(words[cursor:end]))
+            cursor = end
+        # Pad if we somehow ended up short
+        while len(chunks) < n_slices:
+            chunks.append("")
+        return chunks[:n_slices]
+
+    def _distribute_time(
+        self,
+        zh_chunks: list[str],
+        en_chunks: list[str],
+        start_ms: int,
+        end_ms: int,
+    ) -> list[_SubtitleSlice]:
+        """Distribute time range across slices proportionally by zh char count."""
+        weights = [len(c) or 1 for c in zh_chunks]
+        total_weight = sum(weights) or len(zh_chunks)
+        total_duration = max(end_ms - start_ms, len(zh_chunks))
+
+        slices: list[_SubtitleSlice] = []
+        cursor = start_ms
+        accumulated = 0
+        for i, (zh, en) in enumerate(zip(zh_chunks, en_chunks)):
+            accumulated += weights[i]
+            if i == len(zh_chunks) - 1:
+                slice_end = end_ms
+            else:
+                ratio = accumulated / total_weight
+                slice_end = start_ms + int(total_duration * ratio)
+                slice_end = max(slice_end, cursor + 1)
+                remaining = len(zh_chunks) - i - 1
+                slice_end = min(slice_end, end_ms - remaining)
+            slices.append(_SubtitleSlice(
+                start_ms=cursor, end_ms=slice_end,
+                zh_text=zh, en_text=en,
+            ))
+            cursor = slice_end
+        return slices
 
     def _split_subtitle_text(self, text: str) -> list[str]:
         normalized = re.sub(r"\s+", "", text).strip()
