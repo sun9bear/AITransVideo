@@ -26,7 +26,6 @@ from services.web_ui import (
     build_provider_key_options,
     build_translation_model_options,
     build_web_ui_snapshot,
-    create_web_ui_server,
     save_web_ui_settings,
     set_translation_primary_model,
 )
@@ -575,16 +574,6 @@ def test_build_web_ui_snapshot_reflects_saved_primary_model(tmp_path: Path) -> N
 
     assert snapshot["settings"]["selected_translation_model"] == "deepseek_chat"
     assert snapshot["settings"]["s3_translate_route"][0]["alias"] == "deepseek_chat"
-
-
-def test_create_web_ui_server_uses_job_api_manager_by_default() -> None:
-    server = create_web_ui_server(port=0)
-
-    try:
-        assert isinstance(server.job_manager, JobAPIBackedJobManager)  # type: ignore[attr-defined]
-        assert server.config_path == str(server.job_manager.config_path)  # type: ignore[attr-defined]
-    finally:
-        server.server_close()
 
 
 def test_job_api_backed_manager_submits_and_polls_via_job_api(tmp_path: Path) -> None:
@@ -1485,7 +1474,9 @@ def test_voice_review_snapshot_includes_volcengine_2_0_voices(tmp_path: Path) ->
 
 def test_voice_review_approve_accepts_auto(tmp_path: Path) -> None:
     """B6: 'auto' is a valid voice selection that normalizes correctly."""
-    from services.web_ui.handler import _normalize_optional_text as _normalize
+    # Real definition lives in config_helpers; handler.py was only a re-import
+    # shim (removed in T1.6b).
+    from services.web_ui.config_helpers import _normalize_optional_text as _normalize
     assert _normalize("auto") == "auto"
 
 
@@ -1840,29 +1831,10 @@ def test_build_web_ui_snapshot_marks_incompatible_cosyvoice_model(tmp_path: Path
     assert "cosyvoice-v3-plus" in str(longshu["compatibility_reason"])
 
 
-def test_voice_library_project_default_rejects_incompatible_cosyvoice_builtin(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config_path = tmp_path / "autodub.local.json"
-    _write_test_config(config_path)
-    config_payload = json.loads(config_path.read_text(encoding="utf-8"))
-    config_payload["tts"] = {"provider": "cosyvoice"}
-    config_path.write_text(json.dumps(config_payload, ensure_ascii=False), encoding="utf-8")
-    manager = ProcessJobManager(project_root=tmp_path, config_path=config_path)
-    server = create_web_ui_server(job_manager=manager, port=0)
-    monkeypatch.setattr(cosyvoice_provider_module, "DEFAULT_MODEL", "cosyvoice-v3-plus")
-    monkeypatch.setattr(voice_library_module, "cosyvoice_provider", cosyvoice_provider_module)
-
-    with _running_server(server) as base_url:
-        status, payload = _request_server_json(
-            f"{base_url}/api/voice-library/set-project-default-builtin",
-            method="POST",
-            payload={"voice_id": "longshu_v3"},
-        )
-
-    assert status == HTTPStatus.BAD_REQUEST
-    assert "cosyvoice-v3-plus" in str(payload["error"])
+# [T1.6a] Deleted: `test_voice_library_project_default_rejects_incompatible_cosyvoice_builtin`
+# was an A-class test exercising the `/api/voice-library/set-project-default-builtin` HTTP
+# endpoint (handler.py), which is retired by T1.6b. The voice_library business logic itself
+# remains tested by voice-library-only cases throughout this file.
 
 
 def test_build_web_ui_snapshot_prefers_manifest_artifact_paths_for_results_outputs(tmp_path: Path) -> None:
@@ -1986,115 +1958,12 @@ def test_build_web_ui_snapshot_exposes_only_whitelisted_result_download_keys(tmp
     assert editor_outputs["输出目录"]["download_key"] is None
 
 
-def test_web_ui_result_download_endpoint_allows_only_public_whitelist(tmp_path: Path) -> None:
-    config_path = tmp_path / "autodub.local.json"
-    _write_test_config(config_path)
-    project_dir = _write_test_process_project(
-        tmp_path,
-        project_name="result_download_endpoint_project",
-        youtube_url="https://www.youtube.com/watch?v=result-download",
-    )
-    (project_dir / "review_state.json").write_text(
-        json.dumps({"stages": {}}, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    (project_dir / "manifest.json").write_text(
-        json.dumps(
-            {
-                "artifact_index": {
-                    "editor.dubbed_audio_complete": "output/dubbed_audio_complete.wav",
-                    "editor.subtitles": "output/subtitles.srt",
-                    "translation.segments": "translation/segments.json",
-                    "publish.dubbed_video": "publish/dubbed_video.mp4",
-                    "state.project": "project_state.json",
-                    "state.review": "review_state.json",
-                }
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    manager = ProcessJobManager(project_root=tmp_path, config_path=config_path)
-    server = create_web_ui_server(job_manager=manager, port=0)
-
-    with _running_server(server) as base_url:
-        manifest_status, manifest_body, manifest_headers = _request_server_bytes(
-            f"{base_url}/api/result-download?project_dir={quote(str(project_dir.resolve(strict=False)))}&key=manifest.file"
-        )
-        blocked_status, blocked_body, _ = _request_server_bytes(
-            f"{base_url}/api/result-download?project_dir={quote(str(project_dir.resolve(strict=False)))}&key=state.review"
-        )
-
-    assert manifest_status == HTTPStatus.OK
-    assert json.loads(manifest_body.decode("utf-8"))["artifact_index"]["editor.subtitles"] == "output/subtitles.srt"
-    assert "attachment;" in manifest_headers["Content-Disposition"]
-    assert blocked_status == HTTPStatus.FORBIDDEN
-    assert "not allowed" in blocked_body.decode("utf-8")
-
-
-def test_project_file_endpoint_is_restricted_to_audio_preview_files(tmp_path: Path) -> None:
-    config_path = tmp_path / "autodub.local.json"
-    _write_test_config(config_path)
-    project_dir = _write_test_process_project(
-        tmp_path,
-        project_name="audio_preview_only_project",
-        youtube_url="https://www.youtube.com/watch?v=audio-preview-only",
-    )
-    review_state_path = project_dir / "review_state.json"
-    review_state_path.write_text(json.dumps({"active_stage": None}, ensure_ascii=False), encoding="utf-8")
-    audio_path = (project_dir / "tts" / "segment_001_speaker_a.wav").resolve(strict=False)
-    other_project_dir = _write_test_process_project(
-        tmp_path,
-        project_name="audio_preview_other_project",
-        youtube_url="https://www.youtube.com/watch?v=audio-preview-other",
-    )
-    other_audio_path = (other_project_dir / "tts" / "segment_001_speaker_a.wav").resolve(strict=False)
-    rogue_audio_path = (tmp_path / "voice_bank" / "rogue_preview.wav").resolve(strict=False)
-    rogue_audio_path.parent.mkdir(parents=True, exist_ok=True)
-    rogue_audio_path.write_bytes(b"rogue-audio")
-    manager = ProcessJobManager(project_root=tmp_path, config_path=config_path)
-    manager._snapshot = ProcessJobSnapshot(
-        job_id="job-audio-preview",
-        status="succeeded",
-        youtube_url="https://www.youtube.com/watch?v=audio-preview-only",
-        speakers="2",
-        voice_a=None,
-        voice_b=None,
-        translation_model_alias="deepseek_chat",
-        project_dir=str(project_dir.resolve(strict=False)),
-        current_stage="completed",
-        current_message="done",
-        started_at="2026-03-19T00:00:00Z",
-        completed_at="2026-03-19T00:05:00Z",
-        returncode=0,
-        logs=[],
-        review_gate=None,
-    )
-    server = create_web_ui_server(job_manager=manager, port=0)
-
-    with _running_server(server) as base_url:
-        audio_status, audio_body, audio_headers = _request_server_bytes(
-            f"{base_url}/api/project-file?path={quote(str(audio_path))}"
-        )
-        blocked_status, blocked_body, _ = _request_server_bytes(
-            f"{base_url}/api/project-file?path={quote(str(review_state_path.resolve(strict=False)))}"
-        )
-        cross_project_status, cross_project_body, _ = _request_server_bytes(
-            f"{base_url}/api/project-file?path={quote(str(other_audio_path))}"
-        )
-        rogue_status, rogue_body, _ = _request_server_bytes(
-            f"{base_url}/api/project-file?path={quote(str(rogue_audio_path))}"
-        )
-
-    assert audio_status == HTTPStatus.OK
-    assert audio_body == b"wav-1"
-    assert audio_headers["Content-Type"].startswith("audio/")
-    assert blocked_status == HTTPStatus.FORBIDDEN
-    assert "audio preview" in blocked_body.decode("utf-8")
-    assert cross_project_status == HTTPStatus.FORBIDDEN
-    assert "current project directory" in cross_project_body.decode("utf-8")
-    assert rogue_status == HTTPStatus.FORBIDDEN
-    assert "current project directory" in rogue_body.decode("utf-8")
+# [T1.6a] `test_web_ui_result_download_endpoint_*` and
+# `test_project_file_endpoint_*` were removed in the 2026-04-17 legacy
+# migration cleanup. Both exercised HTTP endpoints of the retired
+# `web_ui.server` / `web_ui.handler` surface; their targets have been
+# deleted by T1.6b. The retained library tests (build_web_ui_snapshot,
+# voice_review_*, etc.) remain.
 
 
 def test_build_web_ui_snapshot_prefers_manifest_artifact_paths_for_review_inputs(tmp_path: Path) -> None:
@@ -2641,62 +2510,8 @@ def _build_multipart_upload(filename: str, content: bytes) -> tuple[bytes, str]:
     return body, content_type
 
 
-def test_upload_with_user_id_header_writes_to_isolated_path(tmp_path: Path) -> None:
-    """When X-User-Id header is present, file lands in uploads/<user_id>/..."""
-    config_path = tmp_path / "autodub.local.json"
-    _write_test_config(config_path)
-    server = create_web_ui_server(host="127.0.0.1", port=0)
-    server.job_manager = type("FakeManager", (), {"project_root": str(tmp_path)})()
+# [T1.6a] Deleted below: `test_upload_with_user_id_header_writes_to_isolated_path` and
+# `test_upload_without_user_id_header_falls_back_to_global_uploads` were A-class tests
+# exercising the `/api/upload-video` HTTP endpoint in handler.py, retired by T1.6b.
+# Upload behavior is now tested in frontend-next + gateway upload tests.
 
-    with _running_server(server) as base_url:
-        body, ct = _build_multipart_upload("test video.mp4", b"fake video data")
-        req = Request(
-            f"{base_url}/api/upload-video",
-            data=body,
-            headers={
-                "Content-Type": ct,
-                "X-User-Id": "42",
-            },
-            method="POST",
-        )
-        with urlopen(req) as response:
-            result = json.loads(response.read().decode("utf-8"))
-
-    file_path = result["file_path"]
-    # Must be under uploads/42/
-    assert "/42/" in file_path.replace("\\", "/") or "\\42\\" in file_path
-    # Must NOT use timestamp naming — should have uuid-based upload_id
-    import os
-    basename = os.path.basename(file_path)
-    # basename format: <upload_id>_<safe_name>
-    assert "test_video.mp4" in basename
-    # 32-char hex uuid prefix
-    upload_id_part = basename.split("_")[0]
-    assert len(upload_id_part) == 32
-    # File actually exists with correct content
-    assert Path(file_path).read_bytes() == b"fake video data"
-    assert result["file_name"] == "test video.mp4"
-
-
-def test_upload_without_user_id_header_falls_back_to_global_uploads(tmp_path: Path) -> None:
-    """Without X-User-Id header (direct-connect mode), file lands in uploads/."""
-    config_path = tmp_path / "autodub.local.json"
-    _write_test_config(config_path)
-    server = create_web_ui_server(host="127.0.0.1", port=0)
-    server.job_manager = type("FakeManager", (), {"project_root": str(tmp_path)})()
-
-    with _running_server(server) as base_url:
-        body, ct = _build_multipart_upload("fallback.mp4", b"fallback data")
-        req = Request(
-            f"{base_url}/api/upload-video",
-            data=body,
-            headers={"Content-Type": ct},
-            method="POST",
-        )
-        with urlopen(req) as response:
-            result = json.loads(response.read().decode("utf-8"))
-
-    file_path = result["file_path"]
-    # Should be under uploads/ but NOT user-scoped
-    assert "uploads" in file_path.replace("\\", "/")
-    assert Path(file_path).read_bytes() == b"fallback data"

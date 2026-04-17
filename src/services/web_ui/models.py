@@ -2,13 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .constants import WEB_UI_DEFAULT_PORT
-
-
-@dataclass(frozen=True, slots=True)
-class WebUICommandArgs:
-    port: int = WEB_UI_DEFAULT_PORT
-
 
 @dataclass(slots=True)
 class ProcessJobSnapshot:

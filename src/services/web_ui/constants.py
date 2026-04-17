@@ -17,7 +17,9 @@ from services.jobs.api import JOB_API_DEFAULT_HOST, JOB_API_DEFAULT_PORT
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 MAIN_PY_PATH = PROJECT_ROOT / "main.py"
 WEB_UI_DEFAULT_HOST = "127.0.0.1"
-WEB_UI_DEFAULT_PORT = 8876
+# WEB_UI_DEFAULT_PORT (= 8876) removed in 2026-04-17 T1.6a — the standalone
+# Web UI server on that port is retired. JobAPIBackedJobManager uses the
+# Job API base URL directly; nothing here needs the 8876 default anymore.
 WEB_UI_DEFAULT_JOB_API_BASE_URL = f"http://{JOB_API_DEFAULT_HOST}:{JOB_API_DEFAULT_PORT}"
 WEB_UI_TITLE = "AIVideoTrans Web UI"
 MAX_LOG_LINES = 500
