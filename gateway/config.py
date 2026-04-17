@@ -15,6 +15,11 @@ class GatewaySettings(BaseSettings):
     gateway_host: str = "0.0.0.0"
     gateway_port: int = 8880
 
+    # Deployment environment ("dev" / "staging" / "production").
+    # Read from AVT_ENV. Used by startup validators (see startup_checks.py);
+    # production mode refuses to start with auth_required=False.
+    env: str = "dev"
+
     # Database (Step 2)
     pg_password: str = ""
     database_url: str = ""

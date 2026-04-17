@@ -41,6 +41,7 @@ import logging
 from config import settings
 from database import engine, init_db
 from models import Base
+from startup_checks import validate_production_safety
 
 logger = logging.getLogger(__name__)
 from job_intercept import (
@@ -59,9 +60,12 @@ from voice_selection_api import get_voice_selection_pricing, voice_clone_for_sel
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup-time validations and init:
+    # T6 — refuse prod + no-auth combination. Fail fast BEFORE touching DB
+    # so misconfigured deploys surface immediately with a clear message.
+    validate_production_safety(settings.env, settings.auth_required)
     # T3 — DB credentials are resolved and engine is built here. Raises if
     # neither AVT_PG_PASSWORD nor AVT_DATABASE_URL is set (no more hardcoded
-    # avt:avt fallback). T4/T6 will hook additional startup validations here.
+    # avt:avt fallback). T4 will hook additional startup validations here.
     init_db()
 
     # Dev convenience: auto-create tables. In production use Alembic migrations.
