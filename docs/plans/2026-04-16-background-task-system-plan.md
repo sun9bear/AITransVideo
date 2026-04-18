@@ -1,8 +1,84 @@
 # 异步导出任务 v1：素材打包 + 视频生成
 
-> **Status:** active (v1 已通过 commit `27c2b06` 落地；后续扩展项待验收后决定)  
-> **Last updated:** 2026-04-17  
+> **Status:** **shipped** — 后端 + 前端 + migration 014 + 镜像部署已落地到 US 主机；有一条 pre-existing 副作用（Gateway DB `jobs.project_dir` 空）需要 v1.1 加 fallback 收口。
+> **Last updated:** 2026-04-18
 > **Revision:** 2026-04-17 第二稿，整合三方评审（Claude Code / CodeX / Trae）意见，收窄 scope 到 materials_pack + generate_video 两个具体场景，不再作为"通用后台任务框架"规划。
+
+## 2026-04-18 视频输出后续改造（🚧 WIP，未 commit、未部署）
+
+本方案落地后，另一轮独立会话启动的视频输出优化——**当前仍在工作树里，HEAD 为 `3cf4a38`**，US 主机跑的是 HEAD 版本，以下改动尚未 ship：
+
+- **pipeline 在 `_dispatch_process_output_bundle` 把硬编码 `targets=[OutputTarget.EDITOR]` 改成 `[OutputTarget.PUBLISH]`**（`src/pipeline/process.py:3528`）——让 dispatcher 同时产出 editor package + publish.dubbed_video；**注意 pipeline 仍 _不_ 读 job record 的 `output_target` 字段**，这次改动只是换了一个硬编码值
+- VideoRenderer 三轨混合：原视频 + 配音 + 背景音（-12dB）
+- VideoRenderer 生成 poster 图片（360p JPEG，~20KB）并注册 `publish.dubbed_video_poster` artifact
+- Job API `/job-api/jobs/{id}/stream/poster` 端点
+- 前端 `LazyVideoPlayer`：用 `<img loading="lazy">` 作预览 → 点击才加载 `<video>`
+- `/projects` 所有已完成任务卡片默认展开（懒加载保证流量可控）
+- workspace 完成后 2 秒自动跳转 `/projects`
+
+**相关 unstaged 文件**（`git status`）：`src/pipeline/process.py`、`src/modules/output/output_dispatcher.py`、`src/modules/output/publish/{publish_models,video_renderer}.py`、`src/services/jobs/{api,video_render_async}.py`、`frontend-next/src/app/(app)/workspace/[jobId]/page.tsx`、`frontend-next/src/components/workspace/ResultMediaCard.tsx`、`frontend-next/src/lib/api/downloads.ts`
+
+> **语义注记**：`src/services/jobs/service.py:96` 对 `output_target != 'editor'` 仍然 strict reject，所以即便 pipeline 这侧硬编码走 PUBLISH，前端目前**也只能传 `'editor'`**（2026-04-17 `3cf4a38` 因此热修）。要让 "output_target 真正按字段分发产物" 需要额外在 service.py 放开校验 + pipeline 从 job record 读取该字段——这两步**都没做**。
+
+---
+
+## 交付情况（2026-04-17）
+
+### 已落地（main 分支 + US 主机生产）
+
+| Commit | 范围 | 状态 |
+|--------|------|------|
+| `27c2b06` | Export Tasks v1 主体：`background_tasks` 表 + queue + executors + API + 前端 hook + Job API generate-video 异步化 | ✅ |
+| `41a0d75` | docs/graphs/plans + `.superpowers/` 入 gitignore | ✅ |
+| `d174df9` | editor 三轨字幕 + S2 metadata 透传 | ⚠️ **[WIP]** 7 个测试失败（不是本 scope 核心，随带落地做进度基线） |
+| `0520536` | 前端 TranslationForm 抽组件 + UI/API 小改 | ✅ |
+| `3cf4a38` | 热修 `output_target='publish'` → `'editor'`（`0520536` 里 WIP 一行导致后端拒 payload） | ✅ |
+
+**部署**：migration 014 已在 PG 跑完，`background_tasks` 表 + partial unique index 建好；Gateway / Next 镜像 rebuild + up -d，5 容器全 healthy；Gateway 最近日志无 error。
+
+### 相对原稿的关键修订（三方评审驱动）
+
+| 项 | 原稿 | 实际落地 |
+|----|------|---------|
+| 任务所有权 | `user_id=caller.id`（默认） | **`user_id=job.user_id`**：admin 代发起的任务，owner 仍能看到、dedupe 不错位（CodeX 二审 P2-1） |
+| 去重保证 | 应用层 check-then-insert | **partial unique index**（`postgresql_where` + `sqlite_where`）+ `IntegrityError` 回退重查（CodeX 二审 P2-2） |
+| latest 语义 | 只返回 pending/running（"active"） | **默认含 completed**（`include_terminal=True`）以支持 "刷新后素材包可下载" 状态恢复；`active_only=true` 保留老语义（CodeX 一审 P1-1） |
+| 前端 hook restore | 只恢复 active | 恢复 `completed` 也展示"可下载"；`failed` 留 idle 让用户 fresh start |
+| 测试依赖 | 仅 `pytest` | 加 `aiosqlite` + `pytest-asyncio` 到 `[dev]` extras（CodeX 一审 P1-3） |
+| FFmpeg 进度 | `-progress pipe:1` 解析百分比 | 实际用阶段级回调（`starting` → `muxing` → `finalizing` → `done`）；pipe 解析未接入 |
+
+### 文件清单（与原稿比对，实际扩展）
+
+原稿外追加：
+
+- `gateway/background_task_models.py` — SQLAlchemy 模型，`__table_args__` 声明 partial unique index（测试建库也会建，`test_background_task_queue.py` 里有直接撞 IntegrityError 的测试）
+- `gateway/materials_pack_common.py` — 从 `materials_api.py` 抽出的共享 helper（`load_artifact_index` / `resolve_artifact_path` / `collect_files_for_items`）
+- `src/services/jobs/video_render_async.py` — Job API 侧的 threading.Thread 渲染 worker + `render_status.json` atomic 读写
+- `src/modules/output/publish/publish_models.py` — `PublishRequest.ambient_audio_path` 字段（随 ambient audio 三轨 mix WIP 进来）
+- `pyproject.toml` — dev extras 加 `aiosqlite`、`pytest-asyncio`
+- `tests/test_background_task_queue.py`（14 用例）、`tests/test_background_task_api.py`（19 用例）、`tests/test_materials_pack_executor.py`（5 用例）、`tests/test_video_render_async.py`（4 用例）
+
+### 已知遗留
+
+**1. Gateway DB `jobs.project_dir` 列系统性为空（pre-existing 长期 bug，被本方案的 task API 暴露）**
+
+- 根因：`gateway/job_intercept.py:452` 只在 job 创建时写一次 `project_dir`，而那时 pipeline 尚未分配；没有回写机制
+- 影响：点击"生成视频"时 `_resolve_project_dir(job)` 读 DB 空列 → 返回 404 "项目目录不存在"，前端落 failed 状态
+- 这不是 v1 scope 引入，也不是本次 deploy 造成——之前老 `materials_api.py` 同步端点有同样问题，只是用户走的是 iframe/window.open 路径，没触发 Gateway 层校验
+- **收口计划（v1.1）**：`_resolve_project_dir` 改 async + 加 Job API 回退（httpx GET `/jobs/{id}` 读 JSON store 的 project_dir，JSON store 有正确值）。同时需要前端 UX 改进：`materials-availability` 全 false 的 job → 不显示"生成视频"按钮，改显示"项目已过期"。
+
+**2. `d174df9` 带进来的 7 个测试失败（与本方案无关，随 WIP 一起落盘）**
+
+- `test_project_output::test_project_output_skips_ffmpeg_when_wav_is_already_compatible` — EditorPackageWriter 跳 ffmpeg 快路径被拿掉
+- `test_process_pipeline::*`（6 个） — S2 review stage 命名从 `translation_config_review` 调整为 `voice_selection_review`，测试未同步
+
+### 回归覆盖
+
+- 新增测试 42 用例 + 扩展 `test_gateway_route_coverage.py` 4 条 task 路由断言
+- 相邻回归：`test_publish_backend`（7）、`test_editor_package_backend`、`test_manifest_writer`、`test_output_dispatcher`、`test_main_summary`、`test_web_ui` 均通过
+- front/back fingerprint 对齐验证：`{}` → `44136f...`、`{items:["source_video","subtitles"]}` → `d3fd1421...` 两侧 bit-identical
+
+---
 
 ## Context
 
@@ -300,6 +376,8 @@ function useBackgroundTask(opts: Options) {
 | `frontend-next/src/lib/api/downloads.ts` | 改 | 新增 task API URL builders + fingerprint helper |
 | `frontend-next/src/components/workspace/ResultMediaCard.tsx` | 改 | 素材包按钮 + 视频生成按钮改用 hook |
 
+> **注**：上表是原稿规划的最小集。实际落地时范围扩展见顶部「交付情况 → 文件清单（与原稿比对，实际扩展）」。
+
 ---
 
 ## 验证
@@ -317,10 +395,13 @@ function useBackgroundTask(opts: Options) {
   - 500MB 限制 → 任务标 failed
   - path traversal attempt → artifact 解析拒绝
   - 新任务前清理旧 zip
-- 新增 `tests/test_generate_video_executor.py`：
-  - Gateway → Job API 协议正常路径
-  - Job API 返回错误 → task 标 failed + error 透传
-  - `already_exists` 快速返回路径
+- 新增 `tests/test_video_render_async.py`：
+  - threading 起停 + 初始 status file 落盘
+  - manifest artifact_index 更新
+  - runner 抛错时 status 落到 failed
+  - task_id 不匹配返回 `{"mismatch": true}`
+- 新增 `tests/test_background_task_api.py`（19 用例）：
+  - create / latest / get / download 端点的 ownership、task_type 校验、completed restore、admin 代用户发起场景
 
 ### 手工验收
 

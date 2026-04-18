@@ -4,42 +4,44 @@
 
 ## 1. 范围
 
-这张子图只看从输入到剪映草稿输出的工作流内核，重点是：
+这张子图聚焦两条相关但不同的链路：
 
-- `Ingestion`
-- `Media Understanding`
-- `Translation`
-- `SemanticBlock Chunking`
-- `TTS`
-- `Alignment`
-- `Caption Retiming`
-- `Draft Writer`
+- 主工作流内核：从输入到 Jianying draft
+- 任务完成后的导出平面：materials pack 与 generate video
 
-不展开商业化、审核页 UI 和 admin 运维面，只保留和主流程强相关的桥接点。
+其中第一条是主流程，第二条是用户显式触发的后处理侧轴。
 
 ## 2. 工作流主图
 
 ```mermaid
 graph TD
-    Entry["ProjectWorkflow.run_build()"] --> Ingestion["Ingestion<br/>subtitle/provider normalization"]
+    Entry["ProjectWorkflow.run_build()"] --> Ingestion["Ingestion"]
     Ingestion --> AudioPrep["Audio Preparation"]
     AudioPrep --> Media["Media Understanding"]
     Media --> Translation["Translation"]
     Translation --> Chunking["SemanticBlock Chunking"]
-    Chunking --> Alignment["Alignment<br/>DSP first / rewrite fallback"]
+    Chunking --> TTS["TTS"]
+    TTS --> Alignment["Alignment<br/>DSP first / rewrite fallback"]
     Alignment --> Layering["Apply Alignment Text Layers"]
-    Layering --> Retiming["Caption Retiming<br/>deterministic math"]
+    Layering --> Retiming["Caption Retiming"]
     Retiming --> Draft["Draft Writer"]
-    Draft --> Output["Jianying Draft Output<br/>draft_content.json / draft_meta_info.json / jianying_like_export.json"]
+    Draft --> Dispatcher["OutputDispatcher"]
+    Dispatcher --> Editor["Editor Package + Manifest"]
 
-    Pipeline["src/pipeline/process.py"] --> Entry
-    TTS["TTS Providers / Voice Resolution"] --> Alignment
-    Chunking --> TTS
+    Editor --> Workspace["Workspace Result Surface"]
+    Workspace --> PackTask["materials_pack task"]
+    Workspace --> VideoTask["generate_video task"]
+
+    VideoTask --> RenderAsync["video_render_async.py"]
+    RenderAsync --> Renderer["VideoRenderer"]
+    Renderer --> PublishVideo["publish.dubbed_video + poster"]
+
+    PackTask --> PackZip["materials zip artifact"]
 ```
 
-## 3. 阶段顺序证据
+## 3. 主流程仍然是 Draft-first
 
-`src/modules/workflow/project_workflow.py` 中 `run_build()` 的执行顺序是：
+`src/modules/workflow/project_workflow.py` 中 `run_build()` 的顺序仍然是：
 
 1. `_run_ingestion_stage()`
 2. `_run_audio_preparation_stage()`
@@ -50,65 +52,73 @@ graph TD
 7. `_apply_alignment_text_layers(translated_lines, aligned_blocks)`
 8. `_run_draft_stage(translated_lines, aligned_blocks)`
 
-这条链确认了几个架构事实：
+这条顺序继续保证：
 
-- TTS 单位不是字幕行，而是 `SemanticBlock`
-- 对齐发生在 chunking 之后，不是翻译后直接出字幕
-- Draft 输出是流程终点，主交付物仍是剪映草稿，而不是直接 MP4
+- TTS 单位仍然是 `SemanticBlock`
+- Alignment 仍然是 chunking 之后的阶段
+- Caption retiming 仍然是确定性处理
+- 主交付仍然是 draft，而不是把视频渲染塞回主流水线中心
 
-## 4. 模块职责拆分
+## 4. OutputDispatcher 的位置
 
-### 4.1 Ingestion / Media Understanding / Translation
+`src/modules/output/output_dispatcher.py` 当前职责是：
 
-- `Ingestion` 聚类负责字幕、provider、输入归一化。
-- `Media_understanding` 聚类负责源内容理解和素材信息整理。
-- `Translation` 聚类负责翻译与译后结果清洗。
+- 读取 canonical `LocalizedProject`
+- 先写 editor backend
+- 再按 `OutputTarget` 决定是否执行 publish backend
+- 最后写 manifest 并回填 artifact index
 
-这三块共同决定后续 `SemanticBlock` 的语义切分边界。
+这说明 `OutputDispatcher` 不是替代 `project_workflow.py`，而是把“已完成的 canonical localized project”分发到输出后端。
 
-### 4.2 SemanticBlock -> TTS -> Alignment
+## 5. 异步导出平面
 
-- `project_workflow.py` 中 `_run_chunking_stage(translated_lines)` 直接产出 `list[SemanticBlock]`。
-- 之后 `_run_alignment_stage(blocks)` 消费的也是 `SemanticBlock`。
-- `Alignment` 聚类和 `src/services/alignment/aligner.py` 仍然代表“DSP first，rewrite second”的策略边界。
+### 5.1 前端入口
 
-### 4.3 Caption Retiming -> Draft Writer
+- `frontend-next/src/components/workspace/ResultMediaCard.tsx` 使用 `useBackgroundTask()` 管理：
+  `materials_pack`
+  `generate_video`
+- `frontend-next/src/lib/api/downloads.ts` 提供：
+  `buildTaskCreateUrl()`
+  `buildTaskStatusUrl()`
+  `buildTaskDownloadUrl()`
+  `computeParamsFingerprint()`
 
-- `src/modules/draft/caption_retiming.py` 的 `CaptionRetimer` 文档字符串明确写的是：
-  “Retimes captions by linearly scaling original intra-block timing.”
-- `CaptionRetimingConfig` 和 `RetimedCaption` 说明字幕时间是计算得出，不是 prompt 生成。
-- `src/modules/draft/draft_writer.py` 负责写出：
-  `draft_content.json`
-  `draft_meta_info.json`
-  `jianying_like_export.json`
+### 5.2 Gateway 任务控制
 
-## 5. 关键链路
+- `gateway/background_task_api.py` 提供任务创建、查询、latest restore、下载接口
+- `gateway/background_task_queue.py` 通过 `params_fingerprint` 做：
+  dedupe
+  latest state restore
 
-### 5.1 Pipeline 阶段衔接
+这使“同一个 job、同一组参数”的导出任务具备可恢复状态，而不是重复生成。
 
-GitNexus 的 `Pipeline` 聚类当前集中在 `src/pipeline/process.py` 附近，包含：
+### 5.3 视频生成闭环
 
-- `_load_probe_cache`
-- `_run_probe_translation`
-- `_calibrate_tts_duration`
-- `_build_process_output_captions`
-- `_build_process_workflow_build_result`
+- `src/services/jobs/video_render_async.py` 在后台线程中调用 `VideoRenderer().render(...)`
+- 它把状态写到 `publish/render_status.json`
+- `src/modules/output/publish/video_renderer.py` 现在支持：
+  progress callback
+  ambient audio 混音
+  poster 生成
 
-这说明 `process.py` 主要承担“阶段拼装和 payload 衔接”，而不是替代 `project_workflow.py` 本身。
+`src/services/jobs/api.py` 再把这些产物公开成：
 
-### 5.2 对齐后再生成字幕层
+- `stream/video`
+- `stream/audio`
+- `stream/poster`
+- `generate-video/{task_id}` 状态查询
 
-`project_workflow.py` 在 `_run_alignment_stage(blocks)` 之后还有 `_apply_alignment_text_layers(...)`，随后才进入 `_run_draft_stage(...)`。
+## 6. 当前结构含义
 
-这意味着：
+这套结构的关键边界是：
 
-- 先得到块级对齐结果
-- 再把文本层和字幕层挂回去
-- 最后才进入草稿写出
+- 工作流成功后，先稳定落盘 editor/draft/manifest
+- 结果页再决定是否异步打包素材或生成可播放视频
+- 这样不会把 FFmpeg、zip、长耗时导出逻辑塞回主 pipeline 阻塞点
 
-## 6. 这张图适合回答什么问题
+## 7. 这张图适合回答什么问题
 
-- 为什么 TTS 单位是 `SemanticBlock` 而不是 subtitle line
-- 为什么对齐要放在 chunking 之后
-- 为什么 subtitle retiming 仍然应该保持确定性逻辑
-- 为什么主输出是 Jianying draft，而不是直接 rendered MP4
+- 为什么主流程仍然是 draft-first
+- `OutputDispatcher` 在整个流程里到底处于什么层级
+- 为什么视频导出现在是后台任务，不是主 pipeline 内同步步骤
+- 结果页里的 materials pack 和 generate video 分别落到哪里

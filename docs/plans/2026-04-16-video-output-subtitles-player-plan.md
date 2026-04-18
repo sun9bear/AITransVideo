@@ -1,8 +1,41 @@
 # 视频输出优化：字幕 + 播放器 + 素材包 (V3-final)
 
-> **Status:** active (V3-final 三轮审核通过；AlignedSegment en_text + output_dispatcher 前置改动已落地；字幕短句 / 播放器卡片 / 素材包剩余部分推进中)  
-> **Last updated:** 2026-04-16  
+> **Status:** 🟡 Part 1 / Part 2 / Part 3 / materials 端点已 commit 并部署到 US 主机（`d174df9` + `0520536` + `27c2b06` + `3cf4a38`，最新 2026-04-17）。「超出原方案范围的追加改动」整组仍在 worktree WIP、**未 commit**、**未部署**；HEAD 上 pipeline 仍走 EDITOR-only 行为，不自动合成 publish 视频。
+> **Last updated:** 2026-04-18
 > **Reviewed-by:** Codex 三轮
+
+## 完成情况（已 commit 并部署到 US 主机）
+
+- ✅ Part 1 字幕生成优化：SubtitleSlice 单一切片基准 + 短句去标点（剪映风格）+ 3 SRT 输出（zh/en/bilingual）+ 输出链路全程打通（models/writer/dispatcher/manifest/read_surface/constants/mappers）——commit `d174df9`（**⚠️ 带 7 个测试失败的 WIP 基线，详情见 background-task-system-plan.md 交付情况**）
+- ✅ Part 2 媒体流：统一 `stream/{kind}` 端点，Range-aware 206 Partial Content——commit `27c2b06`
+- ✅ Part 3 ResultMediaCard 组件：播放器 + 下载 + 素材包 dialog，3 级 fallback（video → audio → 纯下载）——commit `27c2b06` + `0520536`
+- ✅ materials-availability 端点——commit `27c2b06`
+- ✅ materials-pack Gateway-native 同步端点（后被同轮 commit 的异步 task API 替代，保留为 fallback）——commit `27c2b06`
+- ✅ 项目详情页 + workspace 同步接入——commit `0520536`
+- ✅ pytest 回归补全（test_project_output / test_gateway_route_coverage 等）——commit `d174df9` + `27c2b06`
+
+## 超出原方案范围的追加改动（🚧 未 commit、未部署）
+
+`git status` 显示以下改动仍在 worktree，**HEAD 为 `3cf4a38`（EDITOR-only）**，US 主机跑的也是 HEAD 版本。部署前需要 commit + push + 镜像 rebuild。
+
+- **`src/pipeline/process.py:3528`** 硬编码从 `targets=[OutputTarget.EDITOR]` 改成 `[OutputTarget.PUBLISH]`（让 dispatcher 同时产 editor package + publish.dubbed_video）。注意 pipeline **仍然不读** job record 里的 `output_target` 字段——这次只是换了一个硬编码值，不是"让 `output_target` 真正生效"。
+- VideoRenderer 三轨混合：原视频 + 配音 + 背景音（ambient audio，amix -12dB）
+- VideoRenderer 生成 poster 图片（360p JPEG，~20KB）+ 注册 `publish.dubbed_video_poster` artifact
+- Job API `/job-api/jobs/{id}/stream/poster` 端点
+- 前端 `LazyVideoPlayer`：`<img loading="lazy">` 作预览 → 点击才加载 `<video>`
+- `/projects` 所有已完成任务卡片默认展开
+- workspace 完成后 2 秒自动跳转 `/projects`
+
+相关 unstaged 文件（`git status` 截自 2026-04-18）：`src/pipeline/process.py`、`src/modules/output/output_dispatcher.py`、`src/modules/output/publish/{publish_models,video_renderer}.py`、`src/services/jobs/{api,video_render_async}.py`、`frontend-next/src/app/(app)/workspace/[jobId]/page.tsx`、`frontend-next/src/components/workspace/ResultMediaCard.tsx`、`frontend-next/src/lib/api/downloads.ts`。
+
+## 后续已知问题
+
+- **Gateway DB `jobs.project_dir` 空列**（pre-existing）：`materials-pack` 旧同步端点 + 新异步任务端点都会读 Gateway DB 的 `project_dir`，但 `intercept_create_job` 只在创建时写一次（那时 pipeline 还没分配路径），导致列永远为空。v1.1 收口计划在 Gateway 加 Job API 回退查询。详见 background-task-system-plan 交付情况「已知遗留」。
+- **`output_target` 字段不流通到 pipeline**（截至 HEAD `3cf4a38`）：
+  - `src/services/jobs/service.py:96` 仍硬性 require `output_target == 'editor'`（拒掉 `'publish'` / `'both'`）
+  - `src/pipeline/process.py` 不读 job record 的 `output_target`，而是**硬编码**一个值传给 `OutputDispatcher`
+  - 2026-04-17 前端短暂发过 `'publish'` 触发 400，commit `3cf4a38` 已回滚到 `'editor'`
+  - 上面 "超出原方案范围" 那组 WIP 只是把 pipeline 硬编码从 EDITOR 改 PUBLISH——**没有让 `output_target` 字段真正按值分发**。那需要同时 (a) service.py 放开校验 (b) pipeline 从 job record 读该字段注入 `OutputDispatcher`。当前两步都没做。
 
 ---
 

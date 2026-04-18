@@ -1,8 +1,33 @@
 # UI 导航重构：视频翻译主页 + 新建弹窗 (V2)
 
-> **Status:** active (awaiting implementation — V2-final，综合 Gemini/CodeX/GPT 三方审核 + CodeX 二审修订)  
-> **Last updated:** 2026-04-16  
+> **Status:** ✅ 已全部实施并部署到 US 主机 (2026-04-16)
+> **Last updated:** 2026-04-18
 > **Depends-on:** `docs/plans/2026-04-16-video-output-subtitles-player-plan.md`（播放器卡片）
+
+## 完成情况
+
+- ✅ Phase 1 TranslationForm 组件抽取（`onCreated` + `mode` 契约）+ NewTranslationDialog 弹窗
+- ✅ Phase 2 `/projects` 升级为"视频翻译"主页：
+  - 卡片化展示 + 状态自适应内容（succeeded/running/waiting/failed/queued/cancelled）
+  - 轮询刷新（活跃任务 4 秒间隔）
+  - 卡片数据分层（列表只用 JobSummary，展开才挂载 ResultMediaCard）
+  - 右上角"新建翻译" + "当前任务"按钮
+  - `?new=1` 自动打开新建弹窗
+  - 失败态错误提示 + 重试按钮（修复"加载失败误当空态"）
+  - 新任务自动展开（用 ref 避免 stale closure 覆盖用户手动折叠）
+  - 重新创建带 URL 预填（youtube_url 来源）
+- ✅ Phase 2 `selectActiveTaskJob` 严格 selector（不复用 legacy fallback）
+- ✅ Phase 2 app-shell 侧边栏重组 + `/workspace/*` 高亮改到 `/projects`
+- ✅ Phase 2 导航迁移真值表落地：workspace 取消跳转、projects 详情、not-found 均改为 `/projects?new=1`
+- ✅ Phase 3 播放器集成：ResultMediaCard 嵌入展开的 succeeded 卡片
+- ✅ 过渡策略：旧路由 `/translations/new`、`/tasks/current` 保留可访问
+
+## 超出原方案范围的追加改动
+
+- 卡片网格布局（桌面 md:2 / xl:3 / 2xl:4 列）而非纯竖排
+- 所有已完成任务卡片默认全部展开（配合视频 poster 懒加载，不会打爆流量）
+- workspace 任务完成后 2 秒自动跳转到 `/projects`（toast 提示）
+- workspace 不再显示 ResultMediaCard（避免无法播放的全屏视频问题）
 
 ---
 
