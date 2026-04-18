@@ -99,6 +99,7 @@ export function toJobSummary(payload: ApiJobRecord): JobSummary {
     reviewGate: payload.review_gate,
     errorSummary: payload.error_summary,
     fallbackSummary: payload.fallback_summary,
+    serviceMode: payload.service_mode,
   }
 }
 

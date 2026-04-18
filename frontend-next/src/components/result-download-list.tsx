@@ -5,6 +5,13 @@ import type { ResultDownloadItem } from '@/types/jobs'
 
 type ResultDownloadListProps = {
   items: readonly ResultDownloadItem[]
+  /**
+   * Service mode — Express 下只展示 publish.dubbed_video 一项。
+   * 后端 /artifacts endpoint 已做同等过滤（见
+   * docs/plans/2026-04-18-express-studio-output-filter-plan.md），
+   * 本层为兜底：即便后端回退仍不会泄露 editor/source 下载入口。
+   */
+  serviceMode?: 'express' | 'studio'
 }
 
 const primaryDownloadKeys = [
@@ -18,11 +25,20 @@ const primaryDownloadKeySet = new Set<string>(primaryDownloadKeys)
 
 const ZIP_KEYS = new Set(['editor.tts_segments_zip'])
 
-export function ResultDownloadList({ items }: ResultDownloadListProps) {
+// Express 模式下允许展示的下载 key（和后端
+// EXPRESS_ALLOWED_ARTIFACT_KEYS 语义对齐；poster 不进 download list）
+const EXPRESS_VISIBLE_DOWNLOAD_KEYS = new Set<string>([
+  'publish.dubbed_video',
+])
+
+export function ResultDownloadList({ items, serviceMode }: ResultDownloadListProps) {
+  const effectiveItems = serviceMode === 'express'
+    ? items.filter((item) => EXPRESS_VISIBLE_DOWNLOAD_KEYS.has(item.key))
+    : items
   const orderedPrimaryItems = primaryDownloadKeys
-    .map((key) => items.find((item) => item.key === key))
+    .map((key) => effectiveItems.find((item) => item.key === key))
     .filter((item): item is ResultDownloadItem => Boolean(item))
-  const secondaryItems = items.filter((item) => !primaryDownloadKeySet.has(item.key))
+  const secondaryItems = effectiveItems.filter((item) => !primaryDownloadKeySet.has(item.key))
 
   return (
     <section className="rounded-2xl border border-border bg-card p-5">

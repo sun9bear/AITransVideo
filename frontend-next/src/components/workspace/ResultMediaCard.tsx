@@ -17,6 +17,12 @@ import { toast } from "sonner"
 
 interface ResultMediaCardProps {
   jobId: string
+  /**
+   * Service mode — Express 隐藏"配音音频"和"素材包"按钮；保留视频播放器、
+   * "配音视频"下载和"生成视频"fallback。Studio 完整 UI。
+   * 见 docs/plans/2026-04-18-express-studio-output-filter-plan.md
+   */
+  serviceMode?: 'express' | 'studio'
 }
 
 const MATERIAL_OPTIONS = [
@@ -29,7 +35,8 @@ const MATERIAL_OPTIONS = [
 
 type MaterialItemKey = (typeof MATERIAL_OPTIONS)[number]["key"]
 
-export function ResultMediaCard({ jobId }: ResultMediaCardProps) {
+export function ResultMediaCard({ jobId, serviceMode }: ResultMediaCardProps) {
+  const isExpress = serviceMode === 'express'
   const [availability, setAvailability] = useState<MaterialsAvailability | null>(null)
   const [loading, setLoading] = useState(true)
   const [showPackDialog, setShowPackDialog] = useState(false)
@@ -179,7 +186,7 @@ export function ResultMediaCard({ jobId }: ResultMediaCardProps) {
                 </Button>
               </a>
             )}
-            {hasAudio && audioDownloadUrl && (
+            {!isExpress && hasAudio && audioDownloadUrl && (
               <a href={audioDownloadUrl} download>
                 <Button variant="outline" size="sm" className="gap-2">
                   <Music className="h-4 w-4" />
@@ -188,15 +195,17 @@ export function ResultMediaCard({ jobId }: ResultMediaCardProps) {
                 </Button>
               </a>
             )}
-            <MaterialsPackButton
-              task={packTask}
-              onOpenDialog={() => setShowPackDialog(true)}
-              onDownload={handleDownloadPack}
-            />
+            {!isExpress && (
+              <MaterialsPackButton
+                task={packTask}
+                onOpenDialog={() => setShowPackDialog(true)}
+                onDownload={handleDownloadPack}
+              />
+            )}
           </div>
         </div>
 
-        {showPackDialog && (
+        {!isExpress && showPackDialog && (
           <div className="mt-4 rounded-lg border border-border bg-card p-4 space-y-3">
             <div className="flex items-center justify-between">
               <h4 className="text-sm font-medium">选择素材</h4>

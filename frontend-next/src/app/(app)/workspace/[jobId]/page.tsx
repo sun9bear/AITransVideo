@@ -295,7 +295,7 @@ export default function WorkspacePage() {
               任务已完成，请前往<Link href="/projects" className="text-primary underline ml-1">视频翻译主页</Link>查看和播放结果。
             </div>
           )}
-          <ResultDownloadList items={downloads} />
+          <ResultDownloadList items={downloads} serviceMode={job.serviceMode} />
         </>
       ) : null}
 

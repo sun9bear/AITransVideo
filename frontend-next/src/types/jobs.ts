@@ -66,6 +66,11 @@ export interface JobSummary {
   reviewGate: ReviewGate | null
   errorSummary: ErrorSummary | null
   fallbackSummary: Record<string, unknown> | null
+  /**
+   * Service mode — Express 只暴露配音视频，Studio 全量。
+   * 驱动 ResultMediaCard / ResultDownloadList 的 UI 分支。
+   */
+  serviceMode?: 'express' | 'studio'
 }
 
 export interface JobLogEntry {

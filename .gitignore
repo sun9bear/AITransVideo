@@ -21,6 +21,13 @@ demo_output/
 voice_bank/
 uploads/
 
+# 例外：frontend-next 里的 (app)/projects/ 和 (app)/jobs/ 是 Next.js 路由页面源码，
+# 与顶层 runtime 数据目录同名但完全不是同一类东西，必须入库。
+!frontend-next/src/app/(app)/projects/
+!frontend-next/src/app/(app)/projects/**
+!frontend-next/src/app/(app)/jobs/
+!frontend-next/src/app/(app)/jobs/**
+
 # Config (secrets)
 .env
 .env.*

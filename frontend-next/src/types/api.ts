@@ -31,6 +31,12 @@ export interface ApiJobRecord {
   review_gate: Record<string, unknown> | null
   error_summary: Record<string, unknown> | null
   fallback_summary: Record<string, unknown> | null
+  /**
+   * Service mode — decides UI exposure layer (Express: dubbed video only;
+   * Studio: full output including editor package).
+   * See docs/plans/2026-04-18-express-studio-output-filter-plan.md.
+   */
+  service_mode?: 'express' | 'studio'
 }
 
 export interface ApiJobListResponse {
