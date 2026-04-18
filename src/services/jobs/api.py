@@ -115,6 +115,12 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
                     payload = service.get_editing_segments(path_parts[1])
                     self._write_json(HTTPStatus.OK, payload)
                     return
+                # GET /jobs/{id}/editing/voice-map (T1-6)
+                if (len(path_parts) == 4 and path_parts[0] == "jobs"
+                        and path_parts[2] == "editing" and path_parts[3] == "voice-map"):
+                    payload = service.get_editing_voice_map(path_parts[1])
+                    self._write_json(HTTPStatus.OK, payload)
+                    return
                 # --- Phase 1: review-state (job-scoped, strict) ---
                 if len(path_parts) == 3 and path_parts[0] == "jobs" and path_parts[2] == "review-state":
                     job_id = path_parts[1]
@@ -464,6 +470,34 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
                 if (len(path_parts) == 5 and path_parts[0] == "jobs"
                         and path_parts[2] == "segments" and path_parts[4] == "discard-draft"):
                     result = service.discard_segment_draft_tts(path_parts[1], path_parts[3])
+                    self._write_json(HTTPStatus.OK, {"success": True, **result})
+                    return
+                # POST /jobs/{id}/regenerate-all-tts — batch re-TTS scan (T1-6)
+                if (len(path_parts) == 3 and path_parts[0] == "jobs"
+                        and path_parts[2] == "regenerate-all-tts"):
+                    self._read_json_payload()  # body currently unused
+                    result = service.regenerate_all_dirty_segments(path_parts[1])
+                    self._write_json(HTTPStatus.OK, {"success": True, **result})
+                    return
+                # POST /jobs/{id}/editing/voice-map — set per-segment voice override (T1-6)
+                if (len(path_parts) == 4 and path_parts[0] == "jobs"
+                        and path_parts[2] == "editing" and path_parts[3] == "voice-map"):
+                    payload = self._read_json_payload()
+                    segment_id = str(payload.get("segment_id", "")).strip()
+                    if not segment_id:
+                        raise ValueError("segment_id is required")
+                    action = str(payload.get("action", "set")).strip()
+                    if action == "clear":
+                        result = service.clear_editing_voice_override(
+                            path_parts[1], segment_id
+                        )
+                    else:
+                        provider = str(payload.get("provider", "")).strip()
+                        voice_id = str(payload.get("voice_id", "")).strip()
+                        result = service.set_editing_voice_override(
+                            path_parts[1], segment_id,
+                            provider=provider, voice_id=voice_id,
+                        )
                     self._write_json(HTTPStatus.OK, {"success": True, **result})
                     return
                 # POST /jobs/{id}/editing/commit — T1-1 skeleton raises 501

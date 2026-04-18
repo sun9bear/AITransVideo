@@ -350,6 +350,63 @@ class JobService:
         _touch_editing(record, self.store)
         return result
 
+    # ------------------------------------------------------------------
+    # Batch re-TTS + voice_map (T1-6)
+    # ------------------------------------------------------------------
+
+    def regenerate_all_dirty_segments(
+        self,
+        job_id: str,
+        *,
+        tts_caller=None,
+    ) -> dict:
+        """Synchronous batch regenerate. Per D38 response shape."""
+        from services.jobs.editing import touch_editing as _touch_editing
+        from services.jobs.editing_batch import regenerate_all_dirty_segments as _batch
+
+        record = self._require_editing(job_id)
+        result = _batch(record.project_dir, tts_caller=tts_caller)
+        _touch_editing(record, self.store)
+        return result
+
+    def get_editing_voice_map(self, job_id: str) -> dict:
+        from services.jobs.editing_voice_map import load_voice_map
+
+        record = self._require_editing(job_id)
+        return {"voice_map": load_voice_map(record.project_dir)}
+
+    def set_editing_voice_override(
+        self,
+        job_id: str,
+        segment_id: str,
+        *,
+        provider: str,
+        voice_id: str,
+    ) -> dict:
+        from services.jobs.editing import touch_editing as _touch_editing
+        from services.jobs.editing_voice_map import set_voice_override
+        from services.jobs.input_validators import validate_segment_id
+
+        validate_segment_id(segment_id)
+        record = self._require_editing(job_id)
+        result = set_voice_override(
+            record.project_dir, segment_id,
+            provider=provider, voice_id=voice_id,
+        )
+        _touch_editing(record, self.store)
+        return result
+
+    def clear_editing_voice_override(self, job_id: str, segment_id: str) -> dict:
+        from services.jobs.editing import touch_editing as _touch_editing
+        from services.jobs.editing_voice_map import clear_voice_override
+        from services.jobs.input_validators import validate_segment_id
+
+        validate_segment_id(segment_id)
+        record = self._require_editing(job_id)
+        result = clear_voice_override(record.project_dir, segment_id)
+        _touch_editing(record, self.store)
+        return result
+
     def get_job(self, job_id: str) -> JobRecord | None:
         return self.store.load_job(job_id)
 

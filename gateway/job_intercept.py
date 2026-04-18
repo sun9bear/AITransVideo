@@ -692,6 +692,13 @@ _POST_EDIT_TRANSITION_SUBPATHS: frozenset[str] = frozenset({
     "editing/commit",
 })
 
+# Direct post-edit mutation subpaths (no templating). Union with the
+# per-segment action allowlist in ``_is_post_edit_mutation_subpath``.
+_POST_EDIT_SIMPLE_MUTATION_SUBPATHS: frozenset[str] = frozenset({
+    "regenerate-all-tts",   # T1-6 batch
+    "editing/voice-map",    # T1-6 set/clear voice override (POST only)
+})
+
 
 def _is_post_edit_mutation_subpath(subpath: str) -> bool:
     """Decide whether a job subresource subpath belongs to the post-edit
@@ -699,6 +706,8 @@ def _is_post_edit_mutation_subpath(subpath: str) -> bool:
     the feature flag gate + lock dispatch; ownership is verified separately
     for every subpath via ``_verify_job_ownership``."""
     if subpath in _POST_EDIT_TRANSITION_SUBPATHS:
+        return True
+    if subpath in _POST_EDIT_SIMPLE_MUTATION_SUBPATHS:
         return True
     parts = subpath.split("/")
     # segments/{sid}/{action} where action ∈ {update, status, regenerate-tts,
