@@ -153,13 +153,44 @@ def scan_editing_idle(
     return {"candidates": candidates, "cancelled": cancelled, "failed": failed}
 
 
-# Phase 1 T1-1 will overwrite this module-level variable with its real cancel
-# handler, e.g.:
-#
-#     from src.services.web_ui import editing_idle_scanner
-#     editing_idle_scanner.registered_cancel_callback = real_editing_cancel
-#
-# The cleanup loop calls ``scan_editing_idle(now, registered_cancel_callback)``
-# so a runtime swap takes effect on the next scan cycle without needing a
-# restart.
+# Cleanup loop calls ``scan_editing_idle(now, registered_cancel_callback)``
+# so a runtime swap takes effect on the next scan cycle without restart.
 registered_cancel_callback: CancelCallback = _noop_cancel
+
+
+def inject_editing_cancel_callback(service_provider: object) -> None:
+    """T1-10: bind the real editing-cancel handler to the idle scanner.
+
+    Called from app startup (``main.py`` ``job-api`` subcommand) once the
+    JobService instance is available. ``service_provider`` must expose
+    ``cancel_editing(job_id: str, *, reason: str) -> JobRecord``.
+
+    After this call, ``scan_editing_idle`` invoked by the cleanup loop
+    will drop ``editor/editing/`` + flip status to ``succeeded`` on every
+    job idle past the threshold, rather than just logging.
+    """
+    global registered_cancel_callback
+
+    def _real_cancel(job_id: str, reason: str) -> bool:
+        try:
+            service_provider.cancel_editing(job_id, reason=reason)  # type: ignore[attr-defined]
+            return True
+        except Exception as exc:
+            logger.warning(
+                "editing_idle_scanner: cancel_editing(%s) failed: %s",
+                job_id, exc,
+            )
+            return False
+
+    registered_cancel_callback = _real_cancel
+    logger.info(
+        "editing_idle_scanner: real cancel callback bound "
+        "(replacing _noop_cancel)"
+    )
+
+
+def reset_editing_cancel_callback() -> None:
+    """Test helper: restore the no-op default. Also used by shutdown paths
+    that want to stop cancelling after the service is torn down."""
+    global registered_cancel_callback
+    registered_cancel_callback = _noop_cancel
