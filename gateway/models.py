@@ -115,6 +115,12 @@ class Job(Base):
     __table_args__ = (
         Index("idx_jobs_user_id", "user_id"),
         Index("idx_jobs_status", "status"),
+        # --- Post-edit infra (migration 015, 2026-04-18) ---
+        # See docs/plans/2026-04-18-studio-post-edit-plan.md §5.1
+        # root_job_id + user_id scope TTL lookup; expires_at is the ordering key.
+        Index("idx_jobs_root_user_expires", "root_job_id", "user_id", "expires_at"),
+        Index("idx_jobs_copy_of_job_id", "copy_of_job_id"),
+        Index("idx_jobs_source_content_hash", "source_content_hash"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -161,6 +167,31 @@ class Job(Base):
     quota_state: Mapped[str] = mapped_column(
         String(16), nullable=False, server_default="none"
     )  # "none" | "reserved" | "committed" | "released"
+
+    # --- Post-edit infra (migration 015, 2026-04-18) ---
+    # See docs/plans/2026-04-18-studio-post-edit-plan.md §3.1
+    # User-visible friendly title (auto-generated, user-editable, max 60 chars).
+    # NULL → frontend falls back to getJobDisplayTitle(source_ref).
+    display_name: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    # Per-job TTL. NULL → cleanup uses legacy rule (created_at + 7d). For new
+    # jobs, written at creation; for copies, computed via compute_copy_expires_at
+    # (§5.1) as min(now + 7d, latest_live_sibling.expires_at + 24h).
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Last user action in editing state. Updated on enter-edit + every mutation
+    # (§5.4.1). idle_scanner cancels editing jobs idle > 24h.
+    editing_touched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Direct parent of a copy (NULL for originals).
+    copy_of_job_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Copy lineage root. Originals have root_job_id = job_id. Used with user_id
+    # for TTL scope lookup — prevents cross-user TTL interference (D23).
+    root_job_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Counter of editing → running → succeeded cycles. UI shows "正在重合成 · 第 N 次修改"
+    # when > 0 (D33).
+    edit_generation: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    # Identifies "same source video" for copy family lookup. Local upload: file
+    # SHA-256; YouTube: "youtube:{video_id}". Used to associate copy families
+    # with the original source (D23).
+    source_content_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     # --- V3-0 observation fields (shadow metering) ---
     estimated_minutes: Mapped[float | None] = mapped_column(Float, nullable=True)

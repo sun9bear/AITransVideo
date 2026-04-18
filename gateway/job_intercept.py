@@ -348,7 +348,10 @@ async def intercept_create_job(
         active_count_result = await db.execute(
             select(func.count()).where(
                 Job.user_id == user.id,
-                Job.status.in_(["queued", "running", "waiting_for_review"]),
+                # Concurrency limit counts any "active" job. editing is active
+                # (user holds a paused editing session) and must count — see
+                # docs/plans/2026-04-18-studio-post-edit-plan.md §4.3.
+                Job.status.in_(["queued", "running", "waiting_for_review", "editing"]),
             )
         )
         active_count = active_count_result.scalar() or 0

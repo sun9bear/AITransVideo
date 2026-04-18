@@ -8,6 +8,7 @@ from services.job_paths import build_workspace_dir
 from services.jobs.events import EVENT_LEVEL_ERROR, EVENT_TYPE_STATUS, JobEvent
 from services.jobs.models import (
     ACTIVE_JOB_STATUSES,
+    WORKER_ACTIVE_STATUSES,
     JOB_STATUS_FAILED,
     JOB_STATUS_QUEUED,
     JOB_STATUS_RUNNING,
@@ -200,9 +201,14 @@ class JobService:
         return build_job_artifacts_payload(self.require_job(job_id))
 
     def _reap_stale_jobs(self) -> None:
-        """Mark stale queued/running jobs (no live worker) as failed."""
+        """Mark stale queued/running jobs (no live worker) as failed.
+
+        Uses WORKER_ACTIVE_STATUSES (not ACTIVE_JOB_STATUSES) so that
+        waiting_for_review / editing jobs — which legitimately have no worker —
+        are not mis-flagged as failed. See docs/internal/status-touchpoints-2026-04-18.md.
+        """
         for record in self.store.list_jobs(limit=None):
-            if record.status in {JOB_STATUS_QUEUED, JOB_STATUS_RUNNING}:
+            if record.status in WORKER_ACTIVE_STATUSES:
                 if self._is_stale_process_backed_active_job(record):
                     self._mark_stale_active_job_failed(record)
 
@@ -218,7 +224,11 @@ class JobService:
         return None
 
     def _is_stale_process_backed_active_job(self, record: JobRecord) -> bool:
-        if record.status not in {JOB_STATUS_QUEUED, JOB_STATUS_RUNNING}:
+        # Only QUEUED/RUNNING (= WORKER_ACTIVE_STATUSES) require a live worker
+        # process. waiting_for_review / editing legitimately have no worker and
+        # must never be treated as stale by this helper. See
+        # docs/internal/status-touchpoints-2026-04-18.md §0.
+        if record.status not in WORKER_ACTIVE_STATUSES:
             return False
         return not self.runner.is_process_active(record.job_id)
 

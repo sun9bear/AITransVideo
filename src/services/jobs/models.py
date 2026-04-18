@@ -32,10 +32,12 @@ JOB_STATUS_WAITING_FOR_REVIEW = "waiting_for_review"
 JOB_STATUS_SUCCEEDED = "succeeded"
 JOB_STATUS_FAILED = "failed"
 JOB_STATUS_CANCELLED = "cancelled"
+JOB_STATUS_EDITING = "editing"  # Post-edit workflow (plan 2026-04-18, D21)
 SUPPORTED_JOB_STATUSES = {
     JOB_STATUS_QUEUED,
     JOB_STATUS_RUNNING,
     JOB_STATUS_WAITING_FOR_REVIEW,
+    JOB_STATUS_EDITING,
     JOB_STATUS_SUCCEEDED,
     JOB_STATUS_FAILED,
     JOB_STATUS_CANCELLED,
@@ -44,6 +46,15 @@ ACTIVE_JOB_STATUSES = {
     JOB_STATUS_QUEUED,
     JOB_STATUS_RUNNING,
     JOB_STATUS_WAITING_FOR_REVIEW,
+    JOB_STATUS_EDITING,  # editing is active — cleanup / list-page polling must see it
+}
+# Subset of ACTIVE_JOB_STATUSES that require a live worker process. Reap-stale
+# logic uses this (NOT ACTIVE_JOB_STATUSES) so that editing/waiting_for_review
+# jobs — which legitimately have no worker — are not mis-flagged as failed.
+# See docs/internal/status-touchpoints-2026-04-18.md §0.
+WORKER_ACTIVE_STATUSES = {
+    JOB_STATUS_QUEUED,
+    JOB_STATUS_RUNNING,
 }
 
 STAGE_INGESTION = "ingestion"
@@ -111,6 +122,13 @@ class JobRecord:
     user_id: str | None = None
     workspace_dir: str | None = None
     source_content_hash: str | None = None
+    # --- Post-edit infra (plan 2026-04-18 §3.1) ---
+    display_name: str | None = None
+    expires_at: str | None = None           # ISO-8601
+    editing_touched_at: str | None = None   # ISO-8601; §5.4.1 refresh points
+    copy_of_job_id: str | None = None       # direct parent of a copy
+    root_job_id: str | None = None          # lineage root; originals: == job_id
+    edit_generation: int = 0                # editing→running→succeeded cycles
 
     def __post_init__(self) -> None:
         self.job_id = str(self.job_id).strip()
@@ -136,6 +154,16 @@ class JobRecord:
         self.user_id = _normalize_optional_text(self.user_id)
         self.workspace_dir = _normalize_optional_text(self.workspace_dir)
         self.source_content_hash = _normalize_optional_text(self.source_content_hash)
+        # --- Post-edit fields normalize ---
+        self.display_name = _normalize_optional_text(self.display_name)
+        self.expires_at = _normalize_optional_text(self.expires_at)
+        self.editing_touched_at = _normalize_optional_text(self.editing_touched_at)
+        self.copy_of_job_id = _normalize_optional_text(self.copy_of_job_id)
+        self.root_job_id = _normalize_optional_text(self.root_job_id)
+        # Originals: root_job_id == job_id (ensures TTL lookup works for pre-
+        # post-edit data that was migrated in without an explicit root set).
+        if self.root_job_id is None:
+            self.root_job_id = self.job_id
 
         if not self.job_id:
             raise ValueError("job_id is required")
@@ -197,6 +225,13 @@ class JobRecord:
             "user_id": self.user_id,
             "workspace_dir": self.workspace_dir,
             "source_content_hash": self.source_content_hash,
+            # --- Post-edit infra ---
+            "display_name": self.display_name,
+            "expires_at": self.expires_at,
+            "editing_touched_at": self.editing_touched_at,
+            "copy_of_job_id": self.copy_of_job_id,
+            "root_job_id": self.root_job_id,
+            "edit_generation": self.edit_generation,
         }
 
     @classmethod
@@ -239,6 +274,13 @@ class JobRecord:
             user_id=payload.get("user_id"),
             workspace_dir=payload.get("workspace_dir"),
             source_content_hash=payload.get("source_content_hash"),
+            # --- Post-edit infra ---
+            display_name=payload.get("display_name"),
+            expires_at=payload.get("expires_at"),
+            editing_touched_at=payload.get("editing_touched_at"),
+            copy_of_job_id=payload.get("copy_of_job_id"),
+            root_job_id=payload.get("root_job_id"),
+            edit_generation=int(payload.get("edit_generation") or 0),
         )
 
 

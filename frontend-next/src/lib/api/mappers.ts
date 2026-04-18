@@ -84,7 +84,9 @@ export function toJobSummary(payload: ApiJobRecord): JobSummary {
     sourceType: payload.source_type,
     outputTarget: payload.output_target,
     speakers: payload.speakers,
-    title: buildJobTitle(payload),
+    // Prefer display_name (user-friendly, migration 015); fallback to
+    // derivation from source_ref for pre-migration / pre-T0-4 jobs.
+    title: payload.display_name ?? buildJobTitle(payload),
     voiceA: payload.voice_a,
     voiceB: payload.voice_b,
     status: normalizeStatus(payload.status),
@@ -100,6 +102,13 @@ export function toJobSummary(payload: ApiJobRecord): JobSummary {
     errorSummary: payload.error_summary,
     fallbackSummary: payload.fallback_summary,
     serviceMode: payload.service_mode,
+    // --- Post-edit infra ---
+    displayName: payload.display_name ?? null,
+    expiresAt: payload.expires_at ?? null,
+    editingTouchedAt: payload.editing_touched_at ?? null,
+    copyOfJobId: payload.copy_of_job_id ?? null,
+    rootJobId: payload.root_job_id ?? null,
+    editGeneration: payload.edit_generation ?? 0,
   }
 }
 

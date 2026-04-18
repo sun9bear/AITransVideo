@@ -1,5 +1,6 @@
 export const JOB_STATUS_LABELS = {
   cancelled: '已取消',
+  editing: '修改中',
   failed: '已失败',
   queued: '待开始',
   running: '处理中',
@@ -71,6 +72,17 @@ export interface JobSummary {
    * 驱动 ResultMediaCard / ResultDownloadList 的 UI 分支。
    */
   serviceMode?: 'express' | 'studio'
+  /**
+   * Post-edit infra fields (plan 2026-04-18 §3.3). All nullable because
+   * jobs created before migration 015 have NULL for these columns until
+   * backfill / first-touch populates them.
+   */
+  displayName?: string | null
+  expiresAt?: string | null
+  editingTouchedAt?: string | null
+  copyOfJobId?: string | null
+  rootJobId?: string | null
+  editGeneration?: number
 }
 
 export interface JobLogEntry {
@@ -149,4 +161,16 @@ export const ACTIVE_JOB_STATUSES: readonly JobStatus[] = [
   'queued',
   'running',
   'waiting_for_review',
+  'editing',
+] as const
+
+/**
+ * Subset of ACTIVE_JOB_STATUSES that require a live worker process. UI polling
+ * may still include `editing` (via ACTIVE_JOB_STATUSES), but reap-stale or
+ * "is a pipeline running" checks should use this narrower set.
+ * Mirrors backend WORKER_ACTIVE_STATUSES in src/services/jobs/models.py.
+ */
+export const WORKER_ACTIVE_JOB_STATUSES: readonly JobStatus[] = [
+  'queued',
+  'running',
 ] as const

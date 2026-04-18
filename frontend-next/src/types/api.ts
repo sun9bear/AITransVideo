@@ -1,5 +1,6 @@
 export type ApiJobStatus =
   | 'cancelled'
+  | 'editing'
   | 'failed'
   | 'queued'
   | 'running'
@@ -37,6 +38,16 @@ export interface ApiJobRecord {
    * See docs/plans/2026-04-18-express-studio-output-filter-plan.md.
    */
   service_mode?: 'express' | 'studio'
+  /**
+   * Post-edit infra fields (migration 015, plan 2026-04-18 §3.1).
+   * All nullable because pre-migration jobs don't have these columns set.
+   */
+  display_name?: string | null
+  expires_at?: string | null
+  editing_touched_at?: string | null
+  copy_of_job_id?: string | null
+  root_job_id?: string | null
+  edit_generation?: number
 }
 
 export interface ApiJobListResponse {
