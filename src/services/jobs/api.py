@@ -109,6 +109,12 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
                         }
                     self._write_json(HTTPStatus.OK, artifacts_payload)
                     return
+                # --- Studio post-edit: GET /jobs/{id}/editing/segments (T1-2) ---
+                if (len(path_parts) == 4 and path_parts[0] == "jobs"
+                        and path_parts[2] == "editing" and path_parts[3] == "segments"):
+                    payload = service.get_editing_segments(path_parts[1])
+                    self._write_json(HTTPStatus.OK, payload)
+                    return
                 # --- Phase 1: review-state (job-scoped, strict) ---
                 if len(path_parts) == 3 and path_parts[0] == "jobs" and path_parts[2] == "review-state":
                     job_id = path_parts[1]
@@ -412,6 +418,30 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
                     reason = str(payload.get("reason") or "user_cancel").strip() or "user_cancel"
                     job = service.cancel_editing(path_parts[1], reason=reason)
                     self._write_json(HTTPStatus.OK, {"success": True, "job": job.to_dict()})
+                    return
+                # POST /jobs/{id}/segments/{sid}/update — patch segment text (T1-2)
+                # (RESTful PATCH semantics, HTTP POST chosen because
+                # BaseHTTPRequestHandler's do_PATCH wiring is non-trivial; body
+                # shape mirrors a PATCH payload.)
+                if (len(path_parts) == 5 and path_parts[0] == "jobs"
+                        and path_parts[2] == "segments" and path_parts[4] == "update"):
+                    job_id = path_parts[1]
+                    segment_id = path_parts[3]
+                    patch = self._read_json_payload()
+                    result = service.patch_editing_segment(job_id, segment_id, patch)
+                    self._write_json(HTTPStatus.OK, {"success": True, **result})
+                    return
+                # POST /jobs/{id}/segments/{sid}/status — explicit status change (T1-2)
+                if (len(path_parts) == 5 and path_parts[0] == "jobs"
+                        and path_parts[2] == "segments" and path_parts[4] == "status"):
+                    job_id = path_parts[1]
+                    segment_id = path_parts[3]
+                    payload = self._read_json_payload()
+                    status = str(payload.get("status", "")).strip()
+                    if not status:
+                        raise ValueError("status field is required")
+                    result = service.mark_editing_segment_status(job_id, segment_id, status)
+                    self._write_json(HTTPStatus.OK, {"success": True, **result})
                     return
                 # POST /jobs/{id}/editing/commit — T1-1 skeleton raises 501
                 if (len(path_parts) == 4 and path_parts[0] == "jobs"

@@ -588,21 +588,32 @@ async def intercept_job_subresource(
     if subpath == "continue" and request.method == "POST":
         return await _continue_with_gateway_lock(request, job_id, db)
 
-    # --- Studio post-edit endpoints (T1-1 skeleton, plan 2026-04-18 D29) ---
-    # Three editing endpoints all go through Gateway-layer feature flag +
-    # DB row lock + conditional status sync. See _editing_transition_with_lock.
-    if request.method == "POST" and subpath in {"enter-edit", "editing/cancel", "editing/commit"}:
+    # --- Studio post-edit endpoints (plan 2026-04-18 D29) ---
+    # Two groups, both gated on the feature flag:
+    #   1. State transitions (enter-edit / editing/cancel / editing/commit)
+    #      get a FOR UPDATE row lock + conditional Gateway-DB sync.
+    #   2. Segment mutations (segments/{sid}/update | /status) are editing-
+    #      state job-scoped; no row lock is needed (upstream validates the
+    #      editing state and refreshes editing_touched_at). Feature flag
+    #      still gates to keep the surface fully dark when disabled.
+    if request.method == "POST" and _is_post_edit_mutation_subpath(subpath):
         if not settings.enable_post_edit:
-            # D29 requires backend to refuse entirely when flag is off — UI
-            # gating alone is cosmetic. Return 404 so probes can't distinguish
-            # "feature disabled" from "endpoint unknown"; frontend knows the
-            # flag state via /api/me/entitlements and doesn't expose the call.
+            # D29: refuse at HTTP level so probes can't distinguish "feature
+            # disabled" from "endpoint unknown". Frontend learns flag state
+            # via entitlements and doesn't expose the call when off.
             return _error_response(
                 404,
                 "post_edit_disabled",
                 "Post-edit workflow is not enabled on this deployment.",
             )
-        return await _editing_transition_with_lock(request, job_id, db, subpath=subpath)
+        if subpath in _POST_EDIT_TRANSITION_SUBPATHS:
+            return await _editing_transition_with_lock(request, job_id, db, subpath=subpath)
+        # Segments mutation: proxy without DB lock. Upstream handles state check.
+        return await proxy_request(
+            request=request,
+            upstream_base=settings.job_api_upstream,
+            strip_prefix="/job-api",
+        )
 
     return await proxy_request(
         request=request,
@@ -670,6 +681,30 @@ async def _continue_with_gateway_lock(
     # waiting on this txn.
     await db.commit()
     return response
+
+
+# Set of subpaths that represent editing STATE TRANSITIONS (need FOR UPDATE
+# lock + Gateway DB status sync). Segments mutations are covered by the
+# broader _is_post_edit_mutation_subpath check below.
+_POST_EDIT_TRANSITION_SUBPATHS: frozenset[str] = frozenset({
+    "enter-edit",
+    "editing/cancel",
+    "editing/commit",
+})
+
+
+def _is_post_edit_mutation_subpath(subpath: str) -> bool:
+    """Decide whether a job subresource subpath belongs to the post-edit
+    surface (both state transitions and segment mutations). Used only for
+    the feature flag gate + lock dispatch; ownership is verified separately
+    for every subpath via ``_verify_job_ownership``."""
+    if subpath in _POST_EDIT_TRANSITION_SUBPATHS:
+        return True
+    parts = subpath.split("/")
+    # segments/{sid}/update  or  segments/{sid}/status
+    if len(parts) == 3 and parts[0] == "segments" and parts[2] in {"update", "status"}:
+        return True
+    return False
 
 
 async def _editing_transition_with_lock(

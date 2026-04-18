@@ -225,6 +225,83 @@ class JobService:
             copy_display_name=copy_display_name,
         )
 
+    # ------------------------------------------------------------------
+    # Editing segments CRUD (T1-2). All mutations refresh editing_touched_at
+    # so the idle scanner sees activity.
+    # ------------------------------------------------------------------
+
+    def _require_editing(self, job_id: str) -> JobRecord:
+        from services.jobs.editing import EditingConflictError
+        from services.jobs.models import JOB_STATUS_EDITING
+
+        record = self.require_job(job_id)
+        if record.status != JOB_STATUS_EDITING:
+            raise EditingConflictError(
+                f"job {job_id} is not in editing state (current: {record.status})"
+            )
+        if not record.project_dir:
+            raise EditingConflictError(f"job {job_id} has no project_dir")
+        return record
+
+    def get_editing_segments(self, job_id: str) -> dict:
+        """Read-only fetch of the editing buffer. Does NOT refresh
+        editing_touched_at — the scanner-facing rule is "mutations count as
+        activity, reads do not". See plan §5.4.1."""
+        from services.jobs.editing_segments import editing_payload
+
+        record = self._require_editing(job_id)
+        payload = editing_payload(record.project_dir)
+        return {
+            **payload,
+            "editing_touched_at": record.editing_touched_at,
+            "edit_generation": record.edit_generation,
+        }
+
+    def patch_editing_segment(
+        self,
+        job_id: str,
+        segment_id: str,
+        patch: dict,
+    ) -> dict:
+        """Mutate one segment in editing/segments.json and refresh touched_at.
+        Returns a payload with the updated segment + full status map."""
+        from services.jobs.editing import touch_editing as _touch_editing
+        from services.jobs.editing_segments import (
+            load_segment_status,
+            patch_editing_segment as _patch_editing_segment,
+        )
+        from services.jobs.input_validators import validate_segment_id
+
+        validate_segment_id(segment_id)
+        record = self._require_editing(job_id)
+        updated_segment = _patch_editing_segment(
+            record.project_dir, segment_id, patch
+        )
+        _touch_editing(record, self.store)
+        return {
+            "segment": updated_segment,
+            "segment_status": load_segment_status(record.project_dir),
+        }
+
+    def mark_editing_segment_status(
+        self,
+        job_id: str,
+        segment_id: str,
+        status: str,
+    ) -> dict:
+        """Explicit segment_status update (e.g. frontend calls this after
+        the user "accepts" or "discards" a draft TTS). Also refreshes
+        editing_touched_at."""
+        from services.jobs.editing import touch_editing as _touch_editing
+        from services.jobs.editing_segments import mark_segment_status
+        from services.jobs.input_validators import validate_segment_id
+
+        validate_segment_id(segment_id)
+        record = self._require_editing(job_id)
+        status_map = mark_segment_status(record.project_dir, segment_id, status)
+        _touch_editing(record, self.store)
+        return {"segment_status": status_map}
+
     def get_job(self, job_id: str) -> JobRecord | None:
         return self.store.load_job(job_id)
 
