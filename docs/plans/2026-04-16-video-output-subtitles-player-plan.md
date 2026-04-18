@@ -1,7 +1,7 @@
 # 视频输出优化：字幕 + 播放器 + 素材包 (V3-final)
 
-> **Status:** 🟡 Part 1 / Part 2 / Part 3 / materials 端点已 commit 并部署到 US 主机（`d174df9` + `0520536` + `27c2b06` + `3cf4a38`，最新 2026-04-17）。「超出原方案范围的追加改动」整组仍在 worktree WIP、**未 commit**、**未部署**；HEAD 上 pipeline 仍走 EDITOR-only 行为，不自动合成 publish 视频。
-> **Last updated:** 2026-04-18
+> **Status:** ✅ 全部实施并部署 US（Part 1/2/3 + materials 端点 + baseline `b8d5505` 追加改动；最新 2026-04-18 HEAD `31847b7`）。pipeline `_dispatch_process_output_bundle` 硬编码 PUBLISH，自动合成 dubbed_video + poster。后续 Express / Studio 分层过滤由独立方案 `2026-04-18-express-studio-output-filter-plan.md` 推进。
+> **Last updated:** 2026-04-18（b8d5505 落地后同步）
 > **Reviewed-by:** Codex 三轮
 
 ## 完成情况（已 commit 并部署到 US 主机）
@@ -14,9 +14,9 @@
 - ✅ 项目详情页 + workspace 同步接入——commit `0520536`
 - ✅ pytest 回归补全（test_project_output / test_gateway_route_coverage 等）——commit `d174df9` + `27c2b06`
 
-## 超出原方案范围的追加改动（🚧 未 commit、未部署）
+## 超出原方案范围的追加改动（✅ 已通过 `b8d5505` commit 并部署 US）
 
-`git status` 显示以下改动仍在 worktree，**HEAD 为 `3cf4a38`（EDITOR-only）**，US 主机跑的也是 HEAD 版本。部署前需要 commit + push + 镜像 rebuild。
+commit `b8d5505 feat(video-output): baseline - pipeline PUBLISH + poster + LazyVideoPlayer`（2026-04-18）落地以下改动；前端镜像已重建推送，后端 bind mount `src/` 随 `docker restart aivideotrans-app` 生效。US 主机 marker 核查（2026-04-18）：`OutputTarget.PUBLISH` / `stream/poster` 端点 / `ambient` 三轨混合 / `LazyVideoPlayer` 引用均已就位。
 
 - **`src/pipeline/process.py:3528`** 硬编码从 `targets=[OutputTarget.EDITOR]` 改成 `[OutputTarget.PUBLISH]`（让 dispatcher 同时产 editor package + publish.dubbed_video）。注意 pipeline **仍然不读** job record 里的 `output_target` 字段——这次只是换了一个硬编码值，不是"让 `output_target` 真正生效"。
 - VideoRenderer 三轨混合：原视频 + 配音 + 背景音（ambient audio，amix -12dB）
@@ -26,16 +26,16 @@
 - `/projects` 所有已完成任务卡片默认展开
 - workspace 完成后 2 秒自动跳转 `/projects`
 
-相关 unstaged 文件（`git status` 截自 2026-04-18）：`src/pipeline/process.py`、`src/modules/output/output_dispatcher.py`、`src/modules/output/publish/{publish_models,video_renderer}.py`、`src/services/jobs/{api,video_render_async}.py`、`frontend-next/src/app/(app)/workspace/[jobId]/page.tsx`、`frontend-next/src/components/workspace/ResultMediaCard.tsx`、`frontend-next/src/lib/api/downloads.ts`。
+相关 commit 文件（`b8d5505`，2026-04-18）：`src/pipeline/process.py`、`src/modules/output/output_dispatcher.py`、`src/modules/output/publish/{publish_models,video_renderer}.py`、`src/services/jobs/{api,video_render_async}.py`、`frontend-next/src/app/(app)/workspace/[jobId]/page.tsx`、`frontend-next/src/components/workspace/ResultMediaCard.tsx`、`frontend-next/src/lib/api/downloads.ts`。
 
 ## 后续已知问题
 
 - **Gateway DB `jobs.project_dir` 空列**（pre-existing）：`materials-pack` 旧同步端点 + 新异步任务端点都会读 Gateway DB 的 `project_dir`，但 `intercept_create_job` 只在创建时写一次（那时 pipeline 还没分配路径），导致列永远为空。v1.1 收口计划在 Gateway 加 Job API 回退查询。详见 background-task-system-plan 交付情况「已知遗留」。
-- **`output_target` 字段不流通到 pipeline**（截至 HEAD `3cf4a38`）：
+- **`output_target` 字段不流通到 pipeline**（截至 HEAD `31847b7`，baseline `b8d5505` 之后）：
   - `src/services/jobs/service.py:96` 仍硬性 require `output_target == 'editor'`（拒掉 `'publish'` / `'both'`）
   - `src/pipeline/process.py` 不读 job record 的 `output_target`，而是**硬编码**一个值传给 `OutputDispatcher`
   - 2026-04-17 前端短暂发过 `'publish'` 触发 400，commit `3cf4a38` 已回滚到 `'editor'`
-  - 上面 "超出原方案范围" 那组 WIP 只是把 pipeline 硬编码从 EDITOR 改 PUBLISH——**没有让 `output_target` 字段真正按值分发**。那需要同时 (a) service.py 放开校验 (b) pipeline 从 job record 读该字段注入 `OutputDispatcher`。当前两步都没做。
+  - baseline `b8d5505` 只是把 pipeline 硬编码从 EDITOR 改 PUBLISH——**没有让 `output_target` 字段真正按值分发**。那需要同时 (a) service.py 放开校验 (b) pipeline 从 job record 读该字段注入 `OutputDispatcher`。Express/Studio 分层方案（2026-04-18）明确走 `service_mode` 覆盖这个维度，不再推进 `output_target` 字段化——见该方案 §Non-Goals。
 
 ---
 
