@@ -1,8 +1,81 @@
 # 提示词 & 模型管理方案（v2）
 
-> 日期：2026-04-09
-> 状态：方案（待审批）
-> 版本：v2（整合讨论反馈）
+> **Status:** partially-implemented (with gaps)  
+> **Last updated:** 2026-04-17（metadata 规整 + 代码审计评估）  
+> **Version:** v2（整合讨论反馈）  
+> **Implementation:** 核心架构 ~70% 落地，4 条显著 gap 待补（见下方 §0 实施状态评估）
+
+---
+
+## 0. 实施状态评估（2026-04-17 代码审计）
+
+### 已落地（按方案 §9 的 9 步对照）
+
+| 步骤 | 方案要求 | 实际状态 | 证据 |
+|------|---------|---------|------|
+| 1 | 新建 `llm_registry.py`（MODEL_REGISTRY + 4 函数） | ✅ 完成 | `src/services/llm_registry.py` 279 行；`get_prompt_model` / `get_api_key` / `resolve_model_id` / `get_fallback_candidates` 齐全；多出 `get_available_models_for_prompt` / `get_all_models_with_status` 供前端数据源 |
+| 2 | reviewer provider dispatch + 删 `_MODEL_MAP` | ✅ 完成 | `transcript_reviewer.py:1269` 有 `if provider == "mimo" / deepseek / openai` 分发；`_MODEL_MAP` 已删 |
+| 3 | reviewer 支持 `skip_pass1` + `mode` 参数 | ✅ 签名已加 | `_orchestrate_three_pass(mode, skip_pass1=False)` 存在 |
+| 4 | translator `_call_by_provider()` dispatch | 🟡 部分 | translator.py:868 新路径已建；**但 1028 行保留 legacy LLMRouter fallback chain**，方案 §5.4 要求路由决策层被取代 |
+| 5 | process.py 传 mode（原方案还要求 Express 传 `skip_pass1=True`，**已废止**） | ✅ 完成 | 后期决策推翻"Express 跳 Pass 1"，两模式都跑 Pass 1 以保留 ASR 标注纠正。`process.py:964 skip_pass1=False` 是有意硬编码，方案 §4 的"快捷版跳 Pass 1"章节已过时，保留是为了记录决策演化 |
+| 6 | Gateway API 扩展 | ✅ 完成 | `gateway/admin_settings.py` 返回 `prompt_models` / `provider_api_keys` / `api_key_status` / `available_models`；key 写入协议（脱敏值拒绝 / 空串清空）到位 |
+| 7 | 前端 prompts 页面（Tab + 模型下拉 + Key 管理） | ✅ 完成 | `frontend-next/src/app/(app)/admin/prompts/page.tsx` 420+ 行，studio/express Tab、provider_api_keys 编辑齐全 |
+| 8 | settings 页面移除旧 `review_model` / `translation_model` 下拉 | 🟡 部分 | 下拉 UI 已移除（description 引导去 prompts 页），但 interface 的 `review_model` / `translation_model` 字段 + 默认值（line 8-9, 35-36）**残留**；line 236 仍提"使用上面设置的默认翻译模型" |
+| 9 | 旧读取点清理（§8.1 共 6 条） | ❌ **大部分未清理** | 见下方"Gap 2" |
+
+### Gap 明细（方案宣传价值未兑现的点）
+
+**Gap 1 已作废**（2026-04-17 用户澄清）  
+方案 §4 "快捷版跳过 Pass 1" 是方案草稿阶段的设想，后期决策推翻 — 两模式都跑 Pass 1 以保留 ASR 说话人标注纠正。`process.py:964 skip_pass1=False` 是有意为之，不是实施缺失。方案 §4 章节因而过时，应该删掉或标为"已被后期决策推翻"，保留只做演化记录。
+
+**Gap 2（架构清理未竟）— §8.1 旧读取点仅清一半**
+
+| §8.1 清单项 | 方案要求 | 实际 |
+|-------------|---------|------|
+| `process.py:122 _get_default_translation_model()` | 改调 `get_prompt_model(mode, "translate")` | 函数仍存在（line 136），line 1139 仍在调 |
+| `transcript_reviewer.py:226 _get_review_model()` | 删除 | 仍存在（line 238） |
+| `admin_settings.py AdminSettings.review_model/translation_model` 字段 | 保留但不读写 | 前端 settings interface 仍保留字段+默认值 |
+| `transcript_reviewer.py _MODEL_MAP` | 删除 | ✅ 已删 |
+| `llm/router.py DEFAULT_LLM_MODELS` | 不再被使用 | ❌ LLMRouter 仍被 translator `_call_by_translate_or_rewrite()` legacy 路径调用 |
+| 前端 settings 审校/翻译模型下拉 | 移除 | 🟡 UI 下拉已撤，但底层 interface 字段残留 |
+
+- 影响：新旧逻辑并存 = 后台配置和运行时行为"哪个真值生效"不透明
+- 风险：如果某天 `admin_settings.json` 保留的旧 `review_model` 和新 `prompt_models` 冲突，行为不可预测
+
+**Gap 3（语义错误）— 自动降级顺序与方案完全相反**
+- 方案 §3.3 原话：
+  > 3. 按 cost_rank **降序**排列（优先选质量最接近的）  
+  > 4. 逐个尝试，直到成功或全部失败
+- 实际实现（`transcript_reviewer.py:1017-1019, 1325-1327, 1668-1670`）：
+  ```python
+  _fallback_models = get_fallback_candidates(review_model, requires_audio=...)
+  _cheapest = _fallback_models[-1] if _fallback_models else None       # 最便宜
+  _second_cheapest = _fallback_models[-2] if len(...) >= 2 else None   # 第二便宜
+  # 后续只尝试这 2 个
+  ```
+- 问题 1：**只尝试 2 个候选**，不是方案说的"逐个尝试直到成功或全部失败"
+- 问题 2：**从最便宜开始尝试**（`[-1]` 是 candidates 降序列表的末尾 = 最便宜），与方案"优先质量最接近"正相反
+- 实际后果：Gemini Pro 失败 → 直接用 MiMo（免费）或 DeepSeek，跳过了 Gemini Flash Lite 这种合理的降级目标
+- 用户视角：高价模型失败时，产出质量陡降而不是 graceful degradation
+
+**Gap 4（废弃不彻底）— LLMRouter 仍在翻译主路径中**
+- 方案 §5.4 原话："路由决策层被 llm_registry 取代；Provider 调用层保留复用"
+- 实际 `translator.py:1028` 注释："Legacy path: LLMRouter fallback chain (for unmapped tasks)"
+- 新旧路径共存，"未被 prompt_key 映射"时走老路——这个条件判断本身说明方案的"完全取代"在实现时打了折扣
+
+### 修复优先级（Gap 1 已作废后）
+
+| # | Gap | 修复成本 | 影响面 |
+|---|-----|---------|-------|
+| 3 | fallback 顺序 + 只取 2 个 | ~15 行，改 3 处 fallback 逻辑 | 降级行为的用户体验正确性 |
+| 2 | 清理旧读取点 | ~30 行分散在 3 文件 | 真值一致性 + 长期可维护性 |
+| 4 | LLMRouter 路由决策层真正下线 | 翻译流程 audit + 清理 router.py | 与方案 §5.4 一致性（不致命，见单独评估） |
+
+建议按 3 → 2 → 4 顺序修。Gap 3 决定降级体验对错；Gap 2/4 是架构清理，可归入下一轮 cleanup。
+
+**另需**：方案 §4（快捷版跳过 Pass 1）在下一次维护时整段删除或归档到"演化历史"小节，避免误导未来会话以为这是实施缺失。
+
+---
 
 ---
 

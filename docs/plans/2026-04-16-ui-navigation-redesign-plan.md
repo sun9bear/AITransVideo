@@ -1,8 +1,8 @@
 # UI 导航重构：视频翻译主页 + 新建弹窗 (V2)
 
-> 日期：2026-04-16
-> 状态：方案待实施（V2-final，综合 Gemini/CodeX/GPT 三方审核 + CodeX 二审修订）
-> 前置依赖：`2026-04-16-video-output-subtitles-player-plan.md`（播放器卡片）
+> **Status:** active (awaiting implementation — V2-final，综合 Gemini/CodeX/GPT 三方审核 + CodeX 二审修订)  
+> **Last updated:** 2026-04-16  
+> **Depends-on:** `docs/plans/2026-04-16-video-output-subtitles-player-plan.md`（播放器卡片）
 
 ---
 

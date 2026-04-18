@@ -1,8 +1,8 @@
 # 视频输出优化：字幕 + 播放器 + 素材包 (V3-final)
 
-> 日期：2026-04-16
-> 状态：方案待实施（V3-final，Codex 三轮审核通过）
-> 已完成前置改动：AlignedSegment 加 en_text + output_dispatcher 传递 en_text
+> **Status:** active (V3-final 三轮审核通过；AlignedSegment en_text + output_dispatcher 前置改动已落地；字幕短句 / 播放器卡片 / 素材包剩余部分推进中)  
+> **Last updated:** 2026-04-16  
+> **Reviewed-by:** Codex 三轮
 
 ---
 

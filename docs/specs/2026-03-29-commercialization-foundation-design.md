@@ -1,8 +1,8 @@
 # 商业化前置能力设计
 
-> 状态: Draft
-> 日期: 2026-03-29
-> 适用范围: AIVideoTrans Web MVP / Gateway / Job API / Process Pipeline
+> **Status:** active (current source of truth — QUICKSTART 列为"商业化唯一业务依据")  
+> **Last updated:** 2026-03-29（原稿）/ 2026-04-17（metadata 规整）  
+> **Scope:** AIVideoTrans Web MVP / Gateway / Job API / Process Pipeline
 
 ## 1. 背景
 

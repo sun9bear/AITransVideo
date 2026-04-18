@@ -1,8 +1,9 @@
 # Pricing & Plans API Contract (v2 — frozen)
 
-**Status:** frozen — updated after H1/H2 decision (2026-04-06)
-**Source of truth:** `gateway/plan_catalog.py`
-**Consumers:** `frontend-next/src/lib/billing/*`, marketing / pricing / trial / billing pages
+> **Status:** frozen (active source of truth for plan catalog)  
+> **Last updated:** 2026-04-06（H1/H2 decision）  
+> **Source-of-truth:** `gateway/plan_catalog.py`  
+> **Consumers:** `frontend-next/src/lib/billing/*`, marketing / pricing / trial / billing pages
 
 This document defines the frontend ↔ gateway contract for plan catalog discovery.
 The gateway is the sole authoritative source of truth. The frontend only consumes

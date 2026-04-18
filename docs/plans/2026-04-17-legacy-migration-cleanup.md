@@ -1,9 +1,10 @@
 # 旧架构迁移收尾 & 清理方案
 
-> 日期：2026-04-17
-> 前置：2026-04-17 迁移债务批次（10 commits，已部署 US）+ 三审复核
-> 目标：把单机→Web SaaS 迁移**彻底收尾**，让项目对后续开发零包袱、运行更安全稳定高效。
-> 执行说明：每 Task 独立可回滚，按 Phase 顺序跑，Phase 内可并行。
+> **Status:** active (under review — eng review 已发现 3 条 Critical + 7 条 High，待合入修订)  
+> **Last updated:** 2026-04-17  
+> **Depends-on:** 2026-04-17 迁移债务批次 T1-T8（commits `8e8b896` ~ `d3039b0`，已部署 US）  
+> **Goal:** 把单机→Web SaaS 迁移**彻底收尾**，让项目对后续开发零包袱、运行更安全稳定高效。  
+> **执行说明：** 每 Task 独立可回滚，按 Phase 顺序跑，Phase 内可并行。
 >
 > **修订历史：**
 > - **v1（初稿）**：14 Task / 4 Phase

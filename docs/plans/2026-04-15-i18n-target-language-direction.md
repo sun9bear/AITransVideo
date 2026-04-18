@@ -1,9 +1,9 @@
 # 多目标语言（target_language）架构方向
 
-> **状态**：方向文档，**不立即实施**
-> **日期**：2026-04-15
-> **触发条件**：当有第一个真实的"非英→中"产品需求时启动
-> **前置止血**：已执行 `UPDATE voice_catalog SET matchable=false WHERE provider='volcengine' AND language='en'`（禁用 36 个 VolcEngine 英文音色，详见下文 §3）
+> **Status:** direction (parked until trigger)  
+> **Last updated:** 2026-04-15  
+> **Trigger:** 第一个真实的"非英→中"产品需求  
+> **前置止血：** 已执行 `UPDATE voice_catalog SET matchable=false WHERE provider='volcengine' AND language='en'`（禁用 36 个 VolcEngine 英文音色，详见下文 §3）
 
 ---
 

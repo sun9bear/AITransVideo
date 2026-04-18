@@ -1,7 +1,8 @@
 # 异步导出任务 v1：素材打包 + 视频生成
 
-> 修订记录：2026-04-17 第二稿。整合三方评审（Claude Code / CodeX / Trae）意见，收窄 scope 到
-> materials_pack + generate_video 两个具体场景，不再作为"通用后台任务框架"规划。
+> **Status:** active (v1 已通过 commit `27c2b06` 落地；后续扩展项待验收后决定)  
+> **Last updated:** 2026-04-17  
+> **Revision:** 2026-04-17 第二稿，整合三方评审（Claude Code / CodeX / Trae）意见，收窄 scope 到 materials_pack + generate_video 两个具体场景，不再作为"通用后台任务框架"规划。
 
 ## Context
 
