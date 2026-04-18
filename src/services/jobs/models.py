@@ -65,6 +65,12 @@ STAGE_TRANSLATION_REVIEW = "translation_review"
 STAGE_VOICE_REVIEW = "voice_review"
 STAGE_VOICE_SELECTION_REVIEW = "voice_selection_review"
 STAGE_DRAFT = "draft"
+# Post-edit commit entry point (T1-8). Commits re-run pipeline starting at
+# alignment, skipping ingestion / transcription / translation — those have
+# already been paid for by the original run and their outputs are what
+# editing edits. NEVER reached in normal forward-flow jobs; always
+# explicitly set by runner_extensions.submit_job_from_existing_project_dir.
+STAGE_ALIGNMENT = "alignment"
 STAGE_LEGACY_PROCESS_OUTPUT = "legacy_process_output"
 STAGE_COMPLETED = "completed"
 STAGE_FAILED = "failed"
@@ -76,6 +82,7 @@ SUPPORTED_PUBLIC_STAGES = {
     STAGE_TRANSLATION_REVIEW,
     STAGE_VOICE_REVIEW,
     STAGE_VOICE_SELECTION_REVIEW,
+    STAGE_ALIGNMENT,
     STAGE_DRAFT,
     STAGE_LEGACY_PROCESS_OUTPUT,
     STAGE_COMPLETED,

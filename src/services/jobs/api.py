@@ -500,7 +500,7 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
                         )
                     self._write_json(HTTPStatus.OK, {"success": True, **result})
                     return
-                # POST /jobs/{id}/editing/commit — T1-1 skeleton raises 501
+                # POST /jobs/{id}/editing/commit — overwrite or copy_as_new (T1-9)
                 if (len(path_parts) == 4 and path_parts[0] == "jobs"
                         and path_parts[2] == "editing" and path_parts[3] == "commit"):
                     payload = self._read_json_payload()
@@ -514,15 +514,14 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
                     copy_display_name = payload.get("copy_display_name")
                     if copy_display_name is not None:
                         copy_display_name = str(copy_display_name).strip() or None
-                    # Service layer raises NotImplementedError for T1-1; caught
-                    # below and rendered as 501 Not Implemented with a clear
-                    # message so frontend can surface "this is coming soon".
-                    job = service.commit_editing(
+                    # Returns a dict response (not a JobRecord) because
+                    # copy_as_new affects two jobs and the caller needs both IDs.
+                    result = service.commit_editing(
                         path_parts[1],
                         strategy=strategy,
                         copy_display_name=copy_display_name,
                     )
-                    self._write_json(HTTPStatus.OK, {"success": True, "job": job.to_dict()})
+                    self._write_json(HTTPStatus.OK, {"success": True, **result})
                     return
                 # --- Phase 2: review write endpoints ---
                 if (len(path_parts) >= 4 and path_parts[0] == "jobs"

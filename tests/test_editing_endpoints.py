@@ -360,12 +360,27 @@ def test_service_cancel_editing_passes_reason_through(tmp_path: Path) -> None:
     assert any("idle_24h_auto_cancel" in (e.message or "") for e in events)
 
 
-def test_service_commit_editing_raises_not_implemented(tmp_path: Path) -> None:
+def test_service_commit_editing_dispatches_to_pipeline(tmp_path: Path) -> None:
+    """T1-9 replaced the skeleton with a real commit pipeline; service
+    delegate now returns a dict and calls through the fake runner.
+
+    (Full overwrite / copy_as_new coverage lives in tests/test_editing_commit.py —
+    this test just guards the service-layer wiring from regressing.)"""
     service, _ = _build_service_with_editing_fixture(tmp_path)
     service.enter_editing("job_123")
 
-    with pytest.raises(NotImplementedError):
-        service.commit_editing("job_123", strategy="overwrite")
+    # The default _NullRunner has no start() — swap in a minimal recording one.
+    class _RecordingRunner:
+        def __init__(self) -> None:
+            self.calls = []
+        def start(self, record, continue_existing=False):
+            self.calls.append((record.job_id, continue_existing))
+
+    service.runner = _RecordingRunner()  # type: ignore[assignment]
+    result = service.commit_editing("job_123", strategy="overwrite")
+    assert result["strategy"] == "overwrite"
+    assert result["job_id"] == "job_123"
+    assert service.runner.calls == [("job_123", True)]
 
 
 def test_service_enter_editing_on_nonexistent_job(tmp_path: Path) -> None:

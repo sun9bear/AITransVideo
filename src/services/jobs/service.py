@@ -209,18 +209,19 @@ class JobService:
         *,
         strategy: str,
         copy_display_name: str | None = None,
-    ) -> JobRecord:
-        """T1-1 contract skeleton: validates + raises NotImplementedError.
+    ) -> dict:
+        """Run the commit pipeline (T1-9). Returns response dict (not a
+        JobRecord because copy_as_new produces a sibling + the source is
+        also changed; the dict is the HTTP response shape).
 
-        T1-9 will land the real overwrite / copy_as_new pipeline behind
-        this same signature.
+        Pre-T1-9 versions of this method raised NotImplementedError as a
+        skeleton; now delegates to ``editing_commit.commit_editing_pipeline``.
         """
-        from services.jobs.editing import commit_editing as _commit_editing
+        from services.jobs.editing_commit import commit_editing_pipeline
 
         record = self.require_job(job_id)
-        return _commit_editing(
-            record,
-            self.store,
+        return commit_editing_pipeline(
+            record, self.store, self.runner,
             strategy=strategy,
             copy_display_name=copy_display_name,
         )
