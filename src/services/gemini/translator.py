@@ -1026,6 +1026,15 @@ class GeminiTranslator:
             raise TranslationError(f"No models available for task '{task}'.")
 
         # --- Legacy path: LLMRouter fallback chain (for unmapped tasks) ---
+        # DEPRECATION OBSERVATION (2026-04-17 ~ 2026-05-01): 此路径应为死代码
+        # （生产 job 总会设置 _service_mode 触发新路径）。若观察期日志零命中
+        # '[LLM-ROUTER-LEGACY]' 标签，LLMRouter 模块将被整体下线。
+        # 观察期计划：docs/plans/2026-04-17-llmrouter-deprecation.md
+        print(
+            f"[LLM-ROUTER-LEGACY] hit task={task} prompt_key={prompt_key!r} "
+            f"service_mode={mode!r} has_router={self.llm_router is not None}",
+            flush=True,
+        )
         route = self.llm_router.get_route(task) if self.llm_router is not None else ["default_llm"]
         if not route:
             route = ["default_llm"]

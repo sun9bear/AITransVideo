@@ -1,3 +1,26 @@
+"""LLM Router — DEPRECATED (2026-04-17).
+
+本模块的**路由决策层**（`LLMRouter.get_route` / `generate_via_alias` /
+`DEFAULT_LLM_MODELS` / `DEFAULT_SHARED_TEXT_ROUTE`）已被
+`src/services/llm_registry.py` 取代。见
+`docs/plans/2026-04-09-prompt-model-management-plan.md` §5.4。
+
+**观察期**：2026-04-17 ~ 2026-05-01。生产日志 grep 关键字 `[LLM-ROUTER-LEGACY]`：
+
+- 若观察期内**零命中**：本模块将在 2026-05-01 后整体归档/删除。
+- 若有命中：记录 task 名和上下文，补 `prompt_key_map`（translator.py:998），
+  修完后重启观察期。
+
+**观察期计划文档**：`docs/plans/2026-04-17-llmrouter-deprecation.md`
+
+**模块剩余真实用户**（观察期内需保留）：
+1. `translator.py` 的 `_call_task_with_fallback` legacy path（触发 `[LLM-ROUTER-LEGACY]`）
+2. `process.py:578 / 807 / 2158-2160`（构造 + 注入 segmenter + 读 `model_configs`）
+3. `web_ui/config_helpers.py`（只引用 `DEFAULT_AUTODUB_LOCAL_CONFIG_PATH`，
+   归档本模块前需把 web_ui 的 import 源改为直接从 `services.config_loader` 引）
+4. `tests/test_llm_router.py`（12+ 个专项测试，模块下线时整组删除）
+"""
+
 from __future__ import annotations
 
 import json
