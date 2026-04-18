@@ -1,0 +1,215 @@
+/**
+ * API client for the Studio post-edit endpoints (T1-1..T1-9).
+ *
+ * Contract mirrors the Job API ``/job-api/jobs/{id}/...`` routes; all
+ * requests flow through the Gateway which enforces the feature flag
+ * and editing state checks.
+ */
+
+import { apiClient } from "@/lib/api/client"
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+export interface EditingSegment {
+  segment_id: string
+  speaker_id?: string
+  cn_text?: string
+  source_text?: string
+  start_ms?: number
+  end_ms?: number
+  voice_id?: string
+  provider?: string
+  alignment_method?: string
+  /** UI hint extracted from manifest; may be absent for pre-migration segs. */
+  duration_target_ms?: number
+  duration_actual_ms?: number
+  duration_diff_ratio?: number
+  /** Passthrough for any unknown pipeline-maintained fields. */
+  [key: string]: unknown
+}
+
+export type SegmentStatus =
+  | "accepted"
+  | "text_dirty"
+  | "tts_loading"
+  | "tts_dirty"
+  | "tts_failed"
+  | "voice_dirty"
+
+export interface EditingSegmentsResponse {
+  segments: EditingSegment[]
+  segment_status: Record<string, SegmentStatus>
+  total: number
+  editing_touched_at: string | null
+  edit_generation: number
+}
+
+export interface VoiceMapEntry {
+  provider: string
+  voice_id: string
+}
+
+export interface VoiceMapResponse {
+  voice_map: Record<string, VoiceMapEntry>
+}
+
+export interface BatchRegenerateResponse {
+  total: number
+  succeeded_count: number
+  failed_count: number
+  succeeded_segment_ids: string[]
+  failed_segment_ids: string[]
+  failures: Array<{ segment_id: string; error: string }>
+}
+
+export type CommitStrategy = "overwrite" | "copy_as_new"
+
+export interface CommitOverwriteResponse {
+  strategy: "overwrite"
+  job_id: string
+  edit_generation: number
+  applied_draft_segment_ids: string[]
+  segments_count: number
+  voice_overrides_count?: number
+}
+
+export interface CommitCopyResponse {
+  strategy: "copy_as_new"
+  source_job_id: string
+  new_job_id: string
+  new_project_dir: string
+  new_display_name: string
+}
+
+export type CommitResponse = CommitOverwriteResponse | CommitCopyResponse
+
+// ---------------------------------------------------------------------------
+// Calls
+// ---------------------------------------------------------------------------
+
+export async function enterEditing(jobId: string): Promise<void> {
+  await apiClient.post(`/jobs/${jobId}/enter-edit`, { body: {} })
+}
+
+export async function cancelEditing(
+  jobId: string,
+  options: { reason?: string } = {},
+): Promise<void> {
+  await apiClient.post(`/jobs/${jobId}/editing/cancel`, {
+    body: { reason: options.reason ?? "user_cancel" },
+  })
+}
+
+export async function commitEditing(
+  jobId: string,
+  strategy: CommitStrategy,
+  options: { copy_display_name?: string } = {},
+): Promise<CommitResponse> {
+  const body: Record<string, unknown> = { strategy }
+  if (strategy === "copy_as_new" && options.copy_display_name) {
+    body.copy_display_name = options.copy_display_name
+  }
+  return apiClient.post<CommitResponse>(`/jobs/${jobId}/editing/commit`, { body })
+}
+
+export async function getEditingSegments(
+  jobId: string,
+): Promise<EditingSegmentsResponse> {
+  return apiClient.get<EditingSegmentsResponse>(
+    `/jobs/${jobId}/editing/segments`,
+  )
+}
+
+export async function patchSegmentText(
+  jobId: string,
+  segmentId: string,
+  patch: { cn_text?: string; translation_confirmed?: boolean; rewrite_requested?: boolean },
+): Promise<{ segment: EditingSegment; segment_status: Record<string, SegmentStatus> }> {
+  return apiClient.post(
+    `/jobs/${jobId}/segments/${segmentId}/update`,
+    { body: patch },
+  )
+}
+
+export async function markSegmentStatus(
+  jobId: string,
+  segmentId: string,
+  status: SegmentStatus,
+): Promise<{ segment_status: Record<string, SegmentStatus> }> {
+  return apiClient.post(
+    `/jobs/${jobId}/segments/${segmentId}/status`,
+    { body: { status } },
+  )
+}
+
+export async function regenerateSegmentTts(
+  jobId: string,
+  segmentId: string,
+): Promise<{
+  segment_id: string
+  draft_audio_path: string
+  size_bytes: number
+  segment_status: Record<string, SegmentStatus>
+}> {
+  return apiClient.post(
+    `/jobs/${jobId}/segments/${segmentId}/regenerate-tts`,
+    { body: {} },
+  )
+}
+
+export async function acceptSegmentDraft(
+  jobId: string,
+  segmentId: string,
+): Promise<{ segment_id: string; action: "accepted"; segment_status: Record<string, SegmentStatus> }> {
+  return apiClient.post(
+    `/jobs/${jobId}/segments/${segmentId}/accept-draft`,
+    { body: {} },
+  )
+}
+
+export async function discardSegmentDraft(
+  jobId: string,
+  segmentId: string,
+): Promise<{ segment_id: string; action: "discarded"; segment_status: Record<string, SegmentStatus> }> {
+  return apiClient.post(
+    `/jobs/${jobId}/segments/${segmentId}/discard-draft`,
+    { body: {} },
+  )
+}
+
+export async function regenerateAllDirtyTts(
+  jobId: string,
+): Promise<BatchRegenerateResponse> {
+  return apiClient.post<BatchRegenerateResponse>(
+    `/jobs/${jobId}/regenerate-all-tts`,
+    { body: {} },
+  )
+}
+
+export async function getVoiceMap(jobId: string): Promise<VoiceMapResponse> {
+  return apiClient.get<VoiceMapResponse>(`/jobs/${jobId}/editing/voice-map`)
+}
+
+export async function setVoiceOverride(
+  jobId: string,
+  segmentId: string,
+  provider: string,
+  voiceId: string,
+): Promise<{ segment_id: string; provider: string; voice_id: string }> {
+  return apiClient.post(
+    `/jobs/${jobId}/editing/voice-map`,
+    { body: { segment_id: segmentId, provider, voice_id: voiceId } },
+  )
+}
+
+export async function clearVoiceOverride(
+  jobId: string,
+  segmentId: string,
+): Promise<{ segment_id: string; cleared: boolean }> {
+  return apiClient.post(
+    `/jobs/${jobId}/editing/voice-map`,
+    { body: { segment_id: segmentId, action: "clear" } },
+  )
+}

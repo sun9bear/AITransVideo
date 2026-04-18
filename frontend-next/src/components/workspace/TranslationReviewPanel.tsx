@@ -463,7 +463,19 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
                           speakerA: splitSpeakerA, speakerB: splitSpeakerB,
                           stage: 'translation_review', pendingSpeakerChanges: segmentSpeakers,
                         })
-                        if (result.success) { window.location.reload(); return }
+                        if (result.success) {
+                          // T1-4: refetch via parent (which already reloads
+                          // job state + pulls fresh review resource). Keeps
+                          // user's scroll / form state intact, unlike a
+                          // full window.location.reload().
+                          setSplittingSegmentId(null)
+                          setSplitSourcePos(0)
+                          setSplitCnPos(0)
+                          setSplitSpeakerA('')
+                          setSplitSpeakerB('')
+                          onAdvanced()
+                          return
+                        }
                         setSubmitError('拆分未生效。')
                       } catch (error) { setSubmitError(`拆分失败: ${getErrorMessage(error)}`) } finally { setIsSplitting(false) }
                     }} type="button">
