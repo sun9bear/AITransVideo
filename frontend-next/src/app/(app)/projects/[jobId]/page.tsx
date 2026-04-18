@@ -66,24 +66,30 @@ export default function ProjectDetailPage() {
         </div>
       </section>
 
-      {/* Media player + Downloads */}
+      {/* Media player — 对完成/接近完成的 job 独立渲染。
+          ResultMediaCard 内部会自行 fetch materials-availability，并在
+          hasVideo=false && hasAudio=true 时显示 "生成视频" fallback
+          按钮（这对老 Express job 的补救路径至关重要，不能被 downloads
+          是否为空 gate 住）。CodeX 评审 P2。 */}
+      {job.status === "succeeded" ? (
+        <ResultMediaCard jobId={jobId} serviceMode={job.serviceMode} />
+      ) : null}
+
+      {/* Downloads — 没有可下载条目就显示空状态 */}
       {availableDownloads.length > 0 ? (
-        <>
-          <ResultMediaCard jobId={jobId} serviceMode={job.serviceMode} />
-          <details className="mt-2">
-            <summary className="cursor-pointer text-xs text-muted-foreground hover:text-foreground">
-              更多下载
-            </summary>
-            <div className="mt-2">
-              <ResultDownloadList items={downloads} serviceMode={job.serviceMode} />
-            </div>
-          </details>
-        </>
-      ) : (
-        <section className="rounded-2xl border border-dashed border-border bg-card/50 p-8 text-center">
-          <p className="text-sm text-muted-foreground">当前没有可下载的结果。</p>
+        <details className="mt-2">
+          <summary className="cursor-pointer text-xs text-muted-foreground hover:text-foreground">
+            更多下载
+          </summary>
+          <div className="mt-2">
+            <ResultDownloadList items={downloads} serviceMode={job.serviceMode} />
+          </div>
+        </details>
+      ) : job.status === "succeeded" ? (
+        <section className="rounded-2xl border border-dashed border-border bg-card/50 p-6 text-center">
+          <p className="text-sm text-muted-foreground">当前没有可下载的结果文件。</p>
         </section>
-      )}
+      ) : null}
     </div>
   )
 }
