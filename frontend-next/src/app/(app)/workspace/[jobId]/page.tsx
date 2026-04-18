@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect } from 'react'
 import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
+import { toast } from 'sonner'
 
 import { EmptyState } from '@/components/empty-state'
 import { StatusBadge } from '@/components/status-badge'
@@ -80,6 +81,13 @@ export default function WorkspacePage() {
           prevStatusRef.current !== nextJob.status &&
           (nextJob.status === 'succeeded' || nextJob.status === 'failed' || nextJob.status === 'cancelled')) {
         sendBrowserNotification(nextJob.status, getJobDisplayTitle(nextJob))
+        // Auto-redirect to projects page after successful completion
+        if (nextJob.status === 'succeeded') {
+          toast.success('任务已完成，即将跳转到视频翻译主页...')
+          setTimeout(() => {
+            router.push('/projects')
+          }, 2000)
+        }
       }
       prevStatusRef.current = nextJob.status
       setLogs(nextLogs)
@@ -279,18 +287,15 @@ export default function WorkspacePage() {
         </section>
       ) : null}
 
-      {/* Completed: Media player + Downloads */}
+      {/* Completed: Downloads only (playback + preview is on /projects main page) */}
       {availableDownloadCount > 0 ? (
         <>
-          <ResultMediaCard jobId={jobId} />
-          <details className="mt-2">
-            <summary className="cursor-pointer text-xs text-muted-foreground hover:text-foreground">
-              更多下载
-            </summary>
-            <div className="mt-2">
-              <ResultDownloadList items={downloads} />
+          {isSucceeded && (
+            <div className="rounded-lg border border-border bg-muted/30 p-4 text-sm text-muted-foreground">
+              任务已完成，请前往<Link href="/projects" className="text-primary underline ml-1">视频翻译主页</Link>查看和播放结果。
             </div>
-          </details>
+          )}
+          <ResultDownloadList items={downloads} />
         </>
       ) : null}
 

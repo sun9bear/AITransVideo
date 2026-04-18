@@ -20,3 +20,4 @@ class PublishResult:
     dubbed_video_path: str
     original_video_path: str
     dubbed_audio_path: str
+    poster_path: str | None = None

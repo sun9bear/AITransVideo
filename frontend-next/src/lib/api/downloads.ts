@@ -38,7 +38,7 @@ export function buildResultDownloadUrl(
 /**
  * Build URL for streaming media (video/audio) — no Content-Disposition: attachment.
  */
-export function buildStreamUrl(jobId: string, kind: 'video' | 'audio'): string {
+export function buildStreamUrl(jobId: string, kind: 'video' | 'audio' | 'poster'): string {
   return buildBackendUrl(
     resolveJobApiBaseUrl(),
     `/jobs/${jobId}/stream/${kind}`,

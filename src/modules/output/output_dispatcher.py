@@ -61,6 +61,8 @@ class OutputDispatcher:
                 )
             )
             artifact_index.register("publish.dubbed_video", publish_result.dubbed_video_path)
+            if publish_result.poster_path:
+                artifact_index.register("publish.dubbed_video_poster", publish_result.poster_path)
 
         output_bundle = OutputBundleResult(
             editor_result=editor_result if OutputTarget.EDITOR in expanded_targets or OutputTarget.PUBLISH in expanded_targets else None,

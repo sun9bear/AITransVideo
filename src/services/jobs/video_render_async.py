@@ -170,6 +170,8 @@ def _run_render(
             if "artifact_index" not in manifest_data:
                 manifest_data["artifact_index"] = {}
             manifest_data["artifact_index"]["publish.dubbed_video"] = result.dubbed_video_path
+            if result.poster_path:
+                manifest_data["artifact_index"]["publish.dubbed_video_poster"] = result.poster_path
             manifest_path.write_text(
                 json.dumps(manifest_data, ensure_ascii=False, indent=2),
                 encoding="utf-8",

@@ -135,25 +135,35 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
                     len(path_parts) == 4
                     and path_parts[0] == "jobs"
                     and path_parts[2] == "stream"
-                    and path_parts[3] in ("video", "audio")
+                    and path_parts[3] in ("video", "audio", "poster")
                 ):
                     job_id = path_parts[1]
                     kind = path_parts[3]
                     record = service.require_job(job_id)
                     project_dir = _require_project_dir(record)
-                    artifact_key = (
-                        "publish.dubbed_video" if kind == "video"
-                        else "editor.dubbed_audio_complete"
-                    )
-                    file_path = _resolve_download_path(
-                        project_root=service.runner.project_root,
-                        project_dir=project_dir,
-                        download_key=artifact_key,
-                    )
+                    if kind == "video":
+                        artifact_key = "publish.dubbed_video"
+                        content_type = "video/mp4"
+                    elif kind == "audio":
+                        artifact_key = "editor.dubbed_audio_complete"
+                        content_type = "audio/wav"
+                    else:  # poster
+                        artifact_key = "publish.dubbed_video_poster"
+                        content_type = "image/jpeg"
+                    # poster is not in PUBLIC_RESULT_DOWNLOAD_KEYS whitelist,
+                    # use manifest resolver directly for that case
+                    if kind == "poster":
+                        from services.manifest_reader import resolve_manifest_artifact_path
+                        file_path = resolve_manifest_artifact_path(project_dir, artifact_key)
+                    else:
+                        file_path = _resolve_download_path(
+                            project_root=service.runner.project_root,
+                            project_dir=project_dir,
+                            download_key=artifact_key,
+                        )
                     if file_path is None or not file_path.exists():
                         self._write_json(HTTPStatus.NOT_FOUND, {"error": f"{kind} not found"})
                         return
-                    content_type = "video/mp4" if kind == "video" else "audio/wav"
                     self._write_stream(file_path, content_type=content_type)
                     return
 

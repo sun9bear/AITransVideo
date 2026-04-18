@@ -153,12 +153,7 @@ export function ResultMediaCard({ jobId }: ResultMediaCardProps) {
           {/* Player area */}
           <div className="min-w-0">
             {hasVideo ? (
-              <video
-                className="w-full rounded-lg bg-black aspect-video"
-                controls
-                preload="metadata"
-                src={buildStreamUrl(jobId, "video")}
-              />
+              <LazyVideoPlayer jobId={jobId} />
             ) : hasAudio ? (
               <div className="flex flex-col items-center justify-center rounded-lg bg-muted/30 border border-dashed border-border aspect-video gap-3">
                 <Film className="h-10 w-10 text-muted-foreground/50" />
@@ -385,4 +380,58 @@ function isItemAvailable(key: MaterialItemKey | string, availability: MaterialsA
     case "subtitles": return availability.subtitles_zh || availability.subtitles_en || availability.subtitles_bilingual
     default: return false
   }
+}
+
+/**
+ * Lazy video player: shows a poster image (with native lazy-loading) until
+ * clicked, then swaps to a <video> element. Saves bandwidth when many cards
+ * are rendered on the main projects page — posters only load on scroll,
+ * and video data never loads unless the user clicks play.
+ */
+function LazyVideoPlayer({ jobId }: { jobId: string }) {
+  const [playing, setPlaying] = useState(false)
+  const posterUrl = buildStreamUrl(jobId, "poster")
+  const videoUrl = buildStreamUrl(jobId, "video")
+
+  if (playing) {
+    return (
+      <video
+        className="w-full rounded-lg bg-black aspect-video"
+        controls
+        autoPlay
+        preload="auto"
+        poster={posterUrl}
+        src={videoUrl}
+      />
+    )
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={() => setPlaying(true)}
+      className="relative w-full aspect-video rounded-lg overflow-hidden bg-muted group"
+      aria-label="播放视频"
+    >
+      {/* Native lazy-loading: browser only fetches image when it scrolls into view */}
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={posterUrl}
+        alt=""
+        loading="lazy"
+        className="w-full h-full object-cover"
+        onError={(e) => {
+          // If poster missing (old job), hide image, keep dark background
+          ;(e.currentTarget as HTMLImageElement).style.display = "none"
+        }}
+      />
+      <div className="absolute inset-0 flex items-center justify-center bg-black/30 group-hover:bg-black/20 transition">
+        <div className="flex h-14 w-14 items-center justify-center rounded-full bg-white/90 group-hover:scale-110 transition">
+          <svg viewBox="0 0 24 24" className="h-7 w-7 text-black ml-1" fill="currentColor">
+            <path d="M8 5v14l11-7z" />
+          </svg>
+        </div>
+      </div>
+    </button>
+  )
 }

@@ -3526,7 +3526,9 @@ class ProcessPipeline:
             build_result.localized_project,
             build_result.artifact_index,
             OutputRequest(
-                targets=[OutputTarget.EDITOR],
+                # PUBLISH target also runs EDITOR (dubbed audio is needed for muxing).
+                # Pipeline always produces the final video (原视频画面 + 配音 + 背景音).
+                targets=[OutputTarget.PUBLISH],
                 output_dir=str(project_dir.resolve(strict=False)),
             ),
         )

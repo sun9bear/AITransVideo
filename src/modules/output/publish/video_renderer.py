@@ -118,12 +118,34 @@ class VideoRenderer:
         _notify("finalizing", 90)
         self._validate_rendered_output(output_path)
 
+        # Generate poster (JPEG thumbnail at 1s) for video player preview.
+        # Non-fatal: if this fails, the video still works, just without preview.
+        poster_path = output_dir / "poster.jpg"
+        try:
+            poster_cmd = [
+                self.ffmpeg_executable,
+                "-y",
+                "-ss", "1",
+                "-i", str(output_path),
+                "-vframes", "1",
+                "-vf", "scale=-2:360",
+                "-q:v", "4",
+                str(poster_path),
+            ]
+            self.command_runner(poster_cmd)
+        except Exception:
+            poster_path = None  # noqa: F841 — poster is best-effort
+            poster_str: str | None = None
+        else:
+            poster_str = str(poster_path) if poster_path.exists() and poster_path.stat().st_size > 0 else None
+
         _notify("done", 100)
         return PublishResult(
             project_id=request.project_id,
             dubbed_video_path=str(output_path),
             original_video_path=str(original_video_path),
             dubbed_audio_path=str(dubbed_audio_path),
+            poster_path=poster_str,
         )
 
     @staticmethod
