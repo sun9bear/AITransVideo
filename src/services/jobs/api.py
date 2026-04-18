@@ -396,6 +396,47 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
                     job = service.continue_job(path_parts[1])
                     self._write_json(HTTPStatus.ACCEPTED, job.to_dict())
                     return
+                # --- Studio post-edit (T1-1 skeleton) ---
+                # POST /jobs/{id}/enter-edit — succeeded → editing (studio only)
+                if (len(path_parts) == 3 and path_parts[0] == "jobs"
+                        and path_parts[2] == "enter-edit"):
+                    job = service.enter_editing(path_parts[1])
+                    self._write_json(HTTPStatus.OK, {"success": True, "job": job.to_dict()})
+                    return
+                # POST /jobs/{id}/editing/cancel — editing → succeeded (drops draft)
+                if (len(path_parts) == 4 and path_parts[0] == "jobs"
+                        and path_parts[2] == "editing" and path_parts[3] == "cancel"):
+                    payload = self._read_json_payload()
+                    # reason is optional; defaults per editing.cancel_editing. Admins
+                    # pass reason="admin_force"; scanner passes "idle_24h_auto_cancel".
+                    reason = str(payload.get("reason") or "user_cancel").strip() or "user_cancel"
+                    job = service.cancel_editing(path_parts[1], reason=reason)
+                    self._write_json(HTTPStatus.OK, {"success": True, "job": job.to_dict()})
+                    return
+                # POST /jobs/{id}/editing/commit — T1-1 skeleton raises 501
+                if (len(path_parts) == 4 and path_parts[0] == "jobs"
+                        and path_parts[2] == "editing" and path_parts[3] == "commit"):
+                    payload = self._read_json_payload()
+                    raw_strategy = payload.get("strategy")
+                    strategy = str(raw_strategy or "").strip()
+                    if not strategy:
+                        raise ValueError(
+                            "editing/commit requires a 'strategy' field "
+                            "(overwrite | copy_as_new)"
+                        )
+                    copy_display_name = payload.get("copy_display_name")
+                    if copy_display_name is not None:
+                        copy_display_name = str(copy_display_name).strip() or None
+                    # Service layer raises NotImplementedError for T1-1; caught
+                    # below and rendered as 501 Not Implemented with a clear
+                    # message so frontend can surface "this is coming soon".
+                    job = service.commit_editing(
+                        path_parts[1],
+                        strategy=strategy,
+                        copy_display_name=copy_display_name,
+                    )
+                    self._write_json(HTTPStatus.OK, {"success": True, "job": job.to_dict()})
+                    return
                 # --- Phase 2: review write endpoints ---
                 if (len(path_parts) >= 4 and path_parts[0] == "jobs"
                         and path_parts[2] == "review"):
@@ -667,7 +708,16 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
             except UnsupportedJobRequestError as exc:
                 self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             except JobConflictError as exc:
+                # EditingConflictError is a JobConflictError subclass, so it
+                # also maps to 409 here; no extra branch needed.
                 self._write_json(HTTPStatus.CONFLICT, {"error": str(exc)})
+            except NotImplementedError as exc:
+                # Emitted by editing/commit (T1-1 skeleton). Frontend should
+                # render a "coming soon" notice rather than a crash toast.
+                self._write_json(
+                    HTTPStatus.NOT_IMPLEMENTED,
+                    {"error": str(exc), "code": "not_implemented"},
+                )
             except ValueError as exc:
                 self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             except Exception as exc:  # pragma: no cover

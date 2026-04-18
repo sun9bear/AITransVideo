@@ -178,6 +178,53 @@ class JobService:
         self.runner.stop_process(job_id)
         return self.store.delete_job(job_id)
 
+    # ------------------------------------------------------------------
+    # Post-edit transitions (plan 2026-04-18, T1-1 skeleton).
+    # Thin delegates to services.jobs.editing — all state machine checks,
+    # filesystem side effects, and event emission live in that module.
+    # ------------------------------------------------------------------
+
+    def enter_editing(self, job_id: str) -> JobRecord:
+        """``succeeded → editing``. Creates editor/editing/ + baseline snapshot."""
+        from services.jobs.editing import enter_editing as _enter_editing
+
+        record = self.require_job(job_id)
+        return _enter_editing(record, self.store)
+
+    def cancel_editing(
+        self,
+        job_id: str,
+        *,
+        reason: str = "user_cancel",
+    ) -> JobRecord:
+        """``editing → succeeded``. Drops editor/editing/ and clears touched_at."""
+        from services.jobs.editing import cancel_editing as _cancel_editing
+
+        record = self.require_job(job_id)
+        return _cancel_editing(record, self.store, reason=reason)
+
+    def commit_editing(
+        self,
+        job_id: str,
+        *,
+        strategy: str,
+        copy_display_name: str | None = None,
+    ) -> JobRecord:
+        """T1-1 contract skeleton: validates + raises NotImplementedError.
+
+        T1-9 will land the real overwrite / copy_as_new pipeline behind
+        this same signature.
+        """
+        from services.jobs.editing import commit_editing as _commit_editing
+
+        record = self.require_job(job_id)
+        return _commit_editing(
+            record,
+            self.store,
+            strategy=strategy,
+            copy_display_name=copy_display_name,
+        )
+
     def get_job(self, job_id: str) -> JobRecord | None:
         return self.store.load_job(job_id)
 

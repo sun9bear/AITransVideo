@@ -63,6 +63,14 @@ class GatewaySettings(BaseSettings):
     # create new accounts (returns 403). Legacy email LOGIN is unaffected.
     email_registration_enabled: bool = False
 
+    # --- Studio post-edit workflow (plan 2026-04-18 D29) ---
+    # Backend gate for the editing endpoints (enter-edit / editing/cancel /
+    # editing/commit). Disabled by default so Phase 0 can ship without
+    # exposing the T1-1 skeleton to production users. Flip to True once
+    # the full Phase 1 flow is ready for dogfooding. Mirrors the frontend
+    # flag NEXT_PUBLIC_ENABLE_POST_EDIT which gates the UI entry points.
+    enable_post_edit: bool = False
+
     model_config = {"env_prefix": "AVT_"}
 
 

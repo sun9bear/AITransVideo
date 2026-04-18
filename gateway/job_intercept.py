@@ -588,6 +588,22 @@ async def intercept_job_subresource(
     if subpath == "continue" and request.method == "POST":
         return await _continue_with_gateway_lock(request, job_id, db)
 
+    # --- Studio post-edit endpoints (T1-1 skeleton, plan 2026-04-18 D29) ---
+    # Three editing endpoints all go through Gateway-layer feature flag +
+    # DB row lock + conditional status sync. See _editing_transition_with_lock.
+    if request.method == "POST" and subpath in {"enter-edit", "editing/cancel", "editing/commit"}:
+        if not settings.enable_post_edit:
+            # D29 requires backend to refuse entirely when flag is off — UI
+            # gating alone is cosmetic. Return 404 so probes can't distinguish
+            # "feature disabled" from "endpoint unknown"; frontend knows the
+            # flag state via /api/me/entitlements and doesn't expose the call.
+            return _error_response(
+                404,
+                "post_edit_disabled",
+                "Post-edit workflow is not enabled on this deployment.",
+            )
+        return await _editing_transition_with_lock(request, job_id, db, subpath=subpath)
+
     return await proxy_request(
         request=request,
         upstream_base=settings.job_api_upstream,
@@ -652,6 +668,82 @@ async def _continue_with_gateway_lock(
     # Commit either way — releases the FOR UPDATE lock. A no-op commit is
     # cheap; the important thing is that no future request is blocked
     # waiting on this txn.
+    await db.commit()
+    return response
+
+
+async def _editing_transition_with_lock(
+    request: Request,
+    job_id: str,
+    db: AsyncSession,
+    *,
+    subpath: str,
+) -> Response:
+    """FOR UPDATE lock + pre-condition check + proxy + conditional DB sync.
+
+    Mirrors the shape of ``_continue_with_gateway_lock`` for the three editing
+    endpoints. Per-subpath behaviour:
+
+    - ``enter-edit``     : expect status='succeeded', on upstream 2xx set
+      status='editing' + editing_touched_at=now.
+    - ``editing/cancel`` : expect status='editing', on upstream 2xx set
+      status='succeeded' + editing_touched_at=NULL.
+    - ``editing/commit`` : expect status='editing'. T1-1 upstream always
+      returns 501 so we never write status; T1-9 will swap the upstream
+      implementation and this Gateway layer will start promoting status
+      to 'running' + edit_generation += 1 on success.
+
+    Legacy jobs without a Gateway row skip the lock (same as ``continue``);
+    upstream handles validation for them.
+    """
+    # Map subpath → expected pre-state. If the Gateway row disagrees with
+    # this set we raise 409 without proxying.
+    expected_status_by_subpath = {
+        "enter-edit": "succeeded",
+        "editing/cancel": "editing",
+        "editing/commit": "editing",
+    }
+    expected = expected_status_by_subpath[subpath]
+
+    result = await db.execute(
+        select(Job).where(Job.job_id == job_id).with_for_update()
+    )
+    job = result.scalar_one_or_none()
+    if job is not None and job.status != expected:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Job is not in the expected state for {subpath!r}: "
+                f"expected {expected!r}, got {job.status!r}"
+            ),
+        )
+
+    # Lock held across the proxy call (sub-second for editing endpoints, which
+    # do filesystem work but no pipeline). Concurrent requests to the same
+    # job serialize behind FOR UPDATE, so the "two enter-edit races" scenario
+    # resolves to one success + one 409.
+    response = await proxy_request(
+        request=request,
+        upstream_base=settings.job_api_upstream,
+        strip_prefix="/job-api",
+    )
+
+    if job is not None and 200 <= response.status_code < 300:
+        # Only persist status transitions when upstream accepted the change;
+        # a 501 (T1-1 commit skeleton) / 409 / 5xx leaves Gateway DB in
+        # whatever state it was so the user can retry without blocking.
+        from datetime import datetime, timezone as _tz
+
+        now_utc = datetime.now(_tz.utc)
+        if subpath == "enter-edit":
+            job.status = "editing"
+            job.editing_touched_at = now_utc
+        elif subpath == "editing/cancel":
+            job.status = "succeeded"
+            job.editing_touched_at = None
+        # editing/commit currently never reaches this branch (upstream 501).
+        # When T1-9 lands, add: job.status = "running"; job.edit_generation += 1.
+
     await db.commit()
     return response
 
