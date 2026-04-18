@@ -1,10 +1,16 @@
 # 旧架构迁移收尾 & 清理方案
 
-> **Status:** active (under review — eng review 已发现 3 条 Critical + 7 条 High，待合入修订)  
-> **Last updated:** 2026-04-17  
-> **Depends-on:** 2026-04-17 迁移债务批次 T1-T8（commits `8e8b896` ~ `d3039b0`，已部署 US）  
-> **Goal:** 把单机→Web SaaS 迁移**彻底收尾**，让项目对后续开发零包袱、运行更安全稳定高效。  
+> **Status:** ✅ **COMPLETED & DEPLOYED**（2026-04-17）
+> **Last updated:** 2026-04-18（执行记录追加）
+> **Depends-on:** 2026-04-17 迁移债务批次 T1-T8（commits `8e8b896` ~ `d3039b0`，已部署 US）
+> **Goal:** 把单机→Web SaaS 迁移**彻底收尾**，让项目对后续开发零包袱、运行更安全稳定高效。
 > **执行说明：** 每 Task 独立可回滚，按 Phase 顺序跑，Phase 内可并行。
+>
+> **完成摘要（详见 §13 执行记录）：**
+> - 12 个清理 commit（`5ac5eaf` ~ `fb84c8f`）+ 1 个 doc 收尾 commit（`7408022`）= **13 commits** 已合入 `main` 并推送 `origin/main`
+> - **US 生产已部署**，`aitrans.video` 全链路健康（5/5 容器 healthy，全部 smoke test 通过）
+> - **永久 CI 守卫**：`tests/test_legacy_cleanup_guards.py`（10 条契约级断言）常驻
+> - **推迟项**：T3.1b（audit 证实无多线程访问，premature optimization）+ /opt/aivideotrans 长尾 13 处（非语义 env，非重要路径）
 >
 > **修订历史：**
 > - **v1（初稿）**：14 Task / 4 Phase
@@ -1340,3 +1346,97 @@ cd "D:/Claude/AIVideoTrans_Codex_web_mvp"
 - 🟢 `test_legacy_cleanup_guards.py` 作为永久回归守卫纳入 CI
 
 **v2 相比 v1 的成功判据变化：** 不再以"代码仓 grep 不到 X 字符串"作为成功标志（那是 v1 的脆弱路径，会被注释/文档正常误伤）。改为**契约级 + AST 级**的结构性不回退证明。达到以上后，本项目的**单机→Web 迁移正式完成**，后续开发不用再背历史包袱。
+
+---
+
+## 13. 执行记录（2026-04-17 完成）
+
+本节在方案执行完后追加。每个 Phase 列：实际动作、commit SHA、审核轮次、偏离本方案的地方、验证证据。
+
+### Phase 1 — 死代码清理 ✅
+
+| Task | Commit | 审核 | 备注 |
+|------|--------|------|------|
+| T1.1 frontend/ 删 | `5ac5eaf` | Codex 审核 staging → 批准 | 删除 58 files / -11,139 LoC，合并 T1.1.5（docs 死链同步） |
+| T1.2 tmp_local_video_repro/ 删 | 合并入 `5ac5eaf` 的 commit message（untracked，无 index 痕迹） | - | 本地零引用 verified |
+| T1.3 build/ 归档后删 | 同上（untracked） | - | 2 个历史 deploy tar 归档到 `%USERPROFILE%\Desktop\deploy-archive\` 后删 |
+| T1.4 根 projects/ 删 | 同上（untracked） | - | 空目录，.gitignore 已覆盖 |
+| T1.5 main.py 的 web-ui 子命令删 | `f1dd24e` | Codex 放行 | 实际 4 处触点全清（933 / 940 / 1341 / 1828-1829） |
+| T1.6a test_web_ui.py 拆分 + 依赖迁移 | `cea5045` | Codex 二审→`test_web_ui.py` 保留 50+ library test（只删 6 个 server/handler 专属） | 避免"整删 test_web_ui.py 丢 50+ library 测试覆盖" |
+| T1.6b server.py + handler.py 真删 | `286fea3` | Codex 放行 | 1,262 LoC 退役 |
+| Plan v2.1 doc | `0bb456f` | - | 方案文档本身 commit |
+| verify_deploy.sh（上一批遗留） | `b6b6d03` | - | 顺带 commit，方便下次部署 |
+
+**Phase 1 commit 清单：** `5ac5eaf` `f1dd24e` `cea5045` `286fea3` `0bb456f` `b6b6d03`（6 commits）
+
+### Phase 2 — 配置 / API 一致性 ✅
+
+| Task | Commit | 审核 | 备注 |
+|------|--------|------|------|
+| T2.2 internal_auth.py helper + guard tests | `3e6ab92` | Codex 审核 staging → 批准 | 新文件 295 lines + 6 focused tests（admin_job_monitor / admin_settings / s2_monitor 各 1） |
+| T2.1 + T2.2 合并（5 shared files） | `46887cb` | Codex 放行 | 物理层面不可分（同 line 改 import + 同 hunk 改 `{JOB_API_BASE}` + `headers=internal_headers()`）。commit message 明说两个 Task 合并 |
+| T2.3 路径语义映射（`AIVIDEOTRANS_CONFIG_DIR`） | `da9d0d7` | Codex 放行 | 15 处 `admin_settings.json` / `pricing_runtime.json` / `.env` / `review_prompt_history.json` 字面量收口；13 处长尾推迟（§11）|
+
+**Phase 2 commit 清单：** `3e6ab92` `46887cb` `da9d0d7`（3 commits）
+
+**技术细节偏差**：
+- v2.1 方案 §4 中 admin_settings.py 的 T2.3 hunk 原计划单独 commit 在 T2.3，实际通过 "save 全状态 → 还原 HEAD → 手工重建 T2.1+T2.2 → commit 2 → 恢复完整状态 → commit 3" 的手法精确拆分（因为 git add -p 无法拆解物理上同 line 的 hunk）
+
+### Phase 3 — 并发正确性 ✅
+
+| Task | Commit | 审核 | 备注 |
+|------|--------|------|------|
+| T3.1a 并发触发点审计 | `6af4d27`（plan 追加 §11 条目）| - | **结论：T3.1b 推迟**。证据：pipeline 零 ThreadPoolExecutor；TTS ThreadPoolExecutor 调用链与 llm_registry 零交集；Gateway async handlers 单线程 |
+| T3.1b 加 threading.RLock | — | - | **推迟**（§11 has reasoning + 触发条件） |
+| T3.2 VoiceRegistry file_lock | `a8759a7` | Codex 放行 | `_file_lock.py` 跨平台 reentrant（threading.RLock + fcntl/msvcrt）+ 5 并发测试（含 reentrancy / serialization 断言）|
+
+**Phase 3 commit 清单：** `6af4d27` `a8759a7`（2 commits）
+
+### Phase 4 — 契约级回归守卫 ✅
+
+| Task | Commit | 审核 | 备注 |
+|------|--------|------|------|
+| T4.1 tests/test_legacy_cleanup_guards.py | `fb84c8f` | Codex 放行（2 failure 修复：①远端一过时 projects/ 空目录清掉；②main.py --help exit=1 是 argparse-free dispatcher 的合法行为，守卫改成不检查 exit code）| 10 个契约级测试：文件存在性 × 6 + CLI 行为 × 1 + AST import graph × 1 + AST 字面量 × 1 + Caddyfile 结构 × 1 |
+
+**Phase 4 commit 清单：** `fb84c8f`（1 commit）
+
+### 部署 & 收尾
+
+| 步骤 | 结果 |
+|------|------|
+| Pre-flight SSH 检查 US | 4 个 `AIVIDEOTRANS_*_DIR` env 都在 docker-compose.yml，`AVT_INTERNAL_API_KEY` / `PG_PASSWORD` / `CADDY_EMAIL` 都已设 |
+| 打包 Phase 1-4（23 文件）| `deploy-legacy-cleanup.tar.gz` 180KB |
+| 部署到 US（`Deploy-Via-154.cmd`）| tar 上传 + 解压 + 删除 remote 上的 `frontend/` / 根 `projects/` / `server.py` / `handler.py` |
+| gateway 镜像 rebuild | `docker compose build gateway` 完成 |
+| 容器刷新 | `restart app`（bind mount src/）+ `up -d --force-recreate gateway` |
+| 生产验证 | 5 容器全 healthy，smoke test 全绿（`aitrans.video/` 200、`/api/internal/*` 404、`/job-api/jobs` 401、Let's Encrypt cert 有效） |
+| verify_phase1_4.sh（定制脚本）| 所有 Phase 1-4 契约通过（frontend 删、web_ui server/handler 删、internal_auth 导入 OK、5 gateway 模块用上 internal_headers、llm_registry `_SETTINGS_PATH` env 解析、VoiceRegistry.register_voice 含 file_lock 等）|
+| 合并到 `main` + push | 12 个 commit fast-forward 到 `main`，`git push origin main` 成功 |
+| 分支清理 | `codex/review-guidelines` 本地 + 远端均已删除（CLAUDE.md 纪律：单人单分支） |
+| 2026-04-18 文档收尾 | `7408022 docs: update CLAUDE.md + README + QUICKSTART` —— 集中记录新模块 / env / 禁忌 / 守卫测试入口（见 CLAUDE.md 新增"§2026-04-17 Legacy Migration Cleanup 遗产"整节） |
+
+### 最终度量
+
+| 维度 | 数值 |
+|------|------|
+| 总 commit（含 doc 收尾）| **13** |
+| 代码删除 | `-12,914` lines（frontend 143MB + web_ui server/handler + main.py web-ui 等）|
+| 代码新增 | `+437` lines（`internal_auth.py` / `_file_lock.py` / 3 个新测试文件 + 各种 env 映射 wrap）|
+| 新增测试 | 21（admin X-Internal-Key × 6 + voice_registry 并发 × 5 + legacy cleanup guards × 10）|
+| 本批次生产停机窗口 | ~15 秒（gateway 容器 force-recreate 间隙）|
+| 本批次生产事故 | 0 |
+| 最长连续 green CI 路径 | Phase 2 窄 scope 180 passed；Phase 3 广 scope 73 passed；Phase 4 + 其他 194 passed |
+
+### 永久回归保障（CI 稳态）
+
+`tests/test_legacy_cleanup_guards.py` 10 条守卫长期 live，任何下面的回归会立刻红：
+1. frontend/ / build/ / tmp_local_video_repro/ / 根 projects/ 任一复活
+2. web_ui/server.py 或 handler.py 被复活
+3. 任何 .py 文件 import `services.web_ui.server` / `.handler`（AST 级）
+4. `main.py --help` 输出再次出现 "web-ui"
+5. gateway 业务模块（非 config.py 白名单）AST 常量出现 `http://localhost:8877` / `127.0.0.1:8877`
+6. Caddyfile 丢掉 `@internal_block` 或 `/api/internal/*` 匹配
+
+以及 `tests/test_admin_internal_key_headers.py` 6 条 + `tests/test_voice_registry_concurrency.py` 5 条共 11 条额外行为级守卫。
+
+**总计：21 条专为本次清理设计的回归守卫长驻 CI。**
