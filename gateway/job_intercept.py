@@ -701,8 +701,15 @@ def _is_post_edit_mutation_subpath(subpath: str) -> bool:
     if subpath in _POST_EDIT_TRANSITION_SUBPATHS:
         return True
     parts = subpath.split("/")
-    # segments/{sid}/update  or  segments/{sid}/status
-    if len(parts) == 3 and parts[0] == "segments" and parts[2] in {"update", "status"}:
+    # segments/{sid}/{action} where action ∈ {update, status, regenerate-tts,
+    # accept-draft, discard-draft}. Kept as an explicit allowlist rather than
+    # "any segments/*" so that future non-post-edit segment actions are not
+    # silently gated off when the flag is disabled.
+    if (
+        len(parts) == 3
+        and parts[0] == "segments"
+        and parts[2] in {"update", "status", "regenerate-tts", "accept-draft", "discard-draft"}
+    ):
         return True
     return False
 

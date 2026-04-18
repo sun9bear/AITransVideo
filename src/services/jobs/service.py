@@ -302,6 +302,54 @@ class JobService:
         _touch_editing(record, self.store)
         return {"segment_status": status_map}
 
+    def regenerate_segment_tts(
+        self,
+        job_id: str,
+        segment_id: str,
+        *,
+        tts_caller=None,
+    ) -> dict:
+        """Kick off single-segment TTS re-synthesis (T1-5).
+
+        ``tts_caller`` defaults to the "not wired" placeholder (501 from
+        the API layer). Pass a real caller via JobService subclass /
+        dependency-injected wrapper at service construction time once the
+        TTS router wiring is ready. Also refreshes editing_touched_at.
+        """
+        from services.jobs.editing import touch_editing as _touch_editing
+        from services.jobs.editing_tts import regenerate_segment_tts as _regenerate
+        from services.jobs.input_validators import validate_segment_id
+
+        validate_segment_id(segment_id)
+        record = self._require_editing(job_id)
+        result = _regenerate(
+            record.project_dir, segment_id, tts_caller=tts_caller
+        )
+        _touch_editing(record, self.store)
+        return result
+
+    def accept_segment_draft_tts(self, job_id: str, segment_id: str) -> dict:
+        from services.jobs.editing import touch_editing as _touch_editing
+        from services.jobs.editing_tts import accept_draft_tts
+        from services.jobs.input_validators import validate_segment_id
+
+        validate_segment_id(segment_id)
+        record = self._require_editing(job_id)
+        result = accept_draft_tts(record.project_dir, segment_id)
+        _touch_editing(record, self.store)
+        return result
+
+    def discard_segment_draft_tts(self, job_id: str, segment_id: str) -> dict:
+        from services.jobs.editing import touch_editing as _touch_editing
+        from services.jobs.editing_tts import discard_draft_tts
+        from services.jobs.input_validators import validate_segment_id
+
+        validate_segment_id(segment_id)
+        record = self._require_editing(job_id)
+        result = discard_draft_tts(record.project_dir, segment_id)
+        _touch_editing(record, self.store)
+        return result
+
     def get_job(self, job_id: str) -> JobRecord | None:
         return self.store.load_job(job_id)
 

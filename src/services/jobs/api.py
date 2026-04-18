@@ -443,6 +443,29 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
                     result = service.mark_editing_segment_status(job_id, segment_id, status)
                     self._write_json(HTTPStatus.OK, {"success": True, **result})
                     return
+                # POST /jobs/{id}/segments/{sid}/regenerate-tts — single-segment TTS (T1-5)
+                if (len(path_parts) == 5 and path_parts[0] == "jobs"
+                        and path_parts[2] == "segments" and path_parts[4] == "regenerate-tts"):
+                    job_id = path_parts[1]
+                    segment_id = path_parts[3]
+                    # payload is accepted but currently unused; reserved for
+                    # future provider override (voice_id, model, sample_rate).
+                    self._read_json_payload()
+                    result = service.regenerate_segment_tts(job_id, segment_id)
+                    self._write_json(HTTPStatus.OK, {"success": True, **result})
+                    return
+                # POST /jobs/{id}/segments/{sid}/accept-draft — keep draft wav (T1-5)
+                if (len(path_parts) == 5 and path_parts[0] == "jobs"
+                        and path_parts[2] == "segments" and path_parts[4] == "accept-draft"):
+                    result = service.accept_segment_draft_tts(path_parts[1], path_parts[3])
+                    self._write_json(HTTPStatus.OK, {"success": True, **result})
+                    return
+                # POST /jobs/{id}/segments/{sid}/discard-draft — delete draft (T1-5)
+                if (len(path_parts) == 5 and path_parts[0] == "jobs"
+                        and path_parts[2] == "segments" and path_parts[4] == "discard-draft"):
+                    result = service.discard_segment_draft_tts(path_parts[1], path_parts[3])
+                    self._write_json(HTTPStatus.OK, {"success": True, **result})
+                    return
                 # POST /jobs/{id}/editing/commit — T1-1 skeleton raises 501
                 if (len(path_parts) == 4 and path_parts[0] == "jobs"
                         and path_parts[2] == "editing" and path_parts[3] == "commit"):
