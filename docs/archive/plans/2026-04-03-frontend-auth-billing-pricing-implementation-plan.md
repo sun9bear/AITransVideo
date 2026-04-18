@@ -1,6 +1,11 @@
 # 前端、注册、支付与收费体系改造 Implementation Plan
 
-> **状态说明（2026-04-03）：** 本文档已被 [2026-04-03-frontend-auth-billing-pricing-implementation-plan-v2.md](/D:/Claude/AIVideoTrans_Codex_web_mvp/docs/plans/2026-04-03-frontend-auth-billing-pricing-implementation-plan-v2.md) 替代。本文保留为历史执行稿与范围演化记录，不建议继续作为当前主执行计划使用。
+> **Status:** superseded  
+> **Last updated:** 2026-04-03  
+> **Superseded-by:** `docs/archive/plans/2026-04-03-frontend-auth-billing-pricing-implementation-plan-v2.md`  
+> **Archived at:** 2026-04-17 legacy cleanup
+
+> **状态说明（2026-04-03）：** 本文档已被 v2 版替代，保留为历史执行稿与范围演化记录，不建议继续作为当前主执行计划使用。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

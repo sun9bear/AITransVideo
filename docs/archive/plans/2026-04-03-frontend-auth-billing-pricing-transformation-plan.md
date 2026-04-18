@@ -1,6 +1,12 @@
 # 前端 + 注册 + 支付 + 收费体系改造方案
 
-> **文档角色说明（2026-04-03）：** 本文档是前端、注册、支付与收费体系改造的**战略蓝图 / 目标态设计**，用于说明“为什么这样改、最终想走到哪里”。当前更贴近仓库现状的执行顺序，请以 [2026-04-03-frontend-auth-billing-pricing-implementation-plan-v2.md](/D:/Claude/AIVideoTrans_Codex_web_mvp/docs/plans/2026-04-03-frontend-auth-billing-pricing-implementation-plan-v2.md) 为主。
+> **Status:** completed (implemented)  
+> **Last updated:** 2026-04-03  
+> **Role:** 战略蓝图 / 目标态设计（执行由 `implementation-plan-v2.md` 落地）  
+> **Implemented-by:** V2 + V3 商业化批次  
+> **Archived at:** 2026-04-17 legacy cleanup
+
+> **文档角色说明（2026-04-03）：** 本文档是前端、注册、支付与收费体系改造的**战略蓝图 / 目标态设计**，用于说明"为什么这样改、最终想走到哪里"。当前更贴近仓库现状的执行顺序，请以 `docs/archive/plans/2026-04-03-frontend-auth-billing-pricing-implementation-plan-v2.md` 为主。
 
 > **定位：** 这是一份面向当前仓库的详细改造方案，覆盖 `frontend-next`、`gateway`、注册登录、国内支付、自动续费、试用与收费模型，以及 Stitch 协同设计方式。  
 > **目标：** 在不破坏现有工作台主流程的前提下，把项目从“可用的内部/早期工作台”升级为“可对外获客、可转化、可续费、可控反滥用”的 SaaS 产品。

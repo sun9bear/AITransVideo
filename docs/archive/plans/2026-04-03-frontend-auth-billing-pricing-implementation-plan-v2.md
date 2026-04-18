@@ -1,5 +1,11 @@
 # 前端、注册、支付与收费体系改造 v2 Implementation Plan
 
+> **Status:** completed (implemented)  
+> **Last updated:** 2026-04-03  
+> **Supersedes:** `docs/archive/plans/2026-04-03-frontend-auth-billing-pricing-implementation-plan.md`  
+> **Implemented-by:** V2 + V3 商业化批次（git log 2026-04-03 ~ 2026-04-07）  
+> **Archived at:** 2026-04-17 legacy cleanup
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 在当前 `frontend-next + gateway + jobs service` 架构上，用更小的阶段把“能看、能注册、能收费”主链路先跑通，同时避免一次性打穿现有 `plan_code + free quota + PaymentOrder` 基线。

@@ -1,6 +1,9 @@
 # TTS 供应商最终架构建议（人民币版）
 
-更新时间：2026-03-27
+> **Status:** superseded  
+> **Last updated:** 2026-03-27  
+> **Superseded-by:** `docs/archive/plans/2026-04-08-three-engine-voice-selection-plan.md`（三引擎混用音色架构落地后，本文的二选一结论不再适用）  
+> **Archived at:** 2026-04-17 legacy cleanup
 
 ## 目标
 

@@ -1,5 +1,9 @@
 # Hermes Ops Control Plane Phase 1 Implementation Plan
 
+> **Status:** parked (design complete, 零代码落地)  
+> **Last updated:** 2026-04-11  
+> **Depends-on:** `docs/plans/hermes/2026-04-11-hermes-platform-design.md`
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the first production-ready Hermes Ops Control Plane loop for AIVideoTrans by integrating Hermes-agent with controlled backend APIs, persistence, admin surfaces, and low-noise Telegram delivery.

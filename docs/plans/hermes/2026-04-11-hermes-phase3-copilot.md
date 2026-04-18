@@ -1,5 +1,9 @@
 # Hermes Phase 3 Copilot Implementation Plan
 
+> **Status:** parked (design complete, 零代码落地)  
+> **Last updated:** 2026-04-11  
+> **Depends-on:** `docs/plans/hermes/2026-04-11-hermes-phase15-phase2.md` 落地后方可启动
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add a bounded, evidence-backed internal Hermes Copilot to the AIVideoTrans admin panel, starting with `ops_qa` and `job_diagnosis` only.

@@ -1,7 +1,9 @@
 # Hermes Platform Design (Converged Hermes-First Version)
 
-> Last updated: 2026-04-11
-> Scope: AIVideoTrans single-host production deployment, with future-ready expansion to multi-node and split deployments.
+> **Status:** parked (design complete, 零代码落地, 无明确时间表)  
+> **Last updated:** 2026-04-11  
+> **Scope:** AIVideoTrans single-host production deployment, with future-ready expansion to multi-node and split deployments.  
+> **Startup-condition:** 若未来需要独立 ops 控制面，先更新 `docs/plans/hermes/README.md` 添加启动决策说明。
 
 ## Goal
 
