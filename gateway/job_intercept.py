@@ -13,7 +13,19 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 import uuid as _uuid
+from pathlib import Path
+
+# Make src/ importable so we can reuse services.jobs.logs_redactor (D25).
+# Mirrors the pattern in admin_settings.py — local dev vs Docker container.
+for _candidate in [
+    Path(__file__).resolve().parent.parent / "src",
+    Path("/opt/aivideotrans/app/src"),
+]:
+    if _candidate.is_dir() and str(_candidate) not in sys.path:
+        sys.path.insert(0, str(_candidate))
+
 from fastapi import Depends, HTTPException, Request, Response
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -578,6 +590,15 @@ async def intercept_job_subresource(
     """
     await _verify_job_ownership(job_id, db, user)
 
+    # --- D25 server-side log redaction for non-admin users ---
+    # Intercepts GET /logs BEFORE the generic proxy. Admins pass through
+    # unchanged. Non-admins get events[].message + lines[] filtered through
+    # the registry-aware redactor so provider names / UUIDs / internal IDs
+    # are stripped. Frontend's ``isAdmin`` hide-LogViewer UI is only cosmetic;
+    # this is the authoritative enforcement point.
+    if subpath == "logs" and request.method == "GET":
+        return await _serve_redacted_logs(request, user)
+
     # T2: state-transition endpoints need concurrency control at Gateway layer.
     # For POST /continue we hold a row lock across the upstream proxy call so
     # that (a) concurrent continues serialize at the DB, and (b) we only
@@ -681,6 +702,70 @@ async def _continue_with_gateway_lock(
     # waiting on this txn.
     await db.commit()
     return response
+
+
+async def _serve_redacted_logs(
+    request: Request,
+    user: User | None,
+) -> Response:
+    """Proxy GET /logs and, for non-admin users, strip sensitive fragments
+    from ``events[].message`` and ``lines[]`` before returning.
+
+    Failure modes:
+    - Upstream non-200: return verbatim (nothing to redact).
+    - Response body is not valid JSON or not the expected shape: return
+      verbatim — we prefer "fail open" on unexpected schema changes rather
+      than 500'ing the logs endpoint.
+    """
+    response = await proxy_request(
+        request=request,
+        upstream_base=settings.job_api_upstream,
+        strip_prefix="/job-api",
+    )
+    if response.status_code != 200:
+        return response
+
+    role = (getattr(user, "role", None) or "user") if user is not None else "user"
+    if role == "admin":
+        return response
+
+    try:
+        body = json.loads(response.body.decode("utf-8"))
+    except Exception:
+        logger.warning("redacted_logs: upstream response was not JSON; returning verbatim")
+        return response
+
+    if not isinstance(body, dict):
+        return response
+
+    try:
+        from services.jobs.logs_redactor import build_default_redactor
+
+        redactor = build_default_redactor()
+    except Exception:
+        logger.exception("redacted_logs: failed to build redactor; returning verbatim")
+        return response
+
+    events = body.get("events")
+    if isinstance(events, list):
+        for ev in events:
+            if isinstance(ev, dict):
+                msg = ev.get("message")
+                if isinstance(msg, str) and msg:
+                    ev["message"] = redactor.redact(msg)
+
+    lines = body.get("lines")
+    if isinstance(lines, list):
+        body["lines"] = [
+            redactor.redact(ln) if isinstance(ln, str) else ln
+            for ln in lines
+        ]
+
+    return Response(
+        content=json.dumps(body, ensure_ascii=False),
+        status_code=200,
+        media_type="application/json",
+    )
 
 
 # Set of subpaths that represent editing STATE TRANSITIONS (need FOR UPDATE
