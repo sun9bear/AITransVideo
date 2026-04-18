@@ -4,6 +4,7 @@ import { useState, useRef, useEffect } from 'react'
 import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
 import { toast } from 'sonner'
+import { RefreshCw } from 'lucide-react'
 
 import { EmptyState } from '@/components/empty-state'
 import { StatusBadge } from '@/components/status-badge'
@@ -167,8 +168,12 @@ export default function WorkspacePage() {
 
   const isWaitingForReview = job.status === 'waiting_for_review'
   const isProcessing = job.status === 'running' || job.status === 'queued'
+  // Intentionally distinct from isProcessing: editing is a user-held session,
+  // not a pipeline state. See docs/internal/status-touchpoints-2026-04-18.md §0.
+  const isEditing = job.status === 'editing'
   const isSucceeded = job.status === 'succeeded'
   const isFailed = job.status === 'failed'
+  const editGeneration = job.editGeneration ?? 0
   const displayTitle = getJobDisplayTitle(job)
   const secondaryLabel = getJobSecondaryLabel(job)
   const availableDownloadCount = downloads.filter((i) => i.available).length
@@ -190,7 +195,7 @@ export default function WorkspacePage() {
             <p className="text-sm text-muted-foreground">{secondaryLabel}</p>
           </div>
           <div className="flex items-center gap-3 shrink-0">
-            <StatusBadge status={job.status} />
+            <StatusBadge status={job.status} editGeneration={editGeneration} />
             <Link className="rounded-lg border border-border bg-muted/30 px-4 py-2 text-xs text-muted-foreground transition hover:bg-muted/50" href={`/projects/${jobId}`}>项目详情</Link>
             {(isWaitingForReview || isProcessing) ? (
               <button
@@ -202,6 +207,13 @@ export default function WorkspacePage() {
                 {isCancelling ? '取消中…' : '取消任务'}
               </button>
             ) : null}
+            {/*
+              editing state has its own "放弃修改" / "确认修改" buttons on the
+              /workspace/{id}/edit page (plan §7.6). We do NOT surface a
+              cancel-task button here — cancelling an editing session is
+              destructive (drops the user's draft) and the confirmation flow
+              must happen on the edit page itself.
+            */}
           </div>
         </div>
 
@@ -217,7 +229,16 @@ export default function WorkspacePage() {
               当前需要处理：{getStageLabel(effectiveStage)}
             </span>
           ) : isProcessing ? (
-            <span>{getUserFacingProgressMessage(job.progressMessage) ?? '任务正在处理中…'}</span>
+            <span>
+              {editGeneration > 0
+                ? `正在重合成 · 第 ${editGeneration} 次修改`
+                : (getUserFacingProgressMessage(job.progressMessage) ?? '任务正在处理中…')}
+            </span>
+          ) : isEditing ? (
+            <span className="text-violet-600 dark:text-violet-400 font-medium">
+              此任务处于修改中
+              {editGeneration > 0 ? `（已完成 ${editGeneration} 次修改）` : ''}
+            </span>
           ) : isSucceeded ? (
             <span className="text-emerald-600 dark:text-emerald-400 font-medium">任务已完成</span>
           ) : isFailed ? (
@@ -233,11 +254,41 @@ export default function WorkspacePage() {
         <section className="surface-card p-8 text-center">
           <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-3 border-primary border-t-transparent" />
           <h3 className="text-lg font-semibold text-foreground">
-            正在处理 · {getStageLabel(effectiveStage)}
+            {editGeneration > 0
+              ? `正在重合成 · 第 ${editGeneration} 次修改`
+              : `正在处理 · ${getStageLabel(effectiveStage)}`}
           </h3>
           <p className="mt-2 text-sm text-muted-foreground">
             {getUserFacingProgressMessage(job.progressMessage) ?? '任务正在后台处理，页面会自动刷新…'}
           </p>
+        </section>
+      ) : null}
+
+      {/* Editing state (plan §10.4 / D18). Distinct from "正在处理" — editing
+          is a user-held session: the pipeline is idle waiting for the user to
+          return to the edit page and commit or abandon the draft. The real
+          edit surface lives at /workspace/{id}/edit (Phase 1 T1-3); this
+          card only offers the resume CTA. */}
+      {isEditing ? (
+        <section className="surface-card p-8 text-center border border-violet-500/20 bg-violet-500/5">
+          <RefreshCw className="mx-auto mb-4 h-10 w-10 text-violet-500" />
+          <h3 className="text-lg font-semibold text-foreground">
+            此任务正在修改中
+          </h3>
+          <p className="mt-2 text-sm text-muted-foreground">
+            {editGeneration > 0
+              ? `已完成 ${editGeneration} 次修改。点击下方按钮继续本轮编辑，或在修改页放弃草稿。`
+              : '点击下方按钮继续本轮编辑，或在修改页放弃草稿。'}
+          </p>
+          <div className="mt-4 flex justify-center">
+            <Link
+              href={`/workspace/${jobId}/edit`}
+              className="inline-flex items-center gap-1 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition hover:bg-primary/90"
+            >
+              <RefreshCw className="h-4 w-4" />
+              继续修改
+            </Link>
+          </div>
         </section>
       ) : null}
 

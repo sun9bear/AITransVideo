@@ -27,9 +27,15 @@ import {
   getStageLabel,
   getUserFacingProgressMessage,
 } from "@/features/jobs/presentation"
+import { computeExpiryInfo, expiryColorClass, expiryLabel } from "@/features/jobs/expiry"
 import { listJobs } from "@/lib/api/jobs"
 import { cancelJob, deleteJob } from "@/lib/api/reviews"
-import type { JobSummary, JobStatus } from "@/types/jobs"
+import { ACTIVE_JOB_STATUSES, type JobSummary, type JobStatus } from "@/types/jobs"
+
+// Feature flag gating the post-edit workflow UI (plan D29). Both the frontend
+// entry points and the backend endpoints are gated; this flag defaults to
+// disabled so Phase 0 ships without exposing any Phase 1 surface to end users.
+const POST_EDIT_ENABLED = process.env.NEXT_PUBLIC_ENABLE_POST_EDIT === "1"
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -38,12 +44,19 @@ import type { JobSummary, JobStatus } from "@/types/jobs"
 const POLL_INTERVAL = 4_000
 const MAX_AUTO_EXPAND = 3
 
-const POLL_STATUSES: JobStatus[] = ["running", "queued", "waiting_for_review"]
+// editing is active (user-held session); list page must keep polling so the
+// UI reflects idle auto-cancel, admin force-cancel, and commit transitions.
+const POLL_STATUSES: readonly JobStatus[] = ACTIVE_JOB_STATUSES
 
+// Legacy days-remaining helper. Kept only for any stray callers that have not
+// migrated to computeExpiryInfo; new code should use the tiered helper in
+// @/features/jobs/expiry instead (plan D12). Can be removed once no other
+// call sites reference it.
 function daysRemaining(updatedAt: string): number {
   const elapsed = Date.now() - new Date(updatedAt).getTime()
   return Math.max(0, 7 - Math.floor(elapsed / (1000 * 60 * 60 * 24)))
 }
+void daysRemaining  // keep reference to avoid unused-import-style lint noise
 
 function timeLabel(iso: string) {
   return new Intl.DateTimeFormat("zh-CN", {
@@ -105,7 +118,7 @@ function ProjectsContent() {
           const next = new Set(prev)
           for (const j of data) {
             if (
-              ['running', 'queued', 'waiting_for_review'].includes(j.status) &&
+              ACTIVE_JOB_STATUSES.includes(j.status) &&
               !prevJobIdsRef.current.has(j.id)
             ) {
               next.add(j.id)
@@ -412,8 +425,9 @@ function ProjectCard({
   isCancelling: boolean
 }) {
   const router = useRouter()
-  const days = daysRemaining(job.updatedAt)
-  const isExpiring = days <= 2
+  const expiry = computeExpiryInfo(job)
+  const showEditShortcut =
+    POST_EDIT_ENABLED && job.serviceMode === "studio" && job.status === "succeeded"
 
   return (
     <Card size="sm" className="overflow-visible">
@@ -434,12 +448,12 @@ function ProjectCard({
             <span className="font-semibold text-foreground truncate">
               {getJobDisplayTitle(job)}
             </span>
-            <StatusBadge status={job.status} />
+            <StatusBadge status={job.status} editGeneration={job.editGeneration ?? 0} />
           </div>
           <div className="flex flex-wrap gap-1.5 text-xs text-muted-foreground">
             <span>{timeLabel(job.updatedAt)}</span>
-            <span className={isExpiring ? "text-red-400 font-medium" : ""}>
-              {days > 0 ? `${days} 天后过期` : "即将过期"}
+            <span className={expiryColorClass(expiry.tier)}>
+              {expiryLabel(expiry)}
             </span>
           </div>
         </div>
@@ -449,6 +463,19 @@ function ProjectCard({
           className="flex items-center gap-1.5 shrink-0"
           onClick={(e) => e.stopPropagation()}
         >
+          {showEditShortcut && (
+            // D43: 任务卡右上角"修改"直达按钮。仅 Studio + succeeded + feature flag
+            // 启用时渲染；Phase 1 T1-3 落地 /workspace/{id}/edit 路由后即可跳转。
+            <Link
+              href={`/workspace/${job.id}/edit`}
+              className="inline-flex items-center gap-1 rounded-md border border-border bg-background/60 px-2 py-1 text-xs text-foreground transition hover:bg-accent/40"
+              title="修改此任务"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <RefreshCw className="h-3 w-3" />
+              修改
+            </Link>
+          )}
           <CardActions
             job={job}
             collapsed
@@ -549,6 +576,31 @@ function ExpandedContent({
         </div>
       )
 
+    case "editing":
+      // Plan D18 + §11.6. "editing" is a user-owned session — user either
+      // resumes ("继续修改") or abandons via the edit page. We do NOT offer
+      // a card-level cancel button: cancelling editing is destructive (drops
+      // user draft) and must route through the edit page's own二次确认 flow.
+      return (
+        <div className="space-y-3">
+          <div className="flex items-center gap-2 rounded-lg bg-violet-500/10 px-4 py-3 text-sm text-violet-400">
+            <RefreshCw className="h-4 w-4 shrink-0" />
+            你正在修改此任务
+            {(job.editGeneration ?? 0) > 0 && (
+              <span className="text-xs text-violet-300/80">
+                · 已完成 {job.editGeneration} 次修改
+              </span>
+            )}
+          </div>
+          <Link href={`/workspace/${job.id}/edit`}>
+            <Button size="sm">
+              <ExternalLink className="h-3.5 w-3.5 mr-1" />
+              继续修改
+            </Button>
+          </Link>
+        </div>
+      )
+
     case "failed":
       return (
         <div className="space-y-3">
@@ -641,7 +693,11 @@ function CardActions({
       case "running":
       case "queued":
       case "waiting_for_review":
-        return null // Actions in expanded area
+      case "editing":
+        // Actions are shown in the expanded area (see ExpandedContent).
+        // editing explicitly routes its own confirm flow through the edit
+        // page — no collapsed-level action here.
+        return null
 
       default:
         return null

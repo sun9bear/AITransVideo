@@ -17,13 +17,19 @@ export function selectCurrentTaskJob(jobs: readonly JobSummary[]) {
 }
 
 export function selectActiveTaskJob(jobs: JobSummary[]): JobSummary | null {
-  // Only truly active statuses — NO fallback to "recent 1 hour" like selectCurrentTaskJob
-  const active = jobs.filter(j =>
-    ['running', 'queued', 'waiting_for_review'].includes(j.status)
-  )
+  // Only truly active statuses — NO fallback to "recent 1 hour" like selectCurrentTaskJob.
+  // Reuses ACTIVE_JOB_STATUSES so `editing` is naturally included (plan 2026-04-18).
+  const active = jobs.filter(j => ACTIVE_JOB_STATUSES.includes(j.status))
   if (active.length === 0) return null
-  // Priority: waiting_for_review > running > queued, then by most recent update
-  const priorityOrder = ['waiting_for_review', 'running', 'queued']
+  // Priority: editing > waiting_for_review > running > queued, then by most recent update.
+  // `editing` is highest because it's a user-initiated session the user should be nudged
+  // to resume. See docs/internal/status-touchpoints-2026-04-18.md §0.
+  const priorityOrder: readonly JobSummary['status'][] = [
+    'editing',
+    'waiting_for_review',
+    'running',
+    'queued',
+  ]
   active.sort((a, b) => {
     const pa = priorityOrder.indexOf(a.status)
     const pb = priorityOrder.indexOf(b.status)
