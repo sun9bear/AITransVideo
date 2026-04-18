@@ -25,6 +25,25 @@ JOB_API_DEFAULT_HOST = "127.0.0.1"
 JOB_API_DEFAULT_PORT = 8877
 
 
+# Express/Studio 输出分层白名单（见 docs/plans/2026-04-18-express-studio-output-filter-plan.md）
+# Express 模式下只允许这些 key 从 /artifacts 暴露
+EXPRESS_ALLOWED_ARTIFACT_KEYS: frozenset[str] = frozenset({
+    "publish.dubbed_video",
+    "publish.dubbed_video_poster",
+})
+# Express 模式下只允许 /download/{key} 这些 key
+EXPRESS_ALLOWED_DOWNLOAD_KEYS: frozenset[str] = frozenset({
+    "publish.dubbed_video",
+})
+# Express 模式下只允许 /stream/{kind} 这些 kind（禁 audio）
+EXPRESS_ALLOWED_STREAM_KINDS: frozenset[str] = frozenset({"video", "poster"})
+
+
+def _is_express_job(record) -> bool:
+    """Check if a JobRecord is in Express mode. Safe for missing attribute."""
+    return getattr(record, "service_mode", None) == "express"
+
+
 def build_job_api_server(
     *,
     service: JobService,
@@ -69,10 +88,26 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
                     )
                     return
                 if len(path_parts) == 3 and path_parts[0] == "jobs" and path_parts[2] == "artifacts":
-                    self._write_json(
-                        HTTPStatus.OK,
-                        service.get_artifacts(path_parts[1]),
-                    )
+                    artifacts_payload = service.get_artifacts(path_parts[1])
+                    # Express 过滤：只暴露 publish.dubbed_video + publish.dubbed_video_poster
+                    # 见 docs/plans/2026-04-18-express-studio-output-filter-plan.md
+                    record = service.require_job(path_parts[1])
+                    if _is_express_job(record):
+                        items = artifacts_payload.get("artifacts") or []
+                        filtered = [
+                            it for it in items
+                            if isinstance(it, dict)
+                            and it.get("key") in EXPRESS_ALLOWED_ARTIFACT_KEYS
+                        ]
+                        artifacts_payload = {
+                            **artifacts_payload,
+                            "artifacts": filtered,
+                            "manifest": {
+                                **artifacts_payload.get("manifest", {}),
+                                "artifact_count": len(filtered),
+                            },
+                        }
+                    self._write_json(HTTPStatus.OK, artifacts_payload)
                     return
                 # --- Phase 1: review-state (job-scoped, strict) ---
                 if len(path_parts) == 3 and path_parts[0] == "jobs" and path_parts[2] == "review-state":
@@ -89,6 +124,14 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
                     job_id = path_parts[1]
                     download_key = path_parts[3]
                     record = service.require_job(job_id)
+                    # Express 白名单：只允许 publish.dubbed_video
+                    # 见 docs/plans/2026-04-18-express-studio-output-filter-plan.md
+                    if _is_express_job(record) and download_key not in EXPRESS_ALLOWED_DOWNLOAD_KEYS:
+                        self._write_json(
+                            HTTPStatus.FORBIDDEN,
+                            {"error": f"该产物对 Express 任务不可下载: {download_key}"},
+                        )
+                        return
                     project_dir = _require_project_dir(record)
                     download_path = _resolve_download_path(
                         project_root=service.runner.project_root,
@@ -110,6 +153,13 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
                 if len(path_parts) == 3 and path_parts[0] == "jobs" and path_parts[2] == "tts-segments-zip":
                     job_id = path_parts[1]
                     record = service.require_job(job_id)
+                    # Express 禁 tts-segments-zip（editor-only 产物）
+                    if _is_express_job(record):
+                        self._write_json(
+                            HTTPStatus.FORBIDDEN,
+                            {"error": "TTS 分段包对 Express 任务不可访问"},
+                        )
+                        return
                     project_dir = _require_project_dir(record)
                     tts_dir = project_dir / "tts"
                     if not tts_dir.is_dir():
@@ -140,6 +190,14 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
                     job_id = path_parts[1]
                     kind = path_parts[3]
                     record = service.require_job(job_id)
+                    # Express 禁 stream/audio（只允许 video + poster）
+                    # 见 docs/plans/2026-04-18-express-studio-output-filter-plan.md
+                    if _is_express_job(record) and kind not in EXPRESS_ALLOWED_STREAM_KINDS:
+                        self._write_json(
+                            HTTPStatus.FORBIDDEN,
+                            {"error": f"该媒体流对 Express 任务不可访问: {kind}"},
+                        )
+                        return
                     project_dir = _require_project_dir(record)
                     if kind == "video":
                         artifact_key = "publish.dubbed_video"
