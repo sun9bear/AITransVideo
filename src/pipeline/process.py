@@ -71,6 +71,7 @@ from services.review_state import (
     ReviewStateManager,
 )
 from services.llm import LLMRouter, load_llm_fallback_config
+from services.llm_registry import get_prompt_model as _get_prompt_model
 from services.state_manager import StateManager
 from services.tts.duration_estimator import TTSDurationEstimator
 from services.tts.tts_generator import TTSConfig, TTSGenerator, load_tts_config
@@ -131,12 +132,6 @@ _SPEAKER_ID_PATTERN = re.compile(r"^speaker_[a-z0-9_]+$")
 # _should_skip_translation_config / _should_skip_all_reviews removed —
 # decision now comes from the job record's snapshot fields
 # (job_requires_review, job_service_mode).  See run() below.
-
-
-def _get_default_translation_model(mode: str = "studio") -> str:
-    """Get default translation model from llm_registry."""
-    from services.llm_registry import get_prompt_model
-    return get_prompt_model(mode, "translate")
 
 
 def _is_valid_speaker_id(value: object) -> bool:
@@ -1136,8 +1131,8 @@ class ProcessPipeline:
                 TRANSLATION_CONFIG_REVIEW_STAGE,
             )
             if approved_translation_config is None and not s3_cache_hit:
-                default_model = _get_default_translation_model()
-                print(f"[S3] 自动使用默认翻译模型: {default_model}")
+                default_model = _get_prompt_model(job_service_mode, "translate")
+                print(f"[S3] 自动使用默认翻译模型: {default_model} (service_mode={job_service_mode})")
                 approved_translation_config = {
                     "selected_model": default_model,
                     "prompt_template": None,
@@ -1187,6 +1182,7 @@ class ProcessPipeline:
                             speakers=_review_speaker_styles,
                             video_title=download_result.video_title,
                             debug_output_dir=final_project_dir / "transcript",
+                            mode=job_service_mode,
                         )
                     except Exception as exc:
                         print(f"[S2.5] Pass 3 failed (non-fatal): {exc}", flush=True)

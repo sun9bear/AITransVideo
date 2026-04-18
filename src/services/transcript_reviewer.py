@@ -235,16 +235,6 @@ def _try_compress_audio(audio_path: Path, tmp_dir: Path | None) -> Path | None:
     return None
 
 
-def _get_review_model() -> str:
-    """Get the logical review model name — legacy compat wrapper.
-
-    New code should use ``_get_prompt_model(mode, prompt_key)`` directly.
-    This wrapper exists for call-sites that haven't been migrated yet
-    (e.g. legacy_review_transcript_single_pass).
-    """
-    return _get_prompt_model("studio", "pass1")
-
-
 def _get_admin_prompt_override(prompt_key: str) -> str | None:
     """Load a prompt override from admin settings.
 
@@ -745,6 +735,7 @@ def _orchestrate_three_pass(
             video_url=video_url,
             words_data=words_data,
             debug_output_dir=debug_output_dir,
+            mode=mode,
         )
 
     if not lines:
@@ -1013,17 +1004,19 @@ def _review_pass1_speakers(
 
         contents.append(prompt)
 
-        # Smart retry: transient errors → retry same model; output errors → fallback
+        # Smart retry: transient errors → retry same model; output errors → fallback.
+        # get_fallback_candidates() 返回 cost_rank 降序列表（最贵在前 = 质量最接近当前模型），
+        # 按 prompt-model-management 方案 §3.3 "优先质量最接近"策略迭代全部候选直到成功或全部失败。
         _fallback_models = get_fallback_candidates(review_model, requires_audio=True)
-        _cheapest = _fallback_models[-1] if _fallback_models else None
-        _second_cheapest = _fallback_models[-2] if len(_fallback_models) >= 2 else None
-
-        # Build fallback chain: primary → (retry if transient) → cheapest → second_cheapest
-        _fallback_chain: list[tuple[str, str, str]] = []  # (label, model_name, provider)
-        if _cheapest and _cheapest != review_model:
-            _fallback_chain.append(("cheapest", _cheapest, _MODEL_REGISTRY.get(_cheapest, {}).get("provider", "gemini")))
-        if _second_cheapest and _second_cheapest != review_model:
-            _fallback_chain.append(("2nd_cheapest", _second_cheapest, _MODEL_REGISTRY.get(_second_cheapest, {}).get("provider", "gemini")))
+        _fallback_chain: list[tuple[str, str, str]] = [  # (label, model_name, provider)
+            (
+                f"fallback_{_i + 1}",
+                _m,
+                _MODEL_REGISTRY.get(_m, {}).get("provider", "gemini"),
+            )
+            for _i, _m in enumerate(_fallback_models)
+            if _m != review_model
+        ]
 
         _pass1_last_error: Exception | None = None
         _retried_transient = False
@@ -1321,16 +1314,15 @@ def _review_pass2_text(
         speakers_json=speakers_json,
     )
 
-    # Smart retry: transient → retry same model; output error → fallback
+    # Smart retry: transient → retry same model; output error → fallback.
+    # get_fallback_candidates() 返回 cost_rank 降序列表（质量最接近当前模型在前）。
+    # 迭代全部候选，直到成功或全部失败（方案 §3.3）。
     _fallback_models = get_fallback_candidates(review_model, requires_audio=False)
-    _cheapest = _fallback_models[-1] if _fallback_models else None
-    _second_cheapest = _fallback_models[-2] if len(_fallback_models) >= 2 else None
-
-    _fallback_chain_p2: list[tuple[str, str]] = []
-    if _cheapest and _cheapest != review_model:
-        _fallback_chain_p2.append(("cheapest", _cheapest))
-    if _second_cheapest and _second_cheapest != review_model:
-        _fallback_chain_p2.append(("2nd_cheapest", _second_cheapest))
+    _fallback_chain_p2: list[tuple[str, str]] = [
+        (f"fallback_{_i + 1}", _m)
+        for _i, _m in enumerate(_fallback_models)
+        if _m != review_model
+    ]
 
     _pass2_last_error: Exception | None = None
     _t0 = time.monotonic()
@@ -1602,13 +1594,20 @@ def review_pass3_voice_profiles(
     speakers: dict[str, dict],
     video_title: str = "",
     debug_output_dir: str | Path | None = None,
+    mode: str = "studio",
 ) -> dict[str, dict]:
     """Pass 3: voice profiling.  Called by pipeline after translation review.
 
     Returns speaker_profiles dict: {speaker_id: {voice_description, gender, age_group, ...}}.
     On failure, returns ``_fallback_minimal_speaker_styles(speakers)``.
+
+    Parameters
+    ----------
+    mode : ``"studio"`` | ``"express"`` — selects per-mode Pass 3 (pass1 slot — both
+        audio-capable) model from llm_registry.  Prevents Express jobs from
+        silently using Studio's Gemini Pro on voice profiling.
     """
-    review_model = _get_review_model()
+    review_model = _get_prompt_model(mode, "pass1")
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key:
         logger.warning("[S2][Pass3] GEMINI_API_KEY not set, using fallback profiles")
@@ -1664,16 +1663,19 @@ def review_pass3_voice_profiles(
 
         contents.append(prompt)
 
-        # Smart retry: transient → retry same model; output error → fallback
+        # Smart retry: transient → retry same model; output error → fallback.
+        # get_fallback_candidates() 返回 cost_rank 降序列表（质量最接近当前模型在前）。
+        # 迭代全部候选（方案 §3.3）。
         _fallback_models = get_fallback_candidates(review_model, requires_audio=True)
-        _cheapest_p3 = _fallback_models[-1] if _fallback_models else None
-        _second_cheapest_p3 = _fallback_models[-2] if len(_fallback_models) >= 2 else None
-
-        _fb_chain_p3: list[tuple[str, str, str]] = []
-        if _cheapest_p3 and _cheapest_p3 != review_model:
-            _fb_chain_p3.append(("cheapest", _cheapest_p3, _MODEL_REGISTRY.get(_cheapest_p3, {}).get("provider", "gemini")))
-        if _second_cheapest_p3 and _second_cheapest_p3 != review_model:
-            _fb_chain_p3.append(("2nd_cheapest", _second_cheapest_p3, _MODEL_REGISTRY.get(_second_cheapest_p3, {}).get("provider", "gemini")))
+        _fb_chain_p3: list[tuple[str, str, str]] = [
+            (
+                f"fallback_{_i + 1}",
+                _m,
+                _MODEL_REGISTRY.get(_m, {}).get("provider", "gemini"),
+            )
+            for _i, _m in enumerate(_fallback_models)
+            if _m != review_model
+        ]
 
         # Collect clip paths for mimo fallback
         _clip_paths = [clips[sid] for sid in speaker_ids if sid in clips and clips[sid] and clips[sid].exists()]
@@ -1834,14 +1836,24 @@ def legacy_review_transcript_single_pass(
     video_url: str = "",
     words_data: list[dict] | None = None,
     debug_output_dir: str | Path | None = None,
+    mode: str = "studio",
 ) -> ReviewResult | None:
     """Legacy single-pass review (fallback path).
 
     This is the original ``review_transcript()`` logic preserved as-is.
     Called when the three-pass orchestrator encounters a failure in Pass 1
     or Pass 2, ensuring the pipeline always has a working fallback.
+
+    Parameters
+    ----------
+    mode : ``"studio"`` | ``"express"`` — selects per-mode model from llm_registry.
+        Previously this function hard-coded ``"studio"`` via the removed
+        ``_get_review_model()`` helper, which silently ignored the caller's
+        service_mode.  Orchestrator (``_orchestrate_three_pass``) now threads
+        ``mode`` through so Express jobs stay on Express model config when
+        falling back to legacy.
     """
-    review_model = _get_review_model()
+    review_model = _get_prompt_model(mode, "pass1")
 
     if review_model == "mimo_omni":
         api_key = os.environ.get("MIMO_API_KEY", "").strip()

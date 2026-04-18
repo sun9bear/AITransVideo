@@ -5,8 +5,9 @@ import { toast } from 'sonner'
 
 interface AdminSettings {
   tts_provider: string
-  review_model: string
-  translation_model: string
+  // review_model / translation_model 字段已被 2026-04-09 prompt-model-management 方案的
+  // per-prompt + per-mode 模型选择取代（见 admin/prompts 页面）。前端不再持有也不再传递
+  // 这两个字段；Gateway AdminSettings Pydantic 模型里仍保留字段以兼容 JSON 回滚。
   skip_translation_config_for_users: boolean
   skip_all_reviews_for_free_users: boolean
   free_user_max_duration_minutes: number
@@ -32,8 +33,6 @@ interface AdminSettings {
 
 const DEFAULT_SETTINGS: AdminSettings = {
   tts_provider: 'minimax',
-  review_model: 'gemini_pro',
-  translation_model: 'deepseek',
   skip_translation_config_for_users: true,
   skip_all_reviews_for_free_users: true,
   enable_pre_tts_rewrite: true,

@@ -215,7 +215,7 @@ def test_review_transcript_writes_raw_response_and_speaker_diff_artifacts(
         )
 
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-    monkeypatch.setattr(transcript_reviewer, "_get_review_model", lambda: "gemini")
+    monkeypatch.setattr(transcript_reviewer, "_get_prompt_model", lambda mode, key: "gemini")
     monkeypatch.setattr(transcript_reviewer, "_call_review", _fake_call_review)
 
     result = transcript_reviewer.legacy_review_transcript_single_pass(
@@ -403,7 +403,7 @@ class TestReviewTranscriptAudioFirst:
 
         monkeypatch.setattr(transcript_reviewer, "_call_review", spy_call_review)
         monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-        monkeypatch.setattr(transcript_reviewer, "_get_review_model", lambda: "gemini")
+        monkeypatch.setattr(transcript_reviewer, "_get_prompt_model", lambda mode, key: "gemini")
 
         # Short audio: 10 min → should compress whole file
         monkeypatch.setattr(transcript_reviewer, "_get_audio_duration_ms", lambda p: 600_000)
@@ -449,7 +449,7 @@ class TestReviewTranscriptAudioFirst:
 
         monkeypatch.setattr(transcript_reviewer, "_call_review", spy_call_review)
         monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-        monkeypatch.setattr(transcript_reviewer, "_get_review_model", lambda: "gemini")
+        monkeypatch.setattr(transcript_reviewer, "_get_prompt_model", lambda mode, key: "gemini")
 
         # Single batch (< 200 lines) but long audio
         lines = [_line(1, 0, 5000, "speaker_a", "Hello world.")]
@@ -484,7 +484,7 @@ class TestReviewTranscriptAudioFirst:
         monkeypatch.setattr(transcript_reviewer, "_prepare_review_audio", fake_prepare)
         monkeypatch.setattr(transcript_reviewer, "_call_review", spy_call_review)
         monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-        monkeypatch.setattr(transcript_reviewer, "_get_review_model", lambda: "gemini")
+        monkeypatch.setattr(transcript_reviewer, "_get_prompt_model", lambda mode, key: "gemini")
         monkeypatch.setattr(transcript_reviewer, "_get_audio_duration_ms", lambda p: 600_000)
 
         lines = [_line(1, 0, 5000, "speaker_a", "Hello world.")]
@@ -897,24 +897,26 @@ class TestModelMap:
             assert logical != api_id, f"{logical} should not equal its API ID"
 
 
-class TestGetReviewModel:
-    """Tests for _get_review_model (legacy compat wrapper)."""
+class TestGetPromptModelIntegration:
+    """Tests verifying that transcript_reviewer delegates to llm_registry.get_prompt_model
+    (formerly TestGetReviewModel — the _get_review_model helper was removed in the
+    2026-04-17 prompt-model-management cleanup batch; legacy path and pass3 now call
+    _get_prompt_model(mode, "pass1") directly)."""
 
-    def test_default_is_gemini_pro(self, monkeypatch) -> None:
-        """_get_review_model delegates to llm_registry, defaults to gemini_pro."""
-        from services.llm_registry import invalidate_cache
+    def test_default_studio_pass1_is_gemini_pro(self, monkeypatch) -> None:
+        """llm_registry.get_prompt_model("studio", "pass1") defaults to gemini_pro."""
+        from services.llm_registry import invalidate_cache, get_prompt_model
         invalidate_cache()
         monkeypatch.setattr("os.path.exists", lambda p: False)
-        result = transcript_reviewer._get_review_model()
-        assert result == "gemini_pro"
+        assert get_prompt_model("studio", "pass1") == "gemini_pro"
 
-    def test_legacy_wrapper_returns_valid_model(self, monkeypatch) -> None:
-        """_get_review_model always returns a model from the registry."""
-        from services.llm_registry import invalidate_cache, MODEL_REGISTRY
+    def test_get_prompt_model_returns_valid_model(self, monkeypatch) -> None:
+        """get_prompt_model always returns a model from the registry."""
+        from services.llm_registry import invalidate_cache, get_prompt_model, MODEL_REGISTRY
         invalidate_cache()
         monkeypatch.setattr("os.path.exists", lambda p: False)
-        result = transcript_reviewer._get_review_model()
-        assert result in MODEL_REGISTRY
+        assert get_prompt_model("studio", "pass1") in MODEL_REGISTRY
+        assert get_prompt_model("express", "pass2") in MODEL_REGISTRY
 
     def test_call_review_passes_resolved_model_to_gemini(self, monkeypatch) -> None:
         """_call_review must pass the resolved API model ID (not the logical name)."""
@@ -1172,7 +1174,7 @@ class TestThreePassEvidenceChain:
         monkeypatch.setattr(transcript_reviewer, "_create_review_client", lambda api_key: FakeClient())
         monkeypatch.setattr(transcript_reviewer, "_load_genai_types", lambda: MagicMock())
         monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-        monkeypatch.setattr(transcript_reviewer, "_get_review_model", lambda: "gemini")
+        monkeypatch.setattr(transcript_reviewer, "_get_prompt_model", lambda mode, key: "gemini")
         monkeypatch.setattr(transcript_reviewer, "_try_compress_audio", lambda *a, **kw: None)
 
         result = transcript_reviewer.review_transcript(

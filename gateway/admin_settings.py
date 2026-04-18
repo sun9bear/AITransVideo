@@ -46,8 +46,14 @@ _VALID_ENDPOINT_MODES = {"international", "mainland"}
 
 class AdminSettings(BaseModel):
     tts_provider: str = "minimax"          # "minimax" or "mimo"
-    review_model: str = "gemini_pro"       # "gemini_pro" (highest quality) | "gemini" (low cost) | "mimo_omni"
-    translation_model: str = "deepseek"    # "deepseek" or "gemini"
+    # DEPRECATED (2026-04-09 prompt-model-management plan §8.1): these two globals were
+    # replaced by per-prompt + per-mode selection in ``prompt_models`` (studio / express).
+    # Fields retained only so admin_settings.json can be rolled back to pre-2026-04-09
+    # Gateway without breaking serialization. Neither GET /api/admin/review-prompts nor
+    # POST /api/admin/review-prompts reads or writes these fields anymore.
+    # Safe to remove after 2026-06 if no rollback to pre-prompt-models Gateway is planned.
+    review_model: str = "gemini_pro"       # DEPRECATED — see comment above
+    translation_model: str = "deepseek"    # DEPRECATED — see comment above
     skip_translation_config_for_users: bool = True  # Normal users skip translation config step
     skip_all_reviews_for_free_users: bool = True   # Free users: fully automatic pipeline
     free_user_max_duration_minutes: float = 10.0   # Max video duration for free users (minutes)
