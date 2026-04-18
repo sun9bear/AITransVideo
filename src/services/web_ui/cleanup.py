@@ -1,4 +1,19 @@
-"""Daily cleanup of expired projects (older than 7 days)."""
+"""Daily cleanup of expired projects.
+
+Retention rule (plan 2026-04-18 §5.3):
+
+- If ``jobs/<id>.json`` has a ``expires_at`` field (populated by migration 015
+  + the Gateway at create/copy time), that is the authoritative expiry.
+- Otherwise the legacy fallback applies: delete when
+  ``COALESCE(updated_at, created_at) + RETENTION_DAYS`` is in the past.
+
+Active statuses are never deleted here:
+
+- ``queued`` / ``running`` — live workers, never touch.
+- ``waiting_for_review`` — user-owned session, only user / admin can cancel.
+- ``editing`` — user-owned session; idle-cancel is handled by
+  :mod:`src.services.web_ui.editing_idle_scanner`, NOT this module.
+"""
 from __future__ import annotations
 
 import json
@@ -7,13 +22,55 @@ import os
 import shutil
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 RETENTION_DAYS = 7
 CLEANUP_INTERVAL_SECONDS = 6 * 60 * 60  # Run every 6 hours
+
+# Statuses that must never be deleted by the TTL-based cleanup. ``editing`` is
+# here even though it's also time-based — the per-job idle timeout (24h since
+# editing_touched_at) is enforced by editing_idle_scanner, not this file, so
+# that the two mechanisms don't race.
+# Mirrors src/services/jobs/models.ACTIVE_JOB_STATUSES minus the expected
+# no-worker-is-fine distinction of ``waiting_for_review`` — we skip both.
+_CLEANUP_PROTECTED_STATUSES = frozenset(
+    {"queued", "running", "waiting_for_review", "editing"}
+)
+
+
+def _parse_iso_utc(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _resolve_expires_at(data: dict, now: datetime) -> datetime | None:
+    """Decide when a job is expired. Returns the expiry timestamp, or None
+    if we can't compute one (in which case the caller should skip deletion).
+
+    Priority: explicit ``expires_at`` > legacy ``updated_at/created_at + 7d``.
+    """
+    explicit = data.get("expires_at")
+    if explicit:
+        parsed = _parse_iso_utc(explicit)
+        if parsed is not None:
+            return parsed
+        # Malformed expires_at — fall through to legacy rule rather than
+        # silently never delete.
+    timestamp_str = data.get("updated_at") or data.get("created_at") or ""
+    if not timestamp_str:
+        return None
+    parsed = _parse_iso_utc(timestamp_str)
+    if parsed is None:
+        return None
+    return parsed + timedelta(days=RETENTION_DAYS)
 
 
 def cleanup_expired_projects(*, deleted_job_ids_out: list[str] | None = None) -> dict[str, list[str]]:
@@ -38,25 +95,15 @@ def cleanup_expired_projects(*, deleted_job_ids_out: list[str] | None = None) ->
         except Exception:
             continue
 
-        # Skip active jobs
-        status = data.get("status", "")
-        if status in ("running", "queued"):
+        # Skip any status the TTL cleaner must not touch. Explicit set rather
+        # than "not in terminal statuses" so that unknown future statuses
+        # default to "leave alone" instead of "delete aggressively".
+        status = str(data.get("status", "")).strip().lower()
+        if status in _CLEANUP_PROTECTED_STATUSES:
             continue
 
-        # Check age based on updated_at or created_at
-        timestamp_str = data.get("updated_at") or data.get("created_at") or ""
-        if not timestamp_str:
-            continue
-
-        try:
-            job_time = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
-            if job_time.tzinfo is None:
-                job_time = job_time.replace(tzinfo=timezone.utc)
-        except (ValueError, TypeError):
-            continue
-
-        age_days = (now - job_time).total_seconds() / 86400
-        if age_days < RETENTION_DAYS:
+        expires_at = _resolve_expires_at(data, now)
+        if expires_at is None or now < expires_at:
             continue
 
         job_id = data.get("job_id", job_file.stem)
@@ -91,7 +138,11 @@ def cleanup_expired_projects(*, deleted_job_ids_out: list[str] | None = None) ->
 
 
 def _cleanup_loop() -> None:
-    """Background loop that runs cleanup periodically."""
+    """Background loop that runs TTL cleanup + editing-idle scanner."""
+    # Late import so Phase 0 can land this file without circular-import risk
+    # from Phase 1 modules (the scanner module itself has no Phase 1 deps).
+    from src.services.web_ui import editing_idle_scanner
+
     while True:
         try:
             time.sleep(CLEANUP_INTERVAL_SECONDS)
@@ -105,6 +156,21 @@ def _cleanup_loop() -> None:
             if result["errors"]:
                 for err in result["errors"]:
                     logger.warning("Cleanup error: %s", err)
+
+            # Post-edit idle scanner (D24). Phase 0 callback is a no-op; Phase
+            # 1 T1-1 swaps ``registered_cancel_callback`` at startup to the
+            # real editing/cancel handler. Until then this is detection-only.
+            scan_result = editing_idle_scanner.scan_editing_idle(
+                datetime.now(timezone.utc),
+                editing_idle_scanner.registered_cancel_callback,
+            )
+            if scan_result["candidates"]:
+                logger.info(
+                    "editing idle scan: candidates=%d cancelled=%d failed=%d",
+                    len(scan_result["candidates"]),
+                    len(scan_result["cancelled"]),
+                    len(scan_result["failed"]),
+                )
         except Exception:
             logger.exception("Cleanup loop error")
 
