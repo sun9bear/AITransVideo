@@ -210,6 +210,69 @@ docker-compose.yml 已配置 `src/`、`main.py`、`scripts/` 的 bind mount。
 
 **永久回归守卫：** `tests/test_legacy_cleanup_guards.py` 10 个契约级测试（file existence + CLI 行为 + AST import graph + AST 字面量 + Caddyfile 结构）。任何回退会在 CI 立刻红。
 
+## Studio 视频修改工作流（Phase 1 落地，2026-04-19）
+
+对**已完成的 Studio 任务**（`status == succeeded`），用户可以进入修改流程对
+译文 / 音色 / 单段 TTS 做增量修改，最终覆盖原任务或保存为副本。方案详情见
+[`docs/plans/2026-04-18-studio-post-edit-plan.md`](docs/plans/2026-04-18-studio-post-edit-plan.md)。
+
+**Feature flag 双端 gate（D29）**：
+
+- 后端：`AVT_ENABLE_POST_EDIT=true` 才打开 editing 端点（enter-edit /
+  editing/cancel / editing/commit）及相关 segments / voice-map mutation。
+  默认 False → Gateway 返回 404。
+- 前端：`NEXT_PUBLIC_ENABLE_POST_EDIT=1` 才渲染"修改"入口 + 视频修改页
+  （`/workspace/{id}/edit`）。
+
+**状态机（D21）**：
+
+```
+succeeded ──[enter-edit]──→ editing
+editing   ──[mutation / touch]──→ editing（editing_touched_at 刷新）
+editing   ──[editing/cancel]──→ succeeded（draft 丢弃）
+editing   ──[editing/commit]──→ running (alignment → publish) ──→ succeeded
+```
+
+- `editing ∈ ACTIVE_JOB_STATUSES`（列表页轮询 / cleanup 保护）
+- `editing ∉ WORKER_ACTIVE_STATUSES`（reap-stale 不误杀）
+- `editor/editing/` 子目录：所有可变文件（`segments.json` / `voice_map.json` /
+  `tts_segments_draft/*.wav` / `segment_status.json`）；baseline `editor/...`
+  在 editing 期间**绝对不动**。
+- 闲置 24h（`editing_touched_at < now - 24h`）由 `editing_idle_scanner` 自动 cancel。
+
+**commit 两种策略**：
+
+- `overwrite`：editing/ 覆盖 baseline；`edit_generation += 1`；跑 alignment → publish。
+- `copy_as_new`：两阶段提交（D34）。Phase A 准备新目录（hardlink baseline
+  + apply draft + 新 JobRecord + runner accept），失败整体回滚源 editing/
+  不变。Phase B 源 status=succeeded + rm source editing/。
+
+**付费 API 硬约束（D26）**：
+
+commit 管线（alignment / publish 阶段代码）**永不**调用 `tts_generator.*`。
+守卫测试 `tests/test_phase1_guards.py` AST 扫保护。re-TTS 只在 user-initiated
+端点触发，默认 caller `_not_wired_tts_caller` 抛 NotImplementedError → 501；
+真实 TTS provider wiring 待专项任务。
+
+**关键端点清单**（见 Gateway `_is_post_edit_mutation_subpath` 白名单）：
+
+| HTTP | 路径 | Task | 说明 |
+|------|------|------|------|
+| POST | `/job-api/jobs/{id}/enter-edit` | T1-1 | succeeded → editing，建 editor/editing/ |
+| POST | `/job-api/jobs/{id}/editing/cancel` | T1-1 | 丢 editing/ 回 succeeded |
+| POST | `/job-api/jobs/{id}/editing/commit` | T1-9 | overwrite / copy_as_new |
+| GET  | `/job-api/jobs/{id}/editing/segments` | T1-2 | 读编辑态段落 |
+| POST | `/job-api/jobs/{id}/segments/{sid}/update` | T1-2 | patch cn_text etc. |
+| POST | `/job-api/jobs/{id}/segments/{sid}/status` | T1-2 | 状态变更 |
+| POST | `/job-api/jobs/{id}/segments/{sid}/regenerate-tts` | T1-5 | 单段 re-TTS 写 draft |
+| POST | `/job-api/jobs/{id}/segments/{sid}/accept-draft` | T1-5 | 接受 draft |
+| POST | `/job-api/jobs/{id}/segments/{sid}/discard-draft` | T1-5 | 丢弃 draft |
+| POST | `/job-api/jobs/{id}/regenerate-all-tts` | T1-6 | 批量 re-TTS |
+| GET  | `/job-api/jobs/{id}/editing/voice-map` | T1-6 | 读音色覆盖 |
+| POST | `/job-api/jobs/{id}/editing/voice-map` | T1-6 | set / clear 音色 |
+
+所有 segment 端点入参都走 `validate_segment_id`（D36 regex `^[a-z0-9_]{1,64}$`）深度防御。
+
 ## Key Conventions
 
 - 所有 UI 文本和沟通用中文
