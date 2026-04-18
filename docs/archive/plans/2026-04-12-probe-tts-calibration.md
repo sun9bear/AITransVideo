@@ -224,3 +224,46 @@ Probe 校准已上线，每个 speaker 有独立的 chars/sec 值，`min_chars`/
 | LLM rewrite 触发率 | ~25% | ~8-10% |
 | 每任务额外成本 | — | ~$0.02（探针翻译 + TTS） |
 | 每任务节省成本 | — | ~$0.1-0.3（减少 rewrite + 重 TTS） |
+
+---
+
+## 完成状态（2026-04-13 更新）
+
+**全部 4 个 Phase 已完成并部署到 US 生产环境。**
+
+### Phase 1 ✅ 已完成（前置会话）
+- commit: `394622b refactor: 统一文本字段，删除 tts_cn_text / literal_cn_text 三层模型`
+- commit: `f341b14 fix: 修复 TranslationReviewPanel 重复 cnText 属性导致 Next.js 构建失败`
+
+### Phase 2 ✅ 已完成（前置会话）
+- commit: `feeab7f refactor: 音色选择移到翻译前（Pipeline 重排序）`
+
+### Phase 3 ✅ 已完成（前置会话 + 本会话重构）
+- 原始实施：commit `0d99e3a feat: 探针 TTS 校准（Phase 3）`
+- 重构（2026-04-13）：见 `2026-04-13-probe-tts-calibration-redesign-plan.md`，12 个 commit 大幅改进
+  - 选段从时长过滤改为 hybrid 字数(20-100词)+时长(3-60s)
+  - Pipeline 拆分：probe 翻译提前到音色确认前，TTS 校准留在确认后
+  - 截断 fallback：超长段落句子边界截断 + 词级时间戳精确 end_ms
+  - probe_texts 写入音色选择 payload，前端试听用真实翻译内容
+  - probe cache 带 SHA256 fingerprint（含时长）
+  - probe TTS 前应用用户确认的 voice_id/tts_provider
+  - per-speaker 最小样本数降至 1
+
+### Phase 4 ✅ 已完成（本会话）
+- commit: `5121119 feat: Phase 4 翻译提示词优化 — 字数引导收紧 + JSON 精简 + 重试直判`
+- commit: `0c71322 feat: 翻译字数范围后台可调 — 系统设置页增加 min/max factor 配置`
+- 4.1: 字数引导收紧（"仅供参考" → "请控制在此范围内"）
+- 4.2: JSON 字段精简（只保留 6 个关键字段给 LLM）
+- 4.3: 删除 UNDERSHOOT/OVERSHOOT factor，重试直接用 min/max
+- 4.4: factor 从 admin_settings.json 读取，后台系统设置页可调
+- 4.5: 重试提示词改为中文具体指导
+
+### 实测效果（2026-04-13）
+
+| 指标 | 预期 | 实测 |
+|------|------|------|
+| Pre-splitting 触发 | — | 从 7 段（首次）降到 0 段（修复后） |
+| S5 rewrite 率 | 8-10% | 36-57%（仍然偏高） |
+
+**预期和实测差距原因**：probe 校准样本太少（每 speaker 1-2 段），校准值有 10-12% 噪声。
+详见后续方案 [`2026-04-13-voice-speed-catalog.md`](./2026-04-13-voice-speed-catalog.md)。

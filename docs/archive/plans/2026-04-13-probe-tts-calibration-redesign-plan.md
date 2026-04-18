@@ -207,3 +207,42 @@ def _normalize_preview_text(text: str | None) -> str:
 6. **Studio**: 提交任务 → probe 翻译日志出现在音色确认前 → 音色面板试听听到截断后的视频翻译内容 →
    确认后 S4-probe TTS + 校准日志正常 → S3 用校准值翻译
 7. **Express**: probe 翻译 + TTS + 校准一气呵成，per-speaker 校准值合理
+
+---
+
+## 完成状态（2026-04-13）
+
+**✅ 全部完成并部署到 US 生产环境。**
+
+### 主要 commits（按时间顺序）
+
+| Commit | 内容 |
+|--------|------|
+| `d17e4a4` | 初始重构：hybrid 选段、Pipeline 拆分、probe cache、试听截断、preview API sample_text |
+| `e2a4b8d` | 选段全覆盖：max_duration 60s + 句子边界截断 + 词级时间戳精确 end_ms |
+| `e533c44` | 截断 fallback 覆盖首尾段落的 speaker（之前被 `0 < i < len-1` 过滤掉） |
+| `9c55dd5` | 语义拆分子段继承父段 tts_provider（修复 CosyVoice 音色发给 MiniMax 报错） |
+| `ca8851e` | probe 校准降低 per-speaker 最小样本数至 1 |
+
+### Codex 审查后的修复
+
+- **P1**: probe TTS 前应用用户确认的 voice_id/display_name（`_apply_runtime_voice_overrides`）
+- **P2**: probe cache fingerprint 纳入 `start_ms/end_ms`，时长变化会触发缓存失效
+
+### 测试覆盖
+
+`tests/test_probe_tts_calibration.py` 共 51 个测试（从原始 ~10 个扩展）：
+- `_select_probe_segments`: hybrid 字数、时长 guard、per-speaker 限制、渐进降级、截断 fallback、首尾段覆盖、结果排序
+- `_count_source_words`: 英文、数字、缩写、None 输入
+- `_truncate_at_sentence`: 句号断句、逗号 fallback、硬切
+- `_refine_truncated_probe`: 词级时间戳精确截断、最小时长保证
+- `_normalize_preview_text`: 截断、标点断句、短文本回退、空值回退
+- `_build_probe_fingerprint`: 确定性、模型/术语/时长变化触发失效
+- probe cache save/load round trip + fingerprint mismatch/corrupt 处理
+- 现有 `_build_probe_groups` / `_build_groups` 校准/估算测试
+
+### 后续方案
+
+实测 S5 rewrite 率仍 36%，probe 1-2 样本校准噪声太大。
+下一步方案见 [`2026-04-13-voice-speed-catalog.md`](./2026-04-13-voice-speed-catalog.md)：
+**离线对音色库所有中文音色预标定 chars/sec，彻底替代 probe TTS 校准。**

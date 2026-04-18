@@ -1,5 +1,9 @@
 # 音色语速预标定方案
 
+> **状态**：⏳ **待执行** — 下个会话可以开始实施。方案已审议通过。
+>
+> **上游方案**：[`2026-04-12-probe-tts-calibration.md`](./2026-04-12-probe-tts-calibration.md) 和 [`2026-04-13-probe-tts-calibration-redesign-plan.md`](./2026-04-13-probe-tts-calibration-redesign-plan.md) 已完成实施和部署。本方案是对 probe 校准精度瓶颈的根本性替代方案。
+
 ## 当前问题
 
 ### 重写率仍然偏高（36-57%）
