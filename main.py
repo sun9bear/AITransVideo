@@ -934,6 +934,33 @@ def run_job_api_command(argv: list[str]) -> None:
     parsed_args = parse_job_api_args(argv)
     try:
         service = build_default_job_service(project_root=PROJECT_ROOT)
+
+        # --- T1-10: wire editing idle-cancel into the scanner ---
+        # Without this, ``cleanup.py`` still calls the module-level
+        # ``registered_cancel_callback`` which stays on ``_noop_cancel`` —
+        # idle editing jobs would be detected but never actually cancelled.
+        # Kept failure-tolerant so a broken wiring cannot prevent the Job
+        # API from starting.
+        try:
+            from services.web_ui.editing_idle_scanner import (
+                inject_editing_cancel_callback,
+            )
+
+            inject_editing_cancel_callback(service)
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f"[warn] failed to wire editing idle-cancel callback: {exc}")
+
+        # --- Start the cleanup / idle-scan background thread ---
+        # Runs every 6h: TTL-expired job purge + editing idle auto-cancel.
+        # start_cleanup_thread also runs a one-shot cleanup pass immediately
+        # (useful when the container restarts after a long downtime).
+        try:
+            from services.web_ui.cleanup import start_cleanup_thread
+
+            start_cleanup_thread()
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f"[warn] failed to start cleanup thread: {exc}")
+
         server = build_job_api_server(
             service=service,
             host=parsed_args.host,

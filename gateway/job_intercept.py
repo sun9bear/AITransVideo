@@ -817,23 +817,31 @@ async def _editing_transition_with_lock(
 ) -> Response:
     """FOR UPDATE lock + pre-condition check + proxy + conditional DB sync.
 
-    Mirrors the shape of ``_continue_with_gateway_lock`` for the three editing
-    endpoints. Per-subpath behaviour:
+    Per-subpath behaviour:
 
-    - ``enter-edit``     : expect status='succeeded', on upstream 2xx set
+    - ``enter-edit``     : expect status='succeeded'; on upstream 2xx set
       status='editing' + editing_touched_at=now.
-    - ``editing/cancel`` : expect status='editing', on upstream 2xx set
+    - ``editing/cancel`` : expect status='editing'; on upstream 2xx set
       status='succeeded' + editing_touched_at=NULL.
-    - ``editing/commit`` : expect status='editing'. T1-1 upstream always
-      returns 501 so we never write status; T1-9 will swap the upstream
-      implementation and this Gateway layer will start promoting status
-      to 'running' + edit_generation += 1 on success.
+    - ``editing/commit`` : expect status='editing'. Upstream T1-9 returns
+      200 with a dict whose shape depends on strategy:
+        overwrite     → {strategy, job_id, edit_generation, ...}
+                        Gateway flips source row to running + bumps
+                        edit_generation + clears editing_touched_at +
+                        stamps current_stage='alignment'.
+        copy_as_new   → {strategy, source_job_id, new_job_id,
+                         new_project_dir, new_display_name, ...}
+                        Gateway:
+                          1. Resets source row: status='succeeded',
+                             editing_touched_at=NULL (Phase B mirror).
+                          2. INSERTs a new Jobs row carrying most fields
+                             from source + new IDs + copy lineage +
+                             expires_at computed via the same rule the
+                             Job-API store uses.
 
     Legacy jobs without a Gateway row skip the lock (same as ``continue``);
     upstream handles validation for them.
     """
-    # Map subpath → expected pre-state. If the Gateway row disagrees with
-    # this set we raise 409 without proxying.
     expected_status_by_subpath = {
         "enter-edit": "succeeded",
         "editing/cancel": "editing",
@@ -854,10 +862,6 @@ async def _editing_transition_with_lock(
             ),
         )
 
-    # Lock held across the proxy call (sub-second for editing endpoints, which
-    # do filesystem work but no pipeline). Concurrent requests to the same
-    # job serialize behind FOR UPDATE, so the "two enter-edit races" scenario
-    # resolves to one success + one 409.
     response = await proxy_request(
         request=request,
         upstream_base=settings.job_api_upstream,
@@ -865,10 +869,7 @@ async def _editing_transition_with_lock(
     )
 
     if job is not None and 200 <= response.status_code < 300:
-        # Only persist status transitions when upstream accepted the change;
-        # a 501 (T1-1 commit skeleton) / 409 / 5xx leaves Gateway DB in
-        # whatever state it was so the user can retry without blocking.
-        from datetime import datetime, timezone as _tz
+        from datetime import datetime, timezone as _tz, timedelta as _td
 
         now_utc = datetime.now(_tz.utc)
         if subpath == "enter-edit":
@@ -877,11 +878,154 @@ async def _editing_transition_with_lock(
         elif subpath == "editing/cancel":
             job.status = "succeeded"
             job.editing_touched_at = None
-        # editing/commit currently never reaches this branch (upstream 501).
-        # When T1-9 lands, add: job.status = "running"; job.edit_generation += 1.
+        elif subpath == "editing/commit":
+            await _apply_editing_commit_gateway_side(
+                db, job, response, now_utc=now_utc,
+            )
 
     await db.commit()
     return response
+
+
+async def _apply_editing_commit_gateway_side(
+    db: AsyncSession,
+    source_job: Job,
+    upstream_response: Response,
+    *,
+    now_utc,
+) -> None:
+    """After Job-API's editing/commit returns 2xx, sync Gateway DB.
+
+    Reads the upstream body to decide which strategy was executed:
+
+    - overwrite: promote source row status → running, edit_generation += 1,
+      editing_touched_at cleared, current_stage stamped 'alignment'. Same
+      row is re-used; no INSERT.
+    - copy_as_new: reset source → succeeded (Phase B mirror) + INSERT a
+      fresh Jobs row for the copy with lineage fields populated.
+
+    Failure modes are soft: if parse / INSERT fails we log prominently but
+    do not revert the upstream response — it already succeeded at Job-API
+    layer, and flipping the source back would create a messier state. An
+    admin can reconcile via list_jobs / PG direct edit.
+    """
+    from datetime import timedelta as _td
+
+    try:
+        body = json.loads(upstream_response.body.decode("utf-8"))
+    except Exception:
+        logger.warning(
+            "editing/commit gateway-side: upstream body not JSON; skipping sync"
+        )
+        return
+
+    strategy = body.get("strategy")
+    if strategy == "overwrite":
+        source_job.status = "running"
+        source_job.current_stage = "alignment"
+        source_job.edit_generation = (source_job.edit_generation or 0) + 1
+        source_job.editing_touched_at = None
+        return
+
+    if strategy != "copy_as_new":
+        logger.info(
+            "editing/commit gateway-side: unknown strategy=%r; no DB mutation",
+            strategy,
+        )
+        return
+
+    # copy_as_new Phase B mirror
+    new_job_id = str(body.get("new_job_id") or "").strip()
+    new_display_name = str(body.get("new_display_name") or "").strip()
+    new_project_dir = body.get("new_project_dir")
+    if not new_job_id:
+        logger.warning(
+            "editing/commit copy_as_new: upstream response missing new_job_id; "
+            "source job will still be reset to succeeded but new row will NOT "
+            "be inserted into Gateway DB — admin must reconcile"
+        )
+    # Reset source row (Phase B)
+    source_job.status = "succeeded"
+    source_job.editing_touched_at = None
+
+    if not new_job_id:
+        return
+
+    # Idempotency: if a prior run already inserted this row (retry), skip
+    existing = await db.execute(
+        select(Job).where(Job.job_id == new_job_id)
+    )
+    if existing.scalar_one_or_none() is not None:
+        logger.info(
+            "editing/commit copy_as_new: job_id=%s already in Gateway DB; skipping INSERT",
+            new_job_id,
+        )
+        return
+
+    # TTL for the copy — plan §5.1 simplified form:
+    #   min(now + 7d, most_recent_live_sibling.expires_at + 24h)
+    # We scope by (user_id, root_job_id). If no live sibling exists,
+    # fall back to now + 7d (same as first-copy rule).
+    seven_days_later = now_utc + _td(days=7)
+    source_root_id = source_job.root_job_id or source_job.job_id
+    sibling_q = await db.execute(
+        select(Job.expires_at)
+        .where(
+            Job.user_id == source_job.user_id,
+            Job.root_job_id == source_root_id,
+            Job.expires_at.isnot(None),
+            Job.expires_at > now_utc,
+            Job.job_id != source_job.job_id,
+        )
+        .order_by(Job.created_at.desc())
+        .limit(1)
+        .with_for_update()
+    )
+    sibling_expires = sibling_q.scalar_one_or_none()
+    if sibling_expires is not None:
+        copy_expires = min(seven_days_later, sibling_expires + _td(hours=24))
+    else:
+        copy_expires = seven_days_later
+
+    copy_row = Job(
+        job_id=new_job_id,
+        user_id=source_job.user_id,
+        source_type=source_job.source_type,
+        source_ref=source_job.source_ref,
+        title=source_job.title,
+        speakers=source_job.speakers,
+        status="running",  # runner has already accepted the new job
+        current_stage="alignment",
+        project_dir=str(new_project_dir) if new_project_dir else None,
+        review_gate=None,
+        error_summary=None,
+        service_mode=source_job.service_mode,
+        tts_provider=source_job.tts_provider,
+        tts_model=source_job.tts_model,
+        requires_review=source_job.requires_review,
+        voice_clone_enabled=source_job.voice_clone_enabled,
+        voice_strategy=source_job.voice_strategy,
+        plan_code_snapshot=source_job.plan_code_snapshot,
+        role_snapshot=source_job.role_snapshot,
+        source_duration_seconds=source_job.source_duration_seconds,
+        quota_cost=0,
+        quota_state="none",
+        estimated_duration_seconds=source_job.estimated_duration_seconds,
+        create_idempotency_key=None,
+        # Post-edit lineage
+        display_name=new_display_name or None,
+        expires_at=copy_expires,
+        editing_touched_at=None,
+        copy_of_job_id=source_job.job_id,
+        root_job_id=source_root_id,
+        edit_generation=0,
+        source_content_hash=source_job.source_content_hash,
+    )
+    db.add(copy_row)
+    logger.info(
+        "editing/commit copy_as_new: mirrored new job %s → Gateway DB (copy_of=%s, root=%s)",
+        new_job_id, source_job.job_id, source_root_id,
+    )
 
 
 async def intercept_delete_job_v2(
