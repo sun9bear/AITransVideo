@@ -267,11 +267,13 @@ export default function VideoEditPage() {
       setCommitModalOpen(false)
       if (result.strategy === "copy_as_new") {
         toast.success(`副本 "${result.new_display_name}" 已创建，开始重合成`)
-        router.push(`/workspace/${result.new_job_id}`)
       } else {
         toast.success(`重合成开始 · 第 ${result.edit_generation} 次修改`)
-        router.push(`/workspace/${jobId}`)
       }
+      // Both strategies land on /projects: user's mental model after
+      // 确认修改 is "back to the list to watch progress", parallel to
+      // 放弃修改's /projects push.
+      router.push("/projects")
     } catch (error) {
       toast.error(`合成失败: ${getErrorMessage(error)}`)
     } finally {
