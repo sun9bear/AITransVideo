@@ -207,12 +207,16 @@ def patch_editing_segment(
 
     segments = load_editing_segments(project_dir)
 
-    # Locate the segment by its segment_id field.
+    # Locate the segment by its segment_id field. Tolerate legacy payloads
+    # where segment_id was written as int (e.g. translation/segments.json
+    # carries integer ids that early lazy-seed snapshots preserved verbatim).
+    # HTTP callers always send strings, so str-cast both sides for comparison.
     index = None
+    target = str(segment_id)
     for i, seg in enumerate(segments):
         if not isinstance(seg, dict):
             continue
-        if seg.get("segment_id") == segment_id:
+        if str(seg.get("segment_id")) == target:
             index = i
             break
     if index is None:

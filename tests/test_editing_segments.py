@@ -260,6 +260,31 @@ def test_patch_segment_unknown_segment_id_raises_conflict(tmp_path: Path) -> Non
         patch_editing_segment(project_dir, "seg_999", {"cn_text": "x"})
 
 
+def test_patch_segment_tolerates_legacy_integer_segment_id(tmp_path: Path) -> None:
+    """Legacy editor/editing/segments.json snapshots (seeded before the
+    normalisation patch landed) persisted segment_id as int because
+    translation/segments.json carries integer ids. The HTTP layer always
+    sends strings, so the lookup must str-cast both sides rather than
+    relying on Python == between int and str."""
+    project_dir = tmp_path / "projects" / "legacy_int_ids"
+    (project_dir / "editor" / "editing" / "tts_segments_draft").mkdir(parents=True)
+    (project_dir / "editor" / "editing" / "segments.json").write_text(
+        json.dumps([
+            {"segment_id": 1, "cn_text": "一"},
+            {"segment_id": 4, "cn_text": "四"},
+            {"segment_id": 10, "cn_text": "十"},
+        ]),
+        encoding="utf-8",
+    )
+
+    # HTTP layer sends the literal string '4'; must match the int 4 record.
+    updated = patch_editing_segment(project_dir, "4", {"cn_text": "四改"})
+    assert updated["cn_text"] == "四改"
+    # segment_id survives in whatever shape it was — patch preserves existing
+    # fields verbatim (normalisation happens at seed time, not patch time).
+    assert updated["segment_id"] == 4
+
+
 def test_patch_segment_rejects_bad_id_before_fs_access(tmp_path: Path) -> None:
     _, project_dir, _ = _build_editing_job(tmp_path)
     with pytest.raises(ValueError, match="invalid segment_id"):

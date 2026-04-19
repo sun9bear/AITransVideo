@@ -17,6 +17,7 @@ Out of scope (deferred):
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -162,6 +163,252 @@ def test_editing_conflict_is_job_conflict_subclass() -> None:
     """Allows api.py ``except JobConflictError`` path to cover editing errors
     without adding a bespoke except branch (current api.py depends on this)."""
     assert issubclass(EditingConflictError, JobConflictError)
+
+
+# ---------------------------------------------------------------------------
+# enter_editing — lazy baseline seeding from translation/segments.json.
+#
+# Context: Phase 1 pipeline does not yet emit editor/segments.json at publish
+# time, so legacy / pre-Phase-1 succeeded tasks only have translation/segments.json
+# on disk. enter_editing derives the editor/ baseline on first call from
+# translation, then leaves it alone on subsequent calls (editor/ is
+# authoritative once written). See editing._ensure_editor_segments_baseline.
+# ---------------------------------------------------------------------------
+
+
+def _build_legacy_record_with_translation_only(
+    tmp_path: Path,
+    *,
+    translation_payload: object,
+) -> tuple[JobRecord, JobStore, Path]:
+    """Studio succeeded job with ONLY translation/segments.json on disk
+    (no editor/segments.json). Used to exercise the lazy seed path."""
+    project_dir = tmp_path / "projects" / "job_legacy"
+    (project_dir / "translation").mkdir(parents=True)
+    (project_dir / "translation" / "segments.json").write_text(
+        json.dumps(translation_payload, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    record = JobRecord(
+        job_id="job_legacy",
+        job_type="localize_video",
+        source_type="youtube_url",
+        source_ref="https://example.com/video",
+        output_target="editor",
+        speakers="auto",
+        voice_a=None,
+        voice_b=None,
+        status=JOB_STATUS_SUCCEEDED,
+        current_stage="completed",
+        progress_message=None,
+        created_at=now_iso,
+        updated_at=now_iso,
+        project_dir=str(project_dir),
+        service_mode="studio",
+    )
+    store = JobStore(tmp_path / "jobs")
+    store.save_job(record)
+    return record, store, project_dir
+
+
+def test_enter_editing_seeds_baseline_from_translation_when_editor_absent(
+    tmp_path: Path,
+) -> None:
+    """Legacy task: editor/segments.json missing, translation/segments.json
+    carries the canonical pipeline shape ``{"segments": [...]}``. enter_editing
+    should derive editor/segments.json verbatim from the segments list and
+    copy it to the editing buffer."""
+    translation_payload = {
+        "segments": [
+            {"segment_id": "s_001", "cn_text": "第一段", "speaker_id": "speaker_a", "voice_id": "v1"},
+            {"segment_id": "s_002", "cn_text": "第二段", "speaker_id": "speaker_b", "voice_id": "v2"},
+        ],
+        "total_segments": 2,
+        "output_path": "/ignored",
+    }
+    record, store, project_dir = _build_legacy_record_with_translation_only(
+        tmp_path, translation_payload=translation_payload
+    )
+    assert not (project_dir / "editor" / "segments.json").exists()
+
+    updated = enter_editing(record, store)
+
+    assert updated.status == JOB_STATUS_EDITING
+    baseline_path = project_dir / "editor" / "segments.json"
+    editing_path = project_dir / EDITING_SUBDIR / "segments.json"
+    assert baseline_path.is_file(), "editor/segments.json should be created"
+    assert editing_path.is_file(), "editing buffer should be populated"
+
+    baseline_segments = json.loads(baseline_path.read_text(encoding="utf-8"))
+    assert baseline_segments == translation_payload["segments"], (
+        "baseline should be the translation segments list verbatim"
+    )
+    editing_segments = json.loads(editing_path.read_text(encoding="utf-8"))
+    assert editing_segments == baseline_segments, (
+        "editing buffer should be a faithful copy of the seeded baseline"
+    )
+
+
+def test_enter_editing_second_visit_reads_editor_not_translation(
+    tmp_path: Path,
+) -> None:
+    """After first enter_editing seeds editor/segments.json, a subsequent
+    enter_editing (after cancel) must reuse the existing editor/ baseline
+    even if translation/segments.json has since changed. This guards against
+    a regression where a post-overwrite alignment rerun rewrites translation/
+    and a second edit session would pick up the wrong baseline."""
+    original = {
+        "segments": [{"segment_id": "s_001", "cn_text": "原始", "speaker_id": "a"}],
+    }
+    record, store, project_dir = _build_legacy_record_with_translation_only(
+        tmp_path, translation_payload=original
+    )
+
+    # First edit session: seed baseline + cancel.
+    editing_record = enter_editing(record, store)
+    cancelled = cancel_editing(editing_record, store, reason="user_cancel")
+    assert cancelled.status == JOB_STATUS_SUCCEEDED
+    baseline_path = project_dir / "editor" / "segments.json"
+    assert baseline_path.is_file()
+    baseline_after_first = json.loads(baseline_path.read_text(encoding="utf-8"))
+    assert baseline_after_first == original["segments"]
+
+    # Mutate translation/ to simulate drift (e.g. pipeline re-alignment).
+    drifted = {
+        "segments": [
+            {"segment_id": "s_001", "cn_text": "漂移内容", "speaker_id": "z"},
+            {"segment_id": "s_999", "cn_text": "不应该出现", "speaker_id": "z"},
+        ],
+    }
+    (project_dir / "translation" / "segments.json").write_text(
+        json.dumps(drifted, ensure_ascii=False), encoding="utf-8"
+    )
+
+    # Second edit session must see the ORIGINAL baseline, not the drift.
+    editing_record_2 = enter_editing(cancelled, store)
+    assert editing_record_2.status == JOB_STATUS_EDITING
+    baseline_after_second = json.loads(baseline_path.read_text(encoding="utf-8"))
+    assert baseline_after_second == original["segments"], (
+        "editor/segments.json must be frozen after first seed; second "
+        "enter_editing must not re-read translation/"
+    )
+    editing_path = project_dir / EDITING_SUBDIR / "segments.json"
+    editing_after_second = json.loads(editing_path.read_text(encoding="utf-8"))
+    assert editing_after_second == original["segments"]
+
+
+def test_enter_editing_rejects_when_translation_missing(tmp_path: Path) -> None:
+    """No editor/segments.json and no translation/segments.json → 409 with
+    a message that points at the missing baseline, not a silently empty
+    segment table."""
+    project_dir = tmp_path / "projects" / "job_legacy"
+    project_dir.mkdir(parents=True)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    record = JobRecord(
+        job_id="job_legacy",
+        job_type="localize_video",
+        source_type="youtube_url",
+        source_ref="https://example.com/video",
+        output_target="editor",
+        speakers="auto",
+        voice_a=None,
+        voice_b=None,
+        status=JOB_STATUS_SUCCEEDED,
+        current_stage="completed",
+        progress_message=None,
+        created_at=now_iso,
+        updated_at=now_iso,
+        project_dir=str(project_dir),
+        service_mode="studio",
+    )
+    store = JobStore(tmp_path / "jobs")
+    store.save_job(record)
+
+    with pytest.raises(EditingConflictError, match="cannot seed editor/segments.json"):
+        enter_editing(record, store)
+
+
+def test_enter_editing_rejects_when_translation_has_no_segments_list(
+    tmp_path: Path,
+) -> None:
+    """translation/segments.json exists but lacks a usable ``segments`` list
+    (e.g. top-level is a dict with only metadata, or a number, or malformed).
+    Must 409 rather than silently seed an empty baseline."""
+    for bad_payload in [
+        {"total_segments": 0, "output_path": "/p"},   # dict without 'segments'
+        {"segments": "not a list"},                    # dict with wrong shape
+        42,                                            # not a container at all
+    ]:
+        record, store, _ = _build_legacy_record_with_translation_only(
+            tmp_path / f"case_{id(bad_payload)}",
+            translation_payload=bad_payload,
+        )
+        with pytest.raises(
+            EditingConflictError, match="has no usable 'segments' list"
+        ):
+            enter_editing(record, store)
+
+
+def test_enter_editing_lazy_seed_normalises_integer_segment_ids(tmp_path: Path) -> None:
+    """translation/segments.json carries integer segment_id values (that's
+    what pipeline emits today). The editing layer — HTTP contract, input
+    validators, patch/regen lookups — all treat segment_id as str. Seed
+    must normalise int → str so downstream patch / regenerate-tts calls
+    with string ids like '4' can match rows written out of translation."""
+    translation_payload = {
+        "segments": [
+            {"segment_id": 1, "cn_text": "一"},
+            {"segment_id": 2, "cn_text": "二"},
+            {"segment_id": 10, "cn_text": "十"},
+        ],
+    }
+    record, store, project_dir = _build_legacy_record_with_translation_only(
+        tmp_path, translation_payload=translation_payload
+    )
+
+    enter_editing(record, store)
+
+    seeded = json.loads(
+        (project_dir / "editor" / "segments.json").read_text(encoding="utf-8")
+    )
+    ids = [s["segment_id"] for s in seeded]
+    assert ids == ["1", "2", "10"], (
+        f"segment_id values in editor/segments.json must be str; got {ids}"
+    )
+    # Editing buffer is copied after normalisation, so it inherits str ids too.
+    buffered = json.loads(
+        (project_dir / EDITING_SUBDIR / "segments.json").read_text(encoding="utf-8")
+    )
+    assert [s["segment_id"] for s in buffered] == ["1", "2", "10"]
+
+
+def test_enter_editing_lazy_seed_does_not_touch_translation(tmp_path: Path) -> None:
+    """Seeding editor/segments.json must be a one-way READ of
+    translation/segments.json. After enter_editing, translation/segments.json
+    must be byte-for-byte unchanged — nobody in the editing layer has any
+    business rewriting a pipeline artifact.
+
+    This is the spirit of CodeX's "overwrite commit 只改 editor/segments.json"
+    guardrail, but applied earlier (at seed time) so translation/ stays clean
+    even if the user never commits."""
+    translation_payload = {
+        "segments": [{"segment_id": "s_001", "cn_text": "hi"}],
+        "total_segments": 1,
+    }
+    record, store, project_dir = _build_legacy_record_with_translation_only(
+        tmp_path, translation_payload=translation_payload
+    )
+    translation_path = project_dir / "translation" / "segments.json"
+    before_bytes = translation_path.read_bytes()
+
+    enter_editing(record, store)
+
+    after_bytes = translation_path.read_bytes()
+    assert after_bytes == before_bytes, (
+        "translation/segments.json must be untouched by the editing layer"
+    )
 
 
 # ---------------------------------------------------------------------------

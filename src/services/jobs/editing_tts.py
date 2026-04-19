@@ -137,8 +137,9 @@ def regenerate_segment_tts(
 
     segments = load_editing_segments(project_dir)
     segment = None
+    target = str(segment_id)
     for s in segments:
-        if isinstance(s, dict) and s.get("segment_id") == segment_id:
+        if isinstance(s, dict) and str(s.get("segment_id")) == target:
             segment = s
             break
     if segment is None:
