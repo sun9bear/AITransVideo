@@ -141,6 +141,53 @@ def _build_editing_job_with_diff(
 # ---------------------------------------------------------------------------
 
 
+def _add_succeeded_project_state(project_dir: Path) -> None:
+    """Simulate the project_state.json left behind by a succeeded pipeline:
+    every stage DONE. Used to verify overwrite commit prunes alignment +
+    publish back to PENDING so re-run actually happens."""
+    (project_dir / "project_state.json").write_text(
+        json.dumps({
+            "project_id": project_dir.name,
+            "stages": {
+                "ingestion":           {"status": "done", "payload": {"ok": 1}},
+                "audio_preparation":   {"status": "done", "payload": {"ok": 1}},
+                "media_understanding": {"status": "done", "payload": {"ok": 1}},
+                "translation_review":  {"status": "done", "payload": {"ok": 1}},
+                "translation":         {"status": "done", "payload": {"ok": 1}},
+                "alignment":           {"status": "done", "payload": {"ok": 1}},
+                "legacy_process_output": {"status": "done", "payload": {"ok": 1}},
+            },
+        }),
+        encoding="utf-8",
+    )
+
+
+def test_overwrite_prunes_alignment_stages_in_project_state(tmp_path: Path) -> None:
+    """After overwrite commit, project_state.json must reset alignment +
+    legacy_process_output to PENDING so pipeline runs them. Without this,
+    the source's ALL-DONE state persists and pipeline would conclude
+    'publish already done, nothing to do' on the new segments / drafts."""
+    store, record, project_dir = _build_editing_job_with_diff(
+        tmp_path, text_edits={"seg_001": "EDITED_1"}
+    )
+    _add_succeeded_project_state(project_dir)
+    runner = _RecordingRunner()
+
+    commit_editing_pipeline(record, store, runner=runner, strategy="overwrite")
+
+    state = json.loads((project_dir / "project_state.json").read_text(encoding="utf-8"))
+    stages = state["stages"]
+    # Upstream preserved
+    for preserved in (
+        "ingestion", "audio_preparation", "media_understanding",
+        "translation_review", "translation",
+    ):
+        assert stages[preserved]["status"] == "done"
+    # Alignment + publish pruned
+    assert stages["alignment"]["status"] == "pending"
+    assert stages["legacy_process_output"]["status"] == "pending"
+
+
 def test_overwrite_applies_text_edit_to_baseline(tmp_path: Path) -> None:
     store, record, project_dir = _build_editing_job_with_diff(
         tmp_path, text_edits={"seg_002": "NEW_TEXT_2"}

@@ -40,6 +40,7 @@ What's NOT here:
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -48,13 +49,22 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from core.enums import StageStatus
+from services.jobs.models import (
+    STAGE_ALIGNMENT,
+    STAGE_LEGACY_PROCESS_OUTPUT,
+)
+from utils.atomic_io import atomic_write_json
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
     "CopyPreparationError",
     "apply_draft_segment",
     "hardlink_baseline_audio",
+    "hardlink_media_artifacts",
     "prepare_copy_project_dir",
+    "prune_project_state_payload",
     "rollback_prepared_target",
     "write_audio_safely",
 ]
@@ -97,6 +107,138 @@ def hardlink_baseline_audio(source_dir: str | Path, target_dir: str | Path) -> l
         dst_wav = dst_audio / src_wav.name
         os.link(src_wav, dst_wav)  # raises FileExistsError if dst exists
         linked.append(segment_id)
+    return linked
+
+
+# Relative paths that a succeeded pipeline emits as large, immutable media
+# artifacts — pipeline's S0 / audio_preparation / S1 cache-check against
+# these, so copy_as_new must carry them into the target dir or the new
+# job will re-run demucs / ASR from scratch. Hardlink (not copy) because
+# these are single-writer single-reader and typically in the hundred-MB
+# range; copying would blow out disk and runtime for no gain.
+_MEDIA_HARDLINK_RELS: tuple[str, ...] = (
+    "video/original.mp4",
+    "audio/original.wav",
+    "audio/speech.wav",
+    "audio/ambient.wav",
+)
+
+
+# Stage names that must be reset to PENDING when a copy_as_new /
+# overwrite commit lands. Upstream stages keep DONE so the pipeline's
+# per-stage cache-check (file-existence based) still skips re-running
+# them on the new inputs.
+_STAGES_TO_PRUNE: frozenset[str] = frozenset({
+    STAGE_ALIGNMENT,
+    STAGE_LEGACY_PROCESS_OUTPUT,
+})
+
+
+def _empty_stage_entry() -> dict[str, Any]:
+    # Mirrors ``StateManager._empty_stage`` — duplicated here to avoid
+    # instantiating a StateManager (which would require a path) just to
+    # build one dict. If that method's shape ever changes, this must too.
+    return {
+        "status": StageStatus.PENDING.value,
+        "started_at": None,
+        "finished_at": None,
+        "updated_at": None,
+        "error_message": None,
+        "payload": {},
+    }
+
+
+def prune_project_state_payload(
+    payload: dict[str, Any],
+    *,
+    new_project_id: str,
+) -> dict[str, Any]:
+    """Return a deep-copied project_state dict with ``project_id`` replaced
+    and every stage in ``_STAGES_TO_PRUNE`` reset to PENDING.
+
+    Unknown stages pass through verbatim — fail-closed if a future
+    pipeline version introduces a new post-edit stage (visible DONE
+    surfaces the oversight rather than silently erasing it).
+    """
+    out = copy.deepcopy(payload)
+    out["project_id"] = new_project_id
+    stages = out.get("stages")
+    if isinstance(stages, dict):
+        for stage_name in list(stages.keys()):
+            if stage_name in _STAGES_TO_PRUNE and isinstance(stages[stage_name], dict):
+                stages[stage_name] = _empty_stage_entry()
+    return out
+
+
+# Field-name suffixes that always hold filesystem paths in DubbingSegment /
+# pipeline JSON. Only values under these keys get the source→target
+# substring rewrite, so a stray cn_text / error message that happens to
+# contain the source dir as a substring stays untouched.
+_PATH_KEY_SUFFIXES: tuple[str, ...] = ("_path", "_dir")
+
+
+def _rewrite_project_dir_paths(
+    payload: Any,
+    *,
+    source_dir: Path,
+    target_dir: Path,
+    current_key: str | None = None,
+) -> Any:
+    """Relocate absolute paths pointing at ``source_dir`` to ``target_dir``
+    inside a nested JSON payload, scoped to keys whose name ends in
+    ``_path`` or ``_dir``.
+
+    Scoping to path-flavoured keys avoids mutating arbitrary strings
+    (e.g. error messages or log fragments) that merely happen to embed
+    the source path as a substring.
+    """
+    src_str = str(source_dir)
+    dst_str = str(target_dir)
+    if isinstance(payload, dict):
+        return {
+            k: _rewrite_project_dir_paths(
+                v, source_dir=source_dir, target_dir=target_dir, current_key=k,
+            )
+            for k, v in payload.items()
+        }
+    if isinstance(payload, list):
+        return [
+            _rewrite_project_dir_paths(
+                v, source_dir=source_dir, target_dir=target_dir, current_key=current_key,
+            )
+            for v in payload
+        ]
+    if (
+        isinstance(payload, str)
+        and current_key is not None
+        and any(current_key.endswith(sfx) for sfx in _PATH_KEY_SUFFIXES)
+        and src_str in payload
+    ):
+        return payload.replace(src_str, dst_str)
+    return payload
+
+
+def hardlink_media_artifacts(
+    source_dir: str | Path, target_dir: str | Path,
+) -> list[str]:
+    """Hardlink pipeline's large immutable media artifacts from source to
+    target. Silently skips files that don't exist at source (handles
+    pipelines that never reached the relevant stage, e.g. early failures).
+
+    Returns the list of relative paths actually linked. Raises on any real
+    OS failure (permission / cross-filesystem) so the caller can roll back.
+    """
+    src_root = Path(source_dir)
+    dst_root = Path(target_dir)
+    linked: list[str] = []
+    for rel in _MEDIA_HARDLINK_RELS:
+        src = src_root / rel
+        if not src.is_file():
+            continue
+        dst = dst_root / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        os.link(src, dst)
+        linked.append(rel)
     return linked
 
 
@@ -221,8 +363,43 @@ def prepare_copy_project_dir(
             if src_json.is_file():
                 shutil.copy2(src_json, target / "editor" / name)
 
-        # A3: hardlink baseline wavs
+        # A3: hardlink baseline wavs + media artifacts so pipeline's
+        # per-stage file-existence cache-check skips re-running S0-S4.
         linked = hardlink_baseline_audio(source, target)
+        hardlink_media_artifacts(source, target)
+
+        # A3.1: copy (not hardlink) the small JSON cache markers —
+        # pipeline may rewrite download_metadata.json on restart to
+        # refresh paths and we must not mutate the source through a
+        # shared inode.
+        for rel in ("download_metadata.json", "transcript/transcript.json"):
+            src_file = source / rel
+            if src_file.is_file():
+                dst_file = target / rel
+                dst_file.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src_file, dst_file)
+
+        src_state = source / "project_state.json"
+        if src_state.is_file():
+            state_payload = json.loads(src_state.read_text(encoding="utf-8"))
+            pruned = prune_project_state_payload(
+                state_payload,
+                new_project_id=Path(target_project_dir).name,
+            )
+            atomic_write_json(str(target / "project_state.json"), pruned)
+
+        # translation/segments.json embeds absolute tts/aligned paths
+        # pointing at source — rewrite to target or alignment's in-place
+        # DSP would mutate source audio via the old paths.
+        src_translation = source / "translation" / "segments.json"
+        if src_translation.is_file():
+            dst_translation = target / "translation" / "segments.json"
+            dst_translation.parent.mkdir(parents=True, exist_ok=True)
+            payload = json.loads(src_translation.read_text(encoding="utf-8"))
+            payload = _rewrite_project_dir_paths(
+                payload, source_dir=source, target_dir=target,
+            )
+            atomic_write_json(str(dst_translation), payload)
 
         # A4: apply editing diff
         # A4.1 segments.json: prefer editing/segments.json, fall back to baseline

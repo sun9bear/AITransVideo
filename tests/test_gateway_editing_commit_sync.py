@@ -375,13 +375,18 @@ def test_non_json_body_is_no_op() -> None:
 
 
 def test_run_job_api_command_wires_idle_cancel_callback_source() -> None:
-    """Static guard: run_job_api_command's body must contain the wiring
-    calls. Without this the runtime scanner stays on _noop_cancel
-    indefinitely — CodeX P1-2 regression risk."""
-    main_src = (Path(__file__).resolve().parents[1] / "main.py").read_text(
-        encoding="utf-8"
-    )
-    # Locate the function body
+    """Static guard: run_job_api_command's body must apply runtime wiring.
+    CodeX P1-2 regression risk: without wiring, the idle scanner stays on
+    ``_noop_cancel`` and the cleanup thread never starts.
+
+    After the 2026-04-19 runtime_wiring refactor, the three concrete
+    inject calls (inject_editing_cancel_callback / segment TTS caller /
+    start_cleanup_thread) live inside ``apply_runtime_wiring`` and are
+    reached from both entry points (main.py + scripts/). We still pin
+    them down here — one check on the entry body (must call the helper),
+    one check on the helper (must call each inject)."""
+    repo_root = Path(__file__).resolve().parents[1]
+    main_src = (repo_root / "main.py").read_text(encoding="utf-8")
     func_match = re.search(
         r"def run_job_api_command\([^)]*\)\s*->\s*None:(.*?)(?=\ndef |\Z)",
         main_src,
@@ -389,10 +394,20 @@ def test_run_job_api_command_wires_idle_cancel_callback_source() -> None:
     )
     assert func_match, "run_job_api_command not found in main.py"
     body = func_match.group(1)
-    assert "inject_editing_cancel_callback" in body, (
-        "run_job_api_command must call inject_editing_cancel_callback(service)"
+    assert "apply_runtime_wiring" in body, (
+        "run_job_api_command must delegate post-build wiring to "
+        "apply_runtime_wiring(service) so main.py and the container "
+        "entry (scripts/run_remote_workbench_service.py) stay in lock-step"
     )
-    assert "start_cleanup_thread" in body, (
-        "run_job_api_command must call start_cleanup_thread() so the "
-        "idle scanner actually runs in production"
-    )
+
+    # And the helper itself must call every inject step.
+    helper_src = (repo_root / "src" / "services" / "jobs" / "runtime_wiring.py").read_text(encoding="utf-8")
+    for needle, purpose in (
+        ("inject_editing_cancel_callback", "idle-cancel callback (T1-10)"),
+        ("build_real_segment_tts_caller",  "segment TTS caller (A.2)"),
+        ("start_cleanup_thread",           "cleanup background thread"),
+    ):
+        assert needle in helper_src, (
+            f"runtime_wiring.apply_runtime_wiring missing {needle} call — "
+            f"{purpose} would silently regress"
+        )

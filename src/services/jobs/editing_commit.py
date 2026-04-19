@@ -56,8 +56,10 @@ from services.jobs.copy_service import (
     CopyPreparationError,
     apply_draft_segment,
     prepare_copy_project_dir,
+    prune_project_state_payload,
     rollback_prepared_target,
 )
+from utils.atomic_io import atomic_write_json
 from services.jobs.editing import EDITING_SUBDIR, EditingConflictError
 from services.jobs.events import EVENT_LEVEL_INFO, EVENT_TYPE_STATUS, JobEvent
 from services.jobs.input_validators import validate_commit_strategy
@@ -218,6 +220,17 @@ def _rm_editing_dir(project_dir: Path) -> None:
         shutil.rmtree(editing, ignore_errors=True)
 
 
+def _prune_overwrite_project_state(project_dir: Path) -> None:
+    """Reset alignment + publish to PENDING in the overwrite target's
+    project_state.json. No-op if the file is absent."""
+    state_path = project_dir / "project_state.json"
+    if not state_path.is_file():
+        return
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    pruned = prune_project_state_payload(payload, new_project_id=project_dir.name)
+    atomic_write_json(str(state_path), pruned)
+
+
 def _compute_copy_project_dir(source_project_dir: Path, new_job_id: str) -> Path:
     """Place the copy sibling under the same parent directory, named by
     new_job_id. This keeps storage layout predictable and lets admins find
@@ -306,6 +319,10 @@ def _commit_overwrite(
     summary = _apply_editing_to_baseline(project_dir)
     # Step 3: remove editing buffer.
     _rm_editing_dir(project_dir)
+    # Step 3.5: reset alignment + publish to PENDING so pipeline re-runs
+    # them against the just-applied edits instead of treating the source's
+    # succeeded-era state as authoritative.
+    _prune_overwrite_project_state(project_dir)
 
     # Step 4: flip status.
     now = _utc_now_iso()
