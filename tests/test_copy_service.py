@@ -360,6 +360,30 @@ def test_prepare_copy_hardlinks_media_artifacts(tmp_path: Path) -> None:
         )
 
 
+def _add_review_state(source: Path) -> None:
+    """Populate review_state.json with every pre-alignment review stage
+    approved. Without this on the copy target, the restarted pipeline
+    would regenerate voice_selection_review and pause at stage 7 instead
+    of pushing through to alignment — stopgap for the fact that
+    start_stage='alignment' isn't yet wired end-to-end."""
+    (source / "review_state.json").write_text(
+        json.dumps({
+            "stages": {
+                "speaker_review":     {"status": "approved", "payload": {"speakers": []}},
+                "voice_selection_review": {
+                    "status": "approved",
+                    "payload": {"speakers": [
+                        {"speaker_id": "speaker_a", "voice_id": "v1", "tts_provider": "minimax"},
+                        {"speaker_id": "speaker_b", "voice_id": "v2", "tts_provider": "minimax"},
+                    ]},
+                },
+                "translation_review": {"status": "approved", "payload": {}},
+            },
+        }),
+        encoding="utf-8",
+    )
+
+
 def _add_metadata_and_transcript(source: Path) -> None:
     """Populate download_metadata.json + transcript/transcript.json.
     Pipeline S1 cache-check reads transcript.json; download_metadata.json
@@ -378,6 +402,37 @@ def _add_metadata_and_transcript(source: Path) -> None:
     (source / "transcript" / "transcript.json").write_text(
         json.dumps({"lines": [{"speaker_id": "A", "text": "hello"}]}),
         encoding="utf-8",
+    )
+
+
+def test_prepare_copy_copies_review_state_json(tmp_path: Path) -> None:
+    """review_state.json carries the approved voice_selection_review +
+    translation_review + speaker_review payloads that the original task
+    collected. Until start_stage='alignment' is wired end-to-end, the
+    copy target is still launched via full main.py process and the
+    pipeline re-enters voice_selection_review at ~process.py:1220.
+
+    Without review_state.json, approved_voice_selection returns None and
+    the pipeline pauses at stage 7 (音色选择) — CodeX P1-2 root cause.
+    Copy it so the cache-check finds prior approvals and pushes through
+    to alignment."""
+    source = _make_source_project(tmp_path, n_segments=2)
+    _add_media_artifacts(source)
+    _add_review_state(source)
+    _populate_editing_dir(source)
+    target = tmp_path / "copy"
+
+    prepare_copy_project_dir(source, target)
+
+    assert (target / "review_state.json").is_file(), (
+        "review_state.json missing in target — copy_as_new pipeline would "
+        "re-open voice_selection_review and stall at stage 7"
+    )
+    # Content preserved byte-for-byte (it's pre-alignment state; no paths
+    # inside to rewrite).
+    assert (
+        (target / "review_state.json").read_text(encoding="utf-8")
+        == (source / "review_state.json").read_text(encoding="utf-8")
     )
 
 

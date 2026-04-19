@@ -372,7 +372,16 @@ def prepare_copy_project_dir(
         # pipeline may rewrite download_metadata.json on restart to
         # refresh paths and we must not mutate the source through a
         # shared inode.
-        for rel in ("download_metadata.json", "transcript/transcript.json"):
+        for rel in (
+            "download_metadata.json",
+            "transcript/transcript.json",
+            # review_state.json carries approved voice_selection_review /
+            # translation_review / speaker_review payloads — without these
+            # on the target, pipeline's pre-alignment review gates re-open
+            # and pause at stage 7 (see process.py:1220, CodeX stopgap
+            # until start_stage='alignment' is wired end-to-end).
+            "review_state.json",
+        ):
             src_file = source / rel
             if src_file.is_file():
                 dst_file = target / rel
