@@ -275,6 +275,7 @@ const publicStageMap = {
 
 const statusMap = {
   cancelled: 'cancelled',
+  editing: 'editing',
   failed: 'failed',
   queued: 'queued',
   running: 'running',

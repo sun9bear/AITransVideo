@@ -32,6 +32,7 @@ import {
   type SegmentStatus,
 } from "@/lib/api/editing"
 import { getJob } from "@/lib/api/jobs"
+import { ApiError } from "@/lib/api/client"
 import { getErrorMessage } from "@/lib/api/errors"
 import { getJobDisplayTitle } from "@/features/jobs/presentation"
 import type { JobSummary } from "@/types/jobs"
@@ -155,11 +156,14 @@ export default function VideoEditPage() {
         )
         toast.success(`段 ${segmentId} 重合成完成`)
       } catch (error) {
-        const msg = getErrorMessage(error)
-        if (msg.includes("501") || msg.toLowerCase().includes("not implemented")) {
+        // 501 = TTS provider wiring not yet in place (B-task scope). The
+        // backend message is the raw NotImplementedError string which does
+        // not contain '501' or 'not implemented', so rely on the HTTP status
+        // code surfaced by ApiError instead of substring matching.
+        if (error instanceof ApiError && error.status === 501) {
           toast.error("TTS 合成后端尚未接入 — 功能即将上线")
         } else {
-          toast.error(`重合成失败: ${msg}`)
+          toast.error(`重合成失败: ${getErrorMessage(error)}`)
         }
         // Refresh so UI reflects tts_failed
         void loadData()
@@ -233,7 +237,7 @@ export default function VideoEditPage() {
     try {
       await cancelEditing(jobId)
       toast.success("已放弃本次修改")
-      router.push(`/workspace/${jobId}`)
+      router.push("/projects")
     } catch (error) {
       toast.error(`放弃失败: ${getErrorMessage(error)}`)
     }
