@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from services.jobs.models import JobRecord
 from services.jobs.process_runner import (
@@ -298,6 +298,119 @@ class TestBuildCommand:
 
         assert "--project-dir" in cmd
         assert cmd[cmd.index("--project-dir") + 1] == "projects/42/job_test001"
+
+    def test_start_preserves_alignment_current_stage_in_continue_mode(
+        self, tmp_path: Path,
+    ):
+        """Step 2 Layer 1 — runner.start() had unconditionally reset
+        current_stage to STAGE_INGESTION, which silently broke
+        commit-triggered alignment resumes: submit_job_from_existing_project_dir
+        set job.current_stage='alignment' but runner immediately overwrote it
+        before _build_command could read it.
+
+        Now runner must preserve current_stage when continue_existing=True
+        AND the stage is in the resumable allowlist (alignment today).
+        """
+        runner = _make_runner(tmp_path)
+        job = _make_job(
+            project_dir=str(tmp_path / "proj"),
+            current_stage="alignment",
+        )
+        # Stub out the subprocess + monitor to keep start() focused on the
+        # state transition we care about.
+        runner._popen_factory = MagicMock(
+            return_value=MagicMock(stdout=iter([]), wait=MagicMock(return_value=0))
+        )
+        runner._monitor_process = MagicMock()  # type: ignore[method-assign]
+
+        runner.start(job, continue_existing=True)
+
+        saved = runner.store.require_job(job.job_id)
+        assert saved.current_stage == "alignment", (
+            f"start() overwrote current_stage to {saved.current_stage!r}; "
+            "commit-triggered alignment resume would never reach the "
+            "pipeline's resume branch"
+        )
+
+    def test_start_still_resets_current_stage_for_non_allowlist_stages(
+        self, tmp_path: Path,
+    ):
+        """Regression guard on the allowlist: a job with an unexpected
+        current_stage (legacy 'media_understanding' etc.) in continue mode
+        must still get reset to INGESTION so the pipeline runs the full
+        flow — we only recognise 'alignment' as a resume entry point."""
+        runner = _make_runner(tmp_path)
+        job = _make_job(
+            project_dir=str(tmp_path / "proj"),
+            current_stage="media_understanding",
+        )
+        runner._popen_factory = MagicMock(
+            return_value=MagicMock(stdout=iter([]), wait=MagicMock(return_value=0))
+        )
+        runner._monitor_process = MagicMock()  # type: ignore[method-assign]
+
+        runner.start(job, continue_existing=True)
+
+        saved = runner.store.require_job(job.job_id)
+        assert saved.current_stage == "ingestion"
+
+    def test_start_resets_current_stage_when_not_continue_existing(
+        self, tmp_path: Path,
+    ):
+        """Fresh jobs (continue_existing=False) always start at INGESTION
+        regardless of a pre-set current_stage on the record."""
+        runner = _make_runner(tmp_path)
+        job = _make_job(current_stage="alignment")
+        runner._popen_factory = MagicMock(
+            return_value=MagicMock(stdout=iter([]), wait=MagicMock(return_value=0))
+        )
+        runner._monitor_process = MagicMock()  # type: ignore[method-assign]
+
+        runner.start(job, continue_existing=False)
+
+        saved = runner.store.require_job(job.job_id)
+        assert saved.current_stage == "ingestion"
+
+    def test_continue_with_alignment_current_stage_forwards_resume_from(
+        self, tmp_path: Path,
+    ):
+        """Step 2 Layer 2 — commit copy_as_new / overwrite sets
+        ``current_stage='alignment'`` on the JobRecord before calling
+        runner.start. The subprocess command must carry that intent via
+        ``--resume-from alignment`` so ProcessPipeline.run can branch
+        directly into alignment+publish."""
+        runner = _make_runner(tmp_path)
+        job = _make_job(
+            project_dir="/some/project",
+            current_stage="alignment",
+        )
+        cmd = runner._build_command(job, continue_existing=True)
+
+        assert "--resume-from" in cmd
+        assert cmd[cmd.index("--resume-from") + 1] == "alignment"
+
+    def test_continue_without_alignment_stage_omits_resume_from(
+        self, tmp_path: Path,
+    ):
+        """Only allowlisted start stages trigger --resume-from. Regular
+        continue (e.g. after waiting_for_review) does not carry the flag."""
+        runner = _make_runner(tmp_path)
+        job = _make_job(
+            project_dir="/some/project",
+            current_stage="translation_review",
+        )
+        cmd = runner._build_command(job, continue_existing=True)
+
+        assert "--resume-from" not in cmd
+
+    def test_new_job_never_forwards_resume_from(self, tmp_path: Path):
+        """Fresh jobs (continue_existing=False) must not carry
+        --resume-from even if current_stage happens to be set."""
+        runner = _make_runner(tmp_path)
+        job = _make_job(current_stage="alignment")
+        cmd = runner._build_command(job, continue_existing=False)
+
+        assert "--resume-from" not in cmd
 
     def test_preserves_job_id_and_other_flags(self, tmp_path: Path):
         runner = _make_runner(tmp_path)

@@ -24,6 +24,7 @@ from services.jobs.models import (
     JOB_STATUS_SUCCEEDED,
     JOB_STATUS_WAITING_FOR_REVIEW,
     JobRecord,
+    STAGE_ALIGNMENT,
     STAGE_COMPLETED,
     STAGE_DRAFT,
     STAGE_FAILED,
@@ -76,6 +77,14 @@ STAGE_CODE_MAP = {
     "S5": STAGE_VOICE_SELECTION_REVIEW,
     "S6": STAGE_LEGACY_PROCESS_OUTPUT,
 }
+# Stages that the pipeline knows how to resume at (i.e. skip everything
+# upstream and branch straight into that stage's code block). Used by
+# _build_command + start() to decide whether a continue_existing=True
+# job should carry --resume-from into the subprocess. Keep narrow — any
+# stage added here must have a matching branch in ProcessPipeline.run().
+_RESUMABLE_START_STAGES: frozenset[str] = frozenset({STAGE_ALIGNMENT})
+
+
 INTERNAL_STAGE_MAP = {
     "ingestion": STAGE_INGESTION,
     "audio_preparation": STAGE_INGESTION,
@@ -116,10 +125,17 @@ class ProcessJobRunner:
 
     def start(self, job: JobRecord, *, continue_existing: bool = False) -> JobRecord:
         timestamp = utc_now_iso()
+        # Preserve caller-set current_stage only when this is a resume and
+        # the stage is an allowlisted entry point (commit copy_as_new /
+        # overwrite set 'alignment'). Everything else starts at INGESTION.
+        if continue_existing and job.current_stage in _RESUMABLE_START_STAGES:
+            initial_stage = job.current_stage
+        else:
+            initial_stage = STAGE_INGESTION
         running_job = self._save_job(
             job,
             status=JOB_STATUS_RUNNING,
-            current_stage=STAGE_INGESTION,
+            current_stage=initial_stage,
             progress_message="Starting process-backed localization job.",
             updated_at=timestamp,
             started_at=job.started_at or timestamp,
@@ -244,6 +260,12 @@ class ProcessJobRunner:
             project_dir = job.project_dir or getattr(job, "workspace_dir", None)
             if project_dir:
                 command.extend(["--project-dir", project_dir])
+            # Forward resume-from for commit copy_as_new / overwrite paths so
+            # the pipeline enters directly at alignment. Allowlist prevents
+            # arbitrary stage names (e.g. waiting_for_review) from reaching
+            # main.py — pipeline only knows how to resume at alignment today.
+            if getattr(job, "current_stage", None) in _RESUMABLE_START_STAGES:
+                command.extend(["--resume-from", job.current_stage])
         else:
             workspace_dir = getattr(job, "workspace_dir", None)
             if workspace_dir:

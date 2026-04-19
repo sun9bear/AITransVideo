@@ -178,7 +178,11 @@ def parse_process_args(argv: list[str]) -> ProcessConfig:
     parser.add_argument("--speaker-b", default="Speaker B", help="Speaker B 的显示名称")
     parser.add_argument("--speakers", default="auto", help="说话人数量：1 | 2 | auto（默认 auto）")
     parser.add_argument("--project-dir", default=None, help="指定项目目录")
-    parser.add_argument("--resume-from", default=None, help="断点续跑起始 Stage（预留）")
+    parser.add_argument(
+        "--resume-from",
+        default=None,
+        help="断点续跑起始 Stage；当前仅支持 'alignment'，由 commit copy_as_new / overwrite 触发。",
+    )
     parser.add_argument("--skip-review", action="store_true", help="跳过Gemini说话人审核步骤")
     parser.add_argument("--wait-for-review", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--transcription-method", default="assemblyai", choices=["assemblyai", "gemini"], help="转录方案：assemblyai（默认）| gemini")

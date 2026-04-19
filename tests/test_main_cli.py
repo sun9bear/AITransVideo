@@ -199,3 +199,23 @@ class TestParseProcessArgsSourceParams:
         assert config.speakers == "2"
         assert config.voice_a == "voice-001"
         assert config.job_id == "job_abc"
+
+    def test_resume_from_alignment_landed_in_config(self):
+        """Step 2 Layer 3 — --resume-from alignment must reach
+        ProcessConfig.resume_from so ProcessPipeline.run can branch into
+        alignment-only mode. The flag only survives if parse_process_args
+        forwards it; the 'predefined' comment on the argparse entry was
+        a red herring left from an earlier placeholder."""
+        config = main.parse_process_args(
+            ["main.py", "process", "https://youtube.com/watch?v=t",
+             "--resume-from", "alignment"]
+        )
+        assert config.resume_from == "alignment"
+
+    def test_resume_from_default_is_none(self):
+        """Without --resume-from, config.resume_from stays None — the
+        pipeline then runs the full top-down flow."""
+        config = main.parse_process_args(
+            ["main.py", "process", "https://youtube.com/watch?v=t"]
+        )
+        assert config.resume_from is None
