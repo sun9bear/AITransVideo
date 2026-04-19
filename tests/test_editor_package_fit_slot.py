@@ -59,6 +59,32 @@ def _make_wav(path: Path, duration_ms: int, *, sample_rate: int = 16000) -> Path
     return path
 
 
+def _make_wav_with_silence_padding(
+    path: Path,
+    *,
+    speech_ms: int,
+    leading_silence_ms: int,
+    trailing_silence_ms: int,
+    sample_rate: int = 16000,
+) -> Path:
+    """Write a wav simulating TTS output: leading silence + speech + trailing silence.
+
+    Speech is simulated with a 440Hz tone (loud enough to exceed -40dB).
+    Silence is true AudioSegment.silent. Shape matches what TTS providers
+    (MiniMax / VolcEngine / CosyVoice) typically produce.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Generate 440Hz tone by concatenating sine-wave bytes at -10dB roughly
+    # — pydub's Sine generator is the simplest path:
+    from pydub.generators import Sine
+    speech = Sine(440).to_audio_segment(duration=speech_ms).apply_gain(-10)
+    leading = AudioSegment.silent(duration=leading_silence_ms)
+    trailing = AudioSegment.silent(duration=trailing_silence_ms)
+    combined = leading + speech + trailing
+    combined.set_frame_rate(sample_rate).export(path, format="wav")
+    return path
+
+
 def _measure_ms(path: Path) -> int:
     return len(AudioSegment.from_wav(path))
 
@@ -211,6 +237,120 @@ def test_fit_handles_extreme_compression_ratio(tmp_path: Path) -> None:
     # Slightly looser tolerance at extreme ratios (accumulated rounding).
     assert abs(result_ms - 500) <= 80, (
         f"expected ~500ms at 10x compression, got {result_ms}ms"
+    )
+
+
+
+# ---------------------------------------------------------------------------
+# TTS silence padding trim (pre-stretch optimisation)
+#
+# TTS providers typically pad output with 50-200ms of silence at each end.
+# For γ publish resume, that padding gets counted against the user's slot —
+# a 1.74s wav with 200ms silence on each side only has 1.34s of real speech.
+# If slot is 0.76s, stretching 1.74s → 0.76s (2.3x) blows out audio quality;
+# stretching 1.34s → 0.76s (1.76x) is much more tolerable.
+#
+# Strategy: trim leading/trailing silence BEFORE computing the atempo
+# ratio. Leaves the shortened audio in the slot — any gap between segments
+# is already covered by the dubbed_audio_complete master silence base.
+# ---------------------------------------------------------------------------
+
+
+def test_fit_trims_leading_and_trailing_silence_before_stretching(
+    tmp_path: Path,
+) -> None:
+    """TTS output has ~150ms silence padding at each end. After fit,
+    the silence should be gone and only the speech portion stretched
+    toward the slot duration. Verifies two things:
+
+    1. Result duration matches slot (within atempo tolerance)
+    2. The leading edge of result is NOT silence (trim happened)
+    """
+    # 1300ms total = 150 silence + 1000 speech + 150 silence
+    wav = _make_wav_with_silence_padding(
+        tmp_path / "padded.wav",
+        speech_ms=1000,
+        leading_silence_ms=150,
+        trailing_silence_ms=150,
+    )
+    # slot = 800ms; naive stretch would use ratio 1300/800 = 1.625x
+    # trim-first stretch uses ratio 1000/800 = 1.25x (much better quality)
+    segment = _make_segment(start_ms=0, end_ms=800)
+
+    EditorPackageWriter()._fit_segment_audio_to_slot(wav, segment)
+
+    result = AudioSegment.from_wav(wav)
+    _assert_stretched_toward(len(result), 1300, 800)
+
+    # First 20ms of result must be audible (NOT silence) — proves trim fired.
+    # Silence would be dBFS around -inf / very negative; speech tone ~ -10dB.
+    first_slice_dbfs = result[:20].dBFS
+    assert first_slice_dbfs > -40, (
+        f"leading 20ms of result is silent (dBFS={first_slice_dbfs:.1f}); "
+        "silence trim did not fire — atempo ate CPU stretching padding"
+    )
+
+
+def test_fit_no_trim_when_audio_already_tight(tmp_path: Path) -> None:
+    """No silence padding → trim is a no-op, stretch proceeds as before."""
+    # 1000ms pure speech, no silence edges
+    from pydub.generators import Sine
+    wav = tmp_path / "tight.wav"
+    Sine(440).to_audio_segment(duration=1000).apply_gain(-10).export(
+        wav, format="wav",
+    )
+    segment = _make_segment(start_ms=0, end_ms=500)  # ratio 2x
+
+    EditorPackageWriter()._fit_segment_audio_to_slot(wav, segment)
+
+    _assert_stretched_toward(_measure_ms(wav), 1000, 500)
+
+
+def test_fit_does_not_trim_silence_on_long_segments(tmp_path: Path) -> None:
+    """Segments longer than 3s skip the silence-trim step: their quiet
+    leading/trailing regions may be intentional pauses between phrases,
+    not pure TTS padding. This test constructs a >3s wav with 200ms
+    leading silence — after fit, that leading silence must still be
+    present (stretched with the rest, not cut)."""
+    # 4300ms total = 200 silence + 3900 speech + 200 silence (> 3s gate)
+    wav = _make_wav_with_silence_padding(
+        tmp_path / "long-with-pad.wav",
+        speech_ms=3900,
+        leading_silence_ms=200,
+        trailing_silence_ms=200,
+    )
+    segment = _make_segment(start_ms=0, end_ms=2000)  # slot 2s
+
+    EditorPackageWriter()._fit_segment_audio_to_slot(wav, segment)
+
+    result = AudioSegment.from_wav(wav)
+    # Leading slice is proportionally compressed: original 200ms padding
+    # at 2.15x speedup ≈ 93ms of silence still remains at the head.
+    # Assert the first 20ms is still silent (proves trim did NOT fire).
+    first_slice_dbfs = result[:20].dBFS
+    assert first_slice_dbfs < -40, (
+        f"long segment ({len(result)}ms) had leading silence trimmed "
+        f"(first 20ms dBFS={first_slice_dbfs:.1f}); silence-trim gate "
+        "must only fire on short (≤3s) segments"
+    )
+
+
+def test_fit_does_not_over_trim_all_silent_wav(tmp_path: Path) -> None:
+    """Defensive: if TTS output is entirely silence (bug / failed
+    generation), the trim helper must NOT return an empty audio —
+    that would crash ffmpeg atempo (can't stretch zero-length input).
+    Fall back to stretching the original wav even if it's all silence."""
+    wav = _make_wav(tmp_path / "all-silent.wav", duration_ms=1500)
+    segment = _make_segment(start_ms=0, end_ms=800)
+
+    # Must not raise
+    EditorPackageWriter()._fit_segment_audio_to_slot(wav, segment)
+
+    # Result still exists and is a valid wav
+    result_ms = _measure_ms(wav)
+    assert result_ms > 0, (
+        "silence trim over-trimmed to empty audio; fit should fall back "
+        "to stretching the original wav intact"
     )
 
 

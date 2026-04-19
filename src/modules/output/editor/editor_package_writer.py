@@ -12,6 +12,7 @@ import tempfile
 
 from pydub import AudioSegment
 from pydub.effects import normalize
+from pydub.silence import detect_leading_silence
 
 from modules.output.editor.editor_package_models import (
     ALIGNMENT_METHOD_LABELS,
@@ -25,6 +26,52 @@ logger = logging.getLogger(__name__)
 # Ignore sub-10ms drift between draft wav and slot — a bit-identical
 # no-op avoids the pointless ffmpeg round-trip (and its re-encode).
 _FIT_TOLERANCE_MS = 10
+
+# TTS providers (MiniMax / VolcEngine / CosyVoice) pad output with 50-200ms
+# of silence at each end. Trim that before computing the atempo ratio so
+# the stretch acts on actual speech, not padding — both saves CPU and
+# drops the effective ratio closer to 1.0x (better audio quality).
+#
+# Only applied to short segments: long segments (> _SILENCE_TRIM_MAX_MS)
+# are typically multi-phrase utterances where the leading/trailing "silence"
+# may include intentional pauses at the boundary; padding impact is also
+# proportionally smaller. Threshold is a judgement call — 3s balances
+# "safely single-phrase" against "still benefits from trim".
+_SILENCE_THRESHOLD_DBFS = -40.0       # below this is considered silence
+_SILENCE_CHUNK_MS = 10                # granularity of the scan
+_SILENCE_TRIM_MAX_MS = 3_000          # audio longer than this skips silence trim
+# Defensive cap: if trimming would leave <5% of original audio, something
+# is wrong with the input (all-silence TTS / bug) — keep original to let
+# the stretch fail loudly instead of producing empty output.
+_MIN_KEEP_RATIO_AFTER_TRIM = 0.05
+
+
+def _trim_silence_edges(audio: AudioSegment) -> AudioSegment:
+    """Strip leading + trailing silence from an AudioSegment.
+
+    Uses ``pydub.silence.detect_leading_silence`` applied twice (forward
+    for leading, reversed for trailing) with a conservative -40dB
+    threshold at 10ms granularity. Returns the original audio unchanged
+    if trimming would cut more than 95% (defensive: all-silence input
+    → let downstream stretch decide / fail loudly rather than write an
+    empty wav that ffmpeg can't operate on).
+    """
+    if len(audio) == 0:
+        return audio
+    leading_ms = detect_leading_silence(
+        audio,
+        silence_threshold=_SILENCE_THRESHOLD_DBFS,
+        chunk_size=_SILENCE_CHUNK_MS,
+    )
+    trailing_ms = detect_leading_silence(
+        audio.reverse(),
+        silence_threshold=_SILENCE_THRESHOLD_DBFS,
+        chunk_size=_SILENCE_CHUNK_MS,
+    )
+    keep_len = len(audio) - leading_ms - trailing_ms
+    if keep_len <= 0 or keep_len < len(audio) * _MIN_KEEP_RATIO_AFTER_TRIM:
+        return audio
+    return audio[leading_ms:len(audio) - trailing_ms]
 
 
 def _build_atempo_filter(speed_ratio: float) -> str:
@@ -550,11 +597,35 @@ class EditorPackageWriter:
             return
 
         try:
-            actual_duration_ms = len(AudioSegment.from_wav(wav_path))
+            audio = AudioSegment.from_wav(wav_path)
         except Exception:  # unreadable / not a wav — leave untouched
             return
+        actual_duration_ms = len(audio)
         if actual_duration_ms <= 0:
             return
+
+        # Step 1 — silence-edge trim (short segments only). TTS outputs
+        # padding at both ends; stretching the padded wav burns the atempo
+        # budget on silence. Long segments (>3s) skip this step: their
+        # leading/trailing quiet may be intentional multi-phrase pauses
+        # rather than pure TTS padding.
+        if actual_duration_ms <= _SILENCE_TRIM_MAX_MS:
+            trimmed = _trim_silence_edges(audio)
+            trimmed_duration_ms = len(trimmed)
+            if (
+                0 < trimmed_duration_ms < actual_duration_ms
+                and trimmed_duration_ms != actual_duration_ms
+            ):
+                # Persist trimmed wav in place BEFORE atempo stage — the
+                # ffmpeg call below will re-read this wav, and atempo works
+                # off the shortened duration for a better (closer-to-1.0x)
+                # ratio. Use .replace for hardlink-safety.
+                trim_tmp = wav_path.with_name(
+                    f".{wav_path.stem}.trimmed.wav"
+                )
+                trimmed.export(trim_tmp, format="wav")
+                trim_tmp.replace(wav_path)
+                actual_duration_ms = trimmed_duration_ms
 
         if abs(actual_duration_ms - slot_duration_ms) <= _FIT_TOLERANCE_MS:
             return  # within tolerance — preserve bit-identity
