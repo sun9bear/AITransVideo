@@ -87,6 +87,7 @@ services:
       args:
         NEXT_PUBLIC_CAPTCHA_PROVIDER: "${NEXT_PUBLIC_CAPTCHA_PROVIDER:-fake}"
         NEXT_PUBLIC_TURNSTILE_SITE_KEY: "${NEXT_PUBLIC_TURNSTILE_SITE_KEY:-}"
+        NEXT_PUBLIC_ENABLE_POST_EDIT: "${NEXT_PUBLIC_ENABLE_POST_EDIT:-0}"
     image: aivideotrans-next:latest
     container_name: aivideotrans-next
     network_mode: host
@@ -179,6 +180,8 @@ services:
       # VolcEngine TTS credentials — needed for voice catalog verify
       VOLCENGINE_TTS_APP_ID: "${VOLCENGINE_TTS_APP_ID:-}"
       VOLCENGINE_TTS_ACCESS_KEY: "${VOLCENGINE_TTS_ACCESS_KEY:-}"
+      # Studio post-edit feature flag (D29) — gate editing endpoints
+      AVT_ENABLE_POST_EDIT: "${AVT_ENABLE_POST_EDIT:-false}"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8880/gateway/health')"]
       interval: 15s
