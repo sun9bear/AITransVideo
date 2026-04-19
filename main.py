@@ -950,6 +950,20 @@ def run_job_api_command(argv: list[str]) -> None:
         except Exception as exc:  # pragma: no cover - defensive
             print(f"[warn] failed to wire editing idle-cancel callback: {exc}")
 
+        # --- Wire real SegmentTTSCaller for post-edit re-synthesis ---
+        # Without this, ``regenerate_segment_tts`` / ``regenerate_all_dirty_segments``
+        # fall through to the _not_wired_tts_caller placeholder and return
+        # HTTP 501. TTSGenerator instantiation is lazy (first user click)
+        # so a missing AUTODUB_TTS_API_KEY etc. does not prevent the Job API
+        # from booting — the credential error surfaces as a user-facing
+        # re-TTS failure toast instead.
+        try:
+            from services.tts.segment_regenerate import build_real_segment_tts_caller
+
+            service._segment_tts_caller = build_real_segment_tts_caller()
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f"[warn] failed to wire segment TTS caller: {exc}")
+
         # --- Start the cleanup / idle-scan background thread ---
         # Runs every 6h: TTL-expired job purge + editing idle auto-cancel.
         # start_cleanup_thread also runs a one-shot cleanup pass immediately

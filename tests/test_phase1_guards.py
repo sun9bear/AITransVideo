@@ -128,6 +128,33 @@ def test_editing_commit_pipeline_does_not_call_tts_generator() -> None:
     )
 
 
+def test_paid_api_surface_isolated_from_commit_alignment_publish() -> None:
+    """segment_regenerate is the SOLE production entry point for paid TTS
+    calls in the post-edit flow (wired into JobService at Job API boot
+    from main.py). Any other production module importing it would create
+    a code path that could touch paid providers outside of a user-initiated
+    click — violating the CLAUDE.md paid-API policy.
+
+    Scope: alignment + output pipeline modules + editing_commit. Tests are
+    allowed to import freely."""
+    offenders: list[str] = []
+    for rel_dir in ("src/modules/alignment", "src/modules/output"):
+        for path in _module_paths_under(rel_dir):
+            src = path.read_text(encoding="utf-8", errors="replace")
+            if "segment_regenerate" in src:
+                offenders.append(str(path.relative_to(REPO_ROOT)))
+    commit_path = REPO_ROOT / "src" / "services" / "jobs" / "editing_commit.py"
+    if commit_path.is_file():
+        commit_src = commit_path.read_text(encoding="utf-8")
+        if "segment_regenerate" in commit_src:
+            offenders.append(str(commit_path.relative_to(REPO_ROOT)))
+
+    assert not offenders, (
+        "segment_regenerate leaked into commit/alignment/publish:\n"
+        + "\n".join(f"  {p}" for p in offenders)
+    )
+
+
 # =====================================================================
 # §2 Editing module structure
 # =====================================================================

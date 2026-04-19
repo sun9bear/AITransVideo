@@ -312,10 +312,12 @@ class JobService:
     ) -> dict:
         """Kick off single-segment TTS re-synthesis (T1-5).
 
-        ``tts_caller`` defaults to the "not wired" placeholder (501 from
-        the API layer). Pass a real caller via JobService subclass /
-        dependency-injected wrapper at service construction time once the
-        TTS router wiring is ready. Also refreshes editing_touched_at.
+        ``tts_caller`` explicit arg wins; otherwise fall back to the caller
+        injected at service construction (``self._segment_tts_caller``),
+        then to ``None`` — which makes editing_tts resolve to the "not
+        wired" 501 placeholder. main.run_job_api_command installs the
+        production caller via ``services.tts.segment_regenerate``.
+        Also refreshes editing_touched_at on success.
         """
         from services.jobs.editing import touch_editing as _touch_editing
         from services.jobs.editing_tts import regenerate_segment_tts as _regenerate
@@ -323,8 +325,9 @@ class JobService:
 
         validate_segment_id(segment_id)
         record = self._require_editing(job_id)
+        caller = tts_caller or getattr(self, "_segment_tts_caller", None)
         result = _regenerate(
-            record.project_dir, segment_id, tts_caller=tts_caller
+            record.project_dir, segment_id, tts_caller=caller
         )
         _touch_editing(record, self.store)
         return result
@@ -361,12 +364,17 @@ class JobService:
         *,
         tts_caller=None,
     ) -> dict:
-        """Synchronous batch regenerate. Per D38 response shape."""
+        """Synchronous batch regenerate. Per D38 response shape.
+
+        Same DI story as regenerate_segment_tts — explicit arg wins, then
+        the injected per-service caller, then None (501 placeholder).
+        """
         from services.jobs.editing import touch_editing as _touch_editing
         from services.jobs.editing_batch import regenerate_all_dirty_segments as _batch
 
         record = self._require_editing(job_id)
-        result = _batch(record.project_dir, tts_caller=tts_caller)
+        caller = tts_caller or getattr(self, "_segment_tts_caller", None)
+        result = _batch(record.project_dir, tts_caller=caller)
         _touch_editing(record, self.store)
         return result
 

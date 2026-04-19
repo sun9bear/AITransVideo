@@ -254,6 +254,45 @@ def test_batch_respects_not_wired_caller(tmp_path: Path) -> None:
     assert set(result["failed_segment_ids"]) == {"seg_001", "seg_002"}
 
 
+def test_batch_voice_dirty_segment_uses_voice_map_override(tmp_path: Path) -> None:
+    """CodeX A.2 P1 regression — batch path. set_voice_override flags the
+    segment voice_dirty, which is a BATCH_REGENERATE_TRIGGER_STATUS, so
+    regenerate_all_dirty_segments picks it up. The caller must see the
+    override's provider/voice_id, not the baseline values — otherwise the
+    Phase 2 voice-modify Tab's "save + 一键合成" flow would regenerate
+    every voice_dirty segment with the OLD voice, defeating the UX."""
+    _, project_dir = _build_editing_job(tmp_path, n_segments=3)
+
+    # set_voice_override flips seg_002 to voice_dirty automatically.
+    set_voice_override(
+        project_dir,
+        "seg_002",
+        provider="cosyvoice",
+        voice_id="override_voice_for_seg_002",
+    )
+    # Also flag seg_001 text_dirty so we can assert override is only
+    # applied to the segment that actually has a voice_map entry.
+    mark_segment_status(project_dir, "seg_001", SEGMENT_STATUS_TEXT_DIRTY)
+
+    seen: dict[str, dict] = {}
+
+    def recording_caller(segment, output_path):
+        seen[segment["segment_id"]] = dict(segment)
+        output_path.write_bytes(b"ok")
+
+    result = regenerate_all_dirty_segments(project_dir, tts_caller=recording_caller)
+
+    assert result["succeeded_count"] == 2
+    assert set(result["succeeded_segment_ids"]) == {"seg_001", "seg_002"}
+    # seg_002 carries the override
+    assert seen["seg_002"]["tts_provider"] == "cosyvoice"
+    assert seen["seg_002"]["voice_id"] == "override_voice_for_seg_002"
+    # seg_001 has no override entry so baseline wins; fixture didn't set
+    # tts_provider on seg_001 and _build_editing_job's default voice_id
+    # for seg_001 isn't "override_voice_for_seg_002".
+    assert seen["seg_001"].get("voice_id") != "override_voice_for_seg_002"
+
+
 def test_batch_continues_past_failures_sequentially(tmp_path: Path) -> None:
     """The 3rd segment must still be processed even if the 1st fails."""
     _, project_dir = _build_editing_job(tmp_path, n_segments=3)

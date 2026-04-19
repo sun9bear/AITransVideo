@@ -44,6 +44,7 @@ from services.jobs.editing_segments import (
     load_segment_status,
     mark_segment_status,
 )
+from services.jobs.editing_voice_map import load_voice_map
 from services.jobs.input_validators import validate_segment_id
 
 logger = logging.getLogger(__name__)
@@ -146,6 +147,25 @@ def regenerate_segment_tts(
         raise EditingConflictError(
             f"segment_id {segment_id!r} not found in editing/segments.json"
         )
+
+    # Overlay voice_map.json override onto the segment dict before handing
+    # it to the caller (CodeX A.2 P1). voice_map is the authoritative source
+    # for per-segment provider/voice_id picks made in the editing session —
+    # the underlying editing/segments.json baseline carries the original
+    # pipeline selection, which must be preserved there so clear_voice_override
+    # can revert. Without this overlay, a user changing voice via the Phase 2
+    # voice-modify Tab would still hear the old voice after 重新合成, and a
+    # baseline record missing tts_provider would silently fall back to the
+    # global default provider inside _generate_one — violating the "no
+    # silent provider switch" contract wired into the caller.
+    voice_map = load_voice_map(project_dir)
+    override = voice_map.get(target)
+    if override:
+        segment = {
+            **segment,
+            "tts_provider": override["provider"],
+            "voice_id": override["voice_id"],
+        }
 
     draft_path = draft_audio_path(project_dir, segment_id)
     draft_path.parent.mkdir(parents=True, exist_ok=True)

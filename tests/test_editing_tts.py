@@ -146,6 +146,73 @@ def test_regenerate_writes_draft_and_flags_tts_dirty(tmp_path: Path) -> None:
     assert out_path == draft
 
 
+def test_regenerate_overlays_voice_map_override_onto_segment(tmp_path: Path) -> None:
+    """CodeX A.2 P1 regression. After set_voice_override, the caller must
+    receive a segment dict whose tts_provider + voice_id reflect the voice
+    map entry, NOT the baseline from editing/segments.json. Without this,
+    the Phase 2 voice-modify Tab would silently regenerate the old voice.
+
+    Critical: voice_map is never merged back into editing/segments.json
+    during the editing session (that only happens at commit time), so the
+    overlay must be applied every call."""
+    from services.jobs.editing_voice_map import set_voice_override
+
+    _, project_dir = _build_editing_job(tmp_path)
+    set_voice_override(
+        project_dir,
+        "seg_001",
+        provider="volcengine",
+        voice_id="override_voice_xyz",
+    )
+
+    seen_segments: list[dict] = []
+
+    def recording_caller(segment: dict, output_path: Path) -> None:
+        seen_segments.append(dict(segment))
+        output_path.write_bytes(b"OVERRIDE_WAV")
+
+    regenerate_segment_tts(project_dir, "seg_001", tts_caller=recording_caller)
+
+    assert len(seen_segments) == 1
+    received = seen_segments[0]
+    assert received["tts_provider"] == "volcengine", (
+        "voice_map override must drive tts_provider sent to caller"
+    )
+    assert received["voice_id"] == "override_voice_xyz", (
+        "voice_map override must drive voice_id sent to caller"
+    )
+    # Baseline editing/segments.json must NOT have been mutated — the
+    # overlay is a per-call shallow copy.
+    baseline_json = json.loads(
+        (project_dir / "editor" / "editing" / "segments.json").read_text(encoding="utf-8")
+    )
+    seg_001 = next(s for s in baseline_json if s["segment_id"] == "seg_001")
+    assert seg_001["voice_id"] == "voice_a", (
+        "editing/segments.json baseline must stay clean — override lives "
+        "in voice_map.json only until commit merges them"
+    )
+    assert "tts_provider" not in seg_001 or seg_001.get("tts_provider") != "volcengine"
+
+
+def test_regenerate_skips_voice_overlay_when_no_override(tmp_path: Path) -> None:
+    """Sanity: without set_voice_override, the caller still sees the
+    baseline segment unchanged — overlay is opt-in per voice_map entry."""
+    _, project_dir = _build_editing_job(tmp_path)
+
+    seen_segments: list[dict] = []
+
+    def recording_caller(segment: dict, output_path: Path) -> None:
+        seen_segments.append(dict(segment))
+        output_path.write_bytes(b"BASELINE_WAV")
+
+    regenerate_segment_tts(project_dir, "seg_001", tts_caller=recording_caller)
+
+    assert seen_segments[0]["voice_id"] == "voice_a"
+    # Fixture baseline doesn't set tts_provider, so the received segment
+    # must not acquire one out of thin air either.
+    assert "tts_provider" not in seen_segments[0]
+
+
 def test_regenerate_two_segments_isolated(tmp_path: Path) -> None:
     _, project_dir = _build_editing_job(tmp_path)
     caller = _fake_tts_caller_factory()
