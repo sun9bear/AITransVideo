@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 import json
+import logging
 from pathlib import Path
 import re
 import shutil
@@ -18,6 +19,44 @@ from modules.output.editor.editor_package_models import (
     ProjectOutput,
     ProjectOutputResult,
 )
+
+logger = logging.getLogger(__name__)
+
+# Ignore sub-10ms drift between draft wav and slot — a bit-identical
+# no-op avoids the pointless ffmpeg round-trip (and its re-encode).
+_FIT_TOLERANCE_MS = 10
+
+
+def _build_atempo_filter(speed_ratio: float) -> str:
+    """Build a multi-stage atempo filter string for arbitrary ratios.
+
+    ffmpeg's ``atempo`` natively supports [0.5, 2.0]; outside that range
+    we chain stages (each 0.5 or 2.0) until the remaining factor is
+    in-range. Mirrors ``services.alignment.aligner._build_atempo_filter``
+    — duplicated (not imported) to avoid a modules/output → services/
+    circular import.
+
+    Examples: 0.25x → "atempo=0.5,atempo=0.5"; 4x → "atempo=2,atempo=2".
+    """
+    if speed_ratio <= 0:
+        raise ValueError("speed_ratio must be positive")
+    remaining = float(speed_ratio)
+    factors: list[float] = []
+    while remaining < 0.5:
+        factors.append(0.5)
+        remaining /= 0.5
+    while remaining > 2.0:
+        factors.append(2.0)
+        remaining /= 2.0
+    factors.append(remaining)
+    return ",".join(
+        f"atempo={_format_atempo_factor(factor)}" for factor in factors
+    )
+
+
+def _format_atempo_factor(value: float) -> str:
+    formatted = f"{value:.6f}".rstrip("0").rstrip(".")
+    return formatted or "1"
 
 
 @dataclass(slots=True)
@@ -86,7 +125,7 @@ class EditorPackageWriter:
                 f"{self._format_filename_timestamp(segment.end_ms)}.wav"
             )
             shutil.copy2(source_path, destination_path)
-            self._trim_segment_audio_to_slot(destination_path, segment)
+            self._fit_segment_audio_to_slot(destination_path, segment)
             copied_path = Path(self._ensure_jianying_compatible(str(destination_path))).resolve(strict=False)
             if not copied_path.exists():
                 raise FileNotFoundError(f"导出分段音频失败：{copied_path}")
@@ -484,23 +523,97 @@ class EditorPackageWriter:
         temp_source_path.unlink(missing_ok=True)
         return str(source_path)
 
-    def _trim_segment_audio_to_slot(self, wav_path: Path, segment: AlignedSegment) -> None:
+    def _fit_segment_audio_to_slot(
+        self, wav_path: Path, segment: AlignedSegment,
+    ) -> None:
+        """Time-stretch ``wav_path`` to exactly the segment's slot duration
+        via ffmpeg atempo — bidirectional, no trim, no silent padding.
+
+        Replaces the old ``_trim_segment_audio_to_slot`` (2026-04-19 γ
+        incident): the trim variant only handled "audio too long" by
+        truncation, leaving short audio with silent gaps in the dubbed
+        output. For γ publish-only resume — where the user-regenerated
+        TTS rarely matches slot duration — both directions need DSP.
+
+        ffmpeg atempo chains to support extreme ratios (>2x, <0.5x). At
+        those extremes audio quality degrades ("chipmunk" / "slow-mo"),
+        but the output is a valid wav at the target duration. Users will
+        review segment-level playback in the planned test-playback UI
+        and re-edit text if a segment sounds off.
+
+        γ-compliance: this is pure audio signal processing, no Gemini /
+        no TTS generation / no SegmentAligner. Safe to run inside the
+        publish stage that γ dispatches.
+        """
         slot_duration_ms = max(0, int(segment.end_ms) - int(segment.start_ms))
         if slot_duration_ms <= 0 or not wav_path.exists():
             return
 
         try:
-            audio = AudioSegment.from_wav(wav_path)
-        except Exception:
+            actual_duration_ms = len(AudioSegment.from_wav(wav_path))
+        except Exception:  # unreadable / not a wav — leave untouched
+            return
+        if actual_duration_ms <= 0:
             return
 
-        if len(audio) <= slot_duration_ms:
+        if abs(actual_duration_ms - slot_duration_ms) <= _FIT_TOLERANCE_MS:
+            return  # within tolerance — preserve bit-identity
+
+        speed_ratio = actual_duration_ms / slot_duration_ms
+        filter_value = _build_atempo_filter(speed_ratio)
+
+        if speed_ratio < 0.5 or speed_ratio > 2.0:
+            logger.warning(
+                "segment %s: atempo stretch ratio=%.2fx "
+                "(actual=%dms → slot=%dms) exceeds the quality-safe "
+                "[0.5x, 2.0x] window; output wav is valid at target "
+                "duration but audio quality degrades — user reviews "
+                "in test-playback UI and re-edits if unhappy (方案 A, "
+                "γ publish-only resume契约)",
+                segment.segment_id, speed_ratio,
+                actual_duration_ms, slot_duration_ms,
+            )
+
+        # Keep .wav suffix so ffmpeg auto-detects output format; prefix
+        # with a dot so we can identify it as a tmp artifact.
+        stretched_path = wav_path.with_name(f".{wav_path.stem}.stretched.wav")
+        command = [
+            "ffmpeg",
+            "-i", str(wav_path),
+            "-filter:a", filter_value,
+            "-f", "wav",
+            "-acodec", "pcm_s16le",
+            "-ar", "44100",
+            "-ac", "2",
+            "-y", str(stretched_path),
+        ]
+        try:
+            completed = subprocess.run(
+                command, capture_output=True, text=True, check=False,
+            )
+        except FileNotFoundError:  # no ffmpeg in PATH
+            logger.warning(
+                "segment %s: ffmpeg not in PATH, skipping atempo stretch",
+                segment.segment_id,
+            )
+            if stretched_path.exists():
+                stretched_path.unlink()
             return
 
-        trimmed = audio[:slot_duration_ms]
-        if slot_duration_ms >= 120:
-            trimmed = trimmed.fade_out(min(40, max(10, slot_duration_ms // 20)))
-        trimmed.export(wav_path, format="wav")
+        if completed.returncode != 0 or not stretched_path.exists():
+            logger.warning(
+                "segment %s: atempo stretch failed (rc=%s stderr=%r); "
+                "leaving original wav untouched",
+                segment.segment_id, completed.returncode,
+                (completed.stderr or "")[:200],
+            )
+            if stretched_path.exists():
+                stretched_path.unlink()
+            return
+
+        # Atomic replace — preserves inode semantics (important if wav
+        # is still hardlinked to source in copy_as_new target).
+        stretched_path.replace(wav_path)
 
     def _sorted_segments(self, output: ProjectOutput) -> list[AlignedSegment]:
         return sorted(output.segments, key=lambda segment: (segment.start_ms, segment.segment_id))
