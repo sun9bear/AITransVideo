@@ -1956,6 +1956,34 @@ class ProcessPipeline:
             except Exception as _exc:
                 print(f"[S6] segments.json final-rewrite skipped (non-fatal): {_exc}")
 
+            # Studio post-edit baseline — snapshot translation/segments.json
+            # (the authoritative DubbingSegment dump just rewritten above)
+            # into editor/segments.json so that enter_editing has a baseline
+            # on its very first call. Without this, the editing layer would
+            # have to lazy-seed on demand from translation/, which works
+            # but means the first user to click "修改" pays the seed cost
+            # and any mismatch between translation/ shape today vs. the day
+            # the seed lands is impossible to diagnose from the disk snapshot.
+            # See services.jobs.editor_baseline for the shared helper.
+            # Non-fatal by design: if this write fails (e.g. permission error
+            # or translation/ just got removed by a parallel cleanup), the
+            # legacy lazy-seed fallback in editing.enter_editing still works.
+            try:
+                from services.jobs.editor_baseline import (
+                    write_editor_segments_from_translation,
+                )
+                _baseline_path = write_editor_segments_from_translation(
+                    final_project_dir
+                )
+                print(
+                    f"[S6] editor/segments.json baseline written: {_baseline_path}"
+                )
+            except Exception as _exc:
+                print(
+                    f"[S6] editor/segments.json baseline skipped "
+                    f"(non-fatal, lazy seed will cover): {_exc}"
+                )
+
             # V3-4/V3-5: report pipeline metering to Gateway (best-effort)
             if config.job_id and hasattr(translation_result, "segments"):
                 # V3-5: sum billed_chars from TTSResult (truthful TTS-layer source)

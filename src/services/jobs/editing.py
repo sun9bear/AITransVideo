@@ -34,13 +34,16 @@ Design notes:
 
 from __future__ import annotations
 
-import json
 import logging
 import shutil
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
+from services.jobs.editor_baseline import (
+    EditorBaselineError,
+    write_editor_segments_from_translation,
+)
 from services.jobs.events import EVENT_LEVEL_INFO, EVENT_TYPE_STATUS, JobEvent
 from services.jobs.models import (
     JOB_STATUS_EDITING,
@@ -127,13 +130,16 @@ def enter_editing(record: JobRecord, store: JobStore) -> JobRecord:
             f"job {record.job_id} project_dir does not exist: {project_dir}"
         )
 
-    # Lazy baseline seeding: Phase 1 pipeline does not yet write
-    # editor/segments.json at publish time (follow-up task tracked separately),
-    # so on the first enter_editing call for a legacy / pre-Phase-1 succeeded
-    # task we derive the baseline from translation/segments.json. On
-    # subsequent enter_editing calls (e.g. after overwrite commit or a
-    # cancel-then-reenter cycle) the existing editor/segments.json wins —
-    # we never re-read translation/ once a baseline is established.
+    # Baseline handoff: the pipeline publish stage owns editor/segments.json
+    # for all newly completed Studio tasks (see src/pipeline/process.py S6 —
+    # it calls write_editor_segments_from_translation right after the
+    # translation/segments.json hotfix rewrite). For legacy tasks whose
+    # publish ran before that wiring landed, the helper below falls back to
+    # the same seeder so the task becomes editable on first click. Once
+    # editor/segments.json exists (whichever path produced it), subsequent
+    # enter_editing calls reuse it verbatim — we never re-read translation/
+    # so an overwrite commit's post-alignment translation rewrite cannot
+    # pollute the user's baseline.
     baseline_segments = _ensure_editor_segments_baseline(project_dir, record.job_id)
 
     editing_dir = project_dir / EDITING_SUBDIR
@@ -264,113 +270,44 @@ def touch_editing(record: JobRecord, store: JobStore) -> JobRecord:
 # ---------------------------------------------------------------------------
 
 
-def _normalise_segment_record(segment: object) -> dict[str, object]:
-    """Return a segment dict with ``segment_id`` cast to ``str``.
-
-    Non-dict items are passed through untouched; the seed caller is responsible
-    for refusing wholly-invalid payloads upstream (it already refuses if the
-    ``segments`` field is not a list). ``segment_id`` that is ``None`` is left
-    as-is so validation surfaces elsewhere (input_validators regex) rather
-    than silently turning it into the literal string ``"None"``.
-    """
-    if not isinstance(segment, dict):
-        return segment  # type: ignore[return-value]
-    sid = segment.get("segment_id")
-    if sid is None or isinstance(sid, str):
-        return segment
-    return {**segment, "segment_id": str(sid)}
-
-
 def _ensure_editor_segments_baseline(project_dir: Path, job_id: str) -> Path:
     """Return ``editor/segments.json`` path, seeding it from translation/ if absent.
 
-    Seeding rules (Phase 1 fallback for tasks completed before the publish
-    stage started emitting editor/segments.json):
+    The publish pipeline (since follow-up to T1-3) writes this baseline as
+    its last step, so most modern tasks land with editor/segments.json
+    already populated and this function is a no-op beyond the existence
+    check. For legacy / pre-pipeline-patch tasks, we delegate to the
+    shared seeder in ``editor_baseline`` which reads translation/segments.json,
+    normalises segment_id, and writes the baseline atomically.
 
-    - If ``editor/segments.json`` already exists, return its path unchanged.
-      The existing baseline is authoritative — even if ``translation/segments.json``
-      has since diverged (e.g. after an overwrite commit re-ran alignment),
-      we never re-derive.
-    - Otherwise read ``translation/segments.json`` and extract its ``segments``
-      list. Top-level may be either ``{"segments": [...]}`` (current pipeline
-      shape) or a raw list (defensive). Fields pass through verbatim —
-      editing layer does not filter pipeline-internal fields because future
-      commit paths need the full record to merge back into the pipeline.
-    - Raise ``EditingConflictError`` (→ HTTP 409) if translation/ is missing,
-      unreadable, or has no usable ``segments`` list.
+    Once editor/segments.json exists, subsequent enter_editing calls reuse
+    it verbatim — we never re-read translation/ on second visit so that an
+    overwrite commit's post-alignment translation rewrite cannot pollute
+    the user's baseline.
 
-    Write is atomic (tempfile + replace) so a crash mid-seed cannot leave a
-    half-written baseline that a later enter-edit would treat as valid.
+    Raises ``EditingConflictError`` (→ HTTP 409) if translation/ is missing
+    or malformed. EditorBaselineError is converted so api.py's existing
+    JobConflictError handler picks it up without a new except branch.
     """
-    editor_dir = project_dir / "editor"
-    baseline = editor_dir / "segments.json"
+    baseline = project_dir / "editor" / "segments.json"
     if baseline.is_file():
         return baseline
 
-    translation_path = project_dir / "translation" / "segments.json"
-    if not translation_path.is_file():
+    try:
+        path = write_editor_segments_from_translation(project_dir)
+    except EditorBaselineError as exc:
         raise EditingConflictError(
-            f"job {job_id} cannot seed editor/segments.json: neither "
-            "editor/segments.json nor translation/segments.json exists; "
+            f"job {job_id} cannot seed editor/segments.json: {exc}; "
             "editing is not available for this task"
-        )
-
-    try:
-        raw = translation_path.read_text(encoding="utf-8")
-        trans = json.loads(raw)
-    except (OSError, json.JSONDecodeError) as exc:
-        raise EditingConflictError(
-            f"job {job_id} cannot seed editor/segments.json: "
-            f"translation/segments.json is unreadable ({exc.__class__.__name__})"
         ) from exc
-
-    if isinstance(trans, dict):
-        segments = trans.get("segments")
-    elif isinstance(trans, list):
-        segments = trans
-    else:
-        segments = None
-
-    if not isinstance(segments, list):
-        raise EditingConflictError(
-            f"job {job_id} cannot seed editor/segments.json: "
-            f"translation/segments.json has no usable 'segments' list "
-            f"(got {type(segments).__name__})"
-        )
-
-    # Normalise segment_id to str — pipeline writes it as int but the editing
-    # layer (HTTP contract, input_validators regex, patch/regen lookups) all
-    # treat segment_id as a string. Legacy persisted data is tolerated at
-    # lookup sites (str() cast on both sides), but new seeds should land
-    # already-normalised so downstream writes don't reintroduce drift.
-    segments = [_normalise_segment_record(seg) for seg in segments]
-
-    editor_dir.mkdir(parents=True, exist_ok=True)
-    # Atomic write: temp file in same dir + rename. Same-dir tempfile is
-    # required so that os.replace is a pure rename within one filesystem.
-    tmp = baseline.with_suffix(baseline.suffix + ".seed.tmp")
-    try:
-        tmp.write_text(
-            json.dumps(segments, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        tmp.replace(baseline)
-    finally:
-        # If replace succeeded, tmp no longer exists; if it failed, try to
-        # clean up so a retry has a fresh slate.
-        if tmp.exists():
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
 
     logger.info(
         "editing: seeded editor/segments.json for job_id=%s from "
-        "translation/segments.json (%d segments)",
+        "translation/segments.json (fallback path; pipeline publish should "
+        "own this for new jobs)",
         job_id,
-        len(segments),
     )
-    return baseline
+    return path
 
 
 def _utc_now_iso() -> str:

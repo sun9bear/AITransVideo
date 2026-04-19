@@ -292,6 +292,87 @@ def test_stage_alignment_in_supported_public_stages() -> None:
 
 
 # =====================================================================
+# §4b editor/segments.json baseline wiring
+# =====================================================================
+
+
+def test_pipeline_publish_writes_editor_segments_baseline() -> None:
+    """Pipeline S6 publish stage must invoke ``write_editor_segments_from_translation``
+    so newly completed Studio tasks have an editor/segments.json baseline on
+    disk without relying on editing.enter_editing's lazy fallback. The lazy
+    fallback is safety-net only — for new tasks it must never fire because
+    every first-time click-修改 then pays the translation → editor copy cost
+    and loses the "publish shipped a baseline" invariant.
+
+    This scan looks for the import AND the call, since an import without a
+    call would be a silent regression (someone refactoring in pieces)."""
+    src = _read("src/pipeline/process.py")
+    tree = ast.parse(src)
+
+    import_found = False
+    call_found = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if node.module and node.module.endswith("editor_baseline"):
+                names = {alias.name for alias in node.names}
+                if "write_editor_segments_from_translation" in names:
+                    import_found = True
+        if isinstance(node, ast.Call):
+            func = node.func
+            # Direct-name call (from ... import write_editor_segments_from_translation)
+            if isinstance(func, ast.Name) and func.id == "write_editor_segments_from_translation":
+                call_found = True
+            # Attribute call (editor_baseline.write_editor_segments_from_translation)
+            elif isinstance(func, ast.Attribute) and func.attr == "write_editor_segments_from_translation":
+                call_found = True
+
+    assert import_found, (
+        "src/pipeline/process.py must import "
+        "write_editor_segments_from_translation from services.jobs.editor_baseline"
+    )
+    assert call_found, (
+        "src/pipeline/process.py must call write_editor_segments_from_translation "
+        "(plan follow-up to T1-3: pipeline publish owns the baseline; "
+        "editing.enter_editing fallback is safety-net only)"
+    )
+
+
+def test_editing_enter_delegates_baseline_seed_to_shared_helper() -> None:
+    """editing.py must NOT duplicate the seed logic — both the pipeline
+    writer and the legacy fallback need to behave identically (same
+    normalisation, same error shape) so a task whose baseline came from
+    path 1 is indistinguishable from one whose baseline came from path 2.
+
+    Duplicated implementations drift. If a future edit adds a second
+    json.dumps of a segments list inside editing.py it is almost certainly
+    a regression — route it through editor_baseline instead."""
+    src = _read("src/services/jobs/editing.py")
+    tree = ast.parse(src)
+
+    # Shared helper must be imported.
+    imported = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if node.module and node.module.endswith("editor_baseline"):
+                names = {alias.name for alias in node.names}
+                if "write_editor_segments_from_translation" in names:
+                    imported = True
+                    break
+    assert imported, (
+        "editing.py must import write_editor_segments_from_translation "
+        "from services.jobs.editor_baseline (seed logic is shared with "
+        "the pipeline publish path)"
+    )
+
+    # No local json.dumps of a "segments" list — that would indicate
+    # someone reinlined the seed logic.
+    assert "json.dumps" not in src, (
+        "editing.py must NOT json.dumps anything on its own; any segment "
+        "serialisation belongs in editor_baseline or the store layer"
+    )
+
+
+# =====================================================================
 # §5 Frontend ↔ backend endpoint path parity
 # =====================================================================
 
