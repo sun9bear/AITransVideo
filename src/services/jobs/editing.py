@@ -44,6 +44,10 @@ from services.jobs.editor_baseline import (
     EditorBaselineError,
     write_editor_segments_from_translation,
 )
+from services.jobs.editor_tts_baseline import (
+    EditorTtsBaselineError,
+    ensure_editor_tts_segments_baseline,
+)
 from services.jobs.events import EVENT_LEVEL_INFO, EVENT_TYPE_STATUS, JobEvent
 from services.jobs.models import (
     JOB_STATUS_EDITING,
@@ -141,6 +145,28 @@ def enter_editing(record: JobRecord, store: JobStore) -> JobRecord:
     # so an overwrite commit's post-alignment translation rewrite cannot
     # pollute the user's baseline.
     baseline_segments = _ensure_editor_segments_baseline(project_dir, record.job_id)
+
+    # TTS baseline handoff: same lazy-migration pattern for wav files.
+    # Modern publish writes editor/tts_segments/{sid}.wav; legacy tasks
+    # only have tts/segment_{sid:03d}_aligned.wav. Without baseline wavs,
+    # copy_as_new hardlinks nothing and γ publish-only resume fails fast
+    # with "N segments missing wavs" — the user can't commit at all.
+    # Materialise the baseline once here so subsequent commit flows work.
+    try:
+        tts_result = ensure_editor_tts_segments_baseline(project_dir)
+        if tts_result.get("backfilled_segment_ids"):
+            logger.info(
+                "editing: lazy-backfilled %d wav(s) to editor/tts_segments/ "
+                "for job_id=%s (legacy task migration)",
+                len(tts_result["backfilled_segment_ids"]),
+                record.job_id,
+            )
+    except EditorTtsBaselineError as exc:
+        raise EditingConflictError(
+            f"job {record.job_id} cannot enter editing: {exc}; "
+            "task was produced by a pipeline version that predates the "
+            "editor/tts_segments/ convention and has no legacy tts/ fallback"
+        ) from exc
 
     editing_dir = project_dir / EDITING_SUBDIR
     editing_dir.mkdir(parents=True, exist_ok=True)

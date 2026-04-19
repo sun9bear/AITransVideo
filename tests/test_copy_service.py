@@ -429,11 +429,12 @@ def test_prepare_copy_copies_review_state_json(tmp_path: Path) -> None:
         "review_state.json missing in target — copy_as_new pipeline would "
         "re-open voice_selection_review and stall at stage 7"
     )
-    # Content preserved byte-for-byte (it's pre-alignment state; no paths
-    # inside to rewrite).
+    # Content preserved logically (copy goes through atomic_write_json
+    # which re-formats with indent=2, so byte-equality no longer holds
+    # after the 2026-04-19 path-rewrite refactor — compare parsed JSON).
     assert (
-        (target / "review_state.json").read_text(encoding="utf-8")
-        == (source / "review_state.json").read_text(encoding="utf-8")
+        json.loads((target / "review_state.json").read_text(encoding="utf-8"))
+        == json.loads((source / "review_state.json").read_text(encoding="utf-8"))
     )
 
 
@@ -458,10 +459,222 @@ def test_prepare_copy_copies_download_metadata_and_transcript(tmp_path: Path) ->
         "transcript/transcript.json missing in target — pipeline S1 "
         "would re-run transcription and re-charge AssemblyAI quota"
     )
-    # Metadata content preserved byte-for-byte.
-    assert (
+    # Non-path fields preserved verbatim.
+    src_meta = json.loads(
+        (source / "download_metadata.json").read_text(encoding="utf-8")
+    )
+    dst_meta = json.loads(
         (target / "download_metadata.json").read_text(encoding="utf-8")
-        == (source / "download_metadata.json").read_text(encoding="utf-8")
+    )
+    assert src_meta["url"] == dst_meta["url"]
+    assert src_meta["video_title"] == dst_meta["video_title"]
+    assert src_meta["duration_ms"] == dst_meta["duration_ms"]
+
+
+# ---------------------------------------------------------------------------
+# Path-rewrite coverage for every JSON file copied into target
+#
+# The 2026-04-19 incident: ``copy_service._rewrite_project_dir_paths`` was
+# only applied to ``translation/segments.json``. download_metadata.json,
+# manifest.json, project_state.json, editor/segments.json, transcript.json
+# were bulk-copied verbatim (shutil.copy2), so the target retained absolute
+# paths pointing at the SOURCE project_dir inside those files.
+#
+# Downstream impact: γ pipeline reads these JSONs, prints source paths in
+# its stdout log; ProcessJobRunner._record_line parses log lines and
+# rewrites JobRecord.project_dir to whatever path it sees last. After the
+# first γ run, the JobRecord on disk said project_dir=source, so the next
+# enter_editing / commit loop operated on source — silently destroying the
+# source task's audio while the user believed they were editing the copy.
+#
+# These tests pin down the invariant: *no JSON file under target may
+# contain the source project_dir as a substring*. If new copy flows add
+# more JSON files, extend the no-leak check — don't relax it.
+# ---------------------------------------------------------------------------
+
+
+def test_prepare_copy_rewrites_source_paths_in_download_metadata(
+    tmp_path: Path,
+) -> None:
+    """download_metadata.json stores absolute paths for video / audio /
+    speech / ambient. After copy, none may point at source."""
+    source = _make_source_project(tmp_path, n_segments=1)
+    _add_media_artifacts(source)
+    _populate_editing_dir(source)
+    (source / "download_metadata.json").write_text(
+        json.dumps({
+            "url": "https://example.com/v",
+            "video_title": "sample",
+            "duration_ms": 60000,
+            "video_path": str(source / "video" / "original.mp4"),
+            "audio_path": str(source / "audio" / "original.wav"),
+            "speech_audio_path": str(source / "audio" / "speech_for_asr.wav"),
+            "ambient_audio_path": str(source / "audio" / "ambient.wav"),
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    target = tmp_path / "copy"
+
+    prepare_copy_project_dir(source, target)
+
+    dst_meta = json.loads(
+        (target / "download_metadata.json").read_text(encoding="utf-8")
+    )
+    for key in ("video_path", "audio_path", "speech_audio_path", "ambient_audio_path"):
+        assert str(source) not in dst_meta[key], (
+            f"download_metadata.json[{key!r}] still points at source: "
+            f"{dst_meta[key]!r}. γ resume will read this, print source "
+            "paths, and _record_line will overwrite record.project_dir."
+        )
+        assert str(target) in dst_meta[key], (
+            f"download_metadata.json[{key!r}] not rewritten to target: "
+            f"{dst_meta[key]!r}"
+        )
+
+
+def test_prepare_copy_rewrites_source_paths_in_project_state(
+    tmp_path: Path,
+) -> None:
+    """project_state.json's stage payloads embed absolute audio paths
+    (audio_preparation, alignment artifacts). After copy, none may
+    reference source."""
+    source = _make_source_project(tmp_path, n_segments=2)
+    _add_media_artifacts(source)
+    _populate_editing_dir(source)
+    (source / "project_state.json").write_text(
+        json.dumps({
+            "project_id": source.name,
+            "stages": {
+                "audio_preparation": {
+                    "status": "done",
+                    "payload": {
+                        "speech_audio_path": str(source / "audio" / "speech_for_asr.wav"),
+                        "ambient_audio_path": str(source / "audio" / "ambient.wav"),
+                        "source_audio_path": str(source / "audio" / "original.wav"),
+                        "artifacts": {
+                            "file_paths": [
+                                str(source / "audio" / "original.wav"),
+                                str(source / "audio" / "speech_for_asr.wav"),
+                                str(source / "audio" / "ambient.wav"),
+                            ],
+                        },
+                    },
+                },
+                "alignment": {"status": "done", "payload": {}},
+                "legacy_process_output": {
+                    "status": "done",
+                    "payload": {
+                        "manifest_path": str(source / "manifest.json"),
+                    },
+                },
+            },
+        }),
+        encoding="utf-8",
+    )
+    target = tmp_path / "copy"
+
+    prepare_copy_project_dir(source, target)
+
+    dst_state = json.loads(
+        (target / "project_state.json").read_text(encoding="utf-8")
+    )
+    # Flatten all string values under stages.* and assert no source-ref.
+    def _walk(node: object) -> list[str]:
+        out: list[str] = []
+        if isinstance(node, dict):
+            for v in node.values():
+                out.extend(_walk(v))
+        elif isinstance(node, list):
+            for v in node:
+                out.extend(_walk(v))
+        elif isinstance(node, str):
+            out.append(node)
+        return out
+
+    for value in _walk(dst_state.get("stages", {})):
+        assert str(source) not in value, (
+            f"project_state.json stage payload still references source: "
+            f"{value!r}"
+        )
+
+
+def test_prepare_copy_rewrites_source_paths_in_editor_manifest(
+    tmp_path: Path,
+) -> None:
+    """editor/manifest.json is copied verbatim by Phase A2. If it carries
+    source paths inside artifact index entries, γ publish re-uses those
+    paths and downstream consumers follow them."""
+    source = _make_source_project(tmp_path, n_segments=1)
+    _add_media_artifacts(source)
+    _populate_editing_dir(source)
+    (source / "editor" / "manifest.json").write_text(
+        json.dumps({
+            "artifact_index": {
+                "media.transcript_raw": str(source / "transcript" / "raw_assemblyai.json"),
+                "source.original_video": str(source / "video" / "original.mp4"),
+                "working.ambient_audio": str(source / "audio" / "ambient.wav"),
+            },
+            "some_other_path": str(source / "unrelated.txt"),
+        }),
+        encoding="utf-8",
+    )
+    target = tmp_path / "copy"
+
+    prepare_copy_project_dir(source, target)
+
+    if (target / "editor" / "manifest.json").is_file():
+        content = (target / "editor" / "manifest.json").read_text(encoding="utf-8")
+        assert str(source) not in content, (
+            f"editor/manifest.json still references source: {content[:300]!r}"
+        )
+
+
+def test_prepare_copy_no_json_under_target_references_source(
+    tmp_path: Path,
+) -> None:
+    """Blanket invariant: after prepare_copy_project_dir, scanning every
+    JSON file under target must find zero occurrences of the source
+    project_dir string. This is the last line of defense — if a new
+    call site adds a JSON without rewrite, this catches it."""
+    source = _make_source_project(tmp_path, n_segments=3)
+    _add_media_artifacts(source)
+    _add_metadata_and_transcript(source)
+    _add_translation_segments(source, n_segments=3)
+    _add_project_state(source)
+    # extend project_state with source paths so the test is meaningful
+    ps_path = source / "project_state.json"
+    ps = json.loads(ps_path.read_text(encoding="utf-8"))
+    ps["stages"]["audio_preparation"]["payload"] = {
+        "speech_audio_path": str(source / "audio" / "speech_for_asr.wav"),
+        "ambient_audio_path": str(source / "audio" / "ambient.wav"),
+    }
+    ps_path.write_text(json.dumps(ps), encoding="utf-8")
+    _populate_editing_dir(
+        source,
+        text_edits={"seg_001": "EDIT_1"},
+        voice_map={"seg_002": {"provider": "cosyvoice", "voice_id": "v"}},
+    )
+    target = tmp_path / "copy"
+
+    prepare_copy_project_dir(source, target)
+
+    src_str = str(source)
+    leaks: list[tuple[Path, str]] = []
+    for json_path in target.rglob("*.json"):
+        # Skip binary-ish json events or other non-path JSON if present
+        content = json_path.read_text(encoding="utf-8", errors="replace")
+        if src_str in content:
+            # Find the specific line so the failure message is actionable.
+            for lineno, line in enumerate(content.splitlines(), start=1):
+                if src_str in line:
+                    leaks.append((json_path.relative_to(target), f"L{lineno}: {line.strip()[:200]}"))
+                    break
+    assert not leaks, (
+        "JSON file(s) under target contain source project_dir — copy_as_new "
+        "would carry source-paths into the copy and pollute it via "
+        f"_record_line feedback loop. Leaks:\n" + "\n".join(
+            f"  {p}: {excerpt}" for p, excerpt in leaks
+        )
     )
 
 

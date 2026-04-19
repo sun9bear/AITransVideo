@@ -427,3 +427,120 @@ class TestBuildCommand:
         assert "--transcription-method" in cmd
         assert cmd[cmd.index("--transcription-method") + 1] == "gemini"
         assert "--wait-for-review" in cmd
+
+
+# ===================================================================
+# _record_line — stdout must not overwrite JobRecord.project_dir identity
+#
+# 2026-04-19 incident recap: copy_as_new's target carried some source
+# absolute paths inside download_metadata.json / project_state.json
+# (path-rewrite was only applied to translation/segments.json). γ resume
+# read those JSONs, their absolute paths surfaced in subprocess stdout,
+# and _record_line parsed the last path on every log line and saved it
+# as JobRecord.project_dir. A subsequent enter_editing + commit overwrite
+# on the "copy" then operated on source — destroying source output.
+#
+# Data-source fix (copy_service path rewrite) stops the leak; these
+# tests lock in the control-plane fix: once JobRecord.project_dir is
+# set, stdout / review-marker payloads may NOT redefine it. Identity
+# is write-once by the submit path, observation-only in log parsers.
+# ===================================================================
+
+
+class TestRecordLineIdentityGuard:
+    def _make_runner_with_job(self, tmp_path: Path, *, project_dir: str | None):
+        runner = _make_runner(tmp_path)
+        job = _make_job(project_dir=project_dir)
+        runner.store.save_job(job)
+        return runner, job
+
+    def test_stdout_path_may_not_overwrite_existing_project_dir(
+        self, tmp_path: Path,
+    ) -> None:
+        """Regression for the 2026-04-19 copy-as-new pollution chain:
+        a log line that mentions a *different* project_dir must NOT
+        rewrite JobRecord.project_dir when the record already has one."""
+        runner, job = self._make_runner_with_job(
+            tmp_path,
+            project_dir="/opt/aivideotrans/app/projects/user1/job_correct",
+        )
+        poisoned_line = (
+            "[S6] 完成：输出目录 "
+            "/opt/aivideotrans/app/projects/user1/job_SOMEONE_ELSE/output"
+        )
+
+        runner._record_line(job.job_id, poisoned_line)
+
+        after = runner.store.require_job(job.job_id)
+        assert after.project_dir == (
+            "/opt/aivideotrans/app/projects/user1/job_correct"
+        ), (
+            "stdout log line redefined JobRecord.project_dir — identity "
+            "field must be write-once by submit/copy_service, not by "
+            "arbitrary stdout scraping"
+        )
+
+    def test_stdout_path_fills_missing_project_dir_when_none(
+        self, tmp_path: Path,
+    ) -> None:
+        """Historical feature that must stay working: if the record
+        was submitted without an explicit project_dir (pipeline picks
+        one from video_title), the first stdout path mention seeds it."""
+        runner, job = self._make_runner_with_job(tmp_path, project_dir=None)
+        line = (
+            "[S0] 项目目录："
+            "/opt/aivideotrans/app/projects/user1/job_bootstrap/output"
+        )
+
+        runner._record_line(job.job_id, line)
+
+        after = runner.store.require_job(job.job_id)
+        assert after.project_dir is not None
+        assert "job_bootstrap" in after.project_dir
+
+    def test_review_marker_payload_may_not_overwrite_existing_project_dir(
+        self, tmp_path: Path,
+    ) -> None:
+        """Same rule for [WEB_REVIEW] markers: the structured payload
+        carries a project_dir field that was the original backdoor. Once
+        identity is set, marker payload must not redefine it — only
+        first-time fill-in is allowed."""
+        runner, job = self._make_runner_with_job(
+            tmp_path,
+            project_dir="/opt/aivideotrans/app/projects/user1/job_correct",
+        )
+        marker_payload = {
+            "stage": "voice_selection_review",
+            "project_dir": "/opt/aivideotrans/app/projects/user1/job_HIJACK",
+            "message": "please review",
+        }
+        marker_line = f"[WEB_REVIEW] {json.dumps(marker_payload)}"
+
+        runner._record_line(job.job_id, marker_line)
+
+        after = runner.store.require_job(job.job_id)
+        assert after.project_dir == (
+            "/opt/aivideotrans/app/projects/user1/job_correct"
+        ), (
+            "[WEB_REVIEW] marker payload redefined JobRecord.project_dir "
+            "— identity must be immutable once set"
+        )
+
+    def test_review_marker_fills_missing_project_dir_when_none(
+        self, tmp_path: Path,
+    ) -> None:
+        """Preserve the legacy bootstrap path for review markers too:
+        if JobRecord.project_dir is None, marker payload seeds it."""
+        runner, job = self._make_runner_with_job(tmp_path, project_dir=None)
+        marker_payload = {
+            "stage": "voice_selection_review",
+            "project_dir": "/opt/aivideotrans/app/projects/user1/job_from_marker",
+            "message": "please review",
+        }
+        marker_line = f"[WEB_REVIEW] {json.dumps(marker_payload)}"
+
+        runner._record_line(job.job_id, marker_line)
+
+        after = runner.store.require_job(job.job_id)
+        assert after.project_dir is not None
+        assert "job_from_marker" in after.project_dir

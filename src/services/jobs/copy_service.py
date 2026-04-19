@@ -176,7 +176,43 @@ def prune_project_state_payload(
 # pipeline JSON. Only values under these keys get the source→target
 # substring rewrite, so a stray cn_text / error message that happens to
 # contain the source dir as a substring stays untouched.
-_PATH_KEY_SUFFIXES: tuple[str, ...] = ("_path", "_dir")
+_PATH_KEY_SUFFIXES: tuple[str, ...] = ("_path", "_paths", "_dir", "_dirs")
+
+
+def _copy_json_with_path_rewrite(
+    src_file: Path,
+    dst_file: Path,
+    *,
+    source_dir: Path,
+    target_dir: Path,
+) -> None:
+    """Copy a JSON file from source to target, rewriting any embedded
+    absolute paths that point at ``source_dir`` to the equivalent path
+    under ``target_dir``.
+
+    Replaces the older ``shutil.copy2`` call sites inside
+    ``prepare_copy_project_dir``. The 2026-04-19 incident: a file-level
+    verbatim copy left source paths inside target's
+    download_metadata.json / project_state.json / editor/manifest.json.
+    γ resume's output stdout then surfaced those paths, which
+    ``ProcessJobRunner._record_line`` parsed and used to silently overwrite
+    ``JobRecord.project_dir`` to source — a subsequent enter_editing /
+    commit loop then operated on source while the UI pointed at the copy.
+
+    Rewriting is delegated to ``_rewrite_project_dir_paths`` which only
+    mutates values under keys suffixed ``_path`` / ``_dir``, so safe to
+    apply blindly to any JSON dict/list tree (review_state.json,
+    manifest.json, project_state.json, etc.).
+
+    Non-JSON / unreadable files raise — callers should have already
+    checked with ``is_file()``. dst parent dirs are auto-created.
+    """
+    payload = json.loads(src_file.read_text(encoding="utf-8"))
+    rewritten = _rewrite_project_dir_paths(
+        payload, source_dir=source_dir, target_dir=target_dir,
+    )
+    dst_file.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(str(dst_file), rewritten)
 
 
 def _rewrite_project_dir_paths(
@@ -358,12 +394,20 @@ def prepare_copy_project_dir(
         )
 
     try:
-        # A2: baseline JSON files
+        # A2: baseline JSON files. These are all path-bearing — rewrite
+        # source project_dir refs to target or γ resume / publish will
+        # read source paths back out of them. (2026-04-19 incident: a
+        # copy with un-rewritten project_state.json / download_metadata.json
+        # caused ProcessJobRunner._record_line to parse source paths out
+        # of pipeline stdout and overwrite JobRecord.project_dir → source.)
         (target / "editor").mkdir(parents=True, exist_ok=True)
         for name in ("transcript.json", "manifest.json"):
             src_json = source / "editor" / name
             if src_json.is_file():
-                shutil.copy2(src_json, target / "editor" / name)
+                _copy_json_with_path_rewrite(
+                    src_json, target / "editor" / name,
+                    source_dir=source, target_dir=target,
+                )
 
         # A3: hardlink baseline wavs + media artifacts so pipeline's
         # per-stage file-existence cache-check skips re-running S0-S4.
@@ -373,9 +417,11 @@ def prepare_copy_project_dir(
         # A3.1: copy (not hardlink) the small JSON cache markers —
         # pipeline may rewrite download_metadata.json on restart to
         # refresh paths and we must not mutate the source through a
-        # shared inode.
+        # shared inode. Also rewrite embedded source paths so γ resume
+        # reads target paths, not source.
         for rel in (
             "download_metadata.json",
+            "manifest.json",
             "transcript/transcript.json",
             # review_state.json carries approved voice_selection_review /
             # translation_review / speaker_review payloads — without these
@@ -386,9 +432,10 @@ def prepare_copy_project_dir(
         ):
             src_file = source / rel
             if src_file.is_file():
-                dst_file = target / rel
-                dst_file.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src_file, dst_file)
+                _copy_json_with_path_rewrite(
+                    src_file, target / rel,
+                    source_dir=source, target_dir=target,
+                )
 
         src_state = source / "project_state.json"
         if src_state.is_file():
@@ -396,6 +443,15 @@ def prepare_copy_project_dir(
             pruned = prune_project_state_payload(
                 state_payload,
                 new_project_id=Path(target_project_dir).name,
+            )
+            # Prune only resets stage statuses; it does NOT rewrite embedded
+            # absolute paths inside stage payloads (e.g.
+            # audio_preparation.speech_audio_path, legacy_process_output
+            # .manifest_path). Apply the same rewrite rule used for
+            # translation/segments.json so γ doesn't read stale source
+            # paths out of the cached state.
+            pruned = _rewrite_project_dir_paths(
+                pruned, source_dir=source, target_dir=target,
             )
             atomic_write_json(str(target / "project_state.json"), pruned)
 
@@ -443,6 +499,12 @@ def prepare_copy_project_dir(
                         }
         if voice_map:
             segments = _apply_voice_map_to_segments(segments, voice_map)
+        # Segments may carry absolute paths (tts_audio_path / aligned_audio_path)
+        # inherited from source. Rewrite to target before write so γ resume's
+        # editor-segments loader hands target paths to publish.
+        segments = _rewrite_project_dir_paths(
+            segments, source_dir=source, target_dir=target,
+        )
         # A4.3 write merged segments.json to target
         target_segments_path = target / "editor" / "segments.json"
         target_segments_path.parent.mkdir(parents=True, exist_ok=True)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict as _dc_asdict, dataclass, fields as _dc_fields
 import json
 import os
 from pathlib import Path
@@ -2032,23 +2032,99 @@ class ProcessPipeline:
             needs_review_count=output_result.needs_review_count,
         )
 
+    def _load_segments_for_publish_resume(
+        self,
+        editor_segments_path: Path,
+        translation_segments_path: Path,
+    ) -> list[DubbingSegment]:
+        """Read the post-commit segment list for the γ publish-only path.
+
+        Priority:
+
+        1. ``editor/segments.json`` — canonical post-commit state. The
+           commit layer (``editing_commit._apply_editing_to_baseline`` for
+           overwrite, ``copy_service.prepare_copy_project_dir`` for
+           copy_as_new) writes user text edits + voice_map overrides
+           here. ``segment_id`` is stored as str per
+           ``editor_baseline.normalise_segment_record``.
+        2. ``translation/segments.json`` — fallback for legacy tasks that
+           never went through editing. On copy_as_new, the target's
+           translation/ holds the source's pre-edit text (just path-
+           rewritten), so reading this file silently drops user edits.
+           Only used when editor/segments.json is missing.
+
+        editor/segments.json may carry keys outside the DubbingSegment
+        dataclass (e.g. ``provider`` from ``_apply_voice_map``); filter
+        to known fields before constructing the dataclass, else
+        ``DubbingSegment(**seg)`` raises TypeError for unexpected kwargs.
+        """
+        dubbing_fields = {f.name for f in _dc_fields(DubbingSegment)}
+
+        raw_records: list[dict[str, object]] = []
+        if editor_segments_path.is_file():
+            payload = json.loads(editor_segments_path.read_text(encoding="utf-8"))
+            if isinstance(payload, list):
+                raw_records = [r for r in payload if isinstance(r, dict)]
+            elif isinstance(payload, dict):
+                inner = payload.get("segments")
+                if isinstance(inner, list):
+                    raw_records = [r for r in inner if isinstance(r, dict)]
+        if not raw_records and translation_segments_path.is_file():
+            payload = json.loads(translation_segments_path.read_text(encoding="utf-8"))
+            inner = payload.get("segments") if isinstance(payload, dict) else payload
+            if isinstance(inner, list):
+                raw_records = [r for r in inner if isinstance(r, dict)]
+
+        if not raw_records:
+            raise ValueError(
+                f"resume_from=alignment: no segments found in "
+                f"{editor_segments_path} or {translation_segments_path}"
+            )
+
+        segments: list[DubbingSegment] = []
+        for rec in raw_records:
+            kwargs = {k: v for k, v in rec.items() if k in dubbing_fields}
+            sid = kwargs.get("segment_id")
+            if sid is None:
+                raise ValueError(
+                    f"segment lacks 'segment_id': {rec.get('cn_text', '')[:30]!r}"
+                )
+            if not isinstance(sid, int):
+                try:
+                    kwargs["segment_id"] = int(str(sid))
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"segment_id must be int-castable, got {sid!r}"
+                    ) from exc
+            segments.append(DubbingSegment(**kwargs))
+        return segments
+
     def _run_alignment_and_publish_only(self, config: ProcessConfig) -> ProcessResult:
-        """Resume pipeline at alignment — no S0-S3, no review gates.
+        """Resume pipeline at publish — no TTS, no alignment, no Gemini (γ).
 
         Called from ``run()`` when ``config.resume_from == STAGE_ALIGNMENT``.
-        Triggered by commit copy_as_new / overwrite (plan D28). Rebuilds
-        the context normally populated by S0-S3 from on-disk artifacts
-        (translation/segments.json, audio/{speech,ambient}.wav,
-        transcript/transcript.json, project_state.json, review_state.json —
-        copy_service + editing_commit ensure these are in place).
+        Triggered by commit copy_as_new / overwrite (plan D28, Phase 1 γ).
+
+        γ contract: the user reviewed per-segment duration in the editing
+        UI and decided whether to re-TTS each segment. Commit promoted the
+        accepted drafts to ``editor/tts_segments/{sid}.wav``. This path
+        trusts those wavs as-is and only does publish-side muxing —
+        4 artifacts the user cares about:
+
+        1. 配音音频 — dubbed audio stitched from per-segment wavs
+        2. 配音视频 — original video + dubbed audio + ambient
+        3. 预览图 — poster for the dubbed video
+        4. 字幕 ×3 — zh.srt / en.srt / bilingual.srt
+
+        NO Gemini call (rewrite), NO (re-)TTS, NO alignment DSP.
 
         Preconditions (fail-fast):
         - ``config.project_dir`` set + exists
-        - ``translation/segments.json`` on disk
+        - ``translation/segments.json`` on disk (retained for backward
+          compat and copy_service sanity check; γ prefers editor/)
         - ``audio/speech_for_asr.wav`` + ``audio/ambient.wav`` on disk
-
-        Does NOT run translation / speaker review / voice_selection review /
-        TTS from scratch (those charge paid APIs on full path).
+        - For every segment ``s``: ``editor/tts_segments/{s.segment_id}.wav``
+          on disk. Missing wavs → raise ValueError (commit bug).
         """
         if not config.project_dir:
             raise ValueError(
@@ -2066,6 +2142,9 @@ class ProcessPipeline:
                 f"resume_from=alignment: {trans_path} missing — commit step "
                 "must have placed translation/segments.json on disk"
             )
+        editor_segments_path = (
+            final_project_dir / "editor" / "segments.json"
+        ).resolve(strict=False)
         # Canonical demucs output name — ``services.audio.separator.speech_filename``.
         speech_path = (final_project_dir / "audio" / "speech_for_asr.wav").resolve(strict=False)
         ambient_path = (final_project_dir / "audio" / "ambient.wav").resolve(strict=False)
@@ -2081,25 +2160,37 @@ class ProcessPipeline:
                     "copy_service.hardlink_media_artifacts should have placed it"
                 )
 
-        # --- Config / translator / artifact rebuild (parallel to full run()) ---
-        gemini_config = self._load_stage_config("Gemini", load_gemini_config)
-        llm_fallback_config = self._load_stage_config("LLM fallback", load_llm_fallback_config)
-        tts_config = self._load_stage_config("MiniMax TTS", load_tts_config)
-        llm_router = LLMRouter(llm_fallback_config)
-
-        job_record_dict = config.job_record if isinstance(config.job_record, dict) else None
-        job_service_mode = (job_record_dict or {}).get("service_mode") or "studio"
-
-        translator = GeminiTranslator(
-            api_key=str(
-                gemini_config.get("api_key")
-                or os.environ.get("GEMINI_API_KEY")
-                or ""
-            ),
-            llm_router=llm_router,
+        # --- Load segments + populate wav paths (γ: no TTS / alignment) ---
+        segments = self._load_segments_for_publish_resume(
+            editor_segments_path=editor_segments_path,
+            translation_segments_path=trans_path,
         )
-        translator._service_mode = job_service_mode
+        tts_segments_dir = final_project_dir / "editor" / "tts_segments"
+        missing_sids: list[str] = []
+        for segment in segments:
+            sid_str = str(segment.segment_id)
+            wav_path = tts_segments_dir / f"{sid_str}.wav"
+            if not wav_path.is_file():
+                missing_sids.append(sid_str)
+                continue
+            wav_str = str(wav_path.resolve(strict=False))
+            segment.tts_audio_path = wav_str
+            segment.aligned_audio_path = wav_str
+            segment.actual_duration_ms = _ffprobe_duration_ms(wav_path)
+            if not segment.alignment_method:
+                segment.alignment_method = "direct"
+            segment.needs_review = False
+        if missing_sids:
+            shown = missing_sids[:10]
+            ellipsis = "..." if len(missing_sids) > 10 else ""
+            raise ValueError(
+                f"resume_from=alignment: {len(missing_sids)} segment(s) "
+                f"missing wavs in editor/tts_segments/: {shown}{ellipsis}. "
+                "Commit must have placed every segment's wav on disk — "
+                "this is a commit/copy_service bug."
+            )
 
+        # --- Rebuild publish context from disk ---
         download_result = self._load_download_result(
             final_project_dir,
             fallback_url=(config.source_ref or config.youtube_url or ""),
@@ -2113,172 +2204,77 @@ class ProcessPipeline:
                 raw_response_path="",
                 structured_transcript_path=str(transcript_path),
             )
-        translation_result = self._load_translation_result(trans_path)
-
+        translation_result = TranslationResult(
+            segments=segments,
+            total_segments=len(segments),
+            output_path=str(trans_path.resolve(strict=False)),
+        )
         separated_audio = AudioSeparationResult(
             source_audio_path=str(source_audio_path),
             speech_audio_path=str(speech_path),
             ambient_audio_path=str(ambient_path),
             reused_cache=True,
         )
-        actual_duration_ms = _ffprobe_duration_ms(source_audio_path)
+        actual_total_duration_ms = _ffprobe_duration_ms(source_audio_path)
         source_type = config.source_type or "youtube_url"
         normalized_url = (config.youtube_url or "").strip()
 
-        # S2 review cache (best-effort — alignment uses it to inject voice
-        # description / persona / energy into segments before TTS). Missing
-        # file → empty dicts, alignment degrades gracefully but does not fail.
-        _review_speaker_styles: dict[str, dict] = {}
+        # s2 glossary cache for metering (best-effort).
         _review_glossary: dict[str, str] = {}
         s2_cache_path = final_project_dir / "transcript" / "s2_review_result.json"
         if s2_cache_path.is_file():
             try:
                 _s2 = json.loads(s2_cache_path.read_text(encoding="utf-8"))
-                _review_speaker_styles = _s2.get("speakers", {}) or {}
                 _review_glossary = _s2.get("glossary", {}) or {}
             except Exception as _exc:
-                print(f"[RESUME] s2_review_result load failed (non-fatal): {_exc}", flush=True)
-
-        # Rebuild per-speaker chars/sec from existing TTS output via the
-        # same calibrator run() uses post-TTS — when the source task's TTS
-        # is already cached (the usual resume case), this gives the real
-        # cps the aligner needs. Empty segments / all-zero actual durations
-        # fall back to the calibrator's 4.5 default.
-        _probe_global, _probe_by_speaker = self._calibrate_tts_duration(
-            translation_result.segments
-        )
+                print(
+                    f"[RESUME] s2_review_result load failed (non-fatal): {_exc}",
+                    flush=True,
+                )
 
         state_manager = StateManager(str(final_project_dir / "project_state.json"))
 
-        rewriter_kwargs: dict[str, object] = {}
-        _custom_rewrite_tpl = gemini_config.get("rewrite_prompt_template")
-        if _custom_rewrite_tpl is not None:
-            rewriter_kwargs["rewrite_prompt_template"] = str(_custom_rewrite_tpl)
-
         current_stage_name: str | None = None
         try:
-            # --- Alignment (replicated from run() line 1708-1890, s3_cache_hit=True path) ---
+            # --- Emit STAGE_ALIGNMENT: DONE immediately (γ does no alignment) ---
+            # We still write the stage transition so the job record / stage
+            # reporting stays consistent; payload makes it clear γ skipped
+            # alignment — grep for execution_mode=resume_publish_only.
             current_stage_name = STAGE_ALIGNMENT
             state_manager.set_stage(
                 current_stage_name, StageStatus.RUNNING,
-                {"execution_mode": "resume_from_alignment"},
+                {"execution_mode": "resume_publish_only"},
             )
-
-            if _review_speaker_styles:
-                from services.tts.cosyvoice_voice_selector import (
-                    infer_persona_style, infer_energy_level,
-                )
-                for segment in translation_result.segments:
-                    spk_info = _review_speaker_styles.get(segment.speaker_id, {})
-                    vd = spk_info.get("voice_description", "")
-                    segment.voice_description = vd
-                    segment.gender = spk_info.get("gender", "")
-                    segment.age_group = spk_info.get("age_group", "")
-                    segment.persona_style = (
-                        spk_info.get("persona_style", "") or infer_persona_style(vd)
-                    )
-                    segment.energy_level = (
-                        spk_info.get("energy_level", "") or infer_energy_level(vd)
-                    )
-
-            tts_generator = TTSGenerator(tts_config, job_record=config.job_record)
-            try:
-                tts_generator.set_speaker_chars_per_second(
-                    _probe_by_speaker or None,
-                    global_cps=(
-                        _probe_global
-                        if _probe_global != DEFAULT_ESTIMATED_TTS_CHARS_PER_SECOND
-                        else None
-                    ),
-                )
-            except Exception as _exc:
-                print(f"[RESUME] set_speaker_chars_per_second skipped: {_exc}", flush=True)
-
-            tts_dir = (final_project_dir / "tts").resolve(strict=False)
-            cached_segments, segments_needing_tts = self._hydrate_cached_tts_segments(
-                translation_result.segments, tts_dir,
-            )
-            pre_tts_cps = 4.5
-            pre_tts_by_speaker: dict[str, float] = {}
-            if cached_segments:
-                pre_tts_cps, pre_tts_by_speaker = self._calibrate_tts_duration(cached_segments)
-            pre_tts_rewriter = GeminiRewriter(
-                translator,
-                chars_per_second=pre_tts_cps,
-                chars_per_second_by_speaker=pre_tts_by_speaker,
-                **rewriter_kwargs,
-            )
-            self._pre_rewrite_obvious_overshoot_segments_before_tts(
-                segments=segments_needing_tts,
-                rewriter=pre_tts_rewriter,
-                chars_per_second=pre_tts_cps,
-                chars_per_second_by_speaker=pre_tts_by_speaker,
-                job_provider=getattr(tts_generator, "_job_provider", None),
-            )
-            if segments_needing_tts:
-                print(
-                    "[RESUME/S4] 生成TTS音频..."
-                    f"（{len(cached_segments)}段已缓存，{len(segments_needing_tts)}段需生成）"
-                )
-                tts_generator.generate_all(segments_needing_tts, str(tts_dir))
-            else:
-                print("[RESUME/S4] 所有TTS音频已缓存，跳过生成")
-
-            chars_per_second, chars_per_second_by_speaker = self._calibrate_tts_duration(
-                translation_result.segments
-            )
-
-            post_tts_budget_tracker = PostTTSBudgetTracker()
-            presplit_count = self._presplit_long_overshoot_segments_before_alignment(
-                translation_result=translation_result,
-                tts_generator=tts_generator,
-                tts_dir=tts_dir,
-                post_tts_budget_tracker=post_tts_budget_tracker,
-            )
-            if presplit_count > 0:
-                chars_per_second, chars_per_second_by_speaker = self._calibrate_tts_duration(
-                    translation_result.segments
-                )
-
-            print("[S5] 对齐时间轴...")
-            rewriter = GeminiRewriter(
-                translator,
-                chars_per_second=chars_per_second,
-                chars_per_second_by_speaker=chars_per_second_by_speaker,
-                **rewriter_kwargs,
-            )
-            aligned_segments = SegmentAligner(
-                rewriter=rewriter,
-                tts_generator=tts_generator,
-                post_tts_budget_tracker=post_tts_budget_tracker,
-            ).align_all(translation_result.segments, str(tts_dir))
-            repaired_count = self._repair_failed_long_segments(
-                translation_result=translation_result,
-                tts_generator=tts_generator,
-                rewriter=rewriter,
-                tts_dir=tts_dir,
-                post_tts_budget_tracker=post_tts_budget_tracker,
-            )
-            if repaired_count > 0:
-                aligned_segments = self._build_aligned_segments(translation_result.segments)
-            self._write_segments_snapshot(translation_result)
-            needs_review_count = sum(1 for s in aligned_segments if s.needs_review)
+            needs_review_count = sum(1 for s in segments if s.needs_review)
             print(
-                f"[S5] 完成：共 {len(aligned_segments)} 段，"
-                f"需要人工检查 {needs_review_count} 段"
+                f"[RESUME/S5] \u8df3\u8fc7\u5bf9\u9f50\uff08\u03b3 \u8def\u5f84\uff09\uff1a"
+                f"\u5171 {len(segments)} \u6bb5\uff0c\u9700\u8981\u4eba\u5de5\u68c0\u67e5 "
+                f"{needs_review_count} \u6bb5"
             )
             state_manager.set_stage(
                 current_stage_name, StageStatus.DONE,
-                self._build_alignment_stage_payload(translation_result.segments),
+                {
+                    "execution_mode": "resume_publish_only",
+                    "block_count": len(segments),
+                    "needs_review_count": needs_review_count,
+                    "cn_text_produced": any(bool(s.cn_text.strip()) for s in segments),
+                    "artifacts": build_artifacts_payload(
+                        kind="aligned_audio",
+                        file_paths=[s.aligned_audio_path for s in segments],
+                    ),
+                },
             )
 
-            # --- Publish (replicated from run() line 1891-1957) ---
+            # --- Publish: audio mux / video mux / poster / subtitles ---
             current_stage_name = STAGE_LEGACY_PROCESS_OUTPUT
             state_manager.set_stage(
                 current_stage_name, StageStatus.RUNNING,
-                {"execution_mode": "resume_from_alignment"},
+                {"execution_mode": "resume_publish_only"},
             )
-            print("[S6] 合成输出...")
+            print(
+                "[RESUME/S6] \u5408\u6210\u914d\u97f3\u97f3\u9891/\u914d\u97f3\u89c6\u9891/"
+                "\u9884\u89c8\u56fe/\u5b57\u5e55..."
+            )
             build_result = self._build_process_workflow_build_result(
                 project_dir=final_project_dir,
                 youtube_url=normalized_url,
@@ -2288,8 +2284,8 @@ class ProcessPipeline:
                 separated_audio=separated_audio,
                 transcript_result=transcript_result,
                 translation_result=translation_result,
-                total_duration_ms=actual_duration_ms,
-                segments=translation_result.segments,
+                total_duration_ms=actual_total_duration_ms,
+                segments=segments,
                 stage_snapshot=state_manager.load().get("stages", {}),
                 source_type=source_type,
             )
@@ -2304,14 +2300,18 @@ class ProcessPipeline:
                 self._build_legacy_process_output_stage_payload(output_bundle=output_bundle),
             )
             current_stage_name = None
-            print(f"[S6] 完成：输出目录 {final_project_dir / 'output'}")
+            print(
+                f"[RESUME/S6] \u5b8c\u6210\uff1a\u8f93\u51fa\u76ee\u5f55 "
+                f"{final_project_dir / 'output'}"
+            )
 
-            # translation/segments.json rewrite + editor baseline (same as full path)
+            # Keep translation/segments.json + editor baseline in sync with
+            # the published state. asdict() serialises every DubbingSegment
+            # field including the wav paths we just populated.
             try:
-                from dataclasses import asdict
                 _dump = {
-                    "segments": [asdict(s) for s in translation_result.segments],
-                    "total_segments": len(translation_result.segments),
+                    "segments": [_dc_asdict(s) for s in segments],
+                    "total_segments": len(segments),
                     "output_path": str(trans_path),
                 }
                 trans_path.write_text(
@@ -2319,7 +2319,10 @@ class ProcessPipeline:
                     encoding="utf-8",
                 )
             except Exception as _exc:
-                print(f"[RESUME/S6] segments.json rewrite skipped: {_exc}", flush=True)
+                print(
+                    f"[RESUME/S6] segments.json rewrite skipped: {_exc}",
+                    flush=True,
+                )
 
             try:
                 from services.jobs.editor_baseline import (
@@ -2327,12 +2330,15 @@ class ProcessPipeline:
                 )
                 write_editor_segments_from_translation(final_project_dir)
             except Exception as _exc:
-                print(f"[RESUME/S6] editor baseline skipped: {_exc}", flush=True)
+                print(
+                    f"[RESUME/S6] editor baseline skipped: {_exc}",
+                    flush=True,
+                )
 
             if config.job_id:
-                # tts_results is None on resume path — billed_chars stays None
+                # billed_chars=None — γ did no TTS, nothing to charge.
                 _report_job_metering(
-                    config.job_id, translation_result.segments,
+                    config.job_id, segments,
                     tts_billed_chars=None,
                     glossary=_review_glossary or None,
                 )
@@ -2342,12 +2348,12 @@ class ProcessPipeline:
                 state_manager.set_stage(
                     current_stage_name, StageStatus.FAILED,
                     {
-                        "execution_mode": "resume_from_alignment",
+                        "execution_mode": "resume_publish_only",
                         "error_type": exc.__class__.__name__,
                     },
                     error_message=str(exc),
                 )
-            print(f"[{stage_label}] 失败：{exc}")
+            print(f"[{stage_label}] \u5931\u8d25\uff1a{exc}")
             raise
 
         return ProcessResult(

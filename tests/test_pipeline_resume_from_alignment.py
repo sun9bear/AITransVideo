@@ -167,6 +167,152 @@ def test_resume_fail_fast_when_speech_audio_missing(tmp_path: Path) -> None:
         pipeline._run_alignment_and_publish_only(config)
 
 
+def test_gamma_fails_fast_when_editor_tts_wav_missing(tmp_path: Path) -> None:
+    """γ hard guard: if any segment lacks editor/tts_segments/{sid}.wav,
+    raise a specific ValueError with the sid list. The contract says
+    commit must have placed every segment's wav on disk — if not, the
+    user will see a dubbed video with silence gaps. Better to fail loud."""
+    project = tmp_path / "project"
+    (project / "translation").mkdir(parents=True)
+    (project / "audio").mkdir(parents=True)
+    (project / "editor").mkdir(parents=True)
+    # Provide translation/segments.json with two segments
+    (project / "translation" / "segments.json").write_text(
+        json.dumps({
+            "segments": [
+                {
+                    "segment_id": 1, "speaker_id": "speaker_a",
+                    "display_name": "A", "voice_id": "", "start_ms": 0,
+                    "end_ms": 1000, "target_duration_ms": 1000,
+                    "source_text": "hi", "cn_text": "\u4f60\u597d",
+                },
+                {
+                    "segment_id": 2, "speaker_id": "speaker_a",
+                    "display_name": "A", "voice_id": "", "start_ms": 1000,
+                    "end_ms": 2000, "target_duration_ms": 1000,
+                    "source_text": "bye", "cn_text": "\u518d\u89c1",
+                },
+            ],
+            "total_segments": 2,
+            "output_path": "",
+        }),
+        encoding="utf-8",
+    )
+    # editor/segments.json (authoritative post-commit)
+    (project / "editor" / "segments.json").write_text(
+        json.dumps([
+            {
+                "segment_id": "1", "speaker_id": "speaker_a",
+                "display_name": "A", "voice_id": "", "start_ms": 0,
+                "end_ms": 1000, "target_duration_ms": 1000,
+                "source_text": "hi", "cn_text": "\u4f60\u597d",
+            },
+            {
+                "segment_id": "2", "speaker_id": "speaker_a",
+                "display_name": "A", "voice_id": "", "start_ms": 1000,
+                "end_ms": 2000, "target_duration_ms": 1000,
+                "source_text": "bye", "cn_text": "\u518d\u89c1",
+            },
+        ]),
+        encoding="utf-8",
+    )
+    # Audio precondition files
+    (project / "audio" / "speech_for_asr.wav").write_bytes(b"stub")
+    (project / "audio" / "ambient.wav").write_bytes(b"stub")
+    # Deliberately NO editor/tts_segments/*.wav files
+
+    pipeline = ProcessPipeline()
+    config = ProcessConfig(
+        youtube_url="",
+        source_type="youtube_url", source_ref="x",
+        project_dir=str(project), resume_from="alignment",
+    )
+    with pytest.raises(ValueError, match="editor/tts_segments"):
+        pipeline._run_alignment_and_publish_only(config)
+
+
+def test_gamma_prefers_editor_segments_over_translation_segments(tmp_path: Path) -> None:
+    """γ invariant: editor/segments.json is authoritative post-commit
+    (applies user text edits + voice_map overrides). translation/ is
+    stale (copied verbatim with path rewriting, no edit overlay).
+
+    Pure loader-level assertion: the helper used by γ to read segments
+    must return the editor/ content when both files exist, so user edits
+    are not silently dropped. Uses a fake project dir — doesn't need to
+    actually run publish."""
+    project = tmp_path / "project"
+    (project / "translation").mkdir(parents=True)
+    (project / "editor").mkdir(parents=True)
+
+    # translation/segments.json: OLD text (pre-edit)
+    (project / "translation" / "segments.json").write_text(
+        json.dumps({
+            "segments": [{
+                "segment_id": 1, "speaker_id": "speaker_a",
+                "display_name": "A", "voice_id": "", "start_ms": 0,
+                "end_ms": 1000, "target_duration_ms": 1000,
+                "source_text": "hello", "cn_text": "\u4f60\u597d",
+            }],
+            "total_segments": 1, "output_path": "",
+        }),
+        encoding="utf-8",
+    )
+    # editor/segments.json: NEW text (user's edit)
+    (project / "editor" / "segments.json").write_text(
+        json.dumps([{
+            "segment_id": "1", "speaker_id": "speaker_a",
+            "display_name": "A", "voice_id": "", "start_ms": 0,
+            "end_ms": 1000, "target_duration_ms": 1000,
+            "source_text": "hello", "cn_text": "\u4f60\u597d\u5440",
+        }]),
+        encoding="utf-8",
+    )
+
+    pipeline = ProcessPipeline()
+    segments = pipeline._load_segments_for_publish_resume(
+        editor_segments_path=(project / "editor" / "segments.json"),
+        translation_segments_path=(project / "translation" / "segments.json"),
+    )
+    assert len(segments) == 1
+    # User edit MUST be what γ publishes, not the stale translation/ copy.
+    assert segments[0].cn_text == "\u4f60\u597d\u5440", (
+        "\u03b3 loader must prefer editor/segments.json; got stale translation/ text"
+    )
+    # segment_id must be coerced to int (DubbingSegment contract), even
+    # though editor/segments.json stores it as str.
+    assert segments[0].segment_id == 1
+    assert isinstance(segments[0].segment_id, int)
+
+
+def test_gamma_loader_drops_unknown_voice_map_fields(tmp_path: Path) -> None:
+    """editing_commit.apply_voice_map adds 'provider' to segment dicts
+    (not a DubbingSegment field). γ loader must drop unknown keys, else
+    DubbingSegment(**seg) raises TypeError about unexpected kwargs."""
+    project = tmp_path / "project"
+    (project / "editor").mkdir(parents=True)
+    (project / "editor" / "segments.json").write_text(
+        json.dumps([{
+            "segment_id": "3", "speaker_id": "speaker_a",
+            "display_name": "A", "voice_id": "voice123",
+            "start_ms": 0, "end_ms": 1000, "target_duration_ms": 1000,
+            "source_text": "x", "cn_text": "x",
+            # voice_map override adds 'provider' (maps to tts_provider
+            # but stored as 'provider' by _apply_voice_map):
+            "provider": "cosyvoice",
+            # and some other junk — a legacy task or a future schema drift
+            "legacy_field_we_dont_care_about": 42,
+        }]),
+        encoding="utf-8",
+    )
+    pipeline = ProcessPipeline()
+    segments = pipeline._load_segments_for_publish_resume(
+        editor_segments_path=(project / "editor" / "segments.json"),
+        translation_segments_path=(project / "editor" / "__no_translation__"),
+    )
+    assert len(segments) == 1
+    assert segments[0].voice_id == "voice123"
+
+
 def test_media_artifact_filenames_match_pipeline_output() -> None:
     """Regression guard for the 2026-04-19 filename drift bug: resume
     checks used ``audio/speech.wav`` while demucs actually produces
@@ -240,32 +386,74 @@ def test_resume_method_does_not_reference_upstream_symbol(
     )
 
 
-def test_resume_method_does_not_generate_tts_against_all_segments() -> None:
-    """CodeX ask #3: if prior TTS wavs exist (copy_service hardlinks
-    them), resume must NOT bulk-call TTSGenerator against the full
-    segment list. The only allowed TTS call path is
-    tts_generator.generate_all(segments_needing_tts, ...) where
-    segments_needing_tts is the output of _hydrate_cached_tts_segments
-    (empty list when everything is cached).
+# ===================================================================
+# γ (publish-only) guards — 2026-04-19
+#
+# User contract: commit's resume path runs ONLY publish (audio mux +
+# video mux + poster + 3 subtitles). No Gemini rewrite, no TTS
+# (re-)synthesis, no alignment DSP. The user reviewed each segment's
+# duration in the editing UI and decided whether to re-TTS it before
+# commit; editor/tts_segments/{sid}.wav is the authoritative audio.
+#
+# Plan reference: docs/plans/2026-04-18-studio-post-edit-plan.md (γ).
+# ===================================================================
 
-    Static guard: the resume method's ``generate_all`` call site must
-    be against ``segments_needing_tts``, not against
-    ``translation_result.segments`` — i.e. never the full set."""
+
+@pytest.mark.parametrize("forbidden,why", [
+    ("GeminiRewriter", "γ must not rewrite text via Gemini"),
+    ("SegmentAligner", "γ must not run alignment (it orchestrates Gemini rewrite + TTS retry)"),
+    ("TTSGenerator", "γ must not (re-)synthesise TTS — user already reviewed per-segment duration"),
+    (".align_all(", "γ must not invoke alignment orchestrator"),
+    (".generate_all(", "γ must not generate TTS — editor/tts_segments/ wavs are authoritative"),
+    ("_pre_rewrite_obvious_overshoot_segments_before_tts", "γ must not pre-rewrite (Gemini call)"),
+    ("_presplit_long_overshoot_segments_before_alignment", "γ must not split segments (would invalidate existing wavs)"),
+    ("_repair_failed_long_segments", "γ must not repair — that's the user's job in the editing UI"),
+    ("_hydrate_cached_tts_segments", "γ reads editor/tts_segments/ directly, not the tts/ cache hydrator"),
+    ("_calibrate_tts_duration", "γ takes wav duration as ground truth — no chars/sec recalibration"),
+    ("PostTTSBudgetTracker", "γ does no TTS, no post-TTS budget tracking"),
+    ("pre_tts_rewriter", "γ does no pre-TTS rewriting"),
+])
+def test_gamma_resume_method_forbids_upstream_tts_and_alignment(
+    forbidden: str, why: str,
+) -> None:
+    """γ resume path = publish only. Any appearance of a TTS/alignment
+    symbol in the method body is a regression: it would mean Gemini or
+    TTS gets called despite the user's explicit 'only mux' instruction."""
     body = _extract_resume_method_source()
-    # Find every generate_all call-site argument. The regex picks up
-    # the first positional arg (a Python expression up to the next comma
-    # at top-level paren depth — good enough for our formatted source).
-    matches = re.findall(r"generate_all\(\s*([^,)]+?)\s*,", body)
-    assert matches, (
-        "resume method does not reference generate_all — if this is "
-        "intentional (e.g. future refactor moves TTS out), delete the "
-        "guard. Otherwise alignment cannot have rebuilt audio."
+    assert forbidden not in body, (
+        f"_run_alignment_and_publish_only references {forbidden!r}: {why}. "
+        "γ contract: publish only — editor/tts_segments/{sid}.wav is authoritative."
     )
-    for arg in matches:
-        assert "translation_result.segments" not in arg, (
-            f"generate_all called with full segment list ({arg!r}); "
-            "resume path must only regen cached-miss segments"
-        )
+
+
+def test_gamma_resume_method_consumes_editor_tts_segments() -> None:
+    """γ positive assertion: the method must read from
+    ``editor/tts_segments/`` and assign to segment.aligned_audio_path
+    so publish picks up the user-reviewed wavs.
+
+    If a refactor moves this assignment elsewhere, update the guard —
+    but it must still be present in the γ method somewhere."""
+    body = _extract_resume_method_source()
+    assert "editor" in body and "tts_segments" in body, (
+        "γ resume method must reference editor/tts_segments/ directory"
+    )
+    assert re.search(r"aligned_audio_path\s*=", body), (
+        "γ resume method must assign to segment.aligned_audio_path "
+        "(otherwise publish falls back to tts_audio_path, which γ may "
+        "not populate correctly)"
+    )
+
+
+def test_gamma_resume_method_dispatches_publish_output_bundle() -> None:
+    """γ invariant: the method must actually dispatch the publish output
+    (editor package + publish muxing). Without this, the 4 artifacts
+    the user cares about (dubbed audio, dubbed video, poster, subtitles)
+    would not be produced."""
+    body = _extract_resume_method_source()
+    assert "_dispatch_process_output_bundle" in body, (
+        "γ resume method must call _dispatch_process_output_bundle — "
+        "otherwise no publish muxing happens and the user sees nothing"
+    )
 
 
 def test_resume_method_does_not_enter_review_gate_stage_names() -> None:

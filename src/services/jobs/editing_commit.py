@@ -420,12 +420,30 @@ def _commit_copy_as_new(
 
     # Phase A continued: create new JobRecord.
     root_job_id = record.root_job_id or record.job_id
+    # workspace_dir is the relative sibling-path of project_dir under the
+    # user's projects root (shape: "projects/{user_id}/{job_id}"). replace()
+    # keeps fields not listed, so we MUST explicitly carry over the target
+    # identity — otherwise the new_record inherits source's workspace_dir
+    # and manifest_path, and _resolve_job_project_dir can later pick up the
+    # source-pointing workspace_dir as priority 2 fallback. (2026-04-19
+    # incident: the new_record shipped with source workspace_dir, leading
+    # to silent source pollution on the next commit overwrite.)
+    if record.workspace_dir and record.job_id in record.workspace_dir:
+        new_workspace_dir: str | None = record.workspace_dir.replace(
+            record.job_id, new_job_id,
+        )
+    else:
+        new_workspace_dir = None
     new_record = replace(
         record,
         job_id=new_job_id,
         status=JOB_STATUS_QUEUED,
         current_stage=STAGE_ALIGNMENT,
         project_dir=str(new_project_dir),
+        workspace_dir=new_workspace_dir,
+        # Clear manifest_path; _finalize_process of the new job's γ will
+        # re-populate it from the target's project_state.json post-publish.
+        manifest_path=None,
         display_name=copy_display_name,
         copy_of_job_id=record.job_id,
         root_job_id=root_job_id,

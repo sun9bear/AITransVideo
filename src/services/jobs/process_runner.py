@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -9,6 +10,8 @@ import subprocess
 import sys
 import threading
 from typing import Callable
+
+logger = logging.getLogger(__name__)
 
 from core.exceptions import StateError
 from modules.output.manifest_writer import ManifestWriter
@@ -295,6 +298,56 @@ class ProcessJobRunner:
                 self._processes.pop(job_id, None)
         self._finalize_process(job_id, returncode)
 
+    @staticmethod
+    def _resolve_identity_project_dir(
+        *,
+        current: str | None,
+        detected: str | None,
+        marker_value: str | None = None,
+        job_id: str,
+    ) -> str | None:
+        """Pick the project_dir to save for this log-line tick.
+
+        Rule (2026-04-19 hardening, see
+        ``feedback_record_line_fragility.md``): ``JobRecord.project_dir``
+        is an **identity field**. It is writable once by the submit path
+        (``submit_job`` / ``copy_service.prepare_copy_project_dir`` /
+        ``editing_commit._commit_copy_as_new``). After that, log lines
+        and ``[WEB_REVIEW]`` marker payloads may log paths but MUST NOT
+        redefine which project dir this record points at.
+
+        - ``current`` already set → keep it. A mismatching ``detected``
+          is a diagnostic (e.g. stale path in pipeline log, shared wav
+          path from another job, pollution from copy_as_new) — log a
+          warning and ignore.
+        - ``current`` is None → fall through to ``marker_value`` then
+          ``detected``. Preserves the historical bootstrap path for
+          submissions that don't pre-set project_dir (pipeline derives
+          one from video_title and prints it).
+        """
+        if current is not None:
+            # Warn if something tried to rewrite us. Low-signal when
+            # current == detected (normal echo); high-signal otherwise.
+            if detected and detected != current:
+                logger.warning(
+                    "_record_line: stdout detected_project_dir=%r differs "
+                    "from JobRecord.project_dir=%r for job_id=%s — "
+                    "ignoring (identity is write-once, see "
+                    "feedback_record_line_fragility.md)",
+                    detected, current, job_id,
+                )
+            if marker_value and marker_value != current:
+                logger.warning(
+                    "_record_line: [WEB_REVIEW] marker project_dir=%r "
+                    "differs from JobRecord.project_dir=%r for job_id=%s "
+                    "— ignoring",
+                    marker_value, current, job_id,
+                )
+            return current
+        # current is None — allow first-time fill-in from explicit marker
+        # payload first, then from parsed stdout path.
+        return marker_value or detected
+
     def _record_line(self, job_id: str, line: str) -> None:
         with self._lock:
             if job_id in self._deleted_jobs:
@@ -312,9 +365,14 @@ class ProcessJobRunner:
                 progress_message=_normalize_optional_text(review_gate.get("message"))
                 or current_job.progress_message,
                 updated_at=timestamp,
-                project_dir=_normalize_optional_text(review_gate.get("project_dir"))
-                or detected_project_dir
-                or current_job.project_dir,
+                project_dir=self._resolve_identity_project_dir(
+                    current=current_job.project_dir,
+                    detected=detected_project_dir,
+                    marker_value=_normalize_optional_text(
+                        review_gate.get("project_dir")
+                    ),
+                    job_id=job_id,
+                ),
                 review_gate={
                     "stage": review_stage,
                     "message": _normalize_optional_text(review_gate.get("message")),
@@ -356,7 +414,11 @@ class ProcessJobRunner:
             current_stage=next_stage,
             progress_message=next_message,
             updated_at=timestamp,
-            project_dir=detected_project_dir or current_job.project_dir,
+            project_dir=self._resolve_identity_project_dir(
+                current=current_job.project_dir,
+                detected=detected_project_dir,
+                job_id=job_id,
+            ),
         )
         self.store.append_event(
             job_id,

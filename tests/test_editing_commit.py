@@ -338,6 +338,71 @@ def test_copy_as_new_creates_new_job_with_hardlinked_audio(tmp_path: Path) -> No
     assert src_wav.stat().st_ino == new_wav.stat().st_ino
 
 
+def test_copy_as_new_new_record_fields_do_not_inherit_source_paths(
+    tmp_path: Path,
+) -> None:
+    """Regression for the 2026-04-19 ``副本修改=源被污染`` incident.
+
+    ``dataclasses.replace(record, ...)`` silently inherits any field the
+    caller does not explicitly list. The original ``_commit_copy_as_new``
+    listed ``project_dir`` but forgot ``workspace_dir`` and
+    ``manifest_path``, so new_record carried SOURCE values for those two.
+
+    Downstream effect: after γ completed and ``_finalize_process`` ran,
+    _resolve_job_project_dir's priority-2 fallback (workspace_dir)
+    pointed at source. Combined with ProcessJobRunner._record_line
+    parsing stdout for project_dir mentions, the in-memory JobRecord
+    drifted to source. A subsequent enter_editing + commit overwrite on
+    the copy then wrote the user's edits into source instead of the
+    copy — destroying source state with no warning.
+
+    The fix is to explicitly null/rewrite workspace_dir and manifest_path
+    in new_record so no source-pointing identity fields leak.
+    """
+    store, record, project_dir = _build_editing_job_with_diff(
+        tmp_path, text_edits={"seg_001": "x"},
+    )
+    # Simulate the production shape: source's JobRecord carries
+    # workspace_dir and manifest_path pointing at source's project_dir.
+    from dataclasses import replace as _replace
+    record = _replace(
+        record,
+        workspace_dir=f"projects/test_user/{record.job_id}",
+        manifest_path=str(project_dir / "manifest.json"),
+    )
+    store.save_job(record)
+    runner = _RecordingRunner()
+
+    result = commit_editing_pipeline(
+        record, store, runner,
+        strategy="copy_as_new",
+        copy_display_name="A \u00b7 copy",
+        new_job_id_factory=lambda: "job_copy_identity",
+    )
+
+    new_record = store.require_job(result["new_job_id"])
+
+    # Identity fields must point at the new job, not the source.
+    assert new_record.job_id == "job_copy_identity"
+    assert record.job_id not in (new_record.workspace_dir or ""), (
+        f"new_record.workspace_dir still contains source job_id: "
+        f"{new_record.workspace_dir!r}"
+    )
+    assert "job_copy_identity" in (new_record.workspace_dir or ""), (
+        f"new_record.workspace_dir does not reference new job_id: "
+        f"{new_record.workspace_dir!r}"
+    )
+    # manifest_path must be cleared (or rewritten). Source path MUST NOT
+    # leak — downstream _resolve_manifest_path will regenerate during γ.
+    assert new_record.manifest_path is None or record.job_id not in new_record.manifest_path, (
+        f"new_record.manifest_path leaks source path: "
+        f"{new_record.manifest_path!r}"
+    )
+    # project_dir is positive-asserted elsewhere; guard it here too for
+    # defense-in-depth.
+    assert new_record.project_dir == result["new_project_dir"]
+
+
 def test_copy_as_new_resets_source_to_succeeded(tmp_path: Path) -> None:
     """Phase B: source editing/ dropped + source status → succeeded."""
     store, record, project_dir = _build_editing_job_with_diff(tmp_path)
