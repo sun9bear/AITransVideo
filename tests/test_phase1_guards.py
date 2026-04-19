@@ -128,6 +128,37 @@ def test_editing_commit_pipeline_does_not_call_tts_generator() -> None:
     )
 
 
+def test_both_job_api_entry_points_apply_runtime_wiring() -> None:
+    """The Job API has two entry points — ``main.run_job_api_command``
+    (developer / single-binary) and
+    ``scripts/run_remote_workbench_service.py._run_job_api``
+    (container / linux_app_service.sh). Both MUST call
+    ``apply_runtime_wiring`` before starting the HTTP server, otherwise
+    one entry silently drops T1-10 idle-cancel callback wiring and the
+    A.2 segment TTS caller wiring (regression found 2026-04-19: the
+    container path had never installed the post-edit TTS caller —
+    regenerate-tts returned 501 forever despite main.py doing it).
+
+    The check is intentionally a plain substring scan — an AST-level
+    import-graph check would also catch it, but a typo-level substring
+    assert keeps the contract trivially readable and makes the failure
+    message obvious when someone adds a third entry point and forgets.
+    """
+    checks = [
+        ("main.py", "apply_runtime_wiring"),
+        ("scripts/run_remote_workbench_service.py", "apply_runtime_wiring"),
+    ]
+    missing: list[str] = []
+    for rel, needle in checks:
+        src = _read(rel)
+        if needle not in src:
+            missing.append(f"{rel}: missing {needle!r}")
+    assert not missing, (
+        "Job API entry point(s) do not install runtime wiring:\n"
+        + "\n".join(f"  {m}" for m in missing)
+    )
+
+
 def test_paid_api_surface_isolated_from_commit_alignment_publish() -> None:
     """segment_regenerate is the SOLE production entry point for paid TTS
     calls in the post-edit flow (wired into JobService at Job API boot

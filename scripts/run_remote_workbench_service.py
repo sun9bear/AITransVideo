@@ -65,6 +65,15 @@ def main(argv: list[str] | None = None) -> int:
 
 def _run_job_api(runtime_config) -> int:
     service = build_default_job_service(project_root=PROJECT_ROOT)
+
+    # Post-build wiring — idle-cancel callback, segment TTS caller,
+    # cleanup background thread. The SAME helper is called from
+    # ``main.run_job_api_command`` so the developer path stays in
+    # lock-step. See services.jobs.runtime_wiring.
+    from services.jobs.runtime_wiring import apply_runtime_wiring
+
+    apply_runtime_wiring(service)
+
     server = build_job_api_server(
         service=service,
         host=runtime_config.job_api.host,

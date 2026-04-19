@@ -935,45 +935,13 @@ def run_job_api_command(argv: list[str]) -> None:
     try:
         service = build_default_job_service(project_root=PROJECT_ROOT)
 
-        # --- T1-10: wire editing idle-cancel into the scanner ---
-        # Without this, ``cleanup.py`` still calls the module-level
-        # ``registered_cancel_callback`` which stays on ``_noop_cancel`` —
-        # idle editing jobs would be detected but never actually cancelled.
-        # Kept failure-tolerant so a broken wiring cannot prevent the Job
-        # API from starting.
-        try:
-            from services.web_ui.editing_idle_scanner import (
-                inject_editing_cancel_callback,
-            )
+        # Post-build wiring — idle-cancel callback, segment TTS caller,
+        # cleanup background thread. The SAME helper is called from
+        # ``scripts/run_remote_workbench_service.py`` so the container
+        # entry path stays in lock-step. See services.jobs.runtime_wiring.
+        from services.jobs.runtime_wiring import apply_runtime_wiring
 
-            inject_editing_cancel_callback(service)
-        except Exception as exc:  # pragma: no cover - defensive
-            print(f"[warn] failed to wire editing idle-cancel callback: {exc}")
-
-        # --- Wire real SegmentTTSCaller for post-edit re-synthesis ---
-        # Without this, ``regenerate_segment_tts`` / ``regenerate_all_dirty_segments``
-        # fall through to the _not_wired_tts_caller placeholder and return
-        # HTTP 501. TTSGenerator instantiation is lazy (first user click)
-        # so a missing AUTODUB_TTS_API_KEY etc. does not prevent the Job API
-        # from booting — the credential error surfaces as a user-facing
-        # re-TTS failure toast instead.
-        try:
-            from services.tts.segment_regenerate import build_real_segment_tts_caller
-
-            service._segment_tts_caller = build_real_segment_tts_caller()
-        except Exception as exc:  # pragma: no cover - defensive
-            print(f"[warn] failed to wire segment TTS caller: {exc}")
-
-        # --- Start the cleanup / idle-scan background thread ---
-        # Runs every 6h: TTL-expired job purge + editing idle auto-cancel.
-        # start_cleanup_thread also runs a one-shot cleanup pass immediately
-        # (useful when the container restarts after a long downtime).
-        try:
-            from services.web_ui.cleanup import start_cleanup_thread
-
-            start_cleanup_thread()
-        except Exception as exc:  # pragma: no cover - defensive
-            print(f"[warn] failed to start cleanup thread: {exc}")
+        apply_runtime_wiring(service)
 
         server = build_job_api_server(
             service=service,
