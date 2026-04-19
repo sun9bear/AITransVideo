@@ -2045,7 +2045,7 @@ class ProcessPipeline:
         Preconditions (fail-fast):
         - ``config.project_dir`` set + exists
         - ``translation/segments.json`` on disk
-        - ``audio/speech.wav`` + ``audio/ambient.wav`` on disk
+        - ``audio/speech_for_asr.wav`` + ``audio/ambient.wav`` on disk
 
         Does NOT run translation / speaker review / voice_selection review /
         TTS from scratch (those charge paid APIs on full path).
@@ -2066,11 +2066,15 @@ class ProcessPipeline:
                 f"resume_from=alignment: {trans_path} missing — commit step "
                 "must have placed translation/segments.json on disk"
             )
-        speech_path = (final_project_dir / "audio" / "speech.wav").resolve(strict=False)
+        # Canonical demucs output name — ``services.audio.separator.speech_filename``.
+        speech_path = (final_project_dir / "audio" / "speech_for_asr.wav").resolve(strict=False)
         ambient_path = (final_project_dir / "audio" / "ambient.wav").resolve(strict=False)
         source_audio_path = (final_project_dir / "audio" / "original.wav").resolve(strict=False)
         video_path = (final_project_dir / "video" / "original.mp4").resolve(strict=False)
-        for missing_rel, p in (("audio/speech.wav", speech_path), ("audio/ambient.wav", ambient_path)):
+        for missing_rel, p in (
+            ("audio/speech_for_asr.wav", speech_path),
+            ("audio/ambient.wav", ambient_path),
+        ):
             if not p.is_file():
                 raise ValueError(
                     f"resume_from=alignment: {missing_rel} missing at {p}; "

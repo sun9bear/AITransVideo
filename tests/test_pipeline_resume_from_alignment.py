@@ -149,7 +149,8 @@ def test_resume_fail_fast_when_translation_segments_missing(tmp_path: Path) -> N
 
 def test_resume_fail_fast_when_speech_audio_missing(tmp_path: Path) -> None:
     """alignment needs speech/ambient audio for its DSP. Missing either
-    is a copy_service gap — bail."""
+    is a copy_service gap — bail. Use canonical demucs filename
+    (speech_for_asr.wav), matching services.audio.separator.speech_filename."""
     project = tmp_path / "project"
     (project / "translation").mkdir(parents=True)
     (project / "translation" / "segments.json").write_text(
@@ -162,8 +163,32 @@ def test_resume_fail_fast_when_speech_audio_missing(tmp_path: Path) -> None:
         source_type="youtube_url", source_ref="x",
         project_dir=str(project), resume_from="alignment",
     )
-    with pytest.raises(ValueError, match="audio/speech.wav missing"):
+    with pytest.raises(ValueError, match="audio/speech_for_asr.wav missing"):
         pipeline._run_alignment_and_publish_only(config)
+
+
+def test_media_artifact_filenames_match_pipeline_output() -> None:
+    """Regression guard for the 2026-04-19 filename drift bug: resume
+    checks used ``audio/speech.wav`` while demucs actually produces
+    ``audio/speech_for_asr.wav`` (see services.audio.separator.speech_filename).
+    The hardlink list + the resume-path pre-check must reference the
+    same canonical name, otherwise copy silently skips the file AND
+    resume fail-fasts after."""
+    from services.audio.separator import AudioStemSeparator
+    from services.jobs.copy_service import _MEDIA_HARDLINK_RELS
+
+    speech_name = AudioStemSeparator.speech_filename
+    assert f"audio/{speech_name}" in _MEDIA_HARDLINK_RELS, (
+        f"copy_service._MEDIA_HARDLINK_RELS does not include "
+        f"'audio/{speech_name}' — hardlink will skip the demucs output "
+        "and resume-from-alignment will fail-fast at the pre-check"
+    )
+    # And the resume method's source must reference the same filename.
+    body = _extract_resume_method_source()
+    assert speech_name in body, (
+        f"resume method references an outdated speech filename; must use "
+        f"canonical {speech_name!r}"
+    )
 
 
 # ===================================================================

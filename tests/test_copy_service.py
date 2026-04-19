@@ -328,7 +328,8 @@ def _add_media_artifacts(source: Path) -> None:
     (source / "video" / "original.mp4").write_bytes(b"FAKE_MP4_BYTES")
     (source / "audio").mkdir(parents=True, exist_ok=True)
     (source / "audio" / "original.wav").write_bytes(b"FAKE_WAV_ORIGINAL")
-    (source / "audio" / "speech.wav").write_bytes(b"FAKE_WAV_SPEECH")
+    # Canonical demucs output name (services.audio.separator.speech_filename)
+    (source / "audio" / "speech_for_asr.wav").write_bytes(b"FAKE_WAV_SPEECH")
     (source / "audio" / "ambient.wav").write_bytes(b"FAKE_WAV_AMBIENT")
 
 
@@ -348,7 +349,7 @@ def test_prepare_copy_hardlinks_media_artifacts(tmp_path: Path) -> None:
     for rel in (
         "video/original.mp4",
         "audio/original.wav",
-        "audio/speech.wav",
+        "audio/speech_for_asr.wav",
         "audio/ambient.wav",
     ):
         src = source / rel

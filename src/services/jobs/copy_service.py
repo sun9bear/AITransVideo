@@ -119,7 +119,9 @@ def hardlink_baseline_audio(source_dir: str | Path, target_dir: str | Path) -> l
 _MEDIA_HARDLINK_RELS: tuple[str, ...] = (
     "video/original.mp4",
     "audio/original.wav",
-    "audio/speech.wav",
+    # Canonical demucs output name — see
+    # ``services.audio.separator.speech_filename``.
+    "audio/speech_for_asr.wav",
     "audio/ambient.wav",
 )
 
