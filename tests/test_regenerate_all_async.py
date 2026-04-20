@@ -248,6 +248,98 @@ def test_read_status_returns_none_when_file_absent(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+
+# ---------------------------------------------------------------------------
+# Single-flight: concurrent POSTs must not spawn duplicate batches
+#
+# Bug (Claude Code ultrareview #4, P1 paid-API violation):
+# ``start_regen_all_async`` unconditionally created a new task + thread
+# each call. Double-click / proxy retry / two-tab scenario spun up N
+# parallel threads iterating the SAME eligible list → N × TTS calls
+# per segment = 双倍付费. CLAUDE.md forbids auto-paid-API calls; even
+# user-triggered, duplicate billing is a silent money-burn vector.
+#
+# Fix: per-project in-process lock. If a batch is already active
+# (status file stage ∈ {starting, running}), return the existing
+# task_id. Caller (frontend already polls /status) sees the same id
+# and proceeds without duplicating work.
+# ---------------------------------------------------------------------------
+
+
+def test_concurrent_start_returns_same_task_id_no_duplicate_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two near-simultaneous POSTs on the same project must share one
+    task_id and one worker thread. Verifies:
+      1. Second call returns the SAME task_id as the first
+      2. The TTS caller is invoked exactly N times (not 2N) for the
+         dirty segments
+    """
+    project = _make_project(tmp_path, ["seg_001", "seg_002", "seg_003"])
+    call_barrier = threading.Event()
+    calls: list[str] = []
+
+    def _barrier_caller(segment_dict: dict[str, Any], output_path: Path) -> None:
+        # Hold the first thread so a second start() can race it
+        call_barrier.wait(timeout=2.0)
+        calls.append(segment_dict.get("segment_id", ""))
+        output_path.write_bytes(b"W")
+
+    task_a = start_regen_all_async(
+        project_dir=project, tts_caller=_barrier_caller,
+    )
+    # Second call immediately while thread A is blocked on barrier
+    task_b = start_regen_all_async(
+        project_dir=project, tts_caller=_barrier_caller,
+    )
+    assert task_a == task_b, (
+        f"single-flight broken: got task_a={task_a!r} task_b={task_b!r} "
+        "(two concurrent POSTs spawned two tasks → paid API double-billing)"
+    )
+
+    # Release the thread and wait for completion
+    call_barrier.set()
+    _wait_until(
+        lambda: (s := read_regen_all_status(project, task_a))
+        and s.get("stage") == "completed",
+        timeout_s=3.0,
+    )
+
+    # Each segment called exactly once, never twice
+    from collections import Counter
+    counts = Counter(calls)
+    for sid, count in counts.items():
+        assert count == 1, (
+            f"segment {sid} TTS called {count}x — duplicate billing path"
+        )
+    assert len(calls) == 3
+
+
+def test_start_after_previous_batch_completed_spawns_new_task(
+    tmp_path: Path,
+) -> None:
+    """Single-flight is only per-batch-in-flight, not per-project-ever:
+    once the previous batch completed, a new POST must start a new
+    task (with its own task_id) — otherwise users couldn't re-run
+    a batch after the first finishes."""
+    project = _make_project(tmp_path, ["seg_001"])
+    task_a = start_regen_all_async(
+        project_dir=project, tts_caller=_happy_tts_caller,
+    )
+    _wait_until(
+        lambda: (s := read_regen_all_status(project, task_a))
+        and s.get("stage") == "completed",
+        timeout_s=3.0,
+    )
+    task_b = start_regen_all_async(
+        project_dir=project, tts_caller=_happy_tts_caller,
+    )
+    assert task_a != task_b, (
+        "After previous batch finished, new POST must spawn new task_id "
+        f"(got same id {task_a!r}) — single-flight gate is too strict"
+    )
+
+
 def test_status_transitions_to_failed_on_top_level_exception(tmp_path: Path) -> None:
     """If the thread itself crashes (not a per-segment fail), stage =
     "failed" and ``error`` carries the message. Use missing

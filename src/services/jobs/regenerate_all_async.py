@@ -43,6 +43,36 @@ __all__ = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Single-flight: per-project in-process lock.
+#
+# Why: the POST endpoint used to unconditionally spawn a new thread on every
+# call. Double-click / proxy retry / two-tab scenarios would spin up N
+# parallel batches iterating the SAME dirty segments → N × TTS provider
+# calls per segment (paid API double-billing, violates CLAUDE.md's "付费 API
+# 不能自动调用" constraint — even user-triggered, duplicate spends are
+# silent money-burn).
+#
+# Fix: a module-level ``{project_key: task_id}`` dict guarded by a lock.
+# Second call while a batch is in flight returns the existing task_id —
+# the frontend already polls /status and will see the in-flight progress.
+# The slot is released BEFORE writing the terminal status snapshot so that
+# when a user sees ``stage=completed`` and clicks regenerate again, the
+# new POST is immediately eligible for a fresh task.
+# ---------------------------------------------------------------------------
+
+_active_tasks_lock = threading.Lock()
+_active_tasks: dict[str, str] = {}
+
+
+def _project_key(project_dir: Path) -> str:
+    """Stable string identity for the single-flight dict."""
+    try:
+        return str(project_dir.resolve())
+    except OSError:
+        return str(project_dir)
+
+
 def _new_task_id() -> str:
     return uuid.uuid4().hex[:12]
 
@@ -125,23 +155,53 @@ def start_regen_all_async(
     ``read_regen_all_status``. The status file is seeded synchronously
     before the thread starts so that an immediate GET sees
     ``stage="starting"`` rather than ``None``.
+
+    Single-flight: if a batch is already in flight for this project, the
+    existing ``task_id`` is returned (no new thread, no new TTS calls).
+    The slot is released in ``_run_batch`` when the batch reaches its
+    terminal state.
     """
     project_path = Path(project_dir)
-    task_id = _new_task_id()
-    _write_status(project_path, _initial_status(task_id))
+    project_key = _project_key(project_path)
 
-    thread = threading.Thread(
-        target=_run_batch,
-        name=f"regen-all-{task_id}",
-        kwargs={
-            "task_id": task_id,
-            "project_dir": project_path,
-            "tts_caller": tts_caller,
-        },
-        daemon=True,
-    )
-    thread.start()
+    with _active_tasks_lock:
+        existing = _active_tasks.get(project_key)
+        if existing is not None:
+            return existing
+        task_id = _new_task_id()
+        _active_tasks[project_key] = task_id
+
+    # Past this point we own the slot — any failure to spawn the worker
+    # must release it, otherwise the project is permanently blocked.
+    try:
+        _write_status(project_path, _initial_status(task_id))
+        thread = threading.Thread(
+            target=_run_batch,
+            name=f"regen-all-{task_id}",
+            kwargs={
+                "task_id": task_id,
+                "project_dir": project_path,
+                "tts_caller": tts_caller,
+                "project_key": project_key,
+            },
+            daemon=True,
+        )
+        thread.start()
+    except Exception:
+        with _active_tasks_lock:
+            if _active_tasks.get(project_key) == task_id:
+                del _active_tasks[project_key]
+        raise
     return task_id
+
+
+def _release_active_slot(project_key: str | None, task_id: str) -> None:
+    """Idempotent: remove this batch's slot only if it still owns it."""
+    if project_key is None:
+        return
+    with _active_tasks_lock:
+        if _active_tasks.get(project_key) == task_id:
+            del _active_tasks[project_key]
 
 
 def _run_batch(
@@ -149,103 +209,118 @@ def _run_batch(
     task_id: str,
     project_dir: Path,
     tts_caller: SegmentTTSCaller | None,
+    project_key: str | None = None,
 ) -> None:
     """Thread body. Mirrors ``regenerate_all_dirty_segments`` semantics
     but writes per-segment progress to the status file and distinguishes
-    "per-segment failure (continue)" from "top-level crash (stage=failed)"."""
+    "per-segment failure (continue)" from "top-level crash (stage=failed)".
+
+    Releases the single-flight slot before writing each terminal status
+    snapshot so the "user sees completed → re-POST" path is never gated
+    on thread-teardown timing. The ``finally`` is a safety net for
+    unforeseen exceptions bubbling past the inner handlers.
+    """
     try:
-        status_map = load_segment_status(project_dir)
-    except Exception as exc:  # missing segment_status / unreadable JSON
-        logger.exception("regen batch %s: failed to load segment_status", task_id)
+        try:
+            status_map = load_segment_status(project_dir)
+        except Exception as exc:  # missing segment_status / unreadable JSON
+            logger.exception("regen batch %s: failed to load segment_status", task_id)
+            _release_active_slot(project_key, task_id)
+            _write_status(
+                project_dir,
+                {
+                    **_initial_status(task_id),
+                    "stage": "failed",
+                    "error": f"failed to load segment_status: {exc}"[:500],
+                    "updated_at": _utc_now_iso(),
+                },
+            )
+            return
+
+        eligible = sorted(
+            sid for sid, status in status_map.items()
+            if status in BATCH_REGENERATE_TRIGGER_STATUSES
+        )
+        total = len(eligible)
+        succeeded: list[str] = []
+        failed_ids: list[str] = []
+        failures: list[dict[str, str]] = []
+
+        # Initial running snapshot with known total.
         _write_status(
             project_dir,
             {
                 **_initial_status(task_id),
-                "stage": "failed",
-                "error": f"failed to load segment_status: {exc}"[:500],
-                "updated_at": _utc_now_iso(),
-            },
-        )
-        return
-
-    eligible = sorted(
-        sid for sid, status in status_map.items()
-        if status in BATCH_REGENERATE_TRIGGER_STATUSES
-    )
-    total = len(eligible)
-    succeeded: list[str] = []
-    failed_ids: list[str] = []
-    failures: list[dict[str, str]] = []
-
-    # Initial running snapshot with known total.
-    _write_status(
-        project_dir,
-        {
-            **_initial_status(task_id),
-            "stage": "running",
-            "total": total,
-            "updated_at": _utc_now_iso(),
-        },
-    )
-
-    for segment_id in eligible:
-        # "Current" snapshot so the UI can show "正在重合成 seg_042"
-        _write_status(
-            project_dir,
-            {
-                "task_id": task_id,
                 "stage": "running",
                 "total": total,
-                "succeeded_count": len(succeeded),
-                "failed_count": len(failures),
-                "succeeded_segment_ids": list(succeeded),
-                "failed_segment_ids": list(failed_ids),
-                "failures": list(failures),
-                "current_segment_id": segment_id,
-                "result": None,
-                "error": None,
                 "updated_at": _utc_now_iso(),
             },
         )
-        try:
-            regenerate_segment_tts(
-                project_dir, segment_id, tts_caller=tts_caller,
-            )
-            succeeded.append(segment_id)
-        except Exception as exc:
-            # Per-segment failure: log, record, continue (plan D38).
-            logger.info(
-                "regen batch %s: segment_id=%s failed: %s",
-                task_id, segment_id, exc,
-            )
-            failed_ids.append(segment_id)
-            failures.append(
-                {"segment_id": segment_id, "error": str(exc)[:300]}
-            )
 
-    # Completion snapshot with D38 summary.
-    summary = {
-        "total": total,
-        "succeeded_count": len(succeeded),
-        "failed_count": len(failures),
-        "succeeded_segment_ids": succeeded,
-        "failed_segment_ids": failed_ids,
-        "failures": failures,
-    }
-    _write_status(
-        project_dir,
-        {
-            "task_id": task_id,
-            "stage": "completed",
+        for segment_id in eligible:
+            # "Current" snapshot so the UI can show "正在重合成 seg_042"
+            _write_status(
+                project_dir,
+                {
+                    "task_id": task_id,
+                    "stage": "running",
+                    "total": total,
+                    "succeeded_count": len(succeeded),
+                    "failed_count": len(failures),
+                    "succeeded_segment_ids": list(succeeded),
+                    "failed_segment_ids": list(failed_ids),
+                    "failures": list(failures),
+                    "current_segment_id": segment_id,
+                    "result": None,
+                    "error": None,
+                    "updated_at": _utc_now_iso(),
+                },
+            )
+            try:
+                regenerate_segment_tts(
+                    project_dir, segment_id, tts_caller=tts_caller,
+                )
+                succeeded.append(segment_id)
+            except Exception as exc:
+                # Per-segment failure: log, record, continue (plan D38).
+                logger.info(
+                    "regen batch %s: segment_id=%s failed: %s",
+                    task_id, segment_id, exc,
+                )
+                failed_ids.append(segment_id)
+                failures.append(
+                    {"segment_id": segment_id, "error": str(exc)[:300]}
+                )
+
+        # Completion snapshot with D38 summary.
+        summary = {
             "total": total,
             "succeeded_count": len(succeeded),
             "failed_count": len(failures),
             "succeeded_segment_ids": succeeded,
             "failed_segment_ids": failed_ids,
             "failures": failures,
-            "current_segment_id": None,
-            "result": summary,
-            "error": None,
-            "updated_at": _utc_now_iso(),
-        },
-    )
+        }
+        # Release BEFORE writing "completed" so that once the frontend sees
+        # terminal state, the next POST is already unblocked.
+        _release_active_slot(project_key, task_id)
+        _write_status(
+            project_dir,
+            {
+                "task_id": task_id,
+                "stage": "completed",
+                "total": total,
+                "succeeded_count": len(succeeded),
+                "failed_count": len(failures),
+                "succeeded_segment_ids": succeeded,
+                "failed_segment_ids": failed_ids,
+                "failures": failures,
+                "current_segment_id": None,
+                "result": summary,
+                "error": None,
+                "updated_at": _utc_now_iso(),
+            },
+        )
+    finally:
+        # Safety net — idempotent via task_id identity check.
+        _release_active_slot(project_key, task_id)
