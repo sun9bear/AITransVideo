@@ -7,6 +7,9 @@ export interface VoiceSelectionSpeakerApproval {
   voiceId: string
   voiceSource: 'catalog' | 'cloned' | 'auto_matched'
   ttsProvider?: string
+  /** MiniMax 专属：用户在 UI 选择的音质档（turbo=高级 30pts/min, hd=旗舰 50pts/min）。
+   * 非 MiniMax provider 可不传。Gateway 据此聚合 job 级 quality_tier + tts_model。 */
+  minimaxModel?: 'turbo' | 'hd'
 }
 
 export async function approveVoiceSelection(
@@ -22,6 +25,7 @@ export async function approveVoiceSelection(
           voice_id: s.voiceId,
           voice_source: s.voiceSource,
           tts_provider: s.ttsProvider ?? '',
+          minimax_model: s.minimaxModel ?? null,
         })),
       },
     },

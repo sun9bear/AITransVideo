@@ -432,12 +432,19 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
     setIsSubmitting(true)
     setError(null)
     try {
-      const approvals: VoiceSelectionSpeakerApproval[] = speakers.map((sp) => ({
-        speakerId: sp.speakerId,
-        voiceId: voiceStates[sp.speakerId]?.voiceId ?? '',
-        voiceSource: voiceStates[sp.speakerId]?.voiceSource ?? 'catalog',
-        ttsProvider: voiceStates[sp.speakerId]?.selectedProvider ?? '',
-      }))
+      const approvals: VoiceSelectionSpeakerApproval[] = speakers.map((sp) => {
+        const st = voiceStates[sp.speakerId]
+        const ttsProvider = st?.selectedProvider ?? ''
+        return {
+          speakerId: sp.speakerId,
+          voiceId: st?.voiceId ?? '',
+          voiceSource: st?.voiceSource ?? 'catalog',
+          ttsProvider,
+          // Only meaningful for MiniMax — Gateway 据此聚合 job 级 quality_tier。
+          // 非 MiniMax speaker 传 undefined，避免误算成 flagship。
+          minimaxModel: ttsProvider === 'minimax' ? (st?.minimaxModel ?? 'turbo') : undefined,
+        }
+      })
       await approveVoiceSelection(jobId, approvals)
       onAdvanced()
     } catch (err) {

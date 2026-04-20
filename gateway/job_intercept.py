@@ -609,6 +609,14 @@ async def intercept_job_subresource(
     if subpath == "continue" and request.method == "POST":
         return await _continue_with_gateway_lock(request, job_id, db)
 
+    # V3-6 fix (2026-04-14): voice-selection/approve 要同步把用户选择的
+    # MiniMax 音质档（turbo=高级/hd=旗舰）写回 Gateway DB 的
+    # Job.tts_model 和 Job.metering_snapshot.quality_tier。
+    # 否则 UI 显示 30/50 点/分钟，但 settle 时读到硬编码 standard=15
+    # 就永远按最低档扣点，定价完全失效。
+    if subpath == "review/voice-selection/approve" and request.method == "POST":
+        return await _approve_voice_selection_with_quality_sync(request, job_id, db)
+
     # --- Studio post-edit endpoints (plan 2026-04-18 D29) ---
     # Two groups, both gated on the feature flag:
     #   1. State transitions (enter-edit / editing/cancel / editing/commit)
@@ -701,6 +709,134 @@ async def _continue_with_gateway_lock(
     # cheap; the important thing is that no future request is blocked
     # waiting on this txn.
     await db.commit()
+    return response
+
+
+def _aggregate_quality_tier_from_speakers(
+    speakers: list[dict],
+) -> tuple[str, str | None]:
+    """Aggregate per-speaker UI choices into a job-level (quality_tier, tts_model).
+
+    Rules:
+    - 任一 minimax speaker 选了 hd → ("flagship", "speech-2.8-hd")
+    - 有 minimax speaker 但全部是 turbo → ("high", "speech-2.8-turbo")
+    - 完全没有 minimax speaker → ("standard", None)  ← 保留原 tts_model
+
+    This matches the UI pricing display in VoiceSelectionPanel.tsx:681/688
+    (cpm.minimax_turbo=30pts/min from studio.high; cpm.minimax_hd=50pts/min
+    from studio.flagship). Jobs using only CosyVoice/VolcEngine stay at
+    studio.standard=15pts/min which is the frontend-advertised price for
+    those providers (voice_selection_api.py:241-242).
+    """
+    any_minimax = False
+    any_hd = False
+    for sp in speakers:
+        if not isinstance(sp, dict):
+            continue
+        provider = str(sp.get("tts_provider", "")).strip().lower()
+        if provider == "minimax":
+            any_minimax = True
+            model_hint = str(sp.get("minimax_model", "") or "").strip().lower()
+            if model_hint == "hd":
+                any_hd = True
+
+    if any_minimax and any_hd:
+        return ("flagship", "speech-2.8-hd")
+    if any_minimax:
+        return ("high", "speech-2.8-turbo")
+    return ("standard", None)
+
+
+async def _approve_voice_selection_with_quality_sync(
+    request: Request,
+    job_id: str,
+    db: AsyncSession,
+) -> Response:
+    """Intercept POST /review/voice-selection/approve to sync quality_tier + tts_model.
+
+    Flow:
+    1. Read and parse the request body to extract per-speaker minimax_model.
+    2. Forward the body unchanged to the upstream Job API (which writes
+       review_state.json for the pipeline).
+    3. If upstream returns 2xx, update Gateway DB:
+       - Job.tts_model (consumed by TTS generator at S4)
+       - Job.metering_snapshot.quality_tier (consumed by settle at capture)
+       - Job.metering_snapshot.per_speaker_provider (for provider-breakdown
+         audit; tracks the actual per-speaker provider mix)
+    4. Commit. If DB update fails, log but do NOT roll back upstream —
+       upstream already wrote review_state.json and the pipeline will run
+       with the (possibly stale) quality_tier; this is shadow-safe.
+
+    If upstream returns non-2xx, body is returned verbatim and no DB update.
+    """
+    body_bytes = await request.body()
+    try:
+        payload = json.loads(body_bytes) if body_bytes else {}
+    except Exception:
+        payload = {}
+
+    speakers = payload.get("speakers") if isinstance(payload, dict) else None
+    if not isinstance(speakers, list):
+        speakers = []
+
+    # Forward upstream with the ORIGINAL body unchanged. Upstream doesn't
+    # know about `minimax_model` but doesn't mind extra fields either.
+    response = await proxy_request(
+        request=request,
+        upstream_base=settings.job_api_upstream,
+        strip_prefix="/job-api",
+        override_body=body_bytes,
+    )
+
+    if not (200 <= response.status_code < 300):
+        return response
+
+    # Aggregate job-level quality_tier + tts_model from per-speaker choices.
+    tier, model = _aggregate_quality_tier_from_speakers(speakers)
+
+    try:
+        result = await db.execute(select(Job).where(Job.job_id == job_id))
+        job = result.scalar_one_or_none()
+        if job is None:
+            logger.info("voice-selection/approve: job %s not in Gateway DB, skip sync", job_id)
+            return response
+
+        snap = dict(job.metering_snapshot or {})
+        snap["quality_tier"] = tier
+        # Record per-speaker provider/model mix for audit (provider-breakdown
+        # today only shows job-default provider; this future-proofs the
+        # execution-provider view without requiring a schema change).
+        per_speaker_mix = []
+        for sp in speakers:
+            if not isinstance(sp, dict):
+                continue
+            per_speaker_mix.append({
+                "speaker_id": str(sp.get("speaker_id", "")),
+                "tts_provider": str(sp.get("tts_provider", "")),
+                "minimax_model": str(sp.get("minimax_model", "") or "") or None,
+            })
+        if per_speaker_mix:
+            snap["per_speaker_provider"] = per_speaker_mix
+        job.metering_snapshot = snap
+
+        # Only overwrite tts_model when a minimax speaker explicitly chose
+        # turbo/hd. For jobs using only CosyVoice/VolcEngine, keep whatever
+        # job_intercept.py:120 wrote at create time.
+        if model is not None:
+            job.tts_model = model
+
+        await db.commit()
+        logger.info(
+            "voice-selection/approve: job=%s tier=%s tts_model=%s speakers=%d",
+            job_id, tier, model or job.tts_model, len(speakers),
+        )
+    except Exception as exc:
+        logger.warning(
+            "voice-selection/approve: DB sync failed for %s: %s (non-fatal, upstream already accepted)",
+            job_id, exc,
+        )
+        await db.rollback()
+
     return response
 
 
