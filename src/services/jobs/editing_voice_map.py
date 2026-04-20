@@ -42,8 +42,8 @@ from typing import Any
 
 from services.jobs.editing import EDITING_SUBDIR, EditingConflictError
 from services.jobs.editing_segments import (
-    SEGMENT_STATUS_ACCEPTED,
     SEGMENT_STATUS_VOICE_DIRTY,
+    compute_residual_segment_status,
     mark_segment_status,
 )
 from services.jobs.input_validators import validate_segment_id
@@ -146,7 +146,13 @@ def clear_voice_override(
     segment_id: str,
 ) -> dict[str, Any]:
     """Remove the voice override for ``segment_id`` (segment reverts to
-    whatever the baseline says at commit time). Also clears voice_dirty.
+    whatever the baseline says at commit time).
+
+    Demotes segment_status via ``compute_residual_segment_status`` so a
+    still-edited cn_text (text_dirty) or surviving draft wav (tts_dirty)
+    is preserved — naive unconditional ``accepted`` would hide user
+    edits from batch re-TTS and ship stale audio (Claude Code
+    ultrareview #3 / CodeX P1).
 
     Idempotent — removing a segment with no override in the map succeeds.
     """
@@ -160,5 +166,8 @@ def clear_voice_override(
     voice_map = load_voice_map(project_dir)
     voice_map.pop(segment_id, None)
     _atomic_write_json(_voice_map_path(project_dir), voice_map)
-    mark_segment_status(project_dir, segment_id, SEGMENT_STATUS_ACCEPTED)
+    residual = compute_residual_segment_status(
+        project_dir, segment_id, assume_no_voice_override=True,
+    )
+    mark_segment_status(project_dir, segment_id, residual)
     return {"segment_id": segment_id, "cleared": True}

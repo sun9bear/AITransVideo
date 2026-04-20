@@ -43,6 +43,7 @@ __all__ = [
     "SEGMENT_STATUS_TTS_LOADING",
     "SUPPORTED_SEGMENT_STATUSES",
     "PATCHABLE_SEGMENT_FIELDS",
+    "compute_residual_segment_status",
     "load_editing_segments",
     "load_segment_status",
     "patch_editing_segment",
@@ -342,3 +343,84 @@ def mark_segment_status(
         current[segment_id] = status
     _atomic_write_json(_segment_status_path(project_dir), current)
     return current
+
+
+def _cn_text_differs_from_baseline(
+    project_dir: str | Path, segment_id: str,
+) -> bool:
+    """Does ``editing/segments.json[segment_id].cn_text`` differ from the
+    baseline ``editor/segments.json`` snapshot?
+
+    Returns False if either file is missing or the segment is absent in
+    either — conservative default (under-flag rather than over-flag).
+    """
+    baseline = Path(project_dir) / "editor" / "segments.json"
+    editing = _segments_path(project_dir)
+    if not baseline.is_file() or not editing.is_file():
+        return False
+    try:
+        base = json.loads(baseline.read_text(encoding="utf-8"))
+        edit = json.loads(editing.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(base, list) or not isinstance(edit, list):
+        return False
+    target = str(segment_id)
+    base_text: str | None = None
+    edit_text: str | None = None
+    for s in base:
+        if isinstance(s, dict) and str(s.get("segment_id")) == target:
+            base_text = str(s.get("cn_text") or "")
+            break
+    for s in edit:
+        if isinstance(s, dict) and str(s.get("segment_id")) == target:
+            edit_text = str(s.get("cn_text") or "")
+            break
+    if base_text is None or edit_text is None:
+        return False
+    return base_text != edit_text
+
+
+def compute_residual_segment_status(
+    project_dir: str | Path,
+    segment_id: str,
+    *,
+    assume_no_draft: bool = False,
+    assume_no_voice_override: bool = False,
+) -> str:
+    """Compute the segment_status a caller should settle on when one dirty
+    source is being removed.
+
+    Demoting a single-slot status blindly to ``accepted`` loses signal —
+    e.g. user edits cn_text (text_dirty), then changes voice (voice_dirty
+    clobbers), then clears voice: naive ``mark_segment_status(... accepted)``
+    leaves baseline audio running against an edited text. This helper
+    inspects the other possible dirty sources and picks the strongest
+    one still in effect.
+
+    ``assume_no_draft`` / ``assume_no_voice_override``: callers that have
+    just removed one of these sources pass True so the filesystem probe
+    for that source is skipped — the on-disk JSON may not have flushed
+    yet, and re-probing the state we just wrote would race.
+
+    Precedence (first active dirt wins):
+      tts_dirty   — draft wav exists on disk
+      voice_dirty — voice_map has an override for this segment
+      text_dirty  — editing cn_text differs from baseline
+      accepted    — none of the above
+    """
+    if not assume_no_draft:
+        draft_path = (
+            Path(project_dir) / EDITING_SUBDIR / "tts_segments_draft"
+            / f"{segment_id}.wav"
+        )
+        if draft_path.is_file():
+            return SEGMENT_STATUS_TTS_DIRTY
+    if not assume_no_voice_override:
+        # Late import to avoid editing_segments ↔ editing_voice_map cycle.
+        from services.jobs.editing_voice_map import load_voice_map
+        if segment_id in load_voice_map(project_dir):
+            return SEGMENT_STATUS_VOICE_DIRTY
+    if _cn_text_differs_from_baseline(project_dir, segment_id):
+        return SEGMENT_STATUS_TEXT_DIRTY
+    return SEGMENT_STATUS_ACCEPTED

@@ -40,6 +40,7 @@ from services.jobs.editing_segments import (
     SEGMENT_STATUS_TTS_DIRTY,
     SEGMENT_STATUS_TTS_FAILED,
     SEGMENT_STATUS_TTS_LOADING,
+    compute_residual_segment_status,
     load_editing_segments,
     load_segment_status,
     mark_segment_status,
@@ -240,12 +241,19 @@ def discard_draft_tts(
     project_dir: str | Path,
     segment_id: str,
 ) -> dict[str, Any]:
-    """User clicked "丢弃". Delete the draft file; clear dirty status.
+    """User clicked "丢弃". Delete the draft file; demote segment_status
+    to the correct residual dirty state.
 
     After this, the segment's effective audio is the baseline
-    ``editor/tts_segments/{sid}.wav`` (if present). Idempotent — running
-    twice on a missing draft does NOT raise (the admin force-cancel /
-    idle-cancel paths need the same cleanup shape)."""
+    ``editor/tts_segments/{sid}.wav`` (if present) UNLESS a residual
+    dirt source (text edit / voice override) still demands re-TTS —
+    in that case batch re-TTS will pick the segment up on the next
+    run. Unconditional ``accepted`` here would silently hide those
+    dirty sources and ship stale audio (Claude Code ultrareview #3 /
+    CodeX P1).
+
+    Idempotent — running twice on a missing draft does NOT raise (the
+    admin force-cancel / idle-cancel paths need the same cleanup shape)."""
     validate_segment_id(segment_id)
     draft = draft_audio_path(project_dir, segment_id)
     if draft.exists():
@@ -256,9 +264,10 @@ def discard_draft_tts(
                 "discard_draft_tts: failed to remove %s: %s", draft, exc
             )
             raise
-    status_map = mark_segment_status(
-        project_dir, segment_id, SEGMENT_STATUS_ACCEPTED
+    residual = compute_residual_segment_status(
+        project_dir, segment_id, assume_no_draft=True,
     )
+    status_map = mark_segment_status(project_dir, segment_id, residual)
     return {
         "segment_id": segment_id,
         "action": "discarded",

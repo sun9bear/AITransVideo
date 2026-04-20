@@ -323,6 +323,81 @@ def test_discard_idempotent_on_missing_draft(tmp_path: Path) -> None:
     assert result["segment_status"] == {}
 
 
+# ---------------------------------------------------------------------------
+# Bug (Claude Code ultrareview #3, CodeX P1 silent-data-error):
+# discard_draft_tts unconditionally writes SEGMENT_STATUS_ACCEPTED, even
+# when the text edit or voice override that triggered the regen is
+# still in place. Demoting to accepted hides the remaining dirt from
+# batch re-TTS → commit uses baseline audio against an edited cn_text.
+#
+# Fix: compute the residual dirty state after deleting the draft —
+# voice_dirty if voice_map still has an override / text_dirty if
+# editing cn_text still differs from baseline / else accepted.
+# ---------------------------------------------------------------------------
+
+
+def test_discard_draft_preserves_text_dirty_when_cn_text_differs(
+    tmp_path: Path,
+) -> None:
+    """User edits text, regens TTS, then discards the draft: segment
+    must revert to text_dirty (baseline audio no longer matches the
+    edited text)."""
+    from services.jobs.editing_segments import patch_editing_segment
+
+    _, project_dir = _build_editing_job(tmp_path)
+    patch_editing_segment(project_dir, "seg_001", {"cn_text": "new edited"})
+    caller = _fake_tts_caller_factory(b"DRAFT_AFTER_EDIT")
+    regenerate_segment_tts(project_dir, "seg_001", tts_caller=caller)
+    # After regen, status = tts_dirty (clobbered over text_dirty)
+    assert load_segment_status(project_dir).get("seg_001") == SEGMENT_STATUS_TTS_DIRTY
+
+    discard_draft_tts(project_dir, "seg_001")
+
+    status = load_segment_status(project_dir)
+    from services.jobs.editing_segments import SEGMENT_STATUS_TEXT_DIRTY
+    assert status == {"seg_001": SEGMENT_STATUS_TEXT_DIRTY}, (
+        f"discard_draft_tts stamped segment_status to {status!r} — user's "
+        "text edit is now invisible to batch re-TTS (silent data loss)"
+    )
+
+
+def test_discard_draft_preserves_voice_dirty_when_voice_override_remains(
+    tmp_path: Path,
+) -> None:
+    """User changes voice, regens TTS, then discards the draft: segment
+    must revert to voice_dirty so batch re-TTS will use the override."""
+    from services.jobs.editing_voice_map import set_voice_override
+    from services.jobs.editing_segments import SEGMENT_STATUS_VOICE_DIRTY
+
+    _, project_dir = _build_editing_job(tmp_path)
+    set_voice_override(project_dir, "seg_001", provider="minimax", voice_id="v1")
+    caller = _fake_tts_caller_factory(b"DRAFT_WITH_OVERRIDE")
+    regenerate_segment_tts(project_dir, "seg_001", tts_caller=caller)
+    assert load_segment_status(project_dir).get("seg_001") == SEGMENT_STATUS_TTS_DIRTY
+
+    discard_draft_tts(project_dir, "seg_001")
+
+    status = load_segment_status(project_dir)
+    assert status == {"seg_001": SEGMENT_STATUS_VOICE_DIRTY}, (
+        f"discard_draft_tts stamped segment_status to {status!r} — user's "
+        "voice override is no longer flagged as dirty (batch re-TTS skips it)"
+    )
+
+
+def test_discard_draft_goes_to_accepted_when_no_residual_dirt(
+    tmp_path: Path,
+) -> None:
+    """Baseline regression: a draft regenerated without any text edit or
+    voice change (force regen of a clean segment) discards to accepted."""
+    _, project_dir = _build_editing_job(tmp_path)
+    caller = _fake_tts_caller_factory(b"REGEN_CLEAN")
+    regenerate_segment_tts(project_dir, "seg_001", tts_caller=caller)
+
+    discard_draft_tts(project_dir, "seg_001")
+
+    assert load_segment_status(project_dir) == {}
+
+
 def test_accept_and_discard_reject_bad_sid(tmp_path: Path) -> None:
     _, project_dir = _build_editing_job(tmp_path)
     with pytest.raises(ValueError, match="invalid segment_id"):

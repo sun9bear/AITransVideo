@@ -145,6 +145,81 @@ def test_clear_voice_override_idempotent(tmp_path: Path) -> None:
     assert result["cleared"] is True
 
 
+# ---------------------------------------------------------------------------
+# Bug (Claude Code ultrareview #3, CodeX P1 silent-data-error):
+# clear_voice_override unconditionally writes SEGMENT_STATUS_ACCEPTED,
+# which stamps over a still-valid text_dirty / tts_dirty signal.
+#
+# Scenario: user edits cn_text (→ text_dirty), then changes voice
+# (→ voice_dirty — text_dirty clobbered in the single-slot status map),
+# then reverts the voice. Current code demotes to accepted even though
+# editing/segments.json still carries the edited cn_text. Batch re-TTS
+# skips the segment → commit ships baseline audio with stale text.
+# Silent data corruption — user's text edit vanishes from the rendered
+# output with no warning.
+#
+# Fix: demote to the residual dirty state (text_dirty if cn_text still
+# differs from baseline / tts_dirty if draft wav exists / else accepted).
+# ---------------------------------------------------------------------------
+
+
+def test_clear_voice_override_preserves_text_dirty_when_cn_text_differs(
+    tmp_path: Path,
+) -> None:
+    """After clearing voice override, a segment whose cn_text still differs
+    from the baseline must stay text_dirty so batch re-TTS picks it up."""
+    from services.jobs.editing_segments import patch_editing_segment
+
+    _, project_dir = _build_editing_job(tmp_path)
+    # Step 1: user edits cn_text — becomes text_dirty
+    patch_editing_segment(project_dir, "seg_001", {"cn_text": "edited text"})
+    assert load_segment_status(project_dir) == {"seg_001": SEGMENT_STATUS_TEXT_DIRTY}
+    # Step 2: user sets voice — status clobbered to voice_dirty
+    set_voice_override(project_dir, "seg_001", provider="minimax", voice_id="v1")
+    assert load_segment_status(project_dir) == {"seg_001": SEGMENT_STATUS_VOICE_DIRTY}
+    # Step 3: user clears voice — MUST demote to text_dirty (not accepted!)
+    clear_voice_override(project_dir, "seg_001")
+    status = load_segment_status(project_dir)
+    assert status == {"seg_001": SEGMENT_STATUS_TEXT_DIRTY}, (
+        f"clear_voice_override stamped segment_status to {status!r} — "
+        "user's text edit is now invisible to batch re-TTS (silent data loss)"
+    )
+
+
+def test_clear_voice_override_preserves_tts_dirty_when_draft_exists(
+    tmp_path: Path,
+) -> None:
+    """If a draft wav survives in tts_segments_draft/ (e.g. from an earlier
+    single-segment regen), clearing the voice override must leave the
+    segment at tts_dirty — the user still owes an accept/discard
+    decision for that audio."""
+    _, project_dir = _build_editing_job(tmp_path)
+    set_voice_override(project_dir, "seg_001", provider="minimax", voice_id="v1")
+    # Simulate a draft wav being present on disk
+    draft_dir = project_dir / EDITING_SUBDIR / "tts_segments_draft"
+    draft_dir.mkdir(parents=True, exist_ok=True)
+    (draft_dir / "seg_001.wav").write_bytes(b"DRAFT")
+
+    clear_voice_override(project_dir, "seg_001")
+    status = load_segment_status(project_dir)
+    assert status == {"seg_001": SEGMENT_STATUS_TTS_DIRTY}, (
+        f"draft wav still on disk but status={status!r} — user's draft "
+        "decision is lost from the UI"
+    )
+
+
+def test_clear_voice_override_goes_to_accepted_when_no_residual_dirt(
+    tmp_path: Path,
+) -> None:
+    """Baseline regression: clear voice override when nothing else is
+    dirty must go to accepted (equivalent to the old unconditional
+    behavior — this path is correct)."""
+    _, project_dir = _build_editing_job(tmp_path)
+    set_voice_override(project_dir, "seg_001", provider="minimax", voice_id="v1")
+    clear_voice_override(project_dir, "seg_001")
+    assert load_segment_status(project_dir) == {}  # accepted = absent from map
+
+
 def test_set_voice_override_rejects_empty(tmp_path: Path) -> None:
     _, project_dir = _build_editing_job(tmp_path)
     with pytest.raises(ValueError, match="provider must be non-empty"):
