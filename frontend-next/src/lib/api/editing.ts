@@ -173,7 +173,16 @@ export async function getEditingSegments(
 export async function patchSegmentText(
   jobId: string,
   segmentId: string,
-  patch: { cn_text?: string; translation_confirmed?: boolean; rewrite_requested?: boolean },
+  patch: {
+    cn_text?: string
+    translation_confirmed?: boolean
+    rewrite_requested?: boolean
+    /** 2026-04-20: speaker reassignment. Backend propagates voice_id +
+     *  tts_provider from the new speaker's baseline + clears any
+     *  stale voice_map override + flags voice_dirty. The response
+     *  mirrors the normal PATCH shape — treat exactly like cn_text. */
+    speaker_id?: string
+  },
 ): Promise<{ segment: EditingSegment; segment_status: Record<string, SegmentStatus> }> {
   return apiClient.post(
     `/jobs/${jobId}/segments/${segmentId}/update`,

@@ -161,6 +161,73 @@ export default function VideoEditPage() {
     [jobId],
   )
 
+  // ---- Speaker reassignment ----
+  // Backend propagates voice_id + tts_provider from the new speaker's
+  // baseline + clears any voice_map override on this segment + flags
+  // voice_dirty so batch re-TTS picks it up. Response carries the
+  // patched segment (with new voice_id/tts_provider) + refreshed
+  // segment_status — mirror both into local state and drop any stale
+  // voice_map entry for this segment.
+  const handleSpeakerChange = useCallback(
+    async (segmentId: string, speaker_id: string) => {
+      setSavingSegmentIds((prev) => new Set(prev).add(segmentId))
+      try {
+        const result = await patchSegmentText(jobId, segmentId, { speaker_id })
+        setResource((prev) =>
+          prev
+            ? {
+                ...prev,
+                segments: prev.segments.map((s) =>
+                  s.segment_id === segmentId
+                    ? {
+                        ...s,
+                        speaker_id,
+                        voice_id: result.segment?.voice_id ?? s.voice_id,
+                        tts_provider:
+                          result.segment?.tts_provider ?? s.tts_provider,
+                      }
+                    : s,
+                ),
+                segment_status: result.segment_status,
+              }
+            : prev,
+        )
+        // Voice_map override was cleared server-side — mirror locally
+        setVoiceMap((prev) => {
+          if (!(segmentId in prev)) return prev
+          const next = { ...prev }
+          delete next[segmentId]
+          return next
+        })
+        toast.success(`已改为说话人 ${speaker_id}；重合成时将使用其音色`)
+      } catch (error) {
+        toast.error(`改说话人失败: ${getErrorMessage(error)}`)
+      } finally {
+        setSavingSegmentIds((prev) => {
+          const next = new Set(prev)
+          next.delete(segmentId)
+          return next
+        })
+      }
+    },
+    [jobId],
+  )
+
+  // Distinct speaker ids currently present in the task — used to populate
+  // the speaker-reassignment dropdown. Stable ordering by first appearance.
+  const availableSpeakerIds = useMemo<string[]>(() => {
+    if (!resource) return []
+    const seen: string[] = []
+    const set = new Set<string>()
+    for (const s of resource.segments) {
+      const sid = s.speaker_id
+      if (!sid || set.has(sid)) continue
+      set.add(sid)
+      seen.push(sid)
+    }
+    return seen
+  }, [resource])
+
   // ---- Regenerate TTS ----
 
   const handleRegenerate = useCallback(
@@ -672,7 +739,9 @@ export default function VideoEditPage() {
                     isSaving={savingSegmentIds.has(seg.segment_id)}
                     isRegenerating={regeneratingSegmentIds.has(seg.segment_id)}
                     isActive={activeSegmentId === seg.segment_id}
+                    availableSpeakerIds={availableSpeakerIds}
                     onTextChange={handleTextChange}
+                    onSpeakerChange={handleSpeakerChange}
                     onRegenerate={handleRegenerate}
                     onAcceptDraft={handleAcceptDraft}
                     onDiscardDraft={handleDiscardDraft}
@@ -727,7 +796,11 @@ interface SegmentCardProps {
   /** True when the player is currently inside [start_ms, end_ms] of this
    *  segment (plan §9.2 usePlayerSegmentSync). Drives ring highlight. */
   isActive: boolean
+  /** All speaker_ids currently used somewhere in the task — populates
+   *  the reassignment dropdown. 2026-04-20: plan §7.4 speaker fix flow. */
+  availableSpeakerIds: string[]
   onTextChange: (segmentId: string, cnText: string) => void
+  onSpeakerChange: (segmentId: string, speakerId: string) => void
   onRegenerate: (segmentId: string) => void
   onAcceptDraft: (segmentId: string) => void
   onDiscardDraft: (segmentId: string) => void
@@ -744,7 +817,9 @@ function SegmentCard({
   isSaving,
   isRegenerating,
   isActive,
+  availableSpeakerIds,
   onTextChange,
+  onSpeakerChange,
   onRegenerate,
   onAcceptDraft,
   onDiscardDraft,
@@ -823,7 +898,34 @@ function SegmentCard({
             {timeLabel}
           </button>
         )}
-        {segment.speaker_id && <span>说话人 {segment.speaker_id}</span>}
+        {segment.speaker_id && (
+          <label className="inline-flex items-center gap-1">
+            <span>说话人</span>
+            {availableSpeakerIds.length > 1 ? (
+              <select
+                className="rounded border border-border bg-background px-1.5 py-0.5 text-xs text-foreground disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-1"
+                value={segment.speaker_id}
+                disabled={isSaving}
+                onChange={(e) => {
+                  const next = e.currentTarget.value
+                  if (next && next !== segment.speaker_id) {
+                    onSpeakerChange(segment.segment_id, next)
+                  }
+                }}
+                title="改说话人归属：重合成时自动换成新说话人的音色"
+                aria-label="修改该段说话人归属"
+              >
+                {availableSpeakerIds.map((sid) => (
+                  <option key={sid} value={sid}>
+                    {sid}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <span>{segment.speaker_id}</span>
+            )}
+          </label>
+        )}
         <StatusChip status={status} />
         {isAnomalous && (
           <span className="text-red-500" role="img" aria-label="时长异常">

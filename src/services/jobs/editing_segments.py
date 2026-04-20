@@ -76,6 +76,12 @@ PATCHABLE_SEGMENT_FIELDS: frozenset[str] = frozenset({
     "cn_text",
     "translation_confirmed",
     "rewrite_requested",
+    # 2026-04-20: speaker_id is patchable so users can fix S2-era
+    # misclassification ("this segment is actually speaker_b, not
+    # speaker_a"). The handler has extra coupling below: it propagates
+    # voice_id + tts_provider from the new speaker's baseline and clears
+    # any stale voice_map override on this segment.
+    "speaker_id",
     # voice_id changes go through the voice_map.json helper (T1-6), NOT this
     # patch path, so ``voice_id`` is intentionally excluded here.
 })
@@ -297,6 +303,15 @@ def patch_editing_segment(
             value = str(value)
         elif key in {"translation_confirmed", "rewrite_requested"}:
             value = bool(value)
+        elif key == "speaker_id":
+            # Speaker reassignment has extra coupling handled below
+            # (voice_id propagation + voice_map override clearing).
+            # Reject unknown speakers BEFORE writing any state so a bad
+            # request doesn't half-update the segment.
+            new_speaker_id = str(value).strip()
+            if not new_speaker_id:
+                continue
+            value = new_speaker_id
         updated[key] = value
         applied[key] = value
 
@@ -306,16 +321,104 @@ def patch_editing_segment(
             f"{sorted(PATCHABLE_SEGMENT_FIELDS)}"
         )
 
+    # Speaker reassignment side-effects — computed BEFORE persisting the
+    # patched segments list so failure here leaves disk untouched.
+    speaker_changed = (
+        "speaker_id" in applied
+        and applied["speaker_id"] != segments[index].get("speaker_id")
+    )
+    if speaker_changed:
+        _propagate_speaker_change(
+            segments=segments,
+            index=index,
+            updated=updated,
+            new_speaker_id=str(applied["speaker_id"]),
+        )
+    # Speaker set to same value → silent no-op drop so we don't flip status
+    elif "speaker_id" in applied and len(applied) == 1:
+        return segments[index]  # nothing actually changed
+
     segments[index] = updated
     _atomic_write_json(_segments_path(project_dir), segments)
 
-    # Any patch that touched cn_text invalidates the existing TTS; mark dirty.
-    # translation_confirmed / rewrite_requested flips alone don't change the
-    # rendered audio so they stay at whatever the previous status was.
-    if "cn_text" in applied:
+    # Status flip. cn_text edit → text_dirty; speaker change → voice_dirty
+    # (different voice coming, audio is stale). Both may apply — prefer
+    # voice_dirty when speaker changed since it's a stronger signal and
+    # the batch re-TTS trigger list catches both.
+    if speaker_changed:
+        # Clear any stale voice_map override — it was tied to the old
+        # speaker's voice pick. Import late to avoid module cycle.
+        from services.jobs.editing_voice_map import (
+            clear_voice_override,
+            load_voice_map,
+        )
+        if segment_id in load_voice_map(project_dir):
+            clear_voice_override(project_dir, segment_id)
+        mark_segment_status(project_dir, segment_id, SEGMENT_STATUS_VOICE_DIRTY)
+    elif "cn_text" in applied:
         mark_segment_status(project_dir, segment_id, SEGMENT_STATUS_TEXT_DIRTY)
 
     return updated
+
+
+def _propagate_speaker_change(
+    *,
+    segments: list[dict[str, Any]],
+    index: int,
+    updated: dict[str, Any],
+    new_speaker_id: str,
+) -> None:
+    """Mutate ``updated`` in-place with the new speaker's baseline voice.
+
+    Rules:
+    - The new speaker_id MUST already appear in ``segments`` (at least
+      one other segment uses it). This keeps the allowed-speakers set
+      tied to the task's actual speaker universe — no implicit speaker
+      creation, no upstream coordination with the pipeline's speaker
+      registry.
+    - Copy ``voice_id`` + ``tts_provider`` from the first other segment
+      of the new speaker. This makes re-synth automatically use the
+      new speaker's voice without the user also having to touch the
+      voice Tab.
+    - Preserve other baseline fields (cn_text / timing / etc.) on the
+      edited segment itself.
+    """
+    # Build universe of existing speakers → representative seg voice info
+    rep_voice_id: str | None = None
+    rep_tts_provider: str | None = None
+    known_speakers: set[str] = set()
+    for i, seg in enumerate(segments):
+        if not isinstance(seg, dict):
+            continue
+        sid = seg.get("speaker_id")
+        if not isinstance(sid, str):
+            continue
+        known_speakers.add(sid)
+        if sid == new_speaker_id and i != index and rep_voice_id is None:
+            vid = seg.get("voice_id")
+            prov = seg.get("tts_provider") or seg.get("provider")
+            if isinstance(vid, str) and vid:
+                rep_voice_id = vid
+            if isinstance(prov, str) and prov:
+                rep_tts_provider = prov
+
+    if new_speaker_id not in known_speakers:
+        raise ValueError(
+            f"speaker {new_speaker_id!r} not found in task; known: "
+            f"{sorted(known_speakers)}. "
+            "Cannot reassign to an unknown speaker — no implicit creation."
+        )
+
+    # Propagate voice if we found a rep. (Edge case: the speaker exists
+    # but only on the segment being edited, or all same-speaker segments
+    # lack voice_id — leave voice fields as-is; batch re-TTS + voice
+    # Tab's overlay will sort it out.)
+    if rep_voice_id:
+        updated["voice_id"] = rep_voice_id
+    if rep_tts_provider:
+        updated["tts_provider"] = rep_tts_provider
+        # Scrub the legacy key to avoid drift between the two names.
+        updated.pop("provider", None)
 
 
 def mark_segment_status(

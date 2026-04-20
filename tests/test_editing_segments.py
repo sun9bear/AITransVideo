@@ -334,6 +334,167 @@ def test_supported_segment_statuses_contract() -> None:
     # but IS a valid input (clears entry) — covered by the dedicated test.
 
 
+# ---------------------------------------------------------------------------
+# 2026-04-20: 修改说话人归属
+#
+# 用户场景："S2 审核时把第 5 段归错 speaker 了，editing 阶段想改正"。
+#
+# Semantics:
+#   - `speaker_id` becomes patchable via the same PATCH endpoint.
+#   - The new speaker_id MUST already exist in the task's segments
+#     (no implicit creation of new speakers).
+#   - **voice_id + tts_provider propagate automatically** from another
+#     segment of the new speaker, so re-synthesis uses the new
+#     speaker's voice without the user having to touch the voice Tab.
+#   - voice_map override on this segment is cleared (the old override
+#     was tied to the old speaker's voice pick).
+#   - segment_status flips to voice_dirty → batch re-TTS picks it up.
+# ---------------------------------------------------------------------------
+
+
+def _build_editing_job_with_voices(tmp_path: Path) -> tuple[Path, list[dict]]:
+    """Like _build_editing_job but segments carry voice_id + tts_provider
+    so we can test propagation on speaker change."""
+    project_dir = tmp_path / "projects" / "job_speaker_swap"
+    (project_dir / "editor").mkdir(parents=True)
+    baseline = [
+        {
+            "segment_id": "seg_001", "speaker_id": "speaker_a",
+            "cn_text": "段一", "source_text": "one",
+            "start_ms": 0, "end_ms": 1000,
+            "voice_id": "voice_a_pro", "tts_provider": "minimax",
+        },
+        {
+            "segment_id": "seg_002", "speaker_id": "speaker_b",
+            "cn_text": "段二", "source_text": "two",
+            "start_ms": 1000, "end_ms": 2000,
+            "voice_id": "voice_b_radio", "tts_provider": "cosyvoice",
+        },
+        {
+            "segment_id": "seg_003", "speaker_id": "speaker_a",
+            "cn_text": "段三", "source_text": "three",
+            "start_ms": 2000, "end_ms": 3000,
+            "voice_id": "voice_a_pro", "tts_provider": "minimax",
+        },
+    ]
+    (project_dir / "editor" / "segments.json").write_text(
+        json.dumps(baseline, ensure_ascii=False), encoding="utf-8",
+    )
+    now_iso = datetime.now(timezone.utc).isoformat()
+    record = JobRecord(
+        job_id="job_speaker_swap",
+        job_type="localize_video",
+        source_type="youtube_url",
+        source_ref="https://example.com/video",
+        output_target="editor",
+        speakers="auto",
+        voice_a=None,
+        voice_b=None,
+        status=JOB_STATUS_SUCCEEDED,
+        current_stage="completed",
+        progress_message=None,
+        created_at=now_iso,
+        updated_at=now_iso,
+        project_dir=str(project_dir),
+        service_mode="studio",
+    )
+    store = JobStore(tmp_path / "jobs")
+    store.save_job(record)
+    enter_editing(record, store)
+    return project_dir, baseline
+
+
+def test_patch_speaker_id_propagates_baseline_voice_from_new_speaker(
+    tmp_path: Path,
+) -> None:
+    """Change seg_001 from speaker_a → speaker_b. seg_001's voice_id +
+    tts_provider MUST become speaker_b's baseline (copied from seg_002)."""
+    project_dir, _ = _build_editing_job_with_voices(tmp_path)
+
+    updated = patch_editing_segment(
+        project_dir, "seg_001", {"speaker_id": "speaker_b"},
+    )
+
+    assert updated["speaker_id"] == "speaker_b"
+    assert updated["voice_id"] == "voice_b_radio", (
+        "voice_id should propagate from speaker_b's other segment"
+    )
+    assert updated["tts_provider"] == "cosyvoice"
+    # Persisted to disk
+    segs = load_editing_segments(project_dir)
+    seg1 = next(s for s in segs if s["segment_id"] == "seg_001")
+    assert seg1["speaker_id"] == "speaker_b"
+    assert seg1["voice_id"] == "voice_b_radio"
+    assert seg1["tts_provider"] == "cosyvoice"
+
+
+def test_patch_speaker_id_flags_voice_dirty(tmp_path: Path) -> None:
+    """Change of speaker_id triggers voice_dirty so batch re-TTS picks
+    the segment up (audio needs to be re-generated with new voice)."""
+    from services.jobs.editing_segments import SEGMENT_STATUS_VOICE_DIRTY
+    project_dir, _ = _build_editing_job_with_voices(tmp_path)
+
+    patch_editing_segment(project_dir, "seg_001", {"speaker_id": "speaker_b"})
+
+    status = load_segment_status(project_dir)
+    assert status.get("seg_001") == SEGMENT_STATUS_VOICE_DIRTY
+
+
+def test_patch_speaker_id_clears_existing_voice_map_override(
+    tmp_path: Path,
+) -> None:
+    """If the segment had an explicit voice_map override tied to the old
+    speaker, it's stale the moment speaker_id changes. Clear it so the
+    fresh baseline voice_id (propagated above) is what re-synth uses."""
+    from services.jobs.editing_voice_map import (
+        load_voice_map,
+        set_voice_override,
+    )
+    project_dir, _ = _build_editing_job_with_voices(tmp_path)
+    # Pre-existing override pointing at a speaker_a voice
+    set_voice_override(
+        project_dir, "seg_001",
+        provider="minimax", voice_id="voice_a_special",
+    )
+    assert "seg_001" in load_voice_map(project_dir)
+
+    patch_editing_segment(project_dir, "seg_001", {"speaker_id": "speaker_b"})
+
+    # Override cleared
+    assert "seg_001" not in load_voice_map(project_dir), (
+        "stale voice_map override must be cleared when speaker changes"
+    )
+
+
+def test_patch_speaker_id_rejects_unknown_speaker(tmp_path: Path) -> None:
+    """The new speaker_id must already exist in the task's segments.
+    No implicit speaker creation (keeps voice-selection / speaker
+    profile invariants intact)."""
+    project_dir, _ = _build_editing_job_with_voices(tmp_path)
+
+    with pytest.raises(ValueError, match="speaker.*not found|unknown speaker"):
+        patch_editing_segment(
+            project_dir, "seg_001", {"speaker_id": "speaker_zzz"},
+        )
+    # seg_001 unchanged on disk
+    segs = load_editing_segments(project_dir)
+    seg1 = next(s for s in segs if s["segment_id"] == "seg_001")
+    assert seg1["speaker_id"] == "speaker_a"
+
+
+def test_patch_speaker_id_noop_when_same_value(tmp_path: Path) -> None:
+    """Setting speaker_id to its current value is a no-op — no status
+    flip, no voice_map clearing. (Avoid spurious voice_dirty marks on
+    accidental UI re-submits.)"""
+    project_dir, _ = _build_editing_job_with_voices(tmp_path)
+
+    patch_editing_segment(
+        project_dir, "seg_001", {"speaker_id": "speaker_a"},  # same
+    )
+    status = load_segment_status(project_dir)
+    assert "seg_001" not in status, "no-op speaker patch must not flip status"
+
+
 def test_patchable_fields_contract() -> None:
     """voice_id deliberately excluded — goes through voice_map.json in T1-6."""
     assert "cn_text" in PATCHABLE_SEGMENT_FIELDS
