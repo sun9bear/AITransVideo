@@ -10,9 +10,6 @@ import shutil
 import subprocess
 import tempfile
 
-from pydub import AudioSegment
-from pydub.effects import normalize
-
 from modules.output.editor.editor_package_models import (
     ALIGNMENT_METHOD_LABELS,
     AlignedSegment,
@@ -98,24 +95,28 @@ class EditorPackageWriter:
         return copied_paths
 
     def _compose_full_audio(self, output: ProjectOutput, segment_paths: dict[int, str]) -> str:
+        """Compose the complete dubbed audio by streaming segments via
+        ffmpeg's amix/adelay graph.
+
+        Used to fall back to a pydub overlay path when ffmpeg was
+        unavailable. That fallback was a silent 3h-duration AudioSegment
+        + per-segment overlays in memory — 4-6 GB RSS on long inputs →
+        OOM. Ffmpeg is a hard dependency elsewhere in the pipeline
+        (download → audio extraction, alignment, render), so if it's
+        truly missing the task can't succeed at all; prefer a clear
+        error here over a memory-unsafe fallback.
+        """
         output_root = self._resolve_output_root(output)
         output_root.mkdir(parents=True, exist_ok=True)
         output_path = output_root / "dubbed_audio_complete.wav"
         try:
             self._compose_full_audio_with_ffmpeg(output, segment_paths, output_path)
-        except FileNotFoundError:
-            full_audio = (
-                AudioSegment.silent(
-                    duration=output.total_duration_ms,
-                    frame_rate=44_100,
-                )
-                .set_channels(2)
-                .set_sample_width(2)
-            )
-            for segment in self._sorted_segments(output):
-                dubbed = AudioSegment.from_wav(segment_paths[segment.segment_id])
-                full_audio = full_audio.overlay(dubbed, position=segment.start_ms)
-            full_audio.export(output_path, format="wav")
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "ffmpeg is required to compose dubbed audio but was not found "
+                "on PATH. Install ffmpeg (same binary the rest of the pipeline "
+                "uses)."
+            ) from exc
 
         self._normalize_full_output_audio(output_path)
         return self._ensure_jianying_compatible(str(output_path))
@@ -144,14 +145,16 @@ class EditorPackageWriter:
                 ],
                 capture_output=True, check=True,
             )
-        except (FileNotFoundError, subprocess.CalledProcessError):
-            # Fallback to pydub if ffmpeg unavailable
-            ambient_audio = (
-                AudioSegment.silent(duration=output.total_duration_ms, frame_rate=44_100)
-                .set_channels(2)
-                .set_sample_width(2)
-            )
-            ambient_audio.export(output_path, format="wav")
+        except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+            # Same reasoning as _compose_full_audio — the pydub fallback
+            # here was a silent AudioSegment of the full duration (up to
+            # ~1 GB for 3h stereo 44.1k) and OOM'd on long jobs. ffmpeg
+            # is a hard dependency across the pipeline; prefer a clear
+            # failure to a memory-unsafe fallback.
+            raise RuntimeError(
+                "ffmpeg is required to synthesize silent ambient audio but "
+                "failed. Install / verify ffmpeg on PATH."
+            ) from exc
         return str(output_path.resolve(strict=False))
 
     def _compose_full_audio_with_ffmpeg(
@@ -241,15 +244,68 @@ class EditorPackageWriter:
             raise RuntimeError(f"ffmpeg 合成完整配音失败：{stderr}")
 
     def _normalize_full_output_audio(self, output_path: Path) -> None:
+        """Peak-normalize the dubbed audio in place, equivalent to
+        ``pydub.effects.normalize(audio, headroom=1.0)`` but via ffmpeg
+        so multi-hour inputs don't balloon RSS.
+
+        2026-04-20 OOM fix: the old pydub path loaded the full WAV (~1 GB
+        raw PCM for 3h stereo 44.1k), cloned for `normalize`, hitting the
+        7.6 GB container limit on long jobs. ffmpeg's ``volumedetect``
+        filter streams a single pass to emit max_volume; if normalization
+        is needed, a second streaming pass applies ``volume=<gain> dB``.
+        Python memory stays O(1).
+
+        Target: peak at -1.0 dBFS (headroom=1.0). Skip if audio is silent,
+        already close to peak (max ≥ -3 dBFS), or volumedetect fails —
+        matches the original pydub skip conditions.
+        """
         if not output_path.exists():
             return
 
-        audio = AudioSegment.from_wav(output_path)
-        if audio.rms == 0 or audio.max_dBFS == float("-inf") or audio.max_dBFS >= -3.0:
+        max_db = _ffmpeg_max_volume_db(output_path)
+        if max_db is None:
+            # volumedetect couldn't decide — leave audio untouched, same as
+            # the old path's "rms == 0 or max_dBFS == -inf" early-return.
             return
+        if max_db >= -3.0:
+            return  # already loud enough, no normalization needed
 
-        normalized_audio = normalize(audio, headroom=1.0)
-        normalized_audio.export(output_path, format="wav")
+        target_peak_db = -1.0  # headroom=1.0
+        gain_db = target_peak_db - max_db
+        if gain_db <= 0.0:
+            return  # guard — shouldn't happen given max_db check above
+
+        # Write normalized output to a temp file and swap atomically
+        # (don't corrupt the source on ffmpeg failure / crash).
+        tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg", "-y",
+                    "-i", str(output_path),
+                    "-af", f"volume={gain_db:.2f}dB",
+                    "-sample_fmt", "s16",
+                    "-f", "wav",
+                    str(tmp_path),
+                ],
+                check=True,
+                capture_output=True,
+                timeout=1800,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+            # Leave source intact on failure; loudness mismatch is a cosmetic
+            # issue, not a blocker for delivery.
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+            logger.warning(
+                "ffmpeg normalize failed for %s; keeping original",
+                output_path,
+            )
+            return
+        tmp_path.replace(output_path)
         print("[S6] 完整配音响度校正完成")
 
     def _write_srt(self, output: ProjectOutput) -> tuple[str, str, str]:
@@ -309,15 +365,25 @@ class EditorPackageWriter:
         return str(output_path.resolve(strict=False))
 
     def _detect_background_sounds(self, output: ProjectOutput) -> str:
+        """Detect louder-than-silence content in gaps between speech
+        segments — used to surface "这一段大概是掌声/笑声/音效" hints
+        for manual post-edit in 剪映.
+
+        2026-04-20 OOM fix: the old path loaded the full original.wav
+        (3h ≈ 1 GB raw, pydub clones took it to 4-6 GB). Replaced with
+        per-gap ffmpeg ``astats`` probes — each gap is a few-second
+        window, streaming subprocess reads only that slice, O(1) python
+        memory. Per-gap subprocess cost is ~100 ms; a 3h task with ~300
+        gaps adds ~30 s to publish — acceptable for a report file.
+        """
         output_root = self._resolve_output_root(output)
         output_root.mkdir(parents=True, exist_ok=True)
 
         gaps = self._collect_gaps(output)
         reference_audio_path = self._resolve_background_reference_audio_path(output)
-        original_audio = AudioSegment.from_wav(reference_audio_path) if reference_audio_path is not None else None
 
         findings: list[str] = []
-        if original_audio is None:
+        if reference_audio_path is None:
             for gap_start_ms, gap_end_ms in gaps:
                 findings.append(
                     f"{self._format_gap_timestamp(gap_start_ms)} → {self._format_gap_timestamp(gap_end_ms)}  "
@@ -325,14 +391,15 @@ class EditorPackageWriter:
                 )
         else:
             for gap_start_ms, gap_end_ms in gaps:
-                gap_audio = original_audio[gap_start_ms:gap_end_ms]
-                if gap_audio.rms == 0:
-                    continue
-                gap_dbfs = gap_audio.dBFS
-                if gap_dbfs > -40:
+                rms_db = _ffmpeg_gap_rms_db(
+                    reference_audio_path, gap_start_ms, gap_end_ms,
+                )
+                if rms_db is None:
+                    continue  # silent or probe failed
+                if rms_db > -40:
                     findings.append(
                         f"{self._format_gap_timestamp(gap_start_ms)} → {self._format_gap_timestamp(gap_end_ms)}  "
-                        f"[RMS: {round(gap_dbfs)}dBFS，可能是掌声/笑声/音效]"
+                        f"[RMS: {round(rms_db)}dBFS，可能是掌声/笑声/音效]"
                     )
 
         lines = [
@@ -758,3 +825,93 @@ class EditorPackageWriter:
         if segment.alignment_method == "dsp":
             return "DSP变速，请复查节奏"
         return "已标记人工复查"
+
+
+# ---------------------------------------------------------------------------
+# ffmpeg streaming helpers (2026-04-20 OOM-safe rewrite of what were
+# pydub full-buffer operations). All of these run one or more ffmpeg
+# subprocesses that stream through the audio; python memory is O(1)
+# regardless of source length.
+# ---------------------------------------------------------------------------
+
+
+_MAX_VOLUME_RE = re.compile(r"max_volume:\s*(-?\d+(?:\.\d+)?)\s*dB", re.IGNORECASE)
+_RMS_LEVEL_RE = re.compile(r"RMS\s*level\s*dB:\s*(-?\d+(?:\.\d+)?)", re.IGNORECASE)
+
+
+def _ffmpeg_max_volume_db(source_path: Path) -> float | None:
+    """Return peak-level (max_volume) in dBFS, or None if probe failed /
+    audio is silent. Streaming — O(1) memory regardless of input length."""
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-nostats", "-hide_banner",
+                "-i", str(source_path),
+                "-af", "volumedetect",
+                "-vn",
+                "-f", "null",
+                "-",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=1800,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+    # volumedetect writes to stderr regardless of returncode
+    stderr = result.stderr or ""
+    match = _MAX_VOLUME_RE.search(stderr)
+    if not match:
+        return None
+    try:
+        return float(match.group(1))
+    except (TypeError, ValueError):
+        return None
+
+
+def _ffmpeg_gap_rms_db(
+    source_path: Path, start_ms: int, end_ms: int,
+) -> float | None:
+    """RMS level (dBFS) for the `[start_ms, end_ms]` slice of ``source_path``.
+
+    Returns None on silence, probe failure, or zero-duration windows
+    (caller should treat that as "skip this gap"). Each call is a single
+    short ffmpeg invocation (typically <200 ms for a few-second slice);
+    python memory is O(1)."""
+    duration_ms = end_ms - start_ms
+    if duration_ms <= 0:
+        return None
+    start_s = max(0, start_ms) / 1000.0
+    duration_s = duration_ms / 1000.0
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-nostats", "-hide_banner",
+                "-ss", f"{start_s:.3f}",
+                "-t", f"{duration_s:.3f}",
+                "-i", str(source_path),
+                "-af", "astats=metadata=0:measure_overall=RMS_level",
+                "-vn",
+                "-f", "null",
+                "-",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+    stderr = result.stderr or ""
+    match = _RMS_LEVEL_RE.search(stderr)
+    if not match:
+        return None
+    try:
+        rms = float(match.group(1))
+    except (TypeError, ValueError):
+        return None
+    # astats reports -inf for silent windows — caller should skip.
+    if rms == float("-inf") or rms <= -120.0:
+        return None
+    return rms
