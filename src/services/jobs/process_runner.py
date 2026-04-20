@@ -75,7 +75,21 @@ STAGE_LOG_PATTERN = re.compile(r"^\[(?:RESUME/)?(S[0-9]+)\]\s*(.*)$")
 DOWNLOAD_PROGRESS_PATTERN = re.compile(r"^\[download\]\s*(.+)$", re.IGNORECASE)
 # Path inference patterns for both Windows and POSIX absolute paths in stdout logs.
 WINDOWS_PATH_PATTERN = re.compile(r"([A-Za-z]:[\\/][^\r\n]+)")
-POSIX_PATH_PATTERN = re.compile(r"(/[a-zA-Z0-9_][^\r\n\s]*)")
+
+# POSIX paths in pipeline stdout. 2026-04-20 hardening: the previous
+# pattern ``(/[a-zA-Z0-9_][^\r\n\s]*)`` was matching "/s" inside
+# bytes-per-second units like "55.88KiB/s" — such matches then
+# poisoned JobRecord.project_dir via the bootstrap write-once
+# identity rule. Fix:
+#
+# - negative lookbehind ``(?<![A-Za-z0-9._])`` requires the `/` to NOT
+#   follow an alphanumeric/dot/underscore, so `B/s`, `KiB/s`,
+#   `version1.0/foo` etc. are rejected while `cd /opt/...` and
+#   `项目目录：/opt/...` still match.
+# - post-regex `_is_plausible_project_dir` check further rejects
+#   single-segment ("/s") or suspiciously short candidates — real
+#   project dirs are always nested under /opt/aivideotrans/app/....
+POSIX_PATH_PATTERN = re.compile(r"(?<![A-Za-z0-9._])(/[a-zA-Z0-9_][^\r\n\s]*)")
 STAGE_CODE_MAP = {
     "S0": STAGE_INGESTION,
     "S1": STAGE_MEDIA_UNDERSTANDING,
@@ -629,6 +643,26 @@ def _parse_web_review_marker(line: str) -> dict[str, object] | None:
     return payload
 
 
+def _is_plausible_project_dir(candidate: str) -> bool:
+    """Defense-in-depth validator. Real project dirs always look like
+    ``/opt/aivideotrans/app/projects/<uuid>/job_xxx`` — nested, length
+    well over 20 chars. A single-slash candidate like ``/s`` or ``/tmp``
+    came from regex noise, not a real path announcement. Reject.
+
+    Criteria:
+      - starts with '/'
+      - total length ≥ 4 (so at least ``/abc``)
+      - contains at least 2 slashes (so at least ``/foo/bar``)
+    """
+    if not candidate or not candidate.startswith("/"):
+        return False
+    if len(candidate) < 4:
+        return False
+    if candidate.count("/") < 2:
+        return False
+    return True
+
+
 def _parse_project_dir_from_line(line: str, project_root: Path) -> str | None:
     # Try Windows paths first, then POSIX
     path_candidates = WINDOWS_PATH_PATTERN.findall(line)
@@ -646,9 +680,16 @@ def _parse_project_dir_from_line(line: str, project_root: Path) -> str | None:
         # through Windows Path which would mangle /opt → D:\opt
         import posixpath
         basename = posixpath.basename(raw_candidate)
-        if basename.lower() == "output":
-            return posixpath.dirname(raw_candidate)
-        return raw_candidate
+        result = (
+            posixpath.dirname(raw_candidate)
+            if basename.lower() == "output"
+            else raw_candidate
+        )
+        # Reject obviously-wrong single-segment candidates so fresh
+        # submits don't bootstrap JobRecord.project_dir to garbage.
+        if not _is_plausible_project_dir(result):
+            return None
+        return result
 
     # Windows path — use existing normalize logic
     normalized_candidate = _normalize_path_text(raw_candidate, project_root)

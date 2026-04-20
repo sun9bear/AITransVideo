@@ -89,6 +89,80 @@ def test_parse_project_dir_returns_none_for_no_path() -> None:
     assert _parse_project_dir_from_line("[S3] Translating...", Path(".")) is None
 
 
+# -------------------------------------------------------------------
+# 2026-04-20 regression: yt-dlp progress lines like
+#   "[download]   0.0% of   30.40MiB at   55.88KiB/s ETA 09:17"
+# contain "/s" (bytes-per-second unit) which the POSIX path regex
+# `(/[a-zA-Z0-9_][^\r\n\s]*)` was happily matching as a path. For
+# fresh submits the JobRecord.project_dir was bootstrapped to "/s"
+# from the first download progress tick (before the pipeline printed
+# `项目目录：...`), then locked write-once by the identity guard,
+# breaking every downstream endpoint that reads project_dir.
+#
+# Fix: tighten the POSIX regex so matches are only considered when
+# the "/" is NOT preceded by an alphanumeric (`B/s` stays garbage,
+# `cd /opt/xxx` / `项目目录：/opt/xxx` still match), AND require a
+# minimum of 2 path segments (real project dirs are always
+# `/opt/aivideotrans/app/projects/...`, never single-segment).
+# -------------------------------------------------------------------
+
+
+def test_parse_project_dir_rejects_ytdlp_kib_per_second_unit() -> None:
+    """Slash inside `55.88KiB/s` is NOT a path — rejecting this is the
+    main regression this commit fixes."""
+    line = "[download]   0.0% of   30.40MiB at   55.88KiB/s ETA 09:17"
+    assert _parse_project_dir_from_line(line, Path(".")) is None, (
+        "`/s` in `KiB/s` was matched as a project dir and locked "
+        "JobRecord.project_dir to `/s` forever (identity write-once)."
+    )
+
+
+def test_parse_project_dir_rejects_mib_per_second_unit() -> None:
+    line = "[download]  50% at 2.1MiB/s ETA 00:05"
+    assert _parse_project_dir_from_line(line, Path(".")) is None
+
+
+def test_parse_project_dir_rejects_single_segment_path() -> None:
+    """Even with a clean leading space, `/s` alone is not a legitimate
+    project dir — they're always nested (/opt/app/projects/...).
+    Defense-in-depth against regex edge cases we haven't thought of."""
+    assert _parse_project_dir_from_line("ok /s done", Path(".")) is None
+    assert _parse_project_dir_from_line("trailing /x", Path(".")) is None
+
+
+def test_parse_project_dir_rejects_short_path_in_youtube_url() -> None:
+    """Regression guard: even if the Windows regex happens to match
+    `s:/www.youtube...` on a Windows dev machine (drive-letter
+    heuristic), or the POSIX regex picks out some short fragment,
+    the result must not be `/s` specifically — that's the exact
+    production symptom. Production containers always run POSIX so
+    the Windows branch is purely academic."""
+    line = "[download] https://www.youtube.com/watch?v=hhuaVsOAMFc"
+    result = _parse_project_dir_from_line(line, Path("."))
+    assert result != "/s", (
+        f"YouTube URL line collapsed to /s — same failure mode as "
+        f"KiB/s: {result!r}"
+    )
+
+
+def test_parse_project_dir_still_accepts_legit_pipeline_announcement() -> None:
+    """Regression guard: the happy path — `项目目录：/opt/aivideotrans/...`
+    MUST continue to parse correctly after the tightening."""
+    line = "项目目录：/opt/aivideotrans/app/projects/uuid/job_xxx"
+    assert (
+        _parse_project_dir_from_line(line, Path("."))
+        == "/opt/aivideotrans/app/projects/uuid/job_xxx"
+    )
+
+
+def test_parse_project_dir_still_accepts_cd_style_output() -> None:
+    line = "cd /opt/aivideotrans/data/projects/demo"
+    assert (
+        _parse_project_dir_from_line(line, Path("."))
+        == "/opt/aivideotrans/data/projects/demo"
+    )
+
+
 # ===================================================================
 # _resolve_stage_from_log_line — progress_message isolation
 #
