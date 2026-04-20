@@ -495,6 +495,104 @@ def test_patch_speaker_id_noop_when_same_value(tmp_path: Path) -> None:
     assert "seg_001" not in status, "no-op speaker patch must not flip status"
 
 
+# ---------------------------------------------------------------------------
+# CodeX nit finding 2026-04-20: _propagate_speaker_change 采样门闩过早关闭
+#
+# 原 gate: ``rep_voice_id is None`` → 一旦 voice_id 落位就停止扫描。
+# 问题：如果新 speaker 的第 1 个同伴段是 legacy 数据（只有 voice_id，
+# 没有 tts_provider / 老字段 provider），rep_voice_id 立刻填满，后面
+# 即使有带 tts_provider 的同 speaker 段也采不到。写回时 voice_id 换
+# 新、tts_provider 维持旧 speaker 的值 → provider/voice_id 不匹配，
+# re-TTS 时要么路由失败，要么发错声。
+#
+# 修法：门闩改 OR：``rep_voice_id is None or rep_tts_provider is None``，
+# 继续扫直到两项都有值。函数里的 isinstance+非空 guard 已经防止覆盖
+# 先前成功采到的字段。
+# ---------------------------------------------------------------------------
+
+
+def test_propagate_speaker_change_samples_provider_from_later_segment(
+    tmp_path: Path,
+) -> None:
+    """新 speaker_b 的两个同伴段：seg_002 legacy（只有 voice_id，无
+    tts_provider），seg_004 完整（voice_id + tts_provider）。改
+    seg_001 → speaker_b 时，voice_id 要采 seg_002（按扫描顺序最先
+    落位），但 tts_provider 必须从 seg_004 采到——原 gate 会在 seg_002
+    之后关闭采样，tts_provider 保持 None → 写回时 voice_id 换新、
+    tts_provider 被遗弃，导致 provider/voice_id 不匹配。"""
+    project_dir = tmp_path / "projects" / "job_nit"
+    (project_dir / "editor").mkdir(parents=True)
+    baseline = [
+        {
+            "segment_id": "seg_001", "speaker_id": "speaker_a",
+            "cn_text": "一", "source_text": "one",
+            "start_ms": 0, "end_ms": 1000,
+            "voice_id": "va_pro", "tts_provider": "minimax",
+        },
+        {
+            # Legacy segment of speaker_b: has voice_id but NO tts_provider.
+            # The first scanned same-speaker segment.
+            "segment_id": "seg_002", "speaker_id": "speaker_b",
+            "cn_text": "二", "source_text": "two",
+            "start_ms": 1000, "end_ms": 2000,
+            "voice_id": "vb_radio",
+        },
+        {
+            "segment_id": "seg_003", "speaker_id": "speaker_a",
+            "cn_text": "三", "source_text": "three",
+            "start_ms": 2000, "end_ms": 3000,
+            "voice_id": "va_pro", "tts_provider": "minimax",
+        },
+        {
+            # Full segment of speaker_b — later in scan order. Must be
+            # reached so tts_provider can be propagated.
+            "segment_id": "seg_004", "speaker_id": "speaker_b",
+            "cn_text": "四", "source_text": "four",
+            "start_ms": 3000, "end_ms": 4000,
+            "voice_id": "vb_radio", "tts_provider": "cosyvoice",
+        },
+    ]
+    (project_dir / "editor" / "segments.json").write_text(
+        json.dumps(baseline, ensure_ascii=False), encoding="utf-8",
+    )
+    now_iso = datetime.now(timezone.utc).isoformat()
+    record = JobRecord(
+        job_id="job_nit",
+        job_type="localize_video",
+        source_type="youtube_url",
+        source_ref="https://example.com/video",
+        output_target="editor",
+        speakers="auto",
+        voice_a=None,
+        voice_b=None,
+        status=JOB_STATUS_SUCCEEDED,
+        current_stage="completed",
+        progress_message=None,
+        created_at=now_iso,
+        updated_at=now_iso,
+        project_dir=str(project_dir),
+        service_mode="studio",
+    )
+    store = JobStore(tmp_path / "jobs")
+    store.save_job(record)
+    enter_editing(record, store)
+
+    updated = patch_editing_segment(
+        project_dir, "seg_001", {"speaker_id": "speaker_b"},
+    )
+
+    assert updated["voice_id"] == "vb_radio", (
+        f"voice_id should propagate from a speaker_b segment (seg_002 "
+        f"or seg_004); got {updated.get('voice_id')!r}"
+    )
+    assert updated["tts_provider"] == "cosyvoice", (
+        "tts_provider MUST propagate from seg_004 — the gate must keep "
+        "scanning past seg_002 (which has no tts_provider) until both "
+        "fields are filled. Stale tts_provider would leave "
+        f"provider/voice_id mismatched. got {updated.get('tts_provider')!r}"
+    )
+
+
 def test_patchable_fields_contract() -> None:
     """voice_id deliberately excluded — goes through voice_map.json in T1-6."""
     assert "cn_text" in PATCHABLE_SEGMENT_FIELDS

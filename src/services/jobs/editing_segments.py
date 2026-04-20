@@ -383,7 +383,14 @@ def _propagate_speaker_change(
     - Preserve other baseline fields (cn_text / timing / etc.) on the
       edited segment itself.
     """
-    # Build universe of existing speakers → representative seg voice info
+    # Build universe of existing speakers → representative seg voice info.
+    # Scan same-speaker segments until BOTH voice_id and tts_provider are
+    # filled — not just voice_id. CodeX nit 2026-04-20: if the first
+    # same-speaker segment is legacy data (voice_id only, no tts_provider),
+    # stopping at voice_id leaves rep_tts_provider=None, which then leaks
+    # the old speaker's tts_provider through on write-back. The
+    # `isinstance(...) and <value>` guards below prevent already-filled
+    # fields from being clobbered by empty strings on later segments.
     rep_voice_id: str | None = None
     rep_tts_provider: str | None = None
     known_speakers: set[str] = set()
@@ -394,12 +401,16 @@ def _propagate_speaker_change(
         if not isinstance(sid, str):
             continue
         known_speakers.add(sid)
-        if sid == new_speaker_id and i != index and rep_voice_id is None:
+        if (
+            sid == new_speaker_id
+            and i != index
+            and (rep_voice_id is None or rep_tts_provider is None)
+        ):
             vid = seg.get("voice_id")
             prov = seg.get("tts_provider") or seg.get("provider")
-            if isinstance(vid, str) and vid:
+            if rep_voice_id is None and isinstance(vid, str) and vid:
                 rep_voice_id = vid
-            if isinstance(prov, str) and prov:
+            if rep_tts_provider is None and isinstance(prov, str) and prov:
                 rep_tts_provider = prov
 
     if new_speaker_id not in known_speakers:
