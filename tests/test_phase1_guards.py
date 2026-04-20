@@ -448,6 +448,7 @@ def test_editing_enter_delegates_baseline_seed_to_shared_helper() -> None:
         ("acceptSegmentDraft", "segments/${segmentId}/accept-draft"),
         ("discardSegmentDraft", "segments/${segmentId}/discard-draft"),
         ("regenerateAllDirtyTts", "regenerate-all-tts"),
+        ("getRegenerateAllStatus", "regenerate-all-tts/status"),
         ("getVoiceMap", "editing/voice-map"),
         ("setVoiceOverride", "editing/voice-map"),
         ("clearVoiceOverride", "editing/voice-map"),

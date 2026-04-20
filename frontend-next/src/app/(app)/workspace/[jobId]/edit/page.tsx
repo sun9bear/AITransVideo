@@ -26,6 +26,7 @@ import {
   patchSegmentText,
   regenerateSegmentTts,
   regenerateAllDirtyTts,
+  getRegenerateAllStatus,
   type CommitStrategy,
   type EditingSegment,
   type EditingSegmentsResponse,
@@ -211,20 +212,81 @@ export default function VideoEditPage() {
   const handleBatchRegenerate = useCallback(async () => {
     if (isBatchRegenerating) return
     setIsBatchRegenerating(true)
+    // D39 async batch: POST returns a task_id immediately; progress
+    // comes from polling GET /regenerate-all-tts/status. The single
+    // sonner toast gets updated in-place via its id so the user sees
+    // "合成中 3/100 · 段: seg_004" → "合成中 70/100 · ..." → final summary.
+    const toastId = toast.loading("正在启动批量合成…")
+    const POLL_INTERVAL_MS = 1000
+    const MAX_POLLS = 30 * 60  // 30 minutes; generous for 300+ segments
     try {
-      const result = await regenerateAllDirtyTts(jobId)
-      if (result.failed_count > 0) {
-        toast.warning(
-          `批量合成完成：成功 ${result.succeeded_count} 段，失败 ${result.failed_count} 段（${result.failed_segment_ids.join(", ")}）`,
+      const { task_id: taskId } = await regenerateAllDirtyTts(jobId)
+      let polls = 0
+      let lastDisplayedProgress = ""
+
+      while (polls < MAX_POLLS) {
+        await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS))
+        polls += 1
+        const status = await getRegenerateAllStatus(jobId, taskId)
+
+        // Someone launched another batch — old task id orphaned.
+        if (status.mismatch) {
+          toast.warning("检测到新的批量合成任务，停止跟踪当前进度", {
+            id: toastId,
+          })
+          break
+        }
+
+        if (status.stage === "completed") {
+          const result = status.result
+          if (result && result.failed_count > 0) {
+            toast.warning(
+              `批量合成完成：成功 ${result.succeeded_count} 段，失败 ${result.failed_count} 段（${result.failed_segment_ids.join(", ")}）`,
+              { id: toastId },
+            )
+          } else if (result && result.succeeded_count > 0) {
+            toast.success(
+              `批量合成完成，共 ${result.succeeded_count} 段`,
+              { id: toastId },
+            )
+          } else {
+            toast.info("没有需要重新合成的段落", { id: toastId })
+          }
+          break
+        }
+
+        if (status.stage === "failed") {
+          toast.error(
+            `批量合成失败: ${status.error ?? "未知错误"}`,
+            { id: toastId },
+          )
+          break
+        }
+
+        // Still running / starting — update progress toast in-place.
+        const done = status.succeeded_count + status.failed_count
+        const total = status.total || 0
+        const currentSuffix = status.current_segment_id
+          ? ` · 段 ${status.current_segment_id}`
+          : ""
+        const progressText = total > 0
+          ? `批量合成中 ${done}/${total}${currentSuffix}`
+          : "正在扫描需要合成的段落…"
+        if (progressText !== lastDisplayedProgress) {
+          toast.loading(progressText, { id: toastId })
+          lastDisplayedProgress = progressText
+        }
+      }
+
+      if (polls >= MAX_POLLS) {
+        toast.error(
+          "批量合成超过 30 分钟未完成，已停止跟踪。可刷新页面查看状态",
+          { id: toastId },
         )
-      } else if (result.succeeded_count > 0) {
-        toast.success(`批量合成完成，共 ${result.succeeded_count} 段`)
-      } else {
-        toast.info("没有需要重新合成的段落")
       }
       await loadData()
     } catch (error) {
-      toast.error(`批量合成失败: ${getErrorMessage(error)}`)
+      toast.error(`批量合成失败: ${getErrorMessage(error)}`, { id: toastId })
     } finally {
       setIsBatchRegenerating(false)
     }

@@ -64,6 +64,38 @@ export interface BatchRegenerateResponse {
   failures: Array<{ segment_id: string; error: string }>
 }
 
+// D39 async batch re-TTS contract. POST returns immediately with a
+// task_id; caller polls GET /status until stage is terminal.
+export interface BatchRegenerateStartResponse {
+  task_id: string
+  status: "running"
+}
+
+export type BatchRegenerateStage =
+  | "starting"
+  | "running"
+  | "completed"
+  | "failed"
+
+export interface BatchRegenerateStatus {
+  task_id: string
+  stage: BatchRegenerateStage
+  total: number
+  succeeded_count: number
+  failed_count: number
+  succeeded_segment_ids: string[]
+  failed_segment_ids: string[]
+  failures: Array<{ segment_id: string; error: string }>
+  current_segment_id: string | null
+  result: BatchRegenerateResponse | null
+  error: string | null
+  updated_at: string
+  // When a newer batch has overwritten the status file, old poller
+  // sees mismatch=true — stop polling and show a gentle warning.
+  mismatch?: boolean
+  actual_task_id?: string
+}
+
 export type CommitStrategy = "overwrite" | "copy_as_new"
 
 export interface CommitOverwriteResponse {
@@ -181,10 +213,22 @@ export async function discardSegmentDraft(
 
 export async function regenerateAllDirtyTts(
   jobId: string,
-): Promise<BatchRegenerateResponse> {
-  return apiClient.post<BatchRegenerateResponse>(
+): Promise<BatchRegenerateStartResponse> {
+  // D39 async: returns immediately with a task_id. Caller polls via
+  // ``getRegenerateAllStatus`` until stage is completed / failed.
+  return apiClient.post<BatchRegenerateStartResponse>(
     `/jobs/${jobId}/regenerate-all-tts`,
     { body: {} },
+  )
+}
+
+export async function getRegenerateAllStatus(
+  jobId: string,
+  taskId: string,
+): Promise<BatchRegenerateStatus> {
+  const encoded = encodeURIComponent(taskId)
+  return apiClient.get<BatchRegenerateStatus>(
+    `/jobs/${jobId}/regenerate-all-tts/status?task_id=${encoded}`,
   )
 }
 
