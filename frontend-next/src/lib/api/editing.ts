@@ -20,6 +20,12 @@ export interface EditingSegment {
   start_ms?: number
   end_ms?: number
   voice_id?: string
+  /** Canonical TTS provider key from DubbingSegment (new data). */
+  tts_provider?: string
+  /** Legacy drift key — older editor/segments.json wrote ``provider``
+   * instead of ``tts_provider``. Ultrareview #2 fixed new writes but
+   * existing task snapshots still carry the old field; consumers
+   * should read ``tts_provider ?? provider``. */
   provider?: string
   alignment_method?: string
   /** UI hint extracted from manifest; may be absent for pre-migration segs. */

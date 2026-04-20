@@ -295,26 +295,54 @@ export function VoiceModifyTab({
         // Personal voices (clone library)
         setPersonalVoices(userVoices)
 
-        // Seed draft state per speaker. Voice_map wins over auto-match —
-        // if this speaker already has overrides, the dropdown shows them.
+        // Seed draft state per speaker. Precedence:
+        //   1. voice_map override (user already changed in this session)
+        //   2. Baseline = first segment's voice_id + tts_provider / provider
+        //      — this is what the original pipeline actually used at TTS
+        //      time, including user's original voice pick / cloned voice.
+        //      Dropdown default of "★ 自动匹配" would be misleading: it's
+        //      just a suggestion, not what's in effect.
+        //   3. Fallback to auto_matched only when baseline is missing
+        //      (e.g. legacy task without voice_id on segments).
         const initial: Record<string, SpeakerDraftState> = {}
         for (const sp of loadedSpeakers) {
-          const ownSegments = (segmentsBySpeakerForSeed(segments, sp.speakerId))
+          const ownSegments = segmentsBySpeakerForSeed(segments, sp.speakerId)
           const firstOverriddenSeg = ownSegments.find((seg) => voiceMap[seg.segment_id])
           const override = firstOverriddenSeg ? voiceMap[firstOverriddenSeg.segment_id] : null
+
           if (override) {
             initial[sp.speakerId] = {
               voiceId: override.voice_id,
               selectedProvider: override.provider,
               voiceSource: "catalog",
             }
-          } else {
-            const provMatch = sp.autoMatchedByProvider[loadedDefaultProvider]
+            continue
+          }
+
+          const firstSeg = ownSegments[0]
+          const baselineVoiceId = firstSeg?.voice_id
+            ? String(firstSeg.voice_id).trim()
+            : ""
+          const baselineProvider = firstSeg?.tts_provider
+            ? String(firstSeg.tts_provider).trim()
+            : firstSeg?.provider
+              ? String(firstSeg.provider).trim()
+              : ""
+
+          if (baselineVoiceId) {
             initial[sp.speakerId] = {
-              voiceId: provMatch?.voiceId ?? "",
-              selectedProvider: loadedDefaultProvider,
-              voiceSource: provMatch?.voiceId ? "auto_matched" : "catalog",
+              voiceId: baselineVoiceId,
+              selectedProvider: baselineProvider || loadedDefaultProvider,
+              voiceSource: "catalog",
             }
+            continue
+          }
+
+          const provMatch = sp.autoMatchedByProvider[loadedDefaultProvider]
+          initial[sp.speakerId] = {
+            voiceId: provMatch?.voiceId ?? "",
+            selectedProvider: loadedDefaultProvider,
+            voiceSource: provMatch?.voiceId ? "auto_matched" : "catalog",
           }
         }
 
@@ -608,10 +636,45 @@ export function VoiceModifyTab({
             // just dropdown draft.
             const firstOverrideSeg = ownSegments.find((s) => voiceMap[s.segment_id])
             const appliedEntry = firstOverrideSeg ? voiceMap[firstOverrideSeg.segment_id] : null
-            const draftMatchesApplied =
-              appliedEntry != null
-              && state?.voiceId === appliedEntry.voice_id
-              && state?.selectedProvider === appliedEntry.provider
+
+            // Effective voice = override if present, else baseline from
+            // the first segment's voice_id / tts_provider. This is what
+            // actually plays at TTS time for this speaker.
+            const firstSeg = ownSegments[0]
+            const baselineVoiceId = firstSeg?.voice_id
+              ? String(firstSeg.voice_id).trim()
+              : ""
+            const baselineProvider = firstSeg?.tts_provider
+              ? String(firstSeg.tts_provider).trim()
+              : firstSeg?.provider
+                ? String(firstSeg.provider).trim()
+                : ""
+            const effectiveVoiceId = appliedEntry?.voice_id ?? baselineVoiceId
+            const effectiveProvider = appliedEntry?.provider ?? baselineProvider
+
+            // Disable Apply when the draft matches whatever's effectively
+            // running (override OR baseline) — no point writing a no-op
+            // override, and it'd clutter voice_map with redundant entries.
+            const draftMatchesEffective =
+              state != null
+              && state.voiceId === effectiveVoiceId
+              && state.selectedProvider === effectiveProvider
+
+            // Nice label for the effective voice (used by the "当前生效"
+            // row and the "原任务音色 / 当前覆盖" pinned option).
+            const effectiveLabel = (() => {
+              if (!effectiveVoiceId) return ""
+              const fromProvider = (() => {
+                const src = hasMultiProvider
+                  ? providerMap[effectiveProvider]?.availableVoices
+                  : fallbackVoices
+                return src?.find((v) => v.voiceId === effectiveVoiceId)
+              })()
+              if (fromProvider) return formatVoiceOptionLabel(fromProvider)
+              const fromPersonal = personalVoices.find((v) => v.voiceId === effectiveVoiceId)
+              if (fromPersonal) return fromPersonal.label || fromPersonal.voiceId
+              return effectiveVoiceId
+            })()
 
             // Status label
             const statusLabel = hasOverride
@@ -645,10 +708,17 @@ export function VoiceModifyTab({
                       <span className={`text-xs font-medium ${statusColor}`}>{statusLabel}</span>
                     </div>
 
-                    {/* Applied voice display (what's currently in voice_map) */}
-                    {hasOverride && appliedEntry && (
+                    {/* Effective voice — what actually plays at TTS time.
+                        Shows voice_map override when present, otherwise
+                        baseline from the pipeline's last run (cloned
+                        voice / user's original pick). Always rendered so
+                        users see server truth, not just dropdown draft. */}
+                    {effectiveVoiceId && (
                       <div className="text-xs text-muted-foreground">
-                        当前生效：<span className="font-mono">[{appliedEntry.provider}] {appliedEntry.voice_id}</span>
+                        {hasOverride ? "当前覆盖：" : "当前生效（原任务）："}
+                        <span className="font-mono">
+                          {effectiveProvider ? `[${effectiveProvider}] ` : ""}{effectiveLabel}
+                        </span>
                       </div>
                     )}
 
@@ -685,6 +755,28 @@ export function VoiceModifyTab({
                         disabled={applying}
                       >
                         <option value="">-- 选择音色 --</option>
+                        {/* Pinned "current" row — ensures the effective voice
+                            is always visible/selectable even when it's missing
+                            from catalog (expired clone, legacy voice_id, etc.).
+                            Only shown when the effective provider matches the
+                            current provider Tab AND the voice isn't already
+                            naturally surfaced by catalog / personal groups.
+                         */}
+                        {(() => {
+                          if (!effectiveVoiceId) return null
+                          if (effectiveProvider && effectiveProvider !== currentProvider) return null
+                          const inCatalog = voicesForProvider.some((v) => v.voiceId === effectiveVoiceId)
+                          const inPersonal = currentProvider === "minimax"
+                            && personalVoices.some((v) => v.voiceId === effectiveVoiceId)
+                          if (inCatalog || inPersonal) return null
+                          return (
+                            <optgroup label={hasOverride ? "📌 当前覆盖" : "📌 当前生效（原任务）"}>
+                              <option value={effectiveVoiceId}>
+                                {effectiveLabel}
+                              </option>
+                            </optgroup>
+                          )
+                        })()}
                         {/* Smart recommendations */}
                         {(() => {
                           const provMatch = sp.autoMatchedByProvider[currentProvider]
@@ -801,12 +893,12 @@ export function VoiceModifyTab({
                         disabled={
                           applying
                           || !state?.voiceId
-                          || draftMatchesApplied
+                          || draftMatchesEffective
                         }
                         onClick={() => void handleApplySpeaker(sp.speakerId)}
                         title={
-                          draftMatchesApplied
-                            ? "当前音色已生效，无需重复应用"
+                          draftMatchesEffective
+                            ? "当前音色已是生效状态，无需重复应用"
                             : `将音色应用到该说话人的 ${ownSegments.length} 段`
                         }
                       >
