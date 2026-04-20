@@ -23,6 +23,7 @@ import {
   discardSegmentDraft,
   enterEditing,
   getEditingSegments,
+  getVoiceMap,
   patchSegmentText,
   regenerateSegmentTts,
   regenerateAllDirtyTts,
@@ -31,12 +32,15 @@ import {
   type EditingSegment,
   type EditingSegmentsResponse,
   type SegmentStatus,
+  type VoiceMapEntry,
 } from "@/lib/api/editing"
 import { getJob } from "@/lib/api/jobs"
 import { ApiError } from "@/lib/api/client"
+import { buildDraftAudioUrl } from "@/lib/api/downloads"
 import { getErrorMessage } from "@/lib/api/errors"
 import { getJobDisplayTitle } from "@/features/jobs/presentation"
 import type { JobSummary } from "@/types/jobs"
+import { VoiceModifyTab } from "./VoiceModifyTab"
 
 // Feature flag: gating frontend entry so the page is never rendered when
 // the backend won't honour the endpoints. Must match gateway
@@ -61,18 +65,23 @@ export default function VideoEditPage() {
   const [commitModalOpen, setCommitModalOpen] = useState(false)
   const [commitStrategy, setCommitStrategy] = useState<CommitStrategy>("overwrite")
   const [copyDisplayName, setCopyDisplayName] = useState<string>("")
+  const [activeTab, setActiveTab] = useState<"text" | "voice">("text")
+  const [voiceMap, setVoiceMap] = useState<Record<string, VoiceMapEntry>>({})
 
   // ---- Bootstrap ----
 
   const loadData = useCallback(async (): Promise<void> => {
     if (!jobId) return
     try {
-      const [nextJob, nextRes] = await Promise.all([
+      const [nextJob, nextRes, vmRes] = await Promise.all([
         getJob(jobId),
         getEditingSegments(jobId),
+        // voice_map failure shouldn't block text editing — default to empty.
+        getVoiceMap(jobId).catch(() => ({ voice_map: {} })),
       ])
       setJob(nextJob)
       setResource(nextRes)
+      setVoiceMap(vmRes.voice_map ?? {})
       setPageError(null)
     } catch (error) {
       setPageError(getErrorMessage(error))
@@ -472,62 +481,112 @@ export default function VideoEditPage() {
         </div>
       </section>
 
-      {/* Batch actions + anomaly summary */}
-      <section className="surface-card p-4 flex flex-wrap items-center gap-3">
-        <div className="flex-1 min-w-0 text-sm text-muted-foreground">
-          {dirtyCount > 0 ? (
-            <span>
-              有 <strong className="text-foreground">{dirtyCount}</strong> 段待重合成。
-            </span>
-          ) : (
-            <span>所有段落 TTS 都是最新的。</span>
-          )}
-          {forceDspSegments.length > 0 && (
-            <span className="ml-2 text-amber-500">
-              ⚠ {forceDspSegments.length} 段时长异常（重写 2 次仍超/过短），建议修改
-            </span>
-          )}
-          {draftDurationMismatchSegments.length > 0 && (
-            <button
-              type="button"
-              className="ml-2 text-amber-500 underline decoration-dotted hover:text-amber-400"
-              onClick={() =>
-                scrollToSegment(draftDurationMismatchSegments[0].seg.segment_id)
-              }
-              title="保存后新 TTS 将被 DSP 压缩/拉伸到目标时长，偏差过大时音质会明显下降。点击定位第一段。"
-            >
-              ⚠ {draftDurationMismatchSegments.length} 段新 TTS 时长与目标偏差大，点击定位
-            </button>
-          )}
-        </div>
+      {/* Tab switcher */}
+      <nav
+        className="flex items-center gap-1 border-b border-border"
+        aria-label="修改阶段切换"
+      >
         <button
-          className="rounded-md bg-primary/80 text-primary-foreground px-4 py-1.5 text-xs inline-flex items-center gap-1 disabled:opacity-50"
-          onClick={handleBatchRegenerate}
-          disabled={isBatchRegenerating || dirtyCount === 0}
           type="button"
+          onClick={() => setActiveTab("text")}
+          className={`px-4 py-2 text-sm font-medium -mb-px border-b-2 transition-colors ${
+            activeTab === "text"
+              ? "border-primary text-foreground"
+              : "border-transparent text-muted-foreground hover:text-foreground"
+          }`}
         >
-          {isBatchRegenerating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
-          一键合成所有未合成段落
+          翻译修改
         </button>
-      </section>
+        <button
+          type="button"
+          onClick={() => setActiveTab("voice")}
+          className={`px-4 py-2 text-sm font-medium -mb-px border-b-2 transition-colors ${
+            activeTab === "voice"
+              ? "border-primary text-foreground"
+              : "border-transparent text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          音色修改
+          {Object.keys(voiceMap).length > 0 && (
+            <span className="ml-2 text-xs px-1.5 py-0.5 rounded-full bg-violet-500/15 text-violet-400">
+              {new Set(
+                Object.keys(voiceMap)
+                  .map((sid) => resource.segments.find((s) => s.segment_id === sid)?.speaker_id)
+                  .filter(Boolean),
+              ).size}
+            </span>
+          )}
+        </button>
+      </nav>
 
-      {/* Segment list */}
-      <section className="space-y-3">
-        {resource.segments.map((seg, idx) => (
-          <SegmentCard
-            key={seg.segment_id}
-            index={idx}
-            segment={seg}
-            status={resource.segment_status[seg.segment_id] ?? "accepted"}
-            isSaving={savingSegmentIds.has(seg.segment_id)}
-            isRegenerating={regeneratingSegmentIds.has(seg.segment_id)}
-            onTextChange={handleTextChange}
-            onRegenerate={handleRegenerate}
-            onAcceptDraft={handleAcceptDraft}
-            onDiscardDraft={handleDiscardDraft}
-          />
-        ))}
-      </section>
+      {activeTab === "text" ? (
+        <>
+          {/* Batch actions + anomaly summary */}
+          <section className="surface-card p-4 flex flex-wrap items-center gap-3">
+            <div className="flex-1 min-w-0 text-sm text-muted-foreground">
+              {dirtyCount > 0 ? (
+                <span>
+                  有 <strong className="text-foreground">{dirtyCount}</strong> 段待重合成。
+                </span>
+              ) : (
+                <span>所有段落 TTS 都是最新的。</span>
+              )}
+              {forceDspSegments.length > 0 && (
+                <span className="ml-2 text-amber-500">
+                  ⚠ {forceDspSegments.length} 段时长异常（重写 2 次仍超/过短），建议修改
+                </span>
+              )}
+              {draftDurationMismatchSegments.length > 0 && (
+                <button
+                  type="button"
+                  className="ml-2 text-amber-500 underline decoration-dotted hover:text-amber-400"
+                  onClick={() =>
+                    scrollToSegment(draftDurationMismatchSegments[0].seg.segment_id)
+                  }
+                  title="保存后新 TTS 将被 DSP 压缩/拉伸到目标时长，偏差过大时音质会明显下降。点击定位第一段。"
+                >
+                  ⚠ {draftDurationMismatchSegments.length} 段新 TTS 时长与目标偏差大，点击定位
+                </button>
+              )}
+            </div>
+            <button
+              className="rounded-md bg-primary/80 text-primary-foreground px-4 py-1.5 text-xs inline-flex items-center gap-1 disabled:opacity-50"
+              onClick={handleBatchRegenerate}
+              disabled={isBatchRegenerating || dirtyCount === 0}
+              type="button"
+            >
+              {isBatchRegenerating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+              一键合成所有未合成段落
+            </button>
+          </section>
+
+          {/* Segment list */}
+          <section className="space-y-3">
+            {resource.segments.map((seg, idx) => (
+              <SegmentCard
+                key={seg.segment_id}
+                jobId={jobId}
+                index={idx}
+                segment={seg}
+                status={resource.segment_status[seg.segment_id] ?? "accepted"}
+                isSaving={savingSegmentIds.has(seg.segment_id)}
+                isRegenerating={regeneratingSegmentIds.has(seg.segment_id)}
+                onTextChange={handleTextChange}
+                onRegenerate={handleRegenerate}
+                onAcceptDraft={handleAcceptDraft}
+                onDiscardDraft={handleDiscardDraft}
+              />
+            ))}
+          </section>
+        </>
+      ) : (
+        <VoiceModifyTab
+          jobId={jobId}
+          segments={resource.segments}
+          voiceMap={voiceMap}
+          onVoiceMapChange={setVoiceMap}
+        />
+      )}
 
       {commitModalOpen && (
         <CommitModal
@@ -549,6 +608,7 @@ export default function VideoEditPage() {
 // ---------------------------------------------------------------------------
 
 interface SegmentCardProps {
+  jobId: string
   index: number
   segment: EditingSegment
   status: SegmentStatus
@@ -561,6 +621,7 @@ interface SegmentCardProps {
 }
 
 function SegmentCard({
+  jobId,
   index,
   segment,
   status,
@@ -664,6 +725,20 @@ function SegmentCard({
           }
         }}
       />
+      {status === "tts_dirty" && (
+        // Draft preview — user can listen before accepting. `key` forces a
+        // fresh <audio> element when a newer draft overwrites the file so
+        // the browser doesn't cache a stale buffer from the previous version.
+        <audio
+          key={`draft-${segment.segment_id}-${segment.draft_wav_duration_ms ?? ""}`}
+          controls
+          preload="metadata"
+          className="mt-2 w-full max-w-md h-9"
+          src={buildDraftAudioUrl(jobId, segment.segment_id)}
+        >
+          您的浏览器不支持 audio 标签
+        </audio>
+      )}
       <div className="mt-2 flex flex-wrap gap-2">
         <Button
           size="sm"

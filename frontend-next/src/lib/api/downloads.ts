@@ -46,6 +46,18 @@ export function buildStreamUrl(jobId: string, kind: 'video' | 'audio' | 'poster'
 }
 
 /**
+ * Build URL for the single-segment draft TTS audio preview.
+ * Served as Range-aware audio/wav; safe to use as an <audio src={...}>.
+ * Returns 404 when no draft exists for that segment (plan §7.4).
+ */
+export function buildDraftAudioUrl(jobId: string, segmentId: string): string {
+  return buildBackendUrl(
+    resolveJobApiBaseUrl(),
+    `/jobs/${jobId}/segments/${segmentId}/draft-audio`,
+  )
+}
+
+/**
  * Build URL for materials availability check.
  */
 export function buildMaterialsAvailabilityUrl(jobId: string): string {
