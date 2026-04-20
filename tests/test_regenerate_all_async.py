@@ -340,6 +340,60 @@ def test_start_after_previous_batch_completed_spawns_new_task(
     )
 
 
+# ---------------------------------------------------------------------------
+# Zombie dir: _write_status must not resurrect a deleted editing/ directory
+#
+# Bug (Claude Code ultrareview #1, P2):
+# _write_status unconditionally ran ``path.parent.mkdir(parents=True,
+# exist_ok=True)`` before writing, which means a batch thread still
+# running after the user cancelled / committed (both tear down
+# editor/editing/) recreated the directory just to drop a status file
+# in it. That zombie ``editor/editing/regen_status.json`` then lingers
+# on disk, confuses cleanup scanners, and (more importantly) violates
+# the docstring promise of "silently drops if the editing dir has been
+# removed". Legit invariant: editor/editing/ exists iff job status ==
+# editing.
+#
+# Fix: if parent doesn't exist, silent return (no mkdir).
+# ---------------------------------------------------------------------------
+
+
+def test_write_status_does_not_resurrect_deleted_editing_dir(tmp_path: Path) -> None:
+    """Simulate cancel/commit race: batch thread tries to write status
+    after editor/editing/ is gone. The status file must not be written,
+    and the editing/ directory must stay gone."""
+    from services.jobs.regenerate_all_async import _write_status, _initial_status
+
+    project = tmp_path / "proj"
+    # Deliberately do NOT create editor/editing/ — simulates the user
+    # having just cancelled the editing session.
+    assert not (project / "editor" / "editing").exists()
+
+    _write_status(project, _initial_status("fake_task"))
+
+    # No resurrection: editing/ must not exist, regen_status.json must not exist.
+    assert not (project / "editor" / "editing").exists(), (
+        "zombie dir — _write_status recreated editor/editing/ after "
+        "user cancelled the editing session"
+    )
+    assert not (project / "editor" / "editing" / "regen_status.json").exists()
+
+
+def test_write_status_writes_when_editing_dir_exists(tmp_path: Path) -> None:
+    """Baseline regression: normal case (editing/ exists) still works."""
+    from services.jobs.regenerate_all_async import _write_status, _initial_status
+
+    project = tmp_path / "proj"
+    (project / "editor" / "editing").mkdir(parents=True)
+
+    _write_status(project, _initial_status("real_task"))
+
+    status = (project / "editor" / "editing" / "regen_status.json")
+    assert status.is_file()
+    data = json.loads(status.read_text(encoding="utf-8"))
+    assert data["task_id"] == "real_task"
+
+
 def test_status_transitions_to_failed_on_top_level_exception(tmp_path: Path) -> None:
     """If the thread itself crashes (not a per-segment fail), stage =
     "failed" and ``error`` carries the message. Use missing

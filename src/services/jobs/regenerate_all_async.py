@@ -109,10 +109,20 @@ def read_regen_all_status(
 def _write_status(project_dir: Path, payload: dict[str, Any]) -> None:
     """Atomic write via tmpfile + rename. Silently drops if the editing
     dir has been removed (user cancelled / committed — thread racing
-    with _rm_editing_dir)."""
+    with _rm_editing_dir).
+
+    Must NOT recreate the editing/ directory. Legit invariant: the
+    directory exists iff the job is in ``editing`` status. An
+    unconditional ``mkdir(parents=True, exist_ok=True)`` here would
+    resurrect the dir as a zombie (just the status file, no segments /
+    drafts / voice_map) and leave it on disk after commit/cancel —
+    violating the docstring and confusing cleanup scanners (Claude
+    Code ultrareview #1)."""
     path = status_file_path(project_dir)
+    if not path.parent.is_dir():
+        # editing/ removed by cancel / commit — drop this write silently.
+        return
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2),
