@@ -66,7 +66,12 @@ def get_timeout_for_duration(video_duration_min: float = 30.0) -> int:
 
 PROCESS_RUN_TIMEOUT_SECONDS = TIMEOUT_TIERS["tier2"]  # 默认 6 小时（兼容旧任务）
 
-STAGE_LOG_PATTERN = re.compile(r"^\[(S[0-9]+)\]\s*(.*)$")
+# Match both the classic `[S5] 对齐时间轴...` prefix and γ resume-path's
+# `[RESUME/S6] 合成配音...` prefix. The non-capturing `(?:RESUME/)?` lets
+# stage-code extraction pick up the same S\d+ code either way, so
+# STAGE_CODE_MAP routes γ log lines through the same path as the
+# original pipeline's stage announcements.
+STAGE_LOG_PATTERN = re.compile(r"^\[(?:RESUME/)?(S[0-9]+)\]\s*(.*)$")
 DOWNLOAD_PROGRESS_PATTERN = re.compile(r"^\[download\]\s*(.+)$", re.IGNORECASE)
 # Path inference patterns for both Windows and POSIX absolute paths in stdout logs.
 WINDOWS_PATH_PATTERN = re.compile(r"([A-Za-z]:[\\/][^\r\n]+)")
@@ -77,7 +82,12 @@ STAGE_CODE_MAP = {
     "S2": STAGE_SPEAKER_REVIEW,
     "S3": STAGE_TRANSLATION_REVIEW,
     "S4": STAGE_DRAFT,
-    "S5": STAGE_VOICE_SELECTION_REVIEW,
+    # [S5] 对齐时间轴 — pipeline prints this during alignment, which the
+    # public stepper labels "草稿与配音" (STAGE_DRAFT). The previous
+    # mapping to STAGE_VOICE_SELECTION_REVIEW was a pre-existing bug
+    # (voice_selection_review is a gate stage with no [S\d] log prints);
+    # fixed 2026-04-20 alongside γ's [RESUME/S5] support.
+    "S5": STAGE_DRAFT,
     "S6": STAGE_LEGACY_PROCESS_OUTPUT,
 }
 # Stages that the pipeline knows how to resume at (i.e. skip everything

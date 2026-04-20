@@ -260,6 +260,13 @@ function normalizeStatus(value: string): JobStatus {
 }
 
 const publicStageMap = {
+  // γ commit sets JobRecord.current_stage='alignment' (STAGE_ALIGNMENT
+  // from src/services/jobs/models.py) for resume-from-alignment runs.
+  // The UI stepper has no dedicated "alignment" step; "draft" (草稿与
+  // 配音) is the user-facing label that covers both TTS generation and
+  // alignment. Without this mapping, currentStage="alignment" normalizes
+  // to null and buildStageProgress falls back to "step 1 ingestion".
+  alignment: 'draft',
   cancelled: 'failed',
   completed: 'legacy_process_output',
   draft: 'draft',
@@ -271,6 +278,7 @@ const publicStageMap = {
   translation_config_review: 'translation_config_review',
   translation_review: 'translation_review',
   voice_review: 'voice_review',
+  voice_selection_review: 'voice_selection_review',
 } as const satisfies Record<string, PublicStage>
 
 const statusMap = {

@@ -90,6 +90,59 @@ def test_parse_project_dir_returns_none_for_no_path() -> None:
 
 
 # ===================================================================
+# Stage log regex — must recognise both classic [SN] and γ [RESUME/SN]
+#
+# D33 fix (2026-04-20): γ publish-only resume path prints ``[RESUME/S5]``
+# and ``[RESUME/S6]`` prefixes. The old regex only matched bare `[SN]`,
+# so γ log lines never advanced the stepper — user saw "step 1 输入准备
+# 待开始" throughout the entire commit γ run even though alignment +
+# publish were executing.
+# ===================================================================
+
+
+class TestStageLogPatternResumePrefix:
+    def test_classic_s5_still_matches(self) -> None:
+        from services.jobs.process_runner import STAGE_LOG_PATTERN
+        m = STAGE_LOG_PATTERN.match("[S5] 对齐时间轴...")
+        assert m is not None
+        assert m.group(1) == "S5"
+
+    def test_resume_s5_matches_and_captures_stage_code(self) -> None:
+        """γ's ``[RESUME/S5] 跳过对齐...`` must produce the same stage
+        code as the classic variant so STAGE_CODE_MAP routes it to the
+        same public stage."""
+        from services.jobs.process_runner import STAGE_LOG_PATTERN
+        m = STAGE_LOG_PATTERN.match("[RESUME/S5] 跳过对齐（γ 路径）：...")
+        assert m is not None, "STAGE_LOG_PATTERN failed to match [RESUME/S5]"
+        assert m.group(1) == "S5", (
+            f"expected inner group 'S5', got {m.group(1)!r}"
+        )
+
+    def test_resume_s6_matches(self) -> None:
+        from services.jobs.process_runner import STAGE_LOG_PATTERN
+        m = STAGE_LOG_PATTERN.match("[RESUME/S6] 合成配音音频/配音视频...")
+        assert m is not None
+        assert m.group(1) == "S6"
+
+    def test_stage_code_map_s5_routes_to_draft_not_voice_selection(self) -> None:
+        """Public stage for S5 must be STAGE_DRAFT (草稿与配音 = step 8
+        in the stepper), not STAGE_VOICE_SELECTION_REVIEW. The S5 prefix
+        is printed during alignment by both the classic pipeline
+        ([S5] 对齐时间轴...) and γ ([RESUME/S5] 跳过对齐...)."""
+        from services.jobs.process_runner import STAGE_CODE_MAP
+        from services.jobs.models import STAGE_DRAFT, STAGE_VOICE_SELECTION_REVIEW
+        assert STAGE_CODE_MAP["S5"] == STAGE_DRAFT, (
+            f"S5 must map to STAGE_DRAFT (alignment), got "
+            f"{STAGE_CODE_MAP['S5']!r}"
+        )
+        assert STAGE_CODE_MAP["S5"] != STAGE_VOICE_SELECTION_REVIEW, (
+            "S5 was previously misrouted to voice_selection_review "
+            "(gate stage, no [SN] log emission) — this regression guard "
+            "pins the correct semantic mapping"
+        )
+
+
+# ===================================================================
 # _resolve_job_project_dir
 # ===================================================================
 
