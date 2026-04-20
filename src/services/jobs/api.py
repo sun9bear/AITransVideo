@@ -121,6 +121,53 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
                     payload = service.get_editing_voice_map(path_parts[1])
                     self._write_json(HTTPStatus.OK, payload)
                     return
+                # GET /jobs/{id}/segments/{sid}/draft-audio — inline wav
+                # playback for the "接受 / 丢弃" UI (plan §7.4 / Phase 2).
+                # Range-aware so HTML5 <audio> can seek. 404 when job is
+                # not editing OR no draft wav exists yet (uniform "nothing
+                # to preview" signal for the frontend).
+                if (len(path_parts) == 5 and path_parts[0] == "jobs"
+                        and path_parts[2] == "segments"
+                        and path_parts[4] == "draft-audio"):
+                    from services.jobs.editing import EDITING_SUBDIR
+                    from services.jobs.editing_tts import draft_audio_path
+                    from services.jobs.input_validators import validate_segment_id
+                    from services.jobs.models import JOB_STATUS_EDITING
+
+                    job_id = path_parts[1]
+                    segment_id = path_parts[3]
+                    try:
+                        validate_segment_id(segment_id)
+                    except ValueError:
+                        self._write_json(
+                            HTTPStatus.BAD_REQUEST,
+                            {"error": "invalid segment_id"},
+                        )
+                        return
+                    record = service.require_job(job_id)
+                    project_dir = _require_project_dir(record)
+                    # Drafts only exist while the job is in editing state;
+                    # refuse uniformly with 404 (so frontend treats it the
+                    # same as "segment never regenerated").
+                    editing_dir = Path(project_dir) / EDITING_SUBDIR
+                    if (
+                        record.status != JOB_STATUS_EDITING
+                        or not editing_dir.is_dir()
+                    ):
+                        self._write_json(
+                            HTTPStatus.NOT_FOUND,
+                            {"error": "no draft audio (job not in editing)"},
+                        )
+                        return
+                    file_path = draft_audio_path(project_dir, segment_id)
+                    if not file_path.is_file():
+                        self._write_json(
+                            HTTPStatus.NOT_FOUND,
+                            {"error": "no draft audio for this segment"},
+                        )
+                        return
+                    self._write_stream(file_path, content_type="audio/wav")
+                    return
                 # GET /jobs/{id}/regenerate-all-tts/status?task_id=XXX (D39)
                 # Poll the async batch re-TTS progress. Returns 404 if no
                 # batch has ever started for this project; 200 with a
