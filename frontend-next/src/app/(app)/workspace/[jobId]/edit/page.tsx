@@ -36,9 +36,13 @@ import {
 } from "@/lib/api/editing"
 import { getJob } from "@/lib/api/jobs"
 import { ApiError } from "@/lib/api/client"
-import { buildDraftAudioUrl } from "@/lib/api/downloads"
+import { buildDraftAudioUrl, buildStreamUrl } from "@/lib/api/downloads"
 import { getErrorMessage } from "@/lib/api/errors"
 import { getJobDisplayTitle } from "@/features/jobs/presentation"
+import {
+  usePlayerSegmentSync,
+  type PlayerSyncSegment,
+} from "@/lib/react/usePlayerSegmentSync"
 import type { JobSummary } from "@/types/jobs"
 import { VoiceModifyTab } from "./VoiceModifyTab"
 
@@ -398,6 +402,47 @@ export default function VideoEditPage() {
     }
   }, [])
 
+  // ---- Video player + segment sync (plan §7.2 / §9.2) ----
+  const videoRef = useRef<HTMLVideoElement | null>(null)
+  const playerSyncSegments = useMemo<PlayerSyncSegment[]>(() => {
+    if (!resource) return []
+    return resource.segments
+      .filter(
+        (s): s is EditingSegment & { start_ms: number; end_ms: number } =>
+          typeof s.start_ms === "number" && typeof s.end_ms === "number",
+      )
+      .map((s) => ({
+        segmentId: s.segment_id,
+        startMs: s.start_ms,
+        endMs: s.end_ms,
+      }))
+  }, [resource])
+  const { activeSegmentId } = usePlayerSegmentSync(videoRef, playerSyncSegments)
+
+  // Auto-scroll when the player advances into a new segment. Respects
+  // prefers-reduced-motion via scroll-behavior CSS fallback in Tailwind
+  // (we pass "smooth" unconditionally; OS-level reduce-motion is honored
+  // by modern browsers).  Skipped while the user is actively editing a
+  // textarea (prevent fighting the user), detected via document.activeElement.
+  useEffect(() => {
+    if (!activeSegmentId) return
+    const active = document.activeElement
+    if (active && active.tagName === "TEXTAREA") return
+    const el = document.getElementById(`segment-card-${activeSegmentId}`)
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "center" })
+    }
+  }, [activeSegmentId])
+
+  // Click on segment card → seek video to that segment's start
+  const seekToSegment = useCallback((segmentId: string) => {
+    const seg = resource?.segments.find((s) => s.segment_id === segmentId)
+    const video = videoRef.current
+    if (!seg || !video || typeof seg.start_ms !== "number") return
+    video.currentTime = seg.start_ms / 1000
+    // Don't autoplay; let the user decide (they may be editing silently).
+  }, [resource])
+
   const dirtyCount = useMemo(() => {
     if (!resource) return 0
     return Object.values(resource.segment_status).filter(
@@ -479,6 +524,23 @@ export default function VideoEditPage() {
             确认修改 ...
           </button>
         </div>
+      </section>
+
+      {/* Sticky video player — shows the baseline (last-committed)
+          dubbed video so users can audit text edits against the audio
+          they're about to replace. Sync hook drives per-segment
+          highlight + auto-scroll below. */}
+      <section className="sticky top-2 z-10 surface-card p-2">
+        <video
+          ref={videoRef}
+          className="w-full max-h-[45vh] rounded-md bg-black object-contain"
+          controls
+          preload="metadata"
+          src={buildStreamUrl(jobId, "video")}
+          poster={buildStreamUrl(jobId, "poster")}
+        >
+          您的浏览器不支持 video 标签
+        </video>
       </section>
 
       {/* Tab switcher */}
@@ -571,10 +633,12 @@ export default function VideoEditPage() {
                 status={resource.segment_status[seg.segment_id] ?? "accepted"}
                 isSaving={savingSegmentIds.has(seg.segment_id)}
                 isRegenerating={regeneratingSegmentIds.has(seg.segment_id)}
+                isActive={activeSegmentId === seg.segment_id}
                 onTextChange={handleTextChange}
                 onRegenerate={handleRegenerate}
                 onAcceptDraft={handleAcceptDraft}
                 onDiscardDraft={handleDiscardDraft}
+                onSeek={seekToSegment}
               />
             ))}
           </section>
@@ -614,10 +678,16 @@ interface SegmentCardProps {
   status: SegmentStatus
   isSaving: boolean
   isRegenerating: boolean
+  /** True when the player is currently inside [start_ms, end_ms] of this
+   *  segment (plan §9.2 usePlayerSegmentSync). Drives ring highlight. */
+  isActive: boolean
   onTextChange: (segmentId: string, cnText: string) => void
   onRegenerate: (segmentId: string) => void
   onAcceptDraft: (segmentId: string) => void
   onDiscardDraft: (segmentId: string) => void
+  /** Jump video playback to this segment's start_ms (click the time
+   *  label). No-op when video ref isn't ready or segment has no timing. */
+  onSeek: (segmentId: string) => void
 }
 
 function SegmentCard({
@@ -627,10 +697,12 @@ function SegmentCard({
   status,
   isSaving,
   isRegenerating,
+  isActive,
   onTextChange,
   onRegenerate,
   onAcceptDraft,
   onDiscardDraft,
+  onSeek,
 }: SegmentCardProps) {
   const [localText, setLocalText] = useState(segment.cn_text ?? "")
   useEffect(() => { setLocalText(segment.cn_text ?? "") }, [segment.cn_text])
@@ -673,11 +745,22 @@ function SegmentCard({
   return (
     <article
       id={`segment-card-${segment.segment_id}`}
-      className={`surface-card p-4 ${borderClass}`}
+      className={`surface-card p-4 ${borderClass} ${
+        isActive ? "ring-2 ring-primary/70 shadow-lg shadow-primary/10" : ""
+      } transition-shadow`}
     >
       <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground mb-2">
         <span className="font-mono">#{index + 1}</span>
-        {timeLabel && <span>{timeLabel}</span>}
+        {timeLabel && (
+          <button
+            type="button"
+            className="text-primary/80 underline decoration-dotted underline-offset-2 hover:text-primary hover:decoration-solid"
+            onClick={() => onSeek(segment.segment_id)}
+            title="跳转视频到该段起点"
+          >
+            {timeLabel}
+          </button>
+        )}
         {segment.speaker_id && <span>说话人 {segment.speaker_id}</span>}
         <StatusChip status={status} />
         {isAnomalous && (
