@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import json
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-
-from pydub import AudioSegment
 
 
 DEFAULT_SPEECH_FRAME_RATE = 16_000
@@ -22,7 +22,28 @@ class AudioSeparationResult:
 
 
 class AudioStemSeparator:
-    """Create a speech-focused stem for ASR plus an ambient stem for manual reuse."""
+    """Create a speech-focused stem for ASR plus an ambient stem for manual reuse.
+
+    2026-04-20 memory-safe rewrite: the earlier pydub implementation loaded
+    the entire source into a PCM buffer and cloned it for each per-channel
+    operation (`apply_gain`, `overlay`, `invert_phase`). For a 100-minute
+    stereo 44.1 kHz input (~1 GB of raw PCM) this ballooned to 6+ GB RSS,
+    hitting the 7.6 GB container limit and getting OOM-killed.
+
+    The new implementation streams through ffmpeg's ``pan`` filter in C,
+    with O(1) python memory regardless of input length. Semantics are
+    preserved to within ~0.2% (-6 dB pydub gain ≈ 0.501 vs ffmpeg's
+    0.5 coefficient — inaudible for ASR / ambient purposes):
+
+    Stereo input
+        speech  = 0.5 * FL + 0.5 * FR          → mono, 16 kHz, s16le
+        ambient = (0.5FL - 0.5FR, 0.5FR - 0.5FL)  → stereo, original rate
+
+    Mono input
+        speech  = resample to 16 kHz mono s16le
+        ambient = same-duration silent stereo at the source's frame rate
+                  (consumed only for optional mixback; rms expected 0)
+    """
 
     speech_filename = "speech_for_asr.wav"
     ambient_filename = "ambient.wav"
@@ -51,18 +72,14 @@ class AudioStemSeparator:
                 reused_cache=True,
             )
 
-        try:
-            if source_path.suffix.casefold() == ".wav":
-                source_audio = AudioSegment.from_wav(str(source_path))
-            else:
-                source_audio = AudioSegment.from_file(str(source_path))
-        except Exception as exc:
-            raise AudioSeparationError(f"Failed to load source audio: {source_path}") from exc
+        channels = self._probe_channel_count(source_path)
 
-        source_audio = source_audio.set_sample_width(2)
-        speech_audio, ambient_audio = self._split_stems(source_audio)
-        speech_audio.export(speech_path, format="wav")
-        ambient_audio.export(ambient_path, format="wav")
+        if channels <= 1:
+            self._run_ffmpeg_mono_speech(source_path, speech_path)
+            self._run_ffmpeg_silent_stereo(source_path, ambient_path)
+        else:
+            self._run_ffmpeg_stereo_speech(source_path, speech_path)
+            self._run_ffmpeg_stereo_ambient(source_path, ambient_path)
 
         return AudioSeparationResult(
             source_audio_path=str(source_path),
@@ -71,41 +88,126 @@ class AudioStemSeparator:
             reused_cache=False,
         )
 
-    def _split_stems(self, source_audio: AudioSegment) -> tuple[AudioSegment, AudioSegment]:
-        if source_audio.channels <= 1:
-            speech_audio = (
-                source_audio.set_channels(1)
-                .set_frame_rate(DEFAULT_SPEECH_FRAME_RATE)
-                .set_sample_width(2)
+    # ------------------------------------------------------------------
+    # ffmpeg / ffprobe primitives — all O(1) python memory
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _probe_channel_count(source_path: Path) -> int:
+        """Use ffprobe to decide mono vs stereo processing path. Defaults
+        to mono (safer fallback) if probe fails."""
+        try:
+            result = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v", "error",
+                    "-select_streams", "a:0",
+                    "-show_entries", "stream=channels",
+                    "-of", "json",
+                    str(source_path),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=60,
             )
-            ambient_audio = (
-                AudioSegment.silent(duration=len(source_audio), frame_rate=max(source_audio.frame_rate, 44_100))
-                .set_channels(2)
-                .set_sample_width(2)
+            payload = json.loads(result.stdout or "{}")
+            streams = payload.get("streams") or []
+            if streams and isinstance(streams[0], dict):
+                ch = streams[0].get("channels")
+                if isinstance(ch, int) and ch > 0:
+                    return ch
+        except (
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+            json.JSONDecodeError,
+            FileNotFoundError,
+        ):
+            pass
+        return 1
+
+    @staticmethod
+    def _run_ffmpeg(args: list[str], *, timeout_s: int = 1800) -> None:
+        """Wrapper around ffmpeg with consistent error mapping. Stream-level
+        timeout default 30 min — enough for multi-hour inputs at real-time
+        decode speeds, but finite so a hung subprocess doesn't stick forever."""
+        try:
+            subprocess.run(
+                args,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
             )
-            return speech_audio, ambient_audio
+        except subprocess.CalledProcessError as exc:
+            # Surface ffmpeg's stderr for diagnostics without dumping raw
+            # bytes into the traceback (stderr can be verbose).
+            stderr_tail = (exc.stderr or "")[-2000:]
+            raise AudioSeparationError(
+                f"ffmpeg failed: {' '.join(args[:4])}... rc={exc.returncode}\n"
+                f"stderr (tail):\n{stderr_tail}"
+            ) from exc
+        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+            raise AudioSeparationError(f"ffmpeg invocation failed: {exc}") from exc
 
-        stereo_audio = source_audio.set_channels(2).set_sample_width(2)
-        left_channel, right_channel = stereo_audio.split_to_mono()
+    def _run_ffmpeg_stereo_speech(self, source: Path, dst: Path) -> None:
+        """Stereo → mono 16 kHz speech via center-channel estimate."""
+        self._run_ffmpeg([
+            "ffmpeg", "-y",
+            "-i", str(source),
+            "-af", "pan=mono|c0=0.5*FL+0.5*FR",
+            "-ar", str(DEFAULT_SPEECH_FRAME_RATE),
+            "-ac", "1",
+            "-sample_fmt", "s16",
+            "-f", "wav",
+            str(dst),
+        ])
 
-        # Approximate centered speech by summing both channels with headroom.
-        centered_speech = left_channel.apply_gain(-6.0).overlay(right_channel.apply_gain(-6.0))
-        speech_audio = (
-            centered_speech.set_channels(1)
-            .set_frame_rate(DEFAULT_SPEECH_FRAME_RATE)
-            .set_sample_width(2)
-        )
+    def _run_ffmpeg_stereo_ambient(self, source: Path, dst: Path) -> None:
+        """Stereo → stereo ambient: subtract center channel from each side.
 
-        # Remove the centered content from each side to keep applause/laughter/music as a stem.
-        centered_inverse = centered_speech.invert_phase()
-        ambient_left = left_channel.overlay(centered_inverse)
-        ambient_right = right_channel.overlay(centered_inverse)
-        ambient_audio = (
-            AudioSegment.from_mono_audiosegments(ambient_left, ambient_right)
-            .set_frame_rate(stereo_audio.frame_rate)
-            .set_sample_width(2)
-        )
-        return speech_audio, ambient_audio
+        L_new = 0.5*L - 0.5*R ; R_new = 0.5*R - 0.5*L
+
+        Matches the pydub invert-phase-and-overlay chain's output to
+        within the same ~0.2% coefficient rounding as the speech path."""
+        self._run_ffmpeg([
+            "ffmpeg", "-y",
+            "-i", str(source),
+            "-af", "pan=stereo|c0=0.5*FL-0.5*FR|c1=0.5*FR-0.5*FL",
+            "-ac", "2",
+            "-sample_fmt", "s16",
+            "-f", "wav",
+            str(dst),
+        ])
+
+    def _run_ffmpeg_mono_speech(self, source: Path, dst: Path) -> None:
+        """Mono → mono 16 kHz resample."""
+        self._run_ffmpeg([
+            "ffmpeg", "-y",
+            "-i", str(source),
+            "-ar", str(DEFAULT_SPEECH_FRAME_RATE),
+            "-ac", "1",
+            "-sample_fmt", "s16",
+            "-f", "wav",
+            str(dst),
+        ])
+
+    def _run_ffmpeg_silent_stereo(self, source: Path, dst: Path) -> None:
+        """Mono source → same-duration silent stereo wav.
+
+        Implementation trick: pipe the source through volume=0 — ffmpeg
+        preserves duration + frame rate, sets every sample to zero, then
+        ``-ac 2`` upmixes to stereo. O(1) python memory; no separate
+        probe for duration needed."""
+        self._run_ffmpeg([
+            "ffmpeg", "-y",
+            "-i", str(source),
+            "-af", "volume=0",
+            "-ac", "2",
+            "-sample_fmt", "s16",
+            "-f", "wav",
+            str(dst),
+        ])
 
     def _is_cache_valid(self, source_path: Path, speech_path: Path, ambient_path: Path) -> bool:
         if not speech_path.exists() or not ambient_path.exists():
