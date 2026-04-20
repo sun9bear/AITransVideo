@@ -750,15 +750,24 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
 
 /* ---------- VoiceCloneModal ---------- */
 
+// Exported so the editing-state voice Tab (VoiceModifyTab) can reuse
+// the exact same clone UX — selecting source segments, paid-API
+// trigger, credit cost display. Editing consumers pass a minimal
+// speaker-shaped object (speakerId / speakerName) plus the cost.
+export interface VoiceCloneModalSpeakerRef {
+  speakerId: string
+  speakerName: string
+}
+
 interface VoiceCloneModalProps {
   jobId: string
-  speaker: SpeakerPayload
+  speaker: VoiceCloneModalSpeakerRef
   cloneCostCredits: number
   onClose: () => void
   onComplete: (speakerId: string, voiceId: string) => void
 }
 
-function VoiceCloneModal({ jobId, speaker, cloneCostCredits, onClose, onComplete }: VoiceCloneModalProps) {
+export function VoiceCloneModal({ jobId, speaker, cloneCostCredits, onClose, onComplete }: VoiceCloneModalProps) {
   const [segments, setSegments] = useState<SpeakerAudioSegment[]>([])
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   const [isLoading, setIsLoading] = useState(true)
