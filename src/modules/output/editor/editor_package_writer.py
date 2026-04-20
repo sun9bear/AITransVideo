@@ -633,17 +633,12 @@ class EditorPackageWriter:
         speed_ratio = actual_duration_ms / slot_duration_ms
         filter_value = _build_atempo_filter(speed_ratio)
 
-        if speed_ratio < 0.5 or speed_ratio > 2.0:
-            logger.warning(
-                "segment %s: atempo stretch ratio=%.2fx "
-                "(actual=%dms → slot=%dms) exceeds the quality-safe "
-                "[0.5x, 2.0x] window; output wav is valid at target "
-                "duration but audio quality degrades — user reviews "
-                "in test-playback UI and re-edits if unhappy (方案 A, "
-                "γ publish-only resume契约)",
-                segment.segment_id, speed_ratio,
-                actual_duration_ms, slot_duration_ms,
-            )
+        # No warning for extreme ratios — 方案 A 承诺 "无脑 stretch"，
+        # 用户通过 editing 页面的 D44 slot-mismatch 警告在提交前就知道
+        # 了哪些段会被压缩/拉伸。运行时 warning 既刷 admin LogViewer
+        # （运维价值低），又可能 bleed 到用户 UX（见 2026-04-20 bleed
+        # 事故）。真要排查音质问题，output/segments/{sid}_xxxx.wav 自
+        # 带结果，ffprobe 更直接。
 
         # Keep .wav suffix so ffmpeg auto-detects output format; prefix
         # with a dot so we can identify it as a tmp artifact.
