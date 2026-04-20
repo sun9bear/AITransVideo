@@ -152,6 +152,13 @@ def enter_editing(record: JobRecord, store: JobStore) -> JobRecord:
     # copy_as_new hardlinks nothing and γ publish-only resume fails fast
     # with "N segments missing wavs" — the user can't commit at all.
     # Materialise the baseline once here so subsequent commit flows work.
+    #
+    # Tolerance: if the task has neither tts/ nor editor/tts_segments/
+    # (truly legacy / corrupted / test fixture), don't block enter_editing —
+    # log a warning and let the user edit text / voice_map. γ commit has
+    # its own per-segment wav existence check that will surface the
+    # missing audio with an actionable segment_id list if the user
+    # actually tries to commit.
     try:
         tts_result = ensure_editor_tts_segments_baseline(project_dir)
         if tts_result.get("backfilled_segment_ids"):
@@ -162,11 +169,12 @@ def enter_editing(record: JobRecord, store: JobStore) -> JobRecord:
                 record.job_id,
             )
     except EditorTtsBaselineError as exc:
-        raise EditingConflictError(
-            f"job {record.job_id} cannot enter editing: {exc}; "
-            "task was produced by a pipeline version that predates the "
-            "editor/tts_segments/ convention and has no legacy tts/ fallback"
-        ) from exc
+        logger.warning(
+            "editing: job %s has no audio source for editor/tts_segments/ "
+            "(%s); allowing edit for text/voice_map only — γ commit will "
+            "fail per-segment if user regenerates wavs don't exist",
+            record.job_id, exc,
+        )
 
     editing_dir = project_dir / EDITING_SUBDIR
     editing_dir.mkdir(parents=True, exist_ok=True)

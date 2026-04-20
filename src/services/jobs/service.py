@@ -368,6 +368,10 @@ class JobService:
 
         Same DI story as regenerate_segment_tts — explicit arg wins, then
         the injected per-service caller, then None (501 placeholder).
+
+        Retained for tests and admin tooling. The HTTP POST endpoint
+        uses ``regenerate_all_dirty_segments_async`` instead — gateway
+        times out on 100+ segment batches (D39).
         """
         from services.jobs.editing import touch_editing as _touch_editing
         from services.jobs.editing_batch import regenerate_all_dirty_segments as _batch
@@ -377,6 +381,51 @@ class JobService:
         result = _batch(record.project_dir, tts_caller=caller)
         _touch_editing(record, self.store)
         return result
+
+    def regenerate_all_dirty_segments_async(
+        self,
+        job_id: str,
+        *,
+        tts_caller=None,
+    ) -> dict:
+        """Async batch regenerate (D39). Spawns a daemon thread, returns
+        immediately with a ``task_id``. The thread writes progress to
+        ``{project_dir}/editor/editing/regen_status.json``; poll via
+        ``get_regenerate_all_status(job_id, task_id)``.
+
+        Still refreshes ``editing_touched_at`` synchronously before
+        returning so the idle scanner sees activity even if the thread
+        hasn't emitted any per-segment events yet.
+        """
+        from services.jobs.editing import touch_editing as _touch_editing
+        from services.jobs.regenerate_all_async import start_regen_all_async
+
+        record = self._require_editing(job_id)
+        caller = tts_caller or getattr(self, "_segment_tts_caller", None)
+        task_id = start_regen_all_async(
+            project_dir=record.project_dir, tts_caller=caller,
+        )
+        _touch_editing(record, self.store)
+        return {"task_id": task_id, "status": "running"}
+
+    def get_regenerate_all_status(
+        self,
+        job_id: str,
+        task_id: str,
+    ) -> dict | None:
+        """Read the async batch re-TTS status file for ``task_id``.
+
+        Returns the status snapshot dict, or ``None`` if no batch has
+        ever started for this project. Unlike the mutation endpoints,
+        this does NOT require editing state (the user may poll after
+        commit finishes for terminal state recovery) and does NOT
+        refresh editing_touched_at."""
+        from services.jobs.regenerate_all_async import read_regen_all_status
+
+        record = self.require_job(job_id)
+        if not record.project_dir:
+            return None
+        return read_regen_all_status(record.project_dir, task_id)
 
     def get_editing_voice_map(self, job_id: str) -> dict:
         from services.jobs.editing_voice_map import load_voice_map

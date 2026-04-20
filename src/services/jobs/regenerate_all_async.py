@@ -1,0 +1,251 @@
+"""Threaded batch re-TTS with status-file progress reporting (D39).
+
+Same pattern as ``video_render_async.py``: POST spawns a daemon thread
+and returns a ``task_id`` immediately; the thread iterates
+``regenerate_segment_tts`` over every dirty segment and writes progress
+to ``{project_dir}/editor/editing/regen_status.json`` after each step.
+GET reads that file.
+
+Why threads, not asyncio: Job API is ``stdlib http.server`` (no event
+loop). Why a status file, not ``job_events``: per-segment progress
+updates would inflate the events file by hundreds of rows per batch;
+we want a small, read-only progress snapshot that the frontend can
+poll at ~1Hz. Terminal state (completed / failed with D38 summary) is
+what the API consumer needs — no need to reconstruct intermediate
+states from events.
+
+Plan references: §7.4 / D38 / D39. The sync
+``services.jobs.editing_batch.regenerate_all_dirty_segments`` is
+preserved as the building block — this module only wraps it with
+progress tracking and thread dispatch.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import threading
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from services.jobs.editing_batch import BATCH_REGENERATE_TRIGGER_STATUSES
+from services.jobs.editing_segments import load_segment_status
+from services.jobs.editing_tts import SegmentTTSCaller, regenerate_segment_tts
+
+logger = logging.getLogger(__name__)
+
+__all__ = [
+    "read_regen_all_status",
+    "start_regen_all_async",
+    "status_file_path",
+]
+
+
+def _new_task_id() -> str:
+    return uuid.uuid4().hex[:12]
+
+
+def status_file_path(project_dir: str | Path) -> Path:
+    return Path(project_dir) / "editor" / "editing" / "regen_status.json"
+
+
+def read_regen_all_status(
+    project_dir: str | Path, task_id: str,
+) -> dict[str, Any] | None:
+    """Return the progress snapshot if status file exists and matches.
+
+    - ``None`` if the file doesn't exist (no batch has ever started, or
+      the editing dir was cleaned up).
+    - ``{"mismatch": True, "actual_task_id": <id>}`` when the file
+      belongs to a newer batch — caller should reset state on its side.
+    - Otherwise the full status dict (same shape as ``_write_status``).
+    """
+    path = status_file_path(project_dir)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if data.get("task_id") != task_id:
+        return {"mismatch": True, "actual_task_id": data.get("task_id")}
+    return data
+
+
+def _write_status(project_dir: Path, payload: dict[str, Any]) -> None:
+    """Atomic write via tmpfile + rename. Silently drops if the editing
+    dir has been removed (user cancelled / committed — thread racing
+    with _rm_editing_dir)."""
+    path = status_file_path(project_dir)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        tmp.replace(path)
+    except OSError as exc:
+        logger.warning("Failed to write regen status: %s", exc)
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _initial_status(task_id: str) -> dict[str, Any]:
+    return {
+        "task_id": task_id,
+        "stage": "starting",
+        "total": 0,
+        "succeeded_count": 0,
+        "failed_count": 0,
+        "succeeded_segment_ids": [],
+        "failed_segment_ids": [],
+        "failures": [],
+        "current_segment_id": None,
+        "result": None,
+        "error": None,
+        "updated_at": _utc_now_iso(),
+    }
+
+
+def start_regen_all_async(
+    *,
+    project_dir: str | Path,
+    tts_caller: SegmentTTSCaller | None = None,
+) -> str:
+    """Spawn a daemon thread that batches re-TTS over dirty segments.
+
+    Returns the ``task_id`` that the caller should pass back to
+    ``read_regen_all_status``. The status file is seeded synchronously
+    before the thread starts so that an immediate GET sees
+    ``stage="starting"`` rather than ``None``.
+    """
+    project_path = Path(project_dir)
+    task_id = _new_task_id()
+    _write_status(project_path, _initial_status(task_id))
+
+    thread = threading.Thread(
+        target=_run_batch,
+        name=f"regen-all-{task_id}",
+        kwargs={
+            "task_id": task_id,
+            "project_dir": project_path,
+            "tts_caller": tts_caller,
+        },
+        daemon=True,
+    )
+    thread.start()
+    return task_id
+
+
+def _run_batch(
+    *,
+    task_id: str,
+    project_dir: Path,
+    tts_caller: SegmentTTSCaller | None,
+) -> None:
+    """Thread body. Mirrors ``regenerate_all_dirty_segments`` semantics
+    but writes per-segment progress to the status file and distinguishes
+    "per-segment failure (continue)" from "top-level crash (stage=failed)"."""
+    try:
+        status_map = load_segment_status(project_dir)
+    except Exception as exc:  # missing segment_status / unreadable JSON
+        logger.exception("regen batch %s: failed to load segment_status", task_id)
+        _write_status(
+            project_dir,
+            {
+                **_initial_status(task_id),
+                "stage": "failed",
+                "error": f"failed to load segment_status: {exc}"[:500],
+                "updated_at": _utc_now_iso(),
+            },
+        )
+        return
+
+    eligible = sorted(
+        sid for sid, status in status_map.items()
+        if status in BATCH_REGENERATE_TRIGGER_STATUSES
+    )
+    total = len(eligible)
+    succeeded: list[str] = []
+    failed_ids: list[str] = []
+    failures: list[dict[str, str]] = []
+
+    # Initial running snapshot with known total.
+    _write_status(
+        project_dir,
+        {
+            **_initial_status(task_id),
+            "stage": "running",
+            "total": total,
+            "updated_at": _utc_now_iso(),
+        },
+    )
+
+    for segment_id in eligible:
+        # "Current" snapshot so the UI can show "正在重合成 seg_042"
+        _write_status(
+            project_dir,
+            {
+                "task_id": task_id,
+                "stage": "running",
+                "total": total,
+                "succeeded_count": len(succeeded),
+                "failed_count": len(failures),
+                "succeeded_segment_ids": list(succeeded),
+                "failed_segment_ids": list(failed_ids),
+                "failures": list(failures),
+                "current_segment_id": segment_id,
+                "result": None,
+                "error": None,
+                "updated_at": _utc_now_iso(),
+            },
+        )
+        try:
+            regenerate_segment_tts(
+                project_dir, segment_id, tts_caller=tts_caller,
+            )
+            succeeded.append(segment_id)
+        except Exception as exc:
+            # Per-segment failure: log, record, continue (plan D38).
+            logger.info(
+                "regen batch %s: segment_id=%s failed: %s",
+                task_id, segment_id, exc,
+            )
+            failed_ids.append(segment_id)
+            failures.append(
+                {"segment_id": segment_id, "error": str(exc)[:300]}
+            )
+
+    # Completion snapshot with D38 summary.
+    summary = {
+        "total": total,
+        "succeeded_count": len(succeeded),
+        "failed_count": len(failures),
+        "succeeded_segment_ids": succeeded,
+        "failed_segment_ids": failed_ids,
+        "failures": failures,
+    }
+    _write_status(
+        project_dir,
+        {
+            "task_id": task_id,
+            "stage": "completed",
+            "total": total,
+            "succeeded_count": len(succeeded),
+            "failed_count": len(failures),
+            "succeeded_segment_ids": succeeded,
+            "failed_segment_ids": failed_ids,
+            "failures": failures,
+            "current_segment_id": None,
+            "result": summary,
+            "error": None,
+            "updated_at": _utc_now_iso(),
+        },
+    )

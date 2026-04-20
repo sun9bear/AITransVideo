@@ -8,7 +8,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
-from urllib.parse import quote, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 import zipfile
 
 logger = logging.getLogger(__name__)
@@ -120,6 +120,29 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
                         and path_parts[2] == "editing" and path_parts[3] == "voice-map"):
                     payload = service.get_editing_voice_map(path_parts[1])
                     self._write_json(HTTPStatus.OK, payload)
+                    return
+                # GET /jobs/{id}/regenerate-all-tts/status?task_id=XXX (D39)
+                # Poll the async batch re-TTS progress. Returns 404 if no
+                # batch has ever started for this project; 200 with a
+                # ``mismatch`` body if a newer batch has overwritten the
+                # file (client should reset its UI state).
+                if (len(path_parts) == 4 and path_parts[0] == "jobs"
+                        and path_parts[2] == "regenerate-all-tts"
+                        and path_parts[3] == "status"):
+                    qs = parse_qs(parsed_path.query or "")
+                    task_id = (qs.get("task_id") or [""])[0].strip()
+                    if not task_id:
+                        raise ValueError("task_id query param is required")
+                    status = service.get_regenerate_all_status(
+                        path_parts[1], task_id,
+                    )
+                    if status is None:
+                        self._write_json(
+                            HTTPStatus.NOT_FOUND,
+                            {"error": "no batch re-TTS has started for this job"},
+                        )
+                        return
+                    self._write_json(HTTPStatus.OK, status)
                     return
                 # --- Phase 1: review-state (job-scoped, strict) ---
                 if len(path_parts) == 3 and path_parts[0] == "jobs" and path_parts[2] == "review-state":
@@ -472,11 +495,15 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
                     result = service.discard_segment_draft_tts(path_parts[1], path_parts[3])
                     self._write_json(HTTPStatus.OK, {"success": True, **result})
                     return
-                # POST /jobs/{id}/regenerate-all-tts — batch re-TTS scan (T1-6)
+                # POST /jobs/{id}/regenerate-all-tts — batch re-TTS (T1-6 / D39 async)
+                # Returns {task_id, status: "running"} immediately; progress
+                # read via GET /regenerate-all-tts/status?task_id=XXX.
                 if (len(path_parts) == 3 and path_parts[0] == "jobs"
                         and path_parts[2] == "regenerate-all-tts"):
                     self._read_json_payload()  # body currently unused
-                    result = service.regenerate_all_dirty_segments(path_parts[1])
+                    result = service.regenerate_all_dirty_segments_async(
+                        path_parts[1],
+                    )
                     self._write_json(HTTPStatus.OK, {"success": True, **result})
                     return
                 # POST /jobs/{id}/editing/voice-map — set per-segment voice override (T1-6)
