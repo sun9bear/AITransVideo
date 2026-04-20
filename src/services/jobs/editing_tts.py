@@ -14,8 +14,10 @@ Public surface:
   segment ``accepted``, keep the draft file in place (commit will later move
   it to baseline).
 - ``discard_draft_tts(project_dir, segment_id)`` — user clicked "丢弃": delete
-  the draft, mark ``accepted`` (the segment now falls back to the baseline
-  ``tts_segments/{sid}.wav`` audio).
+  the draft, then demote segment_status via
+  ``compute_residual_segment_status`` so any surviving dirty source
+  (text edit / voice override) is preserved. Only if no residual dirt
+  remains does the segment fall back to ``accepted`` + baseline audio.
 
 TTS caller is **injected** rather than imported: (a) real TTS providers
 are paid APIs and the CLAUDE.md constraint forbids silent invocation, so

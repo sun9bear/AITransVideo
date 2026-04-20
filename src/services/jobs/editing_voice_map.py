@@ -21,8 +21,12 @@ Important decisions:
   reason about and matches the UI (dropdown value IS the state).
 - **segment_status coupling**: setting a voice flips
   ``segment_status[sid] = voice_dirty`` so the batch re-TTS scan picks it
-  up. Clearing a voice (reverting to baseline) flips back to ``accepted``
-  — at commit time the voice_map is gone and baseline audio wins.
+  up. Clearing a voice demotes via
+  ``compute_residual_segment_status`` so any surviving dirty source
+  (text edit / draft wav) is preserved — only falls back to
+  ``accepted`` when there's truly nothing left to re-render. At commit
+  time the voice_map is gone and baseline audio wins for segments that
+  ended up ``accepted``.
 - **No baseline mutation** (§3.5 invariant): we NEVER touch ``segments.json``
   here. The commit flow (T1-9) reads voice_map + segments together and
   writes the merged result to the new project_dir.
