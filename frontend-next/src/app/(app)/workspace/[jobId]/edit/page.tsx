@@ -43,6 +43,10 @@ import {
   usePlayerSegmentSync,
   type PlayerSyncSegment,
 } from "@/lib/react/usePlayerSegmentSync"
+import {
+  SegmentVirtualList,
+  type SegmentVirtualListRef,
+} from "@/components/workspace/segments/SegmentVirtualList"
 import type { JobSummary } from "@/types/jobs"
 import { VoiceModifyTab } from "./VoiceModifyTab"
 
@@ -395,7 +399,16 @@ export default function VideoEditPage() {
       )
   }, [resource])
 
+  const virtualListRef = useRef<SegmentVirtualListRef>(null)
   const scrollToSegment = useCallback((segmentId: string) => {
+    // Prefer the virtual-list imperative API (it knows which items are
+    // currently mounted and where each will land post-scroll). Fallback
+    // to raw DOM anchor for non-virtualized layouts (e.g. early render
+    // before the list mounts).
+    if (virtualListRef.current) {
+      virtualListRef.current.scrollToId(segmentId, { align: "center" })
+      return
+    }
     const el = document.getElementById(`segment-card-${segmentId}`)
     if (el) {
       el.scrollIntoView({ behavior: "smooth", block: "center" })
@@ -418,21 +431,8 @@ export default function VideoEditPage() {
       }))
   }, [resource])
   const { activeSegmentId } = usePlayerSegmentSync(videoRef, playerSyncSegments)
-
-  // Auto-scroll when the player advances into a new segment. Respects
-  // prefers-reduced-motion via scroll-behavior CSS fallback in Tailwind
-  // (we pass "smooth" unconditionally; OS-level reduce-motion is honored
-  // by modern browsers).  Skipped while the user is actively editing a
-  // textarea (prevent fighting the user), detected via document.activeElement.
-  useEffect(() => {
-    if (!activeSegmentId) return
-    const active = document.activeElement
-    if (active && active.tagName === "TEXTAREA") return
-    const el = document.getElementById(`segment-card-${activeSegmentId}`)
-    if (el) {
-      el.scrollIntoView({ behavior: "smooth", block: "center" })
-    }
-  }, [activeSegmentId])
+  // Auto-scroll to active segment is now handled inside SegmentVirtualList
+  // (prop: activeSegmentId). No page-level effect needed.
 
   // Click on segment card → seek video to that segment's start
   const seekToSegment = useCallback((segmentId: string) => {
@@ -489,7 +489,10 @@ export default function VideoEditPage() {
   }
 
   return (
-    <div className="space-y-6 max-w-5xl mx-auto">
+    // §7.9 responsive: desktop 1024+ caps at max-w-5xl (1024px content),
+    // phone/tablet span full width with adjusted padding. Section
+    // `space-y` shrinks on narrow viewports to save vertical space.
+    <div className="space-y-4 sm:space-y-6 max-w-5xl mx-auto px-3 sm:px-0">
       {/* Header */}
       <section className="surface-card p-4 flex flex-wrap items-center gap-3">
         <Link
@@ -526,14 +529,17 @@ export default function VideoEditPage() {
         </div>
       </section>
 
-      {/* Sticky video player — shows the baseline (last-committed)
-          dubbed video so users can audit text edits against the audio
-          they're about to replace. Sync hook drives per-segment
-          highlight + auto-scroll below. */}
-      <section className="sticky top-2 z-10 surface-card p-2">
+      {/* Sticky video player — baseline (last-committed) dubbed video
+          so users can audit text edits against the audio they're about
+          to replace. §7.9 responsive: cap height 40vh on phones,
+          45vh elsewhere. */}
+      <aside
+        className="sticky top-2 z-10 surface-card p-2"
+        aria-label="视频预览"
+      >
         <video
           ref={videoRef}
-          className="w-full max-h-[45vh] rounded-md bg-black object-contain"
+          className="w-full max-h-[40vh] sm:max-h-[45vh] rounded-md bg-black object-contain"
           controls
           preload="metadata"
           src={buildStreamUrl(jobId, "video")}
@@ -541,17 +547,22 @@ export default function VideoEditPage() {
         >
           您的浏览器不支持 video 标签
         </video>
-      </section>
+      </aside>
 
-      {/* Tab switcher */}
+      {/* Tab switcher — full ARIA tabs pattern for screen readers. */}
       <nav
         className="flex items-center gap-1 border-b border-border"
+        role="tablist"
         aria-label="修改阶段切换"
       >
         <button
           type="button"
+          role="tab"
+          id="tab-text"
+          aria-selected={activeTab === "text"}
+          aria-controls="panel-text"
           onClick={() => setActiveTab("text")}
-          className={`px-4 py-2 text-sm font-medium -mb-px border-b-2 transition-colors ${
+          className={`px-4 py-2 text-sm font-medium -mb-px border-b-2 transition-colors min-h-[44px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-1 ${
             activeTab === "text"
               ? "border-primary text-foreground"
               : "border-transparent text-muted-foreground hover:text-foreground"
@@ -561,8 +572,12 @@ export default function VideoEditPage() {
         </button>
         <button
           type="button"
+          role="tab"
+          id="tab-voice"
+          aria-selected={activeTab === "voice"}
+          aria-controls="panel-voice"
           onClick={() => setActiveTab("voice")}
-          className={`px-4 py-2 text-sm font-medium -mb-px border-b-2 transition-colors ${
+          className={`px-4 py-2 text-sm font-medium -mb-px border-b-2 transition-colors min-h-[44px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-1 ${
             activeTab === "voice"
               ? "border-primary text-foreground"
               : "border-transparent text-muted-foreground hover:text-foreground"
@@ -582,10 +597,22 @@ export default function VideoEditPage() {
       </nav>
 
       {activeTab === "text" ? (
-        <>
+        <main
+          id="panel-text"
+          role="tabpanel"
+          aria-labelledby="tab-text"
+          className="space-y-6"
+        >
           {/* Batch actions + anomaly summary */}
-          <section className="surface-card p-4 flex flex-wrap items-center gap-3">
-            <div className="flex-1 min-w-0 text-sm text-muted-foreground">
+          <section
+            className="surface-card p-4 flex flex-wrap items-center gap-3"
+            aria-label="批量操作与异常摘要"
+          >
+            <div
+              className="flex-1 min-w-0 text-sm text-muted-foreground"
+              role="status"
+              aria-live="polite"
+            >
               {dirtyCount > 0 ? (
                 <span>
                   有 <strong className="text-foreground">{dirtyCount}</strong> 段待重合成。
@@ -601,7 +628,7 @@ export default function VideoEditPage() {
               {draftDurationMismatchSegments.length > 0 && (
                 <button
                   type="button"
-                  className="ml-2 text-amber-500 underline decoration-dotted hover:text-amber-400"
+                  className="ml-2 text-amber-500 underline decoration-dotted hover:text-amber-400 min-h-[32px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-1 rounded"
                   onClick={() =>
                     scrollToSegment(draftDurationMismatchSegments[0].seg.segment_id)
                   }
@@ -612,9 +639,10 @@ export default function VideoEditPage() {
               )}
             </div>
             <button
-              className="rounded-md bg-primary/80 text-primary-foreground px-4 py-1.5 text-xs inline-flex items-center gap-1 disabled:opacity-50"
+              className="rounded-md bg-primary/80 text-primary-foreground px-4 py-1.5 text-xs inline-flex items-center gap-1 disabled:opacity-50 min-h-[40px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-1"
               onClick={handleBatchRegenerate}
               disabled={isBatchRegenerating || dirtyCount === 0}
+              aria-busy={isBatchRegenerating}
               type="button"
             >
               {isBatchRegenerating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
@@ -622,34 +650,52 @@ export default function VideoEditPage() {
             </button>
           </section>
 
-          {/* Segment list */}
-          <section className="space-y-3">
-            {resource.segments.map((seg, idx) => (
-              <SegmentCard
-                key={seg.segment_id}
-                jobId={jobId}
-                index={idx}
-                segment={seg}
-                status={resource.segment_status[seg.segment_id] ?? "accepted"}
-                isSaving={savingSegmentIds.has(seg.segment_id)}
-                isRegenerating={regeneratingSegmentIds.has(seg.segment_id)}
-                isActive={activeSegmentId === seg.segment_id}
-                onTextChange={handleTextChange}
-                onRegenerate={handleRegenerate}
-                onAcceptDraft={handleAcceptDraft}
-                onDiscardDraft={handleDiscardDraft}
-                onSeek={seekToSegment}
-              />
-            ))}
+          {/* Segment list — virtualized so 200+ segments don't balloon
+              the DOM. Small tasks (≤ a few dozen segs) still render
+              fine, the overhead is minimal. */}
+          <section aria-label="段落编辑区">
+            <SegmentVirtualList
+              ref={virtualListRef}
+              items={resource.segments}
+              getId={(s) => s.segment_id}
+              activeSegmentId={activeSegmentId}
+              estimatedItemHeight={200}
+              maxHeight="70vh"
+              className="pr-1"
+              renderItem={(seg, idx) => (
+                <div className="pb-3">
+                  <SegmentCard
+                    jobId={jobId}
+                    index={idx}
+                    segment={seg}
+                    status={resource.segment_status[seg.segment_id] ?? "accepted"}
+                    isSaving={savingSegmentIds.has(seg.segment_id)}
+                    isRegenerating={regeneratingSegmentIds.has(seg.segment_id)}
+                    isActive={activeSegmentId === seg.segment_id}
+                    onTextChange={handleTextChange}
+                    onRegenerate={handleRegenerate}
+                    onAcceptDraft={handleAcceptDraft}
+                    onDiscardDraft={handleDiscardDraft}
+                    onSeek={seekToSegment}
+                  />
+                </div>
+              )}
+            />
           </section>
-        </>
+        </main>
       ) : (
-        <VoiceModifyTab
-          jobId={jobId}
-          segments={resource.segments}
-          voiceMap={voiceMap}
-          onVoiceMapChange={setVoiceMap}
-        />
+        <main
+          id="panel-voice"
+          role="tabpanel"
+          aria-labelledby="tab-voice"
+        >
+          <VoiceModifyTab
+            jobId={jobId}
+            segments={resource.segments}
+            voiceMap={voiceMap}
+            onVoiceMapChange={setVoiceMap}
+          />
+        </main>
       )}
 
       {commitModalOpen && (
@@ -742,9 +788,24 @@ function SegmentCard({
       ? "border-l-4 border-l-red-500"
       : ""
 
+  // Screen reader friendly summary for the whole segment card
+  const screenReaderSummary = [
+    `段落 ${index + 1}`,
+    segment.speaker_id ? `说话人 ${segment.speaker_id}` : null,
+    timeLabel || null,
+    isAnomalous
+      ? `时长异常${
+          segment.duration_diff_ratio !== undefined
+            ? `，偏差 ${Math.round(segment.duration_diff_ratio * 100)}%`
+            : ""
+        }`
+      : null,
+  ].filter(Boolean).join("，")
+
   return (
     <article
       id={`segment-card-${segment.segment_id}`}
+      aria-label={screenReaderSummary}
       className={`surface-card p-4 ${borderClass} ${
         isActive ? "ring-2 ring-primary/70 shadow-lg shadow-primary/10" : ""
       } transition-shadow`}
@@ -754,9 +815,10 @@ function SegmentCard({
         {timeLabel && (
           <button
             type="button"
-            className="text-primary/80 underline decoration-dotted underline-offset-2 hover:text-primary hover:decoration-solid"
+            className="text-primary/80 underline decoration-dotted underline-offset-2 hover:text-primary hover:decoration-solid focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-1 rounded"
             onClick={() => onSeek(segment.segment_id)}
             title="跳转视频到该段起点"
+            aria-label={`跳转视频到 ${timeLabel}`}
           >
             {timeLabel}
           </button>
@@ -764,7 +826,7 @@ function SegmentCard({
         {segment.speaker_id && <span>说话人 {segment.speaker_id}</span>}
         <StatusChip status={status} />
         {isAnomalous && (
-          <span className="text-red-500">
+          <span className="text-red-500" role="img" aria-label="时长异常">
             ⚠ 时长异常
             {segment.duration_diff_ratio !== undefined && (
               <span className="ml-1">
@@ -827,6 +889,8 @@ function SegmentCard({
           size="sm"
           variant="secondary"
           disabled={isRegenerating}
+          aria-busy={isRegenerating}
+          aria-label={isRegenerating ? "正在重新合成" : "重新合成该段音频"}
           onClick={() => onRegenerate(segment.segment_id)}
         >
           {isRegenerating ? (
@@ -838,16 +902,30 @@ function SegmentCard({
         </Button>
         {status === "tts_dirty" && (
           <>
-            <Button size="sm" variant="outline" onClick={() => onAcceptDraft(segment.segment_id)}>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => onAcceptDraft(segment.segment_id)}
+              aria-label="接受新合成的音频"
+            >
               <Check className="h-3.5 w-3.5 mr-1" />接受
             </Button>
-            <Button size="sm" variant="ghost" onClick={() => onDiscardDraft(segment.segment_id)}>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => onDiscardDraft(segment.segment_id)}
+              aria-label="丢弃新合成的音频，保留原音频"
+            >
               <Trash2 className="h-3.5 w-3.5 mr-1" />丢弃
             </Button>
           </>
         )}
         {isSaving && (
-          <span className="ml-2 text-xs text-muted-foreground inline-flex items-center gap-1">
+          <span
+            className="ml-2 text-xs text-muted-foreground inline-flex items-center gap-1"
+            role="status"
+            aria-live="polite"
+          >
             <Loader2 className="h-3 w-3 animate-spin" />保存中...
           </span>
         )}
