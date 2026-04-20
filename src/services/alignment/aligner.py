@@ -504,6 +504,13 @@ class SegmentAligner:
         target_duration_ms: int,
         output_path: str,
     ) -> str:
+        # TODO(backlog/audio-fit-migration): replace body with a call to
+        # ``utils.audio_fit.fit_audio_to_slot`` to pick up smart-trim +
+        # clamped-atempo + silence-pad policy. γ publish already uses
+        # that utility (commit dade959); main-pipeline migration is
+        # tracked in docs/internal/backlog.md. Do not inline-refactor
+        # without also updating the 4 call sites' aligned_duration_ms /
+        # alignment_method write-back logic.
         input_audio_path = _resolve_existing_audio_path(input_path)
         if target_duration_ms <= 0:
             raise AlignmentError("target_duration_ms must be positive for DSP alignment.")
