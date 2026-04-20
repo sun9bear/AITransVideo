@@ -668,7 +668,11 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
                         return
 
                     if review_subpath == "voice/preview":
-                        _require_waiting_for_review(record)
+                        # Preview is a stateless TTS probe (no project_dir, no
+                        # write-back). Allow both the classic review gate AND
+                        # the Studio post-edit session — users need to audition
+                        # voices in the "音色修改" Tab too.
+                        _require_waiting_for_review_or_editing(record)
                         payload = self._read_json_payload()
                         from services.jobs.review_actions import preview_voice
                         from services import config_loader
@@ -1018,6 +1022,20 @@ def _require_waiting_for_review(record: object) -> None:
     if status != "waiting_for_review":
         raise JobConflictError(
             f"Job {getattr(record, 'job_id', '?')} is not waiting_for_review (current: {status})"
+        )
+
+
+def _require_waiting_for_review_or_editing(record: object) -> None:
+    """Voice preview / similar read-only probes are useful from both the
+    original review gate AND the Studio post-edit session. These endpoints
+    don't mutate job state — they just call TTS with a sample voice —
+    so allowing ``editing`` alongside ``waiting_for_review`` is safe.
+    Raises JobConflictError for any other state."""
+    status = str(getattr(record, "status", "")).strip()
+    if status not in ("waiting_for_review", "editing"):
+        raise JobConflictError(
+            f"Job {getattr(record, 'job_id', '?')} is not waiting_for_review or editing "
+            f"(current: {status})"
         )
 
 
