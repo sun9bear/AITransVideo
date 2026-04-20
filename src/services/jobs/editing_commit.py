@@ -127,6 +127,22 @@ def _apply_voice_map(
     segments: list[dict[str, Any]],
     voice_map: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    """Overlay voice_map overrides onto the segment list.
+
+    Writes to the canonical ``tts_provider`` field — the same key that
+    ``DubbingSegment.tts_provider`` / the single-segment regen overlay
+    (in services.jobs.editing_tts) / the TTS router / the γ publish
+    loader all read. Writing the drifted ``provider`` key would
+    silently strand the user's provider pick (DubbingSegment
+    constructor filters unknown keys → tts_provider="" → downstream
+    falls back to the global default).
+
+    ``segment_id`` in editing/segments.json may be int (legacy lazy-seed
+    snapshots). voice_map keys are always str (load_voice_map coerces
+    via ``str(sid)``). Normalise the lookup key via ``str()`` instead of
+    gating on ``isinstance(sid, str)`` — the old gate silently dropped
+    every int-typed segment's override.
+    """
     if not voice_map:
         return segments
     out: list[dict[str, Any]] = []
@@ -135,11 +151,14 @@ def _apply_voice_map(
             out.append(seg)
             continue
         sid = seg.get("segment_id")
-        override = voice_map.get(sid) if isinstance(sid, str) else None
+        override = voice_map.get(str(sid)) if sid is not None else None
         if override:
             new_seg = dict(seg)
-            new_seg["provider"] = override["provider"]
+            new_seg["tts_provider"] = override["provider"]
             new_seg["voice_id"] = override["voice_id"]
+            # Scrub any legacy ``provider`` key so editor/segments.json
+            # stays single-source-of-truth on tts_provider.
+            new_seg.pop("provider", None)
             out.append(new_seg)
         else:
             out.append(seg)

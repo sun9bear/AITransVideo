@@ -219,12 +219,67 @@ def test_overwrite_applies_voice_map_and_draft_wavs(tmp_path: Path) -> None:
     commit_editing_pipeline(record, store, runner, strategy="overwrite")
 
     out = json.loads((project_dir / "editor" / "segments.json").read_text(encoding="utf-8"))
-    assert out[0]["provider"] == "cosyvoice"
+    # CodeX P1 (ultrareview #2): voice_map override must land on the
+    # canonical ``tts_provider`` field (not a drifted ``provider`` key).
+    # DubbingSegment.tts_provider is what the γ loader / TTS router /
+    # single-segment regen overlay all read — writing ``provider`` here
+    # silently drops the user's provider pick at publish time.
+    assert out[0]["tts_provider"] == "cosyvoice", (
+        f"voice_map override must populate tts_provider on the segment; "
+        f"got keys {sorted(out[0].keys())}"
+    )
     assert out[0]["voice_id"] == "cv"
+    # Legacy misspelling must not be written — keeps editor/segments.json
+    # clean of unknown fields that γ's DubbingSegment constructor then
+    # has to filter out.
+    assert "provider" not in out[0], (
+        "legacy 'provider' key leaked into editor/segments.json — the "
+        "correct field is tts_provider"
+    )
     assert (project_dir / "editor" / "tts_segments" / "seg_002.wav").read_bytes() == b"NEW_002"
     # seg_001 / seg_003 baselines untouched
     assert (project_dir / "editor" / "tts_segments" / "seg_001.wav").read_bytes() == b"BASE_1"
     assert (project_dir / "editor" / "tts_segments" / "seg_003.wav").read_bytes() == b"BASE_3"
+
+
+def test_overwrite_voice_map_applies_when_segment_id_is_int(
+    tmp_path: Path,
+) -> None:
+    """CodeX P1 (ultrareview #2): legacy tasks carry int segment_ids
+    in editing/segments.json (pre-normalise-seeder snapshots). The
+    voice_map keys are always str (load_voice_map coerces). The current
+    ``override = voice_map.get(sid) if isinstance(sid, str) else None``
+    branch drops overrides for those legacy segments entirely — user's
+    voice pick silently vanishes at commit.
+
+    Fix: normalize via str(sid) before the dict lookup."""
+    store, record, project_dir = _build_editing_job_with_diff(tmp_path)
+    # Mutate editing/segments.json: change segment_id to int
+    editing_segs_path = project_dir / EDITING_SUBDIR / "segments.json"
+    segs = json.loads(editing_segs_path.read_text(encoding="utf-8"))
+    for i, seg in enumerate(segs, start=1):
+        seg["segment_id"] = i  # int instead of "seg_001" etc.
+    editing_segs_path.write_text(
+        json.dumps(segs, ensure_ascii=False), encoding="utf-8",
+    )
+    # voice_map keys are strings (as load_voice_map normalizes them)
+    (project_dir / EDITING_SUBDIR / "voice_map.json").write_text(
+        json.dumps({"1": {"provider": "volcengine", "voice_id": "v_x"}}),
+        encoding="utf-8",
+    )
+    runner = _RecordingRunner()
+
+    commit_editing_pipeline(record, store, runner, strategy="overwrite")
+
+    out = json.loads((project_dir / "editor" / "segments.json").read_text(encoding="utf-8"))
+    # Find the segment that should have been overridden (int-typed id)
+    overridden = next(s for s in out if str(s.get("segment_id")) == "1")
+    assert overridden["tts_provider"] == "volcengine", (
+        f"voice_map override dropped by isinstance(sid, str) gate — "
+        f"legacy int segment_id received no provider update. "
+        f"Got: tts_provider={overridden.get('tts_provider')!r}"
+    )
+    assert overridden["voice_id"] == "v_x"
 
 
 def test_overwrite_flips_status_and_increments_edit_generation(tmp_path: Path) -> None:

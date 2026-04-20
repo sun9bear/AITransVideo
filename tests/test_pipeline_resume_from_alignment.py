@@ -285,9 +285,10 @@ def test_gamma_prefers_editor_segments_over_translation_segments(tmp_path: Path)
 
 
 def test_gamma_loader_drops_unknown_voice_map_fields(tmp_path: Path) -> None:
-    """editing_commit.apply_voice_map adds 'provider' to segment dicts
-    (not a DubbingSegment field). γ loader must drop unknown keys, else
-    DubbingSegment(**seg) raises TypeError about unexpected kwargs."""
+    """γ loader must drop unknown keys, else DubbingSegment(**seg) raises
+    TypeError. Sources of unknown keys include legacy ``provider``
+    misspellings (pre-ultrareview #2 commits wrote ``provider`` instead
+    of ``tts_provider``) and unrelated schema drift."""
     project = tmp_path / "project"
     (project / "editor").mkdir(parents=True)
     (project / "editor" / "segments.json").write_text(
@@ -296,10 +297,11 @@ def test_gamma_loader_drops_unknown_voice_map_fields(tmp_path: Path) -> None:
             "display_name": "A", "voice_id": "voice123",
             "start_ms": 0, "end_ms": 1000, "target_duration_ms": 1000,
             "source_text": "x", "cn_text": "x",
-            # voice_map override adds 'provider' (maps to tts_provider
-            # but stored as 'provider' by _apply_voice_map):
+            # Legacy misspelling that slipped out before the voice_map
+            # field-name fix. Keep this in the fixture so γ stays
+            # tolerant of old editor/segments.json payloads still on
+            # disk from previous commits.
             "provider": "cosyvoice",
-            # and some other junk — a legacy task or a future schema drift
             "legacy_field_we_dont_care_about": 42,
         }]),
         encoding="utf-8",

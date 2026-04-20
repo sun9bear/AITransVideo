@@ -270,10 +270,64 @@ def test_prepare_copy_applies_voice_map_overrides(tmp_path: Path) -> None:
     out = json.loads(
         (target / "editor" / "segments.json").read_text(encoding="utf-8")
     )
-    assert out[0]["provider"] == "cosyvoice"
+    # CodeX P1 (ultrareview #2): voice_map override must land on the
+    # canonical ``tts_provider`` field. The old ``provider`` drift was
+    # silently filtered out by DubbingSegment construction in γ resume.
+    assert out[0]["tts_provider"] == "cosyvoice", (
+        f"voice_map override must populate tts_provider; got keys "
+        f"{sorted(out[0].keys())}"
+    )
     assert out[0]["voice_id"] == "cv_new"
-    # seg_002 untouched
-    assert out[1]["provider"] == "minimax"
+    assert "provider" not in out[0], (
+        "legacy 'provider' key leaked into copy's editor/segments.json"
+    )
+    # seg_002 untouched — inherits whatever the source baseline had;
+    # fixture shorthand uses ``provider`` so that key passes through.
+    # (The copy path does not rename baseline keys — it only applies
+    # overrides, so source's pre-existing `provider` stays put.)
+    assert out[1].get("voice_id") == "v_default"
+
+
+def test_prepare_copy_voice_map_applies_when_segment_id_is_int(
+    tmp_path: Path,
+) -> None:
+    """CodeX P1 (ultrareview #2): editing/segments.json may carry int
+    segment_ids (legacy lazy-seed snapshots). voice_map keys are always
+    str. The current ``isinstance(sid, str)`` gate drops overrides for
+    every int-typed segment → user's voice pick silently lost at
+    copy_as_new."""
+    source = _make_source_project(tmp_path, n_segments=2)
+    editing_dir = source / "editor" / "editing"
+    # editing/segments.json with int segment_ids (overrides the empty
+    # dir seeded by _make_source_project).
+    (editing_dir / "segments.json").write_text(
+        json.dumps([
+            {"segment_id": 1, "cn_text": "t1",
+             "tts_provider": "minimax", "voice_id": "v_default",
+             "start_ms": 0, "end_ms": 1000},
+            {"segment_id": 2, "cn_text": "t2",
+             "tts_provider": "minimax", "voice_id": "v_default",
+             "start_ms": 1000, "end_ms": 2000},
+        ]),
+        encoding="utf-8",
+    )
+    (editing_dir / "voice_map.json").write_text(
+        json.dumps({"1": {"provider": "volcengine", "voice_id": "vx"}}),
+        encoding="utf-8",
+    )
+    target = tmp_path / "copy_int_sid"
+
+    prepare_copy_project_dir(source, target)
+
+    out = json.loads(
+        (target / "editor" / "segments.json").read_text(encoding="utf-8")
+    )
+    overridden = next(s for s in out if str(s.get("segment_id")) == "1")
+    assert overridden["tts_provider"] == "volcengine", (
+        f"voice_map override dropped by isinstance(sid, str) gate. "
+        f"Got tts_provider={overridden.get('tts_provider')!r}"
+    )
+    assert overridden["voice_id"] == "vx"
 
 
 def test_prepare_copy_applies_draft_wavs_over_hardlinks(tmp_path: Path) -> None:

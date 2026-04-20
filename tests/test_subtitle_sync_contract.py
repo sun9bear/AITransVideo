@@ -58,7 +58,9 @@ def test_commit_propagates_edited_cn_text_into_baseline_segments_json(tmp_path: 
     # seg_002 untouched in cn_text, but voice_id overridden
     assert baseline[1]["cn_text"] == "text2"
     assert baseline[1]["voice_id"] == "cv_new"
-    assert baseline[1]["provider"] == "cosyvoice"
+    # voice_map override writes to the canonical tts_provider field
+    # (ultrareview #2 fix — was drifted 'provider' before).
+    assert baseline[1]["tts_provider"] == "cosyvoice"
 
 
 def test_editor_package_writer_reads_segment_cn_text_field() -> None:

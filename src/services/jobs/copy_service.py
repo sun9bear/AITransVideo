@@ -349,19 +349,27 @@ def _apply_voice_map_to_segments(
     voice_map: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Return a new list where every segment whose segment_id is in
-    voice_map has its ``provider`` + ``voice_id`` overwritten. Segments
-    not in voice_map pass through unchanged. Original list not mutated."""
+    voice_map has its ``tts_provider`` + ``voice_id`` overwritten.
+    Segments not in voice_map pass through unchanged. Original list
+    not mutated.
+
+    Uses the canonical ``tts_provider`` field (DubbingSegment /
+    editing_tts / γ loader contract). segment_id lookup normalises
+    via ``str()`` so int-typed legacy ids still match voice_map keys
+    (which are always str per ``load_voice_map``).
+    """
     out: list[dict[str, Any]] = []
     for seg in segments:
         if not isinstance(seg, dict):
             out.append(seg)
             continue
         sid = seg.get("segment_id")
-        override = voice_map.get(sid) if isinstance(sid, str) else None
+        override = voice_map.get(str(sid)) if sid is not None else None
         if override:
             new_seg = dict(seg)
-            new_seg["provider"] = override["provider"]
+            new_seg["tts_provider"] = override["provider"]
             new_seg["voice_id"] = override["voice_id"]
+            new_seg.pop("provider", None)  # scrub legacy misspelling
             out.append(new_seg)
         else:
             out.append(seg)
