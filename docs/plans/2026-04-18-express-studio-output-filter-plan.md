@@ -1,7 +1,8 @@
 # 快捷版 / 工作台版输出内容分层方案
 
-> **Status:** draft v3 — 整合 CodeX 二审 P1/P2 意见，等待复审
+> **Status:** ✅ shipped — Tasks 1-4 后端落地于 `ea53533`；Tasks 5-8 前端落地于 `189e649`；CodeX P2 补丁 `e97e6c5`（ResultMediaCard 独立渲染）。回归覆盖 `tests/test_job_api_express_filter.py`。
 > **Date:** 2026-04-18
+> **Shipped:** 2026-04-18 → 2026-04-19（逐次 commit 到 US 生产）
 > **Goal:** 让 Express（快捷版）任务只对用户暴露"配音视频"，Studio（工作台版）保留全量产物（视频 + 配音音频 + 素材包）。
 > **Architecture:** pipeline 继续产全部产物（技术上 `publish.dubbed_video` 依赖 `editor.dubbed_audio_complete`，不能裁剪产物侧）；过滤只在**用户暴露层**做——Job API 的 `/artifacts` / download whitelist / stream endpoint / `tts-segments-zip` 按 `job.service_mode` 决定返回什么 keys + 拒绝什么下载；前端 `ResultMediaCard` 和 `ResultDownloadList` 按 `serviceMode` 隐藏素材包相关 UI。**关键设计选择**：`materials-availability` 返回值保持真实（不做 false-mask），避免老 Express job 的 "生成视频" fallback 被误屏蔽。
 > **Tech Stack:** Python stdlib `http.server`（Job API）+ Next.js / React 前端 + SQLAlchemy（只读 `job.service_mode` 字段）+ FFmpeg（不改）
