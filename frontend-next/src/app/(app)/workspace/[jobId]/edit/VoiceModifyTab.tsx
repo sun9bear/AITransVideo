@@ -98,6 +98,12 @@ interface SpeakerDraftState {
   voiceId: string
   selectedProvider: string
   voiceSource: "catalog" | "cloned" | "auto_matched"
+  /** 主流程 VoiceSelectionPanel 同款：MiniMax 下的音质档位。
+   *  目前和主流程一样是**纯展示**（approve payload / voice_map 都
+   *  不带它，下游 TTS 不读），只影响右侧 "30 / 50 点/分钟" 文案。
+   *  保留是为了 UX 一致——用户在主流程看到这两档，编辑态不应
+   *  无端消失。未来如要真的分档计费，前后端一起扩 schema。*/
+  minimaxModel: "turbo" | "hd"
 }
 
 interface VoiceModifyTabProps {
@@ -315,6 +321,7 @@ export function VoiceModifyTab({
               voiceId: override.voice_id,
               selectedProvider: override.provider,
               voiceSource: "catalog",
+              minimaxModel: "turbo",
             }
             continue
           }
@@ -334,6 +341,7 @@ export function VoiceModifyTab({
               voiceId: baselineVoiceId,
               selectedProvider: baselineProvider || loadedDefaultProvider,
               voiceSource: "catalog",
+              minimaxModel: "turbo",
             }
             continue
           }
@@ -343,6 +351,7 @@ export function VoiceModifyTab({
             voiceId: provMatch?.voiceId ?? "",
             selectedProvider: loadedDefaultProvider,
             voiceSource: provMatch?.voiceId ? "auto_matched" : "catalog",
+            minimaxModel: "turbo",
           }
         }
 
@@ -918,21 +927,76 @@ export function VoiceModifyTab({
                       )}
                     </div>
 
-                    {/* Pricing hint (mirror main flow) */}
+                    {/* Pricing / quality tier — same layout as main flow
+                        VoiceSelectionPanel: MiniMax has turbo/hd radios,
+                        CosyVoice/豆包 show the standard tier. Radios
+                        are UI-only (main flow also doesn't submit the
+                        choice); future real quality switching needs a
+                        coordinated backend schema change. */}
                     {pricing && (() => {
                       const prov = currentProvider
                       const cpm = pricing.credits_per_minute
-                      const pts =
-                        prov === "minimax"
-                          ? cpm.minimax_turbo
-                          : prov === "cosyvoice"
-                          ? cpm.cosyvoice
-                          : prov === "volcengine"
-                          ? cpm.volcengine
-                          : null
+                      if (prov === "minimax") {
+                        const model = state?.minimaxModel ?? "turbo"
+                        return (
+                          <div className="flex items-center gap-4 flex-wrap">
+                            <label
+                              className="flex items-center gap-1.5 cursor-pointer"
+                              onClick={() => setDraftStates((prev) => ({
+                                ...prev,
+                                [sp.speakerId]: { ...prev[sp.speakerId], minimaxModel: "turbo" },
+                              }))}
+                            >
+                              <span
+                                className={`flex h-3.5 w-3.5 items-center justify-center rounded-full border-2 ${
+                                  model === "turbo"
+                                    ? "border-teal-500"
+                                    : "border-slate-400 dark:border-slate-600"
+                                }`}
+                              >
+                                {model === "turbo" && (
+                                  <span className="h-1.5 w-1.5 rounded-full bg-teal-500" />
+                                )}
+                              </span>
+                              <span className="text-xs text-foreground">高级音质</span>
+                              <span className="text-xs text-slate-400">{cpm.minimax_turbo} 点/分钟</span>
+                            </label>
+                            <label
+                              className="flex items-center gap-1.5 cursor-pointer"
+                              onClick={() => setDraftStates((prev) => ({
+                                ...prev,
+                                [sp.speakerId]: { ...prev[sp.speakerId], minimaxModel: "hd" },
+                              }))}
+                            >
+                              <span
+                                className={`flex h-3.5 w-3.5 items-center justify-center rounded-full border-2 ${
+                                  model === "hd"
+                                    ? "border-teal-500"
+                                    : "border-slate-400 dark:border-slate-600"
+                                }`}
+                              >
+                                {model === "hd" && (
+                                  <span className="h-1.5 w-1.5 rounded-full bg-teal-500" />
+                                )}
+                              </span>
+                              <span className="text-xs text-foreground">旗舰音质</span>
+                              <span className="text-xs text-slate-400">{cpm.minimax_hd} 点/分钟</span>
+                            </label>
+                          </div>
+                        )
+                      }
+                      const pts = prov === "cosyvoice"
+                        ? cpm.cosyvoice
+                        : prov === "volcengine"
+                        ? cpm.volcengine
+                        : null
                       return pts != null ? (
-                        <div className="text-xs text-slate-400">
-                          重合成费用：{pts} 点/分钟（按段累计，仅在&ldquo;重新合成&rdquo;时扣）
+                        <div className="flex items-center gap-1.5">
+                          <span className="flex h-3.5 w-3.5 items-center justify-center rounded-full border-2 border-teal-500">
+                            <span className="h-1.5 w-1.5 rounded-full bg-teal-500" />
+                          </span>
+                          <span className="text-xs text-foreground">标准音质</span>
+                          <span className="text-xs text-slate-400">{pts} 点/分钟</span>
                         </div>
                       ) : null
                     })()}
