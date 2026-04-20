@@ -12,7 +12,6 @@ import tempfile
 
 from pydub import AudioSegment
 from pydub.effects import normalize
-from pydub.silence import detect_leading_silence
 
 from modules.output.editor.editor_package_models import (
     ALIGNMENT_METHOD_LABELS,
@@ -20,90 +19,9 @@ from modules.output.editor.editor_package_models import (
     ProjectOutput,
     ProjectOutputResult,
 )
+from utils.audio_fit import fit_audio_to_slot
 
 logger = logging.getLogger(__name__)
-
-# Ignore sub-10ms drift between draft wav and slot — a bit-identical
-# no-op avoids the pointless ffmpeg round-trip (and its re-encode).
-_FIT_TOLERANCE_MS = 10
-
-# TTS providers (MiniMax / VolcEngine / CosyVoice) pad output with 50-200ms
-# of silence at each end. Trim that before computing the atempo ratio so
-# the stretch acts on actual speech, not padding — both saves CPU and
-# drops the effective ratio closer to 1.0x (better audio quality).
-#
-# Only applied to short segments: long segments (> _SILENCE_TRIM_MAX_MS)
-# are typically multi-phrase utterances where the leading/trailing "silence"
-# may include intentional pauses at the boundary; padding impact is also
-# proportionally smaller. Threshold is a judgement call — 3s balances
-# "safely single-phrase" against "still benefits from trim".
-_SILENCE_THRESHOLD_DBFS = -40.0       # below this is considered silence
-_SILENCE_CHUNK_MS = 10                # granularity of the scan
-_SILENCE_TRIM_MAX_MS = 3_000          # audio longer than this skips silence trim
-# Defensive cap: if trimming would leave <5% of original audio, something
-# is wrong with the input (all-silence TTS / bug) — keep original to let
-# the stretch fail loudly instead of producing empty output.
-_MIN_KEEP_RATIO_AFTER_TRIM = 0.05
-
-
-def _trim_silence_edges(audio: AudioSegment) -> AudioSegment:
-    """Strip leading + trailing silence from an AudioSegment.
-
-    Uses ``pydub.silence.detect_leading_silence`` applied twice (forward
-    for leading, reversed for trailing) with a conservative -40dB
-    threshold at 10ms granularity. Returns the original audio unchanged
-    if trimming would cut more than 95% (defensive: all-silence input
-    → let downstream stretch decide / fail loudly rather than write an
-    empty wav that ffmpeg can't operate on).
-    """
-    if len(audio) == 0:
-        return audio
-    leading_ms = detect_leading_silence(
-        audio,
-        silence_threshold=_SILENCE_THRESHOLD_DBFS,
-        chunk_size=_SILENCE_CHUNK_MS,
-    )
-    trailing_ms = detect_leading_silence(
-        audio.reverse(),
-        silence_threshold=_SILENCE_THRESHOLD_DBFS,
-        chunk_size=_SILENCE_CHUNK_MS,
-    )
-    keep_len = len(audio) - leading_ms - trailing_ms
-    if keep_len <= 0 or keep_len < len(audio) * _MIN_KEEP_RATIO_AFTER_TRIM:
-        return audio
-    return audio[leading_ms:len(audio) - trailing_ms]
-
-
-def _build_atempo_filter(speed_ratio: float) -> str:
-    """Build a multi-stage atempo filter string for arbitrary ratios.
-
-    ffmpeg's ``atempo`` natively supports [0.5, 2.0]; outside that range
-    we chain stages (each 0.5 or 2.0) until the remaining factor is
-    in-range. Mirrors ``services.alignment.aligner._build_atempo_filter``
-    — duplicated (not imported) to avoid a modules/output → services/
-    circular import.
-
-    Examples: 0.25x → "atempo=0.5,atempo=0.5"; 4x → "atempo=2,atempo=2".
-    """
-    if speed_ratio <= 0:
-        raise ValueError("speed_ratio must be positive")
-    remaining = float(speed_ratio)
-    factors: list[float] = []
-    while remaining < 0.5:
-        factors.append(0.5)
-        remaining /= 0.5
-    while remaining > 2.0:
-        factors.append(2.0)
-        remaining /= 2.0
-    factors.append(remaining)
-    return ",".join(
-        f"atempo={_format_atempo_factor(factor)}" for factor in factors
-    )
-
-
-def _format_atempo_factor(value: float) -> str:
-    formatted = f"{value:.6f}".rstrip("0").rstrip(".")
-    return formatted or "1"
 
 
 @dataclass(slots=True)
@@ -573,113 +491,14 @@ class EditorPackageWriter:
     def _fit_segment_audio_to_slot(
         self, wav_path: Path, segment: AlignedSegment,
     ) -> None:
-        """Time-stretch ``wav_path`` to exactly the segment's slot duration
-        via ffmpeg atempo — bidirectional, no trim, no silent padding.
+        """Time-align ``wav_path`` to the segment's slot duration.
 
-        Replaces the old ``_trim_segment_audio_to_slot`` (2026-04-19 γ
-        incident): the trim variant only handled "audio too long" by
-        truncation, leaving short audio with silent gaps in the dubbed
-        output. For γ publish-only resume — where the user-regenerated
-        TTS rarely matches slot duration — both directions need DSP.
-
-        ffmpeg atempo chains to support extreme ratios (>2x, <0.5x). At
-        those extremes audio quality degrades ("chipmunk" / "slow-mo"),
-        but the output is a valid wav at the target duration. Users will
-        review segment-level playback in the planned test-playback UI
-        and re-edit text if a segment sounds off.
-
-        γ-compliance: this is pure audio signal processing, no Gemini /
-        no TTS generation / no SegmentAligner. Safe to run inside the
-        publish stage that γ dispatches.
+        Thin wrapper over ``utils.audio_fit.fit_audio_to_slot``; see that
+        module for the trim / clamp / pad-or-truncate policy. γ-compliant
+        (pure signal processing, no Gemini / TTS / SegmentAligner calls).
         """
         slot_duration_ms = max(0, int(segment.end_ms) - int(segment.start_ms))
-        if slot_duration_ms <= 0 or not wav_path.exists():
-            return
-
-        try:
-            audio = AudioSegment.from_wav(wav_path)
-        except Exception:  # unreadable / not a wav — leave untouched
-            return
-        actual_duration_ms = len(audio)
-        if actual_duration_ms <= 0:
-            return
-
-        # Step 1 — silence-edge trim (short segments only). TTS outputs
-        # padding at both ends; stretching the padded wav burns the atempo
-        # budget on silence. Long segments (>3s) skip this step: their
-        # leading/trailing quiet may be intentional multi-phrase pauses
-        # rather than pure TTS padding.
-        if actual_duration_ms <= _SILENCE_TRIM_MAX_MS:
-            trimmed = _trim_silence_edges(audio)
-            trimmed_duration_ms = len(trimmed)
-            if (
-                0 < trimmed_duration_ms < actual_duration_ms
-                and trimmed_duration_ms != actual_duration_ms
-            ):
-                # Persist trimmed wav in place BEFORE atempo stage — the
-                # ffmpeg call below will re-read this wav, and atempo works
-                # off the shortened duration for a better (closer-to-1.0x)
-                # ratio. Use .replace for hardlink-safety.
-                trim_tmp = wav_path.with_name(
-                    f".{wav_path.stem}.trimmed.wav"
-                )
-                trimmed.export(trim_tmp, format="wav")
-                trim_tmp.replace(wav_path)
-                actual_duration_ms = trimmed_duration_ms
-
-        if abs(actual_duration_ms - slot_duration_ms) <= _FIT_TOLERANCE_MS:
-            return  # within tolerance — preserve bit-identity
-
-        speed_ratio = actual_duration_ms / slot_duration_ms
-        filter_value = _build_atempo_filter(speed_ratio)
-
-        # No warning for extreme ratios — 方案 A 承诺 "无脑 stretch"，
-        # 用户通过 editing 页面的 D44 slot-mismatch 警告在提交前就知道
-        # 了哪些段会被压缩/拉伸。运行时 warning 既刷 admin LogViewer
-        # （运维价值低），又可能 bleed 到用户 UX（见 2026-04-20 bleed
-        # 事故）。真要排查音质问题，output/segments/{sid}_xxxx.wav 自
-        # 带结果，ffprobe 更直接。
-
-        # Keep .wav suffix so ffmpeg auto-detects output format; prefix
-        # with a dot so we can identify it as a tmp artifact.
-        stretched_path = wav_path.with_name(f".{wav_path.stem}.stretched.wav")
-        command = [
-            "ffmpeg",
-            "-i", str(wav_path),
-            "-filter:a", filter_value,
-            "-f", "wav",
-            "-acodec", "pcm_s16le",
-            "-ar", "44100",
-            "-ac", "2",
-            "-y", str(stretched_path),
-        ]
-        try:
-            completed = subprocess.run(
-                command, capture_output=True, text=True, check=False,
-            )
-        except FileNotFoundError:  # no ffmpeg in PATH
-            logger.warning(
-                "segment %s: ffmpeg not in PATH, skipping atempo stretch",
-                segment.segment_id,
-            )
-            if stretched_path.exists():
-                stretched_path.unlink()
-            return
-
-        if completed.returncode != 0 or not stretched_path.exists():
-            logger.warning(
-                "segment %s: atempo stretch failed (rc=%s stderr=%r); "
-                "leaving original wav untouched",
-                segment.segment_id, completed.returncode,
-                (completed.stderr or "")[:200],
-            )
-            if stretched_path.exists():
-                stretched_path.unlink()
-            return
-
-        # Atomic replace — preserves inode semantics (important if wav
-        # is still hardlinked to source in copy_as_new target).
-        stretched_path.replace(wav_path)
+        fit_audio_to_slot(wav_path, slot_duration_ms=slot_duration_ms)
 
     def _sorted_segments(self, output: ProjectOutput) -> list[AlignedSegment]:
         return sorted(output.segments, key=lambda segment: (segment.start_ms, segment.segment_id))
