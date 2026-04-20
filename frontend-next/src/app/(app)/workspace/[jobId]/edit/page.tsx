@@ -35,7 +35,7 @@ import {
   type VoiceMapEntry,
 } from "@/lib/api/editing"
 import { getJob } from "@/lib/api/jobs"
-import { ApiError } from "@/lib/api/client"
+import { ApiError, apiClient } from "@/lib/api/client"
 import { buildDraftAudioUrl, buildStreamUrl } from "@/lib/api/downloads"
 import { getErrorMessage } from "@/lib/api/errors"
 import { getJobDisplayTitle } from "@/features/jobs/presentation"
@@ -75,21 +75,53 @@ export default function VideoEditPage() {
   const [copyDisplayName, setCopyDisplayName] = useState<string>("")
   const [activeTab, setActiveTab] = useState<"text" | "voice">("text")
   const [voiceMap, setVoiceMap] = useState<Record<string, VoiceMapEntry>>({})
+  // Friendly speaker display names from review-state's
+  // voice_selection_review stage. UI shows these instead of raw
+  // `speaker_a` variable names. Empty map when review-state hasn't
+  // been seeded (e.g. task never went through voice selection) — UI
+  // falls back to the raw id.
+  const [speakerNameMap, setSpeakerNameMap] = useState<Record<string, string>>({})
 
   // ---- Bootstrap ----
 
   const loadData = useCallback(async (): Promise<void> => {
     if (!jobId) return
     try {
-      const [nextJob, nextRes, vmRes] = await Promise.all([
+      const [nextJob, nextRes, vmRes, reviewState] = await Promise.all([
         getJob(jobId),
         getEditingSegments(jobId),
         // voice_map failure shouldn't block text editing — default to empty.
         getVoiceMap(jobId).catch(() => ({ voice_map: {} })),
+        // Speaker display-name map. Best-effort: if review-state isn't
+        // loadable (transient 404 / disk issue) the dropdown falls back
+        // to raw speaker_id strings — not blocking.
+        apiClient
+          .get<{
+            results?: {
+              review_flow?: {
+                stages?: Record<string, { payload?: Record<string, unknown> }>
+              }
+            }
+          }>(`/jobs/${jobId}/review-state`)
+          .catch(() => null),
       ])
       setJob(nextJob)
       setResource(nextRes)
       setVoiceMap(vmRes.voice_map ?? {})
+      // Extract speaker name mapping from voice_selection_review payload
+      const stages = reviewState?.results?.review_flow?.stages ?? {}
+      const vsPayload = stages.voice_selection_review?.payload ?? {}
+      const rawSpeakers = Array.isArray(vsPayload.speakers) ? vsPayload.speakers : []
+      const nameMap: Record<string, string> = {}
+      for (const sp of rawSpeakers) {
+        if (sp && typeof sp === "object") {
+          const obj = sp as Record<string, unknown>
+          const sid = String(obj.speaker_id ?? "").trim()
+          const name = String(obj.speaker_name ?? "").trim()
+          if (sid && name) nameMap[sid] = name
+        }
+      }
+      setSpeakerNameMap(nameMap)
       setPageError(null)
     } catch (error) {
       setPageError(getErrorMessage(error))
@@ -199,7 +231,8 @@ export default function VideoEditPage() {
           delete next[segmentId]
           return next
         })
-        toast.success(`已改为说话人 ${speaker_id}；重合成时将使用其音色`)
+        const friendly = speakerNameMap[speaker_id] || speaker_id
+        toast.success(`已改为说话人 ${friendly}；重合成时将使用其音色`)
       } catch (error) {
         toast.error(`改说话人失败: ${getErrorMessage(error)}`)
       } finally {
@@ -210,7 +243,7 @@ export default function VideoEditPage() {
         })
       }
     },
-    [jobId],
+    [jobId, speakerNameMap],
   )
 
   // Distinct speaker ids currently present in the task — used to populate
@@ -740,6 +773,7 @@ export default function VideoEditPage() {
                     isRegenerating={regeneratingSegmentIds.has(seg.segment_id)}
                     isActive={activeSegmentId === seg.segment_id}
                     availableSpeakerIds={availableSpeakerIds}
+                    speakerNameMap={speakerNameMap}
                     onTextChange={handleTextChange}
                     onSpeakerChange={handleSpeakerChange}
                     onRegenerate={handleRegenerate}
@@ -799,6 +833,10 @@ interface SegmentCardProps {
   /** All speaker_ids currently used somewhere in the task — populates
    *  the reassignment dropdown. 2026-04-20: plan §7.4 speaker fix flow. */
   availableSpeakerIds: string[]
+  /** Friendly display names per speaker_id (from review-state's
+   *  voice_selection_review payload). UI shows these instead of raw
+   *  variable-name speaker_ids. Missing entry → UI falls back to the id. */
+  speakerNameMap: Record<string, string>
   onTextChange: (segmentId: string, cnText: string) => void
   onSpeakerChange: (segmentId: string, speakerId: string) => void
   onRegenerate: (segmentId: string) => void
@@ -818,6 +856,7 @@ function SegmentCard({
   isRegenerating,
   isActive,
   availableSpeakerIds,
+  speakerNameMap,
   onTextChange,
   onSpeakerChange,
   onRegenerate,
@@ -825,6 +864,13 @@ function SegmentCard({
   onDiscardDraft,
   onSeek,
 }: SegmentCardProps) {
+  // Prefer friendly display names when available; fall back to the raw
+  // speaker_id so tasks that never went through voice_selection_review
+  // (or ones where the name map failed to load) still render something.
+  const speakerLabel = (sid: string | undefined): string => {
+    if (!sid) return ""
+    return speakerNameMap[sid] || sid
+  }
   const [localText, setLocalText] = useState(segment.cn_text ?? "")
   useEffect(() => { setLocalText(segment.cn_text ?? "") }, [segment.cn_text])
 
@@ -866,7 +912,7 @@ function SegmentCard({
   // Screen reader friendly summary for the whole segment card
   const screenReaderSummary = [
     `段落 ${index + 1}`,
-    segment.speaker_id ? `说话人 ${segment.speaker_id}` : null,
+    segment.speaker_id ? `说话人 ${speakerLabel(segment.speaker_id)}` : null,
     timeLabel || null,
     isAnomalous
       ? `时长异常${
@@ -917,12 +963,12 @@ function SegmentCard({
               >
                 {availableSpeakerIds.map((sid) => (
                   <option key={sid} value={sid}>
-                    {sid}
+                    {speakerLabel(sid)}
                   </option>
                 ))}
               </select>
             ) : (
-              <span>{segment.speaker_id}</span>
+              <span>{speakerLabel(segment.speaker_id)}</span>
             )}
           </label>
         )}
