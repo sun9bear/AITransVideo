@@ -90,6 +90,87 @@ def test_parse_project_dir_returns_none_for_no_path() -> None:
 
 
 # ===================================================================
+# _resolve_stage_from_log_line — progress_message isolation
+#
+# 2026-04-20 bleed bug: Python logger.warning output from in-pipeline
+# DSP code ("segment 172: atempo stretch ratio=0.33x ...") landed in
+# JobRecord.progress_message because _resolve_stage_from_log_line
+# hoisted *every* non-stage-prefixed line to progress_message. The
+# user saw our internal debug log in the workspace card header.
+#
+# Fix: non-prefixed lines preserve the last stage-derived message
+# verbatim. They still land in the event log (admin LogViewer) via
+# store.append_event(), but don't bubble up to the worker header.
+# ===================================================================
+
+
+class TestResolveStageMessageIsolation:
+    """Rules the module contract pins:
+    1. ``[SN]`` or ``[RESUME/SN]`` line → update both stage + message
+    2. ``[download] X`` line → update ingestion stage + download message
+    3. Any other line → preserve previous (stage, message) tuple
+    """
+
+    def _call(self, *, line: str, current_stage, current_message):
+        from services.jobs.process_runner import _resolve_stage_from_log_line
+        return _resolve_stage_from_log_line(
+            line=line,
+            current_stage=current_stage,
+            current_message=current_message,
+        )
+
+    def test_s_prefix_line_updates_message(self) -> None:
+        stage, msg = self._call(
+            line="[S3] 翻译文本...",
+            current_stage="draft", current_message="old message",
+        )
+        assert msg == "翻译文本..."
+        assert stage == "translation_review"  # via STAGE_CODE_MAP["S3"]
+
+    def test_resume_prefix_line_updates_message(self) -> None:
+        stage, msg = self._call(
+            line="[RESUME/S6] 合成配音视频/字幕...",
+            current_stage="draft", current_message="old",
+        )
+        assert msg == "合成配音视频/字幕..."
+        assert stage == "legacy_process_output"
+
+    def test_non_prefix_log_line_does_not_pollute_progress_message(self) -> None:
+        """Regression for the 2026-04-20 UX bleed. A Python
+        ``logger.warning`` message coming through the merged stdout
+        stream must NOT overwrite progress_message — it would render
+        in the user's workspace card, exposing internal debug wording
+        (English + repr format) to end users."""
+        bleed = (
+            "segment 172: atempo stretch ratio=0.33x "
+            "(actual=147ms → slot=440ms) exceeds the quality-safe "
+            "[0.5x, 2.0x] window; output wav is valid at target "
+            "duration but audio quality degrades — user reviews in "
+            "test-playback UI"
+        )
+        stage, msg = self._call(
+            line=bleed,
+            current_stage="legacy_process_output",
+            current_message="合成配音视频/字幕...",
+        )
+        assert msg == "合成配音视频/字幕...", (
+            f"progress_message was polluted by non-prefixed log line: "
+            f"{msg!r}"
+        )
+        assert stage == "legacy_process_output"
+
+    def test_raw_third_party_provider_log_does_not_pollute(self) -> None:
+        """[MiniMax] / [cosyvoice] logs from TTS providers also bleed
+        in practice — same guard covers them."""
+        stage, msg = self._call(
+            line="[MiniMax] voice=moss_abc, confidence=high, source=explicit",
+            current_stage="draft", current_message="生成TTS音频...",
+        )
+        assert msg == "生成TTS音频..."
+        assert stage == "draft"
+
+
+# ===================================================================
 # Stage log regex — must recognise both classic [SN] and γ [RESUME/SN]
 #
 # D33 fix (2026-04-20): γ publish-only resume path prints ``[RESUME/S5]``

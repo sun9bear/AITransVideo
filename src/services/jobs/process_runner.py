@@ -601,10 +601,14 @@ def _resolve_stage_from_log_line(
         download_message = download_match.group(1).strip()
         return STAGE_INGESTION, f"Downloading: {download_message}" if download_message else current_message
 
-    normalized_line = line.strip()
-    if current_stage is not None:
-        return current_stage, normalized_line or current_message
-    return None, normalized_line or current_message
+    # Non-stage-prefixed line: preserve the last stage-derived message
+    # rather than hoisting arbitrary log output to progress_message.
+    # The raw line still lands in the event log via store.append_event()
+    # for admin LogViewer; only the user-facing progress_message pins
+    # to the most recent ``[S*]`` / ``[RESUME/S*]`` / ``[download]``
+    # announcement. (2026-04-20 fix: Python ``logger.warning`` from
+    # in-pipeline DSP code was bleeding into the worker header.)
+    return current_stage, current_message
 
 
 def _parse_web_review_marker(line: str) -> dict[str, object] | None:
