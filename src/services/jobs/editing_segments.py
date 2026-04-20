@@ -169,14 +169,73 @@ def editing_payload(project_dir: str | Path) -> dict[str, Any]:
 
     Frontend consumes this as-is:
       { "segments": [...], "segment_status": {...}, "total": N }
+
+    Each segment dict is augmented with ``draft_wav_duration_ms`` when a
+    ``editor/editing/tts_segments_draft/{sid}.wav`` file exists on disk.
+    This lets the frontend compute slot-mismatch warnings (D44): if the
+    draft's actual duration is far from ``target_duration_ms``, γ
+    publish will DSP-stretch at an extreme ratio and audio quality
+    degrades. Surfacing the ratio at edit time lets the user re-phrase
+    the translation before committing.
+
+    Segments without a draft omit the field entirely — the baseline
+    ``editor/tts_segments/{sid}.wav`` was aligned to slot by the prior
+    publish and always matches target within tolerance.
     """
     segments = load_editing_segments(project_dir)
     status = load_segment_status(project_dir)
+    augmented = _augment_with_draft_wav_duration(project_dir, segments)
     return {
-        "segments": segments,
+        "segments": augmented,
         "segment_status": status,
-        "total": len(segments),
+        "total": len(augmented),
     }
+
+
+def _augment_with_draft_wav_duration(
+    project_dir: str | Path,
+    segments: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Add ``draft_wav_duration_ms`` to any segment whose draft wav exists
+    and is readable by pydub. Silently skips missing / corrupted wavs
+    (field stays absent — frontend treats absent as "no draft on disk")."""
+    draft_dir = Path(project_dir) / EDITING_SUBDIR_NAME / "tts_segments_draft"
+    if not draft_dir.is_dir():
+        return [dict(s) if isinstance(s, dict) else s for s in segments]
+
+    # Deferred pydub import — only pay the cost when segments exist AND
+    # a draft dir is present. Keeps the common (no-draft) path fast.
+    try:
+        from pydub import AudioSegment  # type: ignore
+    except ImportError:  # pragma: no cover — pydub is a project dep
+        return [dict(s) if isinstance(s, dict) else s for s in segments]
+
+    augmented: list[dict[str, Any]] = []
+    for seg in segments:
+        if not isinstance(seg, dict):
+            augmented.append(seg)
+            continue
+        out = dict(seg)
+        sid = str(out.get("segment_id") or "")
+        if sid:
+            draft_wav = draft_dir / f"{sid}.wav"
+            if draft_wav.is_file():
+                try:
+                    out["draft_wav_duration_ms"] = len(
+                        AudioSegment.from_wav(draft_wav)
+                    )
+                except Exception:
+                    # Corrupted / not-a-wav — skip rather than raise.
+                    # The editing page still renders; frontend treats
+                    # absent field as "no valid draft duration yet".
+                    pass
+        augmented.append(out)
+    return augmented
+
+
+# Small constant used by _augment_with_draft_wav_duration — kept as a
+# string so tests and the helper share the same path fragment.
+EDITING_SUBDIR_NAME: str = "editor/editing"
 
 
 # ---------------------------------------------------------------------------

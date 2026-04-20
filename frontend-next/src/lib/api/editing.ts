@@ -26,6 +26,16 @@ export interface EditingSegment {
   duration_target_ms?: number
   duration_actual_ms?: number
   duration_diff_ratio?: number
+  /** Slot duration from the last pipeline run. Frontend compares this
+   * against ``draft_wav_duration_ms`` for D44 slot-mismatch warnings. */
+  target_duration_ms?: number
+  /** Actual duration of ``editor/editing/tts_segments_draft/{sid}.wav``
+   * when present. Absent means no draft on disk (commit uses the
+   * baseline wav which already matches target). γ DSP stretch will
+   * time-warp a draft to match target regardless of how far off, but
+   * extreme ratios (>1.5x / <0.67x) degrade audio quality — warn the
+   * user at edit time so they can shorten the text before committing. */
+  draft_wav_duration_ms?: number
   /** Passthrough for any unknown pipeline-maintained fields. */
   [key: string]: unknown
 }

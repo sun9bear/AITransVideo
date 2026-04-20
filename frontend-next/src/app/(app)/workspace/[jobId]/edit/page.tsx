@@ -352,6 +352,43 @@ export default function VideoEditPage() {
     )
   }, [resource])
 
+  // D44 — segments whose draft wav deviates from the slot's target
+  // duration by >20%. γ publish will DSP-stretch the draft to match
+  // the slot no matter the ratio, but extreme ratios (≥1.5x or ≤0.67x)
+  // produce audible quality loss (chipmunk / slow-mo). Warn the user
+  // at edit time so they can shorten / lengthen the Chinese text
+  // before committing.
+  const draftDurationMismatchSegments = useMemo(() => {
+    if (!resource) return []
+    return resource.segments
+      .map((seg) => {
+        const target =
+          typeof seg.target_duration_ms === "number"
+            ? seg.target_duration_ms
+            : null
+        const draft =
+          typeof seg.draft_wav_duration_ms === "number"
+            ? seg.draft_wav_duration_ms
+            : null
+        if (target === null || draft === null || target <= 0) return null
+        const ratio = draft / target
+        // Soft threshold — atempo within [0.8x, 1.2x] is imperceptible.
+        if (ratio >= 0.8 && ratio <= 1.2) return null
+        return { seg, ratio, target, draft }
+      })
+      .filter(
+        (x): x is { seg: EditingSegment; ratio: number; target: number; draft: number } =>
+          x !== null,
+      )
+  }, [resource])
+
+  const scrollToSegment = useCallback((segmentId: string) => {
+    const el = document.getElementById(`segment-card-${segmentId}`)
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "center" })
+    }
+  }, [])
+
   const dirtyCount = useMemo(() => {
     if (!resource) return 0
     return Object.values(resource.segment_status).filter(
@@ -450,6 +487,18 @@ export default function VideoEditPage() {
               ⚠ {forceDspSegments.length} 段时长异常（重写 2 次仍超/过短），建议修改
             </span>
           )}
+          {draftDurationMismatchSegments.length > 0 && (
+            <button
+              type="button"
+              className="ml-2 text-amber-500 underline decoration-dotted hover:text-amber-400"
+              onClick={() =>
+                scrollToSegment(draftDurationMismatchSegments[0].seg.segment_id)
+              }
+              title="保存后新 TTS 将被 DSP 压缩/拉伸到目标时长，偏差过大时音质会明显下降。点击定位第一段。"
+            >
+              ⚠ {draftDurationMismatchSegments.length} 段新 TTS 时长与目标偏差大，点击定位
+            </button>
+          )}
         </div>
         <button
           className="rounded-md bg-primary/80 text-primary-foreground px-4 py-1.5 text-xs inline-flex items-center gap-1 disabled:opacity-50"
@@ -526,13 +575,44 @@ function SegmentCard({
   useEffect(() => { setLocalText(segment.cn_text ?? "") }, [segment.cn_text])
 
   const isAnomalous = segment.alignment_method === "force_dsp"
+
+  // D44 draft-duration mismatch (only when a draft wav exists AND
+  // deviates >20% from the slot). See page-level memo for rationale.
+  const target =
+    typeof segment.target_duration_ms === "number"
+      ? segment.target_duration_ms
+      : null
+  const draft =
+    typeof segment.draft_wav_duration_ms === "number"
+      ? segment.draft_wav_duration_ms
+      : null
+  const draftRatio =
+    target !== null && draft !== null && target > 0 ? draft / target : null
+  const hasDraftMismatch = draftRatio !== null && (draftRatio < 0.8 || draftRatio > 1.2)
+  const draftMismatchSeverity =
+    draftRatio === null
+      ? null
+      : draftRatio < 0.67 || draftRatio > 1.5
+      ? "severe"
+      : "mild"
+
   const timeLabel = segment.start_ms !== undefined && segment.end_ms !== undefined
     ? `${formatMs(segment.start_ms)} - ${formatMs(segment.end_ms)}`
     : ""
 
+  const borderClass =
+    hasDraftMismatch && draftMismatchSeverity === "severe"
+      ? "border-l-4 border-l-red-500"
+      : hasDraftMismatch
+      ? "border-l-4 border-l-amber-500"
+      : isAnomalous
+      ? "border-l-4 border-l-red-500"
+      : ""
+
   return (
     <article
-      className={`surface-card p-4 ${isAnomalous ? "border-l-4 border-l-red-500" : ""}`}
+      id={`segment-card-${segment.segment_id}`}
+      className={`surface-card p-4 ${borderClass}`}
     >
       <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground mb-2">
         <span className="font-mono">#{index + 1}</span>
@@ -547,6 +627,27 @@ function SegmentCard({
                 （{(segment.duration_diff_ratio * 100).toFixed(0)}%）
               </span>
             )}
+          </span>
+        )}
+        {hasDraftMismatch && draftRatio !== null && target !== null && draft !== null && (
+          <span
+            className={
+              draftMismatchSeverity === "severe"
+                ? "text-red-500"
+                : "text-amber-500"
+            }
+            title={
+              `新 TTS ${(draft / 1000).toFixed(1)}s / 目标 ${(target / 1000).toFixed(1)}s。` +
+              "保存后会被 DSP 拉伸到目标时长，偏差越大音质下降越明显。" +
+              (draftMismatchSeverity === "severe"
+                ? "建议精简译文后重新合成。"
+                : "")
+            }
+          >
+            ⚠ 新 TTS {(draft / 1000).toFixed(1)}s / 目标 {(target / 1000).toFixed(1)}s
+            <span className="ml-1">
+              （{draftRatio > 1 ? "+" : ""}{((draftRatio - 1) * 100).toFixed(0)}%）
+            </span>
           </span>
         )}
       </div>

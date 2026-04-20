@@ -439,3 +439,81 @@ def test_atomic_write_replaces_segments_cleanly(tmp_path: Path) -> None:
     data = json.loads((editing_dir / "segments.json").read_text(encoding="utf-8"))
     assert isinstance(data, list)
     assert len(data) == 3
+
+
+# ---------------------------------------------------------------------------
+# D44 — editing_payload augments segments with draft wav duration
+#
+# γ publish's DSP stretch tolerates any ratio but quality degrades at
+# >2x / <0.5x. For UX, we surface the ratio in the editing page so the
+# user can decide to re-edit text before committing. This requires the
+# backend payload to carry the draft wav's actual duration alongside
+# the slot's ``target_duration_ms`` (which the frontend already has).
+# ---------------------------------------------------------------------------
+
+
+def _write_draft_wav(
+    project_dir: Path, segment_id: str, duration_ms: int,
+) -> Path:
+    """Write a silent wav at ``editor/editing/tts_segments_draft/{sid}.wav``."""
+    from pydub import AudioSegment
+    draft_dir = project_dir / EDITING_SUBDIR / "tts_segments_draft"
+    draft_dir.mkdir(parents=True, exist_ok=True)
+    path = draft_dir / f"{segment_id}.wav"
+    AudioSegment.silent(duration=duration_ms).export(path, format="wav")
+    return path
+
+
+def test_editing_payload_includes_draft_wav_duration_when_present(
+    tmp_path: Path,
+) -> None:
+    """If ``editor/editing/tts_segments_draft/{sid}.wav`` exists, the
+    editing payload must expose its actual duration via
+    ``draft_wav_duration_ms`` so the frontend can compute slot-mismatch
+    warnings."""
+    _, project_dir, _ = _build_editing_job(tmp_path)
+    _write_draft_wav(project_dir, "seg_001", duration_ms=1_840)
+
+    payload = editing_payload(project_dir)
+
+    seg1 = next(s for s in payload["segments"] if s["segment_id"] == "seg_001")
+    assert "draft_wav_duration_ms" in seg1, (
+        "seg with draft must carry draft_wav_duration_ms so frontend can "
+        "show slot-mismatch warning in γ publish contract"
+    )
+    # 1840ms ± 30ms (pydub/ffmpeg encode rounding)
+    assert 1810 <= seg1["draft_wav_duration_ms"] <= 1870
+
+
+def test_editing_payload_omits_draft_duration_when_no_draft(
+    tmp_path: Path,
+) -> None:
+    """Segments without a draft wav must not carry a stale duration
+    field — frontend distinguishes "no draft" vs "draft duration 0"."""
+    _, project_dir, _ = _build_editing_job(tmp_path)
+
+    payload = editing_payload(project_dir)
+
+    for seg in payload["segments"]:
+        assert "draft_wav_duration_ms" not in seg, (
+            f"seg {seg.get('segment_id')!r} has no draft but carries "
+            f"draft_wav_duration_ms={seg.get('draft_wav_duration_ms')!r}"
+        )
+
+
+def test_editing_payload_tolerates_unreadable_draft_wav(tmp_path: Path) -> None:
+    """If the draft wav is truncated / not a valid wav (corrupted drop),
+    the helper must skip the field rather than raise — the rest of the
+    payload still needs to render."""
+    _, project_dir, _ = _build_editing_job(tmp_path)
+    draft_dir = project_dir / EDITING_SUBDIR / "tts_segments_draft"
+    draft_dir.mkdir(parents=True, exist_ok=True)
+    (draft_dir / "seg_001.wav").write_bytes(b"not-a-real-wav")
+
+    payload = editing_payload(project_dir)
+
+    seg1 = next(s for s in payload["segments"] if s["segment_id"] == "seg_001")
+    assert "draft_wav_duration_ms" not in seg1, (
+        "corrupted draft wav should skip the field; got "
+        f"{seg1.get('draft_wav_duration_ms')!r}"
+    )
