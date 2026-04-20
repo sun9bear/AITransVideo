@@ -363,7 +363,23 @@ class ProcessJobRunner:
             if job_id in self._deleted_jobs:
                 return
         current_job = self.store.require_job(job_id)
-        detected_project_dir = _parse_project_dir_from_line(line, self.project_root)
+        # Narrow ``_parse_project_dir_from_line`` to its legacy purpose:
+        # bootstrapping ``JobRecord.project_dir`` for fresh submits where
+        # the pipeline derives the slug at runtime (``submit_job`` creates
+        # the record with project_dir=None; the pipeline prints
+        # ``项目目录：...`` once from main.py summary and the runner captures
+        # it). When project_dir is already set (99% of real traffic post
+        # Phase 1: gateway-issued jobs, commit copy_as_new / overwrite,
+        # render resumes), skip parsing entirely — the identity guard in
+        # ``_resolve_identity_project_dir`` would ignore any detected
+        # value anyway, but dodging the work here also silences the
+        # guard's warning-log noise for stray log lines that happen to
+        # contain a path.
+        detected_project_dir = (
+            _parse_project_dir_from_line(line, self.project_root)
+            if current_job.project_dir is None
+            else None
+        )
         review_gate = _parse_web_review_marker(line)
         if review_gate is not None:
             timestamp = utc_now_iso()

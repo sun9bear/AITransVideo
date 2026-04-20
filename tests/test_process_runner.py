@@ -597,3 +597,76 @@ class TestRecordLineIdentityGuard:
         after = runner.store.require_job(job.job_id)
         assert after.project_dir is not None
         assert "job_from_marker" in after.project_dir
+
+    def test_parse_is_skipped_when_project_dir_already_set(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Polish cleanup (2026-04-20): stdout path parsing is narrowed
+        to the bootstrap-only path. When ``JobRecord.project_dir`` is
+        already set (post-Phase-1 default: gateway submits / copy
+        commits pre-populate it), ``_parse_project_dir_from_line`` is
+        skipped entirely — saves CPU on hot log paths and silences the
+        identity-guard warning log noise that would otherwise fire for
+        every stray path in the stream."""
+        import services.jobs.process_runner as prm
+        runner, job = self._make_runner_with_job(
+            tmp_path,
+            project_dir="/opt/aivideotrans/app/projects/user1/job_correct",
+        )
+        call_count = {"n": 0}
+        real_parse = prm._parse_project_dir_from_line
+
+        def _counting_parse(line: str, root):
+            call_count["n"] += 1
+            return real_parse(line, root)
+        monkeypatch.setattr(prm, "_parse_project_dir_from_line", _counting_parse)
+
+        runner._record_line(
+            job.job_id,
+            "[S6] 输出目录 /opt/aivideotrans/app/projects/user1/job_other/output",
+        )
+
+        assert call_count["n"] == 0, (
+            f"_parse_project_dir_from_line was called {call_count['n']}x "
+            "despite JobRecord.project_dir already being set — short-"
+            "circuit broken, CPU + warning-log waste restored"
+        )
+
+
+class TestRecordLineParserFillInStillWorks:
+    """Complementary guard: bootstrap path must still call the parser
+    when project_dir is None. Separate class so the monkeypatch from
+    the identity-guard test doesn't leak into these cases."""
+
+    def _make_runner_with_job(self, tmp_path: Path, *, project_dir: str | None):
+        runner = _make_runner(tmp_path)
+        job = _make_job(project_dir=project_dir)
+        runner.store.save_job(job)
+        return runner, job
+
+    def test_parse_is_invoked_when_project_dir_is_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Bootstrap path: fresh submit without pre-set project_dir
+        must still parse the log line to discover the pipeline-derived
+        slug."""
+        import services.jobs.process_runner as prm
+        runner, job = self._make_runner_with_job(tmp_path, project_dir=None)
+        call_count = {"n": 0}
+        real_parse = prm._parse_project_dir_from_line
+
+        def _counting_parse(line: str, root):
+            call_count["n"] += 1
+            return real_parse(line, root)
+        monkeypatch.setattr(prm, "_parse_project_dir_from_line", _counting_parse)
+
+        runner._record_line(
+            job.job_id,
+            "[S0] 项目目录：/opt/aivideotrans/app/projects/user1/job_bootstrap/output",
+        )
+
+        assert call_count["n"] == 1, (
+            f"parse called {call_count['n']}x when project_dir was None; "
+            "bootstrap path broken — fresh submits would never discover "
+            "their pipeline-derived project_dir"
+        )
