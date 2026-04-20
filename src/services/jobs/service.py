@@ -107,6 +107,22 @@ class JobService:
         timestamp = utc_now_iso()
         job_id = f"job_{uuid4().hex}"
         workspace_dir = build_workspace_dir(user_id, job_id) if user_id else None
+        # 2026-04-20: pre-fill project_dir as the absolute resolution of
+        # workspace_dir. This closes the long-standing "stdout regex
+        # bootstrap" attack surface (yt-dlp's `55.88KiB/s` progress line
+        # matched as `/s`, poisoning JobRecord.project_dir permanently
+        # via the write-once identity guard). With project_dir filled
+        # from day one, `_parse_project_dir_from_line` short-circuits
+        # entirely for modern gateway-originated traffic.
+        #
+        # user_id=None → legacy CLI direct submit; keep project_dir None
+        # and fall through to the existing stdout capture path (pipeline
+        # derives its own slug from video_title).
+        project_dir_absolute: str | None = None
+        if workspace_dir:
+            project_dir_absolute = str(
+                (self.runner.project_root / workspace_dir).resolve(strict=False)
+            )
         record = JobRecord(
             job_id=job_id,
             job_type=normalized_job_type,
@@ -137,6 +153,7 @@ class JobService:
             create_idempotency_key=create_idempotency_key,
             user_id=user_id,
             workspace_dir=workspace_dir,
+            project_dir=project_dir_absolute,
             source_content_hash=source_content_hash,
         )
         self.store.save_job(record)
