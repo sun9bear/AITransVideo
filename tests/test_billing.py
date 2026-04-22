@@ -14,6 +14,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 _gateway_dir = str(__import__("pathlib").Path(__file__).resolve().parent.parent / "gateway")
 if _gateway_dir not in sys.path:
@@ -105,6 +107,32 @@ def _make_db():
     db.flush = AsyncMock()
     db.refresh = AsyncMock()
     return db
+
+
+def _set_alipay_env(monkeypatch):
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    public_key = private_key.public_key()
+    private_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode("utf-8")
+    public_pem = public_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    ).decode("utf-8")
+    monkeypatch.setenv("AVT_ALIPAY_APP_ID", "app-id")
+    monkeypatch.setenv("AVT_ALIPAY_APP_PRIVATE_KEY", private_pem)
+    monkeypatch.setenv("AVT_ALIPAY_PUBLIC_KEY", public_pem)
+    monkeypatch.setenv(
+        "AVT_ALIPAY_NOTIFY_URL",
+        "https://example.test/api/billing/webhooks/alipay",
+    )
+    monkeypatch.setenv(
+        "AVT_ALIPAY_RETURN_URL",
+        "https://example.test/settings/billing",
+    )
+    return {"private_key": private_pem, "public_key": public_pem}
 
 
 def _paid_event_execute(*, order, user):
@@ -629,56 +657,30 @@ class TestCheckoutConfig:
             if entry["code"] == "alipay":
                 assert entry["operational"] is False
 
-    def test_alipay_env_alone_does_not_make_it_default(self, monkeypatch):
-        """T5 minor revision: truthfulness gate.
-
-        Even with complete AVT_ALIPAY_* env vars, Alipay MUST NOT become the
-        default provider until `_ALIPAY_LIVE_READY` is flipped in
-        `payment_provider_alipay.py`. The frontend should keep routing users
-        into the fake safe path whenever the real signing implementation is
-        still a stub.
-        """
+    def test_alipay_becomes_default_when_env_is_complete(self, monkeypatch):
         import payment_providers
-        monkeypatch.setenv("AVT_ALIPAY_APP_ID", "app-id")
-        monkeypatch.setenv("AVT_ALIPAY_APP_PRIVATE_KEY", "pk")
-        monkeypatch.setenv("AVT_ALIPAY_PUBLIC_KEY", "apk")
-        monkeypatch.setenv(
-            "AVT_ALIPAY_NOTIFY_URL", "https://example.test/api/billing/webhooks/alipay"
-        )
-        payment_providers._PROVIDERS = {}
 
-        user = _make_user(plan_code="free")
-        result = self._run_get_config(user=user)
-        # The T5 minor fix: Alipay is still listed but NOT the default.
-        assert result["default_provider"] == "fake"
-        alipay_entry = next(
-            p for p in result["providers"] if p["code"] == "alipay"
-        )
-        assert alipay_entry["operational"] is False
-
-    def test_alipay_becomes_default_when_live_ready_flag_flipped(self, monkeypatch):
-        """Positive counterpart: once signing ships and someone flips
-        `_ALIPAY_LIVE_READY = True`, Alipay does become the default.
-
-        Keeps the "fully implemented path" exercised so future regressions
-        in the preference ordering are caught.
-        """
-        import payment_provider_alipay
-        import payment_providers
-        monkeypatch.setenv("AVT_ALIPAY_APP_ID", "app-id")
-        monkeypatch.setenv("AVT_ALIPAY_APP_PRIVATE_KEY", "pk")
-        monkeypatch.setenv("AVT_ALIPAY_PUBLIC_KEY", "apk")
-        monkeypatch.setenv(
-            "AVT_ALIPAY_NOTIFY_URL", "https://example.test/api/billing/webhooks/alipay"
-        )
-        monkeypatch.setattr(payment_provider_alipay, "_ALIPAY_LIVE_READY", True)
+        _set_alipay_env(monkeypatch)
         payment_providers._PROVIDERS = {}
 
         user = _make_user(plan_code="free")
         result = self._run_get_config(user=user)
         assert result["default_provider"] == "alipay"
-        codes_in_order = [p["code"] for p in result["providers"]]
-        assert codes_in_order.index("alipay") < codes_in_order.index("fake")
+        alipay_entry = next(p for p in result["providers"] if p["code"] == "alipay")
+        assert alipay_entry["operational"] is True
+
+    def test_alipay_requires_return_url_to_be_operational(self, monkeypatch):
+        import payment_providers
+
+        _set_alipay_env(monkeypatch)
+        monkeypatch.delenv("AVT_ALIPAY_RETURN_URL", raising=False)
+        payment_providers._PROVIDERS = {}
+
+        user = _make_user(plan_code="free")
+        result = self._run_get_config(user=user)
+        assert result["default_provider"] == "fake"
+        alipay_entry = next(p for p in result["providers"] if p["code"] == "alipay")
+        assert alipay_entry["operational"] is False
 
     def test_display_names_are_chinese_first(self, monkeypatch):
         import payment_providers
@@ -738,31 +740,22 @@ class TestCreateOrderAlipayGate:
         # No order row should have been committed.
         db.commit.assert_not_awaited()
 
-    def test_alipay_rejected_even_when_env_complete_but_flag_not_flipped(
-        self, monkeypatch
-    ):
-        """T5 minor revision: the server-side create_order guard must reject
-        Alipay orders as long as `_ALIPAY_LIVE_READY = False`, even if env
-        vars happen to be present. Prevents the "env alone = operational"
-        regression at the order-creation boundary.
-        """
+    def test_alipay_create_order_succeeds_when_env_is_complete(self, monkeypatch):
         import payment_providers
-        from fastapi import HTTPException
-        monkeypatch.setenv("AVT_ALIPAY_APP_ID", "app-id")
-        monkeypatch.setenv("AVT_ALIPAY_APP_PRIVATE_KEY", "pk")
-        monkeypatch.setenv("AVT_ALIPAY_PUBLIC_KEY", "apk")
-        monkeypatch.setenv(
-            "AVT_ALIPAY_NOTIFY_URL", "https://example.test/api/billing/webhooks/alipay"
-        )
+
+        _set_alipay_env(monkeypatch)
         payment_providers._PROVIDERS = {}
 
         user = _make_user(plan_code="free")
         db = self._make_order_db()
+        request = SimpleNamespace(headers={"user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)"})
         body = CreateOrderRequest(target_plan_code="plus", provider="alipay")
-        with pytest.raises(HTTPException) as exc_info:
-            _run(create_order(body, db, user))
-        assert exc_info.value.status_code == 501
-        db.commit.assert_not_awaited()
+
+        result = _run(create_order(body, db, user, request))
+        assert result["provider"] == "alipay"
+        assert result["checkout_surface"] == "mobile_web"
+        assert "alipay.trade.wap.pay" in result["checkout_url"]
+        db.commit.assert_awaited()
 
 
 # ===================================================================

@@ -14,10 +14,17 @@ SUPPORTED_EVENT_TYPES = {
 EVENT_LEVEL_INFO = "info"
 EVENT_LEVEL_WARN = "warn"
 EVENT_LEVEL_ERROR = "error"
+# 2026-04-21 plan §7.8 / D35: needs-ops-intervention severity — e.g.
+# copy_as_new's Phase B cleanup failing (new job already running, source
+# stuck in editing until the 24h idle scanner tides it over). Admin
+# LogViewer should render this differently; logs_redactor must pass it
+# through to admins unredacted for root-cause triage.
+EVENT_LEVEL_CRITICAL = "critical"
 SUPPORTED_EVENT_LEVELS = {
     EVENT_LEVEL_INFO,
     EVENT_LEVEL_WARN,
     EVENT_LEVEL_ERROR,
+    EVENT_LEVEL_CRITICAL,
 }
 
 

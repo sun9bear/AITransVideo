@@ -12,6 +12,10 @@ const statusStyles: Record<string, string> = {
   // editing uses project primary color (violet #8B5CF6) to signal a user-owned
   // session that the user must resume or abandon. See plan 2026-04-18 §11.6.
   editing: "bg-violet-500/15 text-violet-600 dark:text-violet-400",
+  // 2026-04-21: purged = gateway 7d TTL soft-delete. Neutral/muted styling
+  // matches cancelled — the job is "past, done, cold storage" from the
+  // user's perspective, not an error condition.
+  purged: "bg-muted text-muted-foreground",
   idle: "bg-muted text-muted-foreground",
   stopping: "bg-muted text-muted-foreground",
 }

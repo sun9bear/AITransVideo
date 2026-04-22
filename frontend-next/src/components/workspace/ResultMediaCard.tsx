@@ -49,6 +49,9 @@ export function ResultMediaCard({ jobId, serviceMode }: ResultMediaCardProps) {
         setAvailability(data)
         const available = new Set<MaterialItemKey>()
         for (const opt of MATERIAL_OPTIONS) {
+          // source_video 是原始素材里体积最大的（长视频动辄 1-2 GB），
+          // 默认不勾减少触发 5 GB 上限的概率。用户需要时显式勾上即可。
+          if (opt.key === "source_video") continue
           if (isItemAvailable(opt.key, data)) available.add(opt.key)
         }
         setSelectedItems(available)
@@ -241,6 +244,12 @@ export function ResultMediaCard({ jobId, serviceMode }: ResultMediaCardProps) {
             >
               {packTask.isActive ? "打包中..." : "开始打包"}
             </Button>
+            {/* 2026-04-21: 磁盘上 zip 体积可达 GB 级，Gateway 每小时扫一次，
+             *  超过 24h 的已完成 pack task 会被 cleanup_expired_pack_zips
+             *  标记为 expired 并删除磁盘文件。前端应告知用户保留窗口。 */}
+            <p className="text-xs text-muted-foreground">
+              素材包仅保存 24 小时，请及时下载；超时后可重新打包。
+            </p>
           </div>
         )}
       </CardContent>
@@ -295,6 +304,25 @@ function MaterialsPackButton({
       >
         <RotateCcw className="h-4 w-4" />
         打包失败 · 重试
+      </Button>
+    )
+  }
+  // 2026-04-21: Gateway periodic cleanup flips 24h-old completed tasks to
+  // 'expired' and deletes the underlying zip. UI keeps the task card
+  // visible (users may remember they packed before) but swaps the primary
+  // CTA to a "re-pack" prompt so they understand re-clicking has no extra
+  // cost beyond a fresh zip.
+  if (task.status === "expired") {
+    return (
+      <Button
+        variant="outline"
+        size="sm"
+        className="gap-2 border-amber-500/60 text-amber-500"
+        onClick={onOpenDialog}
+        title="素材包已过保留期（24 小时）被自动清理，请重新打包"
+      >
+        <RotateCcw className="h-4 w-4" />
+        素材包已过期 · 重新打包
       </Button>
     )
   }

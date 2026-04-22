@@ -33,6 +33,10 @@ JOB_STATUS_SUCCEEDED = "succeeded"
 JOB_STATUS_FAILED = "failed"
 JOB_STATUS_CANCELLED = "cancelled"
 JOB_STATUS_EDITING = "editing"  # Post-edit workflow (plan 2026-04-18, D21)
+# 2026-04-21: soft-delete marker written by Gateway's project_cleanup
+# once the 7d retention window elapses. Kept in DB so the user retains a
+# history entry ("过期已清理任务 X"); project_dir on disk is gone.
+JOB_STATUS_PURGED = "purged"
 SUPPORTED_JOB_STATUSES = {
     JOB_STATUS_QUEUED,
     JOB_STATUS_RUNNING,
@@ -41,6 +45,7 @@ SUPPORTED_JOB_STATUSES = {
     JOB_STATUS_SUCCEEDED,
     JOB_STATUS_FAILED,
     JOB_STATUS_CANCELLED,
+    JOB_STATUS_PURGED,
 }
 ACTIVE_JOB_STATUSES = {
     JOB_STATUS_QUEUED,

@@ -418,3 +418,90 @@ def test_status_transitions_to_failed_on_top_level_exception(tmp_path: Path) -> 
     assert final["stage"] in {"completed", "failed"}, final
     if final["stage"] == "completed":
         assert final["total"] == 0
+
+
+# ---------------------------------------------------------------------------
+# 2026-04-21 D39 cancel — user must be able to interrupt a long batch
+# (plan §7.10). Signal lives in the status file; the running thread
+# checks it between segments and terminates gracefully, preserving work
+# already done.
+# ---------------------------------------------------------------------------
+
+
+def test_cancel_mid_batch_stops_and_preserves_done_work(tmp_path: Path) -> None:
+    """Cancel mid-run → thread transitions to ``stage='cancelled'`` with
+    correct counts of succeeded / failed / remaining segments."""
+    from services.jobs.regenerate_all_async import request_regen_all_cancel
+
+    project = _make_project(tmp_path, [f"seg_{i:03d}" for i in range(20)])
+
+    # A slow caller: sleep on each segment so the test has time to cancel.
+    call_count = {"n": 0}
+    def _slow_tts(segment_dict, output_path):
+        call_count["n"] += 1
+        time.sleep(0.1)
+        output_path.write_bytes(b"W")
+
+    task_id = start_regen_all_async(
+        project_dir=project, tts_caller=_slow_tts,
+    )
+
+    # Let a couple of segments process then cancel.
+    _wait_until(
+        lambda: (read_regen_all_status(project, task_id) or {}).get("succeeded_count", 0) >= 2,
+        timeout_s=2.0,
+    )
+    request_regen_all_cancel(project, task_id)
+
+    def _terminal():
+        s = read_regen_all_status(project, task_id)
+        if s and s.get("stage") in {"completed", "cancelled", "failed"}:
+            return s
+        return None
+    final = _wait_until(_terminal, timeout_s=3.0)
+    assert final is not None
+    assert final["stage"] == "cancelled", final
+    # Some work happened before cancel landed; not all 20 ran.
+    assert final["succeeded_count"] >= 1
+    assert final["succeeded_count"] < 20
+    # Cancel summary shape: total = original eligible count,
+    # succeeded + failed < total (rest were skipped).
+    assert final["total"] == 20
+    assert len(final["succeeded_segment_ids"]) == final["succeeded_count"]
+
+
+def test_cancel_request_on_nonexistent_task_is_silent(tmp_path: Path) -> None:
+    """Cancelling a wrong / stale task_id must not raise and must not
+    affect a possibly-running task for the same project."""
+    from services.jobs.regenerate_all_async import request_regen_all_cancel
+
+    project = _make_project(tmp_path, ["seg_001"])
+    editing = project / "editor" / "editing"
+    assert editing.is_dir()
+    # No batch has ever run; no status file. Cancel should be a no-op.
+    request_regen_all_cancel(project, "nonexistent-task")
+    # No status file created as a side effect.
+    assert not status_file_path(project).exists()
+
+
+def test_cancel_writes_cancel_requested_flag(tmp_path: Path) -> None:
+    """The cancel API writes ``cancel_requested=True`` to the live
+    status file (so the running thread sees it on next tick)."""
+    from services.jobs.regenerate_all_async import request_regen_all_cancel
+
+    project = _make_project(tmp_path, ["seg_001", "seg_002"])
+
+    # Seed a slow batch.
+    def _slow(segment_dict, output_path):
+        time.sleep(0.3)
+        output_path.write_bytes(b"W")
+    task_id = start_regen_all_async(project_dir=project, tts_caller=_slow)
+    # Wait for status file to exist with stage=running OR starting.
+    _wait_until(
+        lambda: read_regen_all_status(project, task_id) is not None,
+        timeout_s=1.0,
+    )
+    request_regen_all_cancel(project, task_id)
+    current = read_regen_all_status(project, task_id)
+    assert current is not None
+    assert current.get("cancel_requested") is True, current

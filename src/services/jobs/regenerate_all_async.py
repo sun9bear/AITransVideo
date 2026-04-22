@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "read_regen_all_status",
+    "request_regen_all_cancel",
     "start_regen_all_async",
     "status_file_path",
 ]
@@ -106,6 +107,28 @@ def read_regen_all_status(
     return data
 
 
+def _read_status_raw(
+    project_dir: str | Path, task_id: str,
+) -> dict[str, Any] | None:
+    """Internal counterpart to :func:`read_regen_all_status` that does
+    NOT return the ``{"mismatch": ...}`` sentinel — used inside the
+    worker loop where a mismatch shouldn't be possible (single-flight
+    slot is held) and we just want to check ``cancel_requested``.
+    Returns None if the file is missing / unreadable."""
+    path = status_file_path(project_dir)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if data.get("task_id") != task_id:
+        return None
+    return data
+
+
 def _write_status(project_dir: Path, payload: dict[str, Any]) -> None:
     """Atomic write via tmpfile + rename. Silently drops if the editing
     dir has been removed (user cancelled / committed — thread racing
@@ -122,15 +145,27 @@ def _write_status(project_dir: Path, payload: dict[str, Any]) -> None:
     if not path.parent.is_dir():
         # editing/ removed by cancel / commit — drop this write silently.
         return
-    try:
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        tmp.replace(path)
-    except OSError as exc:
-        logger.warning("Failed to write regen status: %s", exc)
+    # Small retry loop — Windows `os.replace` can briefly raise
+    # ``PermissionError`` (WinError 5 / 32) when another thread or
+    # process has the target open for read (the GET /status poller or
+    # another thread's _write_status racing with ours). POSIX rename
+    # is atomic so Linux production never hits this; the retries are
+    # tiny Windows-only friction, not a reliability hack.
+    import time as _time
+    tmp = path.with_suffix(".json.tmp")
+    last_exc: OSError | None = None
+    for attempt in range(3):
+        try:
+            tmp.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            tmp.replace(path)
+            return
+        except OSError as exc:
+            last_exc = exc
+            _time.sleep(0.02 * (attempt + 1))
+    logger.warning("Failed to write regen status after retries: %s", last_exc)
 
 
 def _utc_now_iso() -> str:
@@ -150,8 +185,49 @@ def _initial_status(task_id: str) -> dict[str, Any]:
         "current_segment_id": None,
         "result": None,
         "error": None,
+        # 2026-04-21 plan §7.10 / D39: user may hit "取消批量合成" mid-run.
+        # The thread checks this flag between segments and exits into
+        # stage='cancelled' preserving already-done work. Default False —
+        # nobody has asked to cancel yet.
+        "cancel_requested": False,
         "updated_at": _utc_now_iso(),
     }
+
+
+def request_regen_all_cancel(
+    project_dir: str | Path, task_id: str,
+) -> bool:
+    """Mark a running batch as cancel-requested.
+
+    Writes ``cancel_requested=true`` into the live status file atomically.
+    The running thread sees it on its next per-segment boundary and
+    transitions to ``stage='cancelled'`` with already-done counts intact.
+
+    Returns True if the flag was written, False if:
+      - status file doesn't exist (no batch is running for this project),
+      - the file's task_id doesn't match (stale request for a previous
+        batch — silently ignored; the live batch keeps going).
+
+    Idempotent: calling twice is a no-op on the second pass.
+    """
+    path = status_file_path(project_dir)
+    if not path.is_file():
+        return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    if data.get("task_id") != task_id:
+        # Someone else's batch or a stale id — leave alone.
+        return False
+    if data.get("cancel_requested") is True:
+        return True  # idempotent
+    data["cancel_requested"] = True
+    data["updated_at"] = _utc_now_iso()
+    _write_status(Path(project_dir), data)
+    return True
 
 
 def start_regen_all_async(
@@ -267,7 +343,18 @@ def _run_batch(
             },
         )
 
+        cancelled = False
         for segment_id in eligible:
+            # D39 cancel — check the status file each iteration. Cheap (few
+            # KB JSON read) compared to a 2-5s TTS call, so the polling
+            # overhead is <1% even on small batches. Stopping BEFORE the
+            # TTS call guarantees we don't burn paid provider quota on a
+            # batch the user has already abandoned.
+            current = _read_status_raw(project_dir, task_id)
+            if current is not None and current.get("cancel_requested") is True:
+                cancelled = True
+                break
+
             # "Current" snapshot so the UI can show "正在重合成 seg_042"
             _write_status(
                 project_dir,
@@ -283,6 +370,7 @@ def _run_batch(
                     "current_segment_id": segment_id,
                     "result": None,
                     "error": None,
+                    "cancel_requested": False,
                     "updated_at": _utc_now_iso(),
                 },
             )
@@ -301,6 +389,41 @@ def _run_batch(
                 failures.append(
                     {"segment_id": segment_id, "error": str(exc)[:300]}
                 )
+
+        if cancelled:
+            logger.info(
+                "regen batch %s cancelled after %d succeeded / %d failed",
+                task_id, len(succeeded), len(failures),
+            )
+            summary = {
+                "total": total,
+                "succeeded_count": len(succeeded),
+                "failed_count": len(failures),
+                "succeeded_segment_ids": succeeded,
+                "failed_segment_ids": failed_ids,
+                "failures": failures,
+                "cancelled": True,
+            }
+            _release_active_slot(project_key, task_id)
+            _write_status(
+                project_dir,
+                {
+                    "task_id": task_id,
+                    "stage": "cancelled",
+                    "total": total,
+                    "succeeded_count": len(succeeded),
+                    "failed_count": len(failures),
+                    "succeeded_segment_ids": succeeded,
+                    "failed_segment_ids": failed_ids,
+                    "failures": failures,
+                    "current_segment_id": None,
+                    "result": summary,
+                    "error": None,
+                    "cancel_requested": True,
+                    "updated_at": _utc_now_iso(),
+                },
+            )
+            return
 
         # Completion snapshot with D38 summary.
         summary = {

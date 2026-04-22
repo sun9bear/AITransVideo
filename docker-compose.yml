@@ -189,6 +189,31 @@ services:
       retries: 3
       start_period: 10s
 
+  # Cloudflare Tunnel connector (Phase 1 — see
+  # docs/plans/2026-04-21-cloudflare-r2-deployment-plan.md §4).
+  # Registers outbound connections to Cloudflare edge, so public users
+  # reach aitrans.video via Cloudflare's anycast network (unblocked in
+  # China) instead of hitting the US source IP directly. After Step 14
+  # Caddy downgrade, this is the ONLY public ingress path.
+  # TUNNEL_TOKEN is issued per-tunnel by Cloudflare; anyone holding it
+  # can impersonate the tunnel, so keep it in /opt/aivideotrans/config/.env.
+  cloudflared-us:
+    image: cloudflare/cloudflared:latest
+    container_name: aivideotrans-cloudflared-us
+    network_mode: host
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARED_TOKEN_US:?CLOUDFLARED_TOKEN_US 必须在 .env 中设置}
+    # Start after core services so first tunnel registration has a
+    # functioning origin. No service_healthy dependency — tunnel should
+    # register even if origin is briefly down (Cloudflare returns 502 to
+    # clients while connector stays connected).
+    depends_on:
+      - gateway
+      - next
+      - caddy
+
   caddy:
     image: ${CADDY_IMAGE_NAME:-caddy:2.9.1}
     container_name: ${CADDY_CONTAINER_NAME:-aivideotrans-caddy}

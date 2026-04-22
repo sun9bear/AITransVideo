@@ -34,14 +34,23 @@ export async function getJob(jobId: string): Promise<JobSummary> {
 export async function submitTranslationJob(
   input: CreateTranslationJobInput,
 ): Promise<JobSummary> {
+  // When a local upload is in play, pass the original filename alongside
+  // the sanitised upload path. The gateway's display_name orchestrator
+  // truncates it into a friendly task title (plan §6.2 branch 3).
+  const sourceType = input.sourceType ?? 'youtube_url'
+  const source: Record<string, string> = {
+    type: sourceType,
+    value: sourceType === 'local_video' ? (input.localFilePath ?? '') : input.youtubeUrl,
+  }
+  if (sourceType === 'local_video' && input.localFileName) {
+    source.filename = input.localFileName
+  }
+
   const payload = await apiClient.post<ApiJobRecord>('/jobs', {
     body: {
       job_type: 'localize_video',
       output_target: 'editor',
-      source: {
-        type: input.sourceType ?? 'youtube_url',
-        value: input.sourceType === 'local_video' ? (input.localFilePath ?? '') : input.youtubeUrl,
-      },
+      source,
       speakers: input.speakers,
       voice_a: input.voiceA,
       voice_b: input.voiceB,
@@ -57,6 +66,33 @@ export async function continueJob(jobId: string): Promise<JobSummary> {
   const payload = await apiClient.post<ApiJobRecord>(`/jobs/${jobId}/continue`, {
     body: {},
   })
+  return toJobSummary(payload)
+}
+
+/**
+ * Rename a job's user-visible title. Hits the gateway's rename endpoint
+ * (``PATCH /gateway/jobs/{id}``) which handles ownership + collision
+ * resolution (plan §6.5 / D16). Empty / whitespace-only values are
+ * rejected on the server with 400 — callers should validate client-side
+ * before calling.
+ *
+ * ⚠ This endpoint lives at the raw ``/gateway/*`` path, not under the
+ * client's default ``/job-api`` base. We use ``fetch`` directly here so
+ * the apiClient's prefix assumption doesn't get in the way.
+ */
+export async function renameJob(jobId: string, displayName: string): Promise<JobSummary> {
+  const response = await fetch(`/gateway/jobs/${jobId}`, {
+    method: 'PATCH',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ display_name: displayName }),
+  })
+  if (!response.ok) {
+    const errorBody = await response.json().catch(() => ({}))
+    const message = errorBody?.message ?? errorBody?.detail ?? `重命名失败（HTTP ${response.status}）`
+    throw new Error(message)
+  }
+  const payload = (await response.json()) as ApiJobRecord
   return toJobSummary(payload)
 }
 

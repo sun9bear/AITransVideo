@@ -90,6 +90,7 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
         youtubeUrl: sourceType === "youtube_url" ? youtubeUrl.trim() : "",
         sourceType,
         localFilePath: sourceType === "local_video" ? uploadedFilePath : undefined,
+        localFileName: sourceType === "local_video" ? (uploadFileName || undefined) : undefined,
         transcriptionMethod: sourceType === "local_video" ? "assemblyai" : transcriptionMethod,
         service_mode: serviceMode,
       })
@@ -191,6 +192,9 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
               {validationError && youtubeUrl ? (
                 <p className="text-xs text-red-400">{validationError}</p>
               ) : null}
+              <p className="text-xs text-muted-foreground/80">
+                仅用于翻译您本人或已获授权的视频内容；使用前请确认拥有合法授权，不得用于侵权用途。
+              </p>
             </div>
           ) : (
             <div className="space-y-2">

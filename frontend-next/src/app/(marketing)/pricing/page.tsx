@@ -1,5 +1,6 @@
 import type { Metadata } from "next"
 import { PricingGrid } from "@/components/marketing/pricing-grid"
+import { PricingAssurance } from "@/components/marketing/pricing-assurance"
 import { TrialBanner } from "@/components/marketing/trial-banner"
 import { Faq } from "@/components/marketing/faq"
 
@@ -44,6 +45,7 @@ export default function PricingPage() {
           <div className="mt-10">
             <PricingGrid />
           </div>
+          <PricingAssurance />
         </div>
       </section>
 

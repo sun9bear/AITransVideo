@@ -9,6 +9,7 @@ dependencies = [
     "google-genai",
     "pydub",
     "requests",
+    "cryptography",
     "websocket-client",
     "yt-dlp[default]",
 ]

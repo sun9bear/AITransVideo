@@ -6,6 +6,9 @@ export const JOB_STATUS_LABELS = {
   running: '处理中',
   succeeded: '已完成',
   waiting_for_review: '等待审核',
+  // 2026-04-21: gateway project_cleanup 7d TTL soft-delete. DB 记录
+  // 保留做历史；project_dir 已在磁盘清理。下载 / 修改入口应当禁用。
+  purged: '已清理',
 } as const
 
 export type JobStatus = keyof typeof JOB_STATUS_LABELS
@@ -154,6 +157,13 @@ export interface CreateTranslationJobInput {
   transcriptionMethod?: 'assemblyai' | 'gemini'
   sourceType?: 'youtube_url' | 'local_video'
   localFilePath?: string
+  /**
+   * Original filename of the uploaded file (before server-side sanitisation
+   * into ``localFilePath``). Used by the gateway's display_name orchestrator
+   * to derive a friendly task title via "truncated filename stem". Optional
+   * — falls through to the "上传视频 YYYY-MM-DD NNN" branch if omitted.
+   */
+  localFileName?: string
   service_mode?: 'express' | 'studio'
 }
 

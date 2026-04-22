@@ -2,7 +2,17 @@
 
 import { useCallback, useEffect, useRef, useState } from "react"
 
-export type TaskStatus = "idle" | "pending" | "running" | "completed" | "failed"
+// 2026-04-21: "expired" added for materials_pack zips that the gateway
+// periodic cleanup has pruned (plan §7 24h retention). UI should treat
+// expired like a soft-failure that requires a re-pack click, without
+// surfacing it as an error.
+export type TaskStatus =
+  | "idle"
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed"
+  | "expired"
 
 export interface TaskProgress {
   stage?: string

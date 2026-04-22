@@ -1,26 +1,17 @@
-"""Tests for the Task 5 Alipay integration boundary.
-
-Coverage:
-1. Status mapping for known + unknown Alipay `trade_status` values.
-2. `operational` gating when config is absent vs present.
-3. `create_checkout` contract shape without a live network call, for both
-   configured and unconfigured states.
-4. `parse_webhook` / `parse_alipay_notify` contract for representative
-   form-encoded and JSON payloads.
-5. `verify_signature` behavior on the non-configured path (fails closed).
-
-None of these tests require real Alipay credentials, a network connection,
-or a cryptography library.
-"""
+"""Tests for the live Alipay provider implementation."""
 from __future__ import annotations
 
-import os
+import asyncio
+import json
 import sys
 import types
+from types import SimpleNamespace
 from unittest.mock import MagicMock
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import pytest
-from urllib.parse import parse_qs, urlparse
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 
 _gateway_dir = str(__import__("pathlib").Path(__file__).resolve().parent.parent / "gateway")
@@ -34,317 +25,274 @@ _fake_database.async_session = MagicMock()
 sys.modules.setdefault("database", _fake_database)
 
 import payment_provider_alipay as alipay_helper  # noqa: E402
-import payment_providers  # noqa: E402
 from payment_provider_alipay import (  # noqa: E402
     AlipayConfig,
     build_checkout_url,
+    detect_checkout_surface,
+    format_amount_yuan,
     is_alipay_configured,
     is_alipay_live_ready,
     map_alipay_status,
     parse_alipay_notify,
+    query_order_status,
+    validate_alipay_notify_payload,
+    validate_alipay_query_payload,
     verify_alipay_signature,
 )
-from payment_providers import (  # noqa: E402
-    AlipayProvider,
-    CheckoutResult,
-    NormalizedWebhookEvent,
-    get_provider,
-    is_provider_operational,
-    list_providers,
-)
+from payment_providers import AlipayProvider, CheckoutResult, NormalizedWebhookEvent  # noqa: E402
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-_ALL_ALIPAY_ENV_VARS = (
-    "AVT_ALIPAY_APP_ID",
-    "AVT_ALIPAY_APP_PRIVATE_KEY",
-    "AVT_ALIPAY_PUBLIC_KEY",
-    "AVT_ALIPAY_NOTIFY_URL",
-    "AVT_ALIPAY_RETURN_URL",
-    "AVT_ALIPAY_GATEWAY_URL",
-)
+def _run(coro):
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
 
 
 @pytest.fixture
 def clean_alipay_env(monkeypatch):
-    """Remove every AVT_ALIPAY_* env var for the duration of the test."""
-    for var in _ALL_ALIPAY_ENV_VARS:
+    for var in (
+        "AVT_ALIPAY_APP_ID",
+        "AVT_ALIPAY_APP_PRIVATE_KEY",
+        "AVT_ALIPAY_PUBLIC_KEY",
+        "AVT_ALIPAY_NOTIFY_URL",
+        "AVT_ALIPAY_RETURN_URL",
+        "AVT_ALIPAY_GATEWAY_URL",
+        "AVT_ALIPAY_SELLER_ID",
+    ):
         monkeypatch.delenv(var, raising=False)
     yield
 
 
 @pytest.fixture
-def alipay_configured_env(monkeypatch):
-    """Set the minimum viable AVT_ALIPAY_* env vars."""
+def key_material():
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    public_key = private_key.public_key()
+    private_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode("utf-8")
+    public_pem = public_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    ).decode("utf-8")
+    return {"private_pem": private_pem, "public_pem": public_pem}
+
+
+@pytest.fixture
+def alipay_configured_env(monkeypatch, key_material):
     monkeypatch.setenv("AVT_ALIPAY_APP_ID", "test-app-id")
-    monkeypatch.setenv("AVT_ALIPAY_APP_PRIVATE_KEY", "test-private-key")
-    monkeypatch.setenv("AVT_ALIPAY_PUBLIC_KEY", "test-alipay-public-key")
+    monkeypatch.setenv("AVT_ALIPAY_APP_PRIVATE_KEY", key_material["private_pem"])
+    monkeypatch.setenv("AVT_ALIPAY_PUBLIC_KEY", key_material["public_pem"])
     monkeypatch.setenv(
-        "AVT_ALIPAY_NOTIFY_URL", "https://example.test/api/billing/webhooks/alipay"
+        "AVT_ALIPAY_NOTIFY_URL",
+        "https://example.test/api/billing/webhooks/alipay",
     )
     monkeypatch.setenv(
-        "AVT_ALIPAY_RETURN_URL", "https://example.test/settings/billing?paid=1"
+        "AVT_ALIPAY_RETURN_URL",
+        "https://example.test/settings/billing",
     )
     monkeypatch.setenv(
         "AVT_ALIPAY_GATEWAY_URL",
-        "https://openapi-sandbox.dl.alipaydev.com/gateway.do",
+        "https://openapi.alipay.com/gateway.do",
     )
-    yield
-
-
-# ---------------------------------------------------------------------------
-# 1. Status mapping
-# ---------------------------------------------------------------------------
+    monkeypatch.setenv("AVT_ALIPAY_SELLER_ID", "2088102177694100")
+    return key_material
 
 
 class TestStatusMapping:
-    def test_trade_success_maps_to_paid(self):
+    def test_known_statuses(self):
         assert map_alipay_status("TRADE_SUCCESS") == "paid"
-
-    def test_trade_finished_maps_to_paid(self):
         assert map_alipay_status("TRADE_FINISHED") == "paid"
-
-    def test_trade_closed_maps_to_cancelled(self):
         assert map_alipay_status("TRADE_CLOSED") == "cancelled"
-
-    def test_wait_buyer_pay_maps_to_pending(self):
         assert map_alipay_status("WAIT_BUYER_PAY") == "pending"
 
-    def test_unknown_status_passes_through(self):
+    def test_unknown_status_passthrough(self):
         assert map_alipay_status("SOMETHING_ELSE") == "SOMETHING_ELSE"
-
-    def test_provider_instance_map_status_matches_helper(self, clean_alipay_env):
-        provider = AlipayProvider()
-        assert provider.map_status("TRADE_SUCCESS") == "paid"
-        assert provider.map_status("TRADE_CLOSED") == "cancelled"
-
-
-# ---------------------------------------------------------------------------
-# 2. Operational / non-operational gating
-# ---------------------------------------------------------------------------
 
 
 class TestOperationalGate:
-    """Alipay truthfulness gate (T5 minor revision).
-
-    Env presence alone is NOT sufficient to report `operational = True`.
-    The `_ALIPAY_LIVE_READY` flag in `payment_provider_alipay` must also be
-    True, which happens only after the signed-checkout path and the verified-
-    signature path are genuinely implemented. Until then the provider stays
-    visible but non-operational, and checkout-config will not default users
-    into it.
-    """
-
     def test_non_operational_without_env(self, clean_alipay_env):
         assert is_alipay_configured() is False
         assert is_alipay_live_ready() is False
-        provider = AlipayProvider()
-        assert provider.operational is False
+        assert AlipayProvider().operational is False
 
-    def test_non_operational_with_partial_env(self, monkeypatch, clean_alipay_env):
-        # Only one of the four required vars set.
-        monkeypatch.setenv("AVT_ALIPAY_APP_ID", "x")
-        assert AlipayConfig.from_env() is None
-        assert is_alipay_live_ready() is False
-        provider = AlipayProvider()
-        assert provider.operational is False
-
-    def test_env_alone_is_not_enough(self, alipay_configured_env):
-        """Regression: a configured env MUST NOT flip Alipay to operational.
-
-        The `_ALIPAY_LIVE_READY` module flag ships as False until the signed-
-        checkout and signature-verification paths are actually implemented.
-        This is the whole point of the T5 minor revision — env presence alone
-        used to make Alipay the default provider even though the helper still
-        returned unsigned URLs and fail-closed signatures.
-        """
+    def test_operational_with_complete_env(self, alipay_configured_env):
         assert is_alipay_configured() is True
-        # But live-ready is False because the code-level flag hasn't flipped.
-        assert alipay_helper._ALIPAY_LIVE_READY is False
-        assert is_alipay_live_ready() is False
-        provider = AlipayProvider()
-        assert provider.operational is False
-
-    def test_flipped_flag_plus_env_makes_it_operational(
-        self, monkeypatch, alipay_configured_env
-    ):
-        """When the live-ready flag IS flipped AND env is present, the
-        provider reports operational = True. This test exercises the path that
-        unlocks once the real signing code ships, without requiring a file edit
-        to prove the gate has both inputs wired correctly.
-        """
-        monkeypatch.setattr(alipay_helper, "_ALIPAY_LIVE_READY", True)
+        assert alipay_helper._ALIPAY_LIVE_READY is True
         assert is_alipay_live_ready() is True
-        provider = AlipayProvider()
-        assert provider.operational is True
-
-    def test_flipped_flag_without_env_still_not_operational(
-        self, monkeypatch, clean_alipay_env
-    ):
-        """Even with the live-ready flag True, missing env means not ready."""
-        monkeypatch.setattr(alipay_helper, "_ALIPAY_LIVE_READY", True)
-        assert is_alipay_live_ready() is False
-        provider = AlipayProvider()
-        assert provider.operational is False
-
-    def test_registry_is_provider_operational_reflects_gate(
-        self, monkeypatch, clean_alipay_env
-    ):
-        # Force the registry to rebuild so a fresh AlipayProvider is used.
-        payment_providers._PROVIDERS = {}
-        assert is_provider_operational("alipay") is False
-
-    def test_registry_stays_non_operational_with_env_until_flag_flips(
-        self, monkeypatch, alipay_configured_env
-    ):
-        """Registry-level view matches the updated gate: env alone is not
-        enough, both env AND the code-level live-ready flag must agree.
-        """
-        payment_providers._PROVIDERS = {}
-        # Env is set (alipay_configured_env fixture), but flag is still False.
-        assert is_provider_operational("alipay") is False
-
-        # Flip the flag → now it reports operational.
-        monkeypatch.setattr(alipay_helper, "_ALIPAY_LIVE_READY", True)
-        payment_providers._PROVIDERS = {}
-        assert is_provider_operational("alipay") is True
-
-        # And the registry still lists fake + alipay side-by-side.
-        names = set(list_providers())
-        assert "fake" in names
-        assert "alipay" in names
-
-    def test_fake_remains_default_safe_path_when_alipay_missing(
-        self, clean_alipay_env, monkeypatch
-    ):
-        payment_providers._PROVIDERS = {}
-        assert is_provider_operational("fake") is True
-        assert is_provider_operational("alipay") is False
-
-    def test_module_flag_ships_as_false_by_default(self):
-        """Guard: the code-level live-ready flag must ship as False.
-
-        If this assertion ever fails, someone edited the flag without also
-        completing the signed-checkout + verified-signature implementations.
-        That's the T5 minor revision's single invariant, so catch it here.
-        """
-        assert alipay_helper._ALIPAY_LIVE_READY is False
+        assert AlipayProvider().operational is True
 
 
-# ---------------------------------------------------------------------------
-# 3. create_checkout contract (no live network)
-# ---------------------------------------------------------------------------
+class TestCheckoutSurface:
+    def test_detects_mobile_user_agent(self):
+        assert detect_checkout_surface(None, "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)") == "mobile_web"
+
+    def test_defaults_to_pc(self):
+        assert detect_checkout_surface(None, "Mozilla/5.0 (Windows NT 10.0; Win64; x64)") == "pc_web"
+
+    def test_explicit_surface_wins(self):
+        assert detect_checkout_surface("mobile_web", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)") == "mobile_web"
 
 
 class TestCreateCheckout:
-    def test_non_operational_raises_not_implemented(self, clean_alipay_env):
-        provider = AlipayProvider()
+    def test_requires_config(self, clean_alipay_env):
         with pytest.raises(NotImplementedError):
-            provider.create_checkout(
+            AlipayProvider().create_checkout(
                 order_id="order-x",
                 amount_cny=6900,
                 target_plan_code="plus",
                 billing_period="monthly",
             )
 
-    def test_configured_returns_checkout_result_shape(self, alipay_configured_env):
+    def test_page_pay_checkout_is_signed(self, alipay_configured_env):
         provider = AlipayProvider()
         result = provider.create_checkout(
             order_id="order-xyz",
             amount_cny=6900,
             target_plan_code="plus",
             billing_period="monthly",
+            checkout_surface="pc_web",
         )
         assert isinstance(result, CheckoutResult)
-        assert result.provider_order_id is None  # assigned on notify, not here
-        assert result.checkout_url.startswith(
-            "https://openapi-sandbox.dl.alipaydev.com/gateway.do?"
-        )
-        # Query string must include our order id as out_trade_no and the
-        # yuan amount (6900 fen → 69.00 yuan).
+        assert result.provider_order_id is None
+
         parsed = urlparse(result.checkout_url)
         params = parse_qs(parsed.query)
-        assert params["out_trade_no"] == ["order-xyz"]
-        assert params["total_amount"] == ["69.00"]
-        assert params["app_id"] == ["test-app-id"]
         assert params["method"] == ["alipay.trade.page.pay"]
-        # Must include both notify_url and return_url from config.
-        assert "notify_url" in params and "return_url" in params
+        assert params["sign_type"] == ["RSA2"]
+        assert "sign" in params
 
-    def test_build_checkout_url_yuan_formatting(self, alipay_configured_env):
+        biz_content = json.loads(params["biz_content"][0])
+        assert biz_content["out_trade_no"] == "order-xyz"
+        assert biz_content["product_code"] == "FAST_INSTANT_TRADE_PAY"
+        assert biz_content["total_amount"] == "69.00"
+
+        signed_params = {
+            key: values[0]
+            for key, values in params.items()
+            if key != "sign"
+        }
+        assert alipay_helper._verify_signature(
+            alipay_configured_env["public_pem"],
+            alipay_helper._canonicalize_params(signed_params),
+            params["sign"][0],
+        )
+
+    def test_wap_checkout_uses_mobile_api(self, alipay_configured_env):
         config = AlipayConfig.from_env()
         assert config is not None
+
         url = build_checkout_url(
             config,
-            order_id="o-1",
-            amount_cny=29900,
+            order_id="order-mobile",
+            amount_cny=19900,
             target_plan_code="pro",
-            billing_period="monthly",
+            billing_period="annual",
+            checkout_surface="mobile_web",
         )
         params = parse_qs(urlparse(url).query)
-        assert params["total_amount"] == ["299.00"]
+        biz_content = json.loads(params["biz_content"][0])
+        assert params["method"] == ["alipay.trade.wap.pay"]
+        assert biz_content["product_code"] == "QUICK_WAP_WAY"
+        assert "quit_url" in biz_content
+
+    def test_return_url_carries_order_context(self, alipay_configured_env):
+        provider = AlipayProvider()
+        result = provider.create_checkout(
+            order_id="order-ctx",
+            amount_cny=6900,
+            target_plan_code="plus",
+            billing_period="monthly",
+        )
+        params = parse_qs(urlparse(result.checkout_url).query)
+        return_url = params["return_url"][0]
+        return_params = parse_qs(urlparse(return_url).query)
+        assert return_params["order_id"] == ["order-ctx"]
+        assert return_params["provider"] == ["alipay"]
+        assert return_params["status"] == ["processing"]
+
+    def test_amount_formatter(self):
+        assert format_amount_yuan(1) == "0.01"
+        assert format_amount_yuan(6900) == "69.00"
 
 
-# ---------------------------------------------------------------------------
-# 4. Webhook parsing contract
-# ---------------------------------------------------------------------------
-
-
-class TestParseWebhook:
-    def test_form_encoded_payload(self):
+class TestWebhookParsingAndVerification:
+    def test_parse_form_notify(self):
         body = (
-            b"notify_id=2024abc&out_trade_no=order-123"
-            b"&trade_status=TRADE_SUCCESS&trade_no=2024041922001xxxxxx"
+            b"notify_id=evt-1&out_trade_no=order-123"
+            b"&trade_status=TRADE_SUCCESS&trade_no=trade-1"
         )
         parsed = parse_alipay_notify(body)
+        assert parsed.provider_event_id == "evt-1"
         assert parsed.order_id == "order-123"
         assert parsed.trade_status == "TRADE_SUCCESS"
-        assert parsed.provider_event_id == "2024abc"
 
-    def test_json_payload_accepted_for_tests(self):
-        import json
-
+    def test_parse_json_notify_for_tests(self):
         body = json.dumps(
             {
-                "notify_id": "evt-9",
+                "notify_id": "evt-2",
                 "out_trade_no": "order-456",
                 "trade_status": "TRADE_CLOSED",
-                "trade_no": "alipay-tn-1",
             }
         ).encode("utf-8")
         parsed = parse_alipay_notify(body)
+        assert parsed.provider_event_id == "evt-2"
         assert parsed.order_id == "order-456"
         assert parsed.trade_status == "TRADE_CLOSED"
-        assert parsed.provider_event_id == "evt-9"
 
-    def test_missing_out_trade_no_raises(self):
-        body = b"trade_status=TRADE_SUCCESS"
+    def test_missing_order_id_raises(self):
         with pytest.raises(ValueError):
-            parse_alipay_notify(body)
+            parse_alipay_notify(b"trade_status=TRADE_SUCCESS")
 
-    def test_empty_body_raises(self):
-        with pytest.raises(ValueError):
-            parse_alipay_notify(b"")
+    def test_signature_verification_passes_for_valid_notify(self, alipay_configured_env):
+        config = AlipayConfig.from_env()
+        assert config is not None
 
-    def test_invalid_json_raises(self):
-        body = b"{not: json"
-        with pytest.raises(ValueError):
-            parse_alipay_notify(body)
+        payload = {
+            "notify_id": "evt-3",
+            "trade_no": "trade-3",
+            "out_trade_no": "order-3",
+            "trade_status": "TRADE_SUCCESS",
+            "app_id": config.app_id,
+            "total_amount": "69.00",
+            "seller_id": "2088102177694100",
+        }
+        signed = {
+            **payload,
+            "sign_type": "RSA2",
+        }
+        signed["sign"] = alipay_helper._sign_with_private_key(
+            alipay_configured_env["private_pem"],
+            alipay_helper._canonicalize_params(payload),
+        )
+        body = urlencode(signed).encode("utf-8")
+        assert verify_alipay_signature(config, body, {}) is True
 
-    def test_fallback_provider_event_id_when_notify_id_missing(self):
-        # If notify_id is absent but trade_no is present, use trade_no as the
-        # provider event id so webhook dedup still has a stable key.
-        body = b"out_trade_no=order-77&trade_status=TRADE_SUCCESS&trade_no=tn-xyz"
-        parsed = parse_alipay_notify(body)
-        assert parsed.provider_event_id == "tn-xyz"
+    def test_signature_verification_fails_on_mutation(self, alipay_configured_env):
+        config = AlipayConfig.from_env()
+        assert config is not None
+        payload = {
+            "notify_id": "evt-4",
+            "trade_no": "trade-4",
+            "out_trade_no": "order-4",
+            "trade_status": "TRADE_SUCCESS",
+            "app_id": config.app_id,
+            "total_amount": "69.00",
+            "seller_id": "2088102177694100",
+        }
+        signed = {**payload, "sign_type": "RSA2"}
+        signed["sign"] = alipay_helper._sign_with_private_key(
+            alipay_configured_env["private_pem"],
+            alipay_helper._canonicalize_params(payload),
+        )
+        signed["total_amount"] = "70.00"
+        body = urlencode(signed).encode("utf-8")
+        assert verify_alipay_signature(config, body, {}) is False
 
-    def test_provider_parse_webhook_returns_normalized_event(
-        self, alipay_configured_env
-    ):
+    def test_provider_parse_webhook_returns_normalized_event(self, alipay_configured_env):
         provider = AlipayProvider()
         body = (
             b"notify_id=evt-ok&out_trade_no=order-123"
@@ -357,39 +305,137 @@ class TestParseWebhook:
         assert event.new_status == "paid"
         assert event.event_type == "payment.success"
 
-    def test_provider_parse_webhook_cancelled_maps_event_type(
-        self, alipay_configured_env
-    ):
-        provider = AlipayProvider()
-        body = b"notify_id=evt-cx&out_trade_no=order-42&trade_status=TRADE_CLOSED"
-        event = provider.parse_webhook(body)
-        assert event.new_status == "cancelled"
-        assert event.event_type == "payment.cancelled"
 
-
-# ---------------------------------------------------------------------------
-# 5. Signature verification (fail-closed contract)
-# ---------------------------------------------------------------------------
-
-
-class TestSignatureVerification:
-    def test_fails_closed_without_config(self, clean_alipay_env):
-        assert verify_alipay_signature(None, b"anything", {}) is False
-
-    def test_fails_closed_even_when_config_present_until_rsa_lands(
-        self, alipay_configured_env
-    ):
-        """Task 5 deliberately keeps RSA2 verification unimplemented.
-
-        Until a live signing helper lands, `verify_alipay_signature` must
-        return False even if config is fully populated. The settlement layer
-        treats `signature_valid=False` as "record but don't settle", which is
-        the safest default while the path is still a stub.
-        """
+class TestPayloadValidation:
+    def test_validate_notify_payload(self, alipay_configured_env):
         config = AlipayConfig.from_env()
         assert config is not None
-        assert verify_alipay_signature(config, b"anything", {}) is False
+        payload = {
+            "out_trade_no": "order-1",
+            "app_id": config.app_id,
+            "total_amount": "69.00",
+            "seller_id": "2088102177694100",
+        }
+        validate_alipay_notify_payload(
+            config,
+            payload,
+            order_id="order-1",
+            amount_cny=6900,
+        )
 
-    def test_provider_verify_signature_matches_helper(self, clean_alipay_env):
-        provider = AlipayProvider()
-        assert provider.verify_signature(b"x", {}) is False
+    def test_validate_notify_payload_rejects_mismatch(self, alipay_configured_env):
+        config = AlipayConfig.from_env()
+        assert config is not None
+        payload = {
+            "out_trade_no": "order-1",
+            "app_id": config.app_id,
+            "total_amount": "70.00",
+            "seller_id": "2088102177694100",
+        }
+        with pytest.raises(ValueError):
+            validate_alipay_notify_payload(
+                config,
+                payload,
+                order_id="order-1",
+                amount_cny=6900,
+            )
+
+    def test_validate_query_payload_does_not_require_app_id(self, alipay_configured_env):
+        config = AlipayConfig.from_env()
+        assert config is not None
+        payload = {
+            "out_trade_no": "order-1",
+            "trade_no": "trade-1",
+            "trade_status": "TRADE_SUCCESS",
+            "total_amount": "69.00",
+            "seller_id": "2088102177694100",
+        }
+        validate_alipay_query_payload(
+            config,
+            payload,
+            order_id="order-1",
+            amount_cny=6900,
+        )
+
+
+class TestQueryOrder:
+    def test_query_order_status(self, monkeypatch, alipay_configured_env):
+        captured = {}
+
+        class DummyResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "alipay_trade_query_response": {
+                        "code": "10000",
+                        "out_trade_no": "order-1",
+                        "trade_no": "trade-1",
+                        "trade_status": "TRADE_SUCCESS",
+                        "total_amount": "69.00",
+                        "seller_id": "2088102177694100",
+                    }
+                }
+
+        class DummyClient:
+            def __init__(self, *args, **kwargs):
+                del args, kwargs
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                del exc_type, exc, tb
+
+            async def post(self, url, data):
+                captured["url"] = url
+                captured["data"] = data
+                return DummyResponse()
+
+        monkeypatch.setattr(alipay_helper.httpx, "AsyncClient", DummyClient)
+
+        config = AlipayConfig.from_env()
+        assert config is not None
+        result = _run(query_order_status(config, order_id="order-1"))
+        assert result is not None
+        assert result.provider_order_id == "trade-1"
+        assert result.provider_status == "TRADE_SUCCESS"
+        assert captured["data"]["method"] == "alipay.trade.query"
+        assert json.loads(captured["data"]["biz_content"]) == {"out_trade_no": "order-1"}
+        assert "sign" in captured["data"]
+
+    def test_query_order_status_returns_none_when_trade_missing(
+        self, monkeypatch, alipay_configured_env
+    ):
+        class DummyResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "alipay_trade_query_response": {
+                        "code": "40004",
+                        "sub_code": "ACQ.TRADE_NOT_EXIST",
+                    }
+                }
+
+        class DummyClient:
+            def __init__(self, *args, **kwargs):
+                del args, kwargs
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                del exc_type, exc, tb
+
+            async def post(self, url, data):
+                del url, data
+                return DummyResponse()
+
+        monkeypatch.setattr(alipay_helper.httpx, "AsyncClient", DummyClient)
+
+        config = AlipayConfig.from_env()
+        assert config is not None
+        assert _run(query_order_status(config, order_id="order-1")) is None

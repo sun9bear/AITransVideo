@@ -6,6 +6,7 @@ Step 2: Auth (register/login/logout) + PostgreSQL.
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Request, Response
@@ -50,6 +51,8 @@ from job_intercept import (
     intercept_get_job,
     intercept_job_subresource,
     intercept_list_jobs,
+    intercept_rename_job,
+    intercept_suggested_copy_name,
     update_job_metering,
     update_source_metadata,
 )
@@ -99,6 +102,70 @@ async def lifespan(app: FastAPI):
                 logger.info("Recovered %d stale background tasks", recovered_bg)
     except Exception:
         pass  # Table may not exist yet before migration
+
+    # Periodic cleanup of expired materials_pack zips (24h retention, plan
+    # 2026-04-21). Disk pressure is the concern — the US host sits at 82%
+    # use and each long task produces GB-scale zips that linger without
+    # pruning. An asyncio task is enough at current scale; if multi-node
+    # gateway ever lands, move this to a dedicated worker.
+    import asyncio as _asyncio
+
+    async def _periodic_pack_cleanup() -> None:
+        import background_task_queue as _bg_q
+        from database import async_session as _session
+        # Short initial delay so container startup isn't contending with the
+        # first cleanup pass — reduces log noise during rolling restarts.
+        await _asyncio.sleep(60)
+        while True:
+            try:
+                async with _session() as db:
+                    expired = await _bg_q.cleanup_expired_pack_zips(db)
+                    if expired:
+                        logger.info(
+                            "periodic cleanup: expired %d materials_pack zip(s)",
+                            expired,
+                        )
+            except Exception as exc:
+                # Never crash the loop — transient DB hiccups shouldn't
+                # kill the scheduler for the rest of the gateway's life.
+                logger.warning("periodic pack cleanup failed: %s", exc)
+            # Run hourly. Coarse granularity is fine — 24h retention with
+            # a 1h sweep worst-case keeps a zip 25h after completion.
+            await _asyncio.sleep(3600)
+
+    _cleanup_task = _asyncio.create_task(_periodic_pack_cleanup())
+    # Stash on app.state so the lifespan shutdown can cancel cleanly.
+    app.state.pack_cleanup_task = _cleanup_task
+
+    # Gateway-side 7d project cleanup (plan 2026-04-21). Closes the
+    # "ghost row" gap — the Job API cleanup already rm's project_dir
+    # but never touched gateway DB, so expired terminal jobs were
+    # accumulating as status=succeeded rows with dead project_dir
+    # pointers. This sweeper flips them to status=purged and (if the
+    # dir is still there) unlinks it through a path whitelist.
+    async def _periodic_project_cleanup() -> None:
+        import project_cleanup as _project_cleanup
+        from database import async_session as _session
+        # Offset relative to pack cleanup so the two sweepers don't
+        # contend on the DB at the same moment.
+        await _asyncio.sleep(180)
+        while True:
+            try:
+                async with _session() as db:
+                    purged = await _project_cleanup.cleanup_expired_projects(db)
+                    if purged:
+                        logger.info(
+                            "periodic project cleanup: purged %d expired job record(s)",
+                            purged,
+                        )
+            except Exception as exc:
+                logger.warning("periodic project cleanup failed: %s", exc)
+            # 6h matches the Job API side cadence — the two sweeps
+            # interleave fine and race-free (different tables).
+            await _asyncio.sleep(6 * 3600)
+
+    _project_task = _asyncio.create_task(_periodic_project_cleanup())
+    app.state.project_cleanup_task = _project_task
     # Seed pricing runtime
     try:
         from pricing_runtime import get_runtime_pricing
@@ -107,6 +174,16 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.warning("[pricing] Failed to initialize pricing runtime, using defaults")
     yield
+    # Stop periodic cleaner tasks cleanly so shutdown doesn't hang on
+    # their asyncio.sleep() inside the loops.
+    for attr in ("pack_cleanup_task", "project_cleanup_task"):
+        handle = getattr(app.state, attr, None)
+        if handle is not None:
+            handle.cancel()
+            try:
+                await handle
+            except (asyncio.CancelledError, Exception):
+                pass
     await close_client()
     await engine.dispose()
 
@@ -188,6 +265,15 @@ async def _gateway_upload_video(
     return await handle_upload_video(request, user=_user)
 
 app.post("/gateway/upload-video")(_gateway_upload_video)
+
+# Rename a job's user-visible display_name (plan §6.5 / D16). Lives on
+# the /gateway/* namespace, not /job-api/*, because the collision +
+# ownership logic is gateway-level rather than a transparent proxy.
+app.patch("/gateway/jobs/{job_id}")(intercept_rename_job)
+
+# Suggested "save as new copy" name for the edit-page modal (plan §6.4 / D17).
+# Pure read; the user may edit the suggestion before committing.
+app.get("/gateway/jobs/{job_id}/suggested-copy-name")(intercept_suggested_copy_name)
 
 
 # --- Job API routes ---

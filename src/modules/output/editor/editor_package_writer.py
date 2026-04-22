@@ -313,6 +313,16 @@ class EditorPackageWriter:
 
         Also writes subtitles.srt as a copy of zh for backward compatibility.
         Returns (zh_path, en_path, bilingual_path).
+
+        2026-04-21 plan §12 / D8 contract — **do not add caching here**.
+        This method is the single convergence point for commit-triggered
+        subtitle regeneration: when the user edits segment.cn_text /
+        segment.source_text in the editing UI and commits (overwrite or
+        copy_as_new), the pipeline resumes at STAGE_ALIGNMENT, which flows
+        straight through OutputDispatcher into this writer. Skipping the
+        write on any "nothing changed" heuristic would silently leak stale
+        subtitles into the downloaded SRT and is explicitly forbidden by
+        the plan's §12 guarantee.
         """
         output_root = self._resolve_output_root(output)
         output_root.mkdir(parents=True, exist_ok=True)

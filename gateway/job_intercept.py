@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
 import uuid as _uuid
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 # Make src/ importable so we can reuse services.jobs.logs_redactor (D25).
@@ -27,7 +29,7 @@ for _candidate in [
         sys.path.insert(0, str(_candidate))
 
 from fastapi import Depends, HTTPException, Request, Response
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
@@ -35,6 +37,7 @@ logger = logging.getLogger(__name__)
 from auth import require_auth
 from config import settings
 from database import get_db
+from display_name_orchestrator import DisplayNameContext, compute_display_name
 from models import Job, User
 from proxy import proxy_request
 from quota import check_quota, reserve_quota, settle_job_quota, TERMINAL_STATUSES
@@ -158,8 +161,19 @@ def compute_job_policy(user, service_mode: str) -> dict:
         }
 
 
-def _probe_youtube_duration(url: str, timeout: float = 5.0) -> float | None:
-    """Lightweight yt-dlp metadata probe. Returns duration in seconds or None on failure."""
+def _probe_youtube_metadata(
+    url: str, timeout: float = 5.0
+) -> dict[str, object] | None:
+    """Lightweight yt-dlp metadata probe.
+
+    Returns the parsed JSON metadata dict (has ``duration`` / ``title`` /
+    ``uploader`` / ...) on success, or ``None`` on any failure (missing
+    binary, timeout, non-zero exit, invalid JSON).
+
+    Single yt-dlp invocation — extending callers with more fields (title,
+    etc.) does not add network round trips. See ``_probe_youtube_duration``
+    for the legacy thin wrapper.
+    """
     import subprocess
     try:
         result = subprocess.run(
@@ -167,13 +181,96 @@ def _probe_youtube_duration(url: str, timeout: float = 5.0) -> float | None:
             capture_output=True, text=True, timeout=timeout,
         )
         if result.returncode == 0 and result.stdout.strip():
-            meta = json.loads(result.stdout)
-            dur = meta.get("duration")
-            if dur is not None:
-                return float(dur)
+            parsed = json.loads(result.stdout)
+            if isinstance(parsed, dict):
+                return parsed
     except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError, Exception) as e:
         logger.warning("yt-dlp probe failed for %s: %s", url, e)
     return None
+
+
+def _probe_youtube_duration(url: str, timeout: float = 5.0) -> float | None:
+    """Thin wrapper over :func:`_probe_youtube_metadata` returning duration only.
+
+    Preserved for backward compatibility with older unit test mocks that
+    patched this symbol directly. New callers should use
+    :func:`_probe_youtube_metadata` and extract fields as needed.
+    """
+    meta = _probe_youtube_metadata(url, timeout=timeout)
+    if isinstance(meta, dict):
+        dur = meta.get("duration")
+        if dur is not None:
+            try:
+                return float(dur)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _extract_youtube_title(meta: dict[str, object] | None) -> str | None:
+    """Return a non-empty stripped title from yt-dlp metadata, else None.
+
+    Centralised so callers don't each reinvent the "whitespace-only title
+    counts as missing" rule (see display_name branch 2 / M2)."""
+    if not isinstance(meta, dict):
+        return None
+    title = meta.get("title")
+    if isinstance(title, str):
+        stripped = title.strip()
+        if stripped:
+            return stripped
+    return None
+
+
+# ---------------------------------------------------------------------------
+# display_name DB lookups — production adapters for the orchestrator's
+# injectable fetcher signatures (``gateway.display_name_orchestrator``).
+# ---------------------------------------------------------------------------
+
+
+async def _fetch_user_existing_display_names(
+    db: AsyncSession, user_id: str
+) -> set[str]:
+    """Return the set of non-null ``display_name`` values owned by ``user_id``.
+
+    Used for collision detection when naming a new job. Scope is the whole
+    user (across all jobs, all statuses, all time) — mirrors the pure
+    algorithm contract in ``display_name.resolve_collision``.
+
+    Concurrent-submit race note: two near-simultaneous submits for the same
+    user read the same snapshot here and may both produce the same base
+    name before either commits. The ``_xxxx`` suffix absorbs the collision
+    probabilistically; in the rare event it doesn't, the UI still renders
+    via the fallback chain, so the worst case is "two cards look the same
+    until one is renamed". A tighter guarantee would need a DB unique
+    constraint, out of scope for T0-4.
+    """
+    result = await db.execute(
+        select(Job.display_name).where(
+            Job.user_id == user_id,
+            Job.display_name.is_not(None),
+        )
+    )
+    return {row[0] for row in result.all() if row[0]}
+
+
+async def _fetch_user_branch4_sequence_today(
+    db: AsyncSession, user_id: str, local_date: date
+) -> int:
+    """Return how many ``"上传视频 YYYY-MM-DD %"`` names this user already owns.
+
+    Orchestrator adds 1 to the returned count for the next sequence number.
+    Matches display_name._branch_4_default's format exactly — any drift in
+    the literal prefix would silently produce sequence-001 collisions."""
+    date_str = local_date.strftime("%Y-%m-%d")
+    pattern = f"上传视频 {date_str} %"
+    result = await db.execute(
+        select(func.count()).select_from(Job).where(
+            Job.user_id == user_id,
+            Job.display_name.like(pattern),
+        )
+    )
+    return int(result.scalar() or 0)
 
 
 async def _compensate_upstream_job(job_id: str) -> None:
@@ -410,12 +507,25 @@ async def intercept_create_job(
         except (TypeError, ValueError):
             estimated_duration_seconds = None
 
-    # For YouTube URLs, attempt lightweight yt-dlp probe (5s timeout)
-    if source_type == "youtube_url" and estimated_duration_seconds is None:
-        probed = _probe_youtube_duration(source_value)
-        if probed is not None:
-            estimated_duration_seconds = probed
-            logger.info("yt-dlp probe: %s → %.0fs", source_value, probed)
+    # For YouTube URLs, attempt a single yt-dlp probe (5s timeout) for both
+    # duration (→ quota / plan gating below) and title (→ display_name
+    # generation further down). Single subprocess call keeps submit latency
+    # bounded; on failure both fields stay None and we fall back gracefully.
+    probed_title: str | None = None
+    if source_type == "youtube_url":
+        meta = _probe_youtube_metadata(source_value)
+        probed_title = _extract_youtube_title(meta)
+        if estimated_duration_seconds is None and isinstance(meta, dict):
+            dur = meta.get("duration")
+            if dur is not None:
+                try:
+                    estimated_duration_seconds = float(dur)  # type: ignore[arg-type]
+                    logger.info(
+                        "yt-dlp probe: %s → %.0fs",
+                        source_value, estimated_duration_seconds,
+                    )
+                except (TypeError, ValueError):
+                    pass
 
     # Duration limit check (if we have an estimate)
     if user and not is_admin and estimated_duration_seconds is not None:
@@ -435,12 +545,69 @@ async def intercept_create_job(
     # --- 5. Idempotency key ---
     idempotency_key = request_data.get("create_idempotency_key") or str(_uuid.uuid4())
 
+    # --- 5c. display_name (plan §6.2 + T0-4) ---
+    #
+    # Task-naming decision tree (pure logic in src.services.jobs.display_name):
+    #   Branch 1: YouTube URL + non-empty yt-dlp title → truncate title
+    #   Branch 2: YouTube URL + empty title → fall through to Branch 4
+    #   Branch 3: local upload + non-empty filename → truncate stem
+    #   Branch 4: otherwise → "上传视频 YYYY-MM-DD NNN"
+    # Collision with the user's existing display_names appends _xxxx (4 hex).
+    #
+    # Anonymous / legacy paths (``user is None``) skip generation — the Job
+    # API will keep display_name=NULL, and ``getJobDisplayTitle`` on the
+    # frontend will still fall back to the slug / video-id chain.
+    generated_display_name: str | None = None
+    if user is not None:
+        local_filename_hint: str | None = None
+        if source_type == "local_video" and isinstance(source, dict):
+            fn = source.get("filename")
+            if isinstance(fn, str) and fn.strip():
+                local_filename_hint = fn.strip()
+
+        display_name_ctx = DisplayNameContext(
+            source_type=source_type,
+            source_ref=source_value,
+            user_id=str(user.id),
+            # Server-side UTC date. A precise per-user local-timezone date
+            # would need a frontend signal; until then, the 上传视频
+            # YYYY-MM-DD sequence is "UTC day at submit time" — good enough
+            # for non-authoritative display.
+            user_local_date=datetime.now(timezone.utc).date(),
+            youtube_title=probed_title,
+            local_filename=local_filename_hint,
+        )
+
+        async def _fetch_existing(uid: str, _db=db) -> set[str]:
+            return await _fetch_user_existing_display_names(_db, uid)
+
+        async def _fetch_counter(uid: str, d: date, _db=db) -> int:
+            return await _fetch_user_branch4_sequence_today(_db, uid, d)
+
+        try:
+            generated_display_name = await compute_display_name(
+                display_name_ctx,
+                fetch_existing_names=_fetch_existing,
+                fetch_branch4_sequence_today=_fetch_counter,
+            )
+        except Exception as exc:  # pragma: no cover — defensive
+            # Generation is never load-bearing: on failure, leave
+            # display_name NULL and let the frontend fallback chain
+            # (title → slug → videoId → "未命名视频") take over.
+            logger.warning(
+                "display_name generation failed for user=%s: %s — proceeding without",
+                user.id, exc,
+            )
+            generated_display_name = None
+
     # Inject policy + snapshot fields into upstream request
     if policy:
         request_data.update(policy)
     request_data["estimated_duration_seconds"] = estimated_duration_seconds
     request_data["quota_state"] = "none"
     request_data["create_idempotency_key"] = idempotency_key
+    if generated_display_name:
+        request_data["display_name"] = generated_display_name
     # Inject user_id so Job API can build user-isolated workspace_dir
     if user is not None:
         request_data["user_id"] = str(user.id)
@@ -490,6 +657,10 @@ async def intercept_create_job(
                         quota_cost=1,
                         quota_state="none",
                         create_idempotency_key=idempotency_key,
+                        # Friendly title produced by display_name_orchestrator;
+                        # prefer the upstream echo so we stay in sync even if
+                        # Job API ever normalises the value.
+                        display_name=job_data.get("display_name") or generated_display_name,
                     )
                     db.add(job)
                     # Reserve quota in the same transaction
@@ -916,8 +1087,9 @@ _POST_EDIT_TRANSITION_SUBPATHS: frozenset[str] = frozenset({
 # Direct post-edit mutation subpaths (no templating). Union with the
 # per-segment action allowlist in ``_is_post_edit_mutation_subpath``.
 _POST_EDIT_SIMPLE_MUTATION_SUBPATHS: frozenset[str] = frozenset({
-    "regenerate-all-tts",   # T1-6 batch
-    "editing/voice-map",    # T1-6 set/clear voice override (POST only)
+    "regenerate-all-tts",           # T1-6 batch (async start)
+    "regenerate-all-tts/cancel",    # 2026-04-21 D39 user-initiated cancel
+    "editing/voice-map",            # T1-6 set/clear voice override (POST only)
 })
 
 
@@ -938,7 +1110,15 @@ def _is_post_edit_mutation_subpath(subpath: str) -> bool:
     if (
         len(parts) == 3
         and parts[0] == "segments"
-        and parts[2] in {"update", "status", "regenerate-tts", "accept-draft", "discard-draft"}
+        and parts[2] in {
+            "update", "status", "regenerate-tts",
+            "accept-draft", "discard-draft",
+            # 2026-04-21 plan §7.4: editing-mode segment split + source audio
+            # preview. Both are editing-gated mutations / reads; keeping them
+            # on this allowlist ties them to the feature flag + editing
+            # lock dispatch rather than leaking through the generic proxy.
+            "split", "preview-source",
+        }
     ):
         return True
     return False
@@ -1217,6 +1397,225 @@ async def _verify_job_ownership(
             raise HTTPException(status_code=403, detail="无权访问此任务")
         else:
             logger.warning("Job %s not found in DB — allowing access (legacy job?)", job_id)
+
+
+# ---------------------------------------------------------------------------
+# Rename endpoint — plan §6.5 / D16
+# ---------------------------------------------------------------------------
+
+# Forbidden characters in a user-provided display_name (plan §6.5):
+# ``< > " / \ \0``. Path separators + shell special chars + null byte.
+_FORBIDDEN_DISPLAY_NAME_CHARS = re.compile(r'[<>"/\\\x00]')
+
+# Display-width budget for a renamed title. Matches the pure algorithm's
+# MAX_TOTAL_WIDTH (24 for title + 5 for ``_xxxx`` suffix = 29). Anything
+# wider is rejected up-front so the user sees a clean error rather than
+# silent server-side truncation.
+_MAX_RENAME_DISPLAY_WIDTH = 29
+
+
+async def intercept_rename_job(
+    request: Request,
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(require_auth),
+) -> Response:
+    """PATCH /gateway/jobs/{job_id} — user-initiated rename (plan §6.5 / D16).
+
+    Body: ``{"display_name": "新名"}``.
+
+    Flow:
+      1. Ownership check (403 if the job is someone else's).
+      2. Validate the new name (non-empty, width ≤ 29, no forbidden chars).
+      3. Resolve collisions against the user's *other* jobs — renaming to
+         one's own current value is a no-op, not a suffix trigger.
+      4. Forward to Job API ``PATCH /jobs/{id}`` so the JSON store stays
+         authoritative.
+      5. Mirror the persisted name into gateway PostgreSQL.
+    """
+    await _verify_job_ownership(job_id, db, user)
+
+    try:
+        body = await request.body()
+        data = json.loads(body) if body else {}
+    except Exception:
+        return _error_response(400, "invalid_json", "请求体必须是 JSON。")
+
+    if "display_name" not in data:
+        return _error_response(
+            400, "missing_display_name",
+            "请求体必须包含 display_name 字段。",
+        )
+
+    raw_name = data.get("display_name")
+    if raw_name is None:
+        return _error_response(
+            400, "invalid_display_name", "display_name 不能为 null。",
+        )
+    stripped = str(raw_name).strip()
+    if not stripped:
+        return _error_response(
+            400, "invalid_display_name", "display_name 不能为空。",
+        )
+    if _FORBIDDEN_DISPLAY_NAME_CHARS.search(stripped):
+        return _error_response(
+            400, "invalid_display_name_chars",
+            '任务名不能包含 < > " / \\ 或空字符。',
+        )
+
+    # Width check uses the same CJK-aware helper the pure naming algorithm
+    # relies on. Import-style matches the rest of gateway: the container
+    # has ``src/`` on sys.path (not project root), so we use the unprefixed
+    # ``services.*`` / ``utils.*`` forms.
+    from utils.text_width import display_width
+    from services.jobs.display_name import resolve_collision
+
+    if display_width(stripped) > _MAX_RENAME_DISPLAY_WIDTH:
+        return _error_response(
+            400, "display_name_too_long",
+            "任务名超过长度上限（约 12 个中文字符）。",
+        )
+
+    # Collision pool = this user's OTHER jobs. Excluding self lets the user
+    # submit their current name unchanged (e.g. "reconfirming" a rename
+    # through the same dialog) without getting an ``_xxxx`` suffix.
+    existing_names: set[str] = set()
+    if user is not None:
+        existing_result = await db.execute(
+            select(Job.display_name).where(
+                Job.user_id == user.id,
+                Job.job_id != job_id,
+                Job.display_name.is_not(None),
+            )
+        )
+        existing_names = {row[0] for row in existing_result.all() if row[0]}
+
+    final_name = resolve_collision(stripped, existing_names)[:60]
+
+    # Forward to Job API. We do a direct httpx call (not proxy_request)
+    # because we want the *resolved* name in the body, not the user's raw
+    # input — proxy_request would faithfully forward the original body.
+    import httpx
+    upstream_url = f"{settings.job_api_upstream.rstrip('/')}/jobs/{job_id}"
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            upstream = await client.patch(
+                upstream_url,
+                json={"display_name": final_name},
+                headers={"content-type": "application/json"},
+            )
+    except Exception as exc:
+        logger.error("rename upstream call failed for %s: %s", job_id, exc)
+        return _error_response(
+            502, "upstream_failed",
+            "Job API 调用失败，重命名未保存。",
+        )
+
+    if upstream.status_code != 200:
+        # Pass through upstream error body unchanged so the user sees the
+        # real reason (e.g. 404 if the job was deleted between ownership
+        # check and PATCH — a race we tolerate rather than add another
+        # lock for).
+        return Response(
+            content=upstream.content,
+            status_code=upstream.status_code,
+            headers={"content-type": "application/json"},
+        )
+
+    # Mirror into gateway PostgreSQL. We don't roll back the Job API write
+    # on gateway-DB failure — the JSON store is authoritative; gateway DB
+    # will re-sync on next list_jobs pass.
+    if user is not None:
+        try:
+            await db.execute(
+                update(Job)
+                .where(Job.job_id == job_id, Job.user_id == user.id)
+                .values(display_name=final_name)
+            )
+            await db.commit()
+        except Exception as exc:
+            logger.warning(
+                "gateway DB mirror failed for rename %s: %s (upstream still OK)",
+                job_id, exc,
+            )
+
+    return Response(
+        content=upstream.content,
+        status_code=200,
+        headers={"content-type": "application/json"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Suggested copy-name — plan §6.4 / D17
+# ---------------------------------------------------------------------------
+
+# Column-limit budget. Column is VARCHAR(60); the " · 副本 N" suffix consumes
+# roughly 7-10 chars depending on N. We reserve a fixed suffix budget then
+# fit the source-name portion inside the remainder.
+_COPY_NAME_MAX_LEN = 60
+
+
+def _fallback_copy_source_name(job) -> str:
+    """Best-effort derivation of a title for a job that has no ``display_name``.
+
+    Falls back through job source_ref → job_id so the suggestion never
+    reads like ``None · 副本 N``."""
+    name = getattr(job, "display_name", None)
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    source_ref = getattr(job, "source_ref", None)
+    if isinstance(source_ref, str) and source_ref.strip():
+        return source_ref.strip()[:30]
+    return str(getattr(job, "job_id", "任务") or "任务")
+
+
+async def intercept_suggested_copy_name(
+    request: Request,
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(require_auth),
+) -> Response:
+    """GET /gateway/jobs/{job_id}/suggested-copy-name — pre-fill for the
+    "save as new copy" modal on the edit page (plan §6.4 / D17).
+
+    Returns ``{"suggested_name": "<源名> · 副本 N"}`` where N = one more
+    than the number of existing copies of this source. The user is free
+    to edit the suggestion before submitting ``editing/commit``; collision
+    resolution happens there."""
+    del request  # unused — standard fastapi signature
+    await _verify_job_ownership(job_id, db, user)
+
+    source_result = await db.execute(
+        select(Job).where(Job.job_id == job_id)
+    )
+    source_job = source_result.scalar_one_or_none()
+    if source_job is None:
+        return _error_response(404, "job_not_found", f"任务不存在: {job_id}")
+
+    # Count existing copies. Fresh jobs without any copy yet return 0 →
+    # suggestion becomes "... · 副本 1".
+    count_result = await db.execute(
+        select(func.count()).select_from(Job).where(
+            Job.copy_of_job_id == job_id
+        )
+    )
+    n = int(count_result.scalar() or 0) + 1
+
+    source_name = _fallback_copy_source_name(source_job)
+    suffix = f" · 副本 {n}"
+
+    # If the total exceeds the column budget, sacrifice the source-name
+    # tail so the suffix stays intact (plan §6.4 explicit rule).
+    if len(source_name) + len(suffix) > _COPY_NAME_MAX_LEN:
+        source_name = source_name[: _COPY_NAME_MAX_LEN - len(suffix)]
+
+    suggested = f"{source_name}{suffix}"
+    return Response(
+        content=json.dumps({"suggested_name": suggested}, ensure_ascii=False),
+        status_code=200,
+        headers={"content-type": "application/json"},
+    )
 
 
 async def update_source_metadata(

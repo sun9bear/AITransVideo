@@ -92,6 +92,10 @@ export default function BillingPage() {
     setRefetchToken((n) => n + 1)
   }
 
+  const handleOrderSettled = () => {
+    setRefetchToken((n) => n + 1)
+  }
+
   return (
     <div className="space-y-6">
       <header>
@@ -107,7 +111,7 @@ export default function BillingPage() {
         failed Promise from the three primary fetches never hides the banner.
       */}
       <Suspense fallback={null}>
-        <BillingStatusBanner />
+        <BillingStatusBanner onOrderSettled={handleOrderSettled} />
       </Suspense>
 
       {state.status === "loading" && (

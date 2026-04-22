@@ -73,6 +73,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "assemblyai" },
+    { name = "cryptography" },
     { name = "dashscope" },
     { name = "google-genai" },
     { name = "pydub" },
@@ -92,6 +93,7 @@ dev = [
 requires-dist = [
     { name = "aiosqlite", marker = "extra == 'dev'" },
     { name = "assemblyai" },
+    { name = "cryptography" },
     { name = "dashscope", specifier = ">=1.25.2" },
     { name = "google-genai" },
     { name = "pydub" },

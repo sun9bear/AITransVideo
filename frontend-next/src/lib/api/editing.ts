@@ -92,6 +92,11 @@ export type BatchRegenerateStage =
   | "running"
   | "completed"
   | "failed"
+  // 2026-04-21 D39: user-initiated cancel mid-run. Carries partial
+  // counts in ``result`` (same shape as "completed" summary) plus
+  // ``cancelled: true`` so the UI can distinguish "all done" from
+  // "stopped early with N segments actually synthesised".
+  | "cancelled"
 
 export interface BatchRegenerateStatus {
   task_id: string
@@ -106,6 +111,11 @@ export interface BatchRegenerateStatus {
   result: BatchRegenerateResponse | null
   error: string | null
   updated_at: string
+  /** D39: set to True by ``cancelRegenerateAll`` — the running worker
+   *  observes this on its next per-segment tick and transitions stage
+   *  to ``'cancelled'``. Exposed so the UI can optimistically grey out
+   *  the cancel button between the click and the status flip. */
+  cancel_requested?: boolean
   // When a newer batch has overwritten the status file, old poller
   // sees mismatch=true — stop polling and show a gentle warning.
   mismatch?: boolean
@@ -175,6 +185,10 @@ export async function patchSegmentText(
   segmentId: string,
   patch: {
     cn_text?: string
+    /** 2026-04-21: source_text (English) editable in editing mode.
+     *  Backend marks text_dirty and does NOT auto-retranslate — user
+     *  is responsible for updating cn_text before the next re-TTS. */
+    source_text?: string
     translation_confirmed?: boolean
     rewrite_requested?: boolean
     /** 2026-04-20: speaker reassignment. Backend propagates voice_id +
@@ -188,6 +202,80 @@ export async function patchSegmentText(
     `/jobs/${jobId}/segments/${segmentId}/update`,
     { body: patch },
   )
+}
+
+/**
+ * Split one segment into two at the user's chosen character positions.
+ * Backend re-shuffles segments.json + marks both new ids text_dirty.
+ * Returns the two new segments + the refreshed total count + status map
+ * so callers can patch local state in one shot rather than re-fetching.
+ */
+export async function splitEditingSegment(
+  jobId: string,
+  segmentId: string,
+  body: {
+    split_source_index: number
+    split_cn_index: number
+    speaker_a: string
+    speaker_b: string
+  },
+): Promise<{
+  replaced_segment_id: string
+  new_segments: EditingSegment[]
+  total_count: number
+  segment_status: Record<string, SegmentStatus>
+}> {
+  return apiClient.post(
+    `/jobs/${jobId}/segments/${segmentId}/split`,
+    { body },
+  )
+}
+
+/**
+ * Base64-encoded WAV slice of the source audio for one editing segment.
+ * Response is small enough (10-30 KB per 1-5s of mono 16k audio) to inline
+ * into a ``data:audio/wav;base64,...`` URL on the browser side.
+ */
+/**
+ * Prepare the source-audio preview cache and return metadata (no bytes).
+ * The WAV lives at ``{project_dir}/editor/editing/preview_cache/{sid}.wav``
+ * and is served via GET /segments/{sid}/preview-source-audio.
+ *
+ * 2026-04-21 redesign: the old flow returned 1.3 MB base64 JSON, which
+ * tripped ``RemoteProtocolError`` on the gateway Uvicorn ↔ httpx proxy
+ * for long segments (30+ seconds). Stream URL + ``<audio src>`` lets
+ * the browser do Range-aware fetching natively, bypassing the JSON
+ * body pathology entirely.
+ */
+export async function previewEditingSegmentSource(
+  jobId: string,
+  segmentId: string,
+): Promise<{
+  segment_id: string
+  mime_type: string
+  start_ms: number
+  end_ms: number
+  duration_ms: number
+  size_bytes: number
+}> {
+  return apiClient.post(
+    `/jobs/${jobId}/segments/${segmentId}/preview-source`,
+    { body: {} },
+  )
+}
+
+/**
+ * Build the ``<audio src>`` URL for a segment's prepared preview cache.
+ * The ``_ts`` query param cache-busts the browser between different
+ * POST invocations — editing timestamps or source changes produce a
+ * new cache file that the browser must refetch.
+ */
+export function buildPreviewSourceStreamUrl(
+  jobId: string,
+  segmentId: string,
+  nonce: string | number = Date.now(),
+): string {
+  return `/job-api/jobs/${jobId}/segments/${segmentId}/preview-source-audio?_ts=${nonce}`
 }
 
 export async function markSegmentStatus(
@@ -254,6 +342,25 @@ export async function getRegenerateAllStatus(
   const encoded = encodeURIComponent(taskId)
   return apiClient.get<BatchRegenerateStatus>(
     `/jobs/${jobId}/regenerate-all-tts/status?task_id=${encoded}`,
+  )
+}
+
+/**
+ * D39 plan §7.10: signal the running batch worker to stop between
+ * segments. Server responds ``{cancelled: bool}`` — True = flag was
+ * written and worker will land on ``stage='cancelled'`` on its next
+ * tick; False = wrong task_id / already terminal.
+ *
+ * Idempotent; safe to call multiple times.
+ */
+export async function cancelRegenerateAll(
+  jobId: string,
+  taskId: string,
+): Promise<{ success: boolean; cancelled: boolean }> {
+  const encoded = encodeURIComponent(taskId)
+  return apiClient.post(
+    `/jobs/${jobId}/regenerate-all-tts/cancel?task_id=${encoded}`,
+    { body: {} },
   )
 }
 

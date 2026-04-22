@@ -66,13 +66,26 @@ def _make_request(body: dict) -> MagicMock:
     return req
 
 
-def _make_db_session(*, active_job_count: int = 0, existing_job=None, user_for_quota=None):
+def _make_db_session(
+    *,
+    active_job_count: int = 0,
+    existing_job=None,
+    user_for_quota=None,
+    existing_display_names: set[str] | None = None,
+    branch4_sequence_today: int = 0,
+):
     """Create a mock AsyncSession.
 
-    Query sequence in intercept_create_job:
-      1. COUNT active jobs (concurrency check)
-      2. SELECT Job by job_id (existing job check)
-      3. SELECT User by id (reserve_quota user lookup)
+    Query sequence in intercept_create_job (post 2026-04-21, plan §6.2 / T0-4):
+      1. COUNT active jobs (concurrency check)            → count_result
+      2. SELECT jobs.display_name (existing names)        → names_result
+      3. SELECT COUNT(*) WHERE display_name LIKE (branch4)→ branch4_result   ← optional
+      4. SELECT Job by job_id (existing job check)        → no_job_result
+      5. SELECT User by id (reserve_quota lookup)         → user_result
+
+    Queries 2 + 3 are new (display_name orchestrator). Dispatch is by SQL
+    content rather than call index, so adding / removing a query in either
+    order doesn't silently mis-wire the old ``call_count`` scheme.
     """
     db = AsyncMock()
 
@@ -85,13 +98,33 @@ def _make_db_session(*, active_job_count: int = 0, existing_job=None, user_for_q
     user_result = MagicMock()
     user_result.scalar_one_or_none.return_value = user_for_quota
 
-    call_count = {"n": 0}
+    names_result = MagicMock()
+    names_result.all.return_value = [
+        (name,) for name in (existing_display_names or set())
+    ]
 
-    async def smart_execute(*args, **kwargs):
-        call_count["n"] += 1
-        if call_count["n"] == 1:
+    branch4_result = MagicMock()
+    branch4_result.scalar.return_value = branch4_sequence_today
+
+    # For queries we don't explicitly classify (defensive fallback), keep
+    # the old call_count sequence working for the legacy 3-query path.
+    legacy_call_count = {"n": 0}
+
+    async def smart_execute(stmt, *args, **kwargs):
+        sql_text = str(stmt).lower()
+        # Orchestrator queries — dispatch by the unique WHERE clauses the
+        # orchestrator emits, NOT by mere presence of ``jobs.display_name``
+        # (which appears in ``select(Job)`` too, because display_name is
+        # one of Job's columns).
+        if "display_name is not null" in sql_text:
+            return names_result  # existing_names SELECT
+        if "display_name like" in sql_text:
+            return branch4_result  # branch-4 COUNT(*)
+        # Legacy path: active-count, existing-job, user-select in order.
+        legacy_call_count["n"] += 1
+        if legacy_call_count["n"] == 1:
             return count_result
-        if call_count["n"] == 2:
+        if legacy_call_count["n"] == 2:
             return no_job_result
         return user_result
 
@@ -221,7 +254,7 @@ class TestCreateJobSuccess:
         db = _make_db_session(active_job_count=0, user_for_quota=user)
 
         with patch("job_intercept.proxy_request", side_effect=fake_proxy):
-            with patch("job_intercept._probe_youtube_duration", return_value=None):
+            with patch("job_intercept._probe_youtube_metadata", return_value=None):
                 resp = _run(intercept_create_job(req, db, user))
 
         assert resp.status_code == 202
@@ -258,7 +291,7 @@ class TestCreateJobSuccess:
         db = _make_db_session(active_job_count=0, user_for_quota=user)
 
         with patch("job_intercept.proxy_request", side_effect=fake_proxy):
-            with patch("job_intercept._probe_youtube_duration", return_value=480.0):
+            with patch("job_intercept._probe_youtube_metadata", return_value={"duration": 480.0}):
                 resp = _run(intercept_create_job(req, db, user))
 
         assert resp.status_code == 202
@@ -274,7 +307,7 @@ class TestCreateJobSuccess:
         user = _make_user(plan_code="free")
 
         with patch("job_intercept.proxy_request", new_callable=AsyncMock):
-            with patch("job_intercept._probe_youtube_duration", return_value=900.0):
+            with patch("job_intercept._probe_youtube_metadata", return_value={"duration": 900.0}):
                 resp = _run(intercept_create_job(req, db, user))
 
         body = json.loads(resp.body)
@@ -293,7 +326,7 @@ class TestCreateJobSuccess:
             return _upstream_conflict()
 
         with patch("job_intercept.proxy_request", side_effect=fake_proxy):
-            with patch("job_intercept._probe_youtube_duration", return_value=None):
+            with patch("job_intercept._probe_youtube_metadata", return_value=None):
                 resp = _run(intercept_create_job(req, db, user))
 
         body = json.loads(resp.body)
@@ -317,7 +350,7 @@ class TestCreateJobSuccess:
         db = _make_db_session(active_job_count=99, user_for_quota=user)
 
         with patch("job_intercept.proxy_request", side_effect=fake_proxy):
-            with patch("job_intercept._probe_youtube_duration", return_value=None):
+            with patch("job_intercept._probe_youtube_metadata", return_value=None):
                 resp = _run(intercept_create_job(req, db, user))
 
         assert resp.status_code == 202
@@ -341,7 +374,7 @@ class TestCreateJobSuccess:
         db = _make_db_session(active_job_count=0, user_for_quota=user)
 
         with patch("job_intercept.proxy_request", side_effect=fake_proxy):
-            with patch("job_intercept._probe_youtube_duration", return_value=None):
+            with patch("job_intercept._probe_youtube_metadata", return_value=None):
                 _run(intercept_create_job(req, db, user))
 
         assert captured_body["create_idempotency_key"] == "frontend-uuid-123"
@@ -520,7 +553,7 @@ class TestAdminSettingsTTSProvider:
             return s
 
         with patch("job_intercept.proxy_request", side_effect=fake_proxy):
-            with patch("job_intercept._probe_youtube_duration", return_value=None):
+            with patch("job_intercept._probe_youtube_metadata", return_value=None):
                 with patch.object(admin_mod, "load_settings", mock_load):
                     resp = _run(intercept_create_job(req, db, user))
 
@@ -554,7 +587,7 @@ class TestAdminSettingsTTSProvider:
             return s
 
         with patch("job_intercept.proxy_request", side_effect=fake_proxy):
-            with patch("job_intercept._probe_youtube_duration", return_value=None):
+            with patch("job_intercept._probe_youtube_metadata", return_value=None):
                 with patch.object(admin_mod, "load_settings", mock_load):
                     resp = _run(intercept_create_job(req, db, user))
 
@@ -592,7 +625,7 @@ class TestVolcengineDualModeSnapshot:
             return s
 
         with patch("job_intercept.proxy_request", side_effect=fake_proxy):
-            with patch("job_intercept._probe_youtube_duration", return_value=None):
+            with patch("job_intercept._probe_youtube_metadata", return_value=None):
                 with patch.object(admin_mod, "load_settings", mock_load):
                     resp = _run(intercept_create_job(req, db, user))
 
@@ -626,7 +659,7 @@ class TestVolcengineDualModeSnapshot:
             return s
 
         with patch("job_intercept.proxy_request", side_effect=fake_proxy):
-            with patch("job_intercept._probe_youtube_duration", return_value=None):
+            with patch("job_intercept._probe_youtube_metadata", return_value=None):
                 with patch.object(admin_mod, "load_settings", mock_load):
                     resp = _run(intercept_create_job(req, db, user))
 
@@ -664,7 +697,7 @@ class TestQualityTierTruthChain:
         db = _make_db_session(active_job_count=0, user_for_quota=user)
 
         with patch("job_intercept.proxy_request", side_effect=fake_proxy):
-            with patch("job_intercept._probe_youtube_duration", return_value=None):
+            with patch("job_intercept._probe_youtube_metadata", return_value=None):
                 resp = _run(intercept_create_job(req, db, user))
 
         assert resp.status_code == 202
@@ -693,7 +726,7 @@ class TestQualityTierTruthChain:
         db.add = capture_add
 
         with patch("job_intercept.proxy_request", side_effect=fake_proxy):
-            with patch("job_intercept._probe_youtube_duration", return_value=None):
+            with patch("job_intercept._probe_youtube_metadata", return_value=None):
                 resp = _run(intercept_create_job(req, db, user))
 
         assert resp.status_code == 202
@@ -727,7 +760,7 @@ class TestQualityTierTruthChain:
             return original_estimate(minutes, service_mode, quality_tier)
 
         with patch("job_intercept.proxy_request", side_effect=fake_proxy):
-            with patch("job_intercept._probe_youtube_duration", return_value=None):
+            with patch("job_intercept._probe_youtube_metadata", return_value=None):
                 with patch("job_intercept.estimate_credits", side_effect=capture_estimate):
                     resp = _run(intercept_create_job(req, db, user))
 

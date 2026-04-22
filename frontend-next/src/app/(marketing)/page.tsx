@@ -1,4 +1,5 @@
 import { Hero } from "@/components/marketing/hero"
+import { ProductProof } from "@/components/marketing/product-proof"
 import { Features } from "@/components/marketing/features"
 import { WorkflowShowcase } from "@/components/marketing/workflow-showcase"
 import { PricingPreview } from "@/components/marketing/pricing-preview"
@@ -18,6 +19,7 @@ export default function HomePage() {
   return (
     <>
       <Hero />
+      <ProductProof />
       <Features />
       <WorkflowShowcase />
       <PricingPreview />

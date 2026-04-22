@@ -776,3 +776,279 @@ def test_editing_payload_tolerates_unreadable_draft_wav(tmp_path: Path) -> None:
         "corrupted draft wav should skip the field; got "
         f"{seg1.get('draft_wav_duration_ms')!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# source_text patch support (2026-04-21) — users may correct upstream S1
+# ASR mistakes on the edit page; symmetric with cn_text but no auto-retranslate
+# (user also updates cn_text themselves, then single-segment re-TTS).
+# ---------------------------------------------------------------------------
+
+
+def test_patch_segment_updates_source_text_and_flags_text_dirty(tmp_path: Path) -> None:
+    _, project_dir, _ = _build_editing_job(tmp_path)
+    updated = patch_editing_segment(
+        project_dir, "seg_001", {"source_text": "hello world"}
+    )
+    assert updated["source_text"] == "hello world"
+    # Persists
+    segments = load_editing_segments(project_dir)
+    assert segments[0]["source_text"] == "hello world"
+    # Flags text_dirty because the translation is now potentially stale
+    # (user is responsible for also updating cn_text before re-TTS).
+    status = load_segment_status(project_dir)
+    assert status["seg_001"] == SEGMENT_STATUS_TEXT_DIRTY
+
+
+def test_patch_segment_source_text_and_cn_text_both_apply_and_flag_dirty(tmp_path: Path) -> None:
+    _, project_dir, _ = _build_editing_job(tmp_path)
+    updated = patch_editing_segment(
+        project_dir, "seg_001",
+        {"source_text": "hello world", "cn_text": "你好世界"},
+    )
+    assert updated["source_text"] == "hello world"
+    assert updated["cn_text"] == "你好世界"
+    status = load_segment_status(project_dir)
+    assert status["seg_001"] == SEGMENT_STATUS_TEXT_DIRTY
+
+
+# ---------------------------------------------------------------------------
+# split_editing_segment (2026-04-21) — mirrors translation_review's split
+# behaviour but operates on editor/editing/segments.json (different schema).
+# ---------------------------------------------------------------------------
+
+
+def test_split_editing_segment_replaces_one_with_two(tmp_path: Path) -> None:
+    from services.jobs.editing_segments import split_editing_segment
+
+    _, project_dir, _ = _build_editing_job(tmp_path)
+    # seg_001: "hello" / "你好" — split in the middle.
+    result = split_editing_segment(
+        project_dir,
+        segment_id="seg_001",
+        split_source_index=3,   # "hel" | "lo"
+        split_cn_index=1,       # "你" | "好"
+        speaker_a="A",
+        speaker_b="B",
+    )
+
+    assert result["replaced_segment_id"] == "seg_001"
+    assert len(result["new_segments"]) == 2
+    assert result["total_count"] == 4  # was 3, split adds 1
+
+    segments = load_editing_segments(project_dir)
+    assert len(segments) == 4
+    assert segments[0]["source_text"] == "hel"
+    assert segments[0]["cn_text"] == "你"
+    assert segments[0]["speaker_id"] == "A"
+    assert segments[1]["source_text"] == "lo"
+    assert segments[1]["cn_text"] == "好"
+    assert segments[1]["speaker_id"] == "B"
+    # Unrelated segments unchanged, order preserved.
+    assert segments[2]["segment_id"] == "seg_002"
+    assert segments[3]["segment_id"] == "seg_003"
+
+
+def test_split_editing_segment_proportional_timestamp_split(tmp_path: Path) -> None:
+    """Time boundary splits proportionally to the character position so
+    downstream alignment has a plausible midpoint to re-anchor on."""
+    from services.jobs.editing_segments import split_editing_segment
+
+    _, project_dir, _ = _build_editing_job(tmp_path)
+    # seg_001 is [0ms, 1000ms] for "hello" (5 chars). Splitting at index 2
+    # ("he" | "llo") should place the midpoint at 400ms (2/5 of the way).
+    split_editing_segment(
+        project_dir,
+        segment_id="seg_001",
+        split_source_index=2,
+        split_cn_index=1,
+        speaker_a="A",
+        speaker_b="A",
+    )
+    segments = load_editing_segments(project_dir)
+    assert segments[0]["start_ms"] == 0
+    assert segments[0]["end_ms"] == 400
+    assert segments[1]["start_ms"] == 400
+    assert segments[1]["end_ms"] == 1000
+
+
+def test_split_editing_segment_generates_unique_ids(tmp_path: Path) -> None:
+    from services.jobs.editing_segments import split_editing_segment
+
+    _, project_dir, _ = _build_editing_job(tmp_path)
+    split_editing_segment(
+        project_dir,
+        segment_id="seg_002",
+        split_source_index=3,
+        split_cn_index=1,
+        speaker_a="B",
+        speaker_b="B",
+    )
+    segments = load_editing_segments(project_dir)
+    ids = [s["segment_id"] for s in segments]
+    # All ids unique
+    assert len(ids) == len(set(ids)), f"duplicate segment ids: {ids}"
+    # New ids carry forward a sensible suffix of the source id (not "hacker")
+    # The precise scheme is an impl detail; we only assert uniqueness + stability.
+
+
+def test_split_editing_segment_rejects_zero_part_a(tmp_path: Path) -> None:
+    """If split_source_index == 0 the A half is empty — meaningless split."""
+    from services.jobs.editing_segments import split_editing_segment
+
+    _, project_dir, _ = _build_editing_job(tmp_path)
+    with pytest.raises(ValueError, match="empty"):
+        split_editing_segment(
+            project_dir,
+            segment_id="seg_001",
+            split_source_index=0,
+            split_cn_index=0,
+            speaker_a="A",
+            speaker_b="A",
+        )
+
+
+def test_split_editing_segment_rejects_full_length_split(tmp_path: Path) -> None:
+    """If split_source_index == len(source_text) the B half is empty."""
+    from services.jobs.editing_segments import split_editing_segment
+
+    _, project_dir, _ = _build_editing_job(tmp_path)
+    with pytest.raises(ValueError, match="empty"):
+        split_editing_segment(
+            project_dir,
+            segment_id="seg_001",
+            split_source_index=5,  # "hello" is 5 chars
+            split_cn_index=2,
+            speaker_a="A",
+            speaker_b="A",
+        )
+
+
+def test_split_editing_segment_unknown_id_raises(tmp_path: Path) -> None:
+    from services.jobs.editing_segments import split_editing_segment
+
+    _, project_dir, _ = _build_editing_job(tmp_path)
+    with pytest.raises(EditingConflictError, match="not found"):
+        split_editing_segment(
+            project_dir,
+            segment_id="seg_999",
+            split_source_index=2,
+            split_cn_index=1,
+            speaker_a="A",
+            speaker_b="A",
+        )
+
+
+def test_split_editing_segment_marks_both_new_segments_text_dirty(tmp_path: Path) -> None:
+    """Both halves need re-TTS (draft was sized for the old full segment)."""
+    from services.jobs.editing_segments import split_editing_segment
+
+    _, project_dir, _ = _build_editing_job(tmp_path)
+    result = split_editing_segment(
+        project_dir,
+        segment_id="seg_001",
+        split_source_index=3,
+        split_cn_index=1,
+        speaker_a="A",
+        speaker_b="A",
+    )
+    status = load_segment_status(project_dir)
+    for new_seg in result["new_segments"]:
+        assert status.get(new_seg["segment_id"]) == SEGMENT_STATUS_TEXT_DIRTY
+
+
+# ---------------------------------------------------------------------------
+# slice_source_audio_for_editing_segment (2026-04-21) — ffmpeg integration
+# is factored behind _ffmpeg_slice_to_wav_bytes so we can monkeypatch it
+# and keep unit tests hermetic.
+# ---------------------------------------------------------------------------
+
+
+def test_slice_source_audio_returns_base64_and_timing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from services.jobs import editing_segments as es
+
+    _, project_dir, _ = _build_editing_job(tmp_path)
+    # Create a fake source audio so _find_source_audio_path returns a hit.
+    (project_dir / "audio").mkdir(parents=True, exist_ok=True)
+    src = project_dir / "audio" / "original.wav"
+    src.write_bytes(b"RIFF0000WAVEfmt fake")
+
+    captured: dict[str, object] = {}
+
+    def fake_slice(source_path, start_ms, end_ms, *, timeout_s=30):
+        captured["source_path"] = source_path
+        captured["start_ms"] = start_ms
+        captured["end_ms"] = end_ms
+        return b"FAKE_WAV_BYTES"
+
+    monkeypatch.setattr(es, "_ffmpeg_slice_to_wav_bytes", fake_slice)
+    result = es.slice_source_audio_for_editing_segment(project_dir, "seg_001")
+
+    # Verified against _build_editing_job's baseline segments fixture
+    # where seg_001 spans [0ms, 1000ms].
+    assert captured["start_ms"] == 0
+    assert captured["end_ms"] == 1000
+    assert result["start_ms"] == 0
+    assert result["end_ms"] == 1000
+    assert result["duration_ms"] == 1000
+    assert result["mime_type"] == "audio/wav"
+    # Base64 of "FAKE_WAV_BYTES"
+    import base64
+    assert result["source_audio_base64"] == base64.b64encode(b"FAKE_WAV_BYTES").decode("ascii")
+
+
+def test_slice_source_audio_prefers_speech_for_asr_when_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from services.jobs import editing_segments as es
+
+    _, project_dir, _ = _build_editing_job(tmp_path)
+    (project_dir / "audio").mkdir(parents=True, exist_ok=True)
+    (project_dir / "audio" / "original.wav").write_bytes(b"ORIG")
+    (project_dir / "audio" / "speech_for_asr.wav").write_bytes(b"SPEECH")
+
+    captured: dict[str, object] = {}
+
+    def fake_slice(source_path, start_ms, end_ms, *, timeout_s=30):
+        captured["source_path"] = source_path
+        return b"OK"
+
+    monkeypatch.setattr(es, "_ffmpeg_slice_to_wav_bytes", fake_slice)
+    es.slice_source_audio_for_editing_segment(project_dir, "seg_001")
+    # speech_for_asr.wav is first in _SOURCE_AUDIO_CANDIDATES, so it wins.
+    assert str(captured["source_path"]).endswith("speech_for_asr.wav")
+
+
+def test_slice_source_audio_missing_segment_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from services.jobs import editing_segments as es
+
+    _, project_dir, _ = _build_editing_job(tmp_path)
+    (project_dir / "audio").mkdir(parents=True, exist_ok=True)
+    (project_dir / "audio" / "original.wav").write_bytes(b"x")
+    monkeypatch.setattr(
+        es, "_ffmpeg_slice_to_wav_bytes",
+        lambda *a, **k: pytest.fail("ffmpeg should not be invoked for missing segment"),
+    )
+    with pytest.raises(EditingConflictError, match="not found"):
+        es.slice_source_audio_for_editing_segment(project_dir, "seg_nope")
+
+
+def test_slice_source_audio_missing_audio_file_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Neither speech_for_asr.wav nor original.wav exists → clear runtime error,
+    not a None deref deeper down."""
+    from services.jobs import editing_segments as es
+
+    _, project_dir, _ = _build_editing_job(tmp_path)
+    # Deliberately do NOT create audio/*.wav
+    monkeypatch.setattr(
+        es, "_ffmpeg_slice_to_wav_bytes",
+        lambda *a, **k: pytest.fail("ffmpeg should not be invoked without source"),
+    )
+    with pytest.raises(RuntimeError, match="源音频"):
+        es.slice_source_audio_for_editing_segment(project_dir, "seg_001")

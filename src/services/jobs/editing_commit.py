@@ -61,7 +61,12 @@ from services.jobs.copy_service import (
 )
 from utils.atomic_io import atomic_write_json
 from services.jobs.editing import EDITING_SUBDIR, EditingConflictError
-from services.jobs.events import EVENT_LEVEL_INFO, EVENT_TYPE_STATUS, JobEvent
+from services.jobs.events import (
+    EVENT_LEVEL_CRITICAL,
+    EVENT_LEVEL_INFO,
+    EVENT_TYPE_STATUS,
+    JobEvent,
+)
 from services.jobs.input_validators import validate_commit_strategy
 from services.jobs.models import (
     JOB_STATUS_EDITING,
@@ -108,7 +113,22 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _emit_event(store: JobStore, record: JobRecord, *, message: str) -> None:
+def _emit_event(
+    store: JobStore,
+    record: JobRecord,
+    *,
+    message: str,
+    level: str = EVENT_LEVEL_INFO,
+    payload: dict[str, object] | None = None,
+) -> None:
+    """Append a commit-lifecycle event to the job's event log.
+
+    Default level is INFO (for happy-path transitions). Pass
+    ``level=EVENT_LEVEL_CRITICAL`` for needs-ops-intervention cases
+    like D35 Phase B cleanup failures. ``payload`` carries structured
+    context (e.g. ``failed_step``) that admins can read without having
+    to parse the free-form message string.
+    """
     try:
         event = JobEvent(
             job_id=record.job_id,
@@ -116,7 +136,8 @@ def _emit_event(store: JobStore, record: JobRecord, *, message: str) -> None:
             created_at=_utc_now_iso(),
             status=record.status,
             message=message,
-            level=EVENT_LEVEL_INFO,
+            level=level,
+            payload=payload,
         )
         store.append_event(record.job_id, event)
     except Exception:  # pragma: no cover - defensive
@@ -291,6 +312,27 @@ def commit_editing_pipeline(
             "new_project_dir": <path>,
             "new_display_name": <str>,
         }
+
+    2026-04-21 plan §12 / D8 — subtitle regeneration contract:
+    Both strategies resume the pipeline at STAGE_ALIGNMENT, which flows
+    through OutputDispatcher → EditorPackageWriter._write_srt() and
+    **unconditionally rewrites all three SRTs** (zh / en / bilingual)
+    from the just-committed editor/segments.json. The chain is:
+
+        editing/segments.json (with user's cn_text / source_text edits)
+        → _apply_editing_to_baseline → editor/segments.json
+        → submit_job_from_existing_project_dir(start_stage='alignment')
+        → process._run_alignment_and_publish_only
+        → _load_segments_for_publish_resume (reads editor/segments.json)
+        → _build_process_output_captions / _blocks (cn_text + source_text
+          straight through, no caching)
+        → EditorPackageWriter._write_srt (no skip-if-unchanged logic)
+
+    Do NOT add "skip alignment when no text changed" optimisation — that
+    would silently leak stale SRTs when users edit *only* text (no
+    re-TTS). The publish stage is already cheap (~seconds) and the
+    subtitle freshness guarantee is the whole point of resuming at
+    alignment.
     """
     if record.status != JOB_STATUS_EDITING:
         raise EditingConflictError(
@@ -505,8 +547,11 @@ def _commit_copy_as_new(
         ) from exc
 
     # Phase B: source task becomes succeeded again; its editing/ dir is dropped.
-    # Failures here are not rolled back (new job is already running) but we
-    # DO log prominently so admins see the half-state in job_events.
+    # Failures here are not rolled back (new job is already running) — we
+    # track which step failed so ops can diagnose from job_events without
+    # tailing docker logs. Plan §7.8 / D35 contract.
+    failed_step: str | None = None
+    source_updated: JobRecord = record
     try:
         source_now = _utc_now_iso()
         source_updated = replace(
@@ -515,8 +560,11 @@ def _commit_copy_as_new(
             editing_touched_at=None,
             updated_at=source_now,
         )
+        failed_step = "save_job"
         store.save_job(source_updated)
+        failed_step = "rm_editing_dir"
         _rm_editing_dir(project_dir)
+        failed_step = None  # success
         _emit_event(
             store, source_updated,
             message=(
@@ -525,18 +573,36 @@ def _commit_copy_as_new(
             ),
         )
     except Exception as exc:  # pragma: no cover - defensive
-        logger.exception(
-            "copy_as_new phase B: source cleanup failed for %s; new job %s "
-            "is already running. Admin intervention required.",
-            record.job_id,
-            new_job_id,
+        # D35: elevate to CRITICAL so LogViewer / ops channel picks it up.
+        # The 24h idle-scanner will eventually tide over the source's
+        # stuck 'editing' state (cancel_editing flow), but that leaves a
+        # gap where the user sees the source as "modifying" for hours
+        # despite the new copy already running — hence the loud alert.
+        logger.critical(
+            "copy_as_new phase B failed at step=%s for source=%s "
+            "(new job %s already running). Source may be stuck in "
+            "'editing' until the 24h idle scanner cancels it — admin "
+            "may want to force cancel + rm editor/editing/ manually. "
+            "Exception: %s",
+            failed_step, record.job_id, new_job_id, exc,
+            exc_info=True,
         )
         _emit_event(
             store, record,
             message=(
                 f"editing.commit_phase_b_failed: strategy=copy_as_new "
-                f"new_job_id={new_job_id} err={exc}"
+                f"new_job_id={new_job_id} failed_step={failed_step} err={exc}"
             ),
+            level=EVENT_LEVEL_CRITICAL,
+            payload={
+                "event_type": "editing.commit_phase_b_failed",
+                "strategy": "copy_as_new",
+                "source_job_id": record.job_id,
+                "new_job_id": new_job_id,
+                "failed_step": failed_step,
+                "exception_class": type(exc).__name__,
+                "exception_message": str(exc)[:500],
+            },
         )
 
     return {

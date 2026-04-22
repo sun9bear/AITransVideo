@@ -19,7 +19,8 @@ import hashlib
 import json
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select, update
@@ -252,6 +253,70 @@ async def mark_failed(db: AsyncSession, task_id: str, error: str) -> None:
         )
     )
     await db.commit()
+
+
+async def cleanup_expired_pack_zips(
+    db: AsyncSession,
+    *,
+    now: datetime | None = None,
+    retention_hours: int = 24,
+) -> int:
+    """Delete ``materials_pack`` zip files older than ``retention_hours`` and
+    transition their task status to ``'expired'``.
+
+    Disk pressure on US host sits at 82% (118 GB / 150 GB) and each long
+    podcast task produces ~3-5 GB of packaged zip. 24h is a reasonable
+    middle ground: users have a full day to download, after which the
+    zip becomes dead weight. Re-packing is cheap (~seconds for a 3 GB
+    source already on local disk) — far cheaper than indefinite storage.
+
+    Contract:
+      - Only touches rows where ``task_type='materials_pack'`` AND
+        ``status='completed'`` AND ``updated_at < now - retention_hours``.
+      - Unlinks ``result.zip_path`` (tolerates missing file — still
+        transitions status so the UI reflects reality).
+      - Sets status to ``'expired'``; frontend treats this as "zip has
+        been deleted, click to re-pack".
+      - Idempotent: a second pass finds the already-expired rows in a
+        different status and skips them.
+
+    Returns the number of tasks transitioned to ``'expired'`` this pass.
+    """
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=retention_hours)
+    result = await db.execute(
+        select(BackgroundTask).where(
+            BackgroundTask.task_type == "materials_pack",
+            BackgroundTask.status == "completed",
+            BackgroundTask.updated_at < cutoff,
+        )
+    )
+    tasks = result.scalars().all()
+    expired_count = 0
+    for task in tasks:
+        result_data = task.result or {}
+        zip_path_str = result_data.get("zip_path") if isinstance(result_data, dict) else None
+        if isinstance(zip_path_str, str) and zip_path_str:
+            try:
+                Path(zip_path_str).unlink()
+            except FileNotFoundError:
+                # Already gone — status transition still proceeds.
+                pass
+            except OSError as exc:
+                # Permission issue / busy file — log and skip the status
+                # flip so the next pass retries. Surfaces via repeated
+                # entries in the log if the issue persists.
+                logger.warning(
+                    "cleanup_expired_pack_zips: failed to unlink %s: %s",
+                    zip_path_str, exc,
+                )
+                continue
+        task.status = "expired"
+        task.updated_at = now
+        expired_count += 1
+    if expired_count > 0:
+        await db.commit()
+    return expired_count
 
 
 async def recover_stale(db: AsyncSession) -> int:

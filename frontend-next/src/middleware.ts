@@ -8,7 +8,21 @@ const publicPaths = ["/auth/login", "/auth/register"]
 // reachable without a session cookie; otherwise /pricing, /trial, and the
 // phone-first `/auth` entry would be redirected to /auth/login and could never
 // serve their conversion role.
-const publicExactPaths = ["/", "/pricing", "/trial", "/auth"]
+//
+// Legal pages (/terms, /privacy, /refund, /contact) must also be public —
+// payment partners (Paddle, Airwallex, etc.) audit these pages without a
+// logged-in session, and logged-out visitors must be able to read the policies
+// before signing up.
+const publicExactPaths = [
+  "/",
+  "/pricing",
+  "/trial",
+  "/auth",
+  "/terms",
+  "/privacy",
+  "/refund",
+  "/contact",
+]
 
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl

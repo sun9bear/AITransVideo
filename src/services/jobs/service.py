@@ -78,9 +78,20 @@ class JobService:
         create_idempotency_key: str | None = None,
         user_id: str | None = None,
         source_content_hash: str | None = None,
+        display_name: str | None = None,
     ) -> JobRecord:
         normalized_source_type = str(source_type).strip()
         normalized_source_ref = str(source_ref).strip()
+        # display_name is caller-provided (gateway orchestrator). We only
+        # normalise whitespace + cap length — never invent one here. NULL
+        # is a valid state (legacy CLI submit, anonymous path); the
+        # frontend has its own fallback chain.
+        normalized_display_name: str | None = None
+        if display_name is not None:
+            stripped = str(display_name).strip()
+            if stripped:
+                # Matches the DB VARCHAR(60) limit from migration 015.
+                normalized_display_name = stripped[:60]
         normalized_output_target = str(output_target).strip().lower()
         normalized_job_type = str(job_type).strip()
         normalized_speakers = str(speakers).strip().lower() or "auto"
@@ -155,6 +166,7 @@ class JobService:
             workspace_dir=workspace_dir,
             project_dir=project_dir_absolute,
             source_content_hash=source_content_hash,
+            display_name=normalized_display_name,
         )
         self.store.save_job(record)
         self.store.append_event(
@@ -169,6 +181,37 @@ class JobService:
         )
         self.runner.start(record)
         return self.require_job(record.job_id)
+
+    def update_display_name(
+        self, job_id: str, display_name: str | None
+    ) -> JobRecord:
+        """Persist a rename on an existing job. Plan §6.5 (D16).
+
+        - ``None`` or whitespace-only input clears the field (display_name
+          becomes ``None``); the frontend then falls back through
+          ``getJobDisplayTitle`` → slug → videoId → "未命名视频".
+        - Non-empty input is stripped + truncated to 60 chars (DB column
+          limit, migration 015).
+        - Collision resolution with the user's existing names is the
+          gateway's responsibility (it owns the SQL); this method is a
+          pure write of a pre-validated value.
+
+        Raises :class:`KeyError` (via ``require_job``) if the job id is
+        unknown.
+        """
+        record = self.store.require_job(job_id)
+        normalized: str | None = None
+        if display_name is not None:
+            stripped = str(display_name).strip()
+            if stripped:
+                normalized = stripped[:60]
+        next_record = replace(
+            record,
+            display_name=normalized,
+            updated_at=utc_now_iso(),
+        )
+        self.store.save_job(next_record)
+        return self.store.require_job(job_id)
 
     def continue_job(self, job_id: str) -> JobRecord:
         record = self.require_job(job_id)
@@ -299,6 +342,96 @@ class JobService:
         return {
             "segment": updated_segment,
             "segment_status": load_segment_status(record.project_dir),
+        }
+
+    def split_editing_segment(
+        self,
+        job_id: str,
+        segment_id: str,
+        *,
+        split_source_index: int,
+        split_cn_index: int,
+        speaker_a: str,
+        speaker_b: str,
+    ) -> dict:
+        """Split one segment into two at user-chosen character positions.
+
+        Mirrors the translation-review split UX from the main flow but
+        operates on the editing buffer; also refreshes ``editing_touched_at``
+        so the idle scanner sees activity."""
+        from services.jobs.editing import touch_editing as _touch_editing
+        from services.jobs.editing_segments import (
+            load_segment_status,
+            split_editing_segment as _split_editing_segment,
+        )
+        from services.jobs.input_validators import validate_segment_id
+
+        validate_segment_id(segment_id)
+        record = self._require_editing(job_id)
+        result = _split_editing_segment(
+            record.project_dir,
+            segment_id=segment_id,
+            split_source_index=int(split_source_index),
+            split_cn_index=int(split_cn_index),
+            speaker_a=speaker_a,
+            speaker_b=speaker_b,
+        )
+        _touch_editing(record, self.store)
+        # Enrich with the post-split status map so the frontend can patch
+        # its cached state in one shot rather than re-fetching.
+        return {
+            **result,
+            "segment_status": load_segment_status(record.project_dir),
+        }
+
+    def preview_editing_segment_source_audio(
+        self,
+        job_id: str,
+        segment_id: str,
+    ) -> dict:
+        """Return a base64 WAV slice of the source audio for one editing
+        segment. Read-only; does NOT refresh ``editing_touched_at`` —
+        previewing isn't a mutation and we don't want to extend the
+        24-hour idle clock just because the user scrubbed around.
+
+        Kept for legacy callers / unit tests. Production HTTP path uses
+        :meth:`prepare_preview_source_cache` + the GET stream endpoint
+        because 1 MB+ JSON bodies trigger ``RemoteProtocolError`` on
+        the gateway's Uvicorn + httpx proxy under concurrency."""
+        from services.jobs.editing_segments import (
+            slice_source_audio_for_editing_segment,
+        )
+        from services.jobs.input_validators import validate_segment_id
+
+        validate_segment_id(segment_id)
+        record = self._require_editing(job_id)
+        return slice_source_audio_for_editing_segment(
+            record.project_dir, segment_id
+        )
+
+    def prepare_preview_source_cache(
+        self,
+        job_id: str,
+        segment_id: str,
+    ) -> dict:
+        """Slice + cache the source audio WAV and return the meta only
+        (not the bytes). Frontend then fetches the WAV via the GET
+        stream endpoint, which serves ``<audio>``-friendly Range-aware
+        responses without the 1 MB JSON-body pathology.
+
+        Returns ``{"duration_ms", "start_ms", "end_ms", "mime_type",
+        "size_bytes", "segment_id"}`` — all small primitives so the
+        POST response body stays under ~150 bytes."""
+        from services.jobs.editing_segments import cache_preview_source_wav
+        from services.jobs.input_validators import validate_segment_id
+
+        validate_segment_id(segment_id)
+        record = self._require_editing(job_id)
+        path, meta = cache_preview_source_wav(record.project_dir, segment_id)
+        return {
+            **meta,
+            "segment_id": segment_id,
+            "size_bytes": path.stat().st_size,
         }
 
     def mark_editing_segment_status(
@@ -443,6 +576,27 @@ class JobService:
         if not record.project_dir:
             return None
         return read_regen_all_status(record.project_dir, task_id)
+
+    def request_regenerate_all_cancel(
+        self,
+        job_id: str,
+        task_id: str,
+    ) -> dict:
+        """Signal the running batch re-TTS thread to stop between segments
+        (plan §7.10 / D39). Returns ``{"cancelled": bool}`` — True means
+        the flag was written and the worker will land on
+        ``stage='cancelled'`` on its next per-segment tick; False means
+        no matching live batch was found (wrong task_id, already done,
+        or cleaned up).
+
+        Safe to call repeatedly — the helper is idempotent. Does NOT
+        refresh editing_touched_at (cancelling isn't a mutation the
+        idle scanner should care about)."""
+        from services.jobs.regenerate_all_async import request_regen_all_cancel
+
+        record = self._require_editing(job_id)
+        wrote = request_regen_all_cancel(record.project_dir, task_id)
+        return {"cancelled": wrote}
 
     def get_editing_voice_map(self, job_id: str) -> dict:
         from services.jobs.editing_voice_map import load_voice_map

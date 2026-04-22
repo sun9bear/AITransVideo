@@ -10,7 +10,7 @@ const STEPS: Array<{ index: string; title: string; body: string }> = [
   {
     index: "01",
     title: "导入视频",
-    body: "粘贴 YouTube 链接或上传本地视频，系统自动完成 ASR 转写与说话人分离。",
+    body: "上传您本人或已获授权的视频（本地文件或视频链接），系统自动完成 ASR 转写与说话人分离。",
   },
   {
     index: "02",

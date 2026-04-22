@@ -100,6 +100,45 @@ Current config priority:
 
 On non-Windows systems, the Windows registry layers do not apply.
 
+## Alipay Website Payment
+
+Current project recommendation for real Alipay collection:
+
+- Use one single `网页应用` APPID for both:
+  - `电脑网站支付` (`alipay.trade.page.pay`)
+  - `手机网站支付` (`alipay.trade.wap.pay`)
+- Do **not** split PC and H5 across different APPIDs unless the codebase is
+  explicitly upgraded to a dual-app routing model.
+
+Current production-facing values for the `aitrans.video` deployment:
+
+- `AVT_ALIPAY_APP_ID=2021006147642779`
+- `AVT_ALIPAY_NOTIFY_URL=https://aitrans.video/api/billing/webhooks/alipay`
+- `AVT_ALIPAY_RETURN_URL=https://aitrans.video/settings/billing`
+
+Other required env vars:
+
+- `AVT_ALIPAY_APP_PRIVATE_KEY`
+- `AVT_ALIPAY_PUBLIC_KEY`
+
+Optional but recommended:
+
+- `AVT_ALIPAY_SELLER_ID`
+
+Operational notes:
+
+- `应用网关` should point to:
+  - `https://aitrans.video/api/billing/webhooks/alipay`
+- Do not point Alipay callbacks at `https://api.aitransvideo.com/...` unless that
+  subdomain is reactivated and externally reachable. As of 2026-04-22, its DNS
+  resolves to `expired.hichina.com`.
+- `授权回调地址` is **not required** for the current payment-only flow.
+  It belongs to Alipay user authorization / `openid` style scenarios, not
+  website payment return handling.
+- `接口内容加密方式` (AES) is **not used** by the current PC/H5 payment path.
+  If an AES key was exposed in chat or screenshots, rotate it in the Alipay
+  console and do not rely on the leaked value.
+
 ## Current Recommended Commands
 
 Run from the repository root.

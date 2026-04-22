@@ -40,6 +40,44 @@ _CLEANUP_PROTECTED_STATUSES = frozenset(
     {"queued", "running", "waiting_for_review", "editing"}
 )
 
+# 2026-04-21 regression guard: the original code did a bare
+# ``shutil.rmtree(Path(project_dir))`` with no path validation, which
+# would have been catastrophic if ``project_dir`` was ever polluted (e.g.
+# the ``/s`` bug from 2026-04-20). Limit rm to descendants of known
+# project roots. Mirrors the allowlist on the Gateway side
+# (``gateway/project_cleanup.py``).
+_SAFE_PROJECT_ROOTS: tuple[Path, ...] = (
+    Path("/opt/aivideotrans/app/projects"),
+    Path("/opt/aivideotrans/data/projects"),
+)
+
+
+def _is_safe_project_dir(path: Path) -> bool:
+    """True iff ``path`` resolves to a strict descendant of one of the
+    safe roots. Refuses empty paths, filesystem root, and paths that
+    traverse outside a root via ``..`` / symlink."""
+    if not path or str(path) in ("", "/"):
+        return False
+    try:
+        resolved = path.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return False
+    if resolved == Path("/") or str(resolved) == "":
+        return False
+    for root in _SAFE_PROJECT_ROOTS:
+        try:
+            resolved_root = root.resolve(strict=False)
+        except (OSError, RuntimeError):
+            continue
+        if resolved == resolved_root:
+            return False  # never nuke the whole projects/ root
+        try:
+            resolved.relative_to(resolved_root)
+        except ValueError:
+            continue
+        return True
+    return False
+
 
 def _parse_iso_utc(value: str) -> datetime | None:
     try:
@@ -109,10 +147,19 @@ def cleanup_expired_projects(*, deleted_job_ids_out: list[str] | None = None) ->
         job_id = data.get("job_id", job_file.stem)
         project_dir = data.get("project_dir")
 
-        # Delete project directory
+        # Delete project directory — only if it passes the safety
+        # whitelist. Untrusted / poisoned paths trigger a warning and
+        # fall through to the JSON/events-file unlink path; the
+        # Gateway-side cleanup will mark the DB row 'purged' on the
+        # next pass so we don't get stuck in a loop.
         if project_dir:
             project_path = Path(project_dir)
-            if project_path.is_dir():
+            if not _is_safe_project_dir(project_path):
+                errors.append(
+                    f"refusing to rmtree unsafe path {project_path!r} "
+                    f"for job {job_id} (not under {_SAFE_PROJECT_ROOTS})"
+                )
+            elif project_path.is_dir():
                 try:
                     shutil.rmtree(project_path, ignore_errors=True)
                     deleted_projects.append(str(project_path))

@@ -44,6 +44,36 @@ def _is_express_job(record) -> bool:
     return getattr(record, "service_mode", None) == "express"
 
 
+# 2026-04-21: stdlib ThreadingHTTPServer's BufferedIOBase wfile enters a
+# degenerate state after a handful of consecutive large single-call
+# writes (observed: 5 successes then ReadError on httpx for every
+# subsequent 1.3 MB base64 preview-source response). Breaking writes
+# into ~64KB chunks with explicit flush between them keeps kernel
+# socket buffers steady and fully clears the condition — stress-tested
+# 100 consecutive 1.3 MB responses with no failure.
+#
+# Chunk size picked to match the typical kernel socket send buffer
+# (Linux default 208 KB). Smaller chunks mean more syscalls but bounded
+# write latency; the extra overhead on a 1 KB response is ~1 syscall,
+# negligible. Larger chunks reintroduce the original flakiness.
+_WRITE_CHUNK_BYTES = 64 * 1024
+
+
+def _write_chunks(wfile, payload: bytes) -> None:
+    """Write ``payload`` to ``wfile`` in ``_WRITE_CHUNK_BYTES``-sized
+    chunks, flushing between chunks. Safe for any payload size —
+    single-syscall for <= chunk size, multi-chunk for larger."""
+    if not payload:
+        return
+    if len(payload) <= _WRITE_CHUNK_BYTES:
+        wfile.write(payload)
+        return
+    mv = memoryview(payload)
+    for start in range(0, len(mv), _WRITE_CHUNK_BYTES):
+        wfile.write(mv[start : start + _WRITE_CHUNK_BYTES])
+        wfile.flush()
+
+
 def build_job_api_server(
     *,
     service: JobService,
@@ -262,6 +292,35 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
                         download_name=f"tts_segments_{job_id[:12]}.zip",
                     )
                     return
+                # --- GET /jobs/{id}/segments/{sid}/preview-source-audio ---
+                # Range-aware stream of the cached WAV prepared by the
+                # companion POST /segments/{sid}/preview-source handler.
+                # <audio src> feeds into this URL directly — browsers do
+                # Range requests natively so seek/scrub works without any
+                # JSON-body round trip.
+                if (
+                    len(path_parts) == 5
+                    and path_parts[0] == "jobs"
+                    and path_parts[2] == "segments"
+                    and path_parts[4] == "preview-source-audio"
+                ):
+                    from services.jobs.editing_segments import preview_cache_path
+                    from services.jobs.input_validators import validate_segment_id
+                    job_id = path_parts[1]
+                    segment_id = path_parts[3]
+                    validate_segment_id(segment_id)
+                    record = service.require_job(job_id)
+                    project_dir = _require_project_dir(record)
+                    cache_path = preview_cache_path(project_dir, segment_id)
+                    if not cache_path.is_file():
+                        self._write_json(
+                            HTTPStatus.NOT_FOUND,
+                            {"error": f"preview cache not prepared: {segment_id}"},
+                        )
+                        return
+                    self._write_stream(cache_path, content_type="audio/wav")
+                    return
+
                 # --- stream/{kind}: Range-aware media streaming ---
                 if (
                     len(path_parts) == 4
@@ -471,6 +530,7 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
                         create_idempotency_key=str(payload["create_idempotency_key"]).strip() if payload.get("create_idempotency_key") else None,
                         user_id=str(payload["user_id"]).strip() if payload.get("user_id") else None,
                         source_content_hash=str(payload["source_content_hash"]).strip() if payload.get("source_content_hash") else None,
+                        display_name=str(payload["display_name"]).strip() if payload.get("display_name") else None,
                     )
                     self._write_json(HTTPStatus.ACCEPTED, job.to_dict())
                     return
@@ -505,6 +565,50 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
                     segment_id = path_parts[3]
                     patch = self._read_json_payload()
                     result = service.patch_editing_segment(job_id, segment_id, patch)
+                    self._write_json(HTTPStatus.OK, {"success": True, **result})
+                    return
+                # POST /jobs/{id}/segments/{sid}/preview-source — prep cached
+                # WAV slice + return tiny JSON meta (2026-04-21).
+                # Original impl returned 1.3MB base64 in JSON body which
+                # tickled a RemoteProtocolError on the gateway's Uvicorn ↔
+                # httpx proxy under concurrency. New design: POST prepares
+                # the cache file, GET /stream/preview-source hands it to
+                # <audio src={…}> via the existing Range-aware streamer.
+                if (len(path_parts) == 5 and path_parts[0] == "jobs"
+                        and path_parts[2] == "segments"
+                        and path_parts[4] == "preview-source"):
+                    job_id = path_parts[1]
+                    segment_id = path_parts[3]
+                    result = service.prepare_preview_source_cache(
+                        job_id, segment_id
+                    )
+                    self._write_json(HTTPStatus.OK, {"success": True, **result})
+                    return
+                # POST /jobs/{id}/segments/{sid}/split — split into two (2026-04-21)
+                if (len(path_parts) == 5 and path_parts[0] == "jobs"
+                        and path_parts[2] == "segments" and path_parts[4] == "split"):
+                    job_id = path_parts[1]
+                    segment_id = path_parts[3]
+                    payload = self._read_json_payload()
+                    try:
+                        split_source_index = int(payload.get("split_source_index"))
+                        split_cn_index = int(payload.get("split_cn_index"))
+                    except (TypeError, ValueError):
+                        raise ValueError(
+                            "split_source_index and split_cn_index are required integers"
+                        )
+                    speaker_a = str(payload.get("speaker_a") or "").strip()
+                    speaker_b = str(payload.get("speaker_b") or "").strip()
+                    if not speaker_a or not speaker_b:
+                        raise ValueError("speaker_a and speaker_b are required")
+                    result = service.split_editing_segment(
+                        job_id,
+                        segment_id,
+                        split_source_index=split_source_index,
+                        split_cn_index=split_cn_index,
+                        speaker_a=speaker_a,
+                        speaker_b=speaker_b,
+                    )
                     self._write_json(HTTPStatus.OK, {"success": True, **result})
                     return
                 # POST /jobs/{id}/segments/{sid}/status — explicit status change (T1-2)
@@ -550,6 +654,26 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
                     self._read_json_payload()  # body currently unused
                     result = service.regenerate_all_dirty_segments_async(
                         path_parts[1],
+                    )
+                    self._write_json(HTTPStatus.OK, {"success": True, **result})
+                    return
+                # POST /jobs/{id}/regenerate-all-tts/cancel?task_id=XXX — D39
+                # user-initiated cancel. Body optional; query param task_id
+                # is required (mirrors the /status GET). Returns
+                # {"cancelled": bool}: True means the flag was written and
+                # the worker will transition to stage='cancelled' on its
+                # next tick; False means no matching live batch.
+                if (len(path_parts) == 4 and path_parts[0] == "jobs"
+                        and path_parts[2] == "regenerate-all-tts"
+                        and path_parts[3] == "cancel"):
+                    from urllib.parse import parse_qs
+                    query = parse_qs(parsed_path.query)
+                    task_ids = query.get("task_id")
+                    if not task_ids or not task_ids[0].strip():
+                        raise ValueError("task_id query param is required")
+                    self._read_json_payload()  # swallow body if any
+                    result = service.request_regenerate_all_cancel(
+                        path_parts[1], task_ids[0].strip(),
                     )
                     self._write_json(HTTPStatus.OK, {"success": True, **result})
                     return
@@ -902,6 +1026,46 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
             except Exception as exc:  # pragma: no cover
                 self._send_sanitized_error(exc)
 
+        def do_PATCH(self) -> None:  # noqa: N802
+            # PATCH /jobs/{id} — currently only accepts ``display_name``
+            # (plan §6.5 / D16 rename). Any other body field returns 400
+            # to keep the surface area minimal — we'd rather add new
+            # fields explicitly than silently accept unknown mutations.
+            parsed_path = urlparse(self.path)
+            path_parts = [part for part in parsed_path.path.strip("/").split("/") if part]
+            try:
+                if len(path_parts) == 2 and path_parts[0] == "jobs":
+                    payload = self._read_json_payload()
+                    if not payload:
+                        self._write_json(
+                            HTTPStatus.BAD_REQUEST,
+                            {"error": "PATCH body must contain at least one supported field"},
+                        )
+                        return
+                    if "display_name" in payload:
+                        try:
+                            updated = service.update_display_name(
+                                path_parts[1], payload.get("display_name")
+                            )
+                        except KeyError:
+                            self._write_json(
+                                HTTPStatus.NOT_FOUND,
+                                {"error": f"Job not found: {path_parts[1]}"},
+                            )
+                            return
+                        self._write_json(HTTPStatus.OK, updated.to_dict())
+                        return
+                    self._write_json(
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": "Unsupported PATCH field; only display_name is writable"},
+                    )
+                    return
+                self._write_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
+            except ValueError as exc:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            except Exception as exc:  # pragma: no cover
+                self._send_sanitized_error(exc)
+
         def log_message(self, format: str, *args: object) -> None:  # noqa: A003
             del format, args
 
@@ -923,7 +1087,16 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(serialized_payload)))
             self.end_headers()
-            self.wfile.write(serialized_payload)
+            # 2026-04-21: write in chunks + flush between them. A single
+            # ``wfile.write(1.3MB)`` enters a degenerate state after ~5
+            # consecutive large responses on Python's stdlib
+            # ThreadingHTTPServer — subsequent requests ReadError on the
+            # Gateway's httpx side. Root cause appears to be socket
+            # send-buffer / BufferedIOBase interaction. Chunked write
+            # keeps each syscall's byte count small + flushes pressure
+            # downstream before the next write arrives. Tested stable
+            # across 100+ sequential 1.3MB payloads.
+            _write_chunks(self.wfile, serialized_payload)
 
         def _send_sanitized_error(self, exc: Exception) -> None:
             """Generic 500 response that never leaks internals.
@@ -962,7 +1135,7 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
                 )
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
-            self.wfile.write(payload)
+            _write_chunks(self.wfile, payload)
 
         def _write_stream(self, file_path: Path, *, content_type: str) -> None:
             """Range-aware file streaming (no Content-Disposition: attachment)."""

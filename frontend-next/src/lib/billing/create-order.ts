@@ -20,6 +20,7 @@ export type CreateOrderResponse = {
   target_plan_code: string
   billing_period: string
   provider: string
+  checkout_surface?: string
   checkout_url: string
   expires_at: string | null
 }

@@ -18,13 +18,18 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import PlainTextResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth import get_current_user
 from database import get_db
+from payment_provider_alipay import (
+    detect_checkout_surface,
+    validate_alipay_notify_payload,
+    validate_alipay_query_payload,
+)
 from models import (
     AdminAuditLog,
     BillingInvoice,
@@ -64,6 +69,7 @@ class CreateOrderRequest(BaseModel):
     target_plan_code: str
     billing_period: str = "monthly"
     provider: str = "fake"
+    checkout_surface: str | None = None
 
 
 # --- Order creation (provider-dispatched) ---
@@ -73,6 +79,7 @@ async def create_order(
     body: CreateOrderRequest,
     db: AsyncSession = Depends(get_db),
     user: User | None = Depends(get_current_user),
+    request: Request = None,  # type: ignore[assignment]
 ) -> dict:
     """Create a payment order for plan upgrade, dispatched through provider adapter."""
     if user is None:
@@ -108,6 +115,11 @@ async def create_order(
     if amount <= 0:
         raise HTTPException(status_code=400, detail="无法确定价格")
 
+    checkout_surface = detect_checkout_surface(
+        body.checkout_surface,
+        request.headers.get("user-agent") if request is not None else None,
+    )
+
     now = datetime.now(timezone.utc)
     order = PaymentOrder(
         user_id=user.id,
@@ -117,6 +129,7 @@ async def create_order(
         amount_cny=amount,
         status="created",
         expires_at=now + timedelta(minutes=ORDER_EXPIRY_MINUTES),
+        metadata_json={"checkout_surface": checkout_surface},
     )
     db.add(order)
     # Flush to get order.id without committing — if adapter fails, we rollback
@@ -129,6 +142,7 @@ async def create_order(
             amount_cny=amount,
             target_plan_code=body.target_plan_code,
             billing_period=body.billing_period,
+            checkout_surface=checkout_surface,
         )
     except Exception as exc:
         await db.rollback()
@@ -156,6 +170,7 @@ async def create_order(
         "target_plan_code": order.target_plan_code,
         "billing_period": order.billing_period,
         "provider": order.provider,
+        "checkout_surface": checkout_surface,
         "checkout_url": checkout.checkout_url,
         "expires_at": order.expires_at.isoformat() if order.expires_at else None,
     }
@@ -168,6 +183,7 @@ async def get_order(
     order_id: str,
     db: AsyncSession = Depends(get_db),
     user: User | None = Depends(get_current_user),
+    refresh: bool = False,
 ) -> dict:
     if user is None:
         raise HTTPException(status_code=401, detail="未登录")
@@ -181,6 +197,9 @@ async def get_order(
         if role != "admin":
             raise HTTPException(status_code=403, detail="无权查看此订单")
 
+    if refresh and order.provider == "alipay" and order.status in ("created", "pending"):
+        await _refresh_order_from_provider(db=db, order=order)
+
     return {
         "order_id": str(order.id),
         "status": order.status,
@@ -188,9 +207,73 @@ async def get_order(
         "target_plan_code": order.target_plan_code,
         "billing_period": order.billing_period,
         "provider": order.provider,
+        "provider_order_id": order.provider_order_id,
         "paid_at": order.paid_at.isoformat() if order.paid_at else None,
         "created_at": order.created_at.isoformat() if order.created_at else None,
     }
+
+
+async def _refresh_order_from_provider(
+    *,
+    db: AsyncSession,
+    order: PaymentOrder,
+) -> None:
+    try:
+        provider = get_provider(order.provider)
+    except KeyError:
+        return
+
+    try:
+        query_result = await provider.query_order(
+            order_id=str(order.id),
+            provider_order_id=order.provider_order_id,
+        )
+    except NotImplementedError:
+        return
+    except Exception as exc:
+        logger.warning("Provider %s order query failed for %s: %s", order.provider, order.id, exc)
+        return
+
+    if query_result is None:
+        return
+
+    if order.provider == "alipay":
+        try:
+            validate_alipay_query_payload(
+                _load_live_alipay_config(),
+                query_result.raw_payload,
+                order_id=str(order.id),
+                amount_cny=order.amount_cny,
+            )
+        except ValueError as exc:
+            logger.warning("Ignoring alipay query result for %s: %s", order.id, exc)
+            return
+
+    if query_result.provider_order_id and order.provider_order_id != query_result.provider_order_id:
+        order.provider_order_id = query_result.provider_order_id
+
+    new_status = provider.map_status(query_result.provider_status)
+    if new_status == "pending":
+        order.updated_at = datetime.now(timezone.utc)
+        await db.commit()
+        return
+
+    await _process_payment_event(
+        db=db,
+        provider=order.provider,
+        provider_event_id=query_result.provider_event_id,
+        event_type=f"payment.query.{new_status}",
+        order_id=str(order.id),
+        new_status=new_status,
+        signature_valid=True,
+        raw_payload=query_result.raw_payload,
+    )
+
+
+def _load_live_alipay_config():
+    from payment_provider_alipay import AlipayConfig
+
+    return AlipayConfig.from_env()
 
 
 # --- Checkout config (Task 5) ---
@@ -446,12 +529,12 @@ async def fake_pay_browser(
 
 # --- Webhook endpoint (provider-dispatched) ---
 
-@router.post("/webhooks/{provider_name}")
+@router.post("/webhooks/{provider_name}", response_model=None)
 async def receive_webhook(
     provider_name: str,
     request: Request,
     db: AsyncSession = Depends(get_db),
-) -> dict:
+) -> dict | PlainTextResponse:
     """Receive and process a payment webhook through provider adapter.
 
     Flow:
@@ -469,21 +552,17 @@ async def receive_webhook(
     except KeyError:
         raise HTTPException(status_code=400, detail=f"Unknown provider: {provider_name}")
 
-    # Verify signature through adapter
     try:
         signature_valid = provider.verify_signature(raw_body, headers)
     except NotImplementedError:
-        # Stub provider — signature verification not implemented
         signature_valid = False
     except Exception as exc:
         logger.warning("Signature verification error for %s: %s", provider_name, exc)
         signature_valid = False
 
-    # Parse webhook through adapter
     try:
         event = provider.parse_webhook(raw_body)
     except NotImplementedError:
-        # Stub provider — record raw payload as-is, mark unverified
         try:
             payload = json.loads(raw_body) if raw_body else {}
         except Exception:
@@ -498,15 +577,23 @@ async def receive_webhook(
             event_type=payload.get("event_type", "unknown"),
             order_id=payload.get("order_id", ""),
             new_status=payload.get("status", ""),
-            signature_valid=False,  # stub provider cannot verify
+            signature_valid=False,
             raw_payload=payload,
         )
-        return {"ok": True, "settled": settled}
+        return _provider_webhook_response(provider_name, settled)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"Invalid webhook payload: {exc}")
 
     if not event.provider_event_id:
         raise HTTPException(status_code=400, detail="missing provider_event_id")
+
+    if provider_name == "alipay":
+        signature_valid = signature_valid and await _validate_alipay_event_against_order(
+            db=db,
+            order_id=event.order_id,
+            payload=event.raw_payload,
+            is_query_result=False,
+        )
 
     settled = await _process_payment_event(
         db=db,
@@ -519,7 +606,49 @@ async def receive_webhook(
         raw_payload=event.raw_payload,
     )
 
+    return _provider_webhook_response(provider_name, settled)
+
+
+def _provider_webhook_response(
+    provider_name: str,
+    settled: bool,
+) -> dict | PlainTextResponse:
+    if provider_name == "alipay":
+        return PlainTextResponse("success")
     return {"ok": True, "settled": settled}
+
+
+async def _validate_alipay_event_against_order(
+    *,
+    db: AsyncSession,
+    order_id: str,
+    payload: dict | None,
+    is_query_result: bool,
+) -> bool:
+    result = await db.execute(select(PaymentOrder).where(PaymentOrder.id == order_id))
+    order = result.scalar_one_or_none()
+    if order is None:
+        return True
+
+    try:
+        if is_query_result:
+            validate_alipay_query_payload(
+                _load_live_alipay_config(),
+                payload,
+                order_id=str(order.id),
+                amount_cny=order.amount_cny,
+            )
+        else:
+            validate_alipay_notify_payload(
+                _load_live_alipay_config(),
+                payload,
+                order_id=str(order.id),
+                amount_cny=order.amount_cny,
+            )
+        return True
+    except ValueError as exc:
+        logger.warning("Alipay payload validation failed for %s: %s", order_id, exc)
+        return False
 
 
 # --- Core processing logic (provider-agnostic) ---
@@ -577,6 +706,11 @@ async def _process_payment_event(
         await db.commit()
         logger.warning("Webhook for unknown order %s", order_id)
         return False
+
+    if provider == "alipay" and raw_payload:
+        trade_no = str(raw_payload.get("trade_no", "")).strip()
+        if trade_no and order.provider_order_id != trade_no:
+            order.provider_order_id = trade_no
 
     # Terminal-state guard.
     #

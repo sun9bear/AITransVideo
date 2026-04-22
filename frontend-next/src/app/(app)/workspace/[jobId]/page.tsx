@@ -30,6 +30,7 @@ import {
   getProjectResultSummary,
 } from '@/lib/api/jobs'
 import { approveTranslationConfigReview, cancelJob } from '@/lib/api/reviews'
+import { getEntitlements } from '@/lib/api/entitlements'
 import { usePollingTask } from '@/lib/react/usePollingTask'
 import {
   type JobLogEntry,
@@ -65,6 +66,18 @@ export default function WorkspacePage() {
   const [pageError, setPageError] = useState<string | null>(null)
   const [isCancelling, setIsCancelling] = useState(false)
   const [webUiStage, setWebUiStage] = useState<string | null>(null)
+  // Plan §10.3: "关键进展" log panel + raw progressMessage text are admin-only.
+  // Non-admin users see only the stage label + a generic "处理中" fallback so
+  // provider names / UUIDs / raw error codes never leak into the UI. This is
+  // belt-and-braces with the server-side D25 redactor on /logs.
+  const [isAdmin, setIsAdmin] = useState(false)
+  useEffect(() => {
+    let cancelled = false
+    getEntitlements()
+      .then((ent) => { if (!cancelled) setIsAdmin(ent.ui?.show_admin_badge === true) })
+      .catch(() => { /* keep default: non-admin */ })
+    return () => { cancelled = true }
+  }, [])
   const prevStatusRef = useRef<string | null>(null)
 
   const loadJob = async (silent = false) => {
@@ -222,17 +235,16 @@ export default function WorkspacePage() {
           <StageProgress items={stageItems} />
         </div>
 
-        {/* Progress message */}
+        {/* Progress message — plan §10.1: the "正在处理 · XXX" heading
+         *  already surfaces in the big processing card below, so the
+         *  processing branch here is intentionally silent to avoid
+         *  displaying the same progressMessage twice. Other statuses
+         *  (review / editing / succeeded / failed) keep their concise
+         *  one-liner here because they don't render a dedicated card. */}
         <div className="mt-3 text-sm text-muted-foreground">
           {isWaitingForReview ? (
             <span className="text-amber-600 dark:text-amber-400 font-medium">
               当前需要处理：{getStageLabel(effectiveStage)}
-            </span>
-          ) : isProcessing ? (
-            <span>
-              {editGeneration > 0
-                ? `正在重合成 · 第 ${editGeneration} 次修改`
-                : (getUserFacingProgressMessage(job.progressMessage) ?? '任务正在处理中…')}
             </span>
           ) : isEditing ? (
             <span className="text-violet-600 dark:text-violet-400 font-medium">
@@ -249,7 +261,13 @@ export default function WorkspacePage() {
 
       {/* ===== Dynamic Content Area ===== */}
 
-      {/* Processing state */}
+      {/* Processing state — plan §10.4: non-admin users see a clean
+       *  "stage + generic reassurance" card. The raw progressMessage
+       *  (may contain provider names / retry-with-504 / UUIDs) is
+       *  admin-only. Admins still get the live message for debugging;
+       *  a more comprehensive D25 server-side redactor would let us
+       *  show something tighter to everyone, but until then the safe
+       *  default is a fixed fallback line. */}
       {isProcessing ? (
         <section className="surface-card p-8 text-center">
           <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-3 border-primary border-t-transparent" />
@@ -259,7 +277,9 @@ export default function WorkspacePage() {
               : `正在处理 · ${getStageLabel(effectiveStage)}`}
           </h3>
           <p className="mt-2 text-sm text-muted-foreground">
-            {getUserFacingProgressMessage(job.progressMessage) ?? '任务正在后台处理，页面会自动刷新…'}
+            {isAdmin
+              ? (getUserFacingProgressMessage(job.progressMessage) ?? '任务正在后台处理，页面会自动刷新…')
+              : '任务正在后台处理，页面会自动刷新…'}
           </p>
         </section>
       ) : null}
@@ -350,14 +370,20 @@ export default function WorkspacePage() {
         </>
       ) : null}
 
-      {/* Logs */}
-      <LogViewer
-        description="最近关键进展。"
-        emptyMessage="当前还没有关键进展。"
-        entries={logs}
-        initialVisibleCount={5}
-        title="关键进展"
-      />
+      {/* Logs — admin-only. Plan §10.3: non-admin users don't need to see
+       *  provider names / retry-with-504 / raw stack traces; those are
+       *  debugging aids for the ops role. Hiding the whole panel keeps
+       *  the workspace view concise (the processing card + stage dots
+       *  are the primary signal). */}
+      {isAdmin ? (
+        <LogViewer
+          description="最近关键进展。"
+          emptyMessage="当前还没有关键进展。"
+          entries={logs}
+          initialVisibleCount={5}
+          title="关键进展"
+        />
+      ) : null}
     </div>
   )
 }

@@ -15,9 +15,20 @@ import {
   ChevronRight,
   XCircle,
   RefreshCw,
+  Pencil,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import { StatusBadge } from "@/components/status-badge"
 import { NewTranslationDialog } from "@/components/workspace/NewTranslationDialog"
 import { ResultMediaCard } from "@/components/workspace/ResultMediaCard"
@@ -28,7 +39,7 @@ import {
   getUserFacingProgressMessage,
 } from "@/features/jobs/presentation"
 import { computeExpiryInfo, expiryColorClass, expiryLabel } from "@/features/jobs/expiry"
-import { listJobs } from "@/lib/api/jobs"
+import { listJobs, renameJob } from "@/lib/api/jobs"
 import { cancelJob, deleteJob } from "@/lib/api/reviews"
 import { ACTIVE_JOB_STATUSES, type JobSummary, type JobStatus } from "@/types/jobs"
 
@@ -96,6 +107,10 @@ function ProjectsContent() {
   const [cancellingId, setCancellingId] = useState<string | null>(null)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [dialogInitialUrl, setDialogInitialUrl] = useState<string | undefined>(undefined)
+  // Rename dialog state (plan §6.5 / D16). Tracks the target job + its
+  // pre-fill title so the Modal can open over any card without re-sorting.
+  const [renamingJob, setRenamingJob] = useState<JobSummary | null>(null)
+  const [renameSubmitting, setRenameSubmitting] = useState(false)
 
   const initialExpandDone = useRef(false)
   const prevJobIdsRef = useRef<Set<string>>(new Set())
@@ -226,6 +241,34 @@ function ProjectsContent() {
     setDialogOpen(true)
   }, [])
 
+  const handleRenameOpen = useCallback((job: JobSummary) => {
+    setRenamingJob(job)
+  }, [])
+
+  const handleRenameConfirm = useCallback(
+    async (newName: string) => {
+      if (!renamingJob) return
+      setRenameSubmitting(true)
+      try {
+        const updated = await renameJob(renamingJob.id, newName)
+        // Patch the one row in-place; avoid refetching the whole list
+        // just for a cosmetic change.
+        setJobs((prev) => prev.map((j) => (j.id === updated.id ? updated : j)))
+        toast.success(
+          updated.title === newName.trim()
+            ? "任务已重命名"
+            : `任务已重命名为 "${updated.title}"`, // collision suffix applied
+        )
+        setRenamingJob(null)
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "重命名失败")
+      } finally {
+        setRenameSubmitting(false)
+      }
+    },
+    [renamingJob],
+  )
+
   // ---- Derived state ----
 
   const activeTask = selectActiveTaskJob(jobs)
@@ -332,19 +375,31 @@ function ProjectsContent() {
       </div>
 
       <div className="grid gap-3 grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-        {sorted.map((job) => (
-          <ProjectCard
-            key={job.id}
-            job={job}
-            isExpanded={expanded.has(job.id)}
-            onToggle={() => toggleExpand(job.id)}
-            onDelete={() => void handleDelete(job)}
-            onCancel={() => void handleCancel(job)}
-            onReCreate={() => handleReCreate(job)}
-            isDeleting={deletingId === job.id}
-            isCancelling={cancellingId === job.id}
-          />
-        ))}
+        {sorted.map((job) => {
+          // D19: 副本卡片标题下显示 "· 派生自 <源名>"。源 job 多半在同一
+          // 用户的 list 里 — 直接从 `jobs` 里查一次即可；O(n) per card 对
+          // <100 条任务没压力。源已被 7d TTL 清理时 sourceJob 为 undefined,
+          // UI 会回退为 "· 副本"（仅标记派生，不挂悬空的源名）。
+          const sourceJob = job.copyOfJobId
+            ? jobs.find((j) => j.id === job.copyOfJobId)
+            : null
+          const sourceTitle = sourceJob ? getJobDisplayTitle(sourceJob) : null
+          return (
+            <ProjectCard
+              key={job.id}
+              job={job}
+              sourceTitle={sourceTitle}
+              isExpanded={expanded.has(job.id)}
+              onToggle={() => toggleExpand(job.id)}
+              onDelete={() => void handleDelete(job)}
+              onCancel={() => void handleCancel(job)}
+              onReCreate={() => handleReCreate(job)}
+              onRename={() => handleRenameOpen(job)}
+              isDeleting={deletingId === job.id}
+              isCancelling={cancellingId === job.id}
+            />
+          )
+        })}
       </div>
 
       <NewTranslationDialog
@@ -352,6 +407,13 @@ function ProjectsContent() {
         onOpenChange={handleDialogChange}
         onJobCreated={handleJobCreated}
         initialSourceUrl={dialogInitialUrl}
+      />
+
+      <RenameJobDialog
+        job={renamingJob}
+        submitting={renameSubmitting}
+        onConfirm={handleRenameConfirm}
+        onCancel={() => setRenamingJob(null)}
       />
     </div>
   )
@@ -407,20 +469,25 @@ function PageHeader({
 
 function ProjectCard({
   job,
+  sourceTitle,
   isExpanded,
   onToggle,
   onDelete,
   onCancel,
   onReCreate,
+  onRename,
   isDeleting,
   isCancelling,
 }: {
   job: JobSummary
+  /** D19: 显示"派生自 <源名>"时的源 job 标题。null = 非副本或源已被清理。 */
+  sourceTitle: string | null
   isExpanded: boolean
   onToggle: () => void
   onDelete: () => void
   onCancel: () => void
   onReCreate: () => void
+  onRename: () => void
   isDeleting: boolean
   isCancelling: boolean
 }) {
@@ -450,6 +517,13 @@ function ProjectCard({
             </span>
             <StatusBadge status={job.status} editGeneration={job.editGeneration ?? 0} />
           </div>
+          {/* D19: 副本派生关系小字标识。不可点（plan 明确：仅标记，不做 tree
+           *   视图）；源已被 7d TTL 清走时 fallback 成通用 "· 副本"。 */}
+          {job.copyOfJobId && (
+            <div className="text-[11px] text-muted-foreground truncate">
+              · 派生自 {sourceTitle ?? "已清理的任务"}
+            </div>
+          )}
           <div className="flex flex-wrap gap-1.5 text-xs text-muted-foreground">
             <span>{timeLabel(job.updatedAt)}</span>
             <span className={expiryColorClass(expiry.tier)}>
@@ -482,6 +556,7 @@ function ProjectCard({
             onDelete={onDelete}
             onCancel={onCancel}
             onReCreate={onReCreate}
+            onRename={onRename}
             isDeleting={isDeleting}
             isCancelling={isCancelling}
           />
@@ -659,6 +734,7 @@ function CardActions({
   onDelete,
   onCancel,
   onReCreate,
+  onRename,
   isDeleting,
   isCancelling,
 }: {
@@ -667,6 +743,7 @@ function CardActions({
   onDelete: () => void
   onCancel: () => void
   onReCreate: () => void
+  onRename: () => void
   isDeleting: boolean
   isCancelling: boolean
 }) {
@@ -674,30 +751,48 @@ function CardActions({
 
   // For collapsed cards, show contextual action + delete
   if (collapsed) {
+    // Rename is always available — a user may rename at any stage. Shown
+    // as an inline pencil icon next to the delete button; we skipped the
+    // full "..." dropdown for visual simplicity (§6.5 allows either).
+    const renameBtn = (
+      <Button
+        variant="ghost"
+        size="icon-xs"
+        onClick={onRename}
+        title="重命名"
+      >
+        <Pencil className="h-3.5 w-3.5 text-muted-foreground hover:text-primary" />
+      </Button>
+    )
+
     switch (job.status) {
       case "succeeded":
       case "cancelled":
       case "failed":
+      case "purged":
         return (
-          <Button
-            variant="ghost"
-            size="icon-xs"
-            onClick={onDelete}
-            disabled={isDeleting}
-            title="删除"
-          >
-            <Trash2 className="h-3.5 w-3.5 text-muted-foreground hover:text-red-400" />
-          </Button>
+          <>
+            {renameBtn}
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              onClick={onDelete}
+              disabled={isDeleting}
+              title="删除"
+            >
+              <Trash2 className="h-3.5 w-3.5 text-muted-foreground hover:text-red-400" />
+            </Button>
+          </>
         )
 
       case "running":
       case "queued":
       case "waiting_for_review":
       case "editing":
-        // Actions are shown in the expanded area (see ExpandedContent).
-        // editing explicitly routes its own confirm flow through the edit
-        // page — no collapsed-level action here.
-        return null
+        // Rename still works for in-flight jobs — users often name things
+        // mid-process once the video title comes in. Delete stays hidden
+        // (the cancel CTA lives in ExpandedContent).
+        return renameBtn
 
       default:
         return null
@@ -705,4 +800,94 @@ function CardActions({
   }
 
   return null
+}
+
+// ---------------------------------------------------------------------------
+// RenameJobDialog — plan §6.5 rename modal
+// ---------------------------------------------------------------------------
+//
+// Server-side validation is authoritative (gateway rejects empty / too-long /
+// forbidden-chars with 400). We mirror the cheapest checks here for inline
+// feedback, but never enforce stricter rules than the backend does.
+//
+// Display-width upper bound is 29 (24 title + 5 collision suffix budget);
+// we tell the user "约 12 中文字符" which matches the design spec §6.1.
+
+const FORBIDDEN_RENAME_CHARS = /[<>"/\\\x00]/
+
+function RenameJobDialog({
+  job,
+  submitting,
+  onConfirm,
+  onCancel,
+}: {
+  job: JobSummary | null
+  submitting: boolean
+  onConfirm: (newName: string) => void
+  onCancel: () => void
+}) {
+  const [value, setValue] = useState("")
+
+  // Reset the field whenever the target job changes.
+  useEffect(() => {
+    if (job) {
+      setValue(getJobDisplayTitle(job))
+    } else {
+      setValue("")
+    }
+  }, [job])
+
+  const trimmed = value.trim()
+  const tooLong = trimmed.length > 60
+  const hasBadChar = FORBIDDEN_RENAME_CHARS.test(trimmed)
+  const canSubmit = !!job && !submitting && !!trimmed && !tooLong && !hasBadChar
+
+  return (
+    <Dialog open={!!job} onOpenChange={(open) => { if (!open) onCancel() }}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>重命名任务</DialogTitle>
+          <DialogDescription>
+            最多约 12 个中文字符。与已有任务重名时会自动追加随机后缀。
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-2">
+          <Label htmlFor="rename-input">新任务名</Label>
+          <Input
+            id="rename-input"
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            disabled={submitting}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && canSubmit) {
+                e.preventDefault()
+                onConfirm(trimmed)
+              }
+            }}
+            autoFocus
+            maxLength={80}
+          />
+          {hasBadChar && (
+            <p className="text-xs text-red-500">
+              不能包含 {'<'} {'>'} " / \ 或空字符
+            </p>
+          )}
+          {tooLong && (
+            <p className="text-xs text-red-500">名称过长（超过 60 个字符）</p>
+          )}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onCancel} disabled={submitting}>
+            取消
+          </Button>
+          <Button
+            onClick={() => canSubmit && onConfirm(trimmed)}
+            disabled={!canSubmit}
+          >
+            {submitting ? "保存中…" : "保存"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
 }

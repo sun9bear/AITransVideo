@@ -264,21 +264,44 @@ class TestCreateJobQuotaIntegration:
         return req
 
     def _make_db(self, user, *, active_count=0):
-        """DB that supports both count queries and user lookups for quota."""
+        """DB that supports both count queries and user lookups for quota.
+
+        Query order (post 2026-04-21 display_name orchestrator):
+          1. concurrency COUNT
+          2. SELECT jobs.display_name (existing names, new)
+          3. SELECT COUNT(*) display_name LIKE (branch4, new, conditional)
+          4. existing-job check
+          5. reserve_quota user lookup
+
+        Queries 2 + 3 target ``jobs.display_name``; we dispatch by SQL
+        content so reordering stays robust."""
         db = AsyncMock()
         call_n = {"n": 0}
 
-        # count result
         count_result = MagicMock()
         count_result.scalar.return_value = active_count
-        # user result (for reserve_quota's select(User))
+
         user_result = MagicMock()
         user_result.scalar_one_or_none.return_value = user
-        # job-exists check
+
         no_job_result = MagicMock()
         no_job_result.scalar_one_or_none.return_value = None
 
-        async def smart_execute(*args, **kwargs):
+        names_result = MagicMock()
+        names_result.all.return_value = []  # no existing display_names
+
+        branch4_result = MagicMock()
+        branch4_result.scalar.return_value = 0  # no branch-4 names today
+
+        async def smart_execute(stmt, *args, **kwargs):
+            sql_text = str(stmt).lower()
+            # Dispatch by unique WHERE clauses; ``select(Job)`` also
+            # contains the column ``jobs.display_name`` so we can't just
+            # check for its presence.
+            if "display_name is not null" in sql_text:
+                return names_result
+            if "display_name like" in sql_text:
+                return branch4_result
             call_n["n"] += 1
             if call_n["n"] == 1:
                 return count_result  # concurrency count
@@ -301,7 +324,7 @@ class TestCreateJobQuotaIntegration:
         db = self._make_db(user, active_count=0)
 
         with patch("job_intercept.proxy_request", new_callable=AsyncMock):
-            with patch("job_intercept._probe_youtube_duration", return_value=None):
+            with patch("job_intercept._probe_youtube_metadata", return_value=None):
                 resp = _run(intercept_create_job(req, db, user))
 
         body = json.loads(resp.body)
@@ -326,7 +349,7 @@ class TestCreateJobQuotaIntegration:
                       headers={"content-type": "application/json"})
 
         with patch("job_intercept.proxy_request", side_effect=fake_proxy):
-            with patch("job_intercept._probe_youtube_duration", return_value=None):
+            with patch("job_intercept._probe_youtube_metadata", return_value=None):
                 resp = _run(intercept_create_job(req, db, user))
 
         assert resp.status_code == 202
@@ -349,7 +372,7 @@ class TestCreateJobQuotaIntegration:
                       headers={"content-type": "application/json"})
 
         with patch("job_intercept.proxy_request", side_effect=fake_proxy):
-            with patch("job_intercept._probe_youtube_duration", return_value=None):
+            with patch("job_intercept._probe_youtube_metadata", return_value=None):
                 resp = _run(intercept_create_job(req, db, user))
 
         assert resp.status_code == 202
@@ -372,7 +395,7 @@ class TestCreateJobQuotaIntegration:
                       headers={"content-type": "application/json"})
 
         with patch("job_intercept.proxy_request", side_effect=fake_proxy):
-            with patch("job_intercept._probe_youtube_duration", return_value=None):
+            with patch("job_intercept._probe_youtube_metadata", return_value=None):
                 resp = _run(intercept_create_job(req, db, user))
 
         assert resp.status_code == 202
@@ -389,17 +412,27 @@ class TestCreateJobQuotaIntegration:
         })
 
         # Build a DB mock where:
-        #   call 1: count → 0 (concurrency OK)
-        #   call 2: select Job → None (no existing job)
-        #   call 3: select User for reserve_quota → user with used=5 (exhausted)
+        #   legacy call 1: concurrency count → 0 (OK)
+        #   legacy call 2: existing-job lookup → None
+        #   legacy call 3: reserve_quota user lookup → user with used=5 (exhausted)
+        # Display-name orchestrator queries (dispatched by SQL content, not
+        # call index) return "no existing names, 0 branch-4 names today" so
+        # they don't interfere with the exhaustion simulation.
         exhausted_user = _make_user(quota_total=5, quota_used=5)
         db = AsyncMock()
         count_result = MagicMock(); count_result.scalar.return_value = 0
         no_job_result = MagicMock(); no_job_result.scalar_one_or_none.return_value = None
         exhausted_result = MagicMock(); exhausted_result.scalar_one_or_none.return_value = exhausted_user
+        names_result = MagicMock(); names_result.all.return_value = []
+        branch4_result = MagicMock(); branch4_result.scalar.return_value = 0
         call_n = {"n": 0}
 
-        async def smart_execute(*args, **kwargs):
+        async def smart_execute(stmt, *args, **kwargs):
+            sql_text = str(stmt).lower()
+            if "display_name is not null" in sql_text:
+                return names_result
+            if "display_name like" in sql_text:
+                return branch4_result
             call_n["n"] += 1
             if call_n["n"] == 1: return count_result
             if call_n["n"] == 2: return no_job_result
@@ -419,7 +452,7 @@ class TestCreateJobQuotaIntegration:
 
         compensate_mock = AsyncMock()
         with patch("job_intercept.proxy_request", side_effect=fake_proxy):
-            with patch("job_intercept._probe_youtube_duration", return_value=None):
+            with patch("job_intercept._probe_youtube_metadata", return_value=None):
                 with patch("job_intercept._compensate_upstream_job", compensate_mock):
                     resp = _run(intercept_create_job(req, db, user))
 

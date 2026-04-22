@@ -47,8 +47,12 @@ __all__ = [
     "load_editing_segments",
     "load_segment_status",
     "patch_editing_segment",
+    "split_editing_segment",
+    "slice_source_audio_for_editing_segment",
     "mark_segment_status",
     "editing_payload",
+    "cache_preview_source_wav",
+    "preview_cache_path",
 ]
 
 # Segment status vocabulary. Frontend renders one-to-one against this set.
@@ -82,6 +86,12 @@ PATCHABLE_SEGMENT_FIELDS: frozenset[str] = frozenset({
     # voice_id + tts_provider from the new speaker's baseline and clears
     # any stale voice_map override on this segment.
     "speaker_id",
+    # 2026-04-21: source_text editable so users can correct upstream S1
+    # ASR mistakes. No auto-retranslate — user is responsible for also
+    # updating cn_text before re-TTS. Symmetric with cn_text: modifies the
+    # segment text and marks ``text_dirty`` so the next re-TTS picks up
+    # the new content.
+    "source_text",
     # voice_id changes go through the voice_map.json helper (T1-6), NOT this
     # patch path, so ``voice_id`` is intentionally excluded here.
 })
@@ -297,7 +307,7 @@ def patch_editing_segment(
             continue
         # Minimal normalisation — text fields get str() + strip to avoid
         # accidental whitespace-only "edits".
-        if key in {"cn_text"}:
+        if key in {"cn_text", "source_text"}:
             if value is None:
                 continue
             value = str(value)
@@ -355,7 +365,8 @@ def patch_editing_segment(
         if segment_id in load_voice_map(project_dir):
             clear_voice_override(project_dir, segment_id)
         mark_segment_status(project_dir, segment_id, SEGMENT_STATUS_VOICE_DIRTY)
-    elif "cn_text" in applied:
+    elif "cn_text" in applied or "source_text" in applied:
+        # Either text field edit means the current TTS is for stale content.
         mark_segment_status(project_dir, segment_id, SEGMENT_STATUS_TEXT_DIRTY)
 
     return updated
@@ -538,3 +549,349 @@ def compute_residual_segment_status(
     if _cn_text_differs_from_baseline(project_dir, segment_id):
         return SEGMENT_STATUS_TEXT_DIRTY
     return SEGMENT_STATUS_ACCEPTED
+
+
+# ---------------------------------------------------------------------------
+# split_editing_segment (2026-04-21 / plan §7.4) — splits one segment into
+# two at user-chosen character positions in the source text and cn_text.
+# Mirrors ``web_ui/translation_review._split_segment`` in intent but
+# operates on the editing-mode ``editor/editing/segments.json`` schema
+# (different from translation-review's pre-alignment segments).
+# ---------------------------------------------------------------------------
+
+
+def _derive_split_ids(base_id: str, existing_ids: set[str]) -> tuple[str, str]:
+    """Pick two unique segment_ids derived from ``base_id``.
+
+    Scheme: ``<base>_a`` / ``<base>_b``; on collision (rare: user has
+    already split this segment before) fall through to numeric suffixes.
+    Segment_id format is ``^[a-z0-9_]{1,64}$`` (see
+    input_validators.SEGMENT_ID_RE) so the suffix must match that pattern.
+    """
+    for suffix_a, suffix_b in (
+        ("_a", "_b"),
+        ("_split_a", "_split_b"),
+    ):
+        candidate_a = f"{base_id}{suffix_a}"
+        candidate_b = f"{base_id}{suffix_b}"
+        if candidate_a not in existing_ids and candidate_b not in existing_ids:
+            return candidate_a, candidate_b
+    # Numeric fallback — loops until free slots show up.
+    n = 1
+    while True:
+        candidate_a = f"{base_id}_s{n}a"
+        candidate_b = f"{base_id}_s{n}b"
+        if candidate_a not in existing_ids and candidate_b not in existing_ids:
+            return candidate_a, candidate_b
+        n += 1
+
+
+def split_editing_segment(
+    project_dir: str | Path,
+    *,
+    segment_id: str,
+    split_source_index: int,
+    split_cn_index: int,
+    speaker_a: str,
+    speaker_b: str,
+) -> dict[str, Any]:
+    """Replace one segment with two, both text-dirty.
+
+    Args:
+        project_dir: project root (contains ``editor/editing/``).
+        segment_id: id of the segment being split.
+        split_source_index: character index into ``source_text`` at which
+            to cut. Must satisfy ``0 < split_source_index < len(source_text)``.
+        split_cn_index: character index into ``cn_text``. Same bounds.
+        speaker_a / speaker_b: speaker_id assigned to each half.
+
+    Returns:
+        ``{"replaced_segment_id": ..., "new_segments": [A_dict, B_dict],
+           "total_count": N}``.
+
+    Side-effects:
+        - Writes ``editor/editing/segments.json`` atomically.
+        - Marks both new segment_ids as ``text_dirty`` so the next
+          re-TTS picks them up. The old segment's status entry (if any)
+          is removed since the id no longer exists.
+        - Preserves untouched segments' order and fields.
+        - Does NOT touch baseline ``editor/segments.json`` — commit
+          picks up editing/* as the authoritative copy.
+    """
+    validate_segment_id(segment_id)
+    _ensure_editing_dir(project_dir)
+
+    segments = load_editing_segments(project_dir)
+
+    index: int | None = None
+    target = str(segment_id)
+    for i, seg in enumerate(segments):
+        if isinstance(seg, dict) and str(seg.get("segment_id")) == target:
+            index = i
+            break
+    if index is None:
+        raise EditingConflictError(
+            f"segment_id {segment_id!r} not found in editing/segments.json"
+        )
+
+    original = dict(segments[index])
+    source_text = str(original.get("source_text") or "")
+    cn_text = str(original.get("cn_text") or "")
+
+    if not (0 < split_source_index < len(source_text)):
+        raise ValueError(
+            f"split_source_index {split_source_index} produces an empty half; "
+            f"must be in (0, {len(source_text)}) for source_text of length "
+            f"{len(source_text)}"
+        )
+    if not (0 < split_cn_index < len(cn_text)):
+        raise ValueError(
+            f"split_cn_index {split_cn_index} produces an empty half; "
+            f"must be in (0, {len(cn_text)}) for cn_text of length "
+            f"{len(cn_text)}"
+        )
+
+    # Time split is proportional to the source-character position. We lack
+    # word-level timing in editing mode (it's an alignment detail), so a
+    # uniform speaking-rate assumption is the honest approximation — the
+    # downstream re-alignment will re-anchor using the new TTS waveforms.
+    start_ms = int(original.get("start_ms", 0) or 0)
+    end_ms = int(original.get("end_ms", start_ms) or start_ms)
+    ratio = split_source_index / len(source_text) if source_text else 0.5
+    mid_ms = start_ms + int(round((end_ms - start_ms) * ratio))
+
+    existing_ids = {
+        str(s.get("segment_id"))
+        for s in segments
+        if isinstance(s, dict) and s.get("segment_id") is not None
+    }
+    # The segment we're about to replace is part of ``existing_ids`` but
+    # its id slot will be freed; exclude it so we can still reuse ``base_a``.
+    existing_ids.discard(target)
+    new_id_a, new_id_b = _derive_split_ids(target, existing_ids)
+
+    # Build the two new dicts inheriting everything from the original
+    # except what we want to split/override. We keep pass-through fields
+    # (alignment_method, voice_id, tts_provider, etc.) so the editing
+    # state survives the split without losing upstream metadata.
+    seg_a = dict(original)
+    seg_a.update(
+        segment_id=new_id_a,
+        source_text=source_text[:split_source_index],
+        cn_text=cn_text[:split_cn_index],
+        speaker_id=str(speaker_a).strip() or original.get("speaker_id"),
+        start_ms=start_ms,
+        end_ms=mid_ms,
+    )
+    seg_b = dict(original)
+    seg_b.update(
+        segment_id=new_id_b,
+        source_text=source_text[split_source_index:],
+        cn_text=cn_text[split_cn_index:],
+        speaker_id=str(speaker_b).strip() or original.get("speaker_id"),
+        start_ms=mid_ms,
+        end_ms=end_ms,
+    )
+
+    new_segments = list(segments)
+    new_segments[index : index + 1] = [seg_a, seg_b]
+    _atomic_write_json(_segments_path(project_dir), new_segments)
+
+    # Status bookkeeping: both halves need re-TTS (old draft was sized
+    # for the old full segment). Drop the old id's status entry since
+    # that id no longer exists; a stale "accepted" entry would otherwise
+    # linger until the next write flushed it.
+    mark_segment_status(project_dir, new_id_a, SEGMENT_STATUS_TEXT_DIRTY)
+    mark_segment_status(project_dir, new_id_b, SEGMENT_STATUS_TEXT_DIRTY)
+    status = load_segment_status(project_dir)
+    if target in status:
+        status.pop(target, None)
+        _atomic_write_json(_segment_status_path(project_dir), status)
+
+    return {
+        "replaced_segment_id": target,
+        "new_segments": [seg_a, seg_b],
+        "total_count": len(new_segments),
+    }
+
+
+# ---------------------------------------------------------------------------
+# slice_source_audio_for_editing_segment (2026-04-21 / plan §7.4) — returns
+# a base64-encoded WAV slice of the ORIGINAL (pre-translation) audio for
+# one segment's time range. Parallels web_ui.review_actions.preview_segment's
+# source-clip branch, but scoped to editing-mode data.
+# ---------------------------------------------------------------------------
+
+
+_SOURCE_AUDIO_CANDIDATES: tuple[str, ...] = (
+    # Preferred: the speech-isolated track (mono 16k, smaller + denoised
+    # by the separator step). Falls back to the raw original if
+    # separation didn't run or was cleaned up.
+    "audio/speech_for_asr.wav",
+    "audio/original.wav",
+)
+
+
+def _find_source_audio_path(project_dir: str | Path) -> Path | None:
+    root = Path(project_dir)
+    for candidate_name in _SOURCE_AUDIO_CANDIDATES:
+        p = root / candidate_name
+        if p.is_file():
+            return p
+    return None
+
+
+def _get_editing_segment_timing(
+    project_dir: str | Path, segment_id: str
+) -> tuple[int, int]:
+    """Return (start_ms, end_ms) for one editing segment.
+
+    Raises EditingConflictError if the segment is missing; raises
+    ValueError if the segment has no usable timing info (unlikely — upstream
+    pipeline always writes start_ms/end_ms, but we don't want to emit a
+    0 ms slice silently)."""
+    segments = load_editing_segments(project_dir)
+    target = str(segment_id)
+    for seg in segments:
+        if isinstance(seg, dict) and str(seg.get("segment_id")) == target:
+            try:
+                start_ms = int(seg.get("start_ms", 0) or 0)
+                end_ms = int(seg.get("end_ms", 0) or 0)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"segment {segment_id!r} has non-integer timing fields"
+                ) from exc
+            if end_ms <= start_ms:
+                raise ValueError(
+                    f"segment {segment_id!r} has zero-or-negative duration: "
+                    f"start_ms={start_ms}, end_ms={end_ms}"
+                )
+            return start_ms, end_ms
+    raise EditingConflictError(
+        f"segment_id {segment_id!r} not found in editing/segments.json"
+    )
+
+
+def _ffmpeg_slice_to_wav_bytes(
+    source_audio_path: Path,
+    start_ms: int,
+    end_ms: int,
+    *,
+    timeout_s: int = 30,
+) -> bytes:
+    """Run ffmpeg to cut ``source_audio_path`` to a mono 16k WAV byte
+    stream. Separated from the dispatcher so tests can monkeypatch this
+    one function without touching the full slicer."""
+    import subprocess
+    start_s = start_ms / 1000.0
+    end_s = end_ms / 1000.0
+    result = subprocess.run(
+        [
+            "ffmpeg", "-y",
+            "-i", str(source_audio_path),
+            "-ss", str(start_s),
+            "-to", str(end_s),
+            "-acodec", "pcm_s16le",
+            "-ar", "16000",
+            "-ac", "1",
+            "-f", "wav",
+            "pipe:1",
+        ],
+        capture_output=True,
+        timeout=timeout_s,
+    )
+    if result.returncode != 0 or not result.stdout:
+        stderr_tail = (result.stderr or b"")[-2000:].decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"ffmpeg slice failed (rc={result.returncode}): {stderr_tail}"
+        )
+    return result.stdout
+
+
+def slice_source_audio_for_editing_segment(
+    project_dir: str | Path,
+    segment_id: str,
+) -> dict[str, object]:
+    """Produce a base64-encoded WAV slice of the source audio for one
+    editing segment, ready to be piped into an HTML ``<audio>`` element
+    via ``data:audio/wav;base64,...``.
+
+    Timing comes from ``editor/editing/segments.json`` (not the baseline),
+    so if a prior split edited the boundaries the preview matches what
+    the user sees.
+
+    2026-04-21 NOTE: this path is kept for callers that truly want the
+    inline base64 (unit tests). Production HTTP path uses
+    :func:`cache_preview_source_wav` + the GET stream endpoint to avoid
+    the ``RemoteProtocolError`` on 1 MB+ JSON bodies through
+    Uvicorn+httpx.
+    """
+    import base64
+
+    wav_bytes, meta = _slice_source_audio_bytes(project_dir, segment_id)
+    return {
+        "source_audio_base64": base64.b64encode(wav_bytes).decode("ascii"),
+        **meta,
+    }
+
+
+def _slice_source_audio_bytes(
+    project_dir: str | Path, segment_id: str,
+) -> tuple[bytes, dict[str, object]]:
+    """Shared core: slice the source audio to WAV bytes + return timing meta."""
+    validate_segment_id(segment_id)
+    start_ms, end_ms = _get_editing_segment_timing(project_dir, segment_id)
+
+    source_path = _find_source_audio_path(project_dir)
+    if source_path is None:
+        raise RuntimeError(
+            "源音频文件不存在（audio/speech_for_asr.wav 或 "
+            "audio/original.wav 都未找到）。"
+        )
+
+    wav_bytes = _ffmpeg_slice_to_wav_bytes(source_path, start_ms, end_ms)
+    meta = {
+        "mime_type": "audio/wav",
+        "start_ms": start_ms,
+        "end_ms": end_ms,
+        "duration_ms": end_ms - start_ms,
+    }
+    return wav_bytes, meta
+
+
+# Cache lives under editing/ so it's auto-cleaned by commit / cancel /
+# idle-scanner's editor/editing/ teardown — no separate TTL needed.
+_PREVIEW_CACHE_SUBDIR = "preview_cache"
+
+
+def cache_preview_source_wav(
+    project_dir: str | Path, segment_id: str,
+) -> tuple[Path, dict[str, object]]:
+    """Slice the source audio and persist the WAV to
+    ``editor/editing/preview_cache/{segment_id}.wav``. Returns the
+    (path, meta) pair.
+
+    Overwrites any existing cache for the same segment — fresh edits
+    to timing are picked up without explicit invalidation. Atomic via
+    tmp-then-rename so a concurrent GET stream won't read a half-written
+    file.
+    """
+    _ensure_editing_dir(project_dir)
+    wav_bytes, meta = _slice_source_audio_bytes(project_dir, segment_id)
+    cache_dir = _editing_dir(project_dir) / _PREVIEW_CACHE_SUBDIR
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    final_path = cache_dir / f"{segment_id}.wav"
+    tmp_path = cache_dir / f"{segment_id}.wav.tmp"
+    tmp_path.write_bytes(wav_bytes)
+    tmp_path.replace(final_path)
+    return final_path, meta
+
+
+def preview_cache_path(
+    project_dir: str | Path, segment_id: str,
+) -> Path:
+    """Return the expected cache path for this segment's preview WAV
+    (file may or may not exist — caller must check)."""
+    return (
+        _editing_dir(project_dir) / _PREVIEW_CACHE_SUBDIR / f"{segment_id}.wav"
+    )

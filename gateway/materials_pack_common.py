@@ -20,7 +20,13 @@ ITEM_TO_ARTIFACT_KEYS: dict[str, list[str]] = {
     "subtitles": ["editor.subtitles", "editor.subtitles_en", "editor.subtitles_bilingual"],
 }
 
-MAX_ZIP_SIZE_BYTES = 500 * 1024 * 1024  # 500 MB
+# 2026-04-21: 500 MB was too tight for real long-form inputs — a 100-min
+# podcast's source_video (1.8 GB) + dubbed_audio_complete (1.1 GB) + per-
+# segment tts wavs (1 GB+) trivially crosses 3 GB. Raised to 5 GB to cover
+# the common long-video case; per-plan quotas live in admin settings for
+# future enforcement. Zips over this limit still fail cleanly with
+# "素材包过大，请减少选择项".
+MAX_ZIP_SIZE_BYTES = 5 * 1024 * 1024 * 1024  # 5 GB
 
 
 def load_artifact_index(project_dir: Path) -> dict[str, str]:

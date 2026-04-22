@@ -1,31 +1,9 @@
 "use client"
 
-/**
- * Billing status banner (Task 6).
- *
- * Consumes the redirect query params that the T5 fake-pay browser handler
- * emits, and renders a small, calm result surface at the top of
- * `/settings/billing`. The component does NOT raise or disappear on unknown
- * status values — it only renders when the current `?status=` is one of the
- * values we know how to explain, and stays silent otherwise.
- *
- * Known status values (from T5 `fake_pay_browser`):
- * - `paid`              → success surface, optional subscription context
- * - `already_settled`   → neutral surface, nothing new happened
- * - `error` + reason    → error surface with translated reason
- *
- * After mounting we call `router.replace` once to strip the query param from
- * the URL, so a hard reload or a browser back-navigation later doesn't show
- * a stale "支付成功" banner. The cleared URL keeps the same pathname, so the
- * component's own message stays visible until unmount.
- *
- * Design: matches DESIGN.md §4.3 billing guardrails — restrained, neutral
- * surface, clear state labels, no drama. No marketing typography.
- */
-
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { usePathname, useRouter, useSearchParams } from "next/navigation"
-import { CheckCircle2, AlertCircle, Info, X } from "lucide-react"
+import { AlertCircle, CheckCircle2, Info, X } from "lucide-react"
+import { getOrder, type PaymentOrderStatus } from "@/lib/billing/get-order"
 import { cn } from "@/lib/utils"
 
 type BannerTone = "success" | "info" | "error"
@@ -36,8 +14,12 @@ type BannerContent = {
   body: string
 }
 
+type BillingStatusBannerProps = {
+  onOrderSettled?: () => void
+}
+
 const ERROR_REASON_COPY: Record<string, string> = {
-  order_not_found: "未找到对应的订单,可能已经过期或已取消。",
+  order_not_found: "未找到对应的订单，可能已经过期或被取消。",
 }
 
 function readBannerFromStatus(
@@ -49,42 +31,75 @@ function readBannerFromStatus(
     return {
       tone: "success",
       title: "支付成功",
-      body: "订单已处理,你的订阅信息已更新。",
+      body: "订单已处理，你的订阅信息已更新。",
     }
   }
   if (status === "already_settled") {
     return {
       tone: "info",
       title: "订单已处理",
-      body: "这个订单此前已经支付成功,当前没有新的扣款。",
+      body: "这个订单此前已经支付成功，当前没有新的扣款。",
     }
   }
   if (status === "error") {
-    const detail =
-      (reason && ERROR_REASON_COPY[reason]) ||
-      "支付流程未能完成,请稍后重试或返回下方选择套餐。"
     return {
       tone: "error",
       title: "支付未完成",
-      body: detail,
+      body:
+        (reason && ERROR_REASON_COPY[reason]) ||
+        "支付流程未能完成，请稍后重试或重新创建订单。",
     }
   }
   return null
 }
 
+function readBannerFromOrderStatus(status: PaymentOrderStatus): BannerContent {
+  if (status === "paid") {
+    return {
+      tone: "success",
+      title: "支付成功",
+      body: "系统已经确认到账，订阅与权益会自动刷新。",
+    }
+  }
+  if (status === "failed") {
+    return {
+      tone: "error",
+      title: "支付失败",
+      body: "订单未能完成支付，请重新发起支付或稍后再试。",
+    }
+  }
+  if (status === "cancelled" || status === "expired") {
+    return {
+      tone: "info",
+      title: "订单未完成",
+      body: "订单当前未支付完成，如需升级可重新创建订单。",
+    }
+  }
+  if (status === "refunded") {
+    return {
+      tone: "info",
+      title: "订单已退款",
+      body: "退款状态已同步到账单记录中。",
+    }
+  }
+  return {
+    tone: "info",
+    title: "正在确认支付结果",
+    body: "支付完成后，系统会自动确认订单状态，请稍候。",
+  }
+}
+
 function toneStyles(tone: BannerTone) {
   if (tone === "success") {
     return {
-      container:
-        "border-primary/30 bg-primary/5 text-foreground",
+      container: "border-primary/30 bg-primary/5 text-foreground",
       iconClass: "text-primary",
       Icon: CheckCircle2,
     }
   }
   if (tone === "error") {
     return {
-      container:
-        "border-destructive/40 bg-destructive/5 text-foreground",
+      container: "border-destructive/40 bg-destructive/5 text-foreground",
       iconClass: "text-destructive",
       Icon: AlertCircle,
     }
@@ -96,30 +111,93 @@ function toneStyles(tone: BannerTone) {
   }
 }
 
-export function BillingStatusBanner() {
+async function sleep(ms: number) {
+  await new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+export function BillingStatusBanner({
+  onOrderSettled,
+}: BillingStatusBannerProps) {
   const searchParams = useSearchParams()
   const pathname = usePathname()
   const router = useRouter()
 
-  // Snapshot the status once on mount so a subsequent router.replace that
-  // strips the query param does NOT cause the banner to disappear between
-  // renders. The banner stays visible until unmount / dismiss.
   const [initialStatus] = useState(() => searchParams.get("status"))
   const [initialReason] = useState(() => searchParams.get("reason"))
+  const [initialOrderId] = useState(() => searchParams.get("order_id"))
+  const [initialProvider] = useState(() => searchParams.get("provider"))
   const [dismissed, setDismissed] = useState(false)
+  const [content, setContent] = useState<BannerContent | null>(() => {
+    if (initialOrderId && initialProvider === "alipay") {
+      return readBannerFromOrderStatus("pending")
+    }
+    return readBannerFromStatus(initialStatus, initialReason)
+  })
+  const onOrderSettledRef = useRef(onOrderSettled)
+  const notifiedRef = useRef(false)
 
   useEffect(() => {
-    // Clean the URL exactly once so refresh / back-nav does not re-trigger
-    // the banner. We only touch the URL when there's something to clean.
-    if (!initialStatus) return
-    const current = searchParams.get("status")
-    if (!current) return
-    router.replace(pathname, { scroll: false })
-    // We intentionally depend on an empty dep list style: mount-only cleanup.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+    onOrderSettledRef.current = onOrderSettled
+  }, [onOrderSettled])
 
-  const content = readBannerFromStatus(initialStatus, initialReason)
+  useEffect(() => {
+    const shouldClean =
+      Boolean(initialStatus) ||
+      Boolean(initialReason) ||
+      Boolean(initialOrderId) ||
+      Boolean(initialProvider)
+    if (!shouldClean) return
+    router.replace(pathname, { scroll: false })
+  }, [initialOrderId, initialProvider, initialReason, initialStatus, pathname, router])
+
+  useEffect(() => {
+    if (!initialOrderId || initialProvider !== "alipay") return
+    let cancelled = false
+    const orderId = initialOrderId
+
+    async function pollOrderStatus() {
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        try {
+          const order = await getOrder(orderId, { refresh: true })
+          if (cancelled) return
+          const nextContent = readBannerFromOrderStatus(order.status)
+          setContent(nextContent)
+          if (order.status !== "created" && order.status !== "pending") {
+            if (!notifiedRef.current) {
+              notifiedRef.current = true
+              onOrderSettledRef.current?.()
+            }
+            return
+          }
+        } catch (error) {
+          if (cancelled) return
+          const message =
+            error instanceof Error ? error.message : "支付结果确认失败，请稍后刷新重试。"
+          setContent({
+            tone: "error",
+            title: "支付结果确认失败",
+            body: message,
+          })
+          return
+        }
+        await sleep(2000)
+      }
+
+      if (!cancelled) {
+        setContent({
+          tone: "info",
+          title: "仍在确认支付结果",
+          body: "订单状态还在同步中，你可以稍后刷新此页面再次查看。",
+        })
+      }
+    }
+
+    void pollOrderStatus()
+    return () => {
+      cancelled = true
+    }
+  }, [initialOrderId, initialProvider])
+
   if (!content || dismissed) return null
 
   const { container, iconClass, Icon } = toneStyles(content.tone)

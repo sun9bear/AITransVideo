@@ -8,8 +8,10 @@ import {
   ArrowLeft,
   Check,
   Loader2,
+  Play,
   PlaySquare,
   RefreshCw,
+  Scissors,
   Sparkles,
   Trash2,
   X,
@@ -25,9 +27,13 @@ import {
   getEditingSegments,
   getVoiceMap,
   patchSegmentText,
+  previewEditingSegmentSource,
+  buildPreviewSourceStreamUrl,
   regenerateSegmentTts,
   regenerateAllDirtyTts,
   getRegenerateAllStatus,
+  cancelRegenerateAll,
+  splitEditingSegment,
   type CommitStrategy,
   type EditingSegment,
   type EditingSegmentsResponse,
@@ -69,6 +75,13 @@ export default function VideoEditPage() {
   const [savingSegmentIds, setSavingSegmentIds] = useState<Set<string>>(new Set())
   const [regeneratingSegmentIds, setRegeneratingSegmentIds] = useState<Set<string>>(new Set())
   const [isBatchRegenerating, setIsBatchRegenerating] = useState(false)
+  // D39 cancel: store the in-flight task_id so the "取消批量合成" button
+  // can reach the backend cancel endpoint. null when no batch is running.
+  const [batchTaskId, setBatchTaskId] = useState<string | null>(null)
+  // Optimistic state: set true the instant the cancel button is clicked
+  // so the UI doesn't keep showing "正在合成" while the signal propagates
+  // (~1-2s between click and worker observing cancel_requested).
+  const [isCancellingBatch, setIsCancellingBatch] = useState(false)
   const [isCommitting, setIsCommitting] = useState(false)
   const [commitModalOpen, setCommitModalOpen] = useState(false)
   const [commitStrategy, setCommitStrategy] = useState<CommitStrategy>("overwrite")
@@ -145,6 +158,12 @@ export default function VideoEditPage() {
         setJob(current)
         if (current.status !== "editing") {
           // Transition first. 409 here means someone raced us — load anyway.
+          // D45: 10s watchdog toast — gateway should come back in <1s normally;
+          // if it hasn't by 10s the user at least knows the request is in
+          // flight (reassurance) instead of a silent blank screen.
+          const slowToastTimer = window.setTimeout(() => {
+            toast.loading("正在准备修改环境，可能网络较慢…", { id: "enter-edit-slow" })
+          }, 10_000)
           try {
             await enterEditing(jobId)
           } catch (err) {
@@ -152,6 +171,9 @@ export default function VideoEditPage() {
             if (!msg.includes("409")) {
               throw err
             }
+          } finally {
+            window.clearTimeout(slowToastTimer)
+            toast.dismiss("enter-edit-slow")
           }
         }
         await loadData()
@@ -246,6 +268,106 @@ export default function VideoEditPage() {
     [jobId, speakerNameMap],
   )
 
+  // ---- Source text (English) edit ----
+  // 2026-04-21 plan §7.4: user may correct upstream ASR mistakes on the
+  // original transcript. Backend marks text_dirty; user still needs to
+  // update cn_text separately (no auto-retranslate).
+  const handleSourceTextChange = useCallback(
+    async (segmentId: string, source_text: string) => {
+      setSavingSegmentIds((prev) => new Set(prev).add(segmentId))
+      try {
+        const result = await patchSegmentText(jobId, segmentId, { source_text })
+        setResource((prev) =>
+          prev
+            ? {
+                ...prev,
+                segments: prev.segments.map((s) =>
+                  s.segment_id === segmentId ? { ...s, source_text } : s,
+                ),
+                segment_status: result.segment_status,
+              }
+            : prev,
+        )
+      } catch (error) {
+        toast.error(`保存失败: ${getErrorMessage(error)}`)
+      } finally {
+        setSavingSegmentIds((prev) => {
+          const next = new Set(prev)
+          next.delete(segmentId)
+          return next
+        })
+      }
+    },
+    [jobId],
+  )
+
+  // ---- Split segment ----
+  // Plan §7.4: user chooses character positions in source_text + cn_text;
+  // backend computes new timestamps proportionally and returns both halves
+  // + refreshed status map for in-place splice into local state.
+  const handleSplitSegment = useCallback(
+    async (
+      segmentId: string,
+      body: {
+        split_source_index: number
+        split_cn_index: number
+        speaker_a: string
+        speaker_b: string
+      },
+    ) => {
+      setSavingSegmentIds((prev) => new Set(prev).add(segmentId))
+      try {
+        const result = await splitEditingSegment(jobId, segmentId, body)
+        setResource((prev) => {
+          if (!prev) return prev
+          const index = prev.segments.findIndex(
+            (s) => s.segment_id === segmentId,
+          )
+          if (index < 0) return prev
+          const nextSegments = [...prev.segments]
+          nextSegments.splice(index, 1, ...result.new_segments)
+          return {
+            ...prev,
+            segments: nextSegments,
+            segment_status: result.segment_status,
+          }
+        })
+        toast.success(`拆分完成：${result.new_segments.length} 段，共 ${result.total_count} 段`)
+      } catch (error) {
+        toast.error(`拆分失败: ${getErrorMessage(error)}`)
+      } finally {
+        setSavingSegmentIds((prev) => {
+          const next = new Set(prev)
+          next.delete(segmentId)
+          return next
+        })
+      }
+    },
+    [jobId],
+  )
+
+  // ---- Preview source audio ----
+  // 2026-04-21 redesign: POST prepares the server-side WAV cache,
+  // returns a URL string pointing at the Range-aware GET stream
+  // endpoint. The segment card feeds that URL directly into
+  // <audio src={...}>. Browsers handle Range / progressive playback
+  // natively, so 30+ second segments (1 MB+ WAV) no longer trip the
+  // Uvicorn+httpx big-JSON pathology that killed the old base64 path.
+  const handlePreviewSource = useCallback(
+    async (segmentId: string): Promise<string | null> => {
+      try {
+        const meta = await previewEditingSegmentSource(jobId, segmentId)
+        // Nonce == server-side timestamp-ish; ensures <audio> refetches
+        // after a re-POST (split / text edit) even with the same URL.
+        return buildPreviewSourceStreamUrl(jobId, segmentId, Date.now())
+      } catch (error) {
+        toast.error(`原文试听失败: ${getErrorMessage(error)}`)
+        return null
+      }
+    },
+    [jobId],
+  )
+
   // Distinct speaker ids currently present in the task — used to populate
   // the speaker-reassignment dropdown. Stable ordering by first appearance.
   const availableSpeakerIds = useMemo<string[]>(() => {
@@ -329,15 +451,19 @@ export default function VideoEditPage() {
   const handleBatchRegenerate = useCallback(async () => {
     if (isBatchRegenerating) return
     setIsBatchRegenerating(true)
+    setIsCancellingBatch(false)
     // D39 async batch: POST returns a task_id immediately; progress
     // comes from polling GET /regenerate-all-tts/status. The single
     // sonner toast gets updated in-place via its id so the user sees
     // "合成中 3/100 · 段: seg_004" → "合成中 70/100 · ..." → final summary.
-    const toastId = toast.loading("正在启动批量合成…")
+    // Fixed id "batch-regen" so handleCancelBatch can also address it.
+    const toastId = "batch-regen"
+    toast.loading("正在启动批量合成…", { id: toastId })
     const POLL_INTERVAL_MS = 1000
     const MAX_POLLS = 30 * 60  // 30 minutes; generous for 300+ segments
     try {
       const { task_id: taskId } = await regenerateAllDirtyTts(jobId)
+      setBatchTaskId(taskId)
       let polls = 0
       let lastDisplayedProgress = ""
 
@@ -380,6 +506,19 @@ export default function VideoEditPage() {
           break
         }
 
+        // D39: user clicked 取消批量合成; worker has acknowledged and
+        // transitioned to stage='cancelled' with partial counts.
+        if (status.stage === "cancelled") {
+          const result = status.result
+          const succeeded = result?.succeeded_count ?? status.succeeded_count
+          const remaining = status.total - succeeded - (result?.failed_count ?? status.failed_count)
+          toast.info(
+            `已取消批量合成：完成 ${succeeded} 段，剩余 ${Math.max(0, remaining)} 段未处理`,
+            { id: toastId },
+          )
+          break
+        }
+
         // Still running / starting — update progress toast in-place.
         const done = status.succeeded_count + status.failed_count
         const total = status.total || 0
@@ -406,8 +545,38 @@ export default function VideoEditPage() {
       toast.error(`批量合成失败: ${getErrorMessage(error)}`, { id: toastId })
     } finally {
       setIsBatchRegenerating(false)
+      setBatchTaskId(null)
+      setIsCancellingBatch(false)
     }
   }, [isBatchRegenerating, jobId, loadData])
+
+  // D39 user-initiated cancel of a running batch. Writes the
+  // cancel_requested flag on the backend; the running polling loop
+  // inside handleBatchRegenerate will observe the stage='cancelled'
+  // transition and exit cleanly. No need to interrupt the React
+  // polling loop explicitly.
+  const handleCancelBatch = useCallback(async () => {
+    if (!batchTaskId || isCancellingBatch) return
+    setIsCancellingBatch(true)
+    try {
+      const { cancelled } = await cancelRegenerateAll(jobId, batchTaskId)
+      if (cancelled) {
+        // Worker will flip stage within ~1s; the polling loop updates
+        // the toast in-place.
+        toast.loading("已请求取消，等待当前段合成结束…", {
+          id: "batch-regen",  // matches handleBatchRegenerate's toastId
+        })
+      } else {
+        toast.warning("取消请求未生效（任务可能已结束）", {
+          id: "batch-regen",
+        })
+        setIsCancellingBatch(false)
+      }
+    } catch (error) {
+      toast.error(`取消失败: ${getErrorMessage(error)}`)
+      setIsCancellingBatch(false)
+    }
+  }, [batchTaskId, isCancellingBatch, jobId])
 
   // ---- Abandon / Commit ----
 
@@ -424,11 +593,33 @@ export default function VideoEditPage() {
 
   const handleOpenCommitModal = useCallback(() => {
     setCommitStrategy("overwrite")
+    // Optimistic local default; replaced below with the server's
+    // collision-aware suggestion as soon as it arrives. We pre-seed so
+    // the field isn't empty during the ~100-200 ms fetch.
     setCopyDisplayName(
       job ? `${getJobDisplayTitle(job)} · 副本 1` : "",
     )
     setCommitModalOpen(true)
-  }, [job])
+    // Fire-and-forget server lookup: picks the correct N by counting
+    // existing copies of this source job (plan §6.4 / D17).
+    void (async () => {
+      try {
+        const response = await fetch(
+          `/gateway/jobs/${jobId}/suggested-copy-name`,
+          { credentials: "include" },
+        )
+        if (!response.ok) return
+        const body = (await response.json()) as { suggested_name?: string }
+        if (body?.suggested_name) {
+          setCopyDisplayName(body.suggested_name)
+        }
+      } catch {
+        // Network hiccup — keep the optimistic default. The user can
+        // still edit before commit, and the backend collision check
+        // resolves truly-ambiguous cases.
+      }
+    })()
+  }, [job, jobId])
 
   const handleCommit = useCallback(async () => {
     if (isCommitting) return
@@ -445,9 +636,11 @@ export default function VideoEditPage() {
       })
       setCommitModalOpen(false)
       if (result.strategy === "copy_as_new") {
-        toast.success(`副本 "${result.new_display_name}" 已创建，开始重合成`)
+        // D8 plan §12: commit 会重跑 alignment → publish，三语 SRT 同步重
+        // 生成，用户下载到的字幕是最新编辑后的内容。
+        toast.success(`副本 "${result.new_display_name}" 已创建，开始重合成（视频 + 字幕）`)
       } else {
-        toast.success(`重合成开始 · 第 ${result.edit_generation} 次修改`)
+        toast.success(`重合成开始 · 第 ${result.edit_generation} 次修改（视频 + 字幕同步更新）`)
       }
       // Both strategies land on /projects: user's mental model after
       // 确认修改 is "back to the list to watch progress", parallel to
@@ -721,9 +914,16 @@ export default function VideoEditPage() {
                 <span>所有段落 TTS 都是最新的。</span>
               )}
               {forceDspSegments.length > 0 && (
-                <span className="ml-2 text-amber-500">
-                  ⚠ {forceDspSegments.length} 段时长异常（重写 2 次仍超/过短），建议修改
-                </span>
+                // 2026-04-21 plan §7.1 / D44: 用户要能"点击定位"到首个异常段。
+                // 改成 button 复用 draft-duration-mismatch 的交互模式。
+                <button
+                  type="button"
+                  className="ml-2 text-amber-500 underline decoration-dotted hover:text-amber-400 min-h-[32px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-1 rounded"
+                  onClick={() => scrollToSegment(forceDspSegments[0].segment_id)}
+                  title="对齐器重写 2 次仍超/过短，建议精简译文。点击定位第一段。"
+                >
+                  ⚠ {forceDspSegments.length} 段时长异常（重写 2 次仍超/过短），点击定位
+                </button>
               )}
               {draftDurationMismatchSegments.length > 0 && (
                 <button
@@ -738,16 +938,37 @@ export default function VideoEditPage() {
                 </button>
               )}
             </div>
-            <button
-              className="rounded-md bg-primary/80 text-primary-foreground px-4 py-1.5 text-xs inline-flex items-center gap-1 disabled:opacity-50 min-h-[40px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-1"
-              onClick={handleBatchRegenerate}
-              disabled={isBatchRegenerating || dirtyCount === 0}
-              aria-busy={isBatchRegenerating}
-              type="button"
-            >
-              {isBatchRegenerating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
-              一键合成所有未合成段落
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                className="rounded-md bg-primary/80 text-primary-foreground px-4 py-1.5 text-xs inline-flex items-center gap-1 disabled:opacity-50 min-h-[40px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-1"
+                onClick={handleBatchRegenerate}
+                disabled={isBatchRegenerating || dirtyCount === 0}
+                aria-busy={isBatchRegenerating}
+                type="button"
+              >
+                {isBatchRegenerating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                一键合成所有未合成段落
+              </button>
+              {/* D39 §7.10: 批量合成进行中可取消。后端在当前段合成完后
+               *   停止，已完成段保留，未处理段保持 dirty 状态下次可继续。*/}
+              {isBatchRegenerating && batchTaskId && (
+                <button
+                  className="rounded-md border border-amber-500/60 text-amber-500 px-3 py-1.5 text-xs inline-flex items-center gap-1 disabled:opacity-50 min-h-[40px] hover:bg-amber-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-1"
+                  onClick={handleCancelBatch}
+                  disabled={isCancellingBatch}
+                  aria-busy={isCancellingBatch}
+                  type="button"
+                  title="停止批量合成（完成当前段后停止，已合成的段保留）"
+                >
+                  {isCancellingBatch ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <X className="h-3.5 w-3.5" />
+                  )}
+                  {isCancellingBatch ? "正在取消…" : "取消批量合成"}
+                </button>
+              )}
+            </div>
           </section>
 
           {/* Segment list — virtualized so 200+ segments don't balloon
@@ -775,11 +996,14 @@ export default function VideoEditPage() {
                     availableSpeakerIds={availableSpeakerIds}
                     speakerNameMap={speakerNameMap}
                     onTextChange={handleTextChange}
+                    onSourceTextChange={handleSourceTextChange}
                     onSpeakerChange={handleSpeakerChange}
                     onRegenerate={handleRegenerate}
                     onAcceptDraft={handleAcceptDraft}
                     onDiscardDraft={handleDiscardDraft}
                     onSeek={seekToSegment}
+                    onSplit={handleSplitSegment}
+                    onPreviewSource={handlePreviewSource}
                   />
                 </div>
               )}
@@ -838,6 +1062,9 @@ interface SegmentCardProps {
    *  variable-name speaker_ids. Missing entry → UI falls back to the id. */
   speakerNameMap: Record<string, string>
   onTextChange: (segmentId: string, cnText: string) => void
+  /** 2026-04-21 plan §7.4: edit the English source_text. Backend marks
+   *  text_dirty; user is responsible for also updating cn_text. */
+  onSourceTextChange: (segmentId: string, sourceText: string) => void
   onSpeakerChange: (segmentId: string, speakerId: string) => void
   onRegenerate: (segmentId: string) => void
   onAcceptDraft: (segmentId: string) => void
@@ -845,6 +1072,20 @@ interface SegmentCardProps {
   /** Jump video playback to this segment's start_ms (click the time
    *  label). No-op when video ref isn't ready or segment has no timing. */
   onSeek: (segmentId: string) => void
+  /** 2026-04-21 plan §7.4: split this segment at user-chosen positions. */
+  onSplit: (
+    segmentId: string,
+    body: {
+      split_source_index: number
+      split_cn_index: number
+      speaker_a: string
+      speaker_b: string
+    },
+  ) => Promise<void> | void
+  /** 2026-04-21 plan §7.4: fetch base64 source audio slice for this
+   *  segment. Returns a ``data:audio/wav;base64,...`` URL on success, or
+   *  ``null`` on failure (the handler has already shown a toast). */
+  onPreviewSource: (segmentId: string) => Promise<string | null>
 }
 
 function SegmentCard({
@@ -858,11 +1099,14 @@ function SegmentCard({
   availableSpeakerIds,
   speakerNameMap,
   onTextChange,
+  onSourceTextChange,
   onSpeakerChange,
   onRegenerate,
   onAcceptDraft,
   onDiscardDraft,
   onSeek,
+  onSplit,
+  onPreviewSource,
 }: SegmentCardProps) {
   // Prefer friendly display names when available; fall back to the raw
   // speaker_id so tasks that never went through voice_selection_review
@@ -873,6 +1117,86 @@ function SegmentCard({
   }
   const [localText, setLocalText] = useState(segment.cn_text ?? "")
   useEffect(() => { setLocalText(segment.cn_text ?? "") }, [segment.cn_text])
+
+  // English source text editor (2026-04-21 plan §7.4). Separate local
+  // buffer + effect so reloading from the parent doesn't wipe in-flight
+  // edits.
+  const [localSource, setLocalSource] = useState(segment.source_text ?? "")
+  useEffect(() => { setLocalSource(segment.source_text ?? "") }, [segment.source_text])
+
+  // Source-audio preview state. URL is fetched lazily on first click so
+  // we don't hit the backend for every rendered segment.
+  const [sourceAudioUrl, setSourceAudioUrl] = useState<string | null>(null)
+  const [isFetchingSource, setIsFetchingSource] = useState(false)
+  const sourceAudioRef = useRef<HTMLAudioElement | null>(null)
+
+  // Split panel — closed by default; open toggles inline below the editor
+  // row so users see the impact immediately without a modal.
+  const [splitOpen, setSplitOpen] = useState(false)
+  const [splitSourcePos, setSplitSourcePos] = useState(0)
+  const [splitCnPos, setSplitCnPos] = useState(0)
+  const [splitSpeakerA, setSplitSpeakerA] = useState(segment.speaker_id ?? "")
+  const [splitSpeakerB, setSplitSpeakerB] = useState(segment.speaker_id ?? "")
+  const [isSplitting, setIsSplitting] = useState(false)
+
+  const handleOpenSplit = () => {
+    // Seed midpoints; both must be in (0, len) for the backend to accept.
+    const srcLen = (segment.source_text ?? "").length
+    const cnLen = (segment.cn_text ?? "").length
+    setSplitSourcePos(srcLen > 1 ? Math.floor(srcLen / 2) : 1)
+    setSplitCnPos(cnLen > 1 ? Math.floor(cnLen / 2) : 1)
+    setSplitSpeakerA(segment.speaker_id ?? (availableSpeakerIds[0] ?? ""))
+    setSplitSpeakerB(segment.speaker_id ?? (availableSpeakerIds[0] ?? ""))
+    setSplitOpen(true)
+  }
+
+  const handleConfirmSplit = async () => {
+    if (isSplitting) return
+    setIsSplitting(true)
+    try {
+      await onSplit(segment.segment_id, {
+        split_source_index: splitSourcePos,
+        split_cn_index: splitCnPos,
+        speaker_a: splitSpeakerA,
+        speaker_b: splitSpeakerB,
+      })
+      setSplitOpen(false)
+    } finally {
+      setIsSplitting(false)
+    }
+  }
+
+  const handlePlaySource = async () => {
+    if (sourceAudioUrl) {
+      // Already fetched — just replay.
+      try {
+        const el = sourceAudioRef.current
+        if (el) {
+          el.currentTime = 0
+          await el.play()
+        }
+      } catch {
+        // Browser auto-play policy may block without a gesture; the
+        // visible <audio controls> element below lets the user click
+        // through the default UI as a fallback.
+      }
+      return
+    }
+    setIsFetchingSource(true)
+    try {
+      const url = await onPreviewSource(segment.segment_id)
+      if (url) {
+        setSourceAudioUrl(url)
+        // Attempt immediate playback; swallow rejection silently — the
+        // rendered <audio controls> is the user-facing fallback.
+        setTimeout(() => {
+          sourceAudioRef.current?.play().catch(() => {})
+        }, 50)
+      }
+    } finally {
+      setIsFetchingSource(false)
+    }
+  }
 
   const isAnomalous = segment.alignment_method === "force_dsp"
 
@@ -1005,9 +1329,53 @@ function SegmentCard({
           </span>
         )}
       </div>
-      {segment.source_text && (
-        <p className="text-xs text-muted-foreground mb-2">{segment.source_text}</p>
-      )}
+      {/* English source text — editable on blur. Users correct upstream
+       *  ASR mistakes here; backend marks text_dirty so the next re-TTS
+       *  picks up the new content. User still needs to update the
+       *  translation below (no auto-retranslate). */}
+      <div className="mb-2">
+        <div className="flex items-center justify-between mb-1">
+          <label className="text-xs text-muted-foreground">原文</label>
+          <div className="flex items-center gap-1">
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={handlePlaySource}
+              disabled={isFetchingSource}
+              aria-label="试听该段原文音频"
+              title="播放原文"
+            >
+              {isFetchingSource ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin mr-1" />
+              ) : (
+                <Play className="h-3.5 w-3.5 mr-1" />
+              )}
+              播放原文
+            </Button>
+          </div>
+        </div>
+        <textarea
+          className="w-full min-h-[56px] rounded-md border border-border bg-background/60 p-2 text-xs text-muted-foreground font-sans"
+          value={localSource}
+          onChange={(e) => setLocalSource(e.currentTarget.value)}
+          onBlur={() => {
+            if (localSource !== (segment.source_text ?? "")) {
+              onSourceTextChange(segment.segment_id, localSource)
+            }
+          }}
+        />
+        {sourceAudioUrl && (
+          <audio
+            ref={sourceAudioRef}
+            key={`src-${segment.segment_id}`}
+            controls
+            preload="metadata"
+            className="mt-1 w-full max-w-md h-8"
+            src={sourceAudioUrl}
+          />
+        )}
+      </div>
+      <label className="text-xs text-muted-foreground block mb-1">译文</label>
       <textarea
         className="w-full min-h-[72px] rounded-md border border-border bg-background p-2 text-sm"
         value={localText}
@@ -1018,6 +1386,117 @@ function SegmentCard({
           }
         }}
       />
+      {/* Split panel — inline so users see the halves live. Mirrors the
+       *  main flow TranslationReviewPanel's amber-outlined panel. */}
+      {splitOpen && (
+        <div className="mt-2 rounded-md border border-amber-500/30 bg-amber-500/5 p-3 space-y-3">
+          <div>
+            <div className="flex items-center justify-between text-xs mb-1">
+              <span className="text-muted-foreground">原文拆分位置</span>
+              <span className="font-mono text-amber-500">
+                {splitSourcePos} / {(segment.source_text ?? "").length}
+              </span>
+            </div>
+            <input
+              type="range"
+              min={1}
+              max={Math.max(1, (segment.source_text ?? "").length - 1)}
+              value={splitSourcePos}
+              onChange={(e) => setSplitSourcePos(parseInt(e.currentTarget.value, 10))}
+              className="w-full accent-amber-500"
+              aria-label="原文拆分位置"
+            />
+            <div className="mt-1 text-xs grid grid-cols-2 gap-2">
+              <div className="rounded bg-background/60 px-2 py-1 text-muted-foreground">
+                A：{(segment.source_text ?? "").slice(0, splitSourcePos) || "（空）"}
+              </div>
+              <div className="rounded bg-background/60 px-2 py-1 text-muted-foreground">
+                B：{(segment.source_text ?? "").slice(splitSourcePos) || "（空）"}
+              </div>
+            </div>
+          </div>
+          <div>
+            <div className="flex items-center justify-between text-xs mb-1">
+              <span className="text-muted-foreground">译文拆分位置</span>
+              <span className="font-mono text-amber-500">
+                {splitCnPos} / {(segment.cn_text ?? "").length}
+              </span>
+            </div>
+            <input
+              type="range"
+              min={1}
+              max={Math.max(1, (segment.cn_text ?? "").length - 1)}
+              value={splitCnPos}
+              onChange={(e) => setSplitCnPos(parseInt(e.currentTarget.value, 10))}
+              className="w-full accent-amber-500"
+              aria-label="译文拆分位置"
+            />
+            <div className="mt-1 text-xs grid grid-cols-2 gap-2">
+              <div className="rounded bg-background/60 px-2 py-1">
+                A：{(segment.cn_text ?? "").slice(0, splitCnPos) || "（空）"}
+              </div>
+              <div className="rounded bg-background/60 px-2 py-1">
+                B：{(segment.cn_text ?? "").slice(splitCnPos) || "（空）"}
+              </div>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            <label className="space-y-1">
+              <span className="text-muted-foreground">A 段说话人</span>
+              <select
+                className="w-full rounded border border-border bg-background px-1.5 py-1"
+                value={splitSpeakerA}
+                onChange={(e) => setSplitSpeakerA(e.currentTarget.value)}
+              >
+                {availableSpeakerIds.map((sid) => (
+                  <option key={sid} value={sid}>{speakerLabel(sid)}</option>
+                ))}
+              </select>
+            </label>
+            <label className="space-y-1">
+              <span className="text-muted-foreground">B 段说话人</span>
+              <select
+                className="w-full rounded border border-border bg-background px-1.5 py-1"
+                value={splitSpeakerB}
+                onChange={(e) => setSplitSpeakerB(e.currentTarget.value)}
+              >
+                {availableSpeakerIds.map((sid) => (
+                  <option key={sid} value={sid}>{speakerLabel(sid)}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <div className="flex gap-2 justify-end">
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => setSplitOpen(false)}
+              disabled={isSplitting}
+            >
+              取消
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={handleConfirmSplit}
+              disabled={
+                isSplitting
+                || splitSourcePos <= 0
+                || splitSourcePos >= (segment.source_text ?? "").length
+                || splitCnPos <= 0
+                || splitCnPos >= (segment.cn_text ?? "").length
+                || !splitSpeakerA
+                || !splitSpeakerB
+              }
+            >
+              {isSplitting ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin mr-1" />
+              ) : null}
+              确认拆分
+            </Button>
+          </div>
+        </div>
+      )}
       {status === "tts_dirty" && (
         // Draft preview — user can listen before accepting. `key` forces a
         // fresh <audio> element when a newer draft overwrites the file so
@@ -1047,6 +1526,21 @@ function SegmentCard({
             <RefreshCw className="h-3.5 w-3.5 mr-1" />
           )}
           重新合成
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={handleOpenSplit}
+          disabled={
+            splitOpen
+            || (segment.source_text ?? "").length < 2
+            || (segment.cn_text ?? "").length < 2
+          }
+          aria-label="拆分该段"
+          title="把这段拆成两段"
+        >
+          <Scissors className="h-3.5 w-3.5 mr-1" />
+          拆分
         </Button>
         {status === "tts_dirty" && (
           <>
