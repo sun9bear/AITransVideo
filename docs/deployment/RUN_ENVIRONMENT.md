@@ -129,9 +129,11 @@ Operational notes:
 
 - `应用网关` should point to:
   - `https://aitrans.video/api/billing/webhooks/alipay`
-- Do not point Alipay callbacks at `https://api.aitransvideo.com/...` unless that
-  subdomain is reactivated and externally reachable. As of 2026-04-22, its DNS
-  resolves to `expired.hichina.com`.
+- 本项目唯一的线上域名是 `aitrans.video`（不含 TLD 变体）。所有对外回调
+  （支付宝 / SMS / 第三方 webhook）一律指向 `https://aitrans.video/...`。
+  早期文档曾出现过 `aitransvideo.com` 系列子域（如 `api.aitransvideo.com`），
+  **那不是本项目拥有的域名**，是历史文档里的误写，不应作为任何配置、
+  回调、Tunnel ingress 或业务代码的依据。
 - `授权回调地址` is **not required** for the current payment-only flow.
   It belongs to Alipay user authorization / `openid` style scenarios, not
   website payment return handling.

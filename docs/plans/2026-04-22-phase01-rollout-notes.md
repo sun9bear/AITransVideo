@@ -240,9 +240,11 @@ phase14_rollback.sh 已安装在 /opt/aivideotrans/caddy/ 下可执行
 
 4. **DNS TTL** 调到 1 分钟（CF dashboard → DNS → aitrans.video 那行的 TTL 下拉），撤退时生效更快。
 
-5. **`api.aitransvideo.com` 处理**：CodeX 评估 §6.1 发现该子域仍解析到 `expired.hichina.com`（脏状态），容易被第三方回调误填。选一：
-   - 恢复并纳入 CF Tunnel（加一个 hostname route）
-   - 或彻底从 DNS / 文档 / 后台配置里移除
+5. ~~**`api.aitransvideo.com` 处理**~~ — **这个子域不是本项目拥有的域名**。
+   用户本人澄清：从未持有 `aitransvideo.com`（.com 系列），本项目唯一域名是
+   `aitrans.video`（.video TLD）。CodeX 阶段评估 §6.1 的观察是对一个**与本项目
+   无关的外部域名**的描述，不属于我方任何配置 / 回调 / ingress / 文档口径，
+   无需处理。所有后续提到"清理 api.aitransvideo.com"的条目均可忽略。
 
 6. **监控**：CF dashboard → Analytics → Traffic 设一个"tunnel 故障告警"；或 US 本地 cron 每分钟 curl tunnel 失败 3 次发 webhook。
 
@@ -301,13 +303,63 @@ T+60 docker logs --tail 20 aivideotrans-caddy 确认无报错
 
 | # | 任务 | 本次已完成 | 剩余 |
 |---|---|---|---|
-| 1 | next / gateway / postgres 改绑 127.0.0.1 | – | docker-compose.yml 3 处 |
-| 2 | cloudflared `--metrics 127.0.0.1:20241` | – | docker-compose.yml 1 处 |
-| 3 | `/tmp/Caddyfile.original` 持久化 | ✅ 本次 | – |
+| 1 | next / gateway / postgres 改绑 127.0.0.1 | ✅ 本次（docker-compose.yml + gateway/Dockerfile 双修） | – |
+| 2 | cloudflared `TUNNEL_METRICS=127.0.0.1:20241` | ✅ 本次 | – |
+| 3 | `/tmp/Caddyfile.original` 持久化到 `.git-head` | ✅ 本次 | – |
 | 4 | 生产口径写死：主域名 = `aitrans.video`；tunnel → `localhost:443` → Caddy | ✅ 本次（rollout notes 里已全部对齐真实口径） | – |
-| 5 | `api.aitransvideo.com` 失效 DNS 处理（恢复或下线） | – | 独立任务 |
+| 5 | ~~`api.aitransvideo.com` 处理~~ | — 用户澄清此子域不是本项目域名，无需处理（见上 §CodeX §8 §5） | – |
 
-剩余 3 项（#1 / #2 / #5）作为**下一个专项任务**推进，不和 Phase 2 绑；Phase 2（R2 下载 302 最小闭环）应当等 Phase 1.5 + Phase 0 联通/移动探针数据补齐后再启动。
+5/5 完成。Phase 2（R2 下载 302 最小闭环）可在 Phase 0 联通/移动探针数据补齐后启动。
+
+---
+
+## Phase 1.5 硬化执行结果（2026-04-22）
+
+### 修改面
+
+| 文件 | 改动 | 目的 |
+|---|---|---|
+| `docker-compose.yml` (postgres) | 加 `command: ["postgres","-c","listen_addresses=127.0.0.1,::1"]` | PG 只监听 loopback，ufw 失效也不泄露 |
+| `docker-compose.yml` (next) | `HOSTNAME: "0.0.0.0"` → `"127.0.0.1"` | Next standalone 只绑 loopback |
+| `docker-compose.yml` (gateway) | `AVT_GATEWAY_HOST: "0.0.0.0"` → `"127.0.0.1"` + **新增 `command: ["uvicorn","main:app","--host","127.0.0.1",…]`** 覆盖镜像 CMD | Gateway uvicorn 只绑 loopback |
+| `docker-compose.yml` (cloudflared-us) | 加 `TUNNEL_METRICS=127.0.0.1:20241` | metrics 端口只监听 loopback，避免 tunnel 配置/token 信息泄露 |
+| `gateway/Dockerfile` | `CMD ["uvicorn",…,"--host","0.0.0.0",…]` → `CMD ["python","main.py"]` | 让镜像走 `main.py` 入口读 `settings.gateway_host`（长期修复，避免下次 rebuild 又回到 0.0.0.0） |
+
+> 发现的真正 bug：`gateway/Dockerfile:18` 的 CMD 硬编码 `--host 0.0.0.0`，**绕过** `main.py:325` 的 `uvicorn.run(host=settings.gateway_host, …)`。单改 `docker-compose.yml` 的 `environment.AVT_GATEWAY_HOST` 没用。本次采用"compose `command:` 覆盖（立刻生效）+ Dockerfile 改走 `python main.py`（下次 rebuild 后不需 compose 覆盖）"双修。
+
+### 验证（`ss -ltnp`，US 上真机）
+
+```
+LISTEN 0 200  127.0.0.1:5432   postgres
+LISTEN 0 2048 127.0.0.1:8880   uvicorn  (gateway)
+LISTEN 0 5    127.0.0.1:8877   python   (job-api，本来就 loopback)
+LISTEN 0 4096 127.0.0.1:20241  cloudflared (metrics)
+LISTEN 0 511  127.0.0.1:3000   next-server
+LISTEN 0 200       [::1]:5432  postgres (IPv6 loopback)
+LISTEN 0 4096 127.0.0.1:443    caddy    (tunnel ingress，Phase 1 §14 已落)
+LISTEN 0 4096 127.0.0.1:80     caddy    (Phase 1 §14)
+```
+
+非 loopback 上只剩 `0.0.0.0:22` (sshd) + `127.0.0.53:53` (systemd-resolved 本机专用)，符合预期。
+
+### 公网冒烟
+
+| 项 | 结果 |
+|---|---|
+| `curl http://127.0.0.1:8880/gateway/health` (本机直连) | HTTP 200, 1.2ms |
+| `curl https://aitrans.video/gateway/health` (tunnel → Caddy → Gateway) | HTTP 200, 282ms |
+| `curl https://aitrans.video/` (Next.js 首页) | HTTP 200, 54ms |
+| `curl http://5.78.122.220:8880/...` (公网 IP 直连 Gateway) | connect refused ✅ |
+| `curl http://5.78.122.220:20241/...` (公网 IP 直连 metrics) | connect refused ✅ |
+| ufw 状态 | active, 仅放行 22/tcp |
+
+### 部署路径修正（副产物）
+
+执行中发现 US 上 compose 文件曾**分裂成两份**：
+- `/opt/aivideotrans/app/docker-compose.yml`（管 app / gateway / next / postgres）
+- `/opt/aivideotrans/docker-compose.yml`（管 cloudflared-us / caddy）
+
+这是 Phase 1 §14 cloudflared-us 加入时从不同目录 `docker compose up` 导致的容器 label 分裂。本次一并修复：两条路径写入同一份（md5=6315d834…）硬化版本，新建容器的 `com.docker.compose.project.config_files` label 统一。备份保留在 `*.pre-phase15-*` 和 `*.pre-gwfix-*`。
 
 ---
 

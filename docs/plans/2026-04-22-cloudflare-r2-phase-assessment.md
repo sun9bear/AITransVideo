@@ -1,5 +1,14 @@
 # Cloudflare + R2 方案落实评估报告
 
+> **2026-04-23 更正记**（由项目所有者澄清）：
+>
+> 本报告中多次出现的 `api.aitransvideo.com`（`.com` 系列）**不是本项目持有的域名**。
+> 项目唯一线上域名是 `aitrans.video`（`.video` 一级 TLD）。
+> §2、§6.1、§8.1 第 5 项、§9 第 5 项等关于"处理 / 恢复 / 下线 api.aitransvideo.com"
+> 的结论都是基于对一个**不归属本项目**的外部域名观察得出，应视为无效项，
+> 不会纳入任何 Phase 1.5 或 Phase 2+ 执行清单。下文原文保留供历史追溯，
+> 但**不作为行动依据**。
+
 - 评估日期：2026-04-22
 - 评估范围：
   - [2026-04-21-cloudflare-r2-deployment-plan.md](../plans/2026-04-21-cloudflare-r2-deployment-plan.md)

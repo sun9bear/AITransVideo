@@ -66,6 +66,11 @@ services:
     image: postgres:16-alpine
     container_name: aivideotrans-postgres
     restart: unless-stopped
+    # Phase 1.5 硬化（2026-04-22）：只监听 loopback。network_mode: host 下
+    # 容器内的 127.0.0.1 和宿主 127.0.0.1 是同一个，app/gateway 从容器里连
+    # localhost:5432 依然可达。覆盖 IPv4+IPv6 loopback 两个，因为 uvicorn /
+    # next 默认都可能用 ::1 连本地。若 ufw 失效，公网也无法从外部接入 pg。
+    command: ["postgres", "-c", "listen_addresses=127.0.0.1,::1"]
     environment:
       POSTGRES_DB: aivideotrans
       POSTGRES_USER: avt
@@ -94,7 +99,10 @@ services:
     restart: unless-stopped
     environment:
       PORT: "3000"
-      HOSTNAME: "0.0.0.0"
+      # Phase 1.5 硬化（2026-04-22）：Next standalone 只监听 loopback。
+      # Caddy 从 127.0.0.1:3000 反代，network_mode: host 下容器内 = 宿主
+      # loopback。ufw 失效时公网依然 refused。
+      HOSTNAME: "127.0.0.1"
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/"]
       interval: 15s
@@ -110,6 +118,11 @@ services:
     container_name: aivideotrans-gateway
     network_mode: host
     restart: unless-stopped
+    # Phase 1.5 硬化（2026-04-22）：显式覆盖镜像 CMD 以绑定到 127.0.0.1。
+    # gateway/Dockerfile:18 的 CMD 硬编码了 --host 0.0.0.0，绕过 main.py
+    # 里的 `settings.gateway_host` 机制；在镜像修复（改走 `python main.py`
+    # 入口读 AVT_GATEWAY_HOST）之前，由 compose 覆盖兜底。
+    command: ["uvicorn", "main:app", "--host", "127.0.0.1", "--port", "8880", "--log-level", "info"]
     volumes:
       # Shared config directory (same as app — admin_settings.json, etc.)
       - type: bind
@@ -149,7 +162,10 @@ services:
       - /opt/aivideotrans/config/.env
     environment:
       AVT_JOB_API_UPSTREAM: "http://127.0.0.1:8877"
-      AVT_GATEWAY_HOST: "0.0.0.0"
+      # Phase 1.5 硬化（2026-04-22）：Gateway uvicorn 只监听 loopback。
+      # 所有入站（Caddy / internal loopback / cloudflared 经 Caddy）都走
+      # 127.0.0.1:8880。ufw 失效时公网依然 refused。
+      AVT_GATEWAY_HOST: "127.0.0.1"
       AVT_GATEWAY_PORT: "8880"
       AVT_AUTH_REQUIRED: "true"
       # T6 — default to production so the validate_production_safety startup
@@ -205,6 +221,11 @@ services:
     command: tunnel --no-autoupdate run
     environment:
       - TUNNEL_TOKEN=${CLOUDFLARED_TOKEN_US:?CLOUDFLARED_TOKEN_US 必须在 .env 中设置}
+      # Phase 1.5 硬化（2026-04-22）：metrics 端口只 bind loopback。
+      # 默认 *:20241 会在 ufw 失效时泄漏 tunnel 配置（/config endpoint
+      # 能读到完整 ingress rule）。cloudflared 官方 env var，优先级 >
+      # --metrics CLI flag。
+      - TUNNEL_METRICS=127.0.0.1:20241
     # Start after core services so first tunnel registration has a
     # functioning origin. No service_healthy dependency — tunnel should
     # register even if origin is briefly down (Cloudflare returns 502 to
