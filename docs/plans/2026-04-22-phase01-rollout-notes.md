@@ -223,9 +223,9 @@ phase14_rollback.sh 已安装在 /opt/aivideotrans/caddy/ 下可执行
 
 ---
 
-## 剩余 defense-in-depth（非 Phase 1 范围）
+## 剩余 defense-in-depth（Phase 1.5 专项）
 
-记在这里是**下一个专项任务**：
+[CodeX 阶段评估 §8.1](2026-04-22-cloudflare-r2-phase-assessment.md) 明确列为"推 Phase 2 之前必做"的硬化项。
 
 1. **postgres / next / uvicorn bind 127.0.0.1**（修 `docker-compose.yml`）：
    - Postgres 在 docker-compose.yml 里 `command: postgres` 后加 `-c listen_addresses=127.0.0.1,::1`，或在 `environment:` 里用 `POSTGRES_HOST_AUTH_METHOD` + bind
@@ -236,9 +236,15 @@ phase14_rollback.sh 已安装在 /opt/aivideotrans/caddy/ 下可执行
 
 2. **cloudflared 的 metrics 端口 20241**：目前 bind `*:20241`，如果 ufw 失效也会泄露（会泄漏 tunnel 配置！），应在 docker-compose.yml 里 `--metrics 127.0.0.1:20241`。
 
-3. **DNS TTL** 调到 1 分钟（CF dashboard → DNS → aitrans.video 那行的 TTL 下拉），撤退时生效更快。
+3. ~~**`/tmp/Caddyfile.original` 持久化**~~ — ✅ 已完成（见下方"§15.4 撤退演练结果"）
 
-4. **监控**：CF dashboard → Analytics → Traffic 设一个"tunnel 故障告警"；或 US 本地 cron 每分钟 curl tunnel 失败 3 次发 webhook。
+4. **DNS TTL** 调到 1 分钟（CF dashboard → DNS → aitrans.video 那行的 TTL 下拉），撤退时生效更快。
+
+5. **`api.aitransvideo.com` 处理**：CodeX 评估 §6.1 发现该子域仍解析到 `expired.hichina.com`（脏状态），容易被第三方回调误填。选一：
+   - 恢复并纳入 CF Tunnel（加一个 hostname route）
+   - 或彻底从 DNS / 文档 / 后台配置里移除
+
+6. **监控**：CF dashboard → Analytics → Traffic 设一个"tunnel 故障告警"；或 US 本地 cron 每分钟 curl tunnel 失败 3 次发 webhook。
 
 ---
 
@@ -248,11 +254,64 @@ phase14_rollback.sh 已安装在 /opt/aivideotrans/caddy/ 下可执行
 |---|---|
 | `/opt/aivideotrans/caddy/Caddyfile` | 当前运行版（tls internal） |
 | `/opt/aivideotrans/caddy/Caddyfile.bak-pre-v14-*` | 每次 deploy 自动 snapshot |
-| `/opt/aivideotrans/caddy/phase14_rollback.sh` | 一键撤退脚本 |
-| `/tmp/Caddyfile.original` | 撤退源（git HEAD 版，73 行，md5=98cc32134b...） |
+| `/opt/aivideotrans/caddy/Caddyfile.pre-rollback-*` | 撤退演练 / 真实撤退前的自动 snapshot（rollback.sh 第 1 步产物） |
+| `/opt/aivideotrans/caddy/Caddyfile.git-head` | **撤退源（持久化）** — 重启保留，rollback.sh v2 首选路径 |
+| `/opt/aivideotrans/caddy/phase14_rollback.sh` | 一键撤退脚本（v2：优先 `.git-head`，fallback `/tmp/Caddyfile.original`） |
+| `/tmp/Caddyfile.original` | 撤退源 fallback（重启会丢） |
 
-重启 US 后 `/tmp/` 的东西会丢，所以撤退源建议**同时放 `/opt/aivideotrans/caddy/Caddyfile.git-head`** 一份 —— 下次部署例行补。
+---
+
+## §15.4 撤退演练结果（2026-04-22）
+
+方案 MVP 放行硬指标 ③（"15 min 内能回滚到 Phase 0"）实测数据。
+
+**策略**：纯服务器侧演练（不动 CF DNS），利用 Caddy `/data` 里 2026-03-26 获取的 LE 证书缓存（notAfter=2026-06-24，63 天有效）避免触发 ACME rate limit，production 流量全程走 tunnel 不中断。
+
+**执行脚本**：`/tmp/drill_phase14.sh`（演练完即留档）
+
+| 阶段 | 动作 | 耗时 | 验证结果 |
+|---|---|---|---|
+| A | 快照稳态 | – | ✅ Caddyfile md5=b07a2747，ufw 只 22/tcp，tunnel 200 |
+| B | `phase14_rollback.sh` 全流程 | **2s** | ✅ Caddyfile 恢复 LE / ufw 开 80,443 / Caddy 缓存 LE 证书加载 / loopback 200 / US IP 公网 443 = 200 |
+| B.6 | tunnel 路径 | – | ⚠️ **502**（预期）：rollback 后 Caddy site block 只匹配 `aitrans.video` SNI，而 cloudflared 发 SNI=localhost → 真实撤退时 CF DNS 必须**同步**切 A 记录到 5.78.122.220 |
+| C | 滚回 Phase 1 | **2s** | ✅ Caddyfile 恢复 tls internal / ufw 关 80,443 / Caddy 仅 Local Authority / US IP 公网 refused / tunnel 恢复 200 |
+| **总计** | – | **4s** | ✅ **PASS**（硬指标 ≤ 900s，实际 4s） |
+
+**演练暴露的两个改进点**：
+
+1. `/tmp/Caddyfile.original` 重启就丢 — 已落实持久化到 `/opt/aivideotrans/caddy/Caddyfile.git-head`，`phase14_rollback.sh` 升 v2 优先读持久化路径
+2. tunnel 侧 502 确认："服务器侧撤退 + CF DNS 切换"**必须同步**；单做任一侧会 502 —— [撤退 SOP](#撤退-sop) 要强调 DNS 操作和脚本并行
+
+**撤退 SOP**（真实撤退时，≤5min 完成）：
+
+```
+T0   CF Dashboard → DNS → aitrans.video：CNAME 改 A 记录 5.78.122.220，取消 🟧 Proxied（30s）
+T0   US 同步执行：sudo bash /opt/aivideotrans/caddy/phase14_rollback.sh（2s）
+T+30 curl -I https://aitrans.video/gateway/health → 预期 200（走 US 直连 LE cert）
+T+60 docker logs --tail 20 aivideotrans-caddy 确认无报错
+```
+
+实测数据已证：15min 指标有 225× 的裕度，瓶颈在 CF DNS 传播而非服务器侧。
+
+---
+
+## CodeX 阶段评估 §8 硬化路线图（Phase 1.5）
+
+独立评估报告 [2026-04-22-cloudflare-r2-phase-assessment.md](2026-04-22-cloudflare-r2-phase-assessment.md) 给 Phase 1 打 75% 完成度。在推 Phase 2（R2 下载 302）之前**必须**补这 5 项：
+
+| # | 任务 | 本次已完成 | 剩余 |
+|---|---|---|---|
+| 1 | next / gateway / postgres 改绑 127.0.0.1 | – | docker-compose.yml 3 处 |
+| 2 | cloudflared `--metrics 127.0.0.1:20241` | – | docker-compose.yml 1 处 |
+| 3 | `/tmp/Caddyfile.original` 持久化 | ✅ 本次 | – |
+| 4 | 生产口径写死：主域名 = `aitrans.video`；tunnel → `localhost:443` → Caddy | ✅ 本次（rollout notes 里已全部对齐真实口径） | – |
+| 5 | `api.aitransvideo.com` 失效 DNS 处理（恢复或下线） | – | 独立任务 |
+
+剩余 3 项（#1 / #2 / #5）作为**下一个专项任务**推进，不和 Phase 2 绑；Phase 2（R2 下载 302 最小闭环）应当等 Phase 1.5 + Phase 0 联通/移动探针数据补齐后再启动。
+
+---
 
 ## 参考 git commit
 
 - `0abdc08` phase1(§14): Caddy 降级到 tls internal，仅 loopback + aitrans.video SNI 匹配
+- `f01c763` docs(phase1): 记录 §13-§15 部署踩坑 + cloudflared origin 必需值

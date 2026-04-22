@@ -1,0 +1,150 @@
+==========================================
+=== Phase 1 §15.4 rollback drill start ===
+=== 2026-04-22T10:26:41Z ===
+==========================================
+
+##### A. 演练前稳态快照 #####
+--- A.1 当前 Caddyfile (tls internal 态) md5 ---
+b07a274704a75672b8689db98c1f64fb  /opt/aivideotrans/caddy/Caddyfile
+
+--- A.2 当前 ufw 状态 ---
+Status: active
+
+To                         Action      From
+--                         ------      ----
+22/tcp                     ALLOW       Anywhere                   # SSH
+22/tcp (v6)                ALLOW       Anywhere (v6)              # SSH
+
+
+--- A.3 Caddy 容器状态 ---
+NAMES                STATUS
+aivideotrans-caddy   Up 40 minutes (healthy)
+
+--- A.4 tunnel 路径是否工作 (应 200, 证明生产流量正常) ---
+tunnel path via public DNS: 200
+
+--- A.5 loopback 路径 (当前稳态应是 tls internal 自签) ---
+loopback:443 HTTP code=200 issuer=issuer=CN = Caddy Local Authority - ECC Intermediate
+
+##### B. 执行回滚 (phase14_rollback.sh) #####
+=== 2026-04-22T10:26:41Z rollback start ===
+--- 1. backup current (tls internal) Caddyfile ---
+--- 2. restore original LE Caddyfile ---
+--- 3. reopen ufw 80/443 (keep default deny for others) ---
+Rule added
+Rule added (v6)
+Rule added
+Rule added (v6)
+--- 4. restart Caddy ---
+aivideotrans-caddy
+--- 5. wait for Caddy ready ---
+ready after 2s (HTTP 80 responding)
+--- 6. ufw status ---
+Status: active
+
+To                         Action      From
+--                         ------      ----
+22/tcp                     ALLOW       Anywhere                   # SSH
+80/tcp                     ALLOW       Anywhere                   # LE HTTP-01 challenge + redirect to HTTPS
+443/tcp                    ALLOW       Anywhere                   # Caddy public HTTPS (LE)
+22/tcp (v6)                ALLOW       Anywhere (v6)              # SSH
+80/tcp (v6)                ALLOW       Anywhere (v6)              # LE HTTP-01 challenge + redirect to HTTPS
+443/tcp (v6)               ALLOW       Anywhere (v6)              # Caddy public HTTPS (LE)
+
+--- 7. Caddy last 10 lines ---
+{"level":"info","ts":1776853602.286177,"logger":"http.log","msg":"server running","name":"srv0","protocols":["h1","h2","h3"]}
+{"level":"info","ts":1776853602.2863343,"logger":"http","msg":"enabling automatic TLS certificate management","domains":["aitrans.video"]}
+{"level":"warn","ts":1776853602.2873404,"logger":"tls","msg":"stapling OCSP","error":"no OCSP stapling for [aitrans.video]: no OCSP server specified in certificate","identifiers":["aitrans.video"]}
+{"level":"info","ts":1776853602.2875361,"logger":"tls","msg":"storage cleaning happened too recently; skipping for now","storage":"FileStorage:/data/caddy","instance":"9cd809fc-a11c-45b0-86f9-5537d938db04","try_again":1776940002.2875333,"try_again_in":86399.999999679}
+{"level":"info","ts":1776853602.2875977,"msg":"autosaved config (load with --resume flag)","file":"/config/caddy/autosave.json"}
+{"level":"info","ts":1776853602.2876067,"logger":"tls","msg":"finished cleaning storage units"}
+{"level":"info","ts":1776853602.2876103,"msg":"serving initial configuration"}
+{"level":"info","ts":1776853602.437575,"msg":"got renewal info","names":["aitrans.video"],"window_start":1779606441,"window_end":1779761891,"selected_time":1779679063,"recheck_after":1776877089.4375443,"explanation_url":""}
+{"level":"info","ts":1776853602.439284,"logger":"tls","msg":"updated ACME renewal information","identifiers":["aitrans.video"],"cert_hash":"4583380335a58712209d662dd20e4e288e3a69cd2bc4c10f28edbc6713b3c5b2","ari_unique_id":"jw0TovYuftFQbDMYOF1ZjiNykco.BbKUXP5WhPE2dTmbQH1_XWZa","cert_expiry":1782274996,"selected_time":1779626179,"next_update":1776877089.4375443,"explanation_url":""}
+{"level":"info","ts":1776853603.2591279,"logger":"http.log.access","msg":"handled request","request":{"remote_ip":"127.0.0.1","remote_port":"52824","client_ip":"127.0.0.1","proto":"HTTP/1.1","method":"GET","host":"127.0.0.1","uri":"/","headers":{"User-Agent":["curl/8.5.0"],"Accept":["*/*"]}},"bytes_read":0,"user_id":"","duration":0.000014347,"size":0,"status":308,"resp_headers":{"Location":["https://127.0.0.1/"],"Content-Type":[],"Server":["Caddy"],"Connection":["close"]}}
+=== rollback complete ===
+
+NEXT MANUAL STEP: in CF dashboard, proxied (orange) -> DNS-only (gray)
+for aitrans.video, OR change CNAME to A record at 5.78.122.220.
+
+>>> 回滚脚本耗时: 2s
+
+--- B.1 回滚后 Caddyfile md5 (应 == /tmp/Caddyfile.original) ---
+98cc32134bcce49629b5536dc6c6c49d  /opt/aivideotrans/caddy/Caddyfile
+98cc32134bcce49629b5536dc6c6c49d  /tmp/Caddyfile.original
+
+--- B.2 回滚后 ufw 状态 (80/443 应 allow) ---
+Status: active
+
+To                         Action      From
+--                         ------      ----
+22/tcp                     ALLOW       Anywhere                   # SSH
+80/tcp                     ALLOW       Anywhere                   # LE HTTP-01 challenge + redirect to HTTPS
+443/tcp                    ALLOW       Anywhere                   # Caddy public HTTPS (LE)
+22/tcp (v6)                ALLOW       Anywhere (v6)              # SSH
+80/tcp (v6)                ALLOW       Anywhere (v6)              # LE HTTP-01 challenge + redirect to HTTPS
+443/tcp (v6)               ALLOW       Anywhere (v6)              # Caddy public HTTPS (LE)
+
+--- B.3 Caddy 从缓存加载 LE 证书 ---
+issuer=C = US, O = Let's Encrypt, CN = E8
+subject=CN = aitrans.video
+notBefore=Mar 26 04:23:17 2026 GMT
+notAfter=Jun 24 04:23:16 2026 GMT
+
+--- B.4 loopback 走 LE cert (应 Let's Encrypt issuer + 200) ---
+  via LE cert HTTP=200 ssl_verify=0
+
+--- B.5 公网 US IP :443 是否可直连 (ufw 重开后应 200) ---
+  via US IP direct HTTP=200
+
+--- B.6 tunnel 路径是否仍然正常 (production 不中断验证) ---
+  tunnel path HTTP=502
+
+>>> 回滚 + 验证总耗时: 2s  (硬指标 ≤ 900s = 15min)
+
+##### C. 滚回 Phase 1 (tls internal) #####
+--- C.1 找到最近 pre-rollback 备份 ---
+latest backup: /opt/aivideotrans/caddy/Caddyfile.pre-rollback-1776853601
+
+--- C.2 恢复 tls internal Caddyfile ---
+b07a274704a75672b8689db98c1f64fb  /opt/aivideotrans/caddy/Caddyfile
+
+--- C.3 关回 ufw 80/443 ---
+Rule deleted
+Rule deleted (v6)
+Rule deleted
+Rule deleted (v6)
+Status: active
+
+To                         Action      From
+--                         ------      ----
+22/tcp                     ALLOW       Anywhere                   # SSH
+22/tcp (v6)                ALLOW       Anywhere (v6)              # SSH
+
+
+--- C.4 重启 Caddy ---
+aivideotrans-caddy
+
+--- C.5 等 Caddy ready ---
+ready after 2s
+
+>>> 滚回 Phase 1 耗时: 2s
+
+--- C.6 验证回到 tls internal 稳态 ---
+issuer=CN = Caddy Local Authority - ECC Intermediate
+
+--- C.7 US IP :443 应再次不可达 (ufw filtered) ---
+curl: (7) Failed to connect to aitrans.video port 443 after 0 ms: Couldn't connect to server
+curl: unknown --write-out variable: 'errno'
+  via US IP direct (应失败): HTTP=000 errno= err=7
+
+--- C.8 tunnel 路径仍应正常 ---
+  tunnel path HTTP=200
+
+==========================================
+=== drill complete ===
+回滚耗时:         2s (脚本) / 2s (含验证)
+滚回 Phase 1 耗时: 2s
+演练总耗时:       4s
+硬指标 ≤ 15min (900s): ✅ PASS
+==========================================
