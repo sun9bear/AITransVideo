@@ -1,14 +1,42 @@
 {
     admin off
+    # Phase 1 (2026-04-22): Caddy no longer terminates public TLS. Cloudflare
+    # edge handles the public cert for aitrans.video; cloudflared-us tunnels
+    # to us over the loopback. Caddy only speaks TLS on loopback using its
+    # internal CA (Caddy Local Authority). Because every site block below
+    # binds to 127.0.0.1 / localhost only, Caddy will NOT attempt ACME for
+    # them (non-routable, filtered by Caddy's auto_https safety checks).
+    #
+    # NOTE: do NOT add `auto_https off` here — that flag turns off Caddy's
+    # automatic certificate *management* completely, which also stops the
+    # internal CA from minting the localhost cert. Result: TLS handshakes
+    # fail with "tlsv1 alert internal error" and the tunnel returns 502.
+    # This is a trap v1 of the Phase 1 §14 change hit — see
+    # docs/plans/2026-04-21-phase01-implementation-checklist.md note.
 }
 
-{$AUTODUB_PUBLIC_HOST} {
-    # Public cert via Let's Encrypt ACME. CADDY_EMAIL is the admin contact
-    # for rate-limit / expiration notifications — MUST be set in
-    # /opt/aivideotrans/config/.env on each deploy host. See .env.example.
-    # DO NOT revert to `tls internal` on a public domain — browsers do not
-    # trust Caddy's self-signed CA and HSTS makes the breakage un-bypassable.
-    tls {$CADDY_EMAIL}
+# Loopback-only listener reached by the cloudflared-us container
+# (network_mode: host). Cloudflare Tunnel Public Hostname for
+# aitrans.video / app.aitrans.video must point at HTTPS://localhost:443
+# with noTLSVerify: true (Caddy serves its internal self-signed cert).
+# See docs/plans/2026-04-21-phase01-implementation-checklist.md §14.
+#
+# aitrans.video must be listed as a site-block matcher because cloudflared
+# forwards the public Host header ("aitrans.video") unchanged. Without it,
+# Caddy v2 doesn't match any site block for that Host and returns an empty
+# 200 default response — trap v2 of §14, manifesting as tunnel → 0-byte
+# body. `bind 127.0.0.1` forces loopback binding even though aitrans.video
+# resolves via DNS to CF edge IPs. `tls internal` issues internal-CA certs
+# for ALL three names (incl. aitrans.video); cloudflared accepts because
+# its Public Hostname has `No TLS Verify = ON`.
+#
+# To revert (撤退预案, plan §11.6):
+#   1. put back the `{$AUTODUB_PUBLIC_HOST}` block with `tls {$CADDY_EMAIL}`
+#   2. reopen ufw 80/443 on the US host
+#   3. DNS: flip aitrans.video back to an A record at the US IP
+127.0.0.1:443, localhost:443, aitrans.video:443 {
+    bind 127.0.0.1
+    tls internal
 
     encode zstd gzip
 
