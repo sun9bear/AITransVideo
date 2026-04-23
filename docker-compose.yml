@@ -118,11 +118,10 @@ services:
     container_name: aivideotrans-gateway
     network_mode: host
     restart: unless-stopped
-    # Phase 1.5 硬化（2026-04-22）：显式覆盖镜像 CMD 以绑定到 127.0.0.1。
-    # gateway/Dockerfile:18 的 CMD 硬编码了 --host 0.0.0.0，绕过 main.py
-    # 里的 `settings.gateway_host` 机制；在镜像修复（改走 `python main.py`
-    # 入口读 AVT_GATEWAY_HOST）之前，由 compose 覆盖兜底。
-    command: ["uvicorn", "main:app", "--host", "127.0.0.1", "--port", "8880", "--log-level", "info"]
+    # 启动入口由 gateway/Dockerfile 的 `CMD ["python","main.py"]` 负责，
+    # main.py:320 读 settings.gateway_host / gateway_port（由下方
+    # environment.AVT_GATEWAY_HOST / AVT_GATEWAY_PORT 提供）。
+    # Phase 1.5 早期曾在这里放 `command:` 覆盖兜底，镜像修复后已移除。
     volumes:
       # Shared config directory (same as app — admin_settings.json, etc.)
       - type: bind
