@@ -60,7 +60,7 @@
 
 | 项目 | 计划口径 | 当前状态 | 结论 |
 |---|---|---|---|
-| Phase 0 探针 | 三类探针都要完成并写入基线 | 只有脚本与部分基线文本，未形成完整放行证据 | 部分完成 |
+| Phase 0 探针 | 三类探针都要完成并写入基线 | 探针 ① 三网全数据已进 §15.2（2026-04-23，武汉样本，最差 5 MB/s > 下限 5×）；探针 ②/③ 未跑 | 探针 ① 完成，②③ 待跑 |
 | Phase 1 Tunnel 切流 | 通过 Cloudflare Tunnel 隐藏 US 源站 | 已落地 | 基本完成 |
 | Caddy 降级 | 仅 loopback + `tls internal` | 已落地 | 完成 |
 | UFW 收口 | 仅保留 SSH | 已落地 | 完成 |
@@ -81,21 +81,26 @@
   - [scripts/phase0_probes/probe2_r2_download.sh](../../scripts/phase0_probes/probe2_r2_download.sh)
   - [scripts/phase0_probes/probe3_r2_upload.sh](../../scripts/phase0_probes/probe3_r2_upload.sh)
   - [scripts/phase0_probes/generate_download_url.py](../../scripts/phase0_probes/generate_download_url.py)
-- 方案的 `§15` 已填入一部分基线数据，至少包含：
-  - 中国电信直连基线
-  - R2 原生域名的部分下载稳定性样本
+- 方案的 `§15` 已填入：
+  - **探针 ① 三网完整数据**（2026-04-23，武汉本地抽样）：
+    - 电信 9.08 MB/s / 联通 5.11 MB/s / 移动 17.10 MB/s
+    - 三网全部 HTTP 200 直连可达，无 GFW 封锁
+    - 最差链路相对 §11.3 放行下限（1 MB/s）具备 5× 以上冗余
+  - R2 原生域名的部分下载稳定性样本（电信，单条）
   - `17ce.com` 覆盖测试补充说明
 
 未落实或证据不足的部分：
 
-- `联通 / 移动` 两链路的数据仍未在核查到的文档中完整补齐。
-- 没有发现“探针执行完成”的统一记录页，也没有一个最终的 Phase 0 放行结论页。
-- 生产环境 `.env` 中没有任何 `R2_*` 或 `AVT_STORAGE_BACKEND` 标记，说明 Phase 0 探针数据并没有自然过渡成后续 R2 上线配置。
+- 探针 ② / ③ 尚未跑三网数据（需要项目方先上传 R2 测试样本、签预签名 URL、发受限 token）。
+- 地理覆盖仅武汉本地一点，沿海（上海/广深）与北方（北京/成都）抽样待补。
+- 生产环境 `.env` 中没有任何 `R2_*` 或 `AVT_STORAGE_BACKEND` 标记，说明 Phase 0 探针数据还没转化成后续 R2 上线配置。
 
 判断：
 
-- `Phase 0` 不是完全没做。
-- 但它目前更像“脚本和部分样本已准备/已做”，还不是“足够支撑进入 Phase 2 的闭环证据”。
+- **Phase 0 探针 ① 已充分落地**，支撑"MVP 可走 v4 主路径"的这一侧决策。
+- 探针 ② / ③ 是 Phase 2 / Phase 3 放行门槛，需要补跑；但即使探针 ② 不如 ①，
+  也只决定是否叠加 Phase 2b 备胎（Worker HMAC），不会阻断 MVP 方向。
+- 推进节奏：把探针 ②（R2 下载三网）作为最紧迫的下一步，③（R2 上传三网）可排在后面。
 
 ### 3.3 Phase 1：Tunnel 切流与源站隐藏
 
