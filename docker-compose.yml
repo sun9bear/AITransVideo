@@ -258,6 +258,12 @@ services:
       - type: bind
         source: ${AIVIDEOTRANS_ROOT}/data/runtime_logs
         target: /var/log/aivideotrans
+      # Phase 0 探针样本目录（只读）：Caddyfile 里 handle_path /probe/* →
+      # file_server 会从 /srv/probe 读 100MB 随机样本。探针完成后可删除。
+      - type: bind
+        source: ${AIVIDEOTRANS_ROOT}/probe_samples
+        target: /srv/probe
+        read_only: true
     healthcheck:
       test: ["CMD", "caddy", "validate", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
       interval: 30s

@@ -74,6 +74,18 @@
         reverse_proxy 127.0.0.1:8880
     }
 
+    # Phase 0 探针样本静态目录（公开只读）。挂载 /opt/aivideotrans/probe_samples
+    # 进容器的 /srv/probe，用于给 scripts/phase0_probes/probe1_baseline.sh 提供
+    # 一个 ~100MB 随机样本做"tunnel 基线下载"测速。无 auth，任何人都能拿；
+    # 文件不包含任何业务数据（纯 /dev/urandom），带宽成本可控（100MB × 少量
+    # 测试者）。探针执行完成 / 方案拍板后可删除此 block + probe_samples/ 目录。
+    handle_path /probe/* {
+        root * /srv/probe
+        file_server {
+            precompressed gzip
+        }
+    }
+
     # Deny public access to internal-only endpoints (app↔gateway on localhost only).
     # Must come BEFORE @api_routes to short-circuit reverse_proxy.
     # Return 404 (not 403) to avoid confirming endpoint existence (enumeration defense).
