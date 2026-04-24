@@ -210,6 +210,45 @@ docker-compose.yml 已配置 `src/`、`main.py`、`scripts/` 的 bind mount。
 
 **永久回归守卫：** `tests/test_legacy_cleanup_guards.py` 10 个契约级测试（file existence + CLI 行为 + AST import graph + AST 字面量 + Caddyfile 结构）。任何回退会在 CI 立刻红。
 
+## Phase 2 下载后端（R2 可切换，2026-04-23 落地）
+
+对 `publish.dubbed_video` artifact 的下载路径做"服务端可切换目标"切面。方案详情见
+[`docs/plans/2026-04-23-phase2-r2-download-minimal.md`](docs/plans/2026-04-23-phase2-r2-download-minimal.md)。
+
+**硬约束（不要破坏）**：
+
+- **前端零感知 R2**：下载 URL 永远是 `/job-api/jobs/{id}/download/publish.dubbed_video`，前端代码里**不得**出现 `r2.cloudflarestorage` / `avt-artifacts` / `X-Amz-*` / `AWS4-HMAC-SHA256` / `presigned` 字样。Phase 3+ 做上传也必须守住这条。回归守卫：`tests/test_phase2_download_backend.py::test_frontend_has_no_r2_leakage`（递归 AST 扫 `frontend-next/src/**/*.{ts,tsx,js,jsx,mjs}`）。
+- **Gateway 是下载决策的唯一真源**：`gateway/storage/backend_router.py::resolve_download_target` 是唯一决定"这次下载是否走 R2"的地方。Job API 不知道 R2 存在。不要把 R2 判断散到 `job_intercept.py` 各处。
+- **R2 任何异常必须自动回落 local**：HEAD / upload / presign 任一抛异常 → `resolve_download_target` 返 `None` → gateway 回 Job API 直通字节流。**用户永远不看 R2 故障**。日志用 WARNING（不是 ERROR），因为 user-visible path 仍正常；CRITICAL 只保留给启动期配置缺失。
+- **默认 `AVT_DOWNLOAD_REDIRECT_BACKEND=local`**：docker-compose.yml 默认值 + `gateway/config.py` Settings 字段默认值双保险。生产只有明确 `.env` 开 `r2` + 配齐 `R2_ENDPOINT/ACCESS_KEY_ID/SECRET_ACCESS_KEY` 才切换；任一缺失 `gateway/startup_checks.py::validate_r2_backend` 启动时 CRITICAL 并自动降级回 local（不崩容器）。
+
+**付费 API 约束覆盖情况**：R2 存储**按量计费**（PUT / GET / 出站流量）但**不属于本项目 "付费外部 API" 硬约束范围**——R2 费用是基础设施成本，不像 MiniMax clone 那样每次调用都直接扣用户可见账户额度。lazy upload 在 HEAD 404 时自动触发，符合 "有界 fallback" 而非 "费用失控 fallback" 的语义（per-key 文件锁 + idempotent HEAD 保护重复上传）。
+
+**Event 打点**（routing-decision 语义，非 download-succeeded 语义）：
+
+三种事件类型定义在 `src/services/jobs/events.py` SUPPORTED_EVENT_TYPES 集合：
+
+- `download.redirect.r2` — 路由决定走 R2，返 302 presigned URL
+- `download.fallback.local` — R2 路径出异常，路由切回 local 字节流
+- `download.local.direct` — `backend=local` 默认分支，路由直接透传 Job API
+
+**⚠️ 这三个事件是路由决策时打点，不是下载成功的证据**。写入时机在 `RedirectResponse` / `proxy_request` **之前**。浏览器是否真的跟了 302、local stream 是否真的流到最后，gateway 都不知道。Rollout 仪表盘 **不得** 把 `download.redirect.r2` 计数当 "R2 下载成功数"，也 **不得** 把 `download.fallback.local` 当 "R2 故障 + local 成功"——后者只是 "路由决策切到 local"，local 可能紧接着 4xx/5xx。真正的下载成功率要从 upstream access log / HTTP status 单独算。详见 [plan §11.7](docs/plans/2026-04-23-phase2-r2-download-minimal.md)。
+
+**事件写入路径**：Gateway 侧 **不 import `services.jobs.events`**——`services.jobs.__init__.py` 会传染拉入 pydub，而 gateway 容器不装 pydub（见 `display_name_orchestrator.py:30-35`）。写入逻辑抽在独立模块 `gateway/storage/event_log.py::emit_download_event`（纯 stdlib，无 fastapi / pydub 依赖），直接手写 JSONL append 到 `{jobs_dir}/{job_id}.events.jsonl`，schema 与 `JobEvent.to_dict()` 严格对齐。`gateway/job_intercept.py._emit_download_event` 是一层薄 delegator。**未来新增 download-related event type 必须同步改**：
+1. `src/services/jobs/events.py` 的 `SUPPORTED_EVENT_TYPES`
+2. `gateway/storage/event_log.py` 的 `_DOWNLOAD_EVENT_TYPES`
+3. 回归守卫 `test_emit_download_event_supported_types_in_sync_with_jobs_events` 会在任一侧漏改时 red。
+
+**R2 client 重试策略**：`gateway/storage/r2_client.py` 的共享 boto3 client 配 `retries={"max_attempts": 1}` — **不重试**（`max_attempts=1` 是总尝试次数=1）。HEAD / PUT / presign 任一失败 → `backend_router.resolve_download_target` 返 `None` → 回落 local。理由：fallback 本身是安全网，重试 R2 只会延长用户感知等待——local 字节流立刻可用，UX 更好。
+
+**Gateway 需要 jobs/ bind mount**：docker-compose.yml `gateway` service 加了与 `app` 相同的 `${AIVIDEOTRANS_ROOT}/data/jobs:/opt/aivideotrans/app/jobs` (rw) mount，确保 event JSONL 落到宿主机、与 Job API 共用一份 store。**删了这个 mount 会让所有 download event 静默丢失**。
+
+**R2 key 形状**：`jobs/{job_id}/publish.dubbed_video{suffix}`，`suffix` 从本地文件的实际扩展名取（`.mp4` / `.mov` 等）。Dashboard 可视性 + 未来多容器格式前瞻。不要改成无后缀。
+
+**R2 upload lock 路径**：`{jobs_dir}/_r2_upload_locks/{sha256(key)}`——**不在** artifact 目录下。理由：避免被未来 Studio `editing/commit` 的 `overwrite` / `copy_as_new` 文件搬运误扫进来。回归守卫：`tests/test_phase2_download_backend.py::test_lock_path_not_in_artifact_dir`。
+
+**Presigned URL TTL = 120s**（不是 3600s）。窗口短，泄漏也无意义。`ResponseContentDisposition` header 同时注入 RFC 6266 `filename="..."` + RFC 5987 `filename*=UTF-8''...`，非 ASCII 字符走 `_ascii_fallback_filename` 降级，保证各浏览器下载文件名稳定可读。
+
 ## Studio 视频修改工作流（Phase 1 落地，2026-04-19）
 
 对**已完成的 Studio 任务**（`status == succeeded`），用户可以进入修改流程对

@@ -42,7 +42,11 @@ import logging
 from config import settings
 from database import engine, init_db
 from models import Base
-from startup_checks import validate_production_safety, validate_internal_api_key
+from startup_checks import (
+    validate_internal_api_key,
+    validate_production_safety,
+    validate_r2_backend,
+)
 
 logger = logging.getLogger(__name__)
 from job_intercept import (
@@ -70,6 +74,17 @@ async def lifespan(app: FastAPI):
     # require this to avoid fail-open misconfiguration. Runs before init_db
     # so the error surfaces before we touch the database.
     validate_internal_api_key(settings.internal_api_key)
+    # Phase 2 — verify R2 config consistency. Downgrades to "local" if
+    # AVT_DOWNLOAD_REDIRECT_BACKEND=r2 but any R2 credential is missing
+    # (logs CRITICAL but does NOT raise — downloads must keep working).
+    # The effective value is written back to settings so all request-time
+    # code reads one source of truth.
+    settings.download_redirect_backend = validate_r2_backend(
+        settings.download_redirect_backend,
+        settings.r2_endpoint,
+        settings.r2_access_key_id,
+        settings.r2_secret_access_key,
+    )
     # T3 — DB credentials are resolved and engine is built here. Raises if
     # neither AVT_PG_PASSWORD nor AVT_DATABASE_URL is set (no more hardcoded
     # avt:avt fallback).

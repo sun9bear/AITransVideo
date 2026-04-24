@@ -1,7 +1,7 @@
 # Phase 2 最小 R2 下载闭环实施计划
 
 **日期**：2026-04-23
-**状态**：草案待审
+**状态**：T1-T13 代码/文档完成；待生产 R2 `gateway-production` token + 线上三网验收
 **上游方案**：[2026-04-21-cloudflare-r2-deployment-plan.md](./2026-04-21-cloudflare-r2-deployment-plan.md) Phase 2
 **前置判据**：Phase 0 探针 ② 三网齐活通过 §11.3 D39 判据（commit `6fed91c`）
 **指导原则（CodeX 2026-04-23）**：
@@ -87,7 +87,7 @@ class Settings(BaseSettings):
     r2_access_key_id: str = ""
     r2_secret_access_key: str = ""
     r2_artifacts_bucket: str = "avt-artifacts"
-    r2_presigned_expires_s: int = 3600  # 1h
+    r2_presigned_expires_s: int = 120  # 2min — 窗口短，泄漏也无意义（用户拍板）
     r2_upload_timeout_s: int = 60
 ```
 
@@ -95,7 +95,7 @@ class Settings(BaseSettings):
 - `AVT_DOWNLOAD_REDIRECT_BACKEND=local` (默认) / `r2`
 - `R2_ENDPOINT` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY`（无 `AVT_` 前缀，匹配上游方案约定）
 - `AVT_R2_ARTIFACTS_BUCKET=avt-artifacts`
-- `AVT_R2_PRESIGNED_EXPIRES_S=3600`
+- `AVT_R2_PRESIGNED_EXPIRES_S=120`（**不是 3600**）
 - `AVT_R2_UPLOAD_TIMEOUT_S=60`
 
 **启动校验**：`gateway/startup_checks.py` 新增 `validate_r2_backend`——当 `download_redirect_backend=='r2'` 但 `r2_endpoint` 或 secret 为空时，记 `CRITICAL` 日志并**自动降级为 `local`**（不崩溃启动）。
@@ -209,22 +209,118 @@ Phase 2 部署到 US 后：
 
 ## 9. 出口契约（Phase 2 完成的定义）
 
-- [ ] T1-T10 代码全部合并到 main
-- [ ] T11 测试全绿
-- [ ] §6.1 全部 case 覆盖
-- [ ] §6.2 三网验收 PASS
-- [ ] Gateway US 上 flag=r2 稳定运行 7 天无 ERROR 级 fallback 事件
-- [ ] §15.3 加一行"Phase 2 真实流量数据"对照探针 ② 预签名数据
-- [ ] CLAUDE.md 加 "Phase 2 下载后端" 小节
-- [ ] 失败演练（bucket 对象删除 / 错误 endpoint / 错误 secret）三项全部确认回落
+**代码 / 测试 / 文档闭环（2026-04-24 已完成）**：
 
-## 10. 开放问题（需你拍板）
+- [x] T1 `gateway/config.py` — 加 `download_redirect_backend` / `r2_*` / `jobs_dir` 字段
+- [x] T2 `gateway/startup_checks.py` — `validate_r2_backend` + lifespan 写回 settings
+- [x] T3 `gateway/storage/__init__.py` — 空包
+- [x] T4 `gateway/storage/r2_client.py` — boto3 单例、HEAD / upload / presign + ASCII filename fallback
+- [x] T5 `gateway/storage/backend_router.py` — `resolve_download_target` 单一决策点，所有 R2 异常返 None 回落 local
+- [x] T6 `gateway/job_intercept.py` — 只在 `GET /download/publish.dubbed_video` 分支挂 R2 302
+- [x] T7 事件打点 — `src/services/jobs/events.py` 新增三种 event type（`download.redirect.r2` / `download.fallback.local` / `download.local.direct`），gateway 侧直接写 JSONL（`{jobs_dir}/{job_id}.events.jsonl`），**不 import `services.jobs.events`** 避免 pydub 传染
+- [x] T8 `docker-compose.yml` — gateway service 加 jobs 目录 bind mount (rw) + 8 个 env passthrough（默认 `local` + 空 credentials，零行为变化）
+- [x] T9 `gateway/requirements.txt` — `boto3>=1.34,<2` + `botocore>=1.34,<2`
+- [x] T10 `gateway/Dockerfile` — 走既有 `pip install -r requirements.txt`，无需改动
+- [x] T11 `tests/test_phase2_download_backend.py` — 14 个 test function 覆盖 §6.1 全部 10 个 case（FakeR2 monkeypatch + `sys.modules` scrub + AST-level 前端扫描）
+- [x] T12 本文件 — 阶段性出口契约更新（2026-04-24）
+- [x] T13 `CLAUDE.md` — "Phase 2 下载后端" 小节，记录 feature flag 语义 + 默认 local + R2 异常回落契约
 
-1. **首 artifact 选择确认**：我选 `publish.dubbed_video`（最大、最常下）——OK 吗？还是你想先切 `editor.dubbed_audio_complete`（次大）？
-2. **R2 key 命名**：建议 `jobs/{job_id}/{artifact_key}` → 实际为 `jobs/abc123/publish.dubbed_video`（没有后缀，因为 artifact_key 本身就带）。是否改成 `jobs/{job_id}/publish.dubbed_video.mp4`（带扩展名以便 R2 dashboard 可视）？
-3. **R2 credentials 来源**：用现在 probe ②/③ 的那把（account `ee9757...`）还是建一把新的 "gateway-production" 专用的 token？我建议**生产环境新建一把**，探针那把保留 dev 用。
-4. **事件存储**：新增 3 个 download 事件写到哪？
-   - 选项 A：`gateway/events.py` 独立表（新 table `download_events`）
-   - 选项 B：复用现有 `JobEvent` 表（加 `event_type IN ('download.r2_redirect', ...)`）
-   - B 更省 schema，查询一致。我倾向 B，除非你想给下载事件单独的数据保留策略。
-5. **线上三网验收的样本任务**：需要你或某朋友事先跑一个完整翻译任务（花钱 LLM + TTS），才有 final_video 可以真实下载。要不要复用现有已完成任务？
+**测试状态**：
+
+```
+pytest -q tests/test_phase2_download_backend.py tests/test_legacy_cleanup_guards.py
+24 passed in 2.35s
+```
+
+**生产验收待办**（代码已就绪，等运维窗口）：
+
+- [ ] 申请 `gateway-production` R2 token（不复用探针 token，scope = `avt-artifacts/jobs/*`，权限 = `GetObject / PutObject / HeadObject`）
+- [ ] US 部署：先部署代码保持 `AVT_DOWNLOAD_REDIRECT_BACKEND=local`，确认现有下载零变化
+- [ ] `.env` 翻 flag 到 `r2` + 写入 credentials，`docker compose up -d --force-recreate gateway`
+- [ ] §6.2 三网（电信 / 联通 / 移动）手工验收 302 + 下载成功率 100% + 速度不差于探针 ② 的 20%
+- [ ] 失败演练：bucket 对象删除 / 错误 endpoint / 错误 secret 三项全部确认自动回落 local
+- [ ] 稳定运行 7 天无 ERROR 级 fallback 事件（`download.fallback.local` < 1%）
+- [ ] §15.3 补"Phase 2 真实流量数据"对照探针 ② 预签名数据
+
+## 10. 锁定决议（2026-04-23 用户拍板）
+
+| # | 决议 | 理由 |
+|---|------|------|
+| 1 | 首期 artifact = `publish.dubbed_video` | 最大 + 最常下，收益最高 |
+| 2 | R2 key = `jobs/{job_id}/publish.dubbed_video{suffix}`，`suffix` 从本地文件实际后缀取（`.mp4` / `.mov` / 空）| Dashboard 可视 + 兼容未来不同容器格式 |
+| 3 | 凭证：**新建 `gateway-production` 专用 token**，不复用探针 token | 最小权限 `GetObject / PutObject / HeadObject`，scope 限定 `avt-artifacts` bucket 的 `jobs/*` prefix；探针 token 继续 dev 用 |
+| 4 | 审计事件：写入 `JobEvent` **JSONL schema/event stream**（`{jobs_dir}/{job_id}.events.jsonl`），不是独立 DB 表。事件类型：`download.redirect.r2` / `download.fallback.local` / `download.local.direct`，与 `src/services/jobs/events.py` 的 `SUPPORTED_EVENT_TYPES` 对齐。**注意：这三个都是"路由决策事件"，在 downstream 响应产出之前就已写入——不是"用户成功下载"的证据**（详见 §11.1 / §11.7）| 省 schema、查询一致、复用 `JobStore.load_events` 读路径 |
+| 5 | 验收样本：先用现成已完成真实任务；稳定样本缺失再补一个固定测试任务 | 省一次真实付费 pipeline |
+
+### 额外执行约束（避免返工）
+
+- **Presigned URL TTL = 120s**（不是之前草案写的 3600s）——窗口短，泄漏也无意义
+- **Presign 时必须带 `ResponseContentDisposition`**：保证下载文件名稳定为 `{job_friendly_name}.mp4`，不暴露内部 R2 key
+- **任何 R2 异常必须自动回退 local**，用户无感知；日志 + `download.fallback.local` 事件打点用于事后定位
+
+这些约束同步落到 §4 config + §6 测试 case + §11 事件表设计。
+
+## 11. 实施后的实际工程决策记录（2026-04-24 补）
+
+实施阶段遇到的契约级要点，超出原草案的范围，记在这里方便 Phase 3 接手时不踩坑：
+
+### 11.1 pydub 传染 → gateway 手写 JSONL append（事件写入路径）
+
+`src/services/jobs/events.py` 本身只是纯 dataclass，但它位于 `services.jobs.__init__.py` 的 import graph 下游——`services.jobs` 一旦 import，`process_runner` → `modules.output` → pydub 整条链就会连带加载。Gateway 容器不装 pydub（见 `display_name_orchestrator.py:30-35` 注释）。
+
+**决策**：Gateway 侧 **不 import `JobEvent` / `JobStore`**，把事件写入抽成独立模块 `gateway/storage/event_log.py::emit_download_event`（纯 stdlib，无 fastapi / pydub 依赖），直接手写与 `JobEvent.to_dict()` schema 一致的 dict → `json.dumps` → append 到 `{jobs_dir}/{job_id}.events.jsonl`。
+
+- `gateway/job_intercept.py._emit_download_event` 是一层极薄 delegator，只 re-export 这个 helper——保留历史调用点的可读性，实际逻辑在 `event_log.py` 里。
+- 测试直接 import `storage.event_log.emit_download_event` 跑真 helper（见 `tests/test_phase2_download_backend.py::test_emit_download_event_writes_*`）。**不要** 在测试里重写 record shape——CodeX 2026-04-24 review 指出过：重写 shape 会导致生产 append 路径坏掉而测试仍绿。
+- 任何未来扩展 download-related event type 的改动必须同时更新：
+  1. `src/services/jobs/events.py` 的 `SUPPORTED_EVENT_TYPES` 集合
+  2. `gateway/storage/event_log.py::_DOWNLOAD_EVENT_TYPES` 集合
+  3. 回归守卫 `tests/test_phase2_download_backend.py::test_emit_download_event_supported_types_in_sync_with_jobs_events` 会在任一侧漏改时 red。
+
+### 11.2 Gateway jobs/ 目录必须 bind mount
+
+`settings.jobs_dir` 默认 `/opt/aivideotrans/app/jobs`，但 gateway 容器镜像里这个路径不存在。T8 在 docker-compose.yml 为 gateway service 加了与 app service 相同的 `${AIVIDEOTRANS_ROOT}/data/jobs:/opt/aivideotrans/app/jobs` bind mount，确保 download event JSONL 能落地到宿主机、与 Job API 看同一份 store。**不这么做的后果**：events 静默写失败，监控大盘查询不到任何 `download.*` 事件。
+
+### 11.3 R2 key 带 suffix
+
+`r2_key_for(job_id, "publish.dubbed_video", local_path=...)` 返回 `jobs/{job_id}/publish.dubbed_video.mp4`（从 `local_path.suffix` 取，若本地文件是 `.mov` 则 key 尾巴也是 `.mov`）。Dashboard 可视性 + 未来多容器格式的正交性是设计目标，不要改成无后缀。
+
+### 11.4 Lock 路径必须在 jobs 目录下、不在 artifact 目录下
+
+`_lock_path_for_key` 指向 `{settings.jobs_dir}/_r2_upload_locks/{sha256(key)}`，不是 artifact 所在的工程目录。理由：lazy upload 期间如果 lock 文件混在 artifact 目录里，后续 `editing/commit` 的 `overwrite` / `copy_as_new` 搬运时可能被误扫进来。回归守卫 `tests/test_phase2_download_backend.py::test_lock_path_not_in_artifact_dir` 固化。
+
+### 11.5 前端零感知 R2 的 AST 扫描
+
+`tests/test_phase2_download_backend.py::test_frontend_has_no_r2_leakage` 递归扫 `frontend-next/src/**/*.{ts,tsx,js,jsx,mjs}`，禁止出现 `r2.cloudflarestorage` / `avt-artifacts` / `X-Amz-Signature` / `X-Amz-Expires` / `X-Amz-Algorithm` / `AWS4-HMAC-SHA256`。Phase 3+（上传路径）接手时这个守卫要保留——用户永远不应在前端代码里看到 S3 / R2 的影子。
+
+### 11.6 gateway 业务模块 hardcoded URL 规则继续生效
+
+Phase 2 新增的 `gateway/storage/*.py` 没有写 `http://localhost:8877` / `http://127.0.0.1:8877`——`backend_router.py` 只接本地 Path，`r2_client.py` 只连 R2 endpoint。`tests/test_legacy_cleanup_guards.py::test_gateway_business_modules_no_hardcoded_job_api_url` 继续全绿。
+
+---
+
+以上 6 点是 Phase 3 上传路径的直接前置契约。任何回退（删 jobs bind mount / 改 event emit 走 import / 把 lock 放回 artifact 目录）都会被现有测试立即红。
+
+### 11.7 事件打点语义：路由决策 ≠ 下载成功（CodeX 2026-04-24 review P3）
+
+这三个事件打点的时机是 **routing decision time**，不是 **download-succeeded time**：
+
+| 事件 | 写入时机 | 之后发生什么 |
+|------|---------|-------------|
+| `download.redirect.r2` | `resolve_download_target` 返 URL → 写事件 → 返 `RedirectResponse(302)` | 浏览器自行跟 302 到 R2；**gateway 不知道**客户端是否真的拿到了字节 |
+| `download.fallback.local` | R2 路径抛异常 → 写事件 → 调 `proxy_request` 走 local | proxy 可能成功也可能再失败；事件 **不表达** local 最终成功 |
+| `download.local.direct` | backend=local 默认分支，写事件 → 调 `proxy_request` | 同上，事件在 proxy 之前写入 |
+
+**为什么不移到 proxy 之后**：
+- 重定向路径：`RedirectResponse` 一旦返出 ASGI，gateway 就把控制权交给客户端，没有后续 hook 能知道 302 是否被跟随 / R2 下载是否成功。要知道 "用户下到没" 需要在 R2 侧装 access log 聚合（Phase 2 之外）。
+- Local 透传路径：`proxy_request` 是流式返回字节的，要观测 "流到最后没" 需要 ASGI response middleware，超出 Phase 2 范围。
+
+**对 rollout 仪表盘 / 告警口径的约束**：
+- **不要** 把 `download.redirect.r2` 计数当 "R2 下载成功数"。它只是 "路由选择了 R2"。
+- **不要** 把 `download.fallback.local` 当 "R2 故障 + local 成功"。它只是 "路由决策切到 local" ——local 可能紧接着 404 / 5xx。
+- 正确解读：
+  - `download.redirect.r2` 占比高 + 低 fallback → R2 路径健康
+  - `download.fallback.local` 占比骤升 → R2 HEAD / upload / presign 正在失败（用 gateway WARNING 日志定位）
+  - 真正的 "下载失败率" 要从 access log / upstream 4xx/5xx 单独算，不能从这三个事件推
+
+生产验收（§6.2）的 "下载成功率 100%" 是**人工 curl 验证**，不是基于这三个事件的指标。

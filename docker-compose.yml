@@ -149,6 +149,18 @@ services:
       - type: bind
         source: ${AIVIDEOTRANS_ROOT}/data/projects
         target: /opt/aivideotrans/app/projects
+      # Phase 2 R2 download backend (plan 2026-04-23) needs jobs_dir to:
+      #   (a) append download.* JSONL events that Job API already reads via
+      #       JobStore.load_events (same on-disk schema), and
+      #   (b) host the per-key upload lock files under
+      #       {jobs_dir}/_r2_upload_locks/{sha256}/ so concurrent first-
+      #       downloads of the same artifact don't race the R2 PUT.
+      # Writable because the lock files need O_RDWR. Path deliberately
+      # mirrors the app container's AIVIDEOTRANS_JOBS_DIR so both writers
+      # land in the same file.
+      - type: bind
+        source: ${AIVIDEOTRANS_ROOT}/data/jobs
+        target: /opt/aivideotrans/app/jobs
     depends_on:
       app:
         condition: service_healthy
@@ -197,6 +209,29 @@ services:
       VOLCENGINE_TTS_ACCESS_KEY: "${VOLCENGINE_TTS_ACCESS_KEY:-}"
       # Studio post-edit feature flag (D29) — gate editing endpoints
       AVT_ENABLE_POST_EDIT: "${AVT_ENABLE_POST_EDIT:-false}"
+      # --- Phase 2 R2 download backend (plan 2026-04-23) ---
+      # Default is intentionally safe: "local" keeps the existing Gateway
+      # -> Job API byte-passthrough path. Flipping to "r2" requires ALL
+      # three R2_* secrets to be populated; startup_checks.validate_r2_backend
+      # logs CRITICAL and auto-downgrades to local if anything is missing.
+      AVT_DOWNLOAD_REDIRECT_BACKEND: "${AVT_DOWNLOAD_REDIRECT_BACKEND:-local}"
+      # Shared jobs directory — same path as app container so both writers
+      # land in the same .events.jsonl files. Matches the volume bind below.
+      AIVIDEOTRANS_JOBS_DIR: "/opt/aivideotrans/app/jobs"
+      # R2 credentials. Env var names intentionally omit AVT_ prefix (matches
+      # the upstream Cloudflare-R2 plan + scripts/phase0_probes/ convention).
+      # All four default to empty — Phase 2 happily runs in "local" mode
+      # with no R2 creds, so operators can opt in at rollout time.
+      R2_ENDPOINT: "${R2_ENDPOINT:-}"
+      R2_ACCESS_KEY_ID: "${R2_ACCESS_KEY_ID:-}"
+      R2_SECRET_ACCESS_KEY: "${R2_SECRET_ACCESS_KEY:-}"
+      R2_ARTIFACTS_BUCKET: "${R2_ARTIFACTS_BUCKET:-avt-artifacts}"
+      # Presigned URL TTL (s). Short on purpose — browser follows the 302
+      # immediately, so a leaked URL barely has a replay window.
+      AVT_R2_PRESIGNED_EXPIRES_S: "${AVT_R2_PRESIGNED_EXPIRES_S:-120}"
+      # Lazy-upload wall clock budget (s). If the first-download upload
+      # can't finish inside this, backend_router falls back to local.
+      AVT_R2_UPLOAD_TIMEOUT_S: "${AVT_R2_UPLOAD_TIMEOUT_S:-60}"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8880/gateway/health')"]
       interval: 15s

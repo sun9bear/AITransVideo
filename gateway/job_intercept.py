@@ -815,10 +815,178 @@ async def intercept_job_subresource(
             strip_prefix="/job-api",
         )
 
+    # --- Phase 2 R2 download redirect (plan 2026-04-23) ---
+    # Narrow surface: only GET /download/publish.dubbed_video, only when the
+    # effective backend is R2. Any R2 error inside this branch silently
+    # returns None → we fall through to the existing byte-passthrough so
+    # the user never sees an R2-related failure. See
+    # gateway/storage/backend_router.py for the fallback contract.
+    if (
+        request.method == "GET"
+        and subpath == "download/publish.dubbed_video"
+    ):
+        redirect_url = await _maybe_r2_redirect(job_id, db)
+        if redirect_url is not None:
+            # 302 (not 307) — matches the pattern of existing CDN redirects
+            # and plays nicely with every <a download> client we've seen.
+            _emit_download_event(
+                job_id,
+                "download.redirect.r2",
+                message="Download redirected to R2",
+                payload={"artifact_key": "publish.dubbed_video", "backend": "r2"},
+            )
+            from fastapi.responses import RedirectResponse
+            return RedirectResponse(url=redirect_url, status_code=302)
+        try:
+            from storage.backend_router import is_r2_enabled
+            r2_enabled = is_r2_enabled()
+        except Exception:
+            r2_enabled = False
+        _emit_download_event(
+            job_id,
+            "download.fallback.local" if r2_enabled else "download.local.direct",
+            message=(
+                "Download fell back to local source"
+                if r2_enabled
+                else "Download served from local source"
+            ),
+            payload={"artifact_key": "publish.dubbed_video", "backend": "local"},
+        )
+
     return await proxy_request(
         request=request,
         upstream_base=settings.job_api_upstream,
         strip_prefix="/job-api",
+    )
+
+
+async def _maybe_r2_redirect(job_id: str, db: AsyncSession) -> str | None:
+    """Try to resolve an R2 302 target for ``publish.dubbed_video``.
+
+    Returns the signed URL on success, ``None`` on any miss / error so the
+    caller falls back to local byte-passthrough. Never raises — the entire
+    R2 code path is wrapped so a broken backend can't take the download
+    endpoint down.
+
+    Why this helper lives here (instead of ``backend_router``):
+      - It needs the Gateway DB session to read ``Job.project_dir`` and
+        the user-visible ``display_name`` / ``title``.
+      - ``backend_router.resolve_download_target`` stays DB-agnostic, which
+        keeps its unit tests fast and simple.
+    """
+    try:
+        from storage.backend_router import is_r2_enabled, resolve_download_target
+    except Exception as exc:  # pragma: no cover - boto3/storage missing
+        logger.warning("storage package import failed (%s); falling back to local", exc)
+        return None
+
+    if not is_r2_enabled():
+        return None
+
+    try:
+        result = await db.execute(select(Job).where(Job.job_id == job_id))
+        job = result.scalar_one_or_none()
+    except Exception as exc:
+        logger.warning("r2 redirect: job lookup failed job=%s (%s); falling back", job_id, exc)
+        return None
+
+    if job is None or not job.project_dir:
+        # Legacy row / still-queueing job — no project_dir means we have
+        # no way to find the artifact on disk. Let the Job API handle it.
+        return None
+
+    # Resolve the local artifact path via the shared manifest reader. If
+    # the manifest says the artifact exists, ``resolve_manifest_artifact_path``
+    # returns an absolute Path on the gateway filesystem (the ``projects``
+    # mount is read-only for this resolver, but the R2 upload only needs
+    # read access, so that's fine).
+    try:
+        from services.manifest_reader import resolve_manifest_artifact_path
+        local_path = resolve_manifest_artifact_path(
+            Path(job.project_dir), "publish.dubbed_video"
+        )
+    except Exception as exc:
+        logger.warning(
+            "r2 redirect: manifest resolve failed job=%s (%s); falling back",
+            job_id, exc,
+        )
+        return None
+
+    if local_path is None:
+        # Artifact missing on disk — falling back lets Job API produce its
+        # normal 404 so the user-visible error path is unchanged.
+        return None
+
+    download_filename = _derive_download_filename(job)
+
+    try:
+        return resolve_download_target(
+            job_id=job_id,
+            artifact_key="publish.dubbed_video",
+            local_path=local_path,
+            download_filename=download_filename,
+        )
+    except Exception as exc:
+        # Defensive: resolve_download_target is documented not to raise,
+        # but wrap anyway so a future refactor can't take the endpoint down.
+        logger.warning(
+            "r2 redirect: resolve_download_target raised job=%s (%s); falling back",
+            job_id, exc,
+        )
+        return None
+
+
+def _derive_download_filename(job: Job) -> str:
+    """Pick a friendly filename for the user's Save As dialog.
+
+    Priority: ``display_name`` (user-editable) → ``title`` (auto) → job_id.
+    Always appends ``.mp4``. Any filesystem-hostile char gets replaced with
+    ``_`` so the Content-Disposition value stays header-safe and matches
+    what local filesystems will accept without further prompting.
+    """
+    raw = (job.display_name or job.title or job.job_id or "download").strip()
+    # Strip path separators and other troublemakers. We're not trying to
+    # be cryptographically safe here — the presigned URL is already
+    # authenticated — just producing a sane filename.
+    cleaned = []
+    for ch in raw:
+        if ch in ('"', "\\", "/", ":", "*", "?", "<", ">", "|", "\r", "\n", "\0"):
+            cleaned.append("_")
+        else:
+            cleaned.append(ch)
+    name = "".join(cleaned).strip() or "download"
+    if not name.lower().endswith(".mp4"):
+        name = f"{name}.mp4"
+    return name
+
+
+def _emit_download_event(
+    job_id: str,
+    event_type: str,
+    *,
+    message: str,
+    payload: dict[str, object],
+) -> None:
+    """Thin delegator to :func:`gateway.storage.event_log.emit_download_event`.
+
+    The real JSONL writer lives in ``gateway/storage/event_log.py`` so it
+    can be unit-tested without dragging the fastapi / sqlalchemy import
+    graph of this module into the test process. Keep this wrapper purely
+    as a call-site stub — it exists only so existing imports of
+    ``_emit_download_event`` from this module keep working, and so the
+    call sites in this file stay readable.
+
+    **Routing-decision semantics**: see the module docstring of
+    ``event_log.py``. These events fire *before* the downstream proxy /
+    redirect response, so they measure routing choices, not successful
+    user-visible downloads.
+    """
+    from storage.event_log import emit_download_event
+    emit_download_event(
+        job_id,
+        event_type,
+        message=message,
+        payload=payload,
     )
 
 

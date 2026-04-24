@@ -1,7 +1,9 @@
 """Gateway configuration loaded from environment variables."""
 
+from typing import Literal
 from urllib.parse import quote_plus
 
+from pydantic import Field
 from pydantic_settings import BaseSettings
 
 
@@ -10,6 +12,10 @@ class GatewaySettings(BaseSettings):
 
     # Upstream services
     job_api_upstream: str = "http://127.0.0.1:8877"
+    jobs_dir: str = Field(
+        default="/opt/aivideotrans/app/jobs",
+        validation_alias="AIVIDEOTRANS_JOBS_DIR",
+    )
 
     # Gateway server
     gateway_host: str = "0.0.0.0"
@@ -71,7 +77,40 @@ class GatewaySettings(BaseSettings):
     # flag NEXT_PUBLIC_ENABLE_POST_EDIT which gates the UI entry points.
     enable_post_edit: bool = False
 
-    model_config = {"env_prefix": "AVT_"}
+    # --- Phase 2 R2 download backend (plan 2026-04-23) ---
+    # Pluggable artifact-download target. "local" (default) keeps the historic
+    # gateway → Job API byte-passthrough. "r2" redirects the user with HTTP 302
+    # to a short-lived Cloudflare R2 presigned URL. Any R2 error — missing
+    # config / HEAD failure / upload timeout / signing exception — auto-falls
+    # back to local so users never see a failure (see gateway/storage/
+    # backend_router.py). Phase 2 only covers the ``publish.dubbed_video``
+    # artifact key; other artifacts keep local path unconditionally.
+    download_redirect_backend: Literal["local", "r2"] = "local"
+
+    # R2 credentials & bucket. Env var names intentionally do NOT carry the
+    # AVT_ prefix — they follow the upstream Cloudflare-R2 plan convention
+    # (§10.1 of 2026-04-21-cloudflare-r2-deployment-plan.md) and match what
+    # the existing scripts/phase0_probes/ tooling expects. `validation_alias`
+    # bypasses the class-level AVT_ prefix for these four fields.
+    r2_endpoint: str = Field(default="", validation_alias="R2_ENDPOINT")
+    r2_access_key_id: str = Field(default="", validation_alias="R2_ACCESS_KEY_ID")
+    r2_secret_access_key: str = Field(default="", validation_alias="R2_SECRET_ACCESS_KEY")
+    r2_artifacts_bucket: str = Field(default="avt-artifacts", validation_alias="R2_ARTIFACTS_BUCKET")
+
+    # Presigned URL TTL in seconds. Deliberately tight (120s = 2 min) so that
+    # URL leakage has a very small replay window. User download clicks
+    # follow the 302 immediately; slow network clients on the CF edge still
+    # have plenty of headroom because the URL only needs to be *accepted*
+    # during the TTL, not the full body transferred.
+    r2_presigned_expires_s: int = 120
+
+    # Upload timeout when lazily pushing a never-seen-in-R2 artifact. If the
+    # upload cannot complete inside this budget, the router gives up and
+    # falls back to local. Kept tight to avoid holding user download
+    # requests for too long on a bad day.
+    r2_upload_timeout_s: int = 60
+
+    model_config = {"env_prefix": "AVT_", "populate_by_name": True}
 
 
 def resolve_database_url(raw: GatewaySettings) -> str:

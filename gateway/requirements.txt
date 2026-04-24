@@ -11,3 +11,5 @@ pydantic-settings==2.9.1
 email-validator==2.2.0
 requests==2.33.0
 cryptography==46.0.5
+boto3>=1.34,<2
+botocore>=1.34,<2
