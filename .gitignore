@@ -53,6 +53,10 @@ ssh_upload.py
 .claude/
 .superpowers/
 
+# CodeX 评审 scratch 目录（拉源码 / 临时 tarball / 子代理工作区）
+# 纯本地协作产物，每个会话都不一样，永远不入库
+.codex_tmp/
+
 # IDE / OS
 .vscode/
 .idea/
