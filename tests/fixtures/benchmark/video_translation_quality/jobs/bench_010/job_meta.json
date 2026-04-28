@@ -1,0 +1,27 @@
+{
+  "benchmark_id": "bench_010",
+  "source_job_hash": "e21410f4cecd",
+  "source_index": 10,
+  "selection_reasons": [
+    "low_rewrite_control",
+    "provider:cosyvoice"
+  ],
+  "metrics": {
+    "artifact_available": true,
+    "segment_count": 12,
+    "rewrite_segments": 0,
+    "rewrite_segment_rate": 0.0,
+    "rewrite_count": 0,
+    "needs_review_segments": 0,
+    "needs_review_rate": 0.0,
+    "force_dsp_segments": 0,
+    "pre_tts_events": 0,
+    "pre_tts_contradictions": 0,
+    "speaker_corrections": 0,
+    "speaker_correction_duration_p50_ms": null,
+    "target_duration_p50_ms": 23595.0,
+    "provider": "cosyvoice",
+    "tts_model": null,
+    "service_mode": null
+  }
+}

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict as _dc_asdict, dataclass, fields as _dc_fields
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -55,10 +56,14 @@ from services.assemblyai.transcriber import (
 from services.gemini.rewriter import GeminiRewriter
 from services.gemini.translator import (
     DEFAULT_ESTIMATED_TTS_CHARS_PER_SECOND,
+    DUBBING_MODE_DUB,
+    DUBBING_MODE_KEEP_ORIGINAL,
     DubbingSegment,
     GeminiTranslator,
     TranslationResult,
+    is_keep_original_dubbing_mode,
     load_gemini_config,
+    normalize_dubbing_mode,
 )
 from services.review_state import (
     REVIEW_STAGE_TAB_MAP,
@@ -74,8 +79,14 @@ from services.review_state import (
 from services.llm import LLMRouter, load_llm_fallback_config
 from services.llm_registry import get_prompt_model as _get_prompt_model
 from services.state_manager import StateManager
-from services.tts.duration_estimator import TTSDurationEstimator
+from services.tts.duration_estimator import TTSDurationEstimator, count_spoken_chars
 from services.tts.tts_generator import TTSConfig, TTSGenerator, load_tts_config
+from services.usage_meter import (
+    TTS_BUCKET_FIRST,
+    TTS_BUCKET_POST_TTS_RESYNTH,
+    TTS_BUCKET_PROBE,
+    UsageMeter,
+)
 from services.voice.auto_clone import AutoCloneError, AutoVoiceCloner
 from services.voice_clone import VoiceCloneConfig
 from services.voice.sample_extractor import (
@@ -99,6 +110,192 @@ FAILED_SEGMENT_SEMANTIC_SPLIT_MIN_RATIO = 0.28
 PRE_TTS_REWRITE_MIN_TARGET_MS = 8_000
 PRE_TTS_REWRITE_OVERSHOOT_RATIO = 0.20
 PRE_TTS_REWRITE_UNDERSHOOT_RATIO = 0.25
+PRE_TTS_REWRITE_SHORT_MIN_TARGET_MS = 2_000
+PRE_TTS_REWRITE_SHORT_OVERSHOOT_RATIO = 0.30
+PRE_TTS_REWRITE_NEAR_SHORT_TARGET_MS = 12_000
+PRE_TTS_REWRITE_NEAR_SHORT_OVERSHOOT_RATIO = 0.30
+PRE_TTS_REWRITE_SHORT_DECISION_ESTIMATE_MARGIN = 1.15
+PRE_TTS_REWRITE_MAX_BASE_CHANGE_RATIO = 0.35
+PRE_TTS_REWRITE_REQUIRED_CHANGE_MARGIN = 0.05
+PRE_TTS_REWRITE_MAX_CHANGE_CAP = 0.60
+# P1-d: short, aggressive shrink requests have higher estimator variance.
+# Keep more source text so a fast TTS realization does not flip into undershoot
+# and trigger a post-TTS rewrite immediately after the pre-TTS shrink.
+PRE_TTS_REWRITE_HIGH_SHRINK_RISK_TARGET_MS = 12_000
+PRE_TTS_REWRITE_HIGH_SHRINK_RISK_REQUIRED_SHRINK = 0.45
+PRE_TTS_REWRITE_HIGH_SHRINK_RISK_MAX_CHANGE_RATIO = 0.40
+PRE_TTS_REWRITE_HIGH_SHRINK_RISK_UPPER_SLACK = 0.05
+# P1-g: 8-20s overshoot shrink has shown the highest "shrink then undershoot"
+# risk in production. Keep more text than the raw CPS target so a fast TTS
+# realization does not flip the direction after pre-TTS rewrite.
+PRE_TTS_REWRITE_MID_UNDERSHOOT_RISK_MIN_TARGET_MS = 8_000
+PRE_TTS_REWRITE_MID_UNDERSHOOT_RISK_MAX_TARGET_MS = 20_000
+PRE_TTS_REWRITE_MID_UNDERSHOOT_RISK_REQUIRED_SHRINK = 0.20
+PRE_TTS_REWRITE_MID_UNDERSHOOT_RISK_MAX_CHANGE_RATIO = 0.25
+PRE_TTS_REWRITE_MID_UNDERSHOOT_RISK_MIN_TARGET_MULTIPLIER = 1.10
+PRE_TTS_REWRITE_MID_UNDERSHOOT_RISK_MAX_TARGET_MULTIPLIER = 1.18
+# P1-h: for 20s+ segments, a large pre-TTS shrink can still produce a fast
+# first pass and flip into undershoot/force-DSP. Keep a wider safety floor for
+# long overshoot only; this does not expand the rewrite trigger set.
+PRE_TTS_REWRITE_LONG_UNDERSHOOT_RISK_MIN_TARGET_MS = 20_000
+PRE_TTS_REWRITE_LONG_UNDERSHOOT_RISK_REQUIRED_SHRINK = 0.20
+PRE_TTS_REWRITE_LONG_UNDERSHOOT_RISK_MAX_CHANGE_RATIO = 0.20
+PRE_TTS_REWRITE_LONG_UNDERSHOOT_RISK_MIN_TARGET_MULTIPLIER = 1.15
+PRE_TTS_REWRITE_LONG_UNDERSHOOT_RISK_MAX_TARGET_MULTIPLIER = 1.28
+# P1-k: long overshoot is expensive to leave until post-TTS. If the cheap
+# rewrite misses guardrails, allow one strict retry on the stronger rewrite
+# route, but keep the same deterministic char bounds before accepting it.
+PRE_TTS_REWRITE_STRICT_RETRY_MIN_TARGET_MS = 20_000
+PRE_TTS_REWRITE_STRICT_RETRY_TASK = "s5_rewrite_strict"
+SHORT_MERGE_CANDIDATE_MAX_TARGET_MS = 2_000
+SHORT_MERGE_CANDIDATE_MAX_SPOKEN_CHARS = 18
+SHORT_MERGE_MAX_GAP_MS = 650
+SHORT_MERGE_MAX_COMBINED_TARGET_MS = 10_000
+SPEAKER_STRUCTURE_SHORT_SEGMENT_MS = 8_000
+SPEAKER_STRUCTURE_INCIDENTAL_MAX_SHARE = 0.08
+SPEAKER_STRUCTURE_INCIDENTAL_MAX_DURATION_MS = 60_000
+SPEAKER_STRUCTURE_INCIDENTAL_MAX_SINGLE_SEGMENT_MS = 20_000
+SPEAKER_STRUCTURE_INCIDENTAL_MAX_SEGMENTS = 8
+SPEAKER_STRUCTURE_INCIDENTAL_MIN_SHORT_RATE = 0.75
+SPEAKER_STRUCTURE_FRAGMENTED_MAX_SHARE = 0.15
+SPEAKER_STRUCTURE_FRAGMENTED_MIN_SEGMENTS = 3
+SPEAKER_STRUCTURE_FRAGMENTED_MIN_SHORT_RATE = 0.60
+SPEAKER_STRUCTURE_NON_SPEECH_MARKERS = (
+    "non_speech",
+    "non-speech",
+    "not speech",
+    "background music",
+    "music",
+    "song",
+    "singing",
+    "chant",
+    "chanting",
+    "cheering",
+    "applause",
+    "crowd noise",
+    "背景音乐",
+    "背景音",
+    "非对白",
+    "非语音",
+    "音乐",
+    "歌曲",
+    "唱歌",
+    "合唱",
+    "欢呼",
+    "喝彩",
+    "掌声",
+    "噪声",
+)
+LOW_INFORMATION_UNDERFLOW_KEEP_ORIGINAL_MIN_TARGET_MS = 4_000
+LOW_INFORMATION_UNDERFLOW_KEEP_ORIGINAL_MIN_STRETCH_RATIO = 2.5
+LOW_INFORMATION_UNDERFLOW_KEEP_ORIGINAL_MAX_SOURCE_WORDS = 8
+LOW_INFORMATION_UNDERFLOW_KEEP_ORIGINAL_MAX_SPOKEN_CHARS = 18
+LOW_INFORMATION_CUE_TOKENS = frozenset({
+    "ah",
+    "alright",
+    "break",
+    "done",
+    "er",
+    "exercise",
+    "final",
+    "go",
+    "half",
+    "halfway",
+    "hmm",
+    "huh",
+    "last",
+    "left",
+    "minute",
+    "minutes",
+    "next",
+    "ok",
+    "okay",
+    "ready",
+    "rest",
+    "right",
+    "second",
+    "seconds",
+    "start",
+    "stop",
+    "switch",
+    "uh",
+    "um",
+    "yeah",
+    "yes",
+})
+SHORT_CONTENT_COMPACT_TASK = "s5_short_content_compact"
+SHORT_CONTENT_COMPACT_MIN_TARGET_MS = 2_000
+SHORT_CONTENT_COMPACT_MAX_TARGET_MS = 8_000
+SHORT_CONTENT_COMPACT_MIN_OVERSHOOT_RATIO = 0.30
+SHORT_CONTENT_COMPACT_MIN_SOURCE_WORDS = 3
+SHORT_CONTENT_COMPACT_MIN_PRE_CHARS_OVER_UPPER = 2
+SHORT_CONTENT_COMPACT_CHARS_PER_SECOND_LOWER = 2.6
+SHORT_CONTENT_COMPACT_CHARS_PER_SECOND_UPPER = 4.0
+SHORT_CONTENT_COMPACT_QUESTION_STARTERS = frozenset({
+    "am",
+    "are",
+    "can",
+    "could",
+    "did",
+    "do",
+    "does",
+    "had",
+    "has",
+    "have",
+    "how",
+    "is",
+    "may",
+    "might",
+    "should",
+    "was",
+    "were",
+    "what",
+    "when",
+    "where",
+    "who",
+    "whom",
+    "whose",
+    "why",
+    "will",
+    "would",
+})
+SHORT_CONTENT_COMPACT_FILLER_TOKENS = frozenset({
+    "a",
+    "actually",
+    "and",
+    "basically",
+    "but",
+    "i",
+    "just",
+    "kind",
+    "like",
+    "mean",
+    "of",
+    "okay",
+    "right",
+    "so",
+    "sort",
+    "that",
+    "the",
+    "uh",
+    "um",
+    "well",
+    "you",
+    "know",
+})
+SHORT_CONTENT_COMPACT_NON_SPEECH_TOKENS = frozenset({
+    "applause",
+    "chant",
+    "cheering",
+    "cheers",
+    "crowd",
+    "laughs",
+    "laughter",
+    "music",
+    "noise",
+    "singing",
+    "song",
+})
 # Plan-C+ (2026-04-15): when TTS speed can absorb the drift safely
 # (within both admin speed clamp AND a listen-comfort guardrail),
 # skip the pre-TTS rewrite — it would just be a wasted LLM call.
@@ -167,14 +364,27 @@ def _merge_speaker_name_map(
     return merged
 
 
-def _report_source_metadata(job_id: str, duration_seconds: float, title: str | None = None) -> None:
+def _report_source_metadata(
+    job_id: str,
+    duration_seconds: float | None = None,
+    title: str | None = None,
+    display_name: str | None = None,
+    *,
+    stage_label: str = "S0",
+) -> None:
     """Best-effort callback to Gateway /job-api/jobs/{job_id}/source-metadata."""
     import urllib.request
     gateway_base = os.environ.get("AVT_GATEWAY_URL", "http://localhost:8880")
     url = f"{gateway_base}/job-api/jobs/{job_id}/source-metadata"
-    body: dict = {"source_duration_seconds": duration_seconds}
+    body: dict = {}
+    if duration_seconds is not None:
+        body["source_duration_seconds"] = duration_seconds
     if title:
         body["title"] = title
+    if display_name:
+        body["display_name"] = display_name
+    if not body:
+        return
     try:
         req = urllib.request.Request(
             url,
@@ -183,9 +393,9 @@ def _report_source_metadata(job_id: str, duration_seconds: float, title: str | N
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
-            print(f"[S0] Reported source metadata to gateway: {resp.status}", flush=True)
+            print(f"[{stage_label}] Reported source metadata to gateway: {resp.status}", flush=True)
     except Exception as e:
-        print(f"[S0] Warning: failed to report source metadata: {e}", flush=True)
+        print(f"[{stage_label}] Warning: failed to report source metadata: {e}", flush=True)
 
 
 def _report_job_metering(
@@ -194,6 +404,7 @@ def _report_job_metering(
     *,
     tts_billed_chars: int | None = None,
     glossary: dict[str, str] | None = None,
+    extra_metering: dict[str, object] | None = None,
 ) -> None:
     """Best-effort callback to Gateway /job-api/jobs/{job_id}/metering.
 
@@ -221,6 +432,8 @@ def _report_job_metering(
       - speed_param_distribution: counts by speed param bucket (1.0 / [0.92,1.08] / outside) — Task 1 will populate
       - term_preservation_rate: glossary terms appearing in final translation / total terms
       - missing_glossary_terms: list (≤20) of Chinese terms that were dropped
+      - speaker_*: deterministic P2 speaker-structure summary for incidental
+        and fragmented low-share speakers
     """
     import urllib.request
     gateway_base = os.environ.get("AVT_GATEWAY_URL", "http://localhost:8880")
@@ -235,9 +448,62 @@ def _report_job_metering(
         first_pass_errors_abs: list[float] = []
         method_counts: dict[str, int] = {}
         speed_counts: dict[str, int] = {"1.0": 0, "in_range": 0, "outside": 0}
+        pre_tts_rewrite_events: list[dict[str, object]] = []
+        pre_tts_rewrite_rejected_events: list[dict[str, object]] = []
+        pre_tts_rewrite_rejected_reason_counts: dict[str, int] = {}
+        micro_segment_count = 0
+        short_segment_count = 0
+        short_segment_needs_review_count = 0
+        short_segment_force_dsp_count = 0
+        capped_dsp_overflow_count = 0
+        capped_dsp_underflow_count = 0
+        dsp_silence_pad_segment_count = 0
+        dsp_silence_padded_total_ms = 0
+        dsp_silence_padded_max_ms = 0
+        short_segment_capped_dsp_overflow_count = 0
+        force_dsp_severity_counts: dict[str, int] = {}
+        force_dsp_review_suppressed_count = 0
+        short_merge_candidate_count = 0
+        short_merge_blocked_cross_speaker_count = 0
+        short_merge_applied_count = 0
+        short_merge_absorbed_count = 0
+        auto_keep_original_count = 0
+        auto_keep_original_reason_counts: dict[str, int] = {}
+        short_content_compact_attempted_count = 0
+        short_content_compact_accepted_count = 0
+        short_content_compact_rejected_count = 0
+        short_content_compact_rejected_reason_counts: dict[str, int] = {}
+        short_content_compact_class_counts: dict[str, int] = {}
+        speaker_structure_profiles: dict[str, dict[str, object]] = {}
 
         for seg in segments:
             total_segments += 1
+            speaker_id = str(getattr(seg, "speaker_id", "") or "")
+            if speaker_id:
+                role = str(getattr(seg, "speaker_role", "") or "")
+                existing_profile = speaker_structure_profiles.get(speaker_id)
+                if existing_profile is None or (
+                    not str(existing_profile.get("speaker_role", "") or "") and role
+                ):
+                    speaker_structure_profiles[speaker_id] = {
+                        "speaker_role": role,
+                        "speaker_role_label": str(getattr(seg, "speaker_role_label", "") or ""),
+                        "duration_ms": int(getattr(seg, "speaker_duration_ms", 0) or 0),
+                        "duration_share": round(
+                            float(getattr(seg, "speaker_duration_share", 0.0) or 0.0),
+                            4,
+                        ),
+                        "segment_count": int(getattr(seg, "speaker_segment_count", 0) or 0),
+                        "short_segment_count": int(
+                            getattr(seg, "speaker_short_segment_count", 0) or 0
+                        ),
+                        "short_segment_rate": round(
+                            float(getattr(seg, "speaker_short_segment_rate", 0.0) or 0.0),
+                            4,
+                        ),
+                        "reason": str(getattr(seg, "speaker_structure_reason", "") or ""),
+                        "review_hint": str(getattr(seg, "speaker_review_hint", "") or ""),
+                    }
             text = getattr(seg, "cn_text", "") or ""
             if not text:
                 text = getattr(seg, "merged_cn_text", "") or ""
@@ -255,6 +521,71 @@ def _report_job_metering(
             method = getattr(seg, "alignment_method", "") or ""
             if method:
                 method_counts[method] = method_counts.get(method, 0) + 1
+            if method == "capped_dsp_overflow":
+                capped_dsp_overflow_count += 1
+            if method == "capped_dsp_underflow":
+                capped_dsp_underflow_count += 1
+            pad_ms = int(getattr(seg, "dsp_silence_padded_ms", 0) or 0)
+            if pad_ms > 0:
+                dsp_silence_pad_segment_count += 1
+                dsp_silence_padded_total_ms += pad_ms
+                dsp_silence_padded_max_ms = max(dsp_silence_padded_max_ms, pad_ms)
+            if method in {"force_dsp", "capped_dsp_overflow", "capped_dsp_underflow"}:
+                severity = getattr(seg, "force_dsp_severity", "") or "unknown"
+                force_dsp_severity_counts[severity] = (
+                    force_dsp_severity_counts.get(severity, 0) + 1
+                )
+                if getattr(seg, "force_dsp_review_suppressed", False):
+                    force_dsp_review_suppressed_count += 1
+            if getattr(seg, "short_merge_candidate", False):
+                short_merge_candidate_count += 1
+            if getattr(seg, "short_merge_blocked_reason", "") == "cross_speaker_adjacent":
+                short_merge_blocked_cross_speaker_count += 1
+            if getattr(seg, "short_merge_applied", False):
+                short_merge_applied_count += 1
+                short_merge_absorbed_count += len(
+                    ProcessPipeline._parse_short_merge_absorbed_segment_ids(seg)
+                )
+            auto_keep_reason = str(
+                getattr(seg, "auto_keep_original_reason", "") or ""
+            )
+            if auto_keep_reason:
+                auto_keep_original_count += 1
+                auto_keep_original_reason_counts[auto_keep_reason] = (
+                    auto_keep_original_reason_counts.get(auto_keep_reason, 0) + 1
+                )
+            if getattr(seg, "short_content_compact_attempted", False):
+                short_content_compact_attempted_count += 1
+                compact_class = str(
+                    getattr(seg, "short_content_compact_class", "") or "unknown"
+                )
+                short_content_compact_class_counts[compact_class] = (
+                    short_content_compact_class_counts.get(compact_class, 0) + 1
+                )
+                if getattr(seg, "short_content_compact_accepted", False):
+                    short_content_compact_accepted_count += 1
+                else:
+                    short_content_compact_rejected_count += 1
+                    compact_reason = str(
+                        getattr(seg, "short_content_compact_rejected_reason", "")
+                        or "unknown"
+                    )
+                    short_content_compact_rejected_reason_counts[compact_reason] = (
+                        short_content_compact_rejected_reason_counts.get(compact_reason, 0)
+                        + 1
+                    )
+
+            target_duration_ms = int(getattr(seg, "target_duration_ms", 0) or 0)
+            if 0 < target_duration_ms < 1_000:
+                micro_segment_count += 1
+            if PRE_TTS_REWRITE_SHORT_MIN_TARGET_MS <= target_duration_ms < PRE_TTS_REWRITE_MIN_TARGET_MS:
+                short_segment_count += 1
+                if getattr(seg, "needs_review", False):
+                    short_segment_needs_review_count += 1
+                if method == "force_dsp":
+                    short_segment_force_dsp_count += 1
+                if method == "capped_dsp_overflow":
+                    short_segment_capped_dsp_overflow_count += 1
 
             err = getattr(seg, "first_pass_error_pct", None)
             if err is not None and err != 0.0:
@@ -268,6 +599,69 @@ def _report_job_metering(
                 speed_counts["in_range"] += 1
             else:
                 speed_counts["outside"] += 1
+
+            pre_tts_direction = getattr(seg, "pre_tts_rewrite_direction", "") or ""
+            if pre_tts_direction:
+                pre_tts_rewrite_events.append({
+                    "segment_id": getattr(seg, "segment_id", None),
+                    "direction": pre_tts_direction,
+                    "task": getattr(seg, "pre_tts_rewrite_task", "") or "s5_rewrite",
+                    "estimate_ms": getattr(seg, "pre_tts_estimate_ms", 0) or 0,
+                    "target_ms": getattr(seg, "pre_tts_target_ms", 0) or 0,
+                    "pre_chars": getattr(seg, "pre_tts_pre_chars", 0) or 0,
+                    "post_chars": getattr(seg, "pre_tts_post_chars", 0) or 0,
+                    "post_tts_first_pass_ms": (
+                        getattr(seg, "pre_tts_post_tts_first_pass_ms", 0) or 0
+                    ),
+                    "contradiction": bool(getattr(seg, "pre_tts_contradiction", False)),
+                    "harmful_contradiction": bool(
+                        getattr(seg, "pre_tts_harmful_contradiction", False)
+                    ),
+                    "retry_attempted": bool(
+                        getattr(seg, "pre_tts_rewrite_retry_attempted", False)
+                    ),
+                    "retry_accepted": bool(
+                        getattr(seg, "pre_tts_rewrite_retry_accepted", False)
+                    ),
+                    "initial_rejected_reason": (
+                        getattr(seg, "pre_tts_rewrite_initial_rejected_reason", "") or ""
+                    ),
+                })
+            if getattr(seg, "pre_tts_rewrite_rejected", False):
+                reason = str(
+                    getattr(seg, "pre_tts_rewrite_rejected_reason", "") or "unknown"
+                )
+                pre_tts_rewrite_rejected_reason_counts[reason] = (
+                    pre_tts_rewrite_rejected_reason_counts.get(reason, 0) + 1
+                )
+                pre_tts_rewrite_rejected_events.append({
+                    "segment_id": getattr(seg, "segment_id", None),
+                    "direction": (
+                        getattr(seg, "pre_tts_rewrite_rejected_direction", "") or ""
+                    ),
+                    "reason": reason,
+                    "estimate_ms": (
+                        getattr(seg, "pre_tts_rewrite_rejected_estimate_ms", 0) or 0
+                    ),
+                    "target_ms": (
+                        getattr(seg, "pre_tts_rewrite_rejected_target_ms", 0) or 0
+                    ),
+                    "pre_chars": (
+                        getattr(seg, "pre_tts_rewrite_rejected_pre_chars", 0) or 0
+                    ),
+                    "post_chars": (
+                        getattr(seg, "pre_tts_rewrite_rejected_post_chars", 0) or 0
+                    ),
+                    "lower_chars": (
+                        getattr(seg, "pre_tts_rewrite_rejected_lower_chars", 0) or 0
+                    ),
+                    "upper_chars": (
+                        getattr(seg, "pre_tts_rewrite_rejected_upper_chars", 0) or 0
+                    ),
+                    "retry_attempted": bool(
+                        getattr(seg, "pre_tts_rewrite_retry_attempted", False)
+                    ),
+                })
 
         body: dict = {
             "final_cn_chars": total_cn_chars,
@@ -287,9 +681,50 @@ def _report_job_metering(
                 round(needs_review_count / total_segments, 4)
                 if total_segments > 0 else 0.0
             ),
+            "micro_segment_count": micro_segment_count,
+            "short_segment_count": short_segment_count,
+            "short_segment_needs_review_count": short_segment_needs_review_count,
+            "short_segment_force_dsp_count": short_segment_force_dsp_count,
+            "capped_dsp_overflow_count": capped_dsp_overflow_count,
+            "capped_dsp_underflow_count": capped_dsp_underflow_count,
+            "dsp_silence_pad_segment_count": dsp_silence_pad_segment_count,
+            "dsp_silence_padded_total_ms": dsp_silence_padded_total_ms,
+            "dsp_silence_padded_max_ms": dsp_silence_padded_max_ms,
+            "short_segment_capped_dsp_overflow_count": short_segment_capped_dsp_overflow_count,
+            "force_dsp_severity_distribution": force_dsp_severity_counts,
+            "force_dsp_review_suppressed_count": force_dsp_review_suppressed_count,
+            "short_merge_candidate_count": short_merge_candidate_count,
+            "short_merge_blocked_cross_speaker_count": short_merge_blocked_cross_speaker_count,
+            "short_merge_applied_count": short_merge_applied_count,
+            "short_merge_absorbed_count": short_merge_absorbed_count,
+            "auto_keep_original_count": auto_keep_original_count,
+            "auto_keep_original_reason_distribution": auto_keep_original_reason_counts,
+            "short_content_compact_attempted_count": short_content_compact_attempted_count,
+            "short_content_compact_accepted_count": short_content_compact_accepted_count,
+            "short_content_compact_rejected_count": short_content_compact_rejected_count,
+            "short_content_compact_rejected_reason_distribution": (
+                short_content_compact_rejected_reason_counts
+            ),
+            "short_content_compact_class_distribution": short_content_compact_class_counts,
             "alignment_method_distribution": method_counts,
             "speed_param_distribution": speed_counts,
         }
+        if speaker_structure_profiles:
+            role_counts: dict[str, int] = {}
+            incidental_share_total = 0.0
+            for profile in speaker_structure_profiles.values():
+                role = str(profile.get("speaker_role", "") or "unknown")
+                role_counts[role] = role_counts.get(role, 0) + 1
+                if role == "incidental":
+                    incidental_share_total += float(profile.get("duration_share", 0.0) or 0.0)
+            body["speaker_count"] = len(speaker_structure_profiles)
+            body["speaker_role_distribution"] = role_counts
+            body["speaker_primary_count"] = role_counts.get("primary", 0)
+            body["speaker_incidental_count"] = role_counts.get("incidental", 0)
+            body["speaker_fragmented_count"] = role_counts.get("fragmented", 0)
+            body["speaker_non_speech_count"] = role_counts.get("non_speech", 0)
+            body["speaker_incidental_duration_share"] = round(incidental_share_total, 4)
+            body["speaker_structure_profiles"] = speaker_structure_profiles
 
         # voice_speed_mismatch_rate: fraction of segments whose voice cps
         # deviates >15% from target (= source_english_wps × 1.8). Segments
@@ -341,6 +776,51 @@ def _report_job_metering(
         if tts_billed_chars is not None:
             body["tts_billed_chars"] = tts_billed_chars
 
+        if extra_metering:
+            body.update(extra_metering)
+
+        if pre_tts_rewrite_events:
+            contradiction_count = sum(
+                1 for event in pre_tts_rewrite_events if event["contradiction"]
+            )
+            harmful_contradiction_count = sum(
+                1 for event in pre_tts_rewrite_events if event["harmful_contradiction"]
+            )
+            body["pre_tts_rewrite_count"] = len(pre_tts_rewrite_events)
+            body["pre_tts_contradiction_count"] = contradiction_count
+            body["pre_tts_contradiction_rate"] = round(
+                contradiction_count / len(pre_tts_rewrite_events),
+                4,
+            )
+            body["harmful_pre_tts_contradiction_count"] = harmful_contradiction_count
+            body["harmful_pre_tts_contradiction_rate"] = round(
+                harmful_contradiction_count / len(pre_tts_rewrite_events),
+                4,
+            )
+            body["pre_tts_rewrite_events"] = pre_tts_rewrite_events
+        retry_attempt_count = sum(
+            1 for event in pre_tts_rewrite_rejected_events
+            if event["retry_attempted"]
+        ) + sum(
+            1 for event in pre_tts_rewrite_events
+            if event["retry_attempted"]
+        )
+        retry_accepted_count = sum(
+            1 for event in pre_tts_rewrite_events
+            if event["retry_accepted"]
+        )
+        if pre_tts_rewrite_rejected_events:
+            body["pre_tts_rewrite_rejected_count"] = len(
+                pre_tts_rewrite_rejected_events
+            )
+            body["pre_tts_rewrite_rejected_reason_distribution"] = (
+                pre_tts_rewrite_rejected_reason_counts
+            )
+            body["pre_tts_rewrite_rejected_events"] = pre_tts_rewrite_rejected_events
+        if retry_attempt_count:
+            body["pre_tts_rewrite_retry_attempt_count"] = retry_attempt_count
+            body["pre_tts_rewrite_retry_accepted_count"] = retry_accepted_count
+
         # Phase 2 Task 0 — glossary preservation check (best-effort)
         if glossary:
             try:
@@ -383,6 +863,60 @@ def _is_pre_tts_rewrite_enabled() -> bool:
     return True  # Default: enabled
 
 
+def _count_spoken_chars_for_metering(text: str) -> int:
+    """Count chars with the same spoken-char filter as TTSDurationEstimator."""
+    return count_spoken_chars(text)
+
+
+def _set_usage_meter_if_supported(target: object, usage_meter: UsageMeter | None) -> None:
+    setter = getattr(target, "set_usage_meter", None)
+    if callable(setter):
+        try:
+            setter(usage_meter)
+        except Exception as exc:
+            print(f"[metering] set_usage_meter skipped: {exc}", flush=True)
+
+
+def _write_usage_summary(usage_meter: UsageMeter | None) -> dict[str, object]:
+    if usage_meter is None:
+        return {}
+    try:
+        return usage_meter.write_summary()
+    except Exception as exc:
+        print(f"[metering] usage summary skipped: {exc}", flush=True)
+        return {}
+
+
+def _line_span_seconds_for_metering(lines: list | None) -> float:
+    starts: list[int] = []
+    ends: list[int] = []
+    for line in lines or []:
+        try:
+            starts.append(int(getattr(line, "start_ms", 0) or 0))
+            ends.append(int(getattr(line, "end_ms", 0) or 0))
+        except (TypeError, ValueError):
+            continue
+    if not starts or not ends:
+        return 0.0
+    return max(0.0, (max(ends) - min(starts)) / 1000.0)
+
+
+def _generate_tts_all_with_bucket(
+    tts_generator: object,
+    segments: list[DubbingSegment],
+    output_dir: str,
+    *,
+    usage_bucket: str,
+) -> list:
+    generate_all = getattr(tts_generator, "generate_all")
+    try:
+        return generate_all(segments, output_dir, usage_bucket=usage_bucket)
+    except TypeError as exc:
+        if "usage_bucket" not in str(exc):
+            raise
+        return generate_all(segments, output_dir)
+
+
 # Plan-based max duration (minutes).  Mirrors PLAN_CATALOG in gateway.
 # The pipeline uses these only as a hard safety-net; the primary check
 # is done by Gateway at job-creation time.
@@ -391,6 +925,12 @@ _PLAN_MAX_DURATION_MINUTES = {
     "plus": 60,
     "pro": 180,
 }
+
+VOICE_SPEED_PROFILE_MIN_SAMPLES = 2
+VOICE_SPEED_PROFILE_MIN_SPOKEN_CHARS = 80
+VOICE_SPEED_PROFILE_MIN_NATURAL_DURATION_MS = 10_000
+VOICE_SPEED_PROFILE_MIN_SAMPLE_CHARS = 6
+VOICE_SPEED_PROFILE_MAX_PROFILES_PER_JOB = 20
 
 
 def _resolve_projects_root() -> Path:
@@ -638,6 +1178,7 @@ class ProcessPipeline:
                 tempfile.mkdtemp(prefix="_process_", dir=projects_root)
             ).resolve(strict=False)
             final_project_dir = working_project_dir
+        usage_meter = UsageMeter(final_project_dir, job_id=config.job_id)
         review_state_manager: ReviewStateManager | None = None
         state_manager: StateManager | None = None
         current_stage_name: str | None = None
@@ -821,6 +1362,7 @@ class ProcessPipeline:
                 )
             translator = GeminiTranslator(**translator_kwargs)
             translator._service_mode = job_service_mode  # enables llm_registry model selection
+            _set_usage_meter_if_supported(translator, usage_meter)
 
             transcript_path = (final_project_dir / "transcript" / "transcript.json").resolve(strict=False)
             transcription_method = getattr(config, "transcription_method", None) or "assemblyai"
@@ -841,6 +1383,16 @@ class ProcessPipeline:
                     str(final_project_dir / "transcript"),
                     speaker_labels=normalized_speakers == "auto" or (isinstance(normalized_speakers, int) and normalized_speakers >= 2),
                     speakers_expected=normalized_speakers if isinstance(normalized_speakers, int) and normalized_speakers >= 2 else None,
+                )
+                usage_meter.record_llm(
+                    task="s1_gemini_transcribe",
+                    provider="gemini",
+                    model=str(gemini_config.get("model_name", "gemini")),
+                    model_id=str(gemini_config.get("model_name", "gemini")),
+                    input_text=normalized_url,
+                    output_text="\n".join(line.source_text for line in transcript_result.lines),
+                    audio_input_seconds=_line_span_seconds_for_metering(transcript_result.lines),
+                    attempt_label="legacy_gemini_transcription",
                 )
                 print(f"[S1] Gemini 转录完成：共 {len(transcript_result.lines)} 条")
             else:
@@ -908,6 +1460,7 @@ class ProcessPipeline:
             _review_glossary: dict[str, str] = {}
             _review_speaker_styles: dict[str, dict] = {}
             _review_speaker_names: dict[str, str] = {}  # all speakers including c+
+            _review_display_title_zh: str | None = None
 
             # S2 cache: if review already ran (e.g. pipeline resumed after
             # translation_config_review), restore results instead of re-running.
@@ -922,6 +1475,7 @@ class ProcessPipeline:
                     _s2_cached = _json_s2.loads(s2_result_path.read_text(encoding="utf-8"))
                     _review_speaker_styles = _s2_cached.get("speakers", {})
                     _review_glossary = _s2_cached.get("glossary", {})
+                    _review_display_title_zh = _s2_cached.get("display_title_zh") or None
                     for spk_id, spk_info in _review_speaker_styles.items():
                         name = spk_info.get("name", "")
                         if name:
@@ -931,6 +1485,12 @@ class ProcessPipeline:
                             elif spk_id == "speaker_b" and speaker_name_b_is_placeholder:
                                 speaker_name_b = name
                     print(f"[S2] 已有审校结果，跳过重新审校（{len(_review_speaker_names)} 位说话人，{len(_review_glossary)} 条术语）")
+                    if _review_display_title_zh and config.job_id:
+                        _report_source_metadata(
+                            config.job_id,
+                            display_name=_review_display_title_zh,
+                            stage_label="S2",
+                        )
                 except Exception as _s2_err:
                     print(f"[S2] 加载缓存审校结果失败 ({_s2_err})，将重新审校...")
                     s2_cache_hit = False
@@ -965,6 +1525,7 @@ class ProcessPipeline:
                         debug_output_dir=final_project_dir / "transcript",
                         mode=job_service_mode,
                         skip_pass1=False,
+                        usage_meter=usage_meter,
                     )
 
                     if review_result is not None:
@@ -1017,6 +1578,15 @@ class ProcessPipeline:
                         # Save glossary and styles for translation stage
                         _review_glossary = review_result.glossary
                         _review_speaker_styles = review_result.speakers
+                        _review_display_title_zh = getattr(review_result, "display_title_zh", None)
+                        if _review_display_title_zh:
+                            print(f"[S2] 中文任务名：{_review_display_title_zh}")
+                            if config.job_id:
+                                _report_source_metadata(
+                                    config.job_id,
+                                    display_name=_review_display_title_zh,
+                                    stage_label="S2",
+                                )
 
                         print(f"[S2] Glossary: {len(_review_glossary)} terms")
                         print(f"[S2] Lines: {len(transcript_result.lines)} (was {len(review_result.lines)})")
@@ -1078,10 +1648,20 @@ class ProcessPipeline:
                 self._write_transcript_result(transcript_result)
                 print("[S2] 说话人审核已合并到统一审核，自动跳过。")
 
+            _speaker_structure_profiles = self._build_speaker_structure_profiles(
+                transcript_result.lines,
+                speaker_styles=_review_speaker_styles,
+            )
+            self._log_speaker_structure_profiles(_speaker_structure_profiles)
+
             if s3_cache_hit:
                 print("[S3] 已有翻译结果，跳过翻译")
                 translation_execution_mode = "cache_restore_full"
                 translation_result = self._load_translation_result(segments_path)
+                dubbing_modes_synced = self._apply_transcript_dubbing_modes_to_segments(
+                    translation_result.segments,
+                    transcript_result.lines,
+                )
                 speaker_name_a, speaker_name_b = self._resolve_cached_display_names(
                     translation_result,
                     fallback_speaker_a=speaker_name_a,
@@ -1098,8 +1678,12 @@ class ProcessPipeline:
                         translation_result.segments,
                         _review_speaker_styles,
                     )
-                    if _review_speaker_styles:
-                        self._write_segments_snapshot(translation_result)
+                    self._apply_speaker_structure_profiles_to_segments(
+                        translation_result.segments,
+                        _speaker_structure_profiles,
+                    )
+                if _review_speaker_styles or _speaker_structure_profiles or dubbing_modes_synced:
+                    self._write_segments_snapshot(translation_result)
             else:
                 translation_execution_mode = "fresh_run"
                 translation_result = None
@@ -1191,6 +1775,7 @@ class ProcessPipeline:
                             video_title=download_result.video_title,
                             debug_output_dir=final_project_dir / "transcript",
                             mode=job_service_mode,
+                            usage_meter=usage_meter,
                         )
                     except Exception as exc:
                         print(f"[S2.5] Pass 3 failed (non-fatal): {exc}", flush=True)
@@ -1198,10 +1783,24 @@ class ProcessPipeline:
                     for spk_id, profile in _pass3_profiles.items():
                         if spk_id in _review_speaker_styles:
                             existing = _review_speaker_styles[spk_id]
-                            for key in ("style", "voice_description", "gender", "age_group", "persona_style", "energy_level"):
+                            for key in (
+                                "style",
+                                "voice_description",
+                                "gender",
+                                "age_group",
+                                "persona_style",
+                                "energy_level",
+                                "is_non_speech",
+                                "non_speech_reason",
+                            ):
                                 val = profile.get(key, "")
-                                if val:
+                                if val is not None and val != "":
                                     existing[key] = val
+                    _speaker_structure_profiles = self._build_speaker_structure_profiles(
+                        transcript_result.lines,
+                        speaker_styles=_review_speaker_styles,
+                    )
+                    self._log_speaker_structure_profiles(_speaker_structure_profiles)
                     print(f"[S2.5] Pass 3 voice profiles: {len(_pass3_profiles)} speakers", flush=True)
 
             # --- S4-probe Phase 1: 预翻译（音色确认前） ---
@@ -1278,6 +1877,7 @@ class ProcessPipeline:
                                 ),
                                 speaker_styles=_review_speaker_styles,
                                 probe_segments=_probe_segments or None,
+                                speaker_structure_profiles=_speaker_structure_profiles,
                             )
                             user_choice_by_sid = {
                                 str(sp.get("speaker_id", "")): sp
@@ -1328,6 +1928,7 @@ class ProcessPipeline:
                     ),
                     speaker_styles=_review_speaker_styles,
                     probe_segments=_probe_segments or None,
+                    speaker_structure_profiles=_speaker_structure_profiles,
                 )
                 review_state_manager.set_stage(
                     VOICE_SELECTION_REVIEW_STAGE,
@@ -1350,6 +1951,7 @@ class ProcessPipeline:
                         message=review_message,
                     )
                 )
+                _write_usage_summary(usage_meter)
                 return self._build_paused_result(
                     project_dir=final_project_dir,
                     stage=VOICE_SELECTION_REVIEW_STAGE,
@@ -1375,6 +1977,7 @@ class ProcessPipeline:
                         ),
                         speaker_styles=_review_speaker_styles,
                         probe_segments=_probe_segments or None,
+                        speaker_structure_profiles=_speaker_structure_profiles,
                     )
                     vs_payload["expired_voice_ids"] = expired_voices
                     vs_payload["validation_error"] = f"检测到 {len(expired_voices)} 个音色已失效，请重新选择"
@@ -1393,6 +1996,7 @@ class ProcessPipeline:
                             message=review_message,
                         )
                     )
+                    _write_usage_summary(usage_meter)
                     return self._build_paused_result(
                         project_dir=final_project_dir,
                         stage=VOICE_SELECTION_REVIEW_STAGE,
@@ -1432,7 +2036,7 @@ class ProcessPipeline:
                         _speaker_voices,
                         default_provider=job_tts_provider or "minimax",
                         speaker_providers=_speaker_providers or None,
-                        tts_model=_snap('tts_model'),
+                        tts_model=str(getattr(tts_config, "model", "") or _snap('tts_model') or ""),
                         # Scopes the user_voices fallback to this job's owner.
                         # Without this, a cloned voice_id could match rows from
                         # a different user and leak their cps into this pipeline.
@@ -1483,6 +2087,7 @@ class ProcessPipeline:
             if not _catalog_cps_used and not s3_cache_hit and _probe_segments:
                 try:
                     _probe_tts_generator = TTSGenerator(tts_config, job_record=config.job_record)
+                    _set_usage_meter_if_supported(_probe_tts_generator, usage_meter)
                     _probe_tts_dir = (final_project_dir / "tts").resolve(strict=False)
                     _probe_tts_dir.mkdir(parents=True, exist_ok=True)
                     _probe_chars_per_second, _probe_chars_per_second_by_speaker = (
@@ -1615,6 +2220,10 @@ class ProcessPipeline:
                 translation_result.segments,
                 _review_speaker_styles,
             )
+            self._apply_speaker_structure_profiles_to_segments(
+                translation_result.segments,
+                _speaker_structure_profiles,
+            )
             self._log_review_speaker_styles(_review_speaker_styles)
 
             state_manager.set_stage(
@@ -1649,12 +2258,22 @@ class ProcessPipeline:
                 and reuse_approved_translation_review
             ):
                 translation_result = self._load_translation_result(segments_path)
+                dubbing_modes_synced = self._apply_transcript_dubbing_modes_to_segments(
+                    translation_result.segments,
+                    transcript_result.lines,
+                )
                 # Re-apply per-speaker TTS provider: snapshot may predate the
                 # tts_provider field, or was written before voice selection.
                 if _speaker_providers:
                     for seg in translation_result.segments:
                         if seg.speaker_id in _speaker_providers:
                             seg.tts_provider = _speaker_providers[seg.speaker_id]
+                self._apply_speaker_structure_profiles_to_segments(
+                    translation_result.segments,
+                    _speaker_structure_profiles,
+                )
+                if dubbing_modes_synced:
+                    self._write_segments_snapshot(translation_result)
                 print("[S3] Applied approved translation review snapshot.")
             elif config.wait_for_review:
                 if approved_translation_review is not None and not reuse_approved_translation_review:
@@ -1698,6 +2317,7 @@ class ProcessPipeline:
                             message=review_message,
                         )
                     )
+                    _write_usage_summary(usage_meter)
                     return self._build_paused_result(
                         project_dir=final_project_dir,
                         stage=TRANSLATION_REVIEW_STAGE,
@@ -1744,6 +2364,8 @@ class ProcessPipeline:
                     print(f"  {spk_id} ({name}, {gender}/{age}, persona={ps}, energy={el}): {vd[:80]}", flush=True)
 
             tts_generator = TTSGenerator(tts_config, job_record=config.job_record)
+            _set_usage_meter_if_supported(tts_generator, usage_meter)
+            tts_results = []
             # Phase 2 Task 1 — pipe per-speaker chars/sec into TTS so MiniMax
             # can compute per-segment voice_setting.speed (feature-flagged).
             try:
@@ -1761,21 +2383,76 @@ class ProcessPipeline:
             custom_rewrite_prompt_template = gemini_config.get("rewrite_prompt_template")
             if custom_rewrite_prompt_template is not None:
                 rewriter_kwargs["rewrite_prompt_template"] = str(custom_rewrite_prompt_template)
+            keep_original_count = self._materialize_keep_original_segments(
+                translation_result.segments,
+                source_audio_path=source_audio_path,
+                tts_dir=tts_dir,
+            )
+            if keep_original_count:
+                print(f"[S4] 保留原音：已准备 {keep_original_count} 个原音片段")
+            short_merge_summary = self._apply_short_segment_merges_before_tts(
+                translation_result
+            )
+            if (
+                short_merge_summary.get("applied_count", 0)
+                or short_merge_summary.get("blocked_cross_speaker_count", 0)
+            ):
+                print(
+                    "[S4] Short-segment merge: "
+                    f"applied={short_merge_summary.get('applied_count', 0)}, "
+                    f"absorbed={short_merge_summary.get('absorbed_count', 0)}, "
+                    f"cross-speaker blocked={short_merge_summary.get('blocked_cross_speaker_count', 0)}"
+                )
+            if short_merge_summary.get("applied_count", 0):
+                cleared_cache_count = self._clear_short_merge_tts_cache(
+                    translation_result.segments,
+                    tts_dir,
+                )
+                if cleared_cache_count:
+                    print(
+                        f"[S4] Cleared {cleared_cache_count} stale short-merge TTS cache file(s)."
+                    )
+            auto_keep_original_count = self._materialize_empty_text_keep_original_segments(
+                translation_result.segments,
+                source_audio_path=source_audio_path,
+                tts_dir=tts_dir,
+            )
+            if auto_keep_original_count:
+                print(
+                    "[S4] Empty-text guard: "
+                    f"auto-kept {auto_keep_original_count} short/non-speech segment(s) as original audio"
+                )
             if s3_cache_hit:
                 cached_segments, segments_needing_tts = self._hydrate_cached_tts_segments(
                     translation_result.segments,
                     tts_dir,
                 )
-                pre_tts_chars_per_second = 4.5
-                pre_tts_chars_per_second_by_speaker: dict[str, float] = {}
+                pre_tts_chars_per_second = (
+                    _probe_chars_per_second
+                    if _probe_chars_per_second and _probe_chars_per_second > 0
+                    else DEFAULT_ESTIMATED_TTS_CHARS_PER_SECOND
+                )
+                pre_tts_chars_per_second_by_speaker: dict[str, float] = dict(
+                    _probe_chars_per_second_by_speaker or {}
+                )
                 if cached_segments:
-                    pre_tts_chars_per_second, pre_tts_chars_per_second_by_speaker = (
+                    cached_chars_per_second, cached_chars_per_second_by_speaker = (
                         self._calibrate_tts_duration(cached_segments)
                     )
+                    if (
+                        cached_chars_per_second
+                        and cached_chars_per_second > 0
+                        and pre_tts_chars_per_second == DEFAULT_ESTIMATED_TTS_CHARS_PER_SECOND
+                    ):
+                        pre_tts_chars_per_second = cached_chars_per_second
+                    for _spk, _cps in (cached_chars_per_second_by_speaker or {}).items():
+                        if _cps and _cps > 0:
+                            pre_tts_chars_per_second_by_speaker[_spk] = _cps
                 pre_tts_rewriter = GeminiRewriter(
                     translator,
                     chars_per_second=pre_tts_chars_per_second,
                     chars_per_second_by_speaker=pre_tts_chars_per_second_by_speaker,
+                    usage_phase="pre_tts_rewrite",
                     **rewriter_kwargs,
                 )
                 pre_tts_rewrite_count = self._pre_rewrite_obvious_overshoot_segments_before_tts(
@@ -1795,7 +2472,12 @@ class ProcessPipeline:
                         "[S4] 生成TTS音频..."
                         f"（{len(cached_segments)}段已缓存，{len(segments_needing_tts)}段需生成）"
                     )
-                    tts_generator.generate_all(segments_needing_tts, str(tts_dir))
+                    tts_results = _generate_tts_all_with_bucket(
+                        tts_generator,
+                        segments_needing_tts,
+                        str(tts_dir),
+                        usage_bucket=TTS_BUCKET_FIRST,
+                    )
                     print(
                         f"[S4] 完成：复用 {len(cached_segments)} 段缓存，"
                         f"新生成 {len(segments_needing_tts)} 段"
@@ -1803,10 +2485,20 @@ class ProcessPipeline:
                 else:
                     print("[S4] 所有TTS音频已缓存，跳过生成")
             else:
+                segments_needing_tts = [
+                    segment for segment in translation_result.segments
+                    if not is_keep_original_dubbing_mode(
+                        getattr(segment, "dubbing_mode", DUBBING_MODE_DUB)
+                    )
+                ]
                 if _is_pre_tts_rewrite_enabled():
-                    pre_tts_rewriter = GeminiRewriter(translator, **rewriter_kwargs)
+                    pre_tts_rewriter = GeminiRewriter(
+                        translator,
+                        usage_phase="pre_tts_rewrite",
+                        **rewriter_kwargs,
+                    )
                     pre_tts_rewrite_count = self._pre_rewrite_obvious_overshoot_segments_before_tts(
-                        segments=translation_result.segments,
+                        segments=segments_needing_tts,
                         rewriter=pre_tts_rewriter,
                         chars_per_second=pre_tts_rewriter.chars_per_second,
                         chars_per_second_by_speaker=pre_tts_rewriter.chars_per_second_by_speaker,
@@ -1819,12 +2511,17 @@ class ProcessPipeline:
                         )
                 else:
                     print("[S4] Pre-TTS 预重写已关闭（管理员设置）")
-                print("[S4] 生成TTS音频...")
-                tts_results = tts_generator.generate_all(
-                    translation_result.segments,
-                    str(tts_dir),
-                )
-                print(f"[S4] 完成：生成 {len(tts_results)} 个音频片段")
+                if segments_needing_tts:
+                    print("[S4] 生成TTS音频...")
+                    tts_results = _generate_tts_all_with_bucket(
+                        tts_generator,
+                        segments_needing_tts,
+                        str(tts_dir),
+                        usage_bucket=TTS_BUCKET_FIRST,
+                    )
+                    print(f"[S4] 完成：生成 {len(tts_results)} 个音频片段")
+                else:
+                    print("[S4] 所有片段均保留原音，跳过TTS生成")
 
             chars_per_second, chars_per_second_by_speaker = self._calibrate_tts_duration(
                 translation_result.segments
@@ -1865,6 +2562,7 @@ class ProcessPipeline:
                 translator,
                 chars_per_second=chars_per_second,
                 chars_per_second_by_speaker=chars_per_second_by_speaker,
+                usage_phase="post_tts_rewrite",
                 **rewriter_kwargs,
             )
             aligned_segments = SegmentAligner(
@@ -1885,6 +2583,26 @@ class ProcessPipeline:
             if repaired_count > 0:
                 aligned_segments = self._build_aligned_segments(translation_result.segments)
                 print(f"[S5] Long-segment semantic split repaired {repaired_count} segment(s).")
+            low_info_keep_count = self._auto_keep_low_information_underflow_segments(
+                translation_result.segments,
+                source_audio_path=source_audio_path,
+                tts_dir=tts_dir,
+            )
+            if low_info_keep_count:
+                aligned_segments = self._build_aligned_segments(translation_result.segments)
+                print(
+                    "[S5] Low-information underflow route: "
+                    f"kept {low_info_keep_count} segment(s) as original audio."
+                )
+            if (
+                short_merge_summary.get("candidate_count", 0)
+                or short_merge_summary.get("blocked_cross_speaker_count", 0)
+            ):
+                print(
+                    "[S5] Short-segment merge audit: "
+                    f"same-speaker candidates={short_merge_summary.get('candidate_count', 0)}, "
+                    f"cross-speaker blocked={short_merge_summary.get('blocked_cross_speaker_count', 0)}"
+                )
             self._write_segments_snapshot(translation_result)
             needs_review_count = sum(1 for segment in aligned_segments if segment.needs_review)
             print(
@@ -1992,18 +2710,54 @@ class ProcessPipeline:
                     f"(non-fatal, lazy seed will cover): {_exc}"
                 )
 
+            _voice_profile_metering: dict[str, object] = {}
+            try:
+                _voice_profiles, _voice_profile_skips = (
+                    self._build_user_voice_speed_profiles(
+                        translation_result.segments,
+                        default_provider=job_tts_provider or "minimax",
+                        tts_model=str(getattr(tts_config, "model", "") or _snap("tts_model") or ""),
+                    )
+                )
+                _voice_profile_metering = self._persist_user_voice_speed_profiles(
+                    job_id=config.job_id,
+                    user_id=str(_snap("user_id") or ""),
+                    profiles=_voice_profiles,
+                    skipped_reasons=_voice_profile_skips,
+                )
+            except Exception as _exc:
+                print(
+                    f"[P1-l] Voice speed profile persistence skipped "
+                    f"(non-fatal): {_exc}",
+                    flush=True,
+                )
+
             # V3-4/V3-5: report pipeline metering to Gateway (best-effort)
             if config.job_id and hasattr(translation_result, "segments"):
-                # V3-5: sum billed_chars from TTSResult (truthful TTS-layer source)
-                _tts_billed = None
+                _usage_summary = _write_usage_summary(usage_meter)
+                _usage_summary["transcription_method"] = transcription_method
+                _usage_summary["asr_provider"] = (
+                    "gemini" if transcription_method == "gemini" else "assemblyai"
+                )
+                _usage_summary["asr_provider_cost_status"] = (
+                    "legacy_guard" if transcription_method == "gemini" else "ignored_low_cost"
+                )
+                # Fallback for older tests/fakes that bypass TTSGenerator's usage hook.
                 try:
-                    _tts_billed = sum(getattr(r, "billed_chars", 0) for r in tts_results)
+                    _legacy_tts_billed = sum(getattr(r, "billed_chars", 0) for r in tts_results)
                 except Exception:
-                    pass
+                    _legacy_tts_billed = 0
+                if _legacy_tts_billed and not _usage_summary.get("tts_billed_chars"):
+                    _usage_summary["first_tts_billed_chars"] = _legacy_tts_billed
+                    _usage_summary["tts_billed_chars"] = _legacy_tts_billed
+
+                _extra_metering = dict(_usage_summary)
+                _extra_metering.update(_voice_profile_metering or {})
                 _report_job_metering(
                     config.job_id, translation_result.segments,
-                    tts_billed_chars=_tts_billed if _tts_billed else None,
+                    tts_billed_chars=None,
                     glossary=_review_glossary or None,
+                    extra_metering=_extra_metering,
                 )
         except Exception as exc:
             stage_label = _classify_failed_stage(exc)
@@ -2017,6 +2771,7 @@ class ProcessPipeline:
                     },
                     error_message=str(exc),
                 )
+            _write_usage_summary(usage_meter)
             print(f"[{stage_label}] 失败：{exc}")
             raise
 
@@ -2135,6 +2890,7 @@ class ProcessPipeline:
             raise ValueError(
                 f"resume_from=alignment: project_dir does not exist: {final_project_dir}"
             )
+        usage_meter = UsageMeter(final_project_dir, job_id=config.job_id)
 
         trans_path = (final_project_dir / "translation" / "segments.json").resolve(strict=False)
         if not trans_path.is_file():
@@ -2336,11 +3092,12 @@ class ProcessPipeline:
                 )
 
             if config.job_id:
-                # billed_chars=None — γ did no TTS, nothing to charge.
+                _usage_summary = _write_usage_summary(usage_meter)
                 _report_job_metering(
                     config.job_id, segments,
                     tts_billed_chars=None,
                     glossary=_review_glossary or None,
+                    extra_metering=_usage_summary or None,
                 )
         except Exception as exc:
             stage_label = _classify_failed_stage(exc)
@@ -2353,6 +3110,7 @@ class ProcessPipeline:
                     },
                     error_message=str(exc),
                 )
+            _write_usage_summary(usage_meter)
             print(f"[{stage_label}] \u5931\u8d25\uff1a{exc}")
             raise
 
@@ -2590,6 +3348,218 @@ class ProcessPipeline:
         except Exception:
             pass
 
+    @staticmethod
+    def _is_generic_speaker_name(name: str, speaker_id: str) -> bool:
+        normalized = str(name or "").strip().lower()
+        normalized_sid = str(speaker_id or "").strip().lower()
+        if not normalized:
+            return True
+        generic_names = {
+            normalized_sid,
+            normalized_sid.replace("_", " "),
+            _default_speaker_display_name(normalized_sid).lower(),
+        }
+        if normalized in generic_names:
+            return True
+        if re.fullmatch(r"speaker\s+[a-z0-9]+", normalized):
+            return True
+        if normalized.startswith("unknown speaker") or normalized.startswith("未知说话人"):
+            return True
+        return False
+
+    @staticmethod
+    def _speaker_role_label(role: str) -> str:
+        if role == "non_speech":
+            return "背景音/非对白"
+        if role == "incidental":
+            return "短互动/低占比"
+        if role == "fragmented":
+            return "低占比分散"
+        if role == "primary":
+            return "主说话人"
+        return ""
+
+    @staticmethod
+    def _speaker_review_hint(role: str) -> str:
+        if role == "non_speech":
+            return "疑似背景音乐、人群欢呼、掌声或其他非对白；不建议克隆音色，建议确认是否需要配音。"
+        if role == "incidental":
+            return "低占比短互动说话人；建议使用通用音色，通常不建议克隆。"
+        if role == "fragmented":
+            return "低占比分散说话人；建议抽查是否为真实多人或误分裂。"
+        return ""
+
+    @staticmethod
+    def _review_flag_truthy(value: object) -> bool:
+        if isinstance(value, bool):
+            return value
+        text = str(value or "").strip().lower()
+        return text in {"1", "true", "yes", "y", "on", "是", "对", "非对白", "non_speech"}
+
+    @staticmethod
+    def _speaker_metadata_is_non_speech(profile: dict[str, object] | None) -> bool:
+        if not profile:
+            return False
+        if ProcessPipeline._review_flag_truthy(profile.get("is_non_speech")):
+            return True
+        profile_text = " ".join(
+            str(profile.get(key, "") or "")
+            for key in (
+                "name",
+                "role",
+                "style",
+                "voice_description",
+                "non_speech_reason",
+            )
+        ).lower()
+        return any(marker in profile_text for marker in SPEAKER_STRUCTURE_NON_SPEECH_MARKERS)
+
+    def _build_speaker_structure_profiles(
+        self,
+        lines: list[TranscriptLine],
+        speaker_styles: dict[str, dict[str, object]] | None = None,
+    ) -> dict[str, dict[str, object]]:
+        speaker_styles = speaker_styles or {}
+        per_speaker: dict[str, dict[str, int]] = {}
+        total_duration_ms = 0
+        for line in lines:
+            speaker_id = str(line.speaker_id or "speaker_a").strip() or "speaker_a"
+            duration_ms = max(0, int(line.end_ms) - int(line.start_ms))
+            if duration_ms <= 0:
+                continue
+            total_duration_ms += duration_ms
+            profile = per_speaker.setdefault(
+                speaker_id,
+                {
+                    "duration_ms": 0,
+                    "segment_count": 0,
+                    "short_segment_count": 0,
+                    "max_segment_ms": 0,
+                },
+            )
+            profile["duration_ms"] += duration_ms
+            profile["segment_count"] += 1
+            profile["max_segment_ms"] = max(profile["max_segment_ms"], duration_ms)
+            if duration_ms <= SPEAKER_STRUCTURE_SHORT_SEGMENT_MS:
+                profile["short_segment_count"] += 1
+
+        if not per_speaker or total_duration_ms <= 0:
+            return {}
+
+        sorted_speakers = sorted(
+            per_speaker.items(),
+            key=lambda item: item[1]["duration_ms"],
+            reverse=True,
+        )
+        top_speaker_id = sorted_speakers[0][0]
+        result: dict[str, dict[str, object]] = {}
+        multi_speaker = len(per_speaker) > 1
+
+        for speaker_id, raw_profile in sorted_speakers:
+            duration_ms = raw_profile["duration_ms"]
+            segment_count = raw_profile["segment_count"]
+            short_segment_count = raw_profile["short_segment_count"]
+            max_segment_ms = raw_profile["max_segment_ms"]
+            duration_share = duration_ms / total_duration_ms
+            short_segment_rate = (
+                short_segment_count / segment_count if segment_count > 0 else 0.0
+            )
+
+            role = "primary"
+            reason = "single_speaker"
+            if self._speaker_metadata_is_non_speech(speaker_styles.get(speaker_id)):
+                role = "non_speech"
+                reason = "review_profile_non_speech"
+            elif multi_speaker:
+                incidental = (
+                    speaker_id != top_speaker_id
+                    and duration_share <= SPEAKER_STRUCTURE_INCIDENTAL_MAX_SHARE
+                    and duration_ms <= SPEAKER_STRUCTURE_INCIDENTAL_MAX_DURATION_MS
+                    and max_segment_ms <= SPEAKER_STRUCTURE_INCIDENTAL_MAX_SINGLE_SEGMENT_MS
+                    and (
+                        segment_count <= SPEAKER_STRUCTURE_INCIDENTAL_MAX_SEGMENTS
+                        or short_segment_rate >= SPEAKER_STRUCTURE_INCIDENTAL_MIN_SHORT_RATE
+                    )
+                )
+                fragmented = (
+                    speaker_id != top_speaker_id
+                    and duration_share <= SPEAKER_STRUCTURE_FRAGMENTED_MAX_SHARE
+                    and segment_count >= SPEAKER_STRUCTURE_FRAGMENTED_MIN_SEGMENTS
+                    and short_segment_rate >= SPEAKER_STRUCTURE_FRAGMENTED_MIN_SHORT_RATE
+                )
+                if incidental:
+                    role = "incidental"
+                    reason = "low_share_short_interactions"
+                elif fragmented:
+                    role = "fragmented"
+                    reason = "low_share_fragmented"
+                elif speaker_id == top_speaker_id:
+                    role = "primary"
+                    reason = "top_duration_speaker"
+                elif duration_share >= 0.25:
+                    role = "primary"
+                    reason = "balanced_main_speaker"
+                else:
+                    role = "fragmented"
+                    reason = "low_share_secondary"
+
+            result[speaker_id] = {
+                "speaker_role": role,
+                "speaker_role_label": self._speaker_role_label(role),
+                "speaker_duration_ms": duration_ms,
+                "speaker_duration_share": round(duration_share, 4),
+                "speaker_segment_count": segment_count,
+                "speaker_short_segment_count": short_segment_count,
+                "speaker_short_segment_rate": round(short_segment_rate, 4),
+                "speaker_structure_reason": reason,
+                "speaker_review_hint": self._speaker_review_hint(role),
+            }
+        return result
+
+    def _apply_speaker_structure_profiles_to_segments(
+        self,
+        segments: list[DubbingSegment],
+        speaker_structure_profiles: dict[str, dict[str, object]] | None,
+    ) -> None:
+        if not speaker_structure_profiles:
+            return
+        for segment in segments:
+            profile = speaker_structure_profiles.get(segment.speaker_id)
+            if not profile:
+                continue
+            segment.speaker_role = str(profile.get("speaker_role", "") or "")
+            segment.speaker_role_label = str(profile.get("speaker_role_label", "") or "")
+            segment.speaker_duration_ms = int(profile.get("speaker_duration_ms", 0) or 0)
+            segment.speaker_duration_share = float(
+                profile.get("speaker_duration_share", 0.0) or 0.0
+            )
+            segment.speaker_segment_count = int(profile.get("speaker_segment_count", 0) or 0)
+            segment.speaker_short_segment_count = int(
+                profile.get("speaker_short_segment_count", 0) or 0
+            )
+            segment.speaker_short_segment_rate = float(
+                profile.get("speaker_short_segment_rate", 0.0) or 0.0
+            )
+            segment.speaker_structure_reason = str(
+                profile.get("speaker_structure_reason", "") or ""
+            )
+            segment.speaker_review_hint = str(profile.get("speaker_review_hint", "") or "")
+
+    def _log_speaker_structure_profiles(
+        self,
+        speaker_structure_profiles: dict[str, dict[str, object]],
+    ) -> None:
+        if not speaker_structure_profiles:
+            return
+        summary = []
+        for speaker_id in sorted(speaker_structure_profiles):
+            profile = speaker_structure_profiles[speaker_id]
+            share = float(profile.get("speaker_duration_share", 0.0) or 0.0)
+            role = str(profile.get("speaker_role", "") or "unknown")
+            segments = int(profile.get("speaker_segment_count", 0) or 0)
+            summary.append(f"{speaker_id}:{role}:{share:.1%}/{segments}段")
+        print(f"[S2-P2] speaker structure: {', '.join(summary)}", flush=True)
+
     def _build_voice_selection_review_payload(
         self,
         *,
@@ -2602,8 +3572,16 @@ class ProcessPipeline:
         speaker_names: dict[str, str],
         speaker_styles: dict[str, dict[str, str]] | None = None,
         probe_segments: list["DubbingSegment"] | None = None,
+        speaker_structure_profiles: dict[str, dict[str, object]] | None = None,
     ) -> dict[str, object]:
         """Build pending payload for voice_selection_review stage."""
+        speaker_structure_profiles = (
+            speaker_structure_profiles
+            or self._build_speaker_structure_profiles(
+                transcript_result.lines,
+                speaker_styles=speaker_styles,
+            )
+        )
         # Build probe translation lookup: speaker_id -> list of probe texts
         _probe_texts_by_speaker: dict[str, list[dict[str, str]]] = {}
         if probe_segments:
@@ -2715,8 +3693,6 @@ class ProcessPipeline:
             prov: str, gender: str, age_group: str, persona: str, energy: str,
             target_chars_per_second: float | None = None,
         ) -> dict[str, object] | None:
-            if not gender:
-                return None
             try:
                 from services.tts.voice_match_resolver import resolve_voice_match
                 from services.tts.voice_match_types import VoiceMatchRequest
@@ -2807,7 +3783,14 @@ class ProcessPipeline:
             segs = speaker_segments[sid]
             total_dur = sum(float(s.get("duration_s", 0)) for s in segs)
             segs_sorted = sorted(segs, key=lambda s: float(s.get("duration_s", 0)), reverse=True)
-            can_clone = total_dur >= 10  # clone eligibility (MiniMax-only in frontend)
+            structure_profile = speaker_structure_profiles.get(sid, {})
+            speaker_role = str(structure_profile.get("speaker_role", "") or "")
+            speaker_name = speaker_names.get(sid, sid)
+            if speaker_role == "non_speech" and self._is_generic_speaker_name(speaker_name, sid):
+                speaker_name = "背景音/非对白"
+            if speaker_role == "incidental" and self._is_generic_speaker_name(speaker_name, sid):
+                speaker_name = "短互动/观众"
+            can_clone = total_dur >= 10 and speaker_role not in {"incidental", "non_speech"}
 
             # Auto-match: default provider (backward compat)
             profile = speaker_profiles.get(sid, {})
@@ -2829,9 +3812,27 @@ class ProcessPipeline:
 
             speakers_payload.append({
                 "speaker_id": sid,
-                "speaker_name": speaker_names.get(sid, sid),
+                "speaker_name": speaker_name,
                 "segment_count": len(segs),
                 "total_duration_s": round(total_dur, 1),
+                "speaker_role": speaker_role,
+                "speaker_role_label": str(structure_profile.get("speaker_role_label", "") or ""),
+                "speaker_duration_ms": int(structure_profile.get("speaker_duration_ms", 0) or 0),
+                "speaker_duration_share": float(
+                    structure_profile.get("speaker_duration_share", 0.0) or 0.0
+                ),
+                "speaker_short_segment_count": int(
+                    structure_profile.get("speaker_short_segment_count", 0) or 0
+                ),
+                "speaker_short_segment_rate": float(
+                    structure_profile.get("speaker_short_segment_rate", 0.0) or 0.0
+                ),
+                "speaker_structure_reason": str(
+                    structure_profile.get("speaker_structure_reason", "") or ""
+                ),
+                "speaker_review_hint": str(
+                    structure_profile.get("speaker_review_hint", "") or ""
+                ),
                 "auto_matched_voice": auto_matched,
                 "auto_matched_by_provider": auto_matched_by_provider,
                 "can_clone": can_clone,
@@ -2892,6 +3893,9 @@ class ProcessPipeline:
                     "target_duration_ms": segment.target_duration_ms,
                     "rewrite_count": segment.rewrite_count,
                     "needs_review": segment.needs_review,
+                    "dubbing_mode": normalize_dubbing_mode(
+                        getattr(segment, "dubbing_mode", DUBBING_MODE_DUB)
+                    ),
                 }
                 for segment in translation_result.segments
             },
@@ -3001,12 +4005,42 @@ class ProcessPipeline:
 
     def _load_translation_result(self, segments_path: Path) -> TranslationResult:
         payload = json.loads(segments_path.read_text(encoding="utf-8"))
-        segments = [DubbingSegment(**segment_payload) for segment_payload in payload.get("segments", [])]
+        segments: list[DubbingSegment] = []
+        for segment_payload in payload.get("segments", []):
+            if not isinstance(segment_payload, dict):
+                continue
+            normalized_payload = dict(segment_payload)
+            normalized_payload["dubbing_mode"] = normalize_dubbing_mode(
+                normalized_payload.get("dubbing_mode")
+            )
+            segments.append(DubbingSegment(**normalized_payload))
         return TranslationResult(
             segments=segments,
             total_segments=_coerce_int(payload.get("total_segments"), default=len(segments)),
             output_path=str(segments_path.resolve(strict=False)),
         )
+
+    @staticmethod
+    def _apply_transcript_dubbing_modes_to_segments(
+        segments: list[DubbingSegment],
+        transcript_lines: list[TranscriptLine],
+    ) -> bool:
+        mode_by_segment_id = {
+            int(line.index): normalize_dubbing_mode(getattr(line, "dubbing_mode", DUBBING_MODE_DUB))
+            for line in transcript_lines
+        }
+        changed = False
+        for segment in segments:
+            mode = mode_by_segment_id.get(int(segment.segment_id))
+            if mode is None:
+                segment.dubbing_mode = normalize_dubbing_mode(
+                    getattr(segment, "dubbing_mode", DUBBING_MODE_DUB)
+                )
+                continue
+            if normalize_dubbing_mode(getattr(segment, "dubbing_mode", DUBBING_MODE_DUB)) != mode:
+                segment.dubbing_mode = mode
+                changed = True
+        return changed
 
     @staticmethod
     def _is_placeholder_display_name(display_name: str, speaker_id: str) -> bool:
@@ -3176,6 +4210,13 @@ class ProcessPipeline:
         segments_needing_tts: list[DubbingSegment] = []
 
         for segment in segments:
+            if is_keep_original_dubbing_mode(getattr(segment, "dubbing_mode", DUBBING_MODE_DUB)):
+                if segment.tts_audio_path and Path(segment.tts_audio_path).exists():
+                    cached_segments.append(segment)
+                continue
+            if getattr(segment, "short_merge_applied", False):
+                segments_needing_tts.append(segment)
+                continue
             expected_path = tts_dir / f"segment_{segment.segment_id:03d}_{segment.speaker_id}.wav"
             cached_path: Path | None = None
             if expected_path.exists():
@@ -3197,6 +4238,356 @@ class ProcessPipeline:
             cached_segments.append(segment)
 
         return cached_segments, segments_needing_tts
+
+    def _materialize_keep_original_segments(
+        self,
+        segments: list[DubbingSegment],
+        *,
+        source_audio_path: Path,
+        tts_dir: Path,
+    ) -> int:
+        """Extract source-audio slices for segments marked keep_original.
+
+        These slices occupy the same downstream slot as TTS output, so the
+        normal alignment/export pipeline can stay deterministic and block-based.
+        """
+        keep_segments = [
+            segment for segment in segments
+            if is_keep_original_dubbing_mode(getattr(segment, "dubbing_mode", DUBBING_MODE_DUB))
+        ]
+        if not keep_segments:
+            return 0
+        if not source_audio_path.exists():
+            raise FileNotFoundError(f"保留原音失败：找不到原始音频 {source_audio_path}")
+
+        import subprocess
+
+        tts_dir.mkdir(parents=True, exist_ok=True)
+        materialized_count = 0
+        for segment in keep_segments:
+            start_ms = max(0, int(getattr(segment, "start_ms", 0) or 0))
+            end_ms = max(start_ms, int(getattr(segment, "end_ms", 0) or 0))
+            target_duration_ms = max(0, int(getattr(segment, "target_duration_ms", 0) or 0))
+            duration_ms = max(target_duration_ms, end_ms - start_ms)
+            if duration_ms <= 0:
+                continue
+
+            output_path = (
+                tts_dir / f"segment_{int(segment.segment_id):03d}_{segment.speaker_id}_original.wav"
+            ).resolve(strict=False)
+            if not output_path.exists():
+                cmd = [
+                    "ffmpeg",
+                    "-y",
+                    "-ss",
+                    f"{start_ms / 1000:.3f}",
+                    "-i",
+                    str(source_audio_path.resolve(strict=False)),
+                    "-t",
+                    f"{duration_ms / 1000:.3f}",
+                    "-vn",
+                    "-acodec",
+                    "pcm_s16le",
+                    "-ar",
+                    "44100",
+                    "-ac",
+                    "2",
+                    str(output_path),
+                ]
+                result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+                if result.returncode != 0:
+                    stderr = (result.stderr or "").strip()
+                    raise RuntimeError(f"保留原音片段提取失败 segment_{segment.segment_id:03d}: {stderr}")
+
+            actual_duration_ms = _ffprobe_duration_ms(output_path)
+            segment.tts_audio_path = str(output_path)
+            segment.aligned_audio_path = str(output_path)
+            segment.actual_duration_ms = actual_duration_ms
+            segment.alignment_ratio = (
+                actual_duration_ms / target_duration_ms
+                if target_duration_ms > 0
+                else 1.0
+            )
+            segment.alignment_method = DUBBING_MODE_KEEP_ORIGINAL
+            segment.needs_review = False
+            segment.rewrite_count = 0
+            segment.force_dsp_severity = ""
+            segment.force_dsp_review_suppressed = False
+            segment.force_dsp_review_reason = ""
+            segment.dsp_speed_ratio_used = 1.0
+            segment.dsp_silence_padded_ms = 0
+            segment.dsp_truncated_ms = 0
+            segment.dsp_initial_duration_ms = 0
+            segment.dsp_trimmed_duration_ms = 0
+            segment.dsp_stretched_duration_ms = 0
+            segment.short_content_compact_attempted = False
+            segment.short_content_compact_accepted = False
+            segment.short_content_compact_rejected_reason = ""
+            segment.short_content_compact_class = ""
+            segment.short_content_compact_lower_chars = 0
+            segment.short_content_compact_upper_chars = 0
+            segment.short_content_compact_pre_chars = 0
+            segment.short_content_compact_post_chars = 0
+            segment.selected_voice = "original_audio"
+            segment.match_confidence = DUBBING_MODE_KEEP_ORIGINAL
+            segment.tts_provider = "original"
+            segment.first_pass_duration_ms = actual_duration_ms
+            if not getattr(segment, "first_pass_cn_text", ""):
+                segment.first_pass_cn_text = ""
+            segment.first_pass_error_pct = (
+                (actual_duration_ms - target_duration_ms) / target_duration_ms
+                if target_duration_ms > 0
+                else 0.0
+            )
+            materialized_count += 1
+
+        return materialized_count
+
+    def _materialize_empty_text_keep_original_segments(
+        self,
+        segments: list[DubbingSegment],
+        *,
+        source_audio_path: Path,
+        tts_dir: Path,
+    ) -> int:
+        """Convert safe empty-translation segments to original audio before TTS.
+
+        Empty Chinese text is never a valid TTS input. As a final fallback,
+        preserve the source slice instead of retrying a request that cannot
+        succeed.
+        """
+        auto_keep_segments: list[DubbingSegment] = []
+        for segment in segments:
+            if is_keep_original_dubbing_mode(getattr(segment, "dubbing_mode", DUBBING_MODE_DUB)):
+                continue
+            if str(getattr(segment, "cn_text", "") or "").strip():
+                continue
+            segment.dubbing_mode = DUBBING_MODE_KEEP_ORIGINAL
+            segment.auto_keep_original_reason = "empty_text"
+            segment.auto_keep_original_source = "empty_text_guard"
+            auto_keep_segments.append(segment)
+
+        if not auto_keep_segments:
+            return 0
+        return self._materialize_keep_original_segments(
+            auto_keep_segments,
+            source_audio_path=source_audio_path,
+            tts_dir=tts_dir,
+        )
+
+    def _auto_keep_low_information_underflow_segments(
+        self,
+        segments: list[DubbingSegment],
+        *,
+        source_audio_path: Path,
+        tts_dir: Path,
+    ) -> int:
+        """Preserve original audio for severe low-information underflow cues.
+
+        This runs after alignment, so it only acts on segments where the
+        normal DSP/rewrite path has already proven that the translated TTS is
+        far too short for the slot. It is intentionally conservative: generic
+        timer/filler/backchannel cues can stay as source audio, while normal
+        contentful sentences remain dubbed and reviewable.
+        """
+        auto_keep_segments: list[DubbingSegment] = []
+        for segment in segments:
+            reason = self._low_information_underflow_keep_original_reason(segment)
+            if not reason:
+                continue
+            segment.dubbing_mode = DUBBING_MODE_KEEP_ORIGINAL
+            segment.auto_keep_original_reason = reason
+            segment.auto_keep_original_source = "low_information_underflow_route"
+            auto_keep_segments.append(segment)
+
+        if not auto_keep_segments:
+            return 0
+        return self._materialize_keep_original_segments(
+            auto_keep_segments,
+            source_audio_path=source_audio_path,
+            tts_dir=tts_dir,
+        )
+
+    @staticmethod
+    def _low_information_underflow_keep_original_reason(
+        segment: DubbingSegment,
+    ) -> str:
+        if is_keep_original_dubbing_mode(getattr(segment, "dubbing_mode", DUBBING_MODE_DUB)):
+            return ""
+        if str(getattr(segment, "alignment_method", "") or "") != "capped_dsp_underflow":
+            return ""
+        target_duration_ms = int(getattr(segment, "target_duration_ms", 0) or 0)
+        first_pass_duration_ms = int(getattr(segment, "first_pass_duration_ms", 0) or 0)
+        if (
+            target_duration_ms < LOW_INFORMATION_UNDERFLOW_KEEP_ORIGINAL_MIN_TARGET_MS
+            or first_pass_duration_ms <= 0
+        ):
+            return ""
+        stretch_ratio = target_duration_ms / first_pass_duration_ms
+        if stretch_ratio < LOW_INFORMATION_UNDERFLOW_KEEP_ORIGINAL_MIN_STRETCH_RATIO:
+            return ""
+
+        source_tokens = ProcessPipeline._source_word_tokens(
+            getattr(segment, "source_text", "") or ""
+        )
+        if len(source_tokens) > LOW_INFORMATION_UNDERFLOW_KEEP_ORIGINAL_MAX_SOURCE_WORDS:
+            return ""
+        spoken_chars = count_spoken_chars(getattr(segment, "cn_text", "") or "")
+        if spoken_chars > LOW_INFORMATION_UNDERFLOW_KEEP_ORIGINAL_MAX_SPOKEN_CHARS:
+            return ""
+        if not ProcessPipeline._looks_like_low_information_cue(source_tokens):
+            return ""
+        return "low_information_cue_underflow"
+
+    @staticmethod
+    def _source_word_tokens(text: str) -> list[str]:
+        return [token.lower() for token in re.findall(r"[A-Za-z0-9']+", text)]
+
+    @staticmethod
+    def _looks_like_low_information_cue(source_tokens: list[str]) -> bool:
+        if not source_tokens:
+            return False
+        cue_hits = sum(1 for token in source_tokens if token in LOW_INFORMATION_CUE_TOKENS)
+        has_numeric = any(any(ch.isdigit() for ch in token) for token in source_tokens)
+        has_you_know = "you" in source_tokens and "know" in source_tokens
+        has_filler = any(token in {"uh", "um", "er", "hmm", "ah"} for token in source_tokens)
+        if has_filler and len(source_tokens) <= 4:
+            return True
+        if has_you_know and len(source_tokens) <= 5:
+            return True
+        if has_numeric and cue_hits >= 1:
+            return True
+        if cue_hits >= 2:
+            return True
+        return False
+
+    @staticmethod
+    def _short_content_compact_char_bounds(target_duration_ms: int) -> tuple[int, int]:
+        target_seconds = max(0.0, int(target_duration_ms) / 1000.0)
+        lower = max(6, int(round(target_seconds * SHORT_CONTENT_COMPACT_CHARS_PER_SECOND_LOWER)))
+        upper = max(lower + 2, int(round(target_seconds * SHORT_CONTENT_COMPACT_CHARS_PER_SECOND_UPPER)))
+        return lower, upper
+
+    @staticmethod
+    def _short_content_required_tokens(text: str) -> list[str]:
+        # Hard guard only for literal ASCII/digit tokens already present in the
+        # Chinese draft. Proper names may be translated, but digits/acronyms
+        # that are already literal should not disappear during compression.
+        tokens = re.findall(r"[A-Za-z0-9]+", text or "")
+        result: list[str] = []
+        for token in tokens:
+            if any(ch.isdigit() for ch in token) or token.isupper():
+                result.append(token)
+        return result
+
+    @staticmethod
+    def _short_content_compact_class(segment: DubbingSegment) -> str:
+        source_text = getattr(segment, "source_text", "") or ""
+        tokens = ProcessPipeline._source_word_tokens(source_text)
+        role = str(getattr(segment, "speaker_role", "") or "").strip().lower()
+        source_lower = source_text.lower()
+        if role == "non_speech":
+            return "non_speech"
+        if any(marker in source_lower for marker in ("[music]", "[applause]", "[laughter]", "♪")):
+            return "non_speech"
+        if tokens and all(token in SHORT_CONTENT_COMPACT_NON_SPEECH_TOKENS for token in tokens):
+            return "non_speech"
+        if ProcessPipeline._is_low_information_short_content(tokens, source_text):
+            return "low_information"
+        if "?" in source_text or (tokens and tokens[0] in SHORT_CONTENT_COMPACT_QUESTION_STARTERS):
+            return "question"
+        content_tokens = [
+            token for token in tokens
+            if token not in SHORT_CONTENT_COMPACT_FILLER_TOKENS
+        ]
+        if len(tokens) <= 14 and len(content_tokens) >= 2:
+            return "short_answer_or_clause"
+        return "content_clause"
+
+    @staticmethod
+    def _is_low_information_short_content(
+        source_tokens: list[str],
+        source_text: str = "",
+    ) -> bool:
+        if not source_tokens:
+            return True
+        if "?" in (source_text or ""):
+            return False
+        token_set = set(source_tokens)
+        if len(source_tokens) <= 3 and token_set <= LOW_INFORMATION_CUE_TOKENS:
+            return True
+        if len(source_tokens) <= 6 and len(token_set - LOW_INFORMATION_CUE_TOKENS) <= 1:
+            return True
+        return False
+
+    @staticmethod
+    def _is_short_content_compact_candidate(
+        segment: DubbingSegment,
+        *,
+        rewrite_label: str,
+        pre_chars: int,
+        estimated_duration_ms: int,
+        decision_estimated_duration_ms: int,
+        target_duration_ms: int,
+    ) -> tuple[bool, str, int, int]:
+        if rewrite_label != "overshoot":
+            return False, "", 0, 0
+        if not (
+            SHORT_CONTENT_COMPACT_MIN_TARGET_MS
+            <= target_duration_ms
+            < SHORT_CONTENT_COMPACT_MAX_TARGET_MS
+        ):
+            return False, "", 0, 0
+        if estimated_duration_ms <= 0 or decision_estimated_duration_ms <= 0:
+            return False, "", 0, 0
+        overshoot_ratio = (
+            decision_estimated_duration_ms - target_duration_ms
+        ) / target_duration_ms
+        if overshoot_ratio < SHORT_CONTENT_COMPACT_MIN_OVERSHOOT_RATIO:
+            return False, "", 0, 0
+
+        content_class = ProcessPipeline._short_content_compact_class(segment)
+        if content_class in {"low_information", "non_speech"}:
+            return False, content_class, 0, 0
+        source_tokens = ProcessPipeline._source_word_tokens(
+            getattr(segment, "source_text", "") or ""
+        )
+        if len(source_tokens) < SHORT_CONTENT_COMPACT_MIN_SOURCE_WORDS:
+            return False, content_class, 0, 0
+        lower, upper = ProcessPipeline._short_content_compact_char_bounds(target_duration_ms)
+        if pre_chars <= upper + SHORT_CONTENT_COMPACT_MIN_PRE_CHARS_OVER_UPPER:
+            return False, content_class, lower, upper
+        return True, content_class, lower, upper
+
+    @staticmethod
+    def _short_content_compact_rejection_reason(
+        *,
+        pre_chars: int,
+        post_chars: int,
+        lower_chars: int,
+        upper_chars: int,
+        rewritten_text: str,
+        current_text: str,
+    ) -> str:
+        if not (rewritten_text or "").strip():
+            return "empty"
+        if rewritten_text.strip() == (current_text or "").strip():
+            return "unchanged"
+        if pre_chars <= 0 or post_chars <= 0:
+            return "empty"
+        if post_chars >= pre_chars:
+            return "wrong_direction"
+        if post_chars < lower_chars:
+            return "below_floor"
+        if post_chars > upper_chars:
+            return "above_ceiling"
+        missing_tokens = [
+            token for token in ProcessPipeline._short_content_required_tokens(current_text)
+            if token not in rewritten_text
+        ]
+        if missing_tokens:
+            return "missing_required_token"
+        return ""
 
     def _resolve_or_auto_clone_voice(
         self,
@@ -3437,6 +4828,9 @@ class ProcessPipeline:
         repaired_segments: list[DubbingSegment] = []
 
         for segment in translation_result.segments:
+            if is_keep_original_dubbing_mode(getattr(segment, "dubbing_mode", DUBBING_MODE_DUB)):
+                repaired_segments.append(segment)
+                continue
             repaired_children = self._attempt_semantic_split_repair(
                 segment=segment,
                 next_segment_id=next_segment_id,
@@ -3485,10 +4879,17 @@ class ProcessPipeline:
         job_provider_norm = (job_provider or "").strip().lower() or None
 
         for segment in segments:
-            target_duration_ms = int(segment.target_duration_ms)
-            if target_duration_ms < PRE_TTS_REWRITE_MIN_TARGET_MS:
+            if is_keep_original_dubbing_mode(getattr(segment, "dubbing_mode", DUBBING_MODE_DUB)):
                 continue
+            target_duration_ms = int(segment.target_duration_ms)
             if target_duration_ms <= 0:
+                continue
+            is_short_target = (
+                PRE_TTS_REWRITE_SHORT_MIN_TARGET_MS
+                <= target_duration_ms
+                < PRE_TTS_REWRITE_MIN_TARGET_MS
+            )
+            if target_duration_ms < PRE_TTS_REWRITE_MIN_TARGET_MS and not is_short_target:
                 continue
 
             current_text = segment.cn_text.strip()
@@ -3505,7 +4906,23 @@ class ProcessPipeline:
             if estimated_duration_ms <= 0:
                 continue
 
-            overshoot_ratio = (estimated_duration_ms - target_duration_ms) / target_duration_ms
+            is_near_short_target = (
+                PRE_TTS_REWRITE_MIN_TARGET_MS
+                <= target_duration_ms
+                < PRE_TTS_REWRITE_NEAR_SHORT_TARGET_MS
+            )
+            decision_estimated_duration_ms = estimated_duration_ms
+            if is_short_target or is_near_short_target:
+                decision_estimated_duration_ms = int(
+                    round(
+                        estimated_duration_ms
+                        * PRE_TTS_REWRITE_SHORT_DECISION_ESTIMATE_MARGIN
+                    )
+                )
+
+            overshoot_ratio = (
+                decision_estimated_duration_ms - target_duration_ms
+            ) / target_duration_ms
             undershoot_ratio = (target_duration_ms - estimated_duration_ms) / target_duration_ms
 
             # Plan-C+: if TTS speed can absorb the drift safely, skip the LLM
@@ -3536,13 +4953,21 @@ class ProcessPipeline:
             if _speed_runtime_ok:
                 _eff_max = min(_smax, PRE_TTS_REWRITE_LISTEN_LIMIT_HIGH)
                 _eff_min = max(_smin, PRE_TTS_REWRITE_LISTEN_LIMIT_LOW)
-                ratio = estimated_duration_ms / target_duration_ms
+                ratio = decision_estimated_duration_ms / target_duration_ms
                 if _eff_min <= ratio <= _eff_max:
                     continue  # speed will handle it within listen-comfort range
 
             needs_rewrite = False
             rewrite_label = ""
-            if overshoot_ratio >= PRE_TTS_REWRITE_OVERSHOOT_RATIO:
+            if is_short_target:
+                if overshoot_ratio >= PRE_TTS_REWRITE_SHORT_OVERSHOOT_RATIO:
+                    needs_rewrite = True
+                    rewrite_label = "overshoot"
+            elif is_near_short_target:
+                if overshoot_ratio >= PRE_TTS_REWRITE_NEAR_SHORT_OVERSHOOT_RATIO:
+                    needs_rewrite = True
+                    rewrite_label = "overshoot"
+            elif overshoot_ratio >= PRE_TTS_REWRITE_OVERSHOOT_RATIO:
                 needs_rewrite = True
                 rewrite_label = "overshoot"
             elif undershoot_ratio > PRE_TTS_REWRITE_UNDERSHOOT_RATIO:
@@ -3552,18 +4977,208 @@ class ProcessPipeline:
             if not needs_rewrite:
                 continue
 
-            rewritten_text = rewriter.rewrite_for_duration(
-                current_text,
-                actual_duration_ms=estimated_duration_ms,
+            pre_rewrite_chars = _count_spoken_chars_for_metering(current_text)
+            (
+                is_short_content_compact,
+                short_content_class,
+                compact_lower_chars,
+                compact_upper_chars,
+            ) = self._is_short_content_compact_candidate(
+                segment,
+                rewrite_label=rewrite_label,
+                pre_chars=pre_rewrite_chars,
+                estimated_duration_ms=estimated_duration_ms,
+                decision_estimated_duration_ms=decision_estimated_duration_ms,
+                target_duration_ms=target_duration_ms,
+            )
+            if is_short_content_compact:
+                compact_text = self._rewrite_short_content_compact_with_guardrails(
+                    rewriter=rewriter,
+                    current_text=current_text,
+                    source_text=segment.source_text,
+                    target_duration_ms=target_duration_ms,
+                    target_lower_chars=compact_lower_chars,
+                    target_upper_chars=compact_upper_chars,
+                ).strip()
+                compact_chars = _count_spoken_chars_for_metering(compact_text)
+                compact_rejection_reason = self._short_content_compact_rejection_reason(
+                    pre_chars=pre_rewrite_chars,
+                    post_chars=compact_chars,
+                    lower_chars=compact_lower_chars,
+                    upper_chars=compact_upper_chars,
+                    rewritten_text=compact_text,
+                    current_text=current_text,
+                )
+                segment.short_content_compact_attempted = True
+                segment.short_content_compact_class = short_content_class
+                segment.short_content_compact_lower_chars = compact_lower_chars
+                segment.short_content_compact_upper_chars = compact_upper_chars
+                segment.short_content_compact_pre_chars = pre_rewrite_chars
+                segment.short_content_compact_post_chars = compact_chars
+
+                if compact_rejection_reason:
+                    segment.short_content_compact_accepted = False
+                    segment.short_content_compact_rejected_reason = compact_rejection_reason
+                    self._record_pre_tts_rewrite_rejection(
+                        segment=segment,
+                        reason=f"short_compact_{compact_rejection_reason}",
+                        direction=rewrite_label,
+                        estimate_ms=estimated_duration_ms,
+                        target_ms=target_duration_ms,
+                        pre_chars=pre_rewrite_chars,
+                        post_chars=compact_chars,
+                        lower_chars=compact_lower_chars,
+                        upper_chars=compact_upper_chars,
+                        retry_attempted=False,
+                    )
+                    print(
+                        f"[S4] Short-content compact rejected segment_{segment.segment_id:03d}: "
+                        f"{short_content_class} chars {pre_rewrite_chars}->{compact_chars} "
+                        f"outside guardrails ({compact_rejection_reason})"
+                    )
+                    continue
+
+                self._apply_pre_tts_rewrite_success(
+                    segment=segment,
+                    rewritten_text=compact_text,
+                    rewrite_label=rewrite_label,
+                    estimate_ms=estimated_duration_ms,
+                    target_ms=target_duration_ms,
+                    pre_chars=pre_rewrite_chars,
+                    post_chars=compact_chars,
+                    task_name=SHORT_CONTENT_COMPACT_TASK,
+                    retry_attempted=False,
+                    retry_accepted=False,
+                )
+                segment.short_content_compact_accepted = True
+                segment.short_content_compact_rejected_reason = ""
+                rewritten_count += 1
+                print(
+                    f"[S4] Short-content compact ({short_content_class}) "
+                    f"segment_{segment.segment_id:03d}: chars "
+                    f"{pre_rewrite_chars}->{compact_chars}, "
+                    f"target {target_duration_ms}ms"
+                )
+                continue
+
+            rewrite_char_bounds = self._pre_tts_rewrite_char_bounds(
+                rewrite_label=rewrite_label,
+                pre_chars=pre_rewrite_chars,
+                target_duration_ms=target_duration_ms,
+                chars_per_second=speaker_chars_per_second,
+            )
+            if rewrite_char_bounds is None:
+                continue
+            target_lower_chars, target_upper_chars = rewrite_char_bounds
+            rewritten_text = self._rewrite_pre_tts_with_guardrail_prompt(
+                rewriter=rewriter,
+                current_text=current_text,
+                estimated_duration_ms=estimated_duration_ms,
                 target_duration_ms=target_duration_ms,
                 source_text=segment.source_text,
                 speaker_id=segment.speaker_id,
+                rewrite_label=rewrite_label,
+                target_lower_chars=target_lower_chars,
+                target_upper_chars=target_upper_chars,
+                task_name="s5_rewrite",
             ).strip()
-            if not rewritten_text or rewritten_text == current_text:
+            post_rewrite_chars = _count_spoken_chars_for_metering(rewritten_text)
+            rejection_reason = self._pre_tts_rewrite_rejection_reason(
+                rewrite_label=rewrite_label,
+                pre_chars=pre_rewrite_chars,
+                post_chars=post_rewrite_chars,
+                lower_chars=target_lower_chars,
+                upper_chars=target_upper_chars,
+                rewritten_text=rewritten_text,
+                current_text=current_text,
+            )
+            retry_attempted = False
+            retry_accepted = False
+            initial_rejected_reason = ""
+            accepted_task = "s5_rewrite"
+
+            if rejection_reason:
+                initial_rejected_reason = rejection_reason
+                if self._should_retry_pre_tts_rewrite_strict(
+                    rewrite_label=rewrite_label,
+                    target_duration_ms=target_duration_ms,
+                    rejection_reason=rejection_reason,
+                ):
+                    retry_attempted = True
+                    print(
+                        f"[S4] Pre-TTS rewrite strict retry segment_{segment.segment_id:03d}: "
+                        f"{rewrite_label} first_attempt={rejection_reason} "
+                        f"chars {pre_rewrite_chars}->{post_rewrite_chars}, "
+                        f"bounds {target_lower_chars}-{target_upper_chars}"
+                    )
+                    retry_text = self._rewrite_pre_tts_with_guardrail_prompt(
+                        rewriter=rewriter,
+                        current_text=current_text,
+                        estimated_duration_ms=estimated_duration_ms,
+                        target_duration_ms=target_duration_ms,
+                        source_text=segment.source_text,
+                        speaker_id=segment.speaker_id,
+                        rewrite_label=rewrite_label,
+                        target_lower_chars=target_lower_chars,
+                        target_upper_chars=target_upper_chars,
+                        task_name=PRE_TTS_REWRITE_STRICT_RETRY_TASK,
+                        strict_retry_reason=rejection_reason,
+                    ).strip()
+                    retry_chars = _count_spoken_chars_for_metering(retry_text)
+                    retry_rejection_reason = self._pre_tts_rewrite_rejection_reason(
+                        rewrite_label=rewrite_label,
+                        pre_chars=pre_rewrite_chars,
+                        post_chars=retry_chars,
+                        lower_chars=target_lower_chars,
+                        upper_chars=target_upper_chars,
+                        rewritten_text=retry_text,
+                        current_text=current_text,
+                    )
+                    if not retry_rejection_reason:
+                        rewritten_text = retry_text
+                        post_rewrite_chars = retry_chars
+                        retry_accepted = True
+                        accepted_task = PRE_TTS_REWRITE_STRICT_RETRY_TASK
+                        rejection_reason = ""
+                    else:
+                        rewritten_text = retry_text
+                        post_rewrite_chars = retry_chars
+                        rejection_reason = f"strict_{retry_rejection_reason}"
+
+            if rejection_reason:
+                self._record_pre_tts_rewrite_rejection(
+                    segment=segment,
+                    reason=rejection_reason,
+                    direction=rewrite_label,
+                    estimate_ms=estimated_duration_ms,
+                    target_ms=target_duration_ms,
+                    pre_chars=pre_rewrite_chars,
+                    post_chars=post_rewrite_chars,
+                    lower_chars=target_lower_chars,
+                    upper_chars=target_upper_chars,
+                    retry_attempted=retry_attempted,
+                    initial_rejected_reason=initial_rejected_reason,
+                )
+                print(
+                    f"[S4] Pre-TTS rewrite rejected segment_{segment.segment_id:03d}: "
+                    f"{rewrite_label} chars {pre_rewrite_chars}->{post_rewrite_chars} "
+                    f"outside guardrails ({rejection_reason})"
+                )
                 continue
 
-            segment.cn_text = rewritten_text
-            segment.rewrite_count += 1
+            self._apply_pre_tts_rewrite_success(
+                segment=segment,
+                rewritten_text=rewritten_text,
+                rewrite_label=rewrite_label,
+                estimate_ms=estimated_duration_ms,
+                target_ms=target_duration_ms,
+                pre_chars=pre_rewrite_chars,
+                post_chars=post_rewrite_chars,
+                task_name=accepted_task,
+                retry_attempted=retry_attempted,
+                retry_accepted=retry_accepted,
+                initial_rejected_reason=initial_rejected_reason,
+            )
             rewritten_count += 1
             print(
                 f"[S4] Pre-TTS rewrite ({rewrite_label}) segment_{segment.segment_id:03d}: "
@@ -3571,6 +5186,347 @@ class ProcessPipeline:
             )
 
         return rewritten_count
+
+    @staticmethod
+    def _rewrite_short_content_compact_with_guardrails(
+        *,
+        rewriter: GeminiRewriter,
+        current_text: str,
+        source_text: str,
+        target_duration_ms: int,
+        target_lower_chars: int,
+        target_upper_chars: int,
+    ) -> str:
+        compact_rewrite = getattr(rewriter, "rewrite_short_content_compact", None)
+        if callable(compact_rewrite):
+            return compact_rewrite(
+                current_text,
+                source_text=source_text,
+                target_duration_ms=target_duration_ms,
+                target_lower_chars=target_lower_chars,
+                target_upper_chars=target_upper_chars,
+                task_name=SHORT_CONTENT_COMPACT_TASK,
+            )
+        return rewriter.rewrite_for_duration(
+            current_text,
+            actual_duration_ms=max(target_duration_ms + 1, target_duration_ms * 2),
+            target_duration_ms=target_duration_ms,
+            source_text=source_text,
+        )
+
+    @staticmethod
+    def _rewrite_pre_tts_with_guardrail_prompt(
+        *,
+        rewriter: GeminiRewriter,
+        current_text: str,
+        estimated_duration_ms: int,
+        target_duration_ms: int,
+        source_text: str,
+        speaker_id: str,
+        rewrite_label: str,
+        target_lower_chars: int,
+        target_upper_chars: int,
+        task_name: str = "s5_rewrite",
+        strict_retry_reason: str = "",
+    ) -> str:
+        rewrite_with_profile = getattr(rewriter, "rewrite_for_duration_with_profile", None)
+        if callable(rewrite_with_profile):
+            if rewrite_label == "overshoot":
+                preferred_min_ratio, preferred_max_ratio = (1.0, 1.12)
+            else:
+                preferred_min_ratio, preferred_max_ratio = (0.88, 1.0)
+            return rewrite_with_profile(
+                current_text,
+                actual_duration_ms=estimated_duration_ms,
+                target_duration_ms=target_duration_ms,
+                source_text=source_text,
+                speaker_id=speaker_id,
+                preferred_min_ratio=preferred_min_ratio,
+                preferred_max_ratio=preferred_max_ratio,
+                target_lower_chars=target_lower_chars,
+                target_upper_chars=target_upper_chars,
+                task_name=task_name,
+                strict_retry_reason=strict_retry_reason,
+            )
+        return rewriter.rewrite_for_duration(
+            current_text,
+            actual_duration_ms=estimated_duration_ms,
+            target_duration_ms=target_duration_ms,
+            source_text=source_text,
+            speaker_id=speaker_id,
+        )
+
+    @staticmethod
+    def _pre_tts_rewrite_rejection_reason(
+        *,
+        rewrite_label: str,
+        pre_chars: int,
+        post_chars: int,
+        lower_chars: int,
+        upper_chars: int,
+        rewritten_text: str,
+        current_text: str,
+    ) -> str:
+        if not (rewritten_text or "").strip():
+            return "empty"
+        if rewritten_text.strip() == (current_text or "").strip():
+            return "unchanged"
+        if pre_chars <= 0 or post_chars <= 0:
+            return "empty"
+        if rewrite_label == "overshoot":
+            if post_chars >= pre_chars:
+                return "wrong_direction"
+            if post_chars < lower_chars:
+                return "below_floor"
+            if post_chars > upper_chars:
+                return "above_ceiling"
+            return ""
+        if rewrite_label == "undershoot":
+            if post_chars <= pre_chars:
+                return "wrong_direction"
+            if post_chars < lower_chars:
+                return "below_floor"
+            if post_chars > upper_chars:
+                return "above_ceiling"
+            return ""
+        return "unknown_direction"
+
+    @staticmethod
+    def _should_retry_pre_tts_rewrite_strict(
+        *,
+        rewrite_label: str,
+        target_duration_ms: int,
+        rejection_reason: str,
+    ) -> bool:
+        if rewrite_label != "overshoot":
+            return False
+        if target_duration_ms <= PRE_TTS_REWRITE_STRICT_RETRY_MIN_TARGET_MS:
+            return False
+        return rejection_reason in {
+            "above_ceiling",
+            "below_floor",
+            "wrong_direction",
+            "unchanged",
+            "empty",
+        }
+
+    @staticmethod
+    def _record_pre_tts_rewrite_rejection(
+        *,
+        segment: DubbingSegment,
+        reason: str,
+        direction: str,
+        estimate_ms: int,
+        target_ms: int,
+        pre_chars: int,
+        post_chars: int,
+        lower_chars: int,
+        upper_chars: int,
+        retry_attempted: bool,
+        initial_rejected_reason: str = "",
+    ) -> None:
+        segment.pre_tts_rewrite_rejected = True
+        segment.pre_tts_rewrite_rejected_reason = reason
+        segment.pre_tts_rewrite_rejected_direction = direction
+        segment.pre_tts_rewrite_rejected_estimate_ms = estimate_ms
+        segment.pre_tts_rewrite_rejected_target_ms = target_ms
+        segment.pre_tts_rewrite_rejected_pre_chars = pre_chars
+        segment.pre_tts_rewrite_rejected_post_chars = post_chars
+        segment.pre_tts_rewrite_rejected_lower_chars = lower_chars
+        segment.pre_tts_rewrite_rejected_upper_chars = upper_chars
+        segment.pre_tts_rewrite_retry_attempted = retry_attempted
+        segment.pre_tts_rewrite_retry_accepted = False
+        segment.pre_tts_rewrite_initial_rejected_reason = initial_rejected_reason
+
+    @staticmethod
+    def _apply_pre_tts_rewrite_success(
+        *,
+        segment: DubbingSegment,
+        rewritten_text: str,
+        rewrite_label: str,
+        estimate_ms: int,
+        target_ms: int,
+        pre_chars: int,
+        post_chars: int,
+        task_name: str,
+        retry_attempted: bool,
+        retry_accepted: bool,
+        initial_rejected_reason: str = "",
+    ) -> None:
+        segment.cn_text = rewritten_text
+        segment.rewrite_count += 1
+        segment.pre_tts_rewrite_direction = rewrite_label
+        segment.pre_tts_estimate_ms = estimate_ms
+        segment.pre_tts_target_ms = target_ms
+        segment.pre_tts_pre_chars = pre_chars
+        segment.pre_tts_post_chars = post_chars
+        segment.pre_tts_rewrite_task = task_name
+        segment.pre_tts_rewrite_retry_attempted = retry_attempted
+        segment.pre_tts_rewrite_retry_accepted = retry_accepted
+        segment.pre_tts_rewrite_initial_rejected_reason = initial_rejected_reason
+        segment.pre_tts_rewrite_rejected = False
+        segment.pre_tts_rewrite_rejected_reason = ""
+        if task_name != SHORT_CONTENT_COMPACT_TASK:
+            segment.short_content_compact_attempted = False
+            segment.short_content_compact_accepted = False
+            segment.short_content_compact_rejected_reason = ""
+            segment.short_content_compact_class = ""
+            segment.short_content_compact_lower_chars = 0
+            segment.short_content_compact_upper_chars = 0
+            segment.short_content_compact_pre_chars = 0
+            segment.short_content_compact_post_chars = 0
+
+    @staticmethod
+    def _pre_tts_rewrite_char_bounds(
+        *,
+        rewrite_label: str,
+        pre_chars: int,
+        target_duration_ms: int,
+        chars_per_second: float,
+    ) -> tuple[int, int] | None:
+        if pre_chars <= 0 or target_duration_ms <= 0 or chars_per_second <= 0:
+            return None
+
+        target_chars = max(1.0, target_duration_ms / 1000.0 * chars_per_second)
+        if rewrite_label == "overshoot":
+            if pre_chars <= 1:
+                return None
+            target_floor = max(1, int(round(target_chars)))
+            required_shrink = max(0.0, 1.0 - (target_chars / pre_chars))
+            max_shrink = min(
+                PRE_TTS_REWRITE_MAX_CHANGE_CAP,
+                max(
+                    PRE_TTS_REWRITE_MAX_BASE_CHANGE_RATIO,
+                    required_shrink + PRE_TTS_REWRITE_REQUIRED_CHANGE_MARGIN,
+                ),
+            )
+            high_shrink_risk = (
+                target_duration_ms <= PRE_TTS_REWRITE_HIGH_SHRINK_RISK_TARGET_MS
+                and required_shrink >= PRE_TTS_REWRITE_HIGH_SHRINK_RISK_REQUIRED_SHRINK
+            )
+            mid_undershoot_risk = (
+                not high_shrink_risk
+                and PRE_TTS_REWRITE_MID_UNDERSHOOT_RISK_MIN_TARGET_MS
+                <= target_duration_ms
+                < PRE_TTS_REWRITE_MID_UNDERSHOOT_RISK_MAX_TARGET_MS
+                and required_shrink
+                >= PRE_TTS_REWRITE_MID_UNDERSHOOT_RISK_REQUIRED_SHRINK
+            )
+            long_undershoot_risk = (
+                target_duration_ms
+                > PRE_TTS_REWRITE_LONG_UNDERSHOOT_RISK_MIN_TARGET_MS
+                and required_shrink
+                >= PRE_TTS_REWRITE_LONG_UNDERSHOOT_RISK_REQUIRED_SHRINK
+            )
+            if high_shrink_risk:
+                max_shrink = min(
+                    max_shrink,
+                    PRE_TTS_REWRITE_HIGH_SHRINK_RISK_MAX_CHANGE_RATIO,
+                )
+            if mid_undershoot_risk:
+                target_floor = max(
+                    target_floor,
+                    int(math.ceil(
+                        target_chars
+                        * PRE_TTS_REWRITE_MID_UNDERSHOOT_RISK_MIN_TARGET_MULTIPLIER
+                    )),
+                )
+                max_shrink = min(
+                    max_shrink,
+                    PRE_TTS_REWRITE_MID_UNDERSHOOT_RISK_MAX_CHANGE_RATIO,
+                )
+            if long_undershoot_risk:
+                target_floor = max(
+                    target_floor,
+                    int(math.ceil(
+                        target_chars
+                        * PRE_TTS_REWRITE_LONG_UNDERSHOOT_RISK_MIN_TARGET_MULTIPLIER
+                    )),
+                )
+                max_shrink = min(
+                    max_shrink,
+                    PRE_TTS_REWRITE_LONG_UNDERSHOOT_RISK_MAX_CHANGE_RATIO,
+                )
+            floor_by_shrink_cap = max(1, int(math.ceil(pre_chars * (1.0 - max_shrink))))
+            lower = max(target_floor, floor_by_shrink_cap)
+            upper_by_target = int(math.ceil(target_chars * 1.12))
+            if mid_undershoot_risk:
+                upper_by_target = max(
+                    upper_by_target,
+                    int(math.ceil(
+                        target_chars
+                        * PRE_TTS_REWRITE_MID_UNDERSHOOT_RISK_MAX_TARGET_MULTIPLIER
+                    )),
+                )
+            if long_undershoot_risk:
+                upper_by_target = max(
+                    upper_by_target,
+                    int(math.ceil(
+                        target_chars
+                        * PRE_TTS_REWRITE_LONG_UNDERSHOOT_RISK_MAX_TARGET_MULTIPLIER
+                    )),
+                )
+            if high_shrink_risk:
+                upper_by_target = max(
+                    upper_by_target,
+                    int(math.ceil(lower * (1.0 + PRE_TTS_REWRITE_HIGH_SHRINK_RISK_UPPER_SLACK))),
+                )
+            upper = min(pre_chars - 1, max(lower, upper_by_target))
+            if lower > upper:
+                return None
+            return lower, upper
+
+        if rewrite_label == "undershoot":
+            target_ceiling = max(1, int(round(target_chars)))
+            required_expand = max(0.0, (target_chars / pre_chars) - 1.0)
+            max_expand = min(
+                PRE_TTS_REWRITE_MAX_CHANGE_CAP,
+                max(
+                    PRE_TTS_REWRITE_MAX_BASE_CHANGE_RATIO,
+                    required_expand + PRE_TTS_REWRITE_REQUIRED_CHANGE_MARGIN,
+                ),
+            )
+            ceiling_by_expand_cap = max(1, int(math.floor(pre_chars * (1.0 + max_expand))))
+            upper = min(target_ceiling, ceiling_by_expand_cap)
+            lower = max(pre_chars + 1, int(math.floor(target_chars * 0.88)))
+            if lower > upper:
+                return None
+            return lower, upper
+
+        return None
+
+    @staticmethod
+    def _is_pre_tts_rewrite_within_char_guardrails(
+        *,
+        rewrite_label: str,
+        pre_chars: int,
+        post_chars: int,
+        target_duration_ms: int,
+        chars_per_second: float,
+    ) -> bool:
+        if pre_chars <= 0 or post_chars <= 0 or target_duration_ms <= 0:
+            return False
+        bounds = ProcessPipeline._pre_tts_rewrite_char_bounds(
+            rewrite_label=rewrite_label,
+            pre_chars=pre_chars,
+            target_duration_ms=target_duration_ms,
+            chars_per_second=chars_per_second,
+        )
+        if bounds is None:
+            return False
+        lower, upper = bounds
+
+        if rewrite_label == "overshoot":
+            if post_chars >= pre_chars:
+                return False
+            return lower <= post_chars <= upper
+
+        if rewrite_label == "undershoot":
+            if post_chars <= pre_chars:
+                return False
+            return lower <= post_chars <= upper
+
+        return True
 
     def _presplit_long_overshoot_segments_before_alignment(
         self,
@@ -3608,7 +5564,12 @@ class ProcessPipeline:
                 f"[S4] Pre-splitting long overshoot segment_{segment.segment_id:03d} "
                 f"-> {len(child_segments)} sub-segments."
             )
-            tts_generator.generate_all(child_segments, str(tts_dir))
+            _generate_tts_all_with_bucket(
+                tts_generator,
+                child_segments,
+                str(tts_dir),
+                usage_bucket=TTS_BUCKET_POST_TTS_RESYNTH,
+            )
             updated_segments.extend(child_segments)
             next_segment_id = max(child.segment_id for child in child_segments) + 1
             presplit_count += 1
@@ -3619,6 +5580,8 @@ class ProcessPipeline:
         return presplit_count
 
     def _should_presplit_segment_before_alignment(self, segment: DubbingSegment) -> bool:
+        if is_keep_original_dubbing_mode(getattr(segment, "dubbing_mode", DUBBING_MODE_DUB)):
+            return False
         target_duration_ms = int(segment.target_duration_ms)
         if target_duration_ms <= 0:
             return False
@@ -3677,7 +5640,12 @@ class ProcessPipeline:
             f"[S5] Attempting semantic split repair for segment_{segment.segment_id:03d} "
             f"-> {len(child_segments)} sub-segments."
         )
-        tts_generator.generate_all(child_segments, str(tts_dir))
+        _generate_tts_all_with_bucket(
+            tts_generator,
+            child_segments,
+            str(tts_dir),
+            usage_bucket=TTS_BUCKET_POST_TTS_RESYNTH,
+        )
         SegmentAligner(
             rewriter=rewriter,
             tts_generator=tts_generator,
@@ -3807,7 +5775,12 @@ class ProcessPipeline:
                 return
             child_segment.cn_text = rewritten_text
             child_segment.rewrite_count += 1
-            tts_generator.generate_all([child_segment], str(tts_dir))
+            _generate_tts_all_with_bucket(
+                tts_generator,
+                [child_segment],
+                str(tts_dir),
+                usage_bucket=TTS_BUCKET_POST_TTS_RESYNTH,
+            )
 
             refreshed_tts_path = Path(str(child_segment.tts_audio_path or "")).resolve(strict=False)
             if refreshed_tts_path.exists():
@@ -3830,6 +5803,317 @@ class ProcessPipeline:
             str(tts_dir),
         )
 
+    @staticmethod
+    def _annotate_short_segment_merge_candidates(
+        segments: list[DubbingSegment],
+    ) -> dict[str, int]:
+        """Mark safe same-speaker short-block merge candidates.
+
+        This only writes audit metadata. The pipeline still emits one TTS/audio
+        unit per SemanticBlock until the candidate distribution is validated.
+        Cross-speaker adjacency is explicitly blocked.
+        """
+        candidate_count = 0
+        blocked_cross_speaker_count = 0
+
+        for segment in segments:
+            if getattr(segment, "short_merge_applied", False):
+                segment.short_merge_candidate = False
+                segment.short_merge_target_segment_id = 0
+                segment.short_merge_blocked_reason = ""
+                continue
+            segment.short_merge_candidate = False
+            segment.short_merge_target_segment_id = 0
+            segment.short_merge_reason = ""
+            segment.short_merge_blocked_reason = ""
+
+        for index, segment in enumerate(segments):
+            if getattr(segment, "short_merge_applied", False):
+                continue
+            if is_keep_original_dubbing_mode(getattr(segment, "dubbing_mode", DUBBING_MODE_DUB)):
+                continue
+            target_duration_ms = int(getattr(segment, "target_duration_ms", 0) or 0)
+            if target_duration_ms <= 0 or target_duration_ms > SHORT_MERGE_CANDIDATE_MAX_TARGET_MS:
+                continue
+            spoken_chars = count_spoken_chars(getattr(segment, "cn_text", "") or "")
+            if spoken_chars > SHORT_MERGE_CANDIDATE_MAX_SPOKEN_CHARS:
+                continue
+
+            candidates: list[tuple[int, int, str, DubbingSegment]] = []
+            adjacent_cross_speaker = False
+
+            if index > 0:
+                prev_segment = segments[index - 1]
+                prev_gap_ms = int(segment.start_ms) - int(prev_segment.end_ms)
+                if 0 <= prev_gap_ms <= SHORT_MERGE_MAX_GAP_MS:
+                    if is_keep_original_dubbing_mode(getattr(prev_segment, "dubbing_mode", DUBBING_MODE_DUB)):
+                        pass
+                    elif prev_segment.speaker_id == segment.speaker_id:
+                        combined_ms = target_duration_ms + int(prev_segment.target_duration_ms)
+                        if combined_ms <= SHORT_MERGE_MAX_COMBINED_TARGET_MS:
+                            candidates.append((prev_gap_ms, 0, "same_speaker_prev", prev_segment))
+                    else:
+                        adjacent_cross_speaker = True
+
+            if index + 1 < len(segments):
+                next_segment = segments[index + 1]
+                next_gap_ms = int(next_segment.start_ms) - int(segment.end_ms)
+                if 0 <= next_gap_ms <= SHORT_MERGE_MAX_GAP_MS:
+                    if is_keep_original_dubbing_mode(getattr(next_segment, "dubbing_mode", DUBBING_MODE_DUB)):
+                        pass
+                    elif next_segment.speaker_id == segment.speaker_id:
+                        combined_ms = target_duration_ms + int(next_segment.target_duration_ms)
+                        if combined_ms <= SHORT_MERGE_MAX_COMBINED_TARGET_MS:
+                            candidates.append((next_gap_ms, 1, "same_speaker_next", next_segment))
+                    else:
+                        adjacent_cross_speaker = True
+
+            if candidates:
+                _gap_ms, _tie_breaker, reason, target_segment = min(candidates)
+                segment.short_merge_candidate = True
+                segment.short_merge_target_segment_id = int(target_segment.segment_id)
+                segment.short_merge_reason = reason
+                candidate_count += 1
+            elif adjacent_cross_speaker:
+                segment.short_merge_blocked_reason = "cross_speaker_adjacent"
+                blocked_cross_speaker_count += 1
+
+        return {
+            "candidate_count": candidate_count,
+            "blocked_cross_speaker_count": blocked_cross_speaker_count,
+        }
+
+    @staticmethod
+    def _is_short_segment_merge_source(segment: DubbingSegment) -> bool:
+        if is_keep_original_dubbing_mode(getattr(segment, "dubbing_mode", DUBBING_MODE_DUB)):
+            return False
+        target_duration_ms = int(getattr(segment, "target_duration_ms", 0) or 0)
+        if target_duration_ms <= 0 or target_duration_ms > SHORT_MERGE_CANDIDATE_MAX_TARGET_MS:
+            return False
+        return (
+            count_spoken_chars(getattr(segment, "cn_text", "") or "")
+            <= SHORT_MERGE_CANDIDATE_MAX_SPOKEN_CHARS
+        )
+
+    @staticmethod
+    def _short_merge_gap_ms(left: DubbingSegment, right: DubbingSegment) -> int:
+        return int(getattr(right, "start_ms", 0) or 0) - int(getattr(left, "end_ms", 0) or 0)
+
+    @staticmethod
+    def _can_short_merge_adjacent(left: DubbingSegment, right: DubbingSegment) -> bool:
+        if (
+            is_keep_original_dubbing_mode(getattr(left, "dubbing_mode", DUBBING_MODE_DUB))
+            or is_keep_original_dubbing_mode(getattr(right, "dubbing_mode", DUBBING_MODE_DUB))
+        ):
+            return False
+        if left.speaker_id != right.speaker_id:
+            return False
+        gap_ms = ProcessPipeline._short_merge_gap_ms(left, right)
+        return 0 <= gap_ms <= SHORT_MERGE_MAX_GAP_MS
+
+    @staticmethod
+    def _short_merge_group_span_ms(group: list[DubbingSegment]) -> int:
+        if not group:
+            return 0
+        return max(0, int(group[-1].end_ms) - int(group[0].start_ms))
+
+    @staticmethod
+    def _can_add_to_short_merge_group(
+        group: list[DubbingSegment],
+        segment: DubbingSegment,
+    ) -> bool:
+        if not group:
+            return False
+        if not ProcessPipeline._can_short_merge_adjacent(group[-1], segment):
+            return False
+        span_ms = max(0, int(segment.end_ms) - int(group[0].start_ms))
+        return span_ms <= SHORT_MERGE_MAX_COMBINED_TARGET_MS
+
+    @staticmethod
+    def _join_short_merge_texts(values: list[str]) -> str:
+        return " ".join(value.strip() for value in values if value and value.strip())
+
+    @staticmethod
+    def _parse_short_merge_absorbed_segment_ids(segment: object) -> list[int]:
+        raw = str(getattr(segment, "short_merge_absorbed_segment_ids", "") or "")
+        result: list[int] = []
+        for item in raw.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            try:
+                result.append(int(item))
+            except ValueError:
+                continue
+        return result
+
+    @staticmethod
+    def _short_merge_original_segment_ids(segment: DubbingSegment) -> list[int]:
+        ids = [int(segment.segment_id)]
+        ids.extend(ProcessPipeline._parse_short_merge_absorbed_segment_ids(segment))
+        return sorted(dict.fromkeys(ids))
+
+    @staticmethod
+    def _materialize_short_merge_group(group: list[DubbingSegment]) -> DubbingSegment:
+        if len(group) == 1:
+            return group[0]
+
+        base = group[0]
+        if ProcessPipeline._is_short_segment_merge_source(base):
+            for candidate in group[1:]:
+                if not ProcessPipeline._is_short_segment_merge_source(candidate):
+                    base = candidate
+                    break
+
+        ordered_ids = [int(segment.segment_id) for segment in group]
+        absorbed_ids = [sid for sid in ordered_ids if sid != int(base.segment_id)]
+        base.source_text = ProcessPipeline._join_short_merge_texts(
+            [segment.source_text for segment in group]
+        )
+        base.cn_text = ProcessPipeline._join_short_merge_texts(
+            [segment.cn_text for segment in group]
+        )
+        base.start_ms = int(group[0].start_ms)
+        base.end_ms = int(group[-1].end_ms)
+        base.target_duration_ms = ProcessPipeline._short_merge_group_span_ms(group)
+        base.tts_audio_path = None
+        base.aligned_audio_path = None
+        base.actual_duration_ms = 0
+        base.alignment_ratio = 0.0
+        base.alignment_method = ""
+        base.needs_review = False
+        base.fallback_used_provider = None
+        base.pre_tts_rewrite_direction = ""
+        base.pre_tts_estimate_ms = 0
+        base.pre_tts_target_ms = 0
+        base.pre_tts_pre_chars = 0
+        base.pre_tts_post_chars = 0
+        base.pre_tts_post_tts_first_pass_ms = 0
+        base.pre_tts_contradiction = False
+        base.pre_tts_harmful_contradiction = False
+        base.pre_tts_rewrite_task = ""
+        base.pre_tts_rewrite_retry_attempted = False
+        base.pre_tts_rewrite_retry_accepted = False
+        base.pre_tts_rewrite_initial_rejected_reason = ""
+        base.pre_tts_rewrite_rejected = False
+        base.pre_tts_rewrite_rejected_reason = ""
+        base.pre_tts_rewrite_rejected_direction = ""
+        base.pre_tts_rewrite_rejected_estimate_ms = 0
+        base.pre_tts_rewrite_rejected_target_ms = 0
+        base.pre_tts_rewrite_rejected_pre_chars = 0
+        base.pre_tts_rewrite_rejected_post_chars = 0
+        base.pre_tts_rewrite_rejected_lower_chars = 0
+        base.pre_tts_rewrite_rejected_upper_chars = 0
+        base.first_pass_duration_ms = 0
+        base.first_pass_error_pct = 0.0
+        base.dsp_speed_param = 1.0
+        base.force_dsp_severity = ""
+        base.force_dsp_review_suppressed = False
+        base.force_dsp_review_reason = ""
+        base.dsp_speed_ratio_used = 1.0
+        base.dsp_silence_padded_ms = 0
+        base.dsp_truncated_ms = 0
+        base.dsp_initial_duration_ms = 0
+        base.dsp_trimmed_duration_ms = 0
+        base.dsp_stretched_duration_ms = 0
+        base.short_merge_candidate = False
+        base.short_merge_target_segment_id = 0
+        base.short_merge_reason = "same_speaker_adjacent"
+        base.short_merge_blocked_reason = ""
+        base.short_merge_applied = True
+        base.short_merge_absorbed_segment_ids = ",".join(str(sid) for sid in absorbed_ids)
+        base.auto_keep_original_reason = ""
+        base.auto_keep_original_source = ""
+        base.short_content_compact_attempted = False
+        base.short_content_compact_accepted = False
+        base.short_content_compact_rejected_reason = ""
+        base.short_content_compact_class = ""
+        base.short_content_compact_lower_chars = 0
+        base.short_content_compact_upper_chars = 0
+        base.short_content_compact_pre_chars = 0
+        base.short_content_compact_post_chars = 0
+        return base
+
+    def _apply_short_segment_merges_before_tts(
+        self,
+        translation_result: TranslationResult,
+    ) -> dict[str, int]:
+        segments = list(translation_result.segments)
+        summary = self._annotate_short_segment_merge_candidates(segments)
+        if len(segments) < 2:
+            summary["applied_count"] = 0
+            summary["absorbed_count"] = 0
+            return summary
+
+        groups: list[list[DubbingSegment]] = []
+        index = 0
+        while index < len(segments):
+            segment = segments[index]
+            if (
+                self._is_short_segment_merge_source(segment)
+                and groups
+                and self._can_add_to_short_merge_group(groups[-1], segment)
+            ):
+                groups[-1].append(segment)
+                index += 1
+                continue
+
+            if (
+                self._is_short_segment_merge_source(segment)
+                and index + 1 < len(segments)
+                and self._can_short_merge_adjacent(segment, segments[index + 1])
+                and max(0, int(segments[index + 1].end_ms) - int(segment.start_ms))
+                <= SHORT_MERGE_MAX_COMBINED_TARGET_MS
+            ):
+                groups.append([segment, segments[index + 1]])
+                index += 2
+                continue
+
+            groups.append([segment])
+            index += 1
+
+        merged_segments: list[DubbingSegment] = []
+        absorbed_count = 0
+        for group in groups:
+            merged = self._materialize_short_merge_group(group)
+            merged_segments.append(merged)
+            if len(group) > 1:
+                absorbed_count += len(group) - 1
+
+        applied_count = sum(
+            1 for segment in merged_segments if getattr(segment, "short_merge_applied", False)
+        )
+        if absorbed_count:
+            translation_result.segments = merged_segments
+            translation_result.total_segments = len(merged_segments)
+            summary["candidate_count"] = int(summary.get("candidate_count", 0) or 0)
+        summary["applied_count"] = applied_count
+        summary["absorbed_count"] = absorbed_count
+        return summary
+
+    @staticmethod
+    def _clear_short_merge_tts_cache(
+        segments: list[DubbingSegment],
+        tts_dir: Path,
+    ) -> int:
+        cleared = 0
+        for segment in segments:
+            if not getattr(segment, "short_merge_applied", False):
+                continue
+            expected_path = tts_dir / f"segment_{segment.segment_id:03d}_{segment.speaker_id}.wav"
+            if not expected_path.exists():
+                continue
+            try:
+                expected_path.unlink()
+                cleared += 1
+            except OSError as exc:
+                print(
+                    f"[S4] Warning: failed to clear stale short-merge TTS cache "
+                    f"{expected_path}: {exc}",
+                    flush=True,
+                )
+        return cleared
+
     def _build_aligned_segments(self, segments: list[DubbingSegment]) -> list[AlignedSegment]:
         aligned_segments: list[AlignedSegment] = []
         for segment in segments:
@@ -3846,6 +6130,9 @@ class ProcessPipeline:
                     actual_duration_ms=int(segment.actual_duration_ms),
                     alignment_method=segment.alignment_method,
                     needs_review=segment.needs_review,
+                    dubbing_mode=normalize_dubbing_mode(
+                        getattr(segment, "dubbing_mode", DUBBING_MODE_DUB)
+                    ),
                 )
             )
         return aligned_segments
@@ -3992,12 +6279,13 @@ class ProcessPipeline:
     ) -> list[SemanticBlock]:
         blocks: list[SemanticBlock] = []
         for segment in segments:
+            original_srt_indices = self._short_merge_original_segment_ids(segment)
             blocks.append(
                 SemanticBlock(
                     block_id=f"segment_{int(segment.segment_id):03d}",
                     speaker_id=segment.speaker_id,
                     speaker_name=segment.display_name,
-                    original_srt_indices=[int(segment.segment_id)],
+                    original_srt_indices=original_srt_indices,
                     first_start_ms=int(segment.start_ms),
                     last_end_ms=int(segment.end_ms),
                     target_duration_ms=int(segment.target_duration_ms),
@@ -4009,6 +6297,9 @@ class ProcessPipeline:
                     status=self._resolve_process_output_block_status(segment),
                     alignment_method=segment.alignment_method or "direct",
                     needs_review=bool(segment.needs_review),
+                    dubbing_mode=normalize_dubbing_mode(
+                        getattr(segment, "dubbing_mode", DUBBING_MODE_DUB)
+                    ),
                 )
             )
         return blocks
@@ -4154,7 +6445,11 @@ class ProcessPipeline:
 
     @staticmethod
     def _resolve_process_output_block_status(segment: DubbingSegment) -> str:
-        if segment.alignment_method == "force_dsp":
+        if segment.alignment_method in {
+            "force_dsp",
+            "capped_dsp_overflow",
+            "capped_dsp_underflow",
+        }:
             return "align_done_fallback"
         if segment.needs_review:
             return "align_review_needed"
@@ -4293,10 +6588,67 @@ class ProcessPipeline:
                             "selected_voice": segment.selected_voice,
                             "match_confidence": segment.match_confidence,
                             "tts_provider": segment.tts_provider,
+                            "tts_model_key": segment.tts_model_key,
+                            "first_pass_cn_text": segment.first_pass_cn_text,
                             # T7: fallback provider when primary failed (None if
                             # primary succeeded). Lets users audit voice
                             # substitutions in the final manifest.
                             "fallback_used_provider": segment.fallback_used_provider,
+                            "pre_tts_rewrite_direction": segment.pre_tts_rewrite_direction,
+                            "pre_tts_estimate_ms": segment.pre_tts_estimate_ms,
+                            "pre_tts_target_ms": segment.pre_tts_target_ms,
+                            "pre_tts_pre_chars": segment.pre_tts_pre_chars,
+                            "pre_tts_post_chars": segment.pre_tts_post_chars,
+                            "pre_tts_rewrite_task": segment.pre_tts_rewrite_task,
+                            "pre_tts_rewrite_retry_attempted": segment.pre_tts_rewrite_retry_attempted,
+                            "pre_tts_rewrite_retry_accepted": segment.pre_tts_rewrite_retry_accepted,
+                            "pre_tts_rewrite_initial_rejected_reason": segment.pre_tts_rewrite_initial_rejected_reason,
+                            "pre_tts_rewrite_rejected": segment.pre_tts_rewrite_rejected,
+                            "pre_tts_rewrite_rejected_reason": segment.pre_tts_rewrite_rejected_reason,
+                            "pre_tts_rewrite_rejected_direction": segment.pre_tts_rewrite_rejected_direction,
+                            "pre_tts_rewrite_rejected_estimate_ms": segment.pre_tts_rewrite_rejected_estimate_ms,
+                            "pre_tts_rewrite_rejected_target_ms": segment.pre_tts_rewrite_rejected_target_ms,
+                            "pre_tts_rewrite_rejected_pre_chars": segment.pre_tts_rewrite_rejected_pre_chars,
+                            "pre_tts_rewrite_rejected_post_chars": segment.pre_tts_rewrite_rejected_post_chars,
+                            "pre_tts_rewrite_rejected_lower_chars": segment.pre_tts_rewrite_rejected_lower_chars,
+                            "pre_tts_rewrite_rejected_upper_chars": segment.pre_tts_rewrite_rejected_upper_chars,
+                            "force_dsp_severity": segment.force_dsp_severity,
+                            "force_dsp_review_suppressed": segment.force_dsp_review_suppressed,
+                            "force_dsp_review_reason": segment.force_dsp_review_reason,
+                            "dsp_speed_ratio_used": segment.dsp_speed_ratio_used,
+                            "dsp_silence_padded_ms": segment.dsp_silence_padded_ms,
+                            "dsp_truncated_ms": segment.dsp_truncated_ms,
+                            "dsp_initial_duration_ms": segment.dsp_initial_duration_ms,
+                            "dsp_trimmed_duration_ms": segment.dsp_trimmed_duration_ms,
+                            "dsp_stretched_duration_ms": segment.dsp_stretched_duration_ms,
+                            "short_merge_candidate": segment.short_merge_candidate,
+                            "short_merge_target_segment_id": segment.short_merge_target_segment_id,
+                            "short_merge_reason": segment.short_merge_reason,
+                            "short_merge_blocked_reason": segment.short_merge_blocked_reason,
+                            "short_merge_applied": segment.short_merge_applied,
+                            "short_merge_absorbed_segment_ids": segment.short_merge_absorbed_segment_ids,
+                            "speaker_role": segment.speaker_role,
+                            "speaker_role_label": segment.speaker_role_label,
+                            "speaker_duration_ms": segment.speaker_duration_ms,
+                            "speaker_duration_share": segment.speaker_duration_share,
+                            "speaker_segment_count": segment.speaker_segment_count,
+                            "speaker_short_segment_count": segment.speaker_short_segment_count,
+                            "speaker_short_segment_rate": segment.speaker_short_segment_rate,
+                            "speaker_structure_reason": segment.speaker_structure_reason,
+                            "speaker_review_hint": segment.speaker_review_hint,
+                            "dubbing_mode": normalize_dubbing_mode(
+                                getattr(segment, "dubbing_mode", DUBBING_MODE_DUB)
+                            ),
+                            "auto_keep_original_reason": segment.auto_keep_original_reason,
+                            "auto_keep_original_source": segment.auto_keep_original_source,
+                            "short_content_compact_attempted": segment.short_content_compact_attempted,
+                            "short_content_compact_accepted": segment.short_content_compact_accepted,
+                            "short_content_compact_rejected_reason": segment.short_content_compact_rejected_reason,
+                            "short_content_compact_class": segment.short_content_compact_class,
+                            "short_content_compact_lower_chars": segment.short_content_compact_lower_chars,
+                            "short_content_compact_upper_chars": segment.short_content_compact_upper_chars,
+                            "short_content_compact_pre_chars": segment.short_content_compact_pre_chars,
+                            "short_content_compact_post_chars": segment.short_content_compact_post_chars,
                         }
                         for segment in translation_result.segments
                     ],
@@ -4510,11 +6862,14 @@ class ProcessPipeline:
             (segment.cn_text, _natural_duration_ms(segment))
             for segment in segments
             if segment.actual_duration_ms > 0
+            and not is_keep_original_dubbing_mode(getattr(segment, "dubbing_mode", DUBBING_MODE_DUB))
         ]
         global_estimator.calibrate(global_samples)
 
         speaker_samples: dict[str, list[tuple[str, int]]] = {}
         for segment in segments:
+            if is_keep_original_dubbing_mode(getattr(segment, "dubbing_mode", DUBBING_MODE_DUB)):
+                continue
             if segment.actual_duration_ms <= 0:
                 continue
             speaker_samples.setdefault(segment.speaker_id, []).append(
@@ -4530,6 +6885,246 @@ class ProcessPipeline:
             chars_per_second_by_speaker[speaker_id] = speaker_estimator.chars_per_second
 
         return global_estimator.chars_per_second, chars_per_second_by_speaker
+
+    @staticmethod
+    def _normalize_runtime_tts_provider(provider: object) -> str:
+        value = str(provider or "").strip().lower()
+        if value in {"minimax", "minimax_tts", "minimax_voice_clone"}:
+            return "minimax"
+        if value in {"cosyvoice", "cosyvoice_tts", "cosyvoice_voice_clone"}:
+            return "cosyvoice"
+        if value in {"volcengine", "volcengine_tts", "doubao", "doubao_tts"}:
+            return "volcengine"
+        return value
+
+    @staticmethod
+    def _build_user_voice_speed_profiles(
+        segments: list[DubbingSegment],
+        *,
+        default_provider: str = "minimax",
+        tts_model: str | None = None,
+    ) -> tuple[list[dict[str, object]], dict[str, int]]:
+        """Build conservative cloned-voice speed profiles from first-pass TTS.
+
+        The key guardrail is ``first_pass_cn_text``: post-TTS rewrites may
+        mutate ``segment.cn_text`` after the first audio was generated, so the
+        profile must never pair a first-pass duration with a rewritten text.
+        """
+        from services.tts.voice_speed_bounds import MAX_VALID_CPS, MIN_VALID_CPS
+
+        skipped: dict[str, int] = {}
+
+        def _skip(reason: str, count: int = 1) -> None:
+            skipped[reason] = skipped.get(reason, 0) + count
+
+        buckets: dict[tuple[str, str, str], dict[str, object]] = {}
+        fallback_model_key = str(tts_model or "").strip()
+        default_provider_key = (
+            ProcessPipeline._normalize_runtime_tts_provider(default_provider) or "minimax"
+        )
+
+        for segment in segments:
+            if getattr(segment, "fallback_used_provider", None):
+                _skip("fallback_provider_used")
+                continue
+
+            voice_id = (
+                str(getattr(segment, "selected_voice", "") or "").strip()
+                or str(getattr(segment, "voice_id", "") or "").strip()
+            )
+            if not voice_id or voice_id == "auto":
+                _skip("missing_voice_id")
+                continue
+
+            first_pass_text = str(getattr(segment, "first_pass_cn_text", "") or "").strip()
+            if not first_pass_text:
+                if int(getattr(segment, "rewrite_count", 0) or 0) == 0:
+                    first_pass_text = str(getattr(segment, "cn_text", "") or "").strip()
+                else:
+                    _skip("missing_first_pass_text")
+                    continue
+            spoken_chars = count_spoken_chars(first_pass_text)
+            if spoken_chars < VOICE_SPEED_PROFILE_MIN_SAMPLE_CHARS:
+                _skip("sample_too_short")
+                continue
+
+            first_pass_duration_ms = int(
+                getattr(segment, "first_pass_duration_ms", 0) or 0
+            )
+            if first_pass_duration_ms <= 0:
+                _skip("missing_first_pass_duration")
+                continue
+
+            speed = float(getattr(segment, "dsp_speed_param", 1.0) or 1.0)
+            if speed <= 0:
+                speed = 1.0
+            natural_duration_ms = int(round(first_pass_duration_ms * speed))
+            if natural_duration_ms <= 0:
+                _skip("invalid_natural_duration")
+                continue
+
+            provider_key = ProcessPipeline._normalize_runtime_tts_provider(
+                getattr(segment, "tts_provider", "") or default_provider_key
+            )
+            if provider_key not in {"minimax", "cosyvoice", "volcengine"}:
+                _skip("unsupported_provider")
+                continue
+
+            model_key = (
+                str(getattr(segment, "tts_model_key", "") or "").strip()
+                or fallback_model_key
+            )
+            key = (voice_id, provider_key, model_key)
+            bucket = buckets.setdefault(
+                key,
+                {
+                    "voice_id": voice_id,
+                    "tts_provider": provider_key,
+                    "model_key": model_key,
+                    "sample_count": 0,
+                    "spoken_chars": 0,
+                    "natural_duration_ms": 0,
+                    "speaker_ids": set(),
+                },
+            )
+            bucket["sample_count"] = int(bucket["sample_count"]) + 1
+            bucket["spoken_chars"] = int(bucket["spoken_chars"]) + spoken_chars
+            bucket["natural_duration_ms"] = (
+                int(bucket["natural_duration_ms"]) + natural_duration_ms
+            )
+            speaker_ids = bucket["speaker_ids"]
+            if isinstance(speaker_ids, set):
+                speaker_ids.add(str(getattr(segment, "speaker_id", "") or ""))
+
+        profiles: list[dict[str, object]] = []
+        for bucket in buckets.values():
+            sample_count = int(bucket["sample_count"])
+            spoken_chars = int(bucket["spoken_chars"])
+            natural_duration_ms = int(bucket["natural_duration_ms"])
+            if sample_count < VOICE_SPEED_PROFILE_MIN_SAMPLES:
+                _skip("insufficient_samples")
+                continue
+            if spoken_chars < VOICE_SPEED_PROFILE_MIN_SPOKEN_CHARS:
+                _skip("insufficient_spoken_chars")
+                continue
+            if natural_duration_ms < VOICE_SPEED_PROFILE_MIN_NATURAL_DURATION_MS:
+                _skip("insufficient_duration")
+                continue
+            cps = spoken_chars / (natural_duration_ms / 1000.0)
+            if not (MIN_VALID_CPS <= cps <= MAX_VALID_CPS):
+                _skip("cps_out_of_range")
+                continue
+            speaker_ids_obj = bucket.get("speaker_ids", set())
+            speaker_ids = (
+                sorted(s for s in speaker_ids_obj if s)
+                if isinstance(speaker_ids_obj, set)
+                else []
+            )
+            profiles.append({
+                "voice_id": bucket["voice_id"],
+                "tts_provider": bucket["tts_provider"],
+                "model_key": bucket["model_key"],
+                "chars_per_second": round(cps, 4),
+                "sample_count": sample_count,
+                "spoken_chars": spoken_chars,
+                "natural_duration_ms": natural_duration_ms,
+                "speaker_ids": speaker_ids,
+            })
+
+        profiles.sort(
+            key=lambda item: (
+                int(item.get("spoken_chars", 0) or 0),
+                int(item.get("natural_duration_ms", 0) or 0),
+            ),
+            reverse=True,
+        )
+        if len(profiles) > VOICE_SPEED_PROFILE_MAX_PROFILES_PER_JOB:
+            _skip("profile_cap_exceeded", len(profiles) - VOICE_SPEED_PROFILE_MAX_PROFILES_PER_JOB)
+            profiles = profiles[:VOICE_SPEED_PROFILE_MAX_PROFILES_PER_JOB]
+        return profiles, skipped
+
+    @staticmethod
+    def _persist_user_voice_speed_profiles(
+        *,
+        job_id: str,
+        user_id: str | None,
+        profiles: list[dict[str, object]],
+        skipped_reasons: dict[str, int] | None = None,
+    ) -> dict[str, object]:
+        summary: dict[str, object] = {
+            "voice_speed_profile_candidate_count": len(profiles),
+            "voice_speed_profile_sent_count": 0,
+            "voice_speed_profile_updated_count": 0,
+            "voice_speed_profile_skipped_count": sum((skipped_reasons or {}).values()),
+            "voice_speed_profile_skipped_reason_distribution": dict(skipped_reasons or {}),
+        }
+        if not profiles:
+            return summary
+
+        user_id_text = str(user_id or "").strip()
+        if not user_id_text:
+            reasons = dict(summary["voice_speed_profile_skipped_reason_distribution"])  # type: ignore[arg-type]
+            reasons["missing_user_id"] = reasons.get("missing_user_id", 0) + len(profiles)
+            summary["voice_speed_profile_skipped_count"] = (
+                int(summary["voice_speed_profile_skipped_count"]) + len(profiles)
+            )
+            summary["voice_speed_profile_skipped_reason_distribution"] = reasons
+            return summary
+
+        import urllib.request
+
+        gateway_base = os.environ.get("AVT_GATEWAY_URL", "http://127.0.0.1:8880").rstrip("/")
+        url = f"{gateway_base}/internal/user-voices/speed-profiles"
+        headers = {"Content-Type": "application/json"}
+        internal_key = os.environ.get("AVT_INTERNAL_API_KEY", "").strip()
+        if internal_key:
+            headers["X-Internal-Key"] = internal_key
+        body = {
+            "job_id": job_id,
+            "user_id": user_id_text,
+            "profiles": profiles,
+        }
+
+        try:
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(body).encode("utf-8"),
+                headers=headers,
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                response = json.loads(resp.read().decode("utf-8") or "{}")
+            summary["voice_speed_profile_sent_count"] = len(profiles)
+            updated_count = int(response.get("updated_count", 0) or 0)
+            skipped_count = int(response.get("skipped_count", 0) or 0)
+            summary["voice_speed_profile_updated_count"] = updated_count
+            summary["voice_speed_profile_skipped_count"] = (
+                int(summary["voice_speed_profile_skipped_count"]) + skipped_count
+            )
+            reason_counts = dict(summary["voice_speed_profile_skipped_reason_distribution"])  # type: ignore[arg-type]
+            for item in response.get("skipped", []) or []:
+                if not isinstance(item, dict):
+                    continue
+                reason = str(item.get("reason") or "gateway_skipped")
+                reason_counts[reason] = reason_counts.get(reason, 0) + 1
+            summary["voice_speed_profile_skipped_reason_distribution"] = reason_counts
+            if updated_count:
+                print(
+                    f"[P1-l] Persisted {updated_count} cloned voice speed profile(s).",
+                    flush=True,
+                )
+        except Exception as exc:
+            reasons = dict(summary["voice_speed_profile_skipped_reason_distribution"])  # type: ignore[arg-type]
+            reasons["gateway_persist_failed"] = reasons.get("gateway_persist_failed", 0) + len(profiles)
+            summary["voice_speed_profile_skipped_count"] = (
+                int(summary["voice_speed_profile_skipped_count"]) + len(profiles)
+            )
+            summary["voice_speed_profile_skipped_reason_distribution"] = reasons
+            print(
+                f"[P1-l] Warning: failed to persist cloned voice speed profile(s): {exc}",
+                flush=True,
+            )
+        return summary
 
     # ------------------------------------------------------------------
     # Probe helpers: word counting, sentence-aware truncation, word timestamps
@@ -4909,17 +7504,22 @@ class ProcessPipeline:
                 return cached
 
         # Translate
-        probe_segments = translator.translate_probe(
-            probe_lines,
-            video_title=video_title,
-            youtube_url=youtube_url,
-            glossary=glossary,
-            speaker_voices=speaker_voices,
-            voice_id=voice_id_a,
-            display_name=display_name_a,
-            voice_id_b=voice_id_b,
-            display_name_b=display_name_b,
-        )
+        previous_phase = getattr(translator, "_metering_usage_context", "")
+        setattr(translator, "_metering_usage_context", "probe_translate")
+        try:
+            probe_segments = translator.translate_probe(
+                probe_lines,
+                video_title=video_title,
+                youtube_url=youtube_url,
+                glossary=glossary,
+                speaker_voices=speaker_voices,
+                voice_id=voice_id_a,
+                display_name=display_name_a,
+                voice_id_b=voice_id_b,
+                display_name_b=display_name_b,
+            )
+        finally:
+            setattr(translator, "_metering_usage_context", previous_phase)
 
         if not probe_segments:
             print("[S4-probe] 探针翻译无结果")
@@ -4976,7 +7576,12 @@ class ProcessPipeline:
         probe_tts_dir = (tts_dir / "_probe").resolve(strict=False)
         probe_tts_dir.mkdir(parents=True, exist_ok=True)
         try:
-            tts_generator.generate_all(probe_segments, str(probe_tts_dir))
+            _generate_tts_all_with_bucket(
+                tts_generator,
+                probe_segments,
+                str(probe_tts_dir),
+                usage_bucket=TTS_BUCKET_PROBE,
+            )
         except Exception as exc:
             print(f"[S4-probe] 探针 TTS 失败（回退 {default_cps}）：{exc}")
             return default_cps, {}
@@ -5087,4 +7692,5 @@ def _deserialize_transcript_line_payload(line_payload: object) -> TranscriptLine
         speaker_id=speaker_id,
         speaker_label=speaker_label,
         source_text=_normalize_optional_text(line_payload.get("source_text")) or "",
+        dubbing_mode=normalize_dubbing_mode(line_payload.get("dubbing_mode")),
     )

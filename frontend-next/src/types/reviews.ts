@@ -177,6 +177,9 @@ export interface VoiceSelectionSpeaker {
   speakerName: string
   segmentCount: number
   totalDurationS: number
+  speakerRole?: string
+  speakerRoleLabel?: string
+  speakerReviewHint?: string
   autoMatchedVoice: VoiceSelectionAutoMatchedVoice | null
   canClone: boolean
   segments: VoiceSelectionSpeakerSegment[]

@@ -6,19 +6,34 @@ to keep that class focused on job lifecycle.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import base64
 import json
 import subprocess
+import tempfile
 from pathlib import Path
 
 from services.jobs.models import JOB_STATUS_WAITING_FOR_REVIEW
 from services.review_state import (
     REVIEW_STATUS_APPROVED,
+    REVIEW_STATUS_PENDING,
     TRANSLATION_CONFIG_REVIEW_STAGE,
     TRANSLATION_REVIEW_STAGE,
     VOICE_SELECTION_REVIEW_STAGE,
     ReviewStateManager,
 )
+
+
+DUBBING_MODE_DUB = "dub"
+DUBBING_MODE_KEEP_ORIGINAL = "keep_original"
+VALID_DUBBING_MODES = {DUBBING_MODE_DUB, DUBBING_MODE_KEEP_ORIGINAL}
+
+
+def _normalize_dubbing_mode(value: object) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in VALID_DUBBING_MODES:
+        return normalized
+    return DUBBING_MODE_DUB
 
 
 def approve_translation_config(
@@ -532,16 +547,222 @@ def get_speaker_audio_segments(
             "end_ms": end_ms,
             "duration_s": dur_s,
             "source_text": str(line.get("source_text", ""))[:200],
+            "dubbing_mode": _normalize_dubbing_mode(line.get("dubbing_mode")),
             "audio_url": f"/job-api/jobs/_/speaker-audio/{speaker_id}/{seg_id}.wav",
         })
 
-    # Sort by duration descending
-    segments.sort(key=lambda s: float(s["duration_s"]), reverse=True)
+    # The audit UI needs chronological order. The clone modal can still apply
+    # its own duration-based auto-selection on the client.
+    segments.sort(key=lambda s: int(s["start_ms"]))
 
     return {
         "speaker_id": speaker_id,
         "segments": segments,
         "total_duration_s": round(total_duration, 1),
+    }
+
+
+def set_speaker_audio_dubbing_mode(
+    *,
+    project_dir: Path,
+    segment_id: int,
+    speaker_id: str,
+    dubbing_mode: str,
+) -> dict[str, object]:
+    """Persist per-transcript-line dubbing intent from voice selection."""
+    import re
+
+    if segment_id < 1:
+        raise ValueError("segment_id 必须为正整数")
+    if not re.match(r"^speaker_[a-z0-9_]+$", speaker_id):
+        raise ValueError(f"无效的 speaker_id: {speaker_id}")
+    raw_mode = str(dubbing_mode or "").strip().lower()
+    if raw_mode not in VALID_DUBBING_MODES:
+        raise ValueError(f"无效的 dubbing_mode: {dubbing_mode}")
+    normalized_mode = raw_mode
+
+    transcript_path = project_dir / "transcript" / "transcript.json"
+    if not transcript_path.exists():
+        raise ValueError("项目中找不到转录文件。")
+
+    transcript_data = json.loads(transcript_path.read_text(encoding="utf-8"))
+    is_list_payload = isinstance(transcript_data, list)
+    lines = transcript_data if is_list_payload else transcript_data.get("lines", [])
+    if not isinstance(lines, list):
+        raise ValueError("转录文件格式不正确。")
+
+    target_line: dict[str, object] | None = None
+    target_index: int | None = None
+    for index, line in enumerate(lines):
+        if not isinstance(line, dict):
+            continue
+        if int(line.get("index", 0) or 0) != segment_id:
+            continue
+        current_speaker_id = str(line.get("speaker_id", "")).strip()
+        if current_speaker_id != speaker_id:
+            raise ValueError(
+                f"片段 {segment_id} 当前属于 {current_speaker_id or 'unknown'}，不是 {speaker_id}"
+            )
+        target_line = line
+        target_index = index
+        break
+
+    if target_line is None or target_index is None:
+        raise ValueError(f"找不到 {speaker_id} 的第 {segment_id} 段音频")
+
+    previous_mode = _normalize_dubbing_mode(target_line.get("dubbing_mode"))
+    changed = previous_mode != normalized_mode
+    updated_at = datetime.now(timezone.utc).isoformat()
+    if changed:
+        updated_line = dict(target_line)
+        updated_line["dubbing_mode"] = normalized_mode
+        updated_line["dubbing_mode_updated_at"] = updated_at
+        lines[target_index] = updated_line
+        _atomic_write_json(transcript_path, transcript_data if is_list_payload else {**transcript_data, "lines": lines})
+        snapshot_update_count = _sync_dubbing_mode_to_segment_snapshots(
+            project_dir=project_dir,
+            segment_id=segment_id,
+            dubbing_mode=normalized_mode,
+        )
+
+        review_state_path = Path(project_dir) / "review_state.json"
+        manager = ReviewStateManager(review_state_path)
+        stage = manager.get_stage(VOICE_SELECTION_REVIEW_STAGE)
+        if stage:
+            payload = dict(stage.get("payload") or {})
+            history = payload.get("dubbing_mode_history")
+            if not isinstance(history, list):
+                history = []
+            history.append({
+                "segment_id": segment_id,
+                "speaker_id": speaker_id,
+                "previous_mode": previous_mode,
+                "dubbing_mode": normalized_mode,
+                "updated_at": updated_at,
+            })
+            payload["dubbing_mode_history"] = history[-200:]
+            manager.set_stage(
+                VOICE_SELECTION_REVIEW_STAGE,
+                status=str(stage.get("status") or REVIEW_STATUS_PENDING),
+                payload=payload,
+                activate=True,
+            )
+
+    return {
+        "segment_id": segment_id,
+        "speaker_id": speaker_id,
+        "dubbing_mode": normalized_mode,
+        "previous_mode": previous_mode,
+        "changed": changed,
+        "segment_snapshot_update_count": snapshot_update_count if changed else 0,
+    }
+
+
+def reassign_speaker_audio_segment(
+    *,
+    project_dir: Path,
+    segment_id: int,
+    from_speaker_id: str,
+    to_speaker_id: str,
+) -> dict[str, object]:
+    """Persist a voice-selection-stage speaker correction for one transcript line."""
+    import re
+
+    _speaker_id_re = re.compile(r"^speaker_[a-z0-9_]+$")
+    if segment_id < 1:
+        raise ValueError("segment_id 必须为正整数")
+    if not _speaker_id_re.match(from_speaker_id):
+        raise ValueError(f"无效的 from_speaker_id: {from_speaker_id}")
+    if not _speaker_id_re.match(to_speaker_id):
+        raise ValueError(f"无效的 to_speaker_id: {to_speaker_id}")
+    if from_speaker_id == to_speaker_id:
+        return {
+            "segment_id": segment_id,
+            "from_speaker_id": from_speaker_id,
+            "to_speaker_id": to_speaker_id,
+            "changed": False,
+        }
+
+    transcript_path = project_dir / "transcript" / "transcript.json"
+    if not transcript_path.exists():
+        raise ValueError("项目中找不到转录文件。")
+
+    transcript_data = json.loads(transcript_path.read_text(encoding="utf-8"))
+    is_list_payload = isinstance(transcript_data, list)
+    lines = transcript_data if is_list_payload else transcript_data.get("lines", [])
+    if not isinstance(lines, list):
+        raise ValueError("转录文件格式不正确。")
+
+    if not any(
+        isinstance(line, dict)
+        and str(line.get("speaker_id", "")).strip() == to_speaker_id
+        for line in lines
+    ):
+        raise ValueError(f"目标说话人不存在: {to_speaker_id}")
+
+    target_line: dict[str, object] | None = None
+    target_index: int | None = None
+    for index, line in enumerate(lines):
+        if not isinstance(line, dict):
+            continue
+        if int(line.get("index", 0) or 0) != segment_id:
+            continue
+        current_speaker_id = str(line.get("speaker_id", "")).strip()
+        if current_speaker_id != from_speaker_id:
+            raise ValueError(
+                f"片段 {segment_id} 当前属于 {current_speaker_id or 'unknown'}，不是 {from_speaker_id}"
+            )
+        target_line = line
+        target_index = index
+        break
+
+    if target_line is None or target_index is None:
+        raise ValueError(f"找不到 {from_speaker_id} 的第 {segment_id} 段音频")
+
+    target_label = _resolve_speaker_label(lines, to_speaker_id)
+    updated_line = dict(target_line)
+    updated_line["speaker_id"] = to_speaker_id
+    updated_line["speaker_label"] = target_label
+    updated_line["speaker_reassigned_from"] = from_speaker_id
+    updated_line["speaker_reassigned_at"] = datetime.now(timezone.utc).isoformat()
+    lines[target_index] = updated_line
+
+    _atomic_write_json(transcript_path, transcript_data if is_list_payload else {**transcript_data, "lines": lines})
+
+    # Keep the active review payload in sync for refreshes and audit history.
+    review_state_path = Path(project_dir) / "review_state.json"
+    manager = ReviewStateManager(review_state_path)
+    stage = manager.get_stage(VOICE_SELECTION_REVIEW_STAGE)
+    if stage:
+        payload = dict(stage.get("payload") or {})
+        payload["speakers"] = _recount_voice_selection_speakers(
+            payload.get("speakers"),
+            lines,
+        )
+        history = payload.get("speaker_reassignment_history")
+        if not isinstance(history, list):
+            history = []
+        history.append({
+            "segment_id": segment_id,
+            "from_speaker_id": from_speaker_id,
+            "to_speaker_id": to_speaker_id,
+            "updated_at": updated_line["speaker_reassigned_at"],
+        })
+        payload["speaker_reassignment_history"] = history[-200:]
+        manager.set_stage(
+            VOICE_SELECTION_REVIEW_STAGE,
+            status=str(stage.get("status") or REVIEW_STATUS_PENDING),
+            payload=payload,
+            activate=True,
+        )
+
+    return {
+        "segment_id": segment_id,
+        "from_speaker_id": from_speaker_id,
+        "to_speaker_id": to_speaker_id,
+        "changed": True,
+        "from_summary": _speaker_summary(lines, from_speaker_id),
+        "to_summary": _speaker_summary(lines, to_speaker_id),
     }
 
 
@@ -558,12 +779,6 @@ def extract_speaker_audio_segment(
         raise ValueError(f"无效的 speaker_id 格式: {speaker_id}")
     if segment_id < 1:
         raise ValueError(f"segment_id 必须为正整数")
-
-    # Check cache first
-    cache_dir = project_dir / "speaker_audio" / speaker_id
-    cache_path = cache_dir / f"segment_{segment_id}.wav"
-    if cache_path.exists() and cache_path.stat().st_size > 0:
-        return cache_path.read_bytes()
 
     # Find the segment timestamps from transcript
     transcript_path = project_dir / "transcript" / "transcript.json"
@@ -584,6 +799,14 @@ def extract_speaker_audio_segment(
 
     if target_line is None:
         raise ValueError(f"找不到 {speaker_id} 的第 {segment_id} 段音频")
+
+    # Check cache only after transcript ownership is verified. Speaker
+    # assignments can be edited during voice selection, so stale speaker cache
+    # paths must not bypass the current transcript.
+    cache_dir = project_dir / "speaker_audio" / speaker_id
+    cache_path = cache_dir / f"segment_{segment_id}.wav"
+    if cache_path.exists() and cache_path.stat().st_size > 0:
+        return cache_path.read_bytes()
 
     source_audio = _find_source_audio(project_dir)
     if source_audio is None:
@@ -631,6 +854,143 @@ def _find_source_audio(project_dir: Path) -> Path | None:
         if candidate.exists():
             return candidate
     return None
+
+
+def _atomic_write_json(path: Path, payload: object) -> None:
+    temp_path: Path | None = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f"{path.stem}_",
+            suffix=".tmp",
+            delete=False,
+        ) as temp_file:
+            json.dump(payload, temp_file, ensure_ascii=False, indent=2)
+            temp_file.write("\n")
+            temp_file.flush()
+            temp_path = Path(temp_file.name)
+        temp_path.replace(path)
+    finally:
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink(missing_ok=True)
+
+
+def _sync_dubbing_mode_to_segment_snapshots(
+    *,
+    project_dir: Path,
+    segment_id: int,
+    dubbing_mode: str,
+) -> int:
+    """Keep already-written segment snapshots aligned with transcript intent."""
+    updated_count = 0
+    for snapshot_path in (
+        project_dir / "translation" / "segments.json",
+        project_dir / "editor" / "segments.json",
+    ):
+        if not snapshot_path.exists():
+            continue
+        try:
+            payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            records = payload.get("segments", [])
+        elif isinstance(payload, list):
+            records = payload
+        else:
+            continue
+        if not isinstance(records, list):
+            continue
+
+        changed = False
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            try:
+                record_segment_id = int(str(record.get("segment_id", "")).strip())
+            except ValueError:
+                continue
+            if record_segment_id != segment_id:
+                continue
+            if _normalize_dubbing_mode(record.get("dubbing_mode")) != dubbing_mode:
+                record["dubbing_mode"] = dubbing_mode
+                changed = True
+        if changed:
+            _atomic_write_json(snapshot_path, payload)
+            updated_count += 1
+    return updated_count
+
+
+def _resolve_speaker_label(lines: list[object], speaker_id: str) -> str:
+    for line in lines:
+        if not isinstance(line, dict):
+            continue
+        if str(line.get("speaker_id", "")).strip() != speaker_id:
+            continue
+        label = str(line.get("speaker_label") or "").strip()
+        if label:
+            return label
+    suffix = speaker_id.replace("speaker_", "", 1)
+    if len(suffix) == 1 and suffix.isalpha():
+        return suffix.upper()
+    return speaker_id
+
+
+def _speaker_summary(lines: list[object], speaker_id: str) -> dict[str, object]:
+    count = 0
+    total_duration_s = 0.0
+    for line in lines:
+        if not isinstance(line, dict):
+            continue
+        if str(line.get("speaker_id", "")).strip() != speaker_id:
+            continue
+        count += 1
+        start_ms = int(line.get("start_ms", 0) or 0)
+        end_ms = int(line.get("end_ms", 0) or 0)
+        total_duration_s += max(0, end_ms - start_ms) / 1000.0
+    return {
+        "speaker_id": speaker_id,
+        "segment_count": count,
+        "total_duration_s": round(total_duration_s, 1),
+    }
+
+
+def _recount_voice_selection_speakers(
+    speakers_payload: object,
+    lines: list[object],
+) -> list[dict[str, object]]:
+    if not isinstance(speakers_payload, list):
+        speakers_payload = []
+
+    speaker_ids: list[str] = []
+    for speaker in speakers_payload:
+        if isinstance(speaker, dict):
+            sid = str(speaker.get("speaker_id", "")).strip()
+            if sid and sid not in speaker_ids:
+                speaker_ids.append(sid)
+    for line in lines:
+        if isinstance(line, dict):
+            sid = str(line.get("speaker_id", "")).strip()
+            if sid and sid not in speaker_ids:
+                speaker_ids.append(sid)
+
+    summary_by_id = {sid: _speaker_summary(lines, sid) for sid in speaker_ids}
+    existing_by_id = {
+        str(speaker.get("speaker_id", "")).strip(): dict(speaker)
+        for speaker in speakers_payload
+        if isinstance(speaker, dict)
+    }
+    result: list[dict[str, object]] = []
+    for sid in speaker_ids:
+        speaker = dict(existing_by_id.get(sid, {"speaker_id": sid}))
+        summary = summary_by_id[sid]
+        speaker["segment_count"] = summary["segment_count"]
+        speaker["total_duration_s"] = summary["total_duration_s"]
+        result.append(speaker)
+    return result
 
 
 def _auto_extract_voice_sample(

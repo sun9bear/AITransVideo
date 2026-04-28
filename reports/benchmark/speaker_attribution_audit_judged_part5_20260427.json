@@ -1,0 +1,274 @@
+{
+  "generated_at": "2026-04-27T11:40:51.365723+00:00",
+  "audit_batch": "reports/benchmark/speaker_attribution_audit_batch_20260427.json",
+  "review_model": "gemini_pro",
+  "summary": {
+    "candidates_loaded": 12,
+    "start": 44,
+    "limit": 12,
+    "chunks": 6,
+    "decisions": 12,
+    "errors": 0,
+    "decision_counts": {
+      "asr_speaker": 6,
+      "distinct_speaker": 4,
+      "main_speaker": 1,
+      "s2_speaker": 1
+    },
+    "recommended_action_counts": {
+      "keep": 11,
+      "reassign_to_main": 1
+    }
+  },
+  "decisions": [
+    {
+      "candidate_id": "job_f08cabc1267642b98a9d774a9e2a5da4_cand_006",
+      "decision": "asr_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The female interviewer clearly repeats 'As a phone' in response to the main speaker."
+    },
+    {
+      "candidate_id": "job_730e7195e9c04ed9906d744f62f2986e_cand_001",
+      "decision": "distinct_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "An audience member asks the question, which is distinct from the main speaker."
+    },
+    {
+      "candidate_id": "job_730e7195e9c04ed9906d744f62f2986e_cand_002",
+      "decision": "main_speaker",
+      "confidence": "high",
+      "recommended_action": "reassign_to_main",
+      "reason": "The text 'My book...' is spoken by the main speaker in response to an audience member shouting 'Your book'."
+    },
+    {
+      "candidate_id": "job_b96b20d250934c1caa58d0923b320a4f_cand_001",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The interviewer correctly asks 'Because?' in response to the main speaker."
+    },
+    {
+      "candidate_id": "job_b96b20d250934c1caa58d0923b320a4f_cand_002",
+      "decision": "asr_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly matches the interviewer's voice (speaker_a) making a brief interjection."
+    },
+    {
+      "candidate_id": "job_b96b20d250934c1caa58d0923b320a4f_cand_003",
+      "decision": "asr_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly matches the interviewer's voice (speaker_a) asking a short question."
+    },
+    {
+      "candidate_id": "job_b96b20d250934c1caa58d0923b320a4f_cand_004",
+      "decision": "asr_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly matches the interviewer asking a follow-up question."
+    },
+    {
+      "candidate_id": "job_b96b20d250934c1caa58d0923b320a4f_cand_005",
+      "decision": "asr_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly matches the interviewer asking a short question."
+    },
+    {
+      "candidate_id": "job_b96b20d250934c1caa58d0923b320a4f_cand_006",
+      "decision": "asr_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly features the interviewer asking the question, matching the assigned speaker."
+    },
+    {
+      "candidate_id": "job_7e12f5f49ed04b9b8bc3d1a003b61290_cand_001",
+      "decision": "distinct_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio features the interviewer speaking, which is a distinct speaker from the main speaker."
+    },
+    {
+      "candidate_id": "job_7e12f5f49ed04b9b8bc3d1a003b61290_cand_002",
+      "decision": "distinct_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly features a distinct female interviewer asking a question, which matches the assigned speaker."
+    },
+    {
+      "candidate_id": "job_7e12f5f49ed04b9b8bc3d1a003b61290_cand_003",
+      "decision": "distinct_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly features the same distinct female interviewer asking a question, correctly assigned to the distinct speaker."
+    }
+  ],
+  "errors": [],
+  "responses": [
+    {
+      "model": "gemini_pro",
+      "model_id": "gemini-3.1-pro-preview",
+      "candidate_ids": [
+        "job_f08cabc1267642b98a9d774a9e2a5da4_cand_006",
+        "job_730e7195e9c04ed9906d744f62f2986e_cand_001"
+      ],
+      "raw_text": "{\n  \"decisions\": [\n    {\n      \"candidate_id\": \"job_f08cabc1267642b98a9d774a9e2a5da4_cand_006\",\n      \"decision\": \"asr_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The female interviewer clearly repeats 'As a phone' in response to the main speaker.\"\n    },\n    {\n      \"candidate_id\": \"job_730e7195e9c04ed9906d744f62f2986e_cand_001\",\n      \"decision\": \"distinct_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"An audience member asks the question, which is distinct from the main speaker.\"\n    }\n  ]\n}",
+      "parsed": {
+        "decisions": [
+          {
+            "candidate_id": "job_f08cabc1267642b98a9d774a9e2a5da4_cand_006",
+            "decision": "asr_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The female interviewer clearly repeats 'As a phone' in response to the main speaker."
+          },
+          {
+            "candidate_id": "job_730e7195e9c04ed9906d744f62f2986e_cand_001",
+            "decision": "distinct_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "An audience member asks the question, which is distinct from the main speaker."
+          }
+        ]
+      }
+    },
+    {
+      "model": "gemini_pro",
+      "model_id": "gemini-3.1-pro-preview",
+      "candidate_ids": [
+        "job_730e7195e9c04ed9906d744f62f2986e_cand_002",
+        "job_b96b20d250934c1caa58d0923b320a4f_cand_001"
+      ],
+      "raw_text": "{\n  \"decisions\": [\n    {\n      \"candidate_id\": \"job_730e7195e9c04ed9906d744f62f2986e_cand_002\",\n      \"decision\": \"main_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"reassign_to_main\",\n      \"reason\": \"The text 'My book...' is spoken by the main speaker in response to an audience member shouting 'Your book'.\"\n    },\n    {\n      \"candidate_id\": \"job_b96b20d250934c1caa58d0923b320a4f_cand_001\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The interviewer correctly asks 'Because?' in response to the main speaker.\"\n    }\n  ]\n}",
+      "parsed": {
+        "decisions": [
+          {
+            "candidate_id": "job_730e7195e9c04ed9906d744f62f2986e_cand_002",
+            "decision": "main_speaker",
+            "confidence": "high",
+            "recommended_action": "reassign_to_main",
+            "reason": "The text 'My book...' is spoken by the main speaker in response to an audience member shouting 'Your book'."
+          },
+          {
+            "candidate_id": "job_b96b20d250934c1caa58d0923b320a4f_cand_001",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The interviewer correctly asks 'Because?' in response to the main speaker."
+          }
+        ]
+      }
+    },
+    {
+      "model": "gemini_pro",
+      "model_id": "gemini-3.1-pro-preview",
+      "candidate_ids": [
+        "job_b96b20d250934c1caa58d0923b320a4f_cand_002",
+        "job_b96b20d250934c1caa58d0923b320a4f_cand_003"
+      ],
+      "raw_text": "{\n  \"decisions\": [\n    {\n      \"candidate_id\": \"job_b96b20d250934c1caa58d0923b320a4f_cand_002\",\n      \"decision\": \"asr_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly matches the interviewer's voice (speaker_a) making a brief interjection.\"\n    },\n    {\n      \"candidate_id\": \"job_b96b20d250934c1caa58d0923b320a4f_cand_003\",\n      \"decision\": \"asr_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly matches the interviewer's voice (speaker_a) asking a short question.\"\n    }\n  ]\n}",
+      "parsed": {
+        "decisions": [
+          {
+            "candidate_id": "job_b96b20d250934c1caa58d0923b320a4f_cand_002",
+            "decision": "asr_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly matches the interviewer's voice (speaker_a) making a brief interjection."
+          },
+          {
+            "candidate_id": "job_b96b20d250934c1caa58d0923b320a4f_cand_003",
+            "decision": "asr_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly matches the interviewer's voice (speaker_a) asking a short question."
+          }
+        ]
+      }
+    },
+    {
+      "model": "gemini_pro",
+      "model_id": "gemini-3.1-pro-preview",
+      "candidate_ids": [
+        "job_b96b20d250934c1caa58d0923b320a4f_cand_004",
+        "job_b96b20d250934c1caa58d0923b320a4f_cand_005"
+      ],
+      "raw_text": "{\n  \"decisions\": [\n    {\n      \"candidate_id\": \"job_b96b20d250934c1caa58d0923b320a4f_cand_004\",\n      \"decision\": \"asr_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly matches the interviewer asking a follow-up question.\"\n    },\n    {\n      \"candidate_id\": \"job_b96b20d250934c1caa58d0923b320a4f_cand_005\",\n      \"decision\": \"asr_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly matches the interviewer asking a short question.\"\n    }\n  ]\n}",
+      "parsed": {
+        "decisions": [
+          {
+            "candidate_id": "job_b96b20d250934c1caa58d0923b320a4f_cand_004",
+            "decision": "asr_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly matches the interviewer asking a follow-up question."
+          },
+          {
+            "candidate_id": "job_b96b20d250934c1caa58d0923b320a4f_cand_005",
+            "decision": "asr_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly matches the interviewer asking a short question."
+          }
+        ]
+      }
+    },
+    {
+      "model": "gemini_pro",
+      "model_id": "gemini-3.1-pro-preview",
+      "candidate_ids": [
+        "job_b96b20d250934c1caa58d0923b320a4f_cand_006",
+        "job_7e12f5f49ed04b9b8bc3d1a003b61290_cand_001"
+      ],
+      "raw_text": "{\n  \"decisions\": [\n    {\n      \"candidate_id\": \"job_b96b20d250934c1caa58d0923b320a4f_cand_006\",\n      \"decision\": \"asr_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly features the interviewer asking the question, matching the assigned speaker.\"\n    },\n    {\n      \"candidate_id\": \"job_7e12f5f49ed04b9b8bc3d1a003b61290_cand_001\",\n      \"decision\": \"distinct_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio features the interviewer speaking, which is a distinct speaker from the main speaker.\"\n    }\n  ]\n}",
+      "parsed": {
+        "decisions": [
+          {
+            "candidate_id": "job_b96b20d250934c1caa58d0923b320a4f_cand_006",
+            "decision": "asr_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly features the interviewer asking the question, matching the assigned speaker."
+          },
+          {
+            "candidate_id": "job_7e12f5f49ed04b9b8bc3d1a003b61290_cand_001",
+            "decision": "distinct_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio features the interviewer speaking, which is a distinct speaker from the main speaker."
+          }
+        ]
+      }
+    },
+    {
+      "model": "gemini_pro",
+      "model_id": "gemini-3.1-pro-preview",
+      "candidate_ids": [
+        "job_7e12f5f49ed04b9b8bc3d1a003b61290_cand_002",
+        "job_7e12f5f49ed04b9b8bc3d1a003b61290_cand_003"
+      ],
+      "raw_text": "{\n  \"decisions\": [\n    {\n      \"candidate_id\": \"job_7e12f5f49ed04b9b8bc3d1a003b61290_cand_002\",\n      \"decision\": \"distinct_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly features a distinct female interviewer asking a question, which matches the assigned speaker.\"\n    },\n    {\n      \"candidate_id\": \"job_7e12f5f49ed04b9b8bc3d1a003b61290_cand_003\",\n      \"decision\": \"distinct_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly features the same distinct female interviewer asking a question, correctly assigned to the distinct speaker.\"\n    }\n  ]\n}",
+      "parsed": {
+        "decisions": [
+          {
+            "candidate_id": "job_7e12f5f49ed04b9b8bc3d1a003b61290_cand_002",
+            "decision": "distinct_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly features a distinct female interviewer asking a question, which matches the assigned speaker."
+          },
+          {
+            "candidate_id": "job_7e12f5f49ed04b9b8bc3d1a003b61290_cand_003",
+            "decision": "distinct_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly features the same distinct female interviewer asking a question, correctly assigned to the distinct speaker."
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -48,6 +48,7 @@ from services.tts.tts_generator import (
     TTSGenerator,
     load_tts_config,
 )
+from services.usage_meter import TTS_BUCKET_POST_EDIT_RESYNTH, UsageMeter
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,14 @@ __all__ = ["build_real_segment_tts_caller"]
 # "重合成中..." spinner; pipeline-style 5-minute cooldowns would feel hung.
 _DEFAULT_MAX_RETRIES = 3
 _DEFAULT_BACKOFF_SCHEDULE: tuple[float, ...] = (1.0, 2.0, 4.0)
+
+
+def _project_dir_from_draft_path(output_path: Path) -> Path | None:
+    parts = output_path.resolve(strict=False).parts
+    for index, part in enumerate(parts):
+        if part == "editor" and index > 0:
+            return Path(*parts[:index])
+    return None
 
 
 def build_real_segment_tts_caller(
@@ -130,6 +139,12 @@ def build_real_segment_tts_caller(
         # call site.
         provider = ds.tts_provider or None
         generator = _get_generator()
+        project_dir = _project_dir_from_draft_path(output_path)
+        if project_dir is not None:
+            try:
+                generator.set_usage_meter(UsageMeter(project_dir))
+            except Exception as exc:
+                logger.warning("segment_regenerate: usage meter setup skipped: %s", exc)
 
         last_exc: Exception | None = None
         for attempt in range(max_retries + 1):
@@ -139,7 +154,10 @@ def build_real_segment_tts_caller(
                 # is_valid_output().
                 with tempfile.TemporaryDirectory(prefix="segregen_") as tmpdir:
                     result = generator._generate_one(
-                        ds, tmpdir, provider=provider,
+                        ds,
+                        tmpdir,
+                        provider=provider,
+                        usage_bucket=TTS_BUCKET_POST_EDIT_RESYNTH,
                     )
                     src_wav = Path(result.audio_path)
                     if not src_wav.is_file():

@@ -1,0 +1,45 @@
+{
+  "available": true,
+  "files": [
+    {
+      "path": "editor/segments.json",
+      "size_bytes": 436889
+    },
+    {
+      "path": "project_state.json",
+      "size_bytes": 4982,
+      "top_level_keys": [
+        "project_id",
+        "stages"
+      ]
+    },
+    {
+      "path": "review_state.json",
+      "size_bytes": 392960,
+      "top_level_keys": [
+        "active_stage",
+        "stages"
+      ]
+    },
+    {
+      "path": "transcript/transcript.json",
+      "size_bytes": 94335,
+      "top_level_keys": [
+        "language",
+        "lines",
+        "raw_response_path",
+        "structured_transcript_path",
+        "total_duration_ms"
+      ]
+    },
+    {
+      "path": "translation/segments.json",
+      "size_bytes": 452162,
+      "top_level_keys": [
+        "output_path",
+        "segments",
+        "total_segments"
+      ]
+    }
+  ]
+}

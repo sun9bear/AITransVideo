@@ -1,0 +1,108 @@
+{
+  "available": true,
+  "files": [
+    {
+      "path": "project_state.json",
+      "size_bytes": 4370,
+      "top_level_keys": [
+        "project_id",
+        "stages"
+      ]
+    },
+    {
+      "path": "review_state.json",
+      "size_bytes": 10854,
+      "top_level_keys": [
+        "active_stage",
+        "stages"
+      ]
+    },
+    {
+      "path": "transcript/s2_pass1_result.json",
+      "size_bytes": 1479,
+      "top_level_keys": [
+        "contract_violations",
+        "corrections",
+        "corrections_applied",
+        "fallback_used",
+        "generated_at",
+        "has_audio",
+        "pass",
+        "prompt_version",
+        "review_model",
+        "sanity_applied",
+        "skipped",
+        "speakers"
+      ]
+    },
+    {
+      "path": "transcript/s2_pass2_result.json",
+      "size_bytes": 1996,
+      "top_level_keys": [
+        "contract_violations",
+        "corrections",
+        "corrections_applied",
+        "fallback_used",
+        "generated_at",
+        "glossary",
+        "has_audio",
+        "pass",
+        "prompt_version",
+        "review_model"
+      ]
+    },
+    {
+      "path": "transcript/s2_review_audit.json",
+      "size_bytes": 1600,
+      "top_level_keys": [
+        "audit_events"
+      ],
+      "audit_summary": {}
+    },
+    {
+      "path": "transcript/s2_review_result.json",
+      "size_bytes": 3201,
+      "top_level_keys": [
+        "corrections_applied",
+        "glossary",
+        "has_audio",
+        "line_counts",
+        "raw_corrections",
+        "review_model",
+        "sanity_applied",
+        "speaker_names",
+        "speakers",
+        "version"
+      ]
+    },
+    {
+      "path": "transcript/s2_review_speaker_diff.json",
+      "size_bytes": 17796,
+      "top_level_keys": [
+        "line_counts",
+        "snapshots",
+        "speaker_diffs"
+      ]
+    },
+    {
+      "path": "transcript/transcript.json",
+      "size_bytes": 4236,
+      "top_level_keys": [
+        "language",
+        "lines",
+        "raw_response_path",
+        "structured_transcript_path",
+        "total_duration_ms"
+      ]
+    },
+    {
+      "path": "translation/segments.json",
+      "size_bytes": 14014,
+      "top_level_keys": [
+        "output_path",
+        "segments",
+        "total_segments"
+      ]
+    }
+  ]
+}

@@ -11,9 +11,10 @@
 - S2 monitor
 - admin job logs / AI log analysis
 - voice probe / calibration
-- 背景导出任务控制面
+- background tasks
+- `job_intercept` 上的下载路由、显示名与镜像更新职责
 
-其中前四项是 admin-only，后两项属于控制平面的运维化侧轴。
+其中前四项是 admin-only，后三项属于控制平面的运维化侧轴。
 
 ## 2. Admin / Ops / Calibration 主图
 
@@ -23,15 +24,18 @@ graph TD
     CreditsMonitor["CreditsMonitorPage"] --> CreditsAPI["/api/admin/credits/*"]
     S2Monitor["S2MonitorPage"] --> S2API["/api/admin/s2-stats*"]
     JobLogs["Admin job log tools"] --> LogAPI["/api/admin/jobs/{job_id}/logs + analysis"]
-    VoiceLibrary["Voice library<br/>probe / calibrate"] --> VoiceAPI["/gateway/user-voices/*"]
-    ExportTasks["Workspace export tasks<br/>materials_pack / generate_video"] --> BgTaskAPI["/api/jobs/{job_id}/tasks*"]
+    VoiceLibrary["Voice library / probe / calibrate"] --> VoiceAPI["/gateway/user-voices/*"]
+    ExportTasks["Workspace export tasks"] --> BgTaskAPI["/api/jobs/{job_id}/tasks*"]
+    Downloads["Download / rename sidecar"] --> Intercept["job_intercept.py"]
 
     AdminPricingAPI --> PricingRuntime["pricing_runtime / plan_catalog"]
-    CreditsAPI --> CreditsObs["credits_observability"]
-    S2API --> S2Backend["s2_monitor_api"]
-    LogAPI --> AdminJobMonitor["admin_job_monitor_api"]
-    VoiceAPI --> Calibrator["voice_speed_calibrator"]
-    BgTaskAPI --> BgQueue["background_task_queue"]
+    CreditsAPI --> CreditsObs["credits_observability.py"]
+    S2API --> S2Backend["s2_monitor_api.py"]
+    LogAPI --> AdminJobMonitor["admin_job_monitor_api.py"]
+    VoiceAPI --> Calibrator["voice_speed_calibrator.py"]
+    BgTaskAPI --> BgQueue["background_task_queue.py"]
+    Intercept --> DisplayName["display_name / filename / copy mirror"]
+    Intercept --> StorageRoute["storage.event_log + backend_router bridge"]
 
     BgQueue --> MaterialsPack["materials_pack executor"]
     BgQueue --> GenerateVideo["generate_video executor"]
@@ -39,7 +43,7 @@ graph TD
     RenderAsync --> Renderer["VideoRenderer"]
 
     PricingRuntime --> Truth["PricingPayload / PlanConfig truth"]
-    CreditsObs --> Ledger["credits buckets / ledger / metering snapshot"]
+    CreditsObs --> Ledger["credits buckets / cost metrics / outliers"]
     S2Backend --> S2Artifacts["S2 artifacts / attempts / summaries"]
     AdminJobMonitor --> JobAPI["Job API logs + result summary"]
     Calibrator --> SpeedCatalog["voice_speed_catalog.py"]
@@ -58,14 +62,12 @@ graph TD
 
 ## 4. credits observability
 
-- `frontend-next/src/app/(app)/admin/credits-monitor/page.tsx` 通过 `adminFetch()` 访问：
-  `/summary`
-  `/cost-metrics`
-  `/provider-breakdown`
-  `/outliers`
-- `gateway/credits_observability.py` 文件头明确写明这是：
-  `admin-only read surfaces`
-  `does NOT gate job execution, modify data, or replace V2 truth`
+- `frontend-next/src/app/(app)/admin/credits-monitor/page.tsx` 继续通过 admin 接口读取：
+  `summary`
+  `cost-metrics`
+  `provider-breakdown`
+  `outliers`
+- `gateway/credits_observability.py` 仍然是 admin-only read surface
 
 结论：credits monitor 是观测与核对，不是执行面。
 
@@ -81,14 +83,12 @@ graph TD
   `s2_pass1_result.json`
   `s2_pass2_result.json`
   `s2_pass3_result.json`
-  `s2_*_attempt*.json`
 
 ### 5.2 admin job logs / AI analysis
 
 - `gateway/admin_job_monitor_api.py` 提供：
   `GET /api/admin/jobs/{job_id}/logs`
   以及 AI 日志裁剪与分析输入构造
-- 它通过 `httpx` 读取 Job API 的 `/jobs/{job_id}/logs`
 
 结论：两者都是“围绕运行产物做诊断”的 sidecar，不属于主 pipeline 内核。
 
@@ -100,11 +100,22 @@ graph TD
 - `gateway/voice_speed_calibrator.py` 仍然是可复用单声线校准模块
 - `src/services/tts/voice_speed_catalog.py` 仍然优先消费已校准 `chars_per_second`
 
-这条闭环没有变，但它已经成为稳定的控制平面能力，而不是临时脚本。
+这条闭环没有变，但它已经是稳定的控制平面能力，而不是临时脚本。
 
-## 7. 背景导出任务控制面
+## 7. job_intercept 现在承接更多控制面职责
 
-### 7.1 Gateway API
+`gateway/job_intercept.py` 当前不只负责常规代理，还承担：
+
+- 下载前的 `_maybe_r2_redirect(job_id, db)`
+- 用户友好文件名 `_derive_download_filename(job)`：
+  `display_name -> title -> job_id`
+- `copy_as_new` 之后对 Gateway DB 的镜像更新
+
+这说明 `job_intercept` 已经成为 Gateway 控制平面上的一个关键编排点。
+
+## 8. 背景导出任务控制面
+
+### 8.1 Gateway API
 
 `gateway/background_task_api.py` 当前提供：
 
@@ -118,7 +129,7 @@ graph TD
 - `materials_pack`
 - `generate_video`
 
-### 7.2 Queue 语义
+### 8.2 Queue 语义
 
 `gateway/background_task_queue.py` 明确说明：
 
@@ -127,17 +138,9 @@ graph TD
 
 这意味着控制面关心的不是“有没有任务”，而是“这个 job 在这组参数下的最新任务身份”。
 
-### 7.3 generate_video 执行面
-
-- `src/services/jobs/video_render_async.py` 将状态写入 `publish/render_status.json`
-- 它内部调用 `VideoRenderer().render(..., progress_callback=...)`
-- `VideoRenderer` 现在提供进度回调、ambient 混音、poster 生成
-
-结论：background export 已经从“前端按钮行为”提升为 Gateway 管理的标准 sidecar 能力。
-
-## 8. 这张图适合回答什么问题
+## 9. 这张图适合回答什么问题
 
 - 哪些面是 admin-only，哪些只是控制平面的 sidecar
 - admin pricing、credits monitor、S2 monitor 分别站在什么层级
-- background tasks 和主 pipeline 的边界在哪里
+- background tasks、download routing、display_name 为什么不属于主 pipeline
 - voice calibration 为什么应该归到控制平面，而不是塞进主流程

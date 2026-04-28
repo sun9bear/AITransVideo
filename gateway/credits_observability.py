@@ -100,6 +100,26 @@ FIELD_STATUS = {
     },
 }
 
+# Historical production data shows this snapshot key is not consistently
+# populated, so admin observability must distinguish snapshot values from
+# ledger-derived values instead of treating the JSONB key as complete.
+FIELD_STATUS["metering_snapshot.credits_actual"] = {
+    "status": "LIVE_PARTIAL",
+    "source": "snapshot when populated; otherwise admin views derive actual credits from capture ledger rows",
+}
+FIELD_STATUS["metering_snapshot.pre_tts_rewrite_events"] = {
+    "status": "LIVE_PARTIAL",
+    "source": "Pipeline S6 reports structured pre-TTS rewrite audit events when that path fires",
+}
+FIELD_STATUS["metering_snapshot.harmful_pre_tts_contradiction_count"] = {
+    "status": "LIVE_PARTIAL",
+    "source": "Pipeline S6 derives harmful pre-TTS contradictions from final alignment outcome",
+}
+FIELD_STATUS["metering_snapshot.short_segment_needs_review_count"] = {
+    "status": "LIVE_PARTIAL",
+    "source": "Pipeline S6 reports 2s-8s short-segment needs_review counts",
+}
+
 
 # ---------------------------------------------------------------------------
 # Public helpers
@@ -161,6 +181,75 @@ async def _get_unsettled_job_ids(
     settle_ids = {r[0] for r in settle_result.all()}
     unsettled_ids = reserve_ids - settle_ids
     return reserve_ids, settle_ids, unsettled_ids
+
+
+async def _get_credits_actual_source_rollup(
+    db: AsyncSession,
+    cutoff: datetime | None = None,
+) -> dict:
+    """Classify actual credits provenance for admin observability."""
+    job_where = []
+    if cutoff is not None:
+        job_where.append(Job.created_at > cutoff)
+
+    job_result = await db.execute(
+        select(
+            Job.job_id,
+            _safe_jsonb_int(Job.metering_snapshot, "credits_actual").label("snapshot_actual"),
+        ).where(*job_where)
+    )
+    jobs = {row.job_id: row.snapshot_actual for row in job_result.all()}
+
+    ledger_where = [
+        CreditsLedger.direction == "capture",
+        CreditsLedger.related_job_id.isnot(None),
+    ]
+    if cutoff is not None:
+        ledger_where.append(CreditsLedger.created_at > cutoff)
+
+    ledger_result = await db.execute(
+        select(
+            CreditsLedger.related_job_id.label("job_id"),
+            func.coalesce(func.sum(func.abs(CreditsLedger.credits_delta)), 0).label("ledger_actual"),
+        )
+        .where(*ledger_where)
+        .group_by(CreditsLedger.related_job_id)
+    )
+    ledger_by_job = {
+        row.job_id: int(row.ledger_actual or 0)
+        for row in ledger_result.all()
+        if row.job_id
+    }
+
+    source_counts = {"snapshot": 0, "ledger_derived": 0, "missing": 0}
+    snapshot_sum = 0
+    ledger_derived_sum = 0
+    effective_sum = 0
+    for job_id, snapshot_actual in jobs.items():
+        if snapshot_actual is not None:
+            source_counts["snapshot"] += 1
+            value = int(snapshot_actual)
+            snapshot_sum += value
+            effective_sum += value
+        elif ledger_by_job.get(job_id):
+            source_counts["ledger_derived"] += 1
+            value = int(ledger_by_job[job_id])
+            ledger_derived_sum += value
+            effective_sum += value
+        else:
+            source_counts["missing"] += 1
+
+    return {
+        "source_counts": source_counts,
+        "snapshot_sum": snapshot_sum,
+        "ledger_derived_sum": ledger_derived_sum,
+        "effective_sum": effective_sum,
+        "ledger_capture_jobs": len(ledger_by_job),
+        "methodology": (
+            "snapshot if metering_snapshot.credits_actual exists; else "
+            "sum(abs(capture.credits_delta)) by job; else missing"
+        ),
+    }
 
 
 def _require_admin(user: User | None) -> User:
@@ -298,6 +387,7 @@ async def credits_shadow_summary(
         ),
         "methodology": "set-diff: reserve_job_ids MINUS settle_job_ids (excludes capture_additional)",
     }
+    credits_actual_source = await _get_credits_actual_source_rollup(db)
 
     return {
         "buckets": bucket_summary,
@@ -307,6 +397,7 @@ async def credits_shadow_summary(
             "recent": recent_entries,
         },
         "metering": metering_summary,
+        "credits_actual_source": credits_actual_source,
         "reserve_capture_closeness": closeness,
         "field_status": FIELD_STATUS,
     }
@@ -404,13 +495,23 @@ async def credits_cost_metrics(
     # 未闭环 job 数（按时间窗口过滤）
     _, _, unsettled = await _get_unsettled_job_ids(db, cutoff=cutoff)
     jobs_unsettled = len(unsettled)
+    credits_actual_source = await _get_credits_actual_source_rollup(db, cutoff=cutoff)
+    effective_actual_sum = int(credits_actual_source["effective_sum"])
+    effective_delta_pct = (
+        round(float((est_sum - effective_actual_sum) / effective_actual_sum * 100), 1)
+        if effective_actual_sum
+        else None
+    )
 
     return {
         "window_days": days,
         "jobs_total": jobs_total,
         "credits_estimated_sum": est_sum,
         "credits_actual_sum": act_sum,
+        "credits_actual_effective_sum": effective_actual_sum,
+        "credits_actual_source": credits_actual_source,
         "estimate_actual_delta_pct": delta_pct,
+        "estimate_effective_delta_pct": effective_delta_pct,
         "k_actual": k_actual,
         "rewrite_rate_pct": rewrite_rate_pct,
         "rewrite_count_avg": rewrite_count_avg,

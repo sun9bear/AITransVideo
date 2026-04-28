@@ -1,0 +1,4683 @@
+{
+  "generated_at": "2026-04-27T10:53:15.351040+00:00",
+  "projects_root": "/mnt/HC_Volume_105524101/aivideotrans/projects",
+  "job_count": 30,
+  "high_risk_job_count": 19,
+  "duplicate_group_count": 5,
+  "summary": {
+    "jobs": 30,
+    "high_risk_jobs": 19,
+    "duplicate_groups": 5
+  },
+  "duplicate_groups": [
+    {
+      "source_key": "25c702ac1a1e",
+      "title": "The Most Life-Changing 20 Minute Video You’ll Ever Watch | Naval Ravikant",
+      "jobs": [
+        "job_b8a76a5a8ab64c03a4478602c45b6032",
+        "job_650a4d40b8eb423bb5307f3fe6d52acd",
+        "job_2439b210fc104f5f926a5d4f53e7e572"
+      ],
+      "job_summaries": [
+        {
+          "job_id": "job_b8a76a5a8ab64c03a4478602c45b6032",
+          "speaker_count": 3,
+          "primary_share": 0.9233,
+          "speaker_role_distribution": {
+            "unknown": 3
+          },
+          "force_dsp_count": 17,
+          "needs_review_count": 17,
+          "rewrite_count": 31,
+          "pre_tts_rewrite_count": 24,
+          "risk_level": "high",
+          "risk_reasons": [
+            "high_force_dsp",
+            "missing_speaker_structure_metadata"
+          ]
+        },
+        {
+          "job_id": "job_650a4d40b8eb423bb5307f3fe6d52acd",
+          "speaker_count": 3,
+          "primary_share": 0.9238,
+          "speaker_role_distribution": {
+            "unknown": 3
+          },
+          "force_dsp_count": 43,
+          "needs_review_count": 34,
+          "rewrite_count": 21,
+          "pre_tts_rewrite_count": 3,
+          "risk_level": "high",
+          "risk_reasons": [
+            "high_force_dsp",
+            "missing_speaker_structure_metadata"
+          ]
+        },
+        {
+          "job_id": "job_2439b210fc104f5f926a5d4f53e7e572",
+          "speaker_count": 3,
+          "primary_share": 0.922,
+          "speaker_role_distribution": {
+            "unknown": 3
+          },
+          "force_dsp_count": 28,
+          "needs_review_count": 15,
+          "rewrite_count": 36,
+          "pre_tts_rewrite_count": 21,
+          "risk_level": "high",
+          "risk_reasons": [
+            "high_force_dsp",
+            "missing_speaker_structure_metadata"
+          ]
+        }
+      ],
+      "best_by_cost": "job_b8a76a5a8ab64c03a4478602c45b6032",
+      "best_by_speaker": "job_b8a76a5a8ab64c03a4478602c45b6032"
+    },
+    {
+      "source_key": "29d30c18ed89",
+      "title": "The Best Life Advice from Charlie Munger Final Interview",
+      "jobs": [
+        "job_2f3f66698b294bdd9025aab28b2adac7",
+        "job_d3ca1fb8bf0b42efb906be716ac6995c",
+        "job_abb3fedc905c403db67d784c480c170e"
+      ],
+      "job_summaries": [
+        {
+          "job_id": "job_2f3f66698b294bdd9025aab28b2adac7",
+          "speaker_count": 2,
+          "primary_share": 0.7892,
+          "speaker_role_distribution": {
+            "unknown": 2
+          },
+          "force_dsp_count": 28,
+          "needs_review_count": 28,
+          "rewrite_count": 18,
+          "pre_tts_rewrite_count": 12,
+          "risk_level": "high",
+          "risk_reasons": [
+            "high_force_dsp",
+            "missing_speaker_structure_metadata"
+          ]
+        },
+        {
+          "job_id": "job_d3ca1fb8bf0b42efb906be716ac6995c",
+          "speaker_count": 2,
+          "primary_share": 0.7888,
+          "speaker_role_distribution": {
+            "unknown": 2
+          },
+          "force_dsp_count": 24,
+          "needs_review_count": 8,
+          "rewrite_count": 37,
+          "pre_tts_rewrite_count": 24,
+          "risk_level": "high",
+          "risk_reasons": [
+            "high_force_dsp",
+            "missing_speaker_structure_metadata"
+          ]
+        },
+        {
+          "job_id": "job_abb3fedc905c403db67d784c480c170e",
+          "speaker_count": 2,
+          "primary_share": 0.7781,
+          "speaker_role_distribution": {
+            "unknown": 2
+          },
+          "force_dsp_count": 22,
+          "needs_review_count": 5,
+          "rewrite_count": 38,
+          "pre_tts_rewrite_count": 24,
+          "risk_level": "high",
+          "risk_reasons": [
+            "high_force_dsp",
+            "missing_speaker_structure_metadata"
+          ]
+        }
+      ],
+      "best_by_cost": "job_abb3fedc905c403db67d784c480c170e",
+      "best_by_speaker": "job_2f3f66698b294bdd9025aab28b2adac7"
+    },
+    {
+      "source_key": "d5d1ff5f9643",
+      "title": "Muniba mazari speech at vcon 2017 dubai",
+      "jobs": [
+        "job_fe50b1a0743d4585ba06ebf9cfb476bd",
+        "job_524c5253ad514692bcc06aa170f9567f"
+      ],
+      "job_summaries": [
+        {
+          "job_id": "job_fe50b1a0743d4585ba06ebf9cfb476bd",
+          "speaker_count": 4,
+          "primary_share": 0.8948,
+          "speaker_role_distribution": {
+            "fragmented": 2,
+            "primary": 1,
+            "incidental": 1
+          },
+          "force_dsp_count": 16,
+          "needs_review_count": 14,
+          "rewrite_count": 32,
+          "pre_tts_rewrite_count": 3,
+          "risk_level": "high",
+          "risk_reasons": [
+            "dominant_primary_with_multiple_fragmented_speakers",
+            "high_force_dsp",
+            "incidental_speaker_detected"
+          ]
+        },
+        {
+          "job_id": "job_524c5253ad514692bcc06aa170f9567f",
+          "speaker_count": 4,
+          "primary_share": 0.895,
+          "speaker_role_distribution": {
+            "fragmented": 3,
+            "primary": 1
+          },
+          "force_dsp_count": 18,
+          "needs_review_count": 17,
+          "rewrite_count": 28,
+          "pre_tts_rewrite_count": 5,
+          "risk_level": "high",
+          "risk_reasons": [
+            "dominant_primary_with_multiple_fragmented_speakers",
+            "high_force_dsp"
+          ]
+        }
+      ],
+      "best_by_cost": "job_fe50b1a0743d4585ba06ebf9cfb476bd",
+      "best_by_speaker": "job_fe50b1a0743d4585ba06ebf9cfb476bd"
+    },
+    {
+      "source_key": "f83c54bffd81",
+      "title": "Nvidia CEO Jensen Huang on AI's pressure on software stocks",
+      "jobs": [
+        "job_198ffd877c4044869b2f0db988c424fe",
+        "job_7e12f5f49ed04b9b8bc3d1a003b61290"
+      ],
+      "job_summaries": [
+        {
+          "job_id": "job_198ffd877c4044869b2f0db988c424fe",
+          "speaker_count": 2,
+          "primary_share": 0.857,
+          "speaker_role_distribution": {
+            "unknown": 2
+          },
+          "force_dsp_count": 0,
+          "needs_review_count": 0,
+          "rewrite_count": 0,
+          "pre_tts_rewrite_count": 0,
+          "risk_level": "low",
+          "risk_reasons": [
+            "missing_speaker_structure_metadata"
+          ]
+        },
+        {
+          "job_id": "job_7e12f5f49ed04b9b8bc3d1a003b61290",
+          "speaker_count": 2,
+          "primary_share": 0.857,
+          "speaker_role_distribution": {
+            "unknown": 2
+          },
+          "force_dsp_count": 1,
+          "needs_review_count": 0,
+          "rewrite_count": 4,
+          "pre_tts_rewrite_count": 1,
+          "risk_level": "low",
+          "risk_reasons": [
+            "missing_speaker_structure_metadata"
+          ]
+        }
+      ],
+      "best_by_cost": "job_198ffd877c4044869b2f0db988c424fe",
+      "best_by_speaker": "job_198ffd877c4044869b2f0db988c424fe"
+    },
+    {
+      "source_key": "a7caa3c85f5f",
+      "title": "Why this Chinese EV terrifies Europe’s carmakers",
+      "jobs": [
+        "job_67009391e2d1425eb52728aca4995130",
+        "job_925ad5833c764d2ab386281b58a6c18f"
+      ],
+      "job_summaries": [
+        {
+          "job_id": "job_67009391e2d1425eb52728aca4995130",
+          "speaker_count": 10,
+          "primary_share": 0.4242,
+          "speaker_role_distribution": {
+            "unknown": 10
+          },
+          "force_dsp_count": 13,
+          "needs_review_count": 5,
+          "rewrite_count": 31,
+          "pre_tts_rewrite_count": 25,
+          "risk_level": "high",
+          "risk_reasons": [
+            "high_force_dsp",
+            "missing_speaker_structure_metadata"
+          ]
+        },
+        {
+          "job_id": "job_925ad5833c764d2ab386281b58a6c18f",
+          "speaker_count": 10,
+          "primary_share": 0.4322,
+          "speaker_role_distribution": {
+            "unknown": 10
+          },
+          "force_dsp_count": 11,
+          "needs_review_count": 2,
+          "rewrite_count": 31,
+          "pre_tts_rewrite_count": 25,
+          "risk_level": "high",
+          "risk_reasons": [
+            "high_force_dsp",
+            "missing_speaker_structure_metadata"
+          ]
+        }
+      ],
+      "best_by_cost": "job_925ad5833c764d2ab386281b58a6c18f",
+      "best_by_speaker": "job_67009391e2d1425eb52728aca4995130"
+    }
+  ],
+  "jobs": [
+    {
+      "job_id": "job_524c5253ad514692bcc06aa170f9567f",
+      "project_dir": "/mnt/HC_Volume_105524101/aivideotrans/projects/342bbde3-903b-4944-a53c-12a1de0b5ca9/job_524c5253ad514692bcc06aa170f9567f",
+      "mtime": 1777286053.3837037,
+      "source_key": "d5d1ff5f9643",
+      "title": "Muniba mazari speech at vcon 2017 dubai",
+      "url_present": true,
+      "segment_count": 101,
+      "speaker_count": 4,
+      "primary_speaker_id": "speaker_b",
+      "primary_share": 0.895,
+      "non_primary_share": 0.1051,
+      "speaker_role_distribution": {
+        "fragmented": 3,
+        "primary": 1
+      },
+      "speakers": {
+        "speaker_a": {
+          "speaker_id": "speaker_a",
+          "display_name": "主持人",
+          "role": "fragmented",
+          "role_label": "低占比分散",
+          "duration_ms": 80122,
+          "duration_share": 0.0366,
+          "segment_count": 9,
+          "short_segment_count": 5,
+          "short_segment_rate": 0.5556,
+          "reason": "low_share_secondary",
+          "review_hint": "低占比分散说话人；建议抽查是否为真实多人或误分裂。"
+        },
+        "speaker_b": {
+          "speaker_id": "speaker_b",
+          "display_name": "穆尼巴·马扎里",
+          "role": "primary",
+          "role_label": "主说话人",
+          "duration_ms": 1958172,
+          "duration_share": 0.895,
+          "segment_count": 75,
+          "short_segment_count": 12,
+          "short_segment_rate": 0.16,
+          "reason": "top_duration_speaker",
+          "review_hint": ""
+        },
+        "speaker_c": {
+          "speaker_id": "speaker_c",
+          "display_name": "未知说话人1",
+          "role": "fragmented",
+          "role_label": "低占比分散",
+          "duration_ms": 81951,
+          "duration_share": 0.0375,
+          "segment_count": 5,
+          "short_segment_count": 1,
+          "short_segment_rate": 0.2,
+          "reason": "low_share_secondary",
+          "review_hint": "低占比分散说话人；建议抽查是否为真实多人或误分裂。"
+        },
+        "speaker_d": {
+          "speaker_id": "speaker_d",
+          "display_name": "致辞嘉宾",
+          "role": "fragmented",
+          "role_label": "低占比分散",
+          "duration_ms": 67777,
+          "duration_share": 0.031,
+          "segment_count": 12,
+          "short_segment_count": 10,
+          "short_segment_rate": 0.8333,
+          "reason": "low_share_fragmented",
+          "review_hint": "低占比分散说话人；建议抽查是否为真实多人或误分裂。"
+        }
+      },
+      "risk_level": "high",
+      "risk_reasons": [
+        "dominant_primary_with_multiple_fragmented_speakers",
+        "high_force_dsp"
+      ],
+      "rewrite_count": 28,
+      "pre_tts_rewrite_count": 5,
+      "pre_tts_contradiction_count": 2,
+      "first_pass_abs_error_avg": 0.3255,
+      "first_pass_abs_error_p50": 0.0898,
+      "first_pass_abs_error_p90": 0.3887,
+      "alignment_method_distribution": {
+        "direct": 37,
+        "rewrite_direct": 3,
+        "force_dsp": 18,
+        "rewrite_dsp": 10,
+        "capped_dsp_overflow": 6,
+        "dsp": 27
+      },
+      "force_dsp_count": 18,
+      "short_force_dsp_count": 5,
+      "needs_review_count": 17,
+      "force_dsp_review_suppressed_count": 7,
+      "short_merge_applied_count": 0,
+      "short_merge_blocked_cross_speaker_count": 1,
+      "verifier": {
+        "enabled": true,
+        "applied": false,
+        "candidate_count": 0,
+        "decision_counts": {},
+        "skipped_reason": "no_candidates"
+      },
+      "samples": {
+        "speaker_a": [
+          {
+            "segment_id": 1,
+            "duration_s": 18.5,
+            "method": "direct",
+            "severity": "",
+            "source_text": "Guys, please have a seat and remember, listen from your hearts. Muniba, we present— I present to you We Malaysia 2017, 20,000 people waiting to hear from you.",
+            "cn_text": "各位，请入座。记住，要用心去聆听。穆尼巴·马扎里，我们向你介绍——我向大家介绍，2017年马来西亚V-Con大会，现场有两万名观众正期待着你的分享。"
+          },
+          {
+            "segment_id": 2,
+            "duration_s": 11.1,
+            "method": "rewrite_direct",
+            "severity": "",
+            "source_text": "Okay, beautiful. Thank you, our Pakistani brothers and sisters. Have a seat. Okay, they're all yours.",
+            "cn_text": "好的，真是太棒了。非常感谢我们巴基斯坦的兄弟姐妹们，大家请先坐。好了，现在就把舞台交给你们了，请开始你们的表演吧。"
+          },
+          {
+            "segment_id": 78,
+            "duration_s": 4.2,
+            "method": "force_dsp",
+            "severity": "medium",
+            "source_text": "We Malaysia, um,",
+            "cn_text": "我们马来西亚，呃，"
+          },
+          {
+            "segment_id": 79,
+            "duration_s": 2.8,
+            "method": "force_dsp",
+            "severity": "medium",
+            "source_text": "Unbelievable. Please show her some love.",
+            "cn_text": "太不可思议了，请大家为她鼓掌。"
+          }
+        ],
+        "speaker_c": [
+          {
+            "segment_id": 63,
+            "duration_s": 1.8,
+            "method": "direct",
+            "severity": "",
+            "source_text": "You're still perfect.",
+            "cn_text": "你依然很完美。"
+          },
+          {
+            "segment_id": 82,
+            "duration_s": 22.9,
+            "method": "rewrite_dsp",
+            "severity": "",
+            "source_text": "Of stars. I'm going to give you my heart, heart, heart, heart, heart, 'cause you're a sky— 'cause you're a sky full of stars, stars, 'cause you light up the pat",
+            "cn_text": "关于那片星空。我决定要把我的心，心，心，心，还有这颗心，全都献给你。因为你就是那片星空，你是那满天闪烁的繁星，星星，是你照亮了我前行的路，指引着我。"
+          },
+          {
+            "segment_id": 83,
+            "duration_s": 22.5,
+            "method": "force_dsp",
+            "severity": "high",
+            "source_text": "I don't care who want to tear me apart. I don't care if you do, you do, you do, you do. 'Cause in the sky— 'cause in the sky full of stars, I think I saw you.",
+            "cn_text": "我根本不在乎，到底有谁想要将我彻底撕碎。我真的不在乎，一点都不在乎，不在乎，真的不在乎。因为在那片夜空里，因为在那满天璀璨的繁星之中，我想，我终于看见了你。"
+          },
+          {
+            "segment_id": 84,
+            "duration_s": 19.9,
+            "method": "force_dsp",
+            "severity": "high",
+            "source_text": "Cuz you're a sky— cuz you're a sky full of stars. Stars. I want to die in your arms. Arms. Uh, uh, uh, uh. Cuz you get lighter the more it",
+            "cn_text": "因为你是星空——因为你是满天繁星。星星。我想死在你的怀里。怀里。嗯，嗯，嗯，嗯。因为你越轻盈，就越……"
+          }
+        ],
+        "speaker_d": [
+          {
+            "segment_id": 89,
+            "duration_s": 0.2,
+            "method": "capped_dsp_overflow",
+            "severity": "medium",
+            "source_text": "Um,",
+            "cn_text": "呃，"
+          },
+          {
+            "segment_id": 90,
+            "duration_s": 0.1,
+            "method": "capped_dsp_overflow",
+            "severity": "medium",
+            "source_text": "when",
+            "cn_text": "当"
+          },
+          {
+            "segment_id": 91,
+            "duration_s": 1.4,
+            "method": "force_dsp",
+            "severity": "low",
+            "source_text": "I don't know what you see.",
+            "cn_text": "我不知道你看到的是什么。"
+          },
+          {
+            "segment_id": 93,
+            "duration_s": 4.8,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "I don't know what you see, but all I see is perfect.",
+            "cn_text": "我不知道你看到的是什么，但在我眼里，一切都是完美的。"
+          }
+        ]
+      }
+    },
+    {
+      "job_id": "job_fe50b1a0743d4585ba06ebf9cfb476bd",
+      "project_dir": "/mnt/HC_Volume_105524101/aivideotrans/projects/342bbde3-903b-4944-a53c-12a1de0b5ca9/job_fe50b1a0743d4585ba06ebf9cfb476bd",
+      "mtime": 1777285010.5119178,
+      "source_key": "d5d1ff5f9643",
+      "title": "Muniba mazari speech at vcon 2017 dubai",
+      "url_present": true,
+      "segment_count": 100,
+      "speaker_count": 4,
+      "primary_speaker_id": "speaker_b",
+      "primary_share": 0.8948,
+      "non_primary_share": 0.1052,
+      "speaker_role_distribution": {
+        "fragmented": 2,
+        "primary": 1,
+        "incidental": 1
+      },
+      "speakers": {
+        "speaker_a": {
+          "speaker_id": "speaker_a",
+          "display_name": "男主持人",
+          "role": "fragmented",
+          "role_label": "低占比分散",
+          "duration_ms": 147899,
+          "duration_share": 0.0676,
+          "segment_count": 21,
+          "short_segment_count": 15,
+          "short_segment_rate": 0.7143,
+          "reason": "low_share_fragmented",
+          "review_hint": "低占比分散说话人；建议抽查是否为真实多人或误分裂。"
+        },
+        "speaker_b": {
+          "speaker_id": "speaker_b",
+          "display_name": "穆尼巴·马扎里",
+          "role": "primary",
+          "role_label": "主说话人",
+          "duration_ms": 1957385,
+          "duration_share": 0.8948,
+          "segment_count": 74,
+          "short_segment_count": 11,
+          "short_segment_rate": 0.1486,
+          "reason": "top_duration_speaker",
+          "review_hint": ""
+        },
+        "speaker_c": {
+          "speaker_id": "speaker_c",
+          "display_name": "观众",
+          "role": "incidental",
+          "role_label": "短互动/低占比",
+          "duration_ms": 1752,
+          "duration_share": 0.0008,
+          "segment_count": 1,
+          "short_segment_count": 1,
+          "short_segment_rate": 1.0,
+          "reason": "low_share_short_interactions",
+          "review_hint": "低占比短互动说话人；建议使用通用音色，通常不建议克隆。"
+        },
+        "speaker_d": {
+          "speaker_id": "speaker_d",
+          "display_name": "背景音乐",
+          "role": "fragmented",
+          "role_label": "低占比分散",
+          "duration_ms": 80428,
+          "duration_share": 0.0368,
+          "segment_count": 4,
+          "short_segment_count": 0,
+          "short_segment_rate": 0.0,
+          "reason": "low_share_secondary",
+          "review_hint": "低占比分散说话人；建议抽查是否为真实多人或误分裂。"
+        }
+      },
+      "risk_level": "high",
+      "risk_reasons": [
+        "dominant_primary_with_multiple_fragmented_speakers",
+        "high_force_dsp",
+        "incidental_speaker_detected"
+      ],
+      "rewrite_count": 32,
+      "pre_tts_rewrite_count": 3,
+      "pre_tts_contradiction_count": 1,
+      "first_pass_abs_error_avg": 0.2988,
+      "first_pass_abs_error_p50": 0.1139,
+      "first_pass_abs_error_p90": 0.4675,
+      "alignment_method_distribution": {
+        "rewrite_direct": 6,
+        "force_dsp": 16,
+        "direct": 33,
+        "rewrite_dsp": 9,
+        "capped_dsp_overflow": 5,
+        "dsp": 31
+      },
+      "force_dsp_count": 16,
+      "short_force_dsp_count": 2,
+      "needs_review_count": 14,
+      "force_dsp_review_suppressed_count": 7,
+      "short_merge_applied_count": 0,
+      "short_merge_blocked_cross_speaker_count": 1,
+      "verifier": {
+        "enabled": true,
+        "applied": false,
+        "candidate_count": 1,
+        "decision_counts": {
+          "assigned_speaker": 1
+        },
+        "skipped_reason": ""
+      },
+      "samples": {
+        "speaker_a": [
+          {
+            "segment_id": 1,
+            "duration_s": 18.5,
+            "method": "rewrite_direct",
+            "severity": "",
+            "source_text": "Guys, please have a seat and remember, listen from your hearts. Muniba, we present— I present to you We Malaysia 2017, 20,000 people waiting to hear from you.",
+            "cn_text": "各位，请先入座，并请大家记住，一定要用心去聆听。穆尼巴·马扎里，现在我向大家隆重介绍，在2017年马来西亚V-Con的现场，有两万名热情的观众正屏息以待，渴望听到你的精彩分享。"
+          },
+          {
+            "segment_id": 2,
+            "duration_s": 11.1,
+            "method": "force_dsp",
+            "severity": "high",
+            "source_text": "Okay, beautiful. Thank you, our Pakistani brothers and sisters. Have a seat. Okay, they're all yours.",
+            "cn_text": "太棒了。谢谢我们巴基斯坦的兄弟姐妹们。请坐。好了，舞台交给你们了。"
+          },
+          {
+            "segment_id": 78,
+            "duration_s": 4.2,
+            "method": "force_dsp",
+            "severity": "medium",
+            "source_text": "We Malaysia, um,",
+            "cn_text": "我们马来西亚，呃，"
+          },
+          {
+            "segment_id": 79,
+            "duration_s": 2.8,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "Unbelievable. Please show her some love.",
+            "cn_text": "太不可思议了。请给她一点掌声。"
+          }
+        ],
+        "speaker_c": [
+          {
+            "segment_id": 63,
+            "duration_s": 1.8,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "You're still perfect.",
+            "cn_text": "你依然很完美。"
+          }
+        ],
+        "speaker_d": [
+          {
+            "segment_id": 82,
+            "duration_s": 23.1,
+            "method": "rewrite_dsp",
+            "severity": "",
+            "source_text": "—full of stars. I'm going to give you my heart, heart, heart, heart, 'cause you're a sky— 'cause you're a sky full of stars, 'cause you light up the path.",
+            "cn_text": "抬头看，满天都是闪烁的繁星。我想把我的心，一颗心，完完全全地交给你。因为你就是那片璀璨的星空，因为你就是那满天繁星，是你照亮了我前行的路，指引我不再迷茫。"
+          },
+          {
+            "segment_id": 83,
+            "duration_s": 22.5,
+            "method": "rewrite_direct",
+            "severity": "",
+            "source_text": "I don't care who want to tear me apart. I don't care if you do, you do, you do, you do. 'Cause in the sky— 'cause in the sky full of stars, I think so, you know",
+            "cn_text": "我根本不在乎，到底有谁想要把我彻底撕碎。我真的不在乎，哪怕是你，或者你们，我统统都不在乎。因为在那片星空之下，在那满天璀璨的繁星之中，我想，有些事情你应该是明白的，你懂我的意思，对吧？"
+          },
+          {
+            "segment_id": 84,
+            "duration_s": 19.9,
+            "method": "rewrite_dsp",
+            "severity": "",
+            "source_text": "Cuz you're a sky— cuz you're a sky full of stars. Stars. I want to die in your arms. Arms. Uh, uh, uh, uh, uh. Cuz you get lighter the more it",
+            "cn_text": "因为你是星空，因为你是那满天闪烁的繁星，星星。我真的好想死在你的怀里，在那温暖的怀抱里。呃，呃，呃，呃，呃。因为你变得越是轻盈，它就越是……变得更加纯粹，更加让人沉醉。"
+          },
+          {
+            "segment_id": 87,
+            "duration_s": 14.9,
+            "method": "force_dsp",
+            "severity": "high",
+            "source_text": "Cuz in a sky— cuz in a sky full of stars, I think I see you. I think I see you.",
+            "cn_text": "因为在星空——因为在满天繁星下，我想我看见了你。我想我看见了你。"
+          }
+        ]
+      }
+    },
+    {
+      "job_id": "job_8d78c2685351464192b41828c2cda049",
+      "project_dir": "/mnt/HC_Volume_105524101/aivideotrans/projects/342bbde3-903b-4944-a53c-12a1de0b5ca9/job_8d78c2685351464192b41828c2cda049",
+      "mtime": 1777275693.5932705,
+      "source_key": "e230e09e381b",
+      "title": "The Best Life Advice from Charlie Munger Final Interview",
+      "url_present": true,
+      "segment_count": 52,
+      "speaker_count": 2,
+      "primary_speaker_id": "speaker_b",
+      "primary_share": 0.7776,
+      "non_primary_share": 0.2224,
+      "speaker_role_distribution": {
+        "unknown": 2
+      },
+      "speakers": {
+        "speaker_a": {
+          "speaker_id": "speaker_a",
+          "display_name": "贝基·奎克",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 119189,
+          "duration_share": 0.2224,
+          "segment_count": 28,
+          "short_segment_count": 21,
+          "short_segment_rate": 0.75,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_b": {
+          "speaker_id": "speaker_b",
+          "display_name": "查理·芒格",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 416614,
+          "duration_share": 0.7776,
+          "segment_count": 24,
+          "short_segment_count": 8,
+          "short_segment_rate": 0.3333,
+          "reason": "",
+          "review_hint": ""
+        }
+      },
+      "risk_level": "high",
+      "risk_reasons": [
+        "high_force_dsp",
+        "missing_speaker_structure_metadata"
+      ],
+      "rewrite_count": 16,
+      "pre_tts_rewrite_count": 5,
+      "pre_tts_contradiction_count": 1,
+      "first_pass_abs_error_avg": 0.9947,
+      "first_pass_abs_error_p50": 0.4148,
+      "first_pass_abs_error_p90": 2.6399,
+      "alignment_method_distribution": {
+        "dsp": 12,
+        "force_dsp": 34,
+        "rewrite_dsp": 1,
+        "direct": 3,
+        "rewrite_direct": 2
+      },
+      "force_dsp_count": 34,
+      "short_force_dsp_count": 8,
+      "needs_review_count": 17,
+      "force_dsp_review_suppressed_count": 17,
+      "short_merge_applied_count": 1,
+      "short_merge_blocked_cross_speaker_count": 18,
+      "verifier": {
+        "enabled": true,
+        "applied": false,
+        "candidate_count": 0,
+        "decision_counts": {},
+        "skipped_reason": "no_candidates"
+      },
+      "samples": {
+        "speaker_a": [
+          {
+            "segment_id": 1,
+            "duration_s": 17.4,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "Part of the advice that you give people in life is pretty basic stuff, but if you follow it, it's really excellent advice. I think your first one is, is have lo",
+            "cn_text": "你给出的生活建议中，有些是很基础的道理，但如果能照做，确实是非常棒的建议。我想第一条应该是：降低预期。第二条是：保持幽默感。第三条嘛，当然就是多和亲朋好友在一起，感受他们的爱。"
+          },
+          {
+            "segment_id": 3,
+            "duration_s": 4.1,
+            "method": "force_dsp",
+            "severity": "medium",
+            "source_text": "I have a hard time thinking of a time when you set your expectations low though.",
+            "cn_text": "但我很难想象，你什么时候会降低自己的预期呢？"
+          },
+          {
+            "segment_id": 5,
+            "duration_s": 0.3,
+            "method": "force_dsp",
+            "severity": "low",
+            "source_text": "How so?",
+            "cn_text": "怎么讲呢？"
+          },
+          {
+            "segment_id": 8,
+            "duration_s": 0.1,
+            "method": "force_dsp",
+            "severity": "medium",
+            "source_text": "Right.",
+            "cn_text": "没错。"
+          }
+        ]
+      }
+    },
+    {
+      "job_id": "job_2439b210fc104f5f926a5d4f53e7e572",
+      "project_dir": "/mnt/HC_Volume_105524101/aivideotrans/projects/342bbde3-903b-4944-a53c-12a1de0b5ca9/job_2439b210fc104f5f926a5d4f53e7e572",
+      "mtime": 1777274884.9144933,
+      "source_key": "25c702ac1a1e",
+      "title": "The Most Life-Changing 20 Minute Video You’ll Ever Watch | Naval Ravikant",
+      "url_present": true,
+      "segment_count": 54,
+      "speaker_count": 3,
+      "primary_speaker_id": "speaker_b",
+      "primary_share": 0.922,
+      "non_primary_share": 0.078,
+      "speaker_role_distribution": {
+        "unknown": 3
+      },
+      "speakers": {
+        "speaker_a": {
+          "speaker_id": "speaker_a",
+          "display_name": "乔·罗根",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 22011,
+          "duration_share": 0.0192,
+          "segment_count": 7,
+          "short_segment_count": 6,
+          "short_segment_rate": 0.8571,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_b": {
+          "speaker_id": "speaker_b",
+          "display_name": "纳瓦尔·拉维坎特",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 1057232,
+          "duration_share": 0.922,
+          "segment_count": 31,
+          "short_segment_count": 4,
+          "short_segment_rate": 0.129,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_c": {
+          "speaker_id": "speaker_c",
+          "display_name": "未知说话人1",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 67390,
+          "duration_share": 0.0588,
+          "segment_count": 16,
+          "short_segment_count": 14,
+          "short_segment_rate": 0.875,
+          "reason": "",
+          "review_hint": ""
+        }
+      },
+      "risk_level": "high",
+      "risk_reasons": [
+        "high_force_dsp",
+        "missing_speaker_structure_metadata"
+      ],
+      "rewrite_count": 36,
+      "pre_tts_rewrite_count": 21,
+      "pre_tts_contradiction_count": 1,
+      "first_pass_abs_error_avg": 0.8173,
+      "first_pass_abs_error_p50": 0.2447,
+      "first_pass_abs_error_p90": 1.7937,
+      "alignment_method_distribution": {
+        "force_dsp": 28,
+        "rewrite_dsp": 5,
+        "dsp": 14,
+        "rewrite_direct": 4,
+        "direct": 3
+      },
+      "force_dsp_count": 28,
+      "short_force_dsp_count": 7,
+      "needs_review_count": 15,
+      "force_dsp_review_suppressed_count": 13,
+      "short_merge_applied_count": 0,
+      "short_merge_blocked_cross_speaker_count": 13,
+      "verifier": {
+        "enabled": true,
+        "applied": false,
+        "candidate_count": 0,
+        "decision_counts": {},
+        "skipped_reason": "no_candidates"
+      },
+      "samples": {
+        "speaker_a": [
+          {
+            "segment_id": 1,
+            "duration_s": 1.2,
+            "method": "force_dsp",
+            "severity": "low",
+            "source_text": "What is the meaning of life?",
+            "cn_text": "人生的意义是什么？"
+          },
+          {
+            "segment_id": 7,
+            "duration_s": 16.3,
+            "method": "direct",
+            "severity": "",
+            "source_text": "The meaning of life. It's funny that that's the basis of all existential angst, that you don't— you don't know why you're here, and you have this feeling that i",
+            "cn_text": "人生的意义，这竟是所有存在主义焦虑的根源。因为你不知道自己为何存在，总觉得这一切可能毫无意义。你开始怀疑，天哪，难道我只是这庞大世界中，微不足道的一小块吗？"
+          },
+          {
+            "segment_id": 15,
+            "duration_s": 1.1,
+            "method": "force_dsp",
+            "severity": "low",
+            "source_text": "You got happy before the money?",
+            "cn_text": "你在有钱之前就快乐了吗？"
+          },
+          {
+            "segment_id": 17,
+            "duration_s": 1.2,
+            "method": "force_dsp",
+            "severity": "low",
+            "source_text": "How did you get happy before the money?",
+            "cn_text": "在有钱之前，你是怎么获得快乐的？"
+          }
+        ],
+        "speaker_c": [
+          {
+            "segment_id": 5,
+            "duration_s": 1.8,
+            "method": "force_dsp",
+            "severity": "low",
+            "source_text": "And that can also be captured by your own past.",
+            "cn_text": "而且那也可能被你的过去所束缚。"
+          },
+          {
+            "segment_id": 10,
+            "duration_s": 24.7,
+            "method": "direct",
+            "severity": "",
+            "source_text": "Uh, there's an interesting challenge where I think people need to avoid becoming, uh, a suffering addict, sort of using suffering as the proxy for progress as o",
+            "cn_text": "呃，这里有个有趣的挑战，我觉得人们需要避免成为“受苦成瘾者”，也就是把受苦当作进步的代名词，而不是看重受苦带来的结果，对吧？就像是说，我为了不吃棉花糖而痛苦，为了做这件事而痛苦。我把幸福和满足感与痛苦本身挂钩，而不是与痛苦换来的成果挂钩。"
+          },
+          {
+            "segment_id": 13,
+            "duration_s": 4.6,
+            "method": "force_dsp",
+            "severity": "medium",
+            "source_text": "Right, the outcome may have been the same, but the entire experience of getting there—",
+            "cn_text": "没错，结果可能是一样的，但整个过程的体验却完全不同——"
+          },
+          {
+            "segment_id": 23,
+            "duration_s": 2.4,
+            "method": "force_dsp",
+            "severity": "medium",
+            "source_text": "How do you shortcut that desire contract?",
+            "cn_text": "你有什么捷径能跳过那种欲望的契约吗？"
+          }
+        ]
+      }
+    },
+    {
+      "job_id": "job_6940aeac0c7b442f809ef8fa1925302f",
+      "project_dir": "/mnt/HC_Volume_105524101/aivideotrans/projects/342bbde3-903b-4944-a53c-12a1de0b5ca9/job_6940aeac0c7b442f809ef8fa1925302f",
+      "mtime": 1777268397.7740226,
+      "source_key": "079c20a17278",
+      "title": "How Anthropic’s product team moves faster than anyone else | Cat Wu (Head of Product, Claude Code)",
+      "url_present": true,
+      "segment_count": 213,
+      "speaker_count": 2,
+      "primary_speaker_id": "speaker_a",
+      "primary_share": 0.7167,
+      "non_primary_share": 0.2833,
+      "speaker_role_distribution": {
+        "unknown": 2
+      },
+      "speakers": {
+        "speaker_a": {
+          "speaker_id": "speaker_a",
+          "display_name": "凯特·吴",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 3611598,
+          "duration_share": 0.7167,
+          "segment_count": 117,
+          "short_segment_count": 21,
+          "short_segment_rate": 0.1795,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_b": {
+          "speaker_id": "speaker_b",
+          "display_name": "伦尼",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 1427643,
+          "duration_share": 0.2833,
+          "segment_count": 96,
+          "short_segment_count": 36,
+          "short_segment_rate": 0.375,
+          "reason": "",
+          "review_hint": ""
+        }
+      },
+      "risk_level": "high",
+      "risk_reasons": [
+        "high_force_dsp",
+        "missing_speaker_structure_metadata"
+      ],
+      "rewrite_count": 94,
+      "pre_tts_rewrite_count": 17,
+      "pre_tts_contradiction_count": 6,
+      "first_pass_abs_error_avg": 0.3786,
+      "first_pass_abs_error_p50": 0.2032,
+      "first_pass_abs_error_p90": 0.7913,
+      "alignment_method_distribution": {
+        "direct": 33,
+        "force_dsp": 87,
+        "dsp": 54,
+        "rewrite_dsp": 25,
+        "rewrite_direct": 14
+      },
+      "force_dsp_count": 87,
+      "short_force_dsp_count": 32,
+      "needs_review_count": 74,
+      "force_dsp_review_suppressed_count": 13,
+      "short_merge_applied_count": 1,
+      "short_merge_blocked_cross_speaker_count": 15,
+      "verifier": {
+        "enabled": true,
+        "applied": false,
+        "candidate_count": 0,
+        "decision_counts": {},
+        "skipped_reason": "no_candidates"
+      },
+      "samples": {
+        "speaker_b": [
+          {
+            "segment_id": 2,
+            "duration_s": 4.1,
+            "method": "force_dsp",
+            "severity": "medium",
+            "source_text": "I've never seen anything like the pace you folks at Anthropic are shipping at.",
+            "cn_text": "我从未见过像你们 Anthropic 这样惊人的交付节奏。"
+          },
+          {
+            "segment_id": 4,
+            "duration_s": 5.0,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "You're interviewing hundreds of PMs and you just keep feeling like they're approaching it very incorrectly?",
+            "cn_text": "你面试了数百位产品经理，是不是总觉得他们的方法不太对劲？"
+          },
+          {
+            "segment_id": 6,
+            "duration_s": 3.4,
+            "method": "force_dsp",
+            "severity": "medium",
+            "source_text": "What do you think are the emerging skills PMs need to develop?",
+            "cn_text": "你认为产品经理现在需要培养哪些新兴技能？"
+          },
+          {
+            "segment_id": 8,
+            "duration_s": 38.4,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "Today, my guest is Kat Wu, Head of Product for Claude Code and Cowork at Anthropic. Kat is at the center of everything that is changing in AI and product and bu",
+            "cn_text": "今天我的嘉宾是凯特·吴，她是 Anthropic 公司 Claude Code 和 Cowork 的产品负责人。凯特正处于 AI、产品构建与变革的最前沿，她和团队打造的产品，正在深刻改变我们所有人构建产品的方式。她拥有丰富的洞察、智慧和经验"
+          }
+        ]
+      }
+    },
+    {
+      "job_id": "job_650a4d40b8eb423bb5307f3fe6d52acd",
+      "project_dir": "/mnt/HC_Volume_105524101/aivideotrans/projects/342bbde3-903b-4944-a53c-12a1de0b5ca9/job_650a4d40b8eb423bb5307f3fe6d52acd",
+      "mtime": 1777265002.9690182,
+      "source_key": "25c702ac1a1e",
+      "title": "The Most Life-Changing 20 Minute Video You’ll Ever Watch | Naval Ravikant",
+      "url_present": true,
+      "segment_count": 59,
+      "speaker_count": 3,
+      "primary_speaker_id": "speaker_b",
+      "primary_share": 0.9238,
+      "non_primary_share": 0.0762,
+      "speaker_role_distribution": {
+        "unknown": 3
+      },
+      "speakers": {
+        "speaker_a": {
+          "speaker_id": "speaker_a",
+          "display_name": "乔·罗根",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 23545,
+          "duration_share": 0.0205,
+          "segment_count": 7,
+          "short_segment_count": 6,
+          "short_segment_rate": 0.8571,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_b": {
+          "speaker_id": "speaker_b",
+          "display_name": "纳瓦尔·拉维坎特",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 1063038,
+          "duration_share": 0.9238,
+          "segment_count": 40,
+          "short_segment_count": 3,
+          "short_segment_rate": 0.075,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_c": {
+          "speaker_id": "speaker_c",
+          "display_name": "克里斯·威廉姆森",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 64115,
+          "duration_share": 0.0557,
+          "segment_count": 12,
+          "short_segment_count": 10,
+          "short_segment_rate": 0.8333,
+          "reason": "",
+          "review_hint": ""
+        }
+      },
+      "risk_level": "high",
+      "risk_reasons": [
+        "high_force_dsp",
+        "missing_speaker_structure_metadata"
+      ],
+      "rewrite_count": 21,
+      "pre_tts_rewrite_count": 3,
+      "pre_tts_contradiction_count": 1,
+      "first_pass_abs_error_avg": 0.6284,
+      "first_pass_abs_error_p50": 0.4226,
+      "first_pass_abs_error_p90": 1.4484,
+      "alignment_method_distribution": {
+        "force_dsp": 43,
+        "dsp": 3,
+        "rewrite_dsp": 6,
+        "rewrite_direct": 4,
+        "direct": 3
+      },
+      "force_dsp_count": 43,
+      "short_force_dsp_count": 6,
+      "needs_review_count": 34,
+      "force_dsp_review_suppressed_count": 9,
+      "short_merge_applied_count": 0,
+      "short_merge_blocked_cross_speaker_count": 11,
+      "verifier": {
+        "enabled": true,
+        "applied": false,
+        "candidate_count": 0,
+        "decision_counts": {},
+        "skipped_reason": "no_candidates"
+      },
+      "samples": {
+        "speaker_a": [
+          {
+            "segment_id": 1,
+            "duration_s": 1.2,
+            "method": "force_dsp",
+            "severity": "low",
+            "source_text": "What is the meaning of life?",
+            "cn_text": "人生的意义究竟是什么？"
+          },
+          {
+            "segment_id": 7,
+            "duration_s": 16.3,
+            "method": "force_dsp",
+            "severity": "high",
+            "source_text": "The meaning of life. It's funny that that's the basis of all existential angst, that you don't— you don't know why you're here, and you have this feeling that i",
+            "cn_text": "人生的意义。真有意思，这竟然是所有存在主义焦虑的根源，因为你不知道——你不知道自己为什么会在这里，而且你总有一种感觉，觉得这一切可能是毫无意义的。你开始想，天哪，我到底——我难道只是这庞大事物中的一小块碎片吗？"
+          },
+          {
+            "segment_id": 15,
+            "duration_s": 1.1,
+            "method": "force_dsp",
+            "severity": "low",
+            "source_text": "You got happy before the money?",
+            "cn_text": "你在有钱之前就感到快乐了吗？"
+          },
+          {
+            "segment_id": 17,
+            "duration_s": 1.2,
+            "method": "force_dsp",
+            "severity": "low",
+            "source_text": "How did you get happy before the money?",
+            "cn_text": "在有钱之前，你是怎么获得幸福的？"
+          }
+        ],
+        "speaker_c": [
+          {
+            "segment_id": 5,
+            "duration_s": 1.8,
+            "method": "force_dsp",
+            "severity": "low",
+            "source_text": "And that can also be captured by your own past.",
+            "cn_text": "而且那也可以被你自己的过去所捕获。"
+          },
+          {
+            "segment_id": 10,
+            "duration_s": 24.7,
+            "method": "force_dsp",
+            "severity": "high",
+            "source_text": "Uh, there's an interesting challenge where I think people need to avoid becoming, uh, a suffering addict, sort of using suffering as the proxy for progress as o",
+            "cn_text": "呃，这里有一个有趣的挑战，我认为人们需要避免成为一个“受苦成瘾者”，也就是把受苦当作进步的代理指标，而不是把受苦带来的结果当作指标，对吧？就像是，我因为没吃棉花糖而感到痛苦，我因为做这项工作而感到痛苦，我把幸福感和满足感与痛苦本身挂钩了，而"
+          },
+          {
+            "segment_id": 13,
+            "duration_s": 4.6,
+            "method": "force_dsp",
+            "severity": "medium",
+            "source_text": "Right, the outcome may have been the same, but the entire experience of getting there—",
+            "cn_text": "没错，结果可能是一样的，但整个实现过程的体验却完全不同——"
+          },
+          {
+            "segment_id": 22,
+            "duration_s": 2.4,
+            "method": "force_dsp",
+            "severity": "medium",
+            "source_text": "How do you shortcut that desire contract?",
+            "cn_text": "那该如何跳过这种欲望的契约呢？"
+          }
+        ]
+      }
+    },
+    {
+      "job_id": "job_3066774da2a64848b2f4d1d2824e022b",
+      "project_dir": "/mnt/HC_Volume_105524101/aivideotrans/projects/342bbde3-903b-4944-a53c-12a1de0b5ca9/job_3066774da2a64848b2f4d1d2824e022b",
+      "mtime": 1777259071.8807423,
+      "source_key": "aaef1b9fd2f1",
+      "title": "Jensen Huang – Will Nvidia’s moat persist?",
+      "url_present": true,
+      "segment_count": 239,
+      "speaker_count": 2,
+      "primary_speaker_id": "speaker_b",
+      "primary_share": 0.7613,
+      "non_primary_share": 0.2387,
+      "speaker_role_distribution": {
+        "unknown": 2
+      },
+      "speakers": {
+        "speaker_a": {
+          "speaker_id": "speaker_a",
+          "display_name": "德瓦克什·帕特尔",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 1440409,
+          "duration_share": 0.2387,
+          "segment_count": 104,
+          "short_segment_count": 65,
+          "short_segment_rate": 0.625,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_b": {
+          "speaker_id": "speaker_b",
+          "display_name": "黄仁勋",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 4593533,
+          "duration_share": 0.7613,
+          "segment_count": 135,
+          "short_segment_count": 53,
+          "short_segment_rate": 0.3926,
+          "reason": "",
+          "review_hint": ""
+        }
+      },
+      "risk_level": "high",
+      "risk_reasons": [
+        "high_force_dsp",
+        "missing_speaker_structure_metadata"
+      ],
+      "rewrite_count": 78,
+      "pre_tts_rewrite_count": 15,
+      "pre_tts_contradiction_count": 1,
+      "first_pass_abs_error_avg": 0.8202,
+      "first_pass_abs_error_p50": 0.2306,
+      "first_pass_abs_error_p90": 1.6959,
+      "alignment_method_distribution": {
+        "dsp": 55,
+        "force_dsp": 114,
+        "rewrite_dsp": 20,
+        "direct": 36,
+        "rewrite_direct": 14
+      },
+      "force_dsp_count": 114,
+      "short_force_dsp_count": 45,
+      "needs_review_count": 73,
+      "force_dsp_review_suppressed_count": 41,
+      "short_merge_applied_count": 0,
+      "short_merge_blocked_cross_speaker_count": 52,
+      "verifier": {
+        "enabled": true,
+        "applied": false,
+        "candidate_count": 0,
+        "decision_counts": {},
+        "skipped_reason": "no_candidates"
+      },
+      "samples": {
+        "speaker_a": [
+          {
+            "segment_id": 1,
+            "duration_s": 31.0,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "We've seen the valuations of a bunch of software companies crash because people are expecting AI to commoditize software. And there's a, a potentially naive way",
+            "cn_text": "我们看到很多软件公司的估值崩了，因为大家预期AI会让软件变得平庸化。有一种看似天真的想法是这样的：你看，英伟达把GDS2文件发给台积电，台积电制造逻辑芯片和交换机，然后把它们和SK海力士、美光、三星生产的HBM封装在一起，再发给台湾的ODM"
+          },
+          {
+            "segment_id": 6,
+            "duration_s": 31.9,
+            "method": "direct",
+            "severity": "",
+            "source_text": "Um, I think in your latest filings it was, you had almost $100 billion in purchase commitments with people, foundries, memory, uh, packaging. And then, uh, Semi",
+            "cn_text": "嗯，我看你们最新的财报显示，你们有近1000亿美元的采购承诺，涉及代工厂、内存和封装。而Semi Analysis报道称，你们未来会有2500亿美元的此类采购承诺。所以有一种解读是，英伟达的护城河其实在于你们锁定了这些稀缺组件多年的产能。你"
+          },
+          {
+            "segment_id": 10,
+            "duration_s": 12.4,
+            "method": "direct",
+            "severity": "",
+            "source_text": "I do want to understand more concretely whether the upstream can keep up. Um, for many years now, you guys have been 2x-ing revenue year over year. You guys hav",
+            "cn_text": "我确实想更具体地了解上游是否能跟上。嗯，多年来，你们的营收一直在翻倍增长，你们提供给世界的算力（FLOPS）也一直在以每年超过三倍的速度增长。"
+          },
+          {
+            "segment_id": 12,
+            "duration_s": 0.2,
+            "method": "force_dsp",
+            "severity": "medium",
+            "source_text": "Exactly.",
+            "cn_text": "确实。"
+          }
+        ]
+      }
+    },
+    {
+      "job_id": "job_f08cabc1267642b98a9d774a9e2a5da4",
+      "project_dir": "/mnt/HC_Volume_105524101/aivideotrans/projects/342bbde3-903b-4944-a53c-12a1de0b5ca9/job_f08cabc1267642b98a9d774a9e2a5da4",
+      "mtime": 1777252327.822886,
+      "source_key": "37c9566c7382",
+      "title": "Watch CNBC's full interview with Berkshire Hathaway CEO Warren Buffett",
+      "url_present": true,
+      "segment_count": 403,
+      "speaker_count": 4,
+      "primary_speaker_id": "speaker_b",
+      "primary_share": 0.7174,
+      "non_primary_share": 0.2827,
+      "speaker_role_distribution": {
+        "unknown": 4
+      },
+      "speakers": {
+        "speaker_a": {
+          "speaker_id": "speaker_a",
+          "display_name": "贝基·奎克",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 1627457,
+          "duration_share": 0.2312,
+          "segment_count": 172,
+          "short_segment_count": 99,
+          "short_segment_rate": 0.5756,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_b": {
+          "speaker_id": "speaker_b",
+          "display_name": "沃伦·巴菲特",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 5050573,
+          "duration_share": 0.7174,
+          "segment_count": 213,
+          "short_segment_count": 51,
+          "short_segment_rate": 0.2394,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_c": {
+          "speaker_id": "speaker_c",
+          "display_name": "乔·科南",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 179469,
+          "duration_share": 0.0255,
+          "segment_count": 9,
+          "short_segment_count": 3,
+          "short_segment_rate": 0.3333,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_d": {
+          "speaker_id": "speaker_d",
+          "display_name": "安德鲁·罗斯·索尔金",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 182825,
+          "duration_share": 0.026,
+          "segment_count": 9,
+          "short_segment_count": 2,
+          "short_segment_rate": 0.2222,
+          "reason": "",
+          "review_hint": ""
+        }
+      },
+      "risk_level": "high",
+      "risk_reasons": [
+        "high_force_dsp",
+        "missing_speaker_structure_metadata"
+      ],
+      "rewrite_count": 178,
+      "pre_tts_rewrite_count": 38,
+      "pre_tts_contradiction_count": 12,
+      "first_pass_abs_error_avg": 0.4687,
+      "first_pass_abs_error_p50": 0.2588,
+      "first_pass_abs_error_p90": 1.1592,
+      "alignment_method_distribution": {
+        "rewrite_dsp": 54,
+        "force_dsp": 188,
+        "dsp": 86,
+        "direct": 47,
+        "rewrite_direct": 28
+      },
+      "force_dsp_count": 188,
+      "short_force_dsp_count": 63,
+      "needs_review_count": 130,
+      "force_dsp_review_suppressed_count": 58,
+      "short_merge_applied_count": 0,
+      "short_merge_blocked_cross_speaker_count": 57,
+      "verifier": {
+        "enabled": true,
+        "applied": false,
+        "candidate_count": 0,
+        "decision_counts": {},
+        "skipped_reason": "no_candidates"
+      },
+      "samples": {
+        "speaker_a": [
+          {
+            "segment_id": 1,
+            "duration_s": 33.8,
+            "method": "rewrite_dsp",
+            "severity": "",
+            "source_text": "We are here in Omaha, Nebraska, this morning with Warren Buffett, the chairman and CEO of Berkshire Hathaway. He's just released his 55th annual shareholder let",
+            "cn_text": "我们今天在内布拉斯加州的奥马哈，与伯克希尔·哈撒韦董事长兼CEO沃伦·巴菲特在一起。他刚发布了第55封年度股东信，这也是我们连续第13年在奥马哈与他交流。我们的节目叫“问问沃伦”，旨在让大家在读完信后提出问题。不过鉴于当前新闻，大家对股市显"
+          },
+          {
+            "segment_id": 3,
+            "duration_s": 18.7,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "I want to talk about the letter. Uh, obviously one of the things that you touch on in the level— on the letter is when people should be buying stocks. We're goi",
+            "cn_text": "我想聊聊这封信。你在信中提到了买入股票的时机，我们待会儿会深入探讨。但鉴于今天早上期货指数大跌了818点，观众现在最关心的，恐怕还是你对新冠疫情的看法。这是否值得恐慌？你对此感到担忧吗？"
+          },
+          {
+            "segment_id": 6,
+            "duration_s": 35.3,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "Although there are a lot of people who look at the market and they say, look, I want to buy, but I don't want to buy when the market's sitting at new highs, whe",
+            "cn_text": "尽管有很多人看着市场说，看，我想买，但我不想在市场处于新高、每天都在刷新纪录的时候买。也许今天早上它跌了800点，但可能还会进一步下跌，因为新冠疫情的影响将波及全球经济。国际货币基金组织周末也这么说了。不仅是中国，其他国家在应对疫情时也会出"
+          },
+          {
+            "segment_id": 8,
+            "duration_s": 7.9,
+            "method": "direct",
+            "severity": "",
+            "source_text": "but if I worry that the economy is going to slow down, not just for the quarter but for the year, that would impact how many cars I think they might be able to ",
+            "cn_text": "若我担心经济不仅是本季度，而是全年放缓，那就会影响我对他们汽车产销量的预期。"
+          }
+        ],
+        "speaker_c": [
+          {
+            "segment_id": 115,
+            "duration_s": 60.0,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "Here's the latest on the coronavirus. China reported an additional 150 deaths and 409 new cases overnight. South Korea raised its coronavirus alert to the highe",
+            "cn_text": "以下是关于冠状病毒的最新消息。中国隔夜报告新增死亡病例150例，新增确诊病例409例。韩国将冠状病毒预警级别提升至最高级，此前该国病例数在不到一周内从31例激增至超过750例。亚洲股市隔夜下跌。香港恒生指数，呃，下跌了1.8%。韩国综合股价"
+          },
+          {
+            "segment_id": 116,
+            "duration_s": 23.0,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "at this point, I mean, Boris Johnson out earlier today, Andrew, saying that the risk to UK citizens just over there remains low. I would say that our officials ",
+            "cn_text": "目前，我是说，鲍里斯·约翰逊今天早些时候出来表示，安德鲁，英国公民在那里的风险仍然很低。我想说，我们的官员在这里也会这么说。美国公民面临的风险仍然很低，但有一点显著的区别，那就是，嗯，供应链中断正在拖累几十、几十，实际上是几百家公司。"
+          },
+          {
+            "segment_id": 119,
+            "duration_s": 1.5,
+            "method": "force_dsp",
+            "severity": "low",
+            "source_text": "I, I just wonder, we don't know.",
+            "cn_text": "我，我只是在想，我们不知道。"
+          },
+          {
+            "segment_id": 121,
+            "duration_s": 1.5,
+            "method": "force_dsp",
+            "severity": "low",
+            "source_text": "you know, I was looking at Jim's—",
+            "cn_text": "你知道的，我刚才在看吉姆的——"
+          }
+        ],
+        "speaker_d": [
+          {
+            "segment_id": 117,
+            "duration_s": 34.0,
+            "method": "rewrite_dsp",
+            "severity": "",
+            "source_text": "Absolutely. And that's dampening global growth. What worries me is that we don't know— 3, 3 months, 6 months, 9 months— if it ever gets to the point where we st",
+            "cn_text": "确实如此，这正在抑制全球增长。我担心的是，未来三到九个月，如果全球多地爆发疫情，且部分病例源头不明，一旦疫情成倍扩散，情况将变得严峻。目前这只是全球增长放缓，世界上大多数人还不担心感染病毒，但如果情况恶化，人们将无法出门，无法去看电影、去健"
+          },
+          {
+            "segment_id": 120,
+            "duration_s": 23.7,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "There are major travel that's being changed right now. Conferences are being canceled. There was an article in Time magazine speculating when the— whether the O",
+            "cn_text": "目前有重大的旅行计划正在改变。会议正在被取消。《时代》杂志有一篇文章推测，夏季在日本举行的奥运会，呃，是否会被取消。所以，这里有可能会产生连锁反应的实际影响。话虽如此，越接近春天，天气状况就越好。关于流感，呃，你知道，还有一种说法是……"
+          },
+          {
+            "segment_id": 224,
+            "duration_s": 12.4,
+            "method": "force_dsp",
+            "severity": "high",
+            "source_text": "I was just gonna follow up on that question, Warren, which was about a year ago we had asked you about Michael Bloomberg and you had said that if he ever entere",
+            "cn_text": "沃伦，我想接着刚才的话题问，大约一年前我们问过你关于迈克尔·布隆伯格的事，你说过如果他参选，你会支持他。你现在还会支持他吗？他是你心目中的候选人吗？"
+          },
+          {
+            "segment_id": 317,
+            "duration_s": 0.3,
+            "method": "force_dsp",
+            "severity": "low",
+            "source_text": "I have—",
+            "cn_text": "我有——"
+          }
+        ]
+      }
+    },
+    {
+      "job_id": "job_45179e4a2aa842329ac4e24be6fc3421",
+      "project_dir": "/mnt/HC_Volume_105524101/aivideotrans/projects/342bbde3-903b-4944-a53c-12a1de0b5ca9/job_45179e4a2aa842329ac4e24be6fc3421",
+      "mtime": 1777247518.8755536,
+      "source_key": "ccba53443cd6",
+      "title": "How To Build A Company With AI From The Ground Up",
+      "url_present": true,
+      "segment_count": 23,
+      "speaker_count": 1,
+      "primary_speaker_id": "speaker_a",
+      "primary_share": 1.0,
+      "non_primary_share": 0,
+      "speaker_role_distribution": {
+        "unknown": 1
+      },
+      "speakers": {
+        "speaker_a": {
+          "speaker_id": "speaker_a",
+          "display_name": "戴安娜·胡",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 596541,
+          "duration_share": 1.0,
+          "segment_count": 23,
+          "short_segment_count": 0,
+          "short_segment_rate": 0.0,
+          "reason": "",
+          "review_hint": ""
+        }
+      },
+      "risk_level": "low",
+      "risk_reasons": [
+        "missing_speaker_structure_metadata"
+      ],
+      "rewrite_count": 9,
+      "pre_tts_rewrite_count": 1,
+      "pre_tts_contradiction_count": 0,
+      "first_pass_abs_error_avg": 0.105,
+      "first_pass_abs_error_p50": 0.0776,
+      "first_pass_abs_error_p90": 0.2137,
+      "alignment_method_distribution": {
+        "dsp": 9,
+        "direct": 8,
+        "rewrite_direct": 2,
+        "force_dsp": 2,
+        "rewrite_dsp": 2
+      },
+      "force_dsp_count": 2,
+      "short_force_dsp_count": 0,
+      "needs_review_count": 2,
+      "force_dsp_review_suppressed_count": 0,
+      "short_merge_applied_count": 0,
+      "short_merge_blocked_cross_speaker_count": 0,
+      "verifier": {
+        "enabled": true,
+        "applied": false,
+        "candidate_count": 0,
+        "decision_counts": {},
+        "skipped_reason": "no_candidates"
+      },
+      "samples": {}
+    },
+    {
+      "job_id": "job_730e7195e9c04ed9906d744f62f2986e",
+      "project_dir": "/mnt/HC_Volume_105524101/aivideotrans/projects/342bbde3-903b-4944-a53c-12a1de0b5ca9/job_730e7195e9c04ed9906d744f62f2986e",
+      "mtime": 1777216233.6700094,
+      "source_key": "d8a02a328f89",
+      "title": "Think Faster, Talk Smarter with Matt Abrahams",
+      "url_present": true,
+      "segment_count": 123,
+      "speaker_count": 2,
+      "primary_speaker_id": "speaker_a",
+      "primary_share": 0.9979,
+      "non_primary_share": 0.0021,
+      "speaker_role_distribution": {
+        "unknown": 2
+      },
+      "speakers": {
+        "speaker_a": {
+          "speaker_id": "speaker_a",
+          "display_name": "马特·亚伯拉罕斯",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 2476335,
+          "duration_share": 0.9979,
+          "segment_count": 121,
+          "short_segment_count": 17,
+          "short_segment_rate": 0.1405,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_audience": {
+          "speaker_id": "speaker_audience",
+          "display_name": "马特·亚伯拉罕斯",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 5121,
+          "duration_share": 0.0021,
+          "segment_count": 2,
+          "short_segment_count": 2,
+          "short_segment_rate": 1.0,
+          "reason": "",
+          "review_hint": ""
+        }
+      },
+      "risk_level": "high",
+      "risk_reasons": [
+        "high_force_dsp",
+        "missing_speaker_structure_metadata"
+      ],
+      "rewrite_count": 64,
+      "pre_tts_rewrite_count": 13,
+      "pre_tts_contradiction_count": 3,
+      "first_pass_abs_error_avg": 0.2214,
+      "first_pass_abs_error_p50": 0.1331,
+      "first_pass_abs_error_p90": 0.4516,
+      "alignment_method_distribution": {
+        "rewrite_direct": 18,
+        "dsp": 42,
+        "direct": 25,
+        "force_dsp": 22,
+        "rewrite_dsp": 16
+      },
+      "force_dsp_count": 22,
+      "short_force_dsp_count": 8,
+      "needs_review_count": 17,
+      "force_dsp_review_suppressed_count": 5,
+      "short_merge_applied_count": 0,
+      "short_merge_blocked_cross_speaker_count": 1,
+      "verifier": {
+        "enabled": false
+      },
+      "samples": {
+        "speaker_audience": [
+          {
+            "segment_id": 80,
+            "duration_s": 0.9,
+            "method": "force_dsp",
+            "severity": "low",
+            "source_text": "What are the kids' names?",
+            "cn_text": "孩子们叫什么名字？"
+          },
+          {
+            "segment_id": 111,
+            "duration_s": 4.2,
+            "method": "force_dsp",
+            "severity": "medium",
+            "source_text": "My book— well, look at that. Well, thank you. All right.",
+            "cn_text": "我的书——嗯，你看这个。好吧，谢谢你。好的。"
+          }
+        ]
+      }
+    },
+    {
+      "job_id": "job_b96b20d250934c1caa58d0923b320a4f",
+      "project_dir": "/mnt/HC_Volume_105524101/aivideotrans/projects/342bbde3-903b-4944-a53c-12a1de0b5ca9/job_b96b20d250934c1caa58d0923b320a4f",
+      "mtime": 1777198534.0112014,
+      "source_key": "8980b92cf044",
+      "title": "Warren Buffett On The 2008 Crisis",
+      "url_present": true,
+      "segment_count": 70,
+      "speaker_count": 2,
+      "primary_speaker_id": "speaker_b",
+      "primary_share": 0.8217,
+      "non_primary_share": 0.1783,
+      "speaker_role_distribution": {
+        "unknown": 2
+      },
+      "speakers": {
+        "speaker_a": {
+          "speaker_id": "speaker_a",
+          "display_name": "安德鲁·罗斯·索尔金",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 183322,
+          "duration_share": 0.1783,
+          "segment_count": 31,
+          "short_segment_count": 21,
+          "short_segment_rate": 0.6774,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_b": {
+          "speaker_id": "speaker_b",
+          "display_name": "沃伦·巴菲特",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 844940,
+          "duration_share": 0.8217,
+          "segment_count": 39,
+          "short_segment_count": 11,
+          "short_segment_rate": 0.2821,
+          "reason": "",
+          "review_hint": ""
+        }
+      },
+      "risk_level": "high",
+      "risk_reasons": [
+        "high_force_dsp",
+        "missing_speaker_structure_metadata"
+      ],
+      "rewrite_count": 33,
+      "pre_tts_rewrite_count": 10,
+      "pre_tts_contradiction_count": 3,
+      "first_pass_abs_error_avg": 0.3589,
+      "first_pass_abs_error_p50": 0.2016,
+      "first_pass_abs_error_p90": 0.7561,
+      "alignment_method_distribution": {
+        "rewrite_direct": 8,
+        "rewrite_dsp": 9,
+        "force_dsp": 27,
+        "direct": 16,
+        "dsp": 10
+      },
+      "force_dsp_count": 27,
+      "short_force_dsp_count": 8,
+      "needs_review_count": 15,
+      "force_dsp_review_suppressed_count": 12,
+      "short_merge_applied_count": 0,
+      "short_merge_blocked_cross_speaker_count": 8,
+      "verifier": {
+        "enabled": false
+      },
+      "samples": {
+        "speaker_a": [
+          {
+            "segment_id": 1,
+            "duration_s": 10.5,
+            "method": "rewrite_direct",
+            "severity": "",
+            "source_text": "I want to just go back to 2008 for a moment and just even start with a very big picture sense of it all. What do you think happened that led to 2008?",
+            "cn_text": "我想先回到2008年，从宏观层面来聊聊这件事。你觉得到底是什么导致了那场危机？"
+          },
+          {
+            "segment_id": 5,
+            "duration_s": 9.8,
+            "method": "direct",
+            "severity": "",
+            "source_text": "It's early 2008, hedge funds, uh, with a lot of subprime mortgages are going under. There were a couple. At that point, how worried were you? Do you remember be",
+            "cn_text": "2008年初，很多持有次贷的对冲基金倒闭了。那时候你有多担心？你还记得当时担心吗？"
+          },
+          {
+            "segment_id": 8,
+            "duration_s": 7.6,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "So take us back. I don't know if you remember this. This is after Bear Stearns goes down. So this is before— before Fannie and Freddie—",
+            "cn_text": "那你带我们回顾一下。还记得吗？贝尔斯登倒闭之后，房利美和房地美之前。"
+          },
+          {
+            "segment_id": 10,
+            "duration_s": 3.9,
+            "method": "direct",
+            "severity": "",
+            "source_text": "But after Bear Stearns, you get a call from Dick Fuld.",
+            "cn_text": "贝尔斯登后，你接到迪克·富尔德的电话。"
+          }
+        ]
+      }
+    },
+    {
+      "job_id": "job_7e12f5f49ed04b9b8bc3d1a003b61290",
+      "project_dir": "/mnt/HC_Volume_105524101/aivideotrans/projects/342bbde3-903b-4944-a53c-12a1de0b5ca9/job_7e12f5f49ed04b9b8bc3d1a003b61290",
+      "mtime": 1777196659.839849,
+      "source_key": "f83c54bffd81",
+      "title": "Nvidia CEO Jensen Huang on AI's pressure on software stocks",
+      "url_present": true,
+      "segment_count": 10,
+      "speaker_count": 2,
+      "primary_speaker_id": "speaker_b",
+      "primary_share": 0.857,
+      "non_primary_share": 0.143,
+      "speaker_role_distribution": {
+        "unknown": 2
+      },
+      "speakers": {
+        "speaker_a": {
+          "speaker_id": "speaker_a",
+          "display_name": "未知说话人1",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 47349,
+          "duration_share": 0.143,
+          "segment_count": 4,
+          "short_segment_count": 1,
+          "short_segment_rate": 0.25,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_b": {
+          "speaker_id": "speaker_b",
+          "display_name": "黄仁勋",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 283748,
+          "duration_share": 0.857,
+          "segment_count": 6,
+          "short_segment_count": 1,
+          "short_segment_rate": 0.1667,
+          "reason": "",
+          "review_hint": ""
+        }
+      },
+      "risk_level": "low",
+      "risk_reasons": [
+        "missing_speaker_structure_metadata"
+      ],
+      "rewrite_count": 4,
+      "pre_tts_rewrite_count": 1,
+      "pre_tts_contradiction_count": 1,
+      "first_pass_abs_error_avg": 0.3791,
+      "first_pass_abs_error_p50": 0.1194,
+      "first_pass_abs_error_p90": 0.178,
+      "alignment_method_distribution": {
+        "direct": 2,
+        "rewrite_dsp": 1,
+        "dsp": 5,
+        "rewrite_direct": 1,
+        "force_dsp": 1
+      },
+      "force_dsp_count": 1,
+      "short_force_dsp_count": 0,
+      "needs_review_count": 0,
+      "force_dsp_review_suppressed_count": 1,
+      "short_merge_applied_count": 0,
+      "short_merge_blocked_cross_speaker_count": 1,
+      "verifier": {
+        "enabled": false
+      },
+      "samples": {
+        "speaker_a": [
+          {
+            "segment_id": 1,
+            "duration_s": 20.6,
+            "method": "direct",
+            "severity": "",
+            "source_text": "You think about the software industry, the SaaS-geddon that they've been calling it. You look at law firms, cybersecurity firms last week, and then IBM shares t",
+            "cn_text": "想想软件行业，他们说的那个“SaaS末日”。你看看律所、网络安全公司，上周是它们，这周IBM的股价又跌了25年来最大的一次。呃，这是市场反应过度了，还是说投资者确实有理由觉得，呃，这些根深蒂固的行业要被彻底颠覆了？"
+          },
+          {
+            "segment_id": 4,
+            "duration_s": 16.0,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "But that means that you think that they're not going to disintermediate these companies like a Salesforce or so many of the others along the way, you think they",
+            "cn_text": "但这是否意味着，你认为它们不会去颠覆像Salesforce这样的公司，或者沿途的许多其他公司？你认为市场现在正在抛售的那些公司，它们提供的工具仍然会被使用？"
+          },
+          {
+            "segment_id": 7,
+            "duration_s": 8.7,
+            "method": "rewrite_direct",
+            "severity": "",
+            "source_text": "So they're not going to replace the tools, they're just going to replace us, the humans that use all these tools to begin with. Um, that's an interesting though",
+            "cn_text": "所以它们不会取代工具，只会取代我们这些最初使用工具的人类。这个思想实验挺有意思，我喜欢。"
+          },
+          {
+            "segment_id": 9,
+            "duration_s": 2.1,
+            "method": "direct",
+            "severity": "",
+            "source_text": "They're going to help us. Okay, we'll take that.",
+            "cn_text": "它们会帮我们，接受这说法。"
+          }
+        ]
+      }
+    },
+    {
+      "job_id": "job_198ffd877c4044869b2f0db988c424fe",
+      "project_dir": "/mnt/HC_Volume_105524101/aivideotrans/projects/342bbde3-903b-4944-a53c-12a1de0b5ca9/job_198ffd877c4044869b2f0db988c424fe",
+      "mtime": 1777193859.8081791,
+      "source_key": "f83c54bffd81",
+      "title": "Nvidia CEO Jensen Huang on AI's pressure on software stocks",
+      "url_present": true,
+      "segment_count": 10,
+      "speaker_count": 2,
+      "primary_speaker_id": "speaker_b",
+      "primary_share": 0.857,
+      "non_primary_share": 0.143,
+      "speaker_role_distribution": {
+        "unknown": 2
+      },
+      "speakers": {
+        "speaker_a": {
+          "speaker_id": "speaker_a",
+          "display_name": "未知说话人1",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 47349,
+          "duration_share": 0.143,
+          "segment_count": 4,
+          "short_segment_count": 1,
+          "short_segment_rate": 0.25,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_b": {
+          "speaker_id": "speaker_b",
+          "display_name": "黄仁勋",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 283748,
+          "duration_share": 0.857,
+          "segment_count": 6,
+          "short_segment_count": 1,
+          "short_segment_rate": 0.1667,
+          "reason": "",
+          "review_hint": ""
+        }
+      },
+      "risk_level": "low",
+      "risk_reasons": [
+        "missing_speaker_structure_metadata"
+      ],
+      "rewrite_count": 0,
+      "pre_tts_rewrite_count": 0,
+      "pre_tts_contradiction_count": 0,
+      "first_pass_abs_error_avg": 0.0,
+      "first_pass_abs_error_p50": 0.0,
+      "first_pass_abs_error_p90": 0.0,
+      "alignment_method_distribution": {
+        "": 10
+      },
+      "force_dsp_count": 0,
+      "short_force_dsp_count": 0,
+      "needs_review_count": 0,
+      "force_dsp_review_suppressed_count": 0,
+      "short_merge_applied_count": 0,
+      "short_merge_blocked_cross_speaker_count": 0,
+      "verifier": {
+        "enabled": false
+      },
+      "samples": {
+        "speaker_a": [
+          {
+            "segment_id": 1,
+            "duration_s": 20.6,
+            "method": "",
+            "severity": "",
+            "source_text": "You think about the software industry, the SaaS-geddon that they've been calling it. You look at law firms, cybersecurity firms last week, and then IBM shares t",
+            "cn_text": "你想想现在的软件行业，大家都在说所谓的“SaaS末日”。你看看上周的律师事务所、网络安全公司，然后这周IBM的股价又创下了二十五年来的最大跌幅。嗯，这是市场反应过度了吗？还是你觉得投资者确实有充分的理由看着这一切，然后感叹说，哎呀，嗯，这将"
+          },
+          {
+            "segment_id": 4,
+            "duration_s": 16.0,
+            "method": "",
+            "severity": "",
+            "source_text": "But that means that you think that they're not going to disintermediate these companies like a Salesforce or so many of the others along the way, you think they",
+            "cn_text": "但这也就是说，你认为AI并不会像淘汰中间商那样，淘汰掉像赛富时或者其他许许多多类似的公司，你觉得大家还是会继续使用那些目前正被市场疯狂抛售的公司所提供的工具吗？"
+          },
+          {
+            "segment_id": 7,
+            "duration_s": 8.7,
+            "method": "",
+            "severity": "",
+            "source_text": "So they're not going to replace the tools, they're just going to replace us, the humans that use all these tools to begin with. Um, that's an interesting though",
+            "cn_text": "所以它们并不会取代工具，它们只是会取代我们，取代一开始使用所有这些工具的人类。嗯，这确实是个很有意思的思想实验。我很喜欢。"
+          },
+          {
+            "segment_id": 9,
+            "duration_s": 2.1,
+            "method": "",
+            "severity": "",
+            "source_text": "They're going to help us. Okay, we'll take that.",
+            "cn_text": "来帮我们的。行，这说法我接受。"
+          }
+        ]
+      }
+    },
+    {
+      "job_id": "job_925ad5833c764d2ab386281b58a6c18f",
+      "project_dir": "/mnt/HC_Volume_105524101/aivideotrans/projects/342bbde3-903b-4944-a53c-12a1de0b5ca9/job_925ad5833c764d2ab386281b58a6c18f",
+      "mtime": 1777185099.7563376,
+      "source_key": "a7caa3c85f5f",
+      "title": "Why this Chinese EV terrifies Europe’s carmakers",
+      "url_present": true,
+      "segment_count": 63,
+      "speaker_count": 10,
+      "primary_speaker_id": "speaker_c",
+      "primary_share": 0.4322,
+      "non_primary_share": 0.5679,
+      "speaker_role_distribution": {
+        "unknown": 10
+      },
+      "speakers": {
+        "speaker_a": {
+          "speaker_id": "speaker_a",
+          "display_name": "未知说话人1",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 32509,
+          "duration_share": 0.0441,
+          "segment_count": 1,
+          "short_segment_count": 0,
+          "short_segment_rate": 0.0,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_c": {
+          "speaker_id": "speaker_c",
+          "display_name": "汤姆·麦肯齐",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 318937,
+          "duration_share": 0.4322,
+          "segment_count": 22,
+          "short_segment_count": 6,
+          "short_segment_rate": 0.2727,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_e": {
+          "speaker_id": "speaker_e",
+          "display_name": "贝蒂·刘",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 14569,
+          "duration_share": 0.0197,
+          "segment_count": 2,
+          "short_segment_count": 1,
+          "short_segment_rate": 0.5,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_f": {
+          "speaker_id": "speaker_f",
+          "display_name": "埃隆·马斯克",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 1509,
+          "duration_share": 0.002,
+          "segment_count": 2,
+          "short_segment_count": 2,
+          "short_segment_rate": 1.0,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_b": {
+          "speaker_id": "speaker_b",
+          "display_name": "汤姆·麦肯齐",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 86320,
+          "duration_share": 0.117,
+          "segment_count": 15,
+          "short_segment_count": 12,
+          "short_segment_rate": 0.8,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_g": {
+          "speaker_id": "speaker_g",
+          "display_name": "瑞安·费舍尔",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 90510,
+          "duration_share": 0.1227,
+          "segment_count": 6,
+          "short_segment_count": 2,
+          "short_segment_rate": 0.3333,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_h": {
+          "speaker_id": "speaker_h",
+          "display_name": "吉姆·法利",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 23958,
+          "duration_share": 0.0325,
+          "segment_count": 2,
+          "short_segment_count": 0,
+          "short_segment_rate": 0.0,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_d": {
+          "speaker_id": "speaker_d",
+          "display_name": "李柯",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 127589,
+          "duration_share": 0.1729,
+          "segment_count": 8,
+          "short_segment_count": 4,
+          "short_segment_rate": 0.5,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_i": {
+          "speaker_id": "speaker_i",
+          "display_name": "未知说话人2",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 9041,
+          "duration_share": 0.0123,
+          "segment_count": 1,
+          "short_segment_count": 0,
+          "short_segment_rate": 0.0,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_j": {
+          "speaker_id": "speaker_j",
+          "display_name": "阿尔弗雷多·阿尔塔维拉",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 33004,
+          "duration_share": 0.0447,
+          "segment_count": 4,
+          "short_segment_count": 2,
+          "short_segment_rate": 0.5,
+          "reason": "",
+          "review_hint": ""
+        }
+      },
+      "risk_level": "high",
+      "risk_reasons": [
+        "high_force_dsp",
+        "missing_speaker_structure_metadata"
+      ],
+      "rewrite_count": 31,
+      "pre_tts_rewrite_count": 25,
+      "pre_tts_contradiction_count": 5,
+      "first_pass_abs_error_avg": 0.3048,
+      "first_pass_abs_error_p50": 0.0934,
+      "first_pass_abs_error_p90": 0.4618,
+      "alignment_method_distribution": {
+        "dsp": 17,
+        "direct": 30,
+        "rewrite_dsp": 3,
+        "force_dsp": 11,
+        "rewrite_direct": 2
+      },
+      "force_dsp_count": 11,
+      "short_force_dsp_count": 1,
+      "needs_review_count": 2,
+      "force_dsp_review_suppressed_count": 0,
+      "short_merge_applied_count": 0,
+      "short_merge_blocked_cross_speaker_count": 0,
+      "verifier": {
+        "enabled": false
+      },
+      "samples": {
+        "speaker_a": [
+          {
+            "segment_id": 1,
+            "duration_s": 32.5,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "This is a story about changes that are too big to ignore. For many years, the global car market has been dominated by the same small group— countries like Japan",
+            "cn_text": "这是一个关于不容忽视的巨变的故事。多年来，全球汽车市场一直被同一个小群体主导——也就是像日本、德国和美国这样的国家。但现在情况不同了。在短短五年的时间里，中国超越了世界上那些最大的汽车制造国，从第六名一跃成为第一名。如今，中国出口的汽车数量"
+          }
+        ],
+        "speaker_b": [
+          {
+            "segment_id": 10,
+            "duration_s": 3.7,
+            "method": "direct",
+            "severity": "",
+            "source_text": "How would you characterize BYD's growth in, in recent years?",
+            "cn_text": "你会如何形容比亚迪在近年来的增长？"
+          },
+          {
+            "segment_id": 14,
+            "duration_s": 4.6,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "You come from the industry, Ryan. How, how is BYD viewed within the industry?",
+            "cn_text": "你是业内人士，瑞安。业内是怎么看待比亚迪的？"
+          },
+          {
+            "segment_id": 21,
+            "duration_s": 0.5,
+            "method": "force_dsp",
+            "severity": "",
+            "source_text": "Why Paris?",
+            "cn_text": "为什么选巴黎？"
+          },
+          {
+            "segment_id": 26,
+            "duration_s": 6.0,
+            "method": "direct",
+            "severity": "",
+            "source_text": "What do you think the biggest structural advantage is that BYD has over its competitors?",
+            "cn_text": "你觉得比亚迪相比竞争对手，最大的结构性优势是什么？"
+          }
+        ],
+        "speaker_d": [
+          {
+            "segment_id": 22,
+            "duration_s": 6.5,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "Yeah, very good question. Paris is the country— is the city full of energy and also art.",
+            "cn_text": "嗯，这个问题问得很好。巴黎啊，是一座充满活力、也充满艺术气息的城市。"
+          },
+          {
+            "segment_id": 24,
+            "duration_s": 36.5,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "So, you know, I joined BYD when BYD is a very small company. They started with 20 people, $350,000 investment. So I joined BYD the second year. My first job is ",
+            "cn_text": "我是说啊，我加入比亚迪的时候，公司还很小。最初只有二十个人，投资额三十五万美元。我是第二年加入的，第一份工作就是做海外市场推广经理。那时候我去了香港，1997年在那儿设立了第一个国际办事处。后来，1999年我带着三万美元现金和一个四十尺集装"
+          },
+          {
+            "segment_id": 27,
+            "duration_s": 34.1,
+            "method": "direct",
+            "severity": "",
+            "source_text": "Two things. One is technology. To today, like, we have 120,000 R&D engineers. We invent 52 patents per day. The second is BYD have very strong vehicle integrati",
+            "cn_text": "有两个方面。第一是技术。到现在，我们有十二万名研发工程师，每天能申请五十二项专利。第二，比亚迪的整车集成能力特别强。什么意思呢？就是说我们创新速度特别快，能做出很多别人做不到的酷东西。这也是为什么你看到比亚迪这两年发展这么快。比如我们有那款"
+          },
+          {
+            "segment_id": 33,
+            "duration_s": 4.8,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "all the cool technology in this car, yeah, I did not see any competition here.",
+            "cn_text": "这车里所有酷炫的技术，是的，我在这看不到竞争对手。"
+          }
+        ],
+        "speaker_e": [
+          {
+            "segment_id": 5,
+            "duration_s": 13.4,
+            "method": "rewrite_dsp",
+            "severity": "",
+            "source_text": "There's competitors now ramping up, and as you're familiar with BYD, which is also on the West Coast, I think they're ramping up production of their electric ve",
+            "cn_text": "现在竞争对手正发力，你熟悉的比亚迪也在西海岸，正提高电动车产量。呃，巴菲特有他们百分之十的股份。呃，你笑什么？比亚迪正试图竞争。你笑什么？"
+          },
+          {
+            "segment_id": 7,
+            "duration_s": 1.2,
+            "method": "force_dsp",
+            "severity": "",
+            "source_text": "You don't see them at all as a competitor?",
+            "cn_text": "你完全不把他们当竞争对手吗？"
+          }
+        ],
+        "speaker_f": [
+          {
+            "segment_id": 6,
+            "duration_s": 1.3,
+            "method": "force_dsp",
+            "severity": "",
+            "source_text": "Um, have you seen their car?",
+            "cn_text": "嗯，你见过他们的车吗？"
+          },
+          {
+            "segment_id": 8,
+            "duration_s": 0.2,
+            "method": "force_dsp",
+            "severity": "",
+            "source_text": "No.",
+            "cn_text": "没有。"
+          }
+        ],
+        "speaker_g": [
+          {
+            "segment_id": 11,
+            "duration_s": 0.8,
+            "method": "force_dsp",
+            "severity": "",
+            "source_text": "Yeah, explosive.",
+            "cn_text": "爆发式的。"
+          },
+          {
+            "segment_id": 13,
+            "duration_s": 10.3,
+            "method": "rewrite_dsp",
+            "severity": "",
+            "source_text": "They've, from 2021, gone from like barely, uh, on the map, if you know what I mean, if you look at the chart, to having, uh, 4 million plus sales and being in t",
+            "cn_text": "从2021年开始，他们从几乎默默无闻，你懂我的意思吧，看图表的话，发展到超四百万销量，跻身全球十大汽车制造商。"
+          },
+          {
+            "segment_id": 15,
+            "duration_s": 5.2,
+            "method": "rewrite_dsp",
+            "severity": "",
+            "source_text": "Similar to Musk's comment, like, who are these? I think now people are changing it to, oh yeah, we're kind of scared.",
+            "cn_text": "像马斯克说的，这些人是谁？现在大家改口说，我们有点怕了。"
+          },
+          {
+            "segment_id": 35,
+            "duration_s": 10.1,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "When you think about their advantage in batteries that they've managed to produce, it, it does seem kind of like, um, incredible. They've come out with the gold",
+            "cn_text": "当你想到他们成功制造出的电池优势，这确实让人觉得不可思议。他们拿出了金蛋，以极快的速度、最好的技术和最优的价格做到了。"
+          }
+        ],
+        "speaker_h": [
+          {
+            "segment_id": 17,
+            "duration_s": 8.7,
+            "method": "direct",
+            "severity": "",
+            "source_text": "It's the most humbling thing I've ever seen. Their cost, their quality of their vehicles is far superior, um, to what I see in the West.",
+            "cn_text": "这是我见过最让人谦卑的事情。他们的成本、还有车辆的品质，嗯，都远远超过了我在西方看到的水平。"
+          },
+          {
+            "segment_id": 62,
+            "duration_s": 15.2,
+            "method": "direct",
+            "severity": "",
+            "source_text": "I've never seen a competition like this. The government bet on EVs before anyone else in the world. They're the largest market in the world, and now they're the",
+            "cn_text": "我从未见过这样的竞争。他们的政府比世界上任何人都更早押注电动汽车。他们是全球最大的市场，现在也是全球最重要的市场。我们可以与他们竞争并赢得胜利，但我们必须拿出最好的状态，而且我们必须学习很多新的东西。"
+          }
+        ],
+        "speaker_i": [
+          {
+            "segment_id": 28,
+            "duration_s": 9.0,
+            "method": "direct",
+            "severity": "",
+            "source_text": "It's capable of well over 300 miles an hour. This feels like China turning up and just saying, um, yeah, we'll have all the records.",
+            "cn_text": "它的时速能轻松超过三百英里。感觉就像中国直接登场，然后说，嗯，这些纪录我们都要拿下。"
+          }
+        ],
+        "speaker_j": [
+          {
+            "segment_id": 41,
+            "duration_s": 12.5,
+            "method": "direct",
+            "severity": "",
+            "source_text": "BYD has never been and will never be a low-cost player in any segment. Our main selling argument is value for money.",
+            "cn_text": "大家要知道，比亚迪过去从来都不是，将来也绝对不会是任何一个细分市场里的低成本玩家。我们一直以来最主要的卖点，其实就是物有所值。"
+          },
+          {
+            "segment_id": 44,
+            "duration_s": 12.8,
+            "method": "direct",
+            "severity": "",
+            "source_text": "I won't answer with our volume target because you will not believe me, um, but certainly we, we want to be one of the key players in this, uh, industry, uh, on ",
+            "cn_text": "我不会用我们的销量目标来回答，因为你们不会相信我的，嗯，但毫无疑问，我们，我们希望成为这个，呃，行业中的关键玩家之一，呃，在全球，在全球范围内。"
+          },
+          {
+            "segment_id": 46,
+            "duration_s": 0.2,
+            "method": "force_dsp",
+            "severity": "",
+            "source_text": "Quite worried.",
+            "cn_text": "非常担心。"
+          },
+          {
+            "segment_id": 48,
+            "duration_s": 7.5,
+            "method": "direct",
+            "severity": "",
+            "source_text": "Yes. Are you on track to meet that, to beat that? Yeah, easily, easily, easily beating 1.5 million. Yes, this year.",
+            "cn_text": "是的。你们能顺利实现甚至超越它吗？是的，轻轻松松，轻轻松松就能超过一百五十万。对，就在今年。"
+          }
+        ]
+      }
+    },
+    {
+      "job_id": "job_ce814b8cdc2242d7b72764b2f0b72dd4",
+      "project_dir": "/mnt/HC_Volume_105524101/aivideotrans/projects/342bbde3-903b-4944-a53c-12a1de0b5ca9/job_ce814b8cdc2242d7b72764b2f0b72dd4",
+      "mtime": 1777182317.5808854,
+      "source_key": "02b371bd1842",
+      "title": "The Best Life Advice from Charlie Munger Final Interview",
+      "url_present": true,
+      "segment_count": 53,
+      "speaker_count": 2,
+      "primary_speaker_id": "speaker_b",
+      "primary_share": 0.7888,
+      "non_primary_share": 0.2112,
+      "speaker_role_distribution": {
+        "unknown": 2
+      },
+      "speakers": {
+        "speaker_a": {
+          "speaker_id": "speaker_a",
+          "display_name": "贝基·奎克",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 113175,
+          "duration_share": 0.2112,
+          "segment_count": 28,
+          "short_segment_count": 22,
+          "short_segment_rate": 0.7857,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_b": {
+          "speaker_id": "speaker_b",
+          "display_name": "查理·芒格",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 422804,
+          "duration_share": 0.7888,
+          "segment_count": 25,
+          "short_segment_count": 9,
+          "short_segment_rate": 0.36,
+          "reason": "",
+          "review_hint": ""
+        }
+      },
+      "risk_level": "high",
+      "risk_reasons": [
+        "high_force_dsp",
+        "missing_speaker_structure_metadata"
+      ],
+      "rewrite_count": 39,
+      "pre_tts_rewrite_count": 26,
+      "pre_tts_contradiction_count": 4,
+      "first_pass_abs_error_avg": 0.717,
+      "first_pass_abs_error_p50": 0.2216,
+      "first_pass_abs_error_p90": 2.1838,
+      "alignment_method_distribution": {
+        "direct": 8,
+        "force_dsp": 24,
+        "dsp": 12,
+        "rewrite_dsp": 4,
+        "rewrite_direct": 5
+      },
+      "force_dsp_count": 24,
+      "short_force_dsp_count": 5,
+      "needs_review_count": 7,
+      "force_dsp_review_suppressed_count": 0,
+      "short_merge_applied_count": 0,
+      "short_merge_blocked_cross_speaker_count": 0,
+      "verifier": {
+        "enabled": false
+      },
+      "samples": {
+        "speaker_a": [
+          {
+            "segment_id": 1,
+            "duration_s": 17.4,
+            "method": "direct",
+            "severity": "",
+            "source_text": "Part of the advice that you give people in life is pretty basic stuff, but if you follow it, it's really excellent advice. I think your first one is, is have lo",
+            "cn_text": "你给人们的一些人生建议其实都很基础，但如果照做绝对是非常棒的建议。我想你的第一条是降低期望值。第二条是保持良好的幽默感。第三条显然是让亲朋好友的爱环绕着自己。"
+          },
+          {
+            "segment_id": 3,
+            "duration_s": 4.1,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "I have a hard time thinking of a time when you set your expectations low though.",
+            "cn_text": "不过我很难想象，你什么时候期望值低过。"
+          },
+          {
+            "segment_id": 5,
+            "duration_s": 0.3,
+            "method": "force_dsp",
+            "severity": "",
+            "source_text": "How so?",
+            "cn_text": "怎么说？"
+          },
+          {
+            "segment_id": 8,
+            "duration_s": 0.1,
+            "method": "force_dsp",
+            "severity": "",
+            "source_text": "Right.",
+            "cn_text": "对。"
+          }
+        ]
+      }
+    },
+    {
+      "job_id": "job_67009391e2d1425eb52728aca4995130",
+      "project_dir": "/mnt/HC_Volume_105524101/aivideotrans/projects/342bbde3-903b-4944-a53c-12a1de0b5ca9/job_67009391e2d1425eb52728aca4995130",
+      "mtime": 1777178084.777019,
+      "source_key": "a7caa3c85f5f",
+      "title": "Why this Chinese EV terrifies Europe’s carmakers",
+      "url_present": true,
+      "segment_count": 65,
+      "speaker_count": 10,
+      "primary_speaker_id": "speaker_b",
+      "primary_share": 0.4242,
+      "non_primary_share": 0.5759,
+      "speaker_role_distribution": {
+        "unknown": 10
+      },
+      "speakers": {
+        "speaker_a": {
+          "speaker_id": "speaker_a",
+          "display_name": "未知说话人1",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 32573,
+          "duration_share": 0.0443,
+          "segment_count": 1,
+          "short_segment_count": 0,
+          "short_segment_rate": 0.0,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_b": {
+          "speaker_id": "speaker_b",
+          "display_name": "汤姆·麦肯齐",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 312011,
+          "duration_share": 0.4242,
+          "segment_count": 21,
+          "short_segment_count": 5,
+          "short_segment_rate": 0.2381,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_d": {
+          "speaker_id": "speaker_d",
+          "display_name": "未知说话人2",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 14569,
+          "duration_share": 0.0198,
+          "segment_count": 2,
+          "short_segment_count": 1,
+          "short_segment_rate": 0.5,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_e": {
+          "speaker_id": "speaker_e",
+          "display_name": "埃隆·马斯克",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 1509,
+          "duration_share": 0.0021,
+          "segment_count": 2,
+          "short_segment_count": 2,
+          "short_segment_rate": 1.0,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_f": {
+          "speaker_id": "speaker_f",
+          "display_name": "汤姆·麦肯齐",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 86685,
+          "duration_share": 0.1179,
+          "segment_count": 16,
+          "short_segment_count": 13,
+          "short_segment_rate": 0.8125,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_g": {
+          "speaker_id": "speaker_g",
+          "display_name": "瑞安·费舍尔",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 90510,
+          "duration_share": 0.1231,
+          "segment_count": 6,
+          "short_segment_count": 2,
+          "short_segment_rate": 0.3333,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_h": {
+          "speaker_id": "speaker_h",
+          "display_name": "吉姆·法利",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 23958,
+          "duration_share": 0.0326,
+          "segment_count": 2,
+          "short_segment_count": 0,
+          "short_segment_rate": 0.0,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_c": {
+          "speaker_id": "speaker_c",
+          "display_name": "李柯",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 139097,
+          "duration_share": 0.1891,
+          "segment_count": 11,
+          "short_segment_count": 7,
+          "short_segment_rate": 0.6364,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_i": {
+          "speaker_id": "speaker_i",
+          "display_name": "未知说话人3",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 9041,
+          "duration_share": 0.0123,
+          "segment_count": 1,
+          "short_segment_count": 0,
+          "short_segment_rate": 0.0,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_j": {
+          "speaker_id": "speaker_j",
+          "display_name": "阿尔弗雷多·阿尔塔维拉",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 25531,
+          "duration_share": 0.0347,
+          "segment_count": 3,
+          "short_segment_count": 1,
+          "short_segment_rate": 0.3333,
+          "reason": "",
+          "review_hint": ""
+        }
+      },
+      "risk_level": "high",
+      "risk_reasons": [
+        "high_force_dsp",
+        "missing_speaker_structure_metadata"
+      ],
+      "rewrite_count": 31,
+      "pre_tts_rewrite_count": 25,
+      "pre_tts_contradiction_count": 8,
+      "first_pass_abs_error_avg": 0.3317,
+      "first_pass_abs_error_p50": 0.0922,
+      "first_pass_abs_error_p90": 0.8274,
+      "alignment_method_distribution": {
+        "direct": 33,
+        "dsp": 15,
+        "rewrite_direct": 4,
+        "force_dsp": 13
+      },
+      "force_dsp_count": 13,
+      "short_force_dsp_count": 2,
+      "needs_review_count": 5,
+      "force_dsp_review_suppressed_count": 0,
+      "short_merge_applied_count": 0,
+      "short_merge_blocked_cross_speaker_count": 0,
+      "verifier": {
+        "enabled": false
+      },
+      "samples": {
+        "speaker_a": [
+          {
+            "segment_id": 1,
+            "duration_s": 32.6,
+            "method": "direct",
+            "severity": "",
+            "source_text": "This is a story about changes that are too big to ignore. For many years, the global car market has been dominated by the same small group— countries like Japan",
+            "cn_text": "这是一个关于不容忽视的巨变的故事。多年来，全球汽车市场一直被少数几个国家主导——比如日本、德国和美国。但现在不同了。在短短5年时间里，中国超越了世界上那些最大的汽车制造国，从第六名一跃成为第一名。现在，中国出口的汽车数量比美国和日本加起来还"
+          }
+        ],
+        "speaker_c": [
+          {
+            "segment_id": 22,
+            "duration_s": 6.5,
+            "method": "direct",
+            "severity": "",
+            "source_text": "Yeah, very good question. Paris is the country— is the city full of energy and also art.",
+            "cn_text": "嗯，非常好的问题。巴黎这个国家——这座城市充满了活力，也充满艺术气息。"
+          },
+          {
+            "segment_id": 24,
+            "duration_s": 36.5,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "So, you know, I joined BYD when BYD is a very small company. They started with 20 people, $350,000 investment. So I joined BYD the second year. My first job is ",
+            "cn_text": "所以，你知道的，我加入比亚迪时，它还是家非常小的公司。他们起步时只有20个人，35万美元投资。我是第二年加入比亚迪的。我的第一份工作是海外市场推广经理。所以我在1997年去了香港，设立了第一个，怎么讲呢，类似国际办公室的机构。然后在1999"
+          },
+          {
+            "segment_id": 27,
+            "duration_s": 34.1,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "Two things. One is technology. To today, like, we have 120,000 R&D engineers. We invent 52 patents per day. The second is BYD have very strong vehicle integrati",
+            "cn_text": "有两点。一是技术。到今天，可以说，我们有12万名研发工程师。我们每天发明52项专利。第二点是比亚迪拥有非常强大的整车集成能力。这意味着什么呢？这意味着，可以说，我们的创新速度要快得多。我们能做出的酷炫东西比任何人都多。这就是为什么你在过去两"
+          },
+          {
+            "segment_id": 33,
+            "duration_s": 4.8,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "all the cool technology in this car, yeah, I did not see any competition here.",
+            "cn_text": "这辆车搭载这么多酷炫的技术，是的，我觉得它没有对手。"
+          }
+        ],
+        "speaker_d": [
+          {
+            "segment_id": 5,
+            "duration_s": 13.4,
+            "method": "rewrite_direct",
+            "severity": "",
+            "source_text": "There's competitors now ramping up. And as you're familiar with BYD, which is also on the West Coast, I think they're ramping up production of their electric ve",
+            "cn_text": "现在竞争对手正发力。你应该熟悉同在西海岸的比亚迪，他们正提高电动车产量。巴菲特有他们10%的股份。你笑什么？比亚迪正努力竞争。为什么笑？"
+          },
+          {
+            "segment_id": 7,
+            "duration_s": 1.2,
+            "method": "force_dsp",
+            "severity": "",
+            "source_text": "You don't see them at all as a competitor?",
+            "cn_text": "你完全不把他们当竞争对手？"
+          }
+        ],
+        "speaker_e": [
+          {
+            "segment_id": 6,
+            "duration_s": 1.3,
+            "method": "force_dsp",
+            "severity": "",
+            "source_text": "Um, have you seen their car?",
+            "cn_text": "嗯，你见过他们的车吗？"
+          },
+          {
+            "segment_id": 8,
+            "duration_s": 0.2,
+            "method": "force_dsp",
+            "severity": "",
+            "source_text": "No.",
+            "cn_text": "没有。"
+          }
+        ],
+        "speaker_f": [
+          {
+            "segment_id": 10,
+            "duration_s": 3.7,
+            "method": "direct",
+            "severity": "",
+            "source_text": "How would you characterize BYD's growth in, in recent years?",
+            "cn_text": "你会如何形容比亚迪近年来的增长？"
+          },
+          {
+            "segment_id": 14,
+            "duration_s": 4.6,
+            "method": "direct",
+            "severity": "",
+            "source_text": "You come from the industry, Ryan. How, how is BYD viewed within the industry?",
+            "cn_text": "你来自这个行业，瑞安。业内是，是如何看待比亚迪的？"
+          },
+          {
+            "segment_id": 21,
+            "duration_s": 0.5,
+            "method": "force_dsp",
+            "severity": "",
+            "source_text": "Why Paris?",
+            "cn_text": "为何巴黎？"
+          },
+          {
+            "segment_id": 26,
+            "duration_s": 6.0,
+            "method": "direct",
+            "severity": "",
+            "source_text": "What do you think the biggest structural advantage is that BYD has over its competitors?",
+            "cn_text": "你认为比亚迪相比竞争对手最大的结构性优势是什么？"
+          }
+        ],
+        "speaker_g": [
+          {
+            "segment_id": 11,
+            "duration_s": 0.8,
+            "method": "force_dsp",
+            "severity": "",
+            "source_text": "Yeah, explosive.",
+            "cn_text": "对，爆炸。"
+          },
+          {
+            "segment_id": 13,
+            "duration_s": 10.3,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "They've, from 2021, gone from like barely, uh, on the map, if you know what I mean, if you look at the chart, to having, uh, 4 million plus sales and being in t",
+            "cn_text": "从2021年开始，他们从几乎默默无闻，你懂我的意思吧，如果你看图表的话，发展到拥有超过400万销量，跻身全球十大汽车制造商。"
+          },
+          {
+            "segment_id": 15,
+            "duration_s": 5.2,
+            "method": "force_dsp",
+            "severity": "",
+            "source_text": "Similar to Musk's comment, like, who are these? I think now people are changing it to, oh yeah, we're kind of scared.",
+            "cn_text": "像马斯克说的，这些是谁？现在人们变成了，对，我们有点怕。"
+          },
+          {
+            "segment_id": 35,
+            "duration_s": 10.1,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "When you think about their advantage in batteries that they've managed to produce, it, it does seem kind of like, um, incredible. They've come out with the gold",
+            "cn_text": "想到他们造出的电池优势，这确实让人觉得不可思议。他们就像是拿出了金蛋。他们以极快的速度做到了，用最好的技术，最优惠的价格。"
+          }
+        ],
+        "speaker_h": [
+          {
+            "segment_id": 17,
+            "duration_s": 8.7,
+            "method": "direct",
+            "severity": "",
+            "source_text": "It's the most humbling thing I've ever seen. Their cost, their quality of their vehicles is far superior, um, to what I see in the West.",
+            "cn_text": "这是我见过最让人自愧不如的事。他们的成本，车辆的质量，呃，远远优于我在西方看到的水平。"
+          },
+          {
+            "segment_id": 64,
+            "duration_s": 15.2,
+            "method": "direct",
+            "severity": "",
+            "source_text": "I've never seen a competition like this. The government bet on EVs before anyone else in the world. They're the largest market in the world, and now they're the",
+            "cn_text": "我从未见过这样的竞争。他们的政府比全球任何人都更早押注电动汽车。他们是全球最大也是最重要的市场。我们能竞争并获胜，但必须拿出看家本领，还要学习很多新东西。"
+          }
+        ],
+        "speaker_i": [
+          {
+            "segment_id": 28,
+            "duration_s": 9.0,
+            "method": "direct",
+            "severity": "",
+            "source_text": "It's capable of well over 300 miles an hour. This feels like China turning up and just saying, um, yeah, we'll have all the records.",
+            "cn_text": "它的时速能远超300英里。这感觉就像是中国突然出现，然后说，嗯，是的，我们要打破所有的记录。"
+          }
+        ],
+        "speaker_j": [
+          {
+            "segment_id": 42,
+            "duration_s": 12.5,
+            "method": "direct",
+            "severity": "",
+            "source_text": "BYD has never been and will never be a low-cost player in any segment. Our main selling argument is value for money.",
+            "cn_text": "比亚迪从来不是，也永远不会是任何细分市场里的低成本玩家。我们最主要的卖点，其实是物超所值。"
+          },
+          {
+            "segment_id": 45,
+            "duration_s": 12.8,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "I won't answer with our volume target because you will not believe me, um, but certainly we, we want to be one of the key players in this, uh, industry, uh, on ",
+            "cn_text": "我不会用我们的销量目标来回答你，因为你肯定不信，嗯，但毫无疑问，我们希望成为这个行业里的关键玩家之一，在全球范围内。"
+          },
+          {
+            "segment_id": 47,
+            "duration_s": 0.2,
+            "method": "force_dsp",
+            "severity": "",
+            "source_text": "Quite worried.",
+            "cn_text": "很担心。"
+          }
+        ]
+      }
+    },
+    {
+      "job_id": "job_877146b2c9bc4e67816c2cc2e472413f",
+      "project_dir": "/mnt/HC_Volume_105524101/aivideotrans/projects/342bbde3-903b-4944-a53c-12a1de0b5ca9/job_877146b2c9bc4e67816c2cc2e472413f",
+      "mtime": 1777175094.105455,
+      "source_key": "bc7d40a11ad0",
+      "title": "Nvidia CEO Jensen Huang: AI is going to fundamentally change how we compute everything",
+      "url_present": true,
+      "segment_count": 16,
+      "speaker_count": 3,
+      "primary_speaker_id": "speaker_b",
+      "primary_share": 0.63,
+      "non_primary_share": 0.3699,
+      "speaker_role_distribution": {
+        "unknown": 3
+      },
+      "speakers": {
+        "speaker_a": {
+          "speaker_id": "speaker_a",
+          "display_name": "斯科特",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 89870,
+          "duration_share": 0.1759,
+          "segment_count": 5,
+          "short_segment_count": 0,
+          "short_segment_rate": 0.0,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_b": {
+          "speaker_id": "speaker_b",
+          "display_name": "黄仁勋",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 321837,
+          "duration_share": 0.63,
+          "segment_count": 8,
+          "short_segment_count": 0,
+          "short_segment_rate": 0.0,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_c": {
+          "speaker_id": "speaker_c",
+          "display_name": "未知说话人1",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 99120,
+          "duration_share": 0.194,
+          "segment_count": 3,
+          "short_segment_count": 0,
+          "short_segment_rate": 0.0,
+          "reason": "",
+          "review_hint": ""
+        }
+      },
+      "risk_level": "low",
+      "risk_reasons": [
+        "missing_speaker_structure_metadata"
+      ],
+      "rewrite_count": 13,
+      "pre_tts_rewrite_count": 0,
+      "pre_tts_contradiction_count": 0,
+      "first_pass_abs_error_avg": 0.147,
+      "first_pass_abs_error_p50": 0.1533,
+      "first_pass_abs_error_p90": 0.2015,
+      "alignment_method_distribution": {
+        "dsp": 5,
+        "rewrite_dsp": 2,
+        "rewrite_direct": 5,
+        "force_dsp": 2,
+        "direct": 2
+      },
+      "force_dsp_count": 2,
+      "short_force_dsp_count": 0,
+      "needs_review_count": 2,
+      "force_dsp_review_suppressed_count": 0,
+      "short_merge_applied_count": 0,
+      "short_merge_blocked_cross_speaker_count": 0,
+      "verifier": {
+        "enabled": false
+      },
+      "samples": {
+        "speaker_a": [
+          {
+            "segment_id": 1,
+            "duration_s": 17.4,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "It's an interesting time to have you, obviously, which any time is, but especially given what's been happening within the market today. Looks a lot different th",
+            "cn_text": "显然，现在请您来访谈是个非常有趣的时刻，当然任何时候请您来都很有趣，但考虑到今天市场的情况，这就尤为特别了。今天的市场看起来和前几天大不相同。市场显然很担心超大规模云服务商的支出情况，以及人工智能领域的大规模扩建。您对此有什么看法？"
+          },
+          {
+            "segment_id": 4,
+            "duration_s": 16.8,
+            "method": "rewrite_direct",
+            "severity": "",
+            "source_text": "So when you see numbers that are frankly remarkable, that $660 billion this year will be spent by the hyperscalers as we continue to learn, like we did from Ama",
+            "cn_text": "所以，当你看到那些坦白说非常惊人的数字，随着我们不断了解到的信息，正如昨晚从亚马逊那里得知的，今年超大规模云服务商将花费6600亿美元，你退一步仔细想一想，根据你目前所看到的实际情况，这完全是合情合理的。"
+          },
+          {
+            "segment_id": 7,
+            "duration_s": 20.7,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "I feel like that's the point that you were— it's an interesting point. It sort of turns the way you need to think about these businesses on its head, that if yo",
+            "cn_text": "我觉得这就是你刚才——这是个很有趣的观点。它在某种程度上颠覆了你需要思考这些企业的方式，如果你只盯着支出方面，就像你早些时候谈到的，哦，他们花掉了自由现金流的很大一部分，那你就有点错失了重点。市场需要去理解并接受这一点。作为一名投资者，你也"
+          },
+          {
+            "segment_id": 11,
+            "duration_s": 18.2,
+            "method": "direct",
+            "severity": "",
+            "source_text": "How can we be so certain that the amount of compute we think we'll need and that we continue to hear from CEOs, like you that we will need is actually going to ",
+            "cn_text": "我们怎么能如此确定，我们认为需要的算力，以及我们不断从像您这样的首席执行官那里听到的我们将会需要的算力，真的会成为现实呢？难道我们在某个时候不可避免地会做得过火，但直到为时已晚我们才会意识到吗？"
+          }
+        ],
+        "speaker_c": [
+          {
+            "segment_id": 8,
+            "duration_s": 39.6,
+            "method": "direct",
+            "severity": "",
+            "source_text": "Yes. If you— to You turn the clock back, Scott, to 2008, 2009, right? Amazon could have taken their profits and sent them back to us by way of dividends. Instea",
+            "cn_text": "是的。如果你——如果你把时间倒回，斯科特，回到2008年、2009年，对吧？亚马逊本可以把他们的利润拿出来，通过股息的方式发给我们。相反，杰夫·贝索斯说，我要投资这个叫亚马逊云科技的东西。你可以把它想象成挖金矿。你必须花很多钱去挖金矿，然后"
+          },
+          {
+            "segment_id": 9,
+            "duration_s": 42.8,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "As an investor, I'll just tell you this. I want my personal net worth. I want my funds net worth levered against AI because all human progress is gonna be deriv",
+            "cn_text": "作为一名投资者，我只想告诉你这一点。我希望我个人的净资产，我希望我基金的净资产能跟人工智能挂钩，因为所有人类的进步都将源于机器帮助人类思考并增强人类的思维。因此，无论是持有英伟达，这是我们最大的公开头寸，还是 Anthropic 或 Ope"
+          },
+          {
+            "segment_id": 10,
+            "duration_s": 16.7,
+            "method": "rewrite_direct",
+            "severity": "",
+            "source_text": "How can it just— it's incredible that OpenAI and Anthropic are $20 billion run rate companies, profit generating, profitable revenues and accelerating growth al",
+            "cn_text": "说实话，令人难以置信的是，OpenAI 和 Anthropic 已经是年化收入200亿美元的公司了，它们不仅在创造利润，而且同时还在加速增长。这真的非常了不起，但从我们的角度来看，这完全合情合理。"
+          }
+        ]
+      }
+    },
+    {
+      "job_id": "job_abb3fedc905c403db67d784c480c170e",
+      "project_dir": "/mnt/HC_Volume_105524101/aivideotrans/projects/342bbde3-903b-4944-a53c-12a1de0b5ca9/job_abb3fedc905c403db67d784c480c170e",
+      "mtime": 1777173951.9208481,
+      "source_key": "29d30c18ed89",
+      "title": "The Best Life Advice from Charlie Munger Final Interview",
+      "url_present": true,
+      "segment_count": 53,
+      "speaker_count": 2,
+      "primary_speaker_id": "speaker_b",
+      "primary_share": 0.7781,
+      "non_primary_share": 0.2219,
+      "speaker_role_distribution": {
+        "unknown": 2
+      },
+      "speakers": {
+        "speaker_a": {
+          "speaker_id": "speaker_a",
+          "display_name": "贝基·奎克",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 118804,
+          "duration_share": 0.2219,
+          "segment_count": 29,
+          "short_segment_count": 23,
+          "short_segment_rate": 0.7931,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_b": {
+          "speaker_id": "speaker_b",
+          "display_name": "查理·芒格",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 416614,
+          "duration_share": 0.7781,
+          "segment_count": 24,
+          "short_segment_count": 8,
+          "short_segment_rate": 0.3333,
+          "reason": "",
+          "review_hint": ""
+        }
+      },
+      "risk_level": "high",
+      "risk_reasons": [
+        "high_force_dsp",
+        "missing_speaker_structure_metadata"
+      ],
+      "rewrite_count": 38,
+      "pre_tts_rewrite_count": 24,
+      "pre_tts_contradiction_count": 5,
+      "first_pass_abs_error_avg": 0.6952,
+      "first_pass_abs_error_p50": 0.1832,
+      "first_pass_abs_error_p90": 2.0783,
+      "alignment_method_distribution": {
+        "direct": 14,
+        "force_dsp": 22,
+        "dsp": 9,
+        "rewrite_direct": 7,
+        "rewrite_dsp": 1
+      },
+      "force_dsp_count": 22,
+      "short_force_dsp_count": 3,
+      "needs_review_count": 5,
+      "force_dsp_review_suppressed_count": 0,
+      "short_merge_applied_count": 0,
+      "short_merge_blocked_cross_speaker_count": 0,
+      "verifier": {
+        "enabled": false
+      },
+      "samples": {
+        "speaker_a": [
+          {
+            "segment_id": 1,
+            "duration_s": 17.4,
+            "method": "direct",
+            "severity": "",
+            "source_text": "Part of the advice that you give people in life is pretty basic stuff, but if you follow it, it's really excellent advice. I think your first one is, is have lo",
+            "cn_text": "你给人们的人生建议其实是非常基础的道理，但如果照做，绝对是极好的建议。我想第一条是降低期望值。第二条是保持良好的幽默感。第三条显然是让身边充满朋友和家人的爱。"
+          },
+          {
+            "segment_id": 3,
+            "duration_s": 4.1,
+            "method": "direct",
+            "severity": "",
+            "source_text": "I have a hard time thinking of a time when you set your expectations low though.",
+            "cn_text": "不过我很难想到你哪次降低过期望值。"
+          },
+          {
+            "segment_id": 5,
+            "duration_s": 0.3,
+            "method": "force_dsp",
+            "severity": "",
+            "source_text": "How so?",
+            "cn_text": "怎么说？"
+          },
+          {
+            "segment_id": 8,
+            "duration_s": 0.1,
+            "method": "force_dsp",
+            "severity": "",
+            "source_text": "Right.",
+            "cn_text": "对。"
+          }
+        ]
+      }
+    },
+    {
+      "job_id": "job_d3ca1fb8bf0b42efb906be716ac6995c",
+      "project_dir": "/mnt/HC_Volume_105524101/aivideotrans/projects/342bbde3-903b-4944-a53c-12a1de0b5ca9/job_d3ca1fb8bf0b42efb906be716ac6995c",
+      "mtime": 1777168502.8688374,
+      "source_key": "29d30c18ed89",
+      "title": "The Best Life Advice from Charlie Munger Final Interview",
+      "url_present": true,
+      "segment_count": 53,
+      "speaker_count": 2,
+      "primary_speaker_id": "speaker_b",
+      "primary_share": 0.7888,
+      "non_primary_share": 0.2112,
+      "speaker_role_distribution": {
+        "unknown": 2
+      },
+      "speakers": {
+        "speaker_a": {
+          "speaker_id": "speaker_a",
+          "display_name": "未知说话人1",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 113175,
+          "duration_share": 0.2112,
+          "segment_count": 28,
+          "short_segment_count": 22,
+          "short_segment_rate": 0.7857,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_b": {
+          "speaker_id": "speaker_b",
+          "display_name": "查理·芒格",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 422676,
+          "duration_share": 0.7888,
+          "segment_count": 25,
+          "short_segment_count": 9,
+          "short_segment_rate": 0.36,
+          "reason": "",
+          "review_hint": ""
+        }
+      },
+      "risk_level": "high",
+      "risk_reasons": [
+        "high_force_dsp",
+        "missing_speaker_structure_metadata"
+      ],
+      "rewrite_count": 37,
+      "pre_tts_rewrite_count": 24,
+      "pre_tts_contradiction_count": 7,
+      "first_pass_abs_error_avg": 0.6899,
+      "first_pass_abs_error_p50": 0.1936,
+      "first_pass_abs_error_p90": 1.5727,
+      "alignment_method_distribution": {
+        "rewrite_dsp": 5,
+        "force_dsp": 24,
+        "direct": 14,
+        "dsp": 7,
+        "rewrite_direct": 3
+      },
+      "force_dsp_count": 24,
+      "short_force_dsp_count": 4,
+      "needs_review_count": 8,
+      "force_dsp_review_suppressed_count": 0,
+      "short_merge_applied_count": 0,
+      "short_merge_blocked_cross_speaker_count": 0,
+      "verifier": {
+        "enabled": false
+      },
+      "samples": {
+        "speaker_a": [
+          {
+            "segment_id": 1,
+            "duration_s": 17.4,
+            "method": "rewrite_dsp",
+            "severity": "",
+            "source_text": "Part of the advice that you give people in life is pretty basic stuff, but if you follow it, it's really excellent advice. I think your first one is, is have lo",
+            "cn_text": "你给人们的一些人生建议其实很基础，但如果照做的话绝对是非常棒的。我想第一条是保持较低的期望值，第二条是有良好的幽默感，第三条显然是让亲友的爱围绕着你。"
+          },
+          {
+            "segment_id": 3,
+            "duration_s": 4.1,
+            "method": "direct",
+            "severity": "",
+            "source_text": "I have a hard time thinking of a time when you set your expectations low though.",
+            "cn_text": "不过很难想象你会把期望定得很低。"
+          },
+          {
+            "segment_id": 5,
+            "duration_s": 0.3,
+            "method": "force_dsp",
+            "severity": "",
+            "source_text": "How so?",
+            "cn_text": "怎么说？"
+          },
+          {
+            "segment_id": 8,
+            "duration_s": 0.1,
+            "method": "force_dsp",
+            "severity": "",
+            "source_text": "Right.",
+            "cn_text": "对。"
+          }
+        ]
+      }
+    },
+    {
+      "job_id": "job_74860805483b4596877b8706195a5e30",
+      "project_dir": "/mnt/HC_Volume_105524101/aivideotrans/projects/342bbde3-903b-4944-a53c-12a1de0b5ca9/job_74860805483b4596877b8706195a5e30",
+      "mtime": 1777165743.73597,
+      "source_key": "964adf70a9a1",
+      "title": "What the Fed Can Do About Anthropic’s Latest System",
+      "url_present": true,
+      "segment_count": 26,
+      "speaker_count": 5,
+      "primary_speaker_id": "speaker_e",
+      "primary_share": 0.4814,
+      "non_primary_share": 0.5186,
+      "speaker_role_distribution": {
+        "unknown": 5
+      },
+      "speakers": {
+        "speaker_a": {
+          "speaker_id": "speaker_a",
+          "display_name": "大卫·韦斯廷",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 109069,
+          "duration_share": 0.1932,
+          "segment_count": 11,
+          "short_segment_count": 3,
+          "short_segment_rate": 0.2727,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_b": {
+          "speaker_id": "speaker_b",
+          "display_name": "未知说话人1",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 19731,
+          "duration_share": 0.0349,
+          "segment_count": 1,
+          "short_segment_count": 0,
+          "short_segment_rate": 0.0,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_c": {
+          "speaker_id": "speaker_c",
+          "display_name": "未知说话人2",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 14433,
+          "duration_share": 0.0256,
+          "segment_count": 1,
+          "short_segment_count": 0,
+          "short_segment_rate": 0.0,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_d": {
+          "speaker_id": "speaker_d",
+          "display_name": "凯瑟琳·贾奇",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 149593,
+          "duration_share": 0.2649,
+          "segment_count": 5,
+          "short_segment_count": 0,
+          "short_segment_rate": 0.0,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_e": {
+          "speaker_id": "speaker_e",
+          "display_name": "玛格丽特·米切尔",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 271809,
+          "duration_share": 0.4814,
+          "segment_count": 8,
+          "short_segment_count": 0,
+          "short_segment_rate": 0.0,
+          "reason": "",
+          "review_hint": ""
+        }
+      },
+      "risk_level": "low",
+      "risk_reasons": [
+        "missing_speaker_structure_metadata"
+      ],
+      "rewrite_count": 12,
+      "pre_tts_rewrite_count": 10,
+      "pre_tts_contradiction_count": 7,
+      "first_pass_abs_error_avg": 0.0749,
+      "first_pass_abs_error_p50": 0.0689,
+      "first_pass_abs_error_p90": 0.1208,
+      "alignment_method_distribution": {
+        "direct": 17,
+        "rewrite_direct": 1,
+        "dsp": 7,
+        "rewrite_dsp": 1
+      },
+      "force_dsp_count": 0,
+      "short_force_dsp_count": 0,
+      "needs_review_count": 0,
+      "force_dsp_review_suppressed_count": 0,
+      "short_merge_applied_count": 0,
+      "short_merge_blocked_cross_speaker_count": 0,
+      "verifier": {
+        "enabled": false
+      },
+      "samples": {
+        "speaker_a": [
+          {
+            "segment_id": 1,
+            "duration_s": 9.7,
+            "method": "direct",
+            "severity": "",
+            "source_text": "Anthropic has said that its new Mythos preview is too dangerous for public release. And Secretary Bessent and Chair Powell called in the heads of the major bank",
+            "cn_text": "Anthropic 表示新 Mythos 预览版太危险，不宜公开发布。贝森特部长和鲍威尔主席召集各大银行负责人，就此发出警告。"
+          },
+          {
+            "segment_id": 4,
+            "duration_s": 10.5,
+            "method": "direct",
+            "severity": "",
+            "source_text": "Catherine Judge is a professor at Columbia Law School specializing in the Fed. She explained the risks that Mythos could pose for the banking system and what re",
+            "cn_text": "凯瑟琳·贾奇是哥伦比亚大学法学院的教授，专门研究美联储。她解释了 Mythos 可能给银行系统带来的风险，以及监管机构可以如何应对。"
+          },
+          {
+            "segment_id": 6,
+            "duration_s": 9.7,
+            "method": "direct",
+            "severity": "",
+            "source_text": "There is the danger of bad actors getting access to it. Is there a flip side to it also that it may give the banking system and banks some defensive tools, alth",
+            "cn_text": "确实存在恶意行为者获取该技术的危险。但凡事都有两面性，它是不是也能为银行系统和各家银行提供一些防御工具呢？尽管它可能缺乏——"
+          },
+          {
+            "segment_id": 8,
+            "duration_s": 5.3,
+            "method": "direct",
+            "severity": "",
+            "source_text": "The financial system is global, last time I checked. So it's not just a U.S. problem we have here, potentially.",
+            "cn_text": "据我所知，金融系统是全球性的。所以潜在来看，这不仅是美国面临的问题。"
+          }
+        ],
+        "speaker_b": [
+          {
+            "segment_id": 2,
+            "duration_s": 19.7,
+            "method": "direct",
+            "severity": "",
+            "source_text": "Um, I applaud Secretary Bessant for doing that. One of the things we always were focused on, the risks to the banking system, the risk for any kind of cyberatta",
+            "cn_text": "嗯，我非常赞赏贝森特部长这样做的决定。我们一直关注银行系统的风险，以及任何形式的网络攻击。黑客只要潜入，就能随意篡改系统里的0和1。我们有太多东西依赖银行系统了，所以没有比这更重要的事了。"
+          }
+        ],
+        "speaker_c": [
+          {
+            "segment_id": 3,
+            "duration_s": 14.4,
+            "method": "rewrite_direct",
+            "severity": "",
+            "source_text": "We need to do something about it. I don't think there is a framework. You know, everybody is keen to have a framework within which to operate. I don't think the",
+            "cn_text": "我们需要对此采取行动。我认为目前没有框架。大家都渴望有个能遵循的运作框架。但我认为现在还没有真正监管这些事的治理框架。我们需要，确实需要在这方面下功夫。"
+          }
+        ],
+        "speaker_d": [
+          {
+            "segment_id": 5,
+            "duration_s": 18.1,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "The big deal is there are real concerns that this new, much more sophisticated form of AI could detect and likely will detect very meaningful vulnerabilities in",
+            "cn_text": "最关键的是，人们确实担心这种全新的、更复杂的AI能够，而且很可能会发现银行软件中非常重大的漏洞，这会使银行面临网络攻击，从而导致个别银行瘫痪，甚至可能波及更广泛的银行系统。"
+          },
+          {
+            "segment_id": 7,
+            "duration_s": 25.4,
+            "method": "direct",
+            "severity": "",
+            "source_text": "Yeah, I mean, this is always the interesting question is like AI fighting AI and what does that look like? And there's also a question of what that looks like f",
+            "cn_text": "是的，AI对抗AI会是什么场景？这始终是个有趣的问题。同时，这对银行系统结构意味着什么？美国一直有非常分散的银行系统，许多小银行和区域性银行为实体经济提供服务与贷款。所以，如果这种技术在金融系统中绝对不可或缺，谁将有权使用它呢？"
+          },
+          {
+            "segment_id": 9,
+            "duration_s": 20.7,
+            "method": "direct",
+            "severity": "",
+            "source_text": "Not at all. And we've seen both European and Asian regulators speak out and voice significant concerns. And so one of the things that's so interesting about thi",
+            "cn_text": "完全不是。我们已经看到欧洲和亚洲的监管机构都表达了严重关切。所以有趣的是，你不仅需要明确的公私部门协调，还可能进行全球协调，来弄清这些威胁到底是什么，然后看看现实中能做些什么来遏制它们。"
+          },
+          {
+            "segment_id": 11,
+            "duration_s": 35.6,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "Yeah, I mean, one of the real challenges— no bank supervisor is prepared for this, right? So cyber attacks are nothing new. It's a challenge banks have been dea",
+            "cn_text": "是的，真正的挑战之一在于，没有银行监管者对此做好了准备，对吧？网络攻击并不新鲜，这是银行长期都在应对的挑战，监管者也发挥了作用，帮助银行做好准备，应对操作风险等问题。但这完全是另一个层面的问题，威胁量级大幅跃升，没有任何监管机构准备好全面应"
+          }
+        ]
+      }
+    },
+    {
+      "job_id": "job_a621ae11e0d14f19be28aa568477c69c",
+      "project_dir": "/mnt/HC_Volume_105524101/aivideotrans/projects/342bbde3-903b-4944-a53c-12a1de0b5ca9/job_a621ae11e0d14f19be28aa568477c69c",
+      "mtime": 1777164294.40982,
+      "source_key": "08b644933c7d",
+      "title": "Why Anthropic’s Mythos Is Sparking Alarm",
+      "url_present": true,
+      "segment_count": 44,
+      "speaker_count": 8,
+      "primary_speaker_id": "speaker_b",
+      "primary_share": 0.3303,
+      "non_primary_share": 0.6698,
+      "speaker_role_distribution": {
+        "unknown": 8
+      },
+      "speakers": {
+        "speaker_a": {
+          "speaker_id": "speaker_a",
+          "display_name": "未知说话人1",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 109847,
+          "duration_share": 0.194,
+          "segment_count": 10,
+          "short_segment_count": 2,
+          "short_segment_rate": 0.2,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_c": {
+          "speaker_id": "speaker_c",
+          "display_name": "旁白",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 120928,
+          "duration_share": 0.2136,
+          "segment_count": 16,
+          "short_segment_count": 14,
+          "short_segment_rate": 0.875,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_d": {
+          "speaker_id": "speaker_d",
+          "display_name": "未知说话人3",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 127188,
+          "duration_share": 0.2247,
+          "segment_count": 6,
+          "short_segment_count": 0,
+          "short_segment_rate": 0.0,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_h": {
+          "speaker_id": "speaker_h",
+          "display_name": "未知说话人6",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 5770,
+          "duration_share": 0.0102,
+          "segment_count": 1,
+          "short_segment_count": 1,
+          "short_segment_rate": 1.0,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_e": {
+          "speaker_id": "speaker_e",
+          "display_name": "阿诺德·施瓦辛格",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 10401,
+          "duration_share": 0.0184,
+          "segment_count": 1,
+          "short_segment_count": 0,
+          "short_segment_rate": 0.0,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_b": {
+          "speaker_id": "speaker_b",
+          "display_name": "未知说话人2",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 186985,
+          "duration_share": 0.3303,
+          "segment_count": 8,
+          "short_segment_count": 0,
+          "short_segment_rate": 0.0,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_f": {
+          "speaker_id": "speaker_f",
+          "display_name": "未知说话人4",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 2923,
+          "duration_share": 0.0052,
+          "segment_count": 1,
+          "short_segment_count": 1,
+          "short_segment_rate": 1.0,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_g": {
+          "speaker_id": "speaker_g",
+          "display_name": "未知说话人5",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 2105,
+          "duration_share": 0.0037,
+          "segment_count": 1,
+          "short_segment_count": 1,
+          "short_segment_rate": 1.0,
+          "reason": "",
+          "review_hint": ""
+        }
+      },
+      "risk_level": "low",
+      "risk_reasons": [
+        "missing_speaker_structure_metadata"
+      ],
+      "rewrite_count": 35,
+      "pre_tts_rewrite_count": 29,
+      "pre_tts_contradiction_count": 20,
+      "first_pass_abs_error_avg": 0.1008,
+      "first_pass_abs_error_p50": 0.0881,
+      "first_pass_abs_error_p90": 0.1889,
+      "alignment_method_distribution": {
+        "dsp": 9,
+        "direct": 31,
+        "rewrite_direct": 2,
+        "rewrite_dsp": 1,
+        "force_dsp": 1
+      },
+      "force_dsp_count": 1,
+      "short_force_dsp_count": 0,
+      "needs_review_count": 1,
+      "force_dsp_review_suppressed_count": 0,
+      "short_merge_applied_count": 0,
+      "short_merge_blocked_cross_speaker_count": 0,
+      "verifier": {
+        "enabled": false
+      },
+      "samples": {
+        "speaker_a": [
+          {
+            "segment_id": 1,
+            "duration_s": 18.1,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "If you look at the AI sector landscape more broadly, what you've seen is OpenAI's early dominance being challenged increasingly by Anthropic. Anthropic is drawi",
+            "cn_text": "宏观来看AI行业的格局，OpenAI早期的主导地位正日益受到Anthropic的挑战。它正以八千亿美元甚至更高的估值吸引投资者，这让它几乎成为全球最有价值的初创公司。"
+          },
+          {
+            "segment_id": 3,
+            "duration_s": 5.2,
+            "method": "direct",
+            "severity": "",
+            "source_text": "Only a small number of companies outside of Anthropic have access to it, and on a limited basis.",
+            "cn_text": "除Anthropic外，只有极少数公司能有限访问。"
+          },
+          {
+            "segment_id": 8,
+            "duration_s": 9.1,
+            "method": "direct",
+            "severity": "",
+            "source_text": "There are big worries that this, if it falls into the wrong hands, it could essentially lead to some of the greatest cyber risks that humanity's ever faced.",
+            "cn_text": "人们非常担心，如果这项技术落入坏人之手，可能会引发人类有史以来面临的最大网络风险。"
+          },
+          {
+            "segment_id": 12,
+            "duration_s": 8.4,
+            "method": "direct",
+            "severity": "",
+            "source_text": "The US banking sector is obviously systemically super important to the US economy and the global economy. Trillions of dollars go through these banks' pipes eve",
+            "cn_text": "美国银行业显然对美国和全球经济具有系统性影响。每天有数万亿美元通过其管道流转。"
+          }
+        ],
+        "speaker_c": [
+          {
+            "segment_id": 2,
+            "duration_s": 4.4,
+            "method": "direct",
+            "severity": "",
+            "source_text": "Turbocharging the hype is Anthropic's latest model called Mythos.",
+            "cn_text": "Anthropic的Mythos让热潮升温"
+          },
+          {
+            "segment_id": 4,
+            "duration_s": 7.2,
+            "method": "direct",
+            "severity": "",
+            "source_text": "This limited release has been dubbed Project Glasswing, and all the participants include a who's who of Silicon Valley.",
+            "cn_text": "这次限量发布被称为Glasswing项目，参与者囊括了硅谷各路大人物。"
+          },
+          {
+            "segment_id": 6,
+            "duration_s": 7.0,
+            "method": "direct",
+            "severity": "",
+            "source_text": "The unorthodox rollout has generated a lot of publicity, and already there are reports of unauthorized users accessing the model.",
+            "cn_text": "这种非传统的发布引发了大量关注，已有报道称，未授权用户访问了该模型。"
+          },
+          {
+            "segment_id": 9,
+            "duration_s": 7.1,
+            "method": "direct",
+            "severity": "",
+            "source_text": "With massive potential for havoc and the stakes so high, is tech's era of move fast and break things finally over?",
+            "cn_text": "面对巨大破坏潜力和极高风险，科技界“快速行动、打破常规”的时代终于结束了吗？"
+          }
+        ],
+        "speaker_d": [
+          {
+            "segment_id": 5,
+            "duration_s": 29.7,
+            "method": "direct",
+            "severity": "",
+            "source_text": "We know that Apple, Google, Palo Alto Networks, CrowdStrike, the Linux Foundation, Amazon, that are part of this Glasswing project. It's a highly unusual arrang",
+            "cn_text": "我们知道苹果、谷歌、派拓网络、CrowdStrike、Linux 基金会以及亚马逊，都参与了这个Glasswing 项目。可以说这是一种非常罕见的安排。要知道，这些公司可是激烈的竞争对手，都在努力打造最好的模型。而Anthropic不仅向他"
+          },
+          {
+            "segment_id": 7,
+            "duration_s": 16.2,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "This is terribly basic cybersecurity practice 101 that was missed here. We have been hearing about this theoretical threat that AI poses to cybersecurity. And w",
+            "cn_text": "他们在这里忽略了极其基础的网络安全入门常识。我们一直都在听说AI对网络安全构成某种理论上的威胁。而Mythos所证明的是，这种威胁已经真真切切地成为了现实。"
+          },
+          {
+            "segment_id": 10,
+            "duration_s": 17.8,
+            "method": "direct",
+            "severity": "",
+            "source_text": "Um, well, Bloomberg has learned that the Treasury Secretary, Scott Bessant, and Fed Chair Jerome Powell summoned Wall Street leaders to an urgent meeting on con",
+            "cn_text": "嗯，这个嘛，彭博社了解到，财政部长斯科特·贝森特和美联储主席杰罗姆·鲍威尔紧急召集华尔街领导人开会，因为担心Anthropic最新的AI模型会开启网络风险更大的时代。"
+          },
+          {
+            "segment_id": 15,
+            "duration_s": 11.3,
+            "method": "direct",
+            "severity": "",
+            "source_text": "That could be finding issues in a lot of the web services we use, financial payment services, operating systems, like on iPhones and Android.",
+            "cn_text": "这可能意味着，它能在我们使用的许多网络服务、金融支付服务，以及iPhone和安卓等操作系统中发现问题。"
+          }
+        ],
+        "speaker_e": [
+          {
+            "segment_id": 23,
+            "duration_s": 10.4,
+            "method": "direct",
+            "severity": "",
+            "source_text": "I'll be back. But science fiction aside, the ethics of how to deploy AI is rapidly becoming the loudest debate in the industry, and it's central to Anthropic's ",
+            "cn_text": "我会回来的。抛开科幻不谈，AI部署的伦理问题正成为业内最大争议，这也是 Anthropic 创立的初衷。"
+          }
+        ],
+        "speaker_f": [
+          {
+            "segment_id": 31,
+            "duration_s": 2.9,
+            "method": "direct",
+            "severity": "",
+            "source_text": "There's no way they made an AI too powerful to release.",
+            "cn_text": "他们不可能造出不敢发布的AI。"
+          }
+        ],
+        "speaker_g": [
+          {
+            "segment_id": 32,
+            "duration_s": 2.1,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "We're about to be victims of doom marketing.",
+            "cn_text": "我们要被末日营销坑了。"
+          }
+        ],
+        "speaker_h": [
+          {
+            "segment_id": 21,
+            "duration_s": 5.8,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "The engagement that I've had from CEOs in the last week— yeah, uh, in the UK has been significant.",
+            "cn_text": "过去一周，我和首席执行官们的交流——是的，呃，在英国反响很强烈。"
+          }
+        ]
+      }
+    },
+    {
+      "job_id": "job_187fcd0a44164734898466a4bcc26ea9",
+      "project_dir": "/mnt/HC_Volume_105524101/aivideotrans/projects/342bbde3-903b-4944-a53c-12a1de0b5ca9/job_187fcd0a44164734898466a4bcc26ea9",
+      "mtime": 1777161652.4703913,
+      "source_key": "d97c9fdefbe2",
+      "title": "Top 10 Trump voter groups now turning on him",
+      "url_present": true,
+      "segment_count": 18,
+      "speaker_count": 1,
+      "primary_speaker_id": "speaker_a",
+      "primary_share": 1.0,
+      "non_primary_share": 0,
+      "speaker_role_distribution": {
+        "unknown": 1
+      },
+      "speakers": {
+        "speaker_a": {
+          "speaker_id": "speaker_a",
+          "display_name": "哈里·恩滕",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 487544,
+          "duration_share": 1.0,
+          "segment_count": 18,
+          "short_segment_count": 0,
+          "short_segment_rate": 0.0,
+          "reason": "",
+          "review_hint": ""
+        }
+      },
+      "risk_level": "low",
+      "risk_reasons": [
+        "missing_speaker_structure_metadata"
+      ],
+      "rewrite_count": 15,
+      "pre_tts_rewrite_count": 15,
+      "pre_tts_contradiction_count": 3,
+      "first_pass_abs_error_avg": 0.0539,
+      "first_pass_abs_error_p50": 0.0462,
+      "first_pass_abs_error_p90": 0.0709,
+      "alignment_method_distribution": {
+        "direct": 14,
+        "dsp": 4
+      },
+      "force_dsp_count": 0,
+      "short_force_dsp_count": 0,
+      "needs_review_count": 0,
+      "force_dsp_review_suppressed_count": 0,
+      "short_merge_applied_count": 0,
+      "short_merge_blocked_cross_speaker_count": 0,
+      "verifier": {
+        "enabled": false
+      },
+      "samples": {}
+    },
+    {
+      "job_id": "job_ddba907f1cb146c5b8f9914efe4a7ab2",
+      "project_dir": "/mnt/HC_Volume_105524101/aivideotrans/projects/342bbde3-903b-4944-a53c-12a1de0b5ca9/job_ddba907f1cb146c5b8f9914efe4a7ab2",
+      "mtime": 1777133084.52286,
+      "source_key": "b8f73197af50",
+      "title": "‘NEVER underestimate Chinese models’: Netskope CEO on AI-driven cyber threats",
+      "url_present": true,
+      "segment_count": 18,
+      "speaker_count": 3,
+      "primary_speaker_id": "speaker_c",
+      "primary_share": 0.5527,
+      "non_primary_share": 0.4473,
+      "speaker_role_distribution": {
+        "unknown": 3
+      },
+      "speakers": {
+        "speaker_a": {
+          "speaker_id": "speaker_a",
+          "display_name": "未知说话人1",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 195495,
+          "duration_share": 0.3758,
+          "segment_count": 8,
+          "short_segment_count": 2,
+          "short_segment_rate": 0.25,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_b": {
+          "speaker_id": "speaker_b",
+          "display_name": "杰克·克拉克",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 37207,
+          "duration_share": 0.0715,
+          "segment_count": 1,
+          "short_segment_count": 0,
+          "short_segment_rate": 0.0,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_c": {
+          "speaker_id": "speaker_c",
+          "display_name": "桑杰·贝里",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 287554,
+          "duration_share": 0.5527,
+          "segment_count": 9,
+          "short_segment_count": 1,
+          "short_segment_rate": 0.1111,
+          "reason": "",
+          "review_hint": ""
+        }
+      },
+      "risk_level": "low",
+      "risk_reasons": [
+        "missing_speaker_structure_metadata"
+      ],
+      "rewrite_count": 18,
+      "pre_tts_rewrite_count": 14,
+      "pre_tts_contradiction_count": 6,
+      "first_pass_abs_error_avg": 0.2123,
+      "first_pass_abs_error_p50": 0.0786,
+      "first_pass_abs_error_p90": 0.1671,
+      "alignment_method_distribution": {
+        "dsp": 10,
+        "rewrite_direct": 3,
+        "direct": 4,
+        "force_dsp": 1
+      },
+      "force_dsp_count": 1,
+      "short_force_dsp_count": 0,
+      "needs_review_count": 0,
+      "force_dsp_review_suppressed_count": 0,
+      "short_merge_applied_count": 0,
+      "short_merge_blocked_cross_speaker_count": 0,
+      "verifier": {
+        "enabled": false
+      },
+      "samples": {
+        "speaker_a": [
+          {
+            "segment_id": 1,
+            "duration_s": 49.0,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "Well, it was a standing room only audience at the Semaphore World Economy Conference in Washington, D.C. today, where just an hour ago, our Liz Klayman spoke to",
+            "cn_text": "今天华盛顿特区的世界经济大会座无虚席。一小时前，莉兹采访了Anthropic联合创始人杰克·克拉克，谈到上周经济高层的紧急会议。会议讨论了Anthropic最新AI模型Mythos，它发现整个科技界的软件漏洞并引发巨大恐慌。该模型未公开发布"
+          },
+          {
+            "segment_id": 3,
+            "duration_s": 48.9,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "Clark also said get ready for open-weight models from China to have capabilities like Mythos. Cybersecurity firm Netskope— one platform that incorporates AI mod",
+            "cn_text": "克拉克还表示，要做好准备，迎接来自中国的开源模型具备类似Mythos的能力。网络安全公司Netskope是一个整合了AI模型、帮助企业防范黑客并保护敏感数据的平台。现在我们请出Netskope CEO桑杰·贝里，这是福克斯商业频道的独家采访"
+          },
+          {
+            "segment_id": 5,
+            "duration_s": 15.2,
+            "method": "rewrite_direct",
+            "severity": "",
+            "source_text": "I mean, Linux— they found, uh, vulnerabilities in Linux, uh, 27-year-old, 30-year-old vulnerabilities in some of these programs, which I found Uh, obviously con",
+            "cn_text": "我是说，他们发现了Linux中的漏洞，呃，其中一些程序里有27年、30年历史的漏洞，我发现这显然令人担忧。他提到中国在开发阶段紧随其后，那么你对此怎么看？"
+          },
+          {
+            "segment_id": 7,
+            "duration_s": 7.4,
+            "method": "direct",
+            "severity": "",
+            "source_text": "The New York Times called this a terrifying warning sign because they saw it. They were— they experienced it. Do you think that China already has this capabilit",
+            "cn_text": "纽约时报称这是可怕的警告信号，因为他们亲身经历了。你认为中国已有这种能力吗？"
+          }
+        ],
+        "speaker_b": [
+          {
+            "segment_id": 2,
+            "duration_s": 37.2,
+            "method": "rewrite_direct",
+            "severity": "",
+            "source_text": "The moment it came off the line, we started running the tests that we've been developing for the past few months. It blew every single benchmark we had out of t",
+            "cn_text": "模型刚一上线，我们就开始运行过去几个月一直在开发的测试。结果它彻底打破了我们所有的基准记录。当应用于火狐浏览器、Windows等外部软件时，我们发现了似乎是全新的漏洞。就在那时，我们意识到必须采取不同的做法。所以召开这次会议，是因为我们没像"
+          }
+        ]
+      }
+    },
+    {
+      "job_id": "job_b98bdc65841f4254bdc2a410eb6e0939",
+      "project_dir": "/mnt/HC_Volume_105524101/aivideotrans/projects/342bbde3-903b-4944-a53c-12a1de0b5ca9/job_b98bdc65841f4254bdc2a410eb6e0939",
+      "mtime": 1777129618.1488886,
+      "source_key": "88eb341f0659",
+      "title": "Extended interview: Jamie Dimon on AI, Iran and more",
+      "url_present": true,
+      "segment_count": 86,
+      "speaker_count": 2,
+      "primary_speaker_id": "speaker_b",
+      "primary_share": 0.776,
+      "non_primary_share": 0.224,
+      "speaker_role_distribution": {
+        "unknown": 2
+      },
+      "speakers": {
+        "speaker_a": {
+          "speaker_id": "speaker_a",
+          "display_name": "未知说话人1",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 250108,
+          "duration_share": 0.224,
+          "segment_count": 41,
+          "short_segment_count": 29,
+          "short_segment_rate": 0.7073,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_b": {
+          "speaker_id": "speaker_b",
+          "display_name": "杰米·戴蒙",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 866370,
+          "duration_share": 0.776,
+          "segment_count": 45,
+          "short_segment_count": 17,
+          "short_segment_rate": 0.3778,
+          "reason": "",
+          "review_hint": ""
+        }
+      },
+      "risk_level": "high",
+      "risk_reasons": [
+        "high_force_dsp",
+        "missing_speaker_structure_metadata"
+      ],
+      "rewrite_count": 48,
+      "pre_tts_rewrite_count": 32,
+      "pre_tts_contradiction_count": 6,
+      "first_pass_abs_error_avg": 1.046,
+      "first_pass_abs_error_p50": 0.2178,
+      "first_pass_abs_error_p90": 1.7622,
+      "alignment_method_distribution": {
+        "force_dsp": 44,
+        "direct": 18,
+        "dsp": 17,
+        "rewrite_dsp": 6,
+        "rewrite_direct": 1
+      },
+      "force_dsp_count": 44,
+      "short_force_dsp_count": 17,
+      "needs_review_count": 25,
+      "force_dsp_review_suppressed_count": 0,
+      "short_merge_applied_count": 0,
+      "short_merge_blocked_cross_speaker_count": 0,
+      "verifier": {
+        "enabled": false
+      },
+      "samples": {
+        "speaker_a": [
+          {
+            "segment_id": 1,
+            "duration_s": 0.8,
+            "method": "force_dsp",
+            "severity": "",
+            "source_text": "Gene, thank you for doing this.",
+            "cn_text": "吉恩，感谢你接受采访。"
+          },
+          {
+            "segment_id": 3,
+            "duration_s": 7.9,
+            "method": "direct",
+            "severity": "",
+            "source_text": "Uh, you've been writing for many years about the American dream and its troubles. It's fraying, it's struggling. What happened?",
+            "cn_text": "呃，这些年你一直在写美国梦和它的困境。它正在破灭，在挣扎。到底发生了什么？"
+          },
+          {
+            "segment_id": 5,
+            "duration_s": 10.3,
+            "method": "direct",
+            "severity": "",
+            "source_text": "And is it only the lower third? Because, you know, we do polling at CBS and, you know, 3 out of 4 people say it's harder today to raise a family, buy a home, an",
+            "cn_text": "仅仅是底层三分之一吗？因为我们在CBS做过民调，四分之三的人表示，如今养家糊口、买房和找份好工作都变得更难了。"
+          },
+          {
+            "segment_id": 7,
+            "duration_s": 8.2,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "Well, you, you mentioned capital and growth. Uh, there's polling recently that finds only about half the country even has a positive view of capitalism.",
+            "cn_text": "嗯，你，你提到了资本和增长。呃，最近有民调显示，全国只有大约一半的人对资本主义持正面看法。"
+          }
+        ]
+      }
+    },
+    {
+      "job_id": "job_ef0a73e543e64b428dbeb3b3f5741b4f",
+      "project_dir": "/mnt/HC_Volume_105524101/aivideotrans/projects/342bbde3-903b-4944-a53c-12a1de0b5ca9/job_ef0a73e543e64b428dbeb3b3f5741b4f",
+      "mtime": 1777122762.7531097,
+      "source_key": "47727b2dc6b4",
+      "title": "Disappearance of UFO expert Gen. Neil McCasland 'alarming': Coulthart | Jesse Weber Live",
+      "url_present": true,
+      "segment_count": 13,
+      "speaker_count": 2,
+      "primary_speaker_id": "speaker_b",
+      "primary_share": 0.5541,
+      "non_primary_share": 0.4459,
+      "speaker_role_distribution": {
+        "unknown": 2
+      },
+      "speakers": {
+        "speaker_a": {
+          "speaker_id": "speaker_a",
+          "display_name": "杰西·韦伯",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 206331,
+          "duration_share": 0.4459,
+          "segment_count": 7,
+          "short_segment_count": 1,
+          "short_segment_rate": 0.1429,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_b": {
+          "speaker_id": "speaker_b",
+          "display_name": "罗斯·库尔特哈特",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 256370,
+          "duration_share": 0.5541,
+          "segment_count": 6,
+          "short_segment_count": 0,
+          "short_segment_rate": 0.0,
+          "reason": "",
+          "review_hint": ""
+        }
+      },
+      "risk_level": "low",
+      "risk_reasons": [
+        "missing_speaker_structure_metadata"
+      ],
+      "rewrite_count": 6,
+      "pre_tts_rewrite_count": 4,
+      "pre_tts_contradiction_count": 2,
+      "first_pass_abs_error_avg": 0.265,
+      "first_pass_abs_error_p50": 0.0434,
+      "first_pass_abs_error_p90": 0.1074,
+      "alignment_method_distribution": {
+        "direct": 7,
+        "dsp": 4,
+        "force_dsp": 1,
+        "rewrite_direct": 1
+      },
+      "force_dsp_count": 1,
+      "short_force_dsp_count": 0,
+      "needs_review_count": 0,
+      "force_dsp_review_suppressed_count": 0,
+      "short_merge_applied_count": 0,
+      "short_merge_blocked_cross_speaker_count": 0,
+      "verifier": {
+        "enabled": false
+      },
+      "samples": {
+        "speaker_a": [
+          {
+            "segment_id": 1,
+            "duration_s": 37.5,
+            "method": "direct",
+            "severity": "",
+            "source_text": "A 68-year-old retired Air Force officer has been missing since February 27th in Albuquerque, New Mexico. A Silver Alert has been issued, and that's typically re",
+            "cn_text": "一名68岁的退役空军军官自2月27日起在新墨西哥州阿尔伯克基失踪。目前已发布了银色警报，这通常是为失踪的老年人，有时是为有健康问题的人准备的。不过，需要明确的是，这可不是什么普通的失踪老人。不，这是少将威廉·尼尔·麦卡斯兰，他是空军研究实验"
+          },
+          {
+            "segment_id": 2,
+            "duration_s": 63.1,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "And here's where the story really gets strange. The base that he once led, Wright-Patterson Air Force Base, is historically linked to Project Blue Book. This is",
+            "cn_text": "而这正是故事真正变得离奇的地方。他曾领导的莱特-帕特森空军基地，在历史上与蓝皮书计划密切相关。这是美国军方对不明飞行物目击事件的官方调查。麦卡斯兰曾掌管20亿美元的预算和美国最大的机密。所以，当这样的人失踪时，你知道的，人们自然会产生疑问，"
+          },
+          {
+            "segment_id": 4,
+            "duration_s": 39.4,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "He has a wealth of information, a storied career. The circumstances surrounding his disappearance are bizarre, to say the least. No clear direction of travel, n",
+            "cn_text": "他掌握着丰富的信息，有着传奇的职业生涯。他失踪的情况，至少可以说，非常离奇。没有明确的出行方向，也没有确认的衣着。这就是这件事如此古怪的原因。在我们讨论，比如说，有人带走他这种指控之前，呃，我们能不能直接切入正题？我是说，就在宣布即将公开这"
+          },
+          {
+            "segment_id": 6,
+            "duration_s": 22.8,
+            "method": "direct",
+            "severity": "",
+            "source_text": "Well, Iran, I mean, that took center stage. Uh, let me ask you this, speaking of which, just gotta throw it out here. If he was, let's say kidnapped, if he was ",
+            "cn_text": "嗯，伊朗，我是说，那件事成了焦点。呃，让我问你，说到这我不得不提。如果他，比如说被绑架或带走了，谁会想带走他？你会把目光投向哪些国家，然后说，哇，如果他们抓住这家伙，他掌握着丰富的信息和机密，他对我们正在建造或开发的东西会很有用？"
+          }
+        ]
+      }
+    },
+    {
+      "job_id": "job_48a6013c9782424aa424ae8803480b41",
+      "project_dir": "/mnt/HC_Volume_105524101/aivideotrans/projects/342bbde3-903b-4944-a53c-12a1de0b5ca9/job_48a6013c9782424aa424ae8803480b41",
+      "mtime": 1777120757.1650221,
+      "source_key": "10e70955da47",
+      "title": "Just a regular billionaire",
+      "url_present": true,
+      "segment_count": 62,
+      "speaker_count": 3,
+      "primary_speaker_id": "speaker_b",
+      "primary_share": 0.5227,
+      "non_primary_share": 0.4773,
+      "speaker_role_distribution": {
+        "unknown": 3
+      },
+      "speakers": {
+        "speaker_a": {
+          "speaker_id": "speaker_a",
+          "display_name": "未知说话人1",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 182244,
+          "duration_share": 0.4244,
+          "segment_count": 30,
+          "short_segment_count": 22,
+          "short_segment_rate": 0.7333,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_b": {
+          "speaker_id": "speaker_b",
+          "display_name": "沃伦·巴菲特",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 224414,
+          "duration_share": 0.5227,
+          "segment_count": 31,
+          "short_segment_count": 22,
+          "short_segment_rate": 0.7097,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_c": {
+          "speaker_id": "speaker_c",
+          "display_name": "卡罗尔·卢米斯",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 22709,
+          "duration_share": 0.0529,
+          "segment_count": 1,
+          "short_segment_count": 0,
+          "short_segment_rate": 0.0,
+          "reason": "",
+          "review_hint": ""
+        }
+      },
+      "risk_level": "high",
+      "risk_reasons": [
+        "high_force_dsp",
+        "missing_speaker_structure_metadata"
+      ],
+      "rewrite_count": 10,
+      "pre_tts_rewrite_count": 4,
+      "pre_tts_contradiction_count": 2,
+      "first_pass_abs_error_avg": 0.7223,
+      "first_pass_abs_error_p50": 0.4305,
+      "first_pass_abs_error_p90": 1.5172,
+      "alignment_method_distribution": {
+        "direct": 15,
+        "force_dsp": 36,
+        "dsp": 7,
+        "rewrite_dsp": 1,
+        "rewrite_direct": 3
+      },
+      "force_dsp_count": 36,
+      "short_force_dsp_count": 14,
+      "needs_review_count": 24,
+      "force_dsp_review_suppressed_count": 0,
+      "short_merge_applied_count": 0,
+      "short_merge_blocked_cross_speaker_count": 0,
+      "verifier": {
+        "enabled": false
+      },
+      "samples": {
+        "speaker_a": [
+          {
+            "segment_id": 1,
+            "duration_s": 5.0,
+            "method": "direct",
+            "severity": "",
+            "source_text": "Nice wheels. Yeah, well, so how old is this Caddy?",
+            "cn_text": "车不错啊。嗯，那这辆凯迪拉克开了几年了？"
+          },
+          {
+            "segment_id": 3,
+            "duration_s": 18.1,
+            "method": "direct",
+            "severity": "",
+            "source_text": "You think the third richest man in the world might have his own chauffeur, but not Warren Buffett. He prefers being in the driver's seat. Do any of your billion",
+            "cn_text": "你可能觉得世界第三富豪会有专职司机，但沃伦·巴菲特不是这样。他更喜欢自己坐在驾驶座上。你的那些亿万富翁朋友们，有没有拿这辆凯迪拉克跟你开过玩笑，说你居然自己开车，而不是，呃，开辆更拉风的车？"
+          },
+          {
+            "segment_id": 5,
+            "duration_s": 8.3,
+            "method": "direct",
+            "severity": "",
+            "source_text": "On a cold winter morning, Buffett chauffeured me around his hometown of Omaha, Nebraska, pointing out all the hot spots.",
+            "cn_text": "在一个冬晨，巴菲特载着我游览他的家乡内布拉斯加州奥马哈，向我指出各处的热门地点。"
+          },
+          {
+            "segment_id": 7,
+            "duration_s": 1.2,
+            "method": "force_dsp",
+            "severity": "",
+            "source_text": "So what do you have at McDonald's?",
+            "cn_text": "那你去麦当劳都吃些什么？"
+          }
+        ],
+        "speaker_c": [
+          {
+            "segment_id": 37,
+            "duration_s": 22.7,
+            "method": "force_dsp",
+            "severity": "",
+            "source_text": "Well, his biggest strength without doubt is his rationality that he brings to business and investing. And, uh, this is a trait— rationality— that you would thin",
+            "cn_text": "嗯，毫无疑问，他最大的优势就是他在商业和投资中展现出的理性。而且，呃，理性这个特质，你可能会认为很多投资者，呃，都会把它带到工作中。但事实是，呃，他们中的大多数人，在某些关键时刻，往往会被情绪所左右，而他从来不会那样做。"
+          }
+        ]
+      }
+    },
+    {
+      "job_id": "job_2f3f66698b294bdd9025aab28b2adac7",
+      "project_dir": "/mnt/HC_Volume_105524101/aivideotrans/projects/342bbde3-903b-4944-a53c-12a1de0b5ca9/job_2f3f66698b294bdd9025aab28b2adac7",
+      "mtime": 1777116779.5033836,
+      "source_key": "29d30c18ed89",
+      "title": "The Best Life Advice from Charlie Munger Final Interview",
+      "url_present": true,
+      "segment_count": 53,
+      "speaker_count": 2,
+      "primary_speaker_id": "speaker_b",
+      "primary_share": 0.7892,
+      "non_primary_share": 0.2108,
+      "speaker_role_distribution": {
+        "unknown": 2
+      },
+      "speakers": {
+        "speaker_a": {
+          "speaker_id": "speaker_a",
+          "display_name": "贝基·奎克",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 112903,
+          "duration_share": 0.2108,
+          "segment_count": 28,
+          "short_segment_count": 22,
+          "short_segment_rate": 0.7857,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_b": {
+          "speaker_id": "speaker_b",
+          "display_name": "查理·芒格",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 422676,
+          "duration_share": 0.7892,
+          "segment_count": 25,
+          "short_segment_count": 9,
+          "short_segment_rate": 0.36,
+          "reason": "",
+          "review_hint": ""
+        }
+      },
+      "risk_level": "high",
+      "risk_reasons": [
+        "high_force_dsp",
+        "missing_speaker_structure_metadata"
+      ],
+      "rewrite_count": 18,
+      "pre_tts_rewrite_count": 12,
+      "pre_tts_contradiction_count": 6,
+      "first_pass_abs_error_avg": 0.7951,
+      "first_pass_abs_error_p50": 0.2713,
+      "first_pass_abs_error_p90": 1.9839,
+      "alignment_method_distribution": {
+        "rewrite_direct": 4,
+        "force_dsp": 28,
+        "dsp": 10,
+        "direct": 10,
+        "rewrite_dsp": 1
+      },
+      "force_dsp_count": 28,
+      "short_force_dsp_count": 10,
+      "needs_review_count": 28,
+      "force_dsp_review_suppressed_count": 0,
+      "short_merge_applied_count": 0,
+      "short_merge_blocked_cross_speaker_count": 0,
+      "verifier": {
+        "enabled": false
+      },
+      "samples": {
+        "speaker_a": [
+          {
+            "segment_id": 1,
+            "duration_s": 17.4,
+            "method": "rewrite_direct",
+            "severity": "",
+            "source_text": "Part of the advice that you give people in life is pretty basic stuff, but if you follow it, it's really excellent advice. I think your first one is, is have lo",
+            "cn_text": "你给人们的人生建议其实挺基础的，但如果照做的话绝对非常棒。我想你的第一点是降低期望值，第二点是保持幽默感，而第三点显然就是，让身边充满家人和朋友的爱。"
+          },
+          {
+            "segment_id": 3,
+            "duration_s": 4.1,
+            "method": "force_dsp",
+            "severity": "",
+            "source_text": "I have a hard time thinking of a time when you set your expectations low though.",
+            "cn_text": "不过我很难想象，你什么时候会把自己的期望值定得很低。"
+          },
+          {
+            "segment_id": 5,
+            "duration_s": 0.3,
+            "method": "force_dsp",
+            "severity": "",
+            "source_text": "How so?",
+            "cn_text": "怎么说？"
+          },
+          {
+            "segment_id": 8,
+            "duration_s": 0.1,
+            "method": "force_dsp",
+            "severity": "",
+            "source_text": "Right.",
+            "cn_text": "对。"
+          }
+        ]
+      }
+    },
+    {
+      "job_id": "job_58a6fb6a7eac46dc9e5d2811ded8bd38",
+      "project_dir": "/mnt/HC_Volume_105524101/aivideotrans/projects/342bbde3-903b-4944-a53c-12a1de0b5ca9/job_58a6fb6a7eac46dc9e5d2811ded8bd38",
+      "mtime": 1777113479.4672554,
+      "source_key": "a0def523366d",
+      "title": "Charlie Munger interview: You've got to learn how to recognize rare opportunities",
+      "url_present": true,
+      "segment_count": 11,
+      "speaker_count": 3,
+      "primary_speaker_id": "speaker_b",
+      "primary_share": 0.7593,
+      "non_primary_share": 0.2407,
+      "speaker_role_distribution": {
+        "unknown": 3
+      },
+      "speakers": {
+        "speaker_a": {
+          "speaker_id": "speaker_a",
+          "display_name": "埃文·卡迈克尔",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 40836,
+          "duration_share": 0.0697,
+          "segment_count": 2,
+          "short_segment_count": 0,
+          "short_segment_rate": 0.0,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_b": {
+          "speaker_id": "speaker_b",
+          "display_name": "查理·芒格",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 444759,
+          "duration_share": 0.7593,
+          "segment_count": 7,
+          "short_segment_count": 1,
+          "short_segment_rate": 0.1429,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_c": {
+          "speaker_id": "speaker_c",
+          "display_name": "未知说话人1",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 100135,
+          "duration_share": 0.171,
+          "segment_count": 2,
+          "short_segment_count": 0,
+          "short_segment_rate": 0.0,
+          "reason": "",
+          "review_hint": ""
+        }
+      },
+      "risk_level": "low",
+      "risk_reasons": [
+        "missing_speaker_structure_metadata"
+      ],
+      "rewrite_count": 1,
+      "pre_tts_rewrite_count": 1,
+      "pre_tts_contradiction_count": 1,
+      "first_pass_abs_error_avg": 0.0752,
+      "first_pass_abs_error_p50": 0.0644,
+      "first_pass_abs_error_p90": 0.0942,
+      "alignment_method_distribution": {
+        "direct": 3,
+        "dsp": 8
+      },
+      "force_dsp_count": 0,
+      "short_force_dsp_count": 0,
+      "needs_review_count": 0,
+      "force_dsp_review_suppressed_count": 0,
+      "short_merge_applied_count": 0,
+      "short_merge_blocked_cross_speaker_count": 0,
+      "verifier": {
+        "enabled": false
+      },
+      "samples": {
+        "speaker_a": [
+          {
+            "segment_id": 1,
+            "duration_s": 17.5,
+            "method": "direct",
+            "severity": "",
+            "source_text": "He's an American business magnate, lawyer, investor, and philanthropist. He's vice chairman of Berkshire Hathaway, the investment company chaired by Warren Buff",
+            "cn_text": "他是一位美国商业巨头、律师、投资家和慈善家。他是沃伦·巴菲特执掌的伯克希尔·哈撒韦公司的副主席。他的净资产高达十三亿美元。他就是查理·芒格，以下是他的十大成功法则。"
+          },
+          {
+            "segment_id": 11,
+            "duration_s": 23.4,
+            "method": "direct",
+            "severity": "",
+            "source_text": "Thank you guys so much for watching. I made this video because Dom Aviation Channel asked me to. So if there's a famous entrepreneur that you want me to profile",
+            "cn_text": "感谢大家观看。本期视频应Dom Aviation频道请求制作。想让我下期介绍哪位著名企业家？请在评论区留言。查理·芒格的十大法则中，哪条对你影响最大？也欢迎留言，我会参与讨论。再次感谢观看，保持信念，我们很快再见。"
+          }
+        ],
+        "speaker_c": [
+          {
+            "segment_id": 6,
+            "duration_s": 50.7,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "How did— I'm a survivor. I listened in law school when some wag said, \"A legal mind is a mind that when two things are all twisted up together and interacting, ",
+            "cn_text": "怎么——我是一个幸存者。我在法学院时听到有个爱开玩笑的人说：“所谓的法律头脑，就是当两件事完全纠缠在一起并相互作用时，你能够负责任地只考虑其中一件事而不顾另一件事。” 嗯，我从那一句话就能看出，这简直荒谬透顶，这也进一步推动了我顺应自己的天"
+          },
+          {
+            "segment_id": 7,
+            "duration_s": 49.4,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "And what I noted, since the really big ideas carry 95% of the freight, that it wasn't at all hard for me to pick up all the big ideas in all the disciplines and",
+            "cn_text": "我注意到，既然那些真正的大思想承载了百分之九十五的分量，那么对我来说，掌握所有学科中的大思想，并让它们成为我思维习惯的标准部分，就一点也不难。当然，一旦你掌握了这些思想，如果你不去实践，它们就毫无用处。如果你不练习，你就会失去它。所以我一生"
+          }
+        ]
+      }
+    },
+    {
+      "job_id": "job_b8a76a5a8ab64c03a4478602c45b6032",
+      "project_dir": "/mnt/HC_Volume_105524101/aivideotrans/projects/342bbde3-903b-4944-a53c-12a1de0b5ca9/job_b8a76a5a8ab64c03a4478602c45b6032",
+      "mtime": 1777111368.1009622,
+      "source_key": "25c702ac1a1e",
+      "title": "The Most Life-Changing 20 Minute Video You’ll Ever Watch | Naval Ravikant",
+      "url_present": true,
+      "segment_count": 49,
+      "speaker_count": 3,
+      "primary_speaker_id": "speaker_b",
+      "primary_share": 0.9233,
+      "non_primary_share": 0.0767,
+      "speaker_role_distribution": {
+        "unknown": 3
+      },
+      "speakers": {
+        "speaker_a": {
+          "speaker_id": "speaker_a",
+          "display_name": "乔·罗根",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 21931,
+          "duration_share": 0.0191,
+          "segment_count": 6,
+          "short_segment_count": 5,
+          "short_segment_rate": 0.8333,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_b": {
+          "speaker_id": "speaker_b",
+          "display_name": "纳瓦尔·拉维坎特",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 1060935,
+          "duration_share": 0.9233,
+          "segment_count": 29,
+          "short_segment_count": 3,
+          "short_segment_rate": 0.1034,
+          "reason": "",
+          "review_hint": ""
+        },
+        "speaker_c": {
+          "speaker_id": "speaker_c",
+          "display_name": "汤姆·比利尤",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 66194,
+          "duration_share": 0.0576,
+          "segment_count": 14,
+          "short_segment_count": 12,
+          "short_segment_rate": 0.8571,
+          "reason": "",
+          "review_hint": ""
+        }
+      },
+      "risk_level": "high",
+      "risk_reasons": [
+        "high_force_dsp",
+        "missing_speaker_structure_metadata"
+      ],
+      "rewrite_count": 31,
+      "pre_tts_rewrite_count": 24,
+      "pre_tts_contradiction_count": 2,
+      "first_pass_abs_error_avg": 0.3337,
+      "first_pass_abs_error_p50": 0.1143,
+      "first_pass_abs_error_p90": 1.111,
+      "alignment_method_distribution": {
+        "force_dsp": 17,
+        "dsp": 16,
+        "direct": 12,
+        "rewrite_direct": 3,
+        "rewrite_dsp": 1
+      },
+      "force_dsp_count": 17,
+      "short_force_dsp_count": 5,
+      "needs_review_count": 17,
+      "force_dsp_review_suppressed_count": 0,
+      "short_merge_applied_count": 0,
+      "short_merge_blocked_cross_speaker_count": 0,
+      "verifier": {
+        "enabled": false
+      },
+      "samples": {
+        "speaker_a": [
+          {
+            "segment_id": 1,
+            "duration_s": 1.2,
+            "method": "force_dsp",
+            "severity": "",
+            "source_text": "What is the meaning of life?",
+            "cn_text": "生命的意义是什么？"
+          },
+          {
+            "segment_id": 7,
+            "duration_s": 16.3,
+            "method": "dsp",
+            "severity": "",
+            "source_text": "The meaning of life. It's funny that that's the basis of all existential angst, that you don't— you don't know why you're here, and you have this feeling that i",
+            "cn_text": "生命的意义。有趣的是，那正是所有存在主义焦虑的基础，就是你——你不知道你为什么在这里，而且你有种感觉，这一切可能是毫无意义的。你开始想，天哪，什么——我只是这东西的一小部分吗？"
+          },
+          {
+            "segment_id": 15,
+            "duration_s": 1.1,
+            "method": "force_dsp",
+            "severity": "",
+            "source_text": "You got happy before the money?",
+            "cn_text": "你在有钱之前就快乐了？"
+          },
+          {
+            "segment_id": 17,
+            "duration_s": 1.2,
+            "method": "force_dsp",
+            "severity": "",
+            "source_text": "How did you get happy before the money?",
+            "cn_text": "在有钱之前你是怎么获得快乐的？"
+          }
+        ],
+        "speaker_c": [
+          {
+            "segment_id": 5,
+            "duration_s": 1.8,
+            "method": "force_dsp",
+            "severity": "",
+            "source_text": "And that can also be captured by your own past.",
+            "cn_text": "而那也可能被你自己的过去所俘获。"
+          },
+          {
+            "segment_id": 10,
+            "duration_s": 24.7,
+            "method": "rewrite_direct",
+            "severity": "",
+            "source_text": "Uh, there's an interesting challenge where I think people need to avoid becoming, uh, a suffering addict, sort of using suffering as the proxy for progress as o",
+            "cn_text": "呃，我觉得这里有个有趣的挑战，人们需要避免成为受苦成瘾者，有点像把受苦当成进步的指标，而不是看受苦带来的结果，对吧？就像我不吃棉花糖很痛苦，做这工作很痛苦，我把幸福感和满足感跟痛苦本身联系在一起，而不是跟它另一面带来的东西联系起来。"
+          },
+          {
+            "segment_id": 13,
+            "duration_s": 4.6,
+            "method": "force_dsp",
+            "severity": "",
+            "source_text": "Right, the outcome may have been the same, but the entire experience of getting there—",
+            "cn_text": "没错，结果可能是一样的，但达到那个结果的整个体验——"
+          },
+          {
+            "segment_id": 22,
+            "duration_s": 2.4,
+            "method": "force_dsp",
+            "severity": "",
+            "source_text": "How do you shortcut that desire contract?",
+            "cn_text": "你怎么走捷径跳过欲望契约？"
+          }
+        ]
+      }
+    },
+    {
+      "job_id": "job_715770b00cc34a7a87a354f5e386139b",
+      "project_dir": "/mnt/HC_Volume_105524101/aivideotrans/projects/342bbde3-903b-4944-a53c-12a1de0b5ca9/job_715770b00cc34a7a87a354f5e386139b",
+      "mtime": 1777105526.4189553,
+      "source_key": "792b5a154b0e",
+      "title": "Don't Find A Niche. Become The Niche.",
+      "url_present": true,
+      "segment_count": 85,
+      "speaker_count": 1,
+      "primary_speaker_id": "speaker_a",
+      "primary_share": 1.0,
+      "non_primary_share": 0,
+      "speaker_role_distribution": {
+        "unknown": 1
+      },
+      "speakers": {
+        "speaker_a": {
+          "speaker_id": "speaker_a",
+          "display_name": "丹·柯",
+          "role": "",
+          "role_label": "",
+          "duration_ms": 2237976,
+          "duration_share": 1.0,
+          "segment_count": 85,
+          "short_segment_count": 1,
+          "short_segment_rate": 0.0118,
+          "reason": "",
+          "review_hint": ""
+        }
+      },
+      "risk_level": "low",
+      "risk_reasons": [
+        "missing_speaker_structure_metadata"
+      ],
+      "rewrite_count": 73,
+      "pre_tts_rewrite_count": 0,
+      "pre_tts_contradiction_count": 0,
+      "first_pass_abs_error_avg": 0.0648,
+      "first_pass_abs_error_p50": 0.0451,
+      "first_pass_abs_error_p90": 0.133,
+      "alignment_method_distribution": {
+        "direct": 38,
+        "dsp": 40,
+        "rewrite_direct": 4,
+        "force_dsp": 1,
+        "rewrite_dsp": 2
+      },
+      "force_dsp_count": 1,
+      "short_force_dsp_count": 1,
+      "needs_review_count": 1,
+      "force_dsp_review_suppressed_count": 0,
+      "short_merge_applied_count": 0,
+      "short_merge_blocked_cross_speaker_count": 0,
+      "verifier": {
+        "enabled": false
+      },
+      "samples": {}
+    }
+  ]
+}

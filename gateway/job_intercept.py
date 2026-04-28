@@ -16,7 +16,7 @@ import logging
 import re
 import sys
 import uuid as _uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 # Make src/ importable so we can reuse services.jobs.logs_redactor (D25).
@@ -45,6 +45,50 @@ from credits_service import (
     ensure_free_bucket, estimate_credits,
     shadow_reserve, shadow_release, shadow_capture, shadow_safe,
 )
+
+
+POST_EDIT_RESPONSE_FIELDS = (
+    "display_name",
+    "expires_at",
+    "editing_touched_at",
+    "copy_of_job_id",
+    "root_job_id",
+    "edit_generation",
+)
+
+
+def _serialize_response_value(value):
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value
+
+
+def _merge_gateway_job_metadata(upstream_job: dict, db_job: Job | None) -> dict:
+    """Overlay Gateway-owned metadata onto a Job API JSON record.
+
+    The Job API JSON store owns pipeline progress fields, but Gateway is the
+    source of truth for user-facing commercial/post-edit metadata. Returning
+    upstream rows without this merge makes `display_name` and `expires_at`
+    silently disappear from `/job-api/jobs`, and lets stale upstream JSON
+    resurrect DB rows that Gateway cleanup already marked `purged`.
+    """
+    if db_job is None:
+        return upstream_job
+
+    merged = dict(upstream_job)
+    db_status = getattr(db_job, "status", None)
+    if db_status == "purged":
+        merged["status"] = "purged"
+
+    db_stage = getattr(db_job, "current_stage", None)
+    if db_status == "purged" and db_stage is not None:
+        merged["current_stage"] = db_stage
+
+    for field in POST_EDIT_RESPONSE_FIELDS:
+        value = getattr(db_job, field, None)
+        if value is not None:
+            merged[field] = _serialize_response_value(value)
+    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -176,17 +220,73 @@ def _probe_youtube_metadata(
     """
     import subprocess
     try:
+        command = _build_youtube_probe_command(url)
         result = subprocess.run(
-            ["yt-dlp", "--dump-json", "--no-download", "--no-warnings", url],
+            command,
             capture_output=True, text=True, timeout=timeout,
         )
         if result.returncode == 0 and result.stdout.strip():
             parsed = json.loads(result.stdout)
             if isinstance(parsed, dict):
                 return parsed
+        stderr = (result.stderr or "").strip()
+        if stderr:
+            logger.warning("yt-dlp probe failed for %s: %s", url, stderr[:500])
     except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError, Exception) as e:
         logger.warning("yt-dlp probe failed for %s: %s", url, e)
     return None
+
+
+def _build_youtube_probe_command(
+    url: str, *, config_path: Path | None = None
+) -> list[str]:
+    command = [
+        "yt-dlp",
+        "--dump-json",
+        "--no-download",
+        "--no-warnings",
+        "--ignore-no-formats-error",
+    ]
+    command.extend(_youtube_probe_auth_args(config_path=config_path))
+    command.append(url)
+    return command
+
+
+def _youtube_probe_auth_args(*, config_path: Path | None = None) -> list[str]:
+    try:
+        from services import config_loader
+    except Exception:
+        return []
+
+    config = None
+    if config_path is not None:
+        config = config_loader.load_project_local_config(config_path)
+    else:
+        for candidate in (
+            Path("/opt/aivideotrans/config/autodub.local.json"),
+            Path("/opt/aivideotrans/app/autodub.local.json"),
+            Path(__file__).resolve().parent.parent / "autodub.local.json",
+        ):
+            if candidate.exists():
+                config = config_loader.load_project_local_config(candidate)
+                break
+    if config is None:
+        config = config_loader.load_project_local_config()
+
+    cookie_file, _ = config_loader.resolve_path_value(
+        config=config,
+        config_key_paths=(("youtube", "cookie_file"),),
+    )
+    if cookie_file and Path(cookie_file).exists():
+        return ["--cookies", cookie_file]
+
+    cookies_from_browser, _ = config_loader.resolve_text_value(
+        config=config,
+        config_key_paths=(("youtube", "cookies_from_browser"),),
+    )
+    if cookies_from_browser:
+        return ["--cookies-from-browser", cookies_from_browser]
+    return []
 
 
 def _probe_youtube_duration(url: str, timeout: float = 5.0) -> float | None:
@@ -222,6 +322,59 @@ def _extract_youtube_title(meta: dict[str, object] | None) -> str | None:
     return None
 
 
+_CJK_TEXT_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
+_AUTO_PLACEHOLDER_DISPLAY_NAME_RE = re.compile(
+    r"^(?:上传视频|油管视频) \d{4}-\d{2}-\d{2} \d{3}(?:_[a-z0-9]{4})?$"
+)
+
+
+def _sanitize_s2_display_name(value: object) -> str | None:
+    """Normalize a Chinese S2 title before writing it to Job.display_name."""
+    if not isinstance(value, str):
+        return None
+    name = re.sub(r"\s+", " ", value).strip()
+    name = name.strip(" \t\r\n\"'“”‘’《》<>（）()[]【】")
+    name = re.sub(r"^(?:中文)?(?:任务名|标题|视频名|视频标题)\s*[:：]\s*", "", name).strip()
+    if not name or not _CJK_TEXT_RE.search(name):
+        return None
+    if name.lower() in {"null", "none"} or name in {"无", "未知", "未命名视频"}:
+        return None
+    return name[:60].strip()
+
+
+def _looks_like_truncated_source_title(job: Job, current_name: str) -> bool:
+    source_title = (getattr(job, "title", "") or "").strip()
+    if not source_title or not current_name:
+        return False
+    if _CJK_TEXT_RE.search(current_name):
+        return False
+    return source_title.startswith(current_name)
+
+
+def _looks_like_youtube_id_fallback(job: Job, current_name: str) -> bool:
+    source_ref = (getattr(job, "source_ref", "") or "").strip()
+    if not source_ref or not current_name:
+        return False
+    if not re.fullmatch(r"[A-Za-z0-9_-]{8,16}", current_name):
+        return False
+    return current_name in source_ref
+
+
+def _should_replace_display_name_from_s2(job: Job) -> bool:
+    """Avoid overwriting explicit user names when S2 proposes a Chinese title."""
+    current = (getattr(job, "display_name", None) or "").strip()
+    if not current:
+        return True
+    if _AUTO_PLACEHOLDER_DISPLAY_NAME_RE.match(current):
+        return True
+    if (getattr(job, "source_type", "") or "").strip().lower() == "youtube_url":
+        return (
+            _looks_like_truncated_source_title(job, current)
+            or _looks_like_youtube_id_fallback(job, current)
+        )
+    return False
+
+
 # ---------------------------------------------------------------------------
 # display_name DB lookups — production adapters for the orchestrator's
 # injectable fetcher signatures (``gateway.display_name_orchestrator``).
@@ -254,16 +407,19 @@ async def _fetch_user_existing_display_names(
     return {row[0] for row in result.all() if row[0]}
 
 
+def _branch4_prefix_for_source(source_type: str | None) -> str:
+    return "油管视频" if (source_type or "").strip().lower() == "youtube_url" else "上传视频"
+
+
 async def _fetch_user_branch4_sequence_today(
-    db: AsyncSession, user_id: str, local_date: date
+    db: AsyncSession, user_id: str, local_date: date, source_type: str | None = None
 ) -> int:
-    """Return how many ``"上传视频 YYYY-MM-DD %"`` names this user already owns.
+    """Return how many branch-4 placeholder names this user already owns.
 
     Orchestrator adds 1 to the returned count for the next sequence number.
-    Matches display_name._branch_4_default's format exactly — any drift in
-    the literal prefix would silently produce sequence-001 collisions."""
+    Matches display_name._branch_4_default's source-specific prefix exactly."""
     date_str = local_date.strftime("%Y-%m-%d")
-    pattern = f"上传视频 {date_str} %"
+    pattern = f"{_branch4_prefix_for_source(source_type)} {date_str} %"
     result = await db.execute(
         select(func.count()).select_from(Job).where(
             Job.user_id == user_id,
@@ -310,9 +466,30 @@ async def intercept_list_jobs(
         result_all = await db.execute(select(Job.job_id))
         all_db_job_ids = {row[0] for row in result_all.all()}
 
-        # Get this user's job_ids
-        result_user = await db.execute(select(Job.job_id).where(Job.user_id == user.id))
-        user_job_ids = {row[0] for row in result_user.all()}
+        # Get this user's rows. We need the full row, not just job_id, because
+        # Gateway owns the user-facing metadata that the Job API JSON store
+        # does not always carry (`display_name`, `expires_at`, cleanup status).
+        result_user = await db.execute(select(Job).where(Job.user_id == user.id))
+        user_jobs: dict[str, Job] = {}
+        user_job_ids: set[str] = set()
+        try:
+            scalar_rows = result_user.scalars().all()
+        except Exception:
+            scalar_rows = None
+        if isinstance(scalar_rows, list):
+            user_jobs = {
+                row.job_id: row
+                for row in scalar_rows
+                if getattr(row, "job_id", None)
+            }
+            user_job_ids = set(user_jobs)
+        if not user_job_ids:
+            # Compatibility for tests / older adapters that still return rows
+            # shaped like (job_id,) for this query.
+            try:
+                user_job_ids = {row[0] for row in result_user.all()}
+            except Exception:
+                user_job_ids = set()
 
         # Log orphan jobs but do NOT auto-claim
         orphan_ids = [j.get("job_id") for j in all_jobs if j.get("job_id") and j.get("job_id") not in all_db_job_ids]
@@ -322,16 +499,25 @@ async def intercept_list_jobs(
         # Sync status from upstream to DB + settle quota on terminal transitions
         upstream_by_id = {j.get("job_id"): j for j in all_jobs if j.get("job_id")}
         for jid in user_job_ids:
+            db_job = user_jobs.get(jid)
             upstream_job = upstream_by_id.get(jid)
             if upstream_job:
                 upstream_status = upstream_job.get("status", "")
                 upstream_stage = upstream_job.get("current_stage")
                 try:
-                    result_job = await db.execute(
-                        select(Job).where(Job.job_id == jid)
-                    )
-                    db_job = result_job.scalar_one_or_none()
+                    if db_job is None:
+                        result_job = await db.execute(
+                            select(Job).where(Job.job_id == jid)
+                        )
+                        db_job = result_job.scalar_one_or_none()
+                        if db_job is not None:
+                            user_jobs[jid] = db_job
                     if db_job is not None:
+                        if db_job.status == "purged":
+                            # Gateway cleanup is authoritative. A stale Job API
+                            # JSON row must not resurrect a project whose
+                            # artifacts have already been removed.
+                            continue
                         old_status = db_job.status
                         db_job.status = upstream_status
                         db_job.current_stage = upstream_stage
@@ -389,7 +575,11 @@ async def intercept_list_jobs(
             await db.rollback()
 
         # Only return jobs that belong to this user in DB
-        filtered_jobs = [j for j in all_jobs if j.get("job_id") in user_job_ids]
+        filtered_jobs = [
+            _merge_gateway_job_metadata(j, user_jobs.get(j.get("job_id")))
+            for j in all_jobs
+            if j.get("job_id") in user_job_ids
+        ]
         print(f"[GATEWAY] list_jobs: upstream={len(all_jobs)}, db_user={len(user_job_ids)}, returning={len(filtered_jobs)}", flush=True)
         data["jobs"] = filtered_jobs
 
@@ -507,10 +697,10 @@ async def intercept_create_job(
         except (TypeError, ValueError):
             estimated_duration_seconds = None
 
-    # For YouTube URLs, attempt a single yt-dlp probe (5s timeout) for both
-    # duration (→ quota / plan gating below) and title (→ display_name
-    # generation further down). Single subprocess call keeps submit latency
-    # bounded; on failure both fields stay None and we fall back gracefully.
+    # For YouTube URLs, attempt a single yt-dlp probe (5s timeout) for duration
+    # (→ quota / plan gating below) and source title metadata. The user-facing
+    # display_name starts as a Chinese placeholder and is replaced later by S2
+    # review when a content-aware Chinese title is available.
     probed_title: str | None = None
     if source_type == "youtube_url":
         meta = _probe_youtube_metadata(source_value)
@@ -545,14 +735,19 @@ async def intercept_create_job(
     # --- 5. Idempotency key ---
     idempotency_key = request_data.get("create_idempotency_key") or str(_uuid.uuid4())
 
+    # Ordinary jobs keep a fixed 7-day retention deadline from creation. This
+    # value must be explicit rather than inferred from updated_at; editing
+    # enter/cancel legitimately touches updated_at but must not extend TTL.
+    job_expires_at = datetime.now(timezone.utc) + timedelta(days=7)
+
     # --- 5c. display_name (plan §6.2 + T0-4) ---
     #
     # Task-naming decision tree (pure logic in src.services.jobs.display_name):
-    #   Branch 1: YouTube URL + non-empty yt-dlp title → truncate title
-    #   Branch 2: YouTube URL + empty title → fall through to Branch 4
-    #   Branch 3: local upload + non-empty filename → truncate stem
+    #   Branch 1: YouTube URL → "油管视频 YYYY-MM-DD NNN"
+    #   Branch 2: reserved for compatibility with older plan wording
+    #   Branch 3: local upload + Chinese filename → truncate stem
     #   Branch 4: otherwise → "上传视频 YYYY-MM-DD NNN"
-    # Collision with the user's existing display_names appends _xxxx (4 hex).
+    # Collision with the user's existing display_names appends _xxxx.
     #
     # Anonymous / legacy paths (``user is None``) skip generation — the Job
     # API will keep display_name=NULL, and ``getJobDisplayTitle`` on the
@@ -581,8 +776,8 @@ async def intercept_create_job(
         async def _fetch_existing(uid: str, _db=db) -> set[str]:
             return await _fetch_user_existing_display_names(_db, uid)
 
-        async def _fetch_counter(uid: str, d: date, _db=db) -> int:
-            return await _fetch_user_branch4_sequence_today(_db, uid, d)
+        async def _fetch_counter(uid: str, d: date, _db=db, _source_type=source_type) -> int:
+            return await _fetch_user_branch4_sequence_today(_db, uid, d, _source_type)
 
         try:
             generated_display_name = await compute_display_name(
@@ -606,6 +801,7 @@ async def intercept_create_job(
     request_data["estimated_duration_seconds"] = estimated_duration_seconds
     request_data["quota_state"] = "none"
     request_data["create_idempotency_key"] = idempotency_key
+    request_data["expires_at"] = job_expires_at.isoformat()
     if generated_display_name:
         request_data["display_name"] = generated_display_name
     # Inject user_id so Job API can build user-isolated workspace_dir
@@ -661,6 +857,7 @@ async def intercept_create_job(
                         # prefer the upstream echo so we stay in sync even if
                         # Job API ever normalises the value.
                         display_name=job_data.get("display_name") or generated_display_name,
+                        expires_at=job_expires_at,
                     )
                     db.add(job)
                     # Reserve quota in the same transaction
@@ -741,11 +938,32 @@ async def intercept_get_job(
 ) -> Response:
     """GET /job-api/jobs/{job_id} — verify ownership, then forward. No auto-claim."""
     await _verify_job_ownership(job_id, db, user)
-    return await proxy_request(
+    upstream_response = await proxy_request(
         request=request,
         upstream_base=settings.job_api_upstream,
         strip_prefix="/job-api",
     )
+    if not settings.auth_required or user is None:
+        return upstream_response
+    if not (200 <= upstream_response.status_code < 300):
+        return upstream_response
+    try:
+        payload = json.loads(upstream_response.body)
+        if not isinstance(payload, dict):
+            return upstream_response
+        result = await db.execute(
+            select(Job).where(Job.job_id == job_id, Job.user_id == user.id)
+        )
+        db_job = result.scalar_one_or_none()
+        payload = _merge_gateway_job_metadata(payload, db_job)
+        return Response(
+            content=json.dumps(payload, ensure_ascii=False),
+            status_code=upstream_response.status_code,
+            headers={"content-type": "application/json"},
+        )
+    except Exception:
+        logger.exception("Failed to merge gateway metadata for job %s", job_id)
+        return upstream_response
 
 
 async def intercept_job_subresource(
@@ -1791,10 +2009,10 @@ async def update_source_metadata(
     job_id: str,
     db: AsyncSession = Depends(get_db),
 ) -> Response:
-    """POST /job-api/jobs/{job_id}/source-metadata — internal callback from Pipeline S0.
+    """POST /job-api/jobs/{job_id}/source-metadata — internal callback from Pipeline.
 
-    Allows the pipeline to report actual source_duration_seconds after download.
-    Gateway uses this to update the PostgreSQL record.
+    Allows the pipeline to report source duration/title after S0 and a
+    content-aware Chinese display_name after S2 review.
     """
     body = await request.body()
     try:
@@ -1804,10 +2022,16 @@ async def update_source_metadata(
 
     actual_duration = data.get("source_duration_seconds")
     title = data.get("title")
+    raw_display_name = (
+        data.get("display_name")
+        if "display_name" in data
+        else data.get("display_title_zh")
+    )
+    s2_display_name = _sanitize_s2_display_name(raw_display_name)
 
-    if actual_duration is None and title is None:
+    if actual_duration is None and title is None and s2_display_name is None:
         return Response(
-            content=json.dumps({"error": "no_update_fields", "message": "至少提供 source_duration_seconds 或 title"}),
+            content=json.dumps({"error": "no_update_fields", "message": "至少提供 source_duration_seconds、title 或有效中文 display_name"}),
             status_code=400,
             headers={"content-type": "application/json"},
         )
@@ -1832,7 +2056,7 @@ async def update_source_metadata(
 
             # V3 fix: if create-time had no estimated_duration, do late shadow reserve now
             # Idempotency: check ledger for existing reserve before doing another one
-            snap = job.metering_snapshot or {}
+            snap = getattr(job, "metering_snapshot", None) or {}
             if dur_float > 0:
                 try:
                     from models import CreditsLedger
@@ -1867,16 +2091,22 @@ async def update_source_metadata(
             pass
     if title is not None:
         job.title = str(title)[:512]
+    display_name_updated = False
+    if s2_display_name is not None and _should_replace_display_name_from_s2(job):
+        job.display_name = s2_display_name
+        display_name_updated = True
 
     try:
         await db.commit()
     except Exception:
         await db.rollback()
 
-    logger.info("source-metadata updated for %s: duration=%s title=%s",
-                job_id, actual_duration, title)
+    logger.info(
+        "source-metadata updated for %s: duration=%s title=%s display_name_updated=%s",
+        job_id, actual_duration, title, display_name_updated,
+    )
     return Response(
-        content=json.dumps({"ok": True}),
+        content=json.dumps({"ok": True, "display_name_updated": display_name_updated}),
         status_code=200,
         headers={"content-type": "application/json"},
     )
@@ -1936,6 +2166,75 @@ async def update_job_metering(
         "first_pass_error_pct_p90", "first_pass_error_pct_n",
         "glossary_total_terms", "glossary_preserved_terms",
         "term_preservation_rate", "missing_glossary_terms",
+        # P0 quality benchmark audit fields
+        "pre_tts_rewrite_count", "pre_tts_contradiction_count",
+        "pre_tts_contradiction_rate", "pre_tts_rewrite_events",
+        "pre_tts_rewrite_rejected_count",
+        "pre_tts_rewrite_rejected_reason_distribution",
+        "pre_tts_rewrite_rejected_events",
+        "pre_tts_rewrite_retry_attempt_count",
+        "pre_tts_rewrite_retry_accepted_count",
+        "harmful_pre_tts_contradiction_count",
+        "harmful_pre_tts_contradiction_rate",
+        "micro_segment_count", "short_segment_count",
+        "short_segment_needs_review_count", "short_segment_force_dsp_count",
+        "capped_dsp_overflow_count", "short_segment_capped_dsp_overflow_count",
+        "force_dsp_severity_distribution", "force_dsp_review_suppressed_count",
+        "short_merge_candidate_count", "short_merge_blocked_cross_speaker_count",
+        "short_merge_applied_count", "short_merge_absorbed_count",
+        "speaker_count", "speaker_role_distribution", "speaker_primary_count",
+        "speaker_incidental_count", "speaker_fragmented_count",
+        "speaker_incidental_duration_share", "speaker_structure_profiles",
+        "voice_speed_profile_candidate_count", "voice_speed_profile_sent_count",
+        "voice_speed_profile_updated_count", "voice_speed_profile_skipped_count",
+        "voice_speed_profile_skipped_reason_distribution",
+        # Job-level LLM/TTS cost metering sidecar
+        "usage_metering_version", "usage_events_count",
+        "transcription_method", "asr_provider", "asr_provider_cost_status",
+        "legacy_gemini_transcription_call_count",
+        "first_tts_billed_chars", "first_tts_call_count",
+        "probe_tts_billed_chars", "probe_tts_call_count",
+        "post_tts_resynth_billed_chars", "post_tts_resynth_call_count",
+        "post_edit_resynth_billed_chars", "post_edit_resynth_call_count",
+        "post_edit_resynth_tts_billed_chars", "post_edit_resynth_tts_call_count",
+        "interactive_preview_billed_chars", "interactive_preview_call_count",
+        "interactive_preview_tts_billed_chars", "interactive_preview_tts_call_count",
+        "tts_billed_chars_by_bucket", "tts_call_count_by_bucket",
+        "tts_billed_chars_by_provider", "tts_call_count_by_provider",
+        "tts_call_count",
+        "llm_call_count", "llm_input_tokens", "llm_output_tokens",
+        "llm_total_tokens", "llm_audio_input_bytes", "llm_audio_input_seconds",
+        "llm_task_call_distribution", "llm_model_call_distribution",
+        "s1_gemini_transcribe_llm_calls", "s1_gemini_transcribe_llm_input_tokens",
+        "s1_gemini_transcribe_llm_output_tokens", "s1_gemini_transcribe_llm_tokens",
+        "s2_pass1_llm_calls", "s2_pass1_llm_input_tokens",
+        "s2_pass1_llm_output_tokens", "s2_pass1_llm_tokens",
+        "s2_pass2_llm_calls", "s2_pass2_llm_input_tokens",
+        "s2_pass2_llm_output_tokens", "s2_pass2_llm_tokens",
+        "s2_pass3_llm_calls", "s2_pass3_llm_input_tokens",
+        "s2_pass3_llm_output_tokens", "s2_pass3_llm_tokens",
+        "s2_speaker_verifier_llm_calls", "s2_speaker_verifier_llm_input_tokens",
+        "s2_speaker_verifier_llm_output_tokens", "s2_speaker_verifier_llm_tokens",
+        "s2_review_llm_calls", "s2_review_llm_input_tokens",
+        "s2_review_llm_output_tokens", "s2_review_llm_tokens",
+        "s2_infer_llm_calls", "s2_infer_llm_input_tokens",
+        "s2_infer_llm_output_tokens", "s2_infer_llm_tokens",
+        "s3_translate_llm_calls", "s3_translate_llm_input_tokens",
+        "s3_translate_llm_output_tokens", "s3_translate_llm_tokens",
+        "s5_rewrite_llm_calls", "s5_rewrite_llm_input_tokens",
+        "s5_rewrite_llm_output_tokens", "s5_rewrite_llm_tokens",
+        "s5_rewrite_strict_llm_calls", "s5_rewrite_strict_llm_input_tokens",
+        "s5_rewrite_strict_llm_output_tokens", "s5_rewrite_strict_llm_tokens",
+        "s5_short_content_compact_llm_calls",
+        "s5_short_content_compact_llm_input_tokens",
+        "s5_short_content_compact_llm_output_tokens",
+        "s5_short_content_compact_llm_tokens",
+        "probe_translate_llm_calls", "probe_translate_llm_input_tokens",
+        "probe_translate_llm_output_tokens", "probe_translate_llm_tokens",
+        "pre_tts_rewrite_llm_calls", "pre_tts_rewrite_llm_input_tokens",
+        "pre_tts_rewrite_llm_output_tokens", "pre_tts_rewrite_llm_tokens",
+        "post_tts_rewrite_llm_calls", "post_tts_rewrite_llm_input_tokens",
+        "post_tts_rewrite_llm_output_tokens", "post_tts_rewrite_llm_tokens",
     }
     updated_keys = []
     for key in allowed_keys:

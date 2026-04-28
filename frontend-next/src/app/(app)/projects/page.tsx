@@ -76,6 +76,13 @@ function timeLabel(iso: string) {
   }).format(new Date(iso))
 }
 
+function cardTimestamp(job: JobSummary): string {
+  if ((job.status === "succeeded" || job.status === "purged") && job.completedAt) {
+    return job.completedAt
+  }
+  return job.updatedAt
+}
+
 /** Pick at most MAX_AUTO_EXPAND jobs to auto-expand. */
 function computeDefaultExpanded(jobs: JobSummary[]): Set<string> {
   // Expand all jobs by default. Lazy loading inside ResultMediaCard
@@ -274,7 +281,7 @@ function ProjectsContent() {
   const activeTask = selectActiveTaskJob(jobs)
   const sorted = [...jobs].sort(
     (a, b) =>
-      new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
+      new Date(cardTimestamp(b)).getTime() - new Date(cardTimestamp(a)).getTime(),
   )
 
   // ---- Loading state ----
@@ -525,7 +532,7 @@ function ProjectCard({
             </div>
           )}
           <div className="flex flex-wrap gap-1.5 text-xs text-muted-foreground">
-            <span>{timeLabel(job.updatedAt)}</span>
+            <span>{timeLabel(cardTimestamp(job))}</span>
             <span className={expiryColorClass(expiry.tier)}>
               {expiryLabel(expiry)}
             </span>
@@ -826,24 +833,40 @@ function RenameJobDialog({
   onConfirm: (newName: string) => void
   onCancel: () => void
 }) {
-  const [value, setValue] = useState("")
+  return (
+    <Dialog open={!!job} onOpenChange={(open) => { if (!open) onCancel() }}>
+      {job && (
+        <RenameJobDialogForm
+          key={job.id}
+          job={job}
+          submitting={submitting}
+          onConfirm={onConfirm}
+          onCancel={onCancel}
+        />
+      )}
+    </Dialog>
+  )
+}
 
-  // Reset the field whenever the target job changes.
-  useEffect(() => {
-    if (job) {
-      setValue(getJobDisplayTitle(job))
-    } else {
-      setValue("")
-    }
-  }, [job])
+function RenameJobDialogForm({
+  job,
+  submitting,
+  onConfirm,
+  onCancel,
+}: {
+  job: JobSummary
+  submitting: boolean
+  onConfirm: (newName: string) => void
+  onCancel: () => void
+}) {
+  const [value, setValue] = useState(() => getJobDisplayTitle(job))
 
   const trimmed = value.trim()
   const tooLong = trimmed.length > 60
   const hasBadChar = FORBIDDEN_RENAME_CHARS.test(trimmed)
-  const canSubmit = !!job && !submitting && !!trimmed && !tooLong && !hasBadChar
+  const canSubmit = !submitting && !!trimmed && !tooLong && !hasBadChar
 
   return (
-    <Dialog open={!!job} onOpenChange={(open) => { if (!open) onCancel() }}>
       <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle>重命名任务</DialogTitle>
@@ -869,7 +892,7 @@ function RenameJobDialog({
           />
           {hasBadChar && (
             <p className="text-xs text-red-500">
-              不能包含 {'<'} {'>'} " / \ 或空字符
+              不能包含 {'<'} {'>'} 引号 / \ 或空字符
             </p>
           )}
           {tooLong && (
@@ -888,6 +911,5 @@ function RenameJobDialog({
           </Button>
         </DialogFooter>
       </DialogContent>
-    </Dialog>
   )
 }

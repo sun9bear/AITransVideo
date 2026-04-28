@@ -9,29 +9,40 @@
 - `review_state.py` 中的 stage 集合
 - `WorkspacePage` 如何决定当前审核 UI
 - `TranslationReviewPanel / VoiceReviewPanel / VoiceSelectionPanel`
-- review gate 与 pipeline resume
+- review gate 与 pipeline pause / resume
+- review 完成后如何与 post-edit 表面衔接
 
 ## 2. 审核流主图
 
 ```mermaid
 graph TD
-    ReviewState["Review State<br/>review_state.py"] --> Speaker["speaker_review"]
+    Pipeline["process.py"] --> Pending["waiting_for_review"]
+    Pending --> ReviewState["ReviewStateManager / review_state.py"]
+
+    ReviewState --> Speaker["speaker_review"]
     ReviewState --> Config["translation_config_review"]
     ReviewState --> Translation["translation_review"]
     ReviewState --> Voice["voice_review"]
     ReviewState --> VoiceSelect["voice_selection_review"]
     ReviewState --> AudioAlign["audio_alignment_review"]
 
-    Workspace["WorkspacePage"] --> Gate["reviewGate.stage / currentStage"]
+    Workspace["WorkspacePage"] --> Gate["job.reviewGate?.stage ?? currentStage"]
     Gate --> TranslationPanel["TranslationReviewPanel"]
     Gate --> VoicePanel["VoiceReviewPanel"]
     Gate --> VoiceSelectPanel["VoiceSelectionPanel"]
 
-    TranslationPanel --> ReviewAPI["reviews.ts / request serialization"]
+    TranslationPanel --> ReviewAPI["reviews.ts"]
     VoicePanel --> ReviewAPI
-    VoiceSelectPanel --> ReviewAPI
-    ReviewAPI --> Resume["approve / advance / resume pipeline"]
-    Resume --> ReviewState
+    VoiceSelectPanel --> VoiceAPI["voiceSelection.ts"]
+
+    ReviewAPI --> ReviewActions["review_actions.py"]
+    VoiceAPI --> ReviewActions
+    ReviewActions --> ReviewState
+    ReviewState --> Resume["resume pipeline"]
+    Resume --> Pipeline
+
+    Resume --> Result["Result surface"]
+    Result --> Edit["VideoEditPage<br/>(downstream, not part of gate)"]
 ```
 
 ## 3. 当前 stage 集合
@@ -45,7 +56,7 @@ graph TD
 - `voice_selection_review`
 - `audio_alignment_review`
 
-并继续维护 route/tab 映射：
+并继续维护 tab 映射：
 
 - `speaker_review -> review`
 - `translation_config_review -> translation-config`
@@ -54,7 +65,7 @@ graph TD
 - `voice_selection_review -> voice-selection`
 - `audio_alignment_review -> audio-alignment`
 
-## 4. 当前前端入口已经统一到 WorkspacePage
+## 4. 当前前端入口仍然统一到 WorkspacePage
 
 `frontend-next/src/app/(app)/workspace/[jobId]/page.tsx` 当前是审核流主入口：
 
@@ -66,60 +77,53 @@ graph TD
 同一个页面里还做了两件重要的控制逻辑：
 
 - `translation_config_review` 在没有独立 UI 的情况下自动 approve
-- `speaker_review / translation_config_review` 作为自动处理阶段，不再对应旧 Vite 前端那种独立 review 页面
+- `voice_selection_review` 仍通过 `VoiceSelectionPanel` 作为 Studio 主路径承接
 
-这意味着审核流的用户交互表面已经是“Workspace 内分流”，而不是旧时代的多 route review app。
+这意味着审核流的用户交互表面仍然是“Workspace 内分流”，而不是旧时代的多 route review app。
 
-## 5. GitNexus 直接证据
+## 5. Voice selection 仍是主审核路径
+
+### 5.1 前端
+
+- `frontend-next/src/components/workspace/VoiceSelectionPanel.tsx` 会从 review state 中提取 `voice_selection_review` payload
+- 提交时调用 `approveVoiceSelection(jobId, approvals)`
+- `frontend-next/src/lib/api/voiceSelection.ts` 对应的提交端点是：
+  `/jobs/{jobId}/review/voice-selection/approve`
+
+### 5.2 后端
+
+- `src/services/jobs/review_actions.py:approve_voice_selection(...)` 负责把 per-speaker 绑定写回 approved payload
+- `src/pipeline/process.py` 在多处显式构建与刷新 `voice_selection_review` payload，并在需要时把任务置为 `waiting_for_review`
+
+结论：`voice_selection_review` 仍是 Studio 主路径，不是一个已经废弃但尚未删除的残留 stage。
+
+## 6. GitNexus 与源码直接证据
 
 GitNexus 当前直接识别出：
 
 - `WorkspacePage -> BuildBackendUrl`
 - `WorkspacePage -> ResolveJobApiBaseUrl`
-- `TranslationReviewPanel -> SerializeBody`
-- `TranslationReviewPanel -> ParsePayload`
-- `TranslationReviewPanel -> ApiError`
+- `Approve_voice_selection -> StateError`
 
-这几条 process 说明：
+源码侧则补足了具体落点：
 
-- Workspace 是当前 review surface 的实际入口
-- Translation review 的请求构造、payload 解析和错误边界都已稳定成独立链路
+- `WorkspacePage` 在 `effectiveReviewStage === 'voice_selection_review'` 时渲染 `VoiceSelectionPanel`
+- `review_state.py` 注释明确说明：
+  `voice_review` 是 legacy fallback
+  `voice_selection_review` 是 Studio primary path
 
-## 6. 新旧路径变化
+## 7. Review 与 Post-Edit 的边界
 
-从 `git diff --name-status 490cce8..HEAD` 可以直接看到：
+`frontend-next/src/app/(app)/workspace/[jobId]/edit/page.tsx` 现在会读取 `voice_selection_review` payload 里的 speaker display names，但它不是 review gate 本身：
 
-- `frontend/src/routes/review/SpeakerReviewPage.tsx` 已删除
-- `frontend/src/routes/review/TranslationReviewPage.tsx` 已删除
-- `frontend/src/routes/review/VoiceReviewPage.tsx` 已删除
-- 整个 `frontend/` Vite 前端已退出主路径
+- review 的本质仍是 `waiting_for_review -> panel submit -> resume`
+- post-edit 的本质是 `succeeded -> editing -> mutate -> commit`
 
-因此，旧图里“`frontend-next + frontend` 并列承载 review UI”的说法已经过期。
-
-## 7. 当前审核流边界
-
-### 7.1 `voice_review` 与 `voice_selection_review` 仍并存
-
-`review_state.py` 注释仍然表明：
-
-- `voice_review` 是 legacy recovery/fallback stage
-- `voice_selection_review` 是 Studio primary path
-
-所以设计与排障时，应该优先把 `voice_selection_review` 当主路径。
-
-### 7.2 review 仍然是显式 gate / resume
-
-虽然 UI 入口统一到 WorkspacePage，但 review 的本质没有变化：
-
-- 任务进入 `waiting_for_review`
-- 页面根据 `reviewGate.stage` 渲染对应 panel
-- panel 提交后再推动 pipeline 恢复
-
-这不是隐式自动穿透，而是显式 gate/resume 机制。
+因此，`VideoEditPage` 应被视为 review 成功后的下游表面，而不是另一个 review stage。
 
 ## 8. 这张图适合回答什么问题
 
 - 当前审核 UI 到底是哪个页面在承接
-- 为什么旧 review route 已删但 review stage 仍然存在
 - `voice_review` 和 `voice_selection_review` 的主次关系是什么
-- 哪些阶段还有用户交互，哪些已经自动化了
+- pipeline 是怎样进入 `waiting_for_review`，又怎样恢复
+- 为什么 edit 页会读取 review payload，但不应把 edit 页画成 review gate 本身

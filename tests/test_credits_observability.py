@@ -64,7 +64,8 @@ class TestShadowSummaryResponse:
     def _mock_db(self, *, bucket_rows=None, ledger_rows=None, recent_entries=None,
                  total_jobs=0, has_estimated=0, has_actual=0, has_snapshot=0,
                  has_credits_est=0, has_credits_act=0,
-                 reserve_job_ids=None, settle_job_ids=None):
+                 reserve_job_ids=None, settle_job_ids=None,
+                 actual_job_rows=None, ledger_actual_rows=None):
         """Mock DB for credits_shadow_summary.
 
         reserve_job_ids / settle_job_ids: lists of job-id strings returned as
@@ -102,6 +103,12 @@ class TestShadowSummaryResponse:
             elif call_n["n"] == 11:
                 # settle job-id set
                 r.all.return_value = [(jid,) for jid in _settle_ids]
+            elif call_n["n"] == 12:
+                # credits_actual source job rows
+                r.all.return_value = actual_job_rows or []
+            elif call_n["n"] == 13:
+                # credits_actual source ledger rows
+                r.all.return_value = ledger_actual_rows or []
             return r
 
         db.execute = smart_execute
@@ -118,6 +125,11 @@ class TestShadowSummaryResponse:
         assert resp["metering"]["total_jobs"] == 0
         assert resp["metering"]["with_credits_estimated"] == 0
         assert resp["metering"]["with_credits_actual"] == 0
+        assert resp["credits_actual_source"]["source_counts"] == {
+            "snapshot": 0,
+            "ledger_derived": 0,
+            "missing": 0,
+        }
         assert resp["reserve_capture_closeness"]["jobs_with_reserve"] == 0
         assert resp["reserve_capture_closeness"]["jobs_unsettled"] == 0
         assert "field_status" in resp
@@ -146,6 +158,14 @@ class TestShadowSummaryResponse:
             has_credits_act=12,
             reserve_job_ids=job_ids,
             settle_job_ids=job_ids,
+            actual_job_rows=[
+                SimpleNamespace(job_id="j1", snapshot_actual=12),
+                SimpleNamespace(job_id="j2", snapshot_actual=None),
+                SimpleNamespace(job_id="j3", snapshot_actual=None),
+            ],
+            ledger_actual_rows=[
+                SimpleNamespace(job_id="j2", ledger_actual=9),
+            ],
         )
 
         resp = _run(credits_shadow_summary(db=db, user=user))
@@ -153,6 +173,12 @@ class TestShadowSummaryResponse:
         assert len(resp["buckets"]) == 2
         assert resp["metering"]["with_credits_estimated"] == 16
         assert resp["metering"]["with_credits_actual"] == 12
+        assert resp["credits_actual_source"]["source_counts"] == {
+            "snapshot": 1,
+            "ledger_derived": 1,
+            "missing": 1,
+        }
+        assert resp["credits_actual_source"]["effective_sum"] == 21
         assert resp["reserve_capture_closeness"]["jobs_unsettled"] == 0
 
     def test_reserve_capture_closeness_healthy(self):
@@ -210,7 +236,6 @@ class TestFieldStatus:
         assert "estimated_minutes" in live_fields
         assert "actual_minutes" in live_fields
         assert "metering_snapshot.credits_estimated" in live_fields
-        assert "metering_snapshot.credits_actual" in live_fields
         assert "metering_snapshot.service_mode" in live_fields
         assert "metering_snapshot.tts_provider" in live_fields
         assert "metering_snapshot.tts_model" in live_fields
@@ -226,6 +251,10 @@ class TestFieldStatus:
         assert status["coverage"]["cosyvoice"].startswith("LIVE")
         assert status["coverage"]["volcengine"].startswith("LIVE")
         assert status["coverage"]["mimo"].startswith("NOT_COVERED")
+
+    def test_credits_actual_is_live_partial(self):
+        status = FIELD_STATUS["metering_snapshot.credits_actual"]
+        assert status["status"] == "LIVE_PARTIAL"
 
     def test_quality_tier_is_live(self):
         """V3-6: quality_tier is now LIVE (from compute_job_policy)."""
@@ -245,6 +274,7 @@ class TestFieldStatus:
             "metering_snapshot.tts_model", "metering_snapshot.final_cn_chars",
             "metering_snapshot.tts_billed_chars", "metering_snapshot.rewrite_triggered",
             "metering_snapshot.rewrite_count", "metering_snapshot.quality_tier",
+            "metering_snapshot.pre_tts_rewrite_events",
         ]
         for field in required:
             assert field in FIELD_STATUS, f"Missing field: {field}"
@@ -319,7 +349,8 @@ class TestCostMetricsResponse:
                  k_avg=None, k_p50=None, k_p75=None, k_p90=None,
                  rw_total=0, rw_with_rewrite=0, rw_avg_count=None,
                  mode_rows=None, tts_total=0, tts_with=0,
-                 reserve_ids=None, settle_ids=None):
+                 reserve_ids=None, settle_ids=None,
+                 actual_job_rows=None, ledger_actual_rows=None):
         db = AsyncMock()
         call_n = {"n": 0}
 
@@ -346,6 +377,10 @@ class TestCostMetricsResponse:
                 r.all.return_value = [(jid,) for jid in (reserve_ids or [])]
             elif call_n["n"] == 8:  # settle ids
                 r.all.return_value = [(jid,) for jid in (settle_ids or [])]
+            elif call_n["n"] == 9:  # credits_actual source job rows
+                r.all.return_value = actual_job_rows or []
+            elif call_n["n"] == 10:  # credits_actual source ledger rows
+                r.all.return_value = ledger_actual_rows or []
             return r
 
         db.execute = smart_execute
@@ -360,7 +395,10 @@ class TestCostMetricsResponse:
         assert resp["jobs_total"] == 0
         assert resp["credits_estimated_sum"] == 0
         assert resp["credits_actual_sum"] == 0
+        assert resp["credits_actual_effective_sum"] == 0
+        assert resp["credits_actual_source"]["source_counts"]["missing"] == 0
         assert resp["estimate_actual_delta_pct"] is None
+        assert resp["estimate_effective_delta_pct"] is None
         assert resp["k_actual"]["avg"] is None
         assert resp["rewrite_rate_pct"] is None
         assert resp["jobs_unsettled"] == 0
@@ -377,13 +415,28 @@ class TestCostMetricsResponse:
             ],
             tts_total=20, tts_with=17,
             reserve_ids=["j1"], settle_ids=[],
+            actual_job_rows=[
+                SimpleNamespace(job_id="j1", snapshot_actual=1000),
+                SimpleNamespace(job_id="j2", snapshot_actual=None),
+                SimpleNamespace(job_id="j3", snapshot_actual=None),
+            ],
+            ledger_actual_rows=[
+                SimpleNamespace(job_id="j2", ledger_actual=800),
+            ],
         )
         resp = _run(credits_cost_metrics(window="7", db=db, user=user))
 
         assert resp["jobs_total"] == 20
         assert resp["credits_estimated_sum"] == 3200
         assert resp["credits_actual_sum"] == 2850
+        assert resp["credits_actual_effective_sum"] == 1800
         assert resp["estimate_actual_delta_pct"] == 12.3
+        assert resp["estimate_effective_delta_pct"] == 77.8
+        assert resp["credits_actual_source"]["source_counts"] == {
+            "snapshot": 1,
+            "ledger_derived": 1,
+            "missing": 1,
+        }
         assert resp["k_actual"]["avg"] == 281
         assert resp["k_actual"]["p90"] == 350
         assert resp["rewrite_rate_pct"] == 85.0

@@ -12,11 +12,14 @@ import {
   getSpeakerAudioSegments,
   getUserVoices,
   previewVoice,
+  reassignSpeakerAudioSegment,
   type SpeakerAudioSegment,
+  type SpeakerAudioReassignResult,
   type UserVoiceEntry,
   type VoiceSelectionSpeakerApproval,
   getVoiceSelectionPricing,
   type VoiceSelectionPricingResponse,
+  updateSpeakerAudioDubbingMode,
 } from '@/lib/api/voiceSelection'
 import { apiClient } from '@/lib/api/client'
 import type { ApiWebUiStateResponse } from '@/types/api'
@@ -35,6 +38,9 @@ interface SpeakerPayload {
   speakerName: string
   segmentCount: number
   totalDurationS: number
+  speakerRole: string
+  speakerRoleLabel: string
+  speakerReviewHint: string
   canClone: boolean
   autoMatchedVoice: { voiceId: string; label: string } | null
   autoMatchedByProvider: Record<
@@ -104,6 +110,13 @@ function formatVoiceOptionLabel(v: AvailableVoice): string {
   return `${base} · ${cps.toFixed(1)}字/秒(${tier})`
 }
 
+function formatTimecode(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000))
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  return `${minutes}:${seconds.toString().padStart(2, '0')}`
+}
+
 /* ---------- Main Component ---------- */
 
 export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelProps) {
@@ -122,6 +135,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [cloneModalSpeaker, setCloneModalSpeaker] = useState<string | null>(null)
+  const [auditModalSpeaker, setAuditModalSpeaker] = useState<string | null>(null)
   const [previewLoading, setPreviewLoading] = useState<Record<string, boolean>>({})
   const [previewError, setPreviewError] = useState<Record<string, string | null>>({})
   const [expiredVoiceIds, setExpiredVoiceIds] = useState<string[]>([])
@@ -192,6 +206,9 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
             speakerName: String(s.speaker_name ?? s.speaker_id ?? ''),
             segmentCount: Number(s.segment_count ?? 0),
             totalDurationS: Number(s.total_duration_s ?? 0),
+            speakerRole: String(s.speaker_role ?? ''),
+            speakerRoleLabel: String(s.speaker_role_label ?? ''),
+            speakerReviewHint: String(s.speaker_review_hint ?? ''),
             canClone: Boolean(s.can_clone),
             targetCharsPerSecond: s.target_chars_per_second != null ? Number(s.target_chars_per_second) : null,
             autoMatchedVoice: s.auto_matched_voice
@@ -327,6 +344,27 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
     getUserVoices().then(setPersonalVoices).catch(() => {})
   }, [])
 
+  const handleSpeakerSegmentReassigned = useCallback((result: SpeakerAudioReassignResult) => {
+    if (!result.changed) return
+    setSpeakers((prev) => prev.map((sp) => {
+      if (result.fromSummary && sp.speakerId === result.fromSummary.speakerId) {
+        return {
+          ...sp,
+          segmentCount: result.fromSummary.segmentCount,
+          totalDurationS: result.fromSummary.totalDurationS,
+        }
+      }
+      if (result.toSummary && sp.speakerId === result.toSummary.speakerId) {
+        return {
+          ...sp,
+          segmentCount: result.toSummary.segmentCount,
+          totalDurationS: result.toSummary.totalDurationS,
+        }
+      }
+      return sp
+    }))
+  }, [])
+
   const handlePreview = useCallback(async (speakerId: string) => {
     const state = voiceStates[speakerId]
     if (!state?.voiceId) return
@@ -389,7 +427,8 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
   }, [])
 
   const allSelected = useMemo(() => {
-    return speakers.length > 0 && speakers.every((sp) => voiceStates[sp.speakerId]?.voiceId)
+    return speakers.some((sp) => sp.segmentCount > 0)
+      && speakers.every((sp) => sp.segmentCount <= 0 || voiceStates[sp.speakerId]?.voiceId)
   }, [speakers, voiceStates])
 
   const anyCloning = useMemo(() => {
@@ -402,6 +441,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
     // Phase 4: warn when selected voice cps deviates >30% from target
     const mismatchWarnings: string[] = []
     for (const sp of speakers) {
+      if (sp.segmentCount <= 0) continue
       const targetCps = sp.targetCharsPerSecond
       if (targetCps == null || targetCps <= 0) continue
       const state = voiceStates[sp.speakerId]
@@ -432,7 +472,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
     setIsSubmitting(true)
     setError(null)
     try {
-      const approvals: VoiceSelectionSpeakerApproval[] = speakers.map((sp) => {
+      const approvals: VoiceSelectionSpeakerApproval[] = speakers.filter((sp) => sp.segmentCount > 0).map((sp) => {
         const st = voiceStates[sp.speakerId]
         const ttsProvider = st?.selectedProvider ?? ''
         return {
@@ -493,7 +533,8 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
     )
   }
 
-  const selectedSpeaker = speakers.find((s) => s.speakerId === cloneModalSpeaker) ?? null
+  const selectedCloneSpeaker = speakers.find((s) => s.speakerId === cloneModalSpeaker) ?? null
+  const selectedAuditSpeaker = speakers.find((s) => s.speakerId === auditModalSpeaker) ?? null
 
   return (
     <>
@@ -520,16 +561,21 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
             const currentProvider = state?.selectedProvider ?? defaultProvider
             const voicesForProvider = getVoicesForSpeaker(sp.speakerId)
             const showClone = canSpeakerClone(sp.speakerId)
-            const statusLabel = state?.voiceSource === 'cloned'
-              ? '已克隆'
-              : state?.voiceId
-                ? '已选择'
-                : '待选择'
-            const statusColor = state?.voiceSource === 'cloned'
-              ? 'text-teal-600 dark:text-teal-400'
-              : state?.voiceId
-                ? 'text-emerald-600 dark:text-emerald-400'
-                : 'text-amber-600 dark:text-amber-400'
+            const hasNoSegments = sp.segmentCount <= 0
+            const statusLabel = hasNoSegments
+              ? '无片段'
+              : state?.voiceSource === 'cloned'
+                ? '已克隆'
+                : state?.voiceId
+                  ? '已选择'
+                  : '待选择'
+            const statusColor = hasNoSegments
+              ? 'text-slate-400'
+              : state?.voiceSource === 'cloned'
+                ? 'text-teal-600 dark:text-teal-400'
+                : state?.voiceId
+                  ? 'text-emerald-600 dark:text-emerald-400'
+                  : 'text-amber-600 dark:text-amber-400'
 
             return (
               <div key={sp.speakerId} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-800/30 p-4">
@@ -545,8 +591,16 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                       <span className="font-medium text-foreground text-sm">{sp.speakerName}</span>
                       <span className="text-xs text-slate-400">{sp.speakerId}</span>
                       <span className="text-xs text-slate-400">{sp.segmentCount} 段 · {sp.totalDurationS.toFixed(1)}s</span>
+                      {sp.speakerRoleLabel ? (
+                        <span className="rounded border border-amber-400/30 bg-amber-400/10 px-1.5 py-0.5 text-xs font-medium text-amber-600 dark:text-amber-300">
+                          {sp.speakerRoleLabel}
+                        </span>
+                      ) : null}
                       <span className={`text-xs font-medium ${statusColor}`}>{statusLabel}</span>
                     </div>
+                    {sp.speakerReviewHint ? (
+                      <p className="text-xs text-amber-600 dark:text-amber-300">{sp.speakerReviewHint}</p>
+                    ) : null}
 
                     {/* Provider Tabs (only when multi-provider payload) */}
                     {hasMultiProvider ? (
@@ -660,6 +714,15 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                         </button>
                       ) : null}
 
+                      <button
+                        className="h-8 rounded border border-slate-300 dark:border-slate-600 px-3 text-xs font-medium text-slate-500 dark:text-slate-400 transition hover:bg-slate-100 dark:hover:bg-slate-700 disabled:opacity-50"
+                        disabled={sp.segmentCount <= 0}
+                        onClick={() => setAuditModalSpeaker(sp.speakerId)}
+                        type="button"
+                      >
+                        核对原音
+                      </button>
+
                       {showClone ? (
                         <button
                           className="h-8 rounded border border-teal-500/40 bg-teal-500/10 px-3 text-xs font-medium text-teal-600 dark:text-teal-400 transition hover:bg-teal-500/20 disabled:opacity-50"
@@ -728,7 +791,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
         {/* Footer */}
         <div className="flex items-center justify-between pt-2 border-t border-slate-200 dark:border-slate-700">
           <span className="text-xs text-slate-400">
-            {speakers.filter((sp) => voiceStates[sp.speakerId]?.voiceId).length} / {speakers.length} 说话人已配置音色
+            {speakers.filter((sp) => sp.segmentCount > 0 && voiceStates[sp.speakerId]?.voiceId).length} / {speakers.filter((sp) => sp.segmentCount > 0).length} 说话人已配置音色
           </span>
           <button
             className="rounded-lg bg-teal-600 px-5 py-2 text-sm font-medium text-white transition hover:bg-teal-700 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -742,16 +805,219 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
       </section>
 
       {/* Clone Modal */}
-      {cloneModalSpeaker && selectedSpeaker ? (
+      {cloneModalSpeaker && selectedCloneSpeaker ? (
         <VoiceCloneModal
           cloneCostCredits={cloneCostCredits}
           jobId={jobId}
           onClose={() => setCloneModalSpeaker(null)}
           onComplete={handleCloneComplete}
-          speaker={selectedSpeaker}
+          speaker={selectedCloneSpeaker}
+        />
+      ) : null}
+
+      {/* Source audio audit modal */}
+      {auditModalSpeaker && selectedAuditSpeaker ? (
+        <SpeakerAudioAuditModal
+          jobId={jobId}
+          onClose={() => setAuditModalSpeaker(null)}
+          onReassigned={handleSpeakerSegmentReassigned}
+          speaker={selectedAuditSpeaker}
+          speakerOptions={speakers.map((sp) => ({
+            speakerId: sp.speakerId,
+            speakerName: sp.speakerName,
+          }))}
         />
       ) : null}
     </>
+  )
+}
+
+/* ---------- SpeakerAudioAuditModal ---------- */
+
+interface SpeakerAudioAuditModalProps {
+  jobId: string
+  speaker: Pick<SpeakerPayload, 'speakerId' | 'speakerName'>
+  speakerOptions: Array<Pick<SpeakerPayload, 'speakerId' | 'speakerName'>>
+  onClose: () => void
+  onReassigned: (result: SpeakerAudioReassignResult) => void
+}
+
+function SpeakerAudioAuditModal({
+  jobId,
+  speaker,
+  speakerOptions,
+  onClose,
+  onReassigned,
+}: SpeakerAudioAuditModalProps) {
+  const [segments, setSegments] = useState<SpeakerAudioSegment[]>([])
+  const [isLoading, setIsLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [reassigningSegmentId, setReassigningSegmentId] = useState<number | null>(null)
+  const [updatingDubbingModeSegmentId, setUpdatingDubbingModeSegmentId] = useState<number | null>(null)
+  const audioRef = useRef<HTMLAudioElement | null>(null)
+  const [playingSegmentId, setPlayingSegmentId] = useState<number | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    async function load() {
+      try {
+        setIsLoading(true)
+        setError(null)
+        const result = await getSpeakerAudioSegments(jobId, speaker.speakerId)
+        if (!cancelled) {
+          setSegments([...result.segments].sort((a, b) => a.startMs - b.startMs))
+        }
+      } catch (err) {
+        if (!cancelled) setError(getErrorMessage(err))
+      } finally {
+        if (!cancelled) setIsLoading(false)
+      }
+    }
+    load()
+    return () => { cancelled = true }
+  }, [jobId, speaker.speakerId])
+
+  const playSegment = useCallback((seg: SpeakerAudioSegment) => {
+    if (audioRef.current) { audioRef.current.pause(); audioRef.current = null }
+    if (playingSegmentId === seg.segmentId) { setPlayingSegmentId(null); return }
+    const audio = new Audio(seg.audioUrl)
+    audio.onended = () => setPlayingSegmentId(null)
+    audio.onerror = () => setPlayingSegmentId(null)
+    audio.play().catch(() => setPlayingSegmentId(null))
+    audioRef.current = audio
+    setPlayingSegmentId(seg.segmentId)
+  }, [playingSegmentId])
+
+  const handleReassign = useCallback(async (seg: SpeakerAudioSegment, toSpeakerId: string) => {
+    if (!toSpeakerId || toSpeakerId === speaker.speakerId || reassigningSegmentId) return
+    setReassigningSegmentId(seg.segmentId)
+    setError(null)
+    try {
+      const result = await reassignSpeakerAudioSegment({
+        jobId,
+        segmentId: seg.segmentId,
+        fromSpeakerId: speaker.speakerId,
+        toSpeakerId,
+      })
+      onReassigned(result)
+      setSegments((prev) => prev.filter((item) => item.segmentId !== seg.segmentId))
+      if (audioRef.current && playingSegmentId === seg.segmentId) {
+        audioRef.current.pause()
+        audioRef.current = null
+        setPlayingSegmentId(null)
+      }
+    } catch (err) {
+      setError(getErrorMessage(err))
+    } finally {
+      setReassigningSegmentId(null)
+    }
+  }, [jobId, onReassigned, playingSegmentId, reassigningSegmentId, speaker.speakerId])
+
+  const handleDubbingModeChange = useCallback(async (seg: SpeakerAudioSegment, keepOriginal: boolean) => {
+    if (updatingDubbingModeSegmentId) return
+    const nextMode = keepOriginal ? 'keep_original' : 'dub'
+    if (seg.dubbingMode === nextMode) return
+    setUpdatingDubbingModeSegmentId(seg.segmentId)
+    setError(null)
+    setSegments((prev) => prev.map((item) => (
+      item.segmentId === seg.segmentId ? { ...item, dubbingMode: nextMode } : item
+    )))
+    try {
+      const result = await updateSpeakerAudioDubbingMode({
+        jobId,
+        segmentId: seg.segmentId,
+        speakerId: speaker.speakerId,
+        dubbingMode: nextMode,
+      })
+      setSegments((prev) => prev.map((item) => (
+        item.segmentId === result.segmentId
+          ? { ...item, dubbingMode: result.dubbingMode }
+          : item
+      )))
+    } catch (err) {
+      setSegments((prev) => prev.map((item) => (
+        item.segmentId === seg.segmentId ? { ...item, dubbingMode: seg.dubbingMode } : item
+      )))
+      setError(getErrorMessage(err))
+    } finally {
+      setUpdatingDubbingModeSegmentId(null)
+    }
+  }, [jobId, speaker.speakerId, updatingDubbingModeSegmentId])
+
+  useEffect(() => {
+    return () => { if (audioRef.current) { audioRef.current.pause(); audioRef.current = null } }
+  }, [])
+
+  const totalDuration = useMemo(() => {
+    return segments.reduce((sum, seg) => sum + seg.durationS, 0)
+  }, [segments])
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+      <div className="w-full max-w-3xl max-h-[85vh] flex flex-col rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 shadow-xl">
+        <div className="flex items-center justify-between p-4 border-b border-slate-200 dark:border-slate-700">
+          <h3 className="text-base font-semibold text-foreground">核对原音 — {speaker.speakerName}</h3>
+          <button className="text-slate-400 hover:text-foreground transition" onClick={onClose} type="button">
+            <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M6 18L18 6M6 6l12 12" strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} /></svg>
+          </button>
+        </div>
+        <div className="flex items-center gap-4 px-4 py-2 bg-slate-50/50 dark:bg-slate-800/30">
+          <span className="text-xs text-slate-500">共 <span className="font-medium text-foreground">{segments.length}</span> 段</span>
+          <span className="text-xs text-slate-500">总时长 <span className="font-medium text-foreground">{totalDuration.toFixed(1)}s</span></span>
+          <span className="text-xs text-slate-400">按时间排序，修改后会立即保存。</span>
+        </div>
+        <div className="flex-1 overflow-y-auto p-4 space-y-1">
+          {isLoading ? (
+            <div className="text-center py-8 text-sm text-slate-400">加载原音片段...</div>
+          ) : segments.length === 0 ? (
+            <div className="text-center py-8 text-sm text-slate-400">当前说话人没有待核对片段</div>
+          ) : segments.map((seg) => {
+            const isPlaying = playingSegmentId === seg.segmentId
+            const isReassigning = reassigningSegmentId === seg.segmentId
+            const isUpdatingMode = updatingDubbingModeSegmentId === seg.segmentId
+            return (
+              <div className="flex items-center gap-3 rounded-lg border border-transparent px-3 py-2 transition hover:bg-slate-50 dark:hover:bg-slate-800/40" key={seg.segmentId}>
+                <button className="h-7 w-7 rounded-full border border-slate-300 dark:border-slate-600 flex items-center justify-center shrink-0 hover:bg-slate-100 dark:hover:bg-slate-700 transition" onClick={() => playSegment(seg)} type="button">
+                  {isPlaying ? <svg className="h-3 w-3 text-teal-500" fill="currentColor" viewBox="0 0 24 24"><rect height="16" rx="1" width="4" x="6" y="4" /><rect height="16" rx="1" width="4" x="14" y="4" /></svg> : <svg className="h-3 w-3 text-slate-500" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>}
+                </button>
+                <span className="w-12 shrink-0 text-xs tabular-nums text-slate-400">{formatTimecode(seg.startMs)}</span>
+                <span className="min-w-0 flex-1 truncate text-xs text-foreground">{seg.sourceText || `片段 ${seg.segmentId}`}</span>
+                <span className="w-12 shrink-0 text-right text-xs text-slate-400">{seg.durationS.toFixed(1)}s</span>
+                <label className="flex h-8 w-[102px] shrink-0 items-center justify-center gap-1 rounded border border-slate-300 dark:border-slate-600 px-2 text-xs text-slate-600 dark:text-slate-300">
+                  <input
+                    checked={seg.dubbingMode === 'keep_original'}
+                    className="h-3.5 w-3.5 accent-teal-500"
+                    disabled={isUpdatingMode || updatingDubbingModeSegmentId !== null}
+                    onChange={(event) => { void handleDubbingModeChange(seg, event.target.checked) }}
+                    type="checkbox"
+                  />
+                  保留原音
+                </label>
+                <select
+                  className="h-8 w-[150px] shrink-0 rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 text-xs text-foreground disabled:opacity-50"
+                  disabled={isReassigning || reassigningSegmentId !== null}
+                  onChange={(event) => { void handleReassign(seg, event.target.value) }}
+                  value={speaker.speakerId}
+                >
+                  {speakerOptions.map((option) => (
+                    <option key={option.speakerId} value={option.speakerId}>
+                      {option.speakerName || option.speakerId}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )
+          })}
+        </div>
+        <div className="flex items-center justify-between p-4 border-t border-slate-200 dark:border-slate-700">
+          <span className="text-xs text-slate-400">可修改说话人归属，也可让片段跳过翻译配音并保留原音。</span>
+          <div className="flex items-center gap-2">
+            {error ? <span className="text-xs text-red-500 max-w-[280px] truncate">{error}</span> : null}
+            <button className="h-8 rounded px-4 text-sm text-slate-500 transition hover:text-foreground" onClick={onClose} type="button">关闭</button>
+          </div>
+        </div>
+      </div>
+    </div>
   )
 }
 

@@ -5,16 +5,18 @@ Implements decision D10 + M2 of the post-edit plan
 
 Decision tree:
 
-1. **YouTube source with non-empty title**
-   truncate(title, width=24) → collision suffix if needed
+1. **YouTube source**
+   ``"油管视频 YYYY-MM-DD NNN"`` — a temporary Chinese placeholder until
+   S2 review can derive a content-aware Chinese title.
 
 2. **YouTube source with empty / missing title**
-   (private / deleted / 401 / yt-dlp fallback) — fall through to branch 4
+   same placeholder path as branch 1; yt-dlp title availability no longer
+   affects the initial user-facing name.
 
-3. **Local upload with a filename (non-empty, non-whitespace)**
+3. **Local upload with a Chinese filename (non-empty, non-whitespace)**
    truncate(os.path.splitext(filename)[0], width=24) → collision suffix if needed
 
-4. **Local upload with no filename**
+4. **Local upload with no suitable Chinese filename**
    ``"上传视频 YYYY-MM-DD NNN"`` — NNN is a per-user, per-day, zero-padded
    counter; no collision suffix needed in practice.
 
@@ -35,6 +37,7 @@ from __future__ import annotations
 
 import os
 import random
+import re
 import string
 from dataclasses import dataclass
 from datetime import date
@@ -62,6 +65,7 @@ MAX_TOTAL_WIDTH = 29
 MAX_RETRIES = 5
 _SUFFIX_CHARS = string.ascii_lowercase + string.digits
 _SUFFIX_LEN = 4
+_CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
 
 
 @dataclass(slots=True, frozen=True)
@@ -131,27 +135,22 @@ def resolve_collision(
 def _pick_base_name(inp: DisplayNameInput, *, width: int) -> str:
     source_type = (inp.source_type or "").strip().lower()
 
-    # Branch 1+2: YouTube source
+    # Branch 1: YouTube source uses a Chinese placeholder at creation time.
+    # Content-aware Chinese titles are generated later during S2 review.
     if source_type == "youtube_url":
-        title = (inp.youtube_title or "").strip()
-        if title:
-            truncated = truncate_to_width(title, width)
-            if truncated:
-                return truncated
-        # Empty / blank title → fall through to branch 4
         return _branch_4_default(inp)
 
-    # Branch 3: local upload with filename
+    # Branch 3: local upload with a suitable Chinese filename.
     if source_type == "local_video":
         filename = (inp.local_filename or "").strip()
         if filename:
             stem, _ = os.path.splitext(filename)
             stem = stem.strip()
-            if stem:
+            if stem and _CJK_RE.search(stem):
                 truncated = truncate_to_width(stem, width)
                 if truncated:
                     return truncated
-        # No filename → branch 4
+        # No suitable Chinese filename → branch 4
         return _branch_4_default(inp)
 
     # Unknown source_type: defensive default
@@ -159,7 +158,7 @@ def _pick_base_name(inp: DisplayNameInput, *, width: int) -> str:
 
 
 def _branch_4_default(inp: DisplayNameInput) -> str:
-    """``上传视频 YYYY-MM-DD NNN`` — counter-based, no truncation needed."""
+    """``油管视频/上传视频 YYYY-MM-DD NNN`` — counter-based placeholder."""
     local_date = inp.user_local_date
     sequence = inp.upload_sequence_today
     if local_date is None or sequence is None:
@@ -171,4 +170,5 @@ def _branch_4_default(inp: DisplayNameInput) -> str:
         )
     date_str = local_date.strftime("%Y-%m-%d")
     seq_str = f"{sequence:03d}"
-    return f"上传视频 {date_str} {seq_str}"
+    prefix = "油管视频" if (inp.source_type or "").strip().lower() == "youtube_url" else "上传视频"
+    return f"{prefix} {date_str} {seq_str}"

@@ -1,0 +1,18 @@
+{
+  "corrections": [
+    {
+      "phase": "original_to_after_corrections",
+      "position": 9,
+      "before_speaker_id": "speaker_b",
+      "after_speaker_id": "speaker_a",
+      "start_ms": 137330,
+      "end_ms": 144930,
+      "duration_ms": 7600,
+      "source_text": {
+        "snippet": "We thank you for watching. And remember, stay updated on breaking news and top stories on the NBC News app or watch live on our YouTube channel.",
+        "chars": 144,
+        "truncated": false
+      }
+    }
+  ]
+}

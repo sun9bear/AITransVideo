@@ -1,0 +1,662 @@
+{
+  "corrections": [
+    {
+      "phase": "original_to_after_corrections",
+      "position": 1,
+      "before_speaker_id": "speaker_b",
+      "after_speaker_id": "speaker_a",
+      "start_ms": 47400,
+      "end_ms": 48600,
+      "duration_ms": 1200,
+      "source_text": {
+        "snippet": "I hope you enjoy it.",
+        "chars": 20,
+        "truncated": false
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 3,
+      "before_speaker_id": "speaker_b",
+      "after_speaker_id": "speaker_a",
+      "start_ms": 86780,
+      "end_ms": 97500,
+      "duration_ms": 10720,
+      "source_text": {
+        "snippet": "So, Tim, you've said publicly that you think UFOs, UAPs, are Ah, the story of the century. Now, I happen to agree with you, but why do you say that?",
+        "chars": 148,
+        "truncated": false
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 4,
+      "before_speaker_id": "speaker_c",
+      "after_speaker_id": "speaker_b",
+      "start_ms": 97500,
+      "end_ms": 112180,
+      "duration_ms": 14680,
+      "source_text": {
+        "snippet": "Oh, absolutely. We're being visited by non human intelligence with technology we really don't understand. And with intentions we don't understand it all either. And this is just one of those great big questions. Are we alone or not? And we…",
+        "chars": 267,
+        "truncated": true
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 5,
+      "before_speaker_id": "speaker_b",
+      "after_speaker_id": "speaker_a",
+      "start_ms": 112660,
+      "end_ms": 123619,
+      "duration_ms": 10959,
+      "source_text": {
+        "snippet": "Now that really does surprise me to hear that from a former very high ranking flag officer in the US Navy to actually say you're stating categorically that you believe NHI non human intelligence are real.",
+        "chars": 204,
+        "truncated": false
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 6,
+      "before_speaker_id": "speaker_c",
+      "after_speaker_id": "speaker_b",
+      "start_ms": 123700,
+      "end_ms": 124820,
+      "duration_ms": 1120,
+      "source_text": {
+        "snippet": "Absolutely I do.",
+        "chars": 16,
+        "truncated": false
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 7,
+      "before_speaker_id": "speaker_b",
+      "after_speaker_id": "speaker_a",
+      "start_ms": 124820,
+      "end_ms": 125700,
+      "duration_ms": 880,
+      "source_text": {
+        "snippet": "Why do you say that?",
+        "chars": 20,
+        "truncated": false
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 8,
+      "before_speaker_id": "speaker_c",
+      "after_speaker_id": "speaker_b",
+      "start_ms": 126180,
+      "end_ms": 151330,
+      "duration_ms": 25150,
+      "source_text": {
+        "snippet": "Well, for a number of reasons that have been coming out, Congress has been informed and they have drafted legislation and They've passed legislation, for example, to establish a DoD office to look at it. They've done the same. NASA did the…",
+        "chars": 457,
+        "truncated": true
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 9,
+      "before_speaker_id": "speaker_b",
+      "after_speaker_id": "speaker_a",
+      "start_ms": 151970,
+      "end_ms": 154690,
+      "duration_ms": 2720,
+      "source_text": {
+        "snippet": "Wow, that's a big thing for you to say that, isn't it?",
+        "chars": 54,
+        "truncated": false
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 10,
+      "before_speaker_id": "speaker_c",
+      "after_speaker_id": "speaker_b",
+      "start_ms": 154770,
+      "end_ms": 165230,
+      "duration_ms": 10460,
+      "source_text": {
+        "snippet": "It is. It's astonishing. And that's why I wrote that article in the Hill. I don't understand why more people are not, uh, interested in this. I mystify the lack of intellectual curiosity.",
+        "chars": 187,
+        "truncated": false
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 11,
+      "before_speaker_id": "speaker_b",
+      "after_speaker_id": "speaker_a",
+      "start_ms": 165390,
+      "end_ms": 179550,
+      "duration_ms": 14160,
+      "source_text": {
+        "snippet": "You know, the moment for me was the Schumer amendment when the House, sorry, the Senate majority Leader Chuck Schumer put into proposed legislation language referring to non human intelligence over 20 times.",
+        "chars": 207,
+        "truncated": false
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 12,
+      "before_speaker_id": "speaker_c",
+      "after_speaker_id": "speaker_b",
+      "start_ms": 179630,
+      "end_ms": 186850,
+      "duration_ms": 7220,
+      "source_text": {
+        "snippet": "Exactly. That's the statement. And I. Congress doesn't act at that level without information.",
+        "chars": 93,
+        "truncated": false
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 13,
+      "before_speaker_id": "speaker_b",
+      "after_speaker_id": "speaker_a",
+      "start_ms": 187810,
+      "end_ms": 190130,
+      "duration_ms": 2320,
+      "source_text": {
+        "snippet": "Clearly you believe there's a cover up.",
+        "chars": 39,
+        "truncated": false
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 14,
+      "before_speaker_id": "speaker_c",
+      "after_speaker_id": "speaker_b",
+      "start_ms": 190530,
+      "end_ms": 191010,
+      "duration_ms": 480,
+      "source_text": {
+        "snippet": "Yes.",
+        "chars": 4,
+        "truncated": false
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 15,
+      "before_speaker_id": "speaker_b",
+      "after_speaker_id": "speaker_a",
+      "start_ms": 191730,
+      "end_ms": 207010,
+      "duration_ms": 15280,
+      "source_text": {
+        "snippet": "Why are they covering it up? I mean, you're probably one of the more highly cleared public officials from the military past serving who's basically come out publicly and said you think this is real? Why do you think there is this cover up?…",
+        "chars": 265,
+        "truncated": true
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 16,
+      "before_speaker_id": "speaker_c",
+      "after_speaker_id": "speaker_b",
+      "start_ms": 207170,
+      "end_ms": 236380,
+      "duration_ms": 29210,
+      "source_text": {
+        "snippet": "Well, sure, this is technology we're still trying to learn about and, and it could give us an advantage in any military conflict. So that's a good reason to not disclose the nature of the technology. And I think for the foreseeable future…",
+        "chars": 482,
+        "truncated": true
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 17,
+      "before_speaker_id": "speaker_b",
+      "after_speaker_id": "speaker_a",
+      "start_ms": 237240,
+      "end_ms": 262280,
+      "duration_ms": 25040,
+      "source_text": {
+        "snippet": "You very prominently sat right behind Ryan Graves in the House oversight hearing earlier this year. You made a point of being seen to support Ryan Graves, the former fighter pilot, David Fravor, the former fighter pilot, and David Grusch,…",
+        "chars": 334,
+        "truncated": true
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 18,
+      "before_speaker_id": "speaker_c",
+      "after_speaker_id": "speaker_b",
+      "start_ms": 263020,
+      "end_ms": 336100,
+      "duration_ms": 73080,
+      "source_text": {
+        "snippet": "Right. Well, all those officers are speaking out about the phenomena and the need to study it scientifically more and take policy measures. For example, Ryan is stood up, a non profit called the Americans for Safe Aerospace with a very wor…",
+        "chars": 1127,
+        "truncated": true
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 19,
+      "before_speaker_id": "speaker_b",
+      "after_speaker_id": "speaker_a",
+      "start_ms": 336500,
+      "end_ms": 348180,
+      "duration_ms": 11680,
+      "source_text": {
+        "snippet": "Shouldn't there be, I mean, philosophically, shouldn't it be really important that somebody certainly at your level in the Navy be allowed to talk openly to your colleagues about the flight safety Risks that these kind of things.",
+        "chars": 229,
+        "truncated": false
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 20,
+      "before_speaker_id": "speaker_c",
+      "after_speaker_id": "speaker_b",
+      "start_ms": 348260,
+      "end_ms": 350500,
+      "duration_ms": 2240,
+      "source_text": {
+        "snippet": "Absolutely, absolutely. This is a safety issue.",
+        "chars": 47,
+        "truncated": false
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 21,
+      "before_speaker_id": "speaker_b",
+      "after_speaker_id": "speaker_a",
+      "start_ms": 350880,
+      "end_ms": 354160,
+      "duration_ms": 3280,
+      "source_text": {
+        "snippet": "So why do you think they tried to suppress knowledge of that video?",
+        "chars": 67,
+        "truncated": false
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 22,
+      "before_speaker_id": "speaker_c",
+      "after_speaker_id": "speaker_b",
+      "start_ms": 354240,
+      "end_ms": 367920,
+      "duration_ms": 13680,
+      "source_text": {
+        "snippet": "Well, it's the over classification issue that we've touched on that these UAP and the crash retrieval objects are classified. And it's really kind of a Cold War legacy of over classification.",
+        "chars": 191,
+        "truncated": false
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 23,
+      "before_speaker_id": "speaker_b",
+      "after_speaker_id": "speaker_a",
+      "start_ms": 368240,
+      "end_ms": 392970,
+      "duration_ms": 24730,
+      "source_text": {
+        "snippet": "Tim. I have to say I think a lot of people sitting back home will be scratching their heads going, wow, a former flag officer in the US Navy, a former rear admiral, is talking about the existence of a non human intelligence. They're probab…",
+        "chars": 431,
+        "truncated": true
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 24,
+      "before_speaker_id": "speaker_c",
+      "after_speaker_id": "speaker_b",
+      "start_ms": 393290,
+      "end_ms": 434520,
+      "duration_ms": 41230,
+      "source_text": {
+        "snippet": "A few, a few reasons for that, Ross. Uh, first off, I had a job where I was the superintendent of the U.S. naval Observatory and I had a team of astrophysicists that uh, monitored the stars and made star catalogs. And I learned a lot about…",
+        "chars": 645,
+        "truncated": true
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 25,
+      "before_speaker_id": "speaker_b",
+      "after_speaker_id": "speaker_a",
+      "start_ms": 435960,
+      "end_ms": 443000,
+      "duration_ms": 7040,
+      "source_text": {
+        "snippet": "Are you disappointed that the US government's not doing more data driven empirical research investigating UAPs?",
+        "chars": 111,
+        "truncated": false
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 26,
+      "before_speaker_id": "speaker_c",
+      "after_speaker_id": "speaker_b",
+      "start_ms": 443780,
+      "end_ms": 481810,
+      "duration_ms": 38030,
+      "source_text": {
+        "snippet": "Uh, I am. I think it's time now. And with the Sol foundation coming out in its inaugural symposium here, this is exactly what we're trying to do is make policy recommendations to the US Government to begin more systematic scientific study…",
+        "chars": 632,
+        "truncated": true
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 27,
+      "before_speaker_id": "speaker_b",
+      "after_speaker_id": "speaker_a",
+      "start_ms": 482050,
+      "end_ms": 493190,
+      "duration_ms": 11140,
+      "source_text": {
+        "snippet": "The problem, Tim, is that a lot of the government is still in absolute denial. I mean you talk as a fact about a crash retrieval program and we're talking here about retrieved non human technology, aren't we?",
+        "chars": 208,
+        "truncated": false
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 28,
+      "before_speaker_id": "speaker_c",
+      "after_speaker_id": "speaker_b",
+      "start_ms": 493190,
+      "end_ms": 493590,
+      "duration_ms": 400,
+      "source_text": {
+        "snippet": "Yes.",
+        "chars": 4,
+        "truncated": false
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 29,
+      "before_speaker_id": "speaker_b",
+      "after_speaker_id": "speaker_a",
+      "start_ms": 493590,
+      "end_ms": 507030,
+      "duration_ms": 13440,
+      "source_text": {
+        "snippet": "And yet there are people in the government like until very recently, the, uh, Pentagon's spokesperson on UAPs, Dr. Sean Kirkpatrick, is still saying he's seen no credible evidence of this phenomena. What do you say to that?",
+        "chars": 223,
+        "truncated": false
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 30,
+      "before_speaker_id": "speaker_c",
+      "after_speaker_id": "speaker_b",
+      "start_ms": 507190,
+      "end_ms": 550220,
+      "duration_ms": 43030,
+      "source_text": {
+        "snippet": "So what you have going on right now are again legacy classified programs, special access programs. And without congressional direction and White House policy, that's not going to change. And so I don't criticize for example Sean Kirkpatric…",
+        "chars": 717,
+        "truncated": true
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 31,
+      "before_speaker_id": "speaker_b",
+      "after_speaker_id": "speaker_a",
+      "start_ms": 550540,
+      "end_ms": 566180,
+      "duration_ms": 15640,
+      "source_text": {
+        "snippet": "Can I ask you this? I can understand why it might be decided by very senior people in the Defence Department that we shouldn't reveal technology because it's a weapon, a ah, potential weapon. It's a potential advantage in a future war. You…",
+        "chars": 271,
+        "truncated": true
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 32,
+      "before_speaker_id": "speaker_c",
+      "after_speaker_id": "speaker_b",
+      "start_ms": 566180,
+      "end_ms": 589340,
+      "duration_ms": 23160,
+      "source_text": {
+        "snippet": "Absolutely. And I think some of the technology should remain classified. We don't want it to get in the hands of our adversaries. However, the fact that we're being visited by non human intelligence, that is what I think needs to be disclo…",
+        "chars": 511,
+        "truncated": true
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 33,
+      "before_speaker_id": "speaker_b",
+      "after_speaker_id": "speaker_a",
+      "start_ms": 589740,
+      "end_ms": 592540,
+      "duration_ms": 2800,
+      "source_text": {
+        "snippet": "Why is the SOL foundation so important?",
+        "chars": 39,
+        "truncated": false
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 34,
+      "before_speaker_id": "speaker_c",
+      "after_speaker_id": "speaker_b",
+      "start_ms": 593660,
+      "end_ms": 626530,
+      "duration_ms": 32870,
+      "source_text": {
+        "snippet": "Right. So we're at a time now where previously UAP have been pretty much received stigma and skepticism and we're changing that. We're at an uh, inflection point in our uh, understanding of this phenomena. And SOELL is coming out now to ad…",
+        "chars": 431,
+        "truncated": true
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 35,
+      "before_speaker_id": "speaker_b",
+      "after_speaker_id": "speaker_a",
+      "start_ms": 627620,
+      "end_ms": 630180,
+      "duration_ms": 2560,
+      "source_text": {
+        "snippet": "What sort of research would you like SOL to do?",
+        "chars": 47,
+        "truncated": false
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 36,
+      "before_speaker_id": "speaker_c",
+      "after_speaker_id": "speaker_b",
+      "start_ms": 630580,
+      "end_ms": 650820,
+      "duration_ms": 20240,
+      "source_text": {
+        "snippet": "Well, I'm of course interested in the technology aspects of the UAP phenomena. That's fascinating to me. But there are other elements. Again I mean the socio cultural, I um, guess implications are great. Uh, we're not alone, this is what w…",
+        "chars": 317,
+        "truncated": true
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 37,
+      "before_speaker_id": "speaker_b",
+      "after_speaker_id": "speaker_a",
+      "start_ms": 651620,
+      "end_ms": 664220,
+      "duration_ms": 12600,
+      "source_text": {
+        "snippet": "You know, it's amazing. I think a lot of us will watching on would think that somebody at your level of seniority in the U.S. navy and then in NOAA, uh, I would have Thought you would have been briefed into something like this program?",
+        "chars": 235,
+        "truncated": false
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 38,
+      "before_speaker_id": "speaker_c",
+      "after_speaker_id": "speaker_b",
+      "start_ms": 664460,
+      "end_ms": 688820,
+      "duration_ms": 24360,
+      "source_text": {
+        "snippet": "Oh, no, no. Uh, their special access programs are very tightly restricted. And so you have to look at what one's job is. And that need to know, right, that they have a classification or clearance at a certain level, and then do they have a…",
+        "chars": 439,
+        "truncated": true
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 39,
+      "before_speaker_id": "speaker_b",
+      "after_speaker_id": "speaker_a",
+      "start_ms": 689700,
+      "end_ms": 707490,
+      "duration_ms": 17790,
+      "source_text": {
+        "snippet": "The obvious question then is, clearly the government knows a lot more than it's letting on. Here's Sol starting out doing virgin research, and yet the best research is probably hidden inside some of these special access programs. Would you…",
+        "chars": 293,
+        "truncated": true
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 40,
+      "before_speaker_id": "speaker_c",
+      "after_speaker_id": "speaker_b",
+      "start_ms": 707730,
+      "end_ms": 723490,
+      "duration_ms": 15760,
+      "source_text": {
+        "snippet": "Absolutely. And that's the purpose of the Schumer Amendment. And that's what we want to see, is we want this panel that it directs to convene and review these programs and make a determination on what can be released or disclosed without c…",
+        "chars": 269,
+        "truncated": true
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 41,
+      "before_speaker_id": "speaker_b",
+      "after_speaker_id": "speaker_a",
+      "start_ms": 724690,
+      "end_ms": 743030,
+      "duration_ms": 18340,
+      "source_text": {
+        "snippet": "Now, Tim, I don't think it's a coincidence that the jet fighter pilots who came forward are US Navy. There's a lot of US Navy behind the push for transparency. Is the US Navy more switched on to the need for transparency and disclosure on…",
+        "chars": 304,
+        "truncated": true
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 42,
+      "before_speaker_id": "speaker_c",
+      "after_speaker_id": "speaker_b",
+      "start_ms": 743270,
+      "end_ms": 754990,
+      "duration_ms": 11720,
+      "source_text": {
+        "snippet": "Well, the statistics of disclosure certainly make that the case. And we've seen that with Ryan Graves and David, uh, Fravor, for example. Alex Dietrich, why is the US Navy",
+        "chars": 171,
+        "truncated": false
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 43,
+      "before_speaker_id": "speaker_b",
+      "after_speaker_id": "speaker_a",
+      "start_ms": 754990,
+      "end_ms": 757270,
+      "duration_ms": 2280,
+      "source_text": {
+        "snippet": "different from the US Air Force on disclosure?",
+        "chars": 46,
+        "truncated": false
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 44,
+      "before_speaker_id": "speaker_c",
+      "after_speaker_id": "speaker_b",
+      "start_ms": 757270,
+      "end_ms": 804000,
+      "duration_ms": 46730,
+      "source_text": {
+        "snippet": "Right. Well, I think Steve, uh, pardon me, Chris Mellon wrote an op ed, I believe it was in Politico, but you'll have to try about this, about the Air Force not disclosing at a level like the Navy, and, uh, I'd speculate, but having been i…",
+        "chars": 739,
+        "truncated": true
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 45,
+      "before_speaker_id": "speaker_b",
+      "after_speaker_id": "speaker_a",
+      "start_ms": 804160,
+      "end_ms": 807360,
+      "duration_ms": 3200,
+      "source_text": {
+        "snippet": "So it's official. Sailors are more honest than flyers.",
+        "chars": 54,
+        "truncated": false
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 46,
+      "before_speaker_id": "speaker_c",
+      "after_speaker_id": "speaker_b",
+      "start_ms": 807360,
+      "end_ms": 811200,
+      "duration_ms": 3840,
+      "source_text": {
+        "snippet": "I don't know about honesty, but I'll say, uh, they're less risk averse.",
+        "chars": 71,
+        "truncated": false
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 47,
+      "before_speaker_id": "speaker_b",
+      "after_speaker_id": "speaker_a",
+      "start_ms": 811840,
+      "end_ms": 813280,
+      "duration_ms": 1440,
+      "source_text": {
+        "snippet": "Tim Gallaudet, thanks very much.",
+        "chars": 32,
+        "truncated": false
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": 48,
+      "before_speaker_id": "speaker_c",
+      "after_speaker_id": "speaker_b",
+      "start_ms": 813280,
+      "end_ms": 814080,
+      "duration_ms": 800,
+      "source_text": {
+        "snippet": "Thank you, Ross.",
+        "chars": 16,
+        "truncated": false
+      }
+    }
+  ]
+}

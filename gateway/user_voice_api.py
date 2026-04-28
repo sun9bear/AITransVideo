@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Query, Request, Response
 from sqlalchemy import select
@@ -14,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth import require_auth
 from database import get_db
 from models import User, UserVoice
+from services.tts.voice_speed_bounds import MAX_VALID_CPS, MIN_VALID_CPS
 from user_voice_service import (
     add_user_voice,
     delete_user_voice,
@@ -57,6 +59,17 @@ def _normalize_tts_provider(stored: str | None) -> str | None:
         return "cosyvoice"
     if s in ("volcengine", "volcengine_tts", "doubao", "doubao_tts"):
         return "volcengine"
+    return None
+
+
+def _internal_access_error(request: Request) -> Response | None:
+    from config import settings as _settings
+
+    key = _settings.internal_api_key
+    if not key:
+        return _json(503, {"error": "internal_endpoint_misconfigured"})
+    if request.headers.get("X-Internal-Key", "") != key:
+        return _json(403, {"error": "invalid_internal_key"})
     return None
 
 
@@ -295,6 +308,7 @@ async def calibrate_voice_speed(
 
 @internal_router.get("/user-voices/by-voice-ids")
 async def internal_lookup_user_voices_by_ids(
+    request: Request,
     voice_ids: str = Query(..., description="Comma-separated voice_ids"),
     user_id: str = Query(..., description="Owning user UUID — REQUIRED to prevent cross-user cps leakage"),
     db: AsyncSession = Depends(get_db),
@@ -312,6 +326,10 @@ async def internal_lookup_user_voices_by_ids(
       - have a non-null ``chars_per_second`` (calibrated)
       - are not expired
     """
+    internal_error = _internal_access_error(request)
+    if internal_error is not None:
+        return internal_error
+
     ids = [v.strip() for v in voice_ids.split(",") if v.strip()]
     if not ids:
         return _json(200, {"voices": []})
@@ -350,6 +368,127 @@ async def internal_lookup_user_voices_by_ids(
             }
             for v in voices
         ],
+    })
+
+
+@internal_router.post("/user-voices/speed-profiles")
+async def internal_ingest_user_voice_speed_profiles(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Persist conservative cloned-voice speed profiles observed by pipeline.
+
+    This endpoint only fills missing per-model/scalar calibration fields for
+    existing ``user_voices`` rows. It deliberately does not create voices and
+    does not overwrite an already calibrated model, so production jobs cannot
+    degrade a user's explicit calibration.
+    """
+    internal_error = _internal_access_error(request)
+    if internal_error is not None:
+        return internal_error
+
+    body = await _read_body(request)
+    uid = str(body.get("user_id", "") or "").strip()
+    if not uid:
+        return _json(400, {"error": "user_id_required"})
+    try:
+        user_uuid = uuid.UUID(uid)
+    except (ValueError, AttributeError):
+        return _json(400, {"error": "invalid_user_id"})
+
+    profiles = body.get("profiles")
+    if not isinstance(profiles, list):
+        return _json(400, {"error": "profiles_required"})
+    profiles = profiles[:50]
+    voice_ids = [
+        str(item.get("voice_id", "")).strip()
+        for item in profiles
+        if isinstance(item, dict) and str(item.get("voice_id", "")).strip()
+    ]
+    if not voice_ids:
+        return _json(200, {"ok": True, "updated_count": 0, "skipped_count": 0})
+
+    result = await db.execute(
+        select(UserVoice).where(
+            UserVoice.user_id == user_uuid,
+            UserVoice.voice_id.in_(voice_ids),
+            UserVoice.expired_at.is_(None),
+        )
+    )
+    voices_by_id = {voice.voice_id: voice for voice in result.scalars().all()}
+    updated: list[dict] = []
+    skipped: list[dict] = []
+    now = datetime.now(timezone.utc)
+
+    for item in profiles:
+        if not isinstance(item, dict):
+            skipped.append({"voice_id": "", "reason": "invalid_profile"})
+            continue
+        voice_id = str(item.get("voice_id", "") or "").strip()
+        if not voice_id:
+            skipped.append({"voice_id": "", "reason": "missing_voice_id"})
+            continue
+        voice = voices_by_id.get(voice_id)
+        if voice is None:
+            skipped.append({"voice_id": voice_id, "reason": "missing_user_voice"})
+            continue
+
+        stored_provider = _normalize_tts_provider(voice.tts_provider)
+        profile_provider = _normalize_tts_provider(str(item.get("tts_provider", "") or ""))
+        if stored_provider is None:
+            skipped.append({"voice_id": voice_id, "reason": "unsupported_voice_provider"})
+            continue
+        if profile_provider is None:
+            skipped.append({"voice_id": voice_id, "reason": "unsupported_profile_provider"})
+            continue
+        if stored_provider != profile_provider:
+            skipped.append({"voice_id": voice_id, "reason": "provider_mismatch"})
+            continue
+
+        try:
+            cps = float(item.get("chars_per_second"))
+        except (TypeError, ValueError):
+            skipped.append({"voice_id": voice_id, "reason": "invalid_cps"})
+            continue
+        if not (MIN_VALID_CPS <= cps <= MAX_VALID_CPS):
+            skipped.append({"voice_id": voice_id, "reason": "cps_out_of_range"})
+            continue
+
+        model_key = str(item.get("model_key", "") or "").strip()
+        by_model = dict(voice.chars_per_second_by_model or {})
+        if model_key:
+            if model_key in by_model:
+                skipped.append({"voice_id": voice_id, "reason": "existing_model_calibration"})
+                continue
+            by_model[model_key] = cps
+            voice.chars_per_second_by_model = by_model
+        elif voice.chars_per_second is not None:
+            skipped.append({"voice_id": voice_id, "reason": "existing_scalar_calibration"})
+            continue
+
+        if voice.chars_per_second is None:
+            voice.chars_per_second = cps
+        voice.speed_calibrated_at = now
+        voice.updated_at = now
+        updated.append({
+            "voice_id": voice_id,
+            "chars_per_second": cps,
+            "model_key": model_key,
+        })
+
+    if updated:
+        await db.commit()
+
+    logger.info(
+        "[user-voice-speed-profile] job=%s user=%s updated=%d skipped=%d",
+        body.get("job_id"), uid, len(updated), len(skipped),
+    )
+    return _json(200, {
+        "ok": True,
+        "updated_count": len(updated),
+        "skipped_count": len(skipped),
+        "updated": updated,
+        "skipped": skipped,
     })
 
 

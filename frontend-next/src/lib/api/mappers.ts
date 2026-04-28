@@ -233,16 +233,18 @@ function toArtifactSummary(payload: ApiArtifactSummary): {
 }
 
 function buildJobTitle(payload: ApiJobRecord) {
-  if (!payload.source_ref) {
-    return payload.job_id
+  if (payload.source_type === 'local_video' && payload.source_ref) {
+    const filename = payload.source_ref.split(/[\\/]/).pop()?.trim()
+    if (filename) {
+      const dotIndex = filename.lastIndexOf('.')
+      const stem = dotIndex > 0 ? filename.slice(0, dotIndex) : filename
+      if (stem.trim()) {
+        return stem.trim()
+      }
+    }
   }
 
-  try {
-    const url = new URL(payload.source_ref)
-    return url.searchParams.get('v') ?? url.hostname
-  } catch {
-    return payload.source_ref
-  }
+  return '未命名视频'
 }
 
 function normalizeStage(value: string | null): PublicStage | null {
@@ -285,6 +287,7 @@ const statusMap = {
   cancelled: 'cancelled',
   editing: 'editing',
   failed: 'failed',
+  purged: 'purged',
   queued: 'queued',
   running: 'running',
   succeeded: 'succeeded',

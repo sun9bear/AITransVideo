@@ -531,12 +531,51 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
                         user_id=str(payload["user_id"]).strip() if payload.get("user_id") else None,
                         source_content_hash=str(payload["source_content_hash"]).strip() if payload.get("source_content_hash") else None,
                         display_name=str(payload["display_name"]).strip() if payload.get("display_name") else None,
+                        expires_at=str(payload["expires_at"]).strip() if payload.get("expires_at") else None,
                     )
                     self._write_json(HTTPStatus.ACCEPTED, job.to_dict())
                     return
                 if len(path_parts) == 3 and path_parts[0] == "jobs" and path_parts[2] == "continue":
                     job = service.continue_job(path_parts[1])
                     self._write_json(HTTPStatus.ACCEPTED, job.to_dict())
+                    return
+                # POST /jobs/{id}/speaker-audio/reassign — voice-selection-stage
+                # speaker correction for a single transcript line.
+                if (len(path_parts) == 4 and path_parts[0] == "jobs"
+                        and path_parts[2] == "speaker-audio"
+                        and path_parts[3] == "reassign"):
+                    job_id = path_parts[1]
+                    record = service.require_job(job_id)
+                    _require_review_gate(record, expected_stage="voice_selection_review")
+                    project_dir = _require_project_dir(record)
+                    payload = self._read_json_payload()
+                    from services.jobs.review_actions import reassign_speaker_audio_segment
+                    result = reassign_speaker_audio_segment(
+                        project_dir=project_dir,
+                        segment_id=int(payload.get("segment_id", 0) or 0),
+                        from_speaker_id=str(payload.get("from_speaker_id", "")).strip(),
+                        to_speaker_id=str(payload.get("to_speaker_id", "")).strip(),
+                    )
+                    self._write_json(HTTPStatus.OK, {"success": True, **result})
+                    return
+                # POST /jobs/{id}/speaker-audio/dubbing-mode — mark one
+                # transcript line as normal dubbing or keep-original audio.
+                if (len(path_parts) == 4 and path_parts[0] == "jobs"
+                        and path_parts[2] == "speaker-audio"
+                        and path_parts[3] == "dubbing-mode"):
+                    job_id = path_parts[1]
+                    record = service.require_job(job_id)
+                    _require_review_gate(record, expected_stage="voice_selection_review")
+                    project_dir = _require_project_dir(record)
+                    payload = self._read_json_payload()
+                    from services.jobs.review_actions import set_speaker_audio_dubbing_mode
+                    result = set_speaker_audio_dubbing_mode(
+                        project_dir=project_dir,
+                        segment_id=int(payload.get("segment_id", 0) or 0),
+                        speaker_id=str(payload.get("speaker_id", "")).strip(),
+                        dubbing_mode=str(payload.get("dubbing_mode", "")).strip(),
+                    )
+                    self._write_json(HTTPStatus.OK, {"success": True, **result})
                     return
                 # --- Studio post-edit (T1-1 skeleton) ---
                 # POST /jobs/{id}/enter-edit — succeeded → editing (studio only)

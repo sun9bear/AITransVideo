@@ -93,6 +93,26 @@ def _static_fallback() -> list[dict]:
         return []
 
 
+def _backup_voices_from_pool(
+    pool: list[dict],
+    primary_voice_id: str,
+    *,
+    max_count: int = 5,
+) -> tuple[str, ...]:
+    """Return catalog backups for fallback matches."""
+    backups: list[str] = []
+    seen = {primary_voice_id}
+    for voice in pool:
+        vid = str(voice.get("voice_id", "") or "")
+        if not vid or vid in seen:
+            continue
+        backups.append(vid)
+        seen.add(vid)
+        if len(backups) >= max_count:
+            break
+    return tuple(backups)
+
+
 def select_minimax_voice_match(
     *,
     gender: str | None,
@@ -111,21 +131,6 @@ def select_minimax_voice_match(
     4. Score via combined_rerank
     5. Return top-scored voice + backups
     """
-    if not gender:
-        fallback = FALLBACK_VOICE
-        logger.info("[MiniMax-matcher] No gender, fallback=%s", fallback)
-        return VoiceMatchResult(
-            voice_id=fallback,
-            match_reason="fallback(no_gender)",
-            match_score=0.20,
-            match_confidence="low",
-            backup_voices=(),
-        )
-
-    g = gender.lower().strip()
-    age_bucket = resolve_age_bucket(age_group)
-    persona = (persona_style or "").lower().strip()
-    energy = (energy_level or "").lower().strip()
     lang = _resolve_language(target_language)
 
     # --- Step 1: Load pool ---
@@ -141,6 +146,22 @@ def select_minimax_voice_match(
         # Ultimate fallback: default Chinese pool
         lang_pool = [v for v in pool if v.get("language") == "中文-普通话"]
 
+    if not gender:
+        fallback = FALLBACK_VOICE
+        logger.info("[MiniMax-matcher] No gender, fallback=%s", fallback)
+        return VoiceMatchResult(
+            voice_id=fallback,
+            match_reason="fallback(no_gender)",
+            match_score=0.20,
+            match_confidence="low",
+            backup_voices=_backup_voices_from_pool(lang_pool, fallback),
+        )
+
+    g = gender.lower().strip()
+    age_bucket = resolve_age_bucket(age_group)
+    persona = (persona_style or "").lower().strip()
+    energy = (energy_level or "").lower().strip()
+
     # --- Step 3: Gender filter ---
     candidates = [v for v in lang_pool if v.get("gender") == g]
 
@@ -155,7 +176,7 @@ def select_minimax_voice_match(
             match_reason=f"fallback(no_candidates,gender={g},lang={lang})",
             match_score=0.20,
             match_confidence="low",
-            backup_voices=(),
+            backup_voices=_backup_voices_from_pool(lang_pool, fallback),
         )
 
     # --- Step 4: Check if pool has structured catalog tags ---

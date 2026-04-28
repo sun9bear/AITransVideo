@@ -37,7 +37,7 @@ from services.llm.providers.openai_provider import OpenAIProvider
 
 DEFAULT_OPENAI_MODEL_NAME = "gpt-4.1"
 DEFAULT_ANTHROPIC_MODEL_NAME = "claude-sonnet-4-6"
-DEFAULT_DEEPSEEK_MODEL_NAME = "deepseek-chat"
+DEFAULT_DEEPSEEK_MODEL_NAME = "deepseek-v4-flash"
 DEFAULT_GPT_41_MINI_MODEL_NAME = "gpt-4.1-mini"
 DEFAULT_GPT_54_MODEL_NAME = "gpt-5.4"
 DEFAULT_GEMINI_25_FLASH_MODEL_NAME = "gemini-2.5-flash"
@@ -103,6 +103,7 @@ DEFAULT_LLM_FALLBACKS: dict[str, list[str]] = {
     "s2_review": list(DEFAULT_SHARED_TEXT_ROUTE),
     "s3_translate": list(DEFAULT_SHARED_TEXT_ROUTE),
     "s5_rewrite": list(DEFAULT_SHARED_TEXT_ROUTE),
+    "s5_short_content_compact": list(DEFAULT_SHARED_TEXT_ROUTE),
 }
 
 
@@ -176,7 +177,7 @@ def load_llm_fallback_config() -> dict[str, object]:
             "api_key": _normalize_optional_text(deepseek_section.get("api_key"))
             or _normalize_optional_text(os.getenv(deepseek_env_var)),
             "api_key_env_var": deepseek_env_var,
-            "base_url": _normalize_optional_text(deepseek_section.get("base_url")) or "https://api.deepseek.com/v1",
+            "base_url": _normalize_optional_text(deepseek_section.get("base_url")) or "https://api.deepseek.com",
             "model_name": _normalize_optional_text(deepseek_section.get("model_name"))
             or DEFAULT_DEEPSEEK_MODEL_NAME,
             "temperature": _coerce_float(deepseek_section.get("temperature"), default=DEFAULT_TEMPERATURE),

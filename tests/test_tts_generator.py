@@ -13,6 +13,7 @@ from services.tts.tts_generator import (
     TTSResult,
     load_tts_config,
 )
+from services.usage_meter import TTS_BUCKET_PROBE, UsageMeter
 import services.tts.tts_generator as tts_generator_module
 
 
@@ -112,6 +113,42 @@ def test_tts_generator_generates_single_segment_audio(
     assert result.duration_ms > 0
     assert segment.tts_audio_path == result.audio_path
     assert calls[0]["url"] == "https://api.minimaxi.com/v1/t2a_v2"
+
+
+def test_tts_generator_records_usage_meter_bucket(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wav_bytes = _build_wav_bytes(duration_ms=1_000)
+    _install_fake_requests(
+        monkeypatch,
+        [
+            {
+                "status_code": 200,
+                "payload": {
+                    "base_resp": {"status_code": 0, "status_msg": "success"},
+                    "data": {"audio": wav_bytes.hex()},
+                },
+            }
+        ],
+    )
+    monkeypatch.setattr(tts_generator_module, "_ffprobe_duration_ms", lambda _path: 1000)
+    segment = _build_segment(segment_id=1, cn_text="探针文本")
+    meter = UsageMeter(tmp_path / "project", job_id="job-tts-usage")
+    generator = TTSGenerator(TTSConfig(api_key="secret"))
+    generator.set_usage_meter(meter)
+
+    result = generator._generate_one(
+        segment,
+        str(tmp_path / "tts"),
+        usage_bucket=TTS_BUCKET_PROBE,
+    )
+    summary = meter.summarize()
+
+    assert result.billed_chars == len("探针文本") * 2
+    assert summary["probe_tts_billed_chars"] == len("探针文本") * 2
+    assert summary["probe_tts_call_count"] == 1
+    assert summary["tts_billed_chars"] == len("探针文本") * 2
 
 
 def test_tts_generator_generates_multiple_segments_and_updates_alignment_fields(
@@ -369,6 +406,23 @@ def test_tts_generator_retries_transient_request_failures(
     assert sleep_calls == [0.5]
     captured = capsys.readouterr().out
     assert "MiniMax请求失败，0.5秒后重试（1/2）" in captured
+
+
+def test_tts_generator_does_not_retry_empty_text_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generator = TTSGenerator(TTSConfig(api_key="secret"))
+    sleep_calls: list[float] = []
+    monkeypatch.setattr(tts_generator_module.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+
+    with pytest.raises(TTSGenerationError, match="segment.cn_text is required"):
+        generator._generate_one_with_backoff(
+            _build_segment(segment_id=1, cn_text=""),
+            str(tmp_path / "tts"),
+        )
+
+    assert sleep_calls == []
 
 
 def test_tts_generator_does_not_fallback_from_cosyvoice_to_mimo(

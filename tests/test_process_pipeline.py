@@ -85,6 +85,38 @@ class TestProcessConfigSourceNormalization:
         assert c.youtube_url == "https://yt.com/v=test"
 
 
+def test_report_source_metadata_can_send_s2_display_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_urlopen(req, timeout):
+        captured["url"] = req.full_url
+        captured["timeout"] = timeout
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return FakeResponse()
+
+    monkeypatch.setenv("AVT_GATEWAY_URL", "http://gateway.test")
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    process_module._report_source_metadata(
+        "job-1",
+        display_name="巴菲特谈接班",
+        stage_label="S2",
+    )
+
+    assert captured["url"] == "http://gateway.test/job-api/jobs/job-1/source-metadata"
+    assert captured["timeout"] == 5
+    assert captured["body"] == {"display_name": "巴菲特谈接班"}
+
+
 # ===================================================================
 # ProcessPipeline source-aware ingest tests
 # ===================================================================
@@ -3089,6 +3121,163 @@ def test_process_pipeline_reuses_partial_tts_cache_when_translation_cache_hits(
     assert observed["generated_count"] == 4
 
 
+def test_process_pipeline_uses_persisted_probe_cps_for_pre_tts_on_translation_cache_hit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_single_speaker_pipeline_mocks(monkeypatch)
+    project_dir = tmp_path / "project_cached_translation_probe_cps"
+    video_path = _write_video(project_dir / "video" / "original.mp4")
+    audio_path = _export_silent_wav(project_dir / "audio" / "original.wav", duration_ms=2_500)
+    _write_download_metadata(
+        project_dir,
+        video_path=video_path,
+        audio_path=audio_path,
+        video_title="Cached Translation Probe CPS",
+        duration_ms=2_500,
+        url="https://youtube.example/watch?v=cache-probe-cps",
+    )
+    _write_transcript_cache(project_dir, _make_single_speaker_lines(), total_duration_ms=2_000)
+    _write_segments_cache(project_dir, _make_single_speaker_segments())
+    speech_audio_path = _export_silent_wav(project_dir / "audio" / "speech_for_asr.wav", duration_ms=2_500)
+    ambient_audio_path = _export_silent_wav(project_dir / "audio" / "ambient.wav", duration_ms=2_500)
+    (project_dir / "audio" / "probe_calibration.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "global_chars_per_second": 7.25,
+                "chars_per_second_by_speaker": {"speaker_a": 8.5},
+                "speaker_voice_ids": {"speaker_a": "voice_demo_001"},
+                "calibrated_at": "2026-04-25T00:00:00+00:00",
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_ensure_separated_audio_assets(self, *, project_dir, source_audio_path):
+        del self, project_dir
+        return process_module.AudioSeparationResult(
+            source_audio_path=str(source_audio_path),
+            speech_audio_path=str(speech_audio_path.resolve(strict=False)),
+            ambient_audio_path=str(ambient_audio_path.resolve(strict=False)),
+            reused_cache=True,
+        )
+
+    monkeypatch.setattr(
+        ProcessPipeline,
+        "_ensure_separated_audio_assets",
+        fake_ensure_separated_audio_assets,
+    )
+    monkeypatch.setattr(process_module, "_ffprobe_duration_ms", lambda path: 2_500)
+
+    import services.tts.voice_speed_catalog as voice_speed_catalog_module
+
+    monkeypatch.setattr(
+        voice_speed_catalog_module,
+        "lookup_per_speaker",
+        lambda *args, **kwargs: (0.0, {}),
+    )
+
+    captured: dict[str, object] = {}
+
+    class CaptureRewriter:
+        def __init__(
+            self,
+            translator,
+            chars_per_second: float = 4.5,
+            chars_per_second_by_speaker: dict[str, float] | None = None,
+            **kwargs,
+        ):
+            del translator, kwargs
+            self.chars_per_second = chars_per_second
+            self.chars_per_second_by_speaker = chars_per_second_by_speaker or {}
+            captured.setdefault("rewriter_chars_per_second", []).append(chars_per_second)
+            captured.setdefault("rewriter_chars_per_second_by_speaker", []).append(
+                dict(self.chars_per_second_by_speaker)
+            )
+
+    def capture_pre_tts(
+        self,
+        *,
+        segments,
+        rewriter,
+        chars_per_second,
+        chars_per_second_by_speaker,
+        job_provider=None,
+    ):
+        del self, segments, rewriter, job_provider
+        captured["pre_tts_chars_per_second"] = chars_per_second
+        captured["pre_tts_chars_per_second_by_speaker"] = dict(chars_per_second_by_speaker or {})
+        return 0
+
+    monkeypatch.setattr(process_module, "GeminiRewriter", CaptureRewriter)
+    monkeypatch.setattr(
+        ProcessPipeline,
+        "_pre_rewrite_obvious_overshoot_segments_before_tts",
+        capture_pre_tts,
+    )
+
+    def fake_dispatch_output_bundle(self, *, project_dir, build_result):
+        del self, build_result
+        output_dir = Path(project_dir) / "fake_output"
+        segments_dir = output_dir / "segments"
+        segments_dir.mkdir(parents=True, exist_ok=True)
+        dubbed_audio_path = _export_silent_wav(output_dir / "dubbed.wav", duration_ms=2_000)
+        ambient_path = _export_silent_wav(output_dir / "ambient.wav", duration_ms=2_000)
+        subtitles_path = output_dir / "subtitles.srt"
+        subtitles_en_path = output_dir / "subtitles_en.srt"
+        subtitles_bilingual_path = output_dir / "subtitles_bilingual.srt"
+        background_sounds_path = output_dir / "background.json"
+        alignment_report_path = output_dir / "alignment_report.json"
+        manifest_path = output_dir / "manifest.json"
+        for path in (
+            subtitles_path,
+            subtitles_en_path,
+            subtitles_bilingual_path,
+            background_sounds_path,
+            alignment_report_path,
+            manifest_path,
+        ):
+            path.write_text("", encoding="utf-8")
+        return OutputBundleResult(
+            editor_result=ProjectOutputResult(
+                dubbed_audio_path=str(dubbed_audio_path.resolve(strict=False)),
+                ambient_audio_path=str(ambient_path.resolve(strict=False)),
+                segments_dir=str(segments_dir.resolve(strict=False)),
+                segment_count=2,
+                subtitles_path=str(subtitles_path.resolve(strict=False)),
+                subtitles_en_path=str(subtitles_en_path.resolve(strict=False)),
+                subtitles_bilingual_path=str(subtitles_bilingual_path.resolve(strict=False)),
+                background_sounds_path=str(background_sounds_path.resolve(strict=False)),
+                alignment_report_path=str(alignment_report_path.resolve(strict=False)),
+                needs_review_count=0,
+            ),
+            manifest_path=str(manifest_path.resolve(strict=False)),
+        )
+
+    monkeypatch.setattr(
+        ProcessPipeline,
+        "_dispatch_process_output_bundle",
+        fake_dispatch_output_bundle,
+    )
+
+    ProcessPipeline().run(
+        ProcessConfig(
+            youtube_url="https://youtube.example/watch?v=cache-probe-cps",
+            voice_a="voice_demo_001",
+            project_dir=str(project_dir),
+            job_record=_STUDIO_JOB_RECORD,
+        )
+    )
+
+    assert captured["rewriter_chars_per_second"][0] == 7.25
+    assert captured["rewriter_chars_per_second_by_speaker"][0] == {"speaker_a": 8.5}
+    assert captured["pre_tts_chars_per_second"] == 7.25
+    assert captured["pre_tts_chars_per_second_by_speaker"] == {"speaker_a": 8.5}
+
+
 def test_process_pipeline_does_not_reuse_tts_cache_when_translation_is_regenerated(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3604,6 +3793,470 @@ def test_calibrate_tts_duration_handles_invalid_speed_param() -> None:
     # All 3 segments normalized to natural=1000ms, so cps = 4.0.
     assert global_cps == pytest.approx(4.0, abs=0.001)
     assert cps_by_speaker["speaker_a"] == pytest.approx(4.0, abs=0.001)
+
+
+def test_process_pipeline_marks_only_same_speaker_short_merge_candidates() -> None:
+    pipeline = ProcessPipeline()
+    segments = [
+        DubbingSegment(
+            segment_id=1,
+            speaker_id="speaker_a",
+            display_name="Speaker A",
+            voice_id="voice_a",
+            start_ms=0,
+            end_ms=6_000,
+            target_duration_ms=6_000,
+            source_text="Long lead in.",
+            cn_text="long lead in",
+        ),
+        DubbingSegment(
+            segment_id=2,
+            speaker_id="speaker_a",
+            display_name="Speaker A",
+            voice_id="voice_a",
+            start_ms=6_100,
+            end_ms=7_600,
+            target_duration_ms=1_500,
+            source_text="Right.",
+            cn_text="ok",
+        ),
+        DubbingSegment(
+            segment_id=3,
+            speaker_id="speaker_b",
+            display_name="Speaker B",
+            voice_id="voice_b",
+            start_ms=7_800,
+            end_ms=9_300,
+            target_duration_ms=1_500,
+            source_text="Yes.",
+            cn_text="yes",
+        ),
+    ]
+
+    summary = pipeline._annotate_short_segment_merge_candidates(segments)
+
+    assert summary == {"candidate_count": 1, "blocked_cross_speaker_count": 1}
+    assert segments[1].short_merge_candidate is True
+    assert segments[1].short_merge_target_segment_id == 1
+    assert segments[1].short_merge_reason == "same_speaker_prev"
+    assert segments[2].short_merge_candidate is False
+    assert segments[2].short_merge_blocked_reason == "cross_speaker_adjacent"
+
+
+def test_process_pipeline_merges_same_speaker_short_segment_before_tts(tmp_path: Path) -> None:
+    pipeline = ProcessPipeline()
+    translation_result = TranslationResult(
+        segments=[
+            DubbingSegment(
+                segment_id=1,
+                speaker_id="speaker_a",
+                display_name="Speaker A",
+                voice_id="voice_a",
+                start_ms=0,
+                end_ms=6_000,
+                target_duration_ms=6_000,
+                source_text="This is the main point.",
+                cn_text="这是主要内容",
+                tts_audio_path="stale.wav",
+                actual_duration_ms=6_500,
+                alignment_method="force_dsp",
+                needs_review=True,
+            ),
+            DubbingSegment(
+                segment_id=2,
+                speaker_id="speaker_a",
+                display_name="Speaker A",
+                voice_id="voice_a",
+                start_ms=6_100,
+                end_ms=7_300,
+                target_duration_ms=1_200,
+                source_text="Right.",
+                cn_text="对",
+            ),
+            DubbingSegment(
+                segment_id=3,
+                speaker_id="speaker_b",
+                display_name="Speaker B",
+                voice_id="voice_b",
+                start_ms=7_500,
+                end_ms=9_000,
+                target_duration_ms=1_500,
+                source_text="Yes.",
+                cn_text="是的",
+            ),
+        ],
+        total_segments=3,
+        output_path=str(tmp_path / "segments.json"),
+    )
+
+    summary = pipeline._apply_short_segment_merges_before_tts(translation_result)
+
+    assert summary["candidate_count"] == 1
+    assert summary["blocked_cross_speaker_count"] == 1
+    assert summary["applied_count"] == 1
+    assert summary["absorbed_count"] == 1
+    assert len(translation_result.segments) == 2
+    merged = translation_result.segments[0]
+    assert merged.segment_id == 1
+    assert merged.start_ms == 0
+    assert merged.end_ms == 7_300
+    assert merged.target_duration_ms == 7_300
+    assert merged.source_text == "This is the main point. Right."
+    assert merged.cn_text == "这是主要内容 对"
+    assert merged.tts_audio_path is None
+    assert merged.actual_duration_ms == 0
+    assert merged.alignment_method == ""
+    assert merged.needs_review is False
+    assert merged.short_merge_applied is True
+    assert merged.short_merge_absorbed_segment_ids == "2"
+    assert translation_result.total_segments == 2
+    assert translation_result.segments[1].short_merge_blocked_reason == "cross_speaker_adjacent"
+
+
+def test_process_pipeline_does_not_merge_cross_speaker_short_segment(tmp_path: Path) -> None:
+    pipeline = ProcessPipeline()
+    translation_result = TranslationResult(
+        segments=[
+            DubbingSegment(
+                segment_id=1,
+                speaker_id="speaker_a",
+                display_name="Speaker A",
+                voice_id="voice_a",
+                start_ms=0,
+                end_ms=3_000,
+                target_duration_ms=3_000,
+                source_text="Question?",
+                cn_text="问题",
+            ),
+            DubbingSegment(
+                segment_id=2,
+                speaker_id="speaker_b",
+                display_name="Speaker B",
+                voice_id="voice_b",
+                start_ms=3_100,
+                end_ms=4_100,
+                target_duration_ms=1_000,
+                source_text="Yes.",
+                cn_text="是",
+            ),
+        ],
+        total_segments=2,
+        output_path=str(tmp_path / "segments.json"),
+    )
+
+    summary = pipeline._apply_short_segment_merges_before_tts(translation_result)
+
+    assert summary["candidate_count"] == 0
+    assert summary["blocked_cross_speaker_count"] == 1
+    assert summary["applied_count"] == 0
+    assert summary["absorbed_count"] == 0
+    assert len(translation_result.segments) == 2
+    assert translation_result.segments[1].short_merge_blocked_reason == "cross_speaker_adjacent"
+
+
+def test_process_pipeline_classifies_low_share_short_interaction_speaker() -> None:
+    pipeline = ProcessPipeline()
+    lines = [
+        TranscriptLine(1, 0, 300_000, "speaker_a", "A", "Main talk."),
+        TranscriptLine(2, 300_000, 600_000, "speaker_a", "A", "More main talk."),
+        TranscriptLine(3, 610_000, 614_000, "speaker_b", "B", "Yes."),
+        TranscriptLine(4, 620_000, 624_000, "speaker_b", "B", "No."),
+        TranscriptLine(5, 630_000, 635_000, "speaker_b", "B", "Okay."),
+        TranscriptLine(6, 640_000, 646_000, "speaker_b", "B", "Right."),
+    ]
+
+    profiles = pipeline._build_speaker_structure_profiles(lines)
+
+    assert profiles["speaker_a"]["speaker_role"] == "primary"
+    assert profiles["speaker_b"]["speaker_role"] == "incidental"
+    assert profiles["speaker_b"]["speaker_structure_reason"] == "low_share_short_interactions"
+    assert profiles["speaker_b"]["speaker_segment_count"] == 4
+    assert profiles["speaker_b"]["speaker_short_segment_count"] == 4
+
+
+def test_process_pipeline_keeps_balanced_interview_speakers_primary() -> None:
+    pipeline = ProcessPipeline()
+    lines = [
+        TranscriptLine(1, 0, 60_000, "speaker_a", "A", "Question."),
+        TranscriptLine(2, 60_000, 120_000, "speaker_b", "B", "Answer."),
+        TranscriptLine(3, 120_000, 180_000, "speaker_a", "A", "Follow up."),
+        TranscriptLine(4, 180_000, 240_000, "speaker_b", "B", "More answer."),
+    ]
+
+    profiles = pipeline._build_speaker_structure_profiles(lines)
+
+    assert profiles["speaker_a"]["speaker_role"] == "primary"
+    assert profiles["speaker_b"]["speaker_role"] == "primary"
+    assert profiles["speaker_b"]["speaker_structure_reason"] == "balanced_main_speaker"
+
+
+def test_voice_selection_payload_marks_incidental_speaker_without_forcing_clone() -> None:
+    pipeline = ProcessPipeline()
+    lines = [
+        TranscriptLine(1, 0, 300_000, "speaker_a", "A", "Main talk."),
+        TranscriptLine(2, 300_000, 600_000, "speaker_a", "A", "More main talk."),
+        TranscriptLine(3, 610_000, 614_000, "speaker_b", "B", "Yes."),
+        TranscriptLine(4, 620_000, 624_000, "speaker_b", "B", "No."),
+        TranscriptLine(5, 630_000, 635_000, "speaker_b", "B", "Okay."),
+        TranscriptLine(6, 640_000, 646_000, "speaker_b", "B", "Right."),
+    ]
+    transcript = TranscriptResult(
+        lines=lines,
+        total_duration_ms=646_000,
+        language="en",
+        raw_response_path="",
+        structured_transcript_path="",
+    )
+    profiles = pipeline._build_speaker_structure_profiles(lines)
+
+    payload = pipeline._build_voice_selection_review_payload(
+        transcript_result=transcript,
+        tts_provider="minimax",
+        service_mode="studio",
+        source_audio_path="",
+        effective_speakers=2,
+        speaker_names={"speaker_a": "Host", "speaker_b": "Speaker B"},
+        speaker_styles={},
+        speaker_structure_profiles=profiles,
+    )
+
+    speakers = {
+        str(speaker["speaker_id"]): speaker
+        for speaker in payload["speakers"]
+        if isinstance(speaker, dict)
+    }
+    assert speakers["speaker_b"]["speaker_role"] == "incidental"
+    assert speakers["speaker_b"]["speaker_name"] == "短互动/观众"
+    assert speakers["speaker_b"]["can_clone"] is False
+    assert speakers["speaker_b"]["speaker_duration_share"] < 0.08
+
+
+def test_voice_selection_payload_marks_non_speech_speaker_without_clone() -> None:
+    pipeline = ProcessPipeline()
+    lines = [
+        TranscriptLine(1, 0, 300_000, "speaker_a", "A", "Main talk."),
+        TranscriptLine(2, 300_000, 315_000, "speaker_c", "C", "Crowd cheering."),
+    ]
+    transcript = TranscriptResult(
+        lines=lines,
+        total_duration_ms=315_000,
+        language="en",
+        raw_response_path="",
+        structured_transcript_path="",
+    )
+    speaker_styles = {
+        "speaker_a": {"name": "Main speaker"},
+        "speaker_c": {
+            "name": "未知说话人1",
+            "is_non_speech": "true",
+            "non_speech_reason": "crowd cheering",
+        },
+    }
+    profiles = pipeline._build_speaker_structure_profiles(lines, speaker_styles=speaker_styles)
+
+    payload = pipeline._build_voice_selection_review_payload(
+        transcript_result=transcript,
+        tts_provider="minimax",
+        service_mode="studio",
+        source_audio_path="",
+        effective_speakers=2,
+        speaker_names={"speaker_a": "Main speaker", "speaker_c": "speaker_c"},
+        speaker_styles=speaker_styles,
+        speaker_structure_profiles=profiles,
+    )
+
+    speakers = {
+        str(speaker["speaker_id"]): speaker
+        for speaker in payload["speakers"]
+        if isinstance(speaker, dict)
+    }
+    assert profiles["speaker_c"]["speaker_role"] == "non_speech"
+    assert profiles["speaker_c"]["speaker_structure_reason"] == "review_profile_non_speech"
+    assert speakers["speaker_c"]["speaker_name"] == "背景音/非对白"
+    assert speakers["speaker_c"]["speaker_role_label"] == "背景音/非对白"
+    assert speakers["speaker_c"]["can_clone"] is False
+
+
+def test_process_pipeline_detects_low_information_underflow_cue() -> None:
+    segment = DubbingSegment(
+        segment_id=3,
+        speaker_id="speaker_a",
+        display_name="Speaker A",
+        voice_id="voice_a",
+        start_ms=0,
+        end_ms=10_552,
+        target_duration_ms=10_552,
+        source_text="10 seconds left. Next exercise.",
+        cn_text="还剩十秒。下一个动作。",
+        first_pass_duration_ms=2_682,
+        alignment_method="capped_dsp_underflow",
+    )
+
+    reason = ProcessPipeline._low_information_underflow_keep_original_reason(segment)
+
+    assert reason == "low_information_cue_underflow"
+
+
+def test_process_pipeline_does_not_auto_keep_contentful_underflow_sentence() -> None:
+    segment = DubbingSegment(
+        segment_id=3,
+        speaker_id="speaker_a",
+        display_name="Speaker A",
+        voice_id="voice_a",
+        start_ms=0,
+        end_ms=9_596,
+        target_duration_ms=9_596,
+        source_text="OK may be the most recognizable word in the world.",
+        cn_text="OK 可能是全球辨识度最高的词了。",
+        first_pass_duration_ms=3_274,
+        alignment_method="capped_dsp_underflow",
+    )
+
+    reason = ProcessPipeline._low_information_underflow_keep_original_reason(segment)
+
+    assert reason == ""
+
+
+def test_process_pipeline_detects_short_content_compact_candidate() -> None:
+    segment = DubbingSegment(
+        segment_id=21,
+        speaker_id="speaker_a",
+        display_name="Interviewer",
+        voice_id="voice_a",
+        start_ms=0,
+        end_ms=3_145,
+        target_duration_ms=3_145,
+        source_text=(
+            "Would you repeat that this time? If trouble's coming, "
+            "would you still say buy stocks right now?"
+        ),
+        cn_text="您现在还会重复那句话吗？如果麻烦要来了，您还会建议现在买入股票吗？",
+    )
+
+    candidate, content_class, lower, upper = (
+        ProcessPipeline._is_short_content_compact_candidate(
+            segment,
+            rewrite_label="overshoot",
+            pre_chars=30,
+            estimated_duration_ms=6_650,
+            decision_estimated_duration_ms=7_648,
+            target_duration_ms=3_145,
+        )
+    )
+
+    assert candidate is True
+    assert content_class == "question"
+    assert (lower, upper) == (8, 13)
+
+
+def test_process_pipeline_excludes_low_information_from_short_content_compact() -> None:
+    segment = DubbingSegment(
+        segment_id=18,
+        speaker_id="speaker_a",
+        display_name="Coach",
+        voice_id="voice_a",
+        start_ms=0,
+        end_ms=5_158,
+        target_duration_ms=5_158,
+        source_text="10 seconds left. Next exercise.",
+        cn_text="还剩十秒钟。下一个动作。",
+    )
+
+    candidate, content_class, lower, upper = (
+        ProcessPipeline._is_short_content_compact_candidate(
+            segment,
+            rewrite_label="overshoot",
+            pre_chars=12,
+            estimated_duration_ms=8_000,
+            decision_estimated_duration_ms=9_200,
+            target_duration_ms=5_158,
+        )
+    )
+
+    assert candidate is False
+    assert content_class == "low_information"
+    assert (lower, upper) == (0, 0)
+
+
+def test_process_pipeline_auto_keeps_low_information_underflow_after_alignment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pipeline = ProcessPipeline()
+    segment = DubbingSegment(
+        segment_id=18,
+        speaker_id="speaker_a",
+        display_name="Speaker A",
+        voice_id="voice_a",
+        start_ms=10_000,
+        end_ms=15_158,
+        target_duration_ms=5_158,
+        source_text="know, 10 seconds left.",
+        cn_text="还剩十秒钟。",
+        first_pass_duration_ms=1_614,
+        alignment_method="capped_dsp_underflow",
+        needs_review=True,
+        dsp_speed_ratio_used=0.67,
+        dsp_silence_padded_ms=2_791,
+        force_dsp_severity="high",
+    )
+    materialized: list[DubbingSegment] = []
+
+    def fake_materialize(
+        self: ProcessPipeline,
+        segments: list[DubbingSegment],
+        *,
+        source_audio_path: Path,
+        tts_dir: Path,
+    ) -> int:
+        del self, source_audio_path, tts_dir
+        materialized.extend(segments)
+        for item in segments:
+            item.alignment_method = "keep_original"
+            item.needs_review = False
+            item.dsp_silence_padded_ms = 0
+        return len(segments)
+
+    monkeypatch.setattr(
+        ProcessPipeline,
+        "_materialize_keep_original_segments",
+        fake_materialize,
+    )
+
+    count = pipeline._auto_keep_low_information_underflow_segments(
+        [segment],
+        source_audio_path=tmp_path / "source.wav",
+        tts_dir=tmp_path / "tts",
+    )
+
+    assert count == 1
+    assert materialized == [segment]
+    assert segment.dubbing_mode == "keep_original"
+    assert segment.alignment_method == "keep_original"
+    assert segment.auto_keep_original_reason == "low_information_cue_underflow"
+    assert segment.auto_keep_original_source == "low_information_underflow_route"
+    assert segment.needs_review is False
+
+
+def test_process_pipeline_uses_absorbed_ids_for_output_block_indices() -> None:
+    pipeline = ProcessPipeline()
+    segment = DubbingSegment(
+        segment_id=3,
+        speaker_id="speaker_a",
+        display_name="Speaker A",
+        voice_id="voice_a",
+        start_ms=0,
+        end_ms=4_000,
+        target_duration_ms=4_000,
+        source_text="A B",
+        cn_text="甲 乙",
+        short_merge_applied=True,
+        short_merge_absorbed_segment_ids="1,2",
+    )
+
+    blocks = pipeline._build_process_output_blocks([segment])
+
+    assert blocks[0].original_srt_indices == [1, 2, 3]
 
 
 def test_process_pipeline_attempts_semantic_split_repair_for_failed_long_segment(
@@ -4127,7 +4780,7 @@ def test_process_pipeline_pre_rewrites_obvious_overshoot_before_tts() -> None:
                 source_text,
                 speaker_id,
             )
-            return "shortened text"
+            return "b" * 90
 
     rewritten_count = pipeline._pre_rewrite_obvious_overshoot_segments_before_tts(
         segments=[segment],
@@ -4138,8 +4791,502 @@ def test_process_pipeline_pre_rewrites_obvious_overshoot_before_tts() -> None:
 
     assert rewritten_count == 1
     assert observed["args"] == ("a" * 120, 26_666, 20_000, "Original source text", "speaker_a")
-    assert segment.cn_text == "shortened text"
+    assert segment.cn_text == "b" * 90
     assert segment.rewrite_count == 1
+    assert segment.pre_tts_rewrite_direction == "overshoot"
+    assert segment.pre_tts_estimate_ms == 26_666
+    assert segment.pre_tts_target_ms == 20_000
+    assert segment.pre_tts_pre_chars == 120
+    assert segment.pre_tts_post_chars == 90
+
+
+def test_process_pipeline_uses_short_content_compact_before_tts() -> None:
+    pipeline = ProcessPipeline()
+    segment = DubbingSegment(
+        segment_id=21,
+        speaker_id="speaker_a",
+        display_name="Interviewer",
+        voice_id="voice_a",
+        start_ms=0,
+        end_ms=3_145,
+        target_duration_ms=3_145,
+        source_text=(
+            "Would you repeat that this time? If trouble's coming, "
+            "would you still say buy stocks right now?"
+        ),
+        cn_text="您现在还会重复那句话吗？如果麻烦要来了，您还会建议现在买入股票吗？",
+    )
+    observed: dict[str, object] = {}
+
+    class FakeRewriter:
+        def rewrite_short_content_compact(self, cn_text: str, **kwargs: object) -> str:
+            observed["cn_text"] = cn_text
+            observed["kwargs"] = kwargs
+            return "现在还建议买股票吗"
+
+        def rewrite_for_duration_with_profile(self, *args: object, **kwargs: object) -> str:
+            raise AssertionError("short content should use compact rewrite")
+
+    rewritten_count = pipeline._pre_rewrite_obvious_overshoot_segments_before_tts(
+        segments=[segment],
+        rewriter=FakeRewriter(),  # type: ignore[arg-type]
+        chars_per_second=4.5,
+        chars_per_second_by_speaker={},
+    )
+
+    assert rewritten_count == 1
+    assert observed["kwargs"] == {
+        "source_text": segment.source_text,
+        "target_duration_ms": 3_145,
+        "target_lower_chars": 8,
+        "target_upper_chars": 13,
+        "task_name": "s5_short_content_compact",
+    }
+    assert segment.cn_text == "现在还建议买股票吗"
+    assert segment.rewrite_count == 1
+    assert segment.pre_tts_rewrite_direction == "overshoot"
+    assert segment.pre_tts_rewrite_task == "s5_short_content_compact"
+    assert segment.short_content_compact_attempted is True
+    assert segment.short_content_compact_accepted is True
+    assert segment.short_content_compact_class == "question"
+    assert segment.short_content_compact_pre_chars == 30
+    assert segment.short_content_compact_post_chars == 9
+
+
+def test_process_pipeline_rejects_short_content_compact_when_required_digits_drop() -> None:
+    pipeline = ProcessPipeline()
+    segment = DubbingSegment(
+        segment_id=178,
+        speaker_id="speaker_a",
+        display_name="Interviewer",
+        voice_id="voice_a",
+        start_ms=0,
+        end_ms=3_077,
+        target_duration_ms=3_077,
+        source_text="Auto insurance, I'm not sure, I might prefer the 80-year-olds over the 20-year-olds.",
+        cn_text="汽车保险的话，我不确定，我可能更倾向于保80岁的，而不是20岁的。",
+    )
+
+    class FakeRewriter:
+        def rewrite_short_content_compact(self, cn_text: str, **kwargs: object) -> str:
+            del cn_text, kwargs
+            return "车险我更看好老人"
+
+        def rewrite_for_duration_with_profile(self, *args: object, **kwargs: object) -> str:
+            raise AssertionError("rejected compact rewrite should not fall back to generic rewrite")
+
+    rewritten_count = pipeline._pre_rewrite_obvious_overshoot_segments_before_tts(
+        segments=[segment],
+        rewriter=FakeRewriter(),  # type: ignore[arg-type]
+        chars_per_second=4.5,
+        chars_per_second_by_speaker={},
+    )
+
+    assert rewritten_count == 0
+    assert segment.cn_text == "汽车保险的话，我不确定，我可能更倾向于保80岁的，而不是20岁的。"
+    assert segment.short_content_compact_attempted is True
+    assert segment.short_content_compact_accepted is False
+    assert segment.short_content_compact_rejected_reason == "missing_required_token"
+    assert segment.pre_tts_rewrite_rejected is True
+    assert segment.pre_tts_rewrite_rejected_reason == "short_compact_missing_required_token"
+
+
+def test_process_pipeline_rejects_pre_tts_rewrite_below_char_floor() -> None:
+    pipeline = ProcessPipeline()
+    segment = DubbingSegment(
+        segment_id=41,
+        speaker_id="speaker_a",
+        display_name="Dan Koe",
+        voice_id="voice_a",
+        start_ms=0,
+        end_ms=20_000,
+        target_duration_ms=20_000,
+        source_text="Original source text",
+        cn_text="a" * 120,
+    )
+
+    class FakeRewriter:
+        def rewrite_for_duration(
+            self,
+            cn_text: str,
+            actual_duration_ms: int,
+            target_duration_ms: int,
+            source_text: str = "",
+            speaker_id: str | None = None,
+        ) -> str:
+            del cn_text, actual_duration_ms, target_duration_ms, source_text, speaker_id
+            return "b" * 60
+
+    rewritten_count = pipeline._pre_rewrite_obvious_overshoot_segments_before_tts(
+        segments=[segment],
+        rewriter=FakeRewriter(),  # type: ignore[arg-type]
+        chars_per_second=4.5,
+        chars_per_second_by_speaker={},
+    )
+
+    assert rewritten_count == 0
+    assert segment.cn_text == "a" * 120
+    assert segment.rewrite_count == 0
+    assert getattr(segment, "pre_tts_rewrite_direction", "") == ""
+    assert segment.pre_tts_rewrite_rejected is True
+    assert segment.pre_tts_rewrite_rejected_reason == "below_floor"
+    assert segment.pre_tts_rewrite_retry_attempted is False
+
+
+def test_process_pipeline_strict_retries_long_pre_tts_rewrite_once() -> None:
+    pipeline = ProcessPipeline()
+    segment = DubbingSegment(
+        segment_id=43,
+        speaker_id="speaker_a",
+        display_name="Long Speaker",
+        voice_id="voice_a",
+        start_ms=0,
+        end_ms=30_000,
+        target_duration_ms=30_000,
+        source_text="Original source text",
+        cn_text="a" * 200,
+    )
+    observed_tasks: list[str] = []
+    observed_reasons: list[str] = []
+
+    class FakeRewriter:
+        def rewrite_for_duration_with_profile(self, *args, **kwargs):
+            del args
+            observed_tasks.append(kwargs["task_name"])
+            observed_reasons.append(kwargs.get("strict_retry_reason", ""))
+            if kwargs["task_name"] == "s5_rewrite":
+                return "b" * 120
+            return "c" * 165
+
+    rewritten_count = pipeline._pre_rewrite_obvious_overshoot_segments_before_tts(
+        segments=[segment],
+        rewriter=FakeRewriter(),  # type: ignore[arg-type]
+        chars_per_second=4.5,
+        chars_per_second_by_speaker={},
+    )
+
+    assert rewritten_count == 1
+    assert observed_tasks == ["s5_rewrite", "s5_rewrite_strict"]
+    assert observed_reasons == ["", "below_floor"]
+    assert segment.cn_text == "c" * 165
+    assert segment.pre_tts_rewrite_direction == "overshoot"
+    assert segment.pre_tts_rewrite_task == "s5_rewrite_strict"
+    assert segment.pre_tts_rewrite_retry_attempted is True
+    assert segment.pre_tts_rewrite_retry_accepted is True
+    assert segment.pre_tts_rewrite_initial_rejected_reason == "below_floor"
+    assert segment.pre_tts_rewrite_rejected is False
+
+
+def test_process_pipeline_records_long_pre_tts_strict_retry_rejection() -> None:
+    pipeline = ProcessPipeline()
+    segment = DubbingSegment(
+        segment_id=44,
+        speaker_id="speaker_a",
+        display_name="Long Speaker",
+        voice_id="voice_a",
+        start_ms=0,
+        end_ms=30_000,
+        target_duration_ms=30_000,
+        source_text="Original source text",
+        cn_text="a" * 200,
+    )
+
+    class FakeRewriter:
+        def rewrite_for_duration_with_profile(self, *args, **kwargs):
+            del args
+            if kwargs["task_name"] == "s5_rewrite":
+                return "b" * 120
+            return "c" * 140
+
+    rewritten_count = pipeline._pre_rewrite_obvious_overshoot_segments_before_tts(
+        segments=[segment],
+        rewriter=FakeRewriter(),  # type: ignore[arg-type]
+        chars_per_second=4.5,
+        chars_per_second_by_speaker={},
+    )
+
+    assert rewritten_count == 0
+    assert segment.cn_text == "a" * 200
+    assert segment.pre_tts_rewrite_rejected is True
+    assert segment.pre_tts_rewrite_rejected_reason == "strict_below_floor"
+    assert segment.pre_tts_rewrite_rejected_pre_chars == 200
+    assert segment.pre_tts_rewrite_rejected_post_chars == 140
+    assert segment.pre_tts_rewrite_rejected_lower_chars == 160
+    assert segment.pre_tts_rewrite_rejected_upper_chars == 173
+    assert segment.pre_tts_rewrite_retry_attempted is True
+    assert segment.pre_tts_rewrite_retry_accepted is False
+
+
+def test_process_pipeline_passes_pre_tts_guardrail_bounds_to_profile_rewriter() -> None:
+    pipeline = ProcessPipeline()
+    segment = DubbingSegment(
+        segment_id=42,
+        speaker_id="speaker_a",
+        display_name="Dan Koe",
+        voice_id="voice_a",
+        start_ms=0,
+        end_ms=20_000,
+        target_duration_ms=20_000,
+        source_text="Original source text",
+        cn_text="a" * 120,
+    )
+    observed: dict[str, object] = {}
+
+    class FakeRewriter:
+        def rewrite_for_duration_with_profile(self, *args, **kwargs):
+            observed["args"] = args
+            observed["kwargs"] = kwargs
+            return "b" * 90
+
+    rewritten_count = pipeline._pre_rewrite_obvious_overshoot_segments_before_tts(
+        segments=[segment],
+        rewriter=FakeRewriter(),  # type: ignore[arg-type]
+        chars_per_second=4.5,
+        chars_per_second_by_speaker={},
+    )
+
+    assert rewritten_count == 1
+    assert observed["args"] == ("a" * 120,)
+    assert observed["kwargs"]["target_lower_chars"] == 90
+    assert observed["kwargs"]["target_upper_chars"] == 101
+
+
+def test_process_pipeline_tightens_short_high_shrink_pre_tts_bounds() -> None:
+    bounds = ProcessPipeline._pre_tts_rewrite_char_bounds(
+        rewrite_label="overshoot",
+        pre_chars=99,
+        target_duration_ms=11_939,
+        chars_per_second=4.088,
+    )
+
+    assert bounds == (60, 63)
+
+
+def test_process_pipeline_rejects_short_high_shrink_rewrite_below_risk_floor() -> None:
+    assert not ProcessPipeline._is_pre_tts_rewrite_within_char_guardrails(
+        rewrite_label="overshoot",
+        pre_chars=99,
+        post_chars=54,
+        target_duration_ms=11_939,
+        chars_per_second=4.088,
+    )
+    assert ProcessPipeline._is_pre_tts_rewrite_within_char_guardrails(
+        rewrite_label="overshoot",
+        pre_chars=99,
+        post_chars=60,
+        target_duration_ms=11_939,
+        chars_per_second=4.088,
+    )
+
+
+def test_process_pipeline_tightens_mid_undershoot_risk_pre_tts_bounds() -> None:
+    bounds = ProcessPipeline._pre_tts_rewrite_char_bounds(
+        rewrite_label="overshoot",
+        pre_chars=89,
+        target_duration_ms=16_898,
+        chars_per_second=4.126,
+    )
+
+    assert bounds == (77, 83)
+
+
+def test_process_pipeline_rejects_mid_undershoot_risk_rewrite_below_floor() -> None:
+    assert not ProcessPipeline._is_pre_tts_rewrite_within_char_guardrails(
+        rewrite_label="overshoot",
+        pre_chars=89,
+        post_chars=74,
+        target_duration_ms=16_898,
+        chars_per_second=4.126,
+    )
+    assert ProcessPipeline._is_pre_tts_rewrite_within_char_guardrails(
+        rewrite_label="overshoot",
+        pre_chars=89,
+        post_chars=77,
+        target_duration_ms=16_898,
+        chars_per_second=4.126,
+    )
+
+
+def test_process_pipeline_tightens_long_undershoot_risk_pre_tts_bounds() -> None:
+    bounds = ProcessPipeline._pre_tts_rewrite_char_bounds(
+        rewrite_label="overshoot",
+        pre_chars=127,
+        target_duration_ms=28_183,
+        chars_per_second=3.373,
+    )
+
+    assert bounds == (110, 122)
+
+
+def test_process_pipeline_rejects_long_undershoot_risk_rewrite_below_floor() -> None:
+    assert not ProcessPipeline._is_pre_tts_rewrite_within_char_guardrails(
+        rewrite_label="overshoot",
+        pre_chars=127,
+        post_chars=103,
+        target_duration_ms=28_183,
+        chars_per_second=3.373,
+    )
+    assert ProcessPipeline._is_pre_tts_rewrite_within_char_guardrails(
+        rewrite_label="overshoot",
+        pre_chars=127,
+        post_chars=110,
+        target_duration_ms=28_183,
+        chars_per_second=3.373,
+    )
+
+
+def test_process_pipeline_pre_rewrites_short_obvious_overshoot_before_tts() -> None:
+    pipeline = ProcessPipeline()
+    segment = DubbingSegment(
+        segment_id=44,
+        speaker_id="speaker_a",
+        display_name="Interviewer",
+        voice_id="voice_a",
+        start_ms=0,
+        end_ms=4_000,
+        target_duration_ms=4_000,
+        source_text="Okay.",
+        cn_text="a" * 40,
+    )
+    observed: dict[str, object] = {}
+
+    class FakeRewriter:
+        def rewrite_for_duration_with_profile(self, *args, **kwargs):
+            observed["args"] = args
+            observed["kwargs"] = kwargs
+            return "b" * 24
+
+    rewritten_count = pipeline._pre_rewrite_obvious_overshoot_segments_before_tts(
+        segments=[segment],
+        rewriter=FakeRewriter(),  # type: ignore[arg-type]
+        chars_per_second=4.5,
+        chars_per_second_by_speaker={},
+    )
+
+    assert rewritten_count == 1
+    assert observed["args"] == ("a" * 40,)
+    assert observed["kwargs"]["target_lower_chars"] == 24
+    assert observed["kwargs"]["target_upper_chars"] == 26
+    assert segment.cn_text == "b" * 24
+    assert segment.pre_tts_rewrite_direction == "overshoot"
+
+
+def test_process_pipeline_skips_short_low_overshoot_before_tts() -> None:
+    pipeline = ProcessPipeline()
+    segment = DubbingSegment(
+        segment_id=45,
+        speaker_id="speaker_a",
+        display_name="Interviewer",
+        voice_id="voice_a",
+        start_ms=0,
+        end_ms=6_000,
+        target_duration_ms=6_000,
+        source_text="Short source text",
+        cn_text="a" * 30,
+    )
+
+    class FakeRewriter:
+        def rewrite_for_duration(self, *args, **kwargs):
+            raise AssertionError("short segments require a higher overshoot threshold")
+
+    rewritten_count = pipeline._pre_rewrite_obvious_overshoot_segments_before_tts(
+        segments=[segment],
+        rewriter=FakeRewriter(),  # type: ignore[arg-type]
+        chars_per_second=4.5,
+        chars_per_second_by_speaker={},
+    )
+
+    assert rewritten_count == 0
+    assert segment.cn_text == "a" * 30
+
+
+def test_process_pipeline_short_estimate_margin_catches_borderline_overshoot() -> None:
+    pipeline = ProcessPipeline()
+    segment = DubbingSegment(
+        segment_id=47,
+        speaker_id="speaker_a",
+        display_name="Interviewer",
+        voice_id="voice_a",
+        start_ms=0,
+        end_ms=6_000,
+        target_duration_ms=6_000,
+        source_text="Short source text",
+        cn_text="a" * 35,
+    )
+
+    class FakeRewriter:
+        def rewrite_for_duration_with_profile(self, *args, **kwargs):
+            return "b" * 27
+
+    rewritten_count = pipeline._pre_rewrite_obvious_overshoot_segments_before_tts(
+        segments=[segment],
+        rewriter=FakeRewriter(),  # type: ignore[arg-type]
+        chars_per_second=4.5,
+        chars_per_second_by_speaker={},
+    )
+
+    assert rewritten_count == 1
+    assert segment.cn_text == "b" * 27
+    assert segment.pre_tts_estimate_ms == 7777
+
+
+def test_process_pipeline_near_short_estimate_margin_catches_borderline_overshoot() -> None:
+    pipeline = ProcessPipeline()
+    segment = DubbingSegment(
+        segment_id=48,
+        speaker_id="speaker_a",
+        display_name="Interviewer",
+        voice_id="voice_a",
+        start_ms=0,
+        end_ms=9_500,
+        target_duration_ms=9_500,
+        source_text="Near short source text",
+        cn_text="a" * 44,
+    )
+
+    class FakeRewriter:
+        def rewrite_for_duration_with_profile(self, *args, **kwargs):
+            return "b" * 38
+
+    rewritten_count = pipeline._pre_rewrite_obvious_overshoot_segments_before_tts(
+        segments=[segment],
+        rewriter=FakeRewriter(),  # type: ignore[arg-type]
+        chars_per_second=4.0,
+        chars_per_second_by_speaker={},
+    )
+
+    assert rewritten_count == 1
+    assert segment.cn_text == "b" * 38
+    assert segment.pre_tts_estimate_ms == 11000
+
+
+def test_process_pipeline_skips_micro_segment_pre_tts_rewrite() -> None:
+    pipeline = ProcessPipeline()
+    segment = DubbingSegment(
+        segment_id=46,
+        speaker_id="speaker_a",
+        display_name="Interviewer",
+        voice_id="voice_a",
+        start_ms=0,
+        end_ms=1_000,
+        target_duration_ms=1_000,
+        source_text="Yes.",
+        cn_text="a" * 30,
+    )
+
+    class FakeRewriter:
+        def rewrite_for_duration(self, *args, **kwargs):
+            raise AssertionError("micro segments should not use pre-TTS rewrite")
+
+    rewritten_count = pipeline._pre_rewrite_obvious_overshoot_segments_before_tts(
+        segments=[segment],
+        rewriter=FakeRewriter(),  # type: ignore[arg-type]
+        chars_per_second=4.5,
+        chars_per_second_by_speaker={},
+    )
+
+    assert rewritten_count == 0
+    assert segment.cn_text == "a" * 30
 
 
 def test_process_pipeline_skips_pre_tts_rewrite_when_speed_can_handle(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4211,7 +5358,7 @@ def test_process_pipeline_pre_tts_rewrite_when_speed_cant_handle(monkeypatch: py
     class FakeRewriter:
         def rewrite_for_duration(self, *args, **kwargs):
             rewrite_calls["n"] += 1
-            return "shorter text"
+            return "b" * 160
 
     rewritten_count = pipeline._pre_rewrite_obvious_overshoot_segments_before_tts(
         segments=[segment],
@@ -4221,7 +5368,7 @@ def test_process_pipeline_pre_tts_rewrite_when_speed_cant_handle(monkeypatch: py
     )
     assert rewritten_count == 1
     assert rewrite_calls["n"] == 1
-    assert segment.cn_text == "shorter text"
+    assert segment.cn_text == "b" * 160
 
 
 def test_pre_tts_rewrite_skip_disabled_when_speed_flag_off(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4252,7 +5399,7 @@ def test_pre_tts_rewrite_skip_disabled_when_speed_flag_off(monkeypatch: pytest.M
     class FakeRewriter:
         def rewrite_for_duration(self, *args, **kwargs):
             rewrite_calls["n"] += 1
-            return "shorter text"
+            return "b" * 90
 
     rewritten_count = pipeline._pre_rewrite_obvious_overshoot_segments_before_tts(
         segments=[segment],
@@ -4299,7 +5446,7 @@ def test_pre_tts_rewrite_skip_disabled_for_provider_without_speed(monkeypatch: p
     class FakeRewriter:
         def rewrite_for_duration(self, *args, **kwargs):
             rewrite_calls["n"] += 1
-            return "shorter text"
+            return "b" * 90
 
     rewritten_count = pipeline._pre_rewrite_obvious_overshoot_segments_before_tts(
         segments=[segment],
@@ -4381,7 +5528,7 @@ def test_pre_tts_rewrite_skip_job_provider_without_speed_still_rewrites(monkeypa
     class FakeRewriter:
         def rewrite_for_duration(self, *args, **kwargs):
             rewrite_calls["n"] += 1
-            return "shorter text"
+            return "b" * 90
 
     rewritten_count = pipeline._pre_rewrite_obvious_overshoot_segments_before_tts(
         segments=[segment],

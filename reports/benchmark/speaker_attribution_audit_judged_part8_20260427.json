@@ -1,0 +1,271 @@
+{
+  "generated_at": "2026-04-27T11:48:37.651802+00:00",
+  "audit_batch": "reports/benchmark/speaker_attribution_audit_batch_20260427.json",
+  "review_model": "gemini_pro",
+  "summary": {
+    "candidates_loaded": 12,
+    "start": 80,
+    "limit": 12,
+    "chunks": 6,
+    "decisions": 12,
+    "errors": 0,
+    "decision_counts": {
+      "s2_speaker": 8,
+      "distinct_speaker": 4
+    },
+    "recommended_action_counts": {
+      "keep": 12
+    }
+  },
+  "decisions": [
+    {
+      "candidate_id": "job_abb3fedc905c403db67d784c480c170e_cand_002",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly shows the female interviewer saying 'Right' as a backchannel response."
+    },
+    {
+      "candidate_id": "job_abb3fedc905c403db67d784c480c170e_cand_003",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly shows the female interviewer saying 'Yeah' in agreement."
+    },
+    {
+      "candidate_id": "job_abb3fedc905c403db67d784c480c170e_cand_004",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly contains a female voice saying 'Yeah', which matches the assigned speaker (speaker_a)."
+    },
+    {
+      "candidate_id": "job_abb3fedc905c403db67d784c480c170e_cand_005",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly contains a female voice asking 'How so?', which matches the assigned speaker (speaker_a)."
+    },
+    {
+      "candidate_id": "job_abb3fedc905c403db67d784c480c170e_cand_006",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly features the female interviewer asking the question, matching the assigned speaker."
+    },
+    {
+      "candidate_id": "job_d3ca1fb8bf0b42efb906be716ac6995c_cand_001",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio features the female interviewer asking the question, which aligns with the assigned speaker."
+    },
+    {
+      "candidate_id": "job_d3ca1fb8bf0b42efb906be716ac6995c_cand_002",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly features the interviewer asking a question, which matches the assigned speaker."
+    },
+    {
+      "candidate_id": "job_d3ca1fb8bf0b42efb906be716ac6995c_cand_003",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio features the interviewer saying 'Right', confirming the assigned speaker is correct."
+    },
+    {
+      "candidate_id": "job_d3ca1fb8bf0b42efb906be716ac6995c_cand_004",
+      "decision": "distinct_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly contains a distinct female voice (the interviewer) saying 'Yeah' in agreement."
+    },
+    {
+      "candidate_id": "job_d3ca1fb8bf0b42efb906be716ac6995c_cand_005",
+      "decision": "distinct_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly contains a distinct female voice (the interviewer) asking 'How so?'."
+    },
+    {
+      "candidate_id": "job_d3ca1fb8bf0b42efb906be716ac6995c_cand_006",
+      "decision": "distinct_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly features the interviewer asking 'How so?', confirming the assigned speaker is correct."
+    },
+    {
+      "candidate_id": "job_b98bdc65841f4254bdc2a410eb6e0939_cand_001",
+      "decision": "distinct_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly features the interviewer saying 'Yeah' in agreement, confirming the assigned speaker is correct."
+    }
+  ],
+  "errors": [],
+  "responses": [
+    {
+      "model": "gemini_pro",
+      "model_id": "gemini-3.1-pro-preview",
+      "candidate_ids": [
+        "job_abb3fedc905c403db67d784c480c170e_cand_002",
+        "job_abb3fedc905c403db67d784c480c170e_cand_003"
+      ],
+      "raw_text": "{\n  \"decisions\": [\n    {\n      \"candidate_id\": \"job_abb3fedc905c403db67d784c480c170e_cand_002\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly shows the female interviewer saying 'Right' as a backchannel response.\"\n    },\n    {\n      \"candidate_id\": \"job_abb3fedc905c403db67d784c480c170e_cand_003\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly shows the female interviewer saying 'Yeah' in agreement.\"\n    }\n  ]\n}",
+      "parsed": {
+        "decisions": [
+          {
+            "candidate_id": "job_abb3fedc905c403db67d784c480c170e_cand_002",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly shows the female interviewer saying 'Right' as a backchannel response."
+          },
+          {
+            "candidate_id": "job_abb3fedc905c403db67d784c480c170e_cand_003",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly shows the female interviewer saying 'Yeah' in agreement."
+          }
+        ]
+      }
+    },
+    {
+      "model": "gemini_pro",
+      "model_id": "gemini-3.1-pro-preview",
+      "candidate_ids": [
+        "job_abb3fedc905c403db67d784c480c170e_cand_004",
+        "job_abb3fedc905c403db67d784c480c170e_cand_005"
+      ],
+      "raw_text": "{\n  \"decisions\": [\n    {\n      \"candidate_id\": \"job_abb3fedc905c403db67d784c480c170e_cand_004\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly contains a female voice saying 'Yeah', which matches the assigned speaker (speaker_a).\"\n    },\n    {\n      \"candidate_id\": \"job_abb3fedc905c403db67d784c480c170e_cand_005\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly contains a female voice asking 'How so?', which matches the assigned speaker (speaker_a).\"\n    }\n  ]\n}",
+      "parsed": {
+        "decisions": [
+          {
+            "candidate_id": "job_abb3fedc905c403db67d784c480c170e_cand_004",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly contains a female voice saying 'Yeah', which matches the assigned speaker (speaker_a)."
+          },
+          {
+            "candidate_id": "job_abb3fedc905c403db67d784c480c170e_cand_005",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly contains a female voice asking 'How so?', which matches the assigned speaker (speaker_a)."
+          }
+        ]
+      }
+    },
+    {
+      "model": "gemini_pro",
+      "model_id": "gemini-3.1-pro-preview",
+      "candidate_ids": [
+        "job_abb3fedc905c403db67d784c480c170e_cand_006",
+        "job_d3ca1fb8bf0b42efb906be716ac6995c_cand_001"
+      ],
+      "raw_text": "{\n  \"decisions\": [\n    {\n      \"candidate_id\": \"job_abb3fedc905c403db67d784c480c170e_cand_006\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly features the female interviewer asking the question, matching the assigned speaker.\"\n    },\n    {\n      \"candidate_id\": \"job_d3ca1fb8bf0b42efb906be716ac6995c_cand_001\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio features the female interviewer asking the question, which aligns with the assigned speaker.\"\n    }\n  ]\n}",
+      "parsed": {
+        "decisions": [
+          {
+            "candidate_id": "job_abb3fedc905c403db67d784c480c170e_cand_006",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly features the female interviewer asking the question, matching the assigned speaker."
+          },
+          {
+            "candidate_id": "job_d3ca1fb8bf0b42efb906be716ac6995c_cand_001",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio features the female interviewer asking the question, which aligns with the assigned speaker."
+          }
+        ]
+      }
+    },
+    {
+      "model": "gemini_pro",
+      "model_id": "gemini-3.1-pro-preview",
+      "candidate_ids": [
+        "job_d3ca1fb8bf0b42efb906be716ac6995c_cand_002",
+        "job_d3ca1fb8bf0b42efb906be716ac6995c_cand_003"
+      ],
+      "raw_text": "{\n  \"decisions\": [\n    {\n      \"candidate_id\": \"job_d3ca1fb8bf0b42efb906be716ac6995c_cand_002\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly features the interviewer asking a question, which matches the assigned speaker.\"\n    },\n    {\n      \"candidate_id\": \"job_d3ca1fb8bf0b42efb906be716ac6995c_cand_003\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio features the interviewer saying 'Right', confirming the assigned speaker is correct.\"\n    }\n  ]\n}",
+      "parsed": {
+        "decisions": [
+          {
+            "candidate_id": "job_d3ca1fb8bf0b42efb906be716ac6995c_cand_002",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly features the interviewer asking a question, which matches the assigned speaker."
+          },
+          {
+            "candidate_id": "job_d3ca1fb8bf0b42efb906be716ac6995c_cand_003",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio features the interviewer saying 'Right', confirming the assigned speaker is correct."
+          }
+        ]
+      }
+    },
+    {
+      "model": "gemini_pro",
+      "model_id": "gemini-3.1-pro-preview",
+      "candidate_ids": [
+        "job_d3ca1fb8bf0b42efb906be716ac6995c_cand_004",
+        "job_d3ca1fb8bf0b42efb906be716ac6995c_cand_005"
+      ],
+      "raw_text": "{\n  \"decisions\": [\n    {\n      \"candidate_id\": \"job_d3ca1fb8bf0b42efb906be716ac6995c_cand_004\",\n      \"decision\": \"distinct_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly contains a distinct female voice (the interviewer) saying 'Yeah' in agreement.\"\n    },\n    {\n      \"candidate_id\": \"job_d3ca1fb8bf0b42efb906be716ac6995c_cand_005\",\n      \"decision\": \"distinct_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly contains a distinct female voice (the interviewer) asking 'How so?'.\"\n    }\n  ]\n}",
+      "parsed": {
+        "decisions": [
+          {
+            "candidate_id": "job_d3ca1fb8bf0b42efb906be716ac6995c_cand_004",
+            "decision": "distinct_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly contains a distinct female voice (the interviewer) saying 'Yeah' in agreement."
+          },
+          {
+            "candidate_id": "job_d3ca1fb8bf0b42efb906be716ac6995c_cand_005",
+            "decision": "distinct_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly contains a distinct female voice (the interviewer) asking 'How so?'."
+          }
+        ]
+      }
+    },
+    {
+      "model": "gemini_pro",
+      "model_id": "gemini-3.1-pro-preview",
+      "candidate_ids": [
+        "job_d3ca1fb8bf0b42efb906be716ac6995c_cand_006",
+        "job_b98bdc65841f4254bdc2a410eb6e0939_cand_001"
+      ],
+      "raw_text": "{\n  \"decisions\": [\n    {\n      \"candidate_id\": \"job_d3ca1fb8bf0b42efb906be716ac6995c_cand_006\",\n      \"decision\": \"distinct_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly features the interviewer asking 'How so?', confirming the assigned speaker is correct.\"\n    },\n    {\n      \"candidate_id\": \"job_b98bdc65841f4254bdc2a410eb6e0939_cand_001\",\n      \"decision\": \"distinct_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly features the interviewer saying 'Yeah' in agreement, confirming the assigned speaker is correct.\"\n    }\n  ]\n}",
+      "parsed": {
+        "decisions": [
+          {
+            "candidate_id": "job_d3ca1fb8bf0b42efb906be716ac6995c_cand_006",
+            "decision": "distinct_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly features the interviewer asking 'How so?', confirming the assigned speaker is correct."
+          },
+          {
+            "candidate_id": "job_b98bdc65841f4254bdc2a410eb6e0939_cand_001",
+            "decision": "distinct_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly features the interviewer saying 'Yeah' in agreement, confirming the assigned speaker is correct."
+          }
+        ]
+      }
+    }
+  ]
+}

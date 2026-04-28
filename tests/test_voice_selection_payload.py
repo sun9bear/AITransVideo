@@ -127,6 +127,53 @@ class TestPayloadMinimax:
         for v in payload["available_voices"]:
             assert v["provider"] == "minimax"
 
+    def test_unknown_speaker_still_gets_backup_recommendations(self) -> None:
+        """No gender/style fallback should still give the UI candidate voices."""
+        proc = _get_pipeline_class().__new__(_get_pipeline_class())
+        payload = proc._build_voice_selection_review_payload(
+            transcript_result=FakeTranscriptResult(),
+            translation_result=None,
+            tts_provider="minimax",
+            service_mode="studio",
+            source_audio_path="/tmp/src.wav",
+            effective_speakers=1,
+            speaker_names={"speaker_a": "未知说话人1"},
+        )
+
+        speaker = payload["speakers"][0]
+        match = speaker["auto_matched_by_provider"]["minimax"]
+        assert match["voice_id"] == "Wise_Woman"
+        backups = match["backup_voices"]
+        assert len(backups) == 5
+        backup_ids = [item["voice_id"] for item in backups]
+        assert "Wise_Woman" not in backup_ids
+        assert len(backup_ids) == len(set(backup_ids))
+
+    def test_pass3_unknown_gender_still_gets_backup_recommendations(self) -> None:
+        """Pass 3 can explicitly return gender=unknown; keep recommendations usable."""
+        proc = _get_pipeline_class().__new__(_get_pipeline_class())
+        payload = proc._build_voice_selection_review_payload(
+            transcript_result=FakeTranscriptResult(),
+            translation_result=None,
+            tts_provider="minimax",
+            service_mode="studio",
+            source_audio_path="/tmp/src.wav",
+            effective_speakers=1,
+            speaker_names={"speaker_a": "未知说话人1"},
+            speaker_styles={
+                "speaker_a": {
+                    "gender": "unknown",
+                    "age_group": "middle",
+                    "persona_style": "professional",
+                    "energy_level": "medium",
+                }
+            },
+        )
+
+        match = payload["speakers"][0]["auto_matched_by_provider"]["minimax"]
+        assert match["voice_id"] == "Wise_Woman"
+        assert len(match["backup_voices"]) == 5
+
 
 class TestSpeakerNameMap:
     def test_additional_speaker_names_survive_merged_map(self) -> None:

@@ -1,0 +1,60 @@
+{
+  "corrections": [
+    {
+      "phase": "original_to_after_corrections",
+      "position": null,
+      "before_speaker_id": "speaker_b",
+      "after_speaker_id": "speaker_a",
+      "start_ms": 33770,
+      "end_ms": 42570,
+      "duration_ms": 8800,
+      "source_text": {
+        "snippet": "What would you have done differently? Yes. You think about it? I think about. Yes, I think a lot about what I nearly missed by being just not quite smart enough or hardworking enough.",
+        "chars": 183,
+        "truncated": false
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": null,
+      "before_speaker_id": "speaker_b",
+      "after_speaker_id": "speaker_a",
+      "start_ms": 67050,
+      "end_ms": 82170,
+      "duration_ms": 15120,
+      "source_text": {
+        "snippet": "I figured you would have ended up richer. I was going to live to be 100 years old. And I constantly am aware of the facts that I basically screwed up. Given the hand I dealt, I could have done a lot better. Quite easily done a lot better.",
+        "chars": 238,
+        "truncated": false
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": null,
+      "before_speaker_id": "speaker_b",
+      "after_speaker_id": "speaker_a",
+      "start_ms": 91050,
+      "end_ms": 109530,
+      "duration_ms": 18480,
+      "source_text": {
+        "snippet": "I know you could have moved and spent more jobs for about 60 years. We're similar. But you see, we're both smart enough to have, uh, watched our friends who got rich build these really fancy houses. And I would say in practically every cas…",
+        "chars": 287,
+        "truncated": true
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": null,
+      "before_speaker_id": "speaker_b",
+      "after_speaker_id": "speaker_a",
+      "start_ms": 143750,
+      "end_ms": 176160,
+      "duration_ms": 32410,
+      "source_text": {
+        "snippet": "Yes. And then Divide it. Yes, of course. That's what everybody's life is with any sense. All the people I know, uh, my friends now, they never would become alcoholics. It was too dangerous. They don't get near it if it takes that many fine…",
+        "chars": 412,
+        "truncated": true
+      }
+    }
+  ]
+}

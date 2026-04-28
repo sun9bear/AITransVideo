@@ -1,0 +1,165 @@
+{
+  "generated_at": "2026-04-27T11:20:23.436283+00:00",
+  "audit_batch": "reports/benchmark/speaker_attribution_audit_batch_20260427.json",
+  "review_model": "gemini_pro",
+  "summary": {
+    "candidates_loaded": 8,
+    "chunks": 2,
+    "decisions": 8,
+    "decision_counts": {
+      "music_or_non_speech": 4,
+      "distinct_speaker": 3,
+      "asr_speaker": 1
+    },
+    "recommended_action_counts": {
+      "mark_non_speech": 4,
+      "keep": 4
+    }
+  },
+  "decisions": [
+    {
+      "candidate_id": "job_524c5253ad514692bcc06aa170f9567f_cand_001",
+      "decision": "music_or_non_speech",
+      "confidence": "high",
+      "recommended_action": "mark_non_speech",
+      "reason": "The audio is a background song playing, not a speaker."
+    },
+    {
+      "candidate_id": "job_524c5253ad514692bcc06aa170f9567f_cand_002",
+      "decision": "asr_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio is clearly the host speaking over the music."
+    },
+    {
+      "candidate_id": "job_524c5253ad514692bcc06aa170f9567f_cand_003",
+      "decision": "music_or_non_speech",
+      "confidence": "high",
+      "recommended_action": "mark_non_speech",
+      "reason": "The audio consists of crowd chanting and cheering, not a distinct speaker."
+    },
+    {
+      "candidate_id": "job_524c5253ad514692bcc06aa170f9567f_cand_004",
+      "decision": "music_or_non_speech",
+      "confidence": "high",
+      "recommended_action": "mark_non_speech",
+      "reason": "The audio is a background song playing, not a speaker."
+    },
+    {
+      "candidate_id": "job_524c5253ad514692bcc06aa170f9567f_cand_005",
+      "decision": "distinct_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly features a distinct male voice from the audience shouting the phrase."
+    },
+    {
+      "candidate_id": "job_524c5253ad514692bcc06aa170f9567f_cand_006",
+      "decision": "distinct_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio features a distinct male guest speaker, correctly assigned."
+    },
+    {
+      "candidate_id": "job_fe50b1a0743d4585ba06ebf9cfb476bd_cand_001",
+      "decision": "music_or_non_speech",
+      "confidence": "high",
+      "recommended_action": "mark_non_speech",
+      "reason": "The audio is a song playing in the background, not spoken dialogue."
+    },
+    {
+      "candidate_id": "job_fe50b1a0743d4585ba06ebf9cfb476bd_cand_002",
+      "decision": "distinct_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly features a distinct male voice from the audience shouting the phrase."
+    }
+  ],
+  "responses": [
+    {
+      "model": "gemini_pro",
+      "model_id": "gemini-3.1-pro-preview",
+      "candidate_ids": [
+        "job_524c5253ad514692bcc06aa170f9567f_cand_001",
+        "job_524c5253ad514692bcc06aa170f9567f_cand_002",
+        "job_524c5253ad514692bcc06aa170f9567f_cand_003",
+        "job_524c5253ad514692bcc06aa170f9567f_cand_004"
+      ],
+      "raw_text": "{\n  \"decisions\": [\n    {\n      \"candidate_id\": \"job_524c5253ad514692bcc06aa170f9567f_cand_001\",\n      \"decision\": \"music_or_non_speech\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"mark_non_speech\",\n      \"reason\": \"The audio is a background song playing, not a speaker.\"\n    },\n    {\n      \"candidate_id\": \"job_524c5253ad514692bcc06aa170f9567f_cand_002\",\n      \"decision\": \"asr_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio is clearly the host speaking over the music.\"\n    },\n    {\n      \"candidate_id\": \"job_524c5253ad514692bcc06aa170f9567f_cand_003\",\n      \"decision\": \"music_or_non_speech\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"mark_non_speech\",\n      \"reason\": \"The audio consists of crowd chanting and cheering, not a distinct speaker.\"\n    },\n    {\n      \"candidate_id\": \"job_524c5253ad514692bcc06aa170f9567f_cand_004\",\n      \"decision\": \"music_or_non_speech\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"mark_non_speech\",\n      \"reason\": \"The audio is a background song playing, not a speaker.\"\n    }\n  ]\n}",
+      "parsed": {
+        "decisions": [
+          {
+            "candidate_id": "job_524c5253ad514692bcc06aa170f9567f_cand_001",
+            "decision": "music_or_non_speech",
+            "confidence": "high",
+            "recommended_action": "mark_non_speech",
+            "reason": "The audio is a background song playing, not a speaker."
+          },
+          {
+            "candidate_id": "job_524c5253ad514692bcc06aa170f9567f_cand_002",
+            "decision": "asr_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio is clearly the host speaking over the music."
+          },
+          {
+            "candidate_id": "job_524c5253ad514692bcc06aa170f9567f_cand_003",
+            "decision": "music_or_non_speech",
+            "confidence": "high",
+            "recommended_action": "mark_non_speech",
+            "reason": "The audio consists of crowd chanting and cheering, not a distinct speaker."
+          },
+          {
+            "candidate_id": "job_524c5253ad514692bcc06aa170f9567f_cand_004",
+            "decision": "music_or_non_speech",
+            "confidence": "high",
+            "recommended_action": "mark_non_speech",
+            "reason": "The audio is a background song playing, not a speaker."
+          }
+        ]
+      }
+    },
+    {
+      "model": "gemini_pro",
+      "model_id": "gemini-3.1-pro-preview",
+      "candidate_ids": [
+        "job_524c5253ad514692bcc06aa170f9567f_cand_005",
+        "job_524c5253ad514692bcc06aa170f9567f_cand_006",
+        "job_fe50b1a0743d4585ba06ebf9cfb476bd_cand_001",
+        "job_fe50b1a0743d4585ba06ebf9cfb476bd_cand_002"
+      ],
+      "raw_text": "{\n  \"decisions\": [\n    {\n      \"candidate_id\": \"job_524c5253ad514692bcc06aa170f9567f_cand_005\",\n      \"decision\": \"distinct_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly features a distinct male voice from the audience shouting the phrase.\"\n    },\n    {\n      \"candidate_id\": \"job_524c5253ad514692bcc06aa170f9567f_cand_006\",\n      \"decision\": \"distinct_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio features a distinct male guest speaker, correctly assigned.\"\n    },\n    {\n      \"candidate_id\": \"job_fe50b1a0743d4585ba06ebf9cfb476bd_cand_001\",\n      \"decision\": \"music_or_non_speech\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"mark_non_speech\",\n      \"reason\": \"The audio is a song playing in the background, not spoken dialogue.\"\n    },\n    {\n      \"candidate_id\": \"job_fe50b1a0743d4585ba06ebf9cfb476bd_cand_002\",\n      \"decision\": \"distinct_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly features a distinct male voice from the audience shouting the phrase.\"\n    }\n  ]\n}",
+      "parsed": {
+        "decisions": [
+          {
+            "candidate_id": "job_524c5253ad514692bcc06aa170f9567f_cand_005",
+            "decision": "distinct_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly features a distinct male voice from the audience shouting the phrase."
+          },
+          {
+            "candidate_id": "job_524c5253ad514692bcc06aa170f9567f_cand_006",
+            "decision": "distinct_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio features a distinct male guest speaker, correctly assigned."
+          },
+          {
+            "candidate_id": "job_fe50b1a0743d4585ba06ebf9cfb476bd_cand_001",
+            "decision": "music_or_non_speech",
+            "confidence": "high",
+            "recommended_action": "mark_non_speech",
+            "reason": "The audio is a song playing in the background, not spoken dialogue."
+          },
+          {
+            "candidate_id": "job_fe50b1a0743d4585ba06ebf9cfb476bd_cand_002",
+            "decision": "distinct_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly features a distinct male voice from the audience shouting the phrase."
+          }
+        ]
+      }
+    }
+  ]
+}

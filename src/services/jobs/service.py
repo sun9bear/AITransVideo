@@ -79,6 +79,7 @@ class JobService:
         user_id: str | None = None,
         source_content_hash: str | None = None,
         display_name: str | None = None,
+        expires_at: str | None = None,
     ) -> JobRecord:
         normalized_source_type = str(source_type).strip()
         normalized_source_ref = str(source_ref).strip()
@@ -92,6 +93,11 @@ class JobService:
             if stripped:
                 # Matches the DB VARCHAR(60) limit from migration 015.
                 normalized_display_name = stripped[:60]
+        normalized_expires_at: str | None = None
+        if expires_at is not None:
+            stripped_expires_at = str(expires_at).strip()
+            if stripped_expires_at:
+                normalized_expires_at = stripped_expires_at
         normalized_output_target = str(output_target).strip().lower()
         normalized_job_type = str(job_type).strip()
         normalized_speakers = str(speakers).strip().lower() or "auto"
@@ -167,6 +173,7 @@ class JobService:
             project_dir=project_dir_absolute,
             source_content_hash=source_content_hash,
             display_name=normalized_display_name,
+            expires_at=normalized_expires_at,
         )
         self.store.save_job(record)
         self.store.append_event(

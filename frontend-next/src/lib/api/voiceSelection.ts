@@ -61,12 +61,22 @@ export interface SpeakerAudioSegment {
   durationS: number
   sourceText: string
   audioUrl: string
+  dubbingMode: 'dub' | 'keep_original'
 }
 
 export interface SpeakerAudioResponse {
   speakerId: string
   segments: SpeakerAudioSegment[]
   totalDurationS: number
+}
+
+export interface SpeakerAudioReassignResult {
+  segmentId: number
+  fromSpeakerId: string
+  toSpeakerId: string
+  changed: boolean
+  fromSummary?: { speakerId: string; segmentCount: number; totalDurationS: number }
+  toSummary?: { speakerId: string; segmentCount: number; totalDurationS: number }
 }
 
 export interface VoicePreviewResult {
@@ -151,6 +161,7 @@ export async function getSpeakerAudioSegments(
       end_ms: number
       duration_s: number
       source_text: string
+      dubbing_mode?: string
       audio_url: string
     }>
     total_duration_s: number
@@ -165,8 +176,79 @@ export async function getSpeakerAudioSegments(
       durationS: s.duration_s,
       sourceText: s.source_text,
       audioUrl: s.audio_url,
+      dubbingMode: s.dubbing_mode === 'keep_original' ? 'keep_original' : 'dub',
     })),
     totalDurationS: result.total_duration_s,
+  }
+}
+
+export async function updateSpeakerAudioDubbingMode(input: {
+  jobId: string
+  segmentId: number
+  speakerId: string
+  dubbingMode: 'dub' | 'keep_original'
+}): Promise<{ segmentId: number; speakerId: string; dubbingMode: 'dub' | 'keep_original'; changed: boolean }> {
+  const result = await apiClient.post<{
+    segment_id: number
+    speaker_id: string
+    dubbing_mode: string
+    changed: boolean
+  }>(`/jobs/${input.jobId}/speaker-audio/dubbing-mode`, {
+    body: {
+      segment_id: input.segmentId,
+      speaker_id: input.speakerId,
+      dubbing_mode: input.dubbingMode,
+    },
+  })
+
+  return {
+    segmentId: result.segment_id,
+    speakerId: result.speaker_id,
+    dubbingMode: result.dubbing_mode === 'keep_original' ? 'keep_original' : 'dub',
+    changed: result.changed,
+  }
+}
+
+export async function reassignSpeakerAudioSegment(input: {
+  jobId: string
+  segmentId: number
+  fromSpeakerId: string
+  toSpeakerId: string
+}): Promise<SpeakerAudioReassignResult> {
+  const result = await apiClient.post<{
+    segment_id: number
+    from_speaker_id: string
+    to_speaker_id: string
+    changed: boolean
+    from_summary?: { speaker_id: string; segment_count: number; total_duration_s: number }
+    to_summary?: { speaker_id: string; segment_count: number; total_duration_s: number }
+  }>(`/jobs/${input.jobId}/speaker-audio/reassign`, {
+    body: {
+      segment_id: input.segmentId,
+      from_speaker_id: input.fromSpeakerId,
+      to_speaker_id: input.toSpeakerId,
+    },
+  })
+
+  return {
+    segmentId: result.segment_id,
+    fromSpeakerId: result.from_speaker_id,
+    toSpeakerId: result.to_speaker_id,
+    changed: result.changed,
+    fromSummary: result.from_summary
+      ? {
+          speakerId: result.from_summary.speaker_id,
+          segmentCount: result.from_summary.segment_count,
+          totalDurationS: result.from_summary.total_duration_s,
+        }
+      : undefined,
+    toSummary: result.to_summary
+      ? {
+          speakerId: result.to_summary.speaker_id,
+          segmentCount: result.to_summary.segment_count,
+          totalDurationS: result.to_summary.total_duration_s,
+        }
+      : undefined,
   }
 }
 

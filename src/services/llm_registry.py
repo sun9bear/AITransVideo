@@ -57,14 +57,31 @@ MODEL_REGISTRY: dict[str, dict[str, Any]] = {
         "cost_hint": "¥0.25/百万 token",
     },
     # DeepSeek (text-only)
+    # DeepSeek V4 defaults thinking mode to enabled. Translation/rewrite are
+    # structured-output stages, so the low-cost default keeps non-thinking
+    # behavior explicit instead of relying on the retiring deepseek-chat alias.
     "deepseek": {
-        "api_model_id": "deepseek-chat",
+        "api_model_id": "deepseek-v4-flash",
         "provider": "deepseek",
         "supports_audio": False,
         "api_key_env": "DEEPSEEK_API_KEY",
         "cost_rank": 3,
-        "label": "DeepSeek Chat",
-        "cost_hint": "¥1/百万 token",
+        "label": "DeepSeek V4 Flash（快速）",
+        "cost_hint": "$0.14/$0.28 每百万 token",
+        "request_overrides": {"thinking": {"type": "disabled"}},
+    },
+    "deepseek_v4_pro": {
+        "api_model_id": "deepseek-v4-pro",
+        "provider": "deepseek",
+        "supports_audio": False,
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "cost_rank": 4,
+        "label": "DeepSeek V4 Pro（高质量）",
+        "cost_hint": "$0.435/$0.87 每百万 token（限时）",
+        "request_overrides": {
+            "thinking": {"type": "enabled"},
+            "reasoning_effort": "high",
+        },
     },
     # OpenAI text-only series
     "openai": {
@@ -85,15 +102,34 @@ MODEL_REGISTRY: dict[str, dict[str, Any]] = {
         "label": "GPT-5.4（高质量）",
         "cost_hint": "约 ¥0.5/千 token",
     },
-    # MiMo (omni-modal, free — supports text + image + audio + video)
+    # MiMo (Xiaomi)
+    "mimo_v25": {
+        "api_model_id": "mimo-v2.5",
+        "provider": "mimo",
+        "supports_audio": True,
+        "api_key_env": "MIMO_API_KEY",
+        "cost_rank": 2,
+        "label": "MiMo-V2.5（全模态）",
+        "cost_hint": "Token Plan 1x（音频已验证）",
+    },
+    "mimo_v25_pro": {
+        "api_model_id": "mimo-v2.5-pro",
+        "provider": "mimo",
+        "supports_audio": False,
+        "api_key_env": "MIMO_API_KEY",
+        "cost_rank": 4,
+        "label": "MiMo-V2.5-Pro（Agent 文本）",
+        "cost_hint": "Token Plan 2x（音频 payload 未开放）",
+    },
+    # Legacy MiMo Omni — keep for existing admin settings and audio fallback paths.
     "mimo_omni": {
         "api_model_id": "mimo-v2-omni",
         "provider": "mimo",
         "supports_audio": True,
         "api_key_env": "MIMO_API_KEY",
         "cost_rank": 1,
-        "label": "MiMo-V2-Omni（免费）",
-        "cost_hint": "免费",
+        "label": "MiMo-V2-Omni（旧版）",
+        "cost_hint": "旧版",
     },
 }
 
@@ -104,6 +140,7 @@ _DEFAULTS: dict[str, str] = {
     "pass3": "gemini_pro",
     "translate": "deepseek",
     "rewrite": "deepseek",
+    "rewrite_strict": "gemini_pro",
     "probe_translate": "deepseek",
 }
 

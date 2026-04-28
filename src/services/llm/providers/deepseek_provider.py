@@ -25,7 +25,7 @@ class DeepSeekProvider:
             env_var = self.config.api_key_env_var or "DEEPSEEK_API_KEY"
             raise LLMProviderError(f"DeepSeek API key is required via autodub.local.json or env {env_var}.")
 
-        base_url = (self.config.base_url or "https://api.deepseek.com/v1").rstrip("/")
+        base_url = (self.config.base_url or "https://api.deepseek.com").rstrip("/")
         payload: dict[str, Any] = {
             "model": model_name,
             "messages": [{"role": "user", "content": prompt}],
@@ -34,6 +34,8 @@ class DeepSeekProvider:
         }
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
+        if model_name.startswith("deepseek-v4-"):
+            payload["thinking"] = {"type": "disabled"}
 
         try:
             response = requests.post(

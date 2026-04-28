@@ -1,0 +1,270 @@
+{
+  "generated_at": "2026-04-27T11:51:09.259432+00:00",
+  "audit_batch": "reports/benchmark/speaker_attribution_audit_batch_20260427.json",
+  "review_model": "gemini_pro",
+  "summary": {
+    "candidates_loaded": 12,
+    "start": 92,
+    "limit": 12,
+    "chunks": 6,
+    "decisions": 12,
+    "errors": 0,
+    "decision_counts": {
+      "s2_speaker": 12
+    },
+    "recommended_action_counts": {
+      "keep": 12
+    }
+  },
+  "decisions": [
+    {
+      "candidate_id": "job_b98bdc65841f4254bdc2a410eb6e0939_cand_002",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly matches the interviewer's voice."
+    },
+    {
+      "candidate_id": "job_b98bdc65841f4254bdc2a410eb6e0939_cand_003",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly matches the interviewer's voice."
+    },
+    {
+      "candidate_id": "job_b98bdc65841f4254bdc2a410eb6e0939_cand_004",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "Clear backchannel 'Yeah' from the interviewer (Speaker A)."
+    },
+    {
+      "candidate_id": "job_b98bdc65841f4254bdc2a410eb6e0939_cand_005",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "Clear backchannel 'Yeah, yeah' from the interviewer (Speaker A)."
+    },
+    {
+      "candidate_id": "job_b98bdc65841f4254bdc2a410eb6e0939_cand_006",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly matches the interviewer's voice responding to the guest."
+    },
+    {
+      "candidate_id": "job_48a6013c9782424aa424ae8803480b41_cand_001",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly matches the interviewer asking a follow-up question."
+    },
+    {
+      "candidate_id": "job_48a6013c9782424aa424ae8803480b41_cand_002",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly features the interviewer asking the question, matching the assigned speaker."
+    },
+    {
+      "candidate_id": "job_48a6013c9782424aa424ae8803480b41_cand_003",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly features the interviewer asking the question, matching the assigned speaker."
+    },
+    {
+      "candidate_id": "job_48a6013c9782424aa424ae8803480b41_cand_004",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly matches the interviewer's voice asking a question."
+    },
+    {
+      "candidate_id": "job_48a6013c9782424aa424ae8803480b41_cand_005",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly matches the interviewer's voice commenting on the photo."
+    },
+    {
+      "candidate_id": "job_48a6013c9782424aa424ae8803480b41_cand_006",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly features a female interviewer interjecting, which matches the assigned speaker."
+    },
+    {
+      "candidate_id": "job_2f3f66698b294bdd9025aab28b2adac7_cand_001",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly features a female interviewer saying 'Right', which matches the assigned speaker."
+    }
+  ],
+  "errors": [],
+  "responses": [
+    {
+      "model": "gemini_pro",
+      "model_id": "gemini-3.1-pro-preview",
+      "candidate_ids": [
+        "job_b98bdc65841f4254bdc2a410eb6e0939_cand_002",
+        "job_b98bdc65841f4254bdc2a410eb6e0939_cand_003"
+      ],
+      "raw_text": "{\n  \"decisions\": [\n    {\n      \"candidate_id\": \"job_b98bdc65841f4254bdc2a410eb6e0939_cand_002\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly matches the interviewer's voice.\"\n    },\n    {\n      \"candidate_id\": \"job_b98bdc65841f4254bdc2a410eb6e0939_cand_003\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly matches the interviewer's voice.\"\n    }\n  ]\n}",
+      "parsed": {
+        "decisions": [
+          {
+            "candidate_id": "job_b98bdc65841f4254bdc2a410eb6e0939_cand_002",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly matches the interviewer's voice."
+          },
+          {
+            "candidate_id": "job_b98bdc65841f4254bdc2a410eb6e0939_cand_003",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly matches the interviewer's voice."
+          }
+        ]
+      }
+    },
+    {
+      "model": "gemini_pro",
+      "model_id": "gemini-3.1-pro-preview",
+      "candidate_ids": [
+        "job_b98bdc65841f4254bdc2a410eb6e0939_cand_004",
+        "job_b98bdc65841f4254bdc2a410eb6e0939_cand_005"
+      ],
+      "raw_text": "{\n  \"decisions\": [\n    {\n      \"candidate_id\": \"job_b98bdc65841f4254bdc2a410eb6e0939_cand_004\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"Clear backchannel 'Yeah' from the interviewer (Speaker A).\"\n    },\n    {\n      \"candidate_id\": \"job_b98bdc65841f4254bdc2a410eb6e0939_cand_005\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"Clear backchannel 'Yeah, yeah' from the interviewer (Speaker A).\"\n    }\n  ]\n}",
+      "parsed": {
+        "decisions": [
+          {
+            "candidate_id": "job_b98bdc65841f4254bdc2a410eb6e0939_cand_004",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "Clear backchannel 'Yeah' from the interviewer (Speaker A)."
+          },
+          {
+            "candidate_id": "job_b98bdc65841f4254bdc2a410eb6e0939_cand_005",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "Clear backchannel 'Yeah, yeah' from the interviewer (Speaker A)."
+          }
+        ]
+      }
+    },
+    {
+      "model": "gemini_pro",
+      "model_id": "gemini-3.1-pro-preview",
+      "candidate_ids": [
+        "job_b98bdc65841f4254bdc2a410eb6e0939_cand_006",
+        "job_48a6013c9782424aa424ae8803480b41_cand_001"
+      ],
+      "raw_text": "{\n  \"decisions\": [\n    {\n      \"candidate_id\": \"job_b98bdc65841f4254bdc2a410eb6e0939_cand_006\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly matches the interviewer's voice responding to the guest.\"\n    },\n    {\n      \"candidate_id\": \"job_48a6013c9782424aa424ae8803480b41_cand_001\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly matches the interviewer asking a follow-up question.\"\n    }\n  ]\n}",
+      "parsed": {
+        "decisions": [
+          {
+            "candidate_id": "job_b98bdc65841f4254bdc2a410eb6e0939_cand_006",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly matches the interviewer's voice responding to the guest."
+          },
+          {
+            "candidate_id": "job_48a6013c9782424aa424ae8803480b41_cand_001",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly matches the interviewer asking a follow-up question."
+          }
+        ]
+      }
+    },
+    {
+      "model": "gemini_pro",
+      "model_id": "gemini-3.1-pro-preview",
+      "candidate_ids": [
+        "job_48a6013c9782424aa424ae8803480b41_cand_002",
+        "job_48a6013c9782424aa424ae8803480b41_cand_003"
+      ],
+      "raw_text": "{\n  \"decisions\": [\n    {\n      \"candidate_id\": \"job_48a6013c9782424aa424ae8803480b41_cand_002\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly features the interviewer asking the question, matching the assigned speaker.\"\n    },\n    {\n      \"candidate_id\": \"job_48a6013c9782424aa424ae8803480b41_cand_003\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly features the interviewer asking the question, matching the assigned speaker.\"\n    }\n  ]\n}",
+      "parsed": {
+        "decisions": [
+          {
+            "candidate_id": "job_48a6013c9782424aa424ae8803480b41_cand_002",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly features the interviewer asking the question, matching the assigned speaker."
+          },
+          {
+            "candidate_id": "job_48a6013c9782424aa424ae8803480b41_cand_003",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly features the interviewer asking the question, matching the assigned speaker."
+          }
+        ]
+      }
+    },
+    {
+      "model": "gemini_pro",
+      "model_id": "gemini-3.1-pro-preview",
+      "candidate_ids": [
+        "job_48a6013c9782424aa424ae8803480b41_cand_004",
+        "job_48a6013c9782424aa424ae8803480b41_cand_005"
+      ],
+      "raw_text": "{\n  \"decisions\": [\n    {\n      \"candidate_id\": \"job_48a6013c9782424aa424ae8803480b41_cand_004\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly matches the interviewer's voice asking a question.\"\n    },\n    {\n      \"candidate_id\": \"job_48a6013c9782424aa424ae8803480b41_cand_005\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly matches the interviewer's voice commenting on the photo.\"\n    }\n  ]\n}",
+      "parsed": {
+        "decisions": [
+          {
+            "candidate_id": "job_48a6013c9782424aa424ae8803480b41_cand_004",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly matches the interviewer's voice asking a question."
+          },
+          {
+            "candidate_id": "job_48a6013c9782424aa424ae8803480b41_cand_005",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly matches the interviewer's voice commenting on the photo."
+          }
+        ]
+      }
+    },
+    {
+      "model": "gemini_pro",
+      "model_id": "gemini-3.1-pro-preview",
+      "candidate_ids": [
+        "job_48a6013c9782424aa424ae8803480b41_cand_006",
+        "job_2f3f66698b294bdd9025aab28b2adac7_cand_001"
+      ],
+      "raw_text": "{\n  \"decisions\": [\n    {\n      \"candidate_id\": \"job_48a6013c9782424aa424ae8803480b41_cand_006\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly features a female interviewer interjecting, which matches the assigned speaker.\"\n    },\n    {\n      \"candidate_id\": \"job_2f3f66698b294bdd9025aab28b2adac7_cand_001\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly features a female interviewer saying 'Right', which matches the assigned speaker.\"\n    }\n  ]\n}",
+      "parsed": {
+        "decisions": [
+          {
+            "candidate_id": "job_48a6013c9782424aa424ae8803480b41_cand_006",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly features a female interviewer interjecting, which matches the assigned speaker."
+          },
+          {
+            "candidate_id": "job_2f3f66698b294bdd9025aab28b2adac7_cand_001",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly features a female interviewer saying 'Right', which matches the assigned speaker."
+          }
+        ]
+      }
+    }
+  ]
+}

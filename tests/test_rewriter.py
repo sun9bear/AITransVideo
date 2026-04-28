@@ -155,6 +155,40 @@ def test_rewriter_uses_s5_rewrite_fallback_route_when_router_is_available() -> N
     assert captured["json_mode"] is False
 
 
+def test_rewriter_short_content_compact_uses_dedicated_task_and_prompt() -> None:
+    translator = _build_translator()
+    rewriter = GeminiRewriter(translator, chars_per_second=4.5)
+    captured: dict[str, object] = {}
+
+    def fake_call(task: str, prompt: str, *, json_mode: bool = False) -> str:
+        captured["task"] = task
+        captured["json_mode"] = json_mode
+        captured["prompt"] = prompt
+        return "现在还建议买股票吗"
+
+    translator._call_task_with_fallback = fake_call  # type: ignore[method-assign]
+
+    rewritten = rewriter.rewrite_short_content_compact(
+        "您现在还会重复那句话吗？如果麻烦要来了，您还会建议现在买入股票吗？",
+        source_text=(
+            "Would you repeat that this time? If trouble's coming, "
+            "would you still say buy stocks right now?"
+        ),
+        target_duration_ms=3_145,
+        target_lower_chars=8,
+        target_upper_chars=13,
+    )
+
+    assert rewritten == "现在还建议买股票吗"
+    assert captured["task"] == "s5_short_content_compact"
+    assert captured["json_mode"] is False
+    prompt = str(captured["prompt"])
+    assert "口播压缩" in prompt
+    assert "目标 spoken chars：8~13" in prompt
+    assert "多个连续问题可合并为一个核心问题" in prompt
+    assert "Would you repeat that this time?" in prompt
+
+
 def test_rewriter_prefers_speaker_specific_chars_per_second() -> None:
     translator = _build_translator()
     rewriter = GeminiRewriter(
@@ -252,3 +286,30 @@ def test_rewriter_prompt_includes_directional_bounds() -> None:
 
     assert "40~48" in prompt
     assert "88%~108%" in prompt
+
+
+def test_rewriter_profile_uses_explicit_char_bounds() -> None:
+    translator = _build_translator()
+    rewriter = GeminiRewriter(translator, chars_per_second=4.5)
+    captured: dict[str, str] = {}
+
+    def fake_call(task: str, prompt: str, *, json_mode: bool = False) -> str:
+        del task, json_mode
+        captured["prompt"] = prompt
+        return "改写后的中文文本"
+
+    translator._call_task_with_fallback = fake_call  # type: ignore[method-assign]
+
+    rewritten = rewriter.rewrite_for_duration_with_profile(
+        "需要压缩的中文文本",
+        actual_duration_ms=26_000,
+        target_duration_ms=20_000,
+        preferred_min_ratio=1.0,
+        preferred_max_ratio=1.12,
+        target_lower_chars=90,
+        target_upper_chars=101,
+    )
+
+    assert rewritten == "改写后的中文文本"
+    assert "90~101" in captured["prompt"]
+    assert "spoken chars" in captured["prompt"]

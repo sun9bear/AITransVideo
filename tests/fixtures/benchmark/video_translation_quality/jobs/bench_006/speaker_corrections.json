@@ -1,0 +1,60 @@
+{
+  "corrections": [
+    {
+      "phase": "original_to_after_corrections",
+      "position": null,
+      "before_speaker_id": "speaker_b",
+      "after_speaker_id": "speaker_a",
+      "start_ms": 560,
+      "end_ms": 7040,
+      "duration_ms": 6480,
+      "source_text": {
+        "snippet": "I think another thing you've said is whatever you are, um, wealth and age will make you more so.",
+        "chars": 96,
+        "truncated": false
+      }
+    },
+    {
+      "phase": "original_to_after_corrections",
+      "position": null,
+      "before_speaker_id": "speaker_b",
+      "after_speaker_id": "speaker_a",
+      "start_ms": 99670,
+      "end_ms": 105800,
+      "duration_ms": 6130,
+      "source_text": {
+        "snippet": "You're pretty active, you've got a busy social schedule. You're on zoom. You have breakfasts and lunch. Well I just like it",
+        "chars": 123,
+        "truncated": false
+      }
+    },
+    {
+      "phase": "after_corrections_to_after_sanity",
+      "position": 0,
+      "before_speaker_id": "speaker_a",
+      "after_speaker_id": "speaker_b",
+      "start_ms": 560,
+      "end_ms": 7040,
+      "duration_ms": 6480,
+      "source_text": {
+        "snippet": "I think another thing you've said is whatever you are, um, wealth and age will make you more so.",
+        "chars": 96,
+        "truncated": false
+      }
+    },
+    {
+      "phase": "after_corrections_to_after_sanity",
+      "position": 7,
+      "before_speaker_id": "speaker_a",
+      "after_speaker_id": "speaker_b",
+      "start_ms": 99670,
+      "end_ms": 105800,
+      "duration_ms": 6130,
+      "source_text": {
+        "snippet": "You're pretty active, you've got a busy social schedule. You're on zoom. You have breakfasts and lunch. Well I just like it",
+        "chars": 123,
+        "truncated": false
+      }
+    }
+  ]
+}

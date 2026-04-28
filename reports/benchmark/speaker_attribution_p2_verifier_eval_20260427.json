@@ -1,0 +1,582 @@
+{
+  "generated_at": "2026-04-27T14:28:42.894148+00:00",
+  "audit_batch": "reports/benchmark/speaker_attribution_audit_batch_20260427.json",
+  "judgement_files": [
+    "reports/benchmark/speaker_attribution_audit_judged_part10_20260427.json",
+    "reports/benchmark/speaker_attribution_audit_judged_part2_20260427.json",
+    "reports/benchmark/speaker_attribution_audit_judged_part3_20260427.json",
+    "reports/benchmark/speaker_attribution_audit_judged_part3a_20260427.json",
+    "reports/benchmark/speaker_attribution_audit_judged_part4a_20260427.json",
+    "reports/benchmark/speaker_attribution_audit_judged_part5_20260427.json",
+    "reports/benchmark/speaker_attribution_audit_judged_part6_20260427.json",
+    "reports/benchmark/speaker_attribution_audit_judged_part7_20260427.json",
+    "reports/benchmark/speaker_attribution_audit_judged_part8_20260427.json",
+    "reports/benchmark/speaker_attribution_audit_judged_part9_20260427.json",
+    "reports/benchmark/speaker_attribution_audit_judged_smoke_20260427.json"
+  ],
+  "parts": [
+    {
+      "file": "reports/benchmark/speaker_attribution_audit_judged_part10_20260427.json",
+      "summary": {
+        "candidates_loaded": 11,
+        "start": 104,
+        "limit": 20,
+        "chunks": 6,
+        "decisions": 11,
+        "errors": 0,
+        "decision_counts": {
+          "s2_speaker": 8,
+          "distinct_speaker": 3
+        },
+        "recommended_action_counts": {
+          "keep": 11
+        }
+      }
+    },
+    {
+      "file": "reports/benchmark/speaker_attribution_audit_judged_part2_20260427.json",
+      "summary": {
+        "candidates_loaded": 12,
+        "start": 8,
+        "limit": 12,
+        "chunks": 4,
+        "decisions": 12,
+        "errors": 0,
+        "decision_counts": {
+          "s2_speaker": 8,
+          "distinct_speaker": 3,
+          "music_or_non_speech": 1
+        },
+        "recommended_action_counts": {
+          "keep": 10,
+          "mark_non_speech": 1,
+          "mark_review": 1
+        }
+      }
+    },
+    {
+      "file": "reports/benchmark/speaker_attribution_audit_judged_part3_20260427.json",
+      "summary": {
+        "candidates_loaded": 24,
+        "start": 20,
+        "limit": 24,
+        "chunks": 8,
+        "decisions": 24,
+        "errors": 0,
+        "decision_counts": {
+          "s2_speaker": 13,
+          "asr_speaker": 5,
+          "distinct_speaker": 5,
+          "main_speaker": 1
+        },
+        "recommended_action_counts": {
+          "keep": 23,
+          "reassign_to_main": 1
+        }
+      }
+    },
+    {
+      "file": "reports/benchmark/speaker_attribution_audit_judged_part3a_20260427.json",
+      "summary": {
+        "candidates_loaded": 6,
+        "start": 20,
+        "limit": 6,
+        "chunks": 3,
+        "decisions": 6,
+        "errors": 0,
+        "decision_counts": {
+          "s2_speaker": 4,
+          "distinct_speaker": 2
+        },
+        "recommended_action_counts": {
+          "keep": 6
+        }
+      }
+    },
+    {
+      "file": "reports/benchmark/speaker_attribution_audit_judged_part4a_20260427.json",
+      "summary": {
+        "candidates_loaded": 6,
+        "start": 26,
+        "limit": 6,
+        "chunks": 3,
+        "decisions": 6,
+        "errors": 0,
+        "decision_counts": {
+          "s2_speaker": 3,
+          "distinct_speaker": 2,
+          "main_speaker": 1
+        },
+        "recommended_action_counts": {
+          "keep": 5,
+          "reassign_to_main": 1
+        }
+      }
+    },
+    {
+      "file": "reports/benchmark/speaker_attribution_audit_judged_part5_20260427.json",
+      "summary": {
+        "candidates_loaded": 12,
+        "start": 44,
+        "limit": 12,
+        "chunks": 6,
+        "decisions": 12,
+        "errors": 0,
+        "decision_counts": {
+          "asr_speaker": 6,
+          "distinct_speaker": 4,
+          "main_speaker": 1,
+          "s2_speaker": 1
+        },
+        "recommended_action_counts": {
+          "keep": 11,
+          "reassign_to_main": 1
+        }
+      }
+    },
+    {
+      "file": "reports/benchmark/speaker_attribution_audit_judged_part6_20260427.json",
+      "summary": {
+        "candidates_loaded": 12,
+        "start": 56,
+        "limit": 12,
+        "chunks": 6,
+        "decisions": 12,
+        "errors": 0,
+        "decision_counts": {
+          "distinct_speaker": 10,
+          "s2_speaker": 2
+        },
+        "recommended_action_counts": {
+          "keep": 12
+        }
+      }
+    },
+    {
+      "file": "reports/benchmark/speaker_attribution_audit_judged_part7_20260427.json",
+      "summary": {
+        "candidates_loaded": 12,
+        "start": 68,
+        "limit": 12,
+        "chunks": 6,
+        "decisions": 12,
+        "errors": 0,
+        "decision_counts": {
+          "s2_speaker": 8,
+          "distinct_speaker": 4
+        },
+        "recommended_action_counts": {
+          "keep": 12
+        }
+      }
+    },
+    {
+      "file": "reports/benchmark/speaker_attribution_audit_judged_part8_20260427.json",
+      "summary": {
+        "candidates_loaded": 12,
+        "start": 80,
+        "limit": 12,
+        "chunks": 6,
+        "decisions": 12,
+        "errors": 0,
+        "decision_counts": {
+          "s2_speaker": 8,
+          "distinct_speaker": 4
+        },
+        "recommended_action_counts": {
+          "keep": 12
+        }
+      }
+    },
+    {
+      "file": "reports/benchmark/speaker_attribution_audit_judged_part9_20260427.json",
+      "summary": {
+        "candidates_loaded": 12,
+        "start": 92,
+        "limit": 12,
+        "chunks": 6,
+        "decisions": 12,
+        "errors": 0,
+        "decision_counts": {
+          "s2_speaker": 12
+        },
+        "recommended_action_counts": {
+          "keep": 12
+        }
+      }
+    },
+    {
+      "file": "reports/benchmark/speaker_attribution_audit_judged_smoke_20260427.json",
+      "summary": {
+        "candidates_loaded": 8,
+        "chunks": 2,
+        "decisions": 8,
+        "decision_counts": {
+          "music_or_non_speech": 4,
+          "distinct_speaker": 3,
+          "asr_speaker": 1
+        },
+        "recommended_action_counts": {
+          "mark_non_speech": 4,
+          "keep": 4
+        }
+      }
+    }
+  ],
+  "summary": {
+    "audit_candidates": 115,
+    "judged_unique_candidates": 115,
+    "coverage_pct": 100.0,
+    "decision_counts": {
+      "s2_speaker": 60,
+      "distinct_speaker": 36,
+      "asr_speaker": 12,
+      "music_or_non_speech": 5,
+      "main_speaker": 2
+    },
+    "recommended_action_counts": {
+      "keep": 107,
+      "mark_non_speech": 5,
+      "reassign_to_main": 2,
+      "mark_review": 1
+    },
+    "jobs_covered": 21,
+    "job_counts": {
+      "job_2f3f66698b294bdd9025aab28b2adac7": 6,
+      "job_b8a76a5a8ab64c03a4478602c45b6032": 6,
+      "job_fe50b1a0743d4585ba06ebf9cfb476bd": 6,
+      "job_8d78c2685351464192b41828c2cda049": 6,
+      "job_2439b210fc104f5f926a5d4f53e7e572": 6,
+      "job_650a4d40b8eb423bb5307f3fe6d52acd": 6,
+      "job_3066774da2a64848b2f4d1d2824e022b": 6,
+      "job_f08cabc1267642b98a9d774a9e2a5da4": 6,
+      "job_b96b20d250934c1caa58d0923b320a4f": 6,
+      "job_925ad5833c764d2ab386281b58a6c18f": 6,
+      "job_ce814b8cdc2242d7b72764b2f0b72dd4": 6,
+      "job_67009391e2d1425eb52728aca4995130": 6,
+      "job_abb3fedc905c403db67d784c480c170e": 6,
+      "job_d3ca1fb8bf0b42efb906be716ac6995c": 6,
+      "job_b98bdc65841f4254bdc2a410eb6e0939": 6,
+      "job_48a6013c9782424aa424ae8803480b41": 6,
+      "job_524c5253ad514692bcc06aa170f9567f": 6,
+      "job_7e12f5f49ed04b9b8bc3d1a003b61290": 4,
+      "job_198ffd877c4044869b2f0db988c424fe": 4,
+      "job_6940aeac0c7b442f809ef8fa1925302f": 3,
+      "job_730e7195e9c04ed9906d744f62f2986e": 2
+    },
+    "non_keep_count": 8,
+    "non_keep_pct": 7.0,
+    "duplicate_decisions_ignored": 12,
+    "unknown_candidate_decisions": 0,
+    "judge_errors": 0
+  },
+  "go_no_go": {
+    "broad_low_support_auto_merge": {
+      "decision": "NO_GO",
+      "reason": "93.0% of judged candidates were keep, and only 1.7% were main_speaker."
+    },
+    "verifier_gated_main_reassignment": {
+      "decision": "CAUTIOUS_GO",
+      "reason": "Allow only medium/high-confidence local audio verifier main_speaker decisions; observed count=2."
+    },
+    "non_speech_profile_marking": {
+      "decision": "GO",
+      "reason": "Use high-confidence music/non-speech decisions to mark complete low-support non-dialogue speakers; observed count=5."
+    },
+    "phrase_or_title_specific_rules": {
+      "decision": "NO_GO",
+      "reason": "Judged failures span mixed presenter, host, audience, music, and guest cases."
+    }
+  },
+  "reason_action_counts": {
+    "audience_unknown_or_non_speech_profile": {
+      "keep": 33,
+      "mark_non_speech": 3,
+      "mark_review": 1
+    },
+    "duplicate_source_group": {
+      "keep": 61,
+      "mark_non_speech": 5,
+      "mark_review": 1,
+      "reassign_to_main": 1
+    },
+    "force_dsp": {
+      "keep": 90,
+      "mark_non_speech": 4,
+      "reassign_to_main": 2,
+      "mark_review": 1
+    },
+    "fragmented_speaker": {
+      "keep": 6,
+      "mark_non_speech": 5
+    },
+    "incidental_speaker": {
+      "keep": 1
+    },
+    "long_low_support_segment": {
+      "keep": 17,
+      "mark_non_speech": 5,
+      "mark_review": 1
+    },
+    "low_duration_share": {
+      "keep": 34,
+      "mark_non_speech": 4,
+      "reassign_to_main": 2
+    },
+    "low_segment_count": {
+      "keep": 14,
+      "reassign_to_main": 1
+    },
+    "needs_review": {
+      "keep": 36,
+      "mark_non_speech": 4,
+      "reassign_to_main": 2,
+      "mark_review": 1
+    },
+    "non_primary_speaker": {
+      "keep": 107,
+      "mark_non_speech": 5,
+      "reassign_to_main": 2,
+      "mark_review": 1
+    },
+    "short_interaction": {
+      "keep": 88,
+      "reassign_to_main": 1
+    }
+  },
+  "reason_decision_counts": {
+    "audience_unknown_or_non_speech_profile": {
+      "distinct_speaker": 19,
+      "s2_speaker": 15,
+      "music_or_non_speech": 3
+    },
+    "duplicate_source_group": {
+      "distinct_speaker": 30,
+      "s2_speaker": 26,
+      "asr_speaker": 6,
+      "music_or_non_speech": 5,
+      "main_speaker": 1
+    },
+    "force_dsp": {
+      "s2_speaker": 58,
+      "distinct_speaker": 21,
+      "asr_speaker": 12,
+      "music_or_non_speech": 4,
+      "main_speaker": 2
+    },
+    "fragmented_speaker": {
+      "music_or_non_speech": 5,
+      "s2_speaker": 3,
+      "distinct_speaker": 2,
+      "asr_speaker": 1
+    },
+    "incidental_speaker": {
+      "distinct_speaker": 1
+    },
+    "long_low_support_segment": {
+      "distinct_speaker": 15,
+      "music_or_non_speech": 5,
+      "s2_speaker": 2,
+      "asr_speaker": 1
+    },
+    "low_duration_share": {
+      "distinct_speaker": 21,
+      "s2_speaker": 7,
+      "asr_speaker": 6,
+      "music_or_non_speech": 4,
+      "main_speaker": 2
+    },
+    "low_segment_count": {
+      "distinct_speaker": 12,
+      "s2_speaker": 2,
+      "main_speaker": 1
+    },
+    "needs_review": {
+      "s2_speaker": 27,
+      "distinct_speaker": 7,
+      "music_or_non_speech": 4,
+      "asr_speaker": 3,
+      "main_speaker": 2
+    },
+    "non_primary_speaker": {
+      "s2_speaker": 60,
+      "distinct_speaker": 36,
+      "asr_speaker": 12,
+      "music_or_non_speech": 5,
+      "main_speaker": 2
+    },
+    "short_interaction": {
+      "s2_speaker": 57,
+      "distinct_speaker": 20,
+      "asr_speaker": 11,
+      "main_speaker": 1
+    }
+  },
+  "non_keep_decisions": [
+    {
+      "candidate_id": "job_2439b210fc104f5f926a5d4f53e7e572_cand_001",
+      "job_id": "job_2439b210fc104f5f926a5d4f53e7e572",
+      "segment_id": 33,
+      "assigned_speaker_id": "speaker_c",
+      "assigned_display_name": "未知说话人1",
+      "duration_ms": 9981,
+      "reasons": [
+        "non_primary_speaker",
+        "audience_unknown_or_non_speech_profile",
+        "long_low_support_segment",
+        "force_dsp",
+        "needs_review",
+        "duplicate_source_group"
+      ],
+      "decision": "distinct_speaker",
+      "confidence": "high",
+      "recommended_action": "mark_review",
+      "reason": "The speaker is clearly the interviewer (Joe Rogan), but is assigned to an 'unknown speaker' profile. It should likely be merged with speaker_a."
+    },
+    {
+      "candidate_id": "job_524c5253ad514692bcc06aa170f9567f_cand_004",
+      "job_id": "job_524c5253ad514692bcc06aa170f9567f",
+      "segment_id": 82,
+      "assigned_speaker_id": "speaker_c",
+      "assigned_display_name": "未知说话人1",
+      "duration_ms": 22899,
+      "reasons": [
+        "non_primary_speaker",
+        "fragmented_speaker",
+        "low_duration_share",
+        "audience_unknown_or_non_speech_profile",
+        "long_low_support_segment",
+        "duplicate_source_group"
+      ],
+      "decision": "music_or_non_speech",
+      "confidence": "high",
+      "recommended_action": "mark_non_speech",
+      "reason": "The audio is a background song playing, not a speaker."
+    },
+    {
+      "candidate_id": "job_524c5253ad514692bcc06aa170f9567f_cand_001",
+      "job_id": "job_524c5253ad514692bcc06aa170f9567f",
+      "segment_id": 87,
+      "assigned_speaker_id": "speaker_c",
+      "assigned_display_name": "未知说话人1",
+      "duration_ms": 14907,
+      "reasons": [
+        "non_primary_speaker",
+        "fragmented_speaker",
+        "low_duration_share",
+        "audience_unknown_or_non_speech_profile",
+        "long_low_support_segment",
+        "force_dsp",
+        "needs_review",
+        "duplicate_source_group"
+      ],
+      "decision": "music_or_non_speech",
+      "confidence": "high",
+      "recommended_action": "mark_non_speech",
+      "reason": "The audio is a background song playing, not a speaker."
+    },
+    {
+      "candidate_id": "job_524c5253ad514692bcc06aa170f9567f_cand_003",
+      "job_id": "job_524c5253ad514692bcc06aa170f9567f",
+      "segment_id": 101,
+      "assigned_speaker_id": "speaker_d",
+      "assigned_display_name": "致辞嘉宾",
+      "duration_ms": 17472,
+      "reasons": [
+        "non_primary_speaker",
+        "fragmented_speaker",
+        "low_duration_share",
+        "long_low_support_segment",
+        "force_dsp",
+        "needs_review",
+        "duplicate_source_group"
+      ],
+      "decision": "music_or_non_speech",
+      "confidence": "high",
+      "recommended_action": "mark_non_speech",
+      "reason": "The audio consists of crowd chanting and cheering, not a distinct speaker."
+    },
+    {
+      "candidate_id": "job_650a4d40b8eb423bb5307f3fe6d52acd_cand_004",
+      "job_id": "job_650a4d40b8eb423bb5307f3fe6d52acd",
+      "segment_id": 19,
+      "assigned_speaker_id": "speaker_a",
+      "assigned_display_name": "乔·罗根",
+      "duration_ms": 1940,
+      "reasons": [
+        "non_primary_speaker",
+        "low_duration_share",
+        "short_interaction",
+        "force_dsp",
+        "needs_review",
+        "duplicate_source_group"
+      ],
+      "decision": "main_speaker",
+      "confidence": "high",
+      "recommended_action": "reassign_to_main",
+      "reason": "The voice saying 'Uh, again, trite, right?' is clearly the main speaker (Naval Ravikant), continuing his previous thought."
+    },
+    {
+      "candidate_id": "job_730e7195e9c04ed9906d744f62f2986e_cand_002",
+      "job_id": "job_730e7195e9c04ed9906d744f62f2986e",
+      "segment_id": 111,
+      "assigned_speaker_id": "speaker_audience",
+      "assigned_display_name": "马特·亚伯拉罕斯",
+      "duration_ms": 4246,
+      "reasons": [
+        "non_primary_speaker",
+        "low_duration_share",
+        "low_segment_count",
+        "force_dsp",
+        "needs_review"
+      ],
+      "decision": "main_speaker",
+      "confidence": "high",
+      "recommended_action": "reassign_to_main",
+      "reason": "The text 'My book...' is spoken by the main speaker in response to an audience member shouting 'Your book'."
+    },
+    {
+      "candidate_id": "job_fe50b1a0743d4585ba06ebf9cfb476bd_cand_001",
+      "job_id": "job_fe50b1a0743d4585ba06ebf9cfb476bd",
+      "segment_id": 87,
+      "assigned_speaker_id": "speaker_d",
+      "assigned_display_name": "背景音乐",
+      "duration_ms": 14907,
+      "reasons": [
+        "non_primary_speaker",
+        "fragmented_speaker",
+        "low_duration_share",
+        "audience_unknown_or_non_speech_profile",
+        "long_low_support_segment",
+        "force_dsp",
+        "needs_review",
+        "duplicate_source_group"
+      ],
+      "decision": "music_or_non_speech",
+      "confidence": "high",
+      "recommended_action": "mark_non_speech",
+      "reason": "The audio is a song playing in the background, not spoken dialogue."
+    },
+    {
+      "candidate_id": "job_fe50b1a0743d4585ba06ebf9cfb476bd_cand_005",
+      "job_id": "job_fe50b1a0743d4585ba06ebf9cfb476bd",
+      "segment_id": 100,
+      "assigned_speaker_id": "speaker_a",
+      "assigned_display_name": "男主持人",
+      "duration_ms": 17472,
+      "reasons": [
+        "non_primary_speaker",
+        "fragmented_speaker",
+        "long_low_support_segment",
+        "force_dsp",
+        "needs_review",
+        "duplicate_source_group"
+      ],
+      "decision": "music_or_non_speech",
+      "confidence": "high",
+      "recommended_action": "mark_non_speech",
+      "reason": "The audio consists of a crowd chanting and cheering, not the assigned speaker."
+    }
+  ],
+  "errors": []
+}

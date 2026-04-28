@@ -9,6 +9,9 @@ ALIGNMENT_METHOD_LABELS = {
     "rewrite_direct": "Gemini重写后直接使用",
     "rewrite_dsp": "Gemini重写后DSP对齐",
     "force_dsp": "强制DSP兜底",
+    "capped_dsp_overflow": "短段听感保护DSP",
+    "capped_dsp_underflow": "限速DSP并补静音",
+    "keep_original": "保留原音",
 }
 
 
@@ -25,6 +28,7 @@ class AlignedSegment:
     actual_duration_ms: int
     alignment_method: str
     needs_review: bool
+    dubbing_mode: str = "dub"
 
 
 @dataclass(slots=True)

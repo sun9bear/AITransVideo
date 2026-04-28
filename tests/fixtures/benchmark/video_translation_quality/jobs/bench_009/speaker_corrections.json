@@ -1,0 +1,18 @@
+{
+  "corrections": [
+    {
+      "phase": "original_to_after_corrections",
+      "position": 15,
+      "before_speaker_id": "speaker_b",
+      "after_speaker_id": "speaker_d",
+      "start_ms": 317780,
+      "end_ms": 327620,
+      "duration_ms": 9840,
+      "source_text": {
+        "snippet": "Thank you for watching. Subscribe below and download our News Nation app right now on your phone and you will get fact based, unbiased news for all Americans.",
+        "chars": 158,
+        "truncated": false
+      }
+    }
+  ]
+}

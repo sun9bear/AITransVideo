@@ -1,0 +1,138 @@
+{
+  "available": true,
+  "files": [
+    {
+      "path": "project_state.json",
+      "size_bytes": 4514,
+      "top_level_keys": [
+        "project_id",
+        "stages"
+      ]
+    },
+    {
+      "path": "review_state.json",
+      "size_bytes": 16232,
+      "top_level_keys": [
+        "active_stage",
+        "stages"
+      ]
+    },
+    {
+      "path": "transcript/s2_pass1_result.json",
+      "size_bytes": 1079,
+      "top_level_keys": [
+        "attempts_count",
+        "contract_violations",
+        "corrections",
+        "corrections_applied",
+        "duration_ms",
+        "fallback_used",
+        "generated_at",
+        "has_audio",
+        "parse_failures",
+        "pass",
+        "prompt_version",
+        "review_model",
+        "sanity_applied",
+        "skipped",
+        "speakers",
+        "success_attempt_label",
+        "success_attempt_model"
+      ]
+    },
+    {
+      "path": "transcript/s2_pass2_result.json",
+      "size_bytes": 2945,
+      "top_level_keys": [
+        "attempts_count",
+        "contract_violations",
+        "corrections",
+        "corrections_applied",
+        "duration_ms",
+        "fallback_used",
+        "generated_at",
+        "glossary",
+        "has_audio",
+        "parse_failures",
+        "pass",
+        "prompt_version",
+        "review_model",
+        "success_attempt_label",
+        "success_attempt_model"
+      ]
+    },
+    {
+      "path": "transcript/s2_pass3_result.json",
+      "size_bytes": 1773,
+      "top_level_keys": [
+        "attempts_count",
+        "clips_extracted",
+        "contract_violations",
+        "duration_ms",
+        "fallback_used",
+        "generated_at",
+        "has_audio",
+        "parse_failures",
+        "pass",
+        "prompt_version",
+        "review_model",
+        "speaker_profiles",
+        "success_attempt_label",
+        "success_attempt_model"
+      ]
+    },
+    {
+      "path": "transcript/s2_review_audit.json",
+      "size_bytes": 24,
+      "top_level_keys": [
+        "audit_events"
+      ],
+      "audit_summary": {}
+    },
+    {
+      "path": "transcript/s2_review_result.json",
+      "size_bytes": 3487,
+      "top_level_keys": [
+        "corrections_applied",
+        "glossary",
+        "has_audio",
+        "line_counts",
+        "raw_corrections",
+        "review_model",
+        "sanity_applied",
+        "speaker_names",
+        "speakers",
+        "version"
+      ]
+    },
+    {
+      "path": "transcript/s2_review_speaker_diff.json",
+      "size_bytes": 31811,
+      "top_level_keys": [
+        "line_counts",
+        "snapshots",
+        "speaker_diffs"
+      ]
+    },
+    {
+      "path": "transcript/transcript.json",
+      "size_bytes": 8245,
+      "top_level_keys": [
+        "language",
+        "lines",
+        "raw_response_path",
+        "structured_transcript_path",
+        "total_duration_ms"
+      ]
+    },
+    {
+      "path": "translation/segments.json",
+      "size_bytes": 20963,
+      "top_level_keys": [
+        "output_path",
+        "segments",
+        "total_segments"
+      ]
+    }
+  ]
+}

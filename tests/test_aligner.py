@@ -94,15 +94,204 @@ def test_aligner_uses_dsp_when_diff_is_within_dsp_threshold(tmp_path: Path) -> N
     _assert_jianying_wav_format(output_path)
 
 
-def test_aligner_uses_force_dsp_and_marks_review_when_diff_exceeds_threshold(tmp_path: Path) -> None:
+def test_aligner_uses_force_dsp_and_marks_review_when_diff_exceeds_threshold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     input_path = _export_tone_wav(tmp_path / "input" / "force.wav", duration_ms=10_000)
     segment = _build_segment(segment_id=1, audio_path=input_path, end_ms=6_000)
+    output_path = tmp_path / "aligned" / "segment_001_aligned.wav"
+    output_path.parent.mkdir(parents=True)
+    shutil.copyfile(input_path, output_path)
+    monkeypatch.setattr(SegmentAligner, "_dsp_stretch", lambda self, *_args, **_kwargs: str(output_path))
+    monkeypatch.setattr(aligner_module, "_measure_wav_duration_ms", lambda _path: 6_000)
 
     aligned = SegmentAligner()._align_one(segment, str(tmp_path / "aligned"))
 
     assert aligned.alignment_method == "force_dsp"
     assert aligned.needs_review is True
     assert Path(aligned.aligned_audio_path).exists()
+
+
+def test_aligner_short_force_dsp_backchannel_does_not_require_review(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = _export_tone_wav(tmp_path / "input" / "short_force.wav", duration_ms=1_200)
+    segment = _build_segment(segment_id=1, audio_path=input_path, end_ms=500)
+    segment.cn_text = "嗯，是的。"
+    output_path = tmp_path / "aligned" / "segment_001_aligned.wav"
+    output_path.parent.mkdir(parents=True)
+    shutil.copyfile(input_path, output_path)
+    monkeypatch.setattr(SegmentAligner, "_dsp_stretch", lambda self, *_args, **_kwargs: str(output_path))
+    monkeypatch.setattr(aligner_module, "_measure_wav_duration_ms", lambda _path: 500)
+
+    aligned = SegmentAligner(rewriter=None, tts_generator=None)._align_one(
+        segment,
+        str(tmp_path / "aligned"),
+    )
+
+    assert aligned.alignment_method == "capped_dsp_overflow"
+    assert aligned.needs_review is False
+    assert segment.needs_review is False
+    assert segment.force_dsp_severity == "low"
+    assert segment.force_dsp_review_suppressed is True
+    assert segment.force_dsp_review_reason == "short_backchannel"
+
+
+def test_aligner_caps_short_force_dsp_target_for_listenability(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = _export_tone_wav(tmp_path / "input" / "tiny_force.wav", duration_ms=2_400)
+    segment = _build_segment(segment_id=1, audio_path=input_path, end_ms=500)
+    segment.cn_text = "嗯，好。"
+    output_path = tmp_path / "aligned" / "segment_001_aligned.wav"
+    output_path.parent.mkdir(parents=True)
+    shutil.copyfile(input_path, output_path)
+    captured: dict[str, int] = {}
+
+    def fake_dsp(
+        self: SegmentAligner,
+        _input_path: str,
+        target_duration_ms: int,
+        _output_path: str,
+        **_kwargs: object,
+    ) -> str:
+        captured["target_duration_ms"] = target_duration_ms
+        return str(output_path)
+
+    monkeypatch.setattr(SegmentAligner, "_dsp_stretch", fake_dsp)
+    monkeypatch.setattr(aligner_module, "_measure_wav_duration_ms", lambda _path: 1_371)
+
+    aligned = SegmentAligner()._align_one(segment, str(tmp_path / "aligned"))
+
+    assert aligned.alignment_method == "capped_dsp_overflow"
+    assert captured["target_duration_ms"] == 1_371
+    assert aligned.actual_duration_ms == 1_371
+
+
+def test_aligner_short_force_dsp_long_text_still_requires_review(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = _export_tone_wav(tmp_path / "input" / "short_force_long_text.wav", duration_ms=1_200)
+    segment = _build_segment(segment_id=1, audio_path=input_path, end_ms=500)
+    segment.cn_text = "这是一个明显不是短反馈的完整句子，仍然需要人工检查，不能自动降噪。"
+    output_path = tmp_path / "aligned" / "segment_001_aligned.wav"
+    output_path.parent.mkdir(parents=True)
+    shutil.copyfile(input_path, output_path)
+    monkeypatch.setattr(SegmentAligner, "_dsp_stretch", lambda self, *_args, **_kwargs: str(output_path))
+    monkeypatch.setattr(aligner_module, "_measure_wav_duration_ms", lambda _path: 500)
+
+    aligned = SegmentAligner(rewriter=None, tts_generator=None)._align_one(
+        segment,
+        str(tmp_path / "aligned"),
+    )
+
+    assert aligned.alignment_method == "capped_dsp_overflow"
+    assert aligned.needs_review is True
+    assert segment.needs_review is True
+    assert segment.force_dsp_severity == "high"
+    assert segment.force_dsp_review_suppressed is False
+
+
+def test_aligner_two_second_force_dsp_backchannel_is_review_denoised(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = _export_tone_wav(tmp_path / "input" / "two_second_short_force.wav", duration_ms=4_200)
+    segment = _build_segment(segment_id=1, audio_path=input_path, end_ms=1_800)
+    segment.cn_text = "ok yes"
+    output_path = tmp_path / "aligned" / "segment_001_aligned.wav"
+    output_path.parent.mkdir(parents=True)
+    shutil.copyfile(input_path, output_path)
+    monkeypatch.setattr(SegmentAligner, "_dsp_stretch", lambda self, *_args, **_kwargs: str(output_path))
+    monkeypatch.setattr(aligner_module, "_measure_wav_duration_ms", lambda _path: 1_800)
+
+    aligned = SegmentAligner(rewriter=None, tts_generator=None)._align_one(
+        segment,
+        str(tmp_path / "aligned"),
+    )
+
+    assert aligned.alignment_method == "capped_dsp_overflow"
+    assert aligned.needs_review is False
+    assert segment.force_dsp_severity == "low"
+    assert segment.force_dsp_review_suppressed is True
+
+
+def test_aligner_two_to_five_second_force_dsp_keeps_review_with_medium_severity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = _export_tone_wav(tmp_path / "input" / "medium_short_force.wav", duration_ms=5_500)
+    segment = _build_segment(segment_id=1, audio_path=input_path, end_ms=3_000)
+    segment.cn_text = "short medium"
+    output_path = tmp_path / "aligned" / "segment_001_aligned.wav"
+    output_path.parent.mkdir(parents=True)
+    shutil.copyfile(input_path, output_path)
+    monkeypatch.setattr(SegmentAligner, "_dsp_stretch", lambda self, *_args, **_kwargs: str(output_path))
+    monkeypatch.setattr(aligner_module, "_measure_wav_duration_ms", lambda _path: 3_000)
+
+    aligned = SegmentAligner(rewriter=None, tts_generator=None)._align_one(
+        segment,
+        str(tmp_path / "aligned"),
+    )
+
+    assert aligned.alignment_method == "force_dsp"
+    assert aligned.needs_review is True
+    assert segment.force_dsp_severity == "medium"
+    assert segment.force_dsp_review_suppressed is False
+
+
+def test_aligner_marks_pre_tts_contradiction_after_first_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = _export_tone_wav(tmp_path / "input" / "short_after_pre_rewrite.wav", duration_ms=16_000)
+    segment = _build_segment(segment_id=1, audio_path=input_path, end_ms=20_000)
+    segment.pre_tts_rewrite_direction = "overshoot"
+    segment.pre_tts_estimate_ms = 26_666
+    segment.pre_tts_target_ms = 20_000
+    segment.pre_tts_pre_chars = 120
+    segment.pre_tts_post_chars = 80
+    output_path = tmp_path / "aligned" / "segment_001_aligned.wav"
+    output_path.parent.mkdir(parents=True)
+    shutil.copyfile(input_path, output_path)
+    monkeypatch.setattr(SegmentAligner, "_dsp_stretch", lambda self, *_args, **_kwargs: str(output_path))
+    monkeypatch.setattr(aligner_module, "_measure_wav_duration_ms", lambda _path: 16_000)
+
+    SegmentAligner()._align_one(segment, str(tmp_path / "aligned"))
+
+    assert segment.first_pass_duration_ms == 16_000
+    assert segment.pre_tts_post_tts_first_pass_ms == 16_000
+    assert segment.pre_tts_contradiction is True
+    assert segment.pre_tts_harmful_contradiction is True
+
+
+def test_aligner_marks_direct_pre_tts_contradiction_as_not_harmful(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = _export_tone_wav(tmp_path / "input" / "direct_after_pre_rewrite.wav", duration_ms=18_800)
+    segment = _build_segment(
+        segment_id=1,
+        audio_path=input_path,
+        end_ms=20_000,
+        actual_duration_ms=18_800,
+    )
+    segment.pre_tts_rewrite_direction = "overshoot"
+    segment.pre_tts_estimate_ms = 26_666
+    segment.pre_tts_target_ms = 20_000
+    segment.pre_tts_pre_chars = 120
+    segment.pre_tts_post_chars = 88
+    monkeypatch.setattr(aligner_module, "_measure_wav_duration_ms", lambda _path: 18_800)
+
+    aligned = SegmentAligner()._align_one(segment, str(tmp_path / "aligned"))
+
+    assert aligned.alignment_method == "direct"
+    assert segment.pre_tts_contradiction is True
+    assert segment.pre_tts_harmful_contradiction is False
 
 
 def test_aligner_supports_slowdown_when_tts_is_shorter_than_target(tmp_path: Path) -> None:
@@ -148,32 +337,70 @@ def test_aligner_surfaces_missing_ffmpeg(tmp_path: Path, monkeypatch: pytest.Mon
         SegmentAligner()._align_one(segment, str(tmp_path / "aligned"))
 
 
-def test_aligner_builds_chained_atempo_filter_for_extreme_ratio(
+def test_aligner_caps_extreme_underflow_dsp_and_pads_silence(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     input_path = _export_tone_wav(tmp_path / "input" / "extreme.wav", duration_ms=1_000)
-    captured_commands: list[list[str]] = []
+    aligner = SegmentAligner()
 
-    def fake_run(command: list[str], capture_output: bool, text: bool, check: bool) -> subprocess.CompletedProcess[str]:
-        del capture_output, text, check
-        captured_commands.append(command)
-        Path(command[-1]).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(input_path, Path(command[-1]))
-        return subprocess.CompletedProcess(command, 0, "", "")
-
-    monkeypatch.setattr(aligner_module, "_measure_wav_duration_ms", lambda path: 1_000)
-    monkeypatch.setattr(aligner_module.subprocess, "run", fake_run)
-
-    output_path = SegmentAligner()._dsp_stretch(
+    output_path = aligner._dsp_stretch(
         str(input_path),
         2_500,
         str(tmp_path / "aligned" / "segment_001_aligned.wav"),
     )
 
+    fit_result = aligner._last_dsp_fit_result
+    assert fit_result is not None
     assert Path(output_path).exists()
-    filter_index = captured_commands[0].index("-filter:a") + 1
-    assert captured_commands[0][filter_index] == "atempo=0.5,atempo=0.8"
+    assert len(AudioSegment.from_wav(output_path)) == pytest.approx(2_500, abs=10)
+    assert fit_result.speed_ratio_used == pytest.approx(
+        aligner_module.UNDERFLOW_LISTENABLE_DSP_MIN_SPEED_RATIO
+    )
+    assert fit_result.silence_padded_ms >= 800
+    assert AudioSegment.from_wav(output_path)[-700:].dBFS < -60
+
+
+def test_aligner_marks_capped_underflow_when_force_dsp_would_extreme_slowmo(
+    tmp_path: Path,
+) -> None:
+    input_path = _export_tone_wav(tmp_path / "input" / "short_underflow.wav", duration_ms=1_000)
+    segment = _build_segment(segment_id=1, audio_path=input_path, end_ms=5_000)
+    segment.cn_text = "还剩十秒。"
+
+    aligned = SegmentAligner(rewriter=None, tts_generator=None)._align_one(
+        segment,
+        str(tmp_path / "aligned"),
+    )
+
+    assert aligned.alignment_method == "capped_dsp_underflow"
+    assert aligned.needs_review is True
+    assert segment.force_dsp_severity == "high"
+    assert segment.dsp_speed_ratio_used == pytest.approx(
+        aligner_module.UNDERFLOW_LISTENABLE_DSP_MIN_SPEED_RATIO
+    )
+    assert segment.dsp_silence_padded_ms >= 3_000
+    assert len(AudioSegment.from_wav(aligned.aligned_audio_path)) == pytest.approx(5_000, abs=10)
+
+
+def test_aligner_clears_dsp_audit_between_segments_when_next_segment_is_direct(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_input = _export_tone_wav(tmp_path / "input" / "underflow.wav", duration_ms=1_000)
+    second_input = _export_tone_wav(tmp_path / "input" / "direct.wav", duration_ms=1_000)
+    first_segment = _build_segment(segment_id=1, audio_path=first_input, end_ms=5_000)
+    second_segment = _build_segment(segment_id=2, audio_path=second_input, end_ms=1_020)
+    monkeypatch.setattr(aligner_module, "_measure_wav_duration_ms", lambda path: len(AudioSegment.from_wav(path)))
+    aligner = SegmentAligner(rewriter=None, tts_generator=None)
+
+    first_aligned = aligner._align_one(first_segment, str(tmp_path / "aligned"))
+    second_aligned = aligner._align_one(second_segment, str(tmp_path / "aligned"))
+
+    assert first_aligned.alignment_method == "capped_dsp_underflow"
+    assert first_segment.dsp_silence_padded_ms > 0
+    assert second_aligned.alignment_method == "direct"
+    assert second_segment.dsp_silence_padded_ms == 0
+    assert second_segment.dsp_speed_ratio_used == pytest.approx(1.0)
 
 
 def test_aligner_uses_direct_copy_when_absolute_diff_is_small_for_short_segment(tmp_path: Path) -> None:

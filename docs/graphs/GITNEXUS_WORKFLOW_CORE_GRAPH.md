@@ -4,39 +4,48 @@
 
 ## 1. 范围
 
-这张子图聚焦两条相关但不同的链路：
+这张子图聚焦三条相关但不同的链路：
 
 - 主工作流内核：从输入到 Jianying draft
-- 任务完成后的导出平面：materials pack 与 generate video
+- 任务完成后的导出平面：`materials_pack` 与 `generate_video`
+- 成功任务进入的 post-edit 回路：`editing -> regenerate -> commit -> alignment-only resume`
 
-其中第一条是主流程，第二条是用户显式触发的后处理侧轴。
+其中第一条是主流程，后两条都是围绕主流程的后处理侧轴。
 
 ## 2. 工作流主图
 
 ```mermaid
 graph TD
     Entry["ProjectWorkflow.run_build()"] --> Ingestion["Ingestion"]
-    Ingestion --> AudioPrep["Audio Preparation"]
-    AudioPrep --> Media["Media Understanding"]
+    Ingestion --> AudioPrep["Audio preparation"]
+    AudioPrep --> Media["Media understanding"]
     Media --> Translation["Translation"]
-    Translation --> Chunking["SemanticBlock Chunking"]
+    Translation --> Chunking["SemanticBlock chunking"]
     Chunking --> TTS["TTS"]
     TTS --> Alignment["Alignment<br/>DSP first / rewrite fallback"]
-    Alignment --> Layering["Apply Alignment Text Layers"]
-    Layering --> Retiming["Caption Retiming"]
-    Retiming --> Draft["Draft Writer"]
+    Alignment --> Retiming["Caption retiming"]
+    Retiming --> Draft["Draft writer"]
     Draft --> Dispatcher["OutputDispatcher"]
-    Dispatcher --> Editor["Editor Package + Manifest"]
+    Dispatcher --> Editor["Editor package + manifest"]
 
-    Editor --> Workspace["Workspace Result Surface"]
-    Workspace --> PackTask["materials_pack task"]
-    Workspace --> VideoTask["generate_video task"]
+    Editor --> Workspace["Workspace / Result surface"]
+    Workspace --> PackTask["materials_pack"]
+    Workspace --> VideoTask["generate_video"]
+    Workspace --> EditPage["VideoEditPage"]
 
     VideoTask --> RenderAsync["video_render_async.py"]
     RenderAsync --> Renderer["VideoRenderer"]
     Renderer --> PublishVideo["publish.dubbed_video + poster"]
 
     PackTask --> PackZip["materials zip artifact"]
+
+    EditPage --> Editing["editor/editing/<br/>segments + voice_map + draft wavs"]
+    Editing --> SingleRegen["single / batch regenerate"]
+    SingleRegen --> SegmentRegen["segment_regenerate.py"]
+    Editing --> Commit["overwrite / copy_as_new"]
+    Commit --> Resume["start_stage='alignment'"]
+    Resume --> AlignmentOnly["process._run_alignment_and_publish_only"]
+    AlignmentOnly --> Dispatcher
 ```
 
 ## 3. 主流程仍然是 Draft-first
@@ -49,8 +58,7 @@ graph TD
 4. `_run_translation_stage(source_lines)`
 5. `_run_chunking_stage(translated_lines)`
 6. `_run_alignment_stage(blocks)`
-7. `_apply_alignment_text_layers(translated_lines, aligned_blocks)`
-8. `_run_draft_stage(translated_lines, aligned_blocks)`
+7. `_run_draft_stage(translated_lines, aligned_blocks)`
 
 这条顺序继续保证：
 
@@ -70,11 +78,11 @@ graph TD
 
 这说明 `OutputDispatcher` 不是替代 `project_workflow.py`，而是把“已完成的 canonical localized project”分发到输出后端。
 
-## 5. 异步导出平面
+## 5. 导出平面
 
 ### 5.1 前端入口
 
-- `frontend-next/src/components/workspace/ResultMediaCard.tsx` 使用 `useBackgroundTask()` 管理：
+- `frontend-next/src/components/workspace/ResultMediaCard.tsx` 继续通过 `useBackgroundTask()` 管理：
   `materials_pack`
   `generate_video`
 - `frontend-next/src/lib/api/downloads.ts` 提供：
@@ -92,33 +100,50 @@ graph TD
 
 这使“同一个 job、同一组参数”的导出任务具备可恢复状态，而不是重复生成。
 
-### 5.3 视频生成闭环
+## 6. Post-Edit 回路
 
-- `src/services/jobs/video_render_async.py` 在后台线程中调用 `VideoRenderer().render(...)`
-- 它把状态写到 `publish/render_status.json`
-- `src/modules/output/publish/video_renderer.py` 现在支持：
-  progress callback
-  ambient audio 混音
-  poster 生成
+### 6.1 editing buffer 是独立工作区
 
-`src/services/jobs/api.py` 再把这些产物公开成：
+- `src/services/jobs/editing.py` 定义：
+  `enter_editing()`：`succeeded -> editing`
+  `cancel_editing()`：`editing -> succeeded`
+- 可变文件都放在 `editor/editing/` 下，而不是直接改 baseline
+- `src/services/jobs/editing_segments.py` 维护段级状态：
+  `accepted`
+  `text_dirty`
+  `tts_loading`
+  `tts_dirty`
+  `tts_failed`
+  `voice_dirty`
 
-- `stream/video`
-- `stream/audio`
-- `stream/poster`
-- `generate-video/{task_id}` 状态查询
+### 6.2 regenerate 仍受原有付费约束
 
-## 6. 当前结构含义
+- `src/services/tts/segment_regenerate.py` 明确要求只能从 user-initiated editing path 调用
+- 它会重试同一个 provider，不会 silent fallback 到别的 provider
+
+这保证 post-edit 不会绕过既有的付费 API 触发边界。
+
+### 6.3 commit 重新并回 alignment / publish
+
+- `src/services/jobs/editing_commit.py` 的 `overwrite` 会把 editing buffer 提升到 baseline，然后以 `start_stage='alignment'` 重新提交 runner
+- `copy_as_new` 则准备新 `job_id / project_dir`，再以相同的 `alignment` 起点启动新任务
+- `src/pipeline/process.py` 明确支持 `resume_from == STAGE_ALIGNMENT` 时走 `_run_alignment_and_publish_only(config)`
+
+结论：post-edit 不是重新跑 ingestion / translation 主链，而是以“对齐与发布重发”为核心的增量回路。
+
+## 7. 当前结构含义
 
 这套结构的关键边界是：
 
-- 工作流成功后，先稳定落盘 editor/draft/manifest
+- 工作流成功后，先稳定落盘 editor / draft / manifest
 - 结果页再决定是否异步打包素材或生成可播放视频
-- 这样不会把 FFmpeg、zip、长耗时导出逻辑塞回主 pipeline 阻塞点
+- Studio 修改则进入独立 editing buffer，最后并回 `alignment -> publish`
 
-## 7. 这张图适合回答什么问题
+因此，无论导出还是 post-edit，都没有把 FFmpeg、zip、长耗时任务或可变编辑态塞回主 pipeline 的最前面。
+
+## 8. 这张图适合回答什么问题
 
 - 为什么主流程仍然是 draft-first
 - `OutputDispatcher` 在整个流程里到底处于什么层级
-- 为什么视频导出现在是后台任务，不是主 pipeline 内同步步骤
-- 结果页里的 materials pack 和 generate video 分别落到哪里
+- 为什么 post-edit 是 `alignment-only resume`，而不是整条流水线重跑
+- 结果页里的 `materials_pack`、`generate_video`、`VideoEditPage` 分别接到哪里

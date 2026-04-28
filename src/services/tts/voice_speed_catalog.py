@@ -23,7 +23,10 @@ logger = logging.getLogger(__name__)
 
 
 _GATEWAY_URL = "http://127.0.0.1:8880/api/internal/voice-catalog"
-_USER_VOICES_GATEWAY_URL = "http://127.0.0.1:8880/api/internal/user-voices/by-voice-ids"
+# user_voice_api's internal router is mounted at /internal today (the voice
+# catalog uses /api/internal). Keep this URL aligned with the actual route so
+# cloned-voice speed profiles written by P1-l are visible on the next run.
+_USER_VOICES_GATEWAY_URL = "http://127.0.0.1:8880/internal/user-voices/by-voice-ids"
 _CACHE_TTL_SECONDS = 120.0
 
 

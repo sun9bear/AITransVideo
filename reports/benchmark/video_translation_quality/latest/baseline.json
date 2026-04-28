@@ -1,0 +1,114 @@
+{
+  "dataset": {
+    "dir": "tests/fixtures/benchmark/video_translation_quality",
+    "version": "video_translation_quality.v1",
+    "jobs": 12,
+    "validation": {
+      "dataset_dir": "tests/fixtures/benchmark/video_translation_quality",
+      "jobs": 12,
+      "json_files": 73,
+      "status": "ok"
+    }
+  },
+  "quality_baseline": {
+    "segments": 993,
+    "rewrite_segments": 212,
+    "rewrite_segment_rate": 0.2135,
+    "rewrite_count_total": 295,
+    "rewrite_count_p50": 5.5,
+    "rewrite_count_p90": 91.3,
+    "needs_review_segments": 186,
+    "needs_review_rate": 0.1873,
+    "force_dsp_segments": 186,
+    "pre_tts_events": 87,
+    "pre_tts_contradictions": 61,
+    "pre_tts_contradiction_rate": 0.7011,
+    "pre_tts_contradiction_root_cause_proxy": {
+      "missing_pre_post_chars": 61
+    },
+    "speaker_corrections": 58,
+    "segment_duration_ms_cdf": {
+      "p10": 1280.0,
+      "p25": 3520.0,
+      "p50": 12890.0,
+      "p75": 28890.0,
+      "p90": 46930.0
+    },
+    "speaker_correction_duration_ms_cdf": {
+      "p10": 1368.0,
+      "p25": 3420.0,
+      "p50": 11049.5,
+      "p75": 18445.0,
+      "p90": 32548.0
+    }
+  },
+  "provider_summary": {
+    "cosyvoice/cosyvoice-v3-flash/express": {
+      "jobs": 1,
+      "segments": 10,
+      "rewrite_segments": 7,
+      "rewrite_count": 11.0,
+      "pre_tts_contradictions": 1
+    },
+    "cosyvoice/unknown/unknown": {
+      "jobs": 1,
+      "segments": 12,
+      "rewrite_segments": 0,
+      "rewrite_count": 0.0,
+      "pre_tts_contradictions": 0
+    },
+    "minimax/speech-2.8-hd/studio": {
+      "jobs": 1,
+      "segments": 72,
+      "rewrite_segments": 30,
+      "rewrite_count": 31.0,
+      "pre_tts_contradictions": 19
+    },
+    "minimax/speech-2.8-turbo/studio": {
+      "jobs": 2,
+      "segments": 272,
+      "rewrite_segments": 59,
+      "rewrite_count": 61.0,
+      "pre_tts_contradictions": 41
+    },
+    "minimax/unknown/unknown": {
+      "jobs": 2,
+      "segments": 486,
+      "rewrite_segments": 116,
+      "rewrite_count": 192.0,
+      "pre_tts_contradictions": 0
+    },
+    "unknown/unknown/unknown": {
+      "jobs": 3,
+      "segments": 62,
+      "rewrite_segments": 0,
+      "rewrite_count": 0.0,
+      "pre_tts_contradictions": 0
+    },
+    "volcengine/unknown/unknown": {
+      "jobs": 2,
+      "segments": 79,
+      "rewrite_segments": 0,
+      "rewrite_count": 0.0,
+      "pre_tts_contradictions": 0
+    }
+  },
+  "cost_model": {
+    "assumptions_cny": {
+      "llm_rewrite_per_segment": 0.0003,
+      "tts_rewrite_per_segment_low": 0.02,
+      "tts_rewrite_per_segment_high": 0.07,
+      "manual_speaker_fix": 3.0
+    },
+    "current_dataset_cost_cny": {
+      "llm_rewrite": 0.0885,
+      "tts_rewrite_low": 5.9,
+      "tts_rewrite_high": 20.65,
+      "manual_speaker_fix_proxy": 174.0
+    },
+    "break_even": {
+      "extra_llm_candidates_per_rewrite_to_match_tts_low": 66.67,
+      "extra_llm_candidates_per_rewrite_to_match_tts_high": 233.33
+    }
+  }
+}

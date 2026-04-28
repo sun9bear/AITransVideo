@@ -98,6 +98,26 @@ def test_submit_job_without_user_id_leaves_project_dir_for_bootstrap(
     assert created.workspace_dir is None
 
 
+def test_submit_job_persists_explicit_expires_at(tmp_path: Path) -> None:
+    """Gateway supplies the retention deadline; Job API must store it so
+    post-edit updated_at churn cannot extend cleanup/display TTL."""
+    service, _ = _build_service(
+        tmp_path,
+        plans=[{"lines": [], "returncode": 0}],
+    )
+    expires_at = "2026-04-25T00:00:00+00:00"
+
+    created = service.submit_job(
+        source_type="youtube_url",
+        source_ref="https://youtube.example/watch?v=ttl",
+        user_id="7",
+        expires_at=expires_at,
+    )
+
+    assert created.expires_at == expires_at
+    assert service.require_job(created.job_id).expires_at == expires_at
+
+
 def test_submit_job_with_user_id_is_immune_to_yt_dlp_progress_lines(
     tmp_path: Path,
 ) -> None:

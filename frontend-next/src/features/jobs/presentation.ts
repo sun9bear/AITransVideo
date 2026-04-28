@@ -169,15 +169,16 @@ export function getErrorCategory(errorSummary: ErrorSummary | null): {
 
 export function getJobDisplayTitle(job: Pick<JobSummary, 'projectDir' | 'sourceRef' | 'title'>) {
   const sourceVideoId = extractYoutubeVideoId(job.sourceRef)
-  const normalizedTitle = normalizeText(job.title)
+  const normalizedTitle = discardGeneratedJobId(normalizeText(job.title))
   const projectSlug = extractProjectSlug(job.projectDir)
-  const slugTitle = projectSlug ? humanizeSlug(projectSlug) : null
+  const safeProjectSlug = discardGeneratedJobId(projectSlug)
+  const slugTitle = safeProjectSlug ? humanizeSlug(safeProjectSlug) : null
 
   if (slugTitle && (!normalizedTitle || normalizedTitle === sourceVideoId)) {
     return slugTitle
   }
 
-  return normalizedTitle ?? slugTitle ?? sourceVideoId ?? '未命名视频'
+  return normalizedTitle ?? slugTitle ?? '未命名视频'
 }
 
 export function getJobSecondaryLabel(job: Pick<JobSummary, 'projectDir' | 'sourceRef'>) {
@@ -315,4 +316,11 @@ function normalizeText(value: unknown) {
 
   const normalizedValue = value.trim()
   return normalizedValue || null
+}
+
+function discardGeneratedJobId(value: string | null) {
+  if (!value) {
+    return null
+  }
+  return /^job[_-][a-f0-9]{24,}$/i.test(value) ? null : value
 }

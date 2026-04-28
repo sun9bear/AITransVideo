@@ -129,6 +129,371 @@ def test_interview_sanity_check_skips_when_actual_speaker_count_exceeds_two() ->
     assert [line.speaker_id for line in adjusted] == ["speaker_a", "speaker_b", "speaker_c"]
 
 
+def test_single_speaker_audience_guard_collapses_short_one_off_speakers() -> None:
+    original = [
+        _line(1, 0, 60_000, "speaker_a", "Today we will practice concise communication."),
+        _line(2, 60_000, 66_000, "speaker_a", "What happens when your mouth goes dry?"),
+        _line(3, 66_000, 84_000, "speaker_a", "Yes, I am not sure, and then I call this anxiety."),
+        _line(4, 84_000, 84_900, "speaker_a", "Yes."),
+        _line(5, 84_900, 184_900, "speaker_a", "Let us continue with the next example."),
+    ]
+    reviewed = [
+        original[0],
+        _line(2, 60_000, 66_000, "speaker_b", "My mouth goes dry."),
+        _line(3, 66_000, 84_000, "speaker_c", "Yes, I am not sure, and then I call this anxiety."),
+        _line(4, 84_000, 84_900, "speaker_d", "Yes."),
+        original[4],
+    ]
+    speakers = {
+        "speaker_a": {"name": "马特·亚伯拉罕斯", "role": "speaker"},
+        "speaker_b": {"name": "未知说话人1", "role": "audience"},
+        "speaker_c": {"name": "未知说话人2", "role": "audience"},
+        "speaker_d": {"name": "未知说话人3", "role": "audience"},
+    }
+
+    adjusted, guarded_speakers, applied = (
+        transcript_reviewer._apply_single_speaker_audience_fragmentation_guard(  # noqa: SLF001
+            original_lines=original,
+            reviewed_lines=reviewed,
+            speakers=speakers,
+        )
+    )
+
+    assert applied == 3
+    assert [line.speaker_id for line in adjusted] == [
+        "speaker_a",
+        "speaker_audience",
+        "speaker_a",
+        "speaker_audience",
+        "speaker_a",
+    ]
+    assert set(guarded_speakers) == {"speaker_a", "speaker_audience"}
+    assert guarded_speakers["speaker_audience"]["name"] == "现场观众"
+
+
+def test_single_speaker_audience_guard_ignores_real_multi_speaker_asr() -> None:
+    original = [
+        _line(1, 0, 20_000, "speaker_a", "Let me ask the first question."),
+        _line(2, 20_000, 40_000, "speaker_b", "I think the answer is complicated."),
+    ]
+    reviewed = [
+        original[0],
+        _line(2, 20_000, 26_000, "speaker_c", "Yes, it is complicated."),
+    ]
+
+    adjusted, guarded_speakers, applied = (
+        transcript_reviewer._apply_single_speaker_audience_fragmentation_guard(  # noqa: SLF001
+            original_lines=original,
+            reviewed_lines=reviewed,
+            speakers={"speaker_a": {"name": "A"}, "speaker_c": {"name": "Unknown"}},
+        )
+    )
+
+    assert applied == 0
+    assert adjusted == reviewed
+    assert set(guarded_speakers) == {"speaker_a", "speaker_c"}
+
+
+def test_single_speaker_audience_guard_keeps_substantial_detected_speakers() -> None:
+    original = [
+        _line(1, 0, 60_000, "speaker_a", "Welcome to the session."),
+        _line(2, 60_000, 65_000, "speaker_a", "First answer."),
+        _line(3, 65_000, 70_000, "speaker_a", "Second answer."),
+        _line(4, 70_000, 75_000, "speaker_a", "Third answer."),
+        _line(5, 75_000, 175_000, "speaker_a", "Back to the main speaker."),
+    ]
+    reviewed = [
+        original[0],
+        _line(2, 60_000, 65_000, "speaker_b", "First answer."),
+        _line(3, 65_000, 70_000, "speaker_b", "Second answer."),
+        _line(4, 70_000, 75_000, "speaker_b", "Third answer."),
+        original[4],
+    ]
+
+    adjusted, guarded_speakers, applied = (
+        transcript_reviewer._apply_single_speaker_audience_fragmentation_guard(  # noqa: SLF001
+            original_lines=original,
+            reviewed_lines=reviewed,
+            speakers={
+                "speaker_a": {"name": "Main"},
+                "speaker_b": {"name": "Guest", "role": "guest"},
+            },
+        )
+    )
+
+    assert applied == 0
+    assert adjusted == reviewed
+    assert set(guarded_speakers) == {"speaker_a", "speaker_b"}
+
+
+def test_single_speaker_audience_guard_keeps_named_short_guest_fragments() -> None:
+    original = [
+        _line(1, 0, 100_000, "speaker_a", "Welcome to the panel."),
+        _line(2, 100_000, 106_000, "speaker_a", "Alice answers briefly."),
+        _line(3, 106_000, 112_000, "speaker_a", "Bob answers briefly."),
+        _line(4, 112_000, 118_000, "speaker_a", "Carol answers briefly."),
+        _line(5, 118_000, 200_000, "speaker_a", "Back to the moderator."),
+    ]
+    reviewed = [
+        original[0],
+        _line(2, 100_000, 106_000, "speaker_b", "Alice answers briefly."),
+        _line(3, 106_000, 112_000, "speaker_c", "Bob answers briefly."),
+        _line(4, 112_000, 118_000, "speaker_d", "Carol answers briefly."),
+        original[4],
+    ]
+    speakers = {
+        "speaker_a": {"name": "Moderator", "role": "moderator"},
+        "speaker_b": {"name": "Alice", "role": "guest"},
+        "speaker_c": {"name": "Bob", "role": "guest"},
+        "speaker_d": {"name": "Carol", "role": "guest"},
+    }
+
+    adjusted, guarded_speakers, applied = (
+        transcript_reviewer._apply_single_speaker_audience_fragmentation_guard(  # noqa: SLF001
+            original_lines=original,
+            reviewed_lines=reviewed,
+            speakers=speakers,
+        )
+    )
+
+    assert applied == 0
+    assert adjusted == reviewed
+    assert set(guarded_speakers) == {"speaker_a", "speaker_b", "speaker_c", "speaker_d"}
+
+
+def test_single_speaker_audience_guard_reverts_long_audience_like_segments() -> None:
+    original = [
+        _line(1, 0, 100_000, "speaker_a", "Lecture introduction."),
+        _line(2, 100_000, 118_400, "speaker_a", "This is a long mixed segment that should not be treated as a brief audience response."),
+        _line(3, 118_400, 119_300, "speaker_a", "What are the kids' names?"),
+        _line(4, 119_300, 130_500, "speaker_a", "Another long segment with enough duration to require conservative speaker handling."),
+        _line(5, 130_500, 300_000, "speaker_a", "Back to the lecture."),
+    ]
+    reviewed = [
+        original[0],
+        _line(2, 100_000, 118_400, "speaker_b", "This is a long mixed segment that should not be treated as a brief audience response."),
+        _line(3, 118_400, 119_300, "speaker_b", "What are the kids' names?"),
+        _line(4, 119_300, 130_500, "speaker_b", "Another long segment with enough duration to require conservative speaker handling."),
+        original[4],
+    ]
+
+    adjusted, guarded_speakers, applied = (
+        transcript_reviewer._apply_single_speaker_audience_fragmentation_guard(  # noqa: SLF001
+            original_lines=original,
+            reviewed_lines=reviewed,
+            speakers={
+                "speaker_a": {"name": "Main", "role": "speaker"},
+                "speaker_b": {"name": "观众", "role": "听众"},
+            },
+        )
+    )
+
+    assert applied == 3
+    assert [line.speaker_id for line in adjusted] == [
+        "speaker_a",
+        "speaker_a",
+        "speaker_audience",
+        "speaker_a",
+        "speaker_a",
+    ]
+    assert set(guarded_speakers) == {"speaker_a", "speaker_audience"}
+
+
+def test_low_support_speaker_verifier_collects_multi_speaker_candidate() -> None:
+    original = [
+        _line(1, 0, 20_000, "speaker_a", "Main speaker introduction."),
+        _line(2, 20_000, 26_000, "speaker_a", "A brief audience-like interruption."),
+        _line(3, 26_000, 50_000, "speaker_b", "A real second speaker continues."),
+    ]
+    reviewed = [
+        original[0],
+        _line(2, 20_000, 26_000, "speaker_c", "A brief audience-like interruption."),
+        original[2],
+    ]
+    speakers = {
+        "speaker_a": {"name": "Speaker A", "role": "host"},
+        "speaker_b": {"name": "Speaker B", "role": "guest"},
+        "speaker_c": {"name": "未知说话人1", "role": "unknown"},
+    }
+
+    candidates = transcript_reviewer._collect_low_support_speaker_verifier_candidates(  # noqa: SLF001
+        original_lines=original,
+        reviewed_lines=reviewed,
+        speakers=speakers,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0]["assigned_speaker_id"] == "speaker_c"
+    assert candidates[0]["main_speaker_id"] == "speaker_a"
+    assert candidates[0]["trigger"] == "original_asr_changed"
+
+
+def test_low_support_speaker_verifier_collects_long_non_speech_sized_candidate() -> None:
+    original = [
+        _line(1, 0, 120_000, "speaker_a", "Main speaker introduction."),
+        _line(2, 120_000, 145_000, "speaker_c", "Background song."),
+    ]
+    reviewed = list(original)
+    speakers = {
+        "speaker_a": {"name": "Speaker A", "role": "speaker"},
+        "speaker_c": {"name": "未知说话人1", "role": "unknown"},
+    }
+
+    candidates = transcript_reviewer._collect_low_support_speaker_verifier_candidates(  # noqa: SLF001
+        original_lines=original,
+        reviewed_lines=reviewed,
+        speakers=speakers,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0]["duration_ms"] == 25_000
+
+
+def test_low_support_speaker_verifier_applies_main_speaker_decision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = [
+        _line(1, 0, 20_000, "speaker_a", "Main speaker introduction."),
+        _line(2, 20_000, 26_000, "speaker_a", "A brief audience-like interruption."),
+    ]
+    reviewed = [
+        original[0],
+        _line(2, 20_000, 26_000, "speaker_c", "A brief audience-like interruption."),
+    ]
+    audio_path = tmp_path / "review_audio.ogg"
+    audio_path.write_bytes(b"fake")
+
+    def fake_run(**kwargs):
+        return [
+            {
+                "candidate_id": kwargs["candidates"][0]["candidate_id"],
+                "decision": "main_speaker",
+                "confidence": "high",
+                "reason": "same voice",
+            }
+        ]
+
+    monkeypatch.setattr(transcript_reviewer, "_run_low_support_speaker_verifier", fake_run)
+
+    adjusted, guarded_speakers, applied, summary = (
+        transcript_reviewer._apply_low_support_speaker_verifier(  # noqa: SLF001
+            original_lines=original,
+            reviewed_lines=reviewed,
+            speakers={
+                "speaker_a": {"name": "Speaker A"},
+                "speaker_c": {"name": "未知说话人1", "role": "unknown"},
+            },
+            audio_path=audio_path,
+            review_tmp_dir=tmp_path,
+            review_model="gemini",
+            api_key="fake-key",
+        )
+    )
+
+    assert applied == 1
+    assert summary["applied"] == 1
+    assert [line.speaker_id for line in adjusted] == ["speaker_a", "speaker_a"]
+    assert set(guarded_speakers) == {"speaker_a"}
+
+
+def test_low_support_speaker_verifier_keeps_uncertain_decision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = [
+        _line(1, 0, 20_000, "speaker_a", "Main speaker introduction."),
+        _line(2, 20_000, 26_000, "speaker_a", "A brief audience-like interruption."),
+    ]
+    reviewed = [
+        original[0],
+        _line(2, 20_000, 26_000, "speaker_c", "A brief audience-like interruption."),
+    ]
+    audio_path = tmp_path / "review_audio.ogg"
+    audio_path.write_bytes(b"fake")
+
+    def fake_run(**kwargs):
+        return [
+            {
+                "candidate_id": kwargs["candidates"][0]["candidate_id"],
+                "decision": "uncertain",
+                "confidence": "medium",
+                "reason": "overlap",
+            }
+        ]
+
+    monkeypatch.setattr(transcript_reviewer, "_run_low_support_speaker_verifier", fake_run)
+
+    adjusted, guarded_speakers, applied, summary = (
+        transcript_reviewer._apply_low_support_speaker_verifier(  # noqa: SLF001
+            original_lines=original,
+            reviewed_lines=reviewed,
+            speakers={
+                "speaker_a": {"name": "Speaker A"},
+                "speaker_c": {"name": "未知说话人1", "role": "unknown"},
+            },
+            audio_path=audio_path,
+            review_tmp_dir=tmp_path,
+            review_model="gemini",
+            api_key="fake-key",
+        )
+    )
+
+    assert applied == 0
+    assert summary["applied"] == 0
+    assert [line.speaker_id for line in adjusted] == ["speaker_a", "speaker_c"]
+    assert set(guarded_speakers) == {"speaker_a", "speaker_c"}
+
+
+def test_low_support_speaker_verifier_marks_fully_non_speech_speaker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = [
+        _line(1, 0, 20_000, "speaker_a", "Main speaker introduction."),
+        _line(2, 20_000, 26_000, "speaker_c", "Crowd cheers."),
+    ]
+    reviewed = [
+        original[0],
+        original[1],
+    ]
+    audio_path = tmp_path / "review_audio.ogg"
+    audio_path.write_bytes(b"fake")
+
+    def fake_run(**kwargs):
+        return [
+            {
+                "candidate_id": kwargs["candidates"][0]["candidate_id"],
+                "decision": "non_speech",
+                "confidence": "high",
+                "reason": "crowd cheering rather than an individual speaker",
+            }
+        ]
+
+    monkeypatch.setattr(transcript_reviewer, "_run_low_support_speaker_verifier", fake_run)
+
+    adjusted, guarded_speakers, applied, summary = (
+        transcript_reviewer._apply_low_support_speaker_verifier(  # noqa: SLF001
+            original_lines=original,
+            reviewed_lines=reviewed,
+            speakers={
+                "speaker_a": {"name": "Speaker A"},
+                "speaker_c": {"name": "未知说话人1", "role": "unknown"},
+            },
+            audio_path=audio_path,
+            review_tmp_dir=tmp_path,
+            review_model="gemini",
+            api_key="fake-key",
+        )
+    )
+
+    assert applied == 0
+    assert summary["non_speech_marked"] == 1
+    assert [line.speaker_id for line in adjusted] == ["speaker_a", "speaker_c"]
+    assert guarded_speakers["speaker_c"]["is_non_speech"] == "true"
+    assert guarded_speakers["speaker_c"]["name"] == "背景音/非对白"
+
+
 def test_merge_correction_preserves_speaker_c() -> None:
     lines = [
         _line(1, 0, 2_000, "speaker_c", "First part."),
@@ -703,16 +1068,10 @@ class TestCallReviewAudioFirst:
     """Tests for _call_review audio-first behavior (no 200MB threshold)."""
 
     def test_audio_uploaded_regardless_of_size(self, monkeypatch) -> None:
-        """Audio is uploaded no matter how large (we rely on prior compression)."""
-        uploaded_files: list = []
+        """Audio is loaded no matter how large (we rely on prior compression)."""
+        read_bytes = MagicMock(return_value=b"fake-audio")
 
         class FakeClient:
-            class files:
-                @staticmethod
-                def upload(file=None):
-                    uploaded_files.append(str(file))
-                    return MagicMock()
-
             class models:
                 @staticmethod
                 def generate_content(model, contents, config, **kw):
@@ -726,6 +1085,7 @@ class TestCallReviewAudioFirst:
         audio = Path("/tmp/test_big_audio.ogg")
 
         with patch.object(Path, "exists", return_value=True), \
+             patch.object(Path, "read_bytes", read_bytes), \
              patch.object(Path, "stat", return_value=MagicMock(st_size=500 * 1024 * 1024)):
             result = transcript_reviewer._call_review(
                 api_key="key",
@@ -737,7 +1097,7 @@ class TestCallReviewAudioFirst:
             )
 
         assert result is not None
-        assert len(uploaded_files) == 1
+        assert read_bytes.call_count == 1
 
 
 # ===================================================================
@@ -824,6 +1184,7 @@ class TestPromptTemplates:
 
         audio = Path("/tmp/test_audio.ogg")
         with patch.object(Path, "exists", return_value=True), \
+             patch.object(Path, "read_bytes", return_value=b"fake-audio"), \
              patch.object(Path, "stat", return_value=MagicMock(st_size=5 * 1024 * 1024)):
             transcript_reviewer._call_review(
                 api_key="key",
@@ -878,11 +1239,18 @@ class TestModelMap:
     def test_registry_has_all_logical_names(self) -> None:
         assert "gemini_pro" in _MODEL_REGISTRY
         assert "gemini" in _MODEL_REGISTRY
+        assert "deepseek_v4_pro" in _MODEL_REGISTRY
+        assert "mimo_v25" in _MODEL_REGISTRY
+        assert "mimo_v25_pro" in _MODEL_REGISTRY
         assert "mimo_omni" in _MODEL_REGISTRY
 
     def test_resolve_known_names(self) -> None:
         assert _resolve_model_id("gemini_pro") == _MODEL_REGISTRY["gemini_pro"]["api_model_id"]
         assert _resolve_model_id("gemini") == _MODEL_REGISTRY["gemini"]["api_model_id"]
+        assert _resolve_model_id("deepseek") == "deepseek-v4-flash"
+        assert _resolve_model_id("deepseek_v4_pro") == "deepseek-v4-pro"
+        assert _resolve_model_id("mimo_v25") == "mimo-v2.5"
+        assert _resolve_model_id("mimo_v25_pro") == "mimo-v2.5-pro"
         assert _resolve_model_id("mimo_omni") == _MODEL_REGISTRY["mimo_omni"]["api_model_id"]
 
     def test_resolve_unknown_falls_back(self) -> None:
@@ -896,12 +1264,32 @@ class TestModelMap:
             api_id = info["api_model_id"]
             assert logical != api_id, f"{logical} should not equal its API ID"
 
+    def test_deepseek_v4_default_disables_thinking(self) -> None:
+        """Default DeepSeek keeps old deepseek-chat non-thinking semantics."""
+        assert _MODEL_REGISTRY["deepseek"]["api_model_id"] == "deepseek-v4-flash"
+        assert _MODEL_REGISTRY["deepseek"]["request_overrides"] == {
+            "thinking": {"type": "disabled"},
+        }
+
+    def test_mimo_audio_capability_matches_verified_payloads(self) -> None:
+        """Only models verified with the audio payload are selectable for Pass 1/3."""
+        from services.llm_registry import get_available_models_for_prompt
+
+        assert _MODEL_REGISTRY["mimo_v25"]["supports_audio"] is True
+        assert _MODEL_REGISTRY["mimo_v25_pro"]["supports_audio"] is False
+        pass1_values = {model["value"] for model in get_available_models_for_prompt("pass1")}
+        pass3_values = {model["value"] for model in get_available_models_for_prompt("pass3")}
+        assert "mimo_v25" in pass1_values
+        assert "mimo_v25" in pass3_values
+        assert "mimo_v25_pro" not in pass1_values
+        assert "mimo_v25_pro" not in pass3_values
+
 
 class TestGetPromptModelIntegration:
     """Tests verifying that transcript_reviewer delegates to llm_registry.get_prompt_model
     (formerly TestGetReviewModel — the _get_review_model helper was removed in the
-    2026-04-17 prompt-model-management cleanup batch; legacy path and pass3 now call
-    _get_prompt_model(mode, "pass1") directly)."""
+    2026-04-17 prompt-model-management cleanup batch; Pass 1 and Pass 3 now use
+    independent registry slots)."""
 
     def test_default_studio_pass1_is_gemini_pro(self, monkeypatch) -> None:
         """llm_registry.get_prompt_model("studio", "pass1") defaults to gemini_pro."""
@@ -954,6 +1342,29 @@ class TestGetPromptModelIntegration:
         assert captured_models[0] == _MODEL_REGISTRY["gemini_pro"]["api_model_id"]
         assert captured_models[0] != "gemini_pro"
 
+    def test_call_review_dispatches_mimo_v25_to_mimo_api(self, monkeypatch) -> None:
+        """Any provider=mimo review model should use the MiMo multimodal path."""
+        captured: dict[str, object] = {}
+
+        def fake_mimo_review(**kwargs):
+            captured.update(kwargs)
+            return {}, {}, []
+
+        monkeypatch.setattr(transcript_reviewer, "_call_review_mimo_omni", fake_mimo_review)
+
+        result = transcript_reviewer._call_review(
+            api_key="mimo-key",
+            transcript_body="test",
+            line_count=1,
+            audio_path=None,
+            video_title="Test",
+            video_url="",
+            review_model="mimo_v25",
+        )
+
+        assert result == ({}, {}, [])
+        assert captured["model_id"] == "mimo-v2.5"
+
 
 # ===================================================================
 # Three-pass split tests
@@ -983,6 +1394,7 @@ class TestThreePassContractEnforcement:
         """Pass 1 prompt explicitly forbids fix_text/merge."""
         from src.services.transcript_reviewer import _PASS1_PROMPT
         assert "fix_text" in _PASS1_PROMPT
+        assert "is_non_speech" in _PASS1_PROMPT
         prompt_lower = _PASS1_PROMPT.lower()
         assert "不要输出" in _PASS1_PROMPT or "绝对不要" in _PASS1_PROMPT or "do not output" in prompt_lower
 
@@ -991,12 +1403,20 @@ class TestThreePassContractEnforcement:
         from src.services.transcript_reviewer import _PASS2_PROMPT
         assert "correct_speaker" in _PASS2_PROMPT
         assert "绝对不要" in _PASS2_PROMPT
+        assert "display_title_zh" in _PASS2_PROMPT
+
+    def test_sanitize_display_title_requires_chinese(self) -> None:
+        from src.services.transcript_reviewer import sanitize_display_title_zh
+
+        assert sanitize_display_title_zh("标题：巴菲特谈接班") == "巴菲特谈接班"
+        assert sanitize_display_title_zh("Just an English title") is None
 
     def test_pass3_prompt_forbids_corrections_and_glossary(self) -> None:
         """Pass 3 prompt explicitly forbids corrections and glossary."""
         from src.services.transcript_reviewer import _PASS3_PROMPT
         assert "不要输出 corrections" in _PASS3_PROMPT
         assert "不要输出 glossary" in _PASS3_PROMPT
+        assert "is_non_speech" in _PASS3_PROMPT
 
 
 class TestThreePassFallback:
@@ -1017,30 +1437,47 @@ class TestThreePassFallback:
 
         assert result is None
 
-    def test_mimo_omni_skips_three_pass(self, monkeypatch) -> None:
-        """MiMo Omni model bypasses three-pass and uses legacy directly."""
+    def test_mimo_pass1_runs_three_pass_provider_path(self, monkeypatch) -> None:
+        """MiMo pass1 models run through Pass 1 instead of bypassing to legacy."""
+        from services.llm_registry import invalidate_cache, _DEFAULTS
+
+        invalidate_cache()
+        monkeypatch.setitem(_DEFAULTS, "pass1", "mimo_v25")
+        monkeypatch.setitem(_DEFAULTS, "pass2", "deepseek")
+        monkeypatch.setattr("os.path.exists", lambda p: False)
+        monkeypatch.setenv("MIMO_API_KEY", "fake-key")
+
+        mimo_calls: list[str] = []
         legacy_called = []
 
-        def fake_legacy(*args, **kwargs):
-            legacy_called.append(True)
-            return transcript_reviewer.ReviewResult(
-                speakers={"speaker_a": {"name": "A", "gender": "male", "age_group": "middle"}},
-                glossary={},
-                corrections_applied=0,
-                lines=args[0],
-            )
+        def fake_mimo_raw(**kwargs):
+            mimo_calls.append(kwargs["model_id"])
+            return json.dumps({
+                "speakers": {"speaker_a": {"name": "A", "gender": "male", "age_group": "middle"}},
+                "corrections": [],
+            })
 
+        def fake_pass2(**kwargs):
+            return {
+                "glossary": {},
+                "display_title_zh": None,
+                "corrections": [],
+                "raw_corrections": [],
+                "contract_violations": [],
+                "response_text": "{}",
+                "parsed_payload": {},
+                "duration_ms": 1,
+                "success_attempt_label": "primary",
+                "success_attempt_model": kwargs["review_model"],
+            }
+
+        monkeypatch.setattr(transcript_reviewer, "_call_mimo_omni_raw", fake_mimo_raw)
+        monkeypatch.setattr(transcript_reviewer, "_review_pass2_text", fake_pass2)
         monkeypatch.setattr(
             transcript_reviewer,
             "legacy_review_transcript_single_pass",
-            fake_legacy,
+            lambda *args, **kwargs: legacy_called.append(True),
         )
-        # MiMo Omni for pass1 still triggers legacy (text-only, can't do audio Pass 1)
-        from services.llm_registry import invalidate_cache, _DEFAULTS
-        invalidate_cache()
-        monkeypatch.setitem(_DEFAULTS, "pass1", "mimo_omni")
-        monkeypatch.setattr("os.path.exists", lambda p: False)
-        monkeypatch.setenv("MIMO_API_KEY", "fake-key")
 
         lines = [_line(1, 0, 5000, "speaker_a", "Hello.")]
         result = transcript_reviewer.review_transcript(
@@ -1048,7 +1485,8 @@ class TestThreePassFallback:
         )
 
         assert result is not None
-        assert len(legacy_called) == 1
+        assert mimo_calls == ["mimo-v2.5"]
+        assert legacy_called == []
 
 
 class TestThreePassVoiceProfiles:
@@ -1096,6 +1534,29 @@ class TestThreePassVoiceProfiles:
             speakers=speakers,
         )
         assert "speaker_a" in result
+        assert result["speaker_a"]["gender"] == "female"
+
+    def test_pass3_uses_independent_registry_slot(self, monkeypatch) -> None:
+        """Pass 3 must read the pass3 slot, not pass1."""
+        calls: list[tuple[str, str]] = []
+
+        def fake_get_prompt_model(mode: str, key: str) -> str:
+            calls.append((mode, key))
+            return "gemini"
+
+        monkeypatch.setattr(transcript_reviewer, "_get_prompt_model", fake_get_prompt_model)
+        speakers = {
+            "speaker_a": {"name": "A", "gender": "female", "age_group": "young"},
+        }
+
+        result = transcript_reviewer.review_pass3_voice_profiles(
+            [_line(1, 0, 5000, "speaker_a", "Hello")],
+            source_audio_path=None,
+            speakers=speakers,
+            mode="express",
+        )
+
+        assert calls == [("express", "pass3")]
         assert result["speaker_a"]["gender"] == "female"
 
 
@@ -1164,11 +1625,12 @@ class TestThreePassEvidenceChain:
                     else:
                         # Pass 2 response
                         resp.text = json.dumps({
+                            "display_title_zh": "爱丽丝问候开场",
                             "corrections": [
                                 {"action": "fix_text", "index": 1, "old": "Hello there.", "new": "Hello, there.", "reason": "punctuation"},
                             ],
                             "glossary": {"Alice": "爱丽丝"},
-                        })
+                        }, ensure_ascii=False)
                     return resp
 
         monkeypatch.setattr(transcript_reviewer, "_create_review_client", lambda api_key: FakeClient())
@@ -1186,6 +1648,7 @@ class TestThreePassEvidenceChain:
         )
 
         assert result is not None
+        assert result.display_title_zh == "爱丽丝问候开场"
         # Should have gone through three-pass (not legacy fallback)
         assert call_count[0] == 2
 
@@ -1230,5 +1693,9 @@ class TestThreePassEvidenceChain:
         result_path = debug_dir / "s2_review_result.json"
         assert result_path.exists()
         agg = json.loads(result_path.read_text(encoding="utf-8"))
+        assert agg["display_title_zh"] == "爱丽丝问候开场"
         assert agg["speakers"]["speaker_a"]["name"] == "Alice"
         assert agg["glossary"] == {"Alice": "爱丽丝"}
+
+        pass2 = json.loads((debug_dir / "s2_pass2_result.json").read_text(encoding="utf-8"))
+        assert pass2["display_title_zh"] == "爱丽丝问候开场"

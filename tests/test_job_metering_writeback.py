@@ -62,6 +62,68 @@ class TestUpdateJobMetering:
             "rewrite_triggered": True,
             "rewrite_count": 3,
             "tts_billed_chars": 1200,
+            "first_tts_billed_chars": 900,
+            "probe_tts_billed_chars": 40,
+            "post_tts_resynth_billed_chars": 220,
+            "post_edit_resynth_billed_chars": 40,
+            "llm_call_count": 7,
+            "llm_input_tokens": 1234,
+            "llm_output_tokens": 456,
+            "pre_tts_rewrite_llm_calls": 2,
+            "pre_tts_rewrite_llm_tokens": 300,
+            "s2_pass1_llm_calls": 1,
+            "transcription_method": "assemblyai",
+            "asr_provider_cost_status": "ignored_low_cost",
+            "pre_tts_rewrite_count": 1,
+            "pre_tts_contradiction_count": 1,
+            "pre_tts_contradiction_rate": 1.0,
+            "harmful_pre_tts_contradiction_count": 1,
+            "harmful_pre_tts_contradiction_rate": 1.0,
+            "pre_tts_rewrite_rejected_count": 1,
+            "pre_tts_rewrite_rejected_reason_distribution": {"strict_below_floor": 1},
+            "pre_tts_rewrite_retry_attempt_count": 1,
+            "pre_tts_rewrite_retry_accepted_count": 0,
+            "micro_segment_count": 2,
+            "short_segment_count": 4,
+            "short_segment_needs_review_count": 3,
+            "short_segment_force_dsp_count": 3,
+            "force_dsp_severity_distribution": {"low": 2, "medium": 1},
+            "force_dsp_review_suppressed_count": 2,
+            "short_merge_candidate_count": 1,
+            "short_merge_blocked_cross_speaker_count": 1,
+            "short_merge_applied_count": 1,
+            "short_merge_absorbed_count": 2,
+            "pre_tts_rewrite_events": [
+                {
+                    "segment_id": 1,
+                    "direction": "overshoot",
+                    "task": "s5_rewrite",
+                    "estimate_ms": 26000,
+                    "target_ms": 20000,
+                    "pre_chars": 120,
+                    "post_chars": 80,
+                    "post_tts_first_pass_ms": 16000,
+                    "contradiction": True,
+                    "harmful_contradiction": True,
+                    "retry_attempted": False,
+                    "retry_accepted": False,
+                    "initial_rejected_reason": "",
+                }
+            ],
+            "pre_tts_rewrite_rejected_events": [
+                {
+                    "segment_id": 2,
+                    "direction": "overshoot",
+                    "reason": "strict_below_floor",
+                    "estimate_ms": 30000,
+                    "target_ms": 22000,
+                    "pre_chars": 160,
+                    "post_chars": 100,
+                    "lower_chars": 130,
+                    "upper_chars": 145,
+                    "retry_attempted": True,
+                }
+            ],
         })
 
         resp = _run(update_job_metering(req, "job-m-1", db))
@@ -77,6 +139,34 @@ class TestUpdateJobMetering:
         assert job.metering_snapshot["rewrite_triggered"] is True
         assert job.metering_snapshot["rewrite_count"] == 3
         assert job.metering_snapshot["tts_billed_chars"] == 1200
+        assert job.metering_snapshot["first_tts_billed_chars"] == 900
+        assert job.metering_snapshot["probe_tts_billed_chars"] == 40
+        assert job.metering_snapshot["post_tts_resynth_billed_chars"] == 220
+        assert job.metering_snapshot["post_edit_resynth_billed_chars"] == 40
+        assert job.metering_snapshot["llm_call_count"] == 7
+        assert job.metering_snapshot["llm_input_tokens"] == 1234
+        assert job.metering_snapshot["llm_output_tokens"] == 456
+        assert job.metering_snapshot["pre_tts_rewrite_llm_calls"] == 2
+        assert job.metering_snapshot["pre_tts_rewrite_llm_tokens"] == 300
+        assert job.metering_snapshot["s2_pass1_llm_calls"] == 1
+        assert job.metering_snapshot["transcription_method"] == "assemblyai"
+        assert job.metering_snapshot["asr_provider_cost_status"] == "ignored_low_cost"
+        assert job.metering_snapshot["pre_tts_rewrite_count"] == 1
+        assert job.metering_snapshot["pre_tts_contradiction_count"] == 1
+        assert job.metering_snapshot["harmful_pre_tts_contradiction_count"] == 1
+        assert job.metering_snapshot["pre_tts_rewrite_rejected_count"] == 1
+        assert job.metering_snapshot["pre_tts_rewrite_retry_attempt_count"] == 1
+        assert job.metering_snapshot["micro_segment_count"] == 2
+        assert job.metering_snapshot["short_segment_count"] == 4
+        assert job.metering_snapshot["short_segment_needs_review_count"] == 3
+        assert job.metering_snapshot["short_segment_force_dsp_count"] == 3
+        assert job.metering_snapshot["force_dsp_severity_distribution"] == {"low": 2, "medium": 1}
+        assert job.metering_snapshot["force_dsp_review_suppressed_count"] == 2
+        assert job.metering_snapshot["short_merge_candidate_count"] == 1
+        assert job.metering_snapshot["short_merge_blocked_cross_speaker_count"] == 1
+        assert job.metering_snapshot["short_merge_applied_count"] == 1
+        assert job.metering_snapshot["short_merge_absorbed_count"] == 2
+        assert job.metering_snapshot["pre_tts_rewrite_events"][0]["contradiction"] is True
 
     def test_creates_snapshot_if_none(self):
         job = _make_job(metering_snapshot=None)
@@ -335,6 +425,145 @@ class TestReportJobMeteringCallback:
         assert body["tts_billed_chars"] == 42
         assert body["final_cn_chars"] == 2
 
+    def test_extra_usage_metering_fields_are_reported(self):
+        fn = self._setup()
+        blocks = [
+            SimpleNamespace(cn_text="你好", rewrite_count=0),
+        ]
+        body = self._capture_call(
+            fn,
+            "test-usage-metering",
+            blocks,
+            extra_metering={
+                "usage_events_count": 12,
+                "first_tts_billed_chars": 120,
+                "probe_tts_billed_chars": 10,
+                "post_tts_resynth_billed_chars": 20,
+                "post_edit_resynth_tts_billed_chars": 8,
+                "llm_call_count": 5,
+                "pre_tts_rewrite_llm_calls": 2,
+                "pre_tts_rewrite_llm_tokens": 300,
+                "s2_speaker_verifier_llm_calls": 1,
+                "transcription_method": "assemblyai",
+                "asr_provider_cost_status": "ignored_low_cost",
+            },
+        )
+
+        assert body["usage_events_count"] == 12
+        assert body["first_tts_billed_chars"] == 120
+        assert body["probe_tts_billed_chars"] == 10
+        assert body["post_tts_resynth_billed_chars"] == 20
+        assert body["post_edit_resynth_tts_billed_chars"] == 8
+        assert body["llm_call_count"] == 5
+        assert body["pre_tts_rewrite_llm_calls"] == 2
+        assert body["pre_tts_rewrite_llm_tokens"] == 300
+        assert body["s2_speaker_verifier_llm_calls"] == 1
+        assert body["transcription_method"] == "assemblyai"
+        assert body["asr_provider_cost_status"] == "ignored_low_cost"
+
+    def test_pre_tts_rewrite_events_are_reported(self):
+        fn = self._setup()
+        from services.gemini.translator import DubbingSegment
+
+        segment = DubbingSegment(
+            segment_id=7,
+            speaker_id="spk_0",
+            display_name="Speaker",
+            voice_id="v1",
+            start_ms=0,
+            end_ms=4_000,
+            target_duration_ms=4_000,
+            source_text="Hello",
+            cn_text="改写后文本",
+            rewrite_count=1,
+            pre_tts_rewrite_direction="overshoot",
+            pre_tts_estimate_ms=26_666,
+            pre_tts_target_ms=20_000,
+            pre_tts_pre_chars=120,
+            pre_tts_post_chars=5,
+            pre_tts_post_tts_first_pass_ms=16_000,
+            pre_tts_contradiction=True,
+            pre_tts_harmful_contradiction=True,
+        )
+
+        body = self._capture_call(fn, "test-pre-tts", [segment])
+
+        assert body["pre_tts_rewrite_count"] == 1
+        assert body["pre_tts_contradiction_count"] == 1
+        assert body["pre_tts_contradiction_rate"] == 1.0
+        assert body["harmful_pre_tts_contradiction_count"] == 1
+        assert body["harmful_pre_tts_contradiction_rate"] == 1.0
+        assert body["micro_segment_count"] == 0
+        assert body["short_segment_count"] == 1
+        assert body["short_segment_needs_review_count"] == 0
+        assert body["short_segment_force_dsp_count"] == 0
+        assert body["pre_tts_rewrite_events"] == [
+            {
+                "segment_id": 7,
+                "direction": "overshoot",
+                "task": "s5_rewrite",
+                "estimate_ms": 26_666,
+                "target_ms": 20_000,
+                "pre_chars": 120,
+                "post_chars": 5,
+                "post_tts_first_pass_ms": 16_000,
+                "contradiction": True,
+                "harmful_contradiction": True,
+                "retry_attempted": False,
+                "retry_accepted": False,
+                "initial_rejected_reason": "",
+            }
+        ]
+
+    def test_pre_tts_rewrite_rejected_events_are_reported(self):
+        fn = self._setup()
+        from services.gemini.translator import DubbingSegment
+
+        segment = DubbingSegment(
+            segment_id=8,
+            speaker_id="spk_0",
+            display_name="Speaker",
+            voice_id="v1",
+            start_ms=0,
+            end_ms=30_000,
+            target_duration_ms=30_000,
+            source_text="Hello",
+            cn_text="原始文本",
+            pre_tts_rewrite_rejected=True,
+            pre_tts_rewrite_rejected_reason="strict_below_floor",
+            pre_tts_rewrite_rejected_direction="overshoot",
+            pre_tts_rewrite_rejected_estimate_ms=44_444,
+            pre_tts_rewrite_rejected_target_ms=30_000,
+            pre_tts_rewrite_rejected_pre_chars=200,
+            pre_tts_rewrite_rejected_post_chars=140,
+            pre_tts_rewrite_rejected_lower_chars=160,
+            pre_tts_rewrite_rejected_upper_chars=173,
+            pre_tts_rewrite_retry_attempted=True,
+        )
+
+        body = self._capture_call(fn, "test-pre-tts-rejected", [segment])
+
+        assert body["pre_tts_rewrite_rejected_count"] == 1
+        assert body["pre_tts_rewrite_rejected_reason_distribution"] == {
+            "strict_below_floor": 1
+        }
+        assert body["pre_tts_rewrite_retry_attempt_count"] == 1
+        assert body["pre_tts_rewrite_retry_accepted_count"] == 0
+        assert body["pre_tts_rewrite_rejected_events"] == [
+            {
+                "segment_id": 8,
+                "direction": "overshoot",
+                "reason": "strict_below_floor",
+                "estimate_ms": 44_444,
+                "target_ms": 30_000,
+                "pre_chars": 200,
+                "post_chars": 140,
+                "lower_chars": 160,
+                "upper_chars": 173,
+                "retry_attempted": True,
+            }
+        ]
+
     def test_real_dubbing_segment_path(self):
         """Real production path: DubbingSegment with cn_text."""
         fn = self._setup()
@@ -361,6 +590,7 @@ class TestReportJobMeteringCallback:
         assert body["final_cn_chars"] == 8
         assert body["rewrite_triggered"] is True
         assert body["rewrite_count"] == 1
+        assert body["short_segment_count"] == 2
 
     def test_real_dubbing_segment_no_rewrite(self):
         """DubbingSegment with no rewrites 鈫?rewrite_triggered=False."""
@@ -378,4 +608,27 @@ class TestReportJobMeteringCallback:
         assert body["final_cn_chars"] == 4
         assert body["rewrite_triggered"] is False
         assert body["rewrite_count"] == 0
+
+    def test_short_merge_applied_metrics_are_reported(self):
+        fn = self._setup()
+        from services.gemini.translator import DubbingSegment
+
+        segment = DubbingSegment(
+            segment_id=5,
+            speaker_id="spk_0",
+            display_name="S",
+            voice_id="v1",
+            start_ms=0,
+            end_ms=5_000,
+            target_duration_ms=5_000,
+            source_text="Merged text",
+            cn_text="合并文本",
+            short_merge_applied=True,
+            short_merge_absorbed_segment_ids="2,4",
+        )
+
+        body = self._capture_call(fn, "test-short-merge", [segment])
+
+        assert body["short_merge_applied_count"] == 1
+        assert body["short_merge_absorbed_count"] == 2
 

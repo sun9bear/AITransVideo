@@ -1,0 +1,28 @@
+{
+  "benchmark_id": "bench_008",
+  "source_job_hash": "497138910eb6",
+  "source_index": 8,
+  "selection_reasons": [
+    "high_rewrite",
+    "force_dsp",
+    "provider:minimax"
+  ],
+  "metrics": {
+    "artifact_available": true,
+    "segment_count": 243,
+    "rewrite_segments": 58,
+    "rewrite_segment_rate": 0.2387,
+    "rewrite_count": 96,
+    "needs_review_segments": 89,
+    "needs_review_rate": 0.3663,
+    "force_dsp_segments": 89,
+    "pre_tts_events": 0,
+    "pre_tts_contradictions": 0,
+    "speaker_corrections": 0,
+    "speaker_correction_duration_p50_ms": null,
+    "target_duration_p50_ms": 9760.0,
+    "provider": "minimax",
+    "tts_model": null,
+    "service_mode": null
+  }
+}

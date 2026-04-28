@@ -6,9 +6,8 @@ Responsibilities under test:
 1. Fetches the user's current ``display_name`` values exactly once, passes
    them as the ``existing_names`` collision set.
 2. Only calls the branch-4 sequence counter when the algorithm actually needs
-   it (empty YouTube title / empty local filename). YouTube-with-title and
-   local-with-filename paths must NOT issue a counter query — that's a
-   wasted DB round trip in the common case.
+   it (YouTube placeholder / empty or non-Chinese local filename). Local uploads
+   with a Chinese filename must NOT issue a counter query.
 3. The counter's returned value is "how many branch-4 names the user already
    owns today"; orchestrator hands ``+1`` as ``upload_sequence_today`` (so
    the first branch-4 job of the day is 001).
@@ -22,6 +21,7 @@ gateway module itself for the SQL side.
 from __future__ import annotations
 
 import asyncio
+import sys
 from datetime import date
 
 from gateway.display_name_orchestrator import (
@@ -71,12 +71,12 @@ class _FakeFetchers:
 
 
 # ---------------------------------------------------------------------------
-# Branch 1: YouTube + title — no counter query
+# Branch 1: YouTube placeholder — counter query
 # ---------------------------------------------------------------------------
 
 
-def test_youtube_with_title_returns_truncated_and_skips_counter() -> None:
-    fakes = _FakeFetchers()
+def test_youtube_with_title_returns_placeholder_and_uses_counter() -> None:
+    fakes = _FakeFetchers(branch4_count=2)
     ctx = DisplayNameContext(
         source_type="youtube_url",
         source_ref="https://youtube.com/watch?v=abc",
@@ -91,16 +91,16 @@ def test_youtube_with_title_returns_truncated_and_skips_counter() -> None:
             fetch_branch4_sequence_today=fakes.fetch_branch4_sequence_today,
         )
     )
-    assert result == "My Short Title"
+    assert result == "油管视频 2026-04-20 003"
     assert fakes.existing_calls == ["u1"]
-    assert fakes.branch4_calls == [], (
-        "Branch 1 (YouTube with title) must not waste a DB round trip on "
-        "the branch-4 sequence counter"
+    assert fakes.branch4_calls == [("u1", date(2026, 4, 20))]
+
+
+def test_youtube_placeholder_collision_gets_suffix() -> None:
+    fakes = _FakeFetchers(
+        existing_names={"油管视频 2026-04-20 001"},
+        branch4_count=0,
     )
-
-
-def test_youtube_with_collision_gets_suffix() -> None:
-    fakes = _FakeFetchers(existing_names={"My Title"})
     ctx = DisplayNameContext(
         source_type="youtube_url",
         source_ref="https://youtube.com/watch?v=abc",
@@ -115,13 +115,12 @@ def test_youtube_with_collision_gets_suffix() -> None:
             fetch_branch4_sequence_today=fakes.fetch_branch4_sequence_today,
         )
     )
-    assert result != "My Title"
-    assert result.startswith("My Title_")
-    assert len(result) == len("My Title_") + 4  # _xxxx
+    assert result != "油管视频 2026-04-20 001"
+    assert result.startswith("油管视频 2026-04-20 001_")
 
 
 # ---------------------------------------------------------------------------
-# Branch 2: YouTube + empty title — falls through to branch 4 + counter
+# Branch 2: YouTube + empty title — same placeholder path
 # ---------------------------------------------------------------------------
 
 
@@ -141,7 +140,7 @@ def test_youtube_empty_title_triggers_branch4_counter() -> None:
             fetch_branch4_sequence_today=fakes.fetch_branch4_sequence_today,
         )
     )
-    assert result == "上传视频 2026-04-20 008"  # 7 + 1
+    assert result == "油管视频 2026-04-20 008"  # 7 + 1
     assert fakes.branch4_calls == [("u1", date(2026, 4, 20))]
 
 
@@ -161,16 +160,36 @@ def test_youtube_none_title_triggers_branch4_counter() -> None:
             fetch_branch4_sequence_today=fakes.fetch_branch4_sequence_today,
         )
     )
-    assert result == "上传视频 2026-04-20 001"  # counter was 0 → next is 001
+    assert result == "油管视频 2026-04-20 001"  # counter was 0 → next is 001
 
 
 # ---------------------------------------------------------------------------
-# Branch 3: local upload with filename — no counter query
+# Branch 3: local upload with Chinese filename — no counter query
 # ---------------------------------------------------------------------------
 
 
-def test_local_with_filename_skips_counter() -> None:
+def test_local_with_chinese_filename_skips_counter() -> None:
     fakes = _FakeFetchers()
+    ctx = DisplayNameContext(
+        source_type="local_video",
+        source_ref="/tmp/uploads/u1/abc_vacation.mp4",
+        user_id="u1",
+        user_local_date=date(2026, 4, 20),
+        local_filename="暑期采访.mp4",
+    )
+    result = _run(
+        compute_display_name(
+            ctx,
+            fetch_existing_names=fakes.fetch_existing_names,
+            fetch_branch4_sequence_today=fakes.fetch_branch4_sequence_today,
+        )
+    )
+    assert result == "暑期采访"
+    assert fakes.branch4_calls == []
+
+
+def test_local_with_non_chinese_filename_uses_placeholder_counter() -> None:
+    fakes = _FakeFetchers(branch4_count=1)
     ctx = DisplayNameContext(
         source_type="local_video",
         source_ref="/tmp/uploads/u1/abc_vacation.mp4",
@@ -185,8 +204,8 @@ def test_local_with_filename_skips_counter() -> None:
             fetch_branch4_sequence_today=fakes.fetch_branch4_sequence_today,
         )
     )
-    assert result == "vacation"
-    assert fakes.branch4_calls == []
+    assert result == "上传视频 2026-04-20 002"
+    assert fakes.branch4_calls == [("u1", date(2026, 4, 20))]
 
 
 # ---------------------------------------------------------------------------
@@ -289,3 +308,27 @@ def test_existing_names_fetched_exactly_once() -> None:
         "orchestrator must not re-query existing_names mid-flow — "
         "it's a user-wide snapshot, one query is enough"
     )
+
+
+def test_compute_display_name_does_not_import_heavy_services_jobs_package(monkeypatch) -> None:
+    """Gateway must be able to name jobs without Job API-only dependencies."""
+    monkeypatch.delitem(sys.modules, "services.jobs", raising=False)
+    fakes = _FakeFetchers(branch4_count=0)
+    ctx = DisplayNameContext(
+        source_type="youtube_url",
+        source_ref="https://youtube.com/watch?v=missing-title",
+        user_id="u1",
+        user_local_date=date(2026, 4, 20),
+        youtube_title=None,
+    )
+
+    result = _run(
+        compute_display_name(
+            ctx,
+            fetch_existing_names=fakes.fetch_existing_names,
+            fetch_branch4_sequence_today=fakes.fetch_branch4_sequence_today,
+        )
+    )
+
+    assert result == "油管视频 2026-04-20 001"
+    assert "services.jobs" not in sys.modules

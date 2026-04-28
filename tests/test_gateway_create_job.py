@@ -30,6 +30,7 @@ sys.modules.setdefault("database", _fake_database)
 
 from fastapi import Response as FastAPIResponse  # noqa: E402
 from job_intercept import (  # noqa: E402
+    _build_youtube_probe_command,
     intercept_create_job,
     update_source_metadata,
     _error_response,
@@ -270,8 +271,28 @@ class TestCreateJobSuccess:
         assert captured_body["estimated_duration_seconds"] == 300
         assert captured_body["quota_state"] == "none"
         assert captured_body["create_idempotency_key"] is not None
+        assert datetime.fromisoformat(captured_body["expires_at"]).tzinfo is not None
+        assert captured_body["display_name"].startswith("油管视频 ")
         # user_id injected for workspace isolation
         assert captured_body["user_id"] == "uid-1"
+
+    def test_youtube_probe_command_uses_configured_cookie_file(self, tmp_path):
+        cookie_file = tmp_path / "youtube.cookies.txt"
+        cookie_file.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+        config_path = tmp_path / "autodub.local.json"
+        config_path.write_text(
+            json.dumps({"youtube": {"cookie_file": "youtube.cookies.txt"}}),
+            encoding="utf-8",
+        )
+
+        command = _build_youtube_probe_command(
+            "https://youtube.com/watch?v=abc",
+            config_path=config_path,
+        )
+
+        assert "--cookies" in command
+        assert "--ignore-no-formats-error" in command
+        assert str(cookie_file.resolve(strict=False)) in command
 
     def test_yt_dlp_probe_populates_estimated_duration(self):
         """When frontend doesn't send duration, yt-dlp probe fills it."""
@@ -291,11 +312,15 @@ class TestCreateJobSuccess:
         db = _make_db_session(active_job_count=0, user_for_quota=user)
 
         with patch("job_intercept.proxy_request", side_effect=fake_proxy):
-            with patch("job_intercept._probe_youtube_metadata", return_value={"duration": 480.0}):
+            with patch(
+                "job_intercept._probe_youtube_metadata",
+                return_value={"duration": 480.0, "title": "Readable Video Title"},
+            ):
                 resp = _run(intercept_create_job(req, db, user))
 
         assert resp.status_code == 202
         assert captured_body["estimated_duration_seconds"] == 480.0
+        assert captured_body["display_name"].startswith("油管视频 ")
 
     def test_yt_dlp_probe_exceeding_limit_is_rejected(self):
         """yt-dlp probe returns 15min → free user rejected with duration_limit."""
@@ -435,6 +460,107 @@ class TestUpdateSourceMetadata:
         assert body["ok"] is True
         assert job_mock.source_duration_seconds == 532.0
         assert job_mock.title == "New Title"
+
+    def test_updates_auto_placeholder_display_name_from_s2(self):
+        job_mock = SimpleNamespace(
+            job_id="job-1",
+            source_type="youtube_url",
+            source_duration_seconds=None,
+            title="Old Title",
+            display_name="油管视频 2026-04-25 001",
+        )
+        db = AsyncMock()
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = job_mock
+        db.execute = AsyncMock(return_value=result)
+        db.commit = AsyncMock()
+
+        req = MagicMock()
+        req.body = AsyncMock(return_value=json.dumps({
+            "display_name": "巴菲特谈接班与投资",
+        }, ensure_ascii=False).encode())
+
+        resp = _run(update_source_metadata(req, "job-1", db))
+        body = json.loads(resp.body)
+        assert body["ok"] is True
+        assert body["display_name_updated"] is True
+        assert job_mock.display_name == "巴菲特谈接班与投资"
+
+    def test_s2_display_name_does_not_override_user_name(self):
+        job_mock = SimpleNamespace(
+            job_id="job-1",
+            source_type="youtube_url",
+            source_duration_seconds=None,
+            title="Old Title",
+            display_name="我手动改过的名称",
+        )
+        db = AsyncMock()
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = job_mock
+        db.execute = AsyncMock(return_value=result)
+        db.commit = AsyncMock()
+
+        req = MagicMock()
+        req.body = AsyncMock(return_value=json.dumps({
+            "display_name": "巴菲特谈接班与投资",
+        }, ensure_ascii=False).encode())
+
+        resp = _run(update_source_metadata(req, "job-1", db))
+        body = json.loads(resp.body)
+        assert body["ok"] is True
+        assert body["display_name_updated"] is False
+        assert job_mock.display_name == "我手动改过的名称"
+
+    def test_s2_display_name_replaces_auto_truncated_youtube_title(self):
+        job_mock = SimpleNamespace(
+            job_id="job-1",
+            source_type="youtube_url",
+            source_duration_seconds=None,
+            title="Just a regular billionaire explaining succession",
+            display_name="Just a regular billionai",
+        )
+        db = AsyncMock()
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = job_mock
+        db.execute = AsyncMock(return_value=result)
+        db.commit = AsyncMock()
+
+        req = MagicMock()
+        req.body = AsyncMock(return_value=json.dumps({
+            "display_title_zh": "普通亿万富翁谈接班",
+        }, ensure_ascii=False).encode())
+
+        resp = _run(update_source_metadata(req, "job-1", db))
+        body = json.loads(resp.body)
+        assert body["ok"] is True
+        assert body["display_name_updated"] is True
+        assert job_mock.display_name == "普通亿万富翁谈接班"
+
+    def test_s2_display_name_replaces_youtube_video_id_fallback(self):
+        job_mock = SimpleNamespace(
+            job_id="job-1",
+            source_type="youtube_url",
+            source_ref="https://youtube.com/watch?v=P9YTKb5PgR0",
+            source_duration_seconds=None,
+            title="",
+            display_name="P9YTKb5PgR0",
+        )
+        db = AsyncMock()
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = job_mock
+        db.execute = AsyncMock(return_value=result)
+        db.commit = AsyncMock()
+
+        req = MagicMock()
+        req.body = AsyncMock(return_value=json.dumps({
+            "display_name": "普通亿万富翁谈接班",
+        }, ensure_ascii=False).encode())
+
+        resp = _run(update_source_metadata(req, "job-1", db))
+        body = json.loads(resp.body)
+        assert body["ok"] is True
+        assert body["display_name_updated"] is True
+        assert job_mock.display_name == "普通亿万富翁谈接班"
 
     def test_missing_job_returns_ok_with_note(self):
         db = AsyncMock()

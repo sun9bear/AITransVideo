@@ -224,6 +224,33 @@ def test_project_output_trims_segment_audio_to_its_time_slot_before_export(tmp_p
     assert len(AudioSegment.from_wav(exported_paths[1])) == 900
 
 
+def test_project_output_preserves_capped_dsp_overflow_audio(tmp_path: Path) -> None:
+    overflow_audio = _export_tone_wav(tmp_path / "sources" / "capped.wav", duration_ms=1_350)
+    output = _build_output(
+        tmp_path,
+        segments=[
+            _build_segment(
+                segment_id=1,
+                speaker_id="speaker_a",
+                display_name="Dan Koe",
+                start_ms=0,
+                end_ms=500,
+                cn_text="嗯，好。",
+                aligned_audio_path=overflow_audio,
+                alignment_method="capped_dsp_overflow",
+            ),
+        ],
+        total_duration_ms=2_000,
+        project_name="capped_dsp_overflow",
+    )
+
+    result = ProjectOutputWriter().write(output)
+    exported_paths = sorted((Path(result.segments_dir) / "speaker_a").glob("*.wav"))
+
+    assert len(exported_paths) == 1
+    assert len(AudioSegment.from_wav(exported_paths[0])) == 1_350
+
+
 def test_project_output_segment_file_name_matches_expected_format(tmp_path: Path) -> None:
     source_audio = _export_silent_wav(tmp_path / "sources" / "segment.wav", duration_ms=45_000)
     output = _build_output(

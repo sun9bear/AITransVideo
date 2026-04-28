@@ -4,8 +4,9 @@
 - 修订日期：2026-04-21（v2，吸收 CodeX 一审意见后重写）
 - 修订日期：2026-04-21（v3，吸收 Claude Code 二审 + CodeX 二审后重写；**方向性调整：US 继续作主节点，SG 先不启用**）
 - 修订日期：2026-04-21（v4，吸收 CodeX 三审后重写；**R2 走原生域名 + Phase 0/3 加探针 + MVP 目标降级**）
+- 修订日期：2026-04-27（v5，实施状态更新；**磁盘止血改由 100G 扩展卷承接，R2 继续承担下载后端与后续上传评估**）
 - 作者：sun9bear（Claude Opus 4.7 协助起草与修订）
-- 状态：**待实施**
+- 状态：**部分实施 / 运维路径已调整**
 - 依赖 / 关联：
   - `docs/plans/2026-04-16-background-task-system-plan.md`（后台任务系统，复用其 task 模型）
   - `docs/plans/2026-04-17-legacy-migration-cleanup.md`（内部 API key / config dir 约定）
@@ -76,6 +77,72 @@ v3 经 CodeX 三审后发现 R2 能力边界硬冲突 + 前端 payload 链路断
 
 ---
 
+## v5 实施状态更新（2026-04-27）
+
+本节记录 2026-04-24 至 2026-04-27 的实际线上推进结果。后续推进以本节为当前状态基线；v4 正文仍保留为中长期蓝图与回滚依据。
+
+### v5 关键结论
+
+1. **R2 不是当前磁盘止血主线**：v4 已修正过这一点，Phase 2 下载后端主要解决"源站出站带宽"和"为后续 TTL / 上传改造铺路"，不能单独阻止 pipeline workspace 在本地增长。
+2. **当前磁盘止血主线改为扩展卷**：已购买并挂载 100G SSD volume，后续任务缓存与最终结果目录继续沿用本地文件语义，但底层落到扩展卷。
+3. **代码层改动保持最小**：容器内路径仍为 `/opt/aivideotrans/app/projects`，应用层无需为扩展卷改代码；只改宿主机挂载源和 Compose/env 配置。
+4. **R2 后续定位不变**：继续作为下载后端、带宽优化、长期 artifact lifecycle、浏览器直传评估的基础设施；不再把"尽快迁全量对象存储"作为磁盘告急时的第一动作。
+
+### 已完成的线上动作
+
+| 日期 | 动作 | 结果 |
+|---|---|---|
+| 2026-04-22 | Phase 1 Cloudflare Tunnel 上线 | `cloudflared-us` 持续运行，公网入口经 Cloudflare 到 US 主机 |
+| 2026-04-25 | Phase 2 R2 下载后端上线 | 生产 `.env` 已启用 `AVT_DOWNLOAD_REDIRECT_BACKEND=r2`，配置 `R2_ARTIFACTS_BUCKET=avt-artifacts`；下载后端可 R2 兜底本地 |
+| 2026-04-27 | 清理已删除项目残留缓存 | 删除 76 个 orphan job 目录，释放约 `52.62GB`；根盘从约 `99%` 降到 `72%` |
+| 2026-04-27 | 挂载 100G 扩展卷并迁移 `projects/` | 新卷挂载到 `/mnt/HC_Volume_105524101`；`projects` 目录迁到 `/mnt/HC_Volume_105524101/aivideotrans/projects` |
+| 2026-04-27 | 切换容器数据挂载源 | `app` / `gateway` 的 project bind mount 均指向新卷；容器内路径不变 |
+
+### 当前生产路径基线
+
+| 项目 | 当前值 |
+|---|---|
+| US 主机 | `5.78.122.220` |
+| 根盘 | `/dev/sda1`，150G |
+| 扩展卷 | `/dev/sdb`，ext4，约 98G |
+| 扩展卷挂载点 | `/mnt/HC_Volume_105524101` |
+| 后续任务缓存 / 结果物理目录 | `/mnt/HC_Volume_105524101/aivideotrans/projects` |
+| 兼容路径 | `/opt/aivideotrans/data/projects -> /mnt/HC_Volume_105524101/aivideotrans/projects` |
+| 容器内项目路径 | `/opt/aivideotrans/app/projects` |
+| Compose 变量 | `AIVIDEOTRANS_PROJECTS_HOST_DIR=/mnt/HC_Volume_105524101/aivideotrans/projects` |
+| 配置备份 | `/opt/aivideotrans/docker-compose.yml.pre-volume-20260427T024641Z`、`/opt/aivideotrans/app/docker-compose.yml.pre-volume-20260427T024641Z`、`/opt/aivideotrans/config/.env.pre-volume-20260427T024641Z` |
+
+### 切换后验证快照
+
+| 检查项 | 结果 |
+|---|---|
+| 根盘空间 | `48G / 150G`，剩余 `97G`，使用率 `33%` |
+| 新卷空间 | `56G / 98G`，剩余 `38G`，使用率 `60%` |
+| `aivideotrans-app` | healthy，`/opt/aivideotrans/app/projects` bind 到新卷 |
+| `aivideotrans-gateway` | healthy，`/opt/aivideotrans/app/projects` 和 `/opt/aivideotrans/data/projects` bind 到新卷 |
+| Gateway health | `http://127.0.0.1:8880/gateway/health` 返回 OK |
+| Next 本地探测 | `http://127.0.0.1:3000/` 返回 OK |
+| 容器写入测试 | 写入 `/opt/aivideotrans/app/projects/.volume_write_test` 后确认文件落在新卷 |
+
+### 对后续任务推进的影响
+
+| 原推进项 | v5 后的处理 |
+|---|---|
+| Phase 2 R2 下载 | 保持现状，继续观测下载成功率、R2 lazy upload 和本地 fallback |
+| Phase 3 浏览器直传 R2 | 仍按 v4 的独立关卡推进，不因磁盘告急而提前上；先补上传探针和小流量灰度 |
+| Phase 5 TTL 清理 | 仍需要做，但优先级从"立刻救火"降为"稳定运营能力" |
+| US→SG 迁移 | 仍不启用；US 主节点 + 扩展卷当前足够支撑下一阶段 |
+| 旧项目结果访问 | 路径保持兼容；老记录里的 `project_dir` 仍可通过 `/opt/aivideotrans/data/projects` symlink 访问 |
+
+### v5 后续建议
+
+1. **先补监控而不是继续大迁移**：至少监控根盘、新卷、`projects/` 增长速度、R2 上传失败率、下载 fallback 次数。
+2. **新增任务默认继续落新卷**：不要再把新任务写回根盘；后续任何 Compose 改动都必须保留 `AIVIDEOTRANS_PROJECTS_HOST_DIR`。
+3. **TTL 清理按保守策略实现**：优先清理 orphan job 目录、已 purged job 目录、过期中间文件；不要直接删除用户仍能下载的最终结果。
+4. **R2 作为 artifact 分发与长期存储演进**：确认 R2 端 artifact 可回源后，再逐步缩短本地最终结果保留时间。
+
+---
+
 ## 0. 背景与目标
 
 ### 0.1 现状痛点
@@ -83,7 +150,7 @@ v3 经 CodeX 三审后发现 R2 能力边界硬冲突 + 前端 payload 链路断
 1. **网络隔离**：主要用户在中国大陆，当前单台美国服务器（`5.78.122.220`）大陆不可直连，测试用户用代理访问。
 2. **核心 API 境外绑定**：Gemini / AssemblyAI / YouTube 必须境外调用，国内无法替代。
 3. **TTS provider 全部在国内**：MiniMax（新加坡+北京）、VolcEngine 豆包、CosyVoice，境外服务器已验证可调用。
-4. **存储天花板**：当前 US 节点单盘 150 GB，单任务 1.4-2.8 GB（含源视频），百任务即爆。
+4. **存储天花板**：原 US 节点单盘 150 GB，单任务 1.4-2.8 GB（含源视频），百任务即爆。2026-04-27 已通过 100G 扩展卷承接 `projects/` 目录作为当前止血方案，详见 v5 实施状态更新。
 5. **上传/下载链路经 Python Gateway**：[gateway/upload.py:17](../../gateway/upload.py) 2 GB 限制，单请求无分片；[gateway/background_task_api.py:203-243](../../gateway/background_task_api.py) 老任务走 Python 进程流 zip。大陆上传美国必然超时。
 6. **域名未备案**：不走国内 CDN / OSS，需完全基于海外基础设施。
 7. **运维裸奔**：无监控、无备份、无告警、部署靠 `Deploy-Via-154.cmd` 手动脚本。
@@ -100,7 +167,7 @@ v3 经 CodeX 三审后发现 R2 能力边界硬冲突 + 前端 payload 链路断
 1. 大陆用户访问速度**相对 Phase 0 基线显著提升**（三网实测 LCP / API RTT / 下载速度改善比例参见 § 11.3 验收标准 + § 15 基线快照）
 2. 上传 2 GB 源视频**支持分片 + 断点续传**，**不经 Gateway Python 进程**
 3. 成品视频下载**走 CDN**，**不吃源站出站带宽**
-4. 本地磁盘占用**不再单调增长**（Phase 5 启用 TTL 清理后稳定）
+4. 本地磁盘占用**不再挤压根盘**（v5 已迁到扩展卷）；长期仍需 Phase 5 TTL 清理后稳定
 5. **零暴露源站 IP**（全部 Cloudflare Tunnel）
 6. 月度总成本**可控**（初期仅增加 R2 使用费；具体见 § 8 成本估算）
 
@@ -125,7 +192,7 @@ v3 经 CodeX 三审后发现 R2 能力边界硬冲突 + 前端 payload 链路断
 | D6 | 上传路径 | **浏览器 → R2 Multipart 直传**。Gateway 只发预签名 URL，不经手文件字节 |
 | D7 （v4 改）| 下载路径 | **Gateway 鉴权 → 302 跳转 R2 预签名 GET URL**。改造范围：`/job-api/jobs/{id}/download/{key}`（主下载）+ `/api/jobs/{id}/tasks/{task_id}/download`（materials pack）+ `/job-api/jobs/{id}/tts-segments-zip` + `/job-api/jobs/{id}/stream/{kind}`（**条件 opt-in**：≤25min 走 R2 302，>25min 保留本地 Range，见 D35）|
 | D8 （v3 改）| YouTube 下载流 | US 主节点本地 yt-dlp 下载到 `jobs/{job_id}/source.xxx`（现有流程不变）→ pipeline 完成后，**成品视频推 R2**（不是源视频）。源视频仅作为处理中间产物，由 Phase 5 的 TTL 清理处理 |
-| D9 | 本地磁盘策略 | 只存**处理中任务的临时产物**（30 天 TTL 清理）；成品立即推 R2 |
+| D9（v5 调整） | 本地磁盘策略 | 当前生产先用扩展卷承接 `projects/` 的处理中缓存和最终结果，避免挤压根盘；Phase 5 再补 TTL 清理。R2 已用于下载后端与长期 artifact 演进，但不再作为磁盘告急时的第一步迁移方案 |
 | D10 | PG 备份 | 每日 cron `pg_dump` → `gzip` → `aws s3 cp` 到 `r2://avt-backups/`，保留 30 天 |
 | D11 | 监控 | **Uptime Kuma 自建**（SG 上跑容器），免费，告警推飞书/TG webhook |
 | D12 （v4 改）| 域名结构 | **单域名 `app.yourdomain.com`**（保留现有 `NEXT_PUBLIC_JOB_API_BASE_URL` 相对路径默认值），所有 `/job-api/*` `/api/*` `/gateway/*` 都走同一域。cookie same-origin 不改。**R2 走原生域名 `<account>.r2.cloudflarestorage.com`**（D33 + v4：不配 custom domain）|
@@ -157,6 +224,7 @@ v3 经 CodeX 三审后发现 R2 能力边界硬冲突 + 前端 payload 链路断
 | **D38（v4 新增）** | Phase 3 降级为"可行性关卡" | Phase 3（R2 浏览器直传）**不再是 4 天确定实施**。判据：<br>- Phase 0 探针 ③ 上传成功率 ≥ 80% → Phase 3 按原计划推进（4d）<br>- 成功率 60-80% → Phase 3 先做**前端 UX 灰度 + 失败清晰提示**，不强切默认路径（+1d UI 工作）<br>- 成功率 < 60% → Phase 3 重评审：要么启用 Phase 2b 方向 B（但上传桶必须私有仍不解），要么推迟上传改造等 SG 迁移 |
 | **D39（v4 新增）| Phase 2b 下载链路备胎 | 触发条件：MVP 实测"应用访问正常，但 `*.r2.cloudflarestorage.com` 下载在三网任一不稳定"。方案：artifacts bucket 设 public + 绑 `files.yourdomain.com` custom domain + 部署 Cloudflare Worker 校验 Gateway 发的 HMAC 签名。上传链路**不变**（上传桶必须私有，仍走原生 R2 endpoint）。工时 +1-1.5d（Worker 开发 + HMAC 签名/校验 + 测试） |
 | **D40（v4 新增）| `force_local=1` 运维开关 | 下载端点（download / stream / tts-segments-zip）接受可选查询参数 `?force_local=1`；Gateway 识别后忽略 R2 key 直接走本地 FileResponse。仅用于紧急兜底（R2 不可用或 presign URL 大陆不通时手工切流）。默认不暴露给前端，运维手工 curl 调用或通过 feature flag 临时开启 |
+| **D41（v5 新增）| 当前磁盘止血策略 | **短期使用 100G 扩展卷承接 `/opt/aivideotrans/data/projects`**，物理路径为 `/mnt/HC_Volume_105524101/aivideotrans/projects`，容器内路径保持 `/opt/aivideotrans/app/projects`。R2 继续解决下载分发和长期 artifact 生命周期，不再作为磁盘告急时的第一步迁移方案 |
 
 ---
 
@@ -2656,6 +2724,16 @@ Phase 0 执行时填写，用于后续 Phase 验收对比。
 - Gateway 进程 RSS：`____ MB`
 - 日均出站带宽（GB/day）：`____`（Phase 2 对比必需）
 
+**v5 实测快照（2026-04-27，清理 + 扩展卷迁移后）**：
+
+| 指标 | 数值 |
+|---|---:|
+| 根盘 `/` | `48G / 150G`，使用率 `33%` |
+| 新卷 `/mnt/HC_Volume_105524101` | `56G / 98G`，使用率 `60%` |
+| `projects/` 目录 | `56G`，物理落点为 `/mnt/HC_Volume_105524101/aivideotrans/projects` |
+| Job 状态计数 | `succeeded=21`、`purged=54`、`running=3`（需后续判断是否为历史遗留状态） |
+| 清理释放 | orphan job cache 删除 `76` 个，约 `52.62GB` |
+
 ### 15.6 Phase N 上线后对比（重复填）
 
 | Phase | 日期 | 出站带宽下降 % | 电信下载变化 % | 联通下载变化 % | 移动下载变化 % | 磁盘变化 | Gateway CPU 变化 |
@@ -2984,11 +3062,11 @@ CodeX 四审**没有**提新架构问题，只指出 v4 初版在活跃章节还
 
 **v4 方案正式结束** — 共 19 节 + 附录 A/B/C。
 
-**实施优先级（v4 最终）**：
-1. **Phase 0（~1.5 天）** → 三探针跑完，数据进 § 15.2-15.4
-2. **Phase 1 + 2（MVP ~5d）** → 在 Phase 0 探针 ② 数据达标的前提下推进；不达标则启 Phase 2b 备胎（~1.5d）
-3. **MVP 放行三硬指标**（§ 11.3）通过 → 进 Phase 3
-4. **Phase 3（关卡，工时浮动）** → 由 Phase 0 探针 ③ 和 Phase 3 灰度测试两重判据决定 α/β/γ 路径
-5. **Phase 5 运维** + 可选 Phase 6 US→SG 迁移（附录 C）
+**实施优先级（v5 当前，2026-04-27 更新）**：
+1. **保持 Phase 1 + Phase 2 现状稳定**：Cloudflare Tunnel 与 R2 下载后端已上线，继续观测下载成功率、fallback 次数、源站出站带宽。
+2. **先补运维监控**：根盘、新卷、`projects/` 增长速度、容器健康、R2 lazy upload 失败率需要进入日常检查。
+3. **Phase 5 TTL 清理改为稳定性任务**：先做 orphan / purged / 过期中间文件清理，不直接删除仍可能被用户下载的最终结果。
+4. **Phase 3 浏览器直传仍按关卡推进**：由 Phase 0 探针 ③ 和灰度测试决定 α/β/γ 路径，不再因为磁盘告急而提前强推。
+5. **US→SG 仍保留为可选迁移**：当前 US 主节点 + 100G 扩展卷足够支撑下一阶段；SG 不作为近期主线。
 
-**v4 基于 CodeX 三审 + 四审（2026-04-21）修订**。R2 + custom domain 能力边界冲突已纠正，MVP 承诺降级为可验证硬指标，Phase 3 上传由独立关卡判据驱动，活跃章节无 v3 口径残留。本文档自此作为实施蓝图。
+**v5 基于 2026-04-27 线上实际操作修订**。R2 + custom domain 能力边界冲突仍按 v4 结论处理；磁盘告急的当前解法改为扩展卷承接本地 `projects/`，R2 继续作为下载分发、长期 artifact lifecycle 和后续浏览器直传的演进基础。本文档自此作为当前实施状态与后续推进蓝图。

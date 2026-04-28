@@ -87,7 +87,8 @@ class EditorPackageWriter:
                 f"{self._format_filename_timestamp(segment.end_ms)}.wav"
             )
             shutil.copy2(source_path, destination_path)
-            self._fit_segment_audio_to_slot(destination_path, segment)
+            if segment.alignment_method not in {"capped_dsp_overflow", "keep_original"}:
+                self._fit_segment_audio_to_slot(destination_path, segment)
             copied_path = Path(self._ensure_jianying_compatible(str(destination_path))).resolve(strict=False)
             if not copied_path.exists():
                 raise FileNotFoundError(f"导出分段音频失败：{copied_path}")
@@ -473,7 +474,14 @@ class EditorPackageWriter:
             lines.append(f"{speaker_label}（{display_name}）：{speaker_counts[speaker_id]}段")
 
         lines.extend(["", "对齐方式统计："])
-        for method in ("direct", "dsp", "rewrite_direct", "rewrite_dsp", "force_dsp"):
+        for method in (
+            "direct",
+            "dsp",
+            "rewrite_direct",
+            "rewrite_dsp",
+            "force_dsp",
+            "capped_dsp_overflow",
+        ):
             count = method_counts.get(method, 0)
             percentage = round((count / total_segments) * 100) if total_segments else 0
             lines.append(f"  {ALIGNMENT_METHOD_LABELS[method]}：{count}段（{percentage}%）")
@@ -830,6 +838,8 @@ class EditorPackageWriter:
     def _build_review_reason(self, segment: AlignedSegment) -> str:
         if segment.alignment_method == "force_dsp":
             return "强制DSP，变速幅度过大"
+        if segment.alignment_method == "capped_dsp_overflow":
+            return "短段听感保护，音频可能轻微跨段"
         if segment.alignment_method in {"rewrite_direct", "rewrite_dsp"}:
             return "Gemini重写后仍建议复查"
         if segment.alignment_method == "dsp":

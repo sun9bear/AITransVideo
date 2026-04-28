@@ -14,12 +14,28 @@ interface KActual {
   p90: number | null
 }
 
+interface CreditsActualSource {
+  source_counts: {
+    snapshot: number
+    ledger_derived: number
+    missing: number
+  }
+  snapshot_sum: number
+  ledger_derived_sum: number
+  effective_sum: number
+  ledger_capture_jobs: number
+  methodology: string
+}
+
 interface CostMetrics {
   window_days: number
   jobs_total: number
   credits_estimated_sum: number | null
   credits_actual_sum: number | null
+  credits_actual_effective_sum?: number | null
+  credits_actual_source?: CreditsActualSource
   estimate_actual_delta_pct: number | null
+  estimate_effective_delta_pct?: number | null
   k_actual: KActual
   rewrite_rate_pct: number | null
   rewrite_count_avg: number | null
@@ -114,6 +130,7 @@ interface Summary {
     recent: RecentEntry[]
   }
   metering: Record<string, number>
+  credits_actual_source?: CreditsActualSource
   reserve_capture_closeness: ClosenessInfo
   field_status: Record<string, FieldStatusValue>
 }
@@ -450,11 +467,25 @@ export default function CreditsMonitorPage() {
               value={fmt(metrics.credits_actual_sum)}
             />
             <Card
-              label="预估/实扣偏差率"
-              value={fmtPct(metrics.estimate_actual_delta_pct)}
+              label="实扣点数(有效)"
+              value={fmt(metrics.credits_actual_effective_sum ?? metrics.credits_actual_sum)}
+              sub={
+                metrics.credits_actual_source
+                  ? `snapshot ${metrics.credits_actual_source.source_counts.snapshot} / ledger ${metrics.credits_actual_source.source_counts.ledger_derived} / missing ${metrics.credits_actual_source.source_counts.missing}`
+                  : undefined
+              }
               highlight={
-                metrics.estimate_actual_delta_pct != null &&
-                Math.abs(metrics.estimate_actual_delta_pct) > 20
+                metrics.credits_actual_source?.source_counts.missing
+                  ? "warn"
+                  : undefined
+              }
+            />
+            <Card
+              label="预估/实扣偏差率"
+              value={fmtPct(metrics.estimate_effective_delta_pct ?? metrics.estimate_actual_delta_pct)}
+              highlight={
+                (metrics.estimate_effective_delta_pct ?? metrics.estimate_actual_delta_pct) != null &&
+                Math.abs(metrics.estimate_effective_delta_pct ?? metrics.estimate_actual_delta_pct ?? 0) > 20
                   ? "warn"
                   : undefined
               }

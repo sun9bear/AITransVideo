@@ -41,6 +41,7 @@ class TranscriptLine:
     speaker_id: str
     speaker_label: str
     source_text: str
+    dubbing_mode: str = "dub"
 
 
 @dataclass(slots=True)

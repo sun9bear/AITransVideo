@@ -1,0 +1,476 @@
+{
+  "generated_at": "2026-04-27T11:30:12.689277+00:00",
+  "audit_batch": "reports/benchmark/speaker_attribution_audit_batch_20260427.json",
+  "review_model": "gemini_pro",
+  "summary": {
+    "candidates_loaded": 24,
+    "start": 20,
+    "limit": 24,
+    "chunks": 8,
+    "decisions": 24,
+    "errors": 0,
+    "decision_counts": {
+      "s2_speaker": 13,
+      "asr_speaker": 5,
+      "distinct_speaker": 5,
+      "main_speaker": 1
+    },
+    "recommended_action_counts": {
+      "keep": 23,
+      "reassign_to_main": 1
+    }
+  },
+  "decisions": [
+    {
+      "candidate_id": "job_2439b210fc104f5f926a5d4f53e7e572_cand_003",
+      "decision": "asr_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly matches the assigned speaker (Joe Rogan) saying 'Yeah'."
+    },
+    {
+      "candidate_id": "job_2439b210fc104f5f926a5d4f53e7e572_cand_004",
+      "decision": "asr_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly matches the assigned speaker (Joe Rogan) asking the question."
+    },
+    {
+      "candidate_id": "job_2439b210fc104f5f926a5d4f53e7e572_cand_005",
+      "decision": "asr_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly matches the assigned speaker (Joe Rogan) asking the question."
+    },
+    {
+      "candidate_id": "job_2439b210fc104f5f926a5d4f53e7e572_cand_006",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly matches the assigned speaker (Joe Rogan)."
+    },
+    {
+      "candidate_id": "job_6940aeac0c7b442f809ef8fa1925302f_cand_001",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly matches the assigned speaker (Lenny)."
+    },
+    {
+      "candidate_id": "job_6940aeac0c7b442f809ef8fa1925302f_cand_002",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly matches the assigned speaker (Lenny)."
+    },
+    {
+      "candidate_id": "job_6940aeac0c7b442f809ef8fa1925302f_cand_003",
+      "decision": "distinct_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly features the male interviewer (Lenny), which matches the assigned speaker_b."
+    },
+    {
+      "candidate_id": "job_650a4d40b8eb423bb5307f3fe6d52acd_cand_001",
+      "decision": "distinct_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio is clearly Joe Rogan speaking, matching the assigned speaker_a."
+    },
+    {
+      "candidate_id": "job_650a4d40b8eb423bb5307f3fe6d52acd_cand_002",
+      "decision": "distinct_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The short interjection is spoken by a distinct voice (Chris Williamson), matching the assigned speaker_c."
+    },
+    {
+      "candidate_id": "job_650a4d40b8eb423bb5307f3fe6d52acd_cand_003",
+      "decision": "asr_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The voice saying 'Yeah' matches the assigned speaker (Joe Rogan)."
+    },
+    {
+      "candidate_id": "job_650a4d40b8eb423bb5307f3fe6d52acd_cand_004",
+      "decision": "main_speaker",
+      "confidence": "high",
+      "recommended_action": "reassign_to_main",
+      "reason": "The voice saying 'Uh, again, trite, right?' is clearly the main speaker (Naval Ravikant), continuing his previous thought."
+    },
+    {
+      "candidate_id": "job_650a4d40b8eb423bb5307f3fe6d52acd_cand_005",
+      "decision": "asr_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The voice asking the question matches the assigned speaker (Joe Rogan)."
+    },
+    {
+      "candidate_id": "job_650a4d40b8eb423bb5307f3fe6d52acd_cand_006",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly matches the assigned speaker (Joe Rogan)."
+    },
+    {
+      "candidate_id": "job_3066774da2a64848b2f4d1d2824e022b_cand_001",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly matches the assigned speaker (Dwarkesh Patel) interrupting."
+    },
+    {
+      "candidate_id": "job_3066774da2a64848b2f4d1d2824e022b_cand_002",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly matches the assigned speaker (Dwarkesh Patel) saying 'Yeah'."
+    },
+    {
+      "candidate_id": "job_3066774da2a64848b2f4d1d2824e022b_cand_003",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly shows speaker_a saying 'Yeah' as a backchannel response."
+    },
+    {
+      "candidate_id": "job_3066774da2a64848b2f4d1d2824e022b_cand_004",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "Speaker_a clearly answers 'Yes' to the question asked by speaker_b."
+    },
+    {
+      "candidate_id": "job_3066774da2a64848b2f4d1d2824e022b_cand_005",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "Speaker_a clearly says 'Yeah' in agreement."
+    },
+    {
+      "candidate_id": "job_3066774da2a64848b2f4d1d2824e022b_cand_006",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The brief interruption matches the interviewer's voice."
+    },
+    {
+      "candidate_id": "job_f08cabc1267642b98a9d774a9e2a5da4_cand_001",
+      "decision": "distinct_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The speaker is explicitly introduced as Andrew and the voice matches a distinct male speaker."
+    },
+    {
+      "candidate_id": "job_f08cabc1267642b98a9d774a9e2a5da4_cand_002",
+      "decision": "distinct_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The voice matches the distinct male speaker continuing his thought."
+    },
+    {
+      "candidate_id": "job_f08cabc1267642b98a9d774a9e2a5da4_cand_003",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly features the female interviewer's voice, matching the assigned speaker."
+    },
+    {
+      "candidate_id": "job_f08cabc1267642b98a9d774a9e2a5da4_cand_004",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly features the female interviewer's voice asking the question, matching the assigned speaker."
+    },
+    {
+      "candidate_id": "job_f08cabc1267642b98a9d774a9e2a5da4_cand_005",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio features the male co-host's voice, matching the assigned speaker."
+    }
+  ],
+  "errors": [],
+  "responses": [
+    {
+      "model": "gemini_pro",
+      "model_id": "gemini-3.1-pro-preview",
+      "candidate_ids": [
+        "job_2439b210fc104f5f926a5d4f53e7e572_cand_003",
+        "job_2439b210fc104f5f926a5d4f53e7e572_cand_004",
+        "job_2439b210fc104f5f926a5d4f53e7e572_cand_005"
+      ],
+      "raw_text": "{\n  \"decisions\": [\n    {\n      \"candidate_id\": \"job_2439b210fc104f5f926a5d4f53e7e572_cand_003\",\n      \"decision\": \"asr_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly matches the assigned speaker (Joe Rogan) saying 'Yeah'.\"\n    },\n    {\n      \"candidate_id\": \"job_2439b210fc104f5f926a5d4f53e7e572_cand_004\",\n      \"decision\": \"asr_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly matches the assigned speaker (Joe Rogan) asking the question.\"\n    },\n    {\n      \"candidate_id\": \"job_2439b210fc104f5f926a5d4f53e7e572_cand_005\",\n      \"decision\": \"asr_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly matches the assigned speaker (Joe Rogan) asking the question.\"\n    }\n  ]\n}",
+      "parsed": {
+        "decisions": [
+          {
+            "candidate_id": "job_2439b210fc104f5f926a5d4f53e7e572_cand_003",
+            "decision": "asr_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly matches the assigned speaker (Joe Rogan) saying 'Yeah'."
+          },
+          {
+            "candidate_id": "job_2439b210fc104f5f926a5d4f53e7e572_cand_004",
+            "decision": "asr_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly matches the assigned speaker (Joe Rogan) asking the question."
+          },
+          {
+            "candidate_id": "job_2439b210fc104f5f926a5d4f53e7e572_cand_005",
+            "decision": "asr_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly matches the assigned speaker (Joe Rogan) asking the question."
+          }
+        ]
+      }
+    },
+    {
+      "model": "gemini_pro",
+      "model_id": "gemini-3.1-pro-preview",
+      "candidate_ids": [
+        "job_2439b210fc104f5f926a5d4f53e7e572_cand_006",
+        "job_6940aeac0c7b442f809ef8fa1925302f_cand_001",
+        "job_6940aeac0c7b442f809ef8fa1925302f_cand_002"
+      ],
+      "raw_text": "{\n  \"decisions\": [\n    {\n      \"candidate_id\": \"job_2439b210fc104f5f926a5d4f53e7e572_cand_006\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly matches the assigned speaker (Joe Rogan).\"\n    },\n    {\n      \"candidate_id\": \"job_6940aeac0c7b442f809ef8fa1925302f_cand_001\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly matches the assigned speaker (Lenny).\"\n    },\n    {\n      \"candidate_id\": \"job_6940aeac0c7b442f809ef8fa1925302f_cand_002\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly matches the assigned speaker (Lenny).\"\n    }\n  ]\n}",
+      "parsed": {
+        "decisions": [
+          {
+            "candidate_id": "job_2439b210fc104f5f926a5d4f53e7e572_cand_006",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly matches the assigned speaker (Joe Rogan)."
+          },
+          {
+            "candidate_id": "job_6940aeac0c7b442f809ef8fa1925302f_cand_001",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly matches the assigned speaker (Lenny)."
+          },
+          {
+            "candidate_id": "job_6940aeac0c7b442f809ef8fa1925302f_cand_002",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly matches the assigned speaker (Lenny)."
+          }
+        ]
+      }
+    },
+    {
+      "model": "gemini_pro",
+      "model_id": "gemini-3.1-pro-preview",
+      "candidate_ids": [
+        "job_6940aeac0c7b442f809ef8fa1925302f_cand_003",
+        "job_650a4d40b8eb423bb5307f3fe6d52acd_cand_001",
+        "job_650a4d40b8eb423bb5307f3fe6d52acd_cand_002"
+      ],
+      "raw_text": "{\n  \"decisions\": [\n    {\n      \"candidate_id\": \"job_6940aeac0c7b442f809ef8fa1925302f_cand_003\",\n      \"decision\": \"distinct_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly features the male interviewer (Lenny), which matches the assigned speaker_b.\"\n    },\n    {\n      \"candidate_id\": \"job_650a4d40b8eb423bb5307f3fe6d52acd_cand_001\",\n      \"decision\": \"distinct_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio is clearly Joe Rogan speaking, matching the assigned speaker_a.\"\n    },\n    {\n      \"candidate_id\": \"job_650a4d40b8eb423bb5307f3fe6d52acd_cand_002\",\n      \"decision\": \"distinct_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The short interjection is spoken by a distinct voice (Chris Williamson), matching the assigned speaker_c.\"\n    }\n  ]\n}",
+      "parsed": {
+        "decisions": [
+          {
+            "candidate_id": "job_6940aeac0c7b442f809ef8fa1925302f_cand_003",
+            "decision": "distinct_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly features the male interviewer (Lenny), which matches the assigned speaker_b."
+          },
+          {
+            "candidate_id": "job_650a4d40b8eb423bb5307f3fe6d52acd_cand_001",
+            "decision": "distinct_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio is clearly Joe Rogan speaking, matching the assigned speaker_a."
+          },
+          {
+            "candidate_id": "job_650a4d40b8eb423bb5307f3fe6d52acd_cand_002",
+            "decision": "distinct_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The short interjection is spoken by a distinct voice (Chris Williamson), matching the assigned speaker_c."
+          }
+        ]
+      }
+    },
+    {
+      "model": "gemini_pro",
+      "model_id": "gemini-3.1-pro-preview",
+      "candidate_ids": [
+        "job_650a4d40b8eb423bb5307f3fe6d52acd_cand_003",
+        "job_650a4d40b8eb423bb5307f3fe6d52acd_cand_004",
+        "job_650a4d40b8eb423bb5307f3fe6d52acd_cand_005"
+      ],
+      "raw_text": "{\n  \"decisions\": [\n    {\n      \"candidate_id\": \"job_650a4d40b8eb423bb5307f3fe6d52acd_cand_003\",\n      \"decision\": \"asr_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The voice saying 'Yeah' matches the assigned speaker (Joe Rogan).\"\n    },\n    {\n      \"candidate_id\": \"job_650a4d40b8eb423bb5307f3fe6d52acd_cand_004\",\n      \"decision\": \"main_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"reassign_to_main\",\n      \"reason\": \"The voice saying 'Uh, again, trite, right?' is clearly the main speaker (Naval Ravikant), continuing his previous thought.\"\n    },\n    {\n      \"candidate_id\": \"job_650a4d40b8eb423bb5307f3fe6d52acd_cand_005\",\n      \"decision\": \"asr_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The voice asking the question matches the assigned speaker (Joe Rogan).\"\n    }\n  ]\n}",
+      "parsed": {
+        "decisions": [
+          {
+            "candidate_id": "job_650a4d40b8eb423bb5307f3fe6d52acd_cand_003",
+            "decision": "asr_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The voice saying 'Yeah' matches the assigned speaker (Joe Rogan)."
+          },
+          {
+            "candidate_id": "job_650a4d40b8eb423bb5307f3fe6d52acd_cand_004",
+            "decision": "main_speaker",
+            "confidence": "high",
+            "recommended_action": "reassign_to_main",
+            "reason": "The voice saying 'Uh, again, trite, right?' is clearly the main speaker (Naval Ravikant), continuing his previous thought."
+          },
+          {
+            "candidate_id": "job_650a4d40b8eb423bb5307f3fe6d52acd_cand_005",
+            "decision": "asr_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The voice asking the question matches the assigned speaker (Joe Rogan)."
+          }
+        ]
+      }
+    },
+    {
+      "model": "gemini_pro",
+      "model_id": "gemini-3.1-pro-preview",
+      "candidate_ids": [
+        "job_650a4d40b8eb423bb5307f3fe6d52acd_cand_006",
+        "job_3066774da2a64848b2f4d1d2824e022b_cand_001",
+        "job_3066774da2a64848b2f4d1d2824e022b_cand_002"
+      ],
+      "raw_text": "{\n  \"decisions\": [\n    {\n      \"candidate_id\": \"job_650a4d40b8eb423bb5307f3fe6d52acd_cand_006\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly matches the assigned speaker (Joe Rogan).\"\n    },\n    {\n      \"candidate_id\": \"job_3066774da2a64848b2f4d1d2824e022b_cand_001\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly matches the assigned speaker (Dwarkesh Patel) interrupting.\"\n    },\n    {\n      \"candidate_id\": \"job_3066774da2a64848b2f4d1d2824e022b_cand_002\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly matches the assigned speaker (Dwarkesh Patel) saying 'Yeah'.\"\n    }\n  ]\n}",
+      "parsed": {
+        "decisions": [
+          {
+            "candidate_id": "job_650a4d40b8eb423bb5307f3fe6d52acd_cand_006",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly matches the assigned speaker (Joe Rogan)."
+          },
+          {
+            "candidate_id": "job_3066774da2a64848b2f4d1d2824e022b_cand_001",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly matches the assigned speaker (Dwarkesh Patel) interrupting."
+          },
+          {
+            "candidate_id": "job_3066774da2a64848b2f4d1d2824e022b_cand_002",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly matches the assigned speaker (Dwarkesh Patel) saying 'Yeah'."
+          }
+        ]
+      }
+    },
+    {
+      "model": "gemini_pro",
+      "model_id": "gemini-3.1-pro-preview",
+      "candidate_ids": [
+        "job_3066774da2a64848b2f4d1d2824e022b_cand_003",
+        "job_3066774da2a64848b2f4d1d2824e022b_cand_004",
+        "job_3066774da2a64848b2f4d1d2824e022b_cand_005"
+      ],
+      "raw_text": "{\n  \"decisions\": [\n    {\n      \"candidate_id\": \"job_3066774da2a64848b2f4d1d2824e022b_cand_003\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly shows speaker_a saying 'Yeah' as a backchannel response.\"\n    },\n    {\n      \"candidate_id\": \"job_3066774da2a64848b2f4d1d2824e022b_cand_004\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"Speaker_a clearly answers 'Yes' to the question asked by speaker_b.\"\n    },\n    {\n      \"candidate_id\": \"job_3066774da2a64848b2f4d1d2824e022b_cand_005\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"Speaker_a clearly says 'Yeah' in agreement.\"\n    }\n  ]\n}",
+      "parsed": {
+        "decisions": [
+          {
+            "candidate_id": "job_3066774da2a64848b2f4d1d2824e022b_cand_003",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly shows speaker_a saying 'Yeah' as a backchannel response."
+          },
+          {
+            "candidate_id": "job_3066774da2a64848b2f4d1d2824e022b_cand_004",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "Speaker_a clearly answers 'Yes' to the question asked by speaker_b."
+          },
+          {
+            "candidate_id": "job_3066774da2a64848b2f4d1d2824e022b_cand_005",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "Speaker_a clearly says 'Yeah' in agreement."
+          }
+        ]
+      }
+    },
+    {
+      "model": "gemini_pro",
+      "model_id": "gemini-3.1-pro-preview",
+      "candidate_ids": [
+        "job_3066774da2a64848b2f4d1d2824e022b_cand_006",
+        "job_f08cabc1267642b98a9d774a9e2a5da4_cand_001",
+        "job_f08cabc1267642b98a9d774a9e2a5da4_cand_002"
+      ],
+      "raw_text": "{\n  \"decisions\": [\n    {\n      \"candidate_id\": \"job_3066774da2a64848b2f4d1d2824e022b_cand_006\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The brief interruption matches the interviewer's voice.\"\n    },\n    {\n      \"candidate_id\": \"job_f08cabc1267642b98a9d774a9e2a5da4_cand_001\",\n      \"decision\": \"distinct_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The speaker is explicitly introduced as Andrew and the voice matches a distinct male speaker.\"\n    },\n    {\n      \"candidate_id\": \"job_f08cabc1267642b98a9d774a9e2a5da4_cand_002\",\n      \"decision\": \"distinct_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The voice matches the distinct male speaker continuing his thought.\"\n    }\n  ]\n}",
+      "parsed": {
+        "decisions": [
+          {
+            "candidate_id": "job_3066774da2a64848b2f4d1d2824e022b_cand_006",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The brief interruption matches the interviewer's voice."
+          },
+          {
+            "candidate_id": "job_f08cabc1267642b98a9d774a9e2a5da4_cand_001",
+            "decision": "distinct_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The speaker is explicitly introduced as Andrew and the voice matches a distinct male speaker."
+          },
+          {
+            "candidate_id": "job_f08cabc1267642b98a9d774a9e2a5da4_cand_002",
+            "decision": "distinct_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The voice matches the distinct male speaker continuing his thought."
+          }
+        ]
+      }
+    },
+    {
+      "model": "gemini_pro",
+      "model_id": "gemini-3.1-pro-preview",
+      "candidate_ids": [
+        "job_f08cabc1267642b98a9d774a9e2a5da4_cand_003",
+        "job_f08cabc1267642b98a9d774a9e2a5da4_cand_004",
+        "job_f08cabc1267642b98a9d774a9e2a5da4_cand_005"
+      ],
+      "raw_text": "{\n  \"decisions\": [\n    {\n      \"candidate_id\": \"job_f08cabc1267642b98a9d774a9e2a5da4_cand_003\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly features the female interviewer's voice, matching the assigned speaker.\"\n    },\n    {\n      \"candidate_id\": \"job_f08cabc1267642b98a9d774a9e2a5da4_cand_004\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly features the female interviewer's voice asking the question, matching the assigned speaker.\"\n    },\n    {\n      \"candidate_id\": \"job_f08cabc1267642b98a9d774a9e2a5da4_cand_005\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio features the male co-host's voice, matching the assigned speaker.\"\n    }\n  ]\n}",
+      "parsed": {
+        "decisions": [
+          {
+            "candidate_id": "job_f08cabc1267642b98a9d774a9e2a5da4_cand_003",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly features the female interviewer's voice, matching the assigned speaker."
+          },
+          {
+            "candidate_id": "job_f08cabc1267642b98a9d774a9e2a5da4_cand_004",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly features the female interviewer's voice asking the question, matching the assigned speaker."
+          },
+          {
+            "candidate_id": "job_f08cabc1267642b98a9d774a9e2a5da4_cand_005",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio features the male co-host's voice, matching the assigned speaker."
+          }
+        ]
+      }
+    }
+  ]
+}

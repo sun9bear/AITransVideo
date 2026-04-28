@@ -1,0 +1,30 @@
+{
+  "benchmark_id": "bench_003",
+  "source_job_hash": "0ca4d5e6b5c9",
+  "source_index": 3,
+  "selection_reasons": [
+    "pre_tts_contradiction",
+    "speaker_correction",
+    "high_rewrite",
+    "force_dsp",
+    "provider:minimax"
+  ],
+  "metrics": {
+    "artifact_available": true,
+    "segment_count": 16,
+    "rewrite_segments": 10,
+    "rewrite_segment_rate": 0.625,
+    "rewrite_count": 12,
+    "needs_review_segments": 3,
+    "needs_review_rate": 0.1875,
+    "force_dsp_segments": 3,
+    "pre_tts_events": 7,
+    "pre_tts_contradictions": 6,
+    "speaker_corrections": 1,
+    "speaker_correction_duration_p50_ms": 9840.0,
+    "target_duration_p50_ms": 14770.0,
+    "provider": "minimax",
+    "tts_model": "speech-2.8-turbo",
+    "service_mode": "studio"
+  }
+}

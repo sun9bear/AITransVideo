@@ -21,39 +21,41 @@ from src.services.jobs.display_name import (
 from src.utils.text_width import display_width
 
 
-# --- Branch 1: YouTube + non-empty title ----------------------------------
+# --- Branch 1: YouTube placeholder ----------------------------------------
 
 
-def test_youtube_short_title_kept_as_is() -> None:
+def test_youtube_uses_chinese_placeholder_even_when_title_exists() -> None:
     inp = DisplayNameInput(
         source_type="youtube_url",
         source_ref="https://youtube.com/watch?v=abc",
         youtube_title="Short Title",
+        user_local_date=date(2026, 4, 18),
+        upload_sequence_today=1,
     )
-    assert generate_display_name(inp, set()) == "Short Title"
+    assert generate_display_name(inp, set()) == "油管视频 2026-04-18 001"
 
 
-def test_youtube_long_title_truncated_to_width() -> None:
+def test_youtube_placeholder_ignores_long_title() -> None:
     long_title = "这是一个非常非常非常非常非常长的视频标题"  # much > 24 units
     inp = DisplayNameInput(
         source_type="youtube_url",
         source_ref="https://youtube.com/watch?v=abc",
         youtube_title=long_title,
+        user_local_date=date(2026, 4, 18),
+        upload_sequence_today=2,
     )
-    result = generate_display_name(inp, set())
-    assert display_width(result) <= DEFAULT_TITLE_WIDTH
-    assert long_title.startswith(result)
+    assert generate_display_name(inp, set()) == "油管视频 2026-04-18 002"
 
 
-def test_youtube_unicode_title_never_splits_mid_char() -> None:
+def test_youtube_placeholder_pads_sequence() -> None:
     inp = DisplayNameInput(
         source_type="youtube_url",
         source_ref="https://youtube.com/watch?v=abc",
         youtube_title="你好世界12345abc",
+        user_local_date=date(2026, 4, 18),
+        upload_sequence_today=7,
     )
-    result = generate_display_name(inp, set())
-    # Must be a prefix of the input
-    assert inp.youtube_title.startswith(result)
+    assert generate_display_name(inp, set()) == "油管视频 2026-04-18 007"
 
 
 # --- Branch 2: YouTube + empty title → falls through to Branch 4 ----------
@@ -67,7 +69,7 @@ def test_youtube_empty_title_falls_through_to_branch_4() -> None:
         user_local_date=date(2026, 4, 18),
         upload_sequence_today=7,
     )
-    assert generate_display_name(inp, set()) == "上传视频 2026-04-18 007"
+    assert generate_display_name(inp, set()) == "油管视频 2026-04-18 007"
 
 
 def test_youtube_whitespace_only_title_falls_through() -> None:
@@ -78,7 +80,7 @@ def test_youtube_whitespace_only_title_falls_through() -> None:
         user_local_date=date(2026, 4, 18),
         upload_sequence_today=1,
     )
-    assert generate_display_name(inp, set()) == "上传视频 2026-04-18 001"
+    assert generate_display_name(inp, set()) == "油管视频 2026-04-18 001"
 
 
 def test_youtube_none_title_falls_through() -> None:
@@ -89,19 +91,21 @@ def test_youtube_none_title_falls_through() -> None:
         user_local_date=date(2026, 4, 18),
         upload_sequence_today=42,
     )
-    assert generate_display_name(inp, set()) == "上传视频 2026-04-18 042"
+    assert generate_display_name(inp, set()) == "油管视频 2026-04-18 042"
 
 
 # --- Branch 3: local upload with filename ---------------------------------
 
 
-def test_local_uses_filename_stem_stripped_of_extension() -> None:
+def test_local_english_filename_falls_through_to_branch_4() -> None:
     inp = DisplayNameInput(
         source_type="local_video",
         source_ref="local://upload",
         local_filename="my_video.mp4",
+        user_local_date=date(2026, 4, 18),
+        upload_sequence_today=3,
     )
-    assert generate_display_name(inp, set()) == "my_video"
+    assert generate_display_name(inp, set()) == "上传视频 2026-04-18 003"
 
 
 def test_local_with_chinese_filename() -> None:
@@ -117,21 +121,21 @@ def test_local_long_filename_truncated() -> None:
     inp = DisplayNameInput(
         source_type="local_video",
         source_ref="local://upload",
-        local_filename="a_very_long_filename_that_should_be_truncated_at_24_units.mp4",
+        local_filename="这是一个非常非常非常非常非常长的视频文件名.mp4",
     )
     result = generate_display_name(inp, set())
     assert display_width(result) <= DEFAULT_TITLE_WIDTH
 
 
-def test_local_dotfile_without_basename_falls_back_to_branch_4() -> None:
-    # ".hidden" → splitext → (".hidden", "") → stem = ".hidden" (non-empty)
-    # So it should keep ".hidden" as the name, NOT branch 4.
+def test_local_dotfile_without_chinese_name_falls_back_to_branch_4() -> None:
     inp = DisplayNameInput(
         source_type="local_video",
         source_ref="local://upload",
         local_filename=".hidden",
+        user_local_date=date(2026, 4, 18),
+        upload_sequence_today=4,
     )
-    assert generate_display_name(inp, set()) == ".hidden"
+    assert generate_display_name(inp, set()) == "上传视频 2026-04-18 004"
 
 
 # --- Branch 4: no filename ------------------------------------------------
@@ -231,13 +235,15 @@ def test_collision_returns_last_candidate_when_all_retries_fail() -> None:
 # --- End-to-end via generate_display_name ---------------------------------
 
 
-def test_youtube_title_collides_with_existing_gets_suffix() -> None:
+def test_youtube_placeholder_collides_with_existing_gets_suffix() -> None:
     inp = DisplayNameInput(
         source_type="youtube_url",
         source_ref="https://youtube.com/watch?v=abc",
         youtube_title="Shared Name",
+        user_local_date=date(2026, 4, 18),
+        upload_sequence_today=1,
     )
     rng = random.Random(7)
-    result = generate_display_name(inp, {"Shared Name"}, rng=rng)
-    assert result.startswith("Shared Name_")
-    assert result != "Shared Name"
+    result = generate_display_name(inp, {"油管视频 2026-04-18 001"}, rng=rng)
+    assert result.startswith("油管视频 2026-04-18 001_")
+    assert result != "油管视频 2026-04-18 001"

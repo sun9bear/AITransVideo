@@ -196,6 +196,22 @@ class TranslationError(Exception):
     pass
 
 
+DUBBING_MODE_DUB = "dub"
+DUBBING_MODE_KEEP_ORIGINAL = "keep_original"
+VALID_DUBBING_MODES = {DUBBING_MODE_DUB, DUBBING_MODE_KEEP_ORIGINAL}
+
+
+def normalize_dubbing_mode(value: object) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in VALID_DUBBING_MODES:
+        return normalized
+    return DUBBING_MODE_DUB
+
+
+def is_keep_original_dubbing_mode(value: object) -> bool:
+    return normalize_dubbing_mode(value) == DUBBING_MODE_KEEP_ORIGINAL
+
+
 @dataclass(slots=True)
 class DubbingSegment:
     segment_id: int
@@ -222,9 +238,11 @@ class DubbingSegment:
     selected_voice: str = ""   # actual voice used for TTS (populated after TTS generation)
     match_confidence: str = "" # "high" / "medium" / "low" (populated after TTS generation)
     tts_provider: str = ""     # per-speaker TTS provider override (set by voice_selection_review)
+    tts_model_key: str = ""    # actual TTS model/resource key used for speed profiling
     # Phase 2 Task 0 metrics — translation-duration-alignment
     catalog_hit: bool = False           # speaker's voice_id was found in voice_catalog with chars_per_second
     first_pass_duration_ms: int = 0     # raw TTS output duration BEFORE any rewrite/DSP (snapshot at S5 entry)
+    first_pass_cn_text: str = ""        # text used for that first-pass TTS, before any post-TTS rewrite
     first_pass_error_pct: float = 0.0   # (first_pass_duration_ms - target_duration_ms) / target_duration_ms (sign preserved)
     dsp_speed_param: float = 1.0        # Task 1 will populate; 1.0 means "no speed adjustment / not yet implemented"
     # CodeX P2-3: target Chinese chars/sec for the speaker, derived from
@@ -237,6 +255,77 @@ class DubbingSegment:
     # exhausted). Mirrors TTSResult.fallback_used_provider and ends up in
     # the segment manifest so users can audit voice substitutions.
     fallback_used_provider: str | None = None
+    # P0 observability: pre-TTS rewrite audit fields. These do not affect
+    # alignment behavior; they make duration-gate contradictions measurable.
+    pre_tts_rewrite_direction: str = ""
+    pre_tts_estimate_ms: int = 0
+    pre_tts_target_ms: int = 0
+    pre_tts_pre_chars: int = 0
+    pre_tts_post_chars: int = 0
+    pre_tts_post_tts_first_pass_ms: int = 0
+    pre_tts_contradiction: bool = False
+    pre_tts_harmful_contradiction: bool = False
+    pre_tts_rewrite_task: str = ""
+    pre_tts_rewrite_retry_attempted: bool = False
+    pre_tts_rewrite_retry_accepted: bool = False
+    pre_tts_rewrite_initial_rejected_reason: str = ""
+    pre_tts_rewrite_rejected: bool = False
+    pre_tts_rewrite_rejected_reason: str = ""
+    pre_tts_rewrite_rejected_direction: str = ""
+    pre_tts_rewrite_rejected_estimate_ms: int = 0
+    pre_tts_rewrite_rejected_target_ms: int = 0
+    pre_tts_rewrite_rejected_pre_chars: int = 0
+    pre_tts_rewrite_rejected_post_chars: int = 0
+    pre_tts_rewrite_rejected_lower_chars: int = 0
+    pre_tts_rewrite_rejected_upper_chars: int = 0
+    # P1-i/P1-j: deterministic short-segment handling audit fields.
+    force_dsp_severity: str = ""              # low / medium / high for final force_dsp
+    force_dsp_review_suppressed: bool = False # true when a short backchannel is auto-denoised
+    force_dsp_review_reason: str = ""
+    # P1-m: main alignment DSP fit audit. Underflow caps slow down short audio
+    # and pad the remaining slot with silence instead of extreme slow-mo.
+    dsp_speed_ratio_used: float = 1.0
+    dsp_silence_padded_ms: int = 0
+    dsp_truncated_ms: int = 0
+    dsp_initial_duration_ms: int = 0
+    dsp_trimmed_duration_ms: int = 0
+    dsp_stretched_duration_ms: int = 0
+    short_merge_candidate: bool = False       # safe same-speaker merge candidate
+    short_merge_target_segment_id: int = 0
+    short_merge_reason: str = ""
+    short_merge_blocked_reason: str = ""
+    short_merge_applied: bool = False
+    short_merge_absorbed_segment_ids: str = "" # comma-separated original segment ids
+    # P2 speaker-structure audit fields. These are deterministic metadata from
+    # transcript durations; they do not change speaker assignment by themselves.
+    speaker_role: str = ""              # primary / incidental / fragmented
+    speaker_role_label: str = ""
+    speaker_duration_ms: int = 0
+    speaker_duration_share: float = 0.0
+    speaker_segment_count: int = 0
+    speaker_short_segment_count: int = 0
+    speaker_short_segment_rate: float = 0.0
+    speaker_structure_reason: str = ""
+    speaker_review_hint: str = ""
+    # Segment-level user intent from voice-selection review.
+    # "dub" follows normal translate/TTS/alignment; "keep_original" skips
+    # translation/TTS and overlays the matching original-audio slice.
+    dubbing_mode: str = DUBBING_MODE_DUB
+    # P4-lite: deterministic low-information cue routing. Some timer/filler
+    # cues are too short to dub naturally into long action slots; after capped
+    # underflow DSP, the pipeline may preserve the original slice instead.
+    auto_keep_original_reason: str = ""
+    auto_keep_original_source: str = ""
+    # P1-n: compact spoken rewrite for short, contentful Q&A segments that
+    # would otherwise enter force-DSP because literal Chinese is too long.
+    short_content_compact_attempted: bool = False
+    short_content_compact_accepted: bool = False
+    short_content_compact_rejected_reason: str = ""
+    short_content_compact_class: str = ""
+    short_content_compact_lower_chars: int = 0
+    short_content_compact_upper_chars: int = 0
+    short_content_compact_pre_chars: int = 0
+    short_content_compact_post_chars: int = 0
 
 
 @dataclass(slots=True)
@@ -286,6 +375,8 @@ class GeminiTranslator:
         self.model: Any | None = None
         self._types_module: Any | None = None
         self._legacy_sdk: Any | None = None
+        self._usage_meter: Any | None = None
+        self._metering_usage_context = ""
 
         if _skip_init:
             return
@@ -300,6 +391,44 @@ class GeminiTranslator:
         from services.gemini.client_factory import create_gemini_client
         self.client = create_gemini_client(api_key=normalized_api_key)
         self._types_module = _load_google_genai_types()
+
+    def set_usage_meter(self, usage_meter: Any | None) -> None:
+        self._usage_meter = usage_meter
+
+    def _record_llm_usage(
+        self,
+        *,
+        task: str,
+        model_name: str,
+        prompt: str,
+        response_text: str,
+        attempt_label: str = "",
+        provider: str | None = None,
+        model_id: str | None = None,
+    ) -> None:
+        meter = getattr(self, "_usage_meter", None)
+        if meter is None:
+            return
+        try:
+            info = _MODEL_REGISTRY.get(model_name, {})
+            provider_name = provider or str(info.get("provider", "gemini"))
+            resolved_model_id = model_id or (
+                _resolve_model_id(model_name)
+                if model_name in _MODEL_REGISTRY
+                else model_name
+            )
+            meter.record_llm(
+                task=task,
+                phase=getattr(self, "_metering_usage_context", "") or "",
+                provider=provider_name,
+                model=model_name,
+                model_id=resolved_model_id,
+                input_text=prompt,
+                output_text=response_text,
+                attempt_label=attempt_label,
+            )
+        except Exception as exc:
+            print(f"[metering] LLM usage record skipped: {exc}", flush=True)
 
     def translate(
         self,
@@ -353,6 +482,10 @@ class GeminiTranslator:
             _write_json(output_path, asdict(result))
             return result
 
+        translatable_groups = [
+            group for group in groups
+            if not is_keep_original_dubbing_mode(group.get("dubbing_mode"))
+        ]
         fingerprint = self._build_translation_fingerprint(
             groups,
             video_title=video_title,
@@ -361,15 +494,16 @@ class GeminiTranslator:
         translated_items = self._load_translation_checkpoint(
             checkpoint_path,
             expected_fingerprint=fingerprint,
+            expected_segment_ids=[int(group["segment_id"]) for group in translatable_groups],
         )
-        if len(translated_items) > len(groups):
+        if len(translated_items) > len(translatable_groups):
             translated_items = []
 
         if translated_items:
-            print(f"[S3] 检测到翻译断点，恢复 {len(translated_items)}/{len(groups)} 段")
+            print(f"[S3] 检测到翻译断点，恢复 {len(translated_items)}/{len(translatable_groups)} 段")
 
-        for batch_start in range(len(translated_items), len(groups), DEFAULT_BATCH_SIZE):
-            batch = groups[batch_start:batch_start + DEFAULT_BATCH_SIZE]
+        for batch_start in range(len(translated_items), len(translatable_groups), DEFAULT_BATCH_SIZE):
+            batch = translatable_groups[batch_start:batch_start + DEFAULT_BATCH_SIZE]
             translated_items.extend(
                 self._translate_batch_with_length_retry(
                     batch,
@@ -382,20 +516,30 @@ class GeminiTranslator:
                 checkpoint_path,
                 fingerprint=fingerprint,
                 translated_items=translated_items,
-                total_groups=len(groups),
+                total_groups=len(translatable_groups),
             )
-            completed_count = min(batch_start + DEFAULT_BATCH_SIZE, len(groups))
-            print(f"[S3] 翻译进度：{completed_count}/{len(groups)} 段")
+            completed_count = min(batch_start + DEFAULT_BATCH_SIZE, len(translatable_groups))
+            print(f"[S3] 翻译进度：{completed_count}/{len(translatable_groups)} 段")
 
-        for index, item in enumerate(translated_items, start=1):
-            item["segment_id"] = index
+        translated_by_id = {
+            int(item["segment_id"]): item
+            for item in translated_items
+            if isinstance(item, dict)
+        }
 
         segments: list[DubbingSegment] = []
-        for index, (group, translated_item) in enumerate(zip(groups, translated_items), start=1):
+        for group in groups:
+            segment_id = int(group["segment_id"])
             start_ms = int(group["start_ms"])
             end_ms = int(group["end_ms"])
             speaker_id = str(group["speaker_id"])
-            normalized_cn_text = str(translated_item["cn_text"]).strip()
+            dubbing_mode = normalize_dubbing_mode(group.get("dubbing_mode"))
+            translated_item = translated_by_id.get(segment_id)
+            normalized_cn_text = (
+                ""
+                if dubbing_mode == DUBBING_MODE_KEEP_ORIGINAL
+                else str((translated_item or {}).get("cn_text", "")).strip()
+            )
             segment_voice_id, segment_display_name = _resolve_segment_voice_assignment(
                 speaker_id=speaker_id,
                 voice_id=normalized_voice_id,
@@ -411,7 +555,7 @@ class GeminiTranslator:
             _target_cps = round(_src_wps * 1.8, 3) if _src_wps > 0 else 0.0
             segments.append(
                 DubbingSegment(
-                    segment_id=index,
+                    segment_id=segment_id,
                     speaker_id=speaker_id,
                     display_name=segment_display_name,
                     voice_id=segment_voice_id,
@@ -421,6 +565,7 @@ class GeminiTranslator:
                     source_text=str(group["source_text"]),
                     cn_text=normalized_cn_text,
                     target_chars_per_second=_target_cps,
+                    dubbing_mode=dubbing_mode,
                 )
             )
 
@@ -564,6 +709,7 @@ class GeminiTranslator:
                     "min_chars": int(group["min_chars"]),
                     "max_chars": int(group["max_chars"]),
                     "source_text": str(group["source_text"]),
+                    "dubbing_mode": str(group.get("dubbing_mode") or DUBBING_MODE_DUB),
                 }
                 for group in groups
             ],
@@ -581,6 +727,7 @@ class GeminiTranslator:
         checkpoint_path: Path,
         *,
         expected_fingerprint: str,
+        expected_segment_ids: list[int] | None = None,
     ) -> list[dict[str, object]]:
         if not checkpoint_path.exists():
             return []
@@ -601,8 +748,11 @@ class GeminiTranslator:
         if not isinstance(translated_items, list):
             return []
 
+        expected_ids = expected_segment_ids or list(range(1, len(translated_items) + 1))
         normalized_items: list[dict[str, object]] = []
-        for expected_segment_id, item in enumerate(translated_items, start=1):
+        if len(translated_items) > len(expected_ids):
+            return []
+        for expected_segment_id, item in zip(expected_ids, translated_items):
             if not isinstance(item, dict):
                 return []
             try:
@@ -878,7 +1028,7 @@ class GeminiTranslator:
         """Call a specific model by logical name, dispatching by provider.
 
         - gemini → existing _call_gemini_with_retry
-        - deepseek/openai → LLMRouter provider layer (generate_via_alias)
+        - deepseek/openai → OpenAI-compatible HTTP call
         - mimo → OpenAI-compatible HTTP call
         """
         info = _MODEL_REGISTRY.get(model_name)
@@ -908,6 +1058,7 @@ class GeminiTranslator:
             provider=provider,
             prompt=prompt,
             json_mode=json_mode,
+            request_overrides=info.get("request_overrides"),
         )
 
     @staticmethod
@@ -952,13 +1103,14 @@ class GeminiTranslator:
         provider: str,
         prompt: str,
         json_mode: bool = False,
+        request_overrides: object | None = None,
     ) -> str:
         """Direct call to OpenAI-compatible API (DeepSeek / OpenAI)."""
         import urllib.request
         import urllib.error
         base_urls = {
             "openai": "https://api.openai.com/v1",
-            "deepseek": "https://api.deepseek.com/v1",
+            "deepseek": "https://api.deepseek.com",
         }
         base_url = base_urls.get(provider, base_urls["openai"])
         url = f"{base_url}/chat/completions"
@@ -970,6 +1122,8 @@ class GeminiTranslator:
         }
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
+        if isinstance(request_overrides, dict):
+            payload.update(request_overrides)
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         req = urllib.request.Request(
             url,
@@ -998,6 +1152,8 @@ class GeminiTranslator:
         prompt_key_map = {
             "s3_translate": "translate",
             "s5_rewrite": "rewrite",
+            "s5_rewrite_strict": "rewrite_strict",
+            "s5_short_content_compact": "rewrite",
             "s2_infer": "translate",  # speaker inference uses same model as translate
         }
         prompt_key = prompt_key_map.get(task)
@@ -1012,6 +1168,13 @@ class GeminiTranslator:
                 try:
                     print(f"[LLM] {task} using {m} ({_resolve_model_id(m)})")
                     response_text = self._call_by_model(m, prompt, json_mode=json_mode)
+                    self._record_llm_usage(
+                        task=task,
+                        model_name=m,
+                        prompt=prompt,
+                        response_text=response_text,
+                        attempt_label="primary" if i == 0 else f"fallback_{i}",
+                    )
                     if validator is not None:
                         validator(response_text)
                     return response_text
@@ -1067,6 +1230,20 @@ class GeminiTranslator:
                             json_mode=json_mode,
                         )
 
+                    record_model_name = override_model_name or alias
+                    record_model_id = override_model_name or alias
+                    if alias in {"gemini_current", "default_llm"} or provider_name == "gemini":
+                        record_model_name = override_model_name or self.model_name
+                        record_model_id = override_model_name or self.model_name
+                    self._record_llm_usage(
+                        task=task,
+                        model_name=record_model_name,
+                        model_id=record_model_id,
+                        provider=provider_name or "gemini",
+                        prompt=prompt,
+                        response_text=response_text,
+                        attempt_label=alias,
+                    )
                     if validator is not None:
                         validator(response_text)
                     return response_text
@@ -1861,6 +2038,9 @@ def _build_groups(
                 "target_duration_ms": target_duration_ms,
                 "target_duration_seconds": round(target_duration_ms / 1000, 1),
                 "source_text": line.source_text,
+                "dubbing_mode": normalize_dubbing_mode(
+                    getattr(line, "dubbing_mode", DUBBING_MODE_DUB)
+                ),
             }
         )
     if not groups:

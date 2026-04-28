@@ -7,9 +7,14 @@ import shutil
 import subprocess
 
 from modules.output.project_output import AlignedSegment
+from utils.audio_fit import FitPolicy, FitResult, fit_audio_to_slot
 from utils.audio_utils import measure_duration_ms as _ffprobe_duration_ms
 from utils.atomic_io import is_valid_output
 from services.gemini.translator import DubbingSegment
+from services.gemini.translator import DUBBING_MODE_DUB, DUBBING_MODE_KEEP_ORIGINAL
+from services.gemini.translator import is_keep_original_dubbing_mode, normalize_dubbing_mode
+from services.tts.duration_estimator import count_spoken_chars
+from services.usage_meter import TTS_BUCKET_POST_TTS_RESYNTH
 
 
 # Phase 2 force-DSP override — admin-controlled, read at every alignment call
@@ -44,6 +49,30 @@ LATER_REWRITE_TARGET_RATIO_WINDOWS = {
 SEVERE_EXPAND_REWRITE_MIN_TARGET_MS = 20_000
 SEVERE_EXPAND_REWRITE_MAX_RATIO = 0.55
 DEFAULT_MAX_POST_TTS_ADJUSTMENTS_PER_SEGMENT = 3
+SHORT_FORCE_DSP_LOW_MAX_TARGET_MS = 2_000
+SHORT_FORCE_DSP_LOW_MAX_SPOKEN_CHARS = 18
+SHORT_FORCE_DSP_LOW_MAX_FIRST_PASS_MS = 4_500
+SHORT_FORCE_DSP_LOW_MAX_FIRST_PASS_RATIO = 4.0
+SHORT_FORCE_DSP_MEDIUM_MAX_TARGET_MS = 5_000
+SHORT_FORCE_DSP_MEDIUM_MAX_SPOKEN_CHARS = 28
+SHORT_LISTENABLE_DSP_MAX_TARGET_MS = 2_000
+SHORT_LISTENABLE_DSP_MAX_FIRST_PASS_MS = 4_500
+SHORT_LISTENABLE_DSP_MAX_SPOKEN_CHARS = 28
+SHORT_LISTENABLE_DSP_MAX_SPEED_RATIO = 1.75
+SHORT_LISTENABLE_DSP_POLICY = FitPolicy(
+    atempo_max=SHORT_LISTENABLE_DSP_MAX_SPEED_RATIO,
+)
+UNDERFLOW_LISTENABLE_DSP_MIN_SPEED_RATIO = 0.67
+CAPPED_UNDERFLOW_MIN_SILENCE_PAD_MS = 250
+DEFAULT_ALIGNMENT_DSP_POLICY = FitPolicy(
+    atempo_min=UNDERFLOW_LISTENABLE_DSP_MIN_SPEED_RATIO,
+    atempo_max=100.0,
+)
+_FORCE_DSP_REVIEW_METHODS = {
+    "force_dsp",
+    "capped_dsp_overflow",
+    "capped_dsp_underflow",
+}
 
 
 class AlignmentError(Exception):
@@ -113,6 +142,7 @@ class SegmentAligner:
         self.min_rewrite_target_ms = int(min_rewrite_target_ms)
         self.max_rewrite_ratio = float(max_rewrite_ratio)
         self.post_tts_budget_tracker = post_tts_budget_tracker
+        self._last_dsp_fit_result: FitResult | None = None
 
     def align_all(
         self,
@@ -125,6 +155,11 @@ class SegmentAligner:
         results: list[AlignedSegment] = []
         total_segments = len(segments)
         for index, segment in enumerate(segments, start=1):
+            if is_keep_original_dubbing_mode(getattr(segment, "dubbing_mode", DUBBING_MODE_DUB)):
+                results.append(self._keep_original_result(segment))
+                if total_segments > 0 and (index % 15 == 0 or index == total_segments):
+                    print(f"[S5] 对齐进度: {index}/{total_segments} 段")
+                continue
             output_path = output_root / f"segment_{segment.segment_id:03d}_aligned.wav"
             if is_valid_output(str(output_path)):
                 print(f"[S5] 跳过已完成的对齐段 {index}/{total_segments}")
@@ -145,6 +180,7 @@ class SegmentAligner:
                     actual_duration_ms=duration_ms,
                     alignment_method="checkpoint",
                     needs_review=False,
+                    dubbing_mode=normalize_dubbing_mode(getattr(segment, "dubbing_mode", DUBBING_MODE_DUB)),
                 ))
                 if total_segments > 0 and (index % 15 == 0 or index == total_segments):
                     print(f"[S5] 对齐进度: {index}/{total_segments} 段")
@@ -153,6 +189,34 @@ class SegmentAligner:
             if total_segments > 0 and (index % 15 == 0 or index == total_segments):
                 print(f"[S5] 对齐进度: {index}/{total_segments} 段")
         return results
+
+    def _keep_original_result(self, segment: DubbingSegment) -> AlignedSegment:
+        audio_path = segment.aligned_audio_path or segment.tts_audio_path
+        if not audio_path:
+            raise AlignmentError("keep_original segment is missing source audio slice.")
+        resolved_audio_path = _resolve_existing_audio_path(audio_path)
+        duration_ms = _measure_wav_duration_ms(resolved_audio_path)
+        target_duration_ms = int(segment.target_duration_ms)
+        segment.tts_audio_path = str(resolved_audio_path)
+        segment.aligned_audio_path = str(resolved_audio_path)
+        segment.actual_duration_ms = duration_ms
+        segment.alignment_ratio = duration_ms / target_duration_ms if target_duration_ms > 0 else 1.0
+        segment.alignment_method = DUBBING_MODE_KEEP_ORIGINAL
+        segment.needs_review = False
+        return AlignedSegment(
+            segment_id=segment.segment_id,
+            speaker_id=segment.speaker_id,
+            display_name=segment.display_name,
+            start_ms=segment.start_ms,
+            end_ms=segment.end_ms,
+            cn_text=segment.cn_text,
+            en_text=getattr(segment, "en_text", ""),
+            aligned_audio_path=str(resolved_audio_path),
+            actual_duration_ms=duration_ms,
+            alignment_method=DUBBING_MODE_KEEP_ORIGINAL,
+            needs_review=False,
+            dubbing_mode=DUBBING_MODE_KEEP_ORIGINAL,
+        )
 
     def _align_one(
         self,
@@ -177,13 +241,25 @@ class SegmentAligner:
         # overwrite segment.actual_duration_ms below, so we save it here once.
         # `target_duration_ms > 0` is already guaranteed by the check above.
         segment.first_pass_duration_ms = current_actual_duration_ms
+        if not getattr(segment, "first_pass_cn_text", ""):
+            segment.first_pass_cn_text = segment.cn_text.strip()
         segment.first_pass_error_pct = (
             (current_actual_duration_ms - target_duration_ms) / target_duration_ms
         )
+        pre_tts_direction = (getattr(segment, "pre_tts_rewrite_direction", "") or "").lower()
+        if pre_tts_direction:
+            segment.pre_tts_post_tts_first_pass_ms = current_actual_duration_ms
+            error_pct = segment.first_pass_error_pct
+            segment.pre_tts_contradiction = (
+                (pre_tts_direction in {"overshoot", "shrink", "too_long"} and error_pct < -0.05)
+                or (pre_tts_direction in {"undershoot", "expand", "too_short"} and error_pct > 0.05)
+            )
 
         alignment_method = "force_dsp"
         needs_review = True
         aligned_duration_ms: int | None = None
+        self._last_dsp_fit_result = None
+        self._clear_dsp_fit_audit(segment)
 
         # Phase 2 force-DSP override — when admin enables `force_dsp_alignment`,
         # bypass the rewrite/direct/dsp decision entirely and always stretch
@@ -226,19 +302,70 @@ class SegmentAligner:
                 aligned_audio_path, aligned_duration_ms, alignment_method, needs_review = rewrite_outcome
             else:
                 input_path = _resolve_existing_audio_path(segment.tts_audio_path)
-                aligned_audio_path = self._dsp_stretch(str(input_path), target_duration_ms, str(output_path))
+                if self._should_use_listenable_short_dsp(
+                    segment=segment,
+                    actual_duration_ms=current_actual_duration_ms,
+                    target_duration_ms=target_duration_ms,
+                ):
+                    listenable_target_ms = self._listenable_short_dsp_target_ms(
+                        actual_duration_ms=current_actual_duration_ms,
+                    )
+                    aligned_audio_path = self._dsp_stretch(
+                        str(input_path),
+                        listenable_target_ms,
+                        str(output_path),
+                        policy=SHORT_LISTENABLE_DSP_POLICY,
+                    )
+                    alignment_method = "capped_dsp_overflow"
+                else:
+                    aligned_audio_path = self._dsp_stretch(
+                        str(input_path),
+                        target_duration_ms,
+                        str(output_path),
+                    )
+                    alignment_method = "force_dsp"
                 aligned_duration_ms = _measure_wav_duration_ms(Path(aligned_audio_path))
-                alignment_method = "force_dsp"
                 needs_review = True
 
         if aligned_duration_ms is None:
             aligned_duration_ms = _measure_wav_duration_ms(Path(aligned_audio_path))
+
+        self._apply_dsp_fit_audit(segment)
+        if (
+            alignment_method in {"force_dsp", "force_dsp_user"}
+            and self._last_dsp_fit_was_capped_underflow()
+        ):
+            alignment_method = "capped_dsp_underflow"
+
+        if alignment_method in _FORCE_DSP_REVIEW_METHODS:
+            severity, suppress_review, review_reason = self._classify_force_dsp_review(
+                segment=segment,
+                actual_duration_ms=current_actual_duration_ms,
+                target_duration_ms=target_duration_ms,
+            )
+            segment.force_dsp_severity = severity
+            segment.force_dsp_review_reason = review_reason
+            segment.force_dsp_review_suppressed = False
+            if suppress_review and needs_review:
+                needs_review = False
+                segment.force_dsp_review_suppressed = True
+        else:
+            segment.force_dsp_severity = ""
+            segment.force_dsp_review_suppressed = False
+            segment.force_dsp_review_reason = ""
 
         segment.aligned_audio_path = aligned_audio_path
         segment.actual_duration_ms = aligned_duration_ms
         segment.alignment_ratio = aligned_duration_ms / target_duration_ms if target_duration_ms > 0 else 0.0
         segment.alignment_method = alignment_method
         segment.needs_review = needs_review
+        segment.pre_tts_harmful_contradiction = (
+            bool(getattr(segment, "pre_tts_contradiction", False))
+            and self._is_pre_tts_contradiction_harmful(
+                alignment_method=alignment_method,
+                needs_review=needs_review,
+            )
+        )
 
         return AlignedSegment(
             segment_id=segment.segment_id,
@@ -252,6 +379,7 @@ class SegmentAligner:
             actual_duration_ms=aligned_duration_ms,
             alignment_method=alignment_method,
             needs_review=needs_review,
+            dubbing_mode=normalize_dubbing_mode(getattr(segment, "dubbing_mode", DUBBING_MODE_DUB)),
         )
 
     def _attempt_rewrite_loop(
@@ -308,10 +436,19 @@ class SegmentAligner:
             attempted_rewrite = True
             segment.cn_text = rewritten_text
             segment.rewrite_count += 1
-            tts_result = self.tts_generator._generate_one(
-                segment,
-                str(Path(output_path).resolve(strict=False).parent),
-            )
+            try:
+                tts_result = self.tts_generator._generate_one(
+                    segment,
+                    str(Path(output_path).resolve(strict=False).parent),
+                    usage_bucket=TTS_BUCKET_POST_TTS_RESYNTH,
+                )
+            except TypeError as exc:
+                if "usage_bucket" not in str(exc):
+                    raise
+                tts_result = self.tts_generator._generate_one(
+                    segment,
+                    str(Path(output_path).resolve(strict=False).parent),
+                )
             segment.tts_audio_path = tts_result.audio_path
             segment.actual_duration_ms = tts_result.duration_ms
             if target_duration_ms > 0:
@@ -406,6 +543,125 @@ class SegmentAligner:
         if abs(diff_ratio) <= self.dsp_threshold:
             return "dsp"
         return "rewrite_or_force"
+
+    def _should_use_listenable_short_dsp(
+        self,
+        *,
+        segment: DubbingSegment,
+        actual_duration_ms: int,
+        target_duration_ms: int,
+    ) -> bool:
+        if target_duration_ms <= 0 or actual_duration_ms <= target_duration_ms:
+            return False
+        if target_duration_ms > SHORT_LISTENABLE_DSP_MAX_TARGET_MS:
+            return False
+        if actual_duration_ms > SHORT_LISTENABLE_DSP_MAX_FIRST_PASS_MS:
+            return False
+        if count_spoken_chars(segment.cn_text) > SHORT_LISTENABLE_DSP_MAX_SPOKEN_CHARS:
+            return False
+        return (
+            actual_duration_ms / target_duration_ms
+            > SHORT_LISTENABLE_DSP_MAX_SPEED_RATIO
+        )
+
+    @staticmethod
+    def _listenable_short_dsp_target_ms(*, actual_duration_ms: int) -> int:
+        return max(
+            1,
+            int(round(actual_duration_ms / SHORT_LISTENABLE_DSP_MAX_SPEED_RATIO)),
+        )
+
+    def _is_short_force_dsp_expected(
+        self,
+        *,
+        segment: DubbingSegment,
+        actual_duration_ms: int,
+        target_duration_ms: int,
+    ) -> bool:
+        _severity, suppress_review, _reason = self._classify_force_dsp_review(
+            segment=segment,
+            actual_duration_ms=actual_duration_ms,
+            target_duration_ms=target_duration_ms,
+        )
+        return suppress_review
+
+    def _classify_force_dsp_review(
+        self,
+        *,
+        segment: DubbingSegment,
+        actual_duration_ms: int,
+        target_duration_ms: int,
+    ) -> tuple[str, bool, str]:
+        """Classify final force-DSP risk without another LLM rewrite.
+
+        Only very short, low-information backchannels are auto-denoised from
+        manual review. 2-5s force-DSP is still surfaced, but marked medium so
+        downstream reports can separate it from genuinely long/high-risk drift.
+        """
+        if target_duration_ms <= 0 or actual_duration_ms <= 0:
+            return "high", False, "invalid_duration"
+
+        spoken_chars = count_spoken_chars(segment.cn_text)
+        first_pass_ratio = actual_duration_ms / target_duration_ms
+
+        if (
+            target_duration_ms <= SHORT_FORCE_DSP_LOW_MAX_TARGET_MS
+            and spoken_chars <= SHORT_FORCE_DSP_LOW_MAX_SPOKEN_CHARS
+            and actual_duration_ms <= SHORT_FORCE_DSP_LOW_MAX_FIRST_PASS_MS
+            and first_pass_ratio <= SHORT_FORCE_DSP_LOW_MAX_FIRST_PASS_RATIO
+        ):
+            return "low", True, "short_backchannel"
+
+        if (
+            target_duration_ms <= SHORT_FORCE_DSP_MEDIUM_MAX_TARGET_MS
+            and spoken_chars <= SHORT_FORCE_DSP_MEDIUM_MAX_SPOKEN_CHARS
+        ):
+            return "medium", False, "short_segment"
+
+        return "high", False, "long_or_contentful_segment"
+
+    @staticmethod
+    def _clear_dsp_fit_audit(segment: DubbingSegment) -> None:
+        segment.dsp_speed_ratio_used = 1.0
+        segment.dsp_silence_padded_ms = 0
+        segment.dsp_truncated_ms = 0
+        segment.dsp_initial_duration_ms = 0
+        segment.dsp_trimmed_duration_ms = 0
+        segment.dsp_stretched_duration_ms = 0
+
+    def _apply_dsp_fit_audit(self, segment: DubbingSegment) -> None:
+        fit_result = self._last_dsp_fit_result
+        if fit_result is None:
+            return
+        segment.dsp_speed_ratio_used = float(fit_result.speed_ratio_used)
+        segment.dsp_silence_padded_ms = int(fit_result.silence_padded_ms)
+        segment.dsp_truncated_ms = int(fit_result.truncated_ms)
+        segment.dsp_initial_duration_ms = int(fit_result.initial_duration_ms)
+        segment.dsp_trimmed_duration_ms = int(fit_result.trimmed_duration_ms)
+        segment.dsp_stretched_duration_ms = int(fit_result.stretched_duration_ms)
+
+    def _last_dsp_fit_was_capped_underflow(self) -> bool:
+        fit_result = self._last_dsp_fit_result
+        if fit_result is None:
+            return False
+        if fit_result.initial_duration_ms >= fit_result.final_duration_ms:
+            return False
+        if fit_result.silence_padded_ms < CAPPED_UNDERFLOW_MIN_SILENCE_PAD_MS:
+            return False
+        return (
+            fit_result.speed_ratio_used
+            <= UNDERFLOW_LISTENABLE_DSP_MIN_SPEED_RATIO + 1e-6
+        )
+
+    @staticmethod
+    def _is_pre_tts_contradiction_harmful(
+        *,
+        alignment_method: str,
+        needs_review: bool,
+    ) -> bool:
+        if needs_review:
+            return True
+        return alignment_method not in {"direct", "dsp"}
 
     def _rewrite_segment_with_constraints(
         self,
@@ -503,22 +759,34 @@ class SegmentAligner:
         input_path: str,
         target_duration_ms: int,
         output_path: str,
+        *,
+        policy: FitPolicy | None = None,
     ) -> str:
-        # TODO(backlog/audio-fit-migration): replace body with a call to
-        # ``utils.audio_fit.fit_audio_to_slot`` to pick up smart-trim +
-        # clamped-atempo + silence-pad policy. γ publish already uses
-        # that utility (commit dade959); main-pipeline migration is
-        # tracked in docs/internal/backlog.md. Do not inline-refactor
-        # without also updating the 4 call sites' aligned_duration_ms /
-        # alignment_method write-back logic.
+        self._last_dsp_fit_result = None
         input_audio_path = _resolve_existing_audio_path(input_path)
         if target_duration_ms <= 0:
             raise AlignmentError("target_duration_ms must be positive for DSP alignment.")
 
+        output_audio_path = Path(output_path).resolve(strict=False)
+        output_audio_path.parent.mkdir(parents=True, exist_ok=True)
+        fit_source_path = input_audio_path
+        if input_audio_path.resolve(strict=False) != output_audio_path:
+            shutil.copy2(input_audio_path, output_audio_path)
+            fit_source_path = output_audio_path
+
+        fit_result = fit_audio_to_slot(
+            fit_source_path,
+            target_duration_ms,
+            output_path=output_audio_path,
+            policy=policy or DEFAULT_ALIGNMENT_DSP_POLICY,
+        )
+        self._last_dsp_fit_result = fit_result
+        if fit_result is not None and output_audio_path.exists():
+            return str(output_audio_path)
+
         actual_duration_ms = _measure_wav_duration_ms(input_audio_path)
         speed_ratio = actual_duration_ms / target_duration_ms
         filter_value = _build_atempo_filter(speed_ratio)
-        output_audio_path = Path(output_path).resolve(strict=False)
 
         command = [
             "ffmpeg",

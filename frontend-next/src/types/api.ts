@@ -2,6 +2,7 @@ export type ApiJobStatus =
   | 'cancelled'
   | 'editing'
   | 'failed'
+  | 'purged'
   | 'queued'
   | 'running'
   | 'succeeded'

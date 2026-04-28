@@ -1,0 +1,933 @@
+{
+  "version": "translation_quality_benchmark.v1",
+  "status": "completed",
+  "completed_at": "2026-04-26T15:28:59.323340+00:00",
+  "config": {
+    "samples_path": "/tmp/translation_eval_samples_20260426.json",
+    "output_path": "/tmp/translation_quality_benchmark_deepseek_v4_pro_extra_20260426.json",
+    "models": [
+      "deepseek_v4_pro"
+    ],
+    "judge_model": "gpt54",
+    "sample_limit": null,
+    "sample_ids": [
+      "trans_eval_003",
+      "trans_eval_006",
+      "trans_eval_010",
+      "trans_eval_013",
+      "trans_eval_018",
+      "trans_eval_024"
+    ],
+    "skip_judge": false
+  },
+  "sample_source": {
+    "path": "/tmp/translation_eval_samples_20260426.json",
+    "version": "translation_model_eval_samples.v1",
+    "prompt_sources": {
+      "translate": {
+        "source": "runtime default",
+        "template_sha256": "f8c177cc694026a5bbf3caee7896de5d40c6e54c166b99086bbf53c07f8e93de"
+      },
+      "rewrite": {
+        "source": "runtime default",
+        "template_sha256": "677be76ae67ebe4a84461eb3d863a5a2d9a1fa6fc32059061ab6fda4ef9db46f"
+      },
+      "probe_translate": {
+        "source": "runtime default",
+        "template_sha256": "45708adf6543d1df290bd69370bd16284cbeb1451dfe1140d2001af4acff4609"
+      },
+      "precedence": [
+        "autodub.local.json prompts.s3_translate / prompts.s5_rewrite",
+        "admin_settings.json review_prompts.translate / rewrite / probe_translate",
+        "runtime default constants"
+      ]
+    },
+    "coverage": {
+      "samples": 24,
+      "jobs_scanned": 58,
+      "jobs_selected": 20,
+      "candidate_windows": 1710,
+      "selection_reasons": {
+        "glossary_hit": 21,
+        "high_density": 23,
+        "long_segment": 17,
+        "low_density_oral": 24,
+        "multi_speaker": 20,
+        "numeric_financial": 16,
+        "rewrite_risk": 15,
+        "short_backchannel": 6,
+        "technical_terms": 11
+      },
+      "service_modes": {
+        "express": 3,
+        "studio": 10,
+        "unknown": 11
+      },
+      "translation_prompt_sources": {
+        "runtime default": 24
+      },
+      "rewrite_cases": 26
+    }
+  },
+  "results": [
+    {
+      "sample_id": "trans_eval_003",
+      "model": "deepseek_v4_pro",
+      "model_meta": {
+        "model": "deepseek_v4_pro",
+        "api_model_id": "deepseek-v4-pro",
+        "provider": "deepseek",
+        "label": "DeepSeek V4 Pro（高质量）",
+        "cost_hint": "$0.435/$0.87 每百万 token（限时）",
+        "cost_rank": 4
+      },
+      "status": "ok",
+      "started_at": "2026-04-26T15:21:09.865897+00:00",
+      "latency_ms": 12842,
+      "prompt_chars": 5363,
+      "response_chars": 713,
+      "response_text": "[\n  {\n    \"segment_id\": 41,\n    \"cn_text\": \"对。\"\n  },\n  {\n    \"segment_id\": 42,\n    \"cn_text\": \"所以说，不管你是想拿来出租还是自己运营，如果是出租模式，那你最好有个庞大的客户生态，覆盖多个行业，能消化掉你运营的算力。呃，如果你想自己运营呢……嗯，你也知道，我们显然有能力帮你搞定。比如像埃隆跟xAI的合作就是这样，因为我们能够赋能任何公司、任何行业的运营者，你可以用这个来搭建超级计算机，做科学研究，像礼来公司就用它做药物研发。也就是说，我们能帮他们运营自己的超算，把它用在药物发现、生物科学等各种各样的应用场景。嗯，这些我们都加速了。\"\n  },\n  {\n    \"segment_id\": 43,\n    \"cn_text\": \"总之，有大量的应用场景我们都能覆盖，你也可以在TPU上做这些，同样，英伟达的CUDA本身也是一块超棒的张量处理单元。而且它覆盖了整个数据处理的完整生命周期，计算啊、人工智能啊，方方面面都行。所以我们的市场机会要大得多，覆盖面也广得多。因为我们体量够大嘛，基本上全球所有应用我们都能支持。现在你在任何地方搭建英伟达的系统，都清楚肯定能找到客户。这跟其他的模式，完全是两码事。\"\n  },\n  {\n    \"segment_id\": 44,\n    \"cn_text\": \"嗯，接下来这个问题会比较长，但你业绩确实太惊人了。呃，这收入主要……你一个季度六百亿，肯定不是靠医药业务挣来的。\"\n  },\n  {\n    \"segment_id\": 45,\n    \"cn_text\": \"啊。\"\n  }\n]",
+      "constraints": {
+        "format_ok": true,
+        "parse_error": null,
+        "missing_segment_ids": [],
+        "extra_segment_ids": [],
+        "segment_checks": [
+          {
+            "segment_id": 41,
+            "spoken_chars": 1,
+            "min_chars": 1,
+            "max_chars": 2,
+            "in_range": true
+          },
+          {
+            "segment_id": 42,
+            "spoken_chars": 196,
+            "min_chars": 202,
+            "max_chars": 273,
+            "in_range": false
+          },
+          {
+            "segment_id": 43,
+            "spoken_chars": 169,
+            "min_chars": 160,
+            "max_chars": 217,
+            "in_range": true
+          },
+          {
+            "segment_id": 44,
+            "spoken_chars": 48,
+            "min_chars": 47,
+            "max_chars": 64,
+            "in_range": true
+          },
+          {
+            "segment_id": 45,
+            "spoken_chars": 1,
+            "min_chars": 1,
+            "max_chars": 2,
+            "in_range": true
+          }
+        ],
+        "char_range_pass_rate": 0.8,
+        "glossary_checks": [
+          {
+            "source": "ASIC",
+            "target": "专用集成电路",
+            "present": false
+          },
+          {
+            "source": "CUDA",
+            "target": "CUDA 并行计算平台",
+            "present": false
+          }
+        ],
+        "glossary_pass_rate": 0.0,
+        "constraint_score": 68.0,
+        "parsed_segments": [
+          {
+            "segment_id": 41,
+            "cn_text": "对。"
+          },
+          {
+            "segment_id": 42,
+            "cn_text": "所以说，不管你是想拿来出租还是自己运营，如果是出租模式，那你最好有个庞大的客户生态，覆盖多个行业，能消化掉你运营的算力。呃，如果你想自己运营呢……嗯，你也知道，我们显然有能力帮你搞定。比如像埃隆跟xAI的合作就是这样，因为我们能够赋能任何公司、任何行业的运营者，你可以用这个来搭建超级计算机，做科学研究，像礼来公司就用它做药物研发。也就是说，我们能帮他们运营自己的超算，把它用在药物发现、生物科学等各种各样的应用场景。嗯，这些我们都加速了。"
+          },
+          {
+            "segment_id": 43,
+            "cn_text": "总之，有大量的应用场景我们都能覆盖，你也可以在TPU上做这些，同样，英伟达的CUDA本身也是一块超棒的张量处理单元。而且它覆盖了整个数据处理的完整生命周期，计算啊、人工智能啊，方方面面都行。所以我们的市场机会要大得多，覆盖面也广得多。因为我们体量够大嘛，基本上全球所有应用我们都能支持。现在你在任何地方搭建英伟达的系统，都清楚肯定能找到客户。这跟其他的模式，完全是两码事。"
+          },
+          {
+            "segment_id": 44,
+            "cn_text": "嗯，接下来这个问题会比较长，但你业绩确实太惊人了。呃，这收入主要……你一个季度六百亿，肯定不是靠医药业务挣来的。"
+          },
+          {
+            "segment_id": 45,
+            "cn_text": "啊。"
+          }
+        ]
+      },
+      "judge": {
+        "status": "ok",
+        "judge_model": "gpt54",
+        "judge_model_meta": {
+          "model": "gpt54",
+          "api_model_id": "gpt-5.4",
+          "provider": "openai",
+          "label": "GPT-5.4（高质量）",
+          "cost_hint": "约 ¥0.5/千 token",
+          "cost_rank": 6
+        },
+        "latency_ms": 6321,
+        "prompt_chars": 9815,
+        "response_text": "{\n  \"semantic_completeness\": 16,\n  \"terminology\": 8,\n  \"length_fit\": 11,\n  \"oral_naturalness\": 12,\n  \"context_consistency\": 8,\n  \"format_compliance\": 10,\n  \"tts_readiness\": 8,\n  \"quality_score\": 73,\n  \"major_issues\": [\n    \"segment 42 未达到最小字数要求（196 < 202），时长适配偏紧\",\n    \"segment 43 将 CUDA 误说成“一块张量处理单元”，偏离原意；更应表达为 CUDA 并行计算平台/被打造为出色的张量处理能力\",\n    \"segment 43 对 'that you can do so with tpusc' 处理不准，译成“你也可以在TPU上做这些”与参考语义相反，存在误译风险\",\n    \"segment 42 将 'drug discovery' 译为“药物研发”，基本可接受但弱化了“药物发现”含义\",\n    \"segment 42 把 'for Elon with xAI' 译成“埃隆跟xAI的合作”，原文更像举例说明为埃隆/xAI提供支持，不一定是“合作”关系\",\n    \"术语表中的 CUDA 未按指定“CUDA 并行计算平台”呈现\"\n  ],\n  \"brief_reason\": \"整体可读性和口播感不错，格式也完全合规，短句段落处理自然。但核心问题在于 segment 43 存在明显术语和语义偏差，尤其把 CUDA 说成“张量处理单元”不准确，且对 TPU 相关句意理解有误；segment 42 也有少量关系和措辞偏移，并且字数未达下限。综合来看属于可用但需修改的译文。\"\n}",
+        "parsed": {
+          "semantic_completeness": 16.0,
+          "terminology": 8.0,
+          "length_fit": 11.0,
+          "oral_naturalness": 12.0,
+          "context_consistency": 8.0,
+          "format_compliance": 10.0,
+          "tts_readiness": 8.0,
+          "quality_score": 73.0,
+          "major_issues": [
+            "segment 42 未达到最小字数要求（196 < 202），时长适配偏紧",
+            "segment 43 将 CUDA 误说成“一块张量处理单元”，偏离原意；更应表达为 CUDA 并行计算平台/被打造为出色的张量处理能力",
+            "segment 43 对 'that you can do so with tpusc' 处理不准，译成“你也可以在TPU上做这些”与参考语义相反，存在误译风险",
+            "segment 42 将 'drug discovery' 译为“药物研发”，基本可接受但弱化了“药物发现”含义",
+            "segment 42 把 'for Elon with xAI' 译成“埃隆跟xAI的合作”，原文更像举例说明为埃隆/xAI提供支持，不一定是“合作”关系",
+            "术语表中的 CUDA 未按指定“CUDA 并行计算平台”呈现"
+          ],
+          "brief_reason": "整体可读性和口播感不错，格式也完全合规，短句段落处理自然。但核心问题在于 segment 43 存在明显术语和语义偏差，尤其把 CUDA 说成“张量处理单元”不准确，且对 TPU 相关句意理解有误；segment 42 也有少量关系和措辞偏移，并且字数未达下限。综合来看属于可用但需修改的译文。"
+        }
+      }
+    },
+    {
+      "sample_id": "trans_eval_006",
+      "model": "deepseek_v4_pro",
+      "model_meta": {
+        "model": "deepseek_v4_pro",
+        "api_model_id": "deepseek-v4-pro",
+        "provider": "deepseek",
+        "label": "DeepSeek V4 Pro（高质量）",
+        "cost_hint": "$0.435/$0.87 每百万 token（限时）",
+        "cost_rank": 4
+      },
+      "status": "ok",
+      "started_at": "2026-04-26T15:21:29.030620+00:00",
+      "latency_ms": 25386,
+      "prompt_chars": 5943,
+      "response_chars": 759,
+      "response_text": "[\n  {\n    \"segment_id\": 27,\n    \"cn_text\": \"有几个原因吧，罗斯。首先，我当时的职位是美国海军天文台的台长，手下有一个天体物理学家团队，呃，他们负责监测恒星，编制星表。那段经历让我学到不少天体物理学知识，也让我真正体会到宇宙有多浩瀚。你要知道，光是我们的银河系就有两千到三千亿颗恒星，而像这样的星系还有好几千亿个。在这种情况下，还认为人类是宇宙中唯一的智慧生命，就太自大了。然后第二点，就像我刚才提到的，我在一封，呃，保密邮件里看到了2015年的那个“Go Fast”视频。当时我就明白了，那绝对不是我们自己的技术。\"\n  },\n  {\n    \"segment_id\": 28,\n    \"cn_text\": \"美国政府没有用数据驱动、实证研究的方法去调查不明异常现象，你对此感到失望吗？\"\n  },\n  {\n    \"segment_id\": 29,\n    \"cn_text\": \"呃，确实失望。我觉得现在是时候了，随着索尔基金会召开首次研讨会，我们正试图推动美国政府开始对不明异常现象进行更系统的科学研究，而且是从多个方面入手。索尔关注的不光是硬科学，比如想办法获取那些坠毁回收计划中的材料，好让我们进一步了解那种可能给社会带来巨大好处的技术；同时它也关注人文层面，像社会学、人类学，呃，还有一些，怎么说呢，伦理层面的问题。\"\n  },\n  {\n    \"segment_id\": 30,\n    \"cn_text\": \"可问题在于，蒂姆，政府里还有很多人完全在否认。你刚才把坠机回收项目说得像事实一样，那我们现在讨论的就是回收来的非人类技术，对吧？\"\n  },\n  {\n    \"segment_id\": 31,\n    \"cn_text\": \"是的。\"\n  }\n]",
+      "constraints": {
+        "format_ok": true,
+        "parse_error": null,
+        "missing_segment_ids": [],
+        "extra_segment_ids": [],
+        "segment_checks": [
+          {
+            "segment_id": 27,
+            "spoken_chars": 209,
+            "min_chars": 189,
+            "max_chars": 256,
+            "in_range": true
+          },
+          {
+            "segment_id": 28,
+            "spoken_chars": 35,
+            "min_chars": 24,
+            "max_chars": 33,
+            "in_range": false
+          },
+          {
+            "segment_id": 29,
+            "spoken_chars": 156,
+            "min_chars": 174,
+            "max_chars": 235,
+            "in_range": false
+          },
+          {
+            "segment_id": 30,
+            "spoken_chars": 58,
+            "min_chars": 57,
+            "max_chars": 78,
+            "in_range": true
+          },
+          {
+            "segment_id": 31,
+            "spoken_chars": 2,
+            "min_chars": 1,
+            "max_chars": 2,
+            "in_range": true
+          }
+        ],
+        "char_range_pass_rate": 0.6,
+        "glossary_checks": [
+          {
+            "source": "UAP",
+            "target": "不明异常现象 (Unidentified Anomalous Phenomena)",
+            "present": false
+          },
+          {
+            "source": "Go fast video",
+            "target": "“Go Fast”视频",
+            "present": true
+          },
+          {
+            "source": "U.S. Naval Observatory",
+            "target": "美国海军天文台",
+            "present": true
+          },
+          {
+            "source": "Sol Foundation",
+            "target": "索尔基金会",
+            "present": true
+          }
+        ],
+        "glossary_pass_rate": 0.75,
+        "constraint_score": 79.75,
+        "parsed_segments": [
+          {
+            "segment_id": 27,
+            "cn_text": "有几个原因吧，罗斯。首先，我当时的职位是美国海军天文台的台长，手下有一个天体物理学家团队，呃，他们负责监测恒星，编制星表。那段经历让我学到不少天体物理学知识，也让我真正体会到宇宙有多浩瀚。你要知道，光是我们的银河系就有两千到三千亿颗恒星，而像这样的星系还有好几千亿个。在这种情况下，还认为人类是宇宙中唯一的智慧生命，就太自大了。然后第二点，就像我刚才提到的，我在一封，呃，保密邮件里看到了2015年的那个“Go Fast”视频。当时我就明白了，那绝对不是我们自己的技术。"
+          },
+          {
+            "segment_id": 28,
+            "cn_text": "美国政府没有用数据驱动、实证研究的方法去调查不明异常现象，你对此感到失望吗？"
+          },
+          {
+            "segment_id": 29,
+            "cn_text": "呃，确实失望。我觉得现在是时候了，随着索尔基金会召开首次研讨会，我们正试图推动美国政府开始对不明异常现象进行更系统的科学研究，而且是从多个方面入手。索尔关注的不光是硬科学，比如想办法获取那些坠毁回收计划中的材料，好让我们进一步了解那种可能给社会带来巨大好处的技术；同时它也关注人文层面，像社会学、人类学，呃，还有一些，怎么说呢，伦理层面的问题。"
+          },
+          {
+            "segment_id": 30,
+            "cn_text": "可问题在于，蒂姆，政府里还有很多人完全在否认。你刚才把坠机回收项目说得像事实一样，那我们现在讨论的就是回收来的非人类技术，对吧？"
+          },
+          {
+            "segment_id": 31,
+            "cn_text": "是的。"
+          }
+        ]
+      },
+      "judge": {
+        "status": "ok",
+        "judge_model": "gpt54",
+        "judge_model_meta": {
+          "model": "gpt54",
+          "api_model_id": "gpt-5.4",
+          "provider": "openai",
+          "label": "GPT-5.4（高质量）",
+          "cost_hint": "约 ¥0.5/千 token",
+          "cost_rank": 6
+        },
+        "latency_ms": 6332,
+        "prompt_chars": 11357,
+        "response_text": "{\n  \"semantic_completeness\": 22,\n  \"terminology\": 11,\n  \"length_fit\": 9,\n  \"oral_naturalness\": 14,\n  \"context_consistency\": 9,\n  \"format_compliance\": 10,\n  \"tts_readiness\": 9,\n  \"quality_score\": 84,\n  \"major_issues\": [\n    \"segment 28 超出 max_chars（35 > 33），时长适配不足\",\n    \"segment 29 低于 min_chars（156 < 174），信息密度偏低，可能影响配音时长填充\",\n    \"术语表要求的 UAP 规范译法“ 不明异常现象 (Unidentified Anomalous Phenomena) ”未严格遵循，仅写作“不明异常现象”\",\n    \"segment 27 将 superintendent 译为“台长”不够稳妥，更接近“负责人/主管”\",\n    \"segment 27 将 secret email 译为“保密邮件”，更准确应为“机密邮件/秘密邮件”\"\n  ],\n  \"brief_reason\": \"整体译文准确、顺畅，口播感较好，跨段衔接也基本一致。主要扣分点在于两段字数不达标，以及 UAP 未严格按术语表完整呈现。个别措辞有轻微偏差，但不影响整体理解。\"\n}",
+        "parsed": {
+          "semantic_completeness": 22.0,
+          "terminology": 11.0,
+          "length_fit": 9.0,
+          "oral_naturalness": 14.0,
+          "context_consistency": 9.0,
+          "format_compliance": 10.0,
+          "tts_readiness": 9.0,
+          "quality_score": 84.0,
+          "major_issues": [
+            "segment 28 超出 max_chars（35 > 33），时长适配不足",
+            "segment 29 低于 min_chars（156 < 174），信息密度偏低，可能影响配音时长填充",
+            "术语表要求的 UAP 规范译法“ 不明异常现象 (Unidentified Anomalous Phenomena) ”未严格遵循，仅写作“不明异常现象”",
+            "segment 27 将 superintendent 译为“台长”不够稳妥，更接近“负责人/主管”",
+            "segment 27 将 secret email 译为“保密邮件”，更准确应为“机密邮件/秘密邮件”"
+          ],
+          "brief_reason": "整体译文准确、顺畅，口播感较好，跨段衔接也基本一致。主要扣分点在于两段字数不达标，以及 UAP 未严格按术语表完整呈现。个别措辞有轻微偏差，但不影响整体理解。"
+        }
+      }
+    },
+    {
+      "sample_id": "trans_eval_010",
+      "model": "deepseek_v4_pro",
+      "model_meta": {
+        "model": "deepseek_v4_pro",
+        "api_model_id": "deepseek-v4-pro",
+        "provider": "deepseek",
+        "label": "DeepSeek V4 Pro（高质量）",
+        "cost_hint": "$0.435/$0.87 每百万 token（限时）",
+        "cost_rank": 4
+      },
+      "status": "ok",
+      "started_at": "2026-04-26T15:22:00.750272+00:00",
+      "latency_ms": 17812,
+      "prompt_chars": 6251,
+      "response_chars": 986,
+      "response_text": "[\n  {\n    \"segment_id\": 5,\n    \"cn_text\": \"那句座右铭的最后一部分是享受生活，而这通常就是前面两点带来的副产品——少工作、多休息、多赚钱，同时拥有时间和地点的自由，让你能够自主选择如何度过一生。这就是我的人生信条。而且每当我看到评论区或其他地方有人质疑这个想法时，我就觉得特别奇怪。拜托，哥们儿，难道你觉得自己完全无法掌控人生吗？对，你现在确实做不到，这需要一点时间。\"\n  },\n  {\n    \"segment_id\": 6,\n    \"cn_text\": \"这个话题我可以说上一整天，但说真的，哥们儿，你得相信自己，这话听起来简单，但你就朝着更好的未来去努力就行了。不过问题是，我自己也曾掉进那个陷阱，想要过上别人那种生活。海景风光、脚趾间沙沙的感觉、像大卫·哈塞尔霍夫那样晒成古铜色，在沙滩上一边喝椰子水一边用笔记本工作。直到我真正体验了那种生活。\"\n  },\n  {\n    \"segment_id\": 7,\n    \"cn_text\": \"我并不是要刻意贬低数字游民文化，我觉得它很棒，我真心觉得挺棒的。但是，怎么说呢，谁真的想那样啊？那种感觉很快就会腻。你试着在海滩上工作，结果因为阳光太刺眼，根本看不清屏幕，又热得不行，还得不停补防晒，然后你就会想，我渴死了，还不如待在屋里干活呢。所以我也说不清，这种事，怎么说呢，你必须亲身试错，才能明白自己到底想要什么。\"\n  },\n  {\n    \"segment_id\": 8,\n    \"cn_text\": \"你得先搞清楚自己不想要什么，才能想明白自己真正想要什么。但你必须明白，那些人鼓吹的光鲜亮丽和各种生活方式，它们本质上是一种多巴胺刺激，对吧？你看到某个自己向往的东西，可一旦得到了，如果你不珍惜它，不让它成为生活的一部分，那种新鲜劲儿很快就会消失。那些地方的Wi-Fi信号会让人抓狂，派对、语言障碍，还有社交媒体上那些所谓的高光时刻，它们真的会让人厌倦。\"\n  },\n  {\n    \"segment_id\": 9,\n    \"cn_text\": \"所以本期视频的目的，我想聊聊适度与可持续性，因为我们刚才谈到，那些东西，至少那些表面光鲜的东西，其实并不真正可持续。因此，我想介绍一种商业模式，让你通过实践、实验和不断迭代，来打造你理想的生活方式。\"\n  }\n]",
+      "constraints": {
+        "format_ok": true,
+        "parse_error": null,
+        "missing_segment_ids": [],
+        "extra_segment_ids": [],
+        "segment_checks": [
+          {
+            "segment_id": 5,
+            "spoken_chars": 145,
+            "min_chars": 153,
+            "max_chars": 206,
+            "in_range": false
+          },
+          {
+            "segment_id": 6,
+            "spoken_chars": 131,
+            "min_chars": 125,
+            "max_chars": 170,
+            "in_range": true
+          },
+          {
+            "segment_id": 7,
+            "spoken_chars": 141,
+            "min_chars": 162,
+            "max_chars": 219,
+            "in_range": false
+          },
+          {
+            "segment_id": 8,
+            "spoken_chars": 159,
+            "min_chars": 162,
+            "max_chars": 219,
+            "in_range": false
+          },
+          {
+            "segment_id": 9,
+            "spoken_chars": 88,
+            "min_chars": 85,
+            "max_chars": 116,
+            "in_range": true
+          }
+        ],
+        "char_range_pass_rate": 0.4,
+        "glossary_checks": [
+          {
+            "source": "David Hasselhoff",
+            "target": "大卫·哈塞尔霍夫",
+            "present": true
+          }
+        ],
+        "glossary_pass_rate": 1.0,
+        "constraint_score": 79.0,
+        "parsed_segments": [
+          {
+            "segment_id": 5,
+            "cn_text": "那句座右铭的最后一部分是享受生活，而这通常就是前面两点带来的副产品——少工作、多休息、多赚钱，同时拥有时间和地点的自由，让你能够自主选择如何度过一生。这就是我的人生信条。而且每当我看到评论区或其他地方有人质疑这个想法时，我就觉得特别奇怪。拜托，哥们儿，难道你觉得自己完全无法掌控人生吗？对，你现在确实做不到，这需要一点时间。"
+          },
+          {
+            "segment_id": 6,
+            "cn_text": "这个话题我可以说上一整天，但说真的，哥们儿，你得相信自己，这话听起来简单，但你就朝着更好的未来去努力就行了。不过问题是，我自己也曾掉进那个陷阱，想要过上别人那种生活。海景风光、脚趾间沙沙的感觉、像大卫·哈塞尔霍夫那样晒成古铜色，在沙滩上一边喝椰子水一边用笔记本工作。直到我真正体验了那种生活。"
+          },
+          {
+            "segment_id": 7,
+            "cn_text": "我并不是要刻意贬低数字游民文化，我觉得它很棒，我真心觉得挺棒的。但是，怎么说呢，谁真的想那样啊？那种感觉很快就会腻。你试着在海滩上工作，结果因为阳光太刺眼，根本看不清屏幕，又热得不行，还得不停补防晒，然后你就会想，我渴死了，还不如待在屋里干活呢。所以我也说不清，这种事，怎么说呢，你必须亲身试错，才能明白自己到底想要什么。"
+          },
+          {
+            "segment_id": 8,
+            "cn_text": "你得先搞清楚自己不想要什么，才能想明白自己真正想要什么。但你必须明白，那些人鼓吹的光鲜亮丽和各种生活方式，它们本质上是一种多巴胺刺激，对吧？你看到某个自己向往的东西，可一旦得到了，如果你不珍惜它，不让它成为生活的一部分，那种新鲜劲儿很快就会消失。那些地方的Wi-Fi信号会让人抓狂，派对、语言障碍，还有社交媒体上那些所谓的高光时刻，它们真的会让人厌倦。"
+          },
+          {
+            "segment_id": 9,
+            "cn_text": "所以本期视频的目的，我想聊聊适度与可持续性，因为我们刚才谈到，那些东西，至少那些表面光鲜的东西，其实并不真正可持续。因此，我想介绍一种商业模式，让你通过实践、实验和不断迭代，来打造你理想的生活方式。"
+          }
+        ]
+      },
+      "judge": {
+        "status": "ok",
+        "judge_model": "gpt54",
+        "judge_model_meta": {
+          "model": "gpt54",
+          "api_model_id": "gpt-5.4",
+          "provider": "openai",
+          "label": "GPT-5.4（高质量）",
+          "cost_hint": "约 ¥0.5/千 token",
+          "cost_rank": 6
+        },
+        "latency_ms": 5977,
+        "prompt_chars": 11876,
+        "response_text": "{\n  \"semantic_completeness\": 22,\n  \"terminology\": 14,\n  \"length_fit\": 8,\n  \"oral_naturalness\": 14,\n  \"context_consistency\": 9,\n  \"format_compliance\": 10,\n  \"tts_readiness\": 8,\n  \"quality_score\": 85,\n  \"major_issues\": [\n    \"segment 5、7、8 字数低于最小值，不利于满足配音时长目标\",\n    \"segment 5 将 both 译为“前面两点”不够准确，原文更接近前述几项共同作用/两方面综合结果\",\n    \"segment 8 对“The Wi‑Fi connection in those areas gets old”处理为“Wi‑Fi信号会让人抓狂”，语义有轻微改写，原文重点是久了会腻/失去新鲜感\",\n    \"segment 7、8 为压缩时长有一定信息浓缩，虽主旨保留，但细节层次略有弱化\"\n  ],\n  \"brief_reason\": \"整体译文准确自然，口播感较好，专名“大卫·哈塞尔霍夫”使用正确，跨段衔接也基本一致。主要问题是 5/7/8 三段长度未达下限，影响配音适配；个别措辞有轻微语义偏移，但不影响整体理解。\"\n}",
+        "parsed": {
+          "semantic_completeness": 22.0,
+          "terminology": 14.0,
+          "length_fit": 8.0,
+          "oral_naturalness": 14.0,
+          "context_consistency": 9.0,
+          "format_compliance": 10.0,
+          "tts_readiness": 8.0,
+          "quality_score": 85.0,
+          "major_issues": [
+            "segment 5、7、8 字数低于最小值，不利于满足配音时长目标",
+            "segment 5 将 both 译为“前面两点”不够准确，原文更接近前述几项共同作用/两方面综合结果",
+            "segment 8 对“The Wi‑Fi connection in those areas gets old”处理为“Wi‑Fi信号会让人抓狂”，语义有轻微改写，原文重点是久了会腻/失去新鲜感",
+            "segment 7、8 为压缩时长有一定信息浓缩，虽主旨保留，但细节层次略有弱化"
+          ],
+          "brief_reason": "整体译文准确自然，口播感较好，专名“大卫·哈塞尔霍夫”使用正确，跨段衔接也基本一致。主要问题是 5/7/8 三段长度未达下限，影响配音适配；个别措辞有轻微语义偏移，但不影响整体理解。"
+        }
+      }
+    },
+    {
+      "sample_id": "trans_eval_013",
+      "model": "deepseek_v4_pro",
+      "model_meta": {
+        "model": "deepseek_v4_pro",
+        "api_model_id": "deepseek-v4-pro",
+        "provider": "deepseek",
+        "label": "DeepSeek V4 Pro（高质量）",
+        "cost_hint": "$0.435/$0.87 每百万 token（限时）",
+        "cost_rank": 4
+      },
+      "status": "ok",
+      "started_at": "2026-04-26T15:22:24.542261+00:00",
+      "latency_ms": 106304,
+      "prompt_chars": 5226,
+      "response_chars": 910,
+      "response_text": "[\n  {\n    \"segment_id\": 25,\n    \"cn_text\": \"这得花上那么长的时间，才能，呃……\"\n  },\n  {\n    \"segment_id\": 26,\n    \"cn_text\": \"呃。你想啊，你得花那么长的时间，才能开始以某种方式去改变一些东西，让它变得比以前更好。嗯，当这种情况发生时，用他的话来说，音乐就那么自然而然地流淌出来。你知道，我之所以这么讲，是因为我采访过的所有这些人都是这么说的。顺便提一下，这次采访已经是三十多年前的事了。呃，在对这么多人的采访中，很多人都把这种感觉描述为一种自发涌出的“流动感”。于是，我就把这种，呃，体验，称作“心流体验”。\"\n  },\n  {\n    \"segment_id\": 27,\n    \"cn_text\": \"而这种体验呢，它其实出现在很多不同的领域。我来举一个例子，一位诗人是这么形容它的。这个描述来自我的一名学生，她采访了美国一些首屈一指的作家和诗人。里面讲的，同样是一种毫不费力、自然而然就流露出来的感觉。也就是当你进入那种，呃，心醉神迷的忘我状态时，你所感受到的。这位诗人把这种状态比作——就好像在天空中推开了一扇飘浮的门。这个比喻，跟阿尔伯特·爱因斯坦当年描述相对论时的说法，简直如出一辙。\"\n  },\n  {\n    \"segment_id\": 28,\n    \"cn_text\": \"这是他在描述，呃，当时是怎么想象相对论中的各种作用力的。他那时候正苦苦挣扎，绞尽脑汁想搞清楚相对论背后的运作机制。嗯，不过你要知道，这种体验不仅出现在科学领域，也会发生在其他活动中。我举个例子，这是我的另一个学生，来自澳大利亚的苏珊·杰克逊。她当时所做的工作，就是去访谈世界上一些最顶尖的运动员。\"\n  },\n  {\n    \"segment_id\": 29,\n    \"cn_text\": \"那么你看到这里，这个描述来自一位，呃，奥运会滑冰运动员。它所描述的，正是同样那种本质性的东西——关于一个人内在状态的现象学刻画。你会发现，你根本不需要去思考，一切就这么自动地运转起来，你整个人与音乐融为一体，诸如此类的描述。\"\n  }\n]",
+      "constraints": {
+        "format_ok": true,
+        "parse_error": null,
+        "missing_segment_ids": [],
+        "extra_segment_ids": [],
+        "segment_checks": [
+          {
+            "segment_id": 25,
+            "spoken_chars": 13,
+            "min_chars": 13,
+            "max_chars": 18,
+            "in_range": true
+          },
+          {
+            "segment_id": 26,
+            "spoken_chars": 165,
+            "min_chars": 105,
+            "max_chars": 142,
+            "in_range": false
+          },
+          {
+            "segment_id": 27,
+            "spoken_chars": 175,
+            "min_chars": 114,
+            "max_chars": 155,
+            "in_range": false
+          },
+          {
+            "segment_id": 28,
+            "spoken_chars": 133,
+            "min_chars": 79,
+            "max_chars": 108,
+            "in_range": false
+          },
+          {
+            "segment_id": 29,
+            "spoken_chars": 99,
+            "min_chars": 61,
+            "max_chars": 82,
+            "in_range": false
+          }
+        ],
+        "char_range_pass_rate": 0.2,
+        "glossary_checks": [
+          {
+            "source": "Albert Einstein",
+            "target": "阿尔伯特·爱因斯坦",
+            "present": true
+          },
+          {
+            "source": "Susan Jackson",
+            "target": "苏珊·杰克逊",
+            "present": true
+          },
+          {
+            "source": "flow experience",
+            "target": "心流体验",
+            "present": true
+          }
+        ],
+        "glossary_pass_rate": 1.0,
+        "constraint_score": 72.0,
+        "parsed_segments": [
+          {
+            "segment_id": 25,
+            "cn_text": "这得花上那么长的时间，才能，呃……"
+          },
+          {
+            "segment_id": 26,
+            "cn_text": "呃。你想啊，你得花那么长的时间，才能开始以某种方式去改变一些东西，让它变得比以前更好。嗯，当这种情况发生时，用他的话来说，音乐就那么自然而然地流淌出来。你知道，我之所以这么讲，是因为我采访过的所有这些人都是这么说的。顺便提一下，这次采访已经是三十多年前的事了。呃，在对这么多人的采访中，很多人都把这种感觉描述为一种自发涌出的“流动感”。于是，我就把这种，呃，体验，称作“心流体验”。"
+          },
+          {
+            "segment_id": 27,
+            "cn_text": "而这种体验呢，它其实出现在很多不同的领域。我来举一个例子，一位诗人是这么形容它的。这个描述来自我的一名学生，她采访了美国一些首屈一指的作家和诗人。里面讲的，同样是一种毫不费力、自然而然就流露出来的感觉。也就是当你进入那种，呃，心醉神迷的忘我状态时，你所感受到的。这位诗人把这种状态比作——就好像在天空中推开了一扇飘浮的门。这个比喻，跟阿尔伯特·爱因斯坦当年描述相对论时的说法，简直如出一辙。"
+          },
+          {
+            "segment_id": 28,
+            "cn_text": "这是他在描述，呃，当时是怎么想象相对论中的各种作用力的。他那时候正苦苦挣扎，绞尽脑汁想搞清楚相对论背后的运作机制。嗯，不过你要知道，这种体验不仅出现在科学领域，也会发生在其他活动中。我举个例子，这是我的另一个学生，来自澳大利亚的苏珊·杰克逊。她当时所做的工作，就是去访谈世界上一些最顶尖的运动员。"
+          },
+          {
+            "segment_id": 29,
+            "cn_text": "那么你看到这里，这个描述来自一位，呃，奥运会滑冰运动员。它所描述的，正是同样那种本质性的东西——关于一个人内在状态的现象学刻画。你会发现，你根本不需要去思考，一切就这么自动地运转起来，你整个人与音乐融为一体，诸如此类的描述。"
+          }
+        ]
+      },
+      "judge": {
+        "status": "ok",
+        "judge_model": "gpt54",
+        "judge_model_meta": {
+          "model": "gpt54",
+          "api_model_id": "gpt-5.4",
+          "provider": "openai",
+          "label": "GPT-5.4（高质量）",
+          "cost_hint": "约 ¥0.5/千 token",
+          "cost_rank": 6
+        },
+        "latency_ms": 7083,
+        "prompt_chars": 9662,
+        "response_text": "{\n  \"semantic_completeness\": 20,\n  \"terminology\": 14,\n  \"length_fit\": 2,\n  \"oral_naturalness\": 12,\n  \"context_consistency\": 8,\n  \"format_compliance\": 10,\n  \"tts_readiness\": 6,\n  \"quality_score\": 72,\n  \"major_issues\": [\n    \"除 segment 25 外，其余 segment 全部明显超出 max_chars，严重不符合配音时长约束。\",\n    \"segment 26 添加了原文没有的口语扩写，如“你想啊”“你知道”“顺便提一下”，导致信息膨胀并拖长时长。\",\n    \"segment 27 将“opening a door that floats up in the sky”译成“在天空中推开了一扇飘浮的门”，原文更接近“打开一扇漂浮在天空中的门”，动作关系有轻微偏移。\",\n    \"segment 27 把“ecstatic state”扩成“心醉神迷的忘我状态”，虽可接受但有明显演绎。\",\n    \"segment 28 将“did work with”译成“去访谈”，语义变窄；原文更偏“开展研究/合作工作”。\",\n    \"segment 29 的“你根本不需要去思考”与原文“You don't think”基本可通，但后面加入“你会发现”等引导语，进一步拉长且增加非必要成分。\"\n  ],\n  \"brief_reason\": \"译文整体意思基本到位，术语和专名使用正确，中文口语感也较自然。但最大问题是为口播场景过度扩写，4个主要 segment 都严重超长，且夹带不少原文没有的填充表达，影响配音适配和后续 TTS 处理，因此综合分被明显拉低。\"\n}",
+        "parsed": {
+          "semantic_completeness": 20.0,
+          "terminology": 14.0,
+          "length_fit": 2.0,
+          "oral_naturalness": 12.0,
+          "context_consistency": 8.0,
+          "format_compliance": 10.0,
+          "tts_readiness": 6.0,
+          "quality_score": 72.0,
+          "major_issues": [
+            "除 segment 25 外，其余 segment 全部明显超出 max_chars，严重不符合配音时长约束。",
+            "segment 26 添加了原文没有的口语扩写，如“你想啊”“你知道”“顺便提一下”，导致信息膨胀并拖长时长。",
+            "segment 27 将“opening a door that floats up in the sky”译成“在天空中推开了一扇飘浮的门”，原文更接近“打开一扇漂浮在天空中的门”，动作关系有轻微偏移。",
+            "segment 27 把“ecstatic state”扩成“心醉神迷的忘我状态”，虽可接受但有明显演绎。",
+            "segment 28 将“did work with”译成“去访谈”，语义变窄；原文更偏“开展研究/合作工作”。",
+            "segment 29 的“你根本不需要去思考”与原文“You don't think”基本可通，但后面加入“你会发现”等引导语，进一步拉长且增加非必要成分。"
+          ],
+          "brief_reason": "译文整体意思基本到位，术语和专名使用正确，中文口语感也较自然。但最大问题是为口播场景过度扩写，4个主要 segment 都严重超长，且夹带不少原文没有的填充表达，影响配音适配和后续 TTS 处理，因此综合分被明显拉低。"
+        }
+      }
+    },
+    {
+      "sample_id": "trans_eval_018",
+      "model": "deepseek_v4_pro",
+      "model_meta": {
+        "model": "deepseek_v4_pro",
+        "api_model_id": "deepseek-v4-pro",
+        "provider": "deepseek",
+        "label": "DeepSeek V4 Pro（高质量）",
+        "cost_hint": "$0.435/$0.87 每百万 token（限时）",
+        "cost_rank": 4
+      },
+      "status": "ok",
+      "started_at": "2026-04-26T15:24:17.931278+00:00",
+      "latency_ms": 222545,
+      "prompt_chars": 5925,
+      "response_chars": 187,
+      "response_text": "[\n  {\n    \"segment_id\": 11,\n    \"cn_text\": \"然后你还提到中国。有些人觉得，呃，也许中国才是真正的幕后操盘手，是它最终促成了这笔交易，可以这么说。\"\n  },\n  {\n    \"segment_id\": 12,\n    \"cn_text\": \"对，嗯，呃，根据《纽约时报》和其他媒体的报道，中国在最后一刻进行了干预，参与了进来。呃，",
+      "constraints": {
+        "format_ok": false,
+        "parse_error": "invalid_json: Unterminated string starting at: line 8 column 16 (char 142)",
+        "missing_segment_ids": [
+          11,
+          12,
+          13,
+          14,
+          15
+        ],
+        "extra_segment_ids": [],
+        "segment_checks": [
+          {
+            "segment_id": 11,
+            "spoken_chars": 0,
+            "min_chars": 41,
+            "max_chars": 56,
+            "in_range": false
+          },
+          {
+            "segment_id": 12,
+            "spoken_chars": 0,
+            "min_chars": 147,
+            "max_chars": 198,
+            "in_range": false
+          },
+          {
+            "segment_id": 13,
+            "spoken_chars": 0,
+            "min_chars": 13,
+            "max_chars": 18,
+            "in_range": false
+          },
+          {
+            "segment_id": 14,
+            "spoken_chars": 0,
+            "min_chars": 141,
+            "max_chars": 190,
+            "in_range": false
+          },
+          {
+            "segment_id": 15,
+            "spoken_chars": 0,
+            "min_chars": 91,
+            "max_chars": 124,
+            "in_range": false
+          }
+        ],
+        "char_range_pass_rate": 0.0,
+        "glossary_checks": [
+          {
+            "source": "Pakistan",
+            "target": "巴基斯坦",
+            "present": false
+          },
+          {
+            "source": "China",
+            "target": "中国",
+            "present": false
+          },
+          {
+            "source": "Iran",
+            "target": "伊朗",
+            "present": false
+          },
+          {
+            "source": "US",
+            "target": "美国",
+            "present": false
+          },
+          {
+            "source": "New York Times",
+            "target": "纽约时报",
+            "present": false
+          },
+          {
+            "source": "JCPOA",
+            "target": "JCPOA",
+            "present": false
+          },
+          {
+            "source": "Joint Comprehensive Plan of Action",
+            "target": "联合全面行动计划",
+            "present": false
+          },
+          {
+            "source": "Russia",
+            "target": "俄罗斯",
+            "present": false
+          },
+          {
+            "source": "Qatar",
+            "target": "卡塔尔",
+            "present": false
+          },
+          {
+            "source": "Oman",
+            "target": "阿曼",
+            "present": false
+          },
+          {
+            "source": "non Nuclear Proliferation Treaty",
+            "target": "核不扩散条约",
+            "present": false
+          }
+        ],
+        "glossary_pass_rate": 0.0,
+        "constraint_score": 0.0,
+        "parsed_segments": []
+      },
+      "judge": {
+        "status": "ok",
+        "judge_model": "gpt54",
+        "judge_model_meta": {
+          "model": "gpt54",
+          "api_model_id": "gpt-5.4",
+          "provider": "openai",
+          "label": "GPT-5.4（高质量）",
+          "cost_hint": "约 ¥0.5/千 token",
+          "cost_rank": 6
+        },
+        "latency_ms": 6973,
+        "prompt_chars": 11439,
+        "response_text": "{\n  \"semantic_completeness\": 3,\n  \"terminology\": 2,\n  \"length_fit\": 0,\n  \"oral_naturalness\": 4,\n  \"context_consistency\": 1,\n  \"format_compliance\": 0,\n  \"tts_readiness\": 1,\n  \"quality_score\": 11,\n  \"major_issues\": [\n    \"候选输出不是要求的 JSON 对象，而是被截断的数组字符串，整体格式不合规。\",\n    \"仅能看到 segment 11 完整内容和 segment 12 的开头，segment 12-15 实际缺失，属于严重漏译。\",\n    \"deterministic_checks 显示 format_ok=false，且所有 segment_id 均被判定缺失。\",\n    \"长度约束无法满足：由于输出截断，所有分段 spoken_chars 记为 0，全部不在 min_chars/max_chars 范围内。\",\n    \"术语覆盖严重不足；虽然可见部分出现了“中国”“纽约时报”，但巴基斯坦、伊朗、JCPOA、联合全面行动计划、俄罗斯、卡塔尔、阿曼、核不扩散条约等关键术语均未完整体现。\",\n    \"segment 11 中将 sealed the deal 译为“促成了这笔交易”基本可接受，但“幕后操盘手”语气较强，且口播里夹杂较多“呃”略显拖沓。\",\n    \"由于内容不完整，无法保证跨 segment 的指代、逻辑衔接和人物立场一致性。\",\n    \"不适合直接进入 TTS，需先补全缺失分段并修复结构。\"\n  ],\n  \"brief_reason\": \"候选译文最大问题是输出被截断，既不符合规定格式，也缺失绝大多数分段内容，导致语义完整性、术语、长度和可用于 TTS 的程度都很差。已见到的少量内容局部尚可，但不足以弥补整体不可用的问题。\"\n}",
+        "parsed": {
+          "semantic_completeness": 3.0,
+          "terminology": 2.0,
+          "length_fit": 0.0,
+          "oral_naturalness": 4.0,
+          "context_consistency": 1.0,
+          "format_compliance": 0.0,
+          "tts_readiness": 1.0,
+          "quality_score": 11.0,
+          "major_issues": [
+            "候选输出不是要求的 JSON 对象，而是被截断的数组字符串，整体格式不合规。",
+            "仅能看到 segment 11 完整内容和 segment 12 的开头，segment 12-15 实际缺失，属于严重漏译。",
+            "deterministic_checks 显示 format_ok=false，且所有 segment_id 均被判定缺失。",
+            "长度约束无法满足：由于输出截断，所有分段 spoken_chars 记为 0，全部不在 min_chars/max_chars 范围内。",
+            "术语覆盖严重不足；虽然可见部分出现了“中国”“纽约时报”，但巴基斯坦、伊朗、JCPOA、联合全面行动计划、俄罗斯、卡塔尔、阿曼、核不扩散条约等关键术语均未完整体现。",
+            "segment 11 中将 sealed the deal 译为“促成了这笔交易”基本可接受，但“幕后操盘手”语气较强，且口播里夹杂较多“呃”略显拖沓。",
+            "由于内容不完整，无法保证跨 segment 的指代、逻辑衔接和人物立场一致性。",
+            "不适合直接进入 TTS，需先补全缺失分段并修复结构。"
+          ],
+          "brief_reason": "候选译文最大问题是输出被截断，既不符合规定格式，也缺失绝大多数分段内容，导致语义完整性、术语、长度和可用于 TTS 的程度都很差。已见到的少量内容局部尚可，但不足以弥补整体不可用的问题。"
+        }
+      }
+    },
+    {
+      "sample_id": "trans_eval_024",
+      "model": "deepseek_v4_pro",
+      "model_meta": {
+        "model": "deepseek_v4_pro",
+        "api_model_id": "deepseek-v4-pro",
+        "provider": "deepseek",
+        "label": "DeepSeek V4 Pro（高质量）",
+        "cost_hint": "$0.435/$0.87 每百万 token（限时）",
+        "cost_rank": 4
+      },
+      "status": "ok",
+      "started_at": "2026-04-26T15:28:07.452821+00:00",
+      "latency_ms": 46060,
+      "prompt_chars": 4842,
+      "response_chars": 603,
+      "response_text": "[\n  {\n    \"segment_id\": 3,\n    \"cn_text\": \"你已经把自己很多钱都捐出去了。\"\n  },\n  {\n    \"segment_id\": 4,\n    \"cn_text\": \"是啊，但不像沃伦那样。我们芒格家的钱，一半以上早就传给了子孙后代。所以我的做法正好相反。虽然我的钱没他那么多，但我家大部分钱，我做了截然相反的决定。沃伦把大部分钱都捐了，但也不能说他纯粹就是捐了，钱是去了公共基金会，会再运转个一百年。那不完全是送出去，也不是浪费掉，而是用它去做些有意义的事。\"\n  },\n  {\n    \"segment_id\": 5,\n    \"cn_text\": \"你的愿望清单上，还有什么没做的吗？有没有特别想干的事？\"\n  },\n  {\n    \"segment_id\": 6,\n    \"cn_text\": \"这个问题挺有意思。\"\n  },\n  {\n    \"segment_id\": 7,\n    \"cn_text\": \"我现在太老了，也太虚弱了，跟我96岁的时候完全没法比，所以我再也不想去抓一条两百磅的金枪鱼了。把它弄上来，简直要累掉半条命，太耗体力了。说实话，我也不知道为什么我年轻那会儿愿意花大价钱去钓一条两百磅的金枪鱼，还从来都没钓上来过。现在就算给我机会，我也会直接推掉。我连出海去追它们都不会去了。有些事，随着时间流逝，你自然就放下了。\"\n  }\n]",
+      "constraints": {
+        "format_ok": true,
+        "parse_error": null,
+        "missing_segment_ids": [],
+        "extra_segment_ids": [],
+        "segment_checks": [
+          {
+            "segment_id": 3,
+            "spoken_chars": 14,
+            "min_chars": 11,
+            "max_chars": 16,
+            "in_range": true
+          },
+          {
+            "segment_id": 4,
+            "spoken_chars": 131,
+            "min_chars": 131,
+            "max_chars": 178,
+            "in_range": true
+          },
+          {
+            "segment_id": 5,
+            "spoken_chars": 24,
+            "min_chars": 19,
+            "max_chars": 26,
+            "in_range": true
+          },
+          {
+            "segment_id": 6,
+            "spoken_chars": 8,
+            "min_chars": 5,
+            "max_chars": 8,
+            "in_range": true
+          },
+          {
+            "segment_id": 7,
+            "spoken_chars": 148,
+            "min_chars": 141,
+            "max_chars": 192,
+            "in_range": true
+          }
+        ],
+        "char_range_pass_rate": 1.0,
+        "glossary_checks": [
+          {
+            "source": "Warren",
+            "target": "沃伦",
+            "present": true
+          },
+          {
+            "source": "Munger",
+            "target": "芒格",
+            "present": true
+          }
+        ],
+        "glossary_pass_rate": 1.0,
+        "constraint_score": 100.0,
+        "parsed_segments": [
+          {
+            "segment_id": 3,
+            "cn_text": "你已经把自己很多钱都捐出去了。"
+          },
+          {
+            "segment_id": 4,
+            "cn_text": "是啊，但不像沃伦那样。我们芒格家的钱，一半以上早就传给了子孙后代。所以我的做法正好相反。虽然我的钱没他那么多，但我家大部分钱，我做了截然相反的决定。沃伦把大部分钱都捐了，但也不能说他纯粹就是捐了，钱是去了公共基金会，会再运转个一百年。那不完全是送出去，也不是浪费掉，而是用它去做些有意义的事。"
+          },
+          {
+            "segment_id": 5,
+            "cn_text": "你的愿望清单上，还有什么没做的吗？有没有特别想干的事？"
+          },
+          {
+            "segment_id": 6,
+            "cn_text": "这个问题挺有意思。"
+          },
+          {
+            "segment_id": 7,
+            "cn_text": "我现在太老了，也太虚弱了，跟我96岁的时候完全没法比，所以我再也不想去抓一条两百磅的金枪鱼了。把它弄上来，简直要累掉半条命，太耗体力了。说实话，我也不知道为什么我年轻那会儿愿意花大价钱去钓一条两百磅的金枪鱼，还从来都没钓上来过。现在就算给我机会，我也会直接推掉。我连出海去追它们都不会去了。有些事，随着时间流逝，你自然就放下了。"
+          }
+        ]
+      },
+      "judge": {
+        "status": "ok",
+        "judge_model": "gpt54",
+        "judge_model_meta": {
+          "model": "gpt54",
+          "api_model_id": "gpt-5.4",
+          "provider": "openai",
+          "label": "GPT-5.4（高质量）",
+          "cost_hint": "约 ¥0.5/千 token",
+          "cost_rank": 6
+        },
+        "latency_ms": 5808,
+        "prompt_chars": 8425,
+        "response_text": "{\n  \"semantic_completeness\": 23,\n  \"terminology\": 14,\n  \"length_fit\": 15,\n  \"oral_naturalness\": 14,\n  \"context_consistency\": 9,\n  \"format_compliance\": 10,\n  \"tts_readiness\": 9,\n  \"quality_score\": 94,\n  \"major_issues\": [\n    \"segment 4 将“The majority of his money he gave away”明确成“沃伦把大部分钱都捐了”，指代补足自然，但原文代词 his 在严格意义上存在轻微指代改写风险。\",\n    \"segment 7 的“愿意花大价钱去钓”比原文“would have paid any amount to get”略有强化，语气上稍微增译。\",\n    \"segment 3 的“把自己很多钱都捐出去了”口语自然，但“give away”未必严格等于“捐”，存在轻微语义收窄。\"\n  ],\n  \"brief_reason\": \"整体译文准确完整，术语“沃伦”“芒格”使用正确，所有分段字数均满足约束，中文口播感强，衔接自然，适合配音与TTS。主要是个别处有轻微语义收窄或语气强化，但不影响整体高质量。\"\n}",
+        "parsed": {
+          "semantic_completeness": 23.0,
+          "terminology": 14.0,
+          "length_fit": 15.0,
+          "oral_naturalness": 14.0,
+          "context_consistency": 9.0,
+          "format_compliance": 10.0,
+          "tts_readiness": 9.0,
+          "quality_score": 94.0,
+          "major_issues": [
+            "segment 4 将“The majority of his money he gave away”明确成“沃伦把大部分钱都捐了”，指代补足自然，但原文代词 his 在严格意义上存在轻微指代改写风险。",
+            "segment 7 的“愿意花大价钱去钓”比原文“would have paid any amount to get”略有强化，语气上稍微增译。",
+            "segment 3 的“把自己很多钱都捐出去了”口语自然，但“give away”未必严格等于“捐”，存在轻微语义收窄。"
+          ],
+          "brief_reason": "整体译文准确完整，术语“沃伦”“芒格”使用正确，所有分段字数均满足约束，中文口播感强，衔接自然，适合配音与TTS。主要是个别处有轻微语义收窄或语气强化，但不影响整体高质量。"
+        }
+      }
+    }
+  ],
+  "summary": {
+    "models": [
+      {
+        "model": "deepseek_v4_pro",
+        "api_model_id": "deepseek-v4-pro",
+        "provider": "deepseek",
+        "label": "DeepSeek V4 Pro（高质量）",
+        "cost_hint": "$0.435/$0.87 每百万 token（限时）",
+        "cost_rank": 4,
+        "attempts": 6,
+        "successes": 6,
+        "success_rate": 1.0,
+        "avg_latency_ms": 71825,
+        "avg_quality_score": 69.83,
+        "avg_constraint_score": 66.46,
+        "speed_score": 100.0,
+        "reliability_score": 100.0,
+        "overall_score": 75.36,
+        "error_count": 0
+      }
+    ],
+    "status_counts": {
+      "ok": 6
+    },
+    "weights": {
+      "judge_quality": 0.65,
+      "deterministic_constraints": 0.15,
+      "processing_speed": 0.1,
+      "reliability": 0.1
+    }
+  }
+}

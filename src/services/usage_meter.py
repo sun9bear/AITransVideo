@@ -1,0 +1,362 @@
+from __future__ import annotations
+
+import json
+import math
+import threading
+import time
+import uuid
+from pathlib import Path
+from typing import Any
+
+
+TTS_BUCKET_FIRST = "first_tts"
+TTS_BUCKET_PROBE = "probe_tts"
+TTS_BUCKET_POST_TTS_RESYNTH = "post_tts_resynth"
+TTS_BUCKET_POST_EDIT_RESYNTH = "post_edit_resynth"
+TTS_BUCKET_INTERACTIVE_PREVIEW = "interactive_preview"
+
+_JOB_TTS_BUCKETS = {
+    TTS_BUCKET_FIRST,
+    TTS_BUCKET_PROBE,
+    TTS_BUCKET_POST_TTS_RESYNTH,
+    TTS_BUCKET_POST_EDIT_RESYNTH,
+}
+
+
+def estimate_text_tokens(text: str | None) -> int:
+    """Cheap, deterministic estimate for metering when provider usage is absent."""
+    if not text:
+        return 0
+    return max(1, int(math.ceil(len(str(text).encode("utf-8")) / 4)))
+
+
+def _safe_key(value: object) -> str:
+    raw = str(value or "").strip().lower()
+    chars = [ch if ch.isalnum() else "_" for ch in raw]
+    key = "".join(chars).strip("_")
+    while "__" in key:
+        key = key.replace("__", "_")
+    return key or "unknown"
+
+
+def _coerce_int(value: object) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _coerce_float(value: object) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+class UsageMeter:
+    """Append-only per-job LLM/TTS usage recorder.
+
+    This is intentionally sidecar state. Recording failures are warnings, not
+    pipeline failures.
+    """
+
+    def __init__(
+        self,
+        project_dir: str | Path | None,
+        *,
+        job_id: str | None = None,
+    ) -> None:
+        self.project_dir = Path(project_dir).resolve(strict=False) if project_dir else None
+        self.job_id = str(job_id or "").strip()
+        self.events_path = (
+            self.project_dir / "metering" / "usage_events.jsonl"
+            if self.project_dir is not None
+            else None
+        )
+        self.summary_path = (
+            self.project_dir / "metering" / "usage_summary.json"
+            if self.project_dir is not None
+            else None
+        )
+        self._lock = threading.Lock()
+        self._events: list[dict[str, Any]] = []
+        self._event_ids: set[str] = set()
+        self.reload()
+
+    @property
+    def events(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [dict(event) for event in self._events]
+
+    def reload(self) -> None:
+        if self.events_path is None or not self.events_path.is_file():
+            return
+        loaded: list[dict[str, Any]] = []
+        event_ids: set[str] = set()
+        try:
+            for line in self.events_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                event = json.loads(line)
+                if not isinstance(event, dict):
+                    continue
+                event_id = str(event.get("event_id") or "")
+                if event_id and event_id in event_ids:
+                    continue
+                loaded.append(event)
+                if event_id:
+                    event_ids.add(event_id)
+        except Exception as exc:
+            print(f"[metering] usage event reload skipped: {exc}", flush=True)
+            return
+        with self._lock:
+            self._events = loaded
+            self._event_ids = event_ids
+
+    def record_tts(
+        self,
+        *,
+        bucket: str,
+        provider: str,
+        model: str = "",
+        text: str = "",
+        billed_chars: int = 0,
+        segment_id: int | str | None = None,
+        voice_id: str = "",
+        selected_voice: str = "",
+        duration_ms: int | None = None,
+        fallback_used_provider: str | None = None,
+    ) -> None:
+        bucket_key = _safe_key(bucket)
+        self.record_event({
+            "kind": "tts",
+            "bucket": bucket_key,
+            "provider": str(provider or ""),
+            "model": str(model or ""),
+            "segment_id": segment_id,
+            "voice_id": str(voice_id or ""),
+            "selected_voice": str(selected_voice or ""),
+            "input_chars": len(text or ""),
+            "billed_chars": max(0, _coerce_int(billed_chars)),
+            "duration_ms": max(0, _coerce_int(duration_ms)),
+            "fallback_used_provider": str(fallback_used_provider or ""),
+        })
+
+    def record_llm(
+        self,
+        *,
+        task: str,
+        provider: str,
+        model: str,
+        model_id: str = "",
+        phase: str = "",
+        input_text: str = "",
+        output_text: str = "",
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        audio_input_bytes: int = 0,
+        audio_input_count: int = 0,
+        audio_input_seconds: float = 0.0,
+        attempt_label: str = "",
+        success: bool = True,
+        error: str = "",
+    ) -> None:
+        in_tokens = (
+            max(0, _coerce_int(input_tokens))
+            if input_tokens is not None
+            else estimate_text_tokens(input_text)
+        )
+        out_tokens = (
+            max(0, _coerce_int(output_tokens))
+            if output_tokens is not None
+            else estimate_text_tokens(output_text)
+        )
+        self.record_event({
+            "kind": "llm",
+            "task": _safe_key(task),
+            "phase": _safe_key(phase) if phase else "",
+            "provider": str(provider or ""),
+            "model": str(model or ""),
+            "model_id": str(model_id or model or ""),
+            "attempt_label": str(attempt_label or ""),
+            "input_text_chars": len(input_text or ""),
+            "output_text_chars": len(output_text or ""),
+            "input_tokens": in_tokens,
+            "output_tokens": out_tokens,
+            "token_count_source": "estimated_text_length",
+            "audio_input_bytes": max(0, _coerce_int(audio_input_bytes)),
+            "audio_input_count": max(0, _coerce_int(audio_input_count)),
+            "audio_input_seconds": max(0.0, _coerce_float(audio_input_seconds)),
+            "success": bool(success),
+            "error": str(error or "")[:500],
+        })
+
+    def record_event(self, event: dict[str, Any]) -> None:
+        payload = dict(event)
+        event_id = str(payload.get("event_id") or uuid.uuid4().hex)
+        payload["event_id"] = event_id
+        payload.setdefault("created_at_ms", int(time.time() * 1000))
+        if self.job_id:
+            payload.setdefault("job_id", self.job_id)
+
+        with self._lock:
+            if event_id in self._event_ids:
+                return
+            self._events.append(payload)
+            self._event_ids.add(event_id)
+            events_path = self.events_path
+
+        if events_path is None:
+            return
+        try:
+            events_path.parent.mkdir(parents=True, exist_ok=True)
+            with events_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+                f.write("\n")
+        except Exception as exc:
+            print(f"[metering] usage event append skipped: {exc}", flush=True)
+
+    def summarize(self) -> dict[str, Any]:
+        events = self.events
+        summary: dict[str, Any] = {
+            "usage_events_count": len(events),
+            "usage_metering_version": 1,
+        }
+
+        llm_calls = 0
+        llm_input_tokens = 0
+        llm_output_tokens = 0
+        llm_audio_bytes = 0
+        llm_audio_seconds = 0.0
+        llm_task_calls: dict[str, int] = {}
+        llm_task_input_tokens: dict[str, int] = {}
+        llm_task_output_tokens: dict[str, int] = {}
+        llm_phase_calls: dict[str, int] = {}
+        llm_phase_input_tokens: dict[str, int] = {}
+        llm_phase_output_tokens: dict[str, int] = {}
+        llm_model_calls: dict[str, int] = {}
+
+        tts_total = 0
+        tts_calls = 0
+        tts_by_bucket: dict[str, int] = {}
+        tts_calls_by_bucket: dict[str, int] = {}
+        tts_by_provider: dict[str, int] = {}
+        tts_calls_by_provider: dict[str, int] = {}
+
+        legacy_gemini_transcription_calls = 0
+
+        for event in events:
+            kind = event.get("kind")
+            if kind == "llm":
+                llm_calls += 1
+                task = _safe_key(event.get("task"))
+                phase = _safe_key(event.get("phase")) if event.get("phase") else ""
+                provider = _safe_key(event.get("provider"))
+                model_id = str(event.get("model_id") or event.get("model") or "")
+                model_key = f"{provider}:{model_id or 'unknown'}:{task}"
+                input_tokens = max(0, _coerce_int(event.get("input_tokens")))
+                output_tokens = max(0, _coerce_int(event.get("output_tokens")))
+                llm_input_tokens += input_tokens
+                llm_output_tokens += output_tokens
+                llm_audio_bytes += max(0, _coerce_int(event.get("audio_input_bytes")))
+                llm_audio_seconds += max(0.0, _coerce_float(event.get("audio_input_seconds")))
+                llm_task_calls[task] = llm_task_calls.get(task, 0) + 1
+                llm_task_input_tokens[task] = llm_task_input_tokens.get(task, 0) + input_tokens
+                llm_task_output_tokens[task] = llm_task_output_tokens.get(task, 0) + output_tokens
+                llm_model_calls[model_key] = llm_model_calls.get(model_key, 0) + 1
+                if phase:
+                    llm_phase_calls[phase] = llm_phase_calls.get(phase, 0) + 1
+                    llm_phase_input_tokens[phase] = llm_phase_input_tokens.get(phase, 0) + input_tokens
+                    llm_phase_output_tokens[phase] = llm_phase_output_tokens.get(phase, 0) + output_tokens
+                if task == "s1_gemini_transcribe":
+                    legacy_gemini_transcription_calls += 1
+            elif kind == "tts":
+                bucket = _safe_key(event.get("bucket"))
+                provider = _safe_key(event.get("provider"))
+                billed = max(0, _coerce_int(event.get("billed_chars")))
+                tts_calls += 1
+                if bucket in _JOB_TTS_BUCKETS:
+                    tts_total += billed
+                tts_by_bucket[bucket] = tts_by_bucket.get(bucket, 0) + billed
+                tts_calls_by_bucket[bucket] = tts_calls_by_bucket.get(bucket, 0) + 1
+                tts_by_provider[provider] = tts_by_provider.get(provider, 0) + billed
+                tts_calls_by_provider[provider] = tts_calls_by_provider.get(provider, 0) + 1
+
+        summary.update({
+            "llm_call_count": llm_calls,
+            "llm_input_tokens": llm_input_tokens,
+            "llm_output_tokens": llm_output_tokens,
+            "llm_total_tokens": llm_input_tokens + llm_output_tokens,
+            "llm_audio_input_bytes": llm_audio_bytes,
+            "llm_audio_input_seconds": round(llm_audio_seconds, 3),
+            "llm_task_call_distribution": llm_task_calls,
+            "llm_model_call_distribution": llm_model_calls,
+            "tts_call_count": tts_calls,
+            "tts_billed_chars": tts_total,
+            "tts_billed_chars_by_bucket": tts_by_bucket,
+            "tts_call_count_by_bucket": tts_calls_by_bucket,
+            "tts_billed_chars_by_provider": tts_by_provider,
+            "tts_call_count_by_provider": tts_calls_by_provider,
+            "legacy_gemini_transcription_call_count": legacy_gemini_transcription_calls,
+        })
+
+        for bucket in (
+            TTS_BUCKET_FIRST,
+            TTS_BUCKET_PROBE,
+            TTS_BUCKET_POST_TTS_RESYNTH,
+            TTS_BUCKET_POST_EDIT_RESYNTH,
+            TTS_BUCKET_INTERACTIVE_PREVIEW,
+        ):
+            summary[f"{bucket}_billed_chars"] = tts_by_bucket.get(bucket, 0)
+            summary[f"{bucket}_call_count"] = tts_calls_by_bucket.get(bucket, 0)
+        summary["post_edit_resynth_tts_billed_chars"] = tts_by_bucket.get(
+            TTS_BUCKET_POST_EDIT_RESYNTH,
+            0,
+        )
+        summary["post_edit_resynth_tts_call_count"] = tts_calls_by_bucket.get(
+            TTS_BUCKET_POST_EDIT_RESYNTH,
+            0,
+        )
+        summary["interactive_preview_tts_billed_chars"] = tts_by_bucket.get(
+            TTS_BUCKET_INTERACTIVE_PREVIEW,
+            0,
+        )
+        summary["interactive_preview_tts_call_count"] = tts_calls_by_bucket.get(
+            TTS_BUCKET_INTERACTIVE_PREVIEW,
+            0,
+        )
+
+        for task, calls in llm_task_calls.items():
+            input_tokens = llm_task_input_tokens.get(task, 0)
+            output_tokens = llm_task_output_tokens.get(task, 0)
+            summary[f"{task}_llm_calls"] = calls
+            summary[f"{task}_llm_input_tokens"] = input_tokens
+            summary[f"{task}_llm_output_tokens"] = output_tokens
+            summary[f"{task}_llm_tokens"] = input_tokens + output_tokens
+
+        for phase, calls in llm_phase_calls.items():
+            input_tokens = llm_phase_input_tokens.get(phase, 0)
+            output_tokens = llm_phase_output_tokens.get(phase, 0)
+            summary[f"{phase}_llm_calls"] = calls
+            summary[f"{phase}_llm_input_tokens"] = input_tokens
+            summary[f"{phase}_llm_output_tokens"] = output_tokens
+            summary[f"{phase}_llm_tokens"] = input_tokens + output_tokens
+
+        return summary
+
+    def write_summary(self) -> dict[str, Any]:
+        summary = self.summarize()
+        if self.summary_path is None:
+            return summary
+        try:
+            self.summary_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = self.summary_path.with_suffix(".json.tmp")
+            tmp_path.write_text(
+                json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            tmp_path.replace(self.summary_path)
+        except Exception as exc:
+            print(f"[metering] usage summary write skipped: {exc}", flush=True)
+        return summary

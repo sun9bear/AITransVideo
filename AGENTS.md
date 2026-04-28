@@ -14,8 +14,10 @@ Build a Python workflow that outputs Jianying draft projects rather than rendere
 - New sessions should read `docs/graphs/GITNEXUS_PROJECT_GRAPH.md` first, then enter the relevant subgraph by task.
 - Graph index: `docs/graphs/README.md`
 - Workflow core: `docs/graphs/GITNEXUS_WORKFLOW_CORE_GRAPH.md`
-- Commercialization: `docs/graphs/GITNEXUS_COMMERCIALIZATION_GRAPH.md`
 - Review flow: `docs/graphs/GITNEXUS_REVIEW_GRAPH.md`
+- Editing / Post-Edit / Regeneration: `docs/graphs/GITNEXUS_EDITING_POST_EDIT_GRAPH.md`
+- Storage / Delivery / R2: `docs/graphs/GITNEXUS_STORAGE_DELIVERY_R2_GRAPH.md`
+- Commercialization: `docs/graphs/GITNEXUS_COMMERCIALIZATION_GRAPH.md`
 - Admin / Ops / Calibration: `docs/graphs/GITNEXUS_ADMIN_OPS_CALIBRATION_GRAPH.md`
 - Use these graph docs as the fast orientation layer before deeper code reads when the task is architecture-sensitive or the codebase is unfamiliar.
 

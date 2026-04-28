@@ -24,6 +24,7 @@ from services.tts.tts_strategy import (
     get_fallback_provider,
 )
 from services.tts.cosyvoice_voice_catalog import is_cosyvoice_v3_flash_builtin_voice
+from services.usage_meter import TTS_BUCKET_FIRST
 import re as _re
 
 
@@ -186,6 +187,10 @@ class TTSGenerator:
         # speed_decision return missing_inputs and fall back to speed=1.0).
         self._chars_per_second_by_speaker: dict[str, float] = {}
         self._global_chars_per_second: float | None = None
+        self._usage_meter: Any | None = None
+
+    def set_usage_meter(self, usage_meter: Any | None) -> None:
+        self._usage_meter = usage_meter
 
     def set_speaker_chars_per_second(
         self,
@@ -226,6 +231,7 @@ class TTSGenerator:
         output_dir: str,
         *,
         job_record: Any = None,
+        usage_bucket: str = TTS_BUCKET_FIRST,
     ) -> list[TTSResult]:
         output_root = Path(output_dir).resolve(strict=False)
         output_root.mkdir(parents=True, exist_ok=True)
@@ -255,9 +261,19 @@ class TTSGenerator:
 
         if pending_count > self._PARALLEL_THRESHOLD:
             print(f"[S4] {pending_count} 段待生成，启用 {self._PARALLEL_WORKERS} 路并行 TTS")
-            return self._generate_all_parallel(segments, output_root, total_segments)
+            return self._generate_all_parallel(
+                segments,
+                output_root,
+                total_segments,
+                usage_bucket=usage_bucket,
+            )
 
-        return self._generate_all_sequential(segments, output_root, total_segments)
+        return self._generate_all_sequential(
+            segments,
+            output_root,
+            total_segments,
+            usage_bucket=usage_bucket,
+        )
 
     def _get_rate_limiter(self) -> RateLimiter:
         """Get rate limiter with provider-appropriate RPM."""
@@ -270,12 +286,21 @@ class TTSGenerator:
         segments: list[DubbingSegment],
         output_root: Path,
         total_segments: int,
+        *,
+        usage_bucket: str,
     ) -> list[TTSResult]:
         """Sequential TTS generation with rate limiting (Tier 1: ≤30min videos)."""
         results: list[TTSResult] = []
         rate_limiter = self._get_rate_limiter()
         for index, segment in enumerate(segments, start=1):
-            result = self._process_segment(segment, output_root, index, total_segments, rate_limiter)
+            result = self._process_segment(
+                segment,
+                output_root,
+                index,
+                total_segments,
+                rate_limiter,
+                usage_bucket=usage_bucket,
+            )
             results.append(result)
         return results
 
@@ -284,6 +309,8 @@ class TTSGenerator:
         segments: list[DubbingSegment],
         output_root: Path,
         total_segments: int,
+        *,
+        usage_bucket: str,
     ) -> list[TTSResult]:
         """Parallel TTS generation with shared rate limiter (Tier 2/3: >30min videos)."""
         # Shared rate limiter across all workers — use provider-specific RPM
@@ -295,7 +322,15 @@ class TTSGenerator:
 
         def _worker(index: int, segment: DubbingSegment) -> tuple[int, TTSResult]:
             nonlocal completed_count
-            result = self._process_segment(segment, output_root, index, total_segments, rate_limiter, quiet=True)
+            result = self._process_segment(
+                segment,
+                output_root,
+                index,
+                total_segments,
+                rate_limiter,
+                quiet=True,
+                usage_bucket=usage_bucket,
+            )
             with completed_lock:
                 completed_count += 1
                 if completed_count % 15 == 0 or completed_count == total_segments:
@@ -315,6 +350,10 @@ class TTSGenerator:
                     _, result = future.result()
                     results_dict[seg.segment_id] = result
                 except Exception as exc:
+                    if isinstance(exc, TTSGenerationError) and _is_non_retryable_tts_input_error(exc):
+                        raise TTSGenerationError(
+                            f"TTS 段 {seg.segment_id} 输入无效，停止重试: {exc}"
+                        ) from exc
                     print(f"[S4] TTS 段 {seg.segment_id} 失败（已保留已完成段）: {exc}")
                     failed_segments.append((idx, seg, exc))
 
@@ -351,6 +390,7 @@ class TTSGenerator:
         total_segments: int,
         rate_limiter: RateLimiter,
         quiet: bool = False,
+        usage_bucket: str = TTS_BUCKET_FIRST,
     ) -> TTSResult:
         """Process a single segment: check cache → rate limit → generate → update segment."""
         output_path = output_root / f"segment_{segment.segment_id:03d}_{segment.speaker_id}.wav"
@@ -380,7 +420,11 @@ class TTSGenerator:
             )
         else:
             rate_limiter.wait()
-            result = self._generate_one_with_backoff(segment, str(output_root))
+            result = self._generate_one_with_backoff(
+                segment,
+                str(output_root),
+                usage_bucket=usage_bucket,
+            )
 
         segment.tts_audio_path = result.audio_path
         segment.actual_duration_ms = result.duration_ms
@@ -788,6 +832,8 @@ class TTSGenerator:
         self,
         segment: DubbingSegment,
         output_dir: str,
+        *,
+        usage_bucket: str = TTS_BUCKET_FIRST,
     ) -> TTSResult:
         """Wrap _generate_one with exponential backoff + fallback provider chain."""
         provider = getattr(self, "_job_provider", None) or get_tts_provider()
@@ -797,9 +843,16 @@ class TTSGenerator:
         # --- Primary provider attempts ---
         for attempt in range(1, max_attempts + 1):
             try:
-                return self._generate_one(segment, output_dir, provider=provider)
+                return self._generate_one(
+                    segment,
+                    output_dir,
+                    provider=provider,
+                    usage_bucket=usage_bucket,
+                )
             except TTSGenerationError as exc:
                 last_error = exc
+                if _is_non_retryable_tts_input_error(exc):
+                    raise
                 if attempt < max_attempts:
                     wait = self._OUTER_BACKOFF_SCHEDULE[attempt - 1]
                     print(
@@ -830,7 +883,12 @@ class TTSGenerator:
                 f"尝试 fallback → {fallback}"
             )
             try:
-                result = self._generate_one(segment, output_dir, provider=fallback)
+                result = self._generate_one(
+                    segment,
+                    output_dir,
+                    provider=fallback,
+                    usage_bucket=usage_bucket,
+                )
                 result.fallback_used_provider = fallback
                 return result
             except TTSGenerationError as fb_exc:
@@ -851,7 +909,12 @@ class TTSGenerator:
         time.sleep(self._OUTER_PAUSE_SECONDS)
 
         try:
-            return self._generate_one(segment, output_dir, provider=provider)
+            return self._generate_one(
+                segment,
+                output_dir,
+                provider=provider,
+                usage_bucket=usage_bucket,
+            )
         except TTSGenerationError:
             # Final failure — let the caller handle it (checkpoint already saved)
             raise TTSGenerationError(
@@ -865,6 +928,7 @@ class TTSGenerator:
         output_dir: str,
         *,
         provider: str | None = None,
+        usage_bucket: str = TTS_BUCKET_FIRST,
     ) -> TTSResult:
         output_root = Path(output_dir).resolve(strict=False)
         output_root.mkdir(parents=True, exist_ok=True)
@@ -893,6 +957,12 @@ class TTSGenerator:
             try:
                 result = self._generate_one_cosyvoice(segment, tts_text, output_root)
                 result.billed_chars = _cn_chars * 2  # 阿里云百炼: 1 汉字 = 2 计费字符
+                self._record_tts_usage(
+                    result,
+                    bucket=usage_bucket,
+                    provider="cosyvoice",
+                    text=tts_text,
+                )
                 return result
             except TTSGenerationError:
                 raise
@@ -903,6 +973,12 @@ class TTSGenerator:
                 result = self._generate_one_mimo(segment, tts_text, output_root)
                 # MiMo: token-based billing, truthful billed_chars unavailable
                 # result.billed_chars stays 0 (default)
+                self._record_tts_usage(
+                    result,
+                    bucket=usage_bucket,
+                    provider="mimo",
+                    text=tts_text,
+                )
                 return result
             except TTSGenerationError:
                 raise
@@ -912,6 +988,12 @@ class TTSGenerator:
             try:
                 result = self._generate_one_volcengine(segment, tts_text, output_root)
                 result.billed_chars = _cn_chars  # VolcEngine: direct char billing
+                self._record_tts_usage(
+                    result,
+                    bucket=usage_bucket,
+                    provider="volcengine",
+                    text=tts_text,
+                )
                 return result
             except TTSGenerationError:
                 raise
@@ -1002,6 +1084,7 @@ class TTSGenerator:
         # can build the speed_param_distribution histogram.
         try:
             segment.dsp_speed_param = effective_speed
+            segment.tts_model_key = self.config.model
         except Exception:
             pass  # best-effort; ignore if segment is read-only somehow
 
@@ -1065,7 +1148,7 @@ class TTSGenerator:
         except Exception as exc:
             raise TTSGenerationError(f"Failed to decode generated wav audio: {output_path}") from exc
 
-        return TTSResult(
+        result = TTSResult(
             segment_id=segment.segment_id,
             audio_path=str(output_path.resolve(strict=False)),
             duration_ms=duration_ms,
@@ -1074,6 +1157,40 @@ class TTSGenerator:
             match_confidence=mm_confidence,
             billed_chars=_cn_chars * 2,  # MiniMax: 1 汉字 = 2 计费字符
         )
+        self._record_tts_usage(
+            result,
+            bucket=usage_bucket,
+            provider=str(provider or "minimax"),
+            text=tts_text,
+        )
+        return result
+
+    def _record_tts_usage(
+        self,
+        result: TTSResult,
+        *,
+        bucket: str,
+        provider: str,
+        text: str,
+    ) -> None:
+        meter = getattr(self, "_usage_meter", None)
+        if meter is None:
+            return
+        try:
+            meter.record_tts(
+                bucket=bucket,
+                provider=provider,
+                model=self.config.model,
+                text=text,
+                billed_chars=result.billed_chars,
+                segment_id=result.segment_id,
+                voice_id=result.voice_id,
+                selected_voice=result.selected_voice,
+                duration_ms=result.duration_ms,
+                fallback_used_provider=result.fallback_used_provider,
+            )
+        except Exception as exc:
+            print(f"[metering] TTS usage record skipped: {exc}", flush=True)
 
 
 def load_tts_config() -> TTSConfig:
@@ -1232,6 +1349,11 @@ def _is_retryable_tts_error(error_obj: TTSGenerationError) -> bool:
         or "HTTP error: status_code=5" in message
         or "response is not valid JSON" in message
     )
+
+
+def _is_non_retryable_tts_input_error(error_obj: TTSGenerationError) -> bool:
+    message = str(error_obj)
+    return "segment.cn_text is required" in message
 
 
 def _normalize_optional_text(value: object) -> str | None:

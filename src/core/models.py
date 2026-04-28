@@ -44,8 +44,10 @@ class SemanticBlock:
     error_type: str | None = None
     alignment_method: str = "direct"
     needs_review: bool = False
+    dubbing_mode: str = "dub"
 
     def __post_init__(self) -> None:
         self.merged_cn_text = self.merged_cn_text.strip()
         self.cn_line_texts = [text.strip() for text in self.cn_line_texts]
         self.final_cn_lines = [text.strip() for text in self.final_cn_lines]
+        self.dubbing_mode = self.dubbing_mode.strip() or "dub"

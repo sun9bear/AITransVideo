@@ -1,0 +1,271 @@
+{
+  "generated_at": "2026-04-27T11:46:04.541595+00:00",
+  "audit_batch": "reports/benchmark/speaker_attribution_audit_batch_20260427.json",
+  "review_model": "gemini_pro",
+  "summary": {
+    "candidates_loaded": 12,
+    "start": 68,
+    "limit": 12,
+    "chunks": 6,
+    "decisions": 12,
+    "errors": 0,
+    "decision_counts": {
+      "s2_speaker": 8,
+      "distinct_speaker": 4
+    },
+    "recommended_action_counts": {
+      "keep": 12
+    }
+  },
+  "decisions": [
+    {
+      "candidate_id": "job_ce814b8cdc2242d7b72764b2f0b72dd4_cand_002",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "Clear female voice saying 'Right', matching the assigned speaker."
+    },
+    {
+      "candidate_id": "job_ce814b8cdc2242d7b72764b2f0b72dd4_cand_003",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "Clear female voice saying 'Yeah', matching the assigned speaker."
+    },
+    {
+      "candidate_id": "job_ce814b8cdc2242d7b72764b2f0b72dd4_cand_004",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly features the female interviewer asking 'How so?', which matches the assigned speaker."
+    },
+    {
+      "candidate_id": "job_ce814b8cdc2242d7b72764b2f0b72dd4_cand_005",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly features the female interviewer asking 'How so?', which matches the assigned speaker."
+    },
+    {
+      "candidate_id": "job_ce814b8cdc2242d7b72764b2f0b72dd4_cand_006",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly features the female interviewer asking the question, matching the assigned speaker."
+    },
+    {
+      "candidate_id": "job_67009391e2d1425eb52728aca4995130_cand_001",
+      "decision": "distinct_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio features a distinct female interviewer asking the question, which is correctly separated from the main narrator."
+    },
+    {
+      "candidate_id": "job_67009391e2d1425eb52728aca4995130_cand_002",
+      "decision": "distinct_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The voice belongs to a distinct commentator or reviewer, different from the main reporter."
+    },
+    {
+      "candidate_id": "job_67009391e2d1425eb52728aca4995130_cand_003",
+      "decision": "distinct_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The voice is a distinct narrator introducing the main reporter at the end of the clip."
+    },
+    {
+      "candidate_id": "job_67009391e2d1425eb52728aca4995130_cand_004",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly matches the assigned speaker answering the interviewer's question."
+    },
+    {
+      "candidate_id": "job_67009391e2d1425eb52728aca4995130_cand_005",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly matches Elon Musk saying 'No' in response to the question."
+    },
+    {
+      "candidate_id": "job_67009391e2d1425eb52728aca4995130_cand_006",
+      "decision": "distinct_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio clearly matches Elon Musk's voice, who is a distinct speaker in this clip."
+    },
+    {
+      "candidate_id": "job_abb3fedc905c403db67d784c480c170e_cand_001",
+      "decision": "s2_speaker",
+      "confidence": "high",
+      "recommended_action": "keep",
+      "reason": "The audio is clearly the female interviewer asking a question, correctly assigned."
+    }
+  ],
+  "errors": [],
+  "responses": [
+    {
+      "model": "gemini_pro",
+      "model_id": "gemini-3.1-pro-preview",
+      "candidate_ids": [
+        "job_ce814b8cdc2242d7b72764b2f0b72dd4_cand_002",
+        "job_ce814b8cdc2242d7b72764b2f0b72dd4_cand_003"
+      ],
+      "raw_text": "{\n  \"decisions\": [\n    {\n      \"candidate_id\": \"job_ce814b8cdc2242d7b72764b2f0b72dd4_cand_002\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"Clear female voice saying 'Right', matching the assigned speaker.\"\n    },\n    {\n      \"candidate_id\": \"job_ce814b8cdc2242d7b72764b2f0b72dd4_cand_003\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"Clear female voice saying 'Yeah', matching the assigned speaker.\"\n    }\n  ]\n}",
+      "parsed": {
+        "decisions": [
+          {
+            "candidate_id": "job_ce814b8cdc2242d7b72764b2f0b72dd4_cand_002",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "Clear female voice saying 'Right', matching the assigned speaker."
+          },
+          {
+            "candidate_id": "job_ce814b8cdc2242d7b72764b2f0b72dd4_cand_003",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "Clear female voice saying 'Yeah', matching the assigned speaker."
+          }
+        ]
+      }
+    },
+    {
+      "model": "gemini_pro",
+      "model_id": "gemini-3.1-pro-preview",
+      "candidate_ids": [
+        "job_ce814b8cdc2242d7b72764b2f0b72dd4_cand_004",
+        "job_ce814b8cdc2242d7b72764b2f0b72dd4_cand_005"
+      ],
+      "raw_text": "{\n  \"decisions\": [\n    {\n      \"candidate_id\": \"job_ce814b8cdc2242d7b72764b2f0b72dd4_cand_004\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly features the female interviewer asking 'How so?', which matches the assigned speaker.\"\n    },\n    {\n      \"candidate_id\": \"job_ce814b8cdc2242d7b72764b2f0b72dd4_cand_005\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly features the female interviewer asking 'How so?', which matches the assigned speaker.\"\n    }\n  ]\n}",
+      "parsed": {
+        "decisions": [
+          {
+            "candidate_id": "job_ce814b8cdc2242d7b72764b2f0b72dd4_cand_004",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly features the female interviewer asking 'How so?', which matches the assigned speaker."
+          },
+          {
+            "candidate_id": "job_ce814b8cdc2242d7b72764b2f0b72dd4_cand_005",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly features the female interviewer asking 'How so?', which matches the assigned speaker."
+          }
+        ]
+      }
+    },
+    {
+      "model": "gemini_pro",
+      "model_id": "gemini-3.1-pro-preview",
+      "candidate_ids": [
+        "job_ce814b8cdc2242d7b72764b2f0b72dd4_cand_006",
+        "job_67009391e2d1425eb52728aca4995130_cand_001"
+      ],
+      "raw_text": "{\n  \"decisions\": [\n    {\n      \"candidate_id\": \"job_ce814b8cdc2242d7b72764b2f0b72dd4_cand_006\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly features the female interviewer asking the question, matching the assigned speaker.\"\n    },\n    {\n      \"candidate_id\": \"job_67009391e2d1425eb52728aca4995130_cand_001\",\n      \"decision\": \"distinct_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio features a distinct female interviewer asking the question, which is correctly separated from the main narrator.\"\n    }\n  ]\n}",
+      "parsed": {
+        "decisions": [
+          {
+            "candidate_id": "job_ce814b8cdc2242d7b72764b2f0b72dd4_cand_006",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly features the female interviewer asking the question, matching the assigned speaker."
+          },
+          {
+            "candidate_id": "job_67009391e2d1425eb52728aca4995130_cand_001",
+            "decision": "distinct_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio features a distinct female interviewer asking the question, which is correctly separated from the main narrator."
+          }
+        ]
+      }
+    },
+    {
+      "model": "gemini_pro",
+      "model_id": "gemini-3.1-pro-preview",
+      "candidate_ids": [
+        "job_67009391e2d1425eb52728aca4995130_cand_002",
+        "job_67009391e2d1425eb52728aca4995130_cand_003"
+      ],
+      "raw_text": "{\n  \"decisions\": [\n    {\n      \"candidate_id\": \"job_67009391e2d1425eb52728aca4995130_cand_002\",\n      \"decision\": \"distinct_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The voice belongs to a distinct commentator or reviewer, different from the main reporter.\"\n    },\n    {\n      \"candidate_id\": \"job_67009391e2d1425eb52728aca4995130_cand_003\",\n      \"decision\": \"distinct_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The voice is a distinct narrator introducing the main reporter at the end of the clip.\"\n    }\n  ]\n}",
+      "parsed": {
+        "decisions": [
+          {
+            "candidate_id": "job_67009391e2d1425eb52728aca4995130_cand_002",
+            "decision": "distinct_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The voice belongs to a distinct commentator or reviewer, different from the main reporter."
+          },
+          {
+            "candidate_id": "job_67009391e2d1425eb52728aca4995130_cand_003",
+            "decision": "distinct_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The voice is a distinct narrator introducing the main reporter at the end of the clip."
+          }
+        ]
+      }
+    },
+    {
+      "model": "gemini_pro",
+      "model_id": "gemini-3.1-pro-preview",
+      "candidate_ids": [
+        "job_67009391e2d1425eb52728aca4995130_cand_004",
+        "job_67009391e2d1425eb52728aca4995130_cand_005"
+      ],
+      "raw_text": "{\n  \"decisions\": [\n    {\n      \"candidate_id\": \"job_67009391e2d1425eb52728aca4995130_cand_004\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly matches the assigned speaker answering the interviewer's question.\"\n    },\n    {\n      \"candidate_id\": \"job_67009391e2d1425eb52728aca4995130_cand_005\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly matches Elon Musk saying 'No' in response to the question.\"\n    }\n  ]\n}",
+      "parsed": {
+        "decisions": [
+          {
+            "candidate_id": "job_67009391e2d1425eb52728aca4995130_cand_004",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly matches the assigned speaker answering the interviewer's question."
+          },
+          {
+            "candidate_id": "job_67009391e2d1425eb52728aca4995130_cand_005",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly matches Elon Musk saying 'No' in response to the question."
+          }
+        ]
+      }
+    },
+    {
+      "model": "gemini_pro",
+      "model_id": "gemini-3.1-pro-preview",
+      "candidate_ids": [
+        "job_67009391e2d1425eb52728aca4995130_cand_006",
+        "job_abb3fedc905c403db67d784c480c170e_cand_001"
+      ],
+      "raw_text": "{\n  \"decisions\": [\n    {\n      \"candidate_id\": \"job_67009391e2d1425eb52728aca4995130_cand_006\",\n      \"decision\": \"distinct_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio clearly matches Elon Musk's voice, who is a distinct speaker in this clip.\"\n    },\n    {\n      \"candidate_id\": \"job_abb3fedc905c403db67d784c480c170e_cand_001\",\n      \"decision\": \"s2_speaker\",\n      \"confidence\": \"high\",\n      \"recommended_action\": \"keep\",\n      \"reason\": \"The audio is clearly the female interviewer asking a question, correctly assigned.\"\n    }\n  ]\n}",
+      "parsed": {
+        "decisions": [
+          {
+            "candidate_id": "job_67009391e2d1425eb52728aca4995130_cand_006",
+            "decision": "distinct_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio clearly matches Elon Musk's voice, who is a distinct speaker in this clip."
+          },
+          {
+            "candidate_id": "job_abb3fedc905c403db67d784c480c170e_cand_001",
+            "decision": "s2_speaker",
+            "confidence": "high",
+            "recommended_action": "keep",
+            "reason": "The audio is clearly the female interviewer asking a question, correctly assigned."
+          }
+        ]
+      }
+    }
+  ]
+}

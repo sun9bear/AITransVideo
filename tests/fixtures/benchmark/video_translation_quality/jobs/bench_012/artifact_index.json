@@ -1,0 +1,28 @@
+{
+  "available": true,
+  "files": [
+    {
+      "path": "editor/segments.json",
+      "size_bytes": 436886
+    },
+    {
+      "path": "project_state.json",
+      "size_bytes": 2829,
+      "top_level_keys": [
+        "project_id",
+        "stages"
+      ]
+    },
+    {
+      "path": "transcript/transcript.json",
+      "size_bytes": 92859,
+      "top_level_keys": [
+        "language",
+        "lines",
+        "raw_response_path",
+        "structured_transcript_path",
+        "total_duration_ms"
+      ]
+    }
+  ]
+}
