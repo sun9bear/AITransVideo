@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import {
@@ -15,6 +15,8 @@ import { useBackgroundTask } from "@/lib/react/useBackgroundTask"
 import { Download, Video, Music, Package, X, Film, Loader2, RotateCcw, CheckCircle2, RefreshCw } from "lucide-react"
 import Link from "next/link"
 import { toast } from "sonner"
+
+const RESULT_VIDEO_PLAY_EVENT = "aivt:result-video-play"
 
 interface ResultMediaCardProps {
   jobId: string
@@ -302,11 +304,7 @@ function MaterialsPackButton({
       <Button
         variant="outline"
         size="sm"
-        className="gap-2"
-        style={{
-          borderColor: "color-mix(in oklab, var(--bamboo) 55%, transparent)",
-          color: "var(--bamboo)",
-        }}
+        className="gap-2 border-emerald-500/60 text-emerald-500 hover:bg-emerald-500/10"
         onClick={onDownload}
       >
         <CheckCircle2 className="h-4 w-4" />
@@ -456,19 +454,40 @@ function isItemAvailable(key: MaterialItemKey | string, availability: MaterialsA
  * and video data never loads unless the user clicks play.
  */
 function LazyVideoPlayer({ jobId }: { jobId: string }) {
-  const [playing, setPlaying] = useState(false)
+  const [hasStarted, setHasStarted] = useState(false)
+  const videoRef = useRef<HTMLVideoElement | null>(null)
   const posterUrl = buildStreamUrl(jobId, "poster")
   const videoUrl = buildStreamUrl(jobId, "video")
 
-  if (playing) {
+  useEffect(() => {
+    const handleOtherVideoPlay = (event: Event) => {
+      const activeJobId = (event as CustomEvent<{ jobId?: string }>).detail?.jobId
+      if (activeJobId && activeJobId !== jobId) {
+        videoRef.current?.pause()
+      }
+    }
+    window.addEventListener(RESULT_VIDEO_PLAY_EVENT, handleOtherVideoPlay)
+    return () => window.removeEventListener(RESULT_VIDEO_PLAY_EVENT, handleOtherVideoPlay)
+  }, [jobId])
+
+  const handlePlay = () => {
+    window.dispatchEvent(
+      new CustomEvent(RESULT_VIDEO_PLAY_EVENT, { detail: { jobId } }),
+    )
+  }
+
+  if (hasStarted) {
     return (
       <video
+        ref={videoRef}
         className="w-full rounded-lg bg-black aspect-video"
         controls
         autoPlay
-        preload="auto"
+        playsInline
+        preload="metadata"
         poster={posterUrl}
         src={videoUrl}
+        onPlay={handlePlay}
       />
     )
   }
@@ -476,7 +495,7 @@ function LazyVideoPlayer({ jobId }: { jobId: string }) {
   return (
     <button
       type="button"
-      onClick={() => setPlaying(true)}
+      onClick={() => setHasStarted(true)}
       className="relative w-full aspect-video rounded-lg overflow-hidden bg-muted group"
       aria-label="播放视频"
     >

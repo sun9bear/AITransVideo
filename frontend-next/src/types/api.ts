@@ -53,6 +53,10 @@ export interface ApiJobRecord {
 
 export interface ApiJobListResponse {
   jobs: ApiJobRecord[]
+  total?: number
+  limit?: number | null
+  offset?: number
+  has_more?: boolean
 }
 
 export interface ApiJobEvent {

@@ -21,9 +21,43 @@ import {
   type ResultDownloadItem,
 } from '@/types/jobs'
 
+export interface JobListPage {
+  jobs: JobSummary[]
+  total: number
+  limit: number | null
+  offset: number
+  hasMore: boolean
+}
+
+export interface ListJobsOptions {
+  limit?: number
+  offset?: number
+}
+
+export async function listJobsPage(options: ListJobsOptions = {}): Promise<JobListPage> {
+  const params = new URLSearchParams()
+  if (typeof options.limit === 'number') params.set('limit', String(options.limit))
+  if (typeof options.offset === 'number') params.set('offset', String(options.offset))
+  const suffix = params.toString()
+  const payload = await apiClient.get<ApiJobListResponse>(`/jobs${suffix ? `?${suffix}` : ''}`)
+  const jobs = payload.jobs.map(toJobSummary)
+  const total = typeof payload.total === 'number' ? payload.total : jobs.length
+  const offset = typeof payload.offset === 'number' ? payload.offset : (options.offset ?? 0)
+  const limit =
+    typeof payload.limit === 'number' || payload.limit === null
+      ? payload.limit
+      : (options.limit ?? null)
+  const hasMore =
+    typeof payload.has_more === 'boolean'
+      ? payload.has_more
+      : offset + jobs.length < total
+
+  return { jobs, total, limit, offset, hasMore }
+}
+
 export async function listJobs(): Promise<JobSummary[]> {
-  const payload = await apiClient.get<ApiJobListResponse>('/jobs')
-  return payload.jobs.map(toJobSummary)
+  const page = await listJobsPage()
+  return page.jobs
 }
 
 export async function getJob(jobId: string): Promise<JobSummary> {

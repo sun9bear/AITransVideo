@@ -39,7 +39,7 @@ import {
   getUserFacingProgressMessage,
 } from "@/features/jobs/presentation"
 import { computeExpiryInfo, expiryColorClass, expiryLabel } from "@/features/jobs/expiry"
-import { listJobs, renameJob } from "@/lib/api/jobs"
+import { listJobsPage, renameJob } from "@/lib/api/jobs"
 import { cancelJob, deleteJob } from "@/lib/api/reviews"
 import { ACTIVE_JOB_STATUSES, type JobSummary, type JobStatus } from "@/types/jobs"
 
@@ -54,6 +54,7 @@ const POST_EDIT_ENABLED = process.env.NEXT_PUBLIC_ENABLE_POST_EDIT === "1"
 
 const POLL_INTERVAL = 4_000
 const MAX_AUTO_EXPAND = 3
+const JOB_PAGE_SIZE = 20
 
 // editing is active (user-held session); list page must keep polling so the
 // UI reflects idle auto-cancel, admin force-cancel, and commit transitions.
@@ -90,6 +91,18 @@ function computeDefaultExpanded(jobs: JobSummary[]): Set<string> {
   return new Set(jobs.map((j) => j.id))
 }
 
+function mergeJobPages(current: JobSummary[], incoming: JobSummary[]): JobSummary[] {
+  const replacements = new Map(incoming.map((job) => [job.id, job]))
+  const seen = new Set(current.map((job) => job.id))
+  const merged = current.map((job) => replacements.get(job.id) ?? job)
+  for (const job of incoming) {
+    if (!seen.has(job.id)) {
+      merged.push(job)
+    }
+  }
+  return merged
+}
+
 // ---------------------------------------------------------------------------
 // Page component
 // ---------------------------------------------------------------------------
@@ -108,7 +121,10 @@ function ProjectsContent() {
 
   const [jobs, setJobs] = useState<JobSummary[]>([])
   const [isLoading, setIsLoading] = useState(true)
+  const [isLoadingMore, setIsLoadingMore] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [totalJobs, setTotalJobs] = useState<number | null>(null)
+  const [hasMoreJobs, setHasMoreJobs] = useState(false)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [cancellingId, setCancellingId] = useState<string | null>(null)
@@ -121,13 +137,65 @@ function ProjectsContent() {
 
   const initialExpandDone = useRef(false)
   const prevJobIdsRef = useRef<Set<string>>(new Set())
+  const jobsRef = useRef<JobSummary[]>([])
+  const loadedCountRef = useRef(0)
+  const loadingMoreRef = useRef(false)
+  const loadMoreSentinelRef = useRef<HTMLDivElement | null>(null)
 
   // ---- Data loading ----
 
+  const commitJobs = useCallback((nextJobs: JobSummary[]) => {
+    jobsRef.current = nextJobs
+    loadedCountRef.current = nextJobs.length
+    prevJobIdsRef.current = new Set(nextJobs.map((j) => j.id))
+    setJobs(nextJobs)
+  }, [])
+
+  const loadMoreJobs = useCallback(async () => {
+    if (!hasMoreJobs || loadingMoreRef.current) return
+    loadingMoreRef.current = true
+    setIsLoadingMore(true)
+    try {
+      const page = await listJobsPage({
+        limit: JOB_PAGE_SIZE,
+        offset: loadedCountRef.current,
+      })
+      const merged = mergeJobPages(jobsRef.current, page.jobs)
+      commitJobs(merged)
+      setTotalJobs(page.total)
+      setHasMoreJobs(page.hasMore)
+      setLoadError(null)
+      setExpanded((prev) => {
+        const next = new Set(prev)
+        for (const job of page.jobs) {
+          next.add(job.id)
+        }
+        return next
+      })
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "鍔犺浇鏇村椤圭洰澶辫触")
+    } finally {
+      loadingMoreRef.current = false
+      setIsLoadingMore(false)
+    }
+  }, [commitJobs, hasMoreJobs])
+
+  const updateJobs = useCallback(
+    (updater: (current: JobSummary[]) => JobSummary[]) => {
+      commitJobs(updater(jobsRef.current))
+    },
+    [commitJobs],
+  )
+
   const loadJobs = useCallback(async () => {
     try {
-      const data = await listJobs()
-      setJobs(data)
+      const limit = Math.max(loadedCountRef.current || JOB_PAGE_SIZE, JOB_PAGE_SIZE)
+      const page = await listJobsPage({ limit, offset: 0 })
+      const data = page.jobs
+      const previousJobIds = prevJobIdsRef.current
+      commitJobs(data)
+      setTotalJobs(page.total)
+      setHasMoreJobs(page.hasMore)
       setLoadError(null)
       if (!initialExpandDone.current) {
         // First load: apply full default expand rules
@@ -141,7 +209,7 @@ function ProjectsContent() {
           for (const j of data) {
             if (
               ACTIVE_JOB_STATUSES.includes(j.status) &&
-              !prevJobIdsRef.current.has(j.id)
+              !previousJobIds.has(j.id)
             ) {
               next.add(j.id)
             }
@@ -149,14 +217,12 @@ function ProjectsContent() {
           return next
         })
       }
-      // Update ref for next comparison
-      prevJobIdsRef.current = new Set(data.map(j => j.id))
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : "加载项目列表失败")
     } finally {
       setIsLoading(false)
     }
-  }, [])
+  }, [commitJobs])
 
   // Initial load
   useEffect(() => {
@@ -170,6 +236,21 @@ function ProjectsContent() {
     const timer = setInterval(() => void loadJobs(), POLL_INTERVAL)
     return () => clearInterval(timer)
   }, [jobs, loadJobs])
+
+  useEffect(() => {
+    const node = loadMoreSentinelRef.current
+    if (!node || !hasMoreJobs) return
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          void loadMoreJobs()
+        }
+      },
+      { rootMargin: "320px" },
+    )
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [hasMoreJobs, loadMoreJobs])
 
   // ?new=1 auto-open
   useEffect(() => {
@@ -214,7 +295,7 @@ function ProjectsContent() {
       setDeletingId(job.id)
       try {
         await deleteJob(job.id)
-        setJobs((prev) => prev.filter((j) => j.id !== job.id))
+        updateJobs((prev) => prev.filter((j) => j.id !== job.id))
         toast.success("项目已删除")
       } catch {
         toast.error("删除失败，请稍后重试")
@@ -222,7 +303,7 @@ function ProjectsContent() {
         setDeletingId(null)
       }
     },
-    [],
+    [updateJobs],
   )
 
   const handleCancel = useCallback(
@@ -260,7 +341,7 @@ function ProjectsContent() {
         const updated = await renameJob(renamingJob.id, newName)
         // Patch the one row in-place; avoid refetching the whole list
         // just for a cosmetic change.
-        setJobs((prev) => prev.map((j) => (j.id === updated.id ? updated : j)))
+        updateJobs((prev) => prev.map((j) => (j.id === updated.id ? updated : j)))
         toast.success(
           updated.title === newName.trim()
             ? "任务已重命名"
@@ -273,7 +354,7 @@ function ProjectsContent() {
         setRenameSubmitting(false)
       }
     },
-    [renamingJob],
+    [renamingJob, updateJobs],
   )
 
   // ---- Derived state ----
@@ -407,6 +488,27 @@ function ProjectsContent() {
             />
           )
         })}
+      </div>
+
+      {loadError && jobs.length > 0 && (
+        <p className="text-center text-sm text-red-500">{loadError}</p>
+      )}
+
+      <div ref={loadMoreSentinelRef} className="flex justify-center py-4">
+        {isLoadingMore ? (
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <RefreshCw className="h-4 w-4 animate-spin" />
+            <span>加载更多任务...</span>
+          </div>
+        ) : hasMoreJobs ? (
+          <Button variant="outline" size="sm" onClick={() => void loadMoreJobs()}>
+            加载更多
+          </Button>
+        ) : totalJobs !== null ? (
+          <p className="text-xs text-muted-foreground">
+            已显示 {jobs.length}/{totalJobs} 个任务
+          </p>
+        ) : null}
       </div>
 
       <NewTranslationDialog
