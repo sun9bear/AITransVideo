@@ -3,29 +3,36 @@ import { cn } from "@/lib/utils"
 /**
  * Cinnabar seal stamp (朱砂方印) as a pure SVG component.
  *
- * Style: 朱文 — red character + red border, transparent interior. This is the
- * canonical "calligrapher's signature seal" reading: the carved stone leaves
- * raised character/border that pick up cinnabar paste, the rest of the seal
- * face is flat (so paper shows through when stamped). It reads unambiguously
- * as a Chinese seal at any size, where the inverse 阴文 style (solid red block
- * with negative-space character) tends to look like a sticker logo on small
- * marks.
+ * Style: 阴文 — solid cinnabar block with the character recessed (paper color
+ * carved through). The reading: a stone seal pressed onto rice paper. Both
+ * the BLOCK EDGE and the CHARACTER EDGE share the same physical erosion so
+ * the seal looks carved-and-stamped, not vector-drawn.
  *
  * Used in three places per docs/plans/2026-04-29-marketing-redesign-ink-aesthetic.md:
  *   1. Site header / footer brand mark (replaces `AV` letter block)
- *   2. Hero composition lower-right (over ink-wash backdrop)
+ *   2. Hero composition lower-right (over rice-paper card)
  *   3. Decorative accent in trust banner / final CTA
  *
- * Design rules (do NOT regress):
- *   - Single Chinese character, default 「译」 (translate). Stay single-char — two
- *     chars crowd the seal and lose calligraphic balance.
- *   - Cinnabar `#C73E3A` for both border and character; no other colors. Inside
- *     of the frame is fully transparent so it picks up whatever surface it sits on.
- *   - Subtle organic edge via low-amplitude turbulence — reads as carved stone
- *     rather than a digital outline. Don't crank the displacement scale; over
- *     ~0.8 the character starts looking damaged instead of stamped.
- *   - Ink dots in two corners — stamped seals always have minor cinnabar paste
- *     irregularities. Two faint dots are enough; more starts looking grungy.
+ * Design rules (do NOT regress without explicit reason):
+ *   - Single Chinese character, default 「译」 (translate).
+ *   - Cinnabar `#C73E3A` for the block; paper-color `#F5F0E6` for the
+ *     carved-out character. NOT `var(--ink-paper)` — the seal must render
+ *     correctly outside the [data-theme="ink"] scope (e.g. on tooling pages
+ *     that drop the marketing layer wrapper).
+ *   - Edge erosion runs at scale=5 with low-frequency noise (baseFrequency
+ *     0.16) — big enough features that the displacement reads as carved
+ *     stone, not as anti-aliasing. Below scale=3 the seal looks like a
+ *     digital sticker; above scale=7 the rectangle starts to fall apart.
+ *   - Paste density wash: a second turbulence converted to alpha mask,
+ *     composited at opacity 0.6 over the block for ink-load variation.
+ *     Without this the cinnabar fill looks flat and printed.
+ *   - Five splatter dots OUTSIDE the block — the telltale of a hand-pressed
+ *     stamp. Vector seals without splatter look fake.
+ *   - Font fallback chain prefers Songti-derived Chinese fonts that read as
+ *     more "篆隶" in proportion (STZhongsong / STFangsong / FangSong) before
+ *     falling through to Noto Serif SC. True 篆书 fonts are rarely installed
+ *     on user machines, so we maximize visual filling of the negative space
+ *     with a heavy Songti rather than chasing a font most users don't have.
  *
  * AI-generated seal stamps embedded in raster hero images MUST be masked or
  * removed upstream — this SVG is the single source of truth so resolution
@@ -54,10 +61,14 @@ export function SealStamp({
   className,
   ariaLabel = "AIVideoTrans 章印",
 }: SealStampProps) {
-  // Stable seeds keyed off the character so the same `char` always renders the
-  // same distress pattern across the site (header logo + hero seal must look
-  // like the same physical stamp pressed twice, not two different ones).
+  // Stable distress seeded by character. Same `char` always renders the same
+  // distress pattern so the header logo + hero seal look like the same
+  // physical stamp pressed twice, not two different seals.
   const seed = char.charCodeAt(0) % 100
+  const erodeFilter = `seal-erode-${seed}`
+  const pasteFilter = `seal-paste-${seed}`
+  const paperColor = "#F5F0E6"
+
   return (
     <svg
       xmlns="http://www.w3.org/2000/svg"
@@ -70,98 +81,95 @@ export function SealStamp({
       style={{ transform: `rotate(${rotation}deg)` }}
     >
       <defs>
-        {/* Edge distress: low-amplitude turbulence + small displacement.
-            Scale=0.6 is the sweet spot — visible bite on the strokes without
-            destroying glyph legibility. */}
+        {/* Edge erosion: low-frequency turbulence + significant displacement
+            so the rect reads as a hand-carved stone face. Applied to the
+            whole seal group (block + character) so edges and the character's
+            negative space share the same physical irregularity. */}
         <filter
-          id={`seal-distress-${seed}`}
-          x="-4%"
-          y="-4%"
-          width="108%"
-          height="108%"
+          id={erodeFilter}
+          x="-15%"
+          y="-15%"
+          width="130%"
+          height="130%"
         >
           <feTurbulence
             type="fractalNoise"
-            baseFrequency="1.3"
-            numOctaves="2"
+            baseFrequency="0.16"
+            numOctaves="3"
             seed={seed}
-            result="noise"
+            result="rough"
           />
           <feDisplacementMap
             in="SourceGraphic"
-            in2="noise"
-            scale="0.6"
+            in2="rough"
+            scale="5"
             xChannelSelector="R"
             yChannelSelector="G"
           />
         </filter>
 
-        {/* Ink-load mask: faint vignette of cinnabar, slightly heavier on one
-            side to suggest a hand-pressed unevenness. Composited over the
-            seal so high-density areas read as wetter ink. */}
-        <radialGradient
-          id={`seal-inkload-${seed}`}
-          cx="42%"
-          cy="38%"
-          r="80%"
-        >
-          <stop offset="0%" stopColor={color} stopOpacity="0.06" />
-          <stop offset="60%" stopColor={color} stopOpacity="0" />
-        </radialGradient>
+        {/* Cinnabar paste density variation: high-frequency noise turned into
+            an alpha mask, composited over the rect so the fill looks wetter
+            on some pixels and drier on others. Without this the block looks
+            like a flat printed swatch. */}
+        <filter id={pasteFilter} x="0%" y="0%" width="100%" height="100%">
+          <feTurbulence
+            type="fractalNoise"
+            baseFrequency="2.2"
+            numOctaves="2"
+            seed={seed + 7}
+            result="grain"
+          />
+          <feColorMatrix
+            in="grain"
+            type="matrix"
+            values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.55 -0.15"
+          />
+          <feComposite in2="SourceGraphic" operator="in" />
+        </filter>
       </defs>
 
-      {/* Inner ink-load wash — confined to a slightly smaller rect so it never
-          paints outside the perceived seal face. Sits *behind* the strokes so
-          the strokes still read crisply on top. */}
-      <rect
-        x="9"
-        y="9"
-        width="82"
-        height="82"
-        fill={`url(#seal-inkload-${seed})`}
-      />
-
-      <g filter={`url(#seal-distress-${seed})`}>
-        {/* Outer carved border — thick stroke, hollow center.
-            strokeWidth=3.5 keeps the frame visually weighted at small sizes
-            (24-32px brand mark) without overwhelming the character at large
-            sizes (56-72px hero seal). */}
-        <rect
-          x="8"
-          y="8"
-          width="84"
-          height="84"
-          fill="none"
-          stroke={color}
-          strokeWidth="3.5"
-          strokeLinejoin="miter"
-          rx="0.5"
-          ry="0.5"
-        />
-
-        {/* Character — red strokes, large, heavy weight. fontWeight=900 makes
-            the strokes substantial enough to read as carved rather than typed.
-            Slight y-offset (51 instead of 50) compensates for the optical
-            heaviness of Songti glyphs which sit slightly low in their box. */}
+      {/* Main carved seal face: solid cinnabar block + recessed character.
+          Both pushed through the erode filter together so the block edge
+          and the character's negative space share the same hand-carved bite. */}
+      <g filter={`url(#${erodeFilter})`}>
+        <rect x="10" y="10" width="80" height="80" fill={color} />
         <text
           x="50"
-          y="51"
+          y="52"
           textAnchor="middle"
           dominantBaseline="central"
-          fontFamily='"Noto Serif SC", "Source Han Serif SC", "Songti SC", "STSong", serif'
-          fontSize="62"
+          fontFamily='"STZhongsong", "STFangsong", "FangSong", "FZShuTi", "STKaiti", "Noto Serif SC", "Source Han Serif SC", "Songti SC", "STSong", serif'
+          fontSize="60"
           fontWeight="900"
-          fill={color}
+          fill={paperColor}
         >
           {char}
         </text>
       </g>
 
-      {/* Ink-paste imperfections — two tiny dots in corners. Real seals always
-          have these; their absence is what makes vector seals look fake. */}
-      <circle cx="20" cy="83" r="0.7" fill={color} opacity="0.5" />
-      <circle cx="82" cy="18" r="0.5" fill={color} opacity="0.4" />
-      <circle cx="14" cy="22" r="0.4" fill={color} opacity="0.35" />
+      {/* Paste density wash — sits over the eroded block, varies cinnabar
+          saturation across the face for wet/dry hand-pressed look. Not
+          eroded itself (extends slightly past the visible edge to bleed
+          into the frayed corners where ink would actually pool). */}
+      <rect
+        x="10"
+        y="10"
+        width="80"
+        height="80"
+        fill={color}
+        filter={`url(#${pasteFilter})`}
+        opacity="0.6"
+      />
+
+      {/* External splatter — five tiny cinnabar dots placed asymmetrically
+          outside the block. The signature of a hand-pressed stamp; without
+          these every vector seal reads as fake. */}
+      <circle cx="5" cy="50" r="0.8" fill={color} opacity="0.5" />
+      <circle cx="95" cy="22" r="0.6" fill={color} opacity="0.4" />
+      <circle cx="48" cy="97" r="0.7" fill={color} opacity="0.45" />
+      <circle cx="14" cy="93" r="0.4" fill={color} opacity="0.35" />
+      <circle cx="92" cy="80" r="0.5" fill={color} opacity="0.4" />
     </svg>
   )
 }
