@@ -211,9 +211,9 @@ function Card({
 }) {
   const highlightClass =
     highlight === "warn"
-      ? "border-yellow-500/30 bg-yellow-500/5"
+      ? "border-[color:var(--ochre)]/30 bg-[color:var(--ochre)]/5"
       : highlight === "ok"
-        ? "border-green-500/30 bg-green-500/5"
+        ? "border-[color:var(--bamboo)]/30 bg-[color:var(--bamboo)]/5"
         : "border-border bg-card"
 
   return (
@@ -255,7 +255,7 @@ function Td({ children, right, mono }: { children: React.ReactNode; right?: bool
 
 function ErrorBox({ msg }: { msg: string }) {
   return (
-    <div className="rounded-lg border border-red-500/20 bg-red-500/5 px-4 py-3 text-sm text-red-400">
+    <div className="rounded-lg border border-[color:var(--cinnabar)]/20 bg-[color:var(--cinnabar)]/5 px-4 py-3 text-sm text-[color:var(--cinnabar)]">
       加载失败：{msg}
     </div>
   )
@@ -388,8 +388,8 @@ export default function CreditsMonitorPage() {
   if (forbidden) {
     return (
       <div className="flex flex-col items-center justify-center py-16 gap-3">
-        <div className="rounded-2xl border border-red-500/20 bg-red-500/5 p-6 text-center">
-          <p className="text-lg font-semibold text-red-400">仅管理员可访问</p>
+        <div className="rounded-2xl border border-[color:var(--cinnabar)]/20 bg-[color:var(--cinnabar)]/5 p-6 text-center">
+          <p className="text-lg font-semibold text-[color:var(--cinnabar)]">仅管理员可访问</p>
           <p className="text-sm text-muted-foreground mt-2">
             你没有查看此页面的权限
           </p>
@@ -440,7 +440,7 @@ export default function CreditsMonitorPage() {
       </div>
 
       {/* ── Scope banner ── */}
-      <div className="flex items-start gap-2 rounded-lg border border-blue-500/30 bg-blue-500/5 px-4 py-3 text-sm text-blue-300">
+      <div className="flex items-start gap-2 rounded-lg px-4 py-3 text-sm border border-[color:var(--ochre)]/30 bg-[color:var(--ochre)]/8 text-[color:var(--ochre)]">
         <Info className="h-4 w-4 mt-0.5 shrink-0" />
         <span>
           仅覆盖内部 shadow metering / credits 数据，不含外部 TTS 账单、LLM token、云资源成本。
@@ -565,7 +565,7 @@ export default function CreditsMonitorPage() {
                   冻结假设: K=250
                   {kDevNote && (
                     <span
-                      className={`ml-2 font-medium ${kAvg != null && kAvg > 250 ? "text-yellow-400" : "text-green-400"}`}
+                      className={`ml-2 font-medium ${kAvg != null && kAvg > 250 ? "text-[color:var(--ochre)]" : "text-[color:var(--bamboo)]"}`}
                     >
                       {kDevNote}
                     </span>
@@ -751,8 +751,8 @@ export default function CreditsMonitorPage() {
               <div
                 className={`rounded-lg border px-4 py-3 text-sm ${
                   summary.reserve_capture_closeness.jobs_unsettled > 0
-                    ? "border-yellow-500/30 bg-yellow-500/5 text-yellow-300"
-                    : "border-green-500/30 bg-green-500/5 text-green-300"
+                    ? "border-[color:var(--ochre)]/30 bg-[color:var(--ochre)]/5 text-[color:var(--ochre)]"
+                    : "border-[color:var(--bamboo)]/30 bg-[color:var(--bamboo)]/5 text-[color:var(--bamboo)]"
                 }`}
               >
                 {summary.reserve_capture_closeness.jobs_unsettled === 0 ? (
@@ -792,9 +792,9 @@ export default function CreditsMonitorPage() {
                       title={info.source}
                       className={`rounded border px-2 py-1 text-xs font-mono ${
                         info.status === "LIVE"
-                          ? "border-green-500/30 bg-green-500/5 text-green-300"
+                          ? "border-[color:var(--bamboo)]/30 bg-[color:var(--bamboo)]/5 text-[color:var(--bamboo)]"
                           : info.status === "LIVE_PARTIAL"
-                            ? "border-yellow-500/30 bg-yellow-500/5 text-yellow-300"
+                            ? "border-[color:var(--ochre)]/30 bg-[color:var(--ochre)]/5 text-[color:var(--ochre)]"
                             : "border-border text-muted-foreground"
                       }`}
                     >
@@ -830,19 +830,19 @@ export default function CreditsMonitorPage() {
                           <span
                             className={`text-xs font-medium ${
                               row.direction === "grant"
-                                ? "text-green-400"
+                                ? "text-[color:var(--bamboo)]"
                                 : row.direction === "capture"
-                                  ? "text-red-400"
+                                  ? "text-[color:var(--cinnabar)]"
                                   : row.direction === "reserve"
-                                    ? "text-yellow-400"
-                                    : "text-blue-400"
+                                    ? "text-[color:var(--ochre)]"
+                                    : "text-muted-foreground"
                             }`}
                           >
                             {row.direction}
                           </span>
                         </Td>
                         <Td right>
-                          <span className={row.credits_delta < 0 ? "text-red-400" : "text-green-400"}>
+                          <span className={row.credits_delta < 0 ? "text-[color:var(--cinnabar)]" : "text-[color:var(--bamboo)]"}>
                             {row.credits_delta > 0 ? "+" : ""}
                             {fmt(row.credits_delta)}
                           </span>
@@ -917,8 +917,8 @@ export default function CreditsMonitorPage() {
                           <span
                             className={
                               row.delta != null && row.delta > 0
-                                ? "text-green-400"
-                                : "text-red-400"
+                                ? "text-[color:var(--bamboo)]"
+                                : "text-[color:var(--cinnabar)]"
                             }
                           >
                             {row.delta != null
@@ -967,7 +967,7 @@ export default function CreditsMonitorPage() {
                           <span
                             className={
                               row.rewrite_count != null && row.rewrite_count >= 5
-                                ? "text-yellow-400 font-semibold"
+                                ? "text-[color:var(--ochre)] font-semibold"
                                 : ""
                             }
                           >
@@ -998,7 +998,7 @@ export default function CreditsMonitorPage() {
                     <span
                       key={id}
                       title={id}
-                      className="font-mono text-xs rounded border border-yellow-500/30 bg-yellow-500/5 text-yellow-300 px-2 py-1"
+                      className="font-mono text-xs rounded border border-[color:var(--ochre)]/30 bg-[color:var(--ochre)]/5 text-[color:var(--ochre)] px-2 py-1"
                     >
                       {shortId(id)}
                     </span>
@@ -1030,7 +1030,7 @@ export default function CreditsMonitorPage() {
                         {row.missing.map((f) => (
                           <span
                             key={f}
-                            className="font-mono text-xs rounded bg-red-500/10 text-red-400 border border-red-500/20 px-1.5 py-0.5"
+                            className="font-mono text-xs rounded bg-[color:var(--cinnabar)]/10 text-[color:var(--cinnabar)] border border-[color:var(--cinnabar)]/20 px-1.5 py-0.5"
                           >
                             {f}
                           </span>

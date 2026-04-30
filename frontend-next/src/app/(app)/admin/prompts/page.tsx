@@ -285,15 +285,15 @@ export default function PromptsPage() {
                     <span className="text-sm font-medium">{m.label}</span>
                     <span className="text-xs text-muted-foreground">{m.cost_hint}</span>
                     {m.supports_audio && (
-                      <span className="text-xs px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400">音频</span>
+                      <span className="text-xs px-1.5 py-0.5 rounded bg-muted/60 text-muted-foreground">音频</span>
                     )}
                   </div>
                   <button
                     onClick={() => handleToggleModel(m.value, !m.enabled)}
                     className={`text-xs px-3 py-1 rounded-md font-medium transition-colors ${
                       m.enabled
-                        ? 'bg-green-500/10 text-green-400 hover:bg-green-500/20'
-                        : 'bg-red-500/10 text-red-400 hover:bg-red-500/20'
+                        ? 'bg-[color:var(--bamboo)]/10 text-[color:var(--bamboo)] hover:bg-[color:var(--bamboo)]/20'
+                        : 'bg-[color:var(--cinnabar)]/10 text-[color:var(--cinnabar)] hover:bg-[color:var(--cinnabar)]/20'
                     }`}
                   >
                     {m.enabled ? '已上线' : '已下线'}
@@ -476,9 +476,9 @@ export default function PromptsPage() {
                 <span className="text-sm font-medium w-24">Gemini</span>
                 <span className="text-sm text-muted-foreground">由 client_factory 管理</span>
                 {geminiConfigured ? (
-                  <span className="text-xs text-green-600 dark:text-green-400">✅ 已配置</span>
+                  <span className="text-xs text-[color:var(--bamboo)] dark:text-[color:var(--bamboo)]">✅ 已配置</span>
                 ) : (
-                  <span className="text-xs text-red-500">❌ 未配置</span>
+                  <span className="text-xs text-[color:var(--cinnabar)]">❌ 未配置</span>
                 )}
               </div>
 
@@ -543,9 +543,9 @@ export default function PromptsPage() {
                         </>
                       )}
                       {envConfigured ? (
-                        <span className="text-xs text-green-600 dark:text-green-400">✅ 环境变量</span>
+                        <span className="text-xs text-[color:var(--bamboo)] dark:text-[color:var(--bamboo)]">✅ 环境变量</span>
                       ) : (
-                        <span className="text-xs text-red-500">❌ 无环境变量</span>
+                        <span className="text-xs text-[color:var(--cinnabar)]">❌ 无环境变量</span>
                       )}
                     </div>
                   </div>

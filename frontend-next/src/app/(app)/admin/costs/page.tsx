@@ -234,7 +234,7 @@ export default function AdminCostManagementPage() {
       </div>
 
       {error && (
-        <div className="rounded-lg border border-red-500/30 bg-red-500/5 px-4 py-3 text-sm text-red-300">
+        <div className="rounded-lg border border-[color:var(--cinnabar)]/30 bg-[color:var(--cinnabar)]/5 px-4 py-3 text-sm text-[color:var(--cinnabar)]">
           {error}
         </div>
       )}
@@ -380,18 +380,18 @@ function CostJobRow({
       </Td>
       <Td right>{job.cost_per_minute_rmb == null ? "-" : fmtMoney(job.cost_per_minute_rmb)}</Td>
       <Td right>
-        <span className={job.has_usage_events ? "text-green-300" : "text-yellow-300"}>
+        <span className={job.has_usage_events ? "text-[color:var(--bamboo)]" : "text-[color:var(--ochre)]"}>
           {fmt(job.usage_events_count)}
         </span>
       </Td>
       <Td right>
         {job.missing_rate_rows > 0 ? (
-          <span className="inline-flex items-center justify-end gap-1 text-yellow-300">
+          <span className="inline-flex items-center justify-end gap-1 text-[color:var(--ochre)]">
             <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
             {fmt(job.missing_rate_rows)}
           </span>
         ) : (
-          <span className="text-green-300">0</span>
+          <span className="text-[color:var(--bamboo)]">0</span>
         )}
       </Td>
     </tr>
@@ -462,7 +462,7 @@ function JobDetails({ job, onClose }: { job: CostJob; onClose: () => void }) {
           </div>
 
           {job.warnings.length > 0 && (
-            <div className="rounded-lg border border-yellow-500/30 bg-yellow-500/5 px-3 py-2 text-xs text-yellow-200">
+            <div className="rounded-lg border border-[color:var(--ochre)]/30 bg-[color:var(--ochre)]/5 px-3 py-2 text-xs text-[color:var(--ochre)]">
               {job.warnings.slice(0, 3).join("；")}
             </div>
           )}
@@ -569,7 +569,7 @@ function UsageTable({
 function RateStatus({ row }: { row: LLMUsageRow | TTSUsageRow }) {
   if (row.rate_status === "configured") {
     return (
-      <span className="inline-flex rounded-md bg-green-500/10 px-2 py-0.5 text-xs text-green-300">
+      <span className="inline-flex rounded-md bg-[color:var(--bamboo)]/10 px-2 py-0.5 text-xs text-[color:var(--bamboo)]">
         已配置
       </span>
     )
@@ -582,7 +582,7 @@ function RateStatus({ row }: { row: LLMUsageRow | TTSUsageRow }) {
     )
   }
   return (
-    <span className="inline-flex rounded-md bg-yellow-500/10 px-2 py-0.5 text-xs text-yellow-300">
+    <span className="inline-flex rounded-md bg-[color:var(--ochre)]/10 px-2 py-0.5 text-xs text-[color:var(--ochre)]">
       缺价格
     </span>
   )
@@ -600,9 +600,9 @@ function MetricCard({
   warn?: boolean
 }) {
   return (
-    <div className={`rounded-lg border bg-card p-4 ${warn ? "border-yellow-500/30" : "border-border"}`}>
+    <div className={`rounded-lg border bg-card p-4 ${warn ? "border-[color:var(--ochre)]/30" : "border-border"}`}>
       <p className="text-xs text-muted-foreground">{label}</p>
-      <p className={`mt-1 text-2xl font-semibold ${warn ? "text-yellow-300" : "text-foreground"}`}>
+      <p className={`mt-1 text-2xl font-semibold ${warn ? "text-[color:var(--ochre)]" : "text-foreground"}`}>
         {value}
       </p>
       <p className="mt-1 truncate text-xs text-muted-foreground">{sub}</p>
@@ -666,9 +666,9 @@ function fmtPercent(value: number | null) {
 
 function marginClass(value: number | null) {
   if (value == null) return "text-muted-foreground"
-  if (value >= 70) return "font-medium text-green-300"
-  if (value >= 50) return "font-medium text-yellow-200"
-  return "font-medium text-red-300"
+  if (value >= 70) return "font-medium text-[color:var(--bamboo)]"
+  if (value >= 50) return "font-medium text-[color:var(--ochre)]"
+  return "font-medium text-[color:var(--cinnabar)]"
 }
 
 function perMinute(value: number | null) {

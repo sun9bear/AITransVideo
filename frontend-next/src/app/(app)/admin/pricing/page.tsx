@@ -152,8 +152,8 @@ export default function AdminPricingPage() {
   if (forbidden) {
     return (
       <div className="flex flex-col items-center justify-center py-16 gap-3">
-        <div className="rounded-2xl border border-red-500/20 bg-red-500/5 p-6 text-center">
-          <p className="text-lg font-semibold text-red-400">
+        <div className="rounded-2xl border border-[color:var(--cinnabar)]/20 bg-[color:var(--cinnabar)]/5 p-6 text-center">
+          <p className="text-lg font-semibold text-[color:var(--cinnabar)]">
             仅管理员可访问
           </p>
           <p className="text-sm text-muted-foreground mt-2">
@@ -194,7 +194,7 @@ export default function AdminPricingPage() {
           </p>
         </div>
         {frozen && (
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-xs font-medium text-amber-400">
+          <span className="inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium border border-[color:var(--ochre)]/30 bg-[color:var(--ochre)]/12 text-[color:var(--ochre)]">
             <LockIcon />
             catalog_frozen
           </span>
@@ -202,7 +202,7 @@ export default function AdminPricingPage() {
       </div>
 
       {error && (
-        <div className="rounded-xl border border-red-500/20 bg-red-500/5 p-4 text-sm text-red-400">
+        <div className="rounded-xl border border-[color:var(--cinnabar)]/20 bg-[color:var(--cinnabar)]/5 p-4 text-sm text-[color:var(--cinnabar)]">
           {error}
         </div>
       )}
@@ -371,9 +371,9 @@ export default function AdminPricingPage() {
                         <span
                           className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${
                             v.status === "active"
-                              ? "bg-emerald-500/10 text-emerald-400"
+                              ? "bg-[color:var(--bamboo)]/12 text-[color:var(--bamboo)]"
                               : v.status === "draft"
-                                ? "bg-amber-500/10 text-amber-400"
+                                ? "bg-[color:var(--ochre)]/12 text-[color:var(--ochre)]"
                                 : "bg-muted text-muted-foreground"
                           }`}
                         >
@@ -446,7 +446,7 @@ function SectionCard({
           <div className="flex items-center gap-2">
             <h2 className="text-lg font-semibold text-foreground">{title}</h2>
             {frozen && (
-              <span className="text-amber-400" title="catalog_frozen: 修改需变更说明">
+              <span className="text-[color:var(--ochre)]" title="catalog_frozen: 修改需变更说明">
                 <LockIcon />
               </span>
             )}
@@ -484,7 +484,7 @@ function KvRow({
       <span className="text-sm text-muted-foreground">
         {label}
         {frozen && (
-          <span className="ml-1 text-amber-400" title="frozen">
+          <span className="ml-1 text-[color:var(--ochre)]" title="frozen">
             <LockIcon />
           </span>
         )}
@@ -516,7 +516,7 @@ function NumberInput({
       <span className="text-sm text-muted-foreground flex-1">
         {label}
         {frozen && (
-          <span className="ml-1 text-amber-400">
+          <span className="ml-1 text-[color:var(--ochre)]">
             <LockIcon />
           </span>
         )}
@@ -566,7 +566,7 @@ function PlansDisplay({
               ({key})
             </span>
             {plan.self_serve && (
-              <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] text-emerald-400">
+              <span className="rounded-full px-2 py-0.5 text-[10px] bg-[color:var(--bamboo)]/12 text-[color:var(--bamboo)]">
                 自助开通
               </span>
             )}
@@ -621,7 +621,7 @@ function PlansDisplay({
             )}
           </div>
           {key === "free" && (
-            <p className="mt-3 text-xs text-amber-400/90">
+            <p className="mt-3 text-xs text-[color:var(--ochre)]">
               当前 Free 仍同时受旧任务额度与新点数赠送约束；V3 credits 真值切换后会进一步收口。
             </p>
           )}
@@ -635,7 +635,7 @@ function PlansDisplay({
             试用期
           </span>
           {trial.frozen && (
-            <span className="text-amber-400">
+            <span className="text-[color:var(--ochre)]">
               <LockIcon />
             </span>
           )}
@@ -711,7 +711,7 @@ function PlansEditor({
                   updatePlan(key, { free_quota_total: v || null })
                 }
               />
-              <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs text-amber-300/90">
+              <div className="rounded-lg px-3 py-2 text-xs border border-[color:var(--ochre)]/25 bg-[color:var(--ochre)]/8 text-[color:var(--ochre)]">
                 <div>赠送点数：{freeGrantCredits} 点</div>
                 <div className="mt-1">
                   Free 赠点请到“点数策略”中的“免费赠点”调整，避免重复真值。

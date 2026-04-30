@@ -140,8 +140,8 @@ export default function AdminSettingsPage() {
   if (forbidden) {
     return (
       <div className="flex flex-col items-center justify-center py-16 gap-3">
-        <div className="rounded-2xl border border-red-500/20 bg-red-500/5 p-6 text-center">
-          <p className="text-lg font-semibold text-red-400">仅管理员可访问</p>
+        <div className="rounded-2xl border border-[color:var(--cinnabar)]/20 bg-[color:var(--cinnabar)]/5 p-6 text-center">
+          <p className="text-lg font-semibold text-[color:var(--cinnabar)]">仅管理员可访问</p>
           <p className="text-sm text-muted-foreground mt-2">您没有权限查看此页面。</p>
         </div>
       </div>
@@ -158,7 +158,7 @@ export default function AdminSettingsPage() {
       </div>
 
       {error ? (
-        <div className="rounded-xl border border-red-500/20 bg-red-500/5 p-4 text-sm text-red-400">
+        <div className="rounded-xl border border-[color:var(--cinnabar)]/20 bg-[color:var(--cinnabar)]/5 p-4 text-sm text-[color:var(--cinnabar)]">
           {error}
         </div>
       ) : null}
@@ -276,7 +276,7 @@ export default function AdminSettingsPage() {
           <div>
             <p className="text-sm font-medium text-foreground">
               TTS 语速微调
-              <span className="ml-2 inline-block rounded bg-purple-500/20 px-1.5 py-0.5 text-[10px] text-purple-400">
+              <span className="ml-2 inline-block rounded bg-[color:var(--ochre)]/20 px-1.5 py-0.5 text-[10px] text-[color:var(--ochre)]">
                 Phase 2 · MiniMax
               </span>
             </p>
@@ -320,7 +320,7 @@ export default function AdminSettingsPage() {
           <div>
             <p className="text-sm font-medium text-foreground">
               强制 DSP 对齐
-              <span className="ml-2 inline-block rounded bg-orange-500/20 px-1.5 py-0.5 text-[10px] text-orange-400">
+              <span className="ml-2 inline-block rounded bg-[color:var(--ochre)]/20 px-1.5 py-0.5 text-[10px] text-[color:var(--ochre)]">
                 Phase 2 · 极端兜底
               </span>
             </p>
@@ -329,7 +329,7 @@ export default function AdminSettingsPage() {
               一定能对齐，但语速差异大的段落会有 atempo 拉伸失真。适合"宁可有点怪也要严格同步"的内容
               （字幕同步/口型对齐），或者上游翻译字数控制不可靠时的兜底方案。
               <br />
-              <span className="text-amber-400">注意：开启后 rewrite 完全不生效，需复核率会变成 0%（因为强制对齐了），但音质需主观判断。</span>
+              <span className="text-[color:var(--ochre)]">注意：开启后 rewrite 完全不生效，需复核率会变成 0%（因为强制对齐了），但音质需主观判断。</span>
             </p>
           </div>
         </label>
@@ -345,7 +345,7 @@ export default function AdminSettingsPage() {
           <div>
             <p className="text-sm font-medium text-foreground">
               音色匹配启用语速维度
-              <span className="ml-2 inline-block rounded bg-cyan-500/20 px-1.5 py-0.5 text-[10px] text-cyan-400">
+              <span className="ml-2 inline-block rounded px-1.5 py-0.5 text-[10px] bg-[color:var(--cinnabar)]/15 text-[color:var(--cinnabar)]">
                 Phase 2 Task 2 · 灰度
               </span>
             </p>
@@ -354,7 +354,7 @@ export default function AdminSettingsPage() {
               把语速接近的音色推到推荐列表前列。<b>极端语速 speaker</b>（Munger 慢节奏 / 快 podcast）效果显著，
               普通 speaker 行为不变。关闭时回退到原 8 维度评分。
               <br />
-              <span className="text-amber-400">默认关闭：建议先观察 metrics（speed_param_distribution + first_pass_error_pct）一段真实数据再启用。</span>
+              <span className="text-[color:var(--ochre)]">默认关闭：建议先观察 metrics（speed_param_distribution + first_pass_error_pct）一段真实数据再启用。</span>
             </p>
           </div>
         </label>

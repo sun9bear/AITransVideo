@@ -68,7 +68,7 @@ const LABEL_FILTERS = [
 
 function LabelBadge({ done }: { done: boolean }) {
   return done
-    ? <span className="inline-block w-2 h-2 rounded-full bg-green-500" title="已完成" />
+    ? <span className="inline-block w-2 h-2 rounded-full bg-[color:var(--bamboo)]" title="已完成" />
     : <span className="inline-block w-2 h-2 rounded-full bg-zinc-600" title="未完成" />
 }
 
@@ -80,9 +80,9 @@ function SpeedCell({ item }: { item: VoiceCatalogItem }) {
   // Speed categories (subjective tiers chosen after catalog calibration).
   let tier = ''
   let color = ''
-  if (cps < 3.5) { tier = '慢';  color = 'text-amber-400' }
+  if (cps < 3.5) { tier = '慢';  color = 'text-[color:var(--ochre)]' }
   else if (cps < 4.5) { tier = '中'; color = 'text-foreground/80' }
-  else { tier = '快'; color = 'text-cyan-400' }
+  else { tier = '快'; color = 'text-[color:var(--bamboo)]' }
 
   const byModel = item.chars_per_second_by_model || null
   const tooltip = byModel
@@ -112,19 +112,19 @@ function formatRelativeCalibratedAt(ts: string | null | undefined): string {
 function VerifyBadge({ item }: { item: VoiceCatalogItem }) {
   // seed 继承信任：仅当从未人工验证过时显示 seed
   if (item.is_verified && item.is_seed && item.verify_attempts === 0) {
-    return <span className="text-xs px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400">seed</span>
+    return <span className="text-xs px-1.5 py-0.5 rounded bg-muted/60 text-muted-foreground">seed</span>
   }
   // 人工验证通过（包括 seed 音色重新验证后）
   if (item.is_verified && item.verify_attempts > 0) {
-    return <span className="text-xs px-1.5 py-0.5 rounded bg-green-500/20 text-green-400">已验证</span>
+    return <span className="text-xs px-1.5 py-0.5 rounded bg-[color:var(--bamboo)]/15 text-[color:var(--bamboo)]">已验证</span>
   }
   // 从未验证过的 seed 但 is_verified（理论上不会走到，保底）
   if (item.is_verified) {
-    return <span className="text-xs px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400">seed</span>
+    return <span className="text-xs px-1.5 py-0.5 rounded bg-muted/60 text-muted-foreground">seed</span>
   }
   // 验证过但失败
   if (item.verify_attempts > 0) {
-    return <span className="text-xs px-1.5 py-0.5 rounded bg-red-500/20 text-red-400">失败</span>
+    return <span className="text-xs px-1.5 py-0.5 rounded bg-[color:var(--cinnabar)]/15 text-[color:var(--cinnabar)]">失败</span>
   }
   return <span className="text-xs px-1.5 py-0.5 rounded bg-zinc-500/20 text-zinc-400">待验证</span>
 }
@@ -151,7 +151,7 @@ function FinalLabelTags({ item }: { item: VoiceCatalogItem }) {
   return (
     <div className="flex flex-wrap gap-0.5">
       {tags.map(t => (
-        <span key={t} className="text-[10px] px-1 py-0 rounded bg-purple-500/15 text-purple-300">{t}</span>
+        <span key={t} className="text-[10px] px-1 py-0 rounded bg-[color:var(--ochre)]/15 text-[color:var(--ochre)]">{t}</span>
       ))}
     </div>
   )
@@ -287,7 +287,7 @@ function AddVoiceModal({
           <input className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-1.5 text-sm"
             value={form.notes || ''} onChange={e => setForm(f => ({ ...f, notes: e.target.value || null }))} />
         </label>
-        {error && <p className="text-sm text-red-400">{error}</p>}
+        {error && <p className="text-sm text-[color:var(--cinnabar)]">{error}</p>}
         <div className="flex justify-end gap-2 pt-2">
           <button className="secondary-button text-sm" onClick={onClose}>取消</button>
           <button className="primary-button text-sm" onClick={handleSave} disabled={saving || !form.voice_id || !form.display_name}>
@@ -381,7 +381,7 @@ function EditVoiceModal({
           <input className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-1.5 text-sm"
             value={form.notes || ''} onChange={e => setForm(f => ({ ...f, notes: e.target.value || null }))} />
         </label>
-        {error && <p className="text-sm text-red-400">{error}</p>}
+        {error && <p className="text-sm text-[color:var(--cinnabar)]">{error}</p>}
         <div className="flex justify-end gap-2 pt-2">
           <button className="secondary-button text-sm" onClick={onClose}>取消</button>
           <button className="primary-button text-sm" onClick={handleSave} disabled={saving}>
@@ -480,7 +480,7 @@ function ImportModal({
                 {preview.map(e => (
                   <div key={e.voice_id} className="flex justify-between py-0.5">
                     <span className="font-mono text-xs">{e.voice_id}</span>
-                    <span className={e.status === 'will_create' ? 'text-green-400 text-xs' : 'text-zinc-500 text-xs'}>
+                    <span className={e.status === 'will_create' ? 'text-[color:var(--bamboo)] text-xs' : 'text-zinc-500 text-xs'}>
                       {e.status === 'will_create' ? '新增' : '跳过（已存在）'}
                     </span>
                   </div>
@@ -488,7 +488,7 @@ function ImportModal({
               </div>
             )}
 
-            {error && <p className="text-sm text-red-400">{error}</p>}
+            {error && <p className="text-sm text-[color:var(--cinnabar)]">{error}</p>}
 
             <div className="flex justify-end gap-2 pt-2">
               <button className="secondary-button text-sm" onClick={handleClose}>取消</button>
@@ -508,10 +508,10 @@ function ImportModal({
         ) : (
           <>
             <div className="space-y-2 text-sm">
-              <p className="text-green-400">已创建：{result.created.length} 条</p>
+              <p className="text-[color:var(--bamboo)]">已创建：{result.created.length} 条</p>
               {result.skipped.length > 0 && <p className="text-zinc-400">跳过（重复）：{result.skipped.length} 条</p>}
               {result.errors.length > 0 && (
-                <div className="text-red-400">
+                <div className="text-[color:var(--cinnabar)]">
                   <p>错误：{result.errors.length} 条</p>
                   {result.errors.map(e => <p key={e.voice_id} className="text-xs ml-2">{e.voice_id}: {e.error}</p>)}
                 </div>
@@ -786,7 +786,7 @@ export default function VoiceCatalogPage() {
           {LABEL_FILTERS.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
         </select>
         {labeling && (
-          <span className="text-xs text-yellow-400 animate-pulse">{labelProgress || '标注中...'}</span>
+          <span className="text-xs text-[color:var(--ochre)] animate-pulse">{labelProgress || '标注中...'}</span>
         )}
         {!labeling && selected.size > 0 && (
           <>
@@ -814,7 +814,7 @@ export default function VoiceCatalogPage() {
 
       {/* Error */}
       {error && (
-        <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-4 text-sm text-red-400">
+        <div className="rounded-lg border border-[color:var(--cinnabar)]/20 bg-[color:var(--cinnabar)]/5 p-4 text-sm text-[color:var(--cinnabar)]">
           {error}
         </div>
       )}
@@ -896,13 +896,13 @@ export default function VoiceCatalogPage() {
                 </td>
                 <td className="px-3 py-2 text-center">
                   {item.matchable
-                    ? <span className="text-green-400">是</span>
+                    ? <span className="text-[color:var(--bamboo)]">是</span>
                     : <span className="text-zinc-500">否</span>}
                 </td>
                 <td className="px-3 py-2 text-center">
                   <div className="flex gap-1 justify-center">
                     <button
-                      className="text-xs px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-400 hover:bg-cyan-500/30"
+                      className="text-xs px-1.5 py-0.5 rounded bg-[color:var(--cinnabar)]/15 text-[color:var(--cinnabar)] hover:bg-[color:var(--cinnabar)]/25"
                       disabled={verifying.has(item.voice_id)}
                       onClick={() => handleVerify(item.voice_id)}
                       title="验证"
@@ -910,21 +910,21 @@ export default function VoiceCatalogPage() {
                       {verifying.has(item.voice_id) ? '...' : '验证'}
                     </button>
                     <button
-                      className="text-xs px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-400 hover:bg-purple-500/30"
+                      className="text-xs px-1.5 py-0.5 rounded bg-[color:var(--ochre)]/20 text-[color:var(--ochre)] hover:bg-[color:var(--ochre)]/30"
                       onClick={() => handleFinalize(item.voice_id)}
                       title="生成 Final 标签"
                     >
                       Final
                     </button>
                     <button
-                      className="text-xs px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30"
+                      className="text-xs px-1.5 py-0.5 rounded bg-muted/60 text-muted-foreground hover:bg-[color:var(--ochre)]/30"
                       onClick={() => setEditVoice(item)}
                       title="编辑"
                     >
                       编辑
                     </button>
                     <button
-                      className="text-xs px-1.5 py-0.5 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30"
+                      className="text-xs px-1.5 py-0.5 rounded bg-[color:var(--cinnabar)]/15 text-[color:var(--cinnabar)] hover:bg-[color:var(--cinnabar)]/30"
                       onClick={() => handleDelete(item.voice_id)}
                       title="归档"
                     >

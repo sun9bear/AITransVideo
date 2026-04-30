@@ -64,13 +64,17 @@ type AnalysisResult = {
   suggestions: string[]
 }
 
+// Ink palette: same semantics as the user-facing StatusBadge (see
+// components/status-badge.tsx). Wrapped here as plain class strings
+// because the admin job table renders raw badges inline rather than
+// going through StatusBadge.
 const STATUS_BADGE: Record<string, string> = {
-  running: "border-blue-500/30 bg-blue-500/10 text-blue-400",
-  queued: "border-gray-500/30 bg-gray-500/10 text-gray-400",
-  waiting_for_review: "border-amber-500/30 bg-amber-500/10 text-amber-400",
-  succeeded: "border-green-500/30 bg-green-500/10 text-green-400",
-  failed: "border-red-500/30 bg-red-500/10 text-red-400",
-  cancelled: "border-gray-500/30 bg-gray-500/10 text-gray-400",
+  running: "border-[color:var(--ochre)]/30 bg-[color:var(--ochre)]/10 text-[color:var(--ochre)]",
+  queued: "border-muted-foreground/30 bg-muted/40 text-muted-foreground",
+  waiting_for_review: "border-[color:var(--ochre)]/30 bg-[color:var(--ochre)]/10 text-[color:var(--ochre)]",
+  succeeded: "border-[color:var(--bamboo)]/30 bg-[color:var(--bamboo)]/10 text-[color:var(--bamboo)]",
+  failed: "border-[color:var(--cinnabar)]/30 bg-[color:var(--cinnabar)]/10 text-[color:var(--cinnabar)]",
+  cancelled: "border-muted-foreground/30 bg-muted/40 text-muted-foreground",
 }
 
 const STATUS_LABEL: Record<string, string> = {
@@ -85,9 +89,9 @@ const STATUS_LABEL: Record<string, string> = {
 const CANCELABLE = new Set(["running", "queued", "waiting_for_review"])
 
 const SEVERITY_STYLE: Record<string, string> = {
-  high: "border-red-500/30 bg-red-500/10 text-red-400",
-  medium: "border-amber-500/30 bg-amber-500/10 text-amber-400",
-  low: "border-gray-500/30 bg-gray-500/10 text-gray-400",
+  high: "border-[color:var(--cinnabar)]/30 bg-[color:var(--cinnabar)]/10 text-[color:var(--cinnabar)]",
+  medium: "border-[color:var(--ochre)]/30 bg-[color:var(--ochre)]/10 text-[color:var(--ochre)]",
+  low: "border-muted-foreground/30 bg-muted/40 text-muted-foreground",
 }
 
 const SEVERITY_LABEL: Record<string, string> = {
@@ -422,7 +426,7 @@ function JobRow({
               <button
                 disabled={acting === job.job_id}
                 onClick={() => onCancel(job.job_id)}
-                className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-xs text-amber-400 hover:bg-amber-500/20 disabled:opacity-50"
+                className="rounded-lg px-3 py-1 text-xs disabled:opacity-50 border border-[color:var(--ochre)]/30 bg-[color:var(--ochre)]/10 text-[color:var(--ochre)] hover:bg-[color:var(--ochre)]/20"
               >
                 取消
               </button>
@@ -430,7 +434,7 @@ function JobRow({
             <button
               disabled={acting === job.job_id}
               onClick={() => onDelete(job.job_id)}
-              className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-1 text-xs text-red-400 hover:bg-red-500/20 disabled:opacity-50"
+              className="rounded-lg border border-[color:var(--cinnabar)]/30 bg-[color:var(--cinnabar)]/10 px-3 py-1 text-xs text-[color:var(--cinnabar)] hover:bg-[color:var(--cinnabar)]/20 disabled:opacity-50"
             >
               删除
             </button>
@@ -452,7 +456,7 @@ function JobRow({
                 <button
                   disabled={analyzing}
                   onClick={() => onAnalyze(job.job_id)}
-                  className="flex items-center gap-1.5 rounded-lg border border-purple-500/30 bg-purple-500/10 px-3 py-1 text-xs font-medium text-purple-400 hover:bg-purple-500/20 disabled:opacity-50 transition-colors"
+                  className="flex items-center gap-1.5 rounded-lg border border-[color:var(--ochre)]/30 bg-[color:var(--ochre)]/10 px-3 py-1 text-xs font-medium text-[color:var(--ochre)] hover:bg-[color:var(--ochre)]/20 disabled:opacity-50 transition-colors"
                 >
                   {analyzing ? (
                     <Loader2 className="h-3 w-3 animate-spin" />
@@ -479,7 +483,7 @@ function JobRow({
 
               {/* AI analysis error */}
               {analysisError && (
-                <div className="rounded-xl border border-red-500/20 bg-red-500/8 px-4 py-3 text-sm text-red-400">
+                <div className="rounded-xl border border-[color:var(--cinnabar)]/20 bg-[color:var(--cinnabar)]/8 px-4 py-3 text-sm text-[color:var(--cinnabar)]">
                   {analysisError}
                 </div>
               )}
@@ -500,8 +504,8 @@ function JobRow({
 
 function AnalysisPanel({ analysis }: { analysis: AnalysisResult }) {
   return (
-    <div className="space-y-4 rounded-xl border border-purple-500/20 bg-purple-500/5 p-4">
-      <h3 className="flex items-center gap-1.5 text-sm font-semibold text-purple-400">
+    <div className="space-y-4 rounded-xl border border-[color:var(--ochre)]/20 bg-[color:var(--ochre)]/5 p-4">
+      <h3 className="flex items-center gap-1.5 text-sm font-semibold text-[color:var(--ochre)]">
         <Sparkles className="h-3.5 w-3.5" />
         AI 分析结果
       </h3>
@@ -710,10 +714,10 @@ function MeteringPanel({
           <span
             className={`ml-2 ${
               (snapshot.term_preservation_rate ?? 0) >= 0.95
-                ? 'text-green-400'
+                ? 'text-[color:var(--bamboo)]'
                 : (snapshot.term_preservation_rate ?? 0) >= 0.8
-                ? 'text-amber-400'
-                : 'text-red-400'
+                ? 'text-[color:var(--ochre)]'
+                : 'text-[color:var(--cinnabar)]'
             }`}
           >
             {snapshot.glossary_preserved_terms ?? 0} / {snapshot.glossary_total_terms} ({termPct})
@@ -742,11 +746,11 @@ function MetricCard({
 }) {
   const toneClass =
     tone === 'good'
-      ? 'border-green-500/30 bg-green-500/5'
+      ? 'border-[color:var(--bamboo)]/30 bg-[color:var(--bamboo)]/5'
       : tone === 'warn'
-      ? 'border-amber-500/30 bg-amber-500/5'
+      ? 'border-[color:var(--ochre)]/30 bg-[color:var(--ochre)]/8'
       : tone === 'bad'
-      ? 'border-red-500/30 bg-red-500/5'
+      ? 'border-[color:var(--cinnabar)]/30 bg-[color:var(--cinnabar)]/5'
       : 'border-border bg-card'
   return (
     <div className={`rounded-lg border ${toneClass} px-2 py-2`}>

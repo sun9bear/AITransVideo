@@ -31,15 +31,17 @@ type AuditEntry = {
 const ROLE_OPTIONS = ["user", "admin"] as const
 const PLAN_OPTIONS = ["free", "plus", "pro"] as const
 
+// Ink palette: free=muted (no special tier), plus=ochre (mid tier),
+// pro=cinnabar (premium / brand color), admin role=cinnabar (authority).
 const PLAN_BADGE: Record<string, string> = {
-  free: "bg-gray-500/15 text-gray-400",
-  plus: "bg-cyan-500/15 text-cyan-400",
-  pro: "bg-purple-500/15 text-purple-400",
+  free: "bg-muted/40 text-muted-foreground",
+  plus: "bg-[color:var(--ochre)]/15 text-[color:var(--ochre)]",
+  pro: "bg-[color:var(--cinnabar)]/15 text-[color:var(--cinnabar)]",
 }
 
 const ROLE_BADGE: Record<string, string> = {
-  user: "bg-gray-500/15 text-gray-400",
-  admin: "bg-amber-500/15 text-amber-400",
+  user: "bg-muted/40 text-muted-foreground",
+  admin: "bg-[color:var(--cinnabar)]/15 text-[color:var(--cinnabar)]",
 }
 
 export default function AdminUsersPage() {
@@ -252,7 +254,7 @@ function UserRow({
           )}
         </td>
         <td className="px-4 py-3 text-xs text-muted-foreground tabular-nums">
-          {u.active_jobs > 0 && <span className="text-amber-400">{u.active_jobs} 活跃</span>}
+          {u.active_jobs > 0 && <span className="text-[color:var(--ochre)]">{u.active_jobs} 活跃</span>}
           {u.active_jobs > 0 && " · "}
           {u.total_jobs} 总计
         </td>
@@ -307,9 +309,9 @@ function UserRow({
                     </span>
                     <span className="text-foreground/80">{e.admin_email}</span>
                     <span>
-                      {e.field_name}: <span className="text-red-400">{e.old_value ?? "-"}</span>
+                      {e.field_name}: <span className="text-[color:var(--cinnabar)]">{e.old_value ?? "-"}</span>
                       {" → "}
-                      <span className="text-emerald-400">{e.new_value ?? "-"}</span>
+                      <span className="text-[color:var(--bamboo)]">{e.new_value ?? "-"}</span>
                     </span>
                   </div>
                 ))}

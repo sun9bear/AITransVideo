@@ -214,9 +214,9 @@ function StatCard({ label, value, sub, warning }: {
   label: string; value: string | number; sub?: string; warning?: boolean
 }) {
   return (
-    <div className={`rounded-lg border p-4 ${warning ? "border-yellow-500/40 bg-yellow-500/5" : "border-border bg-card"}`}>
+    <div className={`rounded-lg border p-4 ${warning ? "border-[color:var(--ochre)]/40 bg-[color:var(--ochre)]/5" : "border-border bg-card"}`}>
       <div className="text-xs text-muted-foreground">{label}</div>
-      <div className={`text-2xl font-bold mt-1 ${warning ? "text-yellow-400" : ""}`}>{value}</div>
+      <div className={`text-2xl font-bold mt-1 ${warning ? "text-[color:var(--ochre)]" : ""}`}>{value}</div>
       {sub && <div className="text-xs text-muted-foreground mt-0.5">{sub}</div>}
     </div>
   )
@@ -268,12 +268,12 @@ function AttemptChain({ attempts }: { attempts: AttemptInfo[] }) {
   return (
     <div className="space-y-1.5 text-xs">
       {attempts.map((a, i) => (
-        <div key={i} className={`flex items-start gap-2 px-2 py-1 rounded ${a.success ? "bg-green-500/10" : "bg-red-500/10"}`}>
-          <span className="shrink-0 mt-0.5">{a.success ? <Check className="h-3 w-3 text-green-400" /> : <X className="h-3 w-3 text-red-400" />}</span>
+        <div key={i} className={`flex items-start gap-2 px-2 py-1 rounded ${a.success ? "bg-[color:var(--bamboo)]/10" : "bg-[color:var(--cinnabar)]/10"}`}>
+          <span className="shrink-0 mt-0.5">{a.success ? <Check className="h-3 w-3 text-[color:var(--bamboo)]" /> : <X className="h-3 w-3 text-[color:var(--cinnabar)]" />}</span>
           <div>
             <span className="font-mono">{a.label}</span>
             <span className="text-muted-foreground ml-2">{a.model}</span>
-            {a.error && <div className="text-red-400 mt-0.5 break-all">{a.error}</div>}
+            {a.error && <div className="text-[color:var(--cinnabar)] mt-0.5 break-all">{a.error}</div>}
             {a.response_text_length != null && (
               <span className="text-muted-foreground ml-2">({a.response_text_length} chars)</span>
             )}
@@ -294,7 +294,7 @@ function PassSummaryLine({ result }: { result: Record<string, unknown> | null })
     <div className="text-xs text-muted-foreground flex gap-3 mt-1">
       {duration != null && <span>耗时 {fmtDuration(duration)}</span>}
       {attempts != null && <span>第 {attempts} 次成功</span>}
-      {(failures ?? 0) > 0 && <span className="text-yellow-400">JSON 解析失败 {failures} 次</span>}
+      {(failures ?? 0) > 0 && <span className="text-[color:var(--ochre)]">JSON 解析失败 {failures} 次</span>}
     </div>
   )
 }
@@ -520,7 +520,7 @@ export default function S2MonitorPage() {
               <span>不参与统计：{data!.jobs_not_eligible} 个任务（running/queued/cancelled）</span>
             )}
             {(agg.pass1.missing_artifact_count ?? 0) > 0 && (
-              <span className="text-red-400">Pass 1 artifact 缺失：{agg.pass1.missing_artifact_count} 个任务</span>
+              <span className="text-[color:var(--cinnabar)]">Pass 1 artifact 缺失：{agg.pass1.missing_artifact_count} 个任务</span>
             )}
             {(agg.pass1.avg_duration_ms ?? 0) > 0 && (
               <span>P1 平均耗时 {fmtDuration(agg.pass1.avg_duration_ms)}</span>
@@ -532,7 +532,7 @@ export default function S2MonitorPage() {
               <span>P3 平均耗时 {fmtDuration(agg.pass3.avg_duration_ms)}</span>
             )}
             {(agg.pass1.total_parse_failures ?? 0) + (agg.pass2.total_parse_failures ?? 0) > 0 && (
-              <span className="text-yellow-400">
+              <span className="text-[color:var(--ochre)]">
                 JSON 解析失败 {(agg.pass1.total_parse_failures ?? 0) + (agg.pass2.total_parse_failures ?? 0)} 次
               </span>
             )}
@@ -588,12 +588,12 @@ export default function S2MonitorPage() {
                       ) : job.pass1_skipped ? (
                         <span className="text-muted-foreground">(跳过)</span>
                       ) : job.pass1_missing ? (
-                        <span className="text-red-400">(缺失)</span>
+                        <span className="text-[color:var(--cinnabar)]">(缺失)</span>
                       ) : (
                         <span>
                           {shortModel(job.pass1_model || "")}
                           {job.pass1_model_downgrade && (
-                            <ArrowDown className="inline h-3 w-3 ml-0.5 text-yellow-400" />
+                            <ArrowDown className="inline h-3 w-3 ml-0.5 text-[color:var(--ochre)]" />
                           )}
                         </span>
                       )}
@@ -616,9 +616,9 @@ export default function S2MonitorPage() {
                       ) : isLegacy ? (
                         <span className="text-muted-foreground">-</span>
                       ) : job.pass3_success ? (
-                        <Check className="inline h-3.5 w-3.5 text-green-400" />
+                        <Check className="inline h-3.5 w-3.5 text-[color:var(--bamboo)]" />
                       ) : (
-                        <X className="inline h-3.5 w-3.5 text-red-400" />
+                        <X className="inline h-3.5 w-3.5 text-[color:var(--cinnabar)]" />
                       )}
                     </td>
 
@@ -665,13 +665,13 @@ export default function S2MonitorPage() {
       {data && data.jobs.length > 0 && (
         <div className="flex flex-wrap gap-4 text-xs text-muted-foreground">
           <span className="flex items-center gap-1">
-            <ArrowDown className="h-3 w-3 text-yellow-400" /> 模型降级
+            <ArrowDown className="h-3 w-3 text-[color:var(--ochre)]" /> 模型降级
           </span>
           <span className="flex items-center gap-1">
-            <X className="h-3 w-3 text-red-400" /> Pass 3 失败
+            <X className="h-3 w-3 text-[color:var(--cinnabar)]" /> Pass 3 失败
           </span>
           <span className="flex items-center gap-1">
-            <Check className="h-3 w-3 text-green-400" /> Pass 3 成功
+            <Check className="h-3 w-3 text-[color:var(--bamboo)]" /> Pass 3 成功
           </span>
           <span>legacy/旧 = legacy 回退或三段式上线前的旧任务</span>
         </div>
