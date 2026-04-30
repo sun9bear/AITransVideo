@@ -164,6 +164,102 @@
   --ochre: oklch(0.62 0.13 60);
 }
 
+/* ==========================================
+   Ink-dark theme — warm-gray ink wash for the (app) workspace/studio layer.
+   Activated by `data-theme="ink-dark"` on the (app) layout root.
+   The site forces html.dark for legacy reasons; this override sits on top
+   so the workspace reads as continuous with the marketing ink theme rather
+   than the steel-blue dark variant the .dark class would otherwise apply.
+   See: docs/plans/2026-04-29-marketing-redesign-ink-aesthetic.md §3 layering
+   ========================================== */
+[data-theme="ink-dark"] {
+  /* Warm dark gray family — hue 70 (slight yellow / aged-paper tint),
+     low chroma so surfaces stay neutral. NOT pure black; the user
+     specifically wanted "深灰，类似水墨画那种感觉的深灰". */
+  --background: oklch(0.18 0.012 70);          /* warm charcoal */
+  --foreground: oklch(0.92 0.010 80);          /* soft cream */
+  --card: oklch(0.22 0.012 70);                /* slightly raised */
+  --card-foreground: oklch(0.92 0.010 80);
+  --popover: oklch(0.20 0.012 70);
+  --popover-foreground: oklch(0.92 0.010 80);
+
+  /* Cinnabar primary — same brand red, slightly lifted L for dark surface contrast */
+  --primary: oklch(0.62 0.18 25);
+  --primary-foreground: oklch(0.98 0.005 85);
+
+  /* Ochre secondary — earthy yellow that pairs naturally with cinnabar
+     in classical Chinese palettes. */
+  --secondary: oklch(0.55 0.12 70);
+  --secondary-foreground: oklch(0.96 0.010 80);
+
+  --muted: oklch(0.26 0.012 70);
+  --muted-foreground: oklch(0.65 0.012 75);
+  --accent: oklch(0.30 0.020 65);
+  --accent-foreground: oklch(0.92 0.010 80);
+
+  /* Destructive collapses to cinnabar — single warm color principle */
+  --destructive: oklch(0.62 0.18 25);
+
+  --border: oklch(0.30 0.015 75);
+  --input: oklch(0.24 0.012 70);
+  --ring: oklch(0.62 0.18 25);
+
+  --chart-1: oklch(0.62 0.18 25);              /* cinnabar */
+  --chart-2: oklch(0.55 0.12 70);              /* ochre */
+  --chart-3: oklch(0.55 0.07 145);             /* bamboo */
+  --chart-4: oklch(0.65 0.012 75);             /* warm gray */
+  --chart-5: oklch(0.50 0.10 80);              /* aged paper */
+
+  --radius: 0.5rem;
+
+  --sidebar: oklch(0.20 0.012 70);
+  --sidebar-foreground: oklch(0.92 0.010 80);
+  --sidebar-primary: oklch(0.62 0.18 25);
+  --sidebar-primary-foreground: oklch(0.98 0.005 85);
+  --sidebar-accent: oklch(0.26 0.012 70);
+  --sidebar-accent-foreground: oklch(0.92 0.010 80);
+  --sidebar-border: oklch(0.30 0.015 75);
+  --sidebar-ring: oklch(0.62 0.18 25);
+
+  /* Ink-namespaced extras — same names as the light theme so components
+     using `var(--ink-paper)` / `var(--cinnabar)` work in either scope. */
+  --ink-paper: oklch(0.18 0.012 70);
+  --ink-paper-2: oklch(0.22 0.012 70);
+  --ink-paper-3: oklch(0.26 0.012 70);
+  --ink-black: oklch(0.92 0.010 80);
+  --ink-gray-1: oklch(0.78 0.010 75);
+  --ink-gray-2: oklch(0.65 0.012 75);
+  --ink-gray-3: oklch(0.50 0.012 75);
+  --ink-gray-4: oklch(0.35 0.015 75);
+  --cinnabar: oklch(0.62 0.18 25);
+  --cinnabar-hover: oklch(0.66 0.18 25);
+  --cinnabar-soft: oklch(0.62 0.18 25 / 0.12);
+  --bamboo: oklch(0.55 0.07 145);
+  --ochre: oklch(0.55 0.12 70);
+}
+
+/* Subtle rice-paper noise texture for the ink-dark scope.
+   Fixed-position so scroll doesn't reveal the seam. Very low opacity
+   + mix-blend-mode overlay so it adds grain without lifting saturation.
+   The SVG is data-URI inlined — no extra HTTP request, ~600 bytes. */
+[data-theme="ink-dark"]::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240' viewBox='0 0 240 240'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' seed='5' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.55 0'/></filter><rect width='240' height='240' filter='url(%23n)' opacity='0.45'/></svg>");
+  background-size: 240px 240px;
+  opacity: 0.05;
+  mix-blend-mode: overlay;
+}
+
+/* Ensure all data-theme="ink-dark" descendants stack above the noise overlay */
+[data-theme="ink-dark"] > * {
+  position: relative;
+  z-index: 1;
+}
+
 /* Dark mode — slate/graphite base, deeper primary */
 .dark {
   --background: oklch(0.13 0.015 250);
