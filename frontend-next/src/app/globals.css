@@ -7,10 +7,12 @@
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  /* Chinese-first font stack per DESIGN.md §2.3: platform Chinese UI fonts win for long body copy. */
-  --font-sans: "Inter", "PingFang SC", "Microsoft YaHei", "Noto Sans SC", "Hiragino Sans GB", system-ui, sans-serif;
+  /* Chinese-first font stack per DESIGN.md §2.3 + plan §4.2: platform Chinese UI fonts win for long body copy.
+     HarmonyOS Sans SC sits behind PingFang because Mac/iOS users get PingFang natively (best on-device),
+     while Windows users with HarmonyOS installed get a step up from YaHei. Linux/server falls through to Noto Sans SC. */
+  --font-sans: "Inter", "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei", "Noto Sans SC", "Hiragino Sans GB", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
-  --font-heading: "Inter", "PingFang SC", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
+  --font-heading: "Inter", "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -92,6 +94,74 @@
   --sidebar-accent-foreground: oklch(0.26 0.02 250);
   --sidebar-border: oklch(0.89 0.005 250);
   --sidebar-ring: oklch(0.5 0.17 252);
+}
+
+/* ==========================================
+   Ink theme — marketing-only "rice paper + cinnabar" aesthetic.
+   Activated by `data-theme="ink"` on the (marketing) layout root.
+   See: docs/plans/2026-04-29-marketing-redesign-ink-aesthetic.md
+   This block ONLY overrides existing tokens within the ink scope; it does
+   NOT touch (app) / (auth) / Studio / Workspace.
+   ========================================== */
+[data-theme="ink"] {
+  /* Rice paper backgrounds — warm cream, not white */
+  --background: oklch(0.96 0.018 85);          /* #F5F0E6 主底 */
+  --foreground: oklch(0.20 0 0);               /* #1A1A1A 主文字 */
+  --card: oklch(0.93 0.024 80);                /* #EDE6D6 卡片 */
+  --card-foreground: oklch(0.20 0 0);
+  --popover: oklch(0.96 0.018 85);
+  --popover-foreground: oklch(0.20 0 0);
+
+  /* Cinnabar — the only warm color, sole CTA / seal / accent */
+  --primary: oklch(0.55 0.18 25);              /* #C73E3A 朱砂 */
+  --primary-foreground: oklch(0.98 0.005 85);  /* 米白文字落朱砂上 */
+
+  /* Ink wash secondary — desaturated ink-gray for non-CTA surfaces */
+  --secondary: oklch(0.32 0.005 80);           /* #4A4A4A */
+  --secondary-foreground: oklch(0.96 0.018 85);
+  --muted: oklch(0.92 0.022 80);               /* #E2D9C5 三级面 */
+  --muted-foreground: oklch(0.42 0.005 80);    /* #6E6A65 副文字 */
+  --accent: oklch(0.93 0.024 80);
+  --accent-foreground: oklch(0.20 0 0);
+
+  /* Destructive collapses to cinnabar — single warm color principle */
+  --destructive: oklch(0.55 0.18 25);
+
+  --border: oklch(0.83 0.020 75);              /* #D2C8B5 极弱分割 */
+  --input: oklch(0.88 0.022 78);
+  --ring: oklch(0.55 0.18 25);
+
+  --chart-1: oklch(0.55 0.18 25);              /* cinnabar */
+  --chart-2: oklch(0.55 0.07 145);             /* bamboo */
+  --chart-3: oklch(0.62 0.13 60);              /* ochre */
+  --chart-4: oklch(0.42 0.005 80);             /* ink gray */
+  --chart-5: oklch(0.74 0.05 80);              /* faded paper */
+
+  --radius: 0.375rem;                          /* 6px — clipped, no SaaS round */
+
+  --sidebar: oklch(0.93 0.024 80);
+  --sidebar-foreground: oklch(0.20 0 0);
+  --sidebar-primary: oklch(0.55 0.18 25);
+  --sidebar-primary-foreground: oklch(0.98 0.005 85);
+  --sidebar-accent: oklch(0.92 0.022 80);
+  --sidebar-accent-foreground: oklch(0.20 0 0);
+  --sidebar-border: oklch(0.83 0.020 75);
+  --sidebar-ring: oklch(0.55 0.18 25);
+
+  /* Ink-namespaced extras (direct usage in custom CSS / inline styles) */
+  --ink-paper: oklch(0.96 0.018 85);
+  --ink-paper-2: oklch(0.93 0.024 80);
+  --ink-paper-3: oklch(0.92 0.022 80);
+  --ink-black: oklch(0.20 0 0);
+  --ink-gray-1: oklch(0.32 0.005 80);
+  --ink-gray-2: oklch(0.42 0.005 80);
+  --ink-gray-3: oklch(0.62 0.008 80);
+  --ink-gray-4: oklch(0.78 0.012 78);
+  --cinnabar: oklch(0.55 0.18 25);
+  --cinnabar-hover: oklch(0.50 0.18 25);
+  --cinnabar-soft: oklch(0.55 0.18 25 / 0.08);
+  --bamboo: oklch(0.55 0.07 145);
+  --ochre: oklch(0.62 0.13 60);
 }
 
 /* Dark mode — slate/graphite base, deeper primary */
@@ -299,6 +369,65 @@
 .marketing-divider {
   height: 1px;
   background: linear-gradient(90deg, transparent, var(--border), transparent);
+}
+
+/* ==========================================
+   Ink-themed marketing surfaces (active when [data-theme="ink"] applied).
+   Override the dark-by-default marketing classes with rice-paper light surfaces.
+   See: docs/plans/2026-04-29-marketing-redesign-ink-aesthetic.md §4
+   ========================================== */
+[data-theme="ink"] .marketing-hero-surface {
+  /* Rice-paper hero: solid paper base + faint ink halo top to suggest depth without
+     dramatizing. Image-based hero is layered on top via <Image> in hero.tsx. */
+  background:
+    radial-gradient(ellipse 90% 40% at 50% -20%, oklch(0.55 0.18 25 / 0.04), transparent 70%),
+    var(--ink-paper);
+  color: var(--ink-black);
+}
+
+[data-theme="ink"] .marketing-reading-surface {
+  background-color: var(--ink-paper);
+  color: var(--ink-black);
+}
+
+[data-theme="ink"] .marketing-divider {
+  /* Ink-stroke style divider, faint cinnabar tint to weave with seal accents. */
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--ink-gray-4) 20%,
+    var(--ink-gray-3) 50%,
+    var(--ink-gray-4) 80%,
+    transparent 100%
+  );
+}
+
+/* Cinnabar text highlight — for key numbers / accents in ink theme. */
+[data-theme="ink"] .ink-accent {
+  color: var(--cinnabar);
+}
+
+/* Display-class headline for hero / section titles in ink theme.
+   Uses Noto Serif SC stack for calligraphic skeleton at large sizes. */
+[data-theme="ink"] .ink-display {
+  font-family: "Noto Serif SC", "Source Han Serif SC", "Songti SC", "STSong", Georgia, serif;
+  font-weight: 900;
+  letter-spacing: -0.005em;
+}
+
+[data-theme="ink"] .ink-heading {
+  font-family: "Noto Serif SC", "Source Han Serif SC", "Songti SC", "STSong", Georgia, serif;
+  font-weight: 600;
+}
+
+/* Numeric / monetary display in ink theme — Space Grotesk's geometric forms read
+   as "industrial" against the calligraphic skeleton of Noto Serif SC, giving
+   prices and key figures a clear contrast tier. */
+[data-theme="ink"] .ink-num {
+  font-family: "Space Grotesk", "Inter", ui-sans-serif, sans-serif;
+  font-feature-settings: "tnum" 1, "lnum" 1;
+  letter-spacing: -0.01em;
 }
 
 /* Chinese body text: slightly larger, more line-height for long-form reading */

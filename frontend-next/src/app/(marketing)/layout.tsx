@@ -2,12 +2,14 @@ import { SiteHeader } from "@/components/marketing/site-header"
 import { SiteFooter } from "@/components/marketing/site-footer"
 
 /**
- * Marketing route group layout — provides header + footer for the homepage,
- * pricing, and trial pages. DESIGN.md §3 applies strongly here.
+ * Marketing route group layout — header, footer, `<main>` landmark.
  *
- * This layout is deliberately thin: header, footer, and a `<main>` landmark.
- * All visual expression lives inside section components under
- * `src/components/marketing/*` so the foundations stay shareable with (app).
+ * Theme: ink (rice paper + cinnabar). Activated by `data-theme="ink"` so the
+ * scope is *only* the marketing surface (homepage, pricing, trial, legal).
+ * The (app) and (auth) route groups are unaffected and continue with the
+ * default cool-toned theme.
+ *
+ * See: docs/plans/2026-04-29-marketing-redesign-ink-aesthetic.md §3 layering
  */
 export default function MarketingLayout({
   children,
@@ -15,7 +17,10 @@ export default function MarketingLayout({
   children: React.ReactNode
 }) {
   return (
-    <div className="flex min-h-screen flex-col bg-background">
+    <div
+      data-theme="ink"
+      className="flex min-h-screen flex-col bg-background"
+    >
       <SiteHeader />
       <main id="main-content" className="flex-1">
         {children}

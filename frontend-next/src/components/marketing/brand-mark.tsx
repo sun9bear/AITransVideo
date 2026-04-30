@@ -1,24 +1,21 @@
 import { cn } from "@/lib/utils"
+import { SealStamp } from "./seal-stamp"
 
 /**
- * Minimal brand mark for the marketing layer. No gradients, no AI-template purple.
- * DESIGN.md §2.2 — "deep blue / steel cyan / signal teal" and no loud neon gradients.
+ * Brand mark for the marketing layer.
  *
- * Uses the foundation primary token so a future brand update only needs to touch
- * globals.css, not every surface that happens to render the logo.
+ * Renders the cinnabar seal stamp (朱砂方印) with the engraved character「译」.
+ * This replaces the previous "AV" letter block — see plan §8 D15.
+ *
+ * The seal is the single source of truth for brand visual identity in the
+ * marketing layer; site header, footer, and any other lockup composition
+ * should call into this module rather than re-implementing the mark.
  */
-export function BrandMark({ className, size = 28 }: { className?: string; size?: number }) {
+export function BrandMark({ className, size = 32 }: { className?: string; size?: number }) {
   return (
-    <div
-      className={cn(
-        "flex items-center justify-center rounded-md bg-primary text-primary-foreground font-semibold shrink-0",
-        className,
-      )}
-      style={{ width: size, height: size, fontSize: Math.round(size * 0.46) }}
-      aria-hidden="true"
-    >
-      AV
-    </div>
+    <span className={cn("inline-flex shrink-0 items-center justify-center", className)}>
+      <SealStamp size={size} ariaLabel="AIVideoTrans" />
+    </span>
   )
 }
 
@@ -26,7 +23,9 @@ export function BrandLockup({ className }: { className?: string }) {
   return (
     <div className={cn("flex items-center gap-2.5", className)}>
       <BrandMark />
-      <span className="font-semibold text-foreground tracking-tight">AIVideoTrans</span>
+      <span className="ink-heading font-semibold text-foreground tracking-tight">
+        AIVideoTrans
+      </span>
     </div>
   )
 }
