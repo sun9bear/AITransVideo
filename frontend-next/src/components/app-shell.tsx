@@ -13,6 +13,7 @@ import {
   BarChart3,
   Bell,
   User,
+  Users,
   HelpCircle,
   ChevronLeft,
   ChevronRight,
@@ -72,6 +73,7 @@ const navGroups: NavGroup[] = [
     adminOnly: true,
     items: [
       { label: "任务管理", href: "/admin/jobs", icon: ClipboardList },
+      { label: "用户管理", href: "/admin/users", icon: Users },
       { label: "音色管理", href: "/admin/voices", icon: AudioLines },
       { label: "模型管理", href: "/admin/prompts", icon: MessageSquareText },
       { label: "审校监控", href: "/admin/s2-monitor", icon: Activity },
