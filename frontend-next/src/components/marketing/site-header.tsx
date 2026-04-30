@@ -111,12 +111,10 @@ export function SiteHeader() {
                 // ink-theme colors regardless of html.dark.
                 className={cn(
                   "hidden sm:inline-flex items-center justify-center gap-1.5",
-                  "h-8 px-3 rounded-[10px] text-[0.8rem] font-semibold",
-                  "border-2 transition-colors",
-                  "border-[color:var(--cinnabar,#C73E3A)]/55",
+                  "h-8 px-3 rounded-[10px] text-[0.8rem] font-medium",
+                  "transition-colors",
                   "bg-[color:var(--ink-paper-2,#EDE6D6)]",
                   "text-[color:var(--ink-black,#1A1A1A)]",
-                  "hover:border-[color:var(--cinnabar,#C73E3A)]",
                   "hover:bg-[color:var(--cinnabar-soft,rgba(199,62,58,0.08))]",
                   "hover:text-[color:var(--cinnabar,#C73E3A)]",
                   "focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[color:var(--cinnabar,#C73E3A)]",
