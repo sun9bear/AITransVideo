@@ -71,6 +71,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_AUTODUB_LOCAL_CONFIG_PATH = PROJECT_ROOT / "autodub.local.json"
 DEFAULT_BASE_URL = "https://api.minimaxi.com"
 DEFAULT_MODEL = "speech-2.8-turbo"
+MINIMAX_TTS_MODELS = frozenset({DEFAULT_MODEL, "speech-2.8-hd"})
 DEFAULT_AUDIO_FORMAT = "wav"
 DEFAULT_TIMEOUT_SECONDS = 60
 DEFAULT_MAX_RETRIES = 5
@@ -124,6 +125,20 @@ def _is_volcengine_voice_resource_mismatch(exc: Exception) -> bool:
         return True
     keywords = ("speaker", "voice", "resource", "invalid", "mismatch")
     return sum(1 for kw in keywords if kw in msg) >= 2
+
+
+def _read_job_field(job_record: Any, key: str) -> Any:
+    if isinstance(job_record, dict):
+        return job_record.get(key)
+    return getattr(job_record, key, None)
+
+
+def _resolve_minimax_model_for_job(job_record: Any, fallback_model: str) -> str:
+    raw_model = _read_job_field(job_record, "tts_model") if job_record is not None else None
+    model = _normalize_optional_text(raw_model)
+    if model in MINIMAX_TTS_MODELS:
+        return model
+    return _normalize_optional_text(fallback_model) or DEFAULT_MODEL
 
 
 @dataclass(slots=True)
@@ -1047,9 +1062,14 @@ class TTSGenerator:
                 flush=True,
             )
 
+        minimax_model = _resolve_minimax_model_for_job(
+            self._resolve_active_job_record(),
+            self.config.model,
+        )
+
         print(
             f"[MiniMax] voice={mm_voice}, confidence={mm_confidence}, "
-            f"source={mm_resolution}, text={tts_text[:50]}...",
+            f"source={mm_resolution}, model={minimax_model}, text={tts_text[:50]}...",
             flush=True,
         )
 
@@ -1084,7 +1104,7 @@ class TTSGenerator:
         # can build the speed_param_distribution histogram.
         try:
             segment.dsp_speed_param = effective_speed
-            segment.tts_model_key = self.config.model
+            segment.tts_model_key = minimax_model
         except Exception:
             pass  # best-effort; ignore if segment is read-only somehow
 
@@ -1097,7 +1117,7 @@ class TTSGenerator:
 
         endpoint = _build_tts_endpoint(self.config.base_url)
         payload = {
-            "model": self.config.model,
+            "model": minimax_model,
             "text": tts_text,
             "voice_setting": {
                 "voice_id": mm_voice,

@@ -27,6 +27,8 @@ from services.review_state import (
 DUBBING_MODE_DUB = "dub"
 DUBBING_MODE_KEEP_ORIGINAL = "keep_original"
 VALID_DUBBING_MODES = {DUBBING_MODE_DUB, DUBBING_MODE_KEEP_ORIGINAL}
+MINIMAX_TTS_MODEL_TURBO = "speech-2.8-turbo"
+MINIMAX_TTS_MODEL_HD = "speech-2.8-hd"
 
 
 def _normalize_dubbing_mode(value: object) -> str:
@@ -34,6 +36,29 @@ def _normalize_dubbing_mode(value: object) -> str:
     if normalized in VALID_DUBBING_MODES:
         return normalized
     return DUBBING_MODE_DUB
+
+
+def resolve_minimax_tts_model_from_voice_selection(
+    speakers: list[dict[str, object]],
+) -> str | None:
+    """Resolve the job-level MiniMax model implied by per-speaker UI choices."""
+    any_minimax = False
+    any_hd = False
+    for sp in speakers:
+        if not isinstance(sp, dict):
+            continue
+        provider = str(sp.get("tts_provider", "") or "").strip().lower()
+        if provider != "minimax":
+            continue
+        any_minimax = True
+        model_hint = str(sp.get("minimax_model", "") or "").strip().lower()
+        if model_hint in {"hd", MINIMAX_TTS_MODEL_HD}:
+            any_hd = True
+    if any_hd:
+        return MINIMAX_TTS_MODEL_HD
+    if any_minimax:
+        return MINIMAX_TTS_MODEL_TURBO
+    return None
 
 
 def approve_translation_config(
@@ -437,7 +462,7 @@ def _validate_voice_provider_compat(voice_id: str, tts_provider: str) -> None:
 def approve_voice_selection(
     *,
     project_dir: Path,
-    speakers: list[dict[str, str]],
+    speakers: list[dict[str, object]],
 ) -> dict[str, object]:
     """Approve voice_selection_review with per-speaker voice bindings."""
     import re
@@ -504,6 +529,11 @@ def approve_voice_selection(
         base["voice_id"] = sp["voice_id"]
         base["voice_source"] = sp.get("voice_source", "catalog")
         base["tts_provider"] = sp.get("tts_provider", "")
+        if str(base["tts_provider"] or "").strip().lower() == "minimax":
+            minimax_model = str(sp.get("minimax_model", "") or "").strip().lower()
+            base["minimax_model"] = "hd" if minimax_model in {"hd", MINIMAX_TTS_MODEL_HD} else "turbo"
+        else:
+            base.pop("minimax_model", None)
         # Drop any in-progress clone marker now that the user has approved.
         base.pop("cloning", None)
         merged_speakers.append(base)

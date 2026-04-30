@@ -26,6 +26,9 @@ from services.jobs.store import JobStore
 from services.state_manager import utc_now_iso
 
 
+SUPPORTED_MINIMAX_TTS_MODELS = {"speech-2.8-turbo", "speech-2.8-hd"}
+
+
 class JobServiceError(Exception):
     """Base error for the A1 job service."""
 
@@ -215,6 +218,28 @@ class JobService:
         next_record = replace(
             record,
             display_name=normalized,
+            updated_at=utc_now_iso(),
+        )
+        self.store.save_job(next_record)
+        return self.store.require_job(job_id)
+
+    def update_tts_model_from_voice_selection(
+        self, job_id: str, tts_model: str | None
+    ) -> JobRecord:
+        """Persist the MiniMax model selected in voice_selection_review."""
+        normalized_model = str(tts_model or "").strip()
+        if not normalized_model:
+            return self.store.require_job(job_id)
+        if normalized_model not in SUPPORTED_MINIMAX_TTS_MODELS:
+            raise ValueError(f"Unsupported MiniMax TTS model: {normalized_model}")
+
+        record = self.store.require_job(job_id)
+        if record.tts_model == normalized_model:
+            return record
+
+        next_record = replace(
+            record,
+            tts_model=normalized_model,
             updated_at=utc_now_iso(),
         )
         self.store.save_job(next_record)

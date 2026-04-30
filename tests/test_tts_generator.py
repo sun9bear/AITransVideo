@@ -115,6 +115,39 @@ def test_tts_generator_generates_single_segment_audio(
     assert calls[0]["url"] == "https://api.minimaxi.com/v1/t2a_v2"
 
 
+def test_minimax_uses_job_record_tts_model_in_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wav_bytes = _build_wav_bytes(duration_ms=1_000)
+    calls = _install_fake_requests(
+        monkeypatch,
+        [
+            {
+                "status_code": 200,
+                "payload": {
+                    "base_resp": {"status_code": 0, "status_msg": "success"},
+                    "data": {"audio": wav_bytes.hex()},
+                },
+            }
+        ],
+    )
+    monkeypatch.setattr(tts_generator_module, "_ffprobe_duration_ms", lambda _path: 1000)
+    segment = _build_segment(segment_id=1)
+
+    TTSGenerator(
+        TTSConfig(api_key="secret", model="speech-2.8-turbo"),
+        job_record={
+            "service_mode": "studio",
+            "tts_provider": "minimax",
+            "tts_model": "speech-2.8-hd",
+        },
+    ).generate_all([segment], str(tmp_path / "tts"))
+
+    assert calls[0]["json"]["model"] == "speech-2.8-hd"
+    assert segment.tts_model_key == "speech-2.8-hd"
+
+
 def test_tts_generator_records_usage_meter_bucket(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

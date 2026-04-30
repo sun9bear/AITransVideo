@@ -899,11 +899,24 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
                     if review_subpath == "voice-selection/approve":
                         _require_review_gate(record, expected_stage="voice_selection_review")
                         payload = self._read_json_payload()
-                        from services.jobs.review_actions import approve_voice_selection
+                        from services.jobs.review_actions import (
+                            approve_voice_selection,
+                            resolve_minimax_tts_model_from_voice_selection,
+                        )
+                        speakers_payload = payload.get("speakers", [])
                         approve_voice_selection(
                             project_dir=project_dir,
-                            speakers=payload.get("speakers", []),
+                            speakers=speakers_payload,
                         )
+                        if isinstance(speakers_payload, list):
+                            minimax_tts_model = resolve_minimax_tts_model_from_voice_selection(
+                                speakers_payload
+                            )
+                            if minimax_tts_model:
+                                service.update_tts_model_from_voice_selection(
+                                    job_id,
+                                    minimax_tts_model,
+                                )
                         continued = service.continue_job(job_id)
                         self._write_json(HTTPStatus.OK, {"success": True, "job": continued.to_dict()})
                         return
