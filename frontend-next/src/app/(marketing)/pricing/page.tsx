@@ -27,10 +27,10 @@ export default function PricingPage() {
     <>
       <section className="marketing-reading-surface pt-16 pb-10 sm:pt-20 sm:pb-12">
         <div className="mx-auto max-w-3xl px-4 text-center sm:px-6 lg:px-8">
-          <p className="text-xs font-semibold uppercase tracking-wider text-primary">
+          <p className="ink-heading text-xs uppercase tracking-widest text-[color:var(--cinnabar,#C73E3A)]">
             定价
           </p>
-          <h1 className="mt-3 text-4xl font-bold tracking-tight text-foreground sm:text-5xl">
+          <h1 className="ink-display mt-3 text-4xl tracking-tight text-foreground sm:text-5xl">
             简单透明，为实际产出买单
           </h1>
           <p className="mt-5 zh-body-lg text-muted-foreground">

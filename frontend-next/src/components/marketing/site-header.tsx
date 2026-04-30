@@ -1,10 +1,11 @@
 "use client"
 
+import { useEffect, useState } from "react"
 import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { useSession } from "@/components/providers/session-provider"
 import { BrandLockup } from "./brand-mark"
-import { buttonVariants } from "@/components/ui/button"
+import { buttonVariants } from "@/components/ui/button-variants"
 import { cn } from "@/lib/utils"
 
 const NAV_ITEMS: Array<{ href: string; label: string }> = [
@@ -14,14 +15,51 @@ const NAV_ITEMS: Array<{ href: string; label: string }> = [
 ]
 
 /**
- * Marketing-layer header. Kept lightweight and contrast-led.
+ * Marketing-layer header. Sticky + scroll-aware CTA highlight.
  *
- * DESIGN.md §3.1 — marketing pages are dark-capable but not universally dark;
- * the header sits on the current page background without injecting its own drama.
+ * See: docs/plans/2026-04-29-marketing-redesign-ink-aesthetic.md §5.2 第四幕「行动」
+ *   "新增 sticky 导航 CTA：滚动超过 hero 后，顶部'免费开始试用'按钮变高亮态 + 微动效"
+ *
+ * Behavior:
+ *   - On non-home pages (`/pricing`, `/trial`, legal): CTA is highlighted from
+ *     first paint — the visitor is already past the conversion-attention boundary.
+ *   - On home (`/`): CTA stays in default state until the user scrolls beyond
+ *     ~50vh (i.e. past the hero). After that point, a faint cinnabar ring and
+ *     elevation kicks in so the CTA reads as "ready when you are".
+ *   - Respects prefers-reduced-motion implicitly: the only animation is a CSS
+ *     transition (which the global rule in globals.css clamps to 0.01ms when
+ *     reduced motion is preferred). No keyframes, no infinite pulses.
  */
 export function SiteHeader() {
   const pathname = usePathname()
   const { user } = useSession()
+
+  const isHome = pathname === "/"
+  // Derived state pattern (avoids `react-hooks/set-state-in-effect` rule):
+  // `pastHero` is computed each render from `isHome` + scroll progress, so we
+  // never call setState synchronously inside an effect body. The effect only
+  // wires up the scroll listener and writes through the listener callback.
+  const [scrolledPast, setScrolledPast] = useState(false)
+  const pastHero = !isHome || scrolledPast
+
+  useEffect(() => {
+    // Non-home pages: pastHero is true via derived state; no listener required.
+    if (!isHome) return
+
+    // Threshold = min(400px, 50vh). Captures both short and tall hero sizes
+    // without coupling to the hero component's specific markup.
+    const compute = () => {
+      const threshold = Math.min(400, window.innerHeight * 0.5)
+      setScrolledPast(window.scrollY > threshold)
+    }
+    compute()
+    window.addEventListener("scroll", compute, { passive: true })
+    window.addEventListener("resize", compute)
+    return () => {
+      window.removeEventListener("scroll", compute)
+      window.removeEventListener("resize", compute)
+    }
+  }, [isHome])
 
   return (
     <header className="sticky top-0 z-40 w-full border-b border-border/70 bg-background/85 backdrop-blur-md">
@@ -71,7 +109,17 @@ export function SiteHeader() {
               </Link>
               <Link
                 href="/auth"
-                className={cn(buttonVariants({ variant: "default", size: "sm" }), "h-8 px-3")}
+                data-attention={pastHero ? "true" : undefined}
+                className={cn(
+                  buttonVariants({ variant: "default", size: "sm" }),
+                  "h-8 px-3 transition-all duration-300",
+                  // Highlighted state: cinnabar ring halo + subtle elevation. The
+                  // ring uses the design token directly so it tracks any future
+                  // primary-color changes automatically.
+                  pastHero
+                    ? "ring-2 ring-[color:var(--cinnabar,#C73E3A)]/35 ring-offset-2 ring-offset-background shadow-md scale-[1.02]"
+                    : "shadow-none",
+                )}
               >
                 免费开始试用
               </Link>

@@ -34,10 +34,10 @@ export function WorkflowShowcase() {
     <section className="bg-muted/40 py-20 sm:py-24">
       <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
         <div className="mx-auto max-w-2xl text-center">
-          <p className="text-xs font-semibold uppercase tracking-wider text-primary">
+          <p className="ink-heading text-xs uppercase tracking-widest text-[color:var(--cinnabar,#C73E3A)]">
             工作流
           </p>
-          <h2 className="mt-3 text-3xl font-bold tracking-tight text-foreground sm:text-4xl">
+          <h2 className="ink-display mt-3 text-3xl text-foreground sm:text-4xl">
             从导入到导出，掌控每一个细节
           </h2>
           <p className="mt-4 zh-body text-muted-foreground">
@@ -49,12 +49,12 @@ export function WorkflowShowcase() {
           {STEPS.map((step) => (
             <li
               key={step.index}
-              className="rounded-xl border border-border bg-card p-5"
+              className="rounded-xl border border-border bg-card p-5 transition-shadow hover:shadow-md"
             >
-              <span className="text-xs font-mono font-semibold text-primary">
+              <span className="ink-num text-base font-bold text-[color:var(--cinnabar,#C73E3A)]">
                 {step.index}
               </span>
-              <h3 className="mt-2 text-base font-semibold text-foreground">
+              <h3 className="ink-heading mt-2 text-base font-semibold text-foreground">
                 {step.title}
               </h3>
               <p className="mt-2 text-sm leading-relaxed text-muted-foreground">

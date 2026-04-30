@@ -33,10 +33,10 @@ export function Features() {
     <section className="marketing-reading-surface py-20 sm:py-24">
       <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
         <div className="mx-auto max-w-2xl text-center">
-          <p className="text-xs font-semibold uppercase tracking-wider text-primary">
+          <p className="ink-heading text-xs uppercase tracking-widest text-[color:var(--cinnabar,#C73E3A)]">
             为什么选择 AIVideoTrans
           </p>
-          <h2 className="mt-3 text-3xl font-bold tracking-tight text-foreground sm:text-4xl">
+          <h2 className="ink-display mt-3 text-3xl text-foreground sm:text-4xl">
             专为专业创作者打造
           </h2>
           <p className="mt-4 zh-body text-muted-foreground">
@@ -52,10 +52,16 @@ export function Features() {
                 key={f.title}
                 className="rounded-xl border border-border bg-card p-6 transition-shadow hover:shadow-md"
               >
-                <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                <div
+                  className="flex h-10 w-10 items-center justify-center rounded-lg"
+                  style={{
+                    backgroundColor: "var(--cinnabar-soft)",
+                    color: "var(--cinnabar)",
+                  }}
+                >
                   <Icon className="h-5 w-5" aria-hidden="true" />
                 </div>
-                <h3 className="mt-5 text-lg font-semibold text-foreground">{f.title}</h3>
+                <h3 className="ink-heading mt-5 text-lg font-semibold text-foreground">{f.title}</h3>
                 <p className="mt-2 zh-body text-muted-foreground text-[0.95rem]">
                   {f.body}
                 </p>

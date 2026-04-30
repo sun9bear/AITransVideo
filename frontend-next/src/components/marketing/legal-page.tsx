@@ -31,10 +31,10 @@ export function LegalPage({
     <>
       <section className="marketing-reading-surface pb-8 pt-16 sm:pb-10 sm:pt-20">
         <div className="mx-auto max-w-3xl px-4 sm:px-6 lg:px-8">
-          <p className="text-xs font-semibold uppercase tracking-wider text-primary">
+          <p className="ink-heading text-xs uppercase tracking-widest text-[color:var(--cinnabar,#C73E3A)]">
             {eyebrow}
           </p>
-          <h1 className="mt-3 text-4xl font-bold tracking-tight text-foreground sm:text-5xl">
+          <h1 className="ink-display mt-3 text-4xl tracking-tight text-foreground sm:text-5xl">
             {title}
           </h1>
           <p className="mt-2 text-sm text-muted-foreground">{titleEn}</p>
@@ -72,8 +72,8 @@ export function LegalSection({
 }) {
   return (
     <section className="rounded-xl border border-border bg-card p-6 sm:p-8">
-      <h2 className="flex items-baseline gap-3 text-xl font-semibold text-foreground sm:text-2xl">
-        <span className="text-base font-medium text-primary sm:text-lg">{number}</span>
+      <h2 className="ink-heading flex items-baseline gap-3 text-xl font-semibold text-foreground sm:text-2xl">
+        <span className="ink-num text-base font-medium text-[color:var(--cinnabar,#C73E3A)] sm:text-lg">{number}</span>
         <span>{title}</span>
       </h2>
       <div className="mt-4 space-y-4 zh-body text-muted-foreground">{children}</div>
@@ -106,7 +106,7 @@ export function LegalClauseList({ items }: { items: ReactNode[] }) {
 export function ContactBlock() {
   return (
     <div className="mt-12 rounded-xl border border-border/70 bg-muted/40 p-6 sm:p-8">
-      <p className="text-sm font-semibold text-foreground">运营主体信息</p>
+      <p className="ink-heading text-sm font-semibold text-foreground">运营主体信息</p>
       <dl className="mt-4 grid gap-y-2 text-sm text-muted-foreground sm:grid-cols-[auto_1fr] sm:gap-x-6">
         <dt>主体名称</dt>
         <dd className="text-foreground/90">{COMPANY_NAME}</dd>

@@ -12,10 +12,10 @@ export function PricingPreview() {
     <section className="marketing-reading-surface py-20 sm:py-24">
       <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
         <div className="mx-auto max-w-2xl text-center">
-          <p className="text-xs font-semibold uppercase tracking-wider text-primary">
+          <p className="ink-heading text-xs uppercase tracking-widest text-[color:var(--cinnabar,#C73E3A)]">
             简单透明的定价
           </p>
-          <h2 className="mt-3 text-3xl font-bold tracking-tight text-foreground sm:text-4xl">
+          <h2 className="ink-display mt-3 text-3xl text-foreground sm:text-4xl">
             只为你真正用到的分钟数买单
           </h2>
           <p className="mt-4 zh-body text-muted-foreground">
