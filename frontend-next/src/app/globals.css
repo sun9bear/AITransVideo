@@ -568,6 +568,29 @@
   }
 }
 
+/* Auto-scrolling product screenshot — used in <ProductProof /> to reveal full
+   UI height inside a fixed 3:2 viewport. Each screenshot has a different
+   aspect ratio, so the scroll distance is parameterised via the
+   `--scroll-y-end` custom property set inline on each instance (e.g. "-58%"
+   for a tall screenshot, "0%" for one already shorter than the viewport).
+   The keyframe holds at top → glides to bottom mid-cycle → glides back, with
+   short dwell at each extreme so users have a moment to read what's there.
+   Pause on hover (handled via the .group/scroll-y-shot pair below) lets users
+   actually study a frame they're interested in. Reduced-motion users get no
+   animation per the global @media rule above. */
+@keyframes scroll-y-shot {
+  0%, 8%   { transform: translateY(0); }
+  50%      { transform: translateY(var(--scroll-y-end, 0)); }
+  92%, 100%{ transform: translateY(0); }
+}
+.scroll-y-shot {
+  animation: scroll-y-shot 18s ease-in-out infinite;
+  will-change: transform;
+}
+.group:hover .scroll-y-shot {
+  animation-play-state: paused;
+}
+
 /* Chinese body text: slightly larger, more line-height for long-form reading */
 .zh-body {
   font-size: 1rem;

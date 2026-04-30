@@ -1,4 +1,3 @@
-import Image from "next/image"
 import {
   CheckCircle2,
   Download,
@@ -9,36 +8,75 @@ import {
   Sparkles,
   WandSparkles,
 } from "lucide-react"
+import type { CSSProperties } from "react"
 import { DIGITAL_DELIVERABLES } from "./company-info"
 import { InkDivider } from "./ink-divider"
 
 /**
- * Real product screenshots — pre-cropped to 3:2 (1280×853 max), webp + jpg
- * fallback. Sourced from the prod workspace + admin views, processed by the
- * O1 import script (D:/Claude/temp/jietu → public/marketing/screenshots).
+ * Real product screenshots — full-height captures (no crop) shown inside a
+ * fixed 3:2 viewport. Each frame auto-scrolls vertically so the visitor sees
+ * the entire UI over time (top → bottom → top, ~18s cycle, pauses on hover).
  *
- * Slot #1 (新建翻译任务) is still placeholder — we don't have a clean shot of
- * that form yet (user needs to create a fresh task and capture the input UI).
+ * Why full-height + scroll instead of static crop: the prod UIs are taller
+ * than 3:2 (the voice-selection page is nearly square; the translation review
+ * page is 0.63 W:H). Cropping to a 3:2 frame either hides the stepper or
+ * hides the actual editing controls — there's no good single frame. Auto-
+ * scrolling shows everything without making the section a wall of tall
+ * mockups. Reduced-motion users see the top crop (frozen at translateY 0).
+ *
+ * Source images live in /marketing/screenshots/ as webp (preferred) + jpg
+ * fallback. Pass each instance its natural width/height so the component can
+ * compute exactly how much to scroll: scroll-y-end =
+ *   max(-(1 - 2*W/(3*H)) * 100%, 0) — i.e. zero when image is already
+ *   wider than 3:2 (no scroll needed), otherwise the % of the image's own
+ *   height that overflows the viewport.
  */
-function RealScreenshot({
+function ScrollingScreenshot({
   src,
   alt,
+  naturalW,
+  naturalH,
 }: {
   src: string
   alt: string
+  naturalW: number
+  naturalH: number
 }) {
+  const VIEWPORT_RATIO = 3 / 2
+  const imgRatio = naturalW / naturalH
+  const scrollPct =
+    imgRatio >= VIEWPORT_RATIO ? 0 : (1 - (2 * naturalW) / (3 * naturalH)) * 100
+  // Animate only when there's >=4% to scroll. Below that the motion is too
+  // subtle to be worth the GPU cost / distraction.
+  const animate = scrollPct >= 4
+  // webp sibling for the picture <source>: same path with .webp suffix.
+  const webpSrc = src.replace(/\.(jpg|jpeg|png)$/i, ".webp")
+
+  const animStyle: CSSProperties | undefined = animate
+    ? ({ "--scroll-y-end": `-${scrollPct.toFixed(1)}%` } as CSSProperties)
+    : undefined
+
   return (
     <div
-      className="relative overflow-hidden rounded-lg border border-border bg-muted/40 shadow-md"
+      className="group relative overflow-hidden rounded-lg border border-border bg-muted/40 shadow-md"
       style={{ aspectRatio: "3 / 2" }}
     >
-      <Image
-        src={src}
-        alt={alt}
-        fill
-        sizes="(max-width: 1024px) 100vw, 50vw"
-        className="object-cover object-top"
-      />
+      <picture>
+        <source type="image/webp" srcSet={webpSrc} />
+        <img
+          src={src}
+          alt={alt}
+          loading="lazy"
+          decoding="async"
+          width={naturalW}
+          height={naturalH}
+          className={`absolute inset-x-0 top-0 h-auto w-full select-none ${
+            animate ? "scroll-y-shot" : ""
+          }`}
+          style={animStyle}
+          draggable={false}
+        />
+      </picture>
     </div>
   )
 }
@@ -51,8 +89,10 @@ function RealScreenshot({
  * The previous version rendered text-based imitations of product UI (Job IDs
  * like "Bed88548..." were placeholder hashes inside fake card layouts). That
  * undermined the section title "真实产品证明". This version (2026-05-01) wires
- * four real screenshots cropped to 3:2: 新建翻译任务页 / 项目结果列表 / 翻译复核 /
- * 三引擎音色选择. All sourced from the live workspace UI.
+ * four real screenshots — 新建翻译任务页 / 项目结果列表 / 翻译复核 / 三引擎音色选择 —
+ * captured at full UI height and auto-scrolled inside a fixed 3:2 frame so
+ * each one reveals every key control without forcing tall mockups in the
+ * layout. All sourced from the live workspace UI.
  *
  * Anchor `id="product-proof"` lets the Hero secondary CTA jump here.
  */
@@ -116,9 +156,11 @@ export function ProductProof() {
             </div>
 
             <div className="mt-5">
-              <RealScreenshot
-                src="/marketing/screenshots/new-translation.webp"
+              <ScrollingScreenshot
+                src="/marketing/screenshots/new-translation.jpg"
                 alt="新建翻译任务页：YouTube 链接 / 上传视频切换 + 快捷版（Express）/ 工作台版（Studio）双方案选择 + 创建任务按钮"
+                naturalW={1280}
+                naturalH={956}
               />
             </div>
 
@@ -158,9 +200,11 @@ export function ProductProof() {
             </div>
 
             <div className="mt-5">
-              <RealScreenshot
-                src="/marketing/screenshots/project-list.webp"
+              <ScrollingScreenshot
+                src="/marketing/screenshots/project-list.jpg"
                 alt="项目结果列表页：每个任务卡片显示标题、过期时间、配音视频/音频/素材包下载按钮和修改入口"
+                naturalW={1280}
+                naturalH={1181}
               />
             </div>
 
@@ -194,9 +238,11 @@ export function ProductProof() {
               </div>
             </div>
             <div className="mt-5">
-              <RealScreenshot
-                src="/marketing/screenshots/translation-review.webp"
+              <ScrollingScreenshot
+                src="/marketing/screenshots/translation-review.jpg"
                 alt="Studio 翻译审核界面：九步进度条 + 说话人确认 + 中英文逐句对照编辑"
+                naturalW={1280}
+                naturalH={2029}
               />
             </div>
           </article>
@@ -213,9 +259,11 @@ export function ProductProof() {
               </div>
             </div>
             <div className="mt-5">
-              <RealScreenshot
-                src="/marketing/screenshots/voice-selection.webp"
+              <ScrollingScreenshot
+                src="/marketing/screenshots/voice-selection.jpg"
                 alt="Studio 音色选择界面：MiniMax / CosyVoice / 豆包 三引擎切换 + 试听 / 核对原音 / 克隆音色"
+                naturalW={1280}
+                naturalH={1381}
               />
             </div>
           </article>
