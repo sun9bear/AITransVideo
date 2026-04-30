@@ -1,3 +1,4 @@
+import Image from "next/image"
 import {
   CheckCircle2,
   Download,
@@ -9,8 +10,38 @@ import {
   WandSparkles,
 } from "lucide-react"
 import { DIGITAL_DELIVERABLES } from "./company-info"
-import { ScreenshotPlaceholder } from "./screenshot-placeholder"
 import { InkDivider } from "./ink-divider"
+
+/**
+ * Real product screenshots — pre-cropped to 3:2 (1280×853 max), webp + jpg
+ * fallback. Sourced from the prod workspace + admin views, processed by the
+ * O1 import script (D:/Claude/temp/jietu → public/marketing/screenshots).
+ *
+ * Slot #1 (新建翻译任务) is still placeholder — we don't have a clean shot of
+ * that form yet (user needs to create a fresh task and capture the input UI).
+ */
+function RealScreenshot({
+  src,
+  alt,
+}: {
+  src: string
+  alt: string
+}) {
+  return (
+    <div
+      className="relative overflow-hidden rounded-lg border border-border bg-muted/40 shadow-md"
+      style={{ aspectRatio: "3 / 2" }}
+    >
+      <Image
+        src={src}
+        alt={alt}
+        fill
+        sizes="(max-width: 1024px) 100vw, 50vw"
+        className="object-cover object-top"
+      />
+    </div>
+  )
+}
 
 /**
  * Product proof — replaces text-mockup UI with real screenshot slots.
@@ -19,9 +50,9 @@ import { InkDivider } from "./ink-divider"
  *
  * The previous version rendered text-based imitations of product UI (Job IDs
  * like "Bed88548..." were placeholder hashes inside fake card layouts). That
- * undermined the section title "真实产品证明". This version uses
- * <ScreenshotPlaceholder> slots labeled with the screenshot we expect to land
- * there; the user replaces them with <Image> once real captures are available.
+ * undermined the section title "真实产品证明". This version (2026-05-01) wires
+ * four real screenshots cropped to 3:2: 新建翻译任务页 / 项目结果列表 / 翻译复核 /
+ * 三引擎音色选择. All sourced from the live workspace UI.
  *
  * Anchor `id="product-proof"` lets the Hero secondary CTA jump here.
  */
@@ -85,11 +116,9 @@ export function ProductProof() {
             </div>
 
             <div className="mt-5">
-              <ScreenshotPlaceholder
-                label="新建翻译任务页"
-                hint="3:2 · 含 YouTube/上传切换 + Express/Studio 选择 + 转录方案 + 创建按钮"
-                aspectRatio="3 / 2"
-                className="shadow-md"
+              <RealScreenshot
+                src="/marketing/screenshots/new-translation.webp"
+                alt="新建翻译任务页：YouTube 链接 / 上传视频切换 + 快捷版（Express）/ 工作台版（Studio）双方案选择 + 创建任务按钮"
               />
             </div>
 
@@ -129,11 +158,9 @@ export function ProductProof() {
             </div>
 
             <div className="mt-5">
-              <ScreenshotPlaceholder
-                label="项目结果列表页"
-                hint="3:2 · 含到期提示 + 任务卡片 + 配音视频/音频/素材包下载按钮"
-                aspectRatio="3 / 2"
-                className="shadow-md"
+              <RealScreenshot
+                src="/marketing/screenshots/project-list.webp"
+                alt="项目结果列表页：每个任务卡片显示标题、过期时间、配音视频/音频/素材包下载按钮和修改入口"
               />
             </div>
 
@@ -167,11 +194,9 @@ export function ProductProof() {
               </div>
             </div>
             <div className="mt-5">
-              <ScreenshotPlaceholder
-                label="Studio 时间轴复核界面"
-                hint="3:2 · 含波形/字幕轨/译文编辑/单段重生成入口"
-                aspectRatio="3 / 2"
-                className="shadow-md"
+              <RealScreenshot
+                src="/marketing/screenshots/translation-review.webp"
+                alt="Studio 翻译审核界面：九步进度条 + 说话人确认 + 中英文逐句对照编辑"
               />
             </div>
           </article>
@@ -188,11 +213,9 @@ export function ProductProof() {
               </div>
             </div>
             <div className="mt-5">
-              <ScreenshotPlaceholder
-                label="Studio 三引擎选音色 Tab"
-                hint="3:2 · MiniMax / CosyVoice / VolcEngine 三 Tab 对比 + 音色卡片"
-                aspectRatio="3 / 2"
-                className="shadow-md"
+              <RealScreenshot
+                src="/marketing/screenshots/voice-selection.webp"
+                alt="Studio 音色选择界面：MiniMax / CosyVoice / 豆包 三引擎切换 + 试听 / 核对原音 / 克隆音色"
               />
             </div>
           </article>
