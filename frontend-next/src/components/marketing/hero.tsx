@@ -72,7 +72,7 @@ export function Hero() {
           >
             {/* Pre-headline — brand label + chinese-led positioning */}
             <p className="ink-heading text-xs sm:text-sm uppercase tracking-[0.25em] text-[color:var(--cinnabar)]">
-              爱译视频 · AIVideoTrans
+              爱译视频 · AITrans.Video
             </p>
 
             {/* Display-class headline — slogan-as-headline */}

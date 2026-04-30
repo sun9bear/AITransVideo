@@ -21,7 +21,7 @@ export default function RegisterPage() {
           开始本地化
         </p>
         <h1 className="ink-display mt-2 text-3xl tracking-tight text-foreground sm:text-4xl">
-          注册 AIVideoTrans
+          注册 AITrans.Video
         </h1>
         <p className="mt-3 zh-body text-sm text-muted-foreground">
           使用手机号验证码注册，新用户需设置登录密码

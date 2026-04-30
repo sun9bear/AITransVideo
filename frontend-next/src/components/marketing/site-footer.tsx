@@ -95,7 +95,7 @@ export function SiteFooter() {
             duplicated in the footer cluttered the rice-paper aesthetic without
             adding compliance value. */}
         <div className="mt-10 border-t border-border/60 pt-6 text-xs text-muted-foreground">
-          © {new Date().getFullYear()} 爱译视频 AIVideoTrans · 长视频翻译配音工作台
+          © {new Date().getFullYear()} 爱译视频 AITrans.Video · 长视频翻译配音工作台
         </div>
       </div>
     </footer>

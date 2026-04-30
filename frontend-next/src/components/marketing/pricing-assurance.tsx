@@ -26,7 +26,7 @@ export function PricingAssurance() {
             购买的是账户内视频处理能力和数字化交付结果
           </h2>
           <p className="mt-4 zh-body text-muted-foreground">
-            AIVideoTrans 为在线数字化服务。用户完成支付后，可在账户内创建翻译任务、查看历史项目、下载交付结果并继续人工复核。
+            AITrans.Video 为在线数字化服务。用户完成支付后，可在账户内创建翻译任务、查看历史项目、下载交付结果并继续人工复核。
             不同套餐解锁的是处理时长、并发能力、工作台模式和下载权限。
           </p>
 

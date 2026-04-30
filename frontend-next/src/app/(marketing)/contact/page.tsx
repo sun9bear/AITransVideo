@@ -3,9 +3,9 @@ import { COMPANY_ADDRESS, COMPANY_NAME, PAYMENT_CHANNEL_NOTE, SUPPORT_EMAIL } fr
 import { LegalPage, LegalSection } from "@/components/marketing/legal-page"
 
 export const metadata: Metadata = {
-  title: "联系我们 · AIVideoTrans",
+  title: "联系我们 · AITrans.Video",
   description:
-    "联系 AIVideoTrans：客服支持、账单退款、隐私请求、版权投诉、商务合作等各类联系方式。",
+    "联系 AITrans.Video：客服支持、账单退款、隐私请求、版权投诉、商务合作等各类联系方式。",
 }
 
 const UPDATED_AT = "2026-04-22"
@@ -28,7 +28,7 @@ export default function ContactPage() {
       intro={
         <>
           <p>
-            感谢您关注 AIVideoTrans。如果您在使用过程中遇到技术问题、付款问题、退款申请、隐私请求、版权投诉或商务合作需求，
+            感谢您关注 AITrans.Video。如果您在使用过程中遇到技术问题、付款问题、退款申请、隐私请求、版权投诉或商务合作需求，
             欢迎通过以下方式与我们联系。
           </p>
           <p className="mt-4">

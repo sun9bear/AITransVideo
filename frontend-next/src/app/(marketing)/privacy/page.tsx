@@ -11,9 +11,9 @@ import {
 } from "@/components/marketing/company-info"
 
 export const metadata: Metadata = {
-  title: "隐私政策 · AIVideoTrans",
+  title: "隐私政策 · AITrans.Video",
   description:
-    "AIVideoTrans 隐私政策：说明我们如何收集、使用、存储、共享、保护您的个人信息，以及您依法享有的相关权利。",
+    "AITrans.Video 隐私政策：说明我们如何收集、使用、存储、共享、保护您的个人信息，以及您依法享有的相关权利。",
 }
 
 const UPDATED_AT = "2026-04-20"
@@ -37,7 +37,7 @@ export default function PrivacyPage() {
             <span className="text-foreground">{COMPANY_NAME}</span>
             （以下简称“我们”）非常重视您的个人信息与数据安全。本《隐私政策》旨在说明，当您访问{" "}
             <span className="text-foreground">aitrans.video</span>{" "}
-            或使用 AIVideoTrans 相关服务时，我们如何收集、使用、存储、共享、保护您的个人信息，以及您依法享有的相关权利。
+            或使用 AITrans.Video 相关服务时，我们如何收集、使用、存储、共享、保护您的个人信息，以及您依法享有的相关权利。
           </p>
           <p className="mt-4">在使用本服务前，请您认真阅读并充分理解本隐私政策。</p>
         </>

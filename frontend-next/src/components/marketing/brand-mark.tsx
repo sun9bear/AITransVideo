@@ -14,7 +14,7 @@ import { SealStamp } from "./seal-stamp"
 export function BrandMark({ className, size = 32 }: { className?: string; size?: number }) {
   return (
     <span className={cn("inline-flex shrink-0 items-center justify-center", className)}>
-      <SealStamp size={size} ariaLabel="AIVideoTrans" />
+      <SealStamp size={size} ariaLabel="AITrans.Video" />
     </span>
   )
 }
@@ -24,7 +24,7 @@ export function BrandLockup({ className }: { className?: string }) {
     <div className={cn("flex items-center gap-2.5", className)}>
       <BrandMark />
       <span className="ink-heading font-semibold text-foreground tracking-tight">
-        AIVideoTrans
+        AITrans.Video
       </span>
     </div>
   )

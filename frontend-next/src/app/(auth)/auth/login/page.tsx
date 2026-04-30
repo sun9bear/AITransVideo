@@ -25,7 +25,7 @@ export default function LoginPage() {
           欢迎回来
         </p>
         <h1 className="ink-display mt-2 text-3xl tracking-tight text-foreground sm:text-4xl">
-          登录 AIVideoTrans
+          登录 AITrans.Video
         </h1>
         <p className="mt-3 zh-body text-sm text-muted-foreground">
           {mode === "password" ? "使用账号和密码登录" : "使用手机号验证码登录"}

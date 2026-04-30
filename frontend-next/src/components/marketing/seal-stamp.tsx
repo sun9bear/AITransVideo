@@ -55,7 +55,7 @@ export function SealStamp({
   size = 64,
   rotation = -3,
   className,
-  ariaLabel = "AIVideoTrans 章印",
+  ariaLabel = "AITrans.Video 章印",
 }: SealStampProps) {
   return (
     <span

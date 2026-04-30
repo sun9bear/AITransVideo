@@ -6,8 +6,8 @@ import { LinkButton } from "@/components/marketing/link-button"
 import { getPlansSafeServer } from "@/lib/billing/get-plans"
 
 export const metadata: Metadata = {
-  title: "免费试用 · AIVideoTrans",
-  description: "免费试用 AIVideoTrans 的完整视频翻译配音工作流，无需绑卡，试用结束不会自动扣费。",
+  title: "免费试用 · AITrans.Video",
+  description: "免费试用 AITrans.Video 的完整视频翻译配音工作流，无需绑卡，试用结束不会自动扣费。",
 }
 
 /**

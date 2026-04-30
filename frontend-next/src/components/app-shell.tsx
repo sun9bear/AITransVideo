@@ -154,7 +154,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </Link>
         )}
         {collapsed && (
-          <Link href="/" className="mx-auto" aria-label="AIVideoTrans 首页">
+          <Link href="/" className="mx-auto" aria-label="AITrans.Video 首页">
             <BrandMark size={28} />
           </Link>
         )}
@@ -315,7 +315,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </Button>
             {/* Breadcrumb-style page indicator */}
             <span className="text-sm font-medium text-foreground font-heading">
-              {pathname.startsWith("/workspace/") ? "工作区" : navGroups.flatMap(g => g.items).find(i => pathname.startsWith(i.href))?.label || "AIVideoTrans"}
+              {pathname.startsWith("/workspace/") ? "工作区" : navGroups.flatMap(g => g.items).find(i => pathname.startsWith(i.href))?.label || "AITrans.Video"}
             </span>
           </div>
           <div className="flex items-center gap-3">

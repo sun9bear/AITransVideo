@@ -11,9 +11,9 @@ import {
 } from "@/components/marketing/company-info"
 
 export const metadata: Metadata = {
-  title: "服务条款 · AIVideoTrans",
+  title: "服务条款 · AITrans.Video",
   description:
-    "AIVideoTrans 服务条款：详细说明本服务的使用规则、用户权利与义务、知识产权、费用、免责及争议解决条款。",
+    "AITrans.Video 服务条款：详细说明本服务的使用规则、用户权利与义务、知识产权、费用、免责及争议解决条款。",
 }
 
 const UPDATED_AT = "2026-04-20"
@@ -34,7 +34,7 @@ export default function TermsPage() {
       intro={
         <>
           <p>
-            欢迎使用 AIVideoTrans（以下简称“本服务”）。本服务由{" "}
+            欢迎使用 AITrans.Video（以下简称“本服务”）。本服务由{" "}
             <span className="text-foreground">{COMPANY_NAME}</span>
             （以下简称“我们”）运营，并通过{" "}
             <span className="text-foreground">aitrans.video</span>

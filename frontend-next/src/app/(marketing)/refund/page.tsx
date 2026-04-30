@@ -10,9 +10,9 @@ import {
 } from "@/components/marketing/company-info"
 
 export const metadata: Metadata = {
-  title: "退款政策 · AIVideoTrans",
+  title: "退款政策 · AITrans.Video",
   description:
-    "AIVideoTrans 退款政策：详细说明订阅、点数购买、处理失败、异常扣费等情形下的退款规则与申请方式。",
+    "AITrans.Video 退款政策：详细说明订阅、点数购买、处理失败、异常扣费等情形下的退款规则与申请方式。",
 }
 
 const UPDATED_AT = "2026-04-20"
@@ -35,7 +35,7 @@ export default function RefundPage() {
           <p>
             本《退款政策》适用于您通过{" "}
             <span className="text-foreground">aitrans.video</span>{" "}
-            购买 AIVideoTrans 相关付费服务、订阅、点数、处理额度或其他数字化权益的情形。请您在购买前认真阅读本政策。
+            购买 AITrans.Video 相关付费服务、订阅、点数、处理额度或其他数字化权益的情形。请您在购买前认真阅读本政策。
           </p>
         </>
       }

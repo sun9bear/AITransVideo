@@ -5,7 +5,7 @@ import { TrialBanner } from "@/components/marketing/trial-banner"
 import { Faq } from "@/components/marketing/faq"
 
 export const metadata: Metadata = {
-  title: "定价 · 爱译视频 AIVideoTrans",
+  title: "定价 · 爱译视频 AITrans.Video",
   description: "长视频也用得起的 AI 翻译配音。Free / Plus / Pro 三档套餐，单条视频最长 180 分钟，无需绑卡，失败不计费，修改片段不必重跑全片。",
 }
 
