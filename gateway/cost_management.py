@@ -1,0 +1,967 @@
+"""Admin cost management surfaces for per-job LLM/TTS metering.
+
+This module is intentionally read-only. Pipeline writes usage facts; Gateway
+loads those facts, applies a versioned price catalog, and returns estimates
+that can be recalculated when provider prices change.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from auth import get_current_user
+from database import get_db
+from models import CreditsLedger, Job, User
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/admin/costs", tags=["admin-costs"])
+
+JOB_TTS_BUCKETS = {
+    "probe_tts",
+    "first_tts",
+    "post_tts_resynth",
+    "post_edit_resynth",
+}
+
+DEFAULT_PRICE_CATALOG: dict[str, Any] = {
+    "version": "2026-04-29-official-checked-default",
+    "currency": "RMB",
+    "usd_to_rmb": 7.2,
+    "notes": (
+        "Gateway-side estimate catalog. Override with "
+        "AVT_COST_PRICE_CATALOG_PATH when provider prices change."
+    ),
+    "llm": {
+        # Official DeepSeek pricing page, current discounted Pro rate.
+        "deepseek:deepseek-v4-flash": {
+            "input_per_million_usd": 0.14,
+            "output_per_million_usd": 0.28,
+            "cached_input_per_million_usd": 0.0028,
+            "source": "deepseek_official_pricing_2026-04-29",
+        },
+        "deepseek:deepseek-v4-pro": {
+            "input_per_million_usd": 0.435,
+            "output_per_million_usd": 0.87,
+            "cached_input_per_million_usd": 0.003625,
+            "source": "deepseek_official_discount_pricing_2026-04-29",
+        },
+        # Official Google Gemini API pricing page.
+        "gemini:gemini-3.1-pro-preview": {
+            "input_per_million_usd": 2.0,
+            "output_per_million_usd": 12.0,
+            "audio_input_per_million_usd": 2.0,
+            "audio_tokens_per_second": 25,
+            "source": "google_gemini_official_pricing_2026-04-29",
+        },
+        "gemini:gemini-2.5-flash-lite": {
+            "input_per_million_usd": 0.10,
+            "output_per_million_usd": 0.40,
+            "audio_input_per_million_usd": 0.30,
+            "audio_tokens_per_second": 25,
+            "source": "google_gemini_official_pricing_2026-04-29",
+        },
+        "gemini:gemini-3.1-flash-lite-preview": {
+            "input_per_million_usd": 0.25,
+            "output_per_million_usd": 1.50,
+            "audio_input_per_million_usd": 0.50,
+            "audio_tokens_per_second": 25,
+            "source": "google_gemini_official_pricing_2026-04-29",
+        },
+    },
+    "tts": {
+        # Provider billing chars are already normalized by pipeline.
+        "minimax:speech-2.8-turbo": {
+            "rmb_per_10k_billed_chars": 2.0,
+            "source": "cost_metering_plan",
+        },
+        "minimax:speech-02-turbo": {
+            "rmb_per_10k_billed_chars": 2.0,
+            "source": "cost_metering_plan_alias",
+        },
+        "minimax:speech-2.8-hd": {
+            "rmb_per_10k_billed_chars": 3.5,
+            "source": "cost_metering_plan",
+        },
+        "minimax:speech-02-hd": {
+            "rmb_per_10k_billed_chars": 3.5,
+            "source": "cost_metering_plan_alias",
+        },
+        "cosyvoice:cosyvoice-v3-flash": {
+            "rmb_per_10k_billed_chars": 1.0,
+            "source": "cost_metering_plan",
+        },
+        "volcengine:seed-tts-2.0": {
+            "rmb_per_10k_billed_chars": 3.0,
+            "source": "cost_metering_plan",
+        },
+        "volcengine:seed-tts-1.1": {
+            "rmb_per_10k_billed_chars": 3.0,
+            "source": "cost_metering_plan_alias",
+        },
+    },
+}
+
+
+@dataclass
+class LLMRow:
+    provider: str
+    model: str
+    model_id: str
+    task: str
+    phase: str
+    calls: int = 0
+    success_calls: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    input_audio_tokens: int = 0
+    output_audio_tokens: int = 0
+    cached_input_tokens: int = 0
+    audio_input_seconds: float = 0.0
+    audio_input_bytes: int = 0
+    cost_rmb: float | None = None
+    rate_status: str = "missing_rate"
+    rate_source: str = ""
+
+
+@dataclass
+class TTSRow:
+    provider: str
+    model: str
+    bucket: str
+    calls: int = 0
+    input_chars: int = 0
+    billed_chars: int = 0
+    duration_ms: int = 0
+    included_in_job_cost: bool = True
+    cost_rmb: float | None = None
+    rate_status: str = "missing_rate"
+    rate_source: str = ""
+
+
+@dataclass
+class JobCostBreakdown:
+    llm_rows: list[LLMRow] = field(default_factory=list)
+    tts_rows: list[TTSRow] = field(default_factory=list)
+    events_count: int = 0
+    has_usage_events: bool = False
+    warnings: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class RevenueEstimate:
+    credits: int | None
+    source: str
+    point_price_rmb: float
+    revenue_rmb: float | None
+
+
+def _require_admin(user: User | None) -> User:
+    if user is None:
+        raise HTTPException(status_code=401, detail="未登录")
+    if (getattr(user, "role", None) or "user") != "admin":
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+    return user
+
+
+def _coerce_int(value: object) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _coerce_float(value: object) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _norm(value: object) -> str:
+    return str(value or "").strip().lower()
+
+
+def _norm_provider(value: object) -> str:
+    raw = _norm(value)
+    if raw in {"minimax_tts", "minimax_voice_clone"}:
+        return "minimax"
+    if raw in {"cosyvoice_tts", "dashscope", "aliyun"}:
+        return "cosyvoice"
+    if raw in {"volcengine_tts", "doubao"}:
+        return "volcengine"
+    return raw or "unknown"
+
+
+def _norm_model(value: object) -> str:
+    raw = _norm(value)
+    aliases = {
+        "speech-02-turbo": "speech-2.8-turbo",
+        "speech-02-hd": "speech-2.8-hd",
+    }
+    return aliases.get(raw, raw or "unknown")
+
+
+def _price_key(provider: object, model: object) -> str:
+    return f"{_norm_provider(provider)}:{_norm_model(model)}"
+
+
+def _default_model_for_provider(provider: str, service_model: str = "") -> str:
+    if provider == "cosyvoice":
+        return "cosyvoice-v3-flash"
+    if provider == "volcengine":
+        return "seed-tts-2.0" if service_model == "studio" else "seed-tts-1.1"
+    if provider == "minimax":
+        return "speech-2.8-turbo"
+    if provider == "mimo":
+        return "mimo-tts"
+    return "unknown"
+
+
+def _model_belongs_to_provider(provider: str, model: str) -> bool:
+    if not model or model == "unknown":
+        return False
+    if provider == "minimax":
+        return model.startswith("speech-")
+    if provider == "cosyvoice":
+        return model.startswith("cosyvoice")
+    if provider == "volcengine":
+        return model.startswith("seed-tts")
+    if provider == "mimo":
+        return model.startswith("mimo")
+    return True
+
+
+def _resolve_tts_event_model(
+    provider: str,
+    event_model: object,
+    *,
+    default_tts_provider: str = "",
+    default_tts_model: str = "",
+    warnings: list[str] | None = None,
+) -> str:
+    model = _norm_model(event_model)
+    default_provider = _norm_provider(default_tts_provider)
+    default_model = _norm_model(default_tts_model)
+
+    if _model_belongs_to_provider(provider, model):
+        return model
+    if provider == default_provider and _model_belongs_to_provider(provider, default_model):
+        if model not in {"", "unknown"} and warnings is not None:
+            warnings.append(
+                f"corrected_tts_model_provider_mismatch:{provider}:{model}->{default_model}"
+            )
+        return default_model
+    fallback = _default_model_for_provider(provider)
+    if model not in {"", "unknown"} and warnings is not None:
+        warnings.append(f"corrected_tts_model_provider_mismatch:{provider}:{model}->{fallback}")
+    return fallback
+
+
+def _catalog_path() -> Path:
+    return Path(
+        os.environ.get(
+            "AVT_COST_PRICE_CATALOG_PATH",
+            "/opt/aivideotrans/config/cost_price_catalog.json",
+        )
+    )
+
+
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def load_price_catalog() -> dict[str, Any]:
+    catalog = json.loads(json.dumps(DEFAULT_PRICE_CATALOG))
+    path = _catalog_path()
+    if not path.is_file():
+        return catalog
+    try:
+        override = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("Failed to load cost price catalog %s: %s", path, exc)
+        return catalog
+    if not isinstance(override, dict):
+        return catalog
+    merged = _deep_merge(catalog, override)
+    merged.setdefault("version", catalog["version"])
+    merged.setdefault("currency", catalog["currency"])
+    return merged
+
+
+def _rate_to_rmb(rate: dict[str, Any], key: str, usd_to_rmb: float) -> float:
+    rmb_key = f"{key}_rmb"
+    usd_key = f"{key}_usd"
+    if rmb_key in rate:
+        return _coerce_float(rate.get(rmb_key))
+    if usd_key in rate:
+        return _coerce_float(rate.get(usd_key)) * usd_to_rmb
+    return 0.0
+
+
+def _llm_rate_for(catalog: dict[str, Any], provider: str, model_id: str, model: str) -> dict[str, Any] | None:
+    llm_rates = catalog.get("llm") if isinstance(catalog.get("llm"), dict) else {}
+    keys = [
+        _price_key(provider, model_id),
+        _price_key(provider, model),
+    ]
+    for key in keys:
+        rate = llm_rates.get(key)
+        if isinstance(rate, dict):
+            return rate
+    return None
+
+
+def _tts_rate_for(catalog: dict[str, Any], provider: str, model: str) -> dict[str, Any] | None:
+    tts_rates = catalog.get("tts") if isinstance(catalog.get("tts"), dict) else {}
+    keys = [_price_key(provider, model)]
+    raw_model = _norm(model)
+    if raw_model == "speech-02-turbo":
+        keys.append(f"{_norm_provider(provider)}:speech-2.8-turbo")
+    elif raw_model == "speech-02-hd":
+        keys.append(f"{_norm_provider(provider)}:speech-2.8-hd")
+    for key in keys:
+        rate = tts_rates.get(key)
+        if isinstance(rate, dict):
+            return rate
+    return None
+
+
+def apply_costs(breakdown: JobCostBreakdown, catalog: dict[str, Any]) -> None:
+    usd_to_rmb = _coerce_float(catalog.get("usd_to_rmb")) or 7.2
+    for row in breakdown.llm_rows:
+        rate = _llm_rate_for(catalog, row.provider, row.model_id, row.model)
+        if rate is None:
+            row.rate_status = "missing_rate"
+            row.cost_rmb = None
+            continue
+        input_price = _rate_to_rmb(rate, "input_per_million", usd_to_rmb)
+        output_price = _rate_to_rmb(rate, "output_per_million", usd_to_rmb)
+        audio_input_price = _rate_to_rmb(rate, "audio_input_per_million", usd_to_rmb) or input_price
+        audio_output_price = _rate_to_rmb(rate, "audio_output_per_million", usd_to_rmb) or output_price
+        audio_input_hour_price = _rate_to_rmb(rate, "audio_input_per_hour", usd_to_rmb)
+        cached_price = _rate_to_rmb(rate, "cached_input_per_million", usd_to_rmb)
+        audio_input_tokens = row.input_audio_tokens
+        if audio_input_tokens == 0 and row.audio_input_seconds > 0 and audio_input_price > 0:
+            audio_input_tokens = int(
+                round(row.audio_input_seconds * (_coerce_float(rate.get("audio_tokens_per_second")) or 25.0))
+            )
+        cost = 0.0
+        cost += row.input_tokens / 1_000_000 * input_price
+        cost += row.output_tokens / 1_000_000 * output_price
+        cost += audio_input_tokens / 1_000_000 * audio_input_price
+        cost += row.output_audio_tokens / 1_000_000 * audio_output_price
+        cost += row.cached_input_tokens / 1_000_000 * cached_price
+        if audio_input_tokens == 0:
+            cost += row.audio_input_seconds / 3600 * audio_input_hour_price
+        row.cost_rmb = round(cost, 6)
+        row.rate_status = "configured"
+        row.rate_source = str(rate.get("source") or "")
+
+    for row in breakdown.tts_rows:
+        if not row.included_in_job_cost:
+            row.cost_rmb = 0.0
+            row.rate_status = "excluded_interactive"
+            continue
+        rate = _tts_rate_for(catalog, row.provider, row.model)
+        if rate is None:
+            row.rate_status = "missing_rate"
+            row.cost_rmb = None
+            continue
+        price = _coerce_float(rate.get("rmb_per_10k_billed_chars"))
+        row.cost_rmb = round(row.billed_chars / 10_000 * price, 6)
+        row.rate_status = "configured"
+        row.rate_source = str(rate.get("source") or "")
+
+
+def _read_usage_events(project_dir: str | None) -> tuple[list[dict[str, Any]], str | None]:
+    if not project_dir:
+        return [], None
+    path = Path(project_dir) / "metering" / "usage_events.jsonl"
+    if not path.is_file():
+        return [], str(path)
+    events: list[dict[str, Any]] = []
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            event = json.loads(line)
+            if isinstance(event, dict):
+                events.append(event)
+    except Exception as exc:
+        logger.warning("Failed to read usage events for %s: %s", project_dir, exc)
+        return [], str(path)
+    return events, str(path)
+
+
+def _aggregate_usage_events(
+    events: list[dict[str, Any]],
+    *,
+    default_tts_provider: str = "",
+    default_tts_model: str = "",
+) -> JobCostBreakdown:
+    breakdown = JobCostBreakdown(
+        events_count=len(events),
+        has_usage_events=bool(events),
+    )
+    llm: dict[tuple[str, str, str, str, str], LLMRow] = {}
+    tts: dict[tuple[str, str, str], TTSRow] = {}
+
+    for event in events:
+        kind = _norm(event.get("kind"))
+        if kind == "llm":
+            provider = _norm_provider(event.get("provider"))
+            model = _norm_model(event.get("model"))
+            model_id = _norm_model(event.get("model_id") or model)
+            task = _norm(event.get("task")) or "unknown"
+            phase = _norm(event.get("phase"))
+            key = (provider, model, model_id, task, phase)
+            row = llm.setdefault(
+                key,
+                LLMRow(
+                    provider=provider,
+                    model=model,
+                    model_id=model_id,
+                    task=task,
+                    phase=phase,
+                ),
+            )
+            row.calls += 1
+            if bool(event.get("success", True)):
+                row.success_calls += 1
+            row.input_tokens += _coerce_int(
+                event.get("input_text_tokens", event.get("input_tokens"))
+            )
+            row.output_tokens += _coerce_int(
+                event.get("output_text_tokens", event.get("output_tokens"))
+            )
+            row.input_audio_tokens += _coerce_int(
+                event.get("input_audio_tokens", event.get("audio_input_tokens"))
+            )
+            row.output_audio_tokens += _coerce_int(
+                event.get("output_audio_tokens", event.get("audio_output_tokens"))
+            )
+            row.cached_input_tokens += _coerce_int(event.get("cached_input_tokens"))
+            row.audio_input_seconds += _coerce_float(event.get("audio_input_seconds"))
+            row.audio_input_bytes += _coerce_int(event.get("audio_input_bytes"))
+        elif kind == "tts":
+            provider = _norm_provider(event.get("provider") or default_tts_provider)
+            model = _resolve_tts_event_model(
+                provider,
+                event.get("model"),
+                default_tts_provider=default_tts_provider,
+                default_tts_model=default_tts_model,
+                warnings=breakdown.warnings,
+            )
+            bucket = _norm(event.get("bucket")) or "unknown"
+            key = (provider, model, bucket)
+            row = tts.setdefault(
+                key,
+                TTSRow(
+                    provider=provider,
+                    model=model,
+                    bucket=bucket,
+                    included_in_job_cost=bucket in JOB_TTS_BUCKETS,
+                ),
+            )
+            row.calls += 1
+            row.input_chars += _coerce_int(event.get("input_chars"))
+            row.billed_chars += _coerce_int(event.get("billed_chars"))
+            row.duration_ms += _coerce_int(event.get("duration_ms"))
+
+    breakdown.llm_rows = sorted(
+        llm.values(),
+        key=lambda row: (row.provider, row.model_id, row.task, row.phase),
+    )
+    breakdown.tts_rows = sorted(
+        tts.values(),
+        key=lambda row: (row.provider, row.model, row.bucket),
+    )
+    if breakdown.warnings:
+        breakdown.warnings = list(dict.fromkeys(breakdown.warnings))
+    return breakdown
+
+
+def _snapshot_breakdown(
+    snapshot: dict[str, Any],
+    *,
+    default_tts_provider: str = "",
+    default_tts_model: str = "",
+) -> JobCostBreakdown:
+    breakdown = JobCostBreakdown(
+        events_count=0,
+        has_usage_events=False,
+        warnings=["usage_events artifact missing; using metering_snapshot fallback"],
+    )
+    input_tokens = _coerce_int(snapshot.get("llm_input_tokens"))
+    output_tokens = _coerce_int(snapshot.get("llm_output_tokens"))
+    if input_tokens or output_tokens:
+        breakdown.llm_rows.append(
+            LLMRow(
+                provider="unknown",
+                model="unknown",
+                model_id="unknown",
+                task="snapshot_total",
+                phase="",
+                calls=_coerce_int(snapshot.get("llm_call_count")),
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                audio_input_seconds=_coerce_float(snapshot.get("llm_audio_input_seconds")),
+                rate_status="missing_rate",
+            )
+        )
+
+    bucket_fields = {
+        "probe_tts": "probe_tts_billed_chars",
+        "first_tts": "first_tts_billed_chars",
+        "post_tts_resynth": "post_tts_resynth_billed_chars",
+        "post_edit_resynth": "post_edit_resynth_tts_billed_chars",
+        "interactive_preview": "interactive_preview_tts_billed_chars",
+    }
+    for bucket, field_name in bucket_fields.items():
+        billed = _coerce_int(snapshot.get(field_name))
+        if billed <= 0:
+            continue
+        breakdown.tts_rows.append(
+            TTSRow(
+                provider=_norm_provider(default_tts_provider),
+                model=_norm_model(default_tts_model),
+                bucket=bucket,
+                calls=_coerce_int(snapshot.get(f"{bucket}_call_count")),
+                billed_chars=billed,
+                included_in_job_cost=bucket in JOB_TTS_BUCKETS,
+            )
+        )
+    return breakdown
+
+
+def build_job_breakdown(
+    *,
+    project_dir: str | None,
+    snapshot: dict[str, Any] | None,
+    default_tts_provider: str = "",
+    default_tts_model: str = "",
+    catalog: dict[str, Any] | None = None,
+) -> JobCostBreakdown:
+    events, events_path = _read_usage_events(project_dir)
+    if events:
+        breakdown = _aggregate_usage_events(
+            events,
+            default_tts_provider=default_tts_provider,
+            default_tts_model=default_tts_model,
+        )
+    else:
+        breakdown = _snapshot_breakdown(
+            snapshot or {},
+            default_tts_provider=default_tts_provider,
+            default_tts_model=default_tts_model,
+        )
+        if events_path:
+            breakdown.warnings.append(f"usage_events not found: {events_path}")
+    default_provider_key = _norm_provider(default_tts_provider)
+    default_model_key = _norm_model(default_tts_model)
+    if _model_belongs_to_provider(default_provider_key, default_model_key):
+        for row in breakdown.tts_rows:
+            if row.provider == default_provider_key and row.model != default_model_key:
+                breakdown.warnings.append(
+                    "job_tts_model_mismatch:"
+                    f"job={default_provider_key}:{default_model_key}, "
+                    f"usage={row.provider}:{row.model}; cost uses usage model"
+                )
+                break
+    if breakdown.warnings:
+        breakdown.warnings = list(dict.fromkeys(breakdown.warnings))
+    apply_costs(breakdown, catalog or load_price_catalog())
+    missing = [
+        f"llm:{row.provider}:{row.model_id}:{row.task}"
+        for row in breakdown.llm_rows
+        if row.cost_rmb is None
+    ]
+    missing.extend(
+        f"tts:{row.provider}:{row.model}:{row.bucket}"
+        for row in breakdown.tts_rows
+        if row.cost_rmb is None
+    )
+    if missing:
+        breakdown.warnings.append("missing_rate: " + ", ".join(missing[:8]))
+    return breakdown
+
+
+def _row_cost(row: LLMRow | TTSRow) -> float:
+    return float(row.cost_rmb or 0.0)
+
+
+def _job_minutes(job: Job) -> float | None:
+    actual = _coerce_float(getattr(job, "actual_minutes", None))
+    if actual > 0:
+        return actual
+    estimated = _coerce_float(getattr(job, "estimated_minutes", None))
+    if estimated > 0:
+        return estimated
+    seconds = _coerce_float(getattr(job, "estimated_duration_seconds", None))
+    if seconds > 0:
+        return seconds / 60
+    return None
+
+
+def _round_money(value: float | None) -> float | None:
+    if value is None:
+        return None
+    return round(float(value), 4)
+
+
+def _point_price_from_runtime() -> tuple[float, str]:
+    try:
+        from pricing_runtime import get_runtime_pricing
+
+        point_price = float(get_runtime_pricing().cost_model.point_price_rmb or 0.0)
+        return point_price, "pricing_runtime.cost_model.point_price_rmb"
+    except Exception:
+        return 0.03, "pricing_schema.default_cost_model.point_price_rmb"
+
+
+def _server_cost_from_runtime() -> tuple[float, str]:
+    try:
+        from pricing_runtime import get_runtime_pricing
+
+        server_cost = float(get_runtime_pricing().cost_model.server_cost_rmb_per_src_min or 0.0)
+        return server_cost, "pricing_runtime.cost_model.server_cost_rmb_per_src_min"
+    except Exception:
+        return 0.03, "pricing_schema.default_cost_model.server_cost_rmb_per_src_min"
+
+
+def _derive_credits_from_minutes(job: Job, minutes: float | None) -> int:
+    if not minutes:
+        return 0
+    snapshot = job.metering_snapshot if isinstance(job.metering_snapshot, dict) else {}
+    try:
+        from credits_service import estimate_credits
+
+        return estimate_credits(
+            minutes,
+            service_mode=job.service_mode or snapshot.get("service_mode") or "express",
+            quality_tier=snapshot.get("quality_tier") or "standard",
+        )
+    except Exception:
+        return 0
+
+
+def _estimate_job_revenue(
+    job: Job,
+    *,
+    minutes: float | None,
+    point_price_rmb: float,
+    ledger_capture_credits: int | None = None,
+) -> RevenueEstimate:
+    snapshot = job.metering_snapshot if isinstance(job.metering_snapshot, dict) else {}
+    credits = _coerce_int(ledger_capture_credits)
+    source = "credits_ledger_capture"
+    if credits <= 0:
+        credits = _coerce_int(snapshot.get("credits_actual"))
+        source = "credits_actual"
+    if credits <= 0:
+        if _norm(getattr(job, "status", "")) == "succeeded":
+            credits = _derive_credits_from_minutes(job, minutes)
+            source = "derived_from_actual_minutes"
+    if credits <= 0:
+        credits = _coerce_int(snapshot.get("credits_estimated"))
+        source = "credits_estimated"
+    if credits <= 0:
+        credits = _derive_credits_from_minutes(job, minutes)
+        source = "derived_from_minutes"
+    if credits <= 0:
+        return RevenueEstimate(
+            credits=None,
+            source="missing",
+            point_price_rmb=point_price_rmb,
+            revenue_rmb=None,
+        )
+    return RevenueEstimate(
+        credits=credits,
+        source=source,
+        point_price_rmb=point_price_rmb,
+        revenue_rmb=credits * point_price_rmb,
+    )
+
+
+def _llm_row_payload(row: LLMRow) -> dict[str, Any]:
+    return {
+        "provider": row.provider,
+        "model": row.model,
+        "model_id": row.model_id,
+        "task": row.task,
+        "phase": row.phase,
+        "calls": row.calls,
+        "success_calls": row.success_calls,
+        "input_tokens": row.input_tokens,
+        "output_tokens": row.output_tokens,
+        "input_audio_tokens": row.input_audio_tokens,
+        "output_audio_tokens": row.output_audio_tokens,
+        "cached_input_tokens": row.cached_input_tokens,
+        "audio_input_seconds": round(row.audio_input_seconds, 3),
+        "audio_input_bytes": row.audio_input_bytes,
+        "cost_rmb": _round_money(row.cost_rmb),
+        "rate_status": row.rate_status,
+        "rate_source": row.rate_source,
+    }
+
+
+def _tts_row_payload(row: TTSRow) -> dict[str, Any]:
+    return {
+        "provider": row.provider,
+        "model": row.model,
+        "bucket": row.bucket,
+        "calls": row.calls,
+        "input_chars": row.input_chars,
+        "billed_chars": row.billed_chars,
+        "duration_ms": row.duration_ms,
+        "included_in_job_cost": row.included_in_job_cost,
+        "cost_rmb": _round_money(row.cost_rmb),
+        "rate_status": row.rate_status,
+        "rate_source": row.rate_source,
+    }
+
+
+def _job_payload(
+    job: Job,
+    owner: User | None,
+    breakdown: JobCostBreakdown,
+    *,
+    point_price_rmb: float | None = None,
+    point_price_source: str | None = None,
+    server_cost_per_min_rmb: float | None = None,
+    server_cost_source: str | None = None,
+    ledger_capture_credits: int | None = None,
+) -> dict[str, Any]:
+    llm_cost = sum(_row_cost(row) for row in breakdown.llm_rows)
+    tts_cost = sum(_row_cost(row) for row in breakdown.tts_rows)
+    total_cost = llm_cost + tts_cost
+    minutes = _job_minutes(job)
+    if point_price_rmb is None:
+        point_price_rmb, point_price_source = _point_price_from_runtime()
+    else:
+        point_price_source = point_price_source or "explicit"
+    if server_cost_per_min_rmb is None:
+        server_cost_per_min_rmb, server_cost_source = _server_cost_from_runtime()
+    else:
+        server_cost_source = server_cost_source or "explicit"
+    server_overhead_cost = (minutes or 0.0) * server_cost_per_min_rmb
+    margin_cost = total_cost + server_overhead_cost
+    revenue = _estimate_job_revenue(
+        job,
+        minutes=minutes,
+        point_price_rmb=point_price_rmb,
+        ledger_capture_credits=ledger_capture_credits,
+    )
+    gross_profit = (
+        revenue.revenue_rmb - margin_cost
+        if revenue.revenue_rmb is not None
+        else None
+    )
+    gross_margin_pct = (
+        gross_profit / revenue.revenue_rmb * 100
+        if revenue.revenue_rmb and revenue.revenue_rmb > 0 and gross_profit is not None
+        else None
+    )
+    missing_rate_rows = sum(
+        1 for row in [*breakdown.llm_rows, *breakdown.tts_rows] if row.cost_rmb is None
+    )
+    return {
+        "job_id": job.job_id,
+        "title": getattr(job, "display_name", None) or getattr(job, "title", None) or getattr(job, "source_ref", None) or job.job_id,
+        "owner_email": getattr(owner, "email", None) if owner else None,
+        "owner_display_name": getattr(owner, "display_name", None) if owner else None,
+        "status": job.status,
+        "current_stage": job.current_stage,
+        "service_mode": job.service_mode,
+        "tts_provider": job.tts_provider,
+        "tts_model": job.tts_model,
+        "plan_code_snapshot": job.plan_code_snapshot,
+        "quality_tier": (job.metering_snapshot or {}).get("quality_tier") if job.metering_snapshot else None,
+        "created_at": job.created_at.isoformat() if job.created_at else None,
+        "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+        "minutes": round(minutes, 3) if minutes else None,
+        "usage_events_count": breakdown.events_count,
+        "has_usage_events": breakdown.has_usage_events,
+        "llm_cost_rmb": _round_money(llm_cost),
+        "tts_cost_rmb": _round_money(tts_cost),
+        "total_cost_rmb": _round_money(total_cost),
+        "cost_per_minute_rmb": _round_money(total_cost / minutes) if minutes else None,
+        "credits_charged": revenue.credits,
+        "credits_source": revenue.source,
+        "point_price_rmb": _round_money(revenue.point_price_rmb),
+        "point_price_source": point_price_source,
+        "revenue_estimate_rmb": _round_money(revenue.revenue_rmb),
+        "server_overhead_cost_rmb": _round_money(server_overhead_cost),
+        "server_cost_per_min_rmb": _round_money(server_cost_per_min_rmb),
+        "server_cost_source": server_cost_source,
+        "margin_cost_rmb": _round_money(margin_cost),
+        "gross_profit_rmb": _round_money(gross_profit),
+        "gross_margin_pct": round(gross_margin_pct, 2) if gross_margin_pct is not None else None,
+        "missing_rate_rows": missing_rate_rows,
+        "warnings": breakdown.warnings,
+        "llm": [_llm_row_payload(row) for row in breakdown.llm_rows],
+        "tts": [_tts_row_payload(row) for row in breakdown.tts_rows],
+    }
+
+
+def _parse_window(window: str) -> tuple[int, datetime]:
+    try:
+        days = max(1, min(180, int(window)))
+    except (TypeError, ValueError):
+        days = 7
+    return days, datetime.now(timezone.utc) - timedelta(days=days)
+
+
+@router.get("/rates")
+async def cost_rates(
+    user: User | None = Depends(get_current_user),
+) -> dict[str, Any]:
+    _require_admin(user)
+    catalog = load_price_catalog()
+    return {
+        "version": catalog.get("version"),
+        "currency": catalog.get("currency", "RMB"),
+        "usd_to_rmb": catalog.get("usd_to_rmb"),
+        "catalog_path": str(_catalog_path()),
+        "llm": catalog.get("llm", {}),
+        "tts": catalog.get("tts", {}),
+        "notes": catalog.get("notes", ""),
+    }
+
+
+@router.get("/jobs")
+async def cost_jobs(
+    window: str = Query("7", description="Lookback window in days, 1-180"),
+    limit: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(get_current_user),
+) -> dict[str, Any]:
+    _require_admin(user)
+    days, cutoff = _parse_window(window)
+    catalog = load_price_catalog()
+
+    result = await db.execute(
+        select(Job, User)
+        .outerjoin(User, Job.user_id == User.id)
+        .where(Job.created_at >= cutoff)
+        .order_by(Job.created_at.desc())
+        .limit(limit)
+    )
+    rows = result.all()
+    job_ids = [job.job_id for job, _owner in rows if job.job_id]
+    ledger_capture_by_job: dict[str, int] = {}
+    if job_ids:
+        ledger_result = await db.execute(
+            select(
+                CreditsLedger.related_job_id,
+                func.coalesce(func.sum(-CreditsLedger.credits_delta), 0),
+            )
+            .where(
+                CreditsLedger.related_job_id.in_(job_ids),
+                CreditsLedger.direction == "capture",
+            )
+            .group_by(CreditsLedger.related_job_id)
+        )
+        ledger_capture_by_job = {
+            str(job_id): int(credits or 0)
+            for job_id, credits in ledger_result.all()
+            if job_id
+        }
+    jobs: list[dict[str, Any]] = []
+    total_llm = 0.0
+    total_tts = 0.0
+    total_revenue = 0.0
+    total_server_overhead = 0.0
+    total_minutes = 0.0
+    jobs_with_usage_events = 0
+    jobs_with_missing_rates = 0
+    total_missing_rate_rows = 0
+    point_price_rmb, point_price_source = _point_price_from_runtime()
+    server_cost_per_min_rmb, server_cost_source = _server_cost_from_runtime()
+
+    for job, owner in rows:
+        snapshot = job.metering_snapshot if isinstance(job.metering_snapshot, dict) else {}
+        default_tts_provider = job.tts_provider or snapshot.get("tts_provider") or ""
+        default_tts_model = job.tts_model or snapshot.get("tts_model") or ""
+        breakdown = build_job_breakdown(
+            project_dir=job.project_dir,
+            snapshot=snapshot,
+            default_tts_provider=default_tts_provider,
+            default_tts_model=default_tts_model,
+            catalog=catalog,
+        )
+        payload = _job_payload(
+            job,
+            owner,
+            breakdown,
+            point_price_rmb=point_price_rmb,
+            point_price_source=point_price_source,
+            server_cost_per_min_rmb=server_cost_per_min_rmb,
+            server_cost_source=server_cost_source,
+            ledger_capture_credits=ledger_capture_by_job.get(job.job_id),
+        )
+        jobs.append(payload)
+        total_llm += float(payload["llm_cost_rmb"] or 0.0)
+        total_tts += float(payload["tts_cost_rmb"] or 0.0)
+        total_revenue += float(payload["revenue_estimate_rmb"] or 0.0)
+        total_server_overhead += float(payload["server_overhead_cost_rmb"] or 0.0)
+        total_minutes += float(payload["minutes"] or 0.0)
+        if payload["has_usage_events"]:
+            jobs_with_usage_events += 1
+        if payload["missing_rate_rows"]:
+            jobs_with_missing_rates += 1
+            total_missing_rate_rows += int(payload["missing_rate_rows"])
+
+    total_cost = total_llm + total_tts
+    margin_cost = total_cost + total_server_overhead
+    return {
+        "window_days": days,
+        "limit": limit,
+        "currency": catalog.get("currency", "RMB"),
+        "pricing_version": catalog.get("version"),
+        "catalog_path": str(_catalog_path()),
+        "totals": {
+            "jobs": len(jobs),
+            "jobs_with_usage_events": jobs_with_usage_events,
+            "jobs_with_missing_rates": jobs_with_missing_rates,
+            "missing_rate_rows": total_missing_rate_rows,
+            "minutes": round(total_minutes, 3),
+            "llm_cost_rmb": _round_money(total_llm),
+            "tts_cost_rmb": _round_money(total_tts),
+            "total_cost_rmb": _round_money(total_cost),
+            "revenue_estimate_rmb": _round_money(total_revenue),
+            "server_overhead_cost_rmb": _round_money(total_server_overhead),
+            "server_cost_per_min_rmb": _round_money(server_cost_per_min_rmb),
+            "server_cost_source": server_cost_source,
+            "margin_cost_rmb": _round_money(margin_cost),
+            "gross_profit_rmb": _round_money(total_revenue - margin_cost)
+            if total_revenue > 0
+            else None,
+            "gross_margin_pct": round((total_revenue - margin_cost) / total_revenue * 100, 2)
+            if total_revenue > 0
+            else None,
+            "point_price_rmb": _round_money(point_price_rmb),
+            "point_price_source": point_price_source,
+            "cost_per_minute_rmb": _round_money(total_cost / total_minutes)
+            if total_minutes > 0
+            else None,
+        },
+        "jobs": jobs,
+    }

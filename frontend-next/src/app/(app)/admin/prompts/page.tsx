@@ -10,6 +10,7 @@ interface PromptData {
   translate: string
   rewrite: string
   probe_translate: string
+  content_compliance: string
 }
 
 interface ModelOption {
@@ -37,9 +38,9 @@ interface HistoryVersion {
   models?: ModelsData
 }
 
-const PROMPT_KEYS = ['pass1', 'pass2', 'pass3', 'translate', 'rewrite', 'probe_translate'] as const
+const PROMPT_KEYS = ['pass1', 'pass2', 'pass3', 'translate', 'rewrite', 'probe_translate', 'content_compliance'] as const
 type PromptKey = typeof PROMPT_KEYS[number]
-const EXPRESS_PROMPT_KEYS = ['pass1', 'pass2', 'pass3', 'translate', 'rewrite', 'probe_translate'] as const
+const EXPRESS_PROMPT_KEYS = ['pass1', 'pass2', 'pass3', 'translate', 'rewrite', 'probe_translate', 'content_compliance'] as const
 
 const PROMPT_LABELS: Record<PromptKey, { title: string; desc: string; vars: string }> = {
   pass1: {
@@ -72,6 +73,11 @@ const PROMPT_LABELS: Record<PromptKey, { title: string; desc: string; vars: stri
     desc: '探针段落预翻译，用于 TTS 校准和音色试听（无字数约束，仅按时长引导）',
     vars: '__VIDEO_TITLE__ __YOUTUBE_URL__ __GROUPS_JSON__ __GLOSSARY_SECTION__ __SPEAKER_INSTRUCTION__',
   },
+  content_compliance: {
+    title: '内容合规审核提示词',
+    desc: '本地规则未明确命中后，调用大模型进行第二层语义审核',
+    vars: '__VIDEO_TITLE__ __VIDEO_DESCRIPTION__ __SOURCE_TYPE__ __SOURCE_REF__ __LOCAL_FINDINGS_JSON__ __TRANSCRIPT_BODY__',
+  },
 }
 
 const PROVIDER_LABELS: Record<string, string> = {
@@ -80,7 +86,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   mimo: 'MiMo',
 }
 
-const EMPTY_PROMPTS: PromptData = { pass1: '', pass2: '', pass3: '', translate: '', rewrite: '', probe_translate: '' }
+const EMPTY_PROMPTS: PromptData = { pass1: '', pass2: '', pass3: '', translate: '', rewrite: '', probe_translate: '', content_compliance: '' }
 
 const API_BASE = '/api/admin/review-prompts'
 
@@ -198,7 +204,7 @@ export default function PromptsPage() {
       if (!resp.ok) throw new Error(await resp.text())
       await refreshAll()
       toast.success(`已还原到「${version.label}」`)
-    } catch (e) {
+    } catch {
       toast.error('还原失败')
     }
   }
@@ -216,7 +222,7 @@ export default function PromptsPage() {
       const data = await resp.json()
       setHistory(data.history || [])
       toast.success('已删除')
-    } catch (e) {
+    } catch {
       toast.error('删除失败')
     }
   }
