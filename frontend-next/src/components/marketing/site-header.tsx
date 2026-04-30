@@ -100,9 +100,15 @@ export function SiteHeader() {
             <>
               <Link
                 href="/auth/login"
+                // Cinnabar-tinted outline reads as a button, distinguishable
+                // from the nav links above it but quieter than the primary
+                // CTA on the right. Was variant="ghost" before — too text-only,
+                // visually merged with the nav strip.
                 className={cn(
-                  buttonVariants({ variant: "ghost", size: "sm" }),
-                  "hidden h-8 px-3 sm:inline-flex",
+                  buttonVariants({ variant: "outline", size: "sm" }),
+                  "hidden h-8 px-3 font-medium sm:inline-flex",
+                  "border-[color:var(--cinnabar,#C73E3A)]/35 text-foreground/85",
+                  "hover:border-[color:var(--cinnabar,#C73E3A)]/70 hover:bg-[color:var(--cinnabar-soft,rgba(199,62,58,0.08))] hover:text-[color:var(--cinnabar,#C73E3A)]",
                 )}
               >
                 登录
