@@ -57,10 +57,10 @@ export default function ProjectDetailPage() {
               进入工作区
             </Link>
           ) : null}
-          <Link className="rounded-lg border border-border bg-muted/30 px-4 py-2 text-sm text-muted-foreground transition hover:bg-white/10" href="/projects">
+          <Link className="rounded-lg border border-border bg-muted/30 px-4 py-2 text-sm text-muted-foreground transition hover:bg-muted/60" href="/projects">
             返回项目列表
           </Link>
-          <Link className="rounded-lg border border-border bg-muted/30 px-4 py-2 text-sm text-muted-foreground transition hover:bg-white/10" href="/projects?new=1">
+          <Link className="rounded-lg border border-border bg-muted/30 px-4 py-2 text-sm text-muted-foreground transition hover:bg-muted/60" href="/projects?new=1">
             新建翻译
           </Link>
         </div>

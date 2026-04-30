@@ -878,7 +878,7 @@ export default function VideoEditPage() {
         >
           音色修改
           {Object.keys(voiceMap).length > 0 && (
-            <span className="ml-2 text-xs px-1.5 py-0.5 rounded-full bg-violet-500/15 text-violet-400">
+            <span className="ml-2 text-xs px-1.5 py-0.5 rounded-full bg-[color:var(--ochre)]/15 text-[color:var(--ochre)]">
               {new Set(
                 Object.keys(voiceMap)
                   .map((sid) => resource.segments.find((s) => s.segment_id === sid)?.speaker_id)
@@ -918,7 +918,7 @@ export default function VideoEditPage() {
                 // 改成 button 复用 draft-duration-mismatch 的交互模式。
                 <button
                   type="button"
-                  className="ml-2 text-amber-500 underline decoration-dotted hover:text-amber-400 min-h-[32px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-1 rounded"
+                  className="ml-2 text-[color:var(--ochre)] underline decoration-dotted hover:opacity-80 min-h-[32px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ochre)] focus-visible:ring-offset-1 rounded"
                   onClick={() => scrollToSegment(forceDspSegments[0].segment_id)}
                   title="对齐器重写 2 次仍超/过短，建议精简译文。点击定位第一段。"
                 >
@@ -928,7 +928,7 @@ export default function VideoEditPage() {
               {draftDurationMismatchSegments.length > 0 && (
                 <button
                   type="button"
-                  className="ml-2 text-amber-500 underline decoration-dotted hover:text-amber-400 min-h-[32px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-1 rounded"
+                  className="ml-2 text-[color:var(--ochre)] underline decoration-dotted hover:opacity-80 min-h-[32px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ochre)] focus-visible:ring-offset-1 rounded"
                   onClick={() =>
                     scrollToSegment(draftDurationMismatchSegments[0].seg.segment_id)
                   }
@@ -953,7 +953,7 @@ export default function VideoEditPage() {
                *   停止，已完成段保留，未处理段保持 dirty 状态下次可继续。*/}
               {isBatchRegenerating && batchTaskId && (
                 <button
-                  className="rounded-md border border-amber-500/60 text-amber-500 px-3 py-1.5 text-xs inline-flex items-center gap-1 disabled:opacity-50 min-h-[40px] hover:bg-amber-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:ring-offset-1"
+                  className="rounded-md px-3 py-1.5 text-xs inline-flex items-center gap-1 disabled:opacity-50 min-h-[40px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 border border-[color:var(--ochre)]/60 text-[color:var(--ochre)] hover:bg-[color:var(--ochre)]/10 focus-visible:ring-[color:var(--ochre)]"
                   onClick={handleCancelBatch}
                   disabled={isCancellingBatch}
                   aria-busy={isCancellingBatch}
@@ -1228,7 +1228,7 @@ function SegmentCard({
     hasDraftMismatch && draftMismatchSeverity === "severe"
       ? "border-l-4 border-l-red-500"
       : hasDraftMismatch
-      ? "border-l-4 border-l-amber-500"
+      ? "border-l-4 border-l-[color:var(--ochre)]"
       : isAnomalous
       ? "border-l-4 border-l-red-500"
       : ""
@@ -1312,7 +1312,7 @@ function SegmentCard({
             className={
               draftMismatchSeverity === "severe"
                 ? "text-red-500"
-                : "text-amber-500"
+                : "text-[color:var(--ochre)]"
             }
             title={
               `新 TTS ${(draft / 1000).toFixed(1)}s / 目标 ${(target / 1000).toFixed(1)}s。` +
@@ -1389,11 +1389,11 @@ function SegmentCard({
       {/* Split panel — inline so users see the halves live. Mirrors the
        *  main flow TranslationReviewPanel's amber-outlined panel. */}
       {splitOpen && (
-        <div className="mt-2 rounded-md border border-amber-500/30 bg-amber-500/5 p-3 space-y-3">
+        <div className="mt-2 rounded-md border border-[color:var(--ochre)]/30 bg-[color:var(--ochre)]/8 p-3 space-y-3">
           <div>
             <div className="flex items-center justify-between text-xs mb-1">
               <span className="text-muted-foreground">原文拆分位置</span>
-              <span className="font-mono text-amber-500">
+              <span className="font-mono text-[color:var(--ochre)]">
                 {splitSourcePos} / {(segment.source_text ?? "").length}
               </span>
             </div>
@@ -1403,7 +1403,7 @@ function SegmentCard({
               max={Math.max(1, (segment.source_text ?? "").length - 1)}
               value={splitSourcePos}
               onChange={(e) => setSplitSourcePos(parseInt(e.currentTarget.value, 10))}
-              className="w-full accent-amber-500"
+              className="w-full accent-[color:var(--ochre)]"
               aria-label="原文拆分位置"
             />
             <div className="mt-1 text-xs grid grid-cols-2 gap-2">
@@ -1418,7 +1418,7 @@ function SegmentCard({
           <div>
             <div className="flex items-center justify-between text-xs mb-1">
               <span className="text-muted-foreground">译文拆分位置</span>
-              <span className="font-mono text-amber-500">
+              <span className="font-mono text-[color:var(--ochre)]">
                 {splitCnPos} / {(segment.cn_text ?? "").length}
               </span>
             </div>
@@ -1428,7 +1428,7 @@ function SegmentCard({
               max={Math.max(1, (segment.cn_text ?? "").length - 1)}
               value={splitCnPos}
               onChange={(e) => setSplitCnPos(parseInt(e.currentTarget.value, 10))}
-              className="w-full accent-amber-500"
+              className="w-full accent-[color:var(--ochre)]"
               aria-label="译文拆分位置"
             />
             <div className="mt-1 text-xs grid grid-cols-2 gap-2">
@@ -1586,12 +1586,12 @@ function StatusChip({ status }: { status: SegmentStatus }) {
     voice_dirty: "音色已改",
   }
   const style: Record<SegmentStatus, string> = {
-    accepted: "text-emerald-600",
-    text_dirty: "text-amber-500",
-    tts_loading: "text-cyan-500",
-    tts_dirty: "text-violet-500",
-    tts_failed: "text-red-500",
-    voice_dirty: "text-amber-500",
+    accepted: "text-[color:var(--bamboo)]",
+    text_dirty: "text-[color:var(--ochre)]",
+    tts_loading: "text-[color:var(--cinnabar)]",
+    tts_dirty: "text-[color:var(--ochre)]",
+    tts_failed: "text-[color:var(--cinnabar)]",
+    voice_dirty: "text-[color:var(--ochre)]",
   }
   return <span className={`font-medium ${style[status] ?? ""}`}>{label[status] ?? status}</span>
 }

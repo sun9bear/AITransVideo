@@ -583,7 +583,7 @@ export function VoiceModifyTab({
   if (isLoading) {
     return (
       <section className="surface-card p-8 text-center">
-        <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-3 border-teal-500 border-t-transparent" />
+        <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-3 border-[color:var(--cinnabar)] border-t-transparent" />
         <h3 className="text-lg font-semibold text-foreground">加载音色候选...</h3>
       </section>
     )
@@ -692,7 +692,7 @@ export function VoiceModifyTab({
                 : `已覆盖 ${overriddenCount}/${ownSegments.length} 段`
               : "原音色"
             const statusColor = hasOverride
-              ? "text-violet-600 dark:text-violet-400"
+              ? "text-[color:var(--ochre)]"
               : "text-slate-500"
 
             return (
@@ -742,7 +742,7 @@ export function VoiceModifyTab({
                               type="button"
                               className={`h-7 rounded-md px-3 text-xs font-medium transition ${
                                 isActive
-                                  ? "bg-teal-600 text-white"
+                                  ? "bg-primary text-primary-foreground"
                                   : "bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700"
                               }`}
                               onClick={() => handleProviderChange(sp.speakerId, prov)}
@@ -887,7 +887,7 @@ export function VoiceModifyTab({
                       {showClone && (
                         <button
                           type="button"
-                          className="h-8 rounded border border-teal-500/40 bg-teal-500/10 px-3 text-xs font-medium text-teal-600 dark:text-teal-400 transition hover:bg-teal-500/20 disabled:opacity-50"
+                          className="h-8 rounded px-3 text-xs font-medium transition disabled:opacity-50 border border-[color:var(--cinnabar)]/40 bg-[color:var(--cinnabar)]/10 text-[color:var(--cinnabar)] hover:bg-[color:var(--cinnabar)]/20"
                           disabled={applying}
                           onClick={() => setCloneModalSpeaker(sp.speakerId)}
                         >
@@ -950,12 +950,12 @@ export function VoiceModifyTab({
                               <span
                                 className={`flex h-3.5 w-3.5 items-center justify-center rounded-full border-2 ${
                                   model === "turbo"
-                                    ? "border-teal-500"
+                                    ? "border-[color:var(--cinnabar)]"
                                     : "border-slate-400 dark:border-slate-600"
                                 }`}
                               >
                                 {model === "turbo" && (
-                                  <span className="h-1.5 w-1.5 rounded-full bg-teal-500" />
+                                  <span className="h-1.5 w-1.5 rounded-full bg-[color:var(--cinnabar)]" />
                                 )}
                               </span>
                               <span className="text-xs text-foreground">高级音质</span>
@@ -971,12 +971,12 @@ export function VoiceModifyTab({
                               <span
                                 className={`flex h-3.5 w-3.5 items-center justify-center rounded-full border-2 ${
                                   model === "hd"
-                                    ? "border-teal-500"
+                                    ? "border-[color:var(--cinnabar)]"
                                     : "border-slate-400 dark:border-slate-600"
                                 }`}
                               >
                                 {model === "hd" && (
-                                  <span className="h-1.5 w-1.5 rounded-full bg-teal-500" />
+                                  <span className="h-1.5 w-1.5 rounded-full bg-[color:var(--cinnabar)]" />
                                 )}
                               </span>
                               <span className="text-xs text-foreground">旗舰音质</span>
@@ -992,8 +992,8 @@ export function VoiceModifyTab({
                         : null
                       return pts != null ? (
                         <div className="flex items-center gap-1.5">
-                          <span className="flex h-3.5 w-3.5 items-center justify-center rounded-full border-2 border-teal-500">
-                            <span className="h-1.5 w-1.5 rounded-full bg-teal-500" />
+                          <span className="flex h-3.5 w-3.5 items-center justify-center rounded-full border-2 border-[color:var(--cinnabar)]">
+                            <span className="h-1.5 w-1.5 rounded-full bg-[color:var(--cinnabar)]" />
                           </span>
                           <span className="text-xs text-foreground">标准音质</span>
                           <span className="text-xs text-slate-400">{pts} 点/分钟</span>
