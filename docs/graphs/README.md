@@ -4,9 +4,9 @@
 
 当前图谱基线：
 
-- GitNexus 索引提交：`92864fd`
-- 索引时间：`2026-04-28`
-- 统计概览：`938` 文件、`16,470` 节点、`39,497` 关系、`300` 条流程
+- GitNexus 索引提交：`2a85009`
+- 索引时间：`2026-04-30`
+- 统计概览：`951` 文件、`16,506` 节点、`39,742` 关系、`300` 条流程
 
 ## 使用顺序
 
@@ -15,8 +15,9 @@
 3. 审核 gate、Workspace review panels、resume 语义读 [GITNEXUS_REVIEW_GRAPH.md](./GITNEXUS_REVIEW_GRAPH.md)
 4. Studio 修改、单段重合成、overwrite / copy_as_new 读 [GITNEXUS_EDITING_POST_EDIT_GRAPH.md](./GITNEXUS_EDITING_POST_EDIT_GRAPH.md)
 5. 下载、R2 重定向、local fallback、文件名派生读 [GITNEXUS_STORAGE_DELIVERY_R2_GRAPH.md](./GITNEXUS_STORAGE_DELIVERY_R2_GRAPH.md)
-6. 商业化、套餐、计费、支付、法律页、settings 任务读 [GITNEXUS_COMMERCIALIZATION_GRAPH.md](./GITNEXUS_COMMERCIALIZATION_GRAPH.md)
+6. 商业化、营销首页、定价/试用 SSR、套餐、计费、支付、法律页、settings 任务读 [GITNEXUS_COMMERCIALIZATION_GRAPH.md](./GITNEXUS_COMMERCIALIZATION_GRAPH.md)
 7. Admin 定价、S2 监控、credits 观测、日志分析、background tasks、voice calibration 任务读 [GITNEXUS_ADMIN_OPS_CALIBRATION_GRAPH.md](./GITNEXUS_ADMIN_OPS_CALIBRATION_GRAPH.md)
+8. metering、质量档位、成本快照、provider breakdown、benchmark sidecar 任务读 [GITNEXUS_BENCHMARK_QUALITY_COST_GRAPH.md](./GITNEXUS_BENCHMARK_QUALITY_COST_GRAPH.md)
 
 ## 文件说明
 
@@ -25,11 +26,12 @@
 - [GITNEXUS_REVIEW_GRAPH.md](./GITNEXUS_REVIEW_GRAPH.md)：审核流图，聚焦 `reviewGate`、`WorkspacePage`、`translation_review`、`voice_selection_review` 与 gate/resume。
 - [GITNEXUS_EDITING_POST_EDIT_GRAPH.md](./GITNEXUS_EDITING_POST_EDIT_GRAPH.md)：编辑后处理图，聚焦 `VideoEditPage`、`VoiceModifyTab`、`editor/editing/`、segment regenerate、`overwrite / copy_as_new`。
 - [GITNEXUS_STORAGE_DELIVERY_R2_GRAPH.md](./GITNEXUS_STORAGE_DELIVERY_R2_GRAPH.md)：存储与交付图，聚焦 `projects` / `workspace` 下载表面、Gateway 路由决策、R2 redirect、local fallback、`display_name` 文件名派生。
-- [GITNEXUS_COMMERCIALIZATION_GRAPH.md](./GITNEXUS_COMMERCIALIZATION_GRAPH.md)：商业化图，聚焦 Gateway pricing/runtime 真源、plan/trial/credits/payment 与前端消费边界。
+- [GITNEXUS_COMMERCIALIZATION_GRAPH.md](./GITNEXUS_COMMERCIALIZATION_GRAPH.md)：商业化图，聚焦营销前门、Gateway pricing/runtime 真源、plan/trial/credits/payment 与前端消费边界。
 - [GITNEXUS_ADMIN_OPS_CALIBRATION_GRAPH.md](./GITNEXUS_ADMIN_OPS_CALIBRATION_GRAPH.md)：控制平面子图，聚焦 admin pricing、S2 monitor、credits observability、job logs、background tasks、voice speed calibration。
+- [GITNEXUS_BENCHMARK_QUALITY_COST_GRAPH.md](./GITNEXUS_BENCHMARK_QUALITY_COST_GRAPH.md)：基准与成本子图，聚焦 `UsageMeter`、`metering_snapshot`、quality tier、credits observability、cost/provider breakdown。
 
 ## 什么时候该看图谱
 
 - 对仓库不熟，先看总图再看子图。
 - 要动架构敏感代码，先看对应子图。
-- 要判断阶段顺序、review gate、editing buffer、下载路由、Gateway 真源位置、background task sidecar 位置，优先看图谱再读源码。
+- 要判断阶段顺序、review gate、editing buffer、下载路由、营销页如何消费套餐真源、Gateway 真源位置、metering sidecar、background task sidecar 位置，优先看图谱再读源码。
