@@ -56,6 +56,30 @@ POST_EDIT_RESPONSE_FIELDS = (
     "edit_generation",
 )
 
+JOB_LIST_DEFAULT_LIMIT = 20
+JOB_LIST_MAX_LIMIT = 100
+
+
+def _parse_job_list_pagination(request: Request) -> tuple[int | None, int]:
+    query_params = getattr(request, "query_params", {}) or {}
+    raw_limit = query_params.get("limit") if hasattr(query_params, "get") else None
+    raw_offset = query_params.get("offset") if hasattr(query_params, "get") else None
+
+    if raw_limit in (None, ""):
+        limit: int | None = None
+    else:
+        try:
+            limit = max(0, min(int(str(raw_limit)), JOB_LIST_MAX_LIMIT))
+        except (TypeError, ValueError):
+            limit = JOB_LIST_DEFAULT_LIMIT
+
+    try:
+        offset = max(0, int(str(raw_offset or "0")))
+    except (TypeError, ValueError):
+        offset = 0
+
+    return limit, offset
+
 
 def _serialize_response_value(value):
     if isinstance(value, datetime):
@@ -447,10 +471,12 @@ async def intercept_list_jobs(
     user: User | None = Depends(require_auth),
 ) -> Response:
     """GET /job-api/jobs — forward to upstream, then filter by user_id."""
+    upstream_query = "" if settings.auth_required and user is not None else None
     upstream_response = await proxy_request(
         request=request,
         upstream_base=settings.job_api_upstream,
         strip_prefix="/job-api",
+        override_query=upstream_query,
     )
 
     # If auth not required or no user, return as-is
@@ -580,8 +606,18 @@ async def intercept_list_jobs(
             for j in all_jobs
             if j.get("job_id") in user_job_ids
         ]
-        print(f"[GATEWAY] list_jobs: upstream={len(all_jobs)}, db_user={len(user_job_ids)}, returning={len(filtered_jobs)}", flush=True)
-        data["jobs"] = filtered_jobs
+        total_jobs = len(filtered_jobs)
+        limit, offset = _parse_job_list_pagination(request)
+        if limit is None:
+            paged_jobs = filtered_jobs[offset:]
+        else:
+            paged_jobs = filtered_jobs[offset: offset + limit]
+        print(f"[GATEWAY] list_jobs: upstream={len(all_jobs)}, db_user={len(user_job_ids)}, returning={len(paged_jobs)}/{total_jobs}", flush=True)
+        data["jobs"] = paged_jobs
+        data["total"] = total_jobs
+        data["limit"] = limit
+        data["offset"] = offset
+        data["has_more"] = offset + len(paged_jobs) < total_jobs
 
         return Response(
             content=json.dumps(data, ensure_ascii=False),

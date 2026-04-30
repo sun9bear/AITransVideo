@@ -119,3 +119,63 @@ def test_list_jobs_merges_gateway_metadata_and_preserves_purged_status():
     # The upstream updated_at may move during no-op edit/cancel. TTL display
     # must be driven by explicit expires_at, not this transient timestamp.
     assert merged["updated_at"] == upstream_job["updated_at"]
+
+
+def test_list_jobs_pages_after_user_filtering_and_strips_upstream_query():
+    upstream_jobs = [
+        {
+            "job_id": f"job_{index}",
+            "status": "succeeded",
+            "current_stage": "completed",
+            "created_at": f"2026-04-18T00:00:0{index}+00:00",
+            "updated_at": f"2026-04-25T12:00:0{index}+00:00",
+        }
+        for index in range(4)
+    ]
+    db_rows = [
+        SimpleNamespace(
+            job_id=f"job_{index}",
+            status="succeeded",
+            current_stage="completed",
+            display_name=None,
+            expires_at=None,
+            editing_touched_at=None,
+            copy_of_job_id=None,
+            root_job_id=f"job_{index}",
+            edit_generation=0,
+        )
+        for index in range(4)
+    ]
+
+    db = AsyncMock()
+    calls = {"n": 0}
+
+    async def execute(_stmt):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _AllResult([(row.job_id,) for row in db_rows])
+        return _ScalarsResult(db_rows)
+
+    db.execute = execute
+    db.commit = AsyncMock()
+    request = _make_request()
+    request.query_params = {"limit": "2", "offset": "1"}
+    request.url.query = "limit=2&offset=1"
+    user = SimpleNamespace(id="uid-1")
+    upstream = FastAPIResponse(
+        content=json.dumps({"jobs": upstream_jobs}).encode("utf-8"),
+        status_code=200,
+        headers={"content-type": "application/json"},
+    )
+
+    proxy_mock = AsyncMock(return_value=upstream)
+    with patch("job_intercept.proxy_request", new=proxy_mock):
+        response = _run(intercept_list_jobs(request, db, user))
+
+    payload = json.loads(response.body)
+    assert [job["job_id"] for job in payload["jobs"]] == ["job_1", "job_2"]
+    assert payload["total"] == 4
+    assert payload["limit"] == 2
+    assert payload["offset"] == 1
+    assert payload["has_more"] is True
+    assert proxy_mock.call_args.kwargs["override_query"] == ""

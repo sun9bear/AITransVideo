@@ -60,7 +60,7 @@ class JobStore:
             events.append(JobEvent.from_dict(payload))
         return events
 
-    def list_jobs(self, *, limit: int | None = 20) -> list[JobRecord]:
+    def list_jobs(self, *, limit: int | None = None, offset: int = 0) -> list[JobRecord]:
         if not self.root_dir.exists():
             return []
 
@@ -72,6 +72,9 @@ class JobStore:
             jobs.append(JobRecord.from_dict(payload))
 
         jobs.sort(key=lambda item: (item.updated_at, item.created_at, item.job_id), reverse=True)
+        normalized_offset = max(int(offset), 0)
+        if normalized_offset:
+            jobs = jobs[normalized_offset:]
         if limit is None:
             return jobs
         return jobs[: max(limit, 0)]

@@ -106,3 +106,18 @@ def test_job_store_lists_jobs_by_latest_updated_at(tmp_path) -> None:
     jobs = store.list_jobs()
 
     assert [job.job_id for job in jobs] == ["job_new", "job_old"]
+
+
+def test_job_store_lists_jobs_with_limit_and_offset(tmp_path) -> None:
+    store = JobStore(tmp_path / "jobs")
+    for index in range(5):
+        store.save_job(
+            _build_job_record(
+                job_id=f"job_{index}",
+                updated_at=f"2026-03-18T00:00:0{index}+00:00",
+            ),
+        )
+
+    jobs = store.list_jobs(limit=2, offset=1)
+
+    assert [job.job_id for job in jobs] == ["job_3", "job_2"]

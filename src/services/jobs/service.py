@@ -652,8 +652,8 @@ class JobService:
         except KeyError as exc:
             raise JobNotFoundError(str(exc)) from exc
 
-    def list_jobs(self, *, limit: int | None = 20) -> list[JobRecord]:
-        return self.store.list_jobs(limit=limit)
+    def list_jobs(self, *, limit: int | None = None, offset: int = 0) -> list[JobRecord]:
+        return self.store.list_jobs(limit=limit, offset=offset)
 
     def read_logs(self, job_id: str) -> list[JobEvent]:
         self.require_job(job_id)

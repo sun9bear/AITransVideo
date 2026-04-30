@@ -39,6 +39,7 @@ async def proxy_request(
     strip_prefix: str = "",
     override_body: bytes | None = None,
     extra_headers: dict[str, str] | None = None,
+    override_query: str | None = None,
 ) -> Response:
     """Forward a request to an upstream service and return its response.
 
@@ -53,7 +54,7 @@ async def proxy_request(
     path = request.url.path
     if strip_prefix and path.startswith(strip_prefix):
         path = path[len(strip_prefix):] or "/"
-    query = str(request.url.query)
+    query = str(request.url.query) if override_query is None else override_query
     upstream_url = f"{upstream_base.rstrip('/')}{path}"
     if query:
         upstream_url = f"{upstream_url}?{query}"
