@@ -1,12 +1,6 @@
 import Link from "next/link"
 import { BrandLockup } from "./brand-mark"
-import {
-  COMPANY_ADDRESS,
-  COMPANY_NAME,
-  PAYMENT_CHANNEL_NOTE,
-  SUPPORT_EMAIL,
-  SUPPORT_EMAIL_HREF,
-} from "./company-info"
+import { SUPPORT_EMAIL, SUPPORT_EMAIL_HREF } from "./company-info"
 
 /**
  * Marketing footer with public trust information.
@@ -95,17 +89,13 @@ export function SiteFooter() {
           </nav>
         </div>
 
-        <div className="mt-10 flex flex-col gap-3 border-t border-border/60 pt-6 text-xs text-muted-foreground sm:flex-row sm:items-start sm:justify-between">
-          <div>© {new Date().getFullYear()} 爱译视频 AIVideoTrans · 长视频翻译配音工作台</div>
-          <div className="flex max-w-3xl flex-wrap gap-x-3 gap-y-1 sm:justify-end">
-            <span>运营主体：{COMPANY_NAME}</span>
-            <span aria-hidden="true">·</span>
-            <span>联系邮箱：{SUPPORT_EMAIL}</span>
-            <span aria-hidden="true">·</span>
-            <span>联系地址：{COMPANY_ADDRESS}</span>
-            <span aria-hidden="true">·</span>
-            <span>{PAYMENT_CHANNEL_NOTE}</span>
-          </div>
+        {/* Copyright row only — full operator identity (运营主体 / 联系邮箱 /
+            联系地址 / 支付渠道说明) lives on the legal pages (Contact / Terms /
+            Privacy / Refund) via the shared ContactBlock component. Keeping it
+            duplicated in the footer cluttered the rice-paper aesthetic without
+            adding compliance value. */}
+        <div className="mt-10 border-t border-border/60 pt-6 text-xs text-muted-foreground">
+          © {new Date().getFullYear()} 爱译视频 AIVideoTrans · 长视频翻译配音工作台
         </div>
       </div>
     </footer>
