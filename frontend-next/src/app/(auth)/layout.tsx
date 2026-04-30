@@ -42,7 +42,12 @@ export default function AuthLayout({
             "radial-gradient(ellipse 60% 50% at 50% 30%, color-mix(in oklab, var(--ink-paper-2) 40%, transparent) 0%, transparent 70%)",
         }}
       />
-      <div className="relative z-10 w-full">{children}</div>
+      {/* Children are sized by their own page-level wrappers (max-w-md mx-auto).
+          We keep `w-full` off this layer so the flex parent's justify-center
+          can do its job — w-full on a flex child fills the cross-axis and
+          neutralizes justify-center, which was the root of the prior
+          left-alignment bug. */}
+      <div className="relative z-10 w-full max-w-md px-4">{children}</div>
     </div>
   )
 }
