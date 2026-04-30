@@ -76,7 +76,7 @@ function DialogBody({
   if (showSuccess) {
     return (
       <div className="flex flex-col items-center justify-center gap-3 py-10">
-        <CheckCircle className="h-12 w-12 text-emerald-400" />
+        <CheckCircle className="h-12 w-12" style={{ color: "var(--bamboo)" }} />
         <p className="text-base font-semibold text-foreground">任务已创建</p>
       </div>
     )

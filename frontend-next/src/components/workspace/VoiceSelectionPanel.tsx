@@ -519,7 +519,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
   if (isLoading) {
     return (
       <section className="surface-card p-8 text-center">
-        <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-3 border-teal-500 border-t-transparent" />
+        <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-3 border-[color:var(--cinnabar)] border-t-transparent" />
         <h3 className="text-lg font-semibold text-foreground">加载音色选择...</h3>
       </section>
     )
@@ -528,7 +528,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
   if (error && speakers.length === 0) {
     return (
       <section className="surface-card p-6">
-        <p className="text-red-500">{error}</p>
+        <p className="text-[color:var(--cinnabar)]">{error}</p>
       </section>
     )
   }
@@ -541,8 +541,8 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
       <section className="surface-card p-6 space-y-6">
         {/* Expired voices banner */}
         {expiredVoiceIds.length > 0 ? (
-          <div className="rounded-lg border border-red-200 dark:border-red-500/20 bg-red-50 dark:bg-red-500/5 p-3">
-            <p className="text-sm text-red-600 dark:text-red-400">
+          <div className="rounded-lg border border-[color:var(--cinnabar)]/30 bg-[color:var(--cinnabar)]/8 p-3">
+            <p className="text-sm text-[color:var(--cinnabar)]">
               检测到 {expiredVoiceIds.length} 个音色已失效，已从选项中移除。请重新选择音色。
             </p>
           </div>
@@ -570,15 +570,15 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                   ? '已选择'
                   : '待选择'
             const statusColor = hasNoSegments
-              ? 'text-slate-400'
+              ? 'text-muted-foreground'
               : state?.voiceSource === 'cloned'
-                ? 'text-teal-600 dark:text-teal-400'
+                ? 'text-[color:var(--bamboo)]'
                 : state?.voiceId
-                  ? 'text-emerald-600 dark:text-emerald-400'
-                  : 'text-amber-600 dark:text-amber-400'
+                  ? 'text-[color:var(--bamboo)]'
+                  : 'text-[color:var(--ochre)]'
 
             return (
-              <div key={sp.speakerId} className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-800/30 p-4">
+              <div key={sp.speakerId} className="rounded-lg border border-border bg-muted/30 p-4">
                 <div className="flex items-start gap-3">
                   {/* Avatar */}
                   <div className="flex h-10 w-10 items-center justify-center rounded-full bg-slate-200 dark:bg-slate-700 text-sm font-bold text-slate-600 dark:text-slate-300 shrink-0">
@@ -592,14 +592,14 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                       <span className="text-xs text-slate-400">{sp.speakerId}</span>
                       <span className="text-xs text-slate-400">{sp.segmentCount} 段 · {sp.totalDurationS.toFixed(1)}s</span>
                       {sp.speakerRoleLabel ? (
-                        <span className="rounded border border-amber-400/30 bg-amber-400/10 px-1.5 py-0.5 text-xs font-medium text-amber-600 dark:text-amber-300">
+                        <span className="rounded px-1.5 py-0.5 text-xs font-medium border border-[color:var(--ochre)]/30 bg-[color:var(--ochre)]/10 text-[color:var(--ochre)]">
                           {sp.speakerRoleLabel}
                         </span>
                       ) : null}
                       <span className={`text-xs font-medium ${statusColor}`}>{statusLabel}</span>
                     </div>
                     {sp.speakerReviewHint ? (
-                      <p className="text-xs text-amber-600 dark:text-amber-300">{sp.speakerReviewHint}</p>
+                      <p className="text-xs text-[color:var(--ochre)]">{sp.speakerReviewHint}</p>
                     ) : null}
 
                     {/* Provider Tabs (only when multi-provider payload) */}
@@ -612,8 +612,8 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                               key={prov}
                               className={`h-7 rounded-md px-3 text-xs font-medium transition ${
                                 isActive
-                                  ? 'bg-teal-600 text-white'
-                                  : 'bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'
+                                  ? 'bg-primary text-primary-foreground'
+                                  : 'bg-muted/50 text-muted-foreground hover:bg-muted'
                               }`}
                               onClick={() => handleProviderChange(sp.speakerId, prov)}
                               type="button"
@@ -628,7 +628,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                     {/* Voice select + preview + clone */}
                     <div className="flex items-center gap-2 flex-wrap">
                       <select
-                        className="h-8 rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 text-sm text-foreground w-[220px] truncate"
+                        className="h-8 rounded border border-border bg-background px-2 text-sm text-foreground w-[220px] truncate"
                         onChange={(e) => handleVoiceChange(sp.speakerId, e.target.value)}
                         value={state?.voiceId ?? ''}
                       >
@@ -705,7 +705,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                       {/* Preview button */}
                       {state?.voiceId ? (
                         <button
-                          className="h-8 rounded border border-slate-300 dark:border-slate-600 px-3 text-xs font-medium text-slate-500 dark:text-slate-400 transition hover:bg-slate-100 dark:hover:bg-slate-700 disabled:opacity-50"
+                          className="h-8 rounded border border-border px-3 text-xs font-medium text-muted-foreground transition hover:bg-muted disabled:opacity-50"
                           disabled={previewLoading[sp.speakerId] || !state?.voiceId}
                           onClick={() => { void handlePreview(sp.speakerId) }}
                           type="button"
@@ -715,7 +715,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                       ) : null}
 
                       <button
-                        className="h-8 rounded border border-slate-300 dark:border-slate-600 px-3 text-xs font-medium text-slate-500 dark:text-slate-400 transition hover:bg-slate-100 dark:hover:bg-slate-700 disabled:opacity-50"
+                        className="h-8 rounded border border-border px-3 text-xs font-medium text-muted-foreground transition hover:bg-muted disabled:opacity-50"
                         disabled={sp.segmentCount <= 0}
                         onClick={() => setAuditModalSpeaker(sp.speakerId)}
                         type="button"
@@ -725,7 +725,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
 
                       {showClone ? (
                         <button
-                          className="h-8 rounded border border-teal-500/40 bg-teal-500/10 px-3 text-xs font-medium text-teal-600 dark:text-teal-400 transition hover:bg-teal-500/20 disabled:opacity-50"
+                          className="h-8 rounded px-3 text-xs font-medium transition border border-[color:var(--cinnabar)]/40 bg-[color:var(--cinnabar)]/10 text-[color:var(--cinnabar)] hover:bg-[color:var(--cinnabar)]/20 disabled:opacity-50"
                           disabled={state?.isCloning}
                           onClick={() => setCloneModalSpeaker(sp.speakerId)}
                           type="button"
@@ -744,15 +744,15 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                         return (
                           <div className="flex items-center gap-4 flex-wrap">
                             <label className="flex items-center gap-1.5 cursor-pointer" onClick={() => setVoiceStates((prev) => ({ ...prev, [sp.speakerId]: { ...prev[sp.speakerId], minimaxModel: 'turbo' } }))}>
-                              <span className={`flex h-3.5 w-3.5 items-center justify-center rounded-full border-2 ${model === 'turbo' ? 'border-teal-500' : 'border-slate-400 dark:border-slate-600'}`}>
-                                {model === 'turbo' ? <span className="h-1.5 w-1.5 rounded-full bg-teal-500" /> : null}
+                              <span className={`flex h-3.5 w-3.5 items-center justify-center rounded-full border-2 ${model === 'turbo' ? 'border-[color:var(--cinnabar)]' : 'border-muted-foreground/40'}`}>
+                                {model === 'turbo' ? <span className="h-1.5 w-1.5 rounded-full bg-[color:var(--cinnabar)]" /> : null}
                               </span>
                               <span className="text-xs text-foreground">高级音质</span>
                               <span className="text-xs text-slate-400">{cpm.minimax_turbo} 点/分钟</span>
                             </label>
                             <label className="flex items-center gap-1.5 cursor-pointer" onClick={() => setVoiceStates((prev) => ({ ...prev, [sp.speakerId]: { ...prev[sp.speakerId], minimaxModel: 'hd' } }))}>
-                              <span className={`flex h-3.5 w-3.5 items-center justify-center rounded-full border-2 ${model === 'hd' ? 'border-teal-500' : 'border-slate-400 dark:border-slate-600'}`}>
-                                {model === 'hd' ? <span className="h-1.5 w-1.5 rounded-full bg-teal-500" /> : null}
+                              <span className={`flex h-3.5 w-3.5 items-center justify-center rounded-full border-2 ${model === 'hd' ? 'border-[color:var(--cinnabar)]' : 'border-muted-foreground/40'}`}>
+                                {model === 'hd' ? <span className="h-1.5 w-1.5 rounded-full bg-[color:var(--cinnabar)]" /> : null}
                               </span>
                               <span className="text-xs text-foreground">旗舰音质</span>
                               <span className="text-xs text-slate-400">{cpm.minimax_hd} 点/分钟</span>
@@ -763,8 +763,8 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                       const pts = prov === 'cosyvoice' ? cpm.cosyvoice : prov === 'volcengine' ? cpm.volcengine : null
                       return pts != null ? (
                         <div className="flex items-center gap-1.5">
-                          <span className="flex h-3.5 w-3.5 items-center justify-center rounded-full border-2 border-teal-500">
-                            <span className="h-1.5 w-1.5 rounded-full bg-teal-500" />
+                          <span className="flex h-3.5 w-3.5 items-center justify-center rounded-full border-2 border-[color:var(--cinnabar)]">
+                            <span className="h-1.5 w-1.5 rounded-full bg-[color:var(--cinnabar)]" />
                           </span>
                           <span className="text-xs text-foreground">标准音质</span>
                           <span className="text-xs text-slate-400">{pts} 点/分钟</span>
@@ -773,10 +773,10 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                     })() : null}
 
                     {previewError[sp.speakerId] ? (
-                      <p className="text-xs text-red-500">{previewError[sp.speakerId]}</p>
+                      <p className="text-xs text-[color:var(--cinnabar)]">{previewError[sp.speakerId]}</p>
                     ) : null}
                     {state?.cloneError ? (
-                      <p className="text-xs text-red-500">{state.cloneError}</p>
+                      <p className="text-xs text-[color:var(--cinnabar)]">{state.cloneError}</p>
                     ) : null}
                   </div>
                 </div>
@@ -786,15 +786,15 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
         </div>
 
         {/* Error */}
-        {error ? <p className="text-sm text-red-500">{error}</p> : null}
+        {error ? <p className="text-sm text-[color:var(--cinnabar)]">{error}</p> : null}
 
         {/* Footer */}
-        <div className="flex items-center justify-between pt-2 border-t border-slate-200 dark:border-slate-700">
+        <div className="flex items-center justify-between pt-2 border-t border-border">
           <span className="text-xs text-slate-400">
             {speakers.filter((sp) => sp.segmentCount > 0 && voiceStates[sp.speakerId]?.voiceId).length} / {speakers.filter((sp) => sp.segmentCount > 0).length} 说话人已配置音色
           </span>
           <button
-            className="rounded-lg bg-teal-600 px-5 py-2 text-sm font-medium text-white transition hover:bg-teal-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="rounded-lg bg-primary px-5 py-2 text-sm font-medium text-primary-foreground transition hover:bg-primary/85 disabled:opacity-50 disabled:cursor-not-allowed"
             disabled={!allSelected || isSubmitting || anyCloning}
             onClick={() => { void handleSubmit() }}
             type="button"
@@ -954,8 +954,8 @@ function SpeakerAudioAuditModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="w-full max-w-3xl max-h-[85vh] flex flex-col rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 shadow-xl">
-        <div className="flex items-center justify-between p-4 border-b border-slate-200 dark:border-slate-700">
+      <div className="w-full max-w-3xl max-h-[85vh] flex flex-col rounded-xl bg-card border border-border shadow-xl">
+        <div className="flex items-center justify-between p-4 border-b border-border">
           <h3 className="text-base font-semibold text-foreground">核对原音 — {speaker.speakerName}</h3>
           <button className="text-slate-400 hover:text-foreground transition" onClick={onClose} type="button">
             <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M6 18L18 6M6 6l12 12" strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} /></svg>
@@ -977,8 +977,8 @@ function SpeakerAudioAuditModal({
             const isUpdatingMode = updatingDubbingModeSegmentId === seg.segmentId
             return (
               <div className="flex items-center gap-3 rounded-lg border border-transparent px-3 py-2 transition hover:bg-slate-50 dark:hover:bg-slate-800/40" key={seg.segmentId}>
-                <button className="h-7 w-7 rounded-full border border-slate-300 dark:border-slate-600 flex items-center justify-center shrink-0 hover:bg-slate-100 dark:hover:bg-slate-700 transition" onClick={() => playSegment(seg)} type="button">
-                  {isPlaying ? <svg className="h-3 w-3 text-teal-500" fill="currentColor" viewBox="0 0 24 24"><rect height="16" rx="1" width="4" x="6" y="4" /><rect height="16" rx="1" width="4" x="14" y="4" /></svg> : <svg className="h-3 w-3 text-slate-500" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>}
+                <button className="h-7 w-7 rounded-full border border-border flex items-center justify-center shrink-0 hover:bg-muted transition" onClick={() => playSegment(seg)} type="button">
+                  {isPlaying ? <svg className="h-3 w-3 text-[color:var(--cinnabar)]" fill="currentColor" viewBox="0 0 24 24"><rect height="16" rx="1" width="4" x="6" y="4" /><rect height="16" rx="1" width="4" x="14" y="4" /></svg> : <svg className="h-3 w-3 text-slate-500" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>}
                 </button>
                 <span className="w-12 shrink-0 text-xs tabular-nums text-slate-400">{formatTimecode(seg.startMs)}</span>
                 <span className="min-w-0 flex-1 truncate text-xs text-foreground">{seg.sourceText || `片段 ${seg.segmentId}`}</span>
@@ -986,7 +986,7 @@ function SpeakerAudioAuditModal({
                 <label className="flex h-8 w-[102px] shrink-0 items-center justify-center gap-1 rounded border border-slate-300 dark:border-slate-600 px-2 text-xs text-slate-600 dark:text-slate-300">
                   <input
                     checked={seg.dubbingMode === 'keep_original'}
-                    className="h-3.5 w-3.5 accent-teal-500"
+                    className="h-3.5 w-3.5 accent-[color:var(--cinnabar)]"
                     disabled={isUpdatingMode || updatingDubbingModeSegmentId !== null}
                     onChange={(event) => { void handleDubbingModeChange(seg, event.target.checked) }}
                     type="checkbox"
@@ -1009,10 +1009,10 @@ function SpeakerAudioAuditModal({
             )
           })}
         </div>
-        <div className="flex items-center justify-between p-4 border-t border-slate-200 dark:border-slate-700">
+        <div className="flex items-center justify-between p-4 border-t border-border">
           <span className="text-xs text-slate-400">可修改说话人归属，也可让片段跳过翻译配音并保留原音。</span>
           <div className="flex items-center gap-2">
-            {error ? <span className="text-xs text-red-500 max-w-[280px] truncate">{error}</span> : null}
+            {error ? <span className="text-xs text-[color:var(--cinnabar)] max-w-[280px] truncate">{error}</span> : null}
             <button className="h-8 rounded px-4 text-sm text-slate-500 transition hover:text-foreground" onClick={onClose} type="button">关闭</button>
           </div>
         </div>
@@ -1125,21 +1125,21 @@ export function VoiceCloneModal({ jobId, speaker, cloneCostCredits, onClose, onC
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="w-full max-w-2xl max-h-[85vh] flex flex-col rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 shadow-xl">
-        <div className="flex items-center justify-between p-4 border-b border-slate-200 dark:border-slate-700">
+      <div className="w-full max-w-2xl max-h-[85vh] flex flex-col rounded-xl bg-card border border-border shadow-xl">
+        <div className="flex items-center justify-between p-4 border-b border-border">
           <h3 className="text-base font-semibold text-foreground">克隆音色 — {speaker.speakerName}</h3>
           <button className="text-slate-400 hover:text-foreground transition" onClick={onClose} type="button">
             <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M6 18L18 6M6 6l12 12" strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} /></svg>
           </button>
         </div>
         <div className="flex items-center gap-3 p-4 border-b border-slate-100 dark:border-slate-800">
-          <button className="h-7 rounded border border-teal-500/40 bg-teal-500/10 px-3 text-xs font-medium text-teal-600 dark:text-teal-400 transition hover:bg-teal-500/20" onClick={autoSelect} type="button">自动选择</button>
+          <button className="h-7 rounded px-3 text-xs font-medium transition border border-[color:var(--cinnabar)]/40 bg-[color:var(--cinnabar)]/10 text-[color:var(--cinnabar)] hover:bg-[color:var(--cinnabar)]/20" onClick={autoSelect} type="button">自动选择</button>
           <span className="text-xs text-slate-400">从最长片段开始自动勾选，总时长 &lt; 300s</span>
         </div>
         <div className="flex items-center gap-4 px-4 py-2 bg-slate-50/50 dark:bg-slate-800/30">
           <span className="text-xs text-slate-500">已选 <span className="font-medium text-foreground">{selectedIds.size}</span> 段</span>
-          <span className="text-xs text-slate-500">总时长 <span className={`font-medium ${exceedsMaxDuration ? 'text-red-500' : meetsMinDuration ? 'text-teal-600 dark:text-teal-400' : 'text-amber-500'}`}>{selectedDuration.toFixed(1)}s</span></span>
-          {!meetsMinDuration ? <span className="text-xs text-amber-500">至少需要 10s</span> : exceedsMaxDuration ? <span className="text-xs text-red-500">不能超过 300s</span> : <span className="text-xs text-teal-600 dark:text-teal-400">满足要求</span>}
+          <span className="text-xs text-slate-500">总时长 <span className={`font-medium ${exceedsMaxDuration ? 'text-[color:var(--cinnabar)]' : meetsMinDuration ? 'text-[color:var(--bamboo)]' : 'text-[color:var(--ochre)]'}`}>{selectedDuration.toFixed(1)}s</span></span>
+          {!meetsMinDuration ? <span className="text-xs text-[color:var(--ochre)]">至少需要 10s</span> : exceedsMaxDuration ? <span className="text-xs text-[color:var(--cinnabar)]">不能超过 300s</span> : <span className="text-xs text-[color:var(--bamboo)]">满足要求</span>}
         </div>
         <div className="flex-1 overflow-y-auto p-4 space-y-1">
           {isLoading ? (
@@ -1150,12 +1150,12 @@ export function VoiceCloneModal({ jobId, speaker, cloneCostCredits, onClose, onC
             const isSelected = selectedIds.has(seg.segmentId)
             const isPlaying = playingSegmentId === seg.segmentId
             return (
-              <div className={`flex items-center gap-3 rounded-lg px-3 py-2 transition cursor-pointer ${isSelected ? 'bg-teal-50 dark:bg-teal-900/20 border border-teal-300 dark:border-teal-700' : 'border border-transparent hover:bg-slate-50 dark:hover:bg-slate-800/40'}`} key={seg.segmentId} onClick={() => toggleSegment(seg.segmentId)}>
+              <div className={`flex items-center gap-3 rounded-lg px-3 py-2 transition cursor-pointer ${isSelected ? 'border bg-[color:var(--cinnabar)]/10 border-[color:var(--cinnabar)]/40' : 'border border-transparent hover:bg-muted/40'}`} key={seg.segmentId} onClick={() => toggleSegment(seg.segmentId)}>
                 <div className={`h-4 w-4 rounded border-2 flex items-center justify-center shrink-0 ${isSelected ? 'border-teal-500 bg-teal-500' : 'border-slate-300 dark:border-slate-600'}`}>
                   {isSelected ? <svg className="h-3 w-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7" strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} /></svg> : null}
                 </div>
-                <button className="h-7 w-7 rounded-full border border-slate-300 dark:border-slate-600 flex items-center justify-center shrink-0 hover:bg-slate-100 dark:hover:bg-slate-700 transition" onClick={(e) => { e.stopPropagation(); playSegment(seg) }} type="button">
-                  {isPlaying ? <svg className="h-3 w-3 text-teal-500" fill="currentColor" viewBox="0 0 24 24"><rect height="16" rx="1" width="4" x="6" y="4" /><rect height="16" rx="1" width="4" x="14" y="4" /></svg> : <svg className="h-3 w-3 text-slate-500" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>}
+                <button className="h-7 w-7 rounded-full border border-border flex items-center justify-center shrink-0 hover:bg-muted transition" onClick={(e) => { e.stopPropagation(); playSegment(seg) }} type="button">
+                  {isPlaying ? <svg className="h-3 w-3 text-[color:var(--cinnabar)]" fill="currentColor" viewBox="0 0 24 24"><rect height="16" rx="1" width="4" x="6" y="4" /><rect height="16" rx="1" width="4" x="14" y="4" /></svg> : <svg className="h-3 w-3 text-slate-500" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>}
                 </button>
                 <span className="flex-1 text-xs text-foreground truncate">{seg.sourceText || `片段 ${seg.segmentId}`}</span>
                 <span className="text-xs text-slate-400 shrink-0">{seg.durationS.toFixed(1)}s</span>
@@ -1163,12 +1163,12 @@ export function VoiceCloneModal({ jobId, speaker, cloneCostCredits, onClose, onC
             )
           })}
         </div>
-        <div className="flex items-center justify-between p-4 border-t border-slate-200 dark:border-slate-700">
+        <div className="flex items-center justify-between p-4 border-t border-border">
           <span className="text-xs text-slate-400">{cloneCostCredits > 0 ? `克隆费用：${cloneCostCredits} 点` : '扣点信息暂不可用'}</span>
           <div className="flex items-center gap-2">
-            {error ? <span className="text-xs text-red-500 max-w-[200px] truncate">{error}</span> : null}
+            {error ? <span className="text-xs text-[color:var(--cinnabar)] max-w-[200px] truncate">{error}</span> : null}
             <button className="h-8 rounded px-4 text-sm text-slate-500 transition hover:text-foreground" disabled={isCloning} onClick={onClose} type="button">取消</button>
-            <button className="h-8 rounded-lg bg-teal-600 px-4 text-sm font-medium text-white transition hover:bg-teal-700 disabled:opacity-50 disabled:cursor-not-allowed" disabled={isCloning || !meetsMinDuration || exceedsMaxDuration} onClick={() => { void handleClone() }} type="button">{isCloning ? '克隆中...' : '开始克隆'}</button>
+            <button className="h-8 rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground transition hover:bg-primary/85 disabled:opacity-50 disabled:cursor-not-allowed" disabled={isCloning || !meetsMinDuration || exceedsMaxDuration} onClick={() => { void handleClone() }} type="button">{isCloning ? '克隆中...' : '开始克隆'}</button>
           </div>
         </div>
       </div>

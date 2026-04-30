@@ -243,18 +243,18 @@ export default function WorkspacePage() {
          *  one-liner here because they don't render a dedicated card. */}
         <div className="mt-3 text-sm text-muted-foreground">
           {isWaitingForReview ? (
-            <span className="text-amber-600 dark:text-amber-400 font-medium">
+            <span className="font-medium" style={{ color: "var(--ochre)" }}>
               当前需要处理：{getStageLabel(effectiveStage)}
             </span>
           ) : isEditing ? (
-            <span className="text-violet-600 dark:text-violet-400 font-medium">
+            <span className="font-medium" style={{ color: "var(--ochre)" }}>
               此任务处于修改中
               {editGeneration > 0 ? `（已完成 ${editGeneration} 次修改）` : ''}
             </span>
           ) : isSucceeded ? (
-            <span className="text-emerald-600 dark:text-emerald-400 font-medium">任务已完成</span>
+            <span className="font-medium" style={{ color: "var(--bamboo)" }}>任务已完成</span>
           ) : isFailed ? (
-            <span className="text-red-600 dark:text-red-400 font-medium">任务处理失败</span>
+            <span className="font-medium" style={{ color: "var(--cinnabar)" }}>任务处理失败</span>
           ) : null}
         </div>
       </section>
@@ -290,8 +290,14 @@ export default function WorkspacePage() {
           edit surface lives at /workspace/{id}/edit (Phase 1 T1-3); this
           card only offers the resume CTA. */}
       {isEditing ? (
-        <section className="surface-card p-8 text-center border border-violet-500/20 bg-violet-500/5">
-          <RefreshCw className="mx-auto mb-4 h-10 w-10 text-violet-500" />
+        <section
+          className="surface-card p-8 text-center"
+          style={{
+            border: "1px solid color-mix(in oklab, var(--ochre) 28%, transparent)",
+            backgroundColor: "color-mix(in oklab, var(--ochre) 8%, transparent)",
+          }}
+        >
+          <RefreshCw className="mx-auto mb-4 h-10 w-10" style={{ color: "var(--ochre)" }} />
           <h3 className="text-lg font-semibold text-foreground">
             此任务正在修改中
           </h3>

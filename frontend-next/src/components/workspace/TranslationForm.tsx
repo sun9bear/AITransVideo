@@ -200,10 +200,18 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
             <div className="space-y-2">
               <span className="text-xs font-medium text-muted-foreground block">选择视频文件</span>
               {uploadedFilePath ? (
-                <div className="flex items-center gap-3 rounded-xl border border-emerald-500/20 bg-emerald-500/5 px-4 py-3">
-                  <span className="text-sm font-medium text-emerald-400">{uploadFileName}</span>
+                <div
+                  className="flex items-center gap-3 rounded-xl px-4 py-3"
+                  style={{
+                    backgroundColor: "color-mix(in oklab, var(--bamboo) 10%, transparent)",
+                    border: "1px solid color-mix(in oklab, var(--bamboo) 28%, transparent)",
+                  }}
+                >
+                  <span className="text-sm font-medium" style={{ color: "var(--bamboo)" }}>
+                    {uploadFileName}
+                  </span>
                   <button
-                    className="text-xs text-muted-foreground hover:text-red-400 transition"
+                    className="text-xs text-muted-foreground transition hover:text-[color:var(--cinnabar)]"
                     onClick={() => { setUploadedFilePath(""); setUploadFileName("") }}
                     type="button"
                   >
@@ -267,7 +275,16 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
               >
                 <div className="flex items-center gap-2 mb-2">
                   <span className="text-sm font-semibold text-foreground">快捷版</span>
-                  <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-400">Express</span>
+                  <span
+                    className="rounded-full px-2 py-0.5 text-[10px] font-semibold"
+                    style={{
+                      backgroundColor: "color-mix(in oklab, var(--bamboo) 14%, transparent)",
+                      color: "var(--bamboo)",
+                      border: "1px solid color-mix(in oklab, var(--bamboo) 30%, transparent)",
+                    }}
+                  >
+                    Express
+                  </span>
                 </div>
                 <p className="text-xs text-muted-foreground leading-relaxed">全自动流程，AI 识别说话人、翻译、配音，无需人工操作。</p>
                 {serviceMode === "express" && (
@@ -289,7 +306,16 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                   >
                     <div className="flex items-center gap-2 mb-2">
                       <span className="text-sm font-semibold text-foreground">工作台版</span>
-                      <span className="rounded-full bg-cyan-500/15 px-2 py-0.5 text-[10px] font-semibold text-cyan-400">Studio</span>
+                      <span
+                        className="rounded-full px-2 py-0.5 text-[10px] font-semibold"
+                        style={{
+                          backgroundColor: "color-mix(in oklab, var(--ochre) 14%, transparent)",
+                          color: "var(--ochre)",
+                          border: "1px solid color-mix(in oklab, var(--ochre) 32%, transparent)",
+                        }}
+                      >
+                        Studio
+                      </span>
                     </div>
                     <p className="text-xs text-muted-foreground leading-relaxed">可审核译文、克隆原声音色，更高质量的定制化配音。</p>
                     {serviceMode === "studio" && (
@@ -302,7 +328,16 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                   <div className="relative rounded-xl border border-border bg-muted/20 p-4 text-left opacity-60 cursor-not-allowed">
                     <div className="flex items-center gap-2 mb-2">
                       <span className="text-sm font-semibold text-foreground">工作台版</span>
-                      <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold text-amber-400">Studio</span>
+                      <span
+                        className="rounded-full px-2 py-0.5 text-[10px] font-semibold"
+                        style={{
+                          backgroundColor: "color-mix(in oklab, var(--ochre) 14%, transparent)",
+                          color: "var(--ochre)",
+                          border: "1px solid color-mix(in oklab, var(--ochre) 32%, transparent)",
+                        }}
+                      >
+                        Studio
+                      </span>
                     </div>
                     <p className="text-xs text-muted-foreground leading-relaxed">可审核译文、克隆原声音色，更高质量的定制化配音。</p>
                     <div className="absolute top-3 right-3 rounded-full bg-muted/50 px-2 py-0.5 text-[10px] text-muted-foreground">

@@ -358,8 +358,8 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
                     <button
                       className={
                         splittingSegmentId === item.segmentId
-                          ? 'rounded-lg border-2 border-amber-500 bg-amber-500 px-4 py-1.5 text-xs font-bold text-white transition hover:bg-amber-600 hover:border-amber-600 shadow-md'
-                          : 'rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-3 py-1 text-xs font-medium text-cyan-400 transition hover:bg-cyan-500/20 hover:border-cyan-500/50'
+                          ? 'rounded-lg border-2 px-4 py-1.5 text-xs font-bold transition shadow-md border-[color:var(--ochre)] bg-[color:var(--ochre)] text-[color:var(--primary-foreground)] hover:opacity-90'
+                          : 'rounded-lg border px-3 py-1 text-xs font-medium transition border-[color:var(--cinnabar)]/30 bg-[color:var(--cinnabar)]/10 text-[color:var(--cinnabar)] hover:bg-[color:var(--cinnabar)]/20 hover:border-[color:var(--cinnabar)]/50'
                       }
                       onClick={() => {
                         if (splittingSegmentId === item.segmentId) { setSplittingSegmentId(null) } else {
@@ -379,7 +379,7 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
 
                 {/* Preview error */}
                 {segPreviewError ? (
-                  <p className="mt-1 text-xs text-red-400">{segPreviewError}</p>
+                  <p className="mt-1 text-xs text-[color:var(--cinnabar)]">{segPreviewError}</p>
                 ) : null}
 
                 {/* Source text + play source button */}
@@ -387,7 +387,7 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
                   <div className="flex items-center justify-between mb-1">
                     <span className="text-xs font-medium text-muted-foreground">原文</span>
                     <button
-                      className="rounded-lg border border-sky-500/30 bg-sky-500/10 px-3 py-1 text-xs font-medium text-sky-400 transition hover:bg-sky-500/20 hover:border-sky-500/50 disabled:opacity-50"
+                      className="rounded-lg px-3 py-1 text-xs font-medium transition border border-[color:var(--cinnabar)]/30 bg-[color:var(--cinnabar)]/10 text-[color:var(--cinnabar)] hover:bg-[color:var(--cinnabar)]/20 hover:border-[color:var(--cinnabar)]/50 disabled:opacity-50"
                       disabled={isPreviewingThis}
                       onClick={() => { void handlePreviewSource(item.segmentId) }}
                       type="button"

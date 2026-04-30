@@ -302,7 +302,11 @@ function MaterialsPackButton({
       <Button
         variant="outline"
         size="sm"
-        className="gap-2 border-emerald-500/60 text-emerald-500 hover:bg-emerald-500/10"
+        className="gap-2"
+        style={{
+          borderColor: "color-mix(in oklab, var(--bamboo) 55%, transparent)",
+          color: "var(--bamboo)",
+        }}
         onClick={onDownload}
       >
         <CheckCircle2 className="h-4 w-4" />
