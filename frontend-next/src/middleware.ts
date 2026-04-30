@@ -27,7 +27,13 @@ const publicExactPaths = [
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl
 
-  // Skip auth check for public paths and API routes
+  // Skip auth check for public paths, API routes, and static assets in /public.
+  //
+  // Asset directories under /public (e.g. /marketing/*, /fonts/*, /icons/*) must
+  // bypass auth — they're served as plain static files. Next.js usually serves
+  // these without invoking middleware, but the matcher below is broad enough
+  // that explicit early-out is needed once a file extension is present in the
+  // URL (e.g. /marketing/hero-paper-1920.webp).
   if (
     publicExactPaths.includes(pathname) ||
     publicPaths.some((p) => pathname.startsWith(p)) ||
@@ -36,7 +42,11 @@ export function middleware(request: NextRequest) {
     pathname.startsWith("/auth/") ||
     pathname.startsWith("/gateway/") ||
     pathname.startsWith("/_next/") ||
-    pathname.startsWith("/favicon")
+    pathname.startsWith("/favicon") ||
+    pathname.startsWith("/marketing/") ||
+    pathname.startsWith("/fonts/") ||
+    pathname.startsWith("/icons/") ||
+    /\.(?:png|jpe?g|webp|avif|gif|svg|ico|woff2?|ttf|otf|css|js|mp4|webm)$/i.test(pathname)
   ) {
     return NextResponse.next()
   }
