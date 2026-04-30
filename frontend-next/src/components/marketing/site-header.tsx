@@ -100,15 +100,26 @@ export function SiteHeader() {
             <>
               <Link
                 href="/auth/login"
-                // Cinnabar-tinted outline reads as a button, distinguishable
-                // from the nav links above it but quieter than the primary
-                // CTA on the right. Was variant="ghost" before — too text-only,
-                // visually merged with the nav strip.
+                // Hand-rolled (NOT buttonVariants outline) because the shared
+                // Button primitive's outline variant carries `dark:bg-input/30
+                // dark:hover:bg-input/50` rules. The site forces html.dark for
+                // the workspace's Synthetix theme; under that root .dark scope
+                // even the marketing-layer ink tokens get the dark: variant
+                // applied, which collapsed this button's background to 30%
+                // alpha and pushed the text into "barely visible gray" against
+                // the cream header. Bypassing buttonVariants pins explicit
+                // ink-theme colors regardless of html.dark.
                 className={cn(
-                  buttonVariants({ variant: "outline", size: "sm" }),
-                  "hidden h-8 px-3 font-medium sm:inline-flex",
-                  "border-[color:var(--cinnabar,#C73E3A)]/35 text-foreground/85",
-                  "hover:border-[color:var(--cinnabar,#C73E3A)]/70 hover:bg-[color:var(--cinnabar-soft,rgba(199,62,58,0.08))] hover:text-[color:var(--cinnabar,#C73E3A)]",
+                  "hidden sm:inline-flex items-center justify-center gap-1.5",
+                  "h-8 px-3 rounded-[10px] text-[0.8rem] font-semibold",
+                  "border-2 transition-colors",
+                  "border-[color:var(--cinnabar,#C73E3A)]/55",
+                  "bg-[color:var(--ink-paper-2,#EDE6D6)]",
+                  "text-[color:var(--ink-black,#1A1A1A)]",
+                  "hover:border-[color:var(--cinnabar,#C73E3A)]",
+                  "hover:bg-[color:var(--cinnabar-soft,rgba(199,62,58,0.08))]",
+                  "hover:text-[color:var(--cinnabar,#C73E3A)]",
+                  "focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[color:var(--cinnabar,#C73E3A)]",
                 )}
               >
                 登录

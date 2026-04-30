@@ -14,14 +14,17 @@ export default function RegisterPage() {
   return (
     <div className="w-full max-w-md px-4 py-10">
       <div className="mb-8 text-center">
-        <div className="mb-4 flex justify-center">
-          <BrandMark size={44} />
+        <div className="mb-5 flex justify-center">
+          <BrandMark size={52} />
         </div>
-        <h1 className="text-2xl font-semibold tracking-tight text-foreground">
+        <p className="ink-heading text-xs uppercase tracking-widest text-[color:var(--cinnabar,#C73E3A)]">
+          开始本地化
+        </p>
+        <h1 className="ink-display mt-2 text-3xl tracking-tight text-foreground sm:text-4xl">
           注册 AIVideoTrans
         </h1>
-        <p className="mt-2 text-sm text-muted-foreground">
-          使用手机号验证码注册,新用户需设置登录密码
+        <p className="mt-3 zh-body text-sm text-muted-foreground">
+          使用手机号验证码注册，新用户需设置登录密码
         </p>
       </div>
 

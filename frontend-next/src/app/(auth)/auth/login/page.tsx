@@ -18,13 +18,16 @@ export default function LoginPage() {
   return (
     <div className="w-full max-w-md px-4 py-10">
       <div className="mb-8 text-center">
-        <div className="mb-4 flex justify-center">
-          <BrandMark size={44} />
+        <div className="mb-5 flex justify-center">
+          <BrandMark size={52} />
         </div>
-        <h1 className="text-2xl font-semibold tracking-tight text-foreground">
+        <p className="ink-heading text-xs uppercase tracking-widest text-[color:var(--cinnabar,#C73E3A)]">
+          欢迎回来
+        </p>
+        <h1 className="ink-display mt-2 text-3xl tracking-tight text-foreground sm:text-4xl">
           登录 AIVideoTrans
         </h1>
-        <p className="mt-2 text-sm text-muted-foreground">
+        <p className="mt-3 zh-body text-sm text-muted-foreground">
           {mode === "password" ? "使用账号和密码登录" : "使用手机号验证码登录"}
         </p>
       </div>
