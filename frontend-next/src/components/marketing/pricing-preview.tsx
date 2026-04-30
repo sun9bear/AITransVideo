@@ -9,17 +9,20 @@ import { LinkButton } from "./link-button"
  */
 export function PricingPreview() {
   return (
-    <section className="marketing-reading-surface py-20 sm:py-24">
+    <section
+      id="pricing"
+      className="marketing-reading-surface py-20 sm:py-24"
+    >
       <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
         <div className="mx-auto max-w-2xl text-center">
           <p className="ink-heading text-xs uppercase tracking-widest text-[color:var(--cinnabar,#C73E3A)]">
             简单透明的定价
           </p>
           <h2 className="ink-display mt-3 text-3xl text-foreground sm:text-4xl">
-            只为你真正用到的分钟数买单
+            长视频也用得起的 AI 翻译配音
           </h2>
           <p className="mt-4 zh-body text-muted-foreground">
-            独创的增量重生成计费模式，改一句台词只扣一句的钱。
+            从个人试用到团队高频生产，按你真正需要的处理能力选择套餐。试用无需绑卡，任务失败不计费，修改片段不必重跑全片。
           </p>
         </div>
 

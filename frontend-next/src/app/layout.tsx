@@ -4,8 +4,12 @@ import { Toaster } from "@/components/ui/sonner"
 import { SessionProvider } from "@/components/providers/session-provider"
 
 export const metadata: Metadata = {
-  title: "AIVideoTrans",
-  description: "AI 视频翻译配音工作台",
+  title: {
+    default: "爱译视频 · 让世界视频开口说中文",
+    template: "%s · 爱译视频 AIVideoTrans",
+  },
+  description:
+    "面向中文创作者的 AI 视频翻译配音工作台。支持最长 3 小时视频，自动生成中文字幕、配音和多种交付结果，工作台里逐句修改，不满意就单段重生成。",
 }
 
 export default function RootLayout({

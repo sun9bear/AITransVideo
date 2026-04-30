@@ -50,11 +50,10 @@ export function ProductProof() {
             真实产品证明
           </p>
           <h2 className="ink-display mt-3 text-3xl text-foreground sm:text-4xl">
-            不是模板站，而是可创建任务并下载结果的工作台
+            不是一次性生成工具，而是可复核、可修改、可下载的工作台
           </h2>
           <p className="mt-4 zh-body text-muted-foreground">
-            AIVideoTrans 当前公开销售的是数字化视频本地化服务。用户在站内创建翻译任务、查看项目状态、下载配音结果与素材包，
-            不依赖人工发货或单页演示图。
+            爱译视频在站内提供完整的视频翻译配音流程：创建任务、查看进度、逐句复核、修改与重生成，最后下载配音视频、配音音频、字幕和素材包。下面的截图来自当前正在运行的产品界面。
           </p>
         </div>
 

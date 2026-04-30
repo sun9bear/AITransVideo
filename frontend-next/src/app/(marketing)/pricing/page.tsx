@@ -5,8 +5,8 @@ import { TrialBanner } from "@/components/marketing/trial-banner"
 import { Faq } from "@/components/marketing/faq"
 
 export const metadata: Metadata = {
-  title: "定价 · AIVideoTrans",
-  description: "AIVideoTrans 套餐与定价：Free / Plus / Pro 三档透明定价，支持免费试用。",
+  title: "定价 · 爱译视频 AIVideoTrans",
+  description: "长视频也用得起的 AI 翻译配音。Free / Plus / Pro 三档套餐，单条视频最长 180 分钟，无需绑卡，失败不计费，修改片段不必重跑全片。",
 }
 
 /**
@@ -31,10 +31,10 @@ export default function PricingPage() {
             定价
           </p>
           <h1 className="ink-display mt-3 text-4xl tracking-tight text-foreground sm:text-5xl">
-            简单透明，为实际产出买单
+            长视频也用得起的 AI 翻译配音
           </h1>
           <p className="mt-5 zh-body-lg text-muted-foreground">
-            三档套餐覆盖从个人尝试到团队稳定输出的不同需求。改一句台词只扣一句的钱，不为整条片子再付一次。
+            从个人试用到团队高频生产，按你真正需要的处理能力选择套餐。试用无需绑卡，任务失败不计费，修改片段不必重跑全片。
           </p>
         </div>
       </section>

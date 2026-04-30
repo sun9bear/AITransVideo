@@ -50,23 +50,23 @@ export function FinalCta() {
             开始本地化
           </p>
           <h2 className="ink-display mt-3 text-3xl text-foreground sm:text-4xl lg:text-5xl">
-            把你的下一支视频，
+            把下一支海外视频，
             <br className="hidden sm:block" />
-            交给精准对齐
+            变成中文配音版
           </h2>
           <p className="zh-body-lg mt-6 text-muted-foreground max-w-xl mx-auto">
-            免费开始，先验证对齐质量与剪映草稿导出，再决定是否升级。
+            上传视频，先生成一版，再逐句修改到适合发布。爱译视频，让世界视频开口说中文。
           </p>
 
           <div className="mt-9 flex flex-col items-center justify-center gap-3 sm:flex-row">
             <PrimaryCta className="min-w-[12rem]" />
             <LinkButton href="/pricing" variant="outline" className="min-w-[10rem]">
-              先看定价
+              查看定价
             </LinkButton>
           </div>
 
           <p className="mt-5 text-xs text-foreground/55">
-            无需绑卡 · 试用结束不会自动扣费
+            无需绑卡 · 7 天试用 · 失败不计费 · 支持长视频
           </p>
         </div>
 

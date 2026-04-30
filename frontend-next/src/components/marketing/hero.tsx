@@ -70,21 +70,19 @@ export function Hero() {
           <div
             className="md:col-span-7 md:pl-4 lg:pl-8 rounded-md bg-[rgba(245,240,230,0.95)] p-6 md:bg-[rgba(245,240,230,0.92)] md:p-8 lg:p-10 backdrop-blur-[2px] shadow-[0_8px_40px_-20px_rgba(26,26,26,0.18)]"
           >
-            {/* Pre-headline 钩子 — pain-point led */}
-            <p className="ink-heading text-sm md:text-base leading-relaxed text-foreground/70 max-w-xl">
-              长视频翻译总在三件事翻车 ——
-              <br className="hidden sm:block" />
-              口型对不上、改一句要重跑全片、剪辑师拿到的是死字幕
+            {/* Pre-headline — brand label + chinese-led positioning */}
+            <p className="ink-heading text-xs sm:text-sm uppercase tracking-[0.25em] text-[color:var(--cinnabar)]">
+              爱译视频 · AIVideoTrans
             </p>
 
-            {/* Display-class headline */}
+            {/* Display-class headline — slogan-as-headline */}
             <h1
-              className="ink-display mt-5 text-4xl sm:text-5xl lg:text-6xl leading-tight text-foreground"
+              className="ink-display mt-4 text-4xl sm:text-5xl lg:text-6xl leading-tight text-foreground"
               style={{ letterSpacing: "-0.01em" }}
             >
-              精准对齐的视频翻译，
-              <br />
-              直出剪映草稿
+              让世界视频，
+              <br className="hidden sm:block" />
+              开口说中文
             </h1>
 
             {/* Cinnabar accent rule — visual anchor between display and subhead */}
@@ -94,26 +92,26 @@ export function Hero() {
               aria-hidden="true"
             />
 
-            {/* Subhead — contrast positioning */}
+            {/* Subhead — long-video focus + multi-format + edit-anytime */}
             <p className="zh-body-lg mt-6 text-foreground/80 max-w-xl">
-              不是又一个 AI 配音工具。是把这三件事单独做对的中文创作者本地化工作台。
+              面向中文创作者的 AI 视频翻译配音工作台。支持最长 3 小时长视频，自动生成中文字幕、配音和多种交付结果。第一版不满意，可以在工作台里逐句修改，单句重生成。
             </p>
 
             {/* CTAs */}
             <div className="mt-9 flex flex-col items-start gap-3 sm:flex-row sm:items-center">
               <PrimaryCta className="min-w-[10rem]" />
               <a
-                href="#product-proof"
+                href="#pricing"
                 className="inline-flex items-center gap-1 text-sm font-medium text-foreground/80 hover:text-foreground transition-colors"
               >
-                查看 30 秒产品演示
+                查看套餐价格
                 <span aria-hidden="true">→</span>
               </a>
             </div>
 
-            {/* Trust line under CTAs */}
+            {/* Trust line under CTAs — emphasis on long-video support */}
             <p className="mt-5 text-xs text-foreground/55">
-              无需绑卡 · 试用结束不会自动扣费
+              无需绑卡 · 7 天试用 · 失败不计费 · 支持长视频
             </p>
           </div>
         </div>

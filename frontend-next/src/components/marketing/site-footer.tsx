@@ -21,7 +21,7 @@ export function SiteFooter() {
           <div className="space-y-3">
             <BrandLockup />
             <p className="max-w-sm text-sm text-muted-foreground">
-              专注长视频的 AI 翻译配音工作台，精准对齐，直出剪映草稿。
+              爱译视频，让世界视频开口说中文。专注长视频的 AI 翻译配音工作台，支持中文字幕、中文配音、多格式导出和逐句修改。
             </p>
           </div>
 
@@ -96,7 +96,7 @@ export function SiteFooter() {
         </div>
 
         <div className="mt-10 flex flex-col gap-3 border-t border-border/60 pt-6 text-xs text-muted-foreground sm:flex-row sm:items-start sm:justify-between">
-          <div>© {new Date().getFullYear()} AIVideoTrans · 专业视频本地化工作台</div>
+          <div>© {new Date().getFullYear()} 爱译视频 AIVideoTrans · 长视频翻译配音工作台</div>
           <div className="flex max-w-3xl flex-wrap gap-x-3 gap-y-1 sm:justify-end">
             <span>运营主体：{COMPANY_NAME}</span>
             <span aria-hidden="true">·</span>

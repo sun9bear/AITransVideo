@@ -10,22 +10,22 @@ const STEPS: Array<{ index: string; title: string; body: string }> = [
   {
     index: "01",
     title: "导入视频",
-    body: "上传您本人或已获授权的视频（本地文件或视频链接），系统自动完成 ASR 转写与说话人分离。",
+    body: "上传本地视频，或粘贴你有权处理的视频链接。适合访谈、课程、播客、演讲、知识类长视频。",
   },
   {
     index: "02",
-    title: "翻译与配音",
-    body: "选择目标语言与音色，支持 Express 快速模式和 Studio 精校模式。",
+    title: "生成第一版",
+    body: "系统自动完成语音识别、翻译、字幕生成和中文配音。先快速拿到一版可预览结果。",
   },
   {
     index: "03",
-    title: "人工复核",
-    body: "在时间轴上逐句校对译文与配音，命中的问题句可以单独重新生成。",
+    title: "工作台精修",
+    body: "逐句检查译文、字幕和配音。人名、术语、语气、断句不满意，直接修改并单独重生成。",
   },
   {
     index: "04",
-    title: "导出成片",
-    body: "一键导出剪映草稿工程，在剪映中继续精调字幕、转场与细节。",
+    title: "下载结果",
+    body: "下载中文配音视频、音频、字幕或素材包，用于发布；需要精剪时再进入剪映或其他剪辑软件。",
   },
 ]
 
@@ -38,10 +38,10 @@ export function WorkflowShowcase() {
             工作流
           </p>
           <h2 className="ink-display mt-3 text-3xl text-foreground sm:text-4xl">
-            从导入到导出，掌控每一个细节
+            从海外视频到中文成片，四步完成
           </h2>
           <p className="mt-4 zh-body text-muted-foreground">
-            四个步骤，每一步都可以人工介入，每一步都有明确的状态反馈。
+            每一步都可以暂停、检查、修改。AI 生成第一版，你决定哪些片段需要再调一次。
           </p>
         </div>
 
