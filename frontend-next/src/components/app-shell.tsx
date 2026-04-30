@@ -320,8 +320,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 {user.display_name}
               </span>
             )}
-            <div className="h-7 w-7 rounded-full bg-gradient-to-br from-violet-500 to-cyan-500 flex items-center justify-center">
-              <span className="text-[10px] font-bold text-white">
+            <div
+              className="h-7 w-7 rounded-full flex items-center justify-center"
+              style={{
+                backgroundColor: "color-mix(in oklab, var(--cinnabar) 14%, transparent)",
+                color: "var(--cinnabar)",
+                border: "1px solid color-mix(in oklab, var(--cinnabar) 35%, transparent)",
+              }}
+            >
+              <span className="text-[10px] font-semibold">
                 {user?.display_name?.[0]?.toUpperCase() || "U"}
               </span>
             </div>

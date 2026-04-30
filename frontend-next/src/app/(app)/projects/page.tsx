@@ -649,7 +649,16 @@ function ExpandedContent({
     case "waiting_for_review":
       return (
         <div className="space-y-3">
-          <div className="flex items-center gap-2 rounded-lg bg-amber-500/10 px-4 py-3 text-sm text-amber-400">
+          {/* Ochre soft banner — same family as the StatusBadge ochre pill,
+              consistent with the ink palette. Was bg-amber-500/10 hardcoded. */}
+          <div
+            className="flex items-center gap-2 rounded-lg px-4 py-3 text-sm"
+            style={{
+              backgroundColor: "color-mix(in oklab, var(--ochre) 12%, transparent)",
+              color: "var(--ochre)",
+              border: "1px solid color-mix(in oklab, var(--ochre) 30%, transparent)",
+            }}
+          >
             <AlertTriangle className="h-4 w-4 shrink-0" />
             需要审核
           </div>
@@ -669,11 +678,20 @@ function ExpandedContent({
       // user draft) and must route through the edit page's own二次确认 flow.
       return (
         <div className="space-y-3">
-          <div className="flex items-center gap-2 rounded-lg bg-violet-500/10 px-4 py-3 text-sm text-violet-400">
+          {/* Ochre soft banner matches the StatusBadge ochre pill for editing.
+              Was bg-violet-500/10 hardcoded. */}
+          <div
+            className="flex items-center gap-2 rounded-lg px-4 py-3 text-sm"
+            style={{
+              backgroundColor: "color-mix(in oklab, var(--ochre) 12%, transparent)",
+              color: "var(--ochre)",
+              border: "1px solid color-mix(in oklab, var(--ochre) 30%, transparent)",
+            }}
+          >
             <RefreshCw className="h-4 w-4 shrink-0" />
             你正在修改此任务
             {(job.editGeneration ?? 0) > 0 && (
-              <span className="text-xs text-violet-300/80">
+              <span className="text-xs opacity-75">
                 · 已完成 {job.editGeneration} 次修改
               </span>
             )}
@@ -690,7 +708,16 @@ function ExpandedContent({
     case "failed":
       return (
         <div className="space-y-3">
-          <div className="flex items-center gap-2 rounded-lg bg-red-500/10 px-4 py-3 text-sm text-red-400">
+          {/* Cinnabar soft banner matches the StatusBadge failed pill.
+              Was bg-red-500/10 hardcoded. */}
+          <div
+            className="flex items-center gap-2 rounded-lg px-4 py-3 text-sm"
+            style={{
+              backgroundColor: "color-mix(in oklab, var(--cinnabar) 12%, transparent)",
+              color: "var(--cinnabar)",
+              border: "1px solid color-mix(in oklab, var(--cinnabar) 30%, transparent)",
+            }}
+          >
             <AlertTriangle className="h-4 w-4 shrink-0" />
             {getUserFacingProgressMessage(job.progressMessage) ?? "处理失败"}
           </div>
