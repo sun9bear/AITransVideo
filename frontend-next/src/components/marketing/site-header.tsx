@@ -113,11 +113,16 @@ export function SiteHeader() {
                 className={cn(
                   buttonVariants({ variant: "default", size: "sm" }),
                   "h-8 px-3 transition-all duration-300",
-                  // Highlighted state: cinnabar ring halo + subtle elevation. The
-                  // ring uses the design token directly so it tracks any future
-                  // primary-color changes automatically.
+                  // Highlighted state: cinnabar pulsing halo via box-shadow.
+                  // We render the halo as a box-shadow rather than a ring so
+                  // it bleeds OUTSIDE the header bar without being clipped on
+                  // mobile (where the header has tight vertical padding and
+                  // a ring + ring-offset gets cut). The keyframe pulses the
+                  // outer cinnabar glow so the eye catches it the moment the
+                  // visitor scrolls past hero. Respects prefers-reduced-motion
+                  // via the global rule in globals.css §base.
                   pastHero
-                    ? "ring-2 ring-[color:var(--cinnabar,#C73E3A)]/35 ring-offset-2 ring-offset-background shadow-md scale-[1.02]"
+                    ? "shadow-none animate-[pulse-cinnabar_2.2s_ease-in-out_infinite]"
                     : "shadow-none",
                 )}
               >

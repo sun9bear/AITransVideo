@@ -430,6 +430,31 @@
   letter-spacing: -0.01em;
 }
 
+/* Sticky-CTA "scroll past hero" pulse — a cinnabar halo that radiates outward
+   then fades, drawing the eye to the conversion button once the visitor has
+   committed to scrolling. Used by site-header.tsx via animate-[pulse-cinnabar].
+   The keyframe uses two box-shadow stacks: an inner ring that pulses outward
+   and dissolves, plus a constant outer glow that gives the button a warm
+   ambient halo. Reduced-motion users see no animation (clamped by the
+   prefers-reduced-motion rule above). */
+@keyframes pulse-cinnabar {
+  0% {
+    box-shadow:
+      0 0 0 0 rgba(199, 62, 58, 0.55),
+      0 0 14px 2px rgba(199, 62, 58, 0.25);
+  }
+  60% {
+    box-shadow:
+      0 0 0 10px rgba(199, 62, 58, 0),
+      0 0 22px 5px rgba(199, 62, 58, 0.22);
+  }
+  100% {
+    box-shadow:
+      0 0 0 0 rgba(199, 62, 58, 0),
+      0 0 14px 2px rgba(199, 62, 58, 0.25);
+  }
+}
+
 /* Chinese body text: slightly larger, more line-height for long-form reading */
 .zh-body {
   font-size: 1rem;

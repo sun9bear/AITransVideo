@@ -59,9 +59,16 @@ export function Hero() {
           {/* Right half: text canvas with rice-paper card backdrop. The card
               gives text a guaranteed-legible surface regardless of what's
               behind, and visually echoes a folded paper laid over the
-              ink-wash backdrop — extending the metaphor rather than fighting it. */}
+              ink-wash backdrop — extending the metaphor rather than fighting it.
+
+              Mobile: card is opaque-er (0.95) and uses tighter padding so the
+              full headline still fits comfortably above the fold. Desktop drops
+              opacity to 0.92 for the painted-paper translucency effect to
+              actually read. Fixes a prior mobile readability bug where the
+              hero text fell directly on the ink-splatter half of the image
+              with poor contrast. */}
           <div
-            className="md:col-span-7 md:pl-4 lg:pl-8 rounded-md md:bg-[rgba(245,240,230,0.92)] md:p-8 lg:p-10 md:backdrop-blur-[2px] md:shadow-[0_8px_40px_-20px_rgba(26,26,26,0.18)]"
+            className="md:col-span-7 md:pl-4 lg:pl-8 rounded-md bg-[rgba(245,240,230,0.95)] p-6 md:bg-[rgba(245,240,230,0.92)] md:p-8 lg:p-10 backdrop-blur-[2px] shadow-[0_8px_40px_-20px_rgba(26,26,26,0.18)]"
           >
             {/* Pre-headline 钩子 — pain-point led */}
             <p className="ink-heading text-sm md:text-base leading-relaxed text-foreground/70 max-w-xl">
