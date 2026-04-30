@@ -539,24 +539,14 @@ function ProjectCard({
           </div>
         </div>
 
-        {/* Collapse-level actions */}
+        {/* Collapse-level actions — note: 修改 button used to live here too,
+            but the user reported the top row was too crowded. It now renders
+            inside <ResultMediaCard /> at the right end of the download row
+            for succeeded jobs. See ExpandedContent below. */}
         <div
           className="flex items-center gap-1.5 shrink-0"
           onClick={(e) => e.stopPropagation()}
         >
-          {showEditShortcut && (
-            // D43: 任务卡右上角"修改"直达按钮。仅 Studio + succeeded + feature flag
-            // 启用时渲染；Phase 1 T1-3 落地 /workspace/{id}/edit 路由后即可跳转。
-            <Link
-              href={`/workspace/${job.id}/edit`}
-              className="inline-flex items-center gap-1 rounded-md border border-border bg-background/60 px-2 py-1 text-xs text-foreground transition hover:bg-accent/40"
-              title="修改此任务"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <RefreshCw className="h-3 w-3" />
-              修改
-            </Link>
-          )}
           <CardActions
             job={job}
             collapsed
@@ -600,9 +590,23 @@ function ExpandedContent({
   onReCreate: () => void
   isCancelling: boolean
 }) {
+  // Edit shortcut is gated on the same predicate that the collapsed-row
+  // shortcut used (Studio + succeeded + post-edit feature flag). Passing
+  // undefined when ineligible keeps ResultMediaCard from rendering the button.
+  const editShortcutHref =
+    POST_EDIT_ENABLED && job.serviceMode === "studio" && job.status === "succeeded"
+      ? `/workspace/${job.id}/edit`
+      : undefined
+
   switch (job.status) {
     case "succeeded":
-      return <ResultMediaCard jobId={job.id} serviceMode={job.serviceMode} />
+      return (
+        <ResultMediaCard
+          jobId={job.id}
+          serviceMode={job.serviceMode}
+          editHref={editShortcutHref}
+        />
+      )
 
     case "running":
       return (

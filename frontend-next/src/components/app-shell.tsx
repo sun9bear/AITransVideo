@@ -103,13 +103,25 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     // Toggle the legacy .dark class on html so any shadcn `dark:` utility
-    // still resolves correctly. The data-theme attribute below is what
-    // actually swaps surfaces inside the (app) scope.
+    // still resolves correctly. The data-theme attribute drives the actual
+    // surface tokens inside the (app) scope.
     document.documentElement.classList.toggle("dark", darkMode)
+    // Also stamp the theme on html itself so Radix/base-ui portals (Dialog,
+    // Toast, Tooltip, DropdownMenu — all of which render to document.body
+    // via Portal) pick up the right ink token family. Without this, the
+    // (app) wrapper's data-theme is on a non-ancestor of the portal root,
+    // so portal content falls through to the default .dark steel-blue tokens.
+    // Clean up on unmount so navigating to (marketing) / (auth) doesn't
+    // leave a stale data-theme on html — those route groups define their
+    // own scope on their layout divs.
+    document.documentElement.setAttribute("data-theme", darkMode ? "ink-dark" : "ink")
     try {
       window.localStorage.setItem("aivt-app-dark-mode", darkMode ? "1" : "0")
     } catch {
       // ignore — see above
+    }
+    return () => {
+      document.documentElement.removeAttribute("data-theme")
     }
   }, [darkMode])
 

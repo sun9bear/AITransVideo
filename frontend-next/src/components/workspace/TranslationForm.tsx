@@ -320,42 +320,48 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
             )}
           </div>
 
-          <div className="h-px bg-muted/40" />
+          {/* Advanced options (转录方案 / 说话人数) — temporarily hidden per
+              user request: 目前暂时用不到. The selects stay mounted so their
+              default state values (assemblyai / auto) flow through to
+              submitJob(). Restore by removing the `hidden` wrapper. */}
+          <div className="hidden">
+            <div className="h-px bg-muted/40" />
 
-          {/* Options */}
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div className="space-y-2">
-              <span className="text-xs font-medium text-muted-foreground block">转录方案</span>
-              <div className="group rounded-xl border border-border bg-muted/30 transition hover:border-primary/30 focus-within:border-primary/40">
-                <select
-                  className="w-full rounded-xl bg-transparent px-4 py-3 text-sm text-foreground focus:outline-none input-focus-ring"
-                  value={transcriptionMethod}
-                  onChange={(e) => setTranscriptionMethod(e.target.value as "assemblyai" | "gemini")}
-                  disabled={isBlockedByConcurrency || submitState === "submitting"}
-                >
-                  <option value="assemblyai">AssemblyAI（音频上传）</option>
-                  <option value="gemini">Gemini 多模态（≤30分钟）</option>
-                </select>
+            {/* Options */}
+            <div className="mt-4 grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <span className="text-xs font-medium text-muted-foreground block">转录方案</span>
+                <div className="group rounded-xl border border-border bg-muted/30 transition hover:border-primary/30 focus-within:border-primary/40">
+                  <select
+                    className="w-full rounded-xl bg-transparent px-4 py-3 text-sm text-foreground focus:outline-none input-focus-ring"
+                    value={transcriptionMethod}
+                    onChange={(e) => setTranscriptionMethod(e.target.value as "assemblyai" | "gemini")}
+                    disabled={isBlockedByConcurrency || submitState === "submitting"}
+                  >
+                    <option value="assemblyai">AssemblyAI（音频上传）</option>
+                    <option value="gemini">Gemini 多模态（≤30分钟）</option>
+                  </select>
+                </div>
               </div>
-            </div>
 
-            <div className="space-y-2">
-              <span className="text-xs font-medium text-muted-foreground block">说话人数</span>
-              <div className="group rounded-xl border border-border bg-muted/30 transition hover:border-primary/30 focus-within:border-primary/40">
-                <select
-                  className="w-full rounded-xl bg-transparent px-4 py-3 text-sm text-foreground focus:outline-none input-focus-ring"
-                  value={speakers}
-                  onChange={(e) => setSpeakers(e.target.value)}
-                  disabled={isBlockedByConcurrency || submitState === "submitting"}
-                >
-                  <option value="auto">自动</option>
-                  <option value="1">1 人</option>
-                  <option value="2">2 人</option>
-                  <option value="3">3 人</option>
-                  <option value="4">4 人</option>
-                  <option value="5">5 人</option>
-                  <option value="6">6 人</option>
-                </select>
+              <div className="space-y-2">
+                <span className="text-xs font-medium text-muted-foreground block">说话人数</span>
+                <div className="group rounded-xl border border-border bg-muted/30 transition hover:border-primary/30 focus-within:border-primary/40">
+                  <select
+                    className="w-full rounded-xl bg-transparent px-4 py-3 text-sm text-foreground focus:outline-none input-focus-ring"
+                    value={speakers}
+                    onChange={(e) => setSpeakers(e.target.value)}
+                    disabled={isBlockedByConcurrency || submitState === "submitting"}
+                  >
+                    <option value="auto">自动</option>
+                    <option value="1">1 人</option>
+                    <option value="2">2 人</option>
+                    <option value="3">3 人</option>
+                    <option value="4">4 人</option>
+                    <option value="5">5 人</option>
+                    <option value="6">6 人</option>
+                  </select>
+                </div>
               </div>
             </div>
           </div>

@@ -1,23 +1,53 @@
+import type { CSSProperties } from "react"
 import { JOB_STATUS_LABELS, type JobStatus } from "@/types/jobs"
 
-const statusStyles: Record<string, string> = {
-  succeeded: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400",
-  failed: "bg-red-500/15 text-red-600 dark:text-red-400",
-  cancelled: "bg-muted text-muted-foreground",
-  // running uses project secondary color (cyan #06B6D4). Keeps parity with the
-  // "正在生成" feel — not the generic blue that doesn't exist in DESIGN.md.
-  running: "bg-cyan-500/15 text-cyan-600 dark:text-cyan-400",
-  queued: "bg-muted text-muted-foreground",
-  waiting_for_review: "bg-amber-500/15 text-amber-600 dark:text-amber-400",
-  // editing uses project primary color (violet #8B5CF6) to signal a user-owned
-  // session that the user must resume or abandon. See plan 2026-04-18 §11.6.
-  editing: "bg-violet-500/15 text-violet-600 dark:text-violet-400",
-  // 2026-04-21: purged = gateway 7d TTL soft-delete. Neutral/muted styling
-  // matches cancelled — the job is "past, done, cold storage" from the
-  // user's perspective, not an error condition.
-  purged: "bg-muted text-muted-foreground",
-  idle: "bg-muted text-muted-foreground",
-  stopping: "bg-muted text-muted-foreground",
+/**
+ * Status pill — ink-aesthetic soft style: tinted bg + matching border + same-
+ * hue text, inspired by the 23 个克隆 cinnabar pill the user pointed at as the
+ * target style. Tied to ink theme tokens so it harmonizes in both ink (light)
+ * and ink-dark surfaces; the legacy emerald/red/amber/violet/cyan palette was
+ * pulled because those Tailwind named colors don't sit in either ink scope.
+ *
+ * Color semantics:
+ *   succeeded            → bamboo  (success)
+ *   running              → ochre   (warm "in progress")
+ *   waiting_for_review   → ochre   (attention required)
+ *   editing              → ochre   (user-owned active session)
+ *   failed               → cinnabar (error / destructive — also brand red)
+ *   queued/cancelled/    → muted gray (neutral / past)
+ *     purged/idle/stopping
+ */
+
+type Tone = "bamboo" | "ochre" | "cinnabar" | "muted"
+
+const STATUS_TONE: Record<string, Tone> = {
+  succeeded: "bamboo",
+  running: "ochre",
+  waiting_for_review: "ochre",
+  editing: "ochre",
+  failed: "cinnabar",
+  cancelled: "muted",
+  queued: "muted",
+  purged: "muted",
+  idle: "muted",
+  stopping: "muted",
+}
+
+function toneStyle(tone: Tone): CSSProperties {
+  if (tone === "muted") {
+    return {
+      backgroundColor: "color-mix(in oklab, var(--muted-foreground) 12%, transparent)",
+      color: "var(--muted-foreground)",
+      border: "1px solid color-mix(in oklab, var(--muted-foreground) 25%, transparent)",
+    }
+  }
+  // bamboo / ochre / cinnabar — all defined in both ink theme blocks.
+  const cssVar = `var(--${tone})`
+  return {
+    backgroundColor: `color-mix(in oklab, ${cssVar} 12%, transparent)`,
+    color: cssVar,
+    border: `1px solid color-mix(in oklab, ${cssVar} 35%, transparent)`,
+  }
 }
 
 export interface StatusBadgeProps {
@@ -35,10 +65,13 @@ export function StatusBadge({ status, editGeneration }: StatusBadgeProps) {
   if (status === "running" && editGeneration && editGeneration > 0) {
     label = `重合成中 · 第 ${editGeneration} 次修改`
   }
-  const style = statusStyles[status] ?? "bg-muted text-muted-foreground"
+  const tone: Tone = STATUS_TONE[status] ?? "muted"
 
   return (
-    <span className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ${style}`}>
+    <span
+      className="inline-flex shrink-0 items-center rounded-full px-3 py-0.5 text-xs font-medium whitespace-nowrap"
+      style={toneStyle(tone)}
+    >
       {label}
     </span>
   )

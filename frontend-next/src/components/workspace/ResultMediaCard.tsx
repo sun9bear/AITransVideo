@@ -12,7 +12,8 @@ import {
   type MaterialsAvailability,
 } from "@/lib/api/downloads"
 import { useBackgroundTask } from "@/lib/react/useBackgroundTask"
-import { Download, Video, Music, Package, X, Film, Loader2, RotateCcw, CheckCircle2 } from "lucide-react"
+import { Download, Video, Music, Package, X, Film, Loader2, RotateCcw, CheckCircle2, RefreshCw } from "lucide-react"
+import Link from "next/link"
 import { toast } from "sonner"
 
 interface ResultMediaCardProps {
@@ -23,6 +24,13 @@ interface ResultMediaCardProps {
    * 见 docs/plans/2026-04-18-express-studio-output-filter-plan.md
    */
   serviceMode?: 'express' | 'studio'
+  /**
+   * When provided, renders a "修改" shortcut button at the right end of the
+   * download row (ml-auto). Lets the projects-list card move 修改 out of the
+   * cramped top header and into the bottom action row. Pass `null` / undefined
+   * to hide. Plan D43 (post-edit feature flag gate enforced by caller).
+   */
+  editHref?: string
 }
 
 const MATERIAL_OPTIONS = [
@@ -35,7 +43,7 @@ const MATERIAL_OPTIONS = [
 
 type MaterialItemKey = (typeof MATERIAL_OPTIONS)[number]["key"]
 
-export function ResultMediaCard({ jobId, serviceMode }: ResultMediaCardProps) {
+export function ResultMediaCard({ jobId, serviceMode, editHref }: ResultMediaCardProps) {
   const isExpress = serviceMode === 'express'
   const [availability, setAvailability] = useState<MaterialsAvailability | null>(null)
   const [loading, setLoading] = useState(true)
@@ -178,8 +186,8 @@ export function ResultMediaCard({ jobId, serviceMode }: ResultMediaCardProps) {
             ) : null}
           </div>
 
-          {/* Download buttons */}
-          <div className="flex flex-wrap gap-2">
+          {/* Download buttons + (optional) 修改 shortcut on the right */}
+          <div className="flex flex-wrap items-center gap-2">
             {hasVideo && videoDownloadUrl && (
               <a href={videoDownloadUrl} download>
                 <Button variant="outline" size="sm" className="gap-2">
@@ -204,6 +212,24 @@ export function ResultMediaCard({ jobId, serviceMode }: ResultMediaCardProps) {
                 onOpenDialog={() => setShowPackDialog(true)}
                 onDownload={handleDownloadPack}
               />
+            )}
+            {editHref && (
+              // ml-auto pushes 修改 to the right edge of the download row.
+              // Cinnabar tinted soft pill style — distinct from the gray
+              // download buttons but quieter than a primary CTA.
+              <Link
+                href={editHref}
+                className="ml-auto inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors"
+                style={{
+                  backgroundColor: "var(--cinnabar-soft, rgba(199,62,58,0.10))",
+                  color: "var(--cinnabar, #C73E3A)",
+                  border: "1px solid color-mix(in oklab, var(--cinnabar) 35%, transparent)",
+                }}
+                title="修改此任务"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                修改
+              </Link>
             )}
           </div>
         </div>

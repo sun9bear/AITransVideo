@@ -172,7 +172,19 @@
    than the steel-blue dark variant the .dark class would otherwise apply.
    See: docs/plans/2026-04-29-marketing-redesign-ink-aesthetic.md §3 layering
    ========================================== */
-[data-theme="ink-dark"] {
+[data-theme="ink-dark"]:not(.__never__) {
+  /* Specificity hack via :not(.__never__) — bumps the rule from (0,1,0) to
+     (0,2,0). When AppShell stamps `data-theme="ink-dark"` directly onto
+     <html>, this rule has to beat the legacy `.dark` block (0,1,0) that
+     comes later in source. Without the bump, the ties on specificity tie-
+     break by source order and `.dark` wins, leaving dialogs/popovers (which
+     portal to body and inherit vars from html) on the steel-blue tokens.
+     `.__never__` is a class no element has, so :not() always passes. The
+     same pattern is reused on the ::before / > * rules below for
+     consistency in scope, though those don't conflict with .dark.
+     Tailwind v4 stripped the cleaner `html[data-theme="ink-dark"]` form
+     during compilation, so this is the path that survives. */
+
   /* Neutral charcoal family — chroma 0 (no yellow / no blue tint), so the
      surface reads as pure ink wash. User feedback: 深色背景不要带黄，再浅
      一点的灰，整体要有水墨画的层次感. Background luminance lifted from 0.18
