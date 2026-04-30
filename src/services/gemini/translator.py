@@ -28,12 +28,10 @@ DEFAULT_MODEL_NAME = "gemini-3.1-pro-preview"
 DEFAULT_SDK_BACKEND = "google-genai"
 LEGACY_SDK_BACKEND = "google-generativeai"
 DEFAULT_TEMPERATURE = 0.3
-# Gemini 3.1 Pro supports up to 65,536 output tokens (64K); the SDK default is
-# only 8,192 which gets truncated when (a) batch JSON is large or (b) thinking
-# tokens consume 20K+ of the budget. Bumped to 65,536 to match transcriber.py
-# and avoid "Gemini returned invalid JSON" fallbacks during long s3_translate
-# batches. (transcriber.py:29 also uses 65,536 for the same reason.)
-DEFAULT_MAX_OUTPUT_TOKENS = 65536
+# Gemini accepts maxOutputTokens in the half-open range [1, 65536).
+# Keep the 64K intent, but never send the exclusive upper bound.
+GEMINI_MAX_OUTPUT_TOKENS_EXCLUSIVE_UPPER_BOUND = 65536
+DEFAULT_MAX_OUTPUT_TOKENS = GEMINI_MAX_OUTPUT_TOKENS_EXCLUSIVE_UPPER_BOUND - 1
 DEFAULT_BATCH_SIZE = 15
 PARALLEL_WORKERS = 3
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 120
@@ -361,7 +359,7 @@ class GeminiTranslator:
         self.api_key = normalized_api_key
         self.model_name = _normalize_optional_text(model_name) or DEFAULT_MODEL_NAME
         self.temperature = float(temperature)
-        self.max_output_tokens = int(max_output_tokens)
+        self.max_output_tokens = _normalize_max_output_tokens(max_output_tokens)
         self.sdk_backend = _normalize_sdk_backend(sdk_backend)
         self.llm_router = llm_router
         self.speaker_infer_prompt_template = get_effective_speaker_infer_prompt_template(
@@ -1155,6 +1153,7 @@ class GeminiTranslator:
             "s5_rewrite_strict": "rewrite_strict",
             "s5_short_content_compact": "rewrite",
             "s2_infer": "translate",  # speaker inference uses same model as translate
+            "content_compliance": "content_compliance",
         }
         prompt_key = prompt_key_map.get(task)
         mode = getattr(self, "_service_mode", None)
@@ -1595,7 +1594,9 @@ def load_gemini_config() -> dict[str, object]:
         "api_key_env_var": api_key_env_var,
         "model_name": _normalize_optional_text(section.get("model_name")) or DEFAULT_MODEL_NAME,
         "temperature": _coerce_float(section.get("temperature"), default=DEFAULT_TEMPERATURE),
-        "max_output_tokens": _coerce_int(section.get("max_output_tokens"), default=DEFAULT_MAX_OUTPUT_TOKENS),
+        "max_output_tokens": _normalize_max_output_tokens(
+            section.get("max_output_tokens")
+        ),
         "sdk_backend": _normalize_sdk_backend(sdk_backend),
         "speaker_infer_prompt_template": speaker_infer_prompt_template,
         "translation_prompt_template": translation_prompt_template,
@@ -2500,6 +2501,15 @@ def _coerce_optional_int(value: object) -> int | None:
 def _coerce_int(value: object, *, default: int) -> int:
     coerced = _coerce_optional_int(value)
     return default if coerced is None else coerced
+
+
+def _normalize_max_output_tokens(value: object) -> int:
+    coerced = _coerce_optional_int(value)
+    normalized = DEFAULT_MAX_OUTPUT_TOKENS if coerced is None else coerced
+    return min(
+        max(1, normalized),
+        GEMINI_MAX_OUTPUT_TOKENS_EXCLUSIVE_UPPER_BOUND - 1,
+    )
 
 
 def _coerce_float(value: object, *, default: float) -> float:

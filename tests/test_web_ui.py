@@ -29,6 +29,9 @@ from services.web_ui import (
     save_web_ui_settings,
     set_translation_primary_model,
 )
+from services.web_ui.translation_review import (
+    _apply_speaker_names_update_from_translation_review,
+)
 
 
 def _write_test_config(path: Path) -> None:
@@ -2229,6 +2232,34 @@ def test_approve_translation_review_submission_writes_segments_json(tmp_path: Pa
     assert first_segment["cn_text"] == "批准后的翻译"
     assert "translation_confirmed" not in first_segment
     assert "rewrite_requested" not in first_segment
+
+
+def test_translation_review_speaker_name_update_writes_downstream_files(
+    tmp_path: Path,
+) -> None:
+    project_dir = _write_test_process_project(
+        tmp_path,
+        project_name="translation_review_speaker_name_update",
+        youtube_url="https://www.youtube.com/watch?v=speaker-name-update",
+    )
+
+    _apply_speaker_names_update_from_translation_review(
+        project_dir=project_dir,
+        speaker_names_update={"speaker_a": "Diana Hu"},
+    )
+
+    review_state = json.loads((project_dir / "review_state.json").read_text(encoding="utf-8"))
+    transcript = json.loads(
+        (project_dir / "transcript" / "transcript.json").read_text(encoding="utf-8")
+    )
+    saved_segments = json.loads(
+        (project_dir / "translation" / "segments.json").read_text(encoding="utf-8")
+    )["segments"]
+
+    speaker_payload = review_state["stages"]["speaker_review"]["payload"]
+    assert speaker_payload["speaker_names"]["speaker_a"] == "Diana Hu"
+    assert saved_segments[0]["display_name"] == "Diana Hu"
+    assert transcript["lines"][0]["speaker_name"] == "Diana Hu"
 
 
 def test_save_speaker_review_submission_persists_confirmation_state(tmp_path: Path) -> None:

@@ -142,6 +142,7 @@ _DEFAULTS: dict[str, str] = {
     "rewrite": "deepseek",
     "rewrite_strict": "gemini_pro",
     "probe_translate": "deepseek",
+    "content_compliance": "gemini_31_flash_lite",
 }
 
 # ---------------------------------------------------------------------------
@@ -198,7 +199,7 @@ def get_prompt_model(mode: str, prompt_key: str) -> str:
     Parameters
     ----------
     mode : "studio" | "express"
-    prompt_key : "pass1" | "pass2" | "pass3" | "translate" | "rewrite"
+    prompt_key : "pass1" | "pass2" | "pass3" | "translate" | "rewrite" | "content_compliance"
 
     Returns
     -------
@@ -275,11 +276,49 @@ def get_fallback_candidates(
     return candidates
 
 
+def get_peer_model_candidates(
+    model_name: str,
+    prompt_key: str,
+    *,
+    cost_rank_delta: int = 1,
+) -> list[str]:
+    """Get enabled alternate models with a similar cost rank for one prompt.
+
+    Used by content-compliance review after the selected model has failed its
+    immediate retry.  This avoids jumping from a low-cost policy check straight
+    to a much more expensive model while still giving the stage a second route.
+    """
+    current = MODEL_REGISTRY.get(model_name, {})
+    if not current:
+        return []
+    current_rank = int(current.get("cost_rank", 99))
+    allowed = {
+        str(item.get("value"))
+        for item in get_available_models_for_prompt(prompt_key)
+        if item.get("value")
+    }
+    candidates: list[str] = []
+    for name, info in MODEL_REGISTRY.items():
+        if name == model_name or name not in allowed:
+            continue
+        rank = int(info.get("cost_rank", 99))
+        if abs(rank - current_rank) <= max(0, int(cost_rank_delta)):
+            candidates.append(name)
+    candidates.sort(
+        key=lambda n: (
+            abs(int(MODEL_REGISTRY[n].get("cost_rank", 99)) - current_rank),
+            int(MODEL_REGISTRY[n].get("cost_rank", 99)),
+            n,
+        )
+    )
+    return candidates
+
+
 def get_available_models_for_prompt(prompt_key: str) -> list[dict]:
     """Get the list of selectable models for a prompt key (for admin UI).
 
     Pass 1/3 require audio → only audio-capable models.
-    Pass 2/translate/rewrite → all models.
+    Pass 2/translate/rewrite/content_compliance → all models.
     Disabled models are excluded.
     """
     requires_audio = prompt_key in ("pass1", "pass3")

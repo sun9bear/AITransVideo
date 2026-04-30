@@ -67,6 +67,7 @@ class DownloadResult:
     duration_ms: int
     url: str
     description: str = ""
+    language: str = ""
 
 
 def load_youtube_download_config() -> dict[str, object]:
@@ -133,7 +134,13 @@ class YouTubeDownloader:
                 ),
             )
 
-        downloaded_video_path, video_title, duration_ms, description = self._download_video(
+        (
+            downloaded_video_path,
+            video_title,
+            duration_ms,
+            description,
+            language,
+        ) = self._download_video(
             request.url,
             str(output_root),
             cookies_from_browser=request.cookies_from_browser,
@@ -150,6 +157,7 @@ class YouTubeDownloader:
             duration_ms=duration_ms,
             url=request.url,
             description=description,
+            language=language,
         )
         self._write_metadata(metadata_path, result)
         return result
@@ -163,7 +171,7 @@ class YouTubeDownloader:
         cookie_file: str | None = None,
         max_retries: int = 2,
         retry_backoff_seconds: float = 1.5,
-    ) -> tuple[str, str, int, str]:
+    ) -> tuple[str, str, int, str, str]:
         output_root = Path(output_dir).resolve(strict=False)
         video_dir = output_root / "video"
         video_dir.mkdir(parents=True, exist_ok=True)
@@ -218,7 +226,14 @@ class YouTubeDownloader:
         video_title = str(info.get("title") or url)
         duration_ms = self._duration_to_ms(info.get("duration"))
         description = str(info.get("description") or "")
-        return str(video_path.resolve(strict=False)), video_title, duration_ms, description
+        language = str(info.get("language") or "").strip()
+        return (
+            str(video_path.resolve(strict=False)),
+            video_title,
+            duration_ms,
+            description,
+            language,
+        )
 
     def _build_download_attempts(
         self,
@@ -390,6 +405,7 @@ class YouTubeDownloader:
                 duration_ms=self._duration_to_ms(payload.get("duration_ms"), treat_as_seconds=False),
                 url=str(payload.get("url") or url),
                 description=str(payload.get("description") or ""),
+                language=str(payload.get("language") or ""),
             )
 
         return DownloadResult(

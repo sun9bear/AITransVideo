@@ -278,7 +278,7 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
       {submitError ? <ErrorBanner message={submitError} /> : null}
 
       {/* Speaker identity confirmation */}
-      {resource.speakerOptions.length > 1 ? (
+      {resource.speakerOptions.length > 0 ? (
         <section className="surface-card p-4">
           <div className="space-y-3">
             <div className="flex items-center gap-2">
@@ -349,7 +349,19 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
                       {resource.speakerOptions.map((o) => <option key={o.id} value={o.id}>{speakerNames[o.id] ?? o.displayName}</option>)}
                     </select>
                   ) : (
-                    <p className="text-sm font-semibold text-foreground">{speakerNames[item.speakerId] ?? (item.displayName || item.speakerId)}</p>
+                    <input
+                      aria-label="修改说话人名字"
+                      className="form-input min-w-[140px] py-1 text-sm font-semibold"
+                      onChange={(event) => {
+                        const speakerId = item.speakerId
+                        setSpeakerNames((prev) => ({
+                          ...prev,
+                          [speakerId]: event.currentTarget.value,
+                        }))
+                      }}
+                      placeholder={item.speakerId}
+                      value={speakerNames[item.speakerId] ?? (item.displayName || item.speakerId)}
+                    />
                   )}
 
                   <div className="ml-auto flex items-center gap-2">
@@ -358,8 +370,8 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
                     <button
                       className={
                         splittingSegmentId === item.segmentId
-                          ? 'rounded-lg border-2 px-4 py-1.5 text-xs font-bold transition shadow-md border-[color:var(--ochre)] bg-[color:var(--ochre)] text-[color:var(--primary-foreground)] hover:opacity-90'
-                          : 'rounded-lg border px-3 py-1 text-xs font-medium transition border-[color:var(--cinnabar)]/30 bg-[color:var(--cinnabar)]/10 text-[color:var(--cinnabar)] hover:bg-[color:var(--cinnabar)]/20 hover:border-[color:var(--cinnabar)]/50'
+                          ? 'rounded-lg border-2 border-amber-500 bg-amber-500 px-4 py-1.5 text-xs font-bold text-white transition hover:bg-amber-600 hover:border-amber-600 shadow-md'
+                          : 'rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-3 py-1 text-xs font-medium text-cyan-400 transition hover:bg-cyan-500/20 hover:border-cyan-500/50'
                       }
                       onClick={() => {
                         if (splittingSegmentId === item.segmentId) { setSplittingSegmentId(null) } else {
@@ -379,7 +391,7 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
 
                 {/* Preview error */}
                 {segPreviewError ? (
-                  <p className="mt-1 text-xs text-[color:var(--cinnabar)]">{segPreviewError}</p>
+                  <p className="mt-1 text-xs text-red-400">{segPreviewError}</p>
                 ) : null}
 
                 {/* Source text + play source button */}
@@ -387,7 +399,7 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
                   <div className="flex items-center justify-between mb-1">
                     <span className="text-xs font-medium text-muted-foreground">原文</span>
                     <button
-                      className="rounded-lg px-3 py-1 text-xs font-medium transition border border-[color:var(--cinnabar)]/30 bg-[color:var(--cinnabar)]/10 text-[color:var(--cinnabar)] hover:bg-[color:var(--cinnabar)]/20 hover:border-[color:var(--cinnabar)]/50 disabled:opacity-50"
+                      className="rounded-lg border border-sky-500/30 bg-sky-500/10 px-3 py-1 text-xs font-medium text-sky-400 transition hover:bg-sky-500/20 hover:border-sky-500/50 disabled:opacity-50"
                       disabled={isPreviewingThis}
                       onClick={() => { void handlePreviewSource(item.segmentId) }}
                       type="button"

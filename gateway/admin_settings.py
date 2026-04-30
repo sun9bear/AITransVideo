@@ -182,7 +182,15 @@ async def update_admin_settings(
 # Review prompts management
 # ---------------------------------------------------------------------------
 
-_PROMPT_KEYS = ("pass1", "pass2", "pass3", "translate", "rewrite", "probe_translate")
+_PROMPT_KEYS = (
+    "pass1",
+    "pass2",
+    "pass3",
+    "translate",
+    "rewrite",
+    "probe_translate",
+    "content_compliance",
+)
 _MODE_KEYS = ("studio", "express")
 
 # ---------------------------------------------------------------------------
@@ -208,8 +216,24 @@ _ALL_MODELS = [
 ]
 
 _DEFAULT_MODELS = {
-    "studio": {"pass1": "gemini_pro", "pass2": "gemini", "pass3": "gemini_pro", "translate": "deepseek", "rewrite": "deepseek"},
-    "express": {"pass1": "gemini", "pass2": "gemini", "pass3": "gemini", "translate": "deepseek", "rewrite": "deepseek"},
+    "studio": {
+        "pass1": "gemini_pro",
+        "pass2": "gemini",
+        "pass3": "gemini_pro",
+        "translate": "deepseek",
+        "rewrite": "deepseek",
+        "probe_translate": "deepseek",
+        "content_compliance": "gemini_31_flash_lite",
+    },
+    "express": {
+        "pass1": "gemini",
+        "pass2": "gemini",
+        "pass3": "gemini",
+        "translate": "deepseek",
+        "rewrite": "deepseek",
+        "probe_translate": "deepseek",
+        "content_compliance": "gemini_31_flash_lite",
+    },
 }
 
 _PROVIDER_KEY_ENVS = {
@@ -473,6 +497,21 @@ __GROUPS_JSON__
     "cn_text": "翻译后的中文文本"
   }
 ]""",
+
+    "content_compliance": """你是中国大陆网络视频内容合规审核员。请基于视频标题、简介和转录稿判断是否存在违法或不良信息风险。
+只输出 JSON，字段包括 decision、confidence、reason、categories。
+
+视频信息：
+- 标题：__VIDEO_TITLE__
+- 简介：__VIDEO_DESCRIPTION__
+- 来源类型：__SOURCE_TYPE__
+- 来源标识：__SOURCE_REF__
+
+第一层本地规则结果：
+__LOCAL_FINDINGS_JSON__
+
+转录稿：
+__TRANSCRIPT_BODY__""",
 }
 
 
@@ -518,6 +557,17 @@ def _load_default_prompts() -> dict[str, str]:
         logger.warning(
             "Failed to import runtime pass1/2/3 prompts — falling back to "
             "gateway-local copy: %s",
+            exc,
+        )
+    try:
+        from services.content_compliance import (  # noqa: WPS433 — lazy import
+            DEFAULT_LLM_CONTENT_COMPLIANCE_PROMPT,
+        )
+        merged["content_compliance"] = DEFAULT_LLM_CONTENT_COMPLIANCE_PROMPT
+    except Exception as exc:  # pragma: no cover — import-guard only
+        logger.warning(
+            "Failed to import runtime content compliance prompt — falling back "
+            "to gateway-local copy: %s",
             exc,
         )
     return merged

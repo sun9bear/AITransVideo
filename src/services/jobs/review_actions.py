@@ -68,12 +68,20 @@ def approve_translation(
     project_dir: Path,
     segments_payload: object,
     segment_speakers: dict[str, str] | None,
+    speaker_names: dict[str, str] | None = None,
 ) -> dict[str, object]:
     """Approve translation review for a specific project. Returns normalized payload."""
     from services.web_ui.translation_review import (
+        _apply_speaker_names_update_from_translation_review,
         _apply_segment_speakers_update_from_translation_review,
         _save_translation_review_submission,
     )
+
+    if speaker_names and isinstance(speaker_names, dict) and len(speaker_names) > 0:
+        _apply_speaker_names_update_from_translation_review(
+            project_dir=project_dir,
+            speaker_names_update=speaker_names,
+        )
 
     if segment_speakers and isinstance(segment_speakers, dict) and len(segment_speakers) > 0:
         _apply_segment_speakers_update_from_translation_review(

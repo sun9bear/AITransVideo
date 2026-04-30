@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import shutil
 import tempfile
+import time
 
 # Load .env file if present (for API keys not in container env)
 _ENV_FILE = Path(os.environ.get("AIVIDEOTRANS_CONFIG_DIR", "/opt/aivideotrans/config")) / ".env"
@@ -46,6 +47,19 @@ from services.audio.source_audio_preparation import (
     SourceAudioPreparationRequest,
     SourceAudioPreparationService,
 )
+from services.content_compliance import (
+    ContentPolicyViolationError,
+    DEFAULT_REPORT_RELATIVE_PATH,
+    LLMContentComplianceReviewer,
+    MainlandChinaContentComplianceReviewer,
+    combine_content_compliance_results,
+    is_content_compliance_enabled,
+    is_content_compliance_llm_enabled,
+    is_content_compliance_llm_fail_closed,
+    load_content_compliance_prompt_template,
+    make_content_compliance_llm_error,
+    validate_content_compliance_llm_response,
+)
 from services.assemblyai.transcriber import (
     AssemblyAITranscriber,
     TranscriptLine,
@@ -77,7 +91,10 @@ from services.review_state import (
     ReviewStateManager,
 )
 from services.llm import LLMRouter, load_llm_fallback_config
-from services.llm_registry import get_prompt_model as _get_prompt_model
+from services.llm_registry import (
+    get_peer_model_candidates as _get_peer_model_candidates,
+    get_prompt_model as _get_prompt_model,
+)
 from services.state_manager import StateManager
 from services.tts.duration_estimator import TTSDurationEstimator, count_spoken_chars
 from services.tts.tts_generator import TTSConfig, TTSGenerator, load_tts_config
@@ -230,7 +247,11 @@ SHORT_CONTENT_COMPACT_MIN_OVERSHOOT_RATIO = 0.30
 SHORT_CONTENT_COMPACT_MIN_SOURCE_WORDS = 3
 SHORT_CONTENT_COMPACT_MIN_PRE_CHARS_OVER_UPPER = 2
 SHORT_CONTENT_COMPACT_CHARS_PER_SECOND_LOWER = 2.6
+SHORT_CONTENT_COMPACT_LONG_TARGET_MIN_MS = 5_000
+SHORT_CONTENT_COMPACT_LONG_CHARS_PER_SECOND_LOWER = 3.0
 SHORT_CONTENT_COMPACT_CHARS_PER_SECOND_UPPER = 4.0
+CONTENT_COMPLIANCE_LLM_RETRY_DELAY_SECONDS = 5.0
+CONTENT_COMPLIANCE_LLM_PEER_COST_RANK_DELTA = 1
 SHORT_CONTENT_COMPACT_QUESTION_STARTERS = frozenset({
     "am",
     "are",
@@ -1089,6 +1110,121 @@ def _truncate_at_sentence(words: list[str], target_count: int) -> str:
     return " ".join(words[:target_count])
 
 
+def _call_content_compliance_llm_with_retry(
+    translator: object,
+    prompt: str,
+    *,
+    primary_model: str,
+    retry_delay_seconds: float | None = None,
+    peer_cost_rank_delta: int | None = None,
+) -> str:
+    primary = str(primary_model or "gemini")
+    delay_seconds = (
+        _content_compliance_retry_delay_seconds()
+        if retry_delay_seconds is None
+        else max(0.0, float(retry_delay_seconds))
+    )
+    rank_delta = (
+        _content_compliance_peer_cost_rank_delta()
+        if peer_cost_rank_delta is None
+        else max(0, int(peer_cost_rank_delta))
+    )
+    peer_models = _get_peer_model_candidates(
+        primary,
+        "content_compliance",
+        cost_rank_delta=rank_delta,
+    )
+    attempts: list[tuple[str, str]] = [
+        (primary, "primary"),
+        (primary, "primary_retry"),
+    ]
+    attempts.extend(
+        (model_name, f"peer_fallback_{index}")
+        for index, model_name in enumerate(peer_models, start=1)
+    )
+
+    last_error: Exception | None = None
+    for attempt_index, (model_name, attempt_label) in enumerate(attempts):
+        if attempt_index == 1 and delay_seconds > 0:
+            print(f"[S2] 内容合规大模型审核失败，暂停 {delay_seconds:g} 秒后重试同模型...")
+            time.sleep(delay_seconds)
+        try:
+            print(f"[S2] 内容合规大模型审核使用 {model_name} ({attempt_label})")
+            response_text = translator._call_by_model(  # type: ignore[attr-defined]
+                model_name,
+                prompt,
+                json_mode=True,
+            )
+            _record_content_compliance_llm_usage(
+                translator,
+                model_name=model_name,
+                prompt=prompt,
+                response_text=response_text,
+                attempt_label=attempt_label,
+            )
+            validate_content_compliance_llm_response(response_text)
+            return response_text
+        except Exception as exc:
+            last_error = exc
+            if attempt_index < len(attempts) - 1:
+                next_model = attempts[attempt_index + 1][0]
+                print(
+                    f"[S2] 内容合规大模型审核 {model_name} ({attempt_label}) 失败，"
+                    f"准备尝试 {next_model}：{exc}"
+                )
+            else:
+                print(
+                    f"[S2] 内容合规大模型审核 {model_name} ({attempt_label}) 失败，"
+                    f"已无同级别备用模型：{exc}"
+                )
+    raise RuntimeError(f"内容合规大模型审核多次失败：{last_error}") from last_error
+
+
+def _record_content_compliance_llm_usage(
+    translator: object,
+    *,
+    model_name: str,
+    prompt: str,
+    response_text: str,
+    attempt_label: str,
+) -> None:
+    record = getattr(translator, "_record_llm_usage", None)
+    if not callable(record):
+        return
+    record(
+        task="content_compliance",
+        model_name=model_name,
+        prompt=prompt,
+        response_text=response_text,
+        attempt_label=attempt_label,
+    )
+
+
+def _content_compliance_retry_delay_seconds() -> float:
+    raw_value = os.environ.get("AVT_CONTENT_COMPLIANCE_LLM_RETRY_DELAY_SECONDS")
+    if raw_value is None:
+        return CONTENT_COMPLIANCE_LLM_RETRY_DELAY_SECONDS
+    try:
+        return max(0.0, float(raw_value))
+    except ValueError:
+        return CONTENT_COMPLIANCE_LLM_RETRY_DELAY_SECONDS
+
+
+def _content_compliance_peer_cost_rank_delta() -> int:
+    raw_value = os.environ.get("AVT_CONTENT_COMPLIANCE_LLM_PEER_COST_RANK_DELTA")
+    if raw_value is None:
+        return CONTENT_COMPLIANCE_LLM_PEER_COST_RANK_DELTA
+    try:
+        return max(0, int(raw_value))
+    except ValueError:
+        return CONTENT_COMPLIANCE_LLM_PEER_COST_RANK_DELTA
+
+
+def _is_english_language_code(language_code: str) -> bool:
+    normalized = str(language_code or "").strip().lower().replace("_", "-")
+    return normalized == "en" or normalized.startswith("en-")
+
+
 class ProcessPipeline:
     """Legacy compatibility pipeline: YouTube URL -> editor-facing dubbing bundle."""
 
@@ -1321,6 +1457,7 @@ class ProcessPipeline:
                 f"[S0] 音频实际时长：{round(actual_duration_ms / 1000, 2)}秒"
                 f"（yt-dlp报告：{round(download_result.duration_ms / 1000, 2)}秒）"
             )
+            self._enforce_english_source_language(download_result)
 
             # --- 套餐时长限制 (snapshot-based, Gateway 主检查的安全网) ---
             _check_duration_limit(
@@ -1406,13 +1543,8 @@ class ProcessPipeline:
                 )
                 print(f"[S1] 完成：共 {len(transcript_result.lines)} 条转录")
 
-            if media_execution_mode == "fresh_run" and transcript_result.lines:
-                detected_language = self._detect_transcript_language(transcript_result.lines)
-                if detected_language != "en":
-                    raise ValueError(
-                        f"当前只支持英文视频翻译。检测到转录稿语言为非英文"
-                        f"（英文字符占比过低）。请确认输入的视频是英文内容。"
-                    )
+            if transcript_result.lines:
+                self._enforce_english_transcript_language(transcript_result)
 
             if transcript_path.exists() and not transcript_result.lines:
                 print(f"[S1] 完成：共 {len(transcript_result.lines)} 条转录")
@@ -1439,6 +1571,30 @@ class ProcessPipeline:
                 {
                     "execution_mode": media_execution_mode,
                 },
+            )
+            content_compliance_llm = None
+            content_compliance_model = ""
+            if is_content_compliance_llm_enabled():
+                content_compliance_model = _get_prompt_model(
+                    job_service_mode,
+                    "content_compliance",
+                )
+
+                def content_compliance_llm(prompt: str) -> str:
+                    return _call_content_compliance_llm_with_retry(
+                        translator,
+                        prompt,
+                        primary_model=content_compliance_model,
+                    )
+
+            content_compliance_payload = self._run_content_compliance_review(
+                final_project_dir=final_project_dir,
+                transcript_result=transcript_result,
+                download_result=download_result,
+                source_type=source_type,
+                source_ref=source_ref,
+                llm_generate_json=content_compliance_llm,
+                llm_model_name=content_compliance_model,
             )
 
             speaker_name_a = config.speaker_a_name
@@ -2036,7 +2192,7 @@ class ProcessPipeline:
                         _speaker_voices,
                         default_provider=job_tts_provider or "minimax",
                         speaker_providers=_speaker_providers or None,
-                        tts_model=str(getattr(tts_config, "model", "") or _snap('tts_model') or ""),
+                        tts_model=str(_snap('tts_model') or getattr(tts_config, "model", "") or ""),
                         # Scopes the user_voices fallback to this job's owner.
                         # Without this, a cloned voice_id could match rows from
                         # a different user and leak their cps into this pipeline.
@@ -2233,6 +2389,7 @@ class ProcessPipeline:
                     transcript_result=transcript_result,
                     effective_speakers=effective_speakers,
                     execution_mode=media_execution_mode,
+                    content_compliance=content_compliance_payload,
                 ),
             )
             current_stage_name = "translation"
@@ -2716,7 +2873,7 @@ class ProcessPipeline:
                     self._build_user_voice_speed_profiles(
                         translation_result.segments,
                         default_provider=job_tts_provider or "minimax",
-                        tts_model=str(getattr(tts_config, "model", "") or _snap("tts_model") or ""),
+                        tts_model=str(_snap("tts_model") or getattr(tts_config, "model", "") or ""),
                     )
                 )
                 _voice_profile_metering = self._persist_user_voice_speed_profiles(
@@ -3920,6 +4077,37 @@ class ProcessPipeline:
             pass
         raise ValueError("说话人数量范围为 1-10 或 auto。")
 
+    def _enforce_english_source_language(self, download_result: DownloadResult) -> None:
+        source_language = str(getattr(download_result, "language", "") or "").strip()
+        if not source_language:
+            return
+        if _is_english_language_code(source_language):
+            print(f"[S0] 视频源语言元数据：{source_language}")
+            return
+        raise ValueError(
+            "当前只支持英文视频翻译。"
+            f"视频源语言元数据为 {source_language!r}，请确认输入的视频是英文内容。"
+        )
+
+    def _enforce_english_transcript_language(
+        self,
+        transcript_result: TranscriptResult,
+    ) -> None:
+        explicit_language = str(getattr(transcript_result, "language", "") or "").strip()
+        if explicit_language and not _is_english_language_code(explicit_language):
+            if explicit_language.lower() not in {"auto", "unknown", "und", "undefined"}:
+                raise ValueError(
+                    "当前只支持英文视频翻译。"
+                    f"转录服务检测到语言为 {explicit_language!r}，请确认输入的视频是英文内容。"
+                )
+
+        detected_language = self._detect_transcript_language(transcript_result.lines)
+        if detected_language != "en":
+            raise ValueError(
+                "当前只支持英文视频翻译。检测到转录稿语言为非英文"
+                "（英文字符占比过低）。请确认输入的视频是英文内容。"
+            )
+
     def _detect_transcript_language(
         self,
         lines: list[TranscriptLine],
@@ -4464,9 +4652,21 @@ class ProcessPipeline:
     @staticmethod
     def _short_content_compact_char_bounds(target_duration_ms: int) -> tuple[int, int]:
         target_seconds = max(0.0, int(target_duration_ms) / 1000.0)
-        lower = max(6, int(round(target_seconds * SHORT_CONTENT_COMPACT_CHARS_PER_SECOND_LOWER)))
+        lower_cps = SHORT_CONTENT_COMPACT_CHARS_PER_SECOND_LOWER
+        if target_duration_ms >= SHORT_CONTENT_COMPACT_LONG_TARGET_MIN_MS:
+            lower_cps = SHORT_CONTENT_COMPACT_LONG_CHARS_PER_SECOND_LOWER
+        lower = max(6, int(round(target_seconds * lower_cps)))
         upper = max(lower + 2, int(round(target_seconds * SHORT_CONTENT_COMPACT_CHARS_PER_SECOND_UPPER)))
         return lower, upper
+
+    @staticmethod
+    def _short_content_compact_retry_char_bounds(
+        lower_chars: int,
+        upper_chars: int,
+    ) -> tuple[int, int]:
+        if upper_chars - lower_chars >= 4:
+            return lower_chars, upper_chars - 1
+        return lower_chars, upper_chars
 
     @staticmethod
     def _short_content_required_tokens(text: str) -> list[str]:
@@ -5017,6 +5217,69 @@ class ProcessPipeline:
                 segment.short_content_compact_post_chars = compact_chars
 
                 if compact_rejection_reason:
+                    retry_attempted = False
+                    initial_rejection_reason = compact_rejection_reason
+                    if compact_rejection_reason == "above_ceiling":
+                        (
+                            retry_lower_chars,
+                            retry_upper_chars,
+                        ) = self._short_content_compact_retry_char_bounds(
+                            compact_lower_chars,
+                            compact_upper_chars,
+                        )
+                        retry_text = self._rewrite_short_content_compact_with_guardrails(
+                            rewriter=rewriter,
+                            current_text=current_text,
+                            source_text=segment.source_text,
+                            target_duration_ms=target_duration_ms,
+                            target_lower_chars=retry_lower_chars,
+                            target_upper_chars=retry_upper_chars,
+                            strict_retry_reason=(
+                                f"{compact_rejection_reason}:{compact_chars}>{compact_upper_chars}"
+                            ),
+                        ).strip()
+                        retry_chars = _count_spoken_chars_for_metering(retry_text)
+                        retry_rejection_reason = (
+                            self._short_content_compact_rejection_reason(
+                                pre_chars=pre_rewrite_chars,
+                                post_chars=retry_chars,
+                                lower_chars=retry_lower_chars,
+                                upper_chars=retry_upper_chars,
+                                rewritten_text=retry_text,
+                                current_text=current_text,
+                            )
+                        )
+                        retry_attempted = True
+                        segment.short_content_compact_lower_chars = retry_lower_chars
+                        segment.short_content_compact_upper_chars = retry_upper_chars
+                        segment.short_content_compact_post_chars = retry_chars
+                        if not retry_rejection_reason:
+                            self._apply_pre_tts_rewrite_success(
+                                segment=segment,
+                                rewritten_text=retry_text,
+                                rewrite_label=rewrite_label,
+                                estimate_ms=estimated_duration_ms,
+                                target_ms=target_duration_ms,
+                                pre_chars=pre_rewrite_chars,
+                                post_chars=retry_chars,
+                                task_name=SHORT_CONTENT_COMPACT_TASK,
+                                retry_attempted=True,
+                                retry_accepted=True,
+                                initial_rejected_reason=initial_rejection_reason,
+                            )
+                            segment.short_content_compact_accepted = True
+                            segment.short_content_compact_rejected_reason = ""
+                            rewritten_count += 1
+                            print(
+                                f"[S4] Short-content compact strict retry "
+                                f"({short_content_class}) segment_{segment.segment_id:03d}: "
+                                f"chars {pre_rewrite_chars}->{retry_chars}, "
+                                f"target {target_duration_ms}ms"
+                            )
+                            continue
+                        compact_text = retry_text
+                        compact_chars = retry_chars
+                        compact_rejection_reason = f"{retry_rejection_reason}_after_retry"
                     segment.short_content_compact_accepted = False
                     segment.short_content_compact_rejected_reason = compact_rejection_reason
                     self._record_pre_tts_rewrite_rejection(
@@ -5027,9 +5290,12 @@ class ProcessPipeline:
                         target_ms=target_duration_ms,
                         pre_chars=pre_rewrite_chars,
                         post_chars=compact_chars,
-                        lower_chars=compact_lower_chars,
-                        upper_chars=compact_upper_chars,
-                        retry_attempted=False,
+                        lower_chars=segment.short_content_compact_lower_chars,
+                        upper_chars=segment.short_content_compact_upper_chars,
+                        retry_attempted=retry_attempted,
+                        initial_rejected_reason=initial_rejection_reason
+                        if retry_attempted
+                        else "",
                     )
                     print(
                         f"[S4] Short-content compact rejected segment_{segment.segment_id:03d}: "
@@ -5196,16 +5462,22 @@ class ProcessPipeline:
         target_duration_ms: int,
         target_lower_chars: int,
         target_upper_chars: int,
+        strict_retry_reason: str = "",
     ) -> str:
         compact_rewrite = getattr(rewriter, "rewrite_short_content_compact", None)
         if callable(compact_rewrite):
+            kwargs: dict[str, object] = {
+                "source_text": source_text,
+                "target_duration_ms": target_duration_ms,
+                "target_lower_chars": target_lower_chars,
+                "target_upper_chars": target_upper_chars,
+                "task_name": SHORT_CONTENT_COMPACT_TASK,
+            }
+            if strict_retry_reason:
+                kwargs["strict_retry_reason"] = strict_retry_reason
             return compact_rewrite(
                 current_text,
-                source_text=source_text,
-                target_duration_ms=target_duration_ms,
-                target_lower_chars=target_lower_chars,
-                target_upper_chars=target_upper_chars,
-                task_name=SHORT_CONTENT_COMPACT_TASK,
+                **kwargs,
             )
         return rewriter.rewrite_for_duration(
             current_text,
@@ -6203,6 +6475,7 @@ class ProcessPipeline:
         translation_result: TranslationResult,
     ):
         metadata_path = (project_dir / "download_metadata.json").resolve(strict=False)
+        content_compliance_path = (project_dir / DEFAULT_REPORT_RELATIVE_PATH).resolve(strict=False)
         review_state_path = (project_dir / "review_state.json").resolve(strict=False)
         project_state_path = (project_dir / "project_state.json").resolve(strict=False)
         artifact_entries = build_core_media_artifact_entries(
@@ -6218,6 +6491,8 @@ class ProcessPipeline:
         )
         if metadata_path.exists():
             artifact_entries.append(("source.download_metadata", metadata_path))
+        if content_compliance_path.exists():
+            artifact_entries.append(("state.content_compliance", content_compliance_path))
         if review_state_path.exists():
             artifact_entries.append(("state.review", review_state_path))
         if project_state_path.exists():
@@ -6353,19 +6628,90 @@ class ProcessPipeline:
             ),
         }
 
+    def _run_content_compliance_review(
+        self,
+        *,
+        final_project_dir: Path,
+        transcript_result: TranscriptResult,
+        download_result: DownloadResult,
+        source_type: str,
+        source_ref: str,
+        llm_generate_json: Callable[[str], str] | None = None,
+        llm_model_name: str | None = None,
+    ) -> dict[str, object]:
+        if not is_content_compliance_enabled():
+            print("[S2] 内容合规审核已关闭，跳过。")
+            return {
+                "status": "skipped",
+                "message": "内容合规审核已关闭。",
+            }
+
+        print("[S2] 审核视频内容合规性...")
+        reviewer = MainlandChinaContentComplianceReviewer()
+        result = reviewer.review(
+            transcript_lines=transcript_result.lines,
+            video_title=download_result.video_title,
+            video_description=download_result.description,
+            source_type=source_type,
+            source_ref=source_ref,
+        )
+        llm_result = None
+        if result.blocked:
+            print("[S2] 本地规则明确命中禁忌内容，跳过大模型审核。")
+        elif is_content_compliance_llm_enabled() and llm_generate_json is not None:
+            print("[S2] 本地规则未命中，调用大模型进行第二层内容合规审核...")
+            llm_reviewer = LLMContentComplianceReviewer(
+                generate_json=llm_generate_json,
+                prompt_template=load_content_compliance_prompt_template(),
+                model_name=str(llm_model_name or ""),
+            )
+            try:
+                llm_result = llm_reviewer.review(
+                    transcript_lines=transcript_result.lines,
+                    local_result=result,
+                    video_title=download_result.video_title,
+                    video_description=download_result.description,
+                    source_type=source_type,
+                    source_ref=source_ref,
+                )
+            except Exception as exc:
+                llm_result = make_content_compliance_llm_error(
+                    exc,
+                    model_name=str(llm_model_name or ""),
+                )
+                print(f"[S2] 大模型内容合规审核失败：{exc}")
+        else:
+            print("[S2] 本地规则未命中，大模型审核未启用或未配置，跳过第二层。")
+
+        final_result = combine_content_compliance_results(
+            local_result=result,
+            llm_result=llm_result,
+            llm_fail_closed=is_content_compliance_llm_fail_closed(),
+        )
+        report_path = reviewer.write_report(final_result, project_dir=final_project_dir)
+        payload = final_result.to_dict()
+        payload["artifact_path"] = str(report_path)
+        if final_result.blocked:
+            print(f"[S2] 内容合规审核未通过，报告：{report_path}")
+            raise ContentPolicyViolationError(final_result)
+
+        print(f"[S2] 内容合规审核通过，报告：{report_path}")
+        return payload
+
     def _build_media_understanding_stage_payload(
         self,
         *,
         transcript_result: TranscriptResult,
         effective_speakers: int,
         execution_mode: str,
+        content_compliance: dict[str, object] | None = None,
     ) -> dict[str, object]:
         speaker_ids = self._detect_speaker_ids(transcript_result.lines)
         transcript_artifacts = [
             transcript_result.raw_response_path,
             transcript_result.structured_transcript_path,
         ]
-        return {
+        payload: dict[str, object] = {
             "execution_mode": execution_mode,
             "line_count": len(transcript_result.lines),
             "speaker_count": max(int(effective_speakers), len(speaker_ids)),
@@ -6376,6 +6722,9 @@ class ProcessPipeline:
                 file_paths=transcript_artifacts,
             ),
         }
+        if content_compliance is not None:
+            payload["content_compliance"] = content_compliance
+        return payload
 
     def _build_translation_stage_payload(
         self,
@@ -7630,6 +7979,8 @@ def _classify_failed_stage(exc: Exception) -> str:
         return "S0"
     if "AssemblyAI" in exc_text:
         return "S1"
+    if isinstance(exc, ContentPolicyViolationError):
+        return "S2"
     if (
         "voice_id for speaker_b" in exc_text
         or "voice_registry" in exc_text

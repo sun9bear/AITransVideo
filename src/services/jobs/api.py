@@ -23,6 +23,7 @@ from services.jobs.service import (
 
 JOB_API_DEFAULT_HOST = "127.0.0.1"
 JOB_API_DEFAULT_PORT = 8877
+JOB_API_MAX_LIST_LIMIT = 100
 
 
 # Express/Studio 输出分层白名单（见 docs/plans/2026-04-18-express-studio-output-filter-plan.md）
@@ -37,6 +38,26 @@ EXPRESS_ALLOWED_DOWNLOAD_KEYS: frozenset[str] = frozenset({
 })
 # Express 模式下只允许 /stream/{kind} 这些 kind（禁 audio）
 EXPRESS_ALLOWED_STREAM_KINDS: frozenset[str] = frozenset({"video", "poster"})
+
+
+def _parse_list_pagination(query: str) -> tuple[int | None, int]:
+    params = parse_qs(query or "")
+    raw_limit = (params.get("limit") or [None])[0]
+    raw_offset = (params.get("offset") or ["0"])[0]
+
+    limit: int | None = None
+    if raw_limit not in (None, ""):
+        try:
+            limit = max(0, min(int(str(raw_limit)), JOB_API_MAX_LIST_LIMIT))
+        except (TypeError, ValueError):
+            limit = JOB_API_MAX_LIST_LIMIT
+
+    try:
+        offset = max(0, int(str(raw_offset)))
+    except (TypeError, ValueError):
+        offset = 0
+
+    return limit, offset
 
 
 def _is_express_job(record) -> bool:
@@ -91,8 +112,18 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
             path_parts = [part for part in parsed_path.path.strip("/").split("/") if part]
             try:
                 if path_parts == ["jobs"]:
+                    limit, offset = _parse_list_pagination(parsed_path.query or "")
+                    all_records = service.list_jobs(limit=None)
+                    if limit is None:
+                        page_records = all_records[offset:]
+                    else:
+                        page_records = all_records[offset: offset + limit]
                     payload = {
-                        "jobs": [record.to_dict() for record in service.list_jobs()],
+                        "jobs": [record.to_dict() for record in page_records],
+                        "total": len(all_records),
+                        "limit": limit,
+                        "offset": offset,
+                        "has_more": offset + len(page_records) < len(all_records),
                     }
                     self._write_json(HTTPStatus.OK, payload)
                     return
@@ -776,6 +807,7 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
                             project_dir=project_dir,
                             segments_payload=payload.get("segments"),
                             segment_speakers=payload.get("segment_speakers") if isinstance(payload.get("segment_speakers"), dict) else None,
+                            speaker_names=payload.get("speaker_names") if isinstance(payload.get("speaker_names"), dict) else None,
                         )
                         # Continue the job after approval
                         continued = service.continue_job(job_id)

@@ -120,6 +120,84 @@ def _apply_segment_speakers_update_from_translation_review(
             pass
 
 
+def _apply_speaker_names_update_from_translation_review(
+    *,
+    project_dir: Path,
+    speaker_names_update: dict[str, str],
+) -> None:
+    """Apply speaker display-name edits from translation review.
+
+    Translation review is the last manual gate before voice selection, so a
+    reviewer may correct "Diana" to the final Chinese display name here.  Keep
+    speaker_review, transcript.json, and segments.json aligned so downstream
+    voice/TTS stages read the corrected name.
+    """
+    normalized_updates: dict[str, str] = {}
+    for speaker_id, display_name in speaker_names_update.items():
+        normalized_id = _normalize_optional_text(speaker_id)
+        normalized_name = _normalize_optional_text(display_name)
+        if normalized_id and normalized_name:
+            normalized_updates[normalized_id] = normalized_name
+    if not normalized_updates:
+        return
+
+    review_state_manager = ReviewStateManager(project_dir / "review_state.json")
+    speaker_review_payload = _load_review_stage_payload(project_dir, SPEAKER_REVIEW_STAGE) or {}
+    speaker_names = speaker_review_payload.get("speaker_names", {})
+    if not isinstance(speaker_names, dict):
+        speaker_names = {}
+    speaker_names = {**speaker_names, **normalized_updates}
+    speaker_review_payload["speaker_names"] = speaker_names
+    speaker_review_payload["speaker_options"] = [
+        {"speaker_id": speaker_id, "display_name": display_name}
+        for speaker_id, display_name in sorted(speaker_names.items())
+    ]
+    review_state_manager.set_stage(
+        SPEAKER_REVIEW_STAGE,
+        status=speaker_review_payload.get("status", REVIEW_STATUS_APPROVED),
+        payload=speaker_review_payload,
+        activate=False,
+    )
+
+    transcript_path = project_dir / "transcript" / "transcript.json"
+    if transcript_path.exists():
+        try:
+            transcript_payload = json.loads(transcript_path.read_text(encoding="utf-8"))
+            lines = transcript_payload.get("lines", [])
+            if isinstance(lines, list):
+                for raw_line in lines:
+                    if not isinstance(raw_line, dict):
+                        continue
+                    speaker_id = _normalize_optional_text(raw_line.get("speaker_id"))
+                    if speaker_id in normalized_updates:
+                        raw_line["speaker_name"] = normalized_updates[speaker_id]
+                transcript_path.write_text(
+                    json.dumps(transcript_payload, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    segments_path = _resolve_translation_segments_path(project_dir)
+    if segments_path.exists():
+        try:
+            seg_payload = json.loads(segments_path.read_text(encoding="utf-8"))
+            segments_list = seg_payload.get("segments", [])
+            if isinstance(segments_list, list):
+                for item in segments_list:
+                    if not isinstance(item, dict):
+                        continue
+                    speaker_id = _normalize_optional_text(item.get("speaker_id"))
+                    if speaker_id in normalized_updates:
+                        item["display_name"] = normalized_updates[speaker_id]
+                segments_path.write_text(
+                    json.dumps(seg_payload, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+        except (OSError, json.JSONDecodeError):
+            pass
+
+
 def _split_segment(
     *,
     project_dir: Path,
