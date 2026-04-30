@@ -305,6 +305,30 @@ class TestShadowRelease:
         entries = _run(shadow_release(db, user_id=uuid.uuid4(), job_id="j"))
         assert entries == []
 
+    def test_release_can_scope_by_reserve_reason_code(self):
+        db = AsyncMock()
+        seen = []
+
+        async def execute(stmt, *args, **kwargs):
+            del args, kwargs
+            seen.append(stmt)
+            r = MagicMock()
+            r.scalars.return_value.all.return_value = []
+            return r
+
+        db.execute = execute
+
+        entries = _run(shadow_release(
+            db,
+            user_id=uuid.uuid4(),
+            job_id="job-clone",
+            reserve_reason_code="voice_clone_reserve_abc",
+        ))
+
+        assert entries == []
+        assert seen, "shadow_release should query reserve ledger entries"
+        assert "reason_code" in str(seen[0])
+
 
 # ===================================================================
 # shadow_capture — correctness tests (minor revision 1.1)
@@ -446,6 +470,70 @@ class TestShadowCapture:
         total_released = sum(abs(e.credits_delta) for e in entries if e.direction == "release")
         assert total_captured == 100
         assert total_released == 0
+
+    def test_actual_without_enough_reserved_records_full_overdraft(self):
+        """Actual cost must be fully represented even when balance is short."""
+        uid = uuid.uuid4()
+        bucket = _make_bucket(
+            bucket_type="subscription",
+            remaining=30,
+            reserved=0,
+            user_id=uid,
+        )
+        db = AsyncMock()
+        calls = {"n": 0}
+
+        async def smart_execute(*args, **kwargs):
+            del args, kwargs
+            calls["n"] += 1
+            r = MagicMock()
+            if calls["n"] == 1:
+                r.scalars.return_value.all.return_value = []
+            else:
+                r.scalars.return_value.all.return_value = [bucket]
+            return r
+
+        db.execute = smart_execute
+        added = []
+        db.add = lambda obj: added.append(obj)
+
+        entries = _run(shadow_capture(
+            db,
+            user_id=uid,
+            job_id="job-overdraft",
+            actual_credits=100,
+            service_mode="studio",
+        ))
+
+        captured = sum(abs(e.credits_delta) for e in entries if e.direction == "capture")
+        assert captured == 100
+        assert [e.reason_code for e in entries] == ["capture_additional", "capture_overdraft"]
+        assert bucket.remaining == -70
+
+    def test_capture_can_scope_by_reserve_reason_code(self):
+        db = AsyncMock()
+        seen = []
+
+        async def execute(stmt, *args, **kwargs):
+            del args, kwargs
+            seen.append(stmt)
+            r = MagicMock()
+            r.scalars.return_value.all.return_value = []
+            return r
+
+        db.execute = execute
+
+        entries = _run(shadow_capture(
+            db,
+            user_id=uuid.uuid4(),
+            job_id="job-clone",
+            actual_credits=0,
+            reserve_reason_code="voice_clone_reserve_abc",
+        ))
+
+        assert entries == []
+        assert seen, "shadow_capture should query reserve ledger entries"
+        assert "reason_code" in str(seen[0])
 
     def test_actual_zero_releases_all(self):
         """actual=0, reserved=50. Everything released, nothing captured."""

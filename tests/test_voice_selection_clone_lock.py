@@ -85,12 +85,18 @@ def _load_stage_payload(project_dir: Path) -> dict:
     return stage.get("payload", {})
 
 
-def _write_clone_project(project_dir: Path, *, speaker_id: str = "speaker_a") -> None:
+def _write_clone_project(
+    project_dir: Path,
+    *,
+    speaker_id: str = "speaker_a",
+    include_audio: bool = True,
+) -> None:
     transcript_dir = project_dir / "transcript"
     transcript_dir.mkdir(parents=True, exist_ok=True)
-    audio_dir = project_dir / "audio"
-    audio_dir.mkdir(parents=True, exist_ok=True)
-    (audio_dir / "original.wav").write_bytes(b"fake-audio")
+    if include_audio:
+        audio_dir = project_dir / "audio"
+        audio_dir.mkdir(parents=True, exist_ok=True)
+        (audio_dir / "original.wav").write_bytes(b"fake-audio")
     transcript_payload = {
         "lines": [
             {
@@ -235,3 +241,44 @@ class TestVoiceCloneEndpointCloneLock:
         assert body["voice_id"] == "vt_speaker_a_123"
         payload = _load_stage_payload(project_dir)
         assert "cloning" not in payload["speakers"][0]
+
+    def test_voice_clone_credits_use_scoped_reserve_and_release(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        project_dir = tmp_path / "project_credit_release"
+        _write_clone_project(project_dir, include_audio=False)
+
+        db = _make_db(SimpleNamespace(job_id="job-4"))
+        user = SimpleNamespace(id="user-1", trial_granted_at=None, trial_ends_at=None)
+        request = _make_request({"speaker_id": "speaker_a", "segment_ids": [1]})
+        calls = []
+
+        async def record_shadow(fn, *args, **kwargs):
+            calls.append((fn.__name__, args, kwargs))
+            return []
+
+        monkeypatch.setattr(voice_selection_api.settings, "auth_required", False)
+        monkeypatch.setattr(voice_selection_api, "shadow_safe", record_shadow)
+        monkeypatch.setattr(voice_selection_api, "_get_clone_cost_credits", lambda: 500)
+
+        with patch("httpx.AsyncClient", return_value=_FakeAsyncClient(project_dir)):
+            response = _run(voice_selection_api.voice_clone_for_selection(request, "job-4", db, user))
+
+        body = json.loads(response.body.decode("utf-8"))
+        assert response.status_code == 400
+        assert body["error"] == "no_source_audio"
+
+        reserve = next(call for call in calls if call[0] == "shadow_reserve")
+        assert reserve[1][0] is db
+        assert reserve[2]["estimated_credits"] == 500
+        assert reserve[2]["service_mode"] == "studio"
+        assert "amount" not in reserve[2]
+        assert "metadata_json" not in reserve[2]
+
+        release = next(call for call in calls if call[0] == "shadow_release")
+        assert release[1][0] is db
+        assert release[2]["reserve_reason_code"] == reserve[2]["reason_code"]
+        assert release[2]["reason_code"] == "voice_clone_no_source_audio"
+        assert all(call[0] != "shadow_capture" for call in calls)

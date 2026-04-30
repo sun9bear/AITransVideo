@@ -321,6 +321,7 @@ async def shadow_capture(
     actual_credits: int,
     service_mode: str = "express",
     reason_code: str = "job_capture",
+    reserve_reason_code: str | None = None,
 ) -> list[CreditsLedger]:
     """Finalize actual credits for a completed job.
 
@@ -345,13 +346,14 @@ async def shadow_capture(
 
     try:
         # Find all reserve entries for this job
-        result = await db.execute(
-            select(CreditsLedger).where(
-                CreditsLedger.user_id == user_id,
-                CreditsLedger.related_job_id == job_id,
-                CreditsLedger.direction == "reserve",
-            )
+        reserve_stmt = select(CreditsLedger).where(
+            CreditsLedger.user_id == user_id,
+            CreditsLedger.related_job_id == job_id,
+            CreditsLedger.direction == "reserve",
         )
+        if reserve_reason_code is not None:
+            reserve_stmt = reserve_stmt.where(CreditsLedger.reason_code == reserve_reason_code)
+        result = await db.execute(reserve_stmt)
         reserve_entries = list(result.scalars().all())
 
         total_reserved = sum(abs(e.credits_delta) for e in reserve_entries)
@@ -446,10 +448,12 @@ async def shadow_capture(
 
             # Additional debit for the excess
             additional = actual_credits - total_reserved
+            last_bucket: CreditsBucket | None = None
             if additional > 0:
                 buckets = await get_user_buckets(db, user_id, for_update=True)
                 ordered = _pick_buckets_by_priority(buckets, service_mode)
                 for bucket in ordered:
+                    last_bucket = bucket
                     if additional <= 0:
                         break
                     available = bucket.remaining - bucket.reserved
@@ -471,6 +475,24 @@ async def shadow_capture(
                     db.add(entry)
                     entries.append(entry)
 
+                # Shadow credits are an accounting surface while legacy quota
+                # gates may still allow a job or clone to finish beyond the
+                # currently available bucket balance. Keep actual consumption
+                # visible instead of silently under-reporting it.
+                if additional > 0 and last_bucket is not None:
+                    last_bucket.remaining -= additional
+                    entry = CreditsLedger(
+                        user_id=user_id,
+                        bucket_id=last_bucket.id,
+                        direction="capture",
+                        credits_delta=-additional,
+                        balance_after=last_bucket.remaining,
+                        related_job_id=job_id,
+                        reason_code="capture_overdraft",
+                    )
+                    db.add(entry)
+                    entries.append(entry)
+
         logger.info(
             "shadow_capture: user=%s job=%s actual=%d reserved=%d entries=%d",
             user_id, job_id, actual_credits, total_reserved, len(entries),
@@ -487,19 +509,21 @@ async def shadow_release(
     user_id,
     job_id: str,
     reason_code: str = "job_release",
+    reserve_reason_code: str | None = None,
 ) -> list[CreditsLedger]:
     """Release all reserved credits for a job (failed / cancelled).
 
     Shadow mode: failures are logged, empty list returned.
     """
     try:
-        result = await db.execute(
-            select(CreditsLedger).where(
-                CreditsLedger.user_id == user_id,
-                CreditsLedger.related_job_id == job_id,
-                CreditsLedger.direction == "reserve",
-            )
+        reserve_stmt = select(CreditsLedger).where(
+            CreditsLedger.user_id == user_id,
+            CreditsLedger.related_job_id == job_id,
+            CreditsLedger.direction == "reserve",
         )
+        if reserve_reason_code is not None:
+            reserve_stmt = reserve_stmt.where(CreditsLedger.reason_code == reserve_reason_code)
+        result = await db.execute(reserve_stmt)
         reserve_entries = list(result.scalars().all())
 
         entries: list[CreditsLedger] = []
@@ -753,6 +777,32 @@ async def ensure_subscription_bucket_from_v2(
 # ---------------------------------------------------------------------------
 # Shadow integration helper — safe wrapper for job pipeline hooks
 # ---------------------------------------------------------------------------
+
+
+async def ensure_credit_buckets_for_user(
+    db: AsyncSession,
+    *,
+    user=None,
+    user_id=None,
+) -> None:
+    """Ensure buckets needed by job and clone credit paths exist.
+
+    This mirrors the lazy setup done by the credits read endpoint so metering
+    does not depend on the user opening the billing page before creating work.
+    """
+    uid = user_id or getattr(user, "id", None)
+    if uid is None:
+        return
+    await ensure_free_bucket(db, uid)
+    if user is not None:
+        try:
+            from plan_catalog import is_user_in_active_trial
+
+            if is_user_in_active_trial(user):
+                await ensure_trial_bucket(db, uid, getattr(user, "trial_ends_at", None))
+        except Exception:
+            logger.exception("ensure_credit_buckets_for_user trial ensure failed: user=%s", uid)
+    await ensure_subscription_bucket_from_v2(db, uid)
 
 
 async def shadow_safe(coro_fn, *args, **kwargs) -> Any:

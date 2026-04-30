@@ -42,7 +42,7 @@ from models import Job, User
 from proxy import proxy_request
 from quota import check_quota, reserve_quota, settle_job_quota, TERMINAL_STATUSES
 from credits_service import (
-    ensure_free_bucket, estimate_credits,
+    ensure_credit_buckets_for_user, estimate_credits,
     shadow_reserve, shadow_release, shadow_capture, shadow_safe,
 )
 
@@ -564,6 +564,11 @@ async def intercept_list_jobs(
                             # V3-1 shadow settle (best-effort)
                             try:
                                 if upstream_status == "succeeded":
+                                    await shadow_safe(
+                                        ensure_credit_buckets_for_user,
+                                        db,
+                                        user=user,
+                                    )
                                     actual_min = None
                                     src_dur = getattr(db_job, "source_duration_seconds", None)
                                     if src_dur:
@@ -584,12 +589,14 @@ async def intercept_list_jobs(
                                         db, user_id=db_job.user_id, job_id=jid,
                                         actual_credits=shadow_credits,
                                         service_mode=db_job.service_mode or "express",
+                                        reserve_reason_code="job_reserve",
                                     )
                                 else:
                                     # failed / cancelled → release
                                     await shadow_safe(
                                         shadow_release,
                                         db, user_id=db_job.user_id, job_id=jid,
+                                        reserve_reason_code="job_reserve",
                                     )
                             except Exception as _se:
                                 logger.warning("V3 shadow settle failed for %s: %s", jid, _se)
@@ -930,6 +937,11 @@ async def intercept_create_job(
                             "tts_model": policy.get("tts_model"),
                         }
                         if shadow_credits > 0:
+                            await shadow_safe(
+                                ensure_credit_buckets_for_user,
+                                db,
+                                user=user,
+                            )
                             await shadow_safe(
                                 shadow_reserve,
                                 db, user_id=user.id, job_id=job_id,
@@ -2100,6 +2112,7 @@ async def update_source_metadata(
                         select(CreditsLedger).where(
                             CreditsLedger.related_job_id == job_id,
                             CreditsLedger.direction == "reserve",
+                            CreditsLedger.reason_code == "job_reserve",
                         ).limit(1)
                     )
                     already_reserved = existing_reserve.scalar_one_or_none() is not None
@@ -2113,7 +2126,11 @@ async def update_source_metadata(
                         if late_credits > 0:
                             snap["credits_estimated"] = late_credits
                             job.metering_snapshot = dict(snap)
-                            await shadow_safe(ensure_free_bucket, db, job.user_id)
+                            await shadow_safe(
+                                ensure_credit_buckets_for_user,
+                                db,
+                                user_id=job.user_id,
+                            )
                             await shadow_safe(
                                 shadow_reserve,
                                 db, user_id=job.user_id, job_id=job_id,

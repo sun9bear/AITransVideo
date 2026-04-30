@@ -12,7 +12,7 @@ import json
 import logging
 import re
 import subprocess
-import tempfile
+import uuid
 from pathlib import Path
 
 from fastapi import Depends, HTTPException, Request, Response
@@ -21,7 +21,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth import require_auth
 from config import settings
-from credits_service import shadow_capture, shadow_release, shadow_reserve, shadow_safe
+from credits_service import (
+    ensure_credit_buckets_for_user,
+    shadow_capture,
+    shadow_release,
+    shadow_reserve,
+    shadow_safe,
+)
 from database import get_db
 from models import Job, User
 
@@ -30,6 +36,7 @@ logger = logging.getLogger(__name__)
 _SPEAKER_ID_RE = re.compile(r"^speaker_[a-z0-9_]+$")
 _SEGMENT_ID_RE = re.compile(r"^[1-9][0-9]*$")
 _CLONE_LOCK_TIMEOUT_SECONDS = 300
+_VOICE_CLONE_RESERVE_REASON = "voice_clone_reserve"
 
 
 def _resolve_speaker_display_name(rs: dict, speaker_id: str) -> str | None:
@@ -100,6 +107,14 @@ def _get_clone_cost_credits() -> int:
         return get_runtime_pricing().credits.voice_clone_cost_credits
     except Exception:
         return 500
+
+
+async def _commit_shadow(db: AsyncSession, label: str) -> None:
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.warning("%s credit ledger commit failed (non-fatal)", label, exc_info=True)
 
 
 async def _verify_job_ownership(
@@ -233,15 +248,16 @@ async def get_voice_selection_pricing(
     Values come from Gateway truth sources (pricing_runtime + DEBIT_RATES),
     never from frontend hardcoded constants.
     """
-    from credits_service import DEBIT_RATES
+    from credits_service import _get_runtime_debit_rates
 
+    rates = _get_runtime_debit_rates()
     return {
         "service_mode": "studio",
         "credits_per_minute": {
-            "volcengine": DEBIT_RATES.get(("studio", "standard"), 15),
-            "cosyvoice": DEBIT_RATES.get(("studio", "standard"), 15),
-            "minimax_turbo": DEBIT_RATES.get(("studio", "high"), 30),
-            "minimax_hd": DEBIT_RATES.get(("studio", "flagship"), 50),
+            "volcengine": rates.get(("studio", "standard"), 15),
+            "cosyvoice": rates.get(("studio", "standard"), 15),
+            "minimax_turbo": rates.get(("studio", "high"), 30),
+            "minimax_hd": rates.get(("studio", "flagship"), 50),
         },
         "voice_clone_cost_credits": _get_clone_cost_credits(),
     }
@@ -346,18 +362,32 @@ async def voice_clone_for_selection(
         # Shadow reserve credits (from runtime pricing, fallback 500)
         clone_cost = _get_clone_cost_credits()
         user_id = user.id if user else None
-        reserve_id: str | None = None
+        reserve_reason_code = f"{_VOICE_CLONE_RESERVE_REASON}_{uuid.uuid4().hex[:12]}"
         if user_id:
-            reserve_result = await shadow_safe(
+            await shadow_safe(ensure_credit_buckets_for_user, db, user=user)
+            await shadow_safe(
                 shadow_reserve,
+                db,
                 user_id=user_id,
                 job_id=job_id,
-                amount=clone_cost,
-                reason_code="voice_clone",
-                metadata_json=json.dumps({"speaker_id": speaker_id}),
-                db=db,
+                estimated_credits=clone_cost,
+                service_mode="studio",
+                reason_code=reserve_reason_code,
             )
-            reserve_id = reserve_result.get("reserve_id") if isinstance(reserve_result, dict) else None
+            await _commit_shadow(db, "voice clone reserve")
+
+        async def release_clone_credits(reason_code: str) -> None:
+            if not user_id:
+                return
+            await shadow_safe(
+                shadow_release,
+                db,
+                user_id=user_id,
+                job_id=job_id,
+                reason_code=reason_code,
+                reserve_reason_code=reserve_reason_code,
+            )
+            await _commit_shadow(db, reason_code)
 
         # Find source audio
         source_audio = None
@@ -367,8 +397,7 @@ async def voice_clone_for_selection(
                 source_audio = candidate
                 break
         if source_audio is None:
-            if reserve_id and user_id:
-                await shadow_safe(shadow_release, reserve_id=reserve_id, db=db)
+            await release_clone_credits("voice_clone_no_source_audio")
             return _json_response(400, {"error": "no_source_audio", "message": "找不到源音频文件"})
 
         # Concat selected segments via ffmpeg (run in executor to avoid blocking)
@@ -384,8 +413,7 @@ async def voice_clone_for_selection(
             )
         except Exception as exc:
             logger.exception("ffmpeg concat failed for %s/%s", job_id, speaker_id)
-            if reserve_id and user_id:
-                await shadow_safe(shadow_release, reserve_id=reserve_id, db=db)
+            await release_clone_credits("voice_clone_concat_failed")
             return _json_response(500, {"error": "concat_failed", "message": f"音频拼接失败: {str(exc)[:200]}"})
 
         # Clone via MiniMax
@@ -398,13 +426,22 @@ async def voice_clone_for_selection(
             )
         except Exception as exc:
             logger.exception("MiniMax clone failed for %s/%s", job_id, speaker_id)
-            if reserve_id and user_id:
-                await shadow_safe(shadow_release, reserve_id=reserve_id, db=db)
+            await release_clone_credits("voice_clone_failed")
             return _json_response(500, {"error": "clone_failed", "message": f"克隆失败: {str(exc)[:200]}"})
 
         # Shadow capture on success
-        if reserve_id and user_id:
-            await shadow_safe(shadow_capture, reserve_id=reserve_id, db=db)
+        if user_id:
+            await shadow_safe(
+                shadow_capture,
+                db,
+                user_id=user_id,
+                job_id=job_id,
+                actual_credits=clone_cost,
+                service_mode="studio",
+                reason_code="voice_clone_capture",
+                reserve_reason_code=reserve_reason_code,
+            )
+            await _commit_shadow(db, "voice clone capture")
 
         # Write cloned voice to user's personal voice library.
         # Resolve a friendly Chinese display name from review_state instead of
