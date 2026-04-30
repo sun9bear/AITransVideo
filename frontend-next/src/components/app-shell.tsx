@@ -6,6 +6,7 @@ import { useEffect, useState } from "react"
 import { toast } from "sonner"
 import { useSession } from "@/components/providers/session-provider"
 import { Button } from "@/components/ui/button"
+import { BrandMark, BrandLockup } from "@/components/marketing/brand-mark"
 import {
   Video,
   Mic2,
@@ -85,10 +86,31 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const { user } = useSession()
   const [collapsed, setCollapsed] = useState(false)
   const [mobileOpen, setMobileOpen] = useState(false)
+  // darkMode is hydrated from localStorage on first client render so the
+  // user's preference persists across reloads. Default true (workspace is
+  // expected to be a dark surface most of the time).
   const [darkMode, setDarkMode] = useState(true)
 
   useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem("aivt-app-dark-mode")
+      if (stored === "0") setDarkMode(false)
+      else if (stored === "1") setDarkMode(true)
+    } catch {
+      // localStorage not available (privacy mode etc.) — keep default.
+    }
+  }, [])
+
+  useEffect(() => {
+    // Toggle the legacy .dark class on html so any shadcn `dark:` utility
+    // still resolves correctly. The data-theme attribute below is what
+    // actually swaps surfaces inside the (app) scope.
     document.documentElement.classList.toggle("dark", darkMode)
+    try {
+      window.localStorage.setItem("aivt-app-dark-mode", darkMode ? "1" : "0")
+    } catch {
+      // ignore — see above
+    }
   }, [darkMode])
 
   // Close mobile sidebar on route change
@@ -105,20 +127,20 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   const sidebarContent = (
     <>
-      {/* Logo */}
+      {/* Brand mark — uses the marketing SealStamp asset so the workspace
+          and the marketing surface share one visual identity. Was previously
+          a violet→cyan gradient with "AI" text; that block predated the
+          ink-aesthetic redesign and read as out-of-system. */}
       <div className="flex h-14 items-center justify-between px-3 border-b border-border">
         {!collapsed && (
           <Link href="/" className="flex items-center gap-2 truncate">
-            <div className="h-7 w-7 rounded-lg bg-gradient-to-br from-violet-500 to-cyan-500 flex items-center justify-center">
-              <span className="text-xs font-bold text-white">AI</span>
-            </div>
-            <span className="font-heading text-sm font-semibold text-foreground">AIVideoTrans</span>
+            <BrandLockup />
           </Link>
         )}
         {collapsed && (
-          <div className="mx-auto h-7 w-7 rounded-lg bg-gradient-to-br from-violet-500 to-cyan-500 flex items-center justify-center">
-            <span className="text-xs font-bold text-white">AI</span>
-          </div>
+          <Link href="/" className="mx-auto" aria-label="AIVideoTrans 首页">
+            <BrandMark size={28} />
+          </Link>
         )}
       </div>
 
@@ -211,7 +233,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   )
 
   return (
-    <div className="flex min-h-screen bg-background">
+    // Theme scope: ink-dark for darkMode, ink (light paper) for light mode.
+    // Both inherit the marketing brand language; the toggle simply swaps
+    // luminance + grain. data-theme attribute drives the [data-theme=...]
+    // token blocks in globals.css.
+    <div
+      data-theme={darkMode ? "ink-dark" : "ink"}
+      className="flex min-h-screen bg-background text-foreground"
+    >
       {/* Mobile overlay */}
       {mobileOpen && (
         <div

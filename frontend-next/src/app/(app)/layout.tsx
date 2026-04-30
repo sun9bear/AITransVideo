@@ -3,27 +3,18 @@ import { AppShell } from "@/components/app-shell"
 /**
  * (app) route group layout — workspace / studio / admin / settings.
  *
- * Theme: ink-dark (warm dark gray + cinnabar + ochre + faint paper grain).
- * Activated via `data-theme="ink-dark"` so the entire (app) scope reads as
- * continuous with the marketing ink theme rather than the legacy steel-blue
- * .dark variant. See globals.css §[data-theme="ink-dark"] for token defs.
+ * Theme is chosen inside AppShell based on the `darkMode` state so that the
+ * Sun/Moon toggle actually switches surfaces:
+ *   darkMode = true  → data-theme="ink-dark" (warm dark gray + cinnabar + ochre + paper grain)
+ *   darkMode = false → data-theme="ink"      (rice paper + cinnabar, same as marketing)
  *
- * The wrapper carries `bg-background text-foreground` so the resolved ink-dark
- * tokens paint the page surface immediately, before any AppShell internals
- * apply their own backgrounds. min-h-screen guarantees the warm-paper grain
- * pseudo-element fills the viewport even on short pages.
+ * Both variants share the same brand language and `--cinnabar` etc. tokens,
+ * so per-page CSS works identically in either mode.
  */
 export default function AppLayout({
   children,
 }: {
   children: React.ReactNode
 }) {
-  return (
-    <div
-      data-theme="ink-dark"
-      className="min-h-screen bg-background text-foreground"
-    >
-      <AppShell>{children}</AppShell>
-    </div>
-  )
+  return <AppShell>{children}</AppShell>
 }
