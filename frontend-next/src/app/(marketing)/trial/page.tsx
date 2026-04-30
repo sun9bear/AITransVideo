@@ -3,6 +3,7 @@ import { ShieldCheck, ArrowRight } from "lucide-react"
 import { TrialDetails } from "@/components/marketing/trial-details"
 import { PrimaryCta } from "@/components/marketing/primary-cta"
 import { LinkButton } from "@/components/marketing/link-button"
+import { getPlansSafeServer } from "@/lib/billing/get-plans"
 
 export const metadata: Metadata = {
   title: "免费试用 · AIVideoTrans",
@@ -18,24 +19,37 @@ export const metadata: Metadata = {
  *
  * Numeric trial facts (days / source_minutes / Studio inclusion) come from the
  * gateway `GET /api/plans` response and are only rendered when frozen === true.
- * See `<TrialDetails />` for the boundary logic.
+ * The lead paragraph below was previously hardcoded — fixed during the
+ * 2026-04-29 marketing redesign so trial copy stays in sync with policy.
+ *
+ * See: docs/plans/2026-04-29-marketing-redesign-ink-aesthetic.md §1.1 issue 4
  */
-export default function TrialPage() {
+export default async function TrialPage() {
+  const data = await getPlansSafeServer()
+  const trial = data.trial
+  const hasNumbers = Boolean(
+    trial &&
+      trial.frozen &&
+      typeof trial.days === "number" &&
+      typeof trial.source_minutes === "number",
+  )
+  const leadParagraph = hasNumbers
+    ? `注册即享 ${trial!.days} 天试用，含 ${trial!.source_minutes} 分钟源视频额度${trial!.includes_studio ? "与 Studio 精校模式" : ""}。亲自验证对齐质量与配音自然度。试用结束后不会自动扣费，也不会锁定你的项目数据。`
+    : "注册即享免费试用。亲自验证对齐质量与配音自然度。试用结束后不会自动扣费，也不会锁定你的项目数据。"
+
   return (
     <>
       <section className="marketing-reading-surface pt-16 pb-8 sm:pt-20">
         <div className="mx-auto max-w-5xl px-4 sm:px-6 lg:px-8">
           <div className="max-w-2xl">
-            <div className="inline-flex items-center gap-2 rounded-full border border-primary/30 bg-primary/5 px-3 py-1 text-xs font-semibold text-primary">
+            <div className="inline-flex items-center gap-2 rounded-full border border-[color:var(--cinnabar,#C73E3A)]/30 bg-[color:var(--cinnabar,#C73E3A)]/5 px-3 py-1 text-xs font-semibold text-[color:var(--cinnabar,#C73E3A)]">
               <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />
               无需绑卡
             </div>
-            <h1 className="mt-5 text-4xl font-bold tracking-tight text-foreground sm:text-5xl">
+            <h1 className="ink-display mt-5 text-4xl tracking-tight text-foreground sm:text-5xl">
               先免费体验，再决定是否升级
             </h1>
-            <p className="mt-5 zh-body-lg text-muted-foreground">
-              注册即享 7 天试用，含 20 分钟源视频额度与 Studio 精校模式。亲自验证对齐质量与配音自然度。试用结束后不会自动扣费，也不会锁定你的项目数据。
-            </p>
+            <p className="mt-5 zh-body-lg text-muted-foreground">{leadParagraph}</p>
           </div>
         </div>
       </section>
@@ -49,7 +63,7 @@ export default function TrialPage() {
 
             <aside className="lg:col-span-2" aria-label="开始试用">
               <div className="sticky top-24 rounded-2xl border border-border bg-card p-6 shadow-sm">
-                <h2 className="text-xl font-semibold text-foreground">立即开始</h2>
+                <h2 className="ink-heading text-xl font-semibold text-foreground">立即开始</h2>
                 <p className="mt-2 text-sm text-muted-foreground">
                   创建账户即可查看并领取你的试用额度，整个过程不超过一分钟。
                 </p>

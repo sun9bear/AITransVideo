@@ -1,25 +1,31 @@
-"use client"
-
-import Link from "next/link"
 import { Check, Minus } from "lucide-react"
-import { buttonVariants } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
-import { Skeleton } from "@/components/ui/skeleton"
-import { useSession } from "@/components/providers/session-provider"
 import { cn } from "@/lib/utils"
+import { getPlansSafeServer } from "@/lib/billing/get-plans"
 import type { Plan, PlanPriceMap } from "@/lib/billing/types"
-import { usePlans } from "./use-plans"
+import { PlanCardCta } from "./plan-card-cta"
 
 /**
- * Three-tier pricing grid consumed from the gateway truth source (GET /api/plans).
+ * Three-tier pricing grid — Server Component variant.
  *
- * Strict rules (DESIGN.md §3.5 + T2 preflight):
- * - Exactly three tiers: Free / Plus / Pro. Plus is visually highlighted.
- * - Trial is NEVER a fourth card — the trial entry is rendered elsewhere
- *   (TrialBanner) as a banner / conversion entry.
- * - Prices, minutes, concurrency caps, and quotas come from the API. No local
- *   fallback numbers. If the API is unavailable, show an empty / error state
- *   rather than inventing defaults.
+ * Why Server Component:
+ *   The previous version was `"use client"` and fetched plans via a useEffect
+ *   in `usePlans()`. As a result, the SSR HTML contained only skeleton cards
+ *   and the live site showed a blank pricing area until JS hydrated. That
+ *   broke first paint, SEO, and slow-network UX.
+ *
+ *   This rewrite fetches plans server-side via `getPlansSafeServer()`, ships
+ *   real prices in the initial HTML, and only the CTA button (which depends
+ *   on session) is a client component (`PlanCardCta`).
+ *
+ * Strict rules (DESIGN.md §3.5 + plan §7):
+ *   - Exactly three tiers: Free / Plus / Pro. Plus is highlighted.
+ *   - Trial is rendered elsewhere (TrialBanner), never as a fourth card.
+ *   - Prices come from `/api/plans`. On gateway failure, fallback to empty
+ *     state with a friendly message — never invent default numbers.
+ *   - Session-aware CTA logic stays a client island.
+ *
+ * See: docs/plans/2026-04-29-marketing-redesign-ink-aesthetic.md §7 PricingPreview
  */
 const PLAN_ORDER = ["free", "plus", "pro"] as const
 
@@ -66,53 +72,14 @@ function planBenefits(plan: Plan): Array<{ label: string; included: boolean }> {
   return benefits
 }
 
-/**
- * Plan CTA href is session-aware so logged-in visitors don't get dropped back on
- * the registration page (which isn't designed as an "upgrade" landing).
- *
- * Guest path (default, Task 3): every tier routes to `/auth` (phone-first main
- * path), which is the only supported public registration entry.
- *
- * Logged-in path: every tier routes to `/translations/new`. Upgrade handling
- * for already-authenticated users is a later-milestone concern (Task 4
- * subscription / checkout flow). Until that ships, logged-in visitors are
- * sent to the workspace so the conversion path never regresses to an auth screen.
- */
-function planCtaHref(
-  plan: Plan,
-  isAuthenticated: boolean,
-): { href: string; label: string } {
-  const authedHref = "/translations/new"
-  const guestHref = "/auth"
-  if (plan.code === "free") {
-    return {
-      href: isAuthenticated ? authedHref : guestHref,
-      label: isAuthenticated ? "进入工作台" : "免费开始",
-    }
-  }
-  if (plan.self_serve) {
-    return {
-      href: isAuthenticated ? authedHref : guestHref,
-      label: isAuthenticated ? "进入工作台" : `选择 ${plan.display_name}`,
-    }
-  }
-  return {
-    href: isAuthenticated ? authedHref : guestHref,
-    label: "联系我们",
-  }
-}
-
 function PlanCard({
   plan,
   highlight,
-  isAuthenticated,
 }: {
   plan: Plan
   highlight: boolean
-  isAuthenticated: boolean
 }) {
   const price = monthlyPriceLabel(plan.price_cny_fen)
-  const cta = planCtaHref(plan, isAuthenticated)
   const benefits = planBenefits(plan)
 
   return (
@@ -130,7 +97,9 @@ function PlanCard({
         </Badge>
       )}
       <div className="space-y-1">
-        <h3 className="text-lg font-semibold text-foreground">{plan.display_name}</h3>
+        <h3 className="ink-heading text-lg font-semibold text-foreground">
+          {plan.display_name}
+        </h3>
         <p className="text-sm text-muted-foreground min-h-[1.25rem]">
           {plan.code === "free" && "适合个人创作者试水与小型项目"}
           {plan.code === "plus" && "适合稳定输出的独立创作者"}
@@ -141,13 +110,13 @@ function PlanCard({
       <div className="mt-5 flex items-baseline gap-1">
         {price ? (
           <>
-            <span className="text-3xl font-semibold text-foreground tabular-nums">
+            <span className="ink-num text-4xl font-bold text-foreground">
               {price.amount}
             </span>
             <span className="text-sm text-muted-foreground">{price.unit}</span>
           </>
         ) : (
-          <span className="text-3xl font-semibold text-foreground">免费</span>
+          <span className="ink-display text-4xl text-foreground">免费</span>
         )}
       </div>
 
@@ -172,63 +141,15 @@ function PlanCard({
       </ul>
 
       <div className="mt-auto pt-6">
-        <Link
-          href={cta.href}
-          className={cn(
-            buttonVariants({ variant: highlight ? "default" : "outline", size: "lg" }),
-            "h-11 w-full",
-          )}
-        >
-          {cta.label}
-        </Link>
+        <PlanCardCta plan={plan} highlight={highlight} />
       </div>
     </div>
   )
 }
 
-function PlanCardSkeleton() {
-  return (
-    <div className="flex flex-col rounded-xl border border-border bg-card p-6">
-      <Skeleton className="h-5 w-24" />
-      <Skeleton className="mt-2 h-4 w-40" />
-      <Skeleton className="mt-5 h-9 w-28" />
-      <div className="mt-6 space-y-3">
-        <Skeleton className="h-4 w-full" />
-        <Skeleton className="h-4 w-11/12" />
-        <Skeleton className="h-4 w-10/12" />
-        <Skeleton className="h-4 w-9/12" />
-      </div>
-      <Skeleton className="mt-8 h-10 w-full" />
-    </div>
-  )
-}
-
-export function PricingGrid() {
-  const state = usePlans()
-  const { user } = useSession()
-  const isAuthenticated = Boolean(user)
-
-  if (state.status === "loading") {
-    return (
-      <div className="grid gap-6 md:grid-cols-3">
-        <PlanCardSkeleton />
-        <PlanCardSkeleton />
-        <PlanCardSkeleton />
-      </div>
-    )
-  }
-
-  if (state.status === "error") {
-    return (
-      <div className="rounded-xl border border-border bg-card p-8 text-center">
-        <p className="text-sm text-muted-foreground">
-          套餐信息暂时无法加载，请稍后重试。
-        </p>
-      </div>
-    )
-  }
-
-  const byCode = new Map(state.data.plans.map((p) => [p.code, p]))
+export async function PricingGrid() {
+  const data = await getPlansSafeServer()
+  const byCode = new Map(data.plans.map((p) => [p.code, p]))
   const ordered = PLAN_ORDER.map((code) => byCode.get(code)).filter(
     (p): p is Plan => Boolean(p),
   )
@@ -236,7 +157,9 @@ export function PricingGrid() {
   if (ordered.length === 0) {
     return (
       <div className="rounded-xl border border-border bg-card p-8 text-center">
-        <p className="text-sm text-muted-foreground">暂无可展示的套餐。</p>
+        <p className="text-sm text-muted-foreground">
+          套餐信息暂时无法加载，请稍后重试。
+        </p>
       </div>
     )
   }
@@ -248,7 +171,6 @@ export function PricingGrid() {
           key={plan.code}
           plan={plan}
           highlight={plan.code === HIGHLIGHT_CODE}
-          isAuthenticated={isAuthenticated}
         />
       ))}
     </div>

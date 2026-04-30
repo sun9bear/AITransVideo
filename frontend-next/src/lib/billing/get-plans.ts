@@ -41,3 +41,44 @@ export async function getPlansSafe(): Promise<PlansResponse> {
     return EMPTY_PLANS_RESPONSE
   }
 }
+
+/**
+ * Server-side variant for use inside Next.js Server Components / Route Handlers.
+ *
+ * Why this exists: `getPlans()` calls `fetch("/api/plans")` with a relative URL.
+ * That works in browsers (relative to current page), but fails in Node-side
+ * fetch which requires an absolute URL. This helper reconstructs the origin
+ * from the inbound request headers (`x-forwarded-proto` + `host`) so SSR
+ * pricing data lands in the initial HTML.
+ *
+ * Falls back to `EMPTY_PLANS_RESPONSE` on any error — pricing pages must never
+ * blank out because the upstream is briefly unavailable.
+ *
+ * Cache strategy: reuses Next's request-scoped fetch dedup. We add a 60s
+ * `revalidate` so pricing changes propagate quickly without hammering the
+ * gateway on every page render.
+ *
+ * MUST be called from a Server Component or Route Handler — `headers()` throws
+ * in client code paths.
+ */
+export async function getPlansSafeServer(): Promise<PlansResponse> {
+  // Lazy-import to keep the client bundle clean. `next/headers` is server-only
+  // and would break the build if leaked into a client component.
+  const { headers } = await import("next/headers")
+  try {
+    const h = await headers()
+    const host = h.get("host")
+    if (!host) return EMPTY_PLANS_RESPONSE
+    const proto = h.get("x-forwarded-proto") ?? (host.includes("localhost") ? "http" : "https")
+    const url = `${proto}://${host}/api/plans`
+    const res = await fetch(url, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      next: { revalidate: 60 },
+    })
+    if (!res.ok) return EMPTY_PLANS_RESPONSE
+    return (await res.json()) as PlansResponse
+  } catch {
+    return EMPTY_PLANS_RESPONSE
+  }
+}
