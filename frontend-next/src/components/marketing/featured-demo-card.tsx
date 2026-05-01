@@ -41,6 +41,10 @@ export function FeaturedDemoCard({ demo, ariaHidden = false }: { demo: Demo; ari
   const videoRef = useRef<HTMLVideoElement | null>(null)
   // Captured currentTime stashed across the src-swap remount — see handleTabChange.
   const pendingResumeTimeRef = useRef<number | null>(null)
+  // Whether the video was playing immediately before a tab swap. Used in
+  // onLoadedMetadata of the new <video> instance to decide whether to
+  // auto-play after the src swap.
+  const wasPlayingRef = useRef(false)
   const { currentlyPlayingId, setCurrentlyPlayingId } = useFeaturedDemos()
 
   // Pause-others coordination: if another card is playing and ours isn't, pause us.
@@ -51,19 +55,51 @@ export function FeaturedDemoCard({ demo, ariaHidden = false }: { demo: Demo; ari
     }
   }, [currentlyPlayingId, demo.id])
 
+  // Hover-to-play (desktop only). Mobile / touch devices fire synthetic
+  // mouseenter on tap, which would auto-play before the user's tap reaches
+  // the native controls — confusing for tap-to-pause flow. The matchMedia
+  // gate ensures we only auto-play on devices with a real hover input.
+  //
+  // play() returns a Promise that may reject due to browser autoplay
+  // policies (no audio without prior user gesture). We catch silently;
+  // the video stays paused on the poster and the user can still click
+  // to play. Once they've clicked anywhere on the page, subsequent hover-
+  // plays succeed for the rest of the session.
+  function handleMouseEnter() {
+    if (typeof window === "undefined") return
+    if (!window.matchMedia("(hover: hover)").matches) return
+    const v = videoRef.current
+    if (!v) return
+    void v.play().catch(() => {
+      /* autoplay policy rejected; poster remains, click-to-play still works */
+    })
+  }
+
+  function handleMouseLeave() {
+    if (typeof window === "undefined") return
+    if (!window.matchMedia("(hover: hover)").matches) return
+    const v = videoRef.current
+    if (v && !v.paused) v.pause()
+    // currentTime is preserved — next hover resumes from the same position.
+  }
+
   function handleTabChange(next: "zh" | "en") {
     if (next === tab) return
     const v = videoRef.current
     pendingResumeTimeRef.current = v?.currentTime ?? 0
+    // Capture play-state so the new <video> instance can resume after remount.
+    wasPlayingRef.current = !!(v && !v.paused)
     setTab(next)
-    // The currentTime restore happens in the new <video>'s onLoadedMetadata
-    // callback — see below. Doing it here would race the React remount.
+    // The currentTime restore + auto-resume happen in the new <video>'s
+    // onLoadedMetadata callback — see below. Doing it here would race the
+    // React remount.
   }
 
   function handleLoadedMetadata() {
     const v = videoRef.current
+    if (!v) return
     const t = pendingResumeTimeRef.current
-    if (v && t != null) {
+    if (t != null) {
       try {
         v.currentTime = t
       } catch {
@@ -72,6 +108,13 @@ export function FeaturedDemoCard({ demo, ariaHidden = false }: { demo: Demo; ari
            never fires. Swallowed to avoid surfacing a benign edge case. */
       }
       pendingResumeTimeRef.current = null
+    }
+    // Auto-play in the new tab if the user had it playing (hover or
+    // click) before swapping. Same autoplay-policy caveat as
+    // handleMouseEnter — silently catches rejection.
+    if (wasPlayingRef.current) {
+      void v.play().catch(() => {})
+      wasPlayingRef.current = false
     }
   }
 
@@ -95,14 +138,22 @@ export function FeaturedDemoCard({ demo, ariaHidden = false }: { demo: Demo; ari
       // button, which is harmless (worst case, two copies of the same
       // demo play; the carousel rotates one offscreen quickly anyway).
       aria-label={demo.display_name}
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={handleMouseLeave}
     >
-      {/* Tab row — segmented control above video */}
+      {/* Tab row — segmented control above video. Both hover (mouseenter)
+          and click trigger the same handleTabChange. Hover gives the
+          fluid "lean over to compare" UX the user asked for; click is
+          retained so touch devices still work (synthetic mouseenter on
+          tap also fires handleTabChange, then the click is a no-op
+          because handleTabChange short-circuits when next === current). */}
       <div role="tablist" aria-label="原片 / 配音版" className="flex border-b border-border">
         <button
           type="button"
           role="tab"
           aria-selected={tab === "zh"}
           tabIndex={ariaHidden ? -1 : 0}
+          onMouseEnter={() => handleTabChange("zh")}
           onClick={() => handleTabChange("zh")}
           className={`flex-1 px-3 py-2 text-xs font-medium transition-colors ${
             tab === "zh"
@@ -117,6 +168,7 @@ export function FeaturedDemoCard({ demo, ariaHidden = false }: { demo: Demo; ari
           role="tab"
           aria-selected={tab === "en"}
           tabIndex={ariaHidden ? -1 : 0}
+          onMouseEnter={() => handleTabChange("en")}
           onClick={() => handleTabChange("en")}
           className={`flex-1 px-3 py-2 text-xs font-medium transition-colors ${
             tab === "en"
