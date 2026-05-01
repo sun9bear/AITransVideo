@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "demos": [
+    {
+      "id": "karpathy-agent-engineering",
+      "display_name": "安德烈·卡帕西谈智能体工程",
+      "source_label": "YouTube · 96jN2OCOfLs · AI Ascent 2025",
+      "segment_label": "16:25 – 17:18 · 52s",
+      "original_src": "/marketing/demos/karpathy-agent-engineering/original.mp4",
+      "dubbed_src": "/marketing/demos/karpathy-agent-engineering/dubbed.mp4",
+      "poster_src": "/marketing/demos/karpathy-agent-engineering/poster.jpg",
+      "natural_width": 1280,
+      "natural_height": 720
+    },
+    {
+      "id": "muniba-disability-vs-ability",
+      "display_name": "穆尼巴·马扎里：拥抱不完美",
+      "source_label": "YouTube · TEDx 演讲",
+      "segment_label": "03:36 – 04:38 · 61s",
+      "original_src": "/marketing/demos/muniba-disability-vs-ability/original.mp4",
+      "dubbed_src": "/marketing/demos/muniba-disability-vs-ability/dubbed.mp4",
+      "poster_src": "/marketing/demos/muniba-disability-vs-ability/poster.jpg",
+      "natural_width": 1280,
+      "natural_height": 720
+    },
+    {
+      "id": "buffett-2008-buy-stocks",
+      "display_name": "CNBC专访巴菲特：2008年与价值投资",
+      "source_label": "CNBC · Becky Quick interview",
+      "segment_label": "09:37 – 10:46 · 69s",
+      "original_src": "/marketing/demos/buffett-2008-buy-stocks/original.mp4",
+      "dubbed_src": "/marketing/demos/buffett-2008-buy-stocks/dubbed.mp4",
+      "poster_src": "/marketing/demos/buffett-2008-buy-stocks/poster.jpg",
+      "natural_width": 1280,
+      "natural_height": 720
+    },
+    {
+      "id": "vox-why-ok",
+      "display_name": "为什么我们总说\"OK\"",
+      "source_label": "Vox · YouTube explainer",
+      "segment_label": "03:05 – 04:04 · 59s",
+      "original_src": "/marketing/demos/vox-why-ok/original.mp4",
+      "dubbed_src": "/marketing/demos/vox-why-ok/dubbed.mp4",
+      "poster_src": "/marketing/demos/vox-why-ok/poster.jpg",
+      "natural_width": 1280,
+      "natural_height": 720
+    },
+    {
+      "id": "jensen-matrix-multiplication",
+      "display_name": "黄仁勋专访:英伟达的护城河",
+      "source_label": "YouTube · Dwarkesh podcast",
+      "segment_label": "21:01 – 21:59 · 58s",
+      "original_src": "/marketing/demos/jensen-matrix-multiplication/original.mp4",
+      "dubbed_src": "/marketing/demos/jensen-matrix-multiplication/dubbed.mp4",
+      "poster_src": "/marketing/demos/jensen-matrix-multiplication/poster.jpg",
+      "natural_width": 1280,
+      "natural_height": 720
+    }
+  ]
+}

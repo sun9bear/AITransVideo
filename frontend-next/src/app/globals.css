@@ -632,3 +632,88 @@
   scrollbar-width: thin;
   scrollbar-color: rgb(139 92 246 / 0.35) transparent;
 }
+
+/* ==========================================
+   FeaturedDemos carousel — homepage section under <ProductProof>.
+
+   Three behaviours implemented via pure CSS, no JS:
+
+   1. Auto-scroll: .demo-track animates translateX from 0 to -50% over 35s
+      linearly, infinitely. The card list is rendered TWICE in DOM (see
+      <FeaturedDemosClient>) so when -50% is reached, the second copy is
+      identically positioned to the first — the keyframe restart at 0%
+      is visually seamless.
+
+   2. Pause-on-hover: animation-play-state: paused while the cursor is
+      anywhere within .demo-carousel.
+
+   3. Hover-shrink-others: when any .demo-card is hovered, that card scales
+      to 1.15 with deeper shadow + z-index lift; siblings scale to 0.92 and
+      drop to 55% opacity. Implemented with the :has() selector — no JS.
+      Browser baseline: Safari 15.4+, Chrome 105+, Firefox 121+. Older
+      browsers degrade gracefully (hovered card still scales up; siblings
+      simply don't shrink).
+
+   On mobile / touch (@media (hover: none)) the auto-scroll is disabled
+   and the track becomes scroll-snap horizontal. Hover scaling is also
+   disabled because there's no cursor.
+
+   prefers-reduced-motion disables the marquee. Hover scaling is preserved
+   because it's not a vestibular trigger (no continuous movement).
+   ========================================== */
+
+@keyframes featured-demos-marquee {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-50%); }
+}
+
+.demo-track {
+  width: max-content;
+  animation: featured-demos-marquee 35s linear infinite;
+  will-change: transform;
+}
+
+.demo-carousel:hover .demo-track {
+  animation-play-state: paused;
+}
+
+.demo-track:has(.demo-card:hover) .demo-card {
+  scale: 0.92;
+  opacity: 0.55;
+}
+.demo-track:has(.demo-card:hover) .demo-card:hover {
+  scale: 1.15;
+  opacity: 1;
+  z-index: 10;
+  box-shadow: 0 20px 60px -10px rgba(0, 0, 0, 0.30);
+}
+
+@media (hover: none) {
+  .demo-carousel {
+    overflow-x: auto;
+    scroll-snap-type: x mandatory;
+    -webkit-overflow-scrolling: touch;
+  }
+  .demo-track {
+    width: max-content;
+    animation: none;
+  }
+  .demo-card {
+    scroll-snap-align: start;
+    width: min(85vw, 320px) !important;
+  }
+  .demo-card:hover {
+    scale: 1 !important;
+    opacity: 1 !important;
+  }
+  .demo-track:has(.demo-card:hover) .demo-card {
+    scale: 1;
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .demo-track {
+    animation: none;
+  }
+}
