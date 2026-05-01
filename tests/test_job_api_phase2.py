@@ -1,11 +1,10 @@
-"""Phase 2 tests: review write endpoints (translation/approve, split-segment, preview-segment, voice/clone)."""
+"""Phase 2 tests: review write endpoints (translation/approve, split-segment, preview-segment)."""
 from __future__ import annotations
 
 from http import HTTPStatus
 import json
 from pathlib import Path
 import threading
-from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -415,26 +414,15 @@ class TestPreviewSegment:
 
 
 # ===================================================================
-# voice/clone (stubbed — no real MiniMax API)
+# legacy voice/clone removal
 # ===================================================================
 
-class TestVoiceClone:
+class TestLegacyVoiceCloneRemoved:
 
-    def test_clone_uses_jobid_authority(self, tmp_path: Path) -> None:
-        """Clone uses the job's project for auto-extraction, not body.project_dir."""
+    def test_clone_endpoint_is_no_longer_served(self, tmp_path: Path) -> None:
         url = "https://youtube.example/watch?v=clone-test"
         project_dir = write_process_project(tmp_path, project_name="clone_test", youtube_url=url)
         escaped = str(project_dir.resolve(strict=False)).replace("\\", "\\\\")
-
-        # Write transcript for auto-extraction
-        _write_transcript_json(project_dir, [
-            {"index": 0, "speaker_id": "speaker_a", "source_text": "Hello",
-             "en_text": "Hello", "start_ms": 0, "end_ms": 2000},
-        ])
-        # Write fake audio
-        audio_dir = project_dir / "audio"
-        audio_dir.mkdir(parents=True, exist_ok=True)
-        (audio_dir / "speech_for_asr.wav").write_bytes(b"RIFF" + b"\x00" * 100)
 
         service, server, thread = _build_server(tmp_path, plans=[
             {"lines": [
@@ -448,43 +436,10 @@ class TestVoiceClone:
                 service, server, tmp_path, youtube_url=url, project_name="clone_test",
             )
 
-            # Patch at the import source, not the module that lazy-imports
-            with patch("services.voice.sample_extractor.VoiceSampleExtractor") as mock_extractor_cls, \
-                 patch("services.voice_clone.VoiceCloneConfig") as mock_config_cls, \
-                 patch("services.voice_clone.MiniMaxVoiceCloneClient") as mock_client_cls:
-
-                mock_extractor = MagicMock()
-                mock_extractor_cls.return_value = mock_extractor
-
-                mock_clone_result = MagicMock()
-                mock_clone_result.voice_id = "cloned_voice_001"
-                mock_client = MagicMock()
-                mock_client.create_voice_clone.return_value = mock_clone_result
-                mock_client_cls.return_value = mock_client
-                mock_config_cls.from_env.return_value = MagicMock()
-
-                status, result = _request_json("POST", f"{base_url}/jobs/{job_id}/review/voice/clone", {
+            try:
+                _request_json("POST", f"{base_url}/jobs/{job_id}/review/voice/clone", {
                     "speaker_id": "speaker_a",
                     "speaker_name": "Dan",
-                    "sample_path": "",
-                    "project_dir": "/fake/ignored",
-                })
-                assert status == HTTPStatus.OK
-                assert result["success"] is True
-                assert result["voice_id"] == "cloned_voice_001"
-                assert result["speaker_id"] == "speaker_a"
-        finally:
-            server.shutdown()
-            server.server_close()
-            thread.join(timeout=5)
-
-    def test_clone_rejects_unknown_job(self, tmp_path: Path) -> None:
-        service, server, thread = _build_server(tmp_path, plans=[])
-        base_url = f"http://127.0.0.1:{server.server_port}"
-        try:
-            try:
-                _request_json("POST", f"{base_url}/jobs/nonexistent/review/voice/clone", {
-                    "speaker_id": "speaker_a",
                 })
             except HTTPError as exc:
                 assert exc.code == HTTPStatus.NOT_FOUND

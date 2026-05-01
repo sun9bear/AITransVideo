@@ -22,10 +22,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth import require_auth
 from config import settings
 from credits_service import (
+    InsufficientCreditsError,
     ensure_credit_buckets_for_user,
+    reserve_credits_or_raise,
     shadow_capture,
     shadow_release,
-    shadow_reserve,
     shadow_safe,
 )
 from database import get_db
@@ -359,22 +360,39 @@ async def voice_clone_for_selection(
         if total_duration_s >= 300:
             return _json_response(400, {"error": "excessive_duration", "message": f"选中片段总时长 {total_duration_s:.1f}s，不能超过 300s"})
 
-        # Shadow reserve credits (from runtime pricing, fallback 500)
+        # Live reserve credits (from runtime pricing, fallback 500)
         clone_cost = _get_clone_cost_credits()
         user_id = user.id if user else None
         reserve_reason_code = f"{_VOICE_CLONE_RESERVE_REASON}_{uuid.uuid4().hex[:12]}"
         if user_id:
-            await shadow_safe(ensure_credit_buckets_for_user, db, user=user)
-            await shadow_safe(
-                shadow_reserve,
-                db,
-                user_id=user_id,
-                job_id=job_id,
-                estimated_credits=clone_cost,
-                service_mode="studio",
-                reason_code=reserve_reason_code,
-            )
-            await _commit_shadow(db, "voice clone reserve")
+            await ensure_credit_buckets_for_user(db, user=user)
+            try:
+                await reserve_credits_or_raise(
+                    db,
+                    user_id=user_id,
+                    job_id=job_id,
+                    estimated_credits=clone_cost,
+                    service_mode="studio",
+                    reason_code=reserve_reason_code,
+                )
+                await _commit_shadow(db, "voice clone reserve")
+            except InsufficientCreditsError as exc:
+                await db.rollback()
+                return _json_response(402, {
+                    "error": "insufficient_credits",
+                    "message": f"点数不足：克隆音色需要 {exc.required} 点，当前可用 {exc.available} 点。请充值或升级后再试。",
+                    "detail": {
+                        "required_credits": exc.required,
+                        "available_credits": exc.available,
+                    },
+                })
+            except Exception:
+                logger.exception("voice clone credit reserve failed for %s", job_id)
+                await db.rollback()
+                return _json_response(500, {
+                    "error": "credit_reserve_failed",
+                    "message": "点数预扣失败，克隆流程已停止。请稍后重试。",
+                })
 
         async def release_clone_credits(reason_code: str) -> None:
             if not user_id:

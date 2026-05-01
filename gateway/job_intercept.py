@@ -42,7 +42,9 @@ from models import Job, User
 from proxy import proxy_request
 from quota import check_quota, reserve_quota, settle_job_quota, TERMINAL_STATUSES
 from credits_service import (
+    InsufficientCreditsError,
     ensure_credit_buckets_for_user, estimate_credits,
+    reserve_credits_or_raise,
     shadow_reserve, shadow_release, shadow_capture, shadow_safe,
 )
 
@@ -54,10 +56,53 @@ POST_EDIT_RESPONSE_FIELDS = (
     "copy_of_job_id",
     "root_job_id",
     "edit_generation",
+    "role_snapshot",
 )
 
 JOB_LIST_DEFAULT_LIMIT = 20
 JOB_LIST_MAX_LIMIT = 100
+POST_EDIT_USAGE_KEY = "post_edit_usage"
+POST_EDIT_MAX_SINGLE_TTS_CHARS = 300
+POST_EDIT_MAX_SEGMENT_SAVE_CHARS = 1000
+POST_EDIT_BATCH_MAX_SEGMENTS_DEFAULT = 50
+POST_EDIT_BATCH_MAX_SEGMENTS_PRO = 150
+
+POST_EDIT_LIMITS: dict[str, dict[str, int | None]] = {
+    "trial": {
+        "overwrite_commits": 3,
+        "copy_as_new": 0,
+        "tts_segments": 8,
+        "tts_chars": 1000,
+        "batch_regenerates": 1,
+        "preview_voice_daily": 20,
+    },
+    "plus": {
+        "overwrite_commits": 10,
+        "copy_as_new": 2,
+        "tts_segments": 30,
+        "tts_chars": 5000,
+        "batch_regenerates": 2,
+        "preview_voice_daily": 60,
+    },
+    "pro": {
+        "overwrite_commits": 30,
+        "copy_as_new": 5,
+        "tts_segments": 100,
+        "tts_chars": 20000,
+        "batch_regenerates": 5,
+        "preview_voice_daily": 200,
+    },
+    "admin": {
+        "overwrite_commits": None,
+        "copy_as_new": None,
+        "tts_segments": None,
+        "tts_chars": None,
+        "batch_regenerates": None,
+        "preview_voice_daily": None,
+    },
+}
+
+POST_EDIT_BATCH_TRIGGER_STATUSES = {"text_dirty", "voice_dirty", "tts_failed"}
 
 
 def _parse_job_list_pagination(request: Request) -> tuple[int | None, int]:
@@ -108,7 +153,13 @@ def _merge_gateway_job_metadata(upstream_job: dict, db_job: Job | None) -> dict:
     if db_status == "purged" and db_stage is not None:
         merged["current_stage"] = db_stage
 
+    is_admin_job = getattr(db_job, "role_snapshot", None) == "admin"
+    if is_admin_job:
+        merged["expires_at"] = None
+
     for field in POST_EDIT_RESPONSE_FIELDS:
+        if is_admin_job and field == "expires_at":
+            continue
         value = getattr(db_job, field, None)
         if value is not None:
             merged[field] = _serialize_response_value(value)
@@ -133,6 +184,15 @@ def _error_response(
         content=json.dumps(body, ensure_ascii=False),
         status_code=status_code,
         headers={"content-type": "application/json"},
+    )
+
+
+def _insufficient_credits_response(exc: InsufficientCreditsError) -> Response:
+    return _error_response(
+        402,
+        "insufficient_credits",
+        f"点数不足：本次预计需要 {exc.required} 点，当前可用 {exc.available} 点。请充值或升级后再试。",
+        {"required_credits": exc.required, "available_credits": exc.available},
     )
 
 
@@ -479,6 +539,7 @@ async def intercept_list_jobs(
         override_query=upstream_query,
     )
 
+
     # If auth not required or no user, return as-is
     if not settings.auth_required or user is None:
         return upstream_response
@@ -563,7 +624,10 @@ async def intercept_list_jobs(
                             await settle_job_quota(db, db_job, upstream_status)
                             # V3-1 shadow settle (best-effort)
                             try:
-                                if upstream_status == "succeeded":
+                                if (
+                                    upstream_status == "succeeded"
+                                    and _should_shadow_settle_job_credits(db_job)
+                                ):
                                     await shadow_safe(
                                         ensure_credit_buckets_for_user,
                                         db,
@@ -591,7 +655,7 @@ async def intercept_list_jobs(
                                         service_mode=db_job.service_mode or "express",
                                         reserve_reason_code="job_reserve",
                                     )
-                                else:
+                                elif _should_shadow_settle_job_credits(db_job):
                                     # failed / cancelled → release
                                     await shadow_safe(
                                         shadow_release,
@@ -778,10 +842,9 @@ async def intercept_create_job(
     # --- 5. Idempotency key ---
     idempotency_key = request_data.get("create_idempotency_key") or str(_uuid.uuid4())
 
-    # Ordinary jobs keep a fixed 7-day retention deadline from creation. This
-    # value must be explicit rather than inferred from updated_at; editing
-    # enter/cancel legitimately touches updated_at but must not extend TTL.
-    job_expires_at = datetime.now(timezone.utc) + timedelta(days=7)
+    # Ordinary jobs keep a fixed 7-day retention deadline from creation. Admin
+    # jobs intentionally have no TTL and are excluded from both cleanup paths.
+    job_expires_at = None if is_admin else datetime.now(timezone.utc) + timedelta(days=7)
 
     # --- 5c. display_name (plan §6.2 + T0-4) ---
     #
@@ -844,7 +907,10 @@ async def intercept_create_job(
     request_data["estimated_duration_seconds"] = estimated_duration_seconds
     request_data["quota_state"] = "none"
     request_data["create_idempotency_key"] = idempotency_key
-    request_data["expires_at"] = job_expires_at.isoformat()
+    if job_expires_at is not None:
+        request_data["expires_at"] = job_expires_at.isoformat()
+    else:
+        request_data.pop("expires_at", None)
     if generated_display_name:
         request_data["display_name"] = generated_display_name
     # Inject user_id so Job API can build user-isolated workspace_dir
@@ -915,46 +981,52 @@ async def intercept_create_job(
                             "免费额度已用完，无法创建任务。",
                             {"job_id": job_id},
                         )
-                    await db.commit()
-                    logger.info("Job %s recorded (mode=%s, plan=%s, quota=%s)",
-                                job_id, service_mode, user_plan, job.quota_state)
 
-                    # --- V3-0/V3-1: Shadow metering + reserve (best-effort) ---
-                    try:
-                        est_min = (estimated_duration_seconds / 60.0) if estimated_duration_seconds else None
-                        job.estimated_minutes = est_min
-                        # Shadow reserve: consume quality_tier from policy (single truth source)
-                        _quality_tier = policy.get("quality_tier", "standard")
-                        # Always write basic metering snapshot (even if duration unknown)
-                        shadow_credits = estimate_credits(
-                            est_min, service_mode=service_mode, quality_tier=_quality_tier,
-                        )
-                        job.metering_snapshot = {
-                            "credits_estimated": shadow_credits if shadow_credits > 0 else None,
-                            "service_mode": service_mode,
-                            "quality_tier": _quality_tier,
-                            "tts_provider": policy.get("tts_provider"),
-                            "tts_model": policy.get("tts_model"),
-                        }
-                        if shadow_credits > 0:
-                            await shadow_safe(
-                                ensure_credit_buckets_for_user,
+                    # Credits are now a live gate for paid work. If we know
+                    # the duration at creation time, reserve before returning
+                    # success; otherwise update_source_metadata performs the
+                    # same hard reserve once the pipeline reports duration.
+                    est_min = (estimated_duration_seconds / 60.0) if estimated_duration_seconds else None
+                    job.estimated_minutes = est_min
+                    _quality_tier = policy.get("quality_tier", "standard")
+                    shadow_credits = estimate_credits(
+                        est_min, service_mode=service_mode, quality_tier=_quality_tier,
+                    )
+                    job.metering_snapshot = {
+                        "credits_estimated": shadow_credits if shadow_credits > 0 else None,
+                        "service_mode": service_mode,
+                        "quality_tier": _quality_tier,
+                        "tts_provider": policy.get("tts_provider"),
+                        "tts_model": policy.get("tts_model"),
+                    }
+                    if shadow_credits > 0:
+                        try:
+                            await ensure_credit_buckets_for_user(db, user=user)
+                            await reserve_credits_or_raise(
                                 db,
-                                user=user,
-                            )
-                            await shadow_safe(
-                                shadow_reserve,
-                                db, user_id=user.id, job_id=job_id,
+                                user_id=user.id,
+                                job_id=job_id,
                                 estimated_credits=shadow_credits,
                                 service_mode=service_mode,
                             )
-                        await db.commit()
-                    except Exception as _shadow_exc:
-                        logger.warning("V3 shadow metering failed for job %s: %s (non-fatal)", job_id, _shadow_exc)
-                        try:
+                        except InsufficientCreditsError as exc:
                             await db.rollback()
-                        except Exception:
-                            pass
+                            await _compensate_upstream_job(job_id)
+                            return _insufficient_credits_response(exc)
+                        except Exception as exc:
+                            logger.exception("credit reserve failed for job %s: %s", job_id, exc)
+                            await db.rollback()
+                            await _compensate_upstream_job(job_id)
+                            return _error_response(
+                                500,
+                                "credit_reserve_failed",
+                                "点数预扣失败，任务已停止。请稍后重试。",
+                                {"job_id": job_id},
+                            )
+
+                    await db.commit()
+                    logger.info("Job %s recorded (mode=%s, plan=%s, quota=%s)",
+                                job_id, service_mode, user_plan, job.quota_state)
                 else:
                     logger.info("Job %s already in DB, skipping", job_id)
             else:
@@ -1027,6 +1099,18 @@ async def intercept_job_subresource(
     """
     await _verify_job_ownership(job_id, db, user)
 
+    if subpath == "review/voice/clone":
+        raise HTTPException(
+            status_code=410,
+            detail=(
+                "The legacy review voice clone endpoint has been removed. "
+                "Use POST /job-api/jobs/{job_id}/voice-clone."
+            ),
+        )
+
+    if subpath == "review/voice/preview" and request.method == "POST":
+        return await _post_edit_voice_preview_with_policy(request, job_id, db, user)
+
     # --- D25 server-side log redaction for non-admin users ---
     # Intercepts GET /logs BEFORE the generic proxy. Admins pass through
     # unchanged. Non-admins get events[].message + lines[] filtered through
@@ -1074,11 +1158,8 @@ async def intercept_job_subresource(
             )
         if subpath in _POST_EDIT_TRANSITION_SUBPATHS:
             return await _editing_transition_with_lock(request, job_id, db, subpath=subpath)
-        # Segments mutation: proxy without DB lock. Upstream handles state check.
-        return await proxy_request(
-            request=request,
-            upstream_base=settings.job_api_upstream,
-            strip_prefix="/job-api",
+        return await _post_edit_mutation_with_policy(
+            request, job_id, db, user, subpath=subpath,
         )
 
     # --- Phase 2 R2 download redirect (plan 2026-04-23) ---
@@ -1558,6 +1639,397 @@ def _is_post_edit_mutation_subpath(subpath: str) -> bool:
     return False
 
 
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _as_aware_utc(value) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str):
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _post_edit_policy_key(user: User | None) -> str:
+    if user is None:
+        return "admin"
+    role = getattr(user, "role", "user") or "user"
+    if role == "admin":
+        return "admin"
+    plan = (getattr(user, "plan_code", "free") or "free").strip().lower()
+    if plan in {"plus", "pro"}:
+        return plan
+    try:
+        from plan_catalog import is_user_in_active_trial
+
+        if is_user_in_active_trial(user):
+            return "trial"
+    except Exception:
+        logger.warning("post-edit policy: failed to resolve trial state", exc_info=True)
+    return "free"
+
+
+def _post_edit_limits_for_user(user: User | None) -> dict[str, int | None] | None:
+    key = _post_edit_policy_key(user)
+    return POST_EDIT_LIMITS.get(key)
+
+
+def _should_shadow_settle_job_credits(job: Job) -> bool:
+    if getattr(job, "copy_of_job_id", None):
+        return False
+    try:
+        if int(getattr(job, "edit_generation", 0) or 0) > 0:
+            return False
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _post_edit_root_id(job: Job) -> str:
+    return str(job.root_job_id or job.job_id)
+
+
+def _post_edit_usage(job: Job) -> dict:
+    raw_snapshot = getattr(job, "metering_snapshot", None)
+    snap = raw_snapshot if isinstance(raw_snapshot, dict) else {}
+    usage = snap.get(POST_EDIT_USAGE_KEY)
+    return dict(usage) if isinstance(usage, dict) else {}
+
+
+def _save_post_edit_usage(job: Job, usage: dict) -> None:
+    raw_snapshot = getattr(job, "metering_snapshot", None)
+    snap = dict(raw_snapshot or {}) if isinstance(raw_snapshot, dict) else {}
+    snap[POST_EDIT_USAGE_KEY] = usage
+    job.metering_snapshot = snap
+
+
+async def _post_edit_root_job_for_update(db: AsyncSession, job: Job) -> Job:
+    root_id = _post_edit_root_id(job)
+    if root_id == job.job_id:
+        return job
+    result = await db.execute(
+        select(Job).where(
+            Job.job_id == root_id,
+            Job.user_id == job.user_id,
+        ).with_for_update()
+    )
+    return result.scalar_one_or_none() or job
+
+
+def _post_edit_job_expires_at(job: Job) -> datetime | None:
+    if getattr(job, "role_snapshot", None) == "admin":
+        return None
+    explicit = _as_aware_utc(getattr(job, "expires_at", None))
+    if explicit is not None:
+        return explicit
+    created = _as_aware_utc(getattr(job, "created_at", None))
+    if created is None:
+        return None
+    return created + timedelta(days=7)
+
+
+def _post_edit_limit_exceeded(
+    usage: dict,
+    field: str,
+    add: int,
+    limit: int | None,
+) -> bool:
+    if limit is None:
+        return False
+    current = int(usage.get(field) or 0)
+    return current + int(add) > int(limit)
+
+
+def _post_edit_increment(usage: dict, field: str, add: int = 1) -> None:
+    usage[field] = int(usage.get(field) or 0) + int(add)
+
+
+def _post_edit_daily_counter(usage: dict, field: str, today: str) -> dict:
+    current = usage.get(field)
+    if not isinstance(current, dict) or current.get("date") != today:
+        current = {"date": today, "count": 0}
+    return dict(current)
+
+
+async def _post_edit_existing_copy_count(db: AsyncSession, job: Job) -> int:
+    result = await db.execute(
+        select(func.count())
+        .select_from(Job)
+        .where(
+            Job.user_id == job.user_id,
+            Job.root_job_id == _post_edit_root_id(job),
+            Job.copy_of_job_id.isnot(None),
+        )
+    )
+    return int(result.scalar() or 0)
+
+
+def _read_post_edit_segments(project_dir: str | None) -> list[dict]:
+    if not project_dir:
+        return []
+    path = Path(project_dir) / "editor" / "editing" / "segments.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    return [s for s in data if isinstance(s, dict)]
+
+
+def _segment_cn_chars(project_dir: str | None, segment_id: str) -> int:
+    target = str(segment_id)
+    for segment in _read_post_edit_segments(project_dir):
+        if str(segment.get("segment_id")) == target:
+            return len(str(segment.get("cn_text") or "").strip())
+    raise HTTPException(status_code=409, detail=f"segment {segment_id!r} not found in editing buffer")
+
+
+def _batch_regen_scope(project_dir: str | None) -> tuple[int, int]:
+    if not project_dir:
+        return 0, 0
+    status_path = Path(project_dir) / "editor" / "editing" / "segment_status.json"
+    try:
+        status_data = json.loads(status_path.read_text(encoding="utf-8"))
+    except Exception:
+        status_data = {}
+    if not isinstance(status_data, dict):
+        status_data = {}
+    eligible = {
+        str(sid)
+        for sid, status in status_data.items()
+        if str(status) in POST_EDIT_BATCH_TRIGGER_STATUSES
+    }
+    if not eligible:
+        return 0, 0
+    total_chars = 0
+    for segment in _read_post_edit_segments(project_dir):
+        sid = str(segment.get("segment_id"))
+        if sid in eligible:
+            total_chars += len(str(segment.get("cn_text") or "").strip())
+    return len(eligible), total_chars
+
+
+async def _read_json_body(request: Request) -> dict:
+    try:
+        raw = await request.body()
+        if not raw:
+            return {}
+        parsed = json.loads(raw.decode("utf-8"))
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+async def _enforce_post_edit_access(
+    db: AsyncSession,
+    job: Job,
+    user: User | None,
+    *,
+    subpath: str,
+    now_utc: datetime,
+) -> tuple[Job, dict[str, int | None]]:
+    limits = _post_edit_limits_for_user(user)
+    if limits is None:
+        raise HTTPException(
+            status_code=403,
+            detail="当前套餐不支持工作台修改流程。",
+        )
+    expires_at = _post_edit_job_expires_at(job)
+    if expires_at is not None and now_utc >= expires_at:
+        raise HTTPException(
+            status_code=410,
+            detail="项目已超过 7 天保存期，不能继续修改。",
+        )
+    root_job = await _post_edit_root_job_for_update(db, job)
+    return root_job, limits
+
+
+async def _check_post_edit_commit_limit(
+    db: AsyncSession,
+    job: Job,
+    user: User | None,
+    *,
+    strategy: str,
+    now_utc: datetime,
+) -> None:
+    root_job, limits = await _enforce_post_edit_access(
+        db, job, user, subpath="editing/commit", now_utc=now_utc,
+    )
+    usage = _post_edit_usage(root_job)
+    if strategy == "overwrite":
+        if _post_edit_limit_exceeded(
+            usage, "overwrite_commits", 1, limits["overwrite_commits"]
+        ):
+            raise HTTPException(status_code=403, detail="本项目免费覆盖保存次数已用完。")
+        return
+    if strategy == "copy_as_new":
+        existing_copies = await _post_edit_existing_copy_count(db, job)
+        used = max(int(usage.get("copy_as_new") or 0), existing_copies)
+        if limits["copy_as_new"] is not None and used + 1 > int(limits["copy_as_new"]):
+            raise HTTPException(status_code=403, detail="本项目免费另存副本次数已用完。")
+        return
+
+
+async def _record_post_edit_commit_usage(
+    db: AsyncSession,
+    source_job: Job,
+    *,
+    strategy: str,
+) -> None:
+    root_job = await _post_edit_root_job_for_update(db, source_job)
+    usage = _post_edit_usage(root_job)
+    if strategy == "overwrite":
+        _post_edit_increment(usage, "overwrite_commits")
+    elif strategy == "copy_as_new":
+        _post_edit_increment(usage, "copy_as_new")
+    _save_post_edit_usage(root_job, usage)
+
+
+async def _consume_post_edit_tts_usage(
+    db: AsyncSession,
+    job: Job,
+    user: User | None,
+    *,
+    segments: int,
+    chars: int,
+    batch_start: bool,
+    now_utc: datetime,
+) -> None:
+    root_job, limits = await _enforce_post_edit_access(
+        db, job, user, subpath="regenerate-tts", now_utc=now_utc,
+    )
+    usage = _post_edit_usage(root_job)
+    if segments <= 0:
+        return
+    if batch_start and _post_edit_limit_exceeded(
+        usage, "batch_regenerates", 1, limits["batch_regenerates"]
+    ):
+        raise HTTPException(status_code=403, detail="本项目免费批量重合成次数已用完。")
+    if _post_edit_limit_exceeded(usage, "tts_segments", segments, limits["tts_segments"]):
+        raise HTTPException(status_code=403, detail="本项目免费重合成段数已用完。")
+    if _post_edit_limit_exceeded(usage, "tts_chars", chars, limits["tts_chars"]):
+        raise HTTPException(status_code=403, detail="本项目免费重合成字数已用完。")
+    if batch_start:
+        _post_edit_increment(usage, "batch_regenerates")
+    _post_edit_increment(usage, "tts_segments", segments)
+    _post_edit_increment(usage, "tts_chars", chars)
+    _save_post_edit_usage(root_job, usage)
+
+
+async def _consume_post_edit_preview_usage(
+    db: AsyncSession,
+    job: Job,
+    user: User | None,
+    *,
+    now_utc: datetime,
+) -> None:
+    root_job, limits = await _enforce_post_edit_access(
+        db, job, user, subpath="review/voice/preview", now_utc=now_utc,
+    )
+    usage = _post_edit_usage(root_job)
+    today = now_utc.date().isoformat()
+    counter = _post_edit_daily_counter(usage, "preview_voice_daily", today)
+    limit = limits["preview_voice_daily"]
+    if limit is not None and int(counter.get("count") or 0) + 1 > int(limit):
+        raise HTTPException(status_code=403, detail="今日免费试听次数已用完。")
+    counter["count"] = int(counter.get("count") or 0) + 1
+    usage["preview_voice_daily"] = counter
+    _save_post_edit_usage(root_job, usage)
+
+
+async def _post_edit_mutation_with_policy(
+    request: Request,
+    job_id: str,
+    db: AsyncSession,
+    user: User | None,
+    *,
+    subpath: str,
+) -> Response:
+    result = await db.execute(select(Job).where(Job.job_id == job_id).with_for_update())
+    job = result.scalar_one_or_none()
+    if job is None:
+        return await proxy_request(
+            request=request,
+            upstream_base=settings.job_api_upstream,
+            strip_prefix="/job-api",
+        )
+    if job.status != "editing":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Job is not in editing state: {job.status}",
+        )
+
+    now_utc = _utc_now()
+    await _enforce_post_edit_access(db, job, user, subpath=subpath, now_utc=now_utc)
+
+    parts = subpath.split("/")
+    if len(parts) == 3 and parts[0] == "segments" and parts[2] == "update":
+        payload = await _read_json_body(request)
+        cn_text = payload.get("cn_text")
+        if cn_text is not None and len(str(cn_text).strip()) > POST_EDIT_MAX_SEGMENT_SAVE_CHARS:
+            raise HTTPException(status_code=400, detail="单段译文字数不能超过 1000 字。")
+
+    if len(parts) == 3 and parts[0] == "segments" and parts[2] == "regenerate-tts":
+        chars = _segment_cn_chars(job.project_dir, parts[1])
+        if chars > POST_EDIT_MAX_SINGLE_TTS_CHARS:
+            raise HTTPException(status_code=400, detail="单段重合成最多支持 300 字。")
+        await _consume_post_edit_tts_usage(
+            db, job, user, segments=1, chars=chars, batch_start=False, now_utc=now_utc,
+        )
+
+    if subpath == "regenerate-all-tts":
+        segments, chars = _batch_regen_scope(job.project_dir)
+        batch_segment_limit = (
+            POST_EDIT_BATCH_MAX_SEGMENTS_PRO
+            if _post_edit_policy_key(user) in {"pro", "admin"}
+            else POST_EDIT_BATCH_MAX_SEGMENTS_DEFAULT
+        )
+        if segments > batch_segment_limit:
+            raise HTTPException(
+                status_code=400,
+                detail=f"单次批量重合成最多支持 {batch_segment_limit} 段。",
+            )
+        await _consume_post_edit_tts_usage(
+            db, job, user, segments=segments, chars=chars, batch_start=True, now_utc=now_utc,
+        )
+
+    await db.commit()
+    return await proxy_request(
+        request=request,
+        upstream_base=settings.job_api_upstream,
+        strip_prefix="/job-api",
+    )
+
+
+async def _post_edit_voice_preview_with_policy(
+    request: Request,
+    job_id: str,
+    db: AsyncSession,
+    user: User | None,
+) -> Response:
+    result = await db.execute(select(Job).where(Job.job_id == job_id).with_for_update())
+    job = result.scalar_one_or_none()
+    if job is not None and job.status == "editing":
+        await _consume_post_edit_preview_usage(db, job, user, now_utc=_utc_now())
+        await db.commit()
+    return await proxy_request(
+        request=request,
+        upstream_base=settings.job_api_upstream,
+        strip_prefix="/job-api",
+    )
+
+
 async def _editing_transition_with_lock(
     request: Request,
     job_id: str,
@@ -1612,6 +2084,19 @@ async def _editing_transition_with_lock(
             ),
         )
 
+    now_utc = _utc_now()
+    if job is not None and subpath == "enter-edit":
+        await _enforce_post_edit_access(
+            db, job, user, subpath=subpath, now_utc=now_utc,
+        )
+    elif job is not None and subpath == "editing/commit":
+        payload = await _read_json_body(request)
+        strategy = str(payload.get("strategy") or "").strip()
+        if strategy:
+            await _check_post_edit_commit_limit(
+                db, job, user, strategy=strategy, now_utc=now_utc,
+            )
+
     response = await proxy_request(
         request=request,
         upstream_base=settings.job_api_upstream,
@@ -1619,9 +2104,6 @@ async def _editing_transition_with_lock(
     )
 
     if job is not None and 200 <= response.status_code < 300:
-        from datetime import datetime, timezone as _tz, timedelta as _td
-
-        now_utc = datetime.now(_tz.utc)
         if subpath == "enter-edit":
             job.status = "editing"
             job.editing_touched_at = now_utc
@@ -1671,6 +2153,7 @@ async def _apply_editing_commit_gateway_side(
 
     strategy = body.get("strategy")
     if strategy == "overwrite":
+        await _record_post_edit_commit_usage(db, source_job, strategy="overwrite")
         source_job.status = "running"
         source_job.current_stage = "alignment"
         source_job.edit_generation = (source_job.edit_generation or 0) + 1
@@ -1685,6 +2168,7 @@ async def _apply_editing_commit_gateway_side(
         return
 
     # copy_as_new Phase B mirror
+    await _record_post_edit_commit_usage(db, source_job, strategy="copy_as_new")
     new_job_id = str(body.get("new_job_id") or "").strip()
     new_display_name = str(body.get("new_display_name") or "").strip()
     new_project_dir = body.get("new_project_dir")
@@ -1732,7 +2216,9 @@ async def _apply_editing_commit_gateway_side(
         .with_for_update()
     )
     sibling_expires = sibling_q.scalar_one_or_none()
-    if sibling_expires is not None:
+    if getattr(source_job, "role_snapshot", None) == "admin":
+        copy_expires = None
+    elif sibling_expires is not None:
         copy_expires = min(seven_days_later, sibling_expires + _td(hours=24))
     else:
         copy_expires = seven_days_later
@@ -2102,12 +2588,13 @@ async def update_source_metadata(
             # so we can later compare estimate vs. actual for calibration.
             job.actual_minutes = dur_float / 60.0
 
-            # V3 fix: if create-time had no estimated_duration, do late shadow reserve now
-            # Idempotency: check ledger for existing reserve before doing another one
+            # If create-time had no estimated_duration, reserve credits as soon
+            # as the pipeline reports the real source duration.
             snap = getattr(job, "metering_snapshot", None) or {}
             if dur_float > 0:
                 try:
                     from models import CreditsLedger
+
                     existing_reserve = await db.execute(
                         select(CreditsLedger).where(
                             CreditsLedger.related_job_id == job_id,
@@ -2126,20 +2613,46 @@ async def update_source_metadata(
                         if late_credits > 0:
                             snap["credits_estimated"] = late_credits
                             job.metering_snapshot = dict(snap)
-                            await shadow_safe(
-                                ensure_credit_buckets_for_user,
+                            await ensure_credit_buckets_for_user(
                                 db,
                                 user_id=job.user_id,
+                                role=getattr(job, "role_snapshot", None),
                             )
-                            await shadow_safe(
-                                shadow_reserve,
+                            await reserve_credits_or_raise(
                                 db, user_id=job.user_id, job_id=job_id,
                                 estimated_credits=late_credits,
                                 service_mode=_svc_mode,
                             )
-                            logger.info("V3 late shadow reserve for %s: %d credits", job_id, late_credits)
+                            logger.info("V3 late credit reserve for %s: %d credits", job_id, late_credits)
+                except InsufficientCreditsError as exc:
+                    job.status = "failed"
+                    job.current_stage = "failed"
+                    job.error_summary = {
+                        "error_code": "insufficient_credits",
+                        "message": (
+                            f"点数不足：本次预计需要 {exc.required} 点，"
+                            f"当前可用 {exc.available} 点。"
+                        ),
+                    }
+                    try:
+                        await db.commit()
+                    except Exception:
+                        await db.rollback()
+                    await _compensate_upstream_job(job_id)
+                    return _insufficient_credits_response(exc)
                 except Exception as _e:
-                    logger.warning("V3 late shadow reserve failed for %s: %s (non-fatal)", job_id, _e)
+                    logger.warning("V3 late credit reserve failed for %s: %s", job_id, _e)
+                    try:
+                        await db.rollback()
+                    except Exception:
+                        pass
+                    await _compensate_upstream_job(job_id)
+                    return _error_response(
+                        500,
+                        "credit_reserve_failed",
+                        "点数预扣失败，任务已停止。请稍后重试。",
+                        {"job_id": job_id},
+                    )
         except (TypeError, ValueError):
             pass
     if title is not None:

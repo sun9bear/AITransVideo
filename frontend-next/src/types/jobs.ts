@@ -86,6 +86,7 @@ export interface JobSummary {
   copyOfJobId?: string | null
   rootJobId?: string | null
   editGeneration?: number
+  roleSnapshot?: string | null
 }
 
 export interface JobLogEntry {

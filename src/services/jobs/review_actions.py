@@ -1,6 +1,6 @@
 """Phase 2: Narrow review action helpers for Job API.
 
-These functions implement the write-side review logic (approve, split, preview, clone)
+These functions implement the write-side review logic (approve, split, preview)
 using the job's verified project_dir as authority. They do NOT live inside JobService
 to keep that class focused on job lifecycle.
 """
@@ -231,65 +231,6 @@ def preview_segment(
         "tts_audio_base64": tts_audio_b64,
         "source_format": "wav",
         "tts_format": "wav",
-    }
-
-
-def clone_voice(
-    *,
-    project_dir: Path,
-    speaker_id: str,
-    speaker_name: str | None,
-    sample_path: str | None,
-    config_path: Path,
-    project_root: Path,
-) -> dict[str, object]:
-    """Clone a voice for the target job's project."""
-    import re
-    from services.web_ui.voice_library import _resolve_voice_registry_path
-
-    effective_speaker_name = (speaker_name or "").strip() or speaker_id
-
-    # Auto-extract sample if not provided
-    if not sample_path or not sample_path.strip():
-        sample_path = _auto_extract_voice_sample(
-            project_dir=project_dir,
-            speaker_id=speaker_id,
-            speaker_name=effective_speaker_name,
-        )
-
-    # Clone via MiniMax
-    from services.voice_clone import VoiceCloneConfig, MiniMaxVoiceCloneClient
-
-    clone_config = VoiceCloneConfig.from_env(config_path)
-    clone_client = MiniMaxVoiceCloneClient(clone_config)
-    clone_result = clone_client.create_voice_clone(
-        speaker_id=speaker_id,
-        speaker_name=effective_speaker_name,
-        source_audio_path=sample_path,
-    )
-
-    # Register in voice registry
-    registry_path = _resolve_voice_registry_path(project_root=project_root, config_path=config_path)
-    from services.voice_registry import VoiceRegistry
-    registry = VoiceRegistry(str(registry_path))
-    registry.register_voice(
-        speaker_id=speaker_id,
-        speaker_name=effective_speaker_name,
-        voice_id=clone_result.voice_id,
-        voice_type="cloned",
-        provider="minimax_voice_clone",
-        tts_provider="minimax_tts",
-        platform="minimax_domestic",
-        label=f"{effective_speaker_name} Clone",
-        source_audio_path=sample_path,
-        notes="从审核页面克隆",
-    )
-    registry.set_default_voice(speaker_id, clone_result.voice_id)
-
-    return {
-        "success": True,
-        "voice_id": clone_result.voice_id,
-        "speaker_id": speaker_id,
     }
 
 
@@ -1029,45 +970,3 @@ def _recount_voice_selection_speakers(
         speaker["total_duration_s"] = summary["total_duration_s"]
         result.append(speaker)
     return result
-
-
-def _auto_extract_voice_sample(
-    *,
-    project_dir: Path,
-    speaker_id: str,
-    speaker_name: str,
-) -> str:
-    """Extract a voice sample from transcript timestamps for auto-clone path."""
-    import re
-
-    source_audio = _find_source_audio(project_dir)
-    if source_audio is None:
-        raise ValueError("项目中找不到源音频文件。")
-
-    transcript_path = project_dir / "transcript" / "transcript.json"
-    if not transcript_path.exists():
-        raise ValueError("项目中找不到转录文件。")
-
-    transcript_data = json.loads(transcript_path.read_text(encoding="utf-8"))
-    lines = transcript_data if isinstance(transcript_data, list) else transcript_data.get("lines", [])
-    speaker_lines = [
-        line for line in lines
-        if isinstance(line, dict) and str(line.get("speaker_id", "")).strip() == speaker_id
-    ]
-    if not speaker_lines:
-        raise ValueError(f"转录文件中找不到 {speaker_id} 的语音片段。")
-
-    # Build voice sample
-    safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", speaker_name.lower().strip())
-    samples_dir = project_dir / "voice_samples"
-    samples_dir.mkdir(parents=True, exist_ok=True)
-    output_path = samples_dir / f"{safe_name}_sample.wav"
-
-    from services.voice.sample_extractor import VoiceSampleExtractor
-    extractor = VoiceSampleExtractor()
-    extractor.extract_sample(
-        source_audio_path=str(source_audio),
-        speaker_lines=speaker_lines,
-        output_path=str(output_path),
-    )
-    return str(output_path)

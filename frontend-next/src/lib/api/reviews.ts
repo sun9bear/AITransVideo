@@ -136,30 +136,6 @@ export async function approveVoiceReview(
   }
 }
 
-export async function cloneVoiceForReview(
-  speakerId: string,
-  speakerName: string,
-  samplePath: string,
-  projectDir?: string,
-  jobId?: string,
-): Promise<{ voiceId: string }> {
-  const body: Record<string, unknown> = {
-    speaker_id: speakerId,
-    speaker_name: speakerName,
-  }
-  if (samplePath) body.sample_path = samplePath
-
-  if (!jobId) {
-    throw new Error('jobId is required for cloneVoiceForReview')
-  }
-
-  const result = await apiClient.post<{ success: boolean; voice_id: string }>(
-    `/jobs/${jobId}/review/voice/clone`,
-    { body },
-  )
-  return { voiceId: result.voice_id }
-}
-
 export async function cancelJob(jobId: string): Promise<{ success: boolean }> {
   const result = await apiClient.post<{ success: boolean }>(`/jobs/${jobId}/cancel`, { body: {} })
   return { success: result.success ?? true }

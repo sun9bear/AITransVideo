@@ -111,6 +111,24 @@ def test_cleanup_skips_protected_statuses(tmp_path, monkeypatch) -> None:
         )
 
 
+def test_cleanup_skips_admin_jobs_even_when_expired(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("AIVIDEOTRANS_JOBS_DIR", str(tmp_path))
+    now = datetime.now(timezone.utc)
+    _write_job(
+        tmp_path,
+        "j_admin",
+        status="succeeded",
+        role_snapshot="admin",
+        updated_at=_iso(now - timedelta(days=30)),
+        expires_at=_iso(now - timedelta(days=10)),
+    )
+
+    result = cleanup_expired_projects()
+
+    assert "j_admin" not in result["deleted_jobs"]
+    assert (tmp_path / "j_admin.json").exists()
+
+
 def test_cleanup_handles_malformed_expires_at_via_legacy_fallback(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("AIVIDEOTRANS_JOBS_DIR", str(tmp_path))
     now = datetime.now(timezone.utc)

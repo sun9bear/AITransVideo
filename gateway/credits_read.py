@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth import get_current_user
 from credits_service import (
+    ensure_admin_credits_bucket,
     ensure_free_bucket,
     ensure_subscription_bucket_from_v2,
     ensure_trial_bucket,
@@ -66,14 +67,17 @@ async def get_my_credits(
 
     now = datetime.now(timezone.utc)
 
-    # Lazy-ensure free + trial + subscription buckets exist (shadow, best-effort)
+    # Lazy-ensure free/trial/subscription buckets, or the admin grant bucket.
     try:
-        await ensure_free_bucket(db, user.id)
-        if is_user_in_active_trial(user):
-            trial_ends = getattr(user, "trial_ends_at", None)
-            await ensure_trial_bucket(db, user.id, trial_ends)
-        # Backfill subscription bucket from V2 active subscription truth
-        await ensure_subscription_bucket_from_v2(db, user.id)
+        role = getattr(user, "role", "user") or "user"
+        if role == "admin":
+            await ensure_admin_credits_bucket(db, user.id)
+        else:
+            await ensure_free_bucket(db, user.id)
+            if is_user_in_active_trial(user):
+                trial_ends = getattr(user, "trial_ends_at", None)
+                await ensure_trial_bucket(db, user.id, trial_ends)
+            await ensure_subscription_bucket_from_v2(db, user.id)
         await db.commit()
     except Exception:
         logger.warning("credits read: lazy bucket ensure failed (non-fatal)")

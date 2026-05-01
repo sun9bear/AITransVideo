@@ -43,10 +43,11 @@ def _run(coro):
         loop.close()
 
 
-def _make_user(*, user_id=None, plan_code="free", trial_granted_at=None, trial_ends_at=None):
+def _make_user(*, user_id=None, plan_code="free", trial_granted_at=None, trial_ends_at=None, role="user"):
     return SimpleNamespace(
         id=user_id or uuid.uuid4(),
         plan_code=plan_code,
+        role=role,
         trial_granted_at=trial_granted_at,
         trial_ends_at=trial_ends_at,
     )
@@ -178,6 +179,30 @@ class TestGetMyCredits:
 
         assert resp["total_available"] == 0
         assert resp["buckets"] == []
+
+    def test_admin_lazy_ensure_uses_admin_grant_bucket(self):
+        uid = uuid.uuid4()
+        user = _make_user(user_id=uid, role="admin")
+        admin_bucket = _make_bucket(
+            bucket_type="manual_adjustment",
+            granted=1_000_000,
+            remaining=1_000_000,
+            reserved=0,
+            source_label="admin_grant",
+            user_id=uid,
+        )
+
+        with patch("credits_read.ensure_admin_credits_bucket", new_callable=AsyncMock, return_value=admin_bucket) as mock_admin:
+            db = AsyncMock()
+            result = MagicMock()
+            result.scalars.return_value.all.return_value = [admin_bucket]
+            db.execute = AsyncMock(return_value=result)
+
+            resp = _run(get_my_credits(db=db, user=user))
+
+        mock_admin.assert_awaited_once_with(db, uid)
+        assert resp["total_available"] == 1_000_000
+        assert resp["buckets"][0]["source_label"] == "admin_grant"
 
 
 # ===================================================================

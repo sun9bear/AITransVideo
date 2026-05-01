@@ -5,13 +5,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { getErrorMessage } from '@/lib/api/errors'
 import {
   approveTranslationReview,
-  cloneVoiceForReview,
   getTranslationReview,
   previewSegmentForJob,
   previewSourceAudioForJob,
   splitSegment,
 } from '@/lib/api/reviews'
-import { getVoiceLibrary, type VoiceLibraryEntry } from '@/lib/api/voiceLibrary'
 import type { TranslationReviewResource } from '@/types/reviews'
 
 /* ---------- Types ---------- */
@@ -23,8 +21,6 @@ type TranslationSegmentState = Record<
 
 interface SpeakerVoiceConfig {
   voiceId: string
-  isCloning: boolean
-  cloneError: string | null
 }
 
 interface TranslationReviewPanelProps {
@@ -54,7 +50,6 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
   // Speaker voice config
   const [speakerVoices, setSpeakerVoices] = useState<Record<string, SpeakerVoiceConfig>>({})
   const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({})
-  const [allVoices, setAllVoices] = useState<VoiceLibraryEntry[]>([])
 
   // Preview state per segment
   const [previewingSegmentId, setPreviewingSegmentId] = useState<string | null>(null)
@@ -93,15 +88,9 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
         // Initialize voice configs per speaker (empty initially)
         const voiceConfigs: Record<string, SpeakerVoiceConfig> = {}
         for (const option of nextResource.speakerOptions) {
-          voiceConfigs[option.id] = { voiceId: '', isCloning: false, cloneError: null }
+          voiceConfigs[option.id] = { voiceId: '' }
         }
         setSpeakerVoices(voiceConfigs)
-
-        // Load voice library
-        try {
-          const lib = await getVoiceLibrary()
-          if (!cancelled) setAllVoices(lib.voices)
-        } catch { /* non-critical */ }
 
         setPageError(null)
       } catch (error) {
@@ -132,23 +121,6 @@ export function TranslationReviewPanel({ jobId, onAdvanced }: TranslationReviewP
 
     return eligible
   }, [resource, segmentSpeakers])
-
-  const updateSpeakerVoice = useCallback((speakerId: string, update: Partial<SpeakerVoiceConfig>) => {
-    setSpeakerVoices((prev) => ({ ...prev, [speakerId]: { ...prev[speakerId], ...update } }))
-  }, [])
-
-  const handleClone = useCallback(async (speakerId: string) => {
-    if (!resource) return
-    updateSpeakerVoice(speakerId, { isCloning: true, cloneError: null })
-    try {
-      const name = speakerNames[speakerId] ?? speakerId
-      const result = await cloneVoiceForReview(speakerId, name, '', resource.projectDir, jobId)
-      updateSpeakerVoice(speakerId, { voiceId: result.voiceId, isCloning: false })
-      try { const lib = await getVoiceLibrary(); setAllVoices(lib.voices) } catch { /* non-critical */ }
-    } catch (error) {
-      updateSpeakerVoice(speakerId, { isCloning: false, cloneError: getErrorMessage(error) })
-    }
-  }, [jobId, resource, speakerNames, updateSpeakerVoice])
 
   const handlePreviewSource = useCallback(async (segmentId: string) => {
     if (!resource) return

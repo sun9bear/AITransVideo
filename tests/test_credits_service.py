@@ -28,10 +28,14 @@ _fake_database.async_session = MagicMock()
 sys.modules.setdefault("database", _fake_database)
 
 from credits_service import (
+    ADMIN_CREDITS_GRANT,
+    InsufficientCreditsError,
     BUCKET_PRIORITY,
     DEBIT_RATES,
     GRANT_AMOUNTS,
     estimate_credits,
+    ensure_admin_credits_bucket,
+    reserve_credits_or_raise,
     shadow_grant,
     shadow_reserve,
     shadow_release,
@@ -251,6 +255,71 @@ class TestShadowReserve:
             db, user_id=uuid.uuid4(), job_id="j", estimated_credits=50,
         ))
         assert entries == []
+
+
+class TestReserveCreditsOrRaise:
+    def _db_with_buckets(self, buckets):
+        db = AsyncMock()
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = buckets
+        db.execute = AsyncMock(return_value=result)
+        added = []
+        db.add = lambda obj: added.append(obj)
+        db._added = added
+        return db
+
+    def test_reserves_full_amount_when_available(self):
+        uid = uuid.uuid4()
+        free_bucket = _make_bucket(bucket_type="free", remaining=100, reserved=0, user_id=uid)
+        sub_bucket = _make_bucket(bucket_type="subscription", remaining=200, reserved=0, user_id=uid)
+        db = self._db_with_buckets([free_bucket, sub_bucket])
+
+        entries = _run(reserve_credits_or_raise(
+            db,
+            user_id=uid,
+            job_id="job-live",
+            estimated_credits=150,
+            service_mode="express",
+        ))
+
+        assert len(entries) == 2
+        assert free_bucket.reserved == 100
+        assert sub_bucket.reserved == 50
+
+    def test_raises_without_partial_reserve_when_insufficient(self):
+        uid = uuid.uuid4()
+        free_bucket = _make_bucket(bucket_type="free", remaining=30, reserved=0, user_id=uid)
+        db = self._db_with_buckets([free_bucket])
+
+        with pytest.raises(InsufficientCreditsError) as exc_info:
+            _run(reserve_credits_or_raise(
+                db,
+                user_id=uid,
+                job_id="job-live",
+                estimated_credits=100,
+                service_mode="express",
+            ))
+
+        assert exc_info.value.required == 100
+        assert exc_info.value.available == 30
+        assert free_bucket.reserved == 0
+
+    def test_admin_bucket_grants_one_million(self):
+        uid = uuid.uuid4()
+        db = AsyncMock()
+        select_result = MagicMock()
+        select_result.scalar_one_or_none.return_value = None
+        db.execute = AsyncMock(return_value=select_result)
+        db.flush = AsyncMock()
+        added = []
+        db.add = lambda obj: added.append(obj)
+
+        bucket = _run(ensure_admin_credits_bucket(db, uid))
+
+        assert bucket is not None
+        assert bucket.bucket_type == "manual_adjustment"
+        assert bucket.granted == ADMIN_CREDITS_GRANT
+        assert bucket.remaining == ADMIN_CREDITS_GRANT
 
 
 # ===================================================================

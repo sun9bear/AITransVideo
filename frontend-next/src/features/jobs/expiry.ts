@@ -36,9 +36,12 @@ function parseIso(iso: string | null | undefined): Date | null {
 }
 
 export function computeExpiryInfo(
-  job: Pick<JobSummary, "expiresAt" | "updatedAt" | "createdAt">,
+  job: Pick<JobSummary, "expiresAt" | "updatedAt" | "createdAt" | "roleSnapshot">,
   now: number = Date.now(),
 ): ExpiryInfo {
+  if (job.roleSnapshot === "admin") {
+    return { expiresAt: null, msLeft: 0, tier: "unknown" }
+  }
   // Explicit expires_at wins.
   const explicit = parseIso(job.expiresAt ?? null)
   if (explicit) {

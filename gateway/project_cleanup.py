@@ -118,6 +118,8 @@ def _is_expired(job: Job, now: datetime) -> bool:
 
     Priority: explicit ``expires_at`` > legacy ``created_at + 7d``.
     """
+    if getattr(job, "role_snapshot", None) == "admin":
+        return False
     expires_at = _as_aware_utc(job.expires_at)
     if expires_at is not None:
         return expires_at < now
@@ -158,6 +160,7 @@ async def cleanup_expired_projects(
     result = await db.execute(
         select(Job).where(
             Job.status.in_(tuple(PURGEABLE_STATUSES)),
+            or_(Job.role_snapshot.is_(None), Job.role_snapshot != "admin"),
             or_(
                 Job.expires_at.is_not(None) & (Job.expires_at < now),
                 Job.expires_at.is_(None) & (Job.created_at < legacy_cutoff),

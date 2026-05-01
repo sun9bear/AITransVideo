@@ -61,7 +61,6 @@ class TestJobSubresourceRouting:
         "review/translation/approve",
         "review/split-segment",
         "review/preview-segment",
-        "review/voice/clone",
         "download/manifest.file",
         "tts-segments-zip",
         "review-state",

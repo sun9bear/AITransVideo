@@ -39,6 +39,7 @@ import {
   getUserFacingProgressMessage,
 } from "@/features/jobs/presentation"
 import { computeExpiryInfo, expiryColorClass, expiryLabel } from "@/features/jobs/expiry"
+import { getEntitlements } from "@/lib/api/entitlements"
 import { listJobsPage, renameJob } from "@/lib/api/jobs"
 import { cancelJob, deleteJob } from "@/lib/api/reviews"
 import { ACTIVE_JOB_STATUSES, type JobSummary, type JobStatus } from "@/types/jobs"
@@ -130,6 +131,7 @@ function ProjectsContent() {
   const [cancellingId, setCancellingId] = useState<string | null>(null)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [dialogInitialUrl, setDialogInitialUrl] = useState<string | undefined>(undefined)
+  const [isAdminView, setIsAdminView] = useState(false)
   // Rename dialog state (plan §6.5 / D16). Tracks the target job + its
   // pre-fill title so the Modal can open over any card without re-sorting.
   const [renamingJob, setRenamingJob] = useState<JobSummary | null>(null)
@@ -228,6 +230,20 @@ function ProjectsContent() {
   useEffect(() => {
     void loadJobs()
   }, [loadJobs])
+
+  useEffect(() => {
+    let cancelled = false
+    getEntitlements()
+      .then((entitlements) => {
+        if (!cancelled) setIsAdminView(entitlements.role === "admin")
+      })
+      .catch(() => {
+        if (!cancelled) setIsAdminView(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   // Polling
   useEffect(() => {
@@ -458,7 +474,15 @@ function ProjectsContent() {
       <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 px-4 py-3 flex items-center gap-3">
         <Clock className="h-5 w-5 text-amber-400 shrink-0" />
         <p className="text-sm text-amber-400/90">
-          每个项目最长保留 <strong>7 天</strong>，过期后自动删除。请及时下载结果文件。
+          {isAdminView ? (
+            <>
+              管理员项目 <strong>永不过期</strong>，后台定期清理不会自动删除。
+            </>
+          ) : (
+            <>
+              每个项目最长保留 <strong>7 天</strong>，过期后自动删除。请及时下载结果文件。
+            </>
+          )}
         </p>
       </div>
 
@@ -485,6 +509,7 @@ function ProjectsContent() {
               onRename={() => handleRenameOpen(job)}
               isDeleting={deletingId === job.id}
               isCancelling={cancellingId === job.id}
+              isAdminView={isAdminView}
             />
           )
         })}
@@ -587,6 +612,7 @@ function ProjectCard({
   onRename,
   isDeleting,
   isCancelling,
+  isAdminView,
 }: {
   job: JobSummary
   /** D19: 显示"派生自 <源名>"时的源 job 标题。null = 非副本或源已被清理。 */
@@ -599,9 +625,12 @@ function ProjectCard({
   onRename: () => void
   isDeleting: boolean
   isCancelling: boolean
+  isAdminView: boolean
 }) {
   const router = useRouter()
   const expiry = computeExpiryInfo(job)
+  const isNonExpiring = isAdminView || job.roleSnapshot === "admin"
+  const expiryText = isNonExpiring ? "永不过期" : expiryLabel(expiry)
   const showEditShortcut =
     POST_EDIT_ENABLED && job.serviceMode === "studio" && job.status === "succeeded"
 
@@ -635,9 +664,11 @@ function ProjectCard({
           )}
           <div className="flex flex-wrap gap-1.5 text-xs text-muted-foreground">
             <span>{timeLabel(cardTimestamp(job))}</span>
-            <span className={expiryColorClass(expiry.tier)}>
-              {expiryLabel(expiry)}
-            </span>
+            {expiryText ? (
+              <span className={isNonExpiring ? "text-[color:var(--bamboo)]" : expiryColorClass(expiry.tier)}>
+                {expiryText}
+              </span>
+            ) : null}
           </div>
         </div>
 

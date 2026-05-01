@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fastapi import Response
+from fastapi import HTTPException, Response
 
 _GATEWAY_DIR = Path(__file__).resolve().parents[1] / "gateway"
 _SRC_DIR = Path(__file__).resolve().parents[1] / "src"
@@ -82,6 +82,7 @@ class _FakeJobRow:
     root_job_id: str | None = None
     edit_generation: int = 0
     source_content_hash: str | None = None
+    metering_snapshot: dict | None = None
     created_at: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
@@ -92,6 +93,9 @@ class _FakeResult:
     value: Any = None
 
     def scalar_one_or_none(self):
+        return self.value
+
+    def scalar(self):
         return self.value
 
 
@@ -172,6 +176,7 @@ def test_overwrite_flips_status_and_bumps_edit_generation() -> None:
     assert source.current_stage == "alignment"
     assert source.edit_generation == 1
     assert source.editing_touched_at is None
+    assert source.metering_snapshot["post_edit_usage"]["overwrite_commits"] == 1
     # No new row inserted for overwrite
     assert session.added_rows == []
 
@@ -188,6 +193,7 @@ def test_overwrite_second_commit_bumps_generation_to_2() -> None:
     )
 
     assert source.edit_generation == 2
+    assert source.metering_snapshot["post_edit_usage"]["overwrite_commits"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +232,7 @@ def test_copy_as_new_resets_source_and_inserts_new_row() -> None:
     # Source was reset (Phase B mirror)
     assert source.status == "succeeded"
     assert source.editing_touched_at is None
+    assert source.metering_snapshot["post_edit_usage"]["copy_as_new"] == 1
     # One INSERT for the copy
     assert len(session.added_rows) == 1
     new_row = session.added_rows[0]
@@ -305,6 +312,49 @@ def test_copy_as_new_missing_new_job_id_only_resets_source() -> None:
     assert source.status == "succeeded"
     assert source.editing_touched_at is None
     assert session.added_rows == []
+
+
+def test_shadow_settle_skips_post_edit_overwrite_and_copies() -> None:
+    original = _FakeJobRow(job_id="job_original", edit_generation=0)
+    overwritten = _FakeJobRow(job_id="job_original", edit_generation=1)
+    copied = _FakeJobRow(job_id="job_copy", copy_of_job_id="job_original")
+
+    assert job_intercept._should_shadow_settle_job_credits(original) is True
+    assert job_intercept._should_shadow_settle_job_credits(overwritten) is False
+    assert job_intercept._should_shadow_settle_job_credits(copied) is False
+
+
+def test_free_user_has_no_post_edit_limits() -> None:
+    user = _FakeUser(plan_code="free")
+
+    assert job_intercept._post_edit_limits_for_user(user) is None
+
+
+def test_trial_cannot_copy_as_new() -> None:
+    now = datetime.now(timezone.utc)
+    user = _FakeUser(
+        plan_code="free",
+        trial_granted_at=now - timedelta(days=1),
+        trial_ends_at=now + timedelta(days=1),
+    )
+    source = _FakeJobRow(job_id="job_src", status="editing", expires_at=now + timedelta(days=1))
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            job_intercept._check_post_edit_commit_limit(
+                _FakeSession(), source, user, strategy="copy_as_new", now_utc=now,
+            )
+        )
+
+    assert exc.value.status_code == 403
+
+
+@dataclass
+class _FakeUser:
+    plan_code: str = "free"
+    role: str = "user"
+    trial_granted_at: datetime | None = None
+    trial_ends_at: datetime | None = None
 
 
 def test_copy_as_new_idempotent_on_duplicate_new_job_id() -> None:

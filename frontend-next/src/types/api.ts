@@ -49,6 +49,7 @@ export interface ApiJobRecord {
   copy_of_job_id?: string | null
   root_job_id?: string | null
   edit_generation?: number
+  role_snapshot?: string | null
 }
 
 export interface ApiJobListResponse {

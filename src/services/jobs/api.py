@@ -880,22 +880,6 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
                         self._write_json(HTTPStatus.OK, result)
                         return
 
-                    if review_subpath == "voice/clone":
-                        _require_waiting_for_review(record)
-                        payload = self._read_json_payload()
-                        from services.jobs.review_actions import clone_voice
-                        from services import config_loader
-                        result = clone_voice(
-                            project_dir=project_dir,
-                            speaker_id=str(payload.get("speaker_id", "")).strip(),
-                            speaker_name=str(payload.get("speaker_name", "")).strip() or None,
-                            sample_path=str(payload.get("sample_path", "")).strip() or None,
-                            config_path=config_loader.DEFAULT_AUTODUB_LOCAL_CONFIG_PATH,
-                            project_root=service.runner.project_root,
-                        )
-                        self._write_json(HTTPStatus.OK, result)
-                        return
-
                     if review_subpath == "voice-selection/approve":
                         _require_review_gate(record, expected_stage="voice_selection_review")
                         payload = self._read_json_payload()

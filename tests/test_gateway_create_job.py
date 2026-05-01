@@ -11,6 +11,7 @@ import asyncio
 import json
 import sys
 import types
+import uuid
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -74,6 +75,7 @@ def _make_db_session(
     user_for_quota=None,
     existing_display_names: set[str] | None = None,
     branch4_sequence_today: int = 0,
+    credit_available: int = 1_000_000,
 ):
     """Create a mock AsyncSession.
 
@@ -107,6 +109,27 @@ def _make_db_session(
     branch4_result = MagicMock()
     branch4_result.scalar.return_value = branch4_sequence_today
 
+    credit_bucket = SimpleNamespace(
+        id=uuid.uuid4(),
+        user_id=getattr(user_for_quota, "id", "uid-1"),
+        bucket_type="free",
+        granted=credit_available,
+        remaining=credit_available,
+        reserved=0,
+        expires_at=None,
+        source_label="free",
+        related_order_id=None,
+        related_subscription_id=None,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    credits_result = MagicMock()
+    credits_result.scalar_one_or_none.return_value = credit_bucket if credit_available > 0 else None
+    credits_result.scalars.return_value.all.return_value = [credit_bucket] if credit_available > 0 else []
+
+    no_subscription_result = MagicMock()
+    no_subscription_result.scalar_one_or_none.return_value = None
+
     # For queries we don't explicitly classify (defensive fallback), keep
     # the old call_count sequence working for the legacy 3-query path.
     legacy_call_count = {"n": 0}
@@ -121,6 +144,10 @@ def _make_db_session(
             return names_result  # existing_names SELECT
         if "display_name like" in sql_text:
             return branch4_result  # branch-4 COUNT(*)
+        if "credits_buckets" in sql_text:
+            return credits_result
+        if "subscriptions" in sql_text:
+            return no_subscription_result
         # Legacy path: active-count, existing-job, user-select in order.
         legacy_call_count["n"] += 1
         if legacy_call_count["n"] == 1:
@@ -381,6 +408,30 @@ class TestCreateJobSuccess:
         assert resp.status_code == 202
         assert captured_body["role_snapshot"] == "admin"
         assert captured_body["tts_model"] == "speech-2.8-hd"
+        assert "expires_at" not in captured_body
+
+    def test_insufficient_credits_stops_create_and_compensates_upstream(self):
+        async def fake_proxy(*, request, upstream_base, strip_prefix, override_body=None):
+            return _upstream_success()
+
+        req = _make_request({
+            "service_mode": "express",
+            "source": {"type": "youtube_url", "value": "https://youtube.com/watch?v=abc"},
+            "estimated_duration_seconds": 300,
+        })
+        user = _make_user(plan_code="free")
+        db = _make_db_session(active_job_count=0, user_for_quota=user, credit_available=0)
+
+        with patch("job_intercept.proxy_request", side_effect=fake_proxy):
+            with patch("job_intercept._probe_youtube_metadata", return_value=None):
+                with patch("job_intercept._compensate_upstream_job", new_callable=AsyncMock) as compensate:
+                    resp = _run(intercept_create_job(req, db, user))
+
+        body = json.loads(resp.body)
+        assert resp.status_code == 402
+        assert body["error"] == "insufficient_credits"
+        assert body["detail"]["required_credits"] == 50
+        compensate.assert_awaited_once_with("job_test123")
 
     def test_idempotency_key_from_frontend_is_preserved(self):
         captured_body = {}
@@ -967,7 +1018,7 @@ class TestQualityTierTruthChain:
         req.url = MagicMock(); req.url.path = "/job-api/jobs"
         req.query_params = {}
 
-        async def fake_proxy(*, request, upstream_base, strip_prefix):
+        async def fake_proxy(*, request, upstream_base, strip_prefix, override_query=None):
             return FastAPIResponse(
                 content=upstream_body, status_code=200,
                 headers={"content-type": "application/json"},

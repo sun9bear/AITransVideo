@@ -65,6 +65,20 @@ GRANT_AMOUNTS: dict[str, int] = {
     "pro": 12000,
 }
 
+ADMIN_CREDITS_GRANT = 1_000_000
+ADMIN_CREDITS_SOURCE_LABEL = "admin_grant"
+
+
+class InsufficientCreditsError(Exception):
+    """Raised when a live credit reservation cannot be fully covered."""
+
+    def __init__(self, *, required: int, available: int) -> None:
+        super().__init__(
+            f"insufficient credits: required={required}, available={available}"
+        )
+        self.required = required
+        self.available = available
+
 
 # ---------------------------------------------------------------------------
 # Runtime pricing accessors — derive from pricing_runtime, fallback to frozen
@@ -176,6 +190,10 @@ def _pick_buckets_by_priority(
     priority_order = bp.get(service_mode, bp.get("express", BUCKET_PRIORITY["express"]))
     type_rank = {t: i for i, t in enumerate(priority_order)}
     return sorted(buckets, key=lambda b: type_rank.get(b.bucket_type, 99))
+
+
+def _bucket_available(bucket: CreditsBucket) -> int:
+    return max(0, int(bucket.remaining or 0) - int(bucket.reserved or 0))
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +329,66 @@ async def shadow_reserve(
     except Exception:
         logger.exception("shadow_reserve failed: user=%s job=%s", user_id, job_id)
         return []
+
+
+async def reserve_credits_or_raise(
+    db: AsyncSession,
+    *,
+    user_id,
+    job_id: str,
+    estimated_credits: int,
+    service_mode: str = "express",
+    reason_code: str = "job_reserve",
+) -> list[CreditsLedger]:
+    """Reserve credits and fail atomically when the user cannot cover the cost.
+
+    This is the live gating counterpart to ``shadow_reserve``. It keeps the
+    same bucket priority and ledger shape, but it refuses partial reserves so a
+    job or paid action can be stopped before downstream work begins.
+    """
+    if estimated_credits <= 0:
+        return []
+
+    buckets = await get_user_buckets(db, user_id, for_update=True)
+    ordered = _pick_buckets_by_priority(buckets, service_mode)
+    available_total = sum(_bucket_available(bucket) for bucket in ordered)
+    if available_total < estimated_credits:
+        logger.info(
+            "reserve_credits_or_raise: insufficient credits for user=%s job=%s "
+            "needed=%d available=%d",
+            user_id, job_id, estimated_credits, available_total,
+        )
+        raise InsufficientCreditsError(
+            required=estimated_credits,
+            available=available_total,
+        )
+
+    remaining_to_reserve = estimated_credits
+    entries: list[CreditsLedger] = []
+    for bucket in ordered:
+        if remaining_to_reserve <= 0:
+            break
+        available = _bucket_available(bucket)
+        if available <= 0:
+            continue
+
+        take = min(available, remaining_to_reserve)
+        bucket.reserved += take
+        remaining_to_reserve -= take
+
+        entry = CreditsLedger(
+            user_id=user_id,
+            bucket_id=bucket.id,
+            direction="reserve",
+            credits_delta=-take,
+            balance_after=bucket.remaining - bucket.reserved,
+            related_job_id=job_id,
+            reason_code=reason_code,
+        )
+        db.add(entry)
+        entries.append(entry)
+
+    return entries
 
 
 async def shadow_capture(
@@ -774,6 +852,46 @@ async def ensure_subscription_bucket_from_v2(
         return None
 
 
+async def ensure_admin_credits_bucket(db: AsyncSession, user_id) -> CreditsBucket | None:
+    """Ensure administrators have a long-lived 1,000,000 point bucket."""
+    try:
+        result = await db.execute(
+            select(CreditsBucket).where(
+                CreditsBucket.user_id == user_id,
+                CreditsBucket.bucket_type == "manual_adjustment",
+                CreditsBucket.source_label == ADMIN_CREDITS_SOURCE_LABEL,
+            )
+        )
+        existing = result.scalar_one_or_none()
+        if existing is None:
+            return await shadow_grant(
+                db,
+                user_id=user_id,
+                bucket_type="manual_adjustment",
+                amount=ADMIN_CREDITS_GRANT,
+                source_label=ADMIN_CREDITS_SOURCE_LABEL,
+                reason_code="admin_grant",
+            )
+
+        if int(existing.granted or 0) < ADMIN_CREDITS_GRANT:
+            delta = ADMIN_CREDITS_GRANT - int(existing.granted or 0)
+            existing.granted = int(existing.granted or 0) + delta
+            existing.remaining = int(existing.remaining or 0) + delta
+            entry = CreditsLedger(
+                user_id=user_id,
+                bucket_id=existing.id,
+                direction="grant",
+                credits_delta=delta,
+                balance_after=existing.remaining,
+                reason_code="admin_grant_topup",
+            )
+            db.add(entry)
+        return existing
+    except Exception:
+        logger.exception("ensure_admin_credits_bucket failed: user=%s", user_id)
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Shadow integration helper — safe wrapper for job pipeline hooks
 # ---------------------------------------------------------------------------
@@ -784,6 +902,7 @@ async def ensure_credit_buckets_for_user(
     *,
     user=None,
     user_id=None,
+    role: str | None = None,
 ) -> None:
     """Ensure buckets needed by job and clone credit paths exist.
 
@@ -792,6 +911,10 @@ async def ensure_credit_buckets_for_user(
     """
     uid = user_id or getattr(user, "id", None)
     if uid is None:
+        return
+    user_role = str(role or getattr(user, "role", "") or "").lower()
+    if user_role == "admin":
+        await ensure_admin_credits_bucket(db, uid)
         return
     await ensure_free_bucket(db, uid)
     if user is not None:

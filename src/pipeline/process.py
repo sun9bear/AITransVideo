@@ -394,6 +394,7 @@ def _report_source_metadata(
     stage_label: str = "S0",
 ) -> None:
     """Best-effort callback to Gateway /job-api/jobs/{job_id}/source-metadata."""
+    import urllib.error
     import urllib.request
     gateway_base = os.environ.get("AVT_GATEWAY_URL", "http://localhost:8880")
     url = f"{gateway_base}/job-api/jobs/{job_id}/source-metadata"
@@ -415,6 +416,15 @@ def _report_source_metadata(
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
             print(f"[{stage_label}] Reported source metadata to gateway: {resp.status}", flush=True)
+    except urllib.error.HTTPError as e:
+        if e.code == 402 and duration_seconds is not None:
+            try:
+                error_body = json.loads(e.read().decode("utf-8", errors="replace"))
+                message = error_body.get("message") or error_body.get("error")
+            except Exception:
+                message = None
+            raise RuntimeError(message or "点数不足，任务已停止。") from e
+        print(f"[{stage_label}] Warning: failed to report source metadata: {e}", flush=True)
     except Exception as e:
         print(f"[{stage_label}] Warning: failed to report source metadata: {e}", flush=True)
 

@@ -23,6 +23,7 @@ import types
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -158,6 +159,17 @@ def test_is_safe_project_dir_rejects_empty_and_root_path():
     assert not project_cleanup._is_safe_project_dir(
         Path(""), safe_roots=(Path("/opt/aivideotrans/data/projects"),)
     )
+
+
+def test_is_expired_skips_admin_even_with_expired_deadline():
+    now = datetime.now(timezone.utc)
+    job = SimpleNamespace(
+        role_snapshot="admin",
+        expires_at=now - timedelta(days=30),
+        created_at=now - timedelta(days=60),
+    )
+
+    assert not project_cleanup._is_expired(job, now)
 
 
 def test_is_safe_project_dir_rejects_poisoned_path_like_slash_s(tmp_path):

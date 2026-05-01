@@ -109,6 +109,7 @@ export function toJobSummary(payload: ApiJobRecord): JobSummary {
     copyOfJobId: payload.copy_of_job_id ?? null,
     rootJobId: payload.root_job_id ?? null,
     editGeneration: payload.edit_generation ?? 0,
+    roleSnapshot: payload.role_snapshot ?? null,
   }
 }
 

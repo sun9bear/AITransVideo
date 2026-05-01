@@ -139,6 +139,8 @@ def cleanup_expired_projects(*, deleted_job_ids_out: list[str] | None = None) ->
         status = str(data.get("status", "")).strip().lower()
         if status in _CLEANUP_PROTECTED_STATUSES:
             continue
+        if str(data.get("role_snapshot", "")).strip().lower() == "admin":
+            continue
 
         expires_at = _resolve_expires_at(data, now)
         if expires_at is None or now < expires_at:

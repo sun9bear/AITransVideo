@@ -9,6 +9,7 @@ import { ApiError } from "@/lib/api/client"
 import { getErrorMessage } from "@/lib/api/errors"
 import { getEntitlements, type UserEntitlements } from "@/lib/api/entitlements"
 import { listJobs, submitTranslationJob } from "@/lib/api/jobs"
+import { getCreditsEstimate, getMyCredits, type CreditsResponse } from "@/lib/billing/get-credits"
 import { getVoiceLibrary, type VoiceLibraryEntry } from "@/lib/api/voiceLibrary"
 import { usePollingTask } from "@/lib/react/usePollingTask"
 import { ACTIVE_JOB_STATUSES, type JobSummary } from "@/types/jobs"
@@ -33,6 +34,18 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   const [transcriptionMethod, setTranscriptionMethod] = useState<"assemblyai" | "gemini">("assemblyai")
   const [serviceMode, setServiceMode] = useState<"express" | "studio">("express")
   const [entitlements, setEntitlements] = useState<UserEntitlements | null>(null)
+  const [credits, setCredits] = useState<CreditsResponse | null>(null)
+  const [creditRates, setCreditRates] = useState<{
+    expressStandard: number | null
+    studioStandard: number | null
+    studioHigh: number | null
+    studioFlagship: number | null
+  }>({
+    expressStandard: null,
+    studioStandard: null,
+    studioHigh: null,
+    studioFlagship: null,
+  })
   const [savedVoices, setSavedVoices] = useState<VoiceLibraryEntry[]>([])
   const [activeJobs, setActiveJobs] = useState<JobSummary[]>([])
   const [isLoadingGuard, setIsLoadingGuard] = useState(true)
@@ -45,9 +58,14 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
         ? "请先上传视频文件。"
         : null
 
+  const isUnlimitedConcurrency = entitlements?.limits.max_concurrent_jobs === null
   const maxConcurrentJobs = entitlements?.limits.max_concurrent_jobs ?? 1
+  const concurrencyLimitLabel = isUnlimitedConcurrency ? "无限制" : String(maxConcurrentJobs)
   const activeJobCount = activeJobs.length
-  const isBlockedByConcurrency = activeJobCount >= maxConcurrentJobs
+  const isBlockedByConcurrency = !isUnlimitedConcurrency && activeJobCount >= maxConcurrentJobs
+  const currentRate = serviceMode === "studio" ? creditRates.studioStandard : creditRates.expressStandard
+  const balanceLabel = credits ? `${credits.total_available} 点` : "读取中"
+  const rateLabel = currentRate != null ? `${currentRate} 点/分钟` : "读取中"
   // For UI display: show the most recent active job if blocked
   const latestActiveJob = activeJobs.length > 0 ? activeJobs[0] : null
 
@@ -72,6 +90,24 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
       .catch(() => {})
     getEntitlements()
       .then((ent) => setEntitlements(ent))
+      .catch(() => {})
+    getMyCredits()
+      .then((value) => setCredits(value))
+      .catch(() => {})
+    Promise.all([
+      getCreditsEstimate(1, "express", "standard"),
+      getCreditsEstimate(1, "studio", "standard"),
+      getCreditsEstimate(1, "studio", "high"),
+      getCreditsEstimate(1, "studio", "flagship"),
+    ])
+      .then(([expressStandard, studioStandard, studioHigh, studioFlagship]) => {
+        setCreditRates({
+          expressStandard: expressStandard.estimated_credits,
+          studioStandard: studioStandard.estimated_credits,
+          studioHigh: studioHigh.estimated_credits,
+          studioFlagship: studioFlagship.estimated_credits,
+        })
+      })
       .catch(() => {})
   }, [])
 
@@ -122,7 +158,7 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
           <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
             <div className="space-y-1">
               <p className="text-xs font-semibold text-amber-400">
-                已达到并发上限（{activeJobCount}/{maxConcurrentJobs}）
+                已达到并发上限（{activeJobCount}/{concurrencyLimitLabel}）
               </p>
               <p className="font-semibold text-foreground">请先完成或取消当前任务，再创建新的翻译。</p>
               <p className="text-sm text-muted-foreground">
@@ -140,7 +176,7 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
         <section className="rounded-2xl border border-border bg-muted/20 p-4">
           <div className="flex items-center justify-between">
             <p className="text-sm text-muted-foreground">
-              当前有 {activeJobCount} 个进行中的任务，仍可创建新任务（上限 {maxConcurrentJobs}）。
+              当前有 {activeJobCount} 个进行中的任务，仍可创建新任务（上限 {concurrencyLimitLabel}）。
             </p>
             <ConcurrencyActionLink jobId={latestActiveJob.id} label="查看任务" mode={mode} variant="subtle" />
           </div>
@@ -354,6 +390,22 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
               </p>
             )}
           </div>
+
+          <section className="rounded-xl border border-border bg-muted/20 p-4">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <p className="text-sm font-medium text-foreground">扣点标准</p>
+              <p className="text-xs text-muted-foreground">当前可用：{balanceLabel}</p>
+            </div>
+            {serviceMode === "express" ? (
+              <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                快捷版按源视频时长扣点，当前标准为 {rateLabel}。创建任务时会按可识别的时长预扣；点数不足会停止创建并提示充值或升级。
+              </p>
+            ) : (
+              <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                工作台版按源视频时长扣点，基础标准为 {rateLabel}；后续选择高级/旗舰音质时分别按 {creditRates.studioHigh ?? "读取中"} / {creditRates.studioFlagship ?? "读取中"} 点/分钟扣除。音色克隆为单次独立扣点，克隆弹窗会再次确认费用。
+              </p>
+            )}
+          </section>
 
           {/* Advanced options (转录方案 / 说话人数) — temporarily hidden per
               user request: 目前暂时用不到. The selects stay mounted so their

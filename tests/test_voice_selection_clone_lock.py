@@ -259,8 +259,14 @@ class TestVoiceCloneEndpointCloneLock:
             calls.append((fn.__name__, args, kwargs))
             return []
 
+        async def record_live_reserve(*args, **kwargs):
+            calls.append(("reserve_credits_or_raise", args, kwargs))
+            return []
+
         monkeypatch.setattr(voice_selection_api.settings, "auth_required", False)
         monkeypatch.setattr(voice_selection_api, "shadow_safe", record_shadow)
+        monkeypatch.setattr(voice_selection_api, "reserve_credits_or_raise", record_live_reserve)
+        monkeypatch.setattr(voice_selection_api, "ensure_credit_buckets_for_user", AsyncMock())
         monkeypatch.setattr(voice_selection_api, "_get_clone_cost_credits", lambda: 500)
 
         with patch("httpx.AsyncClient", return_value=_FakeAsyncClient(project_dir)):
@@ -270,7 +276,7 @@ class TestVoiceCloneEndpointCloneLock:
         assert response.status_code == 400
         assert body["error"] == "no_source_audio"
 
-        reserve = next(call for call in calls if call[0] == "shadow_reserve")
+        reserve = next(call for call in calls if call[0] == "reserve_credits_or_raise")
         assert reserve[1][0] is db
         assert reserve[2]["estimated_credits"] == 500
         assert reserve[2]["service_mode"] == "studio"
