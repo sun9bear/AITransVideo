@@ -92,7 +92,19 @@ export function SiteHeader() {
           {user ? (
             <Link
               href="/translations/new"
-              className={cn(buttonVariants({ variant: "outline", size: "sm" }), "h-8 px-3")}
+              // Cinnabar fill (default variant), NOT outline. Outline carries
+              // `dark:bg-input/30 dark:border-input` rules that get applied
+              // because the root html element keeps `class="dark"` for the
+              // workspace's Synthetix theme — even on marketing pages where
+              // the ink theme cascades via data-theme. Under those rules the
+              // button collapsed to a barely-visible pale pill against the
+              // rice-paper header (user reported 2026-05-01). Same root cause
+              // as the hand-rolled 登录 button below; default variant already
+              // pins clean primary tokens with no dark: overrides, so it
+              // renders as proper cinnabar fill in this slot. Logged-in users
+              // only see this one header action — no 免费开始试用 / 登录 to
+              // compete with — so a strong fill is appropriate.
+              className={cn(buttonVariants({ variant: "default", size: "sm" }), "h-8 px-3")}
             >
               进入工作台
             </Link>
