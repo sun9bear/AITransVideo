@@ -306,7 +306,20 @@ img.save("poster.jpg", quality=85, optimize=True, progressive=True)
 
 Approximate output sizes per demo: ~3–5 MB each MP4, ~80–150 KB poster JPG. Five demos × 2 MP4s + 1 poster = ~33–53 MB total assets — comfortably small for the Next.js public/ directory.
 
+**Container-to-repo transfer**: the ffmpeg/PIL run lands assets at `/tmp/demos/<slug>/` inside `aivideotrans-app`. The plan author must then copy them out and into the project repository so they get committed and bundled into the Next.js image:
+
+```bash
+# From the dev workstation, with the production tarball-deploy flow this
+# session has been using:
+docker exec aivideotrans-app tar -czf /tmp/demos.tar.gz -C /tmp demos
+docker cp aivideotrans-app:/tmp/demos.tar.gz ./demos.tar.gz
+# transfer demos.tar.gz back to dev workstation, extract under
+# frontend-next/public/marketing/, commit, push, redeploy.
+```
+
 The exact extraction commands for all 5 demos, including the SLUG / time range substitutions, will be inlined in the implementation plan (writing-plans step) so the plan author can audit them line-by-line.
+
+**`display_name` vs poster text**: the JSON's `display_name` field and the title string baked into `poster.jpg` are two independent copies of the same Chinese string. There is no automatic check that they match. If a future edit changes `display_name` in the JSON, the poster must be regenerated; otherwise the visual mismatch survives until the next manual asset refresh. Phase 2 admin tooling will collapse this to a single source.
 
 ---
 
