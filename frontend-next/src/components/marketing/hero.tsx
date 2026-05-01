@@ -109,9 +109,13 @@ export function Hero() {
               </a>
             </div>
 
-            {/* Trust line under CTAs — emphasis on long-video support */}
+            {/* Trust line under CTAs — leads with the source-language scope
+                so visitors immediately know what's supported. The product
+                currently only does English → Chinese; before this line was
+                added the page implied broader source coverage via "海外视频"
+                phrasing. Source-scope first, then trust signals. */}
             <p className="mt-5 text-xs text-foreground/55">
-              无需绑卡 · 7 天试用 · 失败不计费 · 支持长视频
+              英文转中文 · 无需绑卡 · 7 天试用 · 失败不计费 · 支持长视频
             </p>
           </div>
         </div>

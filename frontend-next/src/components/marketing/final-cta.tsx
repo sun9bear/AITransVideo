@@ -50,7 +50,7 @@ export function FinalCta() {
             开始本地化
           </p>
           <h2 className="ink-display mt-3 text-3xl text-foreground sm:text-4xl lg:text-5xl">
-            把下一支海外视频，
+            把下一支海外英文视频，
             <br className="hidden sm:block" />
             变成中文配音版
           </h2>
@@ -66,7 +66,7 @@ export function FinalCta() {
           </div>
 
           <p className="mt-5 text-xs text-foreground/55">
-            无需绑卡 · 7 天试用 · 失败不计费 · 支持长视频
+            英文转中文 · 无需绑卡 · 7 天试用 · 失败不计费 · 支持长视频
           </p>
         </div>
 

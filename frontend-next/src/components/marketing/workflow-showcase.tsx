@@ -38,7 +38,7 @@ export function WorkflowShowcase() {
             工作流
           </p>
           <h2 className="ink-display mt-3 text-3xl text-foreground sm:text-4xl">
-            从海外视频到中文成片，四步完成
+            从英文视频到中文成片，四步完成
           </h2>
           <p className="mt-4 zh-body text-muted-foreground">
             每一步都可以暂停、检查、修改。AI 生成第一版，你决定哪些片段需要再调一次。

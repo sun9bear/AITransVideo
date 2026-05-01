@@ -21,7 +21,7 @@ const SCENARIOS: Array<{ tag: string; body: string }> = [
   },
   {
     tag: "视频号 / 抖音创作者",
-    body: "快速本地化海外长视频素材，保留原片节奏、人物语气和讲解结构。",
+    body: "快速本地化海外英文长视频素材，保留原片节奏、人物语气和讲解结构。",
   },
   {
     tag: "教育培训团队",
@@ -49,7 +49,7 @@ export function SuitedScenarios() {
             谁在用爱译视频做长视频本地化
           </h2>
           <p className="mt-4 zh-body text-muted-foreground">
-            如果你的工作流里有海外长视频要持续翻译配音、还要逐条复核交付，下面这些场景多半也是你的日常。
+            如果你的工作流里有海外英文长视频要持续翻译配音、还要逐条复核交付，下面这些场景多半也是你的日常。
           </p>
         </div>
 

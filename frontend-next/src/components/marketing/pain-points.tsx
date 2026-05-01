@@ -44,7 +44,7 @@ export function PainPoints() {
             海外长视频翻译，真正麻烦的是后面 80%
           </h2>
           <p className="mt-4 zh-body text-muted-foreground">
-            AI 生成第一版不难，难的是把它真的改到可以发布。
+            面向英文源、中文输出。AI 生成第一版不难，难的是把它真的改到可以发布。
           </p>
         </div>
 
