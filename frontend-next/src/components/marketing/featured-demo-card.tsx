@@ -91,10 +91,10 @@ export function FeaturedDemoCard({ demo, ariaHidden = false }: { demo: Demo; ari
       // user tabbing through could land on the duplicate's video controls
       // and start a second copy of the same demo. `inert` is supported
       // in Chrome 102+, Safari 15.5+, Firefox 112+ — same baseline as
-      // :has(). We use the suppress-react-prop pattern because React's
-      // built-in `inert` typing arrived only in React 19; the spread
-      // form is forward-compatible with both.
-      {...(ariaHidden ? { inert: "" as unknown as boolean } : {})}
+      // :has(). React 19 types `inert` as a proper boolean prop; older
+      // React (which used the `""` empty-string convention) is not
+      // relevant here since this codebase is React 19+.
+      inert={ariaHidden}
       aria-label={demo.display_name}
     >
       {/* Tab row — segmented control above video */}
