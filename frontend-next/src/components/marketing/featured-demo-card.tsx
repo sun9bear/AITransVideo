@@ -152,11 +152,17 @@ export function FeaturedDemoCard({ demo, ariaHidden = false }: { demo: Demo; ari
         </video>
       </div>
 
-      {/* Footer attribution */}
-      <div className="flex flex-col gap-0.5 px-4 py-3 text-xs text-muted-foreground">
+      {/* Footer — title only. Source attribution (source_label) and time
+          range (segment_label) intentionally dropped per user request
+          2026-05-01: visitors see them as visual clutter when posters
+          already carry the title via the cinnabar-overlay text. The
+          display_name stays as a redundant cue for users who don't see
+          the poster overlay clearly (small viewports, slow connections,
+          or while the video is playing and the poster is gone). The
+          fields remain in featured-demos.json + the JSON schema so
+          Phase 2 admin UI / future redesigns can resurface them. */}
+      <div className="px-4 py-3 text-xs text-muted-foreground">
         <span className="ink-heading text-sm font-semibold text-foreground">{demo.display_name}</span>
-        <span>{demo.source_label}</span>
-        <span>{demo.segment_label}</span>
       </div>
     </article>
   )
