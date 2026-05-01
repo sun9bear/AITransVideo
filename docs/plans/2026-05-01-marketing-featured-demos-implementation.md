@@ -329,6 +329,10 @@ ls demos/
 
 Expected: 5 directories listed (one per slug). Each contains `original.mp4`, `dubbed.mp4`, `poster.jpg` (the `poster-raw.jpg` files can be deleted after verification — they're not needed in the bundle).
 
+> **Fallback if `tar` is missing:** Windows git-bash ships `tar` so this should work via the Bash tool. If the executor's shell environment doesn't have it, install via 7-Zip CLI:
+> `7z x D:/Claude/temp/demos.tar.gz -so | 7z x -si -ttar -oD:/Claude/AIVideoTrans_Codex_web_mvp/frontend-next/public/marketing/`
+> PowerShell's `Expand-Archive` does NOT handle `.tar.gz` natively, so don't rely on it.
+
 - [ ] **Step 4: Clean up `poster-raw.jpg` files (not needed in production)**
 
 ```bash
@@ -636,6 +640,15 @@ export function FeaturedDemoCard({ demo, ariaHidden = false }: { demo: Demo; ari
     <article
       className="demo-card group relative flex w-[320px] shrink-0 flex-col overflow-hidden rounded-xl border border-border bg-card shadow-sm transition-[transform,opacity,box-shadow] duration-200 ease-out md:w-[360px]"
       aria-hidden={ariaHidden ? true : undefined}
+      // `inert` makes the entire subtree non-interactive on duplicate cards
+      // — including the native <video controls>, which `tabIndex={-1}` on
+      // the tab buttons alone wouldn't cover. Without this, a keyboard user
+      // tabbing through could land on the duplicate's video controls and
+      // start a second copy of the same demo. `inert` is supported in
+      // Chrome 102+, Safari 15.5+, Firefox 112+ — same baseline as `:has()`.
+      // We use the suppress-react-prop-warning pattern for inert since it
+      // landed in React 19 typings only.
+      {...(ariaHidden ? { inert: "" as unknown as boolean } : {})}
       aria-label={demo.display_name}
     >
       {/* Tab row — segmented control above video */}
