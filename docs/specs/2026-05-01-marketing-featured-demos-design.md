@@ -62,9 +62,10 @@ Segment selection rationale (one-liner each):
 
 ```
 frontend-next/src/components/marketing/
-├ featured-demos.tsx               (new)
-├ featured-demo-card.tsx           (new — single card with EN/CN tab + video)
-└ featured-demos-context.tsx       (new — currently-playing-id context for pause-others)
+├ featured-demos.tsx               (new — Server Component, reads JSON)
+├ featured-demos-client.tsx        (new — "use client" shell, owns context + renders cards)
+├ featured-demo-card.tsx           (new — "use client", single card with EN/CN tab + video)
+└ featured-demos-context.tsx       (new — "use client", currently-playing-id context for pause-others)
 
 frontend-next/public/marketing/demos/
 ├ featured-demos.json              (new — static config, schema in §6)
@@ -93,11 +94,35 @@ import { FeaturedDemos } from "@/components/marketing/featured-demos"
 // ... rest unchanged
 ```
 
-### 4.3 Server-side data fetch
+### 4.3 Server-side data fetch + client boundary
 
-`<FeaturedDemos>` is a Server Component. It reads `public/marketing/demos/featured-demos.json` at build time using Next.js's filesystem access (`fs.readFile` from a server-only utility, or simply `import demosJson from "../../../public/marketing/demos/featured-demos.json"` since the JSON is small and static). On parse failure or empty list, the component returns `null` — the section silently disappears (no error toast, no placeholder).
+The component graph splits on the server/client boundary because the auto-scroll, hover scaling, video element, tab state, and pause-others context all need to run in the browser, but the JSON read must run on the server (filesystem at build time, no client-side network round-trip).
 
-Phase 2 swap path: the import becomes a fetch from `GET /api/featured-demos` returning the same shape. The card-level rendering stays untouched.
+```
+<FeaturedDemos />                   ← Server Component
+   reads featured-demos.json
+   passes parsed { demos } as props →
+
+      <FeaturedDemosClient demos={...} />   ← "use client"
+         owns FeaturedDemosContext (currentlyPlayingId state)
+         renders the carousel track + .demo-card * 2 (duplicated for loop)
+
+            <FeaturedDemoCard demo={...} />   ← "use client"
+               local useState for active tab (zh / en)
+               <video ref> registers with context onPlay
+```
+
+`<FeaturedDemos>` itself contains zero React state. It performs a static `import demosJson from "../../../public/marketing/demos/featured-demos.json"` (small file, build-time inlined). It validates the parse result against the JSON schema in §6 and:
+
+| Condition | Behavior |
+|---|---|
+| File missing | Build-time module-resolution error. Build fails loudly. (Treated as a deploy bug.) |
+| File present but JSON malformed | Build-time JSON parse error. Build fails loudly. |
+| File parses but `demos` array is empty or malformed | At runtime, `<FeaturedDemos>` returns `null`. The section silently disappears from the page. No placeholder, no error UI. |
+
+`<FeaturedDemosClient>` and below carry the `"use client"` directive. The Server-Component → Client-Component handoff passes the parsed `demos` array as a serialisable prop.
+
+Phase 2 swap path: the static import in `<FeaturedDemos>` becomes a server-side `fetch("/api/featured-demos")` call returning the same JSON shape. `<FeaturedDemosClient>` and the card hierarchy stay untouched.
 
 ---
 
@@ -128,6 +153,8 @@ Implemented purely in CSS using `:has()`:
 ```
 
 No JS state required for the visual effect. Transitions: 200 ms ease-out on `scale`, `opacity`, `box-shadow`.
+
+**Browser baseline**: `:has()` shipped in Chrome 105 (Aug 2022), Safari 15.4 (Mar 2022), Firefox 121 (Dec 2023). The marketing site's supported-browser baseline already aligns with these — every other section in the existing layout uses Tailwind v4 + modern CSS that requires this baseline or newer. No `:has()` polyfill or JS fallback is shipped; on older browsers (Firefox <121) the hover-shrink-others effect simply doesn't apply (the hovered card still scales up; siblings just don't shrink). That graceful degradation is acceptable — the carousel remains fully functional, just less expressive.
 
 ### 5.3 Click-to-play + pause-others
 
@@ -224,43 +251,55 @@ SLUG=karpathy-agent-engineering
 OUT=/tmp/demos/$SLUG
 mkdir -p $OUT
 
-# English clip
+# Frame-accurate output-seek used for the two video clips. Input-seek
+# (`-ss before -i`) is faster but only seeks to the nearest keyframe, which
+# can cause a few-frames drift between original.mp4 and dubbed.mp4 — and
+# that drift is visible when a user toggles the EN/CN tab and resumes from
+# the same currentTime. Output-seek (`-i before -ss`) re-decodes from the
+# start until $START, so both clips land on the exact same frame.
+# `-accurate_seek` is the default for output-seek; we set it explicitly
+# for clarity. The poster grab (single frame) can stay on input-seek.
+
+# English clip — frame-accurate
 docker exec aivideotrans-app ffmpeg -y \
-  -ss $START -i $JOB_DIR/video/original.mp4 -t $DUR \
+  -i $JOB_DIR/video/original.mp4 -ss $START -t $DUR -accurate_seek \
   -vf scale=-2:720 -c:v libx264 -preset slow -crf 23 \
   -c:a aac -b:a 128k -ac 2 -ar 44100 \
   -movflags +faststart \
   $OUT/original.mp4
 
-# Chinese dub clip (same time range, exact alignment)
+# Chinese dub clip — frame-accurate, same time range
 docker exec aivideotrans-app ffmpeg -y \
-  -ss $START -i $JOB_DIR/publish/dubbed_video.mp4 -t $DUR \
+  -i $JOB_DIR/publish/dubbed_video.mp4 -ss $START -t $DUR -accurate_seek \
   -vf scale=-2:720 -c:v libx264 -preset slow -crf 23 \
   -c:a aac -b:a 128k -ac 2 -ar 44100 \
   -movflags +faststart \
   $OUT/dubbed.mp4
 
-# Poster (frame at clip midpoint, taken from the original/English video for consistent visual)
+# Poster — single frame at clip midpoint. Input-seek is fine; one-frame
+# output, sub-second drift doesn't matter for a still image.
 docker exec aivideotrans-app ffmpeg -y \
   -ss $MID -i $JOB_DIR/video/original.mp4 -frames:v 1 \
   -vf scale=-2:720 \
   $OUT/poster-raw.jpg
 ```
 
-The resulting `poster-raw.jpg` then gets the Chinese title overlay added with PIL on the host (or in the app container — both work, the app container has Pillow installed):
+The resulting `poster-raw.jpg` then gets the Chinese title overlay added with PIL inside the `aivideotrans-app` container (which already has Pillow installed). Running it on the host instead would require installing Pillow + CJK fonts on the host first, which is unnecessary churn — the container is the canonical place.
+
+**Font resolution**: the plan author runs the overlay inside the container and **must verify which CJK fonts are actually present** before fixing on a font path. Likely candidates in a Debian/Ubuntu base image: `/usr/share/fonts/opentype/noto/NotoSerifCJK-Bold.ttc`, `/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc`. If the container image does not ship CJK fonts, plan author either (a) `apt-get install fonts-noto-cjk` inside the running container before generating posters, or (b) bundles the font files into the project under `frontend-next/scripts/fonts/` and mounts them. Option (a) is simpler for a one-off run; option (b) is required if the asset pipeline becomes recurrent in Phase 2.
 
 ```python
-# Pseudocode for poster overlay
+# Poster overlay — font_title_path / font_sub_path resolved per the note above
 from PIL import Image, ImageDraw, ImageFont
 img = Image.open("poster-raw.jpg")
 draw = ImageDraw.Draw(img)
-font_title = ImageFont.truetype("/path/to/NotoSerifSC-Bold.ttf", 42)
-font_sub = ImageFont.truetype("/path/to/NotoSansSC-Medium.ttf", 22)
+font_title = ImageFont.truetype(font_title_path, 42)
+font_sub = ImageFont.truetype(font_sub_path, 22)
 
 # Title in lower-left, with cinnabar accent strip
 draw.rectangle([(64, 580), (68, 660)], fill="#C73E3A")
 draw.text((86, 588), "安德烈·卡帕西谈智能体工程", font=font_title, fill="white")
-draw.text((86, 638), "16:25 – 17:18 · 52s", font=font_sub, fill="rgba(255,255,255,0.8)")
+draw.text((86, 638), "16:25 – 17:18 · 52s", font=font_sub, fill=(255, 255, 255, 200))
 
 img.save("poster.jpg", quality=85, optimize=True, progressive=True)
 ```
@@ -275,8 +314,9 @@ The exact extraction commands for all 5 demos, including the SLUG / time range s
 
 | Condition | Behavior |
 |---|---|
-| `featured-demos.json` missing | Component throws at build time; build fails loudly. Treated as a deploy bug, not a runtime concern. |
-| `featured-demos.json` parses but `demos` list is empty | Component returns `null`. Section disappears from the page, no placeholder, no error. |
+| `featured-demos.json` missing | Build-time module-resolution error. Build fails loudly. Treated as a deploy bug, not a runtime concern. |
+| `featured-demos.json` malformed JSON | Build-time JSON parse error. Build fails loudly. Same class as above — caught before deploy. |
+| `featured-demos.json` parses but `demos` list is empty / not an array | At runtime, `<FeaturedDemos>` returns `null`. Section disappears from the page, no placeholder, no error UI. |
 | `featured-demos.json` parses but a particular demo's MP4 is 404 | Browser shows broken video (native `<video>` failure). Other cards continue working. We accept this — Phase 2's admin tooling will validate asset existence at write time. |
 | User has Reduced Motion enabled | Track is static; cards still hoverable; manual horizontal scroll still works. Nothing is hidden. |
 | User on touch device | No auto-scroll, no hover scaling. Manual swipe-snap. Tap any card → starts video. |
