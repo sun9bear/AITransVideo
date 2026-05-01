@@ -85,16 +85,15 @@ export function FeaturedDemoCard({ demo, ariaHidden = false }: { demo: Demo; ari
     <article
       className="demo-card group relative flex w-[320px] shrink-0 flex-col overflow-hidden rounded-xl border border-border bg-card shadow-sm transition-[transform,opacity,box-shadow] duration-200 ease-out md:w-[360px]"
       aria-hidden={ariaHidden ? true : undefined}
-      // `inert` makes the entire subtree non-interactive on duplicate cards
-      // — including the native <video controls>, which tabIndex={-1} on
-      // the tab buttons alone wouldn't cover. Without this, a keyboard
-      // user tabbing through could land on the duplicate's video controls
-      // and start a second copy of the same demo. `inert` is supported
-      // in Chrome 102+, Safari 15.5+, Firefox 112+ — same baseline as
-      // :has(). React 19 types `inert` as a proper boolean prop; older
-      // React (which used the `""` empty-string convention) is not
-      // relevant here since this codebase is React 19+.
-      inert={ariaHidden}
+      // `aria-hidden` keeps screen readers from reading 10 cards instead
+      // of 5. Keyboard isolation is handled per-element via tabIndex={-1}
+      // on the tab <button>s and the <video>, NOT via `inert` on the
+      // article — `inert` would block pointer events too, which kills
+      // the CSS :hover effect on duplicate cards (they'd never trigger
+      // the hover-shrink-others animation). Trade-off accepted: a sighted
+      // mouse user can theoretically click a duplicate's video play
+      // button, which is harmless (worst case, two copies of the same
+      // demo play; the carousel rotates one offscreen quickly anyway).
       aria-label={demo.display_name}
     >
       {/* Tab row — segmented control above video */}
@@ -130,7 +129,9 @@ export function FeaturedDemoCard({ demo, ariaHidden = false }: { demo: Demo; ari
       </div>
 
       {/* Video element. key={activeSrc} forces remount on src swap so the
-          currentTime restore (in onLoadedMetadata) lands on the new element. */}
+          currentTime restore (in onLoadedMetadata) lands on the new element.
+          tabIndex={-1} on duplicates removes them from keyboard tab order
+          (paired with the same on tab buttons above). */}
       <div role="tabpanel" className="relative aspect-video bg-black">
         <video
           ref={videoRef}
@@ -140,6 +141,7 @@ export function FeaturedDemoCard({ demo, ariaHidden = false }: { demo: Demo; ari
           controls
           preload="none"
           playsInline
+          tabIndex={ariaHidden ? -1 : 0}
           onPlay={handlePlay}
           onLoadedMetadata={handleLoadedMetadata}
           width={demo.natural_width}

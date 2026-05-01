@@ -667,6 +667,17 @@
   to   { transform: translateX(-50%); }
 }
 
+/* Carousel viewport. overflow:hidden clips the marquee track horizontally
+   (cards beyond the visible window are hidden as they scroll). The
+   padding-block gives the hover-scaled cards room to grow vertically
+   without being clipped — at scale(1.15), a ~286px card grows ~22px on
+   each edge, so we reserve 32px each side and visually compensate with
+   a negative margin so adjacent sections don't get pushed apart. */
+.demo-carousel {
+  padding-block: 32px;
+  margin-block: -32px;
+}
+
 .demo-track {
   width: max-content;
   animation: featured-demos-marquee 35s linear infinite;
