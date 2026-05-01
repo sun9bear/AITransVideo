@@ -1,15 +1,5 @@
-import {
-  CheckCircle2,
-  Download,
-  FileVideo2,
-  FolderArchive,
-  Languages,
-  Mic2,
-  Sparkles,
-  WandSparkles,
-} from "lucide-react"
+import { CheckCircle2 } from "lucide-react"
 import type { CSSProperties } from "react"
-import { DIGITAL_DELIVERABLES } from "./company-info"
 import { InkDivider } from "./ink-divider"
 
 /**
@@ -269,70 +259,12 @@ export function ProductProof() {
           </article>
         </div>
 
-        <div className="mt-12 rounded-2xl border border-border bg-muted/40 p-6 sm:p-8">
-          <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-            <div className="max-w-2xl">
-              <p className="ink-heading text-xs uppercase tracking-widest text-[color:var(--cinnabar,#C73E3A)]">
-                付费后可以获得什么
-              </p>
-              <h3 className="ink-heading mt-2 text-2xl text-foreground">
-                你买到的不只是一个视频文件
-              </h3>
-              <p className="mt-3 zh-body text-muted-foreground">
-                付费套餐解锁的是账户内的视频处理能力、工作台编辑权限和结果下载权益。任务完成后，你可以下载配音视频、配音音频、字幕、翻译文本和素材包。
-              </p>
-            </div>
-            <div
-              className="rounded-md border px-4 py-3 text-sm"
-              style={{
-                borderColor: "color-mix(in oklab, var(--cinnabar) 25%, transparent)",
-                backgroundColor: "var(--cinnabar-soft)",
-                color: "var(--cinnabar)",
-              }}
-            >
-              支持长视频、多说话人、增量重生成和剪映草稿导出
-            </div>
-          </div>
-
-          <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {DIGITAL_DELIVERABLES.map((item) => {
-              const icon =
-                item === "配音视频" ? (
-                  <FileVideo2 className="h-4 w-4" />
-                ) : item === "配音音频" ? (
-                  <Mic2 className="h-4 w-4" />
-                ) : item === "字幕/素材包" ? (
-                  <FolderArchive className="h-4 w-4" />
-                ) : item === "剪映草稿工程" ? (
-                  <Download className="h-4 w-4" />
-                ) : item === "人工复核工作台" ? (
-                  <Languages className="h-4 w-4" />
-                ) : item === "增量重生成能力" ? (
-                  <WandSparkles className="h-4 w-4" />
-                ) : (
-                  <Sparkles className="h-4 w-4" />
-                )
-
-              return (
-                <div
-                  key={item}
-                  className="flex items-center gap-3 rounded-md border border-border bg-card px-4 py-3 text-sm text-foreground shadow-sm"
-                >
-                  <span
-                    className="rounded-full p-2"
-                    style={{
-                      backgroundColor: "var(--cinnabar-soft)",
-                      color: "var(--cinnabar)",
-                    }}
-                  >
-                    {icon}
-                  </span>
-                  <span>{item}</span>
-                </div>
-              )
-            })}
-          </div>
-        </div>
+        {/* "购买内容 / 你买到的不只是一个视频文件" + DIGITAL_DELIVERABLES grid
+            removed 2026-05-02. The information was redundant — visitors get
+            the same "concrete deliverables" message from FeaturedDemos
+            (real dubbed clips), and from the per-tier benefits already
+            listed in <PricingPreview />. Compressing the page reduces
+            scroll fatigue without losing any factual claim. */}
       </div>
     </section>
   )

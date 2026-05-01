@@ -203,7 +203,28 @@ class TestLegacyViews:
 class TestPlansResponsePayload:
     def test_response_top_level_keys(self):
         payload = _build_plans_response()
-        assert set(payload.keys()) == {"plans", "trial"}
+        # 2026-05-02: added top-level `credits_per_minute` so the marketing
+        # pricing card can compute "约 N 分钟 Express / N 分钟 Studio" without
+        # hardcoding rates client-side. The flat string-key shape (e.g.
+        # "express_standard": 10) is documented in the API contract doc.
+        assert set(payload.keys()) == {"plans", "trial", "credits_per_minute"}
+
+    def test_response_credits_per_minute_shape(self):
+        payload = _build_plans_response()
+        cpm = payload["credits_per_minute"]
+        assert isinstance(cpm, dict)
+        # Frozen V3 baseline rates — see credits_service.DEBIT_RATES
+        assert cpm["express_standard"] == 10
+        assert cpm["studio_standard"] == 15
+        assert cpm["studio_high"] == 30
+        assert cpm["studio_flagship"] == 50
+
+    def test_plans_carry_monthly_grant_credits(self):
+        payload = _build_plans_response()
+        grants = {p["code"]: p.get("monthly_grant_credits") for p in payload["plans"]}
+        # Frozen V3 grant amounts. Free is the recurring free-bucket grant
+        # (separate from free_quota_total which counts task slots).
+        assert grants == {"free": 500, "plus": 3500, "pro": 12000}
 
     def test_response_plans_order_and_codes(self):
         payload = _build_plans_response()

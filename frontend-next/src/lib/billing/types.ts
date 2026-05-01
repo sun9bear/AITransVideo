@@ -30,6 +30,30 @@ export type Plan = {
   price_cny_fen: PlanPriceMap | null
   /** Present only on free-tier plans. */
   free_quota_total?: number
+  /**
+   * Recurring monthly credit grant for this tier (Free / Plus / Pro).
+   * Combined with `PlansResponse.credits_per_minute` to derive an
+   * approximate "约 N 分钟 Express / N 分钟 Studio" display on the
+   * pricing card. Optional because pre-2026-05-02 backend versions
+   * don't include it.
+   */
+  monthly_grant_credits?: number
+}
+
+/**
+ * System-wide credit-to-minute conversion rates, keyed by
+ * `${service_mode}_${quality_tier}` (flat string keys for JSON-friendly
+ * shape; the gateway flattens its internal tuple keys before sending).
+ * The marketing pricing card reads `express_standard` and `studio_standard`
+ * to compute the headline "约 N 分钟" display per paid tier.
+ */
+export type CreditsPerMinute = {
+  express_standard?: number
+  studio_standard?: number
+  studio_high?: number
+  studio_flagship?: number
+  /** Forward-compat for new mode/tier combinations introduced post-V3. */
+  [key: string]: number | undefined
 }
 
 /**
@@ -52,6 +76,12 @@ export type TrialConfig = {
 export type PlansResponse = {
   plans: Plan[]
   trial: TrialConfig
+  /**
+   * Optional — present in 2026-05-02+ gateway. Older backends omit this
+   * key, in which case the pricing card falls back to qualitative
+   * "包含月度处理额度" wording instead of computed minute counts.
+   */
+  credits_per_minute?: CreditsPerMinute
 }
 
 /**

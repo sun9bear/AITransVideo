@@ -344,7 +344,85 @@ def _plan_to_public_dict(plan: PlanDefinition) -> dict[str, Any]:
     }
     if plan.free_quota_total is not None:
         entry["free_quota_total"] = plan.free_quota_total
+
+    # Monthly subscription credit grant. Plus / Pro get a fresh bucket per
+    # billing period (see credits_service.ensure_subscription_bucket).
+    # Free tier gets a recurring small grant too (free_grant_credits).
+    # Marketing pricing card uses this together with `credits_per_minute`
+    # (top-level on the response) to display approximate "约 N 分钟 Express
+    # / N 分钟 Studio" per tier so the buyer can compare the headline price
+    # against what they actually get.
+    grants = _get_runtime_grant_amounts_safe()
+    grant = grants.get(plan.code)
+    if grant is not None:
+        entry["monthly_grant_credits"] = int(grant)
+
     return entry
+
+
+def _get_runtime_grant_amounts_safe() -> dict[str, int]:
+    """Local mirror of credits_service._get_runtime_grant_amounts.
+
+    Duplicated as a local helper to avoid a hard import dependency on
+    credits_service from the public-facing plans module — keeps the
+    /api/plans endpoint resilient if credits_service has a transient
+    import error during startup. Always falls back to the frozen V3
+    GRANT_AMOUNTS dict on any failure.
+    """
+    try:
+        from credits_service import GRANT_AMOUNTS as _GA  # type: ignore
+    except Exception:
+        _GA = {"free": 500, "trial": 300, "plus": 3500, "pro": 12000}
+
+    try:
+        from pricing_runtime import get_runtime_pricing  # type: ignore
+        payload = get_runtime_pricing()
+        result: dict[str, int] = {}
+        # Free tier grant from credits config
+        free = getattr(getattr(payload, "credits", None), "free_grant_credits", None)
+        if free is not None:
+            result["free"] = int(free)
+        # Trial bucket (kept for consistency, not exposed in plans response)
+        trial = getattr(getattr(payload, "trial", None), "grant_credits", None)
+        if trial is not None:
+            result["trial"] = int(trial)
+        # Per-plan grants
+        plans_dict = getattr(payload, "plans", {}) or {}
+        for code, plan in plans_dict.items():
+            mgc = getattr(plan, "monthly_grant_credits", None)
+            if mgc is not None:
+                result[code] = int(mgc)
+        return result if result else dict(_GA)
+    except Exception:
+        return dict(_GA)
+
+
+def _get_runtime_debit_rates_safe() -> dict[str, int]:
+    """Flatten DEBIT_RATES into the public credits_per_minute payload.
+
+    Output shape: {"express_standard": 10, "studio_standard": 15, ...}
+    derived from credits_service.DEBIT_RATES which is keyed by
+    (service_mode, quality_tier) tuples internally. The flat string-key
+    form is friendlier to JSON consumers (no tuple-key gymnastics).
+
+    Marketing pricing card uses Express standard + Studio standard as
+    the two reference rates to display "约 N min Express / M min Studio"
+    on each paid tier.
+    """
+    try:
+        from credits_service import DEBIT_RATES as _DR  # type: ignore
+        flat: dict[str, int] = {}
+        for (mode, tier), val in _DR.items():
+            flat[f"{mode}_{tier}"] = int(val)
+        return flat
+    except Exception:
+        # Frozen V3 fallback
+        return {
+            "express_standard": 10,
+            "studio_standard": 15,
+            "studio_high": 30,
+            "studio_flagship": 50,
+        }
 
 
 def _build_plans_response() -> dict[str, Any]:
@@ -352,6 +430,7 @@ def _build_plans_response() -> dict[str, Any]:
     return {
         "plans": [_plan_to_public_dict(plan) for plan in _get_runtime_plans().values()],
         "trial": dict(_get_runtime_trial_config()),
+        "credits_per_minute": _get_runtime_debit_rates_safe(),
     }
 
 

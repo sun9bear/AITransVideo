@@ -94,7 +94,7 @@ export function Hero() {
 
             {/* Subhead — long-video focus + multi-format + edit-anytime */}
             <p className="zh-body-lg mt-6 text-foreground/80 max-w-xl">
-              面向中文创作者的 AI 视频翻译配音工作台。支持最长 3 小时视频，自动生成中文字幕、中文配音和多种交付结果；第一版不满意，可以逐句修改、单句重生成。
+              把英文长视频变成可发布的中文配音版。支持最长 3 小时视频，自动生成中文字幕、中文配音和多种交付结果；第一版不满意，可以逐句修改、单句重生成。
             </p>
 
             {/* CTAs */}

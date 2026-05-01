@@ -2,7 +2,7 @@ import { Check, Minus } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { cn } from "@/lib/utils"
 import { getPlansSafeServer } from "@/lib/billing/get-plans"
-import type { Plan, PlanPriceMap } from "@/lib/billing/types"
+import type { CreditsPerMinute, Plan, PlanPriceMap } from "@/lib/billing/types"
 import { PlanCardCta } from "./plan-card-cta"
 
 /**
@@ -44,7 +44,21 @@ function monthlyPriceLabel(price: PlanPriceMap | null): { amount: string; unit: 
   return null
 }
 
-function planBenefits(plan: Plan): Array<{ label: string; included: boolean }> {
+/**
+ * Format a credit count + per-minute rate into a readable minute estimate.
+ * "Math.floor" is intentional — it's better to under-promise (e.g. 3500/15=233)
+ * than to round up (234) and have a buyer argue they got a fractional minute
+ * less than advertised.
+ */
+function creditsToMinutes(grant: number, ratePerMin?: number): number | null {
+  if (!ratePerMin || ratePerMin <= 0) return null
+  return Math.floor(grant / ratePerMin)
+}
+
+function planBenefits(
+  plan: Plan,
+  creditsPerMinute: CreditsPerMinute | undefined,
+): Array<{ label: string; included: boolean }> {
   const benefits: Array<{ label: string; included: boolean }> = []
   benefits.push({
     label: `单次视频最长 ${plan.max_duration_minutes} 分钟`,
@@ -54,22 +68,38 @@ function planBenefits(plan: Plan): Array<{ label: string; included: boolean }> {
     label: `最多 ${plan.max_concurrent_jobs} 个任务并行处理`,
     included: true,
   })
-  // Monthly processing quota — Plus/Pro subscriptions grant a monthly credit
-  // pool that converts to source-minutes via the per-mode debit rate (Express
-  // standard 10 cr/min, Studio standard 15, Studio high 30, Studio flagship
-  // 50 — see gateway/credits_service.DEBIT_RATES). The exact credit grant
-  // (Plus 3500 / Pro 12000) is not exposed via /api/plans yet, so we use
-  // ChatGPT's safe fallback wording per 2026-05-01 marketing consult: tell
-  // the visitor they get a monthly pool, point them at the dashboard for
-  // the precise figure. When `_plan_to_public_dict` is extended to include
-  // monthly_grant_credits, swap this for "约 N 分钟 Express / N 分钟 Studio"
-  // computed from the rate table.
-  if (plan.free_quota_total === undefined) {
+
+  // Monthly processing quota line. With 2026-05-02+ gateway, /api/plans
+  // returns `monthly_grant_credits` per plan + top-level `credits_per_minute`
+  // map. We compute Express + Studio-standard minute estimates from those
+  // and show one combined line so paid-tier buyers know exactly what they get.
+  // Older gateway / runtime config without these fields falls back to the
+  // qualitative wording so the card never breaks.
+  if (plan.free_quota_total === undefined && plan.monthly_grant_credits) {
+    const expRate = creditsPerMinute?.express_standard
+    const studioRate = creditsPerMinute?.studio_standard
+    const expMin = creditsToMinutes(plan.monthly_grant_credits, expRate)
+    const studioMin = creditsToMinutes(plan.monthly_grant_credits, studioRate)
+    if (expMin !== null && studioMin !== null) {
+      benefits.push({
+        label: `每月 ${plan.monthly_grant_credits} 点处理额度（约 ${expMin} 分钟 Express / ${studioMin} 分钟 Studio 标准）`,
+        included: true,
+      })
+    } else {
+      // Have grant but missing rate map — show grant only.
+      benefits.push({
+        label: `每月 ${plan.monthly_grant_credits} 点处理额度`,
+        included: true,
+      })
+    }
+  } else if (plan.free_quota_total === undefined) {
+    // No grant data at all — qualitative fallback.
     benefits.push({
       label: "包含月度处理额度，按视频实际时长计费",
       included: true,
     })
   }
+
   const hasStudio = plan.allowed_service_modes.includes("studio")
   benefits.push({
     label: "Express 快速模式",
@@ -91,12 +121,14 @@ function planBenefits(plan: Plan): Array<{ label: string; included: boolean }> {
 function PlanCard({
   plan,
   highlight,
+  creditsPerMinute,
 }: {
   plan: Plan
   highlight: boolean
+  creditsPerMinute: CreditsPerMinute | undefined
 }) {
   const price = monthlyPriceLabel(plan.price_cny_fen)
-  const benefits = planBenefits(plan)
+  const benefits = planBenefits(plan, creditsPerMinute)
 
   return (
     <div
@@ -187,6 +219,7 @@ export async function PricingGrid() {
           key={plan.code}
           plan={plan}
           highlight={plan.code === HIGHLIGHT_CODE}
+          creditsPerMinute={data.credits_per_minute}
         />
       ))}
     </div>

@@ -9,7 +9,20 @@ export const metadata: Metadata = {
     template: "%s · 爱译视频 AITrans.Video",
   },
   description:
-    "面向中文创作者的 AI 视频翻译配音工作台。支持最长 3 小时视频，自动生成中文字幕、中文配音和多种交付结果；第一版不满意，可以逐句修改、单句重生成。",
+    "把英文长视频变成可发布的中文配音版。AI 视频翻译、中文配音、AI 字幕、YouTube 视频翻译、SRT 字幕导出、长视频本地化工作台。支持最长 3 小时视频，逐句修改、单句重生成。",
+  keywords: [
+    "英文视频翻译",
+    "AI 视频翻译",
+    "中文配音",
+    "AI 配音",
+    "AI 字幕",
+    "YouTube 视频翻译",
+    "长视频翻译",
+    "SRT 字幕导出",
+    "视频本地化",
+    "爱译视频",
+    "AITrans.Video",
+  ],
 }
 
 export default function RootLayout({

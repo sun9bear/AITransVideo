@@ -14,19 +14,20 @@ import { FinalCta } from "@/components/marketing/final-cta"
 /**
  * Homepage (`/`).
  *
- * Narrative arc (revised 2026-05-01 per ChatGPT consult round 2 + featured
- * demos addition):
+ * Narrative arc (revised 2026-05-02 per ChatGPT consult round 3):
  *   [问题] Hero → PainPoints (4 concrete frustrations)
- *   [演示] ProductProof (real screenshots) → FeaturedDemos (real dub clips)
- *          → WorkflowShowcase → Features
+ *   [证据] FeaturedDemos (real dub clips, output-level evidence)
+ *   [机制] ProductProof (workspace screenshots) → WorkflowShowcase → Features
  *   [对位] SuitedScenarios (是不是给我用的) → ToolComparison (vs 一键生成)
  *   [信任] TrustBanner → PricingPreview (with TrialBanner) → FAQ
  *   [行动] FinalCta
  *
- * FeaturedDemos was added 2026-05-01 to give "output-level" proof right
- * after the workspace-level proof from ProductProof. Visitors hear what the
- * actual dubbed content sounds like in 5 hand-picked 50-70s clips with
- * EN/CN tab switching. See: docs/specs/2026-05-01-marketing-featured-demos-design.md
+ * FeaturedDemos moved 2026-05-02 from after ProductProof to right after
+ * PainPoints. Rationale: the strongest objection a visitor has is "does
+ * this actually sound natural?" — they need to *hear* a dubbed clip
+ * before they care about workspace screenshots. Problem framing
+ * (PainPoints) sets the question; output samples (FeaturedDemos) answer
+ * it; mechanism evidence (ProductProof + WorkflowShowcase) shows how.
  *
  * SuitedScenarios + ToolComparison bridge "what the product does" to "is
  * this for me / why not the simpler one-click tool".
@@ -40,8 +41,8 @@ export default function HomePage() {
     <>
       <Hero />
       <PainPoints />
-      <ProductProof />
       <FeaturedDemos />
+      <ProductProof />
       <WorkflowShowcase />
       <Features />
       <SuitedScenarios />
