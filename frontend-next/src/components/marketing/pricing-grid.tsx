@@ -54,6 +54,22 @@ function planBenefits(plan: Plan): Array<{ label: string; included: boolean }> {
     label: `最多 ${plan.max_concurrent_jobs} 个任务并行处理`,
     included: true,
   })
+  // Monthly processing quota — Plus/Pro subscriptions grant a monthly credit
+  // pool that converts to source-minutes via the per-mode debit rate (Express
+  // standard 10 cr/min, Studio standard 15, Studio high 30, Studio flagship
+  // 50 — see gateway/credits_service.DEBIT_RATES). The exact credit grant
+  // (Plus 3500 / Pro 12000) is not exposed via /api/plans yet, so we use
+  // ChatGPT's safe fallback wording per 2026-05-01 marketing consult: tell
+  // the visitor they get a monthly pool, point them at the dashboard for
+  // the precise figure. When `_plan_to_public_dict` is extended to include
+  // monthly_grant_credits, swap this for "约 N 分钟 Express / N 分钟 Studio"
+  // computed from the rate table.
+  if (plan.free_quota_total === undefined) {
+    benefits.push({
+      label: "包含月度处理额度，按视频实际时长计费",
+      included: true,
+    })
+  }
   const hasStudio = plan.allowed_service_modes.includes("studio")
   benefits.push({
     label: "Express 快速模式",

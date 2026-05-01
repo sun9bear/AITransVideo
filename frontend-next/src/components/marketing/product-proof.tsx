@@ -273,13 +273,13 @@ export function ProductProof() {
           <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
             <div className="max-w-2xl">
               <p className="ink-heading text-xs uppercase tracking-widest text-[color:var(--cinnabar,#C73E3A)]">
-                购买内容
+                付费后可以获得什么
               </p>
               <h3 className="ink-heading mt-2 text-2xl text-foreground">
-                购买的是数字化视频本地化服务和真实交付物
+                你买到的不只是一个视频文件
               </h3>
               <p className="mt-3 zh-body text-muted-foreground">
-                付费套餐解锁的是账户内处理能力和工作台权益，不是单次静态下载页。任务完成后，用户可在站内查看项目状态、复核内容并下载交付结果。
+                付费套餐解锁的是账户内的视频处理能力、工作台编辑权限和结果下载权益。任务完成后，你可以下载配音视频、配音音频、字幕、翻译文本和素材包。
               </p>
             </div>
             <div

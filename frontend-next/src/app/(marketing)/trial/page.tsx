@@ -34,8 +34,8 @@ export default async function TrialPage() {
       typeof trial.source_minutes === "number",
   )
   const leadParagraph = hasNumbers
-    ? `注册即享 ${trial!.days} 天试用，含 ${trial!.source_minutes} 分钟源视频额度${trial!.includes_studio ? "与 Studio 精校模式" : ""}。亲自验证对齐质量与配音自然度。试用结束后不会自动扣费，也不会锁定你的项目数据。`
-    : "注册即享免费试用。亲自验证对齐质量与配音自然度。试用结束后不会自动扣费，也不会锁定你的项目数据。"
+    ? `注册即享 ${trial!.days} 天试用，含 ${trial!.source_minutes} 分钟源视频额度${trial!.includes_studio ? "与 Studio 精校模式" : ""}。亲自验证对齐质量与配音自然度。试用结束后不会自动扣费，账户信息和已购点数也会保留下来。`
+    : "注册即享免费试用。亲自验证对齐质量与配音自然度。试用结束后不会自动扣费，账户信息和已购点数也会保留下来。"
 
   return (
     <>
@@ -77,7 +77,7 @@ export default async function TrialPage() {
                 <div className="mt-6 space-y-2 border-t border-border pt-5 text-xs text-muted-foreground">
                   <p>· 无需绑定支付方式</p>
                   <p>· 试用结束不会自动扣费</p>
-                  <p>· 项目数据始终保留在你的账户中</p>
+                  <p>· 账户信息和已购点数始终保留</p>
                 </div>
               </div>
             </aside>

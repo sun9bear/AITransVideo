@@ -16,7 +16,7 @@ import { InkDivider } from "./ink-divider"
 const POINTS: Array<{ title: string; body: string }> = [
   {
     title: "视频太长",
-    body: "访谈、课程、播客动辄 1–3 小时。很多工具只适合几十秒短视频试水，超过半小时就处理不动或贵到离谱。",
+    body: "很多工具更适合几十秒到几分钟的短视频试水；一旦遇到 30 分钟、1 小时甚至 3 小时的访谈、课程和播客，处理成本和等待时间都会迅速上升。",
   },
   {
     title: "结果不好改",

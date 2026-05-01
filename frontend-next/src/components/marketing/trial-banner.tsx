@@ -39,9 +39,14 @@ export async function TrialBanner() {
 
   // Description text — numbered when gateway gave us frozen facts, otherwise
   // qualitative-only. Either branch keeps the same trust-led tone.
+  // Retention phrasing: project files default to 7-day retention (see
+  // TrustBanner). Account-level info — login identity, history records, and
+  // any purchased credits — persist indefinitely. Earlier copy conflated the
+  // two ("项目数据会一直保留") which read inconsistently with the 7-day
+  // promise; corrected per user note 2026-05-01.
   const description = hasNumbers
-    ? `注册即享 ${trial!.days} 天试用，含 ${trial!.source_minutes} 分钟源视频额度${trial!.includes_studio ? "与 Studio 精校模式" : ""}。试用结束不会自动扣费，你的项目数据会一直保留在账户中。`
-    : "注册即享免费试用，亲自验证对齐质量与配音自然度。试用结束不会自动扣费，你的项目数据会一直保留在账户中。"
+    ? `注册即享 ${trial!.days} 天试用，含 ${trial!.source_minutes} 分钟源视频额度${trial!.includes_studio ? "与 Studio 精校模式" : ""}。试用结束不会自动扣费，你的账户信息和已购点数会一直保留。`
+    : "注册即享免费试用，亲自验证对齐质量与配音自然度。试用结束不会自动扣费，你的账户信息和已购点数会一直保留。"
 
   return (
     <div className="rounded-2xl border border-border bg-card p-6 md:p-8">

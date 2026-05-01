@@ -24,8 +24,8 @@ const QUALITATIVE_BENEFITS: Array<{ icon: typeof Check; title: string; body: str
   },
   {
     icon: Lock,
-    title: "项目安全保留",
-    body: "试用期间产生的项目数据保留在你的账户中,升级后可以无缝继续编辑。",
+    title: "账户与点数保留",
+    body: "试用结束后账户信息和已购点数会一直保留；项目文件默认保留 7 天，到期前可随时下载或继续修改。",
   },
   {
     icon: CreditCard,
