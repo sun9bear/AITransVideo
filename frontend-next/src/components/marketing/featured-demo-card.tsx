@@ -129,9 +129,17 @@ export function FeaturedDemoCard({ demo, ariaHidden = false }: { demo: Demo; ari
       </div>
 
       {/* Video element. key={activeSrc} forces remount on src swap so the
-          currentTime restore (in onLoadedMetadata) lands on the new element.
-          tabIndex={-1} on duplicates removes them from keyboard tab order
-          (paired with the same on tab buttons above). */}
+          currentTime restore (in onLoadedMetadata) lands on the new
+          element. tabIndex={-1} on duplicates removes them from keyboard
+          tab order (paired with the same on tab buttons above).
+
+          Download disabled via controlsList="nodownload" (hides the
+          download option in the kebab menu in Chromium / Safari) +
+          right-click context menu blocked (prevents "Save video as").
+          Note: this is UI-level only — the MP4 URL is still in the page
+          source and Network tab. A determined user can always grab the
+          file. We do this to discourage casual save-and-redistribute,
+          not to enforce DRM. */}
       <div role="tabpanel" className="relative aspect-video bg-black">
         <video
           ref={videoRef}
@@ -139,11 +147,14 @@ export function FeaturedDemoCard({ demo, ariaHidden = false }: { demo: Demo; ari
           src={activeSrc}
           poster={demo.poster_src}
           controls
+          controlsList="nodownload noremoteplayback"
+          disablePictureInPicture
           preload="none"
           playsInline
           tabIndex={ariaHidden ? -1 : 0}
           onPlay={handlePlay}
           onLoadedMetadata={handleLoadedMetadata}
+          onContextMenu={(e) => e.preventDefault()}
           width={demo.natural_width}
           height={demo.natural_height}
           className="h-full w-full"
