@@ -522,6 +522,75 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                         content_type="audio/wav",
                     )
                     return
+
+                # GET /jobs/{id}/jianying-draft-status (K5)
+                # Poll endpoint for on-demand Jianying draft generation status.
+                # Internal-key auth required when AVT_INTERNAL_API_KEY is set.
+                if (
+                    len(path_parts) == 3
+                    and path_parts[0] == "jobs"
+                    and path_parts[2] == "jianying-draft-status"
+                ):
+                    # Internal-key auth: if AVT_INTERNAL_API_KEY is set,
+                    # the caller must supply a matching X-Internal-Key header.
+                    _jianying_internal_key = os.environ.get("AVT_INTERNAL_API_KEY", "").strip()
+                    if _jianying_internal_key:
+                        _req_key = self.headers.get("X-Internal-Key", "").strip()
+                        if _req_key != _jianying_internal_key:
+                            self._write_json(
+                                HTTPStatus.FORBIDDEN,
+                                {"error": "Invalid or missing X-Internal-Key"},
+                            )
+                            return
+                    jianying_job_id = path_parts[1]
+                    # Gate: job must exist
+                    record = service.store.load_job(jianying_job_id)
+                    if record is None:
+                        self._write_json(
+                            HTTPStatus.NOT_FOUND,
+                            {"code": "job_not_found", "message": f"Job {jianying_job_id} not found."},
+                        )
+                        return
+                    # Get status via runner
+                    try:
+                        state = jianying_runner.get_status(jianying_job_id)
+                    except KeyError:
+                        # get_status raises KeyError if job not found (defensive)
+                        self._write_json(
+                            HTTPStatus.NOT_FOUND,
+                            {"code": "job_not_found", "message": f"Job {jianying_job_id} not found."},
+                        )
+                        return
+                    except Exception as exc:
+                        logger.exception("Jianying status check failed for job %s", jianying_job_id)
+                        self._write_json(
+                            HTTPStatus.INTERNAL_SERVER_ERROR,
+                            {"code": "internal_error", "message": str(exc)[:500]},
+                        )
+                        return
+                    # Build response: add draft_zip_size_bytes by stat-ing the file
+                    response = {
+                        "status": state.get("status"),
+                        "started_at": state.get("started_at"),
+                        "completed_at": state.get("completed_at"),
+                        "error": state.get("error"),
+                        "artifact_key": state.get("artifact_key"),
+                        "draft_zip_path": state.get("draft_zip_path"),
+                        "compatibility_report_path": state.get("compatibility_report_path"),
+                        "draft_zip_size_bytes": None,
+                    }
+                    # Stat the zip file if it exists to get file size
+                    if response.get("draft_zip_path"):
+                        try:
+                            zip_path = Path(response["draft_zip_path"])
+                            if zip_path.exists():
+                                response["draft_zip_size_bytes"] = zip_path.stat().st_size
+                        except Exception:
+                            # If stat fails, leave size as None
+                            pass
+                    self._write_json(HTTPStatus.OK, response)
+                    return
+
                 self._write_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
             except JobNotFoundError as exc:
                 self._write_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
