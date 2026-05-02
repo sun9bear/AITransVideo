@@ -6,6 +6,9 @@ from typing import Any
 
 JOB_TYPE_LOCALIZE_VIDEO = "localize_video"
 
+# Jianying draft on-demand generation (plan §11.5, K2 task)
+VALID_JIANYING_DRAFT_STATUSES = frozenset({"idle", "running", "succeeded", "failed"})
+
 SOURCE_TYPE_YOUTUBE_URL = "youtube_url"
 SOURCE_TYPE_LOCAL_AUDIO = "local_audio"
 SOURCE_TYPE_LOCAL_VIDEO = "local_video"
@@ -142,6 +145,12 @@ class JobRecord:
     root_job_id: str | None = None          # lineage root; originals: == job_id
     edit_generation: int = 0                # editing→running→succeeded cycles
 
+    # --- Jianying draft on-demand generation (plan §11, K2 task) ---
+    jianying_draft_status: str = "idle"     # idle / running / succeeded / failed
+    jianying_draft_started_at: str | None = None   # ISO 8601 UTC
+    jianying_draft_completed_at: str | None = None
+    jianying_draft_error: str | None = None
+
     def __post_init__(self) -> None:
         self.job_id = str(self.job_id).strip()
         self.job_type = str(self.job_type).strip()
@@ -176,6 +185,12 @@ class JobRecord:
         # post-edit data that was migrated in without an explicit root set).
         if self.root_job_id is None:
             self.root_job_id = self.job_id
+
+        # --- Jianying draft fields normalize ---
+        self.jianying_draft_status = str(self.jianying_draft_status).strip().lower()
+        self.jianying_draft_started_at = _normalize_optional_text(self.jianying_draft_started_at)
+        self.jianying_draft_completed_at = _normalize_optional_text(self.jianying_draft_completed_at)
+        self.jianying_draft_error = _normalize_optional_text(self.jianying_draft_error)
 
         if not self.job_id:
             raise ValueError("job_id is required")
@@ -244,6 +259,11 @@ class JobRecord:
             "copy_of_job_id": self.copy_of_job_id,
             "root_job_id": self.root_job_id,
             "edit_generation": self.edit_generation,
+            # --- Jianying draft on-demand generation ---
+            "jianying_draft_status": self.jianying_draft_status,
+            "jianying_draft_started_at": self.jianying_draft_started_at,
+            "jianying_draft_completed_at": self.jianying_draft_completed_at,
+            "jianying_draft_error": self.jianying_draft_error,
         }
 
     @classmethod
@@ -293,6 +313,11 @@ class JobRecord:
             copy_of_job_id=payload.get("copy_of_job_id"),
             root_job_id=payload.get("root_job_id"),
             edit_generation=int(payload.get("edit_generation") or 0),
+            # --- Jianying draft on-demand generation (backward compat: defaults to "idle"/None) ---
+            jianying_draft_status=payload.get("jianying_draft_status", "idle"),
+            jianying_draft_started_at=payload.get("jianying_draft_started_at"),
+            jianying_draft_completed_at=payload.get("jianying_draft_completed_at"),
+            jianying_draft_error=payload.get("jianying_draft_error"),
         )
 
 
