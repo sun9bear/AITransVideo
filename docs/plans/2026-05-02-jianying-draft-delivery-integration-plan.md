@@ -205,6 +205,12 @@ editor.jianying_compatibility_report
 
 ### 5.4 OutputDispatcher 接入
 
+> ⚠️ **此节描述的"OutputDispatcher 自动生成"架构已在 phase 1 后端 PoC 完成后被废弃,改为 §11 描述的 on-demand 按需生成架构。**
+>
+> phase 1 后端 PoC(commits 6b9ce6b..36921e2)实施了本节方案,部署到 US 但 gate 关闭。由于产品决策(草稿 zip 1-2 GB,不是每个用户都需要,自动生成浪费资源),改为按需触发。后端模块 §5.1-§5.3 保留作为 backend 实现,本节的 OutputDispatcher 接入逻辑已在 commit `<K1 SHA>` 中回滚。
+>
+> **当前生效的架构见 §11**。本节保留作为历史记录。
+
 建议扩展 `OutputRequest`，新增非破坏性选项：
 
 ```python
@@ -464,3 +470,332 @@ Gateway：
 4. 手工确认 spike 草稿可打开后，等待字幕 gate 达标，再把后端接入 `OutputDispatcher`，默认由环境变量关闭且 Studio-only。
 5. 后端 PoC 只消费 canonical `SubtitleCue` 或由它生成的 SRT，不复用 spike 的旧 SRT 路径。
 6. 只有当至少一个真实剪映版本验证通过，再进入前端下载按钮和素材包接入。
+
+## 11. 架构修订:从主链自动生成改为按需生成 (2026-05-02)
+
+> Status: Approved
+> 取代 §5.4 的"OutputDispatcher 自动接入"架构
+
+### 11.1 决策背景
+
+phase 1 后端 PoC 完成后(commits 6b9ce6b..36921e2)发现一个产品决策:
+
+- 一个剪映草稿 zip 包含原视频 + 配音 audio + 素材副本,**单 zip 体积 1-2 GB**
+- **并非每个用户、每个任务都需要**剪映草稿;预估只有 30-50% 的 Studio 用户会用剪映继续编辑
+- 任务跑完自动生成对所有任务一遍,**浪费磁盘 / IO / 未来 R2 成本**
+- 用户主动点"生成剪映草稿"按钮是更清晰的知情同意路径
+
+故 §5.4 的"主链自动生成"架构**改为按需触发**:
+
+```
+phase 1 PoC 路径(已废弃):
+  视频翻译流程结束
+  → OutputDispatcher 跑完编辑流程
+  → 自动调用 JianyingDraftBackend
+  → 生成 zip(1-2 GB,即使用户用不到)
+
+新架构(本节):
+  视频翻译流程结束
+  → status="succeeded",result 页面显示"生成剪映草稿"按钮(仅 Studio 任务可见)
+  → 用户点击按钮
+  → API 触发后台 async 生成
+  → status="running"  →  "succeeded"
+  → 前端 polling 拿到状态变化
+  → 显示"下载剪映草稿"按钮
+  → 用户下载 zip
+```
+
+后端 backend 实现(§5.1-§5.3 的 `src/modules/output/jianying/*`)**100% 复用**,只是上层调用方式从 OutputDispatcher 改为 API 端点。
+
+### 11.2 五个设计决策(2026-05-02 确认)
+
+#### 11.2.1 status 字段命名
+
+`jianying_draft_status: str` 持久化在 `JobRecord`,4 个状态:
+
+| 值 | 含义 |
+|---|------|
+| `idle` | 初始状态 / 用户从未触发(任务首次完成默认即此值)|
+| `running` | 后台正在生成 |
+| `succeeded` | 生成完成,zip 可下载 |
+| `failed` | 生成失败,允许重试 |
+
+附加字段:
+- `jianying_draft_error: str \| None` — failed 状态下的错误描述(给用户看 + 日志诊断)
+
+#### 11.2.2 重复触发(API 幂等性)
+
+`POST /jobs/{id}/generate-jianying-draft` 行为:
+
+| 当前 status | 接口响应 |
+|------------|---------|
+| `idle` | **接受**,转 `running`,启动后台任务,返回 `202 Accepted` + `{status: "running"}` |
+| `running` | **拒绝**,返回 `409 Conflict` + `{status: "running", message: "still in progress"}` |
+| `succeeded` | **接受但不重新生成**,返回 `200 OK` + `{status: "succeeded", artifact_key: "editor.jianying_draft_zip"}` — 前端可立即 enable 下载 |
+| `failed` | **接受**,清掉 error,转 `running`,启动新一轮 |
+
+防止暴力点击触发并发生成。succeeded 直接复用,failed 允许重试。
+
+#### 11.2.3 失败重试
+
+允许**无限重试**(phase 1 不加 retry count 上限)。失败大概率是网络瞬断或 pyJianYingDraft 偶发 bug。如果 future 发现用户死磕同一失败任务搞乱日志,再加上限。
+
+#### 11.2.4 过期清理
+
+**不写单独的草稿清理逻辑**。草稿 zip 落在 `{project_dir}/jianying/exports/jianying_draft_*.zip`,job 自身的 cleanup 机制会一并清掉。
+
+理由:保持系统简单,跟现有 cleanup pattern 一致,不引入新维护成本。
+
+#### 11.2.5 Express 任务按钮可见性
+
+**前端隐藏**(不渲染按钮),不是 disabled + tooltip:
+
+```typescript
+{job.serviceMode === "studio" && <GenerateJianyingButton ... />}
+```
+
+后端额外防御:`POST /jobs/{id}/generate-jianying-draft` 收到 `service_mode != "studio"` 的 job 时返回 `403 Forbidden`(防止 admin 工具或 curl 绕过前端)。
+
+理由:Express 用户不会困惑"为什么按钮点了没用";marketing 转化(disabled + 升级提示)是产品决策,不在工程范围。
+
+### 11.3 端到端数据流
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as User (Frontend)
+    participant FE as ResultMediaCard
+    participant GW as Gateway
+    participant API as Job API
+    participant BG as Background Worker
+    participant BE as JianyingDraftBackend
+
+    Note over U,FE: 任务 status=succeeded,Studio 模式,按钮可见
+    U->>FE: 点击"生成剪映草稿"按钮
+    FE->>GW: POST /job-api/jobs/{id}/generate-jianying-draft
+    GW->>API: 透传(internal auth)
+    API->>API: 检查 status,确认 idle/failed
+    API->>API: status = "running"
+    API->>BG: 提交后台任务(thread / asyncio)
+    API-->>FE: 202 Accepted { status: "running" }
+    FE->>FE: 启动 polling(usePollingTask hook,3s 间隔)
+    BG->>BE: backend.write(JianyingDraftRequest)
+    BE->>BE: writer + validator + zip
+    BE-->>BG: JianyingDraftResult(ok / failed)
+    BG->>API: 更新 status = "succeeded" / "failed"
+    BG->>API: 注册 artifact (editor.jianying_draft_zip 等)
+    Note over FE: polling 命中 status="succeeded"
+    FE->>U: 显示"下载剪映草稿"按钮
+    U->>FE: 点击下载
+    FE->>GW: GET /job-api/jobs/{id}/download/editor.jianying_draft_zip
+    GW->>API: 透传
+    API-->>U: zip 字节流
+```
+
+### 11.4 API 端点 spec
+
+#### `POST /job-api/jobs/{id}/generate-jianying-draft`
+
+**触发草稿生成**。
+
+Request body: 空(无需参数,所有信息从 job context 推导)。
+
+Response:
+
+```json
+// 接受触发
+{
+  "status": "running",
+  "started_at": "2026-05-02T15:00:00Z"
+}
+
+// 重复点击 — 已在跑
+HTTP 409
+{
+  "status": "running",
+  "message": "Jianying draft generation already in progress.",
+  "started_at": "2026-05-02T14:58:00Z"
+}
+
+// 已生成 — 复用
+{
+  "status": "succeeded",
+  "artifact_key": "editor.jianying_draft_zip",
+  "draft_zip_path": "...",
+  "completed_at": "2026-05-02T14:55:00Z"
+}
+
+// service_mode 不允许
+HTTP 403
+{
+  "code": "service_mode_not_studio",
+  "message": "Jianying draft is only available for Studio mode jobs."
+}
+
+// pyJianYingDraft 未装
+HTTP 503
+{
+  "code": "engine_unavailable",
+  "message": "Jianying engine is not available on this deployment."
+}
+```
+
+#### `GET /job-api/jobs/{id}/jianying-draft-status`
+
+**查状态**(前端 polling 用)。
+
+Response:
+
+```json
+{
+  "status": "idle" | "running" | "succeeded" | "failed",
+  "started_at": "..." | null,
+  "completed_at": "..." | null,
+  "error": "..." | null,
+  "artifact_key": "editor.jianying_draft_zip" | null,
+  "draft_zip_size_bytes": 12345678 | null,
+  "compatibility_report": { ... } | null
+}
+```
+
+`artifact_key` 仅在 status="succeeded" 时设置,前端用来构造下载 URL。
+
+### 11.5 JobRecord 字段扩展
+
+`src/services/jobs/models.py` `JobRecord` 增加:
+
+```python
+@dataclass(slots=True)
+class JobRecord:
+    # ... 现有字段 ...
+
+    # Jianying draft on-demand generation (plan §11)
+    jianying_draft_status: str = "idle"  # idle / running / succeeded / failed
+    jianying_draft_started_at: str | None = None  # ISO 8601 UTC
+    jianying_draft_completed_at: str | None = None
+    jianying_draft_error: str | None = None
+```
+
+JSON store 序列化默认值:`idle` / null / null / null。读取老数据时字段缺失,treat as `idle`。
+
+跟 Codex 之前加 `service_mode` 字段是同样模式 — 已有先例。
+
+### 11.6 后台异步执行策略
+
+phase 1 第一版用**最简单的 threading**:
+
+```python
+# 在 Job API 端点内
+def trigger_jianying_draft(job_id: str) -> dict:
+    job = store.get(job_id)
+    # ... gate checks ...
+    job.jianying_draft_status = "running"
+    job.jianying_draft_started_at = utc_now_iso()
+    store.save(job)
+
+    def _run_in_background():
+        try:
+            request = build_jianying_request_from_job(job)
+            backend = JianyingDraftBackend()
+            result = backend.write(request)
+            # ... update status + register artifact ...
+        except Exception as exc:
+            # ... update status=failed + record error ...
+
+    threading.Thread(target=_run_in_background, daemon=True).start()
+    return {"status": "running", "started_at": ...}
+```
+
+不引入新的 worker 队列(Redis/Celery)— phase 1 PoC 阶段简化。如果 future 并发量大、需要可靠性(进程重启不丢任务),再引入持久化队列。
+
+**进程重启风险**:Job API 重启时,`status="running"` 的草稿生成会"卡住"(线程死了,DB 还显示 running)。可加一个 startup 时的 reaper:启动时扫所有 `running` 超过 30 分钟的 jianying_draft_status,treat 为 failed(类似现有 `reap-stale` 机制)。这条留给 K3 task 实施。
+
+### 11.7 K1-K10 任务拆分
+
+#### K1: 回滚 phase 1 dispatcher 自动接入
+
+回滚 J5/J6 在 OutputDispatcher / OutputRequest / process.py 的接入逻辑(后端模块 J1-J4 + manifest 字段 J7 保留):
+
+- `src/modules/output/output_models.py`:移除 `OutputRequest.include_jianying_draft` / `service_mode` 字段(它们改为 API 端点参数语义,不是 dispatcher 参数)
+- `src/pipeline/process.py`:移除 `AVT_ENABLE_JIANYING_DRAFT` env 读取
+- `src/modules/output/output_dispatcher.py`:移除 `_maybe_generate_jianying_draft` / `_jianying_cue_gate_passes` / `_build_jianying_request` / `_register_jianying_artifacts` / `jianying_backend` 注入
+- 删除对应测试 `tests/test_output_dispatcher_jianying.py` / `tests/test_output_request_jianying_fields.py` / `tests/test_process_dispatch_jianying_env.py`(完全废弃,不只是改)
+- 保留 `tests/test_jianying_phase1_acceptance.py` 中**不依赖 dispatcher 的部分**(模块 importable + clean env smoke + subtitle consistency 仍然有意义),但移除 e2e 完整 dispatch 用例
+- 保留 J7 的 manifest_writer 字段 + 测试(API 完成后写 manifest 也要用)
+
+#### K2: JobRecord 加 jianying_draft_* 字段
+
+- `src/services/jobs/models.py`:加 4 个字段
+- 序列化 / 反序列化默认值
+- 老数据读取兼容(字段缺失 → idle / null)
+- 新测试:`tests/test_job_record_jianying_fields.py`
+
+#### K3: 后台异步执行 + reap-stale 守护
+
+- 新模块 `src/services/jobs/jianying_draft_runner.py`:封装 `trigger(job_id)` + 后台 thread + 状态更新
+- 异常处理:writer 失败 → status=failed + error 记录
+- 启动期 reaper:扫 running > 30min 的 jianying_draft_status 标 failed(类似 `reap_stale_jobs`)
+- 测试:`tests/test_jianying_draft_runner.py`
+
+#### K4: Job API `POST /generate-jianying-draft` 端点
+
+- `src/services/jobs/api.py`:加路由
+- gate 检查:status / service_mode
+- 调用 K3 runner
+- 测试:`tests/test_job_api_jianying_generate.py`
+
+#### K5: Job API `GET /jianying-draft-status` 端点
+
+- 加路由,返回 status + 时间戳 + error + artifact_key
+- 测试:`tests/test_job_api_jianying_status.py`
+
+#### K6: Gateway 路由转发
+
+- `gateway/job_intercept.py` 或对应路由文件:把两个端点加入 internal proxy 白名单
+- 测试:`tests/test_gateway_jianying_routes.py`
+
+#### K7: 前端"生成剪映草稿"按钮
+
+- `frontend-next/src/components/workspace/ResultMediaCard.tsx`:
+  - service_mode === "studio" 时渲染按钮
+  - 点击 → POST /generate-jianying-draft
+  - 触发 polling(usePollingTask)
+- API client `frontend-next/src/lib/api/jobs.ts`:加 generateJianyingDraft / getJianyingDraftStatus
+- 测试:component 测试
+
+#### K8: 前端下载按钮 + 状态展示
+
+- 状态 `running`:按钮转"生成中..."loading
+- 状态 `succeeded`:转"下载剪映草稿"按钮 + 文件大小 hint
+- 状态 `failed`:转"重新生成" + error tooltip
+- 状态 `idle`:初始按钮
+
+#### K9: 集成测试
+
+- `tests/test_jianying_on_demand_integration.py`:模拟用户触发 → polling → 下载完整流程
+- e2e:用 mock Job API + real backend(importorskip)
+
+#### K10: 部署到 US
+
+- 改 Dockerfile 加 `pip install pyJianYingDraft`
+- rebuild image(后台 nohup + log poll)
+- DB migration(JobRecord 新字段)
+- force-recreate app
+- 验证按钮可见 + 触发流程
+
+### 11.8 Rollback 路径
+
+如果 K10 部署后发现 on-demand 流程有问题:
+
+1. **快速 rollback** — 前端隐藏按钮(改 ResultMediaCard 加 `false &&` short-circuit),用户看不到入口,后端代码留着
+2. **完全 rollback** — git revert K1-K9 的 commits + redeploy
+3. **保留代码 + DB 字段 + 隐藏前端** — 最小损失
+
+### 11.9 验收标准
+
+- [ ] K10 部署后,Studio 任务的 result 页有"生成剪映草稿"按钮,Express 任务无
+- [ ] 点击按钮 → 5-30 秒后 polling 转 succeeded → 下载按钮出现
+- [ ] 下载的 zip 解压后能在剪映 10.5+ 打开
+- [ ] 失败任务可重试,error 显示给用户
+- [ ] 不影响 phase 1a 字幕 v2 主路径
+- [ ] 不影响其他视频翻译流程
