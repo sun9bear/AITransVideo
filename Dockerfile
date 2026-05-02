@@ -20,6 +20,7 @@ RUN apt-get update \
 COPY . /opt/aivideotrans/app
 
 RUN pip install --no-cache-dir . \
+    && pip install --no-cache-dir pyJianYingDraft \
     && curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh \
     && /usr/local/bin/deno --version \
     && chmod +x \
