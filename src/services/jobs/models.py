@@ -145,11 +145,12 @@ class JobRecord:
     root_job_id: str | None = None          # lineage root; originals: == job_id
     edit_generation: int = 0                # editing→running→succeeded cycles
 
-    # --- Jianying draft on-demand generation (plan §11, K2 task) ---
+    # --- Jianying draft on-demand generation (plan §11, K2/K3 task) ---
     jianying_draft_status: str = "idle"     # idle / running / succeeded / failed
     jianying_draft_started_at: str | None = None   # ISO 8601 UTC
     jianying_draft_completed_at: str | None = None
     jianying_draft_error: str | None = None
+    jianying_draft_zip_path: str | None = None  # zip path for download (set when status=succeeded)
 
     def __post_init__(self) -> None:
         self.job_id = str(self.job_id).strip()
@@ -191,6 +192,7 @@ class JobRecord:
         self.jianying_draft_started_at = _normalize_optional_text(self.jianying_draft_started_at)
         self.jianying_draft_completed_at = _normalize_optional_text(self.jianying_draft_completed_at)
         self.jianying_draft_error = _normalize_optional_text(self.jianying_draft_error)
+        self.jianying_draft_zip_path = _normalize_optional_text(self.jianying_draft_zip_path)
 
         if not self.job_id:
             raise ValueError("job_id is required")
@@ -264,6 +266,7 @@ class JobRecord:
             "jianying_draft_started_at": self.jianying_draft_started_at,
             "jianying_draft_completed_at": self.jianying_draft_completed_at,
             "jianying_draft_error": self.jianying_draft_error,
+            "jianying_draft_zip_path": self.jianying_draft_zip_path,
         }
 
     @classmethod
@@ -318,6 +321,7 @@ class JobRecord:
             jianying_draft_started_at=payload.get("jianying_draft_started_at"),
             jianying_draft_completed_at=payload.get("jianying_draft_completed_at"),
             jianying_draft_error=payload.get("jianying_draft_error"),
+            jianying_draft_zip_path=payload.get("jianying_draft_zip_path"),
         )
 
 
