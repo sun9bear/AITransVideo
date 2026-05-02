@@ -61,7 +61,7 @@ const PROMISES = [
 
 export function TrustBanner() {
   return (
-    <section className="marketing-reading-surface py-16 sm:py-20">
+    <section className="marketing-reading-surface py-12 sm:py-14">
       <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
         <div className="mx-auto max-w-2xl text-center">
           <p className="ink-heading text-xs uppercase tracking-widest text-[color:var(--cinnabar,#C73E3A)]">

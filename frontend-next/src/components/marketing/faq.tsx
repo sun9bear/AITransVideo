@@ -67,8 +67,24 @@ const PRICING_FAQ: FaqItem[] = [
 
 export function Faq({ variant = "home" }: { variant?: "home" | "pricing" }) {
   const items = variant === "pricing" ? PRICING_FAQ : GENERAL_FAQ
+
+  // On the homepage, auto-scroll the Q&A cards upward in a vertical
+  // marquee with hover-pause — keeps the section compact (~420px tall)
+  // even with 8+ Q&A items. On /pricing the FAQ is the user's primary
+  // reading surface for purchase decisions, so we keep it as a static
+  // stack there (auto-scrolling forced reading pace conflicts with
+  // deliberate research). 2026-05-02 user request.
+  const useMarquee = variant === "home"
+
+  // For the marquee variant we render the items twice in DOM so the
+  // keyframe loop seam lands on identical content.
+  const renderItems = useMarquee ? [...items, ...items] : items
+
   return (
-    <section className="marketing-reading-surface py-20 sm:py-24">
+    <section
+      id="faq"
+      className="marketing-reading-surface py-14 sm:py-16"
+    >
       <div className="mx-auto max-w-3xl px-4 sm:px-6 lg:px-8">
         <div className="text-center">
           <p className="ink-heading text-xs uppercase tracking-widest text-[color:var(--cinnabar,#C73E3A)]">
@@ -77,18 +93,56 @@ export function Faq({ variant = "home" }: { variant?: "home" | "pricing" }) {
           <h2 className="ink-display mt-3 text-3xl text-foreground sm:text-4xl">
             你可能想知道
           </h2>
+          {useMarquee && (
+            <p className="mt-3 text-xs text-muted-foreground">
+              鼠标悬停可暂停自动滚动 · 完整问答见
+              <a
+                href="/pricing#faq"
+                className="ml-1 underline-offset-2 hover:underline"
+                style={{ color: "var(--cinnabar)" }}
+              >
+                定价页
+              </a>
+            </p>
+          )}
         </div>
-        <dl className="mt-12 space-y-4">
-          {items.map((item) => (
+
+        {useMarquee ? (
+          <div className="vmarquee-container relative mt-8 h-[420px] overflow-hidden sm:h-[460px]">
             <div
-              key={item.q}
-              className="rounded-xl border border-border bg-card p-6 transition-shadow hover:shadow-md"
+              className="vmarquee-track flex flex-col gap-4"
+              role="list"
+              aria-label="常见问题"
             >
-              <dt className="ink-heading text-base font-semibold text-foreground">{item.q}</dt>
-              <dd className="mt-2 zh-body text-muted-foreground">{item.a}</dd>
+              {renderItems.map((item, i) => {
+                const isDuplicate = i >= items.length
+                return (
+                  <article
+                    key={`${item.q}-${isDuplicate ? "duplicate" : "primary"}`}
+                    role="listitem"
+                    aria-hidden={isDuplicate ? true : undefined}
+                    className="rounded-xl border border-border bg-card p-6"
+                  >
+                    <h3 className="ink-heading text-base font-semibold text-foreground">{item.q}</h3>
+                    <p className="mt-2 zh-body text-muted-foreground">{item.a}</p>
+                  </article>
+                )
+              })}
             </div>
-          ))}
-        </dl>
+          </div>
+        ) : (
+          <dl className="mt-8 space-y-4">
+            {items.map((item) => (
+              <div
+                key={item.q}
+                className="rounded-xl border border-border bg-card p-6 transition-shadow hover:shadow-md"
+              >
+                <dt className="ink-heading text-base font-semibold text-foreground">{item.q}</dt>
+                <dd className="mt-2 zh-body text-muted-foreground">{item.a}</dd>
+              </div>
+            ))}
+          </dl>
+        )}
       </div>
     </section>
   )

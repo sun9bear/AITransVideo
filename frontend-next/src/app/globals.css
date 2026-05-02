@@ -728,3 +728,43 @@
     animation: none;
   }
 }
+
+/* ==========================================
+   Vertical card marquee — generic upward-scrolling card stack.
+
+   Currently consumed by <Faq /> on the homepage (compresses 7 stacked
+   Q&A cards into a fixed-height window that auto-scrolls them upward
+   in a continuous loop). The pattern is generic enough to be reused
+   for any "long list of cards we don't want to take 2000px of scroll
+   real estate for".
+
+   Caller renders the card list TWICE in DOM ([...cards, ...cards]) so
+   the keyframe can animate translateY(0) → translateY(-50%) with the
+   loop seam landing on identical content (visually seamless). Hover
+   anywhere on the container pauses the scroll.
+
+   Reduced-motion: animation disabled. Cards stack vertically inside
+   the container; the user can still see the first cards. The container's
+   overflow:hidden means later cards stay clipped, which is acceptable —
+   reduced-motion users typically also rely on full page scroll, and the
+   FAQ has a "show all" alternative entry via the /pricing page.
+   ========================================== */
+@keyframes vmarquee-up {
+  from { transform: translateY(0); }
+  to   { transform: translateY(-50%); }
+}
+
+.vmarquee-track {
+  animation: vmarquee-up 60s linear infinite;
+  will-change: transform;
+}
+
+.vmarquee-container:hover .vmarquee-track {
+  animation-play-state: paused;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vmarquee-track {
+    animation: none;
+  }
+}

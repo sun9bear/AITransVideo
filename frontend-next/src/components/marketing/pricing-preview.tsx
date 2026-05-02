@@ -11,7 +11,7 @@ export function PricingPreview() {
   return (
     <section
       id="pricing"
-      className="marketing-reading-surface py-20 sm:py-24"
+      className="marketing-reading-surface py-14 sm:py-16"
     >
       <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
         <div className="mx-auto max-w-2xl text-center">

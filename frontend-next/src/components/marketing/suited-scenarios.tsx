@@ -39,7 +39,7 @@ const SCENARIOS: Array<{ tag: string; body: string }> = [
 
 export function SuitedScenarios() {
   return (
-    <section className="marketing-reading-surface py-20 sm:py-24">
+    <section className="marketing-reading-surface py-14 sm:py-16">
       <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
         <div className="mx-auto max-w-3xl text-center">
           <p className="ink-heading text-xs uppercase tracking-widest text-[color:var(--cinnabar,#C73E3A)]">

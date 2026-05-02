@@ -31,7 +31,7 @@ const STEPS: Array<{ index: string; title: string; body: string }> = [
 
 export function WorkflowShowcase() {
   return (
-    <section className="bg-muted/40 py-20 sm:py-24">
+    <section className="bg-muted/40 py-14 sm:py-16">
       <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
         <div className="mx-auto max-w-2xl text-center">
           <p className="ink-heading text-xs uppercase tracking-widest text-[color:var(--cinnabar,#C73E3A)]">

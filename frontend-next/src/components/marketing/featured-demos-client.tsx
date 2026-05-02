@@ -32,7 +32,7 @@ export function FeaturedDemosClient({ demos }: { demos: Demo[] }) {
   return (
     <section
       id="featured-demos"
-      className="marketing-reading-surface py-20 sm:py-24"
+      className="marketing-reading-surface py-14 sm:py-16"
     >
       <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
         <div className="mx-auto max-w-3xl text-center">
