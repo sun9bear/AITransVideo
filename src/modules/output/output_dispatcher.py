@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
 
 from core.artifact_index import ArtifactIndex
@@ -40,10 +42,31 @@ class OutputDispatcher:
         publish_result: PublishResult | None = None
 
         if OutputTarget.EDITOR in expanded_targets or OutputTarget.PUBLISH in expanded_targets:
-            editor_result = self.editor_backend.write(
-                self._build_editor_project_output(localized_project, artifact_index, project_root)
-            )
+            project_output = self._build_editor_project_output(localized_project, artifact_index, project_root)
+
+            # Subtitle cue generation (T9 wiring).
+            # Feature flag AVT_DISABLE_SUBTITLE_CUES_V2=1 bypasses entirely for rollback.
+            # Cues must be populated BEFORE editor_backend.write() so that
+            # EditorPackageWriter._write_srt routes to the canonical cue path (T8).
+            cue_result = None
+            if os.environ.get("AVT_DISABLE_SUBTITLE_CUES_V2", "").strip() not in ("1", "true", "yes"):
+                cue_result = self._generate_subtitle_cues(localized_project)
+                if cue_result is not None:
+                    project_output.subtitle_cues = cue_result.cues
+
+            editor_result = self.editor_backend.write(project_output)
             self._register_editor_artifacts(artifact_index, editor_result)
+
+            # Write JSON artifacts and register in artifact_index AFTER editor write.
+            if cue_result is not None:
+                output_dir = Path(project_output.output_dir).resolve(strict=False) / "output"
+                output_dir.mkdir(parents=True, exist_ok=True)
+                self._write_and_register_subtitle_artifacts(
+                    artifact_index=artifact_index,
+                    output_dir=output_dir,
+                    project_id=localized_project.project_id,
+                    cue_result=cue_result,
+                )
 
         if OutputTarget.PUBLISH in expanded_targets:
             original_video_path = artifact_index.get("source.original_video")
@@ -235,3 +258,126 @@ class OutputDispatcher:
         artifact_index.register("editor.subtitles_bilingual", result.subtitles_bilingual_path)
         artifact_index.register("editor.alignment_report", result.alignment_report_path)
         artifact_index.register("editor.segments_dir", result.segments_dir)
+
+    @staticmethod
+    def _generate_subtitle_cues(localized_project: LocalizedProject):  # type: ignore[return]
+        """Generate canonical subtitle cues for the localized project.
+
+        Returns a SubtitleCuePipelineResult, or None if no semantic_blocks are present.
+        Uses localized_project.semantic_blocks as the source of truth for cue generation
+        (these are the final blocks with actual TTS text and alignment durations).
+        """
+        # Lazy import to keep the import graph clean and avoid loading subtitle modules
+        # in callers that don't need them.
+        from modules.subtitles.cue_pipeline import build_subtitle_cues_for_blocks
+
+        if not localized_project.semantic_blocks:
+            return None
+
+        return build_subtitle_cues_for_blocks(
+            localized_project.semantic_blocks,
+            localized_project.captions,
+        )
+
+    @staticmethod
+    def _write_and_register_subtitle_artifacts(
+        *,
+        artifact_index: ArtifactIndex,
+        output_dir: Path,
+        project_id: str,
+        cue_result: object,
+    ) -> None:
+        """Write subtitle_cues.json + subtitle_quality_report.json and register in artifact_index.
+
+        output_dir must already exist (caller ensures it). Writes atomically via
+        json.dumps into the target files. The cue_result argument is typed as object
+        to avoid circular imports at module load time; it is a SubtitleCuePipelineResult.
+        """
+        cues_path = output_dir / "subtitle_cues.json"
+        report_path = output_dir / "subtitle_quality_report.json"
+
+        OutputDispatcher._write_subtitle_cues_json(cues_path, project_id, cue_result.cues)
+        OutputDispatcher._write_quality_report_json(
+            report_path, project_id, cue_result.report, cue_result.block_specs
+        )
+
+        artifact_index.register("editor.subtitle_cues", str(cues_path))
+        artifact_index.register("editor.subtitle_quality_report", str(report_path))
+
+    @staticmethod
+    def _write_subtitle_cues_json(
+        path: Path,
+        project_id: str,
+        cues: list,
+    ) -> None:
+        """Serialize SubtitleCue list to subtitle_cues.json.
+
+        Schema per plan §7:
+          schema_version, project_id, cues[]
+        """
+        serialized_cues = []
+        for cue in cues:
+            serialized_cues.append({
+                "cue_id": cue.cue_id,
+                "block_id": cue.block_id,
+                "speaker_id": cue.speaker_id,
+                "speaker_name": cue.speaker_name,
+                "text": cue.text,
+                "en_text": cue.en_text,
+                "start_ms": cue.start_ms,
+                "end_ms": cue.end_ms,
+                "source": cue.source,
+                "needs_review": cue.needs_review,
+                "review_reason": cue.review_reason,
+            })
+        payload = {
+            "schema_version": "subtitle_cues_v2",
+            "project_id": project_id,
+            "cues": serialized_cues,
+        }
+        path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    @staticmethod
+    def _write_quality_report_json(
+        path: Path,
+        project_id: str,
+        report: object,
+        block_specs: list,
+    ) -> None:
+        """Serialize ValidationReport to subtitle_quality_report.json.
+
+        Schema per plan §8:
+          schema_version, project_id, validation_status, issues[], block_summaries[]
+        """
+        serialized_issues = []
+        for issue in report.issues:
+            serialized_issues.append({
+                "block_id": issue.block_id,
+                "cue_id": issue.cue_id,
+                "code": issue.code,
+                "severity": issue.severity,
+                "message": issue.message,
+            })
+
+        serialized_summaries = []
+        for summary in report.block_summaries:
+            serialized_summaries.append({
+                "block_id": summary.block_id,
+                "cue_count": summary.cue_count,
+                "text_mismatch": summary.text_mismatch,
+                "timing_overlap_count": summary.timing_overlap_count,
+                "timing_out_of_block_count": summary.timing_out_of_block_count,
+                "empty_cue_count": summary.empty_cue_count,
+                "long_unbreakable_count": summary.long_unbreakable_count,
+                "unknown_mixed_token_count": summary.unknown_mixed_token_count,
+                "short_display_duration_count": summary.short_display_duration_count,
+            })
+
+        payload = {
+            "schema_version": "subtitle_quality_report_v2",
+            "project_id": project_id,
+            "validation_status": report.validation_status,
+            "issues": serialized_issues,
+            "block_summaries": serialized_summaries,
+        }
+        path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
