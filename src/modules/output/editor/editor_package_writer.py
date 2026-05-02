@@ -312,6 +312,9 @@ class EditorPackageWriter:
     def _write_srt(self, output: ProjectOutput) -> tuple[str, str, str]:
         """Write 3 SRT files (zh, en, bilingual) and return their paths.
 
+        Routes to canonical-cue path when output.subtitle_cues is non-empty,
+        otherwise falls back to the segment-based path.
+
         Also writes subtitles.srt as a copy of zh for backward compatibility.
         Returns (zh_path, en_path, bilingual_path).
 
@@ -324,6 +327,52 @@ class EditorPackageWriter:
         write on any "nothing changed" heuristic would silently leak stale
         subtitles into the downloaded SRT and is explicitly forbidden by
         the plan's §12 guarantee.
+
+        Plan: subtitle-cue-generation-v2 (T8, Phase 1a).
+        """
+        if output.subtitle_cues:
+            return self._write_srt_from_canonical_cues(output)
+        return self._write_srt_from_segments(output)
+
+    def _write_srt_from_canonical_cues(self, output: ProjectOutput) -> tuple[str, str, str]:
+        """Write 3 SRT files using canonical SubtitleCue list via T7 srt_writer.
+
+        Canonical path: output.subtitle_cues is non-empty. Calls
+        write_zh_srt / write_en_srt / write_bilingual_srt from
+        modules.subtitles.srt_writer and persists the resulting SRT strings
+        to the same filenames as the segment-based path.
+
+        Plan: subtitle-cue-generation-v2 (T8, Phase 1a).
+        """
+        from modules.subtitles.srt_writer import write_bilingual_srt, write_en_srt, write_zh_srt
+
+        output_root = self._resolve_output_root(output)
+        output_root.mkdir(parents=True, exist_ok=True)
+
+        zh_text = write_zh_srt(output.subtitle_cues)
+        en_text = write_en_srt(output.subtitle_cues)
+        bilingual_text = write_bilingual_srt(output.subtitle_cues)
+
+        zh_path = self._write_srt_text_to_file(zh_text, output_path=output_root / "subtitles_zh.srt")
+        en_path = self._write_srt_text_to_file(en_text, output_path=output_root / "subtitles_en.srt")
+        bilingual_path = self._write_srt_text_to_file(
+            bilingual_text, output_path=output_root / "subtitles_bilingual.srt"
+        )
+
+        # Backward compat: subtitles.srt = zh copy
+        compat_path = output_root / "subtitles.srt"
+        shutil.copy2(zh_path, compat_path)
+
+        return (zh_path, en_path, bilingual_path)
+
+    def _write_srt_from_segments(self, output: ProjectOutput) -> tuple[str, str, str]:
+        """Write 3 SRT files using the legacy segment-based slice path.
+
+        Fallback path used when output.subtitle_cues is empty. Builds
+        subtitle slices from AlignedSegment objects via _build_subtitle_slices.
+
+        Plan: subtitle-cue-generation-v2 (T8, Phase 1a) — kept as Phase 1a
+        fallback; main path is _write_srt_from_canonical_cues.
         """
         output_root = self._resolve_output_root(output)
         output_root.mkdir(parents=True, exist_ok=True)
@@ -373,6 +422,18 @@ class EditorPackageWriter:
         if serialized:
             serialized += "\n"
         output_path.write_text(serialized, encoding="utf-8")
+        return str(output_path.resolve(strict=False))
+
+    def _write_srt_text_to_file(self, srt_text: str, *, output_path: Path) -> str:
+        """Write a pre-formatted SRT string to output_path and return the resolved path.
+
+        Used by _write_srt_from_canonical_cues. Accepts the already-serialized
+        SRT string produced by T7 srt_writer functions (write_zh_srt /
+        write_en_srt / write_bilingual_srt) and persists it verbatim.
+
+        Plan: subtitle-cue-generation-v2 (T8, Phase 1a).
+        """
+        output_path.write_text(srt_text, encoding="utf-8")
         return str(output_path.resolve(strict=False))
 
     def _detect_background_sounds(self, output: ProjectOutput) -> str:
@@ -589,7 +650,11 @@ class EditorPackageWriter:
         return sorted(output.segments, key=lambda segment: (segment.start_ms, segment.segment_id))
 
     def _build_subtitle_slices(self, segment: AlignedSegment) -> list[_SubtitleSlice]:
-        """Build subtitle slices with zh as primary split, en following proportionally."""
+        """Build subtitle slices with zh as primary split, en following proportionally.
+
+        DEPRECATED: Phase 1a fallback path. Main path now uses canonical SubtitleCue
+        via _write_srt_from_canonical_cues. Plan: subtitle-cue-generation-v2 (T8).
+        """
         zh_raw = segment.cn_text.strip()
         en_raw = (segment.en_text or "").strip()
         if not zh_raw:
