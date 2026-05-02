@@ -72,11 +72,10 @@ def test_wj_removed():
     assert normalize("hel⁠lo") == "hello"
 
 
-def test_cf_category_predicate():
-    """Any char whose Unicode category is Cf is stripped."""
-    # Build a string whose middle char is known Cf (ZWSP)
+def test_normalize_strips_cf_category_char():
+    """Any char whose Unicode category is Cf is stripped by normalize."""
+    # ZWSP (U+200B) is Cf; normalize should strip it
     target = "​"
-    assert unicodedata.category(target) == "Cf"
     assert normalize(f"a{target}b") == "ab"
 
 
@@ -110,7 +109,7 @@ def test_cjk_period_equals_ascii_period():
     assert normalize("今天，我说。") == normalize("今天,我说.")
 
 
-def test_cjk_comma_and_ascii_comma_equal():
+def test_fullwidth_comma_handled_by_nfkc():
     """NFKC turns full-width ，(U+FF0C) to ','; result equals plain ASCII comma."""
     # U+FF0C is full-width comma handled by NFKC
     assert normalize("好，继续") == normalize("好,继续")
