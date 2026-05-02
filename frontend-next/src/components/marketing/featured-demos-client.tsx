@@ -43,7 +43,7 @@ export function FeaturedDemosClient({ demos }: { demos: Demo[] }) {
             听一段实际配音，比看十张截图更有说服力
           </h2>
           <p className="mt-4 zh-body text-muted-foreground">
-            下面 5 段都是已完成的真实任务片段，每张卡片可在「中文配音版」和「英文原片」之间切换。鼠标悬停可放大查看；触屏可左右滑动浏览。
+            直接听一段——译文是否像人话、配音是否自然、节奏是否对得上原片。
           </p>
         </div>
       </div>
