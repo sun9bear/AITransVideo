@@ -357,6 +357,48 @@ class _FakeUser:
     trial_ends_at: datetime | None = None
 
 
+def test_enter_edit_transition_passes_user_to_access_policy(monkeypatch) -> None:
+    source = _FakeJobRow(job_id="job_src", status="succeeded")
+    session = _FakeSession()
+    session._execute_queue = [_FakeResult(value=source)]
+    user = _FakeUser(plan_code="plus")
+    seen: dict[str, Any] = {}
+
+    async def fake_enforce_post_edit_access(
+        db, job, passed_user, *, subpath: str, now_utc: datetime,
+    ):
+        seen["db"] = db
+        seen["job"] = job
+        seen["user"] = passed_user
+        seen["subpath"] = subpath
+        seen["now_utc"] = now_utc
+        return job, {"overwrite_commits": 1}
+
+    async def fake_proxy_request(**kwargs):
+        seen["proxy_request"] = kwargs
+        return _upstream_response({"ok": True})
+
+    monkeypatch.setattr(
+        job_intercept,
+        "_enforce_post_edit_access",
+        fake_enforce_post_edit_access,
+    )
+    monkeypatch.setattr(job_intercept, "proxy_request", fake_proxy_request)
+
+    response = asyncio.run(
+        job_intercept._editing_transition_with_lock(
+            object(), "job_src", session, user, subpath="enter-edit",
+        )
+    )
+
+    assert response.status_code == 200
+    assert seen["user"] is user
+    assert seen["subpath"] == "enter-edit"
+    assert source.status == "editing"
+    assert source.editing_touched_at is not None
+    assert session.committed is True
+
+
 def test_copy_as_new_idempotent_on_duplicate_new_job_id() -> None:
     """If the same commit request retries and Job-API creates the record
     but the gateway INSERT never fired last time, a second attempt should

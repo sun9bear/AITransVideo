@@ -113,6 +113,7 @@ from services.voice.sample_extractor import (
 )
 from services.voice.voice_lookup import VoiceLookupError, lookup_voice_ids
 from utils.audio_utils import measure_duration_ms as _ffprobe_duration_ms
+from utils.audio_fit import fit_audio_to_slot as _fit_audio_to_slot
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -2954,11 +2955,11 @@ class ProcessPipeline:
             needs_review_count=output_result.needs_review_count,
         )
 
-    def _load_segments_for_publish_resume(
+    def _load_segments_with_source_ids_for_publish_resume(
         self,
         editor_segments_path: Path,
         translation_segments_path: Path,
-    ) -> list[DubbingSegment]:
+    ) -> tuple[list[DubbingSegment], list[str]]:
         """Read the post-commit segment list for the γ publish-only path.
 
         Priority:
@@ -2979,6 +2980,14 @@ class ProcessPipeline:
         dataclass (e.g. ``provider`` from ``_apply_voice_map``); filter
         to known fields before constructing the dataclass, else
         ``DubbingSegment(**seg)`` raises TypeError for unexpected kwargs.
+
+        Editing can create transient split IDs such as ``"11_a"`` and
+        ``"11_b"``. The publish pipeline still needs integer
+        ``DubbingSegment.segment_id`` values for downstream output builders,
+        but the reviewed wavs are stored under the source editor IDs. When
+        any record has a non-int-castable ID, renumber the whole batch by
+        display order and return the original source IDs as the wav lookup
+        keys.
         """
         dubbing_fields = {f.name for f in _dc_fields(DubbingSegment)}
 
@@ -3003,23 +3012,182 @@ class ProcessPipeline:
                 f"{editor_segments_path} or {translation_segments_path}"
             )
 
-        segments: list[DubbingSegment] = []
+        source_segment_ids: list[str] = []
+        parsed_segment_ids: list[int | None] = []
+        needs_sequential_ids = False
         for rec in raw_records:
-            kwargs = {k: v for k, v in rec.items() if k in dubbing_fields}
-            sid = kwargs.get("segment_id")
+            sid = rec.get("segment_id")
             if sid is None:
                 raise ValueError(
                     f"segment lacks 'segment_id': {rec.get('cn_text', '')[:30]!r}"
                 )
-            if not isinstance(sid, int):
-                try:
-                    kwargs["segment_id"] = int(str(sid))
-                except (TypeError, ValueError) as exc:
+            source_segment_ids.append(str(sid))
+            try:
+                parsed_segment_ids.append(int(str(sid)))
+            except (TypeError, ValueError):
+                parsed_segment_ids.append(None)
+                needs_sequential_ids = True
+
+        segments: list[DubbingSegment] = []
+        for index, rec in enumerate(raw_records, start=1):
+            kwargs = {k: v for k, v in rec.items() if k in dubbing_fields}
+            if needs_sequential_ids:
+                kwargs["segment_id"] = index
+            else:
+                parsed_id = parsed_segment_ids[index - 1]
+                if parsed_id is None:
                     raise ValueError(
-                        f"segment_id must be int-castable, got {sid!r}"
-                    ) from exc
+                        f"segment_id must be int-castable, got "
+                        f"{source_segment_ids[index - 1]!r}"
+                    )
+                kwargs["segment_id"] = parsed_id
             segments.append(DubbingSegment(**kwargs))
+        return segments, source_segment_ids
+
+    def _load_segments_for_publish_resume(
+        self,
+        editor_segments_path: Path,
+        translation_segments_path: Path,
+    ) -> list[DubbingSegment]:
+        (
+            segments,
+            _source_segment_ids,
+        ) = self._load_segments_with_source_ids_for_publish_resume(
+            editor_segments_path=editor_segments_path,
+            translation_segments_path=translation_segments_path,
+        )
         return segments
+
+    @staticmethod
+    def _publish_resume_slot_duration_ms(segment: DubbingSegment) -> int:
+        try:
+            start_ms = int(getattr(segment, "start_ms", 0) or 0)
+            end_ms = int(getattr(segment, "end_ms", 0) or 0)
+        except (TypeError, ValueError):
+            start_ms = 0
+            end_ms = 0
+        slot_duration_ms = max(0, end_ms - start_ms)
+        if slot_duration_ms > 0:
+            return slot_duration_ms
+        try:
+            return max(0, int(getattr(segment, "target_duration_ms", 0) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _populate_publish_resume_audio_paths(
+        self,
+        *,
+        segments: list[DubbingSegment],
+        source_segment_ids: list[str],
+        tts_segments_dir: Path,
+    ) -> None:
+        missing_sids: list[str] = []
+        for index, segment in enumerate(segments):
+            sid_str = str(segment.segment_id)
+            source_sid_str = (
+                source_segment_ids[index]
+                if index < len(source_segment_ids)
+                else sid_str
+            )
+            wav_candidates = [tts_segments_dir / f"{source_sid_str}.wav"]
+            numeric_wav_path = tts_segments_dir / f"{sid_str}.wav"
+            if numeric_wav_path not in wav_candidates:
+                wav_candidates.append(numeric_wav_path)
+            wav_path = next((p for p in wav_candidates if p.is_file()), None)
+            if wav_path is None:
+                missing_sids.append(source_sid_str)
+                continue
+            wav_str = str(wav_path.resolve(strict=False))
+            raw_duration_ms = _ffprobe_duration_ms(wav_path)
+            slot_duration_ms = self._publish_resume_slot_duration_ms(segment)
+            segment.tts_audio_path = wav_str
+            segment.aligned_audio_path = wav_str
+            segment.actual_duration_ms = (
+                slot_duration_ms if slot_duration_ms > 0 else raw_duration_ms
+            )
+            if slot_duration_ms > 0:
+                segment.alignment_ratio = raw_duration_ms / slot_duration_ms
+            if not segment.alignment_method:
+                segment.alignment_method = "direct"
+            segment.needs_review = False
+        if missing_sids:
+            shown = missing_sids[:10]
+            ellipsis = "..." if len(missing_sids) > 10 else ""
+            raise ValueError(
+                f"resume_from=alignment: {len(missing_sids)} segment(s) "
+                f"missing wavs in editor/tts_segments/: {shown}{ellipsis}. "
+                "Commit must have placed every segment's wav on disk — "
+                "this is a commit/copy_service bug."
+            )
+
+    def _normalize_editor_tts_segment_ids_for_publish_resume(
+        self,
+        *,
+        tts_segments_dir: Path,
+        segments: list[DubbingSegment],
+    ) -> None:
+        """Materialize reviewed wavs under the integer IDs used for publish.
+
+        Split editor IDs are only an editing-time addressing detail. After a
+        successful commit/publish pass, the next editing session should see a
+        normal integer-ID baseline again. Stage every source wav first so a
+        shifted target like ``12.wav`` cannot clobber the source for another
+        segment before that source has been copied.
+        """
+        staged: list[tuple[Path, Path, DubbingSegment]] = []
+        materialized: list[tuple[Path, DubbingSegment]] = []
+        tts_segments_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            for index, segment in enumerate(segments):
+                source_text = segment.aligned_audio_path or segment.tts_audio_path
+                if not source_text:
+                    raise ValueError(
+                        f"segment {segment.segment_id} has no reviewed wav path"
+                    )
+                source_path = Path(source_text)
+                if not source_path.is_file():
+                    raise ValueError(
+                        f"segment {segment.segment_id} reviewed wav is missing: "
+                        f"{source_path}"
+                    )
+                target_path = tts_segments_dir / f"{segment.segment_id}.wav"
+                if source_path.resolve(strict=False) == target_path.resolve(strict=False):
+                    materialized.append((target_path, segment))
+                    continue
+                tmp_path = tts_segments_dir / (
+                    f".{target_path.name}.renumber-{os.getpid()}-{index}.tmp"
+                )
+                shutil.copy2(source_path, tmp_path)
+                staged.append((tmp_path, target_path, segment))
+
+            for tmp_path, target_path, segment in staged:
+                os.replace(tmp_path, target_path)
+                materialized.append((target_path, segment))
+
+            for target_path, segment in materialized:
+                slot_duration_ms = self._publish_resume_slot_duration_ms(segment)
+                fit_result = _fit_audio_to_slot(
+                    target_path,
+                    slot_duration_ms=slot_duration_ms,
+                )
+                wav_str = str(target_path.resolve(strict=False))
+                segment.tts_audio_path = wav_str
+                segment.aligned_audio_path = wav_str
+                if fit_result is not None:
+                    segment.actual_duration_ms = fit_result.final_duration_ms
+                    segment.dsp_speed_ratio_used = fit_result.speed_ratio_used
+                    segment.dsp_silence_padded_ms = fit_result.silence_padded_ms
+                    segment.dsp_truncated_ms = fit_result.truncated_ms
+                    segment.dsp_initial_duration_ms = fit_result.initial_duration_ms
+                    segment.dsp_trimmed_duration_ms = fit_result.trimmed_duration_ms
+                    segment.dsp_stretched_duration_ms = fit_result.stretched_duration_ms
+        finally:
+            for tmp_path, _target_path, _segment in staged:
+                if tmp_path.exists():
+                    try:
+                        tmp_path.unlink()
+                    except OSError:
+                        pass
 
     def _run_alignment_and_publish_only(self, config: ProcessConfig) -> ProcessResult:
         """Resume pipeline at publish — no TTS, no alignment, no Gemini (γ).
@@ -3084,34 +3252,16 @@ class ProcessPipeline:
                 )
 
         # --- Load segments + populate wav paths (γ: no TTS / alignment) ---
-        segments = self._load_segments_for_publish_resume(
+        segments, source_segment_ids = self._load_segments_with_source_ids_for_publish_resume(
             editor_segments_path=editor_segments_path,
             translation_segments_path=trans_path,
         )
         tts_segments_dir = final_project_dir / "editor" / "tts_segments"
-        missing_sids: list[str] = []
-        for segment in segments:
-            sid_str = str(segment.segment_id)
-            wav_path = tts_segments_dir / f"{sid_str}.wav"
-            if not wav_path.is_file():
-                missing_sids.append(sid_str)
-                continue
-            wav_str = str(wav_path.resolve(strict=False))
-            segment.tts_audio_path = wav_str
-            segment.aligned_audio_path = wav_str
-            segment.actual_duration_ms = _ffprobe_duration_ms(wav_path)
-            if not segment.alignment_method:
-                segment.alignment_method = "direct"
-            segment.needs_review = False
-        if missing_sids:
-            shown = missing_sids[:10]
-            ellipsis = "..." if len(missing_sids) > 10 else ""
-            raise ValueError(
-                f"resume_from=alignment: {len(missing_sids)} segment(s) "
-                f"missing wavs in editor/tts_segments/: {shown}{ellipsis}. "
-                "Commit must have placed every segment's wav on disk — "
-                "this is a commit/copy_service bug."
-            )
+        self._populate_publish_resume_audio_paths(
+            segments=segments,
+            source_segment_ids=source_segment_ids,
+            tts_segments_dir=tts_segments_dir,
+        )
 
         # --- Rebuild publish context from disk ---
         download_result = self._load_download_result(
@@ -3226,6 +3376,11 @@ class ProcessPipeline:
             print(
                 f"[RESUME/S6] \u5b8c\u6210\uff1a\u8f93\u51fa\u76ee\u5f55 "
                 f"{final_project_dir / 'output'}"
+            )
+
+            self._normalize_editor_tts_segment_ids_for_publish_resume(
+                tts_segments_dir=tts_segments_dir,
+                segments=segments,
             )
 
             # Keep translation/segments.json + editor baseline in sync with

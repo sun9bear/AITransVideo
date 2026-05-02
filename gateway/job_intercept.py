@@ -1157,7 +1157,9 @@ async def intercept_job_subresource(
                 "Post-edit workflow is not enabled on this deployment.",
             )
         if subpath in _POST_EDIT_TRANSITION_SUBPATHS:
-            return await _editing_transition_with_lock(request, job_id, db, subpath=subpath)
+            return await _editing_transition_with_lock(
+                request, job_id, db, user, subpath=subpath,
+            )
         return await _post_edit_mutation_with_policy(
             request, job_id, db, user, subpath=subpath,
         )
@@ -2034,6 +2036,7 @@ async def _editing_transition_with_lock(
     request: Request,
     job_id: str,
     db: AsyncSession,
+    user: User | None,
     *,
     subpath: str,
 ) -> Response:

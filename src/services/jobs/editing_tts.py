@@ -49,6 +49,7 @@ from services.jobs.editing_segments import (
 )
 from services.jobs.editing_voice_map import load_voice_map
 from services.jobs.input_validators import validate_segment_id
+from utils.audio_fit import fit_audio_to_slot
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +78,67 @@ class TtsNotWiredError(NotImplementedError):
     """Raised by the default ``_not_wired_tts_caller`` when T1-5 is exercised
     without real TTS provider wiring. Surfaced as HTTP 501 by the API layer,
     so frontend can render "功能即将上线" rather than a crash toast."""
+
+
+def _segment_slot_duration_ms(segment: dict[str, Any]) -> int:
+    try:
+        start_ms = int(segment.get("start_ms") or 0)
+        end_ms = int(segment.get("end_ms") or 0)
+    except (TypeError, ValueError):
+        start_ms = 0
+        end_ms = 0
+    slot_duration_ms = max(0, end_ms - start_ms)
+    if slot_duration_ms > 0:
+        return slot_duration_ms
+    try:
+        return max(0, int(segment.get("target_duration_ms") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _speaker_voice_overlay(
+    segments: list[dict[str, Any]],
+    target_index: int,
+    segment: dict[str, Any],
+) -> dict[str, Any]:
+    """Overlay the current speaker's representative voice onto ``segment``.
+
+    Split/edit flows can change ``speaker_id`` after the baseline segment was
+    copied. Re-TTS must follow the current speaker, not stale inherited voice
+    fields. Per-segment voice_map overrides are applied later and still win.
+    """
+    speaker_id = segment.get("speaker_id")
+    if not isinstance(speaker_id, str) or not speaker_id:
+        return segment
+
+    rep_voice_id: str | None = None
+    rep_tts_provider: str | None = None
+    for index, candidate in enumerate(segments):
+        if index == target_index or not isinstance(candidate, dict):
+            continue
+        if candidate.get("speaker_id") != speaker_id:
+            continue
+        if rep_voice_id is None:
+            voice = candidate.get("voice_id")
+            if isinstance(voice, str) and voice:
+                rep_voice_id = voice
+        if rep_tts_provider is None:
+            provider = candidate.get("tts_provider") or candidate.get("provider")
+            if isinstance(provider, str) and provider:
+                rep_tts_provider = provider
+        if rep_voice_id is not None and rep_tts_provider is not None:
+            break
+
+    if rep_voice_id is None and rep_tts_provider is None:
+        return segment
+
+    overlaid = dict(segment)
+    if rep_voice_id:
+        overlaid["voice_id"] = rep_voice_id
+    if rep_tts_provider:
+        overlaid["tts_provider"] = rep_tts_provider
+        overlaid.pop("provider", None)
+    return overlaid
 
 
 def _not_wired_tts_caller(segment: dict[str, Any], output_path: Path) -> None:
@@ -141,10 +203,12 @@ def regenerate_segment_tts(
 
     segments = load_editing_segments(project_dir)
     segment = None
+    segment_index: int | None = None
     target = str(segment_id)
-    for s in segments:
+    for index, s in enumerate(segments):
         if isinstance(s, dict) and str(s.get("segment_id")) == target:
             segment = s
+            segment_index = index
             break
     if segment is None:
         raise EditingConflictError(
@@ -169,6 +233,8 @@ def regenerate_segment_tts(
             "tts_provider": override["provider"],
             "voice_id": override["voice_id"],
         }
+    elif segment_index is not None:
+        segment = _speaker_voice_overlay(segments, segment_index, segment)
 
     draft_path = draft_audio_path(project_dir, segment_id)
     draft_path.parent.mkdir(parents=True, exist_ok=True)
@@ -196,12 +262,26 @@ def regenerate_segment_tts(
             f"TTS caller returned without writing output at {draft_path}"
         )
 
+    slot_duration_ms = _segment_slot_duration_ms(segment)
+    fit_result = fit_audio_to_slot(draft_path, slot_duration_ms=slot_duration_ms)
     mark_segment_status(project_dir, segment_id, SEGMENT_STATUS_TTS_DIRTY)
     size_bytes = draft_path.stat().st_size
     return {
         "segment_id": segment_id,
         "draft_audio_path": str(draft_path),
         "size_bytes": size_bytes,
+        "duration_fit": (
+            {
+                "initial_duration_ms": fit_result.initial_duration_ms,
+                "final_duration_ms": fit_result.final_duration_ms,
+                "slot_duration_ms": slot_duration_ms,
+                "speed_ratio_used": fit_result.speed_ratio_used,
+                "silence_padded_ms": fit_result.silence_padded_ms,
+                "truncated_ms": fit_result.truncated_ms,
+            }
+            if fit_result is not None
+            else None
+        ),
         "segment_status": load_segment_status(project_dir),
     }
 

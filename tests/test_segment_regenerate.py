@@ -8,7 +8,8 @@ surface and paid TTS providers. These tests pin down:
 - Provider pass-through: the segment's ``tts_provider`` reaches
   ``TTSGenerator._generate_one`` verbatim.
 - segment_id coercion: editor_baseline normalises to str; caller must
-  re-cast to int before constructing DubbingSegment (dataclass contract).
+  map editing ids to ints before constructing DubbingSegment (legacy
+  TTSGenerator filename contract).
 - Lazy TTSGenerator instantiation: factory call itself must not try to
   load TTS credentials — only the first user click does.
 
@@ -58,6 +59,7 @@ class _FakeGenerator:
         output_dir: str,
         *,
         provider: str | None = None,
+        usage_bucket: str | None = None,
     ) -> TTSResult:
         self.calls.append({
             "segment_id": segment.segment_id,
@@ -65,6 +67,7 @@ class _FakeGenerator:
             "voice_id": segment.voice_id,
             "tts_provider": segment.tts_provider,
             "provider_arg": provider,
+            "usage_bucket": usage_bucket,
             "output_dir": output_dir,
         })
         if not self.next_results:
@@ -196,6 +199,43 @@ def test_caller_coerces_str_segment_id_to_int_for_dubbing_segment(
     assert patch_ttsgen.fake.calls[0]["segment_id"] == 42
 
 
+def test_caller_maps_split_segment_id_to_stable_numeric_surrogate(
+    tmp_path: Path, patch_ttsgen: Any,
+) -> None:
+    """Post-edit split ids look like 11_b, while TTSGenerator still uses
+    segment_id with integer formatting for its temporary wav name."""
+    from services.tts.segment_regenerate import build_real_segment_tts_caller
+
+    caller = build_real_segment_tts_caller()
+    patch_ttsgen.fake.next_results = ["ok"]
+    output = tmp_path / "11_b.wav"
+
+    caller(
+        _minimal_segment(segment_id="11_b"),
+        output,
+    )
+
+    assert output.is_file()
+    assert patch_ttsgen.fake.calls[0]["segment_id"] == 11002
+
+
+def test_caller_maps_generic_editing_segment_id_to_stable_surrogate(
+    tmp_path: Path, patch_ttsgen: Any,
+) -> None:
+    from services.tts.segment_regenerate import build_real_segment_tts_caller
+
+    caller = build_real_segment_tts_caller()
+    patch_ttsgen.fake.next_results = ["ok", "ok"]
+
+    caller(_minimal_segment(segment_id="seg_001"), tmp_path / "seg_001.wav")
+    caller(_minimal_segment(segment_id="seg_001"), tmp_path / "seg_001_second.wav")
+
+    first = patch_ttsgen.fake.calls[0]["segment_id"]
+    second = patch_ttsgen.fake.calls[1]["segment_id"]
+    assert isinstance(first, int)
+    assert first == second
+
+
 def test_caller_rejects_missing_segment_id(tmp_path: Path, patch_ttsgen: Any) -> None:
     from services.tts.segment_regenerate import build_real_segment_tts_caller
 
@@ -207,15 +247,15 @@ def test_caller_rejects_missing_segment_id(tmp_path: Path, patch_ttsgen: Any) ->
         caller(seg, tmp_path / "x.wav")
 
 
-def test_caller_rejects_uncastable_segment_id(
+def test_caller_rejects_empty_segment_id(
     tmp_path: Path, patch_ttsgen: Any,
 ) -> None:
     from services.tts.segment_regenerate import build_real_segment_tts_caller
 
     caller = build_real_segment_tts_caller()
-    with pytest.raises(ValueError, match="int-castable"):
+    with pytest.raises(ValueError, match="non-empty"):
         caller(
-            _minimal_segment(segment_id="not a number"),
+            _minimal_segment(segment_id=""),
             tmp_path / "x.wav",
         )
 

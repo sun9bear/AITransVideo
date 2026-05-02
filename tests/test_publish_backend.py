@@ -34,6 +34,39 @@ def test_publish_backend_generates_minimal_dubbed_video_with_renderer(tmp_path: 
     assert result.dubbed_audio_path == str(dubbed_audio_path)
 
 
+def test_video_renderer_mixes_ambient_audio_when_available(tmp_path: Path) -> None:
+    original_video_path = tmp_path / "source.mp4"
+    dubbed_audio_path = tmp_path / "dubbed.wav"
+    ambient_audio_path = tmp_path / "ambient.wav"
+    original_video_path.write_bytes(b"fake-video")
+    dubbed_audio_path.write_bytes(b"fake-audio")
+    ambient_audio_path.write_bytes(b"fake-ambient")
+    commands: list[list[str]] = []
+
+    def fake_runner(command: list[str]) -> None:
+        commands.append(command)
+        Path(command[-1]).write_bytes(b"rendered")
+
+    result = VideoRenderer(command_runner=fake_runner).render(
+        PublishRequest(
+            project_id="publish-with-ambient",
+            original_video_path=str(original_video_path),
+            dubbed_audio_path=str(dubbed_audio_path),
+            ambient_audio_path=str(ambient_audio_path),
+            output_dir=str(tmp_path / "publish"),
+        )
+    )
+
+    mux_command = commands[0]
+    assert Path(result.dubbed_video_path).exists()
+    assert str(ambient_audio_path.resolve(strict=False)) in mux_command
+    assert mux_command.count("-i") == 3
+    assert "-filter_complex" in mux_command
+    filter_graph = mux_command[mux_command.index("-filter_complex") + 1]
+    assert "volume=-12.0dB" in filter_graph
+    assert "amix=inputs=2" in filter_graph
+
+
 def test_video_renderer_rejects_missing_publish_input(tmp_path: Path) -> None:
     dubbed_audio_path = tmp_path / "dubbed.wav"
     dubbed_audio_path.write_bytes(b"fake-audio")

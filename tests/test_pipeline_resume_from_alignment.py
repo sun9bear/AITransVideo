@@ -33,6 +33,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from pipeline.process import ProcessConfig, ProcessPipeline, ProcessResult
+from services.gemini.translator import DubbingSegment
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -284,6 +285,139 @@ def test_gamma_prefers_editor_segments_over_translation_segments(tmp_path: Path)
     assert isinstance(segments[0].segment_id, int)
 
 
+def test_gamma_loader_renumbers_split_editor_ids_and_keeps_wav_lookup_ids(
+    tmp_path: Path,
+) -> None:
+    """Post-edit splits use editor IDs like 11_a/11_b on disk.
+
+    The publish path must still feed integer IDs to DubbingSegment consumers,
+    while looking up reviewed wavs by the source editor IDs.
+    """
+    project = tmp_path / "project"
+    (project / "editor").mkdir(parents=True)
+    (project / "editor" / "segments.json").write_text(
+        json.dumps([
+            {
+                "segment_id": "10", "speaker_id": "speaker_a",
+                "display_name": "A", "voice_id": "", "start_ms": 0,
+                "end_ms": 1000, "target_duration_ms": 1000,
+                "source_text": "before", "cn_text": "\u524d",
+            },
+            {
+                "segment_id": "11_a", "speaker_id": "speaker_a",
+                "display_name": "A", "voice_id": "", "start_ms": 1000,
+                "end_ms": 1500, "target_duration_ms": 500,
+                "source_text": "split a", "cn_text": "\u62c6\u5206A",
+            },
+            {
+                "segment_id": "11_b", "speaker_id": "speaker_b",
+                "display_name": "B", "voice_id": "", "start_ms": 1500,
+                "end_ms": 2000, "target_duration_ms": 500,
+                "source_text": "split b", "cn_text": "\u62c6\u5206B",
+            },
+            {
+                "segment_id": "12", "speaker_id": "speaker_b",
+                "display_name": "B", "voice_id": "", "start_ms": 2000,
+                "end_ms": 3000, "target_duration_ms": 1000,
+                "source_text": "after", "cn_text": "\u540e",
+            },
+        ]),
+        encoding="utf-8",
+    )
+
+    pipeline = ProcessPipeline()
+    segments, source_segment_ids = (
+        pipeline._load_segments_with_source_ids_for_publish_resume(
+            editor_segments_path=(project / "editor" / "segments.json"),
+            translation_segments_path=(project / "editor" / "__no_translation__"),
+        )
+    )
+
+    assert [segment.segment_id for segment in segments] == [1, 2, 3, 4]
+    assert source_segment_ids == ["10", "11_a", "11_b", "12"]
+    assert all(isinstance(segment.segment_id, int) for segment in segments)
+
+
+def test_gamma_normalizes_shifted_wavs_without_clobbering_sources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Renumbering must copy all sources before overwriting shifted targets."""
+    fit_calls: list[tuple[str, int]] = []
+
+    def fake_fit(path: Path, *, slot_duration_ms: int):
+        fit_calls.append((path.name, slot_duration_ms))
+        return None
+
+    monkeypatch.setattr("pipeline.process._fit_audio_to_slot", fake_fit)
+    tts_dir = tmp_path / "project" / "editor" / "tts_segments"
+    tts_dir.mkdir(parents=True)
+    split_b = tts_dir / "11_b.wav"
+    old_12 = tts_dir / "12.wav"
+    split_b.write_bytes(b"split-b")
+    old_12.write_bytes(b"old-12")
+
+    segments = [
+        DubbingSegment(
+            segment_id=12, speaker_id="speaker_b", display_name="B",
+            voice_id="", start_ms=0, end_ms=500, target_duration_ms=500,
+            source_text="split b", cn_text="\u62c6\u5206B",
+            tts_audio_path=str(split_b), aligned_audio_path=str(split_b),
+        ),
+        DubbingSegment(
+            segment_id=13, speaker_id="speaker_b", display_name="B",
+            voice_id="", start_ms=500, end_ms=1000, target_duration_ms=500,
+            source_text="old 12", cn_text="\u65e712",
+            tts_audio_path=str(old_12), aligned_audio_path=str(old_12),
+        ),
+    ]
+
+    ProcessPipeline()._normalize_editor_tts_segment_ids_for_publish_resume(
+        tts_segments_dir=tts_dir,
+        segments=segments,
+    )
+
+    assert (tts_dir / "12.wav").read_bytes() == b"split-b"
+    assert (tts_dir / "13.wav").read_bytes() == b"old-12"
+    assert fit_calls == [("12.wav", 500), ("13.wav", 500)]
+    assert segments[0].tts_audio_path == str((tts_dir / "12.wav").resolve(strict=False))
+    assert segments[1].tts_audio_path == str((tts_dir / "13.wav").resolve(strict=False))
+
+
+def test_gamma_populate_uses_slot_duration_not_raw_wav_duration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Raw re-TTS duration must not expand the post-edit timeline."""
+    tts_dir = tmp_path / "project" / "editor" / "tts_segments"
+    tts_dir.mkdir(parents=True)
+    wav = tts_dir / "11_b.wav"
+    wav.write_bytes(b"raw wav bytes")
+    monkeypatch.setattr("pipeline.process._ffprobe_duration_ms", lambda _path: 27000)
+    segment = DubbingSegment(
+        segment_id=12,
+        speaker_id="speaker_b",
+        display_name="B",
+        voice_id="",
+        start_ms=265000,
+        end_ms=289000,
+        target_duration_ms=24000,
+        source_text="source",
+        cn_text="\u8bd1\u6587",
+    )
+
+    ProcessPipeline()._populate_publish_resume_audio_paths(
+        segments=[segment],
+        source_segment_ids=["11_b"],
+        tts_segments_dir=tts_dir,
+    )
+
+    assert segment.actual_duration_ms == 24000
+    assert segment.alignment_ratio == pytest.approx(27000 / 24000)
+    assert segment.aligned_audio_path == str(wav.resolve(strict=False))
+    assert segment.needs_review is False
+
+
 def test_gamma_loader_drops_unknown_voice_map_fields(tmp_path: Path) -> None:
     """γ loader must drop unknown keys, else DubbingSegment(**seg) raises
     TypeError. Sources of unknown keys include legacy ``provider``
@@ -332,7 +466,11 @@ def test_media_artifact_filenames_match_pipeline_output() -> None:
         "and resume-from-alignment will fail-fast at the pre-check"
     )
     # And the resume method's source must reference the same filename.
-    body = _extract_resume_method_source()
+    body = (
+        _extract_resume_method_source()
+        + "\n"
+        + _extract_process_method_source("_populate_publish_resume_audio_paths")
+    )
     assert speech_name in body, (
         f"resume method references an outdated speech filename; must use "
         f"canonical {speech_name!r}"
@@ -349,18 +487,22 @@ def test_media_artifact_filenames_match_pipeline_output() -> None:
 # ===================================================================
 
 
-def _extract_resume_method_source() -> str:
-    """Return the source of ProcessPipeline._run_alignment_and_publish_only.
-    Uses AST instead of regex because the method body is long and
-    contains nested try/except / for / if that would trip naive slicing."""
+def _extract_process_method_source(method_name: str) -> str:
     tree = ast.parse(PIPELINE_SRC_PATH.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
         if (
             isinstance(node, ast.FunctionDef)
-            and node.name == "_run_alignment_and_publish_only"
+            and node.name == method_name
         ):
             return ast.unparse(node)
-    raise AssertionError("_run_alignment_and_publish_only not found in process.py")
+    raise AssertionError(f"{method_name} not found in process.py")
+
+
+def _extract_resume_method_source() -> str:
+    """Return the source of ProcessPipeline._run_alignment_and_publish_only.
+    Uses AST instead of regex because the method body is long and
+    contains nested try/except / for / if that would trip naive slicing."""
+    return _extract_process_method_source("_run_alignment_and_publish_only")
 
 
 @pytest.mark.parametrize("forbidden,why", [
@@ -381,7 +523,11 @@ def test_resume_method_does_not_reference_upstream_symbol(
     """Each forbidden token names a pre-alignment pipeline collaborator.
     None of them should appear in the resume method body — resume's
     contract is "only alignment + publish, nothing upstream"."""
-    body = _extract_resume_method_source()
+    body = (
+        _extract_resume_method_source()
+        + "\n"
+        + _extract_process_method_source("_populate_publish_resume_audio_paths")
+    )
     assert forbidden not in body, (
         f"_run_alignment_and_publish_only references {forbidden!r}: {why}. "
         "Resume must not touch pre-alignment stages."
@@ -435,7 +581,11 @@ def test_gamma_resume_method_consumes_editor_tts_segments() -> None:
 
     If a refactor moves this assignment elsewhere, update the guard —
     but it must still be present in the γ method somewhere."""
-    body = _extract_resume_method_source()
+    body = (
+        _extract_resume_method_source()
+        + "\n"
+        + _extract_process_method_source("_populate_publish_resume_audio_paths")
+    )
     assert "editor" in body and "tts_segments" in body, (
         "γ resume method must reference editor/tts_segments/ directory"
     )

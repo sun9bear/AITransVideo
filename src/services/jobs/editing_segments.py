@@ -693,6 +693,22 @@ def split_editing_segment(
         end_ms=end_ms,
     )
 
+    original_speaker = original.get("speaker_id")
+    if seg_a.get("speaker_id") != original_speaker:
+        _propagate_speaker_change(
+            segments=segments,
+            index=index,
+            updated=seg_a,
+            new_speaker_id=str(seg_a.get("speaker_id") or ""),
+        )
+    if seg_b.get("speaker_id") != original_speaker:
+        _propagate_speaker_change(
+            segments=segments,
+            index=index,
+            updated=seg_b,
+            new_speaker_id=str(seg_b.get("speaker_id") or ""),
+        )
+
     new_segments = list(segments)
     new_segments[index : index + 1] = [seg_a, seg_b]
     _atomic_write_json(_segments_path(project_dir), new_segments)

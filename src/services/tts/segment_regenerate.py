@@ -33,6 +33,8 @@ startup).
 from __future__ import annotations
 
 import logging
+import hashlib
+import re
 import shutil
 import tempfile
 import time
@@ -58,6 +60,8 @@ __all__ = ["build_real_segment_tts_caller"]
 # "重合成中..." spinner; pipeline-style 5-minute cooldowns would feel hung.
 _DEFAULT_MAX_RETRIES = 3
 _DEFAULT_BACKOFF_SCHEDULE: tuple[float, ...] = (1.0, 2.0, 4.0)
+_MAX_SEGMENT_ID_SURROGATE = 2_147_483_647
+_SPLIT_ID_RE = re.compile(r"^(?P<base>\d+)(?:_split)?_(?P<suffix>[a-z]+)$")
 
 
 def _project_dir_from_draft_path(output_path: Path) -> Path | None:
@@ -66,6 +70,45 @@ def _project_dir_from_draft_path(output_path: Path) -> Path | None:
         if part == "editor" and index > 0:
             return Path(*parts[:index])
     return None
+
+
+def _letters_to_int(value: str) -> int:
+    total = 0
+    for char in value.lower():
+        total = total * 26 + (ord(char) - ord("a") + 1)
+    return total
+
+
+def _segment_id_for_dubbing_segment(segment_id: Any) -> int:
+    """Return a stable int for legacy ``DubbingSegment`` / TTSGenerator use.
+
+    Post-edit segment ids are strings because split segments need ids like
+    ``11_b``. The legacy TTS generator still formats ``segment_id`` with
+    ``:03d`` for its temporary wav name, so keep the editing id at the
+    caller boundary and use an integer surrogate only inside this TTS bridge.
+    """
+    if isinstance(segment_id, int):
+        return segment_id
+
+    text = str(segment_id).strip()
+    if not text:
+        raise ValueError("segment_id must be non-empty")
+    try:
+        return int(text)
+    except (TypeError, ValueError):
+        pass
+
+    match = _SPLIT_ID_RE.fullmatch(text)
+    if match:
+        base = int(match.group("base"))
+        suffix = _letters_to_int(match.group("suffix"))
+        surrogate = base * 1000 + suffix
+        if 0 < surrogate <= _MAX_SEGMENT_ID_SURROGATE:
+            return surrogate
+
+    digest = hashlib.blake2b(text.encode("utf-8"), digest_size=4).digest()
+    surrogate = int.from_bytes(digest, "big") % _MAX_SEGMENT_ID_SURROGATE
+    return surrogate or 1
 
 
 def build_real_segment_tts_caller(
@@ -115,15 +158,14 @@ def build_real_segment_tts_caller(
         sid = kwargs.get("segment_id")
         if sid is None:
             raise ValueError("segment dict lacks 'segment_id' — cannot regenerate TTS")
-        if not isinstance(sid, int):
-            # editor_baseline normalises segment_id to str; DubbingSegment
-            # expects int (legacy pipeline contract). Cast back here.
-            try:
-                kwargs["segment_id"] = int(str(sid))
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"segment_id must be int-castable, got {sid!r}"
-                ) from exc
+        numeric_sid = _segment_id_for_dubbing_segment(sid)
+        if numeric_sid != sid:
+            logger.debug(
+                "segment_regenerate: mapped editing segment_id=%r to TTS surrogate=%s",
+                sid,
+                numeric_sid,
+            )
+        kwargs["segment_id"] = numeric_sid
 
         try:
             ds = DubbingSegment(**kwargs)

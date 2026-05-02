@@ -957,6 +957,39 @@ def test_split_editing_segment_marks_both_new_segments_text_dirty(tmp_path: Path
         assert status.get(new_seg["segment_id"]) == SEGMENT_STATUS_TEXT_DIRTY
 
 
+def test_split_editing_segment_propagates_voice_for_reassigned_half(
+    tmp_path: Path,
+) -> None:
+    """When split assigns one half to another speaker, that half must use
+    the new speaker's voice during subsequent re-TTS."""
+    from services.jobs.editing_segments import split_editing_segment
+
+    project_dir, _ = _build_editing_job_with_voices(tmp_path)
+
+    result = split_editing_segment(
+        project_dir,
+        segment_id="seg_001",
+        split_source_index=2,
+        split_cn_index=1,
+        speaker_a="speaker_a",
+        speaker_b="speaker_b",
+    )
+
+    first, second = result["new_segments"]
+    assert first["speaker_id"] == "speaker_a"
+    assert first["voice_id"] == "voice_a_pro"
+    assert first["tts_provider"] == "minimax"
+    assert second["speaker_id"] == "speaker_b"
+    assert second["voice_id"] == "voice_b_radio"
+    assert second["tts_provider"] == "cosyvoice"
+
+    persisted = load_editing_segments(project_dir)
+    persisted_second = persisted[1]
+    assert persisted_second["speaker_id"] == "speaker_b"
+    assert persisted_second["voice_id"] == "voice_b_radio"
+    assert persisted_second["tts_provider"] == "cosyvoice"
+
+
 # ---------------------------------------------------------------------------
 # slice_source_audio_for_editing_segment (2026-04-21) — ffmpeg integration
 # is factored behind _ffmpeg_slice_to_wav_bytes so we can monkeypatch it

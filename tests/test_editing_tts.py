@@ -146,6 +146,29 @@ def test_regenerate_writes_draft_and_flags_tts_dirty(tmp_path: Path) -> None:
     assert out_path == draft
 
 
+def test_regenerate_fits_draft_audio_to_segment_slot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, project_dir = _build_editing_job(tmp_path)
+    calls: list[tuple[Path, int]] = []
+
+    def fake_fit(path: Path, *, slot_duration_ms: int):
+        calls.append((path, slot_duration_ms))
+        path.write_bytes(b"FITTED_TO_SLOT")
+        return None
+
+    monkeypatch.setattr("services.jobs.editing_tts.fit_audio_to_slot", fake_fit)
+    caller = _fake_tts_caller_factory(b"RAW_TTS_TOO_LONG")
+
+    result = regenerate_segment_tts(project_dir, "seg_001", tts_caller=caller)
+
+    draft = draft_audio_path(project_dir, "seg_001")
+    assert calls == [(draft, 1000)]
+    assert draft.read_bytes() == b"FITTED_TO_SLOT"
+    assert result["size_bytes"] == len(b"FITTED_TO_SLOT")
+
+
 def test_regenerate_overlays_voice_map_override_onto_segment(tmp_path: Path) -> None:
     """CodeX A.2 P1 regression. After set_voice_override, the caller must
     receive a segment dict whose tts_provider + voice_id reflect the voice
@@ -211,6 +234,54 @@ def test_regenerate_skips_voice_overlay_when_no_override(tmp_path: Path) -> None
     # Fixture baseline doesn't set tts_provider, so the received segment
     # must not acquire one out of thin air either.
     assert "tts_provider" not in seen_segments[0]
+
+
+def test_regenerate_uses_current_speaker_voice_for_stale_split_segment(
+    tmp_path: Path,
+) -> None:
+    """Regression for split+speaker-change edits: an already-created split
+    segment may show the new speaker_id while still carrying old voice fields.
+    Re-TTS should follow the current speaker before calling the provider."""
+    _, project_dir = _build_editing_job(tmp_path)
+    editing_segments = project_dir / "editor" / "editing" / "segments.json"
+    editing_segments.write_text(
+        json.dumps([
+            {
+                "segment_id": "11_b",
+                "speaker_id": "B",
+                "cn_text": "新拆分段",
+                "source_text": "split segment",
+                "start_ms": 0,
+                "end_ms": 1000,
+                "target_duration_ms": 1000,
+                "voice_id": "voice_a_old",
+                "tts_provider": "minimax",
+            },
+            {
+                "segment_id": "seg_002",
+                "speaker_id": "B",
+                "cn_text": "参考段",
+                "source_text": "reference",
+                "start_ms": 1000,
+                "end_ms": 2000,
+                "target_duration_ms": 1000,
+                "voice_id": "voice_b",
+                "tts_provider": "cosyvoice",
+            },
+        ], ensure_ascii=False),
+        encoding="utf-8",
+    )
+    seen_segments: list[dict] = []
+
+    def recording_caller(segment: dict, output_path: Path) -> None:
+        seen_segments.append(dict(segment))
+        output_path.write_bytes(b"SPLIT_WAV")
+
+    regenerate_segment_tts(project_dir, "11_b", tts_caller=recording_caller)
+
+    assert seen_segments[0]["speaker_id"] == "B"
+    assert seen_segments[0]["voice_id"] == "voice_b"
+    assert seen_segments[0]["tts_provider"] == "cosyvoice"
 
 
 def test_regenerate_two_segments_isolated(tmp_path: Path) -> None:
