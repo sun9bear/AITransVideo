@@ -11,8 +11,15 @@ import {
   fetchMaterialsAvailability,
   type MaterialsAvailability,
 } from "@/lib/api/downloads"
+import { buildBackendUrl, resolveJobApiBaseUrl } from "@/lib/api/config"
+import {
+  generateJianyingDraft,
+  getJianyingDraftStatus,
+  type JianyingDraftStatusResponse,
+} from "@/lib/api/jobs"
 import { useBackgroundTask } from "@/lib/react/useBackgroundTask"
-import { Download, Video, Music, Package, X, Film, Loader2, RotateCcw, CheckCircle2, RefreshCw } from "lucide-react"
+import { usePollingTask } from "@/lib/react/usePollingTask"
+import { Download, Video, Music, Package, X, Film, Loader2, RotateCcw, CheckCircle2, RefreshCw, Clapperboard } from "lucide-react"
 import Link from "next/link"
 import { toast } from "sonner"
 
@@ -234,6 +241,11 @@ export function ResultMediaCard({ jobId, serviceMode, editHref }: ResultMediaCar
               </Link>
             )}
           </div>
+
+          {/* 剪映草稿区块 — 仅 Studio 任务可见 (plan §11.2.5) */}
+          {!isExpress && (
+            <JianyingDraftSection jobId={jobId} />
+          )}
         </div>
 
         {!isExpress && showPackDialog && (
@@ -445,6 +457,223 @@ function isItemAvailable(key: MaterialItemKey | string, availability: MaterialsA
     case "subtitles": return availability.subtitles_zh || availability.subtitles_en || availability.subtitles_bilingual
     default: return false
   }
+}
+
+// ---------------------------------------------------------------------------
+// 剪映草稿区块 — Studio-only, plan §11 (K7+K8)
+// ---------------------------------------------------------------------------
+
+const JIANYING_DEFAULT_STATE: JianyingDraftStatusResponse = {
+  status: 'idle',
+  started_at: null,
+  completed_at: null,
+  error: null,
+  draft_zip_path: null,
+  draft_zip_size_bytes: null,
+  artifact_key: null,
+  compatibility_report_path: null,
+}
+
+/**
+ * Format bytes to a human-readable string (MB, max 1 decimal).
+ * Returns null for null/0 input.
+ */
+function formatBytes(bytes: number | null): string | null {
+  if (bytes === null || bytes === 0) return null
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+/**
+ * Elapsed time in seconds since started_at. Returns null if not running/no start time.
+ */
+function elapsedSeconds(startedAt: string | null): number | null {
+  if (!startedAt) return null
+  const diff = Math.floor((Date.now() - new Date(startedAt).getTime()) / 1000)
+  return diff > 0 ? diff : null
+}
+
+/**
+ * 剪映草稿区块 — visible only for Studio jobs (caller guards with !isExpress).
+ *
+ * Mount: fetches current status so returning users see succeeded/failed state.
+ * Running: polls every 2.5s via usePollingTask (stops when terminal reached).
+ * Click: calls generateJianyingDraft → transitions to running → starts polling.
+ * Succeeded: shows download button with zip size hint.
+ * Failed: shows error + retry button.
+ */
+function JianyingDraftSection({ jobId }: { jobId: string }) {
+  const [draftState, setDraftState] = useState<JianyingDraftStatusResponse>(JIANYING_DEFAULT_STATE)
+  const [triggering, setTriggering] = useState(false)
+  const [elapsedSec, setElapsedSec] = useState<number | null>(null)
+
+  // Initial fetch on mount — recovers state when user re-opens the tab
+  useEffect(() => {
+    let cancelled = false
+    getJianyingDraftStatus(jobId)
+      .then((data) => {
+        if (!cancelled) setDraftState(data)
+      })
+      .catch(() => {
+        // 404 / network — treat as idle; don't surface an error to the user
+        if (!cancelled) setDraftState(JIANYING_DEFAULT_STATE)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [jobId])
+
+  // Polling — only active while status is 'running'
+  usePollingTask(
+    async () => {
+      try {
+        const fresh = await getJianyingDraftStatus(jobId)
+        setDraftState(fresh)
+      } catch {
+        // transient network error — keep last state, polling continues
+      }
+    },
+    {
+      enabled: draftState.status === 'running',
+      immediate: false,
+      intervalMs: 2500,
+    },
+  )
+
+  // Elapsed-time ticker — updates every second while running
+  useEffect(() => {
+    if (draftState.status !== 'running') {
+      setElapsedSec(null)
+      return
+    }
+    const update = () => setElapsedSec(elapsedSeconds(draftState.started_at))
+    update()
+    const id = window.setInterval(update, 1000)
+    return () => window.clearInterval(id)
+  }, [draftState.status, draftState.started_at])
+
+  const downloadUrl = buildBackendUrl(
+    resolveJobApiBaseUrl(),
+    `/jobs/${jobId}/download/editor.jianying_draft_zip`,
+  )
+
+  async function handleTrigger() {
+    if (triggering) return
+    setTriggering(true)
+    try {
+      const res = await generateJianyingDraft(jobId)
+      // Merge returned state so polling starts immediately if running
+      setDraftState((prev) => ({
+        ...prev,
+        status: res.status,
+        started_at: res.started_at ?? prev.started_at,
+        completed_at: res.completed_at ?? prev.completed_at,
+        artifact_key: (res.artifact_key as 'editor.jianying_draft_zip' | null) ?? prev.artifact_key,
+      }))
+      if (res.status === 'succeeded') {
+        // Server returned an existing zip — refresh full state for size hint
+        getJianyingDraftStatus(jobId).then(setDraftState).catch(() => {})
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '触发失败，请稍后重试'
+      toast.error(msg)
+    } finally {
+      setTriggering(false)
+    }
+  }
+
+  const { status, error, draft_zip_size_bytes } = draftState
+  const sizeHint = formatBytes(draft_zip_size_bytes)
+
+  return (
+    <div className="border-t border-border pt-3 mt-1">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs text-muted-foreground select-none flex items-center gap-1">
+          <Clapperboard className="h-3.5 w-3.5" />
+          剪映草稿
+        </span>
+
+        {/* idle */}
+        {status === 'idle' && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-2"
+            onClick={handleTrigger}
+            disabled={triggering}
+            title="生成可用剪映打开的草稿包，5-30 秒"
+          >
+            {triggering ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Clapperboard className="h-4 w-4" />
+            )}
+            生成剪映草稿
+          </Button>
+        )}
+
+        {/* running */}
+        {status === 'running' && (
+          <Button variant="outline" size="sm" className="gap-2" disabled>
+            <Loader2 className="h-4 w-4 animate-spin" />
+            生成中
+            {elapsedSec !== null && (
+              <span className="text-muted-foreground text-xs">· {elapsedSec}s</span>
+            )}
+          </Button>
+        )}
+
+        {/* succeeded */}
+        {status === 'succeeded' && (
+          <div className="flex flex-col gap-0.5">
+            <a href={downloadUrl} download>
+              <Button
+                variant="outline"
+                size="sm"
+                className="gap-2 border-emerald-500/60 text-emerald-500 hover:bg-emerald-500/10"
+              >
+                <CheckCircle2 className="h-4 w-4" />
+                下载剪映草稿
+                {sizeHint && (
+                  <span className="text-xs text-muted-foreground">{sizeHint}</span>
+                )}
+                <Download className="h-3 w-3 ml-1" />
+              </Button>
+            </a>
+            <p className="text-xs text-muted-foreground pl-0.5">
+              下载后解压，将草稿文件夹放入剪映草稿目录，再在剪映中打开。
+            </p>
+          </div>
+        )}
+
+        {/* failed */}
+        {status === 'failed' && (
+          <div className="flex flex-col gap-1">
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-2 border-destructive/60 text-destructive"
+              onClick={handleTrigger}
+              disabled={triggering}
+              title={error ?? undefined}
+            >
+              {triggering ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <RotateCcw className="h-4 w-4" />
+              )}
+              重试生成
+            </Button>
+            {error && (
+              <p className="text-xs text-destructive/80 max-w-xs truncate pl-0.5" title={error}>
+                {error}
+              </p>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
 }
 
 /**

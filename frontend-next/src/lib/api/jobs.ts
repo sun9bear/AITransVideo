@@ -5,6 +5,7 @@ import {
   toProjectResultSummary,
   toResultDownloadItems,
 } from '@/lib/api/mappers'
+import { buildBackendUrl, resolveJobApiBaseUrl } from '@/lib/api/config'
 import type {
   ApiJobArtifactsResponse,
   ApiJobListResponse,
@@ -172,4 +173,80 @@ export async function getProjectDetail(
     job,
     result,
   }
+}
+
+// ---------------------------------------------------------------------------
+// Jianying draft on-demand generation (plan §11, K7+K8)
+// ---------------------------------------------------------------------------
+
+/**
+ * Response for GET /job-api/jobs/{id}/jianying-draft-status
+ * Polling shape — all timestamps ISO 8601 UTC or null.
+ */
+export interface JianyingDraftStatusResponse {
+  status: 'idle' | 'running' | 'succeeded' | 'failed'
+  started_at: string | null
+  completed_at: string | null
+  error: string | null
+  draft_zip_path: string | null
+  draft_zip_size_bytes: number | null
+  artifact_key: 'editor.jianying_draft_zip' | null
+  compatibility_report_path: string | null
+}
+
+/**
+ * Response for POST /job-api/jobs/{id}/generate-jianying-draft
+ * Server accepts (202) or returns existing succeeded state (200).
+ */
+export interface GenerateJianyingDraftResponse {
+  status: 'running' | 'succeeded'
+  started_at?: string
+  completed_at?: string
+  draft_zip_path?: string
+  artifact_key?: string
+  message?: string
+}
+
+/**
+ * Trigger on-demand jianying draft generation.
+ *
+ * - idle / failed → 202, {status: "running"}
+ * - already succeeded → 200, {status: "succeeded", artifact_key: ...}
+ * - already running → 409 (throws ApiError)
+ * - service_mode not studio → 403 (throws ApiError)
+ */
+export async function generateJianyingDraft(
+  jobId: string,
+): Promise<GenerateJianyingDraftResponse> {
+  const url = buildBackendUrl(resolveJobApiBaseUrl(), `/jobs/${jobId}/generate-jianying-draft`)
+  const res = await fetch(url, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  })
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({})) as Record<string, unknown>
+    const message =
+      typeof body.message === 'string' ? body.message :
+      typeof body.detail === 'string' ? body.detail :
+      `HTTP ${res.status}`
+    throw new Error(message)
+  }
+  return res.json() as Promise<GenerateJianyingDraftResponse>
+}
+
+/**
+ * Poll jianying draft status.
+ * Returns the current state of jianying_draft_* fields on the job.
+ */
+export async function getJianyingDraftStatus(
+  jobId: string,
+): Promise<JianyingDraftStatusResponse> {
+  const url = buildBackendUrl(resolveJobApiBaseUrl(), `/jobs/${jobId}/jianying-draft-status`)
+  const res = await fetch(url, { credentials: 'include' })
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}`)
+  }
+  return res.json() as Promise<JianyingDraftStatusResponse>
 }
