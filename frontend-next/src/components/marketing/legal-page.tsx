@@ -116,8 +116,12 @@ export function ContactBlock() {
             {SUPPORT_EMAIL}
           </a>
         </dd>
-        <dt>联系地址</dt>
-        <dd className="text-foreground/90">{COMPANY_ADDRESS}</dd>
+        {COMPANY_ADDRESS ? (
+          <>
+            <dt>联系地址</dt>
+            <dd className="text-foreground/90">{COMPANY_ADDRESS}</dd>
+          </>
+        ) : null}
       </dl>
       <p className="mt-6 text-xs leading-6 text-muted-foreground/80">
         {PAYMENT_CHANNEL_NOTE}

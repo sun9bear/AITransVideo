@@ -137,10 +137,12 @@ export default function ContactPage() {
           <span className="text-foreground">联系邮箱：</span>
           <Mail address={SUPPORT_EMAIL} />
         </p>
-        <p>
-          <span className="text-foreground">联系地址：</span>
-          {COMPANY_ADDRESS}
-        </p>
+        {COMPANY_ADDRESS ? (
+          <p>
+            <span className="text-foreground">联系地址：</span>
+            {COMPANY_ADDRESS}
+          </p>
+        ) : null}
         <p>{PAYMENT_CHANNEL_NOTE}</p>
       </LegalSection>
     </LegalPage>
