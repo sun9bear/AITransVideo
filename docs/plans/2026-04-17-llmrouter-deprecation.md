@@ -1,10 +1,23 @@
 # LLMRouter 废弃观察期计划
 
-> **Status:** active (observation period)  
-> **Last updated:** 2026-04-17  
-> **Observation window:** 2026-04-17 → 2026-05-01（约 2 周）  
-> **Decision node:** 2026-05-01 — 根据观察结果决定清理 or 延期  
+> **Status:** active (observation period **重启**)
+> **Last updated:** 2026-05-02
+> **Observation window:** ~~2026-04-17 → 2026-05-01~~ **重启 2026-05-02 → 2026-05-16**
+> **Decision node:** 2026-05-16 — 根据观察结果决定清理 or 延期
 > **Related:** `docs/plans/2026-04-09-prompt-model-management-plan.md` §5.4 + §0 Gap 4
+
+## 0. 重启原因（2026-05-02）
+
+第一轮观察（2026-04-17~2026-05-01）失败，证据无法验证：
+
+1. **观察源选错**：plan §2 依赖 `docker logs aivideotrans-app`。docker 日志驱动是 `json-file` 且未配 max-size/max-file rotation，但 `docker rm` 时 json log 文件随容器删除。`aivideotrans-app` 容器在 **2026-05-01 06:17:38** 被 recreate（新 container created time 早于决策日 2026-05-01），观察窗口内的 docker logs 全部丢失。
+2. **Plan §1 论断不全**：`prompt_key_map` 漏映射 `s2_review`（[translator.py:901](../../src/services/gemini/translator.py:901) call site 在 [process.py:_legacy_speaker_inference_and_review](../../src/pipeline/process.py:4943) 的 2-speaker review fallback 里）。任何"新 S2 三轮 review 失败 + 2 speaker"的 job 都会触发 `[LLM-ROUTER-LEGACY]`，意味着 legacy path 不是死代码而是**rare-path live code**。
+
+第二轮修复（2026-05-02 部署）：
+
+- 给 `prompt_key_map` 补 `"s2_review": "translate"` 映射，让 fallback 路径走 llm_registry。
+- legacy path 的 `print(...)` 之外**追加持久化 audit log** 写到 `${AIVIDEOTRANS_RUNTIME_LOGS_DIR}/llm-router-legacy.log`（默认 `/opt/aivideotrans/data/runtime_logs/`，bind mount，container recreate 不丢）。
+- 观察窗重启 2 周。
 
 ---
 
@@ -39,11 +52,11 @@
 每周（建议周一）在生产日志里 grep：
 
 ```bash
-# 在 US 主机上（或本地 docker logs 后同步）
-docker logs aivideotrans-app 2>&1 | grep "\[LLM-ROUTER-LEGACY\]" | wc -l
+# 主源（持久化 audit log，container recreate 不丢；2026-05-02 起启用）
+SSH-US-Via-154.cmd "wc -l /opt/aivideotrans/data/runtime_logs/llm-router-legacy.log 2>/dev/null || echo 0 zero-hits"
 
-# 或直接 grep runtime logs
-grep -rn "\[LLM-ROUTER-LEGACY\]" /opt/aivideotrans/data/runtime_logs/ 2>/dev/null
+# 辅助源（docker logs 仅当前 container lifetime 内有效）
+SSH-US-Via-154.cmd "docker logs aivideotrans-app 2>&1 | grep -c '\[LLM-ROUTER-LEGACY\]'"
 ```
 
 - **期望结果**：零命中（每周都是 0）
@@ -99,9 +112,12 @@ grep -rn "\[LLM-ROUTER-LEGACY\]" /opt/aivideotrans/data/runtime_logs/ 2>/dev/nul
 
 | 检查日期 | 命中次数 | grep 命令输出 | 备注 |
 |----------|---------|--------------|------|
-| 2026-04-17 | — | _（观察起点，标记刚加，需要下次部署后生效）_ | 部署 commit SHA：待填 |
-| 2026-04-24 | ? | ? | ? |
-| 2026-05-01 | ? | ? | 决策节点 |
+| 2026-04-17 | — | _（观察起点，标记刚加，需要下次部署后生效）_ | 部署 commit SHA：857cb46 |
+| 2026-04-24 | — | _（漏检）_ | 单人开发，观察日志 §6 未维护 |
+| 2026-05-01 | **N/A** | container 2026-05-01 06:17 recreate → docker logs 丢失 | **第一轮观察作废**；plan §1 漏映射 s2_review 一并发现 |
+| 2026-05-02 | — | _（第二轮观察起点；audit log 落 runtime_logs/llm-router-legacy.log，bind mount 持久）_ | 部署：translator.py 加 s2_review 映射 + persistent audit log |
+| 2026-05-09 | ? | ? | ? |
+| 2026-05-16 | ? | ? | 决策节点（第二轮） |
 
 ## 7. 非目标
 

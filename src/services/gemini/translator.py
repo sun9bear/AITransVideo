@@ -1153,6 +1153,7 @@ class GeminiTranslator:
             "s5_rewrite_strict": "rewrite_strict",
             "s5_short_content_compact": "rewrite",
             "s2_infer": "translate",  # speaker inference uses same model as translate
+            "s2_review": "translate",  # legacy 2-speaker review fallback (process.py:_legacy_speaker_inference_and_review)
             "content_compliance": "content_compliance",
         }
         prompt_key = prompt_key_map.get(task)
@@ -1188,15 +1189,29 @@ class GeminiTranslator:
             raise TranslationError(f"No models available for task '{task}'.")
 
         # --- Legacy path: LLMRouter fallback chain (for unmapped tasks) ---
-        # DEPRECATION OBSERVATION (2026-04-17 ~ 2026-05-01): 此路径应为死代码
-        # （生产 job 总会设置 _service_mode 触发新路径）。若观察期日志零命中
-        # '[LLM-ROUTER-LEGACY]' 标签，LLMRouter 模块将被整体下线。
+        # DEPRECATION OBSERVATION (2026-05-02 重启): 上一轮 2026-04-17~2026-05-01
+        # 观察因 docker json-file 不持久 + container 2026-05-01 recreate 而证据
+        # 全失。本轮新增 prompt_key_map 的 s2_review 映射 + 持久化 audit log，
+        # 重新观察 2 周（直到 2026-05-16），零命中再执行 §5 11 步清理。
         # 观察期计划：docs/plans/2026-04-17-llmrouter-deprecation.md
-        print(
+        _legacy_path_msg = (
             f"[LLM-ROUTER-LEGACY] hit task={task} prompt_key={prompt_key!r} "
-            f"service_mode={mode!r} has_router={self.llm_router is not None}",
-            flush=True,
+            f"service_mode={mode!r} has_router={self.llm_router is not None}"
         )
+        print(_legacy_path_msg, flush=True)
+        try:
+            _runtime_logs_dir = os.environ.get(
+                "AIVIDEOTRANS_RUNTIME_LOGS_DIR",
+                "/opt/aivideotrans/data/runtime_logs",
+            )
+            os.makedirs(_runtime_logs_dir, exist_ok=True)
+            _audit_log_path = os.path.join(_runtime_logs_dir, "llm-router-legacy.log")
+            with open(_audit_log_path, "a", encoding="utf-8") as _f:
+                _f.write(
+                    f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {_legacy_path_msg}\n"
+                )
+        except OSError:
+            pass
         route = self.llm_router.get_route(task) if self.llm_router is not None else ["default_llm"]
         if not route:
             route = ["default_llm"]
