@@ -9,8 +9,8 @@
 - `review_state.py` 中的 stage 集合
 - `WorkspacePage` 如何决定当前审核 UI
 - `TranslationReviewPanel / VoiceReviewPanel / VoiceSelectionPanel`
-- review gate 与 pipeline pause / resume
-- review 完成后如何与 post-edit 表面衔接
+- translation review 里的 speaker edits / split
+- voice selection 里的 quality tier / clone pricing / resume
 
 ## 2. 审核流主图
 
@@ -31,13 +31,16 @@ graph TD
     Gate --> VoicePanel["VoiceReviewPanel"]
     Gate --> VoiceSelectPanel["VoiceSelectionPanel"]
 
-    TranslationPanel --> ReviewAPI["reviews.ts"]
+    TranslationPanel --> ReviewAPI["reviews.ts / split / approve"]
     VoicePanel --> ReviewAPI
     VoiceSelectPanel --> VoiceAPI["voiceSelection.ts"]
 
     ReviewAPI --> ReviewActions["review_actions.py"]
-    VoiceAPI --> ReviewActions
+    VoiceAPI --> VoiceGateway["voice_selection_api.py + job_intercept.py"]
     ReviewActions --> ReviewState
+    VoiceGateway --> ReviewState
+    VoiceGateway --> QualitySync["quality_tier + tts_model sync"]
+
     ReviewState --> Resume["resume pipeline"]
     Resume --> Pipeline
 
@@ -67,7 +70,7 @@ graph TD
 
 ## 4. 当前前端入口仍然统一到 WorkspacePage
 
-`frontend-next/src/app/(app)/workspace/[jobId]/page.tsx` 当前是审核流主入口：
+`frontend-next/src/app/(app)/workspace/[jobId]/page.tsx` 当前仍是审核流主入口：
 
 - 导入 `TranslationReviewPanel`
 - 导入 `VoiceReviewPanel`
@@ -81,38 +84,62 @@ graph TD
 
 这意味着审核流的用户交互表面仍然是“Workspace 内分流”，而不是旧时代的多 route review app。
 
-## 5. Voice selection 仍是主审核路径
+## 5. Translation review 现在可以直接改说话人归属
 
 ### 5.1 前端
 
-- `frontend-next/src/components/workspace/VoiceSelectionPanel.tsx` 会从 review state 中提取 `voice_selection_review` payload
-- 提交时调用 `approveVoiceSelection(jobId, approvals)`
-- `frontend-next/src/lib/api/voiceSelection.ts` 对应的提交端点是：
-  `/jobs/{jobId}/review/voice-selection/approve`
+- `frontend-next/src/components/workspace/TranslationReviewPanel.tsx` 现在显式维护：
+  `segmentSpeakers`
+  `speakerNames`
+  `segments`
+- 提交 approve 时会把这三类变更一起发给后端
+- split 动作也会带上 `pendingSpeakerChanges`
 
 ### 5.2 后端
 
-- `src/services/jobs/review_actions.py:approve_voice_selection(...)` 负责把 per-speaker 绑定写回 approved payload
-- `src/pipeline/process.py` 在多处显式构建与刷新 `voice_selection_review` payload，并在需要时把任务置为 `waiting_for_review`
+- `src/services/jobs/review_actions.py:approve_translation(...)` 会先调用：
+  `_apply_speaker_names_update_from_translation_review(...)`
+  `_apply_segment_speakers_update_from_translation_review(...)`
+- 然后才保存 translation review submission
+- `split_segment(...)` 同样会先落下 pending speaker changes，再执行真正的切段
 
-结论：`voice_selection_review` 仍是 Studio 主路径，不是一个已经废弃但尚未删除的残留 stage。
+结论：translation review 已经不只是“改译文文本”，而是带说话人归属修正的写侧表面。
 
-## 6. GitNexus 与源码直接证据
+## 6. Voice selection 仍是主审核路径，而且会影响 quality tier
+
+### 6.1 前端
+
+- `frontend-next/src/components/workspace/VoiceSelectionPanel.tsx` 会从 review state 中提取 `voice_selection_review` payload
+- 它现在会读取：
+  smart recommendations
+  `voice_clone_cost_credits`
+  quality tier + credits 提示
+- 这些显示都来自 Gateway pricing/runtime truth
+
+### 6.2 后端
+
+- `src/services/jobs/review_actions.py:resolve_minimax_tts_model_from_voice_selection(...)` 会从 per-speaker 选择推导 job 级 MiniMax model
+- `gateway/job_intercept.py` 在 `review/voice-selection/approve` 拦截路径上，会把聚合后的 `quality_tier + tts_model` 写回 `Job.metering_snapshot`
+- `gateway/voice_selection_api.py` clone 路径则继续用 runtime clone cost 做 reserve / capture / release
+
+结论：`voice_selection_review` 不只是 UI 上的最后一步，它还直接影响后续扣点档位与 TTS 模型。
+
+## 7. GitNexus 与源码直接证据
 
 GitNexus 当前直接识别出：
 
 - `WorkspacePage -> BuildBackendUrl`
 - `WorkspacePage -> ResolveJobApiBaseUrl`
-- `Approve_voice_selection -> StateError`
 
-源码侧则补足了具体落点：
+源码侧补足了具体落点：
 
-- `WorkspacePage` 在 `effectiveReviewStage === 'voice_selection_review'` 时渲染 `VoiceSelectionPanel`
-- `review_state.py` 注释明确说明：
+- `TranslationReviewPanel` 提交 payload 已经包含 `segmentSpeakers`
+- `VoiceSelectionPanel` 已明确显示 quality tier / clone credits
+- `review_state.py` 注释仍明确说明：
   `voice_review` 是 legacy fallback
   `voice_selection_review` 是 Studio primary path
 
-## 7. Review 与 Post-Edit 的边界
+## 8. Review 与 Post-Edit 的边界
 
 `frontend-next/src/app/(app)/workspace/[jobId]/edit/page.tsx` 现在会读取 `voice_selection_review` payload 里的 speaker display names，但它不是 review gate 本身：
 
@@ -121,9 +148,10 @@ GitNexus 当前直接识别出：
 
 因此，`VideoEditPage` 应被视为 review 成功后的下游表面，而不是另一个 review stage。
 
-## 8. 这张图适合回答什么问题
+## 9. 这张图适合回答什么问题
 
 - 当前审核 UI 到底是哪个页面在承接
+- translation review 现在能不能改 speaker 名称和 segment speaker
 - `voice_review` 和 `voice_selection_review` 的主次关系是什么
+- quality tier / clone credits 为什么会在审核阶段就确定
 - pipeline 是怎样进入 `waiting_for_review`，又怎样恢复
-- 为什么 edit 页会读取 review payload，但不应把 edit 页画成 review gate 本身

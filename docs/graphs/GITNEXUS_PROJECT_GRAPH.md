@@ -2,7 +2,7 @@
 
 新会话建议先读本文件，再按任务进入对应子图。
 
-生成时间：2026-04-30
+生成时间：2026-05-01
 生成方式：基于当前仓库 `.gitnexus/` 最新索引与 GitNexus 本地查询结果整理
 
 ## 1. 图谱概览
@@ -11,20 +11,20 @@
 
 | 指标 | 数值 |
 | --- | ---: |
-| 文件数 | 951 |
-| 符号节点数 | 16,506 |
-| 关系边数 | 39,742 |
-| 聚类数 | 683 |
+| 文件数 | 961 |
+| 符号节点数 | 16,761 |
+| 关系边数 | 40,645 |
+| 聚类数 | 712 |
 | 执行流程数 | 300 |
-| 索引提交 | `2a85009` |
+| 索引提交 | `1934901` |
 | 索引状态 | `up-to-date` |
 
-这轮最需要反映的不是 pipeline 主干变化，而是营销前门与商业化消费面的稳定化：
+这轮最需要反映的是四条新边：
 
-- `frontend-next/(marketing)` 已经是稳定前门，首页、定价页、试用页都走 server-first 叙事与 SSR 套餐事实注入
-- `getPlansSafeServer() -> /api/plans -> Gateway truth` 已成为营销页和试用页读取数字事实的标准路径
-- 商业化侧不只剩 billing center；它现在同时覆盖 `marketing trust surface + pricing/trial SSR + provider availability + legal pages`
-- metering / quality / cost sidecar 仍在增长，但前台 `usage` 页仍是占位，这说明这条轴线当前主要服务 admin / observability / benchmark，而不是用户主产品面
+- 点数逻辑已经不只是观测 sidecar，`job create` 与 `voice clone` 都有了 live credit guard
+- Gateway 现在显式拥有 retention / `expires_at` / `purged` 的 authoritative DB 语义
+- admin 成本管理继续站在 `metering_snapshot` 之上，但它仍是只读 read model
+- marketing narrative/proof、content compliance gate 这些上一轮新增结构继续成立
 
 ## 2. 主要功能区块
 
@@ -32,24 +32,22 @@
 
 | 聚类 | 符号数 | 代表文件/成员 |
 | --- | ---: | --- |
-| Services | 500 | `src/services/transcript_reviewer.py`、`src/services/jobs/api.py`、`src/services/usage_meter.py` |
-| Gateway | 274 | `gateway/main.py`、`gateway/job_intercept.py`、`gateway/billing.py`、`gateway/storage/backend_router.py` |
-| Jobs | 163 | Job API、editing、review actions、download / stream surface |
-| Benchmark | 157 | quality / metering / cost 相关 sidecar 已形成稳定聚类 |
-| Api | 154 | `frontend-next/src/lib/api/*`，含 review、voice selection、downloads、editing |
-| Tts | 91 | TTS provider、voice speed、voice selection、segment regenerate |
+| Services | 488 | `src/services/transcript_reviewer.py`、`src/services/jobs/api.py`、`src/services/content_compliance.py` |
+| Gateway | 403 | `gateway/job_intercept.py`、`gateway/credits_service.py`、`gateway/project_cleanup.py`、`gateway/voice_selection_api.py` |
+| Jobs | 193 | Job API、editing、review actions、cleanup / list surfaces |
+| Benchmark | 154 | metering / credits / cost / quality sidecar 已稳定成独立聚类 |
+| Api | 138 | `frontend-next/src/lib/api/*`，含 review、voice selection、jobs、credits |
+| Scripts | 99 | maintenance / diagnostics / support scripts |
+| Tts | 97 | TTS provider、voice selection、segment regenerate |
+| Gemini | 91 | translator / prompt model / retry helpers |
+| Media_understanding | 88 | 媒体理解、说话人结构、合规前置信息 |
 | Ui | 82 | Next.js 交互表面与共享组件 |
-| Gemini | 76 | translator / rewriter / related helpers |
-| Workflow | 68 | `src/modules/workflow/project_workflow.py` 与 stage runners |
-| Media_understanding | 68 | 媒体理解与阶段前置信息抽取 |
-| Web_ui | 68 | 仍有 library 形态的 review / snapshot / helpers 被主路径消费 |
-| Pipeline | 64 | `src/pipeline/process.py` 阶段拼装、review pause / resume、alignment-only resume |
-| Draft | 49 | `draft_writer.py`、`caption_retiming.py`、输出落盘 |
-| Translation | 47 | 翻译与译后整理 |
-| Billing | 18 | plans、orders、checkout config、webhook settlement |
-| Storage | 11 | backend router、R2 client、download routing |
-| Admin | 11 | admin pricing / ops 控制面 |
-| Marketing | 9 | 首页叙事、pricing、trial、trust、legal surface |
+| Pipeline | 75 | `src/pipeline/process.py` orchestration、content compliance、late credit reserve |
+| Workflow | 55 | `project_workflow.py`、stage runners、editing resume 接口 |
+| Web_ui | 55 | translation review / cleanup / helper library |
+| Draft | 47 | `draft_writer.py`、`caption_retiming.py`、输出落盘 |
+| Translation | 44 | 翻译与译后整理 |
+| Assemblyai | 42 | transcription / transcript artifacts |
 
 ## 3. 子图入口
 
@@ -66,141 +64,100 @@
 
 ```mermaid
 graph TD
-    Marketing["Marketing / Pricing / Trial / Legal UI"] --> SSRPlans["Server-side plans fetch<br/>getPlansSafeServer()"]
-    BillingUI["Settings / Billing / Checkout UI"] --> FrontApi
+    Marketing["Marketing / Pricing / Trial / Legal / Proof UI"] --> SSRPlans["Server-side plans fetch<br/>getPlansSafeServer()"]
+    BillingUI["Settings / Billing / Credits UI"] --> FrontApi
     Workspace["Workspace / Projects / Result UI"] --> FrontApi
     ReviewUI["Review Panels"] --> FrontApi
     EditUI["VideoEditPage / VoiceModifyTab"] --> FrontApi
-    AdminUI["Admin / Ops UI"] --> FrontApi
-    UsageUI["Usage / Cost read surfaces"] --> FrontApi
+    AdminUI["Admin / Ops / Cost UI"] --> FrontApi
 
     SSRPlans --> Gateway
     FrontApi["Frontend API + Hooks"] --> Gateway
     FrontApi --> JobApi
 
-    Gateway["Gateway truth + control<br/>auth / pricing / billing / job_intercept / storage router"] --> Billing
+    Gateway["Gateway truth + control<br/>auth / pricing / billing / credits / job_intercept / cleanup"] --> Billing
     Gateway --> Ops
     Gateway --> Storage
-    Gateway --> Metering["metering_snapshot / quality_tier writeback"]
+    Gateway --> Metering["metering_snapshot / quality_tier / cost read-model"]
 
     JobApi["Job API / review / editing / artifacts"] --> Workflow
-    Workflow["Workflow core<br/>project_workflow.py + process.py"] --> Draft
+    Workflow["Workflow orchestration<br/>project_workflow.py + process.py"] --> Compliance["Content compliance gate"]
+    Compliance --> ReviewPrep["Transcript review / translation prep"]
+    ReviewPrep --> Draft["Draft / manifest / output"]
     Workflow --> ReviewState["Review gate / resume"]
     Workflow --> UsageMeter["UsageMeter sidecar"]
+
+    Billing["Plan / trial / credits / payment providers"] --> BillingUI
+    Ops["Costs / cleanup / S2 / logs / calibration / background tasks"] --> AdminUI
+
     ReviewState --> ReviewUI
     ReviewUI --> Workflow
 
-    Draft["Draft / manifest / output"] --> Publish["OutputDispatcher / publish"]
+    Draft --> Publish["OutputDispatcher / publish"]
     Publish --> Storage["Download / R2 / local fallback"]
     Storage --> Workspace
+
+    Workspace --> Retention["expires_at / purged / rename / post-edit TTL"]
+    Retention --> Gateway
 
     EditUI --> PostEdit["Post-edit loop<br/>editing/* + segment_regenerate"]
     PostEdit --> Resume["resume_from=alignment"]
     Resume --> Workflow
 
-    Billing["Plan / trial / credits / payment providers"] --> BillingUI
-    Ops["Credits / S2 / logs / calibration / background tasks"] --> AdminUI
     UsageMeter --> Metering
     Metering --> Ops
-    Metering --> UsageUI
 ```
 
 ## 5. 核心证据链
 
-### 5.1 主流程仍然是 Draft-first
+### 5.1 点数已经从“只观测”升级到 live guard
 
-- `src/modules/workflow/project_workflow.py` 的 `run_build()` 主顺序仍然是：
-  `ingestion -> audio preparation -> media understanding -> translation -> chunking -> alignment -> draft`
-- `src/modules/draft/caption_retiming.py` 仍然承担确定性 retiming
-- `src/pipeline/process.py` 新增的是 review / editing / resume 侧轴，不是把视频渲染抬成主交付
+- `gateway/credits_service.py` 新增 `reserve_credits_or_raise(...)`
+- 它与 `shadow_reserve()` 共享 bucket priority / ledger shape，但不允许 partial reserve；余额不够会抛 `InsufficientCreditsError`
+- `gateway/job_intercept.py` 在创建任务时，如果已知时长，会先 `reserve_credits_or_raise()`；失败则回滚本地事务并补偿取消上游任务
+- 同文件在 `update_source_metadata` 晚到时长路径上，也会做 late reserve；若余额不足，会把 job 置为 failed
+- `gateway/voice_selection_api.py` clone 路径同样改为 `reserve_credits_or_raise()`，不足时直接返回 402
 
-结论：主交付仍是 Jianying draft，不是把“渲染 MP4”塞回主流水线中心。
+结论：credits 不再只是 shadow accounting；至少在 job create 和 voice clone 两个入口上，它已经是 live guard。
 
-### 5.2 营销前门现在是 server-first，而且数字事实来自 Gateway
+### 5.2 retention / purged 现在由 Gateway DB authoritative 持有
 
-- `frontend-next/src/app/(marketing)/page.tsx` 当前首页叙事已经稳定为：
-  `Hero -> ProductProof -> WorkflowShowcase -> Features -> TrustBanner -> PricingPreview -> Faq -> FinalCta`
-- 同文件注释明确说明：
-  `PricingPreview / TrialBanner` 是 async Server Components，价格与试用信息要落进 initial HTML
-- `frontend-next/src/app/(marketing)/pricing/page.tsx` 明确写明三档套餐数字来自 `GET /api/plans`
-- `frontend-next/src/app/(marketing)/trial/page.tsx` 通过 `getPlansSafeServer()` 读取 `trial.days`、`trial.source_minutes`、`includes_studio`，且只在 `trial.frozen === true` 时展示数字
-- `frontend-next/src/lib/billing/get-plans.ts` 注释明确说这是前端学习 plan / pricing / trial runtime facts 的唯一受支持方式
-- `frontend-next/src/middleware.ts` 把 `/`、`/pricing`、`/trial`、`/auth`、`/terms`、`/privacy`、`/refund`、`/contact` 保持为 public route，避免 conversion surface 被 session middleware 拦截
+- `gateway/job_intercept.py` 在创建普通任务时写入 `expires_at = now + 7d`；admin 任务则 `expires_at = None`
+- `gateway/project_cleanup.py` 文件头明确声明它拥有 authoritative DB transition：过期 terminal job 会被翻成 `status='purged'`
+- 同模块还明确：
+  admin job 永不过期
+  active statuses 不参与 purge
+  非安全路径只翻状态，不碰磁盘
+- `src/services/web_ui/cleanup.py` 则继续负责 Job API JSON store 的磁盘清理，并与 Gateway cleanup 共享安全白名单语义
+- `gateway/job_intercept.py` 的 merge 逻辑还会阻止 stale Job API JSON 把已 `purged` 的 DB 行“复活”
 
-结论：营销首页、定价页、试用页已经是稳定架构面，且它们消费商业事实的方式必须被纳入图谱。
+结论：TTL 现在不是零散前端提示，而是 Gateway DB 层的 authoritative lifecycle 语义。
 
-### 5.3 Review 和 Post-Edit 现在是相邻但不同的两层
+### 5.3 projects/workspace 已开始消费 TTL 与 purged 语义
 
-- `frontend-next/src/app/(app)/workspace/[jobId]/page.tsx` 继续在 `WorkspacePage` 内承接 review gate
-- `frontend-next/src/components/workspace/VoiceSelectionPanel.tsx` 继续从 `voice_selection_review` payload 取说话人与候选音色，并通过 `/jobs/{id}/review/voice-selection/approve` 推进 gate
-- `frontend-next/src/app/(app)/workspace/[jobId]/edit/page.tsx` 则在 `status == succeeded` 且 feature flag 打开后进入 `enterEditing -> getEditingSegments -> commitEditing`
+- `frontend-next/src/features/jobs/expiry.ts` 现在明确把 `expiresAt` 作为第一优先级；只有缺失时才回退 `updatedAt + 7d`
+- `frontend-next/src/app/(app)/projects/page.tsx` 会：
+  对 admin 展示“永不过期”
+  对普通任务展示分级 expiry label
+  把 `purged` 当作正式状态处理
+- 同页继续承接 rename，这说明 `display_name + expires_at + purged` 已经是项目列表的正式消费面
 
-结论：`review` 是显式 gate/resume，`post-edit` 是成功后的增量修改层，二者不应混成一条 UI 语义。
+结论：前端结果表面现在已经明确站在 Gateway TTL 真源之上。
 
-### 5.4 下载已经形成独立的 Gateway 路由决策面
+### 5.4 marketing/proof、content compliance 与 admin cost management 仍然成立
 
-- `gateway/job_intercept.py` 在下载入口里先走 `_maybe_r2_redirect(job_id, db)`
-- `gateway/storage/backend_router.py` 明确声明它是“是否真的走 R2” 的唯一决策点
-- 该 router 对 HEAD / upload / presign 任一异常统一 `return None`，由 Gateway 自动回落本地透传
-- 下载事件现在有三类明确打点：
-  `download.redirect.r2`
-  `download.fallback.local`
-  `download.local.direct`
+- marketing 首页仍然是 `PainPoints -> ProductProof -> ToolComparison -> PricingPreview` 的 narrative / proof surface
+- workflow 前部仍然有 `content_compliance` gate
+- `gateway/cost_management.py` 继续站在 `Job.metering_snapshot` 之上提供只读成本 / 收入 / 毛利 read model
 
-结论：下载后端已经不是简单的 artifact 读取，而是带有路由决策、回退契约和事件打点的稳定轴线。
-
-### 5.5 商业化侧已经不是“套餐页 + 假支付”的最小形态
-
-- `frontend-next/src/app/(app)/settings/billing/page.tsx` 现在组合了：
-  `SubscriptionSummary`
-  `CreditsSummary`
-  `CheckoutCard`
-  `OrderHistory`
-- `frontend-next/src/app/(marketing)/pricing/page.tsx` 与 `trial/page.tsx` 已经直接承接 conversion 任务，而不只是 marketing 壳层
-- `gateway/billing.py` 已经具备：
-  `create_order`
-  `get_checkout_config`
-  provider query refresh
-  provider-dispatched webhook handling
-- `gateway/payment_providers.py` 已经把 `fake / alipay / wechatpay / stripe` 统一挂到 provider registry
-- `frontend-next/src/app/(marketing)/privacy/page.tsx`、`refund/page.tsx`、`terms/page.tsx` 已成为营销信任面的一部分
-
-结论：商业化图现在必须覆盖 marketing SSR front door、provider abstraction、可用渠道发布、法律页与 settings billing center。
-
-### 5.6 metering / benchmark / cost 已形成 sidecar，但仍不是主产品面
-
-- `src/services/usage_meter.py` 的 `UsageMeter` 是 append-only per-job usage recorder；注释明确说 recording failures 是 warning，不是 pipeline failure
-- 该 sidecar 将事件写入：
-  `metering/usage_events.jsonl`
-  `metering/usage_summary.json`
-- `gateway/job_intercept.py:update_job_metering()` 负责把 pipeline 传回的 metering 字段 merge 到 `Job.metering_snapshot`
-- 同文件也在 voice selection 审批路径上聚合并写回 `quality_tier`
-- `gateway/credits_observability.py` 提供：
-  `/summary`
-  `/cost-metrics`
-  `/provider-breakdown`
-- `frontend-next/src/app/(app)/usage/page.tsx` 目前仍是“此功能正在开发中”的空态页，这说明当前可用观测面仍主要在 admin / observability 侧
-- `frontend-next/src/lib/cost/estimator.ts` 仍是粗粒度预估器，不是结算真源
-
-结论：benchmark / quality / cost 已经需要单独画图，但它仍是围绕 pipeline 的 sidecar，不应被误画成主流水线阶段。
-
-### 5.7 控制平面继续扩张，但仍应与主 pipeline 解耦
-
-- `gateway/credits_observability.py` 明确是 admin-only read surface
-- `gateway/s2_monitor_api.py` 与 `gateway/admin_job_monitor_api.py` 都围绕产物和日志做诊断，不是主流程 stage
-- `gateway/job_intercept.py` 现在同时承接：
-  下载路由
-  `display_name` 文件名派生
-  `copy_as_new` 后的 Gateway DB 镜像
-
-结论：控制平面在增长，但它仍是围绕主流程的 sidecar，而不是主流程本身。
+结论：这次新提交是“在现有结构上补守门和保留期”，不是推翻上一轮结构。
 
 ## 6. 按任务选图
 
-- 要看主流程、Draft-first、alignment-only resume、异步导出如何挂在后面：读 `GITNEXUS_WORKFLOW_CORE_GRAPH.md`
-- 要看 review gate、WorkspacePage、review panels：读 `GITNEXUS_REVIEW_GRAPH.md`
+- 要看主流程、内容合规 gate、Draft-first、alignment-only resume：读 `GITNEXUS_WORKFLOW_CORE_GRAPH.md`
+- 要看 review gate、speaker edits、voice selection quality tier：读 `GITNEXUS_REVIEW_GRAPH.md`
 - 要看 Studio 修改、segment 状态机、overwrite / copy_as_new：读 `GITNEXUS_EDITING_POST_EDIT_GRAPH.md`
 - 要看下载、R2 redirect、local fallback、文件名派生：读 `GITNEXUS_STORAGE_DELIVERY_R2_GRAPH.md`
-- 要看 marketing 首页、pricing/trial SSR、plan/trial/pricing/credits/payment 真源：读 `GITNEXUS_COMMERCIALIZATION_GRAPH.md`
-- 要看 admin pricing、S2 monitor、credits observability、background tasks、voice calibration：读 `GITNEXUS_ADMIN_OPS_CALIBRATION_GRAPH.md`
-- 要看 metering、quality tier、cost metrics、provider breakdown、预估与真结算边界：读 `GITNEXUS_BENCHMARK_QUALITY_COST_GRAPH.md`
+- 要看 marketing narrative/proof、workspace 点数预估/预扣、plan/trial/pricing/credits/payment 真源：读 `GITNEXUS_COMMERCIALIZATION_GRAPH.md`
+- 要看 admin pricing、admin costs、retention cleanup、credits observability、S2 monitor、background tasks、voice calibration：读 `GITNEXUS_ADMIN_OPS_CALIBRATION_GRAPH.md`
+- 要看 live reserve/capture/release、quality tier、价格目录、margin 估算、provider breakdown：读 `GITNEXUS_BENCHMARK_QUALITY_COST_GRAPH.md`
