@@ -22,7 +22,7 @@ class SubtitleCue:
     en_text: str
     start_ms: int
     end_ms: int
-    source: str  # semantic_block_v2
+    source: str  # e.g. "semantic_block_v2"
     needs_review: bool = False
     review_reason: str | None = None
 

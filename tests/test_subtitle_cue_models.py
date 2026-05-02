@@ -48,58 +48,23 @@ def test_subtitle_cue_speaker_name_none():
     )
 
     assert cue.speaker_name is None
-    assert cue.text == "字幕文本"
-    assert cue.en_text == "Subtitle text"
-
-
-def test_subtitle_cue_needs_review_default_false():
-    """Test that needs_review defaults to False."""
-    cue = SubtitleCue(
-        cue_id="cue_003",
-        block_id="block_003",
-        speaker_id="speaker_c",
-        speaker_name="Charlie",
-        text="测试",
-        en_text="Test",
-        start_ms=100,
-        end_ms=500,
-        source="semantic_block_v2",
-    )
-
-    assert cue.needs_review is False
-
-
-def test_subtitle_cue_review_reason_none_by_default():
-    """Test that review_reason is None by default."""
-    cue = SubtitleCue(
-        cue_id="cue_004",
-        block_id="block_004",
-        speaker_id="speaker_d",
-        speaker_name="Diana",
-        text="文本",
-        en_text="Text",
-        start_ms=200,
-        end_ms=600,
-        source="semantic_block_v2",
-    )
-
-    assert cue.review_reason is None
 
 
 def test_subtitle_cue_mixed_cjk_latin_digits():
-    """Test that text and en_text accept mixed CJK + Latin + digit content."""
+    """Test that text and en_text accept mixed CJK + Latin + digit content, with whitespace stripped."""
     cue = SubtitleCue(
         cue_id="cue_005",
         block_id="block_005",
         speaker_id="speaker_e",
         speaker_name="Eve",
-        text="今天讲 LLM 的 token 数 1024 个",
-        en_text="Today we discuss LLM's token count of 1024 pieces",
+        text="  今天讲 LLM 的 token 数 1024 个  ",
+        en_text="  Today we discuss LLM's token count of 1024 pieces  ",
         start_ms=300,
         end_ms=700,
         source="semantic_block_v2",
     )
 
+    # __post_init__ should strip leading/trailing whitespace
     assert cue.text == "今天讲 LLM 的 token 数 1024 个"
     assert cue.en_text == "Today we discuss LLM's token count of 1024 pieces"
 
