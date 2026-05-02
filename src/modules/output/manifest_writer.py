@@ -55,7 +55,7 @@ class ManifestWriter:
             "requested_targets": [target.value for target in request.expanded_targets()],
             "source_info": dict(localized_project.source_info),
             "key_audio_assets": self._build_key_audio_assets(artifact_map),
-            "primary_outputs": self._build_primary_outputs(output_bundle),
+            "primary_outputs": self._build_primary_outputs(output_bundle, artifact_map),
             "fallback_summary": self._build_fallback_summary(localized_project.stage_snapshot),
             "artifact_index": artifact_map,
         }
@@ -77,7 +77,10 @@ class ManifestWriter:
         return key_audio_assets
 
     @staticmethod
-    def _build_primary_outputs(output_bundle: OutputBundleResult) -> dict[str, object]:
+    def _build_primary_outputs(
+        output_bundle: OutputBundleResult,
+        artifact_map: Mapping[str, str],
+    ) -> dict[str, object]:
         editor_result = output_bundle.editor_result
         publish_result = output_bundle.publish_result
         return {
@@ -90,6 +93,9 @@ class ManifestWriter:
                     "subtitles_en_path": editor_result.subtitles_en_path,
                     "subtitles_bilingual_path": editor_result.subtitles_bilingual_path,
                     "alignment_report_path": editor_result.alignment_report_path,
+                    "jianying_draft_zip": artifact_map.get("editor.jianying_draft_zip"),
+                    "jianying_draft_dir": artifact_map.get("editor.jianying_draft_dir"),
+                    "jianying_compatibility_report": artifact_map.get("editor.jianying_compatibility_report"),
                 }
                 if editor_result is not None
                 else None
