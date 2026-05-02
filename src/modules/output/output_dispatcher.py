@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
 from pathlib import Path
 
@@ -11,14 +10,10 @@ from core.exceptions import PublishError
 from core.project_model import LocalizedProject
 from modules.output.editor.editor_package_backend import EditorPackageBackend
 from modules.output.editor.editor_package_models import AlignedSegment, ProjectOutput, ProjectOutputResult
-from modules.output.jianying.jianying_draft_backend import JianyingDraftBackend
-from modules.output.jianying.jianying_draft_models import JianyingDraftRequest, JianyingDraftResult
 from modules.output.manifest_writer import ManifestWriter
 from modules.output.output_models import OutputBundleResult, OutputRequest
 from modules.output.publish.publish_backend import PublishBackend
 from modules.output.publish.publish_models import PublishRequest, PublishResult
-
-logger = logging.getLogger(__name__)
 
 
 class OutputDispatcher:
@@ -30,12 +25,10 @@ class OutputDispatcher:
         editor_backend: EditorPackageBackend | None = None,
         publish_backend: PublishBackend | None = None,
         manifest_writer: ManifestWriter | None = None,
-        jianying_backend: JianyingDraftBackend | None = None,
     ) -> None:
         self.editor_backend = editor_backend or EditorPackageBackend()
         self.publish_backend = publish_backend or PublishBackend()
         self.manifest_writer = manifest_writer or ManifestWriter()
-        self.jianying_backend = jianying_backend or JianyingDraftBackend()
 
     def dispatch(
         self,
@@ -74,20 +67,6 @@ class OutputDispatcher:
                     project_id=localized_project.project_id,
                     cue_result=cue_result,
                 )
-
-            # Phase 1 — jianying draft generation (gated).
-            # Called after subtitle artifacts are registered so that
-            # _jianying_cue_gate_passes() can find editor.subtitle_cues +
-            # editor.subtitle_quality_report.
-            jianying_result = self._maybe_generate_jianying_draft(
-                request=request,
-                localized_project=localized_project,
-                artifact_index=artifact_index,
-                editor_result=editor_result,
-                project_root=project_root,
-            )
-            if jianying_result is not None:
-                self._register_jianying_artifacts(artifact_index, jianying_result)
 
         if OutputTarget.PUBLISH in expanded_targets:
             original_video_path = artifact_index.get("source.original_video")
@@ -269,194 +248,6 @@ class OutputDispatcher:
             if normalized_duration_ms > 0:
                 duration_candidates.append(normalized_duration_ms)
         return max(duration_candidates, default=0)
-
-    # ------------------------------------------------------------------
-    # Jianying draft helpers (Phase 1, Task J6)
-    # ------------------------------------------------------------------
-
-    def _maybe_generate_jianying_draft(
-        self,
-        *,
-        request: OutputRequest,
-        localized_project: LocalizedProject,
-        artifact_index: ArtifactIndex,
-        editor_result: ProjectOutputResult | None,
-        project_root: Path,
-    ) -> JianyingDraftResult | None:
-        """Conditionally invoke jianying backend if both gates pass.
-
-        Gate 1: request.include_jianying_draft AND request.service_mode == "studio".
-        Gate 2: subtitle_cues_v2 quality gate (plan §1.1) — cue file + report
-                with validation_status in {passed, needs_review} and no hard errors.
-
-        Returns JianyingDraftResult if backend was called, None if any gate fails.
-        """
-        # Gate 1: feature flag
-        if not request.include_jianying_draft:
-            return None
-
-        # Gate 1: service mode
-        if request.service_mode != "studio":
-            logger.info(
-                "jianying draft skipped: service_mode=%r is not 'studio'",
-                request.service_mode,
-            )
-            return None
-
-        # Gate 2: cue v2 quality gate
-        if not self._jianying_cue_gate_passes(artifact_index):
-            logger.info(
-                "jianying draft skipped: subtitle_cues_v2 gate failed "
-                "(cue file missing or quality report has hard errors)"
-            )
-            return None
-
-        # Both gates passed — build request and invoke backend
-        jianying_request = self._build_jianying_request(
-            localized_project=localized_project,
-            artifact_index=artifact_index,
-            editor_result=editor_result,
-            project_root=project_root,
-        )
-        return self.jianying_backend.write(jianying_request)
-
-    @staticmethod
-    def _jianying_cue_gate_passes(artifact_index: ArtifactIndex) -> bool:
-        """Return True iff the subtitle_cues_v2 quality gate passes.
-
-        Checks (plan §1.1):
-        1. editor.subtitle_cues key exists and its path file exists on disk.
-        2. editor.subtitle_quality_report key exists and its path file exists.
-        3. quality_report validation_status is "passed" or "needs_review".
-        4. quality_report has no severity="error" issues.
-        """
-        cues_path_str = artifact_index.get("editor.subtitle_cues")
-        if not cues_path_str:
-            return False
-        if not Path(cues_path_str).exists():
-            return False
-
-        report_path_str = artifact_index.get("editor.subtitle_quality_report")
-        if not report_path_str:
-            return False
-        report_path = Path(report_path_str)
-        if not report_path.exists():
-            return False
-
-        try:
-            report_data = json.loads(report_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return False
-
-        validation_status = report_data.get("validation_status", "")
-        if validation_status not in ("passed", "needs_review"):
-            return False
-
-        # Any severity="error" issue closes the gate
-        for issue in report_data.get("issues", []):
-            if issue.get("severity") == "error":
-                return False
-
-        return True
-
-    @staticmethod
-    def _resolve_project_title(localized_project: LocalizedProject) -> str:
-        """Resolve a display title for the jianying draft.
-
-        Priority: source_info.metadata.video_title → metadata.title → project_id.
-        Matches the logic in _build_editor_project_output.
-        """
-        source_info = localized_project.source_info
-        metadata = source_info.get("metadata", {})
-        if isinstance(metadata, dict):
-            raw_title = metadata.get("video_title") or metadata.get("title")
-            if isinstance(raw_title, str) and raw_title.strip():
-                return raw_title.strip()
-        return localized_project.project_id
-
-    @staticmethod
-    def _build_jianying_request(
-        *,
-        localized_project: LocalizedProject,
-        artifact_index: ArtifactIndex,
-        editor_result: ProjectOutputResult | None,
-        project_root: Path,
-    ) -> JianyingDraftRequest:
-        """Assemble a JianyingDraftRequest from dispatcher's local context.
-
-        Raises PublishError if a required artifact (dubbed_audio / subtitles) is missing.
-        """
-        project_title = OutputDispatcher._resolve_project_title(localized_project)
-
-        source_video_path = artifact_index.get("source.original_video") or ""
-
-        dubbed_audio_path = artifact_index.get("editor.dubbed_audio_complete")
-        if not dubbed_audio_path:
-            raise PublishError(
-                "Jianying draft requires editor.dubbed_audio_complete in ArtifactIndex."
-            )
-
-        subtitle_path = artifact_index.get("editor.subtitles")
-        if not subtitle_path:
-            raise PublishError(
-                "Jianying draft requires editor.subtitles in ArtifactIndex."
-            )
-
-        ambient_audio_path = artifact_index.get("editor.ambient_audio") or None
-
-        # Width/height from env with safe fallback on parse error
-        try:
-            width = int(os.environ.get("AVT_JIANYING_DRAFT_WIDTH", "1920"))
-        except ValueError:
-            logger.warning(
-                "AVT_JIANYING_DRAFT_WIDTH is not a valid integer; falling back to 1920"
-            )
-            width = 1920
-        try:
-            height = int(os.environ.get("AVT_JIANYING_DRAFT_HEIGHT", "1080"))
-        except ValueError:
-            logger.warning(
-                "AVT_JIANYING_DRAFT_HEIGHT is not a valid integer; falling back to 1080"
-            )
-            height = 1080
-
-        return JianyingDraftRequest(
-            project_id=localized_project.project_id,
-            project_title=project_title,
-            source_video_path=source_video_path,
-            dubbed_audio_path=dubbed_audio_path,
-            subtitle_path=subtitle_path,
-            output_dir=str(project_root),
-            ambient_audio_path=ambient_audio_path,
-            width=width,
-            height=height,
-        )
-
-    @staticmethod
-    def _register_jianying_artifacts(
-        artifact_index: ArtifactIndex,
-        result: JianyingDraftResult,
-    ) -> None:
-        """Register jianying artifacts into artifact_index.
-
-        On skip/fail (validation_status != "ok"): only the compatibility_report
-        is registered so operators can inspect the skip/fail reason.
-        On success: all three keys are registered.
-        """
-        if result.validation_status != "ok":
-            if result.compatibility_report_path:
-                artifact_index.register(
-                    "editor.jianying_compatibility_report",
-                    result.compatibility_report_path,
-                )
-            return
-
-        artifact_index.register("editor.jianying_draft_dir", result.draft_dir)
-        artifact_index.register("editor.jianying_draft_zip", result.draft_zip_path)
-        artifact_index.register(
-            "editor.jianying_compatibility_report",
-            result.compatibility_report_path,
-        )
 
     @staticmethod
     def _register_editor_artifacts(artifact_index: ArtifactIndex, result: ProjectOutputResult) -> None:

@@ -14,14 +14,6 @@ class OutputRequest:
     burn_subtitles: bool = False
     mix_original_audio: bool = False
     output_dir: str | None = None
-    # --- Jianying draft gating (plan 2026-05-02 §5.4, J5) ---
-    # Set by process.py when AVT_ENABLE_JIANYING_DRAFT=1.
-    # J6 OutputDispatcher gates the actual backend call on this flag
-    # AND on service_mode == "studio".
-    include_jianying_draft: bool = False
-    # Free-form service mode string ("express" / "studio" / None).
-    # None means gate fails closed in J6 dispatcher.
-    service_mode: str | None = None
 
     def __post_init__(self) -> None:
         if not self.targets:

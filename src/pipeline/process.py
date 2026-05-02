@@ -2809,7 +2809,6 @@ class ProcessPipeline:
             output_bundle = self._dispatch_process_output_bundle(
                 project_dir=final_project_dir,
                 build_result=build_result,
-                config=config,
             )
             assert output_bundle.editor_result is not None
             output_result = output_bundle.editor_result
@@ -3366,7 +3365,6 @@ class ProcessPipeline:
             output_bundle = self._dispatch_process_output_bundle(
                 project_dir=final_project_dir,
                 build_result=build_result,
-                config=config,
             )
             assert output_bundle.editor_result is not None
             output_result = output_bundle.editor_result
@@ -6614,35 +6612,12 @@ class ProcessPipeline:
             stage_outputs=self._build_process_stage_outputs(segments),
         )
 
-    def _resolve_service_mode(self, config: ProcessConfig) -> str | None:
-        """Return service_mode from the job record attached to *config*.
-
-        Reads ``config.job_record`` (dict or JobRecord-like object) the same
-        way the main ``run()`` body does via its ``_snap()`` helper.  Falls
-        back to ``None`` when no record is attached (gate fails closed in J6).
-
-        Plan: docs/plans/2026-05-02-jianying-draft-delivery-integration-plan.md §5.4 (J5).
-        """
-        jr = config.job_record
-        if jr is None:
-            return None
-        if isinstance(jr, dict):
-            return jr.get("service_mode") or None
-        return getattr(jr, "service_mode", None) or None
-
     def _dispatch_process_output_bundle(
         self,
         *,
         project_dir: Path,
         build_result: WorkflowBuildResult,
-        config: ProcessConfig | None = None,
     ) -> OutputBundleResult:
-        # --- Jianying draft gating (plan 2026-05-02 §5.4, J5) ---
-        # Strict "1" check: only the exact string "1" enables the feature.
-        # "true" / "yes" / "True" do NOT enable it.
-        include_jianying = os.environ.get("AVT_ENABLE_JIANYING_DRAFT", "0") == "1"
-        service_mode = self._resolve_service_mode(config) if config is not None else None
-
         return OutputDispatcher().dispatch(
             build_result.localized_project,
             build_result.artifact_index,
@@ -6651,8 +6626,6 @@ class ProcessPipeline:
                 # Pipeline always produces the final video (原视频画面 + 配音 + 背景音).
                 targets=[OutputTarget.PUBLISH],
                 output_dir=str(project_dir.resolve(strict=False)),
-                include_jianying_draft=include_jianying,
-                service_mode=service_mode,
             ),
         )
 
