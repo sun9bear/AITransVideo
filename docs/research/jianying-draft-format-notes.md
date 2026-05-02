@@ -7,7 +7,7 @@
 
 ## 1. 结论先行
 
-**phase 1a 的 SRT 输出可以直接喂给 `pyJianYingDraft.ScriptFile.import_srt()` 生成可被剪映打开的草稿**。技术链路验证通过:
+**phase 1a 的 SRT 输出可以直接喂给 `pyJianYingDraft.ScriptFile.import_srt()` 生成可被剪映打开的草稿**。技术链路验证通过 + **剪映 10.5.0 实测可打开**:
 
 ```
 phase 1a output/subtitles_zh.srt  ──┐
@@ -17,10 +17,12 @@ phase 1a output/subtitles_zh.srt  ──┐
                 draft_content.json  +  draft_meta_info.json
                                     │
                                     ▼
-                  剪映 5.9 草稿目录(可打开 / 可编辑字幕)
+                  剪映 10.5.0 实测可打开 + 字幕段可编辑 ✓
 ```
 
-平台标记 `platform.app_version = "5.9.0"`,与 plan §2 描述的"剪映 5.9 from-zero 生成支持"一致。剪映 6.x / 7.x 的兼容性需要本地手动验证(本 spike 未做)。
+虽然 pyJianYingDraft 模板里把 `platform.app_version` 硬编码为 `"5.9.0"`(详见 §8.5),但**剪映 10.5.0 实测能直接打开这种标记的草稿,显示 2 段字幕,内容/时间码正确**。这证实了剪映向下兼容 5.x 草稿格式 — 不需要 fork 库改 app_version。
+
+剪映 6.x / 7.x 兼容性未单独测,但鉴于 10.5 都能打开 5.9 标记草稿,中间版本几乎可以默认 OK。
 
 ## 2. 库基本信息
 
@@ -223,15 +225,20 @@ draft_meta_info.json 1440 bytes
    - 文本可点击编辑,显示中文 `今天我们来看第一个问题。` / `这个问题涉及 LLM 推理成本。`
    - 不报"项目损坏"或类似错误
 
-### 7.3 版本兼容矩阵(待补)
+### 7.3 版本兼容矩阵(实测+推断)
 
-本 spike 仅以 `platform.app_version = "5.9.0"` 输出。需要在以下版本各做一次手动测试:
+pyJianYingDraft 0.2.6 输出 `platform.app_version = "5.9.0"`。剪映向下兼容老格式。
 
-| 剪映版本 | 平台 | 已验证? | 验收项 |
-|----------|------|--------|--------|
-| 5.9 | Windows | ⏳ 待手动 | 草稿可打开 + 字幕可编辑 |
-| 6.x | Windows | ⏳ 待手动 | 草稿可打开(不要求模板模式) |
-| 7.x | Windows | ⏳ 待手动 | 草稿可打开(不要求自动导出) |
+| 剪映版本 | 平台 | 验证状态 | 验收项 |
+|----------|------|---------|--------|
+| 5.9 | Windows | ⏳ 未单独测,推断 OK(库默认目标版本) | 草稿可打开 + 字幕可编辑 |
+| 6.x | Windows | ⏳ 未单独测,推断 OK(向下兼容) | 草稿可打开 |
+| 7.x | Windows | ⏳ 未单独测,推断 OK | 草稿可打开 |
+| **10.5.0** | **Windows** | **✅ 2026-05-02 实测通过** | **草稿可打开;时间线 1 条字幕轨道 2 个片段;文本中文正确显示;时间码 1.000-3.444s / 3.444-6.000s 正确** |
+
+实测路径(10.5.0):草稿目录 `F:\剪映缓存\草稿\JianyingPro Drafts\phase1a_subtitle_test\` → 重启剪映 → 草稿列表可见 → 点开正常加载。
+
+**结论**:phase 1 接入主链时**不需要 fork 库或改 app_version**,剪映新版本会按需向下兼容渲染。
 
 ## 8. 已知限制(phase 0 不修复,phase 1 处理)
 
@@ -256,9 +263,17 @@ phase 1a 输出有 `subtitles_zh.srt` / `subtitles_en.srt` / `subtitles_bilingua
 
 倾向 (B):两条独立 track 用户更容易关掉其中一条。
 
-### 8.5 platform.app_version 硬编码 5.9
+### 8.5 platform.app_version 硬编码 5.9(实测不阻塞)
 
-pyJianYingDraft 0.2.6 输出固定的 5.9.0。如果剪映 6.x / 7.x 兼容,这个版本号不会成为阻塞,因为剪映通常向下兼容老草稿格式。但如果某个版本检测到 `5.9.0` 字符串后做了功能限制,需要 fork 库改这个值。
+pyJianYingDraft 0.2.6 在 `assets/draft_content_template.json` 把 `app_id: 3704` + `app_version: "5.9.0"` 硬编码。
+
+**2026-05-02 实测结论**:剪映 10.5.0 完全能打开 platform 标记 5.9.0 的草稿,**这个硬编码不阻塞 phase 1**。
+
+只有以下情况才需要考虑改 app_version:
+- 剪映某个未来版本检测到 5.9.0 字符串做了功能降级
+- 需要使用某个新版本独有的字段(如新型字幕特效),老 schema 不支持
+
+phase 1 暂时保留库默认 5.9.0 输出。如果将来要用新版字段(比如剪映 10.x 独有的字幕动画),需要抓真实的 10.x 草稿做 schema 对比,fork 库或自写 writer。
 
 ## 9. phase 1 后续工作(摘要)
 
