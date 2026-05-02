@@ -10,20 +10,18 @@ Plan: docs/plans/2026-05-02-subtitle-cue-generation-v2-plan.md §5.3, §10 Phase
 Invariant (enforced by T6 validator):
     normalize("".join(s.text for s in segment_text(t))) == normalize(t)
 
-Note on whitespace: SegmentSpan strips leading/trailing whitespace from each
-span's text.  This means a single inter-sentence space in the input (e.g.
-"今天。 明天。") is dropped.  The invariant is checked via normalize(), which
-collapses all whitespace runs to a single space — so both normalize("今天。明天。")
-and normalize("今天。 明天。") produce equivalent strings only if the space is
-not load-bearing.  The concatenation invariant holds for all cases *except*
-inputs where an inter-sentence space is the only differentiator.  In practice,
-merged_cn_text from TTS blocks does not contain such inter-sentence spaces.
+Note on whitespace: SegmentSpan preserves the raw chunk text from the
+segmenter — no leading/trailing whitespace is stripped.  This means
+"".join(s.text for s in spans) strictly equals the segmenter input, and
+normalize(join) == normalize(input) holds unconditionally for all inputs,
+including those with inter-sentence spaces like "今天。 明天。".
+Display layers (e.g. the SRT writer) are responsible for stripping
+whitespace before rendering.
 """
 
 from __future__ import annotations
 
 import re
-import unicodedata
 from dataclasses import dataclass
 
 # ---------------------------------------------------------------------------
@@ -35,8 +33,11 @@ from dataclasses import dataclass
 class SegmentSpan:
     """Immutable span produced by segment_text().
 
-    text:          The raw display text of this span.  Leading/trailing
-                   whitespace is stripped via __post_init__.
+    text:          The raw text of this span.  No leading/trailing whitespace
+                   is stripped here — SegmentSpan is a faithful raw-chunk
+                   container.  Concatenation of all span.text values exactly
+                   equals the segmenter input.  Display layers (e.g. the SRT
+                   writer) are responsible for stripping before rendering.
     needs_review:  True when the span contains content that Phase 1a
                    cannot safely split further or verify.
     review_reason: One of "unknown_mixed_token" or "long_unbreakable_text",
@@ -46,12 +47,6 @@ class SegmentSpan:
     text: str
     needs_review: bool = False
     review_reason: str | None = None
-
-    def __post_init__(self) -> None:
-        # frozen=True requires object.__setattr__ to mutate fields.
-        stripped = self.text.strip()
-        if stripped != self.text:
-            object.__setattr__(self, "text", stripped)
 
 
 # ---------------------------------------------------------------------------
@@ -405,6 +400,8 @@ def segment_text(text: str) -> list[SegmentSpan]:
         review_reason: str | None = None
 
         # Step 5: long unbreakable text check (takes precedence over mixed-token).
+        # Use stripped text for length/content analysis; the raw chunk is what
+        # goes into the span so that concatenation exactly reproduces the input.
         if _cjk_equiv_len(stripped) > _LONG_SPAN_THRESHOLD:
             needs_review = True
             review_reason = "long_unbreakable_text"
@@ -417,7 +414,7 @@ def segment_text(text: str) -> list[SegmentSpan]:
 
         spans.append(
             SegmentSpan(
-                text=stripped,
+                text=chunk,  # raw chunk: concatenation == input (strip is display-layer concern)
                 needs_review=needs_review,
                 review_reason=review_reason,
             )

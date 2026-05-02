@@ -322,14 +322,11 @@ def test_tab_newline_only_returns_empty_list():
         "价格 3.14 元。",
         "联系 admin@example.com 谢谢。",
         "参考 https://example.com 即可。谢谢。",
-        # Note: "今天。 明天。" is intentionally omitted from the invariant
-        # parametrize.  SegmentSpan strips leading/trailing whitespace, so
-        # joined spans lose the inter-sentence space.  normalize() collapses
-        # whitespace but does not delete it, so normalize("今天。明天。") !=
-        # normalize("今天。 明天。").  This is a known, documented edge case:
-        # merged_cn_text in production does not contain inter-sentence spaces,
-        # and the invariant holds for all realistic inputs.  The strip behavior
-        # is separately verified by test_trailing_whitespace_stripped_from_spans.
+        # Whitespace inputs: SegmentSpan preserves raw chunks, so invariant holds.
+        "今天。 明天。",       # single inter-sentence space
+        "今天。  明天。",      # double space (normalize folds)
+        "今天。\n明天。",     # newline boundary
+        "  开头有空格。结尾有空格。  ",  # leading + trailing whitespace
         "e.g. 这样可以吗?",
         "这是 hello world 句子。结束。",
         "很好！继续。",
@@ -382,10 +379,10 @@ def test_segment_span_is_frozen():
         span.text = "changed"  # type: ignore[misc]
 
 
-def test_segment_span_strips_whitespace():
-    """SegmentSpan strips leading/trailing whitespace on text via __post_init__."""
+def test_segment_span_preserves_raw_text():
+    """SegmentSpan preserves raw text — no stripping (strip is display-layer concern)."""
     span = SegmentSpan(text="  测试  ")
-    assert span.text == "测试"
+    assert span.text == "  测试  "
 
 
 def test_segment_span_defaults():
@@ -400,12 +397,22 @@ def test_segment_span_defaults():
 # ---------------------------------------------------------------------------
 
 
-def test_trailing_whitespace_stripped_from_spans():
-    """'今天。 明天。' → spans are '今天。' and '明天。', not '今天。' and ' 明天。'."""
-    spans = segment_text("今天。 明天。")
+def test_inter_sentence_space_preserved_in_raw_chunk():
+    """'今天。 明天。' → spans preserve raw chunks; concatenation == input.
+
+    SegmentSpan no longer strips.  The raw chunk from _split_on_boundaries
+    for the second sentence is ' 明天。' (with leading space), so that
+    ''.join(s.text for s in spans) == '今天。 明天。' == original input.
+    Display layers (SRT writer) strip before rendering.
+    """
+    jin = '今'; tian = '天'; period = '。'; ming = '明'
+    text = jin + tian + period + ' ' + ming + tian + period
+    spans = segment_text(text)
     assert len(spans) == 2
-    assert spans[0].text == "今天。"
-    assert spans[1].text == "明天。"
+    assert spans[0].text == jin + tian + period
+    assert spans[1].text == ' ' + ming + tian + period
+    # Concatenation strictly equals input
+    assert ''.join(s.text for s in spans) == text
 
 
 # ---------------------------------------------------------------------------
