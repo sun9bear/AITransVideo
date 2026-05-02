@@ -1164,6 +1164,21 @@ async def intercept_job_subresource(
             request, job_id, db, user, subpath=subpath,
         )
 
+    # --- Jianying draft endpoints (plan §11.7 K6) ---
+    # POST /jobs/{id}/generate-jianying-draft and
+    # GET  /jobs/{id}/jianying-draft-status require X-Internal-Key to
+    # reach the Job API. Ownership is already verified above by
+    # _verify_job_ownership. We inject internal_headers() here; the
+    # service-mode (Studio-only) gate lives at the Job API layer (K4/K5).
+    if subpath in _JIANYING_DRAFT_SUBPATHS:
+        from internal_auth import internal_headers
+        return await proxy_request(
+            request=request,
+            upstream_base=settings.job_api_upstream,
+            strip_prefix="/job-api",
+            extra_headers=internal_headers(),
+        )
+
     # --- Phase 2 R2 download redirect (plan 2026-04-23) ---
     # Narrow surface: only GET /download/publish.dubbed_video, only when the
     # effective backend is R2. Any R2 error inside this branch silently
@@ -1590,6 +1605,16 @@ async def _serve_redacted_logs(
         status_code=200,
         media_type="application/json",
     )
+
+
+# Jianying draft endpoints (plan §11.7 K6).
+# Both require X-Internal-Key forwarding; ownership is verified by the
+# intercept_job_subresource caller. No feature flag — always enabled when
+# the Job API supports the route.
+_JIANYING_DRAFT_SUBPATHS: frozenset[str] = frozenset({
+    "generate-jianying-draft",   # POST — trigger on-demand draft generation
+    "jianying-draft-status",     # GET  — poll draft generation status
+})
 
 
 # Set of subpaths that represent editing STATE TRANSITIONS (need FOR UPDATE
