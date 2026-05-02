@@ -100,12 +100,30 @@ def build_job_api_server(
     service: JobService,
     host: str = JOB_API_DEFAULT_HOST,
     port: int = JOB_API_DEFAULT_PORT,
+    jianying_runner: object | None = None,
 ) -> ThreadingHTTPServer:
-    handler_class = _build_job_api_handler(service=service)
+    from services.jobs.jianying_draft_runner import JianyingDraftRunner
+
+    if jianying_runner is None:
+        jianying_runner = JianyingDraftRunner(store=service.store)
+
+    # Reap orphaned "running" draft rows from a previous process restart.
+    # Must run before accepting requests so the first trigger after a crash
+    # sees "failed" (retriable) rather than stuck "running" (409).
+    try:
+        reaped = jianying_runner.reap_stale()
+        if reaped:
+            logger.info(
+                "Reaped %d stale jianying draft running job(s) at startup", reaped
+            )
+    except Exception:  # pragma: no cover
+        logger.exception("reap_stale at startup failed; continuing")
+
+    handler_class = _build_job_api_handler(service=service, jianying_runner=jianying_runner)
     return ThreadingHTTPServer((host, port), handler_class)
 
 
-def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandler]:
+def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> type[BaseHTTPRequestHandler]:
     class JobAPIHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
             parsed_path = urlparse(self.path)
@@ -1035,6 +1053,106 @@ def _build_job_api_handler(*, service: JobService) -> type[BaseHTTPRequestHandle
                         "already_exists": False,
                         "render_task_id": render_task_id,
                     })
+                    return
+
+                # POST /jobs/{id}/generate-jianying-draft (K4)
+                # Trigger on-demand Jianying draft generation. Idempotent —
+                # running -> 409, succeeded -> 200, idle/failed -> 202.
+                # Internal-key auth required when AVT_INTERNAL_API_KEY is set.
+                if (
+                    len(path_parts) == 3
+                    and path_parts[0] == "jobs"
+                    and path_parts[2] == "generate-jianying-draft"
+                ):
+                    # Internal-key auth: if AVT_INTERNAL_API_KEY is set,
+                    # the caller must supply a matching X-Internal-Key header.
+                    _jianying_internal_key = os.environ.get("AVT_INTERNAL_API_KEY", "").strip()
+                    if _jianying_internal_key:
+                        _req_key = self.headers.get("X-Internal-Key", "").strip()
+                        if _req_key != _jianying_internal_key:
+                            self._write_json(
+                                HTTPStatus.FORBIDDEN,
+                                {"error": "Invalid or missing X-Internal-Key"},
+                            )
+                            return
+                    jianying_job_id = path_parts[1]
+                    # Gate: job must exist
+                    record = service.store.load_job(jianying_job_id)
+                    if record is None:
+                        self._write_json(
+                            HTTPStatus.NOT_FOUND,
+                            {"code": "job_not_found", "message": f"Job {jianying_job_id} not found."},
+                        )
+                        return
+                    # Gate: job must be succeeded
+                    if record.status != "succeeded":
+                        self._write_json(
+                            HTTPStatus.BAD_REQUEST,
+                            {
+                                "code": "job_not_succeeded",
+                                "message": (
+                                    f"Job is in status={record.status!r}; "
+                                    "cannot generate Jianying draft until job is succeeded."
+                                ),
+                            },
+                        )
+                        return
+                    # Gate: service_mode must be "studio"
+                    if (record.service_mode or "").lower() != "studio":
+                        self._write_json(
+                            HTTPStatus.FORBIDDEN,
+                            {
+                                "code": "service_mode_not_studio",
+                                "message": "Jianying draft is only available for Studio mode jobs.",
+                            },
+                        )
+                        return
+                    # Delegate to runner
+                    from services.jobs.jianying_draft_runner import (
+                        JianyingEngineUnavailable,
+                        JianyingNotAllowedError,
+                    )
+                    try:
+                        result = jianying_runner.trigger(jianying_job_id)
+                    except JianyingNotAllowedError as exc:
+                        # Should be caught by gates above, but defensive
+                        self._write_json(
+                            HTTPStatus.FORBIDDEN,
+                            {"code": "service_mode_not_studio", "message": str(exc)},
+                        )
+                        return
+                    except JianyingEngineUnavailable as exc:
+                        self._write_json(
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"code": "engine_unavailable", "message": str(exc)},
+                        )
+                        return
+                    except Exception as exc:
+                        logger.exception(
+                            "Jianying trigger failed for job %s", jianying_job_id
+                        )
+                        self._write_json(
+                            HTTPStatus.INTERNAL_SERVER_ERROR,
+                            {"code": "internal_error", "message": str(exc)[:500]},
+                        )
+                        return
+                    # Map runner result to HTTP status:
+                    # - running + "message" key present -> idempotent already-running -> 409
+                    # - succeeded -> idempotent already-done -> 200
+                    # - running without "message" key -> newly dispatched -> 202
+                    r_status = result.get("status")
+                    if r_status == "running" and "message" in result:
+                        # Already in progress
+                        self._write_json(
+                            HTTPStatus.CONFLICT,
+                            {**result, "message": "Jianying draft generation already in progress."},
+                        )
+                        return
+                    if r_status == "succeeded":
+                        self._write_json(HTTPStatus.OK, result)
+                        return
+                    # Newly dispatched (idle or failed -> running)
+                    self._write_json(HTTPStatus.ACCEPTED, result)
                     return
 
                 # --- Phase 1: job-scoped cancel ---

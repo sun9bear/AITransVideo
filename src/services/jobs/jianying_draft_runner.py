@@ -49,6 +49,15 @@ class JianyingNotAllowedError(Exception):
         super().__init__(message or reason)
 
 
+class JianyingEngineUnavailable(Exception):
+    """Raised when the pyJianYingDraft engine is not available (not installed).
+
+    Re-exported here so the API layer only needs to import from
+    services.jobs.jianying_draft_runner, keeping the optional
+    modules.output.jianying dependency out of api.py imports.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
