@@ -300,6 +300,14 @@ def test_invalid_zero_duration_raises_value_error():
         assign_timing([span("一")], block_start_ms=1000, block_end_ms=1000)
 
 
+def test_invalid_too_many_spans_raises_value_error():
+    """When n > total_duration (degenerate input), assign_timing should
+    reject the request — each cue requires at least 1 ms."""
+    spans = [span(f"x{i}") for i in range(4)]
+    with pytest.raises(ValueError, match="Too many spans"):
+        assign_timing(spans, block_start_ms=0, block_end_ms=3)
+
+
 def test_invalid_negative_duration_raises_value_error():
     """block_end_ms < block_start_ms raises ValueError."""
     with pytest.raises(ValueError, match="block_end_ms"):

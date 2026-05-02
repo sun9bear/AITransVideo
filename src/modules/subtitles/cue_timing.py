@@ -155,6 +155,13 @@ def assign_timing(
     if n == 0:
         return []
 
+    # Degenerate case: more spans than total milliseconds
+    if n > total_duration:
+        raise ValueError(
+            f"Too many spans ({n}) for total duration ({total_duration} ms). "
+            f"Each cue requires at least 1 ms."
+        )
+
     # --- Step 1: compute raw weights with per-span zero floor ---
     raw_weights = [_speech_weight(s.text) for s in spans]
     weights = [w if w > 0.0 else 1.0 for w in raw_weights]
