@@ -214,16 +214,25 @@ export interface GenerateJianyingDraftResponse {
  * - already succeeded → 200, {status: "succeeded", artifact_key: ...}
  * - already running → 409 (throws ApiError)
  * - service_mode not studio → 403 (throws ApiError)
+ * - invalid user_draft_root → 400 (throws Error with backend message)
+ *
+ * Pass `options.userDraftRoot` to tell the backend which local Jianying
+ * drafts directory to bake absolute paths into (K11/K12/K13).
  */
 export async function generateJianyingDraft(
   jobId: string,
+  options?: { userDraftRoot?: string },
 ): Promise<GenerateJianyingDraftResponse> {
   const url = buildBackendUrl(resolveJobApiBaseUrl(), `/jobs/${jobId}/generate-jianying-draft`)
+  const bodyPayload: Record<string, string> = {}
+  if (options?.userDraftRoot) {
+    bodyPayload.user_draft_root = options.userDraftRoot
+  }
   const res = await fetch(url, {
     method: 'POST',
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
-    body: '{}',
+    body: JSON.stringify(bodyPayload),
   })
   if (!res.ok) {
     const body = await res.json().catch(() => ({})) as Record<string, unknown>

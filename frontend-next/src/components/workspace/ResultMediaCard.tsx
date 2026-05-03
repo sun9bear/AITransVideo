@@ -17,6 +17,7 @@ import {
   getJianyingDraftStatus,
   type JianyingDraftStatusResponse,
 } from "@/lib/api/jobs"
+import { JianyingDraftPathDialog } from "@/components/workspace/JianyingDraftPathDialog"
 import { useBackgroundTask } from "@/lib/react/useBackgroundTask"
 import { usePollingTask } from "@/lib/react/usePollingTask"
 import { Download, Video, Music, Package, X, Film, Loader2, RotateCcw, CheckCircle2, RefreshCw, Clapperboard } from "lucide-react"
@@ -506,6 +507,8 @@ function JianyingDraftSection({ jobId }: { jobId: string }) {
   const [draftState, setDraftState] = useState<JianyingDraftStatusResponse>(JIANYING_DEFAULT_STATE)
   const [triggering, setTriggering] = useState(false)
   const [elapsedSec, setElapsedSec] = useState<number | null>(null)
+  const [dialogOpen, setDialogOpen] = useState(false)
+  const [dialogError, setDialogError] = useState<string | undefined>(undefined)
 
   // Initial fetch on mount — recovers state when user re-opens the tab
   useEffect(() => {
@@ -557,11 +560,19 @@ function JianyingDraftSection({ jobId }: { jobId: string }) {
     `/jobs/${jobId}/download/editor.jianying_draft_zip`,
   )
 
-  async function handleTrigger() {
+  function handleGenerateClick() {
+    setDialogError(undefined)
+    setDialogOpen(true)
+  }
+
+  async function handleDialogConfirm(userDraftRoot: string) {
     if (triggering) return
     setTriggering(true)
     try {
-      const res = await generateJianyingDraft(jobId)
+      const res = await generateJianyingDraft(jobId, { userDraftRoot })
+      // Success — close dialog and start polling
+      setDialogOpen(false)
+      setDialogError(undefined)
       // Merge returned state so polling starts immediately if running
       setDraftState((prev) => ({
         ...prev,
@@ -576,7 +587,9 @@ function JianyingDraftSection({ jobId }: { jobId: string }) {
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : '触发失败，请稍后重试'
-      toast.error(msg)
+      // Surface the error inside the dialog so the user can correct and retry.
+      // Do NOT close the dialog on error.
+      setDialogError(msg)
     } finally {
       setTriggering(false)
     }
@@ -599,7 +612,7 @@ function JianyingDraftSection({ jobId }: { jobId: string }) {
             variant="outline"
             size="sm"
             className="gap-2"
-            onClick={handleTrigger}
+            onClick={handleGenerateClick}
             disabled={triggering}
             title="生成可用剪映打开的草稿包，5-30 秒"
           >
@@ -653,7 +666,7 @@ function JianyingDraftSection({ jobId }: { jobId: string }) {
               variant="outline"
               size="sm"
               className="gap-2 border-destructive/60 text-destructive"
-              onClick={handleTrigger}
+              onClick={handleGenerateClick}
               disabled={triggering}
               title={error ?? undefined}
             >
@@ -672,6 +685,13 @@ function JianyingDraftSection({ jobId }: { jobId: string }) {
           </div>
         )}
       </div>
+
+      <JianyingDraftPathDialog
+        open={dialogOpen}
+        onOpenChange={setDialogOpen}
+        onConfirm={handleDialogConfirm}
+        errorMessage={dialogError}
+      />
     </div>
   )
 }
