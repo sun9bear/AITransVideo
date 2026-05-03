@@ -1,3 +1,5 @@
+import { FaqJsonLd } from "@/components/seo/faq-json-ld"
+
 /**
  * FAQ section. DESIGN.md §3.5 — pricing / FAQ surfaces should stay on neutral,
  * high-contrast reading backgrounds for dense Chinese text.
@@ -11,6 +13,14 @@
  * inclusion) while those values remain unfrozen in the gateway catalog.
  * Answers that reference plan-specific numbers should be added after Task 0's
  * trial config is flipped to `frozen = true`.
+ *
+ * SEO: FAQPage JSON-LD schema is emitted inline next to the visible Q&A
+ * markup so the schema and DOM stay byte-aligned — Google's FAQ guideline
+ * requires the structured-data Q&A to mirror what users actually see.
+ * AI search engines (Perplexity, ChatGPT, Claude, Bing Copilot) lean on
+ * FAQPage for direct Q&A citation in answers; even after Google's 2023
+ * rich-snippet pullback the AI-side upside still beats the few hundred
+ * bytes of inline JSON.
  */
 type FaqItem = { q: string; a: string }
 
@@ -85,6 +95,7 @@ export function Faq({ variant = "home" }: { variant?: "home" | "pricing" }) {
       id="faq"
       className="marketing-reading-surface py-14 sm:py-16"
     >
+      <FaqJsonLd items={items} id={`ld-faq-${variant}`} />
       <div className="mx-auto max-w-3xl px-4 sm:px-6 lg:px-8">
         <div className="text-center">
           <p className="ink-heading text-xs uppercase tracking-widest text-[color:var(--cinnabar,#C73E3A)]">
