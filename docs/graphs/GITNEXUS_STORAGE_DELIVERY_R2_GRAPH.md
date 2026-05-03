@@ -4,104 +4,94 @@
 
 ## 1. 范围
 
-这张子图聚焦用户拿到结果文件时的交付链路，重点是：
+这张子图只看“任务结果如何变成用户可下载 / 可导出的交付物”，重点是：
 
-- `projects` / `workspace` 下载表面
-- Gateway 下载路由决策
-- `display_name` 到文件名的派生
-- `R2 redirect -> local fallback`
-- 下载事件打点
+- `publish.dubbed_video`
+- `materials_pack`
+- `editor.jianying_draft_zip`
+- Job API 下载白名单、manifest resolve、R2 / local fallback 的边界
 
-## 2. 存储与交付主图
+## 2. 主图
 
 ```mermaid
 graph TD
-    Projects["Projects page / Result surface"] --> DownloadUI["/job-api/jobs/{id}/download/publish.dubbed_video"]
-    DownloadUI --> Gateway["gateway/job_intercept.py"]
+    ResultUI["Workspace / ResultMediaCard"] --> Video["publish.dubbed_video"]
+    ResultUI --> Pack["materials_pack"]
+    ResultUI --> JDraft["editor.jianying_draft_zip"]
 
-    Gateway --> FileName["display_name -> title -> job_id"]
-    Gateway --> Decide["_maybe_r2_redirect()"]
-    Decide --> Router["storage.backend_router.resolve_download_target()"]
+    Video --> FrontDownloads["download helpers / stream urls"]
+    Pack --> TaskPlane["background task plane"]
+    JDraft --> FrontDownloads
 
-    Router --> R2Path["HEAD / lazy upload / presign"]
-    Router --> LocalPath["return None"]
-    R2Path --> R2["R2 presigned URL"]
-    LocalPath --> JobAPI["Gateway -> Job API local passthrough"]
+    FrontDownloads --> Gateway["Gateway"]
+    FrontDownloads --> JobApi["Job API"]
 
-    Gateway --> Events["download.redirect.r2 / download.fallback.local / download.local.direct"]
-    Projects --> Rename["display_name rename surface"]
-    Rename --> Gateway
+    Gateway --> Proxy["ownership / policy"]
+    Proxy --> JobApi
+
+    JobApi --> Manifest["manifest resolve / artifact lookup"]
+    Manifest --> PublicKeys["public download keys"]
+    PublicKeys --> Local["local file download"]
+    PublicKeys --> R2["R2 redirect / fallback surfaces"]
+
+    Pack --> TaskDownload["task zip download"]
 ```
 
-## 3. 前端对 R2 仍然零感知
+## 3. 当前交付面的变化
 
-- 用户侧下载 URL 仍然是：
-  `/job-api/jobs/{id}/download/publish.dubbed_video`
-- `frontend-next/src/app/(app)/projects/page.tsx` 负责展示结果、重命名、进入后续动作
-- 前端不需要知道：
-  bucket
-  presigned URL
-  `X-Amz-*`
-  R2 endpoint
+### 3.1 `editor.jianying_draft_zip` 已进入正式白名单
 
-结论：下载后端选择仍然必须完全留在服务端。
+- `src/services/web_ui/output_entries.py` 的 `PUBLIC_RESULT_DOWNLOAD_KEYS` 现在包含：
+  - `manifest.file`
+  - `translation.segments`
+  - `editor.subtitles`
+  - `editor.dubbed_audio_complete`
+  - `editor.jianying_draft_zip`
+  - `publish.dubbed_video`
 
-## 4. 单一决策点与 fallback 契约
+结论：剪映草稿 zip 不是隐藏调试产物，而是正式公开下载项。
 
-`gateway/storage/backend_router.py` 当前明确声明：
+### 3.2 结果页现在承载三种交付动作
 
-- 它是“这次下载是否真的走 R2”的唯一决策点
-- 只有 `publish.dubbed_video` 这一个 artifact key 接到这条路由
-- 对 HEAD / upload / presign 任一异常都必须 `return None`
-- 返回 `None` 后由 Gateway 自动走本地透传
+- `frontend-next/src/components/workspace/ResultMediaCard.tsx`
+  - 视频下载 / 播放
+  - 素材包打包与下载
+  - `JianyingDraftSection`
 
-这条契约的关键意义是：R2 退化时，用户仍然拿得到文件。
+结论：结果页交付面已经从“下载结果”升级成“下载 / 打包 / 导出到剪映草稿”的多交付平面。
 
-## 5. Gateway 下载入口
+### 3.3 剪映草稿仍走 Job API download key，而不是前端直拼磁盘路径
 
-`gateway/job_intercept.py` 当前在下载路径上做三件事：
+- `ResultMediaCard.tsx` 构建下载地址时走：
+  - `/jobs/{jobId}/download/editor.jianying_draft_zip`
+- 这条路径仍然经过 Gateway ownership / Job API resolve
 
-- 先调用 `_maybe_r2_redirect(job_id, db)`
-- 用 `_derive_download_filename(job)` 派生友好文件名
-- 根据结果写入事件：
-  `download.redirect.r2`
-  `download.fallback.local`
-  `download.local.direct`
+结论：前端并不知道 zip 的真实磁盘位置；下载权限和定位仍由后端掌握。
 
-其中 `_derive_download_filename(job)` 的优先级是：
+### 3.4 绝对路径模式影响的是 zip 内 draft，而不是下载协议
 
-- `display_name`
-- `title`
-- `job_id`
+- `src/modules/output/jianying/jianying_draft_writer.py`
+  - 无 `user_draft_root`：把 materials 改写成相对路径
+  - 有 `user_draft_root`：把 materials 改写成用户本地剪映草稿目录下的绝对路径
+- 但无论哪种模式，交付给用户的外层产物都还是 `editor.jianying_draft_zip`
 
-这说明重命名已经会直接影响用户“另存为”看到的文件名。
+结论：`user_draft_root` 改的是“解压后 draft_content.json 里的 material path”，不是前端下载协议。
 
-## 6. R2 路径的当前形状
+## 4. 关键证据
 
-`gateway/storage/backend_router.py` 与 `gateway/storage/r2_client.py` 共同形成当前 R2 交付链：
+- `src/services/web_ui/output_entries.py`
+  - `editor.jianying_draft_zip` 在公开下载白名单中
+- `src/modules/output/manifest_writer.py`
+  - `primary_outputs.editor` 写入 jianying draft 相关路径
+- `frontend-next/src/components/workspace/ResultMediaCard.tsx`
+  - Studio 结果页显示 `JianyingDraftSection`
+  - 下载 URL 指向 `/jobs/{id}/download/editor.jianying_draft_zip`
+- `src/services/jobs/api.py`
+  - download key 统一从 Job API resolve
 
-- `is_r2_enabled()` 判断当前是否启用 R2 后端
-- `r2_key_for(job_id, artifact_key, local_path=...)` 生成对象 key
-- `head_artifact(key)` 判断对象是否存在
-- 本地存在但对象缺失时，按 per-key lock 触发 lazy upload
-- `generate_presigned_download_url(key, download_filename)` 生成下载 URL
+## 5. 什么时候优先读这张图
 
-这条链目前是“可切换下载后端”，而不是“全仓统一对象存储”。
-
-## 7. display_name 与交付面
-
-- `frontend-next/src/app/(app)/projects/page.tsx` 已经有 rename / result card 表面
-- `gateway/job_intercept.py` 也在 `copy_as_new` 返回后镜像写入 `new_display_name`
-
-这意味着交付层现在不只是“有没有文件”，还要考虑：
-
-- 项目在列表页叫什么
-- 下载文件名叫什么
-- 复制任务后的新结果以什么名字进入系统
-
-## 8. 这张图适合回答什么问题
-
-- 下载为什么必须先经过 Gateway，而不是让前端直连存储
-- R2 故障时为什么用户仍然能继续下载
-- `display_name` 为什么会影响最终下载文件名
-- 当前哪些 artifact 已经接入 R2 路由，哪些还没有
+- 想改结果页下载面
+- 想把新交付物加入白名单
+- 想判断剪映草稿 zip 该走哪条下载路径
+- 想区分“zip 下载协议”和“zip 内 draft 的绝对 / 相对路径模式”

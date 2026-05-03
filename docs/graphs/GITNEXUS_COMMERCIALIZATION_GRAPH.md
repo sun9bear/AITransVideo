@@ -4,176 +4,87 @@
 
 ## 1. 范围
 
-这张子图只看商业化相关链路，重点是：
+这张子图看的是“用户为什么买、前端如何承诺、哪些事实必须继续由 Gateway 持有”，重点是：
 
-- 营销首页 narrative / proof、定价页、试用页、法律页、contact、settings billing center
-- Gateway 侧的 pricing runtime、plan catalog、trial、credits、payment
-- workspace 创建任务前的 credits 可读 guard
-- provider abstraction、provider availability 与 Alipay live path
-- voice clone cost / quality tier / live reserve 如何继续消费 Gateway 真源
+- marketing 前门 narrative / proof
+- pricing / trial SSR 真源
+- workspace credit read-side guard
+- Studio 与剪映草稿承诺的边界
 
-不展开主流程内部实现，只保留与计费、套餐、权益和转化相关的连接点。
-
-## 2. 商业化主图
+## 2. 主图
 
 ```mermaid
 graph TD
-    PublicRoutes["Public route boundary<br/>middleware.ts"] --> Home["Marketing home"]
-    PublicRoutes --> PricingPage["Pricing page"]
-    PublicRoutes --> TrialPage["Trial page"]
-    PublicRoutes --> Legal["Legal / policy / contact pages"]
+    Home["marketing page.tsx"] --> Pain["PainPoints"]
+    Pain --> Demos["FeaturedDemos"]
+    Demos --> Proof["ProductProof"]
+    Proof --> Workflow["WorkflowShowcase"]
+    Workflow --> Pricing["PricingPreview"]
 
-    Home --> Narrative["PainPoints / ProductProof / ToolComparison"]
-    Narrative --> ProofAssets["Real workspace screenshots / proof assets"]
-    Home --> SSRPlans["SSR plans fetch<br/>getPlansSafeServer()"]
-    PricingPage --> SSRPlans
-    TrialPage --> SSRPlans
-    SSRPlans --> PublicPlans["GET /api/plans"]
-    PublicPlans --> GatewayTruth
+    Pricing --> PlansSSR["SSR plans fetch"]
+    PlansSSR --> GatewayPlans["Gateway plan_catalog / pricing_runtime"]
 
-    BillingCenter["Settings / Billing UI"] --> FrontAPI
-    CreateJob["TranslationForm credit/concurrency guard"] --> CreditsRead["/api/me/credits + /api/credits/estimate"]
-    VoicePricing["Voice selection pricing consumer"] --> FrontAPI
-    AdminPricing["Admin Pricing UI"] --> AdminAPI
+    Workspace["TranslationForm / workspace"] --> CreditsRead["/api/me/credits + /api/credits/estimate"]
+    Workspace --> PlansGate["entitlements / plan gate"]
+    CreditsRead --> GatewayPlans
+    PlansGate --> GatewayPlans
 
-    FrontAPI["Frontend API layer<br/>plans / billing / session"] --> GatewayTruth
-    CreditsRead --> GatewayTruth
-    AdminAPI["Admin pricing API"] --> GatewayTruth
-
-    GatewayTruth["Gateway truth layer<br/>pricing_runtime / plan_catalog"] --> TrialRules["Trial rules"]
-    GatewayTruth --> Plans["Plan catalog / prices"]
-    GatewayTruth --> Credits["credits_service / reserve guards"]
-    GatewayTruth --> Billing["billing.py"]
-    GatewayTruth --> Session["auth / session / entitlements"]
-
-    Billing --> ProviderConfig["get_checkout_config"]
-    Billing --> Orders["create_order / history / order refresh"]
-    Billing --> Webhooks["provider-dispatched webhooks"]
-    Billing --> Providers["payment_providers.py"]
-    Providers --> Alipay["payment_provider_alipay.py"]
-
-    Plans --> VoicePricing
-    VoicePricing --> CloneFlow["voice_selection_api.py<br/>live reserve / capture / release"]
-    Credits --> Ledger["credits buckets / ledgers / debit rates"]
-    Webhooks --> Ledger
-    CloneFlow --> Ledger
-    Session --> FrontAPI
+    ResultProof["ResultMediaCard / JianyingDraftSection"] --> Workflow
 ```
 
-## 3. marketing 前门仍然是 SSR + narrative/proof 组合面
+## 3. 这轮最重要的商业化变化
 
-### 3.1 首页 narrative 已经稳定
+### 3.1 marketing 前门已经把“导出剪映草稿”写成明确承诺
 
-- `frontend-next/src/app/(marketing)/page.tsx` 当前首页顺序仍是：
-  `Hero -> PainPoints -> ProductProof -> WorkflowShowcase -> Features -> SuitedScenarios -> ToolComparison -> TrustBanner -> PricingPreview -> Faq -> FinalCta`
-- `ProductProof` 继续使用真实 workspace 截图证明：
-  创建任务
-  项目结果与下载
-  翻译复核
-  三引擎音色选择
+- `frontend-next/src/components/marketing/workflow-showcase.tsx`
+  - 第 4 步明确写了“下载结果，或直接导出剪映草稿”
+- `frontend-next/src/components/marketing/product-proof.tsx`
+  - 结果页截图与说明继续承担“这是可交付工作台，而不是一次性玩具”的证明
+- `frontend-next/src/app/(marketing)/page.tsx`
+  - narrative 继续是 `PainPoints -> FeaturedDemos -> ProductProof -> WorkflowShowcase -> PricingPreview`
 
-### 3.2 pricing / trial 仍从 Gateway 真源 SSR 注入
+结论：前门承诺已经从“生成中文配音结果”升级成“可以继续导出到本地剪映工作流”。
 
-- `pricing` / `trial` 继续通过 `getPlansSafeServer() -> /api/plans` 把数字事实放进 initial HTML
-- `get-plans.ts` 仍然是前端学习 plan / pricing / trial runtime facts 的唯一受支持路径
+### 3.2 套餐 / 试用 / service-mode gate 仍由 Gateway 掌握
 
-结论：marketing 前门继续承担“叙事 + 真实产品证明 + Gateway 事实注入”三重职责。
+- `gateway/plan_catalog.py` 仍是 plan / trial / pricing 的中心真源
+- `job_intercept.py` 继续根据 plan gate 计算 `service_mode`、provider、质量层等策略
+- 剪映草稿只对 `studio` 任务开放，这个 gate 也落在后端
 
-## 4. workspace 创建任务前现在也有 credits 可读 guard
+结论：前端可以承诺“Studio 可导出剪映草稿”，但不能自己发明谁有资格看到这个能力。
 
-- `frontend-next/src/components/workspace/TranslationForm.tsx` 现在会读取：
-  `getMyCredits()`
-  `getCreditsEstimate(1, "express", "standard")`
-  `getCreditsEstimate(1, "studio", "standard" | "high" | "flagship")`
-- 同一个表单会同时显示：
-  当前可用点数
-  express / studio 基础费率
-  studio 高级 / 旗舰档位费率
-  并发占用 guard
-- 这些接口来自 `gateway/credits_read.py`：
-  `GET /api/me/credits`
-  `GET /api/me/credits-ledger`
-  `GET /api/credits/estimate`
+### 3.3 workspace 读侧 guard 已稳定成商业化前置面
 
-结论：商业化真源现在不只在 marketing 和 billing center，也显式延伸到了 workspace 创建任务前的读侧 guard。
+- `TranslationForm` 继续消费：
+  - `/api/me/credits`
+  - `/api/credits/estimate`
+- 这条链负责余额展示、分钟预估、并发与套餐限制的前置提醒
 
-## 5. public route 与 provider availability 都不能由前端自己猜
+结论：商业化链路现在分成两段：
+- 读侧 guard 在前端提前解释门槛
+- 真正的 plan / credit / service-mode 决策仍在 Gateway
 
-- `frontend-next/src/middleware.ts` 继续把这些路径保留为 public exact paths：
-  `/`
-  `/pricing`
-  `/trial`
-  `/auth`
-  `/terms`
-  `/privacy`
-  `/refund`
-  `/contact`
-- `gateway/billing.py:get_checkout_config()` 继续声明“Gateway owns provider availability”
+### 3.4 “剪映草稿”是产品承诺，不是另一套计费真源
 
-因此前端不能通过 env、常量或 UI 顺序去推断支付渠道是否可用。
+- `JianyingDraftSection` 在结果页上是 Studio-only 能力
+- 但价格、试用、套餐事实仍从 Gateway 的 plan / runtime 层来
+- 没有前端自带第二套餐餐逻辑去决定谁能导出草稿
 
-## 6. Billing center、job create、voice clone 现在分别站在不同层
+结论：导出剪映草稿是前门 proof 和 Studio 价值主张的一部分，但不是独立的商业真源。
 
-### 6.1 Billing center
+## 4. 关键证据
 
-`frontend-next/src/app/(app)/settings/billing/page.tsx` 继续组合：
+- `frontend-next/src/app/(marketing)/page.tsx`
+  - narrative 顺序以 proof 和 workflow 为主
+- `frontend-next/src/components/marketing/workflow-showcase.tsx`
+  - 第 4 步明确写“导出剪映草稿”
+- `frontend-next/src/components/marketing/product-proof.tsx`
+  - 结果页与可下载交付物是 proof 核心
+- `gateway/plan_catalog.py`
+  - plan / price / trial 仍由 Gateway 持有
 
-- `SubscriptionSummary`
-- `CreditsSummary`
-- `CheckoutCard`
-- `OrderHistory`
+## 5. 什么时候优先读这张图
 
-它承担的是展示与触发职责，不是事实源。
-
-### 6.2 Job create
-
-- `gateway/job_intercept.py` 在创建任务时，如果已知时长，会先 `reserve_credits_or_raise()`
-- 不足时直接返回 structured 402 / error response，并补偿取消上游任务
-
-### 6.3 Voice clone
-
-- `gateway/voice_selection_api.py` clone 路径也改为 `reserve_credits_or_raise()`
-- 不足时直接返回 402，并携带 `required_credits / available_credits`
-- clone 成功后再做 capture，失败则 release
-
-结论：商业化图里现在要区分“读侧 guard”“创建任务 live reserve”“clone live reserve”这三类消费面。
-
-## 7. Provider abstraction 与 Alipay live path
-
-### 7.1 provider abstraction
-
-- `gateway/billing.py` 继续保持 provider-agnostic settlement 语义
-- `gateway/payment_providers.py` 当前注册：
-  `fake`
-  `alipay`
-  `wechatpay`
-  `stripe`
-
-### 7.2 Alipay
-
-- `gateway/payment_provider_alipay.py` 继续支持：
-  `alipay.trade.wap.pay`
-  `alipay.trade.page.pay`
-  `alipay.trade.query`
-  notify / query 验签
-
-结论：Alipay 仍然是 provider registry 中的 live adapter。
-
-## 8. 当前商业化边界
-
-从当前代码组织看，商业化仍然是 staged v2 migration，而不是 big-bang rewrite：
-
-- 真源仍是 `pricing_runtime -> plan_catalog -> billing / credits / entitlements`
-- 前端承担 SSR 展示、转化叙事、读侧 guard、结账、会话与状态刷新
-- live reserve 发生在 Gateway，不在前端
-- `cost estimator`、marketing copy、proof 截图都不能升级成结算事实源
-
-任何让前端重新定义 plan / price / entitlement truth 的改动，都应被视为架构漂移。
-
-## 9. 这张图适合回答什么问题
-
-- 为什么 workspace 创建任务前现在也属于商业化消费面
-- `GET /api/me/credits` 与 `GET /api/credits/estimate` 分别解决什么问题
-- job create 和 voice clone 为什么都已经变成 live reserve guard
-- 真实产品截图为什么仍属于商业化架构的一部分
-- 套餐、试用、价格和 clone credits 究竟谁是最终真源
+- 想改首页文案、CTA、proof 顺序
+- 想判断“导出剪映草稿”应该写在什么位置、由谁兜底
+- 想改套餐事实、试用规则、workspace credits 读侧 guard

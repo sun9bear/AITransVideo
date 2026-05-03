@@ -4,171 +4,95 @@
 
 ## 1. 范围
 
-这张子图聚焦四条相关但不同的链路：
+这张子图只看“主流水线如何形成 canonical output”，重点是：
 
-- 主工作流内核：从输入到 Jianying draft
-- 主链前面的内容合规 gate
-- 任务完成后的导出平面：`materials_pack` 与 `generate_video`
-- 成功任务进入的 post-edit 回路：`editing -> regenerate -> commit -> alignment-only resume`
+- `SemanticBlock` 仍然是 TTS / 对齐 / 字幕的基本处理单元
+- `Subtitle Cue V2` 已经并入输出主路径
+- `Jianying draft` 不是替代主流水线，而是基于成功 Studio 任务的派生交付链
 
-其中第一条是主流程，后两条都是围绕主流程的后处理侧轴；内容合规 gate 则是主流程前部的新阻断点。
-
-## 2. 工作流主图
+## 2. 主图
 
 ```mermaid
 graph TD
-    Entry["process.py / ProjectWorkflow.run_build()"] --> Ingestion["Ingestion"]
-    Ingestion --> AudioPrep["Audio preparation"]
-    AudioPrep --> Media["Media understanding"]
-    Media --> Compliance["Content compliance<br/>local rules + optional LLM second layer"]
-    Compliance --> TranscriptReview["Transcript review / speaker structure"]
-    TranscriptReview --> Translation["Translation"]
-    Translation --> Chunking["SemanticBlock chunking"]
-    Chunking --> TTS["TTS"]
-    TTS --> Alignment["Alignment<br/>DSP first / rewrite fallback"]
-    Alignment --> Retiming["Caption retiming"]
-    Retiming --> Draft["Draft writer"]
-    Draft --> Dispatcher["OutputDispatcher"]
-    Dispatcher --> Editor["Editor package + manifest"]
+    Entry["process.py / ProjectWorkflow"] --> Ingestion["Input ingest"]
+    Ingestion --> Media["Media understanding"]
+    Media --> Compliance["Content compliance"]
+    Compliance --> Transcript["Transcript / speaker prep"]
+    Transcript --> Translation["Translation"]
+    Translation --> Blocks["SemanticBlock chunking"]
+    Blocks --> TTS["TTS"]
+    TTS --> Alignment["DSP-first alignment<br/>rewrite fallback"]
 
-    Editor --> Workspace["Workspace / Result surface"]
-    Workspace --> PackTask["materials_pack"]
-    Workspace --> VideoTask["generate_video"]
-    Workspace --> EditPage["VideoEditPage"]
+    Alignment --> CueV2["cue_pipeline.py<br/>canonical SubtitleCue list"]
+    CueV2 --> Validator["cue_validator.py"]
+    Validator --> SRT["srt_writer.py<br/>serialize only"]
 
-    VideoTask --> RenderAsync["video_render_async.py"]
-    RenderAsync --> Renderer["VideoRenderer"]
-    Renderer --> PublishVideo["publish.dubbed_video + poster"]
+    SRT --> Editor["EditorPackageWriter"]
+    Editor --> Manifest["ManifestWriter"]
+    Manifest --> Result["Workspace / result surface"]
 
-    PackTask --> PackZip["materials zip artifact"]
+    Result --> PublishTask["publish.dubbed_video / generate_video"]
+    Result --> PackTask["materials_pack"]
+    Result --> JDraftTask["generate-jianying-draft"]
 
-    EditPage --> Editing["editor/editing/<br/>segments + voice_map + draft wavs"]
-    Editing --> SingleRegen["single / batch regenerate"]
-    SingleRegen --> SegmentRegen["segment_regenerate.py"]
-    Editing --> Commit["overwrite / copy_as_new"]
-    Commit --> Resume["start_stage='alignment'"]
-    Resume --> AlignmentOnly["process._run_alignment_and_publish_only"]
-    AlignmentOnly --> Dispatcher
+    JDraftTask --> JRunner["JianyingDraftRunner"]
+    JRunner --> JBackend["JianyingDraftBackend"]
+    JBackend --> JWriter["JianyingDraftWriter"]
+    JWriter --> JZip["draft zip + compatibility report"]
 ```
 
-## 3. Draft-first 主骨架没有变
+## 3. 现在的核心认知
 
-`src/modules/workflow/project_workflow.py` 中的本体顺序仍然围绕：
+### 3.1 cue v2 已经插到 editor write 之前
 
-1. `_run_ingestion_stage()`
-2. `_run_audio_preparation_stage()`
-3. `_run_media_understanding_stage(subtitle_lines)`
-4. `_run_translation_stage(source_lines)`
-5. `_run_chunking_stage(translated_lines)`
-6. `_run_alignment_stage(blocks)`
-7. `_run_draft_stage(translated_lines, aligned_blocks)`
+- `src/modules/output/output_dispatcher.py` 先构建 `ProjectOutput`
+- 然后在 `editor_backend.write()` 前调用 `_generate_subtitle_cues(...)`
+- `project_output.subtitle_cues = cue_result.cues`
+- 之后才落盘 editor package
 
-这条顺序继续保证：
+这意味着 editor / SRT 现在消费的是 canonical cues，而不是自己再做一次分段。
 
-- TTS 单位仍然是 `SemanticBlock`
-- Alignment 仍然是 chunking 之后的阶段
-- Caption retiming 仍然是确定性处理
-- 主交付仍然是 draft，而不是把视频渲染塞回主流水线中心
+### 3.2 cue pipeline 仍然站在 deterministic 路径上
 
-## 4. 新增的内容合规 gate
+- `src/modules/subtitles/cue_pipeline.py` 从 `SemanticBlock + SubtitleLine` 出发，做的是 deterministic 的：
+  - 文本拼接
+  - 有效时长解析
+  - cue 构建
+  - validator 校验
+- `src/modules/subtitles/srt_writer.py` 明确禁止 re-segmentation / re-timing，只做序列化
 
-### 4.1 位置
+结论：字幕 retiming 仍然是数学 / 规则驱动，不是把 timing 再交给 LLM。
 
-- `src/pipeline/process.py` 在 `media_understanding` 之后设置 stage 为 running
-- 然后立即构造 `content_compliance_llm`
-- 随后调用 `_run_content_compliance_review(...)`
-- 只有通过后才继续 transcript review / translation 相关逻辑
+### 3.3 剪映草稿位于“成功 Studio 任务之后”的派生层
 
-### 4.2 语义
+- `OutputDispatcher` 主路径先产出 editor package / manifest / publish artifacts
+- `src/services/jobs/jianying_draft_runner.py` 再基于成功的 Studio job 触发按需生成
+- `src/modules/output/jianying/jianying_draft_backend.py` 包装 writer + compatibility report
 
-- `_run_content_compliance_review()` 先跑 `MainlandChinaContentComplianceReviewer`
-- 若本地规则未明确拦截，且开关开启，再跑 `LLMContentComplianceReviewer`
-- LLM 路径通过 `_call_content_compliance_llm_with_retry(...)` 做 retry / peer model 退让
-- 最终报告写到 `compliance/content_review.json`
-- 若结果 blocked，会抛 `ContentPolicyViolationError`
+结论：剪映草稿交付已经很重要，但它并没有把主流水线改成“直接生成剪映草稿、跳过 editor canonical outputs”。
 
-### 4.3 落盘与产物
+### 3.4 交付链现在是“三出口”
 
-- `process.py` 会把 `content_compliance` 放进 media-understanding stage payload
-- artifact index 额外记录 `state.content_compliance`
+- `publish.dubbed_video`
+- `materials_pack`
+- `editor.jianying_draft_zip`
 
-结论：这不是营销或 admin sidecar，而是主 pipeline 前部新增的一道显式 gate。
+前两者是原来的视频/素材交付面；第三者是 Studio 结果页新增的派生交付面。
 
-## 5. OutputDispatcher 的位置
+## 4. 关键证据
 
-`src/modules/output/output_dispatcher.py` 当前职责仍然是：
+- `src/modules/output/output_dispatcher.py`
+  - cue 生成在 `editor_backend.write()` 之前
+  - `build_subtitle_cues_for_blocks(...)` 的输入来自 `semantic_blocks`
+- `src/modules/subtitles/cue_pipeline.py`
+  - 模块头部直接声明 `SemanticBlock list -> SubtitleCue list + ValidationReport`
+- `src/modules/subtitles/srt_writer.py`
+  - 模块头部直接声明“不重分段、不重定时，只序列化 canonical cues”
+- `src/modules/output/manifest_writer.py`
+  - `primary_outputs.editor` 里写入 `jianying_draft_zip / dir / compatibility_report`
 
-- 读取 canonical `LocalizedProject`
-- 先写 editor backend
-- 再按 `OutputTarget` 决定是否执行 publish backend
-- 最后写 manifest 并回填 artifact index
+## 5. 什么时候优先读这张图
 
-这说明 `OutputDispatcher` 不是替代 `project_workflow.py`，而是把“已完成的 canonical localized project”分发到输出后端。
-
-## 6. 导出平面
-
-### 6.1 前端入口
-
-- `frontend-next/src/components/workspace/ResultMediaCard.tsx` 继续通过 `useBackgroundTask()` 管理：
-  `materials_pack`
-  `generate_video`
-- `frontend-next/src/app/(app)/projects/page.tsx` 现在改成分页拉取 `listJobsPage(limit, offset)`，但导出入口仍然落在结果卡片与 workspace 表面
-
-### 6.2 Gateway 任务控制
-
-- `gateway/background_task_api.py` 提供任务创建、查询、latest restore、下载接口
-- `gateway/background_task_queue.py` 通过 `params_fingerprint` 做：
-  dedupe
-  latest state restore
-
-这使“同一个 job、同一组参数”的导出任务具备可恢复状态，而不是重复生成。
-
-## 7. Post-Edit 回路
-
-### 7.1 editing buffer 是独立工作区
-
-- `src/services/jobs/editing.py` 定义：
-  `enter_editing()`：`succeeded -> editing`
-  `cancel_editing()`：`editing -> succeeded`
-- 可变文件都放在 `editor/editing/` 下，而不是直接改 baseline
-- `src/services/jobs/editing_segments.py` 维护段级状态：
-  `accepted`
-  `text_dirty`
-  `tts_loading`
-  `tts_dirty`
-  `tts_failed`
-  `voice_dirty`
-
-### 7.2 regenerate 仍受原有付费约束
-
-- `src/services/tts/segment_regenerate.py` 明确要求只能从 user-initiated editing path 调用
-- 它会重试同一个 provider，不会 silent fallback 到别的 provider
-
-这保证 post-edit 不会绕过既有的付费 API 触发边界。
-
-### 7.3 commit 重新并回 alignment / publish
-
-- `src/services/jobs/editing_commit.py` 的 `overwrite` 会把 editing buffer 提升到 baseline，然后以 `start_stage='alignment'` 重新提交 runner
-- `copy_as_new` 则准备新 `job_id / project_dir`，再以相同的 `alignment` 起点启动新任务
-- `src/pipeline/process.py` 明确支持 `resume_from == STAGE_ALIGNMENT` 时走 `_run_alignment_and_publish_only(config)`
-
-结论：post-edit 不是重新跑 ingestion / translation 主链，而是以“对齐与发布重发”为核心的增量回路。
-
-## 8. 当前结构含义
-
-这套结构的关键边界是：
-
-- workflow 主骨架仍然是 Draft-first
-- 内容合规 gate 在翻译前阻断，不改写 Draft-first 的主骨架
-- 结果页再决定是否异步打包素材或生成可播放视频
-- Studio 修改进入独立 editing buffer，最后并回 `alignment -> publish`
-
-因此，无论导出、post-edit 还是内容合规，都没有把 FFmpeg、zip、长耗时任务或可变编辑态塞回主 pipeline 的最前面。
-
-## 9. 这张图适合回答什么问题
-
-- 为什么主流程仍然是 draft-first
-- 内容合规 gate 究竟插在主流程哪里，会不会阻断翻译
-- `OutputDispatcher` 在整个流程里到底处于什么层级
-- 为什么 post-edit 是 `alignment-only resume`，而不是整条流水线重跑
-- 结果页里的 `materials_pack`、`generate_video`、`VideoEditPage` 分别接到哪里
+- 想改 `process.py`、`OutputDispatcher`、`cue_pipeline.py`、`srt_writer.py`
+- 想判断“剪映草稿是不是主流水线的一部分，还是后置派生层”
+- 想确认 Subtitle Cue V2 在当前架构里到底处于什么位置
