@@ -41,32 +41,40 @@ class SubtitleCuePipelineResult:
 
 
 def _resolve_effective_duration(block: SemanticBlock) -> int:
-    """Resolve the effective audio duration for a block, per plan §5.4 priority.
+    """Resolve the timeline-occupancy duration for a block.
 
-    2026-05-03 修订: target_duration_ms now takes priority over
-    actual_audio_duration_ms.  Rationale: publish_backend lays each segment
-    on the timeline using target_duration_ms (the original SRT window).  For
-    DSP / force_dsp / silence-padding alignment methods, actual_audio_duration_ms
-    is the raw TTS render length BEFORE stretching, which can be a fraction of
-    the timeline slot (e.g. 1533ms raw stretched 17× to fill a 25583ms window).
-    Using actual would make cues disappear 24 seconds early.  target_duration_ms
-    correctly reflects the occupied window for ALL alignment methods; for
-    direct/no-DSP segments it equals actual_audio_duration_ms within rounding.
+    Used by SubtitleCueBuilder to compute block_end_ms = first_start_ms +
+    effective_duration_ms. This must match how publish_backend lays
+    segments on the dubbed audio timeline, otherwise subtitle cues drift
+    out of sync with audio (or cause SegmentOverlap when two adjacent
+    blocks' cue windows overlap).
 
-    Priority:
-    1. block.target_duration_ms if > 0  ← timeline occupancy; correct for all
-                                          alignment methods (DSP and non-DSP)
-    2. block.actual_audio_duration_ms if > 0  ← fallback for legacy blocks
-                                                 where target was not set
-    3. block.last_end_ms - block.first_start_ms  ← last-resort legacy fallback
+    Priority (corrected 2026-05-03 after C2 hot-fix):
+      1. block.last_end_ms - block.first_start_ms (>0)
+         The original SRT segment's time window. This is what
+         publish_backend uses as the segment's timeline slot — audio
+         either fits with silence padding or is DSP-stretched to fill
+         exactly this window. Cue timing must match.
+      2. block.target_duration_ms (>0)
+         Fallback if SRT window is unavailable. Note: target_duration_ms
+         is the LLM rewrite TARGET (how long the rewritten Chinese should
+         read), NOT timeline occupancy. Only used when SRT window is
+         missing.
+      3. block.actual_audio_duration_ms (>0)
+         Final fallback if neither SRT window nor target are set. This
+         is the raw TTS render duration before DSP — least accurate for
+         timeline mapping but better than nothing.
 
     Returns the resolved integer duration (may be <= 0 for degenerate blocks).
     """
+    srt_window = int(block.last_end_ms) - int(block.first_start_ms)
+    if srt_window > 0:
+        return srt_window
     if block.target_duration_ms > 0:
         return int(block.target_duration_ms)
     if block.actual_audio_duration_ms > 0:
         return int(block.actual_audio_duration_ms)
-    return int(block.last_end_ms) - int(block.first_start_ms)
+    return 0  # caller handles empty block
 
 
 def _build_caption_map(subtitle_lines: list[SubtitleLine]) -> dict[int, str]:

@@ -183,16 +183,24 @@ block_end_ms = block.first_start_ms + effective_audio_duration_ms
 
 `effective_audio_duration_ms` 优先级：
 
-> **2026-05-03 修订**：原顺序 (actual → target → last-first) 存在生产 bug：
-> DSP / force_dsp 对齐方法中，`actual_audio_duration_ms` 是 DSP 拉伸**前**的原始
-> TTS 渲染时长，而 publish_backend 把段落按 `target_duration_ms`（原始 SRT 时间窗口）
-> 铺到时间轴上。两者差距可达 17×（真实案例：actual=1533ms，target=25583ms），导致
-> 58% 的字幕偏移。修复：将 `target_duration_ms` 提为第一优先级，因为它精确反映
-> 时间轴占用宽度，对所有对齐方法（含 DSP 和非 DSP）均正确。
+> **2026-05-03 修订 (C2)**：原 §5.4 顺序 `actual → target → last-first` 中 `actual_audio_duration_ms`
+> 是 DSP 拉伸前的原始 TTS 渲染时长，不能作为 timeline 占用宽度。短暂尝试 `target_duration_ms`
+> 作为优先级第一（commit c26f730）出现 SegmentOverlap 生产事故 — 因为
+> `target_duration_ms` 是 LLM rewrite 的目标朗读时长，**不是** timeline 占用，可能远大于
+> 段落在原视频中的真实时间窗口。
+>
+> 正确的 timeline 占用宽度是 `block.last_end_ms - block.first_start_ms`，即原 SRT 段落
+> 的时间窗口。publish_backend 把每个段落 audio fit 到这个窗口里（silence padding 或
+> DSP 拉伸），cue 时间必须对齐这个窗口。
+>
+> 最终顺序：
+> 1. `block.last_end_ms - block.first_start_ms`（原 SRT 时间窗口）— 精确反映 timeline 占用
+> 2. `block.target_duration_ms`（LLM rewrite 目标）— 兼容缺少 SRT 窗口的旧 block
+> 3. `block.actual_audio_duration_ms`（原始 TTS 时长）— 最终兜底
 
-1. `block.target_duration_ms`，如果 > 0。← 时间轴占用宽度，对所有对齐方法均正确
-2. `block.actual_audio_duration_ms`，如果 > 0。← 兼容未设 target 的旧 block
-3. `block.last_end_ms - block.first_start_ms`。← 最终兜底
+1. `block.last_end_ms - block.first_start_ms`，如果 > 0。← 原 SRT 时间窗口,精确反映 timeline 占用
+2. `block.target_duration_ms`，如果 > 0。← 兼容未设原 SRT 窗口的旧 block
+3. `block.actual_audio_duration_ms`，如果 > 0。← 最终兜底
 
 cue 内时间按 speech weight 分配，而不是简单字符数：
 

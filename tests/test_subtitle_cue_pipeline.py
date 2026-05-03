@@ -178,18 +178,20 @@ def test_missing_subtitle_line_treated_as_empty() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Scenario 5: Effective duration priority
+# Scenario 5: Effective duration priority (C2 corrected: SRT window first)
 # ---------------------------------------------------------------------------
 
 
-def test_effective_duration_uses_target_duration_first() -> None:
-    """target_duration_ms takes priority over actual_audio_duration_ms.
+def test_effective_duration_uses_srt_window_first() -> None:
+    """SRT window (last_end_ms - first_start_ms) takes priority over target and actual.
 
-    2026-05-03: Renamed/updated from the old test that asserted actual wins.
-    After the DSP timeline fix, target_duration_ms is first priority because
-    publish_backend lays segments on the timeline using target_duration_ms;
-    actual_audio_duration_ms is the raw pre-DSP render length and must not
-    override the occupied timeline window.
+    2026-05-03 C2 correction: the original C test expected target_duration_ms to
+    win. That was wrong — target_duration_ms is the LLM rewrite target, not
+    timeline occupancy. The SRT window IS the timeline slot used by publish_backend.
+
+    With first_start=1000, last_end=5000 the SRT window is 4000ms.
+    target=3000, actual=2500 are both ignored.
+    block_end_ms = 1000 + 4000 = 5000.
     """
     block = _make_block(
         merged_cn_text="测试。",
@@ -200,30 +202,55 @@ def test_effective_duration_uses_target_duration_first() -> None:
     )
     result = build_subtitle_cues_for_blocks([block], [])
 
-    # block_end_ms should be 1000 + 3000 = 4000  (target wins, not actual)
+    # block_end_ms should be 1000 + (5000-1000) = 5000  (SRT window wins)
     for cue in result.cues:
-        assert cue.end_ms <= 4000, f"cue end_ms {cue.end_ms} exceeds expected block_end 4000"
-    # And cues should NOT be constrained to the old block_end of 3500
-    # (at least one cue should extend past 3500 if the block has non-trivial text)
-    # We verify the span covers the target window, not the smaller actual window.
-    assert result.cues[-1].end_ms == 4000, (
-        f"Last cue end_ms {result.cues[-1].end_ms} != expected block_end 4000"
+        assert cue.end_ms <= 5000, f"cue end_ms {cue.end_ms} exceeds expected block_end 5000"
+    assert result.cues[-1].end_ms == 5000, (
+        f"Last cue end_ms {result.cues[-1].end_ms} != expected block_end 5000 (SRT window)"
     )
 
 
-def test_effective_duration_falls_back_to_target_duration() -> None:
-    """When actual_audio_duration_ms == 0, use target_duration_ms."""
+def test_effective_duration_falls_back_to_target_when_no_srt_window() -> None:
+    """When SRT window == 0, fall back to target_duration_ms.
+
+    Legacy/edge case: first_start_ms == last_end_ms (no SRT window set).
+    target=2000 should be used as the fallback.
+    block_end_ms = 0 + 2000 = 2000.
+    """
     block = _make_block(
         merged_cn_text="测试。",
-        first_start_ms=0,
-        last_end_ms=9000,
-        target_duration_ms=4000,
-        actual_audio_duration_ms=0,
+        first_start_ms=263000,
+        last_end_ms=263000,  # srt_window = 0
+        target_duration_ms=2000,
+        actual_audio_duration_ms=1500,
     )
     result = build_subtitle_cues_for_blocks([block], [])
 
+    # srt_window=0 → skip; target=2000 wins; block_end = 263000 + 2000 = 265000
     for cue in result.cues:
-        assert cue.end_ms <= 4000, f"cue end_ms {cue.end_ms} exceeds expected block_end 4000"
+        assert cue.end_ms <= 265000, f"cue end_ms {cue.end_ms} exceeds expected block_end 265000"
+    assert result.cues[-1].end_ms == 265000, (
+        f"Last cue end_ms {result.cues[-1].end_ms} != 265000 (target fallback)"
+    )
+
+
+def test_effective_duration_falls_back_to_actual_when_no_srt_window_and_no_target() -> None:
+    """When SRT window == 0 and target == 0, fall back to actual_audio_duration_ms."""
+    block = _make_block(
+        merged_cn_text="测试。",
+        first_start_ms=263000,
+        last_end_ms=263000,  # srt_window = 0
+        target_duration_ms=0,
+        actual_audio_duration_ms=1800,
+    )
+    result = build_subtitle_cues_for_blocks([block], [])
+
+    # srt_window=0, target=0 → actual=1800 wins; block_end = 263000 + 1800 = 264800
+    for cue in result.cues:
+        assert cue.end_ms <= 264800, f"cue end_ms {cue.end_ms} exceeds expected block_end 264800"
+    assert result.cues[-1].end_ms == 264800, (
+        f"Last cue end_ms {result.cues[-1].end_ms} != 264800 (actual fallback)"
+    )
 
 
 def test_effective_duration_falls_back_to_last_end_minus_first_start() -> None:
@@ -427,133 +454,200 @@ def test_block_specs_exclude_empty_and_degenerate_blocks() -> None:
 
 
 # ---------------------------------------------------------------------------
-# DSP timeline fix scenarios (2026-05-03)
-# Verifying target_duration_ms (post-DSP timeline) is used, not raw TTS duration.
+# SRT window priority scenarios (2026-05-03, C2 corrected)
+# SRT window (last_end_ms - first_start_ms) is the correct timeline occupancy.
 # ---------------------------------------------------------------------------
 
 
-def test_dsp_force_dsp_target_wins_over_actual() -> None:
-    """force_dsp scenario: target=25583ms, actual=1533ms → effective=25583ms.
+def test_srt_window_force_dsp_wins_over_target_and_actual() -> None:
+    """force_dsp scenario (C2): SRT window=2000ms wins over target=25583ms and actual=1533ms.
 
-    Real production case from Buffett interview seg 11:
-      raw TTS for 11-char CN text = 1533ms
-      original English SRT window = 25583ms
-      DSP stretches audio 17x to fill the window
-      publish_backend lays the segment at target_duration_ms on the timeline
-    Subtitle cues must span the full 25583ms window, not just 1533ms.
+    Real production case from Buffett interview seg 11 that caused SegmentOverlap
+    in production after commit c26f730 (C):
+      SRT window: first_start=263000ms, last_end=265000ms → 2000ms
+      LLM rewrite target: 25583ms (how long the rewritten Chinese should read,
+                                   NOT the timeline slot)
+      raw TTS duration: 1533ms (before DSP stretch)
+      publish_backend lays this segment in the 2000ms SRT window (silence pad or DSP)
+    Subtitle cues must span 2000ms, matching the SRT window. Using target=25583ms
+    causes block_end to overshoot the next block's start_ms → SegmentOverlap.
     """
     block = _make_block(
         merged_cn_text="那你为什么停下来了呢？",
-        first_start_ms=0,
-        last_end_ms=25583,
-        target_duration_ms=25583,
+        first_start_ms=263000,
+        last_end_ms=265000,  # SRT window = 2000ms
+        target_duration_ms=25583,  # LLM rewrite target, NOT timeline
         actual_audio_duration_ms=1533,
     )
     result = build_subtitle_cues_for_blocks([block], [])
 
     assert len(result.cues) >= 1
-    # Last cue must end at the full target window, not the raw TTS window
-    assert result.cues[-1].end_ms == 25583, (
-        f"Last cue end_ms {result.cues[-1].end_ms} should be 25583 (target), "
-        f"not 1533 (actual raw TTS)"
+    # Last cue must end at first_start + SRT window = 263000 + 2000 = 265000
+    assert result.cues[-1].end_ms == 265000, (
+        f"Last cue end_ms {result.cues[-1].end_ms} should be 265000 (SRT window), "
+        f"not 288583 (first_start+target) or 264533 (first_start+actual)"
     )
     # First cue must start at block start
-    assert result.cues[0].start_ms == 0
+    assert result.cues[0].start_ms == 263000
 
 
-def test_dsp_direct_no_dsp_target_close_to_actual() -> None:
-    """direct (no-DSP) scenario: target=2000ms, actual=1950ms → effective=2000ms.
+def test_srt_window_direct_no_dsp_srt_window_matches_actual() -> None:
+    """direct (no-DSP) scenario: SRT window=2000ms wins; target and actual are similar.
 
-    For non-DSP segments, target and actual are close; the fix should not break
-    anything.  target still wins, but the difference is negligible.
+    For non-DSP segments, SRT window is close to target and actual; the fix
+    should not break anything. SRT window wins but difference is negligible.
     """
     block = _make_block(
         merged_cn_text="今天天气不错。",
         first_start_ms=5000,
-        last_end_ms=7000,
+        last_end_ms=7000,  # SRT window = 2000ms
         target_duration_ms=2000,
         actual_audio_duration_ms=1950,
     )
     result = build_subtitle_cues_for_blocks([block], [])
 
     assert len(result.cues) >= 1
-    # target wins: block_end = 5000 + 2000 = 7000
+    # SRT window wins: block_end = 5000 + 2000 = 7000
     assert result.cues[-1].end_ms == 7000, (
         f"Last cue end_ms {result.cues[-1].end_ms} != 7000"
     )
 
 
-def test_dsp_target_unset_falls_back_to_actual() -> None:
-    """Legacy fallback: target=0, actual=2500ms → effective=2500ms.
+def test_srt_window_zero_falls_back_to_target() -> None:
+    """Legacy fallback: SRT window=0, target=2500ms → effective=2500ms.
 
-    Some older blocks produced by ASR may not have target_duration_ms set.
-    In that case the fix must fall through to actual_audio_duration_ms.
+    Older blocks where first_start_ms == last_end_ms (no SRT window available).
+    Falls through to target_duration_ms as second priority.
     """
     block = _make_block(
         merged_cn_text="这是一句话。",
         first_start_ms=1000,
-        last_end_ms=4000,
-        target_duration_ms=0,
-        actual_audio_duration_ms=2500,
-    )
-    result = build_subtitle_cues_for_blocks([block], [])
-
-    assert len(result.cues) >= 1
-    # target=0 → skip; actual=2500 wins; block_end = 1000 + 2500 = 3500
-    assert result.cues[-1].end_ms == 3500, (
-        f"Last cue end_ms {result.cues[-1].end_ms} != 3500 (should fall back to actual=2500)"
-    )
-
-
-def test_dsp_all_zero_falls_back_to_last_end_minus_first_start() -> None:
-    """Degenerate: target=0, actual=0 → effective = last_end - first_start = 1500ms."""
-    block = _make_block(
-        merged_cn_text="短句。",
-        first_start_ms=1000,
-        last_end_ms=2500,
-        target_duration_ms=0,
-        actual_audio_duration_ms=0,
-    )
-    result = build_subtitle_cues_for_blocks([block], [])
-
-    assert len(result.cues) >= 1
-    # last-first fallback: 2500 - 1000 = 1500; block_end = 1000 + 1500 = 2500
-    assert result.cues[-1].end_ms == 2500, (
-        f"Last cue end_ms {result.cues[-1].end_ms} != 2500 (last-first fallback)"
-    )
-
-
-def test_dsp_multi_cue_block_force_dsp_spans_full_target_window() -> None:
-    """Integration: block with 3+ cues, force_dsp — all cues stay within the
-    10000ms target window (not squashed into the 2000ms actual window).
-
-    Before the fix: cues would be distributed over [0, 2000ms].
-    After the fix: cues are distributed over [0, 10000ms].
-    """
-    block = _make_block(
-        # Long enough text to produce multiple cues via segmenter
-        merged_cn_text="这是第一句话。这是第二句话。这是第三句话。",
-        first_start_ms=0,
-        last_end_ms=10000,
-        target_duration_ms=10000,
+        last_end_ms=1000,  # srt_window = 0
+        target_duration_ms=2500,
         actual_audio_duration_ms=2000,
     )
     result = build_subtitle_cues_for_blocks([block], [])
 
     assert len(result.cues) >= 1
-    # All cues must be within [0, 10000] — NOT within [0, 2000]
+    # srt_window=0 → skip; target=2500 wins; block_end = 1000 + 2500 = 3500
+    assert result.cues[-1].end_ms == 3500, (
+        f"Last cue end_ms {result.cues[-1].end_ms} != 3500 (target fallback)"
+    )
+
+
+def test_srt_window_zero_target_zero_falls_back_to_actual() -> None:
+    """Legacy fallback: SRT window=0, target=0, actual=1800ms → effective=1800ms."""
+    block = _make_block(
+        merged_cn_text="短句。",
+        first_start_ms=1000,
+        last_end_ms=1000,  # srt_window = 0
+        target_duration_ms=0,
+        actual_audio_duration_ms=1800,
+    )
+    result = build_subtitle_cues_for_blocks([block], [])
+
+    assert len(result.cues) >= 1
+    # srt_window=0, target=0 → actual=1800 wins; block_end = 1000 + 1800 = 2800
+    assert result.cues[-1].end_ms == 2800, (
+        f"Last cue end_ms {result.cues[-1].end_ms} != 2800 (actual fallback)"
+    )
+
+
+def test_srt_window_multi_cue_block_spans_full_srt_window() -> None:
+    """Integration: block with 3+ cues — all cues stay within the SRT window.
+
+    first_start=10000, last_end=15000 → SRT window = 5000ms.
+    target=8000ms (LLM rewrite target; bigger than SRT window but NOT used).
+    All cues must be within [10000ms, 15000ms].
+
+    Before C2 fix (using target): cues would be distributed over [10000, 18000ms],
+    overrunning the next block.
+    After C2 fix: cues are distributed over [10000, 15000ms] (SRT window).
+    """
+    block = _make_block(
+        # Long enough text to produce multiple cues via segmenter
+        merged_cn_text="这是第一句话。这是第二句话。这是第三句话。",
+        first_start_ms=10000,
+        last_end_ms=15000,  # SRT window = 5000ms
+        target_duration_ms=8000,  # LLM target; must NOT win
+        actual_audio_duration_ms=2000,
+    )
+    result = build_subtitle_cues_for_blocks([block], [])
+
+    assert len(result.cues) >= 1
+    # All cues must be within [10000, 15000] — SRT window
     for cue in result.cues:
-        assert cue.end_ms <= 10000, (
-            f"Cue end_ms {cue.end_ms} exceeds target window 10000ms"
+        assert cue.end_ms <= 15000, (
+            f"Cue end_ms {cue.end_ms} exceeds SRT window end 15000ms"
         )
-    # Last cue must reach the end of the target window
-    assert result.cues[-1].end_ms == 10000, (
-        f"Last cue end_ms {result.cues[-1].end_ms} != 10000 (target); "
-        f"cues are squashed into wrong window"
+    # Last cue must reach the end of the SRT window
+    assert result.cues[-1].end_ms == 15000, (
+        f"Last cue end_ms {result.cues[-1].end_ms} != 15000 (SRT window); "
+        f"cues are placed in wrong window"
     )
-    # At least some cues should start after the old actual window (2000ms)
-    # to confirm cues were NOT compressed into the 2000ms pre-fix behavior
-    cues_after_old_window = [c for c in result.cues if c.start_ms >= 2000]
-    assert len(cues_after_old_window) >= 1, (
-        "All cues are within 2000ms — looks like old pre-fix behavior (squashed into actual)"
+    # First cue must start at block_start
+    assert result.cues[0].start_ms == 10000
+
+
+# ---------------------------------------------------------------------------
+# Regression: adjacent blocks must not produce SegmentOverlap (C2 hot-fix)
+# ---------------------------------------------------------------------------
+
+
+def test_no_segment_overlap_adjacent_tight_blocks() -> None:
+    """Critical regression: adjacent blocks with tight SRT windows must not overlap.
+
+    This is the exact failure mode from commit c26f730 (C) that caused production
+    SegmentOverlap errors. Without C2 fix, block_a using target=25000ms would
+    extend its cue window to first_start + 25000 = 35000ms, overlapping block_b
+    which starts at 12000ms.
+
+    With C2 fix (SRT window first):
+      block_a SRT window = 12000 - 10000 = 2000ms → cue ends at 12000ms
+      block_b SRT window = 14000 - 12000 = 2000ms → cue starts at 12000ms
+      No overlap — block_a ends exactly where block_b begins.
+    """
+    block_a = _make_block(
+        block_id="block_a",
+        merged_cn_text="第一句话。",
+        first_start_ms=10000,
+        last_end_ms=12000,  # SRT window = 2000ms
+        target_duration_ms=25000,  # LLM target (much larger than SRT window)
+        actual_audio_duration_ms=1800,
     )
+    block_b = _make_block(
+        block_id="block_b",
+        merged_cn_text="第二句话。",
+        first_start_ms=12000,
+        last_end_ms=14000,  # SRT window = 2000ms; starts exactly where block_a ends
+        target_duration_ms=25000,
+        actual_audio_duration_ms=1800,
+    )
+    result = build_subtitle_cues_for_blocks([block_a, block_b], [])
+
+    a_cues = [c for c in result.cues if c.block_id == "block_a"]
+    b_cues = [c for c in result.cues if c.block_id == "block_b"]
+
+    assert len(a_cues) >= 1
+    assert len(b_cues) >= 1
+
+    # block_a cues must not exceed 12000ms
+    for cue in a_cues:
+        assert cue.end_ms <= 12000, (
+            f"block_a cue end_ms {cue.end_ms} > 12000 — would overlap block_b "
+            f"(C2 regression: target_duration_ms must not override SRT window)"
+        )
+
+    # block_b cues must start at 12000ms or later
+    for cue in b_cues:
+        assert cue.start_ms >= 12000, (
+            f"block_b cue start_ms {cue.start_ms} < 12000"
+        )
+
+    # No overlap between any block_a cue and any block_b cue
+    for ca in a_cues:
+        for cb in b_cues:
+            assert ca.end_ms <= cb.start_ms or cb.end_ms <= ca.start_ms, (
+                f"SegmentOverlap: block_a cue [{ca.start_ms}, {ca.end_ms}] "
+                f"overlaps block_b cue [{cb.start_ms}, {cb.end_ms}]"
+            )
