@@ -282,6 +282,13 @@ class JianyingDraftWriter:
         #        with relative paths starting with "materials/" ---
         self._make_material_paths_relative(draft_content_path, materials_dir)
 
+        # --- 7b. Post-process draft_content.json: ensure video material has
+        #        local_material_id and media_path set so Jianying treats it as
+        #        a local file. pyJianYingDraft 0.2.6 leaves these empty for
+        #        VideoMaterial (causes "素材下载失败" in Jianying), but
+        #        populates them for AudioMaterial. ---
+        self._ensure_video_local_material_fields(draft_content_path)
+
         # --- 8. Post-process draft_meta_info.json: fill draft_name / draft_root_path ---
         self._fill_meta_info(draft_meta_info_path, draft_name, draft_dir)
 
@@ -381,6 +388,44 @@ class JianyingDraftWriter:
             os.replace(tmp_path, draft_content_path)
             logger.debug(
                 "post-processed draft_content.json: absolute material paths -> relative"
+            )
+
+    @staticmethod
+    def _ensure_video_local_material_fields(draft_content_path: str) -> None:
+        """Ensure each video material has local_material_id and media_path
+        populated. Jianying uses these fields to determine whether a material
+        is local; an empty local_material_id makes it treat the material as
+        a remote download, which surfaces in the UI as "素材下载失败,点击重试".
+
+        pyJianYingDraft 0.2.6 fills these for AudioMaterial but not for
+        VideoMaterial — likely an oversight in the library. Without this
+        post-process patch the video track is unusable in the generated draft.
+        """
+        content_text = Path(draft_content_path).read_text(encoding="utf-8")
+        data = json.loads(content_text)
+
+        changed = False
+        for video in data.get("materials", {}).get("videos", []):
+            if not isinstance(video, dict):
+                continue
+            material_id = video.get("material_id") or video.get("id")
+            if material_id and not video.get("local_material_id"):
+                video["local_material_id"] = material_id
+                changed = True
+            path = video.get("path", "") or ""
+            if path and not video.get("media_path"):
+                video["media_path"] = path
+                changed = True
+
+        if changed:
+            tmp_path = draft_content_path + ".tmp"
+            Path(tmp_path).write_text(
+                json.dumps(data, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            os.replace(tmp_path, draft_content_path)
+            logger.debug(
+                "post-processed draft_content.json: filled video local_material_id / media_path"
             )
 
     @staticmethod
