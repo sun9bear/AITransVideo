@@ -22,6 +22,14 @@ const publicExactPaths = [
   "/privacy",
   "/refund",
   "/contact",
+  // SEO discovery surfaces — must serve unauthenticated, otherwise crawler
+  // requests get 302'd to /auth/login. The static-asset early-out below only
+  // matches image/font/css/js/video extensions; .xml and .txt are not in that
+  // list, so without explicit publicExactPath entries the rules at the
+  // bottom would block them. See docs/plans/2026-05-03-geo-optimization-plan.md
+  // §3.3 / §7.0.
+  "/sitemap.xml",
+  "/robots.txt",
 ]
 
 export function middleware(request: NextRequest) {

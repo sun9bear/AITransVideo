@@ -3,10 +3,22 @@ import { PricingGrid } from "@/components/marketing/pricing-grid"
 import { PricingAssurance } from "@/components/marketing/pricing-assurance"
 import { TrialBanner } from "@/components/marketing/trial-banner"
 import { Faq } from "@/components/marketing/faq"
+import { BreadcrumbJsonLd } from "@/components/seo/breadcrumb-json-ld"
+import { absoluteUrl } from "@/lib/seo/site"
+
+const PAGE_DESCRIPTION =
+  "长视频也用得起的 AI 翻译配音。Free / Plus / Pro 三档套餐，单条视频最长 180 分钟，无需绑卡，失败不计费，修改片段不必重跑全片。"
 
 export const metadata: Metadata = {
   title: "定价 · 爱译视频 AITrans.Video",
-  description: "长视频也用得起的 AI 翻译配音。Free / Plus / Pro 三档套餐，单条视频最长 180 分钟，无需绑卡，失败不计费，修改片段不必重跑全片。",
+  description: PAGE_DESCRIPTION,
+  alternates: { canonical: "/pricing" },
+  openGraph: {
+    title: "定价 · 爱译视频",
+    description: PAGE_DESCRIPTION,
+    url: absoluteUrl("/pricing"),
+    type: "website",
+  },
 }
 
 /**
@@ -25,6 +37,12 @@ export const metadata: Metadata = {
 export default function PricingPage() {
   return (
     <>
+      <BreadcrumbJsonLd
+        items={[
+          { name: "首页", path: "/" },
+          { name: "定价", path: "/pricing" },
+        ]}
+      />
       <section className="marketing-reading-surface pt-16 pb-10 sm:pt-20 sm:pb-12">
         <div className="mx-auto max-w-3xl px-4 text-center sm:px-6 lg:px-8">
           <p className="ink-heading text-xs uppercase tracking-widest text-[color:var(--cinnabar,#C73E3A)]">

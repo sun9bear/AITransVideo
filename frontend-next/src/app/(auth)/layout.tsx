@@ -1,3 +1,5 @@
+import type { Metadata } from "next"
+
 /**
  * Auth route group layout — ink-themed (rice paper + cinnabar) so /auth,
  * /auth/login, /auth/register, /auth/forgot-password feel continuous with
@@ -13,7 +15,17 @@
  * top + radial vignette) so the form card sits over a textured ground rather
  * than a flat color — extending the marketing aesthetic into the conversion
  * surface where most decisions are made.
+ *
+ * SEO: noindex covers the whole route group. The three child pages
+ * (login / register / forgot-password) all start with `"use client"` and
+ * therefore can't `export const metadata` themselves — declaring it on this
+ * server-component layout propagates `robots` to all children. See
+ * docs/plans/2026-05-03-geo-optimization-plan.md §7.2.
  */
+export const metadata: Metadata = {
+  robots: { index: false, follow: false },
+}
+
 export default function AuthLayout({
   children,
 }: {

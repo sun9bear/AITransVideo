@@ -2,14 +2,27 @@ import type { Metadata } from "next"
 import "./globals.css"
 import { Toaster } from "@/components/ui/sonner"
 import { SessionProvider } from "@/components/providers/session-provider"
+import { defaultDescription, defaultTitle, siteName, siteUrl } from "@/lib/seo/site"
 
+/**
+ * Root metadata — kept narrow on purpose.
+ *
+ * This layout wraps both `(marketing)` and `(app)` route groups, so anything
+ * declared here leaks into `/workspace`, `/projects`, `/admin` etc. Things
+ * that are safe to fall through (title template, default description as a
+ * fallback before a page declares its own) stay here. Things that would
+ * mis-attribute logged-in pages (`alternates.canonical`, marketing-only OG
+ * title/description) MUST be declared per-page, not here.
+ *
+ * See docs/plans/2026-05-03-geo-optimization-plan.md §7.4.
+ */
 export const metadata: Metadata = {
+  metadataBase: new URL(siteUrl),
   title: {
-    default: "爱译视频 · 让世界视频，开口说中文",
+    default: defaultTitle,
     template: "%s · 爱译视频 AITrans.Video",
   },
-  description:
-    "把英文长视频变成可发布的中文配音版。AI 视频翻译、中文配音、AI 字幕、YouTube 视频翻译、SRT 字幕导出、长视频本地化工作台。支持最长 3 小时视频，逐句修改、单句重生成。",
+  description: defaultDescription,
   keywords: [
     "英文视频翻译",
     "AI 视频翻译",
@@ -23,6 +36,14 @@ export const metadata: Metadata = {
     "爱译视频",
     "AITrans.Video",
   ],
+  // Defaults only — per-page metadata overrides title/description/url.
+  // Locale + siteName + type bubble through to legal/contact pages that
+  // don't declare their own openGraph block.
+  openGraph: {
+    siteName,
+    locale: "zh_CN",
+    type: "website",
+  },
 }
 
 export default function RootLayout({

@@ -607,3 +607,160 @@ def test_copy_as_new_emits_started_and_succeeded(tmp_path: Path) -> None:
     messages = [e.message for e in events if e.message]
     assert any("editing.commit_started: strategy=copy_as_new" in m for m in messages)
     assert any("editing.commit_succeeded: strategy=copy_as_new" in m for m in messages)
+
+
+# ---------------------------------------------------------------------------
+# Jianying draft invalidation on overwrite commit
+# ---------------------------------------------------------------------------
+
+
+def test_overwrite_invalidates_jianying_draft_state(tmp_path: Path) -> None:
+    """After overwrite commit, Jianying draft state must reset to idle.
+
+    Post-edit commit regenerates alignment/publish (SRTs, re-TTS audio if
+    changed), so any existing Jianying draft becomes stale. User must
+    re-trigger generation to get an up-to-date draft.
+    """
+    store, record, project_dir = _build_editing_job_with_diff(tmp_path)
+
+    # Set up pre-existing Jianying draft state
+    record.jianying_draft_status = "succeeded"
+    record.jianying_draft_started_at = "2026-05-01T10:00:00+00:00"
+    record.jianying_draft_completed_at = "2026-05-01T10:05:00+00:00"
+    record.jianying_draft_zip_path = str(project_dir / "jianying" / "exports" / "draft.zip")
+    record.jianying_draft_user_root = "/Users/test/Jianying"
+    store.save_job(record)
+
+    # Create fake on-disk Jianying artifacts
+    jianying_dir = project_dir / "jianying"
+    (jianying_dir / "exports").mkdir(parents=True)
+    (jianying_dir / "exports" / "draft.zip").write_bytes(b"fake zip content")
+    (jianying_dir / "content").write_text("fake content")
+
+    runner = _RecordingRunner()
+
+    commit_editing_pipeline(record, store, runner, strategy="overwrite")
+
+    # Verify state reset
+    final = store.require_job("job_commit")
+    assert final.jianying_draft_status == "idle"
+    assert final.jianying_draft_started_at is None
+    assert final.jianying_draft_completed_at is None
+    assert final.jianying_draft_error is None
+    assert final.jianying_draft_zip_path is None
+    assert final.jianying_draft_user_root is None
+
+    # Verify on-disk artifacts deleted
+    assert not jianying_dir.exists()
+
+
+def test_overwrite_invalidates_jianying_draft_already_idle_is_noop(tmp_path: Path) -> None:
+    """Invalidating a job with idle Jianying state is idempotent."""
+    store, record, project_dir = _build_editing_job_with_diff(tmp_path)
+
+    # Jianying state already idle (the default)
+    assert record.jianying_draft_status == "idle"
+    assert record.jianying_draft_zip_path is None
+
+    runner = _RecordingRunner()
+
+    commit_editing_pipeline(record, store, runner, strategy="overwrite")
+
+    final = store.require_job("job_commit")
+    assert final.jianying_draft_status == "idle"
+    assert final.jianying_draft_zip_path is None
+
+
+def test_overwrite_invalidates_jianying_draft_no_disk_artifacts_no_error(
+    tmp_path: Path,
+) -> None:
+    """Invalidating a job with Jianying state but no on-disk directory is safe."""
+    store, record, project_dir = _build_editing_job_with_diff(tmp_path)
+
+    # Set up state without creating on-disk artifacts
+    record.jianying_draft_status = "succeeded"
+    record.jianying_draft_zip_path = "/nonexistent/path.zip"
+    store.save_job(record)
+
+    # Verify no jianying/ directory exists
+    assert not (project_dir / "jianying").exists()
+
+    runner = _RecordingRunner()
+
+    # Should not raise; idempotent shutil.rmtree with ignore_errors=True
+    commit_editing_pipeline(record, store, runner, strategy="overwrite")
+
+    final = store.require_job("job_commit")
+    assert final.jianying_draft_status == "idle"
+    assert final.jianying_draft_zip_path is None
+
+
+def test_overwrite_invalidates_jianying_draft_preserves_other_edits(
+    tmp_path: Path,
+) -> None:
+    """Jianying invalidation should not interfere with normal edit commit flow."""
+    store, record, project_dir = _build_editing_job_with_diff(
+        tmp_path,
+        text_edits={"seg_001": "EDITED_TEXT"},
+        draft_wavs={"seg_002": b"NEW_WAV"},
+    )
+
+    # Add pre-existing Jianying draft
+    record.jianying_draft_status = "succeeded"
+    record.jianying_draft_zip_path = str(project_dir / "jianying" / "draft.zip")
+    (project_dir / "jianying").mkdir()
+    (project_dir / "jianying" / "draft.zip").write_bytes(b"stale")
+    store.save_job(record)
+
+    runner = _RecordingRunner()
+
+    commit_editing_pipeline(record, store, runner, strategy="overwrite")
+
+    # Verify normal edits applied
+    segments = json.loads((project_dir / "editor" / "segments.json").read_text(encoding="utf-8"))
+    assert segments[0]["cn_text"] == "EDITED_TEXT"
+    assert (project_dir / "editor" / "tts_segments" / "seg_002.wav").read_bytes() == b"NEW_WAV"
+
+    # Verify Jianying state reset
+    final = store.require_job("job_commit")
+    assert final.jianying_draft_status == "idle"
+    assert final.jianying_draft_zip_path is None
+
+    # Verify on-disk artifacts deleted
+    assert not (project_dir / "jianying").exists()
+
+
+def test_copy_as_new_does_not_reset_jianying_state(tmp_path: Path) -> None:
+    """copy_as_new creates a fresh JobRecord with default idle state — no reset needed.
+
+    The new JobRecord starts with jianying_draft_status='idle' by default,
+    so there's nothing to reset. Only the OVERWRITE path needs the reset
+    (since it reuses and mutates the existing JobRecord).
+    """
+    store, record, project_dir = _build_editing_job_with_diff(tmp_path)
+
+    # Set source to have pre-existing Jianying state
+    record.jianying_draft_status = "succeeded"
+    record.jianying_draft_zip_path = str(project_dir / "jianying" / "draft.zip")
+    (project_dir / "jianying").mkdir()
+    (project_dir / "jianying" / "draft.zip").write_bytes(b"source draft")
+    store.save_job(record)
+
+    runner = _RecordingRunner()
+
+    result = commit_editing_pipeline(
+        record, store, runner,
+        strategy="copy_as_new", copy_display_name="Copy",
+        new_job_id_factory=lambda: "job_copy_1",
+    )
+
+    # Source Jianying state should still be preserved (copy_as_new doesn't touch it)
+    source = store.require_job("job_commit")
+    assert source.jianying_draft_status == "succeeded"
+    assert source.jianying_draft_zip_path is not None
+    assert (project_dir / "jianying" / "draft.zip").exists()
+
+    # New copy starts with idle state (default in JobRecord)
+    new_copy = store.require_job(result["new_job_id"])
+    assert new_copy.jianying_draft_status == "idle"
+    assert new_copy.jianying_draft_zip_path is None

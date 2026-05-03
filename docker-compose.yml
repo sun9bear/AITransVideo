@@ -93,6 +93,12 @@ services:
         NEXT_PUBLIC_CAPTCHA_PROVIDER: "${NEXT_PUBLIC_CAPTCHA_PROVIDER:-fake}"
         NEXT_PUBLIC_TURNSTILE_SITE_KEY: "${NEXT_PUBLIC_TURNSTILE_SITE_KEY:-}"
         NEXT_PUBLIC_ENABLE_POST_EDIT: "${NEXT_PUBLIC_ENABLE_POST_EDIT:-0}"
+        # GEO canonical origin — inlined into the standalone bundle at build
+        # time so client-side imports of `lib/seo/site.ts` see the real URL.
+        # Also set as a runtime env below for server-component reads. Must
+        # match gateway SITE_URL or canonical / OG / sitemap will diverge
+        # from email-link host. See plans/2026-05-03-geo-optimization-plan.md.
+        NEXT_PUBLIC_SITE_URL: "${NEXT_PUBLIC_SITE_URL:-https://aitrans.video}"
     image: aivideotrans-next:latest
     container_name: aivideotrans-next
     network_mode: host
@@ -103,6 +109,9 @@ services:
       # Caddy 从 127.0.0.1:3000 反代，network_mode: host 下容器内 = 宿主
       # loopback。ufw 失效时公网依然 refused。
       HOSTNAME: "127.0.0.1"
+      # Mirror the build arg for SSR runtime reads (sitemap.ts / robots.ts
+      # generate at request time, not build time).
+      NEXT_PUBLIC_SITE_URL: "${NEXT_PUBLIC_SITE_URL:-https://aitrans.video}"
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/"]
       interval: 15s
@@ -179,6 +188,13 @@ services:
       AVT_GATEWAY_HOST: "127.0.0.1"
       AVT_GATEWAY_PORT: "8880"
       AVT_AUTH_REQUIRED: "true"
+      # GEO canonical origin — used by gateway/notifications.py to build
+      # email links to /workspace/{job_id}. MUST equal frontend
+      # NEXT_PUBLIC_SITE_URL (set on the `next` service) so email recipients
+      # land on the same canonical host that sitemap / canonical / OG point
+      # at. Single override in .env propagates to both. See
+      # docs/plans/2026-05-03-geo-optimization-plan.md §6.4.
+      SITE_URL: "${SITE_URL:-https://aitrans.video}"
       # T6 — default to production so the validate_production_safety startup
       # guard fires by default. Local dev sets `AVT_ENV=dev` in their own
       # .env to override (safe: the guard only refuses auth-disabled prod).

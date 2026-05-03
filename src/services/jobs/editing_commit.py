@@ -260,6 +260,32 @@ def _rm_editing_dir(project_dir: Path) -> None:
         shutil.rmtree(editing, ignore_errors=True)
 
 
+def _invalidate_jianying_draft_on_commit(job: JobRecord, project_dir: Path | str) -> None:
+    """Reset Jianying draft state on Studio editing/commit overwrite.
+
+    Phase 1 K1-K13 stored Jianying draft on JobRecord + a zip in
+    {project_dir}/jianying/. After post-edit commit, these reflect
+    pre-edit content, so we reset state to idle and delete the on-disk
+    artifacts. User can re-trigger generation to get an up-to-date draft.
+
+    Safe to call multiple times — idempotent.
+    """
+    # Reset JobRecord fields. Caller is responsible for store.save_job(job).
+    job.jianying_draft_status = "idle"
+    job.jianying_draft_started_at = None
+    job.jianying_draft_completed_at = None
+    job.jianying_draft_error = None
+    job.jianying_draft_zip_path = None
+    # Also reset user_root for consistency. User can re-enter it when
+    # they re-trigger generation (it's not persisted between jobs).
+    job.jianying_draft_user_root = None
+
+    # Delete on-disk artifacts. shutil.rmtree silently if missing.
+    jianying_root = Path(project_dir) / "jianying"
+    if jianying_root.exists():
+        shutil.rmtree(jianying_root, ignore_errors=True)
+
+
 def _prune_overwrite_project_state(project_dir: Path) -> None:
     """Reset alignment + publish to PENDING in the overwrite target's
     project_state.json. No-op if the file is absent."""
@@ -395,6 +421,14 @@ def _commit_overwrite(
         edit_generation=record.edit_generation + 1,
         updated_at=now,
     )
+
+    # Step 4.5: invalidate Jianying draft state. Post-edit commit
+    # regenerates alignment/publish (SRTs, audio if re-TTS'd), so any
+    # existing Jianying draft becomes stale. Reset state to idle and
+    # delete on-disk artifacts so user sees "生成剪映草稿" button again
+    # (forcing a re-trigger to get up-to-date content).
+    _invalidate_jianying_draft_on_commit(updated, project_dir)
+
     store.save_job(updated)
     _emit_event(
         store, updated,
@@ -514,6 +548,16 @@ def _commit_copy_as_new(
         completed_at=None,
         created_at=now,
         updated_at=now,
+        # Reset Jianying draft state for the new copy. The source's Jianying
+        # draft is for the source's output; the copy has its own output and
+        # needs a fresh draft if the user wants one. (Without explicit reset,
+        # replace() silently inherits source's jianying_draft_* fields.)
+        jianying_draft_status="idle",
+        jianying_draft_started_at=None,
+        jianying_draft_completed_at=None,
+        jianying_draft_error=None,
+        jianying_draft_zip_path=None,
+        jianying_draft_user_root=None,
     )
     store.save_job(new_record)
 

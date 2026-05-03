@@ -8,7 +8,10 @@ logger = logging.getLogger(__name__)
 
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 FROM_EMAIL = os.getenv("NOTIFICATION_FROM", "noreply@aivideotrans.site")
-SITE_URL = os.getenv("SITE_URL", "https://us.aivideotrans.site")
+# Canonical public origin — must match frontend NEXT_PUBLIC_SITE_URL so email
+# links, sitemap canonical, OG urls and JSON-LD all resolve to the same host.
+# See docs/plans/2026-05-03-geo-optimization-plan.md §6.4.
+SITE_URL = os.getenv("SITE_URL", "https://aitrans.video")
 
 
 async def send_email(to: str, subject: str, html: str) -> bool:

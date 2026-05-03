@@ -1,11 +1,22 @@
 import type { Metadata } from "next"
 import { COMPANY_ADDRESS, COMPANY_NAME, PAYMENT_CHANNEL_NOTE, SUPPORT_EMAIL } from "@/components/marketing/company-info"
 import { LegalPage, LegalSection } from "@/components/marketing/legal-page"
+import { BreadcrumbJsonLd } from "@/components/seo/breadcrumb-json-ld"
+import { absoluteUrl } from "@/lib/seo/site"
+
+const PAGE_DESCRIPTION =
+  "联系 AITrans.Video：客服支持、账单退款、隐私请求、版权投诉、商务合作等各类联系方式。"
 
 export const metadata: Metadata = {
   title: "联系我们 · AITrans.Video",
-  description:
-    "联系 AITrans.Video：客服支持、账单退款、隐私请求、版权投诉、商务合作等各类联系方式。",
+  description: PAGE_DESCRIPTION,
+  alternates: { canonical: "/contact" },
+  openGraph: {
+    title: "联系我们 · 爱译视频",
+    description: PAGE_DESCRIPTION,
+    url: absoluteUrl("/contact"),
+    type: "website",
+  },
 }
 
 const UPDATED_AT = "2026-04-22"
@@ -20,7 +31,14 @@ function Mail({ address, label }: { address: string; label?: string }) {
 
 export default function ContactPage() {
   return (
-    <LegalPage
+    <>
+      <BreadcrumbJsonLd
+        items={[
+          { name: "首页", path: "/" },
+          { name: "联系我们", path: "/contact" },
+        ]}
+      />
+      <LegalPage
       eyebrow="联系我们"
       title="联系我们"
       titleEn="Contact Us"
@@ -146,5 +164,6 @@ export default function ContactPage() {
         <p>{PAYMENT_CHANNEL_NOTE}</p>
       </LegalSection>
     </LegalPage>
+    </>
   )
 }

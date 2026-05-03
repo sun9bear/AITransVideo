@@ -4,10 +4,22 @@ import { TrialDetails } from "@/components/marketing/trial-details"
 import { PrimaryCta } from "@/components/marketing/primary-cta"
 import { LinkButton } from "@/components/marketing/link-button"
 import { getPlansSafeServer } from "@/lib/billing/get-plans"
+import { BreadcrumbJsonLd } from "@/components/seo/breadcrumb-json-ld"
+import { absoluteUrl } from "@/lib/seo/site"
+
+const PAGE_DESCRIPTION =
+  "免费试用 AITrans.Video 的完整视频翻译配音工作流，无需绑卡，试用结束不会自动扣费。"
 
 export const metadata: Metadata = {
   title: "免费试用 · AITrans.Video",
-  description: "免费试用 AITrans.Video 的完整视频翻译配音工作流，无需绑卡，试用结束不会自动扣费。",
+  description: PAGE_DESCRIPTION,
+  alternates: { canonical: "/trial" },
+  openGraph: {
+    title: "免费试用 · 爱译视频",
+    description: PAGE_DESCRIPTION,
+    url: absoluteUrl("/trial"),
+    type: "website",
+  },
 }
 
 /**
@@ -39,6 +51,12 @@ export default async function TrialPage() {
 
   return (
     <>
+      <BreadcrumbJsonLd
+        items={[
+          { name: "首页", path: "/" },
+          { name: "免费试用", path: "/trial" },
+        ]}
+      />
       <section className="marketing-reading-surface pt-16 pb-8 sm:pt-20">
         <div className="mx-auto max-w-5xl px-4 sm:px-6 lg:px-8">
           <div className="max-w-2xl">

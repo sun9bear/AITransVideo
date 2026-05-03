@@ -9,11 +9,22 @@ import {
   SUPPORT_EMAIL,
   SUPPORT_EMAIL_HREF,
 } from "@/components/marketing/company-info"
+import { BreadcrumbJsonLd } from "@/components/seo/breadcrumb-json-ld"
+import { absoluteUrl } from "@/lib/seo/site"
+
+const PAGE_DESCRIPTION =
+  "AITrans.Video 隐私政策：说明我们如何收集、使用、存储、共享、保护您的个人信息，以及您依法享有的相关权利。"
 
 export const metadata: Metadata = {
   title: "隐私政策 · AITrans.Video",
-  description:
-    "AITrans.Video 隐私政策：说明我们如何收集、使用、存储、共享、保护您的个人信息，以及您依法享有的相关权利。",
+  description: PAGE_DESCRIPTION,
+  alternates: { canonical: "/privacy" },
+  openGraph: {
+    title: "隐私政策 · 爱译视频",
+    description: PAGE_DESCRIPTION,
+    url: absoluteUrl("/privacy"),
+    type: "website",
+  },
 }
 
 const UPDATED_AT = "2026-04-20"
@@ -26,7 +37,14 @@ const UPDATED_AT = "2026-04-20"
  */
 export default function PrivacyPage() {
   return (
-    <LegalPage
+    <>
+      <BreadcrumbJsonLd
+        items={[
+          { name: "首页", path: "/" },
+          { name: "隐私政策", path: "/privacy" },
+        ]}
+      />
+      <LegalPage
       eyebrow="隐私政策"
       title="隐私政策"
       titleEn="Privacy Policy"
@@ -276,5 +294,6 @@ export default function PrivacyPage() {
         </p>
       </LegalSection>
     </LegalPage>
+    </>
   )
 }

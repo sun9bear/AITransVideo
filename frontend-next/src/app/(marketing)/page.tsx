@@ -1,3 +1,4 @@
+import type { Metadata } from "next"
 import { Hero } from "@/components/marketing/hero"
 import { PainPoints } from "@/components/marketing/pain-points"
 import { ProductProof } from "@/components/marketing/product-proof"
@@ -10,6 +11,18 @@ import { TrustBanner } from "@/components/marketing/trust-banner"
 import { PricingPreview } from "@/components/marketing/pricing-preview"
 import { Faq } from "@/components/marketing/faq"
 import { FinalCta } from "@/components/marketing/final-cta"
+import { SiteJsonLd } from "@/components/seo/site-json-ld"
+import { absoluteUrl, defaultDescription, defaultTitle } from "@/lib/seo/site"
+
+export const metadata: Metadata = {
+  alternates: { canonical: "/" },
+  openGraph: {
+    title: defaultTitle,
+    description: defaultDescription,
+    url: absoluteUrl("/"),
+    type: "website",
+  },
+}
 
 /**
  * Homepage (`/`).
@@ -39,6 +52,7 @@ import { FinalCta } from "@/components/marketing/final-cta"
 export default function HomePage() {
   return (
     <>
+      <SiteJsonLd />
       <Hero />
       <PainPoints />
       <FeaturedDemos />

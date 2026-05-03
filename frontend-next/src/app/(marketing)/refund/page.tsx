@@ -8,11 +8,22 @@ import {
   SUPPORT_EMAIL,
   SUPPORT_EMAIL_HREF,
 } from "@/components/marketing/company-info"
+import { BreadcrumbJsonLd } from "@/components/seo/breadcrumb-json-ld"
+import { absoluteUrl } from "@/lib/seo/site"
+
+const PAGE_DESCRIPTION =
+  "AITrans.Video 退款政策：详细说明订阅、点数购买、处理失败、异常扣费等情形下的退款规则与申请方式。"
 
 export const metadata: Metadata = {
   title: "退款政策 · AITrans.Video",
-  description:
-    "AITrans.Video 退款政策：详细说明订阅、点数购买、处理失败、异常扣费等情形下的退款规则与申请方式。",
+  description: PAGE_DESCRIPTION,
+  alternates: { canonical: "/refund" },
+  openGraph: {
+    title: "退款政策 · 爱译视频",
+    description: PAGE_DESCRIPTION,
+    url: absoluteUrl("/refund"),
+    type: "website",
+  },
 }
 
 const UPDATED_AT = "2026-04-20"
@@ -25,7 +36,14 @@ const UPDATED_AT = "2026-04-20"
  */
 export default function RefundPage() {
   return (
-    <LegalPage
+    <>
+      <BreadcrumbJsonLd
+        items={[
+          { name: "首页", path: "/" },
+          { name: "退款政策", path: "/refund" },
+        ]}
+      />
+      <LegalPage
       eyebrow="退款政策"
       title="退款政策"
       titleEn="Refund Policy"
@@ -225,5 +243,6 @@ export default function RefundPage() {
         </p>
       </LegalSection>
     </LegalPage>
+    </>
   )
 }

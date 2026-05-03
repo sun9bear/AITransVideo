@@ -9,11 +9,22 @@ import {
   SUPPORT_EMAIL,
   SUPPORT_EMAIL_HREF,
 } from "@/components/marketing/company-info"
+import { BreadcrumbJsonLd } from "@/components/seo/breadcrumb-json-ld"
+import { absoluteUrl } from "@/lib/seo/site"
+
+const PAGE_DESCRIPTION =
+  "AITrans.Video 服务条款：详细说明本服务的使用规则、用户权利与义务、知识产权、费用、免责及争议解决条款。"
 
 export const metadata: Metadata = {
   title: "服务条款 · AITrans.Video",
-  description:
-    "AITrans.Video 服务条款：详细说明本服务的使用规则、用户权利与义务、知识产权、费用、免责及争议解决条款。",
+  description: PAGE_DESCRIPTION,
+  alternates: { canonical: "/terms" },
+  openGraph: {
+    title: "服务条款 · 爱译视频",
+    description: PAGE_DESCRIPTION,
+    url: absoluteUrl("/terms"),
+    type: "website",
+  },
 }
 
 const UPDATED_AT = "2026-04-20"
@@ -26,7 +37,14 @@ const UPDATED_AT = "2026-04-20"
  */
 export default function TermsPage() {
   return (
-    <LegalPage
+    <>
+      <BreadcrumbJsonLd
+        items={[
+          { name: "首页", path: "/" },
+          { name: "服务条款", path: "/terms" },
+        ]}
+      />
+      <LegalPage
       eyebrow="服务条款"
       title="服务条款"
       titleEn="Terms of Service"
@@ -346,5 +364,6 @@ export default function TermsPage() {
         </p>
       </LegalSection>
     </LegalPage>
+    </>
   )
 }
