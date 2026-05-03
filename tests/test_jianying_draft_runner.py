@@ -29,6 +29,7 @@ import pytest
 
 from services.jobs.jianying_draft_runner import (
     JianyingDraftRunner,
+    JianyingInvalidDraftRoot,
     JianyingNotAllowedError,
 )
 from services.jobs.models import JobRecord
@@ -663,6 +664,260 @@ class TestBuildJianyingRequest:
         finished = _wait_for_jianying_status(store, "job-test-001", "failed")
         assert finished.jianying_draft_error is not None
         assert backend.write.call_count == 0  # never reached the backend
+
+
+# ---------------------------------------------------------------------------
+# K11: user_draft_root plumbing through trigger / background
+# ---------------------------------------------------------------------------
+
+
+class TestUserDraftRootPlumbing:
+    """K11: user_draft_root kwarg passes through trigger → background → request."""
+
+    def test_trigger_with_user_draft_root_passes_through_to_request(self, tmp_path):
+        """trigger(user_draft_root=...) is forwarded to JianyingDraftRequest."""
+        store = _make_store(tmp_path)
+        project_dir = _make_project_dir(tmp_path)
+        record = _make_record(project_dir=str(project_dir))
+        store.save_job(record)
+
+        captured_request = {}
+
+        def capture_write(request):
+            captured_request["req"] = request
+            return _make_ok_result()
+
+        backend = mock.MagicMock()
+        backend.write.side_effect = capture_write
+
+        runner = _make_runner(store, backend)
+        win_root = r"F:\剪映缓存\草稿\JianyingPro Drafts"
+        runner.trigger("job-test-001", user_draft_root=win_root)
+
+        _wait_for_jianying_status(store, "job-test-001", "succeeded")
+
+        req = captured_request["req"]
+        assert req.user_draft_root == win_root
+
+    def test_trigger_with_no_user_draft_root_passes_none_to_request(self, tmp_path):
+        """trigger() without user_draft_root passes None to JianyingDraftRequest."""
+        store = _make_store(tmp_path)
+        project_dir = _make_project_dir(tmp_path)
+        record = _make_record(project_dir=str(project_dir))
+        store.save_job(record)
+
+        captured_request = {}
+
+        def capture_write(request):
+            captured_request["req"] = request
+            return _make_ok_result()
+
+        backend = mock.MagicMock()
+        backend.write.side_effect = capture_write
+
+        runner = _make_runner(store, backend)
+        runner.trigger("job-test-001")  # no user_draft_root
+
+        _wait_for_jianying_status(store, "job-test-001", "succeeded")
+
+        req = captured_request["req"]
+        assert req.user_draft_root is None
+
+    def test_user_draft_root_persisted_on_success(self, tmp_path):
+        """On success, jianying_draft_user_root is saved to JobRecord (K11)."""
+        store = _make_store(tmp_path)
+        project_dir = _make_project_dir(tmp_path)
+        record = _make_record(project_dir=str(project_dir))
+        store.save_job(record)
+
+        backend = mock.MagicMock()
+        backend.write.return_value = _make_ok_result(zip_path="/tmp/draft.zip")
+
+        runner = _make_runner(store, backend)
+        win_root = r"F:\JianyingPro Drafts"
+        runner.trigger("job-test-001", user_draft_root=win_root)
+
+        finished = _wait_for_jianying_status(store, "job-test-001", "succeeded")
+
+        assert finished.jianying_draft_user_root == win_root
+
+
+class TestUserDraftRootValidation:
+    """K11: user_draft_root validation raises JianyingInvalidDraftRoot."""
+
+    def test_empty_string_raises_invalid_draft_root(self, tmp_path):
+        """trigger(user_draft_root='') raises JianyingInvalidDraftRoot (K11)."""
+        store = _make_store(tmp_path)
+        record = _make_record()
+        store.save_job(record)
+
+        runner = _make_runner(store)
+
+        with pytest.raises(JianyingInvalidDraftRoot):
+            runner.trigger("job-test-001", user_draft_root="")
+
+    def test_whitespace_only_raises_invalid_draft_root(self, tmp_path):
+        """trigger(user_draft_root='   ') raises JianyingInvalidDraftRoot (K11)."""
+        store = _make_store(tmp_path)
+        record = _make_record()
+        store.save_job(record)
+
+        runner = _make_runner(store)
+
+        with pytest.raises(JianyingInvalidDraftRoot):
+            runner.trigger("job-test-001", user_draft_root="   ")
+
+    def test_url_scheme_raises_invalid_draft_root(self, tmp_path):
+        """trigger(user_draft_root='https://...') raises JianyingInvalidDraftRoot (K11)."""
+        store = _make_store(tmp_path)
+        record = _make_record()
+        store.save_job(record)
+
+        runner = _make_runner(store)
+
+        with pytest.raises(JianyingInvalidDraftRoot):
+            runner.trigger("job-test-001", user_draft_root="https://example.com/drafts")
+
+    def test_null_byte_raises_invalid_draft_root(self, tmp_path):
+        """trigger(user_draft_root containing \\0) raises JianyingInvalidDraftRoot (K11)."""
+        store = _make_store(tmp_path)
+        record = _make_record()
+        store.save_job(record)
+
+        runner = _make_runner(store)
+
+        with pytest.raises(JianyingInvalidDraftRoot):
+            runner.trigger("job-test-001", user_draft_root="F:\\Drafts\x00bad")
+
+    def test_valid_windows_path_accepted(self, tmp_path):
+        """trigger(user_draft_root='F:\\...') does not raise JianyingInvalidDraftRoot (K11)."""
+        store = _make_store(tmp_path)
+        project_dir = _make_project_dir(tmp_path)
+        record = _make_record(project_dir=str(project_dir))
+        store.save_job(record)
+
+        backend = mock.MagicMock()
+        backend.write.return_value = _make_ok_result()
+        runner = _make_runner(store, backend)
+
+        # Must not raise
+        response = runner.trigger("job-test-001", user_draft_root=r"F:\JianyingPro Drafts")
+        assert response["status"] == "running"
+        _wait_for_jianying_status(store, "job-test-001", "succeeded")
+
+    def test_none_user_draft_root_skips_validation(self, tmp_path):
+        """trigger(user_draft_root=None) skips validation entirely (K11)."""
+        store = _make_store(tmp_path)
+        project_dir = _make_project_dir(tmp_path)
+        record = _make_record(project_dir=str(project_dir))
+        store.save_job(record)
+
+        backend = mock.MagicMock()
+        backend.write.return_value = _make_ok_result()
+        runner = _make_runner(store, backend)
+
+        # Must not raise
+        response = runner.trigger("job-test-001", user_draft_root=None)
+        assert response["status"] == "running"
+        _wait_for_jianying_status(store, "job-test-001", "succeeded")
+
+
+class TestIdempotencyWithUserDraftRoot:
+    """K11: idempotency behavior when user_draft_root changes."""
+
+    def test_succeeded_same_root_returns_cached(self, tmp_path):
+        """trigger(succeeded, same user_draft_root) returns cached artifact, no re-run."""
+        store = _make_store(tmp_path)
+        win_root = r"F:\JianyingPro Drafts"
+        record = _make_record(
+            jianying_draft_status="succeeded",
+            jianying_draft_completed_at="2026-05-02T11:00:00Z",
+            jianying_draft_zip_path="/some/path/draft.zip",
+            jianying_draft_user_root=win_root,
+        )
+        store.save_job(record)
+
+        backend = mock.MagicMock()
+        runner = _make_runner(store, backend)
+
+        response = runner.trigger("job-test-001", user_draft_root=win_root)
+
+        assert response["status"] == "succeeded"
+        assert response.get("_idempotent") is True
+        assert response["draft_zip_path"] == "/some/path/draft.zip"
+        backend.write.assert_not_called()
+
+    def test_succeeded_different_root_regenerates(self, tmp_path):
+        """trigger(succeeded, different user_draft_root) falls through and regenerates."""
+        store = _make_store(tmp_path)
+        project_dir = _make_project_dir(tmp_path)
+        old_root = r"F:\OldDrafts"
+        new_root = r"G:\NewDrafts"
+
+        record = _make_record(
+            project_dir=str(project_dir),
+            jianying_draft_status="succeeded",
+            jianying_draft_completed_at="2026-05-02T11:00:00Z",
+            jianying_draft_zip_path="/old/draft.zip",
+            jianying_draft_user_root=old_root,
+        )
+        store.save_job(record)
+
+        backend = mock.MagicMock()
+        backend.write.return_value = _make_ok_result(zip_path="/new/draft.zip")
+
+        runner = _make_runner(store, backend)
+        response = runner.trigger("job-test-001", user_draft_root=new_root)
+
+        # Should have triggered a new run
+        assert response["status"] == "running"
+        assert response.get("_idempotent") is None
+
+        # Wait for the background thread to complete
+        finished = _wait_for_jianying_status(store, "job-test-001", "succeeded")
+        assert finished.jianying_draft_user_root == new_root
+        backend.write.assert_called_once()
+
+    def test_succeeded_no_user_draft_root_returns_cached(self, tmp_path):
+        """trigger(succeeded, no user_draft_root) returns cached even if cached_root is set."""
+        store = _make_store(tmp_path)
+        win_root = r"F:\JianyingPro Drafts"
+        record = _make_record(
+            jianying_draft_status="succeeded",
+            jianying_draft_completed_at="2026-05-02T11:00:00Z",
+            jianying_draft_zip_path="/some/path/draft.zip",
+            jianying_draft_user_root=win_root,
+        )
+        store.save_job(record)
+
+        backend = mock.MagicMock()
+        runner = _make_runner(store, backend)
+
+        # No user_draft_root in call — falsy → treated as "don't compare, use cached"
+        response = runner.trigger("job-test-001")
+
+        assert response["status"] == "succeeded"
+        assert response.get("_idempotent") is True
+        backend.write.assert_not_called()
+
+    def test_succeeded_no_cached_root_and_no_new_root_returns_cached(self, tmp_path):
+        """trigger(succeeded, both None) returns cached artifact (K11)."""
+        store = _make_store(tmp_path)
+        record = _make_record(
+            jianying_draft_status="succeeded",
+            jianying_draft_completed_at="2026-05-02T11:00:00Z",
+            jianying_draft_zip_path="/some/path/draft.zip",
+        )
+        store.save_job(record)
+
+        backend = mock.MagicMock()
+        runner = _make_runner(store, backend)
+
+        response = runner.trigger("job-test-001")
+
+        assert response["status"] == "succeeded"
+        assert response.get("_idempotent") is True
+        backend.write.assert_not_called()
 
 
 if __name__ == "__main__":

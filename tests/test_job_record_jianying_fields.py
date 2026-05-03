@@ -200,5 +200,57 @@ class TestJobRecordJianyingFieldsNoValidationAtDataclass:
         assert record.jianying_draft_status == "bogus"
 
 
+class TestJobRecordJianyingUserRootField:
+    """Test K11: jianying_draft_user_root field."""
+
+    def test_jianying_draft_user_root_defaults_to_none(self):
+        """jianying_draft_user_root defaults to None on construction (K11)."""
+        record = JobRecord(
+            job_id="test-job",
+            job_type="localize_video",
+            source_type="youtube_url",
+            source_ref="https://youtube.com/watch?v=test",
+            output_target="editor",
+            speakers="auto",
+            voice_a=None,
+            voice_b=None,
+            status="succeeded",
+            current_stage=None,
+            progress_message=None,
+            created_at="2026-05-02T00:00:00Z",
+            updated_at="2026-05-02T00:00:00Z",
+        )
+
+        assert record.jianying_draft_user_root is None
+
+    def test_jianying_draft_user_root_explicit_value_preserved(self):
+        """Explicit jianying_draft_user_root is preserved on construction (K11)."""
+        win_path = r"F:\剪映缓存\草稿\JianyingPro Drafts"
+        record = JobRecord.from_dict(
+            _minimal_job_dict(jianying_draft_user_root=win_path)
+        )
+        assert record.jianying_draft_user_root == win_path
+
+    def test_jianying_draft_user_root_round_trip(self):
+        """jianying_draft_user_root survives to_dict → from_dict round-trip (K11)."""
+        win_path = r"F:\剪映缓存\草稿\JianyingPro Drafts"
+        original = JobRecord.from_dict(
+            _minimal_job_dict(jianying_draft_user_root=win_path)
+        )
+        d = original.to_dict()
+        assert d["jianying_draft_user_root"] == win_path
+
+        restored = JobRecord.from_dict(d)
+        assert restored.jianying_draft_user_root == win_path
+
+    def test_jianying_draft_user_root_backward_compat_missing_field(self):
+        """Old JobRecord dict without jianying_draft_user_root defaults to None (K11)."""
+        old_data = _minimal_job_dict()
+        assert "jianying_draft_user_root" not in old_data
+
+        record = JobRecord.from_dict(old_data)
+        assert record.jianying_draft_user_root is None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

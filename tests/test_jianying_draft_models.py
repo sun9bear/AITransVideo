@@ -121,3 +121,54 @@ def test_jianying_draft_result_slots_prevents_unknown_attributes():
 
     with pytest.raises(AttributeError):
         result.unknown_attribute = "value"  # type: ignore
+
+
+# ---------------------------------------------------------------------------
+# K11: user_draft_root field
+# ---------------------------------------------------------------------------
+
+
+def test_jianying_draft_request_user_draft_root_defaults_to_none():
+    """user_draft_root defaults to None when not provided (K11)."""
+    req = JianyingDraftRequest(
+        project_id="proj_udr",
+        project_title="Root Test",
+        source_video_path="/path/to/source.mp4",
+        dubbed_audio_path="/path/to/dubbed.wav",
+        subtitle_path="/path/to/subtitles.srt",
+        output_dir="/output",
+    )
+
+    assert req.user_draft_root is None
+
+
+def test_jianying_draft_request_user_draft_root_accepts_windows_style():
+    """user_draft_root accepts a Windows-style backslash path (K11)."""
+    win_path = r"F:\剪映缓存\草稿\JianyingPro Drafts"
+    req = JianyingDraftRequest(
+        project_id="proj_win",
+        project_title="Windows Root",
+        source_video_path="/path/to/source.mp4",
+        dubbed_audio_path="/path/to/dubbed.wav",
+        subtitle_path="/path/to/subtitles.srt",
+        output_dir="/output",
+        user_draft_root=win_path,
+    )
+
+    assert req.user_draft_root == win_path
+
+
+def test_jianying_draft_request_user_draft_root_accepts_unix_style():
+    """user_draft_root accepts a Unix-style forward-slash path (K11)."""
+    unix_path = "~/Movies/JianyingPro/User Data/Projects/com.lveditor.draft"
+    req = JianyingDraftRequest(
+        project_id="proj_unix",
+        project_title="Unix Root",
+        source_video_path="/path/to/source.mp4",
+        dubbed_audio_path="/path/to/dubbed.wav",
+        subtitle_path="/path/to/subtitles.srt",
+        output_dir="/output",
+        user_draft_root=unix_path,
+    )
+
+    assert req.user_draft_root == unix_path

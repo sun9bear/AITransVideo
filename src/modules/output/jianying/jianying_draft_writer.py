@@ -278,9 +278,16 @@ class JianyingDraftWriter:
         # --- 6. Save draft ---
         draft_content_path, draft_meta_info_path = adapter.save(draft_dir, draft_name)
 
-        # --- 7. Post-process draft_content.json: replace absolute material paths
-        #        with relative paths starting with "materials/" ---
-        self._make_material_paths_relative(draft_content_path, materials_dir)
+        # --- 7. Post-process draft_content.json: embed absolute or relative paths
+        #        depending on whether user_draft_root was supplied. ---
+        if request.user_draft_root:
+            self._make_material_paths_absolute(
+                draft_content_path,
+                request.user_draft_root,
+                draft_name,
+            )
+        else:
+            self._make_material_paths_relative(draft_content_path, materials_dir)
 
         # --- 7b. Post-process draft_content.json: ensure video material has
         #        local_material_id and media_path set so Jianying treats it as
@@ -388,6 +395,63 @@ class JianyingDraftWriter:
             os.replace(tmp_path, draft_content_path)
             logger.debug(
                 "post-processed draft_content.json: absolute material paths -> relative"
+            )
+
+    @staticmethod
+    def _make_material_paths_absolute(
+        draft_content_path: str,
+        user_draft_root: str,
+        draft_name: str,
+    ) -> None:
+        """Rewrite every materials.{videos,audios}[*].path to an absolute path under
+        the user's local drafts root. Format:
+          {user_draft_root}/{draft_name}/materials/{filename}
+        Respects the path separator style of user_draft_root (Windows backslash
+        vs Unix forward-slash).
+
+        Also rewrites video.media_path to match (Jianying uses both).
+        """
+        sep = "\\" if "\\" in user_draft_root else "/"
+        # Strip trailing separator from user_draft_root
+        root = user_draft_root.rstrip("\\/")
+        base = sep.join([root, draft_name, "materials"])
+
+        content_text = Path(draft_content_path).read_text(encoding="utf-8")
+        data = json.loads(content_text)
+        changed = False
+
+        for kind in ("videos", "audios"):
+            for m in data.get("materials", {}).get(kind, []):
+                if not isinstance(m, dict):
+                    continue
+                current = m.get("path", "")
+                if not current:
+                    continue
+                # Only rewrite if it's a relative materials/ path or some other path;
+                # extract the filename and rebuild as absolute.
+                current_norm = current.replace("\\", "/")
+                if current_norm.startswith("materials/"):
+                    filename = current_norm[len("materials/"):]
+                else:
+                    # Already absolute or some other form; extract basename and rebuild
+                    filename = os.path.basename(current_norm)
+                new_path = sep.join([base, filename])
+                m["path"] = new_path
+                if "media_path" in m:
+                    m["media_path"] = new_path
+                changed = True
+
+        if changed:
+            tmp_path = draft_content_path + ".tmp"
+            Path(tmp_path).write_text(
+                json.dumps(data, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            os.replace(tmp_path, draft_content_path)
+            logger.debug(
+                "post-processed draft_content.json with absolute material paths "
+                "rooted at %s",
+                base,
             )
 
     @staticmethod

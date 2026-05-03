@@ -9,6 +9,13 @@ validation_status valid values (JianyingDraftResult.validation_status):
 - "skipped_service_mode"    — service_mode != "studio".
 - "skipped_missing_input"   — required input file missing (e.g. no source video).
 - "failed"                  — generation attempted but raised an error.
+
+JianyingDraftRequest.user_draft_root (K11 / plan §11):
+If user_draft_root is provided, the writer emits absolute material paths
+({user_draft_root}<sep><draft_name><sep>materials<sep><filename>) so Jianying
+can load them directly after the user unzips into that root. If None, falls
+back to relative paths (legacy phase 1 PoC behavior; user must manually
+"link media" in Jianying).
 """
 
 from __future__ import annotations
@@ -33,6 +40,7 @@ class JianyingDraftRequest:
     ambient_audio_path: str | None = None
     width: int = 1920
     height: int = 1080
+    user_draft_root: str | None = None
 
 
 @dataclass(slots=True)

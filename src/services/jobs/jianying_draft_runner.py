@@ -58,6 +58,19 @@ class JianyingEngineUnavailable(Exception):
     """
 
 
+class JianyingInvalidDraftRoot(ValueError):
+    """Raised when user_draft_root fails validation in trigger().
+
+    K12 (API endpoint) catches this and returns HTTP 400.
+
+    Validation rules (applied in trigger() before the job state machine):
+    - Length must be <= 500 characters.
+    - Must not be empty after stripping surrounding whitespace.
+    - Must not contain null bytes (\\0).
+    - Must not begin with a URL scheme (http://, https://, ftp://).
+    """
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -66,6 +79,42 @@ class JianyingEngineUnavailable(Exception):
 def _utc_now_iso() -> str:
     """Return current UTC time as ISO 8601 string."""
     return datetime.now(timezone.utc).isoformat()
+
+
+def _validate_user_draft_root(value: str) -> str:
+    """Validate and normalise user_draft_root.
+
+    Returns the stripped value on success.
+    Raises JianyingInvalidDraftRoot on any validation failure.
+
+    Rules:
+    - Strip surrounding whitespace first.
+    - Empty after strip → rejected.
+    - Length > 500 → rejected.
+    - Contains null byte (\\0) → rejected (security).
+    - Starts with http://, https://, or ftp:// → rejected (user pasted a URL).
+    """
+    stripped = value.strip()
+    if not stripped:
+        raise JianyingInvalidDraftRoot(
+            "user_draft_root must not be empty after stripping whitespace."
+        )
+    if len(stripped) > 500:
+        raise JianyingInvalidDraftRoot(
+            f"user_draft_root is too long ({len(stripped)} chars, max 500)."
+        )
+    if "\0" in stripped:
+        raise JianyingInvalidDraftRoot(
+            "user_draft_root must not contain null bytes."
+        )
+    lower = stripped.lower()
+    for scheme in ("http://", "https://", "ftp://"):
+        if lower.startswith(scheme):
+            raise JianyingInvalidDraftRoot(
+                f"user_draft_root looks like a URL ({stripped[:40]!r}); "
+                "please provide a local filesystem path instead."
+            )
+    return stripped
 
 
 class JianyingDraftRunner:
@@ -96,14 +145,29 @@ class JianyingDraftRunner:
     # Public API
     # ------------------------------------------------------------------
 
-    def trigger(self, job_id: str) -> dict:
+    def trigger(self, job_id: str, *, user_draft_root: str | None = None) -> dict:
         """Idempotent trigger. Returns response dict per plan §11.2.2.
+
+        Args:
+            job_id: The job to generate a draft for.
+            user_draft_root: Optional absolute path to the user's local Jianying
+                drafts directory (e.g. ``"F:\\剪映缓存\\草稿\\JianyingPro Drafts"``
+                or ``"~/Movies/JianyingPro/User Data/Projects/com.lveditor.draft"``).
+                When set, material paths in the generated JSON will be absolute
+                rather than relative. If the cached artifact was built with a
+                different root, the draft is regenerated.
 
         Raises:
             KeyError: if job_id is not found. Caller maps to 404.
             JianyingNotAllowedError: if preconditions are not met. Caller
                 maps to 403/409 based on ``error.reason``.
+            JianyingInvalidDraftRoot: if user_draft_root fails validation.
+                Caller (K12) maps to 400.
         """
+        # Validate user_draft_root early (before touching the store)
+        if user_draft_root is not None:
+            user_draft_root = _validate_user_draft_root(user_draft_root)
+
         job = self._store.require_job(job_id)  # raises KeyError if not found
 
         # Gate 1: must be a studio job
@@ -130,16 +194,22 @@ class JianyingDraftRunner:
                 "message": "still in progress",
             }
 
-        # Already succeeded — return existing artifact, no re-run
+        # Already succeeded — return existing artifact unless user_draft_root differs
         if jd_status == "succeeded":
-            return {
-                "status": "succeeded",
-                "completed_at": job.jianying_draft_completed_at,
-                "draft_zip_path": job.jianying_draft_zip_path,
-                "artifact_key": "editor.jianying_draft_zip",
-            }
+            cached_root = getattr(job, "jianying_draft_user_root", None)
+            if user_draft_root and user_draft_root != cached_root:
+                # User changed the drafts root — fall through and regenerate
+                pass
+            else:
+                return {
+                    "status": "succeeded",
+                    "completed_at": job.jianying_draft_completed_at,
+                    "draft_zip_path": job.jianying_draft_zip_path,
+                    "artifact_key": "editor.jianying_draft_zip",
+                    "_idempotent": True,
+                }
 
-        # idle or failed — transition to running and spawn thread
+        # idle, failed, or succeeded-with-different-root — transition to running and spawn thread
         job.jianying_draft_status = "running"
         job.jianying_draft_started_at = _utc_now_iso()
         job.jianying_draft_completed_at = None
@@ -148,7 +218,7 @@ class JianyingDraftRunner:
 
         threading.Thread(
             target=self._run_in_background,
-            args=(job_id,),
+            args=(job_id, user_draft_root),
             daemon=True,
             name=f"jianying-draft-{job_id}",
         ).start()
@@ -228,15 +298,20 @@ class JianyingDraftRunner:
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _run_in_background(self, job_id: str) -> None:
+    def _run_in_background(self, job_id: str, user_draft_root: str | None = None) -> None:
         """Execute draft generation in a background thread.
 
         Updates JobRecord status on success or failure. All exceptions are
         caught — the thread must never die silently without recording the error.
+
+        Args:
+            job_id: Job to generate a draft for.
+            user_draft_root: Passed through to _build_jianying_request so
+                absolute material paths can be embedded in the draft JSON.
         """
         try:
             job = self._store.require_job(job_id)
-            request = self._build_jianying_request(job)
+            request = self._build_jianying_request(job, user_draft_root=user_draft_root)
 
             # Lazy-import backend to avoid pulling in pyJianYingDraft at module
             # import time (optional dependency).
@@ -257,6 +332,7 @@ class JianyingDraftRunner:
                 job.jianying_draft_zip_path = result.draft_zip_path
                 job.jianying_draft_completed_at = _utc_now_iso()
                 job.jianying_draft_error = None
+                job.jianying_draft_user_root = user_draft_root
                 logger.info(
                     "Jianying draft succeeded for job %s: %s",
                     job_id,
@@ -293,11 +369,17 @@ class JianyingDraftRunner:
                     job_id,
                 )
 
-    def _build_jianying_request(self, job) -> "object":
+    def _build_jianying_request(self, job, *, user_draft_root: str | None = None) -> "object":
         """Construct JianyingDraftRequest from JobRecord.
 
         Reads manifest.json from {project_dir}/manifest.json to resolve
         artifact paths. Raises if project_dir is missing or manifest is absent.
+
+        Args:
+            job: JobRecord instance.
+            user_draft_root: Optional absolute path to the user's local Jianying
+                drafts directory. When set, material paths in the generated JSON
+                will be absolute rather than relative.
 
         Returns a JianyingDraftRequest instance.
         """
@@ -335,4 +417,5 @@ class JianyingDraftRunner:
             ambient_audio_path=ambient_audio_path,
             width=1920,
             height=1080,
+            user_draft_root=user_draft_root,
         )

@@ -72,6 +72,156 @@ def test_project_id_sanitization_removes_special_chars():
 
 
 # ---------------------------------------------------------------------------
+# K11: _make_material_paths_absolute helper (no pyJianYingDraft needed)
+# ---------------------------------------------------------------------------
+
+
+def _write_draft_content(path: str, videos=None, audios=None) -> None:
+    """Write a minimal draft_content.json at *path* for helper tests."""
+    data = {
+        "materials": {
+            "videos": videos or [],
+            "audios": audios or [],
+        }
+    }
+    Path(path).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+def test_make_material_paths_absolute_windows_style(tmp_path):
+    """_make_material_paths_absolute rewrites paths with backslashes for Windows input (K11)."""
+    from modules.output.jianying.jianying_draft_writer import JianyingDraftWriter  # noqa: PLC0415
+
+    content_path = str(tmp_path / "draft_content.json")
+    _write_draft_content(
+        content_path,
+        audios=[{"path": "materials/dubbed_audio.wav", "id": "a1"}],
+    )
+
+    user_draft_root = r"F:\剪映缓存\草稿\JianyingPro Drafts"
+    draft_name = "my_draft"
+    JianyingDraftWriter._make_material_paths_absolute(
+        content_path, user_draft_root, draft_name
+    )
+
+    data = json.loads(Path(content_path).read_text(encoding="utf-8"))
+    audios = data["materials"]["audios"]
+    assert len(audios) == 1
+    expected = r"F:\剪映缓存\草稿\JianyingPro Drafts\my_draft\materials\dubbed_audio.wav"
+    assert audios[0]["path"] == expected, f"got: {audios[0]['path']!r}"
+    # No backslash in expected should appear as forward slash
+    assert "/" not in audios[0]["path"], "Windows path must use backslashes only"
+
+
+def test_make_material_paths_absolute_unix_style(tmp_path):
+    """_make_material_paths_absolute rewrites paths with forward-slashes for Unix input (K11)."""
+    from modules.output.jianying.jianying_draft_writer import JianyingDraftWriter  # noqa: PLC0415
+
+    content_path = str(tmp_path / "draft_content.json")
+    _write_draft_content(
+        content_path,
+        audios=[{"path": "materials/dubbed_audio.wav", "id": "a1"}],
+    )
+
+    user_draft_root = "~/Movies/JianyingPro/User Data/Projects/com.lveditor.draft"
+    draft_name = "my_draft"
+    JianyingDraftWriter._make_material_paths_absolute(
+        content_path, user_draft_root, draft_name
+    )
+
+    data = json.loads(Path(content_path).read_text(encoding="utf-8"))
+    audios = data["materials"]["audios"]
+    assert len(audios) == 1
+    expected = (
+        "~/Movies/JianyingPro/User Data/Projects/com.lveditor.draft"
+        "/my_draft/materials/dubbed_audio.wav"
+    )
+    assert audios[0]["path"] == expected, f"got: {audios[0]['path']!r}"
+    assert "\\" not in audios[0]["path"], "Unix path must not contain backslashes"
+
+
+def test_make_material_paths_absolute_rewrites_video_media_path(tmp_path):
+    """_make_material_paths_absolute also rewrites media_path on video materials (K11)."""
+    from modules.output.jianying.jianying_draft_writer import JianyingDraftWriter  # noqa: PLC0415
+
+    content_path = str(tmp_path / "draft_content.json")
+    _write_draft_content(
+        content_path,
+        videos=[{
+            "path": "materials/source_video.mp4",
+            "media_path": "materials/source_video.mp4",
+            "id": "v1",
+        }],
+    )
+
+    user_draft_root = r"F:\JianyingPro Drafts"
+    draft_name = "job_abc"
+    JianyingDraftWriter._make_material_paths_absolute(
+        content_path, user_draft_root, draft_name
+    )
+
+    data = json.loads(Path(content_path).read_text(encoding="utf-8"))
+    videos = data["materials"]["videos"]
+    assert len(videos) == 1
+    expected = r"F:\JianyingPro Drafts\job_abc\materials\source_video.mp4"
+    assert videos[0]["path"] == expected
+    assert videos[0]["media_path"] == expected, (
+        "media_path must also be rewritten to match path"
+    )
+
+
+def test_make_material_paths_absolute_trailing_separator_stripped(tmp_path):
+    """user_draft_root with trailing separator is handled correctly (K11)."""
+    from modules.output.jianying.jianying_draft_writer import JianyingDraftWriter  # noqa: PLC0415
+
+    content_path = str(tmp_path / "draft_content.json")
+    _write_draft_content(
+        content_path,
+        audios=[{"path": "materials/dubbed.wav", "id": "a1"}],
+    )
+
+    # Trailing backslash should not produce double backslash
+    user_draft_root = r"F:\JianyingPro Drafts" + "\\"
+    JianyingDraftWriter._make_material_paths_absolute(
+        content_path, user_draft_root, "draft_name"
+    )
+
+    data = json.loads(Path(content_path).read_text(encoding="utf-8"))
+    path_val = data["materials"]["audios"][0]["path"]
+    assert "\\\\" not in path_val, f"double backslash found in: {path_val!r}"
+    assert path_val.startswith(r"F:\JianyingPro Drafts\\".rstrip("\\"))
+
+
+def test_make_material_paths_absolute_both_videos_and_audios(tmp_path):
+    """_make_material_paths_absolute rewrites both videos and audios in one pass (K11)."""
+    from modules.output.jianying.jianying_draft_writer import JianyingDraftWriter  # noqa: PLC0415
+
+    content_path = str(tmp_path / "draft_content.json")
+    _write_draft_content(
+        content_path,
+        videos=[{"path": "materials/source_video.mp4", "media_path": "materials/source_video.mp4", "id": "v1"}],
+        audios=[
+            {"path": "materials/dubbed_audio.wav", "id": "a1"},
+            {"path": "materials/ambient_audio.wav", "id": "a2"},
+        ],
+    )
+
+    user_draft_root = r"D:\Drafts"
+    JianyingDraftWriter._make_material_paths_absolute(
+        content_path, user_draft_root, "proj_001"
+    )
+
+    data = json.loads(Path(content_path).read_text(encoding="utf-8"))
+    all_paths = (
+        [v["path"] for v in data["materials"]["videos"]]
+        + [a["path"] for a in data["materials"]["audios"]]
+    )
+    for p in all_paths:
+        assert p.startswith(r"D:\Drafts\proj_001\materials" + "\\"), (
+            f"expected absolute path under D:\\Drafts\\proj_001\\materials\\, got: {p!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Guard: importing jianying_draft_writer itself must not fail without library
 # ---------------------------------------------------------------------------
 
@@ -479,3 +629,90 @@ def test_idempotent_rerun_overwrites_without_error(tmp_workspace: Path):
     # Draft still exists and is valid after second run
     assert os.path.isfile(result2.draft_content_path)
     assert os.path.isfile(result2.draft_zip_path)
+
+
+# ---------------------------------------------------------------------------
+# K11: write() absolute vs relative path mode (require pyJianYingDraft)
+# ---------------------------------------------------------------------------
+
+
+def test_write_with_user_draft_root_produces_absolute_paths(tmp_workspace: Path):
+    """When user_draft_root is set, write() embeds absolute material paths (K11)."""
+    from modules.output.jianying.jianying_draft_models import JianyingDraftRequest  # noqa: PLC0415
+    from modules.output.jianying.jianying_draft_writer import JianyingDraftWriter  # noqa: PLC0415
+
+    dubbed = str(tmp_workspace / "dubbed.wav")
+    srt = str(tmp_workspace / "subtitles.srt")
+    _make_wav(dubbed)
+    _make_srt(srt)
+
+    # Use a Unix-style root so the test works cross-platform without real Windows paths
+    user_root = "/home/testuser/JianyingDrafts"
+    req = JianyingDraftRequest(
+        project_id="test_abs_paths",
+        project_title="Absolute Path Test",
+        source_video_path=str(tmp_workspace / "no_video.mp4"),
+        dubbed_audio_path=dubbed,
+        subtitle_path=srt,
+        output_dir=str(tmp_workspace / "output"),
+        user_draft_root=user_root,
+    )
+
+    writer = JianyingDraftWriter()
+    result = writer.write(req)
+
+    assert result.validation_status == "ok"
+
+    content = json.loads(Path(result.draft_content_path).read_text(encoding="utf-8"))
+    audios = content.get("materials", {}).get("audios", [])
+    assert len(audios) > 0, "no audio materials in draft_content.json"
+    for audio in audios:
+        path_val = audio.get("path", "")
+        assert path_val.startswith(user_root), (
+            f"expected path starting with user_root {user_root!r}, got {path_val!r}"
+        )
+        assert os.path.basename(path_val).endswith(".wav"), (
+            f"expected .wav filename in path, got {path_val!r}"
+        )
+        # Must not be a simple relative path
+        assert not path_val.startswith("materials/"), (
+            f"path should be absolute, not relative, got {path_val!r}"
+        )
+
+
+def test_write_without_user_draft_root_produces_relative_paths(tmp_workspace: Path):
+    """When user_draft_root is None, write() uses relative material paths (back-compat, K11)."""
+    from modules.output.jianying.jianying_draft_models import JianyingDraftRequest  # noqa: PLC0415
+    from modules.output.jianying.jianying_draft_writer import JianyingDraftWriter  # noqa: PLC0415
+
+    dubbed = str(tmp_workspace / "dubbed.wav")
+    srt = str(tmp_workspace / "subtitles.srt")
+    _make_wav(dubbed)
+    _make_srt(srt)
+
+    req = JianyingDraftRequest(
+        project_id="test_rel_paths",
+        project_title="Relative Path Test",
+        source_video_path=str(tmp_workspace / "no_video.mp4"),
+        dubbed_audio_path=dubbed,
+        subtitle_path=srt,
+        output_dir=str(tmp_workspace / "output"),
+        # user_draft_root omitted — defaults to None
+    )
+
+    writer = JianyingDraftWriter()
+    result = writer.write(req)
+
+    assert result.validation_status == "ok"
+
+    content = json.loads(Path(result.draft_content_path).read_text(encoding="utf-8"))
+    audios = content.get("materials", {}).get("audios", [])
+    assert len(audios) > 0, "no audio materials in draft_content.json"
+    for audio in audios:
+        path_val = audio.get("path", "")
+        assert path_val.startswith("materials/"), (
+            f"expected relative path starting with 'materials/', got {path_val!r}"
+        )
+        assert not os.path.isabs(path_val), (
+            f"path must be relative, not absolute, got {path_val!r}"
+        )
