@@ -4,10 +4,14 @@ import { absoluteUrl, blockedRoutes } from "@/lib/seo/site"
 /**
  * Generates `/robots.txt`.
  *
- * Strategy: search-result crawlers (Googlebot/Bingbot/OAI-SearchBot/
- * PerplexityBot) get public marketing; training crawlers (GPTBot,
- * Google-Extended) are fully disallowed until business decides content
- * opt-in is worth it.
+ * Strategy: every documented bot — search-result crawlers AND training
+ * crawlers — gets the same public-marketing allowance. The previous
+ * stance disallowed GPTBot and Google-Extended on the conservative
+ * default of "training crawlers blocked until business opts in"; that
+ * was reversed once Cloudflare AI Crawl Control (which sits in front of
+ * the origin) was explicitly toggled to Allow for those same bots. For
+ * a marketing site whose content exists to be quoted, training-data
+ * inclusion is upside, not a leak.
  *
  * IMPORTANT: robots.txt is NOT a reliable index-removal mechanism. Auth
  * pages carry page-level `noindex` in `(auth)/layout.tsx` so external
@@ -27,15 +31,11 @@ export default function robots(): MetadataRoute.Robots {
   return {
     rules: [
       // Default: allow public marketing, block app/admin/api/auth surfaces.
+      // The wildcard rule covers every crawler we don't enumerate
+      // explicitly, including Bytespider, ClaudeBot, Claude-SearchBot,
+      // CCBot, GPTBot, Google-Extended, PerplexityBot, OAI-SearchBot,
+      // PetalBot, Manus Bot, TikTok Spider, etc.
       { userAgent: "*", ...sharedRules },
-      // Search-result crawlers — same allow list, explicit so they're not
-      // accidentally caught under a stricter rule order in the future.
-      { userAgent: "OAI-SearchBot", ...sharedRules },
-      { userAgent: "PerplexityBot", ...sharedRules },
-      // Training crawlers — fully blocked. Re-evaluate per business call,
-      // not per technical default.
-      { userAgent: "GPTBot", disallow: ["/"] },
-      { userAgent: "Google-Extended", disallow: ["/"] },
     ],
     sitemap: absoluteUrl("/sitemap.xml"),
   }
