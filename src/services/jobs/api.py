@@ -1176,13 +1176,52 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                             },
                         )
                         return
+                    # Parse JSON body (if present, optional) — K12
+                    content_length = int(self.headers.get("content-length", "0") or "0")
+                    body_bytes = self.rfile.read(content_length) if content_length > 0 else b""
+                    user_draft_root = None
+                    if body_bytes:
+                        try:
+                            body = json.loads(body_bytes.decode("utf-8"))
+                        except (json.JSONDecodeError, UnicodeDecodeError):
+                            self._write_json(
+                                HTTPStatus.BAD_REQUEST,
+                                {"code": "invalid_body", "message": "Request body must be valid JSON."},
+                            )
+                            return
+                        if not isinstance(body, dict):
+                            self._write_json(
+                                HTTPStatus.BAD_REQUEST,
+                                {"code": "invalid_body", "message": "Request body must be a JSON object."},
+                            )
+                            return
+                        user_draft_root = body.get("user_draft_root")
+                        if user_draft_root is not None and not isinstance(user_draft_root, str):
+                            self._write_json(
+                                HTTPStatus.BAD_REQUEST,
+                                {
+                                    "code": "invalid_user_draft_root",
+                                    "message": "user_draft_root must be a string.",
+                                },
+                            )
+                            return
                     # Delegate to runner
                     from services.jobs.jianying_draft_runner import (
                         JianyingEngineUnavailable,
+                        JianyingInvalidDraftRoot,
                         JianyingNotAllowedError,
                     )
                     try:
-                        result = jianying_runner.trigger(jianying_job_id)
+                        result = jianying_runner.trigger(jianying_job_id, user_draft_root=user_draft_root)
+                    except JianyingInvalidDraftRoot as exc:
+                        self._write_json(
+                            HTTPStatus.BAD_REQUEST,
+                            {
+                                "code": "invalid_user_draft_root",
+                                "message": str(exc),
+                            },
+                        )
+                        return
                     except JianyingNotAllowedError as exc:
                         # Should be caught by gates above, but defensive
                         self._write_json(

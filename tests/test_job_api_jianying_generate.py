@@ -22,7 +22,11 @@ from urllib.request import Request, urlopen
 import pytest
 
 from services.jobs.api import build_job_api_server
-from services.jobs.jianying_draft_runner import JianyingDraftRunner, JianyingNotAllowedError
+from services.jobs.jianying_draft_runner import (
+    JianyingDraftRunner,
+    JianyingInvalidDraftRoot,
+    JianyingNotAllowedError,
+)
 from services.jobs.models import JobRecord
 from services.jobs.process_runner import ProcessJobRunner
 from services.jobs.service import JobService
@@ -160,7 +164,7 @@ def _internal_headers() -> dict:
 # ---------------------------------------------------------------------------
 
 class TestGenerateJianyingDraftEndpoint:
-    """10 scenarios for POST /jobs/{id}/generate-jianying-draft."""
+    """16 scenarios for POST /jobs/{id}/generate-jianying-draft (K4 + K12)."""
 
     # ------------------------------------------------------------------
     # 1. Happy path: idle job, succeeded status, studio mode -> 202
@@ -315,7 +319,8 @@ class TestGenerateJianyingDraftEndpoint:
             assert body.get("status") == "succeeded"
             assert body.get("draft_zip_path") == "/fake/path/draft.zip"
             # Verify trigger was called exactly once (no second dispatch)
-            mock_runner.trigger.assert_called_once_with("job_succeeded_200")
+            # K12: now trigger is called with user_draft_root=None kwarg
+            mock_runner.trigger.assert_called_once_with("job_succeeded_200", user_draft_root=None)
         finally:
             server.shutdown()
 
@@ -388,6 +393,155 @@ class TestGenerateJianyingDraftEndpoint:
             )
             assert status == 503, f"expected 503 for engine unavailable, got {status}; body={body!r}"
             assert body.get("code") == "engine_unavailable"
+        finally:
+            server.shutdown()
+
+    # ------------------------------------------------------------------
+    # K12: 11. POST with valid user_draft_root body -> runner called with kwarg
+    # ------------------------------------------------------------------
+    def test_post_with_valid_user_draft_root_calls_runner_with_kwarg(self, tmp_path: Path) -> None:
+        """POST with valid user_draft_root in JSON body → runner.trigger called
+        with user_draft_root kwarg. Response 202."""
+        mock_runner = MagicMock(spec=JianyingDraftRunner)
+        mock_runner.trigger.return_value = {
+            "status": "running",
+            "started_at": _iso_now(),
+        }
+        mock_runner.reap_stale.return_value = 0
+
+        _, store, server, _, base_url = _start_server(tmp_path, jianying_runner=mock_runner)
+        try:
+            _inject_job(store, job_id="job_with_draft_root")
+            user_root = "F:\\Drafts\\JianyingPro"
+            status, body = _http_post_json(
+                f"{base_url}/jobs/job_with_draft_root/generate-jianying-draft",
+                body={"user_draft_root": user_root},
+            )
+            assert status == 202, f"expected 202, got {status}; body={body!r}"
+            assert body.get("status") == "running"
+            # Verify trigger was called with user_draft_root kwarg
+            mock_runner.trigger.assert_called_once_with("job_with_draft_root", user_draft_root=user_root)
+        finally:
+            server.shutdown()
+
+    # ------------------------------------------------------------------
+    # K12: 12. POST with empty user_draft_root -> runner raises validation error
+    # ------------------------------------------------------------------
+    def test_post_with_empty_user_draft_root_returns_400(self, tmp_path: Path) -> None:
+        """POST with empty user_draft_root (after strip) → runner raises
+        JianyingInvalidDraftRoot → endpoint returns 400."""
+        mock_runner = MagicMock(spec=JianyingDraftRunner)
+        mock_runner.trigger.side_effect = JianyingInvalidDraftRoot(
+            "user_draft_root must not be empty after stripping whitespace."
+        )
+        mock_runner.reap_stale.return_value = 0
+
+        _, store, server, _, base_url = _start_server(tmp_path, jianying_runner=mock_runner)
+        try:
+            _inject_job(store, job_id="job_empty_root")
+            status, body = _http_post_json(
+                f"{base_url}/jobs/job_empty_root/generate-jianying-draft",
+                body={"user_draft_root": ""},
+            )
+            assert status == 400, f"expected 400, got {status}; body={body!r}"
+            assert body.get("code") == "invalid_user_draft_root"
+            assert "empty" in str(body.get("message", "")).lower()
+        finally:
+            server.shutdown()
+
+    # ------------------------------------------------------------------
+    # K12: 13. POST with URL-like user_draft_root -> runner rejects it
+    # ------------------------------------------------------------------
+    def test_post_with_url_user_draft_root_returns_400(self, tmp_path: Path) -> None:
+        """POST with user_draft_root that looks like a URL (http://...)
+        → runner raises JianyingInvalidDraftRoot → endpoint returns 400."""
+        mock_runner = MagicMock(spec=JianyingDraftRunner)
+        mock_runner.trigger.side_effect = JianyingInvalidDraftRoot(
+            "user_draft_root looks like a URL (http://...); please provide a local filesystem path instead."
+        )
+        mock_runner.reap_stale.return_value = 0
+
+        _, store, server, _, base_url = _start_server(tmp_path, jianying_runner=mock_runner)
+        try:
+            _inject_job(store, job_id="job_url_root")
+            status, body = _http_post_json(
+                f"{base_url}/jobs/job_url_root/generate-jianying-draft",
+                body={"user_draft_root": "http://example.com/drafts"},
+            )
+            assert status == 400, f"expected 400, got {status}; body={body!r}"
+            assert body.get("code") == "invalid_user_draft_root"
+            assert "url" in str(body.get("message", "")).lower()
+        finally:
+            server.shutdown()
+
+    # ------------------------------------------------------------------
+    # K12: 14. POST with non-string user_draft_root (e.g. number) -> 400
+    # ------------------------------------------------------------------
+    def test_post_with_non_string_user_draft_root_returns_400(self, tmp_path: Path) -> None:
+        """POST with user_draft_root as a number (123) or dict → endpoint
+        catches at body-validation stage (before runner) → 400."""
+        _, store, server, _, base_url = _start_server(tmp_path)
+        try:
+            _inject_job(store, job_id="job_non_string_root")
+            status, body = _http_post_json(
+                f"{base_url}/jobs/job_non_string_root/generate-jianying-draft",
+                body={"user_draft_root": 123},
+            )
+            assert status == 400, f"expected 400, got {status}; body={body!r}"
+            assert body.get("code") == "invalid_user_draft_root"
+            assert "string" in str(body.get("message", "")).lower()
+        finally:
+            server.shutdown()
+
+    # ------------------------------------------------------------------
+    # K12: 15. POST with malformed JSON body -> 400
+    # ------------------------------------------------------------------
+    def test_post_with_malformed_json_returns_400(self, tmp_path: Path) -> None:
+        """POST with malformed JSON body → endpoint catches at parsing stage
+        → 400 + code 'invalid_body'."""
+        _, store, server, _, base_url = _start_server(tmp_path)
+        try:
+            _inject_job(store, job_id="job_bad_json")
+            # Manually craft a bad request with invalid JSON
+            bad_json_data = b"{invalid json"
+            req = Request(
+                f"{base_url}/jobs/job_bad_json/generate-jianying-draft",
+                data=bad_json_data,
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    "Content-Length": str(len(bad_json_data)),
+                },
+            )
+            try:
+                with urlopen(req, timeout=5) as resp:
+                    status = resp.status
+                    raw = resp.read().decode("utf-8")
+            except HTTPError as e:
+                status = e.code
+                raw = e.read().decode("utf-8", errors="replace") or "{}"
+            body = json.loads(raw) if raw else {}
+            assert status == 400, f"expected 400 for bad JSON, got {status}; body={body!r}"
+            assert body.get("code") == "invalid_body"
+        finally:
+            server.shutdown()
+
+    # ------------------------------------------------------------------
+    # K12: 16. POST without body (legacy K4 behavior) -> 202
+    # ------------------------------------------------------------------
+    def test_post_without_body_legacy_behavior_returns_202(self, tmp_path: Path) -> None:
+        """POST without body at all (empty or no Content-Length) → runner.trigger
+        called with user_draft_root=None. Response 202. (Legacy K4 behavior.)"""
+        service, store, server, _, base_url = _start_server(tmp_path)
+        try:
+            _inject_job(store, job_id="job_no_body")
+            # POST with no body
+            status, body = _http_post_json(
+                f"{base_url}/jobs/job_no_body/generate-jianying-draft",
+                body=None,
+            )
+            assert status == 202, f"expected 202 for empty body, got {status}; body={body!r}"
+            assert body.get("status") == "running"
         finally:
             server.shutdown()
 
