@@ -1,6 +1,6 @@
 "use client"
 
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react"
+import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react"
 
 export type SessionUser = {
   id: string
@@ -15,11 +15,15 @@ export type SessionUser = {
 type SessionContextValue = {
   user: SessionUser | null
   loading: boolean
+  error: string | null
+  refresh: () => Promise<void>
 }
 
 const SessionContext = createContext<SessionContextValue>({
   user: null,
   loading: true,
+  error: null,
+  refresh: async () => {},
 })
 
 export function useSession() {
@@ -29,22 +33,39 @@ export function useSession() {
 export function SessionProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<SessionUser | null>(null)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
-  useEffect(() => {
-    fetch("/auth/me", { credentials: "include" })
-      .then((r) => {
-        if (!r.ok) throw new Error("not authenticated")
-        return r.json()
-      })
-      .then((d) => {
-        if (d.user) setUser(d.user)
-      })
-      .catch(() => {})
-      .finally(() => setLoading(false))
+  const refresh = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+
+    try {
+      const response = await fetch("/auth/me", { credentials: "include" })
+      if (response.status === 401) {
+        setUser(null)
+        return
+      }
+      if (!response.ok) {
+        throw new Error(`/auth/me failed with HTTP ${response.status}`)
+      }
+
+      const data = await response.json()
+      setUser(data.user ?? null)
+    } catch (err) {
+      console.error("Failed to load session", err)
+      setUser(null)
+      setError("登录状态加载失败，请重试。")
+    } finally {
+      setLoading(false)
+    }
   }, [])
 
+  useEffect(() => {
+    void refresh()
+  }, [refresh])
+
   return (
-    <SessionContext value={{ user, loading }}>
+    <SessionContext value={{ user, loading, error, refresh }}>
       {children}
     </SessionContext>
   )

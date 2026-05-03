@@ -122,8 +122,8 @@ export function SiteHeader() {
                 // the cream header. Bypassing buttonVariants pins explicit
                 // ink-theme colors regardless of html.dark.
                 className={cn(
-                  "hidden sm:inline-flex items-center justify-center gap-1.5",
-                  "h-8 px-3 rounded-[10px] text-[0.8rem] font-medium",
+                  "inline-flex items-center justify-center gap-1.5",
+                  "h-8 px-2.5 sm:px-3 rounded-[10px] text-[0.78rem] sm:text-[0.8rem] font-medium",
                   "transition-colors",
                   "bg-[color:var(--ink-paper-2,#EDE6D6)]",
                   "text-[color:var(--ink-black,#1A1A1A)]",
@@ -139,7 +139,7 @@ export function SiteHeader() {
                 data-attention={pastHero ? "true" : undefined}
                 className={cn(
                   buttonVariants({ variant: "default", size: "sm" }),
-                  "h-8 px-3 transition-all duration-300",
+                  "h-8 px-2.5 sm:px-3 transition-all duration-300",
                   // Highlighted state: cinnabar pulsing halo via box-shadow.
                   // We render the halo as a box-shadow rather than a ring so
                   // it bleeds OUTSIDE the header bar without being clipped on
@@ -153,7 +153,8 @@ export function SiteHeader() {
                     : "shadow-none",
                 )}
               >
-                免费开始试用
+                <span className="sm:hidden">试用</span>
+                <span className="hidden sm:inline">免费开始试用</span>
               </Link>
             </>
           )}

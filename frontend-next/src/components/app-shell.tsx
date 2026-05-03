@@ -31,6 +31,8 @@ import {
   ClipboardList,
   TrendingUp,
   CreditCard,
+  AlertTriangle,
+  RefreshCw,
 } from "lucide-react"
 
 type NavItem = {
@@ -87,7 +89,7 @@ const navGroups: NavGroup[] = [
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
-  const { user } = useSession()
+  const { user, error: sessionError, refresh: refreshSession } = useSession()
   const [collapsed, setCollapsed] = useState(false)
   const [mobileOpen, setMobileOpen] = useState(false)
   // darkMode is hydrated from localStorage on first client render so the
@@ -96,13 +98,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [darkMode, setDarkMode] = useState(true)
 
   useEffect(() => {
-    try {
-      const stored = window.localStorage.getItem("aivt-app-dark-mode")
-      if (stored === "0") setDarkMode(false)
-      else if (stored === "1") setDarkMode(true)
-    } catch {
-      // localStorage not available (privacy mode etc.) — keep default.
-    }
+    const frame = window.requestAnimationFrame(() => {
+      try {
+        const stored = window.localStorage.getItem("aivt-app-dark-mode")
+        if (stored === "0") setDarkMode(false)
+        else if (stored === "1") setDarkMode(true)
+      } catch {
+        // localStorage not available (privacy mode etc.) — keep default.
+      }
+    })
+    return () => window.cancelAnimationFrame(frame)
   }, [])
 
   useEffect(() => {
@@ -338,6 +343,25 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </div>
           </div>
         </header>
+
+        {sessionError ? (
+          <div className="border-b border-destructive/25 bg-destructive/10 px-4 py-3 text-sm text-destructive lg:px-6">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="h-4 w-4" aria-hidden="true" />
+                <span>{sessionError}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => void refreshSession()}
+                className="inline-flex h-8 items-center justify-center gap-2 rounded-md border border-destructive/30 bg-background/60 px-3 text-xs font-medium text-destructive transition hover:bg-background focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-destructive"
+              >
+                <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
+                重试
+              </button>
+            </div>
+          </div>
+        ) : null}
 
         {/* Page content */}
         <main id="main-content" className="flex-1 p-4 lg:p-6">

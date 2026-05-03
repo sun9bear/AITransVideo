@@ -29,6 +29,7 @@ from config import settings as app_settings
 from database import async_session, get_db
 from internal_auth import internal_headers
 from models import AdminAuditLog, Job, User
+from project_cleanup import _is_safe_project_dir
 
 logger = logging.getLogger(__name__)
 
@@ -893,6 +894,38 @@ async def list_all_jobs(
     return {"jobs": result}
 
 
+def _remove_project_dir_if_safe(project_dir: str | None, *, job_id: str) -> bool:
+    """Remove a job project directory only if it is under the project roots."""
+    if not project_dir:
+        return False
+
+    project_path = Path(project_dir)
+    if not project_path.is_dir():
+        return False
+
+    if not _is_safe_project_dir(project_path):
+        logger.warning(
+            "Refusing to remove unsafe project dir for job %s: %s",
+            job_id,
+            project_path,
+        )
+        return False
+
+    try:
+        shutil.rmtree(project_path)
+    except OSError as exc:
+        logger.warning(
+            "Failed to remove project dir for job %s: %s: %s",
+            job_id,
+            project_path,
+            exc,
+        )
+        return False
+
+    logger.info("Removed project dir for job %s: %s", job_id, project_path)
+    return True
+
+
 @router.post("/jobs/{job_id}/cancel")
 async def cancel_job(
     job_id: str,
@@ -917,10 +950,8 @@ async def cancel_job(
         except Exception as exc:
             logger.warning("Failed to fetch job info for %s: %s", job_id, exc)
 
-    # (c) Delete project directory if it exists
-    if project_dir and os.path.isdir(project_dir):
-        shutil.rmtree(project_dir, ignore_errors=True)
-        logger.info("Removed project dir: %s", project_dir)
+    # (c) Delete project directory if it exists and passes the whitelist guard.
+    _remove_project_dir_if_safe(project_dir, job_id=job_id)
 
     # (d) Update status in PostgreSQL + release quota
     async with async_session() as db:
@@ -972,10 +1003,8 @@ async def delete_job(
         except Exception as exc:
             logger.warning("Failed to fetch job info for %s: %s", job_id, exc)
 
-    # Delete project directory
-    if project_dir and os.path.isdir(project_dir):
-        shutil.rmtree(project_dir, ignore_errors=True)
-        logger.info("Removed project dir: %s", project_dir)
+    # Delete project directory if it passes the whitelist guard.
+    _remove_project_dir_if_safe(project_dir, job_id=job_id)
 
     # Delete job JSON file
     job_file = JOBS_STORE_DIR / f"{job_id}.json"
