@@ -44,6 +44,17 @@ export const metadata: Metadata = {
     locale: "zh_CN",
     type: "website",
   },
+  // Search-console site-verification tokens. Next.js renders these as the
+  // appropriate <meta> tags in the homepage <head>, which both tools accept
+  // for ownership verification. Adding more tokens here (e.g. Bing
+  // `msvalidate.01` under `verification.other`) is the single-deploy way to
+  // prove ownership across multiple webmaster tools.
+  verification: {
+    google: "VSf8VEhNmB5UDyf3asBHgFJtagelrwzkiC7xvpm5Hrs",
+    other: {
+      "msvalidate.01": "2AE8618E42C11345B5006A2EA9084308",
+    },
+  },
 }
 
 export default function RootLayout({
