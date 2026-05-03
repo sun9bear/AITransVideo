@@ -19,14 +19,23 @@ import uuid as _uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-# Make src/ importable so we can reuse services.jobs.logs_redactor (D25).
-# Mirrors the pattern in admin_settings.py — local dev vs Docker container.
+# Make src/ importable for any future helpers that legitimately live in
+# ``src/`` and don't drag the ``services.jobs`` package init's pydub chain.
+# logs_redactor itself goes through ``log_redactor_loader`` below, which
+# bypasses the package init entirely (gateway has no pydub).
 for _candidate in [
     Path(__file__).resolve().parent.parent / "src",
     Path("/opt/aivideotrans/app/src"),
 ]:
     if _candidate.is_dir() and str(_candidate) not in sys.path:
         sys.path.insert(0, str(_candidate))
+
+# Gateway-local file-location loader for src/services/jobs/logs_redactor.py.
+# Direct ``from services.jobs.logs_redactor import ...`` ImportError's in the
+# gateway container because services.jobs.__init__ pulls pydub. The loader
+# returns ``None`` on any failure → callers fail-open (verbatim). See
+# ``gateway/log_redactor_loader.py`` for the full rationale.
+from log_redactor_loader import build_default_redactor
 
 from fastapi import Depends, HTTPException, Request, Response
 from sqlalchemy import delete, func, select, update
@@ -684,6 +693,21 @@ async def intercept_list_jobs(
         else:
             paged_jobs = filtered_jobs[offset: offset + limit]
         print(f"[GATEWAY] list_jobs: upstream={len(all_jobs)}, db_user={len(user_job_ids)}, returning={len(paged_jobs)}/{total_jobs}", flush=True)
+
+        # Plan §10.4 deepening: redact provider names / paths / UUIDs
+        # from progress_message + error_summary.message for non-admin
+        # users. Admin gets pass-through (handled inside the helper).
+        # Build the redactor once and reuse across rows — saves N-1
+        # rebuilds on a typical 20-job list.
+        if not _is_admin_user(user):
+            _shared_redactor = build_default_redactor()
+            if _shared_redactor is not None:
+                for job_dict in paged_jobs:
+                    if isinstance(job_dict, dict):
+                        _redact_job_record_in_place(
+                            job_dict, user, redactor=_shared_redactor
+                        )
+
         data["jobs"] = paged_jobs
         data["total"] = total_jobs
         data["limit"] = limit
@@ -1076,6 +1100,9 @@ async def intercept_get_job(
         )
         db_job = result.scalar_one_or_none()
         payload = _merge_gateway_job_metadata(payload, db_job)
+        # Plan §10.4 deepening: redact progress_message + error_summary.message
+        # for non-admin. Admin path is no-op inside the helper.
+        _redact_job_record_in_place(payload, user)
         return Response(
             content=json.dumps(payload, ensure_ascii=False),
             status_code=upstream_response.status_code,
@@ -1543,6 +1570,86 @@ async def _approve_voice_selection_with_quality_sync(
     return response
 
 
+# ---------------------------------------------------------------------------
+# JobRecord-level redaction (plan §10.4 deepening, 2026-04-21).
+#
+# ``GET /jobs/{id}/logs`` already redacts events/lines for non-admin
+# (see _serve_redacted_logs below). But two other JobRecord-shaped
+# fields surface in the workspace UI and were leaking infra detail
+# (provider names / file paths / UUIDs / URLs) to non-admin users:
+#
+#   - ``progress_message`` rendered in the "正在处理" big card subtitle
+#   - ``error_summary.message`` rendered in the failed-state card
+#
+# Storage layer (JobRecord JSON, events.jsonl) is intentionally
+# unchanged — admin's GET still sees raw text. Redaction is response-
+# only and admin pass-through, mirroring the _serve_redacted_logs
+# pattern so the two stay in lock-step on the role check.
+# ---------------------------------------------------------------------------
+
+
+def _is_admin_user(user: User | None) -> bool:
+    """Single source of truth for 'is this user allowed to see raw
+    infra detail in API responses'. Mirrors _serve_redacted_logs's
+    role check exactly so the two paths can never drift apart."""
+    if user is None:
+        return False
+    role = getattr(user, "role", None) or "user"
+    return role == "admin"
+
+
+def _redact_job_record_in_place(
+    record: dict,
+    user: User | None,
+    *,
+    redactor=None,
+) -> None:
+    """Mutate a JobRecord-shaped dict to strip provider names / paths /
+    UUIDs / URLs from user-facing message fields, for non-admin users.
+
+    Admin: no-op (pass-through). Non-admin and ``user is None`` (auth
+    disabled / corrupted session): redact. The fail-closed default is
+    deliberate — leaking by accident is worse than over-redacting.
+
+    Targets:
+      - ``progress_message`` (top-level string)
+      - ``error_summary.message`` (nested string under the dict-typed
+        ``error_summary``)
+
+    Tolerated:
+      - missing fields, ``None`` values, non-dict ``error_summary``
+        (returns silently — no AttributeError)
+      - sibling fields (``error_summary.stage`` / ``error_type`` /
+        ``review_gate`` / ``current_stage`` / etc.) untouched
+
+    The optional ``redactor`` arg lets list endpoints build the
+    Redactor once and reuse it across rows — cheaper than rebuilding
+    per record.
+    """
+    if _is_admin_user(user):
+        return  # admin pass-through, exactly like _serve_redacted_logs
+
+    if redactor is None:
+        redactor = build_default_redactor()
+        if redactor is None:
+            # Loader already logged the underlying failure (file missing /
+            # spec load error). Nothing actionable left here — return without
+            # mutation. Pass-through is safer than blanking the message.
+            return
+
+    # progress_message at the top level
+    pm = record.get("progress_message")
+    if isinstance(pm, str) and pm:
+        record["progress_message"] = redactor.redact(pm)
+
+    # error_summary.message nested
+    es = record.get("error_summary")
+    if isinstance(es, dict):
+        es_msg = es.get("message")
+        if isinstance(es_msg, str) and es_msg:
+            es["message"] = redactor.redact(es_msg)
+
+
 async def _serve_redacted_logs(
     request: Request,
     user: User | None,
@@ -1577,12 +1684,11 @@ async def _serve_redacted_logs(
     if not isinstance(body, dict):
         return response
 
-    try:
-        from services.jobs.logs_redactor import build_default_redactor
-
-        redactor = build_default_redactor()
-    except Exception:
-        logger.exception("redacted_logs: failed to build redactor; returning verbatim")
+    redactor = build_default_redactor()
+    if redactor is None:
+        # Loader already logged. Return verbatim — admin path also returns
+        # verbatim, so callers see the same unredacted body the upstream
+        # produced. Worse than redacted, but no worse than pre-D25 behaviour.
         return response
 
     events = body.get("events")
