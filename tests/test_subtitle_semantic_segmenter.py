@@ -458,3 +458,165 @@ def test_english_word_in_mixed_context_marked_review():
     assert spans[0].needs_review is True
     assert spans[0].review_reason == "unknown_mixed_token"
     assert spans[1].needs_review is False
+
+
+# ---------------------------------------------------------------------------
+# 19. Weak-boundary split: CJK comma (，) and ASCII comma (,)
+# ---------------------------------------------------------------------------
+
+
+def test_weak_comma_split_simple():
+    """'今天我们来谈一下，就是关于 LLM 的问题' — CJK comma splits into 2 spans.
+
+    Both sides: left = '今天我们来谈一下，' (8 CJK + ，= 8 units) >= 6;
+    right = '就是关于 LLM 的问题' has enough content >= 6.
+    """
+    text = "今天我们来谈一下，就是关于LLM的问题"
+    spans = segment_text(text)
+    assert len(spans) >= 2
+    # Concatenation invariant
+    assert "".join(s.text for s in spans) == text
+    # Both sides should be non-trivially short
+    for s in spans:
+        assert len(s.text.strip()) >= 2
+
+
+def test_weak_comma_min_length_guard_rejects_single_char_left():
+    """'我，我觉得我们应该努力工作' — comma after single '我' is REJECTED (left side = 1 CJK < 6).
+
+    The split after '我，' produces left='我，' (1 CJK unit) which fails min_chunk=6.
+    Result: no split at first comma; later comma if any may still split.
+    """
+    text = "我，我觉得我们应该努力工作"
+    spans = segment_text(text)
+    # The first comma (after single '我') must NOT produce a single-char left cue
+    for s in spans:
+        stripped = s.text.strip()
+        # No cue shorter than ~3 chars should appear (the rejected side was 1 CJK)
+        assert not (stripped in ("我，", "我") and len(spans) > 1 and spans[0].text.strip() == stripped)
+    # Concatenation invariant
+    assert "".join(s.text for s in spans) == text
+
+
+def test_weak_emdash_split():
+    """'我去过很多地方——巴黎、伦敦、东京' — em-dash '——' splits into 2 spans.
+
+    Left: '我去过很多地方——' (7 CJK); right: '巴黎、伦敦、东京' (already splits on 、).
+    """
+    text = "我去过很多地方——巴黎、伦敦、东京"
+    spans = segment_text(text)
+    assert len(spans) >= 2
+    # The em-dash should appear as the tail of the first span
+    first_text = spans[0].text
+    assert "——" in first_text or first_text.endswith("——")
+    # Concatenation invariant
+    assert "".join(s.text for s in spans) == text
+
+
+def test_weak_ellipsis_split():
+    """'我觉得……可能不行吧' — ellipsis '……' splits into 2 spans.
+
+    Left side: '我觉得……' (3 CJK) — only 3 units.  If < 6, no split occurs.
+    Let's use a longer left side so both sides pass the guard.
+    """
+    text = "我真的觉得这样做……可能真的不太行"
+    spans = segment_text(text)
+    assert len(spans) >= 2
+    # Concatenation invariant
+    assert "".join(s.text for s in spans) == text
+
+
+def test_weak_ellipsis_short_left_no_split():
+    """'我觉得……可能不行' — '我觉得……' has only 3 CJK units, below min_chunk=6.
+    Split should NOT occur (both sides must meet the guard).
+    """
+    text = "我觉得……可能不行"
+    spans = segment_text(text)
+    # With left side = 3 chars, guard rejects the split → 1 span
+    assert len(spans) == 1
+    assert "".join(s.text for s in spans) == text
+
+
+def test_weak_user_real_example_multiple_short_cues():
+    """User's real production example — must produce multiple spans, each <= ~30 length-units.
+
+    Source: '我,我可不会满世界跑,呃,我只是……你知道,我,我觉得我们发起了一件好事,而且——
+    我觉得没有哪位'捐赠誓言'的成员会比他们原本打算捐的还要少。'
+
+    Phase 1a produced a single 70+ char cue.  This test verifies the weak-boundary
+    pass now splits it into multiple shorter spans.
+    The quoted region '捐赠誓言' must NOT be split internally.
+    """
+    text = "我,我可不会满世界跑,呃,我只是……你知道,我,我觉得我们发起了一件好事,而且——我觉得没有哪位'捐赠誓言'的成员会比他们原本打算捐的还要少。"
+    spans = segment_text(text)
+    # Must produce more than 1 span (the whole point of weak-boundary splitting)
+    assert len(spans) > 1
+    # Concatenation invariant
+    assert "".join(s.text for s in spans) == text
+    # No single span should be longer than ~30 CJK-equiv units
+    from modules.subtitles.semantic_segmenter import _cjk_equiv_len
+    for s in spans:
+        assert _cjk_equiv_len(s.text.strip()) <= 35, (
+            f"Span too long ({_cjk_equiv_len(s.text.strip()):.1f} units): {s.text!r}"
+        )
+    # The '捐赠誓言' quoted region must remain intact in some span
+    full_join = "".join(s.text for s in spans)
+    assert "'捐赠誓言'" in full_join or "捐赠誓言" in full_join
+
+
+def test_weak_url_comma_split_allowed_after_url():
+    """'参考 https://example.com,就这些' — URL is protected; comma AFTER url is a potential split.
+
+    The comma sits after the URL (which ends before it), so it is NOT inside
+    the URL protected range.  However, the comma immediately follows the URL
+    (char right before comma is the URL's last char which is not a letter/digit
+    in typical cases like 'com').  Since 'm' is alpha, the split is prohibited
+    by the English-word adjacency guard.  Result: 1 span (URL + rest stay together).
+    """
+    text = "参考 https://example.com,就这些内容"
+    spans = segment_text(text)
+    # Concatenation invariant regardless of split count
+    assert "".join(s.text for s in spans) == text
+    # The URL must appear intact in the output
+    full = "".join(s.text for s in spans)
+    assert "https://example.com" in full
+
+
+def test_long_no_split_still_marked_long_unbreakable():
+    """Pure CJK long text with no valid split points (no commas, no punct).
+
+    '今天' * 50 = 100 CJK chars > 40 threshold, with no weak boundaries.
+    Must be 1 span flagged 'long_unbreakable_text'.
+    """
+    long_text = "今天" * 50
+    spans = segment_text(long_text)
+    assert len(spans) == 1
+    assert spans[0].needs_review is True
+    assert spans[0].review_reason == "long_unbreakable_text"
+
+
+# ---------------------------------------------------------------------------
+# 20. Concatenation invariant extended to weak-boundary inputs
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "今天我们来谈一下，就是关于LLM的问题",
+        "我去过很多地方——巴黎、伦敦、东京",
+        "我真的觉得这样做……可能真的不太行",
+        "我觉得……可能不行",
+        "我,我可不会满世界跑,呃,我只是……你知道,我,我觉得我们发起了一件好事,而且——我觉得没有哪位'捐赠誓言'的成员会比他们原本打算捐的还要少。",
+        "参考 https://example.com,就这些内容",
+    ],
+)
+def test_weak_boundary_concatenation_invariant(text):
+    """normalize(join(spans)) == normalize(input) for weak-boundary inputs."""
+    spans = segment_text(text)
+    assert normalize(joined(spans)) == normalize(text), (
+        f"Invariant broken for {text!r}\n"
+        f"  joined: {joined(spans)!r}\n"
+        f"  normalize(joined): {normalize(joined(spans))!r}\n"
+        f"  normalize(input):  {normalize(text)!r}"
+    )

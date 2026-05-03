@@ -2,11 +2,13 @@
 
 Three module-level functions: write_zh_srt / write_en_srt / write_bilingual_srt.
 
-Plan: docs/plans/2026-05-02-subtitle-cue-generation-v2-plan.md §T7, Phase 1a.
+Plan: docs/plans/2026-05-02-subtitle-cue-generation-v2-plan.md §T7, §5.3.1.
 
 Contract (from plan §8):
   - Writer does NOT re-segment. It only serializes canonical cues as-is.
   - No calls to segment_text, assign_timing, or any segmenter/builder logic.
+  - Trailing punctuation is stripped per-cue for display (剪映/CapCut style).
+    Only affects the SRT output layer; cue.text is UNCHANGED.
 
 SRT format conventions (aligned with EditorPackageWriter._write_srt_file):
   - Blocks joined with "\n\n"; final block followed by "\n" (not "\n\n").
@@ -24,6 +26,31 @@ SRT format conventions (aligned with EditorPackageWriter._write_srt_file):
 from __future__ import annotations
 
 from modules.subtitles.cue_models import SubtitleCue
+
+# ---------------------------------------------------------------------------
+# Trailing-punctuation strip for display
+# ---------------------------------------------------------------------------
+
+# Characters that should be removed from the tail of a subtitle cue for display.
+# Single-char set: rstrip() naturally handles multi-char sequences like ——/…… by
+# stripping one character at a time until none of these remain at the tail.
+# Whitespace is also stripped (covered by the explicit " \t\n" addition in the call).
+_TRAILING_PUNCT_CHARS = "，,。.；;：:！!？?、—…"
+
+
+def _strip_trailing_subtitle_punct(text: str) -> str:
+    """Strip trailing punctuation from a subtitle cue text for display.
+
+    Both single-char punct (',', '.', etc.) and multi-char sequences
+    ('——', '……') are handled by repeatedly stripping any char in
+    _TRAILING_PUNCT_CHARS until none remain at the tail. This naturally
+    handles e.g. '真的吗?!' -> '真的吗' (strips both '!' and '?').
+
+    Whitespace is also stripped from the tail.
+
+    Only applied at the SRT serialization layer. cue.text is never modified.
+    """
+    return text.rstrip(_TRAILING_PUNCT_CHARS + " \t\n")
 
 
 def _format_srt_time(ms: int) -> str:
@@ -64,6 +91,8 @@ def _build_block(idx: int, start_ms: int, end_ms: int, content: str) -> str:
 def write_zh_srt(cues: list[SubtitleCue]) -> str:
     """Serialize cues to Chinese-only SRT string.
 
+    Trailing punctuation is stripped from each cue's display text
+    (剪映/CapCut style). cue.text itself is not modified.
     Empty/whitespace cues are skipped. Returns "" for an empty cue list.
     Does NOT re-segment or modify timing.
     """
@@ -72,7 +101,7 @@ def write_zh_srt(cues: list[SubtitleCue]) -> str:
     blocks: list[str] = []
     idx = 1
     for cue in cues:
-        text = _clean(cue.text)
+        text = _strip_trailing_subtitle_punct(_clean(cue.text))
         if not text:
             continue
         blocks.append(_build_block(idx, cue.start_ms, cue.end_ms, text))
@@ -85,6 +114,7 @@ def write_zh_srt(cues: list[SubtitleCue]) -> str:
 def write_en_srt(cues: list[SubtitleCue]) -> str:
     """Serialize cues to English-only SRT string.
 
+    Trailing punctuation is stripped from each cue's display text.
     Empty/whitespace en_text cues are skipped. Returns "" for an empty cue list.
     Does NOT re-segment or modify timing.
     """
@@ -93,7 +123,7 @@ def write_en_srt(cues: list[SubtitleCue]) -> str:
     blocks: list[str] = []
     idx = 1
     for cue in cues:
-        text = _clean(cue.en_text)
+        text = _strip_trailing_subtitle_punct(_clean(cue.en_text))
         if not text:
             continue
         blocks.append(_build_block(idx, cue.start_ms, cue.end_ms, text))
@@ -109,6 +139,7 @@ def write_bilingual_srt(cues: list[SubtitleCue]) -> str:
     Content order: en_text on line 1, zh (cue.text) on line 2.
     This matches EditorPackageWriter._write_srt_file bilingual convention.
 
+    Trailing punctuation is stripped from each cue's display text.
     Empty en_text handling (Option A): if en_text is empty/whitespace, write
     zh-only content line (no blank second line). Cues with empty zh text are
     skipped entirely (same policy as write_zh_srt).
@@ -121,8 +152,8 @@ def write_bilingual_srt(cues: list[SubtitleCue]) -> str:
     blocks: list[str] = []
     idx = 1
     for cue in cues:
-        zh = _clean(cue.text)
-        en = _clean(cue.en_text)
+        zh = _strip_trailing_subtitle_punct(_clean(cue.text))
+        en = _strip_trailing_subtitle_punct(_clean(cue.en_text))
         if not zh:
             # No zh text — skip entirely (zh is the anchor for bilingual cues)
             continue

@@ -161,6 +161,17 @@ class SubtitleCue:
 - Phase 1a 只实现最高收益约束：中文强/中标点切分，以及绝不切开英文单词。数字、URL、邮箱、括号/引号嵌套等复杂混排先整体保留在同一 cue，标记 `needs_review=unknown_mixed_token` 或 `long_unbreakable_text`。
 - Phase 1b 再补全数字+单位、百分比、时间码、URL、邮箱、文件名、括号/引号配对识别，并用真实样本形成回归集。
 
+### 5.3.1 后续扩展(2026-05-03 提前到主线)
+
+弱边界切分(逗号 `，,`、顿号 `、` 已在中边界、破折号 `——`、省略号 `……`)+ SRT 末尾标点 strip 已经从原 Phase 1b 范围提前到主线，生产开启。
+
+关键实现细节：
+- `_split_weak_boundaries()` 对每个强/中边界切分后的 chunk 再做弱边界分割
+- 最小长度门卫 `min_chunk_chars=6.0`（CJK=1.0，ASCII 字母=0.5，标点=0）防止产生"我，" 这类极短 cue
+- 硬禁止仍有效：ASCII 字母/数字相邻的位置不切（`isascii()` 限定，避免 CJK 被 `isalpha()=True` 误判）、URL/邮箱保护范围、括号/引号配对区间（含 ASCII `'` 单引号 toggle 模式）
+- SRT 输出层新增 `_strip_trailing_subtitle_punct()`，将末尾标点从 SRT 显示文本中去除（仅在序列化时应用，`cue.text` 字段不变，保持 normalize() invariant）
+- 生效范围：`write_zh_srt` / `write_en_srt` / `write_bilingual_srt` 三个序列化函数
+
 ### 5.4 确定性时间分配
 
 每个 block 的 cue 时间范围：
@@ -375,10 +386,15 @@ and no hard errors
 
 ### Phase 1b: Mixed-token segmentation completion
 
-- 补全数字+单位、百分比、时间码、URL、邮箱、文件名、括号/引号配对识别。
-- 建立 small regression set，覆盖真实中英文混排样本。
-- 调整 `needs_review` 规则，减少可安全识别样本的误报。
-- speech weight 细化：英文按音节估算、数字按中文读法估算、补全句末/逗号 pause weight。
+> **注**：弱边界切分（逗号、破折号、省略号）+ SRT 末尾标点 strip 已于 2026-05-03 提前到主线完成（见 §5.3.1）。Phase 1b 剩余范围如下：
+
+- [x] 弱边界切分（，, , ——, ……）+ SRT trailing-punct strip ← **已完成，提前合入主线**
+- [ ] 补全数字+单位、百分比、时间码识别（精细 mixed-token）
+- [ ] URL、邮箱、文件名内部分割保护细化
+- [ ] 括号/引号配对识别精化（CJK 引号 `「」『』` 等）
+- [ ] 建立 small regression set，覆盖真实中英文混排样本
+- [ ] 调整 `needs_review` 规则，减少可安全识别样本的误报
+- [ ] speech weight 细化：英文按音节估算、数字按中文读法估算、补全句末/逗号 pause weight
 
 验收：
 

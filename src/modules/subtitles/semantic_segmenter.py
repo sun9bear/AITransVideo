@@ -1,11 +1,12 @@
-"""Phase 1a semantic segmenter for subtitle-generation-v2.
+"""Semantic segmenter for subtitle-generation-v2.
 
-Splits a block's merged Chinese text into cue-sized spans using only
-CJK strong/medium punctuation — never breaking inside an English word.
+Splits a block's merged Chinese text into cue-sized spans using CJK
+strong/medium punctuation and (Phase 1b pulled forward) weak-boundary
+punctuation — never breaking inside an English word.
 Mixed-token spans (URLs, numbers, bracket content) are left whole and
 flagged needs_review.
 
-Plan: docs/plans/2026-05-02-subtitle-cue-generation-v2-plan.md §5.3, §10 Phase 1a
+Plan: docs/plans/2026-05-02-subtitle-cue-generation-v2-plan.md §5.3, §5.3.1, §10
 
 Invariant (enforced by T6 validator):
     normalize("".join(s.text for s in segment_text(t))) == normalize(t)
@@ -63,6 +64,16 @@ _MEDIUM_PUNCT = frozenset("；;：:、")
 
 # Union — all boundary punctuation handled by the segmenter
 _BOUNDARY_PUNCT = _STRONG_PUNCT | _MEDIUM_PUNCT
+
+# Weak boundaries (cut with condition): CJK comma, ASCII comma, em-dash, ellipsis.
+# Note: 、 (ideographic comma) is already in _MEDIUM_PUNCT; ，and , are the weak forms.
+# ——: two em-dashes (U+2014 U+2014), common Chinese typographic dash pair.
+# ……: two ellipsis chars (U+2026 U+2026), common Chinese typographic ellipsis pair.
+WEAK_BOUNDARIES = ("，", ",", "——", "……")
+
+# Minimum CJK-char-equivalent length for each side of a weak-boundary split.
+# 6.0 means roughly 6 CJK chars or ~12 ASCII chars per side.
+_WEAK_MIN_CHUNK = 6.0
 
 # ---------------------------------------------------------------------------
 # Regex patterns
@@ -298,6 +309,232 @@ def _merge_broken_english_words(chunks: list[str]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Weak-boundary splitting
+# ---------------------------------------------------------------------------
+
+
+def _find_open_bracket_regions(text: str) -> list[tuple[int, int]]:
+    """Return list of (start, end) ranges that are inside a bracket/quote pair.
+
+    Used to prevent weak-boundary splitting inside bracket/quote regions.
+    We scan left-to-right tracking depth for each bracket pair independently.
+    Each closed region (opener..closer inclusive) is added as a protected range.
+    Open (unclosed) regions at end-of-text are also protected to be safe.
+
+    Same-char pairs (e.g. ' … ' or " … "): treated as toggle — each occurrence
+    alternates between opening and closing at depth 0/1.
+
+    Uses a local bracket-pair list with explicit Unicode code points to avoid any
+    file-encoding ambiguity with the module-level _BRACKET_PAIRS constant.
+    """
+    # Define bracket pairs via explicit code points to avoid encoding issues.
+    # Distinct-char pairs: (opener_codepoint, closer_codepoint)
+    # Same-char pairs: (codepoint, codepoint) — handled with toggle logic below.
+    _LOCAL_BRACKET_PAIRS: list[tuple[str, str]] = [
+        ("(", ")"),          # ASCII parens
+        ("[", "]"),          # ASCII brackets
+        ("{", "}"),          # ASCII braces
+        ("「", "」"),  # 「 」
+        ("『", "』"),  # 『 』
+        ("（", "）"),  # （ ）
+        ("“", "”"),  # " " curly double quotes
+    ]
+    # Same-char quote pairs (toggle mode): single straight quote and backtick
+    _SAME_CHAR_QUOTES: list[str] = [
+        "'",    # ASCII straight single quote U+0027
+        "‘",  # ' left single quotation mark
+        "’",  # ' right single quotation mark (may appear as opener too)
+    ]
+
+    protected: list[tuple[int, int]] = []
+    n = len(text)
+
+    # Distinct-char pairs: depth-tracking
+    for opener, closer in _LOCAL_BRACKET_PAIRS:
+        depth = 0
+        region_start = -1
+        for i, ch in enumerate(text):
+            if ch == opener:
+                if depth == 0:
+                    region_start = i
+                depth += 1
+            elif ch == closer:
+                if depth > 0:
+                    depth -= 1
+                    if depth == 0:
+                        protected.append((region_start, i + 1))
+                        region_start = -1
+        if depth > 0 and region_start >= 0:
+            protected.append((region_start, n))
+
+    # Same-char pairs: toggle mode
+    for quote_char in _SAME_CHAR_QUOTES:
+        in_region = False
+        region_start = -1
+        for i, ch in enumerate(text):
+            if ch == quote_char:
+                if not in_region:
+                    region_start = i
+                    in_region = True
+                else:
+                    protected.append((region_start, i + 1))
+                    in_region = False
+        if in_region and region_start >= 0:
+            protected.append((region_start, n))
+
+    # Sort and merge overlapping ranges
+    if not protected:
+        return []
+    protected.sort()
+    merged: list[tuple[int, int]] = [protected[0]]
+    for s, e in protected[1:]:
+        if s < merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+        else:
+            merged.append((s, e))
+    return merged
+
+
+def _is_inside_english_or_digit_run(text: str, pos: int) -> bool:
+    """Return True if the character at *pos* is immediately adjacent to (or within)
+    an English-word run or digit run — i.e. splitting here would break a token.
+
+    Specifically, we look at the characters just before and just after *pos*.
+    If the char immediately before is a letter/digit, or immediately after is
+    a letter/digit, the split is prohibited (avoids splitting "hello,world" or
+    "3,500" where the comma is intra-token).
+    """
+    if pos > 0 and (text[pos - 1].isalpha() or text[pos - 1].isdigit()):
+        return True
+    if pos < len(text) and (text[pos].isalpha() or text[pos].isdigit()):
+        return True
+    return False
+
+
+def _split_weak_boundaries(
+    text: str, *, min_chunk_chars: float = _WEAK_MIN_CHUNK
+) -> list[str]:
+    """Try to split *text* at each WEAK_BOUNDARIES occurrence, but only
+    if both sides meet min_chunk_chars (CJK chars count 1, ASCII letters count 0.5).
+    Hard prohibition still applies: never split inside an English word run,
+    digit run, URL/email run, or unbalanced bracket region.
+
+    Returns list of substrings in order. If no valid split found, returns
+    [text] unchanged.  Concatenation of returned list always equals *text*.
+    """
+    if not text:
+        return [text]
+
+    protected_url = _find_protected_ranges(text)
+    protected_brackets = _find_open_bracket_regions(text)
+
+    # Merge all protected ranges into one sorted list
+    all_protected: list[tuple[int, int]] = sorted(protected_url + protected_brackets)
+    # Merge overlaps
+    if all_protected:
+        merged_protected: list[tuple[int, int]] = [all_protected[0]]
+        for s, e in all_protected[1:]:
+            if s < merged_protected[-1][1]:
+                merged_protected[-1] = (merged_protected[-1][0], max(merged_protected[-1][1], e))
+            else:
+                merged_protected.append((s, e))
+        all_protected = merged_protected
+
+    def _is_prot(pos: int) -> bool:
+        for s, e in all_protected:
+            if s <= pos < e:
+                return True
+            if s > pos:
+                break
+        return False
+
+    n = len(text)
+    # Collect candidate split points (position = start of the weak boundary token,
+    # split_end = end; the split inserts a break *after* split_end so the boundary
+    # attaches to the preceding chunk — consistent with strong/medium trailing attachment).
+    # We scan for each weak-boundary token in order.
+    candidate_splits: list[int] = []  # split_end positions where we *could* break
+
+    i = 0
+    while i < n:
+        matched = False
+        for wb in WEAK_BOUNDARIES:
+            wlen = len(wb)
+            if text[i:i + wlen] == wb:
+                split_end = i + wlen  # break point: include boundary in left chunk
+                # Check protection
+                if not any(_is_prot(j) for j in range(i, split_end)):
+                    # Check not inside English/digit run.
+                    # Use isascii() to restrict to ASCII letters/digits only — CJK
+                    # chars also return True for isalpha() in Python, but splitting
+                    # at a comma between two CJK chars is exactly what we want.
+                    before_ok = not (
+                        i > 0
+                        and text[i - 1].isascii()
+                        and (text[i - 1].isalpha() or text[i - 1].isdigit())
+                    )
+                    after_ok = not (
+                        split_end < n
+                        and text[split_end].isascii()
+                        and (text[split_end].isalpha() or text[split_end].isdigit())
+                    )
+                    if before_ok and after_ok:
+                        candidate_splits.append(split_end)
+                i = split_end
+                matched = True
+                break
+        if not matched:
+            i += 1
+
+    if not candidate_splits:
+        return [text]
+
+    # Now greedily select splits where both left and right sides meet min_chunk_chars.
+    # Strategy: try to find valid split points.  We scan from left to right,
+    # keeping track of the current segment start.  A candidate split is accepted
+    # only when (a) the left side from current_start to split_end has >= min_chunk_chars,
+    # AND (b) there is enough content remaining on the right side.
+
+    # Pre-compute cumulative CJK-equiv lengths for fast range queries
+    cum: list[float] = [0.0] * (n + 1)
+    for j, ch in enumerate(text):
+        if ch.isspace():
+            cum[j + 1] = cum[j]
+        else:
+            cum[j + 1] = cum[j] + (1.0 if _is_cjk_char(ch) else 0.5)
+
+    def _range_len(start: int, end: int) -> float:
+        return cum[end] - cum[start]
+
+    total_len = cum[n]
+    if total_len < min_chunk_chars * 2:
+        # Not enough content to split at all
+        return [text]
+
+    result: list[str] = []
+    current_start = 0
+
+    for sp in candidate_splits:
+        left_len = _range_len(current_start, sp)
+        right_len = _range_len(sp, n)
+        if left_len >= min_chunk_chars and right_len >= min_chunk_chars:
+            result.append(text[current_start:sp])
+            current_start = sp
+
+    # Append remainder (may be the whole text if no split was accepted)
+    result.append(text[current_start:])
+
+    # Filter out accidental empty strings while preserving concatenation.
+    # (Empty strings can only arise if two splits land at the same position,
+    # which shouldn't happen given our scan, but be defensive.)
+    result = [s for s in result if s]
+    if not result:
+        return [text]
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Mixed-token detection
 # ---------------------------------------------------------------------------
 
@@ -363,9 +600,14 @@ _LONG_SPAN_THRESHOLD = 40.0
 def segment_text(text: str) -> list[SegmentSpan]:
     """Segment a block's merged Chinese text into cue-sized spans.
 
-    Phase 1a: split only on Chinese strong/medium punctuation; never
-    split inside an English word.  Mixed-token spans (URLs, numbers,
-    bracket-enclosed content) stay whole and get needs_review.
+    Three-pass split:
+    1. Strong/medium punctuation split (。！？!? and ；;：:、).
+    2. Safety merge for inadvertently broken English-word runs.
+    3. Weak-boundary split (，, , ——, ……) with min-chunk guard.
+
+    Never splits inside an English word, digit run, URL/email, or
+    unbalanced bracket region.  Mixed-token spans stay whole and get
+    needs_review.
 
     Invariant: normalize("".join(s.text for s in result)) == normalize(text)
     (checked by T6 validator).  Note: inter-sentence whitespace stripped
@@ -377,11 +619,18 @@ def segment_text(text: str) -> list[SegmentSpan]:
     if not text or not text.strip():
         return []
 
-    # Steps 1+2: punctuation-based split, with URL/email protection.
+    # Pass 1: strong/medium punctuation-based split, with URL/email protection.
     chunks = _split_on_boundaries(text)
 
-    # Step 3: safety merge for inadvertently broken English-word runs.
+    # Pass 2: safety merge for inadvertently broken English-word runs.
     chunks = _merge_broken_english_words(chunks)
+
+    # Pass 3: weak-boundary split on each surviving chunk.
+    expanded_chunks: list[str] = []
+    for chunk in chunks:
+        sub = _split_weak_boundaries(chunk)
+        expanded_chunks.extend(sub)
+    chunks = expanded_chunks
 
     # Determine whether the result is a trivially single-token input.
     # The "single-span exception" only suppresses review for inputs that
@@ -399,14 +648,14 @@ def segment_text(text: str) -> list[SegmentSpan]:
         needs_review = False
         review_reason: str | None = None
 
-        # Step 5: long unbreakable text check (takes precedence over mixed-token).
+        # Long unbreakable text check (takes precedence over mixed-token).
         # Use stripped text for length/content analysis; the raw chunk is what
         # goes into the span so that concatenation exactly reproduces the input.
         if _cjk_equiv_len(stripped) > _LONG_SPAN_THRESHOLD:
             needs_review = True
             review_reason = "long_unbreakable_text"
 
-        # Step 4: mixed-token detection.
+        # Mixed-token detection.
         # Suppressed only for trivially single-token inputs (e.g. "hello", "24").
         if not needs_review and not is_trivial and _is_mixed_token(stripped):
             needs_review = True

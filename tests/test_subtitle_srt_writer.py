@@ -26,6 +26,7 @@ import pytest
 from modules.subtitles.cue_models import SubtitleCue
 from modules.subtitles.srt_writer import (
     _format_srt_time,
+    _strip_trailing_subtitle_punct,
     write_bilingual_srt,
     write_en_srt,
     write_zh_srt,
@@ -375,19 +376,25 @@ class TestWhitespaceStripping:
 
 
 # ---------------------------------------------------------------------------
-# Scenario 12: CJK characters preserved verbatim
+# Scenario 12: CJK characters preserved verbatim (trailing punct stripped in SRT)
 # ---------------------------------------------------------------------------
 
 
 class TestCjkPreserved:
     def test_cjk_unchanged(self):
+        # Trailing 。 is stripped in SRT output; internal ，is preserved.
         cue = make_cue(text="你好世界，这是一个测试。")
         result = write_zh_srt([cue])
-        assert "你好世界，这是一个测试。" in result
+        # Internal content should appear without trailing 。
+        assert "你好世界，这是一个测试" in result
+        # Trailing punct must NOT appear at end of content line
+        lines = result.splitlines()
+        assert lines[2] == "你好世界，这是一个测试"
 
     def test_full_width_preserved(self):
         cue = make_cue(text="（括号内容）")
         result = write_zh_srt([cue])
+        # 「）」 is a closing bracket, not in trailing-punct strip set; preserved
         assert "（括号内容）" in result
 
 
@@ -518,3 +525,132 @@ class TestFullSrtOutput:
             "明天也好\n"
         )
         assert result == expected
+
+
+# ---------------------------------------------------------------------------
+# Scenario 17: _strip_trailing_subtitle_punct unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestStripTrailingSubtitlePunct:
+    """Unit tests for the _strip_trailing_subtitle_punct helper."""
+
+    def test_trailing_cjk_comma_stripped(self):
+        assert _strip_trailing_subtitle_punct("今天很好，") == "今天很好"
+
+    def test_trailing_ascii_comma_stripped(self):
+        assert _strip_trailing_subtitle_punct("today,") == "today"
+
+    def test_trailing_cjk_period_stripped(self):
+        assert _strip_trailing_subtitle_punct("明天更好。") == "明天更好"
+
+    def test_trailing_ascii_period_stripped(self):
+        assert _strip_trailing_subtitle_punct("hello.") == "hello"
+
+    def test_trailing_cjk_exclamation_stripped(self):
+        assert _strip_trailing_subtitle_punct("真好！") == "真好"
+
+    def test_trailing_cjk_question_stripped(self):
+        assert _strip_trailing_subtitle_punct("是吗？") == "是吗"
+
+    def test_trailing_ascii_question_exclamation_multi_punct(self):
+        # '?!' — both stripped iteratively
+        assert _strip_trailing_subtitle_punct("真的吗?!") == "真的吗"
+
+    def test_trailing_cjk_ideographic_comma_stripped(self):
+        assert _strip_trailing_subtitle_punct("第一、") == "第一"
+
+    def test_trailing_emdash_stripped(self):
+        # —— (two U+2014): both stripped by rstrip since — is in the strip set
+        assert _strip_trailing_subtitle_punct("说到——") == "说到"
+
+    def test_trailing_ellipsis_stripped(self):
+        # …… (two U+2026): both stripped
+        assert _strip_trailing_subtitle_punct("也许……") == "也许"
+
+    def test_internal_punct_preserved(self):
+        # Internal comma must NOT be stripped
+        assert _strip_trailing_subtitle_punct("今天，我们来看") == "今天，我们来看"
+
+    def test_mixed_cn_en_trailing_comma(self):
+        assert _strip_trailing_subtitle_punct("hello 你好,") == "hello 你好"
+
+    def test_no_trailing_punct_unchanged(self):
+        assert _strip_trailing_subtitle_punct("今天很好") == "今天很好"
+
+    def test_empty_string(self):
+        assert _strip_trailing_subtitle_punct("") == ""
+
+    def test_only_punct_becomes_empty(self):
+        # Text that is entirely trailing punct → empty string
+        assert _strip_trailing_subtitle_punct("。") == ""
+
+    def test_trailing_whitespace_stripped(self):
+        assert _strip_trailing_subtitle_punct("今天  ") == "今天"
+
+
+# ---------------------------------------------------------------------------
+# Scenario 18: Trailing-punct strip applied in SRT writer functions
+# ---------------------------------------------------------------------------
+
+
+class TestTrailingPunctInSrtOutput:
+    """Verify that write_zh_srt / write_en_srt / write_bilingual_srt all strip
+    trailing punct from displayed cue text without altering cue.text itself."""
+
+    def test_zh_srt_trailing_cjk_period_stripped(self):
+        cue = make_cue(text="今天很好。")
+        result = write_zh_srt([cue])
+        lines = result.splitlines()
+        assert lines[2] == "今天很好"
+
+    def test_zh_srt_trailing_ideographic_comma_stripped(self):
+        cue = make_cue(text="第一、")
+        result = write_zh_srt([cue])
+        lines = result.splitlines()
+        assert lines[2] == "第一"
+
+    def test_zh_srt_trailing_emdash_stripped(self):
+        cue = make_cue(text="而且——")
+        result = write_zh_srt([cue])
+        lines = result.splitlines()
+        assert lines[2] == "而且"
+
+    def test_zh_srt_trailing_ellipsis_stripped(self):
+        cue = make_cue(text="只是……")
+        result = write_zh_srt([cue])
+        lines = result.splitlines()
+        assert lines[2] == "只是"
+
+    def test_en_srt_trailing_period_stripped(self):
+        cue = make_cue(en_text="Hello world.")
+        result = write_en_srt([cue])
+        lines = result.splitlines()
+        assert lines[2] == "Hello world"
+
+    def test_en_srt_trailing_question_exclamation_stripped(self):
+        cue = make_cue(en_text="Really?!")
+        result = write_en_srt([cue])
+        lines = result.splitlines()
+        assert lines[2] == "Really"
+
+    def test_bilingual_both_trailing_stripped(self):
+        cue = make_cue(text="今天好。", en_text="Today good.")
+        result = write_bilingual_srt([cue])
+        lines = result.splitlines()
+        assert lines[2] == "Today good"
+        assert lines[3] == "今天好"
+
+    def test_internal_punct_preserved_in_srt(self):
+        # Comma in the middle of text must not be stripped
+        cue = make_cue(text="今天，我们来看")
+        result = write_zh_srt([cue])
+        lines = result.splitlines()
+        assert lines[2] == "今天，我们来看"
+
+    def test_cue_text_field_unchanged(self):
+        # The data-layer cue.text must be untouched after SRT serialization
+        original_text = "今天很好。"
+        cue = make_cue(text=original_text)
+        write_zh_srt([cue])
+        assert cue.text == original_text
