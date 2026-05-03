@@ -182,8 +182,15 @@ def test_missing_subtitle_line_treated_as_empty() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_effective_duration_uses_actual_audio_duration_first() -> None:
-    """When actual_audio_duration_ms > 0, block_end_ms = first_start + actual."""
+def test_effective_duration_uses_target_duration_first() -> None:
+    """target_duration_ms takes priority over actual_audio_duration_ms.
+
+    2026-05-03: Renamed/updated from the old test that asserted actual wins.
+    After the DSP timeline fix, target_duration_ms is first priority because
+    publish_backend lays segments on the timeline using target_duration_ms;
+    actual_audio_duration_ms is the raw pre-DSP render length and must not
+    override the occupied timeline window.
+    """
     block = _make_block(
         merged_cn_text="测试。",
         first_start_ms=1000,
@@ -193,10 +200,15 @@ def test_effective_duration_uses_actual_audio_duration_first() -> None:
     )
     result = build_subtitle_cues_for_blocks([block], [])
 
-    # block_end_ms should be 1000 + 2500 = 3500
-    # All cues must end at or before 3500
+    # block_end_ms should be 1000 + 3000 = 4000  (target wins, not actual)
     for cue in result.cues:
-        assert cue.end_ms <= 3500, f"cue end_ms {cue.end_ms} exceeds expected block_end 3500"
+        assert cue.end_ms <= 4000, f"cue end_ms {cue.end_ms} exceeds expected block_end 4000"
+    # And cues should NOT be constrained to the old block_end of 3500
+    # (at least one cue should extend past 3500 if the block has non-trivial text)
+    # We verify the span covers the target window, not the smaller actual window.
+    assert result.cues[-1].end_ms == 4000, (
+        f"Last cue end_ms {result.cues[-1].end_ms} != expected block_end 4000"
+    )
 
 
 def test_effective_duration_falls_back_to_target_duration() -> None:
@@ -412,3 +424,136 @@ def test_block_specs_exclude_empty_and_degenerate_blocks() -> None:
     assert "block_empty" not in spec_ids
     assert "block_degen" not in spec_ids
     assert "block_ok" in spec_ids
+
+
+# ---------------------------------------------------------------------------
+# DSP timeline fix scenarios (2026-05-03)
+# Verifying target_duration_ms (post-DSP timeline) is used, not raw TTS duration.
+# ---------------------------------------------------------------------------
+
+
+def test_dsp_force_dsp_target_wins_over_actual() -> None:
+    """force_dsp scenario: target=25583ms, actual=1533ms → effective=25583ms.
+
+    Real production case from Buffett interview seg 11:
+      raw TTS for 11-char CN text = 1533ms
+      original English SRT window = 25583ms
+      DSP stretches audio 17x to fill the window
+      publish_backend lays the segment at target_duration_ms on the timeline
+    Subtitle cues must span the full 25583ms window, not just 1533ms.
+    """
+    block = _make_block(
+        merged_cn_text="那你为什么停下来了呢？",
+        first_start_ms=0,
+        last_end_ms=25583,
+        target_duration_ms=25583,
+        actual_audio_duration_ms=1533,
+    )
+    result = build_subtitle_cues_for_blocks([block], [])
+
+    assert len(result.cues) >= 1
+    # Last cue must end at the full target window, not the raw TTS window
+    assert result.cues[-1].end_ms == 25583, (
+        f"Last cue end_ms {result.cues[-1].end_ms} should be 25583 (target), "
+        f"not 1533 (actual raw TTS)"
+    )
+    # First cue must start at block start
+    assert result.cues[0].start_ms == 0
+
+
+def test_dsp_direct_no_dsp_target_close_to_actual() -> None:
+    """direct (no-DSP) scenario: target=2000ms, actual=1950ms → effective=2000ms.
+
+    For non-DSP segments, target and actual are close; the fix should not break
+    anything.  target still wins, but the difference is negligible.
+    """
+    block = _make_block(
+        merged_cn_text="今天天气不错。",
+        first_start_ms=5000,
+        last_end_ms=7000,
+        target_duration_ms=2000,
+        actual_audio_duration_ms=1950,
+    )
+    result = build_subtitle_cues_for_blocks([block], [])
+
+    assert len(result.cues) >= 1
+    # target wins: block_end = 5000 + 2000 = 7000
+    assert result.cues[-1].end_ms == 7000, (
+        f"Last cue end_ms {result.cues[-1].end_ms} != 7000"
+    )
+
+
+def test_dsp_target_unset_falls_back_to_actual() -> None:
+    """Legacy fallback: target=0, actual=2500ms → effective=2500ms.
+
+    Some older blocks produced by ASR may not have target_duration_ms set.
+    In that case the fix must fall through to actual_audio_duration_ms.
+    """
+    block = _make_block(
+        merged_cn_text="这是一句话。",
+        first_start_ms=1000,
+        last_end_ms=4000,
+        target_duration_ms=0,
+        actual_audio_duration_ms=2500,
+    )
+    result = build_subtitle_cues_for_blocks([block], [])
+
+    assert len(result.cues) >= 1
+    # target=0 → skip; actual=2500 wins; block_end = 1000 + 2500 = 3500
+    assert result.cues[-1].end_ms == 3500, (
+        f"Last cue end_ms {result.cues[-1].end_ms} != 3500 (should fall back to actual=2500)"
+    )
+
+
+def test_dsp_all_zero_falls_back_to_last_end_minus_first_start() -> None:
+    """Degenerate: target=0, actual=0 → effective = last_end - first_start = 1500ms."""
+    block = _make_block(
+        merged_cn_text="短句。",
+        first_start_ms=1000,
+        last_end_ms=2500,
+        target_duration_ms=0,
+        actual_audio_duration_ms=0,
+    )
+    result = build_subtitle_cues_for_blocks([block], [])
+
+    assert len(result.cues) >= 1
+    # last-first fallback: 2500 - 1000 = 1500; block_end = 1000 + 1500 = 2500
+    assert result.cues[-1].end_ms == 2500, (
+        f"Last cue end_ms {result.cues[-1].end_ms} != 2500 (last-first fallback)"
+    )
+
+
+def test_dsp_multi_cue_block_force_dsp_spans_full_target_window() -> None:
+    """Integration: block with 3+ cues, force_dsp — all cues stay within the
+    10000ms target window (not squashed into the 2000ms actual window).
+
+    Before the fix: cues would be distributed over [0, 2000ms].
+    After the fix: cues are distributed over [0, 10000ms].
+    """
+    block = _make_block(
+        # Long enough text to produce multiple cues via segmenter
+        merged_cn_text="这是第一句话。这是第二句话。这是第三句话。",
+        first_start_ms=0,
+        last_end_ms=10000,
+        target_duration_ms=10000,
+        actual_audio_duration_ms=2000,
+    )
+    result = build_subtitle_cues_for_blocks([block], [])
+
+    assert len(result.cues) >= 1
+    # All cues must be within [0, 10000] — NOT within [0, 2000]
+    for cue in result.cues:
+        assert cue.end_ms <= 10000, (
+            f"Cue end_ms {cue.end_ms} exceeds target window 10000ms"
+        )
+    # Last cue must reach the end of the target window
+    assert result.cues[-1].end_ms == 10000, (
+        f"Last cue end_ms {result.cues[-1].end_ms} != 10000 (target); "
+        f"cues are squashed into wrong window"
+    )
+    # At least some cues should start after the old actual window (2000ms)
+    # to confirm cues were NOT compressed into the 2000ms pre-fix behavior
+    cues_after_old_window = [c for c in result.cues if c.start_ms >= 2000]
+    assert len(cues_after_old_window) >= 1, (
+        "All cues are within 2000ms — looks like old pre-fix behavior (squashed into actual)"
+    )

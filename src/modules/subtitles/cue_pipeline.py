@@ -43,17 +43,29 @@ class SubtitleCuePipelineResult:
 def _resolve_effective_duration(block: SemanticBlock) -> int:
     """Resolve the effective audio duration for a block, per plan §5.4 priority.
 
+    2026-05-03 修订: target_duration_ms now takes priority over
+    actual_audio_duration_ms.  Rationale: publish_backend lays each segment
+    on the timeline using target_duration_ms (the original SRT window).  For
+    DSP / force_dsp / silence-padding alignment methods, actual_audio_duration_ms
+    is the raw TTS render length BEFORE stretching, which can be a fraction of
+    the timeline slot (e.g. 1533ms raw stretched 17× to fill a 25583ms window).
+    Using actual would make cues disappear 24 seconds early.  target_duration_ms
+    correctly reflects the occupied window for ALL alignment methods; for
+    direct/no-DSP segments it equals actual_audio_duration_ms within rounding.
+
     Priority:
-    1. block.actual_audio_duration_ms if > 0
-    2. block.target_duration_ms if > 0
-    3. block.last_end_ms - block.first_start_ms
+    1. block.target_duration_ms if > 0  ← timeline occupancy; correct for all
+                                          alignment methods (DSP and non-DSP)
+    2. block.actual_audio_duration_ms if > 0  ← fallback for legacy blocks
+                                                 where target was not set
+    3. block.last_end_ms - block.first_start_ms  ← last-resort legacy fallback
 
     Returns the resolved integer duration (may be <= 0 for degenerate blocks).
     """
-    if block.actual_audio_duration_ms > 0:
-        return int(block.actual_audio_duration_ms)
     if block.target_duration_ms > 0:
         return int(block.target_duration_ms)
+    if block.actual_audio_duration_ms > 0:
+        return int(block.actual_audio_duration_ms)
     return int(block.last_end_ms) - int(block.first_start_ms)
 
 
