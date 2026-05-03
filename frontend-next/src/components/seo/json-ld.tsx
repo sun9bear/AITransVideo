@@ -6,11 +6,12 @@
  * search engines dedupe when multiple schema blocks coexist on a page;
  * pass a stable string per schema type per page.
  *
- * Defense-in-depth escape: `<` is replaced with `<` in the serialized
- * payload. Today's callers pass trusted server-side constants, but if a
- * future schema embeds user-derived content (e.g. a Review snippet pulled
- * from a DB), an unescaped `</script>` substring could break out of the
- * script tag. The escape costs nothing and removes a class of footgun.
+ * Defense-in-depth escape: `<` is replaced with `<` in the
+ * serialized payload (browsers parse the JSON identically). Today's
+ * callers pass trusted server-side constants, but if a future schema
+ * embeds user-derived content (e.g. a Review snippet pulled from a DB),
+ * an unescaped `</script>` substring could break out of the script tag.
+ * The escape costs nothing and removes a class of footgun.
  */
 type Props = {
   id: string
