@@ -8,7 +8,8 @@ const PAGE_DESCRIPTION =
   "联系 AITrans.Video：客服支持、账单退款、隐私请求、版权投诉、商务合作等各类联系方式。"
 
 export const metadata: Metadata = {
-  title: "联系我们 · AITrans.Video",
+  // Short title — root layout template adds " · 爱译视频 AITrans.Video".
+  title: "联系我们",
   description: PAGE_DESCRIPTION,
   alternates: { canonical: "/contact" },
   openGraph: {

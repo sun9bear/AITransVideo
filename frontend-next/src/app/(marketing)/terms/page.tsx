@@ -16,7 +16,8 @@ const PAGE_DESCRIPTION =
   "AITrans.Video 服务条款：详细说明本服务的使用规则、用户权利与义务、知识产权、费用、免责及争议解决条款。"
 
 export const metadata: Metadata = {
-  title: "服务条款 · AITrans.Video",
+  // Short title — root layout template adds " · 爱译视频 AITrans.Video".
+  title: "服务条款",
   description: PAGE_DESCRIPTION,
   alternates: { canonical: "/terms" },
   openGraph: {

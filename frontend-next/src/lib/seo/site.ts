@@ -55,23 +55,34 @@ export const publicRoutes = [
 /**
  * Crawler disallow list for robots.txt. Mirrors the auth boundary in
  * frontend-next/src/middleware.ts plus the gateway-internal API surfaces
- * proxied through the Next origin. `/auth/` is disallowed AND auth pages
- * carry page-level `noindex` (in (auth)/layout.tsx) — robots controls
- * fetching, not indexing.
+ * proxied through the Next origin.
+ *
+ * Two design choices:
+ *
+ *   1. NO trailing slash. robots.txt prefix matching with `/admin/` only
+ *      catches `/admin/foo`, not `/admin` itself. Dropping the slash covers
+ *      both exact and sub-path. Safe here because no public route shares
+ *      a prefix with these (no `/administration` etc).
+ *
+ *   2. `/auth` is NOT in this list. Auth pages get page-level `noindex`
+ *      via `(auth)/layout.tsx` instead. If we both `Disallow:` AND
+ *      `noindex`, crawlers can't fetch the page (robots wins) and
+ *      therefore can't see the noindex meta — leaving the URL eligible
+ *      for "blocked by robots.txt" stub indexing. Allowing the fetch lets
+ *      the noindex actually do its job.
  */
 export const blockedRoutes = [
-  "/api/",
-  "/job-api/",
-  "/gateway/",
-  "/admin/",
-  "/workspace/",
-  "/projects/",
-  "/settings/",
-  "/tasks/",
-  "/notifications/",
-  "/usage/",
-  "/voices/",
-  "/auth/",
+  "/api",
+  "/job-api",
+  "/gateway",
+  "/admin",
+  "/workspace",
+  "/projects",
+  "/settings",
+  "/tasks",
+  "/notifications",
+  "/usage",
+  "/voices",
 ] as const
 
 /** Build an absolute URL for a path. `/` returns siteUrl with no trailing slash. */

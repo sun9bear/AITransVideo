@@ -11,7 +11,8 @@ const PAGE_DESCRIPTION =
   "免费试用 AITrans.Video 的完整视频翻译配音工作流，无需绑卡，试用结束不会自动扣费。"
 
 export const metadata: Metadata = {
-  title: "免费试用 · AITrans.Video",
+  // Short title — root layout template adds " · 爱译视频 AITrans.Video".
+  title: "免费试用",
   description: PAGE_DESCRIPTION,
   alternates: { canonical: "/trial" },
   openGraph: {

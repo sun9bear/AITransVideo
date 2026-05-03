@@ -16,7 +16,8 @@ const PAGE_DESCRIPTION =
   "AITrans.Video 隐私政策：说明我们如何收集、使用、存储、共享、保护您的个人信息，以及您依法享有的相关权利。"
 
 export const metadata: Metadata = {
-  title: "隐私政策 · AITrans.Video",
+  // Short title — root layout template adds " · 爱译视频 AITrans.Video".
+  title: "隐私政策",
   description: PAGE_DESCRIPTION,
   alternates: { canonical: "/privacy" },
   openGraph: {

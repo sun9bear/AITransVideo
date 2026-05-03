@@ -6,16 +6,19 @@
  * search engines dedupe when multiple schema blocks coexist on a page;
  * pass a stable string per schema type per page.
  *
- * `dangerouslySetInnerHTML` is safe here because:
- *   - Callers pass plain JS objects built in trusted server code
- *   - JSON.stringify produces well-formed JSON, which is also valid JS
- *     inside a `<script type="application/ld+json">` tag
- *   - schema.org field values (URLs, names) don't contain `</script` byte
- *     sequences in our usage
+ * Defense-in-depth escape: `<` is replaced with `<` in the serialized
+ * payload. Today's callers pass trusted server-side constants, but if a
+ * future schema embeds user-derived content (e.g. a Review snippet pulled
+ * from a DB), an unescaped `</script>` substring could break out of the
+ * script tag. The escape costs nothing and removes a class of footgun.
  */
 type Props = {
   id: string
   data: object
+}
+
+function serialize(data: object): string {
+  return JSON.stringify(data).replace(/</g, "\\u003c")
 }
 
 export function JsonLd({ id, data }: Props) {
@@ -23,7 +26,7 @@ export function JsonLd({ id, data }: Props) {
     <script
       type="application/ld+json"
       id={id}
-      dangerouslySetInnerHTML={{ __html: JSON.stringify(data) }}
+      dangerouslySetInnerHTML={{ __html: serialize(data) }}
     />
   )
 }

@@ -10,7 +10,10 @@ const PAGE_DESCRIPTION =
   "长视频也用得起的 AI 翻译配音。Free / Plus / Pro 三档套餐，单条视频最长 180 分钟，无需绑卡，失败不计费，修改片段不必重跑全片。"
 
 export const metadata: Metadata = {
-  title: "定价 · 爱译视频 AITrans.Video",
+  // Short title — root layout `template: "%s · 爱译视频 AITrans.Video"` adds
+  // the brand suffix automatically. Setting the full string here would
+  // double-suffix to "定价 · 爱译视频 AITrans.Video · 爱译视频 AITrans.Video".
+  title: "定价",
   description: PAGE_DESCRIPTION,
   alternates: { canonical: "/pricing" },
   openGraph: {

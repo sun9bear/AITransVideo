@@ -15,7 +15,8 @@ const PAGE_DESCRIPTION =
   "AITrans.Video 退款政策：详细说明订阅、点数购买、处理失败、异常扣费等情形下的退款规则与申请方式。"
 
 export const metadata: Metadata = {
-  title: "退款政策 · AITrans.Video",
+  // Short title — root layout template adds " · 爱译视频 AITrans.Video".
+  title: "退款政策",
   description: PAGE_DESCRIPTION,
   alternates: { canonical: "/refund" },
   openGraph: {
