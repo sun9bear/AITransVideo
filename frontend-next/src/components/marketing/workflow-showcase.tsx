@@ -25,7 +25,7 @@ const STEPS: Array<{ index: string; title: string; body: string }> = [
   {
     index: "04",
     title: "下载结果",
-    body: "下载中文配音视频、音频、字幕或素材包，用于发布；需要精剪时再进入剪映或其他剪辑软件。",
+    body: "下载中文配音视频、音频、字幕、素材包，或直接导出剪映草稿——在剪映里继续精剪不必从零铺时间线。",
   },
 ]
 

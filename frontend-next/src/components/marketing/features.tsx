@@ -1,13 +1,16 @@
 import { Clock, Package2, Pencil, RefreshCw, Coins, Film } from "lucide-react"
 
 /**
- * Six core value proofs — re-prioritised 2026-04-30 per ChatGPT consult.
+ * Six core value proofs — re-prioritised 2026-04-30 per ChatGPT consult,
+ * with the 剪映草稿 card de-hedged 2026-05-02 after the export feature
+ * formally launched.
  *
- * Long-video support is now the lead because it's the most differentiated
- * thing the product does (most competitors cap at 30–60 min). 剪映草稿 has
- * been demoted to position #6 as a workflow assist — previously it was the
- * hero claim, but it overstated a still-stabilising feature and obscured
- * the bigger wins (length, editability, incremental re-gen, price).
+ * Long-video support is the lead because it's the most differentiated
+ * thing the product does (most competitors cap at 30–60 min). 剪映草稿
+ * sits at position #6 as a workflow assist — it's a real shipped feature
+ * now, but doesn't carry the "you absolutely need this product" weight
+ * that the first 5 cards do (length, editability, incremental re-gen,
+ * price, multi-format).
  *
  * Tone is benefit-first, not feature-first. No "DSP 级帧级对齐" or other
  * technical claims that a) require validation we can't yet ship and b) read
@@ -46,8 +49,8 @@ const FEATURES: Array<{
   },
   {
     icon: Film,
-    title: "可继续进入剪辑流程",
-    body: "需要精剪时可下载素材包，并尝试导出剪映草稿工程，在剪映里继续处理字幕、转场和音视频细节。",
+    title: "一键导入剪映继续精剪",
+    body: "支持导出剪映草稿工程：在剪映里直接打开成片的字幕、配音和素材轨道，继续做转场、特效和音视频细节，不必从头铺时间线。",
   },
 ]
 
