@@ -14,6 +14,7 @@ PUBLIC_RESULT_DOWNLOAD_KEYS = frozenset(
         "translation.segments",
         "editor.subtitles",
         "editor.dubbed_audio_complete",
+        "editor.jianying_draft_zip",
         "publish.dubbed_video",
     }
 )
