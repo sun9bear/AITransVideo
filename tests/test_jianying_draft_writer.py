@@ -106,7 +106,7 @@ def test_make_material_paths_absolute_windows_style(tmp_path):
     data = json.loads(Path(content_path).read_text(encoding="utf-8"))
     audios = data["materials"]["audios"]
     assert len(audios) == 1
-    expected = r"F:\剪映缓存\草稿\JianyingPro Drafts\my_draft\materials\dubbed_audio.wav"
+    expected = r"F:\剪映缓存\草稿\JianyingPro Drafts\jianying_draft_my_draft\materials\dubbed_audio.wav"
     assert audios[0]["path"] == expected, f"got: {audios[0]['path']!r}"
     # No backslash in expected should appear as forward slash
     assert "/" not in audios[0]["path"], "Windows path must use backslashes only"
@@ -133,7 +133,7 @@ def test_make_material_paths_absolute_unix_style(tmp_path):
     assert len(audios) == 1
     expected = (
         "~/Movies/JianyingPro/User Data/Projects/com.lveditor.draft"
-        "/my_draft/materials/dubbed_audio.wav"
+        "/jianying_draft_my_draft/materials/dubbed_audio.wav"
     )
     assert audios[0]["path"] == expected, f"got: {audios[0]['path']!r}"
     assert "\\" not in audios[0]["path"], "Unix path must not contain backslashes"
@@ -162,7 +162,7 @@ def test_make_material_paths_absolute_rewrites_video_media_path(tmp_path):
     data = json.loads(Path(content_path).read_text(encoding="utf-8"))
     videos = data["materials"]["videos"]
     assert len(videos) == 1
-    expected = r"F:\JianyingPro Drafts\job_abc\materials\source_video.mp4"
+    expected = r"F:\JianyingPro Drafts\jianying_draft_job_abc\materials\source_video.mp4"
     assert videos[0]["path"] == expected
     assert videos[0]["media_path"] == expected, (
         "media_path must also be rewritten to match path"
@@ -216,8 +216,8 @@ def test_make_material_paths_absolute_both_videos_and_audios(tmp_path):
         + [a["path"] for a in data["materials"]["audios"]]
     )
     for p in all_paths:
-        assert p.startswith(r"D:\Drafts\proj_001\materials" + "\\"), (
-            f"expected absolute path under D:\\Drafts\\proj_001\\materials\\, got: {p!r}"
+        assert p.startswith(r"D:\Drafts\jianying_draft_proj_001\materials" + "\\"), (
+            f"expected absolute path under D:\\Drafts\\jianying_draft_proj_001\\materials\\, got: {p!r}"
         )
 
 

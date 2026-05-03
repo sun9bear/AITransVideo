@@ -405,7 +405,14 @@ class JianyingDraftWriter:
     ) -> None:
         """Rewrite every materials.{videos,audios}[*].path to an absolute path under
         the user's local drafts root. Format:
-          {user_draft_root}/{draft_name}/materials/{filename}
+          {user_draft_root}/jianying_draft_{draft_name}/materials/{filename}
+
+        The folder name uses the 'jianying_draft_' prefix to match what the user
+        sees after extracting the zip — Windows' built-in unzip creates a folder
+        named after the zip file (which is 'jianying_draft_{draft_name}.zip'), so
+        the unzip target is 'jianying_draft_{draft_name}/'. The JSON paths must
+        match this exactly or Jianying will report missing media.
+
         Respects the path separator style of user_draft_root (Windows backslash
         vs Unix forward-slash).
 
@@ -414,7 +421,8 @@ class JianyingDraftWriter:
         sep = "\\" if "\\" in user_draft_root else "/"
         # Strip trailing separator from user_draft_root
         root = user_draft_root.rstrip("\\/")
-        base = sep.join([root, draft_name, "materials"])
+        zip_folder_name = f"jianying_draft_{draft_name}"
+        base = sep.join([root, zip_folder_name, "materials"])
 
         content_text = Path(draft_content_path).read_text(encoding="utf-8")
         data = json.loads(content_text)
