@@ -168,6 +168,26 @@ def load_editing_segments(project_dir: str | Path) -> list[dict[str, Any]]:
     return data
 
 
+def load_editing_segments_for_audit(
+    project_dir: str | Path, segment_id: str
+) -> dict[str, Any] | None:
+    """Read-only lookup of one segment by id. Returns None if not found.
+
+    Used by the user-edit audit chokepoint to capture pre-mutation state
+    so the resulting event can carry an honest before/after diff. Tolerant
+    of missing files / malformed shape — audit must never block the main
+    mutation path."""
+    try:
+        for seg in load_editing_segments(project_dir):
+            if isinstance(seg, dict) and str(seg.get("segment_id") or "") == str(segment_id):
+                # Return a shallow copy so the caller can compare safely
+                # against the post-mutation segment without aliasing.
+                return dict(seg)
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
 def load_segment_status(project_dir: str | Path) -> dict[str, str]:
     """Return the segment_status map. Missing file → {} (all accepted)."""
     path = _segment_status_path(project_dir)

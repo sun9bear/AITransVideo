@@ -547,8 +547,15 @@ def set_speaker_audio_dubbing_mode(
     segment_id: int,
     speaker_id: str,
     dubbing_mode: str,
+    audit_emitter: object | None = None,
+    audit_context: object | None = None,
 ) -> dict[str, object]:
-    """Persist per-transcript-line dubbing intent from voice selection."""
+    """Persist per-transcript-line dubbing intent from voice selection.
+
+    Optional ``audit_emitter`` / ``audit_context`` route a
+    voice_selection_dubbing_mode_changed event through the JobService
+    user-edit audit chokepoint. Plan 2026-05-04 §7.2.
+    """
     import re
 
     if segment_id < 1:
@@ -627,6 +634,32 @@ def set_speaker_audio_dubbing_mode(
                 activate=True,
             )
 
+    if changed and audit_emitter is not None and audit_context is not None:
+        try:
+            from services.jobs.user_edit_audit import (
+                build_voice_selection_dubbing_mode_changed_event,
+            )
+            duration_ms = None
+            try:
+                start_ms = int(target_line.get("start_ms") or 0)
+                end_ms = int(target_line.get("end_ms") or 0)
+                if end_ms > start_ms:
+                    duration_ms = end_ms - start_ms
+            except (TypeError, ValueError):
+                duration_ms = None
+            audit_emitter(
+                build_voice_selection_dubbing_mode_changed_event(
+                    audit_context,
+                    segment_id=segment_id,
+                    speaker_id=speaker_id,
+                    before_mode=previous_mode,
+                    after_mode=normalized_mode,
+                    duration_ms=duration_ms,
+                )
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
     return {
         "segment_id": segment_id,
         "speaker_id": speaker_id,
@@ -643,8 +676,16 @@ def reassign_speaker_audio_segment(
     segment_id: int,
     from_speaker_id: str,
     to_speaker_id: str,
+    audit_emitter: object | None = None,
+    audit_context: object | None = None,
 ) -> dict[str, object]:
-    """Persist a voice-selection-stage speaker correction for one transcript line."""
+    """Persist a voice-selection-stage speaker correction for one transcript line.
+
+    Optional ``audit_emitter`` is a callable ``(event_dict) -> None`` that
+    forwards the audit event through ``JobService._emit_user_edit_event``;
+    callers in the Job API layer build it from the live JobRecord. Plan
+    2026-05-04 §12 P0.
+    """
     import re
 
     _speaker_id_re = re.compile(r"^speaker_[a-z0-9_]+$")
@@ -734,6 +775,36 @@ def reassign_speaker_audio_segment(
             payload=payload,
             activate=True,
         )
+
+    # Audit hook (plan 2026-05-04 §7.2): voice_selection_speaker_reassigned.
+    # Best-effort — wrapping happens in the emitter callback supplied by the
+    # Job API layer (which routes through JobService._emit_user_edit_event).
+    if audit_emitter is not None and audit_context is not None:
+        try:
+            from services.jobs.user_edit_audit import (
+                build_voice_selection_speaker_reassigned_event,
+            )
+            duration_ms = None
+            try:
+                start_ms = int(target_line.get("start_ms") or 0)
+                end_ms = int(target_line.get("end_ms") or 0)
+                if end_ms > start_ms:
+                    duration_ms = end_ms - start_ms
+            except (TypeError, ValueError):
+                duration_ms = None
+            audit_emitter(
+                build_voice_selection_speaker_reassigned_event(
+                    audit_context,
+                    segment_id=segment_id,
+                    from_speaker_id=from_speaker_id,
+                    to_speaker_id=to_speaker_id,
+                    duration_ms=duration_ms,
+                    is_short_segment=(duration_ms is not None and duration_ms < 2000),
+                )
+            )
+        except Exception:  # noqa: BLE001
+            # Audit must never break the user-facing reassign flow.
+            pass
 
     return {
         "segment_id": segment_id,

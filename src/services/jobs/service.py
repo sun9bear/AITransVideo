@@ -5,7 +5,13 @@ from pathlib import Path
 from uuid import uuid4
 
 from services.job_paths import build_workspace_dir
-from services.jobs.events import EVENT_LEVEL_ERROR, EVENT_TYPE_STATUS, JobEvent
+from services.jobs.events import (
+    EVENT_LEVEL_ERROR,
+    EVENT_LEVEL_WARN,
+    EVENT_TYPE_LOG,
+    EVENT_TYPE_STATUS,
+    JobEvent,
+)
 from services.jobs.models import (
     ACTIVE_JOB_STATUSES,
     WORKER_ACTIVE_STATUSES,
@@ -45,15 +51,77 @@ class UnsupportedJobRequestError(JobServiceError):
     """Raised when a request is outside the A1 public contract."""
 
 
+_DEFAULT_AUDIT_OBSERVER = object()
+
+
 class JobService:
     def __init__(
         self,
         *,
         store: JobStore,
         runner: ProcessJobRunner,
+        audit_observer: object | None = _DEFAULT_AUDIT_OBSERVER,
     ) -> None:
         self.store = store
         self.runner = runner
+        # User-edit audit observer (plan 2026-05-04 §12 P0). Default to a
+        # JsonlAuditObserver so production gets audit out of the box;
+        # tests can inject fakes, or explicitly pass None to disable. Not typed as
+        # AuditObserver here to keep the import lazy — JobService is
+        # imported very early in the boot path and we don't want to drag
+        # in user_edit_audit's transitive imports until first use.
+        if audit_observer is _DEFAULT_AUDIT_OBSERVER:
+            from services.jobs.user_edit_audit import JsonlAuditObserver
+            audit_observer = JsonlAuditObserver()
+        self._audit_observer = audit_observer
+
+    # ------------------------------------------------------------------
+    # User-edit audit helpers (plan 2026-05-04 §12 P0)
+    #
+    # Service layer wraps every observer call in safe_observe so observer
+    # implementations stay simple and any audit failure stays out of the
+    # user-facing main path. Callers in this module + review_actions
+    # should always go through these helpers, never call
+    # self._audit_observer.observe directly.
+    # ------------------------------------------------------------------
+
+    def _emit_user_edit_event(self, project_dir: object, event: dict) -> None:
+        """Service-layer chokepoint for safe audit emission."""
+        from services.jobs.user_edit_audit import safe_observe
+
+        if project_dir is None:
+            return
+        # Build a tiny job-event emitter that lets safe_observe surface
+        # audit-write failures into the JobEvent stream (deduplicated
+        # by safe_observe internally).
+        job_id = str(event.get("job_id") or "").strip()
+
+        def _emit_audit_failure_jobevent(message: str, payload: dict) -> None:
+            if not job_id:
+                return
+            try:
+                self.store.append_event(
+                    job_id,
+                    JobEvent(
+                        job_id=job_id,
+                        event_type=EVENT_TYPE_LOG,
+                        created_at=utc_now_iso(),
+                        stage="user_edit_audit",
+                        level=EVENT_LEVEL_WARN,
+                        message=message,
+                        payload=payload,
+                    ),
+                )
+            except Exception:
+                # Final layer of best-effort — do not raise.
+                pass
+
+        safe_observe(
+            self._audit_observer,
+            project_dir=project_dir,
+            event=event,
+            job_event_emitter=_emit_audit_failure_jobevent,
+        )
 
     def submit_job(
         self,
@@ -277,11 +345,124 @@ class JobService:
     # ------------------------------------------------------------------
 
     def enter_editing(self, job_id: str) -> JobRecord:
-        """``succeeded → editing``. Creates editor/editing/ + baseline snapshot."""
+        """``succeeded → editing``. Creates editor/editing/ + baseline snapshot.
+
+        After the FS baseline is ready, emit a ``editing_session_started``
+        user-edit audit marker (plan 2026-05-04 §7.3) so subsequent
+        before/after diff events have an anchor. The marker is NOT a user
+        correction — analysis tools must not count it as one.
+        """
         from services.jobs.editing import enter_editing as _enter_editing
 
         record = self.require_job(job_id)
-        return _enter_editing(record, self.store)
+        was_legacy_lazy_backfill = self._editor_tts_segments_was_empty(record)
+        result = _enter_editing(record, self.store)
+
+        # Compute baseline metrics (best-effort; audit failure must not
+        # propagate). All values default to None — offline analysis treats
+        # missing as "could not compute" rather than "zero".
+        try:
+            self._emit_editing_session_started(result, legacy_lazy_backfill=was_legacy_lazy_backfill)
+        except Exception:  # noqa: BLE001
+            import logging
+            logging.getLogger(__name__).exception(
+                "editing_session_started audit emit failed for %s", job_id
+            )
+        return result
+
+    def _editor_tts_segments_was_empty(self, record: JobRecord) -> bool:
+        """Heuristic for ``legacy_lazy_backfill`` flag on editing_session_started.
+
+        Returns True if ``editor/tts_segments`` is missing or empty BEFORE
+        enter_editing runs — that's the signature of a legacy task that
+        will trigger ensure_editor_tts_segments_baseline's lazy copy. We
+        check before so the audit marker can faithfully report whether
+        the user's session started with a fresh-built editor or with
+        baseline files that materialized during enter_editing.
+        """
+        if not record.project_dir:
+            return False
+        from pathlib import Path as _Path
+        d = _Path(record.project_dir) / "editor" / "tts_segments"
+        if not d.exists():
+            return True
+        try:
+            for entry in d.iterdir():
+                if entry.is_file() and entry.suffix.lower() == ".wav":
+                    return False
+        except OSError:
+            return False
+        return True
+
+    def _emit_editing_session_started(
+        self,
+        record: JobRecord,
+        *,
+        legacy_lazy_backfill: bool,
+    ) -> None:
+        from pathlib import Path as _Path
+        from services.jobs.user_edit_audit import (
+            AuditContext,
+            build_editing_session_started_event,
+            manifest_audio_fingerprint,
+        )
+
+        if not record.project_dir:
+            return
+        project_dir = _Path(record.project_dir)
+        ctx = AuditContext.from_job_record(record)
+
+        segment_count, speaker_count, speaker_distribution = self._summarize_editing_baseline(project_dir)
+        tts_dir = project_dir / "editor" / "tts_segments"
+        baseline_audio_fp = manifest_audio_fingerprint(tts_dir)
+        baseline_audio_present = tts_dir.exists() and baseline_audio_fp is not None
+
+        event = build_editing_session_started_event(
+            ctx,
+            segment_count=segment_count,
+            speaker_count=speaker_count,
+            speaker_distribution=speaker_distribution,
+            baseline_audio_fingerprint=baseline_audio_fp,
+            baseline_audio_present=baseline_audio_present,
+            legacy_lazy_backfill=legacy_lazy_backfill,
+            edit_generation=record.edit_generation,
+        )
+        self._emit_user_edit_event(project_dir, event)
+
+    @staticmethod
+    def _summarize_editing_baseline(project_dir):
+        """Read editor/segments.json and return (segment_count, speaker_count,
+        per-speaker distribution dict). All-None on read failure."""
+        from pathlib import Path as _Path
+        import json as _json
+
+        seg_path = _Path(project_dir) / "editor" / "segments.json"
+        if not seg_path.exists():
+            return None, None, {}
+        try:
+            payload = _json.loads(seg_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None, None, {}
+        segments = payload if isinstance(payload, list) else payload.get("segments", [])
+        if not isinstance(segments, list):
+            return None, None, {}
+
+        per_speaker: dict[str, dict[str, int]] = {}
+        for seg in segments:
+            if not isinstance(seg, dict):
+                continue
+            sid = str(seg.get("speaker_id") or "").strip() or "unknown"
+            entry = per_speaker.setdefault(sid, {"segments": 0, "duration_ms": 0})
+            entry["segments"] += 1
+            try:
+                start_ms = int(seg.get("start_ms") or 0)
+                end_ms = int(seg.get("end_ms") or 0)
+                if end_ms > start_ms:
+                    entry["duration_ms"] += end_ms - start_ms
+            except (TypeError, ValueError):
+                pass
+
+        return len(segments), len(per_speaker), per_speaker
 
     def cancel_editing(
         self,
@@ -289,11 +470,54 @@ class JobService:
         *,
         reason: str = "user_cancel",
     ) -> JobRecord:
-        """``editing → succeeded``. Drops editor/editing/ and clears touched_at."""
+        """``editing → succeeded``. Drops editor/editing/ and clears touched_at.
+
+        Emits a ``post_edit_cancelled`` user-edit audit event after the FS
+        teardown so analysis can flag UX friction (e.g. user did a lot of
+        edits then bailed out). Plan 2026-05-04 §7.3.
+        """
         from services.jobs.editing import cancel_editing as _cancel_editing
 
         record = self.require_job(job_id)
-        return _cancel_editing(record, self.store, reason=reason)
+        result = _cancel_editing(record, self.store, reason=reason)
+
+        try:
+            self._emit_post_edit_cancelled(record, result, reason=reason)
+        except Exception:  # noqa: BLE001
+            import logging
+            logging.getLogger(__name__).exception(
+                "post_edit_cancelled audit emit failed for %s", job_id
+            )
+        return result
+
+    def _emit_post_edit_cancelled(
+        self,
+        record_before: JobRecord,
+        record_after: JobRecord,
+        *,
+        reason: str,
+    ) -> None:
+        from pathlib import Path as _Path
+        from services.jobs.user_edit_audit import (
+            AuditContext,
+            build_post_edit_cancelled_event,
+        )
+
+        if not record_after.project_dir:
+            return
+        ctx = AuditContext.from_job_record(record_after)
+
+        # There is no durable editing_session_started timestamp in JobRecord.
+        # editing_touched_at is refreshed on every mutation, so using it here
+        # would record "time since last edit" while calling it session duration.
+        # P1 can compute true session duration from the append-only audit stream.
+        event = build_post_edit_cancelled_event(
+            ctx,
+            cancel_reason=reason,
+            session_duration_seconds=None,
+            edit_counts={},  # P0: empty; P1 dataset builder reconstructs from prior events
+        )
+        self._emit_user_edit_event(_Path(record_after.project_dir), event)
 
     def commit_editing(
         self,
@@ -308,15 +532,81 @@ class JobService:
 
         Pre-T1-9 versions of this method raised NotImplementedError as a
         skeleton; now delegates to ``editing_commit.commit_editing_pipeline``.
+
+        After commit succeeds, emit a ``post_edit_committed`` audit event
+        (plan §7.3) and an effective_marker so offline analysis can flip
+        the prior session's edit events from ``effective=False`` to true
+        (without rewriting them — append-only is the contract).
         """
         from services.jobs.editing_commit import commit_editing_pipeline
 
         record = self.require_job(job_id)
-        return commit_editing_pipeline(
+        result = commit_editing_pipeline(
             record, self.store, self.runner,
             strategy=strategy,
             copy_display_name=copy_display_name,
         )
+
+        try:
+            self._emit_post_edit_committed(record, result, strategy=strategy)
+        except Exception:  # noqa: BLE001
+            import logging
+            logging.getLogger(__name__).exception(
+                "post_edit_committed audit emit failed for %s", job_id
+            )
+        return result
+
+    def _emit_post_edit_committed(
+        self,
+        record_pre_commit: JobRecord,
+        result: dict,
+        *,
+        strategy: str,
+    ) -> None:
+        from pathlib import Path as _Path
+        from services.jobs.user_edit_audit import (
+            AuditContext,
+            EFFECTIVE_REASON_COMMITTED,
+            STAGE_POST_EDIT,
+            build_effective_marker_event,
+            build_post_edit_committed_event,
+        )
+
+        # commit_as_new can return a copy_target_job_id; overwrite stays on
+        # the same project_dir. Audit attaches to the SOURCE project_dir
+        # because the user's editing session lives there.
+        if not record_pre_commit.project_dir:
+            return
+        ctx = AuditContext.from_job_record(record_pre_commit)
+        result = result if isinstance(result, dict) else {}
+        target_job_id = result.get("copy_target_job_id") or result.get("target_job_id")
+
+        committed = build_post_edit_committed_event(
+            ctx,
+            strategy=str(strategy),
+            edit_counts={},  # P0: empty; P1 reconstructs from prior session events
+            target_job_id=str(target_job_id) if target_job_id else None,
+        )
+        project_dir = _Path(record_pre_commit.project_dir)
+        self._emit_user_edit_event(project_dir, committed)
+
+        # Effective marker — turn the prior session's edits from "weak/confirmed"
+        # into "effective" via append, without touching the original lines.
+        # We don't enumerate event_ids here because P0 doesn't read back the
+        # JSONL; the marker carries the effective_reason and the offline
+        # parser joins by session boundaries (editing_session_started …
+        # post_edit_committed of the same edit_generation).
+        marker = build_effective_marker_event(
+            ctx,
+            stage=STAGE_POST_EDIT,
+            effective_reason=EFFECTIVE_REASON_COMMITTED,
+            extra_context={
+                "edit_generation": record_pre_commit.edit_generation,
+                "strategy": str(strategy),
+                "target_job_id": str(target_job_id) if target_job_id else None,
+            },
+        )
+        self._emit_user_edit_event(project_dir, marker)
 
     # ------------------------------------------------------------------
     # Editing segments CRUD (T1-2). All mutations refresh editing_touched_at
@@ -357,24 +647,125 @@ class JobService:
         patch: dict,
     ) -> dict:
         """Mutate one segment in editing/segments.json and refresh touched_at.
-        Returns a payload with the updated segment + full status map."""
+        Returns a payload with the updated segment + full status map.
+
+        Emits ``post_edit_text_changed`` and/or ``post_edit_segment_speaker_changed``
+        depending on which fields the patch actually mutated. Plan 2026-05-04 §7.3.
+        """
         from services.jobs.editing import touch_editing as _touch_editing
         from services.jobs.editing_segments import (
             load_segment_status,
+            load_editing_segments_for_audit,
             patch_editing_segment as _patch_editing_segment,
         )
         from services.jobs.input_validators import validate_segment_id
 
         validate_segment_id(segment_id)
         record = self._require_editing(job_id)
+        # Snapshot the pre-patch segment so audit before/after is faithful.
+        before_segment = load_editing_segments_for_audit(
+            record.project_dir, segment_id
+        )
         updated_segment = _patch_editing_segment(
             record.project_dir, segment_id, patch
         )
         _touch_editing(record, self.store)
+
+        try:
+            self._emit_post_edit_segment_patch_audit(
+                record, segment_id, before_segment, updated_segment, patch
+            )
+        except Exception:  # noqa: BLE001
+            import logging
+            logging.getLogger(__name__).exception(
+                "post_edit segment-patch audit emit failed for %s", job_id
+            )
+
         return {
             "segment": updated_segment,
             "segment_status": load_segment_status(record.project_dir),
         }
+
+    def _emit_post_edit_segment_patch_audit(
+        self,
+        record: JobRecord,
+        segment_id: str,
+        before_segment: dict | None,
+        after_segment: dict,
+        patch: dict,
+    ) -> None:
+        """Decompose a patch into per-event audit emissions.
+
+        - cn_text / source_text → post_edit_text_changed
+        - speaker_id → post_edit_segment_speaker_changed
+
+        We rely on the patch dict to know what the user *intended* to change;
+        before/after segment values verify the change actually landed.
+        """
+        from pathlib import Path as _Path
+        from services.jobs.user_edit_audit import (
+            AuditContext,
+            build_post_edit_segment_speaker_changed_event,
+            build_post_edit_text_changed_event,
+            text_hash,
+        )
+
+        if not record.project_dir or not isinstance(patch, dict):
+            return
+        ctx = AuditContext.from_job_record(record)
+        project_dir = _Path(record.project_dir)
+        before_segment = before_segment or {}
+
+        # Text changes (cn_text or source_text). Emit one event per field
+        # actually touched so analysis can correlate independently.
+        for field in ("cn_text", "source_text"):
+            if field not in patch:
+                continue
+            before_text = before_segment.get(field)
+            after_text = after_segment.get(field)
+            if before_text == after_text:
+                continue
+            duration_ms = None
+            try:
+                start_ms = int(after_segment.get("start_ms") or 0)
+                end_ms = int(after_segment.get("end_ms") or 0)
+                if end_ms > start_ms:
+                    duration_ms = end_ms - start_ms
+            except (TypeError, ValueError):
+                duration_ms = None
+            event = build_post_edit_text_changed_event(
+                ctx,
+                segment_id=segment_id,
+                before_chars=len(before_text) if isinstance(before_text, str) else None,
+                after_chars=len(after_text) if isinstance(after_text, str) else None,
+                before_text_hash=text_hash(before_text) if isinstance(before_text, str) else None,
+                after_text_hash=text_hash(after_text) if isinstance(after_text, str) else None,
+                field=field,
+                duration_ms=duration_ms,
+            )
+            self._emit_user_edit_event(project_dir, event)
+
+        # Speaker change (post_edit_segment_speaker_changed)
+        if "speaker_id" in patch:
+            before_sp = before_segment.get("speaker_id")
+            after_sp = after_segment.get("speaker_id")
+            if before_sp != after_sp:
+                duration_ms = None
+                try:
+                    start_ms = int(after_segment.get("start_ms") or 0)
+                    end_ms = int(after_segment.get("end_ms") or 0)
+                    if end_ms > start_ms:
+                        duration_ms = end_ms - start_ms
+                except (TypeError, ValueError):
+                    duration_ms = None
+                event = build_post_edit_segment_speaker_changed_event(
+                    ctx,
+                    segment_id=segment_id,
+                    before_speaker_id=str(before_sp or ""),
+                    after_speaker_id=str(after_sp or ""),
+                    duration_ms=duration_ms,
+                )
+                self._emit_user_edit_event(project_dir, event)
 
     def split_editing_segment(
         self,
@@ -390,9 +781,11 @@ class JobService:
 
         Mirrors the translation-review split UX from the main flow but
         operates on the editing buffer; also refreshes ``editing_touched_at``
-        so the idle scanner sees activity."""
+        so the idle scanner sees activity. Emits
+        ``post_edit_segment_split_confirmed`` audit event (plan §7.3)."""
         from services.jobs.editing import touch_editing as _touch_editing
         from services.jobs.editing_segments import (
+            load_editing_segments_for_audit,
             load_segment_status,
             split_editing_segment as _split_editing_segment,
         )
@@ -400,6 +793,7 @@ class JobService:
 
         validate_segment_id(segment_id)
         record = self._require_editing(job_id)
+        before_segment = load_editing_segments_for_audit(record.project_dir, segment_id)
         result = _split_editing_segment(
             record.project_dir,
             segment_id=segment_id,
@@ -409,12 +803,78 @@ class JobService:
             speaker_b=speaker_b,
         )
         _touch_editing(record, self.store)
+
+        try:
+            self._emit_post_edit_split_audit(
+                record,
+                original_segment_id=segment_id,
+                result=result,
+                before_segment=before_segment,
+                split_source_index=split_source_index,
+                split_cn_index=split_cn_index,
+                speaker_a=speaker_a,
+                speaker_b=speaker_b,
+            )
+        except Exception:  # noqa: BLE001
+            import logging
+            logging.getLogger(__name__).exception(
+                "post_edit_segment_split_confirmed audit emit failed for %s", job_id
+            )
+
         # Enrich with the post-split status map so the frontend can patch
         # its cached state in one shot rather than re-fetching.
         return {
             **result,
             "segment_status": load_segment_status(record.project_dir),
         }
+
+    def _emit_post_edit_split_audit(
+        self,
+        record: JobRecord,
+        *,
+        original_segment_id: str,
+        result: dict,
+        before_segment: dict | None,
+        split_source_index: int,
+        split_cn_index: int,
+        speaker_a: str,
+        speaker_b: str,
+    ) -> None:
+        from pathlib import Path as _Path
+        from services.jobs.user_edit_audit import (
+            AuditContext,
+            build_post_edit_segment_split_confirmed_event,
+        )
+
+        if not record.project_dir:
+            return
+        ctx = AuditContext.from_job_record(record)
+        # Try to extract the new segment ids from the split helper's result.
+        # Shape varies — be tolerant.
+        new_ids: list[str] = []
+        children = result.get("new_segment_ids") if isinstance(result, dict) else None
+        if isinstance(children, list):
+            new_ids = [str(c) for c in children]
+        else:
+            child_list = result.get("children") if isinstance(result, dict) else None
+            if isinstance(child_list, list):
+                for ch in child_list:
+                    sid = ch.get("segment_id") if isinstance(ch, dict) else None
+                    if sid:
+                        new_ids.append(str(sid))
+
+        original_speaker = (before_segment or {}).get("speaker_id") if before_segment else None
+        event = build_post_edit_segment_split_confirmed_event(
+            ctx,
+            original_segment_id=str(original_segment_id),
+            new_segment_ids=new_ids,
+            split_source_index=int(split_source_index),
+            split_cn_index=int(split_cn_index),
+            speaker_a=speaker_a,
+            speaker_b=speaker_b,
+            original_speaker=str(original_speaker) if original_speaker else None,
+        )
+        self._emit_user_edit_event(_Path(record.project_dir), event)
 
     def preview_editing_segment_source_audio(
         self,
@@ -499,7 +959,11 @@ class JobService:
         then to ``None`` — which makes editing_tts resolve to the "not
         wired" 501 placeholder. main.run_job_api_command installs the
         production caller via ``services.tts.segment_regenerate``.
-        Also refreshes editing_touched_at on success.
+        Also refreshes editing_touched_at on success. Emits
+        ``post_edit_tts_regenerated`` audit event (plan §7.3); the
+        ``usage_event_ids`` correlation field is left empty for P0 — P1
+        dataset builder backfills via UsageMeter (job_id, segment_id,
+        timestamp window).
         """
         from services.jobs.editing import touch_editing as _touch_editing
         from services.jobs.editing_tts import regenerate_segment_tts as _regenerate
@@ -512,7 +976,56 @@ class JobService:
             record.project_dir, segment_id, tts_caller=caller
         )
         _touch_editing(record, self.store)
+
+        try:
+            self._emit_post_edit_tts_regenerated(record, segment_id, result)
+        except Exception:  # noqa: BLE001
+            import logging
+            logging.getLogger(__name__).exception(
+                "post_edit_tts_regenerated audit emit failed for %s", job_id
+            )
         return result
+
+    def _emit_post_edit_tts_regenerated(
+        self,
+        record: JobRecord,
+        segment_id: str,
+        result: dict,
+    ) -> None:
+        from pathlib import Path as _Path
+        from services.jobs.user_edit_audit import (
+            AuditContext,
+            build_post_edit_tts_regenerated_event,
+        )
+
+        if not record.project_dir:
+            return
+        ctx = AuditContext.from_job_record(record)
+        # Pull whatever the TTS helper bothered to return; keep tolerant
+        # because the result shape varies by provider.
+        result = result if isinstance(result, dict) else {}
+        provider = result.get("provider")
+        voice_id = result.get("voice_id")
+        model = result.get("model")
+        target_duration_ms = result.get("target_duration_ms")
+        draft_audio_duration_ms = result.get("draft_audio_duration_ms") or result.get(
+            "audio_duration_ms"
+        )
+        success = bool(result.get("success", True))
+        trigger_reason = result.get("trigger_reason") or "manual_retry"
+
+        event = build_post_edit_tts_regenerated_event(
+            ctx,
+            segment_id=segment_id,
+            trigger_reason=str(trigger_reason),
+            provider=provider,
+            voice_id=voice_id,
+            model=model,
+            target_duration_ms=target_duration_ms,
+            draft_audio_duration_ms=draft_audio_duration_ms,
+            success=success,
+        )
+        self._emit_user_edit_event(_Path(record.project_dir), event)
 
     def accept_segment_draft_tts(self, job_id: str, segment_id: str) -> dict:
         from services.jobs.editing import touch_editing as _touch_editing
@@ -523,6 +1036,16 @@ class JobService:
         record = self._require_editing(job_id)
         result = accept_draft_tts(record.project_dir, segment_id)
         _touch_editing(record, self.store)
+
+        try:
+            self._emit_post_edit_draft_tts_event(
+                record, segment_id, result, accepted=True
+            )
+        except Exception:  # noqa: BLE001
+            import logging
+            logging.getLogger(__name__).exception(
+                "post_edit_draft_tts_accepted audit emit failed for %s", job_id
+            )
         return result
 
     def discard_segment_draft_tts(self, job_id: str, segment_id: str) -> dict:
@@ -534,7 +1057,56 @@ class JobService:
         record = self._require_editing(job_id)
         result = discard_draft_tts(record.project_dir, segment_id)
         _touch_editing(record, self.store)
+
+        try:
+            self._emit_post_edit_draft_tts_event(
+                record, segment_id, result, accepted=False
+            )
+        except Exception:  # noqa: BLE001
+            import logging
+            logging.getLogger(__name__).exception(
+                "post_edit_draft_tts_discarded audit emit failed for %s", job_id
+            )
         return result
+
+    def _emit_post_edit_draft_tts_event(
+        self,
+        record: JobRecord,
+        segment_id: str,
+        result: dict,
+        *,
+        accepted: bool,
+    ) -> None:
+        from pathlib import Path as _Path
+        from services.jobs.user_edit_audit import (
+            AuditContext,
+            build_post_edit_draft_tts_accepted_event,
+            build_post_edit_draft_tts_discarded_event,
+        )
+
+        if not record.project_dir:
+            return
+        ctx = AuditContext.from_job_record(record)
+        result = result if isinstance(result, dict) else {}
+        if accepted:
+            event = build_post_edit_draft_tts_accepted_event(
+                ctx,
+                segment_id=segment_id,
+                draft_audio_duration_ms=result.get("draft_audio_duration_ms"),
+                target_duration_ms=result.get("target_duration_ms"),
+                voice_id=result.get("voice_id"),
+                provider=result.get("provider"),
+            )
+        else:
+            event = build_post_edit_draft_tts_discarded_event(
+                ctx,
+                segment_id=segment_id,
+                voice_id=result.get("voice_id"),
+                provider=result.get("provider"),
+                draft_audio_duration_ms=result.get("draft_audio_duration_ms"),
+                target_duration_ms=result.get("target_duration_ms"),
+            )
+        self._emit_user_edit_event(_Path(record.project_dir), event)
 
     # ------------------------------------------------------------------
     # Batch re-TTS + voice_map (T1-6)
@@ -644,29 +1216,119 @@ class JobService:
         provider: str,
         voice_id: str,
     ) -> dict:
+        """Set per-segment voice override + emit
+        ``post_edit_voice_override_changed`` audit event (plan 2026-05-04
+        §10.4 — feeds the auto voice-recommendation analysis loop).
+        """
         from services.jobs.editing import touch_editing as _touch_editing
-        from services.jobs.editing_voice_map import set_voice_override
+        from services.jobs.editing_voice_map import (
+            load_voice_map,
+            set_voice_override,
+        )
         from services.jobs.input_validators import validate_segment_id
 
         validate_segment_id(segment_id)
         record = self._require_editing(job_id)
+        # Snapshot the pre-set voice_map entry so audit before/after is
+        # faithful (segment may already have an override or be unset).
+        before_entry: dict | None = None
+        try:
+            before_entry = load_voice_map(record.project_dir).get(segment_id)
+        except Exception:  # noqa: BLE001
+            before_entry = None
         result = set_voice_override(
             record.project_dir, segment_id,
             provider=provider, voice_id=voice_id,
         )
         _touch_editing(record, self.store)
+
+        try:
+            self._emit_post_edit_voice_override_audit(
+                record,
+                segment_id=segment_id,
+                operation="set",
+                before_entry=before_entry,
+                after_provider=provider,
+                after_voice_id=voice_id,
+            )
+        except Exception:  # noqa: BLE001
+            import logging
+            logging.getLogger(__name__).exception(
+                "post_edit_voice_override_changed audit emit failed for %s", job_id
+            )
         return result
 
     def clear_editing_voice_override(self, job_id: str, segment_id: str) -> dict:
+        """Clear per-segment voice override + emit
+        ``post_edit_voice_override_changed`` (operation=clear). Idempotent;
+        we still emit the event so analysis can see "user reverted to
+        auto-match" — that's a useful signal even when the prior override
+        was already missing.
+        """
         from services.jobs.editing import touch_editing as _touch_editing
-        from services.jobs.editing_voice_map import clear_voice_override
+        from services.jobs.editing_voice_map import (
+            clear_voice_override,
+            load_voice_map,
+        )
         from services.jobs.input_validators import validate_segment_id
 
         validate_segment_id(segment_id)
         record = self._require_editing(job_id)
+        before_entry: dict | None = None
+        try:
+            before_entry = load_voice_map(record.project_dir).get(segment_id)
+        except Exception:  # noqa: BLE001
+            before_entry = None
         result = clear_voice_override(record.project_dir, segment_id)
         _touch_editing(record, self.store)
+
+        try:
+            self._emit_post_edit_voice_override_audit(
+                record,
+                segment_id=segment_id,
+                operation="clear",
+                before_entry=before_entry,
+                after_provider=None,
+                after_voice_id=None,
+            )
+        except Exception:  # noqa: BLE001
+            import logging
+            logging.getLogger(__name__).exception(
+                "post_edit_voice_override_changed audit emit failed for %s", job_id
+            )
         return result
+
+    def _emit_post_edit_voice_override_audit(
+        self,
+        record: JobRecord,
+        *,
+        segment_id: str,
+        operation: str,
+        before_entry: dict | None,
+        after_provider: str | None,
+        after_voice_id: str | None,
+    ) -> None:
+        from pathlib import Path as _Path
+        from services.jobs.user_edit_audit import (
+            AuditContext,
+            build_post_edit_voice_override_changed_event,
+        )
+
+        if not record.project_dir:
+            return
+        before_provider = (before_entry or {}).get("provider") if before_entry else None
+        before_voice_id = (before_entry or {}).get("voice_id") if before_entry else None
+        ctx = AuditContext.from_job_record(record)
+        event = build_post_edit_voice_override_changed_event(
+            ctx,
+            segment_id=segment_id,
+            operation=operation,
+            before_voice_id=str(before_voice_id) if before_voice_id else None,
+            after_voice_id=str(after_voice_id) if after_voice_id else None,
+            before_provider=str(before_provider) if before_provider else None,
+            after_provider=str(after_provider) if after_provider else None,
+        )
+        self._emit_user_edit_event(_Path(record.project_dir), event)
 
     def get_job(self, job_id: str) -> JobRecord | None:
         return self.store.load_job(job_id)

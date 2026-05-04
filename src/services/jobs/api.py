@@ -674,11 +674,16 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                     project_dir = _require_project_dir(record)
                     payload = self._read_json_payload()
                     from services.jobs.review_actions import reassign_speaker_audio_segment
+                    from services.jobs.user_edit_audit import AuditContext
+                    audit_ctx = AuditContext.from_job_record(record)
+                    audit_emitter = lambda ev: service._emit_user_edit_event(project_dir, ev)
                     result = reassign_speaker_audio_segment(
                         project_dir=project_dir,
                         segment_id=int(payload.get("segment_id", 0) or 0),
                         from_speaker_id=str(payload.get("from_speaker_id", "")).strip(),
                         to_speaker_id=str(payload.get("to_speaker_id", "")).strip(),
+                        audit_emitter=audit_emitter,
+                        audit_context=audit_ctx,
                     )
                     self._write_json(HTTPStatus.OK, {"success": True, **result})
                     return
@@ -693,11 +698,16 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                     project_dir = _require_project_dir(record)
                     payload = self._read_json_payload()
                     from services.jobs.review_actions import set_speaker_audio_dubbing_mode
+                    from services.jobs.user_edit_audit import AuditContext
+                    audit_ctx = AuditContext.from_job_record(record)
+                    audit_emitter = lambda ev: service._emit_user_edit_event(project_dir, ev)
                     result = set_speaker_audio_dubbing_mode(
                         project_dir=project_dir,
                         segment_id=int(payload.get("segment_id", 0) or 0),
                         speaker_id=str(payload.get("speaker_id", "")).strip(),
                         dubbing_mode=str(payload.get("dubbing_mode", "")).strip(),
+                        audit_emitter=audit_emitter,
+                        audit_context=audit_ctx,
                     )
                     self._write_json(HTTPStatus.OK, {"success": True, **result})
                     return
