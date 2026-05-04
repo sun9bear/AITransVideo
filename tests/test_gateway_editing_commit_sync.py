@@ -156,7 +156,7 @@ def _upstream_response(body: dict, status: int = 200) -> Response:
 # ---------------------------------------------------------------------------
 
 
-def test_overwrite_flips_status_and_bumps_edit_generation() -> None:
+def test_overwrite_flips_status_and_bumps_edit_generation(monkeypatch) -> None:
     source = _FakeJobRow(job_id="job_src", status="editing", edit_generation=0)
     session = _FakeSession()
     resp = _upstream_response({
@@ -165,6 +165,19 @@ def test_overwrite_flips_status_and_bumps_edit_generation() -> None:
         "edit_generation": 1,
     })
     now = datetime.now(timezone.utc)
+
+    # Stub the materials_pack invalidation hook so this unit test stays
+    # hermetic (the real helper runs a SELECT against BackgroundTask which
+    # the fake session can't reproduce). The dedicated integration test
+    # below verifies the wiring; this one focuses on status/generation.
+    invalidate_calls: list[str] = []
+
+    async def _fake_invalidate(db, *, job_id, **kwargs):
+        invalidate_calls.append(job_id)
+        return 0
+
+    import background_task_queue as _bq
+    monkeypatch.setattr(_bq, "invalidate_materials_pack_for_job", _fake_invalidate)
 
     asyncio.run(
         job_intercept._apply_editing_commit_gateway_side(
@@ -179,12 +192,20 @@ def test_overwrite_flips_status_and_bumps_edit_generation() -> None:
     assert source.metering_snapshot["post_edit_usage"]["overwrite_commits"] == 1
     # No new row inserted for overwrite
     assert session.added_rows == []
+    # And the materials_pack invalidation hook was called for THIS job
+    assert invalidate_calls == ["job_src"]
 
 
-def test_overwrite_second_commit_bumps_generation_to_2() -> None:
+def test_overwrite_second_commit_bumps_generation_to_2(monkeypatch) -> None:
     source = _FakeJobRow(job_id="job_src", status="editing", edit_generation=1)
     session = _FakeSession()
     resp = _upstream_response({"strategy": "overwrite", "job_id": "job_src"})
+
+    async def _fake_invalidate(db, *, job_id, **kwargs):
+        return 0
+
+    import background_task_queue as _bq
+    monkeypatch.setattr(_bq, "invalidate_materials_pack_for_job", _fake_invalidate)
 
     asyncio.run(
         job_intercept._apply_editing_commit_gateway_side(
@@ -194,6 +215,78 @@ def test_overwrite_second_commit_bumps_generation_to_2() -> None:
 
     assert source.edit_generation == 2
     assert source.metering_snapshot["post_edit_usage"]["overwrite_commits"] == 1
+
+
+def test_overwrite_invokes_materials_pack_invalidation_with_now_utc(monkeypatch) -> None:
+    """Wiring check: the invalidation hook is called with the source job_id
+    and the same now_utc the rest of the handler is using, so the
+    materials_pack rows' updated_at lines up with the source row's
+    transition timestamp."""
+    source = _FakeJobRow(job_id="job_src_invl", status="editing")
+    session = _FakeSession()
+    resp = _upstream_response({"strategy": "overwrite", "job_id": "job_src_invl"})
+    fixed_now = datetime(2026, 5, 3, 12, 0, 0, tzinfo=timezone.utc)
+    captured: dict[str, Any] = {}
+
+    async def _fake_invalidate(db, *, job_id, now=None, **kwargs):
+        captured["db_is_session"] = db is session
+        captured["job_id"] = job_id
+        captured["now"] = now
+        return 1  # pretend one stale pack got expired
+
+    import background_task_queue as _bq
+    monkeypatch.setattr(_bq, "invalidate_materials_pack_for_job", _fake_invalidate)
+
+    asyncio.run(
+        job_intercept._apply_editing_commit_gateway_side(
+            session, source, resp, now_utc=fixed_now,
+        )
+    )
+
+    assert captured["db_is_session"] is True
+    assert captured["job_id"] == "job_src_invl"
+    assert captured["now"] == fixed_now
+
+
+def test_copy_as_new_does_not_invalidate_materials_pack(monkeypatch) -> None:
+    """copy_as_new keeps the source as the pre-edit baseline (Phase B
+    Status=succeeded). Source's materials_pack still reflects pre-edit
+    content, which IS the source job's content — so it stays valid.
+    The new copy has a fresh job_id with no pack rows yet."""
+    source = _FakeJobRow(
+        job_id="job_src_copy",
+        status="editing",
+        editing_touched_at=datetime.now(timezone.utc),
+        root_job_id="job_src_copy",
+    )
+    session = _FakeSession()
+    resp = _upstream_response({
+        "strategy": "copy_as_new",
+        "source_job_id": "job_src_copy",
+        "new_job_id": "job_copy_new",
+        "new_project_dir": "/projects/job_copy_new",
+        "new_display_name": "副本",
+    })
+
+    invalidate_calls: list[str] = []
+
+    async def _fake_invalidate(db, *, job_id, **kwargs):
+        invalidate_calls.append(job_id)
+        return 0
+
+    import background_task_queue as _bq
+    monkeypatch.setattr(_bq, "invalidate_materials_pack_for_job", _fake_invalidate)
+
+    asyncio.run(
+        job_intercept._apply_editing_commit_gateway_side(
+            session, source, resp, now_utc=datetime.now(timezone.utc),
+        )
+    )
+
+    # copy_as_new must NOT invalidate source's pack — different rationale
+    # than overwrite (source stays = pre-edit content = source's pack stays
+    # valid for source).
+    assert invalidate_calls == []
 
 
 # ---------------------------------------------------------------------------

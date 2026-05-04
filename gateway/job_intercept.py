@@ -2292,6 +2292,23 @@ async def _apply_editing_commit_gateway_side(
         source_job.current_stage = "alignment"
         source_job.edit_generation = (source_job.edit_generation or 0) + 1
         source_job.editing_touched_at = None
+        # Invalidate any pre-edit materials_pack — its zip captures the
+        # pre-edit SRT / audio / caption text, which becomes stale once
+        # alignment+publish re-runs against the just-applied edits. The
+        # editing_commit Job-API helper already invalidates the Jianying
+        # draft (it lives on JobRecord + project_dir); materials_pack
+        # lives in Gateway DB, so this is the only seam where we can
+        # reach it. No-op for jobs that never packed.
+        from background_task_queue import invalidate_materials_pack_for_job
+        invalidated = await invalidate_materials_pack_for_job(
+            db, job_id=source_job.job_id, now=now_utc,
+        )
+        if invalidated:
+            logger.info(
+                "editing/commit overwrite: invalidated %d materials_pack "
+                "row(s) for job %s (zips unlinked / pending tasks failed)",
+                invalidated, source_job.job_id,
+            )
         return
 
     if strategy != "copy_as_new":

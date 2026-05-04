@@ -255,6 +255,92 @@ async def mark_failed(db: AsyncSession, task_id: str, error: str) -> None:
     await db.commit()
 
 
+async def invalidate_materials_pack_for_job(
+    db: AsyncSession,
+    *,
+    job_id: str,
+    reason: str = "视频已修改，旧素材包已失效",
+    now: datetime | None = None,
+) -> int:
+    """Invalidate every non-terminal-stale ``materials_pack`` row for a job.
+
+    Trigger: editing/commit overwrite. Once the source job's video content
+    has been re-published with edits, any pre-edit ``materials_pack`` zip
+    is stale (it captured the old SRT / old audio / old caption text).
+    Resetting state is a UX choice — better to let the user click "重新打包"
+    against the freshly published artifacts than to leave a stale "可下载"
+    affordance pointing at pre-edit content. Mirrors the Jianying-draft
+    invalidation in ``services.jobs.editing_commit._invalidate_jianying_
+    draft_on_commit`` (Job-API layer); materials_pack lives in Gateway DB
+    so the hook lives here in Gateway.
+
+    Behavior per status:
+      - ``'completed'`` → unlink ``result.zip_path`` (if present) and
+        transition to ``'expired'``. Matches the
+        ``cleanup_expired_pack_zips`` contract; the frontend already
+        treats ``'expired'`` as "zip is gone, click to re-pack".
+      - ``'pending'`` / ``'running'`` → transition to ``'failed'`` with
+        ``error=reason``. The packing in flight was capturing pre-edit
+        content; failing it both surfaces "did not finish, retry" to the
+        user and unblocks the partial unique index for a fresh pack.
+        (Best-effort: an in-flight executor coroutine may still complete
+        and call ``mark_completed`` after we flip — that's a benign race;
+        the next overwrite hits this helper again and the eventually-
+        completed row gets expired then.)
+      - ``'failed'`` / ``'expired'`` → leave alone (already terminal in a
+        way the UI handles).
+
+    Does NOT call ``await db.commit()`` — caller owns the transaction.
+    Designed to be called from inside ``_apply_editing_commit_gateway_
+    side`` where ``_editing_transition_with_lock`` commits at the end.
+
+    Returns the number of rows transitioned this pass.
+    """
+    now = now or datetime.now(timezone.utc)
+    result = await db.execute(
+        select(BackgroundTask).where(
+            BackgroundTask.job_id == job_id,
+            BackgroundTask.task_type == "materials_pack",
+            BackgroundTask.status.in_(("pending", "running", "completed")),
+        )
+    )
+    tasks = result.scalars().all()
+    affected = 0
+    for task in tasks:
+        if task.status == "completed":
+            result_data = task.result or {}
+            zip_path_str = (
+                result_data.get("zip_path")
+                if isinstance(result_data, dict) else None
+            )
+            if isinstance(zip_path_str, str) and zip_path_str:
+                try:
+                    Path(zip_path_str).unlink()
+                except FileNotFoundError:
+                    # Already gone — status flip still proceeds so the
+                    # UI reflects reality.
+                    pass
+                except OSError as exc:
+                    # Permission / busy — log but DON'T skip the status
+                    # flip; the row would otherwise stay 'completed' and
+                    # mislead the user into re-downloading a now-stale zip.
+                    # The orphaned file is small relative to total disk,
+                    # and the periodic cleanup won't re-claim it (the row
+                    # is already 'expired'). Operator-cleanup territory.
+                    logger.warning(
+                        "invalidate_materials_pack_for_job: failed to "
+                        "unlink %s: %s", zip_path_str, exc,
+                    )
+            task.status = "expired"
+        else:
+            # 'pending' / 'running'
+            task.status = "failed"
+            task.error = reason
+        task.updated_at = now
+        affected += 1
+    return affected
+
+
 async def cleanup_expired_pack_zips(
     db: AsyncSession,
     *,

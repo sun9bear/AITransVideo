@@ -290,3 +290,243 @@ def test_cleanup_is_idempotent(tmp_path: Path) -> None:
         assert second == 0
 
     _run(run())
+
+
+# ---------------------------------------------------------------------------
+# invalidate_materials_pack_for_job — editing/commit overwrite hook
+# ---------------------------------------------------------------------------
+
+
+async def _insert_task_for_job(
+    Session,
+    *,
+    task_id: str,
+    job_id: str,
+    task_type: str = "materials_pack",
+    status: str = "completed",
+    zip_path: str | None = None,
+) -> None:
+    """Variant of ``_insert_task`` that takes an explicit ``job_id`` — the
+    invalidation helper filters by job_id, not by age."""
+    now = datetime.now(timezone.utc)
+    async with Session() as db:
+        task = BackgroundTask(
+            id=task_id,
+            job_id=job_id,
+            user_id=uuid.uuid4(),
+            task_type=task_type,
+            params={"items": ["dubbed_audio"]},
+            params_fingerprint=f"fp_{task_id}",
+            status=status,
+            result={"zip_path": zip_path} if zip_path else None,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(task)
+        await db.commit()
+
+
+def test_invalidate_marks_completed_as_expired_and_unlinks_zip(tmp_path: Path) -> None:
+    """A completed materials_pack for the affected job → 'expired' + zip gone."""
+    zip_file = tmp_path / "materials_invalidate.zip"
+    zip_file.write_bytes(b"old-zip-content")
+
+    async def run() -> None:
+        Session = await _make_session()
+        await _insert_task_for_job(
+            Session,
+            task_id="t1",
+            job_id="job_edited",
+            zip_path=str(zip_file),
+        )
+        async with Session() as db:
+            count = await queue.invalidate_materials_pack_for_job(
+                db, job_id="job_edited",
+            )
+            await db.commit()
+        assert count == 1
+        assert not zip_file.exists()
+        task = await _load_task(Session, "t1")
+        assert task.status == "expired"
+
+    _run(run())
+
+
+def test_invalidate_marks_pending_as_failed(tmp_path: Path) -> None:
+    """A pending pack at edit time gets failed (not expired) so the partial
+    unique index unblocks for a fresh pack request."""
+    async def run() -> None:
+        Session = await _make_session()
+        await _insert_task_for_job(
+            Session,
+            task_id="t2",
+            job_id="job_edited",
+            status="pending",
+        )
+        async with Session() as db:
+            count = await queue.invalidate_materials_pack_for_job(
+                db, job_id="job_edited",
+            )
+            await db.commit()
+        assert count == 1
+        task = await _load_task(Session, "t2")
+        assert task.status == "failed"
+        assert task.error  # has the stale-edit reason text
+        assert "已修改" in task.error or "失效" in task.error
+
+    _run(run())
+
+
+def test_invalidate_marks_running_as_failed(tmp_path: Path) -> None:
+    """A running pack at edit time is also failed — same rationale as pending,
+    plus best-effort cancellation of the in-flight executor."""
+    async def run() -> None:
+        Session = await _make_session()
+        await _insert_task_for_job(
+            Session,
+            task_id="t3",
+            job_id="job_edited",
+            status="running",
+        )
+        async with Session() as db:
+            count = await queue.invalidate_materials_pack_for_job(
+                db, job_id="job_edited",
+            )
+            await db.commit()
+        assert count == 1
+        task = await _load_task(Session, "t3")
+        assert task.status == "failed"
+
+    _run(run())
+
+
+def test_invalidate_leaves_failed_and_expired_alone(tmp_path: Path) -> None:
+    """Already-terminal rows ('failed' / 'expired') are no-ops — they don't
+    block the user from creating a fresh pack and contain no live zip."""
+    async def run() -> None:
+        Session = await _make_session()
+        await _insert_task_for_job(
+            Session, task_id="t_failed", job_id="job_edited",
+            status="failed",
+        )
+        await _insert_task_for_job(
+            Session, task_id="t_expired", job_id="job_edited",
+            status="expired",
+        )
+        async with Session() as db:
+            count = await queue.invalidate_materials_pack_for_job(
+                db, job_id="job_edited",
+            )
+            await db.commit()
+        assert count == 0
+        task_f = await _load_task(Session, "t_failed")
+        task_e = await _load_task(Session, "t_expired")
+        assert task_f.status == "failed"
+        assert task_e.status == "expired"
+
+    _run(run())
+
+
+def test_invalidate_scoped_to_job_id(tmp_path: Path) -> None:
+    """Other jobs' materials_pack rows are untouched — invalidation is
+    job-scoped (each job has independent edit lifecycle)."""
+    keep_zip = tmp_path / "materials_other_job.zip"
+    keep_zip.write_bytes(b"unrelated-job")
+
+    async def run() -> None:
+        Session = await _make_session()
+        await _insert_task_for_job(
+            Session, task_id="my_pack", job_id="job_edited",
+            zip_path=str(tmp_path / "edited.zip"),
+        )
+        # Pre-create the edited zip too so we know unlinking happened only
+        # to ours, not the unrelated one.
+        (tmp_path / "edited.zip").write_bytes(b"x")
+        await _insert_task_for_job(
+            Session, task_id="other_pack", job_id="job_other",
+            zip_path=str(keep_zip),
+        )
+        async with Session() as db:
+            count = await queue.invalidate_materials_pack_for_job(
+                db, job_id="job_edited",
+            )
+            await db.commit()
+        assert count == 1
+        # Other job's row + zip survived
+        other = await _load_task(Session, "other_pack")
+        assert other.status == "completed"
+        assert keep_zip.exists()
+
+    _run(run())
+
+
+def test_invalidate_ignores_other_task_types(tmp_path: Path) -> None:
+    """generate_video for the same job_id is not touched — the helper is
+    materials_pack-specific (other task types may reference different
+    artifacts that aren't necessarily stale on edit)."""
+    async def run() -> None:
+        Session = await _make_session()
+        await _insert_task_for_job(
+            Session,
+            task_id="vid1",
+            job_id="job_edited",
+            task_type="generate_video",
+            status="completed",
+        )
+        async with Session() as db:
+            count = await queue.invalidate_materials_pack_for_job(
+                db, job_id="job_edited",
+            )
+            await db.commit()
+        assert count == 0
+        task = await _load_task(Session, "vid1")
+        assert task.status == "completed"
+
+    _run(run())
+
+
+def test_invalidate_does_not_commit_so_caller_owns_transaction() -> None:
+    """The hook runs inside _editing_transition_with_lock's outer txn —
+    auto-commit would prematurely flush other unrelated mutations the
+    same handler is staging. Verify by checking the row only flips
+    after caller commits."""
+    async def run() -> None:
+        Session = await _make_session()
+        await _insert_task_for_job(
+            Session, task_id="txn1", job_id="job_edited", status="pending",
+        )
+        async with Session() as db:
+            count = await queue.invalidate_materials_pack_for_job(
+                db, job_id="job_edited",
+            )
+            assert count == 1
+            # Caller forgets to commit → in this fresh session view, the
+            # row should be unchanged.
+            await db.rollback()
+
+        task = await _load_task(Session, "txn1")
+        assert task.status == "pending"
+
+    _run(run())
+
+
+def test_invalidate_tolerates_missing_zip(tmp_path: Path) -> None:
+    """If the zip was already deleted out-of-band, status still flips."""
+    ghost_path = str(tmp_path / "never_existed.zip")
+
+    async def run() -> None:
+        Session = await _make_session()
+        await _insert_task_for_job(
+            Session, task_id="ghost_inv", job_id="job_edited",
+            zip_path=ghost_path,
+        )
+        async with Session() as db:
+            count = await queue.invalidate_materials_pack_for_job(
+                db, job_id="job_edited",
+            )
+            await db.commit()
+        assert count == 1
+        task = await _load_task(Session, "ghost_inv")
+        assert task.status == "expired"
+
+    _run(run())
