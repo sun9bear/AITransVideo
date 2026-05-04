@@ -1452,3 +1452,313 @@ def test_gemini_translator_routes_speaker_inference_through_task_fallback(monkey
 
     assert inferred_names == {"speaker_a": "Interviewer", "speaker_b": "Founder"}
     assert router.calls == ["s2_infer"]
+
+
+# ===========================================================================
+# Phase B: LLM attempt audit
+# (plan 2026-05-03 §B — failure attempts must be recorded alongside success
+# attempts so paid fallbacks / invalid outputs / quota errors are auditable.)
+# ===========================================================================
+
+
+class _FakeMeter:
+    """Captures every record_llm call so tests can assert on attempt sequences.
+
+    Mirrors UsageMeter.record_llm signature; does not write to disk.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def record_llm(self, **kwargs: object) -> None:
+        self.calls.append(kwargs)
+
+
+def _build_translator_with_meter(*, llm_router=None, service_mode: str | None = None):
+    translator = _build_translator(llm_router=llm_router)
+    meter = _FakeMeter()
+    translator.set_usage_meter(meter)
+    if service_mode is not None:
+        translator._service_mode = service_mode
+    return translator, meter
+
+
+def test_classify_llm_error_buckets_provider_invalid_auth_config_length(
+) -> None:
+    from services.gemini.translator import (
+        LLM_ERROR_CLASS_AUTH,
+        LLM_ERROR_CLASS_CONFIG,
+        LLM_ERROR_CLASS_INVALID_OUTPUT,
+        LLM_ERROR_CLASS_LENGTH,
+        LLM_ERROR_CLASS_PROVIDER,
+        TranslationError,
+        classify_llm_error,
+    )
+
+    assert classify_llm_error(
+        gemini_translator_module.LLMProviderError("HTTP 429 rate limit hit")
+    ) == (LLM_ERROR_CLASS_PROVIDER, "rate_limit")
+
+    assert classify_llm_error(
+        gemini_translator_module.LLMProviderError("Connection timed out")
+    ) == (LLM_ERROR_CLASS_PROVIDER, "transient_network")
+
+    assert classify_llm_error(
+        TranslationError("Gemini returned invalid JSON")
+    ) == (LLM_ERROR_CLASS_INVALID_OUTPUT, "json_parse_failed")
+
+    assert classify_llm_error(
+        TranslationError("API key missing for provider")
+    ) == (LLM_ERROR_CLASS_AUTH, "auth_invalid")
+
+    assert classify_llm_error(
+        TranslationError("Unknown model: gemini_3_5_pro")
+    ) == (LLM_ERROR_CLASS_CONFIG, "configuration_missing")
+
+    assert classify_llm_error(
+        TranslationError("output exceeds max chars: 800/700")
+    ) == (LLM_ERROR_CLASS_LENGTH, "length_constraint")
+
+
+def test_call_task_with_fallback_records_primary_success_with_extra(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """New (llm_registry) path: primary success records one attempt with
+    success=True and provider_response_received=True in extra."""
+    translator, meter = _build_translator_with_meter(service_mode="express")
+
+    # Stub _call_by_model to return immediately
+    monkeypatch.setattr(
+        translator,
+        "_call_by_model",
+        lambda model_name, prompt, json_mode=False: "OK",
+    )
+
+    response = translator._call_task_with_fallback("s3_translate", "prompt-text")
+    assert response == "OK"
+
+    assert len(meter.calls) == 1
+    call = meter.calls[0]
+    assert call["success"] is True
+    assert call["attempt_label"] == "primary"
+    extra = call["extra"]
+    assert extra["provider_response_received"] is True
+    assert extra["fallback_policy_source"] == "llm_registry_defaults"
+    assert "duration_ms" in extra
+
+
+def test_call_task_with_fallback_records_provider_error_then_fallback_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plan §B9.2: primary provider error + fallback success → 2 attempts.
+    Primary attempt has success=False, error_class=provider_error,
+    provider_response_received=False. Fallback attempt has success=True."""
+    translator, meter = _build_translator_with_meter(service_mode="express")
+
+    # Force a known fallback chain so we can predict attempts
+    monkeypatch.setattr(
+        gemini_translator_module,
+        "_get_prompt_model",
+        lambda mode, prompt_key: "gemini_pro",
+    )
+    monkeypatch.setattr(
+        gemini_translator_module,
+        "_get_fallback_candidates",
+        lambda model_name, requires_audio=False: ["deepseek"],
+    )
+
+    call_log: list[str] = []
+
+    def fake_call_by_model(model_name, prompt, json_mode=False):
+        call_log.append(model_name)
+        if model_name == "gemini_pro":
+            raise gemini_translator_module.LLMProviderError(
+                "HTTPSConnectionPool: Connection timed out"
+            )
+        return "translated"
+
+    monkeypatch.setattr(translator, "_call_by_model", fake_call_by_model)
+
+    response = translator._call_task_with_fallback("s3_translate", "prompt")
+    assert response == "translated"
+    assert call_log == ["gemini_pro", "deepseek"]
+
+    assert len(meter.calls) == 2
+    primary, fallback = meter.calls
+    assert primary["success"] is False
+    assert primary["attempt_label"] == "primary"
+    assert primary["extra"]["error_class"] == "provider_error"
+    assert primary["extra"]["error_code"] == "transient_network"
+    assert primary["extra"]["provider_response_received"] is False
+    assert primary["extra"]["fallback_to"] == "deepseek"
+    assert primary["extra"]["fallback_from"] == "gemini_pro"
+    assert primary["extra"]["fallback_policy_source"] == "llm_registry_defaults"
+
+    assert fallback["success"] is True
+    assert fallback["attempt_label"] == "fallback_1"
+
+
+def test_call_task_with_fallback_records_validator_failure_as_invalid_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plan §B9.3: provider returned text but validator rejects it →
+    success=False, provider_response_received=True, error_class=invalid_output.
+    This attempt is the one that 'cost money' even though the output was bad."""
+    translator, meter = _build_translator_with_meter(service_mode="express")
+
+    monkeypatch.setattr(
+        gemini_translator_module,
+        "_get_prompt_model",
+        lambda mode, prompt_key: "gemini_pro",
+    )
+    monkeypatch.setattr(
+        gemini_translator_module,
+        "_get_fallback_candidates",
+        lambda model_name, requires_audio=False: ["deepseek"],
+    )
+    monkeypatch.setattr(
+        translator,
+        "_call_by_model",
+        lambda model_name, prompt, json_mode=False: "I cannot do that",
+    )
+
+    def strict_validator(text: str) -> None:
+        if text != "OK":
+            raise gemini_translator_module.TranslationError(
+                "validator rejected output"
+            )
+
+    # Primary returns "I cannot do that" → validator raises → record failure
+    # Fallback also returns "I cannot do that" → validator raises → re-raise
+    with pytest.raises(gemini_translator_module.TranslationError):
+        translator._call_task_with_fallback(
+            "s3_translate", "prompt", validator=strict_validator
+        )
+
+    # Both attempts recorded as failures with provider_response_received=True
+    assert len(meter.calls) == 2
+    for call in meter.calls:
+        assert call["success"] is False
+        assert call["extra"]["provider_response_received"] is True
+        assert call["extra"]["error_class"] == "invalid_output"
+        assert call["extra"]["error_code"] == "validator_failed"
+
+
+def test_call_task_with_fallback_audit_does_not_leak_full_prompt_response(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plan §B9.4 / §C3: events stored on disk must contain only character
+    counts and metadata, never the full prompt or response. Wire a real
+    UsageMeter and check the JSONL after a call."""
+    from services.usage_meter import UsageMeter
+
+    real_meter = UsageMeter(tmp_path, job_id="job-leak-check")
+    translator = _build_translator()
+    translator.set_usage_meter(real_meter)
+    translator._service_mode = "express"
+
+    monkeypatch.setattr(
+        gemini_translator_module,
+        "_get_prompt_model",
+        lambda mode, prompt_key: "gemini_pro",
+    )
+    monkeypatch.setattr(
+        gemini_translator_module,
+        "_get_fallback_candidates",
+        lambda model_name, requires_audio=False: [],
+    )
+
+    sensitive_prompt = "TOP_SECRET_SYSTEM_PROMPT_DO_NOT_LOG"
+    sensitive_response = "PROPRIETARY_TRANSLATION_OUTPUT"
+    monkeypatch.setattr(
+        translator,
+        "_call_by_model",
+        lambda model_name, prompt, json_mode=False: sensitive_response,
+    )
+
+    translator._call_task_with_fallback("s3_translate", sensitive_prompt)
+
+    events_path = tmp_path / "metering" / "usage_events.jsonl"
+    on_disk = events_path.read_text(encoding="utf-8")
+    assert sensitive_prompt not in on_disk, "prompt body leaked into usage_events.jsonl"
+    assert sensitive_response not in on_disk, "response body leaked into usage_events.jsonl"
+    # But length and type metadata must be present
+    assert "input_text_chars" in on_disk
+    assert "output_text_chars" in on_disk
+
+
+def test_call_task_with_fallback_record_llm_failure_doesnt_break_success_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plan §B5/§B9.8: record_llm raising must not turn a successful LLM
+    response into a translator failure. Paid call already happened; sidecar
+    write failure is best-effort."""
+    translator = _build_translator()
+    translator._service_mode = "express"
+
+    class ExplodingMeter:
+        def record_llm(self, **kwargs):
+            raise RuntimeError("disk full")
+
+    translator.set_usage_meter(ExplodingMeter())
+
+    monkeypatch.setattr(
+        gemini_translator_module,
+        "_get_prompt_model",
+        lambda mode, prompt_key: "gemini_pro",
+    )
+    monkeypatch.setattr(
+        gemini_translator_module,
+        "_get_fallback_candidates",
+        lambda model_name, requires_audio=False: [],
+    )
+    monkeypatch.setattr(
+        translator,
+        "_call_by_model",
+        lambda model_name, prompt, json_mode=False: "OK",
+    )
+
+    # Translator must still return the response despite meter failure
+    response = translator._call_task_with_fallback("s3_translate", "prompt")
+    assert response == "OK"
+
+
+def test_call_task_with_fallback_legacy_router_records_success_and_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plan §B9.7: legacy LLMRouter path must also record success / failure
+    attempts so the LLMRouter deprecation observation can use UsageMeter as
+    its single source of truth (see plan §B4)."""
+    translator, meter = _build_translator_with_meter()
+    monkeypatch.setattr(gemini_translator_module.time, "sleep", lambda seconds: None)
+    # No service_mode → falls through to legacy path
+    assert getattr(translator, "_service_mode", None) is None
+
+    class FakeRouter:
+        def get_route(self, task: str) -> list[str]:
+            return ["deepseek_chat", "gpt_41"]
+
+        def get_model_config(self, alias: str) -> dict[str, object]:
+            return {"provider": "deepseek" if alias == "deepseek_chat" else "openai"}
+
+        def generate_via_alias(self, alias: str, *, prompt: str, json_mode: bool = False):
+            if alias == "deepseek_chat":
+                raise gemini_translator_module.LLMProviderError(
+                    "DeepSeek 400 invalid_request_error"
+                )
+            return "ok"
+
+    translator.llm_router = FakeRouter()
+    response = translator._call_task_with_fallback("s3_translate", "prompt")
+    assert response == "ok"
+
+    # Two attempts: primary failure + fallback success — both via legacy router
+    assert len(meter.calls) == 2
+    primary, fallback = meter.calls
+    assert primary["success"] is False
+    assert primary["extra"]["fallback_policy_source"] == "legacy_router"
+    assert primary["extra"]["fallback_from"] == "deepseek_chat"
+    assert primary["extra"]["fallback_to"] == "gpt_41"
+    assert fallback["success"] is True
+    assert fallback["extra"]["fallback_policy_source"] == "legacy_router"

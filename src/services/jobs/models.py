@@ -152,6 +152,10 @@ class JobRecord:
     jianying_draft_error: str | None = None
     jianying_draft_zip_path: str | None = None  # zip path for download (set when status=succeeded)
     jianying_draft_user_root: str | None = None  # user's local drafts root used for absolute paths (K11)
+    # --- Runner hardening (plan 2026-05-03 §A3) ---
+    jianying_draft_fingerprint: str | None = None  # SHA256 of artifact-content + version inputs (§A4)
+    jianying_draft_attempt_id: str | None = None   # UUID for current attempt; correlates lock / events
+    jianying_draft_substep: str | None = None      # internal sub-step (validating_inputs / building_draft / ...)
 
     def __post_init__(self) -> None:
         self.job_id = str(self.job_id).strip()
@@ -195,6 +199,9 @@ class JobRecord:
         self.jianying_draft_error = _normalize_optional_text(self.jianying_draft_error)
         self.jianying_draft_zip_path = _normalize_optional_text(self.jianying_draft_zip_path)
         self.jianying_draft_user_root = _normalize_optional_text(self.jianying_draft_user_root)
+        self.jianying_draft_fingerprint = _normalize_optional_text(self.jianying_draft_fingerprint)
+        self.jianying_draft_attempt_id = _normalize_optional_text(self.jianying_draft_attempt_id)
+        self.jianying_draft_substep = _normalize_optional_text(self.jianying_draft_substep)
 
         if not self.job_id:
             raise ValueError("job_id is required")
@@ -270,6 +277,9 @@ class JobRecord:
             "jianying_draft_error": self.jianying_draft_error,
             "jianying_draft_zip_path": self.jianying_draft_zip_path,
             "jianying_draft_user_root": self.jianying_draft_user_root,
+            "jianying_draft_fingerprint": self.jianying_draft_fingerprint,
+            "jianying_draft_attempt_id": self.jianying_draft_attempt_id,
+            "jianying_draft_substep": self.jianying_draft_substep,
         }
 
     @classmethod
@@ -326,6 +336,9 @@ class JobRecord:
             jianying_draft_error=payload.get("jianying_draft_error"),
             jianying_draft_zip_path=payload.get("jianying_draft_zip_path"),
             jianying_draft_user_root=payload.get("jianying_draft_user_root"),
+            jianying_draft_fingerprint=payload.get("jianying_draft_fingerprint"),
+            jianying_draft_attempt_id=payload.get("jianying_draft_attempt_id"),
+            jianying_draft_substep=payload.get("jianying_draft_substep"),
         )
 
 

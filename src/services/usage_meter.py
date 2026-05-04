@@ -161,7 +161,17 @@ class UsageMeter:
         attempt_label: str = "",
         success: bool = True,
         error: str = "",
+        extra: dict[str, Any] | None = None,
     ) -> None:
+        """Append a single LLM attempt event.
+
+        Plan 2026-05-03 §B5: ``extra`` carries optional structured fields like
+        ``error_class`` / ``error_code`` / ``provider_response_received`` /
+        ``fallback_from`` / ``fallback_to`` / ``duration_ms`` / ``prompt_hash``
+        without forcing every caller to deal with new positional kwargs.
+        Unknown keys flow through to disk as-is; ``summarize()`` ignores them.
+        Core fields are never overwritten by ``extra``.
+        """
         in_tokens = (
             max(0, _coerce_int(input_tokens))
             if input_tokens is not None
@@ -172,7 +182,7 @@ class UsageMeter:
             if output_tokens is not None
             else estimate_text_tokens(output_text)
         )
-        self.record_event({
+        payload: dict[str, Any] = {
             "kind": "llm",
             "task": _safe_key(task),
             "phase": _safe_key(phase) if phase else "",
@@ -190,7 +200,15 @@ class UsageMeter:
             "audio_input_seconds": max(0.0, _coerce_float(audio_input_seconds)),
             "success": bool(success),
             "error": str(error or "")[:500],
-        })
+        }
+        if extra:
+            for key, value in extra.items():
+                if key in payload:
+                    # Never let extra clobber core metering fields — those have
+                    # invariants (e.g. token coercion, error truncation).
+                    continue
+                payload[key] = value
+        self.record_event(payload)
 
     def record_event(self, event: dict[str, Any]) -> None:
         payload = dict(event)

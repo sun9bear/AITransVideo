@@ -578,6 +578,12 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                         "draft_zip_path": state.get("draft_zip_path"),
                         "compatibility_report_path": state.get("compatibility_report_path"),
                         "draft_zip_size_bytes": None,
+                        # Plan 2026-05-03 §A9: surface runner internals so
+                        # admin / future UI can render sub-step + diagnose
+                        # orphans. Front-end may safely ignore until wired.
+                        "substep": state.get("substep"),
+                        "attempt_id": state.get("attempt_id"),
+                        "fingerprint": state.get("fingerprint"),
                     }
                     # Stat the zip file if it exists to get file size
                     if response.get("draft_zip_path"):

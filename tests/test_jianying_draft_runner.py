@@ -920,5 +920,485 @@ class TestIdempotencyWithUserDraftRoot:
         backend.write.assert_not_called()
 
 
+# ===========================================================================
+# Phase A hardening (plan 2026-05-03 §A): fingerprint, file_lock, sub-step,
+# orphan recovery. Each class below exercises one hardening invariant;
+# scenarios mirror plan §A10's test plan.
+# ===========================================================================
+
+
+def _make_real_inputs(project_dir: Path) -> dict:
+    """Create real artifact files referenced by manifest.json so
+    fingerprint computation hashes actual content."""
+    source = project_dir / "source.mp4"
+    dubbed = project_dir / "dubbed.wav"
+    subs = project_dir / "subtitles.srt"
+    source.write_bytes(b"fake-video-bytes-001")
+    dubbed.write_bytes(b"fake-audio-bytes-001")
+    subs.write_text("1\n00:00:00,000 --> 00:00:01,000\nhello\n", encoding="utf-8")
+    manifest = {
+        "artifact_index": {
+            "source.original_video": str(source),
+            "editor.dubbed_audio_complete": str(dubbed),
+            "editor.subtitles": str(subs),
+        }
+    }
+    (project_dir / "manifest.json").write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+    return {"source": source, "dubbed": dubbed, "subs": subs}
+
+
+class TestFingerprintIdempotency:
+    """Plan §A10.1–A10.3: cache hit when fingerprint + zip + root all match;
+    miss when zip gone, root differs, or content changed."""
+
+    def test_succeeded_same_fingerprint_and_zip_returns_cached(self, tmp_path):
+        from services.jobs.jianying_draft_runner import (
+            _compute_jianying_fingerprint,
+        )
+
+        store = _make_store(tmp_path)
+        project_dir = tmp_path / "project" / "job-test-001"
+        project_dir.mkdir(parents=True)
+        _make_real_inputs(project_dir)
+
+        zip_path = tmp_path / "draft.zip"
+        zip_path.write_bytes(b"existing-zip")
+
+        # Persist record with fingerprint matching current inputs
+        record_seed = _make_record(project_dir=str(project_dir))
+        fingerprint = _compute_jianying_fingerprint(record_seed, None)
+        assert fingerprint, "fingerprint helper must succeed for real inputs"
+
+        record = _make_record(
+            project_dir=str(project_dir),
+            jianying_draft_status="succeeded",
+            jianying_draft_completed_at="2026-05-03T11:00:00Z",
+            jianying_draft_zip_path=str(zip_path),
+            jianying_draft_fingerprint=fingerprint,
+        )
+        store.save_job(record)
+
+        backend = mock.MagicMock()
+        runner = _make_runner(store, backend)
+        response = runner.trigger("job-test-001")
+
+        assert response["status"] == "succeeded"
+        assert response.get("_idempotent") is True
+        assert response["fingerprint"] == fingerprint
+        backend.write.assert_not_called()
+
+    def test_succeeded_fingerprint_match_but_zip_missing_regenerates(self, tmp_path):
+        from services.jobs.jianying_draft_runner import (
+            _compute_jianying_fingerprint,
+        )
+
+        store = _make_store(tmp_path)
+        project_dir = tmp_path / "project" / "job-test-001"
+        project_dir.mkdir(parents=True)
+        _make_real_inputs(project_dir)
+
+        seed = _make_record(project_dir=str(project_dir))
+        fingerprint = _compute_jianying_fingerprint(seed, None)
+
+        record = _make_record(
+            project_dir=str(project_dir),
+            jianying_draft_status="succeeded",
+            jianying_draft_completed_at="2026-05-03T11:00:00Z",
+            jianying_draft_zip_path="/does/not/exist.zip",  # gone
+            jianying_draft_fingerprint=fingerprint,
+        )
+        store.save_job(record)
+
+        backend = mock.MagicMock()
+        backend.write.return_value = _make_ok_result()
+        runner = _make_runner(store, backend)
+        response = runner.trigger("job-test-001")
+
+        assert response["status"] == "running"
+        _wait_for_jianying_status(store, "job-test-001", "succeeded")
+        backend.write.assert_called_once()
+
+    def test_succeeded_different_fingerprint_regenerates(self, tmp_path):
+        store = _make_store(tmp_path)
+        project_dir = tmp_path / "project" / "job-test-001"
+        project_dir.mkdir(parents=True)
+        _make_real_inputs(project_dir)
+
+        zip_path = tmp_path / "draft.zip"
+        zip_path.write_bytes(b"existing-zip")
+
+        record = _make_record(
+            project_dir=str(project_dir),
+            jianying_draft_status="succeeded",
+            jianying_draft_completed_at="2026-05-03T11:00:00Z",
+            jianying_draft_zip_path=str(zip_path),
+            jianying_draft_fingerprint="fingerprint_from_old_input",  # stale
+        )
+        store.save_job(record)
+
+        backend = mock.MagicMock()
+        backend.write.return_value = _make_ok_result(zip_path=str(zip_path))
+        runner = _make_runner(store, backend)
+        response = runner.trigger("job-test-001")
+
+        assert response["status"] == "running"
+        _wait_for_jianying_status(store, "job-test-001", "succeeded")
+        backend.write.assert_called_once()
+
+    def test_legacy_succeeded_no_fingerprint_returns_cached(self, tmp_path):
+        """Backward compat: pre-Phase-A succeeded jobs (fingerprint=None) keep
+        the historical 'trust state' behavior — no re-hash, no re-run."""
+        store = _make_store(tmp_path)
+        record = _make_record(
+            jianying_draft_status="succeeded",
+            jianying_draft_completed_at="2026-05-03T11:00:00Z",
+            jianying_draft_zip_path="/legacy/draft.zip",
+            jianying_draft_fingerprint=None,
+        )
+        store.save_job(record)
+
+        backend = mock.MagicMock()
+        runner = _make_runner(store, backend)
+        response = runner.trigger("job-test-001")
+
+        assert response["status"] == "succeeded"
+        assert response.get("_idempotent") is True
+        backend.write.assert_not_called()
+
+
+class TestConcurrentTriggerLock:
+    """Plan §A10.7 (post-CodeX-review revision): concurrent trigger() calls
+    must NOT block on the worker's long-running backend.write.
+
+    Lock contract after the 2026-05-04 fix: trigger() takes a *short* lock
+    only for state-machine transitions; the worker doesn't hold the lock for
+    backend.write itself. So the second HTTP request returns immediately
+    with status=="running", not after waiting minutes for the draft to
+    finish. Cross-process double-spawn protection comes from the JobRecord
+    state machine (status=="running" gate), not from a long-held lock.
+    """
+
+    def test_concurrent_triggers_return_running_without_blocking(self, tmp_path):
+        import time
+
+        store = _make_store(tmp_path)
+        project_dir = tmp_path / "project" / "job-test-001"
+        project_dir.mkdir(parents=True)
+        _make_real_inputs(project_dir)
+        zip_path = project_dir / "draft.zip"
+        store.save_job(_make_record(project_dir=str(project_dir)))
+
+        call_count = [0]
+        in_backend = threading.Event()
+        release = threading.Event()
+
+        def slow_write(request):
+            call_count[0] += 1
+            in_backend.set()
+            release.wait(timeout=15)
+            zip_path.write_bytes(b"draft contents")
+            return _make_ok_result(zip_path=str(zip_path))
+
+        backend = mock.MagicMock()
+        backend.write.side_effect = slow_write
+        runner = _make_runner(store, backend)
+
+        # First trigger: transitions to running, spawns worker
+        first = runner.trigger("job-test-001")
+        assert first["status"] == "running"
+
+        # Wait for worker to enter backend.write so we know it's mid-flight
+        assert in_backend.wait(timeout=5), "worker did not enter backend"
+
+        # Second trigger MUST return quickly with "still in progress",
+        # NOT block until the worker finishes. We measure wall time to
+        # prove non-blocking semantics — anything over a few hundred ms
+        # would mean we accidentally re-introduced the long-lock bug.
+        before = time.monotonic()
+        second = runner.trigger("job-test-001")
+        elapsed_ms = (time.monotonic() - before) * 1000
+
+        assert elapsed_ms < 500, (
+            f"second trigger took {elapsed_ms:.0f}ms — blocking on worker "
+            "lock has crept back in"
+        )
+        assert second["status"] == "running"
+        assert second.get("message") == "still in progress"
+        assert second.get("attempt_id") == first["attempt_id"], (
+            "second trigger must observe the SAME attempt_id, not a fresh one"
+        )
+
+        # Release worker so the test can clean up
+        release.set()
+        _wait_for_jianying_status(store, "job-test-001", "succeeded")
+
+        # Only ONE backend invocation despite the concurrent trigger
+        assert call_count[0] == 1, f"backend called {call_count[0]} times"
+
+    def test_substep_updates_dont_block_concurrent_trigger(self, tmp_path):
+        """Worker's per-substep state writes take a short lock; a concurrent
+        trigger that arrives between substep transitions still returns fast."""
+        import time
+
+        store = _make_store(tmp_path)
+        project_dir = tmp_path / "project" / "job-test-001"
+        project_dir.mkdir(parents=True)
+        _make_real_inputs(project_dir)
+        zip_path = project_dir / "draft.zip"
+        store.save_job(_make_record(project_dir=str(project_dir)))
+
+        in_backend = threading.Event()
+        release = threading.Event()
+
+        def slow_write(_request):
+            in_backend.set()
+            release.wait(timeout=15)
+            zip_path.write_bytes(b"draft")
+            return _make_ok_result(zip_path=str(zip_path))
+
+        backend = mock.MagicMock()
+        backend.write.side_effect = slow_write
+        runner = _make_runner(store, backend)
+
+        runner.trigger("job-test-001")
+        assert in_backend.wait(timeout=5)
+
+        # Hammer trigger multiple times concurrently from worker threads.
+        # All must return quickly without spawning new workers.
+        results: list[tuple[float, dict]] = []
+        lock = threading.Lock()
+
+        def race():
+            t0 = time.monotonic()
+            r = runner.trigger("job-test-001")
+            with lock:
+                results.append((time.monotonic() - t0, r))
+
+        threads = [threading.Thread(target=race) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        # Every concurrent trigger returned within 500ms
+        for elapsed, resp in results:
+            assert elapsed < 0.5, (
+                f"trigger took {elapsed*1000:.0f}ms during worker substep updates"
+            )
+            assert resp["status"] == "running"
+
+        release.set()
+        _wait_for_jianying_status(store, "job-test-001", "succeeded")
+        assert backend.write.call_count == 1
+
+
+class TestSubstepEvents:
+    """Plan §A10.8: each substep persists on JobRecord and emits a JobEvent."""
+
+    def test_substeps_recorded_during_generation(self, tmp_path):
+        from services.jobs.jianying_draft_runner import (
+            SUBSTEP_BUILDING_DRAFT,
+            SUBSTEP_COMPLETED,
+            SUBSTEP_RESOLVING_ARTIFACTS,
+            SUBSTEP_VALIDATING_INPUTS,
+        )
+
+        store = _make_store(tmp_path)
+        project_dir = tmp_path / "project" / "job-test-001"
+        project_dir.mkdir(parents=True)
+        _make_real_inputs(project_dir)
+        store.save_job(_make_record(project_dir=str(project_dir)))
+
+        backend = mock.MagicMock()
+        backend.write.return_value = _make_ok_result()
+        runner = _make_runner(store, backend)
+        runner.trigger("job-test-001")
+
+        finished = _wait_for_jianying_status(store, "job-test-001", "succeeded")
+
+        # Final substep persisted on record
+        assert finished.jianying_draft_substep == SUBSTEP_COMPLETED
+        assert finished.jianying_draft_attempt_id is not None
+        assert finished.jianying_draft_fingerprint is not None
+
+        # Events sequence on disk
+        events = store.load_events("job-test-001")
+        substeps_seen = [e.payload.get("substep") for e in events]
+        # Order: validating_inputs -> resolving_artifacts -> building_draft -> ...
+        assert SUBSTEP_VALIDATING_INPUTS in substeps_seen
+        assert SUBSTEP_RESOLVING_ARTIFACTS in substeps_seen
+        assert SUBSTEP_BUILDING_DRAFT in substeps_seen
+        assert SUBSTEP_COMPLETED in substeps_seen
+
+        # All events use stage=jianying_draft + carry attempt_id
+        for ev in events:
+            assert ev.stage == "jianying_draft"
+            assert ev.payload.get("attempt_id") == finished.jianying_draft_attempt_id
+
+    def test_failed_event_carries_error_classification(self, tmp_path):
+        store = _make_store(tmp_path)
+        project_dir = tmp_path / "project" / "job-test-001"
+        project_dir.mkdir(parents=True)
+        _make_real_inputs(project_dir)
+        store.save_job(_make_record(project_dir=str(project_dir)))
+
+        backend = mock.MagicMock()
+        backend.write.side_effect = RuntimeError("kaboom")
+        runner = _make_runner(store, backend)
+        runner.trigger("job-test-001")
+
+        _wait_for_jianying_status(store, "job-test-001", "failed")
+
+        events = store.load_events("job-test-001")
+        failed_events = [e for e in events if e.status == "failed"]
+        assert failed_events, "no failed JobEvent emitted"
+        last = failed_events[-1]
+        assert last.payload.get("error_code") == "unexpected_exception"
+        assert last.payload.get("error_class") == "unknown"
+        assert last.level == "critical"
+
+
+class TestOrphanRecovery:
+    """Plan §A10.5–A10.6: stale running with matching zip → succeeded;
+    stale running with no zip → failed with orphan error code."""
+
+    def test_stale_running_with_matching_zip_recovers_to_succeeded(self, tmp_path):
+        from services.jobs.jianying_draft_runner import (
+            _compute_jianying_fingerprint,
+        )
+
+        store = _make_store(tmp_path)
+        project_dir = tmp_path / "project" / "job-stale"
+        project_dir.mkdir(parents=True)
+        _make_real_inputs(project_dir)
+
+        zip_path = tmp_path / "draft.zip"
+        zip_path.write_bytes(b"existing")
+
+        seed = _make_record(job_id="job-stale", project_dir=str(project_dir))
+        fingerprint = _compute_jianying_fingerprint(seed, None)
+
+        now = datetime(2026, 5, 3, 12, 0, 0, tzinfo=timezone.utc)
+        stale_iso = (now - timedelta(minutes=60)).isoformat()
+        store.save_job(_make_record(
+            job_id="job-stale",
+            project_dir=str(project_dir),
+            jianying_draft_status="running",
+            jianying_draft_started_at=stale_iso,
+            jianying_draft_zip_path=str(zip_path),
+            jianying_draft_fingerprint=fingerprint,
+        ))
+
+        runner = _make_runner(store)
+        count = runner.reap_stale(now=now)
+        assert count == 1
+
+        recovered = store.require_job("job-stale")
+        assert recovered.jianying_draft_status == "succeeded"
+        assert recovered.jianying_draft_zip_path == str(zip_path)
+
+        # WARN-level event with stale_running_recovered code
+        events = store.load_events("job-stale")
+        recovery = [e for e in events if e.payload.get("error_code") == "stale_running_recovered"]
+        assert recovery, "no orphan-recovered JobEvent"
+        assert recovery[-1].level == "warn"
+
+    def test_stale_running_no_zip_reaped_as_failed_with_orphan_code(self, tmp_path):
+        store = _make_store(tmp_path)
+        now = datetime(2026, 5, 3, 12, 0, 0, tzinfo=timezone.utc)
+        stale_iso = (now - timedelta(minutes=60)).isoformat()
+
+        # Legacy stale (fingerprint=None) → orphaned_after_process_restart
+        store.save_job(_make_record(
+            job_id="job-orphan",
+            jianying_draft_status="running",
+            jianying_draft_started_at=stale_iso,
+            jianying_draft_fingerprint=None,
+        ))
+
+        runner = _make_runner(store)
+        count = runner.reap_stale(now=now)
+        assert count == 1
+
+        reaped = store.require_job("job-orphan")
+        assert reaped.jianying_draft_status == "failed"
+        assert "stale" in (reaped.jianying_draft_error or "").lower()
+
+        events = store.load_events("job-orphan")
+        critical = [e for e in events if e.level == "critical"]
+        assert critical, "no critical JobEvent emitted"
+        assert critical[-1].payload.get("error_code") == "orphaned_after_process_restart"
+        assert critical[-1].payload.get("error_class") == "orphan_recovery"
+
+    def test_stale_running_with_fingerprint_no_zip_reaped(self, tmp_path):
+        """Has fingerprint (newer record) but zip missing → stale_running_reaped."""
+        store = _make_store(tmp_path)
+        now = datetime(2026, 5, 3, 12, 0, 0, tzinfo=timezone.utc)
+        stale_iso = (now - timedelta(minutes=60)).isoformat()
+
+        store.save_job(_make_record(
+            job_id="job-staleprint",
+            jianying_draft_status="running",
+            jianying_draft_started_at=stale_iso,
+            jianying_draft_zip_path="/nope.zip",
+            jianying_draft_fingerprint="abc123",
+        ))
+
+        runner = _make_runner(store)
+        count = runner.reap_stale(now=now)
+        assert count == 1
+
+        events = store.load_events("job-staleprint")
+        critical = [e for e in events if e.level == "critical"]
+        assert critical[-1].payload.get("error_code") == "stale_running_reaped"
+
+
+class TestStatusApiSurfacesRunnerFields:
+    """Plan §A9: get_status() returns substep / attempt_id / fingerprint."""
+
+    def test_status_surfaces_runner_fields_after_trigger(self, tmp_path):
+        store = _make_store(tmp_path)
+        project_dir = tmp_path / "project" / "job-test-001"
+        project_dir.mkdir(parents=True)
+        _make_real_inputs(project_dir)
+        store.save_job(_make_record(project_dir=str(project_dir)))
+
+        # Block the backend so we can read status mid-run
+        release = threading.Event()
+        backend = mock.MagicMock()
+        def hold(_req):
+            release.wait(timeout=5)
+            return _make_ok_result()
+        backend.write.side_effect = hold
+
+        runner = _make_runner(store, backend)
+        runner.trigger("job-test-001")
+
+        # Poll briefly for substep to advance past initial validating_inputs
+        import time
+        deadline = time.monotonic() + 3.0
+        status = runner.get_status("job-test-001")
+        while time.monotonic() < deadline:
+            status = runner.get_status("job-test-001")
+            if status.get("substep") and status["substep"] != "validating_inputs":
+                break
+            time.sleep(0.05)
+
+        assert status["status"] == "running"
+        assert status["attempt_id"]
+        assert status["fingerprint"]
+        assert status["substep"] in {
+            "validating_inputs",
+            "resolving_artifacts",
+            "building_draft",
+            "validating_compatibility",
+        }
+
+        release.set()
+        _wait_for_jianying_status(store, "job-test-001", "succeeded")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

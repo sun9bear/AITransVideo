@@ -194,6 +194,47 @@ class TranslationError(Exception):
     pass
 
 
+# ---------------------------------------------------------------------------
+# LLM error classification (plan 2026-05-03 §B6).
+#
+# Pure heuristic over the message text. Used as a *fallback* when structural
+# context (provider_response_received) doesn't already pin down the class.
+# Returns (error_class, error_code).
+# ---------------------------------------------------------------------------
+
+LLM_ERROR_CLASS_PROVIDER = "provider_error"
+LLM_ERROR_CLASS_INVALID_OUTPUT = "invalid_output"
+LLM_ERROR_CLASS_AUTH = "auth_error"
+LLM_ERROR_CLASS_LENGTH = "length_constraint_failed"
+LLM_ERROR_CLASS_CONFIG = "configuration_error"
+LLM_ERROR_CLASS_UNKNOWN = "unknown_error"
+
+
+def classify_llm_error(exc: Exception) -> tuple[str, str]:
+    """Return (error_class, error_code) for an LLM exception.
+
+    Note: callers that already know the structural context (e.g. validator
+    raised AFTER provider returned text) should override the class to
+    ``invalid_output`` rather than relying on this heuristic.
+    """
+    msg = str(exc).lower()
+    if "api key" in msg or "api_key" in msg or "credential" in msg or "unauthorized" in msg:
+        return (LLM_ERROR_CLASS_AUTH, "auth_invalid")
+    if "unknown model" in msg or "no models available" in msg or "no llm route" in msg:
+        return (LLM_ERROR_CLASS_CONFIG, "configuration_missing")
+    if "invalid json" in msg or "json parse" in msg or "must be a json" in msg:
+        return (LLM_ERROR_CLASS_INVALID_OUTPUT, "json_parse_failed")
+    if "rate limit" in msg or "quota" in msg or "429" in msg:
+        return (LLM_ERROR_CLASS_PROVIDER, "rate_limit")
+    if "timeout" in msg or "timed out" in msg or "connection" in msg or "ssl" in msg:
+        return (LLM_ERROR_CLASS_PROVIDER, "transient_network")
+    if "char" in msg and ("min" in msg or "max" in msg or "exceed" in msg):
+        return (LLM_ERROR_CLASS_LENGTH, "length_constraint")
+    if isinstance(exc, TranslationError):
+        return (LLM_ERROR_CLASS_INVALID_OUTPUT, "translation_error")
+    return (LLM_ERROR_CLASS_UNKNOWN, "unknown")
+
+
 DUBBING_MODE_DUB = "dub"
 DUBBING_MODE_KEEP_ORIGINAL = "keep_original"
 VALID_DUBBING_MODES = {DUBBING_MODE_DUB, DUBBING_MODE_KEEP_ORIGINAL}
@@ -403,7 +444,14 @@ class GeminiTranslator:
         attempt_label: str = "",
         provider: str | None = None,
         model_id: str | None = None,
+        success: bool = True,
+        error: str = "",
+        extra: dict[str, Any] | None = None,
     ) -> None:
+        """Record one LLM attempt (success or failure) into the project's
+        UsageMeter. Best-effort: write failures only log a warning so the
+        translator's main response path stays intact (plan §B3).
+        """
         meter = getattr(self, "_usage_meter", None)
         if meter is None:
             return
@@ -424,6 +472,9 @@ class GeminiTranslator:
                 input_text=prompt,
                 output_text=response_text,
                 attempt_label=attempt_label,
+                success=success,
+                error=error,
+                extra=extra,
             )
         except Exception as exc:
             print(f"[metering] LLM usage record skipped: {exc}", flush=True)
@@ -1165,23 +1216,66 @@ class GeminiTranslator:
             models_to_try = [model_name] + _get_fallback_candidates(model_name, requires_audio=False)
             last_error: Exception | None = None
             for i, m in enumerate(models_to_try):
+                attempt_label = "primary" if i == 0 else f"fallback_{i}"
+                provider_response_received = False
+                response_text = ""
+                attempt_start_ms = int(time.time() * 1000)
                 try:
                     print(f"[LLM] {task} using {m} ({_resolve_model_id(m)})")
                     response_text = self._call_by_model(m, prompt, json_mode=json_mode)
+                    provider_response_received = True
+                    if validator is not None:
+                        validator(response_text)
+                    # Success — record a clean attempt and return.
                     self._record_llm_usage(
                         task=task,
                         model_name=m,
                         prompt=prompt,
                         response_text=response_text,
-                        attempt_label="primary" if i == 0 else f"fallback_{i}",
+                        attempt_label=attempt_label,
+                        success=True,
+                        extra={
+                            "provider_response_received": True,
+                            "duration_ms": int(time.time() * 1000) - attempt_start_ms,
+                            "fallback_policy_source": "llm_registry_defaults",
+                        },
                     )
-                    if validator is not None:
-                        validator(response_text)
                     return response_text
                 except (TranslationError, LLMProviderError) as exc:
                     last_error = exc
-                    if i < len(models_to_try) - 1:
-                        next_m = models_to_try[i + 1]
+                    # Plan §B5/§B6: structural class wins over heuristic — if
+                    # the provider already returned text and we failed AFTER
+                    # that, it's a validator failure (provider was paid).
+                    if provider_response_received:
+                        error_class = LLM_ERROR_CLASS_INVALID_OUTPUT
+                        error_code = "validator_failed"
+                    else:
+                        error_class, error_code = classify_llm_error(exc)
+                    next_m = models_to_try[i + 1] if i < len(models_to_try) - 1 else None
+                    self._record_llm_usage(
+                        task=task,
+                        model_name=m,
+                        prompt=prompt,
+                        response_text=response_text,
+                        attempt_label=attempt_label,
+                        success=False,
+                        # Audit-safe error: type + short message only. Full
+                        # exception text may carry provider response or user
+                        # subtitle fragments — those don't belong on disk.
+                        # error_class / error_code in extra carry the
+                        # machine-readable signal callers should use.
+                        error=f"{type(exc).__name__}: {str(exc)[:200]}",
+                        extra={
+                            "provider_response_received": provider_response_received,
+                            "error_class": error_class,
+                            "error_code": error_code,
+                            "duration_ms": int(time.time() * 1000) - attempt_start_ms,
+                            "fallback_from": m if next_m else None,
+                            "fallback_to": next_m,
+                            "fallback_policy_source": "llm_registry_defaults",
+                        },
+                    )
+                    if next_m is not None:
                         print(f"[LLM] {task} {m} failed, falling back to {next_m}: {exc}")
                     continue
             if last_error is not None:
@@ -1226,6 +1320,19 @@ class GeminiTranslator:
                 and alias not in {"gemini_current", "default_llm"}
             )
             for retry_attempt in range(DEFAULT_ALIAS_RETRY_ATTEMPTS_BEFORE_FALLBACK + 1):
+                provider_response_received = False
+                response_text = ""
+                attempt_start_ms = int(time.time() * 1000)
+                # Resolve recording identity once per attempt so failure path
+                # has the same model_name/model_id keys as the success path.
+                record_model_name = override_model_name or alias
+                record_model_id = override_model_name or alias
+                if alias in {"gemini_current", "default_llm"} or provider_name == "gemini":
+                    record_model_name = override_model_name or self.model_name
+                    record_model_id = override_model_name or self.model_name
+                attempt_label = (
+                    alias if retry_attempt == 0 else f"{alias}_retry_{retry_attempt}"
+                )
                 try:
                     if alias in {"gemini_current", "default_llm"} or provider_name == "gemini":
                         if override_model_name is None:
@@ -1244,11 +1351,9 @@ class GeminiTranslator:
                             json_mode=json_mode,
                         )
 
-                    record_model_name = override_model_name or alias
-                    record_model_id = override_model_name or alias
-                    if alias in {"gemini_current", "default_llm"} or provider_name == "gemini":
-                        record_model_name = override_model_name or self.model_name
-                        record_model_id = override_model_name or self.model_name
+                    provider_response_received = True
+                    if validator is not None:
+                        validator(response_text)
                     self._record_llm_usage(
                         task=task,
                         model_name=record_model_name,
@@ -1256,17 +1361,49 @@ class GeminiTranslator:
                         provider=provider_name or "gemini",
                         prompt=prompt,
                         response_text=response_text,
-                        attempt_label=alias,
+                        attempt_label=attempt_label,
+                        success=True,
+                        extra={
+                            "provider_response_received": True,
+                            "duration_ms": int(time.time() * 1000) - attempt_start_ms,
+                            "fallback_policy_source": "legacy_router",
+                        },
                     )
-                    if validator is not None:
-                        validator(response_text)
                     return response_text
                 except (TranslationError, LLMProviderError) as exc:
                     last_error = exc
+                    if provider_response_received:
+                        error_class = LLM_ERROR_CLASS_INVALID_OUTPUT
+                        error_code = "validator_failed"
+                    else:
+                        error_class, error_code = classify_llm_error(exc)
                     should_retry_same_alias = (
                         allow_same_alias_retry
                         and retry_attempt < DEFAULT_ALIAS_RETRY_ATTEMPTS_BEFORE_FALLBACK
                         and _should_retry_same_alias_before_fallback(exc)
+                    )
+                    next_alias = (
+                        route[index + 1] if index < len(route) - 1 else None
+                    )
+                    self._record_llm_usage(
+                        task=task,
+                        model_name=record_model_name,
+                        model_id=record_model_id,
+                        provider=provider_name or "gemini",
+                        prompt=prompt,
+                        response_text=response_text,
+                        attempt_label=attempt_label,
+                        success=False,
+                        error=f"{type(exc).__name__}: {str(exc)[:200]}",
+                        extra={
+                            "provider_response_received": provider_response_received,
+                            "error_class": error_class,
+                            "error_code": error_code,
+                            "duration_ms": int(time.time() * 1000) - attempt_start_ms,
+                            "fallback_from": alias if (next_alias and not should_retry_same_alias) else None,
+                            "fallback_to": next_alias if not should_retry_same_alias else None,
+                            "fallback_policy_source": "legacy_router",
+                        },
                     )
                     if should_retry_same_alias:
                         wait_seconds = 3 * (retry_attempt + 1)
