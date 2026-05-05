@@ -214,6 +214,127 @@ def test_attempt_rewrite_loop_stamps_tts_input_after_each_resynth(monkeypatch, t
     assert seg.first_pass_cn_text == "原版"
 
 
+# ---------------------------------------------------------------------------
+# A4: editor/segments.json round-trip + legacy backfill
+# ---------------------------------------------------------------------------
+
+
+def test_translation_segments_json_dataclass_asdict_includes_tts_input(tmp_path):
+    """The pipeline's translation/segments.json final-rewrite uses
+    dataclasses.asdict — verify the new field shows up in the dump
+    automatically (no manual write-side change needed)."""
+    from dataclasses import asdict
+    seg = _make_segment("你好", tts_input_cn_text="你好")
+    dump = asdict(seg)
+    assert "tts_input_cn_text" in dump
+    assert dump["tts_input_cn_text"] == "你好"
+
+
+def test_publish_resume_loader_round_trips_tts_input_cn_text(tmp_path):
+    """A modern editor/segments.json carrying tts_input_cn_text round-trips
+    cleanly through _load_segments_with_source_ids_for_publish_resume."""
+    import json
+    from pipeline.process import ProcessPipeline
+
+    editor_dir = tmp_path / "editor"
+    editor_dir.mkdir()
+    payload = [{
+        "segment_id": "1",
+        "speaker_id": "A",
+        "display_name": "A",
+        "voice_id": "v",
+        "start_ms": 0,
+        "end_ms": 1000,
+        "target_duration_ms": 1000,
+        "source_text": "hello",
+        "cn_text": "用户改过的新文本",
+        "tts_input_cn_text": "TTS 合成时用的旧文本",  # drift case
+        "actual_duration_ms": 1000,
+    }]
+    (editor_dir / "segments.json").write_text(
+        json.dumps(payload, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    pp = ProcessPipeline.__new__(ProcessPipeline)  # bypass __init__
+    segments, _ = pp._load_segments_with_source_ids_for_publish_resume(
+        editor_segments_path=editor_dir / "segments.json",
+        translation_segments_path=tmp_path / "translation" / "segments.json",
+    )
+    assert len(segments) == 1
+    seg = segments[0]
+    assert seg.cn_text == "用户改过的新文本"
+    assert seg.tts_input_cn_text == "TTS 合成时用的旧文本"  # NOT silently coerced
+
+
+def test_publish_resume_loader_backfills_tts_input_for_legacy_jobs(tmp_path):
+    """A pre-2026-05-04 editor/segments.json without ``tts_input_cn_text``
+    is treated as in-sync: backfill to current cn_text. Without backfill
+    every legacy block would be falsely flagged as drift downstream."""
+    import json
+    from pipeline.process import ProcessPipeline
+
+    editor_dir = tmp_path / "editor"
+    editor_dir.mkdir()
+    payload = [{
+        "segment_id": "1",
+        "speaker_id": "A",
+        "display_name": "A",
+        "voice_id": "v",
+        "start_ms": 0,
+        "end_ms": 1000,
+        "target_duration_ms": 1000,
+        "source_text": "hello",
+        "cn_text": "原始翻译",
+        # tts_input_cn_text omitted (legacy schema)
+        "actual_duration_ms": 1000,
+    }]
+    (editor_dir / "segments.json").write_text(
+        json.dumps(payload, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    pp = ProcessPipeline.__new__(ProcessPipeline)
+    segments, _ = pp._load_segments_with_source_ids_for_publish_resume(
+        editor_segments_path=editor_dir / "segments.json",
+        translation_segments_path=tmp_path / "translation" / "segments.json",
+    )
+    assert len(segments) == 1
+    assert segments[0].cn_text == "原始翻译"
+    # Backfill: empty tts_input_cn_text + non-empty cn_text → use cn_text
+    assert segments[0].tts_input_cn_text == "原始翻译"
+
+
+def test_load_translation_result_backfills_tts_input_for_legacy_translation_json(tmp_path):
+    """Same backfill rule applies when reading translation/segments.json
+    directly (resume from earlier-than-publish stage)."""
+    import json
+    from pipeline.process import ProcessPipeline
+
+    trans_path = tmp_path / "translation_segments.json"
+    payload = {
+        "segments": [{
+            "segment_id": 1,
+            "speaker_id": "A",
+            "display_name": "A",
+            "voice_id": "v",
+            "start_ms": 0,
+            "end_ms": 1000,
+            "target_duration_ms": 1000,
+            "source_text": "hello",
+            "cn_text": "原始翻译",
+            # legacy schema
+        }],
+        "total_segments": 1,
+    }
+    trans_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    pp = ProcessPipeline.__new__(ProcessPipeline)
+    result = pp._load_translation_result(trans_path)
+    assert len(result.segments) == 1
+    assert result.segments[0].tts_input_cn_text == "原始翻译"
+
+
 def test_attempt_rewrite_loop_stamps_tts_input_to_best_candidate_on_max_attempts(
     monkeypatch, tmp_path,
 ):

@@ -3041,7 +3041,9 @@ class ProcessPipeline:
                         f"{source_segment_ids[index - 1]!r}"
                     )
                 kwargs["segment_id"] = parsed_id
-            segments.append(DubbingSegment(**kwargs))
+            seg = DubbingSegment(**kwargs)
+            _backfill_legacy_tts_input_cn_text(seg)
+            segments.append(seg)
         return segments, source_segment_ids
 
     def _load_segments_for_publish_resume(
@@ -4359,6 +4361,7 @@ class ProcessPipeline:
     def _load_translation_result(self, segments_path: Path) -> TranslationResult:
         payload = json.loads(segments_path.read_text(encoding="utf-8"))
         segments: list[DubbingSegment] = []
+        dubbing_fields = {f.name for f in _dc_fields(DubbingSegment)}
         for segment_payload in payload.get("segments", []):
             if not isinstance(segment_payload, dict):
                 continue
@@ -4366,7 +4369,12 @@ class ProcessPipeline:
             normalized_payload["dubbing_mode"] = normalize_dubbing_mode(
                 normalized_payload.get("dubbing_mode")
             )
-            segments.append(DubbingSegment(**normalized_payload))
+            # Defensive: filter to known fields so legacy translation JSONs
+            # carrying obsolete schema keys don't crash construction.
+            filtered = {k: v for k, v in normalized_payload.items() if k in dubbing_fields}
+            seg = DubbingSegment(**filtered)
+            _backfill_legacy_tts_input_cn_text(seg)
+            segments.append(seg)
         return TranslationResult(
             segments=segments,
             total_segments=_coerce_int(payload.get("total_segments"), default=len(segments)),
@@ -8189,6 +8197,24 @@ def _normalize_optional_text(value: object) -> str | None:
         if normalized:
             return normalized
     return None
+
+
+def _backfill_legacy_tts_input_cn_text(segment: DubbingSegment) -> None:
+    """Backfill ``tts_input_cn_text`` for legacy editor/segments.json files.
+
+    2026-05-04 P0a context: pre-rollout JSON has no ``tts_input_cn_text``
+    key, so the dataclass default of ``""`` lands on every segment loaded
+    from disk. Downstream cue generation compares ``cn_text`` to
+    ``tts_input_cn_text`` to detect text↔audio drift; an empty stamp would
+    falsely flag the entire legacy job as drift.
+
+    Conservative default: assume the audio matches the current cn_text
+    (i.e. user hasn't done text-edit-without-regen-tts on this old job).
+    If they had, ``editor/segment_status.json`` would already mark the
+    segment ``text_dirty`` and the editing layer guards drift independently.
+    """
+    if not segment.tts_input_cn_text and segment.cn_text:
+        segment.tts_input_cn_text = segment.cn_text
 
 
 def _deserialize_transcript_line_payload(line_payload: object) -> TranscriptLine:
