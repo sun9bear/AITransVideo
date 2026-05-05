@@ -4,159 +4,114 @@
 
 ## 1. 范围
 
-这张子图聚焦 Gateway 控制平面的 sidecar 轴线，重点是：
+这张子图只看控制平面与运维诊断面，重点是：
 
-- admin pricing
-- admin costs
-- credits observability
-- retention cleanup / purged 语义
-- S2 monitor
-- admin job logs / AI log analysis
-- voice probe / calibration
-- background tasks
-- `job_intercept` 上的下载路由、显示名、TTL、quality tier 与镜像更新职责
+- admin settings 里的 whisper deliverable alignment 开关组
+- traffic analytics
+- credits / costs / cleanup
+- Jianying runner orphan diagnosis
+- `user-edit audit` 写失败时如何告警
 
-其中前五项是 admin-only，后三项属于控制平面的运维化侧轴。
-
-## 2. Admin / Ops / Calibration 主图
+## 2. 主图
 
 ```mermaid
 graph TD
-    AdminPricing["AdminPricingPage"] --> AdminPricingAPI["admin pricing API"]
-    AdminCosts["AdminCostManagementPage"] --> CostAPI["/api/admin/costs/*"]
-    CreditsMonitor["CreditsMonitorPage"] --> CreditsAPI["/api/admin/credits/*"]
-    S2Monitor["S2MonitorPage"] --> S2API["/api/admin/s2-stats*"]
-    JobLogs["Admin job log tools"] --> LogAPI["/api/admin/jobs/{job_id}/logs + analysis"]
-    VoiceLibrary["Voice library / probe / calibrate"] --> VoiceAPI["/gateway/user-voices/*"]
-    ExportTasks["Workspace export tasks"] --> BgTaskAPI["/api/jobs/{job_id}/tasks*"]
-    ProjectsOps["Project retention / purge sidecar"] --> Retention["project_cleanup.py + web_ui.cleanup"]
-    Downloads["Download / rename / TTL / quality sidecar"] --> Intercept["job_intercept.py"]
+    AdminUI["Admin / Ops UI"] --> Gateway["Gateway admin surfaces"]
+    Gateway --> Settings["/api/admin/settings"]
+    Gateway --> Traffic["/api/admin/traffic"]
+    Gateway --> Credits["credits observability / admin costs"]
+    Gateway --> Cleanup["pack cleanup / project purge"]
 
-    AdminPricingAPI --> PricingRuntime["pricing_runtime / plan_catalog"]
-    CostAPI --> CostMgmt["cost_management.py"]
-    CreditsAPI --> CreditsObs["credits_observability.py"]
-    S2API --> S2Backend["s2_monitor_api.py"]
-    LogAPI --> AdminJobMonitor["admin_job_monitor_api.py"]
-    VoiceAPI --> Calibrator["voice_speed_calibrator.py"]
-    BgTaskAPI --> BgQueue["background_task_queue.py"]
-    Retention --> Purged["status='purged' / expires_at / admin-no-TTL"]
-    Intercept --> DisplayName["display_name / filename / copy mirror"]
-    Intercept --> StorageRoute["storage.event_log + backend_router bridge"]
-    Intercept --> QualitySync["quality_tier / tts_model sync"]
-    Intercept --> TTLSync["expires_at / post-edit TTL / merge guards"]
+    Settings --> WhisperPolicy["enabled / trigger / skip_cache / model"]
+    Traffic --> CaddyLogs["public-entry.access logs"]
+    CaddyLogs --> Categories["human / search / AI crawler / scanner"]
 
-    BgQueue --> MaterialsPack["materials_pack executor"]
-    BgQueue --> GenerateVideo["generate_video executor"]
-    GenerateVideo --> RenderAsync["video_render_async.py"]
-    RenderAsync --> Renderer["VideoRenderer"]
+    JobApi["Job API"] --> JobEvents["JobEvent stream"]
+    JobApi --> JRunner["JianyingDraftRunner"]
+    JRunner --> RunnerState["attempt_id / fingerprint / substep"]
+    JRunner --> Rescue["reap_stale / orphan rescue"]
 
-    PricingRuntime --> Truth["PricingPayload / PlanConfig truth"]
-    CostMgmt --> Snapshot["Job.metering_snapshot + price catalog"]
-    CreditsObs --> Ledger["credits buckets / cost metrics / outliers"]
-    S2Backend --> S2Artifacts["S2 artifacts / attempts / summaries"]
-    AdminJobMonitor --> JobAPI["Job API logs + result summary"]
-    Calibrator --> SpeedCatalog["voice_speed_catalog.py"]
+    ReviewEdit["review + post-edit actions"] --> UserEditAudit["user_edit_events.jsonl"]
+    UserEditAudit --> WarnBridge["safe_observe WARN bridge"]
+    WarnBridge --> JobEvents
+
+    RunnerState --> JobEvents
+    Rescue --> JobEvents
+    Categories --> AdminUI
+    Credits --> AdminUI
+    Cleanup --> AdminUI
+    JobEvents --> AdminUI
 ```
 
-## 3. admin pricing 仍是发布面，不是真源
+## 3. 当前最重要的控制平面变化
 
-- `frontend-next/src/app/(app)/admin/pricing/page.tsx` 仍然通过：
-  `getAdminPricing()`
-  `savePricingDraft()`
-  `publishPricing()`
-- pricing 发布后的运行时读取仍回到：
-  `gateway/main.py:lifespan -> get_runtime_pricing() -> PricingPayload`
+### 3.1 admin settings 已经是 whisper deliverable alignment 的运行时控制面
 
-结论：admin pricing 是受权限控制的发布面，不是独立真源。
+- `gateway/admin_settings.py` 现在直接暴露：
+  - `whisper_alignment_enabled`
+  - `whisper_alignment_trigger`
+  - `whisper_alignment_skip_cache`
+  - `whisper_alignment_model`
+- 前端 `admin/settings/page.tsx` 也已经有对应表单与说明文案
 
-## 4. admin costs 继续是正式只读能力
+结论：whisper 何时跑、用什么模型、是否每次强制 fresh，现在都在 admin control plane 上可操作。
 
-- `gateway/main.py` 显式 `include_router(cost_management_router)`
-- `gateway/cost_management.py` 文件头明确声明：
-  pipeline 写 usage facts
-  Gateway 加载这些 facts
-  应用 versioned price catalog
-  返回可重算 estimates
-- `frontend-next/src/app/(app)/admin/costs/page.tsx` 通过 `/api/admin/costs/jobs` 读取：
-  总成本
-  预估收入
-  毛利 / 毛利率
-  per-job LLM/TTS 细项
+### 3.2 traffic analytics 已经是正式 admin surface
 
-结论：admin costs 是基于 metering snapshot 的 read-only control-plane，而不是新的账本真源。
+- `gateway/traffic_analytics.py` 是只读的 Caddy JSON access log parser
+- 它输出的分类包括：
+  - `likely_human_browser`
+  - `search_engine`
+  - `ai_crawler`
+  - `automation_or_probe`
+  - `scanner`
+- `frontend-next/src/app/(app)/admin/traffic/page.tsx` 已经承接这套聚合结果
 
-## 5. retention cleanup 现在有双层但分工明确的实现
+结论：运维面现在能直接看到“真实用户 / 搜索引擎 / AI crawler / 扫描器”分布，而不是只看原始日志。
 
-### 5.1 Gateway 层
+### 3.3 Jianying runner 已经能给 ops 提供更细粒度诊断
 
-- `gateway/project_cleanup.py` 文件头明确说它拥有 authoritative DB transition
-- 规则包括：
-  terminal non-admin jobs 才能 purge
-  admin jobs 永不过期
-  unsafe path 只翻状态不删盘
-  legacy row 可回退 `created_at + 7d`
+- `jianying_draft_runner.py` 现在把 `attempt_id / fingerprint / substep` 持久化到 `JobRecord`
+- stale rescue 结果会被发到 `JobEvent`
 
-### 5.2 Job API 层
+结论：ops 不再只能看到“running / failed”，而是能看到卡在哪个子步骤、是否命中 cache、是否被 stale rescue。
 
-- `src/services/web_ui/cleanup.py` 继续负责 JSON store / project dir 清理
-- 它现在同样显式保护：
-  `queued`
-  `running`
-  `waiting_for_review`
-  `editing`
-- 并共享 path whitelist guard
+### 3.4 cleanup 现在分成两条独立循环
 
-结论：现在是“Gateway 负责 DB lifecycle，Job API 负责 legacy disk cleanup”的双层保留期结构。
+- `gateway/main.py` 会恢复 stale background tasks
+- 同文件还会周期性：
+  - 清理过期 `materials_pack` zips
+  - 清理过期 project records / `purged` 状态
 
-## 6. credits observability
+结论：交付物 retention 和项目生命周期清理现在是正式的 Gateway 运维职责。
 
-- `frontend-next/src/app/(app)/admin/credits-monitor/page.tsx` 继续通过 admin 接口读取：
-  `summary`
-  `cost-metrics`
-  `provider-breakdown`
-  `outliers`
-- `gateway/credits_observability.py` 仍然是 admin-only read surface
+### 3.5 `user-edit audit` 仍然是 best-effort sidecar，但故障会桥接成 JobEvent 告警
 
-结论：credits monitor 是观测与核对，不是执行面。
+- `user_edit_audit.py` 的 `safe_observe(...)` 会捕获 observer 失败
+- 然后发一条 deduplicated `JobEvent(level=WARN)`，payload 带 `audit_write_failed`
 
-## 7. S2 monitor 与 admin logs
+结论：行为审计不会炸主路径，但坏了以后 ops 仍然能从 JobEvent 看出链路不完整。
 
-### 7.1 S2 monitor
+## 4. 关键证据
 
-- `frontend-next/src/app/(app)/admin/s2-monitor/page.tsx` 调用：
-  `fetchS2Stats(...)`
-  `fetchJobDetail(jobId)`
-- `gateway/s2_monitor_api.py` 聚合读取：
-  `s2_review_result.json`
-  `s2_pass1_result.json`
-  `s2_pass2_result.json`
-  `s2_pass3_result.json`
+- `gateway/admin_settings.py`
+  - whisper policy fields
+- `frontend-next/src/app/(app)/admin/settings/page.tsx`
+  - whisper settings UI
+- `gateway/traffic_analytics.py`
+  - Caddy log parser + traffic category model
+- `frontend-next/src/app/(app)/admin/traffic/page.tsx`
+  - admin traffic dashboard
+- `src/services/jobs/jianying_draft_runner.py`
+  - substep / attempt_id / fingerprint / rescue
+- `gateway/main.py`
+  - cleanup loops
+- `src/services/jobs/user_edit_audit.py`
+  - WARN bridge
 
-### 7.2 admin job logs / AI analysis
+## 5. 什么情况下优先读这张图
 
-- `gateway/admin_job_monitor_api.py` 提供：
-  `GET /api/admin/jobs/{job_id}/logs`
-  以及 AI 日志裁剪与分析输入构造
-
-结论：两者都是围绕运行产物做诊断的 sidecar。
-
-## 8. job_intercept 现在也承接 TTL 与 merge guards
-
-`gateway/job_intercept.py` 当前不只负责常规代理，还承担：
-
-- 创建普通 job 时写入 `expires_at = now + 7d`
-- admin job 不写 TTL
-- merge `/job-api/jobs` 响应时，阻止 stale upstream JSON 复活 `purged` 行
-- `copy_as_new` 时按同一 TTL 规则推导新副本 `expires_at`
-- post-edit 入口按 `_post_edit_job_expires_at(job)` 阻止已过期任务继续编辑
-- 下载、display_name、quality tier 同步等既有控制面职责
-
-这说明 `job_intercept` 已经是 control-plane 的关键编排点，而不只是 proxy wrapper。
-
-## 9. 这张图适合回答什么问题
-
-- 哪些面是 admin-only，哪些只是控制平面的 sidecar
-- admin pricing、admin costs、credits monitor、retention cleanup 分别站在什么层级
-- 为什么 project cleanup 要拆成 Gateway DB cleanup + Job API disk cleanup 两层
-- background tasks、download routing、TTL、quality sync、display_name 为什么不属于主 pipeline
-- admin job 为什么“永不过期”
+- 想改 whisper admin settings
+- 想理解 `skip_cache` 在 ops 侧到底意味着什么
+- 想排查 crawler / scanner / human traffic 分布
+- 想判断 runner orphan、audit 失败、cleanup 这几条告警线的边界

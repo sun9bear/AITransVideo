@@ -1,39 +1,41 @@
 # GitNexus 项目图谱
 
 新会话建议先读本文件，再按任务进入对应子图。
-
-生成时间：2026-05-03
+生成时间：2026-05-06
 生成方式：基于当前仓库 `.gitnexus/` 最新索引与源码核对整理
 
 ## 1. 图谱概览
 
 | 指标 | 数值 |
 | --- | ---: |
-| 文件数 | 1006 |
-| 节点数 | 17,730 |
-| 关系数 | 43,324 |
-| 聚类数 | 741 |
+| 文件数 | 1057 |
+| 节点数 | 18,993 |
+| 关系数 | 46,249 |
+| 聚类数 | 822 |
 | 流程数 | 300 |
-| 索引提交 | `83f4ddd` |
+| 索引提交 | `482b315` |
 | 索引状态 | `up-to-date` |
 
-这轮最需要反映的结构变化有四条：
+这轮最需要反映的结构变化有六条：
 
-- `Subtitle Cue V2` 已经成为 `OutputDispatcher -> EditorPackageWriter -> SRT` 的 canonical path，而不是附带实验层。
-- Studio 任务现在有一条单独的 `on-demand Jianying draft delivery` 平面，带状态机、异步 runner、Gateway ownership proxy、前端轮询与本地路径输入。
-- 结果交付面已经稳定分成三类：`publish.dubbed_video`、`materials_pack`、`editor.jianying_draft_zip`。
-- marketing 前门已经不再模糊描述“可继续剪辑”，而是明确把“导出剪映草稿”写进 narrative 和 workflow showcase。
+- `deliverable-time whisper alignment` 已经成为正式交付侧路：Jianying 草稿和 `materials_pack` 在消费字幕前都会走 `ensure_whisper_aligned_subtitles`
+- `cue_pipeline` 现在有完整的 `env capability + admin policy + trigger context` 语义，`publish / deliverable / manual` 三种触发策略已经落成
+- `tts_input_cn_text` 已从“附带字段”升级为 drift 见证；`_block_is_in_sync()` 和 post-edit commit stamp 都依赖它
+- `JianyingDraftRunner` 的 fingerprint 现在显式纳入 whisper policy snapshot；`skip_cache=true` 还会绕过外层 `succeeded` cache-hit
+- Gateway admin 面已经长出 `whisper` 设置组与 `traffic analytics`，控制面不再只有 pricing / credits / cleanup
+- overwrite commit 会同时失效两类交付副产物：Job API 层的 Jianying draft，以及 Gateway DB 里的 `materials_pack`
 
-## 2. 关键域
+## 2. 关键基座
 
-| 域 | 当前主轴 | 代表文件 |
+| 基座 | 当前主轴 | 代表文件 |
 | --- | --- | --- |
-| Workflow | 语义块到对齐后的 canonical project | `src/pipeline/process.py`、`src/modules/output/output_dispatcher.py` |
-| Subtitles | cue v2 分段、定时、校验、SRT 序列化 | `src/modules/subtitles/cue_pipeline.py`、`src/modules/subtitles/srt_writer.py` |
-| Jianying | 剪映草稿 writer / validator / backend | `src/modules/output/jianying/jianying_draft_writer.py`、`src/modules/output/jianying/jianying_draft_backend.py` |
-| Jobs API | 按需剪映草稿状态机、下载面、后台线程 runner | `src/services/jobs/api.py`、`src/services/jobs/jianying_draft_runner.py`、`src/services/jobs/models.py` |
-| Gateway | ownership、套餐 gate、credits、job subresource proxy | `gateway/job_intercept.py`、`gateway/plan_catalog.py` |
-| Frontend | workspace 结果页、Jianying path dialog、marketing proof | `frontend-next/src/components/workspace/ResultMediaCard.tsx`、`frontend-next/src/components/workspace/JianyingDraftPathDialog.tsx`、`frontend-next/src/app/(marketing)/page.tsx` |
+| Workflow | `SemanticBlock -> TTS -> DSP-first alignment -> cue_pipeline -> editor outputs` | `src/pipeline/process.py`、`src/modules/output/output_dispatcher.py` |
+| Subtitles | `SRT window` timing、drift gate、deliverable-time whisper sidecar | `src/modules/subtitles/cue_pipeline.py`、`src/services/subtitles/ensure_whisper_alignment.py` |
+| Jianying | on-demand draft runner、policy-aware fingerprint、substeps、orphan rescue | `src/services/jobs/jianying_draft_runner.py`、`src/modules/output/jianying/jianying_draft_writer.py` |
+| Editing | `overwrite / copy_as_new`、`tts_input_cn_text` stamp、deliverable invalidation | `src/services/jobs/editing_commit.py`、`src/services/jobs/copy_service.py` |
+| Delivery | `materials_pack`、`generate_video`、download keys、R2 / local fallback | `gateway/background_task_executors.py`、`src/services/jobs/api.py`、`src/services/web_ui/output_entries.py` |
+| Gateway | ownership、auth/captcha、plan truth、admin settings、traffic analytics | `gateway/job_intercept.py`、`gateway/main.py`、`gateway/admin_settings.py`、`gateway/traffic_analytics.py` |
+| Metering & Audit | `UsageMeter`、`JobEvent`、`user_edit_events.jsonl` 三条 sidecar | `src/services/usage_meter.py`、`src/services/jobs/user_edit_audit.py` |
 
 ## 3. 子图入口
 
@@ -51,90 +53,108 @@
 
 ```mermaid
 graph TD
-    Marketing["Marketing / Proof / Pricing / Legal"] --> PlansSSR["SSR plans + trial facts"]
+    Marketing["Marketing / Pricing / FAQ / SEO"] --> PlansSSR["SSR plans + trial facts"]
+    Marketing --> AuthFront["Auth / captcha front door"]
+    Marketing --> Trust["FAQ JSON-LD / robots / sitemap"]
+
     Workspace["Workspace / Projects / Result UI"] --> FrontApi["Frontend API / hooks"]
     ReviewUI["Review panels"] --> FrontApi
     EditUI["Post-edit UI"] --> FrontApi
+    AdminUI["Admin / Ops UI"] --> FrontApi
 
-    PlansSSR --> Gateway
-    FrontApi --> Gateway["Gateway truth + control"]
+    PlansSSR --> Gateway["Gateway truth + control"]
+    AuthFront --> Gateway
+    FrontApi --> Gateway
     FrontApi --> JobApi["Job API / artifacts / tasks"]
 
     Gateway --> Billing["Plan / trial / pricing / credits / payment"]
-    Gateway --> Proxy["Ownership + subresource proxy"]
+    Gateway --> Ops["admin settings / traffic / cleanup / observability"]
+    Gateway --> Proxy["ownership + subresource proxy"]
 
     JobApi --> Workflow["ProjectWorkflow / process.py"]
     Workflow --> Compliance["Content compliance"]
-    Compliance --> ReviewPrep["Transcript / translation prep"]
-    ReviewPrep --> TTSAlign["SemanticBlock / TTS / DSP-first alignment"]
-    TTSAlign --> CueV2["Subtitle cue v2"]
+    Compliance --> Prep["Transcript / translation prep"]
+    Prep --> TTSAlign["SemanticBlock / TTS / DSP-first alignment"]
+    TTSAlign --> CueV2["cue_pipeline / subtitle cue v2"]
     CueV2 --> Editor["Editor package / manifest"]
 
+    CueV2 --> WhisperEnsure["ensure_whisper_aligned_subtitles"]
+    WhisperEnsure --> JDraftTask["generate-jianying-draft"]
+    WhisperEnsure --> PackTask["materials_pack"]
+
     Editor --> Publish["publish.dubbed_video"]
-    Editor --> JDraft["Jianying draft backend artifacts"]
-    Editor --> Storage["Result download / R2 / local fallback"]
+    Editor --> Delivery["downloads / R2 / local fallback"]
 
     Workspace --> ResultCard["ResultMediaCard"]
-    ResultCard --> Materials["materials_pack"]
+    ResultCard --> PackTask
     ResultCard --> VideoTask["generate_video"]
-    ResultCard --> JDraftTask["generate-jianying-draft"]
+    ResultCard --> JDraftTask
 
     JDraftTask --> Proxy
+    PackTask --> Gateway
+    VideoTask --> Gateway
     Proxy --> JobApi
-    JobApi --> JRunner["JianyingDraftRunner"]
-    JRunner --> JDraft
-    JDraft --> Storage
 
-    ReviewUI --> Workflow
-    EditUI --> Workflow
-    Billing --> Workspace
+    JobApi --> JRunner["JianyingDraftRunner"]
+    JRunner --> Delivery
+
+    EditUI --> EditCommit["editing_commit / overwrite / copy_as_new"]
+    EditCommit --> Workflow
+    EditCommit --> DeliveryReset["invalidate jianying draft + materials_pack"]
+
+    ReviewUI --> UserEditAudit["user_edit_events.jsonl"]
+    EditUI --> UserEditAudit
+    Workflow --> UsageMeter["UsageMeter / attempt-level LLM+TTS"]
+
+    UserEditAudit --> Ops
+    UsageMeter --> Ops
+    Trust --> Marketing
 ```
 
 ## 5. 核心证据链
 
-### 5.1 Subtitle Cue V2 已经是输出主路径
+### 5.1 deliverable-time whisper alignment 已经是正式侧路
 
-- `src/modules/output/output_dispatcher.py` 在 `editor_backend.write()` 之前调用 `_generate_subtitle_cues(...)`。
-- 该调用惰性导入 `modules.subtitles.cue_pipeline.build_subtitle_cues_for_blocks(...)`，输入是 `localized_project.semantic_blocks + captions`。
-- `src/modules/subtitles/cue_pipeline.py` 明确把自己定义为 `SemanticBlock list -> SubtitleCue list + ValidationReport` 的桥接层。
-- `src/modules/subtitles/srt_writer.py` 明确声明“只序列化 canonical cues，不重分段，不重新定时”。
+- `src/services/subtitles/ensure_whisper_alignment.py` 模块头直接写明：它被 Jianying draft generation 和 `materials_pack` packaging 调用
+- `src/services/jobs/jianying_draft_runner.py` 新增 `aligning_subtitles` 子步骤，并在后台线程里调用同一个 helper
+- `gateway/background_task_executors.py` 在 `materials_pack` 选中 `subtitles` 时，会先走内部接口 `ensure-whisper-aligned-subtitles`
 
-结论：字幕层现在不是“从 editor 产物再反推 SRT”，而是从 `SemanticBlock` 直接生成 canonical cues，再喂给 editor / SRT writer。
+结论：whisper 对齐现在不是 publish 阶段的默认主路，而是“交付前确保字幕精对齐”的正式 sidecar。
 
-### 5.2 剪映草稿已经长成独立交付平面
+### 5.2 `tts_input_cn_text` 已经变成 drift 见证
 
-- `src/services/jobs/models.py` 给 `JobRecord` 加了 `jianying_draft_status / started_at / completed_at / zip_path / user_root` 字段。
-- `src/services/jobs/jianying_draft_runner.py` 定义了 `idle / running / succeeded / failed` 状态机，并在 Job API 启动时执行 `reap_stale()`。
-- `src/services/jobs/api.py` 暴露：
-  - `POST /jobs/{id}/generate-jianying-draft`
-  - `GET /jobs/{id}/jianying-draft-status`
-  - `user_draft_root` 作为 body 入口
-- `gateway/job_intercept.py` 对这两个 subresource 做 ownership 校验后再注入 internal headers 转发。
+- `src/modules/subtitles/cue_pipeline.py::_block_is_in_sync()` 对比的是 `tts_input_cn_text` 与当前 `merged_cn_text`
+- `src/services/jobs/editing_commit.py` 在 draft wav promoted 时，会把对应 segment 的 `tts_input_cn_text` 重打成当前 `cn_text`
 
-结论：剪映草稿不是 `OutputDispatcher` 的默认同步副产品，而是 Studio 成功任务上的独立异步交付链。
+结论：系统现在能显式区分“文本改了但音频没重做”和“文本与音频同步”这两种状态。
 
-### 5.3 交付面已经从“两类结果”变成“三类结果”
+### 5.3 Jianying runner 的 cache 语义已经受 whisper policy 约束
 
-- `src/modules/output/manifest_writer.py` 把 `editor.jianying_draft_zip / editor.jianying_draft_dir / editor.jianying_compatibility_report` 写进 `primary_outputs.editor`。
-- `src/services/web_ui/output_entries.py` 把 `editor.jianying_draft_zip` 纳入公开下载白名单。
-- `frontend-next/src/components/workspace/ResultMediaCard.tsx` 现在同时承接：
-  - `materials_pack`
-  - `generate_video`
-  - `JianyingDraftSection`
+- `src/services/jobs/jianying_draft_runner.py::_whisper_policy_snapshot()` 把 `env_capability_enabled / admin_enabled / trigger / skip_cache / model` 纳入 fingerprint 输入
+- 同文件 `_whisper_force_fresh_active()` 还会在 `skip_cache=true` 时绕过外层 `succeeded` cache-hit
 
-结论：结果页已经不只是在“视频 / 音频 / 素材包”之间切换，而是正式承载“导出到剪映草稿”的第三种交付模式。
+结论：admin 改 whisper 策略后，旧 draft zip 不会再被“错误复用”。
 
-### 5.4 marketing 前门已经把剪映草稿写成承诺
+### 5.4 Gateway 控制面新增了两条独立轴线
 
-- `frontend-next/src/app/(marketing)/page.tsx` 继续以 `PainPoints -> FeaturedDemos -> ProductProof -> WorkflowShowcase -> PricingPreview` 组织 narrative。
-- `frontend-next/src/components/marketing/workflow-showcase.tsx` 第 4 步明确写了“下载结果，或直接导出剪映草稿”。
-- `frontend-next/src/components/marketing/product-proof.tsx` 结果面说明已经把“可下载的交付物”写成产品证明的一部分。
+- `gateway/admin_settings.py` 现在直接承载 whisper deliverable alignment 的 admin settings
+- `gateway/traffic_analytics.py` 是只读的 Caddy access log parser，输出 crawler / scanner / human traffic 分类
+- `gateway/main.py` 把 `captcha_router`、`traffic_analytics_router`、cleanup loops 一起挂到了 Gateway 生命周期里
 
-结论：marketing 不再只是证明“能翻译并配音”，而是开始证明“可交付到你本地剪映继续剪”。
+结论：Gateway 已经同时承担商业真源、auth 前门、交付控制、以及流量 / 运维诊断控制面。
+
+### 5.5 overwrite commit 会同时失效两类交付副产物
+
+- `src/services/jobs/editing_commit.py::_invalidate_jianying_draft_on_commit(...)` 会重置 `jianying_draft_*` 并删除 `{project_dir}/jianying/`
+- `gateway/job_intercept.py` 在 `editing/commit overwrite` 成功后会调用 `invalidate_materials_pack_for_job(...)`
+
+结论：post-edit 后交付副产物都被显式视为 stale，不再靠“用户自己记得重做”。
 
 ## 6. 按任务选图
 
-- 要看 `SemanticBlock -> cue v2 -> editor outputs`，读 `GITNEXUS_WORKFLOW_CORE_GRAPH.md`
-- 要看 `generate-jianying-draft`、`user_draft_root`、zip / report、前端轮询，读 `GITNEXUS_JIANYING_DRAFT_DELIVERY_GRAPH.md`
-- 要看下载白名单、`editor.jianying_draft_zip`、R2 / local fallback，读 `GITNEXUS_STORAGE_DELIVERY_R2_GRAPH.md`
-- 要看首页如何消费“导出剪映草稿”的产品承诺，读 `GITNEXUS_COMMERCIALIZATION_GRAPH.md`
+- 要看 whisper 对齐到底在哪一层发生、主路是否改变，读 `GITNEXUS_WORKFLOW_CORE_GRAPH.md`
+- 要看 `skip_cache`、fingerprint、orphan rescue、`user_draft_root`，读 `GITNEXUS_JIANYING_DRAFT_DELIVERY_GRAPH.md`
+- 要看 `materials_pack` 预对齐、下载白名单、cleanup，读 `GITNEXUS_STORAGE_DELIVERY_R2_GRAPH.md`
+- 要看 `tts_input_cn_text` commit stamp、overwrite / copy_as_new、副产物失效，读 `GITNEXUS_EDITING_POST_EDIT_GRAPH.md`
+- 要看 auth/captcha 前门、FAQ/SEO、套餐真源，读 `GITNEXUS_COMMERCIALIZATION_GRAPH.md`
+- 要看 admin whisper settings、traffic analytics、orphan diagnosis、cleanup，读 `GITNEXUS_ADMIN_OPS_CALIBRATION_GRAPH.md`

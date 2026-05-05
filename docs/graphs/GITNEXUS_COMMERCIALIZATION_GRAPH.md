@@ -4,87 +4,97 @@
 
 ## 1. 范围
 
-这张子图看的是“用户为什么买、前端如何承诺、哪些事实必须继续由 Gateway 持有”，重点是：
+这张子图看的是“用户为什么买、前门怎么承诺、公开入口怎样被搜索引擎和 AI crawler 理解”，重点是：
 
-- marketing 前门 narrative / proof
+- marketing narrative / proof
 - pricing / trial SSR 真源
-- workspace credit read-side guard
-- Studio 与剪映草稿承诺的边界
+- FAQ JSON-LD / robots / sitemap / auth noindex
+- 剪映草稿承诺与 auth/captcha 前门
 
 ## 2. 主图
 
 ```mermaid
 graph TD
     Home["marketing page.tsx"] --> Pain["PainPoints"]
-    Pain --> Demos["FeaturedDemos"]
-    Demos --> Proof["ProductProof"]
-    Proof --> Workflow["WorkflowShowcase"]
-    Workflow --> Pricing["PricingPreview"]
+    Pain --> Features["Features / Product proof"]
+    Features --> Workflow["WorkflowShowcase"]
+    Workflow --> Pricing["PricingPreview / pricing page"]
+    Pricing --> FAQ["Faq"]
+
+    FAQ --> FaqLd["FaqJsonLd / FAQPage"]
+    Home --> SiteLd["SiteJsonLd"]
+    Pricing --> Breadcrumb["BreadcrumbJsonLd"]
+    Robots["robots.ts"] --> Crawlers["search + AI crawlers"]
+    Sitemap["sitemap.ts"] --> Crawlers
+    AuthNoindex["(auth)/layout.tsx noindex"] --> Crawlers
 
     Pricing --> PlansSSR["SSR plans fetch"]
     PlansSSR --> GatewayPlans["Gateway plan_catalog / pricing_runtime"]
 
-    Workspace["TranslationForm / workspace"] --> CreditsRead["/api/me/credits + /api/credits/estimate"]
-    Workspace --> PlansGate["entitlements / plan gate"]
-    CreditsRead --> GatewayPlans
-    PlansGate --> GatewayPlans
-
-    ResultProof["ResultMediaCard / JianyingDraftSection"] --> Workflow
+    AuthPages["login / register / forgot-password"] --> Captcha["CaptchaGate / phone verification"]
+    Captcha --> GatewayAuth["Gateway auth + captcha routes"]
 ```
 
 ## 3. 这轮最重要的商业化变化
 
-### 3.1 marketing 前门已经把“导出剪映草稿”写成明确承诺
+### 3.1 marketing 前门继续明确承诺“导出剪映草稿”
 
-- `frontend-next/src/components/marketing/workflow-showcase.tsx`
-  - 第 4 步明确写了“下载结果，或直接导出剪映草稿”
-- `frontend-next/src/components/marketing/product-proof.tsx`
-  - 结果页截图与说明继续承担“这是可交付工作台，而不是一次性玩具”的证明
-- `frontend-next/src/app/(marketing)/page.tsx`
-  - narrative 继续是 `PainPoints -> FeaturedDemos -> ProductProof -> WorkflowShowcase -> PricingPreview`
+- `workflow-showcase.tsx` 的第 4 步仍然明确写着：
+  - 下载配音视频 / 音频 / 字幕 / 素材包
+  - 或直接导出剪映草稿继续精剪
+- `features.tsx`、`faq.tsx`、`tool-comparison.tsx` 也都继续把“剪映草稿工程”放在公开承诺里
 
-结论：前门承诺已经从“生成中文配音结果”升级成“可以继续导出到本地剪映工作流”。
+结论：剪映草稿已经是营销前门的明确产品承诺，不是后台隐藏能力。
 
-### 3.2 套餐 / 试用 / service-mode gate 仍由 Gateway 掌握
+### 3.2 FAQ 仍然是可见内容 + 可引用结构化内容两层
 
-- `gateway/plan_catalog.py` 仍是 plan / trial / pricing 的中心真源
-- `job_intercept.py` 继续根据 plan gate 计算 `service_mode`、provider、质量层等策略
-- 剪映草稿只对 `studio` 任务开放，这个 gate 也落在后端
+- `faq.tsx` 继续内联 `FaqJsonLd`
+- FAQ 文案里已经把可下载交付物写全：视频、音频、字幕、翻译文本、素材包、剪映草稿工程
 
-结论：前端可以承诺“Studio 可导出剪映草稿”，但不能自己发明谁有资格看到这个能力。
+结论：FAQ 既给用户看，也给搜索引擎和 AI crawler 提供结构化 Q&A 语义。
 
-### 3.3 workspace 读侧 guard 已稳定成商业化前置面
+### 3.3 套餐 / 试用 / 定价真源仍然由 Gateway 掌握
 
-- `TranslationForm` 继续消费：
-  - `/api/me/credits`
-  - `/api/credits/estimate`
-- 这条链负责余额展示、分钟预估、并发与套餐限制的前置提醒
+- `pricing` 页面继续走 SSR plans fetch
+- 真正的 plan / trial / pricing facts 仍然在 `Gateway plan_catalog / pricing_runtime`
 
-结论：商业化链路现在分成两段：
-- 读侧 guard 在前端提前解释门槛
-- 真正的 plan / credit / service-mode 决策仍在 Gateway
+结论：这一轮虽然前门和 auth 有变化，但 plan truth 边界没有漂移到前端。
 
-### 3.4 “剪映草稿”是产品承诺，不是另一套计费真源
+### 3.4 auth 前门已经明确接入 captcha 语义
 
-- `JianyingDraftSection` 在结果页上是 Studio-only 能力
-- 但价格、试用、套餐事实仍从 Gateway 的 plan / runtime 层来
-- 没有前端自带第二套餐餐逻辑去决定谁能导出草稿
+- `(auth)/auth/login/page.tsx` 继续提供手机号验证码登录
+- `(auth)/auth/register/page.tsx`、`forgot-password/page.tsx` 都已经接入 `CaptchaGate`
+- `gateway/main.py` 继续挂载 `captcha_router`
 
-结论：导出剪映草稿是前门 proof 和 Studio 价值主张的一部分，但不是独立的商业真源。
+结论：公开前门现在不仅有营销承诺，也有更完整的 captcha-backed auth 入口控制。
+
+### 3.5 `auth` 仍然被明确排除在公开 SEO 面之外
+
+- `(auth)/layout.tsx` 继续统一下发 `robots: { index: false, follow: false }`
+- `robots.ts` 与 `sitemap.ts` 只让公开 marketing surface 被抓取
+
+结论：公开营销面与受限 auth 面的边界仍然清晰。
 
 ## 4. 关键证据
 
-- `frontend-next/src/app/(marketing)/page.tsx`
-  - narrative 顺序以 proof 和 workflow 为主
 - `frontend-next/src/components/marketing/workflow-showcase.tsx`
-  - 第 4 步明确写“导出剪映草稿”
-- `frontend-next/src/components/marketing/product-proof.tsx`
-  - 结果页与可下载交付物是 proof 核心
-- `gateway/plan_catalog.py`
-  - plan / price / trial 仍由 Gateway 持有
+  - 第 4 步继续承诺导出剪映草稿
+- `frontend-next/src/components/marketing/faq.tsx`
+  - FAQ 文案 + `FaqJsonLd`
+- `frontend-next/src/app/(marketing)/pricing/page.tsx`
+  - SSR plans fetch
+- `frontend-next/src/app/(auth)/layout.tsx`
+  - `noindex`
+- `frontend-next/src/app/(auth)/auth/login/page.tsx`
+- `frontend-next/src/app/(auth)/auth/register/page.tsx`
+- `frontend-next/src/app/(auth)/auth/forgot-password/page.tsx`
+  - captcha / phone verification flows
+- `gateway/main.py`
+  - `captcha_router`
 
-## 5. 什么时候优先读这张图
+## 5. 什么情况下优先读这张图
 
-- 想改首页文案、CTA、proof 顺序
-- 想判断“导出剪映草稿”应该写在什么位置、由谁兜底
-- 想改套餐事实、试用规则、workspace credits 读侧 guard
+- 想改首页 / 定价页 narrative
+- 想同步“剪映草稿承诺”在 marketing、FAQ、对比表里的表述
+- 想改 auth/captcha 前门，但不想碰 plan truth 边界
+- 想确认 robots / sitemap / auth noindex 的边界

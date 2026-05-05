@@ -4,11 +4,12 @@
 
 ## 1. 范围
 
-这张子图只看“主流水线如何形成 canonical output”，重点是：
+这张子图只看“主流水线如何形成 canonical outputs，以及交付前字幕如何被二次校正”，重点是：
 
 - `SemanticBlock` 仍然是 TTS / 对齐 / 字幕的基本处理单元
-- `Subtitle Cue V2` 已经并入输出主路径
-- `Jianying draft` 不是替代主流水线，而是基于成功 Studio 任务的派生交付链
+- 主对齐路径仍然是 `DSP-first alignment`，不是把 timing 主导权交给 LLM
+- `cue_pipeline` 现在同时承担 `SRT-window-first timing`、drift gate、以及 whisper trigger/context gate
+- Jianying 草稿与 `materials_pack` 共享同一个 deliverable-time whisper ensure helper
 
 ## 2. 主图
 
@@ -23,76 +24,80 @@ graph TD
     Blocks --> TTS["TTS"]
     TTS --> Alignment["DSP-first alignment<br/>rewrite fallback"]
 
-    Alignment --> CueV2["cue_pipeline.py<br/>canonical SubtitleCue list"]
-    CueV2 --> Validator["cue_validator.py"]
-    Validator --> SRT["srt_writer.py<br/>serialize only"]
+    Alignment --> CueGate["cue_pipeline.py<br/>window-first timing + drift gate"]
+    CueGate --> Validator["cue_validator.py"]
+    Validator --> SRT["srt_writer.py"]
+    SRT --> Editor["EditorPackageWriter / manifest"]
 
-    SRT --> Editor["EditorPackageWriter"]
-    Editor --> Manifest["ManifestWriter"]
-    Manifest --> Result["Workspace / result surface"]
-
-    Result --> PublishTask["publish.dubbed_video / generate_video"]
-    Result --> PackTask["materials_pack"]
-    Result --> JDraftTask["generate-jianying-draft"]
-
-    JDraftTask --> JRunner["JianyingDraftRunner"]
-    JRunner --> JBackend["JianyingDraftBackend"]
-    JBackend --> JWriter["JianyingDraftWriter"]
-    JWriter --> JZip["draft zip + compatibility report"]
+    CueGate --> WhisperGate["env + admin + trigger context"]
+    WhisperGate --> DeliverableEnsure["ensure_whisper_aligned_subtitles"]
+    DeliverableEnsure --> JDraft["Jianying deliverable"]
+    DeliverableEnsure --> Pack["materials_pack subtitles"]
 ```
 
-## 3. 现在的核心认知
+## 3. 当前核心认知
 
-### 3.1 cue v2 已经插到 editor write 之前
+### 3.1 `SemanticBlock` 仍然是主处理单元
 
-- `src/modules/output/output_dispatcher.py` 先构建 `ProjectOutput`
-- 然后在 `editor_backend.write()` 前调用 `_generate_subtitle_cues(...)`
-- `project_output.subtitle_cues = cue_result.cues`
-- 之后才落盘 editor package
+- `process.py` 与 `output_dispatcher.py` 仍然围绕 `aligned_blocks`、`captions`、`artifact_index` 组织输出
+- deliverable-time whisper helper 也是从 `editor/segments.json` 重建 `SemanticBlock` 与 `SubtitleLine` 再走 cue pipeline
 
-这意味着 editor / SRT 现在消费的是 canonical cues，而不是自己再做一次分段。
+结论：whisper 侧路没有把系统打回“按 subtitle line 做 TTS / 对齐”的旧模型。
 
-### 3.2 cue pipeline 仍然站在 deterministic 路径上
+### 3.2 `tts_input_cn_text` 现在决定 block 是否允许走 whisper cues
 
-- `src/modules/subtitles/cue_pipeline.py` 从 `SemanticBlock + SubtitleLine` 出发，做的是 deterministic 的：
-  - 文本拼接
-  - 有效时长解析
-  - cue 构建
-  - validator 校验
-- `src/modules/subtitles/srt_writer.py` 明确禁止 re-segmentation / re-timing，只做序列化
+- `cue_pipeline.py::_block_is_in_sync()` 比较的是 `tts_input_cn_text` 与当前 `merged_cn_text`
+- 空 `tts_input_cn_text` 被视为 in-sync；文本改了但音频没重做的 block 会被挡在 whisper path 之外
 
-结论：字幕 retiming 仍然是数学 / 规则驱动，不是把 timing 再交给 LLM。
+结论：系统现在显式区分“字幕文本修改”与“音频已经跟上”的状态，避免拿旧音频做新文本的精对齐。
 
-### 3.3 剪映草稿位于“成功 Studio 任务之后”的派生层
+### 3.3 whisper gate 是完整的三层语义，不是单开关
 
-- `OutputDispatcher` 主路径先产出 editor package / manifest / publish artifacts
-- `src/services/jobs/jianying_draft_runner.py` 再基于成功的 Studio job 触发按需生成
-- `src/modules/output/jianying/jianying_draft_backend.py` 包装 writer + compatibility report
+- `AVT_WHISPER_ALIGN_ENABLED=1` 是 ops capability switch
+- `admin_settings.json` 里的 `whisper_alignment_enabled / trigger / model / skip_cache` 是 admin policy
+- `cue_pipeline.py` 里的 context 语义是 `publish / deliverable / manual`
 
-结论：剪映草稿交付已经很重要，但它并没有把主流水线改成“直接生成剪映草稿、跳过 editor canonical outputs”。
+当前 trigger 语义：
+- `publish`：允许 publish、deliverable、manual 三个 context
+- `deliverable`：只允许 deliverable、manual；publish 阶段跳过
+- `manual`：不允许自动触发，只保留管理员专用入口
 
-### 3.4 交付链现在是“三出口”
+结论：whisper 已经不是“开 / 关”这么简单，而是按交付时机精细控制。
 
-- `publish.dubbed_video`
-- `materials_pack`
-- `editor.jianying_draft_zip`
+### 3.4 deliverable-time ensure helper 改写的是字幕交付物，不是主对齐策略
 
-前两者是原来的视频/素材交付面；第三者是 Studio 结果页新增的派生交付面。
+- `ensure_whisper_alignment.py` 只负责重写 `output/subtitle_cues.json` 与 SRT 文件
+- 它会根据当前 WAV 实际字节计算 fingerprint，并把 `alignment_model` stamp 进 payload
+- 它不会重跑主 TTS，也不会替换 DSP-first alignment 作为主路
+
+结论：主工作流的架构不变，新增的是“交付前字幕精校”的正式 sidecar。
+
+### 3.5 Jianying 与 `materials_pack` 已经共享这条 sidecar
+
+- `JianyingDraftRunner` 在 `aligning_subtitles` 子步骤里调用 ensure helper
+- `gateway/background_task_executors.py` 会在 `materials_pack` 选择了 `subtitles` 时，先通过内部 HTTP 调用 Job API 的 ensure endpoint
+
+结论：两种交付方式现在共享同一份字幕精对齐语义，不再各自维护一套逻辑。
 
 ## 4. 关键证据
 
-- `src/modules/output/output_dispatcher.py`
-  - cue 生成在 `editor_backend.write()` 之前
-  - `build_subtitle_cues_for_blocks(...)` 的输入来自 `semantic_blocks`
 - `src/modules/subtitles/cue_pipeline.py`
-  - 模块头部直接声明 `SemanticBlock list -> SubtitleCue list + ValidationReport`
-- `src/modules/subtitles/srt_writer.py`
-  - 模块头部直接声明“不重分段、不重定时，只序列化 canonical cues”
-- `src/modules/output/manifest_writer.py`
-  - `primary_outputs.editor` 里写入 `jianying_draft_zip / dir / compatibility_report`
+  - `publish / deliverable / manual` trigger gate
+  - `_block_is_in_sync()`
+  - `model / skip_cache` 从 admin settings 注入 whisper path
+- `src/services/subtitles/ensure_whisper_alignment.py`
+  - 读取 `editor/segments.json`
+  - 计算当前 WAV 内容哈希
+  - 重写 `subtitle_cues.json` 与 SRT
+- `src/services/jobs/jianying_draft_runner.py`
+  - `SUBSTEP_ALIGNING_SUBTITLES`
+  - deliverable-time ensure 调用
+- `gateway/background_task_executors.py`
+  - `materials_pack` 预打包 whisper delegation
 
-## 5. 什么时候优先读这张图
+## 5. 什么情况下优先读这张图
 
-- 想改 `process.py`、`OutputDispatcher`、`cue_pipeline.py`、`srt_writer.py`
-- 想判断“剪映草稿是不是主流水线的一部分，还是后置派生层”
-- 想确认 Subtitle Cue V2 在当前架构里到底处于什么位置
+- 想改 `cue_pipeline.py`、`ensure_whisper_alignment.py`、`srt_writer.py`
+- 想判断 whisper 对齐到底属于主路还是 sidecar
+- 想确认 `tts_input_cn_text` 现在在哪一层产生语义作用
+- 想搞清楚 `publish / deliverable / manual` 三种触发策略的边界
