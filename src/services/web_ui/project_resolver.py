@@ -414,24 +414,29 @@ def _resolve_public_result_download_path(
     elif normalized_key == "editor.jianying_draft_zip":
         # Phase 1 on-demand drafts are generated post-dispatcher by
         # JianyingDraftRunner (services.jobs.jianying_draft_runner) and live
-        # at {project_dir}/jianying/exports/jianying_draft_*.zip. The project
-        # manifest is written by OutputDispatcher BEFORE the runner generates
-        # the zip, so manifest.artifact_index has no editor.jianying_draft_zip
-        # entry. Resolve via the runner's known convention path instead.
+        # at {project_dir}/jianying/exports/*.zip. The project manifest is
+        # written by OutputDispatcher BEFORE the runner generates the zip,
+        # so manifest.artifact_index has no editor.jianying_draft_zip entry —
+        # resolve via the runner's known convention path instead.
+        #
+        # 2026-05-04: zip filenames switched from `jianying_draft_{job_id}.zip`
+        # to user-friendly `{title}_{date}.zip` (with `_2`, `_3`... collision
+        # suffixes). The match here is just `*.zip` because the
+        # `jianying/exports/` directory is jianying-specific — every zip in it
+        # is a jianying draft. Old `jianying_draft_*` legacy zips still match.
         exports_dir = resolved_project_dir / "jianying" / "exports"
         candidates: list[Path] = []
         if exports_dir.exists() and exports_dir.is_dir():
             candidates = [
                 entry
                 for entry in exports_dir.iterdir()
-                if entry.is_file()
-                and entry.name.startswith("jianying_draft_")
-                and entry.suffix == ".zip"
+                if entry.is_file() and entry.suffix == ".zip"
             ]
         if not candidates:
             return None
-        # If multiple zips exist (e.g. user re-triggered after a fix), serve
-        # the most recently generated one.
+        # If multiple zips exist (e.g. user re-triggered after a fix, or the
+        # 2026-05-04 collision-suffix path produced _2/_3), serve the most
+        # recently generated one.
         candidate_path = max(candidates, key=lambda p: p.stat().st_mtime).resolve(strict=False)
     else:
         artifact_index = load_manifest_artifact_index(project_dir=resolved_project_dir)

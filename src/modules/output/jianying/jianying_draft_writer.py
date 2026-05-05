@@ -13,9 +13,11 @@ Plan: docs/plans/2026-05-02-jianying-draft-delivery-integration-plan.md §5.2
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import logging
 import os
+import re
 import shutil
 import zipfile
 from pathlib import Path
@@ -54,6 +56,109 @@ def _sanitize_draft_name(project_id: str) -> str:
     for ch in ("/", "\\", ":"):
         project_id = project_id.replace(ch, "_")
     return project_id
+
+
+# ---------------------------------------------------------------------------
+# Friendly zip-name composition (2026-05-04)
+# ---------------------------------------------------------------------------
+#
+# Old scheme: ``jianying_draft_{project_id}.zip`` → user sees a 36-char hex blob.
+# New scheme: ``{title}_{date}.zip`` → uses ``request.project_title`` (which the
+# runner pre-populates from ``job.display_name or job.job_id``).
+#
+# This is purely a rename of the user-facing zip + the folder name Windows'
+# built-in unzip target produces. The ``draft_name`` passed to pyJianYingDraft
+# (its internal project identifier on the user's filesystem after import)
+# stays as the project_id — pyJianYingDraft 0.2.6's Unicode handling for that
+# field is unverified, so we keep blast radius small.
+
+# Windows-illegal: < > : " / \ | ? * + control chars (0x00-0x1F, 0x7F).
+# Linux-illegal: NUL only (covered by control-char range). Other chars
+# (incl. CJK, ASCII spaces, parens, brackets, ASCII punctuation) are kept.
+_FILENAME_ILLEGAL_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f\x7f]')
+
+# Unicode char-count budget. CJK in UTF-8 is up to 4 bytes/char; 80 chars =
+# 320 bytes, well under the 255-byte filename limit and Windows 260-char path.
+# (The whole zip filename adds the date suffix `_YYYY-MM-DD.zip` = 15 chars,
+# so the basename total stays ≤ 95 chars + extension.)
+_NAME_MAX_CHARS = 80
+
+
+def _sanitize_zip_basename(name: str) -> str:
+    """Sanitize a user-facing string for use inside a zip filename.
+
+    Steps:
+      1. Strip Windows-illegal chars + control chars (replace with empty).
+      2. Strip leading/trailing whitespace and dots (Windows trips on trailing
+         dots; both platforms hate leading whitespace).
+      3. Cap to ``_NAME_MAX_CHARS`` characters.
+
+    Spaces inside the name are PRESERVED (per UX choice 2026-05-04: feels more
+    natural for human-language titles, both Windows and Linux accept them).
+
+    Returns ``""`` if nothing usable remains — callers should fall through to
+    a backup name source.
+    """
+    if not name:
+        return ""
+    cleaned = _FILENAME_ILLEGAL_RE.sub("", name)
+    cleaned = cleaned.strip(" .\t\r\n")
+    if len(cleaned) > _NAME_MAX_CHARS:
+        cleaned = cleaned[:_NAME_MAX_CHARS].rstrip(" .")
+    return cleaned
+
+
+def _resolve_zip_basename(
+    *,
+    project_title: str | None,
+    project_id: str,
+    today_utc: _dt.date | None = None,
+) -> str:
+    """Compose the zip basename ``{name}_{YYYY-MM-DD}`` with sanitization.
+
+    Name resolution priority:
+      1. ``project_title`` — runner pre-populates this from
+         ``job.display_name or job.job_id``. The display_name is what the
+         user sees in the workspace list (e.g. the Chinese title set via the
+         pencil-edit icon); falling through to job_id is a defensive bottom.
+      2. ``project_id`` — last resort if project_title sanitizes to empty
+         (e.g. user title was nothing but illegal chars). Should be very rare.
+      3. The literal string ``"draft"`` — paranoia fallback for the case
+         where even project_id is somehow empty.
+
+    Date is UTC ``YYYY-MM-DD`` (the server runs UTC; the date label is for
+    human reference, not strict scheduling, so dropping the time is fine).
+
+    Caller must append ``.zip`` and is responsible for collision suffixes.
+    """
+    name = _sanitize_zip_basename(project_title or "")
+    if not name:
+        name = _sanitize_zip_basename(project_id)
+    if not name:
+        name = "draft"
+    if today_utc is None:
+        today_utc = _dt.datetime.now(_dt.timezone.utc).date()
+    return f"{name}_{today_utc.strftime('%Y-%m-%d')}"
+
+
+def _resolve_zip_path_with_collision(exports_dir: str, basename: str) -> str:
+    """Append ``_2``, ``_3``... if ``{basename}.zip`` already exists.
+
+    Caller writes the returned path. Same-day re-publish (e.g. Studio
+    edit→commit overwrite) won't clobber a previous zip the user may still
+    be downloading. Hard cap at 999 to prevent runaway loops on edge cases.
+    """
+    candidate = os.path.join(exports_dir, f"{basename}.zip")
+    if not os.path.exists(candidate):
+        return candidate
+    for counter in range(2, 1000):
+        candidate = os.path.join(exports_dir, f"{basename}_{counter}.zip")
+        if not os.path.exists(candidate):
+            return candidate
+    raise RuntimeError(
+        f"could not find a non-colliding zip name for {basename!r} "
+        f"under {exports_dir!r} after 999 attempts"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -278,13 +383,28 @@ class JianyingDraftWriter:
         # --- 6. Save draft ---
         draft_content_path, draft_meta_info_path = adapter.save(draft_dir, draft_name)
 
-        # --- 7. Post-process draft_content.json: embed absolute or relative paths
-        #        depending on whether user_draft_root was supplied. ---
+        # --- 7. Resolve user-friendly zip basename (2026-05-04 rename) ---
+        # Composed once here so the same value drives:
+        #   (a) the zip filename in exports_dir
+        #   (b) the unzip-target folder prefix in absolute-path JSON rewriting
+        # Windows' built-in unzip names the extracted folder after the zip
+        # stem, so JSON paths must agree with the zip basename or Jianying
+        # reports missing media (the K11 invariant).
+        zip_basename = _resolve_zip_basename(
+            project_title=request.project_title,
+            project_id=request.project_id,
+        )
+        zip_path = _resolve_zip_path_with_collision(exports_dir, zip_basename)
+        # Final stem actually used (collision counter may have bumped it):
+        unzip_folder_name = Path(zip_path).stem
+
+        # --- 7a. Post-process draft_content.json: embed absolute or relative paths
+        #         depending on whether user_draft_root was supplied. ---
         if request.user_draft_root:
             self._make_material_paths_absolute(
                 draft_content_path,
                 request.user_draft_root,
-                draft_name,
+                unzip_folder_name,
             )
         else:
             self._make_material_paths_relative(draft_content_path, materials_dir)
@@ -300,10 +420,6 @@ class JianyingDraftWriter:
         self._fill_meta_info(draft_meta_info_path, draft_name, draft_dir)
 
         # --- 9. Build portable zip ---
-        zip_path = os.path.join(
-            exports_dir,
-            f"jianying_draft_{draft_name}.zip",
-        )
         self._build_zip(draft_dir, zip_path)
 
         return JianyingDraftResult(
@@ -401,17 +517,22 @@ class JianyingDraftWriter:
     def _make_material_paths_absolute(
         draft_content_path: str,
         user_draft_root: str,
-        draft_name: str,
+        unzip_folder_name: str,
     ) -> None:
         """Rewrite every materials.{videos,audios}[*].path to an absolute path under
         the user's local drafts root. Format:
-          {user_draft_root}/jianying_draft_{draft_name}/materials/{filename}
+          {user_draft_root}/{unzip_folder_name}/materials/{filename}
 
-        The folder name uses the 'jianying_draft_' prefix to match what the user
-        sees after extracting the zip — Windows' built-in unzip creates a folder
-        named after the zip file (which is 'jianying_draft_{draft_name}.zip'), so
-        the unzip target is 'jianying_draft_{draft_name}/'. The JSON paths must
-        match this exactly or Jianying will report missing media.
+        ``unzip_folder_name`` MUST equal the zip stem the writer just chose —
+        Windows' built-in unzip creates a folder named after the zip file,
+        and Jianying reads back these absolute paths verbatim. Mismatch =
+        "素材下载失败,点击重试" in the Jianying UI.
+
+        Pre-2026-05-04 contract: the writer hard-coded ``jianying_draft_{draft_name}``
+        as both the zip stem and the folder prefix here. The 2026-05-04 rename
+        switched the zip basename to ``{title}_{date}`` (with collision suffix)
+        and now the writer passes the resolved stem in directly — no prefix
+        synthesis happens inside this function any more.
 
         Respects the path separator style of user_draft_root (Windows backslash
         vs Unix forward-slash).
@@ -421,8 +542,7 @@ class JianyingDraftWriter:
         sep = "\\" if "\\" in user_draft_root else "/"
         # Strip trailing separator from user_draft_root
         root = user_draft_root.rstrip("\\/")
-        zip_folder_name = f"jianying_draft_{draft_name}"
-        base = sep.join([root, zip_folder_name, "materials"])
+        base = sep.join([root, unzip_folder_name, "materials"])
 
         content_text = Path(draft_content_path).read_text(encoding="utf-8")
         data = json.loads(content_text)

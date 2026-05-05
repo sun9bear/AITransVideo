@@ -72,6 +72,156 @@ def test_project_id_sanitization_removes_special_chars():
 
 
 # ---------------------------------------------------------------------------
+# Friendly zip-naming helpers (2026-05-04)
+# ---------------------------------------------------------------------------
+
+
+def test_sanitize_zip_basename_preserves_chinese_and_spaces():
+    """CJK + spaces are kept; Windows-illegal chars stripped; trailing
+    whitespace/dots trimmed."""
+    from modules.output.jianying.jianying_draft_writer import (  # noqa: PLC0415
+        _sanitize_zip_basename,
+    )
+
+    # Pure CJK is preserved verbatim.
+    assert _sanitize_zip_basename("如何在6到12个月内彻底重塑自我") == "如何在6到12个月内彻底重塑自我"
+
+    # ASCII spaces inside the name are kept (UX choice).
+    assert _sanitize_zip_basename("Buffett interview 2026") == "Buffett interview 2026"
+
+    # Windows-illegal chars stripped, surrounding text kept.
+    assert _sanitize_zip_basename('A: "Quote" / B') == "A Quote  B"
+    assert _sanitize_zip_basename("name<>|?*") == "name"
+
+    # Leading/trailing whitespace and dots trimmed.
+    assert _sanitize_zip_basename("  spaced  ") == "spaced"
+    assert _sanitize_zip_basename("trailing.dots...") == "trailing.dots"
+    assert _sanitize_zip_basename("...lead.dots") == "lead.dots"
+
+
+def test_sanitize_zip_basename_caps_at_80_chars_and_trims_trailing():
+    """Names longer than 80 chars are truncated; trailing space/dot is
+    re-stripped after truncation so we don't leave an unsafe ending."""
+    from modules.output.jianying.jianying_draft_writer import (  # noqa: PLC0415
+        _sanitize_zip_basename,
+    )
+
+    long_name = "A" * 200
+    out = _sanitize_zip_basename(long_name)
+    assert len(out) == 80
+    assert out == "A" * 80
+
+    # Truncation lands on a trailing space — trailing-space trim runs again.
+    in_trick = "X" * 79 + " " + "Y" * 5
+    out = _sanitize_zip_basename(in_trick)
+    assert len(out) == 79
+    assert out == "X" * 79  # trailing space stripped
+
+
+def test_sanitize_zip_basename_returns_empty_on_unusable_input():
+    """Empty input + input that's only illegal chars → empty string."""
+    from modules.output.jianying.jianying_draft_writer import (  # noqa: PLC0415
+        _sanitize_zip_basename,
+    )
+
+    assert _sanitize_zip_basename("") == ""
+    assert _sanitize_zip_basename(None or "") == ""  # defensive: None coerced upstream
+    assert _sanitize_zip_basename("///") == ""
+    assert _sanitize_zip_basename("<>|?*") == ""
+    assert _sanitize_zip_basename("   ") == ""
+    assert _sanitize_zip_basename("....") == ""
+
+
+def test_resolve_zip_basename_priority_uses_project_title_first():
+    """Sanitized project_title wins over project_id."""
+    import datetime as _dt  # noqa: PLC0415
+    from modules.output.jianying.jianying_draft_writer import (  # noqa: PLC0415
+        _resolve_zip_basename,
+    )
+
+    out = _resolve_zip_basename(
+        project_title="如何在6到12个月内彻底重塑自我",
+        project_id="job_2593995420f546c3bcdcbef126f0b202",
+        today_utc=_dt.date(2026, 5, 4),
+    )
+    assert out == "如何在6到12个月内彻底重塑自我_2026-05-04"
+
+
+def test_resolve_zip_basename_falls_back_to_project_id_when_title_empty():
+    """Empty / pathological title → project_id basename."""
+    import datetime as _dt  # noqa: PLC0415
+    from modules.output.jianying.jianying_draft_writer import (  # noqa: PLC0415
+        _resolve_zip_basename,
+    )
+
+    for empty_title in ("", None, "   ", "<>|?*"):
+        out = _resolve_zip_basename(
+            project_title=empty_title,
+            project_id="job_abc123",
+            today_utc=_dt.date(2026, 5, 4),
+        )
+        assert out == "job_abc123_2026-05-04", f"title={empty_title!r} produced {out!r}"
+
+
+def test_resolve_zip_basename_falls_back_to_draft_when_all_empty():
+    """Defensive: even if project_id sanitizes to empty (truly degenerate),
+    the result is a usable literal — never empty."""
+    import datetime as _dt  # noqa: PLC0415
+    from modules.output.jianying.jianying_draft_writer import (  # noqa: PLC0415
+        _resolve_zip_basename,
+    )
+
+    out = _resolve_zip_basename(
+        project_title="",
+        project_id="<>|?*",
+        today_utc=_dt.date(2026, 5, 4),
+    )
+    assert out == "draft_2026-05-04"
+
+
+def test_resolve_zip_basename_default_today_uses_utc():
+    """When today_utc is omitted, the helper stamps current UTC date."""
+    import datetime as _dt  # noqa: PLC0415
+    from modules.output.jianying.jianying_draft_writer import (  # noqa: PLC0415
+        _resolve_zip_basename,
+    )
+
+    before = _dt.datetime.now(_dt.timezone.utc).date()
+    out = _resolve_zip_basename(project_title="hello", project_id="job")
+    after = _dt.datetime.now(_dt.timezone.utc).date()
+    # Date stamp is one of {before, after} — handles midnight crossing.
+    assert out in (
+        f"hello_{before.strftime('%Y-%m-%d')}",
+        f"hello_{after.strftime('%Y-%m-%d')}",
+    )
+
+
+def test_resolve_zip_path_with_collision_returns_plain_when_unique(tmp_path):
+    from modules.output.jianying.jianying_draft_writer import (  # noqa: PLC0415
+        _resolve_zip_path_with_collision,
+    )
+
+    out = _resolve_zip_path_with_collision(str(tmp_path), "title_2026-05-04")
+    assert out == str(tmp_path / "title_2026-05-04.zip")
+
+
+def test_resolve_zip_path_with_collision_appends_counter(tmp_path):
+    """Existing zip → _2; that taken too → _3; etc."""
+    from modules.output.jianying.jianying_draft_writer import (  # noqa: PLC0415
+        _resolve_zip_path_with_collision,
+    )
+
+    base = "title_2026-05-04"
+    (tmp_path / f"{base}.zip").write_bytes(b"")
+    out2 = _resolve_zip_path_with_collision(str(tmp_path), base)
+    assert out2 == str(tmp_path / f"{base}_2.zip")
+
+    (tmp_path / f"{base}_2.zip").write_bytes(b"")
+    out3 = _resolve_zip_path_with_collision(str(tmp_path), base)
+    assert out3 == str(tmp_path / f"{base}_3.zip")
+
+
+# ---------------------------------------------------------------------------
 # K11: _make_material_paths_absolute helper (no pyJianYingDraft needed)
 # ---------------------------------------------------------------------------
 
@@ -88,7 +238,11 @@ def _write_draft_content(path: str, videos=None, audios=None) -> None:
 
 
 def test_make_material_paths_absolute_windows_style(tmp_path):
-    """_make_material_paths_absolute rewrites paths with backslashes for Windows input (K11)."""
+    """_make_material_paths_absolute rewrites paths with backslashes for Windows input.
+
+    Post-2026-05-04 contract: third arg is the actual unzip-target folder
+    name (== zip stem), no implicit ``jianying_draft_`` prefix.
+    """
     from modules.output.jianying.jianying_draft_writer import JianyingDraftWriter  # noqa: PLC0415
 
     content_path = str(tmp_path / "draft_content.json")
@@ -98,22 +252,25 @@ def test_make_material_paths_absolute_windows_style(tmp_path):
     )
 
     user_draft_root = r"F:\剪映缓存\草稿\JianyingPro Drafts"
-    draft_name = "my_draft"
+    unzip_folder_name = "如何在6到12个月内彻底重塑自我_2026-05-04"
     JianyingDraftWriter._make_material_paths_absolute(
-        content_path, user_draft_root, draft_name
+        content_path, user_draft_root, unzip_folder_name
     )
 
     data = json.loads(Path(content_path).read_text(encoding="utf-8"))
     audios = data["materials"]["audios"]
     assert len(audios) == 1
-    expected = r"F:\剪映缓存\草稿\JianyingPro Drafts\jianying_draft_my_draft\materials\dubbed_audio.wav"
+    expected = (
+        r"F:\剪映缓存\草稿\JianyingPro Drafts"
+        + "\\如何在6到12个月内彻底重塑自我_2026-05-04\\materials\\dubbed_audio.wav"
+    )
     assert audios[0]["path"] == expected, f"got: {audios[0]['path']!r}"
     # No backslash in expected should appear as forward slash
     assert "/" not in audios[0]["path"], "Windows path must use backslashes only"
 
 
 def test_make_material_paths_absolute_unix_style(tmp_path):
-    """_make_material_paths_absolute rewrites paths with forward-slashes for Unix input (K11)."""
+    """_make_material_paths_absolute rewrites paths with forward-slashes for Unix input."""
     from modules.output.jianying.jianying_draft_writer import JianyingDraftWriter  # noqa: PLC0415
 
     content_path = str(tmp_path / "draft_content.json")
@@ -123,9 +280,9 @@ def test_make_material_paths_absolute_unix_style(tmp_path):
     )
 
     user_draft_root = "~/Movies/JianyingPro/User Data/Projects/com.lveditor.draft"
-    draft_name = "my_draft"
+    unzip_folder_name = "My Project_2026-05-04"
     JianyingDraftWriter._make_material_paths_absolute(
-        content_path, user_draft_root, draft_name
+        content_path, user_draft_root, unzip_folder_name
     )
 
     data = json.loads(Path(content_path).read_text(encoding="utf-8"))
@@ -133,14 +290,14 @@ def test_make_material_paths_absolute_unix_style(tmp_path):
     assert len(audios) == 1
     expected = (
         "~/Movies/JianyingPro/User Data/Projects/com.lveditor.draft"
-        "/jianying_draft_my_draft/materials/dubbed_audio.wav"
+        "/My Project_2026-05-04/materials/dubbed_audio.wav"
     )
     assert audios[0]["path"] == expected, f"got: {audios[0]['path']!r}"
     assert "\\" not in audios[0]["path"], "Unix path must not contain backslashes"
 
 
 def test_make_material_paths_absolute_rewrites_video_media_path(tmp_path):
-    """_make_material_paths_absolute also rewrites media_path on video materials (K11)."""
+    """_make_material_paths_absolute also rewrites media_path on video materials."""
     from modules.output.jianying.jianying_draft_writer import JianyingDraftWriter  # noqa: PLC0415
 
     content_path = str(tmp_path / "draft_content.json")
@@ -154,15 +311,15 @@ def test_make_material_paths_absolute_rewrites_video_media_path(tmp_path):
     )
 
     user_draft_root = r"F:\JianyingPro Drafts"
-    draft_name = "job_abc"
+    unzip_folder_name = "Buffett Interview_2026-05-04"
     JianyingDraftWriter._make_material_paths_absolute(
-        content_path, user_draft_root, draft_name
+        content_path, user_draft_root, unzip_folder_name
     )
 
     data = json.loads(Path(content_path).read_text(encoding="utf-8"))
     videos = data["materials"]["videos"]
     assert len(videos) == 1
-    expected = r"F:\JianyingPro Drafts\jianying_draft_job_abc\materials\source_video.mp4"
+    expected = r"F:\JianyingPro Drafts\Buffett Interview_2026-05-04\materials\source_video.mp4"
     assert videos[0]["path"] == expected
     assert videos[0]["media_path"] == expected, (
         "media_path must also be rewritten to match path"
@@ -170,7 +327,7 @@ def test_make_material_paths_absolute_rewrites_video_media_path(tmp_path):
 
 
 def test_make_material_paths_absolute_trailing_separator_stripped(tmp_path):
-    """user_draft_root with trailing separator is handled correctly (K11)."""
+    """user_draft_root with trailing separator is handled correctly."""
     from modules.output.jianying.jianying_draft_writer import JianyingDraftWriter  # noqa: PLC0415
 
     content_path = str(tmp_path / "draft_content.json")
@@ -182,17 +339,17 @@ def test_make_material_paths_absolute_trailing_separator_stripped(tmp_path):
     # Trailing backslash should not produce double backslash
     user_draft_root = r"F:\JianyingPro Drafts" + "\\"
     JianyingDraftWriter._make_material_paths_absolute(
-        content_path, user_draft_root, "draft_name"
+        content_path, user_draft_root, "Title_2026-05-04"
     )
 
     data = json.loads(Path(content_path).read_text(encoding="utf-8"))
     path_val = data["materials"]["audios"][0]["path"]
     assert "\\\\" not in path_val, f"double backslash found in: {path_val!r}"
-    assert path_val.startswith(r"F:\JianyingPro Drafts\\".rstrip("\\"))
+    assert path_val.startswith(r"F:\JianyingPro Drafts\Title_2026-05-04")
 
 
 def test_make_material_paths_absolute_both_videos_and_audios(tmp_path):
-    """_make_material_paths_absolute rewrites both videos and audios in one pass (K11)."""
+    """_make_material_paths_absolute rewrites both videos and audios in one pass."""
     from modules.output.jianying.jianying_draft_writer import JianyingDraftWriter  # noqa: PLC0415
 
     content_path = str(tmp_path / "draft_content.json")
@@ -206,8 +363,9 @@ def test_make_material_paths_absolute_both_videos_and_audios(tmp_path):
     )
 
     user_draft_root = r"D:\Drafts"
+    unzip_folder_name = "Project Name_2026-05-04"
     JianyingDraftWriter._make_material_paths_absolute(
-        content_path, user_draft_root, "proj_001"
+        content_path, user_draft_root, unzip_folder_name
     )
 
     data = json.loads(Path(content_path).read_text(encoding="utf-8"))
@@ -216,8 +374,8 @@ def test_make_material_paths_absolute_both_videos_and_audios(tmp_path):
         + [a["path"] for a in data["materials"]["audios"]]
     )
     for p in all_paths:
-        assert p.startswith(r"D:\Drafts\jianying_draft_proj_001\materials" + "\\"), (
-            f"expected absolute path under D:\\Drafts\\jianying_draft_proj_001\\materials\\, got: {p!r}"
+        assert p.startswith(r"D:\Drafts\Project Name_2026-05-04\materials" + "\\"), (
+            f"expected absolute path under D:\\Drafts\\Project Name_2026-05-04\\materials\\, got: {p!r}"
         )
 
 
@@ -715,4 +873,140 @@ def test_write_without_user_draft_root_produces_relative_paths(tmp_workspace: Pa
         )
         assert not os.path.isabs(path_val), (
             f"path must be relative, not absolute, got {path_val!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Friendly zip naming end-to-end (2026-05-04)
+# ---------------------------------------------------------------------------
+
+
+def test_write_zip_filename_uses_project_title_and_date(tmp_workspace: Path):
+    """Zip filename is ``{project_title}_{YYYY-MM-DD}.zip`` end-to-end.
+
+    Pre-2026-05-04 the filename was ``jianying_draft_{project_id}.zip``;
+    we renamed to surface the user's display name (passed through
+    ``project_title``) and the generation date for friendliness.
+    """
+    import datetime as _dt  # noqa: PLC0415
+
+    from modules.output.jianying.jianying_draft_models import JianyingDraftRequest  # noqa: PLC0415
+    from modules.output.jianying.jianying_draft_writer import JianyingDraftWriter  # noqa: PLC0415
+
+    dubbed = str(tmp_workspace / "dubbed.wav")
+    srt = str(tmp_workspace / "subtitles.srt")
+    _make_wav(dubbed)
+    _make_srt(srt)
+
+    req = JianyingDraftRequest(
+        project_id="job_abcdef0123",
+        project_title="如何在6到12个月内彻底重塑自我",
+        source_video_path=str(tmp_workspace / "no_video.mp4"),
+        dubbed_audio_path=dubbed,
+        subtitle_path=srt,
+        output_dir=str(tmp_workspace / "output"),
+    )
+
+    writer = JianyingDraftWriter()
+    result = writer.write(req)
+
+    assert result.validation_status == "ok"
+
+    today_str = _dt.datetime.now(_dt.timezone.utc).date().strftime("%Y-%m-%d")
+    expected_basename = f"如何在6到12个月内彻底重塑自我_{today_str}"
+
+    zip_basename = os.path.basename(result.draft_zip_path)
+    # Allow same-day collision suffixes (_2/_3) but the prefix must match.
+    assert zip_basename.startswith(expected_basename), (
+        f"zip filename should start with {expected_basename!r}, got {zip_basename!r}"
+    )
+    assert zip_basename.endswith(".zip")
+    assert os.path.isfile(result.draft_zip_path)
+
+    # Old prefix MUST NOT appear in the zip filename — that would be a
+    # rollback regression.
+    assert not zip_basename.startswith("jianying_draft_"), (
+        f"zip filename should not use the legacy 'jianying_draft_' prefix, got {zip_basename!r}"
+    )
+
+
+def test_write_zip_filename_falls_back_to_project_id_when_title_empty(tmp_workspace: Path):
+    """Empty ``project_title`` → basename uses sanitized project_id (defensive)."""
+    import datetime as _dt  # noqa: PLC0415
+
+    from modules.output.jianying.jianying_draft_models import JianyingDraftRequest  # noqa: PLC0415
+    from modules.output.jianying.jianying_draft_writer import JianyingDraftWriter  # noqa: PLC0415
+
+    dubbed = str(tmp_workspace / "dubbed.wav")
+    srt = str(tmp_workspace / "subtitles.srt")
+    _make_wav(dubbed)
+    _make_srt(srt)
+
+    req = JianyingDraftRequest(
+        project_id="job_fallback_test",
+        project_title="",  # empty → fallback path
+        source_video_path=str(tmp_workspace / "no_video.mp4"),
+        dubbed_audio_path=dubbed,
+        subtitle_path=srt,
+        output_dir=str(tmp_workspace / "output"),
+    )
+
+    writer = JianyingDraftWriter()
+    result = writer.write(req)
+    assert result.validation_status == "ok"
+
+    today_str = _dt.datetime.now(_dt.timezone.utc).date().strftime("%Y-%m-%d")
+    zip_basename = os.path.basename(result.draft_zip_path)
+    assert zip_basename.startswith(f"job_fallback_test_{today_str}"), (
+        f"expected fallback basename starting with job_fallback_test_{today_str}, "
+        f"got {zip_basename!r}"
+    )
+
+
+def test_write_absolute_paths_use_friendly_unzip_folder_name(tmp_workspace: Path):
+    """When user_draft_root is set, absolute paths in draft_content.json must
+    point under ``{user_draft_root}/{friendly_basename}/materials/...``
+    (NOT under the legacy ``jianying_draft_*`` prefix). This is the
+    K11 invariant restated for the 2026-05-04 rename.
+    """
+    import datetime as _dt  # noqa: PLC0415
+
+    from modules.output.jianying.jianying_draft_models import JianyingDraftRequest  # noqa: PLC0415
+    from modules.output.jianying.jianying_draft_writer import JianyingDraftWriter  # noqa: PLC0415
+
+    dubbed = str(tmp_workspace / "dubbed.wav")
+    srt = str(tmp_workspace / "subtitles.srt")
+    _make_wav(dubbed)
+    _make_srt(srt)
+
+    user_root = "/home/test/JianyingDrafts"
+    req = JianyingDraftRequest(
+        project_id="job_xyz",
+        project_title="My Friendly Title",
+        source_video_path=str(tmp_workspace / "no_video.mp4"),
+        dubbed_audio_path=dubbed,
+        subtitle_path=srt,
+        output_dir=str(tmp_workspace / "output"),
+        user_draft_root=user_root,
+    )
+
+    writer = JianyingDraftWriter()
+    result = writer.write(req)
+    assert result.validation_status == "ok"
+
+    today_str = _dt.datetime.now(_dt.timezone.utc).date().strftime("%Y-%m-%d")
+    expected_unzip_folder = f"My Friendly Title_{today_str}"
+    expected_path_prefix = f"{user_root}/{expected_unzip_folder}/materials/"
+
+    content = json.loads(Path(result.draft_content_path).read_text(encoding="utf-8"))
+    audios = content.get("materials", {}).get("audios", [])
+    assert len(audios) > 0
+    for audio in audios:
+        path_val = audio.get("path", "")
+        assert path_val.startswith(expected_path_prefix), (
+            f"expected path under {expected_path_prefix!r}, got {path_val!r}"
+        )
+        # And NOT under the legacy prefix.
+        assert "jianying_draft_" not in path_val, (
+            f"legacy prefix leaked into absolute path: {path_val!r}"
         )
