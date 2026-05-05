@@ -8,6 +8,7 @@ import { User, Lock } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { goToPostAuthRedirect, resolvePostAuthRedirect } from "@/lib/auth/post-auth-redirect"
 
 /**
  * Account + password login form (A1 unified login).
@@ -16,7 +17,7 @@ import { Label } from "@/components/ui/label"
  */
 export function PasswordLoginForm() {
   const searchParams = useSearchParams()
-  const redirectTo = searchParams.get("from") || "/translations/new"
+  const redirectTo = resolvePostAuthRedirect(searchParams)
   const [account, setAccount] = useState("")
   const [password, setPassword] = useState("")
   const [submitting, setSubmitting] = useState(false)
@@ -41,10 +42,9 @@ export function PasswordLoginForm() {
         return
       }
       toast.success("登录成功")
-      await new Promise((r) => setTimeout(r, 250))
-      window.location.replace(redirectTo)
-    } catch {
-      toast.error("网络错误,请重试")
+      await goToPostAuthRedirect(redirectTo)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "网络错误,请重试")
     } finally {
       setSubmitting(false)
     }

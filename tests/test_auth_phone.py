@@ -15,8 +15,10 @@ DB access is stubbed at the infrastructure level.
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import types
+import urllib.parse
 import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -183,6 +185,80 @@ class TestCaptcha:
     def test_rejects_sentinel(self):
         with pytest.raises(risk_control.CaptchaVerificationError):
             risk_control.verify_captcha("fail")
+
+    def test_geetest_validates_payload_with_scene_key(self, monkeypatch):
+        monkeypatch.setattr(settings, "captcha_provider", "geetest")
+        monkeypatch.setattr(settings, "geetest_register_captcha_id", "register-id")
+        monkeypatch.setattr(settings, "geetest_register_captcha_key", "register-key")
+        monkeypatch.setattr(settings, "geetest_login_captcha_id", "login-id")
+        monkeypatch.setattr(settings, "geetest_login_captcha_key", "login-key")
+        monkeypatch.setattr(settings, "geetest_api_server", "http://gcaptcha4.geetest.com")
+
+        response = MagicMock()
+        response.read.return_value = json.dumps({"result": "success", "reason": "ok"}).encode()
+        response_cm = MagicMock()
+        response_cm.__enter__.return_value = response
+        response_cm.__exit__.return_value = None
+
+        token = json.dumps(
+            {
+                "provider": "geetest",
+                "scenario": "login",
+                "captcha_id": "login-id",
+                "lot_number": "lot-123",
+                "captcha_output": "captcha-output",
+                "pass_token": "pass-token",
+                "gen_time": "1710000000",
+            }
+        )
+
+        with patch("urllib.request.urlopen", return_value=response_cm) as urlopen:
+            risk_control.verify_captcha(token)
+
+        request = urlopen.call_args.args[0]
+        assert "captcha_id=login-id" in request.full_url
+        posted = urllib.parse.parse_qs(request.data.decode())
+        assert posted["lot_number"] == ["lot-123"]
+        assert posted["captcha_output"] == ["captcha-output"]
+        assert posted["pass_token"] == ["pass-token"]
+        assert posted["gen_time"] == ["1710000000"]
+        assert posted["sign_token"][0]
+
+    def test_geetest_rejects_wrong_scene_captcha_id(self, monkeypatch):
+        monkeypatch.setattr(settings, "captcha_provider", "geetest")
+        monkeypatch.setattr(settings, "geetest_register_captcha_id", "register-id")
+        monkeypatch.setattr(settings, "geetest_register_captcha_key", "register-key")
+        monkeypatch.setattr(settings, "geetest_login_captcha_id", "login-id")
+        monkeypatch.setattr(settings, "geetest_login_captcha_key", "login-key")
+
+        token = json.dumps(
+            {
+                "provider": "geetest",
+                "scenario": "login",
+                "captcha_id": "register-id",
+                "lot_number": "lot-123",
+                "captcha_output": "captcha-output",
+                "pass_token": "pass-token",
+                "gen_time": "1710000000",
+            }
+        )
+
+        with pytest.raises(risk_control.CaptchaVerificationError):
+            risk_control.verify_captcha(token)
+
+
+class TestSessionCookie:
+    def test_create_session_uses_mobile_compatible_lax_cookie(self):
+        db = _make_db()
+        response = Response()
+
+        _run(auth.create_session(db, uuid.uuid4(), response))
+
+        set_cookie = response.headers["set-cookie"]
+        assert "avt_session=" in set_cookie
+        assert "HttpOnly" in set_cookie
+        assert "Secure" in set_cookie
+        assert "SameSite=lax" in set_cookie
 
 
 # ---------------------------------------------------------------------------
@@ -459,6 +535,10 @@ class TestVerifyCodeEndpoint:
         assert result["registration_token"] is not None
         assert result["user"] is None
         assert ch.consumed_at is not None
+        registration_challenge = db.add.call_args.args[0]
+        assert registration_challenge.purpose == "registration"
+        assert len(registration_challenge.code) > 16
+        assert result["registration_token"] == registration_challenge.code
         # create_session must NOT have been called.
         session_mock.assert_not_called()
 

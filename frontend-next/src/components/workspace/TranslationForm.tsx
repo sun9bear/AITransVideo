@@ -68,6 +68,14 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   const rateLabel = currentRate != null ? `${currentRate} 点/分钟` : "读取中"
   // For UI display: show the most recent active job if blocked
   const latestActiveJob = activeJobs.length > 0 ? activeJobs[0] : null
+  const planCardBaseClass = "relative rounded-xl border-2 p-4 text-left transition"
+  const planCardSelectedClass = `${planCardBaseClass} border-transparent`
+  const planCardIdleClass = `${planCardBaseClass} border-border bg-muted/20 hover:border-primary/30`
+  const selectedPlanStyle = {
+    borderColor: "color-mix(in oklab, var(--primary) 52%, transparent)",
+    backgroundColor: "color-mix(in oklab, var(--primary) 7%, transparent)",
+    boxShadow: "0 0 0 2px color-mix(in oklab, var(--primary) 18%, transparent)",
+  }
 
   const loadActiveJobs = async (silent = false) => {
     if (!silent) setIsLoadingGuard(true)
@@ -184,24 +192,24 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
       ) : null}
 
       {/* Form */}
-      <section className="rounded-2xl border border-border bg-card p-6">
-        <div className="flex items-center justify-between mb-5">
+      <section className="min-w-0 rounded-2xl border border-border bg-card p-4 sm:p-6">
+        <div className="mb-5 flex min-w-0 items-center justify-between gap-3">
           <h2 className="text-lg font-semibold text-foreground">任务输入</h2>
           {latestActiveJob ? <StatusBadge status={latestActiveJob.status} /> : null}
         </div>
         <form className="space-y-6" onSubmit={handleSubmit}>
           {/* Source type toggle */}
-          <div className="flex gap-2">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
             <button
               type="button"
-              className={`rounded-lg px-4 py-2 text-sm font-medium transition ${sourceType === "youtube_url" ? "bg-primary text-white" : "border border-border bg-muted/30 text-muted-foreground hover:bg-muted/50"}`}
+              className={`min-w-0 break-keep rounded-lg px-4 py-2 text-sm font-medium transition ${sourceType === "youtube_url" ? "bg-primary text-white" : "border border-border bg-muted/30 text-muted-foreground hover:bg-muted/50"}`}
               onClick={() => setSourceType("youtube_url")}
             >
               YouTube 链接
             </button>
             <button
               type="button"
-              className={`rounded-lg px-4 py-2 text-sm font-medium transition ${sourceType === "local_video" ? "bg-primary text-white" : "border border-border bg-muted/30 text-muted-foreground hover:bg-muted/50"}`}
+              className={`min-w-0 break-keep rounded-lg px-4 py-2 text-sm font-medium transition ${sourceType === "local_video" ? "bg-primary text-white" : "border border-border bg-muted/30 text-muted-foreground hover:bg-muted/50"}`}
               onClick={() => setSourceType("local_video")}
             >
               上传视频
@@ -305,7 +313,8 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
               {/* Express mode */}
               <button
                 type="button"
-                className={`relative rounded-xl border-2 p-4 text-left transition ${serviceMode === "express" ? "border-primary/50 bg-primary/5 ring-2 ring-primary/20" : "border-border bg-muted/20 hover:border-primary/30"}`}
+                className={serviceMode === "express" ? planCardSelectedClass : planCardIdleClass}
+                style={serviceMode === "express" ? selectedPlanStyle : undefined}
                 disabled={isBlockedByConcurrency || submitState === "submitting"}
                 onClick={() => setServiceMode("express")}
               >
@@ -336,7 +345,8 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                 return studioAllowed ? (
                   <button
                     type="button"
-                    className={`relative rounded-xl border-2 p-4 text-left transition ${serviceMode === "studio" ? "border-primary/50 bg-primary/5 ring-2 ring-primary/20" : "border-border bg-muted/20 hover:border-primary/30"}`}
+                    className={serviceMode === "studio" ? planCardSelectedClass : planCardIdleClass}
+                    style={serviceMode === "studio" ? selectedPlanStyle : undefined}
                     disabled={isBlockedByConcurrency || submitState === "submitting"}
                     onClick={() => setServiceMode("studio")}
                   >
@@ -460,7 +470,7 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
           <button
             type="submit"
             disabled={Boolean(validationError) || isBlockedByConcurrency || submitState === "submitting" || isLoadingGuard}
-            className="inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-primary to-primary/80 px-6 py-2.5 text-sm font-semibold text-white shadow-lg shadow-primary/25 transition hover:shadow-primary/40 hover:brightness-110 disabled:opacity-50"
+            className="inline-flex w-full items-center justify-center gap-2 rounded-full border border-transparent bg-gradient-to-r from-primary to-primary/80 px-6 py-2.5 text-sm font-semibold text-white shadow-lg shadow-primary/25 transition hover:shadow-primary/40 hover:brightness-110 disabled:cursor-not-allowed disabled:border-border disabled:bg-muted disabled:bg-none disabled:text-muted-foreground disabled:shadow-none disabled:hover:brightness-100 disabled:hover:shadow-none sm:w-auto"
           >
             {submitState === "submitting" ? "创建中…" : "创建任务"}
           </button>

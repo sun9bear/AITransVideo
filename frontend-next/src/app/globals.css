@@ -51,6 +51,18 @@
   --radius-4xl: calc(var(--radius) * 2.6);
 }
 
+[data-theme="ink"] [data-slot="input"] {
+  color-scheme: light;
+  color: var(--foreground);
+  caret-color: var(--foreground);
+}
+
+[data-theme="ink"] [data-slot="input"]:-webkit-autofill,
+[data-theme="ink"] [data-slot="input"]:-webkit-autofill:hover,
+[data-theme="ink"] [data-slot="input"]:-webkit-autofill:focus {
+  -webkit-text-fill-color: var(--foreground);
+}
+
 /* ==========================================
    AIVideoTrans Global Foundations
    DESIGN.md §2: neutral slate base, deep-blue / steel-cyan accents,

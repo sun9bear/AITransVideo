@@ -27,6 +27,7 @@ from subscriptions import router as subscriptions_router
 from materials_api import router as materials_router
 from background_task_api import router as background_task_router
 from voice_catalog_api import router as voice_catalog_router, internal_router as voice_catalog_internal_router
+from traffic_analytics import router as traffic_analytics_router
 from auth import (
     LoginRequest,
     RegisterRequest,
@@ -254,6 +255,7 @@ app.include_router(admin_job_monitor_router)
 app.include_router(billing_router)
 app.include_router(cost_management_router)
 app.include_router(credits_observability_router)
+app.include_router(traffic_analytics_router)
 app.include_router(credits_read_router)
 app.include_router(entitlements_router)
 app.include_router(plan_catalog_router)

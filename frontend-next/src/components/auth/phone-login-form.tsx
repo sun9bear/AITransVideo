@@ -7,7 +7,8 @@ import { Phone, KeyRound, Lock } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { CaptchaGate } from "./captcha-gate"
+import { CaptchaGate, type CaptchaChallenge } from "./captcha-gate"
+import { goToPostAuthRedirect, resolvePostAuthRedirect } from "@/lib/auth/post-auth-redirect"
 
 /**
  * Phone verification login / registration form (A1 rewrite).
@@ -23,17 +24,23 @@ import { CaptchaGate } from "./captcha-gate"
  */
 type Step = "phone" | "code" | "set-password"
 
-export function PhoneLoginForm() {
+type PhoneLoginFormProps = {
+  captchaScenario?: "register" | "login"
+}
+
+export function PhoneLoginForm({ captchaScenario = "register" }: PhoneLoginFormProps) {
   const searchParams = useSearchParams()
-  const redirectTo = searchParams.get("from") || "/translations/new"
+  const redirectTo = resolvePostAuthRedirect(searchParams)
 
   const [step, setStep] = useState<Step>("phone")
   const [phone, setPhone] = useState("")
   const [captchaToken, setCaptchaToken] = useState<string | null>(null)
+  const [captchaChallenge, setCaptchaChallenge] = useState<CaptchaChallenge | null>(null)
   const [code, setCode] = useState("")
   const [registrationToken, setRegistrationToken] = useState<string | null>(null)
   const [password, setPassword] = useState("")
   const [confirmPassword, setConfirmPassword] = useState("")
+  const [captchaExecuting, setCaptchaExecuting] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [resendCountdown, setResendCountdown] = useState(0)
 
@@ -47,14 +54,34 @@ export function PhoneLoginForm() {
 
   const phoneLooksValid = /^(\+?86)?\s*1[3-9]\d{9}$/.test(phone.replace(/[\s\-]/g, ""))
 
+  const resolveCaptchaToken = async () => {
+    if (captchaToken) return captchaToken
+    if (!captchaChallenge) {
+      toast.error("人机验证仍在加载,请稍后再试")
+      return null
+    }
+    setCaptchaExecuting(true)
+    try {
+      const token = await captchaChallenge.execute()
+      setCaptchaToken(token)
+      return token
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "人机验证失败,请重试")
+      captchaChallenge.reset()
+      return null
+    } finally {
+      setCaptchaExecuting(false)
+    }
+  }
+
   const handleSendCode = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!phoneLooksValid) {
       toast.error("请输入正确的手机号")
       return
     }
-    if (!captchaToken) {
-      toast.error("请先完成人机验证")
+    const token = await resolveCaptchaToken()
+    if (!token) {
       return
     }
     setSubmitting(true)
@@ -64,20 +91,22 @@ export function PhoneLoginForm() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           phone_number: phone.trim(),
-          captcha_token: captchaToken,
+          captcha_token: token,
         }),
         credentials: "include",
       })
       const data = await res.json().catch(() => ({}))
       if (!res.ok) {
+        setCaptchaToken(null)
+        captchaChallenge?.reset()
         toast.error(data?.detail || "验证码发送失败")
         return
       }
       toast.success("验证码已发送")
       setStep("code")
       setResendCountdown(60)
-    } catch {
-      toast.error("网络错误,请重试")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "网络错误,请重试")
     } finally {
       setSubmitting(false)
     }
@@ -115,10 +144,9 @@ export function PhoneLoginForm() {
 
       // EXISTING user — already logged in.
       toast.success("登录成功")
-      await new Promise((r) => setTimeout(r, 250))
-      window.location.replace(redirectTo)
-    } catch {
-      toast.error("网络错误,请重试")
+      await goToPostAuthRedirect(redirectTo)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "网络错误,请重试")
     } finally {
       setSubmitting(false)
     }
@@ -156,10 +184,9 @@ export function PhoneLoginForm() {
         return
       }
       toast.success("注册成功,欢迎使用")
-      await new Promise((r) => setTimeout(r, 250))
-      window.location.replace(redirectTo)
-    } catch {
-      toast.error("网络错误,请重试")
+      await goToPostAuthRedirect(redirectTo)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "网络错误,请重试")
     } finally {
       setSubmitting(false)
     }
@@ -193,17 +220,24 @@ export function PhoneLoginForm() {
         </div>
 
         <CaptchaGate
+          scenario={captchaScenario}
           verified={Boolean(captchaToken)}
           onVerify={(token) => setCaptchaToken(token)}
+          onReady={setCaptchaChallenge}
           disabled={submitting}
         />
 
         <Button
           type="submit"
           className="h-11 w-full"
-          disabled={submitting || !phoneLooksValid || !captchaToken}
+          disabled={
+            submitting ||
+            captchaExecuting ||
+            !phoneLooksValid ||
+            (!captchaToken && !captchaChallenge)
+          }
         >
-          {submitting ? "发送中…" : "发送验证码"}
+          {captchaExecuting ? "验证中…" : submitting ? "发送中…" : "发送验证码"}
         </Button>
       </form>
     )

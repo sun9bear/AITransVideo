@@ -291,6 +291,93 @@ def reset_ip_trial_grants() -> None:
     _ip_trial_granted.clear()
 
 
+def _geetest_credentials(scenario: str) -> tuple[str, str]:
+    normalized = scenario if scenario in {"register", "login"} else "register"
+    if normalized == "login":
+        captcha_id = settings.geetest_login_captcha_id or settings.geetest_register_captcha_id
+        captcha_key = settings.geetest_login_captcha_key or settings.geetest_register_captcha_key
+    else:
+        captcha_id = settings.geetest_register_captcha_id or settings.geetest_login_captcha_id
+        captcha_key = settings.geetest_register_captcha_key or settings.geetest_login_captcha_key
+    return captcha_id.strip(), captcha_key.strip()
+
+
+def _verify_geetest(token: str) -> None:
+    """Server-side GeeTest CAPTCHA v4 secondary validation."""
+    import hashlib
+    import hmac
+    import json
+    import logging
+    import urllib.parse
+    import urllib.request
+
+    _log = logging.getLogger(__name__)
+
+    try:
+        payload = json.loads(token)
+    except json.JSONDecodeError:
+        raise CaptchaVerificationError("请重新完成人机验证")
+
+    if not isinstance(payload, dict) or payload.get("provider") != "geetest":
+        raise CaptchaVerificationError("请重新完成人机验证")
+
+    scenario = str(payload.get("scenario") or "register")
+    captcha_id, captcha_key = _geetest_credentials(scenario)
+    if not captcha_id or not captcha_key:
+        _log.error("AVT_CAPTCHA_PROVIDER=geetest but GeeTest credentials are missing for scenario=%s.", scenario)
+        raise CaptchaVerificationError("人机验证服务配置异常,请稍后重试")
+
+    client_captcha_id = str(payload.get("captcha_id") or "")
+    if client_captcha_id and client_captcha_id != captcha_id:
+        _log.warning("GeeTest captcha_id mismatch: scenario=%s client=%s expected=%s", scenario, client_captcha_id, captcha_id)
+        raise CaptchaVerificationError("人机验证未通过,请重试")
+
+    lot_number = str(payload.get("lot_number") or "")
+    captcha_output = str(payload.get("captcha_output") or "")
+    pass_token = str(payload.get("pass_token") or "")
+    gen_time = str(payload.get("gen_time") or "")
+    if not all([lot_number, captcha_output, pass_token, gen_time]):
+        raise CaptchaVerificationError("请重新完成人机验证")
+
+    sign_token = hmac.new(
+        captcha_key.encode("utf-8"),
+        lot_number.encode("utf-8"),
+        digestmod=hashlib.sha256,
+    ).hexdigest()
+    data = urllib.parse.urlencode(
+        {
+            "lot_number": lot_number,
+            "captcha_output": captcha_output,
+            "pass_token": pass_token,
+            "gen_time": gen_time,
+            "sign_token": sign_token,
+        }
+    ).encode("utf-8")
+    url = (
+        settings.geetest_api_server.rstrip("/")
+        + "/validate?captcha_id="
+        + urllib.parse.quote(captcha_id)
+    )
+    req = urllib.request.Request(
+        url,
+        data=data,
+        method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:
+        _log.error("GeeTest verify failed: %s", exc)
+        raise CaptchaVerificationError("人机验证服务异常,请重试")
+
+    _log.info("GeeTest response: result=%s reason=%s", result.get("result"), result.get("reason"))
+    if result.get("result") != "success":
+        _log.warning("GeeTest rejected: reason=%s", result.get("reason"))
+        raise CaptchaVerificationError("人机验证未通过,请重试")
+
+
 def _verify_turnstile(token: str) -> None:
     """Server-side verification via Cloudflare Turnstile.
 
@@ -342,9 +429,10 @@ def _verify_turnstile(token: str) -> None:
 def verify_captcha(token: str | None) -> None:
     """Verify a captcha token. Raises CaptchaVerificationError on rejection.
 
-    Supports two providers:
+    Supports three providers:
     - "fake": accepts any non-empty token except "fail" (local dev / tests)
-    - "aliyun": calls Aliyun Captcha 2.0 VerifyIntelligentCaptcha (production)
+    - "geetest": validates GeeTest CAPTCHA v4 payloads
+    - "turnstile": validates Cloudflare Turnstile tokens
     """
     provider = (settings.captcha_provider or "fake").strip().lower()
 
@@ -360,11 +448,15 @@ def verify_captcha(token: str | None) -> None:
         _verify_turnstile(token.strip())
         return
 
+    if provider == "geetest":
+        _verify_geetest(token.strip())
+        return
+
     if provider == "aliyun":
         # Legacy — kept for reference but no longer recommended (cross-border issues)
         _verify_turnstile(token.strip())
         return
 
     raise NotImplementedError(
-        f"Captcha provider {provider!r} is not supported. Use 'fake' or 'turnstile'."
+        f"Captcha provider {provider!r} is not supported. Use 'fake', 'geetest', or 'turnstile'."
     )

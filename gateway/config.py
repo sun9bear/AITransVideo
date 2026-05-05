@@ -16,6 +16,10 @@ class GatewaySettings(BaseSettings):
         default="/opt/aivideotrans/app/jobs",
         validation_alias="AIVIDEOTRANS_JOBS_DIR",
     )
+    runtime_logs_dir: str = Field(
+        default="/opt/aivideotrans/data/runtime_logs",
+        validation_alias="AIVIDEOTRANS_RUNTIME_LOGS_DIR",
+    )
 
     # Gateway server
     gateway_host: str = "0.0.0.0"
@@ -51,6 +55,11 @@ class GatewaySettings(BaseSettings):
     # out of scope for Task 3.
     sms_provider: str = "fake"
     captcha_provider: str = "fake"
+    geetest_api_server: str = "http://gcaptcha4.geetest.com"
+    geetest_register_captcha_id: str = ""
+    geetest_register_captcha_key: str = ""
+    geetest_login_captcha_id: str = ""
+    geetest_login_captcha_key: str = ""
 
     # OTP lifetime. Kept deliberately short.
     phone_code_ttl_seconds: int = 300  # 5 minutes

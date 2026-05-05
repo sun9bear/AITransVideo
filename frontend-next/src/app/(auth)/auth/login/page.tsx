@@ -16,8 +16,8 @@ export default function LoginPage() {
   const [mode, setMode] = useState<LoginMode>("password")
 
   return (
-    <div className="w-full max-w-md px-4 py-10">
-      <div className="mb-8 text-center">
+    <div className="w-full">
+      <div className="mb-6 text-center sm:mb-8">
         <div className="mb-5 flex justify-center">
           <BrandMark size={52} />
         </div>
@@ -32,7 +32,7 @@ export default function LoginPage() {
         </p>
       </div>
 
-      <div className="rounded-2xl border border-border bg-card p-6 shadow-sm sm:p-8">
+      <div className="rounded-2xl border border-border bg-card p-4 shadow-sm sm:p-8">
         {/* Mode toggle */}
         <div className="mb-6 flex rounded-lg border border-border bg-muted/30 p-1">
           <button
@@ -62,7 +62,7 @@ export default function LoginPage() {
         </div>
 
         <Suspense fallback={null}>
-          {mode === "password" ? <PasswordLoginForm /> : <PhoneLoginForm />}
+          {mode === "password" ? <PasswordLoginForm /> : <PhoneLoginForm captchaScenario="login" />}
         </Suspense>
 
         <div className="mt-6 border-t border-border pt-5 text-center text-sm text-muted-foreground">

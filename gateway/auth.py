@@ -81,7 +81,7 @@ async def create_session(db: AsyncSession, user_id, response: Response) -> str:
         key=settings.session_cookie_name,
         value=token,
         httponly=True,
-        samesite="strict",
+        samesite="lax",
         secure=True,
         max_age=settings.session_expire_days * 86400,
         path="/",

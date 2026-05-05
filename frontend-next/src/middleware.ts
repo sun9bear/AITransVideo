@@ -61,9 +61,10 @@ export function middleware(request: NextRequest) {
 
   // Check for session cookie
   const sessionToken = request.cookies.get("avt_session")?.value
+  const sessionHint = request.cookies.get("avt_session_hint")?.value
 
-  // No session cookie → redirect to login
-  if (!sessionToken) {
+  // No session marker -> redirect to login
+  if (!sessionToken && sessionHint !== "1") {
     const loginUrl = request.nextUrl.clone()
     loginUrl.pathname = "/auth/login"
     loginUrl.searchParams.set("from", pathname)

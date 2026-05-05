@@ -90,7 +90,7 @@ class PhoneVerificationChallenge(Base):
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     phone_number: Mapped[str] = mapped_column(String(32), nullable=False)
-    code: Mapped[str] = mapped_column(String(16), nullable=False)
+    code: Mapped[str] = mapped_column(String(128), nullable=False)
     client_ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
     purpose: Mapped[str] = mapped_column(
         String(32), nullable=False, server_default="login"

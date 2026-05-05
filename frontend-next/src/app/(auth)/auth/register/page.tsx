@@ -11,11 +11,20 @@ import { PhoneLoginForm } from "@/components/auth/phone-login-form"
  */
 export default function RegisterPage() {
   return (
-    <div className="w-full max-w-md px-4 py-10">
-      <div className="mb-8 text-center">
-        <div className="mb-5 flex justify-center">
-          <BrandMark size={52} />
-        </div>
+    <div className="w-full">
+      <div className="mb-6 flex items-center justify-between">
+        <Link href="/" className="inline-flex items-center" aria-label="AITrans.Video 首页">
+          <BrandMark size={44} />
+        </Link>
+        <Link
+          href="/auth/login"
+          className="inline-flex h-9 items-center justify-center rounded-lg border border-border bg-card px-3 text-sm font-medium text-foreground shadow-sm transition-colors hover:border-primary/50 hover:text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+        >
+          登录
+        </Link>
+      </div>
+
+      <div className="mb-6 text-center sm:mb-8">
         <p className="ink-heading text-xs uppercase tracking-widest text-[color:var(--cinnabar,#C73E3A)]">
           开始本地化
         </p>
@@ -27,7 +36,7 @@ export default function RegisterPage() {
         </p>
       </div>
 
-      <div className="rounded-2xl border border-border bg-card p-6 shadow-sm sm:p-8">
+      <div className="rounded-2xl border border-border bg-card p-4 shadow-sm sm:p-8">
         <Suspense fallback={null}>
           <PhoneLoginForm />
         </Suspense>

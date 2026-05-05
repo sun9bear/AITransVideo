@@ -99,8 +99,8 @@ export default function ForgotPasswordPage() {
   }
 
   return (
-    <div className="w-full max-w-md px-4 py-10">
-      <div className="mb-8 text-center">
+    <div className="w-full">
+      <div className="mb-6 text-center sm:mb-8">
         <div className="mb-4 flex justify-center">
           <BrandMark size={44} />
         </div>
@@ -112,7 +112,7 @@ export default function ForgotPasswordPage() {
         </p>
       </div>
 
-      <div className="rounded-2xl border border-border bg-card p-6 shadow-sm sm:p-8">
+      <div className="rounded-2xl border border-border bg-card p-4 shadow-sm sm:p-8">
         {step === "phone" && (
           <div className="space-y-5">
             <div className="space-y-2">
@@ -137,6 +137,7 @@ export default function ForgotPasswordPage() {
               </div>
             </div>
             <CaptchaGate
+              scenario="login"
               verified={Boolean(captchaToken)}
               onVerify={(token) => setCaptchaToken(token)}
               disabled={submitting}

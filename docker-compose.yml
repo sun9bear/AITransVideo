@@ -92,6 +92,8 @@ services:
       args:
         NEXT_PUBLIC_CAPTCHA_PROVIDER: "${NEXT_PUBLIC_CAPTCHA_PROVIDER:-fake}"
         NEXT_PUBLIC_TURNSTILE_SITE_KEY: "${NEXT_PUBLIC_TURNSTILE_SITE_KEY:-}"
+        NEXT_PUBLIC_GEETEST_REGISTER_CAPTCHA_ID: "${NEXT_PUBLIC_GEETEST_REGISTER_CAPTCHA_ID:-}"
+        NEXT_PUBLIC_GEETEST_LOGIN_CAPTCHA_ID: "${NEXT_PUBLIC_GEETEST_LOGIN_CAPTCHA_ID:-}"
         NEXT_PUBLIC_ENABLE_POST_EDIT: "${NEXT_PUBLIC_ENABLE_POST_EDIT:-0}"
         # GEO canonical origin — inlined into the standalone bundle at build
         # time so client-side imports of `lib/seo/site.ts` see the real URL.
@@ -105,6 +107,10 @@ services:
     restart: unless-stopped
     environment:
       PORT: "3000"
+      NEXT_PUBLIC_CAPTCHA_PROVIDER: "${NEXT_PUBLIC_CAPTCHA_PROVIDER:-fake}"
+      NEXT_PUBLIC_TURNSTILE_SITE_KEY: "${NEXT_PUBLIC_TURNSTILE_SITE_KEY:-}"
+      NEXT_PUBLIC_GEETEST_REGISTER_CAPTCHA_ID: "${NEXT_PUBLIC_GEETEST_REGISTER_CAPTCHA_ID:-}"
+      NEXT_PUBLIC_GEETEST_LOGIN_CAPTCHA_ID: "${NEXT_PUBLIC_GEETEST_LOGIN_CAPTCHA_ID:-}"
       # Phase 1.5 硬化（2026-04-22）：Next standalone 只监听 loopback。
       # Caddy 从 127.0.0.1:3000 反代，network_mode: host 下容器内 = 宿主
       # loopback。ufw 失效时公网依然 refused。
@@ -170,6 +176,11 @@ services:
       - type: bind
         source: ${AIVIDEOTRANS_ROOT}/data/jobs
         target: /opt/aivideotrans/app/jobs
+      # Caddy public access logs for admin traffic analytics (read-only).
+      - type: bind
+        source: ${AIVIDEOTRANS_ROOT}/data/runtime_logs
+        target: /opt/aivideotrans/data/runtime_logs
+        read_only: true
     depends_on:
       app:
         condition: service_healthy
@@ -187,6 +198,7 @@ services:
       # 127.0.0.1:8880。ufw 失效时公网依然 refused。
       AVT_GATEWAY_HOST: "127.0.0.1"
       AVT_GATEWAY_PORT: "8880"
+      AIVIDEOTRANS_RUNTIME_LOGS_DIR: "/opt/aivideotrans/data/runtime_logs"
       AVT_AUTH_REQUIRED: "true"
       # GEO canonical origin — used by gateway/notifications.py to build
       # email links to /workspace/{job_id}. MUST equal frontend
@@ -212,6 +224,12 @@ services:
       # --- Captcha (Cloudflare Turnstile) ---
       AVT_CAPTCHA_PROVIDER: "${AVT_CAPTCHA_PROVIDER:-fake}"
       AVT_TURNSTILE_SECRET_KEY: "${AVT_TURNSTILE_SECRET_KEY:-}"
+      # --- Captcha (GeeTest CAPTCHA v4) ---
+      AVT_GEETEST_API_SERVER: "${AVT_GEETEST_API_SERVER:-http://gcaptcha4.geetest.com}"
+      AVT_GEETEST_REGISTER_CAPTCHA_ID: "${AVT_GEETEST_REGISTER_CAPTCHA_ID:-}"
+      AVT_GEETEST_REGISTER_CAPTCHA_KEY: "${AVT_GEETEST_REGISTER_CAPTCHA_KEY:-}"
+      AVT_GEETEST_LOGIN_CAPTCHA_ID: "${AVT_GEETEST_LOGIN_CAPTCHA_ID:-}"
+      AVT_GEETEST_LOGIN_CAPTCHA_KEY: "${AVT_GEETEST_LOGIN_CAPTCHA_KEY:-}"
       # --- Aliyun SMS credentials (shared with FC relay) ---
       AVT_ALIYUN_SMS_ACCESS_KEY_ID: "${AVT_ALIYUN_SMS_ACCESS_KEY_ID:-}"
       AVT_ALIYUN_SMS_ACCESS_KEY_SECRET: "${AVT_ALIYUN_SMS_ACCESS_KEY_SECRET:-}"

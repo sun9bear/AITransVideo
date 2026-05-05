@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation"
 import { useEffect, useState } from "react"
 import { toast } from "sonner"
 import { useSession } from "@/components/providers/session-provider"
+import { clearPostAuthSessionHint } from "@/lib/auth/post-auth-redirect"
 import { Button } from "@/components/ui/button"
 import { BrandMark, BrandLockup } from "@/components/marketing/brand-mark"
 import {
@@ -30,8 +31,11 @@ import {
   Calculator,
   ClipboardList,
   TrendingUp,
+  Globe2,
+  Search,
   CreditCard,
   AlertTriangle,
+  ShieldAlert,
   RefreshCw,
 } from "lucide-react"
 
@@ -46,6 +50,8 @@ type NavGroup = {
   items: NavItem[]
   adminOnly?: boolean
 }
+
+const WORKSPACE_THEME_STORAGE_KEY = "aivt-workspace-theme"
 
 const navGroups: NavGroup[] = [
   {
@@ -79,6 +85,10 @@ const navGroups: NavGroup[] = [
       { label: "音色管理", href: "/admin/voices", icon: AudioLines },
       { label: "模型管理", href: "/admin/prompts", icon: MessageSquareText },
       { label: "审校监控", href: "/admin/s2-monitor", icon: Activity },
+      { label: "访问监控", href: "/admin/traffic", icon: Globe2 },
+      { label: "转化监控", href: "/admin/conversions", icon: TrendingUp },
+      { label: "安全监控", href: "/admin/security", icon: ShieldAlert },
+      { label: "发现优化", href: "/admin/discovery", icon: Search },
       { label: "成本管理", href: "/admin/costs", icon: Calculator },
       { label: "定价管理", href: "/admin/pricing", icon: Wallet },
       { label: "点数校准", href: "/admin/credits-monitor", icon: TrendingUp },
@@ -93,16 +103,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [collapsed, setCollapsed] = useState(false)
   const [mobileOpen, setMobileOpen] = useState(false)
   // darkMode is hydrated from localStorage on first client render so the
-  // user's preference persists across reloads. Default true (workspace is
-  // expected to be a dark surface most of the time).
-  const [darkMode, setDarkMode] = useState(true)
+  // user's preference persists across reloads. Default is light for the
+  // workspace because most mobile browser chrome and auth surfaces are light.
+  const [darkMode, setDarkMode] = useState(false)
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
       try {
-        const stored = window.localStorage.getItem("aivt-app-dark-mode")
-        if (stored === "0") setDarkMode(false)
-        else if (stored === "1") setDarkMode(true)
+        const stored = window.localStorage.getItem(WORKSPACE_THEME_STORAGE_KEY)
+        if (stored === "dark") setDarkMode(true)
+        else if (stored === "light") setDarkMode(false)
       } catch {
         // localStorage not available (privacy mode etc.) — keep default.
       }
@@ -125,7 +135,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     // own scope on their layout divs.
     document.documentElement.setAttribute("data-theme", darkMode ? "ink-dark" : "ink")
     try {
-      window.localStorage.setItem("aivt-app-dark-mode", darkMode ? "1" : "0")
+      window.localStorage.setItem(WORKSPACE_THEME_STORAGE_KEY, darkMode ? "dark" : "light")
     } catch {
       // ignore — see above
     }
@@ -140,26 +150,46 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     return () => window.cancelAnimationFrame(frame)
   }, [pathname])
 
+  useEffect(() => {
+    if (!mobileOpen) return
+
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = "hidden"
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setMobileOpen(false)
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown)
+    return () => {
+      document.body.style.overflow = previousOverflow
+      window.removeEventListener("keydown", handleKeyDown)
+    }
+  }, [mobileOpen])
+
   const handleLogout = async () => {
     await fetch("/auth/logout", { method: "POST", credentials: "include" })
+    clearPostAuthSessionHint()
     toast.success("已登出")
     window.location.href = "/auth/login"
   }
 
-  const sidebarContent = (
+  const renderSidebarContent = (isCollapsed: boolean, onNavigate?: () => void) => (
     <>
       {/* Brand mark — uses the marketing SealStamp asset so the workspace
           and the marketing surface share one visual identity. Was previously
           a violet→cyan gradient with "AI" text; that block predated the
           ink-aesthetic redesign and read as out-of-system. */}
       <div className="flex h-14 items-center justify-between px-3 border-b border-border">
-        {!collapsed && (
-          <Link href="/" className="flex items-center gap-2 truncate">
+        {!isCollapsed && (
+          <Link href="/" className="flex items-center gap-2 truncate" onClick={onNavigate}>
             <BrandLockup />
           </Link>
         )}
-        {collapsed && (
-          <Link href="/" className="mx-auto" aria-label="AITrans.Video 首页">
+        {isCollapsed && (
+          <Link href="/" className="mx-auto" aria-label="AITrans.Video 首页" onClick={onNavigate}>
             <BrandMark size={28} />
           </Link>
         )}
@@ -174,7 +204,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           return true
         }).map((group) => (
           <div key={group.label}>
-            {!collapsed && (
+            {!isCollapsed && (
               <p className="px-3 mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-sidebar-foreground/40">
                 {group.label}
               </p>
@@ -196,10 +226,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                         ? "bg-primary/15 text-primary font-medium"
                         : "text-muted-foreground hover:bg-accent hover:text-foreground"
                     }`}
-                    title={collapsed ? item.label : undefined}
+                    title={isCollapsed ? item.label : undefined}
+                    onClick={onNavigate}
                   >
                     <Icon className={`h-4 w-4 shrink-0 ${isActive ? "text-primary" : ""}`} />
-                    {!collapsed && <span className="truncate">{item.label}</span>}
+                    {!isCollapsed && <span className="truncate">{item.label}</span>}
                   </Link>
                 )
               })}
@@ -213,17 +244,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         {/* Theme toggle */}
         <Button
           variant="ghost"
-          size={collapsed ? "icon" : "sm"}
-          className={`${collapsed ? "w-full" : "w-full justify-start gap-2"} text-muted-foreground hover:text-foreground`}
+          size={isCollapsed ? "icon" : "sm"}
+          className={`${isCollapsed ? "w-full" : "w-full justify-start gap-2"} text-muted-foreground hover:text-foreground`}
           onClick={() => setDarkMode(!darkMode)}
           aria-label={darkMode ? "切换到浅色模式" : "切换到深色模式"}
         >
           {darkMode ? <Sun className="h-4 w-4 shrink-0" aria-hidden="true" /> : <Moon className="h-4 w-4 shrink-0" aria-hidden="true" />}
-          {!collapsed && <span className="text-xs">{darkMode ? "浅色模式" : "深色模式"}</span>}
+          {!isCollapsed && <span className="text-xs">{darkMode ? "浅色模式" : "深色模式"}</span>}
         </Button>
 
         {/* User info */}
-        {user && !collapsed && (
+        {user && !isCollapsed && (
           <div className="px-2 space-y-1.5">
             <p className="text-xs font-medium text-foreground truncate">{user.display_name}</p>
             <p className="text-[10px] text-muted-foreground truncate">{user.email}</p>
@@ -238,7 +269,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </Button>
           </div>
         )}
-        {user && collapsed && (
+        {user && isCollapsed && (
           <Button
             variant="ghost"
             size="icon"
@@ -260,23 +291,21 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     // token blocks in globals.css.
     <div
       data-theme={darkMode ? "ink-dark" : "ink"}
-      className="flex min-h-screen bg-background text-foreground"
+      className="flex min-h-screen overflow-x-hidden bg-background text-foreground"
     >
-      {/* Mobile overlay */}
-      {mobileOpen && (
+      {mobileOpen ? (
         <div
-          className="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm lg:hidden"
+          className="fixed inset-0 z-40 bg-black/45 backdrop-blur-sm lg:hidden"
           onClick={() => setMobileOpen(false)}
         />
-      )}
-
+      ) : null}
       {/* Sidebar — desktop */}
       <aside
         className={`hidden lg:flex sticky top-0 h-screen flex-col border-r border-border bg-sidebar transition-[width] duration-200 ${
           collapsed ? "w-16" : "w-56"
         }`}
       >
-        {sidebarContent}
+        {renderSidebarContent(collapsed)}
         {/* Collapse toggle */}
         <button
           className="absolute -right-3 top-20 z-10 flex h-6 w-6 items-center justify-center rounded-full border border-border bg-card text-muted-foreground hover:text-foreground shadow-sm"
@@ -288,42 +317,40 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       </aside>
 
       {/* Sidebar — mobile */}
-      <aside
-        className={`fixed inset-y-0 left-0 z-50 flex w-64 flex-col border-r border-border bg-sidebar transition-transform duration-200 lg:hidden ${
-          mobileOpen ? "translate-x-0" : "-translate-x-full"
-        }`}
-      >
-        <button
-          className="absolute right-2 top-3 z-10 flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground"
-          onClick={() => setMobileOpen(false)}
-          aria-label="关闭侧边栏"
-        >
-          <X className="h-5 w-5" aria-hidden="true" />
-        </button>
-        {sidebarContent}
-      </aside>
+      {mobileOpen ? (
+        <aside className="fixed inset-y-0 left-0 z-50 flex w-56 max-w-[72dvw] flex-col border-r border-border bg-sidebar shadow-xl lg:hidden">
+          <button
+            type="button"
+            className="absolute right-2 top-3 z-10 flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground"
+            onClick={() => setMobileOpen(false)}
+            aria-label="关闭侧边栏"
+          >
+            <X className="h-5 w-5" aria-hidden="true" />
+          </button>
+          {renderSidebarContent(false, () => setMobileOpen(false))}
+        </aside>
+      ) : null}
 
       {/* Main content */}
-      <div className="flex-1 flex flex-col min-w-0">
+      <div className="flex min-w-0 flex-1 flex-col overflow-x-hidden">
         {/* Top bar */}
-        <header className="sticky top-0 z-30 flex h-14 items-center justify-between border-b border-border bg-background/80 backdrop-blur-md px-4 lg:px-6">
-          <div className="flex items-center gap-3">
-            {/* Mobile hamburger */}
+        <header className="sticky top-0 z-30 flex h-14 items-center justify-between border-b border-border bg-background/80 backdrop-blur-md px-3 sm:px-4 lg:px-6">
+          <div className="flex min-w-0 items-center gap-3">
             <Button
               variant="ghost"
               size="icon"
-              className="lg:hidden h-8 w-8 text-muted-foreground"
+              className="h-8 w-8 shrink-0 text-muted-foreground lg:hidden"
               onClick={() => setMobileOpen(true)}
               aria-label="打开菜单"
             >
               <Menu className="h-5 w-5" aria-hidden="true" />
             </Button>
             {/* Breadcrumb-style page indicator */}
-            <span className="text-sm font-medium text-foreground font-heading">
+            <span className="truncate text-sm font-medium text-foreground font-heading">
               {pathname.startsWith("/workspace/") ? "工作区" : navGroups.flatMap(g => g.items).find(i => pathname.startsWith(i.href))?.label || "AITrans.Video"}
             </span>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex shrink-0 items-center gap-3">
             {user && (
               <span className="hidden sm:block text-xs text-muted-foreground">
                 {user.display_name}
@@ -364,7 +391,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         ) : null}
 
         {/* Page content */}
-        <main id="main-content" className="flex-1 p-4 lg:p-6">
+        <main id="main-content" className="min-w-0 flex-1 overflow-x-hidden p-3 sm:p-4 lg:p-6">
           {children}
         </main>
       </div>
