@@ -483,6 +483,12 @@ class SegmentAligner:
                 )
             segment.tts_audio_path = tts_result.audio_path
             segment.actual_duration_ms = tts_result.duration_ms
+            # 2026-05-04 P0a — the audio at tts_audio_path now reflects
+            # ``rewritten_text`` (segment.cn_text was just updated above).
+            # Re-stamp tts_input_cn_text so any subsequent comparison knows
+            # which text the audio comes from. first_pass_cn_text stays
+            # immutable (the helper guards on "if not already set").
+            _snapshot_first_pass_text(segment)
             if target_duration_ms > 0:
                 segment.alignment_ratio = tts_result.duration_ms / target_duration_ms
             else:
@@ -532,6 +538,10 @@ class SegmentAligner:
             segment.tts_audio_path = best_tts_audio_path
             segment.actual_duration_ms = best_actual_duration_ms
             segment.alignment_ratio = best_alignment_ratio
+            # 2026-05-04 P0a — best-candidate finalization re-applies cn_text
+            # to whichever attempt scored best (may differ from last attempt).
+            # Re-stamp tts_input_cn_text so it tracks the audio finally used.
+            _snapshot_first_pass_text(segment)
             best_decision = self._evaluate_alignment(best_actual_duration_ms, target_duration_ms)
             if best_decision == "direct":
                 aligned_audio_path = self._direct_copy(best_tts_audio_path, output_path)
