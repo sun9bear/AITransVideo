@@ -247,6 +247,32 @@ def _apply_editing_to_baseline(project_dir: Path) -> dict[str, Any]:
             apply_draft_segment(draft_wav, target_wav)
             applied.append(draft_wav.stem)
 
+    # 3) re-stamp tts_input_cn_text for every segment whose draft was
+    #    promoted in step 2 — the draft was synthesized from that segment's
+    #    CURRENT cn_text, and the audio just replaced baseline. Segments
+    #    WITHOUT a promoted draft keep their existing tts_input_cn_text
+    #    (which may equal cn_text → in sync, or differ → drift detected).
+    #
+    #    Plan ref: 2026-05-04-subtitle-audio-sync-plan.md Phase A Task A5/A6.
+    #    Per §3.5 invariant, baseline audio is untouched until commit, so the
+    #    accept-draft endpoint cannot stamp here — only commit can. This is
+    #    the single, atomic stamp point covering both single-segment regen
+    #    (A5) and batch regen-all-dirty (A6).
+    if applied:
+        applied_ids = set(applied)
+        for seg in segments:
+            sid = str(seg.get("segment_id", ""))
+            if sid in applied_ids:
+                seg["tts_input_cn_text"] = seg.get("cn_text", "")
+        # Re-write the now-stamped segments.json over the version we wrote
+        # at step 1. Two writes is mildly wasteful but keeps the existing
+        # voice_map merge order intact (voice_map applies BEFORE we know
+        # which drafts were promoted).
+        target_file.write_text(
+            json.dumps(segments, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
     return {
         "applied_draft_segment_ids": applied,
         "segments_count": len(segments),

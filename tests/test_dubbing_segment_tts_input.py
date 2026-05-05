@@ -215,6 +215,144 @@ def test_attempt_rewrite_loop_stamps_tts_input_after_each_resynth(monkeypatch, t
 
 
 # ---------------------------------------------------------------------------
+# A5/A6: commit-time stamp when drafts are promoted to baseline
+# ---------------------------------------------------------------------------
+#
+# Plan-time intent was "stamp on accept-draft" (A5) and "stamp on batch
+# regen-all-dirty" (A6). But §3.5 invariant ("baseline untouched until
+# commit") means drafts sit in tts_segments_draft/ during editing and only
+# move to baseline during commit. So both A5 and A6 collapse into ONE site:
+# at _apply_editing_to_baseline, for every draft wav promoted, update the
+# corresponding editor/segments.json record's tts_input_cn_text to its
+# cn_text. Segments without a promoted draft keep their existing
+# tts_input_cn_text — preserving the drift state for cue-pipeline detection.
+
+
+def test_commit_stamps_tts_input_for_segments_with_promoted_draft(tmp_path):
+    """``_apply_editing_to_baseline`` reads ``editing/segments.json`` and
+    writes ``editor/segments.json``. For each segment whose draft wav was
+    promoted from ``editing/tts_segments_draft/`` → ``editor/tts_segments/``,
+    the corresponding record in editor/segments.json must have
+    ``tts_input_cn_text`` set to its (potentially user-edited) ``cn_text``.
+
+    The two seg cases in this test:
+      seg_1: user edited cn_text from '原' to '新' AND clicked regen-tts.
+             Draft wav exists. After commit:
+               cn_text='新', tts_input_cn_text='新' (synced)
+      seg_2: user edited cn_text from '保留' to '改了' but did NOT regen-tts.
+             No draft wav. After commit:
+               cn_text='改了', tts_input_cn_text='保留' (drift preserved)
+    """
+    import json
+    from services.jobs.editing_commit import _apply_editing_to_baseline
+
+    project_dir = tmp_path
+    editing = project_dir / "editor" / "editing"
+    editing.mkdir(parents=True)
+    drafts = editing / "tts_segments_draft"
+    drafts.mkdir()
+    baseline_tts = project_dir / "editor" / "tts_segments"
+    baseline_tts.mkdir(parents=True)
+
+    # Pre-seed baseline tts wavs (would have been written by previous publish)
+    (baseline_tts / "1.wav").write_bytes(b"old wav 1")
+    (baseline_tts / "2.wav").write_bytes(b"old wav 2")
+
+    # User regenerated seg_1's TTS → draft exists for seg_1
+    (drafts / "1.wav").write_bytes(b"new wav for seg 1")
+    # seg_2: user edited cn_text but didn't regen → NO draft
+
+    # editing/segments.json carries user's latest edits
+    (editing / "segments.json").write_text(
+        json.dumps([
+            {
+                "segment_id": "1",
+                "speaker_id": "A",
+                "display_name": "A",
+                "voice_id": "v",
+                "start_ms": 0,
+                "end_ms": 1000,
+                "target_duration_ms": 1000,
+                "source_text": "x",
+                "cn_text": "新",
+                "tts_input_cn_text": "原",  # stale from pre-edit baseline
+            },
+            {
+                "segment_id": "2",
+                "speaker_id": "A",
+                "display_name": "A",
+                "voice_id": "v",
+                "start_ms": 1000,
+                "end_ms": 2000,
+                "target_duration_ms": 1000,
+                "source_text": "y",
+                "cn_text": "改了",
+                "tts_input_cn_text": "保留",  # NO draft → must stay
+            },
+        ], ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    summary = _apply_editing_to_baseline(project_dir)
+    assert summary["applied_draft_segment_ids"] == ["1"]
+
+    written = json.loads(
+        (project_dir / "editor" / "segments.json").read_text(encoding="utf-8")
+    )
+    assert len(written) == 2
+    by_id = {rec["segment_id"]: rec for rec in written}
+
+    # seg_1: draft was promoted → tts_input_cn_text re-stamped to cn_text
+    assert by_id["1"]["cn_text"] == "新"
+    assert by_id["1"]["tts_input_cn_text"] == "新"
+
+    # seg_2: no draft → tts_input_cn_text preserved (drift state intact for
+    # downstream cue-pipeline detection)
+    assert by_id["2"]["cn_text"] == "改了"
+    assert by_id["2"]["tts_input_cn_text"] == "保留"
+
+
+def test_commit_no_drafts_leaves_all_tts_input_unchanged(tmp_path):
+    """Commit with empty editing/tts_segments_draft/ (e.g. text-only edits,
+    no regen-tts) must NOT mutate any segment's tts_input_cn_text — that
+    would mask drift."""
+    import json
+    from services.jobs.editing_commit import _apply_editing_to_baseline
+
+    project_dir = tmp_path
+    editing = project_dir / "editor" / "editing"
+    editing.mkdir(parents=True)
+    (editing / "tts_segments_draft").mkdir()  # empty drafts dir
+
+    (editing / "segments.json").write_text(
+        json.dumps([
+            {
+                "segment_id": "1",
+                "speaker_id": "A",
+                "display_name": "A",
+                "voice_id": "v",
+                "start_ms": 0,
+                "end_ms": 1000,
+                "target_duration_ms": 1000,
+                "source_text": "x",
+                "cn_text": "用户编辑后的新文本",
+                "tts_input_cn_text": "原合成时的文本",  # drift, preserved
+            },
+        ], ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    summary = _apply_editing_to_baseline(project_dir)
+    assert summary["applied_draft_segment_ids"] == []
+
+    written = json.loads(
+        (project_dir / "editor" / "segments.json").read_text(encoding="utf-8")
+    )
+    assert written[0]["cn_text"] == "用户编辑后的新文本"
+    assert written[0]["tts_input_cn_text"] == "原合成时的文本"
+
+
+# ---------------------------------------------------------------------------
 # A4: editor/segments.json round-trip + legacy backfill
 # ---------------------------------------------------------------------------
 
