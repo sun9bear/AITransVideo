@@ -27,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -59,15 +60,17 @@ logger = logging.getLogger(__name__)
 
 JIANYING_DRAFT_BACKEND_VERSION = "1"
 JIANYING_DRAFT_WRITER_VERSION = "1"
-# CodeX P1 (2026-05-05): bump to 2 — Whisper alignment policy snapshot
-# was added to the fingerprint inputs. Old (schema=1) fingerprints
-# stored on succeeded records will not match new computations on
-# trigger(), forcing a single one-time rebuild per existing job after
-# rollout. That's intentional: existing proportional drafts must be
-# rebuilt now that admin can flip on Whisper alignment, otherwise the
-# admin toggle has no effect on cached jobs. After rebuild the new
-# schema-2 fingerprint is stamped and subsequent triggers cache-hit.
-JIANYING_DRAFT_FINGERPRINT_SCHEMA = 2
+# CodeX P1 (2026-05-05): bump to 2 — Whisper alignment admin policy
+# snapshot was added to the fingerprint inputs.
+# CodeX P1 follow-up (2026-05-05): bump to 3 — env capability bool
+# was added to the policy snapshot too, completing the effective-gate
+# coverage. Old (schema=2) fingerprints stored from the brief window
+# between the two fixes are also invalidated — intentional, since
+# they could have been computed with admin=true while env was off,
+# producing a fingerprint that wouldn't notice env later flipping on.
+# Admins / users may see a single one-time rebuild on the next
+# trigger after rollout; subsequent triggers cache-hit cleanly.
+JIANYING_DRAFT_FINGERPRINT_SCHEMA = 3
 
 # Lock target lives under jobs_dir/_locks/jianying_draft/{job_id}.run.
 # .lock sidecar is created automatically by services._file_lock.file_lock
@@ -183,25 +186,34 @@ def _sha256_file(path: Path | None) -> str:
 
 
 def _whisper_policy_snapshot() -> dict:
-    """Snapshot of the Whisper alignment admin policy for fingerprint input.
+    """Effective gate snapshot for fingerprint input.
 
-    CodeX P1 (2026-05-05): the four ``whisper_alignment_*`` fields
-    must be part of the Jianying-draft fingerprint, otherwise admin
-    can flip the master switch / change the trigger / change the model
-    without invalidating succeeded drafts on disk — the cached zip
-    keeps getting served back even though the policy says "now use
-    Whisper". We pull the current values via the typed reader (same
-    one cue_pipeline uses) so admin <-> runtime always agree.
+    Includes BOTH halves of the double-gate:
+      - ``env_capability_enabled`` — ``AVT_WHISPER_ALIGN_ENABLED=1`` (ops
+        capability switch). CodeX P1 follow-up #2 (2026-05-05): if this
+        is omitted from the fingerprint, the natural rollout sequence
+        (admin opts in BEFORE ops opens env) leaves cached proportional
+        drafts undisturbed when env is later flipped on. Including it
+        means env state changes also invalidate caches.
+      - ``admin_*`` fields from admin_settings.json (D-1 + D-5).
+
+    CodeX P1 (2026-05-05): admin policy alone in the fingerprint
+    invalidates caches when admin flips the master switch / trigger /
+    model / skip_cache. Adding env_capability_enabled completes the
+    picture — any change to the EFFECTIVE gate (env AND admin)
+    triggers a rebuild on next trigger.
 
     Read failure / missing file → returns the dataclass defaults (the
     reader is defensive); fingerprint stays stable. We never raise
     here — fingerprint computation is a hot path.
     """
+    env_capability = os.environ.get("AVT_WHISPER_ALIGN_ENABLED", "") == "1"
     try:
         from services.admin_settings import read_whisper_alignment_settings
         s = read_whisper_alignment_settings()
         return {
-            "enabled": s.enabled,
+            "env_capability_enabled": env_capability,
+            "admin_enabled": s.enabled,
             "trigger": s.trigger,
             "skip_cache": s.skip_cache,
             "model": s.model,
@@ -209,7 +221,8 @@ def _whisper_policy_snapshot() -> dict:
     except Exception:  # noqa: BLE001 — fingerprint must never crash trigger
         # Fall back to the documented defaults.
         return {
-            "enabled": False,
+            "env_capability_enabled": env_capability,
+            "admin_enabled": False,
             "trigger": "deliverable",
             "skip_cache": False,
             "model": "small",

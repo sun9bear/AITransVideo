@@ -118,10 +118,23 @@ def ensure_whisper_aligned_subtitles(project_dir: str | Path) -> dict:
             elapsed_ms=int((time.monotonic() - t0) * 1000),
         ).to_dict()
 
-    # ---- Fast path: existing cues already whisper-aligned + matches fp ----
+    # ---- Read current admin policy (skip_cache + model) ----
+    # CodeX P1 follow-up #2 (2026-05-05): the fast path used to look only
+    # at audio fingerprint match, ignoring whisper_alignment_model and
+    # whisper_alignment_skip_cache. That meant admin switching small→
+    # medium would not regenerate (cues kept old-model timing in the zip),
+    # and the skip_cache=true "force fresh" lever was silently swallowed.
+    # Both fixes:
+    #   - skip_cache=true: bypass fast path entirely
+    #   - model: stamp current model into payload + compare on fast-path read
+    from services.admin_settings import read_whisper_alignment_settings
+    admin = read_whisper_alignment_settings()
+
+    # ---- Fast path: existing cues already whisper-aligned + matches fp + matches model ----
+    # Bypassed entirely when admin asks for a force-fresh run (skip_cache).
     cues_path = project_dir / "output" / "subtitle_cues.json"
     expected_fp = _compute_alignment_fingerprint(segs)
-    if cues_path.is_file():
+    if not admin.skip_cache and cues_path.is_file():
         try:
             payload = json.loads(cues_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError, ValueError):
@@ -129,6 +142,7 @@ def ensure_whisper_aligned_subtitles(project_dir: str | Path) -> dict:
         if isinstance(payload, dict):
             cues = payload.get("cues", [])
             stamped_fp = payload.get("alignment_fingerprint")
+            stamped_model = payload.get("alignment_model")
             all_whisper = (
                 cues
                 and all(
@@ -136,7 +150,11 @@ def ensure_whisper_aligned_subtitles(project_dir: str | Path) -> dict:
                     for c in cues
                 )
             )
-            if all_whisper and stamped_fp == expected_fp:
+            if (
+                all_whisper
+                and stamped_fp == expected_fp
+                and stamped_model == admin.model
+            ):
                 return EnsureStatus(
                     action="already_aligned",
                     whisper_invoked=False,
@@ -144,7 +162,9 @@ def ensure_whisper_aligned_subtitles(project_dir: str | Path) -> dict:
                 ).to_dict()
 
     # ---- Slow path: regenerate via cue pipeline with whisper enabled ----
-    blocks_processed = _regenerate_whisper_cues(project_dir, segs, expected_fp)
+    blocks_processed = _regenerate_whisper_cues(
+        project_dir, segs, expected_fp, model=admin.model,
+    )
     return EnsureStatus(
         action="regenerated",
         whisper_invoked=True,
@@ -224,6 +244,8 @@ def _regenerate_whisper_cues(
     project_dir: Path,
     segs: list[dict],
     fingerprint: str,
+    *,
+    model: str,
 ) -> int:
     """Build cues with whisper enabled and write all output files.
 
@@ -232,6 +254,11 @@ def _regenerate_whisper_cues(
     the already-deployed Phase A/B/C plumbing — segment_text() for cue
     splitting, build_cues_with_char_times() for whisper-driven timing,
     cue_pipeline.build_subtitle_cues_for_blocks() as the orchestrator.
+
+    ``model`` is stamped into ``subtitle_cues.json::alignment_model`` so
+    the next ensure call can detect "admin switched models since this
+    payload was produced" without rerunning whisper to find out
+    (CodeX P1 follow-up #2, 2026-05-05).
     """
     # Lazy imports to keep the deliverable-handler import surface small.
     from core.models import SemanticBlock, SubtitleLine
@@ -321,6 +348,12 @@ def _regenerate_whisper_cues(
         "schema_version": "subtitle_cues_v2",
         "project_id": project_id,
         "alignment_fingerprint": fingerprint,
+        # CodeX P1 follow-up #2 (2026-05-05): stamp the whisper model so
+        # the next ensure call's fast path can detect a model switch
+        # without spawning whisper to find out. Model is part of the
+        # cache key in run_whisper_subprocess_cached too — old sidecars
+        # keyed by old model don't get reused.
+        "alignment_model": model,
         "cues": cues_serialized,
     }
     (output_dir / "subtitle_cues.json").write_text(

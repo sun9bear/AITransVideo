@@ -142,21 +142,30 @@ def test_returns_already_aligned_when_cues_are_whisper_with_matching_fingerprint
     tmp_path, monkeypatch,
 ):
     """Cues already carry whisper source AND fingerprint matches the
-    current aligned WAV bytes → no work, no whisper invocation."""
+    current aligned WAV bytes AND stamped model matches admin model
+    → no work, no whisper invocation."""
     monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
     monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
     (tmp_path / "admin_settings.json").write_text(
-        json.dumps({"whisper_alignment_enabled": True}), encoding="utf-8",
+        json.dumps({
+            "whisper_alignment_enabled": True,
+            "whisper_alignment_model": "small",
+        }),
+        encoding="utf-8",
     )
 
     project_dir = _build_minimal_project(
         tmp_path, n_segments=2,
         cues_source="semantic_block_v2_whisper_aligned",
     )
-    # Add fingerprint matching current WAV bytes
+    # Add fingerprint matching current WAV bytes + stamped model.
+    # CodeX P1 follow-up #2 (2026-05-05) made the fast path require both;
+    # missing alignment_model treats the payload as model-unknown and
+    # forces regeneration (one-time rebuild for legacy payloads).
     cues_path = project_dir / "output" / "subtitle_cues.json"
     cues_payload = json.loads(cues_path.read_text(encoding="utf-8"))
     cues_payload["alignment_fingerprint"] = _expected_fingerprint(project_dir)
+    cues_payload["alignment_model"] = "small"
     cues_path.write_text(json.dumps(cues_payload, ensure_ascii=False, indent=2),
                          encoding="utf-8")
 
@@ -507,6 +516,189 @@ def test_regenerates_when_wav_overwritten_under_stale_sidecar(
     # And the cue_pipeline did invoke whisper for at least the modified
     # segment (others may cache-hit at the subprocess level — that's fine).
     assert len(fake_run_calls) >= 1
+
+
+# ---------------------------------------------------------------------------
+# CodeX P1 follow-up #2 (2026-05-05): already_aligned fast path must
+# respect admin model + skip_cache, not just the audio fingerprint.
+#
+# Regression: the fast path checked
+#   - all cues carry whisper source
+#   - stamped audio fingerprint matches current WAV bytes
+# but ignored:
+#   - the model field (admin switching small → medium needs a fresh
+#     transcript even though audio is unchanged)
+#   - skip_cache=true (admin saying "force fresh" was being silently
+#     swallowed by the fast path)
+# Result on materials_pack: SRT file in zip kept old-model timing
+# despite admin having flipped to a larger model. On Jianying: top-level
+# fingerprint already invalidates (model is in _whisper_policy_snapshot),
+# but the inner ensure call still returned already_aligned and produced
+# the stale SRT, which then went into the rebuilt zip.
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_regenerates_when_admin_model_changes(tmp_path, monkeypatch):
+    """First run with model=small produces whisper-aligned cues stamped
+    with that model; admin then switches to medium. ensure must NOT
+    return ``already_aligned`` — the transcripts were produced by a
+    different model and should be regenerated.
+
+    Regression for: admin can change ``whisper_alignment_model`` but
+    fast-path gate doesn't notice → stale SRT in deliverable zip."""
+    monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+    monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "admin_settings.json").write_text(
+        json.dumps({
+            "whisper_alignment_enabled": True,
+            "whisper_alignment_model": "small",
+        }),
+        encoding="utf-8",
+    )
+
+    project_dir = _build_minimal_project(
+        tmp_path, n_segments=2,
+        cues_source="semantic_block_v2_whisper_aligned",
+    )
+    cues_path = project_dir / "output" / "subtitle_cues.json"
+    cues_payload = json.loads(cues_path.read_text(encoding="utf-8"))
+    # Stamp the audio fingerprint as if this run was produced under
+    # model=small — the audio is unchanged.
+    cues_payload["alignment_fingerprint"] = _expected_fingerprint(project_dir)
+    cues_payload["alignment_model"] = "small"
+    cues_path.write_text(json.dumps(cues_payload, ensure_ascii=False, indent=2),
+                         encoding="utf-8")
+
+    # Now admin switches to medium.
+    (tmp_path / "admin_settings.json").write_text(
+        json.dumps({
+            "whisper_alignment_enabled": True,
+            "whisper_alignment_model": "medium",
+        }),
+        encoding="utf-8",
+    )
+
+    from services.subtitles.ensure_whisper_alignment import (
+        ensure_whisper_aligned_subtitles,
+    )
+
+    fake_run_calls: list[str] = []
+
+    def _fake_whisper_cached(wav_path, *args, **kwargs):
+        fake_run_calls.append(str(wav_path))
+        return [{"start_ms": 0, "end_ms": 100, "text": "fresh-medium"}]
+
+    monkeypatch.setattr(
+        "modules.subtitles.cue_pipeline._run_whisper_cached",
+        _fake_whisper_cached,
+    )
+
+    status = ensure_whisper_aligned_subtitles(project_dir)
+
+    assert status["action"] == "regenerated", (
+        f"Model switch (small→medium) must trigger regeneration, "
+        f"got action={status['action']!r}. The fast path is ignoring "
+        f"the admin model field."
+    )
+    assert status["whisper_invoked"] is True
+    assert len(fake_run_calls) >= 1
+
+
+def test_ensure_skip_cache_bypasses_already_aligned_fast_path(
+    tmp_path, monkeypatch,
+):
+    """When admin sets ``whisper_alignment_skip_cache=true``, the
+    already_aligned fast path must be bypassed — even if cues are
+    whisper-aligned and audio fingerprint matches. This is the admin's
+    explicit "force fresh transcription" lever; if the fast path
+    swallows it, the lever has zero effect."""
+    monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+    monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "admin_settings.json").write_text(
+        json.dumps({
+            "whisper_alignment_enabled": True,
+            "whisper_alignment_skip_cache": True,  # ← the lever
+        }),
+        encoding="utf-8",
+    )
+
+    project_dir = _build_minimal_project(
+        tmp_path, n_segments=2,
+        cues_source="semantic_block_v2_whisper_aligned",
+    )
+    cues_path = project_dir / "output" / "subtitle_cues.json"
+    cues_payload = json.loads(cues_path.read_text(encoding="utf-8"))
+    cues_payload["alignment_fingerprint"] = _expected_fingerprint(project_dir)
+    cues_payload["alignment_model"] = "small"
+    cues_path.write_text(json.dumps(cues_payload, ensure_ascii=False, indent=2),
+                         encoding="utf-8")
+
+    from services.subtitles.ensure_whisper_alignment import (
+        ensure_whisper_aligned_subtitles,
+    )
+
+    fake_run_calls: list[str] = []
+
+    def _fake_whisper_cached(wav_path, *args, **kwargs):
+        fake_run_calls.append(str(wav_path))
+        return [{"start_ms": 0, "end_ms": 100, "text": "fresh"}]
+
+    monkeypatch.setattr(
+        "modules.subtitles.cue_pipeline._run_whisper_cached",
+        _fake_whisper_cached,
+    )
+
+    status = ensure_whisper_aligned_subtitles(project_dir)
+
+    assert status["action"] == "regenerated", (
+        f"skip_cache=true must bypass the already_aligned fast path; "
+        f"got action={status['action']!r}. The lever is being ignored."
+    )
+    assert status["whisper_invoked"] is True
+
+
+def test_ensure_already_aligned_when_model_matches_and_no_skip_cache(
+    tmp_path, monkeypatch,
+):
+    """Sanity / no-regression: when stamped model matches admin model
+    AND skip_cache is false AND audio fingerprint matches → fast path
+    fires (no whisper invocation, action=already_aligned). This is the
+    intended common case: same admin policy, same audio bytes, idempotent
+    repeat trigger."""
+    monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+    monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "admin_settings.json").write_text(
+        json.dumps({
+            "whisper_alignment_enabled": True,
+            "whisper_alignment_model": "small",
+            "whisper_alignment_skip_cache": False,
+        }),
+        encoding="utf-8",
+    )
+
+    project_dir = _build_minimal_project(
+        tmp_path, n_segments=2,
+        cues_source="semantic_block_v2_whisper_aligned",
+    )
+    cues_path = project_dir / "output" / "subtitle_cues.json"
+    cues_payload = json.loads(cues_path.read_text(encoding="utf-8"))
+    cues_payload["alignment_fingerprint"] = _expected_fingerprint(project_dir)
+    cues_payload["alignment_model"] = "small"
+    cues_path.write_text(json.dumps(cues_payload, ensure_ascii=False, indent=2),
+                         encoding="utf-8")
+
+    from services.subtitles.ensure_whisper_alignment import (
+        ensure_whisper_aligned_subtitles,
+    )
+
+    with patch(
+        "modules.subtitles.cue_pipeline._run_whisper_cached",
+        side_effect=AssertionError("whisper should not be invoked on fast-path hit"),
+    ):
+        status = ensure_whisper_aligned_subtitles(project_dir)
+
+    assert status["action"] == "already_aligned"
+    assert status["whisper_invoked"] is False
 
 
 def test_content_hash_for_wav_returns_actual_bytes_not_sidecar(tmp_path):

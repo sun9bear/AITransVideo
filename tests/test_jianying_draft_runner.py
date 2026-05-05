@@ -1754,5 +1754,116 @@ class TestWhisperAlignmentInvalidatesCachedDraft:
         assert third.jianying_draft_zip_path == second.jianying_draft_zip_path
 
 
+# ---------------------------------------------------------------------------
+# CodeX P1 follow-up #2 (2026-05-05): env capability flip must invalidate
+# cached jianying drafts even when admin policy is unchanged.
+#
+# Regression: _whisper_policy_snapshot() only read the four
+# admin_settings.json fields, NOT the AVT_WHISPER_ALIGN_ENABLED env var.
+# Rollout sequence:
+#   1. admin saves whisper_alignment_enabled=true
+#   2. ops env still off → effective gate is closed → trigger generates
+#      proportional zip with fingerprint = F_admin_only
+#   3. ops sets AVT_WHISPER_ALIGN_ENABLED=1 → effective gate opens
+#   4. admin policy snapshot is unchanged → fingerprint still F_admin_only
+#      → trigger() returns cached proportional zip → admin's whisper
+#      toggle has zero effect even though both gates are now open
+# This is the precise scenario double-gate rollout creates: admin
+# typically opts in BEFORE ops capability is rolled. Fix: include the
+# env capability bool in the fingerprint snapshot so env changes
+# invalidate caches just like admin changes do.
+# ---------------------------------------------------------------------------
+
+
+class TestEnvCapabilityFlipsInvalidateCachedDraft:
+    """Same shape as TestWhisperAlignmentInvalidatesCachedDraft but
+    flipping the OPS env capability instead of the admin policy."""
+
+    def test_env_capability_off_to_on_invalidates_cached_proportional_zip(
+        self, tmp_path, monkeypatch,
+    ):
+        """Phase 1: admin enabled=true but env off → proportional zip.
+        Phase 2: ops sets env=1 (admin unchanged) → next trigger MUST
+        rebuild. Without env in fingerprint this would cache-hit and
+        admin's earlier opt-in would never take effect."""
+        # Phase 1 setup: admin opted in BEFORE env was opened.
+        monkeypatch.delenv("AVT_WHISPER_ALIGN_ENABLED", raising=False)
+        monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+        (tmp_path / "admin_settings.json").write_text(
+            json.dumps({
+                "whisper_alignment_enabled": True,
+                "whisper_alignment_trigger": "deliverable",
+            }),
+            encoding="utf-8",
+        )
+
+        store = _make_store(tmp_path)
+        project_dir = _make_project_dir(tmp_path)
+        store.save_job(_make_record(project_dir=str(project_dir)))
+        (project_dir / "source.mp4").write_bytes(b"src")
+        (project_dir / "dubbed.wav").write_bytes(b"dub")
+        (project_dir / "subtitles.srt").write_text("proportional", encoding="utf-8")
+
+        ensure_calls: list[str] = []
+
+        def _fake_ensure(project_dir_arg):
+            ensure_calls.append(str(project_dir_arg))
+            return {"action": "regenerated", "whisper_invoked": True,
+                    "blocks_processed": 5, "elapsed_ms": 12345}
+
+        monkeypatch.setattr(
+            "services.subtitles.ensure_whisper_alignment.ensure_whisper_aligned_subtitles",
+            _fake_ensure,
+        )
+
+        backend = mock.MagicMock()
+        backend.write.return_value = _make_ok_result(
+            zip_path=str(tmp_path / "first.zip"),
+        )
+        runner = _make_runner(store, backend)
+
+        # Phase 1: env off → effective gate closed → ensure_helper not
+        # invoked (the runner short-circuits via _whisper_align_enabled).
+        runner.trigger("job-test-001")
+        first = _wait_for_jianying_status(store, "job-test-001", "succeeded")
+        Path(first.jianying_draft_zip_path).write_bytes(b"first-zip")
+        assert ensure_calls == [], (
+            "Phase 1 control: env off → no whisper invocation regardless "
+            "of admin policy"
+        )
+        first_fp = first.jianying_draft_fingerprint
+
+        # Phase 2: ops opens env. Admin already has enabled=true; nothing
+        # else changes (same project files, same admin policy).
+        monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+
+        backend.write.reset_mock()
+        backend.write.return_value = _make_ok_result(
+            zip_path=str(tmp_path / "second.zip"),
+        )
+
+        runner.trigger("job-test-001")
+        second = _wait_for_jianying_status(store, "job-test-001", "succeeded")
+        Path(second.jianying_draft_zip_path).write_bytes(b"second-zip")
+
+        # The whisper helper must have run on this rebuild.
+        assert ensure_calls == [str(project_dir)], (
+            "After ops opens env capability, the next trigger MUST "
+            "rebuild and run ensure_whisper_aligned_subtitles. "
+            f"Got ensure_calls={ensure_calls!r}."
+        )
+        assert backend.write.call_count == 1, (
+            "Phase 2 trigger MUST rebuild (backend.write called once). "
+            "Cache-hit on the env-unaware fingerprint would mean call=0."
+        )
+        # Fingerprint must change between phase 1 and phase 2 — env
+        # capability is now part of the fingerprint inputs.
+        assert second.jianying_draft_fingerprint != first_fp, (
+            "Stored fingerprint must differ between env-off phase 1 and "
+            "env-on phase 2 — otherwise next trigger would also rebuild "
+            "perpetually."
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
