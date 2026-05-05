@@ -38,6 +38,37 @@ def _is_force_dsp_alignment_enabled() -> bool:
         pass
     return False
 
+
+def _snapshot_first_pass_text(segment: DubbingSegment) -> None:
+    """Snapshot the segment's CURRENT cn_text into the audit fields.
+
+    Called at every TTS pass entry into alignment (initial pass, post-TTS
+    rewrite re-pass). Two fields, snapshotted at the same time but with
+    different mutability:
+
+    - ``first_pass_cn_text`` — set ONLY the first time. Preserved across
+      subsequent post-TTS rewrites because downstream voice-speed-profile
+      sampling pairs ``first_pass_duration_ms`` with this text and would
+      poison the profile if paired with a rewritten version
+      (see ``pipeline/process.py:7423-7425``).
+
+    - ``tts_input_cn_text`` — ALWAYS overwritten with the current cn_text.
+      Records "the text that produced the audio currently on disk".
+      Re-stamped on every post-TTS rewrite. Never re-stamped at user-edit
+      time (the editing endpoints don't call this), which is exactly how
+      we detect text↔audio drift downstream.
+
+    Empty / whitespace-only cn_text is treated defensively: don't poison
+    a previously-set non-empty stamp with "". TTS never runs on empty
+    text in normal flow, so this only affects pathological inputs.
+    """
+    current = (segment.cn_text or "").strip()
+    if not current:
+        return
+    if not getattr(segment, "first_pass_cn_text", ""):
+        segment.first_pass_cn_text = current
+    segment.tts_input_cn_text = current
+
 FIRST_REWRITE_TARGET_RATIO_WINDOWS = {
     "shrink": (0.95, 1.12),
     "expand": (0.88, 1.08),
@@ -241,8 +272,9 @@ class SegmentAligner:
         # overwrite segment.actual_duration_ms below, so we save it here once.
         # `target_duration_ms > 0` is already guaranteed by the check above.
         segment.first_pass_duration_ms = current_actual_duration_ms
-        if not getattr(segment, "first_pass_cn_text", ""):
-            segment.first_pass_cn_text = segment.cn_text.strip()
+        # 2026-05-04 P0a — snapshot the text we just synthesized. Captures
+        # tts_input_cn_text every pass; first_pass_cn_text only first pass.
+        _snapshot_first_pass_text(segment)
         segment.first_pass_error_pct = (
             (current_actual_duration_ms - target_duration_ms) / target_duration_ms
         )
