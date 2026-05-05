@@ -5,20 +5,151 @@ and the subtitle-cue-generation-v2 abstractions (T1-T7).  It intentionally impor
 from core.models — that coupling is acceptable here because cue_pipeline is the
 designated integration layer (T9 / OutputDispatcher).
 
+2026-05-04 Phase C addition: optional whisper-aligned cue boundaries.
+When ``AVT_WHISPER_ALIGN_ENABLED=1`` and a block is in-sync (cn_text
+matches tts_input_cn_text via Phase B normalize), the pipeline runs
+faster-whisper on the block's aligned audio and uses the resulting
+char-level timestamps to drive cue boundaries (vs the legacy
+proportional layout). ANY failure path — flag off, drift, missing
+audio, whisper subprocess error, DTW disjoint, build_cues_with_char_times
+returns [] — falls back to ``build_cues_for_block`` so publish never
+breaks because of whisper trouble. CodeX guardrails locked in.
+
 Plan: docs/plans/2026-05-02-subtitle-cue-generation-v2-plan.md §6, §10 Phase 1a
+      docs/plans/2026-05-04-subtitle-audio-sync-plan.md Phase C Task C3
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
+from pathlib import Path
 
 from core.models import SemanticBlock, SubtitleLine
-from modules.subtitles.cue_builder import build_cues_for_block
-from modules.subtitles.cue_models import SubtitleCue
+from modules.subtitles.cue_builder import (
+    build_cues_for_block,
+    build_cues_with_char_times,
+)
+from modules.subtitles.cue_models import SubtitleCue, normalize
 from modules.subtitles.cue_validator import BlockSpec, ValidationReport, validate_cues
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Whisper alignment feature flag + drift gate
+# ---------------------------------------------------------------------------
+
+
+def _whisper_align_enabled() -> bool:
+    """Read the feature flag fresh every call so deploy-time env changes
+    take effect without re-importing the module. Default off (CodeX
+    guardrail #1) — only ``AVT_WHISPER_ALIGN_ENABLED == "1"`` activates."""
+    return os.environ.get("AVT_WHISPER_ALIGN_ENABLED", "") == "1"
+
+
+def _block_is_in_sync(block: SemanticBlock) -> bool:
+    """Drift gate consistent with Phase B validator (CodeX guardrail #4).
+
+    Empty ``tts_input_cn_text`` → treated as in-sync (legacy / pre-rollout
+    block, Phase A's load-time backfill should have populated it).
+    Otherwise: in-sync iff ``normalize(merged) == normalize(tts_input)`` —
+    same comparison used in ``cue_validator.validate_cues`` so the C3
+    decision matches what subtitle_quality_report.json says.
+    """
+    tts_input = (block.tts_input_cn_text or "").strip()
+    if not tts_input:
+        return True
+    return normalize(tts_input) == normalize(block.merged_cn_text)
+
+
+def _try_whisper_aligned_cues(
+    block: SemanticBlock,
+    *,
+    en_text: str,
+    block_start_ms: int,
+    block_end_ms: int,
+    min_display_ms: int,
+) -> list[SubtitleCue] | None:
+    """Try to build whisper-aligned cues for a block.
+
+    Returns ``None`` if any precondition or step fails — caller falls
+    back to the proportional path. Order of fallback gates:
+
+    1. Feature flag off → None (no whisper invocation)
+    2. Drift block → None
+    3. aligned_audio_path is None / file missing → None
+    4. Whisper subprocess raises (RuntimeError, TimeoutExpired, JSONError) → None
+    5. DTW returns [] (disjoint / empty) → None
+    6. build_cues_with_char_times returns [] (anomaly) → None
+
+    Successful path returns a non-empty list of cues with
+    ``source = "semantic_block_v2_whisper_aligned"``.
+    """
+    if not _whisper_align_enabled():
+        return None
+
+    if not _block_is_in_sync(block):
+        return None
+
+    audio_path = block.aligned_audio_path
+    if not audio_path:
+        return None
+    audio_pathobj = Path(audio_path)
+    if not audio_pathobj.is_file():
+        logger.debug(
+            "whisper-align: block %s aligned_audio_path %s not on disk; "
+            "falling back", block.block_id, audio_path,
+        )
+        return None
+
+    # Lazy import — keeps the dependency optional. If the whisper_align
+    # module fails to import (e.g. faster-whisper not installed yet),
+    # treat as fallback rather than crashing the whole pipeline.
+    try:
+        from services.whisper_align import run_whisper_subprocess
+        from services.whisper_align.dtw import align_chars_to_words
+    except ImportError as exc:
+        logger.warning(
+            "whisper-align: import failed (%s); falling back for block %s",
+            exc, block.block_id,
+        )
+        return None
+
+    # Subprocess invocation — any exception is fallback territory.
+    try:
+        words = run_whisper_subprocess(audio_path, language="zh")
+    except Exception as exc:  # noqa: BLE001 — whisper subprocess errors are
+                              # diverse (RuntimeError, TimeoutExpired,
+                              # JSONDecodeError, ImportError from runner...)
+        logger.warning(
+            "whisper-align: subprocess failed for block %s (%s); falling back",
+            block.block_id, exc,
+        )
+        return None
+
+    if not words:
+        return None
+
+    char_times = align_chars_to_words(block.merged_cn_text, words)
+    if not char_times:
+        return None
+
+    cues = build_cues_with_char_times(
+        block_id=block.block_id,
+        speaker_id=block.speaker_id,
+        speaker_name=block.speaker_name,
+        cn_text=block.merged_cn_text,
+        en_text=en_text,
+        block_start_ms=block_start_ms,
+        block_end_ms=block_end_ms,
+        char_times=char_times,
+        min_display_ms=min_display_ms,
+    )
+    if not cues:
+        return None
+    return cues
 
 
 # ---------------------------------------------------------------------------
@@ -164,27 +295,40 @@ def build_subtitle_cues_for_blocks(
         # Derive en_text from SubtitleLines referenced by this block
         en_text = _derive_en_text(block, caption_map)
 
-        # Build cues (may raise ValueError for truly bad inputs; propagate upward)
-        try:
-            cues = build_cues_for_block(
-                block_id=block.block_id,
-                speaker_id=block.speaker_id,
-                speaker_name=block.speaker_name,
-                cn_text=block.merged_cn_text,
-                en_text=en_text,
-                block_start_ms=block_start_ms,
-                block_end_ms=block_end_ms,
-                min_display_ms=min_display_ms,
-            )
-        except ValueError:
-            logger.warning(
-                "cue_pipeline: build_cues_for_block raised ValueError for block %r "
-                "(start=%d end=%d); skipping",
-                block.block_id,
-                block_start_ms,
-                block_end_ms,
-            )
-            continue
+        # 2026-05-04 Phase C: opportunistic whisper-aligned cues. Returns
+        # None for any precondition failure / runtime error, so we always
+        # have the proportional fallback below as the safety net. CodeX
+        # guardrail #5: publish must never fail because of whisper trouble.
+        cues: list[SubtitleCue] | None = _try_whisper_aligned_cues(
+            block,
+            en_text=en_text,
+            block_start_ms=block_start_ms,
+            block_end_ms=block_end_ms,
+            min_display_ms=min_display_ms,
+        )
+
+        if cues is None:
+            # Build cues via the proportional path (existing behavior).
+            try:
+                cues = build_cues_for_block(
+                    block_id=block.block_id,
+                    speaker_id=block.speaker_id,
+                    speaker_name=block.speaker_name,
+                    cn_text=block.merged_cn_text,
+                    en_text=en_text,
+                    block_start_ms=block_start_ms,
+                    block_end_ms=block_end_ms,
+                    min_display_ms=min_display_ms,
+                )
+            except ValueError:
+                logger.warning(
+                    "cue_pipeline: build_cues_for_block raised ValueError for block %r "
+                    "(start=%d end=%d); skipping",
+                    block.block_id,
+                    block_start_ms,
+                    block_end_ms,
+                )
+                continue
 
         if cues:
             all_cues.extend(cues)

@@ -434,3 +434,237 @@ def test_quality_report_json_exposes_aggregate_drift_count(tmp_path):
 
     assert data["text_audio_drift_count"] == 2
     assert data["validation_status"] == "needs_review"
+
+
+# ---------------------------------------------------------------------------
+# Phase C C3: cue_pipeline integration with feature flag + 5 fallback paths
+# ---------------------------------------------------------------------------
+#
+# CodeX-required regression classes (all covered below):
+#   - flag off
+#   - sync block + audio + flag on → whisper used
+#   - drift block (skip)
+#   - no aligned_audio_path (skip)
+#   - whisper subprocess failure (fallback)
+#   - DTW empty result (fallback)
+#   - short_merge / no aligned audio (fallback)
+
+
+def _make_block(
+    block_id: str,
+    cn_text: str,
+    *,
+    tts_input_cn_text: str | None = None,
+    aligned_audio_path: str | None = None,
+    first_start_ms: int = 0,
+    last_end_ms: int = 5000,
+    target_duration_ms: int = 5000,
+):
+    from core.models import SemanticBlock
+    return SemanticBlock(
+        block_id=block_id, speaker_id="A", speaker_name="A",
+        original_srt_indices=[1],
+        first_start_ms=first_start_ms, last_end_ms=last_end_ms,
+        target_duration_ms=target_duration_ms,
+        merged_cn_text=cn_text,
+        tts_input_cn_text=(tts_input_cn_text if tts_input_cn_text is not None else cn_text),
+        aligned_audio_path=aligned_audio_path,
+    )
+
+
+def _make_subtitle_lines(*texts):
+    from core.models import SubtitleLine
+    return [
+        SubtitleLine(index=i + 1, start_ms=i * 5000, end_ms=(i + 1) * 5000,
+                     speaker_id="A", speaker_name="A",
+                     en_text=f"en{i}", cn_text=t)
+        for i, t in enumerate(texts)
+    ]
+
+
+def test_c3_flag_off_skips_whisper_alignment(monkeypatch, tmp_path):
+    """When AVT_WHISPER_ALIGN_ENABLED is unset / != "1", whisper is NEVER
+    invoked. All cues come from the proportional path — source tag does
+    NOT contain "whisper"."""
+    monkeypatch.delenv("AVT_WHISPER_ALIGN_ENABLED", raising=False)
+    from modules.subtitles.cue_pipeline import build_subtitle_cues_for_blocks
+
+    # Whisper must not be called — set up a sentinel that would crash if it were
+    def _explode(*a, **kw):
+        raise AssertionError("whisper should not be called when flag is off")
+    monkeypatch.setattr(
+        "services.whisper_align.run_whisper_subprocess", _explode,
+    )
+
+    audio = tmp_path / "seg.wav"
+    audio.write_bytes(b"fake-wav")
+    block = _make_block("b1", "你好。", aligned_audio_path=str(audio))
+    result = build_subtitle_cues_for_blocks([block], _make_subtitle_lines("你好。"))
+    assert all("whisper" not in c.source.lower() for c in result.cues)
+
+
+def test_c3_flag_on_sync_block_uses_whisper(monkeypatch, tmp_path):
+    """Flag on + drift==False + audio path exists → whisper subprocess
+    invoked, char_times feed into cue construction, cues carry the
+    whisper-aligned source tag."""
+    monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+    from modules.subtitles.cue_pipeline import build_subtitle_cues_for_blocks
+
+    fake_words = [
+        {"start_ms": 100, "end_ms": 800, "text": "你好"},
+    ]
+    monkeypatch.setattr(
+        "services.whisper_align.run_whisper_subprocess",
+        lambda *a, **kw: fake_words,
+    )
+
+    audio = tmp_path / "seg.wav"
+    audio.write_bytes(b"fake-wav")
+    # 1-cue text "你好" — no segmenter split
+    block = _make_block("b1", "你好",
+                        aligned_audio_path=str(audio),
+                        first_start_ms=10_000, last_end_ms=11_000,
+                        target_duration_ms=1_000)
+    result = build_subtitle_cues_for_blocks([block], _make_subtitle_lines("你好"))
+    assert len(result.cues) == 1
+    assert "whisper" in result.cues[0].source.lower()
+    # Local 100..800ms + global offset 10_000 → 10_100..10_800
+    assert result.cues[0].start_ms == 10_100
+    assert result.cues[0].end_ms == 10_800
+
+
+def test_c3_drift_block_skips_whisper_uses_proportional(monkeypatch, tmp_path):
+    """Drift block (cn_text != tts_input_cn_text per normalize) MUST skip
+    whisper and use proportional path — Phase B's drift detection gate
+    is consumed here exactly as CodeX guardrail #4 requires."""
+    monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+    from modules.subtitles.cue_pipeline import build_subtitle_cues_for_blocks
+
+    def _explode(*a, **kw):
+        raise AssertionError("whisper should not be called for drift block")
+    monkeypatch.setattr(
+        "services.whisper_align.run_whisper_subprocess", _explode,
+    )
+
+    audio = tmp_path / "seg.wav"
+    audio.write_bytes(b"fake-wav")
+    drift_block = _make_block(
+        "b1", "新版文字",  # current cn_text
+        tts_input_cn_text="原版文字",  # what audio was made from
+        aligned_audio_path=str(audio),
+    )
+    result = build_subtitle_cues_for_blocks(
+        [drift_block], _make_subtitle_lines("新版文字"),
+    )
+    # Cues built — but NOT via whisper path
+    assert all("whisper" not in c.source.lower() for c in result.cues)
+
+
+def test_c3_block_without_aligned_audio_skips_whisper(monkeypatch, tmp_path):
+    """A SemanticBlock with aligned_audio_path=None (e.g. short_merge
+    base where audio is freshly cleared) MUST skip whisper. Falls
+    through to proportional path."""
+    monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+    from modules.subtitles.cue_pipeline import build_subtitle_cues_for_blocks
+
+    def _explode(*a, **kw):
+        raise AssertionError("whisper should not be called when no audio")
+    monkeypatch.setattr(
+        "services.whisper_align.run_whisper_subprocess", _explode,
+    )
+
+    block = _make_block("b1", "你好。", aligned_audio_path=None)
+    result = build_subtitle_cues_for_blocks([block], _make_subtitle_lines("你好。"))
+    assert all("whisper" not in c.source.lower() for c in result.cues)
+
+
+def test_c3_block_with_missing_audio_file_skips_whisper(monkeypatch, tmp_path):
+    """aligned_audio_path is set but the file is missing on disk
+    (deleted, copy_as_new mid-flight, etc.) → skip whisper, fall back."""
+    monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+    from modules.subtitles.cue_pipeline import build_subtitle_cues_for_blocks
+
+    def _explode(*a, **kw):
+        raise AssertionError("whisper should not be called when audio missing")
+    monkeypatch.setattr(
+        "services.whisper_align.run_whisper_subprocess", _explode,
+    )
+
+    block = _make_block(
+        "b1", "你好。", aligned_audio_path=str(tmp_path / "does_not_exist.wav"),
+    )
+    result = build_subtitle_cues_for_blocks([block], _make_subtitle_lines("你好。"))
+    assert all("whisper" not in c.source.lower() for c in result.cues)
+
+
+def test_c3_whisper_subprocess_failure_falls_back_to_proportional(monkeypatch, tmp_path):
+    """Whisper subprocess raises (model load failed, OOM, timeout) →
+    cue_pipeline catches and falls back to proportional. PUBLISH MUST
+    NOT FAIL just because whisper had a bad day — CodeX guardrail #5."""
+    monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+    from modules.subtitles.cue_pipeline import build_subtitle_cues_for_blocks
+
+    def _fail(*a, **kw):
+        raise RuntimeError("whisper subprocess failed (rc=1): cuda OOM")
+    monkeypatch.setattr(
+        "services.whisper_align.run_whisper_subprocess", _fail,
+    )
+
+    audio = tmp_path / "seg.wav"
+    audio.write_bytes(b"fake-wav")
+    block = _make_block("b1", "你好。", aligned_audio_path=str(audio))
+    result = build_subtitle_cues_for_blocks([block], _make_subtitle_lines("你好。"))
+    # Cues exist (publish proceeds) but via proportional path
+    assert len(result.cues) >= 1
+    assert all("whisper" not in c.source.lower() for c in result.cues)
+
+
+def test_c3_dtw_empty_result_falls_back_to_proportional(monkeypatch, tmp_path):
+    """Whisper succeeded but DTW returned [] (cn_text and whisper
+    transcript too disjoint to align). Cue pipeline falls back."""
+    monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+    from modules.subtitles.cue_pipeline import build_subtitle_cues_for_blocks
+
+    # Wrong-language whisper output → DTW disjoint → empty char_times
+    monkeypatch.setattr(
+        "services.whisper_align.run_whisper_subprocess",
+        lambda *a, **kw: [{"start_ms": 0, "end_ms": 1000,
+                            "text": "totally different english words here"}],
+    )
+
+    audio = tmp_path / "seg.wav"
+    audio.write_bytes(b"fake-wav")
+    block = _make_block("b1", "你好世界",
+                        aligned_audio_path=str(audio),
+                        first_start_ms=0, last_end_ms=1000,
+                        target_duration_ms=1000)
+    result = build_subtitle_cues_for_blocks([block], _make_subtitle_lines("你好世界"))
+    assert len(result.cues) >= 1
+    assert all("whisper" not in c.source.lower() for c in result.cues)
+
+
+def test_c3_drift_check_uses_normalize_consistent_with_phase_b(monkeypatch, tmp_path):
+    """The drift gate must use cue_models.normalize() — same as the
+    Phase B validator — so drift decisions in C3 match what
+    subtitle_quality_report.json says. CodeX guardrail #4."""
+    monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+    from modules.subtitles.cue_pipeline import build_subtitle_cues_for_blocks
+
+    # Trailing whitespace difference — normalize() collapses these to equal,
+    # so the drift gate should NOT trigger; whisper SHOULD run.
+    fake_words = [{"start_ms": 0, "end_ms": 800, "text": "你好"}]
+    monkeypatch.setattr(
+        "services.whisper_align.run_whisper_subprocess",
+        lambda *a, **kw: fake_words,
+    )
+
+    audio = tmp_path / "seg.wav"
+    audio.write_bytes(b"fake-wav")
+    block = _make_block("b1", "你好",
+                        tts_input_cn_text="  你好  ",  # only whitespace diff
+                        aligned_audio_path=str(audio),
+                        first_start_ms=0, last_end_ms=1000,
+                        target_duration_ms=1000)
+    result = build_subtitle_cues_for_blocks([block], _make_subtitle_lines("你好"))
+    # Treated as in-sync via normalize → whisper runs
+    assert any("whisper" in c.source.lower() for c in result.cues)
