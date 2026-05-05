@@ -164,6 +164,7 @@ def run_whisper_subprocess_cached(
     language: str = _DEFAULT_LANGUAGE,
     model: str = _DEFAULT_MODEL,
     timeout_sec: int = _DEFAULT_TIMEOUT_SEC,
+    skip_cache: bool = False,
 ) -> list[dict]:
     """Cache-aware variant of ``run_whisper_subprocess``.
 
@@ -178,30 +179,39 @@ def run_whisper_subprocess_cached(
     Cache I/O failures are advisory — corrupt cache, missing read perms,
     or a write failure all degrade to "compute fresh, return result".
     The transcribe call itself surfaces normally on subprocess error.
+
+    Phase D-5 (2026-05-05): ``skip_cache=True`` bypasses the cache
+    lookup and always runs fresh. The freshly-computed result is still
+    written to the cache (overwriting any prior entry), so subsequent
+    calls with ``skip_cache=False`` benefit. Used when admin sets
+    ``whisper_alignment_skip_cache=true`` to force re-transcription
+    (e.g. after an audio re-render that didn't change bytes — rare —
+    or just to validate cache freshness).
     """
     cache_path = _cache_path_for(wav_path, model=model, language=language)
 
-    # Lookup
-    try:
-        if cache_path.is_file():
-            cached = json.loads(cache_path.read_text(encoding="utf-8"))
-            if (
-                isinstance(cached, dict)
-                and cached.get("version") == _CACHE_FILE_VERSION
-                and isinstance(cached.get("words"), list)
-            ):
-                # Validate hash to detect "WAV bytes changed but cache
-                # file is stale" — cheaper than running whisper.
-                if cached.get("content_hash") == _hash_wav_bytes(wav_path):
-                    return list(cached["words"])
-    except (OSError, json.JSONDecodeError, ValueError) as exc:
-        # Corrupt cache: log at debug, fall through to fresh run.
-        logger.debug(
-            "whisper-align cache: ignoring unreadable cache at %s (%s)",
-            cache_path, exc,
-        )
+    # Lookup (skipped when admin asks for a fresh run)
+    if not skip_cache:
+        try:
+            if cache_path.is_file():
+                cached = json.loads(cache_path.read_text(encoding="utf-8"))
+                if (
+                    isinstance(cached, dict)
+                    and cached.get("version") == _CACHE_FILE_VERSION
+                    and isinstance(cached.get("words"), list)
+                ):
+                    # Validate hash to detect "WAV bytes changed but cache
+                    # file is stale" — cheaper than running whisper.
+                    if cached.get("content_hash") == _hash_wav_bytes(wav_path):
+                        return list(cached["words"])
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            # Corrupt cache: log at debug, fall through to fresh run.
+            logger.debug(
+                "whisper-align cache: ignoring unreadable cache at %s (%s)",
+                cache_path, exc,
+            )
 
-    # Cache miss / corrupt / hash mismatch → run fresh
+    # Cache miss / corrupt / hash mismatch / skip_cache → run fresh
     words = run_whisper_subprocess(
         wav_path, language=language, model=model, timeout_sec=timeout_sec,
     )

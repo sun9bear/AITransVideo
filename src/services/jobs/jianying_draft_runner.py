@@ -1005,11 +1005,15 @@ class JianyingDraftRunner:
             return  # JobRecord without project_dir — can't run; let
                     # _build_jianying_request fail with a clearer error.
 
-        # Pre-check the double-gate: if closed, skip the substep label
+        # Pre-check the gates: if closed, skip the substep label
         # entirely so users never see a transient "正在精准对齐字幕" blip.
+        # D-5: context="deliverable" — Jianying-draft is the prototypical
+        # deliverable handoff. trigger ∈ {"publish", "deliverable"} both
+        # permit; "manual" blocks the auto-trigger (admin must invoke
+        # the manual endpoint instead).
         try:
             from modules.subtitles.cue_pipeline import _whisper_align_enabled
-            if not _whisper_align_enabled():
+            if not _whisper_align_enabled(context="deliverable"):
                 return
         except Exception:  # noqa: BLE001 — flag check should never fail loudly
             logger.exception(

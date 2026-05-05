@@ -508,12 +508,17 @@ def test_c3_flag_on_sync_block_uses_whisper(monkeypatch, tmp_path):
     invoked, char_times feed into cue construction, cues carry the
     whisper-aligned source tag.
 
-    D-1: BOTH gates must be open (env + admin policy)."""
+    D-1: BOTH gates must be open (env + admin policy).
+    D-5: trigger='publish' so publish-context (default) permits."""
     monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
     monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
     import json as _json
     (tmp_path / "admin_settings.json").write_text(
-        _json.dumps({"whisper_alignment_enabled": True}), encoding="utf-8",
+        _json.dumps({
+            "whisper_alignment_enabled": True,
+            "whisper_alignment_trigger": "publish",
+        }),
+        encoding="utf-8",
     )
     from modules.subtitles.cue_pipeline import build_subtitle_cues_for_blocks
 
@@ -808,12 +813,20 @@ def test_d1_admin_setting_on_but_env_off_skips_whisper(monkeypatch, tmp_path):
 
 def test_d1_both_gates_open_invokes_whisper(monkeypatch, tmp_path):
     """Env capability + admin policy both on → whisper IS invoked.
-    Verifies the AND-gate actually ANDs (not OR by mistake)."""
+    Verifies the AND-gate actually ANDs (not OR by mistake).
+
+    D-5: explicitly set trigger='publish' so publish-context (default
+    on the build call) permits — without it the D-5 default
+    'deliverable' would skip publish."""
     monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
     monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
     import json
     (tmp_path / "admin_settings.json").write_text(
-        json.dumps({"whisper_alignment_enabled": True}), encoding="utf-8",
+        json.dumps({
+            "whisper_alignment_enabled": True,
+            "whisper_alignment_trigger": "publish",
+        }),
+        encoding="utf-8",
     )
 
     from modules.subtitles.cue_pipeline import build_subtitle_cues_for_blocks
@@ -855,6 +868,398 @@ def test_d1_both_gates_off_skips_whisper(monkeypatch, tmp_path):
     assert all("whisper" not in c.source.lower() for c in result.cues)
 
 
+# ---------------------------------------------------------------------------
+# D-5: trigger field semantics — when does whisper actually run?
+# ---------------------------------------------------------------------------
+
+
+def test_d5_trigger_publish_runs_whisper_at_publish(monkeypatch, tmp_path):
+    """trigger='publish' (admin opted into "every task gets whisper at
+    publish time") → cue_pipeline at publish time runs whisper."""
+    monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+    monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+    import json as _json
+    (tmp_path / "admin_settings.json").write_text(
+        _json.dumps({
+            "whisper_alignment_enabled": True,
+            "whisper_alignment_trigger": "publish",
+        }),
+        encoding="utf-8",
+    )
+    from modules.subtitles.cue_pipeline import build_subtitle_cues_for_blocks
+
+    whisper_calls: list = []
+
+    def _stub(*a, **kw):
+        whisper_calls.append(1)
+        return [{"start_ms": 0, "end_ms": 800, "text": "你好"}]
+    monkeypatch.setattr(
+        "modules.subtitles.cue_pipeline._run_whisper_cached", _stub,
+    )
+
+    audio = tmp_path / "seg.wav"
+    audio.write_bytes(b"fake")
+    block = _make_block(
+        "b1", "你好",
+        aligned_audio_path=str(audio),
+        first_start_ms=0, last_end_ms=1000,
+        target_duration_ms=1000,
+    )
+    result = build_subtitle_cues_for_blocks([block], _make_subtitle_lines("你好"))
+    assert len(whisper_calls) == 1, "trigger=publish should run whisper at publish"
+    assert any("whisper" in c.source.lower() for c in result.cues)
+
+
+def test_d5_trigger_deliverable_skips_whisper_at_publish(monkeypatch, tmp_path):
+    """trigger='deliverable' (default, user-preferred) → cue_pipeline at
+    publish time does NOT run whisper. The deliverable handlers
+    (D-3 / D-4) trigger it later."""
+    monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+    monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+    import json as _json
+    (tmp_path / "admin_settings.json").write_text(
+        _json.dumps({
+            "whisper_alignment_enabled": True,
+            "whisper_alignment_trigger": "deliverable",
+        }),
+        encoding="utf-8",
+    )
+    from modules.subtitles.cue_pipeline import build_subtitle_cues_for_blocks
+
+    whisper_calls: list = []
+
+    def _stub(*a, **kw):
+        whisper_calls.append(1)
+        return [{"start_ms": 0, "end_ms": 800, "text": "你好"}]
+    monkeypatch.setattr(
+        "modules.subtitles.cue_pipeline._run_whisper_cached", _stub,
+    )
+
+    audio = tmp_path / "seg.wav"
+    audio.write_bytes(b"fake")
+    block = _make_block("b1", "你好", aligned_audio_path=str(audio))
+    result = build_subtitle_cues_for_blocks([block], _make_subtitle_lines("你好"))
+    assert whisper_calls == [], (
+        "trigger=deliverable should NOT run whisper at publish time; "
+        "deliverable handlers (jianying / materials_pack) own the trigger."
+    )
+    assert all("whisper" not in c.source.lower() for c in result.cues)
+
+
+def test_d5_trigger_manual_skips_whisper_at_publish(monkeypatch, tmp_path):
+    """trigger='manual' → no auto-trigger anywhere. Equivalent to
+    enabled=false from publish's perspective; deliverable handlers
+    also skip. Only admin manual invocation triggers whisper."""
+    monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+    monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+    import json as _json
+    (tmp_path / "admin_settings.json").write_text(
+        _json.dumps({
+            "whisper_alignment_enabled": True,
+            "whisper_alignment_trigger": "manual",
+        }),
+        encoding="utf-8",
+    )
+    from modules.subtitles.cue_pipeline import build_subtitle_cues_for_blocks
+
+    whisper_calls: list = []
+
+    def _stub(*a, **kw):
+        whisper_calls.append(1)
+        return [{"start_ms": 0, "end_ms": 800, "text": "你好"}]
+    monkeypatch.setattr(
+        "modules.subtitles.cue_pipeline._run_whisper_cached", _stub,
+    )
+
+    audio = tmp_path / "seg.wav"
+    audio.write_bytes(b"fake")
+    block = _make_block("b1", "你好", aligned_audio_path=str(audio))
+    build_subtitle_cues_for_blocks([block], _make_subtitle_lines("你好"))
+    assert whisper_calls == []
+
+
+def test_d5_deliverable_context_runs_whisper_under_trigger_deliverable(
+    monkeypatch, tmp_path,
+):
+    """When ``build_subtitle_cues_for_blocks`` is called with
+    ``context='deliverable'`` (D-2 ensure helper does this), trigger
+    'deliverable' permits whisper. This is the path the user's design
+    locks in: at publish time → proportional, at deliverable time →
+    whisper."""
+    monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+    monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+    import json as _json
+    (tmp_path / "admin_settings.json").write_text(
+        _json.dumps({
+            "whisper_alignment_enabled": True,
+            "whisper_alignment_trigger": "deliverable",
+        }),
+        encoding="utf-8",
+    )
+    from modules.subtitles.cue_pipeline import build_subtitle_cues_for_blocks
+
+    whisper_calls: list = []
+
+    def _stub(*a, **kw):
+        whisper_calls.append(1)
+        return [{"start_ms": 0, "end_ms": 800, "text": "你好"}]
+    monkeypatch.setattr(
+        "modules.subtitles.cue_pipeline._run_whisper_cached", _stub,
+    )
+
+    audio = tmp_path / "seg.wav"
+    audio.write_bytes(b"fake")
+    block = _make_block(
+        "b1", "你好",
+        aligned_audio_path=str(audio),
+        first_start_ms=0, last_end_ms=1000,
+        target_duration_ms=1000,
+    )
+    # NEW: pass context="deliverable"
+    result = build_subtitle_cues_for_blocks(
+        [block], _make_subtitle_lines("你好"), context="deliverable",
+    )
+    assert len(whisper_calls) == 1, (
+        "trigger=deliverable + context=deliverable should run whisper"
+    )
+    assert any("whisper" in c.source.lower() for c in result.cues)
+
+
+def test_d5_deliverable_context_skipped_under_trigger_manual(
+    monkeypatch, tmp_path,
+):
+    """trigger='manual' even at deliverable context → still no whisper.
+    Manual mode means "ONLY admin manual invocation triggers"."""
+    monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+    monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+    import json as _json
+    (tmp_path / "admin_settings.json").write_text(
+        _json.dumps({
+            "whisper_alignment_enabled": True,
+            "whisper_alignment_trigger": "manual",
+        }),
+        encoding="utf-8",
+    )
+    from modules.subtitles.cue_pipeline import build_subtitle_cues_for_blocks
+
+    whisper_calls: list = []
+
+    def _stub(*a, **kw):
+        whisper_calls.append(1)
+        return [{"start_ms": 0, "end_ms": 800, "text": "你好"}]
+    monkeypatch.setattr(
+        "modules.subtitles.cue_pipeline._run_whisper_cached", _stub,
+    )
+
+    audio = tmp_path / "seg.wav"
+    audio.write_bytes(b"fake")
+    block = _make_block("b1", "你好", aligned_audio_path=str(audio))
+    build_subtitle_cues_for_blocks(
+        [block], _make_subtitle_lines("你好"), context="deliverable",
+    )
+    assert whisper_calls == []
+
+
+# ---------------------------------------------------------------------------
+# D-5: model + skip_cache passthrough from admin settings
+# ---------------------------------------------------------------------------
+
+
+def test_d5_admin_model_propagates_to_subprocess_call(monkeypatch, tmp_path):
+    """``whisper_alignment_model`` admin field threads through cue_pipeline
+    → run_whisper_subprocess_cached's ``model`` kwarg. Affects the
+    cache key + subprocess invocation. Tests with a non-default value
+    so we can prove it's the admin value, not a hardcoded default."""
+    monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+    monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+    import json as _json
+    (tmp_path / "admin_settings.json").write_text(
+        _json.dumps({
+            "whisper_alignment_enabled": True,
+            "whisper_alignment_trigger": "publish",
+            "whisper_alignment_model": "medium",
+        }),
+        encoding="utf-8",
+    )
+    from modules.subtitles.cue_pipeline import build_subtitle_cues_for_blocks
+
+    captured: list[dict] = []
+
+    def _capture(*a, **kw):
+        captured.append(dict(kw))
+        return [{"start_ms": 0, "end_ms": 800, "text": "你好"}]
+
+    monkeypatch.setattr(
+        "modules.subtitles.cue_pipeline._run_whisper_cached", _capture,
+    )
+
+    audio = tmp_path / "seg.wav"
+    audio.write_bytes(b"fake")
+    block = _make_block(
+        "b1", "你好",
+        aligned_audio_path=str(audio),
+        first_start_ms=0, last_end_ms=1000, target_duration_ms=1000,
+    )
+    build_subtitle_cues_for_blocks([block], _make_subtitle_lines("你好"))
+
+    assert len(captured) == 1, "whisper should be invoked exactly once"
+    assert captured[0].get("model") == "medium"
+
+
+def test_d5_admin_skip_cache_propagates_to_subprocess_call(monkeypatch, tmp_path):
+    """``whisper_alignment_skip_cache`` admin field threads through to
+    the subprocess wrapper. When True, the cache lookup is bypassed
+    even on hit — used to force a fresh transcription run."""
+    monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+    monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+    import json as _json
+    (tmp_path / "admin_settings.json").write_text(
+        _json.dumps({
+            "whisper_alignment_enabled": True,
+            "whisper_alignment_trigger": "publish",
+            "whisper_alignment_skip_cache": True,
+        }),
+        encoding="utf-8",
+    )
+    from modules.subtitles.cue_pipeline import build_subtitle_cues_for_blocks
+
+    captured: list[dict] = []
+
+    def _capture(*a, **kw):
+        captured.append(dict(kw))
+        return [{"start_ms": 0, "end_ms": 800, "text": "你好"}]
+
+    monkeypatch.setattr(
+        "modules.subtitles.cue_pipeline._run_whisper_cached", _capture,
+    )
+
+    audio = tmp_path / "seg.wav"
+    audio.write_bytes(b"fake")
+    block = _make_block(
+        "b1", "你好",
+        aligned_audio_path=str(audio),
+        first_start_ms=0, last_end_ms=1000, target_duration_ms=1000,
+    )
+    build_subtitle_cues_for_blocks([block], _make_subtitle_lines("你好"))
+
+    assert len(captured) == 1
+    assert captured[0].get("skip_cache") is True
+
+
+def test_d5_skip_cache_bypasses_cache_lookup_in_subprocess_wrapper(
+    monkeypatch, tmp_path,
+):
+    """End-to-end: ``run_whisper_subprocess_cached`` with skip_cache=True
+    must NOT return the cached words even when the cache file matches.
+    It runs the real subprocess wrapper (which we monkeypatch) and
+    overwrites the cache."""
+    import json as _json
+    from services.whisper_align import (
+        run_whisper_subprocess_cached, _cache_path_for, _hash_wav_bytes,
+        _CACHE_FILE_VERSION,
+    )
+
+    audio = tmp_path / "seg.wav"
+    audio.write_bytes(b"fake-wav-bytes")
+
+    # Pre-populate cache with stale content. If skip_cache=False were
+    # used, this would be returned verbatim.
+    cache_path = _cache_path_for(str(audio), model="small", language="zh")
+    cache_path.write_text(_json.dumps({
+        "version": _CACHE_FILE_VERSION,
+        "content_hash": _hash_wav_bytes(str(audio)),
+        "model": "small",
+        "language": "zh",
+        "words": [{"start_ms": 0, "end_ms": 100, "text": "STALE"}],
+    }), encoding="utf-8")
+
+    fresh_words = [{"start_ms": 100, "end_ms": 800, "text": "FRESH"}]
+
+    def _fake_subprocess(*a, **kw):
+        return fresh_words
+
+    monkeypatch.setattr(
+        "services.whisper_align.run_whisper_subprocess", _fake_subprocess,
+    )
+
+    # skip_cache=False → returns stale cached value
+    result_cached = run_whisper_subprocess_cached(str(audio), model="small")
+    assert result_cached[0]["text"] == "STALE"
+
+    # skip_cache=True → bypasses cache, runs fresh
+    result_fresh = run_whisper_subprocess_cached(
+        str(audio), model="small", skip_cache=True,
+    )
+    assert result_fresh[0]["text"] == "FRESH"
+
+    # And the cache file got overwritten with the fresh result
+    new_cache = _json.loads(cache_path.read_text(encoding="utf-8"))
+    assert new_cache["words"][0]["text"] == "FRESH"
+
+
+def test_d5_trigger_permits_decision_matrix():
+    """Lock down the full 3×3 trigger × context decision matrix so any
+    future tweak to the policy lights up."""
+    from modules.subtitles.cue_pipeline import _trigger_permits
+
+    # Format: (trigger, context, expected)
+    matrix = [
+        ("publish", "publish", True),
+        ("publish", "deliverable", True),
+        ("publish", "manual", True),
+        ("deliverable", "publish", False),
+        ("deliverable", "deliverable", True),
+        ("deliverable", "manual", True),
+        ("manual", "publish", False),
+        ("manual", "deliverable", False),
+        ("manual", "manual", True),
+    ]
+    for trigger, context, expected in matrix:
+        actual = _trigger_permits(trigger, context)
+        assert actual is expected, (
+            f"_trigger_permits({trigger!r}, {context!r}) returned {actual}, "
+            f"expected {expected}"
+        )
+
+
+def test_d5_invalid_admin_trigger_falls_back_to_default_deliverable(
+    monkeypatch, tmp_path,
+):
+    """An admin typo / unknown trigger value is sanitized to 'deliverable'
+    by ``_parse_whisper_settings``. So at publish context, whisper
+    skips (deliverable doesn't permit publish). Defense-in-depth — if
+    the admin UI somehow lets through 'enabled' instead of 'enable',
+    we don't accidentally widen access."""
+    monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+    monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+    import json as _json
+    (tmp_path / "admin_settings.json").write_text(
+        _json.dumps({
+            "whisper_alignment_enabled": True,
+            "whisper_alignment_trigger": "always",  # not in whitelist
+        }),
+        encoding="utf-8",
+    )
+    from modules.subtitles.cue_pipeline import build_subtitle_cues_for_blocks
+
+    whisper_calls: list = []
+
+    def _stub(*a, **kw):
+        whisper_calls.append(1)
+        return [{"start_ms": 0, "end_ms": 800, "text": "你好"}]
+    monkeypatch.setattr(
+        "modules.subtitles.cue_pipeline._run_whisper_cached", _stub,
+    )
+
+    audio = tmp_path / "seg.wav"
+    audio.write_bytes(b"fake")
+    block = _make_block("b1", "你好", aligned_audio_path=str(audio))
+    build_subtitle_cues_for_blocks([block], _make_subtitle_lines("你好"))
+
+    # Sanitized trigger='deliverable' + default context='publish' → skip
+    assert whisper_calls == []
+
+
 def test_d1_admin_setting_change_takes_effect_without_restart(monkeypatch, tmp_path):
     """Admin flips the toggle while the service is running. Next call
     to build_subtitle_cues_for_blocks reflects the change. No restart
@@ -881,14 +1286,25 @@ def test_d1_admin_setting_change_takes_effect_without_restart(monkeypatch, tmp_p
                         first_start_ms=0, last_end_ms=1_000,
                         target_duration_ms=1_000)
 
-    # Phase 1: admin OFF
-    settings.write_text(json.dumps({"whisper_alignment_enabled": False}), encoding="utf-8")
+    # Phase 1: admin OFF (D-5: trigger doesn't matter when enabled=False)
+    settings.write_text(
+        json.dumps({"whisper_alignment_enabled": False}), encoding="utf-8",
+    )
     block_off = _make_block("b1", "你好", **block_kwargs)
     result = build_subtitle_cues_for_blocks([block_off], _make_subtitle_lines("你好"))
     assert len(whisper_calls) == 0  # whisper NOT called
 
-    # Phase 2: admin ON (without process restart)
-    settings.write_text(json.dumps({"whisper_alignment_enabled": True}), encoding="utf-8")
+    # Phase 2: admin ON with trigger='publish' (without process restart).
+    # D-5: trigger='publish' is required for publish-context (default
+    # build_subtitle_cues_for_blocks call) to permit. Default trigger
+    # 'deliverable' would skip publish.
+    settings.write_text(
+        json.dumps({
+            "whisper_alignment_enabled": True,
+            "whisper_alignment_trigger": "publish",
+        }),
+        encoding="utf-8",
+    )
     block_on = _make_block("b1", "你好", **block_kwargs)
     result = build_subtitle_cues_for_blocks([block_on], _make_subtitle_lines("你好"))
     assert len(whisper_calls) == 1  # whisper IS called now
@@ -899,12 +1315,17 @@ def test_c3_drift_check_uses_normalize_consistent_with_phase_b(monkeypatch, tmp_
     Phase B validator — so drift decisions in C3 match what
     subtitle_quality_report.json says. CodeX guardrail #4.
 
-    D-1: needs both env capability AND admin policy ON."""
+    D-1: needs both env capability AND admin policy ON.
+    D-5: trigger='publish' so publish-context (default) permits."""
     monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
     monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
     import json as _json
     (tmp_path / "admin_settings.json").write_text(
-        _json.dumps({"whisper_alignment_enabled": True}), encoding="utf-8",
+        _json.dumps({
+            "whisper_alignment_enabled": True,
+            "whisper_alignment_trigger": "publish",
+        }),
+        encoding="utf-8",
     )
     from modules.subtitles.cue_pipeline import build_subtitle_cues_for_blocks
 

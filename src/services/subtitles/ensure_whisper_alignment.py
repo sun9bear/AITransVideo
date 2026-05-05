@@ -77,11 +77,15 @@ def ensure_whisper_aligned_subtitles(project_dir: str | Path) -> dict:
     t0 = time.monotonic()
     project_dir = Path(project_dir)
 
-    # ---- Gate 1: admin policy + env capability ----
+    # ---- Gate 1: admin policy + env capability + trigger permits deliverable ----
     # Lazy-import the cue_pipeline gate so the deliverable handlers
     # don't carry a transitive import to faster_whisper / whisper_align.
+    #
+    # D-5: pass context="deliverable" so trigger="deliverable" or
+    # "publish" both permit (only "manual" blocks here). Mirrors what
+    # _regenerate_whisper_cues passes to build_subtitle_cues_for_blocks.
     from modules.subtitles.cue_pipeline import _whisper_align_enabled
-    if not _whisper_align_enabled():
+    if not _whisper_align_enabled(context="deliverable"):
         return EnsureStatus(
             action="skipped_admin_disabled",
             whisper_invoked=False,
@@ -289,7 +293,12 @@ def _regenerate_whisper_cues(
             cn_text=cn_text,
         ))
 
-    result = build_subtitle_cues_for_blocks(blocks, lines)
+    # D-5: context="deliverable" tells the trigger gate this is the
+    # post-publish deliverable handoff. trigger ∈ {"publish",
+    # "deliverable"} both permit; "manual" blocks (the helper
+    # already short-circuited above on the same gate, so this
+    # primarily documents intent).
+    result = build_subtitle_cues_for_blocks(blocks, lines, context="deliverable")
 
     output_dir = project_dir / "output"
     output_dir.mkdir(parents=True, exist_ok=True)

@@ -15,8 +15,19 @@ audio, whisper subprocess error, DTW disjoint, build_cues_with_char_times
 returns [] — falls back to ``build_cues_for_block`` so publish never
 breaks because of whisper trouble. CodeX guardrails locked in.
 
+2026-05-05 Phase D additions:
+  - D-1: admin policy double-gate. ``admin_settings.json::
+    whisper_alignment_enabled`` must also be true; either the env or
+    the admin field can disable.
+  - D-5: ``context``-aware trigger field. Default trigger
+    ``"deliverable"`` skips publish (this module's default call site)
+    and runs only at deliverable handlers (D-2 ensure helper). Admin
+    can flip to ``"publish"`` (every task) or ``"manual"``
+    (admin-button-only). Callers that know they are at a deliverable
+    handoff pass ``context="deliverable"``.
+
 Plan: docs/plans/2026-05-02-subtitle-cue-generation-v2-plan.md §6, §10 Phase 1a
-      docs/plans/2026-05-04-subtitle-audio-sync-plan.md Phase C Task C3
+      docs/plans/2026-05-04-subtitle-audio-sync-plan.md Phase C Task C3 + Phase D
 """
 
 from __future__ import annotations
@@ -55,14 +66,79 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Whisper alignment feature flag + drift gate
+# Whisper alignment feature flag + trigger gate + drift gate
 # ---------------------------------------------------------------------------
 
+# Recognised values of the ``context`` argument — each call site identifies
+# itself so the trigger field's policy can be applied.
+#
+# - ``"publish"``     publish stage (every task; this is the default)
+# - ``"deliverable"`` Jianying / materials_pack pre-pack (D-3 / D-4)
+# - ``"manual"``      admin clicked "run whisper now" (D-6 endpoint)
+_VALID_CONTEXTS = frozenset({"publish", "deliverable", "manual"})
 
-def _whisper_align_enabled() -> bool:
-    """Two-gate: env capability AND admin policy. BOTH must be open.
 
-    Phase D-1 (2026-05-05) introduced the second gate. Rationale:
+def _trigger_permits(trigger: str, context: str) -> bool:
+    """Decision matrix for whether ``trigger`` allows running at ``context``.
+
+    Defines the user-preferred semantics introduced in D-5:
+
+    | trigger \\ context | publish | deliverable | manual |
+    |--------------------|---------|-------------|--------|
+    | ``publish``        | ✓       | ✓           | ✓      |
+    | ``deliverable``    | ✗       | ✓           | ✓      |
+    | ``manual``         | ✗       | ✗           | ✓      |
+
+    Rationale:
+      - ``publish`` is "run for every task" — superset, allows everywhere.
+      - ``deliverable`` is "only when user wants subtitles in the
+        deliverable" (Jianying / materials_pack). Skips publish.
+      - ``manual`` is "no auto-trigger anywhere" — admin-only.
+      - A ``"manual"`` context (admin endpoint) bypasses the trigger
+        check entirely; admin invocation is by definition intentional.
+
+    Unknown context falls through to the strictest interpretation
+    (publish) so unfamiliar callers don't accidentally widen access.
+    """
+    if context == "manual":
+        return True
+    if context == "deliverable":
+        return trigger in ("publish", "deliverable")
+    # context == "publish" or any unrecognised value → strictest
+    return trigger == "publish"
+
+
+def _resolve_whisper_settings(*, context: str = "publish"):
+    """Single-pass evaluation of the three gates: env capability,
+    admin ``enabled`` policy, and trigger-vs-context match. Returns the
+    parsed ``WhisperAlignmentSettings`` if all three open, else ``None``.
+
+    Folding the three gates into one function lets callers grab
+    ``settings.model`` / ``settings.skip_cache`` for the subprocess
+    call without re-reading admin_settings.json. Read fresh per call
+    (no caching) so admin edits propagate without restart.
+    """
+    if os.environ.get("AVT_WHISPER_ALIGN_ENABLED", "") != "1":
+        return None
+    # Lazy import — keeps cue_pipeline's import time light, and avoids
+    # a circular dep risk (admin_settings is in services/, cue_pipeline
+    # is in modules/, services may eventually import from modules).
+    from services.admin_settings import read_whisper_alignment_settings
+    settings = read_whisper_alignment_settings()
+    if not settings.enabled:
+        return None
+    if not _trigger_permits(settings.trigger, context):
+        return None
+    return settings
+
+
+def _whisper_align_enabled(*, context: str = "publish") -> bool:
+    """Three-gate: env capability AND admin policy AND trigger-vs-context.
+    BOTH the env flag AND admin ``enabled`` AND the trigger field for
+    this call site must permit.
+
+    Phase D-1 (2026-05-05) introduced env+admin double-gate.
+    Phase D-5 (2026-05-05) added the trigger-vs-context third gate.
 
     - ``AVT_WHISPER_ALIGN_ENABLED=1`` — ops capability switch. Set by
       docker-compose / .env. "Does this server know how to run whisper?
@@ -74,21 +150,16 @@ def _whisper_align_enabled() -> bool:
       "Should we run whisper for this deployment?" Admin can toggle in
       the backend UI without touching docker-compose.
 
-    Effective rule: ``effective = env_allows AND admin_enabled``. AND
-    (not OR) so:
-      - either gate closed → safe default (proportional cues)
-      - both open → run whisper
+    - ``admin_settings.json::whisper_alignment_trigger`` vs ``context`` —
+      where in the pipeline this call sits. Default trigger
+      ``"deliverable"`` only runs whisper at deliverable handlers
+      (Jianying / materials_pack), saving ~5-15s per task at publish
+      time. ``"publish"`` runs everywhere; ``"manual"`` is admin-only.
 
     Read fresh per call (no caching). Env evaluates first because it's
     cheaper (no file read).
     """
-    if os.environ.get("AVT_WHISPER_ALIGN_ENABLED", "") != "1":
-        return False
-    # Lazy import — keeps cue_pipeline's import time light, and avoids
-    # a circular dep risk (admin_settings is in services/, cue_pipeline
-    # is in modules/, services may eventually import from modules).
-    from services.admin_settings import read_whisper_alignment_settings
-    return read_whisper_alignment_settings().enabled
+    return _resolve_whisper_settings(context=context) is not None
 
 
 def _block_is_in_sync(block: SemanticBlock) -> bool:
@@ -113,6 +184,7 @@ def _try_whisper_aligned_cues(
     block_start_ms: int,
     block_end_ms: int,
     min_display_ms: int,
+    context: str = "publish",
 ) -> list[SubtitleCue] | None:
     """Try to build whisper-aligned cues for a block.
 
@@ -126,10 +198,17 @@ def _try_whisper_aligned_cues(
     5. DTW returns [] (disjoint / empty) → None
     6. build_cues_with_char_times returns [] (anomaly) → None
 
+    ``context`` (D-5) tells the trigger gate where this call sits:
+    "publish" (publish stage, default), "deliverable" (D-3/D-4 ensure
+    helper), or "manual" (admin endpoint). The admin
+    ``whisper_alignment_trigger`` field decides whether each context is
+    permitted (see ``_trigger_permits``).
+
     Successful path returns a non-empty list of cues with
     ``source = "semantic_block_v2_whisper_aligned"``.
     """
-    if not _whisper_align_enabled():
+    settings = _resolve_whisper_settings(context=context)
+    if settings is None:
         return None
 
     if not _block_is_in_sync(block):
@@ -152,8 +231,16 @@ def _try_whisper_aligned_cues(
     # monkeypatch this name directly (cue_pipeline._run_whisper_cached)
     # so the patch survives even after the whisper_align module gets
     # re-imported by the import-isolation test.
+    #
+    # D-5: model + skip_cache come from admin settings. ``skip_cache=True``
+    # forces a fresh subprocess run even on a cache hit (admin override).
     try:
-        words = _run_whisper_cached(audio_path, language="zh")
+        words = _run_whisper_cached(
+            audio_path,
+            language="zh",
+            model=settings.model,
+            skip_cache=settings.skip_cache,
+        )
     except Exception as exc:  # noqa: BLE001 — whisper subprocess errors are
                               # diverse (RuntimeError, TimeoutExpired,
                               # JSONDecodeError, ImportError from runner...)
@@ -285,6 +372,7 @@ def build_subtitle_cues_for_blocks(
     subtitle_lines: list[SubtitleLine],
     *,
     min_display_ms: int = 500,
+    context: str = "publish",
 ) -> SubtitleCuePipelineResult:
     """High-level pipeline: SemanticBlock list → SubtitleCue list + ValidationReport.
 
@@ -312,6 +400,11 @@ def build_subtitle_cues_for_blocks(
         blocks:         List of SemanticBlock instances (typically aligned_blocks).
         subtitle_lines: List of SubtitleLine instances for en_text lookup.
         min_display_ms: Minimum display duration passed to validator (default 500).
+        context:        Where this call sits in the pipeline. Drives the
+            D-5 trigger-vs-context gate for whisper alignment. One of
+            ``"publish"`` (publish stage, default), ``"deliverable"``
+            (D-2 ensure helper for Jianying / materials_pack), or
+            ``"manual"`` (admin "run whisper now" endpoint).
 
     Returns:
         SubtitleCuePipelineResult with all cues, the ValidationReport, and
@@ -353,6 +446,7 @@ def build_subtitle_cues_for_blocks(
             block_start_ms=block_start_ms,
             block_end_ms=block_end_ms,
             min_display_ms=min_display_ms,
+            context=context,
         )
 
         if cues is None:
