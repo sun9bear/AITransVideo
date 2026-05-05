@@ -75,11 +75,27 @@ def _flatten_words(words: list[dict]) -> tuple[str, list[tuple[int, int]]]:
     """Concatenate words' text into a single string, build per-char times.
 
     Each char inside a word gets ``(word_start + i*step, word_start + (i+1)*step)``
-    where ``step = (word_end - word_start) / len(word)``. Words with
-    zero duration or empty text are skipped — they can't contribute
-    timing information.
+    where ``step = (word_end - word_start) / kept_count`` and ``kept_count``
+    is the number of chars in this word that survive normalization
+    (i.e. CJK + ASCII letters/digits, not punctuation/whitespace).
 
-    Returns ``("", [])`` if every word is malformed.
+    Why count only kept chars (CodeX P2, 2026-05-04):
+    Whitespace and punctuation are stripped by ``_normalize_for_compare``
+    before alignment, so they never become anchors for cn_text timing.
+    Letting them consume 1/N of the word's [start, end] interval would
+    push real chars later — symptom: ``text=' 你好'`` over [0,1000]
+    used to put 你 at 333ms instead of ~0ms.
+
+    Stripped chars still appear in the flat output (so ``ws_text`` matches
+    the original word concatenation char-for-char and orig-index lookups
+    stay correct). Their per-char time is set to a zero-width slice at
+    the boundary of the surrounding kept chars — never queried by the
+    aligner via ws_norm_to_orig (which only contains kept positions),
+    but kept consistent for any future debugging that walks ws_char_times
+    by orig position.
+
+    Words with zero duration or empty text are skipped. Returns
+    ``("", [])`` if every word is malformed.
     """
     flat_chars: list[str] = []
     flat_times: list[tuple[int, int]] = []
@@ -89,14 +105,37 @@ def _flatten_words(words: list[dict]) -> tuple[str, list[tuple[int, int]]]:
         end = int(word.get("end_ms", 0) or 0)
         if not text or end <= start:
             continue
-        n = len(text)
-        step = (end - start) / n
-        for i, ch in enumerate(text):
+
+        # Mark which chars survive normalize (kept) vs not (stripped).
+        keep_flags = [bool(_normalize_for_compare(ch)) for ch in text]
+        kept_count = sum(keep_flags)
+
+        if kept_count == 0:
+            # Whole word is whitespace / punctuation — emit zero-width
+            # timestamps at the word start so any downstream interpolation
+            # has something to anchor on. ws_norm_to_orig won't reference
+            # these, so their exact times don't drive output cues.
+            for ch in text:
+                flat_chars.append(ch)
+                flat_times.append((start, start))
+            continue
+
+        # Distribute the word's duration evenly across kept chars only.
+        step = (end - start) / kept_count
+        kept_seen = 0
+        for ch, kept in zip(text, keep_flags):
             flat_chars.append(ch)
-            flat_times.append((
-                int(start + i * step),
-                int(start + (i + 1) * step),
-            ))
+            if kept:
+                flat_times.append((
+                    int(start + kept_seen * step),
+                    int(start + (kept_seen + 1) * step),
+                ))
+                kept_seen += 1
+            else:
+                # Stripped char: zero-width slice at the next kept char's
+                # start (or word end if it follows the last kept char).
+                anchor = int(start + kept_seen * step)
+                flat_times.append((anchor, anchor))
     return "".join(flat_chars), flat_times
 
 

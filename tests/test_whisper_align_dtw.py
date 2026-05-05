@@ -293,3 +293,72 @@ def test_dtw_handles_punctuation_dense_whisper_output():
     # And the comma/period aren't in the cn output text (cn_text had none).
     cn_chars_out = "".join(ct["text"] for ct in char_times)
     assert cn_chars_out == cn_text
+
+
+# ---------------------------------------------------------------------------
+# CodeX P2: stripped chars (whitespace/punctuation) must NOT consume word
+# duration. They normalize to '' and therefore aren't usable for timing
+# anchors; if we let them eat 1/N of the word's [start, end] interval, the
+# real chars all get pushed later. That's a subtle ~100-300ms drift on
+# typical faster-whisper outputs.
+# ---------------------------------------------------------------------------
+
+
+def test_dtw_first_char_starts_near_word_start_when_word_has_leading_space():
+    """``text=' 你好'`` over [0, 1000] — the cn_text first char's start_ms
+    should be near 0 (the word's actual start), NOT 333 (one third of
+    the way in because the leading space ate a slot). Real symptom on
+    production: subtitles consistently appear ~330ms late on the first
+    word."""
+    from services.whisper_align.dtw import align_chars_to_words
+
+    char_times = align_chars_to_words(
+        "你好",
+        [{"start_ms": 0, "end_ms": 1000, "text": " 你好"}],
+    )
+    assert len(char_times) == 2
+    # Expect first char near the word's start (0ms), with at most a tiny
+    # tolerance for integer rounding inside _flatten_words.
+    assert char_times[0]["start_ms"] <= 50, (
+        f"first cn char starts at {char_times[0]['start_ms']}ms; "
+        "leading whitespace must not consume duration"
+    )
+
+
+def test_dtw_inter_word_punctuation_does_not_delay_following_chars():
+    """``text='你好，世界'`` over [0, 1000] — the comma stripped by
+    normalize must not push 世/界 later. We expect chars distributed
+    across 4 surviving slots (250ms each), not 5 slots (200ms each
+    where the comma eats one)."""
+    from services.whisper_align.dtw import align_chars_to_words
+
+    char_times = align_chars_to_words(
+        "你好世界",
+        [{"start_ms": 0, "end_ms": 1000, "text": "你好，世界"}],
+    )
+    assert len(char_times) == 4
+    # 世 (idx 2 in cn_text) should start near 500ms, not near 600ms.
+    # Allow tolerance for rounding but reject the buggy 600ms placement.
+    assert char_times[2]["start_ms"] < 575, (
+        f"世 starts at {char_times[2]['start_ms']}ms; comma in whisper "
+        "transcript should not delay subsequent cn_text chars"
+    )
+
+
+def test_dtw_trailing_punctuation_does_not_shorten_last_chars():
+    """Trailing punctuation in whisper word ('你好。' over [0, 600])
+    shouldn't compress 好 into a sub-200ms slot — the period should be
+    treated as zero-duration since it's stripped at compare time."""
+    from services.whisper_align.dtw import align_chars_to_words
+
+    char_times = align_chars_to_words(
+        "你好",
+        [{"start_ms": 0, "end_ms": 600, "text": "你好。"}],
+    )
+    assert len(char_times) == 2
+    # 好 should run roughly half of [0, 600], not just 1/3 (which would be
+    # the case if the period ate a slot).
+    assert char_times[1]["end_ms"] >= 550
+    # And start before mid-point — 好 should occupy [300, 600] with the
+    # fix, not [200, 400].
+    assert char_times[1]["start_ms"] >= 250
