@@ -29,6 +29,13 @@ interface AdminSettings {
   // When OFF, voice matching ignores target_chars_per_second and uses the
   // legacy 8-dimension persona/age/pitch scoring. Default OFF for canary.
   voice_match_speed_dimension_enabled: boolean
+  // Phase D — Whisper subtitle alignment (2026-05-05).
+  // Admin master + 3 sub-policy fields. Runtime additionally requires
+  // AVT_WHISPER_ALIGN_ENABLED=1 env (ops capability switch).
+  whisper_alignment_enabled: boolean
+  whisper_alignment_trigger: string  // "publish" | "deliverable" | "manual"
+  whisper_alignment_skip_cache: boolean
+  whisper_alignment_model: string    // "tiny" | "base" | "small" | "medium" | "large-v3"
 }
 
 const DEFAULT_SETTINGS: AdminSettings = {
@@ -47,7 +54,57 @@ const DEFAULT_SETTINGS: AdminSettings = {
   tts_speed_mode: 'default',
   force_dsp_alignment: false,
   voice_match_speed_dimension_enabled: false,
+  whisper_alignment_enabled: false,
+  whisper_alignment_trigger: 'deliverable',
+  whisper_alignment_skip_cache: false,
+  whisper_alignment_model: 'small',
 }
+
+const WHISPER_TRIGGER_OPTIONS = [
+  {
+    value: 'deliverable',
+    label: '仅在交付时（默认）',
+    description: '用户点击「生成剪映草稿」/「打包素材」且勾选了字幕时才执行；publish 阶段不动，速度最快',
+  },
+  {
+    value: 'publish',
+    label: '每次发布都做',
+    description: '每个任务在 publish 阶段都跑一次 Whisper；首次交付字幕已是精准对齐，但 publish 多约 5-15s',
+  },
+  {
+    value: 'manual',
+    label: '只手动触发',
+    description: '关闭所有自动入口；只能由管理员通过专门接口触发（适合调试或排障）',
+  },
+]
+
+const WHISPER_MODEL_OPTIONS = [
+  {
+    value: 'tiny',
+    label: 'tiny（~75MB）',
+    description: '最小最快，约 0.5× 实时，仅作冒烟用，中文 ASR 精度有限',
+  },
+  {
+    value: 'base',
+    label: 'base（~150MB）',
+    description: '比 tiny 准但更慢，约 1× 实时',
+  },
+  {
+    value: 'small',
+    label: 'small（~466MB，推荐）',
+    description: '精度/速度折中，约 3× 实时；线上对比试运行后选定的默认值',
+  },
+  {
+    value: 'medium',
+    label: 'medium（~1.5GB）',
+    description: '更高精度，约 6× 实时；适合长视频字幕工作流（峰值 RAM ~3GB）',
+  },
+  {
+    value: 'large-v3',
+    label: 'large-v3（~3GB）',
+    description: '最高精度，约 10× 实时；建议有 GPU 才启用',
+  },
+]
 
 const TTS_SPEED_MODE_OPTIONS = [
   { value: 'default',    label: '默认 ±8%',  description: '限幅 [0.92, 1.08]，听感无损（推荐）' },
@@ -358,6 +415,85 @@ export default function AdminSettingsPage() {
             </p>
           </div>
         </label>
+      </SettingSection>
+
+      {/* Phase D — Whisper 字幕时间对齐 */}
+      <SettingSection
+        title="Whisper 字幕时间对齐"
+        description="使用 faster-whisper 重新对齐字幕显示时间（不动文本，只动 cue 起止毫秒），让字幕与配音音频严格同步。需要服务端启用了 AVT_WHISPER_ALIGN_ENABLED=1 环境变量才能真正生效。"
+      >
+        <label className="flex items-center gap-3 rounded-xl border border-border bg-muted/30 p-4 cursor-pointer hover:bg-muted/50 transition">
+          <input
+            type="checkbox"
+            checked={settings.whisper_alignment_enabled}
+            onChange={(e) => setSettings((s) => ({ ...s, whisper_alignment_enabled: e.target.checked }))}
+            className="h-4 w-4 rounded border-border"
+          />
+          <div>
+            <p className="text-sm font-medium text-foreground">
+              启用 Whisper 字幕时间对齐
+              <span className="ml-2 inline-block rounded px-1.5 py-0.5 text-[10px] bg-[color:var(--ochre)]/20 text-[color:var(--ochre)]">
+                Phase D · 受控启用
+              </span>
+            </p>
+            <p className="text-xs text-muted-foreground mt-1">
+              关闭时使用原有的「按字数比例」分配字幕时间（默认）。开启后将按下方触发策略调用 Whisper 字符级时间戳，
+              替换 cue 的起止时间，但<b>字幕文字本身不变</b>。
+              <br />
+              <span className="text-muted-foreground/80">即使本开关打开，若 ops 没有设置 AVT_WHISPER_ALIGN_ENABLED=1，运行时仍走 fallback。</span>
+            </p>
+          </div>
+        </label>
+
+        {settings.whisper_alignment_enabled && (
+          <>
+            <div className="rounded-xl border border-border bg-muted/30 p-4">
+              <p className="text-sm font-medium text-foreground mb-2">触发时机</p>
+              <p className="text-xs text-muted-foreground mb-3">
+                决定 Whisper 在哪些环节自动跑。<b>「仅在交付时」</b> 是推荐默认：用户没勾字幕的视频不浪费算力；
+                第一次交付字幕的等待 ~10 分钟（小模型，38 分钟音频），结果会缓存，再次交付秒级。
+              </p>
+              <RadioGroup
+                options={WHISPER_TRIGGER_OPTIONS}
+                value={settings.whisper_alignment_trigger}
+                onChange={(v) => setSettings((s) => ({ ...s, whisper_alignment_trigger: v }))}
+                name="whisper_alignment_trigger"
+              />
+            </div>
+
+            <div className="rounded-xl border border-border bg-muted/30 p-4">
+              <p className="text-sm font-medium text-foreground mb-2">模型尺寸</p>
+              <p className="text-xs text-muted-foreground mb-3">
+                faster-whisper 的模型档位。线上默认 <code className="text-foreground">small</code>（~3× 实时，CN ASR 精度足够）；
+                短视频或需要绝对精度可考虑 <code className="text-foreground">medium</code>，但 RAM/时间成本翻倍。
+                切换模型会触发<b>缓存重建</b>（不同模型的 cache key 不同）。
+              </p>
+              <RadioGroup
+                options={WHISPER_MODEL_OPTIONS}
+                value={settings.whisper_alignment_model}
+                onChange={(v) => setSettings((s) => ({ ...s, whisper_alignment_model: v }))}
+                name="whisper_alignment_model"
+              />
+            </div>
+
+            <label className="flex items-center gap-3 rounded-xl border border-border bg-muted/30 p-4 cursor-pointer hover:bg-muted/50 transition">
+              <input
+                type="checkbox"
+                checked={settings.whisper_alignment_skip_cache}
+                onChange={(e) => setSettings((s) => ({ ...s, whisper_alignment_skip_cache: e.target.checked }))}
+                className="h-4 w-4 rounded border-border"
+              />
+              <div>
+                <p className="text-sm font-medium text-foreground">强制跳过缓存（每次重新转录）</p>
+                <p className="text-xs text-muted-foreground mt-1">
+                  默认关闭：相同 WAV 内容只跑一次，结果存在 <code className="text-foreground">{'{wav}.whisper_<model>_zh.json'}</code> 旁。
+                  <b>开启会显著拖慢每次交付</b>（相当于回到首次的 ~10 分钟）；只在排障 / 验证模型升级 / 怀疑缓存被误用时短期开启。
+                  开启时仍会重写新的缓存，关闭后立即生效。
+                </p>
+              </div>
+            </label>
+          </>
+        )}
       </SettingSection>
 
       {/* Free user limits */}

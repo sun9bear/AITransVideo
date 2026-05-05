@@ -44,6 +44,14 @@ router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 _VALID_ENDPOINT_MODES = {"international", "mainland"}
 
+# Phase D-5 (2026-05-05) — whisper-alignment field whitelists. Same
+# whitelist as ``services/admin_settings.py::_parse_whisper_settings``;
+# duplicated here because Gateway can't import from src/services
+# (separate Python image). Any change must be mirrored both sides —
+# enforced as a contract by tests that round-trip a sample JSON.
+_VALID_WHISPER_TRIGGERS = {"publish", "deliverable", "manual"}
+_VALID_WHISPER_MODELS = {"tiny", "base", "small", "medium", "large-v3"}
+
 
 class AdminSettings(BaseModel):
     tts_provider: str = "minimax"          # "minimax" or "mimo"
@@ -86,6 +94,45 @@ class AdminSettings(BaseModel):
     # synced content (subtitles, lip-sync) when LLM translation length
     # control is unreliable.
     force_dsp_alignment: bool = False
+    # --- Phase D — Whisper subtitle alignment (2026-05-05) ---
+    # Master switch + sub-policy fields. The runtime additionally requires
+    # ``AVT_WHISPER_ALIGN_ENABLED=1`` env var to be set (ops capability
+    # switch); admin policy here is necessary but not sufficient. See
+    # ``src/modules/subtitles/cue_pipeline._whisper_align_enabled``.
+    #
+    # ``whisper_alignment_enabled``    — admin master switch
+    # ``whisper_alignment_trigger``    — when does whisper actually run?
+    #   "publish"     every task, at publish stage (slowest UX, best 1st delivery)
+    #   "deliverable" only when user clicks Jianying / 素材包 (default; fast publish)
+    #   "manual"      no auto-trigger anywhere (admin-only via dedicated endpoint)
+    # ``whisper_alignment_skip_cache`` — bypass per-WAV cache (force fresh)
+    # ``whisper_alignment_model``      — faster-whisper model size
+    whisper_alignment_enabled: bool = False
+    whisper_alignment_trigger: str = "deliverable"
+    whisper_alignment_skip_cache: bool = False
+    whisper_alignment_model: str = "small"
+
+    @field_validator("whisper_alignment_trigger")
+    @classmethod
+    def validate_whisper_alignment_trigger(cls, v: str) -> str:
+        normalized = v.strip().lower()
+        if normalized not in _VALID_WHISPER_TRIGGERS:
+            raise ValueError(
+                f"whisper_alignment_trigger 必须是 "
+                f"{sorted(_VALID_WHISPER_TRIGGERS)} 之一，收到: {v!r}"
+            )
+        return normalized
+
+    @field_validator("whisper_alignment_model")
+    @classmethod
+    def validate_whisper_alignment_model(cls, v: str) -> str:
+        normalized = v.strip().lower()
+        if normalized not in _VALID_WHISPER_MODELS:
+            raise ValueError(
+                f"whisper_alignment_model 必须是 "
+                f"{sorted(_VALID_WHISPER_MODELS)} 之一，收到: {v!r}"
+            )
+        return normalized
 
     @field_validator("tts_speed_mode")
     @classmethod
