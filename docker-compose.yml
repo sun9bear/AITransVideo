@@ -3,6 +3,13 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Phase D — opt into Whisper subtitle alignment runtime deps at
+        # image build time. Default 0 (no faster-whisper installed).
+        # Deployments that flip this to 1 must ALSO mount the
+        # model_cache volume below + set HF_HOME so model downloads
+        # survive container recreation.
+        INSTALL_WHISPER: "${INSTALL_WHISPER:-0}"
     image: ${APP_IMAGE_NAME:-aivideotrans-app:linux-baseline}
     container_name: ${APP_CONTAINER_NAME:-aivideotrans-app}
     network_mode: host
@@ -14,6 +21,10 @@ services:
       AIVIDEOTRANS_JOBS_DIR: /opt/aivideotrans/app/jobs
       AIVIDEOTRANS_PROJECTS_DIR: /opt/aivideotrans/app/projects
       AIVIDEOTRANS_RUNTIME_LOGS_DIR: /opt/aivideotrans/data/runtime_logs
+      # Phase D — Whisper model cache target. Bind-mounted below so
+      # pre-warmed weights persist across rebuilds. Container default
+      # was /root/.cache/huggingface (ephemeral writable layer).
+      HF_HOME: /opt/aivideotrans/model_cache/hf
       ASSEMBLYAI_API_KEY: ${ASSEMBLYAI_API_KEY:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       VERTEX_AI_EXPRESS_KEY: ${VERTEX_AI_EXPRESS_KEY:-}
@@ -55,6 +66,14 @@ services:
       - type: bind
         source: ${AIVIDEOTRANS_ROOT}/data/runtime_logs
         target: /opt/aivideotrans/data/runtime_logs
+      # Phase D — persistent Whisper / HF model cache. Survives container
+      # rebuild so we don't re-download ~466 MB ``small`` weights on every
+      # ``docker compose build app``. HF_HOME is set above to point here.
+      # Created lazily by host preflight (or manual mkdir) — empty on
+      # fresh install means first whisper subprocess will populate it.
+      - type: bind
+        source: ${AIVIDEOTRANS_ROOT}/data/model_cache
+        target: /opt/aivideotrans/model_cache
     healthcheck:
       test: ["CMD", "python", "scripts/linux_remote_workbench_preflight.py", "app-health"]
       interval: 30s

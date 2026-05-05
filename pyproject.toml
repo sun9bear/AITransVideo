@@ -23,3 +23,12 @@ dev = [
     # tests/test_background_task_api.py).
     "aiosqlite",
 ]
+# Phase D — optional Whisper subtitle alignment runtime dependency.
+# Default deployments do NOT install this (faster-whisper + ctranslate2 +
+# tokenizer add ~500 MB image weight). Enable per deployment via the app
+# Dockerfile build arg ``INSTALL_WHISPER=1`` (which calls
+# ``pip install .[whisper]``); compose example in docker-compose.yml.
+# See docs/plans/2026-05-04-subtitle-audio-sync-plan.md "灰度启用 SOP".
+whisper = [
+    "faster-whisper==1.0.3",
+]
