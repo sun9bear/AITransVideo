@@ -401,3 +401,140 @@ def _expected_fingerprint(project_dir: Path) -> str:
         (project_dir / "editor" / "segments.json").read_text(encoding="utf-8")
     )
     return _compute_alignment_fingerprint(segs)
+
+
+# ---------------------------------------------------------------------------
+# CodeX P1 (2026-05-05): _content_hash_for_wav must NOT trust the
+# whisper-cache sidecar's content_hash without verifying current WAV bytes.
+#
+# Regression: a project that successfully ran whisper alignment has
+# {wav_path}.whisper_<model>_<lang>.json sidecars. If a user then re-TTSs
+# a segment (overwrites the WAV bytes at the same path), the sidecar
+# stays behind with the OLD hash. _content_hash_for_wav reads sidecar.
+# content_hash and returns it without checking the WAV — so the
+# alignment fingerprint is computed against stale bytes and matches the
+# previously-stamped fingerprint in subtitle_cues.json. ensure_helper
+# returns "already_aligned" → whisper does NOT re-run → SRT keeps the
+# old timing while the new audio plays differently.
+#
+# Fix: hash the actual WAV bytes. The C5 cache sidecar is meant for the
+# whisper subprocess wrapper (where the hash is verified before reuse);
+# it is NOT a trustworthy fingerprint source for downstream consumers.
+# ---------------------------------------------------------------------------
+
+
+def test_regenerates_when_wav_overwritten_under_stale_sidecar(
+    tmp_path, monkeypatch,
+):
+    """Setup mimics a real edit-commit/re-TTS round:
+      1. project ran ensure once → cues are whisper-aligned + fingerprint
+         stamped, sidecars exist next to each WAV with content_hash=H1.
+      2. user re-TTS'd one segment, overwriting its WAV bytes → current
+         hash for that WAV is H2 ≠ H1.
+      3. user clicks "生成剪映草稿" → ensure runs again.
+
+    Expected behavior: ensure detects the audio change and regenerates.
+    The sidecar's stale H1 must NOT be trusted as the content hash —
+    it would make the fingerprint match the old stamped value, falsely
+    triggering the already_aligned fast path.
+    """
+    monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+    monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "admin_settings.json").write_text(
+        json.dumps({"whisper_alignment_enabled": True}), encoding="utf-8",
+    )
+
+    project_dir = _build_minimal_project(
+        tmp_path, n_segments=2,
+        cues_source="semantic_block_v2_whisper_aligned",
+    )
+
+    # (1) Compute the "old" fingerprint and stamp it into subtitle_cues.json
+    # at this point the WAV bytes still match what the sidecars will say.
+    old_fp = _expected_fingerprint(project_dir)
+    cues_path = project_dir / "output" / "subtitle_cues.json"
+    cues_payload = json.loads(cues_path.read_text(encoding="utf-8"))
+    cues_payload["alignment_fingerprint"] = old_fp
+    cues_path.write_text(json.dumps(cues_payload, ensure_ascii=False, indent=2),
+                         encoding="utf-8")
+
+    # Pre-seed the C5 sidecar files with the OLD hash. This is what the
+    # whisper subprocess wrapper writes after a successful run.
+    tts_dir = project_dir / "tts"
+    for wav_path in sorted(tts_dir.glob("segment_*_aligned.wav")):
+        old_hash = hashlib.sha256(wav_path.read_bytes()).hexdigest()
+        sidecar = wav_path.with_name(f"{wav_path.name}.whisper_small_zh.json")
+        sidecar.write_text(json.dumps({
+            "version": 1,
+            "content_hash": old_hash,
+            "model": "small",
+            "language": "zh",
+            "words": [{"start_ms": 0, "end_ms": 100, "text": "stale"}],
+        }), encoding="utf-8")
+
+    # (2) Now overwrite ONE WAV's bytes (simulating re-TTS for that
+    # segment). The sidecar stays — it carries the stale H1.
+    target_wav = tts_dir / "segment_001_aligned.wav"
+    new_bytes = target_wav.read_bytes() + b"_NEW_TTS_BYTES_"
+    target_wav.write_bytes(new_bytes)
+
+    from services.subtitles.ensure_whisper_alignment import (
+        ensure_whisper_aligned_subtitles,
+    )
+
+    # Patch the cue_pipeline whisper call so we can detect "did regenerate
+    # actually run?" without spawning a real subprocess.
+    fake_run_calls: list[str] = []
+
+    def _fake_whisper_cached(wav_path, *args, **kwargs):
+        fake_run_calls.append(str(wav_path))
+        return [{"start_ms": 0, "end_ms": 100, "text": "fresh"}]
+
+    monkeypatch.setattr(
+        "modules.subtitles.cue_pipeline._run_whisper_cached",
+        _fake_whisper_cached,
+    )
+
+    status = ensure_whisper_aligned_subtitles(project_dir)
+
+    # Whisper MUST have re-run because the WAV bytes changed.
+    assert status["action"] == "regenerated", (
+        f"Expected 'regenerated' (new WAV bytes), got {status['action']!r}. "
+        "Helper trusted the stale sidecar hash and incorrectly took the "
+        "already_aligned fast path."
+    )
+    assert status["whisper_invoked"] is True
+    # And the cue_pipeline did invoke whisper for at least the modified
+    # segment (others may cache-hit at the subprocess level — that's fine).
+    assert len(fake_run_calls) >= 1
+
+
+def test_content_hash_for_wav_returns_actual_bytes_not_sidecar(tmp_path):
+    """Direct unit test on the helper: when WAV bytes differ from the
+    sidecar's stored content_hash, the helper MUST return the hash of
+    the current bytes, not the sidecar value."""
+    wav = tmp_path / "seg.wav"
+    wav.write_bytes(b"new-audio-bytes")
+    actual_hash = hashlib.sha256(b"new-audio-bytes").hexdigest()
+
+    # Plant a stale sidecar with a wrong hash
+    sidecar = wav.with_name(f"{wav.name}.whisper_small_zh.json")
+    sidecar.write_text(json.dumps({
+        "version": 1,
+        "content_hash": "deadbeef" * 8,  # plausibly-shaped but wrong
+        "model": "small",
+        "language": "zh",
+        "words": [],
+    }), encoding="utf-8")
+
+    from services.subtitles.ensure_whisper_alignment import (
+        _content_hash_for_wav,
+    )
+
+    result = _content_hash_for_wav(str(wav))
+    assert result == actual_hash, (
+        f"_content_hash_for_wav returned {result!r}; expected the actual "
+        f"WAV bytes' hash {actual_hash!r}. The sidecar's stored hash "
+        f"({'deadbeef' * 8!r}) must NOT be trusted without verifying "
+        "current bytes."
+    )

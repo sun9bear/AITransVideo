@@ -172,12 +172,13 @@ def test_executor_helper_swallows_http_errors(monkeypatch):
             raise httpx.ConnectError("simulated network failure")
 
     monkeypatch.setattr(executors.httpx, "AsyncClient", _FakeClient)
-    # Stub internal_headers so the import inside the helper succeeds
-    sys.modules.setdefault(
-        "internal_auth",
-        type(sys)("internal_auth"),
-    )
-    sys.modules["internal_auth"].internal_headers = lambda: {}  # type: ignore[attr-defined]
+    # Stub internal_headers so the import inside the helper succeeds.
+    # Use monkeypatch.setitem so sys.modules is restored at test teardown,
+    # otherwise this leaks into later tests that import the real
+    # internal_auth module (e.g. test_gateway_jianying_routes).
+    fake_internal_auth = type(sys)("internal_auth")
+    fake_internal_auth.internal_headers = lambda: {}  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "internal_auth", fake_internal_auth)
 
     # Should not raise
     asyncio.run(executors._ensure_whisper_aligned_subtitles("job-test-001"))
@@ -201,8 +202,9 @@ def test_executor_helper_swallows_non_200_status(monkeypatch):
         async def post(self, url, headers=None): return _Resp()
 
     monkeypatch.setattr(executors.httpx, "AsyncClient", _FakeClient)
-    sys.modules.setdefault("internal_auth", type(sys)("internal_auth"))
-    sys.modules["internal_auth"].internal_headers = lambda: {}  # type: ignore[attr-defined]
+    fake_internal_auth = type(sys)("internal_auth")
+    fake_internal_auth.internal_headers = lambda: {}  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "internal_auth", fake_internal_auth)
 
     # Should not raise
     asyncio.run(executors._ensure_whisper_aligned_subtitles("job-test-001"))
@@ -235,7 +237,7 @@ def test_executor_helper_uses_internal_headers(monkeypatch):
     fake_internal_auth.internal_headers = lambda: {  # type: ignore[attr-defined]
         "X-Internal-Key": "fake-key-for-test",
     }
-    sys.modules["internal_auth"] = fake_internal_auth
+    monkeypatch.setitem(sys.modules, "internal_auth", fake_internal_auth)
 
     asyncio.run(executors._ensure_whisper_aligned_subtitles("job-test-001"))
     assert captured_headers.get("X-Internal-Key") == "fake-key-for-test"

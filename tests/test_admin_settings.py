@@ -177,6 +177,102 @@ def test_whisper_alignment_settings_validates_model_enum(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# CodeX P2 (2026-05-05): bool() on string field values is unsafe.
+# bool("false") == True in Python — any non-empty string truthy. That
+# means a hand-edited admin_settings.json containing
+# {"whisper_alignment_enabled": "false"} would silently flip Whisper
+# ON in production. Defensive cast: only real bool values are honored;
+# anything else falls back to the field's default.
+# ---------------------------------------------------------------------------
+
+
+def test_whisper_alignment_string_false_is_NOT_treated_as_true(tmp_path, monkeypatch):
+    """A hand-edited admin_settings.json where boolean fields were typed
+    as strings ('false' / 'true' / '0' / '1') must NOT be coerced via
+    Python's truthy semantics. Whisper is a high-cost path; a typo on
+    the boolean side cannot quietly enable it."""
+    monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "admin_settings.json").write_text(
+        json.dumps({
+            "whisper_alignment_enabled": "false",   # string!
+            "whisper_alignment_skip_cache": "false",
+        }),
+        encoding="utf-8",
+    )
+    from services.admin_settings import read_whisper_alignment_settings
+
+    s = read_whisper_alignment_settings()
+    # 'false' (string) must not be honored as truthy. The safe fallback
+    # is the field's default — both default to False, so the wrong-typed
+    # field reads as False either way: that's exactly the contract.
+    assert s.enabled is False, (
+        "Hand-edited 'false' string MUST NOT enable whisper. "
+        "bool('false') == True — defensive parse must reject non-bool."
+    )
+    assert s.skip_cache is False
+
+
+def test_whisper_alignment_string_true_falls_back_to_default(tmp_path, monkeypatch):
+    """The mirror case: a string 'true' is also rejected. We only
+    accept real Python bool. (Asymmetric handling — accepting 'true'
+    but not 'false' — would be a footgun.)"""
+    monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "admin_settings.json").write_text(
+        json.dumps({
+            "whisper_alignment_enabled": "true",
+            "whisper_alignment_skip_cache": "true",
+        }),
+        encoding="utf-8",
+    )
+    from services.admin_settings import read_whisper_alignment_settings
+
+    s = read_whisper_alignment_settings()
+    # Both fields default to False. We chose: any non-bool → default.
+    # So even string 'true' produces False. Admin UI / Pydantic model
+    # always writes real bool; only hand-edits hit this branch.
+    assert s.enabled is False
+    assert s.skip_cache is False
+
+
+def test_whisper_alignment_int_zero_one_falls_back_to_default(tmp_path, monkeypatch):
+    """Integers (0 / 1) are common JSON "boolean-ish" values. They must
+    NOT be honored — same defensive contract."""
+    monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "admin_settings.json").write_text(
+        json.dumps({
+            "whisper_alignment_enabled": 1,
+            "whisper_alignment_skip_cache": 0,
+        }),
+        encoding="utf-8",
+    )
+    from services.admin_settings import read_whisper_alignment_settings
+
+    s = read_whisper_alignment_settings()
+    # int 1 != real bool True (in our defensive contract). Falls back to
+    # default False.
+    assert s.enabled is False
+    assert s.skip_cache is False
+
+
+def test_whisper_alignment_real_bool_still_honored(tmp_path, monkeypatch):
+    """Sanity: real Python bool keeps working — the validation hardening
+    must not break the supported (Pydantic-written) shape."""
+    monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "admin_settings.json").write_text(
+        json.dumps({
+            "whisper_alignment_enabled": True,
+            "whisper_alignment_skip_cache": True,
+        }),
+        encoding="utf-8",
+    )
+    from services.admin_settings import read_whisper_alignment_settings
+
+    s = read_whisper_alignment_settings()
+    assert s.enabled is True
+    assert s.skip_cache is True
+
+
 def test_aligner_force_dsp_still_reads_admin_settings(tmp_path, monkeypatch):
     """The aligner's force_dsp toggle was the original consumer of
     admin_settings.json. After D-1 refactor it should still work the

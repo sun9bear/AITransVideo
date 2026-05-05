@@ -159,14 +159,17 @@ def ensure_whisper_aligned_subtitles(project_dir: str | Path) -> dict:
 
 
 def _compute_alignment_fingerprint(segs: list[dict]) -> str:
-    """SHA256 over (segment_id, aligned_audio_path basename, file content
-    sha256) tuples. Captures: segment ordering, audio path identity, and
-    audio bytes — any of these changing invalidates the whisper transcript.
+    """SHA256 over (segment_id, aligned_audio_path, file content sha256)
+    tuples. Captures: segment ordering, audio path identity, and audio
+    bytes — any of these changing invalidates the whisper transcript.
 
-    Per-WAV content hashes are reused from the C5 cache layer if those
-    cache files exist (they store ``content_hash`` already); else
-    re-hashed. Hashing one WAV is fast (<100ms each on a typical 30s
-    aligned WAV).
+    CodeX P1 (2026-05-05): we DO NOT reuse the C5 sidecar's stored
+    content_hash here. Sidecars are only verified at READ time inside
+    the whisper subprocess wrapper; they remain on disk with stale
+    hashes after a re-TTS rewrites the WAV at the same path. Hashing
+    the actual bytes is the only correctness-safe choice. Cost: ~50ms
+    per 1MB WAV, ~1.5s for a 30-segment project; fingerprint is
+    computed at most once per ensure call.
     """
     h = hashlib.sha256()
     for seg in sorted(segs, key=lambda s: str(s.get("segment_id", ""))):
@@ -183,35 +186,29 @@ def _compute_alignment_fingerprint(segs: list[dict]) -> str:
 
 
 def _content_hash_for_wav(wav_path: str) -> str:
-    """Cheap content hash with the C5 cache as a fast-path source.
+    """SHA-256 of the WAV file's current bytes.
 
-    If a whisper cache exists alongside the WAV, its stored
-    ``content_hash`` is reused. Otherwise the file is read and hashed.
-    Empty / missing path → empty hash (won't match anything).
+    CodeX P1 (2026-05-05): we used to fast-path through the C5 sidecar
+    file (``{wav}.whisper_<model>_<lang>.json``) and reuse its stored
+    ``content_hash`` field. That was unsafe — the sidecar is written
+    by the whisper subprocess wrapper and is only verified at READ
+    time inside that wrapper (it compares to current WAV bytes BEFORE
+    using the cached transcript). If the WAV was rewritten under it
+    (re-TTS, edit-commit), the sidecar stays on disk with the OLD
+    hash. Trusting it produces a fingerprint that matches the
+    previously-stamped fingerprint in subtitle_cues.json → ensure
+    helper falsely returns "already_aligned" → SRT keeps stale timing
+    while the audio is new.
+
+    Hashing the actual bytes is ~50ms for a typical 1MB segment WAV,
+    or ~1.5s for a 30-segment project. Cheap insurance for correctness.
+    Empty path / missing file → empty hash (won't match anything).
     """
     if not wav_path:
         return ""
     p = Path(wav_path)
     if not p.is_file():
         return ""
-
-    # Try C5 cache first (~5KB JSON read instead of full WAV hash).
-    # Cache file naming: {wav_path}.whisper_<model>_<lang>.json — we
-    # look for any whisper_* cache file alongside the WAV. If present,
-    # its content_hash should match the current bytes (the cache was
-    # invalidated automatically by run_whisper_subprocess_cached when
-    # bytes changed).
-    for cache_file in p.parent.glob(f"{p.name}.whisper_*.json"):
-        try:
-            cache = json.loads(cache_file.read_text(encoding="utf-8"))
-            if isinstance(cache, dict):
-                ch = cache.get("content_hash")
-                if isinstance(ch, str) and ch:
-                    return ch
-        except (OSError, json.JSONDecodeError, ValueError):
-            continue
-
-    # Fallback: hash the file directly. ~50ms for a 1MB WAV.
     h = hashlib.sha256()
     try:
         with p.open("rb") as f:

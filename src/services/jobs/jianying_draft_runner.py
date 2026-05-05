@@ -59,7 +59,15 @@ logger = logging.getLogger(__name__)
 
 JIANYING_DRAFT_BACKEND_VERSION = "1"
 JIANYING_DRAFT_WRITER_VERSION = "1"
-JIANYING_DRAFT_FINGERPRINT_SCHEMA = 1
+# CodeX P1 (2026-05-05): bump to 2 — Whisper alignment policy snapshot
+# was added to the fingerprint inputs. Old (schema=1) fingerprints
+# stored on succeeded records will not match new computations on
+# trigger(), forcing a single one-time rebuild per existing job after
+# rollout. That's intentional: existing proportional drafts must be
+# rebuilt now that admin can flip on Whisper alignment, otherwise the
+# admin toggle has no effect on cached jobs. After rebuild the new
+# schema-2 fingerprint is stamped and subsequent triggers cache-hit.
+JIANYING_DRAFT_FINGERPRINT_SCHEMA = 2
 
 # Lock target lives under jobs_dir/_locks/jianying_draft/{job_id}.run.
 # .lock sidecar is created automatically by services._file_lock.file_lock
@@ -174,6 +182,40 @@ def _sha256_file(path: Path | None) -> str:
         return "missing"
 
 
+def _whisper_policy_snapshot() -> dict:
+    """Snapshot of the Whisper alignment admin policy for fingerprint input.
+
+    CodeX P1 (2026-05-05): the four ``whisper_alignment_*`` fields
+    must be part of the Jianying-draft fingerprint, otherwise admin
+    can flip the master switch / change the trigger / change the model
+    without invalidating succeeded drafts on disk — the cached zip
+    keeps getting served back even though the policy says "now use
+    Whisper". We pull the current values via the typed reader (same
+    one cue_pipeline uses) so admin <-> runtime always agree.
+
+    Read failure / missing file → returns the dataclass defaults (the
+    reader is defensive); fingerprint stays stable. We never raise
+    here — fingerprint computation is a hot path.
+    """
+    try:
+        from services.admin_settings import read_whisper_alignment_settings
+        s = read_whisper_alignment_settings()
+        return {
+            "enabled": s.enabled,
+            "trigger": s.trigger,
+            "skip_cache": s.skip_cache,
+            "model": s.model,
+        }
+    except Exception:  # noqa: BLE001 — fingerprint must never crash trigger
+        # Fall back to the documented defaults.
+        return {
+            "enabled": False,
+            "trigger": "deliverable",
+            "skip_cache": False,
+            "model": "small",
+        }
+
+
 def _compute_jianying_fingerprint(
     job: "JobRecord", user_draft_root: str | None
 ) -> str | None:
@@ -181,12 +223,17 @@ def _compute_jianying_fingerprint(
     Jianying draft. Returns None when project_dir / manifest are missing —
     callers treat None as "can't form a stable input set, skip cache check".
 
-    Fingerprint inputs (plan §A4):
+    Fingerprint inputs (plan §A4 + 2026-05-05 D-followup):
     - SHA256 of source.original_video / editor.dubbed_audio_complete /
       editor.subtitles / editor.ambient_audio file contents.
     - Normalized user_draft_root.
     - Backend / writer version constants.
     - Fingerprint schema version.
+    - **Whisper alignment policy snapshot** (enabled / trigger / model /
+      skip_cache). When admin flips any of these, succeeded drafts on
+      disk become cache-misses on next trigger so the new policy
+      actually takes effect. Without this, admin's toggle has zero
+      effect on jobs that already produced a proportional zip.
 
     Explicitly NOT included: full manifest.json hash (would include
     timestamps / mtime / unrelated artifacts and break legitimate cache hits).
@@ -224,6 +271,7 @@ def _compute_jianying_fingerprint(
         "backend_version": JIANYING_DRAFT_BACKEND_VERSION,
         "writer_version": JIANYING_DRAFT_WRITER_VERSION,
         "artifact_schema": JIANYING_DRAFT_FINGERPRINT_SCHEMA,
+        "whisper_alignment_policy": _whisper_policy_snapshot(),
     }
     serialized = json.dumps(payload, sort_keys=True).encode("utf-8")
     return hashlib.sha256(serialized).hexdigest()
@@ -841,12 +889,28 @@ class JianyingDraftRunner:
                             job_id,
                         )
                         return
+                    # CodeX P1 (2026-05-05): re-compute the fingerprint
+                    # AFTER ensure_helper has had a chance to rewrite
+                    # editor.subtitles. The fingerprint stamped at
+                    # trigger() time was based on pre-alignment SRT
+                    # bytes; if we kept that, the next identical
+                    # trigger would compute a different fingerprint
+                    # (because the SRT is now whisper-aligned) and
+                    # rebuild needlessly. Recomputing here means
+                    # "stamp the fingerprint that matches the artifact
+                    # set we actually shipped", so subsequent triggers
+                    # cache-hit cleanly.
+                    final_fp = _compute_jianying_fingerprint(
+                        final_job, user_draft_root,
+                    )
                     final_job.jianying_draft_status = "succeeded"
                     final_job.jianying_draft_zip_path = result.draft_zip_path
                     final_job.jianying_draft_completed_at = _utc_now_iso()
                     final_job.jianying_draft_error = None
                     final_job.jianying_draft_user_root = user_draft_root
                     final_job.jianying_draft_substep = SUBSTEP_COMPLETED
+                    if final_fp is not None:
+                        final_job.jianying_draft_fingerprint = final_fp
                     self._store.save_job(final_job)
                     self._emit_status_event(
                         job_id,

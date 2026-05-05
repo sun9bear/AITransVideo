@@ -142,10 +142,33 @@ def read_whisper_alignment_settings() -> WhisperAlignmentSettings:
     return WhisperAlignmentSettings()
 
 
+def _strict_bool(value, *, default: bool) -> bool:
+    """CodeX P2 (2026-05-05): defensive bool parser.
+
+    Plain ``bool(value)`` is unsafe for hand-edited admin_settings.json
+    because Python's truthy semantics treat ``"false"``, ``"0"`` and
+    similar non-empty strings as ``True``. For the Whisper alignment
+    fields — which gate a high-cost subprocess pipeline — that turns
+    a JSON typo into "Whisper silently enabled across all tenants".
+
+    Strict contract: only real Python ``bool`` values pass through; any
+    other type (str, int, None, dict, list, ...) falls back to the
+    field's default. The Pydantic admin UI always writes real bools, so
+    only hand-edits hit this branch.
+
+    Note: bool is a subclass of int in Python, so ``isinstance(True, int)``
+    is True. Order the check ``isinstance(value, bool)`` BEFORE any int
+    check elsewhere; here the contract is simple — match bool, else default.
+    """
+    if isinstance(value, bool):
+        return value
+    return default
+
+
 def _parse_whisper_settings(cfg: dict) -> WhisperAlignmentSettings:
     """Apply per-field defaulting + enum validation."""
-    enabled = bool(cfg.get("whisper_alignment_enabled", False))
-    skip_cache = bool(cfg.get("whisper_alignment_skip_cache", False))
+    enabled = _strict_bool(cfg.get("whisper_alignment_enabled"), default=False)
+    skip_cache = _strict_bool(cfg.get("whisper_alignment_skip_cache"), default=False)
 
     trigger = str(cfg.get("whisper_alignment_trigger") or "").strip()
     if trigger not in _VALID_TRIGGERS:

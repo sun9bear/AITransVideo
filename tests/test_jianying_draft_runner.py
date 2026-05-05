@@ -1550,5 +1550,209 @@ class TestWhisperAlignmentHookD3:
         assert backend.write.call_count == 1
 
 
+# ---------------------------------------------------------------------------
+# CodeX P1 (2026-05-05): cache-hit must NOT bypass whisper alignment.
+#
+# Regression: trigger() returns the cached zip when a previous succeeded
+# attempt exists with a matching fingerprint and the zip is still on disk.
+# Before this fix, that path completely bypassed _maybe_align_subtitles
+# in the background thread — so an admin who flipped the Whisper toggle
+# AFTER a proportional draft was generated would see the same old zip
+# returned forever (no rebuild, no whisper).
+#
+# Fix: whisper-alignment policy snapshot is part of the input fingerprint.
+# Any change to (enabled / trigger / model / skip_cache) flips the
+# fingerprint → cache miss → fresh background run → ensure_helper runs
+# → final fingerprint stamped on completion (post-alignment SRT bytes).
+# Subsequent identical triggers then cache-hit cleanly.
+# ---------------------------------------------------------------------------
+
+
+class TestWhisperAlignmentInvalidatesCachedDraft:
+    """When the admin Whisper policy changes, succeeded jobs must rebuild
+    on next trigger so the new policy actually takes effect — they must
+    NOT be served from cache. After rebuild, second trigger with the
+    same policy must cache-hit (no infinite rebuild loop)."""
+
+    def _setup_succeeded_proportional_draft(self, tmp_path, monkeypatch):
+        """Initial state: a draft was generated under proportional cues
+        (whisper disabled). Returns (store, project_dir, runner_factory)."""
+        # Phase 1 setup: gates closed (no whisper involved).
+        monkeypatch.delenv("AVT_WHISPER_ALIGN_ENABLED", raising=False)
+        monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+
+        store = _make_store(tmp_path)
+        project_dir = _make_project_dir(tmp_path)
+        store.save_job(_make_record(project_dir=str(project_dir)))
+
+        # Pre-create the artifact files the fingerprint hashes; the
+        # specific bytes don't matter, only that they exist + are stable
+        # across triggers in this test.
+        (project_dir / "source.mp4").write_bytes(b"src")
+        (project_dir / "dubbed.wav").write_bytes(b"dub")
+        (project_dir / "subtitles.srt").write_text("proportional", encoding="utf-8")
+
+        return store, project_dir
+
+    def test_admin_enables_whisper_invalidates_cached_proportional_zip(
+        self, tmp_path, monkeypatch,
+    ):
+        """Phase 1: proportional draft exists, status=succeeded.
+        Phase 2: admin opens both gates. Next trigger MUST rebuild,
+        not return the old zip — otherwise admin's toggle has zero
+        effect on existing tasks."""
+        store, project_dir = self._setup_succeeded_proportional_draft(
+            tmp_path, monkeypatch,
+        )
+
+        ensure_calls: list[str] = []
+
+        def _fake_ensure(project_dir_arg):
+            ensure_calls.append(str(project_dir_arg))
+            return {"action": "regenerated", "whisper_invoked": True,
+                    "blocks_processed": 5, "elapsed_ms": 12345}
+
+        monkeypatch.setattr(
+            "services.subtitles.ensure_whisper_alignment.ensure_whisper_aligned_subtitles",
+            _fake_ensure,
+        )
+
+        backend = mock.MagicMock()
+        backend.write.return_value = _make_ok_result(zip_path=str(tmp_path / "a.zip"))
+        runner = _make_runner(store, backend)
+
+        # Phase 1: gates closed → first trigger generates proportional zip
+        runner.trigger("job-test-001")
+        first = _wait_for_jianying_status(store, "job-test-001", "succeeded")
+        # Make the zip path actually exist so the cache-hit branch on the
+        # next trigger has a real file to point at.
+        Path(first.jianying_draft_zip_path).write_bytes(b"first-zip")
+        assert ensure_calls == [], (
+            "Phase 1 control: gates closed → no whisper invocation"
+        )
+        first_fingerprint = first.jianying_draft_fingerprint
+
+        # Phase 2: admin flips both gates ON, then user triggers again.
+        monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+        (tmp_path / "admin_settings.json").write_text(
+            json.dumps({
+                "whisper_alignment_enabled": True,
+                "whisper_alignment_trigger": "deliverable",
+            }),
+            encoding="utf-8",
+        )
+
+        # Reset backend call count so we can verify a NEW backend.write
+        # happened on this second trigger (vs. cache hit).
+        backend.write.reset_mock()
+        backend.write.return_value = _make_ok_result(
+            zip_path=str(tmp_path / "b.zip"),
+        )
+
+        runner.trigger("job-test-001")
+        second = _wait_for_jianying_status(store, "job-test-001", "succeeded")
+        Path(second.jianying_draft_zip_path).write_bytes(b"second-zip")
+
+        # The whisper helper must have run during this rebuild.
+        assert ensure_calls == [str(project_dir)], (
+            "After admin opens gates, the next trigger MUST run "
+            "ensure_whisper_aligned_subtitles. Got %r" % ensure_calls
+        )
+        # And backend.write must have run (proving cache was invalidated).
+        assert backend.write.call_count == 1, (
+            "Phase 2 must rebuild the draft (backend.write call count = 1); "
+            "cache-hit on the proportional fingerprint would mean count = 0."
+        )
+        # Fingerprint should differ from phase 1 (whisper policy snapshot
+        # is part of the fingerprint, OR the post-alignment SRT changed
+        # the input set — either way the stored fingerprint must update).
+        assert second.jianying_draft_fingerprint != first_fingerprint, (
+            "After whisper rebuild, the stored fingerprint must reflect "
+            "the new state (policy + post-alignment SRT). "
+            "Otherwise next trigger would also rebuild needlessly."
+        )
+
+    def test_second_trigger_after_whisper_rebuild_hits_cache(
+        self, tmp_path, monkeypatch,
+    ):
+        """After phase-2 rebuild produces a new whisper-aligned zip + new
+        fingerprint, the THIRD trigger (same admin policy, same inputs)
+        must cache-hit — no extra ensure_helper invocations, no extra
+        backend.write calls.
+
+        This is the "no infinite rebuild loop" guarantee. If the
+        post-rebuild fingerprint isn't the one that gets stamped on the
+        succeeded record, every subsequent trigger would compute a
+        different fingerprint and rebuild again forever."""
+        store, project_dir = self._setup_succeeded_proportional_draft(
+            tmp_path, monkeypatch,
+        )
+
+        ensure_calls: list[str] = []
+
+        def _fake_ensure(project_dir_arg):
+            ensure_calls.append(str(project_dir_arg))
+            # Simulate the helper rewriting the SRT (whisper-aligned content)
+            (Path(project_dir_arg) / "subtitles.srt").write_text(
+                "whisper-aligned-content", encoding="utf-8",
+            )
+            return {"action": "regenerated", "whisper_invoked": True,
+                    "blocks_processed": 5, "elapsed_ms": 12345}
+
+        monkeypatch.setattr(
+            "services.subtitles.ensure_whisper_alignment.ensure_whisper_aligned_subtitles",
+            _fake_ensure,
+        )
+
+        backend = mock.MagicMock()
+        backend.write.return_value = _make_ok_result(
+            zip_path=str(tmp_path / "draft.zip"),
+        )
+        runner = _make_runner(store, backend)
+
+        # Phase 1: gates closed, build proportional draft.
+        runner.trigger("job-test-001")
+        first = _wait_for_jianying_status(store, "job-test-001", "succeeded")
+        Path(first.jianying_draft_zip_path).write_bytes(b"first")
+
+        # Phase 2: open gates, trigger rebuild.
+        monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+        (tmp_path / "admin_settings.json").write_text(
+            json.dumps({
+                "whisper_alignment_enabled": True,
+                "whisper_alignment_trigger": "deliverable",
+            }),
+            encoding="utf-8",
+        )
+        backend.write.reset_mock()
+        backend.write.return_value = _make_ok_result(
+            zip_path=str(tmp_path / "draft2.zip"),
+        )
+        runner.trigger("job-test-001")
+        second = _wait_for_jianying_status(store, "job-test-001", "succeeded")
+        Path(second.jianying_draft_zip_path).write_bytes(b"second")
+        assert backend.write.call_count == 1
+        assert len(ensure_calls) == 1
+
+        # Phase 3: third trigger — same admin policy, same inputs (the
+        # SRT is now whisper-aligned, but stable across calls). Should
+        # cache-hit: no new backend.write, no new ensure_helper call.
+        backend.write.reset_mock()
+        runner.trigger("job-test-001")
+        third = _wait_for_jianying_status(store, "job-test-001", "succeeded")
+
+        assert backend.write.call_count == 0, (
+            "Third trigger must cache-hit (no new backend.write). Got "
+            f"{backend.write.call_count} call(s) — fingerprint after "
+            "rebuild was not stamped correctly, causing perpetual rebuild."
+        )
+        assert len(ensure_calls) == 1, (
+            "Third trigger must NOT re-run ensure_helper (cache hit). "
+            f"Got {len(ensure_calls)} call(s)."
+        )
+        # Cached zip path stays the same.
+        assert third.jianying_draft_zip_path == second.jianying_draft_zip_path
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
