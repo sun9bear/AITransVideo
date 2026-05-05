@@ -41,6 +41,20 @@ if str(_SRC) not in sys.path:
 # ---------------------------------------------------------------------------
 # Skip gate — real whisper costs ~1.5GB RAM + ~466MB disk + 30s-2min CPU.
 # Opt in deliberately via env var.
+#
+# CodeX P2 (2026-05-04): module-level ``pytest.importorskip`` is a TRAP —
+# it raises Skipped during collection BEFORE pytestmark gets a chance to
+# evaluate, leaving pytest with "no tests collected" and exit code 5
+# even when the user intentionally has the env unset. Default-skip must
+# be a clean exit 0 so CI / dev runs of this file in isolation don't
+# look like a failure.
+#
+# Instead: ``pytestmark = skipif(...)`` keyed on the env var is the ONLY
+# module-level gate. Each test individually does ``pytest.importorskip(
+# "faster_whisper")`` at the top of its body — which only fires when the
+# env IS set (i.e. user explicitly opted in to real whisper but hasn't
+# installed the package). Reports as skipped per-test with the actionable
+# message, returns exit 0.
 # ---------------------------------------------------------------------------
 
 _REAL_WHISPER_ENABLED = os.environ.get("AVT_RUN_REAL_WHISPER_TESTS", "") == "1"
@@ -49,16 +63,11 @@ _SKIP_REASON = (
     "enable (downloads ~466MB small model on first run, peaks at ~1.5GB RAM, "
     "takes 30s-2min on CPU)."
 )
+_FASTER_WHISPER_MISSING_REASON = (
+    "faster-whisper not installed; install with `pip install faster-whisper`"
+)
 
 pytestmark = pytest.mark.skipif(not _REAL_WHISPER_ENABLED, reason=_SKIP_REASON)
-
-
-# Also gate on faster-whisper being importable — if the env var is set
-# but the package isn't installed, give a clearer message via importorskip.
-faster_whisper = pytest.importorskip(
-    "faster_whisper",
-    reason="faster-whisper not installed; install with `pip install faster-whisper`",
-)
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +100,7 @@ def test_real_whisper_subprocess_runs_end_to_end_on_silence(tmp_path: Path):
     subprocess.run argv → runner main() → faster-whisper.transcribe →
     JSON dump → wrapper JSON.loads → list[dict] return shape.
     """
+    pytest.importorskip("faster_whisper", reason=_FASTER_WHISPER_MISSING_REASON)
     from services.whisper_align import run_whisper_subprocess
 
     wav = tmp_path / "silence.wav"
@@ -115,6 +125,7 @@ def test_real_whisper_runs_with_tiny_model_too(tmp_path: Path):
     """Verify the model param actually flows through to the subprocess.
     Tiny model (~75MB) is smaller than small — useful for fast CI smoke
     if anyone ever wires this up. Same shape contract."""
+    pytest.importorskip("faster_whisper", reason=_FASTER_WHISPER_MISSING_REASON)
     from services.whisper_align import run_whisper_subprocess
 
     wav = tmp_path / "silence.wav"
@@ -130,6 +141,7 @@ def test_real_whisper_handles_invalid_wav_path():
     """Pointing at a non-existent file should fail via the subprocess
     error path (RuntimeError with stderr context), not silently. This
     is the negative end-to-end smoke."""
+    pytest.importorskip("faster_whisper", reason=_FASTER_WHISPER_MISSING_REASON)
     from services.whisper_align import run_whisper_subprocess
 
     with pytest.raises(RuntimeError) as exc_info:
