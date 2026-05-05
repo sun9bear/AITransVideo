@@ -185,6 +185,43 @@ def _sha256_file(path: Path | None) -> str:
         return "missing"
 
 
+def _whisper_force_fresh_active() -> bool:
+    """CodeX P2 (2026-05-05): admin asked for every-trigger fresh
+    transcription via ``whisper_alignment_skip_cache=true``. The
+    inner ensure_helper already respects this (bypasses the
+    already_aligned fast path), but trigger() decides cache-vs-rebuild
+    BEFORE the background thread runs. Without bypassing the outer
+    succeeded cache-hit too, the second trigger under skip_cache=true
+    would compute an identical fingerprint, hit the cached zip, and
+    never run ensure_helper — breaking the admin UI's "每次重新转录"
+    promise.
+
+    True iff ALL of:
+      - ``AVT_WHISPER_ALIGN_ENABLED=1`` (ops capability open)
+      - admin ``whisper_alignment_enabled=true``
+      - admin ``whisper_alignment_trigger`` allows the deliverable
+        context (publish or deliverable; manual does NOT auto-trigger
+        the helper, so skip_cache is moot)
+      - admin ``whisper_alignment_skip_cache=true``
+
+    Read failure / missing file / any exception → False (defensive;
+    matches the rest of the runner's "fingerprint must never crash
+    trigger" contract).
+    """
+    if os.environ.get("AVT_WHISPER_ALIGN_ENABLED", "") != "1":
+        return False
+    try:
+        from services.admin_settings import read_whisper_alignment_settings
+        s = read_whisper_alignment_settings()
+        if not s.enabled:
+            return False
+        if s.trigger not in ("publish", "deliverable"):
+            return False
+        return s.skip_cache
+    except Exception:  # noqa: BLE001 — defensive read; never crash trigger
+        return False
+
+
 def _whisper_policy_snapshot() -> dict:
     """Effective gate snapshot for fingerprint input.
 
@@ -391,6 +428,21 @@ class JianyingDraftRunner:
                     "substep": job.jianying_draft_substep,
                     "fingerprint": job.jianying_draft_fingerprint,
                 }
+            elif jd_status == "succeeded" and _whisper_force_fresh_active():
+                # CodeX P2 (2026-05-05): admin asked for force-fresh
+                # transcription on every trigger (skip_cache=true with
+                # the effective Whisper gate open). Bypass the cache-hit
+                # branch entirely so the background thread runs and
+                # ensure_helper actually re-transcribes. Without this
+                # bypass, the SECOND trigger would compute an identical
+                # fingerprint (skip_cache=true is a stable input here)
+                # and hit the cached zip — admin UI promise of "每次
+                # 重新转录" would silently break.
+                logger.info(
+                    "Jianying %s: bypassing succeeded cache-hit because "
+                    "admin set whisper_alignment_skip_cache=true.",
+                    job_id,
+                )
             elif jd_status == "succeeded":
                 # Already succeeded — return cached unless fingerprint or root differs.
                 cached_root = job.jianying_draft_user_root

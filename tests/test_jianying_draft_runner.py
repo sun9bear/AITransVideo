@@ -1865,5 +1865,205 @@ class TestEnvCapabilityFlipsInvalidateCachedDraft:
         )
 
 
+# ---------------------------------------------------------------------------
+# CodeX P2 (2026-05-05): skip_cache=true must propagate past the
+# Jianying outer succeeded-cache-hit, not just the ensure helper's
+# inner fast path.
+#
+# Regression: admin sets whisper_alignment_skip_cache=true (UI label:
+# "强制跳过缓存（每次重新转录）") to force fresh transcription. The
+# inner ensure_helper now respects this (CodeX previous follow-up).
+# But trigger() decides cache vs rebuild BEFORE the background thread
+# runs, and the policy snapshot includes skip_cache, so the FIRST
+# trigger under skip_cache=true correctly rebuilds. The SECOND trigger
+# computes the same fingerprint (skip_cache=true is part of the
+# stamped fingerprint, but unchanged) → cache-hit → cached zip
+# returned → ensure_helper never runs. The "every time" promise on
+# the admin UI breaks.
+#
+# Fix: when (effective Whisper gate is open) AND (admin.skip_cache is
+# true), trigger() bypasses the succeeded cache-hit branch and always
+# rebuilds. Cache-hit semantics are preserved when skip_cache=false
+# (which is the default + recommended state).
+# ---------------------------------------------------------------------------
+
+
+class TestSkipCacheBypassesJianyingOuterCache:
+    """admin skip_cache=true is a "force fresh, every time" lever; the
+    Jianying outer succeeded cache must respect it the same way the
+    ensure helper's inner fast path does."""
+
+    def _setup_succeeded_whisper_draft(
+        self, tmp_path, monkeypatch, *, skip_cache_phase1: bool,
+    ):
+        """First-trigger setup: whisper-aligned succeeded zip on disk.
+        Returns (store, project_dir, runner, ensure_calls, backend)."""
+        monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+        monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+        (tmp_path / "admin_settings.json").write_text(
+            json.dumps({
+                "whisper_alignment_enabled": True,
+                "whisper_alignment_trigger": "deliverable",
+                "whisper_alignment_skip_cache": skip_cache_phase1,
+            }),
+            encoding="utf-8",
+        )
+
+        store = _make_store(tmp_path)
+        project_dir = _make_project_dir(tmp_path)
+        store.save_job(_make_record(project_dir=str(project_dir)))
+        (project_dir / "source.mp4").write_bytes(b"src")
+        (project_dir / "dubbed.wav").write_bytes(b"dub")
+        (project_dir / "subtitles.srt").write_text(
+            "whisper-aligned-content", encoding="utf-8",
+        )
+
+        ensure_calls: list[str] = []
+
+        def _fake_ensure(project_dir_arg):
+            ensure_calls.append(str(project_dir_arg))
+            return {"action": "regenerated", "whisper_invoked": True,
+                    "blocks_processed": 5, "elapsed_ms": 12345}
+
+        monkeypatch.setattr(
+            "services.subtitles.ensure_whisper_alignment.ensure_whisper_aligned_subtitles",
+            _fake_ensure,
+        )
+
+        backend = mock.MagicMock()
+        backend.write.return_value = _make_ok_result(
+            zip_path=str(tmp_path / "draft.zip"),
+        )
+        runner = _make_runner(store, backend)
+
+        # First trigger — produces a succeeded record under the requested
+        # skip_cache value.
+        runner.trigger("job-test-001")
+        first = _wait_for_jianying_status(store, "job-test-001", "succeeded")
+        Path(first.jianying_draft_zip_path).write_bytes(b"first-zip")
+        return store, project_dir, runner, ensure_calls, backend
+
+    def test_second_trigger_under_skip_cache_true_rebuilds(
+        self, tmp_path, monkeypatch,
+    ):
+        """skip_cache=true on first AND second trigger. Second must
+        rebuild even though the input set is unchanged — admin UI
+        promises "每次重新转录"."""
+        store, project_dir, runner, ensure_calls, backend = (
+            self._setup_succeeded_whisper_draft(
+                tmp_path, monkeypatch, skip_cache_phase1=True,
+            )
+        )
+        # First trigger ran ensure_helper once (regenerate produces a
+        # whisper-aligned zip).
+        assert len(ensure_calls) == 1
+
+        # Second trigger — same admin policy, same inputs.
+        backend.write.reset_mock()
+        backend.write.return_value = _make_ok_result(
+            zip_path=str(tmp_path / "draft2.zip"),
+        )
+        runner.trigger("job-test-001")
+        _wait_for_jianying_status(store, "job-test-001", "succeeded")
+
+        assert backend.write.call_count == 1, (
+            "skip_cache=true on second trigger MUST force a rebuild "
+            "(backend.write call count = 1). Got "
+            f"{backend.write.call_count} — outer cache-hit served the "
+            "stale zip and bypassed ensure_helper."
+        )
+        assert len(ensure_calls) == 2, (
+            "skip_cache=true MUST run ensure_helper on every trigger. "
+            f"Got {len(ensure_calls)} call(s) total across two triggers."
+        )
+
+    def test_second_trigger_with_skip_cache_false_hits_cache(
+        self, tmp_path, monkeypatch,
+    ):
+        """No-regression sanity: skip_cache=false (default) means the
+        normal succeeded cache-hit fires on identical second trigger."""
+        store, project_dir, runner, ensure_calls, backend = (
+            self._setup_succeeded_whisper_draft(
+                tmp_path, monkeypatch, skip_cache_phase1=False,
+            )
+        )
+        assert len(ensure_calls) == 1  # first trigger ran helper
+
+        backend.write.reset_mock()
+        runner.trigger("job-test-001")
+        _wait_for_jianying_status(store, "job-test-001", "succeeded")
+
+        # Second trigger should cache-hit — no rebuild, no ensure call.
+        assert backend.write.call_count == 0, (
+            "skip_cache=false should preserve normal cache-hit behavior."
+        )
+        assert len(ensure_calls) == 1, (
+            "skip_cache=false: ensure_helper should NOT run on identical "
+            "second trigger."
+        )
+
+    def test_skip_cache_true_but_gate_closed_uses_normal_cache(
+        self, tmp_path, monkeypatch,
+    ):
+        """Defensive: if effective Whisper gate is CLOSED (env off OR
+        admin enabled=false), skip_cache=true is moot — ensure_helper
+        won't run anyway. The outer cache-hit should behave normally;
+        otherwise admin who left skip_cache=true while disabling
+        Whisper would see perpetual rebuilds for no benefit."""
+        monkeypatch.delenv("AVT_WHISPER_ALIGN_ENABLED", raising=False)
+        monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+        # admin enabled=true + skip_cache=true, but env capability OFF
+        (tmp_path / "admin_settings.json").write_text(
+            json.dumps({
+                "whisper_alignment_enabled": True,
+                "whisper_alignment_trigger": "deliverable",
+                "whisper_alignment_skip_cache": True,
+            }),
+            encoding="utf-8",
+        )
+
+        store = _make_store(tmp_path)
+        project_dir = _make_project_dir(tmp_path)
+        store.save_job(_make_record(project_dir=str(project_dir)))
+        (project_dir / "source.mp4").write_bytes(b"src")
+        (project_dir / "dubbed.wav").write_bytes(b"dub")
+        (project_dir / "subtitles.srt").write_text("proportional", encoding="utf-8")
+
+        ensure_calls: list[str] = []
+
+        def _fake_ensure(project_dir_arg):
+            ensure_calls.append(str(project_dir_arg))
+            return {"action": "regenerated", "whisper_invoked": True}
+
+        monkeypatch.setattr(
+            "services.subtitles.ensure_whisper_alignment.ensure_whisper_aligned_subtitles",
+            _fake_ensure,
+        )
+
+        backend = mock.MagicMock()
+        backend.write.return_value = _make_ok_result(
+            zip_path=str(tmp_path / "draft.zip"),
+        )
+        runner = _make_runner(store, backend)
+
+        # First trigger — no whisper because env is off
+        runner.trigger("job-test-001")
+        first = _wait_for_jianying_status(store, "job-test-001", "succeeded")
+        Path(first.jianying_draft_zip_path).write_bytes(b"first-zip")
+        assert ensure_calls == []
+
+        # Second trigger — should cache-hit (skip_cache moot when gate
+        # is closed; otherwise admin's leftover skip_cache=true would
+        # cause perpetual rebuilds for no benefit).
+        backend.write.reset_mock()
+        runner.trigger("job-test-001")
+
+        assert backend.write.call_count == 0, (
+            "When effective Whisper gate is closed, skip_cache=true is "
+            "moot — outer cache-hit should fire normally. Got "
+            f"{backend.write.call_count} backend.write call(s)."
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
