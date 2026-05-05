@@ -6418,6 +6418,21 @@ class ProcessPipeline:
         base.cn_text = ProcessPipeline._join_short_merge_texts(
             [segment.cn_text for segment in group]
         )
+        # 2026-05-04 P0b — short_merge collapses N segments into one base.
+        # Join tts_input_cn_text in parallel with cn_text so the merged
+        # base's drift state matches the input ground truth: any
+        # constituent segment in drift propagates to the merged base.
+        # (Segments with empty tts_input_cn_text fall back to cn_text via
+        # the dataclass-default backfill applied at load — by the time
+        # we reach short_merge, both fields are non-empty for all members
+        # that were in sync, so the join produces the right text either
+        # way.)
+        base.tts_input_cn_text = ProcessPipeline._join_short_merge_texts(
+            [
+                segment.tts_input_cn_text or segment.cn_text
+                for segment in group
+            ]
+        )
         base.start_ms = int(group[0].start_ms)
         base.end_ms = int(group[-1].end_ms)
         base.target_duration_ms = ProcessPipeline._short_merge_group_span_ms(group)
@@ -6738,6 +6753,13 @@ class ProcessPipeline:
                     last_end_ms=int(segment.end_ms),
                     target_duration_ms=int(segment.target_duration_ms),
                     merged_cn_text=segment.cn_text,
+                    # 2026-05-04 P0b — propagate the audio's source-of-truth
+                    # text to the block. Empty-after-backfill defaults to
+                    # cn_text (treat as in-sync). Cue pipeline compares
+                    # this against merged_cn_text for drift detection.
+                    tts_input_cn_text=(
+                        segment.tts_input_cn_text or segment.cn_text
+                    ),
                     actual_audio_duration_ms=int(segment.actual_duration_ms),
                     rewrite_count=int(segment.rewrite_count),
                     tts_audio_path=_normalize_optional_text(segment.tts_audio_path),
