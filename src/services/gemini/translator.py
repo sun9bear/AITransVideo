@@ -282,6 +282,15 @@ class DubbingSegment:
     catalog_hit: bool = False           # speaker's voice_id was found in voice_catalog with chars_per_second
     first_pass_duration_ms: int = 0     # raw TTS output duration BEFORE any rewrite/DSP (snapshot at S5 entry)
     first_pass_cn_text: str = ""        # text used for that first-pass TTS, before any post-TTS rewrite
+    # 2026-05-04 P0a — exact text that was fed to TTS for the CURRENT
+    # ``aligned_audio_path``. Re-stamped on EVERY successful TTS synthesis
+    # (initial pipeline, pre-TTS rewrite, post-TTS rewrite, single-segment
+    # regen-tts on draft accept, batch regen-all-dirty). NEVER mutated by
+    # user text edits — that's the whole point: ``cn_text != tts_input_cn_text``
+    # is how downstream cue generation detects "subtitle text changed but
+    # audio is still old" drift and falls back to safe proportional layout
+    # instead of producing timestamps from mismatched audio.
+    tts_input_cn_text: str = ""
     first_pass_error_pct: float = 0.0   # (first_pass_duration_ms - target_duration_ms) / target_duration_ms (sign preserved)
     dsp_speed_param: float = 1.0        # Task 1 will populate; 1.0 means "no speed adjustment / not yet implemented"
     # CodeX P2-3: target Chinese chars/sec for the speaker, derived from
