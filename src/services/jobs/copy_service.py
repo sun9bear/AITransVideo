@@ -538,6 +538,31 @@ def prepare_copy_project_dir(
                 apply_draft_segment(copy_tmp, target_wav)
                 applied_drafts.append(segment_id)
 
+        # A4.5 — re-stamp tts_input_cn_text on each segment whose draft
+        # was promoted in A4.4. The draft was synthesized from that
+        # segment's CURRENT cn_text and just replaced the new job's
+        # baseline audio, so tts_input_cn_text must reflect cn_text or
+        # downstream cue-pipeline drift detection (Phase B) would falsely
+        # flag this in-sync segment as text↔audio drift.
+        #
+        # Mirrors editing_commit._apply_editing_to_baseline's stamp logic
+        # for the overwrite path. Segments WITHOUT a promoted draft
+        # intentionally retain their existing tts_input_cn_text — that
+        # IS the drift state when user edits text without regen-tts.
+        #
+        # Plan ref: 2026-05-04-subtitle-audio-sync-plan.md Phase A
+        # follow-up after CodeX review (P1 finding).
+        if applied_drafts:
+            applied_ids = set(applied_drafts)
+            for seg in segments:
+                sid = str(seg.get("segment_id", ""))
+                if sid in applied_ids:
+                    seg["tts_input_cn_text"] = seg.get("cn_text", "")
+            target_segments_path.write_text(
+                json.dumps(segments, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
     except CopyPreparationError:
         raise
     except Exception as exc:

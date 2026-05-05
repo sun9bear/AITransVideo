@@ -361,6 +361,137 @@ def test_prepare_copy_applies_draft_wavs_over_hardlinks(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 2026-05-04 P0a follow-up: tts_input_cn_text stamping on draft promotion
+#
+# Mirrors the stamp logic in editing_commit._apply_editing_to_baseline. When
+# a copy_as_new commit promotes a draft wav into the new job's baseline,
+# that wav was synthesized from editing/segments.json[sid].cn_text — so
+# the new job's editor/segments.json[sid].tts_input_cn_text MUST be
+# updated to match. Without this, downstream cue-pipeline drift detection
+# would falsely flag segments that just got fresh audio as "text edited
+# without regen-tts".
+# ---------------------------------------------------------------------------
+
+
+def test_prepare_copy_stamps_tts_input_for_promoted_drafts(tmp_path: Path) -> None:
+    """copy_as_new commit re-stamps tts_input_cn_text on each segment whose
+    draft was promoted, mirroring the overwrite path's behavior.
+
+    seg_001: text edited from "原001" → "新001" + draft promoted
+             → tts_input_cn_text must end up "新001" (synced)
+    seg_002: text NOT edited, no draft → stays at "原002" (no-op)
+    seg_003: text edited from "原003" → "改003" but NO draft (user didn't
+             regen-tts) → tts_input_cn_text stays "原003" (drift preserved
+             so downstream cue pipeline can detect it)
+    """
+    source = tmp_path / "src_project"
+    tts_dir = source / "editor" / "tts_segments"
+    tts_dir.mkdir(parents=True)
+    for i in range(1, 4):
+        (tts_dir / f"seg_{i:03d}.wav").write_bytes(f"BASE_{i}".encode())
+
+    # Baseline ships with both fields populated and synced — this is the
+    # state the source job lands in after a successful publish.
+    baseline_segments = [
+        {"segment_id": f"seg_{i:03d}",
+         "cn_text": f"原{i:03d}",
+         "tts_input_cn_text": f"原{i:03d}",
+         "provider": "minimax", "voice_id": "v_default"}
+        for i in range(1, 4)
+    ]
+    (source / "editor" / "segments.json").write_text(
+        json.dumps(baseline_segments, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (source / "editor" / "transcript.json").write_text("{}", encoding="utf-8")
+    (source / "editor" / "manifest.json").write_text(
+        json.dumps({"artifact_count": 3}), encoding="utf-8",
+    )
+
+    # User edits seg_001 + seg_003 cn_text in the editing buffer, but only
+    # regenerates TTS for seg_001.
+    _populate_editing_dir(
+        source,
+        text_edits={"seg_001": "新001", "seg_003": "改003"},
+        draft_segments={"seg_001": b"DRAFT_AUDIO_001"},
+    )
+
+    target = tmp_path / "copy"
+    summary = prepare_copy_project_dir(source, target)
+    assert summary["applied_draft_segment_ids"] == ["seg_001"]
+
+    # Read back the target's baseline and assert per-segment stamping.
+    written = json.loads(
+        (target / "editor" / "segments.json").read_text(encoding="utf-8")
+    )
+    by_id = {rec["segment_id"]: rec for rec in written}
+
+    # seg_001: draft promoted → tts_input re-stamped to current cn_text
+    assert by_id["seg_001"]["cn_text"] == "新001"
+    assert by_id["seg_001"]["tts_input_cn_text"] == "新001"
+
+    # seg_002: untouched — both fields preserve baseline value
+    assert by_id["seg_002"]["cn_text"] == "原002"
+    assert by_id["seg_002"]["tts_input_cn_text"] == "原002"
+
+    # seg_003: text edited but NO draft → drift preserved
+    # (tts_input still points at the audio's original text)
+    assert by_id["seg_003"]["cn_text"] == "改003"
+    assert by_id["seg_003"]["tts_input_cn_text"] == "原003"
+
+
+def test_prepare_copy_with_no_drafts_preserves_all_tts_input(tmp_path: Path) -> None:
+    """Text-only edits without any TTS regen → no drafts → no segments
+    should have their tts_input_cn_text touched. Drift state survives the
+    copy unchanged so cue pipeline still sees it."""
+    source = tmp_path / "src_project"
+    tts_dir = source / "editor" / "tts_segments"
+    tts_dir.mkdir(parents=True)
+    for i in range(1, 3):
+        (tts_dir / f"seg_{i:03d}.wav").write_bytes(f"BASE_{i}".encode())
+
+    baseline_segments = [
+        {"segment_id": "seg_001", "cn_text": "原001",
+         "tts_input_cn_text": "原001",
+         "provider": "minimax", "voice_id": "v_default"},
+        {"segment_id": "seg_002", "cn_text": "原002",
+         "tts_input_cn_text": "原002",
+         "provider": "minimax", "voice_id": "v_default"},
+    ]
+    (source / "editor" / "segments.json").write_text(
+        json.dumps(baseline_segments, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (source / "editor" / "transcript.json").write_text("{}", encoding="utf-8")
+    (source / "editor" / "manifest.json").write_text(
+        json.dumps({"artifact_count": 2}), encoding="utf-8",
+    )
+
+    # User edits text on both, no regen-tts on either.
+    _populate_editing_dir(
+        source,
+        text_edits={"seg_001": "新001", "seg_002": "新002"},
+        # draft_segments=None → no drafts applied
+    )
+
+    target = tmp_path / "copy"
+    summary = prepare_copy_project_dir(source, target)
+    assert summary["applied_draft_segment_ids"] == []
+
+    written = json.loads(
+        (target / "editor" / "segments.json").read_text(encoding="utf-8")
+    )
+    by_id = {rec["segment_id"]: rec for rec in written}
+
+    # Both segments: cn_text reflects the edit, tts_input_cn_text stays at
+    # baseline (drift preserved end-to-end through the copy).
+    assert by_id["seg_001"]["cn_text"] == "新001"
+    assert by_id["seg_001"]["tts_input_cn_text"] == "原001"
+    assert by_id["seg_002"]["cn_text"] == "新002"
+    assert by_id["seg_002"]["tts_input_cn_text"] == "原002"
+
+
+# ---------------------------------------------------------------------------
 # prepare_copy_project_dir — full pipeline artifact cloning (2026-04-19 fix)
 #
 # Background: without these, a copy_as_new new-job pipeline sees an
