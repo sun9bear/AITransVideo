@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json as _json
 import os
 from pathlib import Path
 import shutil
@@ -17,26 +16,17 @@ from services.tts.duration_estimator import count_spoken_chars
 from services.usage_meter import TTS_BUCKET_POST_TTS_RESYNTH
 
 
-# Phase 2 force-DSP override — admin-controlled, read at every alignment call
-# (cheap, file is small). Keeps aligner free of HTTP/gateway dependencies.
-_ADMIN_SETTINGS_PATH = Path(
-    os.environ.get("AIVIDEOTRANS_CONFIG_DIR", "/opt/aivideotrans/config")
-) / "admin_settings.json"
+# Phase 2 force-DSP override — admin-controlled, read at every alignment call.
+# 2026-05-05 Phase D-1: read logic factored into ``services.admin_settings`` so
+# the Whisper-alignment reader and this one share one tested file-read path.
+from services.admin_settings import read_admin_setting
 
 
 def _is_force_dsp_alignment_enabled() -> bool:
     """Read admin_settings.force_dsp_alignment. Defaults to False on any read
     failure so the existing rewrite/dsp/direct decision tree stays in effect.
     """
-    try:
-        if _ADMIN_SETTINGS_PATH.exists():
-            with _ADMIN_SETTINGS_PATH.open(encoding="utf-8") as f:
-                cfg = _json.load(f)
-            if isinstance(cfg, dict):
-                return bool(cfg.get("force_dsp_alignment", False))
-    except Exception:
-        pass
-    return False
+    return bool(read_admin_setting("force_dsp_alignment", default=False))
 
 
 def _snapshot_first_pass_text(segment: DubbingSegment) -> None:

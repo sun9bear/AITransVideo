@@ -506,8 +506,15 @@ def test_c3_flag_off_skips_whisper_alignment(monkeypatch, tmp_path):
 def test_c3_flag_on_sync_block_uses_whisper(monkeypatch, tmp_path):
     """Flag on + drift==False + audio path exists → whisper subprocess
     invoked, char_times feed into cue construction, cues carry the
-    whisper-aligned source tag."""
+    whisper-aligned source tag.
+
+    D-1: BOTH gates must be open (env + admin policy)."""
     monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+    monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+    import json as _json
+    (tmp_path / "admin_settings.json").write_text(
+        _json.dumps({"whisper_alignment_enabled": True}), encoding="utf-8",
+    )
     from modules.subtitles.cue_pipeline import build_subtitle_cues_for_blocks
 
     fake_words = [
@@ -713,11 +720,192 @@ def test_c3_helper_raising_exception_falls_back_to_proportional(monkeypatch, tmp
     assert all("whisper" not in c.source.lower() for c in result.cues)
 
 
+# ---------------------------------------------------------------------------
+# D-1: double-gate (env capability + admin policy) for whisper alignment.
+#
+# Two gates must BOTH be open for whisper to actually run:
+# 1. AVT_WHISPER_ALIGN_ENABLED=1 (ops capability switch)
+# 2. admin_settings.json::whisper_alignment_enabled=true (admin policy)
+#
+# Either gate closed → behave as if whisper is disabled (proportional
+# path used). Default behavior (both unset) is therefore SAFE: code is
+# inert until ops AND admin both opt in.
+# ---------------------------------------------------------------------------
+
+
+def test_d1_env_set_but_admin_setting_off_skips_whisper(monkeypatch, tmp_path):
+    """Env var on, admin setting off → whisper NOT invoked. Admin
+    policy gate is the second-line guard against accidental rollout.
+
+    Uses a counter (not assertion-raising stub) because the cue_pipeline
+    catches all exceptions and falls back; that masks "whisper got
+    called but failed" vs "whisper never got called". Counter shows
+    the ground truth."""
+    monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+    # Admin settings: explicitly disabled
+    monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+    import json
+    (tmp_path / "admin_settings.json").write_text(
+        json.dumps({"whisper_alignment_enabled": False}), encoding="utf-8",
+    )
+
+    from modules.subtitles.cue_pipeline import build_subtitle_cues_for_blocks
+
+    whisper_calls = []
+
+    def _stub(*a, **kw):
+        whisper_calls.append(1)
+        return [{"start_ms": 0, "end_ms": 1000, "text": "你好"}]
+    monkeypatch.setattr(
+        "modules.subtitles.cue_pipeline._run_whisper_cached", _stub,
+    )
+
+    audio = tmp_path / "seg.wav"
+    audio.write_bytes(b"fake-wav")
+    block = _make_block("b1", "你好", aligned_audio_path=str(audio))
+    result = build_subtitle_cues_for_blocks([block], _make_subtitle_lines("你好"))
+
+    assert whisper_calls == [], (
+        "Admin policy off should prevent whisper subprocess from spawning. "
+        f"Got {len(whisper_calls)} call(s)."
+    )
+    # And cue source confirms proportional path.
+    assert all("whisper" not in c.source.lower() for c in result.cues)
+
+
+def test_d1_admin_setting_on_but_env_off_skips_whisper(monkeypatch, tmp_path):
+    """Admin policy on but env capability off → whisper NOT invoked.
+    Env is the ops kill switch — emergency override beats admin policy."""
+    monkeypatch.delenv("AVT_WHISPER_ALIGN_ENABLED", raising=False)
+    monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+    import json
+    (tmp_path / "admin_settings.json").write_text(
+        json.dumps({"whisper_alignment_enabled": True}), encoding="utf-8",
+    )
+
+    from modules.subtitles.cue_pipeline import build_subtitle_cues_for_blocks
+
+    whisper_calls = []
+
+    def _stub(*a, **kw):
+        whisper_calls.append(1)
+        return [{"start_ms": 0, "end_ms": 1000, "text": "你好"}]
+    monkeypatch.setattr(
+        "modules.subtitles.cue_pipeline._run_whisper_cached", _stub,
+    )
+
+    audio = tmp_path / "seg.wav"
+    audio.write_bytes(b"fake-wav")
+    block = _make_block("b1", "你好", aligned_audio_path=str(audio))
+    result = build_subtitle_cues_for_blocks([block], _make_subtitle_lines("你好"))
+
+    assert whisper_calls == [], (
+        "Env capability off should prevent whisper subprocess. "
+        f"Got {len(whisper_calls)} call(s)."
+    )
+    assert all("whisper" not in c.source.lower() for c in result.cues)
+
+
+def test_d1_both_gates_open_invokes_whisper(monkeypatch, tmp_path):
+    """Env capability + admin policy both on → whisper IS invoked.
+    Verifies the AND-gate actually ANDs (not OR by mistake)."""
+    monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+    monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+    import json
+    (tmp_path / "admin_settings.json").write_text(
+        json.dumps({"whisper_alignment_enabled": True}), encoding="utf-8",
+    )
+
+    from modules.subtitles.cue_pipeline import build_subtitle_cues_for_blocks
+
+    monkeypatch.setattr(
+        "modules.subtitles.cue_pipeline._run_whisper_cached",
+        lambda *a, **kw: [{"start_ms": 100, "end_ms": 800, "text": "你好"}],
+    )
+
+    audio = tmp_path / "seg.wav"
+    audio.write_bytes(b"fake")
+    block = _make_block(
+        "b1", "你好",
+        aligned_audio_path=str(audio),
+        first_start_ms=10_000, last_end_ms=11_000,
+        target_duration_ms=1_000,
+    )
+    result = build_subtitle_cues_for_blocks([block], _make_subtitle_lines("你好"))
+    assert any("whisper" in c.source.lower() for c in result.cues)
+
+
+def test_d1_both_gates_off_skips_whisper(monkeypatch, tmp_path):
+    """Default state (both gates off) → no whisper. Just to be explicit
+    about what production looks like out of the box."""
+    monkeypatch.delenv("AVT_WHISPER_ALIGN_ENABLED", raising=False)
+    monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))  # no settings file
+    from modules.subtitles.cue_pipeline import build_subtitle_cues_for_blocks
+
+    def _explode(*a, **kw):
+        raise AssertionError("whisper should not be called when both gates are off")
+    monkeypatch.setattr(
+        "modules.subtitles.cue_pipeline._run_whisper_cached", _explode,
+    )
+
+    audio = tmp_path / "seg.wav"
+    audio.write_bytes(b"fake")
+    block = _make_block("b1", "你好", aligned_audio_path=str(audio))
+    result = build_subtitle_cues_for_blocks([block], _make_subtitle_lines("你好"))
+    assert all("whisper" not in c.source.lower() for c in result.cues)
+
+
+def test_d1_admin_setting_change_takes_effect_without_restart(monkeypatch, tmp_path):
+    """Admin flips the toggle while the service is running. Next call
+    to build_subtitle_cues_for_blocks reflects the change. No restart
+    needed (admin_settings.json is read fresh per call)."""
+    monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+    monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+    settings = tmp_path / "admin_settings.json"
+
+    import json
+    from modules.subtitles.cue_pipeline import build_subtitle_cues_for_blocks
+
+    whisper_calls: list = []
+
+    def _stub(*a, **kw):
+        whisper_calls.append(1)
+        return [{"start_ms": 0, "end_ms": 800, "text": "你好"}]
+    monkeypatch.setattr(
+        "modules.subtitles.cue_pipeline._run_whisper_cached", _stub,
+    )
+
+    audio = tmp_path / "seg.wav"
+    audio.write_bytes(b"fake")
+    block_kwargs = dict(aligned_audio_path=str(audio),
+                        first_start_ms=0, last_end_ms=1_000,
+                        target_duration_ms=1_000)
+
+    # Phase 1: admin OFF
+    settings.write_text(json.dumps({"whisper_alignment_enabled": False}), encoding="utf-8")
+    block_off = _make_block("b1", "你好", **block_kwargs)
+    result = build_subtitle_cues_for_blocks([block_off], _make_subtitle_lines("你好"))
+    assert len(whisper_calls) == 0  # whisper NOT called
+
+    # Phase 2: admin ON (without process restart)
+    settings.write_text(json.dumps({"whisper_alignment_enabled": True}), encoding="utf-8")
+    block_on = _make_block("b1", "你好", **block_kwargs)
+    result = build_subtitle_cues_for_blocks([block_on], _make_subtitle_lines("你好"))
+    assert len(whisper_calls) == 1  # whisper IS called now
+
+
 def test_c3_drift_check_uses_normalize_consistent_with_phase_b(monkeypatch, tmp_path):
     """The drift gate must use cue_models.normalize() — same as the
     Phase B validator — so drift decisions in C3 match what
-    subtitle_quality_report.json says. CodeX guardrail #4."""
+    subtitle_quality_report.json says. CodeX guardrail #4.
+
+    D-1: needs both env capability AND admin policy ON."""
     monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+    monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+    import json as _json
+    (tmp_path / "admin_settings.json").write_text(
+        _json.dumps({"whisper_alignment_enabled": True}), encoding="utf-8",
+    )
     from modules.subtitles.cue_pipeline import build_subtitle_cues_for_blocks
 
     # Trailing whitespace difference — normalize() collapses these to equal,

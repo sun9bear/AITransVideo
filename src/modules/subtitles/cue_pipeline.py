@@ -60,10 +60,35 @@ logger = logging.getLogger(__name__)
 
 
 def _whisper_align_enabled() -> bool:
-    """Read the feature flag fresh every call so deploy-time env changes
-    take effect without re-importing the module. Default off (CodeX
-    guardrail #1) — only ``AVT_WHISPER_ALIGN_ENABLED == "1"`` activates."""
-    return os.environ.get("AVT_WHISPER_ALIGN_ENABLED", "") == "1"
+    """Two-gate: env capability AND admin policy. BOTH must be open.
+
+    Phase D-1 (2026-05-05) introduced the second gate. Rationale:
+
+    - ``AVT_WHISPER_ALIGN_ENABLED=1`` — ops capability switch. Set by
+      docker-compose / .env. "Does this server know how to run whisper?
+      (faster-whisper installed, model cached, OK to spawn subprocess?)"
+      Ops can flip this OFF in an emergency to disable across all
+      tenants instantly without touching admin UI or DB.
+
+    - ``admin_settings.json::whisper_alignment_enabled`` — admin policy.
+      "Should we run whisper for this deployment?" Admin can toggle in
+      the backend UI without touching docker-compose.
+
+    Effective rule: ``effective = env_allows AND admin_enabled``. AND
+    (not OR) so:
+      - either gate closed → safe default (proportional cues)
+      - both open → run whisper
+
+    Read fresh per call (no caching). Env evaluates first because it's
+    cheaper (no file read).
+    """
+    if os.environ.get("AVT_WHISPER_ALIGN_ENABLED", "") != "1":
+        return False
+    # Lazy import — keeps cue_pipeline's import time light, and avoids
+    # a circular dep risk (admin_settings is in services/, cue_pipeline
+    # is in modules/, services may eventually import from modules).
+    from services.admin_settings import read_whisper_alignment_settings
+    return read_whisper_alignment_settings().enabled
 
 
 def _block_is_in_sync(block: SemanticBlock) -> bool:
