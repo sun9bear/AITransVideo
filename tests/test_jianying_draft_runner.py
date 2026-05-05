@@ -1400,5 +1400,155 @@ class TestStatusApiSurfacesRunnerFields:
         _wait_for_jianying_status(store, "job-test-001", "succeeded")
 
 
+# ---------------------------------------------------------------------------
+# D-3: ensure-whisper-aligned subtitles wired in before draft build
+# ---------------------------------------------------------------------------
+
+
+class TestWhisperAlignmentHookD3:
+    """The runner calls ``ensure_whisper_aligned_subtitles(project_dir)``
+    BEFORE building the draft so the SRT in the zip carries whisper
+    timing whenever both gates are open. Both gates closed → helper
+    is a no-op (`skipped_admin_disabled`); draft uses existing
+    proportional cues. Helper exception → swallowed; draft generation
+    continues with on-disk SRTs."""
+
+    def test_helper_invoked_when_both_gates_open(self, tmp_path, monkeypatch):
+        """Env capability ON + admin policy ON → ensure-helper called
+        before backend.write."""
+        monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+        monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+        (tmp_path / "admin_settings.json").write_text(
+            json.dumps({"whisper_alignment_enabled": True}), encoding="utf-8",
+        )
+
+        store = _make_store(tmp_path)
+        project_dir = _make_project_dir(tmp_path)
+        record = _make_record(project_dir=str(project_dir))
+        store.save_job(record)
+
+        ensure_calls: list[str] = []
+
+        def _fake_ensure(project_dir_arg):
+            ensure_calls.append(str(project_dir_arg))
+            return {"action": "regenerated", "whisper_invoked": True,
+                    "blocks_processed": 5, "elapsed_ms": 12345}
+
+        monkeypatch.setattr(
+            "services.subtitles.ensure_whisper_alignment.ensure_whisper_aligned_subtitles",
+            _fake_ensure,
+        )
+
+        backend = mock.MagicMock()
+        backend.write.return_value = _make_ok_result()
+        runner = _make_runner(store, backend)
+        runner.trigger("job-test-001")
+        _wait_for_jianying_status(store, "job-test-001", "succeeded")
+
+        assert len(ensure_calls) == 1, (
+            "ensure_whisper_aligned_subtitles should be called exactly once "
+            f"when both gates open; got {len(ensure_calls)}"
+        )
+        assert str(project_dir) in ensure_calls[0]
+
+    def test_helper_skipped_when_env_capability_off(self, tmp_path, monkeypatch):
+        """Env off → ensure-helper not even imported. Saves the
+        ImportError surface area for tenants without whisper deployed."""
+        monkeypatch.delenv("AVT_WHISPER_ALIGN_ENABLED", raising=False)
+        monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+        (tmp_path / "admin_settings.json").write_text(
+            json.dumps({"whisper_alignment_enabled": True}), encoding="utf-8",
+        )
+
+        store = _make_store(tmp_path)
+        project_dir = _make_project_dir(tmp_path)
+        store.save_job(_make_record(project_dir=str(project_dir)))
+
+        ensure_calls: list = []
+
+        def _fake_ensure(project_dir_arg):
+            ensure_calls.append(project_dir_arg)
+            return {"action": "regenerated", "whisper_invoked": True}
+
+        monkeypatch.setattr(
+            "services.subtitles.ensure_whisper_alignment.ensure_whisper_aligned_subtitles",
+            _fake_ensure,
+        )
+
+        backend = mock.MagicMock()
+        backend.write.return_value = _make_ok_result()
+        runner = _make_runner(store, backend)
+        runner.trigger("job-test-001")
+        _wait_for_jianying_status(store, "job-test-001", "succeeded")
+
+        assert ensure_calls == [], (
+            "ensure_whisper_aligned_subtitles should NOT be called when "
+            "env capability is off"
+        )
+
+    def test_helper_skipped_when_admin_policy_off(self, tmp_path, monkeypatch):
+        """Env on, admin policy off → ensure-helper not called. Today's
+        production default — admins must opt in via the backend toggle."""
+        monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+        monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+        (tmp_path / "admin_settings.json").write_text(
+            json.dumps({"whisper_alignment_enabled": False}), encoding="utf-8",
+        )
+
+        store = _make_store(tmp_path)
+        project_dir = _make_project_dir(tmp_path)
+        store.save_job(_make_record(project_dir=str(project_dir)))
+
+        ensure_calls: list = []
+
+        def _fake_ensure(project_dir_arg):
+            ensure_calls.append(project_dir_arg)
+            return {"action": "regenerated", "whisper_invoked": True}
+
+        monkeypatch.setattr(
+            "services.subtitles.ensure_whisper_alignment.ensure_whisper_aligned_subtitles",
+            _fake_ensure,
+        )
+
+        backend = mock.MagicMock()
+        backend.write.return_value = _make_ok_result()
+        runner = _make_runner(store, backend)
+        runner.trigger("job-test-001")
+        _wait_for_jianying_status(store, "job-test-001", "succeeded")
+
+        assert ensure_calls == []
+
+    def test_helper_exception_does_not_block_draft(self, tmp_path, monkeypatch):
+        """Helper raises (corrupt segments file, OOM, whatever) → draft
+        generation continues with on-disk SRTs. Defense-in-depth on top
+        of the cue_pipeline's own fallback."""
+        monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+        monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+        (tmp_path / "admin_settings.json").write_text(
+            json.dumps({"whisper_alignment_enabled": True}), encoding="utf-8",
+        )
+
+        store = _make_store(tmp_path)
+        project_dir = _make_project_dir(tmp_path)
+        store.save_job(_make_record(project_dir=str(project_dir)))
+
+        def _explode(project_dir_arg):
+            raise RuntimeError("simulated whisper helper failure")
+
+        monkeypatch.setattr(
+            "services.subtitles.ensure_whisper_alignment.ensure_whisper_aligned_subtitles",
+            _explode,
+        )
+
+        backend = mock.MagicMock()
+        backend.write.return_value = _make_ok_result()
+        runner = _make_runner(store, backend)
+        runner.trigger("job-test-001")
+        # Despite helper raising, draft must succeed.
+        final = _wait_for_jianying_status(store, "job-test-001", "succeeded")
+        assert final.jianying_draft_status == "succeeded"
+        assert backend.write.call_count == 1
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

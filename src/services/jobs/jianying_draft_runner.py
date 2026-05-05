@@ -73,6 +73,13 @@ JIANYING_DRAFT_LOCK_SUBDIR = "_locks/jianying_draft"
 
 SUBSTEP_VALIDATING_INPUTS = "validating_inputs"
 SUBSTEP_RESOLVING_ARTIFACTS = "resolving_artifacts"
+# 2026-05-05 D-3: optional substep before BUILDING_DRAFT. Only emitted
+# when the whisper double-gate is open; otherwise we skip straight to
+# BUILDING_DRAFT and the user never sees this stage. Wall time on the
+# fast path (already aligned + fingerprint match) is < 1s; on slow
+# path (cache miss) ~3× audio realtime — front-end progress indicator
+# uses this substep label to set user expectations.
+SUBSTEP_ALIGNING_SUBTITLES = "aligning_subtitles"
 SUBSTEP_BUILDING_DRAFT = "building_draft"
 SUBSTEP_VALIDATING_COMPATIBILITY = "validating_compatibility"
 SUBSTEP_ZIPPING_DRAFT = "zipping_draft"
@@ -764,6 +771,22 @@ class JianyingDraftRunner:
                 user_draft_root=user_draft_root,
             )
             job = self._store.require_job(job_id)
+
+            # 2026-05-05 D-3: ensure subtitles are whisper-aligned before
+            # we package the draft. Helper is a no-op when the double-gate
+            # is closed (env capability + admin policy) — preserves
+            # today's proportional path for tenants with whisper off.
+            # Open-gate path: ~1s if cache hit, ~3× audio-duration if
+            # cache miss; surfaced to UI as the SUBSTEP_ALIGNING_SUBTITLES
+            # progress label. Failure inside the helper would already
+            # have been swallowed by cue_pipeline's fallback path; we
+            # ALSO wrap in try/except here so a totally unexpected
+            # exception (file IO, OOM) can never block draft generation.
+            self._maybe_align_subtitles(
+                job_id, attempt_id, job,
+                user_draft_root=user_draft_root,
+            )
+
             request = self._build_jianying_request(job, user_draft_root=user_draft_root)
 
             # Lazy-import backend to avoid pulling in pyJianYingDraft at module
@@ -944,6 +967,82 @@ class JianyingDraftRunner:
             logger.exception(
                 "Failed to record jianying error for job %s — store unreachable",
                 job_id,
+            )
+
+    def _maybe_align_subtitles(
+        self,
+        job_id: str,
+        attempt_id: str,
+        job,
+        *,
+        user_draft_root: str | None,
+    ) -> None:
+        """D-3: bring subtitles to whisper-aligned state if both gates open.
+
+        Called from ``_do_generate`` after RESOLVING_ARTIFACTS, before
+        BUILDING_DRAFT. The helper is a no-op (returns early with
+        ``skipped_admin_disabled``) when the double-gate is closed —
+        which is the production default — so tenants without whisper
+        opt-in pay nothing. When the gates open, work happens here:
+
+          - Cache hit (already whisper-aligned + fingerprint matches):
+            ~1s wall-time, no subprocess. UI flickers SUBSTEP_ALIGNING_SUBTITLES.
+          - Cache miss (cues are proportional, or audio re-TTS'd
+            underneath stale whisper run): full re-run. ~3× audio
+            realtime per uncached segment.
+
+        Defensive: any exception from the helper is logged and swallowed
+        — draft generation continues with whatever cues are currently
+        on disk. The whisper path itself has its own fallback (cue
+        pipeline drops back to proportional on whisper errors), so
+        reaching this except is unlikely; defense-in-depth.
+
+        2026-05-05 D-3: this is the FIRST entry point that triggers
+        whisper alignment at deliverable time (instead of every publish).
+        D-4 will add the same call to the materials_pack handler.
+        """
+        if not job.project_dir:
+            return  # JobRecord without project_dir — can't run; let
+                    # _build_jianying_request fail with a clearer error.
+
+        # Pre-check the double-gate: if closed, skip the substep label
+        # entirely so users never see a transient "正在精准对齐字幕" blip.
+        try:
+            from modules.subtitles.cue_pipeline import _whisper_align_enabled
+            if not _whisper_align_enabled():
+                return
+        except Exception:  # noqa: BLE001 — flag check should never fail loudly
+            logger.exception(
+                "whisper-align gate check failed for job %s; skipping align step",
+                job_id,
+            )
+            return
+
+        # Both gates open — surface progress to the user.
+        self._set_substep(
+            job_id,
+            attempt_id,
+            SUBSTEP_ALIGNING_SUBTITLES,
+            message="正在精准对齐字幕（首次约 10 分钟）",
+            user_draft_root=user_draft_root,
+        )
+
+        try:
+            from services.subtitles.ensure_whisper_alignment import (
+                ensure_whisper_aligned_subtitles,
+            )
+            status = ensure_whisper_aligned_subtitles(job.project_dir)
+            logger.info(
+                "whisper-align for job %s: action=%s elapsed=%dms blocks=%d",
+                job_id,
+                status.get("action"),
+                status.get("elapsed_ms", 0),
+                status.get("blocks_processed", 0),
+            )
+        except Exception:  # noqa: BLE001 — never block draft generation
+            logger.exception(
+                "whisper-align helper raised for job %s — proceeding with "
+                "existing on-disk subtitles", job_id,
             )
 
     def _build_jianying_request(self, job, *, user_draft_root: str | None = None) -> "object":
