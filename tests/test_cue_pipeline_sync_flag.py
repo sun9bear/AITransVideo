@@ -167,3 +167,178 @@ def test_short_merge_single_segment_returns_unchanged():
     base = ProcessPipeline._materialize_short_merge_group([seg])
     assert base is seg  # same instance
     assert base.tts_input_cn_text == "X"
+
+
+# ---------------------------------------------------------------------------
+# B3: cue pipeline drift detection + validation issue
+# ---------------------------------------------------------------------------
+
+
+def _make_block_spec(
+    block_id: str,
+    merged_cn_text: str,
+    *,
+    tts_input_cn_text: str | None = None,
+    start_ms: int = 0,
+    end_ms: int = 5000,
+):
+    """BlockSpec factory; defaults tts_input_cn_text to merged_cn_text (sync)."""
+    from modules.subtitles.cue_validator import BlockSpec
+    return BlockSpec(
+        block_id=block_id,
+        merged_cn_text=merged_cn_text,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        tts_input_cn_text=(
+            tts_input_cn_text if tts_input_cn_text is not None else merged_cn_text
+        ),
+    )
+
+
+def _make_cue(
+    cue_id: str, block_id: str, text: str, start_ms: int, end_ms: int,
+):
+    """SubtitleCue factory."""
+    from modules.subtitles.cue_models import SubtitleCue
+    return SubtitleCue(
+        cue_id=cue_id,
+        block_id=block_id,
+        speaker_id="A",
+        speaker_name="A",
+        text=text,
+        en_text="",
+        start_ms=start_ms,
+        end_ms=end_ms,
+        source="block",
+        needs_review=False,
+        review_reason=None,
+    )
+
+
+def test_validator_emits_drift_issue_when_tts_input_differs_from_merged():
+    """A BlockSpec where tts_input_cn_text != merged_cn_text emits a
+    text_audio_drift issue. Severity is 'review' (informational) — drift
+    flips status to needs_review but doesn't fail validation, since the
+    cue pipeline still produces usable cues via the proportional layout
+    fallback."""
+    from modules.subtitles.cue_validator import validate_cues
+
+    drift_spec = _make_block_spec(
+        "b1",
+        merged_cn_text="新版文字",
+        tts_input_cn_text="原版文字",
+        start_ms=0, end_ms=2000,
+    )
+    sync_spec = _make_block_spec(
+        "b2",
+        merged_cn_text="同步的文字",
+        start_ms=2000, end_ms=4000,
+    )
+    cues = [
+        _make_cue("b1_c1", "b1", "新版文字", 0, 2000),
+        _make_cue("b2_c1", "b2", "同步的文字", 2000, 4000),
+    ]
+    report = validate_cues(block_specs=[drift_spec, sync_spec], cues=cues)
+
+    drift_issues = [i for i in report.issues if i.code == "text_audio_drift"]
+    assert len(drift_issues) == 1
+    assert drift_issues[0].block_id == "b1"
+    assert drift_issues[0].severity == "review"
+
+    # Validation status flips to needs_review (would have been "passed"
+    # without drift) — the drift IS surfaced but not as a hard error.
+    assert report.validation_status == "needs_review"
+
+
+def test_validator_no_drift_issue_when_fields_match():
+    """No drift issue emitted when merged_cn_text == tts_input_cn_text
+    (post-strip-and-normalize comparison)."""
+    from modules.subtitles.cue_validator import validate_cues
+
+    spec = _make_block_spec("b1", merged_cn_text="同步文本")
+    cues = [_make_cue("b1_c1", "b1", "同步文本", 0, 2000)]
+    report = validate_cues(block_specs=[spec], cues=cues)
+
+    drift_issues = [i for i in report.issues if i.code == "text_audio_drift"]
+    assert drift_issues == []
+    assert report.validation_status == "passed"
+
+
+def test_validator_treats_empty_tts_input_as_in_sync():
+    """A BlockSpec with empty tts_input_cn_text (legacy case before Phase
+    A backfill ran) is treated as in-sync — no false drift flag.
+
+    This is an extra safety net: Phase A's load-time backfill SHOULD have
+    populated the field, but layered defense is cheap and keeps cue
+    pipeline robust across version skews."""
+    from modules.subtitles.cue_validator import validate_cues
+
+    spec = _make_block_spec("b1", merged_cn_text="文本", tts_input_cn_text="")
+    cues = [_make_cue("b1_c1", "b1", "文本", 0, 2000)]
+    report = validate_cues(block_specs=[spec], cues=cues)
+
+    drift_issues = [i for i in report.issues if i.code == "text_audio_drift"]
+    assert drift_issues == []
+
+
+def test_block_summary_exposes_text_audio_drift_flag():
+    """BlockSummary carries a per-block text_audio_drift bool so the
+    quality report can surface it directly without re-walking issues."""
+    from modules.subtitles.cue_validator import validate_cues
+
+    drift_spec = _make_block_spec(
+        "b1", merged_cn_text="新", tts_input_cn_text="原",
+        start_ms=0, end_ms=2000,
+    )
+    sync_spec = _make_block_spec(
+        "b2", merged_cn_text="同步",
+        start_ms=2000, end_ms=4000,
+    )
+    cues = [
+        _make_cue("b1_c1", "b1", "新", 0, 2000),
+        _make_cue("b2_c1", "b2", "同步", 2000, 4000),
+    ]
+    report = validate_cues(block_specs=[drift_spec, sync_spec], cues=cues)
+
+    by_id = {s.block_id: s for s in report.block_summaries}
+    assert by_id["b1"].text_audio_drift is True
+    assert by_id["b2"].text_audio_drift is False
+
+
+def test_cue_pipeline_emits_drift_issue_for_drift_block():
+    """End-to-end: build_subtitle_cues_for_blocks passes block.tts_input_cn_text
+    through to the validator's BlockSpec and a drift block surfaces in the
+    final ValidationReport."""
+    from core.models import SemanticBlock, SubtitleLine
+    from modules.subtitles.cue_pipeline import build_subtitle_cues_for_blocks
+
+    drift_block = SemanticBlock(
+        block_id="b1", speaker_id="A", speaker_name="A",
+        original_srt_indices=[1], first_start_ms=0, last_end_ms=2000,
+        target_duration_ms=2000,
+        merged_cn_text="新版文字",
+        tts_input_cn_text="原版文字",
+    )
+    sync_block = SemanticBlock(
+        block_id="b2", speaker_id="A", speaker_name="A",
+        original_srt_indices=[2], first_start_ms=2000, last_end_ms=4000,
+        target_duration_ms=2000,
+        merged_cn_text="同步的文字",
+        tts_input_cn_text="同步的文字",
+    )
+    lines = [
+        SubtitleLine(index=1, start_ms=0, end_ms=2000, speaker_id="A",
+                     speaker_name="A", en_text="x", cn_text="新版文字"),
+        SubtitleLine(index=2, start_ms=2000, end_ms=4000, speaker_id="A",
+                     speaker_name="A", en_text="y", cn_text="同步的文字"),
+    ]
+    result = build_subtitle_cues_for_blocks([drift_block, sync_block], lines)
+
+    drift_issues = [i for i in result.report.issues if i.code == "text_audio_drift"]
+    assert len(drift_issues) == 1
+    assert drift_issues[0].block_id == "b1"
+
+    # And block-summary surfaces it without re-walking issues.
+    by_id = {s.block_id: s for s in result.report.block_summaries}
+    assert by_id["b1"].text_audio_drift is True
+    assert by_id["b2"].text_audio_drift is False

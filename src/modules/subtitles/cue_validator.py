@@ -34,12 +34,19 @@ class BlockSpec:
 
     Decouples the validator from SemanticBlock — callers resolve block fields
     before passing in, so the validator has no dependency on core.models.
+
+    ``tts_input_cn_text`` (2026-05-04 P0b): the text that was actually fed
+    to TTS for this block's audio. Compared against ``merged_cn_text`` to
+    detect text↔audio drift after a user edited cn_text without
+    regenerating TTS. Empty string is treated as "in-sync" (legacy /
+    pre-rollout block) to avoid false positives.
     """
 
     block_id: str
     merged_cn_text: str
     start_ms: int
     end_ms: int
+    tts_input_cn_text: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -55,7 +62,13 @@ class ValidationIssue:
 
 @dataclass(slots=True, frozen=True)
 class BlockSummary:
-    """Per-block aggregated stats for the quality report."""
+    """Per-block aggregated stats for the quality report.
+
+    ``text_audio_drift`` (2026-05-04 P0b): True when ``BlockSpec.merged_cn_text``
+    differs from ``BlockSpec.tts_input_cn_text`` (post normalize). Emitted
+    independently of cue-level issues so the quality report can surface
+    drift state directly.
+    """
 
     block_id: str
     cue_count: int
@@ -66,6 +79,7 @@ class BlockSummary:
     long_unbreakable_count: int
     unknown_mixed_token_count: int
     short_display_duration_count: int
+    text_audio_drift: bool = False
 
 
 @dataclass(slots=True, frozen=True)
@@ -95,6 +109,7 @@ class _BlockAccumulator:
     long_unbreakable_count: int = 0
     unknown_mixed_token_count: int = 0
     short_display_duration_count: int = 0
+    text_audio_drift: bool = False
 
     def to_summary(self) -> BlockSummary:
         return BlockSummary(
@@ -107,6 +122,7 @@ class _BlockAccumulator:
             long_unbreakable_count=self.long_unbreakable_count,
             unknown_mixed_token_count=self.unknown_mixed_token_count,
             short_display_duration_count=self.short_display_duration_count,
+            text_audio_drift=self.text_audio_drift,
         )
 
 
@@ -190,6 +206,36 @@ def validate_cues(
         # Sort cues by start_ms for overlap check (do not mutate original list).
         sorted_cues = sorted(raw_cues, key=lambda c: c.start_ms)
         acc.cue_count = len(sorted_cues)
+
+        # --- text_audio_drift (block-level, 2026-05-04 P0b) ---
+        # If the audio's source text (tts_input_cn_text) differs from the
+        # current cn_text (merged_cn_text), the user edited cn_text without
+        # regenerating TTS — subtitles drawn from cn_text will not match
+        # what the audio actually says. Emit as a "review" issue so callers
+        # know to fall back to the safe proportional cue layout (Phase C
+        # whisper alignment will use this flag to skip drift blocks).
+        # Empty tts_input_cn_text is treated as in-sync (legacy / pre-rollout
+        # block) — Phase A's load-time backfill should have filled it, but
+        # defense-in-depth keeps cue pipeline robust across version skews.
+        if spec.tts_input_cn_text:
+            if normalize(spec.tts_input_cn_text) != normalize(spec.merged_cn_text):
+                acc.text_audio_drift = True
+                issues.append(
+                    ValidationIssue(
+                        block_id=block_id,
+                        cue_id=None,
+                        code="text_audio_drift",
+                        severity="review",
+                        message=(
+                            f"Block '{block_id}': cn_text "
+                            f"{normalize(spec.merged_cn_text)!r} differs "
+                            f"from tts_input_cn_text "
+                            f"{normalize(spec.tts_input_cn_text)!r} — "
+                            "subtitle text may not match audio. "
+                            "User edited text without re-generating TTS."
+                        ),
+                    )
+                )
 
         # --- text_mismatch (block-level) ---
         joined = "".join(c.text for c in sorted_cues)

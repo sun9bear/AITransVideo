@@ -191,13 +191,16 @@ def build_subtitle_cues_for_blocks(
 
         # Build BlockSpec for validator (even if cues is empty — segmenter may have
         # returned [] for whitespace-only cn_text, but merged_cn_text was non-empty;
-        # the validator will correctly flag text_mismatch or empty_cue in that case)
+        # the validator will correctly flag text_mismatch or empty_cue in that case).
+        # 2026-05-04 P0b: pass tts_input_cn_text so the validator can detect
+        # text↔audio drift when the user edited cn_text without re-running TTS.
         block_specs.append(
             BlockSpec(
                 block_id=block.block_id,
                 merged_cn_text=block.merged_cn_text,
                 start_ms=block_start_ms,
                 end_ms=block_end_ms,
+                tts_input_cn_text=block.tts_input_cn_text,
             )
         )
 
