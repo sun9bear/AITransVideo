@@ -197,12 +197,19 @@ def align_chars_to_words(cn_text: str, words: list[dict]) -> list[dict]:
     if not ws_text or not ws_char_times:
         return []
 
-    # Build a parallel mapping from normalized index → original index.
-    # We need this to map alignment results (which use normalized
-    # strings) back to the original cn / ws character positions for
-    # timing assignment.
-    cn_norm, cn_norm_to_orig = _normalize_with_index_map(cn_text)
-    ws_norm, ws_norm_to_orig = _normalize_with_index_map(ws_text)
+    # Build BOTH index direction maps for cn and ws sides:
+    # cn side needs orig→norm (to find "given a cn orig char index, where
+    # is it in cn norm space?" → look up alignment[norm_idx] to get
+    # corresponding ws norm position).
+    # ws side needs norm→orig (to find "given an alignment ws norm index,
+    # which ws orig char does that point at?" → for time lookup).
+    # CodeX P1 (2026-05-04): the previous helper returned only
+    # orig_to_norm and the caller treated it as norm_to_orig on the ws
+    # side, causing KeyError when a ws orig char normalized to ""
+    # (leading whitespace, CJK comma, inter-word space). Returning both
+    # directions explicitly removes the foot-gun.
+    cn_norm, cn_orig_to_norm, _cn_norm_to_orig = _normalize_with_index_maps(cn_text)
+    ws_norm, _ws_orig_to_norm, ws_norm_to_orig = _normalize_with_index_maps(ws_text)
 
     if not cn_norm or not ws_norm:
         # Whole text was just punctuation / whitespace — no shared
@@ -226,22 +233,32 @@ def align_chars_to_words(cn_text: str, words: list[dict]) -> list[dict]:
     cn_orig_len = len(cn_text)
     for orig_idx in range(cn_orig_len):
         # Find which normalized cn-char index this orig_idx maps to (if any).
-        norm_idx = cn_norm_to_orig.get(orig_idx)
-        if norm_idx is None:
-            # This orig char was punctuation — interpolate.
+        cn_norm_idx = cn_orig_to_norm.get(orig_idx)
+        if cn_norm_idx is None:
+            # This orig char was punctuation/whitespace — interpolate.
             time = _interpolate_neighbor_time(
                 char_times, orig_idx, cn_orig_len, ws_char_times,
             )
         else:
-            ws_norm_idx = alignment[norm_idx]
+            ws_norm_idx = alignment[cn_norm_idx]
             if ws_norm_idx is None:
-                # cn char with no ws anchor — interpolate.
+                # cn char has no ws anchor — interpolate.
                 time = _interpolate_neighbor_time(
                     char_times, orig_idx, cn_orig_len, ws_char_times,
                 )
             else:
-                ws_orig_idx = ws_norm_to_orig[ws_norm_idx]
-                time = ws_char_times[ws_orig_idx]
+                # ws_norm_idx is a position in ws_norm space; convert back
+                # to ws_text orig position to look up the per-char time.
+                # Defensive .get() — alignment indices SHOULD be valid by
+                # construction, but a malformed alignment trace must not
+                # raise; fall back to interpolation instead.
+                ws_orig_idx = ws_norm_to_orig.get(ws_norm_idx)
+                if ws_orig_idx is None or ws_orig_idx >= len(ws_char_times):
+                    time = _interpolate_neighbor_time(
+                        char_times, orig_idx, cn_orig_len, ws_char_times,
+                    )
+                else:
+                    time = ws_char_times[ws_orig_idx]
         char_times.append({
             "start_ms": time[0],
             "end_ms": time[1],
@@ -258,37 +275,41 @@ def align_chars_to_words(cn_text: str, words: list[dict]) -> list[dict]:
     return char_times
 
 
-def _normalize_with_index_map(s: str) -> tuple[str, dict[int, int]]:
-    """Normalize a string AND return a map from original-index to
-    normalized-index (only entries for chars that survived normalization).
+def _normalize_with_index_maps(
+    s: str,
+) -> tuple[str, dict[int, int], dict[int, int]]:
+    """Normalize a string and return BOTH index direction maps.
 
-    The return shape is ``(normalized_string, {orig_idx: norm_idx})``.
-    Inverse map (norm_idx → orig_idx) is just ``{v: k}`` of this dict;
-    callers may want either direction.
+    Returns ``(normalized_string, orig_to_norm, norm_to_orig)``:
+    - ``orig_to_norm[orig_idx]`` → first norm position for this orig char.
+      Only entries for chars that survived normalization. Used cn-side
+      to find "where in norm space did this cn char land?".
+    - ``norm_to_orig[norm_idx]`` → orig position this norm char came from.
+      Used ws-side to find "given the alignment's norm index, which
+      orig ws char is that?".
+
+    For a char that normalizes to multiple norm chars (e.g. Arabic "20"
+    → "二零"), ``orig_to_norm`` records the FIRST norm position (so
+    callers reading "what time is this orig char at" pick up the start
+    of the run). Each of the multiple norm positions maps back to the
+    same orig in ``norm_to_orig``.
+
+    Both returns are needed: returning only ``orig_to_norm`` and
+    inverting it via ``{v: k}`` is wrong when one orig char normalizes
+    to multiple norm chars (the inverse drops all but the last).
     """
     norm_chars: list[str] = []
     orig_to_norm: dict[int, int] = {}
+    norm_to_orig: dict[int, int] = {}
     for orig_idx, ch in enumerate(s):
         norm_ch = _normalize_for_compare(ch)
         if norm_ch:
+            first_norm_idx = len(norm_chars)
+            orig_to_norm[orig_idx] = first_norm_idx
             for nc in norm_ch:
-                orig_to_norm[orig_idx] = len(norm_chars)
+                norm_to_orig[len(norm_chars)] = orig_idx
                 norm_chars.append(nc)
-    norm_str = "".join(norm_chars)
-    # We want both directions; convert orig_to_norm into a dict ALSO
-    # carrying the inverse for ws-side use.
-    norm_to_orig = {v: k for k, v in orig_to_norm.items()}
-    # Caller signature expects ``(norm, norm_to_orig)`` so they can index
-    # alignment output (norm-space) back to original chars.
-    # But we've also been using orig_to_norm above… simplest: return a
-    # dict that includes whichever direction the caller wants. Pick
-    # norm_to_orig since the alignment IS in norm space.
-    # (Naming: the variable name in caller is cn_norm_to_orig, ws_norm_to_orig.)
-    # To preserve the caller's expected-name semantics, we return:
-    #   normalized string, dict mapping orig_idx → norm_idx
-    # No wait: caller does cn_norm_to_orig.get(orig_idx) — it wants
-    # orig→norm. Return that.
-    return norm_str, orig_to_norm
+    return "".join(norm_chars), orig_to_norm, norm_to_orig
 
 
 def _interpolate_neighbor_time(

@@ -215,3 +215,81 @@ def test_dtw_assigns_last_cn_char_to_last_word_time():
     char_times = align_chars_to_words(cn_text, words)
     assert char_times[-1]["end_ms"] <= 800
     assert char_times[-1]["end_ms"] >= 780  # near 800
+
+
+# ---------------------------------------------------------------------------
+# CodeX P1: whisper word text containing leading/inter-word/CJK punctuation
+# previously triggered KeyError because the ws-side norm→orig index map
+# was wired backwards. These three are now regression tests.
+# ---------------------------------------------------------------------------
+
+
+def test_dtw_handles_whisper_word_with_leading_space():
+    """faster-whisper commonly emits ' 你好' (with leading space) for the
+    first word in a segment. The space normalizes to '' which used to
+    trigger a KeyError in the orig↔norm index lookup. Must not raise."""
+    from services.whisper_align.dtw import align_chars_to_words
+
+    char_times = align_chars_to_words(
+        "你好",
+        [{"start_ms": 0, "end_ms": 1000, "text": " 你好"}],
+    )
+    # 2 chars aligned, all within the word's span.
+    assert len(char_times) == 2
+    for ct in char_times:
+        assert 0 <= ct["start_ms"] < ct["end_ms"] <= 1000
+
+
+def test_dtw_handles_whisper_word_with_cjk_comma():
+    """ASR often inserts CJK commas (，) which normalize to ''. Must not
+    raise; the cn_text chars get sensible times regardless of where the
+    punctuation sits in the whisper transcript."""
+    from services.whisper_align.dtw import align_chars_to_words
+
+    cn_text = "你好世界"
+    char_times = align_chars_to_words(
+        cn_text,
+        [{"start_ms": 0, "end_ms": 1000, "text": "你好，世界"}],
+    )
+    assert len(char_times) == 4
+    # All chars get a time within the word's span.
+    for ct in char_times:
+        assert 0 <= ct["start_ms"] <= ct["end_ms"] <= 1000
+
+
+def test_dtw_handles_whisper_word_with_inter_word_space():
+    """Common ASR output: '你好 世界' (space between words for English-style
+    word separation). Space normalizes to ''; previous bug was a KeyError
+    when the alignment mapped a cn char to the post-space norm position."""
+    from services.whisper_align.dtw import align_chars_to_words
+
+    cn_text = "你好世界"
+    char_times = align_chars_to_words(
+        cn_text,
+        [{"start_ms": 0, "end_ms": 1000, "text": "你好 世界"}],
+    )
+    assert len(char_times) == 4
+    # Times monotone, within span.
+    for i in range(1, len(char_times)):
+        assert char_times[i]["start_ms"] >= char_times[i - 1]["start_ms"]
+
+
+def test_dtw_handles_punctuation_dense_whisper_output():
+    """Stress-test: whisper output dense with punctuation that all
+    normalize to ''. The code must handle it without index errors —
+    even when the alignment map is heavily fragmented."""
+    from services.whisper_align.dtw import align_chars_to_words
+
+    cn_text = "你好世界"
+    # Lots of punctuation ASR might emit
+    char_times = align_chars_to_words(
+        cn_text,
+        [
+            {"start_ms": 0, "end_ms": 500, "text": "你好,"},
+            {"start_ms": 500, "end_ms": 1000, "text": " 世界。"},
+        ],
+    )
+    assert len(char_times) == 4
+    # And the comma/period aren't in the cn output text (cn_text had none).
+    cn_chars_out = "".join(ct["text"] for ct in char_times)
+    assert cn_chars_out == cn_text

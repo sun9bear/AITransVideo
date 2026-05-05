@@ -132,21 +132,35 @@ def _try_whisper_aligned_cues(
     if not words:
         return None
 
-    char_times = align_chars_to_words(block.merged_cn_text, words)
-    if not char_times:
+    # CodeX P1 (2026-05-04): DTW + helper invocation must ALSO be inside
+    # a fallback try. Even though both should be exception-free by
+    # contract (helper returns [] on anomaly, DTW returns []), an
+    # unforeseen bug must not crash publish. CodeX guardrail #5: any
+    # whisper-path exception → fall back to proportional cues, never
+    # propagate to build_subtitle_cues_for_blocks.
+    try:
+        char_times = align_chars_to_words(block.merged_cn_text, words)
+        if not char_times:
+            return None
+
+        cues = build_cues_with_char_times(
+            block_id=block.block_id,
+            speaker_id=block.speaker_id,
+            speaker_name=block.speaker_name,
+            cn_text=block.merged_cn_text,
+            en_text=en_text,
+            block_start_ms=block_start_ms,
+            block_end_ms=block_end_ms,
+            char_times=char_times,
+            min_display_ms=min_display_ms,
+        )
+    except Exception as exc:  # noqa: BLE001 — see above; whisper-path safety
+        logger.warning(
+            "whisper-align: post-subprocess pipeline raised for block %s "
+            "(%s); falling back", block.block_id, exc,
+        )
         return None
 
-    cues = build_cues_with_char_times(
-        block_id=block.block_id,
-        speaker_id=block.speaker_id,
-        speaker_name=block.speaker_name,
-        cn_text=block.merged_cn_text,
-        en_text=en_text,
-        block_start_ms=block_start_ms,
-        block_end_ms=block_end_ms,
-        char_times=char_times,
-        min_display_ms=min_display_ms,
-    )
     if not cues:
         return None
     return cues

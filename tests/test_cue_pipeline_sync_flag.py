@@ -643,6 +643,76 @@ def test_c3_dtw_empty_result_falls_back_to_proportional(monkeypatch, tmp_path):
     assert all("whisper" not in c.source.lower() for c in result.cues)
 
 
+def test_c3_dtw_raising_exception_falls_back_to_proportional(monkeypatch, tmp_path):
+    """CodeX P1: Whisper succeeds but DTW raises (e.g. unexpected input
+    shape, bug in normalize). Cue pipeline MUST catch this and fall back
+    to proportional — publish must never fail because of whisper/DTW
+    trouble. CodeX guardrail #5."""
+    monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+    from modules.subtitles.cue_pipeline import build_subtitle_cues_for_blocks
+
+    # Whisper returns "valid" words (caller can't pre-validate)
+    monkeypatch.setattr(
+        "services.whisper_align.run_whisper_subprocess",
+        lambda *a, **kw: [{"start_ms": 0, "end_ms": 1000, "text": "你好"}],
+    )
+
+    # DTW raises some unexpected exception
+    def _explode(*a, **kw):
+        raise KeyError("synthetic dtw bug")
+    monkeypatch.setattr(
+        "services.whisper_align.dtw.align_chars_to_words", _explode,
+    )
+
+    audio = tmp_path / "seg.wav"
+    audio.write_bytes(b"fake")
+    block = _make_block(
+        "b1", "你好",
+        aligned_audio_path=str(audio),
+        first_start_ms=0, last_end_ms=1000, target_duration_ms=1000,
+    )
+    result = build_subtitle_cues_for_blocks([block], _make_subtitle_lines("你好"))
+    # Cues exist (publish proceeded) AND came via proportional path.
+    assert len(result.cues) >= 1
+    assert all("whisper" not in c.source.lower() for c in result.cues)
+
+
+def test_c3_helper_raising_exception_falls_back_to_proportional(monkeypatch, tmp_path):
+    """Same guardrail: build_cues_with_char_times raising must not crash
+    publish. (The helper itself returns [] for known anomalies; this
+    covers any unforeseen exception path.)"""
+    monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+    from modules.subtitles.cue_pipeline import build_subtitle_cues_for_blocks
+
+    monkeypatch.setattr(
+        "services.whisper_align.run_whisper_subprocess",
+        lambda *a, **kw: [{"start_ms": 0, "end_ms": 1000, "text": "你好"}],
+    )
+    monkeypatch.setattr(
+        "services.whisper_align.dtw.align_chars_to_words",
+        lambda *a, **kw: [{"start_ms": 0, "end_ms": 1000, "text": "你好"}],
+    )
+
+    def _explode(*a, **kw):
+        raise RuntimeError("synthetic helper bug")
+    # build_cues_with_char_times is imported at module top into cue_pipeline's
+    # namespace, so the patch target IS cue_pipeline (not cue_builder).
+    monkeypatch.setattr(
+        "modules.subtitles.cue_pipeline.build_cues_with_char_times", _explode,
+    )
+
+    audio = tmp_path / "seg.wav"
+    audio.write_bytes(b"fake")
+    block = _make_block(
+        "b1", "你好",
+        aligned_audio_path=str(audio),
+        first_start_ms=0, last_end_ms=1000, target_duration_ms=1000,
+    )
+    result = build_subtitle_cues_for_blocks([block], _make_subtitle_lines("你好"))
+    assert len(result.cues) >= 1
+    assert all("whisper" not in c.source.lower() for c in result.cues)
+
+
 def test_c3_drift_check_uses_normalize_consistent_with_phase_b(monkeypatch, tmp_path):
     """The drift gate must use cue_models.normalize() — same as the
     Phase B validator — so drift decisions in C3 match what
