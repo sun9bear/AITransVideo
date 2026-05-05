@@ -1066,6 +1066,62 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                     self._write_json(HTTPStatus.OK, {"ok": True, "labels": labels})
                     return
 
+                # --- Internal: ensure whisper-aligned subtitles (D-4 entry) ---
+                # Called by gateway's materials_pack executor BEFORE packaging
+                # the zip when the user selected the "subtitles" item. Idempotent
+                # and gated by env capability + admin policy (returns
+                # action="skipped_admin_disabled" if either gate is closed).
+                #
+                # Path: POST /internal/jobs/{job_id}/ensure-whisper-aligned-subtitles
+                #
+                # Returns: {action, whisper_invoked, blocks_processed, elapsed_ms}
+                # — see services.subtitles.ensure_whisper_alignment.EnsureStatus.
+                # 4xx surfaces are job-existence / project-dir issues.
+                if (
+                    len(path_parts) == 4
+                    and path_parts[0] == "internal"
+                    and path_parts[1] == "jobs"
+                    and path_parts[3] == "ensure-whisper-aligned-subtitles"
+                ):
+                    target_job_id = path_parts[2]
+                    record = service.store.load_job(target_job_id)
+                    if record is None:
+                        self._write_json(
+                            HTTPStatus.NOT_FOUND,
+                            {"code": "job_not_found", "message": f"Job {target_job_id} not found."},
+                        )
+                        return
+                    if not record.project_dir:
+                        self._write_json(
+                            HTTPStatus.BAD_REQUEST,
+                            {
+                                "code": "no_project_dir",
+                                "message": "Job has no project_dir; cannot ensure subtitle alignment.",
+                            },
+                        )
+                        return
+                    try:
+                        from services.subtitles.ensure_whisper_alignment import (
+                            ensure_whisper_aligned_subtitles,
+                        )
+                        status = ensure_whisper_aligned_subtitles(record.project_dir)
+                        self._write_json(HTTPStatus.OK, status)
+                    except Exception as exc:  # noqa: BLE001 — gateway expects
+                                              # 200 with explicit failure status,
+                                              # not 5xx, so it can fall through
+                                              # to packaging the on-disk SRT.
+                        self._write_json(
+                            HTTPStatus.OK,
+                            {
+                                "action": "skipped_helper_error",
+                                "whisper_invoked": False,
+                                "blocks_processed": 0,
+                                "elapsed_ms": 0,
+                                "error": str(exc)[:500],
+                            },
+                        )
+                    return
+
                 # --- generate-video: start async video mux, return render_task_id ---
                 if (
                     len(path_parts) == 3

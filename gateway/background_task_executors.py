@@ -47,6 +47,14 @@ async def execute_materials_pack(
 
     Deletes any prior ``materials_*.zip`` in the project's exports directory
     before writing the new one — per-project retention = latest only.
+
+    D-4 (2026-05-05): when the user picked the ``subtitles`` item, we
+    delegate to Job API's ``/internal/jobs/{job_id}/ensure-whisper-aligned-subtitles``
+    BEFORE packing so the SRT in the zip uses whisper-aligned timing
+    (admin-gated). Gateway has no direct access to the cue pipeline /
+    whisper code (separate container, separate Python image), so the
+    HTTP delegation is the cleanest seam. Failure of the ensure call
+    is logged + tolerated — packing continues with the on-disk SRT.
     """
     async with async_session() as db:
         try:
@@ -62,6 +70,17 @@ async def execute_materials_pack(
             if not project_dir.is_dir():
                 await queue.mark_failed(db, task_id, "项目目录不存在")
                 return
+
+            # D-4 ensure-whisper-aligned-subtitles delegation (only when
+            # subtitles are part of the selected items). Idempotent + admin-
+            # gated; helper returns "skipped_admin_disabled" / fast path
+            # / regenerated. We don't block the pack on errors here.
+            if "subtitles" in item_list:
+                await queue.update_progress(
+                    db, task_id,
+                    {"stage": "aligning_subtitles", "percent": 5, "files": 0},
+                )
+                await _ensure_whisper_aligned_subtitles(job_id)
 
             artifact_index = load_artifact_index(project_dir)
             files_to_pack, total_size = collect_files_for_items(
@@ -123,6 +142,57 @@ def _write_zip(zip_path: Path, files: list[tuple[str, Path]]) -> None:
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for arcname, file_path in files:
             zf.write(file_path, arcname)
+
+
+# Internal endpoint timeout — deliberately generous because cold cache
+# whisper run can take ~10+ min on a 38-min audio. Job API end will
+# stream subprocess work but we wait for the HTTP response. If it hits,
+# we fall through to packing the on-disk SRT.
+_ENSURE_WHISPER_TIMEOUT_SEC = 60 * 30  # 30 min hard cap
+
+
+async def _ensure_whisper_aligned_subtitles(job_id: str) -> None:
+    """D-4: HTTP-delegate to Job API's internal endpoint.
+
+    Gateway and Job API run in separate containers with separate Python
+    images (Gateway image is built from ``./gateway/`` only). The
+    whisper helper lives in ``src/services/subtitles/...`` which is
+    NOT in the gateway image — the cleanest cross-container call is
+    HTTP, mirroring the existing ``generate-video`` pattern.
+
+    Failure semantics: any HTTP error / timeout is logged and
+    SWALLOWED. The materials_pack flow continues, packs whatever SRT
+    is on disk (likely proportional). The whisper helper itself is
+    idempotent and gates on admin policy, so a missed call here is
+    not a correctness issue — just a "next click might benefit from
+    re-trying" UX hiccup.
+    """
+    from internal_auth import internal_headers
+    upstream = settings.job_api_upstream.rstrip("/")
+    url = f"{upstream}/internal/jobs/{job_id}/ensure-whisper-aligned-subtitles"
+    try:
+        async with httpx.AsyncClient(timeout=_ENSURE_WHISPER_TIMEOUT_SEC) as client:
+            r = await client.post(url, headers=internal_headers())
+        if r.status_code == 200:
+            try:
+                payload = r.json()
+            except ValueError:
+                payload = {"action": "unknown"}
+            logger.info(
+                "ensure-whisper-aligned-subtitles for job %s: %s",
+                job_id, payload,
+            )
+        else:
+            logger.warning(
+                "ensure-whisper-aligned-subtitles for job %s: HTTP %d (proceeding "
+                "with on-disk SRT)",
+                job_id, r.status_code,
+            )
+    except (httpx.HTTPError, OSError) as exc:
+        logger.warning(
+            "ensure-whisper-aligned-subtitles for job %s: %s (proceeding with "
+            "on-disk SRT)", job_id, exc,
+        )
 
 
 # -----------------------------------------------------------------------------
