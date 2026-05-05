@@ -178,6 +178,16 @@ def build_cues_for_block(
 # path in subtitle_quality_report and downstream consumers.
 _WHISPER_ALIGNED_SOURCE = "semantic_block_v2_whisper_aligned"
 
+# Tolerance for char_times overshooting the block's slot duration.
+# DTW's trailing-char interpolation adds ~80ms when the last cn char
+# has no whisper anchor (common: trailing punctuation that ASR drops);
+# whisper's last word also tends to end a few hundred ms before the
+# WAV's actual end (silence padding). Net overshoot is typically
+# 0-100ms. Anything above this threshold indicates corrupted upstream
+# timing — fall back to proportional rather than silently clamping
+# (which would mask the bug).
+_SLOT_OVERSHOOT_TOLERANCE_MS = 100
+
 
 def build_cues_with_char_times(
     *,
@@ -296,7 +306,13 @@ def build_cues_with_char_times(
         except (KeyError, TypeError, ValueError):
             return []
         # Sanity: local times must fit within the WAV slot duration.
-        if local_start < 0 or local_end > slot_duration + 1:  # +1 ms tolerance
+        # Small overshoots (typically ≤100ms) come from DTW's trailing
+        # char interpolation when the last cn char has no whisper anchor;
+        # they're handled by the _to_global clamp below. Larger overshoots
+        # indicate corrupted upstream timing — fall back. (2026-05-05:
+        # threshold raised from +1ms to +100ms after a reshape-task rerun
+        # showed legitimate ~17ms overshoots being rejected.)
+        if local_start < 0 or local_end > slot_duration + _SLOT_OVERSHOOT_TOLERANCE_MS:
             return []
         if local_end < local_start:
             return []

@@ -83,20 +83,18 @@ def test_cues_use_char_times_for_span_boundaries():
     assert cues[1].text == "世界。"
 
 
-def test_helper_returns_empty_on_char_times_out_of_slot_bounds():
-    """char_times.end_ms exceeding the block's slot duration is a real
-    anomaly (whisper output times come from the WAV which IS the slot,
-    so they should never exceed). Treat as fallback per CodeX guidance:
-    "越界 → build_cues_for_block()". Helper returns [] so caller falls
-    back to proportional path rather than emitting cues that would trip
-    the validator's timing_out_of_block check downstream."""
+def test_helper_returns_empty_on_char_times_far_out_of_slot_bounds():
+    """char_times.end_ms exceeding the block's slot duration by MORE than
+    the tolerance (~100ms ≈ one CJK char duration) is a real anomaly:
+    something corrupted the upstream timing data. Treat as fallback per
+    CodeX guidance ("越界 → build_cues_for_block()")."""
     from modules.subtitles.cue_builder import build_cues_with_char_times
 
     cn_text = "你好。"
     char_times = [
         {"start_ms": 0, "end_ms": 200, "text": "你"},
         {"start_ms": 200, "end_ms": 400, "text": "好"},
-        {"start_ms": 400, "end_ms": 12_000, "text": "。"},  # past block end
+        {"start_ms": 400, "end_ms": 12_000, "text": "。"},  # 2000ms past — way beyond
     ]
     cues = build_cues_with_char_times(
         block_id="b1", speaker_id="A", speaker_name="A",
@@ -128,6 +126,70 @@ def test_cues_clamp_at_slot_boundary_when_char_times_at_edge():
     assert len(cues) == 1
     assert cues[0].start_ms == 0
     assert cues[0].end_ms == 10_000
+
+
+# ---------------------------------------------------------------------------
+# 2026-05-05 follow-up: small-overshoot tolerance.
+#
+# Production rerun on the reshape task showed 2/85 segments fell back
+# because DTW interpolation of the trailing unanchored char produced
+# end_ms = (last_word_end + 80ms), which overshot the slot by ~17ms
+# (typical: whisper's last word ends ~60ms before slot end; +80 char
+# duration overshoots by ~17). Rejecting these is over-strict; the slot
+# clamp via _to_global handles the small overshoot cleanly.
+#
+# Rule: ≤ 100ms overshoot → continue (_to_global clamps to block_end_ms).
+# > 100ms overshoot → real anomaly, fall back.
+# ---------------------------------------------------------------------------
+
+
+def test_cues_clamp_when_overshoot_is_within_tolerance(tmp_path):
+    """char_times.end_ms exceeding slot_duration by ~17ms (production
+    case from DTW trailing-char interpolation) MUST produce
+    whisper-aligned cues with the last cue clamped to block_end_ms,
+    not fall back to proportional. Threshold is 100ms; 17ms is well
+    inside it."""
+    from modules.subtitles.cue_builder import build_cues_with_char_times
+
+    cn_text = "你好。"
+    # Slot 10_000 — last char overshoots by 17ms (10_017 > 10_000).
+    char_times = [
+        {"start_ms": 0, "end_ms": 3_300, "text": "你"},
+        {"start_ms": 3_300, "end_ms": 6_600, "text": "好"},
+        {"start_ms": 6_600, "end_ms": 10_017, "text": "。"},  # +17ms overshoot
+    ]
+    cues = build_cues_with_char_times(
+        block_id="b1", speaker_id="A", speaker_name="A",
+        cn_text=cn_text, en_text="hello",
+        block_start_ms=0, block_end_ms=10_000,
+        char_times=char_times,
+    )
+    assert len(cues) == 1
+    # Last cue's end clamped to slot, not 10_017.
+    assert cues[0].end_ms == 10_000
+    # And it IS the whisper-aligned source (proves we didn't fall back).
+    assert "whisper" in cues[0].source.lower()
+
+
+def test_cues_fall_back_when_overshoot_is_beyond_tolerance(tmp_path):
+    """500ms overshoot is beyond the ~100ms tolerance → fall back.
+    Anything that big indicates corrupted upstream timing (DTW shouldn't
+    interpolate that far), and silently clamping it would mask the bug."""
+    from modules.subtitles.cue_builder import build_cues_with_char_times
+
+    cn_text = "你好。"
+    char_times = [
+        {"start_ms": 0, "end_ms": 3_300, "text": "你"},
+        {"start_ms": 3_300, "end_ms": 6_600, "text": "好"},
+        {"start_ms": 6_600, "end_ms": 10_500, "text": "。"},  # +500ms overshoot
+    ]
+    cues = build_cues_with_char_times(
+        block_id="b1", speaker_id="A", speaker_name="A",
+        cn_text=cn_text, en_text="hello",
+        block_start_ms=0, block_end_ms=10_000,
+        char_times=char_times,
+    )
+    assert cues == []
 
 
 def test_cues_carry_needs_review_from_segment_span():
