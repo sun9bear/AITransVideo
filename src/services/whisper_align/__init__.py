@@ -32,6 +32,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -42,6 +43,39 @@ logger = logging.getLogger(__name__)
 _DEFAULT_TIMEOUT_SEC = 600        # 10 min — sized for ~30 min audio on small/INT8
 _DEFAULT_MODEL = "small"          # ~466MB on disk, ~1.5GB peak RAM, good CN accuracy
 _DEFAULT_LANGUAGE = "zh"
+
+# The src/ directory containing the ``services`` package. Computed once at
+# import time so the subprocess env injection below knows where to point
+# PYTHONPATH. ``__file__`` resolves to .../src/services/whisper_align/__init__.py;
+# parents[2] backs up to .../src/.
+_SRC_ROOT = str(Path(__file__).resolve().parents[2])
+
+
+def _build_subprocess_env() -> dict[str, str]:
+    """Construct an env dict for ``subprocess.run`` that puts the project's
+    src/ directory on PYTHONPATH so the child's ``python -m
+    services.whisper_align.runner`` resolves the package.
+
+    CodeX P1 (2026-05-04): without this, the parent's in-process
+    ``sys.path`` augmentation (pytest conftest, container entrypoint,
+    ``main.py`` startup) does NOT propagate to ``subprocess.run`` —
+    the child Python sees a fresh import path that lacks src/, fails
+    with ``ModuleNotFoundError: No module named 'services'``, and the
+    cue pipeline silently falls back to proportional layout. End
+    result: with ``AVT_WHISPER_ALIGN_ENABLED=1`` set, whisper would
+    appear to work (no crash) but never actually align anything.
+
+    Preserves any pre-existing parent PYTHONPATH entries by prepending
+    src/ rather than overwriting — keeps the child's dependency
+    resolution intact.
+    """
+    env = os.environ.copy()
+    existing = env.get("PYTHONPATH", "")
+    if existing:
+        env["PYTHONPATH"] = f"{_SRC_ROOT}{os.pathsep}{existing}"
+    else:
+        env["PYTHONPATH"] = _SRC_ROOT
+    return env
 
 
 def run_whisper_subprocess(
@@ -80,6 +114,7 @@ def run_whisper_subprocess(
         text=True,
         timeout=timeout_sec,
         encoding="utf-8",
+        env=_build_subprocess_env(),
     )
     if proc.returncode != 0:
         # Truncate stderr to keep error message readable in logs.

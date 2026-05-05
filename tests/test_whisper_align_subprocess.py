@@ -205,11 +205,93 @@ def test_runner_module_imports_without_faster_whisper_at_module_level():
 
 def test_wrapper_module_imports_without_faster_whisper():
     """Same guarantee for the parent-side wrapper module — the wrapper
-    must never import faster_whisper directly."""
+    must never import faster_whisper directly.
+
+    Saves and restores both ``services.whisper_align`` and its ``dtw``
+    submodule so a re-import inside this test doesn't leave stale module
+    references that break subsequent tests' monkeypatches.
+    """
     import importlib
+
+    saved = {
+        name: sys.modules.get(name)
+        for name in (
+            "services.whisper_align",
+            "services.whisper_align.dtw",
+            "services.whisper_align.runner",
+        )
+    }
     masked = {"faster_whisper": None}
-    with patch.dict(sys.modules, masked, clear=False):
-        sys.modules.pop("services.whisper_align", None)
-        sys.modules.pop("services.whisper_align.__init__", None)
-        mod = importlib.import_module("services.whisper_align")
-        assert hasattr(mod, "run_whisper_subprocess")
+    try:
+        with patch.dict(sys.modules, masked, clear=False):
+            for name in saved:
+                sys.modules.pop(name, None)
+            mod = importlib.import_module("services.whisper_align")
+            assert hasattr(mod, "run_whisper_subprocess")
+    finally:
+        # Restore — otherwise downstream tests' monkeypatches against
+        # the cached `services.whisper_align.dtw` etc. would target a
+        # stale module reference.
+        for name, saved_mod in saved.items():
+            if saved_mod is not None:
+                sys.modules[name] = saved_mod
+            else:
+                sys.modules.pop(name, None)
+
+
+# ---------------------------------------------------------------------------
+# CodeX P1 (2026-05-04): subprocess inherits PYTHONPATH so child can find
+# `services.whisper_align.runner`. Without this, `python -m services...`
+# raises ModuleNotFoundError in any environment where the parent has src
+# on sys.path but not on PYTHONPATH (which is most environments — pytest
+# adds via conftest, container entrypoint adds at startup, but neither
+# propagates to subprocess.run children automatically).
+# ---------------------------------------------------------------------------
+
+
+def test_run_whisper_subprocess_passes_pythonpath_with_src_root_to_child():
+    """The subprocess.run call MUST pass an env where PYTHONPATH includes
+    the project's src/ directory. Without this, the child can't import
+    services.* and silently falls back to proportional cues."""
+    import os
+    from pathlib import Path
+    from services.whisper_align import run_whisper_subprocess
+
+    fake_proc = MagicMock(returncode=0, stdout=json.dumps({"words": []}), stderr="")
+    with patch("services.whisper_align.subprocess.run", return_value=fake_proc) as mock_run:
+        run_whisper_subprocess("/audio.wav", language="zh")
+
+    env = mock_run.call_args.kwargs.get("env")
+    assert env is not None, (
+        "run_whisper_subprocess MUST pass env=... to subprocess.run; without "
+        "an explicit env the child won't have PYTHONPATH and `python -m "
+        "services.whisper_align.runner` raises ModuleNotFoundError"
+    )
+    pythonpath = env.get("PYTHONPATH", "")
+    # The project's src/ directory must appear in PYTHONPATH so the
+    # `services` package resolves in the child.
+    src_root = Path(__file__).resolve().parents[1] / "src"
+    assert str(src_root) in pythonpath.split(os.pathsep), (
+        f"PYTHONPATH={pythonpath!r} does not contain src root {src_root!r}; "
+        "child subprocess won't be able to import services.whisper_align.runner"
+    )
+
+
+def test_run_whisper_subprocess_preserves_existing_pythonpath():
+    """If the parent process already has PYTHONPATH set (e.g. for a
+    parent-injected dependency), the wrapper must PREPEND src/ rather
+    than overwriting. Otherwise the child loses the parent's deps."""
+    import os
+    from services.whisper_align import run_whisper_subprocess
+
+    fake_proc = MagicMock(returncode=0, stdout=json.dumps({"words": []}), stderr="")
+    with patch.dict(os.environ, {"PYTHONPATH": "/some/parent/dep/path"}, clear=False):
+        with patch("services.whisper_align.subprocess.run", return_value=fake_proc) as mock_run:
+            run_whisper_subprocess("/audio.wav")
+
+    env = mock_run.call_args.kwargs.get("env") or {}
+    pythonpath = env.get("PYTHONPATH", "")
+    # Both parent's pre-existing entry AND src/ root must be present.
+    assert "/some/parent/dep/path" in pythonpath, (
+        f"parent's PYTHONPATH was lost: child got {pythonpath!r}"
+    )

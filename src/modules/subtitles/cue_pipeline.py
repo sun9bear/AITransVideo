@@ -34,6 +34,23 @@ from modules.subtitles.cue_builder import (
 from modules.subtitles.cue_models import SubtitleCue, normalize
 from modules.subtitles.cue_validator import BlockSpec, ValidationReport, validate_cues
 
+# 2026-05-04 P0c CodeX P1 follow-up: import the whisper-align integration
+# at module top via aliases so tests have stable monkeypatch targets that
+# survive `services.whisper_align` module re-import isolation tests.
+# Previously these were lazy-imported inside _try_whisper_aligned_cues; the
+# lazy import bound to the post-reimport (un-patched) module instance, so
+# C3 tests that patched services.whisper_align.run_whisper_subprocess
+# would silently spawn a real subprocess after the import-isolation test
+# ran first and left a stale module reference behind.
+#
+# services.whisper_align itself does NOT import faster_whisper at module
+# load — the dependency loads lazily inside the runner subprocess via
+# `from faster_whisper import WhisperModel` in runner.main(). So
+# importing the wrapper at cue_pipeline module top is safe even in
+# environments without faster-whisper installed.
+from services.whisper_align import run_whisper_subprocess_cached as _run_whisper_cached
+from services.whisper_align.dtw import align_chars_to_words as _align_chars_to_words
+
 logger = logging.getLogger(__name__)
 
 
@@ -104,25 +121,14 @@ def _try_whisper_aligned_cues(
         )
         return None
 
-    # Lazy import — keeps the dependency optional. If the whisper_align
-    # module fails to import (e.g. faster-whisper not installed yet),
-    # treat as fallback rather than crashing the whole pipeline.
-    # Use the C5 cache-aware variant: re-running cue generation on a
-    # commit where most segments' WAVs didn't change skips the heavy
-    # whisper subprocess for cached blocks.
-    try:
-        from services.whisper_align import run_whisper_subprocess_cached
-        from services.whisper_align.dtw import align_chars_to_words
-    except ImportError as exc:
-        logger.warning(
-            "whisper-align: import failed (%s); falling back for block %s",
-            exc, block.block_id,
-        )
-        return None
-
     # Subprocess invocation (or cache hit) — any exception is fallback territory.
+    # _run_whisper_cached is a module-level alias for
+    # services.whisper_align.run_whisper_subprocess_cached. Tests
+    # monkeypatch this name directly (cue_pipeline._run_whisper_cached)
+    # so the patch survives even after the whisper_align module gets
+    # re-imported by the import-isolation test.
     try:
-        words = run_whisper_subprocess_cached(audio_path, language="zh")
+        words = _run_whisper_cached(audio_path, language="zh")
     except Exception as exc:  # noqa: BLE001 — whisper subprocess errors are
                               # diverse (RuntimeError, TimeoutExpired,
                               # JSONDecodeError, ImportError from runner...)
@@ -142,7 +148,7 @@ def _try_whisper_aligned_cues(
     # whisper-path exception → fall back to proportional cues, never
     # propagate to build_subtitle_cues_for_blocks.
     try:
-        char_times = align_chars_to_words(block.merged_cn_text, words)
+        char_times = _align_chars_to_words(block.merged_cn_text, words)
         if not char_times:
             return None
 

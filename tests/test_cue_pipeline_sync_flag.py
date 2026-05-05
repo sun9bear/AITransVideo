@@ -493,7 +493,7 @@ def test_c3_flag_off_skips_whisper_alignment(monkeypatch, tmp_path):
     def _explode(*a, **kw):
         raise AssertionError("whisper should not be called when flag is off")
     monkeypatch.setattr(
-        "services.whisper_align.run_whisper_subprocess", _explode,
+        "modules.subtitles.cue_pipeline._run_whisper_cached", _explode,
     )
 
     audio = tmp_path / "seg.wav"
@@ -514,7 +514,7 @@ def test_c3_flag_on_sync_block_uses_whisper(monkeypatch, tmp_path):
         {"start_ms": 100, "end_ms": 800, "text": "你好"},
     ]
     monkeypatch.setattr(
-        "services.whisper_align.run_whisper_subprocess",
+        "modules.subtitles.cue_pipeline._run_whisper_cached",
         lambda *a, **kw: fake_words,
     )
 
@@ -543,7 +543,7 @@ def test_c3_drift_block_skips_whisper_uses_proportional(monkeypatch, tmp_path):
     def _explode(*a, **kw):
         raise AssertionError("whisper should not be called for drift block")
     monkeypatch.setattr(
-        "services.whisper_align.run_whisper_subprocess", _explode,
+        "modules.subtitles.cue_pipeline._run_whisper_cached", _explode,
     )
 
     audio = tmp_path / "seg.wav"
@@ -570,7 +570,7 @@ def test_c3_block_without_aligned_audio_skips_whisper(monkeypatch, tmp_path):
     def _explode(*a, **kw):
         raise AssertionError("whisper should not be called when no audio")
     monkeypatch.setattr(
-        "services.whisper_align.run_whisper_subprocess", _explode,
+        "modules.subtitles.cue_pipeline._run_whisper_cached", _explode,
     )
 
     block = _make_block("b1", "你好。", aligned_audio_path=None)
@@ -587,7 +587,7 @@ def test_c3_block_with_missing_audio_file_skips_whisper(monkeypatch, tmp_path):
     def _explode(*a, **kw):
         raise AssertionError("whisper should not be called when audio missing")
     monkeypatch.setattr(
-        "services.whisper_align.run_whisper_subprocess", _explode,
+        "modules.subtitles.cue_pipeline._run_whisper_cached", _explode,
     )
 
     block = _make_block(
@@ -607,7 +607,7 @@ def test_c3_whisper_subprocess_failure_falls_back_to_proportional(monkeypatch, t
     def _fail(*a, **kw):
         raise RuntimeError("whisper subprocess failed (rc=1): cuda OOM")
     monkeypatch.setattr(
-        "services.whisper_align.run_whisper_subprocess", _fail,
+        "modules.subtitles.cue_pipeline._run_whisper_cached", _fail,
     )
 
     audio = tmp_path / "seg.wav"
@@ -627,7 +627,7 @@ def test_c3_dtw_empty_result_falls_back_to_proportional(monkeypatch, tmp_path):
 
     # Wrong-language whisper output → DTW disjoint → empty char_times
     monkeypatch.setattr(
-        "services.whisper_align.run_whisper_subprocess",
+        "modules.subtitles.cue_pipeline._run_whisper_cached",
         lambda *a, **kw: [{"start_ms": 0, "end_ms": 1000,
                             "text": "totally different english words here"}],
     )
@@ -653,7 +653,7 @@ def test_c3_dtw_raising_exception_falls_back_to_proportional(monkeypatch, tmp_pa
 
     # Whisper returns "valid" words (caller can't pre-validate)
     monkeypatch.setattr(
-        "services.whisper_align.run_whisper_subprocess",
+        "modules.subtitles.cue_pipeline._run_whisper_cached",
         lambda *a, **kw: [{"start_ms": 0, "end_ms": 1000, "text": "你好"}],
     )
 
@@ -661,7 +661,7 @@ def test_c3_dtw_raising_exception_falls_back_to_proportional(monkeypatch, tmp_pa
     def _explode(*a, **kw):
         raise KeyError("synthetic dtw bug")
     monkeypatch.setattr(
-        "services.whisper_align.dtw.align_chars_to_words", _explode,
+        "modules.subtitles.cue_pipeline._align_chars_to_words", _explode,
     )
 
     audio = tmp_path / "seg.wav"
@@ -685,11 +685,11 @@ def test_c3_helper_raising_exception_falls_back_to_proportional(monkeypatch, tmp
     from modules.subtitles.cue_pipeline import build_subtitle_cues_for_blocks
 
     monkeypatch.setattr(
-        "services.whisper_align.run_whisper_subprocess",
+        "modules.subtitles.cue_pipeline._run_whisper_cached",
         lambda *a, **kw: [{"start_ms": 0, "end_ms": 1000, "text": "你好"}],
     )
     monkeypatch.setattr(
-        "services.whisper_align.dtw.align_chars_to_words",
+        "modules.subtitles.cue_pipeline._align_chars_to_words",
         lambda *a, **kw: [{"start_ms": 0, "end_ms": 1000, "text": "你好"}],
     )
 
@@ -724,7 +724,7 @@ def test_c3_drift_check_uses_normalize_consistent_with_phase_b(monkeypatch, tmp_
     # so the drift gate should NOT trigger; whisper SHOULD run.
     fake_words = [{"start_ms": 0, "end_ms": 800, "text": "你好"}]
     monkeypatch.setattr(
-        "services.whisper_align.run_whisper_subprocess",
+        "modules.subtitles.cue_pipeline._run_whisper_cached",
         lambda *a, **kw: fake_words,
     )
 
