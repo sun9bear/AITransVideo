@@ -107,8 +107,11 @@ def _try_whisper_aligned_cues(
     # Lazy import — keeps the dependency optional. If the whisper_align
     # module fails to import (e.g. faster-whisper not installed yet),
     # treat as fallback rather than crashing the whole pipeline.
+    # Use the C5 cache-aware variant: re-running cue generation on a
+    # commit where most segments' WAVs didn't change skips the heavy
+    # whisper subprocess for cached blocks.
     try:
-        from services.whisper_align import run_whisper_subprocess
+        from services.whisper_align import run_whisper_subprocess_cached
         from services.whisper_align.dtw import align_chars_to_words
     except ImportError as exc:
         logger.warning(
@@ -117,9 +120,9 @@ def _try_whisper_aligned_cues(
         )
         return None
 
-    # Subprocess invocation — any exception is fallback territory.
+    # Subprocess invocation (or cache hit) — any exception is fallback territory.
     try:
-        words = run_whisper_subprocess(audio_path, language="zh")
+        words = run_whisper_subprocess_cached(audio_path, language="zh")
     except Exception as exc:  # noqa: BLE001 — whisper subprocess errors are
                               # diverse (RuntimeError, TimeoutExpired,
                               # JSONDecodeError, ImportError from runner...)

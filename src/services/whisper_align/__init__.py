@@ -9,20 +9,32 @@ WAV, prints word-timestamps as JSON to stdout, then exits. The model
 and is reclaimed on subprocess exit — the long-lived parent (Job-API,
 runner, cue pipeline) never carries the footprint.
 
+C5 cache (2026-05-04): ``run_whisper_subprocess_cached`` is a thin
+content-hash-keyed wrapper around the bare runner. Avoids re-spawning
+the subprocess when a WAV's bytes haven't changed (common case during
+edit-commit when most segments are untouched). Cache is per-WAV file
+on disk; cleanup follows the project_dir lifecycle automatically. The
+bare ``run_whisper_subprocess`` stays cache-free so existing callers
+(C4 smoke tests, C1 unit tests) are unaffected.
+
 Hard constraints (CodeX guardrails for Phase C):
 - Parent NEVER imports faster_whisper. The package may not even be
   installed in environments that don't enable the feature flag.
 - Caller is responsible for the fallback contract: any failure from
-  this wrapper (RuntimeError, JSON decode error, TimeoutExpired) must
+  these wrappers (RuntimeError, JSON decode error, TimeoutExpired) must
   be caught and treated as "this block didn't get aligned, use the
   proportional layout instead." cue_pipeline does this in C3.
+- Cache is advisory, never required: corrupt cache → re-run; cache
+  write failure → still return the fresh result.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import subprocess
 import sys
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -79,4 +91,109 @@ def run_whisper_subprocess(
     return list(payload.get("words", []))
 
 
-__all__ = ["run_whisper_subprocess"]
+# ---------------------------------------------------------------------------
+# C5: content-hash cache wrapper
+# ---------------------------------------------------------------------------
+#
+# Cache lives next to the WAV: ``{wav_path}.whisper_{model}_{lang}.json``.
+# Per-WAV file (not project-level dir) keeps cleanup automatic — when the
+# project_dir is deleted, its caches go with it. The cache key is the
+# WAV's content hash plus model + language; same path with different bytes
+# (e.g. user re-generated TTS for that segment) invalidates automatically.
+
+_CACHE_FILE_VERSION = 1  # bump if schema changes
+
+
+def _hash_wav_bytes(wav_path: str) -> str:
+    """SHA-256 of the WAV file's contents. Read in a single pass; for
+    typical per-segment WAVs (≤ a few MB) this is well under 100ms."""
+    h = hashlib.sha256()
+    with open(wav_path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _cache_path_for(wav_path: str, *, model: str, language: str) -> Path:
+    """Cache file location: same dir as the WAV, suffix carries model+lang
+    so different invocations don't share state. The hash is verified
+    INSIDE the cache file (not in the filename) so re-synthesizing the
+    WAV at the same path doesn't leave orphaned cache files behind."""
+    p = Path(wav_path)
+    return p.with_name(f"{p.name}.whisper_{model}_{language}.json")
+
+
+def run_whisper_subprocess_cached(
+    wav_path: str,
+    *,
+    language: str = _DEFAULT_LANGUAGE,
+    model: str = _DEFAULT_MODEL,
+    timeout_sec: int = _DEFAULT_TIMEOUT_SEC,
+) -> list[dict]:
+    """Cache-aware variant of ``run_whisper_subprocess``.
+
+    Cache hit when:
+      - cache file exists at ``_cache_path_for(...)``
+      - cache JSON parses cleanly
+      - cache's ``content_hash`` matches the WAV's current bytes
+      - cache's ``version`` matches ``_CACHE_FILE_VERSION``
+
+    Otherwise: run the subprocess fresh, write cache, return result.
+
+    Cache I/O failures are advisory — corrupt cache, missing read perms,
+    or a write failure all degrade to "compute fresh, return result".
+    The transcribe call itself surfaces normally on subprocess error.
+    """
+    cache_path = _cache_path_for(wav_path, model=model, language=language)
+
+    # Lookup
+    try:
+        if cache_path.is_file():
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            if (
+                isinstance(cached, dict)
+                and cached.get("version") == _CACHE_FILE_VERSION
+                and isinstance(cached.get("words"), list)
+            ):
+                # Validate hash to detect "WAV bytes changed but cache
+                # file is stale" — cheaper than running whisper.
+                if cached.get("content_hash") == _hash_wav_bytes(wav_path):
+                    return list(cached["words"])
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        # Corrupt cache: log at debug, fall through to fresh run.
+        logger.debug(
+            "whisper-align cache: ignoring unreadable cache at %s (%s)",
+            cache_path, exc,
+        )
+
+    # Cache miss / corrupt / hash mismatch → run fresh
+    words = run_whisper_subprocess(
+        wav_path, language=language, model=model, timeout_sec=timeout_sec,
+    )
+
+    # Persist (best-effort; never let cache I/O break the caller).
+    try:
+        payload = {
+            "version": _CACHE_FILE_VERSION,
+            "content_hash": _hash_wav_bytes(wav_path),
+            "model": model,
+            "language": language,
+            "words": words,
+        }
+        cache_path.write_text(
+            json.dumps(payload, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        logger.warning(
+            "whisper-align cache: write failed at %s (%s); result still "
+            "returned to caller", cache_path, exc,
+        )
+
+    return words
+
+
+__all__ = [
+    "run_whisper_subprocess",
+    "run_whisper_subprocess_cached",
+]
