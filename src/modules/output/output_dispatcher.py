@@ -360,7 +360,11 @@ class OutputDispatcher:
             })
 
         serialized_summaries = []
+        text_audio_drift_count = 0
         for summary in report.block_summaries:
+            drift = bool(getattr(summary, "text_audio_drift", False))
+            if drift:
+                text_audio_drift_count += 1
             serialized_summaries.append({
                 "block_id": summary.block_id,
                 "cue_count": summary.cue_count,
@@ -371,12 +375,19 @@ class OutputDispatcher:
                 "long_unbreakable_count": summary.long_unbreakable_count,
                 "unknown_mixed_token_count": summary.unknown_mixed_token_count,
                 "short_display_duration_count": summary.short_display_duration_count,
+                # 2026-05-04 P0b: per-block drift state for UI badges /
+                # tooling. Phase C whisper alignment uses the underlying
+                # SemanticBlock flag; this is the reader-friendly mirror.
+                "text_audio_drift": drift,
             })
 
         payload = {
             "schema_version": "subtitle_quality_report_v2",
             "project_id": project_id,
             "validation_status": report.validation_status,
+            # 2026-05-04 P0b: top-level aggregate so dashboards / UI cards
+            # don't have to iterate block_summaries to surface the count.
+            "text_audio_drift_count": text_audio_drift_count,
             "issues": serialized_issues,
             "block_summaries": serialized_summaries,
         }

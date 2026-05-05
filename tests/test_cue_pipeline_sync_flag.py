@@ -342,3 +342,95 @@ def test_cue_pipeline_emits_drift_issue_for_drift_block():
     by_id = {s.block_id: s for s in result.report.block_summaries}
     assert by_id["b1"].text_audio_drift is True
     assert by_id["b2"].text_audio_drift is False
+
+
+# ---------------------------------------------------------------------------
+# B4: subtitle_quality_report.json exposes per-block drift + count
+# ---------------------------------------------------------------------------
+
+
+def test_quality_report_json_exposes_text_audio_drift_per_block(tmp_path):
+    """Per-block summaries in the serialized JSON include text_audio_drift
+    so the UI / downstream tooling can render "audio out of date" badges
+    without re-deriving from the issues list."""
+    import json
+    from modules.output.output_dispatcher import OutputDispatcher
+    from modules.subtitles.cue_validator import (
+        BlockSummary, ValidationReport,
+    )
+
+    drift_summary = BlockSummary(
+        block_id="b1",
+        cue_count=2,
+        text_mismatch=False,
+        timing_overlap_count=0,
+        timing_out_of_block_count=0,
+        empty_cue_count=0,
+        long_unbreakable_count=0,
+        unknown_mixed_token_count=0,
+        short_display_duration_count=0,
+        text_audio_drift=True,
+    )
+    sync_summary = BlockSummary(
+        block_id="b2",
+        cue_count=2,
+        text_mismatch=False,
+        timing_overlap_count=0,
+        timing_out_of_block_count=0,
+        empty_cue_count=0,
+        long_unbreakable_count=0,
+        unknown_mixed_token_count=0,
+        short_display_duration_count=0,
+        text_audio_drift=False,
+    )
+    report = ValidationReport(
+        validation_status="needs_review",
+        issues=[],
+        block_summaries=[drift_summary, sync_summary],
+    )
+
+    out = tmp_path / "subtitle_quality_report.json"
+    OutputDispatcher._write_quality_report_json(out, "proj_test", report, [])
+    data = json.loads(out.read_text(encoding="utf-8"))
+
+    by_id = {s["block_id"]: s for s in data["block_summaries"]}
+    assert by_id["b1"]["text_audio_drift"] is True
+    assert by_id["b2"]["text_audio_drift"] is False
+
+
+def test_quality_report_json_exposes_aggregate_drift_count(tmp_path):
+    """Top-level ``text_audio_drift_count`` surfaces "how many blocks have
+    drift" at a glance, so dashboards / UI summary cards don't have to
+    iterate block_summaries themselves."""
+    import json
+    from modules.output.output_dispatcher import OutputDispatcher
+    from modules.subtitles.cue_validator import (
+        BlockSummary, ValidationReport,
+    )
+
+    summaries = [
+        BlockSummary(
+            block_id=f"b{i}",
+            cue_count=1,
+            text_mismatch=False,
+            timing_overlap_count=0,
+            timing_out_of_block_count=0,
+            empty_cue_count=0,
+            long_unbreakable_count=0,
+            unknown_mixed_token_count=0,
+            short_display_duration_count=0,
+            text_audio_drift=(i in (1, 3)),  # 2 of 4 blocks drift
+        ) for i in range(4)
+    ]
+    report = ValidationReport(
+        validation_status="needs_review",
+        issues=[],
+        block_summaries=summaries,
+    )
+
+    out = tmp_path / "subtitle_quality_report.json"
+    OutputDispatcher._write_quality_report_json(out, "proj_test", report, [])
+    data = json.loads(out.read_text(encoding="utf-8"))
+
+    assert data["text_audio_drift_count"] == 2
+    assert data["validation_status"] == "needs_review"
