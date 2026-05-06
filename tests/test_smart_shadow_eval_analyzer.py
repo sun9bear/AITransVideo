@@ -86,3 +86,38 @@ def test_analyzer_speaker_count_section(tmp_path):
     assert "Speaker 数分布" in report
     # 3/5 = 60% main_speaker ≤ 3 (at threshold 0.10)
     assert "60" in report or "0.6" in report
+
+
+def test_analyzer_clone_availability_section(tmp_path):
+    """§4: 按 main_speaker_count(threshold=0.10) 分桶 → 每桶有≥1 个合格样本(≥5s) 的占比"""
+    facts = tmp_path / "facts.jsonl"
+    samples = [
+        {"schema_version": 1, "job_id": "j1",
+         "speaker_stats": {"speaker_count_by_threshold": {"0.10": 2}},
+         "clone_sample_stats": {"eligible_speakers": 2,
+            "eligible_sample_count_buckets_by_speaker": [
+                {"≥5s": 5, "≥8s": 3, "≥10s": 1, "≥15s": 0},
+                {"≥5s": 3, "≥8s": 2, "≥10s": 0, "≥15s": 0}]}},
+        {"schema_version": 1, "job_id": "j2",
+         "speaker_stats": {"speaker_count_by_threshold": {"0.10": 2}},
+         "clone_sample_stats": {"eligible_speakers": 2,
+            "eligible_sample_count_buckets_by_speaker": [
+                {"≥5s": 5, "≥8s": 3, "≥10s": 1, "≥15s": 0},
+                {"≥5s": 0, "≥8s": 0, "≥10s": 0, "≥15s": 0}]}},
+        {"schema_version": 1, "job_id": "j3",
+         "speaker_stats": {"speaker_count_by_threshold": {"0.10": 3}},
+         "clone_sample_stats": {"eligible_speakers": 3,
+            "eligible_sample_count_buckets_by_speaker": [
+                {"≥5s": 5, "≥8s": 3, "≥10s": 1, "≥15s": 0},
+                {"≥5s": 4, "≥8s": 2, "≥10s": 0, "≥15s": 0},
+                {"≥5s": 2, "≥8s": 1, "≥10s": 0, "≥15s": 0}]}},
+    ]
+    facts.write_text("\n".join(json.dumps(s) for s in samples))
+    out = tmp_path / "report"
+    subprocess.run([sys.executable, str(SCRIPT),
+                    "--facts", str(facts), "--out-dir", str(out)],
+                   check=True, capture_output=True)
+    report = (out / "report.md").read_text(encoding="utf-8")
+    assert "§4 克隆样本可用率" in report
+    assert "main=2" in report or "2 speakers" in report
+    assert "main=3" in report or "3 speakers" in report

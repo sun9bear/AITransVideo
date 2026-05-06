@@ -86,6 +86,47 @@ def _section_speaker_count(facts, threshold_set):
     return lines
 
 
+def _section_clone_availability(facts):
+    """§4: For each main_speaker_count bucket (using threshold=0.10),
+    show what % of jobs have ALL speakers with ≥1 eligible sample ≥5s."""
+    if not facts:
+        return ["## §4 克隆样本可用率\n\n(no data)\n"]
+    by_main_count = defaultdict(list)
+    for f in facts:
+        sct = (f.get("speaker_stats") or {}).get("speaker_count_by_threshold") or {}
+        main_count = sct.get("0.10")
+        css = f.get("clone_sample_stats")
+        if isinstance(main_count, int) and css:
+            by_main_count[main_count].append(css)
+    if not by_main_count:
+        return ["## §4 克隆样本可用率\n\n(no clone_sample_stats data)\n"]
+    lines = ["## §4 克隆样本可用率",
+             "",
+             "按 main_speaker_count (threshold=0.10) 分桶，每桶里所有主 speaker 都有 ≥1 个 ≥5s 合格样本的 job 占比：",
+             "",
+             "| main_count | jobs | all-eligible (≥5s) | all-eligible (≥8s) |",
+             "|---|---|---|---|"]
+    for mc in sorted(by_main_count.keys()):
+        jobs = by_main_count[mc]
+        all_5 = sum(
+            1 for css in jobs
+            if all(b.get("≥5s", 0) >= 1 for b in
+                   (css.get("eligible_sample_count_buckets_by_speaker") or [])[:mc])
+        )
+        all_8 = sum(
+            1 for css in jobs
+            if all(b.get("≥8s", 0) >= 1 for b in
+                   (css.get("eligible_sample_count_buckets_by_speaker") or [])[:mc])
+        )
+        n = len(jobs)
+        lines.append(
+            f"| main={mc} | {n} | {all_5}/{n} ({all_5/n*100:.0f}%) | "
+            f"{all_8}/{n} ({all_8/n*100:.0f}%) |"
+        )
+    lines.append("")
+    return lines
+
+
 def build_arg_parser():
     p = argparse.ArgumentParser(description="Smart shadow eval analyzer")
     p.add_argument("--facts", required=True)
@@ -174,6 +215,7 @@ def main(argv=None):
     report_lines += _section_metadata(facts, summary, args)
     report_lines += _section_data_availability(facts, args.phase_cutoff_date)
     report_lines += _section_speaker_count(facts, args.smart_eligibility_threshold_set)
+    report_lines += _section_clone_availability(facts)
     # ↑↑↑ All section calls MUST be above the writes below ↑↑↑
 
     (out_dir / "report.md").write_text("\n".join(report_lines), encoding="utf-8")
