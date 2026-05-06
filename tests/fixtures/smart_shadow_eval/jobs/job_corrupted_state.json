@@ -1,0 +1,8 @@
+{
+  "job_id": "job_corrupted_state",
+  "project_id": "test_pid_corrupted",
+  "status": "succeeded",
+  "service_mode": "studio",
+  "tts_provider": "minimax",
+  "tts_model": "speech-2.8-hd"
+}

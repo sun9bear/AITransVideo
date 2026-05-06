@@ -338,6 +338,25 @@ def test_user_edits(tmp_path):
     assert ue["text_changes_effective"] == 3
 
 
+def test_corrupted_record_skipped(tmp_path):
+    """Job with no created_at → skipped, count incremented."""
+    fixtures = Path(__file__).resolve().parent / "fixtures" / "smart_shadow_eval"
+    out_dir = tmp_path / "out"
+    subprocess.run(
+        [sys.executable, str(SCRIPT),
+         "--jobs-root", str(fixtures / "jobs"),
+         "--projects-root", str(fixtures / "projects"),
+         "--out-dir", str(out_dir)],
+        check=True, capture_output=True
+    )
+    summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
+    assert summary["scan_stats"]["skipped_for_missing_identity"] >= 1
+
+    # Also verify the corrupted job didn't make it into facts.jsonl
+    facts = (out_dir / "facts.jsonl").read_text(encoding="utf-8")
+    assert "job_corrupted_state" not in facts
+
+
 @pytest.mark.skipif(sys.platform == "win32",
                      reason="SIGINT to subprocess not reliably testable on Windows")
 def test_sigint_writes_incomplete_summary(tmp_path):
