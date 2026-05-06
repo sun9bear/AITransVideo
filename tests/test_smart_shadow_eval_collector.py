@@ -66,3 +66,21 @@ def test_collector_with_one_real_fixture(tmp_path):
     assert inv["job_id"] == "job_post_phase_full"
     assert inv["status"] == "succeeded"
     assert inv["service_mode"] in ("studio", "express")
+
+
+def test_collector_extracts_duration_and_language(tmp_path):
+    fixtures = Path(__file__).resolve().parent / "fixtures" / "smart_shadow_eval"
+    out_dir = tmp_path / "out"
+    subprocess.run(
+        [sys.executable, str(SCRIPT),
+         "--jobs-root", str(fixtures / "jobs"),
+         "--projects-root", str(fixtures / "projects"),
+         "--out-dir", str(out_dir)],
+        check=True, capture_output=True, text=True
+    )
+    inventory = [json.loads(line) for line in
+                 (out_dir / "inventory.jsonl").read_text().splitlines()]
+    inv = next(i for i in inventory if i["job_id"] == "job_post_phase_full")
+    assert inv["duration_seconds"] == 254.0
+    assert inv["source_language"] == "en_us"
+    assert inv["target_language"] == "zh-CN"

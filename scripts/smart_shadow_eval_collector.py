@@ -30,6 +30,67 @@ from pathlib import Path
 SCHEMA_VERSION = 1
 
 
+ARTIFACT_PATHS = {
+    # JOBS root (flat)
+    "job_record":             "{job_id}.json",
+    "job_events":             "{job_id}.events.jsonl",
+
+    # PROJECT/JOB level (2-level nested)
+    "project_state":          "project_state.json",
+    "review_state":           "review_state.json",
+    "manifest":               "manifest.json",
+    "download_metadata":      "download_metadata.json",
+    "transcript":             "transcript/transcript.json",
+    "s2_review_result":       "transcript/s2_review_result.json",
+    "s2_review_audit":        "transcript/s2_review_audit.json",
+    "s2_pass1_result":        "transcript/s2_pass1_result.json",
+    "translation_segments":   "translation/segments.json",
+    "editor_segments":        "editor/segments.json",
+    "subtitle_quality_report": "output/subtitle_quality_report.json",
+    "subtitle_cues":           "output/subtitle_cues.json",
+    "usage_events":           "metering/usage_events.jsonl",
+    "user_edit_events":       "audit/user_edit_events.jsonl",
+}
+
+
+def _resolve_project_dir(projects_root: Path, project_id: str | None,
+                          job_id: str) -> Path | None:
+    """projects/<project_id>/job_<bare_id>/ — handles missing project_id."""
+    if not project_id:
+        return None
+    bare_job_id = job_id.removeprefix("job_") if job_id.startswith("job_") else job_id
+    candidate = projects_root / project_id / f"job_{bare_job_id}"
+    return candidate if candidate.is_dir() else None
+
+
+def _safe_load_json(path: Path) -> dict | list | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+
+
+def _extract_from_project_state(project_state: dict | None) -> dict:
+    """Return {duration_seconds, source_language, asr_speaker_count} or null fields."""
+    out = {
+        "duration_seconds": None,
+        "source_language": None,
+        "asr_speaker_count": None,
+    }
+    if not isinstance(project_state, dict):
+        return out
+    stages = project_state.get("stages") or {}
+    ingestion = (stages.get("ingestion") or {}).get("payload") or {}
+    media = (stages.get("media_understanding") or {}).get("payload") or {}
+    if isinstance(ingestion.get("duration_ms"), (int, float)):
+        out["duration_seconds"] = ingestion["duration_ms"] / 1000.0
+    if isinstance(media.get("language"), str):
+        out["source_language"] = media["language"]
+    if isinstance(media.get("speaker_count"), int):
+        out["asr_speaker_count"] = media["speaker_count"]
+    return out
+
+
 def _git_sha() -> str:
     try:
         out = sp.check_output(
@@ -160,12 +221,22 @@ def main(argv: list[str] | None = None) -> int:
                     continue
 
                 # Date filter (later)
+                project_dir = _resolve_project_dir(
+                    projects_root, rec.get("project_id"), job_id
+                )
+                ps = (_safe_load_json(project_dir / ARTIFACT_PATHS["project_state"])
+                      if project_dir else None)
+                ps_extracted = _extract_from_project_state(ps)
+
                 inv_entry = {
                     "schema_version": SCHEMA_VERSION,
                     "job_id": job_id,
                     "project_id": rec.get("project_id"),
                     "status": status,
                     "created_at": created_at,
+                    "duration_seconds": ps_extracted["duration_seconds"],
+                    "source_language": ps_extracted["source_language"],
+                    "target_language": "zh-CN",
                     "service_mode": rec.get("service_mode"),
                     "had_post_edit": (rec.get("edit_generation", 0) or 0) > 0
                         or rec.get("copy_of_job_id") is not None,
