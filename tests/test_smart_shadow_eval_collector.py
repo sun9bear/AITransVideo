@@ -326,6 +326,113 @@ def test_actual_clone_stats_buckets_sum_invariant(tmp_path):
     assert acs["unknown_speakers"] == 1
 
 
+def test_uncertain_speaker_duration_share_basic(tmp_path):
+    """speaker_stats.uncertain_speaker_duration_share = sum of correction
+    audit_event durations / total transcript duration.
+
+    P1 simulator translation_review_auto_approval depends on this signal —
+    when missing, every job lands in 'unevaluable: missing_signals'. Closing
+    Gap B from P1 Done note §5.2.
+    """
+    mod = _load_collector_module()
+    pdir = tmp_path / "proj"
+    (pdir / "transcript").mkdir(parents=True)
+    # 100s transcript, 1 line
+    (pdir / "transcript" / "transcript.json").write_text(json.dumps({
+        "lines": [
+            {"speaker_id": "speaker_a", "start_ms": 0, "end_ms": 100000},
+        ],
+    }), encoding="utf-8")
+    # Audit: 1 correction covering 30s (30%)
+    (pdir / "transcript" / "s2_review_audit.json").write_text(json.dumps({
+        "audit_events": [
+            {"start_ms": 10000, "end_ms": 40000, "source": "correction",
+             "before_speaker_id": "speaker_b", "after_speaker_id": "speaker_a"},
+        ],
+    }), encoding="utf-8")
+    share = mod._compute_uncertain_speaker_duration_share(pdir)
+    assert share is not None
+    assert abs(share - 0.30) < 1e-6
+
+
+def test_uncertain_speaker_duration_share_no_audit_file(tmp_path):
+    """Missing s2_review_audit.json → None (not 0.0).
+
+    None propagates 'unevaluable: missing_signals' through the simulator.
+    Returning 0.0 would falsely promote pre-Phase-A jobs to auto_approve."""
+    mod = _load_collector_module()
+    pdir = tmp_path / "proj"
+    (pdir / "transcript").mkdir(parents=True)
+    (pdir / "transcript" / "transcript.json").write_text(json.dumps({
+        "lines": [{"speaker_id": "speaker_a", "start_ms": 0, "end_ms": 1000}],
+    }), encoding="utf-8")
+    assert mod._compute_uncertain_speaker_duration_share(pdir) is None
+
+
+def test_uncertain_speaker_duration_share_zero_when_no_corrections(tmp_path):
+    """Audit file present but 0 corrections → 0.0 (different from None).
+
+    Distinct semantics: this means S2 Pass 1 ran and confirmed every original
+    speaker assignment — the ASR was confident. Smart should auto_approve."""
+    mod = _load_collector_module()
+    pdir = tmp_path / "proj"
+    (pdir / "transcript").mkdir(parents=True)
+    (pdir / "transcript" / "transcript.json").write_text(json.dumps({
+        "lines": [{"speaker_id": "speaker_a", "start_ms": 0, "end_ms": 100000}],
+    }), encoding="utf-8")
+    (pdir / "transcript" / "s2_review_audit.json").write_text(json.dumps({
+        "audit_events": [],
+    }), encoding="utf-8")
+    share = mod._compute_uncertain_speaker_duration_share(pdir)
+    assert share == 0.0
+
+
+def test_uncertain_speaker_duration_share_skips_non_correction_sources(tmp_path):
+    """Only source=='correction' counts. sanity_check / other sources ignored.
+
+    sanity_check events (n=2 in 43-job local survey) are S2's "I checked,
+    no change needed" markers — they should NOT inflate uncertainty share.
+    """
+    mod = _load_collector_module()
+    pdir = tmp_path / "proj"
+    (pdir / "transcript").mkdir(parents=True)
+    (pdir / "transcript" / "transcript.json").write_text(json.dumps({
+        "lines": [{"speaker_id": "speaker_a", "start_ms": 0, "end_ms": 100000}],
+    }), encoding="utf-8")
+    (pdir / "transcript" / "s2_review_audit.json").write_text(json.dumps({
+        "audit_events": [
+            {"start_ms": 0, "end_ms": 50000, "source": "sanity_check"},
+            {"start_ms": 50000, "end_ms": 60000, "source": "correction"},
+        ],
+    }), encoding="utf-8")
+    share = mod._compute_uncertain_speaker_duration_share(pdir)
+    assert abs(share - 0.10) < 1e-6  # only the 10s correction
+
+
+def test_speaker_stats_includes_uncertain_speaker_duration_share(tmp_path):
+    """End-to-end: collector run produces fact with
+    speaker_stats.uncertain_speaker_duration_share populated.
+
+    Wires the helper into _compute_speaker_stats output so simulator's
+    _decide_translation_review can read fact.speaker_stats.uncertain_*.
+    """
+    fixtures = Path(__file__).resolve().parent / "fixtures" / "smart_shadow_eval"
+    out_dir = tmp_path / "out"
+    subprocess.run(
+        [sys.executable, str(SCRIPT),
+         "--jobs-root", str(fixtures / "jobs"),
+         "--projects-root", str(fixtures / "projects"),
+         "--out-dir", str(out_dir)],
+        check=True, capture_output=True
+    )
+    facts = [json.loads(line) for line in
+             (out_dir / "facts.jsonl").read_text(encoding="utf-8").splitlines()]
+    f = next(x for x in facts if x["job_id"] == "job_post_phase_full")
+    assert "uncertain_speaker_duration_share" in f["speaker_stats"]
+    # Fixture has no s2_review_audit.json → expect None
+    assert f["speaker_stats"]["uncertain_speaker_duration_share"] is None
+
+
 def test_actual_clone_stats_classifications_by_speaker_parallel(tmp_path):
     """classifications_by_speaker is a parallel list to voice_ids_by_speaker.
 

@@ -270,9 +270,14 @@ def _build_fact_sheet(rec: dict, project_dir: Path | None,
     edit_gen = rec.get("edit_generation", 0) or 0
     transcript = (_safe_load_json(project_dir / ARTIFACT_PATHS["transcript"])
                   if project_dir else None)
+    # Wire uncertain_speaker_duration_share — needs project_dir for
+    # s2_review_audit.json, which _compute_speaker_stats() doesn't have.
+    uncertain_share = _compute_uncertain_speaker_duration_share(project_dir)
     speaker_stats = _compute_speaker_stats(
         transcript, ps_extracted.get("asr_speaker_count")
     )
+    if speaker_stats is not None:
+        speaker_stats["uncertain_speaker_duration_share"] = uncertain_share
     clone_sample_stats = _compute_clone_sample_stats(transcript)
     if resolved_project_id is None:
         resolved_project_id = _extract_project_id_from_record(rec, rec["job_id"])
@@ -338,7 +343,72 @@ def _compute_speaker_stats(transcript: dict | None,
         "asr_speaker_count": asr_speaker_count or len(durations),
         "speaker_duration_shares": [round(s, 4) for s in shares],
         "speaker_count_by_threshold": by_threshold,
+        # uncertain_speaker_duration_share is filled in by caller because it
+        # needs project_dir to read s2_review_audit.json. Default None here so
+        # callers that bypass the wiring still produce a structurally valid
+        # speaker_stats dict (rather than KeyError downstream).
+        "uncertain_speaker_duration_share": None,
     }
+
+
+def _compute_uncertain_speaker_duration_share(
+        project_dir: Path | None) -> float | None:
+    """Share of transcript duration covered by S2 Pass 1 speaker corrections.
+
+    Read-only post-hoc proxy for "the original ASR / diarization was uncertain
+    enough that audio-text Gemini review had to fix the speaker assignment
+    on N% of speech duration." This is the closest event-time signal we have
+    for translation_review_auto_approval — at translation review time,
+    s2_review_audit.json is already on disk (S2 runs before translation).
+
+    Reads `transcript/s2_review_audit.json` (audit_events with
+    `source == "correction"`) and divides total corrected duration by total
+    transcript duration. Other audit_event source values (e.g.
+    `sanity_check` — S2's "I checked, no change needed" marker) are
+    deliberately excluded; counting them would inflate the share with
+    confidence-affirming events.
+
+    Returns:
+        float in [0, 1] when both audit + transcript are present and
+            transcript total duration > 0.
+        None when either file is missing — distinct semantics from 0.0
+            (which means "S2 Pass 1 ran but found no corrections needed").
+            Returning 0.0 for missing audit would falsely promote pre-Phase-A
+            jobs to auto_approve in the simulator.
+    """
+    if not project_dir:
+        return None
+    audit_path = project_dir / ARTIFACT_PATHS["s2_review_audit"]
+    transcript_path = project_dir / ARTIFACT_PATHS["transcript"]
+    audit = _safe_load_json(audit_path)
+    transcript = _safe_load_json(transcript_path)
+    if not isinstance(audit, dict) or not isinstance(transcript, dict):
+        return None
+    events = audit.get("audit_events")
+    lines = transcript.get("lines")
+    if not isinstance(events, list) or not isinstance(lines, list):
+        return None
+    corrected_ms = 0
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        if ev.get("source") != "correction":
+            continue
+        s = ev.get("start_ms", 0)
+        e = ev.get("end_ms", 0)
+        if isinstance(s, (int, float)) and isinstance(e, (int, float)):
+            corrected_ms += max(0, e - s)
+    total_ms = 0
+    for line in lines:
+        if not isinstance(line, dict):
+            continue
+        s = line.get("start_ms", 0)
+        e = line.get("end_ms", 0)
+        if isinstance(s, (int, float)) and isinstance(e, (int, float)):
+            total_ms += max(0, e - s)
+    if total_ms <= 0:
+        return None
+    return round(corrected_ms / total_ms, 4)
 
 
 def _compute_clone_sample_stats(transcript: dict | None) -> dict | None:
