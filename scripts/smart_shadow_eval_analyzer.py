@@ -460,7 +460,7 @@ def _compute_cost_per_job(fact, pricing):
     return (smart_total, revenue, margin, quality)
 
 
-def _section_cost_margin_risk(facts, pricing):
+def _section_cost_margin_risk(facts, pricing, pricing_source_note=None):
     if not pricing:
         return [
             "## §8 / §9 / §11 成本 / 毛利 / 风险标记",
@@ -488,10 +488,14 @@ def _section_cost_margin_risk(facts, pricing):
         verdict = "MARGINAL (p90 margin negative)"
     else:
         verdict = "PASS"
-    return [
+    out = [
         "## §8 / §9 成本 + 毛利",
         "",
         "> 成本估算基于 pricing_runtime.json snapshot;不构成财务事实。",
+    ]
+    if pricing_source_note:
+        out.append(f"> ⚠️ **Pricing source**: {pricing_source_note}")
+    out += [
         "",
         f"| Metric | p50 | p90 | p99 |",
         f"|---|---|---|---|",
@@ -500,6 +504,7 @@ def _section_cost_margin_risk(facts, pricing):
         f"## §11 Risk Verdict: **{verdict}**",
         "",
     ]
+    return out
 
 
 def build_arg_parser():
@@ -508,6 +513,9 @@ def build_arg_parser():
     p.add_argument("--inventory", required=False)
     p.add_argument("--summary", required=False)
     p.add_argument("--pricing-runtime-snapshot", required=False)
+    p.add_argument("--pricing-source-note", required=False, default=None,
+                   help="Banner shown above §8/§9 cost section, "
+                        "e.g. 'using code defaults, no production pricing_runtime snapshot found'.")
     p.add_argument("--out-dir", required=True)
     p.add_argument("--phase-cutoff-date", default="2026-05-05")
     p.add_argument("--smart-eligibility-threshold-set", default="0.05,0.10,0.15,0.20")
@@ -600,7 +608,10 @@ def main(argv=None):
     report_lines += matrix_lines
     summary_extra.update(matrix_extra)
     pricing = _load_pricing(args.pricing_runtime_snapshot)
-    report_lines += _section_cost_margin_risk(facts, pricing)
+    report_lines += _section_cost_margin_risk(
+        facts, pricing,
+        pricing_source_note=args.pricing_source_note,
+    )
     # ↑↑↑ All section calls MUST be above the writes below ↑↑↑
 
     (out_dir / "report.md").write_text("\n".join(report_lines), encoding="utf-8")
