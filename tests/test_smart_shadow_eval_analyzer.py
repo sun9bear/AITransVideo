@@ -121,3 +121,36 @@ def test_analyzer_clone_availability_section(tmp_path):
     assert "§4 克隆样本可用率" in report
     assert "main=2" in report or "2 speakers" in report
     assert "main=3" in report or "3 speakers" in report
+
+
+def test_analyzer_retry_section(tmp_path):
+    """§5: retry/rewrite 分布 + 区分 metering vs fallback 数据源"""
+    facts = tmp_path / "facts.jsonl"
+    samples = [
+        {"schema_version": 1, "job_id": "j1",
+         "duration_seconds": 60,
+         "retry_stats": {"rewrite_count": 3, "retts_count": 5,
+                          "retts_total_duration_ms": 12000,
+                          "_data_source": "metering"},
+         "usage_meter": {"rewrite_input_text_chars_total": 100}},
+        {"schema_version": 1, "job_id": "j2",
+         "duration_seconds": 120,
+         "retry_stats": {"rewrite_count": 1, "retts_count": 2,
+                          "retts_total_duration_ms": 4000,
+                          "_data_source": "metering"},
+         "usage_meter": {"rewrite_input_text_chars_total": 50}},
+        {"schema_version": 1, "job_id": "j3",
+         "duration_seconds": 60,
+         "retry_stats": {"rewrite_count": 2, "retts_count": None,
+                          "_data_source": "fallback_editor_segments"}},
+    ]
+    facts.write_text("\n".join(json.dumps(s) for s in samples))
+    out = tmp_path / "report"
+    subprocess.run([sys.executable, str(SCRIPT),
+                    "--facts", str(facts), "--out-dir", str(out)],
+                   check=True, capture_output=True)
+    report = (out / "report.md").read_text(encoding="utf-8")
+    assert "§5 Retry" in report or "§5 重试" in report
+    assert "metering" in report.lower()
+    assert "fallback" in report.lower()
+    assert "rewrite_input_text_chars_total" in report

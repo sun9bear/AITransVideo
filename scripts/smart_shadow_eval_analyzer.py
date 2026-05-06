@@ -127,6 +127,65 @@ def _section_clone_availability(facts):
     return lines
 
 
+def _section_retry_distribution(facts):
+    """§5: rewrite/retts distribution split by metering vs fallback.
+
+    Includes rewrite_input_text_chars_total p50/p90/p99 — same denominator
+    used by §8 cost (G5), so owner can reconcile §5 retry volume with §8 cost.
+    """
+    if not facts:
+        return ["## §5 Retry 分布\n\n(no data)\n"]
+    metering = [f for f in facts
+                if (f.get("retry_stats") or {}).get("_data_source") == "metering"]
+    fallback = [f for f in facts
+                if (f.get("retry_stats") or {}).get("_data_source", "").startswith("fallback")]
+    lines = ["## §5 Retry 分布", "",
+             f"- jobs with metering data: {len(metering)}",
+             f"- jobs with fallback data: {len(fallback)}",
+             ""]
+    if metering:
+        rwc = sorted((f["retry_stats"]["rewrite_count"] or 0) for f in metering)
+        rtc = sorted((f["retry_stats"]["retts_count"] or 0) for f in metering)
+        rtd = sorted((f["retry_stats"]["retts_total_duration_ms"] or 0) for f in metering)
+        rwch = sorted(
+            (f.get("usage_meter") or {}).get("rewrite_input_text_chars_total") or 0
+            for f in metering
+        )
+        ratios = sorted(
+            (f["retry_stats"].get("retts_total_duration_ms") or 0) / 1000.0 /
+            max(1, f.get("duration_seconds") or 1)
+            for f in metering
+        )
+        lines += [
+            "### Metering subset",
+            "",
+            "| Metric | p50 | p90 | p99 |",
+            "|---|---|---|---|",
+            f"| rewrite_count | {_percentile(rwc, 0.5)} | {_percentile(rwc, 0.9)} | {_percentile(rwc, 0.99)} |",
+            f"| rewrite_input_text_chars_total | {_percentile(rwch, 0.5)} | {_percentile(rwch, 0.9)} | {_percentile(rwch, 0.99)} |",
+            f"| retts_count | {_percentile(rtc, 0.5)} | {_percentile(rtc, 0.9)} | {_percentile(rtc, 0.99)} |",
+            f"| retts_audio_ms | {_percentile(rtd, 0.5)} | {_percentile(rtd, 0.9)} | {_percentile(rtd, 0.99)} |",
+            f"| retts_audio/src ratio | {_percentile(ratios, 0.5):.3f} | {_percentile(ratios, 0.9):.3f} | {_percentile(ratios, 0.99):.3f} |",
+            "",
+            "> `rewrite_input_text_chars_total` 是 §8 cost 公式 `rewrite_rmb` 项的输入分母，"
+            "owner 可用此列与 §8 cost 数据对账。",
+            "",
+        ]
+    if fallback:
+        rwc = sorted((f["retry_stats"]["rewrite_count"] or 0) for f in fallback)
+        lines += [
+            "### Fallback subset (editor.segments rewrite_count only)",
+            "",
+            "| Metric | p50 | p90 | p99 |",
+            "|---|---|---|---|",
+            f"| rewrite_count | {_percentile(rwc, 0.5)} | {_percentile(rwc, 0.9)} | {_percentile(rwc, 0.99)} |",
+            "",
+            "> retts_count 在 fallback 路径 N/A（旧 job 无 metering）",
+            "",
+        ]
+    return lines
+
+
 def build_arg_parser():
     p = argparse.ArgumentParser(description="Smart shadow eval analyzer")
     p.add_argument("--facts", required=True)
@@ -216,6 +275,7 @@ def main(argv=None):
     report_lines += _section_data_availability(facts, args.phase_cutoff_date)
     report_lines += _section_speaker_count(facts, args.smart_eligibility_threshold_set)
     report_lines += _section_clone_availability(facts)
+    report_lines += _section_retry_distribution(facts)
     # ↑↑↑ All section calls MUST be above the writes below ↑↑↑
 
     (out_dir / "report.md").write_text("\n".join(report_lines), encoding="utf-8")
