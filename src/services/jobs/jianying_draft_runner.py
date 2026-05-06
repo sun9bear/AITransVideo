@@ -64,13 +64,16 @@ JIANYING_DRAFT_WRITER_VERSION = "1"
 # snapshot was added to the fingerprint inputs.
 # CodeX P1 follow-up (2026-05-05): bump to 3 — env capability bool
 # was added to the policy snapshot too, completing the effective-gate
-# coverage. Old (schema=2) fingerprints stored from the brief window
-# between the two fixes are also invalidated — intentional, since
-# they could have been computed with admin=true while env was off,
-# producing a fingerprint that wouldn't notice env later flipping on.
-# Admins / users may see a single one-time rebuild on the next
-# trigger after rollout; subsequent triggers cache-hit cleanly.
-JIANYING_DRAFT_FINGERPRINT_SCHEMA = 3
+# coverage.
+# 2026-05-06 bump to 4 — ``display_name`` is now part of the fingerprint
+# so a renamed job (whether by user pencil-edit or S2 placeholder→Chinese
+# auto-rename) invalidates the cached zip. Without this, a job triggered
+# while display_name was the auto placeholder ("油管视频 YYYY-MM-DD ###")
+# would forever return the stale zip whose physical filename baked in
+# the placeholder, even after S2 updated display_name to a real title.
+# One-time rebuild on next trigger after rollout; subsequent triggers
+# cache-hit cleanly.
+JIANYING_DRAFT_FINGERPRINT_SCHEMA = 4
 
 # Lock target lives under jobs_dir/_locks/jianying_draft/{job_id}.run.
 # .lock sidecar is created automatically by services._file_lock.file_lock
@@ -322,6 +325,15 @@ def _compute_jianying_fingerprint(
         "writer_version": JIANYING_DRAFT_WRITER_VERSION,
         "artifact_schema": JIANYING_DRAFT_FINGERPRINT_SCHEMA,
         "whisper_alignment_policy": _whisper_policy_snapshot(),
+        # 2026-05-06: ``display_name`` is what gets baked into the zip's
+        # physical filename (via ``_resolve_zip_basename`` in the writer).
+        # Including it in the fingerprint means a rename — most commonly
+        # S2 auto-replacing the placeholder "油管视频 YYYY-MM-DD ###"
+        # with a Chinese title — invalidates the cached zip so the next
+        # trigger rebuilds with the correct filename. Without this, a
+        # job triggered before S2 finished naming would serve the stale
+        # placeholder-named zip forever.
+        "display_name": (job.display_name or "").strip(),
     }
     serialized = json.dumps(payload, sort_keys=True).encode("utf-8")
     return hashlib.sha256(serialized).hexdigest()

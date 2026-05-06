@@ -1888,6 +1888,136 @@ class TestEnvCapabilityFlipsInvalidateCachedDraft:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# 2026-05-06: display_name rename must invalidate cached jianying zip.
+#
+# Production bug surfaced by user "DeepMind创始人..." task:
+#   1. Job created with placeholder display_name "油管视频 2026-05-05 001"
+#   2. User triggers Jianying generation immediately (before S2 finishes).
+#   3. Backend writes zip whose physical filename bakes in the placeholder:
+#      "油管视频 2026-05-05 001_2026-05-06.zip"
+#   4. S2 later updates display_name → "DeepMind创始人..."
+#   5. Card UI shows the Chinese title, but next trigger of Jianying
+#      computes the SAME fingerprint (display_name was not in fingerprint
+#      inputs), hits the cache, returns the placeholder-named zip.
+#   6. User downloads "油管视频 2026-05-05 001_..." despite the card
+#      showing the Chinese title — confusing.
+#
+# Fix: include display_name in the fingerprint payload. A rename of any
+# kind (S2 auto-rename of placeholder, user manual pencil-edit) flips
+# the fingerprint → cache miss → fresh build with the new name baked
+# in. SCHEMA bump 3→4 forces a one-time rebuild of existing succeeded
+# jobs that may have stale-named zips.
+# ---------------------------------------------------------------------------
+
+
+class TestDisplayNameRenameInvalidatesCachedDraft:
+    """When display_name changes (S2 auto-rename or user manual edit),
+    the next trigger must rebuild so the new name reaches the zip's
+    physical filename."""
+
+    def test_display_name_change_invalidates_cached_zip(
+        self, tmp_path, monkeypatch,
+    ):
+        """Phase 1: succeeded zip stamped under placeholder display_name.
+        Phase 2: display_name renamed (simulating S2 auto-rename).
+        Phase 3: trigger MUST rebuild; new zip filename / fingerprint
+        reflects the new name."""
+        # Keep whisper gates closed for this test — the bug is unrelated
+        # to whisper, just stale fingerprint.
+        monkeypatch.delenv("AVT_WHISPER_ALIGN_ENABLED", raising=False)
+        monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+
+        store = _make_store(tmp_path)
+        project_dir = _make_project_dir(tmp_path)
+        record = _make_record(
+            project_dir=str(project_dir),
+            display_name="油管视频 2026-05-05 001",  # placeholder
+        )
+        store.save_job(record)
+        (project_dir / "source.mp4").write_bytes(b"src")
+        (project_dir / "dubbed.wav").write_bytes(b"dub")
+        (project_dir / "subtitles.srt").write_text("srt", encoding="utf-8")
+
+        backend = mock.MagicMock()
+        backend.write.return_value = _make_ok_result(
+            zip_path=str(tmp_path / "first.zip"),
+        )
+        runner = _make_runner(store, backend)
+
+        # Phase 1: trigger under placeholder display_name → builds zip
+        runner.trigger("job-test-001")
+        first = _wait_for_jianying_status(store, "job-test-001", "succeeded")
+        Path(first.jianying_draft_zip_path).write_bytes(b"first-zip")
+        first_fp = first.jianying_draft_fingerprint
+
+        # Phase 2: display_name renamed (simulating S2 auto-rename
+        # placeholder → Chinese title). Other inputs unchanged.
+        first.display_name = "DeepMind创始人：我们距离AGI已完成四分之三"
+        store.save_job(first)
+
+        # Phase 3: trigger again — should rebuild because fingerprint
+        # now includes display_name.
+        backend.write.reset_mock()
+        backend.write.return_value = _make_ok_result(
+            zip_path=str(tmp_path / "second.zip"),
+        )
+        runner.trigger("job-test-001")
+        second = _wait_for_jianying_status(store, "job-test-001", "succeeded")
+        Path(second.jianying_draft_zip_path).write_bytes(b"second-zip")
+
+        assert backend.write.call_count == 1, (
+            "After display_name rename, next trigger MUST rebuild. "
+            f"Got backend.write.call_count={backend.write.call_count} — "
+            "fingerprint missed the name change and served stale zip."
+        )
+        assert second.jianying_draft_fingerprint != first_fp, (
+            "Stored fingerprint must differ between placeholder-named "
+            "phase 1 and renamed phase 2."
+        )
+
+    def test_identical_display_name_still_caches(self, tmp_path, monkeypatch):
+        """No-regression: when display_name is unchanged across triggers,
+        the second trigger still cache-hits (no perpetual rebuild)."""
+        monkeypatch.delenv("AVT_WHISPER_ALIGN_ENABLED", raising=False)
+        monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+
+        store = _make_store(tmp_path)
+        project_dir = _make_project_dir(tmp_path)
+        record = _make_record(
+            project_dir=str(project_dir),
+            display_name="DeepMind创始人：我们距离AGI已完成四分之三",
+        )
+        store.save_job(record)
+        (project_dir / "source.mp4").write_bytes(b"src")
+        (project_dir / "dubbed.wav").write_bytes(b"dub")
+        (project_dir / "subtitles.srt").write_text("srt", encoding="utf-8")
+
+        backend = mock.MagicMock()
+        backend.write.return_value = _make_ok_result(
+            zip_path=str(tmp_path / "draft.zip"),
+        )
+        runner = _make_runner(store, backend)
+
+        # Phase 1: build
+        runner.trigger("job-test-001")
+        first = _wait_for_jianying_status(store, "job-test-001", "succeeded")
+        Path(first.jianying_draft_zip_path).write_bytes(b"first-zip")
+
+        # Phase 2: same display_name, same inputs → cache-hit
+        backend.write.reset_mock()
+        runner.trigger("job-test-001")
+        second = _wait_for_jianying_status(store, "job-test-001", "succeeded")
+
+        assert backend.write.call_count == 0, (
+            "Identical display_name + identical inputs must cache-hit. "
+            f"Got {backend.write.call_count} unwanted rebuild."
+        )
+        assert (
+            second.jianying_draft_fingerprint == first.jianying_draft_fingerprint
+        )
+
+
 class TestSkipCacheBypassesJianyingOuterCache:
     """admin skip_cache=true is a "force fresh, every time" lever; the
     Jianying outer succeeded cache must respect it the same way the
