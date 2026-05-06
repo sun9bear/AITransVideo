@@ -588,3 +588,89 @@ def test_b7_diff_kind_no_studio_signal(tmp_path):
     vs = next(d for d in decisions if d.get("stage_or_segment_id") == "voice_sample_selection")
     assert vs["match"] is None
     assert vs["diff_kind"] == "no_studio_signal"
+
+
+def test_b8_per_segment_records_long_text(tmp_path):
+    """Segment with long cn_text → recorded as expected_retts."""
+    facts = tmp_path / "facts.jsonl"
+    fact = {
+        "schema_version": 1, "job_id": "j_b8_long", "project_id": "p",
+        "service_mode": "studio", "status": "succeeded",
+        "created_at": "2026-05-06T08:00:00+00:00",
+        "duration_seconds": 60,
+    }
+    facts.write_text(json.dumps(fact) + "\n")
+    projects = tmp_path / "projects" / "p" / "job_j_b8_long"
+    (projects / "editor").mkdir(parents=True)
+    segs = [
+        # Segment 1: short, NOT interesting
+        {"segment_id": "1", "speaker_id": "A", "cn_text": "短", "start_ms": 0, "end_ms": 5000, "rewrite_count": 0},
+        # Segment 2: long, INTERESTING (expected_retts)
+        {"segment_id": "2", "speaker_id": "A",
+         "cn_text": "这是一段非常非常长的文本超过基线很多很多需要重新合成的中文文本。" * 10,
+         "start_ms": 5000, "end_ms": 15000, "rewrite_count": 0},
+    ]
+    (projects / "editor" / "segments.json").write_text(json.dumps(segs, ensure_ascii=False), encoding="utf-8")
+    out = tmp_path / "out"
+    subprocess.run([sys.executable, str(SCRIPT),
+                     "--facts", str(facts),
+                     "--projects-root", str(tmp_path / "projects"),
+                     "--out-dir", str(out)], check=True, capture_output=True)
+    decisions = [json.loads(line) for line in (out / "j_b8_long" / "smart_shadow_decisions.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    seg_decisions = [d for d in decisions if d.get("decision_kind") == "segment"]
+    assert len(seg_decisions) >= 1
+    long_seg = next((d for d in seg_decisions if d.get("stage_or_segment_id") == "segment_2"), None)
+    assert long_seg is not None
+    assert long_seg["smart_decision"].get("expected_retts") is True
+
+
+def test_b8_per_segment_skips_uninteresting(tmp_path):
+    """All-short, no rewrite, no user-edit segments → no per-segment records."""
+    facts = tmp_path / "facts.jsonl"
+    fact = {
+        "schema_version": 1, "job_id": "j_b8_skip", "project_id": "p",
+        "service_mode": "studio", "status": "succeeded",
+        "created_at": "2026-05-06T08:00:00+00:00",
+        "duration_seconds": 60,
+    }
+    facts.write_text(json.dumps(fact) + "\n")
+    projects = tmp_path / "projects" / "p" / "job_j_b8_skip"
+    (projects / "editor").mkdir(parents=True)
+    segs = [
+        {"segment_id": str(i), "speaker_id": "A", "cn_text": "短", "start_ms": i * 5000, "end_ms": (i + 1) * 5000, "rewrite_count": 0}
+        for i in range(3)
+    ]
+    (projects / "editor" / "segments.json").write_text(json.dumps(segs, ensure_ascii=False), encoding="utf-8")
+    out = tmp_path / "out"
+    subprocess.run([sys.executable, str(SCRIPT),
+                     "--facts", str(facts),
+                     "--projects-root", str(tmp_path / "projects"),
+                     "--out-dir", str(out)], check=True, capture_output=True)
+    decisions = [json.loads(line) for line in (out / "j_b8_skip" / "smart_shadow_decisions.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    seg_decisions = [d for d in decisions if d.get("decision_kind") == "segment"]
+    assert len(seg_decisions) == 0  # all uninteresting
+
+
+def test_b8_per_segment_records_rewrite_count_gt_0(tmp_path):
+    """Segment with editor.rewrite_count > 0 → recorded."""
+    facts = tmp_path / "facts.jsonl"
+    fact = {
+        "schema_version": 1, "job_id": "j_b8_rw", "project_id": "p",
+        "service_mode": "studio", "status": "succeeded",
+        "created_at": "2026-05-06T08:00:00+00:00",
+        "duration_seconds": 60,
+    }
+    facts.write_text(json.dumps(fact) + "\n")
+    projects = tmp_path / "projects" / "p" / "job_j_b8_rw"
+    (projects / "editor").mkdir(parents=True)
+    segs = [{"segment_id": "1", "speaker_id": "A", "cn_text": "短", "start_ms": 0, "end_ms": 5000, "rewrite_count": 3}]
+    (projects / "editor" / "segments.json").write_text(json.dumps(segs, ensure_ascii=False), encoding="utf-8")
+    out = tmp_path / "out"
+    subprocess.run([sys.executable, str(SCRIPT),
+                     "--facts", str(facts),
+                     "--projects-root", str(tmp_path / "projects"),
+                     "--out-dir", str(out)], check=True, capture_output=True)
+    decisions = [json.loads(line) for line in (out / "j_b8_rw" / "smart_shadow_decisions.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    seg_decisions = [d for d in decisions if d.get("decision_kind") == "segment"]
+    assert len(seg_decisions) == 1
+    assert seg_decisions[0]["smart_decision"].get("expected_rewrite") is True

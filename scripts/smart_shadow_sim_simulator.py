@@ -330,6 +330,69 @@ def _extract_studio_actual(stage_id: str, fact: dict, smart_decision) -> object:
     return "unknown"
 
 
+def _per_segment_decisions(segments: list[dict], fact: dict) -> list[dict]:
+    """Record per-segment decisions only for "interesting" segments per §3.2.
+
+    Interesting if any of:
+      - Smart would trigger expected_retts (long cn_text)
+      - Smart would trigger expected_rewrite (rewrite_count > 0)
+      - Studio user_edit_events touched it (TODO: needs project_dir read; in B8 v1 use fact.user_edits as proxy)
+      - segment in subtitle drift list (fact.subtitle_sync.drift_block_ids)
+    """
+    out_decisions = []
+    drift_block_ids = set((fact.get("subtitle_sync") or {}).get("drift_block_ids") or [])
+    for seg in segments:
+        seg_id = str(seg.get("segment_id", ""))
+        if not seg_id:
+            continue
+        cn_text = seg.get("cn_text", "") or ""
+        start_ms = seg.get("start_ms", 0)
+        end_ms = seg.get("end_ms", 0)
+        rewrite_count = seg.get("rewrite_count", 0) or 0
+        # Long text trigger
+        expected_retts = False
+        retts_reason = ""
+        if isinstance(start_ms, (int, float)) and isinstance(end_ms, (int, float)) and end_ms > start_ms:
+            duration_min = (end_ms - start_ms) / 60000.0
+            threshold = K_CN_CHARS_PER_SRC_MIN * duration_min * 1.05
+            if len(cn_text) > threshold:
+                expected_retts = True
+                retts_reason = f"cn_text_chars_{len(cn_text)}_exceeds_{threshold:.0f}"
+        # Rewrite trigger
+        expected_rewrite = rewrite_count > 0
+        rewrite_reason = f"editor_rewrite_count_{rewrite_count}" if expected_rewrite else ""
+        # Drift trigger
+        drift_match = (f"block_{int(seg_id):04d}" in drift_block_ids
+                        if seg_id.isdigit() else False)
+        # Skip if not interesting
+        if not (expected_retts or expected_rewrite or drift_match):
+            continue
+        smart = {}
+        if expected_retts:
+            smart["expected_retts"] = True
+            smart["retts_reason"] = retts_reason
+        if expected_rewrite:
+            smart["expected_rewrite"] = True
+            smart["rewrite_reason"] = rewrite_reason
+        if drift_match:
+            smart["drift"] = True
+        out_decisions.append({
+            "schema_version": SCHEMA_VERSION,
+            "decision_kind": "segment",
+            "stage_or_segment_id": f"segment_{seg_id}",
+            "smart_decision": smart,
+            "studio_actual": None,
+            "match": None,
+            "diff_kind": "pending",
+            "evidence": {
+                "cn_text_chars": len(cn_text),
+                "duration_ms": end_ms - start_ms if end_ms > start_ms else 0,
+                "rewrite_count": rewrite_count,
+            },
+        })
+    return out_decisions
+
+
 def _classify_diff(stage_id: str, smart_decision, studio_actual) -> tuple[bool | None, str]:
     """Returns (match, diff_kind). Per §3.4 / §3.3 enum.
 
@@ -503,6 +566,8 @@ def main(argv: list[str] | None = None) -> int:
                 m, dk = _classify_diff(d["stage_or_segment_id"], d["smart_decision"], d["studio_actual"])
                 d["match"] = m
                 d["diff_kind"] = dk
+            # B8: per-segment decisions for "interesting" segments only
+            decisions += _per_segment_decisions(segments, fact)
             (job_dir / "smart_shadow_decisions.jsonl").write_text(
                 "\n".join(json.dumps(d, ensure_ascii=False) for d in decisions) + ("\n" if decisions else ""),
                 encoding="utf-8",
