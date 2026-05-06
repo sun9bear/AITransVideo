@@ -280,3 +280,68 @@ def test_b3_translation_manual_review_high_uncertain(tmp_path):
     stages = {d["stage_or_segment_id"]: d for d in decisions if d.get("decision_kind") == "stage"}
     assert stages["translation_review_auto_approval"]["smart_decision"]["decision"] == "manual_review_required"
     assert "uncertain" in stages["translation_review_auto_approval"]["smart_decision"]["reason"].lower()
+
+
+def test_b4_retry_estimation_no_retries_needed(tmp_path):
+    """Segments well within budget -> expected_retts_count=0, no budget hit."""
+    facts = tmp_path / "facts.jsonl"
+    fact = {
+        "schema_version": 1, "job_id": "j_b4_low", "project_id": "p",
+        "service_mode": "studio", "status": "succeeded",
+        "created_at": "2026-05-06T08:00:00+00:00",
+        "duration_seconds": 60,  # 1 source min
+    }
+    facts.write_text(json.dumps(fact) + "\n")
+    projects = tmp_path / "projects" / "p" / "job_j_b4_low"
+    (projects / "editor").mkdir(parents=True)
+    # 5 segments, each well within k=240 chars/min × duration × 1.05
+    segs = [
+        {"segment_id": str(i), "speaker_id": "A",
+         "cn_text": "短文本",  # 3 chars, way below threshold
+         "start_ms": i * 10000, "end_ms": (i + 1) * 10000,
+         "rewrite_count": 0}
+        for i in range(5)
+    ]
+    (projects / "editor" / "segments.json").write_text(json.dumps(segs, ensure_ascii=False), encoding="utf-8")
+    out = tmp_path / "out"
+    subprocess.run([sys.executable, str(SCRIPT),
+                     "--facts", str(facts),
+                     "--projects-root", str(tmp_path / "projects"),
+                     "--out-dir", str(out)], check=True, capture_output=True)
+    decisions = [json.loads(line) for line in (out / "j_b4_low" / "smart_shadow_decisions.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    stages = {d["stage_or_segment_id"]: d for d in decisions if d.get("decision_kind") == "stage"}
+    rep = stages["tts_duration_repair_policy"]["smart_decision"]
+    assert rep["expected_retts_count"] == 0
+    assert rep["would_hit_budget_cap"] is False
+
+
+def test_b4_retry_estimation_with_long_segment(tmp_path):
+    """Segment with cn_text > k_chars × duration × 1.05 -> expected_retts_count >=1."""
+    facts = tmp_path / "facts.jsonl"
+    fact = {
+        "schema_version": 1, "job_id": "j_b4_long", "project_id": "p2",
+        "service_mode": "studio", "status": "succeeded",
+        "created_at": "2026-05-06T08:00:00+00:00",
+        "duration_seconds": 30,  # 0.5 src min
+    }
+    facts.write_text(json.dumps(fact) + "\n")
+    projects = tmp_path / "projects" / "p2" / "job_j_b4_long"
+    (projects / "editor").mkdir(parents=True)
+    # k=240 chars/min × 0.5min × 1.05 = 126 chars threshold for a full-duration segment.
+    # If segment duration = 30s (0.5 min), cn_text > 126 chars triggers.
+    segs = [{
+        "segment_id": "1", "speaker_id": "A",
+        "cn_text": "这是一段非常非常长的中文文本，远远超过基线阈值，所以智能版会触发重新合成。" * 5,  # ~250 chars
+        "start_ms": 0, "end_ms": 30000,
+        "rewrite_count": 0,
+    }]
+    (projects / "editor" / "segments.json").write_text(json.dumps(segs, ensure_ascii=False), encoding="utf-8")
+    out = tmp_path / "out"
+    subprocess.run([sys.executable, str(SCRIPT),
+                     "--facts", str(facts),
+                     "--projects-root", str(tmp_path / "projects"),
+                     "--out-dir", str(out)], check=True, capture_output=True)
+    decisions = [json.loads(line) for line in (out / "j_b4_long" / "smart_shadow_decisions.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    stages = {d["stage_or_segment_id"]: d for d in decisions if d.get("decision_kind") == "stage"}
+    rep = stages["tts_duration_repair_policy"]["smart_decision"]
+    assert rep["expected_retts_count"] >= 1

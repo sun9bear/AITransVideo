@@ -173,6 +173,45 @@ def _decide_translation_review(fact: dict) -> tuple:
              "eligible_speakers": eligible, "asr_speaker_count": asr_count})
 
 
+K_CN_CHARS_PER_SRC_MIN = 240  # default from spec §3.5
+
+
+def _estimate_retry(segments: list[dict], source_duration_seconds: float | None) -> tuple:
+    """§3.5 retry estimation v1."""
+    if not segments:
+        return ({"unevaluable": True, "reason": "no_segments"}, {"segments_count": 0})
+    expected_retts_count = 0
+    rewrite_count_total = 0
+    for seg in segments:
+        cn_text = seg.get("cn_text", "") or ""
+        estimated_cn_chars = len(cn_text)
+        start_ms = seg.get("start_ms", 0)
+        end_ms = seg.get("end_ms", 0)
+        if isinstance(start_ms, (int, float)) and isinstance(end_ms, (int, float)) and end_ms > start_ms:
+            duration_min = (end_ms - start_ms) / 60000.0
+            threshold = K_CN_CHARS_PER_SRC_MIN * duration_min * 1.05
+            if estimated_cn_chars > threshold:
+                expected_retts_count += 1
+        rewrite_count_total += seg.get("rewrite_count", 0) or 0
+    expected_retts_count += rewrite_count_total
+    avg_segment_duration_s = 0.0
+    if segments:
+        durs = [(seg.get("end_ms", 0) - seg.get("start_ms", 0)) / 1000.0 for seg in segments]
+        durs = [d for d in durs if d > 0]
+        avg_segment_duration_s = sum(durs) / len(durs) if durs else 0.0
+    would_hit_budget_cap = False
+    if source_duration_seconds and source_duration_seconds > 0:
+        retts_audio_estimate = expected_retts_count * avg_segment_duration_s
+        would_hit_budget_cap = retts_audio_estimate > 1.5 * source_duration_seconds
+    return ({"expected_retts_count": expected_retts_count,
+             "expected_rewrite_count": rewrite_count_total,
+             "would_hit_budget_cap": would_hit_budget_cap},
+            {"k_cn_chars_per_src_min": K_CN_CHARS_PER_SRC_MIN,
+             "rewrite_threshold_multiplier": 1.05,
+             "budget_cap_multiplier": 1.5,
+             "segments_count": len(segments)})
+
+
 def _resolve_project_dir(projects_root: Path | None, fact: dict) -> Path | None:
     """Locate <projects_root>/<project_id>/job_<bare_id>/ or None."""
     if not projects_root or not projects_root.is_dir():
@@ -264,6 +303,8 @@ def main(argv: list[str] | None = None) -> int:
             decisions.append(_stage_decision("stage", "clone_policy", cp_dec, cp_ev))
             tr_dec, tr_ev = _decide_translation_review(fact)
             decisions.append(_stage_decision("stage", "translation_review_auto_approval", tr_dec, tr_ev))
+            retry_dec, retry_ev = _estimate_retry(segments, fact.get("duration_seconds"))
+            decisions.append(_stage_decision("stage", "tts_duration_repair_policy", retry_dec, retry_ev))
             # Phase A3: write empty decisions.jsonl + scaffold report
             (job_dir / "smart_shadow_decisions.jsonl").write_text(
                 "\n".join(json.dumps(d, ensure_ascii=False) for d in decisions),
