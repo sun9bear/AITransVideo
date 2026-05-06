@@ -44,3 +44,25 @@ def test_collector_with_empty_fixtures(tmp_path):
     s = json.loads(summary.read_text())
     assert s["is_complete_run"] is True
     assert s["scan_stats"]["jobs_factsheeted"] == 0
+
+
+def test_collector_with_one_real_fixture(tmp_path):
+    """喂 fixture 'job_post_phase_full' 应产 1 行 inventory + 1 行 fact"""
+    fixtures = Path(__file__).resolve().parent / "fixtures" / "smart_shadow_eval"
+    out_dir = tmp_path / "out"
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT),
+         "--jobs-root", str(fixtures / "jobs"),
+         "--projects-root", str(fixtures / "projects"),
+         "--out-dir", str(out_dir)],
+        capture_output=True, text=True
+    )
+    assert result.returncode == 0, f"stderr={result.stderr}"
+
+    inventory = (out_dir / "inventory.jsonl").read_text().strip().splitlines()
+    assert len(inventory) >= 1
+    inv = json.loads(inventory[0])
+    assert inv["job_id"] == "job_post_phase_full"
+    assert inv["status"] == "succeeded"
+    assert inv["service_mode"] in ("studio", "express")

@@ -137,7 +137,40 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 paths = list(_iter_job_record_paths(jobs_root))
             for record_path in paths:
-                # P-A2: skeleton — fact extraction in subsequent tasks
+                try:
+                    rec = json.loads(record_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError) as exc:
+                    errors.append({
+                        "job_id": record_path.stem,
+                        "error_type": type(exc).__name__,
+                        "message": str(exc),
+                        "traceback": traceback.format_exc(),
+                    })
+                    continue
+
+                job_id = rec.get("job_id")
+                status = rec.get("status")
+                created_at = rec.get("created_at")
+                if not job_id or not created_at or not status:
+                    skipped_identity += 1
+                    continue
+
+                if not args.include_running and status != "succeeded":
+                    skipped_status += 1
+                    continue
+
+                # Date filter (later)
+                inv_entry = {
+                    "schema_version": SCHEMA_VERSION,
+                    "job_id": job_id,
+                    "project_id": rec.get("project_id"),
+                    "status": status,
+                    "created_at": created_at,
+                    "service_mode": rec.get("service_mode"),
+                    "had_post_edit": (rec.get("edit_generation", 0) or 0) > 0
+                        or rec.get("copy_of_job_id") is not None,
+                }
+                fi.write(json.dumps(inv_entry, ensure_ascii=False) + "\n")
                 inventory_count += 1
     except BaseException as exc:
         fatal_exception = exc
