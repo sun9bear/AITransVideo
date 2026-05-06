@@ -2818,6 +2818,41 @@ async def update_source_metadata(
     except Exception:
         await db.rollback()
 
+    # 2026-05-06: when S2 auto-renames placeholder → Chinese title, the
+    # PG row above gets updated. Mirror the change into the Job-API
+    # JSON store so downstream artifacts (剪映 zip filename via
+    # _resolve_zip_basename, materials_pack download_filename, future
+    # consumers) see the same name. Without this mirror, a job
+    # triggered AFTER S2 finishes would still have the placeholder
+    # display_name in its JSON record and produce a placeholder-named
+    # zip even after my 2026-05-06 jianying fingerprint fix.
+    #
+    # Best-effort: failure to mirror is logged but does NOT roll back
+    # the PG update. The JSON store can be reconciled later (worst
+    # case: one stale-named zip until next user-initiated rename).
+    if display_name_updated:
+        try:
+            import httpx
+            upstream_url = f"{settings.job_api_upstream.rstrip('/')}/jobs/{job_id}"
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.patch(
+                    upstream_url,
+                    json={"display_name": s2_display_name},
+                    headers={"content-type": "application/json"},
+                )
+            if resp.status_code != 200:
+                logger.warning(
+                    "S2 display_name mirror failed for %s: HTTP %s — JSON "
+                    "store will keep placeholder until next manual rename",
+                    job_id, resp.status_code,
+                )
+        except Exception as exc:  # noqa: BLE001 — mirror is best-effort
+            logger.warning(
+                "S2 display_name mirror failed for %s: %s — JSON store "
+                "will keep placeholder until next manual rename",
+                job_id, exc,
+            )
+
     logger.info(
         "source-metadata updated for %s: duration=%s title=%s display_name_updated=%s",
         job_id, actual_duration, title, display_name_updated,
