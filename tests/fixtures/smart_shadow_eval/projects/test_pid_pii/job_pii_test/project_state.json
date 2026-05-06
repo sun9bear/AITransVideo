@@ -1,0 +1,7 @@
+{
+  "project_id": "test_pid_pii",
+  "stages": {
+    "ingestion": {"payload": {"duration_ms": 60000}},
+    "media_understanding": {"payload": {"language": "en_us", "speaker_count": 2}}
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "stages": {
+    "translation_review": {
+      "payload": {
+        "segments": {
+          "1": {"cn_text": "abc@example.com 提供"}
+        }
+      }
+    }
+  }
+}

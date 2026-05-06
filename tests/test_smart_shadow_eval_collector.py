@@ -63,10 +63,10 @@ def test_collector_with_one_real_fixture(tmp_path):
     )
     assert result.returncode == 0, f"stderr={result.stderr}"
 
-    inventory = (out_dir / "inventory.jsonl").read_text().strip().splitlines()
+    inventory = [json.loads(line) for line in
+                 (out_dir / "inventory.jsonl").read_text().strip().splitlines()]
     assert len(inventory) >= 1
-    inv = json.loads(inventory[0])
-    assert inv["job_id"] == "job_post_phase_full"
+    inv = next(i for i in inventory if i["job_id"] == "job_post_phase_full")
     assert inv["status"] == "succeeded"
     assert inv["service_mode"] in ("studio", "express")
 
