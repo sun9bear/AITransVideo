@@ -74,6 +74,75 @@ def _build_per_job_report(fact: dict, decisions: list[dict]) -> dict:
     }
 
 
+def _stage_decision(kind: str, stage_id: str, smart_decision, evidence: dict | None = None) -> dict:
+    """Build a stage-level decision record. studio_actual / match / diff_kind in B6/B7."""
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "decision_kind": "stage",
+        "stage_or_segment_id": stage_id,
+        "smart_decision": smart_decision,
+        "studio_actual": None,         # Filled in B6
+        "match": None,                  # Filled in B7
+        "diff_kind": "pending",         # Filled in B7
+        "evidence": evidence or {},
+    }
+
+
+def _decide_eligibility_gate(fact: dict, main_threshold: float) -> tuple[dict, dict]:
+    """Returns (smart_decision, evidence). main_threshold like 0.10."""
+    sct = (fact.get("speaker_stats") or {}).get("speaker_count_by_threshold") or {}
+    key = f"{main_threshold:.2f}"
+    main_count = sct.get(key)
+    if not isinstance(main_count, int):
+        return ({"decision": "unevaluable", "reason": "missing_speaker_stats"},
+                {"fact_field_path": f"speaker_stats.speaker_count_by_threshold.{key}", "fact_value": main_count})
+    if main_count > 3:
+        return ({"decision": "reject_main_speakers_gt_3", "main_count": main_count},
+                {"fact_field_path": f"speaker_stats.speaker_count_by_threshold.{key}", "fact_value": main_count})
+    # Check clone sample insufficient
+    css = fact.get("clone_sample_stats") or {}
+    eligible = css.get("eligible_speakers", 0)
+    if eligible < main_count:
+        return ({"decision": "reject_clone_samples_insufficient",
+                 "main_count": main_count, "eligible_speakers": eligible},
+                {"fact_field_path": "clone_sample_stats.eligible_speakers", "fact_value": eligible})
+    return ({"decision": "pass", "main_count": main_count},
+            {"fact_field_path": f"speaker_stats.speaker_count_by_threshold.{key}", "fact_value": main_count})
+
+
+def _decide_voice_sample_selection(fact: dict, soft_seconds: int, preferred_seconds: int) -> tuple:
+    """Per-main-speaker clone vs preset decision."""
+    css = fact.get("clone_sample_stats") or {}
+    buckets = css.get("eligible_sample_count_buckets_by_speaker")
+    if not isinstance(buckets, list):
+        return ({"unevaluable": True, "reason": "missing_clone_samples"},
+                {"fact_field_path": "clone_sample_stats.eligible_sample_count_buckets_by_speaker"})
+    sct = (fact.get("speaker_stats") or {}).get("speaker_count_by_threshold") or {}
+    main_count = sct.get("0.10", len(buckets))
+    if not isinstance(main_count, int):
+        main_count = len(buckets)
+    decisions = []
+    for i, bucket in enumerate(buckets[:main_count]):
+        soft_key = f"≥{soft_seconds}s"
+        pref_key = f"≥{preferred_seconds}s"
+        if bucket.get(pref_key, 0) >= 1:
+            decisions.append({"speaker_index": i, "choice": "clone", "reason": f"≥{preferred_seconds}s_sample_available"})
+        elif bucket.get(soft_key, 0) >= 1:
+            decisions.append({"speaker_index": i, "choice": "clone", "reason": f"≥{soft_seconds}s_sample_available_soft"})
+        else:
+            decisions.append({"speaker_index": i, "choice": "preset", "reason": "no_sufficient_sample"})
+    return (decisions, {"fact_field_path": "clone_sample_stats.eligible_sample_count_buckets_by_speaker",
+                        "main_count": main_count})
+
+
+def _decide_clone_policy(voice_selection_decision) -> tuple:
+    """List of speaker indices Smart would auto-clone."""
+    if not isinstance(voice_selection_decision, list):
+        return ({"unevaluable": True, "reason": "voice_selection_unevaluable"}, {})
+    cloned = [d["speaker_index"] for d in voice_selection_decision if d.get("choice") == "clone"]
+    return ({"auto_clone_main_speakers": cloned}, {"derived_from": "voice_sample_selection"})
+
+
 def _resolve_project_dir(projects_root: Path | None, fact: dict) -> Path | None:
     """Locate <projects_root>/<project_id>/job_<bare_id>/ or None."""
     if not projects_root or not projects_root.is_dir():
@@ -153,7 +222,16 @@ def main(argv: list[str] | None = None) -> int:
             projects_root_path = (Path(args.projects_root) if args.projects_root else None)
             project_dir = _resolve_project_dir(projects_root_path, fact)
             segments = _load_editor_segments(project_dir)
-            decisions: list[dict] = []  # Phase B will populate
+            decisions: list[dict] = []
+            # B2: stage decisions
+            elig_dec, elig_ev = _decide_eligibility_gate(fact, args.main_speaker_threshold)
+            decisions.append(_stage_decision("stage", "eligibility_gate", elig_dec, elig_ev))
+            vs_dec, vs_ev = _decide_voice_sample_selection(
+                fact, args.clone_min_seconds_soft, args.clone_min_seconds_preferred,
+            )
+            decisions.append(_stage_decision("stage", "voice_sample_selection", vs_dec, vs_ev))
+            cp_dec, cp_ev = _decide_clone_policy(vs_dec)
+            decisions.append(_stage_decision("stage", "clone_policy", cp_dec, cp_ev))
             # Phase A3: write empty decisions.jsonl + scaffold report
             (job_dir / "smart_shadow_decisions.jsonl").write_text(
                 "\n".join(json.dumps(d, ensure_ascii=False) for d in decisions),

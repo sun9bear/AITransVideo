@@ -130,3 +130,100 @@ def test_simulator_handles_missing_editor_segments(tmp_path):
         capture_output=True, text=True
     )
     assert result.returncode == 0, f"stderr={result.stderr}"
+
+
+def test_b2_stage_decisions_pass_path(tmp_path):
+    """Job with main=2 speakers, both have >=8s samples -> pass+clone+clone."""
+    facts = tmp_path / "facts.jsonl"
+    fact = {
+        "schema_version": 1,
+        "job_id": "job_b2_pass",
+        "project_id": "pid_b2",
+        "service_mode": "studio",
+        "status": "succeeded",
+        "created_at": "2026-05-06T08:00:00+00:00",
+        "speaker_stats": {
+            "asr_speaker_count": 2,
+            "speaker_duration_shares": [0.6, 0.4],
+            "speaker_count_by_threshold": {"0.05": 2, "0.10": 2, "0.15": 2, "0.20": 2},
+        },
+        "clone_sample_stats": {
+            "eligible_speakers": 2,
+            "eligible_sample_count_buckets_by_speaker": [
+                {"≥5s": 5, "≥8s": 3, "≥10s": 1, "≥15s": 0},
+                {"≥5s": 4, "≥8s": 2, "≥10s": 1, "≥15s": 0},
+            ],
+        },
+    }
+    facts.write_text(json.dumps(fact) + "\n")
+    out = tmp_path / "out"
+    subprocess.run(
+        [sys.executable, str(SCRIPT),
+         "--facts", str(facts),
+         "--out-dir", str(out)],
+        check=True, capture_output=True, text=True
+    )
+    decisions_path = out / "job_b2_pass" / "smart_shadow_decisions.jsonl"
+    decisions = [json.loads(line) for line in decisions_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    stages = {d["stage_or_segment_id"]: d for d in decisions if d.get("decision_kind") == "stage"}
+    # eligibility_gate
+    assert stages["eligibility_gate"]["smart_decision"]["decision"] == "pass"
+    # voice_sample_selection: both speakers eligible for clone
+    vs = stages["voice_sample_selection"]["smart_decision"]
+    assert isinstance(vs, list)
+    assert len(vs) == 2
+    assert all(s["choice"] == "clone" for s in vs)
+    # clone_policy: list of 2 cloned speakers
+    cp = stages["clone_policy"]["smart_decision"]
+    assert cp.get("auto_clone_main_speakers")
+    assert len(cp["auto_clone_main_speakers"]) == 2
+
+
+def test_b2_eligibility_gate_rejects_main_gt_3(tmp_path):
+    """Main >3 -> reject_main_speakers_gt_3."""
+    facts = tmp_path / "facts.jsonl"
+    fact = {
+        "schema_version": 1,
+        "job_id": "job_b2_reject",
+        "project_id": "pid",
+        "service_mode": "studio",
+        "status": "succeeded",
+        "created_at": "2026-05-06T08:00:00+00:00",
+        "speaker_stats": {
+            "asr_speaker_count": 5,
+            "speaker_duration_shares": [0.3, 0.25, 0.2, 0.15, 0.10],
+            "speaker_count_by_threshold": {"0.05": 5, "0.10": 4, "0.15": 3, "0.20": 2},
+        },
+        "clone_sample_stats": {"eligible_speakers": 4, "eligible_sample_count_buckets_by_speaker": []},
+    }
+    facts.write_text(json.dumps(fact) + "\n")
+    out = tmp_path / "out"
+    subprocess.run(
+        [sys.executable, str(SCRIPT),
+         "--facts", str(facts),
+         "--out-dir", str(out)],
+        check=True, capture_output=True
+    )
+    decisions = [json.loads(line) for line in (out / "job_b2_reject" / "smart_shadow_decisions.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    stages = {d["stage_or_segment_id"]: d for d in decisions if d.get("decision_kind") == "stage"}
+    assert stages["eligibility_gate"]["smart_decision"]["decision"] == "reject_main_speakers_gt_3"
+
+
+def test_b2_voice_selection_unevaluable_when_clone_stats_missing(tmp_path):
+    """Missing clone_sample_stats -> voice_sample_selection unevaluable."""
+    facts = tmp_path / "facts.jsonl"
+    fact = {
+        "schema_version": 1, "job_id": "job_b2_uneval", "project_id": "pid",
+        "service_mode": "studio", "status": "succeeded",
+        "created_at": "2026-05-06T08:00:00+00:00",
+        "speaker_stats": {"asr_speaker_count": 2, "speaker_duration_shares": [0.6, 0.4],
+                          "speaker_count_by_threshold": {"0.05": 2, "0.10": 2, "0.15": 2, "0.20": 2}},
+    }
+    facts.write_text(json.dumps(fact) + "\n")
+    out = tmp_path / "out"
+    subprocess.run([sys.executable, str(SCRIPT), "--facts", str(facts), "--out-dir", str(out)],
+                    check=True, capture_output=True)
+    decisions = [json.loads(line) for line in (out / "job_b2_uneval" / "smart_shadow_decisions.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    stages = {d["stage_or_segment_id"]: d for d in decisions if d.get("decision_kind") == "stage"}
+    vs = stages["voice_sample_selection"]["smart_decision"]
+    assert vs == "unevaluable" or (isinstance(vs, dict) and vs.get("unevaluable"))
