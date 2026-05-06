@@ -330,6 +330,104 @@ def _extract_studio_actual(stage_id: str, fact: dict, smart_decision) -> object:
     return "unknown"
 
 
+def _classify_diff(stage_id: str, smart_decision, studio_actual) -> tuple[bool | None, str]:
+    """Returns (match, diff_kind). Per §3.4 / §3.3 enum.
+
+    diff_kind:
+      - match: smart_decision == studio_actual (semantic)
+      - smart_more_aggressive: smart rejects/degrades while studio passed
+      - smart_less_aggressive: smart passes while studio actually intervened (user_modified, etc.)
+      - orthogonal: dimensions don't directly compare
+      - no_studio_signal: studio_actual is "unknown" or unavailable
+    """
+    if studio_actual == "unknown":
+        return None, "no_studio_signal"
+    # Stage-specific equivalence
+    if stage_id == "eligibility_gate":
+        if isinstance(smart_decision, dict):
+            sd = smart_decision.get("decision")
+            if sd == "pass" and studio_actual == "pass":
+                return True, "match"
+            if sd in ("reject_main_speakers_gt_3", "reject_clone_samples_insufficient") and studio_actual == "pass":
+                return False, "smart_more_aggressive"
+            if sd == "unevaluable":
+                return None, "no_studio_signal"
+        return False, "orthogonal"
+    if stage_id == "voice_sample_selection":
+        if isinstance(smart_decision, list) and isinstance(studio_actual, list):
+            if len(smart_decision) != len(studio_actual):
+                return False, "orthogonal"
+            choices_match = all(
+                s.get("choice") == a.get("choice")
+                for s, a in zip(smart_decision, studio_actual))
+            if choices_match:
+                return True, "match"
+            smart_clones = sum(1 for s in smart_decision if s.get("choice") == "clone")
+            actual_clones = sum(1 for a in studio_actual if a.get("choice") == "clone")
+            if smart_clones > actual_clones:
+                return False, "smart_more_aggressive"
+            elif smart_clones < actual_clones:
+                return False, "smart_less_aggressive"
+            return False, "orthogonal"
+        return None, "no_studio_signal"
+    if stage_id == "clone_policy":
+        if isinstance(smart_decision, dict) and isinstance(studio_actual, dict):
+            smart_set = set(smart_decision.get("auto_clone_main_speakers", []))
+            actual_set = set(studio_actual.get("cloned_speaker_indices", []))
+            if smart_set == actual_set:
+                return True, "match"
+            if smart_set > actual_set:
+                return False, "smart_more_aggressive"
+            if smart_set < actual_set:
+                return False, "smart_less_aggressive"
+            return False, "orthogonal"
+        return None, "no_studio_signal"
+    if stage_id == "translation_review_auto_approval":
+        sd = smart_decision.get("decision") if isinstance(smart_decision, dict) else None
+        if sd == "unevaluable":
+            return None, "no_studio_signal"
+        # smart auto_approve + studio auto_approved → match
+        # smart auto_approve + studio user_modified → smart_less_aggressive (smart should have flagged)
+        # smart manual_review + studio auto_approved → smart_more_aggressive (smart over-cautious)
+        # smart manual_review + studio user_modified → match (both flag)
+        if sd == "auto_approve" and studio_actual == "auto_approved":
+            return True, "match"
+        if sd == "manual_review_required" and studio_actual == "user_modified":
+            return True, "match"
+        if sd == "auto_approve" and studio_actual == "user_modified":
+            return False, "smart_less_aggressive"
+        if sd == "manual_review_required" and studio_actual == "auto_approved":
+            return False, "smart_more_aggressive"
+        return False, "orthogonal"
+    if stage_id == "tts_duration_repair_policy":
+        if not isinstance(studio_actual, dict):
+            return None, "no_studio_signal"
+        if not isinstance(smart_decision, dict) or smart_decision.get("unevaluable"):
+            return None, "no_studio_signal"
+        smart_n = smart_decision.get("expected_retts_count", 0)
+        actual_n = studio_actual.get("actual_retts_count")
+        if actual_n is None:
+            return None, "no_studio_signal"
+        if smart_n == actual_n:
+            return True, "match"
+        # match if within 50% of actual (loose)
+        if actual_n > 0 and abs(smart_n - actual_n) / max(1, actual_n) < 0.5:
+            return True, "match"
+        if smart_n > actual_n:
+            return False, "smart_more_aggressive"
+        return False, "smart_less_aggressive"
+    if stage_id == "subtitle_sync_policy":
+        if not isinstance(studio_actual, dict):
+            return None, "no_studio_signal"
+        if isinstance(smart_decision, dict) and smart_decision.get("unevaluable"):
+            return None, "no_studio_signal"
+        # If smart recommends whisper and studio used a whisper alignment_model → match
+        if smart_decision.get("whisper_align_recommended") and studio_actual.get("alignment_model"):
+            return True, "match"
+        return False, "orthogonal"
+    return None, "no_studio_signal"
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Smart shadow simulator (P1, read-only, offline)."
@@ -400,6 +498,11 @@ def main(argv: list[str] | None = None) -> int:
             for d in decisions:
                 d["studio_actual"] = _extract_studio_actual(
                     d["stage_or_segment_id"], fact, d["smart_decision"])
+            # B7: classify match / diff_kind based on studio_actual
+            for d in decisions:
+                m, dk = _classify_diff(d["stage_or_segment_id"], d["smart_decision"], d["studio_actual"])
+                d["match"] = m
+                d["diff_kind"] = dk
             (job_dir / "smart_shadow_decisions.jsonl").write_text(
                 "\n".join(json.dumps(d, ensure_ascii=False) for d in decisions) + ("\n" if decisions else ""),
                 encoding="utf-8",

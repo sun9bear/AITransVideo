@@ -506,3 +506,85 @@ def test_b6_studio_actual_translation_review_user_modified(tmp_path):
     decisions = [json.loads(line) for line in (out / "j_b6_t2" / "smart_shadow_decisions.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
     tr = next(d for d in decisions if d.get("stage_or_segment_id") == "translation_review_auto_approval")
     assert tr["studio_actual"] == "user_modified"
+
+
+def test_b7_diff_kind_match_and_more_aggressive(tmp_path):
+    """smart=pass + studio=pass → match. smart=reject + studio=pass → more_aggressive."""
+    # Test pass=pass match
+    facts = tmp_path / "facts.jsonl"
+    fact_pass = {
+        "schema_version": 1, "job_id": "j_b7_match", "project_id": "p",
+        "service_mode": "studio", "status": "succeeded",
+        "created_at": "2026-05-06T08:00:00+00:00",
+        "speaker_stats": {"asr_speaker_count": 2,
+                           "speaker_duration_shares": [0.6, 0.4],
+                           "speaker_count_by_threshold": {"0.05": 2, "0.10": 2, "0.15": 2, "0.20": 2},
+                           "uncertain_speaker_duration_share": 0.0},
+        "clone_sample_stats": {"eligible_speakers": 2,
+                                "eligible_sample_count_buckets_by_speaker": [
+                                    {"≥5s": 5, "≥8s": 3, "≥10s": 1, "≥15s": 0},
+                                    {"≥5s": 4, "≥8s": 2, "≥10s": 1, "≥15s": 0},
+                                ]},
+    }
+    facts.write_text(json.dumps(fact_pass) + "\n")
+    out = tmp_path / "out"
+    subprocess.run([sys.executable, str(SCRIPT), "--facts", str(facts), "--out-dir", str(out)],
+                    check=True, capture_output=True)
+    decisions = [json.loads(line) for line in (out / "j_b7_match" / "smart_shadow_decisions.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    elig = next(d for d in decisions if d.get("stage_or_segment_id") == "eligibility_gate")
+    assert elig["match"] is True
+    assert elig["diff_kind"] == "match"
+
+
+def test_b7_diff_kind_smart_more_aggressive(tmp_path):
+    """smart=reject_main_speakers_gt_3 + studio=pass → smart_more_aggressive."""
+    facts = tmp_path / "facts.jsonl"
+    fact_reject = {
+        "schema_version": 1, "job_id": "j_b7_more", "project_id": "p",
+        "service_mode": "studio", "status": "succeeded",
+        "created_at": "2026-05-06T08:00:00+00:00",
+        "speaker_stats": {"asr_speaker_count": 5,
+                           "speaker_duration_shares": [0.3, 0.25, 0.2, 0.15, 0.10],
+                           "speaker_count_by_threshold": {"0.05": 5, "0.10": 4, "0.15": 3, "0.20": 2},
+                           "uncertain_speaker_duration_share": 0.0},
+        "clone_sample_stats": {"eligible_speakers": 4,
+                                "eligible_sample_count_buckets_by_speaker": [
+                                    {"≥5s": 5, "≥8s": 3, "≥10s": 1, "≥15s": 0},
+                                ]},
+    }
+    facts.write_text(json.dumps(fact_reject) + "\n")
+    out = tmp_path / "out"
+    subprocess.run([sys.executable, str(SCRIPT), "--facts", str(facts), "--out-dir", str(out)],
+                    check=True, capture_output=True)
+    decisions = [json.loads(line) for line in (out / "j_b7_more" / "smart_shadow_decisions.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    elig = next(d for d in decisions if d.get("stage_or_segment_id") == "eligibility_gate")
+    assert elig["match"] is False
+    assert elig["diff_kind"] == "smart_more_aggressive"
+
+
+def test_b7_diff_kind_no_studio_signal(tmp_path):
+    """studio_actual = unknown → match=null, diff_kind='no_studio_signal'."""
+    facts = tmp_path / "facts.jsonl"
+    fact = {
+        "schema_version": 1, "job_id": "j_b7_unk", "project_id": "p",
+        "service_mode": "studio", "status": "succeeded",
+        "created_at": "2026-05-06T08:00:00+00:00",
+        "speaker_stats": {"asr_speaker_count": 2,
+                           "speaker_duration_shares": [0.6, 0.4],
+                           "speaker_count_by_threshold": {"0.05": 2, "0.10": 2, "0.15": 2, "0.20": 2},
+                           "uncertain_speaker_duration_share": 0.0},
+        "clone_sample_stats": {"eligible_speakers": 2,
+                                "eligible_sample_count_buckets_by_speaker": [
+                                    {"≥5s": 5, "≥8s": 3, "≥10s": 1, "≥15s": 0},
+                                    {"≥5s": 4, "≥8s": 2, "≥10s": 1, "≥15s": 0},
+                                ]},
+        # No actual_clone_stats → voice_selection studio_actual = "unknown"
+    }
+    facts.write_text(json.dumps(fact) + "\n")
+    out = tmp_path / "out"
+    subprocess.run([sys.executable, str(SCRIPT), "--facts", str(facts), "--out-dir", str(out)],
+                    check=True, capture_output=True)
+    decisions = [json.loads(line) for line in (out / "j_b7_unk" / "smart_shadow_decisions.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    vs = next(d for d in decisions if d.get("stage_or_segment_id") == "voice_sample_selection")
+    assert vs["match"] is None
+    assert vs["diff_kind"] == "no_studio_signal"
