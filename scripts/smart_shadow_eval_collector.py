@@ -37,6 +37,12 @@ SPEAKER_THRESHOLDS = (0.05, 0.10, 0.15, 0.20)
 SAMPLE_THRESHOLDS_S = (5, 8, 10, 15)
 
 
+REWRITE_TASKS = frozenset({
+    "s5_rewrite", "s5_rewrite_strict", "s5_short_content_compact",
+})
+RETTS_BUCKETS = frozenset({"post_tts_resynth", "post_edit_resynth"})
+
+
 ARTIFACT_PATHS = {
     # JOBS root (flat)
     "job_record":             "{job_id}.json",
@@ -193,6 +199,7 @@ def _build_fact_sheet(rec: dict, project_dir: Path | None,
         "speaker_stats": speaker_stats,
         "clone_sample_stats": clone_sample_stats,
         "actual_clone_stats": _compute_actual_clone_stats(project_dir),
+        "retry_stats": _compute_retry_stats(project_dir),
         # Phase B-E: retry_stats, etc.
     }
 
@@ -299,6 +306,41 @@ def _compute_actual_clone_stats(project_dir: Path | None) -> dict | None:
         "cloned_speakers": classifications.count("cloned"),
         "preset_speakers": classifications.count("preset"),
         "voice_ids_by_speaker": voice_ids,
+    }
+
+
+def _compute_retry_stats(project_dir: Path | None) -> dict | None:
+    """Prefer metering, fall back to editor/segments.json rewrite_count sum."""
+    if not project_dir:
+        return None
+    metering_path = project_dir / ARTIFACT_PATHS["usage_events"]
+    if metering_path.is_file():
+        # Phase D: implement metering parsing (Task C2)
+        return _retry_stats_from_metering(metering_path)
+    # Fallback
+    editor_segs = _safe_load_json(project_dir / ARTIFACT_PATHS["editor_segments"])
+    if not isinstance(editor_segs, list):
+        return {
+            "rewrite_count": None,
+            "retts_count": None,
+            "retts_total_duration_ms": None,
+            "_data_source": "no_data",
+        }
+    return {
+        "rewrite_count": sum(s.get("rewrite_count", 0) or 0 for s in editor_segs),
+        "retts_count": None,
+        "retts_total_duration_ms": None,
+        "_data_source": "fallback_editor_segments",
+    }
+
+
+def _retry_stats_from_metering(metering_path: Path) -> dict:
+    """Stub for Phase C/D: implement in Task C2 (metering parsing)."""
+    return {
+        "rewrite_count": None,
+        "retts_count": None,
+        "retts_total_duration_ms": None,
+        "_data_source": "metering_pending_impl",
     }
 
 

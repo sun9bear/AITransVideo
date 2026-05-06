@@ -194,3 +194,24 @@ def test_actual_clone_stats(tmp_path):
     assert acs["preset_speakers"] == 1  # speaker_b uses preset_chinese_male_1
     assert acs["voice_ids_by_speaker"][0].startswith("moss_audio_")
     assert "preset" in acs["voice_ids_by_speaker"][1].lower()
+
+
+def test_retry_stats_fallback(tmp_path):
+    """No metering/usage_events.jsonl → fallback to editor.segments.rewrite_count sum"""
+    fixtures = Path(__file__).resolve().parent / "fixtures" / "smart_shadow_eval"
+    out_dir = tmp_path / "out"
+    subprocess.run(
+        [sys.executable, str(SCRIPT),
+         "--jobs-root", str(fixtures / "jobs"),
+         "--projects-root", str(fixtures / "projects"),
+         "--out-dir", str(out_dir)],
+        check=True, capture_output=True
+    )
+    facts = [json.loads(line) for line in
+             (out_dir / "facts.jsonl").read_text(encoding="utf-8").splitlines()]
+    f = next(x for x in facts if x["job_id"] == "job_post_phase_full")
+    rs = f["retry_stats"]
+    # editor segs: rewrite_count 1 + 0 = 1
+    assert rs["rewrite_count"] == 1
+    assert rs["retts_count"] is None  # no metering = no retts data
+    assert rs["_data_source"] == "fallback_editor_segments"
