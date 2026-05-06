@@ -154,3 +154,47 @@ def test_analyzer_retry_section(tmp_path):
     assert "metering" in report.lower()
     assert "fallback" in report.lower()
     assert "rewrite_input_text_chars_total" in report
+
+
+def test_analyzer_threshold_matrix(tmp_path):
+    """§10: 4×4 matrix of Smart eligibility/rejection/degradation rates"""
+    facts = tmp_path / "facts.jsonl"
+    samples = [
+        # j1: 2 speakers, both have ≥10s samples → eligible at all thresholds
+        {"schema_version": 1, "job_id": "j1",
+         "speaker_stats": {"speaker_count_by_threshold": {
+             "0.05": 2, "0.10": 2, "0.15": 2, "0.20": 2}},
+         "clone_sample_stats": {"eligible_speakers": 2,
+            "eligible_sample_count_buckets_by_speaker": [
+                {"≥5s": 5, "≥8s": 3, "≥10s": 2, "≥15s": 1},
+                {"≥5s": 4, "≥8s": 2, "≥10s": 1, "≥15s": 0}]}},
+        # j2: 4 speakers (gate fails at threshold 0.05/0.10) - rejected
+        {"schema_version": 1, "job_id": "j2",
+         "speaker_stats": {"speaker_count_by_threshold": {
+             "0.05": 4, "0.10": 4, "0.15": 3, "0.20": 2}},
+         "clone_sample_stats": {"eligible_speakers": 4,
+            "eligible_sample_count_buckets_by_speaker": [
+                {"≥5s": 5, "≥8s": 3, "≥10s": 1, "≥15s": 0},
+                {"≥5s": 4, "≥8s": 2, "≥10s": 0, "≥15s": 0},
+                {"≥5s": 2, "≥8s": 0, "≥10s": 0, "≥15s": 0},
+                {"≥5s": 1, "≥8s": 0, "≥10s": 0, "≥15s": 0}]}},
+        # j3: 3 speakers, 1 has insufficient samples - degraded at higher min_seconds
+        {"schema_version": 1, "job_id": "j3",
+         "speaker_stats": {"speaker_count_by_threshold": {
+             "0.05": 3, "0.10": 3, "0.15": 3, "0.20": 3}},
+         "clone_sample_stats": {"eligible_speakers": 3,
+            "eligible_sample_count_buckets_by_speaker": [
+                {"≥5s": 5, "≥8s": 3, "≥10s": 1, "≥15s": 0},
+                {"≥5s": 3, "≥8s": 1, "≥10s": 0, "≥15s": 0},
+                {"≥5s": 0, "≥8s": 0, "≥10s": 0, "≥15s": 0}]}},
+    ]
+    facts.write_text("\n".join(json.dumps(s) for s in samples))
+    out = tmp_path / "report"
+    subprocess.run([sys.executable, str(SCRIPT),
+                    "--facts", str(facts), "--out-dir", str(out)],
+                   check=True, capture_output=True)
+    report = (out / "report.md").read_text(encoding="utf-8")
+    assert "§10" in report
+    assert "适配率" in report or "eligible" in report.lower()
+    summary = json.loads((out / "report_summary.json").read_text(encoding="utf-8"))
+    assert "threshold_matrix" in summary

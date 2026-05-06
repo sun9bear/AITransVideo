@@ -186,6 +186,79 @@ def _section_retry_distribution(facts):
     return lines
 
 
+def _classify_job_at_threshold(fact, main_threshold_str, min_sec_key):
+    """Return 'eligible' | 'rejected' | 'degraded' for a job at given thresholds.
+    eligible: main ≤ 3 AND all main speakers have ≥1 sample ≥ min_sec
+    rejected: main > 3 (speaker gate fails)
+    degraded: main ≤ 3 BUT at least 1 main speaker has no qualifying sample
+    """
+    sct = (fact.get("speaker_stats") or {}).get("speaker_count_by_threshold") or {}
+    main_count = sct.get(main_threshold_str)
+    if not isinstance(main_count, int):
+        return None  # missing data
+    if main_count > 3:
+        return "rejected"
+    css = fact.get("clone_sample_stats") or {}
+    buckets = css.get("eligible_sample_count_buckets_by_speaker") or []
+    relevant = buckets[:main_count]
+    if len(relevant) < main_count:
+        return "degraded"
+    if all(b.get(min_sec_key, 0) >= 1 for b in relevant):
+        return "eligible"
+    return "degraded"
+
+
+def _section_threshold_matrix(facts, main_thresholds_csv, min_secs_csv):
+    """§10: 4×4 matrix of Smart eligibility/rejection/degradation rates.
+
+    Returns (lines, summary_extra_dict).
+    """
+    if not facts:
+        return ["## §10 阈值校准矩阵\n\n(no data)\n"], {}
+    main_ths = [t.strip() for t in main_thresholds_csv.split(",")]
+    min_secs = [int(s.strip()) for s in min_secs_csv.split(",")]
+    lines = [
+        "## §10 阈值校准矩阵 (Smart 适配率 / 拒绝率 / 降级率)",
+        "",
+        "**核心 P0 输出**：在不同 main-speaker threshold × min-sample-seconds 阈值组合下，"
+        "Smart MVP 的适配率 / 拒绝率 / 降级率。Owner 决定 §7.2 / §9 阈值的依据。",
+        "",
+        "格式：eligible / rejected / degraded（百分比）",
+        "",
+    ]
+    matrix_summary = {}
+    for ms in min_secs:
+        ms_key = f"≥{ms}s"
+        lines += [
+            f"### min_sample_seconds = {ms}s",
+            "",
+            "| main_threshold | eligible | rejected (main>3) | degraded | total |",
+            "|---|---|---|---|---|",
+        ]
+        for mt in main_ths:
+            classifications = [
+                _classify_job_at_threshold(f, mt, ms_key) for f in facts
+            ]
+            valid = [c for c in classifications if c is not None]
+            n = len(valid) or 1
+            elig = classifications.count("eligible")
+            rej = classifications.count("rejected")
+            deg = classifications.count("degraded")
+            lines.append(
+                f"| {mt} | {elig}/{n} ({elig/n*100:.0f}%) "
+                f"| {rej}/{n} ({rej/n*100:.0f}%) "
+                f"| {deg}/{n} ({deg/n*100:.0f}%) | {n} |"
+            )
+            matrix_summary[f"main={mt}_min={ms}s"] = {
+                "eligible_pct": elig / n * 100,
+                "rejected_pct": rej / n * 100,
+                "degraded_pct": deg / n * 100,
+                "total": n,
+            }
+        lines.append("")
+    return lines, {"threshold_matrix": matrix_summary}
+
+
 def build_arg_parser():
     p = argparse.ArgumentParser(description="Smart shadow eval analyzer")
     p.add_argument("--facts", required=True)
@@ -276,6 +349,11 @@ def main(argv=None):
     report_lines += _section_speaker_count(facts, args.smart_eligibility_threshold_set)
     report_lines += _section_clone_availability(facts)
     report_lines += _section_retry_distribution(facts)
+    matrix_lines, matrix_extra = _section_threshold_matrix(
+        facts, args.smart_eligibility_threshold_set, args.min_sample_seconds_set
+    )
+    report_lines += matrix_lines
+    summary_extra.update(matrix_extra)
     # ↑↑↑ All section calls MUST be above the writes below ↑↑↑
 
     (out_dir / "report.md").write_text("\n".join(report_lines), encoding="utf-8")
