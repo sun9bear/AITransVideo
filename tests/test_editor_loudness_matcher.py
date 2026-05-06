@@ -28,15 +28,15 @@ def test_speaker_gains_follow_original_speaker_loudness() -> None:
 
     gains = calculate_speaker_gains(pairs)
 
-    assert gains["speaker_a"] == pytest.approx(-21.0)
-    assert gains["speaker_b"] == pytest.approx(2.0)
+    assert gains["speaker_a"] == pytest.approx(0.0)
+    assert gains["speaker_b"] == pytest.approx(14.0)
 
 
 def test_speaker_gain_clamps_large_boosts_and_cuts() -> None:
     policy = LoudnessMatchPolicy(min_gain_db=-24.0, max_gain_db=10.0)
     pairs = [
-        LoudnessPair(1, "too_loud", -50.0, -10.0, 1_000),
-        LoudnessPair(2, "too_quiet", -10.0, -35.0, 1_000),
+        LoudnessPair(1, "too_loud", -34.0, 5.0, 1_000),
+        LoudnessPair(2, "too_quiet", -34.0, -60.0, 1_000),
     ]
 
     gains = calculate_speaker_gains(pairs, policy=policy)
@@ -49,13 +49,41 @@ def test_segment_residual_is_limited_around_speaker_gain() -> None:
     policy = LoudnessMatchPolicy(max_segment_residual_db=3.0)
 
     gain = calculate_segment_gain_db(
-        source_dbfs=-45.0,
+        source_dbfs=-33.0,
         output_dbfs=-15.0,
-        speaker_gain_db=-20.0,
+        speaker_gain_db=-8.0,
+        speaker_source_dbfs=-36.0,
+        speaker_target_dbfs=-23.0,
         policy=policy,
     )
 
-    assert gain == pytest.approx(-23.0)
+    assert gain == pytest.approx(-5.0)
+
+
+def test_quiet_source_is_lifted_to_comfort_floor() -> None:
+    pairs = [
+        LoudnessPair(1, "speaker_a", -44.0, -30.0, 1_000),
+        LoudnessPair(2, "speaker_a", -45.0, -31.0, 1_000),
+        LoudnessPair(3, "speaker_b", -35.0, -20.0, 1_000),
+        LoudnessPair(4, "speaker_b", -34.0, -19.0, 1_000),
+    ]
+
+    gains = calculate_speaker_gains(pairs)
+
+    assert gains["speaker_a"] == pytest.approx(6.5)
+    assert gains["speaker_b"] == pytest.approx(0.0)
+
+
+def test_comfortable_segment_is_not_adjusted_inside_deadband() -> None:
+    gain = calculate_segment_gain_db(
+        source_dbfs=-30.0,
+        output_dbfs=-18.0,
+        speaker_gain_db=0.0,
+        speaker_source_dbfs=-32.0,
+        speaker_target_dbfs=-18.0,
+    )
+
+    assert gain == pytest.approx(0.0)
 
 
 def test_measure_active_loudness_ignores_silence(tmp_path: Path) -> None:

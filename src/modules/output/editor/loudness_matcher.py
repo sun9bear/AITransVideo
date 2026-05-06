@@ -20,14 +20,21 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True, slots=True)
 class LoudnessMatchPolicy:
     min_segment_duration_ms: int = 300
+    min_speaker_reference_duration_ms: int = 30_000
     frame_ms: int = 50
     active_floor_dbfs: float = -50.0
     active_below_peak_db: float = 35.0
     min_gain_db: float = -24.0
-    max_gain_db: float = 10.0
+    max_gain_db: float = 16.0
     max_segment_residual_db: float = 3.0
     min_apply_gain_db: float = 0.25
     limiter_limit: float = 0.97
+    comfort_min_active_dbfs: float = -24.0
+    comfort_max_active_dbfs: float = -14.0
+    target_active_dbfs: float = -22.0
+    min_speaker_target_dbfs: float = -24.0
+    max_speaker_target_dbfs: float = -18.5
+    max_source_relative_db: float = 4.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +56,16 @@ class SegmentGain:
     gain_db: float
     applied: bool
     reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SpeakerGainPlan:
+    speaker_id: str
+    source_dbfs: float
+    output_dbfs: float
+    target_dbfs: float
+    gain_db: float
+    duration_ms: int
 
 
 _DEFAULT_POLICY = LoudnessMatchPolicy()
@@ -77,7 +94,7 @@ def match_segment_loudness_to_source(
         _write_report(
             report_path,
             reference_audio_path=None,
-            speaker_gains={},
+            speaker_plans={},
             segments=[
                 SegmentGain(
                     segment_id=segment.segment_id,
@@ -146,7 +163,7 @@ def match_segment_loudness_to_source(
             )
         )
 
-    speaker_gains = calculate_speaker_gains(pairs, policy=policy)
+    speaker_plans = calculate_speaker_gain_plans(pairs, policy=policy)
     pair_by_id = {pair.segment_id: pair for pair in pairs}
     adjusted_segments = 0
     total_abs_gain = 0.0
@@ -154,8 +171,8 @@ def match_segment_loudness_to_source(
         pair = pair_by_id.get(segment.segment_id)
         if pair is None:
             continue
-        speaker_gain = speaker_gains.get(segment.speaker_id)
-        if speaker_gain is None:
+        speaker_plan = speaker_plans.get(segment.speaker_id)
+        if speaker_plan is None:
             gains.append(
                 SegmentGain(
                     segment_id=segment.segment_id,
@@ -173,7 +190,9 @@ def match_segment_loudness_to_source(
         gain_db = calculate_segment_gain_db(
             source_dbfs=pair.source_dbfs,
             output_dbfs=pair.output_dbfs,
-            speaker_gain_db=speaker_gain,
+            speaker_gain_db=speaker_plan.gain_db,
+            speaker_source_dbfs=speaker_plan.source_dbfs,
+            speaker_target_dbfs=speaker_plan.target_dbfs,
             policy=policy,
         )
         segment_path = Path(segment_paths[segment.segment_id]).resolve(strict=False)
@@ -194,7 +213,7 @@ def match_segment_loudness_to_source(
                 speaker_id=segment.speaker_id,
                 source_dbfs=pair.source_dbfs,
                 output_dbfs=pair.output_dbfs,
-                speaker_gain_db=speaker_gain,
+                speaker_gain_db=speaker_plan.gain_db,
                 gain_db=gain_db,
                 applied=applied,
                 reason=reason,
@@ -205,7 +224,7 @@ def match_segment_loudness_to_source(
     _write_report(
         report_path,
         reference_audio_path=str(reference_path),
-        speaker_gains=speaker_gains,
+        speaker_plans=speaker_plans,
         segments=gains,
         policy=policy,
     )
@@ -224,20 +243,91 @@ def calculate_speaker_gains(
     *,
     policy: LoudnessMatchPolicy = _DEFAULT_POLICY,
 ) -> dict[str, float]:
-    deltas_by_speaker: dict[str, list[float]] = {}
-    for pair in pairs:
-        deltas_by_speaker.setdefault(pair.speaker_id, []).append(
-            pair.source_dbfs - pair.output_dbfs
-        )
     return {
-        speaker_id: _clamp(
-            _robust_median(deltas),
+        speaker_id: plan.gain_db
+        for speaker_id, plan in calculate_speaker_gain_plans(
+            pairs,
+            policy=policy,
+        ).items()
+    }
+
+
+def calculate_speaker_gain_plans(
+    pairs: Iterable[LoudnessPair],
+    *,
+    policy: LoudnessMatchPolicy = _DEFAULT_POLICY,
+) -> dict[str, SpeakerGainPlan]:
+    source_by_speaker: dict[str, list[float]] = {}
+    output_by_speaker: dict[str, list[float]] = {}
+    duration_by_speaker: dict[str, int] = {}
+    for pair in pairs:
+        source_by_speaker.setdefault(pair.speaker_id, []).append(pair.source_dbfs)
+        output_by_speaker.setdefault(pair.speaker_id, []).append(pair.output_dbfs)
+        duration_by_speaker[pair.speaker_id] = (
+            duration_by_speaker.get(pair.speaker_id, 0) + pair.duration_ms
+        )
+
+    source_medians = {
+        speaker_id: _robust_median(values)
+        for speaker_id, values in source_by_speaker.items()
+        if values and output_by_speaker.get(speaker_id)
+    }
+    output_medians = {
+        speaker_id: _robust_median(values)
+        for speaker_id, values in output_by_speaker.items()
+        if values and source_by_speaker.get(speaker_id)
+    }
+    anchor_candidates = [
+        source_dbfs
+        for speaker_id, source_dbfs in source_medians.items()
+        if duration_by_speaker.get(speaker_id, 0)
+        >= policy.min_speaker_reference_duration_ms
+    ]
+    if not anchor_candidates:
+        anchor_candidates = list(source_medians.values())
+    if not anchor_candidates:
+        return {}
+    source_anchor_dbfs = _robust_median(anchor_candidates)
+
+    plans: dict[str, SpeakerGainPlan] = {}
+    for speaker_id, source_dbfs in source_medians.items():
+        output_dbfs = output_medians[speaker_id]
+        relative_db = _clamp(
+            source_dbfs - source_anchor_dbfs,
+            -policy.max_source_relative_db,
+            policy.max_source_relative_db,
+        )
+        relative_target_dbfs = _clamp(
+            policy.target_active_dbfs + relative_db,
+            policy.min_speaker_target_dbfs,
+            policy.max_speaker_target_dbfs,
+        )
+        if (
+            policy.comfort_min_active_dbfs
+            <= output_dbfs
+            <= policy.comfort_max_active_dbfs
+        ):
+            target_dbfs = output_dbfs
+        else:
+            target_dbfs = _clamp(
+                relative_target_dbfs,
+                policy.comfort_min_active_dbfs,
+                policy.comfort_max_active_dbfs,
+            )
+        gain_db = _clamp(
+            target_dbfs - output_dbfs,
             policy.min_gain_db,
             policy.max_gain_db,
         )
-        for speaker_id, deltas in deltas_by_speaker.items()
-        if deltas
-    }
+        plans[speaker_id] = SpeakerGainPlan(
+            speaker_id=speaker_id,
+            source_dbfs=source_dbfs,
+            output_dbfs=output_dbfs,
+            target_dbfs=target_dbfs,
+            gain_db=gain_db,
+            duration_ms=duration_by_speaker.get(speaker_id, 0),
+        )
+    return plans
 
 
 def calculate_segment_gain_db(
@@ -245,9 +335,31 @@ def calculate_segment_gain_db(
     source_dbfs: float,
     output_dbfs: float,
     speaker_gain_db: float,
+    speaker_source_dbfs: float | None = None,
+    speaker_target_dbfs: float | None = None,
     policy: LoudnessMatchPolicy = _DEFAULT_POLICY,
 ) -> float:
-    raw_gain = source_dbfs - output_dbfs
+    if (
+        abs(speaker_gain_db) < policy.min_apply_gain_db
+        and policy.comfort_min_active_dbfs
+        <= output_dbfs
+        <= policy.comfort_max_active_dbfs
+    ):
+        return 0.0
+    if speaker_source_dbfs is None or speaker_target_dbfs is None:
+        speaker_source_dbfs = source_dbfs
+        speaker_target_dbfs = source_dbfs
+    source_offset_db = _clamp(
+        source_dbfs - speaker_source_dbfs,
+        -policy.max_segment_residual_db,
+        policy.max_segment_residual_db,
+    )
+    target_dbfs = _clamp(
+        speaker_target_dbfs + source_offset_db,
+        policy.min_speaker_target_dbfs,
+        policy.max_speaker_target_dbfs,
+    )
+    raw_gain = target_dbfs - output_dbfs
     residual = _clamp(
         raw_gain - speaker_gain_db,
         -policy.max_segment_residual_db,
@@ -412,18 +524,32 @@ def _write_report(
     report_path: Path,
     *,
     reference_audio_path: str | None,
-    speaker_gains: Mapping[str, float],
+    speaker_plans: Mapping[str, SpeakerGainPlan],
     segments: Sequence[SegmentGain],
     policy: LoudnessMatchPolicy,
 ) -> None:
     payload = {
         "reference_audio_path": reference_audio_path,
         "speaker_gains_db": {
-            speaker_id: round(gain_db, 3)
-            for speaker_id, gain_db in sorted(speaker_gains.items())
+            speaker_id: round(plan.gain_db, 3)
+            for speaker_id, plan in sorted(speaker_plans.items())
+        },
+        "speaker_targets_dbfs": {
+            speaker_id: {
+                "source_active_dbfs": round(plan.source_dbfs, 3),
+                "output_active_dbfs": round(plan.output_dbfs, 3),
+                "target_active_dbfs": round(plan.target_dbfs, 3),
+                "duration_ms": plan.duration_ms,
+            }
+            for speaker_id, plan in sorted(speaker_plans.items())
         },
         "policy": {
             "min_segment_duration_ms": policy.min_segment_duration_ms,
+            "target_active_dbfs": policy.target_active_dbfs,
+            "comfort_min_active_dbfs": policy.comfort_min_active_dbfs,
+            "comfort_max_active_dbfs": policy.comfort_max_active_dbfs,
+            "min_speaker_target_dbfs": policy.min_speaker_target_dbfs,
+            "max_speaker_target_dbfs": policy.max_speaker_target_dbfs,
             "min_gain_db": policy.min_gain_db,
             "max_gain_db": policy.max_gain_db,
             "max_segment_residual_db": policy.max_segment_residual_db,
