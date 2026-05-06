@@ -290,3 +290,30 @@ def test_subtitle_sync(tmp_path):
     assert ss["text_audio_drift_count"] == 2
     assert "drift_block_ids" in ss
     assert ss["drift_block_ids"] == ["block_0007", "block_0012"]
+
+
+def test_whisper_and_workflow_cache(tmp_path):
+    """Whisper from subtitle_cues, workflow cache from project_state — different fields."""
+    fixtures = Path(__file__).resolve().parent / "fixtures" / "smart_shadow_eval"
+    out_dir = tmp_path / "out"
+    subprocess.run(
+        [sys.executable, str(SCRIPT),
+         "--jobs-root", str(fixtures / "jobs"),
+         "--projects-root", str(fixtures / "projects"),
+         "--out-dir", str(out_dir)],
+        check=True, capture_output=True
+    )
+    facts = [json.loads(line) for line in
+             (out_dir / "facts.jsonl").read_text(encoding="utf-8").splitlines()]
+    f = next(x for x in facts if x["job_id"] == "job_post_phase_full")
+
+    w = f["whisper"]
+    assert w["alignment_model"] == "small"
+    assert w["alignment_fingerprint"] == "abc123def456"
+    # 5 cues total, 3 whisper-aligned, 2 fallback
+    assert w["whisper_aligned_cue_count"] == 3
+    assert w["proportional_fallback_cue_count"] == 2
+
+    wac = f["workflow_alignment_cache"]
+    assert wac["cache_hit_blocks"] == 4
+    assert wac["block_count"] == 5

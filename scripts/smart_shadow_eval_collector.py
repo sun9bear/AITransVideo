@@ -43,6 +43,11 @@ REWRITE_TASKS = frozenset({
 RETTS_BUCKETS = frozenset({"post_tts_resynth", "post_edit_resynth"})
 
 
+_WHISPER_ALIGNED_SOURCE = "semantic_block_v2_whisper_aligned"
+# Stage names that may contain workflow alignment cache (prod smoke 验证)
+_ALIGNMENT_STAGE_CANDIDATES = ("audio_alignment", "subtitle_alignment", "alignment")
+
+
 ARTIFACT_PATHS = {
     # JOBS root (flat)
     "job_record":             "{job_id}.json",
@@ -170,7 +175,8 @@ def _build_artifact_presence(project_dir: Path | None) -> dict:
 
 
 def _build_fact_sheet(rec: dict, project_dir: Path | None,
-                      ps_extracted: dict, run_id: str) -> dict:
+                      ps_extracted: dict, run_id: str,
+                      ps: dict | None = None) -> dict:
     """Phase A: minimal fact sheet — Phase B/C/D/E will extend."""
     edit_gen = rec.get("edit_generation", 0) or 0
     transcript = (_safe_load_json(project_dir / ARTIFACT_PATHS["transcript"])
@@ -205,6 +211,8 @@ def _build_fact_sheet(rec: dict, project_dir: Path | None,
             if project_dir else None
         ),
         "subtitle_sync": _compute_subtitle_sync(project_dir),
+        "whisper": _compute_whisper(project_dir),
+        "workflow_alignment_cache": _compute_workflow_alignment_cache(ps),
         # Phase B-E: retry_stats, etc.
     }
 
@@ -451,6 +459,62 @@ def _compute_subtitle_sync(project_dir: Path | None) -> dict | None:
     }
 
 
+def _compute_whisper(project_dir: Path | None) -> dict | None:
+    if not project_dir:
+        return None
+    cues_path = project_dir / ARTIFACT_PATHS["subtitle_cues"]
+    sidecar_count = sum(
+        1 for _ in project_dir.rglob("*.whisper_*_*.json")
+    )
+    if not cues_path.is_file():
+        return {
+            "alignment_model": None,
+            "alignment_fingerprint": None,
+            "whisper_aligned_cue_count": None,
+            "proportional_fallback_cue_count": None,
+            "whisper_sidecar_count": sidecar_count,
+            "_reason_null": "subtitle_cues.json absent (pre-Phase-D job)",
+        }
+    data = _safe_load_json(cues_path)
+    if not isinstance(data, dict):
+        return None
+    cues = data.get("cues") or []
+    aligned = sum(1 for c in cues
+                  if _WHISPER_ALIGNED_SOURCE in str(c.get("source", "")))
+    total = len(cues)
+    return {
+        "alignment_model": data.get("alignment_model"),
+        "alignment_fingerprint": data.get("alignment_fingerprint"),
+        "whisper_aligned_cue_count": aligned,
+        "proportional_fallback_cue_count": max(0, total - aligned),
+        "whisper_sidecar_count": sidecar_count,
+    }
+
+
+def _compute_workflow_alignment_cache(project_state: dict | None) -> dict | None:
+    """DSP TTS aligned-audio stage cache (NOT whisper)."""
+    if not isinstance(project_state, dict):
+        return None
+    stages = project_state.get("stages") or {}
+    for name in _ALIGNMENT_STAGE_CANDIDATES:
+        stage = stages.get(name)
+        if isinstance(stage, dict):
+            payload = stage.get("payload") or {}
+            chb = payload.get("cache_hit_blocks")
+            bc = payload.get("block_count")
+            if isinstance(chb, int):
+                return {
+                    "cache_hit_blocks": chb,
+                    "block_count": bc if isinstance(bc, int) else None,
+                    "_stage_name": name,
+                }
+    return {
+        "cache_hit_blocks": None,
+        "block_count": None,
+        "_reason_null": "no alignment stage found in project_state",
+    }
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Smart shadow eval collector (read-only)."
@@ -565,7 +629,7 @@ def main(argv: list[str] | None = None) -> int:
                 fi.write(json.dumps(inv_entry, ensure_ascii=False) + "\n")
                 inventory_count += 1
 
-                fact_sheet = _build_fact_sheet(rec, project_dir, ps_extracted, run_id)
+                fact_sheet = _build_fact_sheet(rec, project_dir, ps_extracted, run_id, ps)
                 ff.write(json.dumps(fact_sheet, ensure_ascii=False) + "\n")
                 facts_count += 1
     except BaseException as exc:

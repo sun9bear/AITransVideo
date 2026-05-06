@@ -1,0 +1,11 @@
+{
+  "alignment_model": "small",
+  "alignment_fingerprint": "abc123def456",
+  "cues": [
+    {"index": 1, "source": "semantic_block_v2_whisper_aligned"},
+    {"index": 2, "source": "semantic_block_v2_whisper_aligned"},
+    {"index": 3, "source": "semantic_block_v2_whisper_aligned"},
+    {"index": 4, "source": "semantic_block_v2_proportional"},
+    {"index": 5, "source": "semantic_block_v2_proportional"}
+  ]
+}
