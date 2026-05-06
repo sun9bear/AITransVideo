@@ -2905,7 +2905,7 @@ async def update_job_metering(
         "voice_speed_profile_candidate_count", "voice_speed_profile_sent_count",
         "voice_speed_profile_updated_count", "voice_speed_profile_skipped_count",
         "voice_speed_profile_skipped_reason_distribution",
-        # Job-level LLM/TTS cost metering sidecar
+        # Job-level LLM/TTS/voice-clone cost metering sidecar
         "usage_metering_version", "usage_events_count",
         "transcription_method", "asr_provider", "asr_provider_cost_status",
         "legacy_gemini_transcription_call_count",
@@ -2919,6 +2919,9 @@ async def update_job_metering(
         "tts_billed_chars_by_bucket", "tts_call_count_by_bucket",
         "tts_billed_chars_by_provider", "tts_call_count_by_provider",
         "tts_call_count",
+        "voice_clone_call_count", "voice_clone_success_call_count",
+        "voice_clone_billable_count", "voice_clone_count_by_provider",
+        "voice_clone_source_audio_seconds",
         "llm_call_count", "llm_input_tokens", "llm_output_tokens",
         "llm_total_tokens", "llm_audio_input_bytes", "llm_audio_input_seconds",
         "llm_task_call_distribution", "llm_model_call_distribution",

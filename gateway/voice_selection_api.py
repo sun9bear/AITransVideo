@@ -447,6 +447,29 @@ async def voice_clone_for_selection(
             await release_clone_credits("voice_clone_failed")
             return _json_response(500, {"error": "clone_failed", "message": f"克隆失败: {str(exc)[:200]}"})
 
+        try:
+            from services.usage_meter import UsageMeter
+
+            UsageMeter(project_dir, job_id=job_id).record_voice_clone(
+                provider="minimax_voice_clone",
+                model="voice_clone",
+                voice_id=clone_result,
+                speaker_id=speaker_id,
+                source_audio_seconds=total_duration_s,
+                source_audio_bytes=concat_path.stat().st_size if concat_path.exists() else 0,
+                selected_segment_count=len(selected_segments),
+                clone_count=1,
+                billable=True,
+                success=True,
+                extra={
+                    "billing_policy": "minimax_charges_voice_clone_on_first_tts_use",
+                    "cost_estimate_timing": "clone_success",
+                    "selected_segment_ids": segment_ids,
+                },
+            )
+        except Exception:
+            logger.warning("Voice clone usage metering skipped for %s/%s", job_id, speaker_id, exc_info=True)
+
         # Shadow capture on success
         if user_id:
             await shadow_safe(

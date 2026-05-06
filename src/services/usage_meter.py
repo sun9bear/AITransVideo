@@ -14,6 +14,7 @@ TTS_BUCKET_PROBE = "probe_tts"
 TTS_BUCKET_POST_TTS_RESYNTH = "post_tts_resynth"
 TTS_BUCKET_POST_EDIT_RESYNTH = "post_edit_resynth"
 TTS_BUCKET_INTERACTIVE_PREVIEW = "interactive_preview"
+VOICE_CLONE_BUCKET = "voice_clone"
 
 _JOB_TTS_BUCKETS = {
     TTS_BUCKET_FIRST,
@@ -210,6 +211,44 @@ class UsageMeter:
                 payload[key] = value
         self.record_event(payload)
 
+    def record_voice_clone(
+        self,
+        *,
+        provider: str,
+        model: str = "voice_clone",
+        voice_id: str = "",
+        speaker_id: str = "",
+        source_audio_seconds: float = 0.0,
+        source_audio_bytes: int = 0,
+        selected_segment_count: int = 0,
+        clone_count: int = 1,
+        billable: bool = True,
+        success: bool = True,
+        error: str = "",
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "kind": "voice_clone",
+            "bucket": VOICE_CLONE_BUCKET,
+            "provider": str(provider or ""),
+            "model": str(model or "voice_clone"),
+            "voice_id": str(voice_id or ""),
+            "speaker_id": str(speaker_id or ""),
+            "source_audio_seconds": max(0.0, _coerce_float(source_audio_seconds)),
+            "source_audio_bytes": max(0, _coerce_int(source_audio_bytes)),
+            "selected_segment_count": max(0, _coerce_int(selected_segment_count)),
+            "clone_count": max(0, _coerce_int(clone_count)),
+            "billable": bool(billable),
+            "success": bool(success),
+            "error": str(error or "")[:500],
+        }
+        if extra:
+            for key, value in extra.items():
+                if key in payload:
+                    continue
+                payload[key] = value
+        self.record_event(payload)
+
     def record_event(self, event: dict[str, Any]) -> None:
         payload = dict(event)
         event_id = str(payload.get("event_id") or uuid.uuid4().hex)
@@ -261,6 +300,11 @@ class UsageMeter:
         tts_calls_by_bucket: dict[str, int] = {}
         tts_by_provider: dict[str, int] = {}
         tts_calls_by_provider: dict[str, int] = {}
+        voice_clone_calls = 0
+        voice_clone_success_calls = 0
+        voice_clone_billable_count = 0
+        voice_clone_source_audio_seconds = 0.0
+        voice_clone_by_provider: dict[str, int] = {}
 
         legacy_gemini_transcription_calls = 0
 
@@ -300,6 +344,21 @@ class UsageMeter:
                 tts_calls_by_bucket[bucket] = tts_calls_by_bucket.get(bucket, 0) + 1
                 tts_by_provider[provider] = tts_by_provider.get(provider, 0) + billed
                 tts_calls_by_provider[provider] = tts_calls_by_provider.get(provider, 0) + 1
+            elif kind == "voice_clone":
+                provider = _safe_key(event.get("provider"))
+                clone_count = max(0, _coerce_int(event.get("clone_count")))
+                if clone_count <= 0 and bool(event.get("success", True)):
+                    clone_count = 1
+                voice_clone_calls += 1
+                if bool(event.get("success", True)):
+                    voice_clone_success_calls += 1
+                if bool(event.get("billable", True)):
+                    voice_clone_billable_count += clone_count
+                    voice_clone_by_provider[provider] = voice_clone_by_provider.get(provider, 0) + clone_count
+                voice_clone_source_audio_seconds += max(
+                    0.0,
+                    _coerce_float(event.get("source_audio_seconds")),
+                )
 
         summary.update({
             "llm_call_count": llm_calls,
@@ -316,6 +375,11 @@ class UsageMeter:
             "tts_call_count_by_bucket": tts_calls_by_bucket,
             "tts_billed_chars_by_provider": tts_by_provider,
             "tts_call_count_by_provider": tts_calls_by_provider,
+            "voice_clone_call_count": voice_clone_calls,
+            "voice_clone_success_call_count": voice_clone_success_calls,
+            "voice_clone_billable_count": voice_clone_billable_count,
+            "voice_clone_count_by_provider": voice_clone_by_provider,
+            "voice_clone_source_audio_seconds": round(voice_clone_source_audio_seconds, 3),
             "legacy_gemini_transcription_call_count": legacy_gemini_transcription_calls,
         })
 

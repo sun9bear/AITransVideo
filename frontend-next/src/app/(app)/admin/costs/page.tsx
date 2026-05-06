@@ -44,6 +44,22 @@ type TTSUsageRow = {
   rate_source: string
 }
 
+type VoiceCloneUsageRow = {
+  provider: string
+  model: string
+  bucket: string
+  calls: number
+  success_calls: number
+  billable_clones: number
+  source_audio_seconds: number
+  source_audio_bytes: number
+  selected_segment_count: number
+  cost_rmb: number | null
+  rate_status: string
+  rate_source: string
+  billing_policy: string
+}
+
 type CostJob = {
   job_id: string
   title: string
@@ -63,6 +79,7 @@ type CostJob = {
   has_usage_events: boolean
   llm_cost_rmb: number
   tts_cost_rmb: number
+  voice_clone_cost_rmb: number
   total_cost_rmb: number
   cost_per_minute_rmb: number | null
   credits_charged: number | null
@@ -80,6 +97,7 @@ type CostJob = {
   warnings: string[]
   llm: LLMUsageRow[]
   tts: TTSUsageRow[]
+  voice_clone: VoiceCloneUsageRow[]
 }
 
 type CostResponse = {
@@ -96,6 +114,7 @@ type CostResponse = {
     minutes: number
     llm_cost_rmb: number
     tts_cost_rmb: number
+    voice_clone_cost_rmb: number
     total_cost_rmb: number
     revenue_estimate_rmb: number | null
     server_overhead_cost_rmb: number | null
@@ -245,7 +264,7 @@ export default function AdminCostManagementPage() {
         </div>
       ) : data ? (
         <>
-          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4 xl:grid-cols-7">
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4 xl:grid-cols-8">
             <MetricCard label="任务数" value={fmt(data.totals.jobs)} sub={`${fmt(data.totals.jobs_with_usage_events)} 个有 usage_events`} />
             <MetricCard label="总成本" value={fmtMoney(data.totals.total_cost_rmb)} sub={perMinute(data.totals.cost_per_minute_rmb)} />
             <MetricCard
@@ -261,6 +280,7 @@ export default function AdminCostManagementPage() {
             />
             <MetricCard label="LLM 成本" value={fmtMoney(data.totals.llm_cost_rmb)} sub="文本/音频输入与输出" />
             <MetricCard label="TTS 成本" value={fmtMoney(data.totals.tts_cost_rmb)} sub="按 provider billed_chars" />
+            <MetricCard label="音色克隆" value={fmtMoney(data.totals.voice_clone_cost_rmb)} sub="按 voice_clone 价格表" />
             <MetricCard
               label="缺价格项"
               value={fmt(data.totals.missing_rate_rows)}
@@ -281,7 +301,7 @@ export default function AdminCostManagementPage() {
 
           <div className="overflow-hidden rounded-lg border border-border bg-card">
             <div className="overflow-x-auto">
-                <table className="w-full min-w-[1320px] text-sm">
+                <table className="w-full min-w-[1400px] text-sm">
                 <thead className="border-b border-border bg-muted/30 text-xs text-muted-foreground">
                   <tr>
                     <Th>任务</Th>
@@ -290,6 +310,7 @@ export default function AdminCostManagementPage() {
                     <Th right>分钟</Th>
                     <Th right>LLM</Th>
                     <Th right>TTS</Th>
+                    <Th right>克隆</Th>
                     <Th right>总成本</Th>
                     <Th right>预估收入</Th>
                     <Th right>毛利率</Th>
@@ -301,7 +322,7 @@ export default function AdminCostManagementPage() {
                 <tbody className="divide-y divide-border">
                   {data.jobs.length === 0 ? (
                     <tr>
-                      <td colSpan={12} className="px-4 py-10 text-center text-muted-foreground">
+                      <td colSpan={13} className="px-4 py-10 text-center text-muted-foreground">
                         当前窗口暂无任务
                       </td>
                     </tr>
@@ -369,6 +390,7 @@ function CostJobRow({
       <Td right>{job.minutes ? fmt(job.minutes) : "-"}</Td>
       <Td right>{fmtMoney(job.llm_cost_rmb)}</Td>
       <Td right>{fmtMoney(job.tts_cost_rmb)}</Td>
+      <Td right>{fmtMoney(job.voice_clone_cost_rmb)}</Td>
       <Td right>
         <span className="font-medium text-foreground">{fmtMoney(job.total_cost_rmb)}</span>
       </Td>
@@ -430,7 +452,7 @@ function JobDetails({ job, onClose }: { job: CostJob; onClose: () => void }) {
           </div>
         </div>
         <div className="space-y-4 p-4 lg:p-6">
-          <div className="grid grid-cols-2 gap-3 lg:grid-cols-6">
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-7">
             <MetricCard label="总成本" value={fmtMoney(job.total_cost_rmb)} sub={perMinute(job.cost_per_minute_rmb)} />
             <MetricCard
               label="预估收入"
@@ -445,6 +467,7 @@ function JobDetails({ job, onClose }: { job: CostJob; onClose: () => void }) {
             />
             <MetricCard label="LLM 成本" value={fmtMoney(job.llm_cost_rmb)} sub={`${fmt(job.llm.length)} 个模型/阶段项`} />
             <MetricCard label="TTS 成本" value={fmtMoney(job.tts_cost_rmb)} sub={`${fmt(job.tts.length)} 个 TTS bucket`} />
+            <MetricCard label="音色克隆" value={fmtMoney(job.voice_clone_cost_rmb)} sub={`${fmt(job.voice_clone.length)} 个克隆项`} />
             <MetricCard label="缺价格项" value={fmt(job.missing_rate_rows)} sub="缺失时不会计入总成本" warn={job.missing_rate_rows > 0} />
           </div>
 
@@ -541,6 +564,43 @@ function JobDetails({ job, onClose }: { job: CostJob; onClose: () => void }) {
               )}
             </tbody>
           </UsageTable>
+
+          <UsageTable title="音色克隆">
+            <thead className="border-b border-border bg-muted/30 text-xs text-muted-foreground">
+              <tr>
+                <Th>Bucket</Th>
+                <Th>Provider</Th>
+                <Th>Model</Th>
+                <Th right>Calls</Th>
+                <Th right>成功</Th>
+                <Th right>计费音色</Th>
+                <Th right>源音频秒</Th>
+                <Th right>成本</Th>
+                <Th>价格</Th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border">
+              {job.voice_clone.length === 0 ? (
+                <EmptyRow colSpan={9} text="没有音色克隆 usage 记录" />
+              ) : (
+                job.voice_clone.map((row, index) => (
+                  <tr key={`${row.provider}-${row.model}-${row.bucket}-${index}`}>
+                    <Td>
+                      <span className="font-medium text-foreground">{voiceCloneBucketLabel(row.bucket)}</span>
+                    </Td>
+                    <Td>{row.provider}</Td>
+                    <Td>{row.model}</Td>
+                    <Td right>{fmt(row.calls)}</Td>
+                    <Td right>{fmt(row.success_calls)}</Td>
+                    <Td right>{fmt(row.billable_clones)}</Td>
+                    <Td right>{row.source_audio_seconds ? fmt(row.source_audio_seconds) : "-"}</Td>
+                    <Td right>{row.cost_rmb == null ? "-" : fmtMoney(row.cost_rmb)}</Td>
+                    <Td><RateStatus row={row} /></Td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </UsageTable>
         </div>
       </section>
     </div>
@@ -566,7 +626,7 @@ function UsageTable({
   )
 }
 
-function RateStatus({ row }: { row: LLMUsageRow | TTSUsageRow }) {
+function RateStatus({ row }: { row: LLMUsageRow | TTSUsageRow | VoiceCloneUsageRow }) {
   if (row.rate_status === "configured") {
     return (
       <span className="inline-flex rounded-md bg-[color:var(--bamboo)]/10 px-2 py-0.5 text-xs text-[color:var(--bamboo)]">
@@ -692,6 +752,13 @@ function bucketLabel(value: string) {
     post_tts_resynth: "TTS 后重合成",
     post_edit_resynth: "编辑后再生成",
     interactive_preview: "试听预览",
+  }
+  return labels[value] ?? value
+}
+
+function voiceCloneBucketLabel(value: string) {
+  const labels: Record<string, string> = {
+    voice_clone: "音色克隆",
   }
   return labels[value] ?? value
 }

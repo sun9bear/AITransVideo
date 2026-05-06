@@ -1,4 +1,4 @@
-"""Admin cost management surfaces for per-job LLM/TTS metering.
+"""Admin cost management surfaces for per-job LLM/TTS/voice-clone metering.
 
 This module is intentionally read-only. Pipeline writes usage facts; Gateway
 loads those facts, applies a versioned price catalog, and returns estimates
@@ -34,7 +34,7 @@ JOB_TTS_BUCKETS = {
 }
 
 DEFAULT_PRICE_CATALOG: dict[str, Any] = {
-    "version": "2026-04-29-official-checked-default",
+    "version": "2026-05-05-minimax-voice-clone-default",
     "currency": "RMB",
     "usd_to_rmb": 7.2,
     "notes": (
@@ -109,6 +109,13 @@ DEFAULT_PRICE_CATALOG: dict[str, Any] = {
             "source": "cost_metering_plan_alias",
         },
     },
+    "voice_clone": {
+        "minimax:voice_clone": {
+            "rmb_per_clone": 9.9,
+            "source": "minimax_paygo_pricing_voice_cloning_2026-05-05",
+            "billing_policy": "charged on first T2A synthesis with cloned voice",
+        },
+    },
 }
 
 
@@ -149,9 +156,27 @@ class TTSRow:
 
 
 @dataclass
+class VoiceCloneRow:
+    provider: str
+    model: str
+    bucket: str
+    calls: int = 0
+    success_calls: int = 0
+    billable_clones: int = 0
+    source_audio_seconds: float = 0.0
+    source_audio_bytes: int = 0
+    selected_segment_count: int = 0
+    cost_rmb: float | None = None
+    rate_status: str = "missing_rate"
+    rate_source: str = ""
+    billing_policy: str = ""
+
+
+@dataclass
 class JobCostBreakdown:
     llm_rows: list[LLMRow] = field(default_factory=list)
     tts_rows: list[TTSRow] = field(default_factory=list)
+    voice_clone_rows: list[VoiceCloneRow] = field(default_factory=list)
     events_count: int = 0
     has_usage_events: bool = False
     warnings: list[str] = field(default_factory=list)
@@ -342,6 +367,23 @@ def _tts_rate_for(catalog: dict[str, Any], provider: str, model: str) -> dict[st
     return None
 
 
+def _voice_clone_rate_for(catalog: dict[str, Any], provider: str, model: str) -> dict[str, Any] | None:
+    clone_rates = (
+        catalog.get("voice_clone")
+        if isinstance(catalog.get("voice_clone"), dict)
+        else {}
+    )
+    keys = [
+        _price_key(provider, model),
+        f"{_norm_provider(provider)}:voice_clone",
+    ]
+    for key in keys:
+        rate = clone_rates.get(key)
+        if isinstance(rate, dict):
+            return rate
+    return None
+
+
 def apply_costs(breakdown: JobCostBreakdown, catalog: dict[str, Any]) -> None:
     usd_to_rmb = _coerce_float(catalog.get("usd_to_rmb")) or 7.2
     for row in breakdown.llm_rows:
@@ -388,6 +430,18 @@ def apply_costs(breakdown: JobCostBreakdown, catalog: dict[str, Any]) -> None:
         row.rate_status = "configured"
         row.rate_source = str(rate.get("source") or "")
 
+    for row in breakdown.voice_clone_rows:
+        rate = _voice_clone_rate_for(catalog, row.provider, row.model)
+        if rate is None:
+            row.rate_status = "missing_rate"
+            row.cost_rmb = None
+            continue
+        price = _coerce_float(rate.get("rmb_per_clone"))
+        row.cost_rmb = round(row.billable_clones * price, 6)
+        row.rate_status = "configured"
+        row.rate_source = str(rate.get("source") or "")
+        row.billing_policy = str(rate.get("billing_policy") or row.billing_policy or "")
+
 
 def _read_usage_events(project_dir: str | None) -> tuple[list[dict[str, Any]], str | None]:
     if not project_dir:
@@ -422,6 +476,7 @@ def _aggregate_usage_events(
     )
     llm: dict[tuple[str, str, str, str, str], LLMRow] = {}
     tts: dict[tuple[str, str, str], TTSRow] = {}
+    voice_clone: dict[tuple[str, str, str], VoiceCloneRow] = {}
 
     for event in events:
         kind = _norm(event.get("kind"))
@@ -484,6 +539,34 @@ def _aggregate_usage_events(
             row.input_chars += _coerce_int(event.get("input_chars"))
             row.billed_chars += _coerce_int(event.get("billed_chars"))
             row.duration_ms += _coerce_int(event.get("duration_ms"))
+        elif kind == "voice_clone":
+            provider = _norm_provider(event.get("provider"))
+            model = _norm_model(event.get("model") or "voice_clone")
+            bucket = _norm(event.get("bucket")) or "voice_clone"
+            key = (provider, model, bucket)
+            row = voice_clone.setdefault(
+                key,
+                VoiceCloneRow(
+                    provider=provider,
+                    model=model,
+                    bucket=bucket,
+                    billing_policy=str(event.get("billing_policy") or ""),
+                ),
+            )
+            row.calls += 1
+            success = bool(event.get("success", True))
+            if success:
+                row.success_calls += 1
+            clone_count = _coerce_int(event.get("clone_count"))
+            if clone_count <= 0 and success:
+                clone_count = 1
+            if bool(event.get("billable", True)):
+                row.billable_clones += max(0, clone_count)
+            row.source_audio_seconds += _coerce_float(event.get("source_audio_seconds"))
+            row.source_audio_bytes += _coerce_int(event.get("source_audio_bytes"))
+            row.selected_segment_count += _coerce_int(event.get("selected_segment_count"))
+            if not row.billing_policy:
+                row.billing_policy = str(event.get("billing_policy") or "")
 
     breakdown.llm_rows = sorted(
         llm.values(),
@@ -491,6 +574,10 @@ def _aggregate_usage_events(
     )
     breakdown.tts_rows = sorted(
         tts.values(),
+        key=lambda row: (row.provider, row.model, row.bucket),
+    )
+    breakdown.voice_clone_rows = sorted(
+        voice_clone.values(),
         key=lambda row: (row.provider, row.model, row.bucket),
     )
     if breakdown.warnings:
@@ -548,6 +635,20 @@ def _snapshot_breakdown(
                 included_in_job_cost=bucket in JOB_TTS_BUCKETS,
             )
         )
+
+    voice_clone_count = _coerce_int(snapshot.get("voice_clone_billable_count"))
+    if voice_clone_count > 0:
+        breakdown.voice_clone_rows.append(
+            VoiceCloneRow(
+                provider="minimax",
+                model="voice_clone",
+                bucket="voice_clone",
+                calls=_coerce_int(snapshot.get("voice_clone_call_count")),
+                success_calls=_coerce_int(snapshot.get("voice_clone_success_call_count")),
+                billable_clones=voice_clone_count,
+                source_audio_seconds=_coerce_float(snapshot.get("voice_clone_source_audio_seconds")),
+            )
+        )
     return breakdown
 
 
@@ -598,12 +699,17 @@ def build_job_breakdown(
         for row in breakdown.tts_rows
         if row.cost_rmb is None
     )
+    missing.extend(
+        f"voice_clone:{row.provider}:{row.model}:{row.bucket}"
+        for row in breakdown.voice_clone_rows
+        if row.cost_rmb is None
+    )
     if missing:
         breakdown.warnings.append("missing_rate: " + ", ".join(missing[:8]))
     return breakdown
 
 
-def _row_cost(row: LLMRow | TTSRow) -> float:
+def _row_cost(row: LLMRow | TTSRow | VoiceCloneRow) -> float:
     return float(row.cost_rmb or 0.0)
 
 
@@ -738,6 +844,24 @@ def _tts_row_payload(row: TTSRow) -> dict[str, Any]:
     }
 
 
+def _voice_clone_row_payload(row: VoiceCloneRow) -> dict[str, Any]:
+    return {
+        "provider": row.provider,
+        "model": row.model,
+        "bucket": row.bucket,
+        "calls": row.calls,
+        "success_calls": row.success_calls,
+        "billable_clones": row.billable_clones,
+        "source_audio_seconds": round(row.source_audio_seconds, 3),
+        "source_audio_bytes": row.source_audio_bytes,
+        "selected_segment_count": row.selected_segment_count,
+        "cost_rmb": _round_money(row.cost_rmb),
+        "rate_status": row.rate_status,
+        "rate_source": row.rate_source,
+        "billing_policy": row.billing_policy,
+    }
+
+
 def _job_payload(
     job: Job,
     owner: User | None,
@@ -751,7 +875,8 @@ def _job_payload(
 ) -> dict[str, Any]:
     llm_cost = sum(_row_cost(row) for row in breakdown.llm_rows)
     tts_cost = sum(_row_cost(row) for row in breakdown.tts_rows)
-    total_cost = llm_cost + tts_cost
+    voice_clone_cost = sum(_row_cost(row) for row in breakdown.voice_clone_rows)
+    total_cost = llm_cost + tts_cost + voice_clone_cost
     minutes = _job_minutes(job)
     if point_price_rmb is None:
         point_price_rmb, point_price_source = _point_price_from_runtime()
@@ -780,7 +905,9 @@ def _job_payload(
         else None
     )
     missing_rate_rows = sum(
-        1 for row in [*breakdown.llm_rows, *breakdown.tts_rows] if row.cost_rmb is None
+        1
+        for row in [*breakdown.llm_rows, *breakdown.tts_rows, *breakdown.voice_clone_rows]
+        if row.cost_rmb is None
     )
     return {
         "job_id": job.job_id,
@@ -801,6 +928,7 @@ def _job_payload(
         "has_usage_events": breakdown.has_usage_events,
         "llm_cost_rmb": _round_money(llm_cost),
         "tts_cost_rmb": _round_money(tts_cost),
+        "voice_clone_cost_rmb": _round_money(voice_clone_cost),
         "total_cost_rmb": _round_money(total_cost),
         "cost_per_minute_rmb": _round_money(total_cost / minutes) if minutes else None,
         "credits_charged": revenue.credits,
@@ -818,6 +946,7 @@ def _job_payload(
         "warnings": breakdown.warnings,
         "llm": [_llm_row_payload(row) for row in breakdown.llm_rows],
         "tts": [_tts_row_payload(row) for row in breakdown.tts_rows],
+        "voice_clone": [_voice_clone_row_payload(row) for row in breakdown.voice_clone_rows],
     }
 
 
@@ -842,6 +971,7 @@ async def cost_rates(
         "catalog_path": str(_catalog_path()),
         "llm": catalog.get("llm", {}),
         "tts": catalog.get("tts", {}),
+        "voice_clone": catalog.get("voice_clone", {}),
         "notes": catalog.get("notes", ""),
     }
 
@@ -887,6 +1017,7 @@ async def cost_jobs(
     jobs: list[dict[str, Any]] = []
     total_llm = 0.0
     total_tts = 0.0
+    total_voice_clone = 0.0
     total_revenue = 0.0
     total_server_overhead = 0.0
     total_minutes = 0.0
@@ -920,6 +1051,7 @@ async def cost_jobs(
         jobs.append(payload)
         total_llm += float(payload["llm_cost_rmb"] or 0.0)
         total_tts += float(payload["tts_cost_rmb"] or 0.0)
+        total_voice_clone += float(payload["voice_clone_cost_rmb"] or 0.0)
         total_revenue += float(payload["revenue_estimate_rmb"] or 0.0)
         total_server_overhead += float(payload["server_overhead_cost_rmb"] or 0.0)
         total_minutes += float(payload["minutes"] or 0.0)
@@ -929,7 +1061,7 @@ async def cost_jobs(
             jobs_with_missing_rates += 1
             total_missing_rate_rows += int(payload["missing_rate_rows"])
 
-    total_cost = total_llm + total_tts
+    total_cost = total_llm + total_tts + total_voice_clone
     margin_cost = total_cost + total_server_overhead
     return {
         "window_days": days,
@@ -945,6 +1077,7 @@ async def cost_jobs(
             "minutes": round(total_minutes, 3),
             "llm_cost_rmb": _round_money(total_llm),
             "tts_cost_rmb": _round_money(total_tts),
+            "voice_clone_cost_rmb": _round_money(total_voice_clone),
             "total_cost_rmb": _round_money(total_cost),
             "revenue_estimate_rmb": _round_money(total_revenue),
             "server_overhead_cost_rmb": _round_money(total_server_overhead),

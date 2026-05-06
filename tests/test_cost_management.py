@@ -15,6 +15,7 @@ from cost_management import (  # noqa: E402
     JobCostBreakdown,
     LLMRow,
     TTSRow,
+    VoiceCloneRow,
     _aggregate_usage_events,
     _job_payload,
     apply_costs,
@@ -74,6 +75,17 @@ def test_aggregate_and_apply_costs_split_llm_and_tts_buckets():
             "input_chars": 100,
             "billed_chars": 200,
         },
+        {
+            "kind": "voice_clone",
+            "bucket": "voice_clone",
+            "provider": "minimax_voice_clone",
+            "model": "voice_clone",
+            "source_audio_seconds": 18.5,
+            "selected_segment_count": 3,
+            "clone_count": 1,
+            "billable": True,
+            "success": True,
+        },
     ]
 
     breakdown = _aggregate_usage_events(events)
@@ -86,6 +98,10 @@ def test_aggregate_and_apply_costs_split_llm_and_tts_buckets():
     assert costs_by_bucket["interactive_preview"] == 0.0
     preview = next(row for row in breakdown.tts_rows if row.bucket == "interactive_preview")
     assert preview.included_in_job_cost is False
+    assert len(breakdown.voice_clone_rows) == 1
+    assert breakdown.voice_clone_rows[0].provider == "minimax"
+    assert breakdown.voice_clone_rows[0].billable_clones == 1
+    assert breakdown.voice_clone_rows[0].cost_rmb == 9.9
 
 
 def test_build_job_breakdown_falls_back_to_snapshot_when_usage_events_missing(tmp_path):
@@ -135,6 +151,7 @@ def test_job_payload_margin_can_include_server_overhead():
     breakdown = JobCostBreakdown(
         llm_rows=[LLMRow(provider="deepseek", model="deepseek-v4-flash", model_id="deepseek-v4-flash", task="s3", phase="", cost_rmb=0.5)],
         tts_rows=[TTSRow(provider="minimax", model="speech-2.8-hd", bucket="first_tts", cost_rmb=0.5)],
+        voice_clone_rows=[VoiceCloneRow(provider="minimax", model="voice_clone", bucket="voice_clone", cost_rmb=0.2)],
     )
 
     payload = _job_payload(
@@ -148,7 +165,8 @@ def test_job_payload_margin_can_include_server_overhead():
     )
 
     assert payload["revenue_estimate_rmb"] == 3.0
-    assert payload["total_cost_rmb"] == 1.0
+    assert payload["voice_clone_cost_rmb"] == 0.2
+    assert payload["total_cost_rmb"] == 1.2
     assert payload["server_overhead_cost_rmb"] == 0.3
-    assert payload["margin_cost_rmb"] == 1.3
-    assert payload["gross_margin_pct"] == 56.67
+    assert payload["margin_cost_rmb"] == 1.5
+    assert payload["gross_margin_pct"] == 50.0
