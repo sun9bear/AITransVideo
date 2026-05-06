@@ -197,6 +197,67 @@ def test_actual_clone_stats(tmp_path):
     assert "preset" in acs["voice_ids_by_speaker"][1].lower()
 
 
+def test_classify_voice_id_vt_prefix_is_cloned(tmp_path):
+    """Production cloned voice IDs use 'vt_*' prefix (per process.py::_validate_cloned_voices).
+
+    Regression: this prefix was previously misclassified as 'preset', causing
+    false smart_more_aggressive findings in P1 shadow simulator.
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "collector_mod",
+        Path(__file__).resolve().parent.parent / "scripts" / "smart_shadow_eval_collector.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    # Direct unit test of helper
+    assert mod._classify_voice_id("vt_speaker_a_1777851965742") == "cloned"
+    assert mod._classify_voice_id("vt_") == "cloned"  # edge: bare prefix
+
+
+def test_classify_voice_id_unknown_default(tmp_path):
+    """Unrecognized voice_id -> 'unknown', NOT 'preset' by default.
+
+    Defaulting to 'preset' caused false smart_more_aggressive findings.
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "collector_mod",
+        Path(__file__).resolve().parent.parent / "scripts" / "smart_shadow_eval_collector.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod._classify_voice_id("some_unknown_id") == "unknown"
+    assert mod._classify_voice_id("") == "unknown"
+    assert mod._classify_voice_id("auto") == "unknown"
+
+
+def test_classify_voice_id_explicit_preset(tmp_path):
+    """preset_* prefix is the only way to be classified as 'preset'."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "collector_mod",
+        Path(__file__).resolve().parent.parent / "scripts" / "smart_shadow_eval_collector.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod._classify_voice_id("preset_chinese_male_1") == "preset"
+    assert mod._classify_voice_id("preset_anything") == "preset"
+
+
+def test_classify_voice_id_existing_clone_patterns_still_work(tmp_path):
+    """moss_audio_* and UUID-like patterns continue to classify as cloned."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "collector_mod",
+        Path(__file__).resolve().parent.parent / "scripts" / "smart_shadow_eval_collector.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod._classify_voice_id("moss_audio_85bcf79d-00f2-11f1-b80b-cafa791d3a11") == "cloned"
+    assert mod._classify_voice_id("abc123def456-7890-abcd-ef01-23456789abcd") == "cloned"
+
+
 def test_retry_stats_fallback(tmp_path):
     """No metering/usage_events.jsonl → fallback to editor.segments.rewrite_count sum"""
     fixtures = Path(__file__).resolve().parent / "fixtures" / "smart_shadow_eval"

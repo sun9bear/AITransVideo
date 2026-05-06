@@ -288,19 +288,55 @@ def _load_editor_segments(project_dir: Path | None) -> list[dict]:
 
 
 def _classify_voice_id(voice_id: str) -> str:
-    """Classify voice_id as 'clone' / 'preset' / 'unknown'. Mirrors P0 collector heuristic.
+    """Classify voice_id as 'cloned' / 'preset' / 'unknown'.
 
-    Uses 'clone' (not 'cloned') so it lines up with the smart_decision vocabulary
-    produced by ``_decide_voice_sample_selection`` for direct comparison.
+    Cloned voice ID patterns (per src/pipeline/process.py:3635-3638
+    and src/services/tts/* heuristics):
+    - "vt_*" prefix (canonical cloned ID prefix per _validate_cloned_voices)
+    - "moss_audio_*" prefix (MiniMax cloned audio sample IDs)
+    - UUID-like (>=32 chars with hyphens, e.g. cloned voice resource UUIDs)
+
+    Preset patterns (must be explicit):
+    - "preset_*" prefix (test fixtures + admin UI convention)
+
+    Anything else -> "unknown" (NOT "preset" by default - that caused
+    false "smart_more_aggressive" classifications on production data).
+
+    NOTE: this helper MUST stay byte-for-byte identical with
+    ``smart_shadow_eval_collector._classify_voice_id`` (enforced by
+    ``test_classify_voice_id_consistency_across_p0_and_p1``). When this
+    classification needs to be compared against smart's vocabulary
+    (which uses "clone" not "cloned"), the caller is responsible for
+    the cloned -> clone translation - see _extract_studio_actual.
     """
     if not voice_id or voice_id.lower() == "auto":
         return "unknown"
+    # Cloned voice patterns (most specific first):
+    if voice_id.startswith("vt_"):
+        return "cloned"
     if voice_id.startswith("moss_audio_"):
-        return "clone"
-    # UUID-like pattern (≥32 chars, contains hyphens) → cloned
+        return "cloned"
     if len(voice_id) >= 32 and "-" in voice_id:
+        return "cloned"
+    # Explicit preset:
+    if voice_id.startswith("preset_"):
+        return "preset"
+    # Unknown - don't default to preset
+    return "unknown"
+
+
+def _smart_choice_for_voice_id(voice_id: str) -> str:
+    """Map voice_id classification onto smart's choice vocabulary.
+
+    smart's _decide_voice_sample_selection emits "clone" / "preset", while
+    _classify_voice_id (canonical, kept identical with collector) emits
+    "cloned" / "preset" / "unknown". This helper translates between them
+    so studio_actual choices compare cleanly with smart_decision choices.
+    """
+    cls = _classify_voice_id(voice_id)
+    if cls == "cloned":
         return "clone"
-    return "preset"
+    return cls
 
 
 def _extract_studio_actual(stage_id: str, fact: dict, smart_decision) -> object:
@@ -313,14 +349,17 @@ def _extract_studio_actual(stage_id: str, fact: dict, smart_decision) -> object:
         voice_ids = acs.get("voice_ids_by_speaker") or []
         if not voice_ids:
             return "unknown"
-        return [{"speaker_index": i, "choice": _classify_voice_id(vid), "voice_id": vid}
+        return [{"speaker_index": i,
+                 "choice": _smart_choice_for_voice_id(vid),
+                 "voice_id": vid}
                 for i, vid in enumerate(voice_ids)]
     if stage_id == "clone_policy":
         acs = fact.get("actual_clone_stats") or {}
         voice_ids = acs.get("voice_ids_by_speaker") or []
         if not voice_ids:
             return "unknown"
-        cloned_indices = [i for i, vid in enumerate(voice_ids) if _classify_voice_id(vid) == "clone"]
+        cloned_indices = [i for i, vid in enumerate(voice_ids)
+                          if _classify_voice_id(vid) == "cloned"]
         return {"cloned_speaker_indices": cloned_indices}
     if stage_id == "translation_review_auto_approval":
         ue = fact.get("user_edits") or {}
@@ -439,6 +478,9 @@ def _classify_diff(stage_id: str, smart_decision, studio_actual) -> tuple[bool |
         if isinstance(smart_decision, list) and isinstance(studio_actual, list):
             if len(smart_decision) != len(studio_actual):
                 return False, "orthogonal"
+            # If ANY speaker in studio_actual is "unknown", we can't reliably diff.
+            if any(a.get("choice") == "unknown" for a in studio_actual):
+                return None, "no_studio_signal"
             choices_match = all(
                 s.get("choice") == a.get("choice")
                 for s, a in zip(smart_decision, studio_actual))

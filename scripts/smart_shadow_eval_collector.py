@@ -374,15 +374,34 @@ def _compute_clone_sample_stats(transcript: dict | None) -> dict | None:
 
 
 def _classify_voice_id(voice_id: str) -> str:
-    """'cloned' | 'preset' | 'unknown' / 'auto'."""
+    """Classify voice_id as 'cloned' / 'preset' / 'unknown'.
+
+    Cloned voice ID patterns (per src/pipeline/process.py:3635-3638
+    and src/services/tts/* heuristics):
+    - "vt_*" prefix (canonical cloned ID prefix per _validate_cloned_voices)
+    - "moss_audio_*" prefix (MiniMax cloned audio sample IDs)
+    - UUID-like (>=32 chars with hyphens, e.g. cloned voice resource UUIDs)
+
+    Preset patterns (must be explicit):
+    - "preset_*" prefix (test fixtures + admin UI convention)
+
+    Anything else -> "unknown" (NOT "preset" by default - that caused
+    false "smart_more_aggressive" classifications on production data).
+    """
     if not voice_id or voice_id.lower() == "auto":
         return "unknown"
-    # MiniMax cloned voices typically have moss_audio_ prefix or long uuid hash
+    # Cloned voice patterns (most specific first):
+    if voice_id.startswith("vt_"):
+        return "cloned"
     if voice_id.startswith("moss_audio_"):
         return "cloned"
     if len(voice_id) >= 32 and "-" in voice_id:
         return "cloned"
-    return "preset"
+    # Explicit preset:
+    if voice_id.startswith("preset_"):
+        return "preset"
+    # Unknown - don't default to preset
+    return "unknown"
 
 
 def _compute_actual_clone_stats(project_dir: Path | None) -> dict | None:

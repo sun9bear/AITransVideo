@@ -736,3 +736,99 @@ def test_b9_report_warnings_for_unevaluable(tmp_path):
                     check=True, capture_output=True)
     report = json.loads((out / "j_b9_uneval" / "smart_shadow_report.json").read_text(encoding="utf-8"))
     assert "subtitle_sync_policy" in report["stages_unevaluable"]
+
+
+def test_classify_voice_id_vt_prefix_is_cloned():
+    """Same regression test as P0 collector - vt_* must be cloned."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "sim_mod",
+        Path(__file__).resolve().parent.parent / "scripts" / "smart_shadow_sim_simulator.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod._classify_voice_id("vt_speaker_a_1777851965742") == "cloned"
+
+
+def test_classify_voice_id_unknown_default_no_false_aggressive():
+    """Unknown voice_id should NOT default to 'preset' - that caused false
+    smart_more_aggressive findings in Phase B Gate 2."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "sim_mod",
+        Path(__file__).resolve().parent.parent / "scripts" / "smart_shadow_sim_simulator.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod._classify_voice_id("some_unknown_id") == "unknown"
+    assert mod._classify_voice_id("") == "unknown"
+
+
+def test_classify_voice_id_consistency_across_p0_and_p1():
+    """P0 collector and P1 simulator MUST classify identically - drift would
+    cause aggregate diff numbers to disagree with collector facts."""
+    import importlib.util
+
+    sim_spec = importlib.util.spec_from_file_location(
+        "sim_mod",
+        Path(__file__).resolve().parent.parent / "scripts" / "smart_shadow_sim_simulator.py"
+    )
+    sim_mod = importlib.util.module_from_spec(sim_spec)
+    sim_spec.loader.exec_module(sim_mod)
+
+    coll_spec = importlib.util.spec_from_file_location(
+        "coll_mod",
+        Path(__file__).resolve().parent.parent / "scripts" / "smart_shadow_eval_collector.py"
+    )
+    coll_mod = importlib.util.module_from_spec(coll_spec)
+    coll_spec.loader.exec_module(coll_mod)
+
+    test_ids = [
+        "vt_speaker_a_1777851965742",
+        "moss_audio_85bcf79d-00f2-11f1-b80b-cafa791d3a11",
+        "preset_chinese_male_1",
+        "some_unknown_xyz",
+        "",
+        "auto",
+        "abc123def456-7890-abcd-ef01-23456789abcd",
+    ]
+    for vid in test_ids:
+        assert sim_mod._classify_voice_id(vid) == coll_mod._classify_voice_id(vid), (
+            f"Classification drift for {vid!r}: "
+            f"sim={sim_mod._classify_voice_id(vid)} vs collector={coll_mod._classify_voice_id(vid)}"
+        )
+
+
+def test_b7_unknown_speaker_in_studio_actual_no_studio_signal(tmp_path):
+    """If actual_clone_stats has unknown voice_id, diff_kind = no_studio_signal,
+    NOT false smart_more_aggressive (Codex Gate 2 finding)."""
+    facts = tmp_path / "facts.jsonl"
+    fact = {
+        "schema_version": 1, "job_id": "j_b7_vt", "project_id": "p",
+        "service_mode": "studio", "status": "succeeded",
+        "created_at": "2026-05-06T08:00:00+00:00",
+        "speaker_stats": {"asr_speaker_count": 1,
+                           "speaker_duration_shares": [1.0],
+                           "speaker_count_by_threshold": {"0.05": 1, "0.10": 1, "0.15": 1, "0.20": 1},
+                           "uncertain_speaker_duration_share": 0.0},
+        "clone_sample_stats": {"eligible_speakers": 1,
+                                "eligible_sample_count_buckets_by_speaker": [
+                                    {"≥5s": 5, "≥8s": 3, "≥10s": 1, "≥15s": 0},
+                                ]},
+        # vt_* should be classified as cloned (after fix)
+        "actual_clone_stats": {
+            "voice_ids_by_speaker": ["vt_speaker_a_1777851965742"]},
+    }
+    facts.write_text(json.dumps(fact) + "\n")
+    out = tmp_path / "out"
+    subprocess.run([sys.executable, str(SCRIPT), "--facts", str(facts), "--out-dir", str(out)],
+                    check=True, capture_output=True)
+    decisions = [json.loads(line) for line in (out / "j_b7_vt" / "smart_shadow_decisions.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    vs = next(d for d in decisions if d.get("stage_or_segment_id") == "voice_sample_selection")
+    # Smart picks clone (≥10s sample), Studio actually cloned (vt_) → match
+    assert vs["match"] is True
+    assert vs["diff_kind"] == "match"
+    # clone_policy: Smart says clone speaker 0, Studio also cloned speaker 0 → match
+    cp = next(d for d in decisions if d.get("stage_or_segment_id") == "clone_policy")
+    assert cp["match"] is True
+    assert cp["diff_kind"] == "match"
