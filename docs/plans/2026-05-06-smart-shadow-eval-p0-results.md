@@ -191,3 +191,49 @@ P0 conditional PASS for P1.
 - Post-Phase-D 报告：`D:/Claude/temp/smart_shadow_eval/prod_smoke/report_post_phase/`
 - Facts dumps：`D:/Claude/temp/smart_shadow_eval/prod_full/facts.jsonl` (38 facts) 和 `prod_smoke/facts.jsonl` (3 facts)
 - Run summaries：同目录 `summary.json`
+
+---
+
+## 11. 后置修正：vt_ 前缀分类 + unknown_speakers schema（2026-05-06，P1 Gate 2 期间发现）
+
+P1 simulator 实施期间 Codex 第二意见审查 **`smart_shadow_eval_collector._classify_voice_id`** 发现两轮 bug，对本 note §3 / §4 部分数字做事后修正：
+
+### 11.1 第一轮（commit `195911c`）：vt_ 前缀被误分为 preset
+
+**触发**：production 用户克隆音色 ID 走 `vt_<speaker>_<timestamp>` 格式（参 `src/pipeline/process.py::_validate_cloned_voices`），collector 当时只识别 `moss_audio_*` + UUID-like 两种克隆形态，把 `vt_*` fallback 默认归为 `preset`。
+
+**对本 note 的影响**：§3.2 / §3.3 表格依赖 `clone_sample_stats`（容量统计）而非 `actual_clone_stats`（实际选择），所以**§3 数据不变**。但若有后续基于本 38-job dump 重算"Studio 实际克隆 vs preset 占比"的分析，需注意：
+
+- 旧 `actual_clone_stats.cloned_speakers / preset_speakers` 把 `vt_*` 计入 preset 桶 → 当年若做"Studio 主动克隆比例"统计会偏低。
+- 修复后默认应假设：production main speakers 走 vt_ 克隆是主流路径。
+
+### 11.2 第二轮（commit `b1b1f8c`）：unknown_speakers 桶缺失 + clone_policy false-positive
+
+**触发**：195911c 把 `_classify_voice_id` 改成 3 类（`cloned/preset/unknown`）但 `_compute_actual_clone_stats` 还是只 count 2 桶；P1 simulator `clone_policy._classify_diff` 也把 unknown 静默丢掉，造成 `smart_set={0} > actual_set={}` 假阳性 `smart_more_aggressive`。
+
+**修复内容**：
+- collector schema 增加 `unknown_speakers` count + `classifications_by_speaker` 平行数组。invariant: `cloned + preset + unknown == len(voice_ids_by_speaker)`。
+- simulator `_extract_studio_actual` 为 clone_policy 增 `unknown_speaker_indices`；`_classify_diff` 在该列表非空时直接降级 `no_studio_signal`（与 voice_sample_selection 保持一致）。
+
+**对 P1 真实 smoke 数据的影响**（C7 5-job smoke）：12 jobs 重新走 collector 后发现 **5/12 jobs 至少有 1 个 unknown 分类的 voice_id**（占 41%）。这些 voice_id 不匹配 `vt_*` / `moss_audio_*` / `preset_*` / UUID 任一形态，典型为内部测试音色 / 早期 schema 残留。修复前这些 job 会被误判为 `preset_speakers` 升高 → P1 simulator voice_sample_selection 假阳性 `smart_more_aggressive`。
+
+### 11.3 重跑验证
+
+| 数据集 | facts | 修复前 | 修复后 |
+|---|---|---|---|
+| 本 note §3 38-job 全量 | 不可重跑（生产 SSH 当时数据，已变） | — | 待生产 collector 重跑后回填 |
+| 本地 12-job extract | `prod_full_refreshed_v2/facts.jsonl` | n/a | 已重跑，§3 类型分布维持 100%（不变） |
+| C7 smoke 5-job | `c7_smoke/facts.jsonl` | 旧 schema 会出 ≥2 假阳性 more_aggressive | 0 假阳性（见 P1 aggregate） |
+
+### 11.4 §3.x 数据是否仍然可信
+
+- **§3.1 main speaker 分布**：完全不依赖 `_classify_voice_id`（来自 `speaker_stats`），**仍然可信**。
+- **§3.2 克隆样本可用率**：来自 `clone_sample_stats`（容量），不依赖分类，**仍然可信**。
+- **§3.3 阈值矩阵**：同 §3.2，**仍然可信**。
+- **若以本 note 38-job 数据反推"Studio 实际克隆 vs preset 比例"**：旧数据被偏置，需要重跑生产 collector 后再下结论。本次未做（生产 SSH 没排队）。
+
+### 11.5 行动项
+
+- [ ] 下次 production SSH 部署窗口顺手用 `b1b1f8c` 后的 collector 重跑生产 38-job dump，回填本 note §3 真实 cloned/preset/unknown 三桶分布。
+- [x] P1 simulator + aggregator 已对齐新 schema（commits `195911c` `b1b1f8c` `4a55eb0`）。
+- [x] 5 个新回归测试钉住 invariant 与 unknown 分类不再退化。
