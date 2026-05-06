@@ -71,3 +71,62 @@ def test_simulator_one_fact_writes_per_job_sidecar(tmp_path):
     assert "smart_eligibility" in report
     assert "stage_decisions_count" in report
     assert "warnings" in report
+
+
+def test_simulator_loads_editor_segments_when_available(tmp_path):
+    """If projects-root has editor/segments.json for the job, simulator loads it."""
+    facts = tmp_path / "facts.jsonl"
+    fact = {
+        "schema_version": 1,
+        "job_id": "job_b1_test",
+        "project_id": "pid_b1",
+        "service_mode": "studio",
+        "status": "succeeded",
+        "created_at": "2026-05-06T08:00:00+00:00",
+    }
+    facts.write_text(json.dumps(fact) + "\n")
+
+    projects = tmp_path / "projects" / "pid_b1" / "job_b1_test" / "editor"
+    projects.mkdir(parents=True)
+    (projects / "segments.json").write_text(json.dumps([
+        {"segment_id": "1", "speaker_id": "A", "cn_text": "hello", "start_ms": 0, "end_ms": 5000},
+        {"segment_id": "2", "speaker_id": "A", "cn_text": "world", "start_ms": 5000, "end_ms": 10000},
+    ]), encoding="utf-8")
+
+    out = tmp_path / "out"
+    subprocess.run(
+        [sys.executable, str(SCRIPT),
+         "--facts", str(facts),
+         "--projects-root", str(tmp_path / "projects"),
+         "--out-dir", str(out)],
+        check=True, capture_output=True, text=True
+    )
+    # Phase B1 just confirms simulator runs without crashing when segments are present.
+    # Detailed segment-level assertions come in B8.
+    report = json.loads((out / "job_b1_test" / "smart_shadow_report.json").read_text(encoding="utf-8"))
+    assert report["job_id"] == "job_b1_test"
+
+
+def test_simulator_handles_missing_editor_segments(tmp_path):
+    """No editor/segments.json → simulator falls back gracefully."""
+    facts = tmp_path / "facts.jsonl"
+    fact = {
+        "schema_version": 1,
+        "job_id": "job_b1_no_segs",
+        "project_id": "pid_b1_none",
+        "service_mode": "studio",
+        "status": "succeeded",
+        "created_at": "2026-05-06T08:00:00+00:00",
+    }
+    facts.write_text(json.dumps(fact) + "\n")
+    projects = tmp_path / "projects" / "pid_b1_none" / "job_b1_no_segs"
+    projects.mkdir(parents=True)
+    out = tmp_path / "out"
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT),
+         "--facts", str(facts),
+         "--projects-root", str(tmp_path / "projects"),
+         "--out-dir", str(out)],
+        capture_output=True, text=True
+    )
+    assert result.returncode == 0, f"stderr={result.stderr}"
