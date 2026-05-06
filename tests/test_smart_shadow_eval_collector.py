@@ -414,6 +414,165 @@ def test_project_id_fallback_from_project_dir(tmp_path):
     assert f["speaker_stats"]["asr_speaker_count"] == 1
 
 
+def test_since_filter_excludes_old_jobs(tmp_path):
+    """--since 2026-05-05 should exclude jobs with created_at < 2026-05-05."""
+    jobs_root = tmp_path / "jobs"
+    projects_root = tmp_path / "projects"
+    jobs_root.mkdir()
+    projects_root.mkdir()
+    # Old job (April)
+    old_job = {
+        "job_id": "job_old", "status": "succeeded",
+        "service_mode": "studio", "tts_provider": "minimax",
+        "tts_model": "speech-2.8-hd",
+        "created_at": "2026-04-19T13:36:59+00:00",
+        "edit_generation": 0, "copy_of_job_id": None, "root_job_id": "job_old",
+    }
+    # New job (May)
+    new_job = {
+        "job_id": "job_new", "status": "succeeded",
+        "service_mode": "studio", "tts_provider": "minimax",
+        "tts_model": "speech-2.8-hd",
+        "created_at": "2026-05-06T10:00:00+00:00",
+        "edit_generation": 0, "copy_of_job_id": None, "root_job_id": "job_new",
+    }
+    (jobs_root / "job_old.json").write_text(json.dumps(old_job), encoding="utf-8")
+    (jobs_root / "job_new.json").write_text(json.dumps(new_job), encoding="utf-8")
+
+    out_dir = tmp_path / "out"
+    subprocess.run(
+        [sys.executable, str(SCRIPT),
+         "--jobs-root", str(jobs_root),
+         "--projects-root", str(projects_root),
+         "--out-dir", str(out_dir),
+         "--since", "2026-05-05"],
+        check=True, capture_output=True
+    )
+    facts = [json.loads(line) for line in
+             (out_dir / "facts.jsonl").read_text(encoding="utf-8").splitlines()]
+    job_ids = [f["job_id"] for f in facts]
+    assert "job_new" in job_ids
+    assert "job_old" not in job_ids
+
+    summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
+    assert summary["scan_stats"]["skipped_for_date_filter"] == 1
+
+
+def test_until_filter_excludes_future_jobs(tmp_path):
+    """--until 2026-04-30 should include April jobs and exclude May jobs."""
+    jobs_root = tmp_path / "jobs"
+    projects_root = tmp_path / "projects"
+    jobs_root.mkdir()
+    projects_root.mkdir()
+    old_job = {
+        "job_id": "job_old", "status": "succeeded",
+        "service_mode": "studio", "tts_provider": "minimax",
+        "tts_model": "speech-2.8-hd",
+        "created_at": "2026-04-19T13:36:59+00:00",
+        "edit_generation": 0, "copy_of_job_id": None, "root_job_id": "job_old",
+    }
+    new_job = {
+        "job_id": "job_new", "status": "succeeded",
+        "service_mode": "studio", "tts_provider": "minimax",
+        "tts_model": "speech-2.8-hd",
+        "created_at": "2026-05-06T10:00:00+00:00",
+        "edit_generation": 0, "copy_of_job_id": None, "root_job_id": "job_new",
+    }
+    (jobs_root / "job_old.json").write_text(json.dumps(old_job), encoding="utf-8")
+    (jobs_root / "job_new.json").write_text(json.dumps(new_job), encoding="utf-8")
+
+    out_dir = tmp_path / "out"
+    subprocess.run(
+        [sys.executable, str(SCRIPT),
+         "--jobs-root", str(jobs_root),
+         "--projects-root", str(projects_root),
+         "--out-dir", str(out_dir),
+         "--until", "2026-04-30"],
+        check=True, capture_output=True
+    )
+    facts = [json.loads(line) for line in
+             (out_dir / "facts.jsonl").read_text(encoding="utf-8").splitlines()]
+    job_ids = [f["job_id"] for f in facts]
+    assert "job_old" in job_ids
+    assert "job_new" not in job_ids
+
+
+def test_limit_applied_after_filter(tmp_path):
+    """--limit 1 with --since should pick the first job that PASSES filter, not the
+    first job in alphabetical order."""
+    jobs_root = tmp_path / "jobs"
+    projects_root = tmp_path / "projects"
+    jobs_root.mkdir()
+    projects_root.mkdir()
+    # Two old (filter excludes) + one new (passes)
+    for i, ts in enumerate(["2026-04-01", "2026-04-15"]):
+        (jobs_root / f"job_old{i}.json").write_text(json.dumps({
+            "job_id": f"job_old{i}", "status": "succeeded",
+            "service_mode": "studio", "tts_provider": "minimax",
+            "tts_model": "speech-2.8-hd",
+            "created_at": f"{ts}T00:00:00+00:00",
+            "edit_generation": 0, "copy_of_job_id": None, "root_job_id": f"job_old{i}",
+        }), encoding="utf-8")
+    (jobs_root / "job_new.json").write_text(json.dumps({
+        "job_id": "job_new", "status": "succeeded",
+        "service_mode": "studio", "tts_provider": "minimax",
+        "tts_model": "speech-2.8-hd",
+        "created_at": "2026-05-06T10:00:00+00:00",
+        "edit_generation": 0, "copy_of_job_id": None, "root_job_id": "job_new",
+    }), encoding="utf-8")
+
+    out_dir = tmp_path / "out"
+    subprocess.run(
+        [sys.executable, str(SCRIPT),
+         "--jobs-root", str(jobs_root),
+         "--projects-root", str(projects_root),
+         "--out-dir", str(out_dir),
+         "--since", "2026-05-01",
+         "--limit", "1"],
+        check=True, capture_output=True
+    )
+    facts = [json.loads(line) for line in
+             (out_dir / "facts.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(facts) == 1
+    assert facts[0]["job_id"] == "job_new"
+
+
+def test_orphaned_project_dir_count(tmp_path):
+    """Count project_dirs without corresponding JobRecord."""
+    jobs_root = tmp_path / "jobs"
+    projects_root = tmp_path / "projects"
+    jobs_root.mkdir()
+    projects_root.mkdir()
+    # 1 job WITH record
+    (jobs_root / "job_known.json").write_text(json.dumps({
+        "job_id": "job_known", "status": "succeeded",
+        "service_mode": "studio", "tts_provider": "minimax",
+        "tts_model": "speech-2.8-hd",
+        "created_at": "2026-05-06T10:00:00+00:00",
+        "edit_generation": 0, "copy_of_job_id": None, "root_job_id": "job_known",
+    }), encoding="utf-8")
+    # Create matching project_dir
+    (projects_root / "pid1" / "job_known").mkdir(parents=True)
+    # 2 orphaned project_dirs (no JobRecord)
+    (projects_root / "pid1" / "job_orphan1").mkdir(parents=True)
+    (projects_root / "pid2" / "job_orphan2").mkdir(parents=True)
+    # 1 non-job dir (should be ignored)
+    (projects_root / "pid1" / "not_a_job_dir").mkdir(parents=True)
+
+    out_dir = tmp_path / "out"
+    subprocess.run(
+        [sys.executable, str(SCRIPT),
+         "--jobs-root", str(jobs_root),
+         "--projects-root", str(projects_root),
+         "--out-dir", str(out_dir)],
+        check=True, capture_output=True
+    )
+    summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
+    # 3 dirs starting with "job_": job_known + job_orphan1 + job_orphan2
+    # Of these, 1 has JobRecord (job_known) and 2 are orphaned
+    assert summary["scan_stats"]["orphaned_project_dir_count"] == 2
+
+
 @pytest.mark.skipif(sys.platform == "win32",
                      reason="SIGINT to subprocess not reliably testable on Windows")
 def test_sigint_writes_incomplete_summary(tmp_path):

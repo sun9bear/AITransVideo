@@ -206,6 +206,36 @@ def _atomic_write_summary(out_dir: Path, summary: dict) -> None:
     tmp.rename(out_dir / "summary.json")
 
 
+def _count_orphaned_project_dirs(projects_root: Path, jobs_root: Path) -> int:
+    """Count project_dirs under projects_root with no matching JobRecord.
+
+    Production has 12 jobs but 84 project_dirs in some samples — this number
+    surfaces that gap to operators. Pattern: projects/<project_id>/job_<bare_id>/.
+    """
+    if not projects_root.is_dir() or not jobs_root.is_dir():
+        return 0
+    # Build set of known job_ids (with prefix) from jobs_root
+    known_job_ids = set()
+    for p in jobs_root.glob("job_*.json"):
+        if p.name.endswith(".events.jsonl"):
+            continue
+        # Strip ".json" suffix and use as job_id
+        known_job_ids.add(p.stem)
+    # Walk projects/<pid>/job_<bare>/ and count those whose job_id has no record
+    orphaned = 0
+    for project_id_dir in projects_root.iterdir():
+        if not project_id_dir.is_dir():
+            continue
+        for job_dir in project_id_dir.iterdir():
+            if not job_dir.is_dir():
+                continue
+            if not job_dir.name.startswith("job_"):
+                continue
+            if job_dir.name not in known_job_ids:
+                orphaned += 1
+    return orphaned
+
+
 def _build_artifact_presence(project_dir: Path | None) -> dict:
     """Check existence of each artifact path."""
     if project_dir is None or not project_dir.is_dir():
@@ -682,12 +712,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         with facts_tmp.open("w", encoding="utf-8") as ff, \
              inventory_tmp.open("w", encoding="utf-8") as fi:
-            if args.limit is not None:
-                paths = list(_iter_job_record_paths(jobs_root))[: args.limit]
-            else:
-                paths = list(_iter_job_record_paths(jobs_root))
+            paths = list(_iter_job_record_paths(jobs_root))
             for record_path in paths:
                 if _INTERRUPTED["flag"]:
+                    break
+                # Stop scanning once we've factsheeted enough (--limit applies
+                # AFTER status + date filters so prod smoke gets real samples,
+                # not the first N alphabetically).
+                if args.limit is not None and facts_count >= args.limit:
                     break
                 try:
                     rec = json.loads(record_path.read_text(encoding="utf-8"))
@@ -711,7 +743,20 @@ def main(argv: list[str] | None = None) -> int:
                     skipped_status += 1
                     continue
 
-                # Date filter (later)
+                # Date filter — relies on YYYY-MM-DD prefix being lexicographically
+                # sortable. Real data is all `+00:00` UTC, so simple string compare
+                # works without timezone arithmetic. The `+99:99` sentinel for
+                # --until trivially sorts after any real timezone suffix, giving
+                # an inclusive end-of-day cutoff.
+                if args.since and created_at < args.since:
+                    skipped_date += 1
+                    continue
+                if args.until:
+                    until_marker = args.until + "T23:59:59.999999+99:99"
+                    if created_at > until_marker:
+                        skipped_date += 1
+                        continue
+
                 resolved_project_id = _extract_project_id_from_record(rec, job_id)
                 project_dir = _resolve_project_dir(
                     projects_root, resolved_project_id, job_id
@@ -765,7 +810,8 @@ def main(argv: list[str] | None = None) -> int:
             "skipped_for_status_filter": skipped_status,
             "skipped_for_date_filter": skipped_date,
             "skipped_for_missing_identity": skipped_identity,
-            "orphaned_project_dir_count": 0,  # filled in Task A3
+            "orphaned_project_dir_count":
+                _count_orphaned_project_dirs(projects_root, jobs_root),
         },
         "errors": errors,
         "git_sha": _git_sha(),
