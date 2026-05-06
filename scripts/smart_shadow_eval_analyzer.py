@@ -223,6 +223,83 @@ def _section_subtitle_drift(facts):
     return lines
 
 
+def _section_whisper_coverage(facts):
+    """§7: deliverable-time Whisper coverage (NOT DSP cache).
+
+    Uses subtitle_cues.json::cues[].source counts, NOT project_state cache fields.
+    """
+    if not facts:
+        return ["## §7 Whisper 覆盖\n\n(no data)\n"]
+    pd_subset = [f for f in facts
+                 if (f.get("artifact_presence") or {}).get("subtitle_cues")]
+    lines = ["## §7 Whisper 覆盖 (Phase D+ subset; deliverable-time faster-whisper)",
+             "",
+             f"- subtitle_cues.json present: {len(pd_subset)}/{len(facts)}",
+             "",
+             "> **wall_time 不在 P0 范围**(runtime 只 logger.info 不持久化)",
+             "",
+             "> **重要**:本节统计**真正的 deliverable-time Whisper 覆盖**——"
+             "用 `subtitle_cues.json::cues[].source` 含 `'semantic_block_v2_whisper_aligned'` "
+             "的 cue 数。**不是** workflow alignment cache(那是 §7b,DSP TTS aligned-audio "
+             "stage cache,完全不同的 cache)。",
+             ""]
+    if not pd_subset:
+        lines.append("> No Phase D+ jobs (or Whisper 双闸门未启用). Need post-2026-05-05 prod smoke.")
+        lines.append("")
+        return lines
+
+    # Alignment model distribution
+    model_counts = defaultdict(int)
+    for f in pd_subset:
+        m = (f.get("whisper") or {}).get("alignment_model")
+        if m:
+            model_counts[m] += 1
+    if model_counts:
+        lines += ["### alignment_model 分布", "",
+                  "| Model | Count |", "|---|---|"]
+        for m, c in sorted(model_counts.items()):
+            lines.append(f"| {m} | {c} |")
+        lines.append("")
+
+    # whisper_aligned_cue ratio
+    ratios = []
+    for f in pd_subset:
+        w = f.get("whisper") or {}
+        aligned = w.get("whisper_aligned_cue_count")
+        fallback = w.get("proportional_fallback_cue_count")
+        if isinstance(aligned, int) and isinstance(fallback, int):
+            total = aligned + fallback
+            if total > 0:
+                ratios.append(aligned / total)
+    if ratios:
+        ratios.sort()
+        lines += [
+            "### whisper_aligned / total cue 比例",
+            "",
+            f"- p50: {_percentile(ratios, 0.5):.2%}",
+            f"- p90: {_percentile(ratios, 0.9):.2%}",
+            f"- p99: {_percentile(ratios, 0.99):.2%}",
+            "",
+        ]
+
+    # Sidecar count
+    sidecar_counts = sorted(
+        (f.get("whisper") or {}).get("whisper_sidecar_count") or 0
+        for f in pd_subset
+    )
+    if sidecar_counts:
+        lines += [
+            "### whisper_sidecar_count 分布 (per-WAV cache files)",
+            "",
+            f"- p50: {_percentile(sidecar_counts, 0.5)}",
+            f"- p90: {_percentile(sidecar_counts, 0.9)}",
+            "",
+            "> 真实 cache hit/miss 当前未持久化,P0 不统计;wall_time 也不在 P0 范围。",
+            "",
+        ]
+    return lines
+
+
 def _classify_job_at_threshold(fact, main_threshold_str, min_sec_key):
     """Return 'eligible' | 'rejected' | 'degraded' for a job at given thresholds.
     eligible: main ≤ 3 AND all main speakers have ≥1 sample ≥ min_sec
@@ -387,6 +464,7 @@ def main(argv=None):
     report_lines += _section_clone_availability(facts)
     report_lines += _section_retry_distribution(facts)
     report_lines += _section_subtitle_drift(facts)
+    report_lines += _section_whisper_coverage(facts)
     matrix_lines, matrix_extra = _section_threshold_matrix(
         facts, args.smart_eligibility_threshold_set, args.min_sample_seconds_set
     )

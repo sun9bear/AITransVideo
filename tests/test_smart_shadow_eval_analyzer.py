@@ -184,6 +184,44 @@ def test_analyzer_drift_section(tmp_path):
     assert "Phase B+" in report or "subtitle_quality_report" in report
 
 
+def test_analyzer_whisper_section_uses_cue_source_not_cache(tmp_path):
+    """§7: alignment_model 分布 + whisper_aligned_cue_count / total，不用 cache_hits"""
+    facts = tmp_path / "facts.jsonl"
+    samples = [
+        {"schema_version": 1, "job_id": "j1",
+         "artifact_presence": {"subtitle_cues": True},
+         "whisper": {"alignment_model": "small",
+                     "whisper_aligned_cue_count": 80,
+                     "proportional_fallback_cue_count": 20,
+                     "whisper_sidecar_count": 5}},
+        {"schema_version": 1, "job_id": "j2",
+         "artifact_presence": {"subtitle_cues": True},
+         "whisper": {"alignment_model": "medium",
+                     "whisper_aligned_cue_count": 100,
+                     "proportional_fallback_cue_count": 0,
+                     "whisper_sidecar_count": 8}},
+        {"schema_version": 1, "job_id": "j3_pre_d",
+         "artifact_presence": {"subtitle_cues": False},
+         "whisper": {"alignment_model": None,
+                     "whisper_aligned_cue_count": None}},
+    ]
+    facts.write_text("\n".join(json.dumps(s) for s in samples))
+    out = tmp_path / "report"
+    subprocess.run([sys.executable, str(SCRIPT),
+                    "--facts", str(facts), "--out-dir", str(out)],
+                   check=True, capture_output=True)
+    report = (out / "report.md").read_text(encoding="utf-8")
+    assert "§7 Whisper" in report
+    assert "small" in report
+    assert "medium" in report
+    assert "whisper_aligned" in report or "aligned_cue" in report
+    assert "wall_time" in report
+    # Negative assertions — Codex iter 4 P1
+    # §7 must NOT use cache_hits/cache_misses (those are §7b workflow_alignment_cache)
+    assert "cache_hits" not in report
+    assert "cache_misses" not in report
+
+
 def test_analyzer_threshold_matrix(tmp_path):
     """§10: 4×4 matrix of Smart eligibility/rejection/degradation rates"""
     facts = tmp_path / "facts.jsonl"
