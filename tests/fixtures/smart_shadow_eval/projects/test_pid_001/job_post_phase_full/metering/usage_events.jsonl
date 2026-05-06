@@ -1,0 +1,8 @@
+{"kind": "llm", "task": "s5_rewrite", "input_tokens": 100, "output_tokens": 50, "input_text_chars": 30}
+{"kind": "llm", "task": "s5_rewrite", "input_tokens": 80, "output_tokens": 40, "input_text_chars": 25}
+{"kind": "llm", "task": "translate", "input_tokens": 500, "output_tokens": 300}
+{"kind": "tts", "bucket": "first_tts", "billed_chars": 200, "duration_ms": 8000}
+{"kind": "tts", "bucket": "post_tts_resynth", "billed_chars": 50, "duration_ms": 1500}
+{"kind": "tts", "bucket": "post_tts_resynth", "billed_chars": 50, "duration_ms": 1500}
+{"kind": "tts", "bucket": "post_tts_resynth", "billed_chars": 50, "duration_ms": 1500}
+{"kind": "voice_clone"}

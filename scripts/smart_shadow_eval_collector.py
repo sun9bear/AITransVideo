@@ -200,6 +200,10 @@ def _build_fact_sheet(rec: dict, project_dir: Path | None,
         "clone_sample_stats": clone_sample_stats,
         "actual_clone_stats": _compute_actual_clone_stats(project_dir),
         "retry_stats": _compute_retry_stats(project_dir),
+        "usage_meter": (
+            _compute_usage_meter(project_dir / ARTIFACT_PATHS["usage_events"])
+            if project_dir else None
+        ),
         # Phase B-E: retry_stats, etc.
     }
 
@@ -335,13 +339,88 @@ def _compute_retry_stats(project_dir: Path | None) -> dict | None:
 
 
 def _retry_stats_from_metering(metering_path: Path) -> dict:
-    """Stub for Phase C/D: implement in Task C2 (metering parsing)."""
+    rewrite = 0
+    retts_count = 0
+    retts_dur_ms = 0
+    try:
+        for line in metering_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            kind = ev.get("kind")
+            if kind == "llm" and ev.get("task") in REWRITE_TASKS:
+                rewrite += 1
+            elif kind == "tts" and ev.get("bucket") in RETTS_BUCKETS:
+                retts_count += 1
+                retts_dur_ms += int(ev.get("duration_ms") or 0)
+    except OSError:
+        return {
+            "rewrite_count": None, "retts_count": None,
+            "retts_total_duration_ms": None,
+            "_data_source": "metering_unreadable",
+        }
     return {
-        "rewrite_count": None,
-        "retts_count": None,
-        "retts_total_duration_ms": None,
-        "_data_source": "metering_pending_impl",
+        "rewrite_count": rewrite,
+        "retts_count": retts_count,
+        "retts_total_duration_ms": retts_dur_ms,
+        "_data_source": "metering",
     }
+
+
+def _compute_usage_meter(metering_path: Path) -> dict | None:
+    """Aggregate llm tokens / tts chars / clone calls for cost estimation.
+
+    Includes rewrite_input_text_chars_total (sum of input_text_chars for
+    LLM events with task IN REWRITE_TASKS) — needed by analyzer §4.2 cost
+    formula's rewrite_extra_rmb term.
+    """
+    if not metering_path.is_file():
+        return None
+    agg = {
+        "llm_input_tokens": 0,
+        "llm_output_tokens": 0,
+        "tts_chars_total": 0,
+        "post_tts_resynth_billed_chars": 0,
+        "post_edit_resynth_billed_chars": 0,
+        "clone_calls": 0,
+        "rewrite_count": 0,
+        "rewrite_input_text_chars_total": 0,
+    }
+    try:
+        for line in metering_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            kind = ev.get("kind")
+            if kind == "llm":
+                agg["llm_input_tokens"] += int(ev.get("input_tokens") or 0)
+                agg["llm_output_tokens"] += int(ev.get("output_tokens") or 0)
+                if ev.get("task") in REWRITE_TASKS:
+                    agg["rewrite_count"] += 1
+                    agg["rewrite_input_text_chars_total"] += int(
+                        ev.get("input_text_chars") or 0
+                    )
+            elif kind == "tts":
+                bc = int(ev.get("billed_chars") or 0)
+                agg["tts_chars_total"] += bc
+                bucket = ev.get("bucket")
+                if bucket == "post_tts_resynth":
+                    agg["post_tts_resynth_billed_chars"] += bc
+                elif bucket == "post_edit_resynth":
+                    agg["post_edit_resynth_billed_chars"] += bc
+            elif kind == "voice_clone":
+                agg["clone_calls"] += 1
+    except OSError:
+        return None
+    return agg
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

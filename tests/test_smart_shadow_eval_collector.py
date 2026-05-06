@@ -1,3 +1,4 @@
+import shutil
 import sys
 import json
 import subprocess
@@ -199,6 +200,35 @@ def test_actual_clone_stats(tmp_path):
 def test_retry_stats_fallback(tmp_path):
     """No metering/usage_events.jsonl → fallback to editor.segments.rewrite_count sum"""
     fixtures = Path(__file__).resolve().parent / "fixtures" / "smart_shadow_eval"
+    # Copy fixture but skip metering/ subdir to test fallback path
+    test_jobs = tmp_path / "jobs"
+    test_projects = tmp_path / "projects"
+    shutil.copytree(fixtures / "jobs", test_jobs)
+    shutil.copytree(
+        fixtures / "projects", test_projects,
+        ignore=shutil.ignore_patterns("metering"),
+    )
+    out_dir = tmp_path / "out"
+    subprocess.run(
+        [sys.executable, str(SCRIPT),
+         "--jobs-root", str(test_jobs),
+         "--projects-root", str(test_projects),
+         "--out-dir", str(out_dir)],
+        check=True, capture_output=True
+    )
+    facts = [json.loads(line) for line in
+             (out_dir / "facts.jsonl").read_text(encoding="utf-8").splitlines()]
+    f = next(x for x in facts if x["job_id"] == "job_post_phase_full")
+    rs = f["retry_stats"]
+    # editor segs: rewrite_count 1 + 0 = 1
+    assert rs["rewrite_count"] == 1
+    assert rs["retts_count"] is None  # no metering = no retts data
+    assert rs["_data_source"] == "fallback_editor_segments"
+
+
+def test_retry_stats_from_metering(tmp_path):
+    """When metering exists, prefer metering data."""
+    fixtures = Path(__file__).resolve().parent / "fixtures" / "smart_shadow_eval"
     out_dir = tmp_path / "out"
     subprocess.run(
         [sys.executable, str(SCRIPT),
@@ -211,7 +241,33 @@ def test_retry_stats_fallback(tmp_path):
              (out_dir / "facts.jsonl").read_text(encoding="utf-8").splitlines()]
     f = next(x for x in facts if x["job_id"] == "job_post_phase_full")
     rs = f["retry_stats"]
-    # editor segs: rewrite_count 1 + 0 = 1
-    assert rs["rewrite_count"] == 1
-    assert rs["retts_count"] is None  # no metering = no retts data
-    assert rs["_data_source"] == "fallback_editor_segments"
+    assert rs["_data_source"] == "metering"
+    assert rs["rewrite_count"] == 2  # 2 s5_rewrite events in fixture
+    assert rs["retts_count"] == 3    # 3 post_tts_resynth events
+    assert rs["retts_total_duration_ms"] == 4500  # 1500 + 1500 + 1500
+
+
+def test_usage_meter_aggregation(tmp_path):
+    """Usage meter aggregates llm tokens, tts chars, clone calls, rewrite chars."""
+    fixtures = Path(__file__).resolve().parent / "fixtures" / "smart_shadow_eval"
+    out_dir = tmp_path / "out"
+    subprocess.run(
+        [sys.executable, str(SCRIPT),
+         "--jobs-root", str(fixtures / "jobs"),
+         "--projects-root", str(fixtures / "projects"),
+         "--out-dir", str(out_dir)],
+        check=True, capture_output=True
+    )
+    facts = [json.loads(line) for line in
+             (out_dir / "facts.jsonl").read_text(encoding="utf-8").splitlines()]
+    f = next(x for x in facts if x["job_id"] == "job_post_phase_full")
+    um = f["usage_meter"]
+    assert um is not None
+    assert um["llm_input_tokens"] == 680     # 100 + 80 + 500
+    assert um["llm_output_tokens"] == 390    # 50 + 40 + 300
+    assert um["tts_chars_total"] == 350      # 200 + 50 + 50 + 50
+    assert um["post_tts_resynth_billed_chars"] == 150  # 50 * 3
+    assert um["post_edit_resynth_billed_chars"] == 0
+    assert um["clone_calls"] == 1
+    assert um["rewrite_count"] == 2
+    assert um["rewrite_input_text_chars_total"] == 55  # 30 + 25
