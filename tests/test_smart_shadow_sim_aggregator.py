@@ -430,6 +430,42 @@ def test_c4_retry_estimation_vs_actual(tmp_path):
     assert err_p50.endswith("%")
 
 
+def test_c4_retry_estimation_metering_actual_only_when_smart_unevaluable(tmp_path):
+    """When facts have metering data but smart says unevaluable (e.g. no
+    project_dir / no segments), surface the gap honestly via three counts:
+    jobs_with_metering_actual, jobs_with_smart_estimate, jobs_with_metering.
+    """
+    sim_out = tmp_path / "sim_out"
+    sim_out.mkdir()
+    # 2 metering jobs but smart unevaluable (no segments)
+    for jid, actual_n in [("j_meter_a", 7), ("j_meter_b", 23)]:
+        _write_job_sidecar(sim_out, jid, "pass", {
+            "tts_duration_repair_policy": (
+                {"unevaluable": True, "reason": "no_segments"},
+                {"actual_retts_count": actual_n,
+                 "actual_retts_total_duration_ms": actual_n * 25000,
+                 "data_source": "metering"},
+                None, "no_studio_signal", {}),
+        })
+    # 1 fully fallback job
+    _write_job_sidecar(sim_out, "j_fb", "pass", {
+        "tts_duration_repair_policy": (
+            {"unevaluable": True, "reason": "no_segments"},
+            {"actual_retts_count": None, "data_source": "fallback_editor_segments"},
+            None, "no_studio_signal", {}),
+    })
+    agg, _ = _run_aggregator(tmp_path)
+    re = agg["retry_estimation_vs_actual"]
+    assert re["jobs_with_metering_actual"] == 2
+    assert re["jobs_with_smart_estimate"] == 0
+    assert re["jobs_with_metering"] == 0  # intersection empty
+    assert re["estimation_error_p50"] == "n/a"
+    # Warning text should reflect the gap, not just say "no metering"
+    assert any("smart estimate is unavailable" in w
+               or "smart could only estimate" in w
+               for w in agg["warnings"])
+
+
 def test_c4_p2_readiness_signals(tmp_path):
     """p2_readiness_signals.post_phase_metered_jobs counts jobs with metering
     data AND whisper alignment (proxy for post-Phase-D)."""

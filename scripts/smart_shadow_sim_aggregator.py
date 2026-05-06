@@ -297,10 +297,24 @@ def _subtitle_drift_observations(per_job: list[dict]) -> dict:
 
 
 def _retry_estimation_vs_actual(per_job: list[dict]) -> dict:
-    """Compute estimation error over jobs with metering-sourced actual count."""
+    """Compute estimation error over jobs where BOTH smart estimate AND actual
+    metering count are available.
+
+    Three counts are surfaced (they differ when project_dirs are unavailable
+    locally — e.g. running aggregator on facts without an extracted project
+    tree, smart can't compute its segment-level estimate):
+
+    - jobs_with_metering_actual: facts have metering-sourced retts count.
+    - jobs_with_smart_estimate: simulator produced an `expected_retts_count`
+      (requires editor/segments.json access).
+    - jobs_with_metering: BOTH above (== `jobs_evaluable_for_estimation`).
+      Estimation error percentiles are over this intersection only.
+    """
     smart_vals: list[int] = []
     actual_vals: list[int] = []
     err_pcts: list[float] = []
+    n_metering_actual = 0
+    n_smart_estimate = 0
     for entry in per_job:
         stage_dec = _stage_decisions_by_id(
             entry["decisions"], "tts_duration_repair_policy")
@@ -309,6 +323,13 @@ def _retry_estimation_vs_actual(per_job: list[dict]) -> dict:
         d = stage_dec[0]
         actual = d.get("studio_actual")
         smart = d.get("smart_decision")
+        # Count metering presence (actual side) independently of smart side.
+        if isinstance(actual, dict) and actual.get("data_source") == "metering" \
+                and actual.get("actual_retts_count") is not None:
+            n_metering_actual += 1
+        if isinstance(smart, dict) \
+                and smart.get("expected_retts_count") is not None:
+            n_smart_estimate += 1
         if not isinstance(actual, dict) or not isinstance(smart, dict):
             continue
         if actual.get("data_source") != "metering":
@@ -326,7 +347,9 @@ def _retry_estimation_vs_actual(per_job: list[dict]) -> dict:
         else:
             err_pcts.append(100.0)  # actual=0 but smart predicted some — treat as 100%
     out = {
-        "jobs_with_metering": len(actual_vals),
+        "jobs_with_metering_actual": n_metering_actual,
+        "jobs_with_smart_estimate": n_smart_estimate,
+        "jobs_with_metering": len(actual_vals),  # BOTH sides — evaluable for error
         "smart_estimated_retts_count_p50": _percentile(smart_vals, 50),
         "smart_estimated_retts_count_p90": _percentile(smart_vals, 90),
         "actual_retts_count_p50": _percentile(actual_vals, 50),
@@ -404,10 +427,25 @@ def _build_warnings(per_job: list[dict], p2_signals: dict, retry_stats: dict,
             f"job(s) found; need ≥{P2_THRESHOLD_METERED_JOBS} for P0 re-run "
             "and ≥20 to consider P2 — smoke set too small for production decisions."
         )
-    if retry_stats["jobs_with_metering"] == 0:
+    n_actual = retry_stats.get("jobs_with_metering_actual", 0)
+    n_smart = retry_stats.get("jobs_with_smart_estimate", 0)
+    n_eval = retry_stats["jobs_with_metering"]
+    if n_eval == 0 and n_actual == 0:
         warnings.append(
             "No metering-sourced retry data — retry_estimation_vs_actual is "
             "INCONCLUSIVE; estimation accuracy cannot be measured.")
+    elif n_eval == 0 and n_actual > 0 and n_smart == 0:
+        warnings.append(
+            f"{n_actual} job(s) have metering-sourced actual retts count but "
+            "smart estimate is unavailable for all (project_dirs/editor "
+            "segments not accessible at run time). Estimation error "
+            "INCONCLUSIVE — re-run with project_dirs available to evaluate "
+            "smart's retry-estimation formula.")
+    elif n_eval == 0 and n_actual > 0:
+        warnings.append(
+            f"{n_actual} job(s) have metering data but smart could only "
+            f"estimate retts on {n_smart}; intersection is empty so error "
+            "INCONCLUSIVE.")
     if voice_diff.get("studio_unknown_voices", 0) > 0:
         warnings.append(
             f"{voice_diff['studio_unknown_voices']} job(s) had unknown studio "
@@ -519,7 +557,12 @@ def _build_markdown_summary(aggregate: dict) -> str:
     if re_:
         lines.append("## Retry Estimation vs Actual")
         lines.append("")
-        lines.append(f"- jobs_with_metering: {re_.get('jobs_with_metering', 0)}")
+        lines.append(f"- jobs_with_metering_actual: {re_.get('jobs_with_metering_actual', 0)} "
+                     "(facts have metering retts)")
+        lines.append(f"- jobs_with_smart_estimate: {re_.get('jobs_with_smart_estimate', 0)} "
+                     "(simulator computed `expected_retts_count`)")
+        lines.append(f"- jobs_with_metering: {re_.get('jobs_with_metering', 0)} "
+                     "(BOTH — evaluable for estimation error)")
         lines.append(f"- smart_estimated_retts_count p50/p90: "
                      f"{re_.get('smart_estimated_retts_count_p50', 'n/a')} / "
                      f"{re_.get('smart_estimated_retts_count_p90', 'n/a')}")
