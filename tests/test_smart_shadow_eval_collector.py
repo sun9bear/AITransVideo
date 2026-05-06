@@ -258,6 +258,98 @@ def test_classify_voice_id_existing_clone_patterns_still_work(tmp_path):
     assert mod._classify_voice_id("abc123def456-7890-abcd-ef01-23456789abcd") == "cloned"
 
 
+def _load_collector_module():
+    """Load smart_shadow_eval_collector.py as a module for direct helper testing."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "collector_mod",
+        Path(__file__).resolve().parent.parent / "scripts" / "smart_shadow_eval_collector.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _make_project_dir_with_segments(tmp_path: Path, segments: list) -> Path:
+    """Build a minimal project_dir with editor/segments.json containing given segments."""
+    pdir = tmp_path / "proj_test"
+    (pdir / "editor").mkdir(parents=True)
+    (pdir / "editor" / "segments.json").write_text(
+        json.dumps(segments), encoding="utf-8"
+    )
+    return pdir
+
+
+def test_actual_clone_stats_unknown_voice_id_counted(tmp_path):
+    """voice_id that doesn't match any cloned/preset pattern -> unknown_speakers count.
+
+    Regression for 195911c follow-up: voice_ids classified as 'unknown' were
+    silently dropped from cloned/preset buckets, breaking
+    cloned + preset == len(voice_ids) invariant. unknown_speakers makes the
+    classification surface explicit so aggregator stats are honest.
+    """
+    mod = _load_collector_module()
+    pdir = _make_project_dir_with_segments(tmp_path, [
+        {"segment_id": "1", "speaker_id": "speaker_a",
+         "voice_id": "weird_unrecognized_format_xyz",
+         "start_ms": 0, "end_ms": 1000},
+    ])
+    acs = mod._compute_actual_clone_stats(pdir)
+    assert acs is not None
+    assert acs["unknown_speakers"] == 1
+    assert acs["cloned_speakers"] == 0
+    assert acs["preset_speakers"] == 0
+    assert acs["voice_ids_by_speaker"] == ["weird_unrecognized_format_xyz"]
+
+
+def test_actual_clone_stats_buckets_sum_invariant(tmp_path):
+    """cloned_speakers + preset_speakers + unknown_speakers == len(voice_ids_by_speaker).
+
+    Each speaker contributes to exactly one bucket. Aggregator-side cross-job
+    statistics rely on this; when the invariant breaks, dashboards lie."""
+    mod = _load_collector_module()
+    pdir = _make_project_dir_with_segments(tmp_path, [
+        {"segment_id": "1", "speaker_id": "spk_clone",
+         "voice_id": "vt_speaker_a_1234567890", "start_ms": 0, "end_ms": 1000},
+        {"segment_id": "2", "speaker_id": "spk_preset",
+         "voice_id": "preset_chinese_male_1", "start_ms": 1000, "end_ms": 2000},
+        {"segment_id": "3", "speaker_id": "spk_unknown",
+         "voice_id": "mystery_id_abc", "start_ms": 2000, "end_ms": 3000},
+    ])
+    acs = mod._compute_actual_clone_stats(pdir)
+    assert acs is not None
+    total = (acs["cloned_speakers"] + acs["preset_speakers"]
+             + acs["unknown_speakers"])
+    assert total == len(acs["voice_ids_by_speaker"]) == 3
+    assert acs["cloned_speakers"] == 1
+    assert acs["preset_speakers"] == 1
+    assert acs["unknown_speakers"] == 1
+
+
+def test_actual_clone_stats_classifications_by_speaker_parallel(tmp_path):
+    """classifications_by_speaker is a parallel list to voice_ids_by_speaker.
+
+    Per-position classification surfaces *which* speaker is unknown, not
+    just the count. Useful for downstream debugging without re-running
+    _classify_voice_id on every consumer.
+    """
+    mod = _load_collector_module()
+    pdir = _make_project_dir_with_segments(tmp_path, [
+        {"segment_id": "1", "speaker_id": "spk_a",
+         "voice_id": "vt_abc_123", "start_ms": 0, "end_ms": 1000},
+        {"segment_id": "2", "speaker_id": "spk_b",
+         "voice_id": "preset_x", "start_ms": 1000, "end_ms": 2000},
+        {"segment_id": "3", "speaker_id": "spk_c",
+         "voice_id": "weirdo", "start_ms": 2000, "end_ms": 3000},
+    ])
+    acs = mod._compute_actual_clone_stats(pdir)
+    assert "classifications_by_speaker" in acs
+    assert acs["classifications_by_speaker"] == ["cloned", "preset", "unknown"]
+    # Parallel arrays — same length, same order:
+    assert len(acs["classifications_by_speaker"]) == \
+           len(acs["voice_ids_by_speaker"])
+
+
 def test_retry_stats_fallback(tmp_path):
     """No metering/usage_events.jsonl → fallback to editor.segments.rewrite_count sum"""
     fixtures = Path(__file__).resolve().parent / "fixtures" / "smart_shadow_eval"

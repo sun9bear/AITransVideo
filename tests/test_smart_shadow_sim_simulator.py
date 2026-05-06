@@ -832,3 +832,83 @@ def test_b7_unknown_speaker_in_studio_actual_no_studio_signal(tmp_path):
     cp = next(d for d in decisions if d.get("stage_or_segment_id") == "clone_policy")
     assert cp["match"] is True
     assert cp["diff_kind"] == "match"
+
+
+def test_clone_policy_unknown_voice_id_no_studio_signal(tmp_path):
+    """clone_policy: when ANY studio voice_id is unknown, diff_kind must be
+    no_studio_signal — NOT smart_more_aggressive.
+
+    Bug being fixed: previously when smart said clone speaker 0 and studio
+    voice_id classified as 'unknown', _extract_studio_actual returned
+    cloned_speaker_indices=[] (unknown silently dropped). Then
+    smart_set={0} > actual_set={} → falsely flagged as smart_more_aggressive.
+    The honest answer is "we can't tell what studio did", which is
+    no_studio_signal.
+    """
+    facts = tmp_path / "facts.jsonl"
+    fact = {
+        "schema_version": 1, "job_id": "j_unk_cp", "project_id": "p",
+        "service_mode": "studio", "status": "succeeded",
+        "created_at": "2026-05-06T08:00:00+00:00",
+        "speaker_stats": {"asr_speaker_count": 1,
+                           "speaker_duration_shares": [1.0],
+                           "speaker_count_by_threshold": {"0.05": 1, "0.10": 1, "0.15": 1, "0.20": 1},
+                           "uncertain_speaker_duration_share": 0.0},
+        "clone_sample_stats": {"eligible_speakers": 1,
+                                "eligible_sample_count_buckets_by_speaker": [
+                                    {"≥5s": 5, "≥8s": 3, "≥10s": 1, "≥15s": 0},
+                                ]},
+        # voice_id doesn't match any cloned/preset pattern -> unknown
+        "actual_clone_stats": {
+            "voice_ids_by_speaker": ["weird_unrecognized_id_xyz"]},
+    }
+    facts.write_text(json.dumps(fact) + "\n")
+    out = tmp_path / "out"
+    subprocess.run([sys.executable, str(SCRIPT), "--facts", str(facts), "--out-dir", str(out)],
+                    check=True, capture_output=True)
+    decisions = [json.loads(line) for line in
+                  (out / "j_unk_cp" / "smart_shadow_decisions.jsonl")
+                  .read_text(encoding="utf-8").splitlines() if line.strip()]
+    cp = next(d for d in decisions
+              if d.get("stage_or_segment_id") == "clone_policy")
+    # Smart wants to clone speaker 0, but we can't tell what Studio did.
+    # Must NOT be smart_more_aggressive.
+    assert cp["diff_kind"] == "no_studio_signal", (
+        f"clone_policy expected no_studio_signal, got {cp['diff_kind']!r}; "
+        f"smart={cp['smart_decision']} studio={cp['studio_actual']}"
+    )
+    assert cp["match"] is None
+    assert cp["diff_kind"] != "smart_more_aggressive"
+
+
+def test_voice_sample_selection_unknown_voice_id_no_studio_signal(tmp_path):
+    """voice_sample_selection: existing path already handles unknown studio
+    choices via the 'any unknown -> no_studio_signal' early return; this
+    test pins that contract so future refactors don't regress it."""
+    facts = tmp_path / "facts.jsonl"
+    fact = {
+        "schema_version": 1, "job_id": "j_unk_vs", "project_id": "p",
+        "service_mode": "studio", "status": "succeeded",
+        "created_at": "2026-05-06T08:00:00+00:00",
+        "speaker_stats": {"asr_speaker_count": 1,
+                           "speaker_duration_shares": [1.0],
+                           "speaker_count_by_threshold": {"0.05": 1, "0.10": 1, "0.15": 1, "0.20": 1},
+                           "uncertain_speaker_duration_share": 0.0},
+        "clone_sample_stats": {"eligible_speakers": 1,
+                                "eligible_sample_count_buckets_by_speaker": [
+                                    {"≥5s": 5, "≥8s": 3, "≥10s": 1, "≥15s": 0},
+                                ]},
+        "actual_clone_stats": {
+            "voice_ids_by_speaker": ["mystery_id_no_pattern"]},
+    }
+    facts.write_text(json.dumps(fact) + "\n")
+    out = tmp_path / "out"
+    subprocess.run([sys.executable, str(SCRIPT), "--facts", str(facts), "--out-dir", str(out)],
+                    check=True, capture_output=True)
+    decisions = [json.loads(line) for line in
+                  (out / "j_unk_vs" / "smart_shadow_decisions.jsonl")
+                  .read_text(encoding="utf-8").splitlines() if line.strip()]
+    vs = next(d for d in decisions
+              if d.get("stage_or_segment_id") == "voice_sample_selection")
+    assert vs["diff_kind"] == "no_studio_signal"
+    assert vs["match"] is None

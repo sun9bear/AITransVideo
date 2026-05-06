@@ -405,7 +405,21 @@ def _classify_voice_id(voice_id: str) -> str:
 
 
 def _compute_actual_clone_stats(project_dir: Path | None) -> dict | None:
-    """Per speaker: cloned vs preset voice classification."""
+    """Per speaker: cloned / preset / unknown voice classification.
+
+    Schema invariant (enforced by
+    test_actual_clone_stats_buckets_sum_invariant):
+
+        cloned_speakers + preset_speakers + unknown_speakers
+            == len(voice_ids_by_speaker)
+
+    `classifications_by_speaker` is a parallel list to `voice_ids_by_speaker`,
+    surfacing *which* speaker is unknown without forcing every downstream
+    consumer to re-run `_classify_voice_id`. This matters for the P1
+    simulator's `clone_policy` diff: when any studio voice is unknown the
+    diff_kind must degrade to `no_studio_signal` rather than report a
+    misleading `smart_more_aggressive`.
+    """
     if not project_dir:
         return None
     # Prefer editor/segments.json (post-edit-aware), fall back to translation/segments.json
@@ -428,7 +442,9 @@ def _compute_actual_clone_stats(project_dir: Path | None) -> dict | None:
     return {
         "cloned_speakers": classifications.count("cloned"),
         "preset_speakers": classifications.count("preset"),
+        "unknown_speakers": classifications.count("unknown"),
         "voice_ids_by_speaker": voice_ids,
+        "classifications_by_speaker": classifications,
     }
 
 

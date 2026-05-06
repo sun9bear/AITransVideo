@@ -360,7 +360,13 @@ def _extract_studio_actual(stage_id: str, fact: dict, smart_decision) -> object:
             return "unknown"
         cloned_indices = [i for i, vid in enumerate(voice_ids)
                           if _classify_voice_id(vid) == "cloned"]
-        return {"cloned_speaker_indices": cloned_indices}
+        # Surface unknown speakers explicitly so _classify_diff can degrade
+        # to no_studio_signal rather than silently dropping them and reporting
+        # smart_more_aggressive (Codex Gate 2 follow-up).
+        unknown_indices = [i for i, vid in enumerate(voice_ids)
+                           if _classify_voice_id(vid) == "unknown"]
+        return {"cloned_speaker_indices": cloned_indices,
+                "unknown_speaker_indices": unknown_indices}
     if stage_id == "translation_review_auto_approval":
         ue = fact.get("user_edits") or {}
         tc = ue.get("text_changes_effective")
@@ -496,6 +502,13 @@ def _classify_diff(stage_id: str, smart_decision, studio_actual) -> tuple[bool |
         return None, "no_studio_signal"
     if stage_id == "clone_policy":
         if isinstance(smart_decision, dict) and isinstance(studio_actual, dict):
+            # If ANY studio voice is unknown (can't tell if it was a clone
+            # or a preset), we can't honestly compare set membership. Degrade
+            # to no_studio_signal rather than silently treating unknown as
+            # "not cloned" and reporting false smart_more_aggressive.
+            unknown_indices = studio_actual.get("unknown_speaker_indices", [])
+            if unknown_indices:
+                return None, "no_studio_signal"
             smart_set = set(smart_decision.get("auto_clone_main_speakers", []))
             actual_set = set(studio_actual.get("cloned_speaker_indices", []))
             if smart_set == actual_set:
