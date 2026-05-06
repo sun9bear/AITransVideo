@@ -2163,6 +2163,39 @@ async def _post_edit_voice_preview_with_policy(
     )
 
 
+def _accepted_overwrite_commit_response(job: Job) -> Response | None:
+    status = getattr(job, "status", None)
+    if status not in {"running", "succeeded"}:
+        return None
+    try:
+        edit_generation = int(getattr(job, "edit_generation", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    if edit_generation <= 0:
+        return None
+    if getattr(job, "editing_touched_at", None) is not None:
+        return None
+    project_dir = getattr(job, "project_dir", None)
+    if not project_dir:
+        return None
+    if (Path(project_dir) / "editor" / "editing").exists():
+        return None
+    body = {
+        "success": True,
+        "strategy": "overwrite",
+        "job_id": getattr(job, "job_id", None),
+        "edit_generation": edit_generation,
+        "current_stage": getattr(job, "current_stage", None) or "alignment",
+        "already_started": True,
+        "already_completed": status == "succeeded",
+    }
+    return Response(
+        content=json.dumps(body, ensure_ascii=False),
+        status_code=200,
+        headers={"content-type": "application/json"},
+    )
+
+
 async def _editing_transition_with_lock(
     request: Request,
     job_id: str,
@@ -2210,6 +2243,14 @@ async def _editing_transition_with_lock(
     )
     job = result.scalar_one_or_none()
     if job is not None and job.status != expected:
+        if subpath == "editing/commit":
+            payload = await _read_json_body(request)
+            strategy = str(payload.get("strategy") or "").strip()
+            if strategy == "overwrite":
+                accepted_response = _accepted_overwrite_commit_response(job)
+                if accepted_response is not None:
+                    await db.commit()
+                    return accepted_response
         raise HTTPException(
             status_code=409,
             detail=(

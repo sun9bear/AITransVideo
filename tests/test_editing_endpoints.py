@@ -629,6 +629,24 @@ def test_service_commit_editing_dispatches_to_pipeline(tmp_path: Path) -> None:
     assert result["job_id"] == "job_123"
     assert service.runner.calls == [("job_123", True)]
 
+    duplicate = service.commit_editing("job_123", strategy="overwrite")
+    assert duplicate["strategy"] == "overwrite"
+    assert duplicate["job_id"] == "job_123"
+    assert duplicate["already_started"] is True
+    assert service.runner.calls == [("job_123", True)]
+
+    completed = replace(
+        service.store.load_job("job_123"),
+        status=JOB_STATUS_SUCCEEDED,
+        current_stage="completed",
+    )
+    service.store.save_job(completed)
+    duplicate_after_finish = service.commit_editing("job_123", strategy="overwrite")
+    assert duplicate_after_finish["strategy"] == "overwrite"
+    assert duplicate_after_finish["already_started"] is True
+    assert duplicate_after_finish["already_completed"] is True
+    assert service.runner.calls == [("job_123", True)]
+
 
 def test_service_enter_editing_on_nonexistent_job(tmp_path: Path) -> None:
     from services.jobs.service import JobNotFoundError

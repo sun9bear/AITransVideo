@@ -18,10 +18,12 @@ from services.jobs.models import (
     JOB_STATUS_FAILED,
     JOB_STATUS_QUEUED,
     JOB_STATUS_RUNNING,
+    JOB_STATUS_SUCCEEDED,
     JOB_STATUS_WAITING_FOR_REVIEW,
     JOB_TYPE_LOCALIZE_VIDEO,
     OUTPUT_TARGET_EDITOR,
     SOURCE_TYPE_YOUTUBE_URL,
+    STAGE_ALIGNMENT,
     SUPPORTED_SOURCE_TYPES,
     STAGE_FAILED,
     JobRecord,
@@ -52,6 +54,29 @@ class UnsupportedJobRequestError(JobServiceError):
 
 
 _DEFAULT_AUDIT_OBSERVER = object()
+
+
+def _accepted_overwrite_commit_response(record: JobRecord) -> dict | None:
+    """Treat a duplicate overwrite submit as success after commit left editing."""
+    if record.status not in {JOB_STATUS_RUNNING, JOB_STATUS_SUCCEEDED}:
+        return None
+    if int(record.edit_generation or 0) <= 0:
+        return None
+    if record.editing_touched_at is not None:
+        return None
+    if not record.project_dir:
+        return None
+    editing_dir = Path(record.project_dir) / "editor" / "editing"
+    if editing_dir.exists():
+        return None
+    return {
+        "strategy": "overwrite",
+        "job_id": record.job_id,
+        "edit_generation": record.edit_generation,
+        "current_stage": record.current_stage or STAGE_ALIGNMENT,
+        "already_started": True,
+        "already_completed": record.status == JOB_STATUS_SUCCEEDED,
+    }
 
 
 class JobService:
@@ -541,6 +566,11 @@ class JobService:
         from services.jobs.editing_commit import commit_editing_pipeline
 
         record = self.require_job(job_id)
+        if strategy == "overwrite":
+            accepted = _accepted_overwrite_commit_response(record)
+            if accepted is not None:
+                return accepted
+
         result = commit_editing_pipeline(
             record, self.store, self.runner,
             strategy=strategy,

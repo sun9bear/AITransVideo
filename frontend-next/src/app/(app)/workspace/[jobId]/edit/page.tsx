@@ -83,6 +83,7 @@ export default function VideoEditPage() {
   // (~1-2s between click and worker observing cancel_requested).
   const [isCancellingBatch, setIsCancellingBatch] = useState(false)
   const [isCommitting, setIsCommitting] = useState(false)
+  const commitInFlightRef = useRef(false)
   const [commitModalOpen, setCommitModalOpen] = useState(false)
   const [commitStrategy, setCommitStrategy] = useState<CommitStrategy>("overwrite")
   const [copyDisplayName, setCopyDisplayName] = useState<string>("")
@@ -639,12 +640,12 @@ export default function VideoEditPage() {
   }, [job, jobId])
 
   const handleCommit = useCallback(async () => {
-    if (isCommitting) return
+    if (commitInFlightRef.current || isCommitting) return
     if (commitStrategy === "copy_as_new" && !copyDisplayName.trim()) {
       toast.error("副本名不能为空")
       return
     }
-    if (!window.confirm("重新生成后无法回到本次编辑状态，是否继续？")) return
+    commitInFlightRef.current = true
     setIsCommitting(true)
     try {
       const result = await commitEditing(jobId, commitStrategy, {
@@ -666,6 +667,7 @@ export default function VideoEditPage() {
     } catch (error) {
       toast.error(`合成失败: ${getErrorMessage(error)}`)
     } finally {
+      commitInFlightRef.current = false
       setIsCommitting(false)
     }
   }, [commitStrategy, copyDisplayName, isCommitting, jobId, router])
@@ -1699,8 +1701,9 @@ function CommitModal({
           重新生成后无法回到本次编辑状态。
         </div>
         <div className="flex justify-end gap-2">
-          <Button variant="ghost" size="sm" onClick={onClose}>取消</Button>
+          <Button type="button" variant="ghost" size="sm" onClick={onClose}>取消</Button>
           <Button
+            type="button"
             size="sm"
             onClick={onSubmit}
             disabled={isSubmitting}

@@ -16,6 +16,7 @@ from modules.output.editor.editor_package_models import (
     ProjectOutput,
     ProjectOutputResult,
 )
+from modules.output.editor.loudness_matcher import match_segment_loudness_to_source
 from utils.audio_fit import fit_audio_to_slot
 
 logger = logging.getLogger(__name__)
@@ -93,6 +94,12 @@ class EditorPackageWriter:
             if not copied_path.exists():
                 raise FileNotFoundError(f"导出分段音频失败：{copied_path}")
             copied_paths[segment.segment_id] = str(copied_path)
+        match_segment_loudness_to_source(
+            project_dir=Path(output.output_dir).resolve(strict=False),
+            segments=self._sorted_segments(output),
+            segment_paths=copied_paths,
+            output_root=self._resolve_output_root(output),
+        )
         return copied_paths
 
     def _compose_full_audio(self, output: ProjectOutput, segment_paths: dict[int, str]) -> str:

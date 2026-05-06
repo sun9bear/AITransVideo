@@ -492,6 +492,85 @@ def test_enter_edit_transition_passes_user_to_access_policy(monkeypatch) -> None
     assert session.committed is True
 
 
+def test_duplicate_overwrite_commit_after_start_is_idempotent(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    project_dir = tmp_path / "project"
+    (project_dir / "editor").mkdir(parents=True)
+    source = _FakeJobRow(
+        job_id="job_src",
+        status="running",
+        current_stage="alignment",
+        edit_generation=1,
+        project_dir=str(project_dir),
+        editing_touched_at=None,
+    )
+    session = _FakeSession()
+    session._execute_queue = [_FakeResult(value=source)]
+
+    class _Request:
+        async def body(self):
+            return b'{"strategy":"overwrite"}'
+
+    async def _unexpected_proxy(**kwargs):
+        raise AssertionError("duplicate overwrite commit should not proxy upstream")
+
+    monkeypatch.setattr(job_intercept, "proxy_request", _unexpected_proxy)
+
+    response = asyncio.run(
+        job_intercept._editing_transition_with_lock(
+            _Request(), "job_src", session, None, subpath="editing/commit",
+        )
+    )
+    body = json.loads(response.body.decode("utf-8"))
+
+    assert response.status_code == 200
+    assert body["success"] is True
+    assert body["already_started"] is True
+    assert body["strategy"] == "overwrite"
+    assert session.committed is True
+
+
+def test_duplicate_overwrite_commit_after_finish_is_idempotent(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    project_dir = tmp_path / "project"
+    (project_dir / "editor").mkdir(parents=True)
+    source = _FakeJobRow(
+        job_id="job_src",
+        status="succeeded",
+        current_stage="completed",
+        edit_generation=1,
+        project_dir=str(project_dir),
+        editing_touched_at=None,
+    )
+    session = _FakeSession()
+    session._execute_queue = [_FakeResult(value=source)]
+
+    class _Request:
+        async def body(self):
+            return b'{"strategy":"overwrite"}'
+
+    async def _unexpected_proxy(**kwargs):
+        raise AssertionError("completed duplicate overwrite should not proxy upstream")
+
+    monkeypatch.setattr(job_intercept, "proxy_request", _unexpected_proxy)
+
+    response = asyncio.run(
+        job_intercept._editing_transition_with_lock(
+            _Request(), "job_src", session, None, subpath="editing/commit",
+        )
+    )
+    body = json.loads(response.body.decode("utf-8"))
+
+    assert response.status_code == 200
+    assert body["success"] is True
+    assert body["already_started"] is True
+    assert body["already_completed"] is True
+    assert body["strategy"] == "overwrite"
+    assert session.committed is True
+
+
 def test_copy_as_new_idempotent_on_duplicate_new_job_id() -> None:
     """If the same commit request retries and Job-API creates the record
     but the gateway INSERT never fired last time, a second attempt should
