@@ -156,6 +156,34 @@ def test_analyzer_retry_section(tmp_path):
     assert "rewrite_input_text_chars_total" in report
 
 
+def test_analyzer_drift_section(tmp_path):
+    """§6: text_audio_drift_count 分布（仅有 subtitle_quality_report 子集）"""
+    facts = tmp_path / "facts.jsonl"
+    samples = [
+        {"schema_version": 1, "job_id": "j1",
+         "artifact_presence": {"subtitle_quality_report": True},
+         "subtitle_sync": {"text_audio_drift_count": 0}},
+        {"schema_version": 1, "job_id": "j2",
+         "artifact_presence": {"subtitle_quality_report": True},
+         "subtitle_sync": {"text_audio_drift_count": 2}},
+        {"schema_version": 1, "job_id": "j3",
+         "artifact_presence": {"subtitle_quality_report": True},
+         "subtitle_sync": {"text_audio_drift_count": 5}},
+        {"schema_version": 1, "job_id": "j4_pre_b",
+         "artifact_presence": {"subtitle_quality_report": False},
+         "subtitle_sync": {"text_audio_drift_count": None}},
+    ]
+    facts.write_text("\n".join(json.dumps(s) for s in samples))
+    out = tmp_path / "report"
+    subprocess.run([sys.executable, str(SCRIPT),
+                    "--facts", str(facts), "--out-dir", str(out)],
+                   check=True, capture_output=True)
+    report = (out / "report.md").read_text(encoding="utf-8")
+    assert "§6 字幕一致性" in report
+    assert "drift=0" in report or "无 drift" in report
+    assert "Phase B+" in report or "subtitle_quality_report" in report
+
+
 def test_analyzer_threshold_matrix(tmp_path):
     """§10: 4×4 matrix of Smart eligibility/rejection/degradation rates"""
     facts = tmp_path / "facts.jsonl"

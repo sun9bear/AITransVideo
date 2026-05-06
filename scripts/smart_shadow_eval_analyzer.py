@@ -186,6 +186,43 @@ def _section_retry_distribution(facts):
     return lines
 
 
+def _section_subtitle_drift(facts):
+    """§6: text_audio_drift_count distribution (Phase B+ subset only)."""
+    if not facts:
+        return ["## §6 字幕一致性\n\n(no data)\n"]
+    pb_subset = [f for f in facts
+                 if (f.get("artifact_presence") or {}).get("subtitle_quality_report")]
+    lines = ["## §6 字幕一致性 (Phase B+ subset)",
+             "",
+             f"- subtitle_quality_report present: {len(pb_subset)}/{len(facts)}",
+             ""]
+    if not pb_subset:
+        lines.append("> No Phase B+ jobs in facts. Need post-2026-05-05 prod smoke data.")
+        lines.append("")
+        return lines
+    drift_counts = sorted(
+        (f["subtitle_sync"]["text_audio_drift_count"] or 0)
+        for f in pb_subset if f.get("subtitle_sync")
+    )
+    n = len(drift_counts)
+    drift_zero = sum(1 for c in drift_counts if c == 0)
+    drift_le2 = sum(1 for c in drift_counts if c <= 2)
+    drift_gt5 = sum(1 for c in drift_counts if c > 5)
+    lines += [
+        "| Bucket | Count | % |",
+        "|---|---|---|",
+        f"| drift=0 (理想) | {drift_zero} | {drift_zero/n*100:.0f}% |",
+        f"| drift≤2 | {drift_le2} | {drift_le2/n*100:.0f}% |",
+        f"| drift>5 (高风险) | {drift_gt5} | {drift_gt5/n*100:.0f}% |",
+        "",
+        f"- p50: {_percentile(drift_counts, 0.5)}",
+        f"- p90: {_percentile(drift_counts, 0.9)}",
+        f"- p99: {_percentile(drift_counts, 0.99)}",
+        "",
+    ]
+    return lines
+
+
 def _classify_job_at_threshold(fact, main_threshold_str, min_sec_key):
     """Return 'eligible' | 'rejected' | 'degraded' for a job at given thresholds.
     eligible: main ≤ 3 AND all main speakers have ≥1 sample ≥ min_sec
@@ -349,6 +386,7 @@ def main(argv=None):
     report_lines += _section_speaker_count(facts, args.smart_eligibility_threshold_set)
     report_lines += _section_clone_availability(facts)
     report_lines += _section_retry_distribution(facts)
+    report_lines += _section_subtitle_drift(facts)
     matrix_lines, matrix_extra = _section_threshold_matrix(
         facts, args.smart_eligibility_threshold_set, args.min_sample_seconds_set
     )
