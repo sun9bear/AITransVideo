@@ -48,6 +48,21 @@ _WHISPER_ALIGNED_SOURCE = "semantic_block_v2_whisper_aligned"
 _ALIGNMENT_STAGE_CANDIDATES = ("audio_alignment", "subtitle_alignment", "alignment")
 
 
+SPEAKER_EVENT_TYPES = frozenset({
+    "translation_segment_speaker_changed",
+    "post_edit_segment_speaker_changed",
+    "voice_selection_speaker_reassigned",
+})
+SPLIT_EVENT_TYPES = frozenset({
+    "translation_segment_split_confirmed",
+    "post_edit_segment_split_confirmed",
+})
+TEXT_EVENT_TYPES = frozenset({
+    "translation_segment_text_changed",
+    "post_edit_text_changed",
+})
+
+
 ARTIFACT_PATHS = {
     # JOBS root (flat)
     "job_record":             "{job_id}.json",
@@ -213,6 +228,7 @@ def _build_fact_sheet(rec: dict, project_dir: Path | None,
         "subtitle_sync": _compute_subtitle_sync(project_dir),
         "whisper": _compute_whisper(project_dir),
         "workflow_alignment_cache": _compute_workflow_alignment_cache(ps),
+        "user_edits": _compute_user_edits(project_dir),
         # Phase B-E: retry_stats, etc.
     }
 
@@ -512,6 +528,45 @@ def _compute_workflow_alignment_cache(project_state: dict | None) -> dict | None
         "cache_hit_blocks": None,
         "block_count": None,
         "_reason_null": "no alignment stage found in project_state",
+    }
+
+
+def _compute_user_edits(project_dir: Path | None) -> dict | None:
+    if not project_dir:
+        return None
+    path = project_dir / ARTIFACT_PATHS["user_edit_events"]
+    if not path.is_file():
+        return {
+            "speaker_corrections_effective": None,
+            "splits_confirmed_effective": None,
+            "text_changes_effective": None,
+            "_reason_null": "audit/user_edit_events.jsonl absent",
+        }
+    counts = {"speaker": 0, "split": 0, "text": 0}
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if ev.get("effective_marker") != "effective":
+                continue
+            et = ev.get("event_type")
+            if et in SPEAKER_EVENT_TYPES:
+                counts["speaker"] += 1
+            elif et in SPLIT_EVENT_TYPES:
+                counts["split"] += 1
+            elif et in TEXT_EVENT_TYPES:
+                counts["text"] += 1
+    except OSError:
+        return None
+    return {
+        "speaker_corrections_effective": counts["speaker"],
+        "splits_confirmed_effective": counts["split"],
+        "text_changes_effective": counts["text"],
     }
 
 

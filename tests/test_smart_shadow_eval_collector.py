@@ -317,3 +317,22 @@ def test_whisper_and_workflow_cache(tmp_path):
     wac = f["workflow_alignment_cache"]
     assert wac["cache_hit_blocks"] == 4
     assert wac["block_count"] == 5
+
+
+def test_user_edits(tmp_path):
+    fixtures = Path(__file__).resolve().parent / "fixtures" / "smart_shadow_eval"
+    out_dir = tmp_path / "out"
+    subprocess.run(
+        [sys.executable, str(SCRIPT),
+         "--jobs-root", str(fixtures / "jobs"),
+         "--projects-root", str(fixtures / "projects"),
+         "--out-dir", str(out_dir)],
+        check=True, capture_output=True
+    )
+    facts = [json.loads(line) for line in
+             (out_dir / "facts.jsonl").read_text(encoding="utf-8").splitlines()]
+    f = next(x for x in facts if x["job_id"] == "job_post_phase_full")
+    ue = f["user_edits"]
+    assert ue["speaker_corrections_effective"] == 2
+    assert ue["splits_confirmed_effective"] == 1
+    assert ue["text_changes_effective"] == 3

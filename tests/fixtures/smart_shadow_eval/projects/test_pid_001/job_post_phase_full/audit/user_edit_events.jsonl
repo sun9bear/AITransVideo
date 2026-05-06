@@ -1,0 +1,7 @@
+{"event_type": "translation_segment_speaker_changed", "effective_marker": "effective"}
+{"event_type": "translation_segment_speaker_changed", "effective_marker": "effective"}
+{"event_type": "translation_segment_speaker_changed", "effective_marker": "weak"}
+{"event_type": "translation_segment_split_confirmed", "effective_marker": "effective"}
+{"event_type": "translation_segment_text_changed", "effective_marker": "effective"}
+{"event_type": "translation_segment_text_changed", "effective_marker": "effective"}
+{"event_type": "post_edit_text_changed", "effective_marker": "effective"}
