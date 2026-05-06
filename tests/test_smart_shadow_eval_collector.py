@@ -174,3 +174,23 @@ def test_clone_sample_buckets(tmp_path):
     # speaker_b: 4s, 12s
     assert css["eligible_sample_count_buckets_by_speaker"][1] == \
            {"≥5s": 1, "≥8s": 1, "≥10s": 1, "≥15s": 0}
+
+
+def test_actual_clone_stats(tmp_path):
+    fixtures = Path(__file__).resolve().parent / "fixtures" / "smart_shadow_eval"
+    out_dir = tmp_path / "out"
+    subprocess.run(
+        [sys.executable, str(SCRIPT),
+         "--jobs-root", str(fixtures / "jobs"),
+         "--projects-root", str(fixtures / "projects"),
+         "--out-dir", str(out_dir)],
+        check=True, capture_output=True
+    )
+    facts = [json.loads(line) for line in
+             (out_dir / "facts.jsonl").read_text(encoding="utf-8").splitlines()]
+    f = next(x for x in facts if x["job_id"] == "job_post_phase_full")
+    acs = f["actual_clone_stats"]
+    assert acs["cloned_speakers"] == 1  # speaker_a uses moss_audio_*
+    assert acs["preset_speakers"] == 1  # speaker_b uses preset_chinese_male_1
+    assert acs["voice_ids_by_speaker"][0].startswith("moss_audio_")
+    assert "preset" in acs["voice_ids_by_speaker"][1].lower()

@@ -1,0 +1,4 @@
+[
+  {"segment_id": "1", "speaker_id": "speaker_a", "voice_id": "moss_audio_85bcf79d-00f2-11f1-b80b-cafa791d3a11", "start_ms": 0, "end_ms": 23000, "actual_duration_ms": 22000, "rewrite_count": 1},
+  {"segment_id": "2", "speaker_id": "speaker_b", "voice_id": "preset_chinese_male_1", "start_ms": 23000, "end_ms": 39000, "actual_duration_ms": 16000, "rewrite_count": 0}
+]

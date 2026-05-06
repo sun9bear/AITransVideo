@@ -192,6 +192,7 @@ def _build_fact_sheet(rec: dict, project_dir: Path | None,
         "artifact_presence": _build_artifact_presence(project_dir),
         "speaker_stats": speaker_stats,
         "clone_sample_stats": clone_sample_stats,
+        "actual_clone_stats": _compute_actual_clone_stats(project_dir),
         # Phase B-E: retry_stats, etc.
     }
 
@@ -258,6 +259,46 @@ def _compute_clone_sample_stats(transcript: dict | None) -> dict | None:
     return {
         "eligible_speakers": len(buckets),
         "eligible_sample_count_buckets_by_speaker": buckets,
+    }
+
+
+def _classify_voice_id(voice_id: str) -> str:
+    """'cloned' | 'preset' | 'unknown' / 'auto'."""
+    if not voice_id or voice_id.lower() == "auto":
+        return "unknown"
+    # MiniMax cloned voices typically have moss_audio_ prefix or long uuid hash
+    if voice_id.startswith("moss_audio_"):
+        return "cloned"
+    if len(voice_id) >= 32 and "-" in voice_id:
+        return "cloned"
+    return "preset"
+
+
+def _compute_actual_clone_stats(project_dir: Path | None) -> dict | None:
+    """Per speaker: cloned vs preset voice classification."""
+    if not project_dir:
+        return None
+    # Prefer editor/segments.json (post-edit-aware), fall back to translation/segments.json
+    segs_path = project_dir / ARTIFACT_PATHS["editor_segments"]
+    if not segs_path.is_file():
+        segs_path = project_dir / ARTIFACT_PATHS["translation_segments"]
+    segs = _safe_load_json(segs_path)
+    if not isinstance(segs, list) or not segs:
+        return None
+    # First voice_id seen per speaker
+    by_speaker = {}
+    for seg in segs:
+        spk = seg.get("speaker_id")
+        vid = seg.get("voice_id")
+        if spk and vid and spk not in by_speaker:
+            by_speaker[spk] = vid
+    # Order by appearance (= order in segments)
+    voice_ids = list(by_speaker.values())
+    classifications = [_classify_voice_id(v) for v in voice_ids]
+    return {
+        "cloned_speakers": classifications.count("cloned"),
+        "preset_speakers": classifications.count("preset"),
+        "voice_ids_by_speaker": voice_ids,
     }
 
 
