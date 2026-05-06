@@ -144,9 +144,9 @@ def _section_retry_distribution(facts):
              f"- jobs with fallback data: {len(fallback)}",
              ""]
     if metering:
-        rwc = sorted((f["retry_stats"]["rewrite_count"] or 0) for f in metering)
-        rtc = sorted((f["retry_stats"]["retts_count"] or 0) for f in metering)
-        rtd = sorted((f["retry_stats"]["retts_total_duration_ms"] or 0) for f in metering)
+        rwc = sorted((f["retry_stats"].get("rewrite_count") or 0) for f in metering)
+        rtc = sorted((f["retry_stats"].get("retts_count") or 0) for f in metering)
+        rtd = sorted((f["retry_stats"].get("retts_total_duration_ms") or 0) for f in metering)
         rwch = sorted(
             (f.get("usage_meter") or {}).get("rewrite_input_text_chars_total") or 0
             for f in metering
@@ -172,7 +172,7 @@ def _section_retry_distribution(facts):
             "",
         ]
     if fallback:
-        rwc = sorted((f["retry_stats"]["rewrite_count"] or 0) for f in fallback)
+        rwc = sorted((f["retry_stats"].get("rewrite_count") or 0) for f in fallback)
         lines += [
             "### Fallback subset (editor.segments rewrite_count only)",
             "",
@@ -415,6 +415,91 @@ def _section_threshold_matrix(facts, main_thresholds_csv, min_secs_csv):
     return lines, {"threshold_matrix": matrix_summary}
 
 
+def _load_pricing(path):
+    if not path:
+        return None
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _compute_cost_per_job(fact, pricing):
+    """Return (smart_total_rmb, revenue_rmb, margin_rmb, quality)."""
+    cm = pricing.get("cost_model", {})
+    creds = pricing.get("credits", {})
+    src_min = (fact.get("duration_seconds") or 0) / 60.0
+    baseline = src_min * (
+        cm.get("translate_cost_rmb_per_src_min", 0)
+        + cm.get("s2_review_cost_rmb_per_src_min", 0)
+        + cm.get("rewrite_cost_rmb_per_src_min", 0)
+        + cm.get("server_cost_rmb_per_src_min", 0)
+    )
+    um = fact.get("usage_meter") or {}
+    rs = fact.get("retry_stats") or {}
+    rmb_per_char = (cm.get("rewrite_cost_rmb_per_src_min", 0)
+                    / max(1, cm.get("k_cn_chars_per_src_min", 250)))
+    if rs.get("_data_source") == "metering":
+        retts_rmb = (um.get("post_tts_resynth_billed_chars", 0)
+                     + um.get("post_edit_resynth_billed_chars", 0)) * rmb_per_char
+        # Rewrite cost: real input chars from metering (reviewer iter1 MAJOR fix)
+        rewrite_rmb = um.get("rewrite_input_text_chars_total", 0) * rmb_per_char
+        quality = "high"
+    else:
+        # Fallback (no metering): use rewrite_count × AVG_REWRITE_CHARS baseline.
+        rewrite_count = (rs.get("rewrite_count") or 0)
+        rewrite_rmb = rewrite_count * AVG_REWRITE_CHARS * rmb_per_char
+        retts_rmb = 0  # no retts data without metering
+        quality = "low"
+    clone_rmb = (um.get("clone_calls", 0)
+                 * creds.get("voice_clone_cost_credits", 500)
+                 * cm.get("point_cost_rmb", 0.015))
+    smart_total = baseline + retts_rmb + rewrite_rmb + clone_rmb
+    revenue = 100 * src_min * cm.get("point_price_rmb", 0.03)
+    margin = revenue - smart_total
+    return (smart_total, revenue, margin, quality)
+
+
+def _section_cost_margin_risk(facts, pricing):
+    if not pricing:
+        return [
+            "## §8 / §9 / §11 成本 / 毛利 / 风险标记",
+            "",
+            "❌ N/A — pricing snapshot not provided (use --pricing-runtime-snapshot)",
+            "",
+        ]
+    results = [_compute_cost_per_job(f, pricing) for f in facts]
+    margins = sorted(r[2] for r in results)
+    if not margins:
+        return ["## §8 / §9 / §11", "", "(no data)", ""]
+    n = len(margins)
+    p50 = margins[n // 2] if n > 0 else 0
+    p90 = margins[int(n * 0.9)] if n > 0 else 0
+    p99 = margins[int(n * 0.99)] if n > 0 else 0
+    # Risk
+    high_quality_margins = [r[2] for r in results if r[3] == "high"]
+    if len(high_quality_margins) < n * 0.5:
+        verdict = "INCONCLUSIVE (metering data < 50%)"
+    elif p99 < 0:
+        verdict = "FAIL (p99 margin negative)"
+    elif p90 < 0:
+        verdict = "MARGINAL (p90 margin negative)"
+    else:
+        verdict = "PASS"
+    return [
+        "## §8 / §9 成本 + 毛利",
+        "",
+        "> 成本估算基于 pricing_runtime.json snapshot;不构成财务事实。",
+        "",
+        f"| Metric | p50 | p90 | p99 |",
+        f"|---|---|---|---|",
+        f"| margin (RMB) | {p50:.2f} | {p90:.2f} | {p99:.2f} |",
+        "",
+        f"## §11 Risk Verdict: **{verdict}**",
+        "",
+    ]
+
+
 def build_arg_parser():
     p = argparse.ArgumentParser(description="Smart shadow eval analyzer")
     p.add_argument("--facts", required=True)
@@ -513,6 +598,8 @@ def main(argv=None):
     )
     report_lines += matrix_lines
     summary_extra.update(matrix_extra)
+    pricing = _load_pricing(args.pricing_runtime_snapshot)
+    report_lines += _section_cost_margin_risk(facts, pricing)
     # ↑↑↑ All section calls MUST be above the writes below ↑↑↑
 
     (out_dir / "report.md").write_text("\n".join(report_lines), encoding="utf-8")

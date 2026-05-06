@@ -287,3 +287,64 @@ def test_analyzer_threshold_matrix(tmp_path):
     assert "适配率" in report or "eligible" in report.lower()
     summary = json.loads((out / "report_summary.json").read_text(encoding="utf-8"))
     assert "threshold_matrix" in summary
+
+
+def test_analyzer_cost_section_with_pricing(tmp_path):
+    pricing = tmp_path / "pricing.json"
+    pricing.write_text(json.dumps({
+        "version": 1,
+        "credits": {"voice_clone_cost_credits": 500},
+        "cost_model": {
+            "point_cost_rmb": 0.015,
+            "point_price_rmb": 0.03,
+            "k_cn_chars_per_src_min": 250,
+            "translate_cost_rmb_per_src_min": 0.03,
+            "s2_review_cost_rmb_per_src_min": 0.02,
+            "rewrite_cost_rmb_per_src_min": 0.02,
+            "server_cost_rmb_per_src_min": 0.03,
+        }
+    }))
+    facts = tmp_path / "facts.jsonl"
+    facts.write_text(json.dumps({
+        "schema_version": 1,
+        "job_id": "j1",
+        "duration_seconds": 60,  # 1 source min
+        "usage_meter": {"clone_calls": 1, "post_tts_resynth_billed_chars": 100,
+                         "post_edit_resynth_billed_chars": 0,
+                         "llm_input_tokens": 0, "llm_output_tokens": 0,
+                         "tts_chars_total": 250},
+        "retry_stats": {"_data_source": "metering"},
+    }))
+    # baseline = 1 * (0.03+0.02+0.02+0.03) = 0.10 RMB
+    # smart_retry = 100 * (0.02/250) = 0.008 RMB
+    # clone = 1 * 500 * 0.015 = 7.5 RMB
+    # smart_total = 0.10 + 0.008 + 7.5 = 7.608 RMB
+    # revenue = 100 * 1 * 0.03 = 3 RMB
+    # margin = 3 - 7.608 = -4.608 RMB → FAIL
+    out = tmp_path / "report"
+    subprocess.run([sys.executable, str(SCRIPT),
+                    "--facts", str(facts),
+                    "--pricing-runtime-snapshot", str(pricing),
+                    "--out-dir", str(out)], check=True, capture_output=True)
+    report = (out / "report.md").read_text(encoding="utf-8")
+    # Risk verdict — single job with negative margin
+    # Note: with single job, p50/p90/p99 are all the same value (-4.608)
+    # so verdict is FAIL (p99 < 0)
+    assert "FAIL" in report or "MARGINAL" in report
+    # Margin or cost values shown
+    assert "7.6" in report or "-4.6" in report
+
+
+def test_analyzer_no_pricing_falls_to_na(tmp_path):
+    """Without --pricing-runtime-snapshot, cost section reports N/A."""
+    facts = tmp_path / "facts.jsonl"
+    facts.write_text(json.dumps({
+        "schema_version": 1, "job_id": "j1",
+        "duration_seconds": 60,
+    }))
+    out = tmp_path / "report"
+    subprocess.run([sys.executable, str(SCRIPT),
+                    "--facts", str(facts),
+                    "--out-dir", str(out)], check=True, capture_output=True)
+    report = (out / "report.md").read_text(encoding="utf-8")
+    assert "N/A" in report or "pricing snapshot not provided" in report
