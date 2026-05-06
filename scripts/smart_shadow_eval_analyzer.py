@@ -473,11 +473,13 @@ def _section_cost_margin_risk(facts, pricing):
     if not margins:
         return ["## §8 / §9 / §11", "", "(no data)", ""]
     n = len(margins)
-    p50 = margins[n // 2] if n > 0 else 0
-    p90 = margins[int(n * 0.9)] if n > 0 else 0
-    p99 = margins[int(n * 0.99)] if n > 0 else 0
+    p50 = _percentile(margins, 0.5) or 0
+    p90 = _percentile(margins, 0.9) or 0
+    p99 = _percentile(margins, 0.99) or 0
     # Risk
     high_quality_margins = [r[2] for r in results if r[3] == "high"]
+    # Strict less-than: exactly 50% metering coverage is sufficient (not INCONCLUSIVE).
+    # E.g. n=2 high=1 → 1 < 1.0 = False → reaches PASS/FAIL branch; intended behavior.
     if len(high_quality_margins) < n * 0.5:
         verdict = "INCONCLUSIVE (metering data < 50%)"
     elif p99 < 0:
@@ -570,7 +572,6 @@ def main(argv=None):
     # time / report.md already written).
     # ─────────────────────────────────────────────────────────────────────
 
-    # Generate skeleton report (Phase G1: only metadata)
     # summary_extra accumulates fields written by later sections (e.g., §10 threshold_matrix)
     summary_extra: dict = {}
     report_lines = [

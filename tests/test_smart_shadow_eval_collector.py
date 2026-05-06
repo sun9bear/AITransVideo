@@ -599,3 +599,22 @@ def test_sigint_writes_incomplete_summary(tmp_path):
         s = json.loads(summary_path.read_text(encoding="utf-8"))
         assert "is_complete_run" in s
         # If interrupted in time, is_complete_run=false; if too fast or signal didn't land, true is OK
+
+
+def test_until_filter_iso_sentinel_ordering():
+    """Lock in the +99:99 sentinel comparison trick — must order correctly across
+    the day-boundary regardless of any timezone suffix in actual job timestamps.
+    """
+    # The sentinel
+    until_marker = "2026-04-19" + "T23:59:59.999999+99:99"
+    # Real timestamps that should sort BEFORE the marker (within Apr 19)
+    inside_day = "2026-04-19T13:36:59+00:00"
+    inside_day_late = "2026-04-19T23:59:58+00:00"
+    inside_day_neg = "2026-04-19T23:59:59-12:00"
+    # And the next day, which should sort AFTER
+    next_day = "2026-04-20T00:00:00+00:00"
+
+    assert inside_day < until_marker
+    assert inside_day_late < until_marker
+    assert inside_day_neg < until_marker
+    assert next_day > until_marker

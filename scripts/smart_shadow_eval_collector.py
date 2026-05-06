@@ -266,7 +266,7 @@ def _build_fact_sheet(rec: dict, project_dir: Path | None,
                       ps_extracted: dict, run_id: str,
                       ps: dict | None = None,
                       resolved_project_id: str | None = None) -> dict:
-    """Phase A: minimal fact sheet — Phase B/C/D/E will extend."""
+    """Build the per-job fact sheet."""
     edit_gen = rec.get("edit_generation", 0) or 0
     transcript = (_safe_load_json(project_dir / ARTIFACT_PATHS["transcript"])
                   if project_dir else None)
@@ -305,7 +305,6 @@ def _build_fact_sheet(rec: dict, project_dir: Path | None,
         "whisper": _compute_whisper(project_dir),
         "workflow_alignment_cache": _compute_workflow_alignment_cache(ps),
         "user_edits": _compute_user_edits(project_dir),
-        # Phase B-E: retry_stats, etc.
     }
 
 
