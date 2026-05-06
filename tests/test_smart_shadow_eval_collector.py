@@ -84,3 +84,43 @@ def test_collector_extracts_duration_and_language(tmp_path):
     assert inv["duration_seconds"] == 254.0
     assert inv["source_language"] == "en_us"
     assert inv["target_language"] == "zh-CN"
+
+
+def test_collector_writes_minimal_fact_sheet(tmp_path):
+    fixtures = Path(__file__).resolve().parent / "fixtures" / "smart_shadow_eval"
+    out_dir = tmp_path / "out"
+    subprocess.run(
+        [sys.executable, str(SCRIPT),
+         "--jobs-root", str(fixtures / "jobs"),
+         "--projects-root", str(fixtures / "projects"),
+         "--out-dir", str(out_dir)],
+        check=True, capture_output=True, text=True
+    )
+    facts = [json.loads(line) for line in
+             (out_dir / "facts.jsonl").read_text().splitlines()]
+    assert len(facts) >= 1
+    f = next(x for x in facts if x["job_id"] == "job_post_phase_full")
+    assert f["schema_version"] == 1
+    assert f["service_mode"] == "studio"
+    assert f["tts_provider"] == "minimax"
+    assert f["tts_model"] == "speech-2.8-hd"
+    assert f["edit_generation"] == 1
+    assert f["had_post_edit"] is True  # edit_generation > 0
+    assert "run_id" in f
+    assert "artifact_presence" in f
+    assert f["artifact_presence"]["project_state_json"] is True
+    assert f["artifact_presence"]["transcript_json"] is True
+
+
+def test_fact_sheet_line_under_4kb(tmp_path):
+    fixtures = Path(__file__).resolve().parent / "fixtures" / "smart_shadow_eval"
+    out_dir = tmp_path / "out"
+    subprocess.run(
+        [sys.executable, str(SCRIPT),
+         "--jobs-root", str(fixtures / "jobs"),
+         "--projects-root", str(fixtures / "projects"),
+         "--out-dir", str(out_dir)],
+        check=True, capture_output=True
+    )
+    for line in (out_dir / "facts.jsonl").read_text().splitlines():
+        assert len(line.encode("utf-8")) <= 4096

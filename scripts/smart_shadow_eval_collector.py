@@ -130,6 +130,57 @@ def _atomic_write_summary(out_dir: Path, summary: dict) -> None:
     tmp.rename(out_dir / "summary.json")
 
 
+def _build_artifact_presence(project_dir: Path | None) -> dict:
+    """Check existence of each artifact path."""
+    if project_dir is None or not project_dir.is_dir():
+        return {key: False for key in [
+            "project_state_json", "review_state_json", "manifest_json",
+            "transcript_json", "s2_review_result_json", "s2_pass1_result_json",
+            "translation_segments_json", "editor_segments_json",
+            "subtitle_quality_report", "subtitle_cues",
+            "metering_usage_events", "audit_user_edit_events",
+        ]}
+    return {
+        "project_state_json": (project_dir / ARTIFACT_PATHS["project_state"]).is_file(),
+        "review_state_json": (project_dir / ARTIFACT_PATHS["review_state"]).is_file(),
+        "manifest_json": (project_dir / ARTIFACT_PATHS["manifest"]).is_file(),
+        "transcript_json": (project_dir / ARTIFACT_PATHS["transcript"]).is_file(),
+        "s2_review_result_json": (project_dir / ARTIFACT_PATHS["s2_review_result"]).is_file(),
+        "s2_pass1_result_json": (project_dir / ARTIFACT_PATHS["s2_pass1_result"]).is_file(),
+        "translation_segments_json": (project_dir / ARTIFACT_PATHS["translation_segments"]).is_file(),
+        "editor_segments_json": (project_dir / ARTIFACT_PATHS["editor_segments"]).is_file(),
+        "subtitle_quality_report": (project_dir / ARTIFACT_PATHS["subtitle_quality_report"]).is_file(),
+        "subtitle_cues": (project_dir / ARTIFACT_PATHS["subtitle_cues"]).is_file(),
+        "metering_usage_events": (project_dir / ARTIFACT_PATHS["usage_events"]).is_file(),
+        "audit_user_edit_events": (project_dir / ARTIFACT_PATHS["user_edit_events"]).is_file(),
+    }
+
+
+def _build_fact_sheet(rec: dict, project_dir: Path | None,
+                      ps_extracted: dict, run_id: str) -> dict:
+    """Phase A: minimal fact sheet — Phase B/C/D/E will extend."""
+    edit_gen = rec.get("edit_generation", 0) or 0
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "run_id": run_id,
+        "job_id": rec["job_id"],
+        "project_id": rec.get("project_id"),
+        "root_job_id": rec.get("root_job_id") or rec["job_id"],
+        "service_mode": rec.get("service_mode"),
+        "status": rec["status"],
+        "created_at": rec["created_at"],
+        "duration_seconds": ps_extracted["duration_seconds"],
+        "source_language": ps_extracted["source_language"],
+        "target_language": "zh-CN",
+        "tts_provider": rec.get("tts_provider"),
+        "tts_model": rec.get("tts_model"),
+        "edit_generation": edit_gen,
+        "had_post_edit": edit_gen > 0 or rec.get("copy_of_job_id") is not None,
+        "artifact_presence": _build_artifact_presence(project_dir),
+        # Phase B-E: speaker_stats, clone_sample_stats, retry_stats, etc.
+    }
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Smart shadow eval collector (read-only)."
@@ -243,6 +294,10 @@ def main(argv: list[str] | None = None) -> int:
                 }
                 fi.write(json.dumps(inv_entry, ensure_ascii=False) + "\n")
                 inventory_count += 1
+
+                fact_sheet = _build_fact_sheet(rec, project_dir, ps_extracted, run_id)
+                ff.write(json.dumps(fact_sheet, ensure_ascii=False) + "\n")
+                facts_count += 1
     except BaseException as exc:
         fatal_exception = exc
         errors.append({
