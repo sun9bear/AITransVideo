@@ -67,3 +67,22 @@ def test_analyzer_skeleton_writes_minimal_report(tmp_path):
     assert (out / "report_summary.json").is_file()
     rs = json.loads((out / "report_summary.json").read_text(encoding="utf-8"))
     assert rs["facts_count"] == 0
+
+
+def test_analyzer_speaker_count_section(tmp_path):
+    facts = tmp_path / "facts.jsonl"
+    # 5 jobs: 3 with main_speaker_count=2, 2 with =4
+    samples = [
+        {"schema_version": 1, "job_id": f"j{i}", "created_at": "2026-04-01",
+         "speaker_stats": {"speaker_count_by_threshold": {"0.10": cnt}}}
+        for i, cnt in enumerate([2, 2, 2, 4, 4])
+    ]
+    facts.write_text("\n".join(json.dumps(s) for s in samples))
+    out = tmp_path / "report"
+    subprocess.run([sys.executable, str(SCRIPT),
+                    "--facts", str(facts), "--out-dir", str(out)],
+                   check=True, capture_output=True)
+    report = (out / "report.md").read_text(encoding="utf-8")
+    assert "Speaker 数分布" in report
+    # 3/5 = 60% main_speaker ≤ 3 (at threshold 0.10)
+    assert "60" in report or "0.6" in report
