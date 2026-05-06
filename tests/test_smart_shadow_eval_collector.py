@@ -124,3 +124,25 @@ def test_fact_sheet_line_under_4kb(tmp_path):
     )
     for line in (out_dir / "facts.jsonl").read_text().splitlines():
         assert len(line.encode("utf-8")) <= 4096
+
+
+def test_speaker_stats_extraction(tmp_path):
+    """transcript.json 3 lines: A=5s+4s=9s, B=3s. Total 12s. Shares: A=0.75, B=0.25"""
+    fixtures = Path(__file__).resolve().parent / "fixtures" / "smart_shadow_eval"
+    out_dir = tmp_path / "out"
+    subprocess.run(
+        [sys.executable, str(SCRIPT),
+         "--jobs-root", str(fixtures / "jobs"),
+         "--projects-root", str(fixtures / "projects"),
+         "--out-dir", str(out_dir)],
+        check=True, capture_output=True
+    )
+    facts = [json.loads(line) for line in
+             (out_dir / "facts.jsonl").read_text().splitlines()]
+    f = next(x for x in facts if x["job_id"] == "job_post_phase_full")
+    ss = f["speaker_stats"]
+    assert ss["asr_speaker_count"] == 2
+    assert ss["speaker_duration_shares"] == [0.75, 0.25]
+    assert ss["speaker_count_by_threshold"]["0.05"] == 2
+    assert ss["speaker_count_by_threshold"]["0.10"] == 2
+    assert ss["speaker_count_by_threshold"]["0.20"] == 2

@@ -24,10 +24,14 @@ import socket
 import subprocess as sp
 import sys
 import traceback
+from collections import defaultdict
 from pathlib import Path
 
 
 SCHEMA_VERSION = 1
+
+
+SPEAKER_THRESHOLDS = (0.05, 0.10, 0.15, 0.20)
 
 
 ARTIFACT_PATHS = {
@@ -160,6 +164,11 @@ def _build_fact_sheet(rec: dict, project_dir: Path | None,
                       ps_extracted: dict, run_id: str) -> dict:
     """Phase A: minimal fact sheet — Phase B/C/D/E will extend."""
     edit_gen = rec.get("edit_generation", 0) or 0
+    transcript = (_safe_load_json(project_dir / ARTIFACT_PATHS["transcript"])
+                  if project_dir else None)
+    speaker_stats = _compute_speaker_stats(
+        transcript, ps_extracted.get("asr_speaker_count")
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "run_id": run_id,
@@ -177,7 +186,41 @@ def _build_fact_sheet(rec: dict, project_dir: Path | None,
         "edit_generation": edit_gen,
         "had_post_edit": edit_gen > 0 or rec.get("copy_of_job_id") is not None,
         "artifact_presence": _build_artifact_presence(project_dir),
-        # Phase B-E: speaker_stats, clone_sample_stats, retry_stats, etc.
+        "speaker_stats": speaker_stats,
+        # Phase B-E: clone_sample_stats, retry_stats, etc.
+    }
+
+
+def _compute_speaker_stats(transcript: dict | None,
+                            asr_speaker_count: int | None) -> dict | None:
+    """Return speaker_stats dict or None if transcript missing."""
+    if not isinstance(transcript, dict):
+        return None
+    lines = transcript.get("lines")
+    if not isinstance(lines, list) or not lines:
+        return None
+    durations = defaultdict(float)
+    for line in lines:
+        spk = line.get("speaker_id")
+        s = line.get("start_ms", 0)
+        e = line.get("end_ms", 0)
+        if spk and isinstance(s, (int, float)) and isinstance(e, (int, float)):
+            durations[spk] += max(0.0, e - s)
+    total = sum(durations.values())
+    if total <= 0:
+        return None
+    shares = sorted(
+        (d / total for d in durations.values()),
+        reverse=True,
+    )
+    by_threshold = {
+        f"{t:.2f}": sum(1 for s in shares if s >= t)
+        for t in SPEAKER_THRESHOLDS
+    }
+    return {
+        "asr_speaker_count": asr_speaker_count or len(durations),
+        "speaker_duration_shares": [round(s, 4) for s in shares],
+        "speaker_count_by_threshold": by_threshold,
     }
 
 
