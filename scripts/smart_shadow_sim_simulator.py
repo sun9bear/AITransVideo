@@ -268,6 +268,68 @@ def _load_editor_segments(project_dir: Path | None) -> list[dict]:
     return []
 
 
+def _classify_voice_id(voice_id: str) -> str:
+    """Classify voice_id as 'clone' / 'preset' / 'unknown'. Mirrors P0 collector heuristic.
+
+    Uses 'clone' (not 'cloned') so it lines up with the smart_decision vocabulary
+    produced by ``_decide_voice_sample_selection`` for direct comparison.
+    """
+    if not voice_id or voice_id.lower() == "auto":
+        return "unknown"
+    if voice_id.startswith("moss_audio_"):
+        return "clone"
+    # UUID-like pattern (≥32 chars, contains hyphens) → cloned
+    if len(voice_id) >= 32 and "-" in voice_id:
+        return "clone"
+    return "preset"
+
+
+def _extract_studio_actual(stage_id: str, fact: dict, smart_decision) -> object:
+    """Per §3.4 取数表 — what Studio ACTUALLY did, from existing facts only (no writes)."""
+    if stage_id == "eligibility_gate":
+        # Tautology: task completed in Studio = "pass"
+        return "pass"
+    if stage_id == "voice_sample_selection":
+        acs = fact.get("actual_clone_stats") or {}
+        voice_ids = acs.get("voice_ids_by_speaker") or []
+        if not voice_ids:
+            return "unknown"
+        return [{"speaker_index": i, "choice": _classify_voice_id(vid), "voice_id": vid}
+                for i, vid in enumerate(voice_ids)]
+    if stage_id == "clone_policy":
+        acs = fact.get("actual_clone_stats") or {}
+        voice_ids = acs.get("voice_ids_by_speaker") or []
+        if not voice_ids:
+            return "unknown"
+        cloned_indices = [i for i, vid in enumerate(voice_ids) if _classify_voice_id(vid) == "clone"]
+        return {"cloned_speaker_indices": cloned_indices}
+    if stage_id == "translation_review_auto_approval":
+        ue = fact.get("user_edits") or {}
+        tc = ue.get("text_changes_effective")
+        if tc is None:
+            return "unknown"
+        return "auto_approved" if tc == 0 else "user_modified"
+    if stage_id == "tts_duration_repair_policy":
+        rs = fact.get("retry_stats") or {}
+        ds = rs.get("_data_source")
+        if ds not in ("metering", "fallback_editor_segments"):
+            return "unknown"
+        return {
+            "actual_retts_count": rs.get("retts_count"),
+            "actual_retts_total_duration_ms": rs.get("retts_total_duration_ms"),
+            "data_source": ds,
+        }
+    if stage_id == "subtitle_sync_policy":
+        w = fact.get("whisper") or {}
+        sm = w.get("alignment_model")
+        ss = fact.get("subtitle_sync") or {}
+        drift = ss.get("text_audio_drift_count")
+        if sm is None and drift is None:
+            return "unknown"
+        return {"alignment_model": sm, "drift_count": drift}
+    return "unknown"
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Smart shadow simulator (P1, read-only, offline)."
@@ -334,6 +396,10 @@ def main(argv: list[str] | None = None) -> int:
             decisions.append(_stage_decision("stage", "tts_duration_repair_policy", retry_dec, retry_ev))
             sub_dec, sub_ev = _decide_subtitle_sync(fact)
             decisions.append(_stage_decision("stage", "subtitle_sync_policy", sub_dec, sub_ev))
+            # B6: extract studio_actual for each stage
+            for d in decisions:
+                d["studio_actual"] = _extract_studio_actual(
+                    d["stage_or_segment_id"], fact, d["smart_decision"])
             (job_dir / "smart_shadow_decisions.jsonl").write_text(
                 "\n".join(json.dumps(d, ensure_ascii=False) for d in decisions) + ("\n" if decisions else ""),
                 encoding="utf-8",

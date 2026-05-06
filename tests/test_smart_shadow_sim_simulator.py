@@ -386,3 +386,123 @@ def test_b5_subtitle_sync_pre_phase_d_unevaluable(tmp_path):
     stages = {d["stage_or_segment_id"]: d for d in decisions if d.get("decision_kind") == "stage"}
     ss = stages["subtitle_sync_policy"]["smart_decision"]
     assert ss.get("unevaluable") is True or ss.get("decision") == "unevaluable"
+
+
+def test_b6_studio_actual_eligibility_gate_always_pass(tmp_path):
+    """eligibility_gate.studio_actual = pass tautology (task ran in Studio)."""
+    facts = tmp_path / "facts.jsonl"
+    fact = {
+        "schema_version": 1, "job_id": "j_b6_a", "project_id": "p",
+        "service_mode": "studio", "status": "succeeded",
+        "created_at": "2026-05-06T08:00:00+00:00",
+        "speaker_stats": {
+            "asr_speaker_count": 2,
+            "speaker_duration_shares": [0.6, 0.4],
+            "speaker_count_by_threshold": {"0.05": 2, "0.10": 2, "0.15": 2, "0.20": 2},
+            "uncertain_speaker_duration_share": 0.0,
+        },
+        "clone_sample_stats": {"eligible_speakers": 2,
+                                "eligible_sample_count_buckets_by_speaker": [
+                                    {"≥5s": 5, "≥8s": 3, "≥10s": 1, "≥15s": 0},
+                                    {"≥5s": 4, "≥8s": 2, "≥10s": 1, "≥15s": 0},
+                                ]},
+    }
+    facts.write_text(json.dumps(fact) + "\n")
+    out = tmp_path / "out"
+    subprocess.run([sys.executable, str(SCRIPT), "--facts", str(facts), "--out-dir", str(out)],
+                    check=True, capture_output=True)
+    decisions = [json.loads(line) for line in (out / "j_b6_a" / "smart_shadow_decisions.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    elig = next(d for d in decisions if d.get("stage_or_segment_id") == "eligibility_gate")
+    assert elig["studio_actual"] == "pass"
+
+
+def test_b6_studio_actual_voice_selection_from_actual_clone_stats(tmp_path):
+    """voice_sample_selection.studio_actual = list of cloned/preset per speaker, from actual_clone_stats.voice_ids_by_speaker."""
+    facts = tmp_path / "facts.jsonl"
+    fact = {
+        "schema_version": 1, "job_id": "j_b6_v", "project_id": "p",
+        "service_mode": "studio", "status": "succeeded",
+        "created_at": "2026-05-06T08:00:00+00:00",
+        "speaker_stats": {"asr_speaker_count": 2,
+                           "speaker_duration_shares": [0.6, 0.4],
+                           "speaker_count_by_threshold": {"0.05": 2, "0.10": 2, "0.15": 2, "0.20": 2},
+                           "uncertain_speaker_duration_share": 0.0},
+        "clone_sample_stats": {"eligible_speakers": 2,
+                                "eligible_sample_count_buckets_by_speaker": [
+                                    {"≥5s": 5, "≥8s": 3, "≥10s": 1, "≥15s": 0},
+                                    {"≥5s": 4, "≥8s": 2, "≥10s": 1, "≥15s": 0},
+                                ]},
+        "actual_clone_stats": {
+            "cloned_speakers": 1,
+            "preset_speakers": 1,
+            "voice_ids_by_speaker": ["moss_audio_xxx-yyyy-zzzz", "preset_chinese_male_1"],
+        },
+    }
+    facts.write_text(json.dumps(fact) + "\n")
+    out = tmp_path / "out"
+    subprocess.run([sys.executable, str(SCRIPT), "--facts", str(facts), "--out-dir", str(out)],
+                    check=True, capture_output=True)
+    decisions = [json.loads(line) for line in (out / "j_b6_v" / "smart_shadow_decisions.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    vs = next(d for d in decisions if d.get("stage_or_segment_id") == "voice_sample_selection")
+    actual = vs["studio_actual"]
+    assert isinstance(actual, list)
+    assert actual[0]["choice"] == "clone"
+    assert actual[1]["choice"] == "preset"
+
+
+def test_b6_studio_actual_translation_review_no_user_changes(tmp_path):
+    """translation_review.studio_actual = 'auto_approved' if user_edits.text_changes_effective == 0."""
+    facts = tmp_path / "facts.jsonl"
+    fact = {
+        "schema_version": 1, "job_id": "j_b6_t", "project_id": "p",
+        "service_mode": "studio", "status": "succeeded",
+        "created_at": "2026-05-06T08:00:00+00:00",
+        "speaker_stats": {"asr_speaker_count": 2,
+                           "speaker_duration_shares": [0.6, 0.4],
+                           "speaker_count_by_threshold": {"0.05": 2, "0.10": 2, "0.15": 2, "0.20": 2},
+                           "uncertain_speaker_duration_share": 0.0},
+        "clone_sample_stats": {"eligible_speakers": 2,
+                                "eligible_sample_count_buckets_by_speaker": [
+                                    {"≥5s": 5, "≥8s": 3, "≥10s": 1, "≥15s": 0},
+                                    {"≥5s": 4, "≥8s": 2, "≥10s": 1, "≥15s": 0},
+                                ]},
+        "user_edits": {"speaker_corrections_effective": 0,
+                        "splits_confirmed_effective": 0,
+                        "text_changes_effective": 0},
+    }
+    facts.write_text(json.dumps(fact) + "\n")
+    out = tmp_path / "out"
+    subprocess.run([sys.executable, str(SCRIPT), "--facts", str(facts), "--out-dir", str(out)],
+                    check=True, capture_output=True)
+    decisions = [json.loads(line) for line in (out / "j_b6_t" / "smart_shadow_decisions.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    tr = next(d for d in decisions if d.get("stage_or_segment_id") == "translation_review_auto_approval")
+    assert tr["studio_actual"] == "auto_approved"
+
+
+def test_b6_studio_actual_translation_review_user_modified(tmp_path):
+    """translation_review.studio_actual = 'user_modified' if user_edits.text_changes_effective > 0."""
+    facts = tmp_path / "facts.jsonl"
+    fact = {
+        "schema_version": 1, "job_id": "j_b6_t2", "project_id": "p",
+        "service_mode": "studio", "status": "succeeded",
+        "created_at": "2026-05-06T08:00:00+00:00",
+        "speaker_stats": {"asr_speaker_count": 2,
+                           "speaker_duration_shares": [0.6, 0.4],
+                           "speaker_count_by_threshold": {"0.05": 2, "0.10": 2, "0.15": 2, "0.20": 2},
+                           "uncertain_speaker_duration_share": 0.0},
+        "clone_sample_stats": {"eligible_speakers": 2,
+                                "eligible_sample_count_buckets_by_speaker": [
+                                    {"≥5s": 5, "≥8s": 3, "≥10s": 1, "≥15s": 0},
+                                    {"≥5s": 4, "≥8s": 2, "≥10s": 1, "≥15s": 0},
+                                ]},
+        "user_edits": {"speaker_corrections_effective": 0,
+                        "splits_confirmed_effective": 0,
+                        "text_changes_effective": 5},
+    }
+    facts.write_text(json.dumps(fact) + "\n")
+    out = tmp_path / "out"
+    subprocess.run([sys.executable, str(SCRIPT), "--facts", str(facts), "--out-dir", str(out)],
+                    check=True, capture_output=True)
+    decisions = [json.loads(line) for line in (out / "j_b6_t2" / "smart_shadow_decisions.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    tr = next(d for d in decisions if d.get("stage_or_segment_id") == "translation_review_auto_approval")
+    assert tr["studio_actual"] == "user_modified"
