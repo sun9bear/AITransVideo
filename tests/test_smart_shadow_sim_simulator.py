@@ -345,3 +345,44 @@ def test_b4_retry_estimation_with_long_segment(tmp_path):
     stages = {d["stage_or_segment_id"]: d for d in decisions if d.get("decision_kind") == "stage"}
     rep = stages["tts_duration_repair_policy"]["smart_decision"]
     assert rep["expected_retts_count"] >= 1
+
+
+def test_b5_subtitle_sync_post_phase_d(tmp_path):
+    """Post-Phase-D: whisper.alignment_model='small' -> recommend whisper_align."""
+    facts = tmp_path / "facts.jsonl"
+    fact = {
+        "schema_version": 1, "job_id": "j_b5", "project_id": "p",
+        "service_mode": "studio", "status": "succeeded",
+        "created_at": "2026-05-06T08:00:00+00:00",
+        "whisper": {"alignment_model": "small",
+                     "whisper_aligned_cue_count": 80,
+                     "proportional_fallback_cue_count": 5},
+    }
+    facts.write_text(json.dumps(fact) + "\n")
+    out = tmp_path / "out"
+    subprocess.run([sys.executable, str(SCRIPT), "--facts", str(facts), "--out-dir", str(out)], check=True, capture_output=True)
+    decisions = [json.loads(line) for line in (out / "j_b5" / "smart_shadow_decisions.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    stages = {d["stage_or_segment_id"]: d for d in decisions if d.get("decision_kind") == "stage"}
+    ss = stages["subtitle_sync_policy"]["smart_decision"]
+    assert ss["whisper_align_recommended"] is True
+    assert ss["expected_fallback_ratio"] >= 0
+
+
+def test_b5_subtitle_sync_pre_phase_d_unevaluable(tmp_path):
+    """Pre-Phase-D: whisper data null -> unevaluable."""
+    facts = tmp_path / "facts.jsonl"
+    fact = {
+        "schema_version": 1, "job_id": "j_b5_pre", "project_id": "p",
+        "service_mode": "studio", "status": "succeeded",
+        "created_at": "2026-05-06T08:00:00+00:00",
+        "whisper": {"alignment_model": None, "whisper_aligned_cue_count": None,
+                     "proportional_fallback_cue_count": None,
+                     "_reason_null": "subtitle_cues.json absent (pre-Phase-D job)"},
+    }
+    facts.write_text(json.dumps(fact) + "\n")
+    out = tmp_path / "out"
+    subprocess.run([sys.executable, str(SCRIPT), "--facts", str(facts), "--out-dir", str(out)], check=True, capture_output=True)
+    decisions = [json.loads(line) for line in (out / "j_b5_pre" / "smart_shadow_decisions.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    stages = {d["stage_or_segment_id"]: d for d in decisions if d.get("decision_kind") == "stage"}
+    ss = stages["subtitle_sync_policy"]["smart_decision"]
+    assert ss.get("unevaluable") is True or ss.get("decision") == "unevaluable"

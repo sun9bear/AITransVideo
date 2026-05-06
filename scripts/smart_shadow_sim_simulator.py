@@ -56,20 +56,31 @@ def _load_facts(facts_path: Path) -> list[dict]:
 
 
 def _build_per_job_report(fact: dict, decisions: list[dict]) -> dict:
-    """Phase A3 scaffold: most fields TBD in Phase B."""
+    stage_decisions = [d for d in decisions if d.get("decision_kind") == "stage"]
+    unevaluable = [d["stage_or_segment_id"] for d in stage_decisions
+                    if (d["smart_decision"] is None
+                        or (isinstance(d["smart_decision"], dict)
+                            and (d["smart_decision"].get("unevaluable")
+                                 or d["smart_decision"].get("decision") == "unevaluable")))]
+    elig = next((d for d in stage_decisions if d["stage_or_segment_id"] == "eligibility_gate"), None)
+    smart_eligibility = "unevaluable"
+    if elig:
+        smart_dec = elig["smart_decision"]
+        if isinstance(smart_dec, dict):
+            smart_eligibility = smart_dec.get("decision", "unevaluable")
     return {
         "schema_version": SCHEMA_VERSION,
         "job_id": fact["job_id"],
-        "smart_eligibility": "unevaluable",
-        "stage_decisions_count": 0,
-        "stage_decisions_match": 0,
-        "segment_decisions_count": 0,
-        "segment_decisions_match": 0,
-        "smart_more_aggressive_count": 0,
-        "smart_less_aggressive_count": 0,
-        "orthogonal_count": 0,
-        "stages_unevaluable": [],
-        "thresholds_used": {},
+        "smart_eligibility": smart_eligibility,
+        "stage_decisions_count": len(stage_decisions),
+        "stage_decisions_match": 0,             # B7
+        "segment_decisions_count": 0,           # B8
+        "segment_decisions_match": 0,           # B7
+        "smart_more_aggressive_count": 0,       # B7
+        "smart_less_aggressive_count": 0,       # B7
+        "orthogonal_count": 0,                  # B7
+        "stages_unevaluable": unevaluable,
+        "thresholds_used": {},                  # filled in B6 or just from args
         "warnings": [],
     }
 
@@ -212,6 +223,22 @@ def _estimate_retry(segments: list[dict], source_duration_seconds: float | None)
              "segments_count": len(segments)})
 
 
+def _decide_subtitle_sync(fact: dict) -> tuple:
+    w = fact.get("whisper") or {}
+    if w.get("alignment_model") is None:
+        return ({"unevaluable": True, "reason": "pre_phase_d_job_or_no_whisper"},
+                {"whisper_alignment_model": None})
+    aligned = w.get("whisper_aligned_cue_count") or 0
+    fallback = w.get("proportional_fallback_cue_count") or 0
+    total = aligned + fallback
+    expected_fallback_ratio = (fallback / total) if total > 0 else 0.0
+    return ({"whisper_align_recommended": True,
+             "expected_fallback_ratio": round(expected_fallback_ratio, 4),
+             "alignment_model": w.get("alignment_model")},
+            {"whisper_aligned_cue_count": aligned,
+             "proportional_fallback_cue_count": fallback})
+
+
 def _resolve_project_dir(projects_root: Path | None, fact: dict) -> Path | None:
     """Locate <projects_root>/<project_id>/job_<bare_id>/ or None."""
     if not projects_root or not projects_root.is_dir():
@@ -305,9 +332,10 @@ def main(argv: list[str] | None = None) -> int:
             decisions.append(_stage_decision("stage", "translation_review_auto_approval", tr_dec, tr_ev))
             retry_dec, retry_ev = _estimate_retry(segments, fact.get("duration_seconds"))
             decisions.append(_stage_decision("stage", "tts_duration_repair_policy", retry_dec, retry_ev))
-            # Phase A3: write empty decisions.jsonl + scaffold report
+            sub_dec, sub_ev = _decide_subtitle_sync(fact)
+            decisions.append(_stage_decision("stage", "subtitle_sync_policy", sub_dec, sub_ev))
             (job_dir / "smart_shadow_decisions.jsonl").write_text(
-                "\n".join(json.dumps(d, ensure_ascii=False) for d in decisions),
+                "\n".join(json.dumps(d, ensure_ascii=False) for d in decisions) + ("\n" if decisions else ""),
                 encoding="utf-8",
             )
             report = _build_per_job_report(fact, decisions)
