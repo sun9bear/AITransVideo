@@ -357,6 +357,63 @@ def test_corrupted_record_skipped(tmp_path):
     assert "job_corrupted_state" not in facts
 
 
+def test_project_id_fallback_from_project_dir(tmp_path):
+    """JobRecord without project_id field but with project_dir absolute path → resolve via path."""
+    jobs_root = tmp_path / "jobs"
+    projects_root = tmp_path / "projects"
+    jobs_root.mkdir()
+    # Create a real-shape JobRecord without project_id at top level
+    real_job = {
+        "job_id": "job_realshape",
+        "status": "succeeded",
+        "service_mode": "studio",
+        "tts_provider": "minimax",
+        "tts_model": "speech-2.8-hd",
+        "created_at": "2026-04-19T13:36:59+00:00",
+        "edit_generation": 0,
+        "copy_of_job_id": None,
+        "root_job_id": "job_realshape",
+        # Mimic real data: project_dir is absolute path; no project_id field
+        "project_dir": "/opt/aivideotrans/app/projects/uuid_test_pid/job_realshape",
+        "manifest_path": "/opt/aivideotrans/app/projects/uuid_test_pid/job_realshape/manifest.json",
+    }
+    (jobs_root / "job_realshape.json").write_text(
+        json.dumps(real_job), encoding="utf-8"
+    )
+    # Create matching project_dir under projects_root
+    project_dir = projects_root / "uuid_test_pid" / "job_realshape"
+    (project_dir / "transcript").mkdir(parents=True)
+    (project_dir / "project_state.json").write_text(json.dumps({
+        "stages": {
+            "ingestion": {"payload": {"duration_ms": 60000}},
+            "media_understanding": {"payload": {"language": "en_us", "speaker_count": 1}},
+        }
+    }), encoding="utf-8")
+    (project_dir / "transcript" / "transcript.json").write_text(json.dumps({
+        "lines": [{"speaker_id": "speaker_a", "start_ms": 0, "end_ms": 30000}]
+    }), encoding="utf-8")
+
+    out_dir = tmp_path / "out"
+    subprocess.run(
+        [sys.executable, str(SCRIPT),
+         "--jobs-root", str(jobs_root),
+         "--projects-root", str(projects_root),
+         "--out-dir", str(out_dir)],
+        check=True, capture_output=True
+    )
+    facts = [json.loads(line) for line in
+             (out_dir / "facts.jsonl").read_text(encoding="utf-8").splitlines()]
+    f = next(x for x in facts if x["job_id"] == "job_realshape")
+    # Project_id was resolved from project_dir path
+    assert f["project_id"] == "uuid_test_pid"
+    # Artifact extraction worked
+    assert f["artifact_presence"]["project_state_json"] is True
+    assert f["artifact_presence"]["transcript_json"] is True
+    assert f["duration_seconds"] == 60.0
+    assert f["source_language"] == "en_us"
+    assert f["speaker_stats"]["asr_speaker_count"] == 1
+
+
 @pytest.mark.skipif(sys.platform == "win32",
                      reason="SIGINT to subprocess not reliably testable on Windows")
 def test_sigint_writes_incomplete_summary(tmp_path):

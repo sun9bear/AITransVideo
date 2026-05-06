@@ -102,6 +102,33 @@ ARTIFACT_PATHS = {
 }
 
 
+def _extract_project_id_from_record(rec: dict, job_id: str) -> str | None:
+    """Get project_id, falling back to parsing project_dir / manifest_path.
+
+    Real JobRecord may not have a top-level project_id field; instead, the
+    project_dir / manifest_path absolute path encodes it as the segment
+    between '/projects/' and '/job_<job_id>/'.
+    """
+    pid = rec.get("project_id")
+    if isinstance(pid, str) and pid:
+        return pid
+    bare_job_id = job_id.removeprefix("job_") if job_id.startswith("job_") else job_id
+    job_segment = f"job_{bare_job_id}"
+    for path_field in ("project_dir", "manifest_path"):
+        path_value = rec.get(path_field)
+        if not isinstance(path_value, str) or not path_value:
+            continue
+        # Normalize separators (real data has POSIX slashes)
+        parts = path_value.replace("\\", "/").split("/")
+        for i, part in enumerate(parts):
+            if part == "projects" and i + 1 < len(parts):
+                candidate = parts[i + 1]
+                # Sanity: candidate is not the job segment itself
+                if candidate and candidate != job_segment:
+                    return candidate
+    return None
+
+
 def _resolve_project_dir(projects_root: Path, project_id: str | None,
                           job_id: str) -> Path | None:
     """projects/<project_id>/job_<bare_id>/ — handles missing project_id."""
@@ -207,7 +234,8 @@ def _build_artifact_presence(project_dir: Path | None) -> dict:
 
 def _build_fact_sheet(rec: dict, project_dir: Path | None,
                       ps_extracted: dict, run_id: str,
-                      ps: dict | None = None) -> dict:
+                      ps: dict | None = None,
+                      resolved_project_id: str | None = None) -> dict:
     """Phase A: minimal fact sheet — Phase B/C/D/E will extend."""
     edit_gen = rec.get("edit_generation", 0) or 0
     transcript = (_safe_load_json(project_dir / ARTIFACT_PATHS["transcript"])
@@ -216,11 +244,13 @@ def _build_fact_sheet(rec: dict, project_dir: Path | None,
         transcript, ps_extracted.get("asr_speaker_count")
     )
     clone_sample_stats = _compute_clone_sample_stats(transcript)
+    if resolved_project_id is None:
+        resolved_project_id = _extract_project_id_from_record(rec, rec["job_id"])
     return {
         "schema_version": SCHEMA_VERSION,
         "run_id": run_id,
         "job_id": rec["job_id"],
-        "project_id": rec.get("project_id"),
+        "project_id": resolved_project_id,
         "root_job_id": rec.get("root_job_id") or rec["job_id"],
         "service_mode": rec.get("service_mode"),
         "status": rec["status"],
@@ -682,8 +712,9 @@ def main(argv: list[str] | None = None) -> int:
                     continue
 
                 # Date filter (later)
+                resolved_project_id = _extract_project_id_from_record(rec, job_id)
                 project_dir = _resolve_project_dir(
-                    projects_root, rec.get("project_id"), job_id
+                    projects_root, resolved_project_id, job_id
                 )
                 ps = (_safe_load_json(project_dir / ARTIFACT_PATHS["project_state"])
                       if project_dir else None)
@@ -692,7 +723,7 @@ def main(argv: list[str] | None = None) -> int:
                 inv_entry = {
                     "schema_version": SCHEMA_VERSION,
                     "job_id": job_id,
-                    "project_id": rec.get("project_id"),
+                    "project_id": resolved_project_id,
                     "status": status,
                     "created_at": created_at,
                     "duration_seconds": ps_extracted["duration_seconds"],
@@ -705,7 +736,10 @@ def main(argv: list[str] | None = None) -> int:
                 fi.write(json.dumps(inv_entry, ensure_ascii=False) + "\n")
                 inventory_count += 1
 
-                fact_sheet = _build_fact_sheet(rec, project_dir, ps_extracted, run_id, ps)
+                fact_sheet = _build_fact_sheet(
+                    rec, project_dir, ps_extracted, run_id, ps,
+                    resolved_project_id=resolved_project_id,
+                )
                 ff.write(json.dumps(fact_sheet, ensure_ascii=False) + "\n")
                 facts_count += 1
     except BaseException as exc:
