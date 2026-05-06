@@ -315,6 +315,7 @@ def _retry_estimation_vs_actual(per_job: list[dict]) -> dict:
     err_pcts: list[float] = []
     n_metering_actual = 0
     n_smart_estimate = 0
+    formula_versions: set[int] = set()
     for entry in per_job:
         stage_dec = _stage_decisions_by_id(
             entry["decisions"], "tts_duration_repair_policy")
@@ -330,6 +331,9 @@ def _retry_estimation_vs_actual(per_job: list[dict]) -> dict:
         if isinstance(smart, dict) \
                 and smart.get("expected_retts_count") is not None:
             n_smart_estimate += 1
+            v = smart.get("estimation_formula_version")
+            if isinstance(v, int):
+                formula_versions.add(v)
         if not isinstance(actual, dict) or not isinstance(smart, dict):
             continue
         if actual.get("data_source") != "metering":
@@ -346,6 +350,17 @@ def _retry_estimation_vs_actual(per_job: list[dict]) -> dict:
             err_pcts.append(0.0)
         else:
             err_pcts.append(100.0)  # actual=0 but smart predicted some — treat as 100%
+    # Surface formula version from simulator decisions when available; default
+    # 2 (current spec §3.5 v2) for sidecars produced by older simulators that
+    # didn't emit the field. If decisions span multiple versions we emit the
+    # set so downstream consumers can detect mixed-version aggregates.
+    if not formula_versions:
+        formula_version_out: int | str = 2
+    elif len(formula_versions) == 1:
+        formula_version_out = next(iter(formula_versions))
+    else:
+        formula_version_out = ",".join(
+            str(v) for v in sorted(formula_versions))
     out = {
         "jobs_with_metering_actual": n_metering_actual,
         "jobs_with_smart_estimate": n_smart_estimate,
@@ -360,7 +375,7 @@ def _retry_estimation_vs_actual(per_job: list[dict]) -> dict:
         "estimation_error_p90": (
             f"{_percentile(err_pcts, 90):.1f}%"
             if _percentile(err_pcts, 90) is not None else "n/a"),
-        "estimation_formula_version": 1,
+        "estimation_formula_version": formula_version_out,
     }
     return out
 

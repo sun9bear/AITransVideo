@@ -316,7 +316,15 @@ def test_b4_retry_estimation_no_retries_needed(tmp_path):
 
 
 def test_b4_retry_estimation_with_long_segment(tmp_path):
-    """Segment with cn_text > k_chars × duration × 1.05 -> expected_retts_count >=1."""
+    """Length-only segment (cn_text > threshold, rewrite_count=0).
+
+    v1 added +1 to expected_retts_count for the length-overflow trigger.
+    v2 (spec §3.5, 2026-05-07) demoted length-only triggers — they now
+    surface as a soft per-segment marker but contribute 0 to the aggregate
+    expected_retts_count. See p1-done-note §4-bis.3 for empirical
+    justification (1534 length-only segments across 38 jobs were the main
+    over-prediction driver in v1).
+    """
     facts = tmp_path / "facts.jsonl"
     fact = {
         "schema_version": 1, "job_id": "j_b4_long", "project_id": "p2",
@@ -328,7 +336,7 @@ def test_b4_retry_estimation_with_long_segment(tmp_path):
     projects = tmp_path / "projects" / "p2" / "job_j_b4_long"
     (projects / "editor").mkdir(parents=True)
     # k=240 chars/min × 0.5min × 1.05 = 126 chars threshold for a full-duration segment.
-    # If segment duration = 30s (0.5 min), cn_text > 126 chars triggers.
+    # If segment duration = 30s (0.5 min), cn_text > 126 chars triggers length-only.
     segs = [{
         "segment_id": "1", "speaker_id": "A",
         "cn_text": "这是一段非常非常长的中文文本，远远超过基线阈值，所以智能版会触发重新合成。" * 5,  # ~250 chars
@@ -344,7 +352,13 @@ def test_b4_retry_estimation_with_long_segment(tmp_path):
     decisions = [json.loads(line) for line in (out / "j_b4_long" / "smart_shadow_decisions.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
     stages = {d["stage_or_segment_id"]: d for d in decisions if d.get("decision_kind") == "stage"}
     rep = stages["tts_duration_repair_policy"]["smart_decision"]
-    assert rep["expected_retts_count"] >= 1
+    # v2: length-only no longer contributes to expected_retts_count.
+    assert rep["expected_retts_count"] == 0
+    assert rep["estimation_formula_version"] == 2
+    # But the segment is still flagged at per-segment level for human review:
+    seg_decisions = [d for d in decisions if d.get("decision_kind") == "segment"]
+    assert any(s.get("smart_decision", {}).get("expected_retts") is True
+               for s in seg_decisions)
 
 
 def test_b5_subtitle_sync_post_phase_d(tmp_path):

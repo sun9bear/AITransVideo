@@ -205,41 +205,74 @@ def _decide_translation_review(fact: dict) -> tuple:
 
 K_CN_CHARS_PER_SRC_MIN = 240  # default from spec §3.5
 
+ESTIMATION_FORMULA_VERSION = 2
+
 
 def _estimate_retry(segments: list[dict], source_duration_seconds: float | None) -> tuple:
-    """§3.5 retry estimation v1."""
+    """§3.5 retry estimation v2 (2026-05-07).
+
+    v1 (now retired) summed `length_overflow_indicator + rewrite_count` per
+    segment. On 15 real metered jobs from c7_remote_run/results/p1 v1
+    over-predicted retts by p50=386%, p90=667% — well above spec target ≤50%.
+    Root causes (per p1-done-note §4-bis.3):
+      1. Double-count: segments satisfying BOTH conditions added
+         `length_indicator + rewrite_count` (797 segments across 38 jobs).
+      2. Length-only over-predict: 1534 length-only segments treated as +1
+         retts each, but length overflow is necessary-not-sufficient — most
+         first-take TTS still fits within tolerance.
+
+    v2 fixes both at once: per-segment retts contribution = rewrite_count
+    (drop length-only contribution; per-seg max is implicit since length
+    contributes 0). The length signal is preserved as a per-segment soft
+    marker via _per_segment_decisions for human review.
+
+    ⚠ Soft-signal demarcation: the length-overflow signal that v1 was
+    summing into expected_retts_count is now SOFT — it lives only on
+    per-segment decisions as `expected_retts: True` for diagnostic use.
+    Downstream consumers (especially P2-alpha) MUST NOT use the
+    per-segment marker as a re-TTS action trigger. See
+    _per_segment_decisions docstring + p1-done-note §4-bis.3 for why.
+
+    Empirical accuracy on the 15 metered c7 jobs (2026-05-07): p50=75%,
+    p90=119.8% — 5× better than v1's 386%/667% but still above the
+    original spec §3.5 ≤50% target. ACCEPTED as a *conservative planning
+    signal* (over-predicts in 14/15 cases, never under-predicts beyond
+    parity); original ≤50% target deferred to v3 per-voice / per-provider
+    k_cn_chars_per_src_min calibration, blocked by metered-sample volume
+    (need post_phase_metered_jobs ≥ 30 with per-voice ≥ 10). Do not use
+    the aggregate count as a precise cost predictor.
+    """
     if not segments:
-        return ({"unevaluable": True, "reason": "no_segments"}, {"segments_count": 0})
-    expected_retts_count = 0
+        return ({"unevaluable": True, "reason": "no_segments",
+                 "estimation_formula_version": ESTIMATION_FORMULA_VERSION},
+                {"segments_count": 0,
+                 "estimation_formula_version": ESTIMATION_FORMULA_VERSION})
     rewrite_count_total = 0
     for seg in segments:
-        cn_text = seg.get("cn_text", "") or ""
-        estimated_cn_chars = len(cn_text)
-        start_ms = seg.get("start_ms", 0)
-        end_ms = seg.get("end_ms", 0)
-        if isinstance(start_ms, (int, float)) and isinstance(end_ms, (int, float)) and end_ms > start_ms:
-            duration_min = (end_ms - start_ms) / 60000.0
-            threshold = K_CN_CHARS_PER_SRC_MIN * duration_min * 1.05
-            if estimated_cn_chars > threshold:
-                expected_retts_count += 1
         rewrite_count_total += seg.get("rewrite_count", 0) or 0
-    expected_retts_count += rewrite_count_total
+    # v2: expected_retts_count = sum(rewrite_count). Length-only triggers no
+    # longer contribute. Equivalent to per-seg max(length_indicator,
+    # rewrite_count) since length_indicator drops to 0.
+    expected_retts_count = rewrite_count_total
     avg_segment_duration_s = 0.0
-    if segments:
-        durs = [(seg.get("end_ms", 0) - seg.get("start_ms", 0)) / 1000.0 for seg in segments]
-        durs = [d for d in durs if d > 0]
-        avg_segment_duration_s = sum(durs) / len(durs) if durs else 0.0
+    durs = [(seg.get("end_ms", 0) - seg.get("start_ms", 0)) / 1000.0 for seg in segments]
+    durs = [d for d in durs if d > 0]
+    if durs:
+        avg_segment_duration_s = sum(durs) / len(durs)
     would_hit_budget_cap = False
     if source_duration_seconds and source_duration_seconds > 0:
         retts_audio_estimate = expected_retts_count * avg_segment_duration_s
         would_hit_budget_cap = retts_audio_estimate > 1.5 * source_duration_seconds
     return ({"expected_retts_count": expected_retts_count,
              "expected_rewrite_count": rewrite_count_total,
-             "would_hit_budget_cap": would_hit_budget_cap},
+             "would_hit_budget_cap": would_hit_budget_cap,
+             "estimation_formula_version": ESTIMATION_FORMULA_VERSION},
             {"k_cn_chars_per_src_min": K_CN_CHARS_PER_SRC_MIN,
+             "length_only_demoted": True,
              "rewrite_threshold_multiplier": 1.05,
              "budget_cap_multiplier": 1.5,
-             "segments_count": len(segments)})
+             "segments_count": len(segments),
+             "estimation_formula_version": ESTIMATION_FORMULA_VERSION})
 
 
 def _decide_subtitle_sync(fact: dict) -> tuple:
@@ -402,6 +435,13 @@ def _per_segment_decisions(segments: list[dict], fact: dict) -> list[dict]:
       - Smart would trigger expected_rewrite (rewrite_count > 0)
       - Studio user_edit_events touched it (TODO: needs project_dir read; in B8 v1 use fact.user_edits as proxy)
       - segment in subtitle drift list (fact.subtitle_sync.drift_block_ids)
+
+    ⚠ v2 (2026-05-07) soft-signal demarcation: per-segment
+    `expected_retts: True` is a SOFT SIGNAL ONLY (length overflow detected).
+    It does NOT contribute to stage-level `expected_retts_count` (see
+    _estimate_retry — length-only no longer adds to the aggregate count) and
+    MUST NOT be used by P2-alpha as a re-TTS *action* trigger. Diagnostic /
+    human-review use only.
     """
     out_decisions = []
     drift_block_ids = set((fact.get("subtitle_sync") or {}).get("drift_block_ids") or [])

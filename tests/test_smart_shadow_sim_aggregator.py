@@ -424,7 +424,10 @@ def test_c4_retry_estimation_vs_actual(tmp_path):
     re = agg["retry_estimation_vs_actual"]
     assert re["jobs_with_metering"] == 3
     assert re["actual_retts_count_p50"] == 30
-    assert re["estimation_formula_version"] == 1
+    # Fixture decisions don't carry estimation_formula_version (they
+    # mimic a pre-v2 sidecar). Aggregator falls back to default 2 when
+    # no decision exposes the field.
+    assert re["estimation_formula_version"] == 2
     # error% < 100 (both p50 and p90)
     err_p50 = re["estimation_error_p50"]
     assert err_p50.endswith("%")
