@@ -3,6 +3,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "smart_shadow_eval_collector.py"
 
 
@@ -97,7 +99,7 @@ def test_collector_writes_minimal_fact_sheet(tmp_path):
         check=True, capture_output=True, text=True
     )
     facts = [json.loads(line) for line in
-             (out_dir / "facts.jsonl").read_text().splitlines()]
+             (out_dir / "facts.jsonl").read_text(encoding="utf-8").splitlines()]
     assert len(facts) >= 1
     f = next(x for x in facts if x["job_id"] == "job_post_phase_full")
     assert f["schema_version"] == 1
@@ -122,12 +124,12 @@ def test_fact_sheet_line_under_4kb(tmp_path):
          "--out-dir", str(out_dir)],
         check=True, capture_output=True
     )
-    for line in (out_dir / "facts.jsonl").read_text().splitlines():
+    for line in (out_dir / "facts.jsonl").read_text(encoding="utf-8").splitlines():
         assert len(line.encode("utf-8")) <= 4096
 
 
 def test_speaker_stats_extraction(tmp_path):
-    """transcript.json 3 lines: A=5s+4s=9s, B=3s. Total 12s. Shares: A=0.75, B=0.25"""
+    """transcript.json 5 lines: A=6s+10s+7s=23s, B=4s+12s=16s. Total 39s."""
     fixtures = Path(__file__).resolve().parent / "fixtures" / "smart_shadow_eval"
     out_dir = tmp_path / "out"
     subprocess.run(
@@ -138,11 +140,37 @@ def test_speaker_stats_extraction(tmp_path):
         check=True, capture_output=True
     )
     facts = [json.loads(line) for line in
-             (out_dir / "facts.jsonl").read_text().splitlines()]
+             (out_dir / "facts.jsonl").read_text(encoding="utf-8").splitlines()]
     f = next(x for x in facts if x["job_id"] == "job_post_phase_full")
     ss = f["speaker_stats"]
+    # Expected: speaker_a 23/39 ≈ 0.5897, speaker_b 16/39 ≈ 0.4103
     assert ss["asr_speaker_count"] == 2
-    assert ss["speaker_duration_shares"] == [0.75, 0.25]
+    assert ss["speaker_duration_shares"][0] == pytest.approx(0.5897, abs=0.001)
+    assert ss["speaker_duration_shares"][1] == pytest.approx(0.4103, abs=0.001)
     assert ss["speaker_count_by_threshold"]["0.05"] == 2
     assert ss["speaker_count_by_threshold"]["0.10"] == 2
+    assert ss["speaker_count_by_threshold"]["0.15"] == 2
     assert ss["speaker_count_by_threshold"]["0.20"] == 2
+
+
+def test_clone_sample_buckets(tmp_path):
+    fixtures = Path(__file__).resolve().parent / "fixtures" / "smart_shadow_eval"
+    out_dir = tmp_path / "out"
+    subprocess.run(
+        [sys.executable, str(SCRIPT),
+         "--jobs-root", str(fixtures / "jobs"),
+         "--projects-root", str(fixtures / "projects"),
+         "--out-dir", str(out_dir)],
+        check=True, capture_output=True
+    )
+    facts = [json.loads(line) for line in
+             (out_dir / "facts.jsonl").read_text(encoding="utf-8").splitlines()]
+    f = next(x for x in facts if x["job_id"] == "job_post_phase_full")
+    css = f["clone_sample_stats"]
+    assert css["eligible_speakers"] == 2
+    # speaker_a: 6s, 10s, 7s
+    assert css["eligible_sample_count_buckets_by_speaker"][0] == \
+           {"≥5s": 3, "≥8s": 1, "≥10s": 1, "≥15s": 0}
+    # speaker_b: 4s, 12s
+    assert css["eligible_sample_count_buckets_by_speaker"][1] == \
+           {"≥5s": 1, "≥8s": 1, "≥10s": 1, "≥15s": 0}

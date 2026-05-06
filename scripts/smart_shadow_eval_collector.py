@@ -34,6 +34,9 @@ SCHEMA_VERSION = 1
 SPEAKER_THRESHOLDS = (0.05, 0.10, 0.15, 0.20)
 
 
+SAMPLE_THRESHOLDS_S = (5, 8, 10, 15)
+
+
 ARTIFACT_PATHS = {
     # JOBS root (flat)
     "job_record":             "{job_id}.json",
@@ -169,6 +172,7 @@ def _build_fact_sheet(rec: dict, project_dir: Path | None,
     speaker_stats = _compute_speaker_stats(
         transcript, ps_extracted.get("asr_speaker_count")
     )
+    clone_sample_stats = _compute_clone_sample_stats(transcript)
     return {
         "schema_version": SCHEMA_VERSION,
         "run_id": run_id,
@@ -187,7 +191,8 @@ def _build_fact_sheet(rec: dict, project_dir: Path | None,
         "had_post_edit": edit_gen > 0 or rec.get("copy_of_job_id") is not None,
         "artifact_presence": _build_artifact_presence(project_dir),
         "speaker_stats": speaker_stats,
-        # Phase B-E: clone_sample_stats, retry_stats, etc.
+        "clone_sample_stats": clone_sample_stats,
+        # Phase B-E: retry_stats, etc.
     }
 
 
@@ -221,6 +226,38 @@ def _compute_speaker_stats(transcript: dict | None,
         "asr_speaker_count": asr_speaker_count or len(durations),
         "speaker_duration_shares": [round(s, 4) for s in shares],
         "speaker_count_by_threshold": by_threshold,
+    }
+
+
+def _compute_clone_sample_stats(transcript: dict | None) -> dict | None:
+    """Per speaker: bucket-count of sample durations ≥ each threshold."""
+    if not isinstance(transcript, dict):
+        return None
+    lines = transcript.get("lines")
+    if not isinstance(lines, list) or not lines:
+        return None
+    by_speaker = defaultdict(list)
+    for line in lines:
+        spk = line.get("speaker_id")
+        s = line.get("start_ms", 0)
+        e = line.get("end_ms", 0)
+        if spk and isinstance(s, (int, float)) and isinstance(e, (int, float)):
+            dur_s = max(0.0, e - s) / 1000.0
+            by_speaker[spk].append(dur_s)
+    # Order by total duration descending (matches speaker_duration_shares ordering)
+    sorted_speakers = sorted(
+        by_speaker.items(),
+        key=lambda kv: sum(kv[1]),
+        reverse=True,
+    )
+    buckets = []
+    for _, durations in sorted_speakers:
+        bucket = {f"≥{t}s": sum(1 for d in durations if d >= t)
+                  for t in SAMPLE_THRESHOLDS_S}
+        buckets.append(bucket)
+    return {
+        "eligible_speakers": len(buckets),
+        "eligible_sample_count_buckets_by_speaker": buckets,
     }
 
 

@@ -1,7 +1,9 @@
 {
   "lines": [
-    {"speaker_id": "speaker_a", "start_ms": 0, "end_ms": 5000},
-    {"speaker_id": "speaker_b", "start_ms": 5000, "end_ms": 8000},
-    {"speaker_id": "speaker_a", "start_ms": 8000, "end_ms": 12000}
+    {"speaker_id": "speaker_a", "start_ms": 0, "end_ms": 6000},
+    {"speaker_id": "speaker_a", "start_ms": 6000, "end_ms": 16000},
+    {"speaker_id": "speaker_a", "start_ms": 16000, "end_ms": 23000},
+    {"speaker_id": "speaker_b", "start_ms": 23000, "end_ms": 27000},
+    {"speaker_id": "speaker_b", "start_ms": 27000, "end_ms": 39000}
   ]
 }
