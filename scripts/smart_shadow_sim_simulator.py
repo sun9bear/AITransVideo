@@ -55,32 +55,51 @@ def _load_facts(facts_path: Path) -> list[dict]:
     return out
 
 
-def _build_per_job_report(fact: dict, decisions: list[dict]) -> dict:
+def _build_per_job_report(fact: dict, decisions: list[dict], args=None) -> dict:
     stage_decisions = [d for d in decisions if d.get("decision_kind") == "stage"]
-    unevaluable = [d["stage_or_segment_id"] for d in stage_decisions
-                    if (d["smart_decision"] is None
-                        or (isinstance(d["smart_decision"], dict)
-                            and (d["smart_decision"].get("unevaluable")
-                                 or d["smart_decision"].get("decision") == "unevaluable")))]
+    segment_decisions = [d for d in decisions if d.get("decision_kind") == "segment"]
+
+    # Eligibility
     elig = next((d for d in stage_decisions if d["stage_or_segment_id"] == "eligibility_gate"), None)
     smart_eligibility = "unevaluable"
-    if elig:
-        smart_dec = elig["smart_decision"]
-        if isinstance(smart_dec, dict):
-            smart_eligibility = smart_dec.get("decision", "unevaluable")
+    if elig and isinstance(elig["smart_decision"], dict):
+        smart_eligibility = elig["smart_decision"].get("decision", "unevaluable")
+
+    # Match counts (B7 → B9 wiring)
+    stage_match = sum(1 for d in stage_decisions if d.get("match") is True)
+    seg_match = sum(1 for d in segment_decisions if d.get("match") is True)
+    smart_more = sum(1 for d in decisions if d.get("diff_kind") == "smart_more_aggressive")
+    smart_less = sum(1 for d in decisions if d.get("diff_kind") == "smart_less_aggressive")
+    orthogonal = sum(1 for d in decisions if d.get("diff_kind") == "orthogonal")
+
+    # Unevaluable stages
+    stages_unevaluable = []
+    for d in stage_decisions:
+        sd = d.get("smart_decision")
+        if isinstance(sd, dict) and (sd.get("unevaluable") or sd.get("decision") == "unevaluable"):
+            stages_unevaluable.append(d["stage_or_segment_id"])
+
+    thresholds_used = {}
+    if args is not None:
+        thresholds_used = {
+            "main_speaker_threshold": getattr(args, "main_speaker_threshold", None),
+            "clone_min_seconds_soft": getattr(args, "clone_min_seconds_soft", None),
+            "clone_min_seconds_preferred": getattr(args, "clone_min_seconds_preferred", None),
+        }
+
     return {
         "schema_version": SCHEMA_VERSION,
         "job_id": fact["job_id"],
         "smart_eligibility": smart_eligibility,
         "stage_decisions_count": len(stage_decisions),
-        "stage_decisions_match": 0,             # B7
-        "segment_decisions_count": 0,           # B8
-        "segment_decisions_match": 0,           # B7
-        "smart_more_aggressive_count": 0,       # B7
-        "smart_less_aggressive_count": 0,       # B7
-        "orthogonal_count": 0,                  # B7
-        "stages_unevaluable": unevaluable,
-        "thresholds_used": {},                  # filled in B6 or just from args
+        "stage_decisions_match": stage_match,
+        "segment_decisions_count": len(segment_decisions),
+        "segment_decisions_match": seg_match,
+        "smart_more_aggressive_count": smart_more,
+        "smart_less_aggressive_count": smart_less,
+        "orthogonal_count": orthogonal,
+        "stages_unevaluable": stages_unevaluable,
+        "thresholds_used": thresholds_used,
         "warnings": [],
     }
 
@@ -572,7 +591,7 @@ def main(argv: list[str] | None = None) -> int:
                 "\n".join(json.dumps(d, ensure_ascii=False) for d in decisions) + ("\n" if decisions else ""),
                 encoding="utf-8",
             )
-            report = _build_per_job_report(fact, decisions)
+            report = _build_per_job_report(fact, decisions, args)
             (job_dir / "smart_shadow_report.json").write_text(
                 json.dumps(report, ensure_ascii=False, indent=2),
                 encoding="utf-8",

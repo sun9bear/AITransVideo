@@ -674,3 +674,65 @@ def test_b8_per_segment_records_rewrite_count_gt_0(tmp_path):
     seg_decisions = [d for d in decisions if d.get("decision_kind") == "segment"]
     assert len(seg_decisions) == 1
     assert seg_decisions[0]["smart_decision"].get("expected_rewrite") is True
+
+
+def test_b9_report_complete_schema(tmp_path):
+    """Report has all v1 keys with correct counts derived from decisions."""
+    facts = tmp_path / "facts.jsonl"
+    fact = {
+        "schema_version": 1, "job_id": "j_b9", "project_id": "p",
+        "service_mode": "studio", "status": "succeeded",
+        "created_at": "2026-05-06T08:00:00+00:00",
+        "speaker_stats": {"asr_speaker_count": 2,
+                           "speaker_duration_shares": [0.6, 0.4],
+                           "speaker_count_by_threshold": {"0.05": 2, "0.10": 2, "0.15": 2, "0.20": 2},
+                           "uncertain_speaker_duration_share": 0.0},
+        "clone_sample_stats": {"eligible_speakers": 2,
+                                "eligible_sample_count_buckets_by_speaker": [
+                                    {"≥5s": 5, "≥8s": 3, "≥10s": 1, "≥15s": 0},
+                                    {"≥5s": 4, "≥8s": 2, "≥10s": 1, "≥15s": 0},
+                                ]},
+        "user_edits": {"text_changes_effective": 0},
+        "actual_clone_stats": {
+            "voice_ids_by_speaker": ["moss_audio_xxx-yyyy-zzzz", "preset_chinese_male_1"]},
+    }
+    facts.write_text(json.dumps(fact) + "\n")
+    out = tmp_path / "out"
+    subprocess.run([sys.executable, str(SCRIPT), "--facts", str(facts), "--out-dir", str(out)],
+                    check=True, capture_output=True)
+    report = json.loads((out / "j_b9" / "smart_shadow_report.json").read_text(encoding="utf-8"))
+    assert report["schema_version"] == 1
+    assert report["job_id"] == "j_b9"
+    assert report["smart_eligibility"] == "pass"
+    assert report["stage_decisions_count"] == 6
+    # We have data for all 6 stages so match counts should be > 0
+    assert report["stage_decisions_match"] >= 1
+    assert "stages_unevaluable" in report
+    assert "thresholds_used" in report
+    assert report["thresholds_used"].get("main_speaker_threshold") == 0.10
+
+
+def test_b9_report_warnings_for_unevaluable(tmp_path):
+    """Pre-Phase-D fact (no whisper) → subtitle_sync_policy unevaluable, listed in stages_unevaluable."""
+    facts = tmp_path / "facts.jsonl"
+    fact = {
+        "schema_version": 1, "job_id": "j_b9_uneval", "project_id": "p",
+        "service_mode": "studio", "status": "succeeded",
+        "created_at": "2026-05-06T08:00:00+00:00",
+        "speaker_stats": {"asr_speaker_count": 2,
+                           "speaker_duration_shares": [0.6, 0.4],
+                           "speaker_count_by_threshold": {"0.05": 2, "0.10": 2, "0.15": 2, "0.20": 2},
+                           "uncertain_speaker_duration_share": 0.0},
+        "clone_sample_stats": {"eligible_speakers": 2,
+                                "eligible_sample_count_buckets_by_speaker": [
+                                    {"≥5s": 5, "≥8s": 3, "≥10s": 1, "≥15s": 0},
+                                    {"≥5s": 4, "≥8s": 2, "≥10s": 1, "≥15s": 0},
+                                ]},
+        "whisper": {"alignment_model": None, "_reason_null": "pre-Phase-D"},
+    }
+    facts.write_text(json.dumps(fact) + "\n")
+    out = tmp_path / "out"
+    subprocess.run([sys.executable, str(SCRIPT), "--facts", str(facts), "--out-dir", str(out)],
+                    check=True, capture_output=True)
+    report = json.loads((out / "j_b9_uneval" / "smart_shadow_report.json").read_text(encoding="utf-8"))
+    assert "subtitle_sync_policy" in report["stages_unevaluable"]
