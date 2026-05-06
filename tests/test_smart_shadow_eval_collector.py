@@ -271,3 +271,22 @@ def test_usage_meter_aggregation(tmp_path):
     assert um["clone_calls"] == 1
     assert um["rewrite_count"] == 2
     assert um["rewrite_input_text_chars_total"] == 55  # 30 + 25
+
+
+def test_subtitle_sync(tmp_path):
+    fixtures = Path(__file__).resolve().parent / "fixtures" / "smart_shadow_eval"
+    out_dir = tmp_path / "out"
+    subprocess.run(
+        [sys.executable, str(SCRIPT),
+         "--jobs-root", str(fixtures / "jobs"),
+         "--projects-root", str(fixtures / "projects"),
+         "--out-dir", str(out_dir)],
+        check=True, capture_output=True
+    )
+    facts = [json.loads(line) for line in
+             (out_dir / "facts.jsonl").read_text(encoding="utf-8").splitlines()]
+    f = next(x for x in facts if x["job_id"] == "job_post_phase_full")
+    ss = f["subtitle_sync"]
+    assert ss["text_audio_drift_count"] == 2
+    assert "drift_block_ids" in ss
+    assert ss["drift_block_ids"] == ["block_0007", "block_0012"]

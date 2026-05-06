@@ -1,0 +1,7 @@
+{
+  "text_audio_drift_count": 2,
+  "issues": [
+    {"type": "text_audio_drift", "block_id": "block_0007"},
+    {"type": "text_audio_drift", "block_id": "block_0012"}
+  ]
+}

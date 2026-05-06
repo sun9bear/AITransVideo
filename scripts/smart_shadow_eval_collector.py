@@ -204,6 +204,7 @@ def _build_fact_sheet(rec: dict, project_dir: Path | None,
             _compute_usage_meter(project_dir / ARTIFACT_PATHS["usage_events"])
             if project_dir else None
         ),
+        "subtitle_sync": _compute_subtitle_sync(project_dir),
         # Phase B-E: retry_stats, etc.
     }
 
@@ -421,6 +422,33 @@ def _compute_usage_meter(metering_path: Path) -> dict | None:
     except OSError:
         return None
     return agg
+
+
+def _compute_subtitle_sync(project_dir: Path | None) -> dict | None:
+    if not project_dir:
+        return None
+    path = project_dir / ARTIFACT_PATHS["subtitle_quality_report"]
+    if not path.is_file():
+        return {
+            "text_audio_drift_count": None,
+            "drift_block_ids": [],
+            "_reason_null": "subtitle_quality_report not present",
+        }
+    data = _safe_load_json(path)
+    if not isinstance(data, dict):
+        return {"text_audio_drift_count": None, "drift_block_ids": [], "_reason_null": "unreadable"}
+    drift_count = data.get("text_audio_drift_count")
+    drift_ids = []
+    for issue in (data.get("issues") or []):
+        if issue.get("type") == "text_audio_drift":
+            bid = issue.get("block_id")
+            # Sanitize: only positional ID, no content
+            if isinstance(bid, str) and bid.startswith("block_"):
+                drift_ids.append(bid)
+    return {
+        "text_audio_drift_count": drift_count if isinstance(drift_count, int) else None,
+        "drift_block_ids": drift_ids[:50],  # cap to prevent fingerprint bloat
+    }
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
