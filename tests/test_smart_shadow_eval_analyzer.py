@@ -222,6 +222,29 @@ def test_analyzer_whisper_section_uses_cue_source_not_cache(tmp_path):
     assert "cache_misses" not in report
 
 
+def test_analyzer_workflow_cache_section_with_explicit_not_whisper_warning(tmp_path):
+    facts = tmp_path / "facts.jsonl"
+    samples = [
+        {"schema_version": 1, "job_id": "j1",
+         "workflow_alignment_cache": {"cache_hit_blocks": 8, "block_count": 10}},
+        {"schema_version": 1, "job_id": "j2",
+         "workflow_alignment_cache": {"cache_hit_blocks": 5, "block_count": 10}},
+        {"schema_version": 1, "job_id": "j3",
+         "workflow_alignment_cache": {"cache_hit_blocks": None, "block_count": None}},
+    ]
+    facts.write_text("\n".join(json.dumps(s) for s in samples))
+    out = tmp_path / "report"
+    subprocess.run([sys.executable, str(SCRIPT),
+                    "--facts", str(facts), "--out-dir", str(out)],
+                   check=True, capture_output=True)
+    report = (out / "report.md").read_text(encoding="utf-8")
+    assert "§7b" in report
+    # CRITICAL: 必须含明确 NOT Whisper 警告
+    assert "NOT Whisper" in report or "不是 Whisper" in report
+    # 必须明示不能用作 Whisper-default-on 决策
+    assert "不能用" in report or "do not use" in report.lower()
+
+
 def test_analyzer_threshold_matrix(tmp_path):
     """§10: 4×4 matrix of Smart eligibility/rejection/degradation rates"""
     facts = tmp_path / "facts.jsonl"

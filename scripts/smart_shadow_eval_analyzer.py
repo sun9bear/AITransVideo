@@ -300,6 +300,48 @@ def _section_whisper_coverage(facts):
     return lines
 
 
+def _section_workflow_alignment_cache(facts):
+    """§7b: DSP TTS aligned-audio stage cache (NOT Whisper).
+
+    SPEC §3.13 / §14 explicitly requires this section to be visually
+    distinct from §7 and to carry an explicit "NOT Whisper" warning.
+    """
+    lines = [
+        "## §7b Workflow Alignment Cache (诊断用,NOT Whisper)",
+        "",
+        "> ⚠️ **重要**:本节数据来自 `project_state.json::stages.<alignment_stage>.payload.cache_hit_blocks`,"
+        "**这是 DSP TTS aligned-audio stage 的 cache,不是 Whisper cache**。"
+        "**不能用作\"Smart 默认开启 Whisper 增强\"的决策依据。** Whisper 真实覆盖率见 §7。",
+        "",
+    ]
+    if not facts:
+        lines.append("(no data)\n")
+        return lines
+    pairs = [
+        ((f.get("workflow_alignment_cache") or {}).get("cache_hit_blocks"),
+         (f.get("workflow_alignment_cache") or {}).get("block_count"))
+        for f in facts
+    ]
+    valid = [(h, b) for h, b in pairs if isinstance(h, int) and isinstance(b, int) and b > 0]
+    if not valid:
+        lines.append("(no valid alignment cache data — pre-Phase-* jobs)\n")
+        return lines
+    total_hits = sum(h for h, _ in valid)
+    total_blocks = sum(b for _, b in valid)
+    ratios = sorted(h / b for h, b in valid)
+    lines += [
+        f"- jobs with alignment cache data: {len(valid)}/{len(facts)}",
+        f"- aggregate cache hit rate: {total_hits}/{total_blocks} ({total_hits/total_blocks*100:.0f}%)",
+        "",
+        "### Per-job cache hit ratio 分布",
+        "",
+        f"- p50: {_percentile(ratios, 0.5):.2%}",
+        f"- p90: {_percentile(ratios, 0.9):.2%}",
+        "",
+    ]
+    return lines
+
+
 def _classify_job_at_threshold(fact, main_threshold_str, min_sec_key):
     """Return 'eligible' | 'rejected' | 'degraded' for a job at given thresholds.
     eligible: main ≤ 3 AND all main speakers have ≥1 sample ≥ min_sec
@@ -465,6 +507,7 @@ def main(argv=None):
     report_lines += _section_retry_distribution(facts)
     report_lines += _section_subtitle_drift(facts)
     report_lines += _section_whisper_coverage(facts)
+    report_lines += _section_workflow_alignment_cache(facts)
     matrix_lines, matrix_extra = _section_threshold_matrix(
         facts, args.smart_eligibility_threshold_set, args.min_sample_seconds_set
     )
