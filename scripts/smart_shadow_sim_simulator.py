@@ -143,6 +143,36 @@ def _decide_clone_policy(voice_selection_decision) -> tuple:
     return ({"auto_clone_main_speakers": cloned}, {"derived_from": "voice_sample_selection"})
 
 
+# Threshold for uncertain_speaker_duration_share triggering manual review
+TRANSLATION_REVIEW_UNCERTAIN_THRESHOLD = 0.10  # 10%
+TRANSLATION_REVIEW_MIN_CLONE_ELIGIBLE_RATIO = 0.5  # at least half of asr speakers eligible
+
+
+def _decide_translation_review(fact: dict) -> tuple:
+    ss = fact.get("speaker_stats") or {}
+    css = fact.get("clone_sample_stats") or {}
+    uncertain = ss.get("uncertain_speaker_duration_share")
+    asr_count = ss.get("asr_speaker_count")
+    eligible = css.get("eligible_speakers")
+    if uncertain is None or asr_count is None or eligible is None:
+        return ({"decision": "unevaluable", "reason": "missing_signals"},
+                {"missing": [k for k, v in (("uncertain_speaker_duration_share", uncertain),
+                                              ("asr_speaker_count", asr_count),
+                                              ("eligible_speakers", eligible)) if v is None]})
+    if uncertain > TRANSLATION_REVIEW_UNCERTAIN_THRESHOLD:
+        return ({"decision": "manual_review_required",
+                 "reason": f"high_uncertain_speaker_share_{uncertain:.2f}"},
+                {"uncertain_speaker_duration_share": uncertain})
+    if asr_count > 0 and eligible / asr_count < TRANSLATION_REVIEW_MIN_CLONE_ELIGIBLE_RATIO:
+        return ({"decision": "manual_review_required",
+                 "reason": f"low_clone_eligible_ratio_{eligible}/{asr_count}"},
+                {"eligible_speakers": eligible, "asr_speaker_count": asr_count})
+    return ({"decision": "auto_approve",
+             "reason": "uncertain_low_and_clone_eligible_high"},
+            {"uncertain_speaker_duration_share": uncertain,
+             "eligible_speakers": eligible, "asr_speaker_count": asr_count})
+
+
 def _resolve_project_dir(projects_root: Path | None, fact: dict) -> Path | None:
     """Locate <projects_root>/<project_id>/job_<bare_id>/ or None."""
     if not projects_root or not projects_root.is_dir():
@@ -232,6 +262,8 @@ def main(argv: list[str] | None = None) -> int:
             decisions.append(_stage_decision("stage", "voice_sample_selection", vs_dec, vs_ev))
             cp_dec, cp_ev = _decide_clone_policy(vs_dec)
             decisions.append(_stage_decision("stage", "clone_policy", cp_dec, cp_ev))
+            tr_dec, tr_ev = _decide_translation_review(fact)
+            decisions.append(_stage_decision("stage", "translation_review_auto_approval", tr_dec, tr_ev))
             # Phase A3: write empty decisions.jsonl + scaffold report
             (job_dir / "smart_shadow_decisions.jsonl").write_text(
                 "\n".join(json.dumps(d, ensure_ascii=False) for d in decisions),

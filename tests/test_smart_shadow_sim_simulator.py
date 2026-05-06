@@ -227,3 +227,56 @@ def test_b2_voice_selection_unevaluable_when_clone_stats_missing(tmp_path):
     stages = {d["stage_or_segment_id"]: d for d in decisions if d.get("decision_kind") == "stage"}
     vs = stages["voice_sample_selection"]["smart_decision"]
     assert vs == "unevaluable" or (isinstance(vs, dict) and vs.get("unevaluable"))
+
+
+def test_b3_translation_auto_approve(tmp_path):
+    """Low uncertain + all clone eligible -> auto_approve."""
+    facts = tmp_path / "facts.jsonl"
+    fact = {
+        "schema_version": 1, "job_id": "j", "project_id": "p",
+        "service_mode": "studio", "status": "succeeded",
+        "created_at": "2026-05-06T08:00:00+00:00",
+        "speaker_stats": {"asr_speaker_count": 2,
+                           "speaker_duration_shares": [0.6, 0.4],
+                           "speaker_count_by_threshold": {"0.05": 2, "0.10": 2, "0.15": 2, "0.20": 2},
+                           "uncertain_speaker_duration_share": 0.0},
+        "clone_sample_stats": {"eligible_speakers": 2,
+                                "eligible_sample_count_buckets_by_speaker": [
+                                    {"≥5s": 5, "≥8s": 3, "≥10s": 1, "≥15s": 0},
+                                    {"≥5s": 4, "≥8s": 2, "≥10s": 1, "≥15s": 0},
+                                ]},
+    }
+    facts.write_text(json.dumps(fact) + "\n")
+    out = tmp_path / "out"
+    subprocess.run([sys.executable, str(SCRIPT), "--facts", str(facts), "--out-dir", str(out)],
+                    check=True, capture_output=True)
+    decisions = [json.loads(line) for line in (out / "j" / "smart_shadow_decisions.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    stages = {d["stage_or_segment_id"]: d for d in decisions if d.get("decision_kind") == "stage"}
+    assert stages["translation_review_auto_approval"]["smart_decision"]["decision"] == "auto_approve"
+
+
+def test_b3_translation_manual_review_high_uncertain(tmp_path):
+    """High uncertain_speaker_duration_share -> manual_review_required."""
+    facts = tmp_path / "facts.jsonl"
+    fact = {
+        "schema_version": 1, "job_id": "j2", "project_id": "p2",
+        "service_mode": "studio", "status": "succeeded",
+        "created_at": "2026-05-06T08:00:00+00:00",
+        "speaker_stats": {"asr_speaker_count": 2,
+                           "speaker_duration_shares": [0.6, 0.4],
+                           "speaker_count_by_threshold": {"0.05": 2, "0.10": 2, "0.15": 2, "0.20": 2},
+                           "uncertain_speaker_duration_share": 0.25},  # 25% uncertain
+        "clone_sample_stats": {"eligible_speakers": 2,
+                                "eligible_sample_count_buckets_by_speaker": [
+                                    {"≥5s": 5, "≥8s": 3, "≥10s": 1, "≥15s": 0},
+                                    {"≥5s": 4, "≥8s": 2, "≥10s": 1, "≥15s": 0},
+                                ]},
+    }
+    facts.write_text(json.dumps(fact) + "\n")
+    out = tmp_path / "out"
+    subprocess.run([sys.executable, str(SCRIPT), "--facts", str(facts), "--out-dir", str(out)],
+                    check=True, capture_output=True)
+    decisions = [json.loads(line) for line in (out / "j2" / "smart_shadow_decisions.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    stages = {d["stage_or_segment_id"]: d for d in decisions if d.get("decision_kind") == "stage"}
+    assert stages["translation_review_auto_approval"]["smart_decision"]["decision"] == "manual_review_required"
+    assert "uncertain" in stages["translation_review_auto_approval"]["smart_decision"]["reason"].lower()
