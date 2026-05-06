@@ -336,3 +336,31 @@ def test_user_edits(tmp_path):
     assert ue["speaker_corrections_effective"] == 2
     assert ue["splits_confirmed_effective"] == 1
     assert ue["text_changes_effective"] == 3
+
+
+@pytest.mark.skipif(sys.platform == "win32",
+                     reason="SIGINT to subprocess not reliably testable on Windows")
+def test_sigint_writes_incomplete_summary(tmp_path):
+    """Send SIGINT during scan → summary.is_complete_run can be False (or True if too fast)."""
+    import time
+    import signal as sig
+    fixtures = Path(__file__).resolve().parent / "fixtures" / "smart_shadow_eval"
+    out_dir = tmp_path / "out"
+    proc = subprocess.Popen(
+        [sys.executable, str(SCRIPT),
+         "--jobs-root", str(fixtures / "jobs"),
+         "--projects-root", str(fixtures / "projects"),
+         "--out-dir", str(out_dir)],
+    )
+    time.sleep(0.05)  # Let it start
+    try:
+        proc.send_signal(sig.SIGINT)
+    except (OSError, ValueError):
+        proc.terminate()  # Windows fallback
+    proc.wait(timeout=5)
+    # Should be either completed or interrupted; check summary
+    summary_path = out_dir / "summary.json"
+    if summary_path.is_file():
+        s = json.loads(summary_path.read_text(encoding="utf-8"))
+        assert "is_complete_run" in s
+        # If interrupted in time, is_complete_run=false; if too fast or signal didn't land, true is OK

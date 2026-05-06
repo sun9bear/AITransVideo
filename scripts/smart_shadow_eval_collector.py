@@ -20,12 +20,28 @@ import argparse
 import datetime
 import json
 import os
+import signal as _signal
 import socket
 import subprocess as sp
 import sys
 import traceback
 from collections import defaultdict
 from pathlib import Path
+
+
+_INTERRUPTED = {"flag": False}
+
+
+def _signal_handler(signum, frame):
+    _INTERRUPTED["flag"] = True
+
+
+def _install_signal_handlers():
+    try:
+        _signal.signal(_signal.SIGINT, _signal_handler)
+        _signal.signal(_signal.SIGTERM, _signal_handler)
+    except (AttributeError, ValueError):
+        pass  # Some platforms (Windows) restrict
 
 
 SCHEMA_VERSION = 1
@@ -601,6 +617,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
 
+    _install_signal_handlers()
+    _INTERRUPTED["flag"] = False  # Reset for each run (test isolation)
+
     # Pre-flight (exit 2 path — no summary written yet)
     jobs_root = Path(args.jobs_root)
     projects_root = Path(args.projects_root)
@@ -638,6 +657,8 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 paths = list(_iter_job_record_paths(jobs_root))
             for record_path in paths:
+                if _INTERRUPTED["flag"]:
+                    break
                 try:
                     rec = json.loads(record_path.read_text(encoding="utf-8"))
                 except (OSError, json.JSONDecodeError) as exc:
@@ -703,7 +724,7 @@ def main(argv: list[str] | None = None) -> int:
         "started_at": started_at,
         "finished_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "args": vars(args),
-        "is_complete_run": fatal_exception is None,
+        "is_complete_run": fatal_exception is None and not _INTERRUPTED["flag"],
         "scan_stats": {
             "jobs_inventoried": inventory_count,
             "jobs_factsheeted": facts_count,
@@ -726,10 +747,13 @@ def main(argv: list[str] | None = None) -> int:
 
     # Only rename facts/inventory IF the run completed (preserves spec §3.7
     # invariant: "facts.jsonl 存在 = run 完整").
-    if fatal_exception is None:
+    if fatal_exception is None and not _INTERRUPTED["flag"]:
         facts_tmp.rename(out_dir / "facts.jsonl")
         inventory_tmp.rename(out_dir / "inventory.jsonl")
         return 0
+    # Interrupted → exit 130; fatal → exit 1
+    if _INTERRUPTED["flag"]:
+        return 130
     return 1
 
 
