@@ -234,6 +234,46 @@ P1 simulator 实施期间 Codex 第二意见审查 **`smart_shadow_eval_collecto
 
 ### 11.5 行动项
 
-- [ ] 下次 production SSH 部署窗口顺手用 `b1b1f8c` 后的 collector 重跑生产 38-job dump，回填本 note §3 真实 cloned/preset/unknown 三桶分布。
-- [x] P1 simulator + aggregator 已对齐新 schema（commits `195911c` `b1b1f8c` `4a55eb0`）。
+- [x] **2026-05-07 远端只读 collector 重跑**（38 jobs）已完成，回填三桶真实分布：
+  - **23/38 jobs (60%)** 至少含 1 个 unknown 分类的 voice_id
+  - 14/38 (37%) 全 cloned（vt_ / moss_audio_ / UUID）
+  - 0/38 显式 preset_*（即 production 实际不用 `preset_*` 命名约定）
+  - 余 1 job 是混合
+  - 详见 P1 Done note §4-bis.5
+- [x] P1 simulator + aggregator 已对齐新 schema（commits `195911c` `b1b1f8c` `4a55eb0` `e8f0e6c`）。
 - [x] 5 个新回归测试钉住 invariant 与 unknown 分类不再退化。
+
+---
+
+## 12. 2026-05-07 增补：spec §3.5 retry estimation v1 公式 FAIL
+
+P1 Done note §5.2 Gap A 的远端只读闭环（2026-05-07）拿到了真实估算精度数字。**结论**：
+
+| 指标 | 实测 (n=15 metered jobs) | spec §3.5 期望 |
+|---|---|---|
+| `estimation_error_p50` | **385.7%** | ≤ 50% |
+| `estimation_error_p90` | **666.7%** | ≤ 50% |
+
+**v1 公式 FAIL** —— 15/15 metered jobs 全部 smart over-predict actual retts，最坏 case 30 vs 0（3000% 误差）。
+
+### 12.1 对本 note §11 verdict 的影响
+
+P0 §11 verdict（2026-05-06）当时基于 38 jobs 给的是 **conditional PASS for P1 shadow，NOT PASS for P2 production launch**——这个判断仍然成立，但**增加了一条 P2 入口前的硬阻塞**：
+
+- **原 P2 入口条件**（§7.1 / §7.2）仍要求：post-Phase-D metered ≥20 / cost p90 stable / pricing snapshot
+- **新增** P2 入口条件：spec §3.5 retry estimation **v2 公式 + 在新 metered jobs 上重测 ≤50%**
+
+§3.5 v1 公式问题的根因分析 + v2 建议在 P1 Done note §4-bis.3，不在此重复。
+
+### 12.2 对本 note §6 / §7 主张的影响
+
+- §6 推荐的"P1 初始阈值"不依赖 retry estimation，**仍然有效**
+- §7.2 提及"retts_audio/src 是否仍 ≤ 30%"是 Studio 实测数据（来自 metering），不依赖 smart 公式预测，**仍然有效**
+- §11 决策摘要的"Recommend P1 with main_threshold=0.10..." 是 P1 操作建议，与 P2 cost 推断解耦，**仍然有效**
+- ⚠️ 任何基于"smart 估算成本"做的 P2 商业可行性推断（如果存在）现在**不再可信**——v1 公式 over-predict 4-7× 会让 smart 看起来比实际贵得多
+
+### 12.3 行动项
+
+- [ ] **spec §3.5 公式 v2**（P1 Done note §4-bis.3 三条建议 → 实施）
+- [ ] v2 实施后用同一份 prod facts.jsonl 重跑 simulator，看 `estimation_error_p90` 是否 ≤ 50%
+- [ ] v2 通过后才能开始 P2 cost 推断的工作
