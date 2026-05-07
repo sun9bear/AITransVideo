@@ -914,3 +914,201 @@ def build_effective_marker_event(
     event["effective"] = True
     event["effective_reason"] = effective_reason
     return event
+
+
+# ---------------------------------------------------------------------------
+# Survivor computation (drives ``effective_marker.context.marked_event_ids``)
+# ---------------------------------------------------------------------------
+
+
+def _read_audit_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    out: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict):
+                out.append(obj)
+    return out
+
+
+def _load_final_segments_index(path: Path) -> dict[str, dict[str, Any]] | None:
+    """Read a segments.json and index it by segment_id.
+
+    Tolerates both list-shaped ``[seg, ...]`` and dict-shaped
+    ``{"segments": [...]}`` payloads (different writers in the codebase
+    use both). Returns None if the file is absent or unparseable so the
+    caller can distinguish "no segments file" from "file present, no
+    segments survived" — without that distinction, an absent file would
+    incorrectly mark every intent event as "did not survive".
+    """
+    if not path.is_file():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    segs = raw.get("segments") if isinstance(raw, dict) else raw
+    if not isinstance(segs, list):
+        return None
+    out: dict[str, dict[str, Any]] = {}
+    for seg in segs:
+        if not isinstance(seg, dict):
+            continue
+        sid = seg.get("segment_id")
+        if sid is None:
+            continue
+        out[str(sid)] = seg
+    return out
+
+
+def _find_current_session_start_index(
+    events: list[dict[str, Any]], edit_generation: int | None
+) -> int | None:
+    """Return the index of the latest ``editing_session_started`` event,
+    preferring one whose ``context.edit_generation`` matches when given.
+
+    Falls back to the most recent session boundary if the requested
+    edit_generation is not in the log (legacy backfilled jobs may have a
+    session_started without context.edit_generation set, or the caller
+    may pass None). Returns None if no session_started exists at all.
+    """
+    matched: int | None = None
+    fallback: int | None = None
+    for i, ev in enumerate(events):
+        if ev.get("event_type") != EVENT_TYPE_EDITING_SESSION_STARTED:
+            continue
+        fallback = i
+        if edit_generation is None:
+            continue
+        ctx = ev.get("context") if isinstance(ev, dict) else None
+        gen = ctx.get("edit_generation") if isinstance(ctx, dict) else None
+        if gen == edit_generation:
+            matched = i
+    return matched if matched is not None else fallback
+
+
+def _text_changed_survives(
+    ev: dict[str, Any], final_segs: dict[str, dict[str, Any]]
+) -> bool:
+    """Survivor iff segment still exists AND final cn_text hash matches
+    ``after.text_hash``. Naturally handles A→B→A reverts (B's hash will
+    not match the final A) and toggles (any event whose ``after`` is the
+    final value still survives).
+    """
+    seg = ev.get("segment") if isinstance(ev, dict) else None
+    after = ev.get("after") if isinstance(ev, dict) else None
+    sid = str(seg.get("segment_id") or "") if isinstance(seg, dict) else ""
+    if not sid or sid not in final_segs:
+        return False
+    expected = after.get("text_hash") if isinstance(after, dict) else None
+    if not expected:
+        return False
+    field = "cn_text"
+    if isinstance(after, dict) and after.get("field"):
+        field = str(after["field"])
+    final_text = final_segs[sid].get(field)
+    if final_text is None:
+        return False
+    return text_hash(str(final_text)) == expected
+
+
+def _speaker_changed_survives(
+    ev: dict[str, Any], final_segs: dict[str, dict[str, Any]]
+) -> bool:
+    seg = ev.get("segment") if isinstance(ev, dict) else None
+    after = ev.get("after") if isinstance(ev, dict) else None
+    sid = str(seg.get("segment_id") or "") if isinstance(seg, dict) else ""
+    if not sid or sid not in final_segs:
+        return False
+    expected = str(after.get("speaker_id") or "") if isinstance(after, dict) else ""
+    if not expected:
+        return False
+    return str(final_segs[sid].get("speaker_id") or "") == expected
+
+
+def _split_survives(
+    ev: dict[str, Any], final_segs: dict[str, dict[str, Any]]
+) -> bool:
+    """Survivor iff the parent segment_id is GONE from the final segments
+    (split was applied and not undone). We do not require the recorded
+    children to be present individually because subsequent splits or
+    text edits may rename or further subdivide them — the durable signal
+    is that the parent is gone.
+    """
+    seg = ev.get("segment") if isinstance(ev, dict) else None
+    parent_sid = str(seg.get("segment_id") or "") if isinstance(seg, dict) else ""
+    if not parent_sid:
+        return False
+    return parent_sid not in final_segs
+
+
+def compute_post_edit_marked_event_ids(
+    *,
+    audit_path: Path,
+    final_segments_path: Path,
+    edit_generation: int | None,
+) -> list[str]:
+    """Return the intent event_ids in the most recent editing session
+    whose effects survived to the post-commit final segments.json.
+
+    Used by the service layer's commit-emit path to populate
+    ``effective_marker.context.marked_event_ids``. Each surviving id
+    flips an otherwise-``effective=False`` intent event into "effective"
+    via the join semantics in plan §4.5 (without rewriting the original
+    line — the marker is a separate append).
+
+    Survivor rules:
+
+    * ``post_edit_text_changed`` → final segment exists AND
+      ``text_hash(final.cn_text) == event.after.text_hash``.
+    * ``post_edit_segment_speaker_changed`` → final segment exists AND
+      ``final.speaker_id == event.after.speaker_id``.
+    * ``post_edit_segment_split_confirmed`` → parent ``segment_id``
+      is absent from final segments (the split was applied).
+
+    Returns ``[]`` on any error (missing audit file, missing final
+    segments, malformed JSON, no session boundary). Best-effort: this
+    function MUST NOT raise — the commit-emit path treats survivor
+    computation as a refinement, never a pre-condition.
+    """
+    try:
+        events = _read_audit_jsonl(audit_path)
+    except OSError:
+        return []
+    if not events:
+        return []
+
+    final_segs = _load_final_segments_index(final_segments_path)
+    if final_segs is None:
+        return []
+
+    boundary = _find_current_session_start_index(events, edit_generation)
+    if boundary is None:
+        return []
+
+    survivors: list[str] = []
+    for ev in events[boundary + 1:]:
+        et = ev.get("event_type") if isinstance(ev, dict) else None
+        if et == EVENT_TYPE_POST_EDIT_TEXT_CHANGED:
+            if not _text_changed_survives(ev, final_segs):
+                continue
+        elif et == EVENT_TYPE_POST_EDIT_SEGMENT_SPEAKER_CHANGED:
+            if not _speaker_changed_survives(ev, final_segs):
+                continue
+        elif et == EVENT_TYPE_POST_EDIT_SEGMENT_SPLIT_CONFIRMED:
+            if not _split_survives(ev, final_segs):
+                continue
+        else:
+            continue
+        eid = str(ev.get("event_id") or "")
+        if eid:
+            survivors.append(eid)
+    return survivors

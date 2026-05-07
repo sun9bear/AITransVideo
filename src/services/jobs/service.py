@@ -619,11 +619,14 @@ class JobService:
     ) -> None:
         from pathlib import Path as _Path
         from services.jobs.user_edit_audit import (
+            AUDIT_DIR_NAME,
+            AUDIT_EVENTS_FILENAME,
             AuditContext,
             EFFECTIVE_REASON_COMMITTED,
             STAGE_POST_EDIT,
             build_effective_marker_event,
             build_post_edit_committed_event,
+            compute_post_edit_marked_event_ids,
         )
 
         # commit_as_new can return a copy_target_job_id; overwrite stays on
@@ -633,7 +636,12 @@ class JobService:
             return
         ctx = AuditContext.from_job_record(record_pre_commit)
         result = result if isinstance(result, dict) else {}
-        target_job_id = result.get("copy_target_job_id") or result.get("target_job_id")
+        target_job_id = (
+            result.get("copy_target_job_id")
+            or result.get("target_job_id")
+            or result.get("new_job_id")
+        )
+        new_project_dir = result.get("new_project_dir")
 
         committed = build_post_edit_committed_event(
             ctx,
@@ -644,16 +652,44 @@ class JobService:
         project_dir = _Path(record_pre_commit.project_dir)
         self._emit_user_edit_event(project_dir, committed)
 
-        # Effective marker — turn the prior session's edits from "weak/confirmed"
-        # into "effective" via append, without touching the original lines.
-        # We don't enumerate event_ids here because P0 doesn't read back the
-        # JSONL; the marker carries the effective_reason and the offline
-        # parser joins by session boundaries (editing_session_started …
-        # post_edit_committed of the same edit_generation).
+        # Effective marker — turn the prior session's intent events from
+        # ``effective=False`` into "effective" via append-only join.
+        # ``marked_event_ids`` lists the intent events whose changes
+        # survived to the post-commit final segments.json. The marker is
+        # a separate event; the original intent lines are never rewritten.
+        #
+        # final segments live at ``editor/segments.json``:
+        # - overwrite: same project_dir as the source (editing/ promoted in place).
+        # - copy_as_new: result["new_project_dir"] (the target — source
+        #   editor/segments.json stays on the previous baseline).
+        # Audit JSONL stays on the SOURCE project_dir for both strategies
+        # (per copy_as_new policy: target starts with a fresh audit slate).
+        if strategy == "copy_as_new" and new_project_dir:
+            final_segments_path = _Path(new_project_dir) / "editor" / "segments.json"
+        else:
+            final_segments_path = project_dir / "editor" / "segments.json"
+        audit_path = project_dir / AUDIT_DIR_NAME / AUDIT_EVENTS_FILENAME
+
+        marked_event_ids: list[str] = []
+        try:
+            marked_event_ids = compute_post_edit_marked_event_ids(
+                audit_path=audit_path,
+                final_segments_path=final_segments_path,
+                edit_generation=record_pre_commit.edit_generation,
+            )
+        except Exception:  # noqa: BLE001
+            import logging
+            logging.getLogger(__name__).exception(
+                "compute_post_edit_marked_event_ids failed for %s; "
+                "marker will be emitted with empty marked_event_ids",
+                record_pre_commit.job_id,
+            )
+
         marker = build_effective_marker_event(
             ctx,
             stage=STAGE_POST_EDIT,
             effective_reason=EFFECTIVE_REASON_COMMITTED,
+            marked_event_ids=marked_event_ids,
             extra_context={
                 "edit_generation": record_pre_commit.edit_generation,
                 "strategy": str(strategy),
