@@ -23,6 +23,8 @@ def measure_duration_ms(path: str | Path) -> int:
     """
     resolved = str(Path(path).resolve(strict=False))
     try:
+        # P1-14 (audit 2026-05-07): 30s timeout to prevent worker threads
+        # hanging on hostile or network-mounted audio sources
         result = subprocess.run(
             [
                 "ffprobe",
@@ -35,9 +37,14 @@ def measure_duration_ms(path: str | Path) -> int:
             capture_output=True,
             text=True,
             check=True,
+            timeout=30,
         )
     except FileNotFoundError as exc:
         raise AudioProbeError("ffprobe not found on PATH") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise AudioProbeError(
+            f"ffprobe timed out after {exc.timeout}s for {resolved}"
+        ) from exc
     except subprocess.CalledProcessError as exc:
         raise AudioProbeError(
             f"ffprobe failed for {resolved}: {(exc.stderr or '').strip()}"
