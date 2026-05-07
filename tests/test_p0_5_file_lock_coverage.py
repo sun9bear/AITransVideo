@@ -180,6 +180,100 @@ def test_admin_settings_delete_prompt_history_uses_file_lock():
     )
 
 
+def _admin_settings_function_locks_target(fn_name: str, target_name: str) -> bool:
+    """Stricter than _admin_settings_function_uses_file_lock: also asserts
+    the lock argument is the named module variable (e.g. _PROMPT_HISTORY_FILE
+    or SETTINGS_FILE), not some other path. Catches a refactor that swaps
+    in the wrong file.
+    """
+    src_path = _REPO_ROOT / "gateway" / "admin_settings.py"
+    src = src_path.read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name != fn_name:
+            continue
+        fn_src = ast.get_source_segment(src, node)
+        if fn_src is None:
+            return False
+        fn_tree = ast.parse(textwrap.dedent(fn_src))
+        for sub in ast.walk(fn_tree):
+            if not isinstance(sub, ast.With):
+                continue
+            for it in sub.items:
+                ce = it.context_expr
+                # file_lock(<arg>)
+                if isinstance(ce, ast.Call) \
+                   and isinstance(ce.func, ast.Name) and ce.func.id == "file_lock" \
+                   and len(ce.args) >= 1 \
+                   and isinstance(ce.args[0], ast.Name) \
+                   and ce.args[0].id == target_name:
+                    return True
+        return False
+    return False
+
+
+def test_admin_settings_save_prompt_history_locks_correct_target():
+    """P1-15c (Codex P0-5 review): assert the lock target is specifically
+    _PROMPT_HISTORY_FILE, not some other path. Catches a refactor that
+    swaps in the wrong file or accidentally locks SETTINGS_FILE here."""
+    assert _admin_settings_function_locks_target(
+        "_save_prompt_history", "_PROMPT_HISTORY_FILE"
+    ), (
+        "P1-15c regression: _save_prompt_history must hold "
+        "file_lock(_PROMPT_HISTORY_FILE) specifically — locking any other "
+        "path silently lets a concurrent prompt-history mutation lose "
+        "its update."
+    )
+
+
+def test_admin_settings_delete_prompt_history_locks_correct_target():
+    """Same stricter check for delete_prompt_history."""
+    assert _admin_settings_function_locks_target(
+        "delete_prompt_history", "_PROMPT_HISTORY_FILE"
+    )
+
+
+def test_admin_settings_save_prompt_history_uses_atomic_write_json():
+    """P1-15c (Codex P0-5 review): _save_prompt_history must use
+    atomic_write_json (which does temp + os.replace) so a crash mid-write
+    cannot leave a half-written prompt_history.json. The earlier raw
+    write_text was the bug pattern."""
+    src_path = _REPO_ROOT / "gateway" / "admin_settings.py"
+    src = src_path.read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name != "_save_prompt_history":
+            continue
+        fn_src = ast.get_source_segment(src, node)
+        assert fn_src is not None
+        fn_tree = ast.parse(textwrap.dedent(fn_src))
+        # Walk: must find a Call to atomic_write_json
+        # AND must NOT find a Call to write_text (that would be the bug)
+        found_atomic = False
+        found_write_text = False
+        for sub in ast.walk(fn_tree):
+            if isinstance(sub, ast.Call):
+                func = sub.func
+                if isinstance(func, ast.Name) and func.id == "atomic_write_json":
+                    found_atomic = True
+                if isinstance(func, ast.Attribute) and func.attr == "write_text":
+                    found_write_text = True
+        assert found_atomic, (
+            "P1-15c regression: _save_prompt_history is no longer using "
+            "atomic_write_json — a partial write would corrupt the file."
+        )
+        assert not found_write_text, (
+            "P1-15c regression: _save_prompt_history reverted to write_text. "
+            "atomic_write_json provides crash-safety; raw write_text does not."
+        )
+        return  # found and asserted
+    pytest.fail("_save_prompt_history function not found in admin_settings.py")
+
+
 # ====================================================================
 # §2 — Real concurrency: drive the actual code paths and assert that
 #       all N parallel updates survive in the on-disk file.
