@@ -117,20 +117,30 @@ def _make_db():
 
 
 def _paid_flow_execute(*, order, user, existing_invoice=None, existing_sub=None):
-    """Reproduce the 5-step execute sequence of `_process_payment_event(paid)`:
+    """Reproduce the execute sequence of `_process_payment_event(paid)`
+    AFTER P1-11b (commit ca99e00 replaced SELECT-then-INSERT dedup with
+    INSERT ON CONFLICT RETURNING):
 
-      1. PaymentWebhookEvent dedup → None
-      2. PaymentOrder lookup        → order
-      3. User lookup                → user
-      4. BillingInvoice lookup      → existing_invoice (or None)
-      5. Subscription lookup        → existing_sub (or None)
+      1. PaymentWebhookEvent INSERT ... RETURNING id → ``"evt-row-1"``
+         (None would mean "ON CONFLICT fired → duplicate → bail")
+      2. PaymentWebhookEvent re-fetch by id          → fresh event ORM
+      3. PaymentOrder lookup                          → ``order``
+      4. User lookup                                  → ``user``
+      5. BillingInvoice lookup                        → ``existing_invoice`` or None
+      6. Subscription lookup                          → ``existing_sub`` or None
     """
-    none_dup = MagicMock(); none_dup.scalar_one_or_none.return_value = None
+    insert_res = MagicMock()
+    insert_res.scalar_one_or_none.return_value = "evt-row-1"
+    fresh_event = SimpleNamespace(
+        processed=False, error_message=None, processed_at=None,
+    )
+    event_res = MagicMock()
+    event_res.scalar_one.return_value = fresh_event
     order_res = MagicMock(); order_res.scalar_one_or_none.return_value = order
     user_res = MagicMock(); user_res.scalar_one_or_none.return_value = user
     invoice_res = MagicMock(); invoice_res.scalar_one_or_none.return_value = existing_invoice
     sub_res = MagicMock(); sub_res.scalar_one_or_none.return_value = existing_sub
-    sequence = [none_dup, order_res, user_res, invoice_res, sub_res]
+    sequence = [insert_res, event_res, order_res, user_res, invoice_res, sub_res]
     idx = {"n": 0}
 
     async def _execute(*a, **kw):
@@ -247,11 +257,19 @@ class TestFirstPaymentWritesTruthRows:
 
 class TestIdempotency:
     def test_duplicate_dedup_event_is_a_noop(self):
-        """Existing PaymentWebhookEvent short-circuits the whole path."""
+        """Duplicate PaymentWebhookEvent short-circuits the whole path.
+
+        P1-11b (commit ca99e00): the dedup signal flipped from
+        "SELECT existing returns a row" to "INSERT ON CONFLICT RETURNING
+        produces no row (scalar_one_or_none() == None)".
+        """
         db = _make_db()
-        existing_event = SimpleNamespace(id="dup")
-        hit = MagicMock(); hit.scalar_one_or_none.return_value = existing_event
-        db.execute = AsyncMock(return_value=hit)
+        # INSERT … ON CONFLICT DO NOTHING RETURNING id — duplicate fires,
+        # nothing returned. The function must bail out before any other
+        # execute() call lands.
+        insert_dup = MagicMock()
+        insert_dup.scalar_one_or_none.return_value = None
+        db.execute = AsyncMock(return_value=insert_dup)
 
         settled = _run(
             _process_payment_event(
@@ -747,11 +765,19 @@ class TestRefundInvoiceTransition:
             updated_at=None,
             subscription_id=uuid.uuid4(),
         )
-        none_dup = MagicMock(); none_dup.scalar_one_or_none.return_value = None
+        # P1-11b (commit ca99e00): new sequence is INSERT-RETURNING,
+        # re-fetch event, then SELECT order, then SELECT invoice.
+        insert_res = MagicMock()
+        insert_res.scalar_one_or_none.return_value = "evt-row-1"
+        fresh_event = SimpleNamespace(
+            processed=False, error_message=None, processed_at=None,
+        )
+        event_res = MagicMock()
+        event_res.scalar_one.return_value = fresh_event
         order_res = MagicMock(); order_res.scalar_one_or_none.return_value = order
         invoice_res = MagicMock()
         invoice_res.scalar_one_or_none.return_value = existing_invoice
-        sequence = [none_dup, order_res, invoice_res]
+        sequence = [insert_res, event_res, order_res, invoice_res]
         idx = {"n": 0}
 
         async def _execute(*a, **kw):
@@ -809,12 +835,19 @@ class TestRefundInvoiceTransition:
             updated_at=None,
             subscription_id=None,
         )
-        none_dup = MagicMock(); none_dup.scalar_one_or_none.return_value = None
+        # P1-11b sequence (same shape as test_refund_webhook_does_not_touch_*).
+        insert_res = MagicMock()
+        insert_res.scalar_one_or_none.return_value = "evt-row-2"
+        fresh_event = SimpleNamespace(
+            processed=False, error_message=None, processed_at=None,
+        )
+        event_res = MagicMock()
+        event_res.scalar_one.return_value = fresh_event
         order_res = MagicMock(); order_res.scalar_one_or_none.return_value = order
         invoice_res = MagicMock()
         invoice_res.scalar_one_or_none.return_value = existing_invoice
 
-        sequence = [none_dup, order_res, invoice_res]
+        sequence = [insert_res, event_res, order_res, invoice_res]
         idx = {"n": 0}
 
         async def _execute(*a, **kw):
@@ -848,11 +881,16 @@ class TestRefundInvoiceTransition:
         This guards against a provider sending the same refund event twice —
         the event-dedup happens before the terminal-state guard, so we never
         even reach the `_is_paid_to_refund` branch a second time.
+
+        P1-11b (commit ca99e00): dedup signal flipped from "SELECT existing
+        returns row" to "INSERT ON CONFLICT RETURNING returns no row".
         """
         db = _make_db()
-        existing_event = SimpleNamespace(id="dup-refund-evt")
-        hit = MagicMock(); hit.scalar_one_or_none.return_value = existing_event
-        db.execute = AsyncMock(return_value=hit)
+        # INSERT … ON CONFLICT DO NOTHING RETURNING id — duplicate fires,
+        # nothing returned. Function bails out before any other call.
+        insert_dup = MagicMock()
+        insert_dup.scalar_one_or_none.return_value = None
+        db.execute = AsyncMock(return_value=insert_dup)
 
         settled = _run(
             _process_payment_event(

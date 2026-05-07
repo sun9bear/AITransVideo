@@ -44,6 +44,69 @@ def test_jobs_api_download_does_not_use_read_bytes_for_full_file():
     )
 
 
+def test_download_branch_calls_stream_helper_and_rejects_read_bytes():
+    """P1-12c follow-up (Codex review 2026-05-07): the previous guard
+    only checked that ``_stream_binary_file`` appears anywhere in the
+    file. A future edit could leave the helper definition in place
+    while flipping the download branch back to ``download_path.read_bytes()``
+    and the guard would still pass.
+
+    Tighten: AST-walk every Call whose receiver is ``download_path``.
+    There must be at least one ``Call`` with ``func.attr == "_stream_binary_file"``
+    AND zero ``Call`` matching ``download_path.read_bytes()``.
+    """
+    src_path = _REPO_ROOT / "src" / "services" / "jobs" / "api.py"
+    src = src_path.read_text(encoding="utf-8")
+    tree = ast.parse(src)
+
+    stream_helper_calls = 0
+    download_path_read_bytes_calls = 0
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+
+        # self._stream_binary_file(..., download_path, ...) — match by
+        # attribute name + check that download_path appears as one of
+        # the positional or keyword args.
+        if (
+            isinstance(func, ast.Attribute)
+            and func.attr == "_stream_binary_file"
+        ):
+            mentions_download_path = any(
+                isinstance(a, ast.Name) and a.id == "download_path"
+                for a in node.args
+            ) or any(
+                isinstance(kw.value, ast.Name) and kw.value.id == "download_path"
+                for kw in node.keywords
+            )
+            if mentions_download_path:
+                stream_helper_calls += 1
+
+        # download_path.read_bytes() — the antipattern we rejected.
+        if (
+            isinstance(func, ast.Attribute)
+            and func.attr == "read_bytes"
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "download_path"
+        ):
+            download_path_read_bytes_calls += 1
+
+    assert stream_helper_calls >= 1, (
+        "P1-12c follow-up regression: no call to "
+        "_stream_binary_file(..., download_path, ...) found in api.py. "
+        "The download branch is no longer routed through the streaming "
+        "helper — it likely reverted to read_bytes() or another "
+        "in-memory pattern that risks 1GB+ RSS spikes."
+    )
+    assert download_path_read_bytes_calls == 0, (
+        f"P1-12c follow-up regression: found {download_path_read_bytes_calls} "
+        f"call(s) to download_path.read_bytes() in api.py. This loads the "
+        f"full dubbed_video into RAM; use _stream_binary_file instead."
+    )
+
+
 def test_upload_uses_asyncio_to_thread_for_copyfileobj():
     """gateway/upload.py shutil.copyfileobj must be wrapped in
     asyncio.to_thread to avoid blocking the event loop."""
