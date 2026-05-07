@@ -9,7 +9,7 @@
 - `generate-jianying-draft` 的触发 / 轮询 / ownership proxy
 - `JianyingDraftRunner` 的 `fingerprint / substep / orphan rescue`
 - deliverable-time whisper ensure 如何进入 runner
-- `user_draft_root` 与 zip 命名 / draft path 的边界
+- `display_name`、`user_draft_root` 与 zip 命名 / draft path 的边界
 
 ## 2. 主图
 
@@ -25,7 +25,7 @@ graph TD
     Gateway --> JobApi["Job API"]
 
     JobApi --> Runner["JianyingDraftRunner"]
-    Runner --> Fingerprint["artifact hashes + user_draft_root<br/>+ whisper policy snapshot"]
+    Runner --> Fingerprint["artifact hashes + display_name<br/>+ user_draft_root + whisper policy"]
     Runner --> Substeps["validating -> aligning_subtitles -> building -> zip"]
     Runner --> Rescue["reap_stale / orphan rescue"]
 
@@ -34,6 +34,10 @@ graph TD
     Backend --> Writer["JianyingDraftWriter"]
     Writer --> Zip["editor.jianying_draft_zip"]
     Writer --> Report["compatibility report"]
+
+    Rename["project rename / S2 auto-rename"] --> DisplayName["Job-API JSON display_name"]
+    DisplayName --> Fingerprint
+    DisplayName --> Zip
 
     PostEdit["editing_commit overwrite / copy_as_new"] --> Reset["reset jianying_draft_* + rm project/jianying"]
     Reset --> ResultUI
@@ -44,13 +48,14 @@ graph TD
 ### 3.1 `aligning_subtitles` 已经是正式子步骤
 
 - `jianying_draft_runner.py` 定义了 `SUBSTEP_ALIGNING_SUBTITLES`
-- 只有当 whisper double-gate 打开时，runner 才会进入这个子步骤；否则直接从 `validating_inputs` 走到 `building_draft`
+- 只有当 whisper capability + policy 都打开时，runner 才会进入这个子步骤；否则直接从 `validating_inputs` 走到 `building_draft`
 
 结论：Jianying draft 现在会把“字幕精对齐是否真的发生”显式暴露给用户和 ops。
 
-### 3.2 fingerprint 已经受 whisper policy 影响
+### 3.2 fingerprint 现在不仅受 whisper policy 影响，也受 `display_name` 影响
 
 - `artifact hashes`：`source.original_video`、`editor.dubbed_audio_complete`、`editor.subtitles`、`editor.ambient_audio`
+- `display_name`
 - `user_draft_root`
 - backend / writer version
 - `whisper_alignment_policy`
@@ -60,7 +65,7 @@ graph TD
   - `skip_cache`
   - `model`
 
-结论：admin 改了 whisper 策略后，即使原始素材没变，旧 draft zip 也会变成 cache miss。
+结论：素材不变但项目改名时，旧 draft zip 也会变成 cache miss，避免下载到过时文件名。
 
 ### 3.3 `skip_cache=true` 不只影响 inner helper
 
@@ -81,7 +86,7 @@ graph TD
 
 - `jianying_draft_writer.py` 会基于 `user_draft_root` 决定 draft 内 material path 是相对路径还是绝对路径
 - 对外暴露给结果页的交付物仍然是 `editor.jianying_draft_zip`
-- 同文件还负责友好 zip basename：优先 `project_title`，避免用户直接看到长 UUID
+- 同文件还负责友好 zip basename；现在它与 `display_name` 保持一致，而不是继续依赖旧占位名
 
 结论：`user_draft_root` 属于“解压后剪映如何找到本地素材”的语义，不属于下载权限或下载路径语义。
 
@@ -101,12 +106,15 @@ graph TD
   - `_whisper_policy_snapshot()`
   - `_whisper_force_fresh_active()`
   - `reap_stale()`
+  - fingerprint schema `4`
 - `src/services/subtitles/ensure_whisper_alignment.py`
   - `skip_cache` fast-path bypass
   - `alignment_model` stamp
 - `src/modules/output/jianying/jianying_draft_writer.py`
   - `user_draft_root`
   - friendly zip basename
+- `gateway/job_intercept.py`
+  - rename mirror back into Job-API JSON store
 - `src/services/jobs/editing_commit.py`
   - draft invalidation
 
@@ -114,5 +122,5 @@ graph TD
 
 - 想改 `generate-jianying-draft` 的触发、轮询、状态机
 - 想判断某次 trigger 为什么命中旧 zip、为什么没有重跑
-- 想改 `skip_cache`、`model`、`user_draft_root` 的行为
+- 想改 `skip_cache`、`model`、`user_draft_root`、`display_name` 的行为
 - 想排查 stale running、orphan rescue、cache miss/hit 的诊断语义
