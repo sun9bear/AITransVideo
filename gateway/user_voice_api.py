@@ -497,6 +497,10 @@ async def internal_expire_voice(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> Response:
+    internal_error = _internal_access_error(request)
+    if internal_error is not None:
+        return internal_error
+
     body = await _read_body(request)
     user_id = body.get("user_id")
     job_id = body.get("job_id")

@@ -26,7 +26,11 @@ from plan_catalog import router as plan_catalog_router
 from subscriptions import router as subscriptions_router
 from materials_api import router as materials_router
 from background_task_api import router as background_task_router
-from voice_catalog_api import router as voice_catalog_router, internal_router as voice_catalog_internal_router
+from voice_catalog_api import (
+    router as voice_catalog_router,
+    internal_router as voice_catalog_internal_router,
+    _require_internal_access,
+)
 from traffic_analytics import router as traffic_analytics_router
 from auth import (
     LoginRequest,
@@ -304,8 +308,14 @@ app.get("/job-api/jobs")(intercept_list_jobs)
 app.post("/job-api/jobs")(intercept_create_job)
 app.get("/job-api/jobs/{job_id}")(intercept_get_job)
 app.delete("/job-api/jobs/{job_id}")(intercept_delete_job_v2)
-app.post("/job-api/jobs/{job_id}/source-metadata")(update_source_metadata)
-app.post("/job-api/jobs/{job_id}/metering")(update_job_metering)
+app.post(
+    "/job-api/jobs/{job_id}/source-metadata",
+    dependencies=[Depends(_require_internal_access)],
+)(update_source_metadata)
+app.post(
+    "/job-api/jobs/{job_id}/metering",
+    dependencies=[Depends(_require_internal_access)],
+)(update_job_metering)
 app.post("/job-api/jobs/{job_id}/voice-clone")(voice_clone_for_selection)
 app.get("/api/voice-selection/pricing")(get_voice_selection_pricing)
 

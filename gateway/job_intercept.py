@@ -2509,7 +2509,8 @@ async def _verify_job_ownership(
         if result2.scalar_one_or_none() is not None:
             raise HTTPException(status_code=403, detail="无权访问此任务")
         else:
-            logger.warning("Job %s not found in DB — allowing access (legacy job?)", job_id)
+            logger.warning("Job %s not found in DB — denying access", job_id)
+            raise HTTPException(status_code=404, detail="任务不存在")
 
 
 # ---------------------------------------------------------------------------
