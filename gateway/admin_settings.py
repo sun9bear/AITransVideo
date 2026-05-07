@@ -320,7 +320,13 @@ _PROMPT_HISTORY_FILE = Path(
 
 
 def _load_prompt_history() -> list[dict]:
-    """Load prompt version history."""
+    """Load prompt version history.
+
+    P0-5 follow-up (audit 2026-05-07): read-only, but callers that follow
+    up with _save_prompt_history MUST hold file_lock(_PROMPT_HISTORY_FILE)
+    around the load→modify→save pair to avoid lost-update races between
+    update_review_prompts and delete_prompt_history.
+    """
     if _PROMPT_HISTORY_FILE.exists():
         try:
             return json.loads(_PROMPT_HISTORY_FILE.read_text(encoding="utf-8"))
@@ -330,11 +336,21 @@ def _load_prompt_history() -> list[dict]:
 
 
 def _save_prompt_history(history: list[dict]) -> None:
+    """Persist prompt version history.
+
+    P0-5 follow-up (audit 2026-05-07): file_lock + atomic_write_json so
+    a partial write or a concurrent writer cannot corrupt the file or
+    drop entries. Callers that do load→modify→save (update_review_prompts,
+    delete_prompt_history) MUST also hold file_lock(_PROMPT_HISTORY_FILE)
+    around the whole sequence — the lock here is a defense-in-depth
+    backstop that protects the single write but doesn't protect the
+    load→modify gap.
+    """
     _PROMPT_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _PROMPT_HISTORY_FILE.write_text(
-        json.dumps(history, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    with file_lock(_PROMPT_HISTORY_FILE):
+        atomic_write_json(str(_PROMPT_HISTORY_FILE), history)
+    # NOTE: legacy non-atomic write removed; the inline call above replaces
+    # _PROMPT_HISTORY_FILE.write_text(json.dumps(...), encoding="utf-8").
 
 
 _DEFAULT_PROMPTS: dict[str, str] = {
@@ -740,14 +756,21 @@ async def update_review_prompts(
         has_content = any(old_prompts.get(k) for k in _PROMPT_KEYS) or bool(old_models)
         if has_content:
             from datetime import datetime, timezone
-            history = _load_prompt_history()
-            history.append({
-                "saved_at": datetime.now(timezone.utc).isoformat(),
-                "label": label or f"版本 {len(history) + 1}",
-                "prompts": {k: old_prompts.get(k, "") for k in _PROMPT_KEYS},
-                "models": old_models,
-            })
-            _save_prompt_history(history)
+            # P0-5 follow-up (audit 2026-05-07, codex review 2026-05-07):
+            # nest the prompt_history lock INSIDE the SETTINGS_FILE lock.
+            # Lock order is fixed (settings → history) and the only other
+            # caller of file_lock(_PROMPT_HISTORY_FILE) — delete_prompt_history
+            # — never touches SETTINGS_FILE, so the two are independent and
+            # cannot circular-acquire.
+            with file_lock(_PROMPT_HISTORY_FILE):
+                history = _load_prompt_history()
+                history.append({
+                    "saved_at": datetime.now(timezone.utc).isoformat(),
+                    "label": label or f"版本 {len(history) + 1}",
+                    "prompts": {k: old_prompts.get(k, "") for k in _PROMPT_KEYS},
+                    "models": old_models,
+                })
+                _save_prompt_history(history)
 
         # Update prompt overrides
         review_prompts = full_data.get("review_prompts", {})
@@ -886,11 +909,16 @@ async def delete_prompt_history(
 ) -> dict:
     """Delete a specific history version."""
     _require_admin(user)
-    history = _load_prompt_history()
-    if index < 0 or index >= len(history):
-        raise HTTPException(status_code=404, detail=f"版本 {index} 不存在")
-    deleted = history.pop(index)
-    _save_prompt_history(history)
+    # P0-5 follow-up (audit 2026-05-07, codex review 2026-05-07): wrap
+    # load→pop→save in file_lock(_PROMPT_HISTORY_FILE) so a concurrent
+    # update_review_prompts (which appends to history under the same lock)
+    # cannot lose the new append.
+    with file_lock(_PROMPT_HISTORY_FILE):
+        history = _load_prompt_history()
+        if index < 0 or index >= len(history):
+            raise HTTPException(status_code=404, detail=f"版本 {index} 不存在")
+        deleted = history.pop(index)
+        _save_prompt_history(history)
     logger.info("Prompt history version %d deleted by admin %s", index, getattr(user, "email", "?"))
     return {"deleted": deleted, "history": history}
 

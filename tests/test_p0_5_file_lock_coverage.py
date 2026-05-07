@@ -118,37 +118,66 @@ def test_editing_voice_map_clear_uses_file_lock():
     assert _has_with_file_lock(clear_voice_override)
 
 
-def test_admin_settings_save_uses_file_lock():
-    """admin_settings.save_settings — used by /api/admin/settings.
+def _admin_settings_function_uses_file_lock(fn_name: str) -> bool:
+    """Helper: does the named module-level fn in gateway/admin_settings.py
+    contain a `with file_lock(...)` somewhere in its body?
 
-    Note: save_settings is module-level, not a method, so we read the
-    module source instead of going through inspect.getsource(method).
+    Used as a static guard so any future revert that drops the lock from
+    the prompt-history / settings paths is caught at CI time.
     """
     src_path = _REPO_ROOT / "gateway" / "admin_settings.py"
     src = src_path.read_text(encoding="utf-8")
     tree = ast.parse(src)
     for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            if node.name in {"save_settings", "_save_settings", "update_review_prompts", "toggle_model"}:
-                fn_src = ast.get_source_segment(src, node)
-                if fn_src is None:
-                    continue
-                fn_tree = ast.parse(textwrap.dedent(fn_src))
-                found = False
-                for sub in ast.walk(fn_tree):
-                    if isinstance(sub, ast.With):
-                        for it in sub.items:
-                            ce = it.context_expr
-                            if isinstance(ce, ast.Call) and isinstance(ce.func, ast.Name) and ce.func.id == "file_lock":
-                                found = True
-                                break
-                        if found:
-                            break
-                assert found, (
-                    f"P0-5 regression: gateway/admin_settings.py::{node.name} "
-                    f"is no longer wrapped in file_lock — concurrent admin "
-                    f"saves can lose updates."
-                )
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name != fn_name:
+            continue
+        fn_src = ast.get_source_segment(src, node)
+        if fn_src is None:
+            return False
+        fn_tree = ast.parse(textwrap.dedent(fn_src))
+        for sub in ast.walk(fn_tree):
+            if not isinstance(sub, ast.With):
+                continue
+            for it in sub.items:
+                ce = it.context_expr
+                if isinstance(ce, ast.Call) and isinstance(ce.func, ast.Name) and ce.func.id == "file_lock":
+                    return True
+        return False
+    return False
+
+
+def test_admin_settings_save_uses_file_lock():
+    """admin_settings.save_settings — used by /api/admin/settings."""
+    for name in {"save_settings", "update_review_prompts", "toggle_model"}:
+        assert _admin_settings_function_uses_file_lock(name), (
+            f"P0-5 regression: gateway/admin_settings.py::{name} is no "
+            f"longer wrapped in file_lock — concurrent admin saves can "
+            f"lose updates."
+        )
+
+
+def test_admin_settings_save_prompt_history_uses_file_lock():
+    """P0-5 follow-up (codex review 2026-05-07): _save_prompt_history was
+    raw write_text without lock or atomic write. Two concurrent admin
+    actions (save prompts vs delete history) could lose the append or
+    leave a half-written file."""
+    assert _admin_settings_function_uses_file_lock("_save_prompt_history"), (
+        "P0-5 follow-up regression: _save_prompt_history must use "
+        "file_lock(_PROMPT_HISTORY_FILE) + atomic_write_json."
+    )
+
+
+def test_admin_settings_delete_prompt_history_uses_file_lock():
+    """P0-5 follow-up (codex review 2026-05-07): delete_prompt_history
+    must hold the prompt_history lock around its load→pop→save sequence,
+    not just rely on _save_prompt_history's inner backstop."""
+    assert _admin_settings_function_uses_file_lock("delete_prompt_history"), (
+        "P0-5 follow-up regression: delete_prompt_history must wrap "
+        "load→pop→save in file_lock(_PROMPT_HISTORY_FILE) so a concurrent "
+        "update_review_prompts cannot lose its history append."
+    )
 
 
 # ====================================================================
