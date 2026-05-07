@@ -201,6 +201,62 @@ def test_split_with_no_voice_map_override_leaves_voice_map_unchanged(tmp_path):
     assert load_voice_map(tmp_path) == {}
 
 
+def test_split_removes_orphan_parent_draft_wav(tmp_path):
+    """P1-16 (Codex P0-8 review): if the parent segment had a regenerated
+    draft wav at the time of split, that file becomes an orphan after
+    the split (no segment with parent_sid exists anymore). Commit's
+    draft-promotion phase would copy it to editor/tts_segments/, leaving
+    stale audio. Verify split now cleans up the orphan."""
+    from services.jobs.editing import EDITING_SUBDIR
+    from services.jobs.editing_segments import split_editing_segment
+
+    _seed_one_segment(tmp_path, start_ms=0, end_ms=2000,
+                     source_text="abcdefghij", cn_text="一二三四五六七八九十")
+
+    # Simulate a previous regenerate-tts: a draft wav for seg_001
+    drafts_dir = tmp_path / EDITING_SUBDIR / "tts_segments_draft"
+    drafts_dir.mkdir(parents=True, exist_ok=True)
+    parent_draft = drafts_dir / "seg_001.wav"
+    parent_draft.write_bytes(b"\x00\x00fake-wav-bytes\x00")
+    assert parent_draft.exists()
+
+    split_editing_segment(
+        tmp_path,
+        segment_id="seg_001",
+        split_source_index=5,
+        split_cn_index=5,
+        speaker_a="spk_a",
+        speaker_b="spk_a",
+    )
+
+    assert not parent_draft.exists(), (
+        "P1-16 regression: orphan parent draft wav was NOT removed by "
+        "split. commit's draft-promotion would copy seg_001.wav back to "
+        "editor/tts_segments/, leaving stale audio for a segment id that "
+        "no longer exists."
+    )
+
+
+def test_split_with_no_parent_draft_wav_does_not_raise(tmp_path):
+    """Sanity: if there's no parent draft wav, split must not crash on
+    the unlink — it should be a no-op."""
+    from services.jobs.editing_segments import split_editing_segment
+
+    _seed_one_segment(tmp_path, start_ms=0, end_ms=2000,
+                     source_text="abcdefghij", cn_text="一二三四五六七八九十")
+
+    # No drafts_dir, no draft wav — should still work
+    result = split_editing_segment(
+        tmp_path,
+        segment_id="seg_001",
+        split_source_index=5,
+        split_cn_index=5,
+        speaker_a="spk_a",
+        speaker_b="spk_a",
+    )
+    assert len(result["new_segments"]) == 2
+
+
 # ====================================================================
 # §3 — audio-sync gate covers split halves
 # ====================================================================

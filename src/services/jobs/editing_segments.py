@@ -923,6 +923,20 @@ def split_editing_segment(
             voice_map[new_id_b] = dict(old_override)
             _atomic_write_json(_voice_map_path(project_dir), voice_map)
 
+        # P1-16 (audit 2026-05-07, codex P0-8 review): the parent segment
+        # may have left a draft wav at editor/editing/tts_segments_draft/
+        # {parent_sid}.wav from a previous regenerate-tts. After split,
+        # parent_sid no longer exists in the segments list, so the draft
+        # is an orphan — commit's draft-promotion phase would copy it
+        # back to editor/tts_segments/{parent_sid}.wav, leaving stale
+        # audio for an id that has no corresponding segment entry. Clean
+        # it up here so commit only sees drafts for live segment_ids.
+        # Note: still inside the editing_lock anchor lock so this is
+        # atomic with the segments.json write above.
+        parent_draft = _editing_dir(project_dir) / "tts_segments_draft" / f"{target}.wav"
+        if parent_draft.exists():
+            parent_draft.unlink()
+
         return {
             "replaced_segment_id": target,
             "new_segments": [seg_a, seg_b],
