@@ -302,12 +302,26 @@ class PaymentWebhookEvent(Base):
 
     __tablename__ = "payment_webhook_events"
 
+    # P1-11a (audit 2026-05-07, D-CRITICAL-4): dedup key is the COMPOSITE
+    # ``(provider, provider_event_id)``, not provider_event_id alone.
+    # Provider event IDs are not globally unique across providers (Stripe
+    # / Alipay / WeChat Pay can each emit ``evt_ABC123`` independently);
+    # a single-field UNIQUE risked silently dropping the second provider's
+    # event. Migration 017 swaps the constraint at the schema level; this
+    # __table_args__ keeps autogenerate / metadata consistent.
+    __table_args__ = (
+        UniqueConstraint(
+            "provider", "provider_event_id",
+            name="uq_payment_webhook_events_provider_event",
+        ),
+    )
+
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     provider: Mapped[str] = mapped_column(String(32), nullable=False)
     provider_event_id: Mapped[str] = mapped_column(
-        String(128), unique=True, nullable=False
+        String(128), nullable=False
     )
     event_type: Mapped[str] = mapped_column(String(64), nullable=False)
     signature_valid: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
@@ -630,6 +644,14 @@ class PricingConfigVersion(Base):
         Index("ix_pricing_config_versions_status", "status"),
         Index("ix_pricing_config_versions_version", "version"),
         Index("ix_pricing_config_versions_created_at", "created_at"),
+        # P1-11c (audit 2026-05-07, D-HIGH-3): pricing_admin computes
+        # next version as MAX(version) + 1 then INSERTs without a row
+        # lock — two concurrent admins both see max=N, both insert N+1,
+        # leaving duplicate version rows. Migration 017 adds this UNIQUE
+        # so the second insert fails and the caller can retry.
+        UniqueConstraint(
+            "version", name="uq_pricing_config_versions_version",
+        ),
     )
 
 

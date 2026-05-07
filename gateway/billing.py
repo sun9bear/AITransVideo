@@ -694,7 +694,14 @@ async def _process_payment_event(
             payload=raw_payload,
             received_at=now,
         )
-        .on_conflict_do_nothing(index_elements=["provider_event_id"])
+        # P1-11a (audit 2026-05-07, D-CRITICAL-4 + alembic 017):
+        # composite dedup key — provider event IDs are not globally
+        # unique across providers (Stripe / Alipay / WeChat Pay can
+        # each emit "evt_ABC123" independently). Match the new composite
+        # UNIQUE on the table.
+        .on_conflict_do_nothing(
+            index_elements=["provider", "provider_event_id"]
+        )
         .returning(PaymentWebhookEvent.id)
     )
     insert_result = await db.execute(insert_stmt)
