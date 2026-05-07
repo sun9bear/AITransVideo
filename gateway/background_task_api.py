@@ -31,6 +31,15 @@ from models import Job, User
 
 logger = logging.getLogger(__name__)
 
+# P1-13 (audit 2026-05-07): cap concurrent background tasks at 2 to
+# prevent N users simultaneously clicking "generate video" /
+# "materials pack" from spawning N parallel ffmpeg processes
+# (each consuming 1-2 CPU cores + 0.5-2 GB RAM). With ~4 cores in
+# typical deploy, anything > 2 starves polling requests for 5-10s.
+# Semaphore is module-level so it persists across requests; the
+# event loop is single-threaded so no separate lock needed.
+_BACKGROUND_TASK_SEMAPHORE = asyncio.Semaphore(2)
+
 router = APIRouter()
 
 
@@ -80,13 +89,25 @@ def _launch_executor(
         # Should have been caught at validation, but defensive-guard the
         # background thread entry too.
         raise HTTPException(status_code=400, detail=f"未知任务类型: {task_type}")
+
+    # P1-13 (audit 2026-05-07): gate concurrent ffmpeg spawns. The
+    # executor coroutine is wrapped so that no more than 2 background
+    # tasks run their ffmpeg / heavy work at once across the whole
+    # gateway process. Tasks beyond the cap are queued (still scheduled
+    # on the loop) and acquire as slots free up.
+    executor_coro = executor(
+        task_id=task_id,
+        job_id=job_id,
+        project_dir=project_dir,
+        params=params,
+    )
+
+    async def _gated_executor() -> None:
+        async with _BACKGROUND_TASK_SEMAPHORE:
+            await executor_coro
+
     asyncio.create_task(
-        executor(
-            task_id=task_id,
-            job_id=job_id,
-            project_dir=project_dir,
-            params=params,
-        ),
+        _gated_executor(),
         name=f"bgtask-{task_type}-{task_id}",
     )
 
