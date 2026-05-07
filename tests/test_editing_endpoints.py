@@ -607,6 +607,92 @@ def test_service_cancel_editing_passes_reason_through(tmp_path: Path) -> None:
     assert any("idle_24h_auto_cancel" in (e.message or "") for e in events)
 
 
+def test_service_cancel_editing_skips_audit_when_concurrent_winner_lands_after_require_job(
+    tmp_path: Path,
+) -> None:
+    """P1-15b batch 2 follow-up² (Codex review of c170cff):
+
+    The race the previous diff-based predicate could not detect:
+      1. JobService.cancel_editing calls require_job, gets snapshot
+         with status=editing + editing_touched_at=T1.
+      2. BEFORE update_job acquires its lock, another cancel commits
+         → on-disk: status=succeeded + editing_touched_at=None.
+      3. THIS call's mutator runs under the lock, sees current is
+         already succeeded, returns current unchanged → no-op.
+      4. Result is succeeded + editing_touched_at=None.
+
+    Caller's record diff (editing→succeeded, T1→None) AND result
+    state both look exactly like a real transition. The fix is to
+    expose the lock-internal transition_happened flag from
+    cancel_editing_atomic so JobService can distinguish.
+
+    We construct the race by monkey-patching update_job to perform
+    the concurrent winner's write inside the same lock, then return
+    the freshly-loaded current state — exactly what would happen if
+    the winner committed between require_job and update_job's
+    own load.
+    """
+    from dataclasses import replace as _replace
+    from services.jobs.models import JOB_STATUS_EDITING
+
+    service, project_dir = _build_service_with_editing_fixture(tmp_path)
+    service.enter_editing("job_123")
+
+    audit_path = project_dir / "audit" / "user_edit_events.jsonl"
+    pre_audit = (
+        audit_path.read_text(encoding="utf-8").splitlines()
+        if audit_path.exists() else []
+    )
+
+    # Monkey-patch update_job to inject the concurrent winner BETWEEN
+    # the original update_job's load_job call and the mutator
+    # invocation. We achieve this by wrapping update_job: on first
+    # call we land the winner's transition before delegating to the
+    # real implementation, so the real load_job inside update_job
+    # sees status=succeeded.
+    real_update_job = service.store.update_job
+
+    def fake_update_job(job_id, mutator, *, initial=None):
+        # Simulate the concurrent winner: another cancel committed
+        # the editing → succeeded transition just before this call's
+        # mutator runs. We do it by saving the won state directly,
+        # then deferring to the real update_job which now sees
+        # current.status == succeeded and the mutator no-ops.
+        won = _replace(
+            service.store.require_job(job_id),
+            status=JOB_STATUS_SUCCEEDED,
+            editing_touched_at=None,
+        )
+        service.store.save_job(won)
+        return real_update_job(job_id, mutator, initial=initial)
+
+    service.store.update_job = fake_update_job  # type: ignore[assignment]
+    try:
+        result = service.cancel_editing("job_123", reason="user_cancel")
+    finally:
+        service.store.update_job = real_update_job  # type: ignore[assignment]
+
+    # The result reflects the concurrent winner's transition (so HTTP
+    # caller still gets a coherent record back), but THIS call did NOT
+    # contribute the transition.
+    assert result.status == JOB_STATUS_SUCCEEDED
+    assert result.editing_touched_at is None
+
+    # The audit ledger MUST NOT have grown — the post_edit_cancelled
+    # event must only fire on a real transition that THIS call drove.
+    post_audit = (
+        audit_path.read_text(encoding="utf-8").splitlines()
+        if audit_path.exists() else []
+    )
+    assert post_audit == pre_audit, (
+        f"P1-15b batch 2 follow-up² regression: post_edit_cancelled "
+        f"audit emitted on a no-op cancel_editing. The diff-based "
+        f"predicate could not distinguish 'this call transitioned' "
+        f"from 'this call observed someone else's transition'. "
+        f"audit grew by {len(post_audit) - len(pre_audit)} line(s)."
+    )
+
+
 def test_service_cancel_editing_skips_audit_event_on_concurrent_no_op(
     tmp_path: Path,
 ) -> None:

@@ -514,34 +514,23 @@ class JobService:
         teardown so analysis can flag UX friction (e.g. user did a lot of
         edits then bailed out). Plan 2026-05-04 §7.3.
         """
-        from services.jobs.editing import cancel_editing as _cancel_editing
+        from services.jobs.editing import cancel_editing_atomic as _cancel_editing_atomic
 
         record = self.require_job(job_id)
-        result = _cancel_editing(record, self.store, reason=reason)
-
-        # P1-15b batch 2 follow-up (Codex review of 5748978): the helper
-        # is now allowed to no-op when a concurrent cancel/commit already
-        # moved the job out of editing — it suppresses the editing.cancelled
-        # status event in that case but JobService still owned the
-        # downstream post_edit_cancelled USER AUDIT event. Gate the audit
-        # emit on the same "real transition happened" predicate so the
-        # user-edit ledger doesn't record a cancellation that didn't
-        # actually happen.
-        #
-        # A real cancel_editing transition is uniquely identified by:
-        #   record.status == editing  AND  result.status == succeeded
-        # AND
-        #   record.editing_touched_at != None  AND  result.editing_touched_at is None
-        # The latter pair is what cancel_editing's mutator clears, so a
-        # no-op leaves editing_touched_at unchanged.
-        from services.jobs.models import JOB_STATUS_EDITING, JOB_STATUS_SUCCEEDED
-        is_real_transition = (
-            record.status == JOB_STATUS_EDITING
-            and result.status == JOB_STATUS_SUCCEEDED
-            and record.editing_touched_at is not None
-            and result.editing_touched_at is None
+        # P1-15b batch 2 follow-up² (Codex review of c170cff): use the
+        # atomic variant that exposes the lock-internal transition_happened
+        # flag instead of inferring it from a record/result diff. The
+        # diff-based predicate failed in the stale-snapshot race —
+        # caller's record could legitimately have editing/touched while
+        # result legitimately had succeeded/None even when the mutator
+        # no-op'd because a concurrent winner already wrote that state.
+        # Exposing the flag is the only way to distinguish "this call
+        # transitioned" from "this call observed someone else's transition".
+        result, transition_happened = _cancel_editing_atomic(
+            record, self.store, reason=reason,
         )
-        if is_real_transition:
+
+        if transition_happened:
             try:
                 self._emit_post_edit_cancelled(record, result, reason=reason)
             except Exception:  # noqa: BLE001

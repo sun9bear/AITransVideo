@@ -227,16 +227,35 @@ def enter_editing(record: JobRecord, store: JobStore) -> JobRecord:
     return updated
 
 
-def cancel_editing(
+def cancel_editing_atomic(
     record: JobRecord,
     store: JobStore,
     *,
     reason: str = "user_cancel",
-) -> JobRecord:
-    """Transition ``editing → succeeded``; drop the editing buffer.
+) -> tuple[JobRecord, bool]:
+    """Like :func:`cancel_editing` but also returns whether a real
+    transition happened.
 
-    ``reason`` is recorded on the event so admins can distinguish
-    ``user_cancel`` / ``idle_24h_auto_cancel`` / ``admin_force`` later.
+    Returns ``(updated_record, transition_happened)``:
+      * ``transition_happened == True`` — this call's mutator flipped
+        ``editing → succeeded`` under the lock and the side-effect
+        rmtree + ``editing.cancelled`` event ran.
+      * ``transition_happened == False`` — the mutator observed that
+        another concurrent cancel/commit already moved the record out
+        of editing; this call no-op'd. The returned record reflects
+        the OTHER caller's transition (so you can still safely return
+        it to the HTTP client) but downstream side effects (audit
+        emits, notifications) belonging to THIS call must be skipped
+        because they would double-count.
+
+    P1-15b batch 2 follow-up (Codex review of c170cff): the previous
+    "infer transition from record/result diff" predicate failed in the
+    stale-snapshot race — caller's record snapshot was taken before
+    the concurrent cancel committed, so caller.status==editing AND
+    result.status==succeeded AND caller.editing_touched_at!=None AND
+    result.editing_touched_at==None all held, even though THIS call
+    contributed nothing. Exposing the lock-internal flag eliminates
+    that ambiguity.
     """
     if record.status != JOB_STATUS_EDITING:
         raise EditingConflictError(
@@ -283,6 +302,26 @@ def cancel_editing(
             updated,
             message=f"editing.cancelled: reason={reason}",
         )
+    return updated, transition_happened
+
+
+def cancel_editing(
+    record: JobRecord,
+    store: JobStore,
+    *,
+    reason: str = "user_cancel",
+) -> JobRecord:
+    """Transition ``editing → succeeded``; drop the editing buffer.
+
+    ``reason`` is recorded on the event so admins can distinguish
+    ``user_cancel`` / ``idle_24h_auto_cancel`` / ``admin_force`` later.
+
+    Backward-compat wrapper around :func:`cancel_editing_atomic`. Use
+    the underscore-suffixed variant when the caller cares about
+    distinguishing real transitions from concurrent-no-op (e.g. to
+    gate downstream audit / notification emits).
+    """
+    updated, _ = cancel_editing_atomic(record, store, reason=reason)
     return updated
 
 
