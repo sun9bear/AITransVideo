@@ -190,7 +190,10 @@ def _cleanup_loop() -> None:
     """Background loop that runs TTL cleanup + editing-idle scanner."""
     # Late import so Phase 0 can land this file without circular-import risk
     # from Phase 1 modules (the scanner module itself has no Phase 1 deps).
-    from src.services.web_ui import editing_idle_scanner
+    # P0-6 (audit 2026-05-07): pythonpath in container is .../src, not project
+    # root, so 'src.' prefix is wrong — would raise ImportError and silently
+    # kill this daemon thread before the editing-idle scanner ever ran.
+    from services.web_ui import editing_idle_scanner
 
     while True:
         try:
