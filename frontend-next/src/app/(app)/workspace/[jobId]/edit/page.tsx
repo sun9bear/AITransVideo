@@ -31,6 +31,7 @@ import {
   buildPreviewSourceStreamUrl,
   regenerateSegmentTts,
   regenerateAllDirtyTts,
+  revertUnsyncedTextSegments,
   getRegenerateAllStatus,
   cancelRegenerateAll,
   splitEditingSegment,
@@ -38,6 +39,7 @@ import {
   type EditingSegment,
   type EditingSegmentsResponse,
   type SegmentStatus,
+  type UnsyncedTextSegment,
   type VoiceMapEntry,
 } from "@/lib/api/editing"
 import { getJob } from "@/lib/api/jobs"
@@ -61,6 +63,30 @@ import { VoiceModifyTab } from "./VoiceModifyTab"
 // AVT_ENABLE_POST_EDIT. Without this flag, the fetch calls still hit 404
 // and the page would show an unhelpful error.
 const POST_EDIT_ENABLED = process.env.NEXT_PUBLIC_ENABLE_POST_EDIT === "1"
+
+function extractAudioSyncConflict(error: unknown): UnsyncedTextSegment[] | null {
+  if (!(error instanceof ApiError) || error.status !== 409) return null
+  const payload = error.payload
+  if (!payload || typeof payload !== "object") return null
+  if (!("code" in payload) || payload.code !== "editing_audio_sync_required") {
+    return null
+  }
+  const segments = "unsynced_segments" in payload ? payload.unsynced_segments : null
+  if (!Array.isArray(segments)) return []
+  return segments
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+    .map((item) => ({
+      segment_id: String(item.segment_id ?? ""),
+      status: typeof item.status === "string" ? item.status : undefined,
+      display_name: typeof item.display_name === "string" ? item.display_name : undefined,
+      speaker_id: typeof item.speaker_id === "string" ? item.speaker_id : undefined,
+      current_cn_text: typeof item.current_cn_text === "string" ? item.current_cn_text : undefined,
+      audio_cn_text: typeof item.audio_cn_text === "string" ? item.audio_cn_text : undefined,
+      current_source_text: typeof item.current_source_text === "string" ? item.current_source_text : undefined,
+      audio_source_text: typeof item.audio_source_text === "string" ? item.audio_source_text : undefined,
+    }))
+    .filter((item) => item.segment_id)
+}
 
 
 export default function VideoEditPage() {
@@ -87,6 +113,8 @@ export default function VideoEditPage() {
   const [commitModalOpen, setCommitModalOpen] = useState(false)
   const [commitStrategy, setCommitStrategy] = useState<CommitStrategy>("overwrite")
   const [copyDisplayName, setCopyDisplayName] = useState<string>("")
+  const [audioSyncConflict, setAudioSyncConflict] = useState<UnsyncedTextSegment[] | null>(null)
+  const [isResolvingAudioSync, setIsResolvingAudioSync] = useState(false)
   const [activeTab, setActiveTab] = useState<"text" | "voice">("text")
   const [voiceMap, setVoiceMap] = useState<Record<string, VoiceMapEntry>>({})
   // Friendly speaker display names from review-state's
@@ -466,8 +494,8 @@ export default function VideoEditPage() {
 
   // ---- Batch regenerate ----
 
-  const handleBatchRegenerate = useCallback(async () => {
-    if (isBatchRegenerating) return
+  const handleBatchRegenerate = useCallback(async (): Promise<boolean> => {
+    if (isBatchRegenerating) return false
     setIsBatchRegenerating(true)
     setIsCancellingBatch(false)
     // D39 async batch: POST returns a task_id immediately; progress
@@ -479,6 +507,7 @@ export default function VideoEditPage() {
     toast.loading("正在启动批量合成…", { id: toastId })
     const POLL_INTERVAL_MS = 1000
     const MAX_POLLS = 30 * 60  // 30 minutes; generous for 300+ segments
+    let completedCleanly = false
     try {
       const { task_id: taskId } = await regenerateAllDirtyTts(jobId)
       setBatchTaskId(taskId)
@@ -513,6 +542,7 @@ export default function VideoEditPage() {
           } else {
             toast.info("没有需要重新合成的段落", { id: toastId })
           }
+          completedCleanly = !result || result.failed_count <= 0
           break
         }
 
@@ -559,8 +589,10 @@ export default function VideoEditPage() {
         )
       }
       await loadData()
+      return completedCleanly
     } catch (error) {
       toast.error(`批量合成失败: ${getErrorMessage(error)}`, { id: toastId })
+      return false
     } finally {
       setIsBatchRegenerating(false)
       setBatchTaskId(null)
@@ -639,6 +671,21 @@ export default function VideoEditPage() {
     })()
   }, [job, jobId])
 
+  const commitCurrentOptions = useCallback(async () => {
+    const result = await commitEditing(jobId, commitStrategy, {
+      copy_display_name:
+        commitStrategy === "copy_as_new" ? copyDisplayName.trim() : undefined,
+    })
+    setCommitModalOpen(false)
+    setAudioSyncConflict(null)
+    if (result.strategy === "copy_as_new") {
+      toast.success(`副本 "${result.new_display_name}" 已创建，开始重新生成`)
+    } else {
+      toast.success(`重新生成已开始，第 ${result.edit_generation} 次修改`)
+    }
+    router.push("/projects")
+  }, [commitStrategy, copyDisplayName, jobId, router])
+
   const handleCommit = useCallback(async () => {
     if (commitInFlightRef.current || isCommitting) return
     if (commitStrategy === "copy_as_new" && !copyDisplayName.trim()) {
@@ -648,29 +695,83 @@ export default function VideoEditPage() {
     commitInFlightRef.current = true
     setIsCommitting(true)
     try {
-      const result = await commitEditing(jobId, commitStrategy, {
-        copy_display_name:
-          commitStrategy === "copy_as_new" ? copyDisplayName.trim() : undefined,
-      })
-      setCommitModalOpen(false)
-      if (result.strategy === "copy_as_new") {
-        // D8 plan §12: commit 会重跑 alignment → publish，三语 SRT 同步重
-        // 生成，用户下载到的字幕是最新编辑后的内容。
-        toast.success(`副本 "${result.new_display_name}" 已创建，开始重合成（视频 + 字幕）`)
-      } else {
-        toast.success(`重合成开始 · 第 ${result.edit_generation} 次修改（视频 + 字幕同步更新）`)
-      }
-      // Both strategies land on /projects: user's mental model after
-      // 确认修改 is "back to the list to watch progress", parallel to
-      // 放弃修改's /projects push.
-      router.push("/projects")
+      await commitCurrentOptions()
     } catch (error) {
+      const conflict = extractAudioSyncConflict(error)
+      if (conflict) {
+        setAudioSyncConflict(conflict)
+        return
+      }
       toast.error(`合成失败: ${getErrorMessage(error)}`)
     } finally {
       commitInFlightRef.current = false
       setIsCommitting(false)
     }
-  }, [commitStrategy, copyDisplayName, isCommitting, jobId, router])
+  }, [commitCurrentOptions, commitStrategy, copyDisplayName, isCommitting])
+
+  const handleRegenerateConflictAndCommit = useCallback(async () => {
+    if (!audioSyncConflict || isResolvingAudioSync) return
+    setIsResolvingAudioSync(true)
+    try {
+      const ok = await handleBatchRegenerate()
+      if (!ok) return
+      commitInFlightRef.current = true
+      setIsCommitting(true)
+      try {
+        await commitCurrentOptions()
+      } catch (error) {
+        const conflict = extractAudioSyncConflict(error)
+        if (conflict) {
+          setAudioSyncConflict(conflict)
+        } else {
+          toast.error(`合成失败: ${getErrorMessage(error)}`)
+        }
+      } finally {
+        commitInFlightRef.current = false
+        setIsCommitting(false)
+      }
+    } finally {
+      setIsResolvingAudioSync(false)
+    }
+  }, [audioSyncConflict, commitCurrentOptions, handleBatchRegenerate, isResolvingAudioSync])
+
+  const handleRevertConflictTextAndCommit = useCallback(async () => {
+    if (!audioSyncConflict || isResolvingAudioSync) return
+    setIsResolvingAudioSync(true)
+    try {
+      const segmentIds = audioSyncConflict.map((item) => item.segment_id)
+      const result = await revertUnsyncedTextSegments(jobId, segmentIds)
+      setResource((prev) =>
+        prev
+          ? {
+              ...prev,
+              segments: result.segments,
+              segment_status: result.segment_status,
+            }
+          : prev,
+      )
+      toast.success(`已放弃 ${result.reverted_segment_ids.length} 段未合成的文本修改`)
+      commitInFlightRef.current = true
+      setIsCommitting(true)
+      try {
+        await commitCurrentOptions()
+      } catch (error) {
+        const conflict = extractAudioSyncConflict(error)
+        if (conflict) {
+          setAudioSyncConflict(conflict)
+        } else {
+          toast.error(`合成失败: ${getErrorMessage(error)}`)
+        }
+      } finally {
+        commitInFlightRef.current = false
+        setIsCommitting(false)
+      }
+    } catch (error) {
+      toast.error(`放弃文本修改失败: ${getErrorMessage(error)}`)
+    } finally {
+      setIsResolvingAudioSync(false)
+    }
+  }, [audioSyncConflict, commitCurrentOptions, isResolvingAudioSync, jobId])
 
   // ---- Derived ----
 
@@ -1052,6 +1153,16 @@ export default function VideoEditPage() {
           onCopyNameChange={setCopyDisplayName}
           onClose={() => setCommitModalOpen(false)}
           onSubmit={handleCommit}
+        />
+      )}
+
+      {audioSyncConflict && (
+        <AudioSyncConflictModal
+          segments={audioSyncConflict}
+          isSubmitting={isResolvingAudioSync || isBatchRegenerating || isCommitting}
+          onRegenerateAndContinue={handleRegenerateConflictAndCommit}
+          onRevertAndContinue={handleRevertConflictTextAndCommit}
+          onClose={() => setAudioSyncConflict(null)}
         />
       )}
     </div>
@@ -1624,6 +1735,80 @@ function formatMs(ms: number): string {
 // ---------------------------------------------------------------------------
 // CommitModal
 // ---------------------------------------------------------------------------
+
+interface AudioSyncConflictModalProps {
+  segments: UnsyncedTextSegment[]
+  isSubmitting: boolean
+  onRegenerateAndContinue: () => void
+  onRevertAndContinue: () => void
+  onClose: () => void
+}
+
+function AudioSyncConflictModal({
+  segments,
+  isSubmitting,
+  onRegenerateAndContinue,
+  onRevertAndContinue,
+  onClose,
+}: AudioSyncConflictModalProps) {
+  const shown = segments.slice(0, 6)
+  const extraCount = Math.max(0, segments.length - shown.length)
+  return (
+    <div
+      className="fixed inset-0 z-[110] flex items-center justify-center bg-black/65 p-4 backdrop-blur-[2px]"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="audio-sync-modal-title"
+    >
+      <div className="w-full max-w-xl max-h-[calc(100vh-2rem)] overflow-y-auto rounded-xl border border-border bg-card p-5 text-card-foreground shadow-2xl ring-1 ring-black/10 space-y-4 dark:ring-white/10">
+        <div className="flex items-center justify-between gap-3">
+          <h2 id="audio-sync-modal-title" className="text-base font-bold">有文本修改尚未重新合成音频</h2>
+          <button onClick={onClose} type="button" className="text-muted-foreground hover:text-foreground" disabled={isSubmitting}>
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <p className="text-sm text-muted-foreground">
+          这些段落当前音频仍对应修改前的文本。继续提交前，需要重新合成音频，或明确放弃这些文本修改。
+        </p>
+        <div className="space-y-2 rounded-lg border border-border bg-background/60 p-3 text-xs">
+          {shown.map((segment) => (
+            <div key={segment.segment_id} className="border-b border-border/70 pb-2 last:border-b-0 last:pb-0">
+              <div className="font-medium text-foreground">
+                段落 {segment.segment_id}
+                {segment.display_name ? ` · ${segment.display_name}` : ""}
+              </div>
+              <div className="mt-1 line-clamp-2 text-muted-foreground">
+                当前文本：{segment.current_cn_text || "空"}
+              </div>
+              <div className="mt-1 line-clamp-2 text-muted-foreground">
+                当前音频对应：{segment.audio_cn_text || "空"}
+              </div>
+            </div>
+          ))}
+          {extraCount > 0 && (
+            <div className="text-muted-foreground">还有 {extraCount} 段未显示。</div>
+          )}
+        </div>
+        <div className="flex flex-wrap justify-end gap-2">
+          <Button type="button" variant="ghost" size="sm" onClick={onClose} disabled={isSubmitting}>
+            返回编辑
+          </Button>
+          <Button type="button" variant="outline" size="sm" onClick={onRevertAndContinue} disabled={isSubmitting}>
+            放弃这些文本修改并继续
+          </Button>
+          <Button type="button" size="sm" onClick={onRegenerateAndContinue} disabled={isSubmitting}>
+            {isSubmitting ? (
+              <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <RefreshCw className="mr-1 h-3.5 w-3.5" />
+            )}
+            重新合成并继续提交
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
+}
 
 interface CommitModalProps {
   strategy: CommitStrategy

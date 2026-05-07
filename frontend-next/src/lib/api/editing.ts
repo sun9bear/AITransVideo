@@ -124,6 +124,24 @@ export interface BatchRegenerateStatus {
 
 export type CommitStrategy = "overwrite" | "copy_as_new"
 
+export interface UnsyncedTextSegment {
+  segment_id: string
+  status?: SegmentStatus | string
+  display_name?: string
+  speaker_id?: string
+  current_cn_text?: string
+  audio_cn_text?: string
+  current_source_text?: string
+  audio_source_text?: string
+}
+
+export interface EditingAudioSyncRequiredPayload {
+  code: "editing_audio_sync_required"
+  message?: string
+  error?: string
+  unsynced_segments: UnsyncedTextSegment[]
+}
+
 export interface CommitOverwriteResponse {
   strategy: "overwrite"
   job_id: string
@@ -170,6 +188,20 @@ export async function commitEditing(
     body.copy_display_name = options.copy_display_name
   }
   return apiClient.post<CommitResponse>(`/jobs/${jobId}/editing/commit`, { body })
+}
+
+export async function revertUnsyncedTextSegments(
+  jobId: string,
+  segmentIds: string[],
+): Promise<{
+  reverted_segment_ids: string[]
+  segments: EditingSegment[]
+  segment_status: Record<string, SegmentStatus>
+  editing_touched_at?: string | null
+}> {
+  return apiClient.post(`/jobs/${jobId}/editing/revert-unsynced-text`, {
+    body: { segment_ids: segmentIds },
+  })
 }
 
 export async function getEditingSegments(

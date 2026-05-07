@@ -19,7 +19,7 @@ if _ENV_FILE.exists():
             _key, _, _val = _line.partition("=")
             if _key.strip() and _key.strip() not in os.environ:
                 os.environ[_key.strip()] = _val.strip()
-from typing import Callable, TypeVar
+from typing import Any, Callable, TypeVar
 
 from core.enums import OutputTarget, StageStatus
 from services.jobs.models import STAGE_ALIGNMENT, STAGE_LEGACY_PROCESS_OUTPUT
@@ -947,6 +947,39 @@ def _generate_tts_all_with_bucket(
         if "usage_bucket" not in str(exc):
             raise
         return generate_all(segments, output_dir)
+
+
+def _generate_tts_one_with_bucket(
+    tts_generator: object,
+    segment: DubbingSegment,
+    output_dir: str,
+    *,
+    usage_bucket: str,
+) -> Any:
+    """Force one TTS synthesis pass for a segment.
+
+    The batch ``generate_all`` path skips when the target wav already exists.
+    Post-split child rewrites reuse the same segment id and output filename, so
+    they must bypass that cache after mutating ``cn_text``.
+    """
+    generate_one = getattr(tts_generator, "_generate_one", None)
+    if callable(generate_one):
+        try:
+            return generate_one(segment, output_dir, usage_bucket=usage_bucket)
+        except TypeError as exc:
+            if "usage_bucket" not in str(exc):
+                raise
+            return generate_one(segment, output_dir)
+
+    results = _generate_tts_all_with_bucket(
+        tts_generator,
+        [segment],
+        output_dir,
+        usage_bucket=usage_bucket,
+    )
+    if not results:
+        raise RuntimeError(f"TTS generation returned no result for segment_{segment.segment_id}")
+    return results[0]
 
 
 # Plan-based max duration (minutes).  Mirrors PLAN_CATALOG in gateway.
@@ -2771,6 +2804,14 @@ class ProcessPipeline:
                     f"same-speaker candidates={short_merge_summary.get('candidate_count', 0)}, "
                     f"cross-speaker blocked={short_merge_summary.get('blocked_cross_speaker_count', 0)}"
                 )
+            sync_repairs = _sync_tts_text_audio_for_publish(translation_result.segments)
+            if sync_repairs:
+                print(
+                    "[S5] TTS text/audio sync repaired: "
+                    + "; ".join(sync_repairs[:8])
+                    + ("" if len(sync_repairs) <= 8 else f"; +{len(sync_repairs) - 8} more"),
+                    flush=True,
+                )
             self._write_segments_snapshot(translation_result)
             needs_review_count = sum(1 for segment in aligned_segments if segment.needs_review)
             print(
@@ -3384,7 +3425,6 @@ class ProcessPipeline:
                 tts_segments_dir=tts_segments_dir,
                 segments=segments,
             )
-
             # Keep translation/segments.json + editor baseline in sync with
             # the published state. asdict() serialises every DubbingSegment
             # field including the wav paths we just populated.
@@ -6220,12 +6260,24 @@ class ProcessPipeline:
                 return
             child_segment.cn_text = rewritten_text
             child_segment.rewrite_count += 1
-            _generate_tts_all_with_bucket(
+            tts_result = _generate_tts_one_with_bucket(
                 tts_generator,
-                [child_segment],
+                child_segment,
                 str(tts_dir),
                 usage_bucket=TTS_BUCKET_POST_TTS_RESYNTH,
             )
+            child_segment.tts_audio_path = tts_result.audio_path
+            child_segment.actual_duration_ms = tts_result.duration_ms
+            if getattr(tts_result, "selected_voice", ""):
+                child_segment.selected_voice = tts_result.selected_voice
+            if getattr(tts_result, "match_confidence", ""):
+                child_segment.match_confidence = tts_result.match_confidence
+            child_segment.fallback_used_provider = getattr(
+                tts_result,
+                "fallback_used_provider",
+                None,
+            )
+            child_segment.tts_input_cn_text = child_segment.cn_text.strip()
 
             refreshed_tts_path = Path(str(child_segment.tts_audio_path or "")).resolve(strict=False)
             if refreshed_tts_path.exists():
@@ -7134,6 +7186,7 @@ class ProcessPipeline:
                             "tts_provider": segment.tts_provider,
                             "tts_model_key": segment.tts_model_key,
                             "first_pass_cn_text": segment.first_pass_cn_text,
+                            "tts_input_cn_text": segment.tts_input_cn_text,
                             # T7: fallback provider when primary failed (None if
                             # primary succeeded). Lets users audit voice
                             # substitutions in the final manifest.
@@ -8219,6 +8272,52 @@ def _normalize_optional_text(value: object) -> str | None:
         if normalized:
             return normalized
     return None
+
+
+def _normalize_tts_sync_text(value: object) -> str:
+    return re.sub(r"\s+", "", str(value or "")).strip()
+
+
+def _sync_tts_text_audio_for_publish(segments: list[DubbingSegment]) -> list[str]:
+    """Keep main-pipeline publish text in sync with the current TTS audio.
+
+    In the main pipeline, ``cn_text`` is the text shown in the editor and
+    ``tts_input_cn_text`` is the text that produced the current TTS audio.
+    New runs should normally already be in sync; this non-fatal normalizer
+    prevents an unknown post-TTS rewrite path from shipping mismatched text.
+    """
+    repairs: list[str] = []
+    for segment in segments:
+        if is_keep_original_dubbing_mode(
+            getattr(segment, "dubbing_mode", DUBBING_MODE_DUB)
+        ):
+            continue
+        cn_text = str(getattr(segment, "cn_text", "") or "").strip()
+        if not cn_text:
+            continue
+        has_audio = bool(
+            getattr(segment, "tts_audio_path", None)
+            or getattr(segment, "aligned_audio_path", None)
+        )
+        if not has_audio:
+            continue
+        tts_input = str(getattr(segment, "tts_input_cn_text", "") or "").strip()
+        try:
+            rewrite_count = int(getattr(segment, "rewrite_count", 0) or 0)
+        except (TypeError, ValueError):
+            rewrite_count = 0
+
+        if not tts_input:
+            segment.tts_input_cn_text = cn_text
+            if rewrite_count > 0:
+                repairs.append(f"segment_{segment.segment_id}: backfilled missing tts_input")
+            continue
+
+        if _normalize_tts_sync_text(tts_input) != _normalize_tts_sync_text(cn_text):
+            segment.cn_text = tts_input
+            repairs.append(f"segment_{segment.segment_id}: cn_text <- tts_input_cn_text")
+
+    return repairs
 
 
 def _backfill_legacy_tts_input_cn_text(segment: DubbingSegment) -> None:

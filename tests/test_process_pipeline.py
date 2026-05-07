@@ -971,6 +971,7 @@ def _build_aligned_segments(segments: list[DubbingSegment], output_dir: str) -> 
         segment.alignment_ratio = 1.0
         segment.alignment_method = "direct"
         segment.needs_review = False
+        segment.tts_input_cn_text = segment.cn_text
         aligned_segments.append(
             AlignedSegment(
                 segment_id=segment.segment_id,
@@ -2054,6 +2055,7 @@ def test_process_pipeline_preserves_voice_metadata_in_segments_snapshot(tmp_path
                 end_ms=1_000,
                 target_duration_ms=1_000,
                 source_text="Hello there.",
+                tts_input_cn_text="tts snapshot",
                 cn_text="你好。",
                 voice_description="沉稳低沉的中年男性主持声线",
                 gender="male",
@@ -2076,6 +2078,51 @@ def test_process_pipeline_preserves_voice_metadata_in_segments_snapshot(tmp_path
     assert cached_segment.age_group == "middle"
     assert cached_segment.persona_style == "serious"
     assert cached_segment.energy_level == "low"
+    assert cached_segment.tts_input_cn_text == "tts snapshot"
+
+
+def test_tts_text_audio_sync_publish_backfills_missing_witness() -> None:
+    segment = DubbingSegment(
+        segment_id=9,
+        speaker_id="speaker_a",
+        display_name="Speaker A",
+        voice_id="voice_demo_001",
+        start_ms=0,
+        end_ms=1_000,
+        target_duration_ms=1_000,
+        source_text="Hello.",
+        cn_text="当前文本",
+        tts_audio_path="segment_009.wav",
+        rewrite_count=1,
+    )
+
+    repairs = process_module._sync_tts_text_audio_for_publish([segment])
+
+    assert repairs == ["segment_9: backfilled missing tts_input"]
+    assert segment.cn_text == "当前文本"
+    assert segment.tts_input_cn_text == "当前文本"
+
+
+def test_tts_text_audio_sync_publish_repairs_mismatched_visible_text() -> None:
+    segment = DubbingSegment(
+        segment_id=10,
+        speaker_id="speaker_a",
+        display_name="Speaker A",
+        voice_id="voice_demo_001",
+        start_ms=0,
+        end_ms=1_000,
+        target_duration_ms=1_000,
+        source_text="Hello.",
+        cn_text="界面文本",
+        tts_input_cn_text="实际合成文本",
+        tts_audio_path="segment_010.wav",
+    )
+
+    repairs = process_module._sync_tts_text_audio_for_publish([segment])
+
+    assert repairs == ["segment_10: cn_text <- tts_input_cn_text"]
+    assert segment.cn_text == "实际合成文本"
+    assert segment.tts_input_cn_text == "实际合成文本"
 
 
 def test_process_pipeline_persists_reviewed_voice_metadata_before_tts_failure(
@@ -3532,6 +3579,7 @@ def test_process_pipeline_calibrates_tts_duration_and_writes_rewrite_snapshot(
                 )
                 if segment.segment_id == 1:
                     segment.cn_text = "更适合配音的文本。"
+                    segment.tts_input_cn_text = segment.cn_text
                     segment.rewrite_count = 1
                     segment.alignment_method = "rewrite_dsp"
                     segment.actual_duration_ms = 950
@@ -4539,6 +4587,128 @@ def test_process_pipeline_keeps_semantic_split_when_one_child_still_requires_for
     assert repaired_segments[0].alignment_method == "dsp"
     assert repaired_segments[1].needs_review is True
     assert repaired_segments[1].alignment_method == "force_dsp"
+
+
+def test_retry_failed_semantic_child_forces_resynthesis_after_rewrite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pipeline = ProcessPipeline()
+    tts_dir = tmp_path / "tts"
+    old_tts_path = _export_silent_wav(
+        tts_dir / "segment_007_speaker_a.wav",
+        duration_ms=5_000,
+    )
+    child_segment = DubbingSegment(
+        segment_id=7,
+        speaker_id="speaker_a",
+        display_name="Speaker A",
+        voice_id="voice_a",
+        start_ms=0,
+        end_ms=3_000,
+        target_duration_ms=3_000,
+        source_text="Old child source.",
+        cn_text="old child text",
+        tts_audio_path=str(old_tts_path.resolve(strict=False)),
+        actual_duration_ms=5_000,
+        alignment_ratio=5_000 / 3_000,
+        alignment_method="force_dsp",
+        needs_review=True,
+    )
+    observed: dict[str, object] = {
+        "generate_one_calls": [],
+        "generated": False,
+    }
+
+    class FakeTTSGenerator:
+        def generate_all(self, segments: list[DubbingSegment], output_dir: str) -> list[TTSResult]:
+            del segments, output_dir
+            raise AssertionError("retry rewrite must not use cache-skipping generate_all")
+
+        def _generate_one(
+            self,
+            segment: DubbingSegment,
+            output_dir: str,
+            *,
+            usage_bucket: str | None = None,
+        ) -> TTSResult:
+            observed["generate_one_calls"].append(
+                (segment.segment_id, segment.cn_text, usage_bucket)
+            )
+            observed["generated"] = True
+            audio_path = _export_silent_wav(
+                Path(output_dir) / f"segment_{segment.segment_id:03d}_{segment.speaker_id}.wav",
+                duration_ms=2_600,
+            )
+            return TTSResult(
+                segment_id=segment.segment_id,
+                audio_path=str(audio_path.resolve(strict=False)),
+                duration_ms=2_600,
+                voice_id=segment.voice_id,
+                selected_voice="voice_generated",
+                match_confidence="high",
+            )
+
+    class FakeRewriter:
+        def rewrite_for_duration(
+            self,
+            cn_text: str,
+            actual_duration_ms: int,
+            target_duration_ms: int,
+            source_text: str = "",
+            speaker_id: str | None = None,
+        ) -> str:
+            assert cn_text == "old child text"
+            assert actual_duration_ms == 5_000
+            assert target_duration_ms == 3_000
+            assert source_text == "Old child source."
+            assert speaker_id == "speaker_a"
+            return "rewritten child text"
+
+    class FakeAligner:
+        def __init__(self, *args, **kwargs):
+            del args, kwargs
+
+        def align_all(self, segments: list[DubbingSegment], output_dir: str) -> list[AlignedSegment]:
+            del output_dir
+            assert len(segments) == 1
+            segment = segments[0]
+            assert segment.cn_text == "rewritten child text"
+            assert segment.tts_input_cn_text == "rewritten child text"
+            segment.aligned_audio_path = segment.tts_audio_path
+            segment.alignment_method = "dsp"
+            segment.needs_review = False
+            return []
+
+    def fake_duration(path: Path | str) -> int:
+        if (
+            Path(path).resolve(strict=False) == old_tts_path.resolve(strict=False)
+            and not observed["generated"]
+        ):
+            return 5_000
+        return 2_600
+
+    monkeypatch.setattr(process_module, "SegmentAligner", FakeAligner)
+    monkeypatch.setattr(process_module, "_ffprobe_duration_ms", fake_duration)
+
+    pipeline._retry_failed_semantic_child(
+        child_segment=child_segment,
+        tts_generator=FakeTTSGenerator(),  # type: ignore[arg-type]
+        rewriter=FakeRewriter(),  # type: ignore[arg-type]
+        tts_dir=tts_dir,
+        post_tts_budget_tracker=PostTTSBudgetTracker(),
+    )
+
+    assert observed["generate_one_calls"] == [
+        (7, "rewritten child text", process_module.TTS_BUCKET_POST_TTS_RESYNTH)
+    ]
+    assert child_segment.cn_text == "rewritten child text"
+    assert child_segment.tts_input_cn_text == "rewritten child text"
+    assert child_segment.actual_duration_ms == 2_600
+    assert child_segment.selected_voice == "voice_generated"
+    assert child_segment.match_confidence == "high"
+    assert child_segment.needs_review is False
+    assert child_segment.alignment_method == "dsp"
 
 
 def test_process_pipeline_presplits_long_overshoot_segment_before_alignment(

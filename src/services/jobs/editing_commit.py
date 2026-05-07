@@ -84,6 +84,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "CommitPipelineError",
     "CommitRunner",
+    "EditingAudioSyncRequiredError",
     "commit_editing_pipeline",
 ]
 
@@ -92,6 +93,21 @@ class CommitPipelineError(Exception):
     """Raised when commit_editing_pipeline cannot complete. Caller should
     surface the message to the user so they know their editing state is
     (depending on phase) either fully preserved for retry or half-applied."""
+
+
+class EditingAudioSyncRequiredError(EditingConflictError):
+    """Raised when text edits would be committed without matching TTS audio."""
+
+    code = "editing_audio_sync_required"
+
+    def __init__(self, unsynced_segments: list[dict[str, Any]]) -> None:
+        self.unsynced_segments = unsynced_segments
+        self.payload = {
+            "code": self.code,
+            "message": "Some edited text segments need regenerated TTS before commit.",
+            "unsynced_segments": unsynced_segments,
+        }
+        super().__init__(self.payload["message"])
 
 
 class CommitRunner(Protocol):
@@ -396,6 +412,7 @@ def commit_editing_pipeline(
         raise EditingConflictError(f"job {record.job_id} has no project_dir")
 
     project_dir = Path(record.project_dir)
+    _require_text_audio_sync_before_commit(project_dir)
     if strategy == "overwrite":
         return _commit_overwrite(record, store, runner, project_dir)
 
@@ -415,6 +432,86 @@ def commit_editing_pipeline(
 
 def _default_new_job_id() -> str:
     return f"job_{_uuid.uuid4().hex}"
+
+
+def _load_json_list(path: Path) -> list[dict[str, Any]]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [item for item in data if isinstance(item, dict)]
+
+
+def _segments_by_id(items: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {
+        str(item.get("segment_id")): item
+        for item in items
+        if item.get("segment_id") is not None
+    }
+
+
+def _load_segment_status_map(project_dir: Path) -> dict[str, str]:
+    path = project_dir / EDITING_SUBDIR / "segment_status.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(key): str(value) for key, value in data.items()}
+
+
+def _find_text_edits_without_tts(project_dir: Path) -> list[dict[str, Any]]:
+    """Return text edits whose current audio still represents older text.
+
+    ``text_dirty`` is the authoritative UI/backend signal that a segment's
+    text changed after the last matching TTS synthesis. A draft wav may still
+    exist from an earlier regeneration; if the status is text_dirty, that
+    draft is stale too and must not be promoted at commit.
+    """
+    status_map = _load_segment_status_map(project_dir)
+    if not status_map:
+        return []
+    editing_dir = project_dir / EDITING_SUBDIR
+    drafts_dir = editing_dir / "tts_segments_draft"
+    editing_by_id = _segments_by_id(_load_json_list(editing_dir / "segments.json"))
+    baseline_by_id = _segments_by_id(_load_json_list(project_dir / "editor" / "segments.json"))
+    unsynced: list[dict[str, Any]] = []
+    for sid, status in sorted(status_map.items()):
+        if status != "text_dirty":
+            continue
+        editing_segment = editing_by_id.get(sid)
+        baseline_segment = baseline_by_id.get(sid)
+        if not editing_segment or not baseline_segment:
+            continue
+        current_text = str(editing_segment.get("cn_text") or "")
+        audio_text = str(
+            baseline_segment.get("tts_input_cn_text")
+            or baseline_segment.get("cn_text")
+            or ""
+        )
+        has_stale_draft = (drafts_dir / f"{sid}.wav").is_file()
+        if current_text == audio_text and not has_stale_draft:
+            continue
+        unsynced.append({
+            "segment_id": sid,
+            "status": status,
+            "display_name": editing_segment.get("display_name") or "",
+            "speaker_id": editing_segment.get("speaker_id") or "",
+            "current_cn_text": current_text,
+            "audio_cn_text": audio_text,
+            "current_source_text": editing_segment.get("source_text") or "",
+            "audio_source_text": baseline_segment.get("source_text") or "",
+        })
+    return unsynced
+
+
+def _require_text_audio_sync_before_commit(project_dir: Path) -> None:
+    unsynced = _find_text_edits_without_tts(project_dir)
+    if unsynced:
+        raise EditingAudioSyncRequiredError(unsynced)
 
 
 # ---------------------------------------------------------------------------

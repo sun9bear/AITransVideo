@@ -271,7 +271,11 @@ def test_gateway_knows_every_post_edit_endpoint() -> None:
         ), f"gateway does not recognise transition subpath: {subpath}"
 
     # Simple mutations (T1-6)
-    for subpath in ("regenerate-all-tts", "editing/voice-map"):
+    for subpath in (
+        "regenerate-all-tts",
+        "editing/voice-map",
+        "editing/revert-unsynced-text",
+    ):
         assert (
             f'"{subpath}"' in gateway_src or f"'{subpath}'" in gateway_src
         ), f"gateway does not recognise simple mutation subpath: {subpath}"

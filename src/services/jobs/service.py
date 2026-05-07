@@ -586,6 +586,30 @@ class JobService:
             )
         return result
 
+    def revert_unsynced_text_segments(
+        self,
+        job_id: str,
+        *,
+        segment_ids: list[str],
+    ) -> dict:
+        from services.jobs.editing import EditingConflictError, touch_editing
+        from services.jobs.editing_segments import revert_text_changes_to_audio_baseline
+
+        record = self.require_job(job_id)
+        if record.status != "editing":
+            raise EditingConflictError(
+                f"job {job_id} is not in editing state (current status: {record.status})"
+            )
+        if not record.project_dir:
+            raise EditingConflictError(f"job {job_id} has no project_dir")
+        result = revert_text_changes_to_audio_baseline(
+            record.project_dir,
+            segment_ids,
+        )
+        updated = touch_editing(record, self.store)
+        result["editing_touched_at"] = updated.editing_touched_at
+        return result
+
     def _emit_post_edit_committed(
         self,
         record_pre_commit: JobRecord,

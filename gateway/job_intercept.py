@@ -1738,6 +1738,7 @@ _POST_EDIT_SIMPLE_MUTATION_SUBPATHS: frozenset[str] = frozenset({
     "regenerate-all-tts",           # T1-6 batch (async start)
     "regenerate-all-tts/cancel",    # 2026-04-21 D39 user-initiated cancel
     "editing/voice-map",            # T1-6 set/clear voice override (POST only)
+    "editing/revert-unsynced-text", # discard text edits without matching TTS
 })
 
 

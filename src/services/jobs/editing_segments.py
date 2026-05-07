@@ -47,6 +47,7 @@ __all__ = [
     "load_editing_segments",
     "load_segment_status",
     "patch_editing_segment",
+    "revert_text_changes_to_audio_baseline",
     "split_editing_segment",
     "slice_source_audio_for_editing_segment",
     "mark_segment_status",
@@ -320,7 +321,8 @@ def patch_editing_segment(
             f"segment_id {segment_id!r} not found in editing/segments.json"
         )
 
-    updated = dict(segments[index])  # shallow copy
+    original = segments[index]
+    updated = dict(original)  # shallow copy
     applied: dict[str, Any] = {}
     for key, value in patch.items():
         if key not in PATCHABLE_SEGMENT_FIELDS:
@@ -370,6 +372,14 @@ def patch_editing_segment(
 
     segments[index] = updated
     _atomic_write_json(_segments_path(project_dir), segments)
+
+    # A cn_text edit invalidates any earlier draft wav for this segment.
+    # Commit promotes every draft file it sees, so leaving a stale draft on
+    # disk would let old synthesized content overwrite the baseline audio.
+    if "cn_text" in applied and applied["cn_text"] != original.get("cn_text"):
+        draft = _editing_dir(project_dir) / "tts_segments_draft" / f"{segment_id}.wav"
+        if draft.exists():
+            draft.unlink()
 
     # Status flip. cn_text edit → text_dirty; speaker change → voice_dirty
     # (different voice coming, audio is stale). Both may apply — prefer
@@ -524,6 +534,94 @@ def _cn_text_differs_from_baseline(
     if base_text is None or edit_text is None:
         return False
     return base_text != edit_text
+
+
+def _baseline_segments_by_id(project_dir: str | Path) -> dict[str, dict[str, Any]]:
+    path = Path(project_dir) / "editor" / "segments.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, list):
+        return {}
+    return {
+        str(seg.get("segment_id")): seg
+        for seg in data
+        if isinstance(seg, dict) and seg.get("segment_id") is not None
+    }
+
+
+def revert_text_changes_to_audio_baseline(
+    project_dir: str | Path,
+    segment_ids: list[str],
+) -> dict[str, Any]:
+    """Restore edited text fields to the baseline that matches current audio.
+
+    Used when commit preflight finds text edits without regenerated TTS and
+    the user explicitly chooses to discard those text edits.
+    """
+    _ensure_editing_dir(project_dir)
+    targets: list[str] = []
+    seen: set[str] = set()
+    for raw_sid in segment_ids:
+        sid = str(raw_sid or "").strip()
+        if not sid:
+            continue
+        validate_segment_id(sid)
+        if sid not in seen:
+            targets.append(sid)
+            seen.add(sid)
+    if not targets:
+        raise ValueError("segment_ids must contain at least one segment id")
+
+    segments = load_editing_segments(project_dir)
+    baseline_by_id = _baseline_segments_by_id(project_dir)
+    target_set = set(targets)
+    updated_segments: list[dict[str, Any]] = []
+    reverted: list[str] = []
+    for item in segments:
+        if not isinstance(item, dict):
+            updated_segments.append(item)
+            continue
+        sid = str(item.get("segment_id"))
+        if sid not in target_set:
+            updated_segments.append(item)
+            continue
+        baseline = baseline_by_id.get(sid)
+        if not baseline:
+            raise EditingConflictError(f"baseline segment {sid!r} not found")
+        next_item = dict(item)
+        next_item["cn_text"] = str(
+            baseline.get("tts_input_cn_text") or baseline.get("cn_text") or ""
+        )
+        if "source_text" in baseline:
+            next_item["source_text"] = baseline.get("source_text") or ""
+        updated_segments.append(next_item)
+        reverted.append(sid)
+
+    missing = [sid for sid in targets if sid not in reverted]
+    if missing:
+        raise EditingConflictError(
+            f"segment_id(s) not found in editing/segments.json: {missing}"
+        )
+
+    _atomic_write_json(_segments_path(project_dir), updated_segments)
+    for sid in reverted:
+        draft = _editing_dir(project_dir) / "tts_segments_draft" / f"{sid}.wav"
+        if draft.exists():
+            draft.unlink()
+        residual = compute_residual_segment_status(
+            project_dir,
+            sid,
+            assume_no_draft=True,
+        )
+        mark_segment_status(project_dir, sid, residual)
+
+    return {
+        "reverted_segment_ids": reverted,
+        "segments": [seg for seg in updated_segments if isinstance(seg, dict)],
+        "segment_status": load_segment_status(project_dir),
+    }
 
 
 def compute_residual_segment_status(

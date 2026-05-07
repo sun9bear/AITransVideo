@@ -871,6 +871,25 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                         )
                     self._write_json(HTTPStatus.OK, {"success": True, **result})
                     return
+                # POST /jobs/{id}/editing/revert-unsynced-text — discard text edits
+                # that do not have matching regenerated TTS.
+                if (len(path_parts) == 4 and path_parts[0] == "jobs"
+                        and path_parts[2] == "editing" and path_parts[3] == "revert-unsynced-text"):
+                    payload = self._read_json_payload()
+                    raw_segment_ids = payload.get("segment_ids")
+                    if not isinstance(raw_segment_ids, list):
+                        raise ValueError("segment_ids must be a list")
+                    segment_ids = [
+                        str(item).strip()
+                        for item in raw_segment_ids
+                        if str(item).strip()
+                    ]
+                    result = service.revert_unsynced_text_segments(
+                        path_parts[1],
+                        segment_ids=segment_ids,
+                    )
+                    self._write_json(HTTPStatus.OK, {"success": True, **result})
+                    return
                 # POST /jobs/{id}/editing/commit — overwrite or copy_as_new (T1-9)
                 if (len(path_parts) == 4 and path_parts[0] == "jobs"
                         and path_parts[2] == "editing" and path_parts[3] == "commit"):
@@ -1364,7 +1383,14 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
             except JobConflictError as exc:
                 # EditingConflictError is a JobConflictError subclass, so it
                 # also maps to 409 here; no extra branch needed.
-                self._write_json(HTTPStatus.CONFLICT, {"error": str(exc)})
+                payload = getattr(exc, "payload", None)
+                if isinstance(payload, dict):
+                    self._write_json(
+                        HTTPStatus.CONFLICT,
+                        {"error": str(exc), **payload},
+                    )
+                else:
+                    self._write_json(HTTPStatus.CONFLICT, {"error": str(exc)})
             except NotImplementedError as exc:
                 # Emitted by editing/commit (T1-1 skeleton). Frontend should
                 # render a "coming soon" notice rather than a crash toast.

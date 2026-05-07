@@ -35,6 +35,7 @@ from services.jobs.editing_segments import (
     load_segment_status,
     mark_segment_status,
     patch_editing_segment,
+    revert_text_changes_to_audio_baseline,
 )
 from services.jobs.input_validators import (
     SEGMENT_ID_RE,
@@ -222,6 +223,45 @@ def test_patch_segment_updates_cn_text_and_flags_dirty(tmp_path: Path) -> None:
     # Status auto-flagged
     status = load_segment_status(project_dir)
     assert status["seg_001"] == SEGMENT_STATUS_TEXT_DIRTY
+
+
+def test_patch_segment_cn_text_removes_stale_draft(tmp_path: Path) -> None:
+    _, project_dir, _ = _build_editing_job(tmp_path)
+    draft = project_dir / EDITING_SUBDIR / "tts_segments_draft" / "seg_001.wav"
+    draft.parent.mkdir(parents=True, exist_ok=True)
+    draft.write_bytes(b"old draft")
+
+    patch_editing_segment(project_dir, "seg_001", {"cn_text": "你好呀"})
+
+    assert not draft.exists()
+    assert load_segment_status(project_dir)["seg_001"] == SEGMENT_STATUS_TEXT_DIRTY
+
+
+def test_revert_text_changes_to_audio_baseline_discards_unsynced_text(
+    tmp_path: Path,
+) -> None:
+    _, project_dir, _ = _build_editing_job(tmp_path)
+    editing_segments_path = project_dir / EDITING_SUBDIR / "segments.json"
+    segments = json.loads(editing_segments_path.read_text(encoding="utf-8"))
+    segments[0]["cn_text"] = "新文本"
+    segments[0]["source_text"] = "new source"
+    editing_segments_path.write_text(
+        json.dumps(segments, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    draft = project_dir / EDITING_SUBDIR / "tts_segments_draft" / "seg_001.wav"
+    draft.parent.mkdir(parents=True, exist_ok=True)
+    draft.write_bytes(b"stale draft")
+    mark_segment_status(project_dir, "seg_001", SEGMENT_STATUS_TEXT_DIRTY)
+
+    result = revert_text_changes_to_audio_baseline(project_dir, ["seg_001"])
+
+    by_id = {seg["segment_id"]: seg for seg in result["segments"]}
+    assert by_id["seg_001"]["cn_text"] == "你好"
+    assert by_id["seg_001"]["source_text"] == "hello"
+    assert result["reverted_segment_ids"] == ["seg_001"]
+    assert result["segment_status"] == {}
+    assert not draft.exists()
 
 
 def test_patch_segment_accepts_translation_confirmed(tmp_path: Path) -> None:

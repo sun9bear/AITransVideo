@@ -22,6 +22,7 @@ import pytest
 from services.jobs.editing import EDITING_SUBDIR, enter_editing
 from services.jobs.editing_commit import (
     CommitPipelineError,
+    EditingAudioSyncRequiredError,
     commit_editing_pipeline,
 )
 from services.jobs.editing import EditingConflictError
@@ -206,6 +207,62 @@ def test_overwrite_applies_text_edit_to_baseline(tmp_path: Path) -> None:
     assert out[1]["cn_text"] == "NEW_TEXT_2"
     # editing/ dir removed
     assert not (project_dir / EDITING_SUBDIR).exists()
+
+
+def test_commit_rejects_text_dirty_segment_without_matching_tts(
+    tmp_path: Path,
+) -> None:
+    store, record, project_dir = _build_editing_job_with_diff(
+        tmp_path,
+        text_edits={"seg_001": "NEW_TEXT_1"},
+    )
+    editing_dir = project_dir / EDITING_SUBDIR
+    (editing_dir / "segment_status.json").write_text(
+        json.dumps({"seg_001": "text_dirty"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    runner = _RecordingRunner()
+
+    with pytest.raises(EditingAudioSyncRequiredError) as raised:
+        commit_editing_pipeline(record, store, runner, strategy="overwrite")
+
+    assert runner.calls == []
+    assert raised.value.payload["code"] == "editing_audio_sync_required"
+    assert raised.value.unsynced_segments == [
+        {
+            "segment_id": "seg_001",
+            "status": "text_dirty",
+            "display_name": "",
+            "speaker_id": "",
+            "current_cn_text": "NEW_TEXT_1",
+            "audio_cn_text": "text1",
+            "current_source_text": "",
+            "audio_source_text": "",
+        }
+    ]
+    assert (project_dir / EDITING_SUBDIR).is_dir()
+
+
+def test_commit_rejects_text_dirty_segment_even_when_stale_draft_exists(
+    tmp_path: Path,
+) -> None:
+    store, record, project_dir = _build_editing_job_with_diff(
+        tmp_path,
+        text_edits={"seg_001": "text1"},
+        draft_wavs={"seg_001": b"STALE_DRAFT"},
+    )
+    editing_dir = project_dir / EDITING_SUBDIR
+    (editing_dir / "segment_status.json").write_text(
+        json.dumps({"seg_001": "text_dirty"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    runner = _RecordingRunner()
+
+    with pytest.raises(EditingAudioSyncRequiredError):
+        commit_editing_pipeline(record, store, runner, strategy="overwrite")
+
+    assert runner.calls == []
+    assert (editing_dir / "tts_segments_draft" / "seg_001.wav").read_bytes() == b"STALE_DRAFT"
 
 
 def test_overwrite_applies_voice_map_and_draft_wavs(tmp_path: Path) -> None:
