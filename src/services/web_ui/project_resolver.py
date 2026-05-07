@@ -323,69 +323,6 @@ def _resolve_authoritative_review_project_dir(
     return authoritative_project_dir
 
 
-def _build_current_project_audio_preview_paths(
-    *,
-    project_dir: Path,
-    results_snapshot: dict[str, object],
-) -> set[Path]:
-    allowed_paths: set[Path] = set()
-    for section_name in ("translation_review", "audio_alignment"):
-        section_payload = results_snapshot.get(section_name)
-        if not isinstance(section_payload, dict):
-            continue
-        raw_items = section_payload.get("items")
-        if not isinstance(raw_items, list):
-            continue
-        for raw_item in raw_items:
-            if not isinstance(raw_item, dict):
-                continue
-            for field_name in ("tts_audio_path", "aligned_audio_path"):
-                resolved_path_text = _normalize_optional_text(raw_item.get(field_name))
-                if resolved_path_text is None:
-                    continue
-                resolved_path = Path(resolved_path_text).expanduser().resolve(strict=False)
-                if _path_is_within_root(resolved_path, project_dir) and _is_project_audio_file(resolved_path):
-                    allowed_paths.add(resolved_path)
-    return allowed_paths
-
-
-def _resolve_allowed_project_file_download_path(
-    *,
-    manager: object,
-    requested_path: str,
-) -> Path:
-    candidate_path = Path(requested_path).expanduser().resolve(strict=False)
-    if not candidate_path.exists() or not candidate_path.is_file():
-        raise FileNotFoundError("Requested file was not found.")
-
-    # Late import to avoid circular dependency
-    from .snapshot import build_web_ui_snapshot
-
-    snapshot = build_web_ui_snapshot(manager=manager)  # type: ignore[arg-type]
-    results_snapshot = _ensure_dict(snapshot.get("results"))
-    current_project_dir_text = _normalize_optional_text(results_snapshot.get("project_dir"))
-    if current_project_dir_text is None:
-        raise ValueError("\u5f53\u524d\u6ca1\u6709\u53ef\u7528\u4e8e\u97f3\u9891\u9884\u89c8\u7684\u9879\u76ee\u76ee\u5f55\u3002")
-
-    project_root = manager.project_root.resolve(strict=False)  # type: ignore[union-attr]
-    projects_root = (project_root / "projects").resolve(strict=False)
-    current_project_dir = Path(current_project_dir_text).expanduser().resolve(strict=False)
-    if not _path_is_within_root(current_project_dir, projects_root):
-        raise ValueError("\u5f53\u524d\u7ed3\u679c\u9879\u76ee\u76ee\u5f55\u8d85\u51fa\u4e86 projects \u6839\u76ee\u5f55\u3002")
-    if not _path_is_within_root(candidate_path, current_project_dir):
-        raise ValueError("Requested file is outside the current project directory.")
-    if not _is_project_audio_file(candidate_path):
-        raise ValueError("Requested file is not an allowed audio preview file.")
-
-    allowed_paths = _build_current_project_audio_preview_paths(
-        project_dir=current_project_dir,
-        results_snapshot=results_snapshot,
-    )
-    if candidate_path not in allowed_paths:
-        raise ValueError("Requested file is not in the current project's audio preview whitelist.")
-    return candidate_path
-
-
 def _resolve_public_result_download_path(
     *,
     project_root: Path,
@@ -454,33 +391,6 @@ def _resolve_public_result_download_path(
     if not _path_is_within_root(candidate_path, resolved_project_dir):
         raise ValueError("Resolved download path is outside the project directory.")
     return candidate_path
-
-
-def _resolve_project_dir_by_job_id(
-    *,
-    manager: object,
-    job_id: str,
-) -> str | None:
-    normalized_job_id = job_id.strip()
-    if not normalized_job_id:
-        return None
-
-    # Late import to check manager type without circular dependency
-    from .models import ProcessJobSnapshot  # noqa: F401
-
-    # Check if it's a JobAPIBackedJobManager by duck-typing
-    if hasattr(manager, "_request_json"):
-        try:
-            payload = manager._request_json("GET", f"/jobs/{normalized_job_id}", None)  # type: ignore[union-attr]
-        except Exception:
-            return None
-        return _normalize_optional_text(payload.get("project_dir"))
-
-    snapshot = manager.snapshot()  # type: ignore[union-attr]
-    snapshot_job_id = _normalize_optional_text(snapshot.get("job_id"))
-    if snapshot_job_id != normalized_job_id:
-        return None
-    return _normalize_optional_text(snapshot.get("project_dir"))
 
 
 def _resolve_project_dir_under_projects_root(

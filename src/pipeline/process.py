@@ -3515,25 +3515,6 @@ class ProcessPipeline:
         }
         return f"[WEB_REVIEW] {json.dumps(marker_payload, ensure_ascii=False)}"
 
-    def _build_voice_review_payload(self, exc: VoiceReviewRequiredError) -> dict[str, object]:
-        sample_duration_s = _coerce_float(exc.sample_metrics.get("duration_s"), default=0.0)
-        silence_ratio = _coerce_float(exc.sample_metrics.get("silence_ratio"), default=0.0)
-        return {
-            "reason": "sample_too_short",
-            "message": str(exc),
-            "speakers": [
-                {
-                    "speaker_id": exc.speaker_id,
-                    "speaker_label": exc.speaker_label,
-                    "speaker_name": exc.speaker_name,
-                    "voice_arg_name": exc.voice_arg_name,
-                    "sample_path": exc.sample_path,
-                    "sample_duration_s": round(sample_duration_s, 1),
-                    "silence_ratio": round(silence_ratio, 2),
-                }
-            ],
-        }
-
     def _get_approved_review_payload(
         self,
         review_state_manager: ReviewStateManager,
@@ -3702,10 +3683,20 @@ class ProcessPipeline:
         try:
             from urllib import request as urllib_request
             import json as _json
+            # P0-2a follow-up: gateway's /internal/user-voices/expire now requires
+            # X-Internal-Key (was previously fail-open). Inject the key here so
+            # the silent best-effort notify keeps working. If the env is unset
+            # the request will 403 and the outer except swallows it — same as
+            # the historical "no header sent" behaviour but with explicit intent.
+            import os as _os
+            internal_key = _os.environ.get("AVT_INTERNAL_API_KEY", "").strip()
+            req_headers = {"Content-Type": "application/json"}
+            if internal_key:
+                req_headers["X-Internal-Key"] = internal_key
             req = urllib_request.Request(
                 "http://127.0.0.1:8880/internal/user-voices/expire",
                 data=_json.dumps({"job_id": job_id, "voice_id": voice_id}).encode(),
-                headers={"Content-Type": "application/json"},
+                headers=req_headers,
                 method="POST",
             )
             urllib_request.urlopen(req, timeout=5)
@@ -5001,107 +4992,6 @@ class ProcessPipeline:
         if missing_tokens:
             return "missing_required_token"
         return ""
-
-    def _resolve_or_auto_clone_voice(
-        self,
-        *,
-        speaker_id: str,
-        transcript_result: TranscriptResult,
-        audio_path: Path,
-        final_project_dir: Path,
-        speaker_name: str,
-        voice_registry_path: str,
-        tts_config: TTSConfig,
-        skip_voice_registry_lookup: bool,
-    ) -> str:
-        speaker_label = "Speaker B" if speaker_id == "speaker_b" else "Speaker A"
-        voice_arg_name = "voice-b" if speaker_id == "speaker_b" else "voice-a"
-        if skip_voice_registry_lookup:
-            print(
-                f"[S2] {speaker_label} 仍为默认占位名，跳过音色库通用命中，"
-                "优先克隆当前视频音色..."
-            )
-        else:
-            print(f"[S2] 音色库查找 {speaker_label} ({speaker_name})...")
-            try:
-                resolved_voice_ids = lookup_voice_ids(
-                    {speaker_id: speaker_name},
-                    voice_registry_path=voice_registry_path,
-                )
-                voice_id = resolved_voice_ids[speaker_id]
-                print(f"[S2] 音色库命中：voice_id = {voice_id}")
-                return voice_id
-            except VoiceLookupError as exc:
-                if "Missing voice_id" not in str(exc):
-                    raise
-
-        print(f"[S2] {speaker_label} 未找到，开始自动提取样本...")
-        speaker_lines = [line for line in transcript_result.lines if line.speaker_id == speaker_id]
-        extractor = VoiceSampleExtractor()
-        sample_dir = (final_project_dir / "voice_samples").resolve(strict=False)
-        sample_dir.mkdir(parents=True, exist_ok=True)
-        sample_path = sample_dir / f"{_slugify_text(speaker_name)}_sample.wav"
-        extracted_sample_path = extractor.extract_sample(
-            str(audio_path),
-            speaker_lines,
-            str(sample_path),
-        )
-        sample_metrics = extractor.validate_sample(extracted_sample_path)
-        print(
-            "[S2] 样本提取完成："
-            f"{sample_metrics['duration_s']}秒，RMS {sample_metrics['rms_dbfs']}dBFS"
-        )
-        warnings = sample_metrics.get("warnings", [])
-        if isinstance(warnings, list) and warnings:
-            print(f"[S2] 样本警告：{'；'.join(str(item) for item in warnings)}")
-        sample_duration_s = float(sample_metrics.get("duration_s") or 0.0)
-        if sample_duration_s < MIN_SAMPLE_DURATION_SECONDS:
-            raise VoiceReviewRequiredError(
-                speaker_id=speaker_id,
-                speaker_label=speaker_label,
-                speaker_name=speaker_name,
-                voice_arg_name=voice_arg_name,
-                sample_path=extracted_sample_path,
-                sample_metrics=sample_metrics,
-                message=(
-                    f"{speaker_label} 自动克隆失败：提取到的样本仅 {sample_duration_s:.1f} 秒，"
-                    f"低于 MiniMax 克隆要求的最小时长 {MIN_SAMPLE_DURATION_SECONDS:.1f} 秒。"
-                    f"请手工提供 --{voice_arg_name}，或改用该说话人语音更长的素材。"
-                ),
-            )
-
-        clone_runtime_config = VoiceCloneConfig.from_env()
-        clone_api_key = clone_runtime_config.resolved_api_key() or tts_config.api_key
-        clone_base_url = clone_runtime_config.base_url or tts_config.base_url or "https://api.minimaxi.com"
-        cloner = AutoVoiceCloner(
-            api_key=clone_api_key,
-            base_url=clone_base_url,
-        )
-        print(f"[S2] 正在克隆 {speaker_label} 音色...")
-        clone_config_payload = getattr(cloner, "clone_config", None)
-        if clone_config_payload is not None:
-            clone_config_payload.timeout_seconds = clone_runtime_config.timeout_seconds
-            clone_config_payload.max_retries = clone_runtime_config.max_retries
-            clone_config_payload.retry_backoff_seconds = (
-                clone_runtime_config.retry_backoff_seconds
-            )
-        voice_id = cloner.clone_voice(extracted_sample_path, speaker_name)
-        print(f"[S2] {speaker_label} 克隆成功：voice_id = {voice_id}")
-
-        if not cloner.wait_until_ready(voice_id):
-            raise AutoCloneError(
-                f"{speaker_label} 自动克隆完成，但音色在等待时间内未就绪。"
-                f"请稍后重试或手工提供 --{voice_arg_name}。"
-            )
-
-        cloner.register_voice(
-            voice_id=voice_id,
-            speaker_name=speaker_name,
-            sample_path=extracted_sample_path,
-            voice_registry_path=voice_registry_path,
-        )
-        print(f"[S2] {speaker_label} 已写入音色库")
-        return voice_id
 
     def _legacy_speaker_inference_and_review(
         self,
