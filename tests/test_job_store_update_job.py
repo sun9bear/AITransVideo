@@ -197,6 +197,94 @@ def test_update_job_with_initial_fallback_writes_first_time(store):
     assert on_disk.status == "running"
 
 
+def test_save_job_serializes_with_concurrent_update_job(store):
+    """P1-15b follow-up (Codex review b1fee3a): a direct ``save_job``
+    call (the legacy ``require_job → replace → save_job`` pattern still
+    used by JobService.update_display_name and others) MUST serialize
+    with ``update_job`` holders. Without it, update_job only excludes
+    other update_job callers — a stale-snapshot direct save could slip
+    in between update_job's load and its internal save_job, clobbering
+    fields on both sides.
+
+    We exercise the actual race: thread A enters update_job and the
+    mutator sleeps briefly. While A's mutator is running, thread B
+    calls save_job directly with a stale snapshot. Without per-job
+    file_lock around save_job, B writes during A's critical section
+    and A's later save overwrites B's mutation. With the lock, B
+    blocks until A finishes; A's mutation lands; then B's save lands
+    — but B's snapshot is stale, so this test asserts the FINAL
+    on-disk record reflects A's mutation (B re-overwriting with stale
+    data is a different problem the broader caller migration solves).
+
+    The minimal observable property here: B must NOT execute its
+    save while A is mid-mutation. We check this by having B record
+    the timestamp at which it managed to write; that timestamp must
+    exceed A's mutator-completion timestamp.
+    """
+    import time
+
+    store.save_job(_make_record("job-7", status="queued"))
+
+    timeline: list[tuple[str, float]] = []
+    barrier = threading.Barrier(2)
+
+    def thread_a_update_job():
+        def slow_mutator(current):
+            barrier.wait()  # release B
+            time.sleep(0.05)  # hold the lock for 50ms
+            timeline.append(("a-mutator-finished", time.monotonic()))
+            return replace(current, status="running")
+
+        store.update_job("job-7", slow_mutator)
+        timeline.append(("a-update-returned", time.monotonic()))
+
+    def thread_b_direct_save():
+        barrier.wait()  # released by A's mutator entry
+        # Attempt a direct save while A's mutator is mid-flight.
+        time.sleep(0.005)  # ensure A entered the lock first
+        store.save_job(_make_record("job-7", status="failed"))
+        timeline.append(("b-save-returned", time.monotonic()))
+
+    ta = threading.Thread(target=thread_a_update_job)
+    tb = threading.Thread(target=thread_b_direct_save)
+    ta.start()
+    tb.start()
+    ta.join()
+    tb.join()
+
+    # Extract event timestamps for the assertion.
+    by_name = dict(timeline)
+    a_mutator_end = by_name["a-mutator-finished"]
+    b_save_end = by_name["b-save-returned"]
+    assert b_save_end > a_mutator_end, (
+        f"P1-15b follow-up regression: thread B's save_job completed "
+        f"at {b_save_end:.4f} BEFORE thread A's mutator finished at "
+        f"{a_mutator_end:.4f}. save_job is no longer serialized with "
+        f"update_job's lock; concurrent direct save can clobber "
+        f"in-flight mutations."
+    )
+
+
+def test_update_job_rejects_mutator_changing_job_id(store):
+    """P1-15b follow-up (Codex review b1fee3a): the mutator MUST NOT
+    return a JobRecord with a different job_id. We hold file_lock(job-A)
+    but a mutator that returns ``replace(c, job_id="job-B")`` would
+    write to job-B.json under the WRONG lock, silently bypassing
+    atomicity. Reject this defensively before save."""
+    store.save_job(_make_record("job-8a"))
+    store.save_job(_make_record("job-8b"))
+
+    def cross_job_mutator(current):
+        return replace(current, job_id="job-8b", status="running")
+
+    with pytest.raises(ValueError, match="changed job_id"):
+        store.update_job("job-8a", cross_job_mutator)
+
+    # Both jobs should be unchanged (the failed update didn't write).
+    assert store.require_job("job-8a").status == "queued"
+    assert store.require_job("job-8b").status == "queued"
+
+
 def test_update_job_initial_is_ignored_when_record_already_exists(store):
     """``initial`` is a fallback, NOT an override — if the record IS
     already on disk, the mutator must see the on-disk state, not the

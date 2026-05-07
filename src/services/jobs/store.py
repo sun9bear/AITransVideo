@@ -18,7 +18,20 @@ class JobStore:
     def save_job(self, record: JobRecord) -> JobRecord:
         self.root_dir.mkdir(parents=True, exist_ok=True)
         output_path = self._job_path(record.job_id)
-        self._write_json_atomic(output_path, record.to_dict())
+        # P1-15b follow-up (Codex review of b1fee3a): take the per-job
+        # ``file_lock`` so direct ``save_job`` callers (HTTP threads
+        # doing ``require_job → replace → save_job`` without going
+        # through ``update_job``) serialize with ``update_job`` holders.
+        # Without this, update_job's lock only excluded other
+        # update_job callers — a stale-snapshot direct save from
+        # JobService.update_display_name (or any other path that hasn't
+        # been migrated to update_job yet) could still slip in between
+        # update_job's load and its internal save_job, clobbering both
+        # sides' fields. The lock is reentrant per-thread, so when
+        # update_job calls into save_job from inside its own critical
+        # section the re-acquire is free.
+        with file_lock(output_path):
+            self._write_json_atomic(output_path, record.to_dict())
         return record
 
     def update_job(
@@ -65,6 +78,18 @@ class JobStore:
                     raise KeyError(f"Job not found: {job_id}")
                 current = initial
             updated = mutator(current)
+            # P1-15b follow-up (Codex review of b1fee3a): a buggy
+            # mutator that returns a JobRecord with a different job_id
+            # would cause us to write to a different file (under the
+            # WRONG file_lock — we hold the lock for ``job_id``, not
+            # for ``updated.job_id``), silently bypassing the atomicity
+            # guarantee. Reject this defensively before save.
+            if updated.job_id != job_id:
+                raise ValueError(
+                    f"update_job mutator changed job_id from {job_id!r} "
+                    f"to {updated.job_id!r}. Mutators must not change "
+                    f"the job_id; the lock is keyed by the original id."
+                )
             self.save_job(updated)
             return updated
 
