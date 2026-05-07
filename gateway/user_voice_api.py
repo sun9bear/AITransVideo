@@ -29,7 +29,11 @@ from user_voice_service import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/gateway", tags=["user-voices"])
-internal_router = APIRouter(prefix="/internal", tags=["user-voices-internal"])
+# P0-2b (audit 2026-05-07): prefix changed from /internal → /api/internal so the
+# Caddyfile @internal_block (which only blocks /api/internal/*) properly shields
+# these endpoints from public ingress. Callers in src/services/tts/voice_speed_catalog.py
+# and src/pipeline/process.py have been updated to match.
+internal_router = APIRouter(prefix="/api/internal", tags=["user-voices-internal"])
 
 # Calibration uses the cheaper turbo tier per provider (MiniMax CNY 2/万
 # vs HD 3.5/万) — cps precision is for the speed_decision estimator and

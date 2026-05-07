@@ -173,7 +173,7 @@ def test_persist_user_voice_speed_profiles_posts_internal_payload(monkeypatch) -
         skipped_reasons={"insufficient_samples": 3},
     )
 
-    assert calls["url"] == "http://gateway.local/internal/user-voices/speed-profiles"
+    assert calls["url"] == "http://gateway.local/api/internal/user-voices/speed-profiles"
     assert calls["headers"]["X-internal-key"] == "secret-key"
     assert calls["body"]["job_id"] == "job_1"
     assert calls["body"]["profiles"][0]["voice_id"] == "clone_voice_a"

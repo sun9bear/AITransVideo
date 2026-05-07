@@ -3709,7 +3709,9 @@ class ProcessPipeline:
             from urllib import request as urllib_request
             import json as _json
             req = urllib_request.Request(
-                "http://127.0.0.1:8880/internal/user-voices/expire",
+                # P0-2b (audit 2026-05-07): /internal/* → /api/internal/* so
+                # Caddyfile's @internal_block actually shields these endpoints.
+                "http://127.0.0.1:8880/api/internal/user-voices/expire",
                 data=_json.dumps({"job_id": job_id, "voice_id": voice_id}).encode(),
                 headers=_internal_request_headers(),
                 method="POST",
@@ -7576,7 +7578,8 @@ class ProcessPipeline:
         import urllib.request
 
         gateway_base = os.environ.get("AVT_GATEWAY_URL", "http://127.0.0.1:8880").rstrip("/")
-        url = f"{gateway_base}/internal/user-voices/speed-profiles"
+        # P0-2b (audit 2026-05-07): /internal/* → /api/internal/* so Caddy block applies.
+        url = f"{gateway_base}/api/internal/user-voices/speed-profiles"
         headers = {"Content-Type": "application/json"}
         internal_key = os.environ.get("AVT_INTERNAL_API_KEY", "").strip()
         if internal_key:
