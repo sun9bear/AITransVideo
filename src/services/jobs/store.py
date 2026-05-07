@@ -4,7 +4,9 @@ import json
 import os
 from pathlib import Path
 import tempfile
+from typing import Callable
 
+from services._file_lock import file_lock
 from services.jobs.events import JobEvent
 from services.jobs.models import JobRecord
 
@@ -18,6 +20,53 @@ class JobStore:
         output_path = self._job_path(record.job_id)
         self._write_json_atomic(output_path, record.to_dict())
         return record
+
+    def update_job(
+        self,
+        job_id: str,
+        mutator: Callable[[JobRecord], JobRecord],
+        *,
+        initial: JobRecord | None = None,
+    ) -> JobRecord:
+        """Atomic load → mutator → save under a per-job ``file_lock``.
+
+        P1-15b (audit 2026-05-07, P0-5 caller-layer follow-up):
+        every existing caller of ``save_job`` first did
+        ``record = store.require_job(); record = replace(record, ...);
+        store.save_job(record)``. P0-5 added file_lock around editing/
+        admin/state hot paths but deliberately scoped JobStore out
+        because fixing it requires changing the *caller* contract,
+        not just the save side. This helper closes that gap: callers
+        pass a mutator and we load+save atomically under the same
+        per-job lock, so concurrent HTTP threads + pipeline runner
+        threads cannot interleave their reads and lose updates.
+
+        The mutator MUST be pure: produce a new ``JobRecord`` from the
+        passed-in ``current`` without side effects. Any IO done inside
+        the mutator extends the critical section unnecessarily.
+
+        Reentrant: ``services._file_lock.file_lock`` uses an RLock + a
+        per-thread depth counter, so nested ``update_job`` calls on the
+        same job from the same thread are safe.
+
+        ``initial`` is the fallback record to feed the mutator when the
+        on-disk record doesn't exist yet (the typical first-write path
+        in ``ProcessJobRunner.start``: caller has the in-memory record
+        but it hasn't been persisted yet). Without ``initial`` the
+        method raises ``KeyError`` to preserve the original strict
+        require_job contract for callers that genuinely expect the
+        record to exist.
+        """
+        path = self._job_path(job_id)
+        with file_lock(path):
+            current = self.load_job(job_id)
+            if current is None:
+                if initial is None:
+                    raise KeyError(f"Job not found: {job_id}")
+                current = initial
+            updated = mutator(current)
+            self.save_job(updated)
+            return updated
 
     def load_job(self, job_id: str) -> JobRecord | None:
         path = self._job_path(job_id)

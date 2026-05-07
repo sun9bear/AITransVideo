@@ -558,9 +558,24 @@ class ProcessJobRunner:
         )
 
     def _save_job(self, record: JobRecord, **updates: object) -> JobRecord:
-        next_record = replace(record, **updates)
-        self.store.save_job(next_record)
-        return next_record
+        # P1-15b (audit 2026-05-07): route through update_job so the
+        # full load → modify → save sequence is atomic under the
+        # per-job file_lock. Without it, an HTTP request modifying the
+        # same JobRecord between this method's caller-side
+        # ``require_job()`` and ``save_job()`` would silently lose its
+        # update (the runner thread's stale snapshot would clobber it).
+        # ``record`` is the caller's "expected state" hint; the mutator
+        # re-reads the on-disk current state and applies only the
+        # ``updates`` so concurrent fields written by other writers
+        # are preserved. ``initial=record`` covers the first-write case
+        # in ``start()`` where the JobRecord hasn't been persisted yet.
+        if not updates:
+            return record
+        return self.store.update_job(
+            record.job_id,
+            lambda current: replace(current, **updates),
+            initial=record,
+        )
 
     @staticmethod
     def _kill_process(process: subprocess.Popen[str]) -> None:
