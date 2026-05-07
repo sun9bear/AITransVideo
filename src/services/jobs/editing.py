@@ -184,19 +184,46 @@ def enter_editing(record: JobRecord, store: JobStore) -> JobRecord:
     if not editing_segments.exists():
         shutil.copy2(baseline_segments, editing_segments)
 
+    # P1-15b caller migration (audit 2026-05-07, batch 2): route the
+    # state transition through update_job so concurrent ProcessJobRunner
+    # writes can't lose the editing flag (or vice versa). FS preparation
+    # above is intentionally OUTSIDE the mutator — these helpers only
+    # CREATE files (mkdir / copy2) which are idempotent and safe to
+    # repeat on retry; rolling them into the mutator would extend the
+    # critical section uselessly. The mutator is purely a JobRecord
+    # transition. ``transition_happened`` distinguishes real transitions
+    # from no-ops (another concurrent enter_editing already won) so we
+    # only emit one "editing.entered" event per actual transition.
     now = _utc_now_iso()
-    updated = replace(
-        record,
-        status=JOB_STATUS_EDITING,
-        editing_touched_at=now,
-        updated_at=now,
-    )
-    store.save_job(updated)
-    _emit_event(
-        store,
-        updated,
-        message="editing.entered: user resumed post-edit session",
-    )
+    transition_happened = False
+
+    def mutator(current: JobRecord) -> JobRecord:
+        nonlocal transition_happened
+        if current.status == JOB_STATUS_EDITING:
+            # Another concurrent enter_editing already won — no-op.
+            return current
+        if current.status != JOB_STATUS_SUCCEEDED:
+            # Genuine race: caller saw "succeeded" but disk now reflects
+            # something else (running / failed). Refuse the transition.
+            raise EditingConflictError(
+                f"job {current.job_id} is no longer in succeeded state "
+                f"(current: {current.status}); cannot enter editing"
+            )
+        transition_happened = True
+        return replace(
+            current,
+            status=JOB_STATUS_EDITING,
+            editing_touched_at=now,
+            updated_at=now,
+        )
+
+    updated = store.update_job(record.job_id, mutator)
+    if transition_happened:
+        _emit_event(
+            store,
+            updated,
+            message="editing.entered: user resumed post-edit session",
+        )
     return updated
 
 
@@ -217,24 +244,45 @@ def cancel_editing(
             f"(current status: {record.status})"
         )
 
-    if record.project_dir:
-        editing_dir = Path(record.project_dir) / EDITING_SUBDIR
-        if editing_dir.exists():
-            shutil.rmtree(editing_dir, ignore_errors=True)
-
+    # P1-15b caller migration (audit 2026-05-07, batch 2): route the
+    # state transition through update_job. The FS cleanup (rmtree of
+    # editor/editing/) is INTENTIONALLY AFTER the mutator — it's a
+    # destructive, irreversible side effect that should only run after
+    # the transition is committed AND only when the transition really
+    # happened (mutator may no-op if a concurrent cancel/commit already
+    # won). If rmtree fails after a successful transition, the record
+    # is succeeded but editor/editing/ remains; the cleanup scanner
+    # picks up the orphan dir later. The reverse order (rmtree first,
+    # then transition) would leave a record in editing state with no
+    # editing dir if the transition failed — worse user-facing state.
     now = _utc_now_iso()
-    updated = replace(
-        record,
-        status=JOB_STATUS_SUCCEEDED,
-        editing_touched_at=None,
-        updated_at=now,
-    )
-    store.save_job(updated)
-    _emit_event(
-        store,
-        updated,
-        message=f"editing.cancelled: reason={reason}",
-    )
+    transition_happened = False
+
+    def mutator(current: JobRecord) -> JobRecord:
+        nonlocal transition_happened
+        if current.status != JOB_STATUS_EDITING:
+            # Another concurrent cancel/commit already won — no-op.
+            return current
+        transition_happened = True
+        return replace(
+            current,
+            status=JOB_STATUS_SUCCEEDED,
+            editing_touched_at=None,
+            updated_at=now,
+        )
+
+    updated = store.update_job(record.job_id, mutator)
+
+    if transition_happened:
+        if record.project_dir:
+            editing_dir = Path(record.project_dir) / EDITING_SUBDIR
+            if editing_dir.exists():
+                shutil.rmtree(editing_dir, ignore_errors=True)
+        _emit_event(
+            store,
+            updated,
+            message=f"editing.cancelled: reason={reason}",
+        )
     return updated
 
 
@@ -293,10 +341,21 @@ def touch_editing(record: JobRecord, store: JobStore) -> JobRecord:
     """
     if record.status != JOB_STATUS_EDITING:
         return record
+    # P1-15b caller migration (audit 2026-05-07, batch 2): pure-mutator
+    # state transition. Mutator re-checks status under the lock so a
+    # concurrent cancel/commit that flipped status away from editing
+    # doesn't get clobbered by a stale touch.
     now = _utc_now_iso()
-    updated = replace(record, editing_touched_at=now, updated_at=now)
-    store.save_job(updated)
-    return updated
+
+    def mutator(current: JobRecord) -> JobRecord:
+        if current.status != JOB_STATUS_EDITING:
+            # Status changed mid-flight (cancel / commit raced ahead);
+            # don't resurrect an editing-only field on a non-editing
+            # record. Return current unchanged.
+            return current
+        return replace(current, editing_touched_at=now, updated_at=now)
+
+    return store.update_job(record.job_id, mutator)
 
 
 # ---------------------------------------------------------------------------
