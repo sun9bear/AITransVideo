@@ -386,6 +386,26 @@ def _merge_speaker_name_map(
     return merged
 
 
+def _internal_request_headers() -> dict[str, str]:
+    """Build HTTP headers for pipeline → gateway internal callbacks.
+
+    Gateway endpoints under /job-api/jobs/{id}/source-metadata, /metering,
+    and /internal/user-voices/* are protected by X-Internal-Key (P0-1, P0-2a
+    audit fixes, 2026-05-07). All pipeline callers must inject the key.
+
+    If AVT_INTERNAL_API_KEY is unset (dev / misconfig), fall back to
+    Content-Type only — the request will 403 but the caller's outer
+    try/except already swallows it and prints a warning. Job API has its
+    own startup gate (P0-2c) so this only fires if env is set on Job API
+    but missing on the pipeline subprocess.
+    """
+    headers = {"Content-Type": "application/json"}
+    internal_key = os.environ.get("AVT_INTERNAL_API_KEY", "").strip()
+    if internal_key:
+        headers["X-Internal-Key"] = internal_key
+    return headers
+
+
 def _report_source_metadata(
     job_id: str,
     duration_seconds: float | None = None,
@@ -412,7 +432,7 @@ def _report_source_metadata(
         req = urllib.request.Request(
             url,
             data=json.dumps(body).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers=_internal_request_headers(),
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
@@ -874,7 +894,7 @@ def _report_job_metering(
         req = urllib.request.Request(
             url,
             data=json.dumps(body).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers=_internal_request_headers(),
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
@@ -3677,26 +3697,21 @@ class ProcessPipeline:
         return expired
 
     def _notify_voice_expired(self, job_id: str | None, voice_id: str) -> None:
-        """Best-effort notify gateway to mark voice as expired in user's library."""
+        """Best-effort notify gateway to mark voice as expired in user's library.
+
+        Headers come from the shared ``_internal_request_headers()`` helper
+        (P0-2a audit follow-up, 2026-05-07) so this stays in sync if the
+        protocol ever evolves (trace-id, signed timestamps, etc.).
+        """
         if not job_id:
             return
         try:
             from urllib import request as urllib_request
             import json as _json
-            # P0-2a follow-up: gateway's /internal/user-voices/expire now requires
-            # X-Internal-Key (was previously fail-open). Inject the key here so
-            # the silent best-effort notify keeps working. If the env is unset
-            # the request will 403 and the outer except swallows it — same as
-            # the historical "no header sent" behaviour but with explicit intent.
-            import os as _os
-            internal_key = _os.environ.get("AVT_INTERNAL_API_KEY", "").strip()
-            req_headers = {"Content-Type": "application/json"}
-            if internal_key:
-                req_headers["X-Internal-Key"] = internal_key
             req = urllib_request.Request(
                 "http://127.0.0.1:8880/internal/user-voices/expire",
                 data=_json.dumps({"job_id": job_id, "voice_id": voice_id}).encode(),
-                headers=req_headers,
+                headers=_internal_request_headers(),
                 method="POST",
             )
             urllib_request.urlopen(req, timeout=5)

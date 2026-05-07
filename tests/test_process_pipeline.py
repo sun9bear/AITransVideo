@@ -101,9 +101,12 @@ def test_report_source_metadata_can_send_s2_display_name(monkeypatch: pytest.Mon
         captured["url"] = req.full_url
         captured["timeout"] = timeout
         captured["body"] = json.loads(req.data.decode("utf-8"))
+        # Capture all headers so the X-Internal-Key regression can assert.
+        captured["headers"] = dict(req.headers)
         return FakeResponse()
 
     monkeypatch.setenv("AVT_GATEWAY_URL", "http://gateway.test")
+    monkeypatch.setenv("AVT_INTERNAL_API_KEY", "test-internal-key-1234567890ab")
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
 
     process_module._report_source_metadata(
@@ -115,6 +118,85 @@ def test_report_source_metadata_can_send_s2_display_name(monkeypatch: pytest.Mon
     assert captured["url"] == "http://gateway.test/job-api/jobs/job-1/source-metadata"
     assert captured["timeout"] == 5
     assert captured["body"] == {"display_name": "巴菲特谈接班"}
+    # P0-1 audit follow-up: gateway tightened auth on /source-metadata, so the
+    # pipeline callback MUST forward AVT_INTERNAL_API_KEY as X-Internal-Key.
+    # urllib title-cases header names internally, so check both spellings to
+    # avoid a flake if urllib internals change.
+    headers = captured["headers"]
+    header_keys = {k.lower() for k in headers}
+    assert "x-internal-key" in header_keys, f"X-Internal-Key missing from {headers}"
+    val = headers.get("X-internal-key") or headers.get("X-Internal-Key") or headers.get("x-internal-key")
+    assert val == "test-internal-key-1234567890ab"
+
+
+def test_report_source_metadata_omits_header_when_env_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If AVT_INTERNAL_API_KEY is unset, callback degrades gracefully (request
+    will 403 but outer try/except already handles it). We assert NO X-Internal-Key
+    header is sent to avoid the request being interpreted as having an empty
+    key value (which would still fail server-side comparison)."""
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_urlopen(req, timeout):
+        captured["headers"] = dict(req.headers)
+        return FakeResponse()
+
+    monkeypatch.delenv("AVT_INTERNAL_API_KEY", raising=False)
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    process_module._report_source_metadata("job-x", display_name="t")
+
+    header_keys = {k.lower() for k in captured["headers"]}
+    assert "x-internal-key" not in header_keys
+
+
+def test_report_job_metering_sends_internal_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """P0-1 audit follow-up: /job-api/jobs/{id}/metering is auth-gated, so
+    the pipeline callback MUST forward X-Internal-Key. Without this, every
+    metering writeback (final_cn_chars, tts_billed_chars, glossary metrics)
+    silently 403s into the outer try/except."""
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_urlopen(req, timeout):
+        captured["url"] = req.full_url
+        captured["headers"] = dict(req.headers)
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return FakeResponse()
+
+    monkeypatch.setenv("AVT_GATEWAY_URL", "http://gateway.test")
+    monkeypatch.setenv("AVT_INTERNAL_API_KEY", "metering-test-key-1234567890ab")
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    # Minimal segments shape — _report_job_metering is permissive on shape.
+    segments = [{"cn_text": "你好"}]
+    process_module._report_job_metering("job-m1", segments, tts_billed_chars=2)
+
+    assert captured["url"] == "http://gateway.test/job-api/jobs/job-m1/metering"
+    header_keys = {k.lower() for k in captured["headers"]}
+    assert "x-internal-key" in header_keys, f"X-Internal-Key missing from {captured['headers']}"
+    val = (
+        captured["headers"].get("X-internal-key")
+        or captured["headers"].get("X-Internal-Key")
+        or captured["headers"].get("x-internal-key")
+    )
+    assert val == "metering-test-key-1234567890ab"
 
 
 # ===================================================================
