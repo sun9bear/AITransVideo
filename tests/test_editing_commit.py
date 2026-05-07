@@ -410,6 +410,117 @@ def test_overwrite_runner_failure_rolls_back_to_editing(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# overwrite — race-loss filesystem invariant (P1-15b batch 3 follow-up)
+# ---------------------------------------------------------------------------
+
+
+def test_overwrite_race_loss_does_not_mutate_filesystem(tmp_path: Path) -> None:
+    """P1-15b batch 3 follow-up (Codex review of 0949f75):
+    if a concurrent cancel commits ``editing → succeeded`` between
+    JobService's stale require_job snapshot and ``_commit_overwrite``'s
+    update_job claim, the commit must raise CommitPipelineError WITHOUT
+    having mutated the filesystem. Otherwise the user/admin sees the
+    cancel as winning while the commit's edits are already promoted
+    into the baseline — silent inconsistency between status and disk.
+
+    Race construction: monkey-patch ``store.update_job`` to commit the
+    "concurrent cancel" winner just before the real call's mutator
+    runs, so the mutator sees status=succeeded and raises. After the
+    raise, none of the FS mutations
+    (_apply_editing_to_baseline / _rm_editing_dir /
+    _prune_overwrite_project_state) should have run.
+    """
+    from services.jobs.editing_commit import (
+        _commit_overwrite,
+        CommitPipelineError,
+    )
+
+    store, record, project_dir = _build_editing_job_with_diff(tmp_path)
+    runner = _RecordingRunner()
+
+    # Capture baseline filesystem state BEFORE attempting commit.
+    editing_dir = project_dir / "editor" / "editing"
+    baseline_segments = project_dir / "editor" / "segments.json"
+    project_state = project_dir / "project_state.json"
+    jianying_dir = project_dir / "jianying"
+
+    pre_editing_dir_exists = editing_dir.exists()
+    pre_editing_segments_text = (
+        (editing_dir / "segments.json").read_text(encoding="utf-8")
+        if (editing_dir / "segments.json").exists() else ""
+    )
+    pre_baseline_text = (
+        baseline_segments.read_text(encoding="utf-8")
+        if baseline_segments.exists() else ""
+    )
+    pre_project_state_text = (
+        project_state.read_text(encoding="utf-8")
+        if project_state.exists() else ""
+    )
+    # Touch a marker file inside jianying/ so we can detect a destructive
+    # rmtree by checking the marker afterwards.
+    jianying_dir.mkdir(parents=True, exist_ok=True)
+    marker = jianying_dir / "draft_marker.txt"
+    marker.write_text("pre-commit", encoding="utf-8")
+
+    # Monkey-patch store.update_job: when commit overwrite calls the
+    # claim mutator, FIRST commit a concurrent cancel to disk so the
+    # mutator's load_job sees status=succeeded. The original update_job
+    # then runs the mutator, which raises CommitPipelineError because
+    # the status is no longer editing.
+    real_update_job = store.update_job
+
+    def fake_update_job(job_id, mutator, *, initial=None):
+        # Concurrent cancel commits succeeded directly before our
+        # mutator runs.
+        from dataclasses import replace as _replace
+        won = _replace(
+            store.require_job(job_id),
+            status=JOB_STATUS_SUCCEEDED,
+            editing_touched_at=None,
+        )
+        # Restore real update_job before saving so save_job's lock is
+        # honoured normally.
+        store.update_job = real_update_job  # type: ignore[assignment]
+        store.save_job(won)
+        return real_update_job(job_id, mutator, initial=initial)
+
+    store.update_job = fake_update_job  # type: ignore[assignment]
+
+    with pytest.raises(CommitPipelineError, match="no longer in editing"):
+        _commit_overwrite(record, store, runner, project_dir)
+
+    # The filesystem must look exactly as it did before. None of the
+    # destructive FS steps should have run.
+    assert editing_dir.exists() == pre_editing_dir_exists, (
+        "P1-15b batch 3 follow-up regression: editing/ dir was removed "
+        "even though commit lost the concurrent claim race."
+    )
+    if pre_editing_dir_exists:
+        assert (
+            (editing_dir / "segments.json").read_text(encoding="utf-8")
+            == pre_editing_segments_text
+        ), "editing/segments.json was modified despite race loss"
+    assert baseline_segments.read_text(encoding="utf-8") == pre_baseline_text, (
+        "P1-15b batch 3 follow-up regression: editor/segments.json "
+        "(baseline) was promoted from editing/ even though commit lost "
+        "the concurrent claim race."
+    )
+    if pre_project_state_text:
+        assert project_state.read_text(encoding="utf-8") == pre_project_state_text, (
+            "P1-15b batch 3 follow-up regression: project_state.json was "
+            "pruned despite race loss"
+        )
+    assert marker.exists(), (
+        "P1-15b batch 3 follow-up regression: jianying/ was rmtree'd "
+        "despite race loss"
+    )
+
+    # Runner was never called.
+    assert runner.calls == []
+
+
+# ---------------------------------------------------------------------------
 # copy_as_new — happy path
 # ---------------------------------------------------------------------------
 

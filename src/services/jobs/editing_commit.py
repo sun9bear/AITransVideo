@@ -562,27 +562,22 @@ def _commit_overwrite(
     runner: CommitRunner,
     project_dir: Path,
 ) -> dict[str, Any]:
-    # Step 1-2: apply edits into baseline (atomic per-file).
-    summary = _apply_editing_to_baseline(project_dir)
-    # Step 3: remove editing buffer.
-    _rm_editing_dir(project_dir)
-    # Step 3.5: reset alignment + publish to PENDING so pipeline re-runs
-    # them against the just-applied edits instead of treating the source's
-    # succeeded-era state as authoritative.
-    _prune_overwrite_project_state(project_dir)
-
-    # Step 4 + 4.5: atomic flip status + reset Jianying fields.
-    # P1-15b batch 3 (audit 2026-05-07): single update_job covers
-    # both the editing→running status flip AND the Jianying draft
-    # field reset (status / started_at / completed_at / error /
-    # zip_path / user_root). The mutator re-checks current.status
-    # under the lock — if a concurrent cancel already flipped the
-    # job to succeeded, we raise CommitPipelineError rather than
-    # overwriting (commit is not idempotent: silently re-running
-    # alignment+publish on a finalized baseline would corrupt user-
-    # facing artifacts). The Jianying FS rmtree is deferred to after
-    # a successful transition, so a no-op'd / failed mutator does
-    # not destroy the prior draft.
+    # P1-15b batch 3 follow-up (Codex review of 0949f75):
+    #
+    # ORDER MATTERS — claim the transition under the per-job lock
+    # BEFORE any destructive filesystem work. The previous ordering
+    # (apply_editing → rm_editing_dir → prune_state → update_job)
+    # had a real failure mode: if a concurrent cancel committed
+    # ``editing → succeeded`` between JobService's stale require_job
+    # snapshot and update_job's lock acquisition, this commit would
+    # raise CommitPipelineError AFTER having already promoted the
+    # editing/ buffer into the baseline, removed the editing dir,
+    # and pruned project_state. The user/admin would see "cancel
+    # won" but the cancelled edits would already be on disk.
+    #
+    # New flow: 1) claim transition; 2) do FS work; 3) on FS failure,
+    # roll status back to editing. This way a lost concurrent claim
+    # (mutator raise) leaves the filesystem completely untouched.
     now = _utc_now_iso()
 
     def _flip_to_running(current: JobRecord) -> JobRecord:
@@ -609,12 +604,72 @@ def _commit_overwrite(
             jianying_draft_user_root=None,
         )
 
+    # Step 1 — atomic claim. If a concurrent cancel won, this raises
+    # WITHOUT having touched the filesystem.
     updated = store.update_job(record.job_id, _flip_to_running)
-    # FS cleanup after the transition committed: drop the stale
-    # Jianying draft zip so the user sees the regenerate button again.
-    jianying_root = Path(project_dir) / "jianying"
-    if jianying_root.exists():
-        shutil.rmtree(jianying_root, ignore_errors=True)
+
+    # Step 2 — destructive FS work, now that we own the transition.
+    # If anything below fails, roll status back to editing so the
+    # user/admin can see commit didn't complete (and perhaps retry).
+    # We don't restore the FS itself — once apply_editing_to_baseline
+    # has run, the baseline is already mutated; rolling status back
+    # is the most we can do without a transactional FS.
+    try:
+        # Step 2a: apply edits into baseline (atomic per-file).
+        summary = _apply_editing_to_baseline(project_dir)
+        # Step 2b: remove editing buffer.
+        _rm_editing_dir(project_dir)
+        # Step 2c: reset alignment + publish to PENDING so pipeline re-runs
+        # them against the just-applied edits instead of treating the
+        # source's succeeded-era state as authoritative.
+        _prune_overwrite_project_state(project_dir)
+        # Step 2d: drop stale Jianying draft zip so the user sees the
+        # regenerate button again.
+        jianying_root = Path(project_dir) / "jianying"
+        if jianying_root.exists():
+            shutil.rmtree(jianying_root, ignore_errors=True)
+    except Exception as exc:
+        logger.exception(
+            "commit overwrite: FS prep step failed AFTER claiming the "
+            "editing→running transition for job %s; rolling status "
+            "back to editing so caller can retry",
+            record.job_id,
+        )
+        rollback_now = _utc_now_iso()
+
+        def _rollback_to_editing_after_fs_fail(current: JobRecord) -> JobRecord:
+            # Only roll back if WE still own the transition (status
+            # is still RUNNING from our flip). If a third party (admin
+            # force, idle reaper) already moved it elsewhere, leave
+            # it alone — fighting the third party would just thrash.
+            if current.status != JOB_STATUS_RUNNING:
+                return current
+            return replace(
+                current,
+                status=JOB_STATUS_EDITING,
+                editing_touched_at=now,
+                updated_at=rollback_now,
+            )
+
+        try:
+            rolled = store.update_job(record.job_id, _rollback_to_editing_after_fs_fail)
+            _emit_event(
+                store, rolled,
+                message=(
+                    f"editing.commit_failed: strategy=overwrite "
+                    f"phase=fs_prep err={exc}"
+                ),
+            )
+        except Exception:  # pragma: no cover — defensive
+            logger.exception(
+                "commit overwrite: rollback also failed for job %s; "
+                "record may be stuck in 'running' without a worker",
+                record.job_id,
+            )
+        raise CommitPipelineError(
+            f"commit overwrite FS prep failed for {record.job_id}: {exc}"
+        ) from exc
+
     _emit_event(
         store, updated,
         message=(
