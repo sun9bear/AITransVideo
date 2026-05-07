@@ -2688,6 +2688,15 @@ class ProcessPipeline:
                         f"[S4] Pre-rewrote {pre_tts_rewrite_count} obvious long segment(s) "
                         "before TTS generation."
                     )
+                    cleared_pre_rewrite_cache_count = self._clear_pre_tts_rewrite_audio_cache(
+                        segments_needing_tts,
+                        tts_dir,
+                    )
+                    if cleared_pre_rewrite_cache_count:
+                        print(
+                            "[S4] Cleared "
+                            f"{cleared_pre_rewrite_cache_count} stale pre-rewrite audio cache file(s)."
+                        )
                 if segments_needing_tts:
                     print(
                         "[S4] 生成TTS音频..."
@@ -2730,6 +2739,15 @@ class ProcessPipeline:
                             f"[S4] Pre-rewrote {pre_tts_rewrite_count} obvious long segment(s) "
                             "before TTS generation."
                         )
+                        cleared_pre_rewrite_cache_count = self._clear_pre_tts_rewrite_audio_cache(
+                            segments_needing_tts,
+                            tts_dir,
+                        )
+                        if cleared_pre_rewrite_cache_count:
+                            print(
+                                "[S4] Cleared "
+                                f"{cleared_pre_rewrite_cache_count} stale pre-rewrite audio cache file(s)."
+                            )
                 else:
                     print("[S4] Pre-TTS 预重写已关闭（管理员设置）")
                 if segments_needing_tts:
@@ -5746,6 +5764,7 @@ class ProcessPipeline:
         initial_rejected_reason: str = "",
     ) -> None:
         segment.cn_text = rewritten_text
+        segment.tts_input_cn_text = ""
         segment.rewrite_count += 1
         segment.pre_tts_rewrite_direction = rewrite_label
         segment.pre_tts_estimate_ms = estimate_ms
@@ -6531,6 +6550,39 @@ class ProcessPipeline:
                     f"{expected_path}: {exc}",
                     flush=True,
                 )
+        return cleared
+
+    @staticmethod
+    def _clear_pre_tts_rewrite_audio_cache(
+        segments: list[DubbingSegment],
+        tts_dir: Path,
+    ) -> int:
+        """Invalidate path-based audio checkpoints after pre-TTS text rewrite."""
+        cleared = 0
+        for segment in segments:
+            if not getattr(segment, "pre_tts_rewrite_direction", ""):
+                continue
+            raw_path = tts_dir / f"segment_{segment.segment_id:03d}_{segment.speaker_id}.wav"
+            aligned_path = tts_dir / f"segment_{segment.segment_id:03d}_aligned.wav"
+            candidates = [raw_path, aligned_path]
+            candidates.extend(tts_dir.glob(f"segment_{segment.segment_id:03d}_aligned.wav.*"))
+            for candidate in candidates:
+                if not candidate.exists():
+                    continue
+                try:
+                    candidate.unlink()
+                    cleared += 1
+                except OSError as exc:
+                    print(
+                        f"[S4] Warning: failed to clear stale pre-rewrite audio cache "
+                        f"{candidate}: {exc}",
+                        flush=True,
+                    )
+            segment.tts_audio_path = None
+            segment.aligned_audio_path = None
+            segment.actual_duration_ms = 0
+            segment.alignment_ratio = 0.0
+            segment.alignment_method = ""
         return cleared
 
     def _build_aligned_segments(self, segments: list[DubbingSegment]) -> list[AlignedSegment]:
@@ -8237,12 +8289,18 @@ def _backfill_legacy_tts_input_cn_text(segment: DubbingSegment) -> None:
     ``tts_input_cn_text`` to detect text↔audio drift; an empty stamp would
     falsely flag the entire legacy job as drift.
 
-    Conservative default: assume the audio matches the current cn_text
-    (i.e. user hasn't done text-edit-without-regen-tts on this old job).
-    If they had, ``editor/segment_status.json`` would already mark the
-    segment ``text_dirty`` and the editing layer guards drift independently.
+    Conservative default: only assume the audio matches the current cn_text
+    once the record already looks like a completed audio-bearing segment.
+    Translation-review snapshots are written before TTS exists; backfilling
+    those would create a stale text witness before the first synthesis pass.
     """
-    if not segment.tts_input_cn_text and segment.cn_text:
+    has_audio_witness = bool(
+        getattr(segment, "tts_audio_path", None)
+        or getattr(segment, "aligned_audio_path", None)
+        or int(getattr(segment, "actual_duration_ms", 0) or 0) > 0
+        or (getattr(segment, "alignment_method", "") or "").strip()
+    )
+    if not segment.tts_input_cn_text and segment.cn_text and has_audio_witness:
         segment.tts_input_cn_text = segment.cn_text
 
 

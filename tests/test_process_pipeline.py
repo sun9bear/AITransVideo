@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 from pydub import AudioSegment
@@ -2205,6 +2206,117 @@ def test_tts_text_audio_sync_publish_repairs_mismatched_visible_text() -> None:
     assert repairs == ["segment_10: cn_text <- tts_input_cn_text"]
     assert segment.cn_text == "实际合成文本"
     assert segment.tts_input_cn_text == "实际合成文本"
+
+
+def test_tts_generator_regenerates_cache_when_text_witness_is_stale(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.tts.tts_generator import TTSGenerator
+    import services.tts.tts_generator as tts_module
+
+    generator = TTSGenerator(TTSConfig(api_key="test-key"))
+    output_root = tmp_path / "tts"
+    output_root.mkdir()
+    cached_path = output_root / "segment_001_speaker_a.wav"
+    cached_path.write_bytes(b"old")
+    segment = DubbingSegment(
+        segment_id=1,
+        speaker_id="speaker_a",
+        display_name="Speaker A",
+        voice_id="voice_a",
+        start_ms=0,
+        end_ms=1_000,
+        target_duration_ms=1_000,
+        source_text="hello",
+        cn_text="新的合成文本",
+        tts_input_cn_text="旧的合成文本",
+    )
+    calls: list[str] = []
+
+    class _NoopRateLimiter:
+        def wait(self) -> None:
+            calls.append("wait")
+
+    def _fake_generate_one_with_backoff(segment_arg, output_dir, *, usage_bucket):
+        calls.append(usage_bucket)
+        output_path = Path(output_dir) / "segment_001_speaker_a.wav"
+        output_path.write_bytes(b"new")
+        return TTSResult(
+            segment_id=segment_arg.segment_id,
+            audio_path=str(output_path),
+            duration_ms=777,
+            voice_id=segment_arg.voice_id,
+        )
+
+    monkeypatch.setattr(tts_module, "_ffprobe_duration_ms", lambda path: 123)
+    monkeypatch.setattr(generator, "_generate_one_with_backoff", _fake_generate_one_with_backoff)
+
+    result = generator._process_segment(
+        segment,
+        output_root,
+        1,
+        1,
+        _NoopRateLimiter(),
+        usage_bucket="first",
+    )
+
+    assert result.duration_ms == 777
+    assert calls == ["wait", "first"]
+    assert segment.tts_input_cn_text == "新的合成文本"
+
+
+def test_aligner_reprocesses_when_raw_tts_is_newer_than_aligned_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.alignment.aligner import SegmentAligner
+
+    raw_path = tmp_path / "segment_001_speaker_a.wav"
+    aligned_path = tmp_path / "segment_001_aligned.wav"
+    raw_path.write_bytes(b"raw")
+    aligned_path.write_bytes(b"aligned")
+    os.utime(aligned_path, (100, 100))
+    os.utime(raw_path, (200, 200))
+    segment = DubbingSegment(
+        segment_id=1,
+        speaker_id="speaker_a",
+        display_name="Speaker A",
+        voice_id="voice_a",
+        start_ms=0,
+        end_ms=1_000,
+        target_duration_ms=1_000,
+        source_text="hello",
+        cn_text="新的合成文本",
+        tts_input_cn_text="新的合成文本",
+        tts_audio_path=str(raw_path),
+    )
+    aligner = SegmentAligner()
+    called: list[int] = []
+
+    def _fake_align_one(segment_arg, output_dir):
+        called.append(segment_arg.segment_id)
+        return AlignedSegment(
+            segment_id=segment_arg.segment_id,
+            speaker_id=segment_arg.speaker_id,
+            display_name=segment_arg.display_name,
+            start_ms=segment_arg.start_ms,
+            end_ms=segment_arg.end_ms,
+            cn_text=segment_arg.cn_text,
+            en_text=getattr(segment_arg, "en_text", ""),
+            aligned_audio_path=str(aligned_path),
+            actual_duration_ms=1_000,
+            alignment_method="dsp",
+            needs_review=False,
+            dubbing_mode="dub",
+        )
+
+    monkeypatch.setattr(aligner, "_align_one", _fake_align_one)
+
+    results = aligner.align_all([segment], str(tmp_path))
+
+    assert called == [1]
+    assert results[0].alignment_method == "dsp"
 
 
 def test_process_pipeline_persists_reviewed_voice_metadata_before_tts_failure(
@@ -5052,6 +5164,75 @@ def test_process_pipeline_pre_rewrites_obvious_overshoot_before_tts() -> None:
     assert segment.pre_tts_post_chars == 90
 
 
+def test_process_pipeline_pre_tts_rewrite_clears_stale_text_witness() -> None:
+    pipeline = ProcessPipeline()
+    segment = DubbingSegment(
+        segment_id=40,
+        speaker_id="speaker_a",
+        display_name="Speaker A",
+        voice_id="voice_a",
+        start_ms=0,
+        end_ms=20_000,
+        target_duration_ms=20_000,
+        source_text="Original source text",
+        cn_text="a" * 120,
+        tts_input_cn_text="a" * 120,
+    )
+
+    class FakeRewriter:
+        def rewrite_for_duration_with_profile(self, *args, **kwargs):
+            return "b" * 90
+
+    rewritten_count = pipeline._pre_rewrite_obvious_overshoot_segments_before_tts(
+        segments=[segment],
+        rewriter=FakeRewriter(),  # type: ignore[arg-type]
+        chars_per_second=4.5,
+        chars_per_second_by_speaker={},
+    )
+
+    assert rewritten_count == 1
+    assert segment.cn_text == "b" * 90
+    assert segment.tts_input_cn_text == ""
+
+
+def test_process_pipeline_pre_tts_rewrite_clears_stale_audio_cache(tmp_path: Path) -> None:
+    segment = DubbingSegment(
+        segment_id=40,
+        speaker_id="speaker_a",
+        display_name="Speaker A",
+        voice_id="voice_a",
+        start_ms=0,
+        end_ms=20_000,
+        target_duration_ms=20_000,
+        source_text="Original source text",
+        cn_text="rewritten",
+        tts_audio_path=str(tmp_path / "segment_040_speaker_a.wav"),
+        aligned_audio_path=str(tmp_path / "segment_040_aligned.wav"),
+        actual_duration_ms=12_345,
+        alignment_ratio=0.5,
+        alignment_method="rewrite_dsp",
+        pre_tts_rewrite_direction="overshoot",
+    )
+    raw_path = tmp_path / "segment_040_speaker_a.wav"
+    aligned_path = tmp_path / "segment_040_aligned.wav"
+    whisper_path = tmp_path / "segment_040_aligned.wav.whisper_small_zh.json"
+    raw_path.write_bytes(b"raw")
+    aligned_path.write_bytes(b"aligned")
+    whisper_path.write_text("{}", encoding="utf-8")
+
+    cleared = ProcessPipeline._clear_pre_tts_rewrite_audio_cache([segment], tmp_path)
+
+    assert cleared == 3
+    assert not raw_path.exists()
+    assert not aligned_path.exists()
+    assert not whisper_path.exists()
+    assert segment.tts_audio_path is None
+    assert segment.aligned_audio_path is None
+    assert segment.actual_duration_ms == 0
+    assert segment.alignment_ratio == 0.0
+    assert segment.alignment_method == ""
+
+
 def test_process_pipeline_uses_short_content_compact_before_tts() -> None:
     pipeline = ProcessPipeline()
     segment = DubbingSegment(
@@ -5462,12 +5643,15 @@ def test_process_pipeline_short_estimate_margin_catches_borderline_overshoot() -
         start_ms=0,
         end_ms=6_000,
         target_duration_ms=6_000,
-        source_text="Short source text",
+        source_text="Okay.",
         cn_text="a" * 35,
     )
 
     class FakeRewriter:
         def rewrite_for_duration_with_profile(self, *args, **kwargs):
+            return "b" * 27
+
+        def rewrite_for_duration(self, *args, **kwargs):
             return "b" * 27
 
     rewritten_count = pipeline._pre_rewrite_obvious_overshoot_segments_before_tts(
@@ -5498,6 +5682,9 @@ def test_process_pipeline_near_short_estimate_margin_catches_borderline_overshoo
 
     class FakeRewriter:
         def rewrite_for_duration_with_profile(self, *args, **kwargs):
+            return "b" * 38
+
+        def rewrite_for_duration(self, *args, **kwargs):
             return "b" * 38
 
     rewritten_count = pipeline._pre_rewrite_obvious_overshoot_segments_before_tts(

@@ -182,7 +182,10 @@ class SegmentAligner:
                     print(f"[S5] 对齐进度: {index}/{total_segments} 段")
                 continue
             output_path = output_root / f"segment_{segment.segment_id:03d}_aligned.wav"
-            if is_valid_output(str(output_path)):
+            if is_valid_output(str(output_path)) and self._aligned_cache_is_fresh(
+                segment,
+                output_path,
+            ):
                 print(f"[S5] 跳过已完成的对齐段 {index}/{total_segments}")
                 duration_ms = _ffprobe_duration_ms(output_path)
                 target_duration_ms = int(segment.target_duration_ms)
@@ -206,10 +209,34 @@ class SegmentAligner:
                 if total_segments > 0 and (index % 15 == 0 or index == total_segments):
                     print(f"[S5] 对齐进度: {index}/{total_segments} 段")
                 continue
+            if is_valid_output(str(output_path)):
+                print(
+                    f"[S5] 对齐缓存已过期，重新处理段 {index}/{total_segments}",
+                    flush=True,
+                )
             results.append(self._align_one(segment, str(output_root)))
             if total_segments > 0 and (index % 15 == 0 or index == total_segments):
                 print(f"[S5] 对齐进度: {index}/{total_segments} 段")
         return results
+
+    @staticmethod
+    def _aligned_cache_is_fresh(segment: DubbingSegment, output_path: Path) -> bool:
+        """Return whether an aligned wav can be reused for the segment.
+
+        Text rewrites and TTS regeneration overwrite the raw TTS wav before
+        alignment.  If that input is newer than the aligned wav, the path-based
+        checkpoint is stale even though the aligned file is non-empty.
+        """
+        raw_path_value = (getattr(segment, "tts_audio_path", None) or "").strip()
+        if not raw_path_value:
+            return True
+        raw_path = Path(raw_path_value).resolve(strict=False)
+        if not raw_path.exists():
+            return True
+        try:
+            return raw_path.stat().st_mtime <= output_path.stat().st_mtime
+        except OSError:
+            return False
 
     def _keep_original_result(self, segment: DubbingSegment) -> AlignedSegment:
         audio_path = segment.aligned_audio_path or segment.tts_audio_path

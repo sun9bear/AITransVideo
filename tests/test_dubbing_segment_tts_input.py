@@ -443,9 +443,12 @@ def test_publish_resume_loader_backfills_tts_input_for_legacy_jobs(tmp_path):
     assert segments[0].tts_input_cn_text == "原始翻译"
 
 
-def test_load_translation_result_backfills_tts_input_for_legacy_translation_json(tmp_path):
-    """Same backfill rule applies when reading translation/segments.json
-    directly (resume from earlier-than-publish stage)."""
+def test_load_translation_result_keeps_pre_tts_snapshot_without_witness_empty(tmp_path):
+    """A translation-review snapshot is written before TTS exists.
+
+    It must not be backfilled as an audio witness, otherwise later duration
+    rewrites can leave the editor showing text that never produced the audio.
+    """
     import json
     from pipeline.process import ProcessPipeline
 
@@ -461,6 +464,36 @@ def test_load_translation_result_backfills_tts_input_for_legacy_translation_json
             "target_duration_ms": 1000,
             "source_text": "hello",
             "cn_text": "原始翻译",
+            # legacy schema
+        }],
+        "total_segments": 1,
+    }
+    trans_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    pp = ProcessPipeline.__new__(ProcessPipeline)
+    result = pp._load_translation_result(trans_path)
+    assert len(result.segments) == 1
+    assert result.segments[0].tts_input_cn_text == ""
+
+
+def test_load_translation_result_backfills_tts_input_for_legacy_completed_json(tmp_path):
+    """Legacy completed records still backfill to avoid false drift flags."""
+    import json
+    from pipeline.process import ProcessPipeline
+
+    trans_path = tmp_path / "translation_segments.json"
+    payload = {
+        "segments": [{
+            "segment_id": 1,
+            "speaker_id": "A",
+            "display_name": "A",
+            "voice_id": "v",
+            "start_ms": 0,
+            "end_ms": 1000,
+            "target_duration_ms": 1000,
+            "source_text": "hello",
+            "cn_text": "原始翻译",
+            "actual_duration_ms": 1000,
             # legacy schema
         }],
         "total_segments": 1,

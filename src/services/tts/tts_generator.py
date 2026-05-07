@@ -409,8 +409,19 @@ class TTSGenerator:
     ) -> TTSResult:
         """Process a single segment: check cache → rate limit → generate → update segment."""
         output_path = output_root / f"segment_{segment.segment_id:03d}_{segment.speaker_id}.wav"
+        current_tts_text = _normalize_optional_text(segment.cn_text)
+        stale_text_witness = False
+        if is_valid_output(str(output_path)) and current_tts_text is not None:
+            cached_tts_text = _normalize_optional_text(
+                getattr(segment, "tts_input_cn_text", None)
+            )
+            stale_text_witness = (
+                cached_tts_text is not None
+                and _normalize_cache_text(cached_tts_text)
+                != _normalize_cache_text(current_tts_text)
+            )
 
-        if is_valid_output(str(output_path)):
+        if is_valid_output(str(output_path)) and not stale_text_witness:
             if not quiet:
                 print(f"[TTS] 跳过已完成段 {index}/{total_segments}")
             duration_ms = _ffprobe_duration_ms(output_path)
@@ -434,6 +445,11 @@ class TTSGenerator:
                 match_confidence=cached_conf,
             )
         else:
+            if stale_text_witness and not quiet:
+                print(
+                    f"[TTS] 段 {segment.segment_id} 文本已变化，忽略旧TTS缓存并重新合成",
+                    flush=True,
+                )
             rate_limiter.wait()
             result = self._generate_one_with_backoff(
                 segment,
@@ -450,6 +466,8 @@ class TTSGenerator:
         # T7: mirror fallback flag onto the segment so process.py's manifest
         # dict picks it up alongside selected_voice / match_confidence.
         segment.fallback_used_provider = result.fallback_used_provider
+        if current_tts_text is not None:
+            segment.tts_input_cn_text = current_tts_text
         if segment.target_duration_ms > 0:
             segment.alignment_ratio = result.duration_ms / segment.target_duration_ms
         else:
@@ -1381,6 +1399,10 @@ def _normalize_optional_text(value: object) -> str | None:
         return None
     normalized = str(value).strip()
     return normalized or None
+
+
+def _normalize_cache_text(value: object) -> str:
+    return _re.sub(r"\s+", "", str(value or "")).strip()
 
 
 def _coerce_float(value: object, *, default: float) -> float:
