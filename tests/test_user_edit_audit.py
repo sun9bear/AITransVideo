@@ -73,6 +73,7 @@ from services.jobs.user_edit_audit import (
     build_translation_speaker_changed_event,
     build_voice_selection_dubbing_mode_changed_event,
     build_voice_selection_speaker_reassigned_event,
+    compute_post_edit_marked_event_ids,
     hash_user_id,
     manifest_audio_fingerprint,
     reset_audit_failure_dedup_for_tests,
@@ -734,3 +735,751 @@ class TestEffectiveMarker:
         assert first["effective"] is False  # NEVER rewritten
         assert second["event_type"] == EVENT_TYPE_EFFECTIVE_MARKER
         assert second["context"]["marked_event_ids"] == [first["event_id"]]
+
+
+# ---------------------------------------------------------------------------
+# compute_post_edit_marked_event_ids — survivor logic for effective_marker
+# ---------------------------------------------------------------------------
+
+
+class TestComputePostEditMarkedEventIds:
+    """Survivor computation drives effective_marker.context.marked_event_ids.
+
+    Production bug 2026-05-07: marked_event_ids was always [] because the
+    commit emit path never reads back the JSONL. The fix adds this helper;
+    these tests lock it in.
+    """
+
+    def _write_session_started(
+        self, writer: UserEditAuditWriter, ctx: AuditContext, *, edit_generation: int
+    ) -> dict:
+        return writer.append_event(
+            build_editing_session_started_event(
+                ctx,
+                segment_count=10,
+                speaker_count=2,
+                edit_generation=edit_generation,
+            )
+        )
+
+    def _write_segments_json(self, project_dir: Path, segments: list[dict]) -> Path:
+        editor_dir = project_dir / "editor"
+        editor_dir.mkdir(parents=True, exist_ok=True)
+        path = editor_dir / "segments.json"
+        path.write_text(json.dumps(segments, ensure_ascii=False), encoding="utf-8")
+        return path
+
+    def _audit_path(self, project_dir: Path) -> Path:
+        return project_dir / AUDIT_DIR_NAME / AUDIT_EVENTS_FILENAME
+
+    def test_text_changed_survives_when_final_hash_matches(
+        self, tmp_path: Path, ctx: AuditContext
+    ) -> None:
+        writer = UserEditAuditWriter(tmp_path)
+        self._write_session_started(writer, ctx, edit_generation=0)
+        final_text = "你好世界"
+        edit_event = writer.append_event(
+            build_post_edit_text_changed_event(
+                ctx,
+                segment_id="seg-1",
+                before_chars=2,
+                after_chars=len(final_text),
+                before_text_hash=text_hash("你好"),
+                after_text_hash=text_hash(final_text),
+            )
+        )
+        final_path = self._write_segments_json(
+            tmp_path, [{"segment_id": "seg-1", "cn_text": final_text, "speaker_id": "A"}]
+        )
+        marked = compute_post_edit_marked_event_ids(
+            audit_path=self._audit_path(tmp_path),
+            final_segments_path=final_path,
+            edit_generation=0,
+        )
+        assert marked == [edit_event["event_id"]]
+
+    def test_text_changed_does_not_survive_when_final_text_differs(
+        self, tmp_path: Path, ctx: AuditContext
+    ) -> None:
+        writer = UserEditAuditWriter(tmp_path)
+        self._write_session_started(writer, ctx, edit_generation=0)
+        # User typed "B" but final state is "A" (e.g., reverted via subsequent edit
+        # or revert-unsynced-text endpoint that we did NOT log here).
+        writer.append_event(
+            build_post_edit_text_changed_event(
+                ctx,
+                segment_id="seg-1",
+                before_chars=1,
+                after_chars=1,
+                before_text_hash=text_hash("A"),
+                after_text_hash=text_hash("B"),
+            )
+        )
+        final_path = self._write_segments_json(
+            tmp_path, [{"segment_id": "seg-1", "cn_text": "A", "speaker_id": "A"}]
+        )
+        assert (
+            compute_post_edit_marked_event_ids(
+                audit_path=self._audit_path(tmp_path),
+                final_segments_path=final_path,
+                edit_generation=0,
+            )
+            == []
+        )
+
+    def test_text_changed_revert_chain_only_final_match_survives(
+        self, tmp_path: Path, ctx: AuditContext
+    ) -> None:
+        """A→B→C: only the C edit should survive when final = C."""
+        writer = UserEditAuditWriter(tmp_path)
+        self._write_session_started(writer, ctx, edit_generation=0)
+        writer.append_event(
+            build_post_edit_text_changed_event(
+                ctx,
+                segment_id="seg-1",
+                before_chars=1, after_chars=1,
+                before_text_hash=text_hash("A"),
+                after_text_hash=text_hash("B"),
+            )
+        )
+        c_event = writer.append_event(
+            build_post_edit_text_changed_event(
+                ctx,
+                segment_id="seg-1",
+                before_chars=1, after_chars=1,
+                before_text_hash=text_hash("B"),
+                after_text_hash=text_hash("C"),
+            )
+        )
+        final_path = self._write_segments_json(
+            tmp_path, [{"segment_id": "seg-1", "cn_text": "C", "speaker_id": "A"}]
+        )
+        marked = compute_post_edit_marked_event_ids(
+            audit_path=self._audit_path(tmp_path),
+            final_segments_path=final_path,
+            edit_generation=0,
+        )
+        assert marked == [c_event["event_id"]]
+
+    def test_text_changed_segment_missing_in_final_does_not_survive(
+        self, tmp_path: Path, ctx: AuditContext
+    ) -> None:
+        writer = UserEditAuditWriter(tmp_path)
+        self._write_session_started(writer, ctx, edit_generation=0)
+        writer.append_event(
+            build_post_edit_text_changed_event(
+                ctx,
+                segment_id="seg-deleted",
+                before_chars=2, after_chars=3,
+                before_text_hash=text_hash("ab"),
+                after_text_hash=text_hash("abc"),
+            )
+        )
+        # final segments.json doesn't include seg-deleted.
+        final_path = self._write_segments_json(
+            tmp_path, [{"segment_id": "seg-other", "cn_text": "z", "speaker_id": "A"}]
+        )
+        assert (
+            compute_post_edit_marked_event_ids(
+                audit_path=self._audit_path(tmp_path),
+                final_segments_path=final_path,
+                edit_generation=0,
+            )
+            == []
+        )
+
+    def test_speaker_changed_survives_when_final_matches(
+        self, tmp_path: Path, ctx: AuditContext
+    ) -> None:
+        writer = UserEditAuditWriter(tmp_path)
+        self._write_session_started(writer, ctx, edit_generation=0)
+        edit_event = writer.append_event(
+            build_post_edit_segment_speaker_changed_event(
+                ctx,
+                segment_id="seg-2",
+                before_speaker_id="A",
+                after_speaker_id="B",
+            )
+        )
+        final_path = self._write_segments_json(
+            tmp_path, [{"segment_id": "seg-2", "cn_text": "x", "speaker_id": "B"}]
+        )
+        assert compute_post_edit_marked_event_ids(
+            audit_path=self._audit_path(tmp_path),
+            final_segments_path=final_path,
+            edit_generation=0,
+        ) == [edit_event["event_id"]]
+
+    def test_speaker_changed_revert_does_not_survive(
+        self, tmp_path: Path, ctx: AuditContext
+    ) -> None:
+        """User changes A→B then B→A; only the second event matches final A."""
+        writer = UserEditAuditWriter(tmp_path)
+        self._write_session_started(writer, ctx, edit_generation=0)
+        writer.append_event(
+            build_post_edit_segment_speaker_changed_event(
+                ctx, segment_id="seg-2",
+                before_speaker_id="A", after_speaker_id="B",
+            )
+        )
+        revert_event = writer.append_event(
+            build_post_edit_segment_speaker_changed_event(
+                ctx, segment_id="seg-2",
+                before_speaker_id="B", after_speaker_id="A",
+            )
+        )
+        final_path = self._write_segments_json(
+            tmp_path, [{"segment_id": "seg-2", "cn_text": "x", "speaker_id": "A"}]
+        )
+        marked = compute_post_edit_marked_event_ids(
+            audit_path=self._audit_path(tmp_path),
+            final_segments_path=final_path,
+            edit_generation=0,
+        )
+        assert marked == [revert_event["event_id"]]
+
+    def test_split_survives_when_parent_gone(
+        self, tmp_path: Path, ctx: AuditContext
+    ) -> None:
+        writer = UserEditAuditWriter(tmp_path)
+        self._write_session_started(writer, ctx, edit_generation=0)
+        split_event = writer.append_event(
+            build_post_edit_segment_split_confirmed_event(
+                ctx,
+                original_segment_id="seg-3",
+                new_segment_ids=["seg-3_a", "seg-3_b"],
+                split_source_index=10,
+                split_cn_index=5,
+                speaker_a="A",
+                speaker_b="B",
+            )
+        )
+        # Parent gone; children present.
+        final_path = self._write_segments_json(
+            tmp_path,
+            [
+                {"segment_id": "seg-3_a", "cn_text": "x", "speaker_id": "A"},
+                {"segment_id": "seg-3_b", "cn_text": "y", "speaker_id": "B"},
+            ],
+        )
+        assert compute_post_edit_marked_event_ids(
+            audit_path=self._audit_path(tmp_path),
+            final_segments_path=final_path,
+            edit_generation=0,
+        ) == [split_event["event_id"]]
+
+    def test_split_does_not_survive_when_parent_still_present(
+        self, tmp_path: Path, ctx: AuditContext
+    ) -> None:
+        """Defensive: if some future undo brings the parent id back, the
+        split event must not be marked effective."""
+        writer = UserEditAuditWriter(tmp_path)
+        self._write_session_started(writer, ctx, edit_generation=0)
+        writer.append_event(
+            build_post_edit_segment_split_confirmed_event(
+                ctx,
+                original_segment_id="seg-3",
+                new_segment_ids=["seg-3_a", "seg-3_b"],
+                split_source_index=10,
+                split_cn_index=5,
+                speaker_a="A",
+                speaker_b="B",
+            )
+        )
+        final_path = self._write_segments_json(
+            tmp_path, [{"segment_id": "seg-3", "cn_text": "x", "speaker_id": "A"}]
+        )
+        assert (
+            compute_post_edit_marked_event_ids(
+                audit_path=self._audit_path(tmp_path),
+                final_segments_path=final_path,
+                edit_generation=0,
+            )
+            == []
+        )
+
+    def test_session_boundary_excludes_prior_generation_events(
+        self, tmp_path: Path, ctx: AuditContext
+    ) -> None:
+        """Multi-cycle commit: a second editing session should NOT include
+        edits from the first session in its effective_marker."""
+        writer = UserEditAuditWriter(tmp_path)
+        # First session — these edits belong to commit #1, not commit #2.
+        self._write_session_started(writer, ctx, edit_generation=0)
+        first_session_edit = writer.append_event(
+            build_post_edit_text_changed_event(
+                ctx,
+                segment_id="seg-1",
+                before_chars=1, after_chars=1,
+                before_text_hash=text_hash("A"),
+                after_text_hash=text_hash("B"),
+            )
+        )
+        # Second session — what we're computing the marker for.
+        self._write_session_started(writer, ctx, edit_generation=1)
+        second_session_edit = writer.append_event(
+            build_post_edit_text_changed_event(
+                ctx,
+                segment_id="seg-2",
+                before_chars=1, after_chars=1,
+                before_text_hash=text_hash("X"),
+                after_text_hash=text_hash("Y"),
+            )
+        )
+        final_path = self._write_segments_json(
+            tmp_path,
+            [
+                # seg-1 is "B" in final too — but it's from the prior session.
+                {"segment_id": "seg-1", "cn_text": "B", "speaker_id": "A"},
+                {"segment_id": "seg-2", "cn_text": "Y", "speaker_id": "A"},
+            ],
+        )
+        marked = compute_post_edit_marked_event_ids(
+            audit_path=self._audit_path(tmp_path),
+            final_segments_path=final_path,
+            edit_generation=1,
+        )
+        assert marked == [second_session_edit["event_id"]]
+        assert first_session_edit["event_id"] not in marked
+
+    def test_mixed_intent_types_in_one_session(
+        self, tmp_path: Path, ctx: AuditContext
+    ) -> None:
+        """All three intent kinds in one session, returned in event-log order."""
+        writer = UserEditAuditWriter(tmp_path)
+        self._write_session_started(writer, ctx, edit_generation=0)
+        text_ev = writer.append_event(
+            build_post_edit_text_changed_event(
+                ctx,
+                segment_id="seg-1",
+                before_chars=1, after_chars=1,
+                before_text_hash=text_hash("a"),
+                after_text_hash=text_hash("b"),
+            )
+        )
+        speaker_ev = writer.append_event(
+            build_post_edit_segment_speaker_changed_event(
+                ctx, segment_id="seg-2",
+                before_speaker_id="A", after_speaker_id="B",
+            )
+        )
+        split_ev = writer.append_event(
+            build_post_edit_segment_split_confirmed_event(
+                ctx, original_segment_id="seg-3",
+                new_segment_ids=["seg-3_a", "seg-3_b"],
+                split_source_index=5, split_cn_index=3,
+                speaker_a="A", speaker_b="B",
+            )
+        )
+        final_path = self._write_segments_json(
+            tmp_path,
+            [
+                {"segment_id": "seg-1", "cn_text": "b", "speaker_id": "A"},
+                {"segment_id": "seg-2", "cn_text": "x", "speaker_id": "B"},
+                {"segment_id": "seg-3_a", "cn_text": "y", "speaker_id": "A"},
+                {"segment_id": "seg-3_b", "cn_text": "z", "speaker_id": "B"},
+            ],
+        )
+        marked = compute_post_edit_marked_event_ids(
+            audit_path=self._audit_path(tmp_path),
+            final_segments_path=final_path,
+            edit_generation=0,
+        )
+        assert marked == [
+            text_ev["event_id"],
+            speaker_ev["event_id"],
+            split_ev["event_id"],
+        ]
+
+    def test_committed_event_itself_not_in_marked_ids(
+        self, tmp_path: Path, ctx: AuditContext
+    ) -> None:
+        """post_edit_committed is already effective=True at construction
+        and is not an intent event; it must not appear in marked_event_ids."""
+        writer = UserEditAuditWriter(tmp_path)
+        self._write_session_started(writer, ctx, edit_generation=0)
+        writer.append_event(
+            build_post_edit_committed_event(ctx, strategy="overwrite", edit_counts={})
+        )
+        final_path = self._write_segments_json(
+            tmp_path, [{"segment_id": "seg-1", "cn_text": "x", "speaker_id": "A"}]
+        )
+        assert compute_post_edit_marked_event_ids(
+            audit_path=self._audit_path(tmp_path),
+            final_segments_path=final_path,
+            edit_generation=0,
+        ) == []
+
+    def test_missing_audit_file_returns_empty(
+        self, tmp_path: Path, ctx: AuditContext
+    ) -> None:
+        # No audit file written.
+        final_path = self._write_segments_json(
+            tmp_path, [{"segment_id": "seg-1", "cn_text": "x", "speaker_id": "A"}]
+        )
+        assert compute_post_edit_marked_event_ids(
+            audit_path=tmp_path / AUDIT_DIR_NAME / AUDIT_EVENTS_FILENAME,
+            final_segments_path=final_path,
+            edit_generation=0,
+        ) == []
+
+    def test_missing_final_segments_returns_empty(
+        self, tmp_path: Path, ctx: AuditContext
+    ) -> None:
+        writer = UserEditAuditWriter(tmp_path)
+        self._write_session_started(writer, ctx, edit_generation=0)
+        writer.append_event(
+            build_post_edit_text_changed_event(
+                ctx, segment_id="seg-1",
+                before_chars=1, after_chars=1,
+                before_text_hash=text_hash("a"),
+                after_text_hash=text_hash("b"),
+            )
+        )
+        # final segments file does NOT exist.
+        assert compute_post_edit_marked_event_ids(
+            audit_path=self._audit_path(tmp_path),
+            final_segments_path=tmp_path / "editor" / "segments.json",
+            edit_generation=0,
+        ) == []
+
+    def test_dict_shaped_segments_json_supported(
+        self, tmp_path: Path, ctx: AuditContext
+    ) -> None:
+        """Some writers in the codebase emit ``{"segments": [...]}``;
+        the helper must read both shapes."""
+        writer = UserEditAuditWriter(tmp_path)
+        self._write_session_started(writer, ctx, edit_generation=0)
+        edit_event = writer.append_event(
+            build_post_edit_text_changed_event(
+                ctx, segment_id="seg-1",
+                before_chars=1, after_chars=1,
+                before_text_hash=text_hash("a"),
+                after_text_hash=text_hash("b"),
+            )
+        )
+        editor_dir = tmp_path / "editor"
+        editor_dir.mkdir(parents=True, exist_ok=True)
+        (editor_dir / "segments.json").write_text(
+            json.dumps(
+                {"segments": [{"segment_id": "seg-1", "cn_text": "b", "speaker_id": "A"}]}
+            ),
+            encoding="utf-8",
+        )
+        marked = compute_post_edit_marked_event_ids(
+            audit_path=self._audit_path(tmp_path),
+            final_segments_path=editor_dir / "segments.json",
+            edit_generation=0,
+        )
+        assert marked == [edit_event["event_id"]]
+
+    def test_no_session_started_returns_empty(
+        self, tmp_path: Path, ctx: AuditContext
+    ) -> None:
+        """Without a session boundary we cannot scope events to the current
+        commit — better to return empty than to over-mark."""
+        writer = UserEditAuditWriter(tmp_path)
+        writer.append_event(
+            build_post_edit_text_changed_event(
+                ctx, segment_id="seg-1",
+                before_chars=1, after_chars=1,
+                before_text_hash=text_hash("a"),
+                after_text_hash=text_hash("b"),
+            )
+        )
+        final_path = self._write_segments_json(
+            tmp_path, [{"segment_id": "seg-1", "cn_text": "b", "speaker_id": "A"}]
+        )
+        assert compute_post_edit_marked_event_ids(
+            audit_path=self._audit_path(tmp_path),
+            final_segments_path=final_path,
+            edit_generation=0,
+        ) == []
+
+    def test_edit_generation_none_falls_back_to_latest_session(
+        self, tmp_path: Path, ctx: AuditContext
+    ) -> None:
+        writer = UserEditAuditWriter(tmp_path)
+        self._write_session_started(writer, ctx, edit_generation=0)
+        writer.append_event(
+            build_post_edit_text_changed_event(
+                ctx, segment_id="seg-1",
+                before_chars=1, after_chars=1,
+                before_text_hash=text_hash("a"),
+                after_text_hash=text_hash("X"),
+            )
+        )
+        # Second session — most recent.
+        self._write_session_started(writer, ctx, edit_generation=1)
+        latest_edit = writer.append_event(
+            build_post_edit_text_changed_event(
+                ctx, segment_id="seg-2",
+                before_chars=1, after_chars=1,
+                before_text_hash=text_hash("a"),
+                after_text_hash=text_hash("Y"),
+            )
+        )
+        final_path = self._write_segments_json(
+            tmp_path,
+            [
+                {"segment_id": "seg-1", "cn_text": "X", "speaker_id": "A"},
+                {"segment_id": "seg-2", "cn_text": "Y", "speaker_id": "A"},
+            ],
+        )
+        marked = compute_post_edit_marked_event_ids(
+            audit_path=self._audit_path(tmp_path),
+            final_segments_path=final_path,
+            edit_generation=None,
+        )
+        assert marked == [latest_edit["event_id"]]
+
+    def test_malformed_audit_lines_skipped(
+        self, tmp_path: Path, ctx: AuditContext
+    ) -> None:
+        writer = UserEditAuditWriter(tmp_path)
+        self._write_session_started(writer, ctx, edit_generation=0)
+        edit_event = writer.append_event(
+            build_post_edit_text_changed_event(
+                ctx, segment_id="seg-1",
+                before_chars=1, after_chars=1,
+                before_text_hash=text_hash("a"),
+                after_text_hash=text_hash("b"),
+            )
+        )
+        # Append a malformed JSON line — must not crash the helper.
+        events_path = self._audit_path(tmp_path)
+        with events_path.open("a", encoding="utf-8") as h:
+            h.write("not-json\n")
+            h.write("\n")  # blank line tolerated
+        final_path = self._write_segments_json(
+            tmp_path, [{"segment_id": "seg-1", "cn_text": "b", "speaker_id": "A"}]
+        )
+        marked = compute_post_edit_marked_event_ids(
+            audit_path=events_path,
+            final_segments_path=final_path,
+            edit_generation=0,
+        )
+        assert marked == [edit_event["event_id"]]
+
+
+# ---------------------------------------------------------------------------
+# Integration: JobService._emit_post_edit_committed populates marked_event_ids
+# ---------------------------------------------------------------------------
+
+
+class _NullRunner:
+    """Minimal stub satisfying JobService.__init__ (only stored as
+    self.runner; _emit_post_edit_committed never calls runner methods)."""
+
+
+class TestEmitPostEditCommittedIntegration:
+    """The plumbing that bridges build_effective_marker_event with
+    compute_post_edit_marked_event_ids. These tests guard against
+    regressions like the one shipped 2026-04-19 → 2026-05-07 where the
+    helper existed but was never called from the emit path.
+    """
+
+    def _build_service_with_editing_record(
+        self, tmp_path: Path, *, audit_events: list[dict] | None = None,
+        final_segments: list[dict] | None = None,
+    ) -> tuple[Any, Any]:
+        from datetime import datetime, timezone
+        from services.jobs.models import JOB_STATUS_EDITING, JobRecord
+        from services.jobs.service import JobService
+        from services.jobs.store import JobStore
+
+        project_dir = tmp_path / "projects" / "job_emit_test"
+        editor = project_dir / "editor"
+        editor.mkdir(parents=True)
+        (editor / "segments.json").write_text(
+            json.dumps(final_segments or []), encoding="utf-8",
+        )
+
+        if audit_events:
+            writer = UserEditAuditWriter(project_dir)
+            for ev in audit_events:
+                writer.append_event(ev)
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        record = JobRecord(
+            job_id="job_emit_test",
+            job_type="localize_video",
+            source_type="youtube_url",
+            source_ref="https://example.com/video",
+            output_target="editor",
+            speakers="auto",
+            voice_a=None,
+            voice_b=None,
+            status=JOB_STATUS_EDITING,
+            current_stage=None,
+            progress_message=None,
+            created_at=now_iso,
+            updated_at=now_iso,
+            project_dir=str(project_dir),
+            service_mode="studio",
+            edit_generation=0,
+        )
+        store = JobStore(tmp_path / "jobs")
+        store.save_job(record)
+        service = JobService(store=store, runner=_NullRunner())
+        return service, record
+
+    def _read_audit_events(self, project_dir: Path) -> list[dict]:
+        path = project_dir / AUDIT_DIR_NAME / AUDIT_EVENTS_FILENAME
+        return [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+    def test_emit_populates_marked_event_ids_for_overwrite(
+        self, tmp_path: Path, ctx: AuditContext
+    ) -> None:
+        ctx_local = AuditContext(
+            job_id="job_emit_test",
+            root_job_id="job_emit_test",
+            project_id="job_emit_test",
+            actor_user_id_hash=None,
+        )
+        # Pre-populate the audit log with one session + one text edit
+        # whose hash matches the final segments.json we lay down below.
+        text_event = build_post_edit_text_changed_event(
+            ctx_local,
+            segment_id="seg-1",
+            before_chars=1, after_chars=1,
+            before_text_hash=text_hash("old"),
+            after_text_hash=text_hash("new"),
+        )
+        session_event = build_editing_session_started_event(
+            ctx_local,
+            segment_count=1,
+            speaker_count=1,
+            edit_generation=0,
+        )
+        service, record = self._build_service_with_editing_record(
+            tmp_path,
+            audit_events=[session_event, text_event],
+            final_segments=[
+                {"segment_id": "seg-1", "cn_text": "new", "speaker_id": "A"}
+            ],
+        )
+
+        service._emit_post_edit_committed(
+            record, {"strategy": "overwrite"}, strategy="overwrite",
+        )
+
+        events = self._read_audit_events(Path(record.project_dir))
+        # 4 events: session_started, text_changed, post_edit_committed, marker
+        assert events[-1]["event_type"] == EVENT_TYPE_EFFECTIVE_MARKER
+        assert events[-2]["event_type"] == EVENT_TYPE_POST_EDIT_COMMITTED
+        marker_marked = events[-1]["context"]["marked_event_ids"]
+        assert marker_marked == [text_event["event_id"]], (
+            f"expected marker to mark the surviving text edit; got {marker_marked}"
+        )
+
+    def test_emit_uses_target_project_dir_for_copy_as_new(
+        self, tmp_path: Path
+    ) -> None:
+        ctx_local = AuditContext(
+            job_id="job_emit_test",
+            root_job_id="job_emit_test",
+            project_id="job_emit_test",
+            actor_user_id_hash=None,
+        )
+        # Session + text edit on SOURCE project_dir.
+        session_event = build_editing_session_started_event(
+            ctx_local, segment_count=1, speaker_count=1, edit_generation=0,
+        )
+        text_event = build_post_edit_text_changed_event(
+            ctx_local,
+            segment_id="seg-1",
+            before_chars=1, after_chars=1,
+            before_text_hash=text_hash("old"),
+            after_text_hash=text_hash("new"),
+        )
+        # SOURCE has stale segments (pre-edit) — copy_as_new keeps source intact.
+        service, record = self._build_service_with_editing_record(
+            tmp_path,
+            audit_events=[session_event, text_event],
+            final_segments=[
+                {"segment_id": "seg-1", "cn_text": "old", "speaker_id": "A"}
+            ],
+        )
+        # TARGET has the post-commit final segments.
+        target_dir = tmp_path / "projects" / "job_emit_test_copy"
+        (target_dir / "editor").mkdir(parents=True)
+        (target_dir / "editor" / "segments.json").write_text(
+            json.dumps([{"segment_id": "seg-1", "cn_text": "new", "speaker_id": "A"}]),
+            encoding="utf-8",
+        )
+
+        service._emit_post_edit_committed(
+            record,
+            {
+                "strategy": "copy_as_new",
+                "new_job_id": "job_emit_test_copy",
+                "new_project_dir": str(target_dir),
+            },
+            strategy="copy_as_new",
+        )
+
+        events = self._read_audit_events(Path(record.project_dir))
+        marker = events[-1]
+        assert marker["event_type"] == EVENT_TYPE_EFFECTIVE_MARKER
+        # Survivor was identified via TARGET's segments.json, not SOURCE's
+        # (stale) segments.json — proves the dispatch reads the right file.
+        assert marker["context"]["marked_event_ids"] == [text_event["event_id"]]
+        assert marker["context"]["target_job_id"] == "job_emit_test_copy"
+
+    def test_emit_tolerates_helper_failure_with_empty_marker(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If the survivor helper raises, the marker is still appended
+        with empty marked_event_ids — commit must not fail because audit
+        post-processing did."""
+        ctx_local = AuditContext(
+            job_id="job_emit_test",
+            root_job_id="job_emit_test",
+            project_id="job_emit_test",
+            actor_user_id_hash=None,
+        )
+        session_event = build_editing_session_started_event(
+            ctx_local, segment_count=1, speaker_count=1, edit_generation=0,
+        )
+        text_event = build_post_edit_text_changed_event(
+            ctx_local,
+            segment_id="seg-1",
+            before_chars=1, after_chars=1,
+            before_text_hash=text_hash("old"),
+            after_text_hash=text_hash("new"),
+        )
+        service, record = self._build_service_with_editing_record(
+            tmp_path,
+            audit_events=[session_event, text_event],
+            final_segments=[{"segment_id": "seg-1", "cn_text": "new", "speaker_id": "A"}],
+        )
+
+        # Force the helper to raise. The service-layer try/except must
+        # swallow it and still emit the marker. _emit_post_edit_committed
+        # imports the helper lazily from services.jobs.user_edit_audit,
+        # so we patch the source module — the import statement re-reads
+        # the module attribute on each call.
+
+        def _boom(**kwargs):  # noqa: ANN001
+            raise RuntimeError("simulated survivor compute crash")
+
+        monkeypatch.setattr(
+            "services.jobs.user_edit_audit.compute_post_edit_marked_event_ids",
+            _boom,
+        )
+
+        service._emit_post_edit_committed(
+            record, {"strategy": "overwrite"}, strategy="overwrite",
+        )
+
+        events = self._read_audit_events(Path(record.project_dir))
+        marker = events[-1]
+        assert marker["event_type"] == EVENT_TYPE_EFFECTIVE_MARKER
+        assert marker["effective"] is True
+        # Helper crashed → empty list — but the marker still landed.
+        assert marker["context"]["marked_event_ids"] == []
