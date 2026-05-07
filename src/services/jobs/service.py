@@ -299,44 +299,57 @@ class JobService:
           gateway's responsibility (it owns the SQL); this method is a
           pure write of a pre-validated value.
 
-        Raises :class:`KeyError` (via ``require_job``) if the job id is
+        Raises :class:`KeyError` (via ``update_job``) if the job id is
         unknown.
+
+        P1-15b caller migration (audit 2026-05-07): routed through
+        ``update_job`` so the rename atomically merges with concurrent
+        ProcessJobRunner stage transitions instead of overwriting them
+        from a stale snapshot.
         """
-        record = self.store.require_job(job_id)
         normalized: str | None = None
         if display_name is not None:
             stripped = str(display_name).strip()
             if stripped:
                 normalized = stripped[:60]
-        next_record = replace(
-            record,
-            display_name=normalized,
-            updated_at=utc_now_iso(),
+        return self.store.update_job(
+            job_id,
+            lambda current: replace(
+                current,
+                display_name=normalized,
+                updated_at=utc_now_iso(),
+            ),
         )
-        self.store.save_job(next_record)
-        return self.store.require_job(job_id)
 
     def update_tts_model_from_voice_selection(
         self, job_id: str, tts_model: str | None
     ) -> JobRecord:
-        """Persist the MiniMax model selected in voice_selection_review."""
+        """Persist the MiniMax model selected in voice_selection_review.
+
+        P1-15b caller migration (audit 2026-05-07): routed through
+        ``update_job`` to serialize with concurrent ProcessJobRunner
+        writes. The "no-op when same model" optimization moves into the
+        mutator so the freshness check happens against the locked
+        snapshot, not a pre-lock require_job that may have been stale.
+        """
         normalized_model = str(tts_model or "").strip()
         if not normalized_model:
             return self.store.require_job(job_id)
         if normalized_model not in SUPPORTED_MINIMAX_TTS_MODELS:
             raise ValueError(f"Unsupported MiniMax TTS model: {normalized_model}")
 
-        record = self.store.require_job(job_id)
-        if record.tts_model == normalized_model:
-            return record
+        def mutator(current: JobRecord) -> JobRecord:
+            if current.tts_model == normalized_model:
+                # No-op: same model already set. Return current to skip
+                # an unnecessary write while still holding the lock.
+                return current
+            return replace(
+                current,
+                tts_model=normalized_model,
+                updated_at=utc_now_iso(),
+            )
 
-        next_record = replace(
-            record,
-            tts_model=normalized_model,
-            updated_at=utc_now_iso(),
-        )
-        self.store.save_job(next_record)
-        return self.store.require_job(job_id)
+        return self.store.update_job(job_id, mutator)
 
     def continue_job(self, job_id: str) -> JobRecord:
         record = self.require_job(job_id)
@@ -1475,23 +1488,44 @@ class JobService:
         return not self.runner.is_process_active(record.job_id)
 
     def _mark_stale_active_job_failed(self, record: JobRecord) -> JobRecord:
+        # P1-15b caller migration (audit 2026-05-07): the stale-job
+        # reaper runs from a background scanner thread alongside
+        # ProcessJobRunner. The previous require_job → replace →
+        # save_job pattern could clobber a fresh runner-side stage
+        # update with a snapshot that the scanner had read seconds
+        # earlier. Route through update_job so the reaper either wins
+        # cleanly or loses cleanly to the runner's progress save —
+        # never silently overwrites it.
         timestamp = utc_now_iso()
         error_message = "Recovered stale active job without a live worker process."
-        next_record = replace(
-            record,
-            status=JOB_STATUS_FAILED,
-            current_stage=STAGE_FAILED,
-            progress_message=error_message,
-            updated_at=timestamp,
-            completed_at=timestamp,
-            error_summary={
-                "stage": STAGE_FAILED,
-                "error_type": "stale_active_job",
-                "message": error_message,
-            },
-            review_gate=None,
-        )
-        self.store.save_job(next_record)
+
+        def mutator(current: JobRecord) -> JobRecord:
+            # Re-check liveness under the lock. The runner may have
+            # produced a stage update between the scanner's last
+            # observation and our acquisition of the lock; if the
+            # current state is no longer worker-active, do nothing.
+            if current.status not in WORKER_ACTIVE_STATUSES:
+                return current
+            if self.runner.is_process_active(current.job_id):
+                # The runner came back to life between our scan and
+                # this critical section — leave the record alone.
+                return current
+            return replace(
+                current,
+                status=JOB_STATUS_FAILED,
+                current_stage=STAGE_FAILED,
+                progress_message=error_message,
+                updated_at=timestamp,
+                completed_at=timestamp,
+                error_summary={
+                    "stage": STAGE_FAILED,
+                    "error_type": "stale_active_job",
+                    "message": error_message,
+                },
+                review_gate=None,
+            )
+
+        next_record = self.store.update_job(record.job_id, mutator)
         self.store.append_event(
             record.job_id,
             JobEvent(
