@@ -877,6 +877,11 @@ scripts/smart_shadow_evaluator.py
 > - **结论：P0 PASS for P1 shadow，NOT PASS for P2 production launch**（详见 results note §1）
 >
 > **进 P2 前必须重跑 P0**，门槛：post-Phase-D metered jobs ≥10（重跑）/ ≥20（考虑 P2）。
+>
+> 🔄 **2026-05-07 retry estimation 子项更新**（见 P0 results note §13、P1 done note §4-bis.3.b）：
+> spec §3.5 retry estimation **v2 minimal LANDED**（commit `21e1653`）—— v1 → v2: p50 386%→75%, p90 667%→119.8%（5× 改善）。
+> **v2 accepted as conservative planning signal**，原 ≤50% 目标 deferred 到 v3 per-voice k 校准（触发条件 `post_phase_metered_jobs ≥30 且 per-voice metered ≥10`）。
+> P2 入口里 "retry 精度 ≤50%" 不再是硬阻塞；**P2 cost 推断改走 metered actual + safety margin** 路径，simulator `expected_retts_count` 仅作 sanity check / planning signal。
 
 - 明确智能版服务模式、固定价格、授权文案、speaker 上限。
 - 明确 `on_budget_exhausted` 产品契约和 Smart → Studio 接管费用规则。
@@ -896,6 +901,14 @@ scripts/smart_shadow_evaluator.py
 
 ### P2：智能版 MVP
 
+**入口前置条件**（2026-05-07 更新）：
+- post-Phase-D metered jobs ≥ 20（覆盖更多内容类型）
+- cost p90/p99 在 INCONCLUSIVE 转 PASS / FAIL 后才能定 100 cred/min 可行性
+- production `pricing_runtime.json` 真实单价 snapshot 写入
+- spec §3.5 retry estimation **v2 minimal LANDED + accepted as conservative planning signal**（commit `21e1653`，v1 → v2: p50 386%→75%, p90 667%→119.8%, 5× 改善但未达原 ≤50% 目标 — **deferred to v3** per-voice k 校准）
+- P2 cost 推断**不**依赖 simulator `expected_retts_count` 精度；走 **metered actual + safety margin**
+
+**实施清单**：
 - 上线 `service_mode=smart`。
 - 固定 100 credits/min。
 - 默认受 `AVT_ENABLE_SMART_MODE=false` kill switch 控制。
@@ -911,6 +924,7 @@ scripts/smart_shadow_evaluator.py
 - 输出 `smart_decisions.jsonl`、`smart_quality_report.json`、`smart_cost_summary.json`。
 - 增加付费 API 守卫测试。
 - 不包含独立 verifier。
+- **retry estimation 用法约束**（2026-05-07）：simulator per-segment `expected_retts: True` 是 SOFT SIGNAL ONLY（length overflow 检测），**严禁**用作 re-TTS action trigger；只能作为人工审 / 诊断 / 成本预警。Action trigger 必须基于 actual TTS duration overflow（DSP 压缩失败、re-tts cap 等运行时实际数据），不基于 simulator 的事前预测。
 
 ### P3：独立 multimodal verifier
 

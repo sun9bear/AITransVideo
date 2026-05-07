@@ -247,6 +247,8 @@ P1 simulator 实施期间 Codex 第二意见审查 **`smart_shadow_eval_collecto
 
 ## 12. 2026-05-07 增补：spec §3.5 retry estimation v1 公式 FAIL
 
+> **状态摘要**（2026-05-07）：v1 FAIL → v2 LANDED（commit `21e1653`）；详见下方 §13。本节保留 v1 失败的初始证据。
+
 P1 Done note §5.2 Gap A 的远端只读闭环（2026-05-07）拿到了真实估算精度数字。**结论**：
 
 | 指标 | 实测 (n=15 metered jobs) | spec §3.5 期望 |
@@ -256,24 +258,72 @@ P1 Done note §5.2 Gap A 的远端只读闭环（2026-05-07）拿到了真实估
 
 **v1 公式 FAIL** —— 15/15 metered jobs 全部 smart over-predict actual retts，最坏 case 30 vs 0（3000% 误差）。
 
-### 12.1 对本 note §11 verdict 的影响
+### 12.1 对本 note §11 verdict 的影响（v1 时刻立场，已在 §13 中重新表态）
 
-P0 §11 verdict（2026-05-06）当时基于 38 jobs 给的是 **conditional PASS for P1 shadow，NOT PASS for P2 production launch**——这个判断仍然成立，但**增加了一条 P2 入口前的硬阻塞**：
-
-- **原 P2 入口条件**（§7.1 / §7.2）仍要求：post-Phase-D metered ≥20 / cost p90 stable / pricing snapshot
-- **新增** P2 入口条件：spec §3.5 retry estimation **v2 公式 + 在新 metered jobs 上重测 ≤50%**
-
-§3.5 v1 公式问题的根因分析 + v2 建议在 P1 Done note §4-bis.3，不在此重复。
+P0 §11 verdict（2026-05-06）当时基于 38 jobs 给的是 **conditional PASS for P1 shadow，NOT PASS for P2 production launch**——这个判断仍然成立。**v2 LANDED 之后**（详见 §13）已不再要求 "retry estimation 公式 ≤50% 命中" 作为 P2 硬阻塞；P2 cost 推断改走 **metered actual + safety margin** 路径，不依赖 simulator 估算精度。
 
 ### 12.2 对本 note §6 / §7 主张的影响
 
 - §6 推荐的"P1 初始阈值"不依赖 retry estimation，**仍然有效**
 - §7.2 提及"retts_audio/src 是否仍 ≤ 30%"是 Studio 实测数据（来自 metering），不依赖 smart 公式预测，**仍然有效**
 - §11 决策摘要的"Recommend P1 with main_threshold=0.10..." 是 P1 操作建议，与 P2 cost 推断解耦，**仍然有效**
-- ⚠️ 任何基于"smart 估算成本"做的 P2 商业可行性推断（如果存在）现在**不再可信**——v1 公式 over-predict 4-7× 会让 smart 看起来比实际贵得多
+- ⚠️ 任何基于"smart 估算成本"做的 P2 商业可行性推断（如果存在）现在**不再可信**——v1 公式 over-predict 4-7× 会让 smart 看起来比实际贵得多。v2 把这层偏差从 4-7× 降到 ~1.2×，但仍偏保守，请直接走 metered actual
 
 ### 12.3 行动项
 
-- [ ] **spec §3.5 公式 v2**（P1 Done note §4-bis.3 三条建议 → 实施）
-- [ ] v2 实施后用同一份 prod facts.jsonl 重跑 simulator，看 `estimation_error_p90` 是否 ≤ 50%
-- [ ] v2 通过后才能开始 P2 cost 推断的工作
+- [x] **spec §3.5 公式 v2**（P1 Done note §4-bis.3 → 实施 commit `21e1653`）
+- [x] v2 实施后用同一份 prod facts.jsonl 重跑 simulator：`estimation_error_p50=75.0%, p90=119.8%`（5× 改善但未达 ≤50% 原目标）
+- [x] **决议变更**：原 ≤50% 不再作为 P2 入口条件；详见 §13
+
+---
+
+## 13. 2026-05-07 增补：spec §3.5 retry estimation v2 LANDED — verdict 与 P2 入口条件调整
+
+### 13.1 v2 实施摘要
+
+- **commit**：`21e1653` — `feat: §3.5 retry estimation v2 LANDED + soft-signal demarcation`
+- **修复**：删 length-only stage-level 贡献（保留为 per-segment soft signal）+ per-seg max（修双计）
+- **测试**：`tests/test_smart_shadow_sim_retry_v2.py` 9 个新测试 + 既有 simulator/aggregator 旧测试更新到 v2 数字。`tests/test_smart_shadow_*.py` 总数 99→108 passed, 1 skipped
+- **Soft-signal demarcation**：per-segment `expected_retts: True` 是诊断/人工审用信号，**P2-alpha 严禁**用它当 re-TTS action trigger（注释加在 simulator 两处 docstring）
+
+### 13.2 v2 实测数字（同一份 15 metered c7 jobs）
+
+| 指标 | v1 | **v2** | 原 spec §3.5 期望 |
+|---|---|---|---|
+| `estimation_error_p50` | 385.7% | **75.0%** | ≤ 50% |
+| `estimation_error_p90` | 666.7% | **119.8%** | ≤ 50% |
+| smart 偏向 | over-predict 15/15 | over-predict 14/15 + exact 1/15 | — |
+| 改善倍数 | — | **5.1×** (p50) / **5.6×** (p90) | — |
+
+per-job 表见 P1 Done note §4-bis.3。
+
+### 13.3 Verdict（2026-05-07 决议）
+
+**v2 公式 LANDED, 5× improvement, but FAIL original ≤50% target; ACCEPTED as conservative planning signal**。
+
+理由（决策记录）：
+- v2 偏保守（over-predict 14/15、0 under-predict 超 parity）→ 不会让真实成本暴击预算 cap
+- 单线性系数（如 `rewrite_total × 0.40`）能把 p90 推到 ~60% 但：(1) n=15 上经验拟合过拟合；(2) 仍未达 50%；(3) scaling 引入 under-predict 风险，对成本闸更危险
+- 真正达标需要 per-voice / per-provider `k_cn_chars_per_src_min` 校准，受 metered 样本量阻（v3 backlog）
+
+### 13.4 P2 入口条件调整（取代 §12.1 临时表述）
+
+**移除**：
+- ~~"P2 入口前必须 spec §3.5 retry estimation **v2 公式 + 在新 metered jobs 上重测 ≤50%**"~~
+
+**保留**（仍要满足）：
+- post-Phase-D metered jobs ≥ 20
+- cost p90/p99 stable
+- production `pricing_runtime.json` snapshot 写入
+
+**P2 cost 推断路径变更**：
+- ❌ **不再**用 simulator `expected_retts_count` 做精确成本估算
+- ✅ 改用 **metered actual + safety margin**（即根据 production 已观测的 retts/rewrite 真实分布定保守上限，simulator 估算只作 sanity check）
+- ✅ Smart shadow simulator 的 `expected_retts_count` 仅作**保守 planning signal**：`expected_retts_count > N` 触发 "可能贵" 警示，但不直接换算金额扣点
+
+### 13.5 v3 backlog（不阻 P2-alpha 启动）
+
+- [ ] **per-voice / per-provider `k_cn_chars_per_src_min` 校准**
+  - 触发条件：`post_phase_metered_jobs ≥ 30 且 per-voice metered ≥ 10`
+  - 目标：把 p90 从 v2 的 119.8% 推到 ≤ 50%（spec §3.5 原目标）
+  - 当前阻塞：n=15 jobs 不够分桶；per-voice 分桶后每桶 < 10 样本
