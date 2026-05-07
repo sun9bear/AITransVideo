@@ -13,6 +13,15 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 # Import models so Alembic sees them
 from models import Base  # noqa: F401
+# Ensure all tables are registered to Base.metadata so autogenerate
+# does not propose dropping production tables. Without these imports,
+# Base.metadata only contains tables declared directly in models.py;
+# tables defined in sibling modules (voice_catalog, background_tasks,
+# label_tasks) would appear as "extra in DB" and autogenerate would
+# emit DROP TABLE statements for them.
+import voice_catalog_models  # noqa: F401  # adds VoiceCatalog / VoiceLabel
+import background_task_models  # noqa: F401  # adds BackgroundTask
+import label_task_models  # noqa: F401  # adds LabelTask
 from config import resolve_database_url, settings
 
 config = context.config

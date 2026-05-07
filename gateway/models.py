@@ -120,6 +120,14 @@ class Job(Base):
         # root_job_id + user_id scope TTL lookup; expires_at is the ordering key.
         Index("idx_jobs_root_user_expires", "root_job_id", "user_id", "expires_at"),
         Index("idx_jobs_copy_of_job_id", "copy_of_job_id"),
+        # Partial index used by editing_idle_scanner: most jobs never enter
+        # editing, so NULL rows are excluded from the index. Mirrors migration
+        # 015's CREATE INDEX so autogenerate does not propose creating it again.
+        Index(
+            "idx_jobs_editing_touched_at",
+            "editing_touched_at",
+            postgresql_where=text("editing_touched_at IS NOT NULL"),
+        ),
         Index("idx_jobs_source_content_hash", "source_content_hash"),
     )
 
