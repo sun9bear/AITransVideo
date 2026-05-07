@@ -742,25 +742,40 @@ P0/P1/P2/P3 划分按 **风险性质** 而非"几条 CRITICAL"：直接威胁账
 
 ---
 
-### P0 — 立即修（本周内）
+### P0 — ✅ 全部完成(2026-05-07,14 commits)
 
-直接影响账单、越权、数据丢失或回归守卫红的项目。
+> **状态:** 9 个 P0 项全部实施完毕,加 4 个 Codex 复核发现的 cascade follow-up,共 14 个 commit 落地。每个 commit 都经过 Codex 独立 review。守卫测试套件从 baseline 53 个增长到 **116 个**(新增 P0-4/5/6/8 的回归测试 50+ 用例)。
+>
+> 工作流:6 个并行专项 Agent 审计 → 主席 Agent 汇总 → 三阶段分批实施(阶段 1 并行 Agent / 阶段 2 并行 + 我自做 / 阶段 3 我主刀)→ 每阶段 Codex review → 收尾。
 
-| # | 任务 | 关键文件 |
-| ---: | --- | --- |
-| 1 | `/job-api/jobs/{id}/source-metadata` 与 `/metering` 加 `Depends(_require_internal_access)` | [gateway/main.py:307-308](gateway/main.py:307) |
-| 2 | 内部端点暴露三件套：(a) `internal_expire_voice` 加 internal access 校验，(b) router prefix 改为 `/api/internal` 让 Caddy block 生效，(c) Job API 启动校验 `AVT_INTERNAL_API_KEY` | [gateway/user_voice_api.py:495](gateway/user_voice_api.py:495)、[Caddyfile:92](Caddyfile:92)、[src/services/jobs/api.py:1033](src/services/jobs/api.py:1033) |
-| 3 | `_verify_job_ownership` 改 fail-closed（DB 缺 row → 404，不是默认放行） | [gateway/job_intercept.py:2496](gateway/job_intercept.py:2496) |
-| 4 | `quota.reserve_quota` / `release_quota` 加 `with_for_update()`；`ensure_admin_credits_bucket` 同补 | [gateway/quota.py:55-76](gateway/quota.py:55)、[gateway/credits_service.py:855-892](gateway/credits_service.py:855) |
-| 5 | JSON / file state 层全局 `file_lock`：JobStore、StateManager、editing 三件套（segment/status/voice_map）、`admin_settings` | [src/services/jobs/store.py](src/services/jobs/store.py)、[src/services/state_manager.py](src/services/state_manager.py)、[src/services/jobs/editing_segments.py](src/services/jobs/editing_segments.py)、[src/services/jobs/editing_voice_map.py](src/services/jobs/editing_voice_map.py)、[gateway/admin_settings.py](gateway/admin_settings.py) |
-| 6 | 修 `cleanup.py:193` import 路径 + 加 startup smoke test 强制走一次循环 | [src/services/web_ui/cleanup.py:193](src/services/web_ui/cleanup.py:193) |
-| 7 | Alembic `env.py` import voice_catalog / label_task / background_task models；`Job.__table_args__` 补 `idx_jobs_editing_touched_at` | [gateway/alembic/env.py:15](gateway/alembic/env.py:15)、[gateway/models.py:115-124](gateway/models.py:115) |
-| 8 | split editing segment 三件套：(a) `_find_text_edits_without_tts` 对 split 段加兜底，(b) 拒绝 zero-duration 半段，(c) 迁移 `voice_map` override | [src/services/jobs/editing_commit.py:466-508](src/services/jobs/editing_commit.py:466)、[src/services/jobs/editing_segments.py:707-849](src/services/jobs/editing_segments.py:707) |
-| 9 | 删除根 `projects/` 空目录（让 `tests/test_legacy_cleanup_guards.py::test_no_root_projects_dir` 重新绿） | 仓库根 |
+| # | 任务 | Commit | 关键文件 |
+| ---: | --- | --- | --- |
+| 1 | `/job-api/jobs/{id}/source-metadata` 与 `/metering` 加 `Depends(_require_internal_access)` + caller `X-Internal-Key` cascade | `51f2978` + `8fb1ff3` | [gateway/main.py:307-308](gateway/main.py:307)、[src/pipeline/process.py:_internal_request_headers](src/pipeline/process.py) |
+| 2 | 内部端点暴露三件套:(a) `internal_expire_voice` 加 internal access 校验 + caller header,(b) router prefix `/internal` → `/api/internal` 让 Caddy block 生效,(c) Job API 启动校验 `AVT_INTERNAL_API_KEY` | `51f2978` + `073da4b` + `b9e95fe` + `96f3a68` | [gateway/user_voice_api.py:32](gateway/user_voice_api.py:32)、[Caddyfile:92](Caddyfile:92)、[src/services/jobs/api.py:99](src/services/jobs/api.py:99) |
+| 3 | `_verify_job_ownership` 改 fail-closed(DB 缺 row → 404) | `51f2978` | [gateway/job_intercept.py:2511](gateway/job_intercept.py:2511) |
+| 4 | `quota.reserve_quota` / `release_quota` / `ensure_admin_credits_bucket` 加 `with_for_update()` + AST 守卫 + PG 集成测试 | `d46ce23` | [gateway/quota.py:55-76](gateway/quota.py:55)、[gateway/credits_service.py:855-892](gateway/credits_service.py:855)、[tests/test_quota_concurrency.py](tests/test_quota_concurrency.py) |
+| 5 | JSON / file state 层全局 `file_lock`:StateManager、editing 三件套(共享 anchor)、admin_settings + atomic_write_json + prompt_history follow-up | `c560cc0` + `7e91bc0` | [src/services/state_manager.py](src/services/state_manager.py)、[src/services/jobs/editing_segments.py](src/services/jobs/editing_segments.py)、[src/services/jobs/editing_voice_map.py](src/services/jobs/editing_voice_map.py)、[gateway/admin_settings.py](gateway/admin_settings.py)、[tests/test_p0_5_file_lock_coverage.py](tests/test_p0_5_file_lock_coverage.py) |
+| 6 | 修 `cleanup.py:193` import 路径(`from src.services` → `from services`)+ smoke test 强制走一次循环 | `b7128fe` | [src/services/web_ui/cleanup.py:193](src/services/web_ui/cleanup.py:193)、[tests/test_cleanup_smoke.py](tests/test_cleanup_smoke.py) |
+| 7 | Alembic `env.py` import voice_catalog / label_task / background_task models;`Job.__table_args__` 补 `idx_jobs_editing_touched_at` partial index | `99b22c0` | [gateway/alembic/env.py:15](gateway/alembic/env.py:15)、[gateway/models.py:123-130](gateway/models.py:123) |
+| 8 | split editing segment 三件套:(a) `_find_text_edits_without_tts` 对 split 段加 baseline 缺失兜底,(b) 拒绝 zero-duration 半段(`mid_ms <= start_ms or >= end_ms` 都报),(c) split 时迁移 `voice_map` override 到两个新半段 | `8355ed5` | [src/services/jobs/editing_commit.py:466](src/services/jobs/editing_commit.py:466)、[src/services/jobs/editing_segments.py:707](src/services/jobs/editing_segments.py:707)、[tests/test_p0_8_split_audio_sync.py](tests/test_p0_8_split_audio_sync.py) |
+| 9 | 删除根 `projects/` 空目录 + `tmp_source_video.mkv` + `demo_output/` + 4 个 data 死种子文件归档 + 死代码删除 | `073da4b` | 仓库根、[docs/archive/data/](docs/archive/data/) |
+
+#### P0 阶段实施摘要
+
+- **代码改动:** ~1800 行新增 + ~600 行删除(其中 ~200 行死代码归零)
+- **新测试文件 4 个:** test_quota_concurrency.py、test_cleanup_smoke.py、test_p0_5_file_lock_coverage.py、test_p0_8_split_audio_sync.py(共 50+ 测试用例)
+- **守卫测试增量:** 53 → 116(增加 119%)
+- **Codex 独立 review 轮次:** 6 轮(每个阶段提交后)
+- **Codex 抓到的 cascade 回归:** 1 处(P0-1 的 caller 漏发 X-Internal-Key)+ 1 处补漏(P0-5 prompt_history 漏 follow-up)
+
+#### Codex 第一/二轮 review 提出的非阻断观察(已留 P1)
+
+1. **P0-5 守卫断言可加强**:当前只断言 `with file_lock(...)` 存在,可改为同时校验锁目标 = `_PROMPT_HISTORY_FILE` 和 atomic_write_json 调用 → P1-#15c
+2. **split orphan parent draft wav**:split 前 parent 已有旧 draft wav 时,split 不会清除该 draft,commit 会把多余的 `seg_001.wav` 一起推广到 `editor/tts_segments/`。不会造成 missing-wav,但产生孤儿文件 → P1-#16
 
 ---
 
-### P1 — 本周内（账户安全 + 计费一致性 + 高 ROI 性能）
+### P1 — 本周内（账户安全 + 计费一致性 + 高 ROI 性能 + P0 残余）
 
 | # | 任务 | 关键文件 |
 | ---: | --- | --- |
@@ -769,7 +784,10 @@ P0/P1/P2/P3 划分按 **风险性质** 而非"几条 CRITICAL"：直接威胁账
 | 12 | 性能 IO 三大件：(a) Job listing 内存索引化；(b) pipeline stdout 路径去 fsync + group commit + JobRecord 内存缓存；(c) `download` / `upload` 全部改流式或 `asyncio.to_thread` 包裹 | [src/services/jobs/store.py:63-80](src/services/jobs/store.py:63)、[src/services/jobs/process_runner.py:375-473](src/services/jobs/process_runner.py:375)、[src/services/jobs/api.py:308](src/services/jobs/api.py:308)、[gateway/upload.py:107-108](gateway/upload.py:107) |
 | 13 | `asyncio.Semaphore(2)` 限制 background task executor 并发（generate_video / materials_pack） | [gateway/background_task_api.py:83](gateway/background_task_api.py:83)、[src/services/jobs/video_render_async.py:90-108](src/services/jobs/video_render_async.py:90) |
 | 14 | `audio_utils.measure_duration_ms` ffprobe 加 `timeout=30` | [src/utils/audio_utils.py:18-43](src/utils/audio_utils.py:18) |
-| 15 | S2 Pass 1/2/3 fallback 链加 `max_fallback_attempts=2`，非 transient 错误立即停止级联 | [src/services/transcript_reviewer.py:1362,1655,2071](src/services/transcript_reviewer.py:1362) |
+| 15a | S2 Pass 1/2/3 fallback 链加 `max_fallback_attempts=2`，非 transient 错误立即停止级联 | [src/services/transcript_reviewer.py:1362,1655,2071](src/services/transcript_reviewer.py:1362) |
+| **15b** | **JobStore.update_job(mutator) 重构 + caller 迁移**(P0-5 因 caller 改动量大未做):新增 `JobStore.update_job(job_id, mutator: Callable[[JobRecord], JobRecord])` 公共 API,内部 `with file_lock(self._job_path(job_id)):` 包 load → mutator → save;迁移 ProcessJobRunner._record_line / editing_commit / 高频 caller 共 ~20 处 | [src/services/jobs/store.py:16-19](src/services/jobs/store.py:16)、各 caller |
+| **15c** | **加强 P0-5 守卫断言**(Codex 第一轮复核建议,非阻断):当前 `_admin_settings_function_uses_file_lock` 只检查 `with file_lock(...)` 存在,可加强校验锁目标 = `_PROMPT_HISTORY_FILE` 而非任意路径,以及 `_save_prompt_history` 必含 `atomic_write_json` 调用 | [tests/test_p0_5_file_lock_coverage.py](tests/test_p0_5_file_lock_coverage.py) |
+| **16** | **split orphan parent draft wav 清理**(Codex P0-8 复核新发现,非阻断):split 前 parent 已有旧 draft wav 时,当前 split 不删 `tts_segments_draft/{parent_sid}.wav`,commit 会把孤儿 wav 一起 promote 到 `editor/tts_segments/`。不会 missing-wav,但留垃圾。fix 方案:在 `split_editing_segment` 末尾删除 `parent_sid.wav`(同 lock 内) | [src/services/jobs/editing_segments.py:870-907](src/services/jobs/editing_segments.py:870) |
 
 ---
 
