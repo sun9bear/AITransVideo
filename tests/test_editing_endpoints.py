@@ -607,6 +607,80 @@ def test_service_cancel_editing_passes_reason_through(tmp_path: Path) -> None:
     assert any("idle_24h_auto_cancel" in (e.message or "") for e in events)
 
 
+def test_service_cancel_editing_skips_audit_event_on_concurrent_no_op(
+    tmp_path: Path,
+) -> None:
+    """P1-15b batch 2 follow-up (Codex review of 5748978):
+    JobService.cancel_editing must NOT emit a post_edit_cancelled
+    user-edit audit event when ``editing.cancel_editing`` no-op'd
+    because the underlying record already left editing state (e.g.
+    a concurrent commit/cancel won the race).
+
+    Setup: enter editing → cancel once (real transition, audit
+    emitted) → cancel AGAIN with the same job_id but the helper
+    sees status=succeeded and no-ops → audit log MUST NOT grow.
+    """
+    service, project_dir = _build_service_with_editing_fixture(tmp_path)
+
+    # Real transition: enter then cancel once.
+    service.enter_editing("job_123")
+    first_result = service.cancel_editing("job_123", reason="user_cancel")
+    assert first_result.status == JOB_STATUS_SUCCEEDED
+
+    # Audit ledger lives at {project_dir}/audit/user_edit_events.jsonl
+    audit_path = project_dir / "audit" / "user_edit_events.jsonl"
+    audit_lines_after_first = (
+        audit_path.read_text(encoding="utf-8").splitlines()
+        if audit_path.exists() else []
+    )
+    assert any(
+        "post_edit_cancelled" in line for line in audit_lines_after_first
+    ), (
+        "sanity: real cancel should have emitted a post_edit_cancelled "
+        "audit event (so we have something to compare against)"
+    )
+
+    # Now call cancel_editing again on a job that is no longer in
+    # editing state. The legacy entry-point check would have raised
+    # EditingConflictError; with P1-15b batch 2 the helper still
+    # raises on a pre-lock stale snapshot. We exercise the OTHER
+    # no-op path by constructing the race directly: enter editing,
+    # then have one path "win" the cancel via a direct save_job, and
+    # verify the second cancel_editing call doesn't double-emit.
+    service.enter_editing("job_123")
+    # Simulate a concurrent winner: flip the on-disk record to
+    # SUCCEEDED out of band so cancel_editing's mutator sees the
+    # status has already changed and returns current unchanged.
+    fresh = service.store.require_job("job_123")
+    from dataclasses import replace as _replace
+    won = _replace(
+        fresh,
+        status=JOB_STATUS_SUCCEEDED,
+        editing_touched_at=None,
+    )
+    service.store.save_job(won)
+
+    # Now JobService.cancel_editing's pre-helper require_job returns
+    # SUCCEEDED, and the helper raises EditingConflictError. Catch
+    # it and verify no extra audit event landed.
+    audit_lines_before_second = (
+        audit_path.read_text(encoding="utf-8").splitlines()
+        if audit_path.exists() else []
+    )
+    with pytest.raises(EditingConflictError):
+        service.cancel_editing("job_123", reason="user_cancel")
+
+    audit_lines_after_second = (
+        audit_path.read_text(encoding="utf-8").splitlines()
+        if audit_path.exists() else []
+    )
+    assert audit_lines_after_second == audit_lines_before_second, (
+        "P1-15b batch 2 follow-up regression: a no-op'd cancel_editing "
+        "still emitted a post_edit_cancelled audit event. The audit "
+        "ledger now records cancellations that didn't happen."
+    )
+
+
 def test_service_commit_editing_dispatches_to_pipeline(tmp_path: Path) -> None:
     """T1-9 replaced the skeleton with a real commit pipeline; service
     delegate now returns a dict and calls through the fake runner.

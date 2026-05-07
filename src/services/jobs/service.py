@@ -519,13 +519,36 @@ class JobService:
         record = self.require_job(job_id)
         result = _cancel_editing(record, self.store, reason=reason)
 
-        try:
-            self._emit_post_edit_cancelled(record, result, reason=reason)
-        except Exception:  # noqa: BLE001
-            import logging
-            logging.getLogger(__name__).exception(
-                "post_edit_cancelled audit emit failed for %s", job_id
-            )
+        # P1-15b batch 2 follow-up (Codex review of 5748978): the helper
+        # is now allowed to no-op when a concurrent cancel/commit already
+        # moved the job out of editing — it suppresses the editing.cancelled
+        # status event in that case but JobService still owned the
+        # downstream post_edit_cancelled USER AUDIT event. Gate the audit
+        # emit on the same "real transition happened" predicate so the
+        # user-edit ledger doesn't record a cancellation that didn't
+        # actually happen.
+        #
+        # A real cancel_editing transition is uniquely identified by:
+        #   record.status == editing  AND  result.status == succeeded
+        # AND
+        #   record.editing_touched_at != None  AND  result.editing_touched_at is None
+        # The latter pair is what cancel_editing's mutator clears, so a
+        # no-op leaves editing_touched_at unchanged.
+        from services.jobs.models import JOB_STATUS_EDITING, JOB_STATUS_SUCCEEDED
+        is_real_transition = (
+            record.status == JOB_STATUS_EDITING
+            and result.status == JOB_STATUS_SUCCEEDED
+            and record.editing_touched_at is not None
+            and result.editing_touched_at is None
+        )
+        if is_real_transition:
+            try:
+                self._emit_post_edit_cancelled(record, result, reason=reason)
+            except Exception:  # noqa: BLE001
+                import logging
+                logging.getLogger(__name__).exception(
+                    "post_edit_cancelled audit emit failed for %s", job_id
+                )
         return result
 
     def _emit_post_edit_cancelled(
