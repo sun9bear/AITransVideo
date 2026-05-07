@@ -1526,18 +1526,31 @@ class JobService:
             )
 
         next_record = self.store.update_job(record.job_id, mutator)
-        self.store.append_event(
-            record.job_id,
-            JobEvent(
-                job_id=record.job_id,
-                event_type=EVENT_TYPE_STATUS,
-                created_at=timestamp,
-                stage=next_record.current_stage,
-                status=next_record.status,
-                level=EVENT_LEVEL_ERROR,
-                message=next_record.progress_message,
-            ),
-        )
+        # P1-15b follow-up (Codex review of a687ae6): the mutator above
+        # may intentionally return `current` (no-op) when the job is
+        # no longer worker-active or the runner came back to life
+        # between scan and lock acquisition. In that case we must NOT
+        # emit a stale_active_job error event, otherwise the event log
+        # gets false "Recovered stale active job" noise for jobs that
+        # explicitly weren't marked stale.
+        # Detect the no-op via status: if status is still worker-active
+        # the mutator decided to leave the record alone; only on a
+        # transition to FAILED do we record the recovery event.
+        if next_record.status == JOB_STATUS_FAILED and \
+                next_record.current_stage == STAGE_FAILED and \
+                (next_record.error_summary or {}).get("error_type") == "stale_active_job":
+            self.store.append_event(
+                record.job_id,
+                JobEvent(
+                    job_id=record.job_id,
+                    event_type=EVENT_TYPE_STATUS,
+                    created_at=timestamp,
+                    stage=next_record.current_stage,
+                    status=next_record.status,
+                    level=EVENT_LEVEL_ERROR,
+                    message=next_record.progress_message,
+                ),
+            )
         return next_record
 
 

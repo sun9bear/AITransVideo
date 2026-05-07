@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -503,6 +504,117 @@ def test_job_service_reaps_stale_running_job_without_live_process_before_new_sub
     }
     assert recovered_events[-1].status == JOB_STATUS_FAILED
     assert recovered_events[-1].message == "Recovered stale active job without a live worker process."
+
+
+def test_mark_stale_active_job_skips_event_when_runner_resumed(
+    tmp_path: Path,
+) -> None:
+    """P1-15b follow-up² (Codex review of a687ae6, P2):
+    _mark_stale_active_job_failed's mutator can decide to leave the
+    record alone when runner.is_process_active returns True under the
+    lock (the runner came back to life between scan and lock acquire).
+    In that case we MUST NOT append a stale_active_job error event,
+    otherwise the log gets false "Recovered stale active job" noise
+    for jobs that explicitly weren't marked stale.
+
+    Setup: stale-looking record on disk + fake runner whose
+    is_process_active returns True. Call _mark_stale_active_job_failed
+    directly. Assert: record is unchanged AND no error event was
+    appended.
+    """
+    record = JobRecord(
+        job_id="job-runner-revived",
+        job_type="localize_video",
+        source_type="youtube_url",
+        source_ref="https://youtube.example/watch?v=revived",
+        output_target="editor",
+        speakers="auto",
+        voice_a=None,
+        voice_b=None,
+        status=JOB_STATUS_RUNNING,
+        current_stage="alignment",
+        progress_message="Aligning segments...",
+        created_at="2026-05-07T00:00:00Z",
+        updated_at="2026-05-07T00:00:01Z",
+        started_at="2026-05-07T00:00:00Z",
+    )
+    service, _ = _build_service(tmp_path, plans=[])
+    service.store.save_job(record)
+
+    # Fake runner: claim the process is alive. The mutator should
+    # observe this and return current unchanged.
+    class _AliveRunner:
+        def is_process_active(self, job_id: str) -> bool:
+            return True
+
+    service.runner = _AliveRunner()  # type: ignore[assignment]
+
+    pre_events = service.read_logs(record.job_id)
+    pre_count = len(pre_events)
+    result = service._mark_stale_active_job_failed(record)
+
+    # Record unchanged.
+    assert result.status == JOB_STATUS_RUNNING
+    assert result.current_stage == "alignment"
+    assert result.error_summary in (None, {})
+
+    # No new event was appended.
+    post_events = service.read_logs(record.job_id)
+    assert len(post_events) == pre_count, (
+        f"P1-15b follow-up² regression: a stale_active_job error event "
+        f"was emitted even though the mutator decided not to mark the "
+        f"record failed (runner came back to life). Event delta: "
+        f"{len(post_events) - pre_count}"
+    )
+
+
+def test_mark_stale_active_job_skips_event_when_status_no_longer_active(
+    tmp_path: Path,
+) -> None:
+    """Mirror of the above for the OTHER no-op branch: the record's
+    status is no longer worker-active under the lock (it transitioned
+    to e.g. SUCCEEDED between the scanner's read and our acquire).
+    Mutator returns current; no event must be emitted."""
+    record = JobRecord(
+        job_id="job-finished-mid-scan",
+        job_type="localize_video",
+        source_type="youtube_url",
+        source_ref="https://youtube.example/watch?v=finished",
+        output_target="editor",
+        speakers="auto",
+        voice_a=None,
+        voice_b=None,
+        status=JOB_STATUS_RUNNING,  # caller's stale snapshot
+        current_stage="media_understanding",
+        progress_message="Stale snapshot from scanner",
+        created_at="2026-05-07T00:00:00Z",
+        updated_at="2026-05-07T00:00:01Z",
+        started_at="2026-05-07T00:00:00Z",
+    )
+    service, _ = _build_service(tmp_path, plans=[])
+
+    # Disk reflects the FRESH state: job already succeeded.
+    fresh = replace(record, status=JOB_STATUS_SUCCEEDED, current_stage="legacy_process_output")
+    service.store.save_job(fresh)
+
+    # Runner doesn't matter — the status check fires first.
+    class _DeadRunner:
+        def is_process_active(self, job_id: str) -> bool:
+            return False
+
+    service.runner = _DeadRunner()  # type: ignore[assignment]
+
+    pre_events = service.read_logs(record.job_id)
+    pre_count = len(pre_events)
+    result = service._mark_stale_active_job_failed(record)
+
+    # Record kept the FRESH state (succeeded) — not flipped to failed.
+    assert result.status == JOB_STATUS_SUCCEEDED
+    assert result.current_stage == "legacy_process_output"
+
+    # No new event was appended.
+    post_events = service.read_logs(record.job_id)
+    assert len(post_events) == pre_count
 
 
 def test_job_service_accepts_local_audio_source_type(tmp_path: Path) -> None:
