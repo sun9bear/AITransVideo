@@ -311,6 +311,15 @@ def _invalidate_jianying_draft_on_commit(job: JobRecord, project_dir: Path | str
     artifacts. User can re-trigger generation to get an up-to-date draft.
 
     Safe to call multiple times — idempotent.
+
+    P1-15b batch 3 (audit 2026-05-07): the production caller in
+    ``_commit_overwrite`` no longer uses this helper — it inlines the
+    record-field reset into the ``update_job`` mutator (so the field
+    flip is atomic with the editing→running status flip) and runs the
+    on-disk rmtree after a successful transition. The helper is kept
+    here for the docs/graphs/* references and for ad-hoc admin tooling
+    that might want to clear a stale draft without driving a state
+    transition. No production code path calls it as of 2026-05-07.
     """
     # Reset JobRecord fields. Caller is responsible for store.save_job(job).
     job.jianying_draft_status = "idle"
@@ -562,25 +571,50 @@ def _commit_overwrite(
     # succeeded-era state as authoritative.
     _prune_overwrite_project_state(project_dir)
 
-    # Step 4: flip status.
+    # Step 4 + 4.5: atomic flip status + reset Jianying fields.
+    # P1-15b batch 3 (audit 2026-05-07): single update_job covers
+    # both the editing→running status flip AND the Jianying draft
+    # field reset (status / started_at / completed_at / error /
+    # zip_path / user_root). The mutator re-checks current.status
+    # under the lock — if a concurrent cancel already flipped the
+    # job to succeeded, we raise CommitPipelineError rather than
+    # overwriting (commit is not idempotent: silently re-running
+    # alignment+publish on a finalized baseline would corrupt user-
+    # facing artifacts). The Jianying FS rmtree is deferred to after
+    # a successful transition, so a no-op'd / failed mutator does
+    # not destroy the prior draft.
     now = _utc_now_iso()
-    updated = replace(
-        record,
-        status=JOB_STATUS_RUNNING,
-        current_stage=STAGE_ALIGNMENT,
-        editing_touched_at=None,
-        edit_generation=record.edit_generation + 1,
-        updated_at=now,
-    )
 
-    # Step 4.5: invalidate Jianying draft state. Post-edit commit
-    # regenerates alignment/publish (SRTs, audio if re-TTS'd), so any
-    # existing Jianying draft becomes stale. Reset state to idle and
-    # delete on-disk artifacts so user sees "生成剪映草稿" button again
-    # (forcing a re-trigger to get up-to-date content).
-    _invalidate_jianying_draft_on_commit(updated, project_dir)
+    def _flip_to_running(current: JobRecord) -> JobRecord:
+        if current.status != JOB_STATUS_EDITING:
+            raise CommitPipelineError(
+                f"job {current.job_id} is no longer in editing state "
+                f"(current: {current.status}); cannot commit overwrite"
+            )
+        return replace(
+            current,
+            status=JOB_STATUS_RUNNING,
+            current_stage=STAGE_ALIGNMENT,
+            editing_touched_at=None,
+            edit_generation=current.edit_generation + 1,
+            updated_at=now,
+            # Reset Jianying draft fields atomically with the status
+            # flip. The on-disk artifacts get rmtree-d below after
+            # update_job returns (FS side-effect, deferred).
+            jianying_draft_status="idle",
+            jianying_draft_started_at=None,
+            jianying_draft_completed_at=None,
+            jianying_draft_error=None,
+            jianying_draft_zip_path=None,
+            jianying_draft_user_root=None,
+        )
 
-    store.save_job(updated)
+    updated = store.update_job(record.job_id, _flip_to_running)
+    # FS cleanup after the transition committed: drop the stale
+    # Jianying draft zip so the user sees the regenerate button again.
+    jianying_root = Path(project_dir) / "jianying"
+    if jianying_root.exists():
+        shutil.rmtree(jianying_root, ignore_errors=True)
     _emit_event(
         store, updated,
         message=(
@@ -603,13 +637,25 @@ def _commit_overwrite(
         # Roll status back to editing; drafts were already moved so the user
         # effectively sees their edits applied but the pipeline never ran.
         # Re-emit an editing state record so idle scanner starts afresh.
-        failed = replace(
-            updated,
-            status=JOB_STATUS_EDITING,
-            editing_touched_at=now,
-            updated_at=_utc_now_iso(),
-        )
-        store.save_job(failed)
+        # P1-15b batch 3: route through update_job so this rollback can't
+        # clobber a concurrent cancel/admin write that landed between
+        # update_job(_flip_to_running) and the runner.start failure.
+        rollback_now = _utc_now_iso()
+
+        def _rollback_to_editing(current: JobRecord) -> JobRecord:
+            # If the concurrent winner already moved status away from
+            # running (e.g. user pressed cancel before runner.start
+            # actually attempted), don't resurrect editing state.
+            if current.status != JOB_STATUS_RUNNING:
+                return current
+            return replace(
+                current,
+                status=JOB_STATUS_EDITING,
+                editing_touched_at=now,
+                updated_at=rollback_now,
+            )
+
+        failed = store.update_job(record.job_id, _rollback_to_editing)
         _emit_event(
             store, failed,
             message=f"editing.commit_failed: strategy=overwrite err={exc}",
@@ -710,7 +756,17 @@ def _commit_copy_as_new(
         jianying_draft_zip_path=None,
         jianying_draft_user_root=None,
     )
-    store.save_job(new_record)
+    # P1-15b batch 3: first-write on a fresh job_id; use update_job
+    # with initial=new_record so the write happens under the new
+    # job's per-job lock. There's no on-disk record yet (just-allocated
+    # job_id), so update_job's load_job returns None and falls back to
+    # the initial record. Mutator is a no-op (identity) since we have
+    # nothing to merge.
+    store.update_job(
+        new_record.job_id,
+        lambda current: current,
+        initial=new_record,
+    )
 
     # Phase A final: submit runner. Any failure here rolls back Phase A.
     try:
@@ -749,14 +805,24 @@ def _commit_copy_as_new(
     source_updated: JobRecord = record
     try:
         source_now = _utc_now_iso()
-        source_updated = replace(
-            record,
-            status=JOB_STATUS_SUCCEEDED,
-            editing_touched_at=None,
-            updated_at=source_now,
-        )
+        # P1-15b batch 3: route the source's editing→succeeded flip
+        # through update_job so a concurrent cancel/admin write on the
+        # source can't clobber Phase B's transition (or vice versa).
+        # If the source's status is no longer EDITING under the lock,
+        # an admin/idle-scanner force-cancel beat us — we do nothing
+        # (the source is already out of editing) but still proceed to
+        # rm_editing_dir as defense-in-depth FS cleanup.
+        def _flip_source_to_succeeded(current: JobRecord) -> JobRecord:
+            if current.status != JOB_STATUS_EDITING:
+                return current  # concurrent winner already finished
+            return replace(
+                current,
+                status=JOB_STATUS_SUCCEEDED,
+                editing_touched_at=None,
+                updated_at=source_now,
+            )
         failed_step = "save_job"
-        store.save_job(source_updated)
+        source_updated = store.update_job(record.job_id, _flip_source_to_succeeded)
         failed_step = "rm_editing_dir"
         _rm_editing_dir(project_dir)
         failed_step = None  # success

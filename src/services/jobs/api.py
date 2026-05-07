@@ -1407,18 +1407,39 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                     if record.status not in ("queued", "running", "waiting_for_review"):
                         raise JobConflictError(f"job {job_id} is not in a cancellable state (current: {record.status})")
                     service.runner.stop_process(job_id)
+                    # P1-15b batch 3 (audit 2026-05-07): route the
+                    # cancel state flip through update_job so the
+                    # ProcessJobRunner monitor thread (which writes
+                    # progress / status while stop_process is unwinding
+                    # the subprocess) can't lose its updates to the
+                    # cancel handler's stale snapshot or vice versa.
+                    # The mutator re-validates cancellability under the
+                    # lock — if the runner already drove the job to
+                    # succeeded/failed between require_job and the
+                    # lock, raise JobConflictError instead of silently
+                    # rewriting that terminal state to "cancelled".
                     from dataclasses import replace as _replace
                     from services.state_manager import utc_now_iso
                     timestamp = utc_now_iso()
-                    cancelled_record = _replace(
-                        record,
-                        status="cancelled",
-                        current_stage="failed",
-                        progress_message="Job cancelled by user.",
-                        updated_at=timestamp,
-                        completed_at=timestamp,
+                    _CANCELLABLE = ("queued", "running", "waiting_for_review")
+
+                    def _flip_to_cancelled(current):
+                        if current.status not in _CANCELLABLE:
+                            raise JobConflictError(
+                                f"job {current.job_id} is no longer "
+                                f"cancellable (current: {current.status})"
+                            )
+                        return _replace(
+                            current,
+                            status="cancelled",
+                            current_stage="failed",
+                            progress_message="Job cancelled by user.",
+                            updated_at=timestamp,
+                            completed_at=timestamp,
+                        )
+                    cancelled_record = service.store.update_job(
+                        job_id, _flip_to_cancelled,
                     )
-                    service.store.save_job(cancelled_record)
                     self._write_json(HTTPStatus.OK, {"success": True, "job": cancelled_record.to_dict()})
                     return
                 self._write_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
