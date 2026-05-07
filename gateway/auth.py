@@ -7,7 +7,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
-from fastapi import Cookie, Depends, HTTPException, Response
+from fastapi import Cookie, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -181,6 +181,7 @@ async def register_handler(
 
 async def login_handler(
     body: LoginRequest,
+    request: Request,
     response: Response,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
@@ -196,6 +197,21 @@ async def login_handler(
     account = (body.email or "").strip()
     if not account:
         raise HTTPException(status_code=400, detail="请输入账号")
+
+    # P1-10a-1 (audit 2026-05-07, S-HIGH-3): rate limit before bcrypt
+    # to prevent credential stuffing. _client_ip respects the trusted-
+    # proxy boundary added in the same audit.
+    from auth_phone import _client_ip  # late import to avoid cycle
+    from risk_control import (
+        RateLimitExceeded,
+        check_login_allowed,
+        record_login_failure,
+    )
+    client_ip = _client_ip(request)
+    try:
+        check_login_allowed(account, client_ip)
+    except RateLimitExceeded as exc:
+        raise HTTPException(status_code=429, detail=exc.message)
 
     # Determine if the account looks like a phone number or email.
     import re
@@ -218,9 +234,11 @@ async def login_handler(
     user = result.scalar_one_or_none()
 
     if not user or not user.password_hash or not verify_password(body.password, user.password_hash):
+        record_login_failure(account, client_ip)
         raise HTTPException(status_code=401, detail="账号或密码错误")
 
     if not user.is_active:
+        record_login_failure(account, client_ip)
         raise HTTPException(status_code=403, detail="账户已禁用")
 
     await create_session(db, user.id, response)

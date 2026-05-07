@@ -23,6 +23,7 @@ Trial bookkeeping (frozen by H1 decision 2026-04-06):
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -143,16 +144,47 @@ class ResetPasswordRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+# P1-10a-1 (audit 2026-05-07, S-HIGH-5): X-Forwarded-For trusted-proxy boundary.
+# Default trusted proxies: loopback only. In production, Caddy and
+# Cloudflare-Tunnel both run on localhost via the docker network, so
+# the gateway always sees them as 127.0.0.1 from inside the container.
+# Override via env if a different topology is in play.
+_TRUSTED_PROXIES_ENV = "AVT_TRUSTED_PROXIES"
+_DEFAULT_TRUSTED_PROXIES = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def _trusted_proxies() -> frozenset[str]:
+    raw = os.environ.get(_TRUSTED_PROXIES_ENV, "").strip()
+    if not raw:
+        return _DEFAULT_TRUSTED_PROXIES
+    return frozenset(p.strip() for p in raw.split(",") if p.strip())
+
+
 def _client_ip(request: Request) -> str | None:
-    fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip() or None
-    real = request.headers.get("x-real-ip")
-    if real:
-        return real.strip() or None
-    if request.client is not None:
-        return request.client.host
-    return None
+    """Resolve the requester IP with a trusted-proxy boundary.
+
+    P1-10a-1 (audit 2026-05-07, S-HIGH-5): previously the gateway
+    blindly trusted X-Forwarded-For[0] / X-Real-IP. An attacker hitting
+    the gateway directly (or any path that bypasses Caddy) could spoof
+    those headers to bypass per-IP rate limit + IP-based trial
+    eligibility (each trial = 300 credits).
+
+    New rule: X-Forwarded-For / X-Real-IP are only trusted when the
+    immediate socket peer is in the trusted-proxy allowlist. Otherwise
+    we fall back to request.client.host (the real socket IP).
+    """
+    socket_peer = request.client.host if request.client is not None else None
+    trusted = _trusted_proxies()
+    if socket_peer and socket_peer in trusted:
+        # Trusted reverse proxy — use forwarded headers
+        fwd = request.headers.get("x-forwarded-for")
+        if fwd:
+            return fwd.split(",")[0].strip() or socket_peer
+        real = request.headers.get("x-real-ip")
+        if real:
+            return real.strip() or socket_peer
+    # Untrusted peer — never honor forwarded headers
+    return socket_peer
 
 
 async def _invalidate_previous_codes(db: AsyncSession, phone_number: str) -> None:

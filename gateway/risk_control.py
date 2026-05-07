@@ -192,6 +192,60 @@ def reset_rate_limits() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Login rate limit (P1-10a-1, audit 2026-05-07, S-HIGH-3)
+# ---------------------------------------------------------------------------
+# Two independent buckets:
+#   - per-IP:      5 failed logins per IP per minute
+#   - per-account: 5 failed logins per account per 15 minutes (catches
+#                  distributed brute-force across many IPs targeting one user)
+# Successful login does NOT reset — once you trip the limit you wait it out.
+# This is intentional: a successful login under heavy attack is suspicious.
+
+_LOGIN_IP_WINDOW = 60          # seconds
+_LOGIN_IP_LIMIT = 5
+_LOGIN_ACCOUNT_WINDOW = 900    # 15 minutes
+_LOGIN_ACCOUNT_LIMIT = 5
+
+_login_ip_failures: dict[str, deque[float]] = defaultdict(deque)
+_login_account_failures: dict[str, deque[float]] = defaultdict(deque)
+
+
+def check_login_allowed(account: str, client_ip: str | None) -> None:
+    """Raise RateLimitExceeded when a fresh /auth/login should be rejected.
+
+    Called BEFORE password verification. Records the failure timestamp on
+    record_login_failure() AFTER an actual auth failure.
+    """
+    now = time.monotonic()
+    # Per-IP
+    if client_ip:
+        _prune(_login_ip_failures[client_ip], now, _LOGIN_IP_WINDOW)
+        if len(_login_ip_failures[client_ip]) >= _LOGIN_IP_LIMIT:
+            raise RateLimitExceeded(
+                scope="login_ip",
+                message="登录尝试过于频繁,请稍后再试",
+            )
+    # Per-account
+    if account:
+        key = account.strip().lower()
+        _prune(_login_account_failures[key], now, _LOGIN_ACCOUNT_WINDOW)
+        if len(_login_account_failures[key]) >= _LOGIN_ACCOUNT_LIMIT:
+            raise RateLimitExceeded(
+                scope="login_account",
+                message="该账号登录失败次数过多,请稍后再试",
+            )
+
+
+def record_login_failure(account: str, client_ip: str | None) -> None:
+    """Stamp a failed /auth/login attempt. Call AFTER detecting auth failure."""
+    now = time.monotonic()
+    if client_ip:
+        _login_ip_failures[client_ip].append(now)
+    if account:
+        _login_account_failures[account.strip().lower()].append(now)
+
+
+# ---------------------------------------------------------------------------
 # Captcha
 # ---------------------------------------------------------------------------
 
