@@ -198,6 +198,27 @@ async def login_handler(
     if not account:
         raise HTTPException(status_code=400, detail="请输入账号")
 
+    # P1-10a-1 follow-up (Codex review 2026-05-07): normalize the account
+    # string BEFORE rate-limiting so all phone-format variants
+    # (13800138000, +8613800138000, "86 13800138000", "138-0013-8000")
+    # collapse to the same per-account bucket. Previously each variant
+    # got its own bucket because rate-limit ran on raw `account` while
+    # the DB lookup ran on the normalized form — a distributed
+    # brute-force attacker could try 5 failures per format and bypass
+    # the per-account limit entirely.
+    import re
+    normalized_account = re.sub(r"[\s\-\(\)]+", "", account)
+    if normalized_account.startswith("+86"):
+        normalized_account = normalized_account[3:]
+    elif normalized_account.startswith("86") and len(normalized_account) == 13:
+        normalized_account = normalized_account[2:]
+
+    is_phone = bool(re.match(r"^1[3-9]\d{9}$", normalized_account))
+    # Canonical rate-limit key:
+    #   - phone → 11-digit digits-only form (variants collapse here)
+    #   - email → original; risk_control internally lower-cases it
+    rate_limit_key = normalized_account if is_phone else account
+
     # P1-10a-1 (audit 2026-05-07, S-HIGH-3): rate limit before bcrypt
     # to prevent credential stuffing. _client_ip respects the trusted-
     # proxy boundary added in the same audit.
@@ -209,19 +230,9 @@ async def login_handler(
     )
     client_ip = _client_ip(request)
     try:
-        check_login_allowed(account, client_ip)
+        check_login_allowed(rate_limit_key, client_ip)
     except RateLimitExceeded as exc:
         raise HTTPException(status_code=429, detail=exc.message)
-
-    # Determine if the account looks like a phone number or email.
-    import re
-    normalized_account = re.sub(r"[\s\-\(\)]+", "", account)
-    if normalized_account.startswith("+86"):
-        normalized_account = normalized_account[3:]
-    elif normalized_account.startswith("86") and len(normalized_account) == 13:
-        normalized_account = normalized_account[2:]
-
-    is_phone = bool(re.match(r"^1[3-9]\d{9}$", normalized_account))
 
     if is_phone:
         result = await db.execute(
@@ -234,11 +245,11 @@ async def login_handler(
     user = result.scalar_one_or_none()
 
     if not user or not user.password_hash or not verify_password(body.password, user.password_hash):
-        record_login_failure(account, client_ip)
+        record_login_failure(rate_limit_key, client_ip)
         raise HTTPException(status_code=401, detail="账号或密码错误")
 
     if not user.is_active:
-        record_login_failure(account, client_ip)
+        record_login_failure(rate_limit_key, client_ip)
         raise HTTPException(status_code=403, detail="账户已禁用")
 
     await create_session(db, user.id, response)

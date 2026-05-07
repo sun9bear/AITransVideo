@@ -72,6 +72,97 @@ def test_check_login_allowed_blocks_after_n_per_account_failures():
 
 
 # --------------------------------------------------------------------
+# §1b — Per-account limit must use a CANONICAL key (P1-10a-1 follow-up,
+#       Codex review 2026-05-07). Phone-format variants must collapse
+#       into the same bucket; otherwise the per-account limit is
+#       bypassed by trying 13800138000 / +8613800138000 / "138-0013-8000"
+#       in sequence.
+# --------------------------------------------------------------------
+
+
+def _phone_login_variants(canonical: str) -> list[str]:
+    """Return realistic input variants the user might type or paste,
+    all of which normalize to the same canonical 11-digit number."""
+    return [
+        canonical,                           # 13800138000
+        f"+86{canonical}",                   # +8613800138000
+        f"86 {canonical}",                   # "86 13800138000" (with space — normalizer strips it)
+        f"86{canonical}",                    # 8613800138000
+        f"{canonical[:3]}-{canonical[3:7]}-{canonical[7:]}",        # 138-0013-8000
+        f"({canonical[:3]}) {canonical[3:7]}-{canonical[7:]}",      # (138) 0013-8000
+        f"  {canonical}  ",                  # whitespace padding
+    ]
+
+
+def test_login_variants_collapse_into_one_per_account_bucket():
+    """P1-10a-1 follow-up (Codex review): the login_handler MUST
+    normalize phone-format variants before calling check_login_allowed
+    and record_login_failure. Otherwise each variant gets its own deque
+    and the per-account 5-attempt cap is bypassed.
+
+    Strategy: drive the actual login_handler with a fake DB that always
+    returns no user (every attempt is a 401 failure). After 5 failures
+    via 5 different formats of the same phone, the 6th attempt with a
+    yet-different format MUST be 429.
+    """
+    _reset_rate_limit_state()
+
+    import asyncio
+    import auth as auth_module
+    from fastapi import HTTPException
+
+    canonical = "13800138000"
+    variants = _phone_login_variants(canonical)
+    assert len(variants) >= 6, "need >=6 variants to test 5 fail + 1 blocked"
+
+    # Fake DB session: execute() returns "no user" so every attempt 401s
+    class _FakeResult:
+        def scalar_one_or_none(self):
+            return None
+
+    class _FakeDB:
+        async def execute(self, *args, **kwargs):
+            return _FakeResult()
+
+    # Loopback peer so the trusted-proxy check accepts XFF (or absent)
+    class _FakeRequest:
+        client = type("c", (), {"host": "127.0.0.1"})()
+        headers: dict = {}
+
+    class _FakeResponse:
+        def set_cookie(self, *a, **kw): pass
+
+    async def attempt(account_str: str) -> int | None:
+        body = type("LR", (), {"email": account_str, "password": "wrong"})()
+        try:
+            await auth_module.login_handler(
+                body=body,
+                request=_FakeRequest(),
+                response=_FakeResponse(),
+                db=_FakeDB(),
+            )
+            return None
+        except HTTPException as exc:
+            return exc.status_code
+
+    # First 5 attempts (5 different formats of the SAME phone) — all 401
+    for v in variants[:5]:
+        code = asyncio.run(attempt(v))
+        assert code == 401, (
+            f"variant {v!r} unexpectedly returned {code}; expected 401"
+        )
+
+    # 6th attempt with yet another format → MUST be 429, not 401.
+    code = asyncio.run(attempt(variants[5]))
+    assert code == 429, (
+        f"P1-10a-1 follow-up regression: 6th login attempt with phone-"
+        f"format variant {variants[5]!r} returned {code}; expected 429. "
+        f"Per-account rate limit was bypassed by format variants — the "
+        f"normalizer is not running before check_login_allowed."
+    )
+
+
+# --------------------------------------------------------------------
 # §2 — _client_ip trusted-proxy boundary
 # --------------------------------------------------------------------
 
