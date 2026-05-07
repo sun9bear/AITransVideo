@@ -1554,15 +1554,30 @@ def _compute_user_edits(project_dir: Path | None) -> dict | None:
         }
     counts = {"speaker": 0, "split": 0, "text": 0}
     try:
+        # Intent events stay effective=False on disk (append-only, plan §4.5).
+        # Effectiveness is recorded by a separate event_type="effective_marker"
+        # event whose context.marked_event_ids enumerates the intent event_ids
+        # to promote. So we two-pass: collect promoted ids, then count.
+        events: list[dict] = []
         for line in path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line:
                 continue
             try:
-                ev = json.loads(line)
+                events.append(json.loads(line))
             except json.JSONDecodeError:
                 continue
-            if ev.get("effective_marker") != "effective":
+        marked_ids: set[str] = set()
+        for ev in events:
+            if ev.get("event_type") != "effective_marker":
+                continue
+            ctx = ev.get("context") or {}
+            for eid in ctx.get("marked_event_ids") or []:
+                if isinstance(eid, str):
+                    marked_ids.add(eid)
+        for ev in events:
+            eid = ev.get("event_id")
+            if not isinstance(eid, str) or eid not in marked_ids:
                 continue
             et = ev.get("event_type")
             if et in SPEAKER_EVENT_TYPES:

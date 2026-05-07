@@ -1,7 +1,8 @@
-{"event_type": "translation_segment_speaker_changed", "effective_marker": "effective"}
-{"event_type": "translation_segment_speaker_changed", "effective_marker": "effective"}
-{"event_type": "translation_segment_speaker_changed", "effective_marker": "weak"}
-{"event_type": "translation_segment_split_confirmed", "effective_marker": "effective"}
-{"event_type": "translation_segment_text_changed", "effective_marker": "effective"}
-{"event_type": "translation_segment_text_changed", "effective_marker": "effective"}
-{"event_type": "post_edit_text_changed", "effective_marker": "effective"}
+{"event_type": "translation_segment_speaker_changed", "event_id": "spk-1"}
+{"event_type": "translation_segment_speaker_changed", "event_id": "spk-2"}
+{"event_type": "translation_segment_speaker_changed", "event_id": "spk-3"}
+{"event_type": "translation_segment_split_confirmed", "event_id": "split-1"}
+{"event_type": "translation_segment_text_changed", "event_id": "txt-1"}
+{"event_type": "translation_segment_text_changed", "event_id": "txt-2"}
+{"event_type": "post_edit_text_changed", "event_id": "txt-3"}
+{"event_type": "effective_marker", "context": {"marked_event_ids": ["spk-1", "spk-2", "split-1", "txt-1", "txt-2", "txt-3"]}}
