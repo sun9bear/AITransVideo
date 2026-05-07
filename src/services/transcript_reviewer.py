@@ -37,6 +37,15 @@ _MIMO_OMNI_API_URL = "https://api.xiaomimimo.com/v1/chat/completions"
 
 _TRANSIENT_RETRY_WAIT_S = 3  # seconds to wait before retrying on transient error
 
+# P1-15a (audit 2026-05-07): cap on how many fallback candidates each S2 pass
+# (Pass 1 / Pass 2 / Pass 3) may try when the primary + same-model retry fail.
+# Without this cap a malformed input triggers one paid LLM call per candidate
+# in `_fb_chain` (typically 4-6), with Pass 3 also re-uploading audio each
+# time. Audit recommended 2; do NOT raise this above 3 (cost guard) or set to
+# 0 (would disable fallback entirely). Hardcoded — intentionally NOT an env
+# var, because a misconfigured env would silently re-open the spend gate.
+_MAX_FALLBACK_ATTEMPTS_PER_PASS = 2
+
 
 def _is_transient_error(exc: Exception) -> bool:
     """Classify whether an exception is transient (worth retrying same model).
@@ -1360,8 +1369,18 @@ def _review_pass1_speakers(
                 payload = None
 
         # --- Fallback chain ---
+        # P1-15a (audit 2026-05-07): cap fallback chain at
+        # _MAX_FALLBACK_ATTEMPTS_PER_PASS to prevent runaway paid API spend
+        # on hard inputs.
         if payload is None:
-            for _fb_label, _fb_model, _fb_provider in _fallback_chain:
+            for attempt_idx, (_fb_label, _fb_model, _fb_provider) in enumerate(_fallback_chain):
+                if attempt_idx >= _MAX_FALLBACK_ATTEMPTS_PER_PASS:
+                    logger.warning(
+                        "[S2][Pass1] fallback chain hit max attempts cap (%d); "
+                        "stopping cascade to limit paid LLM spend",
+                        _MAX_FALLBACK_ATTEMPTS_PER_PASS,
+                    )
+                    break
                 try:
                     payload = _attempt_by_provider(_fb_label, _fb_model)
                     logger.info("[S2][Pass1] Succeeded on %s (model=%s)", _fb_label, _fb_model)
@@ -1653,8 +1672,18 @@ def _review_pass2_text(
                 payload = {}
 
         # --- Fallback chain ---
+        # P1-15a (audit 2026-05-07): cap fallback chain at
+        # _MAX_FALLBACK_ATTEMPTS_PER_PASS to prevent runaway paid API spend
+        # on hard inputs.
         if not payload:
-            for _fb_label, _fb_model in _fallback_chain_p2:
+            for attempt_idx, (_fb_label, _fb_model) in enumerate(_fallback_chain_p2):
+                if attempt_idx >= _MAX_FALLBACK_ATTEMPTS_PER_PASS:
+                    logger.warning(
+                        "[S2][Pass2] fallback chain hit max attempts cap (%d); "
+                        "stopping cascade to limit paid LLM spend",
+                        _MAX_FALLBACK_ATTEMPTS_PER_PASS,
+                    )
+                    break
                 _fb_key = _get_model_api_key(_fb_model)
                 try:
                     payload = _attempt_p2(_fb_label, _fb_model, _fb_key)
@@ -2069,8 +2098,19 @@ def review_pass3_voice_profiles(
                 logger.warning("[S2][Pass3] Output error, skipping retry: %s", exc)
 
         # --- Fallback chain ---
+        # P1-15a (audit 2026-05-07): cap fallback chain at
+        # _MAX_FALLBACK_ATTEMPTS_PER_PASS to prevent runaway paid API spend
+        # on hard inputs. Pass 3 also re-uploads audio per attempt, so a
+        # cascading failure here is extra costly.
         if not payload:
-            for _fb_label, _fb_model, _fb_prov in _fb_chain_p3:
+            for attempt_idx, (_fb_label, _fb_model, _fb_prov) in enumerate(_fb_chain_p3):
+                if attempt_idx >= _MAX_FALLBACK_ATTEMPTS_PER_PASS:
+                    logger.warning(
+                        "[S2][Pass3] fallback chain hit max attempts cap (%d); "
+                        "stopping cascade to limit paid LLM spend",
+                        _MAX_FALLBACK_ATTEMPTS_PER_PASS,
+                    )
+                    break
                 try:
                     payload = _attempt_p3_by_provider(_fb_label, _fb_model)
                     _success_label_p3 = _fb_label
