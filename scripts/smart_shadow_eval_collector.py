@@ -452,11 +452,25 @@ def _classify_voice_id(voice_id: str) -> str:
     - "moss_audio_*" prefix (MiniMax cloned audio sample IDs)
     - UUID-like (>=32 chars with hyphens, e.g. cloned voice resource UUIDs)
 
-    Preset patterns (must be explicit):
+    Preset patterns (each backed by ≥3 production instances on the 38-job
+    2026-05-07 prod scan — see Gap C analysis at
+    docs/plans/2026-05-06-smart-shadow-eval-p0-results.md §14):
     - "preset_*" prefix (test fixtures + admin UI convention)
+    - "Chinese (Mandarin)_*" (MiniMax 604-voice catalog descriptive names;
+      10 instances / 5 unique IDs in prod scan)
+    - "Chinese_*_vv1" / "Chinese_*_vv2" (MiniMax 604-voice catalog system
+      names; 24 instances / 7 unique IDs in prod scan)
+    - "*_v3" suffix (CosyVoice 3.0 catalog; 66/68 voices end "_v3";
+      3 instances / 3 unique IDs in prod scan). Order matters: cloned
+      checks above run first, so a hypothetical "vt_*_v3" still wins
+      "cloned".
 
     Anything else -> "unknown" (NOT "preset" by default - that caused
     false "smart_more_aggressive" classifications on production data).
+    Deliberately-not-classified examples seen in prod with < 3 instances:
+    "Wise_Woman" (3 same-literal occurrences, not in 604 catalog) and
+    "zh_male_liufei_uranus_bigtts" (1 occurrence, *_bigtts is VolcEngine
+    convention but n=1 below evidence threshold).
     """
     if not voice_id or voice_id.lower() == "auto":
         return "unknown"
@@ -469,6 +483,16 @@ def _classify_voice_id(voice_id: str) -> str:
         return "cloned"
     # Explicit preset:
     if voice_id.startswith("preset_"):
+        return "preset"
+    # MiniMax catalog descriptive names: "Chinese (Mandarin)_<descriptor>"
+    if voice_id.startswith("Chinese (Mandarin)_"):
+        return "preset"
+    # MiniMax catalog system names: "Chinese_<descriptor>_vv1" / "_vv2"
+    if voice_id.startswith("Chinese_") and (
+            voice_id.endswith("_vv1") or voice_id.endswith("_vv2")):
+        return "preset"
+    # CosyVoice 3.0 catalog: "*_v3" suffix
+    if voice_id.endswith("_v3"):
         return "preset"
     # Unknown - don't default to preset
     return "unknown"

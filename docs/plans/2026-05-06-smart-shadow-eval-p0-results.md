@@ -327,3 +327,77 @@ per-job 表见 P1 Done note §4-bis.3。
   - 触发条件：`post_phase_metered_jobs ≥ 30 且 per-voice metered ≥ 10`
   - 目标：把 p90 从 v2 的 119.8% 推到 ≤ 50%（spec §3.5 原目标）
   - 当前阻塞：n=15 jobs 不够分桶；per-voice 分桶后每桶 < 10 样本
+
+---
+
+## 14. 2026-05-07 增补：Gap C closed — voice_id 60% unknown 分类率修复
+
+> 关联：P1 Done note §5.2 Gap C / §4-bis.5。
+
+### 14.1 问题与定位
+
+P1 Done note §4-bis.5 揭示 38 jobs 里 **23/38 (60.5%)** 至少含 1 个 unknown 分类的 voice_id，触发 P1 simulator `voice_selection_diff` / `clone_policy` 多数 INCONCLUSIVE，无法对这些 production 数据做有意义的 shadow 比较。
+
+根因：`scripts/smart_shadow_eval_collector.py::_classify_voice_id` v1 只识别三种克隆模式（`vt_*` / `moss_audio_*` / UUID）+ 显式 `preset_*`，不覆盖 production 实际使用的多 provider preset 命名约定。
+
+### 14.2 数据驱动的 sub-pattern 提取（n=38，2026-05-07）
+
+从 2026-05-06T22-42Z 远端 P0 全量 facts.jsonl 中抽取 41 个 unknown voice_id 实例，按 ≥3 实例阈值聚类（task 硬约束："至少 3 个同模式实例才纳入,不要主观猜"）：
+
+| Pattern | 描述 | Instances | Unique IDs | Catalog provenance | 决策 |
+|---|---|---:|---:|---|---|
+| **A** `Chinese (Mandarin)_*` | MiniMax 自然描述名 | **10** | 5 | `src/services/tts/minimax_voice_catalog_604.json` 5/5 命中 | ✅ → preset |
+| **B** `Chinese_*_vv1` / `Chinese_*_vv2` | MiniMax 系统名 | **24** | 7 | minimax_voice_catalog_604.json 7/7 命中 | ✅ → preset |
+| **C** `*_v3` 后缀 | CosyVoice 3.0 | **3** | 3 | `cosyvoice_voice_catalog.py` 66/68 voices 该后缀 | ✅ → preset |
+| **D** `*_bigtts` 后缀 | VolcEngine 豆包 | 1 | 1 | volcengine_voice_catalog.py 命名约定 | ❌ < 3 不纳入 |
+| **E** `Wise_Woman` 字面 | 不在 MiniMax 604 catalog | 3 | 1 | 无 catalog 来源 | ❌ literal 不算 pattern + 无 catalog 证据 |
+
+合计 41 instances；A+B+C 共 37 → preset；D+E 共 4 保留 unknown。
+
+`Wise_Woman` 单字面在 production 出现 3 次但**不在** MiniMax 604 catalog（也非 vt_/moss_audio_/UUID/preset_/Chinese_/* 任一已知约定），可能是历史/废弃 preset ID。当前数据不足以建立"以下划线分隔的 PascalCase 英文词组 = preset"这种过宽规则；surface 为 unknown 让 catalog 维护方面后续确认。
+
+### 14.3 实施
+
+| 项 | 内容 |
+|---|---|
+| 改动文件 | `scripts/smart_shadow_eval_collector.py::_classify_voice_id`（添加 3 条 preset 规则）+ `tests/test_smart_shadow_eval_collector.py`（5 个新测试） |
+| 测试 | 113 passed, 1 skipped（smart_shadow 全套）；`classify_voice_id` 子集从 4 涨到 9 个测试 |
+| 守卫 | AST stdlib-only / PII / paths-in-sync 三组守卫全绿（无新增依赖、无 PII 字面量、ARTIFACT_PATHS 未改） |
+| 顺序约束 | cloned 检查（`vt_*` / `moss_audio_*` / UUID）仍在 preset 检查之前。一个假想的 `vt_anything_v3` 仍归 cloned，不会被 `*_v3` 抢走 |
+
+### 14.4 远端验证（同一 38-job 集合 reclassify）
+
+- **run_id**：`gap-c-reclassify-20260507T0037Z`
+- **artifacts**：`D:/Claude/temp/smart_shadow_sim/gap_c/gap-c-reclassify-20260507T0037Z/p0/{facts,inventory,summary}.json{,l}`
+- **方式**：collector-only（task 约束："只跑 collector,不动 simulator/aggregator"），read-only，0 字节 project_dir 原始内容触本地
+
+| 指标 | before (v1) | **after (v2)** |
+|---|---|---|
+| **unknown jobs / 38** | **23 (60.5%)** | **4 (10.5%)** |
+| voice_id instances cloned | 41 | 41（不变 ✓） |
+| voice_id instances preset | 0 | **37**（新增） |
+| voice_id instances unknown | 41 | **4** |
+| invariant `cloned + preset + unknown == voice_ids` | OK | **OK** ✓ |
+
+剩余 4 instances unknown：3× `Wise_Woman` + 1× `zh_male_liufei_uranus_bigtts`，分布在 4 个不同 jobs（即 §14.2 表格 D+E 行的预期分布）。
+
+### 14.5 对 P1 simulator / aggregator 的级联影响（待 P1 闭环重跑后确认）
+
+**直接预期**（基于 reclassified facts.jsonl，未实跑 simulator）：
+- `voice_selection_diff.studio_unknown_voices` 应从 23 → 4
+- `voice_selection_diff.smart_studio_match` 应在 14 + (新 preset 桶里 smart 也匹配 preset 的 jobs) 之间增长
+- `clone_policy._classify_diff` 不再因 unknown 大量降级 `no_studio_signal`，可以给出更多有效 diff_kind
+
+但本次 task 硬约束是 **"只跑 collector,不动 simulator/aggregator"**，所以 simulator 端真实 diff 数字留给下一次 P1 闭环重跑（数据累积期内自然触发，不再单独排队）。
+
+### 14.6 不顺手做的事项（task 硬约束守住）
+
+- ❌ 没动 `src/` `gateway/` `frontend-next/`
+- ❌ 没创 worktree / 新分支（直接 main 提交）
+- ❌ 没碰付费 API（远端只 SSH read）
+- ❌ 没顺手做 v3 retry estimation / P2-alpha / collector 重构
+- ❌ 没扩展超出 ≥3 实例阈值的 pattern（D+E 保留 unknown，等数据再说）
+
+### 14.7 Gap C verdict
+
+**CLOSED.** unknown jobs 60.5% → 10.5%（5.7× 改善），低于 task 设定的 <20% 阈值。继续阻 P2 的是 P0 §7.1 的 metered jobs ≥ 20 数据累积门槛 + §13.4 cost p90/p99 stable + production pricing snapshot 写入，与 voice_id 分类完全解耦。

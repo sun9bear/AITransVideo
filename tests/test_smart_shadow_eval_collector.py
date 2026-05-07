@@ -258,6 +258,102 @@ def test_classify_voice_id_existing_clone_patterns_still_work(tmp_path):
     assert mod._classify_voice_id("abc123def456-7890-abcd-ef01-23456789abcd") == "cloned"
 
 
+def test_classify_voice_id_minimax_mandarin_descriptive_is_preset():
+    """Pattern A (Gap C, 2026-05-07): MiniMax catalog "Chinese (Mandarin)_*" descriptive
+    voice IDs classify as preset.
+
+    Evidence: 10 instances across 5 unique voice_ids in 38-job production scan
+    (run_id 2026-05-06T22-42Z). All 5 unique IDs verified present in
+    src/services/tts/minimax_voice_catalog_604.json.
+    """
+    mod = _load_collector_module()
+    assert mod._classify_voice_id("Chinese (Mandarin)_News_Anchor") == "preset"
+    assert mod._classify_voice_id("Chinese (Mandarin)_Radio_Host") == "preset"
+    assert mod._classify_voice_id("Chinese (Mandarin)_Reliable_Executive") == "preset"
+    assert mod._classify_voice_id("Chinese (Mandarin)_Gentle_Senior") == "preset"
+    assert mod._classify_voice_id("Chinese (Mandarin)_Warm_Girl") == "preset"
+    assert mod._classify_voice_id("Chinese (Mandarin)_Male_Announcer") == "preset"
+
+
+def test_classify_voice_id_minimax_chinese_vv_is_preset():
+    """Pattern B (Gap C, 2026-05-07): MiniMax catalog "Chinese_*_vv1" / "Chinese_*_vv2"
+    system-named voice IDs classify as preset.
+
+    Evidence: 24 instances across 7 unique voice_ids in 38-job production scan.
+    All 7 unique IDs verified present in minimax_voice_catalog_604.json.
+    """
+    mod = _load_collector_module()
+    # vv1 examples
+    assert mod._classify_voice_id("Chinese_radio_reporter_vv1") == "preset"
+    assert mod._classify_voice_id("Chinese_radio_host_male_vv1") == "preset"
+    assert mod._classify_voice_id("Chinese_deep_voiced_male_vv1") == "preset"
+    assert mod._classify_voice_id("Chinese_financial_reporter_vv1") == "preset"
+    # vv2 examples
+    assert mod._classify_voice_id("Chinese_gravelly_storyteller_vv2") == "preset"
+    assert mod._classify_voice_id("Chinese_casual_storyteller_vv2") == "preset"
+    assert mod._classify_voice_id("Chinese_casual_instructor_vv2") == "preset"
+
+
+def test_classify_voice_id_cosyvoice_v3_suffix_is_preset():
+    """Pattern C (Gap C, 2026-05-07): CosyVoice "*_v3" suffix voice IDs
+    classify as preset.
+
+    Evidence: 3 instances across 3 unique voice_ids in 38-job production scan
+    (loongbella_v3, longshuo_v3, longanlang_v3). 66/68 voices in
+    src/services/tts/cosyvoice_voice_catalog.py end with "_v3" — robust suffix.
+
+    Cloned voices win first (vt_/moss_audio_/UUID prefix checks run before this),
+    so a hypothetical user-cloned "vt_anything_v3" would still classify as cloned.
+    """
+    mod = _load_collector_module()
+    assert mod._classify_voice_id("loongbella_v3") == "preset"
+    assert mod._classify_voice_id("longshuo_v3") == "preset"
+    assert mod._classify_voice_id("longanlang_v3") == "preset"
+
+
+def test_classify_voice_id_below_threshold_patterns_stay_unknown():
+    """Gap C decision (2026-05-07): patterns with < 3 production instances
+    are NOT auto-classified — they surface as unknown for future maintenance.
+
+    Specifically:
+    - "Wise_Woman" (3 same-literal instances, NOT a pattern; not in MiniMax 604
+      catalog — could be deprecated/legacy ID, needs catalog confirmation)
+    - "zh_male_liufei_uranus_bigtts" (1 instance, "*_bigtts" is VolcEngine 1.0/2.0
+      naming convention but n=1 below ≥3 evidence threshold)
+
+    Per task constraint "至少 3 个同模式实例才纳入,不要主观猜": don't extend
+    classifier on intuition. These are surfaced as unknown so future
+    maintenance with more samples can decide.
+    """
+    mod = _load_collector_module()
+    assert mod._classify_voice_id("Wise_Woman") == "unknown"
+    assert mod._classify_voice_id("zh_male_liufei_uranus_bigtts") == "unknown"
+
+
+def test_classify_voice_id_v2_does_not_overreach():
+    """v2 new patterns must NOT match obviously unrelated strings.
+
+    Defends against accidentally classifying random IDs as preset because
+    their suffix happens to match (e.g., "anything_v3" beyond CosyVoice
+    catalog, "Chinese_*" without _vv1/_vv2, etc.).
+    """
+    mod = _load_collector_module()
+    # Bare "_v3" but not a real CosyVoice convention — wait, this WILL match.
+    # We accept the suffix's looseness because cloned/UUID checks above catch
+    # the realistic alternatives. Document that "*_v3" is a deliberate broad
+    # bucket (any non-cloned, non-vt_, non-moss_audio_ voice ending _v3 is
+    # treated as preset). If a future cloned-voice naming scheme conflicts,
+    # the cloned prefix check should be extended FIRST, not the preset check
+    # narrowed.
+    # Below: assert things that should still be unknown.
+    assert mod._classify_voice_id("just_chinese") == "unknown"  # no _vv suffix
+    assert mod._classify_voice_id("Chinese_no_suffix") == "unknown"  # missing vv1/vv2
+    assert mod._classify_voice_id("Chinese_radio_vv3") == "unknown"  # vv3 not in v1/v2 set
+    assert mod._classify_voice_id("Mandarin_News_Anchor") == "unknown"  # missing "Chinese (" prefix
+    # Edge: case-sensitive — production data is title-case, so we don't lowercase
+    assert mod._classify_voice_id("chinese (mandarin)_news_anchor") == "unknown"
+
+
 def _load_collector_module():
     """Load smart_shadow_eval_collector.py as a module for direct helper testing."""
     import importlib.util
