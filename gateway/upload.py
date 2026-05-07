@@ -4,6 +4,7 @@ Handles multipart/form-data directly in the Gateway process,
 using the authenticated user context for path isolation.
 Does NOT proxy to 8876.
 """
+import asyncio
 import os
 import re
 import shutil
@@ -105,7 +106,12 @@ async def handle_upload_video(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "wb") as out:
-        shutil.copyfileobj(file_obj, out, length=1024 * 1024)
+        # P1-12c (audit 2026-05-07, H-6): copyfileobj is sync; offload to
+        # thread so a 2GB upload doesn't block the event loop for 30-60s
+        # and starve all other async requests on the gateway worker.
+        # to_thread takes positional args, so the buffer size is passed
+        # positionally (third arg of shutil.copyfileobj signature).
+        await asyncio.to_thread(shutil.copyfileobj, file_obj, out, 1024 * 1024)
 
     file_size_mb = round(file_size / (1024 * 1024), 2)
 

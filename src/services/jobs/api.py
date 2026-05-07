@@ -344,9 +344,14 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                         self._write_json(HTTPStatus.NOT_FOUND, {"error": "Requested download was not found."})
                         return
                     content_type = mimetypes.guess_type(str(download_path))[0] or "application/octet-stream"
-                    self._write_binary(
+                    # P1-12c (audit 2026-05-07, P-CRITICAL-3): stream the
+                    # dubbed_video in 64 KB chunks instead of read_bytes()
+                    # the whole 1 GB file into RAM. Two concurrent
+                    # downloads of a 1 GB artifact would otherwise spike
+                    # Python RSS by ~2 GB and OOM the container.
+                    self._stream_binary_file(
                         HTTPStatus.OK,
-                        download_path.read_bytes(),
+                        download_path,
                         content_type=content_type,
                         download_name=download_path.name,
                     )
@@ -1569,6 +1574,45 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             _write_chunks(self.wfile, payload)
+
+        def _stream_binary_file(
+            self,
+            status: HTTPStatus,
+            file_path: Path,
+            *,
+            content_type: str = "application/octet-stream",
+            download_name: str | None = None,
+        ) -> None:
+            """Write a file response to the wire in chunks rather than
+            reading it fully into memory.
+
+            P1-12c (audit 2026-05-07, P-CRITICAL-3): required for >100 MB
+            artifacts (publish.dubbed_video can be 1 GB+) that would
+            otherwise spike Python RSS by the file size and OOM the
+            container under concurrent download load. Header semantics
+            match _write_binary (Content-Type / Content-Length /
+            Content-Disposition) so the gateway-side proxying is
+            unchanged. Chunk size matches _WRITE_CHUNK_BYTES used
+            elsewhere in this handler.
+            """
+            file_size = file_path.stat().st_size
+            self.send_response(status.value)
+            self.send_header("Content-Type", content_type)
+            if download_name:
+                self.send_header(
+                    "Content-Disposition",
+                    f"attachment; filename*=UTF-8''{quote(download_name)}",
+                )
+            self.send_header("Content-Length", str(file_size))
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            with file_path.open("rb") as handle:
+                while True:
+                    chunk = handle.read(_WRITE_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
 
         def _write_stream(self, file_path: Path, *, content_type: str) -> None:
             """Range-aware file streaming (no Content-Disposition: attachment)."""
