@@ -201,67 +201,76 @@ def test_save_job_serializes_with_concurrent_update_job(store):
     """P1-15b follow-up (Codex review b1fee3a): a direct ``save_job``
     call (the legacy ``require_job → replace → save_job`` pattern still
     used by JobService.update_display_name and others) MUST serialize
-    with ``update_job`` holders. Without it, update_job only excludes
-    other update_job callers — a stale-snapshot direct save could slip
-    in between update_job's load and its internal save_job, clobbering
-    fields on both sides.
+    with ``update_job`` holders.
 
-    We exercise the actual race: thread A enters update_job and the
-    mutator sleeps briefly. While A's mutator is running, thread B
-    calls save_job directly with a stale snapshot. Without per-job
-    file_lock around save_job, B writes during A's critical section
-    and A's later save overwrites B's mutation. With the lock, B
-    blocks until A finishes; A's mutation lands; then B's save lands
-    — but B's snapshot is stale, so this test asserts the FINAL
-    on-disk record reflects A's mutation (B re-overwriting with stale
-    data is a different problem the broader caller migration solves).
+    Setup: thread A enters update_job; its mutator holds the lock for
+    ~150ms by sleeping. While A is mid-mutator, thread B issues a
+    direct save_job. Without the per-job file_lock around save_job,
+    B writes during A's critical section. With the lock, B blocks
+    until A's update_job fully returns.
 
-    The minimal observable property here: B must NOT execute its
-    save while A is mid-mutation. We check this by having B record
-    the timestamp at which it managed to write; that timestamp must
-    exceed A's mutator-completion timestamp.
+    Observable: the GLOBAL EVENT ORDER must place B's save AFTER A's
+    update_job returns. We use append-order on a list (not timestamps,
+    which are flaky on Windows under contention) — list.append is
+    atomic under the GIL, so the recorded sequence reflects the true
+    happens-before relationship.
     """
     import time
 
     store.save_job(_make_record("job-7", status="queued"))
 
-    timeline: list[tuple[str, float]] = []
-    barrier = threading.Barrier(2)
+    timeline: list[str] = []
+    timeline_lock = threading.Lock()  # avoid two threads racing on append
+    mutator_entered = threading.Event()
+
+    def record(label: str) -> None:
+        with timeline_lock:
+            timeline.append(label)
 
     def thread_a_update_job():
         def slow_mutator(current):
-            barrier.wait()  # release B
-            time.sleep(0.05)  # hold the lock for 50ms
-            timeline.append(("a-mutator-finished", time.monotonic()))
+            mutator_entered.set()  # tell B it's safe to issue save_job
+            time.sleep(0.15)  # hold the lock for 150ms — well above
+                              # any reasonable Windows scheduling jitter
+            record("a-mutator-finished")
             return replace(current, status="running")
 
         store.update_job("job-7", slow_mutator)
-        timeline.append(("a-update-returned", time.monotonic()))
+        record("a-update-returned")
 
     def thread_b_direct_save():
-        barrier.wait()  # released by A's mutator entry
-        # Attempt a direct save while A's mutator is mid-flight.
-        time.sleep(0.005)  # ensure A entered the lock first
+        # Block until A is definitively inside the lock + mutator.
+        assert mutator_entered.wait(timeout=2.0)
+        record("b-attempt-save")
         store.save_job(_make_record("job-7", status="failed"))
-        timeline.append(("b-save-returned", time.monotonic()))
+        record("b-save-returned")
 
     ta = threading.Thread(target=thread_a_update_job)
     tb = threading.Thread(target=thread_b_direct_save)
     ta.start()
     tb.start()
-    ta.join()
-    tb.join()
+    ta.join(timeout=5.0)
+    tb.join(timeout=5.0)
+    assert not ta.is_alive() and not tb.is_alive(), (
+        "P1-15b follow-up: thread did not finish within 5s — possible "
+        "deadlock between save_job and update_job locks."
+    )
 
-    # Extract event timestamps for the assertion.
-    by_name = dict(timeline)
-    a_mutator_end = by_name["a-mutator-finished"]
-    b_save_end = by_name["b-save-returned"]
-    assert b_save_end > a_mutator_end, (
-        f"P1-15b follow-up regression: thread B's save_job completed "
-        f"at {b_save_end:.4f} BEFORE thread A's mutator finished at "
-        f"{a_mutator_end:.4f}. save_job is no longer serialized with "
-        f"update_job's lock; concurrent direct save can clobber "
-        f"in-flight mutations."
+    # Required happens-before: A's update_job must fully return before
+    # B's save_job returns. Both events are recorded only after the
+    # corresponding store call completes, so list-append ordering is
+    # an accurate (and timestamp-free) witness to the lock's behaviour.
+    a_returned_idx = timeline.index("a-update-returned")
+    b_returned_idx = timeline.index("b-save-returned")
+    assert a_returned_idx < b_returned_idx, (
+        f"P1-15b follow-up regression: thread B's save_job returned "
+        f"BEFORE thread A's update_job returned. timeline={timeline}. "
+        f"save_job is no longer serialized with update_job's lock; "
+        f"concurrent direct save can clobber in-flight mutations."
+    )
+    # b-attempt-save must precede b-save-returned (sanity).
+    assert (
+        timeline.index("b-attempt-save") < timeline.index("b-save-returned")
     )
 
 
