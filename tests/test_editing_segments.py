@@ -1030,6 +1030,55 @@ def test_split_editing_segment_propagates_voice_for_reassigned_half(
     assert persisted_second["tts_provider"] == "cosyvoice"
 
 
+def test_split_editing_segment_audit_carries_child_segment_ids(
+    tmp_path: Path,
+) -> None:
+    """Regression: ``_emit_post_edit_split_audit`` was reading non-existent
+    ``new_segment_ids`` / ``children`` keys from ``split_editing_segment``'s
+    return, so every ``post_edit_segment_split_confirmed`` event shipped
+    with ``after.child_segment_ids = []``. Drive the helper through
+    ``JobService.split_editing_segment`` and assert the audit JSONL on
+    disk carries the same ids the splitter actually produced."""
+    from services.jobs.user_edit_audit import (
+        AUDIT_DIR_NAME,
+        AUDIT_EVENTS_FILENAME,
+        EVENT_TYPE_POST_EDIT_SEGMENT_SPLIT_CONFIRMED,
+    )
+
+    service, project_dir, record = _build_editing_job(tmp_path)
+
+    result = service.split_editing_segment(
+        record.job_id,
+        "seg_001",
+        split_source_index=3,
+        split_cn_index=1,
+        speaker_a="A",
+        speaker_b="B",
+    )
+    expected_child_ids = [s["segment_id"] for s in result["new_segments"]]
+    assert len(expected_child_ids) == 2
+
+    events_path = project_dir / AUDIT_DIR_NAME / AUDIT_EVENTS_FILENAME
+    assert events_path.is_file(), "audit/user_edit_events.jsonl was not written"
+
+    split_events = [
+        json.loads(line)
+        for line in events_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    split_events = [
+        e for e in split_events
+        if e.get("event_type") == EVENT_TYPE_POST_EDIT_SEGMENT_SPLIT_CONFIRMED
+    ]
+    assert len(split_events) == 1, (
+        f"expected exactly 1 split event, got {len(split_events)}: "
+        f"{[e.get('event_type') for e in split_events]}"
+    )
+    ev = split_events[0]
+    assert ev["after"]["child_segment_ids"] == expected_child_ids
+    assert ev["segment"]["segment_id"] == "seg_001"
+
+
 # ---------------------------------------------------------------------------
 # slice_source_audio_for_editing_segment (2026-04-21) — ffmpeg integration
 # is factored behind _ffmpeg_slice_to_wav_bytes so we can monkeypatch it

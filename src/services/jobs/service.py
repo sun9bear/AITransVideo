@@ -939,19 +939,19 @@ class JobService:
         if not record.project_dir:
             return
         ctx = AuditContext.from_job_record(record)
-        # Try to extract the new segment ids from the split helper's result.
-        # Shape varies — be tolerant.
+        # split_editing_segment returns
+        # ``{"replaced_segment_id": ..., "new_segments": [seg_a, seg_b], ...}``
+        # where each entry is a full segment dict carrying ``segment_id``.
+        # The earlier ``new_segment_ids`` / ``children`` shape was speculative
+        # and never produced by the helper, so every audit event shipped with
+        # an empty ``after.child_segment_ids``. Read the actual key.
         new_ids: list[str] = []
-        children = result.get("new_segment_ids") if isinstance(result, dict) else None
-        if isinstance(children, list):
-            new_ids = [str(c) for c in children]
-        else:
-            child_list = result.get("children") if isinstance(result, dict) else None
-            if isinstance(child_list, list):
-                for ch in child_list:
-                    sid = ch.get("segment_id") if isinstance(ch, dict) else None
-                    if sid:
-                        new_ids.append(str(sid))
+        new_segments = result.get("new_segments") if isinstance(result, dict) else None
+        if isinstance(new_segments, list):
+            for seg in new_segments:
+                sid = seg.get("segment_id") if isinstance(seg, dict) else None
+                if sid:
+                    new_ids.append(str(sid))
 
         original_speaker = (before_segment or {}).get("speaker_id") if before_segment else None
         event = build_post_edit_segment_split_confirmed_event(
