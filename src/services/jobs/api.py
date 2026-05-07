@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import logging
 import os
+import sys
 import mimetypes
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -95,6 +96,38 @@ def _write_chunks(wfile, payload: bytes) -> None:
         wfile.flush()
 
 
+def _validate_internal_api_key() -> None:
+    """Refuse to start Job API if AVT_INTERNAL_API_KEY is unset or too short.
+
+    Mirrors ``gateway/startup_checks.py::validate_internal_api_key`` so that
+    Job API and Gateway have symmetric startup gates. Without a key, every
+    internal endpoint silently fails open to anonymous access (the request-time
+    check sees an empty configured key and skips the comparison), which is a
+    P0 hole.
+
+    Minimum 16 chars. 32+ random chars recommended (see .env.example).
+
+    Exits with status 2 on failure (matches gateway lifespan-startup-refused
+    semantics).
+    """
+    key = os.environ.get("AVT_INTERNAL_API_KEY", "").strip()
+    if not key:
+        print(
+            "[CRITICAL] AVT_INTERNAL_API_KEY is not set; Job API internal endpoints "
+            "would fail-open. Set it in env (recommended: 32+ random chars). "
+            "Generate: python -c \"import secrets; print(secrets.token_urlsafe(32))\"",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if len(key) < 16:
+        print(
+            f"[CRITICAL] AVT_INTERNAL_API_KEY is too short ({len(key)} chars); "
+            "minimum 16 required (recommended: 32+ random chars).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+
 def build_job_api_server(
     *,
     service: JobService,
@@ -102,6 +135,14 @@ def build_job_api_server(
     port: int = JOB_API_DEFAULT_PORT,
     jianying_runner: object | None = None,
 ) -> ThreadingHTTPServer:
+    # P0-2c: enforce internal API key at startup so misconfigured deploys
+    # surface immediately instead of fail-open at first internal request.
+    # ``port == 0`` is the test-server convention (in-process pytest with
+    # ephemeral port) — skip the gate there so the production check does
+    # not break the test suite, which deliberately uses short fixture keys.
+    if port != 0:
+        _validate_internal_api_key()
+
     from services.jobs.jianying_draft_runner import JianyingDraftRunner
 
     if jianying_runner is None:
