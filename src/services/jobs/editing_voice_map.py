@@ -44,9 +44,11 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from services._file_lock import file_lock
 from services.jobs.editing import EDITING_SUBDIR, EditingConflictError
 from services.jobs.editing_segments import (
     SEGMENT_STATUS_VOICE_DIRTY,
+    _editing_lock_anchor,
     compute_residual_segment_status,
     mark_segment_status,
 )
@@ -137,12 +139,17 @@ def set_voice_override(
             f"editing dir does not exist: {editing_dir}; call enter_editing first"
         )
 
-    voice_map = load_voice_map(project_dir)
-    entry = {"provider": provider, "voice_id": voice_id}
-    voice_map[segment_id] = entry
-    _atomic_write_json(_voice_map_path(project_dir), voice_map)
-    mark_segment_status(project_dir, segment_id, SEGMENT_STATUS_VOICE_DIRTY)
-    return {"segment_id": segment_id, **entry}
+    # P0-5 (audit 2026-05-07): protect voice_map + segment_status as a
+    # single logical unit. Shares the editing-state anchor with
+    # patch_editing_segment / mark_segment_status (reentrant) so a
+    # concurrent patch cannot interleave between the two writes.
+    with file_lock(_editing_lock_anchor(project_dir)):
+        voice_map = load_voice_map(project_dir)
+        entry = {"provider": provider, "voice_id": voice_id}
+        voice_map[segment_id] = entry
+        _atomic_write_json(_voice_map_path(project_dir), voice_map)
+        mark_segment_status(project_dir, segment_id, SEGMENT_STATUS_VOICE_DIRTY)
+        return {"segment_id": segment_id, **entry}
 
 
 def clear_voice_override(
@@ -167,11 +174,14 @@ def clear_voice_override(
             f"editing dir does not exist: {editing_dir}; call enter_editing first"
         )
 
-    voice_map = load_voice_map(project_dir)
-    voice_map.pop(segment_id, None)
-    _atomic_write_json(_voice_map_path(project_dir), voice_map)
-    residual = compute_residual_segment_status(
-        project_dir, segment_id, assume_no_voice_override=True,
-    )
-    mark_segment_status(project_dir, segment_id, residual)
-    return {"segment_id": segment_id, "cleared": True}
+    # P0-5 (audit 2026-05-07): same anchor + reentrant lock semantics as
+    # set_voice_override.
+    with file_lock(_editing_lock_anchor(project_dir)):
+        voice_map = load_voice_map(project_dir)
+        voice_map.pop(segment_id, None)
+        _atomic_write_json(_voice_map_path(project_dir), voice_map)
+        residual = compute_residual_segment_status(
+            project_dir, segment_id, assume_no_voice_override=True,
+        )
+        mark_segment_status(project_dir, segment_id, residual)
+        return {"segment_id": segment_id, "cleared": True}

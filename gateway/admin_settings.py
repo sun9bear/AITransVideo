@@ -28,6 +28,14 @@ from auth import get_current_user
 from config import settings as app_settings
 from database import async_session, get_db
 from internal_auth import internal_headers
+
+# P0-5 (audit 2026-05-07): admin_settings.json was previously written via
+# raw SETTINGS_FILE.write_text without a load→modify→save lock or atomic
+# rename, so concurrent admin writes (e.g. two browser tabs both saving
+# /review-prompts) could either corrupt the file on crash or silently
+# overwrite each other. Both helpers below come from src/.
+from services._file_lock import file_lock  # noqa: E402  # sys.path tweak above
+from utils.atomic_io import atomic_write_json  # noqa: E402
 from models import AdminAuditLog, Job, User
 from project_cleanup import _is_safe_project_dir
 
@@ -190,20 +198,22 @@ def save_settings(s: AdminSettings) -> None:
     (review_prompts, prompt_models, provider_api_keys) are preserved.
     """
     SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    # Load existing data to preserve non-AdminSettings fields
-    existing: dict = {}
-    if SETTINGS_FILE.exists():
-        try:
-            existing = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    # Merge: AdminSettings fields overwrite, other keys preserved
-    existing.update(s.model_dump())
-    SETTINGS_FILE.write_text(
-        json.dumps(existing, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    logger.info("Admin settings saved to %s", SETTINGS_FILE)
+    # P0-5 (audit 2026-05-07): wrap the load→merge→write sequence in
+    # file_lock + atomic_write_json so two concurrent admin saves don't
+    # both observe an old snapshot and last-write-wins, and a crash
+    # mid-write doesn't leave a half-written admin_settings.json.
+    with file_lock(SETTINGS_FILE):
+        # Load existing data to preserve non-AdminSettings fields
+        existing: dict = {}
+        if SETTINGS_FILE.exists():
+            try:
+                existing = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        # Merge: AdminSettings fields overwrite, other keys preserved
+        existing.update(s.model_dump())
+        atomic_write_json(str(SETTINGS_FILE), existing)
+        logger.info("Admin settings saved to %s", SETTINGS_FILE)
 
 
 # --- Endpoints ---
@@ -708,81 +718,84 @@ async def update_review_prompts(
             if isinstance(val, str) and _is_masked_key(val):
                 raise HTTPException(status_code=400, detail=f"拒绝：provider_api_keys.{provider} 包含脱敏值，请勿回传 '****...' 格式")
 
-    # Load existing settings
-    full_data: dict = {}
-    if SETTINGS_FILE.exists():
-        try:
-            full_data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-
-    old_prompts = dict(full_data.get("review_prompts", {}))
-    old_models = dict(full_data.get("prompt_models", {}))
-
-    # Save current version to history — prompts + models, NOT keys
-    has_content = any(old_prompts.get(k) for k in _PROMPT_KEYS) or bool(old_models)
-    if has_content:
-        from datetime import datetime, timezone
-        history = _load_prompt_history()
-        history.append({
-            "saved_at": datetime.now(timezone.utc).isoformat(),
-            "label": label or f"版本 {len(history) + 1}",
-            "prompts": {k: old_prompts.get(k, "") for k in _PROMPT_KEYS},
-            "models": old_models,
-        })
-        _save_prompt_history(history)
-
-    # Update prompt overrides
-    review_prompts = full_data.get("review_prompts", {})
-    if not isinstance(review_prompts, dict):
-        review_prompts = {}
-    for key in _PROMPT_KEYS:
-        val = incoming_prompts.get(key)
-        if val is not None:
-            if isinstance(val, str) and val.strip():
-                review_prompts[key] = val.strip()
-            else:
-                review_prompts.pop(key, None)
-    full_data["review_prompts"] = review_prompts
-
-    # Update model selections (with server-side capability validation)
-    if isinstance(incoming_models, dict):
-        _audio_only_prompts = {"pass1", "pass3"}
-        _audio_model_values = {m["value"] for m in _ALL_MODELS if m["supports_audio"]}
-        _all_model_values = {m["value"] for m in _ALL_MODELS}
-        for mode_key, mode_models in incoming_models.items():
-            if not isinstance(mode_models, dict):
-                continue
-            for prompt_key, model_val in mode_models.items():
-                if model_val and model_val not in _all_model_values:
-                    raise HTTPException(status_code=400, detail=f"未知模型: {model_val}")
-                if prompt_key in _audio_only_prompts and model_val and model_val not in _audio_model_values:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"{prompt_key} 需要支持音频的模型，{model_val} 不支持音频输入",
-                    )
-        full_data["prompt_models"] = incoming_models
-
-    # Update provider API keys (keep/replace/clear protocol)
-    if isinstance(incoming_keys, dict):
-        current_keys = full_data.get("provider_api_keys", {})
-        if not isinstance(current_keys, dict):
-            current_keys = {}
-        for provider in _PROVIDER_KEY_ENVS:
-            val = incoming_keys.get(provider)
-            if val is None:
-                continue  # keep current
-            if val == "":
-                current_keys.pop(provider, None)  # clear
-            else:
-                current_keys[provider] = val  # replace
-        full_data["provider_api_keys"] = current_keys
-
     SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    SETTINGS_FILE.write_text(
-        json.dumps(full_data, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    # P0-5 (audit 2026-05-07): same lock + atomic write as save_settings.
+    # Two admins clicking "save prompts" simultaneously previously could
+    # both load full_data, both append a history entry, and only the
+    # last one's prompts persisted (the other's history line referenced
+    # prompts that were never actually saved).
+    with file_lock(SETTINGS_FILE):
+        # Load existing settings
+        full_data: dict = {}
+        if SETTINGS_FILE.exists():
+            try:
+                full_data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+
+        old_prompts = dict(full_data.get("review_prompts", {}))
+        old_models = dict(full_data.get("prompt_models", {}))
+
+        # Save current version to history — prompts + models, NOT keys
+        has_content = any(old_prompts.get(k) for k in _PROMPT_KEYS) or bool(old_models)
+        if has_content:
+            from datetime import datetime, timezone
+            history = _load_prompt_history()
+            history.append({
+                "saved_at": datetime.now(timezone.utc).isoformat(),
+                "label": label or f"版本 {len(history) + 1}",
+                "prompts": {k: old_prompts.get(k, "") for k in _PROMPT_KEYS},
+                "models": old_models,
+            })
+            _save_prompt_history(history)
+
+        # Update prompt overrides
+        review_prompts = full_data.get("review_prompts", {})
+        if not isinstance(review_prompts, dict):
+            review_prompts = {}
+        for key in _PROMPT_KEYS:
+            val = incoming_prompts.get(key)
+            if val is not None:
+                if isinstance(val, str) and val.strip():
+                    review_prompts[key] = val.strip()
+                else:
+                    review_prompts.pop(key, None)
+        full_data["review_prompts"] = review_prompts
+
+        # Update model selections (with server-side capability validation)
+        if isinstance(incoming_models, dict):
+            _audio_only_prompts = {"pass1", "pass3"}
+            _audio_model_values = {m["value"] for m in _ALL_MODELS if m["supports_audio"]}
+            _all_model_values = {m["value"] for m in _ALL_MODELS}
+            for mode_key, mode_models in incoming_models.items():
+                if not isinstance(mode_models, dict):
+                    continue
+                for prompt_key, model_val in mode_models.items():
+                    if model_val and model_val not in _all_model_values:
+                        raise HTTPException(status_code=400, detail=f"未知模型: {model_val}")
+                    if prompt_key in _audio_only_prompts and model_val and model_val not in _audio_model_values:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"{prompt_key} 需要支持音频的模型，{model_val} 不支持音频输入",
+                        )
+            full_data["prompt_models"] = incoming_models
+
+        # Update provider API keys (keep/replace/clear protocol)
+        if isinstance(incoming_keys, dict):
+            current_keys = full_data.get("provider_api_keys", {})
+            if not isinstance(current_keys, dict):
+                current_keys = {}
+            for provider in _PROVIDER_KEY_ENVS:
+                val = incoming_keys.get(provider)
+                if val is None:
+                    continue  # keep current
+                if val == "":
+                    current_keys.pop(provider, None)  # clear
+                else:
+                    current_keys[provider] = val  # replace
+            full_data["provider_api_keys"] = current_keys
+
+        atomic_write_json(str(SETTINGS_FILE), full_data)
     logger.info("Review prompts/models updated by admin %s", getattr(user, "email", "?"))
 
     return {
@@ -808,30 +821,32 @@ async def toggle_model(
     if model_name not in all_model_names:
         raise HTTPException(status_code=400, detail=f"未知模型: {model_name}")
 
-    # Load existing settings
-    full_data: dict = {}
-    if SETTINGS_FILE.exists():
-        try:
-            full_data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-
-    disabled: list = full_data.get("disabled_models", [])
-    if not isinstance(disabled, list):
-        disabled = []
-
-    if enabled:
-        disabled = [m for m in disabled if m != model_name]
-    else:
-        if model_name not in disabled:
-            disabled.append(model_name)
-
-    full_data["disabled_models"] = disabled
     SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    SETTINGS_FILE.write_text(
-        json.dumps(full_data, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    # P0-5 (audit 2026-05-07): same lock + atomic write as save_settings.
+    # Toggle is a small payload but two admins toggling adjacent models in
+    # parallel previously could lose one toggle (lost update on the
+    # disabled_models list).
+    with file_lock(SETTINGS_FILE):
+        # Load existing settings
+        full_data: dict = {}
+        if SETTINGS_FILE.exists():
+            try:
+                full_data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+
+        disabled: list = full_data.get("disabled_models", [])
+        if not isinstance(disabled, list):
+            disabled = []
+
+        if enabled:
+            disabled = [m for m in disabled if m != model_name]
+        else:
+            if model_name not in disabled:
+                disabled.append(model_name)
+
+        full_data["disabled_models"] = disabled
+        atomic_write_json(str(SETTINGS_FILE), full_data)
     _invalidate_llm_cache()
     logger.info("Model %s %s by admin %s", model_name, "enabled" if enabled else "disabled",
                 getattr(user, "email", "?"))

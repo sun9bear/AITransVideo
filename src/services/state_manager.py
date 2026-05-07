@@ -7,6 +7,7 @@ from typing import Any
 
 from core.enums import StageStatus
 from core.exceptions import StateError
+from services._file_lock import file_lock
 
 
 def utc_now_iso() -> str:
@@ -54,10 +55,15 @@ class StateManager:
                 temp_path.unlink(missing_ok=True)
 
     def set_project(self, project_id: str) -> dict[str, Any]:
-        state = self.load()
-        state["project_id"] = project_id
-        self.save(state)
-        return state
+        # P0-5 (audit 2026-05-07): wrap load→modify→save in file_lock so
+        # concurrent set_project / set_stage from pipeline runner thread and
+        # Job API HTTP threads cannot lose updates. Lock path is the state
+        # file itself; the file_lock helper appends .lock automatically.
+        with file_lock(self.state_path):
+            state = self.load()
+            state["project_id"] = project_id
+            self.save(state)
+            return state
 
     def get_stage(self, stage_name: str) -> dict[str, Any] | None:
         state = self.load()
@@ -70,34 +76,39 @@ class StateManager:
         payload: dict[str, Any] | None = None,
         error_message: str | None = None,
     ) -> dict[str, Any]:
-        state = self.load()
-        stages = state.setdefault("stages", {})
-        existing_stage = stages.get(stage_name, self._empty_stage())
-        normalized_status = self._normalize_status(status)
-        timestamp = utc_now_iso()
+        # P0-5 (audit 2026-05-07): same guard as set_project. The file_lock
+        # is reentrant per-thread, so internal callers that nest set_stage
+        # under another set_stage / set_project (e.g. via load() → save())
+        # are safe.
+        with file_lock(self.state_path):
+            state = self.load()
+            stages = state.setdefault("stages", {})
+            existing_stage = stages.get(stage_name, self._empty_stage())
+            normalized_status = self._normalize_status(status)
+            timestamp = utc_now_iso()
 
-        started_at = existing_stage.get("started_at")
-        finished_at = existing_stage.get("finished_at")
-        if normalized_status == StageStatus.PENDING.value:
-            started_at = None
-            finished_at = None
-        elif normalized_status == StageStatus.RUNNING.value:
-            started_at = started_at or timestamp
-            finished_at = None
-        else:
-            started_at = started_at or timestamp
-            finished_at = timestamp
+            started_at = existing_stage.get("started_at")
+            finished_at = existing_stage.get("finished_at")
+            if normalized_status == StageStatus.PENDING.value:
+                started_at = None
+                finished_at = None
+            elif normalized_status == StageStatus.RUNNING.value:
+                started_at = started_at or timestamp
+                finished_at = None
+            else:
+                started_at = started_at or timestamp
+                finished_at = timestamp
 
-        stages[stage_name] = {
-            "status": normalized_status,
-            "started_at": started_at,
-            "finished_at": finished_at,
-            "updated_at": timestamp,
-            "error_message": error_message if normalized_status == StageStatus.FAILED.value else None,
-            "payload": payload or {},
-        }
-        self.save(state)
-        return stages[stage_name]
+            stages[stage_name] = {
+                "status": normalized_status,
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "updated_at": timestamp,
+                "error_message": error_message if normalized_status == StageStatus.FAILED.value else None,
+                "payload": payload or {},
+            }
+            self.save(state)
+            return stages[stage_name]
 
     def _normalize_state(self, state: dict[str, Any]) -> dict[str, Any]:
         normalized_state = {

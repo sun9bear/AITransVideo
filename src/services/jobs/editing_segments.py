@@ -29,6 +29,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from services._file_lock import file_lock
 from services.jobs.editing import EDITING_SUBDIR, EditingConflictError
 from services.jobs.input_validators import validate_segment_id
 
@@ -113,6 +114,33 @@ def _segments_path(project_dir: str | Path) -> Path:
 
 def _segment_status_path(project_dir: str | Path) -> Path:
     return _editing_dir(project_dir) / "segment_status.json"
+
+
+def _editing_lock_anchor(project_dir: str | Path) -> Path:
+    """Return the shared anchor used as the file_lock target for ALL
+    mutating operations on the editing-state files (segments.json,
+    segment_status.json, voice_map.json).
+
+    P0-5 (audit 2026-05-07): Job API is multi-threaded
+    (ThreadingHTTPServer), and editing-state writes from concurrent HTTP
+    requests previously raced — last-write-wins on the whole JSON dict,
+    silently losing the earlier user edit. We use ONE shared lock for all
+    three editing files because:
+
+    * They cross-reference each other (set_voice_override calls
+      mark_segment_status; revert_text_changes_to_audio_baseline mutates
+      segments + status atomically). Per-file locks would either deadlock
+      or leave gaps where two halves of an "atomic" update interleave.
+    * services/_file_lock.py is reentrant (threading.RLock + per-thread
+      depth counter), so nested calls within a single thread are free.
+    * Lock granularity per project_dir is fine — concurrent edits across
+      different projects don't contend on this lock.
+
+    Anchor is segments.json because it's the largest / most-read file in
+    the directory; the .lock sidecar lives next to it. Anchor file does
+    not need to exist — file_lock.touch() creates the sidecar lazily.
+    """
+    return _segments_path(project_dir)
 
 
 def _ensure_editing_dir(project_dir: str | Path) -> Path:
@@ -302,104 +330,110 @@ def patch_editing_segment(
     validate_segment_id(segment_id)
     _ensure_editing_dir(project_dir)
 
-    segments = load_editing_segments(project_dir)
+    # P0-5 (audit 2026-05-07): wrap the entire load → modify → save → side
+    # effects sequence in the shared editing lock so concurrent HTTP
+    # threads cannot read the same segments.json, both mutate their target
+    # index, and last-write-wins. Nested helpers (mark_segment_status /
+    # clear_voice_override) reuse the same anchor and are reentrant.
+    with file_lock(_editing_lock_anchor(project_dir)):
+        segments = load_editing_segments(project_dir)
 
-    # Locate the segment by its segment_id field. Tolerate legacy payloads
-    # where segment_id was written as int (e.g. translation/segments.json
-    # carries integer ids that early lazy-seed snapshots preserved verbatim).
-    # HTTP callers always send strings, so str-cast both sides for comparison.
-    index = None
-    target = str(segment_id)
-    for i, seg in enumerate(segments):
-        if not isinstance(seg, dict):
-            continue
-        if str(seg.get("segment_id")) == target:
-            index = i
-            break
-    if index is None:
-        raise EditingConflictError(
-            f"segment_id {segment_id!r} not found in editing/segments.json"
-        )
-
-    original = segments[index]
-    updated = dict(original)  # shallow copy
-    applied: dict[str, Any] = {}
-    for key, value in patch.items():
-        if key not in PATCHABLE_SEGMENT_FIELDS:
-            continue
-        # Minimal normalisation — text fields get str() + strip to avoid
-        # accidental whitespace-only "edits".
-        if key in {"cn_text", "source_text"}:
-            if value is None:
+        # Locate the segment by its segment_id field. Tolerate legacy payloads
+        # where segment_id was written as int (e.g. translation/segments.json
+        # carries integer ids that early lazy-seed snapshots preserved verbatim).
+        # HTTP callers always send strings, so str-cast both sides for comparison.
+        index = None
+        target = str(segment_id)
+        for i, seg in enumerate(segments):
+            if not isinstance(seg, dict):
                 continue
-            value = str(value)
-        elif key in {"translation_confirmed", "rewrite_requested"}:
-            value = bool(value)
-        elif key == "speaker_id":
-            # Speaker reassignment has extra coupling handled below
-            # (voice_id propagation + voice_map override clearing).
-            # Reject unknown speakers BEFORE writing any state so a bad
-            # request doesn't half-update the segment.
-            new_speaker_id = str(value).strip()
-            if not new_speaker_id:
+            if str(seg.get("segment_id")) == target:
+                index = i
+                break
+        if index is None:
+            raise EditingConflictError(
+                f"segment_id {segment_id!r} not found in editing/segments.json"
+            )
+
+        original = segments[index]
+        updated = dict(original)  # shallow copy
+        applied: dict[str, Any] = {}
+        for key, value in patch.items():
+            if key not in PATCHABLE_SEGMENT_FIELDS:
                 continue
-            value = new_speaker_id
-        updated[key] = value
-        applied[key] = value
+            # Minimal normalisation — text fields get str() + strip to avoid
+            # accidental whitespace-only "edits".
+            if key in {"cn_text", "source_text"}:
+                if value is None:
+                    continue
+                value = str(value)
+            elif key in {"translation_confirmed", "rewrite_requested"}:
+                value = bool(value)
+            elif key == "speaker_id":
+                # Speaker reassignment has extra coupling handled below
+                # (voice_id propagation + voice_map override clearing).
+                # Reject unknown speakers BEFORE writing any state so a bad
+                # request doesn't half-update the segment.
+                new_speaker_id = str(value).strip()
+                if not new_speaker_id:
+                    continue
+                value = new_speaker_id
+            updated[key] = value
+            applied[key] = value
 
-    if not applied:
-        raise ValueError(
-            "patch body contained no patchable fields; allowed: "
-            f"{sorted(PATCHABLE_SEGMENT_FIELDS)}"
+        if not applied:
+            raise ValueError(
+                "patch body contained no patchable fields; allowed: "
+                f"{sorted(PATCHABLE_SEGMENT_FIELDS)}"
+            )
+
+        # Speaker reassignment side-effects — computed BEFORE persisting the
+        # patched segments list so failure here leaves disk untouched.
+        speaker_changed = (
+            "speaker_id" in applied
+            and applied["speaker_id"] != segments[index].get("speaker_id")
         )
+        if speaker_changed:
+            _propagate_speaker_change(
+                segments=segments,
+                index=index,
+                updated=updated,
+                new_speaker_id=str(applied["speaker_id"]),
+            )
+        # Speaker set to same value → silent no-op drop so we don't flip status
+        elif "speaker_id" in applied and len(applied) == 1:
+            return segments[index]  # nothing actually changed
 
-    # Speaker reassignment side-effects — computed BEFORE persisting the
-    # patched segments list so failure here leaves disk untouched.
-    speaker_changed = (
-        "speaker_id" in applied
-        and applied["speaker_id"] != segments[index].get("speaker_id")
-    )
-    if speaker_changed:
-        _propagate_speaker_change(
-            segments=segments,
-            index=index,
-            updated=updated,
-            new_speaker_id=str(applied["speaker_id"]),
-        )
-    # Speaker set to same value → silent no-op drop so we don't flip status
-    elif "speaker_id" in applied and len(applied) == 1:
-        return segments[index]  # nothing actually changed
+        segments[index] = updated
+        _atomic_write_json(_segments_path(project_dir), segments)
 
-    segments[index] = updated
-    _atomic_write_json(_segments_path(project_dir), segments)
+        # A cn_text edit invalidates any earlier draft wav for this segment.
+        # Commit promotes every draft file it sees, so leaving a stale draft on
+        # disk would let old synthesized content overwrite the baseline audio.
+        if "cn_text" in applied and applied["cn_text"] != original.get("cn_text"):
+            draft = _editing_dir(project_dir) / "tts_segments_draft" / f"{segment_id}.wav"
+            if draft.exists():
+                draft.unlink()
 
-    # A cn_text edit invalidates any earlier draft wav for this segment.
-    # Commit promotes every draft file it sees, so leaving a stale draft on
-    # disk would let old synthesized content overwrite the baseline audio.
-    if "cn_text" in applied and applied["cn_text"] != original.get("cn_text"):
-        draft = _editing_dir(project_dir) / "tts_segments_draft" / f"{segment_id}.wav"
-        if draft.exists():
-            draft.unlink()
+        # Status flip. cn_text edit → text_dirty; speaker change → voice_dirty
+        # (different voice coming, audio is stale). Both may apply — prefer
+        # voice_dirty when speaker changed since it's a stronger signal and
+        # the batch re-TTS trigger list catches both.
+        if speaker_changed:
+            # Clear any stale voice_map override — it was tied to the old
+            # speaker's voice pick. Import late to avoid module cycle.
+            from services.jobs.editing_voice_map import (
+                clear_voice_override,
+                load_voice_map,
+            )
+            if segment_id in load_voice_map(project_dir):
+                clear_voice_override(project_dir, segment_id)
+            mark_segment_status(project_dir, segment_id, SEGMENT_STATUS_VOICE_DIRTY)
+        elif "cn_text" in applied or "source_text" in applied:
+            # Either text field edit means the current TTS is for stale content.
+            mark_segment_status(project_dir, segment_id, SEGMENT_STATUS_TEXT_DIRTY)
 
-    # Status flip. cn_text edit → text_dirty; speaker change → voice_dirty
-    # (different voice coming, audio is stale). Both may apply — prefer
-    # voice_dirty when speaker changed since it's a stronger signal and
-    # the batch re-TTS trigger list catches both.
-    if speaker_changed:
-        # Clear any stale voice_map override — it was tied to the old
-        # speaker's voice pick. Import late to avoid module cycle.
-        from services.jobs.editing_voice_map import (
-            clear_voice_override,
-            load_voice_map,
-        )
-        if segment_id in load_voice_map(project_dir):
-            clear_voice_override(project_dir, segment_id)
-        mark_segment_status(project_dir, segment_id, SEGMENT_STATUS_VOICE_DIRTY)
-    elif "cn_text" in applied or "source_text" in applied:
-        # Either text field edit means the current TTS is for stale content.
-        mark_segment_status(project_dir, segment_id, SEGMENT_STATUS_TEXT_DIRTY)
-
-    return updated
+        return updated
 
 
 def _propagate_speaker_change(
@@ -491,13 +525,16 @@ def mark_segment_status(
             f"must be one of {sorted(SUPPORTED_SEGMENT_STATUSES)}"
         )
     _ensure_editing_dir(project_dir)
-    current = load_segment_status(project_dir)
-    if status == SEGMENT_STATUS_ACCEPTED:
-        current.pop(segment_id, None)
-    else:
-        current[segment_id] = status
-    _atomic_write_json(_segment_status_path(project_dir), current)
-    return current
+    # P0-5 (audit 2026-05-07): serialize concurrent status writes from
+    # HTTP threads + voice_map / segments side-effects. Reentrant safe.
+    with file_lock(_editing_lock_anchor(project_dir)):
+        current = load_segment_status(project_dir)
+        if status == SEGMENT_STATUS_ACCEPTED:
+            current.pop(segment_id, None)
+        else:
+            current[segment_id] = status
+        _atomic_write_json(_segment_status_path(project_dir), current)
+        return current
 
 
 def _cn_text_differs_from_baseline(
@@ -574,54 +611,58 @@ def revert_text_changes_to_audio_baseline(
     if not targets:
         raise ValueError("segment_ids must contain at least one segment id")
 
-    segments = load_editing_segments(project_dir)
-    baseline_by_id = _baseline_segments_by_id(project_dir)
-    target_set = set(targets)
-    updated_segments: list[dict[str, Any]] = []
-    reverted: list[str] = []
-    for item in segments:
-        if not isinstance(item, dict):
-            updated_segments.append(item)
-            continue
-        sid = str(item.get("segment_id"))
-        if sid not in target_set:
-            updated_segments.append(item)
-            continue
-        baseline = baseline_by_id.get(sid)
-        if not baseline:
-            raise EditingConflictError(f"baseline segment {sid!r} not found")
-        next_item = dict(item)
-        next_item["cn_text"] = str(
-            baseline.get("tts_input_cn_text") or baseline.get("cn_text") or ""
-        )
-        if "source_text" in baseline:
-            next_item["source_text"] = baseline.get("source_text") or ""
-        updated_segments.append(next_item)
-        reverted.append(sid)
+    # P0-5 (audit 2026-05-07): protect the segments + status pair from
+    # interleaved writes. mark_segment_status reuses the same anchor and
+    # is reentrant.
+    with file_lock(_editing_lock_anchor(project_dir)):
+        segments = load_editing_segments(project_dir)
+        baseline_by_id = _baseline_segments_by_id(project_dir)
+        target_set = set(targets)
+        updated_segments: list[dict[str, Any]] = []
+        reverted: list[str] = []
+        for item in segments:
+            if not isinstance(item, dict):
+                updated_segments.append(item)
+                continue
+            sid = str(item.get("segment_id"))
+            if sid not in target_set:
+                updated_segments.append(item)
+                continue
+            baseline = baseline_by_id.get(sid)
+            if not baseline:
+                raise EditingConflictError(f"baseline segment {sid!r} not found")
+            next_item = dict(item)
+            next_item["cn_text"] = str(
+                baseline.get("tts_input_cn_text") or baseline.get("cn_text") or ""
+            )
+            if "source_text" in baseline:
+                next_item["source_text"] = baseline.get("source_text") or ""
+            updated_segments.append(next_item)
+            reverted.append(sid)
 
-    missing = [sid for sid in targets if sid not in reverted]
-    if missing:
-        raise EditingConflictError(
-            f"segment_id(s) not found in editing/segments.json: {missing}"
-        )
+        missing = [sid for sid in targets if sid not in reverted]
+        if missing:
+            raise EditingConflictError(
+                f"segment_id(s) not found in editing/segments.json: {missing}"
+            )
 
-    _atomic_write_json(_segments_path(project_dir), updated_segments)
-    for sid in reverted:
-        draft = _editing_dir(project_dir) / "tts_segments_draft" / f"{sid}.wav"
-        if draft.exists():
-            draft.unlink()
-        residual = compute_residual_segment_status(
-            project_dir,
-            sid,
-            assume_no_draft=True,
-        )
-        mark_segment_status(project_dir, sid, residual)
+        _atomic_write_json(_segments_path(project_dir), updated_segments)
+        for sid in reverted:
+            draft = _editing_dir(project_dir) / "tts_segments_draft" / f"{sid}.wav"
+            if draft.exists():
+                draft.unlink()
+            residual = compute_residual_segment_status(
+                project_dir,
+                sid,
+                assume_no_draft=True,
+            )
+            mark_segment_status(project_dir, sid, residual)
 
-    return {
-        "reverted_segment_ids": reverted,
-        "segments": [seg for seg in updated_segments if isinstance(seg, dict)],
-        "segment_status": load_segment_status(project_dir),
-    }
+        return {
+            "reverted_segment_ids": reverted,
+            "segments": [seg for seg in updated_segments if isinstance(seg, dict)],
+            "segment_status": load_segment_status(project_dir),
+        }
 
 
 def compute_residual_segment_status(
@@ -739,114 +780,118 @@ def split_editing_segment(
     validate_segment_id(segment_id)
     _ensure_editing_dir(project_dir)
 
-    segments = load_editing_segments(project_dir)
+    # P0-5 (audit 2026-05-07): split mutates segments + segment_status as
+    # a single logical unit; without the lock another concurrent patch
+    # could land between the segments.json write and the status writes.
+    with file_lock(_editing_lock_anchor(project_dir)):
+        segments = load_editing_segments(project_dir)
 
-    index: int | None = None
-    target = str(segment_id)
-    for i, seg in enumerate(segments):
-        if isinstance(seg, dict) and str(seg.get("segment_id")) == target:
-            index = i
-            break
-    if index is None:
-        raise EditingConflictError(
-            f"segment_id {segment_id!r} not found in editing/segments.json"
+        index: int | None = None
+        target = str(segment_id)
+        for i, seg in enumerate(segments):
+            if isinstance(seg, dict) and str(seg.get("segment_id")) == target:
+                index = i
+                break
+        if index is None:
+            raise EditingConflictError(
+                f"segment_id {segment_id!r} not found in editing/segments.json"
+            )
+
+        original = dict(segments[index])
+        source_text = str(original.get("source_text") or "")
+        cn_text = str(original.get("cn_text") or "")
+
+        if not (0 < split_source_index < len(source_text)):
+            raise ValueError(
+                f"split_source_index {split_source_index} produces an empty half; "
+                f"must be in (0, {len(source_text)}) for source_text of length "
+                f"{len(source_text)}"
+            )
+        if not (0 < split_cn_index < len(cn_text)):
+            raise ValueError(
+                f"split_cn_index {split_cn_index} produces an empty half; "
+                f"must be in (0, {len(cn_text)}) for cn_text of length "
+                f"{len(cn_text)}"
+            )
+
+        # Time split is proportional to the source-character position. We lack
+        # word-level timing in editing mode (it's an alignment detail), so a
+        # uniform speaking-rate assumption is the honest approximation — the
+        # downstream re-alignment will re-anchor using the new TTS waveforms.
+        start_ms = int(original.get("start_ms", 0) or 0)
+        end_ms = int(original.get("end_ms", start_ms) or start_ms)
+        ratio = split_source_index / len(source_text) if source_text else 0.5
+        mid_ms = start_ms + int(round((end_ms - start_ms) * ratio))
+
+        existing_ids = {
+            str(s.get("segment_id"))
+            for s in segments
+            if isinstance(s, dict) and s.get("segment_id") is not None
+        }
+        # The segment we're about to replace is part of ``existing_ids`` but
+        # its id slot will be freed; exclude it so we can still reuse ``base_a``.
+        existing_ids.discard(target)
+        new_id_a, new_id_b = _derive_split_ids(target, existing_ids)
+
+        # Build the two new dicts inheriting everything from the original
+        # except what we want to split/override. We keep pass-through fields
+        # (alignment_method, voice_id, tts_provider, etc.) so the editing
+        # state survives the split without losing upstream metadata.
+        seg_a = dict(original)
+        seg_a.update(
+            segment_id=new_id_a,
+            source_text=source_text[:split_source_index],
+            cn_text=cn_text[:split_cn_index],
+            speaker_id=str(speaker_a).strip() or original.get("speaker_id"),
+            start_ms=start_ms,
+            end_ms=mid_ms,
+        )
+        seg_b = dict(original)
+        seg_b.update(
+            segment_id=new_id_b,
+            source_text=source_text[split_source_index:],
+            cn_text=cn_text[split_cn_index:],
+            speaker_id=str(speaker_b).strip() or original.get("speaker_id"),
+            start_ms=mid_ms,
+            end_ms=end_ms,
         )
 
-    original = dict(segments[index])
-    source_text = str(original.get("source_text") or "")
-    cn_text = str(original.get("cn_text") or "")
+        original_speaker = original.get("speaker_id")
+        if seg_a.get("speaker_id") != original_speaker:
+            _propagate_speaker_change(
+                segments=segments,
+                index=index,
+                updated=seg_a,
+                new_speaker_id=str(seg_a.get("speaker_id") or ""),
+            )
+        if seg_b.get("speaker_id") != original_speaker:
+            _propagate_speaker_change(
+                segments=segments,
+                index=index,
+                updated=seg_b,
+                new_speaker_id=str(seg_b.get("speaker_id") or ""),
+            )
 
-    if not (0 < split_source_index < len(source_text)):
-        raise ValueError(
-            f"split_source_index {split_source_index} produces an empty half; "
-            f"must be in (0, {len(source_text)}) for source_text of length "
-            f"{len(source_text)}"
-        )
-    if not (0 < split_cn_index < len(cn_text)):
-        raise ValueError(
-            f"split_cn_index {split_cn_index} produces an empty half; "
-            f"must be in (0, {len(cn_text)}) for cn_text of length "
-            f"{len(cn_text)}"
-        )
+        new_segments = list(segments)
+        new_segments[index : index + 1] = [seg_a, seg_b]
+        _atomic_write_json(_segments_path(project_dir), new_segments)
 
-    # Time split is proportional to the source-character position. We lack
-    # word-level timing in editing mode (it's an alignment detail), so a
-    # uniform speaking-rate assumption is the honest approximation — the
-    # downstream re-alignment will re-anchor using the new TTS waveforms.
-    start_ms = int(original.get("start_ms", 0) or 0)
-    end_ms = int(original.get("end_ms", start_ms) or start_ms)
-    ratio = split_source_index / len(source_text) if source_text else 0.5
-    mid_ms = start_ms + int(round((end_ms - start_ms) * ratio))
+        # Status bookkeeping: both halves need re-TTS (old draft was sized
+        # for the old full segment). Drop the old id's status entry since
+        # that id no longer exists; a stale "accepted" entry would otherwise
+        # linger until the next write flushed it.
+        mark_segment_status(project_dir, new_id_a, SEGMENT_STATUS_TEXT_DIRTY)
+        mark_segment_status(project_dir, new_id_b, SEGMENT_STATUS_TEXT_DIRTY)
+        status = load_segment_status(project_dir)
+        if target in status:
+            status.pop(target, None)
+            _atomic_write_json(_segment_status_path(project_dir), status)
 
-    existing_ids = {
-        str(s.get("segment_id"))
-        for s in segments
-        if isinstance(s, dict) and s.get("segment_id") is not None
-    }
-    # The segment we're about to replace is part of ``existing_ids`` but
-    # its id slot will be freed; exclude it so we can still reuse ``base_a``.
-    existing_ids.discard(target)
-    new_id_a, new_id_b = _derive_split_ids(target, existing_ids)
-
-    # Build the two new dicts inheriting everything from the original
-    # except what we want to split/override. We keep pass-through fields
-    # (alignment_method, voice_id, tts_provider, etc.) so the editing
-    # state survives the split without losing upstream metadata.
-    seg_a = dict(original)
-    seg_a.update(
-        segment_id=new_id_a,
-        source_text=source_text[:split_source_index],
-        cn_text=cn_text[:split_cn_index],
-        speaker_id=str(speaker_a).strip() or original.get("speaker_id"),
-        start_ms=start_ms,
-        end_ms=mid_ms,
-    )
-    seg_b = dict(original)
-    seg_b.update(
-        segment_id=new_id_b,
-        source_text=source_text[split_source_index:],
-        cn_text=cn_text[split_cn_index:],
-        speaker_id=str(speaker_b).strip() or original.get("speaker_id"),
-        start_ms=mid_ms,
-        end_ms=end_ms,
-    )
-
-    original_speaker = original.get("speaker_id")
-    if seg_a.get("speaker_id") != original_speaker:
-        _propagate_speaker_change(
-            segments=segments,
-            index=index,
-            updated=seg_a,
-            new_speaker_id=str(seg_a.get("speaker_id") or ""),
-        )
-    if seg_b.get("speaker_id") != original_speaker:
-        _propagate_speaker_change(
-            segments=segments,
-            index=index,
-            updated=seg_b,
-            new_speaker_id=str(seg_b.get("speaker_id") or ""),
-        )
-
-    new_segments = list(segments)
-    new_segments[index : index + 1] = [seg_a, seg_b]
-    _atomic_write_json(_segments_path(project_dir), new_segments)
-
-    # Status bookkeeping: both halves need re-TTS (old draft was sized
-    # for the old full segment). Drop the old id's status entry since
-    # that id no longer exists; a stale "accepted" entry would otherwise
-    # linger until the next write flushed it.
-    mark_segment_status(project_dir, new_id_a, SEGMENT_STATUS_TEXT_DIRTY)
-    mark_segment_status(project_dir, new_id_b, SEGMENT_STATUS_TEXT_DIRTY)
-    status = load_segment_status(project_dir)
-    if target in status:
-        status.pop(target, None)
-        _atomic_write_json(_segment_status_path(project_dir), status)
-
-    return {
-        "replaced_segment_id": target,
-        "new_segments": [seg_a, seg_b],
-        "total_count": len(new_segments),
-    }
+        return {
+            "replaced_segment_id": target,
+            "new_segments": [seg_a, seg_b],
+            "total_count": len(new_segments),
+        }
 
 
 # ---------------------------------------------------------------------------
