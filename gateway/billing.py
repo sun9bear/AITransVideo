@@ -21,6 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import PlainTextResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth import get_current_user
@@ -673,28 +674,41 @@ async def _process_payment_event(
         signature_valid: Whether the webhook signature was verified by the provider adapter.
             Unverified events are recorded but never settle orders or upgrade plans.
     """
-    # --- Idempotency check ---
-    existing = await db.execute(
-        select(PaymentWebhookEvent).where(
-            PaymentWebhookEvent.provider_event_id == provider_event_id
+    # --- Idempotency check + record (atomic) ---
+    # P1-11b (audit 2026-05-07, D-HIGH-7): atomic INSERT ON CONFLICT replaces
+    # SELECT-then-INSERT race window. Two concurrent provider deliveries used
+    # to both pass the SELECT, both add a row, and rely on the unique
+    # constraint catching the duplicate via IntegrityError on commit. With
+    # ON CONFLICT DO NOTHING RETURNING we get a single atomic statement that
+    # either inserts (returns the new id) or no-ops (returns None). The unique
+    # index on `provider_event_id` is the conflict target.
+    now = datetime.now(timezone.utc)
+    insert_stmt = (
+        pg_insert(PaymentWebhookEvent)
+        .values(
+            provider=provider,
+            provider_event_id=provider_event_id,
+            event_type=event_type,
+            signature_valid=signature_valid,
+            processed=False,
+            payload=raw_payload,
+            received_at=now,
         )
+        .on_conflict_do_nothing(index_elements=["provider_event_id"])
+        .returning(PaymentWebhookEvent.id)
     )
-    if existing.scalar_one_or_none() is not None:
+    insert_result = await db.execute(insert_stmt)
+    inserted_id = insert_result.scalar_one_or_none()
+    if inserted_id is None:
         logger.info("Duplicate webhook event %s, skipping", provider_event_id)
         return False
 
-    # Record the event
-    now = datetime.now(timezone.utc)
-    event = PaymentWebhookEvent(
-        provider=provider,
-        provider_event_id=provider_event_id,
-        event_type=event_type,
-        signature_valid=signature_valid,
-        processed=False,
-        payload=raw_payload,
-        received_at=now,
-    )
-    db.add(event)
+    # Re-fetch as a managed ORM instance so subsequent code can mutate
+    # `event.processed`, `event.error_message`, `event.processed_at`, etc.,
+    # and have those changes flushed in the existing 4-commit flow below.
+    event = (await db.execute(
+        select(PaymentWebhookEvent).where(PaymentWebhookEvent.id == inserted_id)
+    )).scalar_one()
 
     # Find the order
     result = await db.execute(select(PaymentOrder).where(PaymentOrder.id == order_id))

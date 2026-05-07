@@ -136,21 +136,33 @@ def _set_alipay_env(monkeypatch):
 
 
 def _paid_event_execute(*, order, user):
-    """Build an `async db.execute` that replays the Task 4 settlement path.
+    """Build an `async db.execute` that replays the settlement path.
 
-    Sequence of `db.execute` calls in `_process_payment_event` on a paid event:
-      1. PaymentWebhookEvent dedup lookup   → None (new event)
-      2. PaymentOrder lookup                → `order`
-      3. User lookup                        → `user`
-      4. BillingInvoice lookup              → None (new invoice)
-      5. Subscription lookup                → None (new subscription)
+    Sequence of `db.execute` calls in `_process_payment_event` on a paid
+    event AFTER P1-11b (commit a9b423c… replaced SELECT-then-INSERT
+    with INSERT ON CONFLICT RETURNING):
+      1. PaymentWebhookEvent INSERT ... RETURNING id → inserted id
+         (None would mean ON CONFLICT fired = duplicate)
+      2. PaymentWebhookEvent re-fetch by id          → fresh event ORM
+      3. PaymentOrder lookup                          → ``order``
+      4. User lookup                                  → ``user``
+      5. BillingInvoice lookup                        → None
+      6. Subscription lookup                          → None
     """
-    none_a = MagicMock(); none_a.scalar_one_or_none.return_value = None
+    insert_res = MagicMock()
+    insert_res.scalar_one_or_none.return_value = "evt-row-1"
+    fresh_event = SimpleNamespace(
+        processed=False,
+        error_message=None,
+        processed_at=None,
+    )
+    event_res = MagicMock()
+    event_res.scalar_one.return_value = fresh_event
     order_res = MagicMock(); order_res.scalar_one_or_none.return_value = order
     user_res = MagicMock(); user_res.scalar_one_or_none.return_value = user
     none_invoice = MagicMock(); none_invoice.scalar_one_or_none.return_value = None
     none_sub = MagicMock(); none_sub.scalar_one_or_none.return_value = None
-    sequence = [none_a, order_res, user_res, none_invoice, none_sub]
+    sequence = [insert_res, event_res, order_res, user_res, none_invoice, none_sub]
     idx = {"n": 0}
 
     async def _execute(*a, **kw):
@@ -483,6 +495,42 @@ class TestProcessPaymentEvent:
         assert "BillingInvoice" in added_types
         assert "Subscription" in added_types
 
+    def _make_smart_execute(self, *, order, fresh_event=None):
+        """P1-11b mock helper: replay the new INSERT-then-fetch-event-then-
+        SELECT sequence. Call 1 = INSERT RETURNING id (non-None to
+        indicate "inserted, not duplicate"); call 2 = re-fetch event ORM;
+        call 3+ = order / user / invoice / subscription — returns
+        ``order_res`` for every subsequent call to mirror the original
+        smart_execute's deliberately-loose semantics (the failed-payment
+        and unverified paths short-circuit before drilling into User /
+        Invoice fields, so we don't need a real User mock here).
+        """
+        if fresh_event is None:
+            fresh_event = SimpleNamespace(
+                processed=False, error_message=None, processed_at=None,
+            )
+        insert_res = MagicMock()
+        insert_res.scalar_one_or_none.return_value = "evt-row-1"
+        event_res = MagicMock()
+        event_res.scalar_one.return_value = fresh_event
+        order_res = MagicMock()
+        order_res.scalar_one_or_none.return_value = order
+        # call sequence:
+        #   1: INSERT             → insert_res (id non-None = "inserted")
+        #   2: re-fetch event ORM → event_res
+        #   3+: order / user / invoice / subscription → order_res (loose mock,
+        #       matching the legacy behaviour before P1-11b refactor)
+        sequence = [insert_res, event_res]
+        call_n = {"n": 0}
+
+        async def smart_execute(*a, **kw):
+            i = call_n["n"]
+            call_n["n"] += 1
+            if i < len(sequence):
+                return sequence[i]
+            return order_res
+        return smart_execute
+
     def test_unverified_does_not_settle(self):
         user = _make_user(plan_code="free", uid="uid-1")
         order = SimpleNamespace(
@@ -490,14 +538,7 @@ class TestProcessPaymentEvent:
             status="pending", paid_at=None, updated_at=None,
         )
         db = _make_db()
-        none_result = MagicMock(); none_result.scalar_one_or_none.return_value = None
-        order_result = MagicMock(); order_result.scalar_one_or_none.return_value = order
-        call_n = {"n": 0}
-        async def smart_execute(*a, **kw):
-            call_n["n"] += 1
-            if call_n["n"] == 1: return none_result
-            return order_result
-        db.execute = smart_execute
+        db.execute = self._make_smart_execute(order=order)
 
         settled = _run(_process_payment_event(
             db=db, provider="stripe", provider_event_id="evt-unverified",
@@ -509,10 +550,14 @@ class TestProcessPaymentEvent:
         assert order.status == "pending"
 
     def test_duplicate_is_idempotent(self):
+        """P1-11b: a duplicate webhook now manifests as INSERT ON CONFLICT
+        DO NOTHING returning no row — scalar_one_or_none() == None."""
         db = _make_db()
-        existing = SimpleNamespace(id="existing")
-        found = MagicMock(); found.scalar_one_or_none.return_value = existing
-        db.execute = AsyncMock(return_value=found)
+        # First (and only expected) execute call: INSERT returns None
+        # because the unique constraint fires (event already exists).
+        insert_dup = MagicMock()
+        insert_dup.scalar_one_or_none.return_value = None
+        db.execute = AsyncMock(return_value=insert_dup)
 
         settled = _run(_process_payment_event(
             db=db, provider="fake", provider_event_id="dup-evt",
@@ -528,14 +573,7 @@ class TestProcessPaymentEvent:
             status="paid", paid_at=datetime.now(timezone.utc), updated_at=None,
         )
         db = _make_db()
-        none_result = MagicMock(); none_result.scalar_one_or_none.return_value = None
-        order_result = MagicMock(); order_result.scalar_one_or_none.return_value = order
-        call_n = {"n": 0}
-        async def smart_execute(*a, **kw):
-            call_n["n"] += 1
-            if call_n["n"] == 1: return none_result
-            return order_result
-        db.execute = smart_execute
+        db.execute = self._make_smart_execute(order=order)
 
         settled = _run(_process_payment_event(
             db=db, provider="fake", provider_event_id="evt-2",
@@ -550,14 +588,7 @@ class TestProcessPaymentEvent:
             status="pending", paid_at=None, updated_at=None,
         )
         db = _make_db()
-        none_result = MagicMock(); none_result.scalar_one_or_none.return_value = None
-        order_result = MagicMock(); order_result.scalar_one_or_none.return_value = order
-        call_n = {"n": 0}
-        async def smart_execute(*a, **kw):
-            call_n["n"] += 1
-            if call_n["n"] == 1: return none_result
-            return order_result
-        db.execute = smart_execute
+        db.execute = self._make_smart_execute(order=order)
 
         settled = _run(_process_payment_event(
             db=db, provider="fake", provider_event_id="evt-fail",
