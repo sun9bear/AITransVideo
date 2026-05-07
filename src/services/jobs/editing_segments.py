@@ -822,6 +822,18 @@ def split_editing_segment(
         end_ms = int(original.get("end_ms", start_ms) or start_ms)
         ratio = split_source_index / len(source_text) if source_text else 0.5
         mid_ms = start_ms + int(round((end_ms - start_ms) * ratio))
+        # P0-8 (audit 2026-05-07): refuse splits that would produce a
+        # zero-duration half. This happens when (end_ms - start_ms) is very
+        # small or when ratio rounds to 0/1 — the resulting half can break
+        # downstream alignment math (TTS would have to fit text into 0 ms).
+        # Better to reject the split up-front with a clear error than let
+        # the user discover it minutes later at commit time.
+        if mid_ms <= start_ms or mid_ms >= end_ms:
+            raise ValueError(
+                f"split would produce a zero-duration half: start_ms={start_ms}, "
+                f"end_ms={end_ms}, mid_ms={mid_ms}. Segment is too short to split "
+                f"or split position is too close to one end."
+            )
 
         existing_ids = {
             str(s.get("segment_id"))
@@ -886,6 +898,30 @@ def split_editing_segment(
         if target in status:
             status.pop(target, None)
             _atomic_write_json(_segment_status_path(project_dir), status)
+
+        # P0-8 (audit 2026-05-07): migrate any voice_map override from the
+        # old segment_id to BOTH new halves. Without this, a user who
+        # explicitly picked voice X for seg_005 then split it would silently
+        # see the override get dropped (load_voice_map at commit looks up
+        # by segment_id; old key has no matching segment, gets ignored —
+        # both halves fall back to the speaker default).
+        # Late import avoids a circular dependency: editing_voice_map
+        # imports from editing_segments at module load time, so we can't
+        # do top-level. Module is already loaded by the time split runs.
+        from services.jobs.editing_voice_map import (
+            _voice_map_path,
+            load_voice_map,
+        )
+        voice_map = load_voice_map(project_dir)
+        if target in voice_map:
+            old_override = dict(voice_map.pop(target))
+            # Both halves inherit the same provider+voice_id. The user can
+            # override either side individually afterwards via the voice
+            # selection panel; in the common case they want both halves
+            # voiced the same as the original.
+            voice_map[new_id_a] = dict(old_override)
+            voice_map[new_id_b] = dict(old_override)
+            _atomic_write_json(_voice_map_path(project_dir), voice_map)
 
         return {
             "replaced_segment_id": target,

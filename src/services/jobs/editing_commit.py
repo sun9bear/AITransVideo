@@ -470,6 +470,16 @@ def _find_text_edits_without_tts(project_dir: Path) -> list[dict[str, Any]]:
     text changed after the last matching TTS synthesis. A draft wav may still
     exist from an earlier regeneration; if the status is text_dirty, that
     draft is stale too and must not be promoted at commit.
+
+    P0-8 (audit 2026-05-07): segments produced by split_editing_segment
+    have segment_ids (e.g. ``seg_005_s1a``/``_s1b``) that exist in the
+    editing/segments.json copy but NOT in the baseline editor/segments.json
+    (split is not applied to baseline until commit). Previously this
+    branch silently ``continue``-d, so a user who split + edited text +
+    skipped re-TTS would pass the audio-sync gate and only fail at the
+    alignment stage with "missing wavs" — confusing and hard to recover.
+    Now: a missing baseline segment requires a fresh draft wav to clear
+    the gate; otherwise the segment surfaces in the unsynced list.
     """
     status_map = _load_segment_status_map(project_dir)
     if not status_map:
@@ -483,8 +493,27 @@ def _find_text_edits_without_tts(project_dir: Path) -> list[dict[str, Any]]:
         if status != "text_dirty":
             continue
         editing_segment = editing_by_id.get(sid)
+        if not editing_segment:
+            # Editing layer doesn't have this id either — defensive skip.
+            continue
         baseline_segment = baseline_by_id.get(sid)
-        if not editing_segment or not baseline_segment:
+        has_draft = (drafts_dir / f"{sid}.wav").is_file()
+        if baseline_segment is None:
+            # Split halves and any other "new in editing only" id reach
+            # this branch. Without a draft wav there is no audio that
+            # represents the current text — the segment is unsynced.
+            if has_draft:
+                continue
+            unsynced.append({
+                "segment_id": sid,
+                "status": status,
+                "display_name": editing_segment.get("display_name") or "",
+                "speaker_id": editing_segment.get("speaker_id") or "",
+                "current_cn_text": str(editing_segment.get("cn_text") or ""),
+                "audio_cn_text": "",
+                "current_source_text": editing_segment.get("source_text") or "",
+                "audio_source_text": "",
+            })
             continue
         current_text = str(editing_segment.get("cn_text") or "")
         audio_text = str(
@@ -492,8 +521,7 @@ def _find_text_edits_without_tts(project_dir: Path) -> list[dict[str, Any]]:
             or baseline_segment.get("cn_text")
             or ""
         )
-        has_stale_draft = (drafts_dir / f"{sid}.wav").is_file()
-        if current_text == audio_text and not has_stale_draft:
+        if current_text == audio_text and not has_draft:
             continue
         unsynced.append({
             "segment_id": sid,
