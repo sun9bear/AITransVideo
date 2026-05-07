@@ -855,12 +855,15 @@ async def ensure_subscription_bucket_from_v2(
 async def ensure_admin_credits_bucket(db: AsyncSession, user_id) -> CreditsBucket | None:
     """Ensure administrators have a long-lived 1,000,000 point bucket."""
     try:
+        # P0-4 (audit 2026-05-07): row lock to prevent concurrent reserve from over-allocating free quota
+        # (here: protects the read-modify-write top-up branch below from lost updates
+        # when two requests both observe granted < ADMIN_CREDITS_GRANT and both add delta).
         result = await db.execute(
             select(CreditsBucket).where(
                 CreditsBucket.user_id == user_id,
                 CreditsBucket.bucket_type == "manual_adjustment",
                 CreditsBucket.source_label == ADMIN_CREDITS_SOURCE_LABEL,
-            )
+            ).with_for_update()
         )
         existing = result.scalar_one_or_none()
         if existing is None:

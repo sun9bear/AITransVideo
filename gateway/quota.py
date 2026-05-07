@@ -52,7 +52,10 @@ async def reserve_quota(db: AsyncSession, user_id, job: Job) -> bool:
                        job.job_id, job.quota_state)
         return False
 
-    result = await db.execute(select(User).where(User.id == user_id))
+    # P0-4 (audit 2026-05-07): row lock to prevent concurrent reserve from over-allocating free quota
+    result = await db.execute(
+        select(User).where(User.id == user_id).with_for_update()
+    )
     user = result.scalar_one_or_none()
     if user is None:
         return False
@@ -101,8 +104,11 @@ async def release_quota(db: AsyncSession, job: Job) -> bool:
                      job.job_id, job.quota_state)
         return False
 
+    # P0-4 (audit 2026-05-07): row lock to prevent concurrent reserve from over-allocating free quota
     # Find the job's owner to refund
-    result = await db.execute(select(User).where(User.id == job.user_id))
+    result = await db.execute(
+        select(User).where(User.id == job.user_id).with_for_update()
+    )
     user = result.scalar_one_or_none()
     if user is not None:
         plan = getattr(user, "plan_code", "free") or "free"
