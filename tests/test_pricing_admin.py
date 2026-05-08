@@ -161,3 +161,308 @@ def test_publish_requires_change_note_for_frozen_changes():
     change_note = "Adjusted studio standard debit rate"
     should_reject = len(changes) > 0 and not change_note.strip()
     assert should_reject is False
+
+
+# ---------------------------------------------------------------------------
+# P1-11c follow-up (audit 2026-05-07): IntegrityError → HTTP 409
+#
+# Migration 017 added UNIQUE on pricing_config_versions.version. Two
+# concurrent admin saves both compute max+1=N+1 and INSERT; the second
+# commit raises IntegrityError. The endpoints must catch that and
+# return HTTP 409 (not 500) with a Chinese-language retry hint.
+# ---------------------------------------------------------------------------
+
+
+import asyncio
+import sys as _sys
+import types as _types
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
+
+def _ensure_pricing_admin_imports():
+    """Stub the ``database`` module (an asyncpg-bound init in production)
+    so we can import ``pricing_admin`` cleanly inside the test process."""
+    if "database" not in _sys.modules:
+        fake = _types.ModuleType("database")
+        fake.async_session = MagicMock()
+        fake.engine = MagicMock()
+        fake.get_db = MagicMock()
+        _sys.modules["database"] = fake
+
+
+def _run(coro):
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+def _make_admin_user():
+    return SimpleNamespace(
+        id="admin-user-id",
+        email="admin@test.com",
+        role="admin",
+    )
+
+
+def _make_db_for_save_draft(*, max_version: int, raise_integrity: bool):
+    """Build an AsyncMock session where ``select(max(version))`` returns
+    ``max_version`` and ``commit()`` either succeeds or raises
+    ``IntegrityError`` (mimicking UNIQUE collision)."""
+    from sqlalchemy.exc import IntegrityError
+
+    db = AsyncMock()
+    db.add = MagicMock()
+    db.refresh = AsyncMock()
+
+    # ``await db.execute(select(...))`` → result whose
+    # ``.scalar_one_or_none()`` returns max_version (or None for empty).
+    execute_result = MagicMock()
+    execute_result.scalar_one_or_none = MagicMock(return_value=max_version)
+    db.execute = AsyncMock(return_value=execute_result)
+
+    if raise_integrity:
+        db.commit = AsyncMock(
+            side_effect=IntegrityError("INSERT", {}, Exception("UNIQUE violation"))
+        )
+        db.rollback = AsyncMock()
+    else:
+        db.commit = AsyncMock()
+        db.rollback = AsyncMock()
+    return db
+
+
+def _make_async_session_ctx(db):
+    """Wrap an AsyncMock db in a context-manager MagicMock matching
+    ``async_session()`` contract: ``async with async_session() as db: ...``."""
+    cm = AsyncMock()
+    cm.__aenter__.return_value = db
+    cm.__aexit__.return_value = None
+    factory = MagicMock(return_value=cm)
+    return factory
+
+
+def test_save_draft_concurrent_unique_conflict_returns_409():
+    """P1-11c follow-up: two admins clicking Save Draft concurrently
+    both compute version=N+1; the second insert violates UNIQUE on
+    version and the endpoint must surface HTTP 409, not propagate
+    IntegrityError as a 500."""
+    _ensure_pricing_admin_imports()
+    import pricing_admin
+    from fastapi import HTTPException
+
+    user = _make_admin_user()
+    db = _make_db_for_save_draft(max_version=7, raise_integrity=True)
+
+    # Patch async_session so the endpoint's ``async with`` returns our mock.
+    original_session = pricing_admin.async_session
+    pricing_admin.async_session = _make_async_session_ctx(db)
+    try:
+        with pytest.raises(HTTPException) as excinfo:
+            _run(pricing_admin.save_draft(
+                pricing_admin.DraftRequest(
+                    payload=build_default_pricing_payload().model_dump()
+                ),
+                user=user,
+            ))
+        assert excinfo.value.status_code == 409, (
+            "P1-11c follow-up regression: save_draft IntegrityError did "
+            f"not translate to 409 (got status={excinfo.value.status_code}, "
+            f"detail={excinfo.value.detail!r})."
+        )
+        # Detail mentions concurrency / retry to help the admin UI map
+        # the 409 to a sensible toast.
+        assert "版本号冲突" in excinfo.value.detail, (
+            f"P1-11c follow-up regression: 409 detail string lost the "
+            f"'版本号冲突' marker; got {excinfo.value.detail!r}"
+        )
+        # Session was rolled back so the failed transaction doesn't
+        # leak into the next request on the same connection.
+        assert db.rollback.await_count == 1, (
+            "P1-11c follow-up regression: save_draft did not rollback "
+            "after IntegrityError; subsequent requests on the same "
+            "connection would inherit a broken transaction state."
+        )
+    finally:
+        pricing_admin.async_session = original_session
+
+
+def test_save_draft_happy_path_persists_and_returns_version():
+    """No-regression: when commit succeeds, save_draft persists the
+    new draft row and returns it."""
+    _ensure_pricing_admin_imports()
+    import pricing_admin
+
+    user = _make_admin_user()
+    db = _make_db_for_save_draft(max_version=3, raise_integrity=False)
+
+    original_session = pricing_admin.async_session
+    pricing_admin.async_session = _make_async_session_ctx(db)
+    try:
+        result = _run(pricing_admin.save_draft(
+            pricing_admin.DraftRequest(
+                payload=build_default_pricing_payload().model_dump()
+            ),
+            user=user,
+        ))
+        assert "version" in result
+        # The PricingConfigVersion was added with version=4.
+        # db.add was called with the new row — pull the actual model
+        # instance to verify version + status.
+        added_calls = db.add.call_args_list
+        assert len(added_calls) == 1
+        new_row = added_calls[0][0][0]
+        assert new_row.version == 4
+        assert new_row.status == "draft"
+        assert db.commit.await_count == 1
+        # No rollback on the happy path.
+        assert db.rollback.await_count == 0
+    finally:
+        pricing_admin.async_session = original_session
+
+
+def _make_db_for_publish(*, max_version: int, raise_integrity: bool):
+    """Build an AsyncMock session for publish_pricing.
+
+    publish_pricing calls execute() multiple times:
+      1. SELECT active row (returns None or a Mock row)
+      2. UPDATE active→archived
+      3. UPDATE draft→archived
+      4. SELECT max(version)
+    Then INSERT via db.add + db.commit.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    db = AsyncMock()
+    db.add = MagicMock()
+    db.refresh = AsyncMock()
+
+    # Each execute call returns a result. We need: scalar_one_or_none
+    # for SELECT (#1 returns None — no active row; #4 returns max_version).
+    # For UPDATEs (#2, #3) the return value is irrelevant.
+    select_active_result = MagicMock()
+    select_active_result.scalar_one_or_none = MagicMock(return_value=None)
+
+    update_result = MagicMock()  # UPDATE result; not inspected
+
+    select_max_result = MagicMock()
+    select_max_result.scalar_one_or_none = MagicMock(return_value=max_version)
+
+    db.execute = AsyncMock(side_effect=[
+        select_active_result,
+        update_result,
+        update_result,
+        select_max_result,
+    ])
+
+    if raise_integrity:
+        db.commit = AsyncMock(
+            side_effect=IntegrityError("INSERT", {}, Exception("UNIQUE violation"))
+        )
+        db.rollback = AsyncMock()
+    else:
+        db.commit = AsyncMock()
+        db.rollback = AsyncMock()
+    return db
+
+
+def test_publish_pricing_concurrent_unique_conflict_returns_409():
+    """P1-11c follow-up: same UNIQUE-on-version race for publish.
+    Two admins clicking Publish simultaneously — the loser sees 409,
+    not 500."""
+    _ensure_pricing_admin_imports()
+    import pricing_admin
+    from fastapi import HTTPException
+
+    user = _make_admin_user()
+    db = _make_db_for_publish(max_version=7, raise_integrity=True)
+
+    original_session = pricing_admin.async_session
+    pricing_admin.async_session = _make_async_session_ctx(db)
+
+    # publish_pricing also writes a runtime snapshot post-commit;
+    # since commit failed we should NEVER reach that code path.
+    snapshot_calls: list[object] = []
+
+    def _track_snapshot(payload):
+        snapshot_calls.append(payload)
+
+    original_snapshot = pricing_admin.write_runtime_snapshot
+    original_invalidate = pricing_admin.invalidate_runtime_pricing_cache
+    pricing_admin.write_runtime_snapshot = _track_snapshot
+    invalidate_calls: list[None] = []
+    pricing_admin.invalidate_runtime_pricing_cache = lambda: invalidate_calls.append(None)
+
+    try:
+        with pytest.raises(HTTPException) as excinfo:
+            _run(pricing_admin.publish_pricing(
+                pricing_admin.PublishRequest(
+                    payload=build_default_pricing_payload().model_dump(),
+                    change_note=None,
+                ),
+                user=user,
+            ))
+        assert excinfo.value.status_code == 409, (
+            f"P1-11c follow-up regression: publish IntegrityError did not "
+            f"translate to 409 (got {excinfo.value.status_code}, "
+            f"detail={excinfo.value.detail!r})."
+        )
+        assert "版本号冲突" in excinfo.value.detail
+        assert db.rollback.await_count == 1
+        # Critical: runtime snapshot + cache invalidate must NOT run
+        # when the DB commit failed — otherwise the loser of the race
+        # would publish a runtime config that doesn't match any DB row.
+        assert snapshot_calls == [], (
+            "P1-11c follow-up regression: write_runtime_snapshot was "
+            "invoked despite commit failing — would publish runtime "
+            "config inconsistent with DB state."
+        )
+        assert invalidate_calls == [], (
+            "P1-11c follow-up regression: invalidate_runtime_pricing_cache "
+            "was invoked despite commit failing."
+        )
+    finally:
+        pricing_admin.async_session = original_session
+        pricing_admin.write_runtime_snapshot = original_snapshot
+        pricing_admin.invalidate_runtime_pricing_cache = original_invalidate
+
+
+def test_publish_pricing_happy_path_writes_snapshot():
+    """No-regression: when publish commit succeeds, runtime snapshot
+    is written and cache invalidated."""
+    _ensure_pricing_admin_imports()
+    import pricing_admin
+
+    user = _make_admin_user()
+    db = _make_db_for_publish(max_version=2, raise_integrity=False)
+
+    original_session = pricing_admin.async_session
+    pricing_admin.async_session = _make_async_session_ctx(db)
+
+    snapshot_calls: list[object] = []
+    pricing_admin.write_runtime_snapshot = lambda p: snapshot_calls.append(p)
+    invalidate_calls: list[None] = []
+    pricing_admin.invalidate_runtime_pricing_cache = lambda: invalidate_calls.append(None)
+
+    try:
+        result = _run(pricing_admin.publish_pricing(
+            pricing_admin.PublishRequest(
+                payload=build_default_pricing_payload().model_dump(),
+                change_note="initial publish",
+            ),
+            user=user,
+        ))
+        assert "version" in result
+        added = db.add.call_args_list[0][0][0]
+        assert added.version == 3
+        assert added.status == "active"
+        assert added.change_note == "initial publish"
+        assert db.commit.await_count == 1
+        assert db.rollback.await_count == 0
+        # Runtime side effects landed exactly once.
+        assert len(snapshot_calls) == 1
+        assert len(invalidate_calls) == 1
+    finally:
+        pricing_admin.async_session = original_session

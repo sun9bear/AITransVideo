@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select, desc, func, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth import get_current_user
@@ -111,7 +112,20 @@ async def get_pricing(user: User | None = Depends(get_current_user)):
 
 @router.post("/draft")
 async def save_draft(body: DraftRequest, user: User | None = Depends(get_current_user)):
-    """Save a draft pricing version."""
+    """Save a draft pricing version.
+
+    Concurrency: ``pricing_config_versions.version`` is UNIQUE (alembic
+    017 / P1-11c). The ``select(func.max(version)) + 1 → INSERT`` sequence
+    here is intentionally NOT serialised by an advisory lock — instead
+    we rely on the UNIQUE constraint as the correctness barrier. Two
+    admins clicking "Save Draft" simultaneously both compute version=N+1
+    and both try to INSERT; one succeeds, the other gets ``IntegrityError``
+    on commit. We surface that to the client as HTTP 409 Conflict with
+    a Chinese-language hint to refresh + retry.
+
+    Audit ref: docs/audits/2026-05-07-comprehensive-codebase-audit.md
+    P1-11c follow-up — IntegrityError → 409.
+    """
     _require_admin(user)
 
     # Validate payload
@@ -136,7 +150,25 @@ async def save_draft(body: DraftRequest, user: User | None = Depends(get_current
             updated_by_user_id=user.id,
         )
         db.add(row)
-        await db.commit()
+        try:
+            await db.commit()
+        except IntegrityError:
+            # Another admin won the race against UNIQUE(version).
+            # The session is auto-rolled-back; surface a clear retry hint.
+            await db.rollback()
+            logger.info(
+                "[pricing] save_draft concurrent UNIQUE conflict on version=%d "
+                "(user=%s); returning 409 to caller.",
+                max_ver + 1,
+                user.id,
+            )
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "版本号冲突，可能有其他管理员同时保存了定价草稿。"
+                    "请刷新页面后重试。"
+                ),
+            )
         await db.refresh(row)
 
     return {"version": _version_to_dict(row)}
@@ -144,7 +176,25 @@ async def save_draft(body: DraftRequest, user: User | None = Depends(get_current
 
 @router.post("/publish")
 async def publish_pricing(body: PublishRequest, user: User | None = Depends(get_current_user)):
-    """Publish a new active pricing version."""
+    """Publish a new active pricing version.
+
+    Concurrency: same UNIQUE-on-version constraint as ``save_draft``
+    above. Two admins simultaneously clicking "Publish" both archive
+    the current active row (idempotent UPDATE) then both compute
+    ``max+1=N+1`` and both INSERT — one succeeds, the other gets
+    ``IntegrityError`` on commit and is surfaced as HTTP 409 Conflict.
+
+    Note: even though publish does multiple statements
+    (UPDATE active→archived, UPDATE draft→archived, INSERT new active),
+    the entire sequence is one transaction. PostgreSQL rolls back the
+    whole transaction when the INSERT trips UNIQUE — the archive
+    UPDATEs do NOT partially commit. So the loser of the race observes
+    no state change; the winner's transaction is the only one that
+    lands.
+
+    Audit ref: docs/audits/2026-05-07-comprehensive-codebase-audit.md
+    P1-11c follow-up — IntegrityError → 409.
+    """
     _require_admin(user)
 
     # Validate payload
@@ -209,7 +259,26 @@ async def publish_pricing(body: PublishRequest, user: User | None = Depends(get_
             activated_at=now,
         )
         db.add(row)
-        await db.commit()
+        try:
+            await db.commit()
+        except IntegrityError:
+            # Another admin's publish landed first against UNIQUE(version).
+            # The whole transaction (including the archive UPDATEs) is
+            # rolled back atomically; this caller observes no state change.
+            await db.rollback()
+            logger.info(
+                "[pricing] publish concurrent UNIQUE conflict on version=%d "
+                "(user=%s); returning 409 to caller.",
+                max_ver + 1,
+                user.id,
+            )
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "版本号冲突，可能有其他管理员同时发布了定价。"
+                    "请刷新页面查看最新状态后重试。"
+                ),
+            )
         await db.refresh(row)
 
     # Write runtime snapshot and invalidate cache (outside DB transaction)
