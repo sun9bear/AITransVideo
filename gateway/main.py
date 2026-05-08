@@ -16,7 +16,7 @@ from admin_settings import router as admin_router
 from pricing_admin import router as pricing_admin_router
 from s2_monitor_api import router as s2_monitor_router
 from admin_job_monitor_api import router as admin_job_monitor_router
-from auth_phone import router as auth_phone_router, captcha_router
+from auth_phone import router as auth_phone_router
 from billing import router as billing_router
 from cost_management import router as cost_management_router
 from credits_observability import router as credits_observability_router
@@ -247,7 +247,8 @@ app.get("/auth/me")(me_handler)
 app.post("/api/account/change-password")(change_password_handler)
 app.post("/api/account/bind-email")(bind_email_handler)
 app.include_router(auth_phone_router)
-app.include_router(captcha_router)
+# P1-10b / S-HIGH-2: ``captcha_router`` removed along with the dead
+# pre-verify pass-token flow (see auth_phone.py for the rationale).
 
 
 # --- Admin settings routes (before catch-all) ---

@@ -43,9 +43,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth/phone", tags=["auth-phone"])
 
-# Separate router for /auth/captcha/* (no /phone prefix)
-captcha_router = APIRouter(prefix="/auth/captcha", tags=["auth-captcha"])
-
 
 # ---------------------------------------------------------------------------
 # P1-10a-2 / S-HIGH-4 (audit 2026-05-07): wrong-code attempt limit on phone
@@ -64,64 +61,30 @@ MAX_VERIFY_ATTEMPTS = 3
 
 
 # ---------------------------------------------------------------------------
-# Captcha pre-verify: in-memory pass tokens (short-lived, 5 min)
+# P1-10b / S-HIGH-2 (audit 2026-05-07): the captcha "pre-verify + pass_token"
+# pre-flight flow that used to live here was DEAD CODE — the frontend never
+# called ``/auth/captcha/pre-verify``, ``send_code_endpoint`` always called
+# ``risk_control.verify_captcha`` directly on the original captcha_token,
+# and the in-memory ``_captcha_passes`` dict was never consumed. Side
+# effects of leaving it in place:
+#
+#   * Aliyun / Turnstile single-use semantics meant the captcha chain
+#     was broken in production (verify_captcha ran on a token the
+#     provider had already invalidated, so re-submission failed) —
+#     unless ``AVT_CAPTCHA_PROVIDER=fake``.
+#   * ``_captcha_passes`` only got garbage-collected at issuance time.
+#     A long-lived gateway with frontend never calling /pre-verify
+#     accumulated nothing — but a hostile caller could spam /pre-verify
+#     to fill memory unbounded.
+#
+# Fix per audit option (b): delete the entire flow. ``send_code_endpoint``
+# still calls ``risk_control.verify_captcha(captcha_token)`` directly,
+# matching what the frontend already sends. The per-phone send-code
+# rate limit (1/min) is the upstream gate against captcha resubmission.
+#
+# A regression guard in tests/test_alembic_019_phone_attempts.py asserts
+# the deleted symbols don't reappear by accident.
 # ---------------------------------------------------------------------------
-
-import secrets
-import time
-import threading
-
-_captcha_passes: dict[str, float] = {}  # pass_token → expires_at (monotonic)
-_captcha_lock = threading.Lock()
-
-
-def _cleanup_expired_passes() -> None:
-    now = time.monotonic()
-    with _captcha_lock:
-        expired = [k for k, v in _captcha_passes.items() if v < now]
-        for k in expired:
-            del _captcha_passes[k]
-
-
-def issue_captcha_pass() -> str:
-    """Create a short-lived captcha pass token (5 minutes)."""
-    _cleanup_expired_passes()
-    token = secrets.token_urlsafe(32)
-    with _captcha_lock:
-        _captcha_passes[token] = time.monotonic() + 300  # 5 min
-    return token
-
-
-def consume_captcha_pass(token: str) -> bool:
-    """Check and consume a captcha pass token. Returns True if valid."""
-    now = time.monotonic()
-    with _captcha_lock:
-        expires = _captcha_passes.pop(token, None)
-    return expires is not None and expires > now
-
-
-class PreVerifyRequest(BaseModel):
-    captcha_token: str = Field(..., min_length=1, max_length=4096)
-
-
-@captcha_router.post("/pre-verify")
-async def captcha_pre_verify(body: PreVerifyRequest):
-    """Immediately verify a captcha token with Aliyun and return a pass token.
-
-    The Aliyun captchaVerifyParam must be verified within the SDK callback,
-    not stored for later. This endpoint enables that flow:
-    1. Frontend captchaVerifyCallback calls this endpoint immediately
-    2. We verify with Aliyun API (token is fresh)
-    3. Return a pass_token (5 min expiry)
-    4. Frontend stores pass_token and sends it with send-code later
-    """
-    try:
-        risk_control.verify_captcha(body.captcha_token)
-    except risk_control.CaptchaVerificationError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-
-    pass_token = issue_captcha_pass()
-    return {"ok": True, "pass_token": pass_token}
 
 
 # ---------------------------------------------------------------------------
