@@ -705,7 +705,7 @@ class JianyingDraftRunner:
         *,
         message: str | None = None,
         user_draft_root: str | None = None,
-    ) -> None:
+    ) -> bool:
         """Persist substep on JobRecord + emit JobEvent.
 
         Takes the per-job file_lock for the duration of the read-modify-write
@@ -713,25 +713,40 @@ class JianyingDraftRunner:
         critical section so a concurrent trigger() call can serialize behind
         it and still respond quickly.
 
-        P1-15b batch 4 (audit 2026-05-07): the JobRecord write goes
-        through ``store.update_job`` so a concurrent non-jianying
+        Returns ``True`` when the substep was actually written (status
+        was still ``running`` and our attempt_id is the current one).
+        Returns ``False`` when the worker no longer owns the claim —
+        callers (notably ``_do_generate``) MUST treat False as
+        "abandon attempt" and stop doing follow-up work.
+
+        P1-15b batch 4 (audit 2026-05-07) initial: the JobRecord write
+        goes through ``store.update_job`` so a concurrent non-jianying
         mutation (display rename, cancel, etc.) cannot be lost. The
         attempt_id guard now lives inside the mutator — observed under
         the JobStore lock — so a fresh trigger that flipped attempt_id
-        between our require_job and our save can't be clobbered. Mutator
-        returns ``current`` unchanged on attempt-id mismatch, which means
-        ``update_job`` writes the same bytes back — idempotent, with the
-        ``transition_happened`` flag distinguishing real updates from
-        no-ops so the JobEvent only fires when we actually moved state.
+        between our require_job and our save can't be clobbered.
+
+        P1-15b batch 4 follow-up (Codex review 6abba13): the mutator
+        ALSO requires ``jianying_draft_status == 'running'``. Otherwise
+        a stale worker can write substep updates onto a job whose draft
+        was invalidated back to idle by ``editing/commit`` (overwrite
+        invalidation only resets status, not attempt_id, so the
+        attempt_id guard alone passes for the stale worker). Returning
+        False instead of None lets ``_do_generate`` abort the worker
+        loop before invoking ``backend.write`` on stale inputs.
         """
         lock_path = self._lock_path_for(job_id)
         with file_lock(lock_path):
             transition_happened = False
             attempt_observed: str | None = None
+            status_observed: str | None = None
 
             def mutator(current: "JobRecord") -> "JobRecord":
-                nonlocal transition_happened, attempt_observed
+                nonlocal transition_happened, attempt_observed, status_observed
                 attempt_observed = current.jianying_draft_attempt_id
+                status_observed = current.jianying_draft_status
+                if current.jianying_draft_status != "running":
+                    return current
                 if (
                     current.jianying_draft_attempt_id
                     and current.jianying_draft_attempt_id != attempt_id
@@ -743,12 +758,14 @@ class JianyingDraftRunner:
             job = self._store.update_job(job_id, mutator)
             if not transition_happened:
                 logger.warning(
-                    "Substep update for %s skipped — attempt_id changed (mine=%s, current=%s)",
+                    "Substep update for %s skipped — claim no longer owned "
+                    "(mine=%s, current_attempt=%s, current_status=%s)",
                     job_id,
                     attempt_id,
                     attempt_observed,
+                    status_observed,
                 )
-                return
+                return False
             self._emit_status_event(
                 job_id,
                 substep=substep,
@@ -757,6 +774,7 @@ class JianyingDraftRunner:
                 user_draft_root=user_draft_root,
                 message=message,
             )
+            return True
 
     def _recover_orphan(self, job_id: str, *, threshold: datetime) -> bool:
         """Run orphan recovery for one job inside the per-job file_lock.
@@ -964,15 +982,28 @@ class JianyingDraftRunner:
         lock briefly on their own. Concurrent triggers for the same job
         therefore see status=="running" and return immediately rather than
         blocking on the worker.
+
+        P1-15b batch 4 follow-up (Codex review 6abba13): every
+        ``_set_substep`` now returns a bool — False means the worker no
+        longer owns the claim (status flipped off ``running`` and/or a
+        fresh trigger took the attempt_id). When that happens we abandon
+        the attempt: skip the costly ``backend.write``, skip the
+        finalize-success / mark-failed write, and exit cleanly without
+        emitting any user-visible status event. The temp draft (if any)
+        is orphaned on disk and gets cleaned up by the next trigger or
+        a cleanup pass — preferable to writing a misleading
+        ``succeeded`` / ``failed`` for content that has already been
+        invalidated by an overwrite commit.
         """
         try:
-            self._set_substep(
+            if not self._set_substep(
                 job_id,
                 attempt_id,
                 SUBSTEP_RESOLVING_ARTIFACTS,
                 message="正在整理素材",
                 user_draft_root=user_draft_root,
-            )
+            ):
+                return  # claim lost — bail before any work
             job = self._store.require_job(job_id)
 
             # 2026-05-05 D-3: ensure subtitles are whisper-aligned before
@@ -1003,49 +1034,62 @@ class JianyingDraftRunner:
 
                 backend = JianyingDraftBackend()
 
-            self._set_substep(
+            if not self._set_substep(
                 job_id,
                 attempt_id,
                 SUBSTEP_BUILDING_DRAFT,
                 message="正在写入剪映草稿",
                 user_draft_root=user_draft_root,
-            )
+            ):
+                return  # claim lost between RESOLVING and BUILDING — bail before backend.write
 
             result = backend.write(request)
 
-            self._set_substep(
+            if not self._set_substep(
                 job_id,
                 attempt_id,
                 SUBSTEP_VALIDATING_COMPATIBILITY,
                 message="正在校验草稿兼容性",
                 user_draft_root=user_draft_root,
-            )
+            ):
+                return  # claim lost during backend.write — discard result
 
             # validation_status: ok / skipped_no_engine / skipped_missing_input / failed
             if result.validation_status == "ok":
-                self._set_substep(
+                if not self._set_substep(
                     job_id,
                     attempt_id,
                     SUBSTEP_REGISTERING_ARTIFACT,
                     message="正在打包草稿",
                     user_draft_root=user_draft_root,
-                )
+                ):
+                    return  # claim lost — skip finalize
                 # Final-state write also runs in a short critical section so
                 # a concurrent trigger doesn't read a half-updated record.
                 # P1-15b batch 4: terminal write goes through update_job;
                 # attempt_id guard moves into the mutator so a fresh
                 # trigger that flipped attempt_id between the fingerprint
                 # recompute and the JobStore lock can't be clobbered.
+                # P1-15b batch 4 follow-up (Codex 6abba13): mutator also
+                # requires ``jianying_draft_status == "running"`` to defend
+                # against editing/commit overwrite invalidation that flips
+                # status back to ``idle`` while leaving attempt_id intact.
                 lock_path = self._lock_path_for(job_id)
                 with file_lock(lock_path):
                     # Recompute the fingerprint outside the JobStore lock —
                     # it's pure-read disk inspection (no race-sensitive
-                    # state). The mutator re-validates attempt_id under
-                    # the lock before applying. We use whatever JobRecord
-                    # snapshot _compute_jianying_fingerprint sees through
-                    # require_job here; if attempt_id changed concurrently
-                    # the mutator no-ops anyway.
+                    # state). The mutator re-validates ownership (status
+                    # AND attempt_id) under the lock before applying.
                     snapshot = self._store.require_job(job_id)
+                    if snapshot.jianying_draft_status != "running":
+                        logger.warning(
+                            "Final-state write skipped for %s — claim no "
+                            "longer running (status=%s); abandoning attempt %s",
+                            job_id,
+                            snapshot.jianying_draft_status,
+                            attempt_id,
+                        )
+                        return
                     if (
                         snapshot.jianying_draft_attempt_id
                         and snapshot.jianying_draft_attempt_id != attempt_id
@@ -1071,9 +1115,13 @@ class JianyingDraftRunner:
                     )
                     completed_at = _utc_now_iso()
                     transition_happened = False
+                    status_observed: str | None = None
 
                     def _finalize_success(current: "JobRecord") -> "JobRecord":
-                        nonlocal transition_happened
+                        nonlocal transition_happened, status_observed
+                        status_observed = current.jianying_draft_status
+                        if current.jianying_draft_status != "running":
+                            return current
                         if (
                             current.jianying_draft_attempt_id
                             and current.jianying_draft_attempt_id != attempt_id
@@ -1095,8 +1143,11 @@ class JianyingDraftRunner:
                     final_job = self._store.update_job(job_id, _finalize_success)
                     if not transition_happened:
                         logger.warning(
-                            "Final-state write skipped for %s — attempt_id changed",
+                            "Final-state write skipped for %s — claim no "
+                            "longer owned (status=%s, attempt=%s)",
                             job_id,
+                            status_observed,
+                            attempt_id,
                         )
                         return
                     self._emit_status_event(
@@ -1190,15 +1241,26 @@ class JianyingDraftRunner:
         non-jianying field can't be clobbered. The attempt_id guard
         moves into the mutator — observed under the JobStore lock —
         and the JobEvent fires only when ``transition_happened`` is True.
+
+        P1-15b batch 4 follow-up (Codex review 6abba13): mutator ALSO
+        requires ``jianying_draft_status == "running"``. Otherwise a
+        stale worker whose claim was invalidated by editing/commit
+        (status flipped back to ``idle``, attempt_id NOT cleared) would
+        overwrite the idle record with a spurious ``failed`` state and
+        emit a misleading user-visible failure event.
         """
         lock_path = self._lock_path_for(job_id)
         try:
             with file_lock(lock_path):
                 completed_at = _utc_now_iso()
                 transition_happened = False
+                status_observed: str | None = None
 
                 def _record_failure(current: "JobRecord") -> "JobRecord":
-                    nonlocal transition_happened
+                    nonlocal transition_happened, status_observed
+                    status_observed = current.jianying_draft_status
+                    if current.jianying_draft_status != "running":
+                        return current
                     if (
                         current.jianying_draft_attempt_id
                         and current.jianying_draft_attempt_id != attempt_id
@@ -1216,7 +1278,11 @@ class JianyingDraftRunner:
                 job = self._store.update_job(job_id, _record_failure)
                 if not transition_happened:
                     logger.warning(
-                        "Mark-failed for %s skipped — attempt_id changed", job_id
+                        "Mark-failed for %s skipped — claim no longer owned "
+                        "(status=%s, attempt=%s)",
+                        job_id,
+                        status_observed,
+                        attempt_id,
                     )
                     return
                 self._emit_status_event(

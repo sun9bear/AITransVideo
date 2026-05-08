@@ -2427,5 +2427,260 @@ class TestJianyingUpdateJobInteraction:
         )
 
 
+# ---------------------------------------------------------------------------
+# P1-15b batch 4 follow-up (Codex review 6abba13): stale jianying worker
+# must NOT write artifacts or emit success/failure once the claim has
+# been invalidated. The mutator-side guard in _set_substep /
+# _finalize_success / _mark_failed requires
+# ``jianying_draft_status == "running"`` AND attempt_id matching;
+# _do_generate bails out of backend.write the moment _set_substep
+# returns False.
+# ---------------------------------------------------------------------------
+
+
+class TestJianyingClaimOwnershipGuard:
+    """Stale-worker termination semantics.
+
+    Scenario in production: a Studio editing/commit overwrite resets
+    ``jianying_draft_status`` to ``idle`` while leaving the original
+    attempt_id in place (the runner's own claim retention contract
+    intentionally never cleared attempt_id, since the runner-side
+    status guard is the primary defense). A stale background worker
+    from the pre-commit attempt MUST observe its claim is no longer
+    owned and:
+
+      1. ``_set_substep`` must return False.
+      2. ``_do_generate`` must abandon the loop — no further
+         ``backend.write`` invocation, no finalize-success write,
+         no mark-failed write.
+      3. No ``editor.jianying_draft_zip`` artifact is published.
+      4. No ``substep=completed`` / ``status=succeeded`` JobEvent is
+         emitted (and likewise no ``failed`` event).
+    """
+
+    def test_set_substep_returns_false_when_status_idle(self, tmp_path):
+        """Mutator-side guard: status moved off running → no-op."""
+        from services.jobs.jianying_draft_runner import SUBSTEP_BUILDING_DRAFT
+
+        store = _make_store(tmp_path)
+        project_dir = _make_project_dir(tmp_path)
+        record = _make_record(
+            project_dir=str(project_dir),
+            jianying_draft_status="idle",  # invalidated by overwrite commit
+            jianying_draft_attempt_id="stale-attempt",  # leftover from old claim
+            jianying_draft_substep=None,
+        )
+        store.save_job(record)
+
+        runner = _make_runner(store)
+        result = runner._set_substep(
+            "job-test-001",
+            attempt_id="stale-attempt",  # matches but status guard wins
+            substep=SUBSTEP_BUILDING_DRAFT,
+        )
+
+        assert result is False, (
+            "P1-15b batch 4 follow-up regression: _set_substep returned "
+            "True for a stale attempt whose status was already invalidated "
+            "back to idle. status==running guard missing or ineffective."
+        )
+        persisted = store.require_job("job-test-001")
+        assert persisted.jianying_draft_status == "idle"
+        assert persisted.jianying_draft_substep is None, (
+            "P1-15b batch 4 follow-up regression: stale worker wrote a "
+            "substep onto an idle record."
+        )
+
+    def test_finalize_success_no_op_when_status_invalidated(self, tmp_path):
+        """A worker reaching _finalize_success after invalidation
+        must NOT publish jianying_draft_zip_path or flip status to
+        succeeded. The mutator-side status guard is the contract."""
+        from services.jobs.jianying_draft_runner import (
+            JIANYING_DRAFT_FINGERPRINT_SCHEMA,  # noqa: F401 — sanity import
+            SUBSTEP_COMPLETED,
+        )
+
+        store = _make_store(tmp_path)
+        project_dir = _make_project_dir(tmp_path)
+        record = _make_record(
+            project_dir=str(project_dir),
+            jianying_draft_status="running",
+            jianying_draft_attempt_id="A1",
+            jianying_draft_substep="building_draft",
+        )
+        store.save_job(record)
+
+        # Backend lets us interleave: enter backend.write, then we
+        # invalidate (status→idle), then release the backend so the
+        # worker reaches _finalize_success on a now-idle record.
+        in_backend = threading.Event()
+        invalidated = threading.Event()
+
+        def slow_write(request):
+            in_backend.set()
+            invalidated.wait(timeout=5)
+            return _make_ok_result(zip_path=str(tmp_path / "stale-draft.zip"))
+
+        backend = mock.MagicMock()
+        backend.write.side_effect = slow_write
+
+        runner = _make_runner(store, backend)
+        # Spawn worker via _run_in_background directly so we control
+        # the attempt_id from the test (skipping trigger()'s claim).
+        worker = threading.Thread(
+            target=runner._run_in_background,
+            args=("job-test-001", None, "A1"),
+            daemon=True,
+        )
+        worker.start()
+
+        assert in_backend.wait(timeout=5), (
+            "test setup wrong — backend.write was never reached"
+        )
+
+        # Simulate editing/commit overwrite invalidation: flip status
+        # back to idle, leave attempt_id in place (the bug case).
+        from dataclasses import replace as dc_replace
+
+        store.update_job(
+            "job-test-001",
+            lambda current: dc_replace(
+                current,
+                jianying_draft_status="idle",
+                jianying_draft_zip_path=None,
+                jianying_draft_substep=None,
+                # attempt_id INTENTIONALLY NOT cleared — this is
+                # exactly the case Codex flagged
+            ),
+        )
+        invalidated.set()
+        worker.join(timeout=5)
+        assert not worker.is_alive(), "worker did not exit cleanly"
+
+        final = store.require_job("job-test-001")
+        assert final.jianying_draft_status == "idle", (
+            "P1-15b batch 4 follow-up regression: stale worker flipped "
+            f"status to {final.jianying_draft_status!r} after invalidation. "
+            "Should have stayed idle (claim no longer owned)."
+        )
+        assert final.jianying_draft_zip_path is None, (
+            "P1-15b batch 4 follow-up regression: stale worker published "
+            f"jianying_draft_zip_path={final.jianying_draft_zip_path!r} "
+            "for content invalidated by commit. _finalize_success mutator "
+            "must require status==running."
+        )
+        assert final.jianying_draft_substep != SUBSTEP_COMPLETED, (
+            "P1-15b batch 4 follow-up regression: substep advanced to "
+            "completed on an invalidated record."
+        )
+
+    def test_mark_failed_no_op_when_status_invalidated(self, tmp_path):
+        """A worker that errors in backend.write AFTER invalidation
+        must NOT overwrite the idle record with ``failed`` and must
+        NOT emit a misleading ``status=failed`` event."""
+        from dataclasses import replace as dc_replace
+
+        store = _make_store(tmp_path)
+        project_dir = _make_project_dir(tmp_path)
+        record = _make_record(
+            project_dir=str(project_dir),
+            jianying_draft_status="running",
+            jianying_draft_attempt_id="A1",
+            jianying_draft_substep="building_draft",
+        )
+        store.save_job(record)
+
+        in_backend = threading.Event()
+        invalidated = threading.Event()
+
+        def failing_write(request):
+            in_backend.set()
+            invalidated.wait(timeout=5)
+            raise RuntimeError("backend exploded after invalidation")
+
+        backend = mock.MagicMock()
+        backend.write.side_effect = failing_write
+
+        runner = _make_runner(store, backend)
+        worker = threading.Thread(
+            target=runner._run_in_background,
+            args=("job-test-001", None, "A1"),
+            daemon=True,
+        )
+        worker.start()
+
+        assert in_backend.wait(timeout=5)
+
+        store.update_job(
+            "job-test-001",
+            lambda current: dc_replace(
+                current,
+                jianying_draft_status="idle",
+                jianying_draft_substep=None,
+            ),
+        )
+        invalidated.set()
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+
+        final = store.require_job("job-test-001")
+        assert final.jianying_draft_status == "idle", (
+            "P1-15b batch 4 follow-up regression: stale worker's "
+            "_mark_failed flipped status to "
+            f"{final.jianying_draft_status!r} on invalidated record. "
+            "Mutator must require status==running."
+        )
+        assert final.jianying_draft_error is None, (
+            "P1-15b batch 4 follow-up regression: stale worker wrote "
+            f"jianying_draft_error={final.jianying_draft_error!r} on "
+            "invalidated record."
+        )
+
+    def test_do_generate_skips_backend_write_when_claim_lost_early(
+        self, tmp_path
+    ):
+        """If the claim is lost between trigger()'s claim and the
+        first ``_set_substep(RESOLVING_ARTIFACTS)``, _do_generate
+        must abandon BEFORE invoking backend.write.
+
+        This is the strongest fail-fast guarantee: even the costly
+        backend operation is skipped if ownership is gone.
+        """
+        from dataclasses import replace as dc_replace
+
+        store = _make_store(tmp_path)
+        project_dir = _make_project_dir(tmp_path)
+        record = _make_record(
+            project_dir=str(project_dir),
+            # Pre-invalidated state: status==idle but attempt_id leftover.
+            # The worker will run with attempt_id="A1" but status guard
+            # rejects the very first _set_substep.
+            jianying_draft_status="idle",
+            jianying_draft_attempt_id="A1",
+        )
+        store.save_job(record)
+
+        backend = mock.MagicMock()
+        backend.write.side_effect = AssertionError(
+            "backend.write must NOT be called when claim is lost"
+        )
+
+        runner = _make_runner(store, backend)
+        runner._do_generate(
+            "job-test-001", user_draft_root=None, attempt_id="A1",
+        )
+
+        # Backend.write should never have been invoked.
+        assert backend.write.call_count == 0, (
+            "P1-15b batch 4 follow-up regression: _do_generate invoked "
+            "backend.write despite first _set_substep returning False. "
+            "Each _set_substep call site in _do_generate must check the "
+            "return value and bail on False."
+        )
+        # Status remains idle — no spurious writes.
+        final = store.require_job("job-test-001")
+        assert final.jianying_draft_status == "idle"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

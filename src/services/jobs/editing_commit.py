@@ -320,6 +320,13 @@ def _invalidate_jianying_draft_on_commit(job: JobRecord, project_dir: Path | str
     here for the docs/graphs/* references and for ad-hoc admin tooling
     that might want to clear a stale draft without driving a state
     transition. No production code path calls it as of 2026-05-07.
+
+    P1-15b batch 4 follow-up (Codex review 6abba13): also clear
+    attempt_id / substep / fingerprint. The runner's mutator-side
+    defense (status==running guard) makes attempt_id leakage harmless,
+    but leaving stale identity fields invites confusion in admin
+    tooling and reap_stale heuristics. Clearing them keeps the
+    "claim retired" contract crisp.
     """
     # Reset JobRecord fields. Caller is responsible for store.save_job(job).
     job.jianying_draft_status = "idle"
@@ -330,6 +337,12 @@ def _invalidate_jianying_draft_on_commit(job: JobRecord, project_dir: Path | str
     # Also reset user_root for consistency. User can re-enter it when
     # they re-trigger generation (it's not persisted between jobs).
     job.jianying_draft_user_root = None
+    # Clear claim identity so a stale background worker that bypassed
+    # the status guard (e.g. via legacy code path) cannot resurrect
+    # state under this attempt_id.
+    job.jianying_draft_attempt_id = None
+    job.jianying_draft_substep = None
+    job.jianying_draft_fingerprint = None
 
     # Delete on-disk artifacts. shutil.rmtree silently if missing.
     jianying_root = Path(project_dir) / "jianying"
@@ -596,12 +609,22 @@ def _commit_overwrite(
             # Reset Jianying draft fields atomically with the status
             # flip. The on-disk artifacts get rmtree-d below after
             # update_job returns (FS side-effect, deferred).
+            # P1-15b batch 4 follow-up (Codex 6abba13): clear claim
+            # identity (attempt_id / substep / fingerprint) too — a
+            # stale runner thread checks status==running first and
+            # bails, but a legacy code path or admin override that
+            # only inspects attempt_id should also see the slot
+            # vacated. The runner-side guard is the defense; clearing
+            # these here keeps the contract clean.
             jianying_draft_status="idle",
             jianying_draft_started_at=None,
             jianying_draft_completed_at=None,
             jianying_draft_error=None,
             jianying_draft_zip_path=None,
             jianying_draft_user_root=None,
+            jianying_draft_attempt_id=None,
+            jianying_draft_substep=None,
+            jianying_draft_fingerprint=None,
         )
 
     # Step 1 — atomic claim. If a concurrent cancel won, this raises
@@ -880,12 +903,22 @@ def _commit_copy_as_new(
         # draft is for the source's output; the copy has its own output and
         # needs a fresh draft if the user wants one. (Without explicit reset,
         # replace() silently inherits source's jianying_draft_* fields.)
+        # P1-15b batch 4 follow-up (Codex 6abba13): also clear claim
+        # identity (attempt_id / substep / fingerprint) on the new copy
+        # so its idle slot is unambiguously vacant. No source-job worker
+        # writes here (different job_id keys a different lock + record),
+        # but admin tooling and reap_stale heuristics that scan all
+        # jobs see a clean record instead of an "idle but with claim
+        # identity" half-state.
         jianying_draft_status="idle",
         jianying_draft_started_at=None,
         jianying_draft_completed_at=None,
         jianying_draft_error=None,
         jianying_draft_zip_path=None,
         jianying_draft_user_root=None,
+        jianying_draft_attempt_id=None,
+        jianying_draft_substep=None,
+        jianying_draft_fingerprint=None,
     )
     # P1-15b batch 3: first-write on a fresh job_id; use update_job
     # with initial=new_record so the write happens under the new
