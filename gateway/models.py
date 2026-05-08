@@ -652,6 +652,21 @@ class PricingConfigVersion(Base):
         UniqueConstraint(
             "version", name="uq_pricing_config_versions_version",
         ),
+        # P1-11c follow-up² (Codex review 6019beb): even with the
+        # version UNIQUE above, two publish requests can interleave at
+        # PostgreSQL READ COMMITTED such that they archive different
+        # rows and INSERT distinct versions, leaving multiple
+        # status='active' rows. Partial UNIQUE INDEX on status WHERE
+        # status='active' enforces single-active at the schema level;
+        # second INSERT fails with IntegrityError and pricing_admin's
+        # existing handler maps that to HTTP 409. See migration 018
+        # for the full race walkthrough.
+        Index(
+            "uq_pricing_config_versions_active_status",
+            "status",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+        ),
     )
 
 

@@ -178,22 +178,35 @@ async def save_draft(body: DraftRequest, user: User | None = Depends(get_current
 async def publish_pricing(body: PublishRequest, user: User | None = Depends(get_current_user)):
     """Publish a new active pricing version.
 
-    Concurrency: same UNIQUE-on-version constraint as ``save_draft``
-    above. Two admins simultaneously clicking "Publish" both archive
-    the current active row (idempotent UPDATE) then both compute
-    ``max+1=N+1`` and both INSERT — one succeeds, the other gets
-    ``IntegrityError`` on commit and is surfaced as HTTP 409 Conflict.
+    Concurrency contract:
 
-    Note: even though publish does multiple statements
-    (UPDATE active→archived, UPDATE draft→archived, INSERT new active),
-    the entire sequence is one transaction. PostgreSQL rolls back the
-    whole transaction when the INSERT trips UNIQUE — the archive
-    UPDATEs do NOT partially commit. So the loser of the race observes
-    no state change; the winner's transaction is the only one that
+    Two distinct DB-level invariants protect against the publish race:
+
+    1. **UNIQUE on ``version``** (alembic 017 / P1-11c): blocks two
+       admins from inserting rows with the same version number when
+       both compute ``MAX(version)+1`` against the same snapshot.
+    2. **Partial UNIQUE INDEX on ``status WHERE status='active'``**
+       (alembic 018 / P1-11c follow-up²): blocks the more subtle
+       READ COMMITTED interleaving where two publishers archive
+       different rows and end up inserting distinct versions both
+       at status='active'. Without this, the version UNIQUE alone
+       would allow the table to land with two active rows.
+
+    Either constraint surfacing on commit raises ``IntegrityError``
+    and is translated to HTTP 409 Conflict here. We don't disambiguate
+    which constraint fired — both are concurrency conflicts and the
+    user-visible remediation (refresh + retry) is identical.
+
+    Transaction atomicity: the publish sequence is
+    UPDATE active→archived → UPDATE draft→archived →
+    SELECT max(version) → INSERT new active. PostgreSQL rolls back
+    the entire transaction when the final INSERT trips either UNIQUE,
+    so the archive UPDATEs do NOT partially commit. The loser of the
+    race observes no state change; only the winner's transaction
     lands.
 
     Audit ref: docs/audits/2026-05-07-comprehensive-codebase-audit.md
-    P1-11c follow-up — IntegrityError → 409.
+    P1-11c (D-HIGH-3) follow-up + follow-up².
     """
     _require_admin(user)
 
@@ -262,13 +275,22 @@ async def publish_pricing(body: PublishRequest, user: User | None = Depends(get_
         try:
             await db.commit()
         except IntegrityError:
-            # Another admin's publish landed first against UNIQUE(version).
+            # Another admin's publish landed first. Two possible
+            # constraint hits, both indistinguishable to the caller:
+            #   * UNIQUE(version) — both publishers picked the same
+            #     N+1 version number (017 / P1-11c).
+            #   * Partial UNIQUE on (status WHERE status='active') —
+            #     publishers picked DIFFERENT version numbers but both
+            #     ended up inserting status='active' (018 / P1-11c
+            #     follow-up²).
             # The whole transaction (including the archive UPDATEs) is
             # rolled back atomically; this caller observes no state change.
             await db.rollback()
             logger.info(
-                "[pricing] publish concurrent UNIQUE conflict on version=%d "
-                "(user=%s); returning 409 to caller.",
+                "[pricing] publish concurrent UNIQUE conflict at "
+                "next_version=%d (user=%s); returning 409 to caller. "
+                "Constraint may be uq_pricing_config_versions_version "
+                "or uq_pricing_config_versions_active_status.",
                 max_ver + 1,
                 user.id,
             )

@@ -429,6 +429,78 @@ def test_publish_pricing_concurrent_unique_conflict_returns_409():
         pricing_admin.invalidate_runtime_pricing_cache = original_invalidate
 
 
+def test_publish_pricing_active_status_conflict_returns_409():
+    """P1-11c follow-up² (Codex review 6019beb): the active-status
+    partial UNIQUE index (alembic 018) catches the interleaving where
+    two publishers picked DIFFERENT version numbers but both ended up
+    inserting status='active'. Constraint violates on commit; the
+    existing IntegrityError handler treats it identically to the
+    version-collision case (same response, no special-case branch).
+
+    This test simulates B's flow: B reads max=N (A already inserted
+    N+1 active in a transaction B can't see during its UPDATE phase),
+    inserts N+2 active, commits — and PostgreSQL rejects with the
+    partial UNIQUE on active. The test mock raises IntegrityError on
+    commit to exercise the handler regardless of which constraint
+    fired in production.
+    """
+    _ensure_pricing_admin_imports()
+    import pricing_admin
+    from fastapi import HTTPException
+
+    user = _make_admin_user()
+
+    # Use the same _make_db_for_publish helper but with a higher max
+    # version so the test reflects B's "I see A's already-committed
+    # row" snapshot. The IntegrityError shape is opaque — we just
+    # need it to fire on commit; the handler does not inspect the
+    # constraint name.
+    db = _make_db_for_publish(max_version=8, raise_integrity=True)
+
+    original_session = pricing_admin.async_session
+    pricing_admin.async_session = _make_async_session_ctx(db)
+
+    snapshot_calls: list[object] = []
+    original_snapshot = pricing_admin.write_runtime_snapshot
+    original_invalidate = pricing_admin.invalidate_runtime_pricing_cache
+    pricing_admin.write_runtime_snapshot = lambda p: snapshot_calls.append(p)
+    invalidate_calls: list[None] = []
+    pricing_admin.invalidate_runtime_pricing_cache = lambda: invalidate_calls.append(None)
+
+    try:
+        with pytest.raises(HTTPException) as excinfo:
+            _run(pricing_admin.publish_pricing(
+                pricing_admin.PublishRequest(
+                    payload=build_default_pricing_payload().model_dump(),
+                    change_note="B's publish racing A's",
+                ),
+                user=user,
+            ))
+        assert excinfo.value.status_code == 409, (
+            "P1-11c follow-up² regression: active-status conflict did "
+            "not produce 409. The handler must be CONSTRAINT-AGNOSTIC "
+            "— both UNIQUE(version) and the partial UNIQUE on "
+            "(status WHERE active) surface IntegrityError, both must "
+            "map to 409 without inspecting the constraint name. Got "
+            f"status={excinfo.value.status_code}."
+        )
+        assert "版本号冲突" in excinfo.value.detail
+        # Same atomicity guarantee as the version-collision case:
+        # rollback fires, runtime snapshot does NOT.
+        assert db.rollback.await_count == 1
+        assert snapshot_calls == [], (
+            "P1-11c follow-up² regression: write_runtime_snapshot was "
+            "called when commit failed against the active-status "
+            "partial UNIQUE. This would publish a runtime config "
+            "inconsistent with the rolled-back DB transaction."
+        )
+        assert invalidate_calls == []
+    finally:
+        pricing_admin.async_session = original_session
+        pricing_admin.write_runtime_snapshot = original_snapshot
+        pricing_admin.invalidate_runtime_pricing_cache = original_invalidate
+
+
 def test_publish_pricing_happy_path_writes_snapshot():
     """No-regression: when publish commit succeeds, runtime snapshot
     is written and cache invalidated."""
