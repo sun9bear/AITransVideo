@@ -196,7 +196,13 @@ def test_aligner_short_force_dsp_long_text_still_requires_review(
         str(tmp_path / "aligned"),
     )
 
-    assert aligned.alignment_method == "capped_dsp_overflow"
+    # Long content (>SHORT_LISTENABLE_DSP_MAX_SPOKEN_CHARS=28) deliberately
+    # bypasses the listenable-cap path: timeline alignment beats listenability
+    # for real content, so the segment goes to uncapped force_dsp. The chars
+    # threshold is the same constant that gates "medium" severity, so crossing
+    # it also bumps severity to "high" via the long_or_contentful_segment
+    # branch in _classify_force_dsp_review — review is still required.
+    assert aligned.alignment_method == "force_dsp"
     assert aligned.needs_review is True
     assert segment.needs_review is True
     assert segment.force_dsp_severity == "high"

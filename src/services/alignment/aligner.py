@@ -708,6 +708,7 @@ class SegmentAligner:
                 segment=segment,
                 actual_duration_ms=current_actual_duration_ms,
                 target_duration_ms=target_duration_ms,
+                alignment_method=alignment_method,
             )
             segment.force_dsp_severity = severity
             segment.force_dsp_review_reason = review_reason
@@ -1026,15 +1027,26 @@ class SegmentAligner:
         segment: DubbingSegment,
         actual_duration_ms: int,
         target_duration_ms: int,
+        alignment_method: str = "",
     ) -> tuple[str, bool, str]:
         """Classify final force-DSP risk without another LLM rewrite.
 
         Only very short, low-information backchannels are auto-denoised from
         manual review. 2-5s force-DSP is still surfaced, but marked medium so
         downstream reports can separate it from genuinely long/high-risk drift.
+
+        ``capped_dsp_underflow`` always classifies as high severity regardless
+        of target/chars: that method only fires when the source TTS was too
+        short for the slot AND the slowdown hit the 0.67x floor with ≥250ms of
+        silence padding (see ``_last_dsp_fit_was_capped_underflow``). The cap
+        firing is itself a strong audit signal — a short slot with little text
+        can still produce 70%-silence output that needs human attention.
         """
         if target_duration_ms <= 0 or actual_duration_ms <= 0:
             return "high", False, "invalid_duration"
+
+        if alignment_method == "capped_dsp_underflow":
+            return "high", False, "capped_underflow"
 
         spoken_chars = count_spoken_chars(segment.cn_text)
         first_pass_ratio = actual_duration_ms / target_duration_ms
