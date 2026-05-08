@@ -900,7 +900,18 @@ def test_start_cancel_during_popen_kills_orphan_and_skips_register(
 
     runner._popen_factory = _injecting_popen_factory
 
-    result = runner.start(job)
+    # P1-15b batch 3 follow-up⁴ (Codex review of 3593416): start()
+    # MUST raise RunnerStartTerminalError after killing the orphan
+    # rather than returning a (cancelled) JobRecord. Caller layer
+    # (commit overwrite via submit_job_from_existing_project_dir)
+    # ignores start()'s return value, so returning would let commit
+    # treat the race as a successful submit and respond 200.
+    import pytest as _pytest
+    from services.jobs.process_runner import RunnerStartTerminalError
+
+    with _pytest.raises(RunnerStartTerminalError) as exc_info:
+        runner.start(job)
+    assert exc_info.value.observed_status == JOB_STATUS_CANCELLED
 
     # The post-Popen check must have detected _deleted_jobs and killed
     # the orphan subprocess.
@@ -925,9 +936,6 @@ def test_start_cancel_during_popen_kills_orphan_and_skips_register(
         f"P1-15b batch 3 follow-up³ regression: status no longer "
         f"cancelled after start (was {final.status!r})"
     )
-
-    # runner.start returns the (cancelled) record.
-    assert result.status == JOB_STATUS_CANCELLED
 
     # _deleted_jobs marker was cleaned up so a future fresh start of
     # the same job_id is not falsely treated as cancelled.

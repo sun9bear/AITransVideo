@@ -520,6 +520,77 @@ def test_overwrite_race_loss_does_not_mutate_filesystem(tmp_path: Path) -> None:
     assert runner.calls == []
 
 
+def test_overwrite_cancel_during_popen_raises_commit_error_not_success(
+    tmp_path: Path,
+) -> None:
+    """P1-15b batch 3 follow-up⁴ (Codex review of 3593416):
+    when cancel lands DURING runner.start's Popen window (between
+    update_job(_start_mutator) writing status=running and the new
+    process being registered in _processes), runner.start now kills
+    the orphan subprocess AND raises RunnerStartTerminalError. This
+    test verifies that ``_commit_overwrite`` propagates that as a
+    CommitPipelineError instead of returning a success dict.
+
+    Without the raise, ``submit_job_from_existing_project_dir``
+    ignores runner.start's return value and ``_commit_overwrite``
+    treats normal return as success — so POST /editing/commit would
+    respond 200 even though the user's cancel won and no pipeline
+    actually started.
+    """
+    from dataclasses import replace as _replace
+    from services.jobs.editing_commit import (
+        _commit_overwrite,
+        CommitPipelineError,
+    )
+    from services.jobs.models import JOB_STATUS_CANCELLED
+    from services.jobs.process_runner import RunnerStartTerminalError
+
+    store, record, project_dir = _build_editing_job_with_diff(tmp_path)
+
+    class _CancelDuringPopenRunner:
+        """Simulates: ProcessJobRunner.start raises
+        RunnerStartTerminalError after killing the orphan, exactly
+        as the post-Popen cleanup branch now does."""
+        def __init__(self, store):
+            self.store = store
+            self.calls: list[dict] = []
+
+        def start(self, record_arg, *, continue_existing=False):
+            self.calls.append({"job_id": record_arg.job_id})
+            # Simulate the cancel landing during Popen, then the
+            # post-Popen cleanup raising.
+            cancelled = _replace(
+                self.store.require_job(record_arg.job_id),
+                status=JOB_STATUS_CANCELLED,
+                current_stage="failed",
+                progress_message="Job cancelled by user.",
+            )
+            self.store.save_job(cancelled)
+            raise RunnerStartTerminalError(
+                record_arg.job_id, JOB_STATUS_CANCELLED,
+            )
+
+    runner = _CancelDuringPopenRunner(store)
+
+    # MUST raise CommitPipelineError, NOT return a success dict.
+    with pytest.raises(CommitPipelineError, match="terminal|refused"):
+        _commit_overwrite(record, store, runner, project_dir)
+
+    # Status is cancelled (the cancel handler's write is preserved;
+    # commit overwrite's exception path does NOT roll status back to
+    # editing because RunnerStartTerminalError is the trigger).
+    final = store.require_job("job_commit")
+    assert final.status == JOB_STATUS_CANCELLED, (
+        f"P1-15b batch 3 follow-up⁴ regression: commit overwrite "
+        f"rolled status back to {final.status!r} after a "
+        f"RunnerStartTerminalError. The cancel was the user's intent — "
+        f"don't resurrect the editing state."
+    )
+
+    # runner.start was attempted exactly once.
+    assert len(runner.calls) == 1
+
+
 def test_overwrite_concurrent_cancel_after_claim_does_not_resurrect(
     tmp_path: Path,
 ) -> None:

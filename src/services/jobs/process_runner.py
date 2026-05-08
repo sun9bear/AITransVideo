@@ -325,10 +325,17 @@ class ProcessJobRunner:
                 )
             with self._lock:
                 self._deleted_jobs.discard(running_job.job_id)
-            # Return whatever the cancel handler last wrote (status
-            # should be 'cancelled'). Caller of start() can branch on
-            # the returned status if it needs to.
-            return self.store.require_job(running_job.job_id)
+            # P1-15b batch 3 follow-up⁴ (Codex review of 3593416):
+            # caller layer (_commit_overwrite via
+            # submit_job_from_existing_project_dir) ignores start()'s
+            # return value, so returning a JobRecord here would let
+            # commit treat the cancel-during-Popen race as a successful
+            # submit and respond 200 to POST /editing/commit. RAISE
+            # the terminal error so commit's existing
+            # ``except RunnerStartTerminalError`` branch surfaces a
+            # clean CommitPipelineError instead.
+            observed = self.store.require_job(running_job.job_id).status
+            raise RunnerStartTerminalError(running_job.job_id, observed)
 
         monitor = threading.Thread(
             target=self._monitor_process,
