@@ -461,7 +461,7 @@ def translate_lines(self, lines):
 **ROI**: 高（5 分钟省到 1 分钟，长视频用户最有感）
 **风险**: 高（付费 API 并发 + 可能的上下文依赖 + 限流）
 
-**推荐**: 延后，需要单独的“翻译流水线 cost spike 防御 + provider state isolation”专项。
+**推荐**: 延后，需要单独的“翻译流水线 rate-limit burst 防御 + provider state isolation”专项。
 
 ---
 
