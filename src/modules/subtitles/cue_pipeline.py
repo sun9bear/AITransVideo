@@ -363,6 +363,96 @@ def _derive_en_text(block: SemanticBlock, caption_map: dict[int, str]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Cross-block overlap clamp (2026-05-08)
+# ---------------------------------------------------------------------------
+
+# Minimum gap inserted between adjacent cues when we have to clamp the
+# later cue's start. 1ms is enough to satisfy pyJianYingDraft's strict
+# SegmentOverlap check (which is "any overlap fails" without tolerance);
+# larger values would unnecessarily eat into the later cue's duration.
+_CUE_OVERLAP_GAP_MS = 1
+
+
+def _clamp_cross_block_cue_overlaps(
+    cues: list[SubtitleCue],
+    min_display_ms: int,
+) -> list[SubtitleCue]:
+    """Walk cues in start_ms order; clamp any later cue that starts
+    before its predecessor ends.
+
+    Returns a NEW list with adjusted cues (mutating the originals
+    would change shared block_specs / report-bound state in surprising
+    ways). The pipeline result still preserves cue identity (cue_id /
+    block_id / text / source) — only ``start_ms`` and possibly
+    ``end_ms`` are nudged.
+
+    Why we touch ``end_ms`` too: if clamping ``start_ms`` would crush
+    the cue's display duration below ``min_display_ms``, we extend
+    ``end_ms`` to keep the cue readable. Yes this can cascade — the
+    extended cue may now overlap with the cue AFTER it. The loop is
+    sequential precisely so the next iteration sees the updated end
+    and clamps again. Worst case the whole tail of the timeline
+    shifts by O(min_display_ms × overlap_count) milliseconds, which
+    in practice is dominated by a few real-speech interruptions
+    (typically 1-3 across a whole task).
+
+    Empty / single-element input: returned as-is (nothing to clamp).
+    """
+    if len(cues) < 2:
+        return list(cues)
+
+    # Sort a SHALLOW copy by start_ms; ties broken by end_ms (longer
+    # cue first so it owns the boundary). dataclass(slots=True)
+    # instances are hashable-by-id; we rebuild by attribute below.
+    sorted_cues = sorted(cues, key=lambda c: (c.start_ms, -c.end_ms))
+
+    out: list[SubtitleCue] = []
+    prev_end: int | None = None
+
+    for c in sorted_cues:
+        new_start = c.start_ms
+        new_end = c.end_ms
+
+        if prev_end is not None and new_start < prev_end:
+            new_start = prev_end + _CUE_OVERLAP_GAP_MS
+            # If the clamp crushed duration below min_display_ms,
+            # push the end out so the cue stays readable. We accept
+            # that this MIGHT now overlap the next cue — the next
+            # iteration handles that cascade.
+            if new_end - new_start < min_display_ms:
+                new_end = new_start + min_display_ms
+            logger.debug(
+                "cue_pipeline: clamped cross-block overlap on cue %s "
+                "(block %s): start %d→%d end %d→%d",
+                c.cue_id, c.block_id, c.start_ms, new_start, c.end_ms, new_end,
+            )
+
+        if new_start != c.start_ms or new_end != c.end_ms:
+            # Build an adjusted copy preserving every other field.
+            out.append(
+                SubtitleCue(
+                    cue_id=c.cue_id,
+                    block_id=c.block_id,
+                    speaker_id=c.speaker_id,
+                    speaker_name=c.speaker_name,
+                    text=c.text,
+                    en_text=c.en_text,
+                    start_ms=new_start,
+                    end_ms=new_end,
+                    source=c.source,
+                    needs_review=c.needs_review,
+                    review_reason=c.review_reason,
+                )
+            )
+        else:
+            out.append(c)
+
+        prev_end = new_end
+
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -489,6 +579,22 @@ def build_subtitle_cues_for_blocks(
                 tts_input_cn_text=block.tts_input_cn_text,
             )
         )
+
+    # 2026-05-08: clamp cross-block cue overlaps. Source segments can
+    # legitimately overlap when speakers interrupt each other in real
+    # audio (e.g. "对吧?" / "没错" interview banter). Audio is fine
+    # because per-speaker tracks render in parallel, but the SUBTITLE
+    # track is single-laned — overlapping cues trigger SegmentOverlap
+    # in pyJianYingDraft / cause double-renders in any single-track
+    # SRT consumer. The cue_validator's existing timing_overlap check
+    # only catches WITHIN-block overlap; here we catch the cross-block
+    # case the validator misses. Algorithm: sort by start_ms, walk
+    # adjacent pairs, clamp later cue's start to earlier cue's end +
+    # epsilon. If clamp would crush duration below min_display_ms,
+    # also push the later cue's end out so duration is preserved
+    # (rather than dropping the cue entirely — losing user-visible
+    # text is worse than a small global timing nudge).
+    all_cues = _clamp_cross_block_cue_overlaps(all_cues, min_display_ms)
 
     report = validate_cues(
         block_specs=block_specs,
