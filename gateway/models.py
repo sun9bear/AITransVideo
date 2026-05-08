@@ -686,6 +686,14 @@ class PricingConfigVersion(Base):
 
 class Session(Base):
     __tablename__ = "sessions"
+    __table_args__ = (
+        # P2-24 / D-HIGH-2 (audit 2026-05-07, migration 021):
+        # ``auth.create_session`` runs ``DELETE FROM sessions WHERE
+        # expires_at <= NOW()`` on every login. Without this index the
+        # delete is a sequential scan, which becomes a per-login
+        # latency cliff after the table accumulates 10k+ rows.
+        Index("idx_sessions_expires_at", "expires_at"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -700,3 +708,5 @@ class Session(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
     )
+
+
