@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, Query, Request, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import risk_control
 from auth import require_auth
 from database import get_db
 from models import User, UserVoice
@@ -165,9 +166,27 @@ async def probe_user_voice(
     Body: {voice_id, label?, tts_provider?}
     The voice does NOT need to exist in user_voices yet (supports the
     "add voice" modal pre-validation flow).
+
+    P2-23 (audit 2026-05-07): per-user rate limited to 10/min + 100/day.
+    Each probe synthesises against MiniMax / CosyVoice / VolcEngine
+    paid TTS, so without a limit a logged-in attacker could spend the
+    platform's TTS budget at line-rate. The check runs BEFORE the
+    paid call; the stamp runs AFTER a non-empty result so flaky
+    provider returns don't consume the user's daily quota.
     """
     if user is None:
         return _json(401, {"error": "unauthorized"})
+
+    # Rate-limit guard. Per-user window (auth-required endpoint, no IP key).
+    try:
+        risk_control.check_voice_probe_allowed(str(user.id))
+    except risk_control.RateLimitExceeded as exc:
+        return _json(429, {
+            "error": "rate_limited",
+            "scope": exc.scope,
+            "message": exc.message,
+        })
+
     body = await _read_body(request)
     voice_id = str(body.get("voice_id", "")).strip()
     if not voice_id:
@@ -200,6 +219,10 @@ async def probe_user_voice(
 
     if not audio_bytes:
         return _json(502, {"error": "probe_failed", "message": "empty audio"})
+
+    # Stamp AFTER a successful paid call so flaky provider failures
+    # (502 / empty audio) don't tick the daily counter against the user.
+    risk_control.record_voice_probe(str(user.id))
 
     audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
     return _json(200, {

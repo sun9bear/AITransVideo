@@ -246,6 +246,76 @@ def record_login_failure(account: str, client_ip: str | None) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Voice probe rate limit (P2-23, audit 2026-05-07)
+# ---------------------------------------------------------------------------
+# ``/gateway/user-voices/probe`` synthesises a short TTS sample (MiniMax /
+# CosyVoice / VolcEngine — all paid by-the-call). Pre-fix the endpoint had
+# no rate limit, so a logged-in attacker could call it in a tight loop and
+# burn the platform's TTS quota for ~zero cost. Each probe is 10-30 chars
+# and ~5-10s synth wall time, so the absolute-cost ceiling per request is
+# small, but a malicious script can still spend $$ at line-rate.
+#
+# Two independent windows:
+#   * per-user 60s window, 10 calls — covers normal "I want to compare a
+#     few voices" flow (admin UI試聽 button); blocks loops.
+#   * per-user 24h window, 100 calls — covers heavier exploration over a
+#     day; the daily ceiling is the cost-cap.
+#
+# Per-user (NOT per-IP) because the endpoint is auth-required; abuse maps
+# to a real account. NAT'd shared IPs would penalize legitimate users if
+# we keyed on IP.
+
+_VOICE_PROBE_SHORT_WINDOW = 60       # seconds
+_VOICE_PROBE_SHORT_LIMIT = 10
+_VOICE_PROBE_DAY_WINDOW = 86_400     # seconds (24h)
+_VOICE_PROBE_DAY_LIMIT = 100
+
+_voice_probe_buf: dict[str, deque[float]] = defaultdict(deque)
+
+
+def check_voice_probe_allowed(user_id: str) -> None:
+    """Raise RateLimitExceeded when a fresh /user-voices/probe should be
+    rejected. Call BEFORE invoking the paid TTS provider; pair with
+    ``record_voice_probe`` AFTER (or before) to stamp the timestamp.
+
+    Per-user only — the endpoint requires auth, so the user_id is the
+    natural rate-limit key.
+    """
+    if not user_id:
+        return
+    now = time.monotonic()
+    buf = _voice_probe_buf[user_id]
+    # Prune to the larger window first; any timestamp older than the day
+    # window is irrelevant to either limit.
+    _prune(buf, now, _VOICE_PROBE_DAY_WINDOW)
+    if _count_within(buf, now, _VOICE_PROBE_SHORT_WINDOW) >= _VOICE_PROBE_SHORT_LIMIT:
+        raise RateLimitExceeded(
+            scope="voice_probe_short",
+            message="试听过于频繁,请稍后再试",
+        )
+    if len(buf) >= _VOICE_PROBE_DAY_LIMIT:
+        raise RateLimitExceeded(
+            scope="voice_probe_day",
+            message="今日试听次数已达上限,请明日再试",
+        )
+
+
+def record_voice_probe(user_id: str) -> None:
+    """Stamp a successful /user-voices/probe attempt. Call AFTER the paid
+    TTS provider returned a non-empty audio buffer; failures (502 etc.)
+    should NOT be stamped — otherwise a flaky provider would consume the
+    user's daily quota."""
+    if not user_id:
+        return
+    _voice_probe_buf[user_id].append(time.monotonic())
+
+
+def reset_voice_probe_rate_limits() -> None:
+    """Test-support helper: wipe all voice-probe rate-limit buffers."""
+    _voice_probe_buf.clear()
+
+
+# ---------------------------------------------------------------------------
 # Captcha
 # ---------------------------------------------------------------------------
 
