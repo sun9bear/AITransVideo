@@ -277,8 +277,19 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                       try {
                         const formData = new FormData()
                         formData.append("file", file)
+                        // P2-18E (audit 2026-05-07, F-HIGH-3): send the
+                        // session cookie. Pre-fix the upload-video fetch
+                        // omitted ``credentials``, which on browsers
+                        // configured to NOT send cookies cross-site by
+                        // default (Safari ITP, some Chromium privacy
+                        // modes, Edge with strict tracking prevention)
+                        // landed at gateway as anonymous → 401. Other
+                        // mutating endpoints in this codebase already
+                        // pass ``credentials: 'include'``; aligning
+                        // here closes the inconsistency.
                         const response = await fetch("/gateway/upload-video", {
                           method: "POST",
+                          credentials: "include",
                           body: formData,
                         })
                         if (!response.ok) {
