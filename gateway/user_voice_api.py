@@ -170,16 +170,28 @@ async def probe_user_voice(
     P2-23 (audit 2026-05-07): per-user rate limited to 10/min + 100/day.
     Each probe synthesises against MiniMax / CosyVoice / VolcEngine
     paid TTS, so without a limit a logged-in attacker could spend the
-    platform's TTS budget at line-rate. The check runs BEFORE the
-    paid call; the stamp runs AFTER a non-empty result so flaky
-    provider returns don't consume the user's daily quota.
+    platform's TTS budget at line-rate.
+
+    P2-23 follow-up (Codex review 2a9c529): the v0 "check before /
+    record after" split was vulnerable to concurrent burst — N
+    coroutines all passed the check before any record stamped, so all
+    N hit the paid provider in parallel. v1 closes the hole with
+    reserve-before-paid-call + refund-on-failure semantics: the
+    reservation lands atomically inside the rate-limit lock BEFORE
+    the paid call, so concurrent reservers correctly observe each
+    other's slots; refund rolls the slot back when the provider
+    returns 5xx / empty audio so flaky providers don't consume the
+    user's daily quota.
     """
     if user is None:
         return _json(401, {"error": "unauthorized"})
 
-    # Rate-limit guard. Per-user window (auth-required endpoint, no IP key).
+    # Reserve a probe slot atomically BEFORE the paid call. Concurrent
+    # callers see each other's reservations under the lock — the check
+    # + append are inseparable, so a burst of 100 simultaneous requests
+    # admits exactly the limit (10) and rejects the rest with 429.
     try:
-        risk_control.check_voice_probe_allowed(str(user.id))
+        reservation = risk_control.reserve_voice_probe(str(user.id))
     except risk_control.RateLimitExceeded as exc:
         return _json(429, {
             "error": "rate_limited",
@@ -187,52 +199,71 @@ async def probe_user_voice(
             "message": exc.message,
         })
 
-    body = await _read_body(request)
-    voice_id = str(body.get("voice_id", "")).strip()
-    if not voice_id:
-        return _json(400, {"error": "voice_id is required"})
-    label = str(body.get("label", "")).strip() or voice_id
-    raw_provider = str(body.get("tts_provider", "")).strip() or None
-    provider = _normalize_tts_provider(raw_provider) if raw_provider else "minimax"
-    if provider is None:
-        return _json(400, {"error": "unsupported_provider"})
-    model = _DEFAULT_CALIBRATION_MODEL[provider]
-
-    sample_text = f"你好，我是{label}，欢迎使用视频翻译服务。"
-
-    from voice_speed_calibrator import _DEFAULT_SYNTH_FNS
-
-    synth_fn = _DEFAULT_SYNTH_FNS.get(provider)
-    if synth_fn is None:
-        return _json(400, {"error": f"no synth function for provider {provider}"})
-
-    import base64
-
     try:
-        audio_bytes = await asyncio.to_thread(synth_fn, sample_text, voice_id, model)
-    except Exception as exc:
-        logger.warning("[probe] synth failed for voice %s: %s", voice_id, exc)
-        return _json(502, {
-            "error": "probe_failed",
-            "message": str(exc)[:300],
+        body = await _read_body(request)
+        voice_id = str(body.get("voice_id", "")).strip()
+        if not voice_id:
+            # Refund: bad-input rejections shouldn't tick the user's
+            # quota — they didn't reach the paid provider.
+            risk_control.refund_voice_probe(str(user.id), reservation)
+            return _json(400, {"error": "voice_id is required"})
+        label = str(body.get("label", "")).strip() or voice_id
+        raw_provider = str(body.get("tts_provider", "")).strip() or None
+        provider = (
+            _normalize_tts_provider(raw_provider) if raw_provider else "minimax"
+        )
+        if provider is None:
+            risk_control.refund_voice_probe(str(user.id), reservation)
+            return _json(400, {"error": "unsupported_provider"})
+        model = _DEFAULT_CALIBRATION_MODEL[provider]
+
+        sample_text = f"你好，我是{label}，欢迎使用视频翻译服务。"
+
+        from voice_speed_calibrator import _DEFAULT_SYNTH_FNS
+
+        synth_fn = _DEFAULT_SYNTH_FNS.get(provider)
+        if synth_fn is None:
+            risk_control.refund_voice_probe(str(user.id), reservation)
+            return _json(
+                400, {"error": f"no synth function for provider {provider}"}
+            )
+
+        import base64
+
+        try:
+            audio_bytes = await asyncio.to_thread(
+                synth_fn, sample_text, voice_id, model
+            )
+        except Exception as exc:
+            logger.warning(
+                "[probe] synth failed for voice %s: %s", voice_id, exc
+            )
+            risk_control.refund_voice_probe(str(user.id), reservation)
+            return _json(502, {
+                "error": "probe_failed",
+                "message": str(exc)[:300],
+            })
+
+        if not audio_bytes:
+            risk_control.refund_voice_probe(str(user.id), reservation)
+            return _json(
+                502, {"error": "probe_failed", "message": "empty audio"}
+            )
+
+        audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
+        return _json(200, {
+            "ok": True,
+            "audio_base64": audio_b64,
+            "audio_format": "wav",
+            "text": sample_text,
+            "voice_id": voice_id,
+            "provider": provider,
         })
-
-    if not audio_bytes:
-        return _json(502, {"error": "probe_failed", "message": "empty audio"})
-
-    # Stamp AFTER a successful paid call so flaky provider failures
-    # (502 / empty audio) don't tick the daily counter against the user.
-    risk_control.record_voice_probe(str(user.id))
-
-    audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
-    return _json(200, {
-        "ok": True,
-        "audio_base64": audio_b64,
-        "audio_format": "wav",
-        "text": sample_text,
-        "voice_id": voice_id,
-        "provider": provider,
-    })
+    except Exception:
+        # Defensive: any unexpected exception escaping the body refunds
+        # the slot so a code-bug doesn't burn the user's quota.
+        risk_control.refund_voice_probe(str(user.id), reservation)
+        raise
 
 
 @router.delete("/user-voices/{voice_id}")

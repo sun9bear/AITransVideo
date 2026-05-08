@@ -246,24 +246,33 @@ def record_login_failure(account: str, client_ip: str | None) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Voice probe rate limit (P2-23, audit 2026-05-07)
+# Voice probe rate limit (P2-23, audit 2026-05-07; Codex follow-up)
 # ---------------------------------------------------------------------------
 # ``/gateway/user-voices/probe`` synthesises a short TTS sample (MiniMax /
 # CosyVoice / VolcEngine — all paid by-the-call). Pre-fix the endpoint had
-# no rate limit, so a logged-in attacker could call it in a tight loop and
-# burn the platform's TTS quota for ~zero cost. Each probe is 10-30 chars
-# and ~5-10s synth wall time, so the absolute-cost ceiling per request is
-# small, but a malicious script can still spend $$ at line-rate.
+# no rate limit; a logged-in attacker could spam at line-rate.
 #
-# Two independent windows:
-#   * per-user 60s window, 10 calls — covers normal "I want to compare a
-#     few voices" flow (admin UI試聽 button); blocks loops.
-#   * per-user 24h window, 100 calls — covers heavier exploration over a
-#     day; the daily ceiling is the cost-cap.
+# v0 (Codex review of 2a9c529): the "check before / record after" split
+# was vulnerable to concurrent burst — N coroutines all pass the check
+# while no record has stamped yet, and all N hit the paid provider before
+# anyone ticks the counter. v1 closes the burst hole with a
+# **reserve-before-paid-call + refund-on-failure** pattern:
 #
-# Per-user (NOT per-IP) because the endpoint is auth-required; abuse maps
-# to a real account. NAT'd shared IPs would penalize legitimate users if
-# we keyed on IP.
+#   1. ``reserve_voice_probe`` atomically checks + appends a timestamp.
+#      The append happens inside the same lock as the check, so a second
+#      concurrent caller observes the just-reserved slot and hits the
+#      limit (or doesn't, if there's still capacity).
+#   2. The endpoint runs the paid call only AFTER the reservation
+#      lands.
+#   3. On paid-call failure (provider 502 / empty audio), the endpoint
+#      calls ``refund_voice_probe`` to roll back the reservation, so a
+#      flaky provider doesn't consume the user's daily quota.
+#
+# Two windows (unchanged from v0):
+#   * 10 calls / 60s per user
+#   * 100 calls / 24h per user
+#
+# Per-user (NOT per-IP) because the endpoint requires auth.
 
 _VOICE_PROBE_SHORT_WINDOW = 60       # seconds
 _VOICE_PROBE_SHORT_LIMIT = 10
@@ -271,48 +280,77 @@ _VOICE_PROBE_DAY_WINDOW = 86_400     # seconds (24h)
 _VOICE_PROBE_DAY_LIMIT = 100
 
 _voice_probe_buf: dict[str, deque[float]] = defaultdict(deque)
+_voice_probe_lock: Lock = Lock()
 
 
-def check_voice_probe_allowed(user_id: str) -> None:
-    """Raise RateLimitExceeded when a fresh /user-voices/probe should be
-    rejected. Call BEFORE invoking the paid TTS provider; pair with
-    ``record_voice_probe`` AFTER (or before) to stamp the timestamp.
+def reserve_voice_probe(user_id: str) -> float:
+    """Atomically reserve a probe slot in the per-user window.
 
-    Per-user only — the endpoint requires auth, so the user_id is the
-    natural rate-limit key.
+    Raises ``RateLimitExceeded`` when either window is at capacity.
+    On success, returns the reservation timestamp; pass it to
+    ``refund_voice_probe`` to roll back if the paid call fails.
+
+    Concurrency: the check + append happens inside ``_voice_probe_lock``
+    so two simultaneous reservers can't both pass the check before
+    either has stamped. Without this, an asyncio caller can launch N
+    parallel ``await asyncio.to_thread(synth_fn, ...)`` coroutines, all
+    of which pass the v0 check (because no record has run yet), all of
+    which then hit the paid TTS provider, leaving the rate limit
+    bypassed for the burst window.
+
+    Empty user_id is a defensive no-op (returns 0.0, which
+    refund_voice_probe ignores). The auth layer should have rejected
+    anonymous callers before reaching here.
     """
     if not user_id:
-        return
+        return 0.0
     now = time.monotonic()
-    buf = _voice_probe_buf[user_id]
-    # Prune to the larger window first; any timestamp older than the day
-    # window is irrelevant to either limit.
-    _prune(buf, now, _VOICE_PROBE_DAY_WINDOW)
-    if _count_within(buf, now, _VOICE_PROBE_SHORT_WINDOW) >= _VOICE_PROBE_SHORT_LIMIT:
-        raise RateLimitExceeded(
-            scope="voice_probe_short",
-            message="试听过于频繁,请稍后再试",
-        )
-    if len(buf) >= _VOICE_PROBE_DAY_LIMIT:
-        raise RateLimitExceeded(
-            scope="voice_probe_day",
-            message="今日试听次数已达上限,请明日再试",
-        )
+    with _voice_probe_lock:
+        buf = _voice_probe_buf[user_id]
+        _prune(buf, now, _VOICE_PROBE_DAY_WINDOW)
+        if (
+            _count_within(buf, now, _VOICE_PROBE_SHORT_WINDOW)
+            >= _VOICE_PROBE_SHORT_LIMIT
+        ):
+            raise RateLimitExceeded(
+                scope="voice_probe_short",
+                message="试听过于频繁,请稍后再试",
+            )
+        if len(buf) >= _VOICE_PROBE_DAY_LIMIT:
+            raise RateLimitExceeded(
+                scope="voice_probe_day",
+                message="今日试听次数已达上限,请明日再试",
+            )
+        buf.append(now)
+        return now
 
 
-def record_voice_probe(user_id: str) -> None:
-    """Stamp a successful /user-voices/probe attempt. Call AFTER the paid
-    TTS provider returned a non-empty audio buffer; failures (502 etc.)
-    should NOT be stamped — otherwise a flaky provider would consume the
-    user's daily quota."""
-    if not user_id:
+def refund_voice_probe(user_id: str, reservation: float) -> None:
+    """Remove a previously-reserved slot — call when the paid TTS
+    provider returned a 5xx / empty audio so a flaky provider doesn't
+    tick down the user's daily quota.
+
+    ``reservation`` is the timestamp returned by ``reserve_voice_probe``.
+    We pop the matching value (not "the most recent") so two concurrent
+    failures don't refund each other's slots. Already-pruned values
+    (window passed before refund could fire) silently no-op.
+    """
+    if not user_id or reservation <= 0:
         return
-    _voice_probe_buf[user_id].append(time.monotonic())
+    with _voice_probe_lock:
+        buf = _voice_probe_buf[user_id]
+        try:
+            buf.remove(reservation)
+        except ValueError:
+            # Reservation already pruned by the day-window cutoff or
+            # cleared by reset_voice_probe_rate_limits. Defensive no-op.
+            pass
 
 
 def reset_voice_probe_rate_limits() -> None:
     """Test-support helper: wipe all voice-probe rate-limit buffers."""
-    _voice_probe_buf.clear()
+    with _voice_probe_lock:
+        _voice_probe_buf.clear()
 
 
 # ---------------------------------------------------------------------------
