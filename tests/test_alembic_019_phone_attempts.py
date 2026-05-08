@@ -125,22 +125,37 @@ def test_auth_phone_defines_max_verify_attempts_constant():
 
 
 def test_auth_phone_endpoints_filter_by_login_purpose():
-    """P1-10a-2 follow-up (Codex review 405d2a0): the SELECT in both
-    OTP endpoints must scope to ``purpose == 'login'``. Without it,
-    after a successful new-phone verify-code the latest unconsumed
-    challenge for the phone is the registration token, and an
-    attacker can burn it via wrong-code attempts.
+    """P1-10a-2 follow-up (Codex review 405d2a0 + fb6b693):
+    EVERY auth_phone code path that reads OR writes
+    ``PhoneVerificationChallenge`` for OTP semantics must scope to
+    ``purpose == 'login'``.
 
-    AST scan: the source must contain a comparison whose left side is
-    ``PhoneVerificationChallenge.purpose`` and whose right side is the
-    string ``"login"``. We don't pin the exact comparator (== or .__eq__),
-    but at least the literal must appear next to the column reference.
+    The three currently-required sites:
+      1. ``verify_code_endpoint`` SELECT — pre-405d2a0 lookup didn't
+         filter purpose, so wrong-code attempts could pick up a
+         registration token and burn it via the attempts counter.
+      2. ``reset_password_endpoint`` SELECT — same shape, same risk.
+      3. ``_invalidate_previous_codes`` UPDATE — pre-fb6b693
+         /send-code helper consumed every unconsumed challenge
+         regardless of purpose, so an unauthenticated /send-code
+         call could burn a pending registration token directly.
+
+    AST scan: the source must contain a comparison whose left side
+    is ``PhoneVerificationChallenge.purpose`` and whose right side
+    is the string ``"login"``. Drift in any of these three paths
+    silently re-opens a DoS surface against pending registration
+    tokens — protecting them is exactly the goal of P1-10a-2.
     """
     import inspect
 
     import auth_phone
 
-    for endpoint_name in ("verify_code_endpoint", "reset_password_endpoint"):
+    targets = (
+        "verify_code_endpoint",
+        "reset_password_endpoint",
+        "_invalidate_previous_codes",
+    )
+    for endpoint_name in targets:
         fn = getattr(auth_phone, endpoint_name)
         src = inspect.getsource(fn)
         # Allow either single quotes or double quotes around 'login'.
@@ -151,12 +166,10 @@ def test_auth_phone_endpoints_filter_by_login_purpose():
         assert purpose_filter_present, (
             f"P1-10a-2 follow-up regression: {endpoint_name} no longer "
             "filters on PhoneVerificationChallenge.purpose == 'login'. "
-            "After a successful new-phone verify-code, the latest "
-            "unconsumed row is the registration token (purpose="
-            "'registration'). Without the filter, OTP wrong-code "
-            "attempts can pick up that registration row, increment "
-            "its attempts, and burn it after 3 misses — a fresh DoS "
-            "surface that the compare-first fix didn't cover."
+            "Registration tokens (purpose='registration') belong to a "
+            "separate flow (/complete-registration) and must NOT be "
+            "touched by login OTP read/write paths. Drift here re-"
+            "opens the DoS surface that P1-10a-2 closed."
         )
 
 

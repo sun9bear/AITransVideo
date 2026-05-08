@@ -204,11 +204,33 @@ def _client_ip(request: Request) -> str | None:
 
 
 async def _invalidate_previous_codes(db: AsyncSession, phone_number: str) -> None:
+    """Retire any unexpired LOGIN challenges for ``phone_number``.
+
+    Called from ``/send-code`` so the freshly issued OTP is the only
+    valid login challenge for that phone. Registration tokens
+    (``purpose='registration'``) are intentionally NOT touched here:
+
+    P1-10a-2 follow-up² (Codex review fb6b693): pre-fix this UPDATE
+    invalidated EVERY unconsumed challenge for the phone, including
+    registration tokens. An unauthenticated attacker who survived the
+    captcha + per-phone send-code rate limit could call ``/send-code``
+    against a victim's phone and burn the victim's pending
+    ``purpose='registration'`` token, blocking the legitimate
+    ``/complete-registration`` POST.
+
+    The intended semantic is "only the newest LOGIN OTP for this phone
+    is valid" — registration tokens are scoped to their own consume
+    path and don't conflict with login OTPs. Adding the purpose filter
+    aligns this write path with the read paths in ``verify_code_endpoint``
+    / ``reset_password_endpoint`` (both already scoped to
+    ``purpose == 'login'``).
+    """
     now = datetime.now(timezone.utc)
     await db.execute(
         update(PhoneVerificationChallenge)
         .where(
             PhoneVerificationChallenge.phone_number == phone_number,
+            PhoneVerificationChallenge.purpose == "login",
             PhoneVerificationChallenge.consumed_at.is_(None),
             PhoneVerificationChallenge.expires_at > now,
         )

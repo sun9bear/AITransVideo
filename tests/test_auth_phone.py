@@ -369,6 +369,65 @@ class TestSendCodeEndpoint:
         # Fake provider stashed the last code so manual debugging works.
         assert sms_provider.peek_last_fake_code("13800138000") is not None
 
+    def test_send_code_does_not_invalidate_registration_tokens(self):
+        """P1-10a-2 follow-up² (Codex review fb6b693):
+        ``_invalidate_previous_codes`` must scope its UPDATE to
+        ``purpose == 'login'``. Pre-fix it consumed every unconsumed
+        challenge for the phone, so an unauthenticated requester who
+        survived captcha + per-phone send-code rate limits could call
+        ``/send-code`` once and burn a victim's pending registration
+        token (purpose='registration') — the legitimate
+        ``/complete-registration`` POST would then fail.
+
+        We don't have a real DB here; we assert at the SQL level that
+        the UPDATE statement includes the purpose filter. Behavioural
+        proof of "registration row not consumed" is impossible without
+        a live engine, but the SQL-level assertion is sufficient
+        because PostgreSQL itself would honor the WHERE clause.
+        """
+        db = _make_db()
+
+        captured_updates: list[str] = []
+
+        async def _execute_capture(stmt, *args, **kwargs):
+            sql = str(stmt)
+            # Heuristic: anything that mentions UPDATE on
+            # phone_verification_challenges is the invalidation path.
+            if (
+                "update" in sql.lower()
+                and "phone_verification_challenges" in sql.lower()
+            ):
+                captured_updates.append(sql)
+            # Always succeed so the endpoint can complete.
+            return MagicMock()
+
+        db.execute = _execute_capture
+
+        body = SendCodeRequest(phone_number="13800138000", captcha_token="fake-ok")
+        result = _run(send_code_endpoint(body, _make_request(), db))
+        assert result.ok is True
+
+        # Exactly one invalidation UPDATE should have been emitted by
+        # /send-code (the helper). It MUST include the purpose filter
+        # so registration tokens stay intact.
+        assert captured_updates, (
+            "P1-10a-2 follow-up² regression: /send-code did not emit "
+            "an UPDATE on phone_verification_challenges — the "
+            "invalidate-previous-codes step is gone. Either the helper "
+            "was removed (re-opening duplicate-OTP risk) or its SQL "
+            "was changed in a way the test no longer recognises."
+        )
+        for sql in captured_updates:
+            sql_lower = sql.lower()
+            assert "purpose" in sql_lower, (
+                "P1-10a-2 follow-up² regression: /send-code emitted an "
+                "UPDATE that does NOT mention `purpose`. Without that "
+                "filter, the UPDATE consumes EVERY unconsumed challenge "
+                "for the phone — including pending registration tokens "
+                "(purpose='registration'). Captured SQL:\n"
+                f"{sql}"
+            )
+
     def test_phone_rate_limit_returns_429(self):
         db = _make_db()
         db.execute = AsyncMock()
