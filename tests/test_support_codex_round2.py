@@ -32,39 +32,74 @@ def _run(coro):
 # ---------------------------------------------------------------------------
 
 
-def test_implemented_real_providers_is_empty_in_p1():
-    """Future-proof: if someone adds DeepSeek (or any other provider)
-    to the implemented set, this test must be updated AND the
-    corresponding HTTP wiring + test coverage must land at the same
-    time. Adding entries here is a deliberate rendezvous point with a
-    code review."""
+def test_implemented_real_providers_set_is_explicit_rendezvous():
+    """The set tracks providers whose .reply() has reviewed HTTP wiring.
+
+    As of 2026-05-08 the set contains exactly ``{"deepseek"}``. To add
+    a new provider you MUST land all of:
+
+      1. A real ``.reply()`` implementation (returns AIReply, never raises
+         NotImplementedError).
+      2. Unit tests with mocked HTTP exercising 200 / 4xx / 5xx /
+         timeout / parse-failure paths.
+      3. This test updated to the new expected set.
+      4. ``test_support_ai_fake_provider.py`` updated if the provider
+         class previously raised.
+
+    Adding entries without (1)–(3) is a regression we want to catch
+    here, not in production. Removing the existing ``deepseek`` entry
+    without removing the wiring is also a regression.
+    """
     from gateway.support_ai import _IMPLEMENTED_REAL_PROVIDERS
 
-    assert _IMPLEMENTED_REAL_PROVIDERS == set(), (
-        "_IMPLEMENTED_REAL_PROVIDERS must stay empty until a real "
-        "provider's .reply() is implemented and reviewed. Adding a "
-        "provider here without wiring will surface NotImplementedError "
-        "to end users."
+    assert _IMPLEMENTED_REAL_PROVIDERS == {"deepseek"}, (
+        f"_IMPLEMENTED_REAL_PROVIDERS changed unexpectedly: "
+        f"{_IMPLEMENTED_REAL_PROVIDERS}. See test docstring."
     )
 
 
-def test_is_real_provider_ready_returns_false_for_deepseek_with_api_key():
-    """Even with DEEPSEEK_API_KEY set (likely in production for
-    translation), is_real_provider_ready must return False because
-    DeepSeek isn't in the implemented set yet."""
+def test_is_real_provider_ready_for_deepseek_tracks_api_key():
+    """DeepSeek readiness: only True when (provider in implemented set)
+    AND (DEEPSEEK_API_KEY set). Both conditions enforced.
+    """
     from gateway.support_ai import is_real_provider_ready
 
     saved = os.environ.pop("DEEPSEEK_API_KEY", None)
+    saved_config = os.environ.pop("AIVIDEOTRANS_CONFIG_DIR", None)
     try:
-        os.environ["DEEPSEEK_API_KEY"] = "sk-fake-test-key-must-not-trigger-real-call"
+        # Force-clean admin override path so llm_registry's get_api_key
+        # falls through to the env var only.
+        os.environ["AIVIDEOTRANS_CONFIG_DIR"] = "/nonexistent/path/for/test"
+        try:
+            from services import llm_registry  # type: ignore
+
+            llm_registry.invalidate_cache()
+        except Exception:
+            pass
+
+        # No API key → not ready, regardless of implemented set.
         assert is_real_provider_ready("deepseek") is False
+        # API key set + provider in implemented set → ready.
+        os.environ["DEEPSEEK_API_KEY"] = "sk-test-ready-flag-only"
+        assert is_real_provider_ready("deepseek") is True
+        # Fake / unknown / empty / None → never ready.
         assert is_real_provider_ready("fake") is False
         assert is_real_provider_ready("") is False
         assert is_real_provider_ready(None) is False
+        assert is_real_provider_ready("nonexistent") is False
     finally:
         os.environ.pop("DEEPSEEK_API_KEY", None)
         if saved is not None:
             os.environ["DEEPSEEK_API_KEY"] = saved
+        os.environ.pop("AIVIDEOTRANS_CONFIG_DIR", None)
+        if saved_config is not None:
+            os.environ["AIVIDEOTRANS_CONFIG_DIR"] = saved_config
+        try:
+            from services import llm_registry  # type: ignore
+
+            llm_registry.invalidate_cache()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -72,16 +107,30 @@ def test_is_real_provider_ready_returns_false_for_deepseek_with_api_key():
 # ---------------------------------------------------------------------------
 
 
-def test_deepseek_stub_still_raises_not_implemented_error():
-    """The stub itself must keep raising — the fallback in
-    support_service is what swallows it. If someone removes the raise
-    by accident, the test catches it before deploy."""
-    from gateway.support_ai import DeepseekProvider
+def test_deepseek_provider_has_real_reply_method():
+    """DeepseekProvider.reply must NOT raise NotImplementedError as of
+    2026-05-08 — the wired HTTP path is in place. If someone reverts to
+    a stub, this test catches it.
 
-    provider = DeepseekProvider()
-    raised = False
+    This test does NOT actually call DeepSeek; it uses a clean env to
+    exercise the missing-API-key branch, which returns an AIReply
+    object instead of raising.
+    """
+    from gateway.support_ai import AIReply, DeepseekProvider
+
+    saved = os.environ.pop("DEEPSEEK_API_KEY", None)
+    saved_config = os.environ.pop("AIVIDEOTRANS_CONFIG_DIR", None)
     try:
-        _run(
+        os.environ["AIVIDEOTRANS_CONFIG_DIR"] = "/nonexistent/path/for/test"
+        try:
+            from services import llm_registry  # type: ignore
+
+            llm_registry.invalidate_cache()
+        except Exception:
+            pass
+        provider = DeepseekProvider()
+        # Should NOT raise NotImplementedError or any other exception.
+        out = _run(
             provider.reply(
                 message="x",
                 history=[],
@@ -91,9 +140,23 @@ def test_deepseek_stub_still_raises_not_implemented_error():
                 timeout_seconds=5.0,
             )
         )
-    except NotImplementedError:
-        raised = True
-    assert raised, "DeepseekProvider.reply must raise NotImplementedError in P1"
+        assert isinstance(out, AIReply)
+        # No API key path → polite busy reply, no token consumption.
+        assert out.handoff_recommended is True
+        assert out.input_tokens == 0
+        assert out.output_tokens == 0
+    finally:
+        if saved is not None:
+            os.environ["DEEPSEEK_API_KEY"] = saved
+        os.environ.pop("AIVIDEOTRANS_CONFIG_DIR", None)
+        if saved_config is not None:
+            os.environ["AIVIDEOTRANS_CONFIG_DIR"] = saved_config
+        try:
+            from services import llm_registry  # type: ignore
+
+            llm_registry.invalidate_cache()
+        except Exception:
+            pass
 
 
 def test_support_service_has_not_implemented_fallback():
@@ -150,20 +213,50 @@ def test_admin_settings_projection_round_trips_anonymous_flag():
 
 
 def test_admin_model_list_annotates_support_implemented():
+    """Each model row carries ``support_implemented``; the value matches
+    whether the model's provider is in ``_IMPLEMENTED_REAL_PROVIDERS``.
+
+    As of 2026-05-08 only ``deepseek`` is wired, so:
+      - deepseek (and any future deepseek_* variant) → True
+      - everything else → False (silent fallback to fake)
+    """
     from gateway.admin_support_api import _list_text_models
+    from gateway.support_ai import _IMPLEMENTED_REAL_PROVIDERS
 
     rows = _list_text_models()
     assert rows, "expected at least one model row"
+    saw_implemented = False
+    saw_unimplemented = False
     for row in rows:
         assert "support_implemented" in row, (
             f"Model row {row!r} missing support_implemented flag — "
             "Codex round 2 nit."
         )
-        # P1 implemented set is empty, so every row must report False.
-        assert row["support_implemented"] is False, (
-            f"Model {row.get('value')} reported support_implemented=True "
-            "but _IMPLEMENTED_REAL_PROVIDERS is empty in P1."
+        provider = (row.get("provider") or "").strip().lower()
+        expected = provider in _IMPLEMENTED_REAL_PROVIDERS
+        assert row["support_implemented"] is expected, (
+            f"Model {row.get('value')} (provider={provider!r}) reported "
+            f"support_implemented={row['support_implemented']}, expected {expected}"
         )
+        if row["support_implemented"]:
+            saw_implemented = True
+        else:
+            saw_unimplemented = True
+
+    # Sanity: as long as the registry has at least one deepseek model
+    # AND at least one non-deepseek model, both branches should appear.
+    # If this fails, either the registry shape changed or
+    # _IMPLEMENTED_REAL_PROVIDERS no longer contains deepseek.
+    assert saw_implemented, (
+        "No model row reported support_implemented=True. Either the "
+        "registry no longer contains a deepseek model, or "
+        "_IMPLEMENTED_REAL_PROVIDERS lost its deepseek entry."
+    )
+    assert saw_unimplemented, (
+        "Every model reported support_implemented=True. That would mean "
+        "_IMPLEMENTED_REAL_PROVIDERS now covers every registered provider — "
+        "verify intentional and update this guard."
+    )
 
 
 # ---------------------------------------------------------------------------
