@@ -185,7 +185,9 @@ def test_attempt_rewrite_loop_stamps_tts_input_after_each_resynth(monkeypatch, t
 
     # Avoid actually touching audio files in finalization paths.
     monkeypatch.setattr(aligner, "_direct_copy", lambda src, dst: dst)
-    monkeypatch.setattr(aligner, "_dsp_stretch", lambda src, tgt, dst: dst)
+    # 2026-05-08 P2-17a-0: _dsp_stretch returns (path, FitResult | None);
+    # mock returns None for FitResult since this test doesn't exercise audit fields.
+    monkeypatch.setattr(aligner, "_dsp_stretch", lambda src, tgt, dst: (dst, None))
     monkeypatch.setattr(
         "services.alignment.aligner._measure_wav_duration_ms",
         lambda p: 1000,
@@ -548,7 +550,9 @@ def test_attempt_rewrite_loop_stamps_tts_input_to_best_candidate_on_max_attempts
                         lambda **kw: True)
     # Best-candidate decision returns "dsp"; finalization stamps tts_input.
     monkeypatch.setattr(aligner, "_evaluate_alignment", lambda *a, **kw: "dsp")
-    monkeypatch.setattr(aligner, "_dsp_stretch", lambda src, tgt, dst: dst)
+    # 2026-05-08 P2-17a-0: _dsp_stretch returns (path, FitResult | None);
+    # mock returns None for FitResult since this test doesn't exercise audit fields.
+    monkeypatch.setattr(aligner, "_dsp_stretch", lambda src, tgt, dst: (dst, None))
     monkeypatch.setattr(aligner, "_direct_copy", lambda src, dst: dst)
     monkeypatch.setattr(
         "services.alignment.aligner._measure_wav_duration_ms",
