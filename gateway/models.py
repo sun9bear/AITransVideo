@@ -908,6 +908,79 @@ class SupportAIUsage(Base):
     )
 
 
+class SystemAnnouncement(Base):
+    """Admin-composed broadcast notification (migration 023, 2026-05-08).
+
+    Plan §16.7 P2 elevation: admin picks an audience predicate, system
+    fans out one ``user_notifications`` row per matched user. The
+    announcement row is the source-of-truth for "what was sent" and
+    enables clone-and-resend ("edit a previous announcement").
+
+    ``audience_kind`` values supported by the resolver (P1):
+      - all
+      - registered_within_days  (params: {"days": int})
+      - plan_free / plan_plus / plan_pro / plan_paid
+      - trial_active
+      - trial_ending_within_days  (params: {"days": int})
+      - trial_ended_within_days   (params: {"days": int})
+      - paid_no_jobs
+      - inactive_for_days  (params: {"days": int})
+      - active_with_jobs_within_days  (params: {"days": int, "min_jobs": int})
+      - had_failures_within_days  (params: {"days": int})
+      - admin_only
+    """
+
+    __tablename__ = "system_announcements"
+    __table_args__ = (
+        Index("idx_system_announcements_status", "status"),
+        Index("idx_system_announcements_created_at", "created_at"),
+        Index("idx_system_announcements_admin_id", "created_by_admin_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    topic: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="maintenance"
+    )
+    severity: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="info"
+    )
+    action_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    audience_kind: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="all"
+    )
+    audience_params: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_by_admin_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    parent_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("system_announcements.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="draft"
+    )  # "draft" | "sent" | "archived"
+    sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    recipient_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
 class SupportAdminPresence(Base):
     """Per-admin heartbeat presence (migration 022, 2026-05-08).
 

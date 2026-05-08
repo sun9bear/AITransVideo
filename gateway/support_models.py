@@ -381,3 +381,83 @@ class MyOpenConversationView(BaseModel):
 
 class MyOpenConversationsResponse(BaseModel):
     conversations: list[MyOpenConversationView]
+
+
+# ---------- System announcements (plan 2026-05-08 §16.7 follow-up) -------
+
+
+AnnouncementStatus = Literal["draft", "sent", "archived"]
+
+
+class AnnouncementInput(BaseModel):
+    """Composer payload — used for create draft AND update draft."""
+
+    title: str = Field(min_length=1, max_length=255)
+    body: str = Field(min_length=1, max_length=4000)
+    topic: NotificationTopic = "maintenance"
+    severity: NotificationSeverity = "info"
+    action_url: str | None = Field(default=None, max_length=512)
+    audience_kind: str = Field(min_length=1, max_length=32)
+    audience_params: dict | None = None
+
+
+class AnnouncementView(BaseModel):
+    id: str
+    title: str
+    body: str
+    topic: NotificationTopic
+    severity: NotificationSeverity
+    action_url: str | None = None
+    audience_kind: str
+    audience_params: dict | None = None
+    status: AnnouncementStatus
+    sent_at: datetime | None = None
+    recipient_count: int | None = None
+    parent_id: str | None = None
+    created_by_admin_id: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    # Live read / archive stats from user_notifications (only meaningful
+    # after status="sent"). Fields default to None for drafts.
+    stats: dict | None = None
+
+
+class AudienceParamSpec(BaseModel):
+    key: str
+    type: str
+    default: int | str | float
+    min: int | float | None = None
+    max: int | float | None = None
+
+
+class AudienceKindSpec(BaseModel):
+    kind: str
+    label: str
+    group: str
+    params: list[AudienceParamSpec] = Field(default_factory=list)
+
+
+class AudienceCatalogResponse(BaseModel):
+    kinds: list[AudienceKindSpec]
+
+
+class AudiencePreviewResponse(BaseModel):
+    audience_kind: str
+    audience_params: dict | None = None
+    count: int
+
+
+class SendAnnouncementResponse(BaseModel):
+    announcement_id: str
+    audience_size: int
+    newly_notified: int
+    skipped_already_notified: int
+
+
+class RecallAnnouncementResponse(BaseModel):
+    announcement_id: str
+    deleted_count: int
+
+
+class AnnouncementListResponse(BaseModel):
+    items: list[AnnouncementView]

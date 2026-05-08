@@ -100,6 +100,7 @@ const navGroups: NavGroup[] = [
       { label: "定价管理", href: "/admin/pricing", icon: Wallet },
       { label: "点数校准", href: "/admin/credits-monitor", icon: TrendingUp },
       { label: "客服管理", href: "/admin/support", icon: Headphones },
+      { label: "系统公告", href: "/admin/support/announcements", icon: MessageSquareText },
       { label: "系统设置", href: "/admin/settings", icon: Settings2 },
     ],
   },
@@ -224,9 +225,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <div className="space-y-0.5">
               {group.items.map((item) => {
                 const Icon = item.icon
+                // /admin/support has a sub-route /admin/support/announcements;
+                // make /admin/support match only on exact path so the two
+                // sidebar entries don't both highlight at once. Other items
+                // keep prefix matching (e.g. /workspace/{id} → /projects).
                 const isActive =
                   pathname === item.href ||
-                  (item.href !== "/" && pathname.startsWith(item.href)) ||
+                  (item.href === "/admin/support"
+                    ? false
+                    : item.href !== "/" && pathname.startsWith(item.href)) ||
                   (item.href === "/projects" && pathname.startsWith("/workspace/"))
                 // Unread badge for the "通知" item — drives the user
                 // back to the notification center when something new

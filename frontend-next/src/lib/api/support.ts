@@ -406,3 +406,148 @@ export async function adminCloseHandoff(handoffId: string): Promise<{ status: st
     { method: "POST" },
   )
 }
+
+// ---------------------------------------------------------------------------
+// System announcements
+// ---------------------------------------------------------------------------
+
+export type AnnouncementStatus = "draft" | "sent" | "archived"
+export type AnnouncementTopic =
+  | "billing"
+  | "account"
+  | "artifact"
+  | "support"
+  | "maintenance"
+export type AnnouncementSeverity = "info" | "success" | "warning" | "error"
+
+export interface AnnouncementInput {
+  title: string
+  body: string
+  topic: AnnouncementTopic
+  severity: AnnouncementSeverity
+  action_url?: string | null
+  audience_kind: string
+  audience_params?: Record<string, unknown> | null
+}
+
+export interface AnnouncementView {
+  id: string
+  title: string
+  body: string
+  topic: AnnouncementTopic
+  severity: AnnouncementSeverity
+  action_url: string | null
+  audience_kind: string
+  audience_params: Record<string, unknown> | null
+  status: AnnouncementStatus
+  sent_at: string | null
+  recipient_count: number | null
+  parent_id: string | null
+  created_by_admin_id: string | null
+  created_at: string
+  updated_at: string
+  stats: { total: number; read: number; archived: number } | null
+}
+
+export interface AudienceKindSpec {
+  kind: string
+  label: string
+  group: "broad" | "subscription" | "lifecycle" | "behavior"
+  params: Array<{
+    key: string
+    type: string
+    default: number | string
+    min?: number
+    max?: number
+  }>
+}
+
+export async function adminListAudienceKinds(): Promise<{
+  kinds: AudienceKindSpec[]
+}> {
+  return fetchJson("/api/admin/support/announcements/audience-kinds")
+}
+
+export async function adminPreviewAudience(
+  body: AnnouncementInput,
+): Promise<{
+  audience_kind: string
+  audience_params: Record<string, unknown> | null
+  count: number
+}> {
+  return fetchJson("/api/admin/support/announcements/audience-preview", {
+    method: "POST",
+    body: JSON.stringify(body),
+  })
+}
+
+export async function adminListAnnouncements(
+  status?: AnnouncementStatus,
+): Promise<{ items: AnnouncementView[] }> {
+  const qs = status ? `?status=${status}` : ""
+  return fetchJson(`/api/admin/support/announcements${qs}`)
+}
+
+export async function adminCreateAnnouncement(
+  body: AnnouncementInput,
+): Promise<AnnouncementView> {
+  return fetchJson("/api/admin/support/announcements", {
+    method: "POST",
+    body: JSON.stringify(body),
+  })
+}
+
+export async function adminGetAnnouncement(
+  id: string,
+): Promise<AnnouncementView> {
+  return fetchJson(`/api/admin/support/announcements/${encodeURIComponent(id)}`)
+}
+
+export async function adminUpdateAnnouncement(
+  id: string,
+  body: AnnouncementInput,
+): Promise<AnnouncementView> {
+  return fetchJson(`/api/admin/support/announcements/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  })
+}
+
+export async function adminDeleteAnnouncement(
+  id: string,
+): Promise<{ deleted: string }> {
+  return fetchJson(`/api/admin/support/announcements/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  })
+}
+
+export async function adminSendAnnouncement(id: string): Promise<{
+  announcement_id: string
+  audience_size: number
+  newly_notified: number
+  skipped_already_notified: number
+}> {
+  return fetchJson(
+    `/api/admin/support/announcements/${encodeURIComponent(id)}/send`,
+    { method: "POST" },
+  )
+}
+
+export async function adminRecallAnnouncement(id: string): Promise<{
+  announcement_id: string
+  deleted_count: number
+}> {
+  return fetchJson(
+    `/api/admin/support/announcements/${encodeURIComponent(id)}/recall`,
+    { method: "POST" },
+  )
+}
+
+export async function adminCloneAnnouncement(
+  id: string,
+): Promise<AnnouncementView> {
+  return fetchJson(
+    `/api/admin/support/announcements/${encodeURIComponent(id)}/clone`,
+    { method: "POST" },
+  )
+}

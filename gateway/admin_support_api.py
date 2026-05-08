@@ -44,6 +44,7 @@ from models import (
     SupportConversation,
     SupportHandoffRequest,
     SupportMessage,
+    SystemAnnouncement,
     User,
 )
 from support_admin_settings import (
@@ -57,8 +58,17 @@ from support_models import (
     AdminReplyResponse,
     AdminSupportOverview,
     AdminSupportSettingsResponse,
+    AnnouncementInput,
+    AnnouncementListResponse,
+    AnnouncementView,
+    AudienceCatalogResponse,
+    AudienceKindSpec,
+    AudienceParamSpec,
+    AudiencePreviewResponse,
     HeartbeatRequest,
     PresenceView,
+    RecallAnnouncementResponse,
+    SendAnnouncementResponse,
     SetPresenceStatusRequest,
     SupportAdminSettings,
     WeChatQrInfoResponse,
@@ -68,6 +78,14 @@ from support_presence import (
     list_recent as list_recent_presence,
     record_heartbeat,
     set_status as set_presence_status,
+)
+from system_announcements_service import (
+    AUDIENCE_KINDS,
+    clone_for_resend,
+    count_audience,
+    recall_announcement,
+    send_announcement,
+    stats_for as announcement_stats_for,
 )
 from support_wechat_qr import (
     delete_qr,
@@ -662,3 +680,328 @@ async def admin_reply_to_conversation(
         notification_dispatched=notification_dispatched,
         handoff_status=handoff_status,
     )
+
+
+# ---------------------------------------------------------------------------
+# System announcements (admin broadcasts)
+# ---------------------------------------------------------------------------
+
+
+def _serialize_announcement(
+    row: SystemAnnouncement,
+    *,
+    stats: dict[str, int] | None = None,
+) -> AnnouncementView:
+    return AnnouncementView(
+        id=str(row.id),
+        title=row.title,
+        body=row.body,
+        topic=row.topic,
+        severity=row.severity,
+        action_url=row.action_url,
+        audience_kind=row.audience_kind,
+        audience_params=row.audience_params,
+        status=row.status,
+        sent_at=row.sent_at,
+        recipient_count=row.recipient_count,
+        parent_id=str(row.parent_id) if row.parent_id else None,
+        created_by_admin_id=(
+            str(row.created_by_admin_id) if row.created_by_admin_id else None
+        ),
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        stats=stats,
+    )
+
+
+@router.get(
+    "/announcements/audience-kinds",
+    response_model=AudienceCatalogResponse,
+)
+async def list_audience_kinds(
+    user: User | None = Depends(get_current_user),
+) -> AudienceCatalogResponse:
+    _require_admin(user)
+    kinds = [
+        AudienceKindSpec(
+            kind=k["kind"],
+            label=k["label"],
+            group=k["group"],
+            params=[AudienceParamSpec(**p) for p in k.get("params", [])],
+        )
+        for k in AUDIENCE_KINDS
+    ]
+    return AudienceCatalogResponse(kinds=kinds)
+
+
+@router.post(
+    "/announcements/audience-preview",
+    response_model=AudiencePreviewResponse,
+)
+async def preview_audience(
+    body: AnnouncementInput,
+    user: User | None = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> AudiencePreviewResponse:
+    _require_admin(user)
+    try:
+        n = await count_audience(
+            db, kind=body.audience_kind, params=body.audience_params
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return AudiencePreviewResponse(
+        audience_kind=body.audience_kind,
+        audience_params=body.audience_params,
+        count=n,
+    )
+
+
+@router.get(
+    "/announcements",
+    response_model=AnnouncementListResponse,
+)
+async def list_announcements(
+    status: str | None = None,
+    limit: int = 50,
+    user: User | None = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> AnnouncementListResponse:
+    _require_admin(user)
+    stmt = select(SystemAnnouncement).order_by(
+        SystemAnnouncement.created_at.desc()
+    )
+    if status:
+        stmt = stmt.where(SystemAnnouncement.status == status)
+    stmt = stmt.limit(max(1, min(int(limit or 50), 200)))
+    rows = list((await db.execute(stmt)).scalars())
+
+    views: list[AnnouncementView] = []
+    for r in rows:
+        if r.status == "sent":
+            stats = await announcement_stats_for(db, announcement_id=r.id)
+        else:
+            stats = None
+        views.append(_serialize_announcement(r, stats=stats))
+    return AnnouncementListResponse(items=views)
+
+
+@router.post(
+    "/announcements",
+    response_model=AnnouncementView,
+)
+async def create_announcement(
+    body: AnnouncementInput,
+    user: User | None = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> AnnouncementView:
+    """Create a draft announcement. Send is a separate POST."""
+    admin = _require_admin(user)
+    # Validate audience_kind early so a bad value doesn't sit in draft
+    # and surprise the admin at send time.
+    from system_announcements_service import _validate_params
+
+    try:
+        _validate_params(body.audience_kind, body.audience_params)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    row = SystemAnnouncement(
+        title=body.title,
+        body=body.body,
+        topic=body.topic,
+        severity=body.severity,
+        action_url=body.action_url,
+        audience_kind=body.audience_kind,
+        audience_params=body.audience_params,
+        created_by_admin_id=admin.id,
+        status="draft",
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    return _serialize_announcement(row)
+
+
+@router.get(
+    "/announcements/{announcement_id}",
+    response_model=AnnouncementView,
+)
+async def get_announcement(
+    announcement_id: str,
+    user: User | None = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> AnnouncementView:
+    _require_admin(user)
+    import uuid as _uuid
+
+    try:
+        aid = _uuid.UUID(announcement_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="公告不存在")
+    row = await db.get(SystemAnnouncement, aid)
+    if row is None:
+        raise HTTPException(status_code=404, detail="公告不存在")
+    stats = (
+        await announcement_stats_for(db, announcement_id=row.id)
+        if row.status == "sent"
+        else None
+    )
+    return _serialize_announcement(row, stats=stats)
+
+
+@router.patch(
+    "/announcements/{announcement_id}",
+    response_model=AnnouncementView,
+)
+async def update_announcement(
+    announcement_id: str,
+    body: AnnouncementInput,
+    user: User | None = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> AnnouncementView:
+    """Edit a draft. Sent announcements are immutable — clone instead."""
+    _require_admin(user)
+    import uuid as _uuid
+
+    try:
+        aid = _uuid.UUID(announcement_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="公告不存在")
+    row = await db.get(SystemAnnouncement, aid)
+    if row is None:
+        raise HTTPException(status_code=404, detail="公告不存在")
+    if row.status == "sent":
+        raise HTTPException(
+            status_code=400,
+            detail="已发送的公告不可编辑，请使用「复制为新公告」",
+        )
+
+    from system_announcements_service import _validate_params
+
+    try:
+        _validate_params(body.audience_kind, body.audience_params)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    row.title = body.title
+    row.body = body.body
+    row.topic = body.topic
+    row.severity = body.severity
+    row.action_url = body.action_url
+    row.audience_kind = body.audience_kind
+    row.audience_params = body.audience_params
+    row.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    return _serialize_announcement(row)
+
+
+@router.delete("/announcements/{announcement_id}")
+async def delete_draft_announcement(
+    announcement_id: str,
+    user: User | None = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, str]:
+    """Hard-delete a DRAFT announcement. Sent ones must be recalled."""
+    _require_admin(user)
+    import uuid as _uuid
+
+    try:
+        aid = _uuid.UUID(announcement_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="公告不存在")
+    row = await db.get(SystemAnnouncement, aid)
+    if row is None:
+        raise HTTPException(status_code=404, detail="公告不存在")
+    if row.status == "sent":
+        raise HTTPException(
+            status_code=400, detail="已发送的公告不能删除，请使用撤回"
+        )
+    await db.delete(row)
+    await db.commit()
+    return {"deleted": "ok"}
+
+
+@router.post(
+    "/announcements/{announcement_id}/send",
+    response_model=SendAnnouncementResponse,
+)
+async def send_announcement_endpoint(
+    announcement_id: str,
+    user: User | None = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> SendAnnouncementResponse:
+    admin = _require_admin(user)
+    import uuid as _uuid
+
+    try:
+        aid = _uuid.UUID(announcement_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="公告不存在")
+    row = await db.get(SystemAnnouncement, aid)
+    if row is None:
+        raise HTTPException(status_code=404, detail="公告不存在")
+    try:
+        result = await send_announcement(db, announcement=row, admin_id=admin.id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    await db.commit()
+    return SendAnnouncementResponse(**result)
+
+
+@router.post(
+    "/announcements/{announcement_id}/recall",
+    response_model=RecallAnnouncementResponse,
+)
+async def recall_announcement_endpoint(
+    announcement_id: str,
+    user: User | None = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> RecallAnnouncementResponse:
+    """Hard-delete all user_notifications fanned out from this
+    announcement. Sets the row to status="archived"."""
+    _require_admin(user)
+    import uuid as _uuid
+
+    try:
+        aid = _uuid.UUID(announcement_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="公告不存在")
+    row = await db.get(SystemAnnouncement, aid)
+    if row is None:
+        raise HTTPException(status_code=404, detail="公告不存在")
+    if row.status != "sent":
+        raise HTTPException(
+            status_code=400, detail="只有已发送的公告可以撤回"
+        )
+    n = await recall_announcement(db, announcement=row)
+    await db.commit()
+    return RecallAnnouncementResponse(
+        announcement_id=str(row.id),
+        deleted_count=n,
+    )
+
+
+@router.post(
+    "/announcements/{announcement_id}/clone",
+    response_model=AnnouncementView,
+)
+async def clone_announcement_endpoint(
+    announcement_id: str,
+    user: User | None = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> AnnouncementView:
+    """Create a draft copy. Used for "edit and resend" workflows."""
+    admin = _require_admin(user)
+    import uuid as _uuid
+
+    try:
+        aid = _uuid.UUID(announcement_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="公告不存在")
+    row = await db.get(SystemAnnouncement, aid)
+    if row is None:
+        raise HTTPException(status_code=404, detail="公告不存在")
+    clone = await clone_for_resend(db, source=row, admin_id=admin.id)
+    await db.commit()
+    return _serialize_announcement(clone)
