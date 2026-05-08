@@ -154,6 +154,13 @@ export function Faq({ variant = "home" }: { variant?: "home" | "pricing" }) {
             ))}
           </dl>
         )}
+
+        {/* "Still have questions?" support entry — plan 2026-05-08 §8.3.
+            The actual SupportWidget mounts in (marketing)/layout.tsx; this
+            paragraph just nudges users toward it. */}
+        <p className="mt-8 text-center text-sm text-muted-foreground">
+          {"还有疑问？点右下角「客服」浮窗，先 AI 后人工。"}
+        </p>
       </div>
     </section>
   )

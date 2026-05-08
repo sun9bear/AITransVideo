@@ -8,6 +8,7 @@ import { useSession } from "@/components/providers/session-provider"
 import { clearPostAuthSessionHint } from "@/lib/auth/post-auth-redirect"
 import { Button } from "@/components/ui/button"
 import { BrandMark, BrandLockup } from "@/components/marketing/brand-mark"
+import { SupportWidget } from "@/components/support/SupportWidget"
 import {
   Video,
   Mic2,
@@ -395,6 +396,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           {children}
         </main>
       </div>
+      {/* Floating support widget (plan 2026-05-08 §8.2) */}
+      <SupportWidget />
     </div>
   )
 }
