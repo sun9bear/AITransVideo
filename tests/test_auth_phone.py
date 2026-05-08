@@ -500,6 +500,108 @@ class TestVerifyCodeEndpoint:
             "same OTP."
         )
 
+    def test_registration_token_not_consumed_by_otp_attempts(self):
+        """P1-10a-2 follow-up (Codex review 405d2a0): after a successful
+        new-phone verify-code, the latest unconsumed challenge for that
+        phone is the ``purpose='registration'`` token (the user hasn't
+        yet posted ``/complete-registration`` with their password). An
+        attacker who can reach ``/auth/phone/verify-code`` for the same
+        phone must NOT be able to:
+          1. pick up the registration token via the order-by-latest
+             query, AND
+          2. burn it via wrong-code attempts.
+
+        Both endpoints must filter ``purpose == 'login'`` so OTP
+        attempts can never touch a registration token.
+
+        We simulate by inspecting the SQL the endpoint emits: when
+        the query includes the ``purpose = 'login'`` filter the mock
+        returns ``None`` (no matching login challenge — the
+        registration row is filtered out), otherwise it returns the
+        registration row (which is what would happen if the filter
+        regressed).
+        """
+        # Arrange: the only unconsumed row for this phone is a
+        # registration token. Pre-fix, this row would be selected and
+        # mutated. Post-fix, the WHERE clause filters it out and the
+        # endpoint returns "验证码已过期".
+        reg_token = _make_challenge(
+            code="a" * 32,  # 32-char hex = registration token shape
+            attempts=0,
+        )
+        reg_token.purpose = "registration"
+
+        db = _make_db()
+
+        # Stateful purpose-filter-aware mock. When the SELECT does NOT
+        # include "purpose" in its compiled SQL, return the registration
+        # row (regression behavior). When it DOES, return None
+        # (correct behavior — registration filtered out).
+        observed_purpose_filter: list[bool] = []
+
+        def _challenge_result_for_query(stmt) -> object:
+            sql = str(stmt)
+            has_purpose_filter = "purpose" in sql.lower()
+            observed_purpose_filter.append(has_purpose_filter)
+            ch_result = MagicMock()
+            ch_scalars = MagicMock()
+            if has_purpose_filter:
+                # Filtered out — registration challenge does not match.
+                ch_scalars.first.return_value = None
+            else:
+                # No filter (regression) — would return the
+                # registration row, allowing OTP attempts to mutate it.
+                ch_scalars.first.return_value = reg_token
+            ch_result.scalars.return_value = ch_scalars
+            return ch_result
+
+        async def _execute(*args, **kwargs):
+            stmt = args[0] if args else None
+            return _challenge_result_for_query(stmt)
+
+        db.execute = _execute
+
+        # Act: attacker tries 5 wrong codes against the phone.
+        for _ in range(5):
+            with pytest.raises(HTTPException) as exc_info:
+                _run(verify_code_endpoint(
+                    VerifyCodeRequest(
+                        phone_number="13800138000", code="000000",
+                    ),
+                    _make_request(), Response(), db,
+                ))
+            # Without an active LOGIN challenge for this phone, the
+            # endpoint must return "验证码已过期" — NOT increment any
+            # registration row's attempts.
+            assert exc_info.value.status_code == 400
+            assert "已过期" in exc_info.value.detail, (
+                "P1-10a-2 follow-up regression: when the only matching "
+                "row is a registration token, the endpoint must report "
+                "'expired/no active' — NOT the wrong-code/attempts-"
+                "exceeded path. Got detail="
+                f"{exc_info.value.detail!r}."
+            )
+
+        # The registration token is untouched.
+        assert reg_token.attempts == 0, (
+            "P1-10a-2 follow-up regression: registration token's "
+            f"attempts mutated to {reg_token.attempts} via OTP wrong-"
+            "code attempts. /verify-code must filter purpose='login' "
+            "in its WHERE clause."
+        )
+        assert reg_token.consumed_at is None, (
+            "P1-10a-2 follow-up regression: registration token was "
+            "consumed via /verify-code. The endpoint must scope to "
+            "login challenges only — registration tokens are consumed "
+            "by /complete-registration."
+        )
+        # And every observed query DID include the purpose filter.
+        assert all(observed_purpose_filter), (
+            "P1-10a-2 follow-up regression: at least one /verify-code "
+            "query did NOT include the purpose filter. observed = "
+            f"{observed_purpose_filter}"
+        )
+
     def test_correct_code_after_one_wrong_succeeds(self):
         """P1-10a-2 (audit 2026-05-07): the legitimate user must be
         able to recover from a single fat-finger wrong guess. With
@@ -929,6 +1031,56 @@ class TestResetPassword:
             "on a single wrong guess. Same DoS as verify-code."
         )
         assert ch.attempts == 1
+
+    def test_reset_password_does_not_touch_registration_token(self):
+        """P1-10a-2 follow-up (Codex review 405d2a0): the reset-
+        password endpoint mirrors the same purpose='login' filter as
+        verify-code. A pending registration token must not be burnable
+        via wrong codes posted to /reset-password either.
+        """
+        reg_token = _make_challenge(code="a" * 32, attempts=0)
+        reg_token.purpose = "registration"
+
+        db = _make_db()
+
+        observed_purpose_filter: list[bool] = []
+
+        def _challenge_result_for_query(stmt) -> object:
+            sql = str(stmt)
+            has_purpose_filter = "purpose" in sql.lower()
+            observed_purpose_filter.append(has_purpose_filter)
+            ch_result = MagicMock()
+            ch_scalars = MagicMock()
+            if has_purpose_filter:
+                ch_scalars.first.return_value = None
+            else:
+                ch_scalars.first.return_value = reg_token
+            ch_result.scalars.return_value = ch_scalars
+            return ch_result
+
+        async def _execute(*args, **kwargs):
+            stmt = args[0] if args else None
+            return _challenge_result_for_query(stmt)
+
+        db.execute = _execute
+
+        # Five wrong /reset-password calls — must all bounce as
+        # "expired", and the registration token must stay untouched.
+        for _ in range(5):
+            with pytest.raises(HTTPException) as exc_info:
+                _run(reset_password_endpoint(
+                    ResetPasswordRequest(
+                        phone_number="13800138000", code="000000",
+                        new_password="newpw1234567",
+                    ),
+                    _make_request(), Response(), db,
+                ))
+            assert exc_info.value.status_code == 400
+            assert "已过期" in exc_info.value.detail
+
+        assert reg_token.attempts == 0
+        assert reg_token.consumed_at is None
+        assert all(observed_purpose_filter)
 
     def test_three_wrong_reset_guesses_consume_challenge(self):
         """P1-10a-2: reset-password mirrors verify-code's

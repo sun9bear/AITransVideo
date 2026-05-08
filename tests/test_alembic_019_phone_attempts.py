@@ -124,6 +124,42 @@ def test_auth_phone_defines_max_verify_attempts_constant():
     )
 
 
+def test_auth_phone_endpoints_filter_by_login_purpose():
+    """P1-10a-2 follow-up (Codex review 405d2a0): the SELECT in both
+    OTP endpoints must scope to ``purpose == 'login'``. Without it,
+    after a successful new-phone verify-code the latest unconsumed
+    challenge for the phone is the registration token, and an
+    attacker can burn it via wrong-code attempts.
+
+    AST scan: the source must contain a comparison whose left side is
+    ``PhoneVerificationChallenge.purpose`` and whose right side is the
+    string ``"login"``. We don't pin the exact comparator (== or .__eq__),
+    but at least the literal must appear next to the column reference.
+    """
+    import inspect
+
+    import auth_phone
+
+    for endpoint_name in ("verify_code_endpoint", "reset_password_endpoint"):
+        fn = getattr(auth_phone, endpoint_name)
+        src = inspect.getsource(fn)
+        # Allow either single quotes or double quotes around 'login'.
+        purpose_filter_present = (
+            "PhoneVerificationChallenge.purpose == \"login\"" in src
+            or "PhoneVerificationChallenge.purpose == 'login'" in src
+        )
+        assert purpose_filter_present, (
+            f"P1-10a-2 follow-up regression: {endpoint_name} no longer "
+            "filters on PhoneVerificationChallenge.purpose == 'login'. "
+            "After a successful new-phone verify-code, the latest "
+            "unconsumed row is the registration token (purpose="
+            "'registration'). Without the filter, OTP wrong-code "
+            "attempts can pick up that registration row, increment "
+            "its attempts, and burn it after 3 misses — a fresh DoS "
+            "surface that the compare-first fix didn't cover."
+        )
+
+
 def test_auth_phone_endpoints_compare_code_before_consuming():
     """AST scan on both endpoints: the comparison ``challenge.code !=
     code`` must appear BEFORE any assignment to ``challenge.consumed_at``

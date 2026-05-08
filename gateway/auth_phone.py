@@ -313,10 +313,25 @@ async def verify_code_endpoint(
 
     now = datetime.now(timezone.utc)
 
+    # P1-10a-2 follow-up (Codex review 405d2a0): filter by
+    # ``purpose == "login"``. After a new-phone verify-code succeeds,
+    # we issue a separate ``purpose="registration"`` row holding the
+    # registration token; that row is unconsumed and (briefly) the
+    # latest for the phone. Without the purpose filter, a subsequent
+    # ``/verify-code`` or ``/reset-password`` request would pick up
+    # THE REGISTRATION ROW as the active challenge, increment its
+    # attempts on every wrong code, and burn the user's pending
+    # registration token after MAX_VERIFY_ATTEMPTS misses — a fresh
+    # DoS surface that the previous compare-first fix didn't cover.
+    # Registration tokens are ONLY consumable via
+    # ``/complete-registration`` (which already filters
+    # ``purpose == "registration"``); OTP endpoints must scope to
+    # login challenges only.
     result = await db.execute(
         select(PhoneVerificationChallenge)
         .where(
             PhoneVerificationChallenge.phone_number == phone,
+            PhoneVerificationChallenge.purpose == "login",
             PhoneVerificationChallenge.consumed_at.is_(None),
             PhoneVerificationChallenge.expires_at > now,
         )
@@ -527,11 +542,17 @@ async def reset_password_endpoint(
 
     now = datetime.now(timezone.utc)
 
-    # Find active challenge for this phone.
+    # Find active LOGIN challenge for this phone. P1-10a-2 follow-up
+    # (Codex review 405d2a0): scope to ``purpose == "login"`` so the
+    # endpoint can't accidentally pick up an unconsumed registration
+    # token (purpose='registration') and burn it via the wrong-code
+    # attempts counter. Registration tokens are only consumable via
+    # /complete-registration.
     result = await db.execute(
         select(PhoneVerificationChallenge)
         .where(
             PhoneVerificationChallenge.phone_number == phone,
+            PhoneVerificationChallenge.purpose == "login",
             PhoneVerificationChallenge.consumed_at.is_(None),
             PhoneVerificationChallenge.expires_at > now,
         )
