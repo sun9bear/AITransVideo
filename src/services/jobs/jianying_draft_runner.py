@@ -30,6 +30,7 @@ import logging
 import os
 import threading
 import uuid
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -492,16 +493,34 @@ class JianyingDraftRunner:
                 # else: fingerprint mismatch / file gone / root changed — fall through
 
             if response is None:
-                # idle / failed / succeeded-needs-rebuild → transition to running
+                # idle / failed / succeeded-needs-rebuild → transition to running.
+                # P1-15b batch 4 (audit 2026-05-07): route the JobRecord
+                # write through ``store.update_job`` so a concurrent
+                # JobStore mutation (display rename, cancel etc.) on a
+                # NON-jianying field can't be clobbered by the jianying
+                # in-place mutation below. The outer file_lock here
+                # serialises jianying-internal contention; update_job's
+                # own JobStore lock provides cross-system mutation safety.
+                # Two locks are nested (jianying outer, jobstore inner) —
+                # there is no other path holding the jobstore lock and
+                # then trying to acquire the jianying lock, so no risk
+                # of deadlock.
                 attempt_id = uuid.uuid4().hex
-                job.jianying_draft_status = "running"
-                job.jianying_draft_started_at = _utc_now_iso()
-                job.jianying_draft_completed_at = None
-                job.jianying_draft_error = None
-                job.jianying_draft_attempt_id = attempt_id
-                job.jianying_draft_fingerprint = fingerprint  # may be None on legacy paths
-                job.jianying_draft_substep = SUBSTEP_VALIDATING_INPUTS
-                self._store.save_job(job)
+                started_at = _utc_now_iso()
+
+                def _claim_running(current: "JobRecord") -> "JobRecord":
+                    return replace(
+                        current,
+                        jianying_draft_status="running",
+                        jianying_draft_started_at=started_at,
+                        jianying_draft_completed_at=None,
+                        jianying_draft_error=None,
+                        jianying_draft_attempt_id=attempt_id,
+                        jianying_draft_fingerprint=fingerprint,
+                        jianying_draft_substep=SUBSTEP_VALIDATING_INPUTS,
+                    )
+
+                job = self._store.update_job(job_id, _claim_running)
 
                 self._emit_status_event(
                     job_id,
@@ -693,23 +712,43 @@ class JianyingDraftRunner:
         + JobEvent append (a few ms). This is intentionally a *short*
         critical section so a concurrent trigger() call can serialize behind
         it and still respond quickly.
+
+        P1-15b batch 4 (audit 2026-05-07): the JobRecord write goes
+        through ``store.update_job`` so a concurrent non-jianying
+        mutation (display rename, cancel, etc.) cannot be lost. The
+        attempt_id guard now lives inside the mutator — observed under
+        the JobStore lock — so a fresh trigger that flipped attempt_id
+        between our require_job and our save can't be clobbered. Mutator
+        returns ``current`` unchanged on attempt-id mismatch, which means
+        ``update_job`` writes the same bytes back — idempotent, with the
+        ``transition_happened`` flag distinguishing real updates from
+        no-ops so the JobEvent only fires when we actually moved state.
         """
         lock_path = self._lock_path_for(job_id)
         with file_lock(lock_path):
-            job = self._store.require_job(job_id)
-            # Tolerate concurrent recovery: only update if our attempt is still
-            # the current one. Otherwise a stale background thread would clobber
-            # state owned by a fresh trigger.
-            if job.jianying_draft_attempt_id and job.jianying_draft_attempt_id != attempt_id:
+            transition_happened = False
+            attempt_observed: str | None = None
+
+            def mutator(current: "JobRecord") -> "JobRecord":
+                nonlocal transition_happened, attempt_observed
+                attempt_observed = current.jianying_draft_attempt_id
+                if (
+                    current.jianying_draft_attempt_id
+                    and current.jianying_draft_attempt_id != attempt_id
+                ):
+                    return current
+                transition_happened = True
+                return replace(current, jianying_draft_substep=substep)
+
+            job = self._store.update_job(job_id, mutator)
+            if not transition_happened:
                 logger.warning(
                     "Substep update for %s skipped — attempt_id changed (mine=%s, current=%s)",
                     job_id,
                     attempt_id,
-                    job.jianying_draft_attempt_id,
+                    attempt_observed,
                 )
                 return
-            job.jianying_draft_substep = substep
-            self._store.save_job(job)
             self._emit_status_event(
                 job_id,
                 substep=substep,
@@ -729,6 +768,14 @@ class JianyingDraftRunner:
         misbehave if any historical record was written with a different
         precision (microseconds present/absent), timezone offset format
         (+00:00 vs Z), or fractional-second style.
+
+        P1-15b batch 4 (audit 2026-05-07): both terminal writes
+        (succeeded recovery + failed reap) go through ``store.update_job``
+        so a concurrent JobStore mutation on a non-jianying field is
+        not clobbered. The pre-mutator FS / fingerprint inspection
+        stays outside the JobStore lock because it is purely read-only;
+        the mutator re-checks status inside the lock to avoid resurrecting
+        a record whose worker just finished while we were inspecting.
         """
         lock_path = self._lock_path_for(job_id)
         with file_lock(lock_path):
@@ -768,12 +815,29 @@ class JianyingDraftRunner:
                 and cached_fingerprint == current_fingerprint
             )
 
+            now_iso = _utc_now_iso()
+
             if zip_exists and fingerprint_matches:
-                job.jianying_draft_status = "succeeded"
-                job.jianying_draft_error = None
-                job.jianying_draft_completed_at = _utc_now_iso()
-                job.jianying_draft_substep = SUBSTEP_COMPLETED
-                self._store.save_job(job)
+                transition_happened = False
+
+                def _recover_succeed(current: "JobRecord") -> "JobRecord":
+                    nonlocal transition_happened
+                    if current.jianying_draft_status != "running":
+                        # Worker finished between our snapshot read and
+                        # acquiring the JobStore lock — concede the race.
+                        return current
+                    transition_happened = True
+                    return replace(
+                        current,
+                        jianying_draft_status="succeeded",
+                        jianying_draft_error=None,
+                        jianying_draft_completed_at=now_iso,
+                        jianying_draft_substep=SUBSTEP_COMPLETED,
+                    )
+
+                job = self._store.update_job(job_id, _recover_succeed)
+                if not transition_happened:
+                    return False
                 self._emit_status_event(
                     job_id,
                     substep=SUBSTEP_COMPLETED,
@@ -793,14 +857,28 @@ class JianyingDraftRunner:
                 return True
 
             # Mark failed
-            job.jianying_draft_status = "failed"
-            job.jianying_draft_error = (
+            transition_happened = False
+            failure_message = (
                 "Process restart while generation was in progress; "
                 "marked stale by startup reaper. Trigger again to retry."
             )
-            job.jianying_draft_completed_at = _utc_now_iso()
-            job.jianying_draft_substep = SUBSTEP_FAILED
-            self._store.save_job(job)
+
+            def _recover_fail(current: "JobRecord") -> "JobRecord":
+                nonlocal transition_happened
+                if current.jianying_draft_status != "running":
+                    return current
+                transition_happened = True
+                return replace(
+                    current,
+                    jianying_draft_status="failed",
+                    jianying_draft_error=failure_message,
+                    jianying_draft_completed_at=now_iso,
+                    jianying_draft_substep=SUBSTEP_FAILED,
+                )
+
+            job = self._store.update_job(job_id, _recover_fail)
+            if not transition_happened:
+                return False
             self._emit_status_event(
                 job_id,
                 substep=SUBSTEP_FAILED,
@@ -954,12 +1032,23 @@ class JianyingDraftRunner:
                 )
                 # Final-state write also runs in a short critical section so
                 # a concurrent trigger doesn't read a half-updated record.
+                # P1-15b batch 4: terminal write goes through update_job;
+                # attempt_id guard moves into the mutator so a fresh
+                # trigger that flipped attempt_id between the fingerprint
+                # recompute and the JobStore lock can't be clobbered.
                 lock_path = self._lock_path_for(job_id)
                 with file_lock(lock_path):
-                    final_job = self._store.require_job(job_id)
+                    # Recompute the fingerprint outside the JobStore lock —
+                    # it's pure-read disk inspection (no race-sensitive
+                    # state). The mutator re-validates attempt_id under
+                    # the lock before applying. We use whatever JobRecord
+                    # snapshot _compute_jianying_fingerprint sees through
+                    # require_job here; if attempt_id changed concurrently
+                    # the mutator no-ops anyway.
+                    snapshot = self._store.require_job(job_id)
                     if (
-                        final_job.jianying_draft_attempt_id
-                        and final_job.jianying_draft_attempt_id != attempt_id
+                        snapshot.jianying_draft_attempt_id
+                        and snapshot.jianying_draft_attempt_id != attempt_id
                     ):
                         logger.warning(
                             "Final-state write skipped for %s — attempt_id changed",
@@ -978,17 +1067,38 @@ class JianyingDraftRunner:
                     # set we actually shipped", so subsequent triggers
                     # cache-hit cleanly.
                     final_fp = _compute_jianying_fingerprint(
-                        final_job, user_draft_root,
+                        snapshot, user_draft_root,
                     )
-                    final_job.jianying_draft_status = "succeeded"
-                    final_job.jianying_draft_zip_path = result.draft_zip_path
-                    final_job.jianying_draft_completed_at = _utc_now_iso()
-                    final_job.jianying_draft_error = None
-                    final_job.jianying_draft_user_root = user_draft_root
-                    final_job.jianying_draft_substep = SUBSTEP_COMPLETED
-                    if final_fp is not None:
-                        final_job.jianying_draft_fingerprint = final_fp
-                    self._store.save_job(final_job)
+                    completed_at = _utc_now_iso()
+                    transition_happened = False
+
+                    def _finalize_success(current: "JobRecord") -> "JobRecord":
+                        nonlocal transition_happened
+                        if (
+                            current.jianying_draft_attempt_id
+                            and current.jianying_draft_attempt_id != attempt_id
+                        ):
+                            return current
+                        transition_happened = True
+                        kwargs: dict[str, object] = {
+                            "jianying_draft_status": "succeeded",
+                            "jianying_draft_zip_path": result.draft_zip_path,
+                            "jianying_draft_completed_at": completed_at,
+                            "jianying_draft_error": None,
+                            "jianying_draft_user_root": user_draft_root,
+                            "jianying_draft_substep": SUBSTEP_COMPLETED,
+                        }
+                        if final_fp is not None:
+                            kwargs["jianying_draft_fingerprint"] = final_fp
+                        return replace(current, **kwargs)
+
+                    final_job = self._store.update_job(job_id, _finalize_success)
+                    if not transition_happened:
+                        logger.warning(
+                            "Final-state write skipped for %s — attempt_id changed",
+                            job_id,
+                        )
+                        return
                     self._emit_status_event(
                         job_id,
                         substep=SUBSTEP_COMPLETED,
@@ -1073,24 +1183,42 @@ class JianyingDraftRunner:
     ) -> None:
         """Mark JobRecord as failed + emit a typed JobEvent. Best-effort:
         store unreachable still gets logged. Wraps the read-modify-write
-        in a short file_lock so it can't race a concurrent trigger."""
+        in a short file_lock so it can't race a concurrent trigger.
+
+        P1-15b batch 4 (audit 2026-05-07): JobRecord write goes through
+        ``store.update_job`` so a concurrent JobStore mutation on a
+        non-jianying field can't be clobbered. The attempt_id guard
+        moves into the mutator — observed under the JobStore lock —
+        and the JobEvent fires only when ``transition_happened`` is True.
+        """
         lock_path = self._lock_path_for(job_id)
         try:
             with file_lock(lock_path):
-                job = self._store.require_job(job_id)
-                if (
-                    job.jianying_draft_attempt_id
-                    and job.jianying_draft_attempt_id != attempt_id
-                ):
+                completed_at = _utc_now_iso()
+                transition_happened = False
+
+                def _record_failure(current: "JobRecord") -> "JobRecord":
+                    nonlocal transition_happened
+                    if (
+                        current.jianying_draft_attempt_id
+                        and current.jianying_draft_attempt_id != attempt_id
+                    ):
+                        return current
+                    transition_happened = True
+                    return replace(
+                        current,
+                        jianying_draft_status="failed",
+                        jianying_draft_error=error_message,
+                        jianying_draft_completed_at=completed_at,
+                        jianying_draft_substep=substep,
+                    )
+
+                job = self._store.update_job(job_id, _record_failure)
+                if not transition_happened:
                     logger.warning(
                         "Mark-failed for %s skipped — attempt_id changed", job_id
                     )
                     return
-                job.jianying_draft_status = "failed"
-                job.jianying_draft_error = error_message
-                job.jianying_draft_completed_at = _utc_now_iso()
-                job.jianying_draft_substep = substep
-                self._store.save_job(job)
                 self._emit_status_event(
                     job_id,
                     substep=substep,

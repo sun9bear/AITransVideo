@@ -2195,5 +2195,237 @@ class TestSkipCacheBypassesJianyingOuterCache:
         )
 
 
+# ---------------------------------------------------------------------------
+# P1-15b batch 4 (audit 2026-05-07): JianyingDraftRunner save_job sites
+# migrated to update_job(mutator). Regression: a concurrent JobStore
+# mutation on a NON-jianying field must not be clobbered by the runner's
+# jianying-field write, and vice versa.
+# ---------------------------------------------------------------------------
+
+
+class TestJianyingUpdateJobInteraction:
+    """Cross-mutation safety after the batch 4 migration.
+
+    Before batch 4 the runner used ``require_job + in-place mutation +
+    save_job``. If an HTTP-side ``update_job`` (e.g. display rename, S2
+    auto-rename, admin force-fail) committed a non-jianying field
+    BETWEEN the runner's require_job and save_job, the runner's save
+    would write a stale snapshot back to disk, silently dropping the
+    HTTP-side mutation. After batch 4 every runner save goes through
+    ``store.update_job`` whose mutator runs under the JobStore file_lock
+    with a freshly loaded record, so the two paths serialize and both
+    writes survive.
+    """
+
+    def test_set_substep_preserves_concurrent_display_name_update(self, tmp_path):
+        """Force the runner's _do_generate to interleave with an HTTP-side
+        display_name update inside the SAME JobStore lock window.
+
+        Pattern: spawn a real worker (slow backend) and, while it is
+        in the BUILDING_DRAFT substep, issue ``store.update_job`` from
+        the test thread to set ``display_name``. After the worker
+        finishes, the JobRecord must carry BOTH:
+          * jianying_draft_status == "succeeded" (worker's write)
+          * display_name == "Renamed" (HTTP-side write)
+        """
+        from dataclasses import replace as dc_replace
+
+        store = _make_store(tmp_path)
+        project_dir = _make_project_dir(tmp_path)
+        record = _make_record(
+            project_dir=str(project_dir),
+            display_name="Initial",
+        )
+        store.save_job(record)
+
+        building_entered = threading.Event()
+        rename_committed = threading.Event()
+
+        def slow_write(request):
+            building_entered.set()
+            # Block until the test thread has issued its rename.
+            rename_committed.wait(timeout=5)
+            return _make_ok_result(zip_path=str(tmp_path / "draft.zip"))
+
+        backend = mock.MagicMock()
+        backend.write.side_effect = slow_write
+
+        runner = _make_runner(store, backend)
+        runner.trigger("job-test-001")
+
+        # Wait until the worker has progressed past initial substeps and
+        # is sitting inside the (slow) backend.write call. At this point
+        # the jianying lock is RELEASED (the runner's lock-granularity
+        # contract — the long backend.write is lock-free) so our HTTP
+        # rename below can land without queueing forever.
+        assert building_entered.wait(timeout=5), (
+            "backend.write was never reached — test setup wrong"
+        )
+
+        # HTTP-side mutation: rename the job while worker is mid-write.
+        store.update_job(
+            "job-test-001",
+            lambda current: dc_replace(current, display_name="Renamed"),
+        )
+
+        # Release the worker; it will then enter the final-state
+        # update_job mutator. That mutator re-loads the record under the
+        # JobStore lock and replaces ONLY jianying_draft_* fields, so
+        # display_name="Renamed" must survive.
+        rename_committed.set()
+        final = _wait_for_jianying_status(store, "job-test-001", "succeeded")
+
+        assert final.jianying_draft_status == "succeeded"
+        assert final.display_name == "Renamed", (
+            "P1-15b batch 4 regression: jianying worker's save clobbered "
+            "a concurrent display_name update. Worker mutator must use "
+            "store.update_job + replace(only jianying_* fields), not "
+            "in-place mutation of a stale snapshot."
+        )
+
+    def test_mark_failed_preserves_concurrent_display_name_update(self, tmp_path):
+        """Same invariant as above, but on the failure path:
+        backend raises, runner takes the _mark_failed branch.
+        """
+        from dataclasses import replace as dc_replace
+
+        store = _make_store(tmp_path)
+        project_dir = _make_project_dir(tmp_path)
+        record = _make_record(
+            project_dir=str(project_dir),
+            display_name="Initial",
+        )
+        store.save_job(record)
+
+        building_entered = threading.Event()
+        rename_committed = threading.Event()
+
+        def failing_write(request):
+            building_entered.set()
+            rename_committed.wait(timeout=5)
+            raise RuntimeError("simulated backend failure")
+
+        backend = mock.MagicMock()
+        backend.write.side_effect = failing_write
+
+        runner = _make_runner(store, backend)
+        runner.trigger("job-test-001")
+
+        assert building_entered.wait(timeout=5)
+
+        store.update_job(
+            "job-test-001",
+            lambda current: dc_replace(current, display_name="Renamed"),
+        )
+
+        rename_committed.set()
+        final = _wait_for_jianying_status(store, "job-test-001", "failed")
+
+        assert final.jianying_draft_status == "failed"
+        assert final.display_name == "Renamed", (
+            "P1-15b batch 4 regression: jianying _mark_failed clobbered "
+            "a concurrent display_name update. _mark_failed must use "
+            "store.update_job + replace(only jianying_* fields)."
+        )
+
+    def test_set_substep_skips_when_attempt_id_changed(self, tmp_path):
+        """The attempt_id guard must remain effective after the
+        update_job migration: a stale background thread whose
+        attempt_id no longer matches the current one MUST NOT write
+        any jianying_draft_* state, and MUST NOT emit a JobEvent.
+        """
+        from services.jobs.jianying_draft_runner import (
+            SUBSTEP_BUILDING_DRAFT,
+            SUBSTEP_VALIDATING_INPUTS,
+        )
+
+        store = _make_store(tmp_path)
+        project_dir = _make_project_dir(tmp_path)
+        record = _make_record(
+            project_dir=str(project_dir),
+            jianying_draft_status="running",
+            jianying_draft_attempt_id="current-attempt",
+            jianying_draft_substep=SUBSTEP_VALIDATING_INPUTS,
+        )
+        store.save_job(record)
+
+        runner = _make_runner(store)
+
+        # Stale attempt invokes _set_substep — must no-op.
+        runner._set_substep(
+            "job-test-001",
+            attempt_id="stale-attempt",
+            substep=SUBSTEP_BUILDING_DRAFT,
+        )
+
+        persisted = store.require_job("job-test-001")
+        assert persisted.jianying_draft_substep == SUBSTEP_VALIDATING_INPUTS, (
+            "P1-15b batch 4 regression: attempt_id guard moved into the "
+            "mutator but did not skip on mismatch — stale background "
+            "thread clobbered current attempt's substep."
+        )
+        assert persisted.jianying_draft_attempt_id == "current-attempt"
+
+    def test_concurrent_set_substep_calls_serialize_through_jobstore_lock(
+        self, tmp_path
+    ):
+        """Two concurrent _set_substep calls (with the same valid
+        attempt_id) must serialize through the JobStore file_lock and
+        BOTH writes must be observed in some valid order. Without the
+        update_job migration this would be a save_job race; after the
+        migration JobStore's lock provides the serialisation.
+        """
+        from services.jobs.jianying_draft_runner import (
+            SUBSTEP_BUILDING_DRAFT,
+            SUBSTEP_VALIDATING_COMPATIBILITY,
+        )
+
+        store = _make_store(tmp_path)
+        project_dir = _make_project_dir(tmp_path)
+        record = _make_record(
+            project_dir=str(project_dir),
+            jianying_draft_status="running",
+            jianying_draft_attempt_id="attempt-1",
+        )
+        store.save_job(record)
+
+        runner = _make_runner(store)
+        barrier = threading.Barrier(2)
+
+        def call_substep(label: str):
+            barrier.wait()
+            runner._set_substep(
+                "job-test-001",
+                attempt_id="attempt-1",
+                substep=label,
+            )
+
+        t1 = threading.Thread(
+            target=call_substep, args=(SUBSTEP_BUILDING_DRAFT,)
+        )
+        t2 = threading.Thread(
+            target=call_substep, args=(SUBSTEP_VALIDATING_COMPATIBILITY,)
+        )
+        t1.start()
+        t2.start()
+        t1.join(timeout=5)
+        t2.join(timeout=5)
+        assert not t1.is_alive() and not t2.is_alive(), (
+            "P1-15b batch 4: concurrent _set_substep calls deadlocked — "
+            "jianying lock + JobStore lock interleaving introduced a "
+            "circular wait."
+        )
+
+        final = store.require_job("job-test-001")
+        assert final.jianying_draft_substep in (
+            SUBSTEP_BUILDING_DRAFT,
+            SUBSTEP_VALIDATING_COMPATIBILITY,
+        ), (
+            "P1-15b batch 4 regression: concurrent _set_substep produced "
+            f"unexpected substep={final.jianying_draft_substep!r}; expected "
+            "one of the two attempted values."
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
