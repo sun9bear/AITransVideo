@@ -554,17 +554,40 @@ class ProcessJobRunner:
             current_message=current_job.progress_message,
         )
         timestamp = utc_now_iso()
-        next_job = self._save_job(
-            current_job,
-            current_stage=next_stage,
-            progress_message=next_message,
-            updated_at=timestamp,
-            project_dir=self._resolve_identity_project_dir(
-                current=current_job.project_dir,
-                detected=detected_project_dir,
-                job_id=job_id,
-            ),
+        # P1-12b (audit 2026-05-07): skip the JobRecord rewrite if the
+        # log line didn't move stage / message and didn't bootstrap
+        # project_dir. Many pipeline stdout lines trigger the same
+        # `_resolve_stage_from_log_line` output line-after-line; without
+        # this short-circuit each one triggers a full ~30 KB JSON rewrite
+        # for zero semantic change (the audit measured 60-180 MB write
+        # amplification per 30-min pipeline). The log event still
+        # appends regardless — UI tail streams those.
+        next_project_dir = self._resolve_identity_project_dir(
+            current=current_job.project_dir,
+            detected=detected_project_dir,
+            job_id=job_id,
         )
+        semantic_changed = (
+            next_stage != current_job.current_stage
+            or next_message != current_job.progress_message
+            or next_project_dir != current_job.project_dir
+        )
+        if semantic_changed:
+            # Per-line writes use fsync=False (P1-12b group-commit mode):
+            # OS page cache absorbs the bytes; the next strict write
+            # (e.g. _finalize_process) flushes the journal. On kernel
+            # crash we lose at most a few seconds of in-flight log lines,
+            # which the next pipeline restart re-derives from events.jsonl.
+            next_job = self._save_job(
+                current_job,
+                current_stage=next_stage,
+                progress_message=next_message,
+                updated_at=timestamp,
+                project_dir=next_project_dir,
+                fsync=False,
+            )
+        else:
+            next_job = current_job
         self.store.append_event(
             job_id,
             JobEvent(
@@ -575,6 +598,7 @@ class ProcessJobRunner:
                 status=next_job.status,
                 message=line,
             ),
+            fsync=False,
         )
 
     def _finalize_process(self, job_id: str, returncode: int) -> None:
@@ -662,7 +686,13 @@ class ProcessJobRunner:
             ),
         )
 
-    def _save_job(self, record: JobRecord, **updates: object) -> JobRecord:
+    def _save_job(
+        self,
+        record: JobRecord,
+        *,
+        fsync: bool = True,
+        **updates: object,
+    ) -> JobRecord:
         # P1-15b (audit 2026-05-07): route through update_job so the
         # full load → modify → save sequence is atomic under the
         # per-job file_lock. Without it, an HTTP request modifying the
@@ -674,12 +704,18 @@ class ProcessJobRunner:
         # ``updates`` so concurrent fields written by other writers
         # are preserved. ``initial=record`` covers the first-write case
         # in ``start()`` where the JobRecord hasn't been persisted yet.
+        #
+        # P1-12b (audit 2026-05-07): ``fsync`` propagates to JobStore
+        # so the high-frequency ``_record_line`` log-update path can
+        # skip per-line fsyncs. Terminal writes (start / finalize /
+        # status flips) keep ``fsync=True`` (default).
         if not updates:
             return record
         return self.store.update_job(
             record.job_id,
             lambda current: replace(current, **updates),
             initial=record,
+            fsync=fsync,
         )
 
     @staticmethod

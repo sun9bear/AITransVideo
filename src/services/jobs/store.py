@@ -15,7 +15,26 @@ class JobStore:
     def __init__(self, root_dir: str | Path) -> None:
         self.root_dir = Path(root_dir).resolve(strict=False)
 
-    def save_job(self, record: JobRecord) -> JobRecord:
+    def save_job(self, record: JobRecord, *, fsync: bool = True) -> JobRecord:
+        """Persist a JobRecord atomically.
+
+        ``fsync=True`` (default) keeps the strict durability guarantee
+        — the bytes hit physical storage before this method returns.
+        ``fsync=False`` is the **group commit** mode introduced for
+        P1-12b: skip the per-write ``os.fsync`` so the high-frequency
+        ``ProcessJobRunner._record_line`` log-line path doesn't spend
+        2 fsyncs per stdout line (60-180 MB write amplification on a
+        30-min pipeline). The OS page cache still buffers the write;
+        a subsequent strict write from the same process (terminal
+        status flip, ``finalize_process``) flushes the journal and
+        durably-commits the prior buffered writes.
+
+        Crash-window tradeoff: with ``fsync=False`` and a *kernel*
+        crash, recent log-line updates may be lost — the next
+        pipeline / Job API restart re-derives state from events.jsonl
+        + the last fsynced JobRecord. **Status flips and terminal
+        writes MUST stay fsync=True**.
+        """
         self.root_dir.mkdir(parents=True, exist_ok=True)
         output_path = self._job_path(record.job_id)
         # P1-15b follow-up (Codex review of b1fee3a): take the per-job
@@ -31,7 +50,7 @@ class JobStore:
         # update_job calls into save_job from inside its own critical
         # section the re-acquire is free.
         with file_lock(output_path):
-            self._write_json_atomic(output_path, record.to_dict())
+            self._write_json_atomic(output_path, record.to_dict(), fsync=fsync)
         return record
 
     def update_job(
@@ -40,6 +59,7 @@ class JobStore:
         mutator: Callable[[JobRecord], JobRecord],
         *,
         initial: JobRecord | None = None,
+        fsync: bool = True,
     ) -> JobRecord:
         """Atomic load → mutator → save under a per-job ``file_lock``.
 
@@ -69,10 +89,21 @@ class JobStore:
         method raises ``KeyError`` to preserve the original strict
         require_job contract for callers that genuinely expect the
         record to exist.
+
+        ``fsync`` defaults to True; pass False for high-frequency
+        log-line updates (P1-12b group-commit mode). See ``save_job``
+        for the durability tradeoff.
         """
         path = self._job_path(job_id)
         with file_lock(path):
             current = self.load_job(job_id)
+            # Track whether the ``current`` record came from disk
+            # (loaded successfully) or fell back to ``initial`` (first
+            # write). The skip-noop optimization below MUST NOT fire
+            # on first writes — even if the mutator is identity, we
+            # need to persist ``initial`` so subsequent require_job
+            # calls find the record.
+            loaded_from_disk = current is not None
             if current is None:
                 if initial is None:
                     raise KeyError(f"Job not found: {job_id}")
@@ -90,7 +121,23 @@ class JobStore:
                     f"to {updated.job_id!r}. Mutators must not change "
                     f"the job_id; the lock is keyed by the original id."
                 )
-            self.save_job(updated)
+            # P1-12b (audit 2026-05-07): fast no-op path. If the
+            # mutator returned the SAME record (dataclass equality),
+            # nothing on disk needs to change — skip the rewrite.
+            # ``ProcessJobRunner._record_line`` exploits this: many
+            # stdout lines map to the same (current_stage, progress_message)
+            # so skipping the rewrite avoids 30 KB × 3000 lines = 90 MB
+            # of needless write amplification per pipeline run.
+            #
+            # Guarded on ``loaded_from_disk``: first-write callers
+            # (e.g. copy_as_new passing ``initial=new_record`` with an
+            # identity mutator) require the on-disk file to be created
+            # even though "current == updated" trivially holds. Without
+            # this guard the file is never written and subsequent
+            # ``require_job`` calls fail with KeyError.
+            if loaded_from_disk and updated == current:
+                return current
+            self.save_job(updated, fsync=fsync)
             return updated
 
     def load_job(self, job_id: str) -> JobRecord | None:
@@ -108,14 +155,28 @@ class JobStore:
             raise KeyError(f"Job not found: {job_id}")
         return record
 
-    def append_event(self, job_id: str, event: JobEvent) -> JobEvent:
+    def append_event(
+        self, job_id: str, event: JobEvent, *, fsync: bool = True
+    ) -> JobEvent:
+        """Append a JobEvent to ``{job_id}.events.jsonl``.
+
+        ``fsync`` default True keeps strict durability for status /
+        terminal events. Pass ``fsync=False`` for the high-volume log
+        path (``ProcessJobRunner._record_line``) where each pipeline
+        stdout line emits a JobEvent — without the flag, that path
+        does ~3000 fsyncs per 30-min run, which is the larger half of
+        the 6-30s pipeline IO tax measured in the audit. The OS page
+        cache still buffers the bytes; a subsequent strict write
+        from the same process flushes the journal.
+        """
         self.root_dir.mkdir(parents=True, exist_ok=True)
         output_path = self._events_path(job_id)
         with output_path.open("a", encoding="utf-8", newline="\n") as handle:
             handle.write(json.dumps(event.to_dict(), ensure_ascii=False))
             handle.write("\n")
             handle.flush()
-            os.fsync(handle.fileno())
+            if fsync:
+                os.fsync(handle.fileno())
         return event
 
     def load_events(self, job_id: str) -> list[JobEvent]:
@@ -174,7 +235,29 @@ class JobStore:
         return self.root_dir / f"{normalized_job_id}.events.jsonl"
 
     @staticmethod
-    def _write_json_atomic(output_path: Path, payload: dict[str, object]) -> None:
+    def _write_json_atomic(
+        output_path: Path,
+        payload: dict[str, object],
+        *,
+        fsync: bool = True,
+    ) -> None:
+        """Atomic temp + rename JSON write.
+
+        ``fsync=True`` (default) flushes the temp file's bytes to disk
+        before the rename, so a crash mid-rename leaves either the old
+        or the new file content but never corrupted partial bytes.
+
+        ``fsync=False`` (P1-12b group-commit mode) skips that fsync.
+        The temp + rename still preserves crash atomicity at the
+        filesystem-rename level (POSIX rename is atomic on the same
+        directory, journaling FS like ext4 / NTFS guarantee the
+        rename either lands or doesn't). What we lose is durability
+        of the bytes themselves: a kernel-level crash between the
+        rename and the next FS journal flush could leave the renamed
+        path pointing at zeroed blocks. For the per-line log-update
+        use case this is acceptable — the next pipeline / API restart
+        re-derives state from the persisted events.jsonl tail.
+        """
         temp_path: Path | None = None
         try:
             serialized_payload = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
@@ -188,7 +271,8 @@ class JobStore:
             ) as temp_file:
                 temp_file.write(serialized_payload)
                 temp_file.flush()
-                os.fsync(temp_file.fileno())
+                if fsync:
+                    os.fsync(temp_file.fileno())
                 temp_path = Path(temp_file.name)
             os.replace(temp_path, output_path)
         finally:
