@@ -53,9 +53,12 @@ def test_migration_018_revision_chain():
     """Migration revision id + down_revision must match the chain
     that the live DB has applied. Drift = upgrade fails on deploy."""
     src = _MIGRATION_PATH.read_text(encoding="utf-8")
-    assert 'revision: str = "018_pricing_active_partial_unique"' in src, (
+    assert 'revision: str = "018_pricing_active_unique"' in src, (
         "P1-11c follow-up² regression: migration 018 revision id "
-        "drifted from canonical name."
+        "drifted from canonical name. Note: shortened to "
+        "018_pricing_active_unique (25 chars) on 2026-05-08 — the "
+        "original 33-char id overflowed the alembic_version "
+        "VARCHAR(32) column on existing DBs."
     )
     assert 'down_revision: Union[str, None] = "017_audit_unique_constraints"' in src, (
         "P1-11c follow-up² regression: migration 018 down_revision is "

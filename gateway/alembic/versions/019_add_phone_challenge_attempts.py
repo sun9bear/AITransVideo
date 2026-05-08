@@ -1,7 +1,7 @@
 """Audit S-HIGH-4 (P1-10a-2): track wrong-code attempts on phone challenges.
 
 Revision ID: 019_add_phone_challenge_attempts
-Revises: 018_pricing_active_partial_unique
+Revises: 018_pricing_active_unique
 Create Date: 2026-05-08
 
 The pre-019 ``verify_code_endpoint`` / ``reset_password_endpoint``
@@ -40,7 +40,7 @@ from alembic import op
 
 
 revision: str = "019_add_phone_challenge_attempts"
-down_revision: Union[str, None] = "018_pricing_active_partial_unique"
+down_revision: Union[str, None] = "018_pricing_active_unique"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

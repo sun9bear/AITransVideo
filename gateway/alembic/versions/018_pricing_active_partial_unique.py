@@ -1,8 +1,15 @@
 """Audit P1-11c follow-up²: partial UNIQUE on pricing active row.
 
-Revision ID: 018_pricing_active_partial_unique
+Revision ID: 018_pricing_active_unique
 Revises: 017_audit_unique_constraints
 Create Date: 2026-05-08
+
+Note: revision id was originally ``018_pricing_active_partial_unique``
+but production deploy 2026-05-08 surfaced ``StringDataRightTruncationError:
+value too long for type character varying(32)`` because the alembic_version
+column on existing DBs is VARCHAR(32). Shortened to 25 chars; the file
+name keeps ``partial_unique`` for searchability — alembic keys off
+``revision`` not the filename.
 
 Codex review of commit 6019beb caught a race that the v0 P1-11c fix
 (UNIQUE on ``version``) does NOT close:
@@ -64,7 +71,7 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision: str = "018_pricing_active_partial_unique"
+revision: str = "018_pricing_active_unique"
 down_revision: Union[str, None] = "017_audit_unique_constraints"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None

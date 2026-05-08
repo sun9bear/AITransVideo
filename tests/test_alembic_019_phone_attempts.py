@@ -46,9 +46,11 @@ def test_migration_019_file_exists():
 def test_migration_019_revision_chain():
     src = _MIGRATION_PATH.read_text(encoding="utf-8")
     assert 'revision: str = "019_add_phone_challenge_attempts"' in src
-    assert 'down_revision: Union[str, None] = "018_pricing_active_partial_unique"' in src, (
+    assert 'down_revision: Union[str, None] = "018_pricing_active_unique"' in src, (
         "P1-10a-2 regression: migration 019 down_revision is not "
-        "018 — chain is broken; deploy will skip 018 or fail."
+        "018_pricing_active_unique — chain is broken; deploy will "
+        "skip 018 or fail. Note: revision id shortened on 2026-05-08 "
+        "from 33 chars to 25 chars due to VARCHAR(32) column limit."
     )
 
 
