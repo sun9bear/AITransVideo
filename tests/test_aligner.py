@@ -103,7 +103,9 @@ def test_aligner_uses_force_dsp_and_marks_review_when_diff_exceeds_threshold(
     output_path = tmp_path / "aligned" / "segment_001_aligned.wav"
     output_path.parent.mkdir(parents=True)
     shutil.copyfile(input_path, output_path)
-    monkeypatch.setattr(SegmentAligner, "_dsp_stretch", lambda self, *_args, **_kwargs: str(output_path))
+    # 2026-05-08 P2-17a-0: _dsp_stretch returns (path, FitResult | None);
+    # mocks return None for FitResult since these tests don't exercise audit fields.
+    monkeypatch.setattr(SegmentAligner, "_dsp_stretch", lambda self, *_args, **_kwargs: (str(output_path), None))
     monkeypatch.setattr(aligner_module, "_measure_wav_duration_ms", lambda _path: 6_000)
 
     aligned = SegmentAligner()._align_one(segment, str(tmp_path / "aligned"))
@@ -123,7 +125,9 @@ def test_aligner_short_force_dsp_backchannel_does_not_require_review(
     output_path = tmp_path / "aligned" / "segment_001_aligned.wav"
     output_path.parent.mkdir(parents=True)
     shutil.copyfile(input_path, output_path)
-    monkeypatch.setattr(SegmentAligner, "_dsp_stretch", lambda self, *_args, **_kwargs: str(output_path))
+    # 2026-05-08 P2-17a-0: _dsp_stretch returns (path, FitResult | None);
+    # mocks return None for FitResult since these tests don't exercise audit fields.
+    monkeypatch.setattr(SegmentAligner, "_dsp_stretch", lambda self, *_args, **_kwargs: (str(output_path), None))
     monkeypatch.setattr(aligner_module, "_measure_wav_duration_ms", lambda _path: 500)
 
     aligned = SegmentAligner(rewriter=None, tts_generator=None)._align_one(
@@ -157,9 +161,10 @@ def test_aligner_caps_short_force_dsp_target_for_listenability(
         target_duration_ms: int,
         _output_path: str,
         **_kwargs: object,
-    ) -> str:
+    ) -> tuple[str, None]:
+        # 2026-05-08 P2-17a-0: _dsp_stretch returns (path, FitResult | None).
         captured["target_duration_ms"] = target_duration_ms
-        return str(output_path)
+        return str(output_path), None
 
     monkeypatch.setattr(SegmentAligner, "_dsp_stretch", fake_dsp)
     monkeypatch.setattr(aligner_module, "_measure_wav_duration_ms", lambda _path: 1_371)
@@ -181,7 +186,9 @@ def test_aligner_short_force_dsp_long_text_still_requires_review(
     output_path = tmp_path / "aligned" / "segment_001_aligned.wav"
     output_path.parent.mkdir(parents=True)
     shutil.copyfile(input_path, output_path)
-    monkeypatch.setattr(SegmentAligner, "_dsp_stretch", lambda self, *_args, **_kwargs: str(output_path))
+    # 2026-05-08 P2-17a-0: _dsp_stretch returns (path, FitResult | None);
+    # mocks return None for FitResult since these tests don't exercise audit fields.
+    monkeypatch.setattr(SegmentAligner, "_dsp_stretch", lambda self, *_args, **_kwargs: (str(output_path), None))
     monkeypatch.setattr(aligner_module, "_measure_wav_duration_ms", lambda _path: 500)
 
     aligned = SegmentAligner(rewriter=None, tts_generator=None)._align_one(
@@ -206,7 +213,9 @@ def test_aligner_two_second_force_dsp_backchannel_is_review_denoised(
     output_path = tmp_path / "aligned" / "segment_001_aligned.wav"
     output_path.parent.mkdir(parents=True)
     shutil.copyfile(input_path, output_path)
-    monkeypatch.setattr(SegmentAligner, "_dsp_stretch", lambda self, *_args, **_kwargs: str(output_path))
+    # 2026-05-08 P2-17a-0: _dsp_stretch returns (path, FitResult | None);
+    # mocks return None for FitResult since these tests don't exercise audit fields.
+    monkeypatch.setattr(SegmentAligner, "_dsp_stretch", lambda self, *_args, **_kwargs: (str(output_path), None))
     monkeypatch.setattr(aligner_module, "_measure_wav_duration_ms", lambda _path: 1_800)
 
     aligned = SegmentAligner(rewriter=None, tts_generator=None)._align_one(
@@ -230,7 +239,9 @@ def test_aligner_two_to_five_second_force_dsp_keeps_review_with_medium_severity(
     output_path = tmp_path / "aligned" / "segment_001_aligned.wav"
     output_path.parent.mkdir(parents=True)
     shutil.copyfile(input_path, output_path)
-    monkeypatch.setattr(SegmentAligner, "_dsp_stretch", lambda self, *_args, **_kwargs: str(output_path))
+    # 2026-05-08 P2-17a-0: _dsp_stretch returns (path, FitResult | None);
+    # mocks return None for FitResult since these tests don't exercise audit fields.
+    monkeypatch.setattr(SegmentAligner, "_dsp_stretch", lambda self, *_args, **_kwargs: (str(output_path), None))
     monkeypatch.setattr(aligner_module, "_measure_wav_duration_ms", lambda _path: 3_000)
 
     aligned = SegmentAligner(rewriter=None, tts_generator=None)._align_one(
@@ -258,7 +269,9 @@ def test_aligner_marks_pre_tts_contradiction_after_first_pass(
     output_path = tmp_path / "aligned" / "segment_001_aligned.wav"
     output_path.parent.mkdir(parents=True)
     shutil.copyfile(input_path, output_path)
-    monkeypatch.setattr(SegmentAligner, "_dsp_stretch", lambda self, *_args, **_kwargs: str(output_path))
+    # 2026-05-08 P2-17a-0: _dsp_stretch returns (path, FitResult | None);
+    # mocks return None for FitResult since these tests don't exercise audit fields.
+    monkeypatch.setattr(SegmentAligner, "_dsp_stretch", lambda self, *_args, **_kwargs: (str(output_path), None))
     monkeypatch.setattr(aligner_module, "_measure_wav_duration_ms", lambda _path: 16_000)
 
     SegmentAligner()._align_one(segment, str(tmp_path / "aligned"))
@@ -343,13 +356,14 @@ def test_aligner_caps_extreme_underflow_dsp_and_pads_silence(
     input_path = _export_tone_wav(tmp_path / "input" / "extreme.wav", duration_ms=1_000)
     aligner = SegmentAligner()
 
-    output_path = aligner._dsp_stretch(
+    # 2026-05-08 P2-17a-0: _dsp_stretch returns (path, FitResult | None);
+    # the FitResult is no longer cached on self for thread safety.
+    output_path, fit_result = aligner._dsp_stretch(
         str(input_path),
         2_500,
         str(tmp_path / "aligned" / "segment_001_aligned.wav"),
     )
 
-    fit_result = aligner._last_dsp_fit_result
     assert fit_result is not None
     assert Path(output_path).exists()
     assert len(AudioSegment.from_wav(output_path)) == pytest.approx(2_500, abs=10)

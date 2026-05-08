@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import threading
 
 from modules.output.project_output import AlignedSegment
 from utils.audio_fit import FitPolicy, FitResult, fit_audio_to_slot
@@ -101,6 +102,21 @@ class AlignmentError(Exception):
 
 
 class PostTTSBudgetTracker:
+    """Per-root post-TTS rewrite/regeneration budget.
+
+    Thread safety (P2-17a-0, 2026-05-08): all four public methods take
+    ``self._lock`` (a ``threading.RLock``) so the read-modify-write in
+    ``try_consume_for_segment`` is atomic and ``register_child_segments``
+    can call ``root_id_for_segment`` without deadlock. Reentrancy matters
+    because ``register_child_segments`` calls ``root_id_for_segment``
+    while already holding the lock.
+
+    The lock only protects the in-memory ledger. Callers must NOT hold
+    this lock while issuing rewriter / TTS provider / ffmpeg work — those
+    are slow IO and the alignment-level paid_fallback semaphore is the
+    correct place to serialize external calls.
+    """
+
     def __init__(
         self,
         max_extra_tts_per_root: int = DEFAULT_MAX_POST_TTS_ADJUSTMENTS_PER_SEGMENT,
@@ -108,10 +124,12 @@ class PostTTSBudgetTracker:
         self.max_extra_tts_per_root = int(max_extra_tts_per_root)
         self._usage_by_root: dict[int, int] = {}
         self._segment_roots: dict[int, int] = {}
+        self._lock = threading.RLock()
 
     def root_id_for_segment(self, segment: DubbingSegment) -> int:
         segment_id = int(segment.segment_id)
-        return self._segment_roots.get(segment_id, segment_id)
+        with self._lock:
+            return self._segment_roots.get(segment_id, segment_id)
 
     def register_child_segments(
         self,
@@ -119,24 +137,27 @@ class PostTTSBudgetTracker:
         parent_segment: DubbingSegment,
         child_segments: list[DubbingSegment],
     ) -> int:
-        root_id = self.root_id_for_segment(parent_segment)
-        for child_segment in child_segments:
-            self._segment_roots[int(child_segment.segment_id)] = root_id
-        return root_id
+        with self._lock:
+            root_id = self.root_id_for_segment(parent_segment)
+            for child_segment in child_segments:
+                self._segment_roots[int(child_segment.segment_id)] = root_id
+            return root_id
 
     def remaining_for_segment(self, segment: DubbingSegment) -> int:
-        root_id = self.root_id_for_segment(segment)
-        used = self._usage_by_root.get(root_id, 0)
-        return max(0, self.max_extra_tts_per_root - used)
+        with self._lock:
+            root_id = self.root_id_for_segment(segment)
+            used = self._usage_by_root.get(root_id, 0)
+            return max(0, self.max_extra_tts_per_root - used)
 
     def try_consume_for_segment(self, segment: DubbingSegment, amount: int = 1) -> bool:
-        root_id = self.root_id_for_segment(segment)
-        used = self._usage_by_root.get(root_id, 0)
-        normalized_amount = max(0, int(amount))
-        if used + normalized_amount > self.max_extra_tts_per_root:
-            return False
-        self._usage_by_root[root_id] = used + normalized_amount
-        return True
+        with self._lock:
+            root_id = self.root_id_for_segment(segment)
+            used = self._usage_by_root.get(root_id, 0)
+            normalized_amount = max(0, int(amount))
+            if used + normalized_amount > self.max_extra_tts_per_root:
+                return False
+            self._usage_by_root[root_id] = used + normalized_amount
+            return True
 
 
 class SegmentAligner:
@@ -163,7 +184,10 @@ class SegmentAligner:
         self.min_rewrite_target_ms = int(min_rewrite_target_ms)
         self.max_rewrite_ratio = float(max_rewrite_ratio)
         self.post_tts_budget_tracker = post_tts_budget_tracker
-        self._last_dsp_fit_result: FitResult | None = None
+        # 2026-05-08 P2-17a-0: dsp fit result removed from instance state.
+        # Each _align_one call now keeps its own local FitResult and passes
+        # it to _apply_dsp_fit_audit / _last_dsp_fit_was_capped_underflow
+        # explicitly. Required for thread-safe parallel alignment in 17a-1.
 
     def align_all(
         self,
@@ -307,7 +331,10 @@ class SegmentAligner:
         alignment_method = "force_dsp"
         needs_review = True
         aligned_duration_ms: int | None = None
-        self._last_dsp_fit_result = None
+        # Per-call local fit result. Threaded through every branch that may
+        # call _dsp_stretch so audit/capped-underflow detection sees only
+        # this segment's stretch, never a neighbor's.
+        fit_result: FitResult | None = None
         self._clear_dsp_fit_audit(segment)
 
         # Phase 2 force-DSP override — when admin enables `force_dsp_alignment`,
@@ -318,7 +345,7 @@ class SegmentAligner:
         force_dsp_user = _is_force_dsp_alignment_enabled()
         if force_dsp_user:
             input_path = _resolve_existing_audio_path(segment.tts_audio_path)
-            aligned_audio_path = self._dsp_stretch(
+            aligned_audio_path, fit_result = self._dsp_stretch(
                 str(input_path), target_duration_ms, str(output_path),
             )
             alignment_method = "force_dsp_user"
@@ -338,7 +365,9 @@ class SegmentAligner:
             needs_review = False
         elif decision == "dsp":
             input_path = _resolve_existing_audio_path(segment.tts_audio_path)
-            aligned_audio_path = self._dsp_stretch(str(input_path), target_duration_ms, str(output_path))
+            aligned_audio_path, fit_result = self._dsp_stretch(
+                str(input_path), target_duration_ms, str(output_path)
+            )
             alignment_method = "dsp"
             needs_review = False
         else:
@@ -348,7 +377,13 @@ class SegmentAligner:
                 current_actual_duration_ms=current_actual_duration_ms,
             )
             if rewrite_outcome is not None:
-                aligned_audio_path, aligned_duration_ms, alignment_method, needs_review = rewrite_outcome
+                (
+                    aligned_audio_path,
+                    aligned_duration_ms,
+                    alignment_method,
+                    needs_review,
+                    fit_result,
+                ) = rewrite_outcome
             else:
                 input_path = _resolve_existing_audio_path(segment.tts_audio_path)
                 if self._should_use_listenable_short_dsp(
@@ -359,7 +394,7 @@ class SegmentAligner:
                     listenable_target_ms = self._listenable_short_dsp_target_ms(
                         actual_duration_ms=current_actual_duration_ms,
                     )
-                    aligned_audio_path = self._dsp_stretch(
+                    aligned_audio_path, fit_result = self._dsp_stretch(
                         str(input_path),
                         listenable_target_ms,
                         str(output_path),
@@ -367,7 +402,7 @@ class SegmentAligner:
                     )
                     alignment_method = "capped_dsp_overflow"
                 else:
-                    aligned_audio_path = self._dsp_stretch(
+                    aligned_audio_path, fit_result = self._dsp_stretch(
                         str(input_path),
                         target_duration_ms,
                         str(output_path),
@@ -379,10 +414,10 @@ class SegmentAligner:
         if aligned_duration_ms is None:
             aligned_duration_ms = _measure_wav_duration_ms(Path(aligned_audio_path))
 
-        self._apply_dsp_fit_audit(segment)
+        self._apply_dsp_fit_audit(segment, fit_result)
         if (
             alignment_method in {"force_dsp", "force_dsp_user"}
-            and self._last_dsp_fit_was_capped_underflow()
+            and self._last_dsp_fit_was_capped_underflow(fit_result)
         ):
             alignment_method = "capped_dsp_underflow"
 
@@ -437,7 +472,7 @@ class SegmentAligner:
         segment: DubbingSegment,
         output_path: str,
         current_actual_duration_ms: int,
-    ) -> tuple[str, int, str, bool] | None:
+    ) -> tuple[str, int, str, bool, FitResult | None] | None:
         target_duration_ms = int(segment.target_duration_ms)
         if not self._should_attempt_rewrite(current_actual_duration_ms, target_duration_ms):
             return None
@@ -543,11 +578,13 @@ class SegmentAligner:
             if decision == "direct":
                 aligned_audio_path = self._direct_copy(tts_result.audio_path, output_path)
                 aligned_duration_ms = _measure_wav_duration_ms(Path(aligned_audio_path))
-                return aligned_audio_path, aligned_duration_ms, "rewrite_direct", False
+                return aligned_audio_path, aligned_duration_ms, "rewrite_direct", False, None
             if decision == "dsp":
-                aligned_audio_path = self._dsp_stretch(tts_result.audio_path, target_duration_ms, output_path)
+                aligned_audio_path, fit_result = self._dsp_stretch(
+                    tts_result.audio_path, target_duration_ms, output_path
+                )
                 aligned_duration_ms = _measure_wav_duration_ms(Path(aligned_audio_path))
-                return aligned_audio_path, aligned_duration_ms, "rewrite_dsp", False
+                return aligned_audio_path, aligned_duration_ms, "rewrite_dsp", False, fit_result
             current_actual_duration_ms = new_actual_duration_ms
 
         if attempted_rewrite:
@@ -563,11 +600,13 @@ class SegmentAligner:
             if best_decision == "direct":
                 aligned_audio_path = self._direct_copy(best_tts_audio_path, output_path)
                 aligned_duration_ms = _measure_wav_duration_ms(Path(aligned_audio_path))
-                return aligned_audio_path, aligned_duration_ms, "rewrite_direct", False
+                return aligned_audio_path, aligned_duration_ms, "rewrite_direct", False, None
             if best_decision == "dsp":
-                aligned_audio_path = self._dsp_stretch(best_tts_audio_path, target_duration_ms, output_path)
+                aligned_audio_path, fit_result = self._dsp_stretch(
+                    best_tts_audio_path, target_duration_ms, output_path
+                )
                 aligned_duration_ms = _measure_wav_duration_ms(Path(aligned_audio_path))
-                return aligned_audio_path, aligned_duration_ms, "rewrite_dsp", False
+                return aligned_audio_path, aligned_duration_ms, "rewrite_dsp", False, fit_result
 
         return None
 
@@ -688,8 +727,11 @@ class SegmentAligner:
         segment.dsp_trimmed_duration_ms = 0
         segment.dsp_stretched_duration_ms = 0
 
-    def _apply_dsp_fit_audit(self, segment: DubbingSegment) -> None:
-        fit_result = self._last_dsp_fit_result
+    def _apply_dsp_fit_audit(
+        self,
+        segment: DubbingSegment,
+        fit_result: FitResult | None,
+    ) -> None:
         if fit_result is None:
             return
         segment.dsp_speed_ratio_used = float(fit_result.speed_ratio_used)
@@ -699,8 +741,10 @@ class SegmentAligner:
         segment.dsp_trimmed_duration_ms = int(fit_result.trimmed_duration_ms)
         segment.dsp_stretched_duration_ms = int(fit_result.stretched_duration_ms)
 
-    def _last_dsp_fit_was_capped_underflow(self) -> bool:
-        fit_result = self._last_dsp_fit_result
+    def _last_dsp_fit_was_capped_underflow(
+        self,
+        fit_result: FitResult | None,
+    ) -> bool:
         if fit_result is None:
             return False
         if fit_result.initial_duration_ms >= fit_result.final_duration_ms:
@@ -820,8 +864,17 @@ class SegmentAligner:
         output_path: str,
         *,
         policy: FitPolicy | None = None,
-    ) -> str:
-        self._last_dsp_fit_result = None
+    ) -> tuple[str, FitResult | None]:
+        """Stretch ``input_path`` to ``target_duration_ms`` and return both
+        the output path and the ``FitResult`` from ``fit_audio_to_slot``.
+
+        Returning the ``FitResult`` per-call (rather than caching it on
+        ``self``) keeps DSP audit metadata local to a single _align_one
+        invocation; that isolation is what makes parallel alignment safe
+        in 17a-1. ``None`` is returned for ``fit_result`` when the helper
+        falls through to the legacy ffmpeg path (no FitResult available
+        from that branch)."""
+
         input_audio_path = _resolve_existing_audio_path(input_path)
         if target_duration_ms <= 0:
             raise AlignmentError("target_duration_ms must be positive for DSP alignment.")
@@ -839,9 +892,8 @@ class SegmentAligner:
             output_path=output_audio_path,
             policy=policy or DEFAULT_ALIGNMENT_DSP_POLICY,
         )
-        self._last_dsp_fit_result = fit_result
         if fit_result is not None and output_audio_path.exists():
-            return str(output_audio_path)
+            return str(output_audio_path), fit_result
 
         actual_duration_ms = _measure_wav_duration_ms(input_audio_path)
         speed_ratio = actual_duration_ms / target_duration_ms
@@ -881,7 +933,9 @@ class SegmentAligner:
             )
         if not output_audio_path.exists():
             raise AlignmentError("ffmpeg reported success but aligned output was not created.")
-        return str(output_audio_path)
+        # Legacy ffmpeg fallback path: no FitResult is produced by raw atempo,
+        # so callers that rely on dsp_* audit fields will see them stay zeroed.
+        return str(output_audio_path), None
 
     def _direct_copy(self, input_path: str, output_path: str) -> str:
         input_audio_path = _resolve_existing_audio_path(input_path)
