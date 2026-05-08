@@ -33,13 +33,18 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Files that register one or more APIRouters under ``/api/admin/...``.
-# Each file must have its own ``_require_admin`` (currently 9 distinct
+# Each file must have its own ``_require_admin`` (currently 8 distinct
 # copies — P2-19 will抽 to a shared helper later, but for now this
 # guard is content with the per-file pattern).
+#
+# IMPORTANT: only include files that are TRACKED in the git index. A
+# WIP-only file (e.g. user's untracked AI customer support work at the
+# 2026-05-08 audit checkpoint) would make this test pass locally but
+# fail on a clean CI checkout at ``assert path.is_file()``. When the
+# WIP lands in committed form, add the file here and bump the baseline.
 _ADMIN_FILES = (
     "gateway/admin_settings.py",
     "gateway/admin_job_monitor_api.py",
-    "gateway/admin_support_api.py",
     "gateway/cost_management.py",
     "gateway/credits_observability.py",
     "gateway/pricing_admin.py",
@@ -140,10 +145,12 @@ def test_every_admin_route_has_gate_call():
 
 
 def test_admin_route_count_baseline():
-    """Sanity: the 2026-05-08 audit baseline counted 57 admin routes
-    across the 9 listed files. If the count drops sharply, the
-    _ADMIN_FILES list may be missing a new admin file. If it grows,
-    that's fine — new admin endpoints landed.
+    """Sanity: the 2026-05-08 audit baseline counted 51 admin routes
+    across the 8 tracked admin files (the user's WIP
+    ``admin_support_api.py`` adds 6 more but is intentionally
+    excluded — see _ADMIN_FILES note). If the count drops sharply,
+    the _ADMIN_FILES list may be missing a new admin file. If it
+    grows, that's fine — new admin endpoints landed.
 
     This test is intentionally a soft floor (≥ baseline) rather than
     an exact match — additions are normal, but a sudden drop would
@@ -153,7 +160,7 @@ def test_admin_route_count_baseline():
     for rel in _ADMIN_FILES:
         src = (_REPO_ROOT / rel).read_text(encoding="utf-8")
         total += len(_collect_routes(src, rel))
-    baseline = 57
+    baseline = 51
     assert total >= baseline, (
         f"Audit §10 regression: admin route count dropped to {total}, "
         f"below the 2026-05-08 baseline of {baseline}. Either a "
