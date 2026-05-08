@@ -370,14 +370,26 @@ class SegmentAligner:
         output_root.mkdir(parents=True, exist_ok=True)
 
         total_segments = len(segments)
-        # Phase 1: pre-classify.
+        # Phase 1: pre-classify into cheap vs expensive, AND collect every
+        # non-keep-original output path for uniqueness validation. Cache
+        # hits also point ``segment.aligned_audio_path`` at
+        # ``segment_{id}_aligned.wav``; if a duplicate segment_id has one
+        # cache-hit branch and one cache-miss branch, the cache-miss
+        # worker would overwrite the file out from under the cache-hit
+        # AlignedSegment. So the guard must consider both branches, not
+        # just ``needs_align``.
         cheap_results: dict[int, AlignedSegment] = {}
         needs_align: list[tuple[int, DubbingSegment, Path]] = []
+        non_keep_original_paths: list[tuple[int, str]] = []
         for idx, segment in enumerate(segments):
             if is_keep_original_dubbing_mode(getattr(segment, "dubbing_mode", DUBBING_MODE_DUB)):
+                # keep_original uses segment.tts_audio_path / aligned_audio_path,
+                # NOT segment_{id}_aligned.wav, so its paths are disjoint by
+                # design and don't participate in this guard.
                 cheap_results[idx] = self._keep_original_result(segment)
                 continue
             output_path = output_root / f"segment_{segment.segment_id:03d}_aligned.wav"
+            non_keep_original_paths.append((idx, str(output_path)))
             if is_valid_output(str(output_path)) and self._aligned_cache_is_fresh(
                 segment,
                 output_path,
@@ -392,12 +404,11 @@ class SegmentAligner:
                 )
             needs_align.append((idx, segment, output_path))
 
-        # Phase 2: output-path uniqueness check. Duplicate segment_id /
-        # path = nondeterministic last-write-wins under parallel writes;
-        # fail fast before the pool starts.
+        # Phase 2: output-path uniqueness check across ALL non-keep-original
+        # segments (cache-hit + cache-miss both count). Duplicate segment_id
+        # = last-write-wins under parallel; fail fast BEFORE the pool starts.
         unique_paths: set[str] = set()
-        for _idx, _segment, output_path in needs_align:
-            key = str(output_path)
+        for _idx, key in non_keep_original_paths:
             if key in unique_paths:
                 raise AlignmentError(
                     f"duplicate alignment output path '{key}' "

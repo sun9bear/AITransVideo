@@ -762,6 +762,67 @@ def test_align_all_parallel_duplicate_output_paths_fail_fast(
     assert pool_called == [False]
 
 
+def test_align_all_parallel_duplicate_path_caught_when_one_is_cache_hit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Duplicate ``segment_id`` MUST fail-fast even if one of the
+    duplicates would have hit the cache and the other would have
+    needed alignment. The cache-hit branch points
+    ``segment.aligned_audio_path`` at ``segment_{id}_aligned.wav``;
+    the cache-miss worker would then overwrite that file under
+    parallel dispatch, leaving the cache-hit AlignedSegment with
+    metadata that no longer matches the wav on disk.
+
+    Regression guard for codex P2 finding on f7fd66a: the original
+    duplicate-path check only walked ``needs_align``, so this mixed
+    case slipped through.
+    """
+
+    monkeypatch.setenv("AVT_ALIGN_MAX_WORKERS", "2")
+    aligned_dir = tmp_path / "aligned"
+    aligned_dir.mkdir(parents=True, exist_ok=True)
+
+    # Segment A: pre-existing fresh aligned wav at segment_007_aligned.wav.
+    # Use ffmpeg-free stubs: the wav body just needs to exist + be non-empty.
+    cached_wav = aligned_dir / "segment_007_aligned.wav"
+    cached_wav.write_bytes(b"RIFF\x00\x00\x00\x00WAVEfmt ")
+    raw_a = _export_tone_wav(tmp_path / "in" / "raw_a.wav", duration_ms=1_000)
+    # Force aligned newer than raw so cache is fresh.
+    aligned_mtime = cached_wav.stat().st_mtime
+    os.utime(raw_a, (aligned_mtime - 10, aligned_mtime - 10))
+    seg_cache_hit = _build_segment(segment_id=7, audio_path=raw_a, end_ms=1_000)
+
+    # Segment B: same segment_id, but its raw tts is newer (or the
+    # aligned file is missing for it conceptually) → cache miss path.
+    # We share the same segment_id intentionally to trigger duplicate.
+    raw_b = _export_tone_wav(tmp_path / "in" / "raw_b.wav", duration_ms=1_000)
+    os.utime(raw_b, (aligned_mtime + 10, aligned_mtime + 10))
+    seg_cache_miss = _build_segment(segment_id=7, audio_path=raw_b, end_ms=1_000)
+
+    # Mock ffprobe so cache-fresh path doesn't need ffmpeg.
+    monkeypatch.setattr(aligner_module, "_ffprobe_duration_ms", lambda path: 1_000)
+
+    pool_called = [False]
+
+    def _stub_align_one(self, *args, **kwargs):
+        del self, args, kwargs
+        pool_called[0] = True
+        raise AssertionError(
+            "_align_one must not run when a duplicate segment_id has a cache-hit twin"
+        )
+
+    monkeypatch.setattr(SegmentAligner, "_align_one", _stub_align_one)
+
+    from services.alignment.aligner import AlignmentError
+
+    with pytest.raises(AlignmentError, match="duplicate alignment output path"):
+        SegmentAligner().align_all(
+            [seg_cache_hit, seg_cache_miss], str(aligned_dir)
+        )
+    assert pool_called == [False]
+
+
 def test_align_all_parallel_first_error_sets_stop_event_and_skips_paid_fallback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

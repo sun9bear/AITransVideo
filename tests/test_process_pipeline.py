@@ -2294,7 +2294,11 @@ def test_aligner_reprocesses_when_raw_tts_is_newer_than_aligned_cache(
     aligner = SegmentAligner()
     called: list[int] = []
 
-    def _fake_align_one(segment_arg, output_dir):
+    def _fake_align_one(segment_arg, output_dir, **_kwargs):
+        # 2026-05-09 P2-17a-1: accept paid_fallback_semaphore / stop_event
+        # kwargs that the parallel path passes via pool.submit. Default
+        # AVT_ALIGN_MAX_WORKERS=2 means this stale-cache reprocess test
+        # exercises _align_all_parallel, not _align_all_serial.
         called.append(segment_arg.segment_id)
         return AlignedSegment(
             segment_id=segment_arg.segment_id,
