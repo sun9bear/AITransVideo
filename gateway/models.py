@@ -710,3 +710,267 @@ class Session(Base):
     )
 
 
+# ---------------------------------------------------------------------------
+# AI customer support + notification system (migration 020, 2026-05-08)
+# Plan: docs/plans/2026-05-08-ai-customer-support-handoff-plan.md
+# ---------------------------------------------------------------------------
+
+
+class SupportConversation(Base):
+    """Top-level support conversation between user/visitor and AI/human agent.
+
+    ``user_id`` nullable so anonymous (pre-login) visitors can still chat;
+    those rows carry an ``anonymous_id`` instead.
+
+    ``handoff_state`` evolves independently of ``status``: a conversation may
+    be closed (``status=closed``) with no handoff ever happening, or sit at
+    ``status=waiting_human`` after handoff_state moves to ``created``.
+    """
+
+    __tablename__ = "support_conversations"
+    __table_args__ = (
+        Index("idx_support_conversations_user_id", "user_id"),
+        Index("idx_support_conversations_anonymous_id", "anonymous_id"),
+        Index("idx_support_conversations_status", "status"),
+        Index("idx_support_conversations_created_at", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=True
+    )
+    anonymous_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    channel: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="web"
+    )  # "web" | "wechat" | "email"
+    entrypoint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    page_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    job_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    category: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="open"
+    )  # "open" | "waiting_human" | "handled" | "closed"
+    handoff_state: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="none"
+    )  # "none" | "recommended" | "requested" | "created" | "failed" | "closed"
+    handoff_provider: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    handoff_provider_conversation_id: Mapped[str | None] = mapped_column(
+        String(128), nullable=True
+    )
+    notification_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    last_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    message_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+class SupportMessage(Base):
+    """Single message inside a support conversation.
+
+    ``redacted_body`` is the version safe to show a human agent (PII pre-
+    redacted). ``body`` is the original; AI-prompt-bound paths read from
+    ``redacted_body`` whenever it is non-NULL.
+    """
+
+    __tablename__ = "support_messages"
+    __table_args__ = (
+        Index("idx_support_messages_conversation_id", "conversation_id"),
+        Index("idx_support_messages_created_at", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("support_conversations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    sender: Mapped[str] = mapped_column(
+        String(16), nullable=False
+    )  # "user" | "assistant" | "human" | "system"
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    redacted_body: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metadata_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
+class SupportHandoffRequest(Base):
+    """One row per attempt to escalate a conversation to a human channel."""
+
+    __tablename__ = "support_handoff_requests"
+    __table_args__ = (
+        Index("idx_support_handoff_requests_conversation_id", "conversation_id"),
+        Index("idx_support_handoff_requests_status", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("support_conversations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    provider: Mapped[str] = mapped_column(
+        String(32), nullable=False
+    )  # "email" | "chatwoot" | "wechat_kf"
+    reason: Mapped[str] = mapped_column(String(64), nullable=False)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="pending"
+    )  # "pending" | "created" | "failed" | "closed"
+    provider_payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+class SupportAIUsage(Base):
+    """Ledger of every routing decision, written even for template/FAQ paths.
+
+    For ``route ∈ {template, faq}`` the cost columns stay 0; for
+    ``route == "llm"`` they reflect the budget accumulator's view of cost.
+    Drives the monthly budget guard via ``budget_month`` (YYYY-MM string).
+    """
+
+    __tablename__ = "support_ai_usage"
+    __table_args__ = (
+        Index("idx_support_ai_usage_budget_month", "budget_month"),
+        Index("idx_support_ai_usage_conversation_id", "conversation_id"),
+        Index("idx_support_ai_usage_created_at", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("support_conversations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    anonymous_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    model: Mapped[str] = mapped_column(String(64), nullable=False)
+    input_tokens: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    output_tokens: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    input_usd_per_1m_tokens: Mapped[float] = mapped_column(
+        Float, nullable=False, server_default="0"
+    )
+    output_usd_per_1m_tokens: Mapped[float] = mapped_column(
+        Float, nullable=False, server_default="0"
+    )
+    estimated_cost_usd: Mapped[float] = mapped_column(
+        Float, nullable=False, server_default="0"
+    )
+    budget_month: Mapped[str] = mapped_column(String(7), nullable=False)  # "2026-05"
+    route: Mapped[str] = mapped_column(
+        String(16), nullable=False
+    )  # "template" | "faq" | "llm" | "handoff"
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
+class UserNotification(Base):
+    """User-visible projection of pipeline events.
+
+    NOT a replacement for ``events.jsonl`` (which is internal/observability
+    only). This is the sanitized message-stream the UI reads. Admin alerts
+    do NOT live here — those go to email/webhook directly.
+
+    ``dedupe_key`` + the partial unique index (created in migration 020) lets
+    P2 add throttling without a schema change. P1 leaves the column NULL for
+    every notification, so dedupe is a no-op.
+    """
+
+    __tablename__ = "user_notifications"
+    __table_args__ = (
+        Index("idx_user_notifications_user_id_created_at", "user_id", "created_at"),
+        Index("idx_user_notifications_user_id_unread", "user_id", "read_at"),
+        Index("idx_user_notifications_job_id", "job_id"),
+        Index("idx_user_notifications_scope", "scope"),
+        Index(
+            "uq_user_notifications_user_job_dedupe",
+            "user_id",
+            "job_id",
+            "dedupe_key",
+            unique=True,
+            postgresql_where=text("dedupe_key IS NOT NULL"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    scope: Mapped[str] = mapped_column(
+        String(16), nullable=False
+    )  # "system" | "user" | "job"
+    topic: Mapped[str] = mapped_column(
+        String(32), nullable=False
+    )  # "billing" | "account" | "artifact" | "support" | "maintenance"
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    job_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    severity: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="info"
+    )  # "info" | "success" | "warning" | "error"
+    related_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    related_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    artifact_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    action_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    dedupe_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    metadata_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    read_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    archived_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
