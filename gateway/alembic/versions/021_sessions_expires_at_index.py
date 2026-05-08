@@ -1,7 +1,7 @@
 """Audit P2-24 / D-HIGH-2: index sessions.expires_at.
 
 Revision ID: 021_sessions_expires_at_index
-Revises: 019_add_phone_challenge_attempts
+Revises: 020_support_notifications
 Create Date: 2026-05-08
 
 ``auth.create_session`` runs an opportunistic purge on every call:
@@ -41,18 +41,11 @@ partial-failure rerun actually rebuild rather than rubber-stamp.
 Downgrade is symmetric with ``if_exists=True`` so re-running it after
 a manual cleanup doesn't error.
 
-Chain note: ``down_revision`` chains to 019 (the production head as
-of 2026-05-08), NOT to a hypothetical 020. The user's in-progress AI
-customer support migration ``020_add_support_and_notifications`` is
-33 chars (overflows alembic_version VARCHAR(32)) and is still WIP at
-the time this migration was authored. When 020 lands with a
-shortened revision id, EITHER:
-  (a) re-chain 021's ``down_revision`` to 020's final id and re-run
-      tests, OR
-  (b) keep 021 chained at 019 and treat the chain as branched from
-      019 (alembic supports merge migrations).
-Option (a) is cleaner; option (b) is the fallback if 020 lands long
-after 021 deploys.
+Chain: 019 → 020 (``020_support_notifications``, AI customer support
++ notifications) → 021 (this migration). The 020 revision id was
+finalised at 25 chars (down from a 33-char draft that would have
+overflowed alembic_version VARCHAR(32) and tripped the same trap
+that bit migration 018 in production).
 """
 
 from typing import Sequence, Union
@@ -62,7 +55,7 @@ from alembic import op
 
 
 revision: str = "021_sessions_expires_at_index"
-down_revision: Union[str, None] = "019_add_phone_challenge_attempts"
+down_revision: Union[str, None] = "020_support_notifications"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

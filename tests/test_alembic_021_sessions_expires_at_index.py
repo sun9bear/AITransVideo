@@ -72,18 +72,16 @@ def test_migration_021_revision_id_within_varchar_32():
 
 
 def test_migration_021_revision_chain():
-    """021 chains directly to 019 — the production head as of
-    2026-05-08. The user's WIP 020 (AI customer support) had a
-    33-char revision id that overflows alembic_version VARCHAR(32),
-    so 021 deliberately bypasses 020 to stay deployable today.
-    When 020 lands with a shortened revision id, this test should
-    be updated to expect the new chain.
+    """021 chains to 020 (``020_support_notifications``, AI customer
+    support + notifications). 020's revision id was finalised at
+    25 chars after the original 33-char draft was shortened to fit
+    alembic_version VARCHAR(32).
     """
     src = _MIGRATION_PATH.read_text(encoding="utf-8")
-    assert 'down_revision: Union[str, None] = "019_add_phone_challenge_attempts"' in src, (
+    assert 'down_revision: Union[str, None] = "020_support_notifications"' in src, (
         "P2-24 regression: migration 021 down_revision is not "
-        "019_add_phone_challenge_attempts. Chain stitching may need "
-        "re-doing if user's 020 landed in between."
+        "020_support_notifications. Chain is broken; deploy will "
+        "fail to find the predecessor."
     )
 
 
