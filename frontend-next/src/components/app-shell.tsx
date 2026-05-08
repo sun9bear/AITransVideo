@@ -11,6 +11,10 @@ import { BrandMark, BrandLockup } from "@/components/marketing/brand-mark"
 import { SupportWidget } from "@/components/support/SupportWidget"
 import { AdminPresenceSwitcher } from "@/components/support/AdminPresenceSwitcher"
 import {
+  NotificationBell,
+  useNotificationUnreadCount,
+} from "@/components/notifications/NotificationBell"
+import {
   Video,
   Mic2,
   BarChart3,
@@ -104,6 +108,10 @@ const navGroups: NavGroup[] = [
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
   const { user, error: sessionError, refresh: refreshSession } = useSession()
+  // Live unread count drives the sidebar "通知" badge. The hook polls
+  // every 30s when the tab is visible and skips while hidden, so the
+  // sidebar always reflects whatever the backend currently reports.
+  const unreadNotifications = useNotificationUnreadCount(user !== null)
   const [collapsed, setCollapsed] = useState(false)
   const [mobileOpen, setMobileOpen] = useState(false)
   // darkMode is hydrated from localStorage on first client render so the
@@ -220,6 +228,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   pathname === item.href ||
                   (item.href !== "/" && pathname.startsWith(item.href)) ||
                   (item.href === "/projects" && pathname.startsWith("/workspace/"))
+                // Unread badge for the "通知" item — drives the user
+                // back to the notification center when something new
+                // lands. Only shows if count > 0.
+                const showNotifBadge =
+                  item.href === "/notifications" && unreadNotifications > 0
 
                 return (
                   <Link
@@ -234,7 +247,27 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                     onClick={onNavigate}
                   >
                     <Icon className={`h-4 w-4 shrink-0 ${isActive ? "text-primary" : ""}`} />
-                    {!isCollapsed && <span className="truncate">{item.label}</span>}
+                    {!isCollapsed && (
+                      <span className="flex flex-1 items-center justify-between truncate">
+                        <span className="truncate">{item.label}</span>
+                        {showNotifBadge ? (
+                          <span
+                            aria-hidden
+                            className="ml-2 inline-flex min-w-[18px] items-center justify-center rounded-full bg-[color:var(--cinnabar,#C73E3A)] px-1 text-[10px] font-semibold leading-4 text-white"
+                          >
+                            {unreadNotifications > 99 ? "99+" : unreadNotifications}
+                          </span>
+                        ) : null}
+                      </span>
+                    )}
+                    {isCollapsed && showNotifBadge ? (
+                      <span
+                        aria-hidden
+                        className="absolute right-1 top-1 inline-flex min-w-[14px] items-center justify-center rounded-full bg-[color:var(--cinnabar,#C73E3A)] px-1 text-[9px] font-semibold leading-3 text-white"
+                      >
+                        {unreadNotifications > 9 ? "9+" : unreadNotifications}
+                      </span>
+                    ) : null}
                   </Link>
                 )
               })}
@@ -355,6 +388,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </span>
           </div>
           <div className="flex shrink-0 items-center gap-3">
+            {/* Notification bell — visible to all logged-in users. Polls
+                unread count every 30s, flashes tab title when new
+                notification arrives in background tab. */}
+            <NotificationBell isAuthenticated={user !== null} />
             {/* Admin-only: presence status switcher (online / paused / offline).
                 Drives heartbeat to /api/admin/support/heartbeat. */}
             <AdminPresenceSwitcher isAdmin={user?.role === "admin"} />
