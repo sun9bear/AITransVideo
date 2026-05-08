@@ -146,9 +146,16 @@ def load_support_settings(force_reload: bool = False) -> dict[str, Any]:
 
 
 def save_support_settings(model: SupportAdminSettings) -> None:
-    """Persist the admin-editable subset to admin_settings.json."""
+    """Persist the admin-editable subset to admin_settings.json.
+
+    ``file_lock`` expects a ``Path`` and appends its own ``.lock`` suffix
+    via ``path.with_suffix``; ``atomic_write_json`` expects a string
+    target path. Honor both signatures verbatim — passing a str into
+    file_lock or appending ``.lock`` ourselves was the 2026-05-08 prod
+    500 (caught the moment an admin clicked Save on /admin/support).
+    """
     SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with file_lock(str(SETTINGS_FILE) + ".lock"):
+    with file_lock(SETTINGS_FILE):
         existing = _read_admin_json() if SETTINGS_FILE.exists() else {}
         if not isinstance(existing, dict):
             existing = {}
@@ -157,7 +164,7 @@ def save_support_settings(model: SupportAdminSettings) -> None:
             merged_support = {}
         merged_support.update(model.model_dump())
         existing[_SUPPORT_KEY] = merged_support
-        atomic_write_json(SETTINGS_FILE, existing)
+        atomic_write_json(str(SETTINGS_FILE), existing)
     invalidate_cache()
 
 
