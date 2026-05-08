@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import threading
-from dataclasses import replace
 from pathlib import Path
 import tempfile
 from typing import Callable
@@ -11,6 +11,31 @@ from typing import Callable
 from services._file_lock import file_lock
 from services.jobs.events import JobEvent
 from services.jobs.models import JobRecord
+
+
+def _clone_record(record: JobRecord) -> JobRecord:
+    """Deep clone a JobRecord so a caller mutating the result can't
+    poison the JobStore's ``_list_cache`` entry.
+
+    P1-12a follow-up (Codex review of 97cc777): the v0 implementation
+    used ``dataclasses.replace(record)`` to copy the dataclass shell.
+    That fires ``__post_init__`` (which runs ``_copy_optional_dict``
+    on each dict field), but ``_copy_optional_dict(value)`` is itself
+    a shallow ``dict(value)`` — only the top-level keys get copied;
+    a nested dict / list stays aliased. So a caller doing
+    ``jobs[0].review_gate['metadata']['x'] = 999`` or
+    ``jobs[0].error_summary['details'].append(...)`` would still
+    mutate the cached record through the shared inner reference,
+    and the next ``list_jobs`` call would surface the stale state
+    even though disk hadn't changed.
+
+    ``copy.deepcopy`` walks the entire object graph and clones every
+    nested mutable container. The cost on a JobRecord with ~50 scalar
+    fields + 3 small dicts is single-digit microseconds — still a
+    massive win over re-running ``json.loads + JobRecord.from_dict``
+    on a cache hit.
+    """
+    return copy.deepcopy(record)
 
 
 class JobStore:
@@ -234,12 +259,17 @@ class JobStore:
         Correctness:
           * mtime is read AFTER the glob and BEFORE the parse, so a
             concurrent writer's commit is detected on the next list_jobs.
-          * Returns ``replace(cached_record)`` copies so callers can
-            mutate without poisoning the cache. JobRecord is
-            ``@dataclass(slots=True)`` (mutable), and at least one
-            existing caller does ``record.field = ...; save_job(record)``
-            — without the copy, that pattern would silently leak into
-            the cached entry.
+          * Returns ``_clone_record(cached_record)`` deep copies so
+            callers can mutate without poisoning the cache. JobRecord
+            is ``@dataclass(slots=True)`` (mutable), with three
+            ``dict[str, object]`` fields (``review_gate``,
+            ``error_summary``, ``fallback_summary``) that may carry
+            nested dicts/lists. ``copy.deepcopy`` is the only safe
+            choice — ``dataclasses.replace`` is one-level, and the
+            model's ``_copy_optional_dict`` is itself ``dict(value)``
+            (shallow), so a nested mutation like
+            ``jobs[0].review_gate['metadata']['x'] = 999`` would
+            otherwise leak into the cached entry.
           * Cross-process: each gateway worker has its own cache;
             mtime drift naturally invalidates entries when another
             worker writes. No shared cache infra needed.
@@ -274,8 +304,9 @@ class JobStore:
                 # Carry the cached entry forward into new_cache so a
                 # subsequent call still hits.
                 new_cache[job_id] = cached
-                # Return a copy so caller mutations don't poison the cache.
-                records.append(replace(cached[1]))
+                # Deep-copy so nested-dict mutations from callers
+                # don't poison the cache (see _clone_record docstring).
+                records.append(_clone_record(cached[1]))
                 continue
 
             # Cache miss path. Take the per-job file_lock so we don't
@@ -297,7 +328,9 @@ class JobStore:
                 raise ValueError(f"Invalid job record payload: {path}")
             record = JobRecord.from_dict(payload)
             new_cache[job_id] = (mtime_ns, record)
-            records.append(replace(record))
+            # Deep-copy on the cache-miss path too — same reasoning as
+            # the cache-hit branch above (see _clone_record docstring).
+            records.append(_clone_record(record))
 
         # Atomically swap in the new cache. Files that no longer exist
         # in the glob are NOT in new_cache and are dropped — natural

@@ -269,6 +269,81 @@ def test_list_jobs_returns_copies_callers_can_mutate(tmp_path):
     )
 
 
+def test_list_jobs_returns_deep_copies_nested_dict_mutation_isolated(tmp_path):
+    """P1-12a follow-up (Codex review of 97cc777): the v0
+    implementation used ``dataclasses.replace(cached_record)``,
+    which only copies the dataclass shell. JobRecord has three
+    ``dict[str, object]`` fields — ``review_gate`` / ``error_summary``
+    / ``fallback_summary`` — that may carry NESTED dicts/lists. A
+    shallow copy left the inner mutable containers aliased between
+    the cached record and the returned copy, so a caller doing
+    ``jobs[0].review_gate['metadata']['x'] = 999`` would poison the
+    cache through the shared inner dict.
+
+    The fix is ``copy.deepcopy`` (via ``_clone_record``). This test
+    locks in the contract: nested mutation through a returned record
+    is NOT visible on the next list_jobs call.
+    """
+    store = _make_store(tmp_path)
+    store.save_job(_make_record(
+        "a",
+        review_gate={
+            "stage": "voice_review",
+            "metadata": {"counter": 0, "tags": ["alpha"]},
+        },
+        error_summary={"history": [{"code": "x1", "stage": "s2"}]},
+        fallback_summary={"tts": {"failures": 0}},
+    ))
+
+    first_call = store.list_jobs()
+    record = first_call[0]
+
+    # Mutate every nested mutable container the dataclass exposes.
+    # If any of these sneaks back into _list_cache, list_jobs() #2
+    # will surface the poison.
+    record.review_gate["stage"] = "MUTATED"  # top-level dict mutation
+    record.review_gate["metadata"]["counter"] = 999  # nested-dict mutation
+    record.review_gate["metadata"]["tags"].append("beta")  # nested-list append
+    record.error_summary["history"][0]["code"] = "MUTATED"  # nested dict-in-list
+    record.error_summary["history"].append({"code": "extra"})  # list append
+    record.fallback_summary["tts"]["failures"] = 999  # nested dict mutation
+
+    # Cache (the source of truth for the next list_jobs call) must
+    # be untouched.
+    cached = store._list_cache["a"][1]
+    assert cached.review_gate == {
+        "stage": "voice_review",
+        "metadata": {"counter": 0, "tags": ["alpha"]},
+    }, (
+        "P1-12a follow-up regression: review_gate's nested dict was "
+        f"mutated through the returned record. Cached value: "
+        f"{cached.review_gate!r}. Use copy.deepcopy in _clone_record."
+    )
+    assert cached.error_summary == {
+        "history": [{"code": "x1", "stage": "s2"}]
+    }, (
+        "P1-12a follow-up regression: error_summary's nested list-of-"
+        f"dicts was mutated through the returned record. Cached: "
+        f"{cached.error_summary!r}."
+    )
+    assert cached.fallback_summary == {"tts": {"failures": 0}}, (
+        "P1-12a follow-up regression: fallback_summary's nested dict "
+        f"was mutated. Cached: {cached.fallback_summary!r}."
+    )
+
+    # And the next list_jobs call returns clean records — no leak.
+    second_call = store.list_jobs()
+    fresh = second_call[0]
+    assert fresh.review_gate == {
+        "stage": "voice_review",
+        "metadata": {"counter": 0, "tags": ["alpha"]},
+    }
+    assert fresh.error_summary == {
+        "history": [{"code": "x1", "stage": "s2"}]
+    }
+    assert fresh.fallback_summary == {"tts": {"failures": 0}}
+
+
 # ---------------------------------------------------------------------------
 # Concurrency: list_jobs + concurrent save_job don't deadlock or lose
 # updates
