@@ -155,7 +155,26 @@ def _client_ip(request: Request) -> str | None:
     socket_peer = request.client.host if request.client is not None else None
     trusted = _trusted_proxies()
     if socket_peer and socket_peer in trusted:
-        # Trusted reverse proxy — use forwarded headers
+        # Trusted reverse proxy — use forwarded headers, in this priority:
+        # 1. ``CF-Connecting-IP``  — Cloudflare edge injects this with the
+        #    real end-user IP on every request and cloudflared / Caddy
+        #    pass it through unchanged. This is the only header that
+        #    reliably carries the Cloudflare-edge IP through the
+        #    ``CF → cloudflared → Caddy → gateway`` chain on this stack;
+        #    Caddy's default ``reverse_proxy`` REPLACES X-Forwarded-For
+        #    with the immediate peer (cloudflared at 127.0.0.1), wiping
+        #    the original chain.
+        # 2. ``X-Forwarded-For``   — fallback for non-Cloudflare deploys.
+        # 3. ``X-Real-IP``         — fallback for Nginx-style proxies.
+        #
+        # 2026-05-08 fix: pre-fix the gateway only looked at #2, which
+        # arrived as 127.0.0.1 → all phone-registration trial-IP markers
+        # collapsed to a single shared ``__ip_trial__`` row keyed at
+        # 127.0.0.1, so every new user after the first got blocked from
+        # the 7-day trial.
+        cf = request.headers.get("cf-connecting-ip")
+        if cf:
+            return cf.strip() or socket_peer
         fwd = request.headers.get("x-forwarded-for")
         if fwd:
             return fwd.split(",")[0].strip() or socket_peer
