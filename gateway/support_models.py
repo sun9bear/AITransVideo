@@ -39,7 +39,13 @@ SupportEntrypoint = Literal[
     "auth",
     "unknown",
 ]
-HandoffProvider = Literal["email", "chatwoot", "wechat_kf"]
+HandoffProvider = Literal[
+    "in_product",  # admin online → reply in /admin/support panel
+    "wechat_qr",   # admin offline + QR uploaded → user scans QR
+    "email",       # admin offline + no QR → log-only ticket
+    "chatwoot",    # P3 (stub)
+    "wechat_kf",   # P4/P5 (stub)
+]
 HandoffReason = Literal[
     "user_requested_human",
     "low_confidence",
@@ -134,6 +140,13 @@ class SendMessageResponse(BaseModel):
     handoff: HandoffSummary = Field(default_factory=HandoffSummary)
     route: Literal["template", "faq", "llm", "handoff", "blocked"]
     budget_state: Literal["normal", "budget_exhausted"] = "normal"
+    # Populated when an internal handoff (sensitive keyword / template
+    # forced handoff / AI-recommended handoff) lands on the wechat_qr
+    # provider — the widget should render the QR card.
+    wechat_qr_url: str | None = None
+    offline_message: str | None = None
+    handoff_provider: HandoffProvider | None = None
+    online_count: int | None = None
 
 
 # --- POST /api/support/conversations/{id}/handoff -------------------------
@@ -149,6 +162,13 @@ class HandoffResponse(BaseModel):
     provider: HandoffProvider
     provider_conversation_id: str | None = None
     message: str
+    # When ``provider="wechat_qr"`` these fields tell the widget what
+    # to render in the offline branch. Both null for other providers.
+    wechat_qr_url: str | None = None
+    offline_message: str | None = None
+    # Number of admins currently online — useful for the widget to
+    # show a "客服在线" badge even on the in-product path.
+    online_count: int | None = None
 
 
 # --- GET /api/support/conversations/{id}/messages -------------------------
@@ -216,6 +236,23 @@ class SupportAdminSettings(BaseModel):
     )
     support_ops_email: str = "sxz999@proton.me"
 
+    # ---------- Human handoff routing (L1, plan 2026-05-08 follow-up) -------
+    # Frontend admin tabs ping POST /api/admin/support/heartbeat at this
+    # cadence. Lower = better real-time signal but more requests.
+    support_admin_heartbeat_interval_seconds: int = Field(default=30, ge=5, le=600)
+    # Server treats an admin as "online" iff last_heartbeat is within
+    # this window. Should be ≥ 2× heartbeat_interval to absorb network
+    # jitter without false-offline flapping.
+    support_admin_online_threshold_seconds: int = Field(default=60, ge=10, le=1200)
+    # If user clicks 转人工 and gets routed to in-product chat, but no
+    # human reply lands within this window, the widget falls back to
+    # showing the WeChat QR. Set to 0 to disable the fallback timer.
+    support_handoff_offline_fallback_minutes: int = Field(default=5, ge=0, le=120)
+    # Shown to user when no admin is online (above the WeChat QR).
+    support_offline_message: str = (
+        "运营暂未在线，可扫码添加客服微信，我们尽快回复。"
+    )
+
 
 class AdminSupportSettingsResponse(BaseModel):
     settings: SupportAdminSettings
@@ -278,3 +315,69 @@ class NotificationMarkReadRequest(BaseModel):
 
 class NotificationArchiveRequest(BaseModel):
     ids: list[str] = Field(default_factory=list)
+
+
+# ---------- Presence + offline routing (L1, plan 2026-05-08 follow-up) ------
+
+
+PresenceStatusLiteral = Literal["online", "paused", "offline"]
+
+
+class OnlineStatusResponse(BaseModel):
+    """Public — used by SupportWidget to decide handoff routing UI."""
+
+    online: bool
+    online_count: int
+    has_wechat_qr: bool
+    offline_message: str
+    handoff_offline_fallback_minutes: int
+
+
+class HeartbeatRequest(BaseModel):
+    # Optional explicit status; if omitted the heartbeat preserves
+    # whatever status was already set (default new admin → online).
+    status: PresenceStatusLiteral | None = None
+
+
+class PresenceView(BaseModel):
+    user_id: str
+    status: PresenceStatusLiteral
+    last_heartbeat_at: datetime
+    seconds_since_last_heartbeat: int
+
+
+class SetPresenceStatusRequest(BaseModel):
+    status: PresenceStatusLiteral
+
+
+class WeChatQrInfoResponse(BaseModel):
+    has_qr: bool
+    url: str | None = None
+    uploaded_at: datetime | None = None
+    size_bytes: int | None = None
+
+
+class AdminReplyRequest(BaseModel):
+    body: str = Field(min_length=1, max_length=4000)
+    # When true, also marks the underlying handoff_request status="handled".
+    mark_handled: bool = False
+
+
+class AdminReplyResponse(BaseModel):
+    message_id: str
+    notification_dispatched: bool
+    handoff_status: str | None = None
+
+
+class MyOpenConversationView(BaseModel):
+    conversation_id: str
+    status: Literal["open", "waiting_human", "handled", "closed"]
+    handoff_state: Literal[
+        "none", "recommended", "requested", "created", "failed", "closed"
+    ]
+    last_message_preview: str
+    updated_at: datetime
+
+
+class MyOpenConversationsResponse(BaseModel):
+    conversations: list[MyOpenConversationView]

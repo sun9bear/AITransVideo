@@ -30,6 +30,10 @@ from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from datetime import datetime, timezone
+
+from fastapi.responses import FileResponse, Response
+
 from auth import get_current_user
 from database import get_db
 from models import (
@@ -46,11 +50,16 @@ from support_models import (
     HandoffRequest,
     HandoffResponse,
     MessageView,
+    MyOpenConversationsResponse,
+    MyOpenConversationView,
+    OnlineStatusResponse,
     SendMessageRequest,
     SendMessageResponse,
     SupportConfigResponse,
 )
+from support_presence import count_online
 from support_service import create_conversation, send_message
+from support_wechat_qr import existing_qr_path, get_qr_metadata, public_url as qr_public_url
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +119,104 @@ def _rate_limit_check(*, key: str, max_per_hour: int) -> bool:
 # ---------------------------------------------------------------------------
 # /api/support/config
 # ---------------------------------------------------------------------------
+
+
+@router.get("/online-status", response_model=OnlineStatusResponse)
+async def get_online_status(
+    db: AsyncSession = Depends(get_db),
+) -> OnlineStatusResponse:
+    """Public endpoint — widget polls this to choose handoff routing UI.
+
+    Returns the boolean ``online`` flag plus enough config so the widget
+    can render the offline branch (WeChat QR + offline message) without
+    a second round-trip.
+    """
+    settings = load_support_settings()
+    threshold = int(settings.get("support_admin_online_threshold_seconds", 60))
+    online_count = await count_online(db, threshold_seconds=threshold)
+    qr_meta = get_qr_metadata()
+    return OnlineStatusResponse(
+        online=online_count > 0,
+        online_count=online_count,
+        has_wechat_qr=qr_meta is not None,
+        offline_message=str(
+            settings.get(
+                "support_offline_message",
+                "运营暂未在线，可扫码添加客服微信，我们尽快回复。",
+            )
+        ),
+        handoff_offline_fallback_minutes=int(
+            settings.get("support_handoff_offline_fallback_minutes", 5)
+        ),
+    )
+
+
+@router.get("/wechat-qr")
+async def get_wechat_qr() -> Response:
+    """Serve the uploaded WeChat QR image. Public (anyone visiting the
+    site can see it — same trust level as a QR printed on the contact
+    page footer)."""
+    p = existing_qr_path()
+    if p is None:
+        return Response(status_code=404, content="no QR uploaded")
+    media_type = "image/png" if p.suffix.lower() == ".png" else "image/jpeg"
+    # Mild caching: the URL has ``?v={mtime}`` suffix from the frontend
+    # so a re-upload busts caches automatically.
+    headers = {
+        "Cache-Control": "public, max-age=300",
+    }
+    return FileResponse(
+        path=str(p),
+        media_type=media_type,
+        headers=headers,
+    )
+
+
+@router.get("/conversations/my/open", response_model=MyOpenConversationsResponse)
+async def list_my_open_conversations(
+    user: User | None = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> MyOpenConversationsResponse:
+    """Return the user's still-open support conversations.
+
+    Used by SupportWidget on mount: if the user has a conversation that
+    is waiting for human reply (handoff_state in {requested, created}),
+    we restore it instead of starting a fresh one. 401 for anonymous —
+    only logged-in users get conversation continuity across sessions.
+    """
+    if user is None:
+        raise HTTPException(status_code=401, detail="未登录")
+    stmt = (
+        select(SupportConversation)
+        .where(
+            SupportConversation.user_id == user.id,
+            SupportConversation.status.in_(("open", "waiting_human")),
+        )
+        .order_by(SupportConversation.updated_at.desc())
+        .limit(20)
+    )
+    rows = list((await db.execute(stmt)).scalars())
+    items: list[MyOpenConversationView] = []
+    for c in rows:
+        # Pull last message body for preview.
+        last_msg_stmt = (
+            select(SupportMessage)
+            .where(SupportMessage.conversation_id == c.id)
+            .order_by(SupportMessage.created_at.desc())
+            .limit(1)
+        )
+        last = (await db.execute(last_msg_stmt)).scalar_one_or_none()
+        preview = (last.body or "")[:120] if last else ""
+        items.append(
+            MyOpenConversationView(
+                conversation_id=str(c.id),
+                status=c.status,
+                handoff_state=c.handoff_state,
+                last_message_preview=preview,
+                updated_at=c.updated_at,
+            )
+        )
+    return MyOpenConversationsResponse(conversations=items)
 
 
 @router.get("/config", response_model=SupportConfigResponse)
@@ -356,18 +463,44 @@ async def handoff_endpoint(
         provider=provider,
         ops_email=settings.get("support_ops_email", "sxz999@proton.me"),
     )
-    # Append a small "已转人工" assistant note for UI continuity.
-    note = SupportMessage(
-        conversation_id=convo.id,
-        sender="system",
-        body=user_reply_for_reason(body.reason),
-        metadata_json={"event": "handoff_created", "provider": provider},
-    )
-    db.add(note)
+    actual_provider = result["provider"]
+    payload = result.get("payload") or {}
+
+    # User-facing UI message depends on the routing decision:
+    # - in_product: "运营会在浮窗里直接回复你"
+    # - wechat_qr: offline message + QR (the widget renders the image)
+    # - email / chatwoot / wechat_kf: legacy reasons → use user_reply_for_reason
+    if actual_provider == "in_product":
+        ui_message = "已为你转接人工客服。运营在线，会直接在这里回复你。"
+    elif actual_provider == "wechat_qr":
+        ui_message = payload.get(
+            "offline_message",
+            "运营暂未在线，可扫码添加客服微信，我们尽快回复。",
+        )
+    else:
+        ui_message = user_reply_for_reason(body.reason)
+
+    # Append a small "已转人工" assistant note for UI continuity. For
+    # wechat_qr we DON'T append a chat-bubble note — the widget shows
+    # the QR card directly.
+    if actual_provider != "wechat_qr":
+        note = SupportMessage(
+            conversation_id=convo.id,
+            sender="system",
+            body=ui_message,
+            metadata_json={"event": "handoff_created", "provider": actual_provider},
+        )
+        db.add(note)
+
+    threshold = int(settings.get("support_admin_online_threshold_seconds", 60))
+    online_now = await count_online(db, threshold_seconds=threshold)
     await db.commit()
     return HandoffResponse(
         handoff_state=result["handoff_state"] if result["handoff_state"] in ("created", "failed", "requested") else "requested",
-        provider=result["provider"],
+        provider=actual_provider,
         provider_conversation_id=result.get("provider_conversation_id"),
-        message=user_reply_for_reason(body.reason),
+        message=ui_message,
+        wechat_qr_url=payload.get("wechat_qr_url"),
+        offline_message=payload.get("offline_message"),
+        online_count=online_now,
     )

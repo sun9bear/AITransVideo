@@ -267,19 +267,37 @@ async def send_message(
 
     # ---- Path B: explicit handoff path -----------------------------------
     if decision.decision is RoutingDecision.handoff_now:
-        reply_text = user_reply_for_reason(decision.handoff_reason or "user_requested_human")
-        await _persist_assistant(
-            db,
-            conversation=conversation,
-            reply_text=reply_text,
-            metadata={"route": "handoff", "reason": decision.handoff_reason},
-        )
-        await create_handoff(
+        handoff_result = await create_handoff(
             db,
             conversation=conversation,
             reason=decision.handoff_reason or "user_requested_human",
             provider="email",
             ops_email=settings_dict.get("support_ops_email", "sxz999@proton.me"),
+        )
+        actual_provider = handoff_result.get("provider", "email")
+        ho_payload = handoff_result.get("payload") or {}
+        # User-facing reply text depends on routing decision (in_product
+        # vs wechat_qr vs legacy).
+        if actual_provider == "in_product":
+            reply_text = "已为你转接人工客服。运营在线，会直接在这里回复你。"
+        elif actual_provider == "wechat_qr":
+            reply_text = ho_payload.get(
+                "offline_message",
+                "运营暂未在线，可扫码添加客服微信，我们尽快回复。",
+            )
+        else:
+            reply_text = user_reply_for_reason(
+                decision.handoff_reason or "user_requested_human"
+            )
+        await _persist_assistant(
+            db,
+            conversation=conversation,
+            reply_text=reply_text,
+            metadata={
+                "route": "handoff",
+                "reason": decision.handoff_reason,
+                "provider": actual_provider,
+            },
         )
         await record_usage(
             db,
@@ -302,6 +320,9 @@ async def send_message(
             ).model_dump(),
             "route": "handoff",
             "budget_state": budget.state,
+            "wechat_qr_url": ho_payload.get("wechat_qr_url"),
+            "offline_message": ho_payload.get("offline_message"),
+            "handoff_provider": actual_provider,
         }
 
     # ---- Path C: English fallback ----------------------------------------
@@ -387,14 +408,18 @@ async def send_message(
                 "template_id": template_match.template_id,
             },
         )
+        ho_payload: dict[str, Any] = {}
+        actual_provider: str | None = None
         if template_match.handoff_recommended:
-            await create_handoff(
+            handoff_result = await create_handoff(
                 db,
                 conversation=conversation,
                 reason=template_match.handoff_reason or "sensitive_category",
                 provider="email",
                 ops_email=settings_dict.get("support_ops_email", "sxz999@proton.me"),
             )
+            actual_provider = handoff_result.get("provider")
+            ho_payload = handoff_result.get("payload") or {}
         await record_usage(
             db,
             conversation_id=conversation.id,
@@ -412,6 +437,9 @@ async def send_message(
             "handoff": handoff_info.model_dump(),
             "route": "template",
             "budget_state": budget.state,
+            "wechat_qr_url": ho_payload.get("wechat_qr_url"),
+            "offline_message": ho_payload.get("offline_message"),
+            "handoff_provider": actual_provider,
         }
 
     # FAQ search before LLM — short answers are deterministic and free.
@@ -516,14 +544,18 @@ async def send_message(
             "confidence": ai_reply.confidence,
         },
     )
+    ho_payload: dict[str, Any] = {}
+    actual_handoff_provider: str | None = None
     if ai_reply.handoff_recommended:
-        await create_handoff(
+        handoff_result = await create_handoff(
             db,
             conversation=conversation,
             reason=ai_reply.handoff_reason or "low_confidence",
             provider="email",
             ops_email=settings_dict.get("support_ops_email", "sxz999@proton.me"),
         )
+        actual_handoff_provider = handoff_result.get("provider")
+        ho_payload = handoff_result.get("payload") or {}
 
     await record_usage(
         db,
@@ -551,6 +583,9 @@ async def send_message(
         "handoff": handoff_info.model_dump(),
         "route": "llm",
         "budget_state": budget.state,
+        "wechat_qr_url": ho_payload.get("wechat_qr_url"),
+        "offline_message": ho_payload.get("offline_message"),
+        "handoff_provider": actual_handoff_provider,
     }
 
 

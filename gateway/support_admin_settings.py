@@ -138,6 +138,19 @@ def load_support_settings(force_reload: bool = False) -> dict[str, Any]:
             "律师",
             "消协",
         ],
+        # Human handoff routing (L1, plan 2026-05-08 follow-up)
+        "support_admin_heartbeat_interval_seconds": int(
+            os.environ.get("AVT_SUPPORT_ADMIN_HEARTBEAT_INTERVAL_SECONDS", "30") or 30
+        ),
+        "support_admin_online_threshold_seconds": int(
+            os.environ.get("AVT_SUPPORT_ADMIN_ONLINE_THRESHOLD_SECONDS", "60") or 60
+        ),
+        "support_handoff_offline_fallback_minutes": int(
+            os.environ.get("AVT_SUPPORT_HANDOFF_OFFLINE_FALLBACK_MINUTES", "5") or 5
+        ),
+        "support_offline_message": (
+            "运营暂未在线，可扫码添加客服微信，我们尽快回复。"
+        ),
     }
     merged = {**base, **overrides}
     _cache = merged

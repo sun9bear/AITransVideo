@@ -4,7 +4,12 @@ import { usePathname } from "next/navigation"
 import { useEffect, useState } from "react"
 
 import { useSession } from "@/components/providers/session-provider"
-import { getSupportConfig, type SupportConfig } from "@/lib/api/support"
+import {
+  getOnlineStatus,
+  getSupportConfig,
+  type OnlineStatus,
+  type SupportConfig,
+} from "@/lib/api/support"
 
 import { SupportConversationPanel } from "./SupportConversationPanel"
 import { SupportLauncher } from "./SupportLauncher"
@@ -31,6 +36,7 @@ export function SupportWidget() {
   const pathname = usePathname()
   const { user, loading: sessionLoading } = useSession()
   const [config, setConfig] = useState<SupportConfig | null>(null)
+  const [onlineStatus, setOnlineStatus] = useState<OnlineStatus | null>(null)
   const [open, setOpen] = useState(false)
 
   useEffect(() => {
@@ -47,6 +53,27 @@ export function SupportWidget() {
       cancelled = true
     }
   }, [])
+
+  // Poll online status when widget is open. Drives the green/gray dot
+  // in the header and the offline branch routing decision.
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    const tick = async () => {
+      try {
+        const s = await getOnlineStatus()
+        if (!cancelled) setOnlineStatus(s)
+      } catch {
+        // silent — keep last known status
+      }
+    }
+    void tick()
+    const t = setInterval(tick, 30_000)
+    return () => {
+      cancelled = true
+      clearInterval(t)
+    }
+  }, [open])
 
   if (!config || !config.enabled) return null
   // Wait for the session check before deciding visibility — flashing the
@@ -92,6 +119,8 @@ export function SupportWidget() {
         jobId={jobId}
         notificationId={null}
         budgetState={null}
+        onlineStatus={onlineStatus}
+        isLoggedIn={user !== null}
       />
     </>
   )

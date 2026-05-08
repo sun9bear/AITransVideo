@@ -908,6 +908,48 @@ class SupportAIUsage(Base):
     )
 
 
+class SupportAdminPresence(Base):
+    """Per-admin heartbeat presence (migration 022, 2026-05-08).
+
+    One row per admin user_id. Updated on each heartbeat ping (default
+    30s from frontend AppShell). Routing logic checks
+    ``status == "online" AND last_heartbeat_at > now - threshold``.
+
+    Independent from ``sessions``: a 30-day session means "auth is
+    valid", a fresh heartbeat means "admin is at the keyboard". A
+    ticket only routes to in-product chat when both hold.
+    """
+
+    __tablename__ = "support_admin_presence"
+    __table_args__ = (
+        Index(
+            "idx_support_admin_presence_status_heartbeat",
+            "status",
+            "last_heartbeat_at",
+        ),
+    )
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="online"
+    )  # "online" | "paused" | "offline"
+    last_heartbeat_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
 class UserNotification(Base):
     """User-visible projection of pipeline events.
 

@@ -33,7 +33,7 @@ for _candidate in [
     if _candidate.is_dir() and str(_candidate) not in sys.path:
         sys.path.insert(0, str(_candidate))
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -43,6 +43,7 @@ from models import (
     SupportAIUsage,
     SupportConversation,
     SupportHandoffRequest,
+    SupportMessage,
     User,
 )
 from support_admin_settings import (
@@ -52,9 +53,27 @@ from support_admin_settings import (
 )
 from support_budget import current_budget_month, get_budget_status
 from support_models import (
+    AdminReplyRequest,
+    AdminReplyResponse,
     AdminSupportOverview,
     AdminSupportSettingsResponse,
+    HeartbeatRequest,
+    PresenceView,
+    SetPresenceStatusRequest,
     SupportAdminSettings,
+    WeChatQrInfoResponse,
+)
+from support_presence import (
+    get_my_presence,
+    list_recent as list_recent_presence,
+    record_heartbeat,
+    set_status as set_presence_status,
+)
+from support_wechat_qr import (
+    delete_qr,
+    get_qr_metadata,
+    public_url as qr_public_url,
+    save_qr,
 )
 
 logger = logging.getLogger(__name__)
@@ -105,6 +124,21 @@ def _settings_to_model(merged: dict[str, Any]) -> SupportAdminSettings:
             merged.get("support_sensitive_keywords", [])
         ),
         support_ops_email=str(merged.get("support_ops_email", "sxz999@proton.me")),
+        support_admin_heartbeat_interval_seconds=int(
+            merged.get("support_admin_heartbeat_interval_seconds", 30)
+        ),
+        support_admin_online_threshold_seconds=int(
+            merged.get("support_admin_online_threshold_seconds", 60)
+        ),
+        support_handoff_offline_fallback_minutes=int(
+            merged.get("support_handoff_offline_fallback_minutes", 5)
+        ),
+        support_offline_message=str(
+            merged.get(
+                "support_offline_message",
+                "运营暂未在线，可扫码添加客服微信，我们尽快回复。",
+            )
+        ),
     )
 
 
@@ -313,3 +347,318 @@ async def close_handoff(
         convo.updated_at = datetime.now(timezone.utc)
     await db.commit()
     return {"status": "closed"}
+
+
+# ---------------------------------------------------------------------------
+# Presence (heartbeat + status switch)
+# ---------------------------------------------------------------------------
+
+
+def _seconds_since(ts: datetime) -> int:
+    return max(0, int((datetime.now(timezone.utc) - ts).total_seconds()))
+
+
+@router.post("/heartbeat", response_model=PresenceView)
+async def heartbeat(
+    body: HeartbeatRequest = HeartbeatRequest(),
+    user: User | None = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> PresenceView:
+    """Admin tab pings here every N seconds (default 30, configurable).
+
+    The body's ``status`` field is optional — if provided, the
+    heartbeat doubles as an explicit status set; if omitted, the
+    existing status is preserved.
+    """
+    admin = _require_admin(user)
+    if body.status is not None:
+        row = await set_presence_status(db, user_id=admin.id, status=body.status)
+    else:
+        row = await record_heartbeat(db, user_id=admin.id)
+    await db.commit()
+    return PresenceView(
+        user_id=str(row.user_id),
+        status=row.status,
+        last_heartbeat_at=row.last_heartbeat_at,
+        seconds_since_last_heartbeat=_seconds_since(row.last_heartbeat_at),
+    )
+
+
+@router.post("/presence/status", response_model=PresenceView)
+async def set_presence(
+    body: SetPresenceStatusRequest,
+    user: User | None = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> PresenceView:
+    admin = _require_admin(user)
+    row = await set_presence_status(db, user_id=admin.id, status=body.status)
+    await db.commit()
+    return PresenceView(
+        user_id=str(row.user_id),
+        status=row.status,
+        last_heartbeat_at=row.last_heartbeat_at,
+        seconds_since_last_heartbeat=_seconds_since(row.last_heartbeat_at),
+    )
+
+
+@router.get("/presence/me", response_model=PresenceView | None)
+async def get_my_presence_endpoint(
+    user: User | None = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> PresenceView | None:
+    """Return the calling admin's own presence row (or None if no
+    heartbeat has ever been recorded). Used by the topbar status
+    switcher to restore state on page reload."""
+    admin = _require_admin(user)
+    row = await get_my_presence(db, user_id=admin.id)
+    if row is None:
+        return None
+    return PresenceView(
+        user_id=str(row.user_id),
+        status=row.status,
+        last_heartbeat_at=row.last_heartbeat_at,
+        seconds_since_last_heartbeat=_seconds_since(row.last_heartbeat_at),
+    )
+
+
+@router.get("/presence/recent")
+async def list_presence_recent(
+    limit: int = 20,
+    user: User | None = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, list[dict[str, Any]]]:
+    _require_admin(user)
+    rows = await list_recent_presence(db, limit=limit)
+    return {
+        "items": [
+            {
+                "user_id": str(r.user_id),
+                "status": r.status,
+                "last_heartbeat_at": r.last_heartbeat_at.isoformat(),
+                "seconds_since_last_heartbeat": _seconds_since(r.last_heartbeat_at),
+            }
+            for r in rows
+        ]
+    }
+
+
+# ---------------------------------------------------------------------------
+# WeChat QR upload / serve / delete
+# ---------------------------------------------------------------------------
+
+
+@router.get("/wechat-qr", response_model=WeChatQrInfoResponse)
+async def get_wechat_qr_info(
+    user: User | None = Depends(get_current_user),
+) -> WeChatQrInfoResponse:
+    _require_admin(user)
+    meta = get_qr_metadata()
+    if meta is None:
+        return WeChatQrInfoResponse(has_qr=False)
+    return WeChatQrInfoResponse(
+        has_qr=True,
+        url=qr_public_url(),
+        uploaded_at=meta["uploaded_at"],
+        size_bytes=meta["size_bytes"],
+    )
+
+
+@router.post("/wechat-qr", response_model=WeChatQrInfoResponse)
+async def upload_wechat_qr(
+    file: UploadFile = File(...),
+    user: User | None = Depends(get_current_user),
+) -> WeChatQrInfoResponse:
+    _require_admin(user)
+    body = await file.read()
+    try:
+        save_qr(content_type=file.content_type or "", body=body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    meta = get_qr_metadata()
+    assert meta is not None
+    return WeChatQrInfoResponse(
+        has_qr=True,
+        url=qr_public_url(),
+        uploaded_at=meta["uploaded_at"],
+        size_bytes=meta["size_bytes"],
+    )
+
+
+@router.delete("/wechat-qr")
+async def delete_wechat_qr(
+    user: User | None = Depends(get_current_user),
+) -> dict[str, bool]:
+    _require_admin(user)
+    return {"removed": delete_qr()}
+
+
+# ---------------------------------------------------------------------------
+# Admin reply to a support conversation (in-product chat)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/conversations/{conversation_id}")
+async def admin_get_conversation(
+    conversation_id: str,
+    user: User | None = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Admin-scoped read of a support conversation (full message log + user identity).
+
+    Plain dict response so the admin UI can display the user's plan /
+    page / job_id without going through the user-side ``/api/support``
+    routes (which would 403 for cross-user reads)."""
+    _require_admin(user)
+    import uuid as _uuid
+
+    try:
+        cid = _uuid.UUID(conversation_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    convo = await db.get(SupportConversation, cid)
+    if convo is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+
+    msgs_stmt = (
+        select(SupportMessage)
+        .where(SupportMessage.conversation_id == convo.id)
+        .order_by(SupportMessage.created_at.asc())
+    )
+    msgs = list((await db.execute(msgs_stmt)).scalars())
+
+    target_user = None
+    if convo.user_id is not None:
+        target_user = await db.get(User, convo.user_id)
+
+    return {
+        "conversation": {
+            "id": str(convo.id),
+            "user_id": str(convo.user_id) if convo.user_id else None,
+            "anonymous_id": convo.anonymous_id,
+            "channel": convo.channel,
+            "entrypoint": convo.entrypoint,
+            "page_url": convo.page_url,
+            "job_id": convo.job_id,
+            "status": convo.status,
+            "handoff_state": convo.handoff_state,
+            "handoff_provider": convo.handoff_provider,
+            "created_at": convo.created_at.isoformat(),
+            "updated_at": convo.updated_at.isoformat(),
+        },
+        "user": (
+            {
+                "id": str(target_user.id),
+                "display_name": target_user.display_name,
+                "email": target_user.email or "",
+                "phone_number": target_user.phone_number,
+                "plan_code": getattr(target_user, "plan_code", None),
+                "role": getattr(target_user, "role", None),
+            }
+            if target_user
+            else None
+        ),
+        "messages": [
+            {
+                "id": str(m.id),
+                "sender": m.sender,
+                "body": m.body,
+                "created_at": m.created_at.isoformat(),
+                "metadata": m.metadata_json,
+            }
+            for m in msgs
+        ],
+    }
+
+
+@router.post(
+    "/conversations/{conversation_id}/reply",
+    response_model=AdminReplyResponse,
+)
+async def admin_reply_to_conversation(
+    conversation_id: str,
+    body: AdminReplyRequest,
+    user: User | None = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> AdminReplyResponse:
+    """Admin posts a human reply into the conversation.
+
+    Side effects:
+    - Append a ``support_messages`` row with sender="human".
+    - Conversation flips to status="waiting_human" (so the user-side
+      AI doesn't resume) and handoff_state="created".
+    - Dispatch ``support.human_replied`` notification (best-effort) so
+      the user gets a red-dot in the notification bell.
+    - Optionally mark the underlying handoff_request status="handled".
+    """
+    admin = _require_admin(user)
+    import uuid as _uuid
+
+    try:
+        cid = _uuid.UUID(conversation_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    convo = await db.get(SupportConversation, cid)
+    if convo is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+
+    msg = SupportMessage(
+        conversation_id=convo.id,
+        sender="human",
+        body=body.body,
+        metadata_json={
+            "admin_user_id": str(admin.id),
+            "admin_display_name": admin.display_name,
+        },
+    )
+    db.add(msg)
+
+    convo.message_count = (convo.message_count or 0) + 1
+    convo.status = "waiting_human" if convo.status != "closed" else convo.status
+    convo.handoff_state = (
+        "created" if convo.handoff_state in ("none", "recommended", "requested") else convo.handoff_state
+    )
+    convo.updated_at = datetime.now(timezone.utc)
+    await db.flush()
+
+    handoff_status: str | None = None
+    if body.mark_handled and convo.user_id is not None:
+        # Mark any open handoff_request for this conversation as handled.
+        stmt = (
+            select(SupportHandoffRequest)
+            .where(
+                SupportHandoffRequest.conversation_id == convo.id,
+                SupportHandoffRequest.status.in_(("pending", "created")),
+            )
+            .order_by(SupportHandoffRequest.created_at.desc())
+            .limit(1)
+        )
+        h = (await db.execute(stmt)).scalar_one_or_none()
+        if h is not None:
+            h.status = "closed"
+            h.updated_at = datetime.now(timezone.utc)
+            handoff_status = "closed"
+
+    notification_dispatched = False
+    if convo.user_id is not None:
+        try:
+            from notification_dispatch_map import EVENT_SUPPORT_HUMAN_REPLIED
+            from notifications_service import dispatch_event
+
+            await dispatch_event(
+                db,
+                event_type=EVENT_SUPPORT_HUMAN_REPLIED,
+                user_id=convo.user_id,
+                payload={"summary": body.body[:80]},
+                related_id=str(convo.id),
+                dedupe_key=f"support.human_replied:{convo.id}:{msg.id}",
+            )
+            notification_dispatched = True
+        except Exception:
+            logger.exception("Failed to dispatch human_replied notification")
+
+    await db.commit()
+    return AdminReplyResponse(
+        message_id=str(msg.id),
+        notification_dispatched=notification_dispatched,
+        handoff_status=handoff_status,
+    )

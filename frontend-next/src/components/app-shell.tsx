@@ -9,6 +9,7 @@ import { clearPostAuthSessionHint } from "@/lib/auth/post-auth-redirect"
 import { Button } from "@/components/ui/button"
 import { BrandMark, BrandLockup } from "@/components/marketing/brand-mark"
 import { SupportWidget } from "@/components/support/SupportWidget"
+import { AdminPresenceSwitcher } from "@/components/support/AdminPresenceSwitcher"
 import {
   Video,
   Mic2,
@@ -354,6 +355,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </span>
           </div>
           <div className="flex shrink-0 items-center gap-3">
+            {/* Admin-only: presence status switcher (online / paused / offline).
+                Drives heartbeat to /api/admin/support/heartbeat. */}
+            <AdminPresenceSwitcher isAdmin={user?.role === "admin"} />
             {user && (
               <span className="hidden sm:block text-xs text-muted-foreground">
                 {user.display_name}

@@ -37,17 +37,26 @@ export function SupportMessageList({
             (msg.sender === "user" ? "justify-end" : "justify-start")
           }
         >
-          <div
-            className={
-              "max-w-[85%] whitespace-pre-wrap rounded-lg px-3 py-2 leading-relaxed " +
-              (msg.sender === "user"
-                ? "bg-[color:var(--cinnabar,#C73E3A)]/10 text-foreground"
-                : msg.sender === "system"
-                  ? "border border-dashed border-border bg-transparent text-xs text-muted-foreground"
-                  : "border border-border bg-card text-foreground")
-            }
-          >
-            {msg.body}
+          <div className="max-w-[85%]">
+            {msg.sender === "human" ? (
+              <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-emerald-700">
+                ✦ 客服
+              </p>
+            ) : null}
+            <div
+              className={
+                "whitespace-pre-wrap rounded-lg px-3 py-2 leading-relaxed " +
+                (msg.sender === "user"
+                  ? "bg-[color:var(--cinnabar,#C73E3A)]/10 text-foreground"
+                  : msg.sender === "system"
+                    ? "border border-dashed border-border bg-transparent text-xs text-muted-foreground"
+                    : msg.sender === "human"
+                      ? "border border-emerald-300 bg-emerald-50/60 text-foreground"
+                      : "border border-border bg-card text-foreground")
+              }
+            >
+              {msg.body}
+            </div>
           </div>
         </li>
       ))}

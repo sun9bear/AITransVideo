@@ -1,18 +1,21 @@
 """Unified handoff orchestrator.
 
-Plan §13 P2 — email is the default human channel; Chatwoot / WeChat are
-stubs. The orchestrator:
+Plan 2026-05-08 follow-up (online-aware routing):
 
-1. Builds an AI-generated summary of the conversation from the last few
-   messages (sanitized via ``redact_pii``).
-2. Inserts a ``support_handoff_requests`` row.
-3. Calls the configured provider adapter.
-4. Updates ``support_conversations.handoff_state`` and
-   ``support_handoff_requests.status`` according to the result.
-5. Falls back to the email adapter if a non-email provider raises.
+1. **At least one admin online** → in-product chat. Create a row,
+   flip conversation to ``waiting_human``, return immediately. Admin
+   sees the ticket on /admin/support and replies in-product.
+2. **No admin online + WeChat QR uploaded** → ``wechat_qr`` provider.
+   Create a row tagged with provider="wechat_qr"; widget shows the QR
+   image and the offline message. No email send, no admin notification
+   (they're not online to see it).
+3. **No admin online + no WeChat QR** → fall back to the legacy email
+   adapter (log-only until SMTP is wired). Same payload shape as
+   before.
 
 All paths return a structured response the API layer renders to the
-frontend.
+frontend. Failure modes never raise — a failed adapter call leaves the
+conversation in ``failed`` state but the API still returns 200.
 """
 
 from __future__ import annotations
@@ -31,7 +34,10 @@ from models import (
     User,
 )
 from support_adapters.email import send_handoff_email
+from support_admin_settings import load_support_settings
 from support_knowledge import redact_pii
+from support_presence import is_anyone_online
+from support_wechat_qr import get_qr_metadata, public_url as wechat_qr_public_url
 
 logger = logging.getLogger(__name__)
 
@@ -112,16 +118,34 @@ async def create_handoff(
     *,
     conversation: SupportConversation,
     reason: str,
-    provider: str = "email",
+    provider: str = "email",  # legacy/forced — caller can still override
     ops_email: str,
 ) -> dict[str, Any]:
-    """Create a handoff request and call the provider adapter.
+    """Create a handoff request and route to the right channel.
 
-    On success, commits the handoff row and updates the conversation.
-    On adapter failure, marks the row as ``failed`` and (if the failed
-    provider was not already ``email``) tries the email adapter as a
-    last-mile fallback.
+    Routing decision (2026-05-08 L1):
+    1. At least one admin online → ``provider="in_product"``. No
+       external dispatch; ticket lives in admin/support panel.
+    2. No admin online + WeChat QR uploaded → ``provider="wechat_qr"``.
+       Returns ``wechat_qr_url`` + offline message in payload.
+    3. No admin online + no QR → ``provider="email"``. Logs to
+       runtime_logs (SMTP wiring deferred).
+
+    The caller-provided ``provider`` argument is used only when the
+    routing logic settles on a final non-auto provider — the previous
+    behavior of "always email" is preserved as the floor.
     """
+    settings = load_support_settings()
+    threshold = int(settings.get("support_admin_online_threshold_seconds", 60))
+    admin_online = await is_anyone_online(db, threshold_seconds=threshold)
+    qr_meta = get_qr_metadata()
+
+    if admin_online:
+        provider = "in_product"
+    elif qr_meta is not None:
+        provider = "wechat_qr"
+    else:
+        provider = "email"
 
     summary, last_msgs = await _summarize_conversation(db, conversation)
 
@@ -156,7 +180,33 @@ async def create_handoff(
 
     payload: dict[str, Any]
     try:
-        if provider == "email":
+        if provider == "in_product":
+            # Admin is online — no external dispatch needed. Ticket
+            # surfaces in /admin/support; admin replies in-product.
+            payload = {
+                "channel": "in_product",
+                "queued_at": datetime.now(timezone.utc).isoformat(),
+            }
+            request.status = "created"
+            request.provider_payload = payload
+            conversation.handoff_state = "created"
+        elif provider == "wechat_qr":
+            # No admin online but WeChat QR exists — return QR URL and
+            # offline message in payload so widget can render the
+            # offline branch.
+            payload = {
+                "channel": "wechat_qr",
+                "wechat_qr_url": wechat_qr_public_url(),
+                "offline_message": settings.get(
+                    "support_offline_message",
+                    "运营暂未在线，可扫码添加客服微信，我们尽快回复。",
+                ),
+                "queued_at": datetime.now(timezone.utc).isoformat(),
+            }
+            request.status = "created"
+            request.provider_payload = payload
+            conversation.handoff_state = "created"
+        elif provider == "email":
             payload = await send_handoff_email(
                 to_email=ops_email,
                 conversation_id=str(conversation.id),
@@ -170,13 +220,13 @@ async def create_handoff(
                 summary=summary,
                 last_messages=last_msgs,
             )
+            request.status = "created"
+            request.provider_payload = payload
+            conversation.handoff_state = "created"
         else:
             # chatwoot / wechat_kf — stubs raise NotImplementedError; we
             # fall through to email below.
             raise NotImplementedError(f"provider {provider} not wired in P1")
-        request.status = "created"
-        request.provider_payload = payload
-        conversation.handoff_state = "created"
     except NotImplementedError as exc:
         logger.warning("Handoff provider %s not implemented; falling back to email: %s", provider, exc)
         # Fallback path
@@ -210,11 +260,17 @@ async def create_handoff(
         request.provider_payload = {"error": str(exc)}
         conversation.handoff_state = "failed"
 
+    # Sync the conversation's handoff_provider with the actual provider
+    # we landed on (request.provider may have been flipped to email by
+    # the fallback path).
+    conversation.handoff_provider = request.provider
+
     await db.flush()
     return {
         "handoff_state": conversation.handoff_state,
-        "provider": conversation.handoff_provider or provider,
+        "provider": request.provider,
         "provider_conversation_id": conversation.handoff_provider_conversation_id,
         "request_id": str(request.id),
         "status": request.status,
+        "payload": request.provider_payload or {},
     }

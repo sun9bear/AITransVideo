@@ -11,7 +11,43 @@
  * allowed (config.anonymous_enabled).
  */
 
-export type HandoffProvider = "email" | "chatwoot" | "wechat_kf"
+export type HandoffProvider =
+  | "in_product"
+  | "wechat_qr"
+  | "email"
+  | "chatwoot"
+  | "wechat_kf"
+
+export type PresenceStatus = "online" | "paused" | "offline"
+
+export interface OnlineStatus {
+  online: boolean
+  online_count: number
+  has_wechat_qr: boolean
+  offline_message: string
+  handoff_offline_fallback_minutes: number
+}
+
+export interface PresenceView {
+  user_id: string
+  status: PresenceStatus
+  last_heartbeat_at: string
+  seconds_since_last_heartbeat: number
+}
+
+export interface MyOpenConversation {
+  conversation_id: string
+  status: "open" | "waiting_human" | "handled" | "closed"
+  handoff_state:
+    | "none"
+    | "recommended"
+    | "requested"
+    | "created"
+    | "failed"
+    | "closed"
+  last_message_preview: string
+  updated_at: string
+}
 
 export interface SupportConfig {
   enabled: boolean
@@ -105,6 +141,10 @@ export interface SendMessageResponse {
   handoff: HandoffSummary
   route: "template" | "faq" | "llm" | "handoff" | "blocked"
   budget_state: "normal" | "budget_exhausted"
+  wechat_qr_url: string | null
+  offline_message: string | null
+  handoff_provider: HandoffProvider | null
+  online_count: number | null
 }
 
 export interface HandoffRequest {
@@ -123,6 +163,9 @@ export interface HandoffResponse {
   provider: HandoffProvider
   provider_conversation_id: string | null
   message: string
+  wechat_qr_url: string | null
+  offline_message: string | null
+  online_count: number | null
 }
 
 async function fetchJson<T>(
@@ -202,5 +245,164 @@ export async function requestSupportHandoff(
       method: "POST",
       body: JSON.stringify(body),
     },
+  )
+}
+
+export async function getOnlineStatus(): Promise<OnlineStatus> {
+  return fetchJson<OnlineStatus>("/api/support/online-status")
+}
+
+export async function listMyOpenConversations(): Promise<{
+  conversations: MyOpenConversation[]
+}> {
+  return fetchJson<{ conversations: MyOpenConversation[] }>(
+    "/api/support/conversations/my/open",
+  )
+}
+
+// --- Admin-side ---
+
+export async function adminHeartbeat(status?: PresenceStatus): Promise<PresenceView> {
+  return fetchJson<PresenceView>("/api/admin/support/heartbeat", {
+    method: "POST",
+    body: JSON.stringify(status ? { status } : {}),
+  })
+}
+
+export async function adminGetMyPresence(): Promise<PresenceView | null> {
+  return fetchJson<PresenceView | null>("/api/admin/support/presence/me")
+}
+
+export async function adminSetPresenceStatus(
+  status: PresenceStatus,
+): Promise<PresenceView> {
+  return fetchJson<PresenceView>("/api/admin/support/presence/status", {
+    method: "POST",
+    body: JSON.stringify({ status }),
+  })
+}
+
+export interface WeChatQrInfo {
+  has_qr: boolean
+  url: string | null
+  uploaded_at: string | null
+  size_bytes: number | null
+}
+
+export async function adminGetWechatQrInfo(): Promise<WeChatQrInfo> {
+  return fetchJson<WeChatQrInfo>("/api/admin/support/wechat-qr")
+}
+
+export async function adminUploadWechatQr(file: File): Promise<WeChatQrInfo> {
+  const form = new FormData()
+  form.append("file", file)
+  const res = await fetch("/api/admin/support/wechat-qr", {
+    method: "POST",
+    credentials: "include",
+    body: form,
+  })
+  const raw = await res.text()
+  let parsed: unknown = null
+  if (raw) {
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      parsed = raw
+    }
+  }
+  if (!res.ok) {
+    const detail =
+      parsed && typeof parsed === "object" && "detail" in parsed
+        ? String((parsed as { detail: unknown }).detail)
+        : `wechat-qr upload failed: ${res.status}`
+    throw new Error(detail)
+  }
+  return parsed as WeChatQrInfo
+}
+
+export async function adminDeleteWechatQr(): Promise<{ removed: boolean }> {
+  return fetchJson<{ removed: boolean }>("/api/admin/support/wechat-qr", {
+    method: "DELETE",
+  })
+}
+
+export interface AdminConversationDetail {
+  conversation: {
+    id: string
+    user_id: string | null
+    anonymous_id: string | null
+    channel: string
+    entrypoint: string | null
+    page_url: string | null
+    job_id: string | null
+    status: string
+    handoff_state: string
+    handoff_provider: string | null
+    created_at: string
+    updated_at: string
+  }
+  user: {
+    id: string
+    display_name: string
+    email: string
+    phone_number: string | null
+    plan_code: string | null
+    role: string | null
+  } | null
+  messages: Array<{
+    id: string
+    sender: "user" | "assistant" | "human" | "system"
+    body: string
+    created_at: string
+    metadata: Record<string, unknown> | null
+  }>
+}
+
+export async function adminGetConversation(
+  conversationId: string,
+): Promise<AdminConversationDetail> {
+  return fetchJson<AdminConversationDetail>(
+    `/api/admin/support/conversations/${encodeURIComponent(conversationId)}`,
+  )
+}
+
+export async function adminReplyToConversation(
+  conversationId: string,
+  body: string,
+  markHandled = false,
+): Promise<{
+  message_id: string
+  notification_dispatched: boolean
+  handoff_status: string | null
+}> {
+  return fetchJson(
+    `/api/admin/support/conversations/${encodeURIComponent(conversationId)}/reply`,
+    {
+      method: "POST",
+      body: JSON.stringify({ body, mark_handled: markHandled }),
+    },
+  )
+}
+
+export async function adminListHandoffs(
+  status: "pending" | "created" | "failed" | "closed" | null = null,
+): Promise<{ items: Array<{
+  id: string
+  conversation_id: string
+  provider: string
+  reason: string
+  summary: string | null
+  status: string
+  created_at: string
+  updated_at: string
+}> }> {
+  const qs = status ? `?status=${status}` : ""
+  return fetchJson(`/api/admin/support/handoffs${qs}`)
+}
+
+export async function adminCloseHandoff(handoffId: string): Promise<{ status: string }> {
+  return fetchJson(
+    `/api/admin/support/handoffs/${encodeURIComponent(handoffId)}/close`,
+    { method: "POST" },
   )
 }

@@ -1,11 +1,15 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 
 import {
   createSupportConversation,
+  getOnlineStatus,
+  getSupportConversation,
+  listMyOpenConversations,
   type ConversationDetail,
   type CreateConversationRequest,
+  type OnlineStatus,
   type SendMessageResponse,
   type SupportMessageView,
   requestSupportHandoff,
@@ -36,6 +40,11 @@ const INITIAL_STATE: ConversationState = {
   messages: [],
 }
 
+interface OfflineState {
+  qr_url: string
+  message: string
+}
+
 export function SupportConversationPanel({
   visible,
   onRequestClose,
@@ -46,6 +55,8 @@ export function SupportConversationPanel({
   jobId,
   notificationId,
   budgetState,
+  onlineStatus,
+  isLoggedIn,
 }: {
   visible: boolean
   onRequestClose: () => void
@@ -56,28 +67,69 @@ export function SupportConversationPanel({
   jobId: string | null
   notificationId: string | null
   budgetState: "normal" | "budget_exhausted" | null
+  onlineStatus: OnlineStatus | null
+  isLoggedIn: boolean
 }) {
   const [state, setState] = useState<ConversationState>(INITIAL_STATE)
   const [draft, setDraft] = useState("")
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [latestRoute, setLatestRoute] = useState<SendMessageResponse["route"] | null>(null)
+  const [offline, setOffline] = useState<OfflineState | null>(null)
+  const [restoreNotice, setRestoreNotice] = useState<string | null>(null)
   const inputRef = useRef<HTMLTextAreaElement | null>(null)
+  const handoffPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const handoffTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lastMessageIdRef = useRef<string | null>(null)
 
-  // Reset on close — keep transcript on subsequent re-opens but discard
-  // pending text. Plan §8.3 — open / close should not feel destructive,
-  // but a stale draft from yesterday is more confusing than helpful.
+  // Reset draft on close (keep transcript on subsequent re-opens).
   useEffect(() => {
     if (!visible) {
       setDraft("")
       setError(null)
     } else {
-      // Tiny defer so the textarea has time to mount.
-      window.setTimeout(() => {
-        inputRef.current?.focus()
-      }, 30)
+      window.setTimeout(() => inputRef.current?.focus(), 30)
     }
   }, [visible])
+
+  // Conversation restore on mount: if user is logged in and has an
+  // open conversation in waiting_human state, restore it so they can
+  // see the agent's reply seamlessly. Plan §"用户离线/回流" UX.
+  useEffect(() => {
+    if (!visible) return
+    if (state.id) return // already have a conversation
+    if (!isLoggedIn) return
+    let cancelled = false
+    listMyOpenConversations()
+      .then(async ({ conversations }) => {
+        if (cancelled || conversations.length === 0) return
+        const target = conversations[0]
+        const detail = await getSupportConversation(target.conversation_id)
+        if (cancelled) return
+        setState({
+          id: detail.id,
+          status: detail.status,
+          handoff_state: detail.handoff_state,
+          messages: detail.messages,
+        })
+        if (detail.messages.length > 0) {
+          lastMessageIdRef.current =
+            detail.messages[detail.messages.length - 1].id
+        }
+        if (
+          detail.handoff_state === "created" ||
+          detail.handoff_state === "requested"
+        ) {
+          setRestoreNotice("已恢复你之前的客服对话")
+        }
+      })
+      .catch(() => {
+        // 401 is fine (anonymous), other errors silent.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [visible, state.id, isLoggedIn])
 
   const handoffActive =
     state.handoff_state === "requested" || state.handoff_state === "created"
@@ -105,8 +157,10 @@ export function SupportConversationPanel({
     }
   }
 
-  const append = (msg: SupportMessageView) =>
+  const append = (msg: SupportMessageView) => {
     setState((prev) => ({ ...prev, messages: [...prev.messages, msg] }))
+    lastMessageIdRef.current = msg.id
+  }
 
   const sendText = async (text: string) => {
     const trimmed = text.trim()
@@ -146,6 +200,15 @@ export function SupportConversationPanel({
           handoff_state: "created",
           status: "waiting_human",
         }))
+        if (
+          reply.handoff_provider === "wechat_qr" &&
+          reply.wechat_qr_url
+        ) {
+          setOffline({
+            qr_url: reply.wechat_qr_url,
+            message: reply.offline_message ?? "",
+          })
+        }
       } else if (reply.handoff?.recommended) {
         setState((prev) => ({ ...prev, handoff_state: "recommended" }))
       }
@@ -167,12 +230,22 @@ export function SupportConversationPanel({
       const result = await requestSupportHandoff(state.id ?? "", {
         reason: "user_requested_human",
       })
-      append({
-        id: `srv-handoff-${Date.now()}`,
-        sender: "system",
-        body: result.message,
-        created_at: new Date().toISOString(),
-      })
+      if (result.provider === "wechat_qr" && result.wechat_qr_url) {
+        setOffline({
+          qr_url: result.wechat_qr_url,
+          message: result.offline_message ?? "",
+        })
+      } else {
+        // in_product / email — the assistant note appended server-side
+        // will surface on the next polling tick. Add a local optimistic
+        // copy so the user sees something immediately.
+        append({
+          id: `srv-handoff-${Date.now()}`,
+          sender: "system",
+          body: result.message,
+          created_at: new Date().toISOString(),
+        })
+      }
       setState((prev) => ({
         ...prev,
         handoff_state: result.handoff_state,
@@ -183,10 +256,114 @@ export function SupportConversationPanel({
     }
   }
 
+  // Polling for new human messages once handoff is created (in_product
+  // path). Stops when conversation closes or widget is hidden.
+  useEffect(() => {
+    if (!visible) return
+    if (!state.id) return
+    if (state.handoff_state !== "created") {
+      // Clear any prior timer / poll if state moved to closed/handled.
+      if (handoffPollRef.current) {
+        clearInterval(handoffPollRef.current)
+        handoffPollRef.current = null
+      }
+      if (handoffTimeoutRef.current) {
+        clearTimeout(handoffTimeoutRef.current)
+        handoffTimeoutRef.current = null
+      }
+      return
+    }
+    if (state.status === "closed") return
+
+    const tick = async () => {
+      try {
+        const detail = await getSupportConversation(state.id!)
+        // Append any new messages we don't have yet.
+        const known = new Set(state.messages.map((m) => m.id))
+        const fresh = detail.messages.filter((m) => !known.has(m.id))
+        if (fresh.length > 0) {
+          setState((prev) => ({
+            ...prev,
+            status: detail.status,
+            handoff_state: detail.handoff_state,
+            messages: [...prev.messages, ...fresh],
+          }))
+          // If a human reply came in, clear the offline fallback timer.
+          if (fresh.some((m) => m.sender === "human")) {
+            if (handoffTimeoutRef.current) {
+              clearTimeout(handoffTimeoutRef.current)
+              handoffTimeoutRef.current = null
+            }
+          }
+        } else if (
+          detail.status !== state.status ||
+          detail.handoff_state !== state.handoff_state
+        ) {
+          setState((prev) => ({
+            ...prev,
+            status: detail.status,
+            handoff_state: detail.handoff_state,
+          }))
+        }
+      } catch {
+        // silent
+      }
+    }
+    void tick()
+    handoffPollRef.current = setInterval(tick, 5_000)
+
+    // Schedule the offline-fallback timer. If no human message arrives
+    // within fallback_minutes, fetch online-status to get the QR URL
+    // and surface it.
+    const fallbackMin = onlineStatus?.handoff_offline_fallback_minutes ?? 0
+    if (fallbackMin > 0 && !offline) {
+      handoffTimeoutRef.current = setTimeout(async () => {
+        // Re-check whether a human has replied since polling kicked in.
+        if (
+          state.messages.some((m) => m.sender === "human") &&
+          handoffTimeoutRef.current === null
+        ) {
+          return
+        }
+        try {
+          const online = await getOnlineStatus()
+          if (!online.online && online.has_wechat_qr) {
+            setOffline({
+              qr_url: "/api/support/wechat-qr",
+              message: online.offline_message,
+            })
+          }
+        } catch {
+          // silent
+        }
+      }, fallbackMin * 60_000)
+    }
+
+    return () => {
+      if (handoffPollRef.current) {
+        clearInterval(handoffPollRef.current)
+        handoffPollRef.current = null
+      }
+      if (handoffTimeoutRef.current) {
+        clearTimeout(handoffTimeoutRef.current)
+        handoffTimeoutRef.current = null
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, state.id, state.handoff_state])
+
   if (!visible) return null
 
   const showQuickQuestions =
-    state.messages.length === 0 && (quickQuestions ?? FALLBACK_QUICK_QUESTIONS).length > 0
+    !offline &&
+    state.messages.length === 0 &&
+    (quickQuestions ?? FALLBACK_QUICK_QUESTIONS).length > 0
+
+  // Online indicator: green if anyone online, gray otherwise.
+  const onlineDotClass = onlineStatus?.online
+    ? "bg-emerald-500"
+    : "bg-muted-foreground"
+  const onlineLabel = onlineStatus?.online ? "客服在线" : "运营离线"
 
   return (
     <section
@@ -204,8 +381,11 @@ export function SupportConversationPanel({
           <h2 className="text-sm font-semibold text-foreground">
             {SUPPORT_LABELS.panelTitle}
           </h2>
-          <p className="text-xs text-muted-foreground">
-            {SUPPORT_LABELS.panelSubtitle}
+          <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <span aria-hidden className={"h-1.5 w-1.5 rounded-full " + onlineDotClass} />
+            <span>{onlineLabel}</span>
+            <span aria-hidden>·</span>
+            <span>{SUPPORT_LABELS.panelSubtitle}</span>
           </p>
         </div>
         <button
@@ -224,13 +404,36 @@ export function SupportConversationPanel({
         </div>
       ) : null}
 
-      {state.messages.length === 0 ? (
+      {restoreNotice ? (
+        <div className="border-b border-border bg-blue-50/50 px-4 py-2 text-xs text-foreground">
+          {restoreNotice}
+        </div>
+      ) : null}
+
+      {state.messages.length === 0 && !offline ? (
         <div className="px-4 py-3 text-xs leading-relaxed text-muted-foreground">
           {greeting || FALLBACK_GREETING}
         </div>
       ) : null}
 
       <SupportMessageList messages={state.messages} loading={loading} />
+
+      {/* Offline branch: WeChat QR card */}
+      {offline ? (
+        <div className="border-t border-border bg-card/40 px-4 py-3">
+          <p className="mb-2 text-xs leading-relaxed text-foreground">
+            {offline.message ||
+              "运营暂未在线，可扫码添加客服微信，我们尽快回复。"}
+          </p>
+          <div className="flex justify-center">
+            <img
+              src={offline.qr_url}
+              alt="客服微信二维码"
+              className="h-44 w-44 rounded border border-border bg-background object-contain p-1"
+            />
+          </div>
+        </div>
+      ) : null}
 
       {showQuickQuestions ? (
         <div className="flex flex-wrap gap-2 border-t border-border px-4 py-2">
@@ -250,13 +453,13 @@ export function SupportConversationPanel({
         </div>
       ) : null}
 
-      <SupportHandoffBanner state={state.handoff_state} />
+      {!offline ? <SupportHandoffBanner state={state.handoff_state} /> : null}
 
       {error ? (
         <p className="px-4 py-2 text-xs text-destructive">{error}</p>
       ) : null}
 
-      {latestRoute && !handoffActive && state.messages.length > 0 ? (
+      {latestRoute && !handoffActive && !offline && state.messages.length > 0 ? (
         <div className="flex gap-2 border-t border-border px-4 py-2 text-xs">
           <button
             type="button"
@@ -279,7 +482,7 @@ export function SupportConversationPanel({
         className="flex gap-2 border-t border-border px-3 py-3"
         onSubmit={(event) => {
           event.preventDefault()
-          if (handoffActive) return
+          if (handoffActive || offline) return
           void sendText(draft)
         }}
       >
@@ -288,18 +491,21 @@ export function SupportConversationPanel({
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
           placeholder={
-            handoffActive
-              ? SUPPORT_LABELS.handoffWaitingNote
-              : SUPPORT_LABELS.inputPlaceholder
+            offline
+              ? "请在微信继续沟通"
+              : handoffActive
+                ? SUPPORT_LABELS.handoffWaitingNote
+                : SUPPORT_LABELS.inputPlaceholder
           }
-          disabled={handoffActive}
+          disabled={handoffActive || !!offline}
           rows={2}
           className="min-h-[2.5rem] flex-1 resize-none rounded border border-border bg-card px-2 py-1.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-[color:var(--cinnabar,#C73E3A)]/40 disabled:opacity-60"
           onKeyDown={(event) => {
             if (
               event.key === "Enter" &&
               !event.shiftKey &&
-              !handoffActive
+              !handoffActive &&
+              !offline
             ) {
               event.preventDefault()
               void sendText(draft)
@@ -308,7 +514,12 @@ export function SupportConversationPanel({
         />
         <button
           type="submit"
-          disabled={loading || handoffActive || draft.trim().length === 0}
+          disabled={
+            loading ||
+            handoffActive ||
+            !!offline ||
+            draft.trim().length === 0
+          }
           className="self-end rounded bg-[color:var(--cinnabar,#C73E3A)] px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
         >
           {SUPPORT_LABELS.sendButton}

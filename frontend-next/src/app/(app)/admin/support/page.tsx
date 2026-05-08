@@ -17,6 +17,10 @@
 
 import { useEffect, useState } from "react"
 
+import { HandoffTicketsPanel } from "@/components/support/admin/HandoffTicketsPanel"
+import { PresenceConfigCard } from "@/components/support/admin/PresenceConfigCard"
+import { WeChatQrCard } from "@/components/support/admin/WeChatQrCard"
+
 interface SupportSettings {
   support_enabled: boolean
   support_anonymous_enabled: boolean
@@ -29,6 +33,11 @@ interface SupportSettings {
   support_budget_exhausted_message: string
   support_sensitive_keywords: string[]
   support_ops_email: string
+  // Human handoff routing (L1, plan 2026-05-08 follow-up)
+  support_admin_heartbeat_interval_seconds: number
+  support_admin_online_threshold_seconds: number
+  support_handoff_offline_fallback_minutes: number
+  support_offline_message: string
 }
 
 interface SupportModelOption {
@@ -84,6 +93,10 @@ const DEFAULTS: SupportSettings = {
     "举报",
   ],
   support_ops_email: "sxz999@proton.me",
+  support_admin_heartbeat_interval_seconds: 30,
+  support_admin_online_threshold_seconds: 60,
+  support_handoff_offline_fallback_minutes: 5,
+  support_offline_message: "运营暂未在线，可扫码添加客服微信，我们尽快回复。",
 }
 
 async function getJson<T>(url: string, init: RequestInit = {}): Promise<T> {
@@ -382,11 +395,28 @@ export default function AdminSupportPage() {
             className="w-full rounded border border-border bg-background px-2 py-1 text-sm"
           />
           <p className="mt-1 text-xs text-muted-foreground">
-            P1 阶段实际写入运行日志（runtime_logs/support_handoff_email.log），
-            真实 SMTP 投递在 P2 上线时配置。
+            仅在「运营全部不在线 AND 未上传微信 QR」时使用（写入
+            runtime_logs/support_handoff_email.log；SMTP 待接）。
           </p>
         </Field>
       </section>
+
+      <PresenceConfigCard
+        values={{
+          support_admin_heartbeat_interval_seconds:
+            settings.support_admin_heartbeat_interval_seconds,
+          support_admin_online_threshold_seconds:
+            settings.support_admin_online_threshold_seconds,
+          support_handoff_offline_fallback_minutes:
+            settings.support_handoff_offline_fallback_minutes,
+          support_offline_message: settings.support_offline_message,
+        }}
+        onChange={(patch) => setSettings((s) => ({ ...s, ...patch }))}
+      />
+
+      <WeChatQrCard />
+
+      <HandoffTicketsPanel />
 
       <div className="flex items-center justify-end gap-3">
         {savedAt ? (
