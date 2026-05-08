@@ -1016,10 +1016,18 @@ class JianyingDraftRunner:
             # have been swallowed by cue_pipeline's fallback path; we
             # ALSO wrap in try/except here so a totally unexpected
             # exception (file IO, OOM) can never block draft generation.
-            self._maybe_align_subtitles(
+            #
+            # P1-15b batch 4 follow-up² (Codex review 2305188): the
+            # helper now returns False if the claim was retired between
+            # RESOLVING_ARTIFACTS and ALIGNING_SUBTITLES. Bail before
+            # the multi-minute Whisper subprocess — running it on
+            # invalidated content would mutate subtitle sidecars for a
+            # draft whose claim no longer exists.
+            if not self._maybe_align_subtitles(
                 job_id, attempt_id, job,
                 user_draft_root=user_draft_root,
-            )
+            ):
+                return  # claim lost during alignment substep — bail before backend.write
 
             request = self._build_jianying_request(job, user_draft_root=user_draft_root)
 
@@ -1311,7 +1319,7 @@ class JianyingDraftRunner:
         job,
         *,
         user_draft_root: str | None,
-    ) -> None:
+    ) -> bool:
         """D-3: bring subtitles to whisper-aligned state if both gates open.
 
         Called from ``_do_generate`` after RESOLVING_ARTIFACTS, before
@@ -1335,10 +1343,32 @@ class JianyingDraftRunner:
         2026-05-05 D-3: this is the FIRST entry point that triggers
         whisper alignment at deliverable time (instead of every publish).
         D-4 will add the same call to the materials_pack handler.
+
+        Returns:
+          True   — gates closed, OR alignment ran (or attempted) under a
+                   still-owned claim. Caller should continue.
+          False  — claim was retired AFTER we entered the helper but
+                   BEFORE the substep write landed. Caller MUST bail
+                   (do NOT run the Whisper helper, which can take minutes
+                   and would mutate subtitle sidecars for content whose
+                   draft was already invalidated by an overwrite commit).
+
+        P1-15b batch 4 follow-up² (Codex review 2305188): previously
+        the helper called ``_set_substep`` and ignored its bool return,
+        then ran ``ensure_whisper_aligned_subtitles`` unconditionally.
+        That meant a stale worker between RESOLVING_ARTIFACTS (set OK)
+        and ALIGNING_SUBTITLES (claim lost) could spend minutes running
+        Whisper on invalidated content. Now we return False on
+        ``_set_substep`` no-op so ``_do_generate`` aborts before the
+        helper runs.
         """
         if not job.project_dir:
-            return  # JobRecord without project_dir — can't run; let
-                    # _build_jianying_request fail with a clearer error.
+            # JobRecord without project_dir — can't run; let
+            # _build_jianying_request fail with a clearer error.
+            # Return True so _do_generate proceeds to that explicit
+            # error rather than silently swallowing this case as a
+            # claim-loss bail.
+            return True
 
         # Pre-check the gates: if closed, skip the substep label
         # entirely so users never see a transient "正在精准对齐字幕" blip.
@@ -1349,22 +1379,26 @@ class JianyingDraftRunner:
         try:
             from modules.subtitles.cue_pipeline import _whisper_align_enabled
             if not _whisper_align_enabled(context="deliverable"):
-                return
+                return True
         except Exception:  # noqa: BLE001 — flag check should never fail loudly
             logger.exception(
                 "whisper-align gate check failed for job %s; skipping align step",
                 job_id,
             )
-            return
+            return True
 
-        # Both gates open — surface progress to the user.
-        self._set_substep(
+        # Both gates open — surface progress to the user. If the claim
+        # has been retired between RESOLVING_ARTIFACTS and now (e.g. by
+        # an overwrite commit landing in the gap), abandon the attempt
+        # BEFORE invoking the multi-minute Whisper helper.
+        if not self._set_substep(
             job_id,
             attempt_id,
             SUBSTEP_ALIGNING_SUBTITLES,
             message="正在精准对齐字幕（首次约 10 分钟）",
             user_draft_root=user_draft_root,
-        )
+        ):
+            return False
 
         try:
             from services.subtitles.ensure_whisper_alignment import (
@@ -1383,6 +1417,7 @@ class JianyingDraftRunner:
                 "whisper-align helper raised for job %s — proceeding with "
                 "existing on-disk subtitles", job_id,
             )
+        return True
 
     def _build_jianying_request(self, job, *, user_draft_root: str | None = None) -> "object":
         """Construct JianyingDraftRequest from JobRecord.

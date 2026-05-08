@@ -2636,6 +2636,139 @@ class TestJianyingClaimOwnershipGuard:
             "invalidated record."
         )
 
+    def test_alignment_skipped_when_claim_lost_after_resolving(
+        self, tmp_path, monkeypatch,
+    ):
+        """Codex review 2305188: with Whisper gates ENABLED, an
+        overwrite commit landing between RESOLVING_ARTIFACTS and
+        ALIGNING_SUBTITLES must NOT trigger
+        ``ensure_whisper_aligned_subtitles`` for the now-invalidated
+        attempt. The Whisper helper can spend minutes and mutate
+        subtitle sidecars — burning that work on retired content is
+        the whole bug.
+
+        Setup: pre-running record + Whisper gates on. Wrap
+        ``_set_substep`` so the SECOND invocation (the alignment
+        substep) flips status to ``idle`` BEFORE the real
+        ``_set_substep`` runs, simulating an overwrite commit landing
+        in the gap. The real ``_set_substep`` then sees status==idle
+        and returns False; ``_maybe_align_subtitles`` propagates that
+        False; ``_do_generate`` bails BEFORE invoking the Whisper
+        helper.
+        """
+        from dataclasses import replace as dc_replace
+        from services.jobs.jianying_draft_runner import (
+            SUBSTEP_ALIGNING_SUBTITLES,
+            SUBSTEP_BUILDING_DRAFT,
+            SUBSTEP_RESOLVING_ARTIFACTS,
+        )
+
+        # Whisper gates open (both env capability + admin policy).
+        monkeypatch.setenv("AVT_WHISPER_ALIGN_ENABLED", "1")
+        monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+        (tmp_path / "admin_settings.json").write_text(
+            json.dumps({
+                "whisper_alignment_enabled": True,
+                "whisper_alignment_trigger": "deliverable",
+                "whisper_alignment_skip_cache": False,
+            }),
+            encoding="utf-8",
+        )
+
+        store = _make_store(tmp_path)
+        project_dir = _make_project_dir(tmp_path)
+        record = _make_record(
+            project_dir=str(project_dir),
+            jianying_draft_status="running",
+            jianying_draft_attempt_id="A1",
+            jianying_draft_substep="validating_inputs",
+        )
+        store.save_job(record)
+        (project_dir / "source.mp4").write_bytes(b"src")
+        (project_dir / "dubbed.wav").write_bytes(b"dub")
+        (project_dir / "subtitles.srt").write_text(
+            "proportional", encoding="utf-8",
+        )
+
+        ensure_call_log: list[str] = []
+
+        def _fail_ensure(project_dir_arg):
+            ensure_call_log.append(str(project_dir_arg))
+            raise AssertionError(
+                "ensure_whisper_aligned_subtitles must NOT be invoked "
+                "when claim was lost before ALIGNING_SUBTITLES"
+            )
+
+        monkeypatch.setattr(
+            "services.subtitles.ensure_whisper_alignment."
+            "ensure_whisper_aligned_subtitles",
+            _fail_ensure,
+        )
+
+        backend = mock.MagicMock()
+        backend.write.side_effect = AssertionError(
+            "backend.write must NOT be invoked when claim is lost"
+        )
+
+        runner = _make_runner(store, backend)
+        real_set_substep = runner._set_substep
+        call_log: list[str] = []
+
+        def _wrapped_set_substep(
+            job_id, attempt_id, substep, *, message=None, user_draft_root=None,
+        ):
+            call_log.append(substep)
+            if substep == SUBSTEP_ALIGNING_SUBTITLES:
+                # Simulate an overwrite commit retiring the claim
+                # between RESOLVING_ARTIFACTS and ALIGNING_SUBTITLES.
+                store.update_job(
+                    job_id,
+                    lambda current: dc_replace(
+                        current,
+                        jianying_draft_status="idle",
+                    ),
+                )
+            return real_set_substep(
+                job_id,
+                attempt_id,
+                substep,
+                message=message,
+                user_draft_root=user_draft_root,
+            )
+
+        runner._set_substep = _wrapped_set_substep  # type: ignore[method-assign]
+
+        runner._do_generate(
+            "job-test-001", user_draft_root=None, attempt_id="A1",
+        )
+
+        # The Whisper helper was never called — that's the contract.
+        assert ensure_call_log == [], (
+            f"P1-15b batch 4 follow-up² regression: "
+            f"ensure_whisper_aligned_subtitles was invoked "
+            f"{len(ensure_call_log)} time(s) despite claim being lost "
+            f"between RESOLVING_ARTIFACTS and ALIGNING_SUBTITLES. "
+            f"_maybe_align_subtitles must check the bool from "
+            f"_set_substep and return False without invoking the helper. "
+            f"call_log={call_log}"
+        )
+        # backend.write was likewise not invoked — _do_generate bailed
+        # at the alignment substep boundary.
+        assert backend.write.call_count == 0, (
+            "P1-15b batch 4 follow-up² regression: backend.write was "
+            "invoked despite alignment substep returning False. "
+            "_do_generate must check the bool from _maybe_align_subtitles "
+            "and bail before backend.write."
+        )
+        # Substep ordering: RESOLVING then ALIGNING attempted, but no
+        # BUILDING_DRAFT since we bailed.
+        assert SUBSTEP_RESOLVING_ARTIFACTS in call_log
+        assert SUBSTEP_ALIGNING_SUBTITLES in call_log
+        assert SUBSTEP_BUILDING_DRAFT not in call_log, (
+            "P1-15b batch 4 follow-up² regression: _do_generate advanced "
+            "past the alignment bail to BUILDING_DRAFT."
+        )
+
     def test_do_generate_skips_backend_write_when_claim_lost_early(
         self, tmp_path
     ):
