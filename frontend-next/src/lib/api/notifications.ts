@@ -103,3 +103,34 @@ export async function archiveNotifications(
     body: JSON.stringify({ ids }),
   })
 }
+
+// --- Popup notifications (modal on next page load) ----------------------
+
+export interface PopupNotification {
+  id: string
+  title: string
+  body: string
+  severity: NotificationSeverity
+  topic: NotificationTopic
+  action_url: string | null
+  created_at: string
+}
+
+export async function listActivePopups(): Promise<{ items: PopupNotification[] }> {
+  return fetchJson<{ items: PopupNotification[] }>("/api/notifications/popups")
+}
+
+export async function dismissPopup(
+  id: string,
+  options: { markRead?: boolean } = {},
+): Promise<{
+  notification_id: string
+  dismissed_at: string
+  also_marked_read: boolean
+}> {
+  const qs = options.markRead ? "?mark_read=true" : ""
+  return fetchJson(
+    `/api/notifications/popups/${encodeURIComponent(id)}/dismiss${qs}`,
+    { method: "POST" },
+  )
+}

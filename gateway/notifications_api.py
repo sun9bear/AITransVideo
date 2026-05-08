@@ -24,10 +24,14 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from datetime import datetime, timezone
+
+from sqlalchemy import select
+
 from auth import require_auth
 from config import settings
 from database import get_db
-from models import User
+from models import User, UserNotification
 from notifications_service import (
     archive as svc_archive,
     dispatch_event,
@@ -36,10 +40,13 @@ from notifications_service import (
     unread_count as svc_unread_count,
 )
 from support_models import (
+    ActivePopupsResponse,
+    DismissPopupResponse,
     NotificationArchiveRequest,
     NotificationListResponse,
     NotificationMarkReadRequest,
     NotificationView,
+    PopupNotificationView,
 )
 
 logger = logging.getLogger(__name__)
@@ -130,6 +137,94 @@ async def archive_endpoint(
     n = await svc_archive(db, user_id=user.id, ids=body.ids)
     await db.commit()
     return {"archived": n}
+
+
+# ---------------------------------------------------------------------------
+# Popup notifications (modal on next page load)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/popups", response_model=ActivePopupsResponse)
+async def list_active_popups(
+    user: User | None = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+) -> ActivePopupsResponse:
+    """Return notifications flagged ``popup=true`` that the current
+    user hasn't dismissed yet. Frontend polls this on AppShell mount
+    and renders each as a modal one at a time (FIFO).
+    """
+    if user is None:
+        raise HTTPException(status_code=401, detail="未登录")
+    stmt = (
+        select(UserNotification)
+        .where(
+            UserNotification.user_id == user.id,
+            UserNotification.popup.is_(True),
+            UserNotification.popup_dismissed_at.is_(None),
+            UserNotification.archived_at.is_(None),
+        )
+        .order_by(UserNotification.created_at.asc())
+        .limit(5)
+    )
+    rows = list((await db.execute(stmt)).scalars())
+    return ActivePopupsResponse(
+        items=[
+            PopupNotificationView(
+                id=str(r.id),
+                title=r.title,
+                body=r.body,
+                severity=r.severity,
+                topic=r.topic,
+                action_url=r.action_url,
+                created_at=r.created_at,
+            )
+            for r in rows
+        ]
+    )
+
+
+@router.post(
+    "/popups/{notification_id}/dismiss",
+    response_model=DismissPopupResponse,
+)
+async def dismiss_popup(
+    notification_id: str,
+    user: User | None = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+    mark_read: bool = False,
+) -> DismissPopupResponse:
+    """Mark a popup as dismissed.
+
+    By default this only sets ``popup_dismissed_at`` — the
+    notification stays unread in the bell so the user can still
+    revisit it from /notifications. Pass ``?mark_read=true`` to also
+    set ``read_at`` (used when the user clicks "查看详情" and
+    navigates away).
+    """
+    import uuid as _uuid
+
+    if user is None:
+        raise HTTPException(status_code=401, detail="未登录")
+    try:
+        nid = _uuid.UUID(notification_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="通知不存在")
+    row = await db.get(UserNotification, nid)
+    if row is None or row.user_id != user.id:
+        raise HTTPException(status_code=404, detail="通知不存在")
+    now = datetime.now(timezone.utc)
+    if row.popup_dismissed_at is None:
+        row.popup_dismissed_at = now
+    also_read = False
+    if mark_read and row.read_at is None:
+        row.read_at = now
+        also_read = True
+    await db.commit()
+    return DismissPopupResponse(
+        notification_id=str(row.id),
+        dismissed_at=row.popup_dismissed_at,
+        also_marked_read=also_read,
+    )
 
 
 # ---------------------------------------------------------------------------

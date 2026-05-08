@@ -399,6 +399,9 @@ class AnnouncementInput(BaseModel):
     action_url: str | None = Field(default=None, max_length=512)
     audience_kind: str = Field(min_length=1, max_length=32)
     audience_params: dict | None = None
+    # When True, recipients see a modal on first page load instead of
+    # only a quiet bell entry. Migration 024.
+    popup: bool = False
 
 
 class AnnouncementView(BaseModel):
@@ -410,6 +413,7 @@ class AnnouncementView(BaseModel):
     action_url: str | None = None
     audience_kind: str
     audience_params: dict | None = None
+    popup: bool = False
     status: AnnouncementStatus
     sent_at: datetime | None = None
     recipient_count: int | None = None
@@ -461,3 +465,28 @@ class RecallAnnouncementResponse(BaseModel):
 
 class AnnouncementListResponse(BaseModel):
     items: list[AnnouncementView]
+
+
+# ---------- Popup notifications (per-user modals) ------------------------
+
+
+class PopupNotificationView(BaseModel):
+    """Subset of UserNotification rendered as a modal."""
+
+    id: str
+    title: str
+    body: str
+    severity: NotificationSeverity
+    topic: NotificationTopic
+    action_url: str | None = None
+    created_at: datetime
+
+
+class ActivePopupsResponse(BaseModel):
+    items: list[PopupNotificationView]
+
+
+class DismissPopupResponse(BaseModel):
+    notification_id: str
+    dismissed_at: datetime
+    also_marked_read: bool = False

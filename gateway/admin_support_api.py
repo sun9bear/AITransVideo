@@ -701,6 +701,7 @@ def _serialize_announcement(
         action_url=row.action_url,
         audience_kind=row.audience_kind,
         audience_params=row.audience_params,
+        popup=bool(row.popup),
         status=row.status,
         sent_at=row.sent_at,
         recipient_count=row.recipient_count,
@@ -814,6 +815,7 @@ async def create_announcement(
         action_url=body.action_url,
         audience_kind=body.audience_kind,
         audience_params=body.audience_params,
+        popup=bool(body.popup),
         created_by_admin_id=admin.id,
         status="draft",
     )
@@ -891,6 +893,7 @@ async def update_announcement(
     row.action_url = body.action_url
     row.audience_kind = body.audience_kind
     row.audience_params = body.audience_params
+    row.popup = bool(body.popup)
     row.updated_at = datetime.now(timezone.utc)
     await db.commit()
     return _serialize_announcement(row)

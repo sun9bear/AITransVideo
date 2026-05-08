@@ -43,6 +43,7 @@ const DEFAULT_INPUT: AnnouncementInput = {
   action_url: null,
   audience_kind: "all",
   audience_params: {},
+  popup: false,
 }
 
 const TOPIC_OPTIONS: { value: AnnouncementTopic; label: string }[] = [
@@ -171,6 +172,7 @@ export default function AdminAnnouncementsPage() {
       action_url: a.action_url,
       audience_kind: a.audience_kind,
       audience_params: a.audience_params ?? {},
+      popup: a.popup,
     })
     setEditingId(a.id)
     setSavedAt(null)
@@ -490,6 +492,24 @@ export default function AdminAnnouncementsPage() {
           </div>
         </fieldset>
 
+        {/* Popup option — show as modal on next page load */}
+        <label className="flex items-start gap-2 rounded border border-amber-300/40 bg-amber-50/30 p-3 text-sm">
+          <input
+            type="checkbox"
+            checked={!!input.popup}
+            onChange={(e) => updateInput("popup", e.target.checked)}
+            className="mt-0.5 h-4 w-4"
+          />
+          <span className="flex-1">
+            <span className="font-medium text-foreground">弹窗显示</span>
+            <span className="ml-2 text-xs text-muted-foreground">
+              开启后，受众用户**首次**进入网站时会看到一个弹窗（关闭后不再弹）。
+              通知本身仍然进入「通知中心」铃铛，可以重看。
+              适合系统维护、重要变更等强提醒场景；普通通知建议留默认（关闭）。
+            </span>
+          </span>
+        </label>
+
         {/* Action buttons */}
         <div className="flex flex-wrap items-center justify-end gap-2">
           {savedAt ? (
@@ -599,7 +619,14 @@ export default function AdminAnnouncementsPage() {
               >
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0 flex-1">
-                    <p className="font-medium text-foreground truncate">{s.title}</p>
+                    <p className="flex items-center gap-2 font-medium text-foreground truncate">
+                      <span className="truncate">{s.title}</span>
+                      {s.popup ? (
+                        <span className="rounded-full bg-amber-100 px-2 text-[10px] font-semibold uppercase tracking-wide text-amber-700">
+                          弹窗
+                        </span>
+                      ) : null}
+                    </p>
                     <p className="mt-1 truncate text-xs text-muted-foreground">
                       {s.body.slice(0, 80)}
                       {s.body.length > 80 ? "…" : ""}

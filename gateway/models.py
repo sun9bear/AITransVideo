@@ -968,6 +968,12 @@ class SystemAnnouncement(Base):
         DateTime(timezone=True), nullable=True
     )
     recipient_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # When True, every fanned-out user_notifications row carries
+    # popup=true so the recipient sees a modal on next page load
+    # instead of (only) a quiet bell entry. Migration 024.
+    popup: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false", default=False
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -1082,6 +1088,20 @@ class UserNotification(Base):
         DateTime(timezone=True), nullable=True
     )
     expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # ``popup``: when True, the frontend renders this notification as
+    # a modal on next page load (instead of only a quiet bell entry).
+    # Set at fan-out time from the source announcement's flag.
+    # Migration 024 adds a partial index over (user_id, created_at)
+    # filtered to popup=true AND not-yet-dismissed for fast lookup.
+    popup: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false", default=False
+    )
+    # ``popup_dismissed_at``: separate from ``read_at`` so closing the
+    # modal doesn't silently mark the underlying notification as read.
+    # The bell badge stays unread until the user explicitly reads.
+    popup_dismissed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(

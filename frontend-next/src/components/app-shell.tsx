@@ -14,6 +14,7 @@ import {
   NotificationBell,
   useNotificationUnreadCount,
 } from "@/components/notifications/NotificationBell"
+import { NotificationPopupModal } from "@/components/notifications/NotificationPopupModal"
 import {
   Video,
   Mic2,
@@ -448,6 +449,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       </div>
       {/* Floating support widget (plan 2026-05-08 §8.2) */}
       <SupportWidget />
+      {/* Modal for popup-flagged system announcements. Mounts at the
+          AppShell level so it shows on every authenticated route. */}
+      <NotificationPopupModal isAuthenticated={user !== null} />
     </div>
   )
 }

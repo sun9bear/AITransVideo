@@ -396,9 +396,11 @@ async def send_announcement(
             related_type="system_announcement",
             related_id=str(announcement.id),
             action_url=announcement.action_url,
+            popup=bool(announcement.popup),
             metadata_json={
                 "announcement_id": str(announcement.id),
                 "audience_kind": announcement.audience_kind,
+                "popup": bool(announcement.popup),
             },
         )
         db.add(row)
@@ -488,6 +490,7 @@ async def clone_for_resend(
         action_url=source.action_url,
         audience_kind=source.audience_kind,
         audience_params=dict(source.audience_params or {}),
+        popup=bool(source.popup),
         created_by_admin_id=admin_id,
         parent_id=source.id,
         status="draft",

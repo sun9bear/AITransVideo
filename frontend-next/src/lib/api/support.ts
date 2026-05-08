@@ -428,6 +428,7 @@ export interface AnnouncementInput {
   action_url?: string | null
   audience_kind: string
   audience_params?: Record<string, unknown> | null
+  popup?: boolean
 }
 
 export interface AnnouncementView {
@@ -439,6 +440,7 @@ export interface AnnouncementView {
   action_url: string | null
   audience_kind: string
   audience_params: Record<string, unknown> | null
+  popup: boolean
   status: AnnouncementStatus
   sent_at: string | null
   recipient_count: number | null
