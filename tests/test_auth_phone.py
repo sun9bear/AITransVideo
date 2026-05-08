@@ -386,7 +386,16 @@ class TestSendCodeEndpoint:
 # ---------------------------------------------------------------------------
 
 
-def _make_challenge(phone="13800138000", code="654321", expired=False, consumed=False):
+def _make_challenge(
+    phone="13800138000", code="654321", expired=False, consumed=False,
+    attempts=0,
+):
+    """Build a SimpleNamespace shaped like a PhoneVerificationChallenge.
+
+    P1-10a-2 (audit 2026-05-07): the ``attempts`` counter is now part
+    of the model. Default 0 so existing tests stay correct without
+    keyword changes.
+    """
     now = datetime.now(timezone.utc)
     return SimpleNamespace(
         id=uuid.uuid4(),
@@ -396,6 +405,7 @@ def _make_challenge(phone="13800138000", code="654321", expired=False, consumed=
         purpose="login",
         expires_at=now - timedelta(seconds=1) if expired else now + timedelta(minutes=5),
         consumed_at=now if consumed else None,
+        attempts=attempts,
         created_at=now,
     )
 
@@ -441,46 +451,87 @@ class TestVerifyCodeEndpoint:
         assert exc_info.value.status_code == 400
 
     def test_rejects_wrong_code(self):
+        """P1-10a-2 (audit 2026-05-07): a SINGLE wrong guess must NOT
+        consume the challenge — the legitimate user holds the real OTP
+        and must still be able to use it. The wrong-code path now just
+        increments ``attempts`` and returns 400."""
         ch = _make_challenge(code="654321")
         db = _setup_verify_db(challenge=ch)
         body = VerifyCodeRequest(phone_number="13800138000", code="000000")
         with pytest.raises(HTTPException) as exc_info:
             _run(verify_code_endpoint(body, _make_request(), Response(), db))
         assert exc_info.value.status_code == 400
-        # Brute-force guard: the challenge MUST be consumed even on a wrong
-        # guess, so the same OTP cannot be probed again.
-        assert ch.consumed_at is not None
+        # P1-10a-2: post-fix, one wrong guess does NOT burn the OTP.
+        assert ch.consumed_at is None, (
+            "P1-10a-2 regression: a single wrong guess re-burned the "
+            "challenge. That re-introduces the per-phone DoS where an "
+            "attacker can spam-consume the victim's OTP at zero cost."
+        )
+        # Attempts counter incremented exactly once.
+        assert ch.attempts == 1, (
+            f"P1-10a-2 regression: expected attempts=1 after one wrong "
+            f"guess, got {ch.attempts}."
+        )
 
-    def test_wrong_code_burns_challenge_same_code_cannot_retry(self):
-        """Regression: a single wrong guess must burn the OTP.
+    def test_three_wrong_guesses_consume_challenge(self):
+        """P1-10a-2 (audit 2026-05-07): after MAX_VERIFY_ATTEMPTS wrong
+        guesses the challenge IS consumed — otherwise an online brute-
+        force could keep probing the same OTP indefinitely. The third
+        wrong guess returns the dedicated '错误次数过多' error so the
+        UI can prompt for a fresh code."""
+        from auth_phone import MAX_VERIFY_ATTEMPTS
 
-        The attacker flow we block here:
-          1. Attacker knows a victim's phone and can observe a send-code result.
-          2. Attacker guesses the OTP once and misses.
-          3. Before the TTL expires, attacker guesses again with a correct code.
+        ch = _make_challenge(code="654321", attempts=MAX_VERIFY_ATTEMPTS - 1)
+        db = _setup_verify_db(challenge=ch)
+        body = VerifyCodeRequest(phone_number="13800138000", code="000000")
+        with pytest.raises(HTTPException) as exc_info:
+            _run(verify_code_endpoint(body, _make_request(), Response(), db))
+        assert exc_info.value.status_code == 400
+        assert "错误次数过多" in exc_info.value.detail, (
+            "P1-10a-2 regression: the over-limit wrong guess should "
+            "return a distinct '错误次数过多' message so the UI can "
+            "tell the user to request a new code."
+        )
+        # Attempts incremented to MAX_VERIFY_ATTEMPTS, challenge consumed.
+        assert ch.attempts == MAX_VERIFY_ATTEMPTS
+        assert ch.consumed_at is not None, (
+            "P1-10a-2 regression: at MAX_VERIFY_ATTEMPTS the challenge "
+            "must be retired so a brute-forcer can't keep probing the "
+            "same OTP."
+        )
 
-        After this fix, step 3 must fail because the challenge row was
-        consumed at step 2 and the WHERE clause filters `consumed_at IS NULL`.
+    def test_correct_code_after_one_wrong_succeeds(self):
+        """P1-10a-2 (audit 2026-05-07): the legitimate user must be
+        able to recover from a single fat-finger wrong guess. With
+        attempts=1 (under the limit), a subsequent correct code on
+        the SAME challenge must succeed — the old single-attempt
+        behavior would have burned the challenge.
+
+        We simulate the recovery directly by feeding a challenge with
+        attempts=1 and the correct code. The endpoint should consume
+        the challenge and complete the login flow.
         """
-        # First attempt: wrong code, same challenge returned by the query.
-        ch = _make_challenge(code="654321")
-        db1 = _setup_verify_db(challenge=ch)
-        body_wrong = VerifyCodeRequest(phone_number="13800138000", code="000000")
-        with pytest.raises(HTTPException) as exc1:
-            _run(verify_code_endpoint(body_wrong, _make_request(), Response(), db1))
-        assert exc1.value.status_code == 400
-        assert ch.consumed_at is not None
+        ch = _make_challenge(code="654321", attempts=1)  # one prior fat-finger
+        existing = _make_user(trial_granted_at=datetime.now(timezone.utc))
+        db = _setup_verify_db(challenge=ch, user=existing)
 
-        # Second attempt: the real gateway's WHERE clause filters out consumed
-        # challenges, so a fresh query would return no row. Simulate that by
-        # feeding `challenge=None` to the endpoint on the retry.
-        db2 = _setup_verify_db(challenge=None)
-        body_correct = VerifyCodeRequest(phone_number="13800138000", code="654321")
-        with pytest.raises(HTTPException) as exc2:
-            _run(verify_code_endpoint(body_correct, _make_request(), Response(), db2))
-        # Gateway returns the generic "expired, please re-request" error so
-        # the attacker can't tell whether the code was right or simply burned.
-        assert exc2.value.status_code == 400
+        session_mock = AsyncMock(return_value="token")
+        with patch("auth_phone.create_session", new=session_mock):
+            body = VerifyCodeRequest(phone_number="13800138000", code="654321")
+
+            async def _noop_refresh(obj):
+                return None
+
+            db.refresh = _noop_refresh
+            result = _run(verify_code_endpoint(
+                body, _make_request(), Response(), db,
+            ))
+
+        # User logged in successfully; challenge is consumed (correct
+        # code path always retires the challenge).
+        assert result["needs_password"] is False
+        assert ch.consumed_at is not None
+        session_mock.assert_called_once()
 
     def test_disabled_user_cannot_login_via_phone_auth(self):
         """Regression: admin-disabled accounts must not sign in via phone auth.
@@ -857,6 +908,9 @@ class TestResetPassword:
         assert ch.consumed_at is not None
 
     def test_wrong_code_rejected(self):
+        """P1-10a-2 (audit 2026-05-07): one wrong guess on the reset-
+        password endpoint also no-longer consumes the challenge — same
+        DoS reasoning as ``verify_code_endpoint``."""
         ch = _make_challenge(code="654321")
         existing = _make_user(phone="13800138000")
         db = _setup_reset_pw_db(challenge=ch, user=existing)
@@ -870,6 +924,34 @@ class TestResetPassword:
                 _make_request(), Response(), db,
             ))
         assert exc_info.value.status_code == 400
+        assert ch.consumed_at is None, (
+            "P1-10a-2 regression: reset-password burned the challenge "
+            "on a single wrong guess. Same DoS as verify-code."
+        )
+        assert ch.attempts == 1
+
+    def test_three_wrong_reset_guesses_consume_challenge(self):
+        """P1-10a-2: reset-password mirrors verify-code's
+        MAX_VERIFY_ATTEMPTS behaviour — after limit reached the
+        challenge IS retired."""
+        from auth_phone import MAX_VERIFY_ATTEMPTS
+
+        ch = _make_challenge(code="654321", attempts=MAX_VERIFY_ATTEMPTS - 1)
+        existing = _make_user(phone="13800138000")
+        db = _setup_reset_pw_db(challenge=ch, user=existing)
+
+        with pytest.raises(HTTPException) as exc_info:
+            _run(reset_password_endpoint(
+                ResetPasswordRequest(
+                    phone_number="13800138000", code="000000",
+                    new_password="newpw1234567",
+                ),
+                _make_request(), Response(), db,
+            ))
+        assert exc_info.value.status_code == 400
+        assert "错误次数过多" in exc_info.value.detail
+        assert ch.attempts == MAX_VERIFY_ATTEMPTS
+        assert ch.consumed_at is not None
 
     def test_nonexistent_phone_rejected(self):
         ch = _make_challenge(code="654321")

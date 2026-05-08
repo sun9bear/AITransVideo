@@ -48,6 +48,22 @@ captcha_router = APIRouter(prefix="/auth/captcha", tags=["auth-captcha"])
 
 
 # ---------------------------------------------------------------------------
+# P1-10a-2 / S-HIGH-4 (audit 2026-05-07): wrong-code attempt limit on phone
+# challenges. Compare code FIRST; only mark ``consumed_at`` when (a) code
+# matched, or (b) wrong attempts have reached this limit. Pre-019 logic
+# burned the challenge on the first wrong guess, which made a per-phone
+# DoS attack trivially cheap.
+#
+# Why 3: matches industry-standard SMS OTP UX (3 wrong → resend) and is
+# tight enough that any meaningful brute-force still requires a fresh
+# challenge (which the per-phone send-code rate limit already gates at
+# 1/min, 5/hour).
+# ---------------------------------------------------------------------------
+
+MAX_VERIFY_ATTEMPTS = 3
+
+
+# ---------------------------------------------------------------------------
 # Captcha pre-verify: in-memory pass tokens (short-lived, 5 min)
 # ---------------------------------------------------------------------------
 
@@ -310,12 +326,31 @@ async def verify_code_endpoint(
     if challenge is None:
         raise HTTPException(status_code=400, detail="验证码已过期,请重新获取")
 
-    # Single-attempt brute-force guard: consume before comparing.
-    challenge.consumed_at = now
-    await db.commit()
-
+    # P1-10a-2 / S-HIGH-4 (audit 2026-05-07): compare code FIRST. Pre-019
+    # the endpoint marked consumed_at on the first wrong guess, which let
+    # an attacker who knew a victim's phone burn the legitimate OTP at
+    # zero cost. Now we only consume on (a) correct code, or (b) wrong-
+    # attempt count reaching MAX_VERIFY_ATTEMPTS.
     if challenge.code != code:
-        raise HTTPException(status_code=400, detail="验证码错误,请重新获取")
+        new_attempts = (challenge.attempts or 0) + 1
+        challenge.attempts = new_attempts
+        if new_attempts >= MAX_VERIFY_ATTEMPTS:
+            # Limit reached — retire the challenge so an online brute-
+            # force can't keep trying. The user must request a fresh
+            # OTP via /auth/phone/send-code.
+            challenge.consumed_at = now
+        await db.commit()
+        if new_attempts >= MAX_VERIFY_ATTEMPTS:
+            raise HTTPException(
+                status_code=400,
+                detail="验证码错误次数过多,请重新获取",
+            )
+        raise HTTPException(status_code=400, detail="验证码错误")
+
+    # Code matched — consume the challenge. Subsequent commits for the
+    # login / registration flow happen below; consumed_at gets persisted
+    # alongside them atomically.
+    challenge.consumed_at = now
 
     # Check if this phone already has a user.
     user_result = await db.execute(
@@ -506,11 +541,26 @@ async def reset_password_endpoint(
     if challenge is None:
         raise HTTPException(status_code=400, detail="验证码已过期,请重新获取")
 
-    challenge.consumed_at = now
-    await db.commit()
-
+    # P1-10a-2 / S-HIGH-4 (audit 2026-05-07): compare code FIRST, just
+    # like verify_code_endpoint above. Pre-019 the reset-password path
+    # had the same DoS — first wrong guess consumed the OTP, locking
+    # legitimate users out of password reset.
     if challenge.code != code:
-        raise HTTPException(status_code=400, detail="验证码错误,请重新获取")
+        new_attempts = (challenge.attempts or 0) + 1
+        challenge.attempts = new_attempts
+        if new_attempts >= MAX_VERIFY_ATTEMPTS:
+            challenge.consumed_at = now
+        await db.commit()
+        if new_attempts >= MAX_VERIFY_ATTEMPTS:
+            raise HTTPException(
+                status_code=400,
+                detail="验证码错误次数过多,请重新获取",
+            )
+        raise HTTPException(status_code=400, detail="验证码错误")
+
+    # Code matched — consume the challenge. The password write below
+    # commits in the same transaction.
+    challenge.consumed_at = now
 
     # Find the user by phone.
     user_result = await db.execute(

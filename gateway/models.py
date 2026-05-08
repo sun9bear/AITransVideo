@@ -101,6 +101,20 @@ class PhoneVerificationChallenge(Base):
     consumed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # P1-10a-2 / S-HIGH-4 (audit 2026-05-07, migration 019):
+    # wrong-code attempts on this challenge. Pre-019 the
+    # verify-code endpoint marked consumed_at on the FIRST wrong
+    # guess, which let an attacker who knew a victim's phone
+    # spam-burn the legitimate OTP and lock the victim out. The
+    # post-019 logic: compare code first; on wrong guess increment
+    # attempts and only consume when attempts reaches the limit
+    # (default 3 — see ``MAX_VERIFY_ATTEMPTS`` in auth_phone).
+    attempts: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default="0",
+        default=0,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
