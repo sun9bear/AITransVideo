@@ -520,6 +520,106 @@ def test_overwrite_race_loss_does_not_mutate_filesystem(tmp_path: Path) -> None:
     assert runner.calls == []
 
 
+def test_overwrite_concurrent_cancel_after_claim_does_not_resurrect(
+    tmp_path: Path,
+) -> None:
+    """P1-15b batch 3 follow-up² (Codex review of fe922df):
+    after _commit_overwrite atomically claims editing→running, the
+    job is in status=running for hundreds of ms during FS prep
+    BEFORE any worker process exists. A concurrent
+    POST /jobs/{id}/cancel can see status=running, find no process
+    to stop, and flip the record to cancelled. Without the new
+    pre-submit re-check + RunnerStartTerminalError fail-closed,
+    runner.start would silently overwrite cancelled with running,
+    starting a pipeline the user already cancelled.
+
+    Race construction: monkey-patch the runner to land a "concurrent
+    cancel" (direct save_job to status=cancelled) when its start()
+    is called. Then verify _commit_overwrite raises
+    CommitPipelineError, the on-disk status remains 'cancelled', and
+    no pipeline was actually scheduled.
+    """
+    from dataclasses import replace as _replace
+    from services.jobs.editing_commit import (
+        _commit_overwrite,
+        CommitPipelineError,
+    )
+    from services.jobs.models import JOB_STATUS_CANCELLED
+
+    store, record, project_dir = _build_editing_job_with_diff(tmp_path)
+
+    class _CancellingRunner:
+        """Simulates the cancel-during-FS-prep window: when start()
+        is called, first commit a cancel directly to disk, then
+        invoke the real ProcessJobRunner.start which now fail-closes
+        on terminal status.
+
+        We don't need a real ProcessJobRunner here because the
+        runner.start invocation chain calls update_job(...) which
+        reads the on-disk record fresh — the test's "concurrent
+        cancel" save lands on disk before the mutator runs.
+        """
+        def __init__(self, store):
+            self.store = store
+            self.calls: list[dict] = []
+
+        def start(self, record_arg, *, continue_existing=False):
+            # Record the call attempt up front so the assertion below
+            # can verify runner.start WAS attempted even though the
+            # update_job mutator below raises.
+            self.calls.append({"job_id": record_arg.job_id})
+            # Step 1: simulate a concurrent cancel landing AFTER
+            # _commit_overwrite's pre-submit re-validate (which
+            # already passed because we hadn't cancelled yet) but
+            # BEFORE the actual runner.start mutator runs.
+            cancelled = _replace(
+                self.store.require_job(record_arg.job_id),
+                status=JOB_STATUS_CANCELLED,
+                current_stage="failed",
+                progress_message="Job cancelled by user.",
+            )
+            self.store.save_job(cancelled)
+            # Step 2: now do what the real ProcessJobRunner.start
+            # does — call update_job with the fail-closed mutator.
+            from services.jobs.process_runner import (
+                RunnerStartTerminalError,
+                _TERMINAL_RUNNER_STATUSES,
+            )
+            from services.state_manager import utc_now_iso
+
+            def _start_mutator(current):
+                if current.status in _TERMINAL_RUNNER_STATUSES:
+                    raise RunnerStartTerminalError(
+                        current.job_id, current.status
+                    )
+                return _replace(
+                    current,
+                    status=JOB_STATUS_RUNNING,
+                    updated_at=utc_now_iso(),
+                )
+            self.store.update_job(
+                record_arg.job_id, _start_mutator, initial=record_arg,
+            )
+
+    runner = _CancellingRunner(store)
+
+    with pytest.raises(CommitPipelineError, match="terminal"):
+        _commit_overwrite(record, store, runner, project_dir)
+
+    # Cancel should remain — runner.start's fail-closed mutator
+    # refused to overwrite cancelled with running.
+    final = store.require_job("job_commit")
+    assert final.status == JOB_STATUS_CANCELLED, (
+        f"P1-15b batch 3 follow-up² regression: runner.start "
+        f"resurrected a cancelled job back to {final.status!r}. "
+        f"The cancel-during-FS-prep race window still allows "
+        f"resurrection."
+    )
+
+    # The runner saw exactly one call (we only attempted start once).
+    assert len(runner.calls) == 1
+
+
 # ---------------------------------------------------------------------------
 # copy_as_new — happy path
 # ---------------------------------------------------------------------------

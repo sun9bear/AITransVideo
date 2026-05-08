@@ -678,12 +678,89 @@ def _commit_overwrite(
         ),
     )
 
+    # Step 4.9 — pre-submit re-validate the claim. The Step 2 FS prep
+    # window between update_job(_flip_to_running) and runner.start
+    # below is a real cancel/admin race surface: the job has been in
+    # status=running for hundreds of ms without a worker process.
+    # If a concurrent cancel landed during that window, we MUST NOT
+    # call runner.start with a stale `updated` snapshot — runner.start's
+    # own _save_job has its own fail-closed guard now (P1-15b batch 3
+    # follow-up²), but we surface the conflict here too so the caller
+    # gets a clean CommitPipelineError instead of an opaque
+    # RunnerStartTerminalError. Cheap O(1) load + check under the
+    # per-job lock.
+    expected_generation = updated.edit_generation
+
+    def _verify_claim_intact(current: JobRecord) -> JobRecord:
+        if current.status != JOB_STATUS_RUNNING:
+            raise CommitPipelineError(
+                f"job {current.job_id} status changed from running to "
+                f"{current.status} between commit claim and runner submit "
+                f"(likely concurrent cancel)"
+            )
+        if current.edit_generation != expected_generation:
+            raise CommitPipelineError(
+                f"job {current.job_id} edit_generation changed from "
+                f"{expected_generation} to {current.edit_generation} "
+                f"between commit claim and runner submit"
+            )
+        return current  # identity — no-op write
+    try:
+        store.update_job(record.job_id, _verify_claim_intact)
+    except CommitPipelineError as exc:
+        logger.exception(
+            "commit overwrite: claim invalidated before runner submit "
+            "for job %s",
+            record.job_id,
+        )
+        # Do NOT roll status back here — the concurrent action that
+        # invalidated our claim already moved status where it should
+        # be (cancelled / failed / etc). Surfacing the error to the
+        # caller is enough.
+        _emit_event(
+            store, updated,
+            message=(
+                f"editing.commit_failed: strategy=overwrite "
+                f"phase=pre_submit err={exc}"
+            ),
+        )
+        raise
+
     # Step 5: submit pipeline. Runner is expected to drive the pipeline from
-    # alignment → publish; if that raises, we roll status back to editing so
-    # the user can retry (their applied edits are already persisted — which
-    # is intentional: commit moves drafts to baseline before submitting).
+    # alignment → publish. Failures fall into two categories now:
+    #   (a) RunnerStartTerminalError — concurrent cancel landed BETWEEN
+    #       _verify_claim_intact above and runner.start's own atomic
+    #       claim. The cancel already moved status correctly; we MUST
+    #       NOT roll status back to editing (that would resurrect a
+    #       cancelled job). Just surface CommitPipelineError.
+    #   (b) Other exceptions — runner couldn't accept the start (e.g.
+    #       OS error, unavailable runner). Roll status back to editing
+    #       so the user can retry; drafts were already moved so their
+    #       work is not lost.
+    try:
+        from services.jobs.process_runner import RunnerStartTerminalError
+    except ImportError:  # pragma: no cover — defensive
+        RunnerStartTerminalError = ()  # type: ignore[assignment]
+
     try:
         submit_job_from_existing_project_dir(runner, updated, start_stage=STAGE_ALIGNMENT)
+    except RunnerStartTerminalError as exc:
+        logger.warning(
+            "commit overwrite: runner.start refused job %s because "
+            "current status is terminal (%s) — concurrent cancel won "
+            "the final race window. Not rolling status back.",
+            record.job_id, getattr(exc, "observed_status", "?"),
+        )
+        _emit_event(
+            store, store.require_job(record.job_id),
+            message=(
+                f"editing.commit_failed: strategy=overwrite "
+                f"phase=runner_start observed_status={getattr(exc, 'observed_status', '?')}"
+            ),
+        )
+        raise CommitPipelineError(
+            f"runner refused commit for {record.job_id}: {exc}"
+        ) from exc
     except Exception as exc:
         logger.exception(
             "commit overwrite: runner.start failed for job %s",
@@ -691,7 +768,6 @@ def _commit_overwrite(
         )
         # Roll status back to editing; drafts were already moved so the user
         # effectively sees their edits applied but the pipeline never ran.
-        # Re-emit an editing state record so idle scanner starts afresh.
         # P1-15b batch 3: route through update_job so this rollback can't
         # clobber a concurrent cancel/admin write that landed between
         # update_job(_flip_to_running) and the runner.start failure.

@@ -22,6 +22,7 @@ from services.jobs.events import (
     JobEvent,
 )
 from services.jobs.models import (
+    JOB_STATUS_CANCELLED,
     JOB_STATUS_FAILED,
     JOB_STATUS_RUNNING,
     JOB_STATUS_SUCCEEDED,
@@ -40,6 +41,36 @@ from services.jobs.models import (
     STAGE_VOICE_REVIEW,
     STAGE_VOICE_SELECTION_REVIEW,
 )
+
+
+# P1-15b batch 3 follow-up² (Codex review of fe922df): runner.start
+# refuses to (re)start a job that is already in a terminal/cancelled
+# state under the lock. Indicates a concurrent cancel/admin action
+# won the race against the caller's transition claim. Caller must
+# NOT roll back the job's status — the cancel already moved it where
+# it should be — only surface the error.
+class RunnerStartTerminalError(RuntimeError):
+    """``ProcessJobRunner.start`` saw a terminal/cancelled status under
+    the lock and refused to overwrite it with running."""
+
+    def __init__(self, job_id: str, observed_status: str) -> None:
+        self.job_id = job_id
+        self.observed_status = observed_status
+        super().__init__(
+            f"refusing to start runner for job {job_id}: current status "
+            f"is {observed_status!r} (terminal); a concurrent "
+            f"cancel/admin action likely won the race"
+        )
+
+
+# Terminal statuses — a job cannot legitimately leave them via
+# runner.start. Note JOB_STATUS_WAITING_FOR_REVIEW is NOT terminal:
+# the runner uses it to pause + resume around review gates.
+_TERMINAL_RUNNER_STATUSES: frozenset[str] = frozenset({
+    JOB_STATUS_CANCELLED,
+    JOB_STATUS_FAILED,
+    JOB_STATUS_SUCCEEDED,
+})
 from services.jobs.store import JobStore
 from services.manifest_reader import load_manifest_payload
 from services.review_state import REVIEW_STATUS_APPROVED, ReviewStateManager
@@ -159,16 +190,32 @@ class ProcessJobRunner:
             initial_stage = job.current_stage
         else:
             initial_stage = STAGE_INGESTION
-        running_job = self._save_job(
-            job,
-            status=JOB_STATUS_RUNNING,
-            current_stage=initial_stage,
-            progress_message="Starting process-backed localization job.",
-            updated_at=timestamp,
-            started_at=job.started_at or timestamp,
-            completed_at=None,
-            review_gate=None,
-            error_summary=None,
+
+        # P1-15b batch 3 follow-up² (Codex review of fe922df): the
+        # first save here writes status=running. A concurrent cancel
+        # (POST /jobs/{id}/cancel landing during commit's FS prep
+        # window before this start() runs) could have already flipped
+        # the job to CANCELLED. The legacy ``_save_job`` would
+        # silently overwrite that with running, resurrecting a job
+        # the user explicitly cancelled. Use a custom mutator that
+        # fail-closes when current is in a terminal state.
+        def _start_mutator(current: JobRecord) -> JobRecord:
+            if current.status in _TERMINAL_RUNNER_STATUSES:
+                raise RunnerStartTerminalError(current.job_id, current.status)
+            return replace(
+                current,
+                status=JOB_STATUS_RUNNING,
+                current_stage=initial_stage,
+                progress_message="Starting process-backed localization job.",
+                updated_at=timestamp,
+                started_at=current.started_at or timestamp,
+                completed_at=None,
+                review_gate=None,
+                error_summary=None,
+            )
+
+        running_job = self.store.update_job(
+            job.job_id, _start_mutator, initial=job,
         )
         self.store.append_event(
             running_job.job_id,
