@@ -110,6 +110,33 @@ def test_migration_021_creates_concurrent_index():
     )
 
 
+def test_migration_021_handles_invalid_index_leftover():
+    """Codex review of 9d25be7: a previous ``CREATE INDEX
+    CONCURRENTLY`` that was cancelled mid-build leaves a row in
+    ``pg_index`` with ``indisvalid=false``. Vanilla ``if_not_exists=True``
+    sees the name, skips creation, and lets alembic mark this revision
+    applied — but the planner won't actually use the dead index.
+
+    The migration must probe pg_index for INVALID rows and DROP them
+    before CREATE, so a partial-failure rerun actually rebuilds.
+    """
+    src = _MIGRATION_PATH.read_text(encoding="utf-8")
+    # The probe SQL.
+    assert "indisvalid = false" in src, (
+        "P2-24 follow-up regression: migration 021 no longer probes "
+        "pg_index for INVALID leftovers. A cancelled CREATE INDEX "
+        "CONCURRENTLY would leave a dead index that the next deploy "
+        "would silently rubber-stamp via if_not_exists=True."
+    )
+    # The cleanup statement.
+    assert "DROP INDEX CONCURRENTLY IF EXISTS" in src, (
+        "P2-24 follow-up regression: migration 021 detects INVALID "
+        "leftovers but doesn't DROP CONCURRENTLY them. The CREATE "
+        "step would then skip via if_not_exists=True, leaving the "
+        "DB with a dead index."
+    )
+
+
 def test_migration_021_downgrade_drops_index():
     src = _MIGRATION_PATH.read_text(encoding="utf-8")
     assert "drop_index" in src

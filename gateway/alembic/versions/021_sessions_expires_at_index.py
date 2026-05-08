@@ -24,10 +24,22 @@ during the build. ``CREATE INDEX CONCURRENTLY`` cannot run inside a
 transaction; we use ``op.get_context().autocommit_block()`` to opt
 this migration out of alembic's default transaction wrapping.
 
-``if_not_exists=True`` keeps the upgrade idempotent — re-running the
-migration after a partial failure (where ``CREATE INDEX CONCURRENTLY``
-left an INVALID index) won't error a second time. The downgrade is
-symmetric with ``if_exists=True`` for the same reason.
+INVALID-index cleanup (Codex review of 9d25be7): if a previous
+``CREATE INDEX CONCURRENTLY`` was cancelled / failed mid-build,
+PostgreSQL leaves the index in ``indisvalid=false`` state. The name
+is taken but the planner won't use the index — it's effectively
+dead. A naive ``if_not_exists=True`` retry would see the name,
+skip creation, and let alembic mark 021 applied while the index
+silently does nothing.
+
+So this migration first probes ``pg_index`` for any INVALID row with
+the target name and DROPs CONCURRENTLY before CREATE. ``if_not_exists``
+on CREATE keeps a successful prior build idempotent (re-running on a
+healthy DB is a no-op); the dynamic DROP-on-INVALID makes a
+partial-failure rerun actually rebuild rather than rubber-stamp.
+
+Downgrade is symmetric with ``if_exists=True`` so re-running it after
+a manual cleanup doesn't error.
 
 Chain note: ``down_revision`` chains to 019 (the production head as
 of 2026-05-08), NOT to a hypothetical 020. The user's in-progress AI
@@ -45,6 +57,7 @@ after 021 deploys.
 
 from typing import Sequence, Union
 
+import sqlalchemy as sa
 from alembic import op
 
 
@@ -59,6 +72,29 @@ _INDEX_NAME = "idx_sessions_expires_at"
 
 def upgrade() -> None:
     with op.get_context().autocommit_block():
+        # First clean up any INVALID leftover from a previously
+        # cancelled / failed CREATE INDEX CONCURRENTLY. Without this,
+        # ``if_not_exists=True`` below would see the dead-name slot
+        # and let alembic mark this revision applied while the index
+        # is unusable. ``DROP INDEX CONCURRENTLY`` itself must run as
+        # a top-level statement (cannot live inside a transaction or
+        # function block), which the surrounding autocommit_block
+        # already provides.
+        conn = op.get_bind()
+        invalid_row = conn.execute(
+            sa.text(
+                "SELECT 1 FROM pg_index i "
+                "JOIN pg_class c ON c.oid = i.indexrelid "
+                "WHERE c.relname = :idx_name "
+                "AND i.indisvalid = false"
+            ),
+            {"idx_name": _INDEX_NAME},
+        ).first()
+        if invalid_row is not None:
+            op.execute(
+                f"DROP INDEX CONCURRENTLY IF EXISTS {_INDEX_NAME}"
+            )
+
         op.create_index(
             _INDEX_NAME,
             "sessions",
