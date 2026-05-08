@@ -11,6 +11,7 @@ from services.jobs.process_runner import (
     _resolve_job_project_dir,
 )
 from services.jobs.store import JobStore
+from tests.job_test_helpers import FakeProcess
 
 
 def _write_process_project(project_dir: Path, *, youtube_url: str) -> Path:
@@ -824,4 +825,114 @@ class TestRecordLineParserFillInStillWorks:
             f"parse called {call_count['n']}x when project_dir was None; "
             "bootstrap path broken — fresh submits would never discover "
             "their pipeline-derived project_dir"
+        )
+
+
+# ===================================================================
+# P1-15b batch 3 follow-up³ — cancel-during-Popen race
+# ===================================================================
+
+
+def test_start_cancel_during_popen_kills_orphan_and_skips_register(
+    tmp_path: Path,
+) -> None:
+    """P1-15b batch 3 follow-up³ (Codex review of 5c5d2e8):
+    runner.start writes status=running BEFORE Popen, then registers
+    the new process in _processes. Between the status write and the
+    register, a concurrent stop_process() call:
+      1. acquires _lock
+      2. adds job_id to _deleted_jobs
+      3. _processes.get → None (we haven't registered yet)
+      4. returns False (no kill — process didn't exist when checked)
+    The cancel handler then update_job's status → cancelled.
+
+    Without the post-Popen check, runner.start would proceed to
+    register the just-launched process and start the monitor thread.
+    The pipeline subprocess RUNS — paid API calls, FS writes, audit
+    events — even though the user explicitly cancelled. _record_line
+    short-circuits on _deleted_jobs (skipping record writes) but
+    cannot stop the subprocess itself.
+
+    Test injects the cancel inside popen_factory (the moment Popen
+    is "in flight") and verifies:
+      * the post-Popen check kills the orphan subprocess
+      * the subprocess is NOT registered in _processes
+      * status remains 'cancelled' on disk
+      * runner.start returns the cancelled record
+    """
+    from dataclasses import replace as _replace
+    from services.jobs.models import JOB_STATUS_CANCELLED
+
+    runner = _make_runner(tmp_path)
+    job = _make_job(job_id="job-cancel-during-popen")
+    runner.store.save_job(job)
+
+    process_killed: list[bool] = []
+    fake_process_holder: list[FakeProcess] = []
+
+    def _injecting_popen_factory(command, **kwargs):
+        # Step 1: simulate a concurrent stop_process landing AFTER
+        # update_job(_start_mutator) wrote status=running but BEFORE
+        # the new process is registered. stop_process adds job_id
+        # to _deleted_jobs but finds nothing in _processes to kill.
+        runner.stop_process(job.job_id)
+
+        # Step 2: cancel handler then commits status=cancelled to disk.
+        cancelled = _replace(
+            runner.store.require_job(job.job_id),
+            status=JOB_STATUS_CANCELLED,
+            current_stage="failed",
+            progress_message="Job cancelled by user.",
+        )
+        runner.store.save_job(cancelled)
+
+        # Step 3: Popen "completes" — return a FakeProcess with a
+        # tracking kill so we can verify the post-Popen check killed
+        # this orphan.
+        fake = FakeProcess(command, lines=["[S0] starting..."], returncode=0)
+        original_kill = fake.kill
+        def _tracking_kill():
+            process_killed.append(True)
+            original_kill()
+        fake.kill = _tracking_kill
+        fake_process_holder.append(fake)
+        return fake
+
+    runner._popen_factory = _injecting_popen_factory
+
+    result = runner.start(job)
+
+    # The post-Popen check must have detected _deleted_jobs and killed
+    # the orphan subprocess.
+    assert process_killed == [True], (
+        f"P1-15b batch 3 follow-up³ regression: post-Popen kill did "
+        f"not fire. The orphan subprocess will run to completion "
+        f"despite the cancel. process_killed={process_killed}"
+    )
+
+    # The subprocess MUST NOT be registered in _processes — otherwise
+    # the monitor thread starts and the subprocess effectively runs.
+    with runner._lock:
+        assert job.job_id not in runner._processes, (
+            f"P1-15b batch 3 follow-up³ regression: cancelled-during-"
+            f"Popen subprocess was registered in _processes. Monitor "
+            f"thread would now start and the pipeline would proceed."
+        )
+
+    # Status remains cancelled.
+    final = runner.store.require_job(job.job_id)
+    assert final.status == JOB_STATUS_CANCELLED, (
+        f"P1-15b batch 3 follow-up³ regression: status no longer "
+        f"cancelled after start (was {final.status!r})"
+    )
+
+    # runner.start returns the (cancelled) record.
+    assert result.status == JOB_STATUS_CANCELLED
+
+    # _deleted_jobs marker was cleaned up so a future fresh start of
+    # the same job_id is not falsely treated as cancelled.
+    with runner._lock:
+        assert job.job_id not in runner._deleted_jobs, (
+            "_deleted_jobs marker leaked across the cleanup; a future "
+            "start() of the same job_id would be falsely cancelled"
         )

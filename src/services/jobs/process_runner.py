@@ -276,8 +276,59 @@ class ProcessJobRunner:
             )
             return failed_job
 
+        # P1-15b batch 3 follow-up³ (Codex review of 5c5d2e8): the
+        # window between update_job (status→running, line ~213) and
+        # _processes registration here is non-zero (Popen costs ms-to-
+        # tens-of-ms). A concurrent ``stop_process(job_id)`` landing
+        # during that window:
+        #   1. acquires _lock
+        #   2. adds job_id to _deleted_jobs
+        #   3. _processes.get → None (we haven't registered yet)
+        #   4. returns False (couldn't kill)
+        #   5. releases _lock
+        # Cancel handler then update_job's status → cancelled.
+        # WITHOUT the check below, this start() would proceed to
+        # register the just-launched process and kick off the monitor
+        # thread. The pipeline subprocess runs to completion — paid
+        # API calls, FS writes, audit events — even though the user
+        # explicitly cancelled. _record_line / _finalize_process do
+        # short-circuit on ``job_id in _deleted_jobs`` (they skip
+        # record writes), but the subprocess itself is unkilled.
+        #
+        # Atomic check-and-register: under _lock, if _deleted_jobs
+        # contains job_id, do NOT register; signal ``cancelled_during_start``
+        # to the post-lock cleanup. Otherwise register so subsequent
+        # stop_process / cleanup paths see the process.
         with self._lock:
-            self._processes[running_job.job_id] = process
+            if running_job.job_id in self._deleted_jobs:
+                cancelled_during_start = True
+            else:
+                self._processes[running_job.job_id] = process
+                cancelled_during_start = False
+
+        if cancelled_during_start:
+            # Kill the orphan subprocess outside the lock so we don't
+            # block other threads on the wait/kill IO. Status is
+            # already cancelled on disk (the cancel handler's
+            # update_job committed before we returned from Popen);
+            # we just need to make sure the process doesn't keep
+            # running. Drop the _deleted_jobs marker after cleanup
+            # so a subsequent fresh start() of the same job_id is
+            # not falsely flagged as cancelled.
+            self._kill_process(process)
+            try:
+                process.wait(timeout=5)
+            except Exception:  # pragma: no cover — defensive
+                logger.exception(
+                    "post-Popen cancel cleanup: process.wait() failed for %s",
+                    running_job.job_id,
+                )
+            with self._lock:
+                self._deleted_jobs.discard(running_job.job_id)
+            # Return whatever the cancel handler last wrote (status
+            # should be 'cancelled'). Caller of start() can branch on
+            # the returned status if it needs to.
+            return self.store.require_job(running_job.job_id)
 
         monitor = threading.Thread(
             target=self._monitor_process,
