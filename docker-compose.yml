@@ -38,6 +38,17 @@ services:
       GOOGLE_APPLICATION_CREDENTIALS: "/opt/aivideotrans/config/gcp-service-account.json"
       GOOGLE_CLOUD_PROJECT: "${GOOGLE_CLOUD_PROJECT:-gen-lang-client-0200199358}"
       GOOGLE_CLOUD_LOCATION: "${GOOGLE_CLOUD_LOCATION:-global}"
+      # P2-17a-1 alignment thread pool. Listed explicitly (even at default)
+      # so ops has one source of truth: a 32 here would clamp to 4 (cap),
+      # invalid values fall back to 1 (serial). Setting to 1 is the
+      # rollback path — dispatches to _align_all_serial verbatim.
+      AVT_ALIGN_MAX_WORKERS: "${AVT_ALIGN_MAX_WORKERS:-2}"
+      # P2-17a-1 paid fallback semaphore concurrency. Default 1 is a
+      # CORRECTNESS constraint, not cost-conservatism — see
+      # docs/audits/2026-05-08-tts-rewriter-translator-state-audit.md.
+      # Raising above 1 requires upgrading 4 mutable shared fields on
+      # TTSGenerator + GeminiTranslator; do NOT just bump the env.
+      AVT_ALIGN_PAID_FALLBACK_MAX_CONCURRENCY: "${AVT_ALIGN_PAID_FALLBACK_MAX_CONCURRENCY:-1}"
     volumes:
       # --- 开发期代码热更新 bind mount ---
       # 主机代码目录直接映射到容器内，修改后 docker restart 即可生效。

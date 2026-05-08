@@ -1,10 +1,58 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import contextlib
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import threading
+
+
+# 2026-05-09 P2-17a-1: alignment thread pool envs.
+#
+# AVT_ALIGN_MAX_WORKERS: top-level concurrency for the expensive
+# branch of align_all (cache miss / non-keep-original segments). 1
+# means strict serial fallback (dispatches to _align_all_serial(),
+# the verbatim pre-17a-1 body). Defaults to 2; clamped to [1, 4]
+# so a misconfigured 32 doesn't blow up disk / CPU / ffmpeg / paid
+# providers. Invalid / 0 / negative values fall back to 1.
+#
+# AVT_ALIGN_PAID_FALLBACK_MAX_CONCURRENCY: covers rewriter (Gemini)
+# + TTS _generate_one (paid TTS) + best-candidate _dsp_stretch as
+# ONE critical section inside _attempt_rewrite_loop. Default 1 is
+# a CORRECTNESS constraint, not cost-conservatism — see
+# docs/audits/2026-05-08-tts-rewriter-translator-state-audit.md
+# for the four mutable shared fields that require it. Raising
+# above 1 requires upgrading those fields to ① local-return or
+# ② lock-protected first.
+_DEFAULT_ALIGN_MAX_WORKERS = 2
+_ALIGN_MAX_WORKERS_CAP = 4
+_DEFAULT_ALIGN_PAID_FALLBACK_MAX_CONCURRENCY = 1
+
+
+def _read_align_max_workers() -> int:
+    raw = os.environ.get("AVT_ALIGN_MAX_WORKERS", "")
+    try:
+        value = int(raw) if raw.strip() else _DEFAULT_ALIGN_MAX_WORKERS
+    except ValueError:
+        value = 1
+    if value < 1:
+        return 1
+    if value > _ALIGN_MAX_WORKERS_CAP:
+        return _ALIGN_MAX_WORKERS_CAP
+    return value
+
+
+def _read_align_paid_fallback_max_concurrency() -> int:
+    raw = os.environ.get("AVT_ALIGN_PAID_FALLBACK_MAX_CONCURRENCY", "")
+    try:
+        value = int(raw) if raw.strip() else _DEFAULT_ALIGN_PAID_FALLBACK_MAX_CONCURRENCY
+    except ValueError:
+        return 1
+    if value < 1:
+        return 1
+    return value
 
 from modules.output.project_output import AlignedSegment
 from utils.audio_fit import FitPolicy, FitResult, fit_audio_to_slot
@@ -194,6 +242,59 @@ class SegmentAligner:
         segments: list[DubbingSegment],
         output_dir: str,
     ) -> list[AlignedSegment]:
+        """Align every segment to its target slot.
+
+        Dispatch:
+        - ``AVT_ALIGN_MAX_WORKERS=1`` (or invalid/0/negative): runs
+          ``_align_all_serial`` — the verbatim pre-17a-1 body, preserved
+          byte-for-byte so ops dashboards / log scrapers / bisect runs
+          keep their existing signal. This is the rollback path.
+        - ``AVT_ALIGN_MAX_WORKERS>=2``: pre-classifies segments into
+          cheap (keep_original / cache hit) and expensive (cache miss);
+          cheap stay synchronous (their work is dict ops + a single
+          ffprobe), expensive go through a thread pool. Output paths
+          are validated for uniqueness before the pool starts so a
+          duplicate ``segment_id`` fails fast instead of producing
+          nondeterministic last-write-wins overwrites.
+
+        Order: returned list always matches input position regardless of
+        worker completion order. Downstream callers in process.py
+        (2807, 6064, 6224) rely on this — see audit
+        docs/audits/2026-05-08-tts-rewriter-translator-state-audit.md
+        for in-place mutation contract, and
+        docs/plans/2026-05-08-p2-17-pipeline-parallelization-plan.md
+        §3.1 for the grep evidence.
+
+        Paid fallback: rewriter calls + TTS ``_generate_one`` +
+        best-candidate ``_dsp_stretch`` are gated by a semaphore (default
+        concurrency 1). This is a CORRECTNESS constraint per the audit
+        doc — see ``_attempt_rewrite_loop`` for the comment block.
+        """
+
+        workers = _read_align_max_workers()
+        if workers <= 1:
+            # Hard rollback / debug path. _align_all_serial MUST stay a
+            # verbatim copy of the pre-17a-1 align_all body; any
+            # divergence breaks ops dashboards keyed on the three [S5]
+            # log strings and bisect of the parallel rollout.
+            return self._align_all_serial(segments, output_dir)
+
+        return self._align_all_parallel(segments, output_dir, workers=workers)
+
+    def _align_all_serial(
+        self,
+        segments: list[DubbingSegment],
+        output_dir: str,
+    ) -> list[AlignedSegment]:
+        """Pre-17a-1 ``align_all`` body, copied verbatim.
+
+        DO NOT EDIT this function to share helpers with the parallel
+        path. Its purpose is to be the byte-equivalent rollback target
+        for ``AVT_ALIGN_MAX_WORKERS=1`` — same ``[S5] 对齐进度: i/N 段``
+        cadence (every 15 + final), same ``[S5] 跳过已完成的对齐段 i/N``
+        and ``[S5] 对齐缓存已过期，重新处理段 i/N`` strings. Ops dashboards
+        and bisect runs depend on this exact format.
+        """
         output_root = Path(output_dir).resolve(strict=False)
         output_root.mkdir(parents=True, exist_ok=True)
 
@@ -242,6 +343,166 @@ class SegmentAligner:
             if total_segments > 0 and (index % 15 == 0 or index == total_segments):
                 print(f"[S5] 对齐进度: {index}/{total_segments} 段")
         return results
+
+    def _align_all_parallel(
+        self,
+        segments: list[DubbingSegment],
+        output_dir: str,
+        *,
+        workers: int,
+    ) -> list[AlignedSegment]:
+        """Parallel path — used when ``AVT_ALIGN_MAX_WORKERS >= 2``.
+
+        Three phases:
+        1. Pre-classify: cheap branches (keep_original / cache hit) run
+           inline so the thread pool only does work that actually moves
+           the needle.
+        2. Validate: each segment that needs alignment must map to a
+           unique output path — fail fast on duplicate ``segment_id``
+           rather than letting concurrent writes race.
+        3. Submit + collect: expensive segments enter the pool; results
+           are re-assembled in input order. First-error sets stop_event
+           and cancels pending futures (in-flight ffmpeg / provider
+           calls cannot truly be cancelled; the gate is best-effort to
+           skip *new* paid work).
+        """
+        output_root = Path(output_dir).resolve(strict=False)
+        output_root.mkdir(parents=True, exist_ok=True)
+
+        total_segments = len(segments)
+        # Phase 1: pre-classify.
+        cheap_results: dict[int, AlignedSegment] = {}
+        needs_align: list[tuple[int, DubbingSegment, Path]] = []
+        for idx, segment in enumerate(segments):
+            if is_keep_original_dubbing_mode(getattr(segment, "dubbing_mode", DUBBING_MODE_DUB)):
+                cheap_results[idx] = self._keep_original_result(segment)
+                continue
+            output_path = output_root / f"segment_{segment.segment_id:03d}_aligned.wav"
+            if is_valid_output(str(output_path)) and self._aligned_cache_is_fresh(
+                segment,
+                output_path,
+            ):
+                cheap_results[idx] = self._build_cached_aligned_result(segment, output_path)
+                continue
+            if is_valid_output(str(output_path)):
+                # Surface stale-cache log inline (same string + flush as serial path).
+                print(
+                    f"[S5] 对齐缓存已过期，重新处理段 {idx + 1}/{total_segments}",
+                    flush=True,
+                )
+            needs_align.append((idx, segment, output_path))
+
+        # Phase 2: output-path uniqueness check. Duplicate segment_id /
+        # path = nondeterministic last-write-wins under parallel writes;
+        # fail fast before the pool starts.
+        unique_paths: set[str] = set()
+        for _idx, _segment, output_path in needs_align:
+            key = str(output_path)
+            if key in unique_paths:
+                raise AlignmentError(
+                    f"duplicate alignment output path '{key}' "
+                    "(check that segment_id values are unique before align_all)"
+                )
+            unique_paths.add(key)
+
+        # Phase 3: submit + collect.
+        parallel_results: dict[int, AlignedSegment] = {}
+        completed_count = len(cheap_results)
+        progress_lock = threading.Lock()
+        # Emit a single "progress 1" line for every cheap segment that
+        # would have produced one in the serial path. Keep cadence on
+        # the "every 15 / final" rule so dashboards see comparable noise.
+        # We don't replay the serial-path "跳过已完成 i/N" line under
+        # parallel because the i is no longer meaningful when cheap
+        # segments are scattered between expensive ones in input order.
+        if cheap_results:
+            with progress_lock:
+                if total_segments > 0 and completed_count == total_segments:
+                    print(f"[S5] 对齐进度: {completed_count}/{total_segments} 段")
+
+        if needs_align:
+            effective_workers = max(1, min(workers, len(needs_align)))
+            paid_fallback_max_concurrency = _read_align_paid_fallback_max_concurrency()
+            paid_fallback_semaphore = threading.Semaphore(paid_fallback_max_concurrency)
+            stop_event = threading.Event()
+
+            with ThreadPoolExecutor(
+                max_workers=effective_workers,
+                thread_name_prefix="align",
+            ) as pool:
+                future_to_idx = {
+                    pool.submit(
+                        self._align_one,
+                        seg,
+                        str(output_root),
+                        paid_fallback_semaphore=paid_fallback_semaphore,
+                        stop_event=stop_event,
+                    ): idx
+                    for idx, seg, _path in needs_align
+                }
+                try:
+                    for future in as_completed(future_to_idx):
+                        idx = future_to_idx[future]
+                        parallel_results[idx] = future.result()  # re-raises first failure
+                        with progress_lock:
+                            completed_count += 1
+                            if total_segments > 0 and (
+                                completed_count % 15 == 0
+                                or completed_count == total_segments
+                            ):
+                                print(f"[S5] 对齐进度: {completed_count}/{total_segments} 段")
+                except BaseException:
+                    # First failure: signal new paid work to skip and ask
+                    # pending futures to cancel. Already-running ffmpeg /
+                    # provider calls cannot be cancelled — the small
+                    # default workers + paid_fallback=1 keep that
+                    # exposure bounded.
+                    stop_event.set()
+                    for pending in future_to_idx:
+                        pending.cancel()
+                    raise
+
+        # Re-assemble in input order regardless of completion order.
+        return [
+            cheap_results.get(idx) or parallel_results[idx]
+            for idx in range(total_segments)
+        ]
+
+    def _build_cached_aligned_result(
+        self,
+        segment: DubbingSegment,
+        output_path: Path,
+    ) -> AlignedSegment:
+        """Cache-hit branch shared by _align_all_serial and _align_all_parallel.
+
+        Mirrors the in-place mutation + AlignedSegment construction the
+        serial path does inline. _align_all_serial keeps its inline copy
+        for log-fidelity; this helper is for the parallel path only so
+        cheap branches run sync there too.
+        """
+        duration_ms = _ffprobe_duration_ms(output_path)
+        target_duration_ms = int(segment.target_duration_ms)
+        segment.aligned_audio_path = str(output_path)
+        segment.actual_duration_ms = duration_ms
+        segment.alignment_ratio = (
+            duration_ms / target_duration_ms if target_duration_ms > 0 else 0.0
+        )
+        return AlignedSegment(
+            segment_id=segment.segment_id,
+            speaker_id=segment.speaker_id,
+            display_name=segment.display_name,
+            start_ms=segment.start_ms,
+            end_ms=segment.end_ms,
+            cn_text=segment.cn_text,
+            en_text=getattr(segment, "en_text", ""),
+            aligned_audio_path=str(output_path),
+            actual_duration_ms=duration_ms,
+            alignment_method="checkpoint",
+            needs_review=False,
+            dubbing_mode=normalize_dubbing_mode(
+                getattr(segment, "dubbing_mode", DUBBING_MODE_DUB)
+            ),
+        )
 
     @staticmethod
     def _aligned_cache_is_fresh(segment: DubbingSegment, output_path: Path) -> bool:
@@ -294,7 +555,15 @@ class SegmentAligner:
         self,
         segment: DubbingSegment,
         output_dir: str,
+        *,
+        paid_fallback_semaphore: threading.Semaphore | None = None,
+        stop_event: threading.Event | None = None,
     ) -> AlignedSegment:
+        # paid_fallback_semaphore + stop_event are non-None only when called
+        # from _align_all_parallel. Both are forwarded into
+        # _attempt_rewrite_loop where the actual paid-LLM / paid-TTS work
+        # happens; the rest of _align_one is DSP / direct copy and does
+        # not need gating.
         output_root = Path(output_dir).resolve(strict=False)
         output_root.mkdir(parents=True, exist_ok=True)
         output_path = output_root / f"segment_{segment.segment_id:03d}_aligned.wav"
@@ -375,6 +644,8 @@ class SegmentAligner:
                 segment=segment,
                 output_path=str(output_path),
                 current_actual_duration_ms=current_actual_duration_ms,
+                paid_fallback_semaphore=paid_fallback_semaphore,
+                stop_event=stop_event,
             )
             if rewrite_outcome is not None:
                 (
@@ -472,6 +743,8 @@ class SegmentAligner:
         segment: DubbingSegment,
         output_path: str,
         current_actual_duration_ms: int,
+        paid_fallback_semaphore: threading.Semaphore | None = None,
+        stop_event: threading.Event | None = None,
     ) -> tuple[str, int, str, bool, FitResult | None] | None:
         target_duration_ms = int(segment.target_duration_ms)
         if not self._should_attempt_rewrite(current_actual_duration_ms, target_duration_ms):
@@ -479,6 +752,59 @@ class SegmentAligner:
         if self.rewriter is None or self.tts_generator is None:
             return None
 
+        # P2-17a-1 paid fallback gate. The semaphore default concurrency
+        # (AVT_ALIGN_PAID_FALLBACK_MAX_CONCURRENCY=1) is a CORRECTNESS
+        # constraint, not cost-conservatism — see the audit:
+        # docs/audits/2026-05-08-tts-rewriter-translator-state-audit.md
+        # The four mutable shared fields require ③ paid_fallback=1
+        # serial because:
+        #   - GeminiTranslator._metering_usage_context (rewriter
+        #     try/finally setattr; concurrent rewrite races corrupt
+        #     usage phase attribution).
+        #   - TTSGenerator._speaker_voice_cache (per-speaker auto-match
+        #     cache; concurrent _generate_one writes can duplicate match
+        #     work and put the cache in an inconsistent state).
+        #   - TTSGenerator._active_job_record / _job_provider (set in
+        #     generate_all but read by direct _generate_one path;
+        #     concurrent calls may read stale state from prior calls).
+        # Raising max concurrency above 1 requires upgrading each of
+        # those to ① local-return semantics or ② an explicit lock; do
+        # NOT just bump the env.
+        #
+        # Stop-event check happens BOTH before and after acquire so
+        # that:
+        #   - We skip new paid work if a sibling already failed.
+        #   - We don't sit on the semaphore if cancellation arrived
+        #     while we were waiting in queue.
+        if stop_event is not None and stop_event.is_set():
+            return None
+        semaphore_cm: contextlib.AbstractContextManager
+        if paid_fallback_semaphore is not None:
+            semaphore_cm = paid_fallback_semaphore
+        else:
+            semaphore_cm = contextlib.nullcontext()
+        with semaphore_cm:
+            if stop_event is not None and stop_event.is_set():
+                return None
+            return self._attempt_rewrite_loop_unguarded(
+                segment=segment,
+                output_path=output_path,
+                current_actual_duration_ms=current_actual_duration_ms,
+            )
+
+    def _attempt_rewrite_loop_unguarded(
+        self,
+        *,
+        segment: DubbingSegment,
+        output_path: str,
+        current_actual_duration_ms: int,
+    ) -> tuple[str, int, str, bool, FitResult | None] | None:
+        """Original rewrite loop body, extracted so the semaphore wrap
+        in _attempt_rewrite_loop stays a single ``with`` block. Tests
+        that mock ``_dsp_stretch`` / ``rewriter`` / ``tts_generator``
+        keep working unchanged because the body is identical.
+        """
+        target_duration_ms = int(segment.target_duration_ms)
         best_cn_text = segment.cn_text.strip()
         best_tts_audio_path = segment.tts_audio_path
         best_actual_duration_ms = int(current_actual_duration_ms)
