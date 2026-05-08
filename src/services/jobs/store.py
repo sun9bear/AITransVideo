@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+from dataclasses import replace
 from pathlib import Path
 import tempfile
 from typing import Callable
@@ -14,6 +16,23 @@ from services.jobs.models import JobRecord
 class JobStore:
     def __init__(self, root_dir: str | Path) -> None:
         self.root_dir = Path(root_dir).resolve(strict=False)
+        # P1-12a (audit 2026-05-07, P-CRITICAL-1): in-memory cache for
+        # ``list_jobs`` to avoid re-parsing every {job_id}.json on every
+        # call. Each entry is ``(mtime_ns, JobRecord)``; we re-parse only
+        # when the on-disk mtime differs from the cached mtime, which
+        # makes the steady-state cost of list_jobs O(N stat calls) rather
+        # than O(N json.loads + JobRecord.from_dict).
+        #
+        # Cross-process invalidation: each gateway worker holds its own
+        # cache, but per-file mtime detection still triggers re-parse
+        # when another worker mutates the file. No need for shared
+        # invalidation infrastructure.
+        #
+        # Concurrency: ``_list_cache_lock`` protects the dict reference
+        # only — parses happen outside the lock so concurrent list_jobs
+        # callers don't serialize on the json.loads path.
+        self._list_cache: dict[str, tuple[int, JobRecord]] = {}
+        self._list_cache_lock = threading.Lock()
 
     def save_job(self, record: JobRecord, *, fsync: bool = True) -> JobRecord:
         """Persist a JobRecord atomically.
@@ -196,23 +215,106 @@ class JobStore:
         return events
 
     def list_jobs(self, *, limit: int | None = None, offset: int = 0) -> list[JobRecord]:
+        """List all JobRecords sorted by recency.
+
+        P1-12a (audit 2026-05-07, P-CRITICAL-1): each call previously
+        ran ``json.loads`` + ``JobRecord.from_dict`` on every
+        ``{job_id}.json`` in ``root_dir``. With 1000 jobs that came to
+        200-800 ms / call, and the workspace front-end polled multiple
+        list endpoints every 4 s — 5 concurrent users could saturate
+        the Job API.
+
+        New design: maintain an in-memory cache keyed by ``job_id`` with
+        ``(mtime_ns, JobRecord)`` entries. On each call we glob the dir
+        and stat() each file (cheap), then re-parse ONLY the files whose
+        on-disk mtime differs from the cached mtime. Steady state on a
+        stable workload (no writes) hits the cache for every entry and
+        does zero JSON parsing.
+
+        Correctness:
+          * mtime is read AFTER the glob and BEFORE the parse, so a
+            concurrent writer's commit is detected on the next list_jobs.
+          * Returns ``replace(cached_record)`` copies so callers can
+            mutate without poisoning the cache. JobRecord is
+            ``@dataclass(slots=True)`` (mutable), and at least one
+            existing caller does ``record.field = ...; save_job(record)``
+            — without the copy, that pattern would silently leak into
+            the cached entry.
+          * Cross-process: each gateway worker has its own cache;
+            mtime drift naturally invalidates entries when another
+            worker writes. No shared cache infra needed.
+          * Files that disappear between glob and stat are skipped
+            silently (matches pre-cache "file disappeared" semantics).
+        """
         if not self.root_dir.exists():
             return []
 
-        jobs: list[JobRecord] = []
+        # Snapshot the current cache under the lock so concurrent
+        # list_jobs callers don't race on the dict reference. Parses
+        # happen OUTSIDE this lock — only the snapshot + final swap
+        # are inside.
+        with self._list_cache_lock:
+            cache_snapshot = dict(self._list_cache)
+
+        new_cache: dict[str, tuple[int, JobRecord]] = {}
+        records: list[JobRecord] = []
+
         for path in self.root_dir.glob("*.json"):
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            try:
+                mtime_ns = path.stat().st_mtime_ns
+            except (FileNotFoundError, OSError):
+                # File vanished between glob and stat (e.g. concurrent
+                # delete_job). Skip — matches pre-cache behavior.
+                continue
+
+            job_id = path.stem
+            cached = cache_snapshot.get(job_id)
+            if cached is not None and cached[0] == mtime_ns:
+                # Cache hit — bypass json.loads + from_dict entirely.
+                # Carry the cached entry forward into new_cache so a
+                # subsequent call still hits.
+                new_cache[job_id] = cached
+                # Return a copy so caller mutations don't poison the cache.
+                records.append(replace(cached[1]))
+                continue
+
+            # Cache miss path. Take the per-job file_lock so we don't
+            # race a concurrent ``save_job`` mid-rename — particularly
+            # on Windows where ``os.replace`` fails with PermissionError
+            # if the destination is held open elsewhere. The lock is
+            # reentrant so this is safe even when a JobStore caller
+            # already holds the lock from update_job's outer
+            # acquisition; the cache hit path takes no lock so common-
+            # case readers don't queue behind writers.
+            try:
+                with file_lock(path):
+                    payload_text = path.read_text(encoding="utf-8")
+            except (FileNotFoundError, OSError):
+                # File vanished after the stat — skip.
+                continue
+            payload = json.loads(payload_text)
             if not isinstance(payload, dict):
                 raise ValueError(f"Invalid job record payload: {path}")
-            jobs.append(JobRecord.from_dict(payload))
+            record = JobRecord.from_dict(payload)
+            new_cache[job_id] = (mtime_ns, record)
+            records.append(replace(record))
 
-        jobs.sort(key=lambda item: (item.updated_at, item.created_at, item.job_id), reverse=True)
+        # Atomically swap in the new cache. Files that no longer exist
+        # in the glob are NOT in new_cache and are dropped — natural
+        # GC for deleted jobs without an explicit invalidation hook.
+        with self._list_cache_lock:
+            self._list_cache = new_cache
+
+        records.sort(
+            key=lambda item: (item.updated_at, item.created_at, item.job_id),
+            reverse=True,
+        )
         normalized_offset = max(int(offset), 0)
         if normalized_offset:
-            jobs = jobs[normalized_offset:]
+            records = records[normalized_offset:]
         if limit is None:
-            return jobs
-        return jobs[: max(limit, 0)]
+            return records
+        return records[: max(limit, 0)]
 
     def delete_job(self, job_id: str) -> bool:
         """Delete a job record and its events file. Returns True if the job existed."""
