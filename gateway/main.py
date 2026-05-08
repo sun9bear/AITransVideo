@@ -13,6 +13,7 @@ from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from admin_settings import router as admin_router
+from admin_support_api import router as admin_support_router
 from pricing_admin import router as pricing_admin_router
 from s2_monitor_api import router as s2_monitor_router
 from admin_job_monitor_api import router as admin_job_monitor_router
@@ -68,6 +69,10 @@ from job_intercept import (
 )
 from proxy import close_client, init_client, proxy_request
 from voice_selection_api import get_voice_selection_pricing, voice_clone_for_selection
+
+# Customer support + notifications (plan 2026-05-08)
+from support_api import router as support_router
+from notifications_api import router as notifications_router
 
 
 @asynccontextmanager
@@ -254,6 +259,7 @@ app.include_router(auth_phone_router)
 # --- Admin settings routes (before catch-all) ---
 
 app.include_router(admin_router)
+app.include_router(admin_support_router)
 app.include_router(pricing_admin_router)
 app.include_router(s2_monitor_router)
 app.include_router(admin_job_monitor_router)
@@ -275,6 +281,13 @@ app.include_router(voice_catalog_internal_router)
 from user_voice_api import router as user_voice_router, internal_router as user_voice_internal_router
 app.include_router(user_voice_router)
 app.include_router(user_voice_internal_router)
+
+# Customer support API + notification center (plan 2026-05-08)
+from notifications_api import internal_router as notifications_internal_router
+
+app.include_router(support_router)
+app.include_router(notifications_router)
+app.include_router(notifications_internal_router)
 
 
 # --- Gateway-native upload endpoint (before catch-all) ---

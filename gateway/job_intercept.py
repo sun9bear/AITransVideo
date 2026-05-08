@@ -1099,6 +1099,26 @@ async def intercept_get_job(
             select(Job).where(Job.job_id == job_id, Job.user_id == user.id)
         )
         db_job = result.scalar_one_or_none()
+        # Plan 2026-05-08 §16: emit a user notification when we observe a
+        # status transition into a terminal state. The helper never raises
+        # and is gated on db_job.user_id being present, so anonymous /
+        # admin-rebound jobs are skipped automatically. Runs BEFORE the
+        # merge so we can compare upstream vs gateway-DB status.
+        try:
+            upstream_status = payload.get("status") if isinstance(payload, dict) else None
+            from notifications_helpers import maybe_dispatch_job_transition
+            await maybe_dispatch_job_transition(
+                db,
+                db_job=db_job,
+                upstream_status=upstream_status,
+            )
+            # The helper may have updated db_job.status; commit those
+            # changes alongside the response. We commit here (rather than
+            # leaving it for the dependency teardown) because the
+            # surrounding try/except returns through several paths.
+            await db.commit()
+        except Exception:
+            logger.debug("notification transition hook failed", exc_info=True)
         payload = _merge_gateway_job_metadata(payload, db_job)
         # Plan §10.4 deepening: redact progress_message + error_summary.message
         # for non-admin. Admin path is no-op inside the helper.

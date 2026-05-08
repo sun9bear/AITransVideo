@@ -143,6 +143,12 @@ _DEFAULTS: dict[str, str] = {
     "rewrite_strict": "gemini_pro",
     "probe_translate": "deepseek",
     "content_compliance": "gemini_31_flash_lite",
+    # Customer support AI (plan 2026-05-08 §7.2). Default DeepSeek V4 Flash:
+    # short text Q&A, FAQ rewrite, classification — does not need a high
+    # reasoning model. The default value is used by admin_support_api
+    # when no admin override is set; it does NOT auto-activate the real
+    # provider (that requires AVT_SUPPORT_AI_PROVIDER + DEEPSEEK_API_KEY).
+    "support_chat": "deepseek",
 }
 
 # ---------------------------------------------------------------------------
