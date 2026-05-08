@@ -511,6 +511,17 @@ async def complete_registration_endpoint(
     except Exception:
         pass  # shadow — never block registration
 
+    # Plan 2026-05-08 §16.7 follow-up §"新注册用户" — fan out every
+    # active live announcement to this user. Best-effort; failure
+    # logs but never blocks registration.
+    try:
+        from system_announcements_service import (
+            dispatch_announcements_for_new_user,
+        )
+        await dispatch_announcements_for_new_user(db, user_id=user.id)
+    except Exception:
+        pass
+
     await db.commit()
     await db.refresh(user)
 

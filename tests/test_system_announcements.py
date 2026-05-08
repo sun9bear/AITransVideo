@@ -39,6 +39,7 @@ def test_audience_kinds_catalog_has_expected_entries():
         "all",
         "admin_only",
         "registered_within_days",
+        "for_new_registrations",  # added 2026-05-09 (live audience)
         "plan_free",
         "plan_plus",
         "plan_pro",
@@ -53,10 +54,8 @@ def test_audience_kinds_catalog_has_expected_entries():
     }
     actual = {entry["kind"] for entry in AUDIENCE_KINDS}
     assert actual == expected_kinds
-    # Catalog size matches plan §"7 类 + 8 类 = 15"; we ended up at 14
-    # after merging plan_paid (was redundant with plus+pro). If this
-    # changes, update the plan doc.
-    assert len(AUDIENCE_KINDS) == 14
+    # 15 entries: 14 snapshot + 1 live (for_new_registrations).
+    assert len(AUDIENCE_KINDS) == 15
 
 
 def test_audience_kinds_have_required_fields():

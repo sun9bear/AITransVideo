@@ -165,6 +165,20 @@ async def register_handler(
         password_hash=hash_password(body.password),
     )
     db.add(user)
+    await db.flush()
+
+    # Plan 2026-05-08 §16.7 follow-up §"新注册用户" — fan out every
+    # active live announcement (audience_kind="for_new_registrations")
+    # to this user. Best-effort: failure logs but never blocks
+    # registration. Mirrors the same hook in auth_phone for symmetry.
+    try:
+        from system_announcements_service import (
+            dispatch_announcements_for_new_user,
+        )
+        await dispatch_announcements_for_new_user(db, user_id=user.id)
+    except Exception:
+        pass
+
     await db.commit()
     await db.refresh(user)
 

@@ -49,6 +49,7 @@ logger = logging.getLogger(__name__)
 AudienceKind = Literal[
     "all",
     "registered_within_days",
+    "for_new_registrations",  # live: every future registrant gets it
     "plan_free",
     "plan_plus",
     "plan_pro",
@@ -77,8 +78,18 @@ AUDIENCE_KINDS: list[dict[str, Any]] = [
     },
     {
         "kind": "registered_within_days",
-        "label": "N 天内注册",
+        "label": "N 天内注册（快照，已注册的用户）",
         "params": [{"key": "days", "type": "int", "default": 7, "min": 1, "max": 365}],
+        "group": "lifecycle",
+    },
+    {
+        # Live / standing audience — distinct from snapshot. At send
+        # time fan-out is empty; every USER WHO REGISTERS LATER gets
+        # this announcement (including its popup flag) inserted into
+        # their notifications via dispatch_announcements_for_new_user.
+        "kind": "for_new_registrations",
+        "label": "新注册用户（持续生效，每位新注册用户都会收到）",
+        "params": [],
         "group": "lifecycle",
     },
     {"kind": "plan_free", "label": "Free 套餐", "params": [], "group": "subscription"},
@@ -185,6 +196,15 @@ def _build_audience_filter(kind: str, params: dict):
     if kind == "registered_within_days":
         cutoff = now - timedelta(days=int(params["days"]))
         return and_(User.is_active.is_(True), User.created_at >= cutoff)
+
+    if kind == "for_new_registrations":
+        # LIVE audience — at send time, no existing users match (the
+        # whole point: this announcement waits for users registering
+        # AFTER sent_at). Fan-out happens in
+        # ``dispatch_announcements_for_new_user`` called from auth.
+        # Return a contradictory predicate so count_audience and
+        # resolve_audience_user_ids both yield 0 at send time.
+        return User.id.is_(None)
 
     if kind == "plan_free":
         return and_(User.is_active.is_(True), User.plan_code == "free")
@@ -468,6 +488,101 @@ async def stats_for(
         "read": int(row[1] or 0),
         "archived": int(row[2] or 0),
     }
+
+
+async def dispatch_announcements_for_new_user(
+    db: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+) -> int:
+    """Fan out every active live announcement to a freshly-registered user.
+
+    Plan 2026-05-08 §16.7 follow-up §"新注册用户" — admin-flagged
+    announcements with ``audience_kind="for_new_registrations"`` are
+    standing offers: every user registering AFTER an announcement is
+    sent receives it (including its popup flag).
+
+    Called from ``auth.register_handler`` and
+    ``auth_phone.verify_code_endpoint`` immediately after user creation.
+    Best-effort — exceptions are logged and swallowed so registration
+    never fails because of a notification dispatch hiccup.
+
+    Returns the count of newly-inserted ``user_notifications`` rows.
+
+    Idempotency: the dedupe matches on
+    ``(related_type, related_id, user_id)`` so re-running this
+    function for the same user (e.g. a registration retry) won't
+    duplicate notifications. The schema does not enforce this via a
+    unique index for ``related_*`` columns (those are STRING, not
+    indexed for uniqueness), so dedupe is application-side via an
+    explicit pre-check.
+    """
+    try:
+        active_stmt = (
+            select(SystemAnnouncement)
+            .where(
+                and_(
+                    SystemAnnouncement.status == "sent",
+                    SystemAnnouncement.audience_kind == "for_new_registrations",
+                )
+            )
+            .order_by(SystemAnnouncement.sent_at.asc())
+        )
+        active = list((await db.execute(active_stmt)).scalars())
+        if not active:
+            return 0
+
+        # Pre-check existing notifications for this user that already
+        # came from one of these announcements (defensive).
+        ann_ids = [str(a.id) for a in active]
+        existing_stmt = select(UserNotification.related_id).where(
+            and_(
+                UserNotification.user_id == user_id,
+                UserNotification.related_type == "system_announcement",
+                UserNotification.related_id.in_(ann_ids),
+            )
+        )
+        already = set(
+            (await db.execute(existing_stmt)).scalars().all()
+        )
+
+        count = 0
+        for ann in active:
+            if str(ann.id) in already:
+                continue
+            row = UserNotification(
+                scope="system",
+                topic=ann.topic,
+                user_id=user_id,
+                title=ann.title[:255],
+                body=ann.body,
+                severity=ann.severity,
+                related_type="system_announcement",
+                related_id=str(ann.id),
+                action_url=ann.action_url,
+                popup=bool(ann.popup),
+                metadata_json={
+                    "announcement_id": str(ann.id),
+                    "audience_kind": ann.audience_kind,
+                    "popup": bool(ann.popup),
+                    "dispatch": "new_user_registration",
+                },
+            )
+            db.add(row)
+            count += 1
+        if count > 0:
+            await db.flush()
+        return count
+    except Exception as exc:
+        # Never let a notification dispatch break registration. Log
+        # and move on; the user can still log in and read past
+        # announcements from the bell once they look at /notifications.
+        logger.warning(
+            "dispatch_announcements_for_new_user(%s) failed: %s",
+            user_id,
+            exc,
+        )
+        return 0
 
 
 async def clone_for_resend(

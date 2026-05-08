@@ -480,7 +480,12 @@ export default function AdminAnnouncementsPage() {
 
           <div className="rounded border border-dashed border-border bg-muted/20 px-3 py-2 text-xs">
             预览：
-            {previewing ? (
+            {input.audience_kind === "for_new_registrations" ? (
+              <span className="ml-1 text-foreground">
+                <span className="font-semibold">持续生效。</span>
+                每位之后注册的新用户都会收到（包括弹窗）。撤回该公告会停止派发并删除已派发的通知。
+              </span>
+            ) : previewing ? (
               <span className="ml-1 text-muted-foreground">计算中…</span>
             ) : previewCount !== null ? (
               <span className="ml-1 font-semibold text-foreground">
@@ -539,20 +544,28 @@ export default function AdminAnnouncementsPage() {
               busy ||
               !input.title.trim() ||
               !input.body.trim() ||
-              previewCount === 0
+              // for_new_registrations is a LIVE audience — count=0 at
+              // send time is expected, so don't block sending. For all
+              // other kinds, count=0 means "no recipients", block.
+              (previewCount === 0 &&
+                input.audience_kind !== "for_new_registrations")
             }
             onClick={() => {
-              if (
-                confirm(
-                  `确认发送给 ${previewCount ?? "?"} 名用户？发送后只能撤回（硬删除），无法编辑。`,
-                )
-              ) {
+              const msg =
+                input.audience_kind === "for_new_registrations"
+                  ? "确认发布这条公告？将持续生效，每位之后注册的新用户都会收到。撤回会停止派发并删除已派发的通知。"
+                  : `确认发送给 ${previewCount ?? "?"} 名用户？发送后只能撤回（硬删除），无法编辑。`
+              if (confirm(msg)) {
                 void sendNow()
               }
             }}
             className="rounded bg-[color:var(--cinnabar,#C73E3A)] px-4 py-1.5 text-xs font-medium text-white disabled:opacity-50"
           >
-            {busy ? "发送中…" : "发送"}
+            {busy
+              ? "发送中…"
+              : input.audience_kind === "for_new_registrations"
+                ? "发布"
+                : "发送"}
           </button>
         </div>
       </section>
@@ -637,13 +650,27 @@ export default function AdminAnnouncementsPage() {
                         ? new Date(s.sent_at).toLocaleString("zh-CN")
                         : "—"}
                       {" · "}
-                      发给 {s.recipient_count ?? "?"} 人
-                      {s.stats ? (
+                      {s.audience_kind === "for_new_registrations" ? (
                         <>
-                          {" · "}
-                          已读 {s.stats.read} / 归档 {s.stats.archived}
+                          持续生效
+                          {s.stats ? (
+                            <>
+                              {" · "}
+                              已派发 {s.stats.total} · 已读 {s.stats.read}
+                            </>
+                          ) : null}
                         </>
-                      ) : null}
+                      ) : (
+                        <>
+                          发给 {s.recipient_count ?? "?"} 人
+                          {s.stats ? (
+                            <>
+                              {" · "}
+                              已读 {s.stats.read} / 归档 {s.stats.archived}
+                            </>
+                          ) : null}
+                        </>
+                      )}
                     </p>
                   </div>
                   <div className="flex shrink-0 flex-col gap-1 text-xs">
