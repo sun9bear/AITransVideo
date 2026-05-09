@@ -127,6 +127,7 @@ class GeminiRewriter:
         target_lower_chars: int,
         target_upper_chars: int,
         task_name: str = "s5_short_content_compact",
+        strict_retry_reason: str = "",
     ) -> str:
         """Rewrite a short contentful segment as compact spoken Chinese.
 
@@ -134,6 +135,13 @@ class GeminiRewriter:
         short interview questions and quick answers need aggressive oral
         compression, while the generic prompt tries harder to preserve literal
         wording and often remains too long for a 2-8s slot.
+
+        ``strict_retry_reason`` (2026-05-09): when the first compact attempt
+        was rejected (e.g. ``above_ceiling:84>72``), the pipeline retries via
+        ``_rewrite_short_content_compact_with_guardrails`` which forwards this
+        kwarg. Mirrors the strict-retry behaviour of
+        ``rewrite_for_duration_with_profile`` — see ``_build_rewrite_prompt``.
+        Empty string disables the strict-retry tail block.
         """
         normalized_text = (cn_text or "").strip()
         if not normalized_text:
@@ -146,6 +154,7 @@ class GeminiRewriter:
             target_duration_ms=target_duration_ms,
             target_lower_chars=lower_chars,
             target_upper_chars=upper_chars,
+            strict_retry_reason=strict_retry_reason,
         )
         rewritten_text = self._call_task_with_usage_phase(
             task_name,
@@ -182,11 +191,12 @@ class GeminiRewriter:
         target_duration_ms: int,
         target_lower_chars: int,
         target_upper_chars: int,
+        strict_retry_reason: str = "",
     ) -> str:
         current_chars = len(_NON_SPOKEN_CHAR_PATTERN.sub("", cn_text or ""))
         source = (source_text or "").strip() or "未提供"
         target_seconds = max(0.0, target_duration_ms / 1000.0)
-        return (
+        prompt = (
             "你是视频配音口播压缩编辑。请把下面的中文翻译压缩成自然、短促、可直接配音的中文，"
             "用于一个很短的真实内容段。\n\n"
             f"英文原文：{source}\n"
@@ -204,6 +214,19 @@ class GeminiRewriter:
             f"7. 最终必须落在 {target_lower_chars}~{target_upper_chars} 个 spoken chars 之间。\n\n"
             "只输出压缩后的中文口播文本，不要输出解释、字数、引号或多方案。"
         )
+        # 2026-05-09: mirror the strict-retry tail used by _build_rewrite_prompt
+        # (see line 263-269) so the compact path's retry can also surface the
+        # rejection reason. Without this, _rewrite_short_content_compact_with_guardrails
+        # raises TypeError when forwarding strict_retry_reason — the retry
+        # mechanism only worked for the generic rewrite path.
+        if strict_retry_reason:
+            prompt += (
+                "\n\n严格重试：上一版输出因"
+                f"{strict_retry_reason}未通过字数保护。"
+                "这一次必须优先满足上述字数下限和上限，"
+                "不得反向改写，不得输出解释。"
+            )
+        return prompt
 
     def _build_rewrite_prompt(
         self,

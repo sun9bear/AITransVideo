@@ -187,6 +187,60 @@ def test_rewriter_short_content_compact_uses_dedicated_task_and_prompt() -> None
     assert "目标 spoken chars：8~13" in prompt
     assert "多个连续问题可合并为一个核心问题" in prompt
     assert "Would you repeat that this time?" in prompt
+    # 2026-05-09 fix regression guard: when strict_retry_reason is empty
+    # (the default first-call case), the prompt MUST NOT contain the
+    # 严格重试 tail block; otherwise the LLM gets a useless "上一版输出因
+    # 未通过字数保护" sentence on the first attempt.
+    assert "严格重试" not in prompt
+
+
+def test_rewriter_short_content_compact_accepts_strict_retry_reason() -> None:
+    """Regression for 2026-05-09 production failure:
+    ``_rewrite_short_content_compact_with_guardrails`` (process.py:5614)
+    forwards ``strict_retry_reason`` to ``rewrite_short_content_compact``
+    when the first compact attempt was rejected (e.g. ``above_ceiling``).
+    Pre-fix the method's signature didn't accept that kwarg, so the
+    retry call raised TypeError and the whole pipeline failed at S4.
+
+    This test pins:
+    1. The method accepts the kwarg without TypeError.
+    2. The kwarg's content surfaces in the prompt as a 严格重试 block,
+       so the LLM knows what to fix.
+    3. Behaviour mirrors ``rewrite_for_duration_with_profile`` strict
+       retry (rewriter.py:263-269).
+    """
+
+    translator = _build_translator()
+    rewriter = GeminiRewriter(translator, chars_per_second=4.5)
+    captured: dict[str, object] = {}
+
+    def fake_call(task: str, prompt: str, *, json_mode: bool = False) -> str:
+        captured["task"] = task
+        captured["prompt"] = prompt
+        return "更短的口播"
+
+    translator._call_task_with_fallback = fake_call  # type: ignore[method-assign]
+
+    # The kwarg form that process.py:5614 uses — must not raise TypeError.
+    rewritten = rewriter.rewrite_short_content_compact(
+        "这是要被压缩的中文，含很多冗余表达。",
+        source_text="A very contentful question.",
+        target_duration_ms=2_500,
+        target_lower_chars=8,
+        target_upper_chars=12,
+        strict_retry_reason="above_ceiling:18>12",
+    )
+
+    assert rewritten == "更短的口播"
+    prompt = str(captured["prompt"])
+    # 严格重试 block (mirrors line 263-269 of rewriter.py for the generic path)
+    assert "严格重试" in prompt
+    assert "above_ceiling:18>12" in prompt
+    assert "未通过字数保护" in prompt
+    assert "必须优先满足上述字数下限和上限" in prompt
+    # Original compact-prompt body still present.
+    assert "口播压缩" in prompt
+    assert "目标 spoken chars：8~12" in prompt
 
 
 def test_rewriter_prefers_speaker_specific_chars_per_second() -> None:
