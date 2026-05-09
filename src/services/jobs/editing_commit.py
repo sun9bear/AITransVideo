@@ -302,6 +302,75 @@ def _rm_editing_dir(project_dir: Path) -> None:
         shutil.rmtree(editing, ignore_errors=True)
 
 
+def _merge_editing_speakers_into_review_state(
+    project_dir: Path | str,
+    edit_speakers: list,  # list[EditingSpeaker]
+) -> None:
+    """Merge editing speakers into baseline review_state.json (Task 9).
+
+    Updates:
+    - ``speaker_review.payload.speaker_names`` — adds new speaker_id → display_name
+    - ``speaker_review.payload.speaker_options`` — keeps unique sorted list
+    - ``voice_selection_review.payload.voice_profiles`` — adds speaker_id → profile,
+      ONLY for speakers with ``status='ready'`` AND non-empty ``voice_profile``.
+
+    Idempotent: re-running with the same input yields the same output.
+    No-op if ``edit_speakers`` is empty.
+
+    Note: ``ReviewStateManager.set_stage`` REPLACES the payload (not merges),
+    so we always read existing payload first, mutate locally, and write back
+    the full result.
+    """
+    if not edit_speakers:
+        return
+
+    from services.review_state import (
+        ReviewStateManager,
+        SPEAKER_REVIEW_STAGE,
+        VOICE_SELECTION_REVIEW_STAGE,
+        REVIEW_STATUS_APPROVED,
+    )
+
+    rs_path = Path(project_dir) / "review_state.json"
+    if not rs_path.is_file():
+        # baseline review_state 不存在 — commit 不应抵达这里,但容错跳过
+        return
+    manager = ReviewStateManager(rs_path)
+
+    # speaker_review
+    sr = manager.get_stage(SPEAKER_REVIEW_STAGE) or {}
+    sr_payload = dict(sr.get("payload") or {})
+    names = dict(sr_payload.get("speaker_names") or {})
+    for sp in edit_speakers:
+        names[sp.speaker_id] = sp.display_name
+    sr_payload["speaker_names"] = names
+    sr_payload["speaker_options"] = [
+        {"speaker_id": sid, "display_name": dn}
+        for sid, dn in sorted(names.items())
+    ]
+    sr_status = sr.get("status") or REVIEW_STATUS_APPROVED
+    manager.set_stage(SPEAKER_REVIEW_STAGE, status=sr_status, payload=sr_payload)
+
+    # voice_selection_review (仅写 ready 且有 profile 的)
+    profiles_to_write = {
+        sp.speaker_id: sp.voice_profile
+        for sp in edit_speakers
+        if sp.profile_status == "ready" and sp.voice_profile
+    }
+    if profiles_to_write:
+        vsr = manager.get_stage(VOICE_SELECTION_REVIEW_STAGE) or {}
+        vsr_payload = dict(vsr.get("payload") or {})
+        merged_profiles = dict(vsr_payload.get("voice_profiles") or {})
+        merged_profiles.update(profiles_to_write)
+        vsr_payload["voice_profiles"] = merged_profiles
+        vsr_status = vsr.get("status") or REVIEW_STATUS_APPROVED
+        manager.set_stage(
+            VOICE_SELECTION_REVIEW_STAGE,
+            status=vsr_status,
+            payload=vsr_payload,
+        )
+
+
 def _invalidate_jianying_draft_on_commit(job: JobRecord, project_dir: Path | str) -> None:
     """Reset Jianying draft state on Studio editing/commit overwrite.
 
@@ -640,6 +709,28 @@ def _commit_overwrite(
     try:
         # Step 2a: apply edits into baseline (atomic per-file).
         summary = _apply_editing_to_baseline(project_dir)
+        # Step 2a-bis (Task 9): merge editing/speakers.json into baseline
+        # review_state.json so newly-created speakers' display_names and
+        # voice_profiles persist past commit. Best-effort — failure here
+        # is logged but does not fail the commit (display_name will fall
+        # back to speaker_id in downstream rendering, which is recoverable
+        # by re-entering edit and editing display_names manually).
+        # MUST run before _rm_editing_dir below (which deletes speakers.json).
+        try:
+            from services.jobs.editing_speakers import (
+                load_speakers as _load_editing_speakers,
+            )
+            _edit_speakers = _load_editing_speakers(project_dir)
+            if _edit_speakers:
+                _merge_editing_speakers_into_review_state(
+                    project_dir, _edit_speakers,
+                )
+        except Exception:
+            logger.exception(
+                "_commit_overwrite: speakers merge into review_state failed; "
+                "continuing with the rest of overwrite (display_name fallback "
+                "to speaker_id will still work)"
+            )
         # Step 2b: remove editing buffer.
         _rm_editing_dir(project_dir)
         # Step 2c: reset alignment + publish to PENDING so pipeline re-runs
@@ -863,6 +954,29 @@ def _commit_copy_as_new(
         raise CommitPipelineError(
             f"copy_as_new Phase A prepare failed: {exc}"
         ) from exc
+
+    # Phase A bis (Task 9): merge source's editing/speakers.json into the
+    # new project's review_state.json. We MUST read editing speakers from
+    # the source project_dir (Phase B has not yet deleted source editing/),
+    # but write to the new_project_dir's review_state.json.
+    # Best-effort — failure here is logged but does not abort the copy
+    # (the new job still runs; new speakers' display_names will fall back
+    # to speaker_id, recoverable by re-entering edit on the new job).
+    try:
+        from services.jobs.editing_speakers import (
+            load_speakers as _load_editing_speakers,
+        )
+        _edit_speakers = _load_editing_speakers(project_dir)  # source dir
+        if _edit_speakers:
+            _merge_editing_speakers_into_review_state(
+                new_project_dir, _edit_speakers,
+            )
+    except Exception:
+        logger.exception(
+            "_commit_copy_as_new: speakers merge into new job's "
+            "review_state failed; new job's display_names fallback to "
+            "speaker_id"
+        )
 
     # Phase A continued: create new JobRecord.
     root_job_id = record.root_job_id or record.job_id
