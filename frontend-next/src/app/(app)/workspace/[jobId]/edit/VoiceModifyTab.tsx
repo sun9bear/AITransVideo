@@ -413,17 +413,27 @@ export function VoiceModifyTab({
           const firstOverriddenSeg = ownSegments.find((seg) => voiceMap[seg.segment_id])
           const override = firstOverriddenSeg ? voiceMap[firstOverriddenSeg.segment_id] : null
 
+          // 2026-05-09: minimaxModel 默认值要从 segment.tts_model_key 推,
+          // 不能硬编码 "turbo" — 主流程 / 上次编辑保存的是 "speech-X.X-hd"
+          // (旗舰音质) 或 "speech-X.X-turbo" (高级音质)。voice_map override
+          // 不携带 model_key,所以 override 路径也用 baseline segment 的 model_key。
+          const firstSeg = ownSegments[0]
+          const segModelKey = (firstSeg as { tts_model_key?: unknown } | undefined)?.tts_model_key
+          const inferredModel: "turbo" | "hd" =
+            typeof segModelKey === "string" && segModelKey.toLowerCase().includes("hd")
+              ? "hd"
+              : "turbo"
+
           if (override) {
             initial[sp.speakerId] = {
               voiceId: override.voice_id,
               selectedProvider: override.provider,
               voiceSource: "catalog",
-              minimaxModel: "turbo",
+              minimaxModel: inferredModel,
             }
             continue
           }
 
-          const firstSeg = ownSegments[0]
           const baselineVoiceId = firstSeg?.voice_id
             ? String(firstSeg.voice_id).trim()
             : ""
@@ -438,7 +448,7 @@ export function VoiceModifyTab({
               voiceId: baselineVoiceId,
               selectedProvider: baselineProvider || loadedDefaultProvider,
               voiceSource: "catalog",
-              minimaxModel: "turbo",
+              minimaxModel: inferredModel,
             }
             continue
           }
@@ -448,7 +458,7 @@ export function VoiceModifyTab({
             voiceId: provMatch?.voiceId ?? "",
             selectedProvider: loadedDefaultProvider,
             voiceSource: provMatch?.voiceId ? "auto_matched" : "catalog",
-            minimaxModel: "turbo",
+            minimaxModel: inferredModel,
           }
         }
 
