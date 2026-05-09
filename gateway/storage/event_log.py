@@ -52,8 +52,11 @@ logger = logging.getLogger(__name__)
 # These event types are duplicated from ``services.jobs.events`` on purpose —
 # see the module docstring for why we don't import from there. Keep this
 # tuple in sync with ``SUPPORTED_EVENT_TYPES`` in that file.
+# (Plan 2026-05-07 §4.7: ``download.redirect.r2_registry`` added to
+# distinguish registry-driven 302 from legacy lazy-upload 302.)
 _DOWNLOAD_EVENT_TYPES = frozenset({
     "download.redirect.r2",
+    "download.redirect.r2_registry",
     "download.fallback.local",
     "download.local.direct",
 })

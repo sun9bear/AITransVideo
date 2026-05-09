@@ -7,12 +7,18 @@ from typing import Any
 EVENT_TYPE_LOG = "log"
 EVENT_TYPE_STATUS = "status"
 EVENT_TYPE_DOWNLOAD_REDIRECT_R2 = "download.redirect.r2"
+# Plan 2026-05-07 §4.7: ``r2_registry`` distinguishes the new
+# registry-driven 302 path (Stage A) from the legacy lazy-upload one.
+# The rollout dashboard splits them so we can observe registry-path
+# adoption independently of the lazy fallback usage.
+EVENT_TYPE_DOWNLOAD_REDIRECT_R2_REGISTRY = "download.redirect.r2_registry"
 EVENT_TYPE_DOWNLOAD_FALLBACK_LOCAL = "download.fallback.local"
 EVENT_TYPE_DOWNLOAD_LOCAL_DIRECT = "download.local.direct"
 SUPPORTED_EVENT_TYPES = {
     EVENT_TYPE_LOG,
     EVENT_TYPE_STATUS,
     EVENT_TYPE_DOWNLOAD_REDIRECT_R2,
+    EVENT_TYPE_DOWNLOAD_REDIRECT_R2_REGISTRY,
     EVENT_TYPE_DOWNLOAD_FALLBACK_LOCAL,
     EVENT_TYPE_DOWNLOAD_LOCAL_DIRECT,
 }

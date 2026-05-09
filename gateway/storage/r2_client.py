@@ -156,7 +156,11 @@ def head_artifact(key: str) -> bool:
         raise
 
 
-def upload_artifact(local_path: Path, key: str) -> None:
+def upload_artifact(
+    local_path: Path,
+    key: str,
+    content_type: str = "video/mp4",
+) -> None:
     """Upload ``local_path`` to ``bucket/key`` via a single ``put_object`` call.
 
     We prefer ``put_object`` over ``upload_file`` / multipart because:
@@ -164,6 +168,13 @@ def upload_artifact(local_path: Path, key: str) -> None:
       part limit.
     - A single request is easier to time-box and to trace in logs.
     - Multipart adds complexity for negligible wins at this file size.
+
+    ``content_type`` defaults to ``video/mp4`` to preserve the legacy
+    lazy-upload call site (``backend_router._upload_with_lock``) that has
+    only ever pushed ``publish.dubbed_video``. The proactive publisher
+    (plan 2026-05-07 §4.4) derives the value per artifact_key via
+    ``r2_publisher_lib.downloadable_keys.content_type_for`` so subtitles
+    land as ``text/plain`` and zips as ``application/zip``.
 
     Raises the underlying boto3 exception on failure. Caller handles fallback.
     """
@@ -175,13 +186,15 @@ def upload_artifact(local_path: Path, key: str) -> None:
             Bucket=settings.r2_artifacts_bucket,
             Key=key,
             Body=fh,
-            # ContentType is a nicety for debuggers poking at the bucket.
-            # The download URL overrides this via ResponseContentType anyway.
-            ContentType="video/mp4",
+            ContentType=content_type,
         )
 
 
-def generate_presigned_download_url(key: str, download_filename: str) -> str:
+def generate_presigned_download_url(
+    key: str,
+    download_filename: str,
+    content_type: str = "video/mp4",
+) -> str:
     """Sign a short-lived GET URL for ``key``.
 
     The signed URL embeds ``ResponseContentDisposition=attachment; filename=...``
@@ -190,6 +203,12 @@ def generate_presigned_download_url(key: str, download_filename: str) -> str:
     decision (§10 item 2), this is mandatory — without it the saved filename
     leaks the internal key structure and user-facing downloads look like
     ``publish.dubbed_video`` with no extension.
+
+    ``content_type`` defaults to ``video/mp4`` for the legacy lazy-upload
+    code path. The new registry-based download path (plan 2026-05-07 §4.7)
+    passes the real content_type stored in the per-artifact registry so
+    SRT files come back as ``text/plain`` and the browser picks the right
+    Save-As behaviour.
 
     TTL is ``settings.r2_presigned_expires_s`` (default 120s = 2 min). Short
     on purpose: the browser follows the 302 immediately; a leaked URL expires
@@ -211,7 +230,7 @@ def generate_presigned_download_url(key: str, download_filename: str) -> str:
             "Bucket": settings.r2_artifacts_bucket,
             "Key": key,
             "ResponseContentDisposition": content_disposition,
-            "ResponseContentType": "video/mp4",
+            "ResponseContentType": content_type,
         },
         ExpiresIn=settings.r2_presigned_expires_s,
     )

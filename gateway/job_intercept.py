@@ -56,6 +56,11 @@ from credits_service import (
     reserve_credits_or_raise,
     shadow_reserve, shadow_release, shadow_capture, shadow_safe,
 )
+# Plan 2026-05-07 §4.5 (P1.1 fix): shared mirror helper so the sweeper
+# (gateway/r2_artifact_sweeper.py) and this list-jobs path produce
+# identical mirror side-effects (including quota settlement).
+from job_terminal_mirror import mirror_job_terminal_state
+from storage.job_store_reader import JobJsonRecord, parse_iso_timestamp
 
 
 POST_EDIT_RESPONSE_FIELDS = (
@@ -612,25 +617,38 @@ async def intercept_list_jobs(
                         if db_job.status == "purged":
                             # Gateway cleanup is authoritative. A stale Job API
                             # JSON row must not resurrect a project whose
-                            # artifacts have already been removed.
+                            # artifacts have already been removed. (Mirror
+                            # helper also short-circuits on this; check up
+                            # front so we skip the V3 shadow block too.)
                             continue
                         old_status = db_job.status
-                        db_job.status = upstream_status
-                        db_job.current_stage = upstream_stage
-                        # B-fix: mirror project_dir from upstream once the pipeline
-                        # assigns it. The creation-time write at intercept_create_job
-                        # always gets None (pipeline hasn't run yet when the Gateway
-                        # mirror row is first inserted), so everything downstream
-                        # that reads Job.project_dir (background_task_api,
-                        # materials_api) would 404 without this backfill. Only
-                        # write if upstream reports a value — don't clobber a good
-                        # DB value with a transient upstream omission.
                         upstream_project_dir = upstream_job.get("project_dir")
-                        if upstream_project_dir:
-                            db_job.project_dir = upstream_project_dir
-                        # Settle quota when transitioning to terminal status
+                        # Plan 2026-05-07 §4.5 (P1.1): single source of truth
+                        # for mirror semantics (status / stage / project_dir /
+                        # completed_at + quota settle on terminal transition).
+                        # Sweeper invokes the same helper.
+                        await mirror_job_terminal_state(
+                            db,
+                            db_job,
+                            JobJsonRecord(
+                                job_id=jid,
+                                status=upstream_status,
+                                completed_at=parse_iso_timestamp(
+                                    upstream_job.get("completed_at")
+                                ),
+                                project_dir=upstream_project_dir,
+                                current_stage=upstream_stage,
+                                edit_generation=0,  # not read by mirror
+                                jianying_draft_zip_path=None,  # not read
+                                service_mode=None,  # not read
+                            ),
+                        )
+                        # V3 shadow settle is intentionally kept inline here:
+                        # it depends on per-user buckets, redaction config, and
+                        # request context that the sweeper does not have. The
+                        # mirror helper handled the canonical settle; we add
+                        # the shadow settle for the list-jobs path only.
                         if upstream_status in TERMINAL_STATUSES and old_status not in TERMINAL_STATUSES:
-                            await settle_job_quota(db, db_job, upstream_status)
                             # V3-1 shadow settle (best-effort)
                             try:
                                 if (
@@ -1226,25 +1244,35 @@ async def intercept_job_subresource(
             extra_headers=internal_headers(),
         )
 
-    # --- Phase 2 R2 download redirect (plan 2026-04-23) ---
-    # Narrow surface: only GET /download/publish.dubbed_video, only when the
-    # effective backend is R2. Any R2 error inside this branch silently
-    # returns None → we fall through to the existing byte-passthrough so
-    # the user never sees an R2-related failure. See
-    # gateway/storage/backend_router.py for the fallback contract.
-    if (
-        request.method == "GET"
-        and subpath == "download/publish.dubbed_video"
-    ):
-        redirect_url = await _maybe_r2_redirect(job_id, db)
+    # --- R2 download redirect (plan 2026-04-23 + plan 2026-05-07 §4.7) ---
+    # Surface: GET /download/{key} for any downloadable artifact key, only
+    # when AVT_DOWNLOAD_REDIRECT_BACKEND=r2. Any R2 error silently returns
+    # None → caller falls through to byte-passthrough so the user never
+    # sees an R2-related failure. See gateway/storage/backend_router.py
+    # for the fallback contract.
+    download_match = (
+        _DOWNLOAD_KEY_RE.match(subpath)
+        if request.method == "GET"
+        else None
+    )
+    if download_match is not None:
+        artifact_key = download_match.group("key")
+        redirect_url, redirect_kind = await _resolve_r2_redirect(
+            db, job_id, artifact_key=artifact_key,
+        )
         if redirect_url is not None:
             # 302 (not 307) — matches the pattern of existing CDN redirects
             # and plays nicely with every <a download> client we've seen.
             _emit_download_event(
                 job_id,
-                "download.redirect.r2",
+                # registry path is the new (Stage A) flow; legacy lazy
+                # upload still fires the original event name so the
+                # rollout dashboard can split the two populations.
+                "download.redirect.r2_registry"
+                if redirect_kind == "registry"
+                else "download.redirect.r2",
                 message="Download redirected to R2",
-                payload={"artifact_key": "publish.dubbed_video", "backend": "r2"},
+                payload={"artifact_key": artifact_key, "backend": "r2"},
             )
             from fastapi.responses import RedirectResponse
             return RedirectResponse(url=redirect_url, status_code=302)
@@ -1261,7 +1289,7 @@ async def intercept_job_subresource(
                 if r2_enabled
                 else "Download served from local source"
             ),
-            payload={"artifact_key": "publish.dubbed_video", "backend": "local"},
+            payload={"artifact_key": artifact_key, "backend": "local"},
         )
 
     return await proxy_request(
@@ -1271,65 +1299,150 @@ async def intercept_job_subresource(
     )
 
 
-async def _maybe_r2_redirect(job_id: str, db: AsyncSession) -> str | None:
-    """Try to resolve an R2 302 target for ``publish.dubbed_video``.
+async def _resolve_r2_redirect(
+    db: AsyncSession,
+    job_id: str,
+    *,
+    artifact_key: str,
+) -> tuple[str | None, str]:
+    """Resolve an R2 302 target for any downloadable artifact key.
 
-    Returns the signed URL on success, ``None`` on any miss / error so the
-    caller falls back to local byte-passthrough. Never raises — the entire
-    R2 code path is wrapped so a broken backend can't take the download
-    endpoint down.
+    Returns ``(url, kind)`` where ``kind`` is:
+      - ``"registry"``: served from PG-resident r2_artifacts entry
+        (Stage A path; manifest-independent so cleanup-after-push
+        deletions don't break downloads).
+      - ``"lazy"``: served via the legacy lazy-upload path
+        (publish.dubbed_video on edit_generation=0 only).
+      - ``""``: caller should fall back to local byte-passthrough.
 
-    Why this helper lives here (instead of ``backend_router``):
-      - It needs the Gateway DB session to read ``Job.project_dir`` and
-        the user-visible ``display_name`` / ``title``.
-      - ``backend_router.resolve_download_target`` stays DB-agnostic, which
-        keeps its unit tests fast and simple.
+    Plan: 2026-05-07 §4.7. Never raises — every R2 / DB error is
+    swallowed and reported as ``(None, "")``.
     """
     try:
-        from storage.backend_router import is_r2_enabled, resolve_download_target
+        from storage.backend_router import is_r2_enabled
+        from services.r2_publisher_lib.downloadable_keys import download_keys_for
     except Exception as exc:  # pragma: no cover - boto3/storage missing
-        logger.warning("storage package import failed (%s); falling back to local", exc)
-        return None
+        logger.warning(
+            "storage package import failed (%s); falling back to local", exc,
+        )
+        return None, ""
 
     if not is_r2_enabled():
-        return None
+        return None, ""
 
     try:
         result = await db.execute(select(Job).where(Job.job_id == job_id))
         job = result.scalar_one_or_none()
     except Exception as exc:
-        logger.warning("r2 redirect: job lookup failed job=%s (%s); falling back", job_id, exc)
-        return None
+        logger.warning(
+            "r2 redirect: job lookup failed job=%s (%s); falling back",
+            job_id, exc,
+        )
+        return None, ""
 
     if job is None or not job.project_dir:
-        # Legacy row / still-queueing job — no project_dir means we have
-        # no way to find the artifact on disk. Let the Job API handle it.
-        return None
+        # Legacy / still-queueing job — let Job API surface the 404.
+        return None, ""
 
-    # Resolve the local artifact path via the shared manifest reader. If
-    # the manifest says the artifact exists, ``resolve_manifest_artifact_path``
-    # returns an absolute Path on the gateway filesystem (the ``projects``
-    # mount is read-only for this resolver, but the R2 upload only needs
-    # read access, so that's fine).
+    # P2.1: shared allowlist gate. If the requested key isn't in the
+    # job's permission set, return None and let Job API produce the
+    # canonical 403 / 404. Doing the check here means Gateway never
+    # short-circuits a 302 for a key the user shouldn't see.
+    if artifact_key not in download_keys_for(job.service_mode):
+        return None, ""
+
+    expected_gen = job.edit_generation or 0
+
+    # ---- Registry path (Stage A new) ----
+    # Find a matching entry by (artifact_key, edit_generation). The
+    # generation guard means an overwrite (gen N → N+1) cannot be served
+    # from a stale entry — the registry was reset to NULL by
+    # ``_apply_editing_commit_gateway_side`` and the sweeper hasn't
+    # repopulated it for the new generation yet.
+    registry_entry = None
+    if job.r2_artifacts:
+        for item in job.r2_artifacts:
+            if (
+                item.get("artifact_key") == artifact_key
+                and item.get("edit_generation") == expected_gen
+            ):
+                registry_entry = item
+                break
+
+    if registry_entry is not None:
+        state = registry_entry.get("state")
+        if state in ("pushed", "already_present"):
+            r2_key = registry_entry.get("r2_key")
+            filename = registry_entry.get("filename") or _derive_download_filename(job)
+            content_type = registry_entry.get(
+                "content_type", "application/octet-stream",
+            )
+            if r2_key:
+                try:
+                    from storage import r2_client
+                    url = r2_client.generate_presigned_download_url(
+                        r2_key, filename, content_type=content_type,
+                    )
+                    return url, "registry"
+                except Exception as exc:
+                    logger.warning(
+                        "r2 redirect: registry presign failed job=%s key=%s (%s); falling back",
+                        job_id, artifact_key, exc,
+                    )
+                    return None, ""
+        # state == "skipped_missing" → caller should 404, not lazy-fallback
+        # state == "failed"          → caller should 404 too; lazy would
+        #                              just fail the same way
+        return None, ""
+
+    # ---- Lazy fallback (P1.3 narrowed) ----
+    # Only ``publish.dubbed_video`` ever took the legacy lazy path, and
+    # the legacy R2 key shape lacks edit_generation. Allowing it for
+    # gen > 0 would HEAD-hit the gen-0 object and serve a stale video.
+    # For non-zero generations we return None and let Job API serve
+    # whatever it has on disk (or 404).
+    if artifact_key != "publish.dubbed_video":
+        return None, ""
+    if expected_gen != 0:
+        logger.info(
+            "r2 lazy refused: job=%s edit_generation=%d > 0",
+            job_id, expected_gen,
+        )
+        return None, ""
+
+    url = await _legacy_lazy_resolve_publish_dubbed_video(job_id, job)
+    return (url, "lazy") if url is not None else (None, "")
+
+
+async def _legacy_lazy_resolve_publish_dubbed_video(
+    job_id: str, job: Job,
+) -> str | None:
+    """Old Phase 2 lazy-upload path, restricted to publish.dubbed_video.
+
+    Walks ``manifest.json`` for the local artifact path, then defers to
+    ``backend_router.resolve_download_target`` which performs the
+    HEAD-or-upload-then-presign sequence. Any failure returns None so
+    the caller falls through to the byte-passthrough.
+    """
     try:
+        from storage.backend_router import resolve_download_target
         from services.manifest_reader import resolve_manifest_artifact_path
         local_path = resolve_manifest_artifact_path(
             Path(job.project_dir), "publish.dubbed_video"
         )
     except Exception as exc:
         logger.warning(
-            "r2 redirect: manifest resolve failed job=%s (%s); falling back",
+            "r2 lazy: manifest resolve failed job=%s (%s); falling back",
             job_id, exc,
         )
         return None
 
     if local_path is None:
-        # Artifact missing on disk — falling back lets Job API produce its
-        # normal 404 so the user-visible error path is unchanged.
+        # Manifest doesn't list the artifact — Job API will 404 same
+        # way it always has.
         return None
 
     download_filename = _derive_download_filename(job)
-
     try:
         return resolve_download_target(
             job_id=job_id,
@@ -1341,7 +1454,7 @@ async def _maybe_r2_redirect(job_id: str, db: AsyncSession) -> str | None:
         # Defensive: resolve_download_target is documented not to raise,
         # but wrap anyway so a future refactor can't take the endpoint down.
         logger.warning(
-            "r2 redirect: resolve_download_target raised job=%s (%s); falling back",
+            "r2 lazy: resolve_download_target raised job=%s (%s); falling back",
             job_id, exc,
         )
         return None
@@ -1741,6 +1854,15 @@ _JIANYING_DRAFT_SUBPATHS: frozenset[str] = frozenset({
     "generate-jianying-draft",   # POST — trigger on-demand draft generation
     "jianying-draft-status",     # GET  — poll draft generation status
 })
+
+
+# Plan 2026-05-07 §4.7: download path matcher. Matches any single-segment
+# artifact key after ``download/``. The actual permission gate (Express vs
+# Studio) lives inside ``_resolve_r2_redirect`` via the shared allowlist
+# in services/r2_publisher_lib/downloadable_keys.py.
+import re as _re
+
+_DOWNLOAD_KEY_RE = _re.compile(r"^download/(?P<key>[a-z0-9_.\-]+)$")
 
 
 # Set of subpaths that represent editing STATE TRANSITIONS (need FOR UPDATE
@@ -2354,6 +2476,17 @@ async def _apply_editing_commit_gateway_side(
         source_job.current_stage = "alignment"
         source_job.edit_generation = (source_job.edit_generation or 0) + 1
         source_job.editing_touched_at = None
+        # Plan 2026-05-07 §4.7 + §2.4: clear the R2 publish registry so
+        # the sweeper re-pushes under the new edit_generation. Without
+        # this, the bumped generation would have no registry entries
+        # (download path returns None → byte-passthrough), and old g{N-1}
+        # entries (with the previous generation stamp) would never be
+        # served because the download path matches by edit_generation.
+        # Resetting r2_push_retry_after lets sweeper pick the row up
+        # immediately on its next pass instead of waiting for any
+        # leftover backoff to expire.
+        source_job.r2_artifacts = None
+        source_job.r2_push_retry_after = None
         # Invalidate any pre-edit materials_pack — its zip captures the
         # pre-edit SRT / audio / caption text, which becomes stale once
         # alignment+publish re-runs against the just-applied edits. The

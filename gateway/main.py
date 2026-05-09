@@ -192,6 +192,23 @@ async def lifespan(app: FastAPI):
 
     _project_task = _asyncio.create_task(_periodic_project_cleanup())
     app.state.project_cleanup_task = _project_task
+
+    # Plan 2026-05-07 §4.5-4.6: proactive R2 push sweeper. Two feature
+    # flags gate this — both must be on for the loop to do anything.
+    # With either off, sweeper_loop runs but each tick returns early.
+    try:
+        from r2_artifact_sweeper import sweeper_loop as _r2_sweeper_loop
+        _sweeper_task = _asyncio.create_task(
+            _r2_sweeper_loop(), name="r2-artifact-sweeper",
+        )
+        app.state.r2_artifact_sweeper_task = _sweeper_task
+    except Exception:
+        # Sweeper failures must never block gateway startup. Per the
+        # plan's L4 rollback, a broken sweeper should leave the rest
+        # of gateway operational and just stop pushing R2 — exactly
+        # the no-op behavior of an unscheduled task.
+        logger.exception("Failed to start r2_artifact_sweeper; continuing without proactive push")
+
     # Seed pricing runtime
     try:
         from pricing_runtime import get_runtime_pricing
@@ -202,7 +219,7 @@ async def lifespan(app: FastAPI):
     yield
     # Stop periodic cleaner tasks cleanly so shutdown doesn't hang on
     # their asyncio.sleep() inside the loops.
-    for attr in ("pack_cleanup_task", "project_cleanup_task"):
+    for attr in ("pack_cleanup_task", "project_cleanup_task", "r2_artifact_sweeper_task"):
         handle = getattr(app.state, attr, None)
         if handle is not None:
             handle.cancel()

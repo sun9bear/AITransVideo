@@ -215,6 +215,19 @@ class Job(Base):
     # with the original source (D23).
     source_content_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
+    # --- R2 publish registry (migration 025, plan 2026-05-07) ---
+    # Per-artifact registry written by gateway/r2_artifact_sweeper.py. NULL
+    # means the sweeper has not processed this job yet (or an editing/commit
+    # overwrite reset it). Each entry shape: see migration 025 docstring.
+    # The download intercept (_resolve_r2_redirect) reads this directly so
+    # downloads keep working after project_dir is cleaned up locally.
+    r2_artifacts: Mapped[list[dict] | None] = mapped_column(JSONB, nullable=True)
+    # Set by the sweeper to ``now + 5min`` after a partial publish failure so
+    # subsequent sweep passes back off this job. NULL = no backoff active.
+    r2_push_retry_after: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     # --- V3-0 observation fields (shadow metering) ---
     estimated_minutes: Mapped[float | None] = mapped_column(Float, nullable=True)
     actual_minutes: Mapped[float | None] = mapped_column(Float, nullable=True)

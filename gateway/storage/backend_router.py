@@ -73,17 +73,44 @@ def is_r2_enabled() -> bool:
     return settings.download_redirect_backend == "r2"
 
 
-def r2_key_for(job_id: str, artifact_key: str, *, local_path: Path | None = None) -> str:
+def r2_key_for(
+    job_id: str,
+    artifact_key: str,
+    *,
+    local_path: Path | None = None,
+    edit_generation: int | None = None,
+) -> str:
     """Compose the canonical R2 object key for a (job, artifact) pair.
 
-    Shape: ``jobs/{job_id}/{artifact_key}{suffix}``. Deliberately mirrors the
-    local artifact naming while preserving the real file suffix so object
-    browsers and downloaded fallback filenames remain readable.
+    Two shapes (plan 2026-05-07 §4.4):
+
+    - ``edit_generation is None`` (legacy lazy-upload path):
+      ``jobs/{job_id}/{artifact_key}{suffix}``
+      — Used by ``_upload_with_lock`` so existing R2 objects stay
+        addressable. Only ``publish.dubbed_video`` ever takes this path,
+        and the download intercept (``_resolve_r2_redirect``) restricts it
+        to ``edit_generation == 0`` so an overwrite cannot be served from
+        a stale object.
+
+    - ``edit_generation is int`` (proactive publisher path, plan §4.4):
+      ``jobs/{job_id}/g{N}/{artifact_key}{suffix}``
+      — Used by ``r2_publisher_lib.r2_publisher.publish_artifacts`` so each
+        edit generation lands on a physically distinct R2 key. Overwrites
+        cannot HEAD-hit the previous generation's object.
+
+    The two shapes are deliberately disjoint — a publish.dubbed_video
+    pushed via the legacy path under shape A and the same artifact pushed
+    by the publisher under shape B coexist as separate R2 objects until
+    R2 lifecycle policy eventually retires the older one.
     """
     suffix = local_path.suffix if local_path is not None else ""
+    if edit_generation is None:
+        base = f"jobs/{job_id}/{artifact_key}"
+    else:
+        base = f"jobs/{job_id}/g{edit_generation}/{artifact_key}"
     if suffix and not artifact_key.endswith(suffix):
-        return f"jobs/{job_id}/{artifact_key}{suffix}"
-    return f"jobs/{job_id}/{artifact_key}"
+        return f"{base}{suffix}"
+    return base
 
 
 def resolve_download_target(

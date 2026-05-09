@@ -79,6 +79,48 @@ def _imports_of(py_path: Path) -> set[str]:
     return names
 
 
+def _top_level_imports_of(py_path: Path) -> set[str]:
+    """Return only module-level (top-level) imports.
+
+    Function-body lazy imports are excluded — those don't run at module
+    load time, so they don't affect "does importing this module also
+    import package X". Used by the gateway-perimeter guard (plan
+    2026-05-07 §2.1) where the concern is gateway STARTUP, not "does
+    every code path stay clear of X".
+    """
+    try:
+        tree = ast.parse(py_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, SyntaxError):
+        return set()
+    names: set[str] = set()
+    # Only scan the module body — not function / class / try bodies.
+    # ``tree.body`` is the top-level statement list; conditional
+    # try/except at module level still counts (it runs at import).
+    def _scan_block(stmts):
+        for node in stmts:
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    names.add(alias.name)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                names.add(node.module)
+                for alias in node.names:
+                    names.add(f"{node.module}.{alias.name}")
+            elif isinstance(node, ast.Try):
+                # ``try: import X except ImportError`` is still
+                # module-level eager.
+                _scan_block(node.body)
+                _scan_block(node.orelse)
+                _scan_block(node.finalbody)
+                for handler in node.handlers:
+                    _scan_block(handler.body)
+            elif isinstance(node, ast.If):
+                _scan_block(node.body)
+                _scan_block(node.orelse)
+            # Function / class / async function bodies are NOT scanned.
+    _scan_block(tree.body)
+    return names
+
+
 # ---------------------------------------------------------------------------
 # Phase 1 structural invariants: deleted files/directories stay gone
 # ---------------------------------------------------------------------------
@@ -245,6 +287,74 @@ def test_gateway_business_modules_no_hardcoded_job_api_url():
         "Hardcoded Job API upstream URL reappeared in gateway business "
         "module(s). Use settings.job_api_upstream instead:\n  "
         + "\n  ".join(offenders)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Contract: r2_publisher_lib package isolation (plan 2026-05-07 §2.1, P1.2)
+# ---------------------------------------------------------------------------
+
+# These directories form the "Gateway-safe" perimeter. Any code reachable
+# from gateway/ must not transitively trigger services.jobs.__init__.py
+# import — that pulls pydub / ffmpeg, which the Gateway container does
+# not install.
+_GATEWAY_SAFE_DIRS = (
+    "gateway",
+    "src/services/r2_publisher_lib",
+)
+
+# Packages forbidden inside the Gateway-safe perimeter. Anything under
+# services.jobs.* is off-limits (it owns the heavy Job-API deps).
+# storage and r2_publisher_lib are explicitly OK because they are also
+# part of the perimeter.
+_FORBIDDEN_PACKAGE_PREFIXES = (
+    "services.jobs",
+)
+
+# Modules that are known-good despite being in the perimeter — e.g.
+# services.manifest_reader is a single-file module with no jobs deps.
+# Empty for now; populate only after a real review approves a new entry.
+_PERIMETER_IMPORT_ALLOWLIST: set[tuple[str, str]] = set()
+
+
+def test_gateway_perimeter_top_level_no_services_jobs():
+    """Plan 2026-05-07 §2.1 / P1.2: gateway/ and r2_publisher_lib/ MUST
+    NOT *eagerly* import from services.jobs.* — that subtree pulls
+    pydub via its __init__ and Gateway's container deliberately omits
+    pydub.
+
+    Scope: top-level (module-load-time) imports only. Function-body
+    lazy imports are intentionally allowed — the existing
+    ``gateway/job_intercept.py`` lazy-imports ``services.jobs.display_name``
+    inside a rare rename path, which is acceptable because:
+      (a) gateway startup never executes that path;
+      (b) refactoring ``display_name`` out of services.jobs is a
+          separate concern with its own review cost.
+
+    Adding a NEW lazy import is allowed without changing this guard.
+    Adding a NEW top-level import requires:
+      1. Refactoring the target out of services.jobs into a flat
+         module (e.g. services.manifest_reader pattern).
+      2. Or adding to ``_PERIMETER_IMPORT_ALLOWLIST`` with reviewer
+         sign-off.
+    """
+    offenders: list[str] = []
+    for safe_dir in _GATEWAY_SAFE_DIRS:
+        scan_root = REPO / safe_dir
+        if not scan_root.exists():
+            continue
+        for py in _iter_py_files(scan_root):
+            rel = py.relative_to(REPO)
+            for imp in _top_level_imports_of(py):
+                for forbidden in _FORBIDDEN_PACKAGE_PREFIXES:
+                    if imp == forbidden or imp.startswith(forbidden + "."):
+                        if (str(rel), imp) in _PERIMETER_IMPORT_ALLOWLIST:
+                            continue
+                        offenders.append(f"{rel}:{imp}")
+    assert offenders == [], (
+        "Gateway-safe perimeter has TOP-LEVEL services.jobs.* import — "
+        "this drags pydub into the Gateway container at startup. See "
+        "plan 2026-05-07 §2.1 / P1.2:\n  " + "\n  ".join(offenders)
     )
 
 

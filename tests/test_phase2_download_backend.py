@@ -104,12 +104,25 @@ class FakeR2:
             raise self.head_exc
         return self.head_return
 
-    def upload_artifact(self, local_path: Path, key: str) -> None:
+    def upload_artifact(
+        self,
+        local_path: Path,
+        key: str,
+        content_type: str = "video/mp4",
+    ) -> None:
+        # Plan 2026-05-07 §4.3 added the ``content_type`` kwarg so the
+        # publisher can push subtitles as text/plain. Default keeps
+        # legacy lazy-upload callers working unchanged.
         self.upload_calls.append((Path(local_path), key))
         if self.upload_exc is not None:
             raise self.upload_exc
 
-    def generate_presigned_download_url(self, key: str, download_filename: str) -> str:
+    def generate_presigned_download_url(
+        self,
+        key: str,
+        download_filename: str,
+        content_type: str = "video/mp4",
+    ) -> str:
         self.presign_calls.append((key, download_filename))
         if self.presign_exc is not None:
             raise self.presign_exc
@@ -443,18 +456,23 @@ def test_frontend_has_no_r2_leakage():
     )
 
 
-# ---- Bonus guard: job_intercept wires exactly one R2 branch ----------------
+# ---- Bonus guard: job_intercept wires exactly one R2 download surface ------
 
 
-def test_intercept_has_single_r2_branch_on_dubbed_video():
-    """AST-level guard: intercept_job_subresource contains exactly one
-    branch that looks at ``download/publish.dubbed_video`` — catches future
-    accidental duplication or broadening to other artifacts."""
+def test_intercept_has_single_r2_download_surface():
+    """Cheap structural guard: intercept_job_subresource contains exactly
+    one branch that looks at ``download/{key}`` URLs.
+
+    Plan 2026-04-23 narrowed this to ``publish.dubbed_video`` literal.
+    Plan 2026-05-07 §4.7 broadened to all downloadable keys via the
+    ``_DOWNLOAD_KEY_RE`` regex match — exactly one ``download_match`` use
+    site. Catches future accidental duplication.
+    """
     source = (GATEWAY_DIR / "job_intercept.py").read_text(encoding="utf-8")
-    # Cheap string count is enough — the artifact key is an unusual literal.
-    matches = source.count('"download/publish.dubbed_video"')
+    matches = source.count("download_match = (")
     assert matches == 1, (
-        f"Expected exactly 1 reference to 'download/publish.dubbed_video' "
-        f"in job_intercept.py, got {matches}. If you are deliberately adding "
-        f"a second surface, update this guard."
+        f"Expected exactly 1 'download_match = (' in job_intercept.py, "
+        f"got {matches}. The download intercept must have a single entry "
+        f"point so we can reason about ordering / fallback semantics. If "
+        f"you are deliberately adding a second surface, update this guard."
     )

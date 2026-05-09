@@ -27,18 +27,15 @@ JOB_API_DEFAULT_PORT = 8877
 JOB_API_MAX_LIST_LIMIT = 100
 
 
-# Express/Studio 输出分层白名单（见 docs/plans/2026-04-18-express-studio-output-filter-plan.md）
-# Express 模式下只允许这些 key 从 /artifacts 暴露
-EXPRESS_ALLOWED_ARTIFACT_KEYS: frozenset[str] = frozenset({
-    "publish.dubbed_video",
-    "publish.dubbed_video_poster",
-})
-# Express 模式下只允许 /download/{key} 这些 key
-EXPRESS_ALLOWED_DOWNLOAD_KEYS: frozenset[str] = frozenset({
-    "publish.dubbed_video",
-})
-# Express 模式下只允许 /stream/{kind} 这些 kind（禁 audio）
-EXPRESS_ALLOWED_STREAM_KINDS: frozenset[str] = frozenset({"video", "poster"})
+# Express/Studio 输出分层白名单
+# 真源在 src/services/r2_publisher_lib/downloadable_keys.py（plan 2026-05-07 §4.2 / P2.1）
+# Gateway (job_intercept) 也读这同一份, 防止下载层和 R2 推送层的 key 集合漂移。
+# 历史原文档: docs/plans/2026-04-18-express-studio-output-filter-plan.md
+from services.r2_publisher_lib.downloadable_keys import (
+    EXPRESS_ALLOWED_ARTIFACT_KEYS,
+    EXPRESS_ALLOWED_DOWNLOAD_KEYS,
+    EXPRESS_ALLOWED_STREAM_KINDS,
+)
 
 
 def _parse_list_pagination(query: str) -> tuple[int | None, int]:
