@@ -192,6 +192,35 @@ export function VoiceModifyTab({
     return map
   }, [segments])
 
+  // 2026-05-09 fix: editing-mode speakers (新增的 speaker_c 等) 在
+  // editing/speakers.json 里, 不在 voice_selection_review.payload.speakers
+  // 里. 直接 render `speakers` 会让用户在音色修改 Tab 看不到新加的说话人.
+  // 合并: baseline speakers + editing 端注册但 baseline 没有的 speakers,
+  // 后者的 segmentCount/totalDurationS 现场从 segments 算.
+  const displaySpeakers = useMemo<SpeakerPayload[]>(() => {
+    const baselineIds = new Set(speakers.map((s) => s.speakerId))
+    const editingExtras: SpeakerPayload[] = (editingSpeakers ?? [])
+      .filter((es) => es.source === "editing" && !baselineIds.has(es.speaker_id))
+      .map((es) => {
+        const segs = segmentsBySpeaker.get(es.speaker_id) ?? []
+        const totalMs = segs.reduce((acc, s) => {
+          const dur = Number(s.end_ms ?? 0) - Number(s.start_ms ?? 0)
+          return acc + (dur > 0 ? dur : 0)
+        }, 0)
+        return {
+          speakerId: es.speaker_id,
+          speakerName: es.display_name,
+          segmentCount: segs.length,
+          totalDurationS: totalMs / 1000,
+          canClone: true,
+          autoMatchedByProvider: {},
+          autoMatchedVoice: null,
+          probeTexts: [],
+        }
+      })
+    return [...speakers, ...editingExtras]
+  }, [speakers, editingSpeakers, segmentsBySpeaker])
+
   // ---- Bootstrap: same load sequence as VoiceSelectionPanel ----
   useEffect(() => {
     let cancelled = false
@@ -414,7 +443,7 @@ export function VoiceModifyTab({
 
   const handleProviderChange = useCallback((speakerId: string, provider: string) => {
     setDraftStates((prev) => {
-      const sp = speakers.find((s) => s.speakerId === speakerId)
+      const sp = displaySpeakers.find((s) => s.speakerId === speakerId)
       const provMatch = sp?.autoMatchedByProvider[provider]
       return {
         ...prev,
@@ -460,7 +489,7 @@ export function VoiceModifyTab({
     setPreviewLoading((p) => ({ ...p, [speakerId]: true }))
     setPreviewError((p) => ({ ...p, [speakerId]: null }))
     try {
-      const sp = speakers.find((s) => s.speakerId === speakerId)
+      const sp = displaySpeakers.find((s) => s.speakerId === speakerId)
       const probeText = sp?.probeTexts?.[0]?.cnText || undefined
       const result = await previewVoice(jobId, state.voiceId, {
         ttsProvider: state.selectedProvider,
@@ -564,7 +593,7 @@ export function VoiceModifyTab({
         toast.success("已恢复原音色")
         // Also reset the draft state to the auto-match so the dropdown
         // no longer shows the overridden voice.
-        const sp = speakers.find((s) => s.speakerId === speakerId)
+        const sp = displaySpeakers.find((s) => s.speakerId === speakerId)
         const prov = draftStates[speakerId]?.selectedProvider ?? defaultProvider
         const provMatch = sp?.autoMatchedByProvider[prov]
         setDraftStates((prev) => ({
@@ -592,7 +621,7 @@ export function VoiceModifyTab({
   }, [draftStates, fallbackVoices, hasMultiProvider, providerMap])
 
   const canSpeakerClone = useCallback((speakerId: string): boolean => {
-    const sp = speakers.find((s) => s.speakerId === speakerId)
+    const sp = displaySpeakers.find((s) => s.speakerId === speakerId)
     if (!sp?.canClone) return false
     const state = draftStates[speakerId]
     if (!state) return false
@@ -613,7 +642,7 @@ export function VoiceModifyTab({
     )
   }
 
-  if (loadError && speakers.length === 0) {
+  if (loadError && displaySpeakers.length === 0) {
     return (
       <section className="surface-card p-6">
         <p className="text-red-500">{loadError}</p>
@@ -626,7 +655,7 @@ export function VoiceModifyTab({
 
   const selectedSpeakerRef = cloneModalSpeaker
     ? (() => {
-        const sp = speakers.find((s) => s.speakerId === cloneModalSpeaker)
+        const sp = displaySpeakers.find((s) => s.speakerId === cloneModalSpeaker)
         return sp ? { speakerId: sp.speakerId, speakerName: sp.speakerName } : null
       })()
     : null
@@ -663,7 +692,7 @@ export function VoiceModifyTab({
 
         {/* Speaker list */}
         <div className="space-y-3">
-          {speakers.map((sp, index) => {
+          {displaySpeakers.map((sp, index) => {
             const state = draftStates[sp.speakerId]
             const currentProvider = state?.selectedProvider ?? defaultProvider
             const voicesForProvider = getVoicesForSpeaker(sp.speakerId)
@@ -1056,11 +1085,11 @@ export function VoiceModifyTab({
           })}
         </div>
 
-        {speakers.length === 0 && (
+        {displaySpeakers.length === 0 && (
           <p className="text-sm text-muted-foreground">该任务没有说话人信息。</p>
         )}
 
-        {loadError && speakers.length > 0 && (
+        {loadError && displaySpeakers.length > 0 && (
           <p className="text-xs text-red-500">加载时出现部分错误：{loadError}</p>
         )}
       </section>
