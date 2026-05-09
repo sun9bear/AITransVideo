@@ -506,3 +506,156 @@ def test_editing_speakers_routed_as_post_edit_mutation() -> None:
     判定为 True（feature flag gate + lock dispatch 都会受这个 helper 保护）。"""
     from gateway.job_intercept import _is_post_edit_mutation_subpath
     assert _is_post_edit_mutation_subpath("editing/speakers") is True
+
+
+# =====================================================================
+# §6 Add-speaker plan (2026-05-09 Task 5) — voice profile inference
+# =====================================================================
+#
+# Centralised guards for the editing_voice_profile.py module. The runtime-
+# mocked tests in tests/test_editing_voice_profile_async.py exercise the
+# behaviour; these AST-level guards lock in the static contract so the
+# invariants stay visible the moment someone opens this central guard file.
+#
+# Why duplicate "no paid api imports" in two places? Because (a) this file
+# is the canonical "go here for invariants" reference, and (b) the broader
+# forbidden-token list here covers TTS provider modules
+# (minimax_tts / volcengine_tts / cosyvoice_tts) on top of clone modules,
+# which the Task 5 unit test does not. A drift in either direction trips
+# at least one test.
+
+
+_VOICE_PROFILE_FORBIDDEN_IMPORTS: tuple[str, ...] = (
+    "tts_generator",
+    "voice_clone",
+    "minimax_clone",
+    "voice_clone_router",
+    "minimax_tts",
+    "volcengine_tts",
+    "cosyvoice_tts",
+)
+
+
+def test_editing_voice_profile_module_no_paid_api_imports() -> None:
+    """CLAUDE.md hard constraint: editing_voice_profile.py MUST NOT import
+    any TTS / clone module. Voice profile inference is a pure LLM call via
+    review_pass3_voice_profiles(mode='studio') — admin-configured S2 Pass 3
+    LLM (a known cost path billed under the admin account, not violating the
+    "user must explicitly trigger" rule for clone/TTS provider charges).
+
+    A centralised AST scan covers more forbidden tokens than the unit-test
+    counterpart in tests/test_editing_voice_profile_async.py — adding a
+    sibling provider import here trips this guard even if the unit test
+    list lags."""
+    src = _read("src/services/jobs/editing_voice_profile.py")
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            mod = (getattr(node, "module", None) or "")
+            for alias in getattr(node, "names", []):
+                full = f"{mod}.{alias.name}".strip(".")
+                for forbidden in _VOICE_PROFILE_FORBIDDEN_IMPORTS:
+                    assert forbidden not in full, (
+                        f"forbidden import in editing_voice_profile.py: {full} "
+                        f"— violates CLAUDE.md paid API constraint (matched: {forbidden!r})"
+                    )
+
+
+def test_editing_voice_profile_uses_studio_pass3_model() -> None:
+    """D3 (plan 2026-05-09 Task 5): voice profile inference must call
+    review_pass3_voice_profiles with mode='studio' as a literal string —
+    not a variable, not 'express', not hardcoded to a specific provider.
+    The Studio mode resolves the admin-configured S2 Pass 3 LLM at runtime.
+
+    Static AST scan complements the runtime mock in
+    tests/test_editing_voice_profile_async.py::test_inference_uses_studio_mode
+    by catching code drift even before unit tests run (e.g. someone refactors
+    the mode argument to a default and the runtime check still passes)."""
+    src = _read("src/services/jobs/editing_voice_profile.py")
+    tree = ast.parse(src)
+    found = False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        target = node.func
+        name = (
+            target.id if isinstance(target, ast.Name)
+            else target.attr if isinstance(target, ast.Attribute)
+            else None
+        )
+        if name != "review_pass3_voice_profiles":
+            continue
+        mode_kw = next(
+            (kw for kw in node.keywords if kw.arg == "mode"), None,
+        )
+        assert mode_kw is not None, (
+            "review_pass3_voice_profiles call missing 'mode' kwarg"
+        )
+        # mode must be a literal Constant 'studio', not a Name lookup.
+        assert isinstance(mode_kw.value, ast.Constant), (
+            "mode= must be a string literal, got "
+            f"{type(mode_kw.value).__name__}"
+        )
+        assert mode_kw.value.value == "studio", (
+            f"mode= must be 'studio', got {mode_kw.value.value!r}"
+        )
+        found = True
+    assert found, (
+        "no review_pass3_voice_profiles call found in editing_voice_profile.py"
+    )
+
+
+_COMMIT_FORBIDDEN_PROVIDER_TOKENS: tuple[str, ...] = (
+    "tts_generator",
+    "voice_clone",
+    "minimax_clone",
+    "voice_clone_router",
+    "minimax_tts",
+    "volcengine_tts",
+    "cosyvoice_tts",
+)
+
+
+def test_editing_commit_module_no_paid_api_imports() -> None:
+    """D26 hard constraint extended: editing_commit.py is the entry point
+    for the alignment → publish pipeline that runs after a user clicks
+    commit. It MUST NOT import any paid TTS / clone provider — the
+    pipeline reuses existing draft TTS only. The pre-existing
+    test_editing_commit_pipeline_does_not_call_tts_generator above scans
+    for the literal 'tts_generator' substring; this guard widens the net
+    to all known provider tokens via AST, so adding a fresh provider import
+    is caught even if it arrives without the legacy 'tts_generator' name."""
+    src = _read("src/services/jobs/editing_commit.py")
+    tree = ast.parse(src)
+    offending: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            mod = (getattr(node, "module", None) or "")
+            for alias in getattr(node, "names", []):
+                full = f"{mod}.{alias.name}".strip(".")
+                for forbidden in _COMMIT_FORBIDDEN_PROVIDER_TOKENS:
+                    if forbidden in full:
+                        offending.append(f"{full} (matched: {forbidden!r})")
+    assert not offending, (
+        "editing_commit.py imports paid-API provider modules — commit pipeline "
+        "must reuse existing drafts only (D26):\n"
+        + "\n".join(f"  {o}" for o in offending)
+    )
+
+
+@pytest.mark.skip(
+    reason="待 AVT_ENABLE_POST_EDIT toggling fixture 引入后接通 — D29 双端 gate "
+    "已在 _is_post_edit_mutation_subpath / settings.enable_post_edit 两条路径"
+    "上由 test_editing_speakers_in_simple_mutation_whitelist + "
+    "test_editing_speakers_routed_as_post_edit_mutation 间接覆盖；本测试"
+    "占位待端到端 HTTP fixture 通过启动 gateway with enable_post_edit=False "
+    "并 POST /job-api/jobs/{id}/editing/speakers 验证 404 短路。"
+)
+def test_post_speakers_endpoint_404_when_post_edit_disabled() -> None:
+    """D29 双端 gate (plan 2026-05-09 Task 4): when AVT_ENABLE_POST_EDIT=false
+    the POST /editing/speakers route must return 404 'post_edit_disabled' at
+    the gateway layer before reaching the Job API. Placeholder until an
+    end-to-end ASGI fixture for gateway feature-flag toggling is introduced.
+    Static gating coverage: the two whitelist tests above already verify the
+    helper-level routing; this test would add the actual HTTP-status assertion."""
+    pass
