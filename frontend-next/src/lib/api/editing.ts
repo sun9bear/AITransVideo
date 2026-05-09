@@ -6,7 +6,7 @@
  * and editing state checks.
  */
 
-import { apiClient } from "@/lib/api/client"
+import { ApiError, apiClient } from "@/lib/api/client"
 
 // ---------------------------------------------------------------------------
 // Types
@@ -419,5 +419,91 @@ export async function clearVoiceOverride(
   return apiClient.post(
     `/jobs/${jobId}/editing/voice-map`,
     { body: { segment_id: segmentId, action: "clear" } },
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Editing-mode speakers (Task 6 — plan 2026-05-09-studio-editing-add-speaker)
+// ---------------------------------------------------------------------------
+
+/**
+ * Merged baseline + editing speaker view returned by
+ * ``GET /jobs/{id}/editing/speakers``. Baseline rows have ``source =
+ * "baseline"`` and may omit ``color`` / ``created_at`` / ``voice_profile``
+ * since pre-Task-3 tasks never wrote those fields. Editing rows always
+ * carry ``profile_status`` and any inferred ``voice_profile`` once the
+ * background retry pipeline finishes (Task 4 / Task 5).
+ */
+export interface EditingSpeaker {
+  speaker_id: string
+  display_name: string
+  color?: string | null
+  source: "baseline" | "editing"
+  created_at?: string
+  profile_status: "pending_segments" | "inferring" | "ready" | "failed"
+  profile_error?: string | null
+  voice_profile?: Record<string, unknown> | null
+}
+
+/**
+ * Thrown when ``createEditingSpeaker`` hits a 409 with body
+ * ``{ code: "display_name_conflict" }``. Dialog catches this to show the
+ * "名字已被使用" inline error without surfacing the raw ApiError message.
+ */
+export class DisplayNameConflict extends Error {
+  constructor() {
+    super("display_name_conflict")
+    this.name = "DisplayNameConflict"
+  }
+}
+
+export async function listEditingSpeakers(
+  jobId: string,
+): Promise<EditingSpeaker[]> {
+  const body = await apiClient.get<{ speakers: EditingSpeaker[] }>(
+    `/jobs/${jobId}/editing/speakers`,
+  )
+  return body.speakers
+}
+
+export async function createEditingSpeaker(
+  jobId: string,
+  displayName: string,
+): Promise<EditingSpeaker> {
+  try {
+    return await apiClient.post<EditingSpeaker>(
+      `/jobs/${jobId}/editing/speakers`,
+      { body: { display_name: displayName } },
+    )
+  } catch (e: unknown) {
+    // Backend raises JobConflictError → 409 with payload
+    // ``{ code: "display_name_conflict", message: "..." }``. ApiError
+    // exposes ``status: number`` + ``payload: unknown`` (see
+    // lib/api/client.ts).
+    if (e instanceof ApiError && e.status === 409) {
+      const payload = e.payload as { code?: string } | null
+      if (payload?.code === "display_name_conflict") {
+        throw new DisplayNameConflict()
+      }
+    }
+    throw e
+  }
+}
+
+export interface RetryProfileResponse {
+  speaker_id: string
+  /** ``pending_segments`` = real retry kicked off; ``unknown`` = speaker_id
+   *  not in editing/baseline (200, no-op) — Task 5 contract. */
+  status: "pending_segments" | "unknown"
+  scheduled: boolean
+}
+
+export async function retryEditingSpeakerProfile(
+  jobId: string,
+  speakerId: string,
+): Promise<RetryProfileResponse> {
+  return apiClient.post<RetryProfileResponse>(
+    `/jobs/${jobId}/editing/speakers/${speakerId}/retry-profile`,
+    { body: {} },
   )
 }
