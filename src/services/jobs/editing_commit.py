@@ -344,9 +344,12 @@ def _merge_editing_speakers_into_review_state(
     for sp in edit_speakers:
         names[sp.speaker_id] = sp.display_name
     sr_payload["speaker_names"] = names
+    # Preserve dict insertion order (Python 3.7+) — matches baseline writers
+    # in pipeline/process.py:3596-3600 which use detection order. New
+    # editing speakers naturally append to the end.
     sr_payload["speaker_options"] = [
         {"speaker_id": sid, "display_name": dn}
-        for sid, dn in sorted(names.items())
+        for sid, dn in names.items()
     ]
     sr_status = sr.get("status") or REVIEW_STATUS_APPROVED
     manager.set_stage(SPEAKER_REVIEW_STAGE, status=sr_status, payload=sr_payload)

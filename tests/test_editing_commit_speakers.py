@@ -264,3 +264,51 @@ def test_overwrite_commit_merges_editing_speakers(tmp_path: Path) -> None:
     assert vsr is not None
     profiles = vsr["payload"].get("voice_profiles", {})
     assert profiles.get("speaker_b") == {"voice_description": "calm"}
+
+
+def test_merge_preserves_speaker_options_insertion_order(tmp_path: Path) -> None:
+    """speaker_options 顺序 = baseline detection 顺序 + 新 editing speakers
+    append 末尾。不按字母序排——与 pipeline/process.py 写入语义一致。"""
+    project = tmp_path / "project_xyz"
+    edit_dir = project / "editor" / "editing"
+    edit_dir.mkdir(parents=True)
+    rs_path = project / "review_state.json"
+    # baseline 故意逆字母序，模拟 detection 不是按字母的场景
+    rs_path.write_text(json.dumps({
+        "stages": {
+            "speaker_review": {
+                "stage": "speaker_review",
+                "payload": {
+                    "speaker_names": {"speaker_z": "Zara", "speaker_a": "Alice"},
+                    "speaker_options": [
+                        {"speaker_id": "speaker_z", "display_name": "Zara"},
+                        {"speaker_id": "speaker_a", "display_name": "Alice"},
+                    ],
+                },
+            },
+            "voice_selection_review": {
+                "stage": "voice_selection_review",
+                "payload": {},
+            },
+        }
+    }), "utf-8")
+    # editing 加一个新 speaker
+    create_speaker(
+        project, display_name="新人",
+        baseline_speakers=[
+            {"speaker_id": "speaker_z"}, {"speaker_id": "speaker_a"}
+        ],
+    )
+    _merge_editing_speakers_into_review_state(project, load_speakers(project))
+
+    rs = ReviewStateManager(project / "review_state.json")
+    sr = rs.get_stage(SPEAKER_REVIEW_STAGE)
+    options = sr["payload"]["speaker_options"]
+    # baseline z/a 顺序保留 + 新 speaker append 末尾
+    ids = [o["speaker_id"] for o in options]
+    assert ids[0] == "speaker_z"
+    assert ids[1] == "speaker_a"
+    # 第三个是新 speaker (具体 id 取决于 next_speaker_id 分配，
+    # baseline 占了 a + z，应该选 b)
+    assert ids[2] == "speaker_b"
+    assert options[2]["display_name"] == "新人"
