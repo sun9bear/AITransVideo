@@ -1915,6 +1915,18 @@ def _is_post_edit_mutation_subpath(subpath: str) -> bool:
         }
     ):
         return True
+    # editing/speakers/{speaker_id}/retry-profile — Task 5 (plan 2026-05-09).
+    # Dynamic path (speaker_id is variable) so it can't live in the static
+    # _POST_EDIT_SIMPLE_MUTATION_SUBPATHS frozenset. POST mutates per-speaker
+    # state (resets profile_status + re-schedules Pass 3 inference), so it
+    # MUST be on the editing-gated allowlist.
+    if (
+        len(parts) == 4
+        and parts[0] == "editing"
+        and parts[1] == "speakers"
+        and parts[3] == "retry-profile"
+    ):
+        return True
     return False
 
 

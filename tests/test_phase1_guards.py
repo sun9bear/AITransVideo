@@ -299,6 +299,20 @@ def test_gateway_logs_redaction_gated_on_role() -> None:
     )
 
 
+def test_retry_profile_path_in_post_edit_whitelist() -> None:
+    """Task 5 (plan 2026-05-09): retry-profile is a dynamic path
+    (editing/speakers/{speaker_id}/retry-profile) and must be recognised by
+    _is_post_edit_mutation_subpath so the AVT_ENABLE_POST_EDIT feature flag
+    gates it. Missing here = endpoint reachable when post-edit is off."""
+    from gateway.job_intercept import _is_post_edit_mutation_subpath
+    assert _is_post_edit_mutation_subpath(
+        "editing/speakers/speaker_c/retry-profile"
+    )
+    assert _is_post_edit_mutation_subpath(
+        "editing/speakers/speaker_a1b2c3d4/retry-profile"
+    )
+
+
 # =====================================================================
 # §4 Whitelists
 # =====================================================================

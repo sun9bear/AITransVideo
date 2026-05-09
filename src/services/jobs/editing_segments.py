@@ -434,6 +434,26 @@ def patch_editing_segment(
             # Either text field edit means the current TTS is for stale content.
             mark_segment_status(project_dir, segment_id, SEGMENT_STATUS_TEXT_DIRTY)
 
+        # Task 5 (plan 2026-05-09): when the user reassigns a segment to an
+        # editing-mode speaker that was created without segments, this is
+        # the point where Pass 3-style voice profile inference becomes
+        # possible — the speaker now has at least one audio range to
+        # sample. ``maybe_trigger_inference`` is idempotent (only fires if
+        # profile_status == 'pending_segments') and fully non-blocking, so
+        # repeat PATCHes of the same segment cost nothing extra. Wrapped
+        # in try/except so an inference-side bug never blocks a successful
+        # segment patch.
+        if speaker_changed:
+            try:
+                from services.jobs.editing_voice_profile import (
+                    maybe_trigger_inference,
+                )
+                maybe_trigger_inference(project_dir, str(applied["speaker_id"]))
+            except Exception:
+                logger.exception(
+                    "maybe_trigger_inference failed; continuing"
+                )
+
         return updated
 
 

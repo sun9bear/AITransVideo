@@ -346,3 +346,146 @@ def test_get_404_when_job_missing(tmp_path: Path) -> None:
         assert status == HTTPStatus.NOT_FOUND.value, (status, body)
     finally:
         server.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Retry voice-profile inference (Task 5)
+# ---------------------------------------------------------------------------
+
+
+def test_retry_profile_resets_status_to_pending(tmp_path: Path, monkeypatch) -> None:
+    """POST /editing/speakers/{sid}/retry-profile resets failed → pending
+    and reschedules inference. With a sync executor + mocked Pass 3 we
+    can observe the full chain in one HTTP call."""
+    from concurrent.futures import Future
+    from unittest.mock import patch as _patch
+
+    from services.jobs import editing_voice_profile as evp
+    from services.jobs.editing_speakers import load_speakers
+    from services.jobs.editing_voice_profile import _update_speaker_status
+
+    service, server, base_url = _start_server(tmp_path)
+    try:
+        job_id, project_dir = _build_editing_job(service, tmp_path)
+        # Create a new speaker, mark it failed so retry has work to do.
+        post_status, post_body = _http_request(
+            "POST",
+            f"{base_url}/jobs/{job_id}/editing/speakers",
+            {"display_name": "Sundar"},
+        )
+        assert post_status == HTTPStatus.CREATED.value, (post_status, post_body)
+        speaker_id = post_body["speaker_id"]
+        _update_speaker_status(
+            project_dir, speaker_id,
+            status="failed", error="LLM down",
+        )
+
+        # Sync executor so the retry's submit() runs the inference inline,
+        # giving us a deterministic post-state to assert on.
+        class _SyncExecutor:
+            def submit(self, fn, *args, **kw):
+                with _patch(
+                    "services.jobs.editing_voice_profile.review_pass3_voice_profiles",
+                    return_value={speaker_id: {"voice_description": "x"}},
+                ):
+                    fn(*args, **kw)
+                f = Future(); f.set_result(None); return f
+        monkeypatch.setattr(evp, "_executor", _SyncExecutor())
+
+        retry_status, retry_body = _http_request(
+            "POST",
+            f"{base_url}/jobs/{job_id}/editing/speakers/{speaker_id}/retry-profile",
+            None,
+        )
+        assert retry_status == HTTPStatus.ACCEPTED.value, (retry_status, retry_body)
+        assert retry_body == {
+            "speaker_id": speaker_id, "status": "pending_segments",
+        }
+        sp = next(
+            s for s in load_speakers(project_dir) if s.speaker_id == speaker_id
+        )
+        # After the sync executor's mocked Pass 3, status is 'ready'.
+        assert sp.profile_status == "ready"
+        assert sp.voice_profile == {"voice_description": "x"}
+    finally:
+        server.shutdown()
+
+
+def test_retry_profile_unknown_speaker_is_soft_noop(tmp_path: Path) -> None:
+    """Unknown speaker_id → 202 + no crash; speakers.json unchanged."""
+    service, server, base_url = _start_server(tmp_path)
+    try:
+        job_id, project_dir = _build_editing_job(service, tmp_path)
+        speakers_path = project_dir / "editor" / "editing" / "speakers.json"
+        before = (
+            speakers_path.read_text("utf-8") if speakers_path.is_file() else None
+        )
+        status, body = _http_request(
+            "POST",
+            f"{base_url}/jobs/{job_id}/editing/speakers/speaker_zzz/retry-profile",
+            None,
+        )
+        assert status == HTTPStatus.ACCEPTED.value, (status, body)
+        after = (
+            speakers_path.read_text("utf-8") if speakers_path.is_file() else None
+        )
+        assert before == after  # no mutation for unknown id
+    finally:
+        server.shutdown()
+
+
+def test_retry_profile_bad_speaker_id_format_returns_400(tmp_path: Path) -> None:
+    """speaker_id not matching ``speaker_[a-z0-9_]{1,16}`` → 400 ValueError."""
+    service, server, base_url = _start_server(tmp_path)
+    try:
+        job_id, _ = _build_editing_job(service, tmp_path)
+        # ``Speaker_A`` (uppercase) violates the regex.
+        status, body = _http_request(
+            "POST",
+            f"{base_url}/jobs/{job_id}/editing/speakers/Speaker_A/retry-profile",
+            None,
+        )
+        assert status == HTTPStatus.BAD_REQUEST.value, (status, body)
+        assert "speaker_id" in body["error"].lower()
+    finally:
+        server.shutdown()
+
+
+def test_retry_profile_409_when_job_not_in_editing(tmp_path: Path) -> None:
+    """Retry must be gated by editing state — same 409 as other mutations."""
+    service, server, base_url = _start_server(tmp_path)
+    try:
+        # Build a succeeded job but DO NOT call enter_editing
+        project_dir = tmp_path / "projects" / "job_nope"
+        editor = project_dir / "editor"
+        editor.mkdir(parents=True)
+        (editor / "segments.json").write_text("[]", encoding="utf-8")
+        now = _iso_now()
+        record = JobRecord(
+            job_id="job_nope",
+            job_type="localize_video",
+            source_type="youtube_url",
+            source_ref="https://example.com/v",
+            output_target="editor",
+            speakers="auto",
+            voice_a=None,
+            voice_b=None,
+            status=JOB_STATUS_SUCCEEDED,
+            current_stage="completed",
+            progress_message=None,
+            created_at=now,
+            updated_at=now,
+            completed_at=now,
+            project_dir=str(project_dir),
+            service_mode="studio",
+        )
+        service.store.save_job(record)
+
+        status, body = _http_request(
+            "POST",
+            f"{base_url}/jobs/job_nope/editing/speakers/speaker_a/retry-profile",
+            None,
+        )
+        assert status == HTTPStatus.CONFLICT.value, (status, body)
+    finally:
+        server.shutdown()

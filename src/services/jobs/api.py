@@ -992,6 +992,62 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                         raise conflict from exc
                     self._write_json(HTTPStatus.CREATED, _asdict(speaker))
                     return
+                # POST /jobs/{id}/editing/speakers/{speaker_id}/retry-profile —
+                # Task 5 (plan 2026-05-09): user-initiated retry after a Pass 3
+                # voice profile inference left the speaker in 'failed' (or any
+                # non-pending state). Resets profile_status back to
+                # 'pending_segments' and re-fires ``maybe_trigger_inference``.
+                # Idempotent for ``pending_segments`` callers because the helper
+                # only schedules the LLM call when status is 'pending_segments'.
+                # Returns 202 (request accepted, work happens async on the
+                # editvp ThreadPoolExecutor).
+                if (len(path_parts) == 6 and path_parts[0] == "jobs"
+                        and path_parts[2] == "editing" and path_parts[3] == "speakers"
+                        and path_parts[5] == "retry-profile"):
+                    import re as _re_speaker
+                    from services.jobs.editing import EditingConflictError
+                    from services.jobs.models import JOB_STATUS_EDITING
+
+                    record = service.require_job(path_parts[1])
+                    if record.status != JOB_STATUS_EDITING:
+                        raise EditingConflictError(
+                            f"job {path_parts[1]} is not in editing state "
+                            f"(current: {record.status})"
+                        )
+                    project_dir = _require_project_dir(record)
+                    speaker_id = path_parts[4]
+                    if not _re_speaker.fullmatch(
+                        r"speaker_[a-z0-9_]{1,16}", speaker_id
+                    ):
+                        raise ValueError(
+                            f"invalid speaker_id format: {speaker_id!r}"
+                        )
+                    from services.jobs.editing_speakers import load_speakers
+                    from services.jobs.editing_voice_profile import (
+                        _update_speaker_status,
+                        maybe_trigger_inference,
+                    )
+                    # Tolerant: unknown speaker_id is a soft no-op (matches the
+                    # pattern of POST /editing/voice-map/clear etc.). Without
+                    # a registered speaker there's nothing to retry; we don't
+                    # 404 because that would force the frontend to special-case
+                    # a transient race (speaker created on one tab, retried on
+                    # another after cancel).
+                    known = {sp.speaker_id for sp in load_speakers(project_dir)}
+                    if speaker_id in known:
+                        _update_speaker_status(
+                            project_dir, speaker_id,
+                            status="pending_segments",
+                        )
+                        maybe_trigger_inference(project_dir, speaker_id)
+                    self._write_json(
+                        HTTPStatus.ACCEPTED,
+                        {
+                            "speaker_id": speaker_id,
+                            "status": "pending_segments",
+                        },
+                    )
+                    return
                 # POST /jobs/{id}/editing/revert-unsynced-text — discard text edits
                 # that do not have matching regenerated TTS.
                 if (len(path_parts) == 4 and path_parts[0] == "jobs"
