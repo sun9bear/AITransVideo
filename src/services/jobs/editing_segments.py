@@ -395,6 +395,7 @@ def patch_editing_segment(
         )
         if speaker_changed:
             _propagate_speaker_change(
+                project_dir=project_dir,
                 segments=segments,
                 index=index,
                 updated=updated,
@@ -438,6 +439,7 @@ def patch_editing_segment(
 
 def _propagate_speaker_change(
     *,
+    project_dir: str | Path,
     segments: list[dict[str, Any]],
     index: int,
     updated: dict[str, Any],
@@ -446,11 +448,12 @@ def _propagate_speaker_change(
     """Mutate ``updated`` in-place with the new speaker's baseline voice.
 
     Rules:
-    - The new speaker_id MUST already appear in ``segments`` (at least
-      one other segment uses it). This keeps the allowed-speakers set
-      tied to the task's actual speaker universe — no implicit speaker
-      creation, no upstream coordination with the pipeline's speaker
-      registry.
+    - The new speaker_id MUST be known to the task — either already
+      present in ``segments`` (at least one other segment uses it) OR
+      registered in ``editor/editing/speakers.json`` (a freshly created
+      editing speaker that has no segments assigned yet). This keeps
+      the allowed-speakers set tied to the task's known speaker
+      universe — no implicit speaker creation.
     - Copy ``voice_id`` + ``tts_provider`` from the first other segment
       of the new speaker. This makes re-synth automatically use the
       new speaker's voice without the user also having to touch the
@@ -489,11 +492,18 @@ def _propagate_speaker_change(
                 rep_tts_provider = prov
 
     if new_speaker_id not in known_speakers:
-        raise ValueError(
-            f"speaker {new_speaker_id!r} not found in task; known: "
-            f"{sorted(known_speakers)}. "
-            "Cannot reassign to an unknown speaker — no implicit creation."
-        )
+        # 2026-05-09: editing/speakers.json may register a fresh speaker that
+        # has no segments yet. Accept those IDs as the legitimate "first
+        # segment assignment" path. Late import avoids a top-level cycle
+        # (editing_speakers imports from this module).
+        from services.jobs.editing_speakers import load_speakers
+        editing_ids = {sp.speaker_id for sp in load_speakers(project_dir)}
+        if new_speaker_id not in editing_ids:
+            raise ValueError(
+                f"speaker {new_speaker_id!r} not found in task or editing "
+                f"speakers; known: {sorted(known_speakers | editing_ids)}. "
+                "Cannot reassign to an unknown speaker — no implicit creation."
+            )
 
     # Propagate voice if we found a rep. (Edge case: the speaker exists
     # but only on the segment being edited, or all same-speaker segments
@@ -871,6 +881,7 @@ def split_editing_segment(
         original_speaker = original.get("speaker_id")
         if seg_a.get("speaker_id") != original_speaker:
             _propagate_speaker_change(
+                project_dir=project_dir,
                 segments=segments,
                 index=index,
                 updated=seg_a,
@@ -878,6 +889,7 @@ def split_editing_segment(
             )
         if seg_b.get("speaker_id") != original_speaker:
             _propagate_speaker_change(
+                project_dir=project_dir,
                 segments=segments,
                 index=index,
                 updated=seg_b,
