@@ -130,8 +130,20 @@ def set_voice_override(
     provider = str(provider).strip()
     voice_id = str(voice_id).strip()
     if not provider:
+        # 2026-05-09 加日志: editing add-speaker plan 上线后碰到 400 排障——
+        # 没有 provider 时记一行让我们能在 stdout 反查 payload。
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "set_voice_override: empty provider (segment_id=%r voice_id=%r)",
+            segment_id, voice_id,
+        )
         raise ValueError("provider must be non-empty")
     if not voice_id:
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "set_voice_override: empty voice_id (segment_id=%r provider=%r)",
+            segment_id, provider,
+        )
         raise ValueError("voice_id must be non-empty")
     editing_dir = Path(project_dir) / EDITING_SUBDIR
     if not editing_dir.is_dir():

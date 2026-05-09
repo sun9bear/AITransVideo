@@ -14,6 +14,7 @@ import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 from services._file_lock import file_lock
 from services.jobs.editing_speakers import (
@@ -90,13 +91,20 @@ def _gather_inference_inputs(
         if isinstance(raw, list):
             segments_raw = [s for s in raw if isinstance(s, dict)]
 
+    # Pass 3 (transcript_reviewer._extract_speaker_audio_clips) 走属性访问:
+    # `line.speaker_id` / `line.start_ms` / `line.end_ms` —— 直接传 dict 会
+    # raise AttributeError 让 Pass 3 的 audio extraction 失败 (2026-05-09 实
+    # 测过). 用 SimpleNamespace 把 dict 当对象包一层最小成本。
     lines = [
-        {
-            "start_ms": int(s.get("start_ms", 0)),
-            "end_ms": int(s.get("end_ms", 0)),
-            "speaker_id": s.get("speaker_id"),
-            "text": s.get("source_text") or s.get("cn_text") or "",
-        }
+        SimpleNamespace(
+            start_ms=int(s.get("start_ms", 0)),
+            end_ms=int(s.get("end_ms", 0)),
+            speaker_id=s.get("speaker_id"),
+            text=s.get("source_text") or s.get("cn_text") or "",
+            source_text=s.get("source_text") or "",
+            cn_text=s.get("cn_text") or "",
+            index=int(s.get("segment_id", 0)) if str(s.get("segment_id", "")).isdigit() else 0,
+        )
         for s in segments_raw
     ]
 

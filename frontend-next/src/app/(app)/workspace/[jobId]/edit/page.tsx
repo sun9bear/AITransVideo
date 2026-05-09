@@ -367,6 +367,12 @@ export default function VideoEditPage() {
         })
         const friendly = speakerNameMap[speaker_id] || speaker_id
         toast.success(`已改为说话人 ${friendly}；重合成时将使用其音色`)
+        // 2026-05-09: 段落归属到一个 editing-mode 新 speaker 时,后端会
+        // 触发一次 voice profile 推断 (status: pending_segments →
+        // inferring → ready/failed). 立即 refetch 让 UI 不停留在
+        // "待归属段落"——polling 只在 status==='inferring' 时跑,推断
+        // 太快直接到 ready 时 polling 永远没开始。
+        void refetchEditingSpeakers()
       } catch (error) {
         toast.error(`改说话人失败: ${getErrorMessage(error)}`)
       } finally {
@@ -377,7 +383,7 @@ export default function VideoEditPage() {
         })
       }
     },
-    [jobId, speakerNameMap],
+    [jobId, speakerNameMap, refetchEditingSpeakers],
   )
 
   // ---- Source text (English) edit ----
