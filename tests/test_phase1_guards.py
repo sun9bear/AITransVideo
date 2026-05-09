@@ -477,3 +477,18 @@ def test_frontend_api_client_hits_backend_path(
         f"function {frontend_call} body does not reference backend path "
         f"{expected_backend_path!r}"
     )
+
+
+def test_editing_speakers_in_simple_mutation_whitelist() -> None:
+    """Plan §Task 4: POST /editing/speakers 是 mutation 端点，必须进
+    _POST_EDIT_SIMPLE_MUTATION_SUBPATHS frozenset，否则 AVT_ENABLE_POST_EDIT=false
+    时 gateway 不会 short-circuit 它，feature flag 形同虚设。"""
+    from gateway.job_intercept import _POST_EDIT_SIMPLE_MUTATION_SUBPATHS
+    assert "editing/speakers" in _POST_EDIT_SIMPLE_MUTATION_SUBPATHS
+
+
+def test_editing_speakers_routed_as_post_edit_mutation() -> None:
+    """端到端契约：subpath 'editing/speakers' 走 _is_post_edit_mutation_subpath
+    判定为 True（feature flag gate + lock dispatch 都会受这个 helper 保护）。"""
+    from gateway.job_intercept import _is_post_edit_mutation_subpath
+    assert _is_post_edit_mutation_subpath("editing/speakers") is True
