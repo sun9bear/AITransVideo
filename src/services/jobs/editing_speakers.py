@@ -14,6 +14,11 @@ from typing import Any, Iterable
 
 from services._file_lock import file_lock
 from services.jobs.editing_segments import EDITING_SUBDIR_NAME
+from services.review_state import (
+    ReviewStateManager,
+    SPEAKER_REVIEW_STAGE,
+    StateError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -88,10 +93,9 @@ def load_baseline_speakers(project_dir: str | Path) -> list[dict]:
     if not rs_path.is_file():
         return []
     try:
-        from services.review_state import ReviewStateManager, SPEAKER_REVIEW_STAGE
         manager = ReviewStateManager(rs_path)
         stage = manager.get_stage(SPEAKER_REVIEW_STAGE)
-    except Exception as exc:
+    except StateError as exc:
         logger.warning(
             "load_baseline_speakers: review_state.json at %s unreadable; "
             "returning [] (cause: %s)", rs_path, exc,
