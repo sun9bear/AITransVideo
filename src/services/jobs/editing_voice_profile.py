@@ -13,14 +13,13 @@ from __future__ import annotations
 import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict
 from pathlib import Path
-from typing import Any
 
 from services._file_lock import file_lock
 from services.jobs.editing_speakers import (
     editing_speakers_path,
     load_speakers,
+    save_speakers,
 )
 from services.transcript_reviewer import review_pass3_voice_profiles
 
@@ -53,11 +52,13 @@ def _update_speaker_status(
                 if profile is not None:
                     sp.voice_profile = profile
                 break
-        payload = {"version": 1, "speakers": [asdict(s) for s in speakers]}
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), "utf-8")
-        tmp.replace(path)
+        # Reuse save_speakers so the on-disk schema (version / speakers /
+        # updated_at) stays in sync with create_speaker. Previously this
+        # block hand-rolled a payload that omitted updated_at, leaving
+        # speakers.json::updated_at frozen to whatever create_speaker last
+        # wrote — a silent schema drift that broke any consumer keying off
+        # the file-level timestamp.
+        save_speakers(project_dir, speakers)
 
 
 def _gather_inference_inputs(

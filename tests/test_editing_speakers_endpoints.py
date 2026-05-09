@@ -399,7 +399,9 @@ def test_retry_profile_resets_status_to_pending(tmp_path: Path, monkeypatch) -> 
         )
         assert retry_status == HTTPStatus.ACCEPTED.value, (retry_status, retry_body)
         assert retry_body == {
-            "speaker_id": speaker_id, "status": "pending_segments",
+            "speaker_id": speaker_id,
+            "status": "pending_segments",
+            "scheduled": True,
         }
         sp = next(
             s for s in load_speakers(project_dir) if s.speaker_id == speaker_id
@@ -411,8 +413,13 @@ def test_retry_profile_resets_status_to_pending(tmp_path: Path, monkeypatch) -> 
         server.shutdown()
 
 
-def test_retry_profile_unknown_speaker_is_soft_noop(tmp_path: Path) -> None:
-    """Unknown speaker_id → 202 + no crash; speakers.json unchanged."""
+def test_retry_profile_unknown_speaker_returns_unknown_status(tmp_path: Path) -> None:
+    """Unknown speaker_id → 200 OK + ``status: "unknown"`` + ``scheduled: False``.
+
+    Previously this case lied to the frontend by returning 202 + status=
+    pending_segments — indistinguishable from a real retry. The structured
+    response lets the UI render "未知说话人" without parsing strings.
+    Also asserts speakers.json on disk is byte-identical (no mutation)."""
     service, server, base_url = _start_server(tmp_path)
     try:
         job_id, project_dir = _build_editing_job(service, tmp_path)
@@ -425,7 +432,12 @@ def test_retry_profile_unknown_speaker_is_soft_noop(tmp_path: Path) -> None:
             f"{base_url}/jobs/{job_id}/editing/speakers/speaker_zzz/retry-profile",
             None,
         )
-        assert status == HTTPStatus.ACCEPTED.value, (status, body)
+        assert status == HTTPStatus.OK.value, (status, body)
+        assert body == {
+            "speaker_id": "speaker_zzz",
+            "status": "unknown",
+            "scheduled": False,
+        }
         after = (
             speakers_path.read_text("utf-8") if speakers_path.is_file() else None
         )

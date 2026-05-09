@@ -1027,24 +1027,38 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                         _update_speaker_status,
                         maybe_trigger_inference,
                     )
-                    # Tolerant: unknown speaker_id is a soft no-op (matches the
-                    # pattern of POST /editing/voice-map/clear etc.). Without
-                    # a registered speaker there's nothing to retry; we don't
-                    # 404 because that would force the frontend to special-case
-                    # a transient race (speaker created on one tab, retried on
-                    # another after cancel).
+                    # Distinguish "unknown speaker" (200 OK, scheduled=False)
+                    # from "real retry" (202 ACCEPTED, scheduled=True). The
+                    # earlier soft-noop returned 202 + status=pending_segments
+                    # for unknown ids — that lied to the frontend, which
+                    # could not tell a typo from a queued retry. We don't
+                    # 404 because the canonical "speaker not found" race
+                    # (created on one tab, retried on another after cancel)
+                    # is recoverable from the client side; instead we return
+                    # a structured ``status: "unknown"`` payload so the UI
+                    # can show "未知说话人" without parsing strings.
                     known = {sp.speaker_id for sp in load_speakers(project_dir)}
-                    if speaker_id in known:
-                        _update_speaker_status(
-                            project_dir, speaker_id,
-                            status="pending_segments",
+                    if speaker_id not in known:
+                        self._write_json(
+                            HTTPStatus.OK,
+                            {
+                                "speaker_id": speaker_id,
+                                "status": "unknown",
+                                "scheduled": False,
+                            },
                         )
-                        maybe_trigger_inference(project_dir, speaker_id)
+                        return
+                    _update_speaker_status(
+                        project_dir, speaker_id,
+                        status="pending_segments",
+                    )
+                    maybe_trigger_inference(project_dir, speaker_id)
                     self._write_json(
                         HTTPStatus.ACCEPTED,
                         {
                             "speaker_id": speaker_id,
                             "status": "pending_segments",
+                            "scheduled": True,
                         },
                     )
                     return

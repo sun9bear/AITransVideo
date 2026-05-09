@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "EditingSpeaker", "DisplayNameConflictError",
-    "load_speakers", "load_baseline_speakers",
+    "load_speakers", "load_baseline_speakers", "save_speakers",
     "create_speaker", "next_speaker_id",
     "editing_speakers_path",
 ]
@@ -113,7 +113,16 @@ def load_baseline_speakers(project_dir: str | Path) -> list[dict]:
     ]
 
 
-def _save(project_dir: str | Path, speakers: list[EditingSpeaker]) -> None:
+def save_speakers(
+    project_dir: str | Path, speakers: list[EditingSpeaker],
+) -> None:
+    """Atomic write of the editing speakers list to ``speakers.json``.
+
+    Public so ``editing_voice_profile._update_speaker_status`` can reuse the
+    same payload schema (``version`` / ``speakers`` / ``updated_at``) — keeping
+    them in sync prevents schema drift where status mutations forget to
+    refresh ``updated_at`` and the file's mtime / sentinel becomes stale.
+    """
     path = editing_speakers_path(project_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -177,5 +186,5 @@ def create_speaker(
         )
         new_sp.color = _color_for_id(new_sp.speaker_id)
         existing.append(new_sp)
-        _save(project_dir, existing)
+        save_speakers(project_dir, existing)
         return new_sp
