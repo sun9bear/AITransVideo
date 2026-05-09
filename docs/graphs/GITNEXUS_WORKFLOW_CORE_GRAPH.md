@@ -8,8 +8,8 @@
 
 - `SemanticBlock` 仍然是 TTS / 对齐 / 字幕的基本处理单元
 - 主对齐路径仍然是 `DSP-first alignment`，不是把 timing 主导权交给 LLM
-- `cue_pipeline` 继续承担 `SRT-window-first timing` 与交付前的 whisper 对齐 sidecar 入口
-- whisper 是否可用，现在要同时满足部署 capability 与运行时 policy
+- 对齐实现现在已经是 `parallel executor + paid_fallback semaphore + force_dsp review semantics`
+- whisper 是否可用，仍然要同时满足部署 capability 与运行时 policy
 
 ## 2. 主图
 
@@ -22,9 +22,11 @@ graph TD
     Transcript --> Translation["Translation"]
     Translation --> Blocks["SemanticBlock chunking"]
     Blocks --> TTS["TTS"]
-    TTS --> Alignment["DSP-first alignment<br/>rewrite fallback"]
+    TTS --> Alignment["DSP-first alignment"]
+    Alignment --> Parallel["ThreadPoolExecutor + paid_fallback semaphore"]
+    Parallel --> ForceDSP["force_dsp / capped_dsp_underflow<br/>review severity"]
 
-    Alignment --> CueGate["cue_pipeline.py<br/>window-first timing + sync guard"]
+    ForceDSP --> CueGate["cue_pipeline.py<br/>window-first timing + sync guard"]
     CueGate --> Validator["cue_validator.py"]
     Validator --> SRT["srt_writer.py"]
     SRT --> Editor["EditorPackageWriter / manifest"]
@@ -43,38 +45,44 @@ graph TD
 - `process.py` 与 `output_dispatcher.py` 仍然围绕 `aligned_blocks`、`captions`、`artifact_index` 组织输出
 - deliverable-time whisper helper 也是从 `editor/segments.json` 重建 `SemanticBlock` 与 `SubtitleLine` 再走 cue pipeline
 
-结论：whisper 侧路没有把系统打回“按 subtitle line 做 TTS / 对齐”的旧模型。
+结论：这轮并发与 review 语义增强，没有把系统打回“按 subtitle line 做 TTS / 对齐”的旧模型。
 
-### 3.2 主对齐策略依然是 DSP-first，whisper 只改交付字幕
+### 3.2 主对齐策略依然是 DSP-first，但执行层已经并行化
 
-- `ensure_whisper_alignment.py` 只负责重写 `output/subtitle_cues.json` 与 SRT 文件
-- 它不会重跑主 TTS，也不会替换 `aligner.py` 的 DSP-first 主路
-- collector / analyzer 也明确把 whisper coverage 建立在交付字幕的 `cues[].source` 上，而不是 workflow alignment cache
+- `src/services/alignment/aligner.py` 已经显式使用 `ThreadPoolExecutor`
+- paid fallback 不是随线程无限并发，而是受 `paid_fallback_semaphore` 控制
+- 代码注释明确把 paid fallback 视为慢 IO，Semaphore 是成本与供应商速率的硬边界
 
-结论：项目的架构不变量没有变，新增的是“交付前字幕精校”的正式 sidecar。
+结论：工作流的 timing authority 仍在 deterministic 对齐链上，但吞吐与付费 fallback 已经被正式纳入调度策略。
 
-### 3.3 whisper gate 现在是“部署 capability + admin policy + trigger context”三层语义
+### 3.3 `force_dsp` 现在是带 severity 的正式 review 语义
 
-- 部署 capability：`faster-whisper` 只在 `.[whisper]` extra 安装后可用；Docker 通过 `INSTALL_WHISPER` 开关决定是否装进镜像，并通过 `HF_HOME` 复用模型缓存
+- `force_dsp_alignment` 可以从 admin settings 打开
+- `capped_dsp_underflow` 统一分类为 `high severity`
+- `process.py` 现在会导出：
+  - `force_dsp_severity_distribution`
+  - `force_dsp_review_suppressed_count`
+  - `short_segment_force_dsp_count`
+  - `capped_dsp_underflow_count`
+
+结论：`force_dsp` 不再只是一个内部方法名，而是 review / observability 层可见的正式状态。
+
+### 3.4 rewrite 侧也开始接收更明确的 rejection 语义，但 timing authority 仍未交给 LLM
+
+- `process.py` 现在会把 `strict_retry_reason` 传进 rewriter
+- `src/services/gemini/rewriter.py` 在 compact retry 路径上接收这个 reason，用于更明确地表达为什么第一次压缩失败
+
+结论：LLM 被用于“文本修正”，不是“最终时间轴决策”；项目的 deterministic retiming 不变量仍然成立。
+
+### 3.5 whisper gate 仍然是“部署 capability + admin policy + trigger context”三层语义
+
+- 部署 capability：`faster-whisper` 只在 `.[whisper]` extra 安装后可用；Docker 通过 `INSTALL_WHISPER` 决定是否装进镜像，并通过 `HF_HOME` 复用模型缓存
 - admin policy：`whisper_alignment_enabled / trigger / skip_cache / model`
 - trigger context：`publish / deliverable / manual`
 
-当前 trigger 语义：
-- `publish`：允许 publish、deliverable、manual 三个 context
-- `deliverable`：只允许 deliverable、manual；publish 阶段跳过
-- `manual`：不允许自动触发，只保留管理员专用入口
-
 结论：whisper 已经不是简单的运行时开关，而是一条受部署与策略共同约束的交付 sidecar。
 
-### 3.4 `tts_input_cn_text` 仍然是 subtitle sync 的核心 guard
-
-- `cue_pipeline.py::_block_is_in_sync()` 比较的是 `tts_input_cn_text` 与当前 `merged_cn_text`
-- 空 `tts_input_cn_text` 被视为 in-sync；文本改了但音频没重做的 block 会被挡在 whisper path 之外
-- commit 边界上由 `editing_commit.py` 负责把真正重生成后的 segment 重打标
-
-结论：系统现在显式区分“字幕文本修改”与“音频已经跟上”的状态，避免拿旧音频做新文本的精对齐。
-
-### 3.5 Jianying 与 `materials_pack` 已经共享同一条交付侧路
+### 3.6 Jianying 与 `materials_pack` 仍然共享同一条交付侧路
 
 - `JianyingDraftRunner` 在 `aligning_subtitles` 子步骤里调用 ensure helper
 - `gateway/background_task_executors.py` 会在 `materials_pack` 选择了 `subtitles` 时，先通过内部 HTTP 调用 Job API 的 ensure endpoint
@@ -83,28 +91,29 @@ graph TD
 
 ## 4. 关键证据
 
+- `src/services/alignment/aligner.py`
+  - `ThreadPoolExecutor`
+  - `paid_fallback_semaphore`
+  - `force_dsp_alignment`
+  - `capped_dsp_underflow`
+- `src/pipeline/process.py`
+  - `force_dsp_severity_distribution`
+  - `strict_retry_reason`
+- `src/services/gemini/rewriter.py`
+  - compact retry `strict_retry_reason`
 - `src/modules/subtitles/cue_pipeline.py`
   - `publish / deliverable / manual` trigger gate
   - `_block_is_in_sync()`
-  - `model / skip_cache` 从 admin settings 注入 whisper path
 - `src/services/subtitles/ensure_whisper_alignment.py`
-  - 读取 `editor/segments.json`
-  - 计算当前 WAV 内容哈希
   - 重写 `subtitle_cues.json` 与 SRT
 - `src/services/jobs/jianying_draft_runner.py`
   - `SUBSTEP_ALIGNING_SUBTITLES`
-  - deliverable-time ensure 调用
 - `gateway/background_task_executors.py`
   - `materials_pack` 预打包 whisper delegation
-- `pyproject.toml`、`Dockerfile`、`docker-compose.yml`
-  - `.[whisper]`
-  - `INSTALL_WHISPER`
-  - `HF_HOME`
 
 ## 5. 什么情况下优先读这张图
 
-- 想改 `cue_pipeline.py`、`ensure_whisper_alignment.py`、`srt_writer.py`
-- 想判断 whisper 对齐到底属于主路还是 sidecar
-- 想确认 `tts_input_cn_text` 现在在哪一层产生语义作用
-- 想搞清楚 `publish / deliverable / manual` 三种触发策略的边界
-- 想排查“本机为什么没法跑 whisper 对齐”这类 capability vs policy 问题
+- 想改 `aligner.py`、`process.py`、`cue_pipeline.py`、`ensure_whisper_alignment.py`
+- 想判断 parallel alignment 是否改变了项目的 DSP-first 架构不变量
+- 想确认 `force_dsp` / `capped_dsp_underflow` 现在在哪一层变成 review 语义
+- 想搞清楚 `publish / deliverable / manual` 三种 whisper 触发策略的边界

@@ -7,7 +7,7 @@
 这张子图只看 `Studio succeeded job -> editor.jianying_draft_zip` 这条交付链，重点是：
 
 - `generate-jianying-draft` 的触发 / 轮询 / ownership proxy
-- `JianyingDraftRunner` 的 `fingerprint / substep / orphan rescue`
+- `JianyingDraftRunner` 的 `fingerprint / substep / orphan rescue / claim guard`
 - deliverable-time whisper ensure 如何进入 runner
 - `display_name`、`user_draft_root` 与 zip 命名 / draft path 的边界
 
@@ -27,6 +27,7 @@ graph TD
     JobApi --> Runner["JianyingDraftRunner"]
     Runner --> Fingerprint["artifact hashes + display_name<br/>+ user_draft_root + whisper policy"]
     Runner --> Substeps["validating -> aligning_subtitles -> building -> zip"]
+    Runner --> Guards["status==running + attempt_id + update_job"]
     Runner --> Rescue["reap_stale / orphan rescue"]
 
     Substeps --> Ensure["ensure_whisper_aligned_subtitles"]
@@ -39,18 +40,19 @@ graph TD
     DisplayName --> Fingerprint
     DisplayName --> Zip
 
-    PostEdit["editing_commit overwrite / copy_as_new"] --> Reset["reset jianying_draft_* + rm project/jianying"]
+    PostEdit["editing_commit overwrite / copy_as_new"] --> Retire["clear stale attempt_id / substep / fingerprint"]
+    Retire --> Reset["reset jianying_draft_* + rm project/jianying"]
     Reset --> ResultUI
 ```
 
 ## 3. runner 语义
 
-### 3.1 `aligning_subtitles` 已经是正式子步骤
+### 3.1 `aligning_subtitles` 仍然是正式子步骤
 
 - `jianying_draft_runner.py` 定义了 `SUBSTEP_ALIGNING_SUBTITLES`
 - 只有当 whisper capability + policy 都打开时，runner 才会进入这个子步骤；否则直接从 `validating_inputs` 走到 `building_draft`
 
-结论：Jianying draft 现在会把“字幕精对齐是否真的发生”显式暴露给用户和 ops。
+结论：Jianying draft 继续把“字幕精对齐是否真的发生”显式暴露给用户和 ops。
 
 ### 3.2 fingerprint 现在不仅受 whisper policy 影响，也受 `display_name` 影响
 
@@ -67,46 +69,49 @@ graph TD
 
 结论：素材不变但项目改名时，旧 draft zip 也会变成 cache miss，避免下载到过时文件名。
 
-### 3.3 `skip_cache=true` 不只影响 inner helper
+### 3.3 runner 的 substep 与 terminal write 现在都带 claim guard
 
-- `ensure_whisper_alignment.py` 在 `skip_cache=true` 时会跳过“已有 whisper cues 且 fingerprint 匹配”的 fast path
-- `jianying_draft_runner.py::_whisper_force_fresh_active()` 还会绕过外层 `succeeded` cache-hit
+- `jianying_draft_runner.py` 现在明确要求：
+  - `jianying_draft_status == "running"`
+  - `attempt_id` 仍与当前 worker 相符
+- substep 更新与 terminal success / failure 写回都通过 `store.update_job(...)` 做原子 mutator
+- 这样 concurrent rename、overwrite invalidation、fresh trigger 都不会被 stale worker 覆盖
 
-结论：管理员在 UI 上打开“每次重新转录”后，下一次 Jianying trigger 一定会真的进后台执行。
+结论：Jianying draft 状态机现在已经显式建模“谁还拥有这次生成的 claim”。
 
-### 3.4 orphan rescue 已经能区分“真失败”和“产物已生成”
+### 3.4 final success 会重算 fingerprint，而不是继续沿用 trigger 时快照
 
-- `reap_stale()` 会先比较 stale running 的 zip 与当前 fingerprint
-- 匹配则 rescue 成 `succeeded`
-- 不匹配才进入 `stale_running_reaped` 或 `orphaned_after_process_restart`
+- `jianying_draft_runner.py` 在最终成功写回前会根据实际产物重新计算 final fingerprint
+- 这是为了避免 ensure helper / subtitle sidecar 改动后，落盘产物与 trigger 时快照不一致
 
-结论：ops 现在能区分“后台真挂了”和“进程重启但产物其实已经可复用”。
+结论：最终存档的 fingerprint 更接近“产物真相”，而不是“触发输入快照”。
 
-### 3.5 `user_draft_root` 改的是 draft 内素材路径，不是外层下载协议
+### 3.5 overwrite invalidation 现在会退休 stale claim identity
+
+- `editing_commit.py` 的 overwrite 不只是把 `status` 改回 `idle`
+- 还会清空：
+  - `jianying_draft_attempt_id`
+  - `jianying_draft_substep`
+  - `jianying_draft_fingerprint`
+
+结论：旧 worker 即使晚到，也更难把 idle 槽位重新污染成运行态或失败态。
+
+### 3.6 `user_draft_root` 改的是 draft 内素材路径，不是外层下载协议
 
 - `jianying_draft_writer.py` 会基于 `user_draft_root` 决定 draft 内 material path 是相对路径还是绝对路径
 - 对外暴露给结果页的交付物仍然是 `editor.jianying_draft_zip`
-- 同文件还负责友好 zip basename；现在它与 `display_name` 保持一致，而不是继续依赖旧占位名
+- 同文件继续负责友好 zip basename，并与 `display_name` 对齐
 
 结论：`user_draft_root` 属于“解压后剪映如何找到本地素材”的语义，不属于下载权限或下载路径语义。
 
-## 4. post-edit invalidation
-
-- `editing_commit.py::_invalidate_jianying_draft_on_commit(...)`
-  - 重置 `jianying_draft_status / started_at / completed_at / error / zip_path / user_root`
-  - 删除 `{project_dir}/jianying/`
-- `copy_as_new` 也不会继承父 job 的 Jianying draft 状态
-
-结论：post-edit 后旧 draft 一律视为 stale，必须重新生成。
-
-## 5. 关键证据
+## 4. 关键证据
 
 - `src/services/jobs/jianying_draft_runner.py`
   - `SUBSTEP_ALIGNING_SUBTITLES`
   - `_whisper_policy_snapshot()`
   - `_whisper_force_fresh_active()`
   - `reap_stale()`
-  - fingerprint schema `4`
+  - `status==running + attempt_id` claim guard
 - `src/services/subtitles/ensure_whisper_alignment.py`
   - `skip_cache` fast-path bypass
   - `alignment_model` stamp
@@ -117,10 +122,11 @@ graph TD
   - rename mirror back into Job-API JSON store
 - `src/services/jobs/editing_commit.py`
   - draft invalidation
+  - stale claim identity retirement
 
-## 6. 什么情况下优先读这张图
+## 5. 什么情况下优先读这张图
 
 - 想改 `generate-jianying-draft` 的触发、轮询、状态机
 - 想判断某次 trigger 为什么命中旧 zip、为什么没有重跑
 - 想改 `skip_cache`、`model`、`user_draft_root`、`display_name` 的行为
-- 想排查 stale running、orphan rescue、cache miss/hit 的诊断语义
+- 想排查 stale running、orphan rescue、claim lost、cache miss/hit 的诊断语义

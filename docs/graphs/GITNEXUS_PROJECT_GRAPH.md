@@ -1,43 +1,44 @@
 # GitNexus 项目图谱
 
 新会话建议先读本文件，再按任务进入对应子图。
-生成时间：2026-05-07
+生成时间：2026-05-09
 生成方式：基于当前仓库 `.gitnexus/` 最新索引与源码核对整理
 
 ## 1. 图谱概览
 
 | 指标 | 数值 |
 | --- | ---: |
-| 文件数 | 1080 |
-| 节点数 | 19,481 |
-| 关系数 | 47,352 |
-| 聚类数 | 838 |
+| 文件数 | 1185 |
+| 节点数 | 21,209 |
+| 关系数 | 51,229 |
+| 聚类数 | 942 |
 | 流程数 | 300 |
-| 索引提交 | `5c88213` |
+| 索引提交 | `78eea96` |
 | 索引状态 | `up-to-date` |
 
 这轮最需要反映的结构变化有六条：
 
-- `smart_shadow_eval` 与 `smart_shadow_sim` 已从临时脚本长成正式离线评估平面，collector / analyzer / simulator / aggregator 会共同消费项目工件、`UsageMeter`、`user_edit_events.jsonl`
-- post-edit commit 现在存在真实的 text/audio sync hard gate；`editing_commit.py` 会对未重生成 TTS 的文本编辑直接抛 `editing_audio_sync_required`
-- `effective_marker.marked_event_ids` 已成为行为 sidecar 的核心 join 键，负责表达“哪些用户意图最终存活到提交结果”
-- `JianyingDraftRunner` fingerprint 现在显式纳入 `display_name`；改名不再复用旧 zip
-- admin 成本面已经扩成 `LLM / TTS / voice_clone / margin` 读侧，不再只是 credits observability
-- whisper 运行能力现在要同时满足“部署层 capability”与“运行时 policy”；`INSTALL_WHISPER + HF_HOME` 与 `enabled / trigger / skip_cache / model` 成为两层控制
+- `support / notifications / announcements` 已从零长成完整产品平面：帮助中心、客服浮窗、通知中心、管理员客服后台、系统公告 live audience、新注册用户自动分发都已落地
+- workflow 对齐内核已经不只是“单线程 DSP-first”：`ThreadPoolExecutor + paid_fallback semaphore`、`force_dsp_alignment`、`capped_dsp_underflow -> high severity` 都已经进入正式语义
+- 手机号 auth 前门已经重写成统一流：直接 captcha 校验、`verify-code -> registration_token -> complete-registration`、trusted-proxy IP 边界、wrong-code attempt 限制
+- `AppShell` 已经把 `NotificationBell`、popup modal、帮助中心入口、`SupportWidget` 和管理员在线状态切进主应用壳层
+- Jianying draft 与 post-edit 状态机继续加固：runner 的 substep / terminal write 走 `update_job` claim guard，overwrite 会清空 stale `attempt_id / substep / fingerprint`
+- 原有的 offline evaluation、voice clone 成本、whisper deliverable sidecar 仍然成立，但现在不再是唯一新增轴；support / auth / alignment control 已经并列成为核心结构面
 
 ## 2. 关键基座
 
 | 基座 | 当前主轴 | 代表文件 |
 | --- | --- | --- |
-| Workflow | `SemanticBlock -> TTS -> DSP-first alignment -> cue_pipeline -> editor outputs` | `src/pipeline/process.py`、`src/modules/output/output_dispatcher.py` |
+| Workflow | `SemanticBlock -> TTS -> DSP-first + parallel alignment -> cue_pipeline -> editor outputs` | `src/pipeline/process.py`、`src/services/alignment/aligner.py` |
 | Subtitles | `SRT window` timing、deliverable-time whisper sidecar、sync guard | `src/modules/subtitles/cue_pipeline.py`、`src/services/subtitles/ensure_whisper_alignment.py` |
-| Jianying | on-demand draft runner、rename-aware fingerprint、substeps、orphan rescue | `src/services/jobs/jianying_draft_runner.py`、`src/modules/output/jianying/jianying_draft_writer.py` |
-| Editing | `overwrite / copy_as_new`、audio-sync hard gate、deliverable invalidation | `src/services/jobs/editing_commit.py`、`src/services/jobs/copy_service.py` |
+| Jianying | on-demand draft runner、rename-aware fingerprint、claim guard、orphan rescue | `src/services/jobs/jianying_draft_runner.py`、`src/modules/output/jianying/jianying_draft_writer.py` |
+| Editing | `overwrite / copy_as_new`、audio-sync hard gate、preview-source cache、deliverable invalidation | `src/services/jobs/editing_commit.py`、`src/services/jobs/editing_segments.py` |
 | Delivery | `materials_pack`、`generate_video`、download keys、R2 / local fallback | `gateway/background_task_executors.py`、`src/services/jobs/api.py`、`src/services/web_ui/output_entries.py` |
-| Gateway | ownership、auth/captcha、plan truth、admin settings、traffic analytics、cost management | `gateway/job_intercept.py`、`gateway/main.py`、`gateway/admin_settings.py`、`gateway/cost_management.py` |
+| Auth & Lifecycle | phone verify / registration_token / trial grant / live onboarding announcements | `gateway/auth_phone.py`、`gateway/risk_control.py`、`gateway/system_announcements_service.py` |
+| Support & Notifications | support API、AI/template/handoff、notification center、popup feed、announcements | `gateway/support_api.py`、`gateway/support_service.py`、`gateway/notifications_api.py` |
+| Gateway | ownership、plan truth、admin settings、support admin、traffic analytics、cost management | `gateway/job_intercept.py`、`gateway/main.py`、`gateway/admin_settings.py`、`gateway/admin_support_api.py` |
 | Metering & Audit | `UsageMeter`、`JobEvent`、`user_edit_events.jsonl` 三条 sidecar | `src/services/usage_meter.py`、`src/services/jobs/user_edit_audit.py` |
 | Offline Evaluation | `smart_shadow_eval`、`smart_shadow_sim`、aggregate reports、P2 readiness | `scripts/smart_shadow_eval_collector.py`、`scripts/smart_shadow_sim_aggregator.py` |
-| Whisper Deployment | optional extra、Docker build arg、persistent HF cache | `pyproject.toml`、`Dockerfile`、`docker-compose.yml` |
 
 ## 3. 子图入口
 
@@ -48,6 +49,7 @@
 - 编辑 / 后处理图：`docs/graphs/GITNEXUS_EDITING_POST_EDIT_GRAPH.md`
 - 存储与交付图：`docs/graphs/GITNEXUS_STORAGE_DELIVERY_R2_GRAPH.md`
 - 商业化图：`docs/graphs/GITNEXUS_COMMERCIALIZATION_GRAPH.md`
+- 支持 / 通知图：`docs/graphs/GITNEXUS_SUPPORT_NOTIFICATIONS_GRAPH.md`
 - Admin / Ops / Calibration 图：`docs/graphs/GITNEXUS_ADMIN_OPS_CALIBRATION_GRAPH.md`
 - Benchmark / Quality / Cost 图：`docs/graphs/GITNEXUS_BENCHMARK_QUALITY_COST_GRAPH.md`
 
@@ -56,12 +58,13 @@
 ```mermaid
 graph TD
     Marketing["Marketing / Pricing / FAQ / SEO"] --> PlansSSR["SSR plans + trial facts"]
-    Marketing --> AuthFront["Auth / captcha front door"]
+    Marketing --> AuthFront["Auth / phone registration"]
     Marketing --> Trust["FAQ JSON-LD / robots / sitemap"]
 
     Workspace["Workspace / Projects / Result UI"] --> FrontApi["Frontend API / hooks"]
     ReviewUI["Review panels"] --> FrontApi
     EditUI["Post-edit UI"] --> FrontApi
+    AppShell["AppShell / Help / Bell / SupportWidget"] --> FrontApi
     AdminUI["Admin / Ops UI"] --> FrontApi
 
     PlansSSR --> Gateway["Gateway truth + control"]
@@ -69,24 +72,38 @@ graph TD
     FrontApi --> Gateway
     FrontApi --> JobApi["Job API / artifacts / tasks"]
 
-    Gateway --> Billing["Plan / trial / pricing / credits / payment"]
-    Gateway --> Ops["admin settings / traffic / costs / cleanup"]
+    Gateway --> Billing["plan / trial / pricing / credits / payment"]
+    Gateway --> Ops["settings / traffic / costs / support / cleanup"]
+    Gateway --> SupportPlane["support / notifications / announcements"]
     Gateway --> Proxy["ownership + subresource proxy"]
+
+    AuthFront --> PhoneAuth["auth_phone + risk_control"]
+    PhoneAuth --> NewUserAnn["dispatch_announcements_for_new_user"]
 
     JobApi --> Workflow["ProjectWorkflow / process.py"]
     Workflow --> Compliance["Content compliance"]
     Compliance --> Prep["Transcript / translation prep"]
     Prep --> TTSAlign["SemanticBlock / TTS / DSP-first alignment"]
-    TTSAlign --> CueV2["cue_pipeline / subtitle cue v2"]
+    TTSAlign --> AlignCtrl["parallel align + paid_fallback semaphore"]
+    AlignCtrl --> CueV2["cue_pipeline / subtitle cue v2"]
     CueV2 --> Editor["Editor package / manifest"]
 
-    WhisperDeploy["optional whisper extra + HF cache"] --> CueV2
     CueV2 --> WhisperEnsure["ensure_whisper_aligned_subtitles"]
     WhisperEnsure --> JDraftTask["generate-jianying-draft"]
     WhisperEnsure --> PackTask["materials_pack"]
 
     Editor --> Publish["publish.dubbed_video"]
     Editor --> Delivery["downloads / R2 / local fallback"]
+
+    AppShell --> NotificationsUI["Bell / notifications page / popup modal"]
+    AppShell --> HelpUI["help center / support launcher"]
+    NotificationsUI --> SupportPlane
+    HelpUI --> SupportPlane
+
+    SupportPlane --> Conversations["support conversations / AI / handoff"]
+    SupportPlane --> UserNotif["user_notifications / popup feed"]
+    NewUserAnn --> UserNotif
+    UserNotif --> NotificationsUI
 
     Workspace --> ResultCard["ResultMediaCard"]
     ResultCard --> PackTask
@@ -98,18 +115,14 @@ graph TD
     VideoTask --> Gateway
     Proxy --> JobApi
 
-    JobApi --> JRunner["JianyingDraftRunner"]
-    JRunner --> Delivery
-
     EditUI --> EditCommit["editing_commit / overwrite / copy_as_new"]
     EditCommit --> SyncGate["editing_audio_sync_required"]
     EditCommit --> Workflow
     EditCommit --> DeliveryReset["invalidate jianying draft + materials_pack"]
 
-    ReviewUI --> UserEditAudit["user_edit_events.jsonl"]
-    EditUI --> UserEditAudit
     Workflow --> UsageMeter["UsageMeter / attempt-level LLM+TTS"]
     JobApi --> JobEvents["JobEvent stream"]
+    EditUI --> UserEditAudit["user_edit_events.jsonl"]
 
     Workflow --> ShadowCollector["smart_shadow_eval_collector"]
     UsageMeter --> ShadowCollector
@@ -117,70 +130,70 @@ graph TD
     ShadowCollector --> ShadowAnalysis["analyzer / simulator / aggregator"]
     ShadowAnalysis --> Ops
 
-    UserEditAudit --> Ops
-    UsageMeter --> Ops
     JobEvents --> Ops
     Trust --> Marketing
 ```
 
 ## 5. 核心证据链
 
-### 5.1 `smart_shadow_eval / sim` 已经是正式离线评估平面
+### 5.1 `support / notifications / announcements` 已经是完整产品平面
 
-- `scripts/smart_shadow_eval_collector.py` 是 stdlib-only read-only scanner，会扫描 `projects_root`、`jobs_root`，收集 `project_state`、`review_state`、`editor_segments`、`subtitle_cues`、`usage_events.jsonl`、`user_edit_events.jsonl`
-- `scripts/smart_shadow_eval_analyzer.py` 会基于 `facts.jsonl` 与 pricing snapshot 生成 `report.md`，其中 whisper coverage 明确以 `subtitle_cues.json::cues[].source` 为准
-- `scripts/smart_shadow_sim_simulator.py` 会对 `eligibility_gate`、`voice_sample_selection`、`translation_review_auto_approval`、`subtitle_sync_policy` 等阶段做离线决策
-- `scripts/smart_shadow_sim_aggregator.py` 会汇总 stage diff、retry estimation、P2 readiness、user edit observations
+- `gateway/support_api.py` 现在公开承载 `/api/support/config`、会话创建、消息发送、显式 handoff、`/online-status`、WeChat QR、以及“我的未关闭会话”
+- `gateway/support_service.py` 明确规定：它是唯一决定“这一条消息走 template / FAQ / LLM / handoff 哪条路”的编排层，并始终记录 `support_messages` 与 `support_ai_usage`
+- `gateway/notifications_api.py` 提供 bell unread count、通知列表、mark read、archive、popup modal feed
+- `gateway/system_announcements_service.py` 承担 audience resolution、send fan-out、recall、以及 `for_new_registrations` live dispatch
 
-结论：这条链路已经不是临时脚本集合，而是稳定的质量 / 成本 / 行为分析面。
+结论：这条链路已经不是附属工具，而是正式用户面和运营面。
 
-### 5.2 post-edit commit 现在真的存在 text/audio sync hard gate
+### 5.2 workflow 对齐内核已经进入“并行 + review 语义”阶段
 
-- `src/services/jobs/editing_commit.py` 新增 `EditingAudioSyncRequiredError`
-- 同文件会在 `_find_text_edits_without_tts(project_dir)` 命中时抛出 `editing_audio_sync_required`
-- promoted draft wav 仍会把 `tts_input_cn_text` 重打成当前 `cn_text`
+- `src/services/alignment/aligner.py` 已经显式使用 `ThreadPoolExecutor`
+- 同文件把 `paid_fallback` 受控在 alignment-level semaphore 下，而不是随线程数无上限扩张
+- `force_dsp_alignment` 可由 admin settings 打开
+- `capped_dsp_underflow` 会统一分类为 `high severity`
+- `src/pipeline/process.py` 会产出 `force_dsp_severity_distribution`、`force_dsp_review_suppressed_count` 等分布指标
 
-结论：系统现在不仅能看出 drift，还会阻止“文本改了但音频没重做”的提交越过 commit 边界。
+结论：主路径仍是 DSP-first，但现在对并发、fallback 成本、review 严重度都有正式可观测语义。
 
-### 5.3 `effective_marker.marked_event_ids` 已成为行为归因主键
+### 5.3 手机号 auth 前门已经是统一生命周期入口
 
-- `src/services/jobs/user_edit_audit.py` 仍然采用 append-only JSONL，`effective` 通过追加 `effective_marker` 表示
-- `src/services/jobs/service.py` 在 post-edit commit 成功后会计算 `compute_post_edit_marked_event_ids(...)`，把最终存活的 prior intent event ids 写进 marker
-- 最近修复已经围绕 “collector two-pass reads marked_event_ids from effective_marker events” 与 “survivor logic” 展开
+- `gateway/auth_phone.py` 现在的公开流是：
+  - `send-code`
+  - `verify-code`
+  - `complete-registration`
+  - `reset-password`
+- 同文件明确规定“验证码通过 != 注册成功”，trial 只在 `complete-registration` 成功后发放
+- 同文件还修复了 trusted-proxy IP 边界、wrong-code attempt 限额、以及删除旧的 captcha pre-verify pass-token 死路径
+- `complete-registration` 成功后会调用 `dispatch_announcements_for_new_user(...)`
 
-结论：离线分析现在可以精确回答“哪些用户意图真的进入了最终交付结果”。
+结论：auth、trial、以及 onboarding announcement 现在已经连成一条前门生命周期。
 
-### 5.4 Jianying draft 的 cache 语义已经感知项目命名
+### 5.4 `AppShell` 已经变成支持与通知的统一入口壳层
 
-- `src/services/jobs/jianying_draft_runner.py` fingerprint schema 已升级到 `4`
-- fingerprint payload 现在包含 `display_name`
-- `gateway/job_intercept.py` 还会把 rename 镜像回 Job-API JSON store，保证 zip basename 与 downstream filename derivation 读到的是同一个名字
+- `frontend-next/src/components/app-shell.tsx` 现在直接挂载：
+  - `NotificationBell`
+  - `NotificationPopupModal`
+  - `SupportWidget`
+  - `AdminPresenceSwitcher`
+- 同文件导航也新增了“通知”“帮助中心”“客服管理”“系统公告”等入口
+- `frontend-next/src/app/(app)/help/page.tsx` 已经从占位页升级为真实帮助中心落地页
 
-结论：项目改名后旧 draft zip 不会被错误复用，交付文件名与显示名也更一致。
+结论：支持与通知不再是离散页面，而是已经进入主应用导航与壳层常驻入口。
 
-### 5.5 admin 成本面已经扩成 `voice_clone` 与毛利读侧
+### 5.5 Jianying 与 post-edit 状态机继续加固
 
-- `gateway/cost_management.py` 的 `DEFAULT_PRICE_CATALOG` 新增 `minimax:voice_clone`，`rmb_per_clone = 9.9`
-- 同文件 dataclass 已包含 `VoiceCloneRow`
-- `frontend-next/src/app/(app)/admin/costs/page.tsx` 现在展示 `voice_clone_cost_rmb`、`server_overhead_cost_rmb`、`margin_cost_rmb`、`gross_margin_pct`
+- `src/services/jobs/jianying_draft_runner.py` 的 substep / terminal writes 现在强调 `status == "running"` 与 `attempt_id` 双重 claim guard
+- 同文件 final success 会在最终产物生成后重算 fingerprint，避免“trigger 时的输入 fingerprint”与“落盘产物 fingerprint”漂移
+- `src/services/jobs/editing_commit.py` 的 overwrite 路径会清空 stale `jianying_draft_attempt_id / substep / fingerprint`
 
-结论：admin 成本控制面不再只是 credits ledger，而是开始直接承载 job-level 成本与毛利视图。
-
-### 5.6 whisper 运行能力已经分成部署 capability 与 runtime policy 两层
-
-- `pyproject.toml` 把 `faster-whisper` 放进 `.[whisper]` optional dependency
-- `Dockerfile` 新增 `ARG INSTALL_WHISPER=0`，并在开启时安装 `.[whisper]`
-- `docker-compose.yml` 会把 `${AIVIDEOTRANS_ROOT}/data/model_cache` 挂到 `/opt/aivideotrans/model_cache`，并设置 `HF_HOME`
-- `gateway/admin_settings.py` 仍负责 `enabled / trigger / skip_cache / model`
-
-结论：能不能跑 whisper，已经不只是管理员开关，而是“部署能力 + 管理策略”共同决定。
+结论：stale worker、rename、overwrite invalidation 之间的竞态已经被显式建模，而不再靠“最好别撞上”。
 
 ## 6. 按任务选图
 
-- 要看 whisper 对齐到底在哪一层发生、主路是否改变，读 `GITNEXUS_WORKFLOW_CORE_GRAPH.md`
-- 要看 `display_name`、`skip_cache`、fingerprint、orphan rescue、`user_draft_root`，读 `GITNEXUS_JIANYING_DRAFT_DELIVERY_GRAPH.md`
-- 要看 `editing_audio_sync_required`、`tts_input_cn_text` commit stamp、`marked_event_ids`、overwrite / copy_as_new，读 `GITNEXUS_EDITING_POST_EDIT_GRAPH.md`
-- 要看 `materials_pack` 预对齐、下载白名单、cleanup，读 `GITNEXUS_STORAGE_DELIVERY_R2_GRAPH.md`
-- 要看 auth/captcha 前门、FAQ/SEO、套餐真源，读 `GITNEXUS_COMMERCIALIZATION_GRAPH.md`
-- 要看 whisper capability、traffic analytics、voice clone 成本、cleanup，读 `GITNEXUS_ADMIN_OPS_CALIBRATION_GRAPH.md`
+- 要看 alignment、`force_dsp`、parallel fallback、whisper 交付侧路，读 `GITNEXUS_WORKFLOW_CORE_GRAPH.md`
+- 要看 `display_name`、claim guard、orphan rescue、`user_draft_root`，读 `GITNEXUS_JIANYING_DRAFT_DELIVERY_GRAPH.md`
+- 要看 `editing_audio_sync_required`、preview-source cache、overwrite / copy_as_new，读 `GITNEXUS_EDITING_POST_EDIT_GRAPH.md`
+- 要看 pricing truth、phone auth、trial grant、new-user onboarding，读 `GITNEXUS_COMMERCIALIZATION_GRAPH.md`
+- 要看帮助中心、客服浮窗、通知中心、系统公告 fan-out、人工接管，读 `GITNEXUS_SUPPORT_NOTIFICATIONS_GRAPH.md`
+- 要看 alignment / whisper settings、客服后台、traffic analytics、成本控制、cleanup，读 `GITNEXUS_ADMIN_OPS_CALIBRATION_GRAPH.md`
 - 要看 `smart_shadow_eval / sim`、attempt-level metering、行为审计与 P2 readiness，读 `GITNEXUS_BENCHMARK_QUALITY_COST_GRAPH.md`
