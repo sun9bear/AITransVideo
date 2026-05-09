@@ -77,35 +77,30 @@ def load_speakers(project_dir: str | Path) -> list[EditingSpeaker]:
 
 
 def load_baseline_speakers(project_dir: str | Path) -> list[dict]:
-    """Read baseline display_names from review_state.json.
+    """Read baseline display_names from review_state.json (project root).
 
-    Returns ``[{"speaker_id": "...", "display_name": "..."}, ...]`` —
-    the schema this module expects. Used by ``create_speaker`` for
-    uniqueness check + ID allocation, and by the ``GET /editing/speakers``
-    endpoint to merge baseline + editing views.
-
-    Returns ``[]`` if review_state.json is missing or malformed (aligns
-    with the project-wide JSON-tolerance convention; same as
-    ``load_speakers``).
+    Returns ``[{"speaker_id": "...", "display_name": "..."}, ...]``.
+    Uses :class:`ReviewStateManager` so we share the project's canonical
+    JSON-tolerance logic. Returns ``[]`` if the file is missing /
+    malformed / has no speaker_review stage.
     """
-    rs_path = Path(project_dir) / "review" / "review_state.json"
+    rs_path = Path(project_dir) / "review_state.json"
     if not rs_path.is_file():
         return []
     try:
-        rs = json.loads(rs_path.read_text("utf-8"))
-    except (OSError, json.JSONDecodeError):
+        from services.review_state import ReviewStateManager, SPEAKER_REVIEW_STAGE
+        manager = ReviewStateManager(rs_path)
+        stage = manager.get_stage(SPEAKER_REVIEW_STAGE)
+    except Exception as exc:
         logger.warning(
             "load_baseline_speakers: review_state.json at %s unreadable; "
-            "returning []",
-            rs_path,
+            "returning [] (cause: %s)", rs_path, exc,
         )
         return []
-    names = (
-        rs.get("stages", {})
-          .get("speaker_review", {})
-          .get("payload", {})
-          .get("speaker_names", {})
-    )
+    if stage is None:
+        return []
+    payload = stage.get("payload") or {}
+    names = payload.get("speaker_names")
     if not isinstance(names, dict):
         return []
     return [

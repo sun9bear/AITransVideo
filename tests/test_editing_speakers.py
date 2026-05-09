@@ -96,11 +96,9 @@ import json as _json_mod  # 避免和 fixture 命名冲突
 
 
 def test_load_baseline_speakers_reads_review_state(tmp_path: Path) -> None:
-    """从 <project_dir>/review/review_state.json 读 baseline speaker_names。"""
+    """从 <project_dir>/review_state.json 读 baseline speaker_names。"""
     project = _bootstrap_project(tmp_path)
-    rs_dir = project / "review"
-    rs_dir.mkdir()
-    (rs_dir / "review_state.json").write_text(_json_mod.dumps({
+    (project / "review_state.json").write_text(_json_mod.dumps({
         "stages": {
             "speaker_review": {
                 "payload": {
@@ -124,17 +122,13 @@ def test_load_baseline_speakers_missing_file_returns_empty(tmp_path: Path) -> No
 
 def test_load_baseline_speakers_corrupt_json_returns_empty(tmp_path: Path) -> None:
     project = _bootstrap_project(tmp_path)
-    rs_dir = project / "review"
-    rs_dir.mkdir()
-    (rs_dir / "review_state.json").write_text("not json{", "utf-8")
+    (project / "review_state.json").write_text("not json{", "utf-8")
     from services.jobs.editing_speakers import load_baseline_speakers
     assert load_baseline_speakers(project) == []
 
 
 def test_load_baseline_speakers_missing_speaker_review_stage_returns_empty(tmp_path: Path) -> None:
     project = _bootstrap_project(tmp_path)
-    rs_dir = project / "review"
-    rs_dir.mkdir()
-    (rs_dir / "review_state.json").write_text(_json_mod.dumps({"stages": {}}), "utf-8")
+    (project / "review_state.json").write_text(_json_mod.dumps({"stages": {}}), "utf-8")
     from services.jobs.editing_speakers import load_baseline_speakers
     assert load_baseline_speakers(project) == []

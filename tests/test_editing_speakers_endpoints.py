@@ -61,7 +61,7 @@ def _build_editing_job(
     baseline_speaker_names: dict[str, str] | None = None,
 ) -> tuple[str, Path]:
     """Create an editing-state Studio job with optional baseline speakers
-    seeded into ``<project_dir>/review/review_state.json``."""
+    seeded into ``<project_dir>/review_state.json``."""
     project_dir = tmp_path / "projects" / job_id
     editor = project_dir / "editor"
     (editor / "tts_segments").mkdir(parents=True)
@@ -74,9 +74,8 @@ def _build_editing_job(
         encoding="utf-8",
     )
     if baseline_speaker_names:
-        rs_dir = project_dir / "review"
-        rs_dir.mkdir(parents=True, exist_ok=True)
-        (rs_dir / "review_state.json").write_text(
+        project_dir.mkdir(parents=True, exist_ok=True)
+        (project_dir / "review_state.json").write_text(
             json.dumps({
                 "stages": {
                     "speaker_review": {
