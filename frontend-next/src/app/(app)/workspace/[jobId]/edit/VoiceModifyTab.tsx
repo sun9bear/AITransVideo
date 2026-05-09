@@ -47,8 +47,10 @@ import {
   clearVoiceOverride,
   setVoiceOverride,
   type EditingSegment,
+  type EditingSpeaker,
   type VoiceMapEntry,
 } from "@/lib/api/editing"
+import { EditPageSpeakerProfileBadge } from "@/components/workspace/EditPageSpeakerProfileBadge"
 import { getErrorMessage } from "@/lib/api/errors"
 import {
   deleteUserVoice,
@@ -111,6 +113,15 @@ interface VoiceModifyTabProps {
   segments: EditingSegment[]
   voiceMap: Record<string, VoiceMapEntry>
   onVoiceMapChange: (next: Record<string, VoiceMapEntry>) => void
+  /** Editing-mode speakers (baseline + user-added). Drives the per-card
+   *  profile badge + lets the "新增说话人" entry surface brand-new
+   *  speakers immediately. 2026-05-09 plan ``studio-editing-add-speaker``
+   *  Task 8. */
+  editingSpeakers: EditingSpeaker[]
+  /** Open the parent's create-speaker dialog. */
+  onRequestCreateSpeaker: () => void
+  /** Click handler for the badge's "重试" button on failed profiles. */
+  onRetryProfile: (speakerId: string) => void
 }
 
 const PROVIDER_TAB_ORDER = ["minimax", "cosyvoice", "volcengine"] as const
@@ -137,7 +148,20 @@ export function VoiceModifyTab({
   segments,
   voiceMap,
   onVoiceMapChange,
+  editingSpeakers,
+  onRequestCreateSpeaker,
+  onRetryProfile,
 }: VoiceModifyTabProps) {
+  // speaker_id → EditingSpeaker (for profile badge lookup). Memoized
+  // separately from segmentsBySpeaker so the badge doesn't recompute
+  // on every segment update.
+  const editingSpeakerById = useMemo(() => {
+    const m = new Map<string, EditingSpeaker>()
+    for (const sp of editingSpeakers) {
+      if (sp.speaker_id) m.set(sp.speaker_id, sp)
+    }
+    return m
+  }, [editingSpeakers])
   const [speakers, setSpeakers] = useState<SpeakerPayload[]>([])
   const [providerMap, setProviderMap] = useState<Record<string, ProviderInfo>>({})
   const [fallbackVoices, setFallbackVoices] = useState<AvailableVoice[]>([])
@@ -620,12 +644,21 @@ export function VoiceModifyTab({
         )}
 
         {/* Header */}
-        <div className="space-y-1">
-          <h2 className="text-lg font-semibold text-foreground">音色修改</h2>
-          <p className="text-sm text-slate-500">
-            修改某个说话人的音色后，点击&ldquo;应用到此说话人&rdquo;即覆盖该说话人所有段的音色。
-            覆盖后需要回到&ldquo;翻译修改&rdquo;Tab 点击&ldquo;一键重新合成&rdquo;才会生效。
-          </p>
+        <div className="flex items-start justify-between gap-3">
+          <div className="space-y-1 flex-1 min-w-0">
+            <h2 className="text-lg font-semibold text-foreground">音色修改</h2>
+            <p className="text-sm text-slate-500">
+              修改某个说话人的音色后，点击&ldquo;应用到此说话人&rdquo;即覆盖该说话人所有段的音色。
+              覆盖后需要回到&ldquo;翻译修改&rdquo;Tab 点击&ldquo;一键重新合成&rdquo;才会生效。
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onRequestCreateSpeaker}
+            className="shrink-0 h-9 rounded-md border border-border bg-background px-3 text-sm font-medium text-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-1"
+          >
+            + 新增说话人
+          </button>
         </div>
 
         {/* Speaker list */}
@@ -715,6 +748,18 @@ export function VoiceModifyTab({
                         {ownSegments.length} 段 · {sp.totalDurationS.toFixed(1)}s
                       </span>
                       <span className={`text-xs font-medium ${statusColor}`}>{statusLabel}</span>
+                      {/* Profile-status badge — only renders for editing-mode
+                          speakers (source !== "baseline"); baseline returns null. */}
+                      {(() => {
+                        const editingSp = editingSpeakerById.get(sp.speakerId)
+                        if (!editingSp) return null
+                        return (
+                          <EditPageSpeakerProfileBadge
+                            speaker={editingSp}
+                            onRetry={() => onRetryProfile(editingSp.speaker_id)}
+                          />
+                        )
+                      })()}
                     </div>
 
                     {/* Effective voice — what actually plays at TTS time.

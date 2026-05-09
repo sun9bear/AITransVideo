@@ -26,11 +26,13 @@ import {
   enterEditing,
   getEditingSegments,
   getVoiceMap,
+  listEditingSpeakers,
   patchSegmentText,
   previewEditingSegmentSource,
   buildPreviewSourceStreamUrl,
   regenerateSegmentTts,
   regenerateAllDirtyTts,
+  retryEditingSpeakerProfile,
   revertUnsyncedTextSegments,
   getRegenerateAllStatus,
   cancelRegenerateAll,
@@ -38,6 +40,7 @@ import {
   type CommitStrategy,
   type EditingSegment,
   type EditingSegmentsResponse,
+  type EditingSpeaker,
   type SegmentStatus,
   type UnsyncedTextSegment,
   type VoiceMapEntry,
@@ -56,6 +59,7 @@ import {
   type SegmentVirtualListRef,
 } from "@/components/workspace/segments/SegmentVirtualList"
 import type { JobSummary } from "@/types/jobs"
+import { EditPageSpeakerCreateDialog } from "@/components/workspace/EditPageSpeakerCreateDialog"
 import { VoiceModifyTab } from "./VoiceModifyTab"
 
 // Feature flag: gating frontend entry so the page is never rendered when
@@ -123,6 +127,12 @@ export default function VideoEditPage() {
   // been seeded (e.g. task never went through voice selection) — UI
   // falls back to the raw id.
   const [speakerNameMap, setSpeakerNameMap] = useState<Record<string, string>>({})
+  // Editing-mode speakers (baseline + user-added). Loaded from
+  // /editing/speakers; used to populate the "+ 新增说话人" dropdown
+  // option and the profile-status badges in the voice tab.
+  const [editingSpeakers, setEditingSpeakers] = useState<EditingSpeaker[]>([])
+  const editingSpeakersRef = useRef<EditingSpeaker[]>([])
+  const [createSpeakerDialogOpen, setCreateSpeakerDialogOpen] = useState(false)
   const virtualListRef = useRef<SegmentVirtualListRef>(null)
 
   // ---- Bootstrap ----
@@ -172,6 +182,78 @@ export default function VideoEditPage() {
       setIsLoading(false)
     }
   }, [jobId])
+
+  // ---- Editing-mode speakers (Task 8) ----
+  // Loaded from /editing/speakers. Background profile inference can take
+  // 5-15s after a new speaker is created, so we poll while at least one
+  // speaker is in "inferring" state. Failures degrade silently — the next
+  // user action / refresh will retry.
+  const refetchEditingSpeakers = useCallback(async () => {
+    if (!jobId) return
+    try {
+      const list = await listEditingSpeakers(jobId)
+      editingSpeakersRef.current = list
+      setEditingSpeakers(list)
+    } catch {
+      // Best-effort: don't block the editor on this. The dropdown +
+      // badges fall back to the baseline-derived availableSpeakerIds.
+    }
+  }, [jobId])
+
+  useEffect(() => {
+    void refetchEditingSpeakers()
+    // Poll every 3s while any speaker is still inferring. Reading from
+    // ref avoids re-running the effect on every speakers update (which
+    // would clear/recreate the interval and could miss ticks).
+    const interval = window.setInterval(() => {
+      const hasInferring = editingSpeakersRef.current.some(
+        (sp) => sp.profile_status === "inferring",
+      )
+      if (hasInferring) {
+        void refetchEditingSpeakers()
+      }
+    }, 3000)
+    return () => window.clearInterval(interval)
+  }, [refetchEditingSpeakers])
+
+  const handleSpeakerCreated = useCallback(
+    (sp: EditingSpeaker) => {
+      // Optimistic insert so the dropdown / voice card show up
+      // immediately; refetch follows for authoritative state.
+      setEditingSpeakers((prev) => {
+        const next = prev.some((existing) => existing.speaker_id === sp.speaker_id)
+          ? prev
+          : [...prev, sp]
+        editingSpeakersRef.current = next
+        return next
+      })
+      void refetchEditingSpeakers()
+    },
+    [refetchEditingSpeakers],
+  )
+
+  const handleRetryProfile = useCallback(
+    async (speakerId: string) => {
+      try {
+        await retryEditingSpeakerProfile(jobId, speakerId)
+        toast.success("已重新触发音色画像推断")
+        void refetchEditingSpeakers()
+      } catch (error) {
+        toast.error(`重试失败: ${getErrorMessage(error)}`)
+      }
+    },
+    [jobId, refetchEditingSpeakers],
+  )
+
+  const existingSpeakerNames = useMemo(
+    () =>
+      new Set(
+        editingSpeakers
+          .map((sp) => sp.display_name.trim())
+          .filter((name): name is string => name.length > 0),
+      ),
+    [editingSpeakers],
+  )
 
   // First mount: if job isn't in editing yet, call enter-edit then load.
   // (Matches plan §7.1: first visit POSTs /enter-edit; subsequent visits
@@ -1113,10 +1195,12 @@ export default function VideoEditPage() {
                     isRegenerating={regeneratingSegmentIds.has(seg.segment_id)}
                     isActive={activeSegmentId === seg.segment_id}
                     availableSpeakerIds={availableSpeakerIds}
+                    editingSpeakers={editingSpeakers}
                     speakerNameMap={speakerNameMap}
                     onTextChange={handleTextChange}
                     onSourceTextChange={handleSourceTextChange}
                     onSpeakerChange={handleSpeakerChange}
+                    onRequestCreateSpeaker={() => setCreateSpeakerDialogOpen(true)}
                     onRegenerate={handleRegenerate}
                     onAcceptDraft={handleAcceptDraft}
                     onDiscardDraft={handleDiscardDraft}
@@ -1140,6 +1224,9 @@ export default function VideoEditPage() {
             segments={resource.segments}
             voiceMap={voiceMap}
             onVoiceMapChange={setVoiceMap}
+            editingSpeakers={editingSpeakers}
+            onRequestCreateSpeaker={() => setCreateSpeakerDialogOpen(true)}
+            onRetryProfile={handleRetryProfile}
           />
         </main>
       )}
@@ -1165,6 +1252,14 @@ export default function VideoEditPage() {
           onClose={() => setAudioSyncConflict(null)}
         />
       )}
+
+      <EditPageSpeakerCreateDialog
+        jobId={jobId}
+        open={createSpeakerDialogOpen}
+        existingNames={existingSpeakerNames}
+        onClose={() => setCreateSpeakerDialogOpen(false)}
+        onCreated={handleSpeakerCreated}
+      />
     </div>
   )
 }
@@ -1186,6 +1281,11 @@ interface SegmentCardProps {
   /** All speaker_ids currently used somewhere in the task — populates
    *  the reassignment dropdown. 2026-04-20: plan §7.4 speaker fix flow. */
   availableSpeakerIds: string[]
+  /** Editing-mode speakers (baseline + user-added). Used to surface
+   *  brand-new speakers (zero segments yet) in the reassignment
+   *  dropdown so user can attach segments to them. 2026-05-09 plan
+   *  ``studio-editing-add-speaker`` Task 8. */
+  editingSpeakers: EditingSpeaker[]
   /** Friendly display names per speaker_id (from review-state's
    *  voice_selection_review payload). UI shows these instead of raw
    *  variable-name speaker_ids. Missing entry → UI falls back to the id. */
@@ -1195,6 +1295,9 @@ interface SegmentCardProps {
    *  text_dirty; user is responsible for also updating cn_text. */
   onSourceTextChange: (segmentId: string, sourceText: string) => void
   onSpeakerChange: (segmentId: string, speakerId: string) => void
+  /** Open the "新增说话人" dialog (selected via the dropdown's
+   *  ``+ 新增说话人...`` sentinel option). Task 8. */
+  onRequestCreateSpeaker: () => void
   onRegenerate: (segmentId: string) => void
   onAcceptDraft: (segmentId: string) => void
   onDiscardDraft: (segmentId: string) => void
@@ -1226,10 +1329,12 @@ function SegmentCard({
   isRegenerating,
   isActive,
   availableSpeakerIds,
+  editingSpeakers,
   speakerNameMap,
   onTextChange,
   onSourceTextChange,
   onSpeakerChange,
+  onRequestCreateSpeaker,
   onRegenerate,
   onAcceptDraft,
   onDiscardDraft,
@@ -1240,10 +1345,34 @@ function SegmentCard({
   // Prefer friendly display names when available; fall back to the raw
   // speaker_id so tasks that never went through voice_selection_review
   // (or ones where the name map failed to load) still render something.
+  // 2026-05-09: editing-mode speakers carry their own display_name from
+  // /editing/speakers — fall back to that before raw id.
+  const editingSpeakerNameMap = useMemo(() => {
+    const m: Record<string, string> = {}
+    for (const sp of editingSpeakers) {
+      if (sp.speaker_id) m[sp.speaker_id] = sp.display_name || sp.speaker_id
+    }
+    return m
+  }, [editingSpeakers])
   const speakerLabel = (sid: string | undefined): string => {
     if (!sid) return ""
-    return speakerNameMap[sid] || sid
+    return speakerNameMap[sid] || editingSpeakerNameMap[sid] || sid
   }
+  // Dropdown choices = all speaker_ids referenced by segments + any
+  // editing-mode speakers that don't yet have segments (brand-new ones
+  // the user just added). De-dup; preserve ``availableSpeakerIds``
+  // ordering then append the new ones in their backend order.
+  const dropdownSpeakerIds = useMemo(() => {
+    const seen = new Set(availableSpeakerIds)
+    const extras: string[] = []
+    for (const sp of editingSpeakers) {
+      if (sp.speaker_id && !seen.has(sp.speaker_id)) {
+        seen.add(sp.speaker_id)
+        extras.push(sp.speaker_id)
+      }
+    }
+    return extras.length === 0 ? availableSpeakerIds : [...availableSpeakerIds, ...extras]
+  }, [availableSpeakerIds, editingSpeakers])
   const [localText, setLocalText] = useState(segment.cn_text ?? "")
   useEffect(() => { setLocalText(segment.cn_text ?? "") }, [segment.cn_text])
 
@@ -1400,13 +1529,22 @@ function SegmentCard({
         {segment.speaker_id && (
           <label className="inline-flex items-center gap-1">
             <span>说话人</span>
-            {availableSpeakerIds.length > 1 ? (
+            {dropdownSpeakerIds.length > 1 ? (
               <select
                 className="rounded border border-border bg-background px-1.5 py-0.5 text-xs text-foreground disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-1"
                 value={segment.speaker_id}
                 disabled={isSaving}
                 onChange={(e) => {
                   const next = e.currentTarget.value
+                  // Sentinel: open the create-speaker dialog instead of
+                  // assigning "__create__" as a real speaker_id. Reset
+                  // the select back to the current value so it doesn't
+                  // visually stick on the sentinel.
+                  if (next === "__create__") {
+                    e.currentTarget.value = segment.speaker_id ?? ""
+                    onRequestCreateSpeaker()
+                    return
+                  }
                   if (next && next !== segment.speaker_id) {
                     onSpeakerChange(segment.segment_id, next)
                   }
@@ -1414,14 +1552,24 @@ function SegmentCard({
                 title="改说话人归属：重合成时自动换成新说话人的音色"
                 aria-label="修改该段说话人归属"
               >
-                {availableSpeakerIds.map((sid) => (
+                {dropdownSpeakerIds.map((sid) => (
                   <option key={sid} value={sid}>
                     {speakerLabel(sid)}
                   </option>
                 ))}
+                <option value="__create__">+ 新增说话人...</option>
               </select>
             ) : (
-              <span>{speakerLabel(segment.speaker_id)}</span>
+              <span>
+                {speakerLabel(segment.speaker_id)}
+                <button
+                  type="button"
+                  onClick={onRequestCreateSpeaker}
+                  className="ml-2 text-xs text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-1 rounded"
+                >
+                  + 新增说话人
+                </button>
+              </span>
             )}
           </label>
         )}
