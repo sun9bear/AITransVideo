@@ -1881,6 +1881,9 @@ _POST_EDIT_SIMPLE_MUTATION_SUBPATHS: frozenset[str] = frozenset({
     "regenerate-all-tts/cancel",    # 2026-04-21 D39 user-initiated cancel
     "editing/voice-map",            # T1-6 set/clear voice override (POST only)
     "editing/revert-unsynced-text", # discard text edits without matching TTS
+    "editing/speakers",             # Task 3 (plan 2026-05-04): create new
+                                    # editing-mode speaker (POST only; GET is
+                                    # read-only and falls through to proxy).
 })
 
 

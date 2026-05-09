@@ -238,6 +238,37 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                     payload = service.get_editing_voice_map(path_parts[1])
                     self._write_json(HTTPStatus.OK, payload)
                     return
+                # GET /jobs/{id}/editing/speakers — merged baseline + editing
+                # speakers list (Task 3, plan 2026-05-04). Read-only — does
+                # NOT require record.status == editing (the merged view is
+                # also useful for inspection in non-editing states; baseline
+                # entries come from the project's review_state.json which is
+                # static once the job has reached succeeded).
+                if (len(path_parts) == 4 and path_parts[0] == "jobs"
+                        and path_parts[2] == "editing" and path_parts[3] == "speakers"):
+                    from dataclasses import asdict as _asdict
+                    from services.jobs.editing_speakers import (
+                        load_baseline_speakers, load_speakers,
+                    )
+                    record = service.require_job(path_parts[1])
+                    project_dir = _require_project_dir(record)
+                    baseline = load_baseline_speakers(project_dir)
+                    editing = load_speakers(project_dir)
+                    merged: list[dict] = []
+                    for bl in baseline:
+                        merged.append({
+                            "speaker_id": bl["speaker_id"],
+                            "display_name": bl["display_name"],
+                            "color": None,
+                            "source": "baseline",
+                            "created_at": "",
+                            "profile_status": "ready",
+                            "profile_error": None,
+                            "voice_profile": None,
+                        })
+                    merged.extend(_asdict(s) for s in editing)
+                    self._write_json(HTTPStatus.OK, {"speakers": merged})
+                    return
                 # GET /jobs/{id}/segments/{sid}/draft-audio — inline wav
                 # playback for the "接受 / 丢弃" UI (plan §7.4 / Phase 2).
                 # Range-aware so HTML5 <audio> can seek. 404 when job is
@@ -913,6 +944,53 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                             provider=provider, voice_id=voice_id,
                         )
                     self._write_json(HTTPStatus.OK, {"success": True, **result})
+                    return
+                # POST /jobs/{id}/editing/speakers — create new editing-mode
+                # speaker (Task 3, plan 2026-05-04). Mutation, requires the
+                # job to be in editing state — surfaces 409 via
+                # EditingConflictError → JobConflictError handler.
+                if (len(path_parts) == 4 and path_parts[0] == "jobs"
+                        and path_parts[2] == "editing" and path_parts[3] == "speakers"):
+                    from dataclasses import asdict as _asdict
+                    from services.jobs.editing import EditingConflictError
+                    from services.jobs.editing_speakers import (
+                        create_speaker, DisplayNameConflictError,
+                        load_baseline_speakers,
+                    )
+                    from services.jobs.models import JOB_STATUS_EDITING
+
+                    payload = self._read_json_payload()
+                    raw_name = payload.get("display_name", "")
+                    if not isinstance(raw_name, str) or not raw_name.strip():
+                        raise ValueError("display_name is required")
+                    record = service.require_job(path_parts[1])
+                    if record.status != JOB_STATUS_EDITING:
+                        raise EditingConflictError(
+                            f"job {path_parts[1]} is not in editing state "
+                            f"(current: {record.status})"
+                        )
+                    project_dir = _require_project_dir(record)
+                    try:
+                        speaker = create_speaker(
+                            project_dir,
+                            display_name=raw_name,
+                            baseline_speakers=load_baseline_speakers(project_dir),
+                        )
+                    except DisplayNameConflictError as exc:
+                        # Map to 409 with a structured ``code`` payload so
+                        # the frontend can render "已存在同名说话人"
+                        # without parsing the message string.  Pattern
+                        # follows EditingAudioSyncRequiredError — set
+                        # ``.payload`` on a JobConflictError instance and
+                        # the existing 409 handler spreads it into the
+                        # JSON response.
+                        conflict = JobConflictError(str(exc))
+                        conflict.payload = {
+                            "code": "display_name_conflict",
+                            "message": "已存在同名说话人",
+                        }
+                        raise conflict from exc
+                    self._write_json(HTTPStatus.CREATED, _asdict(speaker))
                     return
                 # POST /jobs/{id}/editing/revert-unsynced-text — discard text edits
                 # that do not have matching regenerated TTS.

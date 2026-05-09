@@ -19,7 +19,8 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "EditingSpeaker", "DisplayNameConflictError",
-    "load_speakers", "create_speaker", "next_speaker_id",
+    "load_speakers", "load_baseline_speakers",
+    "create_speaker", "next_speaker_id",
     "editing_speakers_path",
 ]
 
@@ -73,6 +74,44 @@ def load_speakers(project_dir: str | Path) -> list[EditingSpeaker]:
         )
         return []
     return [EditingSpeaker(**sp) for sp in raw.get("speakers", [])]
+
+
+def load_baseline_speakers(project_dir: str | Path) -> list[dict]:
+    """Read baseline display_names from review_state.json.
+
+    Returns ``[{"speaker_id": "...", "display_name": "..."}, ...]`` —
+    the schema this module expects. Used by ``create_speaker`` for
+    uniqueness check + ID allocation, and by the ``GET /editing/speakers``
+    endpoint to merge baseline + editing views.
+
+    Returns ``[]`` if review_state.json is missing or malformed (aligns
+    with the project-wide JSON-tolerance convention; same as
+    ``load_speakers``).
+    """
+    rs_path = Path(project_dir) / "review" / "review_state.json"
+    if not rs_path.is_file():
+        return []
+    try:
+        rs = json.loads(rs_path.read_text("utf-8"))
+    except (OSError, json.JSONDecodeError):
+        logger.warning(
+            "load_baseline_speakers: review_state.json at %s unreadable; "
+            "returning []",
+            rs_path,
+        )
+        return []
+    names = (
+        rs.get("stages", {})
+          .get("speaker_review", {})
+          .get("payload", {})
+          .get("speaker_names", {})
+    )
+    if not isinstance(names, dict):
+        return []
+    return [
+        {"speaker_id": str(sid), "display_name": str(dn)}
+        for sid, dn in names.items()
+    ]
 
 
 def _save(project_dir: str | Path, speakers: list[EditingSpeaker]) -> None:
