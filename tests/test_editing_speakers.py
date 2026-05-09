@@ -67,3 +67,23 @@ def test_overflow_after_z_falls_back_to_hex(tmp_path: Path) -> None:
     baseline = [{"speaker_id": f"speaker_{c}"} for c in "abcdefghijklmnopqrstuvwxyz"]
     sp = create_speaker(project, display_name="X", baseline_speakers=baseline)
     assert re.fullmatch(r"speaker_[0-9a-f]{8}", sp.speaker_id)
+
+
+def test_load_speakers_corrupt_json_returns_empty(tmp_path: Path) -> None:
+    """JSON 损坏 → 不抛，返 []（与 editing_segments / admin_settings 风格一致）。"""
+    project = _bootstrap_project(tmp_path)
+    editing_speakers_path(project).write_text("{not json", "utf-8")
+    assert load_speakers(project) == []
+
+
+def test_color_stable_across_calls(tmp_path: Path) -> None:
+    """_color_for_id 必须确定性（不是 hash() PYTHONHASHSEED 随机）。"""
+    from services.jobs.editing_speakers import _color_for_id
+    # 多次调用同一 id 必须给同一 color
+    c1 = _color_for_id("speaker_c")
+    c2 = _color_for_id("speaker_c")
+    assert c1 == c2
+    # 不同 id 应能产出不同 color（统计意义；palette 8 色可能碰撞，
+    # 但 a/b/c 三个一致碰撞概率低，本测试只检 a 和 z 不冲，足以
+    # 反向证明 hash 不是恒定常量）。
+    assert _color_for_id("speaker_a") != _color_for_id("speaker_z")

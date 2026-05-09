@@ -3,7 +3,9 @@
 ``review_state.json``; merged back into baseline only at commit time."""
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 import secrets
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -12,6 +14,8 @@ from typing import Any, Iterable
 
 from services._file_lock import file_lock
 from services.jobs.editing_segments import EDITING_SUBDIR_NAME
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "EditingSpeaker", "DisplayNameConflictError",
@@ -51,14 +55,23 @@ def _now_iso() -> str:
 
 
 def _color_for_id(speaker_id: str) -> str:
-    return _PALETTE[hash(speaker_id) % len(_PALETTE)]
+    digest = hashlib.sha1(speaker_id.encode("utf-8")).hexdigest()
+    return _PALETTE[int(digest[:8], 16) % len(_PALETTE)]
 
 
 def load_speakers(project_dir: str | Path) -> list[EditingSpeaker]:
     path = editing_speakers_path(project_dir)
     if not path.is_file():
         return []
-    raw = json.loads(path.read_text("utf-8"))
+    try:
+        raw = json.loads(path.read_text("utf-8"))
+    except (OSError, json.JSONDecodeError):
+        logger.warning(
+            "editing_speakers: speakers.json at %s is unreadable / corrupt; "
+            "treating as empty",
+            path,
+        )
+        return []
     return [EditingSpeaker(**sp) for sp in raw.get("speakers", [])]
 
 
