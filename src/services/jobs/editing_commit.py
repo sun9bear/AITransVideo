@@ -354,18 +354,80 @@ def _merge_editing_speakers_into_review_state(
     sr_status = sr.get("status") or REVIEW_STATUS_APPROVED
     manager.set_stage(SPEAKER_REVIEW_STAGE, status=sr_status, payload=sr_payload)
 
-    # voice_selection_review (仅写 ready 且有 profile 的)
+    # voice_selection_review:
+    # 1) voice_profiles dict (仅写 ready 且有 profile 的)
+    # 2) speakers list (前端 VoiceModifyTab 加载的真实数据源 — 必须 append,
+    #    否则 commit 后重进编辑,音色 Tab 看不到 editing-added speaker)。
+    #    2026-05-09 round 3 追修:之前只写 profiles dict 漏了 speakers list。
     profiles_to_write = {
         sp.speaker_id: sp.voice_profile
         for sp in edit_speakers
         if sp.profile_status == "ready" and sp.voice_profile
     }
+
+    # 计算每个新 speaker 的 segment_count + total_duration_s 从 baseline
+    # editor/segments.json (此时 _apply_editing_to_baseline 已把 editing
+    # 段写到 baseline)。auto_match / probe_texts 字段全空 — 用户后续可
+    # 显式 clone 或选预设音色。
+    baseline_segs_path = Path(project_dir) / "editor" / "segments.json"
+    seg_stats: dict[str, tuple[int, int]] = {}  # speaker_id -> (count, total_ms)
+    if baseline_segs_path.is_file():
+        try:
+            data = json.loads(baseline_segs_path.read_text("utf-8"))
+            if isinstance(data, dict):
+                data = data.get("segments", [])
+            if isinstance(data, list):
+                for s in data:
+                    if not isinstance(s, dict):
+                        continue
+                    sid = s.get("speaker_id")
+                    if not isinstance(sid, str):
+                        continue
+                    dur = int(s.get("end_ms", 0)) - int(s.get("start_ms", 0))
+                    if dur < 0:
+                        dur = 0
+                    cur = seg_stats.get(sid, (0, 0))
+                    seg_stats[sid] = (cur[0] + 1, cur[1] + dur)
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    vsr = manager.get_stage(VOICE_SELECTION_REVIEW_STAGE) or {}
+    vsr_payload = dict(vsr.get("payload") or {})
+    vsr_dirty = False
+
+    # voice_profiles dict
     if profiles_to_write:
-        vsr = manager.get_stage(VOICE_SELECTION_REVIEW_STAGE) or {}
-        vsr_payload = dict(vsr.get("payload") or {})
         merged_profiles = dict(vsr_payload.get("voice_profiles") or {})
         merged_profiles.update(profiles_to_write)
         vsr_payload["voice_profiles"] = merged_profiles
+        vsr_dirty = True
+
+    # speakers list — append editing speakers that aren't already there
+    existing_speakers = list(vsr_payload.get("speakers") or [])
+    existing_ids = {s.get("speaker_id") for s in existing_speakers if isinstance(s, dict)}
+    for sp in edit_speakers:
+        if sp.speaker_id in existing_ids:
+            continue
+        seg_count, total_ms = seg_stats.get(sp.speaker_id, (0, 0))
+        existing_speakers.append({
+            "speaker_id": sp.speaker_id,
+            "speaker_name": sp.display_name,
+            "segment_count": seg_count,
+            "total_duration_s": total_ms / 1000.0,
+            # editing-added speaker 没跑过 auto-match,留空让前端走 fallback
+            # 选预设音色或显式 clone
+            "auto_matched_by_provider": {},
+            "auto_matched_voice": None,
+            "probe_texts": [],
+            # can_clone:依靠时长够不够 (主流程用 5s 阈值,这里保持一致)
+            "can_clone": total_ms >= 5000,
+        })
+        existing_ids.add(sp.speaker_id)
+        vsr_dirty = True
+    if vsr_dirty:
+        vsr_payload["speakers"] = existing_speakers
+
+    if vsr_dirty:
         vsr_status = vsr.get("status") or REVIEW_STATUS_APPROVED
         manager.set_stage(
             VOICE_SELECTION_REVIEW_STAGE,

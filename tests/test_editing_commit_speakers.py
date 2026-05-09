@@ -312,3 +312,92 @@ def test_merge_preserves_speaker_options_insertion_order(tmp_path: Path) -> None
     # baseline 占了 a + z，应该选 b)
     assert ids[2] == "speaker_b"
     assert options[2]["display_name"] == "新人"
+
+
+def test_merge_appends_new_speaker_to_voice_selection_review_speakers(
+    tmp_path: Path,
+) -> None:
+    """Round 3 fix: merge must append new speaker to
+    voice_selection_review.payload.speakers list (not just voice_profiles
+    dict). 前端 VoiceModifyTab 加载的是这个 list — 漏掉的话用户
+    commit 后重进编辑,音色 Tab 看不到 editing-added speaker。
+    """
+    project = _bootstrap_project(tmp_path)
+    # 准备 baseline editor/segments.json,让 merge 能算 segment_count
+    # / total_duration_s。speaker_b 占 2 段 共 6000ms,新 speaker_c 占 1 段
+    # 8000ms (>5s,can_clone=True)。
+    edit_dir = project / "editor"
+    (edit_dir / "segments.json").write_text(json.dumps([
+        {"segment_id": "1", "speaker_id": "speaker_a", "start_ms": 0, "end_ms": 1000},
+        {"segment_id": "2", "speaker_id": "speaker_b", "start_ms": 1000, "end_ms": 4000},
+        {"segment_id": "3", "speaker_id": "speaker_b", "start_ms": 4000, "end_ms": 7000},
+        {"segment_id": "4", "speaker_id": "speaker_c", "start_ms": 7000, "end_ms": 15000},
+    ]), "utf-8")
+
+    create_speaker(
+        project, display_name="C",
+        baseline_speakers=[{"speaker_id": "speaker_a"}, {"speaker_id": "speaker_b"}],
+    )
+    speakers = load_speakers(project)
+    speakers[0].profile_status = "ready"
+    speakers[0].voice_profile = {"voice_description": "warm"}
+    save_speakers(project, speakers)
+
+    _merge_editing_speakers_into_review_state(project, load_speakers(project))
+
+    rs = ReviewStateManager(project / "review_state.json")
+    vsr = rs.get_stage(VOICE_SELECTION_REVIEW_STAGE)
+    assert vsr is not None
+    sp_list = vsr["payload"].get("speakers", [])
+    sp_c = next((s for s in sp_list if s.get("speaker_id") == "speaker_c"), None)
+    assert sp_c is not None, "speaker_c must be appended to vsr.payload.speakers"
+    assert sp_c["speaker_name"] == "C"
+    assert sp_c["segment_count"] == 1
+    assert sp_c["total_duration_s"] == 8.0
+    assert sp_c["can_clone"] is True  # 8s > 5s 阈值
+    assert sp_c["auto_matched_voice"] is None
+    assert sp_c["auto_matched_by_provider"] == {}
+    assert sp_c["probe_texts"] == []
+
+
+def test_merge_skips_vsr_speakers_append_when_already_present(tmp_path: Path) -> None:
+    """Idempotency: 重复跑 merge 不重复 append speaker_c 到 vsr.speakers。"""
+    project = _bootstrap_project(tmp_path)
+    (project / "editor" / "segments.json").write_text(json.dumps([
+        {"segment_id": "1", "speaker_id": "speaker_c", "start_ms": 0, "end_ms": 8000},
+    ]), "utf-8")
+    create_speaker(
+        project, display_name="C",
+        baseline_speakers=[{"speaker_id": "speaker_a"}, {"speaker_id": "speaker_b"}],
+    )
+    _merge_editing_speakers_into_review_state(project, load_speakers(project))
+    _merge_editing_speakers_into_review_state(project, load_speakers(project))  # again
+
+    rs = ReviewStateManager(project / "review_state.json")
+    vsr = rs.get_stage(VOICE_SELECTION_REVIEW_STAGE)
+    sp_list = vsr["payload"].get("speakers", [])
+    sp_c_count = sum(1 for s in sp_list if s.get("speaker_id") == "speaker_c")
+    assert sp_c_count == 1
+
+
+def test_merge_short_speaker_can_clone_false(tmp_path: Path) -> None:
+    """5s 以下 can_clone=False (主流程阈值)。"""
+    project = _bootstrap_project(tmp_path)
+    (project / "editor" / "segments.json").write_text(json.dumps([
+        {"segment_id": "1", "speaker_id": "speaker_c", "start_ms": 0, "end_ms": 3000},
+    ]), "utf-8")
+    create_speaker(
+        project, display_name="C-short",
+        baseline_speakers=[{"speaker_id": "speaker_a"}, {"speaker_id": "speaker_b"}],
+    )
+    _merge_editing_speakers_into_review_state(project, load_speakers(project))
+
+    rs = ReviewStateManager(project / "review_state.json")
+    vsr = rs.get_stage(VOICE_SELECTION_REVIEW_STAGE)
+    sp_c = next(
+        (s for s in vsr["payload"]["speakers"] if s.get("speaker_id") == "speaker_c"),
+        None,
+    )
+    assert sp_c is not None
+    assert sp_c["total_duration_s"] == 3.0
+    assert sp_c["can_clone"] is False

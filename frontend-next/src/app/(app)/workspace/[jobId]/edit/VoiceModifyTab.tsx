@@ -163,6 +163,14 @@ export function VoiceModifyTab({
     return m
   }, [editingSpeakers])
   const [speakers, setSpeakers] = useState<SpeakerPayload[]>([])
+  // 2026-05-09 v2: baseline review_state 的 speaker_review.payload.speaker_names
+  // 是 commit-after-add-speaker 路径里**唯一**完整的 baseline speakers 索引
+  // (voice_selection_review.payload.speakers 是 S2 阶段写的,后来 commit merge
+  // 时漏 append; 详见 Task 9 deploy round 3 追修 commit fff26dc)。这里作为
+  // displaySpeakers 的 fallback 来源——任何 baseline speaker_names 里有、
+  // segments 里也有、但 voice_selection_review.speakers 里没有的 speaker_id
+  // 都用一个最小 SpeakerPayload 渲染出来。
+  const [baselineSpeakerNames, setBaselineSpeakerNames] = useState<Record<string, string>>({})
   const [providerMap, setProviderMap] = useState<Record<string, ProviderInfo>>({})
   const [fallbackVoices, setFallbackVoices] = useState<AvailableVoice[]>([])
   const [defaultProvider, setDefaultProvider] = useState("")
@@ -197,29 +205,50 @@ export function VoiceModifyTab({
   // 里. 直接 render `speakers` 会让用户在音色修改 Tab 看不到新加的说话人.
   // 合并: baseline speakers + editing 端注册但 baseline 没有的 speakers,
   // 后者的 segmentCount/totalDurationS 现场从 segments 算.
+  //
+  // v2 (round 3): 上次 commit 的 editing-added speakers 已经写到 baseline
+  // speaker_review.payload.speaker_names + voice_profiles, 但**没**追加到
+  // voice_selection_review.payload.speakers (Task 9 merge 漏的)。重进编辑
+  // 后,editingSpeakers 是空 (editing/speakers.json 已删),speakers state
+  // 也是空 (voice_selection_review 没 append)。需要从 baselineSpeakerNames
+  // 兜底,让用户能在音色 Tab 看到 commit 后的新 speaker。
   const displaySpeakers = useMemo<SpeakerPayload[]>(() => {
+    const synthFromName = (speakerId: string, displayName: string): SpeakerPayload => {
+      const segs = segmentsBySpeaker.get(speakerId) ?? []
+      const totalMs = segs.reduce((acc, s) => {
+        const dur = Number(s.end_ms ?? 0) - Number(s.start_ms ?? 0)
+        return acc + (dur > 0 ? dur : 0)
+      }, 0)
+      return {
+        speakerId,
+        speakerName: displayName,
+        segmentCount: segs.length,
+        totalDurationS: totalMs / 1000,
+        canClone: true,
+        autoMatchedByProvider: {},
+        autoMatchedVoice: null,
+        probeTexts: [],
+      }
+    }
+
     const baselineIds = new Set(speakers.map((s) => s.speakerId))
     const editingExtras: SpeakerPayload[] = (editingSpeakers ?? [])
       .filter((es) => es.source === "editing" && !baselineIds.has(es.speaker_id))
-      .map((es) => {
-        const segs = segmentsBySpeaker.get(es.speaker_id) ?? []
-        const totalMs = segs.reduce((acc, s) => {
-          const dur = Number(s.end_ms ?? 0) - Number(s.start_ms ?? 0)
-          return acc + (dur > 0 ? dur : 0)
-        }, 0)
-        return {
-          speakerId: es.speaker_id,
-          speakerName: es.display_name,
-          segmentCount: segs.length,
-          totalDurationS: totalMs / 1000,
-          canClone: true,
-          autoMatchedByProvider: {},
-          autoMatchedVoice: null,
-          probeTexts: [],
-        }
-      })
-    return [...speakers, ...editingExtras]
-  }, [speakers, editingSpeakers, segmentsBySpeaker])
+      .map((es) => synthFromName(es.speaker_id, es.display_name))
+
+    // v2 fallback: baseline speaker_names 里有但 voice_selection_review.speakers
+    // 没有的 speaker (commit-after-add 路径)
+    const editingExtraIds = new Set(editingExtras.map((e) => e.speakerId))
+    const fromBaselineNames: SpeakerPayload[] = []
+    for (const [sid, name] of Object.entries(baselineSpeakerNames)) {
+      if (baselineIds.has(sid)) continue
+      if (editingExtraIds.has(sid)) continue
+      if (!segmentsBySpeaker.has(sid)) continue  // 没段不显示
+      fromBaselineNames.push(synthFromName(sid, name))
+    }
+
+    return [...speakers, ...editingExtras, ...fromBaselineNames]
+  }, [speakers, editingSpeakers, segmentsBySpeaker, baselineSpeakerNames])
 
   // ---- Bootstrap: same load sequence as VoiceSelectionPanel ----
   useEffect(() => {
@@ -242,6 +271,21 @@ export function VoiceModifyTab({
         if (cancelled) return
 
         const stages = reviewState.results?.review_flow?.stages ?? {}
+        // v2 (round 3): 用 speaker_review.payload.speaker_names 作 fallback
+        // 来源,补 voice_selection_review.speakers 漏的 commit-after-add speakers
+        const speakerReviewPayload = stages.speaker_review?.payload ?? {}
+        const rawNames = (speakerReviewPayload as Record<string, unknown>).speaker_names
+        if (rawNames && typeof rawNames === "object" && !Array.isArray(rawNames)) {
+          const cleaned: Record<string, string> = {}
+          for (const [sid, name] of Object.entries(rawNames as Record<string, unknown>)) {
+            if (typeof sid === "string" && typeof name === "string" && name.trim()) {
+              cleaned[sid] = name
+            }
+          }
+          setBaselineSpeakerNames(cleaned)
+        } else {
+          setBaselineSpeakerNames({})
+        }
         const payload = stages.voice_selection_review?.payload ?? {}
 
         // Parse speakers + auto_matched_by_provider
