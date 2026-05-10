@@ -431,12 +431,28 @@ async def calibrate_voice_speed(
         # Bad JSON is not fatal — fall through to default-all-models.
         pass
 
+    # codex T0-review F-T0-2 (whitelist fix): model_key MUST be in the
+    # canonical set for the voice's provider. Without this guard, any
+    # logged-in user can submit an arbitrary model_key string that flows
+    # straight into the paid TTS payload (and then into the JSONB key).
+    # That admits typo-induced provider 4xx errors, billable-but-wrong
+    # model selection, and pollution of by_model with garbage keys.
+    canonical_models = _CANONICAL_MODELS_BY_PROVIDER.get(
+        provider, [_DEFAULT_CALIBRATION_MODEL[provider]],
+    )
     if model_key_override is not None:
+        if model_key_override not in canonical_models:
+            return _json(400, {
+                "error": "invalid_model_key",
+                "message": (
+                    f"model_key {model_key_override!r} not allowed for provider "
+                    f"{provider!r}. Allowed: {canonical_models}"
+                ),
+                "allowed_model_keys": canonical_models,
+            })
         models_to_run = [model_key_override]
     else:
-        models_to_run = _CANONICAL_MODELS_BY_PROVIDER.get(
-            provider, [_DEFAULT_CALIBRATION_MODEL[provider]],
-        )
+        models_to_run = canonical_models
 
     # Step 2 (codex F-v4.3-2): release route db connection BEFORE paid call.
     # The connection went into use for fetch_user_voice + (auth's prior
@@ -557,10 +573,30 @@ async def calibrate_voice_speed(
             "results": results_payload,
         })
 
+    # codex T0-review F-T0-3 (legacy compat): existing voices/page.tsx +
+    # CalibrateSpeedResponse type read result.calibration?.cps to update
+    # the UI after "测试语速". The new multi-model response would leave
+    # users seeing stale "未标定" state. Keep a legacy `calibration`
+    # field synthesized from the FIRST ok result so the old client keeps
+    # working until the frontend migrates to read `results[]` directly.
+    legacy_calibration: dict | None = None
+    for entry in results_payload:
+        if entry.get("ok"):
+            legacy_calibration = {
+                "cps": entry["cps"],
+                "total_hanzi": entry["total_hanzi"],
+                "total_duration_ms": entry["total_duration_ms"],
+                "provider": provider,
+                "model": entry["model_key"],
+                "per_text": entry["per_text"],
+            }
+            break
+
     return _json(200, {
         "ok": True,
         "voice": _voice_to_dict(refreshed) if refreshed else None,
         "results": results_payload,
+        "calibration": legacy_calibration,  # legacy field — deprecated, read `results` instead
         "provider": provider,
     })
 

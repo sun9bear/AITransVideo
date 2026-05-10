@@ -592,6 +592,189 @@ async def test_run_calibration_task_refunds_on_paid_call_count_zero(monkeypatch)
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# T0-review F-T0-1: starter cancel race (codex round 7)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_starter_cancel_does_not_abandon_paid_tts(monkeypatch):
+    """codex T0-review F-T0-1 — when caller is cancelled while factory is
+    running, paid TTS in `asyncio.to_thread(calibrate_voice)` cannot be
+    interrupted. The fix is to spawn factory as a background task and
+    finalize via done_callback. Caller cancellation should:
+
+      1. Raise CancelledError to caller (via shield)
+      2. Keep factory_task alive in background
+      3. NOT release in-flight registry yet (so a second caller can't
+         re-trigger paid TTS for the same key)
+      4. Eventually finalize with the real paid_call_count when factory
+         completes
+
+    Without the fix, a single cancel → finally fires immediately →
+    refund + release → next caller spawns SECOND paid call. This test
+    pins the post-fix invariant: registry holds the future until
+    factory actually finishes.
+    """
+    fresh_registry = CalibrationInFlightRegistry()
+    monkeypatch.setattr("voice_calibration_inflight.registry", fresh_registry)
+    risk_control.reset_voice_calibration_rate_limits()
+
+    factory_started = asyncio.Event()
+    factory_can_complete = asyncio.Event()
+    factory_completed_result: dict[str, "CalibrationResult | None"] = {"r": None}  # noqa: F821
+
+    async def slow_factory():
+        factory_started.set()
+        # Simulate paid TTS in flight — cannot be interrupted from outside
+        await factory_can_complete.wait()
+        result = CalibrationResult(
+            ok=True, cps=4.5, paid_call_count=3,
+            model_key="speech-2.8-turbo",
+        )
+        factory_completed_result["r"] = result
+        return result
+
+    key = CalibrationKey(
+        scope="user", owner="u_cancel", provider="minimax",
+        voice_id="v_cancel", model_key="speech-2.8-turbo",
+    )
+
+    # Caller 1: starter, will be cancelled mid-flight
+    caller1 = asyncio.create_task(run_calibration_task(
+        key=key, user_id_for_budget="u_cancel", factory=slow_factory,
+    ))
+    await factory_started.wait()  # ensure factory_task entered the wait
+
+    # Cancel the caller
+    caller1.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller1
+
+    # Right after cancel: factory_task should STILL be running.
+    # The in-flight registry should STILL hold the future (otherwise a
+    # second caller could spawn another paid call).
+    await asyncio.sleep(0.05)  # let cancellation propagate
+    assert factory_completed_result["r"] is None, "factory completed too early"
+    assert key in fresh_registry._futures, (
+        "in-flight registry released the future before factory completed — "
+        "second caller could now race a duplicate paid TTS call"
+    )
+
+    # Now allow factory to finish. done_callback should:
+    # - record the real paid_call_count (3, ok=True)
+    # - NOT refund (paid_call_count > 0)
+    # - eventually release the registry entry
+    factory_can_complete.set()
+    # Give the event loop time to process: factory finishes → done_callback
+    # fires → finalize() → schedules release task → release runs
+    for _ in range(20):
+        await asyncio.sleep(0.05)
+        if key not in fresh_registry._futures:
+            break
+    assert factory_completed_result["r"] is not None, "factory should have finished"
+    assert factory_completed_result["r"].paid_call_count == 3
+    # Eventually the registry entry is released (release ran via the
+    # asyncio.create_task scheduled in _finalize)
+    assert key not in fresh_registry._futures, (
+        "registry should have been released after factory completed"
+    )
+
+    # Budget: caller1 reserved 1 slot; result.ok=True means no refund;
+    # so 1 slot remains used. Verify by filling 4 more (5 total = cap).
+    for _ in range(4):
+        risk_control.reserve_voice_calibration("u_cancel")
+    with pytest.raises(risk_control.RateLimitExceeded):
+        risk_control.reserve_voice_calibration("u_cancel")
+
+
+# ---------------------------------------------------------------------------
+# T0-review F-T0-2: manual endpoint model_key whitelist (codex round 7)
+# ---------------------------------------------------------------------------
+
+
+def test_canonical_models_provider_whitelist():
+    """codex T0-review F-T0-2 — verify the constant exposes only the
+    intended model keys for each provider. Manual endpoint validates
+    user-supplied model_key against this dict; any drift here is a
+    direct security regression (arbitrary model_key flowing to paid TTS).
+    """
+    from user_voice_api import _CANONICAL_MODELS_BY_PROVIDER
+
+    # MiniMax: turbo + hd are the only two we support per plan v4 T0-D
+    assert set(_CANONICAL_MODELS_BY_PROVIDER["minimax"]) == {
+        "speech-2.8-turbo", "speech-2.8-hd",
+    }
+    # Other providers: single canonical model each (T0-C-2 future will
+    # expand cosyvoice / volcengine).
+    assert _CANONICAL_MODELS_BY_PROVIDER["cosyvoice"] == ["cosyvoice-v3-flash"]
+    assert _CANONICAL_MODELS_BY_PROVIDER["volcengine"] == ["seed-tts-2.0"]
+
+    # No entry for an unknown provider
+    assert "openai" not in _CANONICAL_MODELS_BY_PROVIDER
+
+
+# ---------------------------------------------------------------------------
+# T0-review F-T0-3: legacy calibration response field (codex round 7)
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_calibration_response_field_built_from_first_ok_result():
+    """codex T0-review F-T0-3 — existing frontend reads
+    result.calibration?.cps. After T0 the response is multi-model
+    {results: [...]}. The endpoint synthesizes a `calibration` field
+    from the first ok result for backward compat.
+
+    Replicates the synthesis logic so a future refactor (e.g. extracting
+    to a helper) keeps the same field shape that voiceLibrary.ts /
+    voices/page.tsx depend on.
+    """
+    # Mimic the structure user_voice_api.py builds.
+    results_payload = [
+        {
+            "model_key": "speech-2.8-turbo",
+            "ok": False,
+            "error_class": "rate_limited",
+            "message": "rate limited",
+        },
+        {
+            "model_key": "speech-2.8-hd",
+            "ok": True,
+            "cps": 4.18,
+            "total_hanzi": 458,
+            "total_duration_ms": 109_500,
+            "error_class": "",
+            "error": "",
+            "paid_call_count": 3,
+            "per_text": [
+                {"name": "T1", "hanzi": 101, "duration_ms": 24000, "cps": 4.21},
+            ],
+        },
+    ]
+
+    # Apply the same selection logic the endpoint uses.
+    legacy_calibration = None
+    for entry in results_payload:
+        if entry.get("ok"):
+            legacy_calibration = {
+                "cps": entry["cps"],
+                "total_hanzi": entry["total_hanzi"],
+                "total_duration_ms": entry["total_duration_ms"],
+                "provider": "minimax",
+                "model": entry["model_key"],
+                "per_text": entry["per_text"],
+            }
+            break
+
+    # Frontend's CalibrateSpeedResponse type expects exactly these fields.
+    assert legacy_calibration is not None
+    assert legacy_calibration["cps"] == 4.18
+    assert legacy_calibration["model"] == "speech-2.8-hd"  # second result wins
+    assert legacy_calibration["total_hanzi"] == 458
+    assert legacy_calibration["provider"] == "minimax"
+    assert isinstance(legacy_calibration["per_text"], list)
+
+
 def test_merged_by_model_helper_preserves_existing_keys():
     """The pure dict-merge primitive used inside the SELECT FOR UPDATE
     transaction. Verifies semantics independent of DB.

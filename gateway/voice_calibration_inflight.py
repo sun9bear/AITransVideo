@@ -292,36 +292,94 @@ async def run_calibration_task(
             await registry.release(key, future)
             raise
 
-    result: "CalibrationResult | None" = None  # noqa: F821
-    try:
-        result = await factory()
-    finally:
-        # v4 codex F-v4-4: refund decision is purely paid_call_count-based.
-        # Provider 5xx / synth timeout / DB write fail → paid_call_count > 0
-        # → DO NOT refund. Only refund the "never reached provider" cases:
-        # voice_not_found / unsupported_provider / pre-flight validation.
-        should_refund = False
-        if result is None:
-            # Defensive: factory broke its contract. Treat as no-paid-call
-            # so we can refund the reservation, but log loudly.
-            logger.error(
-                "[calibration-inflight] factory returned None for key=%s (contract violation)",
-                key,
+    # codex T0-review F-T0-1 (cancel race fix): spawn factory as a
+    # background task and finalize via done_callback. If the caller is
+    # cancelled (HTTP client disconnect, asyncio.gather sibling failure,
+    # asyncio.wait_for timeout), the shielded await raises CancelledError
+    # to the caller — but factory_task keeps running in the background,
+    # the paid TTS thread inside `asyncio.to_thread(calibrate_voice)`
+    # finishes its work, the done_callback fires with the real
+    # paid_call_count, and refund/release decisions reflect what actually
+    # happened.
+    #
+    # Without this wrapping, the v4.1 design path was: caller cancelled
+    # → finally fires immediately with result=None → refund + release
+    # → in-flight registry empty → next request claims as fresh starter
+    # → second paid TTS call spawned for the same key. Single cancel
+    # could trigger N paid calls.
+    factory_task: asyncio.Task = asyncio.create_task(factory())
+
+    def _finalize(task: asyncio.Task) -> None:
+        """Runs synchronously on the event loop when factory_task
+        finishes (success / failure / cancellation we did NOT request).
+
+        We intentionally DO NOT cancel factory_task from the caller's
+        cancel path — once the paid TTS has been issued (or is about to
+        be), we want to know the true paid_call_count before refunding.
+        """
+        result: "CalibrationResult | None" = None  # noqa: F821
+        try:
+            if task.cancelled():
+                # We never cancel factory_task ourselves. Treat any
+                # observed cancellation as a contract violation.
+                logger.error(
+                    "[calibration-inflight] factory_task unexpectedly cancelled key=%s", key,
+                )
+                result = _internal_error_result(key)
+            else:
+                exc = task.exception()
+                if exc is not None:
+                    # Factory contract: never raises. If it does, treat
+                    # as internal_error / paid_call_count==0 so refund
+                    # fires (the safer default — provider-side state is
+                    # unknown).
+                    logger.exception(
+                        "[calibration-inflight] factory raised key=%s",
+                        key, exc_info=exc,
+                    )
+                    result = _internal_error_result(key)
+                else:
+                    result = task.result()
+                    if result is None:
+                        logger.error(
+                            "[calibration-inflight] factory returned None for key=%s (contract violation)",
+                            key,
+                        )
+                        result = _internal_error_result(key)
+
+            # v4 codex F-v4-4: refund only when paid_call_count == 0.
+            should_refund = (
+                user_id_for_budget
+                and reservation > 0
+                and (not result.ok and result.paid_call_count == 0)
             )
-            should_refund = True
-            result = _internal_error_result(key)
-        elif not result.ok and result.paid_call_count == 0:
-            should_refund = True
+            if should_refund:
+                risk_control.refund_voice_calibration(user_id_for_budget, reservation)
 
-        if should_refund and user_id_for_budget and reservation > 0:
-            risk_control.refund_voice_calibration(user_id_for_budget, reservation)
+            # v4.1 codex F-v4.1-4: defensive — future may have been
+            # cancelled by some other path (test cleanup, etc.).
+            if not future.done():
+                future.set_result(result)
+        except Exception:
+            # done_callback must not raise — Python would log + drop it.
+            # Log loudly and move on; release still attempted below.
+            logger.exception("[calibration-inflight] _finalize raised key=%s", key)
 
-        # v4.1 codex F-v4.1-4: defensive — future may have been cancelled
-        # before we reach this point.
-        if not future.done():
-            future.set_result(result)
+        # v4.1 codex F-v4.1-6: identity-checked release. release() is
+        # async; schedule it as a task since done_callback is sync.
+        # The task is fire-and-forget — if event loop is shutting down
+        # the registry leaks one entry, which is acceptable (no live
+        # callers reference it anymore).
+        try:
+            asyncio.create_task(registry.release(key, future))
+        except RuntimeError:
+            # No running event loop (test teardown / shutdown); the
+            # registry will be GC'd anyway.
+            pass
 
-        # v4.1 codex F-v4.1-6: identity-checked release.
-        await registry.release(key, future)
+    factory_task.add_done_callback(_finalize)
 
-    return result
+    # Caller awaits via shield: if caller is cancelled, the shield raises
+    # CancelledError outwards but factory_task keeps running. _finalize
+    # fires when factory_task eventually completes in the background.
+    return await asyncio.shield(factory_task)
