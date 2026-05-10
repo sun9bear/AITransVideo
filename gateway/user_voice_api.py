@@ -24,7 +24,6 @@ from user_voice_service import (
     list_user_voices,
     mark_voice_expired,
     update_user_voice_label,
-    update_voice_speed_calibration,
 )
 
 logger = logging.getLogger(__name__)
@@ -278,24 +277,127 @@ async def remove_user_voice(
     return _json(200, {"ok": True, "deleted": deleted})
 
 
+# Canonical models per provider for the v4 default-dual-model policy
+# (plan T0-D / F-v4-8). When the manual endpoint is called without an
+# explicit model_key, calibrate ALL canonical models for the voice's
+# provider in parallel — same behaviour T1 clone-after will use, so that
+# users picking turbo vs hd later in review have CPS data ready for
+# whichever they choose.
+_CANONICAL_MODELS_BY_PROVIDER: dict[str, list[str]] = {
+    "minimax": ["speech-2.8-turbo", "speech-2.8-hd"],
+    "cosyvoice": ["cosyvoice-v3-flash"],
+    "volcengine": ["seed-tts-2.0"],
+}
+
+
+async def _run_one_user_voice_calibration(
+    *,
+    user_id: str,
+    voice_id: str,
+    provider: str,
+    model_key: str,
+):
+    """Single (user_voice, model_key) calibration: factory body for run_calibration_task.
+
+    Plan v4.3 T0-D contract:
+    - Factory ALWAYS returns CalibrationResult (never raises). All errors
+      packed into CalibrationResult fields.
+    - paid_call_count reflects calls actually issued.
+    - DB write uses an INDEPENDENT short session (with SELECT FOR UPDATE
+      inside update_user_voice_speed_calibration) — no nested transactions
+      with the route db.
+    """
+    from voice_speed_calibrator import CalibrationResult, calibrate_voice
+    from database import async_session
+    from user_voice_service import (
+        VoiceNotFoundError,
+        update_user_voice_speed_calibration,
+    )
+
+    # T0-C bounded TTS calls; calibrate_voice never raises per T0-D contract.
+    result = await asyncio.to_thread(
+        calibrate_voice,
+        provider=provider,
+        model=model_key,
+        voice_id=voice_id,
+        total_timeout_seconds=60.0,
+    )
+    if not result.ok:
+        return result
+
+    # DB write — independent short session, atomic merge.
+    try:
+        async with async_session() as db_write:
+            await update_user_voice_speed_calibration(
+                db_write,
+                voice_id=voice_id,
+                user_id=user_id,
+                cps=result.cps,
+                model_key=model_key,
+            )
+    except VoiceNotFoundError:
+        # Voice was deleted between the existence check above and the write.
+        # paid_call_count is preserved (TTS already happened) so refund won't
+        # fire — that's the correct semantic.
+        return CalibrationResult(
+            ok=False,
+            error="voice_not_found at write time",
+            error_class="voice_not_found",
+            paid_call_count=result.paid_call_count,
+            per_text=result.per_text,
+            cps=result.cps,
+            model_key=model_key,
+        )
+    except Exception as exc:
+        logger.exception(
+            "[calibrate-speed] DB write failed after paid TTS — preserving paid_call_count=%d",
+            result.paid_call_count,
+        )
+        return CalibrationResult(
+            ok=False,
+            error=f"db_write_failed: {exc!r}"[:300],
+            error_class="db_write_failed",
+            paid_call_count=result.paid_call_count,
+            per_text=result.per_text,
+            cps=result.cps,
+            model_key=model_key,
+        )
+
+    return result
+
+
 @router.post("/user-voices/{voice_id}/calibrate-speed")
 async def calibrate_voice_speed(
     voice_id: str,
+    request: Request,
     user: User | None = Depends(require_auth),
     db: AsyncSession = Depends(get_db),
 ) -> Response:
-    """Calibrate one user voice's chars-per-second by running 3 standard
-    Chinese texts through the provider's TTS, then persist the result.
+    """Calibrate a user voice's chars-per-second across one or more models.
 
-    - 401 if not authenticated
-    - 404 if the voice doesn't exist or doesn't belong to ``user``
-    - 400 if the voice's tts_provider can't be mapped to a supported one
-    - 502 if the provider call fails / produces invalid audio
-    - 200 with the new cps + per-text breakdown on success
+    Plan v4.3 T0-A.2 / F-v4.3-2 contract:
+    - Optional ``{"model_key": "..."}`` body. None / missing = calibrate
+      all canonical models for the voice's provider in parallel
+      (matches T1 clone-after default).
+    - Budget reservation (``reserve_voice_calibration``) lands on the
+      atomic-claim path inside ``run_calibration_task``, so a UI button
+      double-click joins the in-flight future without consuming a second
+      slot.
+    - Route DB session is rolled back BEFORE paid TTS so connection pool
+      isn't held for ~30s × N models. Writes happen via independent short
+      sessions inside the factory.
+
+    Returns
+    -------
+    200 with per-model results when at least one model succeeded.
+    202 when all models hit ``rate_limited`` (caller can retry later).
+    400 / 404 unchanged from prior behaviour.
+    502 when all models failed at the provider layer.
     """
     if user is None:
         return _json(401, {"error": "unauthorized"})
 
+    # Step 1 (route db, short-lived): existence + provider validation.
     voice = await fetch_user_voice(db, user.id, voice_id)
     if voice is None:
         return _json(404, {"error": "voice_not_found"})
@@ -313,54 +415,153 @@ async def calibrate_voice_speed(
                 "请联系管理员手动校准。"
             ),
         })
-    model = _DEFAULT_CALIBRATION_MODEL[provider]
 
-    from voice_speed_calibrator import calibrate_voice
-
+    # Parse optional model_key body. We tolerate empty body / non-JSON
+    # gracefully — UI's existing "校准语速" button currently sends no body.
+    model_key_override: str | None = None
     try:
-        result = await asyncio.to_thread(
-            calibrate_voice,
-            provider=provider,
-            model=model,
-            voice_id=voice_id,
+        raw_body = await request.body()
+        if raw_body:
+            parsed = json.loads(raw_body)
+            if isinstance(parsed, dict):
+                mk = parsed.get("model_key")
+                if isinstance(mk, str) and mk.strip():
+                    model_key_override = mk.strip()
+    except (json.JSONDecodeError, ValueError):
+        # Bad JSON is not fatal — fall through to default-all-models.
+        pass
+
+    if model_key_override is not None:
+        models_to_run = [model_key_override]
+    else:
+        models_to_run = _CANONICAL_MODELS_BY_PROVIDER.get(
+            provider, [_DEFAULT_CALIBRATION_MODEL[provider]],
         )
-    except Exception as exc:
-        logger.exception("[calibrate-speed] unexpected error for voice %s", voice_id)
-        return _json(500, {"error": "calibration_failed", "message": str(exc)[:200]})
 
-    per_text_payload = [
-        {"name": t.name, "hanzi": t.hanzi, "duration_ms": t.duration_ms, "cps": t.cps}
-        for t in result.per_text
-    ]
-    if not result.ok:
-        return _json(502, {
-            "error": "calibration_failed",
-            "message": result.error,
-            "per_text": per_text_payload,
-        })
+    # Step 2 (codex F-v4.3-2): release route db connection BEFORE paid call.
+    # The connection went into use for fetch_user_voice + (auth's prior
+    # SELECTs); rollback ends any implicit transaction and returns the
+    # connection to the pool for other requests during the ~30s × N models
+    # paid TTS work.
+    user_id_str = str(user.id)
+    await db.rollback()
 
-    updated = await update_voice_speed_calibration(
-        db,
-        voice,
-        cps=result.cps,
-        model_key=model,
+    # Step 3: parallel calibration via the shared run_calibration_task helper.
+    # claim_or_join + budget + factory + refund-on-paid_count==0 + release
+    # all live in that one helper so the manual endpoint, T1 clone hook,
+    # T2 review preflight, and T3 admin batch share identical semantics.
+    from voice_calibration_inflight import (
+        CalibrationKey,
+        run_calibration_task,
     )
 
-    logger.info(
-        "[calibrate-speed] voice=%s provider=%s model=%s cps=%.4f total_ms=%d",
-        voice_id, provider, model, result.cps, result.total_duration_ms,
+    async def _run_one(model_key: str):
+        key = CalibrationKey(
+            scope="user",
+            owner=user_id_str,
+            provider=provider,
+            voice_id=voice_id,
+            model_key=model_key,
+        )
+
+        async def _factory():
+            return await _run_one_user_voice_calibration(
+                user_id=user_id_str,
+                voice_id=voice_id,
+                provider=provider,
+                model_key=model_key,
+            )
+
+        try:
+            result = await run_calibration_task(
+                key=key,
+                user_id_for_budget=user_id_str,
+                factory=_factory,
+            )
+            return model_key, result, None
+        except risk_control.RateLimitExceeded as exc:
+            return model_key, None, exc
+
+    outcomes = await asyncio.gather(
+        *(_run_one(mk) for mk in models_to_run),
+        return_exceptions=False,
     )
-    return _json(200, {
-        "ok": True,
-        "voice": _voice_to_dict(updated),
-        "calibration": {
+
+    # Aggregate response.
+    results_payload: list[dict] = []
+    any_ok = False
+    all_rate_limited = True
+    rate_limit_message = None
+    for model_key, result, rate_limit_exc in outcomes:
+        if rate_limit_exc is not None:
+            all_rate_limited = all_rate_limited and True
+            rate_limit_message = rate_limit_exc.message
+            results_payload.append({
+                "model_key": model_key,
+                "ok": False,
+                "error_class": "rate_limited",
+                "message": rate_limit_exc.message,
+            })
+            continue
+        all_rate_limited = False
+        if result is None:
+            results_payload.append({
+                "model_key": model_key,
+                "ok": False,
+                "error_class": "internal_error",
+                "message": "no result from run_calibration_task",
+            })
+            continue
+
+        per_text_payload = [
+            {"name": t.name, "hanzi": t.hanzi, "duration_ms": t.duration_ms, "cps": t.cps}
+            for t in result.per_text
+        ]
+        if result.ok:
+            any_ok = True
+        results_payload.append({
+            "model_key": model_key,
+            "ok": result.ok,
             "cps": result.cps,
             "total_hanzi": result.total_hanzi,
             "total_duration_ms": result.total_duration_ms,
-            "provider": provider,
-            "model": model,
+            "error_class": result.error_class or ("" if result.ok else "unknown"),
+            "error": result.error,
+            "paid_call_count": result.paid_call_count,
             "per_text": per_text_payload,
-        },
+        })
+        logger.info(
+            "[calibrate-speed] voice=%s provider=%s model=%s ok=%s cps=%.4f paid_calls=%d",
+            voice_id, provider, model_key,
+            result.ok, result.cps, result.paid_call_count,
+        )
+
+    if all_rate_limited:
+        return _json(429, {
+            "error": "rate_limited",
+            "message": rate_limit_message or "calibration budget exhausted",
+            "results": results_payload,
+        })
+
+    # Refresh the voice row from a fresh session so the response reflects
+    # the writes that just happened in independent factory sessions.
+    from database import async_session
+    async with async_session() as db_read:
+        refreshed = await fetch_user_voice(db_read, user.id, voice_id)
+
+    if not any_ok:
+        return _json(502, {
+            "error": "calibration_failed",
+            "message": "all models failed; see results for details",
+            "voice": _voice_to_dict(refreshed) if refreshed else None,
+            "results": results_payload,
+        })
+
+    return _json(200, {
+        "ok": True,
+        "voice": _voice_to_dict(refreshed) if refreshed else None,
+        "results": results_payload,
+        "provider": provider,
     })
 
 

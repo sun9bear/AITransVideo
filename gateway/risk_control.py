@@ -354,6 +354,116 @@ def reset_voice_probe_rate_limits() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Voice calibration rate limit (P2 voice CPS auto-calibration plan v4.3 T0-A)
+# ---------------------------------------------------------------------------
+# ``voice_speed_calibrator.calibrate_voice`` runs 3 paid TTS calls (T1/T2/T3
+# standard texts) against MiniMax / CosyVoice / VolcEngine. Pre-fix the
+# manual ``POST /gateway/user-voices/{id}/calibrate-speed`` endpoint had
+# **no** rate limit (v3 plan claimed there was, codex F1 caught it).
+# Auto-calibration after voice clone (T1) and review submit (T2) will
+# multiply call frequency, so we need an independent budget BEFORE turning
+# either on.
+#
+# Why a NEW budget instead of reusing reserve_voice_probe (codex v3 F4):
+#   - probe is "user listened to a voice sample" — UX budget, 10/min, 100/day
+#   - calibration is "system calibrating CPS for accuracy" — maintenance
+#     budget. Different intent, different cap. Reusing probe would let the
+#     system silently consume the user's listening allowance.
+#
+# Why 5/min, 30/day per user (decision §7.2):
+#   - T1 clone-after enqueues 2 calibrations per clone (turbo + hd both).
+#     5/min absorbs a burst of 2 clones/minute without contention.
+#   - 30/day absorbs ~15 clones/day per user, well above realistic usage.
+#   - Admin batch goes through internal API key, NOT through this user
+#     budget — so this cap doesn't bottleneck T3 ops paths.
+#   - Tighter than probe's 10/min (probe is cheaper per call: 1 short text
+#     vs calibration's 3 standard texts ~30s each).
+#
+# Reserve / refund semantics (v4.1 codex F-v4.1-7 + v4 F-v4-4):
+#   - Caller MUST call reserve BEFORE invoking calibrate_voice.
+#   - Refund is ONLY for "no paid call was issued":
+#       voice_not_found / unsupported_provider / rate_limited (this raise
+#       happens inside reserve, no slot taken — defensive no-op refund OK).
+#   - Provider 5xx, synth timeout, ffprobe failure, post-paid DB write
+#     failure: DO NOT refund. paid_call_count > 0 means budget is spent.
+#     Refunding these would let provider failure storms bypass the budget.
+#   - The factory contract is "always returns CalibrationResult never
+#     raises", so caller pure-function checks `result.paid_call_count == 0`
+#     to decide refund.
+
+_VOICE_CALIBRATION_SHORT_WINDOW = 60        # seconds
+_VOICE_CALIBRATION_SHORT_LIMIT = 5
+_VOICE_CALIBRATION_DAY_WINDOW = 86_400      # 24h
+_VOICE_CALIBRATION_DAY_LIMIT = 30
+
+_voice_calibration_buf: dict[str, deque[float]] = defaultdict(deque)
+_voice_calibration_lock: Lock = Lock()
+
+
+def reserve_voice_calibration(user_id: str) -> float:
+    """Atomically reserve a calibration slot in the per-user window.
+
+    Raises ``RateLimitExceeded`` when either the 5/min or 30/day cap is
+    reached. On success returns the reservation timestamp; pass to
+    ``refund_voice_calibration`` ONLY for ``paid_call_count == 0`` failure
+    paths (see module docstring).
+
+    Empty user_id returns 0.0 as a defensive no-op (auth layer should
+    have rejected anonymous callers; this prevents an internal coding
+    bug from silently disabling the limit).
+    """
+    if not user_id:
+        return 0.0
+    now = time.monotonic()
+    with _voice_calibration_lock:
+        buf = _voice_calibration_buf[user_id]
+        _prune(buf, now, _VOICE_CALIBRATION_DAY_WINDOW)
+        if (
+            _count_within(buf, now, _VOICE_CALIBRATION_SHORT_WINDOW)
+            >= _VOICE_CALIBRATION_SHORT_LIMIT
+        ):
+            raise RateLimitExceeded(
+                scope="voice_calibration_short",
+                message="校准请求过于频繁,请稍后再试",
+            )
+        if len(buf) >= _VOICE_CALIBRATION_DAY_LIMIT:
+            raise RateLimitExceeded(
+                scope="voice_calibration_day",
+                message="今日校准次数已达上限,请明日再试",
+            )
+        buf.append(now)
+        return now
+
+
+def refund_voice_calibration(user_id: str, reservation: float) -> None:
+    """Roll back a previously-reserved slot.
+
+    Caller MUST only invoke this when no paid TTS call was issued
+    (CalibrationResult.paid_call_count == 0 OR caller never reached the
+    factory). For paid_call_count > 0 the budget is correctly spent,
+    even if the result was not ok.
+
+    ``reservation`` is the timestamp returned by ``reserve_voice_calibration``.
+    Already-pruned values silently no-op — the user simply moved past the
+    24h window.
+    """
+    if not user_id or reservation <= 0:
+        return
+    with _voice_calibration_lock:
+        buf = _voice_calibration_buf[user_id]
+        try:
+            buf.remove(reservation)
+        except ValueError:
+            pass
+
+
+def reset_voice_calibration_rate_limits() -> None:
+    """Test-support helper: wipe all voice-calibration rate-limit buffers."""
+    with _voice_calibration_lock:
+        _voice_calibration_buf.clear()
+
+
+# ---------------------------------------------------------------------------
 # Captcha
 # ---------------------------------------------------------------------------
 

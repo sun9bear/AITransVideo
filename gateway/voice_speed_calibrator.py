@@ -76,6 +76,34 @@ class CalibrationResult:
     On failure: ``ok=False``, ``error`` is a human-readable message
     naming the failing text (e.g. ``"synth failed on T2_documentary: ..."``)
     so the user-facing error in the UI is actionable.
+
+    Plan v3+ additions for the auto-calibration callers (T1 clone hook,
+    T2 review preflight, T3 admin batch):
+
+    ``error_class`` (v3 codex F9 + v4.1 F-v4.1-7):
+        Machine-parseable error category so callers can decide refund
+        / retry / skip without parsing the human-readable string. One
+        of: ``""`` (success), ``"unknown_provider"``, ``"voice_not_found"``,
+        ``"synth_failed"``, ``"duration_measurement_failed"``,
+        ``"non_positive_duration"``, ``"total_duration_zero"``,
+        ``"out_of_bounds_cps"``, ``"total_timeout"``, ``"db_write_failed"``,
+        ``"internal_error"``, ``"rate_limited"``, ``"unsupported_provider"``.
+
+    ``paid_call_count`` (v4.1 codex F-v4.1-7):
+        Number of paid TTS calls the calibration ACTUALLY ISSUED to the
+        provider — incremented BEFORE each ``synth_fn`` invocation so
+        that synth_fn raising (5xx, timeout) still increments the count.
+        Caller (clone hook / review preflight / manual endpoint) reads
+        this to decide refund: refund only when ``paid_call_count == 0``.
+        Refunding paid_call_count > 0 would let provider failure storms
+        bypass the budget.
+
+    ``model_key`` (v3 codex F2 + v4 model-aware writes):
+        The canonical model id this result is FOR (e.g. ``"speech-2.8-turbo"``,
+        ``"speech-2.8-hd"``). Mandatory for write helpers — they store
+        results into ``chars_per_second_by_model[model_key]`` JSONB. Empty
+        only on early-failure paths where the caller already knows the
+        intended model.
     """
     ok: bool
     cps: float = 0.0
@@ -83,6 +111,9 @@ class CalibrationResult:
     total_duration_ms: int = 0
     per_text: list[TextResult] = field(default_factory=list)
     error: str = ""
+    error_class: str = ""
+    paid_call_count: int = 0
+    model_key: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -90,9 +121,34 @@ class CalibrationResult:
 # wire payload is byte-identical to what the pipeline sends.
 # ---------------------------------------------------------------------------
 
+# T0-C bounded primitives (plan v4.3 §3.0): per-call timeouts must be
+# tight so calibrate_voice's outer total_timeout_seconds budget can't
+# be silently bypassed by a single slow provider call. v1's 60s × 2
+# retries gave a 180s worst case per text (540s for the full 3-text
+# calibration), unsuitable for the synchronous T2 review preflight.
+#
+# 12s × max_retries=1 gives 24s worst case per text. MiniMax production
+# voice probe averages ~5s per call, p95 < 10s — 12s is conservative
+# without being wasteful.
+_MINIMAX_CALIBRATION_SYNTH_TIMEOUT_S = 12.0
+_MINIMAX_CALIBRATION_SYNTH_MAX_RETRIES = 1
+
+# T0-C ffprobe timeout (plan v4.3 §3.0): WAV duration probe should be
+# sub-second; 10s is a generous upper bound. Without it, a hung ffprobe
+# subprocess would extend calibration indefinitely beyond
+# total_timeout_seconds.
+_FFPROBE_TIMEOUT_S = 10
+
+
 def _synthesize_minimax(text: str, voice_id: str, model: str) -> bytes:
     """MiniMax HTTP synth via the production helper. Returns raw bytes
-    (WAV format requested below; ``audio`` field is hex-encoded)."""
+    (WAV format requested below; ``audio`` field is hex-encoded).
+
+    Uses calibration-specific bounded timeouts (12s × 1 retry) — NOT
+    the production TTS helper's defaults (60s × 2 retries which suit
+    long-text dubbing but would let a single calibration call hang for
+    180s).
+    """
     from services.tts.tts_generator import _build_tts_endpoint, _post_json
 
     api_key = (
@@ -121,8 +177,8 @@ def _synthesize_minimax(text: str, voice_id: str, model: str) -> bytes:
         endpoint=endpoint,
         api_key=api_key,
         payload=payload,
-        timeout_seconds=60.0,
-        max_retries=2,
+        timeout_seconds=_MINIMAX_CALIBRATION_SYNTH_TIMEOUT_S,
+        max_retries=_MINIMAX_CALIBRATION_SYNTH_MAX_RETRIES,
         retry_backoff_seconds=2.0,
     )
     base = response.get("base_resp") or {}
@@ -153,7 +209,13 @@ _DEFAULT_SYNTH_FNS: dict[str, Callable[[str, str, str], bytes]] = {
 
 
 def _measure_wav_duration_ms(wav_bytes: bytes) -> int:
-    """Probe a WAV byte buffer with ffprobe, return duration in ms."""
+    """Probe a WAV byte buffer with ffprobe, return duration in ms.
+
+    T0-C (plan v4.3): ``timeout=_FFPROBE_TIMEOUT_S`` so a hung ffprobe
+    subprocess can't extend calibration past ``total_timeout_seconds``.
+    Raises ``subprocess.TimeoutExpired`` when ffprobe doesn't return in
+    time; callers map that to ``error_class="duration_measurement_failed"``.
+    """
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
         f.write(wav_bytes)
         path = f.name
@@ -166,6 +228,7 @@ def _measure_wav_duration_ms(wav_bytes: bytes) -> int:
                 path,
             ],
             capture_output=True, text=True, check=True,
+            timeout=_FFPROBE_TIMEOUT_S,
         )
         seconds = float(result.stdout.strip())
         return int(round(seconds * 1000))
@@ -181,11 +244,18 @@ def calibrate_voice(
     provider: str,
     model: str,
     voice_id: str,
+    total_timeout_seconds: float = 60.0,
     inter_call_sleep_s: float = 2.0,
     synth_fn: Callable[[str, str, str], bytes] | None = None,
     duration_fn: Callable[[bytes], int] | None = None,
+    monotonic_fn: Callable[[], float] | None = None,
 ) -> CalibrationResult:
     """Calibrate a single voice's chars-per-second across the 3 standard texts.
+
+    Plan v3+ contract: **NEVER raises**. All failure modes packed into
+    ``CalibrationResult`` so the caller (clone hook / review preflight /
+    manual endpoint) can decide refund based purely on
+    ``result.paid_call_count`` (codex v4 F-v4-4).
 
     Parameters
     ----------
@@ -193,46 +263,104 @@ def calibrate_voice(
         ``"minimax"`` / ``"cosyvoice"`` / ``"volcengine"`` — picks the default
         synth function. Ignored when ``synth_fn`` is provided (testing).
     model:
-        Provider-specific model identifier — passed through to ``synth_fn``.
-        For VolcEngine this is the resource_id (e.g. ``"seed-tts-2.0"``).
+        Provider-specific canonical model identifier (e.g. ``"speech-2.8-turbo"``,
+        ``"speech-2.8-hd"``). Passed through to ``synth_fn``. The result's
+        ``model_key`` field is set to this value so callers can write into
+        the right ``chars_per_second_by_model`` JSONB key (T0-D).
     voice_id:
-        The voice to calibrate.
+        Provider-side voice id to calibrate.
+    total_timeout_seconds:
+        Outer budget for the entire 3-text calibration. Plan v4.1 codex
+        F-v4.1-7: this is checked at SEGMENT BOUNDARIES — not enforced
+        inside a blocking ``synth_fn`` call. The bounded primitives
+        (``_post_json`` 12s / ffprobe 10s) limit each call's worst-case
+        contribution to ~24s; the total budget catches "first 2 calls
+        each took 28s, abort before issuing call 3". Once an individual
+        synth_fn is in flight, this budget cannot interrupt it.
     inter_call_sleep_s:
-        Sleep between the 3 synth calls. ~2s default ≈ the bulk script's
-        rate-limited cadence. Kept conservative; per-voice calibration is
-        not throughput-critical.
+        Sleep between the 3 synth calls. ~2s default ≈ bulk script's
+        rate-limited cadence. The sleep is also subject to the segment-
+        boundary timeout check.
     synth_fn:
         Override for tests. Takes ``(text, voice_id, model)`` returning
         raw audio bytes (must be parseable by ffprobe — WAV is fine).
     duration_fn:
         Override for tests. Takes audio bytes returning duration in ms.
         Production path uses ffprobe.
+    monotonic_fn:
+        Override for tests (fake clock). Defaults to ``time.monotonic``.
+        Used for total_timeout_seconds budget tracking.
 
     Returns
     -------
     CalibrationResult
-        Always returns a result object — never raises. Inspect ``ok``.
+        Always a result object — never raises. ``paid_call_count`` reflects
+        how many synth calls were actually issued (incremented BEFORE each
+        call so 5xx/timeout are counted — codex v4.1 F-v4.1-7).
     """
     sfn = synth_fn or _DEFAULT_SYNTH_FNS.get(provider)
     if sfn is None:
-        return CalibrationResult(ok=False, error=f"unknown provider: {provider!r}")
+        return CalibrationResult(
+            ok=False,
+            error=f"unknown provider: {provider!r}",
+            error_class="unknown_provider",
+            paid_call_count=0,
+            model_key=model,
+        )
 
     dfn = duration_fn or _measure_wav_duration_ms
+    clock = monotonic_fn or time.monotonic
+    started_at = clock()
 
     per_text: list[TextResult] = []
     total_hanzi = 0
     total_ms = 0
+    paid_call_count = 0
 
-    for idx, (name, text) in enumerate(STANDARD_TEXTS.items()):
+    items = list(STANDARD_TEXTS.items())
+    for idx, (name, text) in enumerate(items):
+        # T0-C segment-boundary timeout check (plan v4.1 F-v4.1-7): enforce
+        # total budget BEFORE issuing the next paid call. Already-running
+        # synth_fn cannot be interrupted; this prevents NEW work from
+        # starting once budget is exhausted.
+        if clock() - started_at > total_timeout_seconds:
+            return CalibrationResult(
+                ok=False,
+                error=f"total_timeout: budget {total_timeout_seconds}s exhausted before {name}",
+                error_class="total_timeout",
+                paid_call_count=paid_call_count,
+                per_text=per_text,
+                model_key=model,
+            )
+
         if idx > 0 and inter_call_sleep_s > 0:
             time.sleep(inter_call_sleep_s)
+            # Re-check after sleep — sleep itself may have consumed the budget
+            if clock() - started_at > total_timeout_seconds:
+                return CalibrationResult(
+                    ok=False,
+                    error=f"total_timeout: budget {total_timeout_seconds}s exhausted during inter-call sleep before {name}",
+                    error_class="total_timeout",
+                    paid_call_count=paid_call_count,
+                    per_text=per_text,
+                    model_key=model,
+                )
+
+        # paid_call_count increments BEFORE synth (codex v4.1 F-v4.1-7).
+        # If synth_fn raises (provider 5xx, timeout, network error), the
+        # count still reflects "we issued this call" so caller's refund
+        # logic correctly sees count > 0 and skips refund.
+        paid_call_count += 1
         try:
             wav = sfn(text, voice_id, model)
         except Exception as exc:
             return CalibrationResult(
                 ok=False,
                 error=f"synth failed on {name}: {exc}",
+                error_class="synth_failed",
+                paid_call_count=paid_call_count,
                 per_text=per_text,
+                model_key=model,
             )
         try:
             duration_ms = dfn(wav)
@@ -240,13 +368,19 @@ def calibrate_voice(
             return CalibrationResult(
                 ok=False,
                 error=f"duration measurement failed on {name}: {exc}",
+                error_class="duration_measurement_failed",
+                paid_call_count=paid_call_count,
                 per_text=per_text,
+                model_key=model,
             )
         if duration_ms <= 0:
             return CalibrationResult(
                 ok=False,
                 error=f"non-positive duration on {name}: {duration_ms}",
+                error_class="non_positive_duration",
+                paid_call_count=paid_call_count,
                 per_text=per_text,
+                model_key=model,
             )
         hanzi = count_hanzi(text)
         seg_cps = hanzi / (duration_ms / 1000.0) if duration_ms > 0 else 0.0
@@ -258,7 +392,10 @@ def calibrate_voice(
         return CalibrationResult(
             ok=False,
             error="total duration zero",
+            error_class="total_duration_zero",
+            paid_call_count=paid_call_count,
             per_text=per_text,
+            model_key=model,
         )
 
     cps = total_hanzi / (total_ms / 1000.0)
@@ -266,10 +403,13 @@ def calibrate_voice(
         return CalibrationResult(
             ok=False,
             error=f"cps {cps:.2f} out of sanity range [{MIN_VALID_CPS}, {MAX_VALID_CPS}]",
+            error_class="out_of_bounds_cps",
+            paid_call_count=paid_call_count,
             per_text=per_text,
             total_hanzi=total_hanzi,
             total_duration_ms=total_ms,
             cps=round(cps, 4),
+            model_key=model,
         )
 
     return CalibrationResult(
@@ -278,4 +418,6 @@ def calibrate_voice(
         total_hanzi=total_hanzi,
         total_duration_ms=total_ms,
         per_text=per_text,
+        paid_call_count=paid_call_count,
+        model_key=model,
     )

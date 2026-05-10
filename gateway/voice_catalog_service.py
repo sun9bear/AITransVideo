@@ -264,6 +264,81 @@ async def soft_delete_voice(db: AsyncSession, voice: VoiceCatalog) -> VoiceCatal
     return voice
 
 
+class CatalogVoiceNotFoundError(LookupError):
+    """Raised by ``update_catalog_voice_speed_calibration`` when the
+    (provider, voice_id, archived_at IS NULL) row is not present at write
+    time — typically because the voice was archived between the caller's
+    decision to calibrate and the write."""
+
+
+async def update_catalog_voice_speed_calibration(
+    db: AsyncSession,
+    *,
+    provider: str,
+    voice_id: str,
+    cps: float,
+    model_key: str,
+) -> VoiceCatalog:
+    """Atomically persist a per-model calibration result onto a catalog voice.
+
+    Counterpart to ``user_voice_service.update_user_voice_speed_calibration``
+    for the catalog-scope writes (admin batch, T3 ops). Same JSONB-merge-
+    under-FOR-UPDATE pattern (plan v4.1 codex F-v4.1-1) so concurrent
+    turbo + hd writes don't lose each other's keys.
+
+    Plan v4.2 codex F-v4.2-6: query MUST filter on
+    ``(provider, voice_id, archived_at IS NULL)`` so cross-provider
+    voice_id collisions and retired-voice rows can't be silently
+    overwritten. ``voice_id`` is unique in voice_catalog at the schema
+    level today, but T0 codifies the defensive query.
+
+    Parameters
+    ----------
+    db:
+        AsyncSession. Helper opens its own ``async with db.begin()`` block.
+    provider:
+        Canonical lowercase, e.g. ``"minimax"``.
+    voice_id:
+        Provider-side voice id (catalog VoiceCatalog.voice_id).
+    cps:
+        Calibrated chars-per-second for ``model_key``.
+    model_key:
+        Canonical model id; required.
+
+    Raises
+    ------
+    CatalogVoiceNotFoundError
+        When no non-archived row matches.
+    """
+    if not model_key:
+        raise ValueError("model_key is required (plan v4 T0-D)")
+
+    async with db.begin():
+        result = await db.execute(
+            select(VoiceCatalog)
+              .where(
+                  VoiceCatalog.provider == provider,
+                  VoiceCatalog.voice_id == voice_id,
+                  VoiceCatalog.archived_at.is_(None),
+              )
+              .with_for_update()
+        )
+        voice = result.scalar_one_or_none()
+        if voice is None:
+            raise CatalogVoiceNotFoundError(
+                f"voice_catalog missing or archived: provider={provider!r} voice_id={voice_id!r}"
+            )
+
+        merged = dict(voice.chars_per_second_by_model or {})
+        merged[model_key] = float(cps)
+        voice.chars_per_second_by_model = merged
+        voice.chars_per_second = sum(merged.values()) / len(merged)
+        now = datetime.now(timezone.utc)
+        voice.speed_calibrated_at = now
+        voice.updated_at = now
+    return voice
+
+
 class VerifySkipped(Exception):
     """Raised when verify cannot run (unsupported provider, missing creds).
 
