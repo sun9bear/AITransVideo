@@ -261,30 +261,64 @@ def test_gateway_knows_every_post_edit_endpoint() -> None:
     """Every editing mutation subpath the Job API exposes must be listed
     in ``_is_post_edit_mutation_subpath`` so the feature flag (D29) gates
     it. A missing entry would leave the endpoint accessible when the flag
-    is off — silent feature leak."""
-    gateway_src = _read("gateway/job_intercept.py")
+    is off — silent feature leak.
 
-    # State transitions
-    for subpath in ("enter-edit", "editing/cancel", "editing/commit"):
-        assert (
-            f'"{subpath}"' in gateway_src or f"'{subpath}'" in gateway_src
-        ), f"gateway does not recognise transition subpath: {subpath}"
+    Audit P2-21 (2026-05-07) tightening: switched from string-substring
+    presence checks to **set equality** against three module-level
+    frozensets. Set equality catches BOTH directions of drift:
+      - gateway misses an endpoint that exists in EXPECTED → previous
+        substring check already caught this.
+      - gateway adds an endpoint without updating the EXPECTED set →
+        the new test fails fast, forcing a deliberate update of both
+        sides at once. This is the case the substring check missed:
+        a stray entry in the gateway whitelist (e.g. typo, obsolete
+        endpoint) would silently linger.
+    """
+    from gateway.job_intercept import (
+        _POST_EDIT_TRANSITION_SUBPATHS,
+        _POST_EDIT_SIMPLE_MUTATION_SUBPATHS,
+        _POST_EDIT_SEGMENT_ACTIONS,
+    )
 
-    # Simple mutations (T1-6)
-    for subpath in (
+    EXPECTED_TRANSITIONS = frozenset({
+        "enter-edit",
+        "editing/cancel",
+        "editing/commit",
+    })
+    EXPECTED_SIMPLE_MUTATIONS = frozenset({
         "regenerate-all-tts",
+        "regenerate-all-tts/cancel",
         "editing/voice-map",
         "editing/revert-unsynced-text",
-    ):
-        assert (
-            f'"{subpath}"' in gateway_src or f"'{subpath}'" in gateway_src
-        ), f"gateway does not recognise simple mutation subpath: {subpath}"
+        "editing/speakers",
+    })
+    EXPECTED_SEGMENT_ACTIONS = frozenset({
+        "update",
+        "status",
+        "regenerate-tts",
+        "accept-draft",
+        "discard-draft",
+        "split",
+        "preview-source",
+    })
 
-    # Segment-scoped actions: must appear in the segments action whitelist
-    for action in ("update", "status", "regenerate-tts", "accept-draft", "discard-draft"):
-        assert (
-            f'"{action}"' in gateway_src or f"'{action}'" in gateway_src
-        ), f"gateway segments action allowlist missing: {action}"
+    assert _POST_EDIT_TRANSITION_SUBPATHS == EXPECTED_TRANSITIONS, (
+        f"gateway _POST_EDIT_TRANSITION_SUBPATHS drifted from EXPECTED set: "
+        f"missing={EXPECTED_TRANSITIONS - _POST_EDIT_TRANSITION_SUBPATHS} "
+        f"extra={_POST_EDIT_TRANSITION_SUBPATHS - EXPECTED_TRANSITIONS}. "
+        f"Update BOTH sides together (gateway whitelist + this test) so "
+        f"a future endpoint addition can't slip through one side only."
+    )
+    assert _POST_EDIT_SIMPLE_MUTATION_SUBPATHS == EXPECTED_SIMPLE_MUTATIONS, (
+        f"gateway _POST_EDIT_SIMPLE_MUTATION_SUBPATHS drifted: "
+        f"missing={EXPECTED_SIMPLE_MUTATIONS - _POST_EDIT_SIMPLE_MUTATION_SUBPATHS} "
+        f"extra={_POST_EDIT_SIMPLE_MUTATION_SUBPATHS - EXPECTED_SIMPLE_MUTATIONS}."
+    )
+    assert _POST_EDIT_SEGMENT_ACTIONS == EXPECTED_SEGMENT_ACTIONS, (
+        f"gateway _POST_EDIT_SEGMENT_ACTIONS drifted: "
+        f"missing={EXPECTED_SEGMENT_ACTIONS - _POST_EDIT_SEGMENT_ACTIONS} "
+        f"extra={_POST_EDIT_SEGMENT_ACTIONS - EXPECTED_SEGMENT_ACTIONS}."
+    )
 
 
 def test_gateway_logs_redaction_gated_on_role() -> None:

@@ -1948,6 +1948,25 @@ _POST_EDIT_SIMPLE_MUTATION_SUBPATHS: frozenset[str] = frozenset({
                                     # read-only and falls through to proxy).
 })
 
+# Per-segment action allowlist (templated as ``segments/{sid}/{action}``).
+# Promoted from an inline set inside ``_is_post_edit_mutation_subpath`` so
+# the test suite can assert set-equality against an EXPECTED list — catches
+# both directions of drift (gateway adds without test update, or test
+# expects without gateway implementation). Audit P2-21 (2026-05-07).
+#
+# Kept as an explicit allowlist rather than "any segments/*" so that
+# future non-post-edit segment actions are not silently gated off when
+# the AVT_ENABLE_POST_EDIT flag is disabled.
+_POST_EDIT_SEGMENT_ACTIONS: frozenset[str] = frozenset({
+    "update", "status", "regenerate-tts",
+    "accept-draft", "discard-draft",
+    # 2026-04-21 plan §7.4: editing-mode segment split + source audio
+    # preview. Both are editing-gated mutations / reads; keeping them
+    # on this allowlist ties them to the feature flag + editing
+    # lock dispatch rather than leaking through the generic proxy.
+    "split", "preview-source",
+})
+
 
 def _is_post_edit_mutation_subpath(subpath: str) -> bool:
     """Decide whether a job subresource subpath belongs to the post-edit
@@ -1959,22 +1978,10 @@ def _is_post_edit_mutation_subpath(subpath: str) -> bool:
     if subpath in _POST_EDIT_SIMPLE_MUTATION_SUBPATHS:
         return True
     parts = subpath.split("/")
-    # segments/{sid}/{action} where action ∈ {update, status, regenerate-tts,
-    # accept-draft, discard-draft}. Kept as an explicit allowlist rather than
-    # "any segments/*" so that future non-post-edit segment actions are not
-    # silently gated off when the flag is disabled.
     if (
         len(parts) == 3
         and parts[0] == "segments"
-        and parts[2] in {
-            "update", "status", "regenerate-tts",
-            "accept-draft", "discard-draft",
-            # 2026-04-21 plan §7.4: editing-mode segment split + source audio
-            # preview. Both are editing-gated mutations / reads; keeping them
-            # on this allowlist ties them to the feature flag + editing
-            # lock dispatch rather than leaking through the generic proxy.
-            "split", "preview-source",
-        }
+        and parts[2] in _POST_EDIT_SEGMENT_ACTIONS
     ):
         return True
     # editing/speakers/{speaker_id}/retry-profile — Task 5 (plan 2026-05-09).
