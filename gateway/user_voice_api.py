@@ -586,9 +586,17 @@ async def calibrate_voice_speed(
 
     # Refresh the voice row from a fresh session so the response reflects
     # the writes that just happened in independent factory sessions.
+    #
+    # Bug fix (T0 prod 500, codex F-T0-7): we did `await db.rollback()`
+    # earlier (line 488) to release the route session before paid TTS.
+    # That detached the `user` ORM object from any session — accessing
+    # `user.id` here triggers a lazy load on a closed AsyncSession and
+    # raises sqlalchemy.exc.MissingGreenlet ("greenlet_spawn has not
+    # been called"). Use the already-cached `user_id_str` (captured at
+    # line 487 BEFORE the rollback) instead.
     from database import async_session
     async with async_session() as db_read:
-        refreshed = await fetch_user_voice(db_read, user.id, voice_id)
+        refreshed = await fetch_user_voice(db_read, user_id_str, voice_id)
 
     if not any_ok:
         return _json(502, {
