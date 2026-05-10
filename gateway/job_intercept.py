@@ -1654,6 +1654,56 @@ async def _approve_voice_selection_with_quality_sync(
     if not isinstance(speakers, list):
         speakers = []
 
+    # Plan v4.3 §3.2 T2 — voice CPS preflight calibration BEFORE proxy.
+    # Hard requirement: this must run before proxy_request so that when
+    # the pipeline reads review_state.json it sees calibrated CPS for
+    # the chosen voices. Otherwise Pre-TTS rewrite degrades to default
+    # CPS on first run.
+    #
+    # codex F-v4.1-2: route ``db`` was already used by _verify_job_ownership
+    # earlier in intercept_job_subresource. We rollback BEFORE the up-to-50s
+    # preflight wait so SQLAlchemy returns the connection to the pool.
+    # Without this, concurrent submits would exhaust the connection pool.
+    preflight_outcomes: list[dict] = []
+    try:
+        from voice_calibration_review_preflight import (
+            pre_flight_calibrate_voices,
+            review_preflight_enabled,
+        )
+        if review_preflight_enabled() and speakers:
+            try:
+                await db.rollback()
+            except Exception:
+                # rollback shouldn't realistically raise; if it does,
+                # we still proceed — proxy + DB sync below own their
+                # own commit semantics so the route doesn't deadlock.
+                logger.exception(
+                    "[t2-preflight] route db.rollback() raised job=%s — proceeding",
+                    job_id,
+                )
+            try:
+                preflight_outcomes = await pre_flight_calibrate_voices(
+                    job_id=job_id,
+                    speakers=speakers,
+                )
+            except Exception:
+                # The preflight module is built to never raise (all errors
+                # surface as outcome dicts). This catch is a paranoia net
+                # for unforeseen import / asyncio glitches — proxy must
+                # never block on preflight.
+                logger.exception(
+                    "[t2-preflight] pre_flight_calibrate_voices raised job=%s — degrading",
+                    job_id,
+                )
+                preflight_outcomes = []
+    except Exception:
+        # Module import or any wiring error — log and proceed without
+        # preflight. Outermost soft-fail guard.
+        logger.exception(
+            "[t2-preflight] outer wiring error job=%s — proceeding without preflight",
+            job_id,
+        )
+
     # Forward upstream with the ORIGINAL body unchanged. Upstream doesn't
     # know about `minimax_model` but doesn't mind extra fields either.
     response = await proxy_request(

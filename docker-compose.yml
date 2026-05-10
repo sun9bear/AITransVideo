@@ -280,6 +280,13 @@ services:
       # voice, and budget is rate-limited to 8/min × 30/day per user
       # (see risk_control._VOICE_CALIBRATION_*).
       AVT_AUTO_CALIBRATE_AFTER_CLONE: "${AVT_AUTO_CALIBRATE_AFTER_CLONE:-true}"
+      # Voice CPS preflight on review submit (plan v4.3 T2). Default OFF —
+      # operator must explicitly opt in. When true: /review/voice-selection/approve
+      # will pre-calibrate the chosen voices' CPS for the job's final MiniMax
+      # model BEFORE proxying to Job-API, with a hard 50s upper bound. Voices
+      # not in user_voices/voice_catalog or non-MiniMax providers are skipped.
+      # Pending tasks at 50s keep running in background (NOT cancelled).
+      AVT_AUTO_CALIBRATE_ON_REVIEW_SUBMIT: "${AVT_AUTO_CALIBRATE_ON_REVIEW_SUBMIT:-false}"
       # --- Phase 2 R2 download backend (plan 2026-04-23) ---
       # Default is intentionally safe: "local" keeps the existing Gateway
       # -> Job API byte-passthrough path. Flipping to "r2" requires ALL
