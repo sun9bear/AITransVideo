@@ -1696,6 +1696,24 @@ async def _approve_voice_selection_with_quality_sync(
                     job_id,
                 )
                 preflight_outcomes = []
+
+            # codex v4.4 P2: emit a summary log so operators can track
+            # T2 hit rate (already_calibrated vs calibrated vs
+            # not_started_timeout vs still_running vs not_found etc.)
+            # without grepping individual voice events. preflight_outcomes
+            # is otherwise currently consumed only by this log; future
+            # work will surface it in the response for frontend tooltip
+            # rendering.
+            if preflight_outcomes:
+                _counts: dict[str, int] = {}
+                for _o in preflight_outcomes:
+                    _s = str(_o.get("status") or "unknown")
+                    _counts[_s] = _counts.get(_s, 0) + 1
+                logger.info(
+                    "[t2-preflight] summary job=%s total=%d %s",
+                    job_id, len(preflight_outcomes),
+                    " ".join(f"{k}={v}" for k, v in sorted(_counts.items())),
+                )
     except Exception:
         # Module import or any wiring error — log and proceed without
         # preflight. Outermost soft-fail guard.

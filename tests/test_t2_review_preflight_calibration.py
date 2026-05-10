@@ -1020,3 +1020,261 @@ def test_t2_preflight_runs_before_proxy_request():
         "pre_flight_calibrate_voices() must appear BEFORE proxy_request() "
         "in _approve_voice_selection_with_quality_sync — codex F5 regression"
     )
+
+
+# ---------------------------------------------------------------------------
+# v4.4 P1-1: queued tasks (semaphore not yet acquired) MUST be cancelled
+#           at batch timeout so they don't start NEW paid TTS work after
+#           the user has already proxied into the pipeline.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_t2_queued_task_cancelled_at_timeout_no_paid_call(monkeypatch):
+    """codex v4.4 P1-1: with max_concurrency=1 and two slow voices, the
+    second voice never acquires the semaphore. After the batch timeout,
+    the second task MUST be cancelled (no paid TTS), and the outcome
+    MUST be 'not_started_timeout'.
+
+    Without the fix, the second task would eventually acquire the
+    semaphore (after the first finishes) and start a NEW paid TTS call
+    — but by then the user has already proxied into the pipeline with
+    default CPS for that voice, so the calibration is wasted budget.
+    """
+    speakers = _make_speakers(
+        ("v_first", "minimax", "hd"),    # acquires sem first
+        ("v_queued", "minimax", "hd"),   # blocked behind v_first
+    )
+
+    paid_calls = []   # track which voice_ids reached run_calibration_task
+    first_started = asyncio.Event()
+
+    async def fake_run_calibration_task(*, key, user_id_for_budget, factory):
+        paid_calls.append(key.voice_id)
+        if key.voice_id == "v_first":
+            first_started.set()
+            # Block long enough for the batch timeout to fire.
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                # First task is allowed to keep running; if cancelled it's
+                # the test runtime tearing down.
+                raise
+        # If v_queued ever reaches here, the test fails — paid TTS should
+        # NOT have been issued for the queued voice.
+        return CalibrationResult(
+            ok=True, cps=4.0, paid_call_count=3, model_key=key.model_key,
+        )
+
+    fake_inflight = types.ModuleType("voice_calibration_inflight")
+    fake_inflight.CalibrationKey = CalibrationKey
+    fake_inflight.run_calibration_task = fake_run_calibration_task
+    monkeypatch.setitem(sys.modules, "voice_calibration_inflight", fake_inflight)
+
+    fake_models = types.ModuleType("models")
+    fake_models.Job = MagicMock()
+    fake_models.UserVoice = MagicMock()
+    monkeypatch.setitem(sys.modules, "models", fake_models)
+    fake_catalog = types.ModuleType("voice_catalog_models")
+    fake_catalog.VoiceCatalog = MagicMock()
+    monkeypatch.setitem(sys.modules, "voice_catalog_models", fake_catalog)
+    _patch_select(monkeypatch)
+
+    fake_job = MagicMock()
+    fake_job.user_id = "owner-uuid"
+
+    class FakeSession:
+        def __init__(self):
+            self.queries = []
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return None
+        async def execute(self, stmt):
+            self.queries.append(stmt)
+            r = MagicMock()
+            if len(self.queries) == 1:
+                r.scalar_one_or_none.return_value = fake_job
+            elif len(self.queries) == 2:
+                r.scalars().all.return_value = [
+                    _FakeUserVoiceRow("v_first", None),
+                    _FakeUserVoiceRow("v_queued", None),
+                ]
+            return r
+
+    fake_db = types.ModuleType("database")
+    fake_db.async_session = lambda: FakeSession()
+    monkeypatch.setitem(sys.modules, "database", fake_db)
+
+    outcomes = await t2.pre_flight_calibrate_voices(
+        job_id="job_t", speakers=speakers,
+        batch_total_timeout_seconds=0.5,
+        max_concurrency=1,   # critical: forces queue
+    )
+
+    # Wait briefly to ensure any race-y post-return scheduling settles.
+    await asyncio.sleep(0.2)
+
+    # CRITICAL: paid TTS only fired for v_first; v_queued was cancelled
+    # before acquiring the semaphore.
+    assert paid_calls == ["v_first"], (
+        f"Queued task MUST NOT issue paid TTS after timeout. "
+        f"paid_calls={paid_calls}"
+    )
+
+    # And the outcome reports the cancelled state explicitly so callers
+    # / dashboards can distinguish "in flight, may finish" vs "never
+    # started".
+    out_first = next(o for o in outcomes if o["voice_id"] == "v_first")
+    out_queued = next(o for o in outcomes if o["voice_id"] == "v_queued")
+    assert out_first["status"] == "still_running", (
+        f"v_first held the semaphore at timeout; expected still_running, got {out_first}"
+    )
+    assert out_queued["status"] == "not_started_timeout", (
+        f"v_queued never acquired semaphore; expected not_started_timeout, got {out_queued}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# v4.4 P1-2: expired user_voices row MUST NOT route to user scope.
+#           Either fall back to catalog or mark not_found.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_t2_expired_user_voice_not_routed_to_user_scope(monkeypatch):
+    """codex v4.4 P1-2: a row in user_voices with expired_at != NULL is
+    a soft-deleted clone. The resolve query MUST filter it out so we
+    don't:
+    1. Issue paid TTS for an unusable voice
+    2. Write CPS back to a row the rest of the pipeline ignores
+
+    The test simulates the database returning NO rows for the user_voices
+    query (reflecting the new ``expired_at IS NULL`` filter), then no
+    rows for catalog either. Outcome should be 'not_found' with NO
+    calibrate call.
+    """
+    speakers = _make_speakers(
+        ("vt_expired", "minimax", "hd", "catalog"),
+    )
+
+    paid_calls = []
+    async def fake_run_calibration_task(*, key, user_id_for_budget, factory):
+        paid_calls.append(key.voice_id)
+        return CalibrationResult(ok=True, cps=4.0, paid_call_count=3, model_key=key.model_key)
+
+    fake_inflight = types.ModuleType("voice_calibration_inflight")
+    fake_inflight.CalibrationKey = CalibrationKey
+    fake_inflight.run_calibration_task = fake_run_calibration_task
+    monkeypatch.setitem(sys.modules, "voice_calibration_inflight", fake_inflight)
+
+    fake_models = types.ModuleType("models")
+    fake_models.Job = MagicMock()
+    fake_models.UserVoice = MagicMock()
+    monkeypatch.setitem(sys.modules, "models", fake_models)
+    fake_catalog = types.ModuleType("voice_catalog_models")
+    fake_catalog.VoiceCatalog = MagicMock()
+    monkeypatch.setitem(sys.modules, "voice_catalog_models", fake_catalog)
+    _patch_select(monkeypatch)
+
+    fake_job = MagicMock()
+    fake_job.user_id = "owner-uuid"
+
+    class FakeSession:
+        """Session that simulates the production behavior: the
+        expired_at IS NULL filter EXCLUDES the expired row, so the
+        user_voices query returns empty even though a row exists."""
+        def __init__(self):
+            self.queries = []
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return None
+        async def execute(self, stmt):
+            self.queries.append(stmt)
+            r = MagicMock()
+            if len(self.queries) == 1:
+                r.scalar_one_or_none.return_value = fake_job
+            elif len(self.queries) == 2:
+                # user_voices query — returns EMPTY because the
+                # expired_at IS NULL filter excludes the soft-deleted row.
+                r.scalars().all.return_value = []
+            elif len(self.queries) == 3:
+                # catalog query — also empty (it's a private user clone,
+                # not a library voice)
+                r.scalars().all.return_value = []
+            return r
+
+    fake_db = types.ModuleType("database")
+    fake_db.async_session = lambda: FakeSession()
+    monkeypatch.setitem(sys.modules, "database", fake_db)
+
+    outcomes = await t2.pre_flight_calibrate_voices(
+        job_id="job_t", speakers=speakers,
+    )
+
+    # CRITICAL: NO paid TTS for the expired voice.
+    assert paid_calls == [], (
+        f"Expired user voice MUST NOT trigger paid calibration. "
+        f"paid_calls={paid_calls}"
+    )
+
+    # And the outcome is 'not_found' (not 'calibrated' or 'failed').
+    assert len(outcomes) == 1
+    assert outcomes[0]["status"] == "not_found", (
+        f"Expired voice with no catalog row should resolve to "
+        f"not_found, got status={outcomes[0]['status']!r}"
+    )
+
+
+def test_t2_resolve_query_includes_expired_at_filter():
+    """Source guard for codex v4.4 P1-2: the user_voices probe in
+    _resolve_targets_user_first MUST include an
+    ``UserVoice.expired_at.is_(None)`` filter to match the semantics
+    of user_voice_service.fetch_user_voice (which is the canonical
+    public lookup).
+
+    Without this filter, an expired user clone would route to user
+    scope, get paid-calibrated, and write CPS back to a soft-deleted
+    row.
+    """
+    from pathlib import Path
+    p = (
+        Path(__file__).resolve().parent.parent
+        / "gateway" / "voice_calibration_review_preflight.py"
+    )
+    src = p.read_text(encoding="utf-8")
+
+    fn_start = src.find("async def _resolve_targets_user_first")
+    assert fn_start > 0
+    fn_end = src.find("\nasync def ", fn_start + 100)
+    if fn_end < 0:
+        fn_end = len(src)
+    fn_body = src[fn_start:fn_end]
+
+    assert "UserVoice.expired_at.is_(None)" in fn_body, (
+        "_resolve_targets_user_first must filter UserVoice.expired_at.is_(None)"
+    )
+
+
+def test_t2_update_user_voice_speed_calibration_filters_expired():
+    """Source guard for codex v4.4 P1-2: defense-in-depth at the writer
+    layer. update_user_voice_speed_calibration MUST also filter
+    expired_at IS NULL so a voice that expires between resolve and
+    write doesn't get a CPS write into a soft-deleted row.
+    """
+    from pathlib import Path
+    p = (
+        Path(__file__).resolve().parent.parent
+        / "gateway" / "user_voice_service.py"
+    )
+    src = p.read_text(encoding="utf-8")
+
+    fn_start = src.find("async def update_user_voice_speed_calibration")
+    assert fn_start > 0
+    fn_end = src.find("\n# ", fn_start + 100)
+    if fn_end < 0:
+        fn_end = src.find("\nasync def ", fn_start + 100)
+    if fn_end < 0:
+        fn_end = len(src)
+    fn_body = src[fn_start:fn_end]
+
+    assert "UserVoice.expired_at.is_(None)" in fn_body, (
+        "update_user_voice_speed_calibration must filter UserVoice.expired_at.is_(None)"
+    )

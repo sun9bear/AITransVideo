@@ -175,10 +175,20 @@ async def _resolve_targets_user_first(
         # Phase A: user_voices probe. Single query for all voice_ids
         # under this user. Match by (user_id, voice_id) — matches the
         # uq_user_voices_user_voice unique constraint exactly.
+        #
+        # codex v4.4 P1-2: filter expired_at IS NULL to match the
+        # semantics of the public lookup user_voice_service.fetch_user_voice
+        # (line 163). Without it, an expired/soft-deleted clone would
+        # incorrectly route to user scope; we'd then issue paid TTS
+        # and write CPS back to a row the rest of the pipeline already
+        # treats as unusable. Expired rows now fall through to the
+        # catalog probe; if catalog also misses, the spec resolves to
+        # status='not_found' and never reaches calibrate_voice.
         user_rows = (await db.execute(
             select(UserVoice).where(
                 UserVoice.user_id == owner_id,
                 UserVoice.voice_id.in_(voice_ids),
+                UserVoice.expired_at.is_(None),
             )
         )).scalars().all()
         user_row_map = {r.voice_id: r for r in user_rows}
@@ -483,19 +493,44 @@ async def pre_flight_calibrate_voices(
         return outcomes
 
     # ----- Phase 4: launch tasks under semaphore + asyncio.wait with hard cap
+    #
+    # codex v4.4 P1-1: each bounded task signals an asyncio.Event the
+    # MOMENT it acquires the semaphore — before any paid work begins.
+    # After the 50s batch timeout, the route still proxies to Job-API
+    # and the user enters the pipeline. We must NOT keep starting NEW
+    # paid TTS work for that submit beyond the boundary; queued tasks
+    # whose start_event is not yet set can be safely cancelled because
+    # they haven't issued the calibrate_voice call yet.
+    #
+    # Started tasks (event set) are allowed to keep running because:
+    #   - paid TTS may already be in flight inside the factory
+    #   - cancelling them would orphan a paid call's DB write
+    #   - the per-voice 60s T0-C primitive bounds them anyway
     sem = asyncio.Semaphore(max(1, max_concurrency))
+    started_events: dict[asyncio.Task, asyncio.Event] = {}
 
-    async def _bounded_task(target: _ResolvedTarget):
+    async def _bounded_task(target: _ResolvedTarget, started: asyncio.Event):
         async with sem:
+            # Mark BEFORE delegating to run_calibration_task. By the
+            # time control returns from the registry/factory chain,
+            # paid TTS has been spent (factory_task is detached inside
+            # run_calibration_task and shielded from caller cancel —
+            # see voice_calibration_inflight._finalize). Setting the
+            # event here is the boundary between "queued / cancellable"
+            # and "started / must let finish".
+            started.set()
             return await _run_via_inflight_registry(
                 target=target,
                 owner_id=owner_id,
                 final_minimax_model=final_minimax_model,
             )
 
-    tasks: list[asyncio.Task] = [
-        asyncio.create_task(_bounded_task(t)) for t in to_launch
-    ]
+    tasks: list[asyncio.Task] = []
+    for tgt in to_launch:
+        ev = asyncio.Event()
+        t = asyncio.create_task(_bounded_task(tgt, ev))
+        tasks.append(t)
+        started_events[t] = ev
     task_to_target = dict(zip(tasks, to_launch))
 
     done, pending = await asyncio.wait(
@@ -511,17 +546,32 @@ async def pre_flight_calibrate_voices(
         ))
 
     for task in pending:
-        # codex v4.1 F-v4.1-8 + v4.2 F-v4.2-4: done_callback ONLY logs.
-        # The factory ALREADY wrote DB inside its own short session
-        # before completing. The callback is purely observability.
         target = task_to_target[task]
-        task.add_done_callback(
-            lambda t, tgt=target: _log_background_outcome(t, tgt, final_minimax_model)
-        )
-        outcomes.append(_outcome_from_target(
-            target, status="still_running",
-            model_key=final_minimax_model,
-        ))
+        if started_events[task].is_set():
+            # Paid work already in flight (or just kicked off). Let it
+            # finish in background; per-task 60s primitive bounds it.
+            # codex v4.1 F-v4.1-8 + v4.2 F-v4.2-4: done_callback ONLY
+            # logs — factory ALREADY wrote DB inside its own short
+            # session before completing.
+            task.add_done_callback(
+                lambda t, tgt=target: _log_background_outcome(t, tgt, final_minimax_model)
+            )
+            outcomes.append(_outcome_from_target(
+                target, status="still_running",
+                model_key=final_minimax_model,
+            ))
+        else:
+            # Queued waiting for semaphore; no paid TTS spent. Cancel.
+            # codex v4.4 P1-1: this is the case the original code missed
+            # — without cancellation, queued tasks would acquire sem
+            # AFTER the user has already proxied into the pipeline and
+            # start NEW paid TTS for a voice the pipeline already
+            # bypassed (defaulting to default CPS).
+            task.cancel()
+            outcomes.append(_outcome_from_target(
+                target, status="not_started_timeout",
+                model_key=final_minimax_model,
+            ))
 
     return outcomes
 

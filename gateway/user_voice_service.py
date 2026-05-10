@@ -225,17 +225,24 @@ async def update_user_voice_speed_calibration(
         raise ValueError("model_key is required (plan v4 T0-D)")
 
     async with db.begin():
+        # codex v4.4 P1-2: filter expired_at IS NULL so we never write
+        # calibration back to a soft-deleted row. This is a defense-
+        # in-depth pair with the resolve-time filter in
+        # voice_calibration_review_preflight._resolve_targets_user_first;
+        # protects against the race where a voice expires between
+        # T2's read snapshot and the write.
         result = await db.execute(
             select(UserVoice)
               .where(
                   UserVoice.voice_id == voice_id,    # F-v4.2-1: provider id, NOT UUID PK
                   UserVoice.user_id == user_id,
+                  UserVoice.expired_at.is_(None),
               )
               .with_for_update()
         )
         voice = result.scalar_one_or_none()
         if voice is None:
-            raise VoiceNotFoundError(f"user_voices missing: voice_id={voice_id!r} user_id={user_id!r}")
+            raise VoiceNotFoundError(f"user_voices missing/expired: voice_id={voice_id!r} user_id={user_id!r}")
 
         merged = _merged_by_model(voice.chars_per_second_by_model, model_key=model_key, cps=cps)
         voice.chars_per_second_by_model = merged
