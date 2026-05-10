@@ -73,6 +73,13 @@ class JobJsonRecord:
     case where Gateway PG and JSON store disagree — the sweeper
     should prefer the JSON value because the JSON write happens
     closer to the policy snapshot moment.
+
+    ``edit_generation`` is ``int | None`` (not ``int = 0``) on purpose:
+    a missing field in the upstream payload must NOT silently mirror
+    a 0 onto Gateway PG (production saw post-edit jobs whose PG row
+    drifted to a stale generation because intercept_list_jobs
+    constructed records with hardcoded ``edit_generation=0`` —
+    plan 2026-05-07 follow-up after Day 2 stuck-job triage).
     """
 
     job_id: str
@@ -80,7 +87,7 @@ class JobJsonRecord:
     completed_at: datetime | None
     project_dir: str | None
     current_stage: str | None
-    edit_generation: int
+    edit_generation: int | None
     jianying_draft_zip_path: str | None
     service_mode: str | None
 
@@ -128,6 +135,19 @@ def _coerce_int(raw: object, default: int = 0) -> int:
         return default
 
 
+def _coerce_int_or_none(raw: object) -> int | None:
+    """Like ``_coerce_int`` but returns ``None`` when the field is
+    missing or unparseable. Used for mirror-target fields where a
+    silent default would clobber Gateway PG with a stale 0.
+    """
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def _coerce_str_or_none(raw: object) -> str | None:
     return raw if isinstance(raw, str) and raw else None
 
@@ -139,7 +159,10 @@ def _record_from_payload(path: Path, data: dict) -> JobJsonRecord:
         completed_at=_parse_completed_at(data.get("completed_at")),
         project_dir=_coerce_str_or_none(data.get("project_dir")),
         current_stage=_coerce_str_or_none(data.get("current_stage")),
-        edit_generation=_coerce_int(data.get("edit_generation"), 0),
+        # Mirror target — None when field absent so we don't silently
+        # write 0 onto a job that's actually at gen N+1 in Gateway PG
+        # (post-edit drift, plan 2026-05-07 Day 2 follow-up).
+        edit_generation=_coerce_int_or_none(data.get("edit_generation")),
         jianying_draft_zip_path=_coerce_str_or_none(
             data.get("jianying_draft_zip_path")
         ),

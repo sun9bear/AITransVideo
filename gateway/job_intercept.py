@@ -624,9 +624,21 @@ async def intercept_list_jobs(
                         old_status = db_job.status
                         upstream_project_dir = upstream_job.get("project_dir")
                         # Plan 2026-05-07 §4.5 (P1.1): single source of truth
-                        # for mirror semantics (status / stage / project_dir /
-                        # completed_at + quota settle on terminal transition).
-                        # Sweeper invokes the same helper.
+                        # for mirror semantics. Sweeper invokes the same helper.
+                        # Day 2 follow-up: pass real upstream edit_generation
+                        # (None when absent) so the mirror can keep PG in
+                        # sync with overwrite bumps. See
+                        # gateway/job_terminal_mirror.py for the drift-fix
+                        # rationale.
+                        upstream_edit_generation = upstream_job.get("edit_generation")
+                        try:
+                            upstream_edit_generation_int = (
+                                int(upstream_edit_generation)
+                                if upstream_edit_generation is not None
+                                else None
+                            )
+                        except (TypeError, ValueError):
+                            upstream_edit_generation_int = None
                         await mirror_job_terminal_state(
                             db,
                             db_job,
@@ -638,9 +650,9 @@ async def intercept_list_jobs(
                                 ),
                                 project_dir=upstream_project_dir,
                                 current_stage=upstream_stage,
-                                edit_generation=0,  # not read by mirror
-                                jianying_draft_zip_path=None,  # not read
-                                service_mode=None,  # not read
+                                edit_generation=upstream_edit_generation_int,
+                                jianying_draft_zip_path=None,  # not read by mirror
+                                service_mode=None,  # not read by mirror
                             ),
                         )
                         # V3 shadow settle is intentionally kept inline here:

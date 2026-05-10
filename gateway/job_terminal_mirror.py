@@ -99,6 +99,23 @@ async def mirror_job_terminal_state(
     if upstream.completed_at and upstream.completed_at != db_job.completed_at:
         db_job.completed_at = upstream.completed_at
         changed = True
+    # edit_generation drift fix (Day 2 follow-up). Without this, a job
+    # whose JSON store records generation N+1 (because the user did an
+    # editing/commit overwrite) but whose Gateway PG row is still at
+    # generation N (because intercept_list_jobs didn't sync it before
+    # this fix) will fail _run_publish's race-protection forever:
+    # sweeper snapshots N+1, _run_publish sees PG=N, refuses to land
+    # results. We saw this in production on the first Day-2 backfill
+    # (plan 2026-05-07).
+    #
+    # Only mirror when upstream actually carries the value (None means
+    # "field not present in payload" — see JobJsonRecord docstring).
+    if (
+        upstream.edit_generation is not None
+        and upstream.edit_generation != (db_job.edit_generation or 0)
+    ):
+        db_job.edit_generation = upstream.edit_generation
+        changed = True
 
     # Quota settlement on terminal entry. settle_job_quota itself guards
     # against double-settling (quota.py:131 checks quota_state). The
