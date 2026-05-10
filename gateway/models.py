@@ -221,7 +221,21 @@ class Job(Base):
     # overwrite reset it). Each entry shape: see migration 025 docstring.
     # The download intercept (_resolve_r2_redirect) reads this directly so
     # downloads keep working after project_dir is cleaned up locally.
-    r2_artifacts: Mapped[list[dict] | None] = mapped_column(JSONB, nullable=True)
+    #
+    # ``none_as_null=True`` is mandatory: SQLAlchemy's default JSONB behavior
+    # turns Python ``None`` assignment (e.g. the ``source_job.r2_artifacts =
+    # None`` we run in ``_apply_editing_commit_gateway_side`` after an
+    # overwrite) into a JSONB ``null`` literal, NOT a SQL NULL. The sweeper's
+    # ``Job.r2_artifacts.is_(None)`` predicate (and the partial index on
+    # ``WHERE r2_artifacts IS NULL``) can't match the literal, so the row
+    # would be invisible to the sweeper while ORM reads still surface
+    # ``None`` — the row gets stuck unable to receive a fresh push. With
+    # ``none_as_null=True``, ``None`` round-trips as SQL NULL and both
+    # planes agree. (Day 2 follow-up after observing 2 stuck post-edit
+    # jobs in production.)
+    r2_artifacts: Mapped[list[dict] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     # Set by the sweeper to ``now + 5min`` after a partial publish failure so
     # subsequent sweep passes back off this job. NULL = no backoff active.
     r2_push_retry_after: Mapped[datetime | None] = mapped_column(
