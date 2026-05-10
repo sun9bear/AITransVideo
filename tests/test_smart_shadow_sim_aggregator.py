@@ -471,10 +471,10 @@ def test_c4_retry_estimation_metering_actual_only_when_smart_unevaluable(tmp_pat
 
 def test_c4_p2_readiness_signals(tmp_path):
     """p2_readiness_signals.post_phase_metered_jobs counts jobs with metering
-    data AND whisper alignment (proxy for post-Phase-D)."""
+    data AND subtitle drift signal set (Phase A/B, not Phase D Whisper)."""
     sim_out = tmp_path / "sim_out"
     sim_out.mkdir()
-    # 2 post-Phase-D metered jobs
+    # 2 post-Phase-A/B metered jobs (alignment_model present + drift=0)
     for jid in ["j_post_a", "j_post_b"]:
         _write_job_sidecar(sim_out, jid, "pass", {
             "tts_duration_repair_policy": (
@@ -486,7 +486,7 @@ def test_c4_p2_readiness_signals(tmp_path):
                 {"alignment_model": "small", "drift_count": 0},
                 True, "match", {}),
         })
-    # 1 pre-Phase-D job (no whisper)
+    # 1 pre-Phase-A/B job (no subtitle_quality_report.json → drift_count is None)
     _write_job_sidecar(sim_out, "j_pre", "pass", {
         "tts_duration_repair_policy": (
             {"expected_retts_count": 7},
@@ -500,6 +500,61 @@ def test_c4_p2_readiness_signals(tmp_path):
     assert p2["post_phase_metered_jobs"] == 2
     assert p2["p2_threshold_metered_jobs"] == 10
     assert p2["ready_for_p2_rerun"] is False  # 2 < 10
+
+
+def test_c4_p2_readiness_drift_only_counts_as_post_phase(tmp_path):
+    """Phase A/B without Phase D: alignment_model=None but drift_count is set
+    (including 0 = Phase A/B ran healthy) MUST count as post_phase_metered.
+
+    This is the gate semantics revised 2026-05-09 — production runs whisper
+    only at deliverable time, so post-Phase-D alignment_model is missing for
+    most jobs. Smart's signals depend on Phase A/B (subtitle_quality_report.json),
+    not Phase D.
+    """
+    sim_out = tmp_path / "sim_out"
+    sim_out.mkdir()
+    # j_a: drift=0, no whisper alignment_model → Phase A/B ran, no Phase D
+    _write_job_sidecar(sim_out, "j_drift_zero_no_whisper", "pass", {
+        "tts_duration_repair_policy": (
+            {"expected_retts_count": 12},
+            {"actual_retts_count": 11, "data_source": "metering"},
+            True, "match", {}),
+        "subtitle_sync_policy": (
+            {"unevaluable": True, "reason": "pre_phase_d_job_or_no_whisper"},
+            {"alignment_model": None, "drift_count": 0},
+            None, "no_studio_signal", {}),
+    })
+    # j_b: drift>0, no whisper alignment_model → Phase A/B ran with drift, no Phase D
+    _write_job_sidecar(sim_out, "j_drift_pos_no_whisper", "pass", {
+        "tts_duration_repair_policy": (
+            {"expected_retts_count": 5},
+            {"actual_retts_count": 6, "data_source": "metering"},
+            True, "match", {}),
+        "subtitle_sync_policy": (
+            {"unevaluable": True, "reason": "pre_phase_d_job_or_no_whisper"},
+            {"alignment_model": None, "drift_count": 3},
+            None, "no_studio_signal", {}),
+    })
+    # j_c: drift_count is None → genuinely pre-Phase-A/B, must NOT count
+    _write_job_sidecar(sim_out, "j_drift_none", "pass", {
+        "tts_duration_repair_policy": (
+            {"expected_retts_count": 7},
+            {"actual_retts_count": 8, "data_source": "metering"},
+            True, "match", {}),
+        "subtitle_sync_policy": (
+            {"unevaluable": True, "reason": "pre_phase_d_job_or_no_whisper"},
+            {"alignment_model": None, "drift_count": None},
+            None, "no_studio_signal", {}),
+    })
+    agg, _ = _run_aggregator(tmp_path)
+    p2 = agg["p2_readiness_signals"]
+    # j_a + j_b count (drift set, even though alignment_model is None);
+    # j_c does NOT count (drift_count is None)
+    assert p2["post_phase_metered_jobs"] == 2, (
+        f"Expected 2 (drift_count set in 2 jobs), got "
+        f"{p2['post_phase_metered_jobs']}. Gate must use drift_count is not None, "
+        f"not alignment_model truthiness."
+    )
 
 
 # ============================================================================

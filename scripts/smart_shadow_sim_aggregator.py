@@ -381,14 +381,29 @@ def _retry_estimation_vs_actual(per_job: list[dict]) -> dict:
 
 
 def _p2_readiness_signals(per_job: list[dict]) -> dict:
-    """post_phase_metered_jobs = jobs with metering data AND whisper alignment.
+    """post_phase_metered_jobs = jobs with metering data AND drift signal set.
 
     Used as gate for "are we ready to re-run P0 / proceed toward P2"
     (per plan §15 P0 results note §7.1: ≥10 metered, ≥20 for P2 entry).
+
+    Gate definition (revised 2026-05-09 — Phase A/B, not Phase D):
+        - retts_actual.data_source == "metering" — usage_events.jsonl populated
+        - sub_actual.drift_count is not None — subtitle_quality_report.json
+          present (Phase A/B deployed). drift_count == 0 also counts as set,
+          meaning Phase A/B ran healthy with no drift detected.
+
+    Whisper alignment_model (Phase D) is NO LONGER part of the gate.
+    Production runs whisper alignment only at deliverable time
+    (admin whisper_alignment_trigger="deliverable") — that's a subtitle
+    display-precision optimization, unrelated to the 6 stage decisions Smart
+    makes (eligibility / voice / clone / translation / retry / subtitle_sync).
+    The alignment_model field is preserved in fact sheets and in stage
+    studio_actual sidecars for diagnostics, but is no longer required for a
+    job to count as "post Smart-signal-deployment" (Phase A/B).
     """
     n_metered = 0
     for entry in per_job:
-        # post-Phase-D = has metering data AND has whisper alignment
+        # post-Phase-A/B (Smart-signal-available) = metering AND drift signal set
         retts_dec = _stage_decisions_by_id(
             entry["decisions"], "tts_duration_repair_policy")
         sub_dec = _stage_decisions_by_id(
@@ -401,7 +416,9 @@ def _p2_readiness_signals(per_job: list[dict]) -> dict:
             continue
         if retts_actual.get("data_source") != "metering":
             continue
-        if not sub_actual.get("alignment_model"):
+        # drift_count is None → no subtitle_quality_report.json (pre Phase A/B);
+        # 0 → Phase A/B ran healthy. Use `is None` not falsy so 0 still counts.
+        if sub_actual.get("drift_count") is None:
             continue
         n_metered += 1
     return {
