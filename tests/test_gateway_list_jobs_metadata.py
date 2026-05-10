@@ -20,7 +20,7 @@ _fake_database.async_session = MagicMock()
 sys.modules.setdefault("database", _fake_database)
 
 from fastapi import Response as FastAPIResponse  # noqa: E402
-from job_intercept import intercept_list_jobs  # noqa: E402
+from job_intercept import intercept_get_job, intercept_list_jobs  # noqa: E402
 
 
 def _run(coro):
@@ -63,6 +63,14 @@ class _ScalarsResult:
 
     def scalars(self):
         return _ScalarRows(self._rows)
+
+
+class _ScalarOneResult:
+    def __init__(self, row):
+        self._row = row
+
+    def scalar_one_or_none(self):
+        return self._row
 
 
 def test_list_jobs_merges_gateway_metadata_and_preserves_purged_status():
@@ -179,3 +187,56 @@ def test_list_jobs_pages_after_user_filtering_and_strips_upstream_query():
     assert payload["offset"] == 1
     assert payload["has_more"] is True
     assert proxy_mock.call_args.kwargs["override_query"] == ""
+
+
+def test_get_job_routes_terminal_payload_through_mirror_before_merge():
+    import job_intercept
+
+    db_job = SimpleNamespace(
+        job_id="job_detail",
+        user_id="uid-1",
+        status="running",
+        current_stage="s5",
+        display_name="Detail job",
+        expires_at=None,
+        editing_touched_at=None,
+        copy_of_job_id=None,
+        root_job_id="job_detail",
+        edit_generation=0,
+    )
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=_ScalarOneResult(db_job))
+    db.commit = AsyncMock()
+    request = _make_request()
+    upstream = FastAPIResponse(
+        content=json.dumps({
+            "job_id": "job_detail",
+            "status": "succeeded",
+            "current_stage": "completed",
+            "completed_at": "2026-05-10T07:29:11+00:00",
+            "edit_generation": 0,
+        }).encode("utf-8"),
+        status_code=200,
+        headers={"content-type": "application/json"},
+    )
+    user = SimpleNamespace(id="uid-1")
+    notify = AsyncMock()
+    mirror = AsyncMock()
+
+    with patch("job_intercept._verify_job_ownership", new=AsyncMock()), \
+         patch("job_intercept.proxy_request", new=AsyncMock(return_value=upstream)), \
+         patch("notifications_helpers.maybe_dispatch_job_transition", new=notify), \
+         patch.object(job_intercept, "mirror_job_terminal_state", new=mirror):
+        response = _run(intercept_get_job(request, "job_detail", db, user))
+
+    assert response.status_code == 200
+    notify.assert_awaited_once_with(
+        db,
+        db_job=db_job,
+        upstream_status="succeeded",
+    )
+    mirror.assert_awaited_once()
+    upstream_record = mirror.await_args.args[2]
+    assert upstream_record.job_id == "job_detail"
+    assert upstream_record.status == "succeeded"
+    db.commit.assert_awaited_once()

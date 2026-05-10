@@ -945,12 +945,13 @@ class TestQualityTierTruthChain:
         # estimate_credits must have been called with quality_tier from policy
         assert any(c["quality_tier"] == "standard" for c in estimate_calls)
 
-    def test_settle_reads_tier_from_snapshot_not_hardcoded(self):
-        """Terminal settle must read quality_tier from saved metering_snapshot.
+    def test_list_jobs_routes_terminal_settlement_through_mirror(self):
+        """List-jobs must route terminal settlement through the shared mirror.
 
-        Uses a non-default tier ('high') in the snapshot to prove readback is
-        from snapshot, not a re-hardcoded 'standard'. This is a test-only scenario
-        — current production only produces 'standard'.
+        The old list-jobs path had inline credit settlement logic. The current
+        invariant is stronger: list-jobs, detail polling, and the R2 sweeper all
+        use ``mirror_job_terminal_state`` so status, quota, and credits settle
+        behind one idempotent entrypoint.
         """
         from job_intercept import intercept_list_jobs
 
@@ -970,12 +971,6 @@ class TestQualityTierTruthChain:
             },
             quota_state="reserved",
         )
-
-        estimate_calls = []
-
-        def capture_estimate(minutes, service_mode="express", quality_tier="standard"):
-            estimate_calls.append({"quality_tier": quality_tier})
-            return 999  # dummy value
 
         # Mock DB: user jobs query returns our job; upstream returns it as succeeded
         db = AsyncMock()
@@ -1025,15 +1020,13 @@ class TestQualityTierTruthChain:
             )
 
         with patch("job_intercept.proxy_request", side_effect=fake_proxy):
-            with patch("job_intercept.estimate_credits", side_effect=capture_estimate):
-                with patch("job_intercept.settle_job_quota", new_callable=AsyncMock):
-                    with patch("job_intercept.shadow_safe", new_callable=AsyncMock):
-                        with patch("job_intercept.settings") as mock_settings:
-                            mock_settings.auth_required = True
-                            resp = _run(intercept_list_jobs(req, db, user))
+            with patch("job_intercept.mirror_job_terminal_state", new_callable=AsyncMock) as mirror:
+                with patch("job_intercept.settings") as mock_settings:
+                    mock_settings.auth_required = True
+                    resp = _run(intercept_list_jobs(req, db, user))
 
-        # The settle path must have read 'high' from snapshot, not re-hardcoded 'standard'
-        settle_estimate = [c for c in estimate_calls if c["quality_tier"] == "high"]
-        assert len(settle_estimate) >= 1, (
-            f"settle must read quality_tier='high' from snapshot, got: {estimate_calls}"
-        )
+        assert resp.status_code == 200
+        mirror.assert_awaited_once()
+        upstream_record = mirror.await_args.args[2]
+        assert upstream_record.job_id == "job-settle-qt"
+        assert upstream_record.status == "succeeded"

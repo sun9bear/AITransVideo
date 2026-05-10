@@ -49,12 +49,11 @@ from database import get_db
 from display_name_orchestrator import DisplayNameContext, compute_display_name
 from models import Job, User
 from proxy import proxy_request
-from quota import check_quota, reserve_quota, settle_job_quota, TERMINAL_STATUSES
+from quota import check_quota, reserve_quota, settle_job_quota
 from credits_service import (
     InsufficientCreditsError,
     ensure_credit_buckets_for_user, estimate_credits,
     reserve_credits_or_raise,
-    shadow_reserve, shadow_release, shadow_capture, shadow_safe,
 )
 # Plan 2026-05-07 §4.5 (P1.1 fix): shared mirror helper so the sweeper
 # (gateway/r2_artifact_sweeper.py) and this list-jobs path produce
@@ -655,54 +654,6 @@ async def intercept_list_jobs(
                                 service_mode=None,  # not read by mirror
                             ),
                         )
-                        # V3 shadow settle is intentionally kept inline here:
-                        # it depends on per-user buckets, redaction config, and
-                        # request context that the sweeper does not have. The
-                        # mirror helper handled the canonical settle; we add
-                        # the shadow settle for the list-jobs path only.
-                        if upstream_status in TERMINAL_STATUSES and old_status not in TERMINAL_STATUSES:
-                            # V3-1 shadow settle (best-effort)
-                            try:
-                                if (
-                                    upstream_status == "succeeded"
-                                    and _should_shadow_settle_job_credits(db_job)
-                                ):
-                                    await shadow_safe(
-                                        ensure_credit_buckets_for_user,
-                                        db,
-                                        user=user,
-                                    )
-                                    actual_min = None
-                                    src_dur = getattr(db_job, "source_duration_seconds", None)
-                                    if src_dur:
-                                        actual_min = src_dur / 60.0
-                                    db_job.actual_minutes = actual_min
-                                    # Read quality_tier from saved snapshot (single truth source)
-                                    _saved_tier = (db_job.metering_snapshot or {}).get("quality_tier", "standard")
-                                    shadow_credits = estimate_credits(
-                                        actual_min or db_job.estimated_minutes,
-                                        service_mode=db_job.service_mode or "express",
-                                        quality_tier=_saved_tier,
-                                    )
-                                    snap = db_job.metering_snapshot or {}
-                                    snap["credits_actual"] = shadow_credits
-                                    db_job.metering_snapshot = snap
-                                    await shadow_safe(
-                                        shadow_capture,
-                                        db, user_id=db_job.user_id, job_id=jid,
-                                        actual_credits=shadow_credits,
-                                        service_mode=db_job.service_mode or "express",
-                                        reserve_reason_code="job_reserve",
-                                    )
-                                elif _should_shadow_settle_job_credits(db_job):
-                                    # failed / cancelled → release
-                                    await shadow_safe(
-                                        shadow_release,
-                                        db, user_id=db_job.user_id, job_id=jid,
-                                        reserve_reason_code="job_reserve",
-                                    )
-                            except Exception as _se:
-                                logger.warning("V3 shadow settle failed for %s: %s", jid, _se)
                 except Exception:
                     pass
         try:
@@ -1104,6 +1055,34 @@ async def intercept_create_job(
     return upstream_response
 
 
+def _job_json_record_from_payload(job_id: str, payload: dict) -> JobJsonRecord:
+    upstream_edit_generation = payload.get("edit_generation")
+    try:
+        upstream_edit_generation_int = (
+            int(upstream_edit_generation)
+            if upstream_edit_generation is not None
+            else None
+        )
+    except (TypeError, ValueError):
+        upstream_edit_generation_int = None
+    return JobJsonRecord(
+        job_id=job_id,
+        status=str(payload.get("status") or ""),
+        completed_at=parse_iso_timestamp(payload.get("completed_at")),
+        project_dir=payload.get("project_dir")
+        if isinstance(payload.get("project_dir"), str)
+        else None,
+        current_stage=payload.get("current_stage")
+        if isinstance(payload.get("current_stage"), str)
+        else None,
+        edit_generation=upstream_edit_generation_int,
+        jianying_draft_zip_path=None,
+        service_mode=payload.get("service_mode")
+        if isinstance(payload.get("service_mode"), str)
+        else None,
+    )
+
+
 async def intercept_get_job(
     request: Request,
     job_id: str,
@@ -1129,11 +1108,12 @@ async def intercept_get_job(
             select(Job).where(Job.job_id == job_id, Job.user_id == user.id)
         )
         db_job = result.scalar_one_or_none()
-        # Plan 2026-05-08 §16: emit a user notification when we observe a
-        # status transition into a terminal state. The helper never raises
-        # and is gated on db_job.user_id being present, so anonymous /
-        # admin-rebound jobs are skipped automatically. Runs BEFORE the
-        # merge so we can compare upstream vs gateway-DB status.
+        # Plan 2026-05-08 §16: emit notification first while the Gateway row
+        # still has the previous status, then route the upstream payload through
+        # the same mirror helper used by list-jobs and the R2 sweeper. This
+        # keeps terminal status + quota + credit settlement behind one
+        # idempotent entrypoint; the notification helper is intentionally
+        # notification-only and must not write db_job.status.
         try:
             upstream_status = payload.get("status") if isinstance(payload, dict) else None
             from notifications_helpers import maybe_dispatch_job_transition
@@ -1142,13 +1122,17 @@ async def intercept_get_job(
                 db_job=db_job,
                 upstream_status=upstream_status,
             )
-            # The helper may have updated db_job.status; commit those
-            # changes alongside the response. We commit here (rather than
-            # leaving it for the dependency teardown) because the
-            # surrounding try/except returns through several paths.
+            if db_job is not None:
+                await mirror_job_terminal_state(
+                    db,
+                    db_job,
+                    _job_json_record_from_payload(job_id, payload),
+                )
+            # Commit notification rows plus any mirror/settlement changes here
+            # because the surrounding handler returns through several paths.
             await db.commit()
         except Exception:
-            logger.debug("notification transition hook failed", exc_info=True)
+            logger.debug("job detail mirror/notification hook failed", exc_info=True)
         payload = _merge_gateway_job_metadata(payload, db_job)
         # Plan §10.4 deepening: redact progress_message + error_summary.message
         # for non-admin. Admin path is no-op inside the helper.
@@ -1597,11 +1581,9 @@ def _aggregate_quality_tier_from_speakers(
     - 有 minimax speaker 但全部是 turbo → ("high", "speech-2.8-turbo")
     - 完全没有 minimax speaker → ("standard", None)  ← 保留原 tts_model
 
-    This matches the UI pricing display in VoiceSelectionPanel.tsx:681/688
-    (cpm.minimax_turbo=30pts/min from studio.high; cpm.minimax_hd=50pts/min
-    from studio.flagship). Jobs using only CosyVoice/VolcEngine stay at
-    studio.standard=15pts/min which is the frontend-advertised price for
-    those providers (voice_selection_api.py:241-242).
+    The numeric point/minute rate is not hard-coded here. Settlement resolves
+    these tiers through Gateway runtime pricing, so admin pricing changes stay
+    centralized.
     """
     any_minimax = False
     any_hd = False
@@ -3244,6 +3226,7 @@ async def update_job_metering(
         "interactive_preview_tts_billed_chars", "interactive_preview_tts_call_count",
         "tts_billed_chars_by_bucket", "tts_call_count_by_bucket",
         "tts_billed_chars_by_provider", "tts_call_count_by_provider",
+        "tts_billed_chars_by_provider_model", "tts_call_count_by_provider_model",
         "tts_call_count",
         "voice_clone_call_count", "voice_clone_success_call_count",
         "voice_clone_billable_count", "voice_clone_count_by_provider",

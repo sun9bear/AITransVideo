@@ -147,6 +147,26 @@ def test_job_payload_prefers_ledger_capture_credits_for_revenue():
     assert payload["revenue_estimate_rmb"] == 3.75
 
 
+def test_job_payload_warns_when_clone_capture_masks_missing_job_capture():
+    payload = _job_payload(
+        _job(metering_snapshot={"credits_estimated": 249, "quality_tier": "flagship"}),
+        None,
+        JobCostBreakdown(),
+        point_price_rmb=0.03,
+        point_price_source="test",
+        server_cost_per_min_rmb=0.0,
+        server_cost_source="test",
+        ledger_capture_credits=500,
+        ledger_job_capture_credits=0,
+        ledger_voice_clone_capture_credits=500,
+    )
+
+    assert payload["credits_charged"] == 500
+    assert payload["job_credits_charged"] == 0
+    assert payload["voice_clone_credits_charged"] == 500
+    assert any("missing_job_capture" in warning for warning in payload["warnings"])
+
+
 def test_job_payload_margin_can_include_server_overhead():
     breakdown = JobCostBreakdown(
         llm_rows=[LLMRow(provider="deepseek", model="deepseek-v4-flash", model_id="deepseek-v4-flash", task="s3", phase="", cost_rmb=0.5)],

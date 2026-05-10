@@ -75,8 +75,9 @@ async def maybe_dispatch_job_transition(
     2. Returns early if status hasn't transitioned.
     3. Dispatches with a stable ``dedupe_key`` so a second poll for the
        same transition does not duplicate the notification.
-    4. Updates ``db_job.status`` to the new value so future polls do not
-       re-trigger.
+    4. Leaves ``db_job.status`` untouched. Status mirroring and quota/credit
+       settlement must go through ``mirror_job_terminal_state``; this helper is
+       notification-only so it cannot create a terminal-status side path.
 
     NEVER raises. Any failure is logged at WARNING.
     """
@@ -93,9 +94,6 @@ async def maybe_dispatch_job_transition(
         # is a matter of growing _TERMINAL_TO_EVENT and the dispatch map.
         event_type = _TERMINAL_TO_EVENT.get(new)
         if event_type is None:
-            # still update db_job.status so non-terminal transitions are
-            # tracked (helps debugging, does not emit notifications)
-            db_job.status = new
             return
 
         display_name = _resolve_display_name(db_job)
@@ -113,7 +111,6 @@ async def maybe_dispatch_job_transition(
             },
             dedupe_key=dedupe_key,
         )
-        db_job.status = new
     except Exception as exc:
         # Never break the calling handler.
         logger.warning("notification dispatch helper failed: %s", exc)

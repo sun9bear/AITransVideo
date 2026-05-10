@@ -30,7 +30,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models import CreditsBucket, CreditsLedger
+from models import CreditsBucket, CreditsLedger, Job
 
 logger = logging.getLogger(__name__)
 
@@ -193,7 +193,219 @@ def _pick_buckets_by_priority(
 
 
 def _bucket_available(bucket: CreditsBucket) -> int:
-    return max(0, int(bucket.remaining or 0) - int(bucket.reserved or 0))
+    # Historical bucket rows can contain negative ``reserved`` after repeated
+    # best-effort settlement attempts. Never let that inflate spendable balance.
+    return max(0, int(bucket.remaining or 0) - max(0, int(bucket.reserved or 0)))
+
+
+def _norm(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+_MINIMAX_HD_MODELS = {"hd", "speech-2.8-hd", "speech-02-hd"}
+_MINIMAX_TURBO_MODELS = {"turbo", "speech-2.8-turbo", "speech-02-turbo"}
+
+
+def _provider_model_tier(provider: str | None, model: str | None) -> str | None:
+    provider_key = _norm(provider)
+    model_key = _norm(model)
+    is_minimax = provider_key == "minimax" or model_key in _MINIMAX_HD_MODELS or model_key in _MINIMAX_TURBO_MODELS
+    if not is_minimax:
+        return None
+    if model_key in _MINIMAX_HD_MODELS:
+        return "flagship"
+    if model_key in _MINIMAX_TURBO_MODELS:
+        return "high"
+    return "high"
+
+
+def _tier_from_tts_execution_distribution(snapshot: dict[str, Any]) -> str | None:
+    """Infer tier from actual UsageMeter TTS events summarized into snapshot.
+
+    This is the strongest signal because it reflects the provider/model that
+    actually synthesized audio, not only the user's intended selection.
+    """
+    strongest: str | None = None
+    for field in (
+        "tts_billed_chars_by_provider_model",
+        "tts_call_count_by_provider_model",
+    ):
+        dist = snapshot.get(field)
+        if not isinstance(dist, dict):
+            continue
+        for raw_key, raw_count in dist.items():
+            try:
+                count = int(raw_count or 0)
+            except (TypeError, ValueError):
+                count = 0
+            if count <= 0:
+                continue
+            parts = str(raw_key or "").split(":", 1)
+            provider = parts[0] if parts else ""
+            model = parts[1] if len(parts) > 1 else ""
+            tier = _provider_model_tier(provider, model)
+            if tier == "flagship":
+                return "flagship"
+            if tier == "high":
+                strongest = "high"
+    return strongest
+
+
+def infer_quality_tier_from_execution(
+    *,
+    service_mode: str | None,
+    tts_provider: str | None,
+    tts_model: str | None,
+    snapshot: dict[str, Any] | None = None,
+) -> str:
+    """Infer debit tier from the user's selected and executed TTS model.
+
+    Studio MiniMax has tiered billing: turbo=high, hd=flagship. The actual
+    UsageMeter execution distribution wins over planned job fields; job fields
+    are only fallback signals. Other current providers stay standard unless a
+    trustworthy snapshot says otherwise.
+    """
+    service = _norm(service_mode or (snapshot or {}).get("service_mode") or "express")
+    if service != "studio":
+        return "standard"
+
+    snap = snapshot if isinstance(snapshot, dict) else {}
+
+    execution_tier = _tier_from_tts_execution_distribution(snap)
+    if execution_tier is not None:
+        return execution_tier
+
+    any_minimax = False
+    any_turbo = False
+    for item in snap.get("per_speaker_provider") or []:
+        if not isinstance(item, dict):
+            continue
+        sp_provider = _norm(item.get("tts_provider") or item.get("provider"))
+        sp_model = _norm(
+            item.get("minimax_model")
+            or item.get("tts_model")
+            or item.get("model")
+        )
+        if sp_provider != "minimax" and sp_model not in _MINIMAX_HD_MODELS and sp_model not in _MINIMAX_TURBO_MODELS:
+            continue
+        any_minimax = True
+        if sp_model in _MINIMAX_HD_MODELS:
+            return "flagship"
+        if sp_model in _MINIMAX_TURBO_MODELS:
+            any_turbo = True
+
+    if any_turbo or any_minimax:
+        return "high"
+
+    planned_tier = _provider_model_tier(
+        tts_provider or snap.get("tts_provider"),
+        tts_model or snap.get("tts_model"),
+    )
+    if planned_tier is not None:
+        return planned_tier
+
+    snapshot_tier = _norm(snap.get("quality_tier"))
+    if snapshot_tier in {"standard", "high", "flagship"}:
+        return snapshot_tier
+    return "standard"
+
+
+def should_settle_job_credits(job: Any) -> bool:
+    if getattr(job, "copy_of_job_id", None):
+        return False
+    try:
+        if int(getattr(job, "edit_generation", 0) or 0) > 0:
+            return False
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _snapshot_int(snapshot: dict[str, Any], key: str) -> int:
+    try:
+        return int(snapshot.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+async def _has_job_credit_reserve(db: AsyncSession, *, user_id, job_id: str) -> bool:
+    result = await db.execute(
+        select(CreditsLedger)
+        .where(
+            CreditsLedger.user_id == user_id,
+            CreditsLedger.related_job_id == job_id,
+            CreditsLedger.direction == "reserve",
+            CreditsLedger.reason_code == "job_reserve",
+        )
+        .limit(1)
+    )
+    return result.scalar_one_or_none() is not None
+
+
+def estimate_actual_job_credits(job: Any) -> tuple[int, str, float | None, str]:
+    snapshot = getattr(job, "metering_snapshot", None)
+    if not isinstance(snapshot, dict):
+        snapshot = {}
+    service_mode = _norm(
+        getattr(job, "service_mode", None)
+        or snapshot.get("service_mode")
+        or "express"
+    )
+    quality_tier = infer_quality_tier_from_execution(
+        service_mode=service_mode,
+        tts_provider=getattr(job, "tts_provider", None) or snapshot.get("tts_provider"),
+        tts_model=getattr(job, "tts_model", None) or snapshot.get("tts_model"),
+        snapshot=snapshot,
+    )
+
+    minutes = getattr(job, "actual_minutes", None)
+    if minutes is None:
+        source_duration = getattr(job, "source_duration_seconds", None)
+        if source_duration:
+            minutes = float(source_duration) / 60.0
+    if minutes is None:
+        minutes = getattr(job, "estimated_minutes", None)
+
+    credits = estimate_credits(
+        float(minutes) if minutes else None,
+        service_mode=service_mode,
+        quality_tier=quality_tier,
+    )
+    return credits, quality_tier, float(minutes) if minutes else None, service_mode
+
+
+def _settlement_reason_codes(reason_code: str, reserve_reason_code: str | None) -> set[str]:
+    if reserve_reason_code == "job_reserve" or reason_code == "job_capture":
+        return {
+            "job_capture",
+            "job_release",
+            "capture_additional",
+            "capture_overdraft",
+            "capture_excess_release",
+        }
+    return {reason_code}
+
+
+async def _has_existing_settlement(
+    db: AsyncSession,
+    *,
+    user_id,
+    job_id: str,
+    reason_code: str,
+    reserve_reason_code: str | None,
+) -> bool:
+    reason_codes = _settlement_reason_codes(reason_code, reserve_reason_code)
+    result = await db.execute(
+        select(CreditsLedger)
+        .where(
+            CreditsLedger.user_id == user_id,
+            CreditsLedger.related_job_id == job_id,
+            CreditsLedger.direction.in_(["capture", "release"]),
+            CreditsLedger.reason_code.in_(reason_codes),
+        )
+        .limit(1)
+    )
+    return result.scalar_one_or_none() is not None
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +500,7 @@ async def shadow_reserve(
         for bucket in ordered:
             if remaining_to_reserve <= 0:
                 break
-            available = bucket.remaining - bucket.reserved
+            available = _bucket_available(bucket)
             if available <= 0:
                 continue
 
@@ -423,6 +635,20 @@ async def shadow_capture(
         return []
 
     try:
+        if await _has_existing_settlement(
+            db,
+            user_id=user_id,
+            job_id=job_id,
+            reason_code=reason_code,
+            reserve_reason_code=reserve_reason_code,
+        ):
+            logger.info(
+                "shadow_capture: job=%s reason=%s already settled, skipping",
+                job_id,
+                reason_code,
+            )
+            return []
+
         # Find all reserve entries for this job
         reserve_stmt = select(CreditsLedger).where(
             CreditsLedger.user_id == user_id,
@@ -466,8 +692,10 @@ async def shadow_capture(
                 release_amount = release_map.get(idx, 0)
                 consumed = entry_reserved - release_amount
 
-                # Clear this entry's reservation from bucket
-                bucket.reserved -= entry_reserved
+                # Clear this entry's reservation from bucket. Clamp because
+                # older repeated settlement attempts may already have driven
+                # the mutable bucket counter below zero.
+                bucket.reserved = max(0, int(bucket.reserved or 0) - entry_reserved)
                 # Deduct consumed portion from remaining balance
                 bucket.remaining -= consumed
 
@@ -509,7 +737,7 @@ async def shadow_capture(
                     continue
 
                 consumed = abs(re.credits_delta)
-                bucket.reserved -= consumed
+                bucket.reserved = max(0, int(bucket.reserved or 0) - consumed)
                 bucket.remaining -= consumed
 
                 entry = CreditsLedger(
@@ -534,7 +762,7 @@ async def shadow_capture(
                     last_bucket = bucket
                     if additional <= 0:
                         break
-                    available = bucket.remaining - bucket.reserved
+                    available = _bucket_available(bucket)
                     if available <= 0:
                         continue
                     take = min(available, additional)
@@ -594,6 +822,20 @@ async def shadow_release(
     Shadow mode: failures are logged, empty list returned.
     """
     try:
+        if await _has_existing_settlement(
+            db,
+            user_id=user_id,
+            job_id=job_id,
+            reason_code=reason_code,
+            reserve_reason_code=reserve_reason_code,
+        ):
+            logger.info(
+                "shadow_release: job=%s reason=%s already settled, skipping",
+                job_id,
+                reason_code,
+            )
+            return []
+
         reserve_stmt = select(CreditsLedger).where(
             CreditsLedger.user_id == user_id,
             CreditsLedger.related_job_id == job_id,
@@ -616,7 +858,7 @@ async def shadow_release(
                 continue
 
             release_amount = abs(re.credits_delta)
-            bucket.reserved -= release_amount
+            bucket.reserved = max(0, int(bucket.reserved or 0) - release_amount)
 
             entry = CreditsLedger(
                 user_id=user_id,
@@ -638,6 +880,89 @@ async def shadow_release(
     except Exception:
         logger.exception("shadow_release failed: user=%s job=%s", user_id, job_id)
         return []
+
+
+async def settle_job_credit_ledger(
+    db: AsyncSession,
+    job: Any,
+    terminal_status: str,
+) -> list[CreditsLedger]:
+    """Settle per-minute job credits for a terminal job.
+
+    The debit tier is inferred from the selected/final TTS execution model, not
+    from subscription identity. This function is idempotent via ledger guards in
+    ``shadow_capture`` / ``shadow_release``.
+    """
+    if not should_settle_job_credits(job):
+        return []
+
+    job_id = str(getattr(job, "job_id", "") or "")
+    user_id = getattr(job, "user_id", None)
+    if not job_id or user_id is None:
+        return []
+
+    # Serialize all terminal credit settlement attempts for this job. Multiple
+    # request paths can observe the same terminal state (detail polling,
+    # list-jobs, R2 sweeper); without the row lock two transactions can both
+    # pass the idempotency check and double-capture the user's credits.
+    lock_result = await db.execute(
+        select(Job)
+        .where(Job.job_id == job_id, Job.user_id == user_id)
+        .with_for_update()
+    )
+    locked_job = lock_result.scalar_one_or_none()
+    if locked_job is not None:
+        job = locked_job
+
+    snapshot = dict(getattr(job, "metering_snapshot", None) or {})
+    has_credit_intent = (
+        _snapshot_int(snapshot, "credits_estimated") > 0
+        or await _has_job_credit_reserve(db, user_id=user_id, job_id=job_id)
+    )
+    if not has_credit_intent:
+        # Legacy jobs created before credit reservation should not be charged
+        # retroactively just because a sweeper or detail poll sees them again.
+        return []
+
+    if terminal_status == "succeeded":
+        actual_credits, quality_tier, minutes, service_mode = estimate_actual_job_credits(job)
+        if actual_credits <= 0:
+            return []
+
+        snapshot["credits_actual"] = actual_credits
+        snapshot["quality_tier"] = quality_tier
+        snapshot["credits_actual_quality_tier"] = quality_tier
+        snapshot["credits_actual_minutes"] = round(float(minutes or 0.0), 6)
+        snapshot["credits_actual_source"] = "final_tts_model"
+        job.metering_snapshot = snapshot
+        if minutes is not None:
+            job.actual_minutes = float(minutes)
+
+        await ensure_credit_buckets_for_user(
+            db,
+            user_id=user_id,
+            role=getattr(job, "role_snapshot", None),
+        )
+        return await shadow_capture(
+            db,
+            user_id=user_id,
+            job_id=job_id,
+            actual_credits=actual_credits,
+            service_mode=service_mode,
+            reason_code="job_capture",
+            reserve_reason_code="job_reserve",
+        )
+
+    if terminal_status in {"failed", "cancelled"}:
+        return await shadow_release(
+            db,
+            user_id=user_id,
+            job_id=job_id,
+            reason_code="job_release",
+            reserve_reason_code="job_reserve",
+        )
+
+    return []
 
 
 async def shadow_rollback(

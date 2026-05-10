@@ -34,8 +34,11 @@ from credits_service import (
     DEBIT_RATES,
     GRANT_AMOUNTS,
     estimate_credits,
+    estimate_actual_job_credits,
     ensure_admin_credits_bucket,
+    infer_quality_tier_from_execution,
     reserve_credits_or_raise,
+    settle_job_credit_ledger,
     shadow_grant,
     shadow_reserve,
     shadow_release,
@@ -43,6 +46,7 @@ from credits_service import (
     shadow_rollback,
     shadow_safe,
     _pick_buckets_by_priority,
+    _bucket_available,
     _get_runtime_debit_rates,
     _get_runtime_grant_amounts,
     _get_runtime_bucket_priority,
@@ -112,6 +116,127 @@ class TestEstimateCredits:
 
     def test_unknown_tier_uses_default(self):
         assert estimate_credits(3.0, "express", "unknown_tier") == 30  # 3 * 10 default
+
+
+class TestExecutionQualityTier:
+    def test_minimax_hd_maps_to_flagship(self):
+        assert infer_quality_tier_from_execution(
+            service_mode="studio",
+            tts_provider="minimax",
+            tts_model="speech-2.8-hd",
+        ) == "flagship"
+
+    def test_minimax_turbo_maps_to_high(self):
+        assert infer_quality_tier_from_execution(
+            service_mode="studio",
+            tts_provider="minimax",
+            tts_model="speech-2.8-turbo",
+        ) == "high"
+
+    def test_per_speaker_hd_maps_to_flagship(self):
+        assert infer_quality_tier_from_execution(
+            service_mode="studio",
+            tts_provider="minimax",
+            tts_model=None,
+            snapshot={
+                "per_speaker_provider": [
+                    {"tts_provider": "minimax", "minimax_model": "turbo"},
+                    {"tts_provider": "minimax", "minimax_model": "hd"},
+                ]
+            },
+        ) == "flagship"
+
+    def test_execution_distribution_overrides_stale_job_model(self):
+        assert infer_quality_tier_from_execution(
+            service_mode="studio",
+            tts_provider="minimax",
+            tts_model="speech-2.8-hd",
+            snapshot={
+                "tts_call_count_by_provider_model": {
+                    "minimax:speech-2.8-turbo": 12,
+                }
+            },
+        ) == "high"
+
+    def test_execution_distribution_hd_overrides_stale_turbo_selection(self):
+        assert infer_quality_tier_from_execution(
+            service_mode="studio",
+            tts_provider="minimax",
+            tts_model="speech-2.8-turbo",
+            snapshot={
+                "tts_billed_chars_by_provider_model": {
+                    "minimax:speech-2.8-hd": 1200,
+                }
+            },
+        ) == "flagship"
+
+    def test_non_minimax_defaults_to_standard(self):
+        assert infer_quality_tier_from_execution(
+            service_mode="studio",
+            tts_provider="cosyvoice",
+            tts_model="cosyvoice-v3-flash",
+        ) == "standard"
+
+    def test_estimate_actual_job_credits_uses_final_tts_model(self):
+        job = SimpleNamespace(
+            actual_minutes=28.4378666667,
+            source_duration_seconds=None,
+            estimated_minutes=28.4333333333,
+            service_mode="studio",
+            tts_provider="minimax",
+            tts_model="speech-2.8-hd",
+            metering_snapshot={"quality_tier": "standard"},
+        )
+        credits, tier, minutes, service_mode = estimate_actual_job_credits(job)
+        assert credits == 1422
+        assert tier == "flagship"
+        assert round(minutes, 6) == 28.437867
+        assert service_mode == "studio"
+
+    def test_negative_reserved_does_not_inflate_available_balance(self):
+        bucket = _make_bucket(remaining=100, reserved=-50)
+        assert _bucket_available(bucket) == 100
+
+    def test_settle_job_credit_ledger_locks_job_and_skips_legacy_without_credit_intent(self):
+        uid = uuid.uuid4()
+        job = SimpleNamespace(
+            job_id="legacy-job",
+            user_id=uid,
+            copy_of_job_id=None,
+            edit_generation=0,
+            actual_minutes=5.0,
+            source_duration_seconds=None,
+            estimated_minutes=5.0,
+            service_mode="studio",
+            tts_provider="minimax",
+            tts_model="speech-2.8-hd",
+            metering_snapshot={},
+        )
+        seen = []
+
+        class Result:
+            def __init__(self, row):
+                self.row = row
+
+            def scalar_one_or_none(self):
+                return self.row
+
+        async def execute(stmt, *args, **kwargs):
+            del args, kwargs
+            seen.append(stmt)
+            if len(seen) == 1:
+                return Result(job)
+            return Result(None)
+
+        db = AsyncMock()
+        db.execute = execute
+        db.add = lambda _obj: (_ for _ in ()).throw(AssertionError("no ledger writes expected"))
+
+        entries = _run(settle_job_credit_ledger(db, job, "succeeded"))
+
+        assert entries == []
+        assert seen, "settlement must query and lock the job row"
+        assert getattr(seen[0], "_for_update_arg", None) is not None
 
 
 # ===================================================================
@@ -344,6 +469,11 @@ class TestShadowRelease:
         async def smart_execute(*args, **kwargs):
             call_n["n"] += 1
             if call_n["n"] == 1:
+                # Existing settlement guard.
+                r = MagicMock()
+                r.scalar_one_or_none.return_value = None
+                return r
+            if call_n["n"] == 2:
                 # Reserve entries query
                 r = MagicMock()
                 r.scalars.return_value.all.return_value = [reserve_entry]
@@ -422,7 +552,12 @@ class TestShadowCapture:
         async def smart_execute(*args, **kwargs):
             call_n["n"] += 1
             if call_n["n"] == 1:
-                # First call: select reserve ledger entries
+                # First call: existing settlement guard.
+                r = MagicMock()
+                r.scalar_one_or_none.return_value = None
+                return r
+            if call_n["n"] == 2:
+                # Second call: select reserve ledger entries
                 r = MagicMock()
                 r.scalars.return_value.all.return_value = reserve_entries
                 return r
@@ -436,7 +571,7 @@ class TestShadowCapture:
                 # In the simplified mock, return based on call order.
                 # Since entries are processed in order, track which entry
                 # we're on.
-                entry_idx = call_n["n"] - 2  # 0-indexed after first call
+                entry_idx = call_n["n"] - 3  # 0-indexed after guard + reserve calls
                 if entry_idx < len(reserve_entries):
                     bid = reserve_entries[entry_idx].bucket_id
                 else:
@@ -450,6 +585,30 @@ class TestShadowCapture:
         db.add = lambda obj: added.append(obj)
         db._added = added
         return db
+
+    def test_capture_skips_when_job_already_settled(self):
+        uid = uuid.uuid4()
+        db = AsyncMock()
+        guard_res = MagicMock()
+        guard_res.scalar_one_or_none.return_value = SimpleNamespace(
+            direction="capture",
+            reason_code="job_capture",
+        )
+        db.execute = AsyncMock(return_value=guard_res)
+        db.add = lambda _obj: (_ for _ in ()).throw(AssertionError("duplicate capture"))
+
+        entries = _run(
+            shadow_capture(
+                db,
+                user_id=uid,
+                job_id="job-already-captured",
+                actual_credits=100,
+                reason_code="job_capture",
+                reserve_reason_code="job_reserve",
+            )
+        )
+
+        assert entries == []
 
     def test_actual_less_than_reserved_two_entries_no_dangling(self):
         """actual=80, reserved=60+40=100. Excess 20 released from last entry.
@@ -557,6 +716,8 @@ class TestShadowCapture:
             calls["n"] += 1
             r = MagicMock()
             if calls["n"] == 1:
+                r.scalar_one_or_none.return_value = None
+            elif calls["n"] == 2:
                 r.scalars.return_value.all.return_value = []
             else:
                 r.scalars.return_value.all.return_value = [bucket]
@@ -755,11 +916,13 @@ class TestBucketLocking:
             bucket_id=bucket.id, credits_delta=-100, direction="reserve",
         )
         db = AsyncMock()
+        guard_res = MagicMock()
+        guard_res.scalar_one_or_none.return_value = None
         ledger_res = MagicMock()
         ledger_res.scalars.return_value.all.return_value = [reserve_entry]
         bucket_res = MagicMock()
         bucket_res.scalar_one_or_none.return_value = bucket
-        db.execute = AsyncMock(side_effect=[ledger_res, bucket_res])
+        db.execute = AsyncMock(side_effect=[guard_res, ledger_res, bucket_res])
         db.add = lambda obj: None
 
         _run(shadow_capture(
@@ -779,11 +942,13 @@ class TestBucketLocking:
             bucket_id=bucket.id, credits_delta=-100, direction="reserve",
         )
         db = AsyncMock()
+        guard_res = MagicMock()
+        guard_res.scalar_one_or_none.return_value = None
         ledger_res = MagicMock()
         ledger_res.scalars.return_value.all.return_value = [reserve_entry]
         bucket_res = MagicMock()
         bucket_res.scalar_one_or_none.return_value = bucket
-        db.execute = AsyncMock(side_effect=[ledger_res, bucket_res])
+        db.execute = AsyncMock(side_effect=[guard_res, ledger_res, bucket_res])
         db.add = lambda obj: None
 
         _run(shadow_release(db, user_id=uid, job_id="job-1"))

@@ -27,11 +27,12 @@ Invariants
   means cleanup ran and removed disk artifacts; the JSON record is a
   ghost we deliberately do not resurrect. Returning False means "no
   change, do not commit".
-- **Quota settle is idempotent.** ``settle_job_quota`` (gateway/quota.py:131)
-  guards on ``quota_state ∈ {"none", "reserved"}``; calling it twice
-  for the same job is safe. We still gate on
-  ``upstream_status in TERMINAL_STATUSES and old_status not in TERMINAL_STATUSES``
-  to avoid redundant work, not because it would be incorrect.
+- **Terminal settle is idempotent and compensating.** ``settle_job_quota``
+  guards on ``quota_state ∈ {"none", "reserved"}``, while
+  ``settle_job_credit_ledger`` guards on job-level capture/release rows.
+  We call both for every observed terminal upstream state, not only on
+  the non-terminal -> terminal edge, because other request paths can
+  legitimately sync ``Job.status`` before settlement runs.
 - **Mirror only mirror fields.** ``r2_artifacts``, ``display_name``,
   ``expires_at``, etc. are Gateway-owned. We never overwrite them here.
 - **Caller commits.** This function mutates the SQLAlchemy session but
@@ -45,6 +46,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from credits_service import settle_job_credit_ledger
 from quota import TERMINAL_STATUSES, settle_job_quota
 
 if TYPE_CHECKING:
@@ -73,8 +75,8 @@ async def mirror_job_terminal_state(
     purged          | (any)           | no-op (return False)
     queued / running| succeeded       | sync fields + settle_job_quota
     queued / running| failed          | sync fields + settle_job_quota
-    succeeded       | succeeded       | sync fields if differ; no settle
-    (any non-purged)| (any)           | sync fields; settle iff entering terminal
+    succeeded       | succeeded       | sync fields + compensate missing settle
+    (any non-purged)| (any)           | sync fields; settle iff upstream terminal
     """
     if db_job.status == "purged":
         return False
@@ -117,19 +119,32 @@ async def mirror_job_terminal_state(
         db_job.edit_generation = upstream.edit_generation
         changed = True
 
-    # Quota settlement on terminal entry. settle_job_quota itself guards
-    # against double-settling (quota.py:131 checks quota_state). The
-    # entry-condition check below is just to avoid the function call
-    # overhead for the common steady-state mirror.
-    if upstream_status in TERMINAL_STATUSES and old_status not in TERMINAL_STATUSES:
+    # Terminal settlement is deliberately level-triggered rather than only
+    # edge-triggered. ``GET /jobs/{id}`` notification polling, list-jobs, and
+    # the R2 sweeper can observe the same terminal JSON record in different
+    # orders; settlement must be safe to retry and able to repair a PG row that
+    # already says "succeeded" but still has reserved quota/credits.
+    if upstream_status in TERMINAL_STATUSES:
+        quota_state_before = getattr(db_job, "quota_state", None)
         try:
             await settle_job_quota(db, db_job, upstream_status)
+            if getattr(db_job, "quota_state", None) != quota_state_before:
+                changed = True
         except Exception as exc:
             # Don't propagate — quota glitches must not block status
             # mirroring. Worst case the user has a leaked reservation
             # the cleanup or admin tooling will eventually rectify.
             logger.warning(
                 "mirror: settle_job_quota failed job=%s status=%s (%s)",
+                db_job.job_id, upstream_status, exc,
+            )
+        try:
+            credit_entries = await settle_job_credit_ledger(db, db_job, upstream_status)
+            if credit_entries:
+                changed = True
+        except Exception as exc:
+            logger.warning(
+                "mirror: settle_job_credit_ledger failed job=%s status=%s (%s)",
                 db_job.job_id, upstream_status, exc,
             )
 

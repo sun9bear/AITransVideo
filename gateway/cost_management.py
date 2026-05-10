@@ -872,6 +872,8 @@ def _job_payload(
     server_cost_per_min_rmb: float | None = None,
     server_cost_source: str | None = None,
     ledger_capture_credits: int | None = None,
+    ledger_job_capture_credits: int | None = None,
+    ledger_voice_clone_capture_credits: int | None = None,
 ) -> dict[str, Any]:
     llm_cost = sum(_row_cost(row) for row in breakdown.llm_rows)
     tts_cost = sum(_row_cost(row) for row in breakdown.tts_rows)
@@ -909,6 +911,17 @@ def _job_payload(
         for row in [*breakdown.llm_rows, *breakdown.tts_rows, *breakdown.voice_clone_rows]
         if row.cost_rmb is None
     )
+    warnings = list(breakdown.warnings)
+    snapshot = job.metering_snapshot if isinstance(job.metering_snapshot, dict) else {}
+    if (
+        _norm(getattr(job, "status", "")) == "succeeded"
+        and _coerce_int(snapshot.get("credits_estimated")) > 0
+        and ledger_job_capture_credits is not None
+        and _coerce_int(ledger_job_capture_credits) <= 0
+    ):
+        warnings.append(
+            "missing_job_capture: terminal job has credits_estimated but no job_capture ledger"
+        )
     return {
         "job_id": job.job_id,
         "title": getattr(job, "display_name", None) or getattr(job, "title", None) or getattr(job, "source_ref", None) or job.job_id,
@@ -933,6 +946,8 @@ def _job_payload(
         "cost_per_minute_rmb": _round_money(total_cost / minutes) if minutes else None,
         "credits_charged": revenue.credits,
         "credits_source": revenue.source,
+        "job_credits_charged": ledger_job_capture_credits,
+        "voice_clone_credits_charged": ledger_voice_clone_capture_credits,
         "point_price_rmb": _round_money(revenue.point_price_rmb),
         "point_price_source": point_price_source,
         "revenue_estimate_rmb": _round_money(revenue.revenue_rmb),
@@ -943,7 +958,7 @@ def _job_payload(
         "gross_profit_rmb": _round_money(gross_profit),
         "gross_margin_pct": round(gross_margin_pct, 2) if gross_margin_pct is not None else None,
         "missing_rate_rows": missing_rate_rows,
-        "warnings": breakdown.warnings,
+        "warnings": warnings,
         "llm": [_llm_row_payload(row) for row in breakdown.llm_rows],
         "tts": [_tts_row_payload(row) for row in breakdown.tts_rows],
         "voice_clone": [_voice_clone_row_payload(row) for row in breakdown.voice_clone_rows],
@@ -997,23 +1012,31 @@ async def cost_jobs(
     rows = result.all()
     job_ids = [job.job_id for job, _owner in rows if job.job_id]
     ledger_capture_by_job: dict[str, int] = {}
+    ledger_job_capture_by_job: dict[str, int] = {}
+    ledger_voice_clone_capture_by_job: dict[str, int] = {}
     if job_ids:
         ledger_result = await db.execute(
             select(
                 CreditsLedger.related_job_id,
+                CreditsLedger.reason_code,
                 func.coalesce(func.sum(-CreditsLedger.credits_delta), 0),
             )
             .where(
                 CreditsLedger.related_job_id.in_(job_ids),
                 CreditsLedger.direction == "capture",
             )
-            .group_by(CreditsLedger.related_job_id)
+            .group_by(CreditsLedger.related_job_id, CreditsLedger.reason_code)
         )
-        ledger_capture_by_job = {
-            str(job_id): int(credits or 0)
-            for job_id, credits in ledger_result.all()
-            if job_id
-        }
+        for job_id, reason_code, credits in ledger_result.all():
+            if not job_id:
+                continue
+            key = str(job_id)
+            amount = int(credits or 0)
+            ledger_capture_by_job[key] = ledger_capture_by_job.get(key, 0) + amount
+            if reason_code in {"job_capture", "capture_additional", "capture_overdraft"}:
+                ledger_job_capture_by_job[key] = ledger_job_capture_by_job.get(key, 0) + amount
+            elif reason_code == "voice_clone_capture":
+                ledger_voice_clone_capture_by_job[key] = ledger_voice_clone_capture_by_job.get(key, 0) + amount
     jobs: list[dict[str, Any]] = []
     total_llm = 0.0
     total_tts = 0.0
@@ -1047,6 +1070,8 @@ async def cost_jobs(
             server_cost_per_min_rmb=server_cost_per_min_rmb,
             server_cost_source=server_cost_source,
             ledger_capture_credits=ledger_capture_by_job.get(job.job_id),
+            ledger_job_capture_credits=ledger_job_capture_by_job.get(job.job_id, 0),
+            ledger_voice_clone_capture_credits=ledger_voice_clone_capture_by_job.get(job.job_id, 0),
         )
         jobs.append(payload)
         total_llm += float(payload["llm_cost_rmb"] or 0.0)
