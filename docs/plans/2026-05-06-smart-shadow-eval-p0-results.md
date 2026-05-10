@@ -401,3 +401,91 @@ P1 Done note §4-bis.5 揭示 38 jobs 里 **23/38 (60.5%)** 至少含 1 个 unkn
 ### 14.7 Gap C verdict
 
 **CLOSED.** unknown jobs 60.5% → 10.5%（5.7× 改善），低于 task 设定的 <20% 阈值。继续阻 P2 的是 P0 §7.1 的 metered jobs ≥ 20 数据累积门槛 + §13.4 cost p90/p99 stable + production pricing snapshot 写入，与 voice_id 分类完全解耦。
+
+---
+
+## 15. 2026-05-10 增补：post_phase_metered_jobs gate 定义修正 + §11 verdict 转 PASS
+
+### 15.1 问题：旧 gate 把 Phase D 当 Smart 信号源
+
+P0 §7.1 的 P2 入口阈值（≥10 重跑、≥20 启动）依赖 `aggregate_report.json::p2_readiness_signals.post_phase_metered_jobs`。**旧 gate 定义错了**：它要求
+- `retts_actual.data_source == "metering"`（metering 存在）
+- AND `sub_actual.alignment_model` truthy（Whisper 数据存在）
+
+但 Smart 6 个 stage 决策（eligibility / voice / clone / translation / retry / subtitle_sync）实际依赖的是 **Phase A/B**（`subtitle_quality_report.json::text_audio_drift_count` 字段是否 set），不是 Phase D Whisper alignment。生产 `admin whisper_alignment_trigger="deliverable"` 是 by-design 的合理 trade-off（精准字幕只在用户下载剪映草稿/素材包时跑，节省 publish 5-15s 路径成本）——用户已确认**不改 production**，问题完全在 collector/aggregator gate 定义。
+
+### 15.2 修复（commit `193c100`）
+
+- 文件：`scripts/smart_shadow_sim_aggregator.py::_p2_readiness_signals`
+- 旧 check：`if not sub_actual.get("alignment_model"): continue`
+- 新 check：`if sub_actual.get("drift_count") is None: continue`（注意：`is None`，因为 `drift_count == 0` 表示 Phase A/B 跑过且 healthy，必须计入）
+- `alignment_model` 字段在 fact sheet + simulator/aggregator sidecar **保留**作为 informational signal，不再参与 gate
+- 新增单测 `test_c4_p2_readiness_drift_only_counts_as_post_phase`：验证 alignment_model=None 但 drift_count 非 None 的 job 必须计为 post-phase
+- 全测试：`smart_shadow` 套件 113 → 114 passed, 1 skipped（0 回归）
+- 守卫 AST stdlib-only / PII / paths-in-sync 三组全 GREEN
+
+### 15.3 远端实测（2026-05-10T04:43Z，n=39 production jobs）
+
+run_id `gate-fix-20260510T0443Z`，用 `D:/Claude/temp/smart_shadow_sim/c7_remote_run/run_remote_gate_fix.py` 一次性 paramiko orchestration（read-only，只跑 collector + simulator + aggregator + analyzer，远端 `/tmp/<run_id>` 跑完即清，**0 字节 project_dir 原始内容触本地**）。
+
+| Gate 定义 | 满足 jobs | P0 重跑阈值 ≥10 |
+|---|---:|---|
+| 旧（metering AND alignment_model not None） | **9/39** | ❌ 还差 1 |
+| **新（metering AND drift_count is not None）** | **12/39** | **✅ 已达成** |
+
+数据底层（从 facts.jsonl 直读）：
+- 21/39 jobs 有 metering（usage_events.jsonl）
+- 12/39 jobs 有 `text_audio_drift_count` 设值（subtitle_quality_report.json，Phase A/B 已部署）
+- 9/39 jobs 有 `whisper.alignment_model` 设值（Phase D 已跑 = deliverable 阶段已触发）
+- **3 个新增 jobs**（drift 设值但 alignment_model 是 None）：正是被旧 gate 误漏的 Phase A/B-only jobs
+
+### 15.4 §11 verdict：INCONCLUSIVE → PASS（同次远端 run）
+
+P0 §4.4 当时 n=38 jobs 上 `verdict: INCONCLUSIVE (metering data < 50%)`（35/38 无 metering）。本次 n=39 上跑 `smart_shadow_eval_analyzer.py`，用 gateway/pricing_schema.py code defaults（production 仍无 `pricing_runtime.json`）：
+
+| 指标 | 实测（n=39） |
+|---|---|
+| jobs with metering data | **21/39 (54%)** |
+| metering 50% 门槛 | ≥ 50% → 不 INCONCLUSIVE |
+| margin (RMB) p50 | **55.37** |
+| margin (RMB) p90 | **282.89** |
+| margin (RMB) p99 | **350.59** |
+| **§11 Risk Verdict** | **PASS**（三档都正毛利，21/39 metering ≥ 50%） |
+
+> 注意：**§11 PASS 是数据自然累积穿过 50% metering 阈值导致**（21/39=54% 已 > 50%），不是本次 gate fix 的直接产物。Gate fix 只直接影响 aggregator `post_phase_metered_jobs` 计数。两件事在同一次远端 run 里同时落定，但因果独立。
+
+### 15.5 对 §13.4 P2 入口条件的影响
+
+§13.4 列出 3 条 P2 入口前必须满足条件：
+- ~~post-Phase-D metered jobs ≥ 20~~ → 改为 **post-Phase-A/B（drift_count is not None）metered jobs ≥ 20**；当前 **12/20**（60% 进度）
+- ~~cost p90/p99 stable~~ → **本次 PASS，但仅为单次 snapshot；P2 启动前应在累积到 ≥ 20 metered jobs 时再次复测**
+- production `pricing_runtime.json` snapshot 写入 → **未改变，仍待 ops 写入**
+
+### 15.6 不顺手做的事项（task 硬约束守住）
+
+- ❌ 不动 production `admin_settings.json::whisper_alignment_trigger`（deliverable 是 by-design）
+- ❌ 不重构 simulator 6 stage decision logic（`_decide_subtitle_sync` 仍按 alignment_model 给 smart 决策，与 gate 解耦）
+- ❌ 不做 v3 retry estimation per-voice k 校准
+- ❌ 不删 `alignment_model` 字段（保留作为 informational signal）
+- ❌ 不修复 production whisper trigger
+- ❌ 不动 `src/` `gateway/` `frontend-next/`
+- ❌ 远端只读，不写入任何 production 状态
+
+### 15.7 仍阻 P2 launch 的剩余条件
+
+1. **post_phase_metered_jobs ≥ 20**（P2 启动门槛，当前 12/20）
+2. **production `pricing_runtime.json` snapshot 写入**（替代 code defaults）
+3. P0 §8 4 个 known diagnostic gaps 跟踪（`workflow_alignment_cache` 0 命中 / `orphaned_project_dir_count` / pricing snapshot / audit 命中率）
+
+P0 §7.1 的 ≥10 重跑门槛已达成（12 ≥ 10），`§11 verdict` 也已从 INCONCLUSIVE 转 PASS。从 P0 视角看，P2 评估窗口已开，但 P2 实施仍受 ≥20 metered + production pricing 阻塞。
+
+### 15.8 工件归档
+
+- 远端 run_id：`gate-fix-20260510T0443Z`
+- Tarball：`D:/Claude/temp/smart_shadow_sim/c7_remote_run/results_gate_fix/sidecars.tar.gz`（86 KB）
+- 解压后：
+  - `p0/facts.jsonl`（39 facts）
+  - `p1/aggregate_report.{json,md}` — 含 `post_phase_metered_jobs: 12`, `ready_for_p2_rerun: true`
+  - `p1/job_<id>/smart_shadow_decisions.jsonl` × 39
+  - `p1/job_<id>/smart_shadow_report.json` × 39
+  - `analyzer_out/report.{md,_summary.json}` — 含 §11 Risk Verdict: PASS
