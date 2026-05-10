@@ -599,6 +599,54 @@ async def test_run_calibration_task_refunds_on_paid_call_count_zero(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_starter_factory_exception_normalized_to_internal_error(monkeypatch):
+    """codex T0-review F-T0-4 follow-up (round 9, non-blocking): pin
+    that starter and joiner ALIKE receive a normalized
+    CalibrationResult(internal_error) when factory violates its
+    "always returns CalibrationResult, never raises" contract.
+
+    Pre-fix (c486a19) had starter awaiting `shield(factory_task)` so
+    factory exception propagated as a raw exception to starter while
+    joiner saw the _finalize-normalized result. Post-fix (2f809f6)
+    both await the shared `future` so _finalize is the single result
+    funnel. This test pins the normalization path explicitly.
+    """
+    fresh_registry = CalibrationInFlightRegistry()
+    monkeypatch.setattr("voice_calibration_inflight.registry", fresh_registry)
+    risk_control.reset_voice_calibration_rate_limits()
+
+    async def factory_that_raises():
+        # Violate the contract: synchronous Exception escape.
+        raise RuntimeError("factory contract violation — should NOT escape")
+
+    key = CalibrationKey(
+        scope="user", owner="u_factory_raise", provider="minimax",
+        voice_id="v_factory_raise", model_key="speech-2.8-turbo",
+    )
+
+    # Starter (no joiner this time)
+    result = await run_calibration_task(
+        key=key,
+        user_id_for_budget="u_factory_raise",
+        factory=factory_that_raises,
+    )
+
+    # Result is normalized — no raw exception escaped to caller.
+    assert isinstance(result, CalibrationResult)
+    assert result.ok is False
+    assert result.error_class == "internal_error"
+    assert result.paid_call_count == 0
+    assert result.model_key == key.model_key
+
+    # Budget refunded (paid_call_count == 0 path).
+    # Cap is 5/min; we should have full quota now.
+    for _ in range(5):
+        risk_control.reserve_voice_calibration("u_factory_raise")
+    with pytest.raises(risk_control.RateLimitExceeded):
+        risk_control.reserve_voice_calibration("u_factory_raise")
+
+
+@pytest.mark.asyncio
 async def test_starter_cancel_does_not_abandon_paid_tts(monkeypatch):
     """codex T0-review F-T0-1 — when caller is cancelled while factory is
     running, paid TTS in `asyncio.to_thread(calibrate_voice)` cannot be
