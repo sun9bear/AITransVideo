@@ -50,6 +50,7 @@ from config import settings
 from database import engine, init_db
 from models import Base
 from startup_checks import (
+    is_startup_recovery_schema_missing_error,
     validate_internal_api_key,
     validate_production_safety,
     validate_r2_backend,
@@ -113,10 +114,15 @@ async def lifespan(app: FastAPI):
         async with async_session() as db:
             recovered = await recover_stale_tasks(db)
             if recovered:
-                import logging
-                logging.getLogger(__name__).info("Recovered %d stale label tasks", recovered)
-    except Exception:
-        pass  # Table may not exist yet before migration
+                logger.info("Recovered %d stale label tasks", recovered)
+    except Exception as exc:
+        if is_startup_recovery_schema_missing_error(exc):
+            logger.warning(
+                "Skipped stale label task recovery because the database schema is not ready: %s",
+                exc,
+            )
+        else:
+            logger.exception("Failed to recover stale label tasks during gateway startup")
 
     # Recover stale background tasks (materials_pack / generate_video)
     try:
@@ -126,8 +132,14 @@ async def lifespan(app: FastAPI):
             recovered_bg = await _bg_queue.recover_stale(db)
             if recovered_bg:
                 logger.info("Recovered %d stale background tasks", recovered_bg)
-    except Exception:
-        pass  # Table may not exist yet before migration
+    except Exception as exc:
+        if is_startup_recovery_schema_missing_error(exc):
+            logger.warning(
+                "Skipped stale background task recovery because the database schema is not ready: %s",
+                exc,
+            )
+        else:
+            logger.exception("Failed to recover stale background tasks during gateway startup")
 
     # Periodic cleanup of expired materials_pack zips (24h retention, plan
     # 2026-04-21). Disk pressure is the concern — the US host sits at 82%

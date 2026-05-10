@@ -892,6 +892,62 @@ def test_align_all_parallel_first_error_sets_stop_event_and_skips_paid_fallback(
     )
 
 
+def test_align_all_parallel_base_exception_sets_stop_event_and_reraises(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Characterize the broad BaseException cleanup path without sending
+    a real KeyboardInterrupt through pytest.
+    """
+
+    class _SyntheticAlignmentAbort(BaseException):
+        pass
+
+    monkeypatch.setenv("AVT_ALIGN_MAX_WORKERS", "2")
+    tone = _export_tone_wav(tmp_path / "in" / "tone.wav", duration_ms=1_000)
+    segments = [
+        _build_segment(segment_id=i, audio_path=tone, end_ms=1_000)
+        for i in range(1, 4)
+    ]
+    captured_stop_events: list[threading.Event] = []
+
+    def _stub_align_one(self, segment, output_dir, **kwargs):
+        del self, output_dir
+        stop_event = kwargs.get("stop_event")
+        assert stop_event is not None
+        captured_stop_events.append(stop_event)
+        if segment.segment_id == 1:
+            raise _SyntheticAlignmentAbort("synthetic abort")
+        deadline = time.monotonic() + 2.0
+        while not stop_event.is_set():
+            if time.monotonic() >= deadline:
+                raise AssertionError("stop_event was not set after BaseException")
+            time.sleep(0.005)
+        return AlignedSegment(
+            segment_id=segment.segment_id,
+            speaker_id=segment.speaker_id,
+            display_name=segment.display_name,
+            start_ms=segment.start_ms,
+            end_ms=segment.end_ms,
+            cn_text=segment.cn_text,
+            en_text="",
+            aligned_audio_path="",
+            actual_duration_ms=segment.target_duration_ms,
+            alignment_method="direct",
+            needs_review=False,
+            dubbing_mode=DUBBING_MODE_DUB,
+        )
+
+    monkeypatch.setattr(SegmentAligner, "_align_one", _stub_align_one)
+
+    with pytest.raises(_SyntheticAlignmentAbort, match="synthetic abort"):
+        SegmentAligner().align_all(segments, str(tmp_path / "aligned"))
+
+    assert captured_stop_events
+    assert all(ev is captured_stop_events[0] for ev in captured_stop_events)
+    assert captured_stop_events[0].is_set()
+
+
 @pytest.mark.parametrize("invalid_value", ["not-a-number", "0", "-1", "abc", "1.5"])
 def test_align_all_invalid_max_workers_env_falls_back_to_serial(
     invalid_value: str,

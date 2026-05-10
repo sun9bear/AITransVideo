@@ -450,6 +450,204 @@ class _FakeUser:
     trial_ends_at: datetime | None = None
 
 
+def test_consume_post_edit_tts_usage_records_trial_allowance(monkeypatch) -> None:
+    now = datetime.now(timezone.utc)
+    source = _FakeJobRow(job_id="job_src", status="editing", expires_at=now + timedelta(days=1))
+    user = _FakeUser(plan_code="free", trial_granted_at=now, trial_ends_at=now + timedelta(days=1))
+
+    async def fake_enforce(db, job, passed_user, *, subpath: str, now_utc: datetime):
+        assert db is session
+        assert job is source
+        assert passed_user is user
+        assert subpath == "regenerate-tts"
+        assert now_utc is now
+        return source, job_intercept.POST_EDIT_LIMITS["trial"]
+
+    session = _FakeSession()
+    monkeypatch.setattr(job_intercept, "_enforce_post_edit_access", fake_enforce)
+
+    asyncio.run(
+        job_intercept._consume_post_edit_tts_usage(
+            session,
+            source,
+            user,
+            segments=2,
+            chars=120,
+            batch_start=True,
+            now_utc=now,
+        )
+    )
+
+    usage = source.metering_snapshot[job_intercept.POST_EDIT_USAGE_KEY]
+    assert usage["batch_regenerates"] == 1
+    assert usage["tts_segments"] == 2
+    assert usage["tts_chars"] == 120
+
+
+def test_consume_post_edit_tts_usage_accumulates_existing_usage(monkeypatch) -> None:
+    now = datetime.now(timezone.utc)
+    source = _FakeJobRow(
+        job_id="job_src",
+        status="editing",
+        expires_at=now + timedelta(days=1),
+        metering_snapshot={
+            job_intercept.POST_EDIT_USAGE_KEY: {
+                "tts_segments": 1,
+                "tts_chars": 50,
+            }
+        },
+    )
+    user = _FakeUser(plan_code="free", trial_granted_at=now, trial_ends_at=now + timedelta(days=1))
+
+    async def fake_enforce(db, job, passed_user, *, subpath: str, now_utc: datetime):
+        return source, job_intercept.POST_EDIT_LIMITS["trial"]
+
+    monkeypatch.setattr(job_intercept, "_enforce_post_edit_access", fake_enforce)
+
+    asyncio.run(
+        job_intercept._consume_post_edit_tts_usage(
+            _FakeSession(),
+            source,
+            user,
+            segments=2,
+            chars=120,
+            batch_start=False,
+            now_utc=now,
+        )
+    )
+
+    usage = source.metering_snapshot[job_intercept.POST_EDIT_USAGE_KEY]
+    assert usage["tts_segments"] == 3
+    assert usage["tts_chars"] == 170
+
+
+def test_consume_post_edit_tts_usage_rejects_segment_limit_without_increment(
+    monkeypatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    source = _FakeJobRow(
+        job_id="job_src",
+        status="editing",
+        expires_at=now + timedelta(days=1),
+        metering_snapshot={
+            job_intercept.POST_EDIT_USAGE_KEY: {
+                "tts_segments": 7,
+                "tts_chars": 100,
+            }
+        },
+    )
+    user = _FakeUser(plan_code="free", trial_granted_at=now, trial_ends_at=now + timedelta(days=1))
+
+    async def fake_enforce(db, job, passed_user, *, subpath: str, now_utc: datetime):
+        return source, job_intercept.POST_EDIT_LIMITS["trial"]
+
+    monkeypatch.setattr(job_intercept, "_enforce_post_edit_access", fake_enforce)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            job_intercept._consume_post_edit_tts_usage(
+                _FakeSession(),
+                source,
+                user,
+                segments=2,
+                chars=10,
+                batch_start=False,
+                now_utc=now,
+            )
+        )
+
+    assert exc.value.status_code == 403
+    assert exc.value.detail == "本项目免费重合成段数已用完。"
+    usage = source.metering_snapshot[job_intercept.POST_EDIT_USAGE_KEY]
+    assert usage["tts_segments"] == 7
+    assert usage["tts_chars"] == 100
+
+
+def test_consume_post_edit_tts_usage_rejects_char_limit_without_increment(
+    monkeypatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    source = _FakeJobRow(
+        job_id="job_src",
+        status="editing",
+        expires_at=now + timedelta(days=1),
+        metering_snapshot={
+            job_intercept.POST_EDIT_USAGE_KEY: {
+                "tts_segments": 2,
+                "tts_chars": 995,
+            }
+        },
+    )
+    user = _FakeUser(plan_code="free", trial_granted_at=now, trial_ends_at=now + timedelta(days=1))
+
+    async def fake_enforce(db, job, passed_user, *, subpath: str, now_utc: datetime):
+        return source, job_intercept.POST_EDIT_LIMITS["trial"]
+
+    monkeypatch.setattr(job_intercept, "_enforce_post_edit_access", fake_enforce)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            job_intercept._consume_post_edit_tts_usage(
+                _FakeSession(),
+                source,
+                user,
+                segments=1,
+                chars=10,
+                batch_start=False,
+                now_utc=now,
+            )
+        )
+
+    assert exc.value.status_code == 403
+    assert exc.value.detail == "本项目免费重合成字数已用完。"
+    usage = source.metering_snapshot[job_intercept.POST_EDIT_USAGE_KEY]
+    assert usage["tts_segments"] == 2
+    assert usage["tts_chars"] == 995
+
+
+@pytest.mark.parametrize("plan_code", ["plus", "pro"])
+def test_consume_post_edit_tts_usage_accepts_paid_plan_limits(
+    monkeypatch,
+    plan_code: str,
+) -> None:
+    now = datetime.now(timezone.utc)
+    limits = job_intercept.POST_EDIT_LIMITS[plan_code]
+    source = _FakeJobRow(
+        job_id="job_src",
+        status="editing",
+        expires_at=now + timedelta(days=1),
+        metering_snapshot={
+            job_intercept.POST_EDIT_USAGE_KEY: {
+                "batch_regenerates": int(limits["batch_regenerates"] or 0) - 1,
+            }
+        },
+    )
+    user = _FakeUser(plan_code=plan_code)
+
+    async def fake_enforce(db, job, passed_user, *, subpath: str, now_utc: datetime):
+        assert passed_user is user
+        return source, limits
+
+    monkeypatch.setattr(job_intercept, "_enforce_post_edit_access", fake_enforce)
+
+    asyncio.run(
+        job_intercept._consume_post_edit_tts_usage(
+            _FakeSession(),
+            source,
+            user,
+            segments=int(limits["tts_segments"] or 0),
+            chars=int(limits["tts_chars"] or 0),
+            batch_start=True,
+            now_utc=now,
+        )
+    )
+
+    usage = source.metering_snapshot[job_intercept.POST_EDIT_USAGE_KEY]
+    assert usage["batch_regenerates"] == limits["batch_regenerates"]
+    assert usage["tts_segments"] == limits["tts_segments"]
+    assert usage["tts_chars"] == limits["tts_chars"]
+
+
 def test_enter_edit_transition_passes_user_to_access_policy(monkeypatch) -> None:
     source = _FakeJobRow(job_id="job_src", status="succeeded")
     session = _FakeSession()

@@ -42,6 +42,27 @@ def validate_internal_api_key(key: str) -> None:
         )
 
 
+def is_startup_recovery_schema_missing_error(exc: BaseException) -> bool:
+    """Return whether a startup recovery failure is the expected pre-migration case.
+
+    The stale-task recovery hooks run during Gateway startup. In a fresh local
+    environment, or before a migration is applied, the queue tables may not
+    exist yet. That case should be visible as a warning, while unrelated
+    recovery failures should be logged with full exception details.
+
+    This is intentionally string-based because startup may see different DB
+    driver exception types. The safe failure direction is to return False: an
+    unrecognized schema-missing error is logged with logger.exception instead
+    of being silently swallowed.
+    """
+    text = f"{type(exc).__module__}.{type(exc).__name__}: {exc}".lower()
+    if "undefinedtable" in text or "no such table" in text:
+        return True
+    if "doesn't exist" in text and "table" in text:
+        return True
+    return "relation" in text and "does not exist" in text
+
+
 def validate_r2_backend(
     backend: str,
     r2_endpoint: str,

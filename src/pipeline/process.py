@@ -451,17 +451,15 @@ def _report_source_metadata(
         print(f"[{stage_label}] Warning: failed to report source metadata: {e}", flush=True)
 
 
-def _report_job_metering(
-    job_id: str,
+def _build_job_metering_payload(
     segments: list,
     *,
     tts_billed_chars: int | None = None,
     glossary: dict[str, str] | None = None,
     extra_metering: dict[str, object] | None = None,
-) -> None:
-    """Best-effort callback to Gateway /job-api/jobs/{job_id}/metering.
+) -> dict[str, object]:
+    """Build Gateway job metering fields from real segment objects.
 
-    Computes and reports pipeline metering fields from real segment objects.
     Supports both ``DubbingSegment`` (real pipeline path) and ``SemanticBlock``
     (legacy/alternative path) by checking for available text fields.
 
@@ -488,410 +486,429 @@ def _report_job_metering(
       - speaker_*: deterministic P2 speaker-structure summary for incidental
         and fragmented low-share speakers
     """
+    total_cn_chars = 0
+    total_rewrite_count = 0
+    total_segments = 0
+    catalog_hit_count = 0
+    needs_review_count = 0
+    first_pass_errors_abs: list[float] = []
+    method_counts: dict[str, int] = {}
+    speed_counts: dict[str, int] = {"1.0": 0, "in_range": 0, "outside": 0}
+    pre_tts_rewrite_events: list[dict[str, object]] = []
+    pre_tts_rewrite_rejected_events: list[dict[str, object]] = []
+    pre_tts_rewrite_rejected_reason_counts: dict[str, int] = {}
+    micro_segment_count = 0
+    short_segment_count = 0
+    short_segment_needs_review_count = 0
+    short_segment_force_dsp_count = 0
+    capped_dsp_overflow_count = 0
+    capped_dsp_underflow_count = 0
+    dsp_silence_pad_segment_count = 0
+    dsp_silence_padded_total_ms = 0
+    dsp_silence_padded_max_ms = 0
+    short_segment_capped_dsp_overflow_count = 0
+    force_dsp_severity_counts: dict[str, int] = {}
+    force_dsp_review_suppressed_count = 0
+    short_merge_candidate_count = 0
+    short_merge_blocked_cross_speaker_count = 0
+    short_merge_applied_count = 0
+    short_merge_absorbed_count = 0
+    auto_keep_original_count = 0
+    auto_keep_original_reason_counts: dict[str, int] = {}
+    short_content_compact_attempted_count = 0
+    short_content_compact_accepted_count = 0
+    short_content_compact_rejected_count = 0
+    short_content_compact_rejected_reason_counts: dict[str, int] = {}
+    short_content_compact_class_counts: dict[str, int] = {}
+    speaker_structure_profiles: dict[str, dict[str, object]] = {}
+
+    for seg in segments:
+        total_segments += 1
+        speaker_id = str(getattr(seg, "speaker_id", "") or "")
+        if speaker_id:
+            role = str(getattr(seg, "speaker_role", "") or "")
+            existing_profile = speaker_structure_profiles.get(speaker_id)
+            if existing_profile is None or (
+                not str(existing_profile.get("speaker_role", "") or "") and role
+            ):
+                speaker_structure_profiles[speaker_id] = {
+                    "speaker_role": role,
+                    "speaker_role_label": str(getattr(seg, "speaker_role_label", "") or ""),
+                    "duration_ms": int(getattr(seg, "speaker_duration_ms", 0) or 0),
+                    "duration_share": round(
+                        float(getattr(seg, "speaker_duration_share", 0.0) or 0.0),
+                        4,
+                    ),
+                    "segment_count": int(getattr(seg, "speaker_segment_count", 0) or 0),
+                    "short_segment_count": int(
+                        getattr(seg, "speaker_short_segment_count", 0) or 0
+                    ),
+                    "short_segment_rate": round(
+                        float(getattr(seg, "speaker_short_segment_rate", 0.0) or 0.0),
+                        4,
+                    ),
+                    "reason": str(getattr(seg, "speaker_structure_reason", "") or ""),
+                    "review_hint": str(getattr(seg, "speaker_review_hint", "") or ""),
+                }
+        text = getattr(seg, "cn_text", "") or ""
+        if not text:
+            text = getattr(seg, "merged_cn_text", "") or ""
+        total_cn_chars += len(text)
+        total_rewrite_count += getattr(seg, "rewrite_count", 0)
+
+        # Phase 2 Task 0 — per-segment metric collection (best-effort:
+        # missing attributes are treated as defaults so that legacy paths
+        # like SemanticBlock continue to work without raising).
+        if getattr(seg, "catalog_hit", False):
+            catalog_hit_count += 1
+        if getattr(seg, "needs_review", False):
+            needs_review_count += 1
+
+        method = getattr(seg, "alignment_method", "") or ""
+        if method:
+            method_counts[method] = method_counts.get(method, 0) + 1
+        if method == "capped_dsp_overflow":
+            capped_dsp_overflow_count += 1
+        if method == "capped_dsp_underflow":
+            capped_dsp_underflow_count += 1
+        pad_ms = int(getattr(seg, "dsp_silence_padded_ms", 0) or 0)
+        if pad_ms > 0:
+            dsp_silence_pad_segment_count += 1
+            dsp_silence_padded_total_ms += pad_ms
+            dsp_silence_padded_max_ms = max(dsp_silence_padded_max_ms, pad_ms)
+        if method in {"force_dsp", "capped_dsp_overflow", "capped_dsp_underflow"}:
+            severity = getattr(seg, "force_dsp_severity", "") or "unknown"
+            force_dsp_severity_counts[severity] = (
+                force_dsp_severity_counts.get(severity, 0) + 1
+            )
+            if getattr(seg, "force_dsp_review_suppressed", False):
+                force_dsp_review_suppressed_count += 1
+        if getattr(seg, "short_merge_candidate", False):
+            short_merge_candidate_count += 1
+        if getattr(seg, "short_merge_blocked_reason", "") == "cross_speaker_adjacent":
+            short_merge_blocked_cross_speaker_count += 1
+        if getattr(seg, "short_merge_applied", False):
+            short_merge_applied_count += 1
+            short_merge_absorbed_count += len(
+                ProcessPipeline._parse_short_merge_absorbed_segment_ids(seg)
+            )
+        auto_keep_reason = str(
+            getattr(seg, "auto_keep_original_reason", "") or ""
+        )
+        if auto_keep_reason:
+            auto_keep_original_count += 1
+            auto_keep_original_reason_counts[auto_keep_reason] = (
+                auto_keep_original_reason_counts.get(auto_keep_reason, 0) + 1
+            )
+        if getattr(seg, "short_content_compact_attempted", False):
+            short_content_compact_attempted_count += 1
+            compact_class = str(
+                getattr(seg, "short_content_compact_class", "") or "unknown"
+            )
+            short_content_compact_class_counts[compact_class] = (
+                short_content_compact_class_counts.get(compact_class, 0) + 1
+            )
+            if getattr(seg, "short_content_compact_accepted", False):
+                short_content_compact_accepted_count += 1
+            else:
+                short_content_compact_rejected_count += 1
+                compact_reason = str(
+                    getattr(seg, "short_content_compact_rejected_reason", "")
+                    or "unknown"
+                )
+                short_content_compact_rejected_reason_counts[compact_reason] = (
+                    short_content_compact_rejected_reason_counts.get(compact_reason, 0)
+                    + 1
+                )
+
+        target_duration_ms = int(getattr(seg, "target_duration_ms", 0) or 0)
+        if 0 < target_duration_ms < 1_000:
+            micro_segment_count += 1
+        if PRE_TTS_REWRITE_SHORT_MIN_TARGET_MS <= target_duration_ms < PRE_TTS_REWRITE_MIN_TARGET_MS:
+            short_segment_count += 1
+            if getattr(seg, "needs_review", False):
+                short_segment_needs_review_count += 1
+            if method == "force_dsp":
+                short_segment_force_dsp_count += 1
+            if method == "capped_dsp_overflow":
+                short_segment_capped_dsp_overflow_count += 1
+
+        err = getattr(seg, "first_pass_error_pct", None)
+        if err is not None and err != 0.0:
+            first_pass_errors_abs.append(abs(float(err)))
+
+        speed = getattr(seg, "dsp_speed_param", 1.0) or 1.0
+        speed = float(speed)
+        if abs(speed - 1.0) < 1e-6:
+            speed_counts["1.0"] += 1
+        elif 0.92 <= speed <= 1.08:
+            speed_counts["in_range"] += 1
+        else:
+            speed_counts["outside"] += 1
+
+        pre_tts_direction = getattr(seg, "pre_tts_rewrite_direction", "") or ""
+        if pre_tts_direction:
+            pre_tts_rewrite_events.append({
+                "segment_id": getattr(seg, "segment_id", None),
+                "direction": pre_tts_direction,
+                "task": getattr(seg, "pre_tts_rewrite_task", "") or "s5_rewrite",
+                "estimate_ms": getattr(seg, "pre_tts_estimate_ms", 0) or 0,
+                "target_ms": getattr(seg, "pre_tts_target_ms", 0) or 0,
+                "pre_chars": getattr(seg, "pre_tts_pre_chars", 0) or 0,
+                "post_chars": getattr(seg, "pre_tts_post_chars", 0) or 0,
+                "post_tts_first_pass_ms": (
+                    getattr(seg, "pre_tts_post_tts_first_pass_ms", 0) or 0
+                ),
+                "contradiction": bool(getattr(seg, "pre_tts_contradiction", False)),
+                "harmful_contradiction": bool(
+                    getattr(seg, "pre_tts_harmful_contradiction", False)
+                ),
+                "retry_attempted": bool(
+                    getattr(seg, "pre_tts_rewrite_retry_attempted", False)
+                ),
+                "retry_accepted": bool(
+                    getattr(seg, "pre_tts_rewrite_retry_accepted", False)
+                ),
+                "initial_rejected_reason": (
+                    getattr(seg, "pre_tts_rewrite_initial_rejected_reason", "") or ""
+                ),
+            })
+        if getattr(seg, "pre_tts_rewrite_rejected", False):
+            reason = str(
+                getattr(seg, "pre_tts_rewrite_rejected_reason", "") or "unknown"
+            )
+            pre_tts_rewrite_rejected_reason_counts[reason] = (
+                pre_tts_rewrite_rejected_reason_counts.get(reason, 0) + 1
+            )
+            pre_tts_rewrite_rejected_events.append({
+                "segment_id": getattr(seg, "segment_id", None),
+                "direction": (
+                    getattr(seg, "pre_tts_rewrite_rejected_direction", "") or ""
+                ),
+                "reason": reason,
+                "estimate_ms": (
+                    getattr(seg, "pre_tts_rewrite_rejected_estimate_ms", 0) or 0
+                ),
+                "target_ms": (
+                    getattr(seg, "pre_tts_rewrite_rejected_target_ms", 0) or 0
+                ),
+                "pre_chars": (
+                    getattr(seg, "pre_tts_rewrite_rejected_pre_chars", 0) or 0
+                ),
+                "post_chars": (
+                    getattr(seg, "pre_tts_rewrite_rejected_post_chars", 0) or 0
+                ),
+                "lower_chars": (
+                    getattr(seg, "pre_tts_rewrite_rejected_lower_chars", 0) or 0
+                ),
+                "upper_chars": (
+                    getattr(seg, "pre_tts_rewrite_rejected_upper_chars", 0) or 0
+                ),
+                "retry_attempted": bool(
+                    getattr(seg, "pre_tts_rewrite_retry_attempted", False)
+                ),
+            })
+
+    body: dict = {
+        "final_cn_chars": total_cn_chars,
+        "rewrite_triggered": total_rewrite_count > 0,
+        "rewrite_count": total_rewrite_count,
+        # --- Phase 2 Task 0 fields ---
+        "total_segments": total_segments,
+        "catalog_hit_count": catalog_hit_count,
+        "catalog_hit_rate": (
+            round(catalog_hit_count / total_segments, 4)
+            if total_segments > 0 else 0.0
+        ),
+        # all-or-nothing: skip_probe is true iff every segment hit the catalog
+        "skip_probe": (total_segments > 0 and catalog_hit_count == total_segments),
+        "needs_review_count": needs_review_count,
+        "needs_review_rate": (
+            round(needs_review_count / total_segments, 4)
+            if total_segments > 0 else 0.0
+        ),
+        "micro_segment_count": micro_segment_count,
+        "short_segment_count": short_segment_count,
+        "short_segment_needs_review_count": short_segment_needs_review_count,
+        "short_segment_force_dsp_count": short_segment_force_dsp_count,
+        "capped_dsp_overflow_count": capped_dsp_overflow_count,
+        "capped_dsp_underflow_count": capped_dsp_underflow_count,
+        "dsp_silence_pad_segment_count": dsp_silence_pad_segment_count,
+        "dsp_silence_padded_total_ms": dsp_silence_padded_total_ms,
+        "dsp_silence_padded_max_ms": dsp_silence_padded_max_ms,
+        "short_segment_capped_dsp_overflow_count": short_segment_capped_dsp_overflow_count,
+        "force_dsp_severity_distribution": force_dsp_severity_counts,
+        "force_dsp_review_suppressed_count": force_dsp_review_suppressed_count,
+        "short_merge_candidate_count": short_merge_candidate_count,
+        "short_merge_blocked_cross_speaker_count": short_merge_blocked_cross_speaker_count,
+        "short_merge_applied_count": short_merge_applied_count,
+        "short_merge_absorbed_count": short_merge_absorbed_count,
+        "auto_keep_original_count": auto_keep_original_count,
+        "auto_keep_original_reason_distribution": auto_keep_original_reason_counts,
+        "short_content_compact_attempted_count": short_content_compact_attempted_count,
+        "short_content_compact_accepted_count": short_content_compact_accepted_count,
+        "short_content_compact_rejected_count": short_content_compact_rejected_count,
+        "short_content_compact_rejected_reason_distribution": (
+            short_content_compact_rejected_reason_counts
+        ),
+        "short_content_compact_class_distribution": short_content_compact_class_counts,
+        "alignment_method_distribution": method_counts,
+        "speed_param_distribution": speed_counts,
+    }
+    if speaker_structure_profiles:
+        role_counts: dict[str, int] = {}
+        incidental_share_total = 0.0
+        for profile in speaker_structure_profiles.values():
+            role = str(profile.get("speaker_role", "") or "unknown")
+            role_counts[role] = role_counts.get(role, 0) + 1
+            if role == "incidental":
+                incidental_share_total += float(profile.get("duration_share", 0.0) or 0.0)
+        body["speaker_count"] = len(speaker_structure_profiles)
+        body["speaker_role_distribution"] = role_counts
+        body["speaker_primary_count"] = role_counts.get("primary", 0)
+        body["speaker_incidental_count"] = role_counts.get("incidental", 0)
+        body["speaker_fragmented_count"] = role_counts.get("fragmented", 0)
+        body["speaker_non_speech_count"] = role_counts.get("non_speech", 0)
+        body["speaker_incidental_duration_share"] = round(incidental_share_total, 4)
+        body["speaker_structure_profiles"] = speaker_structure_profiles
+
+    # voice_speed_mismatch_rate: fraction of segments whose voice cps
+    # deviates >15% from target (= source_english_wps × 1.8). Segments
+    # without target or voice cps are excluded from the denominator.
+    try:
+        mismatch_count = 0
+        mismatch_denom = 0
+        for seg in segments:
+            target_cps_val = float(getattr(seg, "target_chars_per_second", 0) or 0)
+            if target_cps_val <= 0:
+                continue
+            # Use the voice's catalog/user_voices cps (via the probe-calibrated
+            # per-speaker value that was piped into the segment).
+            voice_cps_text = seg.cn_text if hasattr(seg, "cn_text") else ""
+            actual_dur = float(getattr(seg, "actual_duration_ms", 0) or 0)
+            speed_param = float(getattr(seg, "dsp_speed_param", 1.0) or 1.0)
+            if actual_dur <= 0 or not voice_cps_text:
+                continue
+            # Compute voice's natural cps (normalize out speed adjustment)
+            natural_dur_s = (actual_dur * max(0.01, speed_param)) / 1000.0
+            spoken = sum(1 for ch in voice_cps_text if 0x4E00 <= ord(ch) <= 0x9FFF)
+            if spoken <= 0 or natural_dur_s <= 0:
+                continue
+            voice_cps = spoken / natural_dur_s
+            mismatch_denom += 1
+            deviation = abs(voice_cps - target_cps_val) / target_cps_val
+            if deviation > 0.15:
+                mismatch_count += 1
+        if mismatch_denom > 0:
+            body["voice_speed_mismatch_rate"] = round(mismatch_count / mismatch_denom, 4)
+            body["voice_speed_mismatch_count"] = mismatch_count
+            body["voice_speed_mismatch_segments"] = mismatch_denom
+    except Exception:
+        pass  # best-effort metric
+
+    # First-pass duration error stats (only when at least one segment has it).
+    if first_pass_errors_abs:
+        sorted_err = sorted(first_pass_errors_abs)
+        n = len(sorted_err)
+        p50 = sorted_err[n // 2]
+        p90_idx = max(0, int(n * 0.9) - 1) if n > 1 else 0
+        p90 = sorted_err[min(p90_idx, n - 1)]
+        body["first_pass_error_pct_avg"] = round(sum(sorted_err) / n, 4)
+        body["first_pass_error_pct_p50"] = round(p50, 4)
+        body["first_pass_error_pct_p90"] = round(p90, 4)
+        body["first_pass_error_pct_n"] = n
+
+    # V3-5: include tts_billed_chars only if truthfully available from TTS layer
+    if tts_billed_chars is not None:
+        body["tts_billed_chars"] = tts_billed_chars
+
+    if extra_metering:
+        body.update(extra_metering)
+
+    if pre_tts_rewrite_events:
+        contradiction_count = sum(
+            1 for event in pre_tts_rewrite_events if event["contradiction"]
+        )
+        harmful_contradiction_count = sum(
+            1 for event in pre_tts_rewrite_events if event["harmful_contradiction"]
+        )
+        body["pre_tts_rewrite_count"] = len(pre_tts_rewrite_events)
+        body["pre_tts_contradiction_count"] = contradiction_count
+        body["pre_tts_contradiction_rate"] = round(
+            contradiction_count / len(pre_tts_rewrite_events),
+            4,
+        )
+        body["harmful_pre_tts_contradiction_count"] = harmful_contradiction_count
+        body["harmful_pre_tts_contradiction_rate"] = round(
+            harmful_contradiction_count / len(pre_tts_rewrite_events),
+            4,
+        )
+        body["pre_tts_rewrite_events"] = pre_tts_rewrite_events
+    retry_attempt_count = sum(
+        1 for event in pre_tts_rewrite_rejected_events
+        if event["retry_attempted"]
+    ) + sum(
+        1 for event in pre_tts_rewrite_events
+        if event["retry_attempted"]
+    )
+    retry_accepted_count = sum(
+        1 for event in pre_tts_rewrite_events
+        if event["retry_accepted"]
+    )
+    if pre_tts_rewrite_rejected_events:
+        body["pre_tts_rewrite_rejected_count"] = len(
+            pre_tts_rewrite_rejected_events
+        )
+        body["pre_tts_rewrite_rejected_reason_distribution"] = (
+            pre_tts_rewrite_rejected_reason_counts
+        )
+        body["pre_tts_rewrite_rejected_events"] = pre_tts_rewrite_rejected_events
+    if retry_attempt_count:
+        body["pre_tts_rewrite_retry_attempt_count"] = retry_attempt_count
+        body["pre_tts_rewrite_retry_accepted_count"] = retry_accepted_count
+
+    # Phase 2 Task 0 — glossary preservation check (best-effort)
+    if glossary:
+        try:
+            from services.gemini.translator import check_glossary_preservation
+            gloss = check_glossary_preservation(segments, glossary)
+            total_terms = int(gloss.get("total_terms", 0))
+            preserved = int(gloss.get("preserved_terms", 0))
+            body["glossary_total_terms"] = total_terms
+            body["glossary_preserved_terms"] = preserved
+            body["term_preservation_rate"] = (
+                round(preserved / total_terms, 4) if total_terms > 0 else 1.0
+            )
+            missing = gloss.get("missing_terms", []) or []
+            if missing:
+                body["missing_glossary_terms"] = missing
+        except Exception as gx:
+            print(f"[metering] glossary check failed (non-fatal): {gx}", flush=True)
+
+    return body
+
+
+def _report_job_metering(
+    job_id: str,
+    segments: list,
+    *,
+    tts_billed_chars: int | None = None,
+    glossary: dict[str, str] | None = None,
+    extra_metering: dict[str, object] | None = None,
+) -> None:
+    """Best-effort callback to Gateway /job-api/jobs/{job_id}/metering."""
     import urllib.request
+
     gateway_base = os.environ.get("AVT_GATEWAY_URL", "http://localhost:8880")
     url = f"{gateway_base}/job-api/jobs/{job_id}/metering"
 
     try:
-        total_cn_chars = 0
-        total_rewrite_count = 0
-        total_segments = 0
-        catalog_hit_count = 0
-        needs_review_count = 0
-        first_pass_errors_abs: list[float] = []
-        method_counts: dict[str, int] = {}
-        speed_counts: dict[str, int] = {"1.0": 0, "in_range": 0, "outside": 0}
-        pre_tts_rewrite_events: list[dict[str, object]] = []
-        pre_tts_rewrite_rejected_events: list[dict[str, object]] = []
-        pre_tts_rewrite_rejected_reason_counts: dict[str, int] = {}
-        micro_segment_count = 0
-        short_segment_count = 0
-        short_segment_needs_review_count = 0
-        short_segment_force_dsp_count = 0
-        capped_dsp_overflow_count = 0
-        capped_dsp_underflow_count = 0
-        dsp_silence_pad_segment_count = 0
-        dsp_silence_padded_total_ms = 0
-        dsp_silence_padded_max_ms = 0
-        short_segment_capped_dsp_overflow_count = 0
-        force_dsp_severity_counts: dict[str, int] = {}
-        force_dsp_review_suppressed_count = 0
-        short_merge_candidate_count = 0
-        short_merge_blocked_cross_speaker_count = 0
-        short_merge_applied_count = 0
-        short_merge_absorbed_count = 0
-        auto_keep_original_count = 0
-        auto_keep_original_reason_counts: dict[str, int] = {}
-        short_content_compact_attempted_count = 0
-        short_content_compact_accepted_count = 0
-        short_content_compact_rejected_count = 0
-        short_content_compact_rejected_reason_counts: dict[str, int] = {}
-        short_content_compact_class_counts: dict[str, int] = {}
-        speaker_structure_profiles: dict[str, dict[str, object]] = {}
-
-        for seg in segments:
-            total_segments += 1
-            speaker_id = str(getattr(seg, "speaker_id", "") or "")
-            if speaker_id:
-                role = str(getattr(seg, "speaker_role", "") or "")
-                existing_profile = speaker_structure_profiles.get(speaker_id)
-                if existing_profile is None or (
-                    not str(existing_profile.get("speaker_role", "") or "") and role
-                ):
-                    speaker_structure_profiles[speaker_id] = {
-                        "speaker_role": role,
-                        "speaker_role_label": str(getattr(seg, "speaker_role_label", "") or ""),
-                        "duration_ms": int(getattr(seg, "speaker_duration_ms", 0) or 0),
-                        "duration_share": round(
-                            float(getattr(seg, "speaker_duration_share", 0.0) or 0.0),
-                            4,
-                        ),
-                        "segment_count": int(getattr(seg, "speaker_segment_count", 0) or 0),
-                        "short_segment_count": int(
-                            getattr(seg, "speaker_short_segment_count", 0) or 0
-                        ),
-                        "short_segment_rate": round(
-                            float(getattr(seg, "speaker_short_segment_rate", 0.0) or 0.0),
-                            4,
-                        ),
-                        "reason": str(getattr(seg, "speaker_structure_reason", "") or ""),
-                        "review_hint": str(getattr(seg, "speaker_review_hint", "") or ""),
-                    }
-            text = getattr(seg, "cn_text", "") or ""
-            if not text:
-                text = getattr(seg, "merged_cn_text", "") or ""
-            total_cn_chars += len(text)
-            total_rewrite_count += getattr(seg, "rewrite_count", 0)
-
-            # Phase 2 Task 0 — per-segment metric collection (best-effort:
-            # missing attributes are treated as defaults so that legacy paths
-            # like SemanticBlock continue to work without raising).
-            if getattr(seg, "catalog_hit", False):
-                catalog_hit_count += 1
-            if getattr(seg, "needs_review", False):
-                needs_review_count += 1
-
-            method = getattr(seg, "alignment_method", "") or ""
-            if method:
-                method_counts[method] = method_counts.get(method, 0) + 1
-            if method == "capped_dsp_overflow":
-                capped_dsp_overflow_count += 1
-            if method == "capped_dsp_underflow":
-                capped_dsp_underflow_count += 1
-            pad_ms = int(getattr(seg, "dsp_silence_padded_ms", 0) or 0)
-            if pad_ms > 0:
-                dsp_silence_pad_segment_count += 1
-                dsp_silence_padded_total_ms += pad_ms
-                dsp_silence_padded_max_ms = max(dsp_silence_padded_max_ms, pad_ms)
-            if method in {"force_dsp", "capped_dsp_overflow", "capped_dsp_underflow"}:
-                severity = getattr(seg, "force_dsp_severity", "") or "unknown"
-                force_dsp_severity_counts[severity] = (
-                    force_dsp_severity_counts.get(severity, 0) + 1
-                )
-                if getattr(seg, "force_dsp_review_suppressed", False):
-                    force_dsp_review_suppressed_count += 1
-            if getattr(seg, "short_merge_candidate", False):
-                short_merge_candidate_count += 1
-            if getattr(seg, "short_merge_blocked_reason", "") == "cross_speaker_adjacent":
-                short_merge_blocked_cross_speaker_count += 1
-            if getattr(seg, "short_merge_applied", False):
-                short_merge_applied_count += 1
-                short_merge_absorbed_count += len(
-                    ProcessPipeline._parse_short_merge_absorbed_segment_ids(seg)
-                )
-            auto_keep_reason = str(
-                getattr(seg, "auto_keep_original_reason", "") or ""
-            )
-            if auto_keep_reason:
-                auto_keep_original_count += 1
-                auto_keep_original_reason_counts[auto_keep_reason] = (
-                    auto_keep_original_reason_counts.get(auto_keep_reason, 0) + 1
-                )
-            if getattr(seg, "short_content_compact_attempted", False):
-                short_content_compact_attempted_count += 1
-                compact_class = str(
-                    getattr(seg, "short_content_compact_class", "") or "unknown"
-                )
-                short_content_compact_class_counts[compact_class] = (
-                    short_content_compact_class_counts.get(compact_class, 0) + 1
-                )
-                if getattr(seg, "short_content_compact_accepted", False):
-                    short_content_compact_accepted_count += 1
-                else:
-                    short_content_compact_rejected_count += 1
-                    compact_reason = str(
-                        getattr(seg, "short_content_compact_rejected_reason", "")
-                        or "unknown"
-                    )
-                    short_content_compact_rejected_reason_counts[compact_reason] = (
-                        short_content_compact_rejected_reason_counts.get(compact_reason, 0)
-                        + 1
-                    )
-
-            target_duration_ms = int(getattr(seg, "target_duration_ms", 0) or 0)
-            if 0 < target_duration_ms < 1_000:
-                micro_segment_count += 1
-            if PRE_TTS_REWRITE_SHORT_MIN_TARGET_MS <= target_duration_ms < PRE_TTS_REWRITE_MIN_TARGET_MS:
-                short_segment_count += 1
-                if getattr(seg, "needs_review", False):
-                    short_segment_needs_review_count += 1
-                if method == "force_dsp":
-                    short_segment_force_dsp_count += 1
-                if method == "capped_dsp_overflow":
-                    short_segment_capped_dsp_overflow_count += 1
-
-            err = getattr(seg, "first_pass_error_pct", None)
-            if err is not None and err != 0.0:
-                first_pass_errors_abs.append(abs(float(err)))
-
-            speed = getattr(seg, "dsp_speed_param", 1.0) or 1.0
-            speed = float(speed)
-            if abs(speed - 1.0) < 1e-6:
-                speed_counts["1.0"] += 1
-            elif 0.92 <= speed <= 1.08:
-                speed_counts["in_range"] += 1
-            else:
-                speed_counts["outside"] += 1
-
-            pre_tts_direction = getattr(seg, "pre_tts_rewrite_direction", "") or ""
-            if pre_tts_direction:
-                pre_tts_rewrite_events.append({
-                    "segment_id": getattr(seg, "segment_id", None),
-                    "direction": pre_tts_direction,
-                    "task": getattr(seg, "pre_tts_rewrite_task", "") or "s5_rewrite",
-                    "estimate_ms": getattr(seg, "pre_tts_estimate_ms", 0) or 0,
-                    "target_ms": getattr(seg, "pre_tts_target_ms", 0) or 0,
-                    "pre_chars": getattr(seg, "pre_tts_pre_chars", 0) or 0,
-                    "post_chars": getattr(seg, "pre_tts_post_chars", 0) or 0,
-                    "post_tts_first_pass_ms": (
-                        getattr(seg, "pre_tts_post_tts_first_pass_ms", 0) or 0
-                    ),
-                    "contradiction": bool(getattr(seg, "pre_tts_contradiction", False)),
-                    "harmful_contradiction": bool(
-                        getattr(seg, "pre_tts_harmful_contradiction", False)
-                    ),
-                    "retry_attempted": bool(
-                        getattr(seg, "pre_tts_rewrite_retry_attempted", False)
-                    ),
-                    "retry_accepted": bool(
-                        getattr(seg, "pre_tts_rewrite_retry_accepted", False)
-                    ),
-                    "initial_rejected_reason": (
-                        getattr(seg, "pre_tts_rewrite_initial_rejected_reason", "") or ""
-                    ),
-                })
-            if getattr(seg, "pre_tts_rewrite_rejected", False):
-                reason = str(
-                    getattr(seg, "pre_tts_rewrite_rejected_reason", "") or "unknown"
-                )
-                pre_tts_rewrite_rejected_reason_counts[reason] = (
-                    pre_tts_rewrite_rejected_reason_counts.get(reason, 0) + 1
-                )
-                pre_tts_rewrite_rejected_events.append({
-                    "segment_id": getattr(seg, "segment_id", None),
-                    "direction": (
-                        getattr(seg, "pre_tts_rewrite_rejected_direction", "") or ""
-                    ),
-                    "reason": reason,
-                    "estimate_ms": (
-                        getattr(seg, "pre_tts_rewrite_rejected_estimate_ms", 0) or 0
-                    ),
-                    "target_ms": (
-                        getattr(seg, "pre_tts_rewrite_rejected_target_ms", 0) or 0
-                    ),
-                    "pre_chars": (
-                        getattr(seg, "pre_tts_rewrite_rejected_pre_chars", 0) or 0
-                    ),
-                    "post_chars": (
-                        getattr(seg, "pre_tts_rewrite_rejected_post_chars", 0) or 0
-                    ),
-                    "lower_chars": (
-                        getattr(seg, "pre_tts_rewrite_rejected_lower_chars", 0) or 0
-                    ),
-                    "upper_chars": (
-                        getattr(seg, "pre_tts_rewrite_rejected_upper_chars", 0) or 0
-                    ),
-                    "retry_attempted": bool(
-                        getattr(seg, "pre_tts_rewrite_retry_attempted", False)
-                    ),
-                })
-
-        body: dict = {
-            "final_cn_chars": total_cn_chars,
-            "rewrite_triggered": total_rewrite_count > 0,
-            "rewrite_count": total_rewrite_count,
-            # --- Phase 2 Task 0 fields ---
-            "total_segments": total_segments,
-            "catalog_hit_count": catalog_hit_count,
-            "catalog_hit_rate": (
-                round(catalog_hit_count / total_segments, 4)
-                if total_segments > 0 else 0.0
-            ),
-            # all-or-nothing: skip_probe is true iff every segment hit the catalog
-            "skip_probe": (total_segments > 0 and catalog_hit_count == total_segments),
-            "needs_review_count": needs_review_count,
-            "needs_review_rate": (
-                round(needs_review_count / total_segments, 4)
-                if total_segments > 0 else 0.0
-            ),
-            "micro_segment_count": micro_segment_count,
-            "short_segment_count": short_segment_count,
-            "short_segment_needs_review_count": short_segment_needs_review_count,
-            "short_segment_force_dsp_count": short_segment_force_dsp_count,
-            "capped_dsp_overflow_count": capped_dsp_overflow_count,
-            "capped_dsp_underflow_count": capped_dsp_underflow_count,
-            "dsp_silence_pad_segment_count": dsp_silence_pad_segment_count,
-            "dsp_silence_padded_total_ms": dsp_silence_padded_total_ms,
-            "dsp_silence_padded_max_ms": dsp_silence_padded_max_ms,
-            "short_segment_capped_dsp_overflow_count": short_segment_capped_dsp_overflow_count,
-            "force_dsp_severity_distribution": force_dsp_severity_counts,
-            "force_dsp_review_suppressed_count": force_dsp_review_suppressed_count,
-            "short_merge_candidate_count": short_merge_candidate_count,
-            "short_merge_blocked_cross_speaker_count": short_merge_blocked_cross_speaker_count,
-            "short_merge_applied_count": short_merge_applied_count,
-            "short_merge_absorbed_count": short_merge_absorbed_count,
-            "auto_keep_original_count": auto_keep_original_count,
-            "auto_keep_original_reason_distribution": auto_keep_original_reason_counts,
-            "short_content_compact_attempted_count": short_content_compact_attempted_count,
-            "short_content_compact_accepted_count": short_content_compact_accepted_count,
-            "short_content_compact_rejected_count": short_content_compact_rejected_count,
-            "short_content_compact_rejected_reason_distribution": (
-                short_content_compact_rejected_reason_counts
-            ),
-            "short_content_compact_class_distribution": short_content_compact_class_counts,
-            "alignment_method_distribution": method_counts,
-            "speed_param_distribution": speed_counts,
-        }
-        if speaker_structure_profiles:
-            role_counts: dict[str, int] = {}
-            incidental_share_total = 0.0
-            for profile in speaker_structure_profiles.values():
-                role = str(profile.get("speaker_role", "") or "unknown")
-                role_counts[role] = role_counts.get(role, 0) + 1
-                if role == "incidental":
-                    incidental_share_total += float(profile.get("duration_share", 0.0) or 0.0)
-            body["speaker_count"] = len(speaker_structure_profiles)
-            body["speaker_role_distribution"] = role_counts
-            body["speaker_primary_count"] = role_counts.get("primary", 0)
-            body["speaker_incidental_count"] = role_counts.get("incidental", 0)
-            body["speaker_fragmented_count"] = role_counts.get("fragmented", 0)
-            body["speaker_non_speech_count"] = role_counts.get("non_speech", 0)
-            body["speaker_incidental_duration_share"] = round(incidental_share_total, 4)
-            body["speaker_structure_profiles"] = speaker_structure_profiles
-
-        # voice_speed_mismatch_rate: fraction of segments whose voice cps
-        # deviates >15% from target (= source_english_wps × 1.8). Segments
-        # without target or voice cps are excluded from the denominator.
-        try:
-            mismatch_count = 0
-            mismatch_denom = 0
-            for seg in segments:
-                target_cps_val = float(getattr(seg, "target_chars_per_second", 0) or 0)
-                if target_cps_val <= 0:
-                    continue
-                # Use the voice's catalog/user_voices cps (via the probe-calibrated
-                # per-speaker value that was piped into the segment).
-                voice_cps_text = seg.cn_text if hasattr(seg, "cn_text") else ""
-                actual_dur = float(getattr(seg, "actual_duration_ms", 0) or 0)
-                speed_param = float(getattr(seg, "dsp_speed_param", 1.0) or 1.0)
-                if actual_dur <= 0 or not voice_cps_text:
-                    continue
-                # Compute voice's natural cps (normalize out speed adjustment)
-                natural_dur_s = (actual_dur * max(0.01, speed_param)) / 1000.0
-                spoken = sum(1 for ch in voice_cps_text if 0x4E00 <= ord(ch) <= 0x9FFF)
-                if spoken <= 0 or natural_dur_s <= 0:
-                    continue
-                voice_cps = spoken / natural_dur_s
-                mismatch_denom += 1
-                deviation = abs(voice_cps - target_cps_val) / target_cps_val
-                if deviation > 0.15:
-                    mismatch_count += 1
-            if mismatch_denom > 0:
-                body["voice_speed_mismatch_rate"] = round(mismatch_count / mismatch_denom, 4)
-                body["voice_speed_mismatch_count"] = mismatch_count
-                body["voice_speed_mismatch_segments"] = mismatch_denom
-        except Exception:
-            pass  # best-effort metric
-
-        # First-pass duration error stats (only when at least one segment has it).
-        if first_pass_errors_abs:
-            sorted_err = sorted(first_pass_errors_abs)
-            n = len(sorted_err)
-            p50 = sorted_err[n // 2]
-            p90_idx = max(0, int(n * 0.9) - 1) if n > 1 else 0
-            p90 = sorted_err[min(p90_idx, n - 1)]
-            body["first_pass_error_pct_avg"] = round(sum(sorted_err) / n, 4)
-            body["first_pass_error_pct_p50"] = round(p50, 4)
-            body["first_pass_error_pct_p90"] = round(p90, 4)
-            body["first_pass_error_pct_n"] = n
-
-        # V3-5: include tts_billed_chars only if truthfully available from TTS layer
-        if tts_billed_chars is not None:
-            body["tts_billed_chars"] = tts_billed_chars
-
-        if extra_metering:
-            body.update(extra_metering)
-
-        if pre_tts_rewrite_events:
-            contradiction_count = sum(
-                1 for event in pre_tts_rewrite_events if event["contradiction"]
-            )
-            harmful_contradiction_count = sum(
-                1 for event in pre_tts_rewrite_events if event["harmful_contradiction"]
-            )
-            body["pre_tts_rewrite_count"] = len(pre_tts_rewrite_events)
-            body["pre_tts_contradiction_count"] = contradiction_count
-            body["pre_tts_contradiction_rate"] = round(
-                contradiction_count / len(pre_tts_rewrite_events),
-                4,
-            )
-            body["harmful_pre_tts_contradiction_count"] = harmful_contradiction_count
-            body["harmful_pre_tts_contradiction_rate"] = round(
-                harmful_contradiction_count / len(pre_tts_rewrite_events),
-                4,
-            )
-            body["pre_tts_rewrite_events"] = pre_tts_rewrite_events
-        retry_attempt_count = sum(
-            1 for event in pre_tts_rewrite_rejected_events
-            if event["retry_attempted"]
-        ) + sum(
-            1 for event in pre_tts_rewrite_events
-            if event["retry_attempted"]
+        body = _build_job_metering_payload(
+            segments,
+            tts_billed_chars=tts_billed_chars,
+            glossary=glossary,
+            extra_metering=extra_metering,
         )
-        retry_accepted_count = sum(
-            1 for event in pre_tts_rewrite_events
-            if event["retry_accepted"]
-        )
-        if pre_tts_rewrite_rejected_events:
-            body["pre_tts_rewrite_rejected_count"] = len(
-                pre_tts_rewrite_rejected_events
-            )
-            body["pre_tts_rewrite_rejected_reason_distribution"] = (
-                pre_tts_rewrite_rejected_reason_counts
-            )
-            body["pre_tts_rewrite_rejected_events"] = pre_tts_rewrite_rejected_events
-        if retry_attempt_count:
-            body["pre_tts_rewrite_retry_attempt_count"] = retry_attempt_count
-            body["pre_tts_rewrite_retry_accepted_count"] = retry_accepted_count
-
-        # Phase 2 Task 0 — glossary preservation check (best-effort)
-        if glossary:
-            try:
-                from services.gemini.translator import check_glossary_preservation
-                gloss = check_glossary_preservation(segments, glossary)
-                total_terms = int(gloss.get("total_terms", 0))
-                preserved = int(gloss.get("preserved_terms", 0))
-                body["glossary_total_terms"] = total_terms
-                body["glossary_preserved_terms"] = preserved
-                body["term_preservation_rate"] = (
-                    round(preserved / total_terms, 4) if total_terms > 0 else 1.0
-                )
-                missing = gloss.get("missing_terms", []) or []
-                if missing:
-                    body["missing_glossary_terms"] = missing
-            except Exception as gx:
-                print(f"[metering] glossary check failed (non-fatal): {gx}", flush=True)
-
         req = urllib.request.Request(
             url,
             data=json.dumps(body).encode("utf-8"),

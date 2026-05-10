@@ -21,7 +21,10 @@ if _gateway_dir not in sys.path:
 
 import pytest
 
-from startup_checks import validate_production_safety
+from startup_checks import (
+    is_startup_recovery_schema_missing_error,
+    validate_production_safety,
+)
 
 
 def test_production_with_auth_disabled_raises():
@@ -37,3 +40,18 @@ def test_production_with_auth_enabled_ok():
 def test_dev_with_auth_disabled_ok():
     # Non-production envs are allowed to disable auth.
     validate_production_safety(env="dev", auth_required=False)
+
+
+def test_startup_recovery_schema_missing_errors_are_expected():
+    assert is_startup_recovery_schema_missing_error(
+        RuntimeError("sqlite3.OperationalError: no such table: label_tasks")
+    )
+    assert is_startup_recovery_schema_missing_error(
+        RuntimeError('psycopg.errors.UndefinedTable: relation "background_tasks" does not exist')
+    )
+
+
+def test_startup_recovery_unrelated_errors_are_not_expected():
+    assert not is_startup_recovery_schema_missing_error(
+        RuntimeError("database connection timeout")
+    )
