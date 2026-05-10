@@ -6,12 +6,10 @@
 
 这张子图只看控制平面与运维诊断面，重点是：
 
-- alignment / whisper / paid fallback admin settings
-- 客服管理与系统公告后台
-- traffic analytics
-- credits / cost management / cleanup
-- Jianying runner orphan diagnosis
-- `user-edit audit` 写失败时如何告警
+- alignment / whisper / paid fallback settings
+- voice calibration control plane
+- support admin、traffic analytics、cost management
+- cleanup、R2 sweeper、runner 诊断
 
 ## 2. 主图
 
@@ -19,145 +17,121 @@
 graph TD
     AdminUI["Admin / Ops UI"] --> Gateway["Gateway admin surfaces"]
     Gateway --> Settings["/api/admin/settings"]
+    Gateway --> VoiceOps["voice calibration surfaces"]
     Gateway --> SupportAdmin["/api/admin/support/*"]
-    Gateway --> Announcements["/api/admin/support/announcements"]
     Gateway --> Traffic["/api/admin/traffic"]
-    Gateway --> Credits["credits observability / admin costs"]
-    Gateway --> Cleanup["pack cleanup / project purge"]
+    Gateway --> Costs["credits observability / cost management"]
+    Gateway --> Cleanup["cleanup / purge / sweeper"]
 
-    Settings --> AlignPolicy["force_dsp_alignment + paid_fallback + whisper"]
+    Settings --> AlignPolicy["force_dsp_alignment + paid_fallback"]
+    Settings --> WhisperPolicy["whisper policy fields"]
     OpsEnv["INSTALL_WHISPER + .[whisper] + HF_HOME"] --> WhisperCap["runtime capability"]
-    WhisperCap --> AlignPolicy
+    WhisperCap --> WhisperPolicy
+
+    VoiceOps --> Manual["/user-voices/{voice_id}/calibrate-speed"]
+    CloneFlow["voice clone success"] --> Hook["voice_calibration_hook.py"]
+    ReviewApprove["voice-selection approve"] --> Preflight["voice_calibration_review_preflight.py"]
+    Manual --> Inflight["run_calibration_task + inflight dedupe"]
+    Hook --> Inflight
+    Preflight --> Inflight
+    Inflight --> SpeedStore["update_user_voice_speed_calibration"]
+
+    MainLife["gateway/main.py lifespan"] --> Sweeper["r2_artifact_sweeper"]
+    Sweeper --> Mirror["job_terminal_mirror"]
+    Mirror --> Settle["credit/quota settle"]
+    Sweeper --> Publisher["r2_publisher"]
 
     SupportAdmin --> Presence["presence / heartbeat / online threshold"]
-    SupportAdmin --> Handoff["handoff tickets / WeChat QR / ops email / sensitive keywords"]
-    Announcements --> Audience["14 audiences + live new registrations"]
-    Audience --> UserNotif["user_notifications"]
+    SupportAdmin --> Handoff["handoff / WeChat QR / ops email"]
+    Traffic --> Categories["human / search / AI crawler / scanner"]
+    Costs --> CostRows["LLM / TTS / voice_clone / margin rows"]
 
-    Traffic --> CaddyLogs["public-entry.access logs"]
-    CaddyLogs --> Categories["human / search / AI crawler / scanner"]
-
-    Credits --> CostRows["LLM / TTS / voice_clone / margin rows"]
-
-    JobApi["Job API"] --> JobEvents["JobEvent stream"]
-    JobApi --> JRunner["JianyingDraftRunner"]
-    JRunner --> RunnerState["attempt_id / fingerprint / substep"]
-    JRunner --> Rescue["reap_stale / orphan rescue"]
-
-    ReviewEdit["review + post-edit actions"] --> UserEditAudit["user_edit_events.jsonl"]
-    UserEditAudit --> WarnBridge["safe_observe WARN bridge"]
-    WarnBridge --> JobEvents
-
-    RunnerState --> JobEvents
-    Rescue --> JobEvents
+    Publisher --> Cleanup
+    Settle --> Costs
     Categories --> AdminUI
     CostRows --> AdminUI
-    Cleanup --> AdminUI
-    JobEvents --> AdminUI
 ```
 
-## 3. 当前最重要的控制平面变化
+## 3. 当前最重要的控制面变化
 
-### 3.1 alignment 控制面已经从 whisper 开到 `force_dsp` 与 paid fallback
+### 3.1 calibration 已经形成三入口 control plane
 
-- `gateway/admin_settings.py` 现在不仅有：
-  - `whisper_alignment_enabled`
-  - `whisper_alignment_trigger`
-  - `whisper_alignment_skip_cache`
-  - `whisper_alignment_model`
-- 还新增：
-  - `force_dsp_alignment`
-- `src/services/alignment/aligner.py` 还会读取 `align_paid_fallback_max_concurrency`
+- T0：`gateway/user_voice_api.py` 提供 `/user-voices/{voice_id}/calibrate-speed`
+- T1：`gateway/voice_calibration_hook.py` 在 clone 成功后自动补齐 canonical models
+- T2：`gateway/voice_calibration_review_preflight.py` 在 review submit 前补齐缺口
 
-结论：admin 控制面现在能直接影响“何时用 whisper、何时强制 DSP、付费 fallback 最多并发多少”。
+结论：voice speed calibration 已经不再是单点脚本，而是覆盖手动、clone、review 的正式控制平面。
 
-### 3.2 whisper 仍然是“两层控制”，不是单纯 admin 开关
+### 3.2 手动校准与自动校准都走共享 inflight 语义
+
+- 三条入口都汇入共享的 `run_calibration_task`
+- `gateway/voice_calibration_inflight.py` 负责去重与并发协作
+- `gateway/user_voice_service.py::update_user_voice_speed_calibration(...)` 明确保证并行写入 `chars_per_second_by_model` 时不丢更新
+
+结论：多入口并发校准已经有统一的幂等与合并语义，而不是彼此覆盖。
+
+### 3.3 clone-after calibration 现在是带环境开关的正式 sidecar
+
+- `gateway/voice_calibration_hook.py` 只在 clone 成功后触发
+- 当前 phase 1 针对 MiniMax canonical models：
+  - `speech-2.8-turbo`
+  - `speech-2.8-hd`
+- `AVT_AUTO_CALIBRATE_AFTER_CLONE` 默认开启
+- 失败静默，不阻断 clone 主流程
+
+结论：clone 后自动校准是增益 sidecar，不是强耦合主路径。
+
+### 3.4 review preflight 的职责是“提交前最后补齐”
+
+- preflight 只看 job-level final model，不看 per-speaker `model_hint`
+- 优先查 user voice，回退 voice catalog
+- 总预算 50 秒，超时任务不取消
+- 失败 never raise，review approve 始终继续代理
+
+结论：T2 预热的目标是降低首轮运行时不确定性，而不是把审核提交变成阻塞式长任务。
+
+### 3.5 ops 面现在还要管 R2 sweeper 与 terminal mirror
+
+- `gateway/main.py` 启动和关闭 `r2_artifact_sweeper`
+- `gateway/r2_artifact_sweeper.py` 负责 proactive publish、delta push、retry-after backoff
+- `gateway/job_terminal_mirror.py` 负责 terminal state、`edit_generation`、ledger/quota settle 的镜像补偿
+
+结论：Admin/Ops 面已经不只管设置和看板，也承担下载交付平面的后台一致性。
+
+### 3.6 alignment / whisper 控制面仍是两层
 
 - 运行时 policy 由 `gateway/admin_settings.py` 暴露
-- 部署 capability 则由：
+- 部署 capability 仍由：
   - `pyproject.toml` 的 `.[whisper]`
-  - `Dockerfile` 的 `ARG INSTALL_WHISPER`
-  - `docker-compose.yml` 的 `HF_HOME` 与持久模型缓存挂载
+  - `Dockerfile` 的 `INSTALL_WHISPER`
+  - `docker-compose.yml` 的 `HF_HOME`
+ 共同决定
 
-结论：管理员把开关打到 `on` 并不自动意味着节点具备运行 whisper 的能力，ops 还必须确保镜像和缓存层准备好。
-
-### 3.3 客服后台已经成为正式 admin plane
-
-- `gateway/main.py` 现在挂载了 `admin_support_router`
-- `frontend-next/src/app/(app)/admin/support/page.tsx` 现在提供：
-  - support 总开关
-  - AI 模型 / token 价格 / 月预算
-  - 敏感词
-  - ops email
-  - presence / online threshold
-  - WeChat QR
-  - handoff 工单面板
-
-结论：admin 已经可以直接运维客服系统，而不只是看支持日志。
-
-### 3.4 系统公告后台已经能做 audience fan-out 与 live onboarding
-
-- `system_announcements_service.py` 声明了 14 类 audience
-- 其中 `for_new_registrations` 是 live audience
-- 后台支持 send / recall / stats，而 fan-out 结果以 `UserNotification` 进入用户通知中心
-
-结论：运营触达已经进入正式控制面，不再是手工发消息或外部运营工具。
-
-### 3.5 traffic analytics 与 cost management 仍然是独立控制面
-
-- `gateway/traffic_analytics.py` 继续把访问流量分成 human / search / AI crawler / scanner
-- `gateway/cost_management.py` 继续暴露：
-  - `voice_clone_cost_rmb`
-  - `server_overhead_cost_rmb`
-  - `margin_cost_rmb`
-  - `gross_margin_pct`
-
-结论：增长诊断与成本控制仍然是 Gateway admin plane 的两条独立轴。
-
-### 3.6 Jianying runner 与 cleanup 告警线继续收敛
-
-- `jianying_draft_runner.py` 持续暴露 `attempt_id / fingerprint / substep`
-- stale rescue 结果仍会发到 `JobEvent`
-- `gateway/main.py` 仍负责：
-  - stale background tasks recovery
-  - 过期 `materials_pack` 清理
-  - 过期 project records / `purged` 清理
-
-结论：运维面已经能同时看任务 orphan、交付清理、项目保留期与 runner 子步骤。
+结论：管理员把 whisper 开关拨到 `on`，不代表部署层一定具备可运行能力。
 
 ## 4. 关键证据
 
+- `gateway/user_voice_api.py`
+  - 手动校准入口
+- `gateway/voice_calibration_hook.py`
+  - clone-after auto-calibration
+- `gateway/voice_calibration_review_preflight.py`
+  - review-submit preflight
+- `gateway/voice_calibration_inflight.py`
+  - 去重 / 并发协调
+- `gateway/user_voice_service.py`
+  - calibration merge write
+- `gateway/r2_artifact_sweeper.py`
+  - sweeper 控制面
+- `gateway/job_terminal_mirror.py`
+  - terminal mirror / settle
 - `gateway/admin_settings.py`
-  - `force_dsp_alignment`
-  - whisper policy fields
-- `src/services/alignment/aligner.py`
-  - paid fallback max concurrency
-- `pyproject.toml`、`Dockerfile`、`docker-compose.yml`
-  - `.[whisper]`
-  - `INSTALL_WHISPER`
-  - `HF_HOME`
-- `gateway/admin_support_api.py`
-  - admin support surfaces
-- `frontend-next/src/app/(app)/admin/support/page.tsx`
-  - support admin dashboard
-- `gateway/system_announcements_service.py`
-  - audience / send / recall / live dispatch
-- `gateway/traffic_analytics.py`
-  - Caddy log parser + traffic category model
-- `gateway/cost_management.py`
-  - voice clone / margin read model
-- `src/services/jobs/jianying_draft_runner.py`
-  - substep / attempt_id / fingerprint / rescue
-- `gateway/main.py`
-  - router composition
-  - cleanup loops
-- `src/services/jobs/user_edit_audit.py`
-  - WARN bridge
+  - alignment / whisper settings
 
-## 5. 什么情况下优先读这张图
+## 5. 什么时候优先看这张图
 
-- 想改 alignment / whisper admin settings 或部署开关
-- 想改客服后台、presence、handoff、系统公告后台
-- 想排查 crawler / scanner / human traffic 分布
-- 想看 voice clone 成本与毛利读侧怎么进入 admin
-- 想判断 runner orphan、audit 失败、cleanup 这几条告警线的边界
+- 想改 voice calibration 行为或入口
+- 想排查 clone 后为什么没自动校准
+- 想排查 review submit 前为什么会先跑 calibration
+- 想改 alignment / whisper admin settings
+- 想排查 R2 proactive publish、terminal mirror、cleanup 这些后台运维链路

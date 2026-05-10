@@ -1,44 +1,42 @@
 # GitNexus 项目图谱
 
-新会话建议先读本文件，再按任务进入对应子图。
-生成时间：2026-05-09
-生成方式：基于当前仓库 `.gitnexus/` 最新索引与源码核对整理
+新会话建议先读本文件，再按任务进入对应子图。生成时间：`2026-05-10`
+生成方式：基于当前仓库 `.gitnexus/` 最新索引与源码交叉整理。
 
 ## 1. 图谱概览
 
 | 指标 | 数值 |
 | --- | ---: |
-| 文件数 | 1185 |
-| 节点数 | 21,209 |
-| 关系数 | 51,229 |
-| 聚类数 | 942 |
+| 文件数 | 1215 |
+| 节点数 | 21,691 |
+| 关系数 | 49,871 |
+| 聚类数 | 807 |
 | 流程数 | 300 |
-| 索引提交 | `78eea96` |
+| 索引提交 | `2128003` |
 | 索引状态 | `up-to-date` |
 
-这轮最需要反映的结构变化有六条：
+这轮最重要的结构变化有五条：
 
-- `support / notifications / announcements` 已从零长成完整产品平面：帮助中心、客服浮窗、通知中心、管理员客服后台、系统公告 live audience、新注册用户自动分发都已落地
-- workflow 对齐内核已经不只是“单线程 DSP-first”：`ThreadPoolExecutor + paid_fallback semaphore`、`force_dsp_alignment`、`capped_dsp_underflow -> high severity` 都已经进入正式语义
-- 手机号 auth 前门已经重写成统一流：直接 captcha 校验、`verify-code -> registration_token -> complete-registration`、trusted-proxy IP 边界、wrong-code attempt 限制
-- `AppShell` 已经把 `NotificationBell`、popup modal、帮助中心入口、`SupportWidget` 和管理员在线状态切进主应用壳层
-- Jianying draft 与 post-edit 状态机继续加固：runner 的 substep / terminal write 走 `update_job` claim guard，overwrite 会清空 stale `attempt_id / substep / fingerprint`
-- 原有的 offline evaluation、voice clone 成本、whisper deliverable sidecar 仍然成立，但现在不再是唯一新增轴；support / auth / alignment control 已经并列成为核心结构面
+- `voice CPS auto-calibration` 已经从零散逻辑长成完整 sidecar：手动校准、clone 后自动校准、review-submit 前预热校准三条入口都已落地。
+- editing 面新增了独立的 speakers registry 与 voice profile inference，`speaker -> profile -> UI badge` 成为新的稳定子链路。
+- 存储交付面引入了 `r2_artifact_sweeper + job_terminal_mirror + r2_publisher`，下载不再只依赖请求时即时兜底。
+- review 主路径依然是 `WorkspacePage -> panels -> resume`，但 voice selection approve 现在会先经过 T2 calibration preflight。
+- 原有的 commercialization、support/notifications、benchmark/metering 轴线仍然成立，并继续和 Gateway truth、Job API、Workflow 核心并列。
 
 ## 2. 关键基座
 
 | 基座 | 当前主轴 | 代表文件 |
 | --- | --- | --- |
-| Workflow | `SemanticBlock -> TTS -> DSP-first + parallel alignment -> cue_pipeline -> editor outputs` | `src/pipeline/process.py`、`src/services/alignment/aligner.py` |
-| Subtitles | `SRT window` timing、deliverable-time whisper sidecar、sync guard | `src/modules/subtitles/cue_pipeline.py`、`src/services/subtitles/ensure_whisper_alignment.py` |
-| Jianying | on-demand draft runner、rename-aware fingerprint、claim guard、orphan rescue | `src/services/jobs/jianying_draft_runner.py`、`src/modules/output/jianying/jianying_draft_writer.py` |
-| Editing | `overwrite / copy_as_new`、audio-sync hard gate、preview-source cache、deliverable invalidation | `src/services/jobs/editing_commit.py`、`src/services/jobs/editing_segments.py` |
-| Delivery | `materials_pack`、`generate_video`、download keys、R2 / local fallback | `gateway/background_task_executors.py`、`src/services/jobs/api.py`、`src/services/web_ui/output_entries.py` |
-| Auth & Lifecycle | phone verify / registration_token / trial grant / live onboarding announcements | `gateway/auth_phone.py`、`gateway/risk_control.py`、`gateway/system_announcements_service.py` |
-| Support & Notifications | support API、AI/template/handoff、notification center、popup feed、announcements | `gateway/support_api.py`、`gateway/support_service.py`、`gateway/notifications_api.py` |
-| Gateway | ownership、plan truth、admin settings、support admin、traffic analytics、cost management | `gateway/job_intercept.py`、`gateway/main.py`、`gateway/admin_settings.py`、`gateway/admin_support_api.py` |
-| Metering & Audit | `UsageMeter`、`JobEvent`、`user_edit_events.jsonl` 三条 sidecar | `src/services/usage_meter.py`、`src/services/jobs/user_edit_audit.py` |
-| Offline Evaluation | `smart_shadow_eval`、`smart_shadow_sim`、aggregate reports、P2 readiness | `scripts/smart_shadow_eval_collector.py`、`scripts/smart_shadow_sim_aggregator.py` |
+| Workflow | `SemanticBlock -> TTS -> DSP-first alignment -> cue_pipeline -> editor outputs` | `src/pipeline/process.py`、`src/services/alignment/aligner.py` |
+| Review | `waiting_for_review -> WorkspacePage panels -> resume` | `src/services/review_state.py`、`src/services/jobs/review_actions.py` |
+| Editing | `editing speakers -> profile inference -> regenerate -> commit` | `src/services/jobs/editing_speakers.py`、`src/services/jobs/editing_voice_profile.py`、`src/services/jobs/editing_commit.py` |
+| Jianying | on-demand draft runner、claim guard、orphan rescue | `src/services/jobs/jianying_draft_runner.py`、`src/modules/output/jianying/jianying_draft_writer.py` |
+| Delivery | `materials_pack / generate_video / editor.jianying_draft_zip / R2 registry` | `gateway/storage/backend_router.py`、`gateway/r2_artifact_sweeper.py`、`src/services/r2_publisher_lib/r2_publisher.py` |
+| Calibration | manual / clone-after / review-preflight 三入口 | `gateway/user_voice_api.py`、`gateway/voice_calibration_hook.py`、`gateway/voice_calibration_review_preflight.py` |
+| Gateway | ownership、plan truth、ops、support、cleanup | `gateway/job_intercept.py`、`gateway/main.py`、`gateway/admin_settings.py` |
+| Support & Notifications | help center、support conversations、notifications、announcements | `gateway/support_service.py`、`gateway/notifications_api.py`、`gateway/system_announcements_service.py` |
+| Metering & Audit | `UsageMeter`、`JobEvent`、`user_edit_events.jsonl` | `src/services/usage_meter.py`、`src/services/jobs/user_edit_audit.py` |
+| Offline Evaluation | `smart_shadow_eval / sim`、quality/cost reports | `scripts/smart_shadow_eval_collector.py`、`scripts/smart_shadow_sim_aggregator.py` |
 
 ## 3. 子图入口
 
@@ -58,13 +56,12 @@
 ```mermaid
 graph TD
     Marketing["Marketing / Pricing / FAQ / SEO"] --> PlansSSR["SSR plans + trial facts"]
-    Marketing --> AuthFront["Auth / phone registration"]
-    Marketing --> Trust["FAQ JSON-LD / robots / sitemap"]
+    Marketing --> AuthFront["Phone auth / registration"]
 
     Workspace["Workspace / Projects / Result UI"] --> FrontApi["Frontend API / hooks"]
     ReviewUI["Review panels"] --> FrontApi
     EditUI["Post-edit UI"] --> FrontApi
-    AppShell["AppShell / Help / Bell / SupportWidget"] --> FrontApi
+    AppShell["Bell / popup / support / admin entry"] --> FrontApi
     AdminUI["Admin / Ops UI"] --> FrontApi
 
     PlansSSR --> Gateway["Gateway truth + control"]
@@ -72,128 +69,96 @@ graph TD
     FrontApi --> Gateway
     FrontApi --> JobApi["Job API / artifacts / tasks"]
 
-    Gateway --> Billing["plan / trial / pricing / credits / payment"]
-    Gateway --> Ops["settings / traffic / costs / support / cleanup"]
+    Gateway --> Billing["plan / trial / credits / payment"]
     Gateway --> SupportPlane["support / notifications / announcements"]
+    Gateway --> Ops["settings / traffic / costs / cleanup"]
+    Gateway --> CalibrationPlane["voice calibration control plane"]
     Gateway --> Proxy["ownership + subresource proxy"]
 
-    AuthFront --> PhoneAuth["auth_phone + risk_control"]
-    PhoneAuth --> NewUserAnn["dispatch_announcements_for_new_user"]
+    JobApi --> Workflow["process.py / ProjectWorkflow"]
+    Workflow --> ReviewGate["waiting_for_review"]
+    ReviewGate --> ReviewUI
+    Workflow --> EditOutputs["editor package / publish outputs"]
 
-    JobApi --> Workflow["ProjectWorkflow / process.py"]
-    Workflow --> Compliance["Content compliance"]
-    Compliance --> Prep["Transcript / translation prep"]
-    Prep --> TTSAlign["SemanticBlock / TTS / DSP-first alignment"]
-    TTSAlign --> AlignCtrl["parallel align + paid_fallback semaphore"]
-    AlignCtrl --> CueV2["cue_pipeline / subtitle cue v2"]
-    CueV2 --> Editor["Editor package / manifest"]
+    ReviewUI --> ReviewApprove["review actions / voice selection approve"]
+    ReviewApprove --> CalibrationPlane
+    ReviewApprove --> Workflow
 
-    CueV2 --> WhisperEnsure["ensure_whisper_aligned_subtitles"]
-    WhisperEnsure --> JDraftTask["generate-jianying-draft"]
+    EditUI --> EditingPlane["editing speakers / profile / regenerate / commit"]
+    EditingPlane --> Workflow
+    EditingPlane --> DeliveryReset["invalidate stale deliverables"]
+
+    EditOutputs --> WhisperEnsure["ensure_whisper_aligned_subtitles"]
     WhisperEnsure --> PackTask["materials_pack"]
+    WhisperEnsure --> JDraftTask["generate-jianying-draft"]
+    EditOutputs --> VideoTask["generate_video"]
 
-    Editor --> Publish["publish.dubbed_video"]
-    Editor --> Delivery["downloads / R2 / local fallback"]
+    PackTask --> Delivery["downloads / R2 / local fallback"]
+    JDraftTask --> Delivery
+    VideoTask --> Delivery
 
-    AppShell --> NotificationsUI["Bell / notifications page / popup modal"]
-    AppShell --> HelpUI["help center / support launcher"]
-    NotificationsUI --> SupportPlane
-    HelpUI --> SupportPlane
+    MainLife["gateway/main.py lifespan"] --> Sweeper["r2_artifact_sweeper"]
+    Sweeper --> Mirror["job_terminal_mirror"]
+    Mirror --> Registry["r2_artifacts + terminal PG mirror"]
+    Sweeper --> Publisher["r2_publisher"]
+    Publisher --> Registry
+    Registry --> Delivery
 
-    SupportPlane --> Conversations["support conversations / AI / handoff"]
-    SupportPlane --> UserNotif["user_notifications / popup feed"]
-    NewUserAnn --> UserNotif
-    UserNotif --> NotificationsUI
-
-    Workspace --> ResultCard["ResultMediaCard"]
-    ResultCard --> PackTask
-    ResultCard --> VideoTask["generate_video"]
-    ResultCard --> JDraftTask
-
-    JDraftTask --> Proxy
-    PackTask --> Gateway
-    VideoTask --> Gateway
-    Proxy --> JobApi
-
-    EditUI --> EditCommit["editing_commit / overwrite / copy_as_new"]
-    EditCommit --> SyncGate["editing_audio_sync_required"]
-    EditCommit --> Workflow
-    EditCommit --> DeliveryReset["invalidate jianying draft + materials_pack"]
-
-    Workflow --> UsageMeter["UsageMeter / attempt-level LLM+TTS"]
+    Workflow --> UsageMeter["UsageMeter / attempt-level usage"]
     JobApi --> JobEvents["JobEvent stream"]
     EditUI --> UserEditAudit["user_edit_events.jsonl"]
-
-    Workflow --> ShadowCollector["smart_shadow_eval_collector"]
-    UsageMeter --> ShadowCollector
-    UserEditAudit --> ShadowCollector
-    ShadowCollector --> ShadowAnalysis["analyzer / simulator / aggregator"]
-    ShadowAnalysis --> Ops
-
+    UsageMeter --> Shadow["smart_shadow_eval / sim"]
+    UserEditAudit --> Shadow
     JobEvents --> Ops
-    Trust --> Marketing
+    Shadow --> Ops
+
+    SupportPlane --> AppShell
+    Ops --> AdminUI
+    CalibrationPlane --> AdminUI
 ```
 
 ## 5. 核心证据链
 
-### 5.1 `support / notifications / announcements` 已经是完整产品平面
+### 5.1 review 提交前已经有显式 calibration preflight
 
-- `gateway/support_api.py` 现在公开承载 `/api/support/config`、会话创建、消息发送、显式 handoff、`/online-status`、WeChat QR、以及“我的未关闭会话”
-- `gateway/support_service.py` 明确规定：它是唯一决定“这一条消息走 template / FAQ / LLM / handoff 哪条路”的编排层，并始终记录 `support_messages` 与 `support_ai_usage`
-- `gateway/notifications_api.py` 提供 bell unread count、通知列表、mark read、archive、popup modal feed
-- `gateway/system_announcements_service.py` 承担 audience resolution、send fan-out、recall、以及 `for_new_registrations` live dispatch
+- `frontend-next/src/components/workspace/VoiceSelectionPanel.tsx` 的 approve 仍然从 `approveVoiceSelection(jobId, approvals)` 进入。
+- `gateway/job_intercept.py` 的 voice-selection approve 代理前，会进入 `gateway/voice_calibration_review_preflight.py`。
+- preflight 会先解析 job-level final MiniMax model，再优先查 `user_voices(owner_id, voice_id)`，失败时再回退到 `voice_catalog`。
+- preflight 有 50 秒硬上限，失败和超时都不会阻断后续 `proxy_request`。
 
-结论：这条链路已经不是附属工具，而是正式用户面和运营面。
+结论：`voice_selection_review` 已经不仅是 UI 审核门，而是 review-submit 前的真实运行时准备面。
 
-### 5.2 workflow 对齐内核已经进入“并行 + review 语义”阶段
+### 5.2 editing 面已经长出独立 speaker registry 与 profile inference
 
-- `src/services/alignment/aligner.py` 已经显式使用 `ThreadPoolExecutor`
-- 同文件把 `paid_fallback` 受控在 alignment-level semaphore 下，而不是随线程数无上限扩张
-- `force_dsp_alignment` 可由 admin settings 打开
-- `capped_dsp_underflow` 会统一分类为 `high severity`
-- `src/pipeline/process.py` 会产出 `force_dsp_severity_distribution`、`force_dsp_review_suppressed_count` 等分布指标
+- `src/services/jobs/editing_speakers.py` 把编辑态 speaker registry 单独落在 `editor/editing/speakers.json`。
+- `frontend-next/src/app/(app)/workspace/[jobId]/edit/page.tsx` 和 `EditPageSpeakerCreateDialog.tsx` 现在直接消费 `/editing/speakers`。
+- `src/services/jobs/editing_voice_profile.py` 会在新 speaker 首次被绑定 segment 时异步推断 voice profile。
+- `EditPageSpeakerProfileBadge.tsx` 则把 `pending / inferring / ready / failed` 状态显式带回 UI。
 
-结论：主路径仍是 DSP-first，但现在对并发、fallback 成本、review 严重度都有正式可观测语义。
+结论：editing speaker 已经不再只是 segment 上的一个字符串字段，而是有独立生命周期的编辑实体。
 
-### 5.3 手机号 auth 前门已经是统一生命周期入口
+### 5.3 交付面已经从 lazy download 走向 proactive publish
 
-- `gateway/auth_phone.py` 现在的公开流是：
-  - `send-code`
-  - `verify-code`
-  - `complete-registration`
-  - `reset-password`
-- 同文件明确规定“验证码通过 != 注册成功”，trial 只在 `complete-registration` 成功后发放
-- 同文件还修复了 trusted-proxy IP 边界、wrong-code attempt 限额、以及删除旧的 captcha pre-verify pass-token 死路径
-- `complete-registration` 成功后会调用 `dispatch_announcements_for_new_user(...)`
+- `gateway/main.py` 启动时会拉起 `r2_artifact_sweeper`。
+- `gateway/r2_artifact_sweeper.py` 以 JSON store 为真源扫描 succeeded jobs，并先执行 `mirror_job_terminal_state(...)`。
+- `gateway/job_terminal_mirror.py` 负责把 terminal state、`edit_generation`、结算副作用镜像回 Gateway PG，同时避免覆盖 Gateway 自有字段。
+- `src/services/r2_publisher_lib/r2_publisher.py` 用 `jobs/{job_id}/g{edit_generation}/...` 这套 key 空间将 artifacts 主动推到 R2，并更新 `r2_artifacts` registry。
 
-结论：auth、trial、以及 onboarding announcement 现在已经连成一条前门生命周期。
+结论：下载层已经形成 “真源扫描 -> terminal mirror -> proactive publish -> registry redirect” 的正式交付平面。
 
-### 5.4 `AppShell` 已经变成支持与通知的统一入口壳层
+### 5.4 calibration 已经形成三入口 sidecar
 
-- `frontend-next/src/components/app-shell.tsx` 现在直接挂载：
-  - `NotificationBell`
-  - `NotificationPopupModal`
-  - `SupportWidget`
-  - `AdminPresenceSwitcher`
-- 同文件导航也新增了“通知”“帮助中心”“客服管理”“系统公告”等入口
-- `frontend-next/src/app/(app)/help/page.tsx` 已经从占位页升级为真实帮助中心落地页
+- `gateway/user_voice_api.py` 提供手动 `/user-voices/{voice_id}/calibrate-speed`。
+- `gateway/voice_selection_api.py` clone 成功后会触发 `gateway/voice_calibration_hook.py`。
+- `gateway/voice_calibration_review_preflight.py` 在 review submit 前做最后一轮缺失补齐。
+- 三者都汇入共享的 `run_calibration_task` / inflight dedupe 语义。
 
-结论：支持与通知不再是离散页面，而是已经进入主应用导航与壳层常驻入口。
-
-### 5.5 Jianying 与 post-edit 状态机继续加固
-
-- `src/services/jobs/jianying_draft_runner.py` 的 substep / terminal writes 现在强调 `status == "running"` 与 `attempt_id` 双重 claim guard
-- 同文件 final success 会在最终产物生成后重算 fingerprint，避免“trigger 时的输入 fingerprint”与“落盘产物 fingerprint”漂移
-- `src/services/jobs/editing_commit.py` 的 overwrite 路径会清空 stale `jianying_draft_attempt_id / substep / fingerprint`
-
-结论：stale worker、rename、overwrite invalidation 之间的竞态已经被显式建模，而不再靠“最好别撞上”。
+结论：voice speed calibration 已经不是孤立工具，而是和 clone、review、ops 一起组成完整控制平面。
 
 ## 6. 按任务选图
 
-- 要看 alignment、`force_dsp`、parallel fallback、whisper 交付侧路，读 `GITNEXUS_WORKFLOW_CORE_GRAPH.md`
-- 要看 `display_name`、claim guard、orphan rescue、`user_draft_root`，读 `GITNEXUS_JIANYING_DRAFT_DELIVERY_GRAPH.md`
-- 要看 `editing_audio_sync_required`、preview-source cache、overwrite / copy_as_new，读 `GITNEXUS_EDITING_POST_EDIT_GRAPH.md`
-- 要看 pricing truth、phone auth、trial grant、new-user onboarding，读 `GITNEXUS_COMMERCIALIZATION_GRAPH.md`
-- 要看帮助中心、客服浮窗、通知中心、系统公告 fan-out、人工接管，读 `GITNEXUS_SUPPORT_NOTIFICATIONS_GRAPH.md`
-- 要看 alignment / whisper settings、客服后台、traffic analytics、成本控制、cleanup，读 `GITNEXUS_ADMIN_OPS_CALIBRATION_GRAPH.md`
-- 要看 `smart_shadow_eval / sim`、attempt-level metering、行为审计与 P2 readiness，读 `GITNEXUS_BENCHMARK_QUALITY_COST_GRAPH.md`
+- 要看 review gate、translation review、voice selection、review-submit calibration，读 `GITNEXUS_REVIEW_GRAPH.md`
+- 要看 editing speakers、speaker profile、preview-source、commit hard gate，读 `GITNEXUS_EDITING_POST_EDIT_GRAPH.md`
+- 要看 `materials_pack`、R2 发布、terminal mirror、download resolve，读 `GITNEXUS_STORAGE_DELIVERY_R2_GRAPH.md`
+- 要看 admin settings、voice calibration、traffic、cost、cleanup，读 `GITNEXUS_ADMIN_OPS_CALIBRATION_GRAPH.md`
+- 要看 workflow 内核、DSP-first 对齐与 cue pipeline，读 `GITNEXUS_WORKFLOW_CORE_GRAPH.md`

@@ -4,39 +4,47 @@
 
 ## 1. 范围
 
-这张子图聚焦 `editing` 状态下的修改、重生成、提交与 lineage 行为，重点是：
+这张子图聚焦 `editing` 状态下的修改、重生成、speaker 生命周期、提交与 lineage 行为，重点是：
 
-- `overwrite`
-- `copy_as_new`
-- `editing_audio_sync_required` 如何把 text/audio sync 变成 commit hard gate
-- `tts_input_cn_text` 与 `effective_marker.marked_event_ids` 如何在 commit 时变成正式状态字段
-- preview-source cache 如何服务编辑 UI
+- editing speakers registry
+- speaker voice profile inference
+- `preview-source` cache 与 stream endpoint
+- `overwrite / copy_as_new`
+- `editing_audio_sync_required`
 - commit 后对 Jianying draft 与 `materials_pack` 的失效影响
 
 ## 2. 主图
 
 ```mermaid
 graph TD
-    EditPage["VideoEditPage / editing UI"] --> Segments["editing/segments.json + voice_map.json"]
+    EditPage["VideoEditPage"] --> Segments["editing/segments.json + voice_map.json"]
+    EditPage --> Speakers["editor/editing/speakers.json"]
+
+    Speakers --> CreateDialog["EditPageSpeakerCreateDialog"]
+    CreateDialog --> CreateApi["POST /jobs/{id}/editing/speakers"]
+    CreateApi --> SpeakersSvc["editing_speakers.py"]
+    SpeakersSvc --> ProfileKick["maybe_trigger_inference(...)"]
+    ProfileKick --> ProfileJob["editing_voice_profile.py"]
+    ProfileJob --> ProfileBadge["EditPageSpeakerProfileBadge"]
+
     Segments --> DraftTTS["segment regenerate / draft wav"]
     Segments --> PreviewSource["preview-source cache + stream endpoint"]
-    DraftTTS --> Accept["accept / discard draft TTS"]
     Segments --> Structural["split / speaker / text edits"]
 
     Structural --> Audit["user_edit_events.jsonl"]
     DraftTTS --> Audit
-    Accept --> Audit
+    ProfileJob --> Audit
 
     Audit --> Commit["editing_commit.py"]
     Commit --> SyncCheck["find text edits without regenerated TTS"]
     SyncCheck --> Guard["EditingAudioSyncRequiredError"]
     Commit --> Claim["update_job: editing -> running"]
     Claim --> Overwrite["overwrite -> resume alignment"]
-    Commit --> CopyNew["copy_as_new -> new job lineage"]
+    Claim --> CopyNew["copy_as_new -> new job lineage"]
 
     Overwrite --> Stamp["stamp tts_input_cn_text"]
-    Overwrite --> Marker["effective_marker + marked_event_ids"]
-    Overwrite --> Retire["clear stale jianying claim identity"]
+    Overwrite --> Marker["effective_marker.marked_event_ids"]
+    Overwrite --> Retire["clear stale jianying identity"]
     Stamp --> Reset["invalidate jianying draft + materials_pack"]
     Marker --> Reset
     Retire --> Reset
@@ -46,90 +54,89 @@ graph TD
     Prepare --> NewJob["fresh job with clean deliverable state"]
 ```
 
-## 3. 当前最重要的变化
+## 3. 当前最大的变化
 
-### 3.1 commit 现在有真实的 text/audio sync hard gate
+### 3.1 editing speaker 已经是独立实体
 
-- `editing_commit.py` 新增 `EditingAudioSyncRequiredError(EditingConflictError)`
-- `_find_text_edits_without_tts(project_dir)` 命中的 segment，会在 commit 时直接触发 `editing_audio_sync_required`
-- 这条 gate 只针对“文本改了但没有相应 regenerated TTS”的情况，不会替代既有的 lineage / revision 冲突检查
+- `src/services/jobs/editing_speakers.py` 把编辑态 speakers 单独持久化到 `editor/editing/speakers.json`
+- 创建 speaker 通过 `file_lock(editing_speakers_path(project_dir))` 保护
+- `frontend-next/src/lib/api/editing.ts` 暴露了：
+  - `GET /jobs/{id}/editing/speakers`
+  - `POST /jobs/{id}/editing/speakers`
+  - `POST /jobs/{id}/editing/speakers/{speakerId}/retry-profile`
 
-结论：post-edit text/audio sync 已经从“看得见 drift”升级为“不同步就不能提交”。
+结论：editing speaker 不再是临时 UI 状态，而是编辑态下的正式写侧模型。
 
-### 3.2 overwrite 现在先原子 claim，再做 FS prep 与 runner.start
+### 3.2 新 speaker 首次绑定 segment 会触发 voice profile inference
 
-- `editing_commit.py` 现在通过 `store.update_job(...)` 先把记录从 `editing` 翻到 `running`
-- 然后再做：
-  - `apply_editing`
-  - `rm_editing_dir`
-  - `prune_state`
-  - `runner.start`
-- rollback 也走 `update_job(...)`，避免和并发 cancel / admin 改动互相覆盖
+- `src/services/jobs/editing_voice_profile.py` 明确是 fire-and-forget 推断器
+- 当新 speaker 第一次被 segment 引用时，会从 `pending_segments` 进入 `inferring`
+- 推断完成后把 `profile_status / profile_error / profile` 写回 `speakers.json`
+- `frontend-next/src/app/(app)/workspace/[jobId]/edit/page.tsx` 会在存在 `inferring` speaker 时轮询
+- `EditPageSpeakerProfileBadge.tsx` 把状态和结果显式展示给用户
 
-结论：overwrite 的状态迁移已经从“脚本式步骤串”升级成带 claim 语义的状态机。
+结论：speaker profile 已经变成 editing 流里的异步 sidecar，而不是一次性同步填表。
 
-### 3.3 commit 仍然是 `tts_input_cn_text` 的唯一原子 stamp 点
+### 3.3 preview-source cache 已经形成独立回放侧路
 
-- `editing_commit.py` 会对所有被 promoted 的 draft wav 对应 segment 执行：
-  - `seg["tts_input_cn_text"] = seg["cn_text"]`
-- 没有 promoted draft 的 segment 会保留原有 `tts_input_cn_text`
+- `frontend-next/src/lib/api/editing.ts` 暴露：
+  - `POST /jobs/{jobId}/segments/{segmentId}/preview-source`
+  - `GET /job-api/jobs/{jobId}/segments/{segmentId}/preview-source-audio`
+- `src/services/jobs/editing_segments.py` 负责 `cache_preview_source_wav(...)`
+- 语义是把原始 segment 音频缓存到 `editor/editing/preview_cache/{segment_id}.wav`
 
-结论：系统现在能在 commit 边界上精确区分“哪些中文文本已经重新合成进音频，哪些还没有”。
+结论：编辑页现在明确区分“试听 draft TTS”和“回放原始分段音频”两条路径。
 
-### 3.4 `effective_marker.marked_event_ids` 仍然是 commit 结果的行为归因锚点
+### 3.4 commit 仍然有真实的 text/audio sync hard gate
 
-- `service.py` 在 post-edit commit 成功后会计算 `compute_post_edit_marked_event_ids(...)`
-- 然后通过 `_emit_user_edit_event(... effective_marker ...)` 追加一个 marker 事件
-- `marked_event_ids` 表示最终存活到 `editor/segments.json` 的 prior intent 事件集合，而不是所有历史编辑事件
+- `editing_commit.py` 继续通过 `_find_text_edits_without_tts(project_dir)` 检测 drift
+- 命中时直接抛 `EditingAudioSyncRequiredError`
+- 这条 gate 只处理“文本改了但没重新合成音频”的情况，不替代 lineage / revision 冲突检查
 
-结论：离线分析现在能把“用户做过什么”与“最终真的提交了什么”精确区分开。
+结论：text/audio sync 已经不是建议项，而是 commit 的硬约束。
 
-### 3.5 overwrite invalidation 现在会清空 stale Jianying claim identity
+### 3.5 overwrite 先 claim，再做文件系统操作
 
-- overwrite 不只是重置 `jianying_draft_status / zip_path / user_root`
+- `editing_commit.py` 先通过 `store.update_job(...)` 把记录从 `editing` 翻到 `running`
+- 然后才执行 `apply_editing`、`rm_editing_dir`、`prune_state`、`runner.start`
+- rollback 也通过 `update_job(...)`，避免与 cancel、admin 改动互相覆盖
+
+结论：overwrite 已经是显式 claim 语义，而不是脚本式顺序动作。
+
+### 3.6 overwrite 会主动退休旧交付物身份
+
+- overwrite 不只重置 `jianying_draft_status / zip_path / user_root`
 - 还会清空：
   - `jianying_draft_attempt_id`
   - `jianying_draft_substep`
   - `jianying_draft_fingerprint`
-- Gateway 侧仍会调用 `invalidate_materials_pack_for_job(...)`
+- 网关侧仍会调用 `invalidate_materials_pack_for_job(...)`
 
-结论：post-edit 后旧剪映草稿和旧素材包都被明确视为 stale，而且旧 worker 的 claim identity 也被一并退休。
-
-### 3.6 editing UI 新增了 preview-source cache 侧路
-
-- `editing_segments.py` 现在提供 `cache_preview_source_wav(...)`
-- `api.py` 增加了对 `preview_cache_path(...)` 的 GET stream 路径
-- 语义是把原始段音频缓存到 `editor/editing/preview_cache/{segment_id}.wav`，避免编辑 UI 每次都重新切片
-
-结论：编辑侧已经开始显式区分“生成试听 draft WAV”和“回放原始段音频”两条路径。
+结论：post-edit 后旧 Jianying 草稿和旧打包物都被正式标记为 stale。
 
 ## 4. 关键证据
 
+- `src/services/jobs/editing_speakers.py`
+  - speakers registry
+  - create / save / lock
+- `src/services/jobs/editing_voice_profile.py`
+  - fire-and-forget inference
+  - profile 状态写回
+- `frontend-next/src/app/(app)/workspace/[jobId]/edit/page.tsx`
+  - speaker polling
+  - 新 speaker 绑定后的 profile 推断体验
+- `frontend-next/src/lib/api/editing.ts`
+  - editing speakers API
+  - preview-source API
 - `src/services/jobs/editing_commit.py`
   - `EditingAudioSyncRequiredError`
-  - `_find_text_edits_without_tts(...)`
   - `update_job(...)` claim / rollback
-  - `tts_input_cn_text` stamp
-  - stale claim identity retirement
-- `src/services/jobs/service.py`
-  - `compute_post_edit_marked_event_ids(...)`
-  - `_emit_user_edit_event(...)`
-- `gateway/job_intercept.py`
-  - `invalidate_materials_pack_for_job(...)`
-- `src/services/jobs/editing_segments.py`
-  - `cache_preview_source_wav(...)`
-  - `preview_cache_path(...)`
-- `src/services/jobs/api.py`
-  - preview-source stream endpoint
-- `src/services/jobs/copy_service.py`
-  - hardlinks
-  - path rewrite
-  - stage pruning
+  - stale Jianying identity 清理
 
-## 5. 什么情况下优先读这张图
+## 5. 什么时候优先看这张图
 
 - 想改 `overwrite / copy_as_new`
-- 想判断为什么某次 commit 会报 `editing_audio_sync_required`
-- 想理解 preview-source cache 和 draft TTS 试听为什么是两条不同路径
+- 想判断为什么某次 commit 报 `editing_audio_sync_required`
+- 想改 editing speakers 创建、profile 推断、retry-profile
+- 想排查 preview-source cache 与 draft TTS 试听的边界
 - 想改 post-edit 后交付物失效策略
-- 想给编辑流程增加新的审计事件或 survivor 归因逻辑

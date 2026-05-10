@@ -10,9 +10,9 @@
 - `WorkspacePage` 如何决定当前审核 UI
 - `TranslationReviewPanel / VoiceReviewPanel / VoiceSelectionPanel`
 - translation review 里的 speaker edits / split
-- voice selection 里的 quality tier / clone pricing / resume
+- voice selection approve 前的 calibration preflight
 
-## 2. 审核流主图
+## 2. 主图
 
 ```mermaid
 graph TD
@@ -31,19 +31,20 @@ graph TD
     Gate --> VoicePanel["VoiceReviewPanel"]
     Gate --> VoiceSelectPanel["VoiceSelectionPanel"]
 
-    TranslationPanel --> ReviewAPI["reviews.ts / split / approve"]
-    VoicePanel --> ReviewAPI
-    VoiceSelectPanel --> VoiceAPI["voiceSelection.ts"]
+    TranslationPanel --> ReviewApi["reviews.ts / split / approve"]
+    VoicePanel --> ReviewApi
+    ReviewApi --> ReviewActions["review_actions.py"]
 
-    ReviewAPI --> ReviewActions["review_actions.py"]
-    VoiceAPI --> VoiceGateway["voice_selection_api.py + job_intercept.py"]
-    ReviewActions --> ReviewState
-    VoiceGateway --> ReviewState
-    VoiceGateway --> QualitySync["quality_tier + tts_model sync"]
+    VoiceSelectPanel --> VoiceApi["voiceSelection.ts / approveVoiceSelection"]
+    VoiceApi --> VoiceGateway["voice_selection_api.py + job_intercept.py"]
+    VoiceGateway --> QualitySync["quality_tier + final_minimax_model"]
+    QualitySync --> Preflight["voice_calibration_review_preflight.py"]
+    Preflight --> CalibTask["run_calibration_task / inflight dedupe"]
+    Preflight --> Proxy["proxy_request -> Job API"]
+    Proxy --> ReviewActions
 
-    ReviewState --> Resume["resume pipeline"]
+    ReviewActions --> Resume["resume pipeline"]
     Resume --> Pipeline
-
     Resume --> Result["Result surface"]
     Result --> Edit["VideoEditPage<br/>(downstream, not part of gate)"]
 ```
@@ -59,7 +60,7 @@ graph TD
 - `voice_selection_review`
 - `audio_alignment_review`
 
-并继续维护 tab 映射：
+tab 映射仍然是：
 
 - `speaker_review -> review`
 - `translation_config_review -> translation-config`
@@ -68,90 +69,91 @@ graph TD
 - `voice_selection_review -> voice-selection`
 - `audio_alignment_review -> audio-alignment`
 
-## 4. 当前前端入口仍然统一到 WorkspacePage
+## 4. WorkspacePage 仍然是统一审核入口
 
-`frontend-next/src/app/(app)/workspace/[jobId]/page.tsx` 当前仍是审核流主入口：
+`frontend-next/src/app/(app)/workspace/[jobId]/page.tsx` 仍然是审核流的主入口：
 
 - 导入 `TranslationReviewPanel`
 - 导入 `VoiceReviewPanel`
 - 导入 `VoiceSelectionPanel`
-- 从 `job.reviewGate?.stage ?? job.currentStage` 推导当前审核阶段
+- 通过 `job.reviewGate?.stage ?? job.currentStage` 选择当前审核面
 
-同一个页面里还做了两件重要的控制逻辑：
+同一页里仍保留两条重要控制逻辑：
 
-- `translation_config_review` 在没有独立 UI 的情况下自动 approve
-- `voice_selection_review` 仍通过 `VoiceSelectionPanel` 作为 Studio 主路径承接
+- `translation_config_review` 在没有独立交互面的情况下自动 approve
+- `voice_selection_review` 继续由 `VoiceSelectionPanel` 承接 Studio 主路径
 
-这意味着审核流的用户交互表面仍然是“Workspace 内分流”，而不是旧时代的多 route review app。
+结论：审核流仍然是 `WorkspacePage` 内部分流，而不是独立 review app。
 
-## 5. Translation review 现在可以直接改说话人归属
+## 5. Translation review 仍然是 speaker 写侧入口
 
 ### 5.1 前端
 
-- `frontend-next/src/components/workspace/TranslationReviewPanel.tsx` 现在显式维护：
-  `segmentSpeakers`
-  `speakerNames`
-  `segments`
-- 提交 approve 时会把这三类变更一起发给后端
-- split 动作也会带上 `pendingSpeakerChanges`
+- `frontend-next/src/components/workspace/TranslationReviewPanel.tsx` 继续维护 `segmentSpeakers`、`speakerNames`、`segments`
+- approve payload 会把文本修改、speaker 归属、speaker 名称一并提交
+- split 动作也会携带 pending speaker changes
 
 ### 5.2 后端
 
-- `src/services/jobs/review_actions.py:approve_translation(...)` 会先调用：
-  `_apply_speaker_names_update_from_translation_review(...)`
-  `_apply_segment_speakers_update_from_translation_review(...)`
-- 然后才保存 translation review submission
-- `split_segment(...)` 同样会先落下 pending speaker changes，再执行真正的切段
+- `src/services/jobs/review_actions.py:approve_translation(...)` 会先应用 speaker names 与 segment speaker 变更
+- `split_segment(...)` 同样先落地 pending speaker changes，再执行真实切段
 
-结论：translation review 已经不只是“改译文文本”，而是带说话人归属修正的写侧表面。
+结论：translation review 不是单纯改译文，而是当前最主要的 speaker 纠偏写侧。
 
-## 6. Voice selection 仍是主审核路径，而且会影响 quality tier
+## 6. Voice selection approve 现在会先做 T2 calibration preflight
 
-### 6.1 前端
+### 6.1 触发位置
 
-- `frontend-next/src/components/workspace/VoiceSelectionPanel.tsx` 会从 review state 中提取 `voice_selection_review` payload
-- 它现在会读取：
-  smart recommendations
-  `voice_clone_cost_credits`
-  quality tier + credits 提示
-- 这些显示都来自 Gateway pricing/runtime truth
+- `frontend-next/src/components/workspace/VoiceSelectionPanel.tsx` 在 approve 时调用 `approveVoiceSelection(jobId, approvals)`
+- 网关侧拦截点仍在 `gateway/job_intercept.py` 的 `review/voice-selection/approve`
 
-### 6.2 后端
+### 6.2 preflight 语义
 
-- `src/services/jobs/review_actions.py:resolve_minimax_tts_model_from_voice_selection(...)` 会从 per-speaker 选择推导 job 级 MiniMax model
-- `gateway/job_intercept.py` 在 `review/voice-selection/approve` 拦截路径上，会把聚合后的 `quality_tier + tts_model` 写回 `Job.metering_snapshot`
-- `gateway/voice_selection_api.py` clone 路径则继续用 runtime clone cost 做 reserve / capture / release
+`gateway/voice_calibration_review_preflight.py` 明确约束了这轮预热校准：
 
-结论：`voice_selection_review` 不只是 UI 上的最后一步，它还直接影响后续扣点档位与 TTS 模型。
+- 只看 job-level final MiniMax model，而不是 per-speaker `model_hint`
+- 优先探测 `user_voices(owner_id, voice_id)`，失败时才回退 `voice_catalog`
+- 仅在缺失 `chars_per_second_by_model[final_minimax_model]` 时补齐
+- MiniMax 之外的 provider 在 phase 1 直接跳过
+- 每次预热的总预算是 50 秒，超时任务不取消，主请求继续代理
+- 失败永不抛出，不阻断真正的 review approve
 
-## 7. GitNexus 与源码直接证据
+### 6.3 与 clone-after calibration 的边界
 
-GitNexus 当前直接识别出：
+- review preflight 是 T2，目标是“提交前最后补齐缺口”
+- `gateway/voice_calibration_hook.py` 是 T1，目标是“clone 成功后尽快打底”
+- 手动 `/calibrate-speed` 是 T0，目标是“管理员或用户显式修正”
 
-- `WorkspacePage -> BuildBackendUrl`
-- `WorkspacePage -> ResolveJobApiBaseUrl`
+结论：voice selection approve 现在已经带有真实的运行时准备语义，而不是纯 UI 通过按钮。
 
-源码侧补足了具体落点：
+## 7. 这张图的直接证据
 
-- `TranslationReviewPanel` 提交 payload 已经包含 `segmentSpeakers`
-- `VoiceSelectionPanel` 已明确显示 quality tier / clone credits
-- `review_state.py` 注释仍明确说明：
-  `voice_review` 是 legacy fallback
-  `voice_selection_review` 是 Studio primary path
+- `frontend-next/src/components/workspace/VoiceSelectionPanel.tsx`
+  - `approveVoiceSelection(jobId, approvals)`
+  - UI 已消费 calibration 相关显示信息
+- `gateway/voice_calibration_review_preflight.py`
+  - job-level final model
+  - user voice 优先查找
+  - 50 秒硬预算
+  - never raise
+- `gateway/voice_selection_api.py`
+  - clone 流程仍然是审核链路的写侧之一
+- `src/services/jobs/review_actions.py`
+  - 审核提交与 resume 仍由 Job API 侧落地
 
 ## 8. Review 与 Post-Edit 的边界
 
-`frontend-next/src/app/(app)/workspace/[jobId]/edit/page.tsx` 现在会读取 `voice_selection_review` payload 里的 speaker display names，但它不是 review gate 本身：
+`frontend-next/src/app/(app)/workspace/[jobId]/edit/page.tsx` 会读取审核阶段留下来的 speaker display name 和 voice 结果，但它不是新的 review stage：
 
 - review 的本质仍是 `waiting_for_review -> panel submit -> resume`
-- post-edit 的本质是 `succeeded -> editing -> mutate -> commit`
+- post-edit 的本质仍是 `succeeded -> editing -> mutate -> commit`
 
-因此，`VideoEditPage` 应被视为 review 成功后的下游表面，而不是另一个 review stage。
+因此 `VideoEditPage` 仍应视为审核成功后的下游平面。
 
 ## 9. 这张图适合回答什么问题
 
-- 当前审核 UI 到底是哪个页面在承接
-- translation review 现在能不能改 speaker 名称和 segment speaker
-- `voice_review` 和 `voice_selection_review` 的主次关系是什么
-- quality tier / clone credits 为什么会在审核阶段就确定
-- pipeline 是怎样进入 `waiting_for_review`，又怎样恢复
+- 当前审核 UI 到底由哪个页面承接
+- translation review 能否改 speaker 名称和 segment speaker
+- `voice_review` 与 `voice_selection_review` 的主次关系是什么
+- review submit 前为什么会先跑 voice calibration
+- pipeline 怎样进入 `waiting_for_review`，又怎样恢复
