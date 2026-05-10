@@ -283,10 +283,17 @@ async def remove_user_voice(
 # provider in parallel — same behaviour T1 clone-after will use, so that
 # users picking turbo vs hd later in review have CPS data ready for
 # whichever they choose.
+#
+# codex T0-review F-T0-5 (round 8): T0 phase 1 ONLY supports MiniMax.
+# CosyVoice and VolcEngine helpers don't yet have provider-specific
+# bounded primitives — CosyVoice helper has 90s × 5-retry with backoff
+# (worst-case ~5min), VolcEngine has 60s default HTTP timeout. Either
+# path would blow past calibrate_voice's 60s total budget without
+# meaningful protection. Fail closed and add them back when T0-C-2
+# lands provider-specific bounded wrappers.
 _CANONICAL_MODELS_BY_PROVIDER: dict[str, list[str]] = {
     "minimax": ["speech-2.8-turbo", "speech-2.8-hd"],
-    "cosyvoice": ["cosyvoice-v3-flash"],
-    "volcengine": ["seed-tts-2.0"],
+    # cosyvoice / volcengine deliberately omitted — see F-T0-5.
 }
 
 
@@ -414,6 +421,24 @@ async def calibrate_voice_speed(
                 f"音色的 tts_provider {voice.tts_provider!r} 暂不支持自动标定。"
                 "请联系管理员手动校准。"
             ),
+        })
+
+    # codex T0-review F-T0-5 (round 8): T0 phase 1 only auto-calibrates
+    # MiniMax. CosyVoice / VolcEngine bounded primitives land in T0-C-2.
+    # Until then, refuse the auto-calibrate path for them — pre-T0
+    # users had no auto-calibrate UI for these providers anyway.
+    if provider not in _CANONICAL_MODELS_BY_PROVIDER:
+        logger.warning(
+            "[calibrate-speed] voice %s provider %r has no T0 bounded primitive — refusing",
+            voice_id, provider,
+        )
+        return _json(400, {
+            "error": "unsupported_provider_for_auto_calibration",
+            "message": (
+                f"自动标定暂仅支持 MiniMax 音色。此音色的 provider 是 {provider!r}，"
+                "等 T0-C-2 落地后再开放。"
+            ),
+            "provider": provider,
         })
 
     # Parse optional model_key body. We tolerate empty body / non-JSON

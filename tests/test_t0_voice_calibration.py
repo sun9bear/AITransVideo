@@ -23,6 +23,7 @@ correctness story that lives in our code.
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import types
 from pathlib import Path
@@ -693,11 +694,18 @@ async def test_starter_cancel_does_not_abandon_paid_tts(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_canonical_models_provider_whitelist():
-    """codex T0-review F-T0-2 — verify the constant exposes only the
-    intended model keys for each provider. Manual endpoint validates
-    user-supplied model_key against this dict; any drift here is a
-    direct security regression (arbitrary model_key flowing to paid TTS).
+def test_canonical_models_provider_whitelist_minimax_only_for_t0():
+    """codex T0-review F-T0-2 + F-T0-5 — verify the whitelist is
+    MINIMAX ONLY for T0 phase 1.
+
+    F-T0-2: any drift in MiniMax model keys is a security regression
+    (arbitrary model_key flowing to paid TTS).
+
+    F-T0-5: cosyvoice / volcengine MUST NOT be in this dict for T0.
+    Their helpers don't have T0-C bounded primitives — CosyVoice has
+    90s × 5-retry, VolcEngine 60s default. They'd blow past
+    calibrate_voice's 60s total budget. Add them when T0-C-2 lands
+    provider-specific bounded wrappers.
     """
     from user_voice_api import _CANONICAL_MODELS_BY_PROVIDER
 
@@ -705,18 +713,302 @@ def test_canonical_models_provider_whitelist():
     assert set(_CANONICAL_MODELS_BY_PROVIDER["minimax"]) == {
         "speech-2.8-turbo", "speech-2.8-hd",
     }
-    # Other providers: single canonical model each (T0-C-2 future will
-    # expand cosyvoice / volcengine).
-    assert _CANONICAL_MODELS_BY_PROVIDER["cosyvoice"] == ["cosyvoice-v3-flash"]
-    assert _CANONICAL_MODELS_BY_PROVIDER["volcengine"] == ["seed-tts-2.0"]
-
-    # No entry for an unknown provider
+    # F-T0-5: cosyvoice / volcengine MUST be absent for T0.
+    assert "cosyvoice" not in _CANONICAL_MODELS_BY_PROVIDER
+    assert "volcengine" not in _CANONICAL_MODELS_BY_PROVIDER
+    # And of course unknown providers
     assert "openai" not in _CANONICAL_MODELS_BY_PROVIDER
 
 
 # ---------------------------------------------------------------------------
 # T0-review F-T0-3: legacy calibration response field (codex round 7)
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# T0-review F-T0-6: route-level endpoint tests (codex round 8)
+# ---------------------------------------------------------------------------
+# Direct handler-call tests with mocked dependencies. Verify that the
+# whitelist + legacy compat actually fire at the HTTP layer, not just in
+# isolated logic.
+
+
+class _FakeRequest:
+    """Minimal Request stub providing the only method calibrate_voice_speed uses."""
+    def __init__(self, body_bytes: bytes = b""):
+        self._body = body_bytes
+
+    async def body(self):
+        return self._body
+
+
+class _FakeUser:
+    def __init__(self, user_id: str = "00000000-0000-0000-0000-000000000001"):
+        import uuid
+        self.id = uuid.UUID(user_id)
+
+
+class _FakeAsyncSession:
+    """Minimal AsyncSession stub: tracks rollback calls + supplies execute()
+    via a queue of pre-canned results."""
+    def __init__(self):
+        self.rollback_calls = 0
+        self.commit_calls = 0
+        self.execute_results = []  # caller pre-loads expected results
+
+    async def rollback(self):
+        self.rollback_calls += 1
+
+    async def commit(self):
+        self.commit_calls += 1
+
+    async def close(self):
+        pass
+
+    async def execute(self, *args, **kwargs):
+        # Return pre-loaded result if any; default to a Mock that handles
+        # scalar_one_or_none() returning None.
+        if self.execute_results:
+            return self.execute_results.pop(0)
+        m = MagicMock()
+        m.scalar_one_or_none.return_value = None
+        return m
+
+
+@pytest.mark.asyncio
+async def test_manual_endpoint_invalid_model_key_returns_400_without_paid_call(monkeypatch):
+    """codex T0-review F-T0-6: route-level test that invalid model_key
+    triggers 400 BEFORE run_calibration_task / budget reserve / paid TTS.
+
+    Critical security guarantee — without this, a logged-in attacker
+    submitting any model_key string would burn the user's budget and
+    issue paid TTS to the provider.
+    """
+    risk_control.reset_voice_calibration_rate_limits()
+
+    # Patch fetch_user_voice to return a usable voice
+    fake_voice = MagicMock()
+    fake_voice.tts_provider = "minimax"
+    fake_voice.id = "fake-uuid"
+    fake_voice.voice_id = "vt_test"
+
+    async def fake_fetch(db, user_id, voice_id):
+        return fake_voice
+
+    # Patch run_calibration_task — IT MUST NOT BE CALLED
+    run_calibration_task_was_called = []
+
+    async def fake_run_calibration(**kwargs):
+        run_calibration_task_was_called.append(kwargs)
+        from voice_speed_calibrator import CalibrationResult
+        return CalibrationResult(ok=True, cps=4.5, paid_call_count=3, model_key="x")
+
+    import user_voice_api
+    monkeypatch.setattr(user_voice_api, "fetch_user_voice", fake_fetch)
+    monkeypatch.setattr(
+        "voice_calibration_inflight.run_calibration_task", fake_run_calibration,
+    )
+    # _voice_to_dict reads many ORM attrs; stub it to a fixed dict so
+    # MagicMock attribute access doesn't blow up json encoding.
+    monkeypatch.setattr(
+        user_voice_api, "_voice_to_dict",
+        lambda v: {"voice_id": getattr(v, "voice_id", ""), "label": getattr(v, "label", "")},
+    )
+
+    user = _FakeUser()
+    db = _FakeAsyncSession()
+    request = _FakeRequest(b'{"model_key": "speech-99-malicious-not-real"}')
+
+    response = await user_voice_api.calibrate_voice_speed(
+        voice_id="vt_test",
+        request=request,
+        user=user,
+        db=db,
+    )
+
+    # 400 Bad Request
+    assert response.status_code == 400
+    body = json.loads(response.body)
+    assert body["error"] == "invalid_model_key"
+    assert "speech-99-malicious-not-real" in body["message"]
+    assert "speech-2.8-turbo" in body["allowed_model_keys"]
+
+    # CRITICAL: paid call path was never reached
+    assert run_calibration_task_was_called == [], (
+        "invalid model_key must NOT reach run_calibration_task — paid TTS would fire"
+    )
+
+    # And budget remains untouched
+    for _ in range(5):
+        risk_control.reserve_voice_calibration("budget-untouched-user")
+    with pytest.raises(risk_control.RateLimitExceeded):
+        risk_control.reserve_voice_calibration("budget-untouched-user")
+
+
+@pytest.mark.asyncio
+async def test_manual_endpoint_non_minimax_provider_returns_400(monkeypatch):
+    """codex T0-review F-T0-5: T0 phase 1 only auto-calibrates MiniMax.
+    A user voice tagged tts_provider='cosyvoice' must return 400 with
+    error_class='unsupported_provider_for_auto_calibration', NOT proceed
+    to call calibrate_voice (which has no bounded primitive for cosyvoice).
+    """
+    risk_control.reset_voice_calibration_rate_limits()
+
+    fake_voice = MagicMock()
+    fake_voice.tts_provider = "cosyvoice"
+
+    async def fake_fetch(db, user_id, voice_id):
+        return fake_voice
+
+    run_calibration_task_was_called = []
+
+    async def fake_run_calibration(**kwargs):
+        run_calibration_task_was_called.append(kwargs)
+        from voice_speed_calibrator import CalibrationResult
+        return CalibrationResult(ok=True, cps=4.5, paid_call_count=3, model_key="x")
+
+    import user_voice_api
+    monkeypatch.setattr(user_voice_api, "fetch_user_voice", fake_fetch)
+    monkeypatch.setattr(
+        "voice_calibration_inflight.run_calibration_task", fake_run_calibration,
+    )
+    # _voice_to_dict reads many ORM attrs; stub it to a fixed dict so
+    # MagicMock attribute access doesn't blow up json encoding.
+    monkeypatch.setattr(
+        user_voice_api, "_voice_to_dict",
+        lambda v: {"voice_id": getattr(v, "voice_id", ""), "label": getattr(v, "label", "")},
+    )
+
+    user = _FakeUser()
+    db = _FakeAsyncSession()
+    request = _FakeRequest(b"")  # no model_key body
+
+    response = await user_voice_api.calibrate_voice_speed(
+        voice_id="vt_cosy",
+        request=request,
+        user=user,
+        db=db,
+    )
+
+    assert response.status_code == 400
+    body = json.loads(response.body)
+    assert body["error"] == "unsupported_provider_for_auto_calibration"
+    assert body["provider"] == "cosyvoice"
+    assert run_calibration_task_was_called == [], (
+        "non-MiniMax provider must NOT reach run_calibration_task in T0"
+    )
+
+
+@pytest.mark.asyncio
+async def test_manual_endpoint_success_response_includes_legacy_calibration(monkeypatch):
+    """codex T0-review F-T0-3 + F-T0-6: a successful calibration must
+    return the legacy `calibration` field with `.cps` so the existing
+    voices/page.tsx (handleCalibrate reads result.calibration?.cps)
+    keeps working until the frontend migrates to read `results[]`.
+    """
+    risk_control.reset_voice_calibration_rate_limits()
+
+    fake_voice_initial = MagicMock()
+    fake_voice_initial.tts_provider = "minimax"
+    fake_voice_initial.voice_id = "vt_success"
+
+    fake_voice_refreshed = MagicMock()
+    fake_voice_refreshed.id = "fake-uuid"
+    fake_voice_refreshed.voice_id = "vt_success"
+    fake_voice_refreshed.label = "test"
+    fake_voice_refreshed.chars_per_second = 5.09
+    fake_voice_refreshed.chars_per_second_by_model = {
+        "speech-2.8-turbo": 5.09, "speech-2.8-hd": 4.18,
+    }
+    fake_voice_refreshed.speed_calibrated_at = None
+    fake_voice_refreshed.user_id = MagicMock()
+    fake_voice_refreshed.expired_at = None
+    fake_voice_refreshed.provider = "minimax_voice_clone"
+    fake_voice_refreshed.platform = "minimax_domestic"
+    fake_voice_refreshed.source_speaker_id = None
+    fake_voice_refreshed.notes = None
+    fake_voice_refreshed.created_at = None
+    fake_voice_refreshed.updated_at = None
+    fake_voice_refreshed.chars_per_second_by_model = {"speech-2.8-turbo": 5.09}
+
+    fetch_calls = []
+
+    async def fake_fetch(db, user_id, voice_id):
+        fetch_calls.append(voice_id)
+        # First call (route entry) returns initial voice; second call
+        # (after calibrate, fresh session) returns refreshed.
+        if len(fetch_calls) == 1:
+            return fake_voice_initial
+        return fake_voice_refreshed
+
+    # Stub run_calibration_task with an ok result for both turbo + hd
+    async def fake_run_calibration(*, key, user_id_for_budget, factory):
+        from voice_speed_calibrator import CalibrationResult, TextResult
+        return CalibrationResult(
+            ok=True,
+            cps=5.09 if key.model_key == "speech-2.8-turbo" else 4.18,
+            total_hanzi=458,
+            total_duration_ms=90_000 if key.model_key == "speech-2.8-turbo" else 109_500,
+            per_text=[TextResult(name="T1", hanzi=101, duration_ms=20_000, cps=5.05)],
+            paid_call_count=3,
+            model_key=key.model_key,
+        )
+
+    import user_voice_api
+    monkeypatch.setattr(user_voice_api, "fetch_user_voice", fake_fetch)
+    monkeypatch.setattr(
+        "voice_calibration_inflight.run_calibration_task", fake_run_calibration,
+    )
+    # _voice_to_dict reads many ORM attrs; stub it to a fixed dict so
+    # MagicMock attribute access doesn't blow up json encoding.
+    monkeypatch.setattr(
+        user_voice_api, "_voice_to_dict",
+        lambda v: {"voice_id": getattr(v, "voice_id", ""), "label": getattr(v, "label", "")},
+    )
+    # Stub async_session for the post-calibrate refresh
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def fake_async_session():
+        yield _FakeAsyncSession()
+
+    monkeypatch.setattr("database.async_session", fake_async_session)
+
+    user = _FakeUser()
+    db = _FakeAsyncSession()
+    request = _FakeRequest(b"")  # no model_key body → both models
+
+    response = await user_voice_api.calibrate_voice_speed(
+        voice_id="vt_success",
+        request=request,
+        user=user,
+        db=db,
+    )
+
+    assert response.status_code == 200
+    body = json.loads(response.body)
+
+    # F-T0-6: legacy calibration field MUST be present so old client works
+    assert body.get("calibration") is not None, (
+        "missing legacy `calibration` field — old voices/page.tsx would show 未标定"
+    )
+    legacy = body["calibration"]
+    assert "cps" in legacy
+    assert "model" in legacy
+    assert "per_text" in legacy
+    assert legacy["cps"] in (5.09, 4.18)  # one of the two ok results
+    assert legacy["provider"] == "minimax"
+
+    # New shape also present
+    assert body["ok"] is True
+    assert isinstance(body["results"], list)
+    assert len(body["results"]) == 2  # turbo + hd both ran
+    assert body["provider"] == "minimax"
+
+    # route db was rolled back BEFORE paid call (F-v4.3-2 verified inline)
+    assert db.rollback_calls >= 1, (
+        "route db must be rollback'd before paid call (codex F-v4.3-2)"
+    )
 
 
 def test_legacy_calibration_response_field_built_from_first_ok_result():

@@ -379,7 +379,21 @@ async def run_calibration_task(
 
     factory_task.add_done_callback(_finalize)
 
-    # Caller awaits via shield: if caller is cancelled, the shield raises
-    # CancelledError outwards but factory_task keeps running. _finalize
-    # fires when factory_task eventually completes in the background.
-    return await asyncio.shield(factory_task)
+    # codex T0-review F-T0-4 (round 8): starter awaits the SHARED future,
+    # NOT factory_task directly.
+    #
+    # Pre-fix: `await asyncio.shield(factory_task)` returns whatever the
+    # task returned/raised. If the factory broke its "always returns
+    # CalibrationResult" contract and raised, the starter would receive
+    # the raw exception while joiners (awaiting `future`) would see the
+    # _finalize-normalized `CalibrationResult(internal_error)`. This
+    # broke the run_calibration_task helper contract and would crash
+    # the manual endpoint's asyncio.gather with a 500.
+    #
+    # Post-fix: starter and joiner both `await asyncio.shield(future)`.
+    # The factory task is purely a background work unit; _finalize is
+    # the single source of truth that writes the normalized result into
+    # the future. Caller cancellation still propagates outward via shield
+    # (factory_task keeps running in background; finalize still fires
+    # when it completes).
+    return await asyncio.shield(future)
