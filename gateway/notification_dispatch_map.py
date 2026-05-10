@@ -31,6 +31,7 @@ from typing import Any
 EVENT_JOB_SUCCEEDED = "job.succeeded"
 EVENT_JOB_FAILED = "job.failed"
 EVENT_JOB_PUBLISHED = "job.published"
+EVENT_JOB_CONTENT_COMPLIANCE_ADMIN_OVERRIDE = "job.content_compliance_admin_override"
 EVENT_ARTIFACT_JIANYING_DRAFT_READY = "artifact.jianying_draft_ready"
 EVENT_ARTIFACT_MATERIALS_PACK_READY = "artifact.materials_pack_ready"
 
@@ -70,6 +71,16 @@ DISPATCH_MAP: dict[str, dict[str, Any]] = {
         "body": "「{display_name}」修改后的新版本已生成，可下载或继续编辑。",
         "action_url": "/workspace/{job_id}",
         "artifact_key": "dubbed_video",
+    },
+    EVENT_JOB_CONTENT_COMPLIANCE_ADMIN_OVERRIDE: {
+        "scope": "job",
+        "topic": "artifact",
+        "severity": "warning",
+        "title": "内容审核提醒",
+        "body": "「{display_name}」疑似包含敏感内容，已按管理员特权继续翻译流程。{summary}",
+        "action_url": "/workspace/{job_id}",
+        "related_type": "content_compliance",
+        "popup": True,
     },
     EVENT_ARTIFACT_JIANYING_DRAFT_READY: {
         "scope": "job",

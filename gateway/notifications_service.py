@@ -101,9 +101,9 @@ async def dispatch_event(
     action_url = None
     if action_tmpl:
         try:
-            action_url = action_tmpl.format(
-                **safe_payload, job_id=job_id or "",
-            )
+            action_payload = dict(safe_payload)
+            action_payload.setdefault("job_id", job_id or "")
+            action_url = action_tmpl.format(**action_payload)
         except (KeyError, IndexError):
             action_url = action_tmpl
 
@@ -121,6 +121,7 @@ async def dispatch_event(
         action_url=action_url,
         dedupe_key=dedupe_key,
         expires_at=expires_at,
+        popup=bool(recipe.get("popup", False)),
     )
     db.add(notif)
     try:

@@ -4,9 +4,11 @@ from types import SimpleNamespace
 
 import pytest
 
+import pipeline.process as process_module
 from pipeline.process import ProcessPipeline, _call_content_compliance_llm_with_retry
 from services.assemblyai.transcriber import TranscriptLine, TranscriptResult
 from services.content_compliance import (
+    ContentPolicyViolationError,
     LLMContentComplianceReviewer,
     MainlandChinaContentComplianceReviewer,
     validate_content_compliance_llm_response,
@@ -108,6 +110,71 @@ def test_llm_content_compliance_reviewer_blocks_manual_review() -> None:
 
     assert result.blocked
     assert result.status == "needs_manual_review"
+
+
+def test_non_admin_content_compliance_violation_still_blocks(tmp_path) -> None:
+    pipeline = ProcessPipeline()
+    transcript = TranscriptResult(
+        lines=[_line("This clip promotes an online casino.")],
+        total_duration_ms=1000,
+        language="en",
+        raw_response_path="",
+        structured_transcript_path="",
+    )
+
+    with pytest.raises(ContentPolicyViolationError):
+        pipeline._run_content_compliance_review(
+            final_project_dir=tmp_path,
+            transcript_result=transcript,
+            download_result=SimpleNamespace(video_title="Ad", description=""),
+            source_type="youtube_url",
+            source_ref="https://youtube.example/watch?v=blocked",
+        )
+
+
+def test_admin_content_compliance_violation_warns_without_blocking(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_dispatch(**kwargs: object) -> bool:
+        calls.append(kwargs)
+        return True
+
+    monkeypatch.setattr(
+        process_module,
+        "_dispatch_content_compliance_admin_override_notification",
+        fake_dispatch,
+    )
+    pipeline = ProcessPipeline()
+    transcript = TranscriptResult(
+        lines=[_line("This clip promotes an online casino.")],
+        total_duration_ms=1000,
+        language="en",
+        raw_response_path="",
+        structured_transcript_path="",
+    )
+
+    payload = pipeline._run_content_compliance_review(
+        final_project_dir=tmp_path,
+        transcript_result=transcript,
+        download_result=SimpleNamespace(video_title="Ad", description=""),
+        source_type="youtube_url",
+        source_ref="https://youtube.example/watch?v=blocked",
+        admin_override=True,
+        job_id="job_admin",
+        user_id="00000000-0000-0000-0000-000000000001",
+        display_name="Admin Task",
+    )
+
+    assert payload["status"] == "blocked"
+    assert payload["admin_override"] is True
+    assert payload["notification_dispatched"] is True
+    assert calls[0]["job_id"] == "job_admin"
+    assert calls[0]["user_id"] == "00000000-0000-0000-0000-000000000001"
+    assert calls[0]["display_name"] == "Admin Task"
+    assert "\u7ee7\u7eed\u7ffb\u8bd1\u6d41\u7a0b" in str(payload["message"])
 
 
 def test_chinese_source_language_is_blocked_before_translation() -> None:

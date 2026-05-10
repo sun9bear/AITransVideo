@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict as _dc_asdict, dataclass, fields as _dc_fields
+from dataclasses import asdict as _dc_asdict, dataclass, fields as _dc_fields, replace as _dc_replace
 import json
 import math
 import os
@@ -253,6 +253,7 @@ SHORT_CONTENT_COMPACT_LONG_CHARS_PER_SECOND_LOWER = 3.0
 SHORT_CONTENT_COMPACT_CHARS_PER_SECOND_UPPER = 4.0
 CONTENT_COMPLIANCE_LLM_RETRY_DELAY_SECONDS = 5.0
 CONTENT_COMPLIANCE_LLM_PEER_COST_RANK_DELTA = 1
+CONTENT_COMPLIANCE_ADMIN_OVERRIDE_EVENT = "job.content_compliance_admin_override"
 SHORT_CONTENT_COMPACT_QUESTION_STARTERS = frozenset({
     "am",
     "are",
@@ -901,6 +902,82 @@ def _report_job_metering(
             print(f"[metering] Reported job metering to gateway: {resp.status}", flush=True)
     except Exception as e:
         print(f"[metering] Warning: failed to report job metering: {e}", flush=True)
+
+
+def _dispatch_content_compliance_admin_override_notification(
+    *,
+    job_id: str | None,
+    user_id: str | None,
+    display_name: str | None,
+    summary: str,
+) -> bool:
+    """Best-effort task notification when admin content override is applied."""
+    normalized_job_id = str(job_id or "").strip()
+    normalized_user_id = str(user_id or "").strip()
+    if not normalized_job_id or not normalized_user_id:
+        return False
+
+    import urllib.error
+    import urllib.request
+
+    gateway_base = os.environ.get("AVT_GATEWAY_URL", "http://localhost:8880").rstrip("/")
+    url = f"{gateway_base}/internal/notifications/dispatch"
+    body = {
+        "event_type": CONTENT_COMPLIANCE_ADMIN_OVERRIDE_EVENT,
+        "user_id": normalized_user_id,
+        "job_id": normalized_job_id,
+        "payload": {
+            "display_name": str(display_name or normalized_job_id).strip() or normalized_job_id,
+            "job_id": normalized_job_id,
+            "summary": _compact_notification_summary(summary),
+        },
+        "dedupe_key": f"{CONTENT_COMPLIANCE_ADMIN_OVERRIDE_EVENT}:{normalized_job_id}",
+        "related_id": "content_compliance",
+    }
+    try:
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+            headers=_internal_request_headers(),
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            print(
+                f"[S2] 已发送管理员内容合规旁路任务通知：{resp.status}",
+                flush=True,
+            )
+            return 200 <= int(resp.status) < 300
+    except urllib.error.HTTPError as exc:
+        print(f"[S2] Warning: 管理员内容合规旁路通知发送失败：{exc}", flush=True)
+    except Exception as exc:
+        print(f"[S2] Warning: 管理员内容合规旁路通知发送失败：{exc}", flush=True)
+    return False
+
+
+def _compact_notification_summary(summary: str, *, limit: int = 180) -> str:
+    normalized = re.sub(r"\s+", " ", str(summary or "")).strip()
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: max(1, limit - 1)].rstrip() + "…"
+
+
+def _content_compliance_admin_override_message(result: object) -> str:
+    findings = getattr(result, "findings", ()) or ()
+    labels = [
+        str(getattr(finding, "label", "") or "").strip()
+        for finding in list(findings)[:3]
+    ]
+    label_text = "、".join(label for label in labels if label)
+    if label_text:
+        return (
+            "视频内容审核未通过，疑似包含中国大陆法律法规禁止传播的内容"
+            f"（{label_text}）。管理员特权已允许该任务继续翻译流程；"
+            "请自行确认后续使用和发布风险。"
+        )
+    return (
+        "视频内容审核未通过。管理员特权已允许该任务继续翻译流程；"
+        "请自行确认后续使用和发布风险。"
+    )
 
 
 def _is_pre_tts_rewrite_enabled() -> bool:
@@ -1659,6 +1736,10 @@ class ProcessPipeline:
                 source_ref=source_ref,
                 llm_generate_json=content_compliance_llm,
                 llm_model_name=content_compliance_model,
+                admin_override=str(job_role or "").strip().lower() == "admin",
+                job_id=config.job_id,
+                user_id=str(_snap("user_id") or ""),
+                display_name=str(_snap("display_name") or download_result.video_title or ""),
             )
 
             speaker_name_a = config.speaker_a_name
@@ -6844,6 +6925,10 @@ class ProcessPipeline:
         source_ref: str,
         llm_generate_json: Callable[[str], str] | None = None,
         llm_model_name: str | None = None,
+        admin_override: bool = False,
+        job_id: str | None = None,
+        user_id: str | None = None,
+        display_name: str | None = None,
     ) -> dict[str, object]:
         if not is_content_compliance_enabled():
             print("[S2] 内容合规审核已关闭，跳过。")
@@ -6894,9 +6979,29 @@ class ProcessPipeline:
             llm_result=llm_result,
             llm_fail_closed=is_content_compliance_llm_fail_closed(),
         )
+        admin_override_applied = bool(admin_override and final_result.blocked)
+        if admin_override_applied:
+            final_result = _dc_replace(
+                final_result,
+                message=_content_compliance_admin_override_message(final_result),
+            )
         report_path = reviewer.write_report(final_result, project_dir=final_project_dir)
         payload = final_result.to_dict()
         payload["artifact_path"] = str(report_path)
+        if admin_override_applied:
+            payload["admin_override"] = True
+            payload["notification_dispatched"] = (
+                _dispatch_content_compliance_admin_override_notification(
+                    job_id=job_id,
+                    user_id=user_id,
+                    display_name=display_name,
+                    summary=final_result.message,
+                )
+            )
+            print(
+                "[S2] 内容合规审核未通过，但当前任务属于管理员，已记录警告并继续流程。"
+            )
+            return payload
         if final_result.blocked:
             print(f"[S2] 内容合规审核未通过，报告：{report_path}")
             raise ContentPolicyViolationError(final_result)
