@@ -498,6 +498,7 @@ async def voice_clone_for_selection(
         except Exception:
             logger.debug("Could not resolve speaker display name for %s", speaker_id, exc_info=True)
 
+        added_to_library = False
         if user_id:
             try:
                 from user_voice_service import add_user_voice
@@ -512,8 +513,53 @@ async def voice_clone_for_selection(
                     source_speaker_id=speaker_id,
                     notes=f"从任务 {job_id} 克隆",
                 )
+                added_to_library = True
             except Exception:
                 logger.exception("Failed to save cloned voice to user library")
+
+        # Plan v4.3 §3.1 + §5.1 — T1 clone-after auto-calibration hook.
+        # Only fire if (a) the voice was actually persisted to user_voices
+        # (no row → no place to write chars_per_second_by_model), and
+        # (b) the env gate isn't disabled. The hook itself is silent on
+        # every failure path (rate limit, provider error, DB error) so
+        # the clone response never blocks on calibration.
+        #
+        # Two background tasks (one per canonical MiniMax model) are
+        # scheduled here. They run concurrently; the in-flight registry
+        # de-dupes against any racing manual /calibrate-speed for the
+        # same (user, voice, model) tuple.
+        #
+        # Background tasks own their own DB sessions — they do NOT touch
+        # `db` (the route's session is closed by FastAPI dependency
+        # teardown immediately after this function returns).
+        if added_to_library and user_id:
+            try:
+                from voice_calibration_hook import (
+                    CANONICAL_MODELS_BY_PROVIDER,
+                    auto_calibrate_enabled,
+                    calibrate_after_clone,
+                )
+                if auto_calibrate_enabled():
+                    user_id_str = str(user_id)
+                    # MiniMax voice clones always use minimax TTS; T0
+                    # phase 1 only fans out for this provider (see
+                    # voice_calibration_hook.CANONICAL_MODELS_BY_PROVIDER).
+                    for model_key in CANONICAL_MODELS_BY_PROVIDER.get("minimax", ()):
+                        asyncio.create_task(
+                            calibrate_after_clone(
+                                voice_id=clone_result,
+                                user_id=user_id_str,
+                                provider="minimax",
+                                model_key=model_key,
+                            )
+                        )
+            except Exception:
+                # Even the scheduling step must not block the clone
+                # response — log and move on.
+                logger.exception(
+                    "[auto-calibrate-clone] failed to enqueue tasks for voice_id=%s",
+                    clone_result,
+                )
 
         return _json_response(200, {
             "voice_id": clone_result,

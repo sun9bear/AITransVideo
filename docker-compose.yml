@@ -273,6 +273,13 @@ services:
       VOLCENGINE_TTS_ACCESS_KEY: "${VOLCENGINE_TTS_ACCESS_KEY:-}"
       # Studio post-edit feature flag (D29) — gate editing endpoints
       AVT_ENABLE_POST_EDIT: "${AVT_ENABLE_POST_EDIT:-false}"
+      # Voice CPS auto-calibration after clone (plan v4.3 T1). Default ON;
+      # set to "false"/"0"/"no"/"off" to disable. Each successful clone
+      # fires 2 background tasks (turbo + hd) — the in-flight registry
+      # de-dupes against any racing manual /calibrate-speed for the same
+      # voice, and budget is rate-limited to 8/min × 30/day per user
+      # (see risk_control._VOICE_CALIBRATION_*).
+      AVT_AUTO_CALIBRATE_AFTER_CLONE: "${AVT_AUTO_CALIBRATE_AFTER_CLONE:-true}"
       # --- Phase 2 R2 download backend (plan 2026-04-23) ---
       # Default is intentionally safe: "local" keeps the existing Gateway
       # -> Job API byte-passthrough path. Flipping to "r2" requires ALL

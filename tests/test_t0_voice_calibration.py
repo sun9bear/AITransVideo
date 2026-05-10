@@ -81,12 +81,15 @@ def reset_budget():
 
 
 def test_calibration_budget_blocks_after_per_minute_limit():
-    """6 reservations within 60s → 6th raises RateLimitExceeded with
-    scope="voice_calibration_short". The 5/min cap matches plan §7.2."""
+    """9 reservations within 60s → 9th raises RateLimitExceeded with
+    scope="voice_calibration_short". Cap was 5 originally; bumped to 8
+    on 2026-05-10 after T0 prod test (user clicking 3 voices = 6
+    reservations hit cap=5 on the 6th). 8/min still blocks sustained
+    spam but absorbs the natural "click 3 voices" UX."""
     user_id = "user_a"
 
-    # First 5 succeed
-    for _ in range(5):
+    # First 8 succeed
+    for _ in range(8):
         risk_control.reserve_voice_calibration(user_id)
 
     with pytest.raises(risk_control.RateLimitExceeded) as exc_info:
@@ -104,8 +107,8 @@ def test_calibration_budget_refund_releases_slot():
     """
     user_id = "user_b"
 
-    reservations = [risk_control.reserve_voice_calibration(user_id) for _ in range(5)]
-    # Cap reached — 6th would raise.
+    reservations = [risk_control.reserve_voice_calibration(user_id) for _ in range(8)]
+    # Cap reached — 9th would raise.
     with pytest.raises(risk_control.RateLimitExceeded):
         risk_control.reserve_voice_calibration(user_id)
 
@@ -116,10 +119,11 @@ def test_calibration_budget_refund_releases_slot():
 
 
 def test_calibration_budget_does_not_share_user_buckets():
-    """Each user gets independent cap — user_a hitting 5/min does not
-    affect user_b. Necessary so a noisy power user can't lock everyone out."""
+    """Each user gets independent cap — user_a hitting per-minute limit
+    does not affect user_b. Necessary so a noisy power user can't lock
+    everyone out."""
     risk_control.reset_voice_calibration_rate_limits()
-    for _ in range(5):
+    for _ in range(8):
         risk_control.reserve_voice_calibration("user_a")
     # user_a is capped; user_b should still have full quota
     new_reservation = risk_control.reserve_voice_calibration("user_b")
@@ -507,12 +511,13 @@ async def test_run_calibration_task_starter_reserves_joiner_does_not(monkeypatch
     await asyncio.gather(starter_task, joiner_task)
 
     # Total slots used should be 1 (starter), NOT 2.
-    # Verify by attempting 4 more reserves — if joiner had double-reserved,
-    # the cap would be hit at the 4th call (5 total = cap), but it's the 5th.
-    for i in range(4):
-        risk_control.reserve_voice_calibration("u1")  # should all succeed (1+4=5)
+    # Verify by attempting 7 more reserves — if joiner had double-reserved,
+    # the cap (8) would be hit at the 7th call (8 total = cap), but it's
+    # the 8th additional call (1+8=9) that raises.
+    for i in range(7):
+        risk_control.reserve_voice_calibration("u1")  # should all succeed (1+7=8)
     with pytest.raises(risk_control.RateLimitExceeded):
-        risk_control.reserve_voice_calibration("u1")  # 6th raises (cap=5)
+        risk_control.reserve_voice_calibration("u1")  # 9th raises (cap=8)
 
 
 @pytest.mark.asyncio
@@ -547,9 +552,9 @@ async def test_run_calibration_task_no_refund_after_paid_call_count_gt_zero(monk
     assert result.ok is False
 
     # If refund had fired, we'd have 0 slots used. Verify slot is still
-    # held by attempting to fill the bucket and seeing the 5th raise.
-    for _ in range(4):
-        risk_control.reserve_voice_calibration("u1")  # 1+4=5 with NO refund
+    # held by attempting to fill the bucket and seeing the cap raise.
+    for _ in range(7):
+        risk_control.reserve_voice_calibration("u1")  # 1+7=8 with NO refund
     with pytest.raises(risk_control.RateLimitExceeded):
         risk_control.reserve_voice_calibration("u1")
 
@@ -581,8 +586,8 @@ async def test_run_calibration_task_refunds_on_paid_call_count_zero(monkeypatch)
     )
     assert result.paid_call_count == 0
 
-    # Refund should have fired → user has full 5 slots available.
-    for _ in range(5):
+    # Refund should have fired → user has full 8 slots available.
+    for _ in range(8):
         risk_control.reserve_voice_calibration("u1")
     with pytest.raises(risk_control.RateLimitExceeded):
         risk_control.reserve_voice_calibration("u1")
@@ -639,8 +644,8 @@ async def test_starter_factory_exception_normalized_to_internal_error(monkeypatc
     assert result.model_key == key.model_key
 
     # Budget refunded (paid_call_count == 0 path).
-    # Cap is 5/min; we should have full quota now.
-    for _ in range(5):
+    # Cap is 8/min; we should have full quota now.
+    for _ in range(8):
         risk_control.reserve_voice_calibration("u_factory_raise")
     with pytest.raises(risk_control.RateLimitExceeded):
         risk_control.reserve_voice_calibration("u_factory_raise")
@@ -730,8 +735,8 @@ async def test_starter_cancel_does_not_abandon_paid_tts(monkeypatch):
     )
 
     # Budget: caller1 reserved 1 slot; result.ok=True means no refund;
-    # so 1 slot remains used. Verify by filling 4 more (5 total = cap).
-    for _ in range(4):
+    # so 1 slot remains used. Verify by filling 7 more (8 total = cap).
+    for _ in range(7):
         risk_control.reserve_voice_calibration("u_cancel")
     with pytest.raises(risk_control.RateLimitExceeded):
         risk_control.reserve_voice_calibration("u_cancel")
@@ -887,7 +892,7 @@ async def test_manual_endpoint_invalid_model_key_returns_400_without_paid_call(m
     )
 
     # And budget remains untouched
-    for _ in range(5):
+    for _ in range(8):
         risk_control.reserve_voice_calibration("budget-untouched-user")
     with pytest.raises(risk_control.RateLimitExceeded):
         risk_control.reserve_voice_calibration("budget-untouched-user")

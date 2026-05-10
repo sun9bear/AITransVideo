@@ -392,7 +392,13 @@ def reset_voice_probe_rate_limits() -> None:
 #     to decide refund.
 
 _VOICE_CALIBRATION_SHORT_WINDOW = 60        # seconds
-_VOICE_CALIBRATION_SHORT_LIMIT = 5
+# 2026-05-10: bumped 5 → 8 after T0 prod test. User clicking 3 voices in
+# quick succession (= 6 reservations: 3 voices × 2 models each) hit cap=5
+# on the 6th call, leaving the third voice's HD model un-calibrated.
+# 8/min still rejects sustained spam (any user > ~4 voices/min in steady
+# state) but absorbs the natural "click 3 voices to test" UX. Day cap
+# unchanged at 30 — the per-user "I clicked all my voices once" budget.
+_VOICE_CALIBRATION_SHORT_LIMIT = 8
 _VOICE_CALIBRATION_DAY_WINDOW = 86_400      # 24h
 _VOICE_CALIBRATION_DAY_LIMIT = 30
 
