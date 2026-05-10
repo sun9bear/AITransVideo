@@ -834,20 +834,33 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
 
 /* ---------- SpeakerAudioAuditModal ---------- */
 
-interface SpeakerAudioAuditModalProps {
+// Exported so the editing-state voice Tab (VoiceModifyTab) can reuse the
+// audio-listening UX. Editing 模式 reassign + keep-original 后端端点
+// 要求 voice_selection_review 未 approved → editing 状态会 409。
+// readOnly=true 隐藏这两个控件,只保留播放 + 段信息显示。
+export interface SpeakerAudioAuditModalSpeakerRef {
+  speakerId: string
+  speakerName: string
+}
+
+export interface SpeakerAudioAuditModalProps {
   jobId: string
-  speaker: Pick<SpeakerPayload, 'speakerId' | 'speakerName'>
+  speaker: SpeakerAudioAuditModalSpeakerRef
   speakerOptions: Array<Pick<SpeakerPayload, 'speakerId' | 'speakerName'>>
   onClose: () => void
   onReassigned: (result: SpeakerAudioReassignResult) => void
+  /** 2026-05-09: editing 模式只读 — 隐藏 reassign / keep-original 控件,
+   * 只保留播放 + 段信息显示。reassign/keep-original 改动用 翻译修改 Tab。 */
+  readOnly?: boolean
 }
 
-function SpeakerAudioAuditModal({
+export function SpeakerAudioAuditModal({
   jobId,
   speaker,
   speakerOptions,
   onClose,
   onReassigned,
+  readOnly = false,
 }: SpeakerAudioAuditModalProps) {
   const [segments, setSegments] = useState<SpeakerAudioSegment[]>([])
   const [isLoading, setIsLoading] = useState(true)
@@ -983,34 +996,42 @@ function SpeakerAudioAuditModal({
                 <span className="w-12 shrink-0 text-xs tabular-nums text-slate-400">{formatTimecode(seg.startMs)}</span>
                 <span className="min-w-0 flex-1 truncate text-xs text-foreground">{seg.sourceText || `片段 ${seg.segmentId}`}</span>
                 <span className="w-12 shrink-0 text-right text-xs text-slate-400">{seg.durationS.toFixed(1)}s</span>
-                <label className="flex h-8 w-[102px] shrink-0 items-center justify-center gap-1 rounded border border-slate-300 dark:border-slate-600 px-2 text-xs text-slate-600 dark:text-slate-300">
-                  <input
-                    checked={seg.dubbingMode === 'keep_original'}
-                    className="h-3.5 w-3.5 accent-[color:var(--cinnabar)]"
-                    disabled={isUpdatingMode || updatingDubbingModeSegmentId !== null}
-                    onChange={(event) => { void handleDubbingModeChange(seg, event.target.checked) }}
-                    type="checkbox"
-                  />
-                  保留原音
-                </label>
-                <select
-                  className="h-8 w-[150px] shrink-0 rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 text-xs text-foreground disabled:opacity-50"
-                  disabled={isReassigning || reassigningSegmentId !== null}
-                  onChange={(event) => { void handleReassign(seg, event.target.value) }}
-                  value={speaker.speakerId}
-                >
-                  {speakerOptions.map((option) => (
-                    <option key={option.speakerId} value={option.speakerId}>
-                      {option.speakerName || option.speakerId}
-                    </option>
-                  ))}
-                </select>
+                {readOnly ? null : (
+                  <>
+                    <label className="flex h-8 w-[102px] shrink-0 items-center justify-center gap-1 rounded border border-slate-300 dark:border-slate-600 px-2 text-xs text-slate-600 dark:text-slate-300">
+                      <input
+                        checked={seg.dubbingMode === 'keep_original'}
+                        className="h-3.5 w-3.5 accent-[color:var(--cinnabar)]"
+                        disabled={isUpdatingMode || updatingDubbingModeSegmentId !== null}
+                        onChange={(event) => { void handleDubbingModeChange(seg, event.target.checked) }}
+                        type="checkbox"
+                      />
+                      保留原音
+                    </label>
+                    <select
+                      className="h-8 w-[150px] shrink-0 rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 text-xs text-foreground disabled:opacity-50"
+                      disabled={isReassigning || reassigningSegmentId !== null}
+                      onChange={(event) => { void handleReassign(seg, event.target.value) }}
+                      value={speaker.speakerId}
+                    >
+                      {speakerOptions.map((option) => (
+                        <option key={option.speakerId} value={option.speakerId}>
+                          {option.speakerName || option.speakerId}
+                        </option>
+                      ))}
+                    </select>
+                  </>
+                )}
               </div>
             )
           })}
         </div>
         <div className="flex items-center justify-between p-4 border-t border-border">
-          <span className="text-xs text-slate-400">可修改说话人归属，也可让片段跳过翻译配音并保留原音。</span>
+          <span className="text-xs text-slate-400">
+            {readOnly
+              ? '试听原音以核对说话人归属。需修改归属或保留原音请到「翻译修改」Tab 在段落上操作。'
+              : '可修改说话人归属，也可让片段跳过翻译配音并保留原音。'}
+          </span>
           <div className="flex items-center gap-2">
             {error ? <span className="text-xs text-[color:var(--cinnabar)] max-w-[280px] truncate">{error}</span> : null}
             <button className="h-8 rounded px-4 text-sm text-slate-500 transition hover:text-foreground" onClick={onClose} type="button">关闭</button>

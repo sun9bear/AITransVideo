@@ -60,7 +60,7 @@ import {
   type UserVoiceEntry,
   type VoiceSelectionPricingResponse,
 } from "@/lib/api/voiceSelection"
-import { VoiceCloneModal } from "@/components/workspace/VoiceSelectionPanel"
+import { VoiceCloneModal, SpeakerAudioAuditModal } from "@/components/workspace/VoiceSelectionPanel"
 
 /* ---------- Types (mirror VoiceSelectionPanel) ---------- */
 
@@ -184,6 +184,10 @@ export function VoiceModifyTab({
   const [previewLoading, setPreviewLoading] = useState<Record<string, boolean>>({})
   const [previewError, setPreviewError] = useState<Record<string, string | null>>({})
   const [cloneModalSpeaker, setCloneModalSpeaker] = useState<string | null>(null)
+  // 2026-05-09: 核对原音弹窗 — readOnly 模式 (editing 状态后端的 reassign /
+  // keep-original 端点 require voice_selection_review 阶段未 approved,
+  // editing 状态会 409,所以这里只播放,不暴露 mutation 控件)。
+  const [auditModalSpeaker, setAuditModalSpeaker] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
   const previewAudioRef = useRef<HTMLAudioElement | null>(null)
@@ -1011,6 +1015,19 @@ export function VoiceModifyTab({
                         </button>
                       )}
 
+                      {/* 核对原音 — 与主流程一致(VoiceSelectionPanel),弹出
+                          SpeakerAudioAuditModal readOnly 模式: 只播放、
+                          不允许 reassign / keep-original (editing 状态
+                          后端这俩端点会 409)。 */}
+                      <button
+                        type="button"
+                        className="h-8 rounded border border-slate-300 dark:border-slate-600 px-3 text-xs font-medium text-slate-500 dark:text-slate-400 transition hover:bg-slate-100 dark:hover:bg-slate-700 disabled:opacity-50"
+                        disabled={ownSegments.length <= 0 || applying}
+                        onClick={() => setAuditModalSpeaker(sp.speakerId)}
+                      >
+                        核对原音
+                      </button>
+
                       {/* Clone */}
                       {showClone && (
                         <button
@@ -1158,6 +1175,29 @@ export function VoiceModifyTab({
           onComplete={handleCloneComplete}
         />
       )}
+
+      {/* 核对原音 Modal — readOnly 模式 (editing 状态) */}
+      {(() => {
+        if (!auditModalSpeaker) return null
+        const sp = displaySpeakers.find((s) => s.speakerId === auditModalSpeaker)
+        if (!sp) return null
+        return (
+          <SpeakerAudioAuditModal
+            jobId={jobId}
+            speaker={{ speakerId: sp.speakerId, speakerName: sp.speakerName }}
+            speakerOptions={displaySpeakers.map((s) => ({
+              speakerId: s.speakerId,
+              speakerName: s.speakerName,
+            }))}
+            onClose={() => setAuditModalSpeaker(null)}
+            // editing 模式只读 — onReassigned 不会触发,但要传一个 noop
+            // 因为 prop 是必填; 主流程 onReassigned 会刷新 speaker 列表,
+            // editing 模式不需要。
+            onReassigned={() => {}}
+            readOnly
+          />
+        )
+      })()}
     </>
   )
 }
