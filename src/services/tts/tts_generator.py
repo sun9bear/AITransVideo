@@ -1199,6 +1199,7 @@ class TTSGenerator:
             result,
             bucket=usage_bucket,
             provider=str(provider or "minimax"),
+            model=minimax_model,
             text=tts_text,
         )
         return result
@@ -1209,6 +1210,7 @@ class TTSGenerator:
         *,
         bucket: str,
         provider: str,
+        model: str | None = None,
         text: str,
     ) -> None:
         meter = getattr(self, "_usage_meter", None)
@@ -1218,7 +1220,7 @@ class TTSGenerator:
             meter.record_tts(
                 bucket=bucket,
                 provider=provider,
-                model=self.config.model,
+                model=_normalize_optional_text(model) or self.config.model,
                 text=text,
                 billed_chars=result.billed_chars,
                 segment_id=result.segment_id,

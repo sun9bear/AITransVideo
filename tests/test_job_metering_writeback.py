@@ -66,6 +66,8 @@ class TestUpdateJobMetering:
             "probe_tts_billed_chars": 40,
             "post_tts_resynth_billed_chars": 220,
             "post_edit_resynth_billed_chars": 40,
+            "tts_billed_chars_by_provider_model": {"minimax:speech-2.8-hd": 1200},
+            "tts_call_count_by_provider_model": {"minimax:speech-2.8-hd": 42},
             "llm_call_count": 7,
             "llm_input_tokens": 1234,
             "llm_output_tokens": 456,
@@ -143,6 +145,12 @@ class TestUpdateJobMetering:
         assert job.metering_snapshot["probe_tts_billed_chars"] == 40
         assert job.metering_snapshot["post_tts_resynth_billed_chars"] == 220
         assert job.metering_snapshot["post_edit_resynth_billed_chars"] == 40
+        assert job.metering_snapshot["tts_billed_chars_by_provider_model"] == {
+            "minimax:speech-2.8-hd": 1200,
+        }
+        assert job.metering_snapshot["tts_call_count_by_provider_model"] == {
+            "minimax:speech-2.8-hd": 42,
+        }
         assert job.metering_snapshot["llm_call_count"] == 7
         assert job.metering_snapshot["llm_input_tokens"] == 1234
         assert job.metering_snapshot["llm_output_tokens"] == 456

@@ -104,6 +104,16 @@ def test_usage_meter_writes_events_and_summarizes_job_cost_buckets(tmp_path: Pat
     assert summary["interactive_preview_tts_billed_chars"] == 4
     assert summary["tts_billed_chars"] == 18
     assert summary["tts_call_count"] == 5
+    assert summary["tts_billed_chars_by_provider_model"] == {
+        "minimax:speech-2.8-turbo": 12,
+        "cosyvoice:cosyvoice-v2": 6,
+        "minimax:speech-2.8-hd": 4,
+    }
+    assert summary["tts_call_count_by_provider_model"] == {
+        "minimax:speech-2.8-turbo": 3,
+        "cosyvoice:cosyvoice-v2": 1,
+        "minimax:speech-2.8-hd": 1,
+    }
     assert summary["llm_call_count"] == 4
     assert summary["llm_audio_input_bytes"] == 1024
     assert summary["llm_audio_input_seconds"] == 30.5

@@ -129,3 +129,35 @@ def test_manifest_emits_fallback_field():
         "audit which segments used a different TTS provider than their "
         "primary selection."
     )
+
+
+def test_tts_usage_records_resolved_model_not_global_default():
+    from services.tts.tts_generator import TTSConfig, TTSGenerator
+
+    class Meter:
+        def __init__(self):
+            self.events = []
+
+        def record_tts(self, **kwargs):
+            self.events.append(kwargs)
+
+    meter = Meter()
+    generator = TTSGenerator(TTSConfig(api_key="test", model="speech-2.8-turbo"))
+    generator.set_usage_meter(meter)
+    result = TTSResult(
+        segment_id=1,
+        audio_path="x.wav",
+        duration_ms=1000,
+        voice_id="v1",
+        billed_chars=20,
+    )
+
+    generator._record_tts_usage(
+        result,
+        bucket="first_tts",
+        provider="minimax",
+        model="speech-2.8-hd",
+        text="测试",
+    )
+
+    assert meter.events[0]["model"] == "speech-2.8-hd"

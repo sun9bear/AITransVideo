@@ -300,6 +300,8 @@ class UsageMeter:
         tts_calls_by_bucket: dict[str, int] = {}
         tts_by_provider: dict[str, int] = {}
         tts_calls_by_provider: dict[str, int] = {}
+        tts_by_provider_model: dict[str, int] = {}
+        tts_calls_by_provider_model: dict[str, int] = {}
         voice_clone_calls = 0
         voice_clone_success_calls = 0
         voice_clone_billable_count = 0
@@ -336,6 +338,8 @@ class UsageMeter:
             elif kind == "tts":
                 bucket = _safe_key(event.get("bucket"))
                 provider = _safe_key(event.get("provider"))
+                model = str(event.get("model") or "").strip().lower() or "unknown"
+                provider_model = f"{provider}:{model}"
                 billed = max(0, _coerce_int(event.get("billed_chars")))
                 tts_calls += 1
                 if bucket in _JOB_TTS_BUCKETS:
@@ -344,6 +348,12 @@ class UsageMeter:
                 tts_calls_by_bucket[bucket] = tts_calls_by_bucket.get(bucket, 0) + 1
                 tts_by_provider[provider] = tts_by_provider.get(provider, 0) + billed
                 tts_calls_by_provider[provider] = tts_calls_by_provider.get(provider, 0) + 1
+                tts_by_provider_model[provider_model] = (
+                    tts_by_provider_model.get(provider_model, 0) + billed
+                )
+                tts_calls_by_provider_model[provider_model] = (
+                    tts_calls_by_provider_model.get(provider_model, 0) + 1
+                )
             elif kind == "voice_clone":
                 provider = _safe_key(event.get("provider"))
                 clone_count = max(0, _coerce_int(event.get("clone_count")))
@@ -375,6 +385,8 @@ class UsageMeter:
             "tts_call_count_by_bucket": tts_calls_by_bucket,
             "tts_billed_chars_by_provider": tts_by_provider,
             "tts_call_count_by_provider": tts_calls_by_provider,
+            "tts_billed_chars_by_provider_model": tts_by_provider_model,
+            "tts_call_count_by_provider_model": tts_calls_by_provider_model,
             "voice_clone_call_count": voice_clone_calls,
             "voice_clone_success_call_count": voice_clone_success_calls,
             "voice_clone_billable_count": voice_clone_billable_count,

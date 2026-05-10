@@ -668,6 +668,24 @@ def _filename_for(artifact_key: str, base: str, local_path: Path) -> str:
 
 ### 4.5 共享 mirror helper(A11)— P1.1 修复
 
+> **⚠️ 终态结算单一入口约束(2026-05-08 Day 2 教训,新增于 v4.1)**
+>
+> `mirror_job_terminal_state` 必须**完整**承载"任务进入 terminal"的全部副作用,**不能只做 status 字段同步 + 一个 quota settle**。任何把任务推进到 terminal 状态的入口(`intercept_list_jobs` / R2 sweeper / 未来的后台补偿任务 / Stage B cleanup parity)都必须**经过这个 helper**,不能各自实现一套结算逻辑。
+>
+> 第一次部署时只接了 `settle_job_quota`,导致 R2 sweeper 把任务推进到 succeeded 时漏了 `settle_job_credit_ledger` — 任务只留下创建时的 `job_reserve` 没有 capture/release,成本页严重少算用户扣点。修复见 `gateway/job_terminal_mirror.py` 现行版本。
+>
+> **未来添加 terminal side effect 的硬约束**:
+> 1. 必须加进 `mirror_job_terminal_state` 内,不开第二条路径
+> 2. 必须**幂等**(用 reason_code + 已结算检查)
+> 3. 必须**容错**(side effect 失败不阻塞 status mirror;warning 而非 raise)
+> 4. **R2 sweeper / parity 守门只发现事实,不重新定义结算口径** — 价格 / 配额 / 计点全部以 Gateway runtime pricing 为真源
+>
+> 当前 helper 已包含的 terminal side effects(顺序执行):
+> - `settle_job_quota`(legacy 配额)
+> - `settle_job_credit_ledger`(credits 账本,2026-05-08 Day 2 补)
+>
+> Stage B 启用 cleanup parity 守门时,**不要在 cleanup 路径里再调 settle** — cleanup 是状态消费方而非状态生产方,应该假设 mirror 已经把账算完了。
+
 [`gateway/job_terminal_mirror.py`](../../gateway/job_terminal_mirror.py)(新建):
 
 ```python
