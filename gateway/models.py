@@ -59,6 +59,9 @@ class User(Base):
     phone_verified_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    email_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # Trial bookkeeping. `trial_granted_at` is stamped the first time a phone
     # number passes verification; subsequent passes for the same phone never
     # re-grant. `trial_ends_at` stays NULL until the gateway `plan_catalog`
@@ -109,6 +112,50 @@ class PhoneVerificationChallenge(Base):
     # post-019 logic: compare code first; on wrong guess increment
     # attempts and only consume when attempts reaches the limit
     # (default 3 — see ``MAX_VERIFY_ATTEMPTS`` in auth_phone).
+    attempts: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default="0",
+        default=0,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
+class EmailVerificationChallenge(Base):
+    """Single-use email verification challenge.
+
+    Used for email registration confirmation and email password reset. The
+    verification code is stored as a password-style hash so database access
+    alone is not enough to consume an active challenge.
+    """
+
+    __tablename__ = "email_verification_challenges"
+    __table_args__ = (
+        Index("idx_email_challenges_email", "email"),
+        Index("idx_email_challenges_expires", "expires_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    email: Mapped[str] = mapped_column(String(255), nullable=False)
+    code_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    client_ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    purpose: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="registration"
+    )  # "registration" | "password_reset"
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    display_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    consumed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     attempts: Mapped[int] = mapped_column(
         Integer,
         nullable=False,

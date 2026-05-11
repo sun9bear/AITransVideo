@@ -6,7 +6,7 @@ Covers:
 - Rate limiting
 - `/auth/phone/send-code` success and failure modes
 - `/auth/phone/verify-code` success and failure modes
-- Closure of `POST /auth/register`
+- Secondary email registration via `POST /auth/register`
 - Legacy email login still works for users with a password_hash
 - Legacy email login rejects phone-only users (no password_hash)
 
@@ -39,6 +39,7 @@ _fake_database.async_session = MagicMock()
 sys.modules.setdefault("database", _fake_database)
 
 import auth  # noqa: E402
+import auth_email  # noqa: E402
 import auth_phone  # noqa: E402
 import risk_control  # noqa: E402
 import sms_provider  # noqa: E402
@@ -124,6 +125,8 @@ def _reset_state():
     """Reset rate limiter + fake sms + IP trial state between tests."""
     risk_control.reset_rate_limits()
     risk_control.reset_ip_trial_grants()
+    auth_email.reset_email_rate_limits()
+    auth_email.clear_fake_state()
     sms_provider.clear_fake_state()
 
 
@@ -800,20 +803,73 @@ class TestVerifyCodeEndpoint:
 # ---------------------------------------------------------------------------
 
 
-class TestEmailRegisterClosed:
-    def test_register_endpoint_returns_403_when_disabled(self):
-        # Default: settings.email_registration_enabled is False.
-        assert settings.email_registration_enabled is False
+class TestEmailRegister:
+    def setup_method(self):
+        _reset_state()
+
+    def teardown_method(self):
+        _reset_state()
+
+    def test_register_endpoint_returns_403_when_disabled(self, monkeypatch):
+        monkeypatch.setattr(settings, "email_registration_enabled", False)
 
         db = _make_db()
         db.execute = AsyncMock()
         body = auth.RegisterRequest(
-            email="u@test.com", password="password", display_name=""
+            email="u@test.com",
+            password="password1234",
+            display_name="",
+            captcha_token="fake-ok",
         )
         with pytest.raises(HTTPException) as exc_info:
-            _run(auth.register_handler(body, Response(), db))
+            _run(auth.register_handler(body, _make_request(), Response(), db))
         assert exc_info.value.status_code == 403
         assert "手机" in exc_info.value.detail
+
+    def test_register_endpoint_requires_captcha(self, monkeypatch):
+        monkeypatch.setattr(settings, "email_registration_enabled", True)
+
+        db = _make_db()
+        db.execute = AsyncMock()
+        body = auth.RegisterRequest(
+            email="u@test.com", password="password1234", display_name=""
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            _run(auth.register_handler(body, _make_request(), Response(), db))
+        assert exc_info.value.status_code == 400
+        assert "验证" in exc_info.value.detail
+
+    def test_register_endpoint_sends_email_code_without_creating_user(self, monkeypatch):
+        monkeypatch.setattr(settings, "email_registration_enabled", True)
+        monkeypatch.setattr(settings, "email_auth_provider", "fake")
+
+        no_existing = MagicMock()
+        no_existing.scalar_one_or_none.return_value = None
+        db = _make_db()
+        db.execute = AsyncMock(return_value=no_existing)
+
+        body = auth.RegisterRequest(
+            email="NewUser@Test.COM",
+            captcha_token="fake-ok",
+        )
+        result = _run(auth.register_handler(body, _make_request(), Response(), db))
+
+        assert result["ok"] is True
+        assert result["needs_email_verification"] is True
+        assert result["email"] == "newuser@test.com"
+        added = [call.args[0] for call in db.add.call_args_list]
+        from models import EmailVerificationChallenge, User as UserModel
+        users = [obj for obj in added if isinstance(obj, UserModel)]
+        challenges = [obj for obj in added if isinstance(obj, EmailVerificationChallenge)]
+        assert users == []
+        assert len(challenges) == 1
+        challenge = challenges[0]
+        assert challenge.email == "newuser@test.com"
+        assert challenge.purpose == "registration"
+        assert challenge.password_hash is None
+        sent_code = auth_email.peek_last_fake_email_code("newuser@test.com", "registration")
+        assert sent_code is not None
+        assert auth.verify_password(sent_code, challenge.code_hash)
 
 
 class TestLegacyEmailLogin:
@@ -831,7 +887,7 @@ class TestLegacyEmailLogin:
 
         body = auth.LoginRequest(email="ghost@test.com", password="whatever")
         with pytest.raises(HTTPException) as exc_info:
-            _run(auth.login_handler(body, Response(), db))
+            _run(auth.login_handler(body, _make_request(), Response(), db))
         assert exc_info.value.status_code == 401
 
     def test_login_accepts_email_user_with_matching_password(self):
@@ -847,7 +903,7 @@ class TestLegacyEmailLogin:
 
         with patch("auth.create_session", new=AsyncMock(return_value="token")):
             body = auth.LoginRequest(email="real@test.com", password=raw_password)
-            result = _run(auth.login_handler(body, Response(), db))
+            result = _run(auth.login_handler(body, _make_request(), Response(), db))
 
         assert result["user"]["email"] == "real@test.com"
 

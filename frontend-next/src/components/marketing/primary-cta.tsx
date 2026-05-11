@@ -22,9 +22,8 @@ type PrimaryCtaProps = {
  * We intentionally do NOT branch on plan / subscription / trial state here.
  * That belongs to later milestones (Task 4). See DESIGN.md §2.1.
  *
- * Task 3: guest CTA points at `/auth`, not `/auth/register`. Public email
- * registration has been closed; `/auth/register` is now a notice page that
- * redirects users to `/auth` anyway, so we skip the extra hop.
+ * Guest CTA points at `/auth`, the canonical phone-first registration entry.
+ * `/auth/register` remains a compatible alias for direct/shared links.
  *
  * Rendered as a styled <Link> (not a <Button>) because this codebase's base-ui
  * Button primitive does not support Slot-style asChild composition.

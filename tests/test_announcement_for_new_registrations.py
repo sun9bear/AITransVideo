@@ -177,11 +177,12 @@ def test_phone_first_registration_calls_dispatch():
 
 
 def test_email_registration_calls_dispatch():
-    """Legacy email register_handler in auth.py also wires the hook
-    for symmetry. Even though the path is mostly closed, when an
-    operator re-enables email registration the live audience must
-    still work."""
-    src = (REPO / "gateway" / "auth.py").read_text(encoding="utf-8")
+    """Email complete-registration wires the live-audience hook.
+
+    /auth/register now only sends the email verification code; the user is
+    created after /auth/email/complete-registration verifies that code.
+    """
+    src = (REPO / "gateway" / "auth_email.py").read_text(encoding="utf-8")
     assert "dispatch_announcements_for_new_user" in src
     idx = src.find("dispatch_announcements_for_new_user")
     snippet = src[max(0, idx - 200) : idx + 200]

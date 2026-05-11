@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 import bcrypt
 from fastapi import Cookie, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, EmailStr
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
@@ -23,8 +23,9 @@ from models import Session, User
 
 class RegisterRequest(BaseModel):
     email: EmailStr
-    password: str
+    password: str | None = None
     display_name: str = ""
+    captcha_token: str | None = None
 
 
 class LoginRequest(BaseModel):
@@ -131,66 +132,19 @@ async def require_auth(
 
 async def register_handler(
     body: RegisterRequest,
+    request: Request,
     response: Response,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Public email registration is CLOSED as of Task 3.
+    """Secondary email registration path.
 
-    The phone-first flow at `POST /auth/phone/send-code` +
-    `POST /auth/phone/verify-code` is now the only supported public
-    registration path. We keep this handler in place (and keep accepting a
-    well-formed request body) so legacy clients get an actionable error
-    instead of a 404 or a confusing schema-validation crash.
-
-    `AVT_EMAIL_REGISTRATION_ENABLED=true` can re-open this path for emergency
-    operator use, but the default is `false` and production must leave it so.
+    The legacy endpoint name is kept for frontend/backward compatibility. It
+    starts email verification only; password setup and user creation happen
+    after the email code has been verified.
     """
-    if not settings.email_registration_enabled:
-        raise HTTPException(
-            status_code=403,
-            detail="邮箱注册已关闭,请使用手机号验证码注册",
-        )
+    from auth_email import start_email_registration
 
-    # --- Legacy fallback path (only reachable when explicitly re-enabled) ---
-    result = await db.execute(select(User).where(User.email == body.email))
-    if result.scalar_one_or_none():
-        raise HTTPException(status_code=409, detail="该邮箱已注册")
-
-    if len(body.password) < 12:
-        raise HTTPException(status_code=400, detail="密码至少 12 位")
-
-    user = User(
-        email=body.email,
-        display_name=body.display_name or body.email.split("@")[0],
-        password_hash=hash_password(body.password),
-    )
-    db.add(user)
-    await db.flush()
-
-    # Plan 2026-05-08 §16.7 follow-up §"新注册用户" — fan out every
-    # active live announcement (audience_kind="for_new_registrations")
-    # to this user. Best-effort: failure logs but never blocks
-    # registration. Mirrors the same hook in auth_phone for symmetry.
-    try:
-        from system_announcements_service import (
-            dispatch_announcements_for_new_user,
-        )
-        await dispatch_announcements_for_new_user(db, user_id=user.id)
-    except Exception:
-        pass
-
-    await db.commit()
-    await db.refresh(user)
-
-    await create_session(db, user.id, response)
-
-    return {
-        "user": {
-            "id": str(user.id),
-            "email": user.email or "",
-            "display_name": user.display_name,
-        }
-    }
+    return await start_email_registration(body=body, request=request, db=db)
 
 
 async def login_handler(

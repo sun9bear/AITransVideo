@@ -74,9 +74,23 @@ class GatewaySettings(BaseSettings):
     phone_send_code_max_per_phone_hour: int = 5
     phone_send_code_max_per_ip_hour: int = 20
 
-    # Public registration switch. When False, `POST /auth/register` refuses to
-    # create new accounts (returns 403). Legacy email LOGIN is unaffected.
-    email_registration_enabled: bool = False
+    # Public email registration switch. Phone-first registration stays the
+    # default UX, but email can be offered as a secondary path. When false,
+    # `POST /auth/register` refuses to create email accounts (returns 403).
+    email_registration_enabled: bool = True
+
+    # --- Email auth (registration verification + password reset) ---
+    # Default to "fake" so tests/local development do not depend on a live
+    # external mail provider. Production can set AVT_EMAIL_AUTH_PROVIDER=resend
+    # and reuse notifications.send_email / RESEND_API_KEY.
+    email_auth_provider: str = "fake"
+    email_code_ttl_seconds: int = 900  # 15 minutes
+    email_code_length: int = 6
+    email_send_code_window_seconds: int = 60
+    email_send_code_max_per_email_window: int = 1
+    email_send_code_hour_window_seconds: int = 3600
+    email_send_code_max_per_email_hour: int = 5
+    email_send_code_max_per_ip_hour: int = 20
 
     # --- Studio post-edit workflow (plan 2026-04-18 D29) ---
     # Backend gate for the editing endpoints (enter-edit / editing/cancel /

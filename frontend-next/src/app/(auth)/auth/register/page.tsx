@@ -3,7 +3,7 @@
 import { Suspense } from "react"
 import Link from "next/link"
 import { BrandMark } from "@/components/marketing/brand-mark"
-import { PhoneLoginForm } from "@/components/auth/phone-login-form"
+import { RegisterMethodForm } from "@/components/auth/register-method-form"
 
 /**
  * Registration page at /auth/register — same as /auth.
@@ -32,13 +32,13 @@ export default function RegisterPage() {
           注册 AITrans.Video
         </h1>
         <p className="mt-3 zh-body text-sm text-muted-foreground">
-          使用手机号验证码注册，新用户需设置登录密码
+          默认使用手机号注册，也可以切换邮箱注册
         </p>
       </div>
 
       <div className="rounded-2xl border border-border bg-card p-4 shadow-sm sm:p-8">
         <Suspense fallback={null}>
-          <PhoneLoginForm />
+          <RegisterMethodForm />
         </Suspense>
 
         <div className="mt-6 border-t border-border pt-5 text-center text-sm text-muted-foreground">
