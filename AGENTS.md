@@ -36,6 +36,19 @@ Build a Python workflow that outputs Jianying draft projects rather than rendere
 - Team seats, reviewer seats, full minute-level usage ledgering, and full auto-renew/second-channel payment flows are later-stage capabilities unless the current task explicitly brings them into scope.
 - For marketing, auth, billing, and payment-facing UX, optimize primarily for Chinese-language users: Chinese copy should read naturally, CTA wording should fit Chinese product expectations, and trust cues should match Chinese SaaS/payment habits.
 
+## Production deployment
+- US host deployment instructions live in `docs/deployment/US_HOST_PRODUCTION_DEPLOYMENT.md`.
+- The only production Compose entrypoint is `/opt/aivideotrans/docker-compose.yml`.
+- Deploy from `/opt/aivideotrans`, not from `/opt/aivideotrans/app`:
+  `docker compose --env-file /opt/aivideotrans/config/.env up -d --build`
+- Keep the server root Compose file aligned with the repository `docker-compose.yml`.
+- Production build contexts are supplied by `/opt/aivideotrans/config/.env`:
+  `AIVIDEOTRANS_APP_BUILD_CONTEXT=/opt/aivideotrans/app`,
+  `AIVIDEOTRANS_NEXT_BUILD_CONTEXT=/opt/aivideotrans/app/frontend-next`,
+  `AIVIDEOTRANS_GATEWAY_BUILD_CONTEXT=/opt/aivideotrans/app/gateway`.
+- Do not keep divergent Compose files under `/opt/aivideotrans` and `/opt/aivideotrans/app`; that caused the previous captcha build-arg drift.
+- Never run `docker compose down -v` in production unless explicitly asked and the PostgreSQL/data volume impact has been accepted.
+
 ## Review guidelines
 When reviewing pull requests for this repository:
 

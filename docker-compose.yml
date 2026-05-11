@@ -1,7 +1,7 @@
 services:
   app:
     build:
-      context: .
+      context: ${AIVIDEOTRANS_APP_BUILD_CONTEXT:-.}
       dockerfile: Dockerfile
       args:
         # Phase D — opt into Whisper subtitle alignment runtime deps at
@@ -117,7 +117,7 @@ services:
 
   next:
     build:
-      context: ./frontend-next
+      context: ${AIVIDEOTRANS_NEXT_BUILD_CONTEXT:-./frontend-next}
       dockerfile: Dockerfile
       args:
         NEXT_PUBLIC_CAPTCHA_PROVIDER: "${NEXT_PUBLIC_CAPTCHA_PROVIDER:-fake}"
@@ -157,7 +157,7 @@ services:
 
   gateway:
     build:
-      context: ./gateway
+      context: ${AIVIDEOTRANS_GATEWAY_BUILD_CONTEXT:-./gateway}
       dockerfile: Dockerfile
     image: aivideotrans-gateway:latest
     container_name: aivideotrans-gateway
