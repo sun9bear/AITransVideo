@@ -269,6 +269,76 @@ def test_jianying_pushed_via_direct_path_not_manifest(fake_r2, tmp_path):
     assert jianying_uploads[0][2] == "application/zip"
 
 
+def test_jianying_download_filename_matches_on_disk_stem(fake_r2, tmp_path):
+    """2026-05-11 production bug: jianying zip's Save-As filename was
+    being generated as ``{base_filename}_jianying.zip`` while the
+    on-disk zip and its INTERNAL material-path folder were named
+    ``{title}_{YYYY-MM-DD}.zip`` / ``{title}_{YYYY-MM-DD}/`` by
+    ``jianying_draft_writer._resolve_zip_basename``.
+
+    Mismatch consequence: user downloads file as
+    ``{title}_jianying.zip``, Windows unzips into
+    ``{title}_jianying/``, but draft_content.json materials reference
+    ``{title}_{YYYY-MM-DD}/materials/dubbed_audio.wav`` →
+    剪映 reports "媒体丢失" on every open.
+
+    Contract: the Save-As filename for jianying.zip MUST equal
+    ``local_path.name`` so the unzipped folder stem matches what the
+    JSON's material paths expect."""
+    from services.r2_publisher_lib.r2_publisher import publish_artifacts
+
+    project_dir = _make_project_with_manifest(tmp_path, artifact_files={
+        "publish.dubbed_video": "video/final.mp4",
+        "editor.dubbed_audio_complete": "audio/dubbed.wav",
+        "editor.subtitles": "subs/zh.srt",
+        "editor.subtitles_en": "subs/en.srt",
+        "editor.subtitles_bilingual": "subs/bi.srt",
+    })
+    # The runner names the zip exactly as _resolve_zip_basename does.
+    jianying_zip = project_dir / "jianying" / "exports" / "黄仁勋演讲_2026-05-11.zip"
+    jianying_zip.parent.mkdir(parents=True)
+    jianying_zip.write_bytes(b"PK\x03\x04" + b"\0" * 32)
+
+    result = publish_artifacts(
+        job_id="job_j",
+        service_mode="studio",
+        edit_generation=1,
+        project_dir=project_dir,
+        base_filename="黄仁勋演讲",  # title without date — what publish stage typically passes
+        has_jianying_draft=True,
+        jianying_draft_zip_path=str(jianying_zip),
+    )
+    by_key = {e.artifact_key: e for e in result.entries}
+    j = by_key["editor.jianying_draft_zip"]
+    assert j.state == "pushed", j.error
+    assert j.filename == "黄仁勋演讲_2026-05-11.zip", (
+        f"jianying zip Save-As filename must equal local_path.name to "
+        f"preserve the folder-stem invariant 剪映 needs to find materials. "
+        f"Got: {j.filename!r}. Expected: '黄仁勋演讲_2026-05-11.zip'."
+    )
+    # Negative: must NOT use the old `_jianying.zip` suffix
+    assert not j.filename.endswith("_jianying.zip"), (
+        f"regression: jianying Save-As filename reverted to "
+        f"`_jianying.zip` suffix ({j.filename!r}); breaks 剪映 material "
+        f"resolution because folder stem inside the zip is dated."
+    )
+
+
+def test_filename_for_non_jianying_keys_unchanged(tmp_path):
+    """Unit-level sanity: only jianying.zip's filename rule changed.
+    Other artifact keys keep their old templated suffixes."""
+    from services.r2_publisher_lib.r2_publisher import _filename_for
+
+    p = tmp_path / "any.bin"
+    p.write_bytes(b"")
+    assert _filename_for("publish.dubbed_video", "myvid", p) == "myvid.mp4"
+    assert _filename_for("publish.dubbed_video_poster", "myvid", p) == "myvid_poster.jpg"
+    assert _filename_for("editor.dubbed_audio_complete", "myvid", p) == "myvid.wav"
+    assert _filename_for("editor.subtitles", "myvid", p) == "myvid_zh.srt"
+    assert _filename_for("editor.subtitles_en", "myvid", p) == "myvid_en.srt"
+    assert _filename_for("editor.subtitles_bilingual", "myvid", p) == "myvid_bilingual.srt"
+
+
 def test_jianying_delta_push_only_touches_jianying(fake_r2, tmp_path):
     """``push_keys={editor.jianying_draft_zip}`` runs ONLY the jianying
     branch. None of the studio-extras' R2 keys appear in HEAD/PUT

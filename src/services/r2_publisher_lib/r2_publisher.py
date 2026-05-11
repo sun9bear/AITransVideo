@@ -178,7 +178,24 @@ def _filename_for(artifact_key: str, base: str, local_path: Path) -> str:
     if artifact_key == "editor.subtitles_bilingual":
         return f"{name}_bilingual.srt"
     if artifact_key == "editor.jianying_draft_zip":
-        return f"{name}_jianying.zip"
+        # 2026-05-11 production bug fix:
+        # The jianying zip on disk is named "{title}_{YYYY-MM-DD}.zip"
+        # by ``jianying_draft_writer._resolve_zip_basename``. Critically,
+        # the writer also uses ``Path(zip_path).stem`` as the INTERNAL
+        # folder name embedded in draft_content.json material paths
+        # (line 399 in jianying_draft_writer.py).
+        #
+        # 剪映 expects to find materials at
+        # ``{drafts_root}/{zip_stem}/materials/dubbed_audio.wav``. If
+        # the downloaded zip filename doesn't match the zip's internal
+        # folder stem, the user unzips into ``{title}_jianying/`` while
+        # the material paths inside still point to
+        # ``{title}_{YYYY-MM-DD}/materials/...`` → 剪映 reports
+        # "媒体丢失".
+        #
+        # Honour the on-disk filename verbatim — it was carefully
+        # constructed to match the internal folder stem.
+        return local_path.name
     return f"{name}{local_path.suffix or ''}"
 
 
