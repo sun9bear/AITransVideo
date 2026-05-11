@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import os
 import threading
 from pathlib import Path
@@ -11,6 +12,8 @@ from typing import Callable
 from services._file_lock import file_lock
 from services.jobs.events import JobEvent
 from services.jobs.models import JobRecord
+
+logger = logging.getLogger(__name__)
 
 
 def _clone_record(record: JobRecord) -> JobRecord:
@@ -289,7 +292,19 @@ class JobStore:
         new_cache: dict[str, tuple[int, JobRecord]] = {}
         records: list[JobRecord] = []
 
+        # 2026-05-11: defensive list — earlier we used ``*.json`` and
+        # trusted from_dict to fail-loud on stray files; that turned
+        # out to crash the WHOLE list (single bad file → 500 →
+        # workspace empty for every user). Operator-left sidecar files
+        # (``_patch.json``, ``_correct-names.json``) shouldn't be able
+        # to nuke the list. Two-line defense:
+        #   1. Skip files whose name starts with ``_`` — that's the
+        #      convention for operator-left sidecars and lock files.
+        #      Real job_id values never start with underscore.
+        #   2. Per-file try/except logs + skips, never aborts the list.
         for path in self.root_dir.glob("*.json"):
+            if path.name.startswith("_"):
+                continue
             try:
                 mtime_ns = path.stat().st_mtime_ns
             except (FileNotFoundError, OSError):
@@ -323,10 +338,23 @@ class JobStore:
             except (FileNotFoundError, OSError):
                 # File vanished after the stat — skip.
                 continue
-            payload = json.loads(payload_text)
-            if not isinstance(payload, dict):
-                raise ValueError(f"Invalid job record payload: {path}")
-            record = JobRecord.from_dict(payload)
+            # Per-file fail-safe: malformed JSON, non-dict payload, or
+            # from_dict raising on missing/invalid fields must NOT
+            # cascade into a list-wide 500. Log loudly, skip the file,
+            # let the rest of the list go through. See the 2026-05-11
+            # incident where a stray operator file in this directory
+            # blanked the workspace for every user.
+            try:
+                payload = json.loads(payload_text)
+                if not isinstance(payload, dict):
+                    raise ValueError(f"payload is not a dict: type={type(payload).__name__}")
+                record = JobRecord.from_dict(payload)
+            except Exception as exc:  # noqa: BLE001 — last-resort guard
+                logger.warning(
+                    "JobStore.list_jobs: skipping unparseable record at %s (%s)",
+                    path, exc,
+                )
+                continue
             new_cache[job_id] = (mtime_ns, record)
             # Deep-copy on the cache-miss path too — same reasoning as
             # the cache-hit branch above (see _clone_record docstring).
