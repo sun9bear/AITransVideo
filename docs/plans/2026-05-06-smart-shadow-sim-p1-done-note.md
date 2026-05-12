@@ -331,9 +331,11 @@ P0 results note §7.1 的 ≥10 重跑门槛已达成。剩余阻塞：≥20 met
 ### 5.1 数据累积侧
 
 > **2026-05-10 更新**：gate 定义已从 alignment_model 改为 drift_count（详 P0 results note §15）；下方阈值按新 gate 重表述。
+>
+> ⚠️ **2026-05-12 更新**：本节 12/20 数字过时，最新真实状态见 [P0 results note §16](2026-05-06-smart-shadow-eval-p0-results.md#16-2026-05-12-增补基础设施完工--自然累积进展fresh-snapshot)（17/20，缺 3）。
 
 - [x] **post-Phase-A/B metered jobs ≥ 10**（P0 重跑门槛）：✅ **2026-05-10 达成**（n=39, 12 ≥ 10），且同次 analyzer §11 verdict 转 PASS（margin p50/p90/p99 = 55.37 / 282.89 / 350.59 RMB）
-- [ ] **post-Phase-A/B metered jobs ≥ 20**（P2 决策窗口）：当前 12/20（60%），等数据累积
+- [ ] **post-Phase-A/B metered jobs ≥ 20**（P2 决策窗口）：当前 12/20（60%），等数据累积 → **2026-05-12 实测 17/20，详 P0 §16**
 
 ### 5.2 关键 gap 闭环
 

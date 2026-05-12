@@ -901,6 +901,8 @@ scripts/smart_shadow_evaluator.py
 
 ### P2：智能版 MVP
 
+> 📊 **实时 P2 入口阻塞清单见 [P0 results note §16](2026-05-06-smart-shadow-eval-p0-results.md#16-2026-05-12-增补基础设施完工--自然累积进展fresh-snapshot)（2026-05-12 起更新）**。本节下方列出的入口前置条件是 2026-05-07 frozen 版本，部分已完成、部分数字已过时。Audit 应以 P0 §16 + [scan_recent.py](../../temp/smart_shadow_sim/buffett_spot_check/scan_recent.py) 重跑结果为准，不要直接信本节 frozen 状态。
+
 **入口前置条件**（2026-05-07 更新）：
 - post-Phase-D metered jobs ≥ 20（覆盖更多内容类型）
 - cost p90/p99 在 INCONCLUSIVE 转 PASS / FAIL 后才能定 100 cred/min 可行性
