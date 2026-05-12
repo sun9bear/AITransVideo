@@ -450,6 +450,73 @@ class _FakeUser:
     trial_ends_at: datetime | None = None
 
 
+def test_single_regenerate_allows_long_text_and_records_usage(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Single-segment regenerate should not have a fixed 300-char gate.
+
+    The editor now surfaces length risk as warning-only guidance; Gateway
+    should enforce plan usage, then let Job API synthesize and DSP-fit the
+    result if the user chooses to force it.
+    """
+    project_dir = tmp_path / "project"
+    editing_dir = project_dir / "editor" / "editing"
+    editing_dir.mkdir(parents=True)
+    (editing_dir / "segments.json").write_text(
+        json.dumps([
+            {
+                "segment_id": "seg_001",
+                "cn_text": "x" * 862,
+            }
+        ]),
+        encoding="utf-8",
+    )
+    source = _FakeJobRow(
+        job_id="job_src",
+        status="editing",
+        project_dir=str(project_dir),
+    )
+    session = _FakeSession()
+    session._execute_queue = [_FakeResult(value=source)]
+    user = _FakeUser(plan_code="plus")
+    enforce_calls: list[str] = []
+
+    class _Request:
+        async def body(self):
+            return b"{}"
+
+    async def fake_enforce(db, job, passed_user, *, subpath: str, now_utc: datetime):
+        assert db is session
+        assert job is source
+        assert passed_user is user
+        enforce_calls.append(subpath)
+        return source, job_intercept.POST_EDIT_LIMITS["plus"]
+
+    async def fake_proxy_request(**kwargs):
+        return _upstream_response({"ok": True})
+
+    monkeypatch.setattr(job_intercept, "_enforce_post_edit_access", fake_enforce)
+    monkeypatch.setattr(job_intercept, "proxy_request", fake_proxy_request)
+
+    response = asyncio.run(
+        job_intercept._post_edit_mutation_with_policy(
+            _Request(),
+            "job_src",
+            session,
+            user,
+            subpath="segments/seg_001/regenerate-tts",
+        )
+    )
+
+    assert response.status_code == 200
+    assert enforce_calls == ["segments/seg_001/regenerate-tts", "regenerate-tts"]
+    usage = source.metering_snapshot[job_intercept.POST_EDIT_USAGE_KEY]
+    assert usage["tts_segments"] == 1
+    assert usage["tts_chars"] == 862
+    assert session.committed is True
+
+
 def test_consume_post_edit_tts_usage_records_trial_allowance(monkeypatch) -> None:
     now = datetime.now(timezone.utc)
     source = _FakeJobRow(job_id="job_src", status="editing", expires_at=now + timedelta(days=1))

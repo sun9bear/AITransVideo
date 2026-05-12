@@ -12,6 +12,21 @@ import { ApiError, apiClient } from "@/lib/api/client"
 // Types
 // ---------------------------------------------------------------------------
 
+export type TtsLengthGuidanceSeverity = "ok" | "mild" | "warning" | "severe" | "unknown"
+
+export interface TtsLengthGuidance {
+  current_chars: number
+  target_duration_ms: number
+  chars_per_second: number | null
+  chars_per_second_source: string
+  suggested_target_chars: number | null
+  suggested_min_chars: number | null
+  suggested_max_chars: number | null
+  estimated_duration_ms: number | null
+  estimated_ratio: number | null
+  severity: TtsLengthGuidanceSeverity
+}
+
 export interface EditingSegment {
   segment_id: string
   speaker_id?: string
@@ -42,6 +57,11 @@ export interface EditingSegment {
    * extreme ratios (>1.5x / <0.67x) degrade audio quality — warn the
    * user at edit time so they can shorten the text before committing. */
   draft_wav_duration_ms?: number
+  /** Warning-only pre-synthesis estimate for whether edited text fits
+   * the original slot duration for this voice speed. Regenerate remains
+   * allowed even when severity is warning/severe; publish DSP-fits the
+   * resulting audio if the real duration still differs. */
+  tts_length_guidance?: TtsLengthGuidance
   /** Passthrough for any unknown pipeline-maintained fields. */
   [key: string]: unknown
 }

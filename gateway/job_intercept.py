@@ -75,8 +75,7 @@ POST_EDIT_RESPONSE_FIELDS = (
 JOB_LIST_DEFAULT_LIMIT = 20
 JOB_LIST_MAX_LIMIT = 100
 POST_EDIT_USAGE_KEY = "post_edit_usage"
-POST_EDIT_MAX_SINGLE_TTS_CHARS = 300
-POST_EDIT_MAX_SEGMENT_SAVE_CHARS = 1000
+POST_EDIT_MAX_SEGMENT_SAVE_CHARS = 5000
 POST_EDIT_BATCH_MAX_SEGMENTS_DEFAULT = 50
 POST_EDIT_BATCH_MAX_SEGMENTS_PRO = 150
 
@@ -2338,12 +2337,13 @@ async def _post_edit_mutation_with_policy(
         payload = await _read_json_body(request)
         cn_text = payload.get("cn_text")
         if cn_text is not None and len(str(cn_text).strip()) > POST_EDIT_MAX_SEGMENT_SAVE_CHARS:
-            raise HTTPException(status_code=400, detail="单段译文字数不能超过 1000 字。")
+            raise HTTPException(
+                status_code=400,
+                detail=f"单段译文字数不能超过 {POST_EDIT_MAX_SEGMENT_SAVE_CHARS} 字，请拆分后再保存。",
+            )
 
     if len(parts) == 3 and parts[0] == "segments" and parts[2] == "regenerate-tts":
         chars = _segment_cn_chars(job.project_dir, parts[1])
-        if chars > POST_EDIT_MAX_SINGLE_TTS_CHARS:
-            raise HTTPException(status_code=400, detail="单段重合成最多支持 300 字。")
         await _consume_post_edit_tts_usage(
             db, job, user, segments=1, chars=chars, batch_start=False, now_utc=now_utc,
         )

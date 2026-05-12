@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -73,6 +74,20 @@ SUPPORTED_SEGMENT_STATUSES: frozenset[str] = frozenset({
     SEGMENT_STATUS_TTS_FAILED,
     SEGMENT_STATUS_VOICE_DIRTY,
 })
+
+# Warning-only guidance for post-edit re-TTS. The editor should not block
+# long text: the user may deliberately force synthesis, and publish will
+# DSP-fit the resulting wav to the original slot. These bounds only estimate
+# when the text is likely to need audible time-warping after synthesis.
+TTS_LENGTH_GUIDANCE_MIN_FACTOR = 0.85
+TTS_LENGTH_GUIDANCE_MAX_FACTOR = 1.15
+TTS_LENGTH_GUIDANCE_WARNING_MIN_RATIO = 0.70
+TTS_LENGTH_GUIDANCE_WARNING_MAX_RATIO = 1.30
+TTS_LENGTH_GUIDANCE_SEVERE_MIN_RATIO = 0.50
+TTS_LENGTH_GUIDANCE_SEVERE_MAX_RATIO = 1.50
+DEFAULT_TTS_LENGTH_GUIDANCE_CPS = 4.5
+MIN_REASONABLE_TTS_CPS = 2.0
+MAX_REASONABLE_TTS_CPS = 8.0
 
 # Fields that PATCH /jobs/{id}/segments/{sid} is allowed to mutate. Anything
 # else in the PATCH body is silently ignored. This is the allowlist form of
@@ -250,12 +265,178 @@ def editing_payload(project_dir: str | Path) -> dict[str, Any]:
     """
     segments = load_editing_segments(project_dir)
     status = load_segment_status(project_dir)
-    augmented = _augment_with_draft_wav_duration(project_dir, segments)
+    augmented = _augment_with_tts_length_guidance(segments)
+    augmented = _augment_with_draft_wav_duration(project_dir, augmented)
     return {
         "segments": augmented,
         "segment_status": status,
         "total": len(augmented),
     }
+
+
+def _augment_with_tts_length_guidance(
+    segments: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Attach warning-only length guidance for pre-synthesis editing.
+
+    The guidance is deterministic and segment-local: prefer explicit voice
+    speed metadata if present, then observed first-pass speed, then a
+    conservative default. No external service or gateway lookup is needed
+    for the read path.
+    """
+    augmented: list[dict[str, Any]] = []
+    for seg in segments:
+        if not isinstance(seg, dict):
+            augmented.append(seg)
+            continue
+        out = dict(seg)
+        out["tts_length_guidance"] = _build_tts_length_guidance(out)
+        augmented.append(out)
+    return augmented
+
+
+def _build_tts_length_guidance(segment: dict[str, Any]) -> dict[str, Any]:
+    current_chars = _tts_text_char_count(segment.get("cn_text"))
+    target_duration_ms = _segment_target_duration_ms(segment)
+    cps, cps_source = _segment_chars_per_second(segment)
+
+    guidance: dict[str, Any] = {
+        "current_chars": current_chars,
+        "target_duration_ms": target_duration_ms,
+        "chars_per_second": round(cps, 3) if cps is not None else None,
+        "chars_per_second_source": cps_source,
+        "suggested_target_chars": None,
+        "suggested_min_chars": None,
+        "suggested_max_chars": None,
+        "estimated_duration_ms": None,
+        "estimated_ratio": None,
+        "severity": "unknown",
+    }
+    if target_duration_ms <= 0 or cps is None or cps <= 0:
+        return guidance
+
+    target_seconds = target_duration_ms / 1000
+    suggested_target = max(1, int(round(target_seconds * cps)))
+    suggested_min = max(
+        1, int(math.floor(suggested_target * TTS_LENGTH_GUIDANCE_MIN_FACTOR))
+    )
+    suggested_max = max(
+        suggested_min,
+        int(math.ceil(suggested_target * TTS_LENGTH_GUIDANCE_MAX_FACTOR)),
+    )
+    estimated_duration_ms = (
+        int(round((current_chars / cps) * 1000)) if current_chars > 0 else 0
+    )
+    ratio = estimated_duration_ms / target_duration_ms
+
+    guidance.update({
+        "suggested_target_chars": suggested_target,
+        "suggested_min_chars": suggested_min,
+        "suggested_max_chars": suggested_max,
+        "estimated_duration_ms": estimated_duration_ms,
+        "estimated_ratio": round(ratio, 3),
+        "severity": _tts_length_guidance_severity(ratio),
+    })
+    return guidance
+
+
+def _tts_length_guidance_severity(ratio: float) -> str:
+    if (
+        ratio <= TTS_LENGTH_GUIDANCE_SEVERE_MIN_RATIO
+        or ratio >= TTS_LENGTH_GUIDANCE_SEVERE_MAX_RATIO
+    ):
+        return "severe"
+    if (
+        ratio < TTS_LENGTH_GUIDANCE_WARNING_MIN_RATIO
+        or ratio > TTS_LENGTH_GUIDANCE_WARNING_MAX_RATIO
+    ):
+        return "warning"
+    if (
+        ratio < TTS_LENGTH_GUIDANCE_MIN_FACTOR
+        or ratio > TTS_LENGTH_GUIDANCE_MAX_FACTOR
+    ):
+        return "mild"
+    return "ok"
+
+
+def _tts_text_char_count(value: Any) -> int:
+    return len(str(value or "").strip())
+
+
+def _segment_target_duration_ms(segment: dict[str, Any]) -> int:
+    for key in ("target_duration_ms", "duration_target_ms"):
+        value = _coerce_positive_number(segment.get(key))
+        if value is not None:
+            return int(round(value))
+    start = _coerce_positive_number(segment.get("start_ms"), allow_zero=True)
+    end = _coerce_positive_number(segment.get("end_ms"), allow_zero=True)
+    if start is not None and end is not None and end > start:
+        return int(round(end - start))
+    return 0
+
+
+def _segment_chars_per_second(segment: dict[str, Any]) -> tuple[float | None, str]:
+    explicit = _explicit_segment_cps(segment)
+    if explicit is not None:
+        return explicit, "segment"
+
+    first_pass_text = str(segment.get("first_pass_cn_text") or "").strip()
+    first_pass_duration_ms = _coerce_positive_number(
+        segment.get("first_pass_duration_ms")
+    )
+    if first_pass_text and first_pass_duration_ms is not None:
+        observed = len(first_pass_text) / (first_pass_duration_ms / 1000)
+        if _is_reasonable_cps(observed):
+            return observed, "observed_first_pass"
+
+    return DEFAULT_TTS_LENGTH_GUIDANCE_CPS, "default"
+
+
+def _explicit_segment_cps(segment: dict[str, Any]) -> float | None:
+    for key in (
+        "voice_chars_per_second",
+        "chars_per_second",
+        "voice_cps",
+        "calibrated_chars_per_second",
+    ):
+        value = _coerce_positive_number(segment.get(key))
+        if value is not None and _is_reasonable_cps(value):
+            return float(value)
+
+    by_model = segment.get("chars_per_second_by_model")
+    if not isinstance(by_model, dict):
+        return None
+    model_key = str(
+        segment.get("tts_model_key")
+        or segment.get("tts_model")
+        or segment.get("model")
+        or ""
+    )
+    candidates: list[Any] = []
+    if model_key:
+        candidates.append(by_model.get(model_key))
+    candidates.extend(by_model.values())
+    for candidate in candidates:
+        value = _coerce_positive_number(candidate)
+        if value is not None and _is_reasonable_cps(value):
+            return float(value)
+    return None
+
+
+def _coerce_positive_number(value: Any, *, allow_zero: bool = False) -> float | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if allow_zero and numeric >= 0:
+        return numeric
+    if numeric > 0:
+        return numeric
+    return None
+
+
+def _is_reasonable_cps(value: float) -> bool:
+    return MIN_REASONABLE_TTS_CPS <= value <= MAX_REASONABLE_TTS_CPS
 
 
 def _augment_with_draft_wav_duration(

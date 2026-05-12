@@ -662,9 +662,21 @@ def _filename_for(artifact_key: str, base: str, local_path: Path) -> str:
     if artifact_key == "editor.subtitles_bilingual":
         return f"{name}_bilingual.srt"
     if artifact_key == "editor.jianying_draft_zip":
-        return f"{name}_jianying.zip"
+        # ⚠️ 2026-05-11 production bug fix (commit a849fea):
+        # 不能用 f"{name}_jianying.zip" — 剪映 desktop 把 zip stem 当作
+        # internal folder 名找 materials,publisher 自定义后缀会破坏契约。
+        # 直接复用 disk basename(jianying_draft_writer 已保证正确格式)。
+        return local_path.name
     return f"{name}{local_path.suffix or ''}"
 ```
+
+> **⚠️ R2 命名是消费契约,不是 publisher 自由发挥(2026-05-11 Day 3 教训)**
+>
+> `_filename_for` 几个 if 分支在 plan 初稿时凭直觉写成 `{name}_xxx.ext`。jianying 那一行被实战打脸:剪映 desktop app 通过 `draft_content.json` 里的 materials 路径找文件,这个路径用的是 zip 写到磁盘时的 stem(`jianying_draft_writer._resolve_zip_basename`)。Publisher 把下载文件名改成 `{title}_jianying.zip` → 用户解压成 `{title}_jianying/` → 剪映找 `{title}_{date}/materials/*.wav` 失败 → 「媒体丢失」弹窗,产物报废。
+>
+> **invariant**:R2 publisher 对任何 artifact 的 Save-As 文件名,**优先用 `local_path.name`**(disk 上的实际 basename)。disk 名是由产物生成方(writer / encoder / pipeline)和最终消费方(用户应用、播放器、剪辑软件)共同约定的契约,publisher 不该插手。其他 key 现在还用 `{name}_xx.ext` 是历史遗留,以后任何对消费方有路径敏感性的格式(zip / 文件夹结构 / 模板包)都必须直接用 disk basename。
+>
+> 与 §4.5 终态结算同源:**R2 publisher 是路过的快递员,不是包裹标签的定义者**。
 
 ### 4.5 共享 mirror helper(A11)— P1.1 修复
 

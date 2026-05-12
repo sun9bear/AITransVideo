@@ -57,6 +57,8 @@ export class ApiClient {
       const message =
         payload && typeof payload === 'object' && 'message' in payload
           ? String(payload.message)
+          : payload && typeof payload === 'object' && 'detail' in payload
+            ? stringifyErrorDetail(payload.detail)
           : payload && typeof payload === 'object' && 'error' in payload
             ? String(payload.error)
           : `API request failed with status ${response.status}`
@@ -102,3 +104,14 @@ export class ApiClient {
 }
 
 export const apiClient = new ApiClient(resolveJobApiBaseUrl())
+
+function stringifyErrorDetail(detail: unknown): string {
+  if (typeof detail === 'string') {
+    return detail
+  }
+  try {
+    return JSON.stringify(detail)
+  } catch {
+    return String(detail)
+  }
+}

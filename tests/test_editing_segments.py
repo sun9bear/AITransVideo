@@ -819,6 +819,76 @@ def test_editing_payload_tolerates_unreadable_draft_wav(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Post-edit TTS length guidance: warning-only fit estimate before synthesis
+# ---------------------------------------------------------------------------
+
+
+def test_editing_payload_includes_tts_length_guidance_from_observed_speed(
+    tmp_path: Path,
+) -> None:
+    """Pre-synthesis guidance should use segment-local observed voice speed.
+
+    This guards the post-edit policy: long edits are warning-only, not a
+    hard regenerate-tts blocker. The frontend can tell the user the text is
+    likely too long before they force synthesis.
+    """
+    _, project_dir, _ = _build_editing_job(tmp_path)
+    segments = load_editing_segments(project_dir)
+    segments[0].update({
+        "cn_text": "x" * 60,
+        "target_duration_ms": 10_000,
+        "first_pass_cn_text": "x" * 40,
+        "first_pass_duration_ms": 10_000,
+    })
+    (project_dir / EDITING_SUBDIR / "segments.json").write_text(
+        json.dumps(segments, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    payload = editing_payload(project_dir)
+
+    seg1 = next(s for s in payload["segments"] if s["segment_id"] == "seg_001")
+    guidance = seg1["tts_length_guidance"]
+    assert guidance["current_chars"] == 60
+    assert guidance["target_duration_ms"] == 10_000
+    assert guidance["chars_per_second"] == 4.0
+    assert guidance["chars_per_second_source"] == "observed_first_pass"
+    assert guidance["suggested_target_chars"] == 40
+    assert guidance["suggested_min_chars"] == 34
+    assert guidance["suggested_max_chars"] == 46
+    assert guidance["estimated_duration_ms"] == 15_000
+    assert guidance["estimated_ratio"] == 1.5
+    assert guidance["severity"] == "severe"
+
+
+def test_editing_payload_tts_length_guidance_uses_default_speed_when_needed(
+    tmp_path: Path,
+) -> None:
+    _, project_dir, _ = _build_editing_job(tmp_path)
+    segments = load_editing_segments(project_dir)
+    segments[0].update({
+        "cn_text": "x" * 45,
+        "target_duration_ms": 10_000,
+    })
+    (project_dir / EDITING_SUBDIR / "segments.json").write_text(
+        json.dumps(segments, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    payload = editing_payload(project_dir)
+
+    seg1 = next(s for s in payload["segments"] if s["segment_id"] == "seg_001")
+    guidance = seg1["tts_length_guidance"]
+    assert guidance["chars_per_second"] == 4.5
+    assert guidance["chars_per_second_source"] == "default"
+    assert guidance["suggested_target_chars"] == 45
+    assert guidance["suggested_min_chars"] == 38
+    assert guidance["suggested_max_chars"] == 52
+    assert guidance["estimated_duration_ms"] == 10_000
+    assert guidance["estimated_ratio"] == 1.0
+    assert guidance["severity"] == "ok"
+
+
 # source_text patch support (2026-04-21) — users may correct upstream S1
 # ASR mistakes on the edit page; symmetric with cn_text but no auto-retranslate
 # (user also updates cn_text themselves, then single-segment re-TTS).

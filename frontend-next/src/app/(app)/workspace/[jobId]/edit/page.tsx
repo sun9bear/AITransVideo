@@ -92,6 +92,24 @@ function extractAudioSyncConflict(error: unknown): UnsyncedTextSegment[] | null 
     .filter((item) => item.segment_id)
 }
 
+function isPreTtsLengthWarningStatus(status: SegmentStatus): boolean {
+  return status === "text_dirty" || status === "voice_dirty" || status === "tts_failed"
+}
+
+function hasTtsLengthGuidanceWarning(
+  segment: EditingSegment,
+  status: SegmentStatus,
+): boolean {
+  if (!isPreTtsLengthWarningStatus(status)) return false
+  const severity = segment.tts_length_guidance?.severity
+  return severity === "mild" || severity === "warning" || severity === "severe"
+}
+
+function formatDurationSeconds(ms: number | null | undefined): string {
+  if (typeof ms !== "number" || !Number.isFinite(ms)) return "-"
+  return `${(ms / 1000).toFixed(1)}s`
+}
+
 
 export default function VideoEditPage() {
   const params = useParams()
@@ -900,6 +918,14 @@ export default function VideoEditPage() {
       )
   }, [resource])
 
+  const ttsLengthGuidanceWarningSegments = useMemo(() => {
+    if (!resource) return []
+    return resource.segments.filter((seg) => {
+      const status = resource.segment_status[seg.segment_id] ?? "accepted"
+      return hasTtsLengthGuidanceWarning(seg, status)
+    })
+  }, [resource])
+
   const scrollToSegment = useCallback((segmentId: string) => {
     // Prefer the virtual-list imperative API (it knows which items are
     // currently mounted and where each will land post-scroll). Fallback
@@ -1130,6 +1156,18 @@ export default function VideoEditPage() {
                   title="对齐器重写 2 次仍超/过短，建议精简译文。点击定位第一段。"
                 >
                   ⚠ {forceDspSegments.length} 段时长异常（重写 2 次仍超/过短），点击定位
+                </button>
+              )}
+              {ttsLengthGuidanceWarningSegments.length > 0 && (
+                <button
+                  type="button"
+                  className="ml-2 text-[color:var(--ochre)] underline decoration-dotted hover:opacity-80 min-h-[32px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ochre)] focus-visible:ring-offset-1 rounded"
+                  onClick={() =>
+                    scrollToSegment(ttsLengthGuidanceWarningSegments[0].segment_id)
+                  }
+                  title="译文预计时长偏离目标。仍可强制合成，合成后会按真实音频时长走 DSP 对齐。点击定位第一段。"
+                >
+                  ⚠ {ttsLengthGuidanceWarningSegments.length} 段译文预计时长偏离目标，点击定位
                 </button>
               )}
               {draftDurationMismatchSegments.length > 0 && (
@@ -1483,6 +1521,14 @@ function SegmentCard({
       : draftRatio < 0.67 || draftRatio > 1.5
       ? "severe"
       : "mild"
+  const ttsLengthGuidance = segment.tts_length_guidance
+  const hasTtsLengthWarning = hasTtsLengthGuidanceWarning(segment, status)
+  const ttsLengthWarningSeverity = ttsLengthGuidance?.severity ?? null
+  const ttsLengthSuggestedRange =
+    typeof ttsLengthGuidance?.suggested_min_chars === "number"
+    && typeof ttsLengthGuidance?.suggested_max_chars === "number"
+      ? `${ttsLengthGuidance.suggested_min_chars}-${ttsLengthGuidance.suggested_max_chars}`
+      : null
 
   const timeLabel = segment.start_ms !== undefined && segment.end_ms !== undefined
     ? `${formatMs(segment.start_ms)} - ${formatMs(segment.end_ms)}`
@@ -1492,6 +1538,10 @@ function SegmentCard({
     hasDraftMismatch && draftMismatchSeverity === "severe"
       ? "border-l-4 border-l-red-500"
       : hasDraftMismatch
+      ? "border-l-4 border-l-[color:var(--ochre)]"
+      : hasTtsLengthWarning && ttsLengthWarningSeverity === "severe"
+      ? "border-l-4 border-l-red-500"
+      : hasTtsLengthWarning
       ? "border-l-4 border-l-[color:var(--ochre)]"
       : isAnomalous
       ? "border-l-4 border-l-red-500"
@@ -1671,6 +1721,22 @@ function SegmentCard({
       />
       {/* Split panel — inline so users see the halves live. Mirrors the
        *  main flow TranslationReviewPanel's amber-outlined panel. */}
+      {hasTtsLengthWarning && ttsLengthGuidance && (
+        <div
+          className={
+            ttsLengthWarningSeverity === "severe"
+              ? "mt-2 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-500"
+              : "mt-2 rounded-md border border-[color:var(--ochre)]/30 bg-[color:var(--ochre)]/10 px-3 py-2 text-xs text-[color:var(--ochre)]"
+          }
+          title="这是合成前的估算提示，不会阻止重新合成。"
+        >
+          当前 {ttsLengthGuidance.current_chars} 字
+          {ttsLengthSuggestedRange ? `，建议 ${ttsLengthSuggestedRange} 字` : ""}
+          ；预计 {formatDurationSeconds(ttsLengthGuidance.estimated_duration_ms)}
+          {" / "}目标 {formatDurationSeconds(ttsLengthGuidance.target_duration_ms)}。
+          可强制合成，完成后会按真实音频时长走 DSP 对齐。
+        </div>
+      )}
       {splitOpen && (
         <div className="mt-2 rounded-md border border-[color:var(--ochre)]/30 bg-[color:var(--ochre)]/8 p-3 space-y-3">
           <div>
