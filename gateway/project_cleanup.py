@@ -35,7 +35,9 @@ Design principles:
 from __future__ import annotations
 
 import logging
+import os
 import shutil
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -43,10 +45,32 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import Job
+from storage.job_store_reader import find_record
+
+# Make src/ importable so we can pull r2_publisher_lib (mirrors the
+# pattern already in gateway/r2_artifact_sweeper.py / backend_router.py).
+for _candidate in [
+    Path(__file__).resolve().parent.parent / "src",
+    Path("/opt/aivideotrans/app/src"),
+]:
+    if _candidate.is_dir() and str(_candidate) not in sys.path:
+        sys.path.insert(0, str(_candidate))
 
 logger = logging.getLogger(__name__)
 
 RETENTION_DAYS = 7
+
+# Stage B parity gate (plan 2026-05-07 §5.2). Default OFF — when the flag
+# is absent the cleanup behaves exactly as Stage A: TTL elapse →
+# unconditional rmtree + status flip. When enabled, every candidate
+# row gets ``r2_parity_ok`` checked; failures cause the row to be
+# **skipped entirely** (no rmtree, no status flip) so the sweeper has
+# more time to fill the registry. This is intentional: we'd rather
+# leak a small amount of disk for 24h than delete the only on-disk
+# copy of an artifact the sweeper hasn't pushed.
+REQUIRES_R2_PARITY = (
+    os.environ.get("AVT_CLEANUP_REQUIRES_R2_PARITY", "false").lower() == "true"
+)
 
 # Statuses eligible for purge. Must NEVER include any active state — the
 # state machine promotes those through terminal outcomes, and only after
@@ -178,6 +202,42 @@ async def cleanup_expired_projects(
         if project_dir_str:
             project_dir = Path(project_dir_str)
             if _is_safe_project_dir(project_dir, safe_roots=effective_roots):
+                # Stage B parity gate (plan §5.2). When enabled, skip
+                # **both** rmtree AND status flip on parity failure —
+                # let the sweeper retry until R2 has the artifacts, then
+                # the next cleanup pass will succeed. ``continue`` here
+                # leaves the row exactly as we found it.
+                if REQUIRES_R2_PARITY:
+                    json_rec = find_record(job.job_id)
+                    has_jianying = bool(
+                        json_rec and json_rec.jianying_draft_zip_path
+                    )
+                    try:
+                        from services.r2_publisher_lib.r2_parity import (
+                            r2_parity_ok,
+                        )
+                        parity_ok = await r2_parity_ok(
+                            db, job.job_id, has_jianying_draft=has_jianying,
+                        )
+                    except Exception as exc:
+                        # Refuse cleanup on parity tooling failure — the
+                        # safety bias is on the side of keeping the disk
+                        # copy. Logged so operators see it.
+                        logger.warning(
+                            "project cleanup: parity check raised job=%s "
+                            "(%s); skipping row entirely",
+                            job.job_id, exc,
+                        )
+                        parity_ok = False
+                    if not parity_ok:
+                        logger.info(
+                            "project cleanup: skipping job=%s — "
+                            "R2 parity not OK, sweeper will retry, "
+                            "cleanup revisits next pass",
+                            job.job_id,
+                        )
+                        continue  # ← no rmtree, no status flip
+
                 if not dry_run and project_dir.is_dir():
                     try:
                         shutil.rmtree(project_dir, ignore_errors=False)

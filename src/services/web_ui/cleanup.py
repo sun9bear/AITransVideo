@@ -28,7 +28,21 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 RETENTION_DAYS = 7
-CLEANUP_INTERVAL_SECONDS = 6 * 60 * 60  # Run every 6 hours
+CLEANUP_INTERVAL_SECONDS = 6 * 60 * 60  # Legacy constant; see _cleanup_loop
+                                         # for the actual schedule (now
+                                         # cron-style at 3 AM Beijing).
+
+# Plan 2026-05-07 §5.2 (P1.4): when this flag is set, Job API cleanup
+# stops calling ``shutil.rmtree`` on project_dirs. Disk delete becomes
+# Gateway-exclusive (gateway/project_cleanup.py with the R2 parity gate)
+# so the parity check can't be bypassed by the Job API path. JSON file
+# unlink still happens — Job API owns the JSON store.
+# Default OFF: the unflagged behavior is identical to pre-Stage B
+# (mirror Gateway's "rmtree on TTL elapse").
+DELEGATE_RMTREE_TO_GATEWAY = (
+    os.environ.get("AVT_CLEANUP_DELEGATE_RMTREE_TO_GATEWAY", "false").lower()
+    == "true"
+)
 
 # Statuses that must never be deleted by the TTL-based cleanup. ``editing`` is
 # here even though it's also time-based — the per-job idle timeout (24h since
@@ -154,7 +168,13 @@ def cleanup_expired_projects(*, deleted_job_ids_out: list[str] | None = None) ->
         # fall through to the JSON/events-file unlink path; the
         # Gateway-side cleanup will mark the DB row 'purged' on the
         # next pass so we don't get stuck in a loop.
-        if project_dir:
+        #
+        # Plan 2026-05-07 §5.2 (P1.4): in DELEGATE mode we skip rmtree
+        # entirely. Gateway's project_cleanup (with the R2 parity gate)
+        # is the only thing that deletes on-disk artifacts. We still
+        # unlink the JSON / events files below — those belong to the
+        # Job API store, not to Gateway.
+        if project_dir and not DELEGATE_RMTREE_TO_GATEWAY:
             project_path = Path(project_dir)
             if not _is_safe_project_dir(project_path):
                 errors.append(
@@ -186,6 +206,21 @@ def cleanup_expired_projects(*, deleted_job_ids_out: list[str] | None = None) ->
     }
 
 
+def _seconds_until_next_3am_beijing(now_utc: datetime | None = None) -> float:
+    """Plan 2026-05-07 B6: cleanup runs once per day at 3 AM Beijing
+    (= 19:00 UTC). Aligned with off-peak so rmtree IO doesn't compete
+    with users on the playback / editing paths.
+
+    Returns at least 60s so a clock-edge race doesn't busy-loop the
+    sleeper.
+    """
+    now = now_utc or datetime.now(timezone.utc)
+    target = now.replace(hour=19, minute=0, second=0, microsecond=0)
+    if target <= now:
+        target = target + timedelta(days=1)
+    return max(60.0, (target - now).total_seconds())
+
+
 def _cleanup_loop() -> None:
     """Background loop that runs TTL cleanup + editing-idle scanner."""
     # Late import so Phase 0 can land this file without circular-import risk
@@ -197,7 +232,12 @@ def _cleanup_loop() -> None:
 
     while True:
         try:
-            time.sleep(CLEANUP_INTERVAL_SECONDS)
+            # Plan 2026-05-07 B6: cron-style schedule, not fixed interval.
+            # First iteration sleeps until the next 3 AM Beijing rather
+            # than the legacy 6h. start_cleanup_thread() already runs an
+            # immediate pass at boot so the first delayed iteration is
+            # the next nightly window.
+            time.sleep(_seconds_until_next_3am_beijing())
             result = cleanup_expired_projects()
             if result["deleted_jobs"]:
                 logger.info(

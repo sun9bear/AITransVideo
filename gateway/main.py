@@ -199,9 +199,19 @@ async def lifespan(app: FastAPI):
                         )
             except Exception as exc:
                 logger.warning("periodic project cleanup failed: %s", exc)
-            # 6h matches the Job API side cadence — the two sweeps
-            # interleave fine and race-free (different tables).
-            await _asyncio.sleep(6 * 3600)
+            # Plan 2026-05-07 B6: cleanup runs once per day at 3 AM Beijing
+            # (= 19:00 UTC) instead of every 6h. Aligned with off-peak so
+            # rmtree IO doesn't compete with users on the playback /
+            # editing paths. Job API side (services.web_ui.cleanup) does
+            # the same schedule change so the two sweeps still interleave
+            # at the same wall-clock moment.
+            from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+            _now_utc = _dt.now(_tz.utc)
+            _target = _now_utc.replace(hour=19, minute=0, second=0, microsecond=0)
+            if _target <= _now_utc:
+                _target = _target + _td(days=1)
+            _sleep_s = max(60.0, (_target - _now_utc).total_seconds())
+            await _asyncio.sleep(_sleep_s)
 
     _project_task = _asyncio.create_task(_periodic_project_cleanup())
     app.state.project_cleanup_task = _project_task
