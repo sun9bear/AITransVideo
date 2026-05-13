@@ -113,6 +113,7 @@ def _speaker_voice_overlay(
 
     rep_voice_id: str | None = None
     rep_tts_provider: str | None = None
+    rep_tts_model_key: str | None = None
     for index, candidate in enumerate(segments):
         if index == target_index or not isinstance(candidate, dict):
             continue
@@ -126,10 +127,18 @@ def _speaker_voice_overlay(
             provider = candidate.get("tts_provider") or candidate.get("provider")
             if isinstance(provider, str) and provider:
                 rep_tts_provider = provider
-        if rep_voice_id is not None and rep_tts_provider is not None:
+        if rep_tts_model_key is None:
+            model_key = candidate.get("tts_model_key")
+            if isinstance(model_key, str) and model_key:
+                rep_tts_model_key = model_key
+        if (
+            rep_voice_id is not None
+            and rep_tts_provider is not None
+            and rep_tts_model_key is not None
+        ):
             break
 
-    if rep_voice_id is None and rep_tts_provider is None:
+    if rep_voice_id is None and rep_tts_provider is None and rep_tts_model_key is None:
         return segment
 
     overlaid = dict(segment)
@@ -138,6 +147,8 @@ def _speaker_voice_overlay(
     if rep_tts_provider:
         overlaid["tts_provider"] = rep_tts_provider
         overlaid.pop("provider", None)
+    if rep_tts_model_key:
+        overlaid["tts_model_key"] = rep_tts_model_key
     return overlaid
 
 
@@ -180,6 +191,7 @@ def regenerate_segment_tts(
     segment_id: str,
     *,
     tts_caller: SegmentTTSCaller | None = None,
+    default_tts_model: str | None = None,
 ) -> dict[str, Any]:
     """Produce a draft TTS wav for ``segment_id``. Returns metadata for the UI.
 
@@ -233,8 +245,13 @@ def regenerate_segment_tts(
             "tts_provider": override["provider"],
             "voice_id": override["voice_id"],
         }
+        if override.get("tts_model_key"):
+            segment["tts_model_key"] = override["tts_model_key"]
     elif segment_index is not None:
         segment = _speaker_voice_overlay(segments, segment_index, segment)
+
+    if default_tts_model and not str(segment.get("tts_model_key") or "").strip():
+        segment = {**segment, "tts_model_key": str(default_tts_model).strip()}
 
     draft_path = draft_audio_path(project_dir, segment_id)
     draft_path.parent.mkdir(parents=True, exist_ok=True)
@@ -270,6 +287,10 @@ def regenerate_segment_tts(
         "segment_id": segment_id,
         "draft_audio_path": str(draft_path),
         "size_bytes": size_bytes,
+        "provider": segment.get("tts_provider") or segment.get("provider"),
+        "voice_id": segment.get("voice_id"),
+        "model": segment.get("tts_model_key"),
+        "target_duration_ms": _segment_slot_duration_ms(segment),
         "duration_fit": (
             {
                 "initial_duration_ms": fit_result.initial_duration_ms,

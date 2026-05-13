@@ -234,6 +234,7 @@ def start_regen_all_async(
     *,
     project_dir: str | Path,
     tts_caller: SegmentTTSCaller | None = None,
+    default_tts_model: str | None = None,
 ) -> str:
     """Spawn a daemon thread that batches re-TTS over dirty segments.
 
@@ -268,6 +269,7 @@ def start_regen_all_async(
                 "task_id": task_id,
                 "project_dir": project_path,
                 "tts_caller": tts_caller,
+                "default_tts_model": default_tts_model,
                 "project_key": project_key,
             },
             daemon=True,
@@ -295,6 +297,7 @@ def _run_batch(
     task_id: str,
     project_dir: Path,
     tts_caller: SegmentTTSCaller | None,
+    default_tts_model: str | None,
     project_key: str | None = None,
 ) -> None:
     """Thread body. Mirrors ``regenerate_all_dirty_segments`` semantics
@@ -376,7 +379,10 @@ def _run_batch(
             )
             try:
                 regenerate_segment_tts(
-                    project_dir, segment_id, tts_caller=tts_caller,
+                    project_dir,
+                    segment_id,
+                    tts_caller=tts_caller,
+                    default_tts_model=default_tts_model,
                 )
                 succeeded.append(segment_id)
             except Exception as exc:

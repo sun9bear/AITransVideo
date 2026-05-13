@@ -63,6 +63,7 @@ def regenerate_all_dirty_segments(
     project_dir: str | Path,
     *,
     tts_caller: SegmentTTSCaller | None = None,
+    default_tts_model: str | None = None,
 ) -> dict[str, Any]:
     """Run regenerate_segment_tts on every segment whose status is in
     BATCH_REGENERATE_TRIGGER_STATUSES. Continue on per-segment failure.
@@ -81,7 +82,10 @@ def regenerate_all_dirty_segments(
     for segment_id in eligible:
         try:
             regenerate_segment_tts(
-                project_dir, segment_id, tts_caller=tts_caller
+                project_dir,
+                segment_id,
+                tts_caller=tts_caller,
+                default_tts_model=default_tts_model,
             )
             succeeded.append(segment_id)
         except Exception as exc:

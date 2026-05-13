@@ -85,6 +85,7 @@ export interface EditingSegmentsResponse {
 export interface VoiceMapEntry {
   provider: string
   voice_id: string
+  tts_model_key?: string
 }
 
 export interface VoiceMapResponse {
@@ -425,10 +426,17 @@ export async function setVoiceOverride(
   segmentId: string,
   provider: string,
   voiceId: string,
-): Promise<{ segment_id: string; provider: string; voice_id: string }> {
+  ttsModelKey?: string,
+): Promise<{ segment_id: string; provider: string; voice_id: string; tts_model_key?: string }> {
+  const body: Record<string, string> = {
+    segment_id: segmentId,
+    provider,
+    voice_id: voiceId,
+  }
+  if (ttsModelKey) body.tts_model_key = ttsModelKey
   return apiClient.post(
     `/jobs/${jobId}/editing/voice-map`,
-    { body: { segment_id: segmentId, provider, voice_id: voiceId } },
+    { body },
   )
 }
 

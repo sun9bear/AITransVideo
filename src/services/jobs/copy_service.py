@@ -369,6 +369,8 @@ def _apply_voice_map_to_segments(
             new_seg = dict(seg)
             new_seg["tts_provider"] = override["provider"]
             new_seg["voice_id"] = override["voice_id"]
+            if override.get("tts_model_key"):
+                new_seg["tts_model_key"] = override["tts_model_key"]
             new_seg.pop("provider", None)  # scrub legacy misspelling
             out.append(new_seg)
         else:
@@ -501,10 +503,19 @@ def prepare_copy_project_dir(
             if isinstance(raw, dict):
                 for sid, entry in raw.items():
                     if isinstance(entry, dict):
-                        voice_map[str(sid)] = {
+                        normalized = {
                             "provider": str(entry.get("provider", "")).strip(),
                             "voice_id": str(entry.get("voice_id", "")).strip(),
                         }
+                        model_key = str(
+                            entry.get("tts_model_key")
+                            or entry.get("tts_model")
+                            or entry.get("model")
+                            or ""
+                        ).strip()
+                        if model_key:
+                            normalized["tts_model_key"] = model_key
+                        voice_map[str(sid)] = normalized
         if voice_map:
             segments = _apply_voice_map_to_segments(segments, voice_map)
         # Segments may carry absolute paths (tts_audio_path / aligned_audio_path)

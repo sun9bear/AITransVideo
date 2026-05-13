@@ -1088,7 +1088,10 @@ class JobService:
         record = self._require_editing(job_id)
         caller = tts_caller or getattr(self, "_segment_tts_caller", None)
         result = _regenerate(
-            record.project_dir, segment_id, tts_caller=caller
+            record.project_dir,
+            segment_id,
+            tts_caller=caller,
+            default_tts_model=record.tts_model,
         )
         _touch_editing(record, self.store)
 
@@ -1247,7 +1250,11 @@ class JobService:
 
         record = self._require_editing(job_id)
         caller = tts_caller or getattr(self, "_segment_tts_caller", None)
-        result = _batch(record.project_dir, tts_caller=caller)
+        result = _batch(
+            record.project_dir,
+            tts_caller=caller,
+            default_tts_model=record.tts_model,
+        )
         _touch_editing(record, self.store)
         return result
 
@@ -1272,7 +1279,9 @@ class JobService:
         record = self._require_editing(job_id)
         caller = tts_caller or getattr(self, "_segment_tts_caller", None)
         task_id = start_regen_all_async(
-            project_dir=record.project_dir, tts_caller=caller,
+            project_dir=record.project_dir,
+            tts_caller=caller,
+            default_tts_model=record.tts_model,
         )
         _touch_editing(record, self.store)
         return {"task_id": task_id, "status": "running"}
@@ -1330,6 +1339,7 @@ class JobService:
         *,
         provider: str,
         voice_id: str,
+        tts_model_key: str | None = None,
     ) -> dict:
         """Set per-segment voice override + emit
         ``post_edit_voice_override_changed`` audit event (plan 2026-05-04
@@ -1353,7 +1363,9 @@ class JobService:
             before_entry = None
         result = set_voice_override(
             record.project_dir, segment_id,
-            provider=provider, voice_id=voice_id,
+            provider=provider,
+            voice_id=voice_id,
+            tts_model_key=tts_model_key,
         )
         _touch_editing(record, self.store)
 

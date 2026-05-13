@@ -193,6 +193,8 @@ def _apply_voice_map(
             new_seg = dict(seg)
             new_seg["tts_provider"] = override["provider"]
             new_seg["voice_id"] = override["voice_id"]
+            if override.get("tts_model_key"):
+                new_seg["tts_model_key"] = override["tts_model_key"]
             # Scrub any legacy ``provider`` key so editor/segments.json
             # stays single-source-of-truth on tts_provider.
             new_seg.pop("provider", None)
@@ -241,7 +243,16 @@ def _apply_editing_to_baseline(project_dir: Path) -> dict[str, Any]:
                     p = str(entry.get("provider", "")).strip()
                     v = str(entry.get("voice_id", "")).strip()
                     if p and v:
-                        voice_map[str(sid)] = {"provider": p, "voice_id": v}
+                        normalized = {"provider": p, "voice_id": v}
+                        model_key = str(
+                            entry.get("tts_model_key")
+                            or entry.get("tts_model")
+                            or entry.get("model")
+                            or ""
+                        ).strip()
+                        if model_key:
+                            normalized["tts_model_key"] = model_key
+                        voice_map[str(sid)] = normalized
     if voice_map:
         segments = _apply_voice_map(segments, voice_map)
 

@@ -10,7 +10,11 @@ changed this segment's voice during this editing session". Absent keys mean
 "keep whatever the baseline segments.json / speaker defaults say":
 
     {
-      "seg_042": {"provider": "minimax", "voice_id": "male_1"},
+      "seg_042": {
+        "provider": "minimax",
+        "voice_id": "male_1",
+        "tts_model_key": "speech-2.8-hd"
+      },
       "seg_088": {"provider": "cosyvoice", "voice_id": "voice_xyz"}
     }
 
@@ -69,6 +73,11 @@ VOICE_MAP_FILE: str = f"{EDITING_SUBDIR}/voice_map.json"
 # Fields every voice_map entry must have. Stored as a dict per-segment so
 # future additions (e.g. rate/pitch override) don't require a schema bump.
 VOICE_MAP_ENTRY_FIELDS: frozenset[str] = frozenset({"provider", "voice_id"})
+VOICE_MAP_OPTIONAL_ENTRY_FIELDS: frozenset[str] = frozenset({"tts_model_key"})
+
+
+def _normalize_tts_model_key(value: object) -> str:
+    return str(value or "").strip()
 
 
 def _voice_map_path(project_dir: str | Path) -> Path:
@@ -113,7 +122,13 @@ def load_voice_map(project_dir: str | Path) -> dict[str, dict[str, Any]]:
         voice_id = str(entry.get("voice_id", "")).strip()
         if not provider or not voice_id:
             continue
-        out[str(sid)] = {"provider": provider, "voice_id": voice_id}
+        normalized: dict[str, Any] = {"provider": provider, "voice_id": voice_id}
+        model_key = _normalize_tts_model_key(
+            entry.get("tts_model_key") or entry.get("tts_model") or entry.get("model")
+        )
+        if model_key:
+            normalized["tts_model_key"] = model_key
+        out[str(sid)] = normalized
     return out
 
 
@@ -123,6 +138,7 @@ def set_voice_override(
     *,
     provider: str,
     voice_id: str,
+    tts_model_key: str | None = None,
 ) -> dict[str, Any]:
     """Record a user's voice change for ``segment_id`` and flag the segment
     ``voice_dirty``. Returns the updated voice_map entry."""
@@ -157,7 +173,10 @@ def set_voice_override(
     # concurrent patch cannot interleave between the two writes.
     with file_lock(_editing_lock_anchor(project_dir)):
         voice_map = load_voice_map(project_dir)
-        entry = {"provider": provider, "voice_id": voice_id}
+        entry: dict[str, Any] = {"provider": provider, "voice_id": voice_id}
+        model_key = _normalize_tts_model_key(tts_model_key)
+        if model_key:
+            entry["tts_model_key"] = model_key
         voice_map[segment_id] = entry
         _atomic_write_json(_voice_map_path(project_dir), voice_map)
         mark_segment_status(project_dir, segment_id, SEGMENT_STATUS_VOICE_DIRTY)

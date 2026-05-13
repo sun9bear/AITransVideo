@@ -120,6 +120,31 @@ def test_set_voice_override_persists_and_flags_dirty(tmp_path: Path) -> None:
     assert load_segment_status(project_dir) == {"seg_001": "voice_dirty"}
 
 
+def test_set_voice_override_persists_optional_tts_model_key(tmp_path: Path) -> None:
+    _, project_dir = _build_editing_job(tmp_path)
+    result = set_voice_override(
+        project_dir,
+        "seg_001",
+        provider="minimax",
+        voice_id="male_1",
+        tts_model_key="speech-2.8-hd",
+    )
+
+    assert result == {
+        "segment_id": "seg_001",
+        "provider": "minimax",
+        "voice_id": "male_1",
+        "tts_model_key": "speech-2.8-hd",
+    }
+    assert load_voice_map(project_dir) == {
+        "seg_001": {
+            "provider": "minimax",
+            "voice_id": "male_1",
+            "tts_model_key": "speech-2.8-hd",
+        }
+    }
+
+
 def test_set_voice_override_overwrite_semantics(tmp_path: Path) -> None:
     """Plan H3: same segment second set replaces, no history stack."""
     _, project_dir = _build_editing_job(tmp_path)

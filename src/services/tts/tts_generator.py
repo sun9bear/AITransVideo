@@ -1080,9 +1080,16 @@ class TTSGenerator:
                 flush=True,
             )
 
-        minimax_model = _resolve_minimax_model_for_job(
-            self._resolve_active_job_record(),
-            self.config.model,
+        segment_model = _normalize_optional_text(
+            getattr(segment, "tts_model_key", None)
+        )
+        minimax_model = (
+            segment_model
+            if segment_model in MINIMAX_TTS_MODELS
+            else _resolve_minimax_model_for_job(
+                self._resolve_active_job_record(),
+                self.config.model,
+            )
         )
 
         print(

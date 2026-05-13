@@ -217,6 +217,55 @@ def test_regenerate_overlays_voice_map_override_onto_segment(tmp_path: Path) -> 
     assert "tts_provider" not in seg_001 or seg_001.get("tts_provider") != "volcengine"
 
 
+def test_regenerate_overlays_voice_map_tts_model_key(tmp_path: Path) -> None:
+    from services.jobs.editing_voice_map import set_voice_override
+
+    _, project_dir = _build_editing_job(tmp_path)
+    editing_segments = project_dir / "editor" / "editing" / "segments.json"
+    data = json.loads(editing_segments.read_text(encoding="utf-8"))
+    data[0]["tts_model_key"] = "speech-2.8-hd"
+    editing_segments.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    set_voice_override(
+        project_dir,
+        "seg_001",
+        provider="minimax",
+        voice_id="override_voice_xyz",
+        tts_model_key="speech-2.8-turbo",
+    )
+
+    seen_segments: list[dict] = []
+
+    def recording_caller(segment: dict, output_path: Path) -> None:
+        seen_segments.append(dict(segment))
+        output_path.write_bytes(b"OVERRIDE_WAV")
+
+    result = regenerate_segment_tts(project_dir, "seg_001", tts_caller=recording_caller)
+
+    assert seen_segments[0]["tts_model_key"] == "speech-2.8-turbo"
+    assert result["model"] == "speech-2.8-turbo"
+
+
+def test_regenerate_uses_default_job_tts_model_when_segment_lacks_model_key(
+    tmp_path: Path,
+) -> None:
+    _, project_dir = _build_editing_job(tmp_path)
+    seen_segments: list[dict] = []
+
+    def recording_caller(segment: dict, output_path: Path) -> None:
+        seen_segments.append(dict(segment))
+        output_path.write_bytes(b"JOB_MODEL_WAV")
+
+    result = regenerate_segment_tts(
+        project_dir,
+        "seg_001",
+        tts_caller=recording_caller,
+        default_tts_model="speech-2.8-hd",
+    )
+
+    assert seen_segments[0]["tts_model_key"] == "speech-2.8-hd"
+    assert result["model"] == "speech-2.8-hd"
+
+
 def test_regenerate_skips_voice_overlay_when_no_override(tmp_path: Path) -> None:
     """Sanity: without set_voice_override, the caller still sees the
     baseline segment unchanged — overlay is opt-in per voice_map entry."""

@@ -939,9 +939,16 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                     else:
                         provider = str(payload.get("provider", "")).strip()
                         voice_id = str(payload.get("voice_id", "")).strip()
+                        tts_model_key = str(
+                            payload.get("tts_model_key")
+                            or payload.get("tts_model")
+                            or ""
+                        ).strip() or None
                         result = service.set_editing_voice_override(
                             path_parts[1], segment_id,
-                            provider=provider, voice_id=voice_id,
+                            provider=provider,
+                            voice_id=voice_id,
+                            tts_model_key=tts_model_key,
                         )
                     self._write_json(HTTPStatus.OK, {"success": True, **result})
                     return

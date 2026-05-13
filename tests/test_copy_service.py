@@ -261,7 +261,13 @@ def test_prepare_copy_applies_voice_map_overrides(tmp_path: Path) -> None:
     source = _make_source_project(tmp_path, n_segments=2)
     _populate_editing_dir(
         source,
-        voice_map={"seg_001": {"provider": "cosyvoice", "voice_id": "cv_new"}},
+        voice_map={
+            "seg_001": {
+                "provider": "cosyvoice",
+                "voice_id": "cv_new",
+                "tts_model_key": "cosyvoice-v3",
+            }
+        },
     )
     target = tmp_path / "copy"
 
@@ -278,6 +284,7 @@ def test_prepare_copy_applies_voice_map_overrides(tmp_path: Path) -> None:
         f"{sorted(out[0].keys())}"
     )
     assert out[0]["voice_id"] == "cv_new"
+    assert out[0]["tts_model_key"] == "cosyvoice-v3"
     assert "provider" not in out[0], (
         "legacy 'provider' key leaked into copy's editor/segments.json"
     )

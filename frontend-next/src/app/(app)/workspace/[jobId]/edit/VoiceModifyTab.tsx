@@ -141,6 +141,10 @@ function formatVoiceOptionLabel(v: AvailableVoice): string {
   return `${base} · ${cps.toFixed(1)}字/秒(${tier})`
 }
 
+function minimaxModelKey(model: "turbo" | "hd" | undefined): string {
+  return model === "hd" ? "speech-2.8-hd" : "speech-2.8-turbo"
+}
+
 /* ---------- Main Component ---------- */
 
 export function VoiceModifyTab({
@@ -420,11 +424,15 @@ export function VoiceModifyTab({
           // 2026-05-09: minimaxModel 默认值要从 segment.tts_model_key 推,
           // 不能硬编码 "turbo" — 主流程 / 上次编辑保存的是 "speech-X.X-hd"
           // (旗舰音质) 或 "speech-X.X-turbo" (高级音质)。voice_map override
-          // 不携带 model_key,所以 override 路径也用 baseline segment 的 model_key。
+          // 若携带 tts_model_key,说明用户在编辑页重新选择了音质。
           const firstSeg = ownSegments[0]
           const segModelKey = (firstSeg as { tts_model_key?: unknown } | undefined)?.tts_model_key
+          const overrideModelKey = override?.tts_model_key
+          const effectiveModelKey = typeof overrideModelKey === "string" && overrideModelKey
+            ? overrideModelKey
+            : segModelKey
           const inferredModel: "turbo" | "hd" =
-            typeof segModelKey === "string" && segModelKey.toLowerCase().includes("hd")
+            typeof effectiveModelKey === "string" && effectiveModelKey.toLowerCase().includes("hd")
               ? "hd"
               : "turbo"
 
@@ -605,10 +613,23 @@ export function VoiceModifyTab({
       setSpeakerApplying(speakerId, true)
       const next: Record<string, VoiceMapEntry> = { ...voiceMap }
       const failures: string[] = []
+      const ttsModelKey = state.selectedProvider === "minimax"
+        ? minimaxModelKey(state.minimaxModel)
+        : undefined
       for (const seg of ownSegments) {
         try {
-          await setVoiceOverride(jobId, seg.segment_id, state.selectedProvider, state.voiceId)
-          next[seg.segment_id] = { provider: state.selectedProvider, voice_id: state.voiceId }
+          await setVoiceOverride(
+            jobId,
+            seg.segment_id,
+            state.selectedProvider,
+            state.voiceId,
+            ttsModelKey,
+          )
+          next[seg.segment_id] = {
+            provider: state.selectedProvider,
+            voice_id: state.voiceId,
+            ...(ttsModelKey ? { tts_model_key: ttsModelKey } : {}),
+          }
         } catch (err) {
           failures.push(seg.segment_id)
           console.warn("setVoiceOverride failed", seg.segment_id, err)
@@ -1072,12 +1093,8 @@ export function VoiceModifyTab({
                       )}
                     </div>
 
-                    {/* Pricing / quality tier — same layout as main flow
-                        VoiceSelectionPanel: MiniMax has turbo/hd radios,
-                        CosyVoice/豆包 show the standard tier. Radios
-                        are UI-only (main flow also doesn't submit the
-                        choice); future real quality switching needs a
-                        coordinated backend schema change. */}
+                    {/* Pricing / quality tier. MiniMax saves the selected tier
+                        to voice_map.tts_model_key for post-edit TTS. */}
                     {pricing && (() => {
                       const prov = currentProvider
                       const cpm = pricing.credits_per_minute

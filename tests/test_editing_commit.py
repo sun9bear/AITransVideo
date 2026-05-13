@@ -268,7 +268,13 @@ def test_commit_rejects_text_dirty_segment_even_when_stale_draft_exists(
 def test_overwrite_applies_voice_map_and_draft_wavs(tmp_path: Path) -> None:
     store, record, project_dir = _build_editing_job_with_diff(
         tmp_path,
-        voice_map={"seg_001": {"provider": "cosyvoice", "voice_id": "cv"}},
+        voice_map={
+            "seg_001": {
+                "provider": "cosyvoice",
+                "voice_id": "cv",
+                "tts_model_key": "cosyvoice-v3",
+            }
+        },
         draft_wavs={"seg_002": b"NEW_002"},
     )
     runner = _RecordingRunner()
@@ -286,6 +292,7 @@ def test_overwrite_applies_voice_map_and_draft_wavs(tmp_path: Path) -> None:
         f"got keys {sorted(out[0].keys())}"
     )
     assert out[0]["voice_id"] == "cv"
+    assert out[0]["tts_model_key"] == "cosyvoice-v3"
     # Legacy misspelling must not be written — keeps editor/segments.json
     # clean of unknown fields that γ's DubbingSegment constructor then
     # has to filter out.
