@@ -1067,6 +1067,117 @@ def test_split_editing_segment_marks_both_new_segments_text_dirty(tmp_path: Path
         assert status.get(new_seg["segment_id"]) == SEGMENT_STATUS_TEXT_DIRTY
 
 
+def test_split_editing_segment_recomputes_child_target_durations(
+    tmp_path: Path,
+) -> None:
+    """Split children must not inherit the parent's slot duration.
+
+    The post-edit TTS length guidance reads ``target_duration_ms`` first.
+    If both children keep the parent duration, short B halves get wildly
+    inflated suggested character ranges after split.
+    """
+    from services.jobs.editing_segments import split_editing_segment
+
+    _, project_dir, _ = _build_editing_job(tmp_path)
+    segments = load_editing_segments(project_dir)
+    segments[0].update({
+        "source_text": "abcdefghij",
+        "cn_text": "0123456789",
+        "start_ms": 0,
+        "end_ms": 10_000,
+        "target_duration_ms": 10_000,
+        "duration_target_ms": 10_000,
+    })
+    (project_dir / EDITING_SUBDIR / "segments.json").write_text(
+        json.dumps(segments, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    result = split_editing_segment(
+        project_dir,
+        segment_id="seg_001",
+        split_source_index=7,
+        split_cn_index=5,
+        speaker_a="A",
+        speaker_b="A",
+    )
+
+    first, second = result["new_segments"]
+    assert first["start_ms"] == 0
+    assert first["end_ms"] == 7_000
+    assert first["target_duration_ms"] == 7_000
+    assert first["duration_target_ms"] == 7_000
+    assert second["start_ms"] == 7_000
+    assert second["end_ms"] == 10_000
+    assert second["target_duration_ms"] == 3_000
+    assert second["duration_target_ms"] == 3_000
+
+    payload = editing_payload(project_dir)
+    guidance_by_id = {
+        seg["segment_id"]: seg["tts_length_guidance"]
+        for seg in payload["segments"]
+        if seg["segment_id"] in {first["segment_id"], second["segment_id"]}
+    }
+    assert guidance_by_id[first["segment_id"]]["target_duration_ms"] == 7_000
+    assert guidance_by_id[second["segment_id"]]["target_duration_ms"] == 3_000
+
+
+def test_split_editing_segment_uses_word_timestamps_when_available(
+    tmp_path: Path,
+) -> None:
+    """Post-edit split should use the same word-timed estimator as review."""
+    from services.jobs.editing_segments import split_editing_segment
+
+    _, project_dir, _ = _build_editing_job(tmp_path)
+    transcript_dir = project_dir / "transcript"
+    transcript_dir.mkdir(parents=True, exist_ok=True)
+    (transcript_dir / "raw_assemblyai.json").write_text(
+        json.dumps(
+            {
+                "words": [
+                    {"text": "abc", "start": 0, "end": 1_000},
+                    {"text": "defg", "start": 1_200, "end": 4_000},
+                    {"text": "hij", "start": 8_000, "end": 10_000},
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    segments = load_editing_segments(project_dir)
+    segments[0].update({
+        "source_text": "abcdefghij",
+        "cn_text": "0123456789",
+        "start_ms": 0,
+        "end_ms": 10_000,
+        "target_duration_ms": 10_000,
+        "duration_target_ms": 10_000,
+    })
+    (project_dir / EDITING_SUBDIR / "segments.json").write_text(
+        json.dumps(segments, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    result = split_editing_segment(
+        project_dir,
+        segment_id="seg_001",
+        split_source_index=7,
+        split_cn_index=5,
+        speaker_a="A",
+        speaker_b="A",
+    )
+
+    first, second = result["new_segments"]
+    assert first["start_ms"] == 0
+    assert first["end_ms"] == 6_000
+    assert first["target_duration_ms"] == 6_000
+    assert first["duration_target_ms"] == 6_000
+    assert second["start_ms"] == 6_000
+    assert second["end_ms"] == 10_000
+    assert second["target_duration_ms"] == 4_000
+    assert second["duration_target_ms"] == 4_000
+
+
 def test_split_editing_segment_propagates_voice_for_reassigned_half(
     tmp_path: Path,
 ) -> None:

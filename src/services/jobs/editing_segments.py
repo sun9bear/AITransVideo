@@ -956,6 +956,19 @@ def _derive_split_ids(base_id: str, existing_ids: set[str]) -> tuple[str, str]:
         n += 1
 
 
+def _load_split_words_data(project_dir: str | Path) -> list[dict[str, Any]] | None:
+    raw_path = Path(project_dir) / "transcript" / "raw_assemblyai.json"
+    try:
+        data = json.loads(raw_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    words = data.get("words") if isinstance(data, dict) else None
+    if not isinstance(words, list):
+        return None
+    valid = [w for w in words if isinstance(w, dict)]
+    return valid or None
+
+
 def split_editing_segment(
     project_dir: str | Path,
     *,
@@ -1025,18 +1038,27 @@ def split_editing_segment(
                 f"{len(cn_text)}"
             )
 
-        # Time split is proportional to the source-character position. We lack
-        # word-level timing in editing mode (it's an alignment detail), so a
-        # uniform speaking-rate assumption is the honest approximation — the
-        # downstream re-alignment will re-anchor using the new TTS waveforms.
+        # Prefer the same word-timestamp split estimator used by the
+        # transcript-review/main flow. Editing projects normally retain
+        # transcript/raw_assemblyai.json, so this maps the source-text split
+        # position to a word boundary when possible. If word data is absent
+        # or unreliable, estimate_split_ms falls back to character ratio.
         start_ms = int(original.get("start_ms", 0) or 0)
         end_ms = int(original.get("end_ms", start_ms) or start_ms)
-        ratio = split_source_index / len(source_text) if source_text else 0.5
-        mid_ms = start_ms + int(round((end_ms - start_ms) * ratio))
+        from services.transcript_reviewer import estimate_split_ms
+
+        mid_ms = estimate_split_ms(
+            start_ms=start_ms,
+            end_ms=end_ms,
+            source_text=source_text,
+            split_char_pos=split_source_index,
+            words_data=_load_split_words_data(project_dir),
+        )
         # P0-8 (audit 2026-05-07): refuse splits that would produce a
         # zero-duration half. This happens when (end_ms - start_ms) is very
-        # small or when ratio rounds to 0/1 — the resulting half can break
-        # downstream alignment math (TTS would have to fit text into 0 ms).
+        # small or when the computed split rounds to one edge; the resulting
+        # half can break downstream alignment math (TTS would have to fit
+        # text into 0 ms).
         # Better to reject the split up-front with a clear error than let
         # the user discover it minutes later at commit time.
         if mid_ms <= start_ms or mid_ms >= end_ms:
@@ -1055,6 +1077,8 @@ def split_editing_segment(
         # its id slot will be freed; exclude it so we can still reuse ``base_a``.
         existing_ids.discard(target)
         new_id_a, new_id_b = _derive_split_ids(target, existing_ids)
+        duration_a_ms = max(0, mid_ms - start_ms)
+        duration_b_ms = max(0, end_ms - mid_ms)
 
         # Build the two new dicts inheriting everything from the original
         # except what we want to split/override. We keep pass-through fields
@@ -1068,7 +1092,10 @@ def split_editing_segment(
             speaker_id=str(speaker_a).strip() or original.get("speaker_id"),
             start_ms=start_ms,
             end_ms=mid_ms,
+            target_duration_ms=duration_a_ms,
         )
+        if "duration_target_ms" in seg_a:
+            seg_a["duration_target_ms"] = duration_a_ms
         seg_b = dict(original)
         seg_b.update(
             segment_id=new_id_b,
@@ -1077,7 +1104,10 @@ def split_editing_segment(
             speaker_id=str(speaker_b).strip() or original.get("speaker_id"),
             start_ms=mid_ms,
             end_ms=end_ms,
+            target_duration_ms=duration_b_ms,
         )
+        if "duration_target_ms" in seg_b:
+            seg_b["duration_target_ms"] = duration_b_ms
 
         original_speaker = original.get("speaker_id")
         if seg_a.get("speaker_id") != original_speaker:
