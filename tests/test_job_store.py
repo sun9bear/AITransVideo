@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from services.jobs.events import EVENT_TYPE_LOG, EVENT_TYPE_STATUS, JobEvent
 from services.jobs.models import (
     JOB_STATUS_QUEUED,
@@ -87,6 +89,74 @@ def test_job_store_appends_and_reads_events(tmp_path) -> None:
     assert len(events) == 2
     assert events[0].event_type == EVENT_TYPE_STATUS
     assert events[1].message == "[S0] Downloading"
+
+
+def test_job_store_load_events_tolerates_unknown_event_type(tmp_path) -> None:
+    """CodeX P1 follow-up (plan 2026-05-07 §11, 2026-05-12):
+    ``load_events`` must NOT raise when an event_type isn't in the
+    process's current ``SUPPORTED_EVENT_TYPES``. Production hits this
+    when Gateway writes a newly-added event type (e.g. ``stream.*``)
+    before the Job API Python process has reloaded the events module.
+    Old behaviour 500'd ``/jobs/{id}/logs``; new behaviour returns
+    the parseable events and skips the unknown ones.
+    """
+    store = JobStore(tmp_path / "jobs")
+    record = _build_job_record(job_id="job_tolerant")
+    store.save_job(record)
+
+    # Hand-craft a JSONL file with: one valid event, one unknown
+    # event_type (mimics a Gateway-written stream.* before the Job
+    # API process is aware of it), one malformed line.
+    events_path = store._events_path("job_tolerant")
+    events_path.write_text(
+        "\n".join([
+            json.dumps({
+                "job_id": "job_tolerant",
+                "event_type": "status",
+                "created_at": "2026-05-12T10:00:00+00:00",
+                "level": "info",
+                "message": "first",
+                "stage": None, "status": None, "payload": {},
+            }),
+            json.dumps({
+                "job_id": "job_tolerant",
+                # Deliberately a not-yet-in-SUPPORTED-EVENT-TYPES value so
+                # the test simulates the cross-version drift CodeX P1
+                # describes. Pick a clearly-future label so we don't
+                # accidentally trip the test if a real value with that
+                # name ever lands.
+                "event_type": "future.hypothetical.event_type",
+                "created_at": "2026-05-12T10:00:01+00:00",
+                "level": "info",
+                "message": "unknown to old process",
+                "stage": None, "status": None, "payload": {},
+            }),
+            "not-json-at-all",
+            json.dumps({
+                "job_id": "job_tolerant",
+                "event_type": "log",
+                "created_at": "2026-05-12T10:00:02+00:00",
+                "level": "info",
+                "message": "last",
+                "stage": None, "status": None, "payload": {},
+            }),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    # The function must not raise on either the unknown event_type
+    # or the malformed JSON. Both bad lines should be skipped.
+    events = store.load_events("job_tolerant")
+    messages = [e.message for e in events]
+    # We get the 2 well-formed events with known types; the unknown
+    # event_type line and the bad-JSON line are dropped.
+    # NOTE: if a future change adds stream.* to the process's
+    # SUPPORTED_EVENT_TYPES, this assertion's count goes up by one;
+    # update the expected list rather than reverting the tolerance.
+    assert messages == ["first", "last"], (
+        f"load_events tolerance broken: got messages={messages}; "
+        f"expected only the 2 parseable, known-type events."
+    )
 
 
 def test_job_store_lists_jobs_by_latest_updated_at(tmp_path) -> None:

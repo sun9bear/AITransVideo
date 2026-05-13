@@ -227,19 +227,57 @@ class JobStore:
         return event
 
     def load_events(self, job_id: str) -> list[JobEvent]:
+        """Read all events for ``job_id`` from ``{job_id}.events.jsonl``.
+
+        Returns parsed events in file order. Malformed lines (bad JSON,
+        unknown event_type) are skipped and logged at WARNING so a single
+        polluted line never takes down ``/jobs/{id}/logs``.
+
+        Why be tolerant: Gateway writes some event types (``stream.*``,
+        ``download.*``) that may be added to ``services.jobs.events``
+        AFTER the Job API process started, especially during a deploy
+        where ``app`` container code is bind-mounted but the Python
+        process isn't restarted. Pre-tolerance behavior was to raise
+        ``ValueError("Unsupported event_type")`` from ``JobEvent.from_dict``,
+        which bubbled up as a 500 on the logs endpoint and broke admin /
+        user visibility into otherwise-healthy jobs. Skipping is the
+        documented fail-open pattern (mirrors ``services.web_ui.logs_redactor``
+        loader semantics: never let observability tooling kill the
+        primary content path).
+        """
         path = self._events_path(job_id)
         if not path.exists():
             return []
 
         events: list[JobEvent] = []
-        for raw_line in path.read_text(encoding="utf-8").splitlines():
+        skipped = 0
+        for line_no, raw_line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), start=1,
+        ):
             normalized_line = raw_line.strip()
             if not normalized_line:
                 continue
-            payload = json.loads(normalized_line)
-            if not isinstance(payload, dict):
-                raise ValueError(f"Invalid job event payload: {path}")
-            events.append(JobEvent.from_dict(payload))
+            try:
+                payload = json.loads(normalized_line)
+                if not isinstance(payload, dict):
+                    raise ValueError("payload is not a JSON object")
+                events.append(JobEvent.from_dict(payload))
+            except Exception as exc:
+                # Fail-open: log the offending line index + reason but
+                # keep returning the events we did parse. Production
+                # symptoms of the old strict behavior: a Gateway-written
+                # event_type that the Job API process hadn't loaded yet
+                # → entire logs page 500.
+                skipped += 1
+                logger.warning(
+                    "load_events: skipping malformed event line %s in %s (%s)",
+                    line_no, path.name, exc,
+                )
+        if skipped:
+            logger.info(
+                "load_events: skipped %d malformed event line(s) for job=%s",
+                skipped, job_id,
+            )
         return events
 
     def list_jobs(self, *, limit: int | None = None, offset: int = 0) -> list[JobRecord]:

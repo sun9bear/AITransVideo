@@ -1587,18 +1587,22 @@ async def _resolve_r2_stream_redirect(
     if not r2_key:
         return None, ""
 
-    # Stream-specific filename hint: for Save-As (when user right-clicks
-    # the player and chooses "Save video as…"). Reuse the same name the
-    # registry recorded — see r2_publisher._filename_for for the kind-
-    # specific suffix logic ({base}.mp4 / .wav / _poster.jpg).
-    filename = registry_entry.get("filename") or _derive_download_filename(job)
+    # Stream presign is **distinct** from download presign (CodeX P2,
+    # plan §11 follow-up 2026-05-12):
+    #   - TTL ~30 min (vs 2 min for download) — players seek / pause /
+    #     resume over the full play session and need one signature window
+    #     to cover it.
+    #   - No Content-Disposition: attachment — would force the browser
+    #     to download instead of play in-page.
+    #   - No filename param — stream URLs never hit the user's Save-As
+    #     dialog; download path still issues attachment URLs for that.
     content_type = registry_entry.get(
         "content_type", "application/octet-stream",
     )
     try:
         from storage import r2_client
-        url = r2_client.generate_presigned_download_url(
-            r2_key, filename, content_type=content_type,
+        url = r2_client.generate_presigned_stream_url(
+            r2_key, content_type=content_type,
         )
         return url, "registry"
     except Exception as exc:
@@ -2080,11 +2084,14 @@ import re as _re
 _DOWNLOAD_KEY_RE = _re.compile(r"^download/(?P<key>[a-z0-9_.\-]+)$")
 
 # Plan 2026-05-07 §11.3 C3 (Stage C, 2026-05-12): /stream/{kind} matcher.
-# Kinds = video / audio / poster (mirrors src/services/jobs/api.py:447-490).
-# Permission gate + kind→artifact_key translation live in
-# services/r2_publisher_lib/downloadable_keys.py; this regex just identifies
-# the URL surface so the intercept can dispatch.
-_STREAM_KIND_RE = _re.compile(r"^stream/(?P<kind>[a-z]+)$")
+# Kinds are explicitly enumerated (video|audio|poster) to mirror
+# src/services/jobs/api.py:447-490 and to keep unknown kinds out of the
+# Gateway intercept entirely — they pass through to proxy_request and
+# Job API returns its own 404. Without this enumeration, the broader
+# ``[a-z]+`` pattern would let unknown kinds emit a
+# ``stream.fallback.local`` event (CodeX P2 finding, 2026-05-12) and
+# pollute the rollout dashboard's fallback-rate metric.
+_STREAM_KIND_RE = _re.compile(r"^stream/(?P<kind>video|audio|poster)$")
 
 
 # Set of subpaths that represent editing STATE TRANSITIONS (need FOR UPDATE

@@ -496,6 +496,30 @@ def test_intercept_has_single_r2_stream_surface():
     )
 
 
+def test_stream_kind_regex_only_matches_known_kinds():
+    """CodeX P2 follow-up (2026-05-12): ``_STREAM_KIND_RE`` must NOT
+    match arbitrary ``[a-z]+`` segments, only the canonical three.
+    Unknown kinds must bypass the Gateway intercept entirely (no
+    ``stream.fallback.local`` event emitted, no DB hit) so the
+    rollout fallback metric stays clean.
+    """
+    for mod in ("storage", "storage.event_log", "config"):
+        sys.modules.pop(mod, None)
+    sys.modules.pop("job_intercept", None)
+    job_intercept = importlib.import_module("job_intercept")
+    re_obj = job_intercept._STREAM_KIND_RE
+    # Allowed
+    assert re_obj.match("stream/video") is not None
+    assert re_obj.match("stream/audio") is not None
+    assert re_obj.match("stream/poster") is not None
+    # Refused — these would have matched the looser `[a-z]+` pattern
+    assert re_obj.match("stream/unknown") is None
+    assert re_obj.match("stream/preview-source") is None
+    assert re_obj.match("stream/foo") is None
+    assert re_obj.match("stream/") is None
+    assert re_obj.match("stream/video/sub") is None
+
+
 # ============================================================================
 # Stage C tests (plan 2026-05-07 §11.3, 2026-05-12)
 # Coverage: /stream/{kind} R2 redirect for video/audio/poster, with the
@@ -570,22 +594,40 @@ def stream_fresh_modules(monkeypatch, tmp_path):
     monkeypatch.setattr(config.settings, "r2_upload_timeout_s", 60)
     monkeypatch.setattr(config.settings, "jobs_dir", str(tmp_path))
 
-    # Pre-stub r2_client.generate_presigned_download_url so the helper
-    # doesn't actually open a boto3 session in test.
+    # Pre-stub both presign helpers so the test doesn't open a boto3
+    # session. Stream uses the dedicated long-TTL inline-disposition
+    # helper (CodeX P2 follow-up); download still uses the short-TTL
+    # attachment helper. Calls list keeps a (helper_name, ...) prefix
+    # so individual tests can introspect which path was taken.
     r2_client = importlib.import_module("storage.r2_client")
-    calls: list[tuple[str, str, str]] = []
+    calls: list[tuple] = []
 
-    def _fake_presign(key, filename, content_type="video/mp4"):
-        calls.append((key, filename, content_type))
-        return f"https://fake.r2/{key}?sig=abc"
+    def _fake_download_presign(key, filename, content_type="video/mp4"):
+        calls.append(("download", key, filename, content_type))
+        return f"https://fake.r2/{key}?sig=download"
 
-    monkeypatch.setattr(r2_client, "generate_presigned_download_url", _fake_presign)
+    def _fake_stream_presign(key, content_type="video/mp4", expires_s=None):
+        calls.append(("stream", key, content_type, expires_s))
+        return f"https://fake.r2/{key}?sig=stream"
+
+    monkeypatch.setattr(
+        r2_client, "generate_presigned_download_url", _fake_download_presign,
+    )
+    monkeypatch.setattr(
+        r2_client, "generate_presigned_stream_url", _fake_stream_presign,
+    )
     return calls
 
 
 @pytest.mark.asyncio
 async def test_stream_video_r2_redirect_via_registry(stream_fresh_modules):
-    """Studio video stream → registry hit → presigned URL returned."""
+    """Studio video stream → registry hit → STREAM presigned URL.
+
+    CodeX P2 (2026-05-12): the call must land on
+    ``generate_presigned_stream_url`` (long TTL, no Content-Disposition
+    attachment) — NOT the download helper. The fixture records the
+    helper name as the tuple's first element.
+    """
     from job_intercept import _resolve_r2_stream_redirect
     registry = [_stream_entry(
         "publish.dubbed_video", content_type="video/mp4",
@@ -596,13 +638,16 @@ async def test_stream_video_r2_redirect_via_registry(stream_fresh_modules):
 
     url, kind = await _resolve_r2_stream_redirect(db, "job_stream_test", stream_kind="video")
     assert kind == "registry"
-    assert url and "publish.dubbed_video.mp4" in url
-    # presign was called with the registry-recorded content_type
-    assert stream_fresh_modules == [(
-        "jobs/job_stream_test/g0/publish.dubbed_video.mp4",
-        "my_video.mp4",
-        "video/mp4",
-    )]
+    assert url and "sig=stream" in url, (
+        f"stream redirect must call stream presign, not download "
+        f"(got url={url})"
+    )
+    # Stream helper signature: (helper, key, content_type, expires_s)
+    assert len(stream_fresh_modules) == 1
+    helper, key, ct, expires = stream_fresh_modules[0]
+    assert helper == "stream"
+    assert key == "jobs/job_stream_test/g0/publish.dubbed_video.mp4"
+    assert ct == "video/mp4"
 
 
 @pytest.mark.asyncio
@@ -618,7 +663,9 @@ async def test_stream_poster_r2_redirect(stream_fresh_modules):
     url, kind = await _resolve_r2_stream_redirect(db, "job_stream_test", stream_kind="poster")
     assert kind == "registry"
     assert url and "publish.dubbed_video_poster" in url
-    assert stream_fresh_modules[0][2] == "image/jpeg"
+    helper, _key, ct, _expires = stream_fresh_modules[0]
+    assert helper == "stream"
+    assert ct == "image/jpeg"
 
 
 @pytest.mark.asyncio
@@ -694,6 +741,77 @@ async def test_stream_r2_disabled_falls_through(monkeypatch, tmp_path):
     url, kind = await _resolve_r2_stream_redirect(db, "job_stream_test", stream_kind="video")
     assert url is None
     assert kind == ""
+
+
+@pytest.mark.asyncio
+async def test_stream_uses_long_ttl_inline_helper_not_download_helper(
+    stream_fresh_modules,
+):
+    """CodeX P2 invariant (2026-05-12): stream MUST NOT reuse the
+    short-TTL ``attachment``-disposition download helper, or
+    ``<video>`` players will hit 403 mid-playback on any clip > 120s
+    and the player will try to save the file instead of play it.
+
+    Drift guard: if a future refactor accidentally points
+    ``_resolve_r2_stream_redirect`` back at
+    ``generate_presigned_download_url``, this test catches it.
+    """
+    from job_intercept import _resolve_r2_stream_redirect
+    registry = [_stream_entry("publish.dubbed_video")]
+    db = _StreamFakeDB(_StreamFakeJob(r2_artifacts=registry))
+    url, _kind = await _resolve_r2_stream_redirect(db, "job_stream_test", stream_kind="video")
+    assert url and "sig=stream" in url
+    # Negative: download helper must not have been touched
+    helper_names = [c[0] for c in stream_fresh_modules]
+    assert "download" not in helper_names, (
+        f"stream path used download helper(s); calls={stream_fresh_modules}"
+    )
+    assert helper_names == ["stream"]
+
+
+def test_r2_client_stream_presign_uses_no_content_disposition(monkeypatch, tmp_path):
+    """Unit-level: ``generate_presigned_stream_url`` must NOT pass
+    ``ResponseContentDisposition`` to boto3. Doing so would tell R2
+    to add an ``attachment; filename=...`` response header, which
+    breaks in-browser playback (browser tries to save instead of
+    play).
+    """
+    for mod in ("storage", "storage.r2_client", "config"):
+        sys.modules.pop(mod, None)
+    config = importlib.import_module("config")
+    monkeypatch.setattr(config.settings, "download_redirect_backend", "r2")
+    monkeypatch.setattr(config.settings, "r2_endpoint", "https://fake.r2/")
+    monkeypatch.setattr(config.settings, "r2_access_key_id", "ak")
+    monkeypatch.setattr(config.settings, "r2_secret_access_key", "sk")
+    monkeypatch.setattr(config.settings, "r2_artifacts_bucket", "avt-artifacts")
+    monkeypatch.setattr(config.settings, "r2_stream_presigned_expires_s", 1800)
+    monkeypatch.setattr(config.settings, "r2_upload_timeout_s", 60)
+    monkeypatch.setattr(config.settings, "jobs_dir", str(tmp_path))
+
+    r2_client = importlib.import_module("storage.r2_client")
+    # Capture the call so we can inspect Params without going to boto3
+    captured: dict = {}
+
+    class _FakeClient:
+        def generate_presigned_url(self, op, *, Params, ExpiresIn):
+            captured["op"] = op
+            captured["Params"] = Params
+            captured["ExpiresIn"] = ExpiresIn
+            return f"https://r2/{Params['Key']}"
+
+    monkeypatch.setattr(r2_client, "_get_client", lambda: _FakeClient())
+
+    url = r2_client.generate_presigned_stream_url(
+        "jobs/abc/g0/publish.dubbed_video.mp4", content_type="video/mp4",
+    )
+    assert url
+    assert captured["op"] == "get_object"
+    assert "ResponseContentDisposition" not in captured["Params"], (
+        "stream presign must not set Content-Disposition (would force "
+        "browser to download instead of play)"
+    )
+    assert captured["Params"]["ResponseContentType"] == "video/mp4"
+    assert captured["ExpiresIn"] == 1800
 
 
 def test_stream_event_types_in_sync():

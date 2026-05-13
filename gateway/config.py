@@ -127,6 +127,20 @@ class GatewaySettings(BaseSettings):
     # during the TTL, not the full body transferred.
     r2_presigned_expires_s: int = 120
 
+    # Plan 2026-05-07 §11 Stage C / CodeX P2 follow-up (2026-05-12):
+    # ``<video src=...>`` players issue multiple Range requests over the
+    # full playback window (pause / resume / seek may re-fetch minutes
+    # apart). 120s would 403 mid-playback on any video > 2 min. Stream
+    # presign uses this larger budget (default 30 min) so a typical
+    # workspace play / pause / scrub session stays in one signature
+    # window. URLs still aren't permanent — leak window is bounded —
+    # and the object key path component itself is opaque
+    # (``jobs/{job_id}/g{N}/...``) so it doesn't enumerate.
+    r2_stream_presigned_expires_s: int = Field(
+        default=1800,
+        validation_alias="R2_STREAM_PRESIGNED_EXPIRES_S",
+    )
+
     # Upload timeout when lazily pushing a never-seen-in-R2 artifact. If the
     # upload cannot complete inside this budget, the router gives up and
     # falls back to local. Kept tight to avoid holding user download

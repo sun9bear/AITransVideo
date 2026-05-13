@@ -236,6 +236,58 @@ def generate_presigned_download_url(
     )
 
 
+def generate_presigned_stream_url(
+    key: str,
+    content_type: str = "video/mp4",
+    expires_s: int | None = None,
+) -> str:
+    """Sign a long-lived GET URL for in-browser media streaming.
+
+    Plan 2026-05-07 §11.3 C3 + CodeX P1/P2 follow-up (2026-05-12):
+    ``<video src=...>`` and ``<audio src=...>`` players behave very
+    differently from ``<a download>`` downloads:
+
+    1. **TTL has to be long.** Players issue multiple Range requests
+       over the full playback window — pause / resume / seek can
+       re-fetch the same URL minutes apart. The 120s default from
+       ``generate_presigned_download_url`` would 403 mid-playback on
+       any video longer than 2 min. Stream presign defaults to
+       ``settings.r2_stream_presigned_expires_s`` (1800s = 30 min) so
+       a typical workspace play / pause / scrub session stays within
+       a single signature window.
+
+    2. **Disposition has to be inline.** With
+       ``attachment; filename=...`` (the download helper) browsers
+       try to save instead of play, breaking the in-page player.
+       Stream presign omits filename and uses no
+       ``Content-Disposition`` override; R2 then serves the object
+       with whatever default header the bucket / object metadata has.
+
+    3. **No filename param needed.** Stream URLs never reach the
+       user's Save-As dialog; the only path that produces a saved
+       filename is /download/{key}, which keeps using the download
+       helper. Skipping ``ResponseContentDisposition`` here also
+       removes one place where Save-As filenames could drift from
+       the download path.
+
+    Caller passes ``content_type`` from the registry entry so the
+    response carries the right MIME (``video/mp4`` /
+    ``audio/wav`` / ``image/jpeg``).
+    """
+    if expires_s is None:
+        expires_s = getattr(settings, "r2_stream_presigned_expires_s", 1800)
+    client = _get_client()
+    return client.generate_presigned_url(
+        "get_object",
+        Params={
+            "Bucket": settings.r2_artifacts_bucket,
+            "Key": key,
+            "ResponseContentType": content_type,
+        },
+        ExpiresIn=expires_s,
+    )
+
+
 def _ascii_fallback_filename(name: str) -> str:
     """Best-effort ASCII rendering of ``name`` for the legacy ``filename=``
     directive. Non-ASCII characters become ``_`` so that user agents that
