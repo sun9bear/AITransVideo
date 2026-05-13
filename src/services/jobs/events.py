@@ -14,6 +14,16 @@ EVENT_TYPE_DOWNLOAD_REDIRECT_R2 = "download.redirect.r2"
 EVENT_TYPE_DOWNLOAD_REDIRECT_R2_REGISTRY = "download.redirect.r2_registry"
 EVENT_TYPE_DOWNLOAD_FALLBACK_LOCAL = "download.fallback.local"
 EVENT_TYPE_DOWNLOAD_LOCAL_DIRECT = "download.local.direct"
+# Plan 2026-05-07 §11.3 C6 (Stage C, 2026-05-12): /stream/{kind} mirrors
+# the download event vocabulary. We keep the dashboard split between
+# stream and download because the failure modes differ — stream is
+# latency-sensitive (player buffering), download is throughput-sensitive
+# (zip transfer time). Same registry / lazy / fallback semantics, but
+# the metric breakdowns need separate buckets.
+EVENT_TYPE_STREAM_REDIRECT_R2 = "stream.redirect.r2"
+EVENT_TYPE_STREAM_REDIRECT_R2_REGISTRY = "stream.redirect.r2_registry"
+EVENT_TYPE_STREAM_FALLBACK_LOCAL = "stream.fallback.local"
+EVENT_TYPE_STREAM_LOCAL_DIRECT = "stream.local.direct"
 SUPPORTED_EVENT_TYPES = {
     EVENT_TYPE_LOG,
     EVENT_TYPE_STATUS,
@@ -21,6 +31,10 @@ SUPPORTED_EVENT_TYPES = {
     EVENT_TYPE_DOWNLOAD_REDIRECT_R2_REGISTRY,
     EVENT_TYPE_DOWNLOAD_FALLBACK_LOCAL,
     EVENT_TYPE_DOWNLOAD_LOCAL_DIRECT,
+    EVENT_TYPE_STREAM_REDIRECT_R2,
+    EVENT_TYPE_STREAM_REDIRECT_R2_REGISTRY,
+    EVENT_TYPE_STREAM_FALLBACK_LOCAL,
+    EVENT_TYPE_STREAM_LOCAL_DIRECT,
 }
 
 EVENT_LEVEL_INFO = "info"

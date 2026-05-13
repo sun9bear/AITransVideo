@@ -154,14 +154,17 @@ def test_manifest_empty_artifact_index_marks_failed(fake_r2, tmp_path):
 # ---- service_mode filtering -------------------------------------------------
 
 
-def test_express_mode_only_publishes_dubbed_video(fake_r2, tmp_path):
-    """Express download surface has exactly one key. Pushing studio
-    extras for an Express job would be a write-amplification waste +
-    surface a key the user can't reach via /download."""
+def test_express_mode_only_publishes_dubbed_video_and_poster(fake_r2, tmp_path):
+    """Express EAGER_PUSH set = {publish.dubbed_video, publish.dubbed_video_poster}
+    (Stage C added poster — see plan 2026-05-07 §11.3 C1).
+    Studio-only extras (subtitles, dubbed_audio_complete, jianying) must
+    NOT appear; pushing them for Express would be write-amplification
+    waste + would surface keys the user can't reach via /download."""
     from services.r2_publisher_lib.r2_publisher import publish_artifacts
 
     project_dir = _make_project_with_manifest(tmp_path, artifact_files={
         "publish.dubbed_video": "video/final.mp4",
+        "publish.dubbed_video_poster": "video/poster.jpg",
         "editor.subtitles": "subs/zh.srt",
     })
 
@@ -173,8 +176,8 @@ def test_express_mode_only_publishes_dubbed_video(fake_r2, tmp_path):
         base_filename="vid",
     )
     keys = {e.artifact_key for e in result.entries}
-    assert keys == {"publish.dubbed_video"}, keys
-    assert result.entries[0].state == "pushed"
+    assert keys == {"publish.dubbed_video", "publish.dubbed_video_poster"}, keys
+    assert all(e.state == "pushed" for e in result.entries)
     # No subtitles upload despite manifest listing one
     assert all("subtitles" not in k for _, k, _ in fake_r2.upload_calls)
 
@@ -442,3 +445,96 @@ def test_head_hit_skips_put(fake_r2, tmp_path):
     e = result.entries[0]
     assert e.state == "already_present"
     assert fake_r2.upload_calls == []
+
+
+# ---- Stage C: poster eager push (plan 2026-05-07 §11.3 C1) ------------------
+
+
+def test_poster_in_eager_push_studio_and_express():
+    """Stage C decision D43: poster joins EAGER_PUSH for both modes so
+    the /stream/poster path can 302 to R2 like /stream/video.
+
+    Drift would mean the sweeper stops pushing poster after a future
+    refactor, then cleanup deletes the local poster, then the stream
+    endpoint returns 404 — exactly the bug Stage C closes.
+    """
+    from services.r2_publisher_lib.downloadable_keys import (
+        EAGER_PUSH_TO_R2_KEYS_STUDIO,
+        EAGER_PUSH_TO_R2_KEYS_EXPRESS,
+    )
+    assert "publish.dubbed_video_poster" in EAGER_PUSH_TO_R2_KEYS_STUDIO
+    assert "publish.dubbed_video_poster" in EAGER_PUSH_TO_R2_KEYS_EXPRESS
+
+
+def test_poster_pushed_with_image_jpeg_content_type(fake_r2, tmp_path):
+    """End-to-end: a Studio job whose manifest carries
+    ``publish.dubbed_video_poster`` lands in the registry as ``pushed``
+    with content_type=``image/jpeg`` and filename=``{base}_poster.jpg``.
+    Stage C requires this so the Gateway stream redirect path can hand
+    the same content_type back to the browser via presigned URL.
+    """
+    from services.r2_publisher_lib.r2_publisher import publish_artifacts
+
+    project_dir = _make_project_with_manifest(tmp_path, artifact_files={
+        "publish.dubbed_video": "video/final.mp4",
+        "publish.dubbed_video_poster": "video/poster.jpg",
+    })
+
+    result = publish_artifacts(
+        job_id="job_p",
+        service_mode="studio",
+        edit_generation=0,
+        project_dir=project_dir,
+        base_filename="vidname",
+    )
+    by_key = {e.artifact_key: e for e in result.entries}
+    assert "publish.dubbed_video_poster" in by_key, (
+        "poster missing from publisher result — EAGER_PUSH set lost it?"
+    )
+    poster = by_key["publish.dubbed_video_poster"]
+    assert poster.state == "pushed"
+    assert poster.content_type == "image/jpeg"
+    assert poster.filename == "vidname_poster.jpg"
+    # PUT call confirms content_type really made it to r2_client
+    poster_uploads = [
+        (p, k, ct) for (p, k, ct) in fake_r2.upload_calls
+        if "publish.dubbed_video_poster" in k
+    ]
+    assert poster_uploads, "poster PUT missing from fake_r2 calls"
+    assert poster_uploads[0][2] == "image/jpeg"
+
+
+def test_stream_kind_to_artifact_key_mapping():
+    """Stage C C3 contract: /stream/{kind} → artifact_key translation.
+    Stays a one-way function with exactly 3 known kinds; unknowns
+    return None so the Gateway intercept falls through to Job API.
+    """
+    from services.r2_publisher_lib.downloadable_keys import (
+        artifact_key_for_stream_kind,
+    )
+    assert artifact_key_for_stream_kind("video") == "publish.dubbed_video"
+    assert artifact_key_for_stream_kind("audio") == "editor.dubbed_audio_complete"
+    assert artifact_key_for_stream_kind("poster") == "publish.dubbed_video_poster"
+    # Unknown kind → None (caller falls through, never crashes)
+    assert artifact_key_for_stream_kind("foobar") is None
+    assert artifact_key_for_stream_kind("") is None
+
+
+def test_stream_kinds_for_service_mode():
+    """Stage C C3 service_mode allowlist: Express drops audio
+    (mirrors EXPRESS_ALLOWED_STREAM_KINDS in api.py). Drift would let
+    Express users 302 to R2 audio via Gateway, bypassing Job API's
+    own enforcement.
+    """
+    from services.r2_publisher_lib.downloadable_keys import (
+        stream_kinds_for,
+        EXPRESS_ALLOWED_STREAM_KINDS,
+        STUDIO_ALLOWED_STREAM_KINDS,
+    )
+    assert stream_kinds_for("express") == EXPRESS_ALLOWED_STREAM_KINDS
+    assert stream_kinds_for("studio") == STUDIO_ALLOWED_STREAM_KINDS
+    assert stream_kinds_for(None) == STUDIO_ALLOWED_STREAM_KINDS  # default
+    # Express must NOT include audio (per
+    # docs/plans/2026-04-18-express-studio-output-filter-plan.md)
+    assert "audio" not in EXPRESS_ALLOWED_STREAM_KINDS
+    assert "audio" in STUDIO_ALLOWED_STREAM_KINDS

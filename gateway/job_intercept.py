@@ -1287,6 +1287,49 @@ async def intercept_job_subresource(
             payload={"artifact_key": artifact_key, "backend": "local"},
         )
 
+    # --- /stream/{kind} R2 redirect (plan 2026-05-07 §11.3 C3-C4, Stage C) ---
+    # Same fallback contract as /download/{key}: any R2 / DB error returns
+    # ``(None, "")`` and we fall through to the local Range-streaming path
+    # via proxy_request. Reuses the existing AVT_DOWNLOAD_REDIRECT_BACKEND
+    # flag — no separate stream feature flag, because stream and download
+    # serve the same underlying artifacts and have the same risk profile.
+    stream_match = (
+        _STREAM_KIND_RE.match(subpath)
+        if request.method == "GET"
+        else None
+    )
+    if stream_match is not None:
+        stream_kind = stream_match.group("kind")
+        redirect_url, redirect_kind = await _resolve_r2_stream_redirect(
+            db, job_id, stream_kind=stream_kind,
+        )
+        if redirect_url is not None:
+            _emit_download_event(
+                job_id,
+                "stream.redirect.r2_registry"
+                if redirect_kind == "registry"
+                else "stream.redirect.r2",
+                message="Stream redirected to R2",
+                payload={"stream_kind": stream_kind, "backend": "r2"},
+            )
+            from fastapi.responses import RedirectResponse
+            return RedirectResponse(url=redirect_url, status_code=302)
+        try:
+            from storage.backend_router import is_r2_enabled
+            r2_enabled = is_r2_enabled()
+        except Exception:
+            r2_enabled = False
+        _emit_download_event(
+            job_id,
+            "stream.fallback.local" if r2_enabled else "stream.local.direct",
+            message=(
+                "Stream fell back to local source"
+                if r2_enabled
+                else "Stream served from local source"
+            ),
+            payload={"stream_kind": stream_kind, "backend": "local"},
+        )
+
     return await proxy_request(
         request=request,
         upstream_base=settings.job_api_upstream,
@@ -1453,6 +1496,117 @@ async def _legacy_lazy_resolve_publish_dubbed_video(
             job_id, exc,
         )
         return None
+
+
+async def _resolve_r2_stream_redirect(
+    db: AsyncSession,
+    job_id: str,
+    *,
+    stream_kind: str,
+) -> tuple[str | None, str]:
+    """Resolve an R2 302 target for /stream/{kind}.
+
+    Plan: 2026-05-07 §11.3 C3 (Stage C). Mirrors ``_resolve_r2_redirect``
+    but without the legacy lazy-upload fallback path — stream is a new
+    surface so we don't carry pre-Stage-A baggage; if registry doesn't
+    have it, we fall through to Job API's local Range stream
+    (src/services/jobs/api.py:447-490).
+
+    Returns ``(url, kind)`` where ``kind`` is:
+      - ``"registry"``: served from PG-resident r2_artifacts entry.
+      - ``""``: caller should fall back to local byte-passthrough.
+
+    Never raises — every R2 / DB error is swallowed and reported as
+    ``(None, "")``.
+    """
+    try:
+        from storage.backend_router import is_r2_enabled
+        from services.r2_publisher_lib.downloadable_keys import (
+            artifact_key_for_stream_kind,
+            stream_kinds_for,
+        )
+    except Exception as exc:  # pragma: no cover - boto3/storage missing
+        logger.warning(
+            "stream r2 redirect: storage package import failed (%s); falling back",
+            exc,
+        )
+        return None, ""
+
+    if not is_r2_enabled():
+        return None, ""
+
+    # Translate /stream/{kind} → artifact_key. Unknown kinds (anything
+    # not in video/audio/poster) bail out without touching DB — the
+    # downstream Job API path will produce its own 404.
+    artifact_key = artifact_key_for_stream_kind(stream_kind)
+    if artifact_key is None:
+        return None, ""
+
+    try:
+        result = await db.execute(select(Job).where(Job.job_id == job_id))
+        job = result.scalar_one_or_none()
+    except Exception as exc:
+        logger.warning(
+            "stream r2 redirect: job lookup failed job=%s (%s); falling back",
+            job_id, exc,
+        )
+        return None, ""
+
+    if job is None or not job.project_dir:
+        return None, ""
+
+    # Service-mode allowlist gate (mirrors _resolve_r2_redirect P2.1).
+    # Express jobs requesting /stream/audio land here; we refuse so the
+    # Gateway 302 path can't smuggle past the Job API enforcement at
+    # src/services/jobs/api.py:459-464.
+    if stream_kind not in stream_kinds_for(job.service_mode):
+        return None, ""
+
+    expected_gen = job.edit_generation or 0
+
+    registry_entry = None
+    if job.r2_artifacts:
+        for item in job.r2_artifacts:
+            if (
+                item.get("artifact_key") == artifact_key
+                and item.get("edit_generation") == expected_gen
+            ):
+                registry_entry = item
+                break
+
+    if registry_entry is None:
+        return None, ""
+
+    state = registry_entry.get("state")
+    if state not in ("pushed", "already_present"):
+        # skipped_missing / failed → fall through to Job API local stream
+        # (which will either find the on-disk file or return its 404).
+        return None, ""
+
+    r2_key = registry_entry.get("r2_key")
+    if not r2_key:
+        return None, ""
+
+    # Stream-specific filename hint: for Save-As (when user right-clicks
+    # the player and chooses "Save video as…"). Reuse the same name the
+    # registry recorded — see r2_publisher._filename_for for the kind-
+    # specific suffix logic ({base}.mp4 / .wav / _poster.jpg).
+    filename = registry_entry.get("filename") or _derive_download_filename(job)
+    content_type = registry_entry.get(
+        "content_type", "application/octet-stream",
+    )
+    try:
+        from storage import r2_client
+        url = r2_client.generate_presigned_download_url(
+            r2_key, filename, content_type=content_type,
+        )
+        return url, "registry"
+    except Exception as exc:
+        logger.warning(
+            "stream r2 redirect: presign failed job=%s kind=%s (%s); falling back",
+            job_id, stream_kind, exc,
+        )
+        return None, ""
 
 
 def _derive_download_filename(job: Job) -> str:
@@ -1924,6 +2078,13 @@ _JIANYING_DRAFT_SUBPATHS: frozenset[str] = frozenset({
 import re as _re
 
 _DOWNLOAD_KEY_RE = _re.compile(r"^download/(?P<key>[a-z0-9_.\-]+)$")
+
+# Plan 2026-05-07 §11.3 C3 (Stage C, 2026-05-12): /stream/{kind} matcher.
+# Kinds = video / audio / poster (mirrors src/services/jobs/api.py:447-490).
+# Permission gate + kind→artifact_key translation live in
+# services/r2_publisher_lib/downloadable_keys.py; this regex just identifies
+# the URL surface so the intercept can dispatch.
+_STREAM_KIND_RE = _re.compile(r"^stream/(?P<kind>[a-z]+)$")
 
 
 # Set of subpaths that represent editing STATE TRANSITIONS (need FOR UPDATE

@@ -54,11 +54,18 @@ logger = logging.getLogger(__name__)
 # tuple in sync with ``SUPPORTED_EVENT_TYPES`` in that file.
 # (Plan 2026-05-07 §4.7: ``download.redirect.r2_registry`` added to
 # distinguish registry-driven 302 from legacy lazy-upload 302.)
+# (Plan 2026-05-07 §11.3 C6 / Stage C: ``stream.*`` mirrors download.*
+# for /stream/{kind} R2 redirect. The name is kept (_DOWNLOAD_EVENT_TYPES)
+# for git-blame continuity; the contents now cover both surfaces.)
 _DOWNLOAD_EVENT_TYPES = frozenset({
     "download.redirect.r2",
     "download.redirect.r2_registry",
     "download.fallback.local",
     "download.local.direct",
+    "stream.redirect.r2",
+    "stream.redirect.r2_registry",
+    "stream.fallback.local",
+    "stream.local.direct",
 })
 
 

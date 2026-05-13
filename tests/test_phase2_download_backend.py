@@ -391,10 +391,15 @@ def _assert_emit_writes_expected(
 
 
 def test_emit_download_event_supported_types_in_sync_with_jobs_events():
-    """Cross-module contract: the event types the gateway writer accepts
-    without a drift warning must match the ``services.jobs.events``
-    SUPPORTED_EVENT_TYPES set for download.* events. Catches the case where
-    someone adds a new download.* event type to one side without the other.
+    """Cross-module contract: the redirect event types the gateway writer
+    accepts without a drift warning must match the
+    ``services.jobs.events`` SUPPORTED_EVENT_TYPES set for both
+    ``download.*`` and ``stream.*`` families. Catches the case where
+    someone adds a new event type to one side without the other.
+
+    Plan 2026-05-07 §11.3 C6 (Stage C, 2026-05-12): ``_DOWNLOAD_EVENT_TYPES``
+    was extended to include ``stream.*`` keeping the same variable name
+    for git-blame continuity; the assertion below covers both families.
     """
     # Scrub cache — other fixtures muck with sys.modules["config"].
     for mod in ("storage", "storage.event_log"):
@@ -405,17 +410,16 @@ def test_emit_download_event_supported_types_in_sync_with_jobs_events():
     # Pull SUPPORTED_EVENT_TYPES from the Job API side via AST — importing
     # services.jobs.events would pull pydub and defeat the point.
     events_src = (SRC_DIR / "services" / "jobs" / "events.py").read_text(encoding="utf-8")
-    # Extract every download.* string literal assigned to an EVENT_TYPE_*
-    # constant. Robust enough for this small, stable file.
+    # Extract every (download|stream).* string literal assigned to an
+    # EVENT_TYPE_* constant. Robust enough for this small, stable file.
     import re
-    literals = set(re.findall(r'"(download\.[a-z0-9_.]+)"', events_src))
-    job_api_types = {t for t in literals if t.startswith("download.")}
+    literals = set(re.findall(r'"((?:download|stream)\.[a-z0-9_.]+)"', events_src))
 
-    assert gateway_types == job_api_types, (
+    assert gateway_types == literals, (
         f"Event-type drift between gateway/storage/event_log.py and "
         f"src/services/jobs/events.py.\n"
-        f"  gateway-only: {gateway_types - job_api_types}\n"
-        f"  job-api-only: {job_api_types - gateway_types}"
+        f"  gateway-only: {gateway_types - literals}\n"
+        f"  job-api-only: {literals - gateway_types}"
     )
 
 
@@ -476,3 +480,236 @@ def test_intercept_has_single_r2_download_surface():
         f"point so we can reason about ordering / fallback semantics. If "
         f"you are deliberately adding a second surface, update this guard."
     )
+
+
+def test_intercept_has_single_r2_stream_surface():
+    """Stage C parallel guard: same single-entry rule applies to
+    ``/stream/{kind}`` (plan 2026-05-07 §11.3 C3-C4). Future maintainers
+    must not add a second ``stream_match`` dispatch site, or fallback
+    ordering between R2 / Job API local becomes ambiguous.
+    """
+    source = (GATEWAY_DIR / "job_intercept.py").read_text(encoding="utf-8")
+    matches = source.count("stream_match = (")
+    assert matches == 1, (
+        f"Expected exactly 1 'stream_match = (' in job_intercept.py, "
+        f"got {matches}. See same rationale as download surface guard."
+    )
+
+
+# ============================================================================
+# Stage C tests (plan 2026-05-07 §11.3, 2026-05-12)
+# Coverage: /stream/{kind} R2 redirect for video/audio/poster, with the
+# same registry + service_mode allowlist semantics as /download/{key}.
+# ============================================================================
+
+
+class _StreamFakeJob:
+    """Minimal Job stub for direct ``_resolve_r2_stream_redirect`` calls."""
+
+    def __init__(
+        self,
+        *,
+        job_id: str = "job_stream_test",
+        service_mode: str = "studio",
+        edit_generation: int = 0,
+        project_dir: str = "/opt/aivideotrans/app/projects/u/job_stream_test",
+        r2_artifacts: list[dict] | None = None,
+        display_name: str | None = None,
+        title: str | None = None,
+    ) -> None:
+        self.job_id = job_id
+        self.service_mode = service_mode
+        self.edit_generation = edit_generation
+        self.project_dir = project_dir
+        self.r2_artifacts = r2_artifacts
+        self.display_name = display_name
+        self.title = title
+
+
+class _StreamFakeDB:
+    """Async-compatible ``db.execute(select(Job).where(...))`` stub."""
+
+    def __init__(self, job_obj):
+        self._job = job_obj
+
+    async def execute(self, *args, **kwargs):
+        from types import SimpleNamespace
+        return SimpleNamespace(scalar_one_or_none=lambda: self._job)
+
+
+def _stream_entry(artifact_key, *, gen=0, state="pushed", r2_key=None,
+                  filename=None, content_type=None):
+    d = {
+        "artifact_key": artifact_key,
+        "edit_generation": gen,
+        "state": state,
+    }
+    if state in ("pushed", "already_present"):
+        d["r2_key"] = r2_key or f"jobs/job_stream_test/g{gen}/{artifact_key}.bin"
+        d["filename"] = filename or f"vid_{artifact_key}.bin"
+        d["content_type"] = content_type or "application/octet-stream"
+    return d
+
+
+@pytest.fixture
+def stream_fresh_modules(monkeypatch, tmp_path):
+    """Same module-reload dance as the download fixture so each test
+    runs against a clean ``storage`` import with monkeypatched config."""
+    for mod in (
+        "storage", "storage.r2_client", "storage.backend_router",
+        "config",
+    ):
+        sys.modules.pop(mod, None)
+    config = importlib.import_module("config")
+    monkeypatch.setattr(config.settings, "download_redirect_backend", "r2")
+    monkeypatch.setattr(config.settings, "r2_endpoint", "https://fake.r2/")
+    monkeypatch.setattr(config.settings, "r2_access_key_id", "AKIATEST")
+    monkeypatch.setattr(config.settings, "r2_secret_access_key", "secrettest")
+    monkeypatch.setattr(config.settings, "r2_artifacts_bucket", "avt-artifacts")
+    monkeypatch.setattr(config.settings, "r2_presigned_expires_s", 120)
+    monkeypatch.setattr(config.settings, "r2_upload_timeout_s", 60)
+    monkeypatch.setattr(config.settings, "jobs_dir", str(tmp_path))
+
+    # Pre-stub r2_client.generate_presigned_download_url so the helper
+    # doesn't actually open a boto3 session in test.
+    r2_client = importlib.import_module("storage.r2_client")
+    calls: list[tuple[str, str, str]] = []
+
+    def _fake_presign(key, filename, content_type="video/mp4"):
+        calls.append((key, filename, content_type))
+        return f"https://fake.r2/{key}?sig=abc"
+
+    monkeypatch.setattr(r2_client, "generate_presigned_download_url", _fake_presign)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_stream_video_r2_redirect_via_registry(stream_fresh_modules):
+    """Studio video stream → registry hit → presigned URL returned."""
+    from job_intercept import _resolve_r2_stream_redirect
+    registry = [_stream_entry(
+        "publish.dubbed_video", content_type="video/mp4",
+        r2_key="jobs/job_stream_test/g0/publish.dubbed_video.mp4",
+        filename="my_video.mp4",
+    )]
+    db = _StreamFakeDB(_StreamFakeJob(r2_artifacts=registry))
+
+    url, kind = await _resolve_r2_stream_redirect(db, "job_stream_test", stream_kind="video")
+    assert kind == "registry"
+    assert url and "publish.dubbed_video.mp4" in url
+    # presign was called with the registry-recorded content_type
+    assert stream_fresh_modules == [(
+        "jobs/job_stream_test/g0/publish.dubbed_video.mp4",
+        "my_video.mp4",
+        "video/mp4",
+    )]
+
+
+@pytest.mark.asyncio
+async def test_stream_poster_r2_redirect(stream_fresh_modules):
+    """Studio poster stream → registry hit with image/jpeg content_type."""
+    from job_intercept import _resolve_r2_stream_redirect
+    registry = [_stream_entry(
+        "publish.dubbed_video_poster", content_type="image/jpeg",
+        r2_key="jobs/job_stream_test/g0/publish.dubbed_video_poster.jpg",
+        filename="my_video_poster.jpg",
+    )]
+    db = _StreamFakeDB(_StreamFakeJob(r2_artifacts=registry))
+    url, kind = await _resolve_r2_stream_redirect(db, "job_stream_test", stream_kind="poster")
+    assert kind == "registry"
+    assert url and "publish.dubbed_video_poster" in url
+    assert stream_fresh_modules[0][2] == "image/jpeg"
+
+
+@pytest.mark.asyncio
+async def test_stream_audio_express_forbidden(stream_fresh_modules):
+    """Express + audio: must NOT 302 to R2 (audio not in
+    EXPRESS_ALLOWED_STREAM_KINDS); Gateway falls through to Job API which
+    will return its own 403."""
+    from job_intercept import _resolve_r2_stream_redirect
+    registry = [_stream_entry("editor.dubbed_audio_complete", content_type="audio/wav")]
+    db = _StreamFakeDB(_StreamFakeJob(
+        service_mode="express", r2_artifacts=registry,
+    ))
+    url, kind = await _resolve_r2_stream_redirect(db, "job_stream_test", stream_kind="audio")
+    assert url is None
+    assert kind == ""
+
+
+@pytest.mark.asyncio
+async def test_stream_fallback_when_registry_empty(stream_fresh_modules):
+    """Registry NULL → caller falls through to Job API local stream."""
+    from job_intercept import _resolve_r2_stream_redirect
+    db = _StreamFakeDB(_StreamFakeJob(r2_artifacts=None))
+    url, kind = await _resolve_r2_stream_redirect(db, "job_stream_test", stream_kind="video")
+    assert url is None
+    assert kind == ""
+
+
+@pytest.mark.asyncio
+async def test_stream_unknown_kind_falls_through(stream_fresh_modules):
+    """Unknown /stream/foo segment doesn't try R2 at all."""
+    from job_intercept import _resolve_r2_stream_redirect
+    db = _StreamFakeDB(_StreamFakeJob())
+    url, kind = await _resolve_r2_stream_redirect(db, "job_stream_test", stream_kind="foo")
+    assert url is None
+    assert kind == ""
+
+
+@pytest.mark.asyncio
+async def test_stream_old_generation_entry_ignored(stream_fresh_modules):
+    """Registry entry from gen 0 must NOT serve a gen-1 stream request
+    (mirrors the download P1.3 / Stage A overwrite-isolation invariant)."""
+    from job_intercept import _resolve_r2_stream_redirect
+    registry = [_stream_entry("publish.dubbed_video", gen=0)]
+    db = _StreamFakeDB(_StreamFakeJob(edit_generation=1, r2_artifacts=registry))
+    url, kind = await _resolve_r2_stream_redirect(db, "job_stream_test", stream_kind="video")
+    assert url is None  # generation mismatch
+    assert kind == ""
+
+
+@pytest.mark.asyncio
+async def test_stream_skipped_missing_state_falls_through(stream_fresh_modules):
+    """An entry in 'skipped_missing' state means R2 has nothing — caller
+    falls through to Job API local (which will 404 the same way)."""
+    from job_intercept import _resolve_r2_stream_redirect
+    registry = [_stream_entry("publish.dubbed_video", state="skipped_missing")]
+    db = _StreamFakeDB(_StreamFakeJob(r2_artifacts=registry))
+    url, kind = await _resolve_r2_stream_redirect(db, "job_stream_test", stream_kind="video")
+    assert url is None
+    assert kind == ""
+
+
+@pytest.mark.asyncio
+async def test_stream_r2_disabled_falls_through(monkeypatch, tmp_path):
+    """When AVT_DOWNLOAD_REDIRECT_BACKEND != r2, stream helper short-circuits."""
+    for mod in ("storage", "storage.r2_client", "storage.backend_router", "config"):
+        sys.modules.pop(mod, None)
+    config = importlib.import_module("config")
+    monkeypatch.setattr(config.settings, "download_redirect_backend", "local")
+    monkeypatch.setattr(config.settings, "jobs_dir", str(tmp_path))
+    from job_intercept import _resolve_r2_stream_redirect
+    registry = [_stream_entry("publish.dubbed_video")]
+    db = _StreamFakeDB(_StreamFakeJob(r2_artifacts=registry))
+    url, kind = await _resolve_r2_stream_redirect(db, "job_stream_test", stream_kind="video")
+    assert url is None
+    assert kind == ""
+
+
+def test_stream_event_types_in_sync():
+    """Plan 2026-05-07 §11.3 C6: gateway/storage/event_log.py
+    ``_DOWNLOAD_EVENT_TYPES`` must include all 4 stream.* types and
+    services.jobs.events.SUPPORTED_EVENT_TYPES must agree. Drift between
+    the two surfaces would let stream events fail silently in the JSONL
+    emit path or violate the Job API event contract.
+    """
+    from storage.event_log import _DOWNLOAD_EVENT_TYPES
+    from services.jobs import events as _events
+    expected_stream = {
+        "stream.redirect.r2",
+        "stream.redirect.r2_registry",
+        "stream.fallback.local",
+        "stream.local.direct",
+    }
+    assert expected_stream.issubset(_DOWNLOAD_EVENT_TYPES)
+    assert expected_stream.issubset(_events.SUPPORTED_EVENT_TYPES)

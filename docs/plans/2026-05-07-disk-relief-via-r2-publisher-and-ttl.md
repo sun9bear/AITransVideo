@@ -1447,3 +1447,187 @@ Week 3: 真删除生效
 - 月 R2 成本 ≤ ¥5
 - Stage B 守门 0 误删
 - Gateway 包依赖隔离守卫 100% 通过 AST 扫描
+
+---
+
+## 11. Stage C — 覆盖剩余下载/stream 链路(2026-05-12 用户决策)
+
+### 11.1 触发动机
+
+Stage A+B 上线运行后,Day 3-4 实测发现:
+
+1. **下载链路 R2 化只覆盖 4 个 `download` key**(`publish.dubbed_video` / `editor.dubbed_audio_complete` / `editor.subtitles{,_en,_bilingual}` + 条件 `editor.jianying_draft_zip`)
+2. **`/stream/{kind}` 端点**(video / audio / poster)目前完全走本地 Range stream([src/services/jobs/api.py:447-490](../../src/services/jobs/api.py))
+3. **`publish.dubbed_video_poster`** 在 `EXPRESS_ALLOWED_ARTIFACT_KEYS` / `STUDIO_ALLOWED_ARTIFACT_KEYS` 但**不在** EAGER_PUSH 集合 → R2 上没有副本
+4. **admin 任务豁免 cleanup**([gateway/project_cleanup.py:121-122](../../gateway/project_cleanup.py)`if role_snapshot == "admin": return False`)→ admin 用户 disk 永久占用,Stage B parity gate 永远碰不到
+
+实测后果(2026-05-12 磁盘 100%):141G 全部一个 admin 用户(`342bbde3-903b-4944-a53c-12a1de0b5ca9`)的 41 个 succeeded 任务。即使 Stage B parity gate 启用也救不了,因为 `_is_expired` 在 admin 豁免分支直接 return False。
+
+### 11.2 用户决策(2026-05-12)
+
+| 决策 | 内容 |
+|------|------|
+| **D42** | `/stream/{kind}` 接 R2 302 — plan v4 D35 的 "25min 上限" 约束**取消**(原约束是怕长视频签名 30min 过期,但 R2 支持 Range,浏览器从 R2 origin 拉 segment 在签名 TTL 内通常足够;长视频灰度后视情况微调) |
+| **D43** | `publish.dubbed_video_poster` 加入 EAGER_PUSH 集合,publisher 推 poster + content_type=image/jpeg |
+| **D44** | **admin 豁免维持原状**。141G 救急通过临时扩容 50G 处理。admin 长期备份能力转为 §11.8 follow-up |
+| **D45** | Phase 2b CF Custom Domain(plan v4 D39)条件触发判据写入 §11.5,等大陆 stream 体感数据出来后决定 |
+| **D46** | **不推中间产物到 R2**(`source/` / `transcription/` / `mfa/` / `tts_segments/` 等)— 维持 plan §1.3 现有非目标。理由:架构变更过大、收益与复杂度不匹配、违反 `feedback_r2_publisher_consumer_contract`(R2 不该重定义 pipeline IO 语义)|
+| **D47** | **不推 `materials_pack` zip 到 R2** — 维持现有按需生成模式,Stage A §5.2.4 已经写过 "materials_pack 路径不在 /download/{key},留独立专题" |
+
+### 11.3 任务清单
+
+| ID | 文件 / 模块 | 改动类型 | 工时 |
+|----|-------------|---------|------|
+| C1 | `src/services/r2_publisher_lib/downloadable_keys.py` | EAGER_PUSH_TO_R2_KEYS_STUDIO 与 EXPRESS 同集合加 `publish.dubbed_video_poster`;`_CONTENT_TYPE_BY_KEY` 已含 `image/jpeg`(无需改) | 0.1d |
+| C2 | `src/services/r2_publisher_lib/r2_publisher.py:_filename_for` | poster 文件名规则:`{base}_poster.jpg`(沿用现有 line 170 已有的规则,**确认仍生效**)| 0.0d(已有)|
+| C3 | `gateway/job_intercept.py:_resolve_r2_redirect` | 把现有"仅 download key"扩到 stream key 复用同一个 helper。新增第二个 entry point `_resolve_r2_stream_redirect`,接 `kind: Literal["video","audio","poster"]`,内部转 artifact_key(video → `publish.dubbed_video`,audio → `editor.dubbed_audio_complete`,poster → `publish.dubbed_video_poster`),走同一个 registry 查找 + 302 跳转逻辑 | 0.3d |
+| C4 | `gateway/job_intercept.py` 主分支 | 现有 `if download_match: ... 302` 段后新增 `if stream_match:` 分支,镜像同样的 R2 / lazy / fallback 三层;Express service_mode 仍然按 `EXPRESS_ALLOWED_STREAM_KINDS = {"video","poster"}` 守门 | 0.3d |
+| C5 | `src/services/jobs/api.py:447-490` `/stream/{kind}` | **保持不动作 fallback** — Gateway 拦截 302 走 R2;Gateway 不可达时 Job API 仍能直接服务本地文件(symmetric with Stage A /download fallback 设计)| 0d |
+| C6 | `gateway/storage/event_log.py` + `src/services/jobs/events.py` | 加 3 个新事件类型:`stream.redirect.r2_registry` / `stream.fallback.local` / `stream.local.direct`(对齐现有 `download.*` 命名)| 0.1d |
+| C7 | `tests/test_phase2_download_backend.py`(扩) | 新增 stream 路径测试:`test_stream_video_r2_redirect_via_registry` / `test_stream_audio_express_forbidden_passthrough` / `test_stream_poster_r2_redirect` / `test_stream_fallback_when_registry_empty` | 0.3d |
+| C8 | `tests/test_r2_publisher.py`(扩) | 新增 `test_poster_added_to_eager_push_studio` / `test_poster_pushed_with_image_jpeg_content_type` 守卫 | 0.2d |
+| C9 | 部署 + 灰度 | nohup build gateway + force-recreate --no-deps + restart app,沿用 Stage A/B 已建立的安全流程 | 0.3d |
+| **Stage C 合计** | | | **~1.6d** |
+
+### 11.4 关键设计
+
+**stream 端点 R2 化的 invariant 复用**(与 plan §4.5 终态结算单一入口同源):
+
+- `_resolve_r2_stream_redirect` 路由职责清晰:只读 `Job.r2_artifacts` registry + 调 `r2_client.generate_presigned_download_url`
+- 不重定义 content_type / filename — 复用 registry entry 已存的字段(避免 Stage A 出现过的 jianying naming bug 重演)
+- 不调任何 settle helper(parity / cleanup 是状态消费方,plan §4.5 invariant)
+- 不引入新的对长视频签名续期机制(浏览器 `<video>` 拿 302 后从 R2 拉,签名 120s 期内 Range 请求复用同一对象元数据;>120s 后 player 自动 re-request 触发新 302。如果实测 >120s 视频出现卡顿,降级 D42 改为 ≤ N 分钟 opt-in 阈值)
+
+**poster 流转**(C1 一行 set 改动后自动生效):
+
+```
+现有 publish 阶段 → poster.jpg 写 project_dir/output/
+现有 manifest builder 已经把 publish.dubbed_video_poster 写入 artifact_index(否则现有 /stream/poster 本地路径也找不到)
+publisher 加 poster 到 EAGER_PUSH → sweeper 推 R2
+download/stream 都从 PG.r2_artifacts 找到 entry → 302
+```
+
+### 11.5 Phase 2b 条件触发判据
+
+启用 Phase 2b CF Custom Domain(plan v4 D39 / §10.3.1)的判据(D45):
+
+```
+Stage C 部署后 1 周内:
+  IF (大陆用户 stream 卡顿投诉率 ≥ 5%)
+     OR (Uptime Kuma 探针实测武汉移动 R2 stream < 1 MB/s 持续 3+ 天)
+  THEN 启 Phase 2b:
+       - DNS 加 files.aitrans.video CNAME 到 R2 bucket
+       - artifacts bucket 设 public-via-custom-domain
+       - Worker 验签(HMAC,plan v4 D39)
+       - 改 r2_client.presign_get 路由 `files.aitrans.video` 而非 `<account>.r2.cloudflarestorage.com`
+  ELSE 维持现状
+```
+
+工作量 ~1.5d,**不在 Stage C 主体范围**,只触发时启动。
+
+### 11.6 灰度顺序
+
+```
+Day 0: 部署 C1-C9,Gateway 拿到新 image(stream R2 路由分支默认 follow R2 backend flag)
+       验证:flag OFF (`AVT_DOWNLOAD_REDIRECT_BACKEND=local`) → stream 行为完全不变
+       生产实际 flag 是 r2(Stage A 切过)→ stream 立即开始走 R2 302
+       (无独立 stream feature flag — 复用 download 现有 flag,因为 stream 和 download 是同源对象)
+Day 0+5min: 现网新任务 succeeded → sweeper 推 EAGER_PUSH(含新加的 poster)
+            老任务的 poster 走 lazy upload 兜底(Stage A 老 r2_key 形状,publish.dubbed_video 用同样路径)
+Day 1: 手动验证三种场景
+       - 新 Studio 任务:在线播放视频 → Network 面板 302 到 R2
+       - 老任务 poster:走 lazy(第一次访问触发 PUT)
+       - Express 任务:试图 stream/audio → 仍 403(共享白名单生效)
+Day 1-7: 监控指标
+       - 武汉移动用户 stream 卡顿率(用户反馈 + Uptime Kuma 探针)
+       - R2 PUT 次数(poster 加入后 +1 per task,可承受)
+       - source 出站带宽下降比例(stream 不再吃 Gateway 进程带宽)
+Day 7: Stage C 验收
+       Phase 2b 触发判据评估
+Day 14: Phase 2b 触发 OR 不触发,Stage C done
+```
+
+### 11.7 非目标(显式)
+
+- ❌ 中间产物推 R2(D46)— 维持 plan §1.3 现状
+- ❌ `materials_pack` zip 推 R2(D47)— 留独立专题
+- ❌ admin 任务自动 cleanup 改造(用户 D44 决策)— 维持 admin 永久豁免;长期通过 §11.8 备份功能解决
+- ❌ stream 端点的 25min 上限(D42 取消)— 不预设,实测决定
+- ❌ 改 service_mode allowlist 语义 — `EXPRESS_ALLOWED_STREAM_KINDS` 保持原值
+
+### 11.8 长期 follow-up:admin 一键备份到私有网盘
+
+**触发**:Stage C 落地后,admin 任务的长期 disk 占用问题需要"用户主动归档"能力作为最终方案。
+
+**需求**(用户 2026-05-12 提出):
+- admin 可一键把"本账号所有视频任务的数据"打包备份到私有网盘(百度网盘 / OneDrive / Google Drive / 阿里云盘 等)
+- 或者**单个视频任务**单独备份
+- 备份后 admin 可手动删本地 project_dir 释放磁盘
+
+**可行性分析**(不实施,只评估):
+
+| 维度 | 评估 |
+|------|------|
+| **百度网盘 API** | 有官方 [OpenAPI](https://pan.baidu.com/union),OAuth2 + 大文件分片上传(单文件最大 4GB,分片 4MB 起)。每用户 token 7d 过期需 refresh。商用授权需"分发"申请(免费上限 200 QPS)|
+| **数据规模** | 单任务 1-3GB 中间产物 + ~600MB final products = ~2-4GB;41 个任务 ~100-200GB,首次全备份 4-8 小时(取决于网盘上行) |
+| **备份内容** | 已 publish 任务可以"R2 上的最终产物 + 本地中间产物 zip"。或者纯本地 project_dir tar.gz(更完整) |
+| **触发方式** | admin UI 加按钮 "备份此任务" / "批量备份";后端起 background_task 类型 `backup_to_pan`,异步打包 + 上传 |
+| **认证存储** | 用户 token 加密存 PG `users` 表新字段(`pan_provider` / `pan_refresh_token_encrypted`),开发期可手动跑命令注入 |
+| **工作量预估** | OAuth2 + 单文件上传 demo:1d;分片 / 断点续传 / 多任务并发:+1d;UI 按钮 + 进度展示:+1d;**合计 ~3 工日** |
+| **风险** | ① 百度网盘审核严格,可能拒"视频内容"分发授权;② 大文件上传不稳定要重试;③ token 过期管理 |
+
+**设计草稿**(等 Stage C 稳定后再细化为正式 plan):
+
+- 后端:`gateway/background_task_executors.py:execute_backup_to_pan` 新增 executor
+  - 输入:`{job_ids: [...]}` / `{user_id, scope: "all"|"single"}`
+  - 流程:1. 收集 project_dir + R2 副本(可选)→ 2. 打 tar.gz → 3. 分片上传 → 4. 写 PG `backup_records` 表
+- 前端:admin 工作台加"备份"按钮,调 `/api/admin/backups`
+- Schema:新建 `backup_records` (`id`/`user_id`/`job_id`/`provider`/`remote_path`/`size_bytes`/`status`/`created_at`)
+- 鉴权:仅 admin 用户可见,前端 + 后端双侧守门
+
+**何时实施**:Stage C 落地 + 灰度通过后,作为独立 plan `docs/plans/2026-XX-XX-admin-backup-to-pan.md` 启动。当前**不写代码**,只占位记录用户需求。
+
+### 11.9 验收清单
+
+代码 / 集成:
+- [ ] C1: `EAGER_PUSH_TO_R2_KEYS_STUDIO` / `EAGER_PUSH_TO_R2_KEYS_EXPRESS` 都含 `publish.dubbed_video_poster`
+- [ ] C2: publisher 推 poster 时 content_type=`image/jpeg`,filename=`{base}_poster.jpg`(由现有 `_filename_for` line 170 提供)
+- [ ] C3-C4: `gateway/job_intercept.py` 加 `_DOWNLOAD_KEY_RE` 同款 `_STREAM_KIND_RE`,新增 `_resolve_r2_stream_redirect` helper,主分支添加 stream 拦截 + 302 + event emit
+- [ ] C5: `/stream/{kind}` 老路径完全不动(fallback 完整保留)
+- [ ] C6: `SUPPORTED_EVENT_TYPES` 加 `stream.redirect.r2_registry` / `stream.fallback.local` / `stream.local.direct`;`gateway/storage/event_log.py:_DOWNLOAD_EVENT_TYPES` 同步扩展(改名 `_REDIRECT_EVENT_TYPES`)
+- [ ] C7: test_phase2_download_backend.py 新增 4 个 stream 测试全过
+- [ ] C8: test_r2_publisher.py 新增 2 个 poster 守卫全过
+- [ ] AST 守卫:`from services.jobs` top-level import 仍 0 处(plan §4.2 perimeter 不变)
+
+数据 / 体验:
+- [ ] 新任务完成 + sweeper 推完后:在线播放 video → Network 302 → `<account>.r2.cloudflarestorage.com/jobs/{id}/g0/publish.dubbed_video.mp4`
+- [ ] poster 缩略图渲染:`<img src="/job-api/.../stream/poster">` → 302 → R2 image/jpeg
+- [ ] audio 试听(Studio):同 video
+- [ ] Express 任务的 audio 试听:返 403(不受 R2 化影响)
+- [ ] 武汉移动用户实测视频卡顿率 < 5%(P95)— 或触发 Phase 2b
+
+回滚:
+- [ ] BL1 演练:`AVT_DOWNLOAD_REDIRECT_BACKEND=local` → stream 立即回本地 Range stream
+- [ ] BL2 演练:hot-patch `_resolve_r2_stream_redirect` 强制返 None → 仅 stream 回 local;download 保持 R2
+
+### 11.10 回滚
+
+| 级别 | 触发 | 动作 |
+|------|------|------|
+| BL1 | stream R2 路径整体异常 | `AVT_DOWNLOAD_REDIRECT_BACKEND=local`(与 Stage A 同 flag)→ stream + download 都回 local |
+| BL2 | 仅 stream 异常,download 正常 | hot-patch `_resolve_r2_stream_redirect` 强制返 None,download 保持 R2 |
+| BL3 | poster 推送异常(content_type / filename) | 改 EAGER_PUSH 移除 poster + `AVT_R2_PROACTIVE_PUSH_ENABLED=false` 一轮 → 老任务 poster 仍走 lazy 不受影响 |
+| BL4 | Phase 2b 切完发现 R2 public + HMAC 链路出问题 | `R2_PUBLIC_BASE=`(env 清空)+ restart gateway → presigned URL 回 R2 原生域名 |
+
+---
+
+## 12. 总进度索引(2026-05-12 更新)
+
+| 阶段 | 范围 | 状态 | commit |
+|------|------|------|--------|
+| Stage A(§4)| R2 publisher + sweeper + registry-based download | ✅ 完成 + 部署 + 灰度通过 | `10b3e68` |
+| Day 2 fix | JSONB none_as_null + mirror gen drift | ✅ 完成 + 部署 | `7d17347` / `3ba2988` |
+| Day 3 fix | jianying naming = disk basename | ✅ 完成 + 部署 | `a849fea` |
+| Stage B(§5)| parity gate + delegate rmtree + cron schedule | ✅ 代码部署 + flag 默认 OFF(灰度未启) | `f3958ca` |
+| Stage C(§11) | stream/poster R2 + Phase 2b 条件触发 | ⏳ 设计完成,待实施 | — |
+| §11.8 admin 备份 | 长期 follow-up,占位草稿 | ⏳ 未实施 | — |

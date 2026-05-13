@@ -295,9 +295,26 @@ async def test_db_execute_exception_returns_false(fake_r2):
 
 
 @pytest.mark.asyncio
-async def test_express_only_requires_dubbed_video(fake_r2):
+async def test_express_requires_dubbed_video_and_poster(fake_r2):
+    """Stage C: Express EAGER_PUSH now = {dubbed_video, dubbed_video_poster}.
+    Parity must require both (plan 2026-05-07 §11.3 C1)."""
     from services.r2_publisher_lib.r2_parity import r2_parity_ok
-    # Just publish.dubbed_video — Express's only eager key
-    registry = [_entry("publish.dubbed_video")]
+    registry = [
+        _entry("publish.dubbed_video"),
+        _entry("publish.dubbed_video_poster"),
+    ]
     db = FakeDB(_job(service_mode="express", registry=registry))
     assert await r2_parity_ok(db, "job_test") is True
+
+
+@pytest.mark.asyncio
+async def test_express_missing_poster_refuses_parity(fake_r2):
+    """Stage C drift guard: Express registry missing poster → parity False.
+    Without this, an upgrade from Stage B (poster not in EAGER_PUSH) leaving
+    an Express job with only ``publish.dubbed_video`` entry would let
+    cleanup delete the local poster while R2 has nothing → /stream/poster
+    breaks. Parity must refuse so the sweeper backfills first."""
+    from services.r2_publisher_lib.r2_parity import r2_parity_ok
+    registry = [_entry("publish.dubbed_video")]  # missing poster
+    db = FakeDB(_job(service_mode="express", registry=registry))
+    assert await r2_parity_ok(db, "job_test") is False
