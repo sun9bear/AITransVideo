@@ -307,6 +307,11 @@ services:
       # Presigned URL TTL (s). Short on purpose — browser follows the 302
       # immediately, so a leaked URL barely has a replay window.
       AVT_R2_PRESIGNED_EXPIRES_S: "${AVT_R2_PRESIGNED_EXPIRES_S:-120}"
+      # Stream presigned URL TTL (s). Longer than the download TTL because
+      # ``<video src=...>`` players issue multiple Range requests over the
+      # full playback window — 120s would 403 mid-playback on any video > 2 min.
+      # Default 30 min covers a typical workspace play / pause / scrub session.
+      AVT_R2_STREAM_PRESIGNED_EXPIRES_S: "${AVT_R2_STREAM_PRESIGNED_EXPIRES_S:-1800}"
       # Lazy-upload wall clock budget (s). If the first-download upload
       # can't finish inside this, backend_router falls back to local.
       AVT_R2_UPLOAD_TIMEOUT_S: "${AVT_R2_UPLOAD_TIMEOUT_S:-60}"

@@ -136,10 +136,14 @@ class GatewaySettings(BaseSettings):
     # window. URLs still aren't permanent — leak window is bounded —
     # and the object key path component itself is opaque
     # (``jobs/{job_id}/g{N}/...``) so it doesn't enumerate.
-    r2_stream_presigned_expires_s: int = Field(
-        default=1800,
-        validation_alias="R2_STREAM_PRESIGNED_EXPIRES_S",
-    )
+    #
+    # CodeX nit follow-up (2026-05-13): env var name intentionally
+    # follows the ``AVT_`` prefix like ``r2_presigned_expires_s`` and
+    # ``r2_upload_timeout_s``. Read as ``AVT_R2_STREAM_PRESIGNED_EXPIRES_S``.
+    # Only the four R2 *credential* fields (endpoint / key id / secret /
+    # bucket) skip the prefix because they match the upstream
+    # Cloudflare-R2 plan + ``scripts/phase0_probes/`` convention.
+    r2_stream_presigned_expires_s: int = 1800
 
     # Upload timeout when lazily pushing a never-seen-in-R2 artifact. If the
     # upload cannot complete inside this budget, the router gives up and
