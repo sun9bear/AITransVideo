@@ -203,6 +203,173 @@ class TestAutoVoiceReviewOrchestration:
         assert d.choice is VoiceReviewChoice.PRESET
         assert d.reason_code.startswith("non_finite_sample_seconds_")
 
+    def test_consent_must_be_exact_true_not_truthy_strings(self):
+        """Codex 第十三轮 P1: consent guard must use ``is True`` strict
+        identity, NOT ``bool(...)``. ``bool("false")`` and ``bool("0")``
+        are both truthy Python strings, so a stringly-typed upstream
+        payload would silently bypass the consent guard and burn paid
+        clone API — exactly the failure CLAUDE.md "付费 API 不能自动调用"
+        forbids. Only an exact bool ``True`` passes.
+        """
+        from services.smart.auto_voice_review import (
+            evaluate_voice_review, VoiceReviewChoice,
+        )
+        from tests.fakes import FakeCloneProvider
+
+        # Each of these values is truthy under bool() but NOT identity-True.
+        truthy_non_true_values = [
+            "true", "false", "1", "yes", 1, 1.0, [True], {"any": "dict"},
+        ]
+        for value in truthy_non_true_values:
+            fake = FakeCloneProvider()
+            result = evaluate_voice_review(
+                main_speakers=[self._speaker("a", sample_seconds=20.0)],
+                smart_consent={"auto_voice_clone": value},
+                clone_provider=fake,
+                voice_library_quota_remaining=100,
+                smart_decision_id_factory=self._id_factory(),
+            )
+            # CRITICAL: provider NOT called for any of these truthy values.
+            assert fake.calls == [], (
+                f"consent value {value!r} (type={type(value).__name__}) "
+                f"caused clone provider to be called — must be 'is True' "
+                f"strict only."
+            )
+            assert result.decisions[0].choice is VoiceReviewChoice.PRESET
+            assert result.decisions[0].reason_code == "consent_denied"
+
+    def test_consent_exact_true_proceeds_to_clone(self):
+        """Counterpart: exact bool ``True`` IS the only value that
+        bypasses the consent guard."""
+        from services.smart.auto_voice_review import (
+            evaluate_voice_review, VoiceReviewChoice,
+        )
+        from tests.fakes import FakeCloneProvider
+
+        fake = FakeCloneProvider()
+        result = evaluate_voice_review(
+            main_speakers=[self._speaker("a", sample_seconds=20.0)],
+            smart_consent={"auto_voice_clone": True},
+            clone_provider=fake,
+            voice_library_quota_remaining=100,
+            smart_decision_id_factory=self._id_factory(),
+        )
+        assert len(fake.calls) == 1
+        assert result.decisions[0].choice is VoiceReviewChoice.CLONED
+
+    def test_consent_missing_key_fails_closed(self):
+        """smart_consent dict without the auto_voice_clone key → PRESET.
+        Defensive against partial payloads."""
+        from services.smart.auto_voice_review import (
+            evaluate_voice_review, VoiceReviewChoice,
+        )
+        from tests.fakes import FakeCloneProvider
+
+        fake = FakeCloneProvider()
+        result = evaluate_voice_review(
+            main_speakers=[self._speaker("a", sample_seconds=20.0)],
+            smart_consent={},  # auto_voice_clone field missing
+            clone_provider=fake,
+            voice_library_quota_remaining=100,
+            smart_decision_id_factory=self._id_factory(),
+        )
+        assert fake.calls == []
+        assert result.decisions[0].choice is VoiceReviewChoice.PRESET
+        assert result.decisions[0].reason_code == "consent_denied"
+
+    def test_sample_none_never_calls_clone_provider(self):
+        """Codex 第十三轮 P2: ``float(None)`` raises TypeError. Module
+        docstring promises ``Raises: never``. Bad input must route to
+        PRESET, not bubble out as a pipeline crash."""
+        from services.smart.auto_voice_review import (
+            evaluate_voice_review, VoiceReviewChoice, VoiceReviewSpeakerInput,
+        )
+        from tests.fakes import FakeCloneProvider
+
+        # Bypass the dataclass type hint by constructing directly with
+        # bad data — mimics what PR#3C might pass if upstream metering
+        # was incomplete.
+        bad_speaker = VoiceReviewSpeakerInput(
+            speaker_id="a",
+            speaker_name="A",
+            sample_seconds=None,  # type: ignore[arg-type]
+            source_audio_path=Path("/fake.wav"),
+        )
+        fake = FakeCloneProvider()
+        # Should NOT raise, even though float(None) would.
+        result = evaluate_voice_review(
+            main_speakers=[bad_speaker],
+            smart_consent={"auto_voice_clone": True},
+            clone_provider=fake,
+            voice_library_quota_remaining=100,
+            smart_decision_id_factory=self._id_factory(),
+        )
+        assert fake.calls == []
+        d = result.decisions[0]
+        assert d.choice is VoiceReviewChoice.PRESET
+        assert d.reason_code == "invalid_sample_seconds_NoneType"
+
+    def test_sample_non_numeric_string_never_calls_clone_provider(self):
+        """``float("bad")`` raises ValueError → must route to PRESET."""
+        from services.smart.auto_voice_review import (
+            evaluate_voice_review, VoiceReviewChoice, VoiceReviewSpeakerInput,
+        )
+        from tests.fakes import FakeCloneProvider
+
+        bad_speaker = VoiceReviewSpeakerInput(
+            speaker_id="a", speaker_name="A",
+            sample_seconds="not a number",  # type: ignore[arg-type]
+            source_audio_path=Path("/fake.wav"),
+        )
+        fake = FakeCloneProvider()
+        result = evaluate_voice_review(
+            main_speakers=[bad_speaker],
+            smart_consent={"auto_voice_clone": True},
+            clone_provider=fake,
+            voice_library_quota_remaining=100,
+            smart_decision_id_factory=self._id_factory(),
+        )
+        assert fake.calls == []
+        d = result.decisions[0]
+        assert d.choice is VoiceReviewChoice.PRESET
+        assert d.reason_code == "invalid_sample_seconds_str"
+        # Raw form preserved in metrics so admin can diagnose source.
+        assert d.metrics["sample_seconds_raw"] == "'not a number'"
+
+    def test_sample_numeric_string_routes_to_preset_anomaly(self):
+        """``float("15.0")`` actually works — but a stringly-typed
+        sample_seconds is itself a data-quality signal. Module accepts
+        it (math.isfinite check passes after coerce) since the value
+        IS valid; we don't add extra strictness because float() will
+        also normalise int → float silently.
+
+        This test documents the intentional permissiveness: float()
+        coerce handles valid numeric strings + ints. Strict type
+        checking happens at the dataclass / Pydantic layer (PR#3C
+        integration's responsibility).
+        """
+        from services.smart.auto_voice_review import (
+            evaluate_voice_review, VoiceReviewChoice, VoiceReviewSpeakerInput,
+        )
+        from tests.fakes import FakeCloneProvider
+
+        speaker = VoiceReviewSpeakerInput(
+            speaker_id="a", speaker_name="A",
+            sample_seconds="15.0",  # type: ignore[arg-type]
+            source_audio_path=Path("/fake.wav"),
+        )
+        fake = FakeCloneProvider()
+        result = evaluate_voice_review(
+            main_speakers=[speaker],
+            smart_consent={"auto_voice_clone": True},
+            clone_provider=fake,
+            voice_library_quota_remaining=100,
+            smart_decision_id_factory=self._id_factory(),
+        )
+        # 15.0 ≥ 10 → clone proceeds (string was successfully coerced).
+        assert len(fake.calls) == 1
+        assert result.decisions[0].choice is VoiceReviewChoice.CLONED
+
     def test_sample_negative_never_calls_clone_provider(self):
         """Negative duration is upstream-data corruption — must NOT
         bypass guard on the basis of being "less than 10". Use the

@@ -203,7 +203,13 @@ def evaluate_voice_review(
     decisions per plan §6.4 sidecar discipline (failures must not
     block the user-facing pipeline).
     """
-    consent_allows_clone = bool(smart_consent.get("auto_voice_clone", False))
+    # Codex 第十三轮 P1: strict identity check, NOT bool() coercion.
+    # bool("false") / bool("0") / bool(1) all evaluate truthy and would
+    # let a stringly-typed upstream payload bypass the consent guard
+    # and burn paid clone API. Only exact ``True`` (the Pydantic-validated
+    # bool that Gateway should deliver) is allowed through. Anything
+    # else — None, missing, "true" string, 1 int, etc. — falls to PRESET.
+    consent_allows_clone = smart_consent.get("auto_voice_clone") is True
     decisions: list[VoiceReviewDecision] = []
     quota_remaining = voice_library_quota_remaining
     paused_after_speaker: bool = False
@@ -233,14 +239,22 @@ def evaluate_voice_review(
 
         # Rule 2: sample insufficient or anomalous — never call clone provider.
         #
-        # Codex 第十二轮 P1-2: must guard against NaN / inf / non-finite
-        # values, not just ``< min``. Naive ``sample_seconds < 10.0``
-        # returns False for NaN AND inf (NaN comparisons are all False
-        # by IEEE-754; inf isn't less than 10), so a corrupted upstream
-        # value would silently bypass the guard and burn paid clone API.
-        # Use isfinite + reverse condition so anything anomalous lands in
-        # the "insufficient" branch.
-        sample_seconds = float(speaker.sample_seconds)
+        # Codex 第十二轮 P1-2: guard against NaN / inf / non-finite values.
+        # Codex 第十三轮 P2: also guard against None / non-numeric strings
+        # — ``float(None)`` raises TypeError, ``float("bad")`` raises
+        # ValueError, ``float(2**10000)`` raises OverflowError on some
+        # impls. Module docstring promises ``Raises: never``, so wrap
+        # the coerce in try/except and route any bad input to PRESET.
+        try:
+            sample_seconds = float(speaker.sample_seconds)
+        except (TypeError, ValueError, OverflowError):
+            decisions.append(_preset_decision(
+                speaker,
+                f"invalid_sample_seconds_{type(speaker.sample_seconds).__name__}",
+                smart_decision_id_factory(),
+                metrics={"sample_seconds_raw": repr(speaker.sample_seconds)},
+            ))
+            continue
         if not (math.isfinite(sample_seconds) and sample_seconds >= min_sample_seconds):
             # Distinguish "non-finite anomaly" from "below threshold" in
             # the reason_code so admin / sidecar audit can spot data-
