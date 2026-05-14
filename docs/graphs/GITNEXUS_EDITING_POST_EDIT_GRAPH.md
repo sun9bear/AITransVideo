@@ -9,31 +9,36 @@
 - editing speakers registry
 - speaker voice profile inference
 - `preview-source` cache 与 stream endpoint
+- single segment re-TTS 与 batch re-TTS
 - `overwrite / copy_as_new`
 - `editing_audio_sync_required`
-- commit 后对 Jianying draft 与 `materials_pack` 的失效影响
+- Smart job 是否允许进入 editing
 
 ## 2. 主图
 
 ```mermaid
 graph TD
-    EditPage["VideoEditPage"] --> Segments["editing/segments.json + voice_map.json"]
+    EditEntry["enter-edit"] --> ModeGate["service_mode + smart_state editable gate"]
+    ModeGate --> EditPage["VideoEditPage"]
+    EditPage --> Segments["editing/segments.json + voice_map.json"]
     EditPage --> Speakers["editor/editing/speakers.json"]
 
     Speakers --> CreateDialog["EditPageSpeakerCreateDialog"]
-    CreateDialog --> CreateApi["POST /jobs/{id}/editing/speakers"]
+    CreateDialog --> CreateApi["POST /editing/speakers"]
     CreateApi --> SpeakersSvc["editing_speakers.py"]
     SpeakersSvc --> ProfileKick["maybe_trigger_inference(...)"]
     ProfileKick --> ProfileJob["editing_voice_profile.py"]
     ProfileJob --> ProfileBadge["EditPageSpeakerProfileBadge"]
 
-    Segments --> DraftTTS["segment regenerate / draft wav"]
+    Segments --> SingleTTS["segment regenerate / draft wav"]
+    Segments --> BatchTTS["editing_batch.py regenerate_all_dirty_segments"]
     Segments --> PreviewSource["preview-source cache + stream endpoint"]
     Segments --> Structural["split / speaker / text edits"]
 
     Structural --> Audit["user_edit_events.jsonl"]
-    DraftTTS --> Audit
-    ProfileJob --> Audit
+    SingleTTS --> Audit
+    BatchTTS --> StatusMap["segment_status.json"]
+    StatusMap --> Audit
 
     Audit --> Commit["editing_commit.py"]
     Commit --> SyncCheck["find text edits without regenerated TTS"]
@@ -56,87 +61,77 @@ graph TD
 
 ## 3. 当前最大的变化
 
-### 3.1 editing speaker 已经是独立实体
+### 3.1 Smart job 进入 editing 需要二级状态门
 
-- `src/services/jobs/editing_speakers.py` 把编辑态 speakers 单独持久化到 `editor/editing/speakers.json`
-- 创建 speaker 通过 `file_lock(editing_speakers_path(project_dir))` 保护
-- `frontend-next/src/lib/api/editing.ts` 暴露了：
-  - `GET /jobs/{id}/editing/speakers`
-  - `POST /jobs/{id}/editing/speakers`
-  - `POST /jobs/{id}/editing/speakers/{speakerId}/retry-profile`
+- `src/services/jobs/api.py` 现在允许 `service_mode in {studio, smart}` 的任务进入 editing。
+- 如果 `record.service_mode == "smart"`，还必须通过 `is_editable_smart_state(...)`。
+- Smart 只有 `completed` 或 `downgraded_to_studio` 可编辑。
 
-结论：editing speaker 不再是临时 UI 状态，而是编辑态下的正式写侧模型。
+结论：Smart 审计身份可以保留，但 in-flight / refunded Smart job 不能进入 post-edit。
 
-### 3.2 新 speaker 首次绑定 segment 会触发 voice profile inference
+### 3.2 editing speaker 仍然是独立实体
 
-- `src/services/jobs/editing_voice_profile.py` 明确是 fire-and-forget 推断器
-- 当新 speaker 第一次被 segment 引用时，会从 `pending_segments` 进入 `inferring`
-- 推断完成后把 `profile_status / profile_error / profile` 写回 `speakers.json`
-- `frontend-next/src/app/(app)/workspace/[jobId]/edit/page.tsx` 会在存在 `inferring` speaker 时轮询
-- `EditPageSpeakerProfileBadge.tsx` 把状态和结果显式展示给用户
+- `editing_speakers.py` 把编辑态 speakers 持久化到 `editor/editing/speakers.json`。
+- 创建 speaker 通过 `file_lock(editing_speakers_path(project_dir))` 保护。
+- 前端通过 `/editing/speakers` 读写，并通过 retry-profile 重新触发 profile 推断。
 
-结论：speaker profile 已经变成 editing 流里的异步 sidecar，而不是一次性同步填表。
+结论：editing speaker 是编辑态正式模型，不是临时 UI 字段。
 
-### 3.3 preview-source cache 已经形成独立回放侧路
+### 3.3 batch re-TTS 只扫 dirty segment
 
-- `frontend-next/src/lib/api/editing.ts` 暴露：
-  - `POST /jobs/{jobId}/segments/{segmentId}/preview-source`
-  - `GET /job-api/jobs/{jobId}/segments/{segmentId}/preview-source-audio`
-- `src/services/jobs/editing_segments.py` 负责 `cache_preview_source_wav(...)`
-- 语义是把原始 segment 音频缓存到 `editor/editing/preview_cache/{segment_id}.wav`
+- `src/services/jobs/editing_batch.py` 扫描 `segment_status.json`。
+- 触发状态是 `text_dirty / voice_dirty / tts_failed`。
+- `tts_loading` 和 `tts_dirty` 不会被批量覆盖。
+- 单段失败不会中断整批，结果返回 succeeded/failed segment 列表。
 
-结论：编辑页现在明确区分“试听 draft TTS”和“回放原始分段音频”两条路径。
+结论：批量重合成是用户编辑后的显式处理面，不会自动覆盖用户尚未接受的 draft。
 
-### 3.4 commit 仍然有真实的 text/audio sync hard gate
+### 3.4 preview-source cache 继续作为独立回放侧路
 
-- `editing_commit.py` 继续通过 `_find_text_edits_without_tts(project_dir)` 检测 drift
-- 命中时直接抛 `EditingAudioSyncRequiredError`
-- 这条 gate 只处理“文本改了但没重新合成音频”的情况，不替代 lineage / revision 冲突检查
+- `POST /jobs/{jobId}/segments/{segmentId}/preview-source`
+- `GET /job-api/jobs/{jobId}/segments/{segmentId}/preview-source-audio`
+- 缓存落在 `editor/editing/preview_cache/{segment_id}.wav`
 
-结论：text/audio sync 已经不是建议项，而是 commit 的硬约束。
+结论：编辑页继续区分“试听 draft TTS”和“回放原始分段音频”。
 
-### 3.5 overwrite 先 claim，再做文件系统操作
+### 3.5 commit 仍然有 text/audio sync hard gate
 
-- `editing_commit.py` 先通过 `store.update_job(...)` 把记录从 `editing` 翻到 `running`
-- 然后才执行 `apply_editing`、`rm_editing_dir`、`prune_state`、`runner.start`
-- rollback 也通过 `update_job(...)`，避免与 cancel、admin 改动互相覆盖
+- `_find_text_edits_without_tts(project_dir)` 检测文本改动但没有重新合成音频的 segment。
+- 命中时抛 `EditingAudioSyncRequiredError`。
+- 这条 gate 不替代 lineage / revision 冲突检查。
 
-结论：overwrite 已经是显式 claim 语义，而不是脚本式顺序动作。
+结论：post-edit text/audio sync 是提交硬约束。
 
-### 3.6 overwrite 会主动退休旧交付物身份
+### 3.6 overwrite 仍会主动退休旧交付物身份
 
-- overwrite 不只重置 `jianying_draft_status / zip_path / user_root`
-- 还会清空：
-  - `jianying_draft_attempt_id`
-  - `jianying_draft_substep`
-  - `jianying_draft_fingerprint`
-- 网关侧仍会调用 `invalidate_materials_pack_for_job(...)`
+- overwrite 会清空旧 `jianying_draft_attempt_id / substep / fingerprint`。
+- 网关侧会调用 `invalidate_materials_pack_for_job(...)`。
+- `edit_generation` 推进后，R2 交付也切到新的 generation key 空间。
 
-结论：post-edit 后旧 Jianying 草稿和旧打包物都被正式标记为 stale。
+结论：post-edit 后旧草稿、旧打包物、旧 R2 generation 都被视作 stale。
 
 ## 4. 关键证据
 
+- `src/services/jobs/api.py`
+  - Smart editable gate
+  - editing endpoints
+- `src/services/smart/state.py`
+  - `is_editable_smart_state(...)`
+- `src/services/jobs/editing_batch.py`
+  - dirty segment batch regenerate
 - `src/services/jobs/editing_speakers.py`
   - speakers registry
-  - create / save / lock
 - `src/services/jobs/editing_voice_profile.py`
   - fire-and-forget inference
-  - profile 状态写回
-- `frontend-next/src/app/(app)/workspace/[jobId]/edit/page.tsx`
-  - speaker polling
-  - 新 speaker 绑定后的 profile 推断体验
-- `frontend-next/src/lib/api/editing.ts`
-  - editing speakers API
-  - preview-source API
 - `src/services/jobs/editing_commit.py`
-  - `EditingAudioSyncRequiredError`
-  - `update_job(...)` claim / rollback
-  - stale Jianying identity 清理
+  - sync hard gate
+  - overwrite claim
+  - stale deliverable invalidation
 
 ## 5. 什么时候优先看这张图
 
-- 想改 `overwrite / copy_as_new`
-- 想判断为什么某次 commit 报 `editing_audio_sync_required`
+- 想改 Smart job 是否能进入 editing
+- 想改批量 re-TTS 或 segment status
 - 想改 editing speakers 创建、profile 推断、retry-profile
-- 想排查 preview-source cache 与 draft TTS 试听的边界
+- 想判断为什么某次 commit 报 `editing_audio_sync_required`
 - 想改 post-edit 后交付物失效策略

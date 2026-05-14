@@ -9,7 +9,8 @@
 - alignment / whisper / paid fallback settings
 - voice calibration control plane
 - support admin、traffic analytics、cost management
-- cleanup、R2 sweeper、runner 诊断
+- cleanup、R2 sweeper、R2 parity、observability
+- Smart state 与 terminal settlement 诊断
 
 ## 2. 主图
 
@@ -38,76 +39,75 @@ graph TD
 
     MainLife["gateway/main.py lifespan"] --> Sweeper["r2_artifact_sweeper"]
     Sweeper --> Mirror["job_terminal_mirror"]
+    Mirror --> SmartState["smart_state mirror"]
     Mirror --> Settle["credit/quota settle"]
     Sweeper --> Publisher["r2_publisher"]
+    Cleanup --> Parity["r2_parity_ok + R2 HEAD"]
+    Parity --> Publisher
+
+    Events["download.* / stream.* events"] --> R2Obs["scripts/r2_observability.py"]
+    R2Obs --> AdminDecision["rollout / fallback diagnosis"]
 
     SupportAdmin --> Presence["presence / heartbeat / online threshold"]
     SupportAdmin --> Handoff["handoff / WeChat QR / ops email"]
     Traffic --> Categories["human / search / AI crawler / scanner"]
-    Costs --> CostRows["LLM / TTS / voice_clone / margin rows"]
+    Costs --> CostRows["LLM / TTS / voice_clone / smart policy / margin rows"]
 
-    Publisher --> Cleanup
+    SmartState --> Costs
     Settle --> Costs
     Categories --> AdminUI
     CostRows --> AdminUI
+    AdminDecision --> AdminUI
 ```
 
 ## 3. 当前最重要的控制面变化
 
-### 3.1 calibration 已经形成三入口 control plane
+### 3.1 calibration 三入口 control plane 继续成立
 
 - T0：`gateway/user_voice_api.py` 提供 `/user-voices/{voice_id}/calibrate-speed`
 - T1：`gateway/voice_calibration_hook.py` 在 clone 成功后自动补齐 canonical models
 - T2：`gateway/voice_calibration_review_preflight.py` 在 review submit 前补齐缺口
 
-结论：voice speed calibration 已经不再是单点脚本，而是覆盖手动、clone、review 的正式控制平面。
+结论：voice speed calibration 仍是覆盖手动、clone、review 的正式控制平面。
 
-### 3.2 手动校准与自动校准都走共享 inflight 语义
+### 3.2 Smart state 进入 terminal mirror 与 settlement 诊断面
 
-- 三条入口都汇入共享的 `run_calibration_task`
-- `gateway/voice_calibration_inflight.py` 负责去重与并发协作
-- `gateway/user_voice_service.py::update_user_voice_speed_calibration(...)` 明确保证并行写入 `chars_per_second_by_model` 时不丢更新
+- `job_terminal_mirror.py` 在 terminal settle 前合并 upstream `smart_state`。
+- `credits_service.py` 在 legacy terminal branch 前优先读取 `smart_state.credits_policy`。
+- policy 不识别时会记录 warning 并回落，不静默吞掉。
 
-结论：多入口并发校准已经有统一的幂等与合并语义，而不是彼此覆盖。
+结论：排查 Smart 扣费、退款、降级时，必须同时看 Job API JSON store、Gateway PG mirror 和 credit ledger。
 
-### 3.3 clone-after calibration 现在是带环境开关的正式 sidecar
+### 3.3 cleanup 现在可以要求 R2 parity
 
-- `gateway/voice_calibration_hook.py` 只在 clone 成功后触发
-- 当前 phase 1 针对 MiniMax canonical models：
-  - `speech-2.8-turbo`
-  - `speech-2.8-hd`
-- `AVT_AUTO_CALIBRATE_AFTER_CLONE` 默认开启
-- 失败静默，不阻断 clone 主流程
+- `AVT_CLEANUP_REQUIRES_R2_PARITY=true` 时，`project_cleanup.py` 会在删除项目目录前调用 `r2_parity_ok(...)`。
+- `r2_parity_ok(...)` 检查 registry entry、generation、状态值、R2 HEAD。
+- parity 失败会跳过整行，不 rmtree，也不 flip status。
 
-结论：clone 后自动校准是增益 sidecar，不是强耦合主路径。
+结论：磁盘释放策略已经和 R2 交付可靠性绑定。
 
-### 3.4 review preflight 的职责是“提交前最后补齐”
+### 3.4 R2 observability 进入 ops 工具链
 
-- preflight 只看 job-level final model，不看 per-speaker `model_hint`
-- 优先查 user voice，回退 voice catalog
-- 总预算 50 秒，超时任务不取消
-- 失败 never raise，review approve 始终继续代理
+- `scripts/r2_observability.py` 聚合 jobs dir 下的 `*.events.jsonl`。
+- 覆盖 download 与 stream 两类事件。
+- 输出可用于灰度判断，但 redirect 事件不是下载成功率。
 
-结论：T2 预热的目标是降低首轮运行时不确定性，而不是把审核提交变成阻塞式长任务。
+结论：R2 rollout 现在有稳定统计脚本，不必依赖临时 grep。
 
-### 3.5 ops 面现在还要管 R2 sweeper 与 terminal mirror
+### 3.5 email auth 对 ops 的影响是 provider 与 rate limits
 
-- `gateway/main.py` 启动和关闭 `r2_artifact_sweeper`
-- `gateway/r2_artifact_sweeper.py` 负责 proactive publish、delta push、retry-after backoff
-- `gateway/job_terminal_mirror.py` 负责 terminal state、`edit_generation`、ledger/quota settle 的镜像补偿
+- `EMAIL_AUTH_PROVIDER=fake/resend` 决定本地假邮件或真实邮件。
+- email 发送速率由 settings 控制。
+- fake provider 让本地开发和测试不依赖真实外部邮件服务。
 
-结论：Admin/Ops 面已经不只管设置和看板，也承担下载交付平面的后台一致性。
+结论：邮箱注册上线时要同时看 provider 配置、SMTP/Resend 能力、rate limit。
 
 ### 3.6 alignment / whisper 控制面仍是两层
 
-- 运行时 policy 由 `gateway/admin_settings.py` 暴露
-- 部署 capability 仍由：
-  - `pyproject.toml` 的 `.[whisper]`
-  - `Dockerfile` 的 `INSTALL_WHISPER`
-  - `docker-compose.yml` 的 `HF_HOME`
- 共同决定
+- 运行时 policy 由 `gateway/admin_settings.py` 暴露。
+- 部署 capability 由 `pyproject.toml` 的 `.[whisper]`、`Dockerfile` 的 `INSTALL_WHISPER`、`docker-compose.yml` 的 `HF_HOME` 决定。
 
-结论：管理员把 whisper 开关拨到 `on`，不代表部署层一定具备可运行能力。
+结论：管理员打开 whisper 开关不代表部署层一定具备可运行能力。
 
 ## 4. 关键证据
 
@@ -117,21 +117,24 @@ graph TD
   - clone-after auto-calibration
 - `gateway/voice_calibration_review_preflight.py`
   - review-submit preflight
-- `gateway/voice_calibration_inflight.py`
-  - 去重 / 并发协调
-- `gateway/user_voice_service.py`
-  - calibration merge write
-- `gateway/r2_artifact_sweeper.py`
-  - sweeper 控制面
 - `gateway/job_terminal_mirror.py`
-  - terminal mirror / settle
-- `gateway/admin_settings.py`
-  - alignment / whisper settings
+  - smart_state mirror
+  - terminal settle
+- `gateway/credits_service.py`
+  - Smart credits policy dispatcher
+- `gateway/project_cleanup.py`
+  - cleanup parity gate
+- `src/services/r2_publisher_lib/r2_parity.py`
+  - registry + R2 HEAD check
+- `scripts/r2_observability.py`
+  - download / stream observability
+- `gateway/auth_email.py`
+  - email auth provider and rate limits
 
 ## 5. 什么时候优先看这张图
 
 - 想改 voice calibration 行为或入口
-- 想排查 clone 后为什么没自动校准
-- 想排查 review submit 前为什么会先跑 calibration
-- 想改 alignment / whisper admin settings
-- 想排查 R2 proactive publish、terminal mirror、cleanup 这些后台运维链路
+- 想排查 Smart terminal settlement
+- 想排查 cleanup 为什么没有 purge 某个过期项目
+- 想看 R2 fallback / redirect 的统计口径
+- 想改 email auth provider 或 rate limits

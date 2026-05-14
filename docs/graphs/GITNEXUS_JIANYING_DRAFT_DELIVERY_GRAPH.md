@@ -4,129 +4,141 @@
 
 ## 1. 范围
 
-这张子图只看 `Studio succeeded job -> editor.jianying_draft_zip` 这条交付链，重点是：
+这张子图只看 Studio / Smart 成功任务如何按需生成剪映草稿，重点是：
 
-- `generate-jianying-draft` 的触发 / 轮询 / ownership proxy
-- `JianyingDraftRunner` 的 `fingerprint / substep / orphan rescue / claim guard`
-- deliverable-time whisper ensure 如何进入 runner
-- `display_name`、`user_draft_root` 与 zip 命名 / draft path 的边界
+- `POST /jobs/{id}/generate-jianying-draft`
+- `JianyingDraftRunner`
+- `attempt_id / substep / fingerprint`
+- `user_draft_root`
+- deliverable-time subtitle alignment
+- Smart job 的 user-facing Studio gate
 
 ## 2. 主图
 
 ```mermaid
 graph TD
-    StudioJob["succeeded studio job"] --> ResultUI["ResultMediaCard / JianyingDraftSection"]
-    ResultUI --> Trigger["POST generate-jianying-draft"]
-    ResultUI --> Poll["GET jianying-draft-status"]
-    ResultUI --> Dialog["JianyingDraftPathDialog"]
+    ResultUI["Workspace result"] --> Trigger["generate-jianying-draft"]
+    Trigger --> ApiPreflight["Job API preflight"]
+    ApiPreflight --> ModeGate["EDITABLE_SERVICE_MODES"]
+    ModeGate --> Studio["service_mode=studio"]
+    ModeGate --> Smart["service_mode=smart"]
+    Smart --> SmartState["is_editable_smart_state"]
+    SmartState --> SmartOk["completed / downgraded_to_studio"]
+    SmartState --> SmartReject["smart_state_not_editable"]
 
-    Trigger --> Gateway["Gateway ownership proxy"]
-    Poll --> Gateway
-    Gateway --> JobApi["Job API"]
-
-    JobApi --> Runner["JianyingDraftRunner"]
-    Runner --> Fingerprint["artifact hashes + display_name<br/>+ user_draft_root + whisper policy"]
-    Runner --> Substeps["validating -> aligning_subtitles -> building -> zip"]
-    Runner --> Guards["status==running + attempt_id + update_job"]
-    Runner --> Rescue["reap_stale / orphan rescue"]
-
-    Substeps --> Ensure["ensure_whisper_aligned_subtitles"]
-    Ensure --> Backend["JianyingDraftBackend"]
-    Backend --> Writer["JianyingDraftWriter"]
+    Studio --> Runner["JianyingDraftRunner.spawn"]
+    SmartOk --> Runner
+    Runner --> Gate1["Gate 1: pre-lock smart-aware check"]
+    Gate1 --> Lock["per-job lock + fresh require_job"]
+    Lock --> Gate2["Gate 2: post-lock authoritative check"]
+    Gate2 --> Claim["attempt_id + running claim"]
+    Claim --> Fingerprint["fingerprint / display_name / whisper policy"]
+    Fingerprint --> Cache["cache hit / skip_cache bypass"]
+    Cache --> AlignStep["substep: aligning_subtitles"]
+    AlignStep --> Ensure["ensure_whisper_aligned_subtitles"]
+    Ensure --> Writer["JianyingDraftWriter"]
+    Writer --> UserRoot["user_draft_root"]
     Writer --> Zip["editor.jianying_draft_zip"]
-    Writer --> Report["compatibility report"]
 
-    Rename["project rename / S2 auto-rename"] --> DisplayName["Job-API JSON display_name"]
-    DisplayName --> Fingerprint
-    DisplayName --> Zip
+    Runner --> Events["JobEvent / status polling"]
+    Zip --> Download["/download/editor.jianying_draft_zip"]
+    Download --> Gateway["Gateway ownership proxy"]
+    Gateway --> Storage["R2 registry / local fallback"]
 
-    PostEdit["editing_commit overwrite / copy_as_new"] --> Retire["clear stale attempt_id / substep / fingerprint"]
-    Retire --> Reset["reset jianying_draft_* + rm project/jianying"]
-    Reset --> ResultUI
+    EditCommit["post-edit overwrite"] --> Invalidate["clear attempt/substep/fingerprint + zip"]
+    Invalidate --> ResultUI
 ```
 
-## 3. runner 语义
+## 3. 当前核心认知
 
-### 3.1 `aligning_subtitles` 仍然是正式子步骤
+### 3.1 Jianying draft 是 on-demand 交付物
 
-- `jianying_draft_runner.py` 定义了 `SUBSTEP_ALIGNING_SUBTITLES`
-- 只有当 whisper capability + policy 都打开时，runner 才会进入这个子步骤；否则直接从 `validating_inputs` 走到 `building_draft`
+- 结果页通过 `POST /jobs/{id}/generate-jianying-draft` 触发。
+- 产物通过 `/jobs/{id}/download/editor.jianying_draft_zip` 获取。
+- 前端不拼磁盘路径，仍走 Job API / Gateway resolve。
 
-结论：Jianying draft 继续把“字幕精对齐是否真的发生”显式暴露给用户和 ops。
+结论：剪映草稿 zip 是正式用户交付面，不是调试产物。
 
-### 3.2 fingerprint 现在不仅受 whisper policy 影响，也受 `display_name` 影响
+### 3.2 Smart job 现在可以进入 Jianying draft，但有二级状态门
 
-- `artifact hashes`：`source.original_video`、`editor.dubbed_audio_complete`、`editor.subtitles`、`editor.ambient_audio`
-- `display_name`
-- `user_draft_root`
-- backend / writer version
-- `whisper_alignment_policy`
-  - `env_capability_enabled`
-  - `admin_enabled`
-  - `trigger`
-  - `skip_cache`
-  - `model`
+- `src/services/smart/state.py` 定义 `EDITABLE_SERVICE_MODES = {"studio", "smart"}`。
+- `JianyingDraftRunner.spawn()` 和 Job API preflight 都调用 `is_editable_smart_state(...)`。
+- Smart 只有 `completed` 或 `downgraded_to_studio` 可生成 Jianying draft。
+- 其它 Smart 状态返回 `smart_state_not_editable`。
 
-结论：素材不变但项目改名时，旧 draft zip 也会变成 cache miss，避免下载到过时文件名。
+结论：Smart 审计身份会保留，但只有已经完成或正式降级给 Studio 的 Smart job 能进入用户可交付路径。
 
-### 3.3 runner 的 substep 与 terminal write 现在都带 claim guard
+### 3.3 runner 现在有 pre-lock + post-lock 双重 Smart 门禁
 
-- `jianying_draft_runner.py` 现在明确要求：
-  - `jianying_draft_status == "running"`
-  - `attempt_id` 仍与当前 worker 相符
-- substep 更新与 terminal success / failure 写回都通过 `store.update_job(...)` 做原子 mutator
-- 这样 concurrent rename、overwrite invalidation、fresh trigger 都不会被 stale worker 覆盖
+- `_check_smart_aware_service_mode_gate(job)` 是统一 helper。
+- Gate 1 在拿锁前快速拒绝不合规 Smart job。
+- Gate 2 在拿到 per-job lock 后重新读取 JobRecord，再做一次权威检查。
+- 这防止 process runner 在两次读取之间把 `smart_state.status` 改回 `running / clone_blocked_waiting_retry`，而旧 runner 仍 claim `jianying_draft_status=running`。
 
-结论：Jianying draft 状态机现在已经显式建模“谁还拥有这次生成的 claim”。
+结论：Smart/Jianying gate 的拒绝语义现在覆盖并发状态回写，而不只是静态 preflight。
 
-### 3.4 final success 会重算 fingerprint，而不是继续沿用 trigger 时快照
+### 3.4 runner 仍由 claim identity 防止 stale worker 覆盖
 
-- `jianying_draft_runner.py` 在最终成功写回前会根据实际产物重新计算 final fingerprint
-- 这是为了避免 ensure helper / subtitle sidecar 改动后，落盘产物与 trigger 时快照不一致
+- runner 使用 `attempt_id` 区分当前任务与旧 worker。
+- status / substep / terminal write 都受 claim guard 保护。
+- overwrite commit 会清空旧 `attempt_id / substep / fingerprint`。
 
-结论：最终存档的 fingerprint 更接近“产物真相”，而不是“触发输入快照”。
+结论：旧 runner 不能覆盖新的 idle / editing / overwrite 状态。
 
-### 3.5 overwrite invalidation 现在会退休 stale claim identity
+### 3.5 HTTP 层透传 runner 的真实拒绝 reason
 
-- `editing_commit.py` 的 overwrite 不只是把 `status` 改回 `idle`
-- 还会清空：
-  - `jianying_draft_attempt_id`
-  - `jianying_draft_substep`
-  - `jianying_draft_fingerprint`
+- Job API 捕获 `JianyingNotAllowedError` 时返回 `{"code": exc.reason, "message": str(exc)}`。
+- 不再把所有 runner 拒绝重标成旧的 `service_mode_not_studio`。
 
-结论：旧 worker 即使晚到，也更难把 idle 槽位重新污染成运行态或失败态。
+结论：前端可以区分 `service_mode_not_studio_or_smart` 与 `smart_state_not_editable`。
 
-### 3.6 `user_draft_root` 改的是 draft 内素材路径，不是外层下载协议
+### 3.6 fingerprint 继续绑定交付事实
 
-- `jianying_draft_writer.py` 会基于 `user_draft_root` 决定 draft 内 material path 是相对路径还是绝对路径
-- 对外暴露给结果页的交付物仍然是 `editor.jianying_draft_zip`
-- 同文件继续负责友好 zip basename，并与 `display_name` 对齐
+- fingerprint 关注输入、`display_name`、whisper policy 等会影响交付物的因素。
+- `skip_cache=true` 会绕过外层 cache-hit。
+- final success 后按实际落盘产物重算 fingerprint。
 
-结论：`user_draft_root` 属于“解压后剪映如何找到本地素材”的语义，不属于下载权限或下载路径语义。
+结论：缓存命中不是单纯看“之前成功过”，而是看当前交付事实是否一致。
+
+### 3.7 草稿字幕仍在 deliverable-time 对齐
+
+- runner 的 `aligning_subtitles` 子步骤调用 `ensure_whisper_aligned_subtitles`。
+- 这条 sidecar 与 `materials_pack` 共享同一类交付前字幕精对齐语义。
+
+结论：Jianying draft 与 materials pack 的字幕交付路径保持一致。
+
+### 3.8 `user_draft_root` 只影响草稿内部路径
+
+- `jianying_draft_writer.py` 决定 zip 内 `draft_content.json` 的素材路径模式。
+- 外层下载协议仍由 Job API / Gateway 管理。
+
+结论：草稿内部路径和外部下载协议是两层，不应混写。
 
 ## 4. 关键证据
 
+- `src/services/jobs/api.py`
+  - `generate-jianying-draft`
+  - service_mode + smart_state preflight
 - `src/services/jobs/jianying_draft_runner.py`
-  - `SUBSTEP_ALIGNING_SUBTITLES`
-  - `_whisper_policy_snapshot()`
-  - `_whisper_force_fresh_active()`
-  - `reap_stale()`
-  - `status==running + attempt_id` claim guard
-- `src/services/subtitles/ensure_whisper_alignment.py`
-  - `skip_cache` fast-path bypass
-  - `alignment_model` stamp
+  - `JianyingDraftRunner`
+  - `JianyingNotAllowedError`
+  - `_check_smart_aware_service_mode_gate(...)`
+  - `attempt_id / substep / fingerprint`
+  - Smart editable gate
+- `src/services/smart/state.py`
+  - `EDITABLE_SERVICE_MODES`
+  - `is_editable_smart_state(...)`
 - `src/modules/output/jianying/jianying_draft_writer.py`
-  - `user_draft_root`
-  - friendly zip basename
-- `gateway/job_intercept.py`
-  - rename mirror back into Job-API JSON store
-- `src/services/jobs/editing_commit.py`
-  - draft invalidation
-  - stale claim identity retirement
+  - user draft root
+  - zip writer
+- `tests/test_smart_studio_gate_acceptance.py`
+  - Smart completed/downgraded jobs accepted by Jianying gate
+  - non-editable Smart state rejected
 
-## 5. 什么情况下优先读这张图
+## 5. 什么时候优先看这张图
 
-- 想改 `generate-jianying-draft` 的触发、轮询、状态机
-- 想判断某次 trigger 为什么命中旧 zip、为什么没有重跑
-- 想改 `skip_cache`、`model`、`user_draft_root`、`display_name` 的行为
-- 想排查 stale running、orphan rescue、claim lost、cache miss/hit 的诊断语义
+- 想改剪映草稿生成入口
+- 想排查 Smart job 为什么能或不能生成剪映草稿
+- 想改 runner claim guard、substep、fingerprint、cache hit
+- 想改 `user_draft_root` 或 zip 交付路径
+- 想改 post-edit overwrite 对旧草稿的失效策略

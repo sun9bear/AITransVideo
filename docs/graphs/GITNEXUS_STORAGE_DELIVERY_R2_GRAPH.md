@@ -11,7 +11,7 @@
 - `editor.jianying_draft_zip`
 - `r2_artifacts` registry
 - proactive publish、registry redirect、lazy fallback
-- terminal mirror、cleanup 与 invalidation
+- terminal mirror、R2 parity、cleanup 与 observability
 
 ## 2. 主图
 
@@ -39,10 +39,19 @@ graph TD
 
     MainLife["gateway/main.py lifespan"] --> Sweeper["r2_artifact_sweeper"]
     Sweeper --> Mirror["mirror_job_terminal_state"]
-    Mirror --> PG["Gateway PG mirror + settle side effects"]
+    Mirror --> PG["Gateway PG mirror + smart_state + settle"]
     Sweeper --> Publisher["r2_publisher.py"]
     Publisher --> Keys["jobs/{job_id}/g{edit_generation}/..."]
     Keys --> Registry
+
+    Cleanup["project_cleanup.py"] --> Parity["r2_parity_ok"]
+    Parity --> Registry
+    Parity --> Head["R2 HEAD"]
+    Head --> Purge["rmtree + status purged"]
+    Parity --> Skip["skip cleanup, sweeper retries"]
+
+    EventLog["download.* / stream.* events"] --> R2Obs["scripts/r2_observability.py"]
+    R2Obs --> Ops["ops rollout decision"]
 
     EditCommit["editing/commit overwrite"] --> Invalidate["invalidate materials_pack + stale jianying identity"]
     Invalidate --> ResultUI
@@ -50,69 +59,47 @@ graph TD
 
 ## 3. 当前交付面的新结构
 
-### 3.1 `materials_pack` 仍然有显式的 whisper 预处理阶段
+### 3.1 proactive publish 仍然是 R2 主推动力
 
-- `gateway/background_task_executors.py::execute_materials_pack()` 仍会先进入 `aligning_subtitles`
-- 它通过内部调用 `ensure-whisper-aligned-subtitles`
-- sidecar 失败会被记录，但不阻断最终打包
+- `r2_artifact_sweeper.py` 以 JSON store 为真源扫描 succeeded jobs。
+- 扫描时先执行 `mirror_job_terminal_state(...)`。
+- `r2_artifacts IS NULL` 时全量 push。
+- registry 缺 `editor.jianying_draft_zip` 时做 delta push。
+- `expected_generation` 防止 overwrite race。
 
-结论：`materials_pack` 会尽量交付 whisper 对齐字幕，但不会因 sidecar 失败而整个打包失败。
+结论：R2 发布继续由后台扫表主动推进，而不是只靠下载请求触发。
 
-### 3.2 `r2_artifact_sweeper` 已经把主动发布拉进正式主链
+### 3.2 terminal mirror 现在还同步 Smart state
 
-`gateway/r2_artifact_sweeper.py` 明确了几条契约：
+- `gateway/job_terminal_mirror.py` 会把 upstream `smart_state` 合并到 Gateway PG。
+- settle 前先合并 Smart state，使 `settle_job_credit_ledger(...)` 能看到 `credits_policy`。
+- terminal settlement 仍然是幂等补偿式，适配 detail polling、list jobs、R2 sweeper 多入口观察同一终态。
 
-- 真源是 JSON store，而不是 Gateway PG
-- 扫描成功任务时会先做 `mirror_job_terminal_state(...)`
-- 命中 `r2_artifacts IS NULL` 时会全量 push
-- 发现已有草稿但 registry 缺条目时会做 delta push
-- 通过 `expected_generation` 防止与 overwrite race
-- 受两个开关控制：
-  - `AVT_DOWNLOAD_REDIRECT_BACKEND == "r2"`
-  - `AVT_R2_PROACTIVE_PUSH_ENABLED == "true"`
+结论：terminal mirror 现在同时服务下载交付一致性和 Smart 结算一致性。
 
-结论：R2 发布已经不是“有下载请求才被动上传”，而是被正式拉进后台运维平面。
+### 3.3 cleanup 可以被 R2 parity gate 保护
 
-### 3.3 `job_terminal_mirror` 已经成为 sweeper 的前置补偿层
+- `src/services/r2_publisher_lib/r2_parity.py` 检查 expected artifact keys、current `edit_generation`、registry state、R2 HEAD。
+- `gateway/project_cleanup.py` 在 `AVT_CLEANUP_REQUIRES_R2_PARITY=true` 时调用 `r2_parity_ok(...)`。
+- parity 不通过时跳过 rmtree，也不把 DB status 翻成 `purged`。
 
-`gateway/job_terminal_mirror.py` 当前契约是：
+结论：磁盘释放现在可以等待 R2 副本确认，避免删掉唯一可用 artifact。
 
-- 把 terminal job state 从 JSON store 镜像回 Gateway PG
-- `purged` 是 sticky
-- terminal settle 必须幂等且补偿式
-- 只镜像镜像字段，不覆盖 Gateway 自有的 `r2_artifacts / display_name / expires_at`
-- 同步 `edit_generation`，避免 PG 与 JSON drift 造成错误发布
+### 3.4 R2 key 空间继续按 `edit_generation` 分代
 
-结论：terminal mirror 现在不仅服务 list-jobs，也直接服务 proactive publish 的一致性。
+- `r2_publisher.py` 使用 `jobs/{job_id}/g{edit_generation}/...`。
+- registry entry 状态包括 `pushed / already_present / skipped_missing / failed`。
+- overwrite 推进 generation 后，旧 generation 只保留取证意义，不再作为当前下载事实。
 
-### 3.4 R2 key 空间现在显式带 `edit_generation`
+结论：post-edit 之后下载身份按 generation 隔离。
 
-- `src/services/r2_publisher_lib/r2_publisher.py` 用 `jobs/{job_id}/g{edit_generation}/...` 作为主动发布 key 空间
-- registry entry 有：
-  - `pushed`
-  - `already_present`
-  - `skipped_missing`
-  - `failed`
-- `editor.jianying_draft_zip` 只有在调用方确认存在时才会被推送
+### 3.5 download / stream observability 成为灰度判断工具
 
-结论：同一 job 的不同编辑代际已经在交付层被正式区分，不再共享一组模糊下载身份。
+- `scripts/r2_observability.py` 聚合 `download.redirect.r2_registry`、`download.fallback.local`、`stream.redirect.r2_registry`、`stream.fallback.local` 等事件。
+- 脚本是 stdlib-only，面向 Gateway / app 容器共享 jobs dir。
+- 输出用于 rollout 判断，不能把 redirect 计数误解为下载成功率。
 
-### 3.5 `backend_router` 现在是 registry redirect 与 lazy fallback 并存
-
-- `gateway/storage/backend_router.py` 同时理解两类 key：
-  - legacy lazy path
-  - proactive publisher registry path
-- registry path 可以覆盖比 lazy upload 更多的 downloadable keys
-- 仍然保留 local fallback，避免 registry 未热身时直接断链
-
-结论：当前下载层是演进式迁移，而不是一次性切换到纯 R2。
-
-### 3.6 overwrite 仍会让旧交付物失效
-
-- `editing_commit.py` 会退休旧 Jianying claim identity
-- `gateway/job_intercept.py` 仍会在 overwrite commit 后执行 `invalidate_materials_pack_for_job(...)`
-
-结论：post-edit 后旧打包物、旧草稿 zip、旧 fingerprint 继续被视作 stale。
+结论：R2 可观测性现在从手工 grep 升级为可重复脚本。
 
 ## 4. 关键证据
 
@@ -122,20 +109,22 @@ graph TD
   - `expected_generation`
 - `gateway/job_terminal_mirror.py`
   - terminal mirror invariants
-  - `edit_generation`
-- `src/services/r2_publisher_lib/r2_publisher.py`
-  - key shape
-  - registry states
+  - Smart state merge
+  - credit/quota settle
+- `src/services/r2_publisher_lib/r2_parity.py`
+  - cleanup parity gate
+- `gateway/project_cleanup.py`
+  - `AVT_CLEANUP_REQUIRES_R2_PARITY`
+- `scripts/r2_observability.py`
+  - download / stream event aggregation
 - `gateway/storage/backend_router.py`
   - registry redirect
   - lazy fallback
-- `gateway/main.py`
-  - sweeper lifecycle start / cancel
 
 ## 5. 什么时候优先看这张图
 
 - 想改结果页下载面
 - 想加新的 downloadable key
-- 想排查为什么某个成功任务没有被主动推上 R2
-- 想判断 registry redirect 与 local fallback 的优先级
-- 想排查 overwrite 后为什么旧草稿或旧打包物失效
+- 想排查为什么成功任务没有被主动推上 R2
+- 想判断 cleanup 为什么没有删除某个过期项目
+- 想看 R2 redirect / fallback 的观测口径
