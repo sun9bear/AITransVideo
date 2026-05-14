@@ -1621,7 +1621,7 @@ Day 14: Phase 2b 触发 OR 不触发,Stage C done
 
 ---
 
-## 12. 总进度索引(2026-05-12 更新)
+## 12. 总进度索引(2026-05-13 更新)
 
 | 阶段 | 范围 | 状态 | commit |
 |------|------|------|--------|
@@ -1629,5 +1629,8 @@ Day 14: Phase 2b 触发 OR 不触发,Stage C done
 | Day 2 fix | JSONB none_as_null + mirror gen drift | ✅ 完成 + 部署 | `7d17347` / `3ba2988` |
 | Day 3 fix | jianying naming = disk basename | ✅ 完成 + 部署 | `a849fea` |
 | Stage B(§5)| parity gate + delegate rmtree + cron schedule | ✅ 代码部署 + flag 默认 OFF(灰度未启) | `f3958ca` |
-| Stage C(§11) | stream/poster R2 + Phase 2b 条件触发 | ⏳ 设计完成,待实施 | — |
+| Stage C(§11) | stream/{video,audio,poster} R2 redirect + poster eager push | ✅ 完成 + 部署 + 灰度中(Day 1+) | `2a1ad9f` |
+| Stage C P1/P2/P3 | events 词表容错 / stream 30min TTL + inline / `_STREAM_KIND_RE` 收窄 | ✅ 完成 + 部署(CodeX review 2026-05-12) | `0445222` |
+| Stage C naming | `AVT_R2_STREAM_PRESIGNED_EXPIRES_S` 前缀对齐 | ✅ 完成 / 待部署(CodeX review 2026-05-13) | `66f1ee8` |
+| Phase 2b(§11.5) | CF Custom Domain + Worker HMAC | ⏳ 灰度数据未到,判据未触发 | — |
 | §11.8 admin 备份 | 长期 follow-up,占位草稿 | ⏳ 未实施 | — |
