@@ -773,6 +773,93 @@ async def internal_user_voice_quota(
     })
 
 
+@internal_router.post("/user-voices/register-smart")
+async def internal_register_smart_clone(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Mirror a smart-path clone into the per-user voice library.
+
+    Codex 第二十九轮 P0: Smart inline auto-approve takes the
+    Protocol-based path through ``services.smart_wiring._MiniMaxCloneAdapter``,
+    which only calls MiniMax and returns a ``CloneResult``. It does
+    NOT write to Gateway's UserVoice table the way the Studio manual
+    clone endpoint does (see voice_selection_api.py:503 add_user_voice
+    call).
+
+    Without an explicit mirror, the quota endpoint above
+    (``/user-voices/quota``) sees stale ``used`` counts across jobs
+    and §7.3 water mark stops protecting against per-account voice
+    library overflow.
+
+    This endpoint accepts the minimal payload needed to land a
+    UserVoice row with the same field shape as the Studio path:
+      provider="minimax_voice_clone"
+      tts_provider="minimax_tts"
+      platform="minimax_domestic"
+    plus the caller-provided label / source_speaker_id / notes for
+    audit. Defaults match the Studio path so the two clone origins
+    are indistinguishable downstream.
+
+    Auth: ``X-Internal-Key`` only. Internal pipeline path; the
+    public-router POST /user-voices is the user-facing alternative
+    (and uses session auth, not internal key).
+    """
+    internal_error = _internal_access_error(request)
+    if internal_error is not None:
+        return internal_error
+
+    body = await _read_body(request)
+    user_id = body.get("user_id")
+    voice_id = str(body.get("voice_id", "")).strip()
+    if not voice_id:
+        return _json(400, {"error": "voice_id_required"})
+    if not user_id:
+        return _json(400, {"error": "user_id_required"})
+
+    try:
+        user_uuid = uuid.UUID(str(user_id))
+    except (ValueError, AttributeError):
+        return _json(400, {"error": "invalid_user_id"})
+
+    label = str(body.get("label") or voice_id)
+    source_speaker_id = body.get("source_speaker_id")
+    notes = body.get("notes")
+    # Field defaults mirror the Studio voice-clone path to keep the
+    # two clone origins indistinguishable downstream. Callers can
+    # override (e.g. for a future cosyvoice clone path) but the
+    # current Smart path is MiniMax-only.
+    provider = str(body.get("provider") or "minimax_voice_clone")
+    tts_provider = body.get("tts_provider") or "minimax_tts"
+    platform = body.get("platform") or "minimax_domestic"
+
+    try:
+        voice = await add_user_voice(
+            db,
+            user_id=user_uuid,
+            voice_id=voice_id,
+            label=label,
+            provider=provider,
+            tts_provider=tts_provider,
+            platform=platform,
+            source_speaker_id=source_speaker_id,
+            notes=notes,
+        )
+    except Exception as exc:
+        logger.exception(
+            "internal_register_smart_clone: add_user_voice failed "
+            "user_id=%s voice_id=%s: %s",
+            user_id, voice_id, exc,
+        )
+        return _json(500, {"error": "register_failed", "detail": str(exc)[:200]})
+
+    return _json(200, {
+        "ok": True,
+        "voice_id": voice.voice_id,
+        "user_id": str(voice.user_id),
+    })
+
+
 @internal_router.post("/user-voices/speed-profiles")
 async def internal_ingest_user_voice_speed_profiles(
     request: Request,

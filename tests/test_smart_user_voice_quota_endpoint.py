@@ -221,6 +221,172 @@ class TestQuotaEndpointBusinessLogic:
         assert resp.status_code == 400
 
     @pytest.mark.asyncio
+    async def test_register_smart_endpoint_registered_on_internal_router(self):
+        """PR#3C-b3e-fix (Codex 第二十九轮 P0): the register-smart endpoint
+        must be wired on internal_router so the Caddyfile @internal_block
+        properly shields it from public ingress."""
+        import user_voice_api
+
+        routes = [
+            (r.path, r.methods)
+            for r in user_voice_api.internal_router.routes
+        ]
+        register_routes = [
+            (path, methods)
+            for path, methods in routes
+            if path.endswith("/user-voices/register-smart")
+        ]
+        assert register_routes, (
+            "POST /api/internal/user-voices/register-smart not "
+            "registered on internal_router. Codex 第二十九轮 P0 mirror "
+            "channel — without it, Smart auto-clone quota signal "
+            "goes stale across jobs.\n"
+            f"Available internal routes: {routes}"
+        )
+        path, methods = register_routes[0]
+        assert path == "/api/internal/user-voices/register-smart"
+        assert "POST" in methods
+
+    @pytest.mark.asyncio
+    async def test_register_smart_endpoint_writes_to_user_voices(
+        self, monkeypatch,
+    ):
+        """End-to-end mirror: register-smart endpoint should call
+        ``add_user_voice`` with the same field shape as the Studio
+        manual-clone path (voice_selection_api.py:503)."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        import user_voice_api
+
+        # Mock auth
+        monkeypatch.setattr(
+            user_voice_api, "_internal_access_error",
+            lambda req: None,
+        )
+
+        # Track calls to add_user_voice
+        recorded_calls = []
+        fake_voice = MagicMock()
+        fake_voice.voice_id = "vt_xxx"
+        fake_voice.user_id = "00000000-0000-0000-0000-000000000001"
+
+        async def _fake_add(db, **kwargs):
+            recorded_calls.append(kwargs)
+            return fake_voice
+
+        monkeypatch.setattr(user_voice_api, "add_user_voice", _fake_add)
+
+        # Build request with JSON body
+        valid_uuid = "00000000-0000-0000-0000-000000000001"
+        body = {
+            "user_id": valid_uuid,
+            "voice_id": "vt_xxx",
+            "label": "Speaker A Clone",
+            "source_speaker_id": "speaker_a",
+            "notes": "Smart auto-clone from job j-1",
+        }
+
+        fake_req = MagicMock()
+        fake_req.body = AsyncMock(return_value=__import__("json").dumps(body).encode())
+
+        resp = await user_voice_api.internal_register_smart_clone(
+            request=fake_req,
+            db=MagicMock(),
+        )
+
+        import json
+        body_out = json.loads(resp.body.decode("utf-8"))
+        assert body_out["ok"] is True
+        assert body_out["voice_id"] == "vt_xxx"
+
+        # add_user_voice was called with the right field shape.
+        assert len(recorded_calls) == 1
+        call = recorded_calls[0]
+        # Field defaults must match Studio manual-clone path:
+        assert call["provider"] == "minimax_voice_clone"
+        assert call["tts_provider"] == "minimax_tts"
+        assert call["platform"] == "minimax_domestic"
+        assert call["label"] == "Speaker A Clone"
+        assert call["source_speaker_id"] == "speaker_a"
+        assert call["notes"] == "Smart auto-clone from job j-1"
+        assert call["voice_id"] == "vt_xxx"
+
+    @pytest.mark.asyncio
+    async def test_register_smart_endpoint_rejects_missing_fields(
+        self, monkeypatch,
+    ):
+        """Empty user_id or voice_id → 400 BEFORE touching add_user_voice."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        import user_voice_api
+
+        monkeypatch.setattr(
+            user_voice_api, "_internal_access_error",
+            lambda req: None,
+        )
+
+        # Missing voice_id
+        fake_req = MagicMock()
+        fake_req.body = AsyncMock(return_value=b'{"user_id": "00000000-0000-0000-0000-000000000001"}')
+        resp = await user_voice_api.internal_register_smart_clone(
+            request=fake_req,
+            db=MagicMock(),
+        )
+        assert resp.status_code == 400
+
+        # Missing user_id
+        fake_req.body = AsyncMock(return_value=b'{"voice_id": "vt_x"}')
+        resp = await user_voice_api.internal_register_smart_clone(
+            request=fake_req,
+            db=MagicMock(),
+        )
+        assert resp.status_code == 400
+
+        # Invalid UUID
+        fake_req.body = AsyncMock(return_value=b'{"user_id": "not-a-uuid", "voice_id": "vt_x"}')
+        resp = await user_voice_api.internal_register_smart_clone(
+            request=fake_req,
+            db=MagicMock(),
+        )
+        assert resp.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_register_smart_endpoint_returns_500_on_db_failure(
+        self, monkeypatch,
+    ):
+        """add_user_voice exception → 500 so the app helper returns
+        False → process.py escalates to handoff."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        import user_voice_api
+
+        monkeypatch.setattr(
+            user_voice_api, "_internal_access_error",
+            lambda req: None,
+        )
+
+        async def _failing_add(*args, **kwargs):
+            raise RuntimeError("DB connection lost")
+
+        monkeypatch.setattr(user_voice_api, "add_user_voice", _failing_add)
+
+        fake_req = MagicMock()
+        fake_req.body = AsyncMock(return_value=__import__("json").dumps({
+            "user_id": "00000000-0000-0000-0000-000000000001",
+            "voice_id": "vt_xxx",
+            "label": "test",
+        }).encode())
+
+        resp = await user_voice_api.internal_register_smart_clone(
+            request=fake_req,
+            db=MagicMock(),
+        )
+        assert resp.status_code == 500
+        import json
+        body = json.loads(resp.body.decode("utf-8"))
+        assert body["error"] == "register_failed"
+
+    @pytest.mark.asyncio
     async def test_quota_falls_back_to_default_on_admin_settings_load_error(
         self, monkeypatch,
     ):

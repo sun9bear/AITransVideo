@@ -1602,10 +1602,11 @@ class TestB3DCloneSampleExtractorContract:
         source = src.read_text(encoding="utf-8")
         idx = source.find("Smart inline auto-approve path")
         assert idx >= 0
-        # Walk ~550 lines (matches anchor tests in
-        # test_smart_studio_gate_acceptance.py).
+        # Walk ~650 lines (matches anchor tests in
+        # test_smart_studio_gate_acceptance.py — bumped from 550 after
+        # b3e-fix added consent-gating + mirror handling).
         lines = source[idx:].splitlines()
-        block = "\n".join(lines[:550])
+        block = "\n".join(lines[:650])
 
         # Piece 2 (real quota): helper must be referenced; placeholder
         # literal must NOT appear inside the smart inline branch.
@@ -1816,6 +1817,210 @@ class TestB3DCloneSampleExtractorContract:
         # JSON parse error
         monkeypatch.setattr(_requests_mod, "get", _fake_get_bad_json)
         assert _fetch_smart_user_voice_quota_remaining("u") is None
+
+    def test_b3e_fix_consent_false_skips_quota_lookup(self):
+        """Codex 第二十九轮 P1: consent=False jobs must NOT call the
+        Gateway quota endpoint. evaluate_voice_review routes to PRESET
+        without reading quota/sample/provider when consent != True,
+        so a Gateway hiccup must not error-downgrade a PRESET-only
+        smart job to handoff.
+
+        Pin the source-level structure:
+          - Quota lookup is inside an ``if _smart_consent_allows_clone:``
+            gate (the existing gate from b3d sample extraction)
+          - There's an ``else:`` branch that uses stub provider + 0
+            quota so the type signature still satisfies
+            evaluate_voice_review.
+        """
+        from pathlib import Path
+
+        src = Path(__file__).resolve().parents[1] / "src" / "pipeline" / "process.py"
+        source = src.read_text(encoding="utf-8")
+        idx = source.find("Smart inline auto-approve path")
+        assert idx >= 0
+        lines = source[idx:].splitlines()
+        block = "\n".join(lines[:650])
+
+        # Find the quota lookup call — must be inside the consent gate.
+        quota_call = "_fetch_smart_user_voice_quota_remaining("
+        quota_idx = block.find(quota_call)
+        assert quota_idx >= 0
+
+        # Walk backward to find the nearest ``if`` — must be the
+        # _smart_consent_allows_clone gate.
+        preceding = block[:quota_idx]
+        consent_idx = preceding.rfind("if _smart_consent_allows_clone:")
+        assert consent_idx >= 0, (
+            "Quota lookup must live inside ``if _smart_consent_allows_clone:`` "
+            "— Codex 第二十九轮 P1: consent=False jobs short-circuit "
+            "to PRESET inside evaluate_voice_review and must not pay "
+            "for the Gateway round-trip nor risk fail-closed handoff "
+            "on Gateway hiccups.\n"
+            f"Quota call at offset {quota_idx}, no consent gate found "
+            f"before it.\nPreceding 2000 chars:\n{preceding[-2000:]}"
+        )
+
+        # The else branch must exist and use stub provider + 0 quota.
+        # Find the matching else within ~3000 chars of the consent gate.
+        consent_block = block[consent_idx : consent_idx + 4000]
+        else_idx = consent_block.find("\n                    else:")
+        assert else_idx >= 0, (
+            "consent gate has no else: branch — consent=False path "
+            "would crash when evaluate_voice_review reads quota/provider.\n"
+            f"Block:\n{consent_block}"
+        )
+        else_window = consent_block[else_idx : else_idx + 1500]
+        assert "_build_b2_not_wired_clone_provider()" in else_window, (
+            "consent=False else branch must use the b2 stub provider — "
+            "evaluate_voice_review won't actually call it but the type "
+            "signature requires a CloneProvider.\n"
+            f"else window:\n{else_window}"
+        )
+
+    def test_b3e_fix_mirror_helper_returns_true_on_success(self, monkeypatch):
+        """Codex 第二十九轮 P0: ``_register_smart_clone_in_user_voices``
+        helper happy path. Pin the URL + headers + payload shape +
+        return value."""
+        from pipeline.process import _register_smart_clone_in_user_voices
+
+        monkeypatch.setenv("AVT_INTERNAL_API_KEY", "test-key")
+        recorded = {}
+
+        class _Resp:
+            status_code = 200
+
+            def json(self):
+                return {"ok": True, "voice_id": "vt_xxx", "user_id": "u-1"}
+
+        def _fake_post(url, *, json=None, headers=None, timeout=None):
+            recorded["url"] = url
+            recorded["json"] = json
+            recorded["headers"] = headers
+            recorded["timeout"] = timeout
+            return _Resp()
+
+        import requests as _requests_mod
+        monkeypatch.setattr(_requests_mod, "post", _fake_post)
+
+        result = _register_smart_clone_in_user_voices(
+            user_id="u-1",
+            voice_id="vt_xxx",
+            label="Speaker A Clone",
+            source_speaker_id="speaker_a",
+            notes="Smart auto-clone from job j-1",
+        )
+        assert result is True
+
+        assert recorded["url"] == (
+            "http://127.0.0.1:8880/api/internal/user-voices/register-smart"
+        )
+        assert recorded["headers"] == {"X-Internal-Key": "test-key"}
+        assert recorded["timeout"] == 5.0
+        # Field shape mirrors Studio's manual-clone path:
+        # provider="minimax_voice_clone", tts_provider="minimax_tts",
+        # platform="minimax_domestic" come as Gateway-side defaults.
+        body = recorded["json"]
+        assert body["user_id"] == "u-1"
+        assert body["voice_id"] == "vt_xxx"
+        assert body["label"] == "Speaker A Clone"
+        assert body["source_speaker_id"] == "speaker_a"
+        assert body["notes"] == "Smart auto-clone from job j-1"
+
+    def test_b3e_fix_mirror_helper_returns_false_on_failures(self, monkeypatch):
+        """Codex 第二十九轮 P0: ANY failure mode returns False so the
+        caller can escalate to handoff. NEVER raises."""
+        from pipeline.process import _register_smart_clone_in_user_voices
+
+        monkeypatch.setenv("AVT_INTERNAL_API_KEY", "test-key")
+
+        # Empty inputs
+        assert _register_smart_clone_in_user_voices(
+            user_id="", voice_id="vt", label="x",
+        ) is False
+        assert _register_smart_clone_in_user_voices(
+            user_id="u", voice_id="", label="x",
+        ) is False
+
+        # Missing API key
+        monkeypatch.delenv("AVT_INTERNAL_API_KEY", raising=False)
+        assert _register_smart_clone_in_user_voices(
+            user_id="u", voice_id="vt", label="x",
+        ) is False
+
+        # HTTP non-200
+        monkeypatch.setenv("AVT_INTERNAL_API_KEY", "test-key")
+
+        class _BadResp:
+            status_code = 500
+
+            def json(self):
+                return {"ok": True}  # would tempt to use
+
+        def _bad_post(*a, **kw):
+            return _BadResp()
+
+        import requests as _requests_mod
+        monkeypatch.setattr(_requests_mod, "post", _bad_post)
+        assert _register_smart_clone_in_user_voices(
+            user_id="u", voice_id="vt", label="x",
+        ) is False
+
+        # HTTP 200 but ok:false
+        class _OkFalseResp:
+            status_code = 200
+
+            def json(self):
+                return {"ok": False, "error": "db_error"}
+
+        def _ok_false_post(*a, **kw):
+            return _OkFalseResp()
+
+        monkeypatch.setattr(_requests_mod, "post", _ok_false_post)
+        assert _register_smart_clone_in_user_voices(
+            user_id="u", voice_id="vt", label="x",
+        ) is False
+
+        # Network exception
+        def _raises(*a, **kw):
+            raise ConnectionError("network down")
+
+        monkeypatch.setattr(_requests_mod, "post", _raises)
+        assert _register_smart_clone_in_user_voices(
+            user_id="u", voice_id="vt", label="x",
+        ) is False
+
+    def test_b3e_fix_clone_decision_processing_calls_mirror(self):
+        """Codex 第二十九轮 P0: the CLONED branch of the decision-
+        processing loop MUST call ``_register_smart_clone_in_user_voices``.
+        Pin via source-level anchor so a future refactor that splits
+        the loop or moves the mirror call out is flagged."""
+        from pathlib import Path
+
+        src = Path(__file__).resolve().parents[1] / "src" / "pipeline" / "process.py"
+        source = src.read_text(encoding="utf-8")
+        idx = source.find("Smart inline auto-approve path")
+        assert idx >= 0
+        lines = source[idx:].splitlines()
+        block = "\n".join(lines[:650])
+
+        # Mirror helper is called from process.py
+        assert "_register_smart_clone_in_user_voices(" in block, (
+            "Smart branch missing _register_smart_clone_in_user_voices "
+            "call — Codex 第二十九轮 P0: CLONED decisions must mirror "
+            "to UserVoice table or quota signal goes stale across jobs."
+        )
+
+        # Mirror error tracking + handoff branch
+        assert "_smart_clone_mirror_failures" in block, (
+            "Smart branch missing _smart_clone_mirror_failures list — "
+            "needed to aggregate per-speaker mirror failures and "
+            "escalate to handoff."
+        )
+        assert "clone_library_register_failed" in block, (
+            "Smart branch missing clone_library_register_failed reason "
+            "code — Codex 第二十九轮 P0: mirror failure must surface "
+            "to Studio human review so user can take action."
+        )
 
     def test_b3d_consent_false_skips_provider_call_entirely(self):
         """Regression — when consent is False (default for non-clone

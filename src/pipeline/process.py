@@ -479,6 +479,74 @@ def _fetch_smart_user_voice_quota_remaining(user_id: str) -> int | None:
     return remaining
 
 
+def _register_smart_clone_in_user_voices(
+    *,
+    user_id: str,
+    voice_id: str,
+    label: str,
+    source_speaker_id: str | None = None,
+    notes: str | None = None,
+) -> bool:
+    """Mirror a smart-path clone into the Gateway UserVoice table.
+
+    Returns ``True`` on success (HTTP 200, ok:true), ``False`` on
+    any failure.
+
+    Codex 第二十九轮 P0: Smart inline auto-approve uses the Protocol-
+    based ``_MiniMaxCloneAdapter`` which only calls MiniMax — it does
+    NOT write to Gateway's UserVoice table the way Studio's manual
+    voice-clone path does. Without this mirror, the
+    ``/api/internal/user-voices/quota`` endpoint sees stale ``used``
+    counts across jobs and §7.3 water mark stops protecting against
+    voice library overflow.
+
+    This helper closes the loop: after a successful Smart CLONED
+    decision, the caller invokes us to register the new voice_id
+    in UserVoice. Subsequent quota lookups see the updated count.
+
+    Failure semantics — caller (process.py smart branch) treats
+    False as "mirror failed, can't trust quota":
+      - The MiniMax voice already exists (and was paid for)
+      - Gateway hasn't seen it, so next job's quota will be stale
+      - Process.py escalates to handoff so the user is aware
+
+    NEVER raises — failures are returned as False so the caller's
+    aggregation logic stays simple.
+    """
+    import os
+    import requests  # type: ignore[import-not-found]
+
+    user_id = (user_id or "").strip()
+    voice_id = (voice_id or "").strip()
+    if not user_id or not voice_id:
+        return False
+    api_key = os.environ.get("AVT_INTERNAL_API_KEY", "").strip()
+    if not api_key:
+        return False
+    payload: dict[str, object] = {
+        "user_id": user_id,
+        "voice_id": voice_id,
+        "label": label or voice_id,
+    }
+    if source_speaker_id:
+        payload["source_speaker_id"] = source_speaker_id
+    if notes:
+        payload["notes"] = notes
+    try:
+        resp = requests.post(
+            "http://127.0.0.1:8880/api/internal/user-voices/register-smart",
+            json=payload,
+            headers={"X-Internal-Key": api_key},
+            timeout=5.0,
+        )
+        if resp.status_code != 200:
+            return False
+        data = resp.json()
+    except Exception:
+        return False
+    return bool(data.get("ok"))
+
+
 def _is_valid_speaker_id(value: object) -> bool:
     return isinstance(value, str) and _SPEAKER_ID_PATTERN.match(value.strip()) is not None
 
@@ -2746,84 +2814,86 @@ class ProcessPipeline:
                         and sp.get("speaker_id") in _smart_main_speaker_ids
                     ]
 
-                    # ── Piece 2: voice_library_quota_remaining snapshot ──
+                    # ── Pieces 2 + 3: quota snapshot + real CloneProvider ──
                     #
-                    # PR#3C-b3e (Codex 第二十七轮 P0 atomic): query the
-                    # Gateway internal endpoint
-                    # ``/api/internal/user-voices/quota?user_id=<uuid>``
-                    # for the real per-user voice library headroom
-                    # (admin_settings.smart_user_voice_clone_cap minus
-                    # the user's current non-expired UserVoice count).
-                    # Helper returns None on any failure (network / auth
-                    # / parse) → smart fail-closed handoffs below
-                    # BEFORE invoking the real provider.
-                    #
-                    # Smart caps main speakers at 3 (eligibility gate);
-                    # plan §7.3 water mark is 3. Smart will trip the
-                    # brake when ``remaining <= 3``, which means a user
-                    # at 27/30 voices would hand off to Studio instead
-                    # of growing the library to 30+. The brake is
-                    # PREVENTIVE (no call) — not the provider's
-                    # REACTIVE quota-exhaustion error.
-                    _smart_quota_remaining = (
-                        _fetch_smart_user_voice_quota_remaining(
-                            str(_snap("user_id") or "")
+                    # PR#3C-b3e (Codex 第二十七轮 P0 atomic): pieces 2+3
+                    # MUST move together. PR#3C-b3e-fix (Codex 第二十九轮
+                    # P1): both ALSO must be gated on
+                    # ``_smart_consent_allows_clone``. evaluate_voice_review
+                    # short-circuits to PRESET when consent != True,
+                    # never reading quota or provider. So a consent=False
+                    # job (the default for users who didn't opt-in)
+                    # must NOT pay the cost of querying Gateway —
+                    # AND must NOT fail-closed handoff when the quota
+                    # endpoint is transiently unavailable. The unconditional
+                    # version in b3e regressed PRESET-only smart jobs
+                    # to handoff during Gateway hiccups.
+                    if _smart_consent_allows_clone:
+                        _smart_quota_remaining = (
+                            _fetch_smart_user_voice_quota_remaining(
+                                str(_snap("user_id") or "")
+                            )
                         )
-                    )
-                    if _smart_quota_remaining is None:
-                        # Fail-closed: quota unknown → handoff to Studio.
-                        # User can re-attempt via the explicit "克隆音色"
-                        # button in Studio (which uses Gateway-tracked
-                        # capture+reserve credit logic separately).
-                        emit_handoff_markers(
-                            review_state_manager=review_state_manager,
-                            review_stage=VOICE_SELECTION_REVIEW_STAGE,
-                            review_payload=vs_payload,
-                            review_pending_status=REVIEW_STATUS_PENDING,
-                            smart_state_update={
-                                "status": "downgraded_to_studio",
-                                "reason": "voice_library_quota_unavailable",
-                                "handoff_stage": VOICE_SELECTION_REVIEW_STAGE,
-                            },
-                            project_dir=final_project_dir,
-                            user_message=(
-                                "智能版无法读取音色库容量,请人工接管"
-                            ),
-                            web_review_marker_builder=self._build_web_review_marker,
-                        )
-                        state_manager.set_stage(
-                            "voice_selection",
-                            StageStatus.RUNNING,
-                            {"execution_mode": "smart_handoff_quota_unavailable"},
-                        )
-                        current_stage_name = None
-                        _write_usage_summary(usage_meter)
-                        return self._build_paused_result(
-                            project_dir=final_project_dir,
-                            stage=VOICE_SELECTION_REVIEW_STAGE,
-                            message="智能版无法读取音色库容量",
-                        )
+                        if _smart_quota_remaining is None:
+                            # Fail-closed: quota unknown → handoff to Studio.
+                            # User can re-attempt via the explicit "克隆音色"
+                            # button in Studio (which uses Gateway-tracked
+                            # capture+reserve credit logic separately).
+                            emit_handoff_markers(
+                                review_state_manager=review_state_manager,
+                                review_stage=VOICE_SELECTION_REVIEW_STAGE,
+                                review_payload=vs_payload,
+                                review_pending_status=REVIEW_STATUS_PENDING,
+                                smart_state_update={
+                                    "status": "downgraded_to_studio",
+                                    "reason": "voice_library_quota_unavailable",
+                                    "handoff_stage": VOICE_SELECTION_REVIEW_STAGE,
+                                },
+                                project_dir=final_project_dir,
+                                user_message=(
+                                    "智能版无法读取音色库容量,请人工接管"
+                                ),
+                                web_review_marker_builder=self._build_web_review_marker,
+                            )
+                            state_manager.set_stage(
+                                "voice_selection",
+                                StageStatus.RUNNING,
+                                {"execution_mode": "smart_handoff_quota_unavailable"},
+                            )
+                            current_stage_name = None
+                            _write_usage_summary(usage_meter)
+                            return self._build_paused_result(
+                                project_dir=final_project_dir,
+                                stage=VOICE_SELECTION_REVIEW_STAGE,
+                                message="智能版无法读取音色库容量",
+                            )
 
-                    # ── Piece 3: real CloneProvider ──
-                    #
-                    # PR#3C-b3e atomic flip — Piece 2 is now real
-                    # (Gateway quota above); Piece 1 + sample validation
-                    # are already real (PR#3C-b3d). Safety chain for
-                    # any real API call:
-                    #   1. consent.auto_voice_clone is True (strict
-                    #      identity check above gates sample extraction)
-                    #   2. _smart_sample_extraction_error is None
-                    #      (real per-speaker WAV ≥10s exists on disk)
-                    #   3. _smart_quota_remaining is a real integer
-                    #      ≥ water_mark (preventive §7.3 brake)
-                    # When all three hold, ``build_smart_clone_provider()``
-                    # returns the real _MiniMaxCloneAdapter from
-                    # smart_wiring (or the test-injected fake via
-                    # inject_for_test).
-                    from services.smart_wiring import (
-                        build_smart_clone_provider,
-                    )
-                    _smart_clone_provider = build_smart_clone_provider()
+                        # Piece 3: real CloneProvider.
+                        # Safety chain (all three layers gate any real
+                        # MiniMax API call):
+                        #   1. consent.auto_voice_clone is True (this if)
+                        #   2. _smart_sample_extraction_error is None
+                        #      (real per-speaker WAV ≥10s on disk)
+                        #   3. _smart_quota_remaining is a real int
+                        #      from Gateway (preventive §7.3 brake)
+                        # When all three hold, ``build_smart_clone_provider()``
+                        # returns the real _MiniMaxCloneAdapter (or the
+                        # test-injected fake via inject_for_test).
+                        from services.smart_wiring import (
+                            build_smart_clone_provider,
+                        )
+                        _smart_clone_provider = build_smart_clone_provider()
+                    else:
+                        # consent=False path: evaluate_voice_review
+                        # never reads quota or invokes provider — it
+                        # short-circuits to PRESET decisions. Pass
+                        # sentinel values that won't be consumed but
+                        # satisfy the type contract. NEVER reach the
+                        # real provider here.
+                        _smart_quota_remaining = 0
+                        _smart_clone_provider = (
+                            _build_b2_not_wired_clone_provider()
+                        )
 
                     _smart_voice_review = evaluate_voice_review(
                         main_speakers=_smart_main_speakers,
@@ -2894,6 +2964,22 @@ class ProcessPipeline:
                         for sp in _smart_approved_speakers
                         if isinstance(sp, dict)
                     }
+                    # Codex 第二十九轮 P0: track clone mirror failures.
+                    # A CLONED decision means MiniMax has a new voice_id
+                    # but Gateway's UserVoice table doesn't know about
+                    # it yet. We must mirror via the internal endpoint
+                    # so the quota signal stays consistent across jobs.
+                    # If ANY mirror fails, we escalate to handoff so
+                    # the user is aware (and so subsequent jobs that
+                    # would have hit §7.3 brake don't silently miss it).
+                    _smart_clone_mirror_failures: list[str] = []
+                    _smart_user_id_for_mirror = str(
+                        _snap("user_id") or ""
+                    )
+                    _smart_job_id_for_mirror = str(
+                        _snap("job_id") or ""
+                    )
+
                     for _dec in _smart_voice_review.decisions:
                         _sp_entry = _smart_speakers_by_id.get(_dec.speaker_id)
                         if not _sp_entry:
@@ -2903,6 +2989,35 @@ class ProcessPipeline:
                             # AUDIT FIELD ONLY — not a TTS provider.
                             _sp_entry["clone_provider"] = _dec.cloned_provider_name
                             _sp_entry["auto_decision"] = "cloned"
+
+                            # Codex 第二十九轮 P0: mirror to UserVoice.
+                            # MUST happen on every CLONED decision so
+                            # next job's quota sees the up-to-date
+                            # ``used`` count. Field shape mirrors the
+                            # Studio manual-clone path
+                            # (voice_selection_api.py:503) so the two
+                            # clone origins are indistinguishable
+                            # downstream.
+                            _mirror_label = (
+                                _sp_entry.get("speaker_name", "")
+                                or _dec.speaker_id
+                            )
+                            _mirror_ok = _register_smart_clone_in_user_voices(
+                                user_id=_smart_user_id_for_mirror,
+                                voice_id=_dec.cloned_voice_id or "",
+                                label=f"{_mirror_label} Clone",
+                                source_speaker_id=_dec.speaker_id,
+                                notes=(
+                                    f"Smart auto-clone from job "
+                                    f"{_smart_job_id_for_mirror}"
+                                    if _smart_job_id_for_mirror
+                                    else "Smart auto-clone"
+                                ),
+                            )
+                            if not _mirror_ok:
+                                _smart_clone_mirror_failures.append(
+                                    _dec.speaker_id
+                                )
                         elif _dec.choice == VoiceReviewChoice.PRESET:
                             # Auto-matched preset already stamped by
                             # _build_voice_selection_review_payload via
@@ -2923,6 +3038,50 @@ class ProcessPipeline:
                         # TTS provider per-speaker; the clone vendor name
                         # is recorded on _sp_entry["clone_provider"] for audit
                         # but never flows into segment.tts_provider routing.
+
+                    # Codex 第二十九轮 P0: if any mirror failed, hand off
+                    # to Studio. The MiniMax voice already exists (and
+                    # was paid for) but Gateway doesn't know about it,
+                    # so subsequent jobs' quota lookups would be stale.
+                    # Studio human review gives the user a chance to
+                    # manually attach the clone or skip the speaker.
+                    if _smart_clone_mirror_failures:
+                        emit_handoff_markers(
+                            review_state_manager=review_state_manager,
+                            review_stage=VOICE_SELECTION_REVIEW_STAGE,
+                            review_payload=vs_payload,
+                            review_pending_status=REVIEW_STATUS_PENDING,
+                            smart_state_update={
+                                "status": "downgraded_to_studio",
+                                "reason": "clone_library_register_failed",
+                                "handoff_stage": VOICE_SELECTION_REVIEW_STAGE,
+                                "failed_speakers": list(
+                                    _smart_clone_mirror_failures
+                                ),
+                            },
+                            project_dir=final_project_dir,
+                            user_message=(
+                                "智能版克隆已完成但音色库登记失败,请人工接管:"
+                                f" {','.join(_smart_clone_mirror_failures)}"
+                            ),
+                            web_review_marker_builder=self._build_web_review_marker,
+                        )
+                        state_manager.set_stage(
+                            "voice_selection",
+                            StageStatus.RUNNING,
+                            {
+                                "execution_mode": (
+                                    "smart_handoff_mirror_failed"
+                                ),
+                            },
+                        )
+                        current_stage_name = None
+                        _write_usage_summary(usage_meter)
+                        return self._build_paused_result(
+                            project_dir=final_project_dir,
+                            stage=VOICE_SELECTION_REVIEW_STAGE,
+                            message="智能版克隆音色库登记失败",
+                        )
 
                     review_state_manager.set_stage(
                         VOICE_SELECTION_REVIEW_STAGE,
