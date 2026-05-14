@@ -1451,6 +1451,25 @@ class ProcessPipeline:
         job_plan_code = _snap('plan_code_snapshot', 'free')
         job_role = _snap('role_snapshot', 'user')
         self._current_service_mode = job_service_mode  # for recovery paths
+
+        # Smart MVP P2 (plan §6.0.6 / Codex 第八轮 F3) — derive the
+        # effective pipeline mode that smart-aware branches should
+        # consult. ``job_service_mode`` (raw from JobRecord) stays the
+        # audit fact and is what Gateway routing / billing / quota
+        # queries continue to use. ``job_effective_pipeline_mode``
+        # is the per-frame value that smart-aware branches in this
+        # function (auto-review trigger, Studio gate flips, handoff
+        # short-circuit on /continue) MUST read instead of
+        # ``job_service_mode`` — otherwise a smart job whose
+        # smart_state.status is "downgraded_to_studio" will re-enter
+        # the auto layer on /continue and loop the same failure.
+        # The variable is derived here even though the smart-aware
+        # branches that consume it land in subsequent PRs; landing
+        # the variable now lets reviewers / future implementers point
+        # at the canonical reading of "effective mode" rather than
+        # re-derive it inline at each call site.
+        from services.smart.state import derive_effective_pipeline_mode
+        job_effective_pipeline_mode = derive_effective_pipeline_mode(_jr) if _jr else job_service_mode
         # -------------------------------------------------------------
 
         projects_root = _resolve_projects_root()

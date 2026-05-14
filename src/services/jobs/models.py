@@ -157,6 +157,16 @@ class JobRecord:
     jianying_draft_attempt_id: str | None = None   # UUID for current attempt; correlates lock / events
     jianying_draft_substep: str | None = None      # internal sub-step (validating_inputs / building_draft / ...)
 
+    # --- Smart MVP P2 skeleton (plan 2026-05-13 §4.2 / §4.3) ---
+    # State machine snapshot for Smart pipeline. Written by pipeline via
+    # `[SMART_STATE] {...}` stdout marker → process_runner parses → JobStore
+    # update → Gateway mirror via metering callback whitelist. Read by
+    # settle_job_credit_ledger (smart dispatcher), editing/jianying gates,
+    # admin diagnostics. Always None for express/studio jobs.
+    # Shape: {"status": "...", "reason": "...", "handoff_stage": "...",
+    #         "credits_policy": "...", "reserved_credits_per_minute": int, ...}
+    smart_state: dict[str, object] | None = None
+
     def __post_init__(self) -> None:
         self.job_id = str(self.job_id).strip()
         self.job_type = str(self.job_type).strip()
@@ -178,6 +188,7 @@ class JobRecord:
         self.review_gate = _copy_optional_dict(self.review_gate)
         self.error_summary = _copy_optional_dict(self.error_summary)
         self.fallback_summary = _copy_optional_dict(self.fallback_summary)
+        self.smart_state = _copy_optional_dict(self.smart_state)
         self.user_id = _normalize_optional_text(self.user_id)
         self.workspace_dir = _normalize_optional_text(self.workspace_dir)
         self.source_content_hash = _normalize_optional_text(self.source_content_hash)
@@ -280,6 +291,8 @@ class JobRecord:
             "jianying_draft_fingerprint": self.jianying_draft_fingerprint,
             "jianying_draft_attempt_id": self.jianying_draft_attempt_id,
             "jianying_draft_substep": self.jianying_draft_substep,
+            # --- Smart MVP P2 skeleton ---
+            "smart_state": _serialize_optional_dict(self.smart_state),
         }
 
     @classmethod
@@ -339,6 +352,8 @@ class JobRecord:
             jianying_draft_fingerprint=payload.get("jianying_draft_fingerprint"),
             jianying_draft_attempt_id=payload.get("jianying_draft_attempt_id"),
             jianying_draft_substep=payload.get("jianying_draft_substep"),
+            # --- Smart MVP P2 skeleton ---
+            smart_state=payload.get("smart_state"),
         )
 
 

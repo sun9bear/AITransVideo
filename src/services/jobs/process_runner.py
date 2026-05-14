@@ -21,6 +21,9 @@ from services.jobs.events import (
     EVENT_TYPE_STATUS,
     JobEvent,
 )
+from services.smart.state import (
+    parse_smart_state_marker as _parse_smart_state_marker,
+)
 from services.jobs.models import (
     JOB_STATUS_CANCELLED,
     JOB_STATUS_FAILED,
@@ -499,6 +502,43 @@ class ProcessJobRunner:
             if current_job.project_dir is None
             else None
         )
+        # F1 (Smart MVP P2 skeleton, plan 2026-05-13 §4.2 末段):
+        # Smart pipeline emits `[SMART_STATE] {...}` markers to update
+        # JobRecord.smart_state. Parse FIRST so review_gate processing
+        # (which short-circuits with return) doesn't swallow them on the
+        # same line. The marker is independent of review_gate — a single
+        # log line is one or the other, never both, but ordering matters
+        # for the short-circuit return below.
+        smart_state_payload = _parse_smart_state_marker(line)
+        if smart_state_payload is not None:
+            timestamp = utc_now_iso()
+            # Merge into existing smart_state dict (handoff -> partial
+            # reserved_credits_per_minute might already be present from
+            # an earlier reserve marker). Caller can override any field
+            # by emitting a new marker — last write wins for that key.
+            merged_smart_state = dict(current_job.smart_state or {})
+            merged_smart_state.update(smart_state_payload)
+            next_job = self._save_job(
+                current_job,
+                smart_state=merged_smart_state,
+                updated_at=timestamp,
+                fsync=False,  # high-frequency okay; finalize/handoff flush
+            )
+            self.store.append_event(
+                job_id,
+                JobEvent(
+                    job_id=job_id,
+                    event_type=EVENT_TYPE_LOG,
+                    created_at=timestamp,
+                    stage=next_job.current_stage,
+                    status=next_job.status,
+                    message=line,
+                    payload={"smart_state": dict(merged_smart_state)},
+                ),
+                fsync=False,
+            )
+            return
+
         review_gate = _parse_web_review_marker(line)
         if review_gate is not None:
             timestamp = utc_now_iso()

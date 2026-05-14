@@ -375,14 +375,44 @@ def estimate_actual_job_credits(job: Any) -> tuple[int, str, float | None, str]:
 
 
 def _settlement_reason_codes(reason_code: str, reserve_reason_code: str | None) -> set[str]:
-    if reserve_reason_code == "job_reserve" or reason_code == "job_capture":
-        return {
-            "job_capture",
-            "job_release",
-            "capture_additional",
-            "capture_overdraft",
-            "capture_excess_release",
-        }
+    """Return the set of reason_codes that count as "the same job-reserve
+    settlement event" for idempotency dedup in ``_has_existing_settlement``.
+
+    A retry that observes a job in the same terminal status and re-attempts
+    settlement must be recognised as already-done — otherwise sweepers,
+    list-jobs polling and detail polling double-bill.
+
+    The legacy set covers Express/Studio job_reserve → job_capture/job_release
+    plus the capture_additional / capture_overdraft / capture_excess_release
+    correction codes. Smart MVP P2 (plan §5.2 末段) adds a parallel set of
+    smart-distinct reason_codes that the F4 dispatcher writes — they belong
+    in the same idempotency family because they all settle the same single
+    job_reserve and a repeat settle attempt must collapse onto the original
+    write, not duplicate it.
+    """
+    legacy_job_reserve_codes = {
+        "job_capture",
+        "job_release",
+        "capture_additional",
+        "capture_overdraft",
+        "capture_excess_release",
+    }
+    # Smart MVP P2 (plan §5.2 末段) — F4 dispatcher reason_codes. Three
+    # credits_policy paths × the three-step partial-capture flow add up to
+    # five distinct codes, all settling the same job_reserve.
+    smart_job_reserve_codes = {
+        "smart_refund_full",
+        "smart_capture_full",
+        "smart_fail_and_refund_release",
+        "smart_fail_and_refund_clone_reversal",
+        "smart_fail_and_refund_partial_capture",
+    }
+    if (
+        reserve_reason_code == "job_reserve"
+        or reason_code == "job_capture"
+        or reason_code in smart_job_reserve_codes
+    ):
+        return legacy_job_reserve_codes | smart_job_reserve_codes
     return {reason_code}
 
 
@@ -924,6 +954,28 @@ async def settle_job_credit_ledger(
         # retroactively just because a sweeper or detail poll sees them again.
         return []
 
+    # F4 (Smart MVP P2 skeleton, plan 2026-05-13 §5.2 末段): smart_state
+    # dispatcher MUST be evaluated BEFORE the legacy succeeded/failed
+    # branches. Smart `fail_and_refunded` jobs may carry job.status="failed"
+    # (so they would otherwise hit the `failed → release_full` legacy branch
+    # and never apply the partial-capture settlement). Likewise smart
+    # `degraded_delivery_with_report` jobs land status="succeeded" and need
+    # the explicit smart capture_full path even though the dollar amount
+    # currently matches the legacy succeeded branch — that may diverge once
+    # smart credits_policy gains nuances. Always read credits_policy first;
+    # fall through only when there's no smart_state or no policy.
+    smart_state = dict(getattr(job, "smart_state", None) or {})
+    credits_policy = smart_state.get("credits_policy") if smart_state else None
+    if credits_policy:
+        return await _settle_smart_job_credit_ledger(
+            db,
+            job=job,
+            user_id=user_id,
+            job_id=job_id,
+            credits_policy=str(credits_policy),
+            terminal_status=terminal_status,
+        )
+
     if terminal_status == "succeeded":
         actual_credits, quality_tier, minutes, service_mode = estimate_actual_job_credits(job)
         if actual_credits <= 0:
@@ -962,6 +1014,151 @@ async def settle_job_credit_ledger(
             reserve_reason_code="job_reserve",
         )
 
+    return []
+
+
+# ---------------------------------------------------------------------------
+# F4 — Smart MVP P2 settle dispatcher + stub helpers (plan 2026-05-13 §5.2)
+# ---------------------------------------------------------------------------
+#
+# Status: SKELETON. Three credits_policy branches map to existing
+# shadow_release / shadow_capture for now plus two new stub helpers
+# (refund_captured_voice_clone, partial_capture_actual_cost). The stubs
+# carry the correct call shape and a NotImplementedError safety guard so
+# real settlement land in subsequent PRs without changing the dispatcher
+# wiring. Tests in tests/test_smart_skeleton_acceptance.py lock the
+# dispatcher contract so the stubs cannot silently regress.
+
+async def _settle_smart_job_credit_ledger(
+    db: AsyncSession,
+    *,
+    job: Any,
+    user_id,
+    job_id: str,
+    credits_policy: str,
+    terminal_status: str,
+) -> list[CreditsLedger]:
+    """Smart credits_policy → settlement-action dispatcher.
+
+    Plan §4.3 mapping table + §5.2 末段 three-step partial capture flow.
+    See module docstring for skeleton boundary.
+    """
+    if credits_policy == "refund_full":
+        # speaker gate fail / early downgrade / system bug — release the
+        # whole reserve, nothing else captured yet by definition.
+        return await shadow_release(
+            db,
+            user_id=user_id,
+            job_id=job_id,
+            reason_code="smart_refund_full",
+            reserve_reason_code="job_reserve",
+        )
+
+    if credits_policy == "capture_full":
+        # degraded_delivery_with_report — same dollar amount as legacy
+        # succeeded but we route through a smart-distinct reason_code so
+        # the audit trail makes the policy decision visible.
+        actual_credits, _quality_tier, _minutes, service_mode = estimate_actual_job_credits(job)
+        if actual_credits <= 0:
+            return []
+        return await shadow_capture(
+            db,
+            user_id=user_id,
+            job_id=job_id,
+            actual_credits=actual_credits,
+            service_mode=service_mode,
+            reason_code="smart_capture_full",
+            reserve_reason_code="job_reserve",
+        )
+
+    if credits_policy == "capture_actual_cost_capped_at_studio_price":
+        # fail_and_refund three-step (plan §5.2):
+        #   release reserve → refund captured clone → partial capture
+        released = await shadow_release(
+            db,
+            user_id=user_id,
+            job_id=job_id,
+            reason_code="smart_fail_and_refund_release",
+            reserve_reason_code="job_reserve",
+        )
+        clone_refunds = await refund_captured_voice_clone(
+            db,
+            user_id=user_id,
+            job_id=job_id,
+            reason_code="smart_fail_and_refund_clone_reversal",
+        )
+        partial = await partial_capture_actual_cost(
+            db,
+            job=job,
+            user_id=user_id,
+            job_id=job_id,
+            reason_code="smart_fail_and_refund_partial_capture",
+        )
+        return [*released, *clone_refunds, *partial]
+
+    logger.warning(
+        "settle_smart: unrecognised credits_policy=%r for job=%s; "
+        "falling through to terminal_status=%r legacy branch",
+        credits_policy, job_id, terminal_status,
+    )
+    return []
+
+
+async def refund_captured_voice_clone(
+    db: AsyncSession,
+    *,
+    user_id,
+    job_id: str,
+    reason_code: str = "voice_clone_capture_reversal",
+) -> list[CreditsLedger]:
+    """STUB — reverse already-captured ``voice_clone_capture`` ledger entries.
+
+    Real implementation (subsequent PR) selects all
+    ``direction='capture' AND reason_code='voice_clone_capture'`` rows
+    for this job and writes matching ``direction='reversal'`` entries
+    that bring the user's bucket back to pre-clone-capture state.
+
+    Skeleton currently returns an empty list — the dispatcher contract
+    is locked by acceptance tests but the refund itself is no-op until
+    voice-clone settlement gets its real implementation. Production
+    must NOT enable Smart paths that rely on captured clone refunds
+    until this stub is replaced.
+    """
+    logger.warning(
+        "refund_captured_voice_clone STUB invoked for user=%s job=%s reason=%s — "
+        "no ledger entries written. Skeleton boundary; replace before "
+        "Smart paths that rely on captured clone refunds go live.",
+        user_id, job_id, reason_code,
+    )
+    return []
+
+
+async def partial_capture_actual_cost(
+    db: AsyncSession,
+    *,
+    job: Any,
+    user_id,
+    job_id: str,
+    reason_code: str = "smart_fail_and_refund_partial_capture",
+) -> list[CreditsLedger]:
+    """STUB — partial capture for Smart fail_and_refund (plan §5.2 step 3).
+
+    Real implementation (subsequent PR):
+      1. Read UsageMeter.summarize() RMB cost from project_dir/usage_events.jsonl
+      2. credits = max(1, ceil(cost_rmb / point_price_rmb))
+      3. Cap at source_minutes × studio.standard rate
+      4. Write a ``direction='capture'`` ledger row with the partial amount
+
+    Skeleton returns an empty list and logs a warning so an accidental
+    production trip is loud rather than silent. The dispatcher contract
+    is locked by acceptance tests.
+    """
+    logger.warning(
+        "partial_capture_actual_cost STUB invoked for user=%s job=%s reason=%s — "
+        "no ledger entry written. Skeleton boundary; replace before Smart "
+        "fail_and_refund settlement is enabled in production.",
+        user_id, job_id, reason_code,
+    )
     return []
 
 

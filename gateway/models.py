@@ -313,6 +313,13 @@ class Job(Base):
     # --- LIVE (V3-6: from compute_job_policy, current value: "standard") ---
     #   "quality_tier": str          # from policy at create time; "standard" | "high" | "flagship"
 
+    # --- Smart MVP P2 skeleton (plan 2026-05-13 §4.2 / §4.3) ---
+    # Mirrors JobRecord.smart_state from Job API (synced via metering callback,
+    # see job_intercept.update_job_metering allowed_keys whitelist). Read by
+    # settle_job_credit_ledger smart dispatcher (§5.2). Always NULL for
+    # express/studio jobs.
+    smart_state: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
 
 class AdminAuditLog(Base):
     """Audit trail for admin actions on user entitlements."""

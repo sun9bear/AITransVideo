@@ -90,6 +90,13 @@ class JobJsonRecord:
     edit_generation: int | None
     jianying_draft_zip_path: str | None
     service_mode: str | None
+    # Smart MVP P2 (plan §4.2 末段) — pipeline emits [SMART_STATE] markers
+    # that runner writes into JobRecord.smart_state. mirror_job_terminal_state
+    # then propagates this dict into the Gateway DB Job.smart_state column so
+    # the F4 settle dispatcher (credits_service._settle_smart_job_credit_ledger)
+    # can read credits_policy. None = upstream payload didn't carry the field
+    # (legacy / express / studio job — never overwritten on the DB side).
+    smart_state: dict | None = None
 
     @property
     def is_succeeded(self) -> bool:
@@ -167,6 +174,14 @@ def _record_from_payload(path: Path, data: dict) -> JobJsonRecord:
             data.get("jianying_draft_zip_path")
         ),
         service_mode=_coerce_str_or_none(data.get("service_mode")),
+        # Smart MVP P2 — pass through verbatim. dict→dict; non-dict→None
+        # (don't try to coerce; runner always writes a dict so any other
+        # shape is corruption and skipping the mirror is the safe default).
+        smart_state=(
+            data.get("smart_state")
+            if isinstance(data.get("smart_state"), dict)
+            else None
+        ),
     )
 
 

@@ -119,6 +119,23 @@ async def mirror_job_terminal_state(
         db_job.edit_generation = upstream.edit_generation
         changed = True
 
+    # Smart MVP P2 (plan §4.2 末段) — mirror smart_state BEFORE the settle
+    # block below, so the F4 dispatcher in settle_job_credit_ledger sees
+    # the latest credits_policy from the JSON store. Merge semantics
+    # (last-write-wins per key) instead of full replace so partial
+    # marker updates from earlier pipeline frames aren't clobbered by a
+    # final-frame write that only carries one new field. None on
+    # upstream.smart_state means "not present in upstream payload" — do
+    # not clobber an existing DB value.
+    if upstream.smart_state is not None:
+        merged_smart_state = dict(getattr(db_job, "smart_state", None) or {})
+        merged_smart_state.update(upstream.smart_state)
+        # Compare against the existing dict to avoid spurious changed=True
+        # on a no-op poll (mirror is level-triggered and runs frequently).
+        if merged_smart_state != (getattr(db_job, "smart_state", None) or {}):
+            db_job.smart_state = merged_smart_state
+            changed = True
+
     # Terminal settlement is deliberately level-triggered rather than only
     # edge-triggered. ``GET /jobs/{id}`` notification polling, list-jobs, and
     # the R2 sweeper can observe the same terminal JSON record in different

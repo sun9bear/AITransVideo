@@ -637,6 +637,13 @@ async def intercept_list_jobs(
                             )
                         except (TypeError, ValueError):
                             upstream_edit_generation_int = None
+                        # Smart MVP P2 — pull smart_state straight from
+                        # the upstream payload so terminal mirror keeps
+                        # parity with the JSON store on this Job-API
+                        # poll path. Without it the DB stays NULL and
+                        # the F4 settle dispatcher misses the smart
+                        # credits_policy branch on this code path.
+                        upstream_smart_state = upstream_job.get("smart_state")
                         await mirror_job_terminal_state(
                             db,
                             db_job,
@@ -651,6 +658,11 @@ async def intercept_list_jobs(
                                 edit_generation=upstream_edit_generation_int,
                                 jianying_draft_zip_path=None,  # not read by mirror
                                 service_mode=None,  # not read by mirror
+                                smart_state=(
+                                    upstream_smart_state
+                                    if isinstance(upstream_smart_state, dict)
+                                    else None
+                                ),
                             ),
                         )
                 except Exception:
@@ -1078,6 +1090,12 @@ def _job_json_record_from_payload(job_id: str, payload: dict) -> JobJsonRecord:
         jianying_draft_zip_path=None,
         service_mode=payload.get("service_mode")
         if isinstance(payload.get("service_mode"), str)
+        else None,
+        # Smart MVP P2 mirror — pipeline writes via [SMART_STATE] marker
+        # → JobRecord.smart_state → list-jobs payload → here → DB mirror
+        # → settle dispatcher reads job.smart_state.credits_policy.
+        smart_state=payload.get("smart_state")
+        if isinstance(payload.get("smart_state"), dict)
         else None,
     )
 
@@ -3446,21 +3464,40 @@ async def update_job_metering(
             snapshot[key] = data[key]
             updated_keys.append(key)
 
-    if not updated_keys:
+    # F1 (Smart MVP P2 skeleton, plan 2026-05-13 §4.2 末段): mirror
+    # smart_state from pipeline into the dedicated Job.smart_state column
+    # (separate JSONB column, NOT inside metering_snapshot — the two have
+    # different concerns: metering = counters, smart_state = state machine).
+    # Last-write merge so partial pipeline updates don't drop earlier keys
+    # (e.g. reserved_credits_per_minute set at create time + status set
+    # later at handoff). Empty/None payloads are skipped to avoid clobber.
+    smart_state_update = data.get("smart_state")
+    smart_state_changed = False
+    if isinstance(smart_state_update, dict) and smart_state_update:
+        merged_smart_state = dict(job.smart_state or {})
+        merged_smart_state.update(smart_state_update)
+        job.smart_state = merged_smart_state
+        smart_state_changed = True
+
+    if not updated_keys and not smart_state_changed:
         return Response(
             content=json.dumps({"ok": True, "note": "no recognized metering keys"}),
             status_code=200,
             headers={"content-type": "application/json"},
         )
 
-    job.metering_snapshot = snapshot
+    if updated_keys:
+        job.metering_snapshot = snapshot
 
     try:
         await db.commit()
     except Exception:
         await db.rollback()
 
-    logger.info("metering updated for %s: %s", job_id, updated_keys)
+    logger.info(
+        "metering updated for %s: keys=%s smart_state=%s",
+        job_id, updated_keys, smart_state_changed,
+    )
     return Response(
         content=json.dumps({"ok": True}),
         status_code=200,
