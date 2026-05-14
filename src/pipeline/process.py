@@ -3065,6 +3065,7 @@ class ProcessPipeline:
                         # ``job_service_mode`` so downgraded smart jobs
                         # don't re-enter the smart branch on resume.
                         from services.smart.auto_translation_review import (
+                            TranslationReviewDecision,
                             evaluate_translation_review,
                         )
                         from services.smart.handoff import emit_handoff_markers
@@ -3076,16 +3077,42 @@ class ProcessPipeline:
                         # Glossary stats: re-compute locally (the metering
                         # helper at process.py:938 emits into the metering
                         # body, not onto translation_result, so we call
-                        # the underlying helper directly). best-effort
-                        # try/except so a glossary check failure routes
-                        # through auto-review's vacuous-pass path (total=0).
-                        try:
-                            _smart_gloss = check_glossary_preservation(
-                                translation_result.segments,
-                                _review_glossary or None,
-                            )
-                        except Exception:
-                            _smart_gloss = {"total_terms": 0, "preserved_terms": 0}
+                        # the underlying helper directly).
+                        #
+                        # Codex 第二十五轮 P1-2: don't fail-open on helper
+                        # exception. When _review_glossary is empty/None
+                        # → vacuous-pass (total=0) is correct (the gate
+                        # treats glossary as not configured). But when
+                        # _review_glossary is non-empty AND the helper
+                        # raises (field drift, regex bug, …), silently
+                        # writing total=0 would equally vacuous-pass —
+                        # the gate cannot distinguish "no glossary" from
+                        # "glossary check broken". Smart MUST handoff
+                        # in the latter case. We track the failure in
+                        # ``_smart_glossary_check_failed`` and short-
+                        # circuit to handoff below before calling the
+                        # deterministic gate.
+                        _smart_glossary_check_failed = False
+                        _smart_glossary_check_error: str | None = None
+                        if _review_glossary:
+                            try:
+                                _smart_gloss = check_glossary_preservation(
+                                    translation_result.segments,
+                                    _review_glossary,
+                                )
+                            except Exception as _gloss_exc:
+                                _smart_glossary_check_failed = True
+                                _smart_glossary_check_error = str(_gloss_exc)[:200]
+                                _smart_gloss = {
+                                    "total_terms": 0,
+                                    "preserved_terms": 0,
+                                }
+                        else:
+                            # No glossary configured — gate vacuous-passes.
+                            _smart_gloss = {
+                                "total_terms": 0,
+                                "preserved_terms": 0,
+                            }
 
                         # length_overflow / final_spoken_text checksum are
                         # post-TTS signals. Pass None — auto_translation_review's
@@ -3165,11 +3192,50 @@ class ProcessPipeline:
                             "eligible_speakers": _smart_eligible_count,
                         }
 
-                        _smart_translation_decision = evaluate_translation_review(
-                            translation_result=_smart_translation_input,
-                            speaker_stats=_smart_speaker_stats,
-                            clone_sample_stats=_smart_clone_sample_stats,
-                        )
+                        # Codex 第二十五轮 P1-2: glossary helper failure
+                        # short-circuit. The gate cannot distinguish a
+                        # broken helper from "no glossary" — synthesize
+                        # the handoff decision directly so smart never
+                        # auto-approves a job whose glossary check is
+                        # silently bypassed.
+                        if _smart_glossary_check_failed:
+                            _smart_translation_decision = TranslationReviewDecision(
+                                auto_approved=False,
+                                reason_code="glossary_check_error",
+                                failed_check="glossary_preservation",
+                                metrics={
+                                    "glossary_check_error": (
+                                        _smart_glossary_check_error
+                                        or "unknown"
+                                    ),
+                                    "glossary_configured_terms": len(
+                                        _review_glossary or {}
+                                    ),
+                                },
+                            )
+                        else:
+                            # Codex 第二十五轮 P1-1: derive compliance_block
+                            # from content_compliance_payload.
+                            # ContentComplianceResult.status="blocked"
+                            # is the canonical signal (see
+                            # ``src/services/content_compliance.py:118``).
+                            # We treat any "blocked" status as
+                            # auto-approve-unsafe regardless of
+                            # ``admin_override`` — admin override is for
+                            # the legacy human gate; smart must still
+                            # defer translation review to Studio so the
+                            # user re-confirms the bypass in context.
+                            _smart_compliance_block = bool(
+                                isinstance(content_compliance_payload, dict)
+                                and content_compliance_payload.get("status")
+                                == "blocked"
+                            )
+                            _smart_translation_decision = evaluate_translation_review(
+                                translation_result=_smart_translation_input,
+                                speaker_stats=_smart_speaker_stats,
+                                clone_sample_stats=_smart_clone_sample_stats,
+                                compliance_block=_smart_compliance_block,
+                            )
 
                         if not _smart_translation_decision.auto_approved:
                             # Handoff: plan §6.5 three-tuple

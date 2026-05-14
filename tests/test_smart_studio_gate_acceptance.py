@@ -1361,3 +1361,131 @@ class TestProcessPyStudioGateWidening:
                 f"required {required!r}.\n"
                 f"Window:\n{legacy_window}"
             )
+
+    # ===================================================================
+    # PR#3C-b3c-fix (Codex 第二十五轮) — close 2 P1 fail-opens
+    # ===================================================================
+
+    def test_translation_review_passes_compliance_block_to_gate(self):
+        """Codex 第二十五轮 P1-1: compliance_block was previously not
+        plumbed into evaluate_translation_review. Pin that:
+          - the call site includes ``compliance_block=`` kwarg
+          - the value is derived from ``content_compliance_payload``
+            with ``status == "blocked"`` semantics
+          - the gate gate is INVOKED with this kwarg (not just
+            computed)
+        """
+        source = self._source()
+        idx = source.find("Smart inline auto-translation-review path")
+        assert idx >= 0
+        block = source[idx : idx + 16000]
+
+        # _smart_compliance_block must be derived from content_compliance_payload.
+        assert "_smart_compliance_block" in block, (
+            "Smart translation-review branch missing the "
+            "``_smart_compliance_block`` derivation — Codex 第二十五轮 "
+            "P1-1 fail-open. Without it, a blocked / needs_manual_review "
+            "compliance result would still auto-approve translation.\n"
+            f"Block first 3000 chars:\n{block[:3000]}"
+        )
+
+        # Derivation must reference content_compliance_payload + "blocked".
+        deriv_idx = block.find("_smart_compliance_block =")
+        assert deriv_idx >= 0, (
+            "Could not locate ``_smart_compliance_block =`` assignment "
+            "in smart translation-review branch."
+        )
+        deriv_window = block[deriv_idx : deriv_idx + 600]
+        assert "content_compliance_payload" in deriv_window, (
+            "_smart_compliance_block must derive from "
+            "content_compliance_payload, not a hardcoded constant.\n"
+            f"Window:\n{deriv_window}"
+        )
+        assert '"blocked"' in deriv_window, (
+            "_smart_compliance_block derivation must check ``status == "
+            "\"blocked\"`` (see ``src/services/content_compliance.py:131`` "
+            "where ContentComplianceResult.blocked is defined that way).\n"
+            f"Window:\n{deriv_window}"
+        )
+
+        # evaluate_translation_review call site must pass the kwarg.
+        eval_idx = block.find("evaluate_translation_review(")
+        assert eval_idx >= 0, "evaluate_translation_review call missing."
+        eval_window = block[eval_idx : eval_idx + 800]
+        assert "compliance_block=_smart_compliance_block" in eval_window, (
+            "evaluate_translation_review call site missing "
+            "``compliance_block=_smart_compliance_block`` kwarg — the "
+            "Codex 第二十五轮 P1-1 fix didn't reach the actual call.\n"
+            f"Call window:\n{eval_window}"
+        )
+
+    def test_translation_review_glossary_failure_short_circuits_to_handoff(self):
+        """Codex 第二十五轮 P1-2: glossary helper exception when
+        ``_review_glossary`` is configured MUST route to handoff with
+        ``reason_code="glossary_check_error"`` + ``failed_check=
+        "glossary_preservation"`` instead of vacuous-pass.
+
+        Pin the source-level structure:
+          - ``_smart_glossary_check_failed`` boolean state variable
+          - the helper call is gated on ``if _review_glossary:`` (not
+            always called, so empty-glossary stays vacuous-pass)
+          - failed → synthesize ``TranslationReviewDecision(
+            auto_approved=False, reason_code="glossary_check_error",
+            failed_check="glossary_preservation", ...)``
+          - the synthetic decision flows into the existing handoff
+            branch (not a separate code path)
+        """
+        source = self._source()
+        idx = source.find("Smart inline auto-translation-review path")
+        assert idx >= 0
+        block = source[idx : idx + 16000]
+
+        assert "_smart_glossary_check_failed" in block, (
+            "Smart translation-review branch missing "
+            "``_smart_glossary_check_failed`` state — Codex 第二十五轮 "
+            "P1-2 fail-open. Without it, a broken glossary checker "
+            "produces ``total=0`` which the gate vacuous-passes as "
+            "``no glossary configured``.\n"
+            f"Block first 3000 chars:\n{block[:3000]}"
+        )
+
+        # The glossary check call must be gated on ``if _review_glossary:``.
+        # The previous fail-open passed `_review_glossary or None` always,
+        # treating empty glossary the same as failed glossary.
+        # NB: we check substring presence, not exact line layout.
+        assert "if _review_glossary:" in block, (
+            "Glossary check no longer gated on ``if _review_glossary:`` "
+            "— PR#3C-b3c-fix changes the call-site to only invoke "
+            "check_glossary_preservation when the glossary is non-empty, "
+            "so an empty glossary stays in the vacuous-pass path AND a "
+            "broken helper on a configured glossary doesn't silently "
+            "fall through to total=0.\n"
+            f"Block first 3000 chars:\n{block[:3000]}"
+        )
+
+        # The synthesized handoff decision must have the right shape.
+        synth_idx = block.find('reason_code="glossary_check_error"')
+        assert synth_idx >= 0, (
+            "Could not locate ``reason_code=\"glossary_check_error\"`` "
+            "in the smart branch — Codex 第二十五轮 P1-2 fix incomplete.\n"
+            f"Block:\n{block[:4000]}"
+        )
+        synth_window = block[max(0, synth_idx - 400) : synth_idx + 600]
+        assert "TranslationReviewDecision(" in synth_window, (
+            "glossary_check_error reason must be inside a synthesized "
+            "TranslationReviewDecision dataclass so the existing handoff "
+            "branch picks it up.\n"
+            f"Window:\n{synth_window}"
+        )
+        assert 'failed_check="glossary_preservation"' in synth_window, (
+            "glossary failure must report ``failed_check="
+            "\"glossary_preservation\"`` so audit logs / sidecar see "
+            "the same label other glossary failures carry.\n"
+            f"Window:\n{synth_window}"
+        )
+        assert "auto_approved=False" in synth_window, (
+            "Synthesized glossary_check_error decision must have "
+            "``auto_approved=False`` — this is the whole point of "
+            "the fail-CLOSED fix.\n"
+            f"Window:\n{synth_window}"
+        )

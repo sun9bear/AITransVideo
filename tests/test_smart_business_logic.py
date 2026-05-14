@@ -1346,6 +1346,224 @@ class TestTranslationReviewProcessIntegrationShapes:
         assert decision.failed_check == "content_compliance"
 
 
+class TestTranslationReviewProcessIntegrationFailClosed:
+    """Codex 第二十五轮 — pin the two fail-closed behaviours added in
+    PR#3C-b3c-fix.
+
+    Both behaviours are pure: they don't run process.py's whole
+    smart branch (which requires the full pipeline plumbing), but
+    they exercise the SAME synthesis logic that branch uses inline:
+
+      1. compliance_block derivation from
+         ``content_compliance_payload["status"] == "blocked"`` →
+         routes evaluate_translation_review to reject with
+         ``compliance_high_risk``.
+
+      2. Glossary helper exception when glossary is configured →
+         synthesize a TranslationReviewDecision(auto_approved=False,
+         reason_code="glossary_check_error", failed_check=
+         "glossary_preservation") that flows into the existing
+         handoff branch.
+    """
+
+    def _build_segments(self, speaker_ids):
+        from services.gemini.translator import DubbingSegment
+
+        return [
+            DubbingSegment(
+                segment_id=i,
+                speaker_id=sid,
+                display_name=sid.upper(),
+                voice_id="voice_x",
+                start_ms=i * 1000,
+                end_ms=(i + 1) * 1000,
+                target_duration_ms=1000,
+                source_text="hello",
+                cn_text="你好",
+            )
+            for i, sid in enumerate(speaker_ids)
+        ]
+
+    def test_compliance_block_derivation_from_payload(self):
+        """``content_compliance_payload["status"] == "blocked"`` →
+        compliance_block=True → evaluate_translation_review returns
+        ``compliance_high_risk``. This mirrors what process.py does
+        inline at the smart branch (Codex 第二十五轮 P1-1)."""
+        from services.smart.auto_translation_review import (
+            evaluate_translation_review,
+        )
+
+        # Mirror the inline derivation logic from process.py:
+        for status, expected_block in (
+            ("blocked", True),
+            ("passed", False),
+            ("skipped", False),
+            ("needs_manual_review", False),  # only "blocked" trips
+            ("error", False),
+            (None, False),
+        ):
+            payload = {"status": status} if status is not None else None
+            compliance_block = bool(
+                isinstance(payload, dict)
+                and payload.get("status") == "blocked"
+            )
+            assert compliance_block is expected_block, (
+                f"compliance_block derivation broken for status={status!r}: "
+                f"got {compliance_block}, expected {expected_block}"
+            )
+
+        # End-to-end: a "blocked" payload → reject with
+        # compliance_high_risk regardless of other metrics being clean.
+        segments = self._build_segments(["speaker_a"] * 5)
+        translation_input = {
+            "glossary_total_terms": 10,
+            "glossary_preserved_terms": 10,
+            "length_overflow_rate": None,
+            "rewrite_attempted": False,
+            "subtitle_source_text_sha256": None,
+            "final_spoken_text_sha256": None,
+            "segments": [
+                {"segment_id": str(s.segment_id), "speaker_id": s.speaker_id}
+                for s in segments
+            ],
+        }
+        profiles = {
+            "speaker_a": {
+                "speaker_role": "primary",
+                "speaker_duration_share": 1.0,
+                "speaker_duration_ms": 50_000,
+            },
+        }
+        speaker_stats = {
+            "speakers": [
+                {"speaker_id": "speaker_a", "role": "primary",
+                 "duration_share": 1.0},
+            ],
+            "uncertain_speaker_duration_share": 0.0,
+            "asr_speaker_count": 1,
+        }
+        clone_sample_stats = {"eligible_speakers": 1}
+
+        decision = evaluate_translation_review(
+            translation_result=translation_input,
+            speaker_stats=speaker_stats,
+            clone_sample_stats=clone_sample_stats,
+            compliance_block=True,  # what process.py derives + passes
+        )
+        assert decision.auto_approved is False
+        assert decision.reason_code == "compliance_high_risk"
+        assert decision.failed_check == "content_compliance"
+
+    def test_compliance_block_admin_override_still_blocks_smart(self):
+        """Even when admin overrode the legacy compliance gate
+        (admin_override=True), the smart path must still defer to
+        Studio because the content was flagged. Pin the contract:
+        compliance_block depends ONLY on status, never on
+        admin_override (admin override is for the legacy human gate,
+        smart needs the user to re-confirm in context)."""
+        # Admin-override payload still carries status="blocked"
+        # (see process.py:7769-7779 where _dc_replace only changes
+        # message, not status).
+        payload = {
+            "status": "blocked",
+            "admin_override": True,
+            "message": "Admin overrode the block",
+        }
+        compliance_block = bool(
+            isinstance(payload, dict)
+            and payload.get("status") == "blocked"
+        )
+        assert compliance_block is True, (
+            "Admin override must NOT bypass smart's compliance gate. "
+            "compliance_block depends only on status, not admin_override."
+        )
+
+    def test_glossary_check_error_synthesizes_handoff_decision(self):
+        """Codex 第二十五轮 P1-2: a broken glossary helper on a
+        configured glossary must NOT vacuous-pass via total_terms=0.
+        Pin the synthesized handoff decision shape that process.py
+        constructs inline (so the rest of the handoff branch consumes
+        it identically to a real evaluate_translation_review reject).
+        """
+        from services.smart.auto_translation_review import (
+            TranslationReviewDecision,
+        )
+
+        # The synthesized decision shape — must match what process.py
+        # creates when _smart_glossary_check_failed = True.
+        synthesized = TranslationReviewDecision(
+            auto_approved=False,
+            reason_code="glossary_check_error",
+            failed_check="glossary_preservation",
+            metrics={
+                "glossary_check_error": "regex.error: bad escape",
+                "glossary_configured_terms": 7,
+            },
+        )
+        # The handoff branch reads .auto_approved + .reason_code +
+        # .failed_check + .metrics. Pin all four.
+        assert synthesized.auto_approved is False
+        assert synthesized.reason_code == "glossary_check_error"
+        assert synthesized.failed_check == "glossary_preservation"
+        assert synthesized.metrics["glossary_check_error"] == (
+            "regex.error: bad escape"
+        )
+        assert synthesized.metrics["glossary_configured_terms"] == 7
+
+    def test_glossary_empty_remains_vacuous_pass(self):
+        """Empty glossary must STILL vacuous-pass — Codex 第二十五轮 P1-2
+        only changes behaviour for configured-but-broken; "no glossary
+        configured" was correct before and remains correct."""
+        from services.smart.auto_translation_review import (
+            evaluate_translation_review,
+        )
+
+        # When _review_glossary is empty/None, process.py skips the
+        # helper call entirely and writes ``total_terms=0``.
+        # evaluate_translation_review treats total=0 as "no glossary"
+        # and vacuous-passes that check.
+        segments = self._build_segments(["speaker_a"] * 5)
+        translation_input = {
+            "glossary_total_terms": 0,  # what process.py writes when no glossary
+            "glossary_preserved_terms": 0,
+            "length_overflow_rate": None,
+            "rewrite_attempted": False,
+            "subtitle_source_text_sha256": None,
+            "final_spoken_text_sha256": None,
+            "segments": [
+                {"segment_id": str(s.segment_id), "speaker_id": s.speaker_id}
+                for s in segments
+            ],
+        }
+        profiles = {
+            "speaker_a": {
+                "speaker_role": "primary",
+                "speaker_duration_share": 1.0,
+                "speaker_duration_ms": 50_000,
+            },
+        }
+        speaker_stats = {
+            "speakers": [
+                {"speaker_id": "speaker_a", "role": "primary",
+                 "duration_share": 1.0},
+            ],
+            "uncertain_speaker_duration_share": 0.0,
+            "asr_speaker_count": 1,
+        }
+        clone_sample_stats = {"eligible_speakers": 1}
+
+        decision = evaluate_translation_review(
+            translation_result=translation_input,
+            speaker_stats=speaker_stats,
+            clone_sample_stats=clone_sample_stats,
+        )
+        assert decision.auto_approved is True, (
+            f"Empty glossary should still vacuous-pass; got "
+            f"reason={decision.reason_code!r} "
+            f"failed_check={decision.failed_check!r}"
+        )
+
+
 # ===================================================================
 # retry_budget
 # ===================================================================
