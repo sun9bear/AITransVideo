@@ -551,23 +551,31 @@ class TestProcessPyStudioGateWidening:
     def _source(self) -> str:
         return _PROCESS_PY.read_text(encoding="utf-8")
 
-    def test_pre_tts_voice_validation_gate_widened_for_smart(self):
-        """Plan §4.3 末段 row 4 — cloned voice expiry validation must run
-        for smart jobs too. anchor: 'Pre-TTS voice validation' header."""
+    def test_pre_tts_voice_validation_gate_still_literal_studio_pending_handoff(self):
+        """Plan §4.3 末段 row 4. PR#3C-b1's first cut widened this gate
+        to {"studio", "smart"}, but Codex 第十六轮 P1 caught that the
+        ``if expired_voices:`` branch underneath does set_stage(PENDING)
+        + web review marker + paused-return WITHOUT emitting
+        ``[SMART_STATE]`` — re-introducing the 7th-round F1/F2 silent
+        state-mismatch blocker.
+
+        So PR#3C-b1 was reverted to literal Studio-only at this gate.
+        PR#3C-b2 will widen + plumb ``emit_handoff_markers()`` here
+        together. This assertion locks the deferral; when PR#3C-b2
+        lands the widening, update this test to the widened form."""
         block = _find_anchor_block(
             self._source(),
             "Pre-TTS voice validation (cloned voices, before translation)",
-            window=12,
+            window=14,
         )
-        # The widened if expression carries both modes via set membership.
-        assert 'job_service_mode in {"studio", "smart"}' in block, (
-            "Pre-TTS voice validation gate is no longer widened for smart. "
-            f"Block:\n{block}"
-        )
-        # And the legacy literal-Studio comparison must NOT appear in
-        # this anchored block.
-        assert 'job_service_mode == "studio"' not in block, (
-            "Pre-TTS voice validation gate regressed to literal Studio-only. "
+        assert 'job_service_mode == "studio"' in block, (
+            "Pre-TTS voice validation gate has been widened without the "
+            "matching smart_state handoff plumbing. PR#3C-b1 left this "
+            "gate literal Studio-only after Codex 第十六轮 P1 caught the "
+            "expired-voices branch was missing emit_handoff_markers(). "
+            "If you widened deliberately, you MUST also emit "
+            "[SMART_STATE] marker (see services.smart.handoff) before "
+            "the paused-return — and update this test. "
             f"Block:\n{block}"
         )
 

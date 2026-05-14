@@ -2297,14 +2297,17 @@ class ProcessPipeline:
 
             # --- Pre-TTS voice validation (cloned voices, before translation) ---
             #
-            # Plan §4.3 末段 row 4 + Codex 第二轮 F4: smart jobs also need
-            # cloned-voice expiry validation. Without this, a Smart job
-            # whose auto_voice_review picked a cloned vt_* voice that
-            # later expired (admin cleanup, account quota turnover) would
-            # publish with a stale voice_id and hit a 400 during TTS.
-            # Widening here is safe — smart_state remains the audit fact;
-            # the validator only inspects _speaker_voices voice_ids.
-            if config.wait_for_review and job_service_mode in {"studio", "smart"}:
+            # Plan §4.3 末段 row 4. PR#3C-b1 attempt at widening this gate
+            # to {"studio", "smart"} was reverted in PR#3C-b1-fix per
+            # Codex 第十六轮 P1: the ``expired_voices`` branch below
+            # set_stages PENDING + prints a web review marker + returns
+            # a paused result, but does NOT emit ``[SMART_STATE]`` /
+            # ``emit_handoff_markers()``. Letting smart hit this branch
+            # without the smart_state marker silently re-introduces the
+            # 7th-round F1/F2 blocker (process_runner / Gateway billing
+            # see smart_state=running while job lands waiting_for_review).
+            # Widening + handoff plumbing land together in PR#3C-b2.
+            if config.wait_for_review and job_service_mode == "studio":
                 expired_voices = self._validate_cloned_voices(_speaker_voices)
                 if expired_voices:
                     for ev_id in expired_voices:
