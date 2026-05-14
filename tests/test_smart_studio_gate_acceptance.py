@@ -321,6 +321,82 @@ class TestJianyingDraftRunnerGate:
             runner.trigger("job_y")
         assert exc_info.value.reason == "service_mode_not_studio_or_smart"
 
+    def test_race_condition_gate2_rejects_state_flipped_between_reads(self, tmp_path):
+        """Codex 第十五轮 P1: process_runner may flip smart_state.status
+        back to ``running`` between trigger()'s pre-lock require_job
+        (Gate 1) and the post-lock re-read (Gate 2). Without re-running
+        the gate in the lock, the runner would claim
+        jianying_draft_status=running on an in-flight smart job. This
+        test pins the dual-gate behaviour: 1st require_job returns
+        editable, 2nd returns running → trigger raises at Gate 2.
+        """
+        from services.jobs.jianying_draft_runner import (
+            JianyingDraftRunner, JianyingNotAllowedError,
+        )
+
+        editable_job = _build_runner_job(
+            service_mode="smart", status="succeeded",
+            smart_state={"status": "completed"},
+        )
+        flipped_job = _build_runner_job(
+            service_mode="smart", status="succeeded",
+            smart_state={"status": "running"},
+        )
+        # Add the fields the rest of trigger() touches before reaching
+        # the post-lock gate, so the test exercises the WHOLE pre-→-lock
+        # path. jianying_draft_status defaults are fine.
+        for j in (editable_job, flipped_job):
+            j.jianying_draft_status = "idle"
+            j.jianying_draft_started_at = None
+            j.jianying_draft_completed_at = None
+            j.jianying_draft_error = None
+            j.jianying_draft_zip_path = None
+            j.jianying_draft_user_root = None
+            j.jianying_draft_fingerprint = None
+            j.jianying_draft_attempt_id = None
+            j.jianying_draft_substep = None
+            j.project_dir = str(tmp_path)
+
+        store = MagicMock()
+        # 1st call: editable; 2nd call (inside lock): flipped to running.
+        store.require_job.side_effect = [editable_job, flipped_job]
+        # _lock_path_for uses self._store.root_dir / ... — make it a real
+        # tmp Path so file_lock acquisition works.
+        store.root_dir = tmp_path
+        runner = JianyingDraftRunner(store=store)
+        with pytest.raises(JianyingNotAllowedError) as exc_info:
+            runner.trigger("job_y")
+        # Reject must come from Gate 2 (the post-lock check), not from
+        # any downstream pipeline failure.
+        assert exc_info.value.reason == "smart_state_not_editable"
+        # Two reads — confirms the dual-gate path was exercised.
+        assert store.require_job.call_count == 2
+
+    def test_helper_extracted_and_runnable_in_isolation(self):
+        """Codex 第十五轮 P1 末段: gate logic is module-level so it can
+        be invoked from BOTH the pre-lock pre-check AND the post-lock
+        authoritative check. Pin the helper's import surface so a
+        future refactor that inlines the body silently loses the
+        Gate 2 invocation site."""
+        from services.jobs.jianying_draft_runner import (
+            _check_smart_aware_service_mode_gate, JianyingNotAllowedError,
+        )
+
+        editable = _build_runner_job(
+            service_mode="smart", status="succeeded",
+            smart_state={"status": "completed"},
+        )
+        # Editable passes — no raise.
+        _check_smart_aware_service_mode_gate(editable)
+
+        running = _build_runner_job(
+            service_mode="smart", status="succeeded",
+            smart_state={"status": "running"},
+        )
+        with pytest.raises(JianyingNotAllowedError) as exc_info:
+            _check_smart_aware_service_mode_gate(running)
+        assert exc_info.value.reason == "smart_state_not_editable"
+
 
 # ===================================================================
 # C-a.4 — AST guard for new Studio-only literal gates

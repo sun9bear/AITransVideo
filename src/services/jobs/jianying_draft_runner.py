@@ -340,6 +340,48 @@ def _compute_jianying_fingerprint(
     return hashlib.sha256(serialized).hexdigest()
 
 
+def _check_smart_aware_service_mode_gate(job) -> None:
+    """Plan §4.3 末段 + §6.6 + Codex 第二/六轮 F3 + 第十五轮 P1.
+
+    Allow Studio jobs through unconditionally; allow smart jobs only when
+    ``smart_state.status`` is ``completed`` or ``downgraded_to_studio``;
+    reject everything else. Raises ``JianyingNotAllowedError`` with a
+    reason code the HTTP layer surfaces to the user.
+
+    Why this is a module-level helper and called TWICE in trigger():
+
+    The trigger flow reads ``self._store.require_job(job_id)`` once before
+    acquiring the per-job lock (Gate 1, cheap pre-check that returns 4xx
+    fast without holding the lock) AND again inside the lock (Gate 2,
+    authoritative). Codex 第十五轮 P1 noted that the original PR#3C-a
+    only widened the pre-lock check — a concurrent process_runner write
+    that flipped smart_state.status back to "running" between the two
+    require_job calls would slip past, claiming jianying_draft_status=
+    "running" on an in-flight smart job. Routing both reads through this
+    single helper closes that race.
+    """
+    from services.smart.state import EDITABLE_SERVICE_MODES, is_editable_smart_state
+
+    if job.service_mode not in EDITABLE_SERVICE_MODES:
+        raise JianyingNotAllowedError(
+            "service_mode_not_studio_or_smart",
+            f"Jianying draft is only available for Studio or Smart mode "
+            f"jobs (got {job.service_mode!r}).",
+        )
+    if job.service_mode == "smart" and not is_editable_smart_state(
+        getattr(job, "smart_state", None)
+    ):
+        smart_state = getattr(job, "smart_state", None) or {}
+        smart_status = (
+            smart_state.get("status") if isinstance(smart_state, dict) else None
+        )
+        raise JianyingNotAllowedError(
+            "smart_state_not_editable",
+            f"Smart job smart_state.status={smart_status!r} is not editable; "
+            f"only 'completed' or 'downgraded_to_studio' allow Jianying draft.",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -380,29 +422,11 @@ class JianyingDraftRunner:
 
         job = self._store.require_job(job_id)  # raises KeyError if not found
 
-        # Gate 1: must be a studio OR smart job (smart in completed /
-        # downgraded_to_studio state — see plan §4.3 末段 + §6.6 +
-        # Codex 第二/六轮 F3). Smart audit fact preserved on
-        # service_mode; secondary smart_state check prevents in-flight
-        # smart jobs from sneaking in.
-        from services.smart.state import EDITABLE_SERVICE_MODES, is_editable_smart_state
-
-        if job.service_mode not in EDITABLE_SERVICE_MODES:
-            raise JianyingNotAllowedError(
-                "service_mode_not_studio_or_smart",
-                f"Jianying draft is only available for Studio or Smart mode "
-                f"jobs (got {job.service_mode!r}).",
-            )
-        if job.service_mode == "smart" and not is_editable_smart_state(
-            getattr(job, "smart_state", None)
-        ):
-            smart_state = getattr(job, "smart_state", None) or {}
-            smart_status = smart_state.get("status") if isinstance(smart_state, dict) else None
-            raise JianyingNotAllowedError(
-                "smart_state_not_editable",
-                f"Smart job smart_state.status={smart_status!r} is not editable; "
-                f"only 'completed' or 'downgraded_to_studio' allow Jianying draft.",
-            )
+        # Gate 1 (pre-lock cheap check): service_mode + smart_state must
+        # be in an editable shape. Re-checked inside the lock after
+        # re-read (line ~432); see _check_smart_aware_service_mode_gate
+        # docstring for why the dual check matters.
+        _check_smart_aware_service_mode_gate(job)
 
         # Gate 2: overall job must be succeeded
         if job.status != "succeeded":
@@ -430,6 +454,16 @@ class JianyingDraftRunner:
             # Re-read inside the critical section — another worker may have
             # transitioned state since we read above.
             job = self._store.require_job(job_id)
+
+            # Gate 2 (post-lock authoritative): re-run the smart-aware
+            # gate against the freshly-re-read JobRecord. Closes the
+            # race Codex 第十五轮 P1 called out — a concurrent
+            # process_runner can flip smart_state.status back to
+            # ``running`` / ``clone_blocked_waiting_retry`` between
+            # Gate 1's pre-lock read and this re-read; without Gate 2
+            # the runner would claim jianying_draft_status="running"
+            # on an in-flight smart job.
+            _check_smart_aware_service_mode_gate(job)
 
             # Compute fingerprint up-front. None means we can't form a stable
             # input set (no project_dir / no manifest); caller falls through

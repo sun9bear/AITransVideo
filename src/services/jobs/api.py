@@ -1540,10 +1540,18 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                         )
                         return
                     except JianyingNotAllowedError as exc:
-                        # Should be caught by gates above, but defensive
+                        # Codex 第十五轮 P2: surface the runner's actual
+                        # reason instead of hard-coding the legacy
+                        # "service_mode_not_studio" code. Runner can now
+                        # raise distinct reasons
+                        # (service_mode_not_studio_or_smart /
+                        # smart_state_not_editable) and the front end
+                        # branches on the code — silently re-labelling
+                        # would mislead it. ``exc.reason`` is the
+                        # canonical attribute on JianyingNotAllowedError.
                         self._write_json(
                             HTTPStatus.FORBIDDEN,
-                            {"code": "service_mode_not_studio", "message": str(exc)},
+                            {"code": exc.reason, "message": str(exc)},
                         )
                         return
                     except JianyingEngineUnavailable as exc:
