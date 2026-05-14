@@ -729,6 +729,98 @@ class TestProcessPyStudioGateWidening:
             f"Block:\n{smart_block}"
         )
 
+    def test_b2_stub_clone_provider_routes_to_preset_not_quota_pause(self):
+        """Codex 第十九轮 P1: ``_build_b2_not_wired_clone_provider()``'s
+        exception MUST NOT match auto_voice_review's
+        ``_looks_like_quota_error`` substring heuristic (class name OR
+        str(exc) containing "quota"). If it did, every normal Smart
+        job with consent=True + sample>=10s would hit
+        ``PAUSED/provider_quota_exhausted_mid_flight`` on the first
+        clone attempt and trigger handoff to Studio — instead of the
+        intended ``PRESET/provider_failure_max_retries_3`` after the
+        retry budget exhausts.
+
+        Functional integration: run the actual stub + actual
+        evaluate_voice_review with realistic happy-path inputs
+        (consent True, sample >= 10s, quota plenty) and assert the
+        outcome is AUTO_APPROVED with a PRESET decision."""
+        from pipeline.process import _build_b2_not_wired_clone_provider
+        from services.smart.auto_voice_review import (
+            VoiceReviewChoice,
+            VoiceReviewOutcome,
+            VoiceReviewSpeakerInput,
+            evaluate_voice_review,
+        )
+
+        stub_provider = _build_b2_not_wired_clone_provider()
+        speaker = VoiceReviewSpeakerInput(
+            speaker_id="speaker_a",
+            speaker_name="A",
+            sample_seconds=20.0,  # well past the 10s floor
+            source_audio_path=Path("/tmp/fake_sample.wav"),
+        )
+
+        result = evaluate_voice_review(
+            main_speakers=[speaker],
+            smart_consent={"auto_voice_clone": True},
+            clone_provider=stub_provider,
+            voice_library_quota_remaining=100,  # plenty
+            smart_decision_id_factory=lambda: "dec_001",
+        )
+
+        # CRITICAL: outcome is AUTO_APPROVED, not PAUSED — proving the
+        # stub's exception did NOT trip the quota-error heuristic.
+        assert result.outcome is VoiceReviewOutcome.AUTO_APPROVED, (
+            f"Expected AUTO_APPROVED outcome after retry exhaust → PRESET, "
+            f"got {result.outcome!r} with pause_reason={result.pause_reason!r}. "
+            f"This means the stub's exception was misidentified as a quota "
+            f"error and routed to handoff instead of preset fall-through."
+        )
+        assert len(result.decisions) == 1
+        decision = result.decisions[0]
+        assert decision.choice is VoiceReviewChoice.PRESET, (
+            f"Expected PRESET fall-through after retry exhaust, got "
+            f"{decision.choice!r} with reason={decision.reason_code!r}."
+        )
+        assert decision.reason_code == "provider_failure_max_retries_3", (
+            f"Expected reason ``provider_failure_max_retries_3``, got "
+            f"{decision.reason_code!r}. The retry loop should have exhausted "
+            f"the per-speaker retry budget (default 3 attempts)."
+        )
+
+    def test_b2_stub_clone_provider_exception_message_clean(self):
+        """Defensive: pin the exception class + message contents so a
+        future refactor that "improves" the wording doesn't quietly
+        reintroduce 'quota' / a quota-like class name."""
+        from pathlib import Path as _Path
+        from pipeline.process import _build_b2_not_wired_clone_provider
+
+        stub_provider = _build_b2_not_wired_clone_provider()
+        try:
+            stub_provider.clone_voice(
+                speaker_id="a", speaker_name="A",
+                source_audio_path=_Path("/fake.wav"),
+            )
+        except Exception as exc:
+            raised = exc
+        else:  # pragma: no cover — stub MUST raise
+            raised = None
+
+        assert raised is not None, (
+            "stub MUST raise on clone_voice; never silently return."
+        )
+        # The auto_voice_review heuristic substring-matches lowercased
+        # name + str(exc); both surfaces must avoid "quota".
+        assert "quota" not in type(raised).__name__.lower(), (
+            f"stub exception class name {type(raised).__name__!r} contains "
+            f"'quota' — would trip _looks_like_quota_error."
+        )
+        assert "quota" not in str(raised).lower(), (
+            f"stub exception message {str(raised)!r} contains 'quota' — "
+            f"would trip _looks_like_quota_error and route smart to "
+            f"handoff instead of PRESET fall-through."
+        )
+
     def test_lazy_migration_gate_still_literal_studio(self):
         """The 'rebuild auto_matched_by_provider' lazy migration sits
         inside the user-approved review branch — smart jobs don't reach

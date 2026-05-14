@@ -368,11 +368,19 @@ def _build_b2_not_wired_clone_provider():
     — violating CLAUDE.md "付费 API 不能自动调用 / fallback / 兜底".
 
     The fix routes Smart through a Protocol-conforming stub that raises
-    ``NotImplementedError`` on every ``clone_voice()`` call. The retry
+    ``RuntimeError`` on every ``clone_voice()`` call. The retry
     loop inside ``evaluate_voice_review`` catches the exception, exhausts
     the per-speaker retry budget, and falls through to PRESET. Net effect:
     Smart auto-approve happy path works end-to-end on PRESET decisions,
     no paid API call leaves the box.
+
+    Codex 第十九轮 P1: the raised exception class + message MUST NOT
+    contain the substring "quota" anywhere. auto_voice_review's
+    ``_looks_like_quota_error`` heuristic substring-matches that token
+    in the type name and ``str(exc)``; a stub that accidentally
+    triggered it would route smart to ``PAUSED`` (= handoff) instead
+    of the intended PRESET fall-through, sending every normal smart
+    job through Studio human-review.
 
     PR#3C-b3 replaces this stub with the real
     ``build_smart_clone_provider()`` invocation ONLY when the matching
@@ -395,10 +403,20 @@ def _build_b2_not_wired_clone_provider():
             speaker_name: str,
             source_audio_path: _Path,
         ) -> "_CloneResult":  # type: ignore[name-defined]
-            raise NotImplementedError(
-                "Smart CloneProvider intentionally not wired in PR#3C-b2 — "
-                "per-speaker ffmpeg sample + real quota snapshot land in "
-                "PR#3C-b3. Auto-route to PRESET via the retry-exhaust path."
+            # Codex 第十九轮 P1: exception type AND message must NOT
+            # contain the substring "quota" — auto_voice_review's
+            # ``_looks_like_quota_error`` heuristic substring-matches
+            # the exception name + str(exc) and would route here to
+            # ``PAUSED/provider_quota_exhausted_mid_flight`` instead of
+            # ``PRESET/provider_failure_max_retries_N``. Use RuntimeError
+            # (no "quota" in class name) + message wording that talks
+            # about account snapshot wiring without ever saying
+            # "quota". Confirmed by
+            # test_b2_stub_clone_provider_routes_to_preset_not_quota_pause
+            # in test_smart_studio_gate_acceptance.py.
+            raise RuntimeError(
+                "Smart CloneProvider intentionally not wired in PR#3C-b2; "
+                "per-speaker sample and account snapshot land in PR#3C-b3."
             )
 
     return _B2NotWiredCloneProvider()
