@@ -422,6 +422,63 @@ def _build_b2_not_wired_clone_provider():
     return _B2NotWiredCloneProvider()
 
 
+def _fetch_smart_user_voice_quota_remaining(user_id: str) -> int | None:
+    """Query Gateway internal endpoint for the per-user voice library quota.
+
+    Returns ``remaining`` (int) on success, ``None`` on any failure.
+
+    Codex 第二十七轮 P0 atomic contract (PR#3C-b3e): smart auto-clone
+    only fires when this returns a real integer. ``None`` triggers
+    fail-closed handoff in the caller — the real provider must never
+    see a placeholder value.
+
+    Implementation:
+      - GET http://127.0.0.1:8880/api/internal/user-voices/quota?user_id=<uuid>
+      - X-Internal-Key from AVT_INTERNAL_API_KEY env (must be set; the
+        Caddyfile @internal_block blocks unauthenticated calls)
+      - 3s timeout (matches other internal lookups in
+        ``services/tts/voice_speed_catalog.py``)
+      - Catches ANY exception (network / auth / parse) → returns None
+        so the caller routes through fail-closed handoff
+      - On HTTP 200, reads ``remaining`` from JSON body. Validates it's
+        a non-negative int.
+
+    The Gateway endpoint (``user_voice_api.internal_user_voice_quota``)
+    computes ``remaining = max(0, smart_user_voice_clone_cap - used)``
+    where ``used`` is the count of non-expired UserVoice rows for the
+    user. Both halves are admin-tunable (cap via admin_settings.json,
+    used via the natural CRUD).
+    """
+    import os
+    import requests  # type: ignore[import-not-found]
+
+    user_id = (user_id or "").strip()
+    if not user_id:
+        return None
+    api_key = os.environ.get("AVT_INTERNAL_API_KEY", "").strip()
+    if not api_key:
+        # No internal key → can't authenticate. Treat as quota
+        # unavailable; caller will fail-closed handoff.
+        return None
+    try:
+        resp = requests.get(
+            "http://127.0.0.1:8880/api/internal/user-voices/quota",
+            params={"user_id": user_id},
+            headers={"X-Internal-Key": api_key},
+            timeout=3.0,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+    except Exception:
+        return None
+
+    remaining = data.get("remaining")
+    if not isinstance(remaining, int) or remaining < 0:
+        return None
+    return remaining
+
+
 def _is_valid_speaker_id(value: object) -> bool:
     return isinstance(value, str) and _SPEAKER_ID_PATTERN.match(value.strip()) is not None
 
@@ -2470,39 +2527,30 @@ class ProcessPipeline:
                     # eligibility gate marked "main configured dubbing
                     # speakers" per plan §6.1 reach evaluate_voice_review.
                     #
-                    # Codex 第二十轮 three-piece contract:
+                    # Codex 第二十轮 three-piece contract, fully landed
+                    # at PR#3C-b3e:
                     # 1. Real per-speaker ffmpeg sample (VoiceSampleExtractor)
+                    #    + validate_sample() + duration ≥10s gate (b3d)
                     # 2. Real voice_library_quota_remaining snapshot
-                    # 3. Real CloneProvider (build_smart_clone_provider)
+                    #    (Gateway internal endpoint, b3e)
+                    # 3. Real CloneProvider (build_smart_clone_provider, b3e)
                     #
-                    # All three must be wired before the smart path can
-                    # actually clone in production:
-                    # - Real provider + stub samples (whole-file path) would
-                    #   burn paid clone API on the wrong audio.
-                    # - Real provider + placeholder quota would blow past
-                    #   user's MiniMax personal library cap (the provider's
-                    #   error is reactive, the §7.3 brake is preventive).
+                    # All three are now wired. Safety chain for any real
+                    # MiniMax clone API call:
+                    #   - consent.auto_voice_clone is True (strict identity)
+                    #   - _smart_sample_extraction_error is None (real
+                    #     per-speaker WAV ≥10s on disk)
+                    #   - _smart_quota_remaining is a real int from
+                    #     Gateway, ≥ §7.3 water mark (default 3)
+                    # Each layer fail-closed handoffs to Studio when not
+                    # satisfied — the real provider only sees clean inputs.
                     #
-                    # Current state (PR#3C-b3d, after 第二十七轮 P0 revert):
-                    # - Piece 1 LANDED: per-speaker ffmpeg sample below.
-                    # - Piece 1+ LANDED: validate_sample() + duration ≥10s
-                    #   gate (第二十七轮 P1) + validated duration →
-                    #   sample_seconds.
-                    # - Piece 2 PENDING: ``_smart_quota_remaining = 100``
-                    #   is a documented placeholder. Real quota comes
-                    #   from a Gateway internal endpoint that lands in
-                    #   PR#3C-b3e.
-                    # - Piece 3 PENDING: ``_smart_clone_provider`` is the
-                    #   b2 fail-closed stub. Real provider via
-                    #   build_smart_clone_provider() lands in PR#3C-b3e
-                    #   AT THE SAME COMMIT as Piece 2.
-                    #
-                    # b3e atomic invariant: ``_smart_quota_remaining = 100``
-                    # AND ``_build_b2_not_wired_clone_provider()`` must
-                    # both be replaced in a single commit. The regression
-                    # test test_b3d_quota_signal_still_a_placeholder_pending_b3e
-                    # locks this invariant — when b3e flips one without
-                    # the other, the test fails.
+                    # b3e atomic invariant (Codex 第二十七轮 P0): the real
+                    # quota helper call AND build_smart_clone_provider()
+                    # must coexist in the smart inline branch. The
+                    # regression test
+                    # test_b3e_atomic_invariant_quota_and_provider_move_together
+                    # locks this so a partial revert fails the test.
 
                     # ── Piece 1: extract per-speaker clone sample ──
                     #
@@ -2700,46 +2748,82 @@ class ProcessPipeline:
 
                     # ── Piece 2: voice_library_quota_remaining snapshot ──
                     #
-                    # MVP value: 100 — high enough that the plan §7.3
-                    # water-mark brake (default 3) never trips for the
-                    # ≤3 main speakers Smart will clone in a single job.
-                    # The brake's REAL purpose is "stop smart when user's
-                    # MiniMax personal voice library is near its account
-                    # cap"; that needs a Gateway internal endpoint
-                    # (GET /api/internal/user-voices/quota) +
-                    # admin-configured per-user cap which lands in
-                    # PR#3C-b3e.
+                    # PR#3C-b3e (Codex 第二十七轮 P0 atomic): query the
+                    # Gateway internal endpoint
+                    # ``/api/internal/user-voices/quota?user_id=<uuid>``
+                    # for the real per-user voice library headroom
+                    # (admin_settings.smart_user_voice_clone_cap minus
+                    # the user's current non-expired UserVoice count).
+                    # Helper returns None on any failure (network / auth
+                    # / parse) → smart fail-closed handoffs below
+                    # BEFORE invoking the real provider.
                     #
-                    # Codex 第二十七轮 P0: a placeholder 100 + real
-                    # provider would silently bypass §7.3 water mark
-                    # in production. Even if a single job clones ≤3
-                    # main speakers, a user whose MiniMax library is
-                    # near its account cap would still pay for the
-                    # provider's quota-exhaustion error. The provider's
-                    # error is reactive (charged after the call); the
-                    # brake is preventive (no call at all). They are
-                    # not equivalent.
-                    _smart_quota_remaining = 100
+                    # Smart caps main speakers at 3 (eligibility gate);
+                    # plan §7.3 water mark is 3. Smart will trip the
+                    # brake when ``remaining <= 3``, which means a user
+                    # at 27/30 voices would hand off to Studio instead
+                    # of growing the library to 30+. The brake is
+                    # PREVENTIVE (no call) — not the provider's
+                    # REACTIVE quota-exhaustion error.
+                    _smart_quota_remaining = (
+                        _fetch_smart_user_voice_quota_remaining(
+                            str(_snap("user_id") or "")
+                        )
+                    )
+                    if _smart_quota_remaining is None:
+                        # Fail-closed: quota unknown → handoff to Studio.
+                        # User can re-attempt via the explicit "克隆音色"
+                        # button in Studio (which uses Gateway-tracked
+                        # capture+reserve credit logic separately).
+                        emit_handoff_markers(
+                            review_state_manager=review_state_manager,
+                            review_stage=VOICE_SELECTION_REVIEW_STAGE,
+                            review_payload=vs_payload,
+                            review_pending_status=REVIEW_STATUS_PENDING,
+                            smart_state_update={
+                                "status": "downgraded_to_studio",
+                                "reason": "voice_library_quota_unavailable",
+                                "handoff_stage": VOICE_SELECTION_REVIEW_STAGE,
+                            },
+                            project_dir=final_project_dir,
+                            user_message=(
+                                "智能版无法读取音色库容量,请人工接管"
+                            ),
+                            web_review_marker_builder=self._build_web_review_marker,
+                        )
+                        state_manager.set_stage(
+                            "voice_selection",
+                            StageStatus.RUNNING,
+                            {"execution_mode": "smart_handoff_quota_unavailable"},
+                        )
+                        current_stage_name = None
+                        _write_usage_summary(usage_meter)
+                        return self._build_paused_result(
+                            project_dir=final_project_dir,
+                            stage=VOICE_SELECTION_REVIEW_STAGE,
+                            message="智能版无法读取音色库容量",
+                        )
 
-                    # ── Piece 3: CloneProvider ──
+                    # ── Piece 3: real CloneProvider ──
                     #
-                    # Per Codex 第二十七轮 P0: real provider stays GATED
-                    # until real quota signal is wired alongside it (the
-                    # three-piece contract). For b3d we keep the b2
-                    # fail-closed stub here — its exception triggers
-                    # PRESET fall-through inside evaluate_voice_review,
-                    # so the smart job still completes end-to-end with
-                    # preset voices instead of cloned ones. When b3e
-                    # lands real quota, this line flips to
-                    # ``build_smart_clone_provider()`` in the same commit.
-                    #
-                    # The b3d work that already landed and STAYS:
-                    #   - per-speaker ffmpeg sample extraction (Piece 1)
-                    #   - validate_sample() + duration ≥10s gate (P1)
-                    #   - validated duration → sample_seconds (P1)
-                    # When b3e lands real quota + real provider together,
-                    # these pieces are immediately usable — no rework.
-                    _smart_clone_provider = _build_b2_not_wired_clone_provider()
+                    # PR#3C-b3e atomic flip — Piece 2 is now real
+                    # (Gateway quota above); Piece 1 + sample validation
+                    # are already real (PR#3C-b3d). Safety chain for
+                    # any real API call:
+                    #   1. consent.auto_voice_clone is True (strict
+                    #      identity check above gates sample extraction)
+                    #   2. _smart_sample_extraction_error is None
+                    #      (real per-speaker WAV ≥10s exists on disk)
+                    #   3. _smart_quota_remaining is a real integer
+                    #      ≥ water_mark (preventive §7.3 brake)
+                    # When all three hold, ``build_smart_clone_provider()``
+                    # returns the real _MiniMaxCloneAdapter from
+                    # smart_wiring (or the test-injected fake via
+                    # inject_for_test).
+                    from services.smart_wiring import (
+                        build_smart_clone_provider,
+                    )
+                    _smart_clone_provider = build_smart_clone_provider()
 
                     _smart_voice_review = evaluate_voice_review(
                         main_speakers=_smart_main_speakers,

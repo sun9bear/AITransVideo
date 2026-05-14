@@ -663,13 +663,11 @@ class TestProcessPyStudioGateWidening:
             "emit_handoff_markers",
             "REVIEW_STATUS_APPROVED",
             "emit_smart_state_marker",
-            # Codex 第十八轮 P0-2 (rescoped at 第二十七轮 P0): smart path
-            # uses the b2 fail-closed stub UNTIL real quota signal lands
-            # in PR#3C-b3e. b3d only landed Piece 1 + sample validation;
-            # Piece 2 (real quota) + Piece 3 (real provider) move
-            # together in a single follow-up commit so the §7.3 water
-            # mark stays active in production.
-            "_build_b2_not_wired_clone_provider",
+            # PR#3C-b3e (Codex 第二十八轮 atomic flip): smart path
+            # uses the REAL CloneProvider via smart_wiring, paired
+            # with the real Gateway quota helper. Pre-b3e this was
+            # the b2 fail-closed stub.
+            "build_smart_clone_provider",
             # Codex 第十八轮 P1-1: clone vendor recorded as audit, not as
             # TTS provider override
             "_sp_entry[\"clone_provider\"]",
@@ -680,11 +678,12 @@ class TestProcessPyStudioGateWidening:
                 f"contract relies on it. Block:\n{smart_block}"
             )
 
-        # PR#3C-b3d landed pieces (Codex 第二十七轮 narrowed scope):
-        #   - Piece 1: per-speaker ffmpeg sample (VoiceSampleExtractor)
-        #   - P1: sample validation (validate_sample) + duration ≥10s
-        #   - P1: validated duration → sample_seconds
-        # Piece 2 (real quota) + Piece 3 (real provider) deferred to b3e.
+        # PR#3C-b3e three-piece atomic contract (Codex 第二十/二十七/二十八轮):
+        #   - Piece 1: per-speaker ffmpeg sample (b3d)
+        #   - P1: sample validation + duration gate (b3d, Codex 第二十七轮)
+        #   - Piece 2: real quota via Gateway internal endpoint (b3e)
+        #   - Piece 3: real CloneProvider via smart_wiring (b3e)
+        # Pieces 2 + 3 MUST move together — Codex 第二十七轮 P0 invariant.
         for required_piece in (
             # Piece 1: per-speaker ffmpeg sample
             "VoiceSampleExtractor(",
@@ -694,45 +693,35 @@ class TestProcessPyStudioGateWidening:
             ".validate_sample(",
             "MIN_SAMPLE_DURATION_SECONDS",
             "_smart_per_speaker_sample_seconds",
-            # Piece 2 placeholder: still named variable so b3e swap is
-            # a one-line change at the assignment.
-            "_smart_quota_remaining",
+            # Piece 2: real quota helper
+            "_fetch_smart_user_voice_quota_remaining",
+            # Piece 3: real CloneProvider
+            "from services.smart_wiring import",
+            "build_smart_clone_provider()",
         ):
             assert required_piece in smart_block, (
-                f"smart branch missing PR#3C-b3d component "
-                f"{required_piece!r}. Codex 第二十七轮: Piece 1 (per-speaker "
-                f"sample) + P1 (validate_sample + duration gate) must "
-                f"land at b3d so b3e can drop in real quota + provider "
-                f"without rework.\n"
-                f"Block:\n{smart_block[:2500]}"
+                f"smart branch missing three-piece component "
+                f"{required_piece!r}. Codex 第二十七轮 P0 atomic invariant: "
+                f"real quota helper + real CloneProvider must coexist "
+                f"in the smart inline branch; one without the other "
+                f"silently bypasses §7.3 water mark in production.\n"
+                f"Block:\n{smart_block[:3500]}"
             )
 
-        # PR#3C-b3d (Codex 第二十七轮 P0): smart path MUST NOT import
-        # the real ``build_smart_clone_provider`` until Piece 2 (real
-        # quota) lands. Importing it here would tempt a future
-        # one-line swap that re-opens the placeholder-quota leak.
-        for forbidden in (
-            "from services.smart_wiring import build_smart_clone_provider",
-            "from services.smart_wiring import (\n                        build_smart_clone_provider",
-            "_smart_clone_provider = build_smart_clone_provider()",
-        ):
-            assert forbidden not in smart_block, (
-                "Smart branch re-imported / called the real CloneProvider — "
-                "PR#3C-b3e is responsible for swapping the stub for the "
-                "real adapter AT THE SAME TIME as real quota lands. "
-                "Codex 第二十七轮 P0: real provider + placeholder quota "
-                "silently bypasses §7.3 water mark in production.\n"
-                f"Found forbidden: {forbidden!r}"
-            )
-
-        # Verify the stub is still wired.
+        # PR#3C-b3e (Codex 第二十七轮 P0 inverted at b3e): smart branch
+        # MUST NOT use the b2 fail-closed stub here. Stub stays at
+        # module level for test_b2_stub_clone_provider_* tests but the
+        # production smart path now goes through the real provider.
         assert (
             "_smart_clone_provider = _build_b2_not_wired_clone_provider()"
-            in smart_block
+            not in smart_block
         ), (
-            "Smart branch should wire ``_build_b2_not_wired_clone_provider()`` "
-            "until b3e — Codex 第二十七轮 P0 reverted b3d's premature real "
-            "provider hookup.\n"
+            "Smart inline branch still wires the b2 fail-closed stub — "
+            "PR#3C-b3e atomic flip should replace it with "
+            "build_smart_clone_provider() ALONGSIDE the real quota "
+            "helper. If you need to revert to stub for safety reasons, "
+            "also revert the quota helper so Codex 第二十七轮 P0 atomic "
+            "invariant holds.\n"
             f"Block:\n{smart_block[:2000]}"
         )
 
@@ -1610,6 +1599,70 @@ class TestProcessPyStudioGateWidening:
             "``voice_library_quota_remaining=_smart_quota_remaining``. "
             "Magic-number values at the call site obscure b3e migration.\n"
             f"Call window:\n{eval_window}"
+        )
+
+    def test_b3e_quota_unavailable_short_circuits_handoff(self):
+        """PR#3C-b3e contract: when ``_fetch_smart_user_voice_quota_remaining``
+        returns None (network / auth / parse failure), smart MUST
+        handoff to Studio BEFORE invoking the real provider. Codex
+        第二十七轮 P0: any path that lets the real provider run with
+        unknown quota is forbidden.
+
+        Pin the source-level structure:
+          - quota helper return value checked against None
+          - on None: emit_handoff_markers + paused-return BEFORE the
+            real CloneProvider import
+          - reason_code: voice_library_quota_unavailable
+        """
+        smart_block = _find_anchor_block(
+            self._source(),
+            "Smart inline auto-approve path",
+            window=550,
+        )
+
+        # Quota check is in the branch.
+        helper_idx = smart_block.find(
+            "_fetch_smart_user_voice_quota_remaining("
+        )
+        assert helper_idx >= 0, (
+            "Smart branch missing call to "
+            "_fetch_smart_user_voice_quota_remaining. PR#3C-b3e Piece 2."
+        )
+
+        # The branch checks for None and short-circuits BEFORE importing
+        # the real provider.
+        none_check_idx = smart_block.find("if _smart_quota_remaining is None:")
+        assert none_check_idx >= 0, (
+            "Smart branch missing ``if _smart_quota_remaining is None:`` "
+            "fail-closed check. Codex 第二十七轮 P0: unknown quota MUST "
+            "route to handoff, not default to a permissive value.\n"
+            f"Block (first 3000 chars):\n{smart_block[:3000]}"
+        )
+
+        # The None branch must include handoff + reason code BEFORE the
+        # real provider import.
+        none_branch = smart_block[none_check_idx : none_check_idx + 2000]
+        for required in (
+            "emit_handoff_markers(",
+            "voice_library_quota_unavailable",
+            "self._build_paused_result(",
+        ):
+            assert required in none_branch, (
+                f"Quota-unavailable branch missing required {required!r}.\n"
+                f"Branch:\n{none_branch}"
+            )
+
+        # The real provider import must appear AFTER the None check, not
+        # before. If a future refactor moves it above, the gate is gone.
+        import_idx = smart_block.find(
+            "from services.smart_wiring import"
+        )
+        assert import_idx > none_check_idx, (
+            "services.smart_wiring is imported BEFORE the quota None "
+            "check — that defeats the fail-closed gate. The import + "
+            "real CloneProvider call must live AFTER the quota check.\n"
+            f"smart_wiring import at offset {import_idx}; "
+            f"quota None check at offset {none_check_idx}."
         )
 
     def test_b3d_sample_validation_after_extract(self):

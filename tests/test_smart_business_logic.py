@@ -1587,18 +1587,15 @@ class TestB3DCloneSampleExtractorContract:
             except OSError:
                 pass
 
-    def test_b3d_quota_signal_still_a_placeholder_pending_b3e(self):
-        """Codex 第二十七轮 P0 documented gate: ``_smart_quota_remaining =
-        100`` is still a placeholder at b3d (not a real user-voices
-        count). The real quota signal must land alongside the real
-        provider in PR#3C-b3e to preserve §7.3 water mark in production.
+    def test_b3e_atomic_invariant_quota_and_provider_move_together(self):
+        """Codex 第二十七轮 P0 atomic invariant (now reverse-asserted at
+        b3e): Pieces 2 (real quota) + 3 (real provider) MUST coexist.
 
-        This test pins the temporary-placeholder state so a future PR
-        that tries to swap in the real provider WITHOUT real quota
-        fails this test instead of silently re-opening Codex 第二十七轮
-        P0. When b3e lands real quota + real provider together, update
-        this test (or remove if its contract is folded into b3e's
-        anchor tests)."""
+        Pre-b3e (b3d) this test asserted both placeholders coexisted.
+        At b3e both should be real. The invariant is: if one is real
+        and the other isn't, this test fails — protecting against a
+        future PR that partially reverts only one half.
+        """
         from pathlib import Path
 
         src = Path(__file__).resolve().parents[1] / "src" / "pipeline" / "process.py"
@@ -1606,31 +1603,219 @@ class TestB3DCloneSampleExtractorContract:
         idx = source.find("Smart inline auto-approve path")
         assert idx >= 0
         # Walk ~550 lines (matches anchor tests in
-        # test_smart_studio_gate_acceptance.py — bumped from 500 after
-        # b3d/b3e comment expansion).
+        # test_smart_studio_gate_acceptance.py).
         lines = source[idx:].splitlines()
         block = "\n".join(lines[:550])
 
-        # Pin the placeholder value.
-        assert "_smart_quota_remaining = 100" in block, (
-            "_smart_quota_remaining placeholder is no longer literal "
-            "100 — if you swapped in a real signal, also confirm Piece "
-            "3 (real CloneProvider) landed in the same commit. "
-            "Codex 第二十七轮 P0: stub provider + real quota is "
-            "harmless (overly conservative); real provider + stub "
-            "quota silently bypasses §7.3 water mark in production."
+        # Piece 2 (real quota): helper must be referenced; placeholder
+        # literal must NOT appear inside the smart inline branch.
+        assert "_fetch_smart_user_voice_quota_remaining(" in block, (
+            "Smart branch no longer calls "
+            "_fetch_smart_user_voice_quota_remaining — Piece 2 (real "
+            "quota) reverted to a placeholder. Codex 第二十七轮 P0: "
+            "if you re-introduce a static quota, also revert Piece 3 "
+            "(real CloneProvider) in the same commit so the §7.3 brake "
+            "isn't silently bypassed in production.\n"
+            f"Block (first 3000 chars):\n{block[:3000]}"
+        )
+        assert "_smart_quota_remaining = 100" not in block, (
+            "Smart branch contains the literal 100 placeholder for "
+            "_smart_quota_remaining inside the inline auto-approve "
+            "branch. PR#3C-b3e: this must be replaced by the real "
+            "Gateway quota helper. If you intentionally reverted, "
+            "also revert Piece 3 (real CloneProvider) at the same time."
         )
 
-        # The stub provider call site must still be the one wired
-        # (until b3e flips both).
+        # Piece 3 (real provider): the call to
+        # build_smart_clone_provider() must be wired; the b2 stub call
+        # must NOT be in the smart branch.
+        assert "build_smart_clone_provider()" in block, (
+            "Smart branch no longer calls build_smart_clone_provider() "
+            "— Piece 3 (real CloneProvider) reverted. Codex 第二十七轮 "
+            "P0 atomic invariant: if you revert Piece 3 to the stub, "
+            "also revert Piece 2 (real quota) so the combination stays "
+            "either fully-real or fully-stub.\n"
+            f"Block (first 3000 chars):\n{block[:3000]}"
+        )
         assert (
             "_smart_clone_provider = _build_b2_not_wired_clone_provider()"
-            in block
+            not in block
         ), (
-            "Real CloneProvider re-wired without real quota — "
-            "Codex 第二十七轮 P0 forbids this combination. b3e must "
-            "land both pieces in one commit."
+            "Smart branch still wires _build_b2_not_wired_clone_provider() "
+            "after PR#3C-b3e — Piece 3 wasn't flipped. Codex 第二十七轮 P0 "
+            "atomic invariant: replace BOTH Piece 2 (quota) and Piece 3 "
+            "(provider) together, or revert BOTH together."
         )
+
+        # Fail-closed branch: quota=None must short-circuit to handoff
+        # BEFORE invoking the real provider.
+        assert "voice_library_quota_unavailable" in block, (
+            "Smart branch missing the fail-closed handoff for quota "
+            "lookup failure. PR#3C-b3e contract: if "
+            "_fetch_smart_user_voice_quota_remaining returns None "
+            "(network / auth / parse failure), smart MUST handoff "
+            "with reason='voice_library_quota_unavailable' BEFORE "
+            "importing or calling the real provider.\n"
+            f"Block (first 3000 chars):\n{block[:3000]}"
+        )
+
+    def test_b3e_quota_helper_returns_none_on_no_api_key(self, monkeypatch):
+        """Codex 第二十七轮 P0 fail-closed: when AVT_INTERNAL_API_KEY is
+        unset/empty, the quota helper MUST return None so the caller
+        treats quota as unavailable and routes to handoff. Returning a
+        permissive default (e.g. 100) would silently let the real
+        provider fire."""
+        from pipeline.process import _fetch_smart_user_voice_quota_remaining
+
+        monkeypatch.delenv("AVT_INTERNAL_API_KEY", raising=False)
+        assert _fetch_smart_user_voice_quota_remaining("some-user-uuid") is None
+
+        monkeypatch.setenv("AVT_INTERNAL_API_KEY", "")
+        assert _fetch_smart_user_voice_quota_remaining("some-user-uuid") is None
+
+        # Whitespace-only key is also "unset" semantically.
+        monkeypatch.setenv("AVT_INTERNAL_API_KEY", "   ")
+        assert _fetch_smart_user_voice_quota_remaining("some-user-uuid") is None
+
+    def test_b3e_quota_helper_returns_none_on_empty_user_id(self, monkeypatch):
+        """Empty user_id can't be validly looked up — fail-closed
+        instead of issuing a query that would 400 from Gateway."""
+        from pipeline.process import _fetch_smart_user_voice_quota_remaining
+
+        monkeypatch.setenv("AVT_INTERNAL_API_KEY", "test-key")
+
+        assert _fetch_smart_user_voice_quota_remaining("") is None
+        assert _fetch_smart_user_voice_quota_remaining(None) is None  # type: ignore[arg-type]
+        assert _fetch_smart_user_voice_quota_remaining("   ") is None
+
+    def test_b3e_quota_helper_returns_remaining_on_success(self, monkeypatch):
+        """Happy path: Gateway returns 200 + {remaining: N} → helper
+        returns N. Pin the field name + value extraction."""
+        from pipeline import process as process_module
+        from pipeline.process import _fetch_smart_user_voice_quota_remaining
+
+        monkeypatch.setenv("AVT_INTERNAL_API_KEY", "test-key")
+
+        class _FakeResp:
+            status_code = 200
+
+            def json(self):
+                return {"user_id": "x", "used": 5, "limit": 30, "remaining": 25}
+
+        recorded_calls = []
+
+        def _fake_get(url, *, params=None, headers=None, timeout=None):
+            recorded_calls.append({
+                "url": url, "params": params, "headers": headers,
+                "timeout": timeout,
+            })
+            return _FakeResp()
+
+        # process.py imports requests inside the helper function.
+        import requests as _requests_mod
+        monkeypatch.setattr(_requests_mod, "get", _fake_get)
+
+        result = _fetch_smart_user_voice_quota_remaining("user-uuid-abc")
+        assert result == 25, (
+            f"Expected helper to return remaining=25; got {result!r}"
+        )
+
+        # Pin the request shape.
+        assert len(recorded_calls) == 1
+        call = recorded_calls[0]
+        assert call["url"] == (
+            "http://127.0.0.1:8880/api/internal/user-voices/quota"
+        )
+        assert call["params"] == {"user_id": "user-uuid-abc"}
+        assert call["headers"] == {"X-Internal-Key": "test-key"}
+        assert call["timeout"] == 3.0
+
+    def test_b3e_quota_helper_returns_none_on_http_error(self, monkeypatch):
+        """Codex 第二十七轮 P0: non-200 response → None → fail-closed
+        handoff at caller. NEVER fall back to a permissive default.
+        """
+        from pipeline.process import _fetch_smart_user_voice_quota_remaining
+
+        monkeypatch.setenv("AVT_INTERNAL_API_KEY", "test-key")
+
+        for bad_status in (400, 401, 403, 404, 500, 502, 503):
+            class _BadResp:
+                def __init__(self, status):
+                    self.status_code = status
+
+                def json(self):
+                    return {"remaining": 999}  # would tempt to use anyway
+
+            def _fake_get(*args, **kwargs):
+                return _BadResp(bad_status)
+
+            import requests as _requests_mod
+            monkeypatch.setattr(_requests_mod, "get", _fake_get)
+            assert _fetch_smart_user_voice_quota_remaining("u") is None, (
+                f"HTTP {bad_status} should yield None (fail-closed); "
+                f"any non-None return tempts the caller to use a stale "
+                f"quota value, re-opening Codex 第二十七轮 P0."
+            )
+
+    def test_b3e_quota_helper_returns_none_on_invalid_remaining(self, monkeypatch):
+        """Defensive: even on HTTP 200, if ``remaining`` field is
+        missing / wrong type / negative, treat as unavailable."""
+        from pipeline.process import _fetch_smart_user_voice_quota_remaining
+
+        monkeypatch.setenv("AVT_INTERNAL_API_KEY", "test-key")
+
+        bad_bodies = [
+            {},                              # missing
+            {"remaining": None},             # None
+            {"remaining": "25"},             # string (must be int)
+            {"remaining": -5},               # negative
+            {"remaining": 25.5},             # float
+            {"remaining": [25]},             # list
+        ]
+        for body in bad_bodies:
+            class _Resp:
+                status_code = 200
+
+                def json(self, _b=body):
+                    return _b
+
+            def _fake_get(*args, **kwargs):
+                return _Resp()
+
+            import requests as _requests_mod
+            monkeypatch.setattr(_requests_mod, "get", _fake_get)
+            assert _fetch_smart_user_voice_quota_remaining("u") is None, (
+                f"Invalid remaining payload {body!r} should yield None — "
+                f"caller routes to handoff. Codex 第二十七轮 P0."
+            )
+
+    def test_b3e_quota_helper_returns_none_on_network_exception(self, monkeypatch):
+        """ANY exception during HTTP / JSON parse → None.
+        Network blip should never cause the real provider to fire."""
+        from pipeline.process import _fetch_smart_user_voice_quota_remaining
+
+        monkeypatch.setenv("AVT_INTERNAL_API_KEY", "test-key")
+
+        class _ExcResp:
+            status_code = 200
+
+            def json(self):
+                raise ValueError("malformed JSON")
+
+        def _fake_get_raises(*args, **kwargs):
+            raise ConnectionError("network down")
+
+        def _fake_get_bad_json(*args, **kwargs):
+            return _ExcResp()
+
+        import requests as _requests_mod
+        # Network error
+        monkeypatch.setattr(_requests_mod, "get", _fake_get_raises)
+        assert _fetch_smart_user_voice_quota_remaining("u") is None
+
+        # JSON parse error
+        monkeypatch.setattr(_requests_mod, "get", _fake_get_bad_json)
+        assert _fetch_smart_user_voice_quota_remaining("u") is None
 
     def test_b3d_consent_false_skips_provider_call_entirely(self):
         """Regression — when consent is False (default for non-clone

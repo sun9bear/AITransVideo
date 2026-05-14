@@ -699,6 +699,80 @@ async def internal_lookup_user_voices_by_ids(
     })
 
 
+@internal_router.get("/user-voices/quota")
+async def internal_user_voice_quota(
+    request: Request,
+    user_id: str = Query(..., description="Owning user UUID"),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Per-user voice-library quota for Smart MVP §7.3 water-mark brake.
+
+    Returns ``{user_id, used, limit, remaining}``:
+      - ``used``      — count of non-expired UserVoice rows for this user
+      - ``limit``     — admin_settings.smart_user_voice_clone_cap (default 30)
+      - ``remaining`` — max(0, limit - used)
+
+    Consumed by ``src/pipeline/process.py`` smart inline auto-approve
+    branch (PR#3C-b3e): the snapshot is passed to
+    ``evaluate_voice_review.voice_library_quota_remaining`` which
+    decrements locally per clone attempt and trips PAUSED when
+    reaching the water mark (default 3). On the GW side we compute
+    only the static facts; the brake logic stays in the smart module.
+
+    Fail-closed contract (Codex 第二十七轮 P0): when this endpoint is
+    unreachable / errors / returns invalid data, the caller (process.py
+    helper) MUST treat that as "quota unavailable" → handoff to Studio,
+    rather than defaulting to a permissive constant. Real provider +
+    placeholder quota silently bypasses §7.3.
+    """
+    internal_error = _internal_access_error(request)
+    if internal_error is not None:
+        return internal_error
+
+    uid = (user_id or "").strip()
+    if not uid:
+        return _json(400, {"error": "user_id_required"})
+
+    try:
+        user_uuid = uuid.UUID(uid)
+    except (ValueError, AttributeError):
+        return _json(400, {"error": "invalid_user_id"})
+
+    # Count non-expired UserVoice rows for this user.
+    # NB: include voices regardless of provider — soft cap is for the
+    # WHOLE library (smart only ever clones via MiniMax today, but a
+    # future user could mix providers and the cap should still hold).
+    from sqlalchemy import func
+
+    used_count_q = select(func.count()).select_from(UserVoice).where(
+        UserVoice.user_id == user_uuid,
+        UserVoice.expired_at.is_(None),
+    )
+    result = await db.execute(used_count_q)
+    used = int(result.scalar() or 0)
+
+    # Read admin cap. Falls back to AdminSettings default (30) if the
+    # config file is missing or corrupt.
+    try:
+        from admin_settings import load_settings
+        admin = load_settings()
+        limit = int(admin.smart_user_voice_clone_cap)
+    except Exception as exc:
+        logger.warning(
+            "Failed to load smart_user_voice_clone_cap from admin_settings: %s",
+            exc,
+        )
+        limit = 30  # AdminSettings default
+
+    remaining = max(0, limit - used)
+    return _json(200, {
+        "user_id": str(user_uuid),
+        "used": used,
+        "limit": limit,
+        "remaining": remaining,
+    })
+
+
 @internal_router.post("/user-voices/speed-profiles")
 async def internal_ingest_user_voice_speed_profiles(
     request: Request,

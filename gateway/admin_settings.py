@@ -119,6 +119,15 @@ class AdminSettings(BaseModel):
     whisper_alignment_trigger: str = "deliverable"
     whisper_alignment_skip_cache: bool = False
     whisper_alignment_model: str = "small"
+    # --- Smart MVP P2 (PR#3C-b3e, 2026-05-14) ---
+    # Per-user cap on cloned voices stored in MiniMax personal library.
+    # Drives the `voice_library_quota_remaining` snapshot Smart's
+    # auto_voice_review consumes (plan §7.3 N=3 water mark). MiniMax's
+    # actual account-level limit is opaque to us; this is an admin-
+    # tunable soft cap so smart auto-clone refuses to keep filling the
+    # user's library beyond a chosen threshold. Default 30 mirrors
+    # MiniMax's commonly-stated per-account voice quota.
+    smart_user_voice_clone_cap: int = 30
 
     @field_validator("whisper_alignment_trigger")
     @classmethod
