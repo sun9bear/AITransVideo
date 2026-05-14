@@ -821,6 +821,115 @@ class TestProcessPyStudioGateWidening:
             f"handoff instead of PRESET fall-through."
         )
 
+    def test_terminal_marker_helper_emits_completed_for_smart(self, capsys):
+        """Plan §4.3 mapping + §6.0.5 + Codex 第二十轮 — PR#3C-b3a.
+
+        Pipeline's happy-path terminal must emit
+        ``{"status": "completed", "credits_policy": "capture_full"}``
+        for smart jobs so:
+          - editing.py / jianying gates admit the job into post-edit
+            (smart_state.status must be in EDITABLE_SERVICE_MODES)
+          - credits_service settle dispatcher routes through
+            smart_capture_full (credits_policy must be populated)
+
+        Unit-test the helper directly via SimpleNamespace so we don't
+        have to spin up the full pipeline."""
+        from pipeline.process import ProcessPipeline as _PP
+        from services.smart.state import parse_smart_state_marker
+
+        # Build a minimal instance — only the attribute the helper reads.
+        # SimpleNamespace works because the helper accesses
+        # self._current_service_mode (no other state) — duck typing.
+        class _Stub:
+            _current_service_mode = "smart"
+
+            _emit_smart_terminal_completion_marker = (
+                _PP._emit_smart_terminal_completion_marker
+            )
+
+        _Stub()._emit_smart_terminal_completion_marker()
+        captured = capsys.readouterr().out
+        markers = [
+            parse_smart_state_marker(line)
+            for line in captured.splitlines()
+            if line.startswith("[SMART_STATE]")
+        ]
+        non_none = [m for m in markers if m is not None]
+        assert len(non_none) == 1, (
+            f"Expected exactly one [SMART_STATE] marker emit; got "
+            f"{len(non_none)}.\nCaptured stdout:\n{captured}"
+        )
+        marker = non_none[0]
+        assert marker == {
+            "status": "completed",
+            "credits_policy": "capture_full",
+        }, f"Terminal marker payload drifted: {marker!r}"
+
+    def test_terminal_marker_helper_noop_for_non_smart_modes(self, capsys):
+        """Defensive: terminal helper must be a no-op for studio /
+        express / unknown modes. Emitting a smart terminal marker on
+        a non-smart job would corrupt JobRecord.smart_state for a job
+        that should never carry one."""
+        from pipeline.process import ProcessPipeline as _PP
+
+        for mode in ("studio", "express", None, ""):
+            class _Stub:
+                _current_service_mode = mode
+                _emit_smart_terminal_completion_marker = (
+                    _PP._emit_smart_terminal_completion_marker
+                )
+
+            capsys.readouterr()  # clear
+            _Stub()._emit_smart_terminal_completion_marker()
+            captured = capsys.readouterr().out
+            assert "[SMART_STATE]" not in captured, (
+                f"Non-smart mode {mode!r} unexpectedly emitted a terminal "
+                f"smart marker:\n{captured}"
+            )
+
+    def test_terminal_marker_call_sites_wired_at_both_happy_path_returns(self):
+        """Anchor-based: both happy-path ProcessResult returns in
+        run() and the resume-publish-only path MUST call
+        ``_emit_smart_terminal_completion_marker`` before returning.
+
+        Without the wiring at both sites, smart jobs that complete
+        normally (run path) OR via commit copy_as_new / overwrite
+        (resume-publish-only path) would never get the editable
+        terminal status, and editing/jianying/settle would all
+        misbehave per the helper docstring."""
+        source = self._source()
+        # The helper is called immediately before each ProcessResult
+        # construction. Count the call sites — should be exactly 2
+        # (main run, resume-publish-only).
+        call_count = source.count(
+            "self._emit_smart_terminal_completion_marker()"
+        )
+        assert call_count >= 2, (
+            f"Expected ≥2 call sites for _emit_smart_terminal_completion_marker "
+            f"(main run + resume-publish-only happy-path returns); got "
+            f"{call_count}. Smart jobs that finish via one path but not the "
+            f"other would silently fail editable / settle invariants."
+        )
+        # Defensive: each call must be paired with a ``return ProcessResult(``
+        # within the next ~5 lines (so the marker actually surfaces on the
+        # terminal frame, not buried in some other path).
+        idx = 0
+        paired_calls = 0
+        while True:
+            idx = source.find(
+                "self._emit_smart_terminal_completion_marker()", idx
+            )
+            if idx < 0:
+                break
+            window = source[idx : idx + 500]
+            if "return ProcessResult(" in window:
+                paired_calls += 1
+            idx += 1
+        assert paired_calls >= 2, (
+            f"Helper call sites must be immediately followed by "
+            f"``return ProcessResult(``; got {paired_calls} pairings."
+        )
+
     def test_lazy_migration_gate_still_literal_studio(self):
         """The 'rebuild auto_matched_by_provider' lazy migration sits
         inside the user-approved review branch — smart jobs don't reach

@@ -3453,6 +3453,12 @@ class ProcessPipeline:
             print(f"[{stage_label}] 失败：{exc}")
             raise
 
+        # PR#3C-b3a: terminal smart_state marker (see
+        # _emit_smart_terminal_completion_marker docstring). No-op for
+        # non-smart jobs; for smart jobs, flips status → "completed" +
+        # credits_policy → "capture_full" so editing / jianying gates
+        # admit + settle dispatcher routes through smart_capture_full.
+        self._emit_smart_terminal_completion_marker()
         return ProcessResult(
             project_dir=str(final_project_dir.resolve(strict=False)),
             dubbed_audio_path=output_result.dubbed_audio_path,
@@ -3947,6 +3953,11 @@ class ProcessPipeline:
             print(f"[{stage_label}] \u5931\u8d25\uff1a{exc}")
             raise
 
+        # PR#3C-b3a: terminal smart_state marker for the resume-publish-
+        # only happy-path return (covers commit copy_as_new + overwrite
+        # publish stages). Same rationale as the main run() terminal \u2014
+        # see _emit_smart_terminal_completion_marker docstring.
+        self._emit_smart_terminal_completion_marker()
         return ProcessResult(
             project_dir=str(final_project_dir.resolve(strict=False)),
             dubbed_audio_path=output_result.dubbed_audio_path,
@@ -3957,6 +3968,64 @@ class ProcessPipeline:
             background_sounds_path=output_result.background_sounds_path,
             total_segments=output_result.segment_count,
             needs_review_count=output_result.needs_review_count,
+        )
+
+    def _emit_smart_terminal_completion_marker(self) -> None:
+        """Plan §4.3 mapping table + §6.0.5 + Codex 第二十轮.
+
+        When a smart pipeline reaches the happy-path succeeded terminal
+        return, emit a terminal ``smart_state`` marker so:
+
+          - ``JobRecord.smart_state.status`` flips from any intermediate
+            value (e.g. PR#3C-b2 left an unspecified status after voice
+            review auto-approve; or ``downgraded_to_studio`` after user
+            takeover manually approved Studio human-review) to the
+            editable terminal ``"completed"``.
+          - The runner-side marker handler merges it into JobRecord
+            and the mirror chain (PR#1 F1) propagates to Gateway DB
+            ``Job.smart_state`` before settle runs.
+          - ``editing.py`` / ``jianying_draft_runner.py`` /
+            ``jobs/api.py:1458`` gates see ``status="completed"`` and
+            admit the job into Studio post-edit / Jianying draft (per
+            ``EDITABLE_SERVICE_MODES`` + ``is_editable_smart_state``).
+          - ``credits_service.settle_job_credit_ledger``'s smart
+            dispatcher reads ``credits_policy="capture_full"`` and
+            routes through ``smart_capture_full`` (smart-distinct
+            reason_code for audit fidelity; amount currently mirrors
+            the legacy succeeded branch but the routing carries the
+            smart policy semantics).
+
+        This function ONLY fires on the raw ``service_mode == "smart"``
+        audit fact (NOT effective mode — failed paths handle their own
+        terminal marker elsewhere). Failed-terminal paths
+        (``fail_and_refunded`` for budget-exhausted users who chose
+        ``fail_and_refund``) emit their own terminal markers via the
+        ``smart_consent.on_budget_exhausted`` path in subsequent PRs
+        — they are out of scope for PR#3C-b3a.
+
+        Handoff-then-manual-success case: when a smart job hit handoff
+        (smart_state.status="downgraded_to_studio"), user took over via
+        Studio human-review, manually approved, and pipeline ran through
+        to publish → terminal here. The handoff status gets overwritten
+        with "completed" + credits_policy="capture_full". This is
+        intentional and matches plan §6.3 fail-safe ladder row 4
+        ("已开始 clone / TTS, 用户选择 degraded_delivery_with_report
+        且交付当前最佳版本 → 按智能版固定价 100 credits/min capture").
+        The "曾经 handoff 过" audit detail lives in smart_decisions.jsonl
+        (PR#3C-b3e) — not on the terminal smart_state status.
+        """
+        if self._current_service_mode != "smart":
+            return
+        # Lazy import — top-level import order in process.py is fragile
+        # and smart pipeline integration intentionally minimises module-
+        # load coupling.
+        from services.smart.state import emit_smart_state_marker
+
+        emit_smart_state_marker(
+            {
+                "status": "completed",
+                "credits_policy": "capture_full",
+            }
         )
 
     def _build_paused_result(self, *, project_dir: Path, stage: str, message: str) -> ProcessResult:
