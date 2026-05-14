@@ -1449,7 +1449,7 @@ P3 启动条件(独立 program,主方案 §11):
 - [ ] **主动跑 1-2 个 4+ speaker panel + 1 个 >60min 单口长讲**补内容多样性
 - [ ] **运维 standby**:确认 `AVT_ENABLE_SMART_MODE` 可远程一键切换,kill switch 链路 < 5min 生效
 - [ ] **(可选)cost_model 真实数据 calibration** —— owner 已同意 P2 试运行后再做
-- [ ] **owner 拍板:`plus` plan 是否允许 smart**(`allowed_service_modes`)
+- [x] **owner 拍板(2026-05-14):`plus` plan GA 期允许 smart**;P2-alpha/beta 灰度期仍走 user-level overlay(`users.smart_enabled`),GA 节点再 land `plan_catalog.PLANS` 改动
 
 ---
 
@@ -1467,7 +1467,7 @@ P3 启动条件(独立 program,主方案 §11):
 
 ### 13.2 P2 实施需要 owner 拍板的事
 
-1. `plus` plan 是否允许 smart(影响首批 beta 流量大小)
+1. ~~`plus` plan 是否允许 smart(影响首批 beta 流量大小)~~ — **已拍板 2026-05-14**:GA 期允许;P2-alpha/beta 灰度期仍走 §4.1 user-level overlay(`users.smart_enabled`)。`plan_catalog.PLANS` 改 plus 含 smart 留到 GA 节点 land,P2-alpha-code 不动 PLANS
 2. ~~Smart bucket priority 数值~~ — **DELETED 2026-05-14 第五轮 codex F6**:bucket 消费 priority 已落地(`["trial", "subscription", "topup", "free"]`,§5.4);queue priority 推迟(§13.3 deferred)
 3. 阶段 1 / 2 / 3 灰度速率(默认按本文档 §9.2/§9.3 估计)
 4. `target_gross_margin` 是否在 P2 launch 后立刻 calibrate cost_model,还是等 4 周后
@@ -1532,7 +1532,7 @@ P2 launch GA 标准:
 - D2 AST guard fixture cache 复用
 - D3 UsageMeter.summarize() 单次 cache(已在 §4.6 末段一句话覆盖)
 
-**owner 仍需拍板的事**(见 §13.2 #1):`plus` plan 是否允许 smart(影响首批 beta 流量大小)。`plan_catalog.PLANS` 是 H1 frozen by owner approval,该改动需显式签字。
+**owner 已拍板**(见 §13.2 #1,2026-05-14):`plus` plan GA 期允许 smart;P2-alpha/beta 灰度期仍走 user-level overlay。`plan_catalog.PLANS` 改动留到 GA 节点 land。
 
 ### 2026-05-14 codex review(第二意见)
 
