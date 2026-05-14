@@ -1481,6 +1481,156 @@ class TestB3DCloneSampleExtractorContract:
             f"calls={fake.calls}"
         )
 
+    def test_b3d_validate_sample_returns_duration_s(self):
+        """Codex 第二十七轮 P1 contract: validate_sample() returns a dict
+        with ``duration_s`` (float) + ``is_valid`` (bool) + ``warnings``.
+        process.py reads ``duration_s`` to gate on
+        MIN_SAMPLE_DURATION_SECONDS — if validate_sample's return shape
+        drifts, b3d's safety check breaks silently."""
+        import inspect
+
+        from services.voice.sample_extractor import (
+            MIN_SAMPLE_DURATION_SECONDS, VoiceSampleExtractor,
+        )
+
+        sig = inspect.signature(VoiceSampleExtractor.validate_sample)
+        # Single positional arg ``sample_path`` is the contract.
+        assert "sample_path" in sig.parameters, (
+            f"validate_sample signature drift — process.py b3d-fix "
+            f"calls ``.validate_sample(str(sample_path))``. Sig: {sig}"
+        )
+
+        # MIN_SAMPLE_DURATION_SECONDS must be importable as the canonical
+        # floor (10.0). process.py b3d-fix imports + reads it.
+        assert MIN_SAMPLE_DURATION_SECONDS == 10.0, (
+            f"MIN_SAMPLE_DURATION_SECONDS drifted from 10.0 to "
+            f"{MIN_SAMPLE_DURATION_SECONDS}. process.py's sub-10s gate "
+            f"references this constant; if it moves, the gate moves "
+            f"with it — which may or may not be intentional but should "
+            f"surface here so b3d's safety is consciously re-evaluated."
+        )
+
+    def test_b3d_short_sample_triggers_fail_closed_reason_code(self):
+        """End-to-end runtime test: create a tmp wav of <10s, run
+        validate_sample on it, verify duration_s < 10 → process.py's
+        b3d-fix would set sample_too_short_<sid>_<X.X>s reason and
+        handoff.
+
+        This is a contract test against validate_sample's return shape
+        without exercising the full pipeline (which requires the whole
+        ProcessPipeline construction). The anchor test in
+        test_smart_studio_gate_acceptance.py covers the source-level
+        wiring; this test covers the runtime arithmetic.
+        """
+        import struct
+        import tempfile
+        from pathlib import Path
+
+        from services.voice.sample_extractor import (
+            MIN_SAMPLE_DURATION_SECONDS, VoiceSampleExtractor,
+        )
+
+        # Build a 3-second 16 kHz mono s16 WAV — well below the 10s floor.
+        with tempfile.NamedTemporaryFile(
+            suffix=".wav", delete=False
+        ) as tmp_f:
+            tmp_path = Path(tmp_f.name)
+        try:
+            duration_s = 3.0
+            sample_rate = 16_000
+            num_samples = int(duration_s * sample_rate)
+            with open(tmp_path, "wb") as f:
+                # Minimal WAV header (RIFF) + PCM data
+                num_channels = 1
+                bits_per_sample = 16
+                byte_rate = sample_rate * num_channels * bits_per_sample // 8
+                data_size = num_samples * num_channels * bits_per_sample // 8
+                f.write(b"RIFF")
+                f.write(struct.pack("<I", 36 + data_size))
+                f.write(b"WAVE")
+                f.write(b"fmt ")
+                f.write(struct.pack("<I", 16))
+                f.write(struct.pack("<H", 1))  # PCM
+                f.write(struct.pack("<H", num_channels))
+                f.write(struct.pack("<I", sample_rate))
+                f.write(struct.pack("<I", byte_rate))
+                f.write(struct.pack(
+                    "<H", num_channels * bits_per_sample // 8
+                ))
+                f.write(struct.pack("<H", bits_per_sample))
+                f.write(b"data")
+                f.write(struct.pack("<I", data_size))
+                # Silence sample data
+                f.write(b"\x00\x00" * num_samples)
+
+            result = VoiceSampleExtractor().validate_sample(str(tmp_path))
+            # The contract process.py b3d-fix relies on:
+            assert "duration_s" in result, (
+                "validate_sample must return duration_s — process.py "
+                "b3d-fix reads result.get('duration_s')."
+            )
+            measured_duration = float(result["duration_s"])
+            assert measured_duration < MIN_SAMPLE_DURATION_SECONDS, (
+                f"3s WAV measured at {measured_duration}s — should be "
+                f"under {MIN_SAMPLE_DURATION_SECONDS}s floor so b3d "
+                f"would mark sample_too_short and handoff."
+            )
+            # This is the comparison process.py b3d-fix does:
+            #   if _val_duration_s < MIN_SAMPLE_DURATION_SECONDS:
+            #       _smart_sample_extraction_error = f"sample_too_short_{sid}_{...}s"
+            assert measured_duration < MIN_SAMPLE_DURATION_SECONDS, (
+                "Sub-10s contract violated by validate_sample."
+            )
+        finally:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+
+    def test_b3d_quota_signal_still_a_placeholder_pending_b3e(self):
+        """Codex 第二十七轮 P0 documented gate: ``_smart_quota_remaining =
+        100`` is still a placeholder at b3d (not a real user-voices
+        count). The real quota signal must land alongside the real
+        provider in PR#3C-b3e to preserve §7.3 water mark in production.
+
+        This test pins the temporary-placeholder state so a future PR
+        that tries to swap in the real provider WITHOUT real quota
+        fails this test instead of silently re-opening Codex 第二十七轮
+        P0. When b3e lands real quota + real provider together, update
+        this test (or remove if its contract is folded into b3e's
+        anchor tests)."""
+        from pathlib import Path
+
+        src = Path(__file__).resolve().parents[1] / "src" / "pipeline" / "process.py"
+        source = src.read_text(encoding="utf-8")
+        idx = source.find("Smart inline auto-approve path")
+        assert idx >= 0
+        # Walk ~500 lines (matches anchor tests in
+        # test_smart_studio_gate_acceptance.py).
+        lines = source[idx:].splitlines()
+        block = "\n".join(lines[:500])
+
+        # Pin the placeholder value.
+        assert "_smart_quota_remaining = 100" in block, (
+            "_smart_quota_remaining placeholder is no longer literal "
+            "100 — if you swapped in a real signal, also confirm Piece "
+            "3 (real CloneProvider) landed in the same commit. "
+            "Codex 第二十七轮 P0: stub provider + real quota is "
+            "harmless (overly conservative); real provider + stub "
+            "quota silently bypasses §7.3 water mark in production."
+        )
+
+        # The stub provider call site must still be the one wired
+        # (until b3e flips both).
+        assert (
+            "_smart_clone_provider = _build_b2_not_wired_clone_provider()"
+            in block
+        ), (
+            "Real CloneProvider re-wired without real quota — "
+            "Codex 第二十七轮 P0 forbids this combination. b3e must "
+            "land both pieces in one commit."
+        )
+
     def test_b3d_consent_false_skips_provider_call_entirely(self):
         """Regression — when consent is False (default for non-clone
         jobs), evaluate_voice_review routes to PRESET without invoking

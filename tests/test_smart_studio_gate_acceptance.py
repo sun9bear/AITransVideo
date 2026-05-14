@@ -663,9 +663,13 @@ class TestProcessPyStudioGateWidening:
             "emit_handoff_markers",
             "REVIEW_STATUS_APPROVED",
             "emit_smart_state_marker",
-            # Codex 第十八轮 P0-2 inverted at b3d: real provider wired now
-            # that per-speaker samples + quota snapshot are in place.
-            "build_smart_clone_provider",
+            # Codex 第十八轮 P0-2 (rescoped at 第二十七轮 P0): smart path
+            # uses the b2 fail-closed stub UNTIL real quota signal lands
+            # in PR#3C-b3e. b3d only landed Piece 1 + sample validation;
+            # Piece 2 (real quota) + Piece 3 (real provider) move
+            # together in a single follow-up commit so the §7.3 water
+            # mark stays active in production.
+            "_build_b2_not_wired_clone_provider",
             # Codex 第十八轮 P1-1: clone vendor recorded as audit, not as
             # TTS provider override
             "_sp_entry[\"clone_provider\"]",
@@ -676,39 +680,59 @@ class TestProcessPyStudioGateWidening:
                 f"contract relies on it. Block:\n{smart_block}"
             )
 
-        # PR#3C-b3d Codex 第二十轮 three-piece contract: real provider
-        # MUST land together with per-speaker ffmpeg sample + quota.
-        # Pin all three in the smart branch.
+        # PR#3C-b3d landed pieces (Codex 第二十七轮 narrowed scope):
+        #   - Piece 1: per-speaker ffmpeg sample (VoiceSampleExtractor)
+        #   - P1: sample validation (validate_sample) + duration ≥10s
+        #   - P1: validated duration → sample_seconds
+        # Piece 2 (real quota) + Piece 3 (real provider) deferred to b3e.
         for required_piece in (
-            # Piece 1: per-speaker ffmpeg sample (VoiceSampleExtractor)
+            # Piece 1: per-speaker ffmpeg sample
             "VoiceSampleExtractor(",
-            "extract_sample(",
+            ".extract_sample(",
             "_smart_per_speaker_samples",
-            # Piece 2: quota snapshot — even MVP placeholder must
-            # be a named variable, not a magic number passed inline
+            # P1: sample validation
+            ".validate_sample(",
+            "MIN_SAMPLE_DURATION_SECONDS",
+            "_smart_per_speaker_sample_seconds",
+            # Piece 2 placeholder: still named variable so b3e swap is
+            # a one-line change at the assignment.
             "_smart_quota_remaining",
-            # Piece 3: real CloneProvider via smart_wiring
-            "from services.smart_wiring import",
-            "build_smart_clone_provider()",
         ):
             assert required_piece in smart_block, (
-                f"smart branch missing PR#3C-b3d three-piece component "
-                f"{required_piece!r}. Codex 第二十轮: per-speaker ffmpeg + "
-                f"real quota + real CloneProvider MUST land together so "
-                f"paid clone API never sees stub data.\n"
+                f"smart branch missing PR#3C-b3d component "
+                f"{required_piece!r}. Codex 第二十七轮: Piece 1 (per-speaker "
+                f"sample) + P1 (validate_sample + duration gate) must "
+                f"land at b3d so b3e can drop in real quota + provider "
+                f"without rework.\n"
                 f"Block:\n{smart_block[:2500]}"
             )
 
-        # PR#3C-b3d: stub no longer USED in smart path (still defined
-        # at module level for tests + as a documented fail-closed
-        # pattern reference, but smart inline auto-approve goes through
-        # the real provider).
-        assert "_smart_clone_provider = _build_b2_not_wired_clone_provider()" not in smart_block, (
-            "Smart inline branch still uses the b2 fail-closed stub — "
-            "PR#3C-b3d wires the real build_smart_clone_provider() "
-            "alongside per-speaker ffmpeg + quota snapshot. The stub is "
-            "kept at module level for unit tests but the smart path "
-            "MUST use the real provider now.\n"
+        # PR#3C-b3d (Codex 第二十七轮 P0): smart path MUST NOT import
+        # the real ``build_smart_clone_provider`` until Piece 2 (real
+        # quota) lands. Importing it here would tempt a future
+        # one-line swap that re-opens the placeholder-quota leak.
+        for forbidden in (
+            "from services.smart_wiring import build_smart_clone_provider",
+            "from services.smart_wiring import (\n                        build_smart_clone_provider",
+            "_smart_clone_provider = build_smart_clone_provider()",
+        ):
+            assert forbidden not in smart_block, (
+                "Smart branch re-imported / called the real CloneProvider — "
+                "PR#3C-b3e is responsible for swapping the stub for the "
+                "real adapter AT THE SAME TIME as real quota lands. "
+                "Codex 第二十七轮 P0: real provider + placeholder quota "
+                "silently bypasses §7.3 water mark in production.\n"
+                f"Found forbidden: {forbidden!r}"
+            )
+
+        # Verify the stub is still wired.
+        assert (
+            "_smart_clone_provider = _build_b2_not_wired_clone_provider()"
+            in smart_block
+        ), (
+            "Smart branch should wire ``_build_b2_not_wired_clone_provider()`` "
+            "until b3e — Codex 第二十七轮 P0 reverted b3d's premature real "
+            "provider hookup.\n"
             f"Block:\n{smart_block[:2000]}"
         )
 
@@ -1588,34 +1612,69 @@ class TestProcessPyStudioGateWidening:
             f"Call window:\n{eval_window}"
         )
 
-    def test_b3d_real_clone_provider_imported_inside_smart_branch(self):
-        """Codex 第二十轮 piece 3: real provider import must live
-        INSIDE the smart branch (not at module top level) so a non-smart
-        pipeline run never imports services.smart_wiring (which would
-        try to read MINIMAX_API_KEY env even if unused at runtime per
-        the lazy adapter contract; importing the module is fine, but
-        keeping the import local makes the dependency boundary clear).
+    def test_b3d_sample_validation_after_extract(self):
+        """Codex 第二十七轮 P1: ``VoiceSampleExtractor.extract_sample()``
+        emits a WARNING (not exception) when total sample is < 10s.
+        Without an explicit validate_sample() check + duration gate,
+        a sub-10s sample silently flows to the clone provider and gets
+        400-rejected by MiniMax, burning paid API calls.
+
+        Pin: after extract_sample, smart path calls validate_sample(),
+        checks ``duration_s >= MIN_SAMPLE_DURATION_SECONDS``, and on
+        failure records the error → handoff (same error code family
+        as extract failures, so handoff branch is unified).
         """
-        source = self._source()
-        idx = source.find("Smart inline auto-approve path")
-        assert idx >= 0
-        # Module-level imports live above the smart branch. Check the
-        # smart_wiring import is NOT in the first 100 lines of the file
-        # (where module-level imports live) — only inside the smart
-        # branch.
-        head = "\n".join(source.splitlines()[:120])
-        assert "from services.smart_wiring import" not in head, (
-            "services.smart_wiring imported at module top level — should "
-            "be local to the smart inline branch so non-smart pipeline "
-            "runs don't drag the import.\n"
-            f"Module head:\n{head[-1500:]}"
+        smart_block = _find_anchor_block(
+            self._source(),
+            "Smart inline auto-approve path",
+            window=500,
         )
 
-        # The import IS in the smart branch.
-        smart_block = _find_anchor_block(
-            source, "Smart inline auto-approve path", window=500,
+        # validate_sample is invoked.
+        assert ".validate_sample(" in smart_block, (
+            "Smart branch missing validate_sample() call after "
+            "extract_sample. Codex 第二十七轮 P1: without it a sub-10s "
+            "sample silently flows to the clone provider.\n"
+            f"Block first 3000 chars:\n{smart_block[:3000]}"
         )
-        assert "from services.smart_wiring import" in smart_block
+
+        # Duration floor enforced via MIN_SAMPLE_DURATION_SECONDS.
+        assert "MIN_SAMPLE_DURATION_SECONDS" in smart_block, (
+            "Smart branch must compare validated duration against "
+            "MIN_SAMPLE_DURATION_SECONDS (the canonical 10s floor "
+            "from services.voice.sample_extractor). Hardcoding 10.0 "
+            "would drift if the floor moves.\n"
+            f"Block first 3000 chars:\n{smart_block[:3000]}"
+        )
+
+        # Validated duration is recorded into per-speaker dict.
+        assert "_smart_per_speaker_sample_seconds" in smart_block, (
+            "Smart branch must record the VALIDATED duration (not the "
+            "speaker's full transcript duration) so it can be passed "
+            "as sample_seconds to VoiceReviewSpeakerInput. Codex 第二十七轮 "
+            "P1: passing speaker total would mask short-sample issues.\n"
+            f"Block:\n{smart_block[:3000]}"
+        )
+
+        # Failure short-circuits via the same _smart_sample_extraction_error
+        # state that extract failures use → unified handoff branch.
+        err_check_idx = smart_block.find(
+            "if _smart_sample_extraction_error is not None:"
+        )
+        assert err_check_idx >= 0, (
+            "Smart branch missing unified handoff check on "
+            "_smart_sample_extraction_error — validation failures "
+            "should route through the same handoff as extract failures."
+        )
+        # Find a sample_too_short reason code in the validation block
+        # (the pre-handoff section).
+        pre_handoff_window = smart_block[:err_check_idx]
+        assert "sample_too_short_" in pre_handoff_window, (
+            "Smart branch must record a ``sample_too_short_`` reason "
+            "code when validate_sample reports duration < 10s, so the "
+            "handoff carries an actionable label.\n"
+            f"Pre-handoff window:\n{pre_handoff_window[-2000:]}"
+        )
 
     def test_translation_review_glossary_failure_short_circuits_to_handoff(self):
         """Codex 第二十五轮 P1-2: glossary helper exception when

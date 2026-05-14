@@ -2497,6 +2497,7 @@ class ProcessPipeline:
                         smart_consent.get("auto_voice_clone") is True
                     )
                     _smart_per_speaker_samples: dict[str, Path] = {}
+                    _smart_per_speaker_sample_seconds: dict[str, float] = {}
                     _smart_sample_extraction_error: str | None = None
                     if _smart_consent_allows_clone:
                         _smart_sample_root = (
@@ -2551,8 +2552,48 @@ class ProcessPipeline:
                                         f"sample_missing_post_extract_{_candidate_sid}"
                                     )
                                     break
+
+                                # Codex 第二十七轮 P1: VoiceSampleExtractor's
+                                # under-10s case only emits a WARNING and
+                                # returns the (short) wav anyway. Without
+                                # an explicit validate_sample() check, a
+                                # < 10s sample (a speaker who only spoke
+                                # briefly) would silently flow into the
+                                # clone provider — wasting paid API on a
+                                # sample MiniMax would 400-reject.
+                                try:
+                                    _validation = (
+                                        _smart_extractor.validate_sample(
+                                            str(_sample_path)
+                                        )
+                                    )
+                                except Exception as _val_exc:
+                                    _smart_sample_extraction_error = (
+                                        f"sample_validate_error_{_candidate_sid}:"
+                                        f" {type(_val_exc).__name__}"
+                                    )
+                                    break
+                                _val_duration_s = float(
+                                    _validation.get("duration_s") or 0.0
+                                )
+                                if _val_duration_s < MIN_SAMPLE_DURATION_SECONDS:
+                                    _smart_sample_extraction_error = (
+                                        f"sample_too_short_{_candidate_sid}_"
+                                        f"{_val_duration_s:.1f}s"
+                                    )
+                                    break
+                                # is_valid combines duration + silence +
+                                # rms checks. We tolerate non-is_valid as
+                                # long as duration ≥10s — silence/rms
+                                # warnings don't 400-reject from MiniMax,
+                                # they just produce lower-quality clones.
+                                # But the duration floor is a hard
+                                # paid-API safety constraint.
                                 _smart_per_speaker_samples[_candidate_sid] = (
                                     _sample_path
+                                )
+                                _smart_per_speaker_sample_seconds[_candidate_sid] = (
+                                    _val_duration_s
                                 )
 
                     if _smart_sample_extraction_error is not None:
@@ -2594,19 +2635,39 @@ class ProcessPipeline:
                     # ── _smart_main_speakers with per-speaker sample paths ──
                     #
                     # If consent.auto_voice_clone is False:
-                    #   source_audio_path defaults to whole-file (placeholder).
-                    #   evaluate_voice_review routes to PRESET on consent=False
-                    #   BEFORE reading source_audio_path so the placeholder
-                    #   is never actually consumed.
+                    #   source_audio_path defaults to whole-file (placeholder)
+                    #   AND sample_seconds defaults to vs_payload's speaker
+                    #   total_duration_s. evaluate_voice_review routes to
+                    #   PRESET on consent=False BEFORE reading either, so
+                    #   the placeholders are never actually consumed.
                     # If consent.auto_voice_clone is True:
-                    #   _smart_per_speaker_samples[sid] is the real ffmpeg-
-                    #   extracted clone sample (Piece 1 above). Passed
-                    #   verbatim into VoiceReviewSpeakerInput.
+                    #   - source_audio_path = _smart_per_speaker_samples[sid]
+                    #     (Piece 1 real ffmpeg-extracted clone sample)
+                    #   - sample_seconds = _smart_per_speaker_sample_seconds[sid]
+                    #     (Codex 第二十七轮 P1: the VALIDATED duration of
+                    #     the actual sample file, NOT the speaker's total
+                    #     transcript duration. They diverge when a speaker
+                    #     spoke 5min total but VoiceSampleExtractor only
+                    #     produced a 20s concatenated sample — passing
+                    #     5min would make evaluate_voice_review think the
+                    #     sample is plenty long and skip the per-speaker
+                    #     ≥10s floor check.)
+                    def _smart_sample_seconds_for(_sp_dict):
+                        sid = _sp_dict.get("speaker_id")
+                        val = _smart_per_speaker_sample_seconds.get(sid)
+                        if val is not None:
+                            return float(val)
+                        # No validated sample (consent=False path) →
+                        # fall back to vs_payload total. evaluate_voice_review
+                        # won't actually read this in the consent=False
+                        # branch but we still want a defensible value.
+                        return float(_sp_dict.get("total_duration_s") or 0.0)
+
                     _smart_main_speakers = [
                         VoiceReviewSpeakerInput(
                             speaker_id=sp.get("speaker_id", ""),
                             speaker_name=sp.get("speaker_name", "") or sp.get("speaker_id", ""),
-                            sample_seconds=float(sp.get("total_duration_s") or 0.0),
+                            sample_seconds=_smart_sample_seconds_for(sp),
                             source_audio_path=_smart_per_speaker_samples.get(
                                 sp.get("speaker_id"), source_audio_path
                             ),
@@ -2625,29 +2686,40 @@ class ProcessPipeline:
                     # The brake's REAL purpose is "stop smart when user's
                     # MiniMax personal voice library is near its account
                     # cap"; that needs a Gateway internal endpoint
-                    # (GET /user-voices/count + admin-configured per-user
-                    # cap) which lands in PR#3C-b3e. Until then this is
-                    # a per-job retry-loop safety only — the brake still
-                    # fires if evaluate_voice_review's local decrement
-                    # spirals (e.g. a runaway retry loop), so we're not
-                    # entirely brakeless.
+                    # (GET /api/internal/user-voices/quota) +
+                    # admin-configured per-user cap which lands in
+                    # PR#3C-b3e.
+                    #
+                    # Codex 第二十七轮 P0: a placeholder 100 + real
+                    # provider would silently bypass §7.3 water mark
+                    # in production. Even if a single job clones ≤3
+                    # main speakers, a user whose MiniMax library is
+                    # near its account cap would still pay for the
+                    # provider's quota-exhaustion error. The provider's
+                    # error is reactive (charged after the call); the
+                    # brake is preventive (no call at all). They are
+                    # not equivalent.
                     _smart_quota_remaining = 100
 
-                    # ── Piece 3: real CloneProvider ──
+                    # ── Piece 3: CloneProvider ──
                     #
-                    # build_smart_clone_provider() returns the
-                    # _MiniMaxCloneAdapter from services.smart_wiring
-                    # (or the test-injected fake via inject_for_test).
-                    # Safe to invoke now because:
-                    #   - consent gate above ensures samples extracted
-                    #     only when consent.auto_voice_clone is True
-                    #   - sample extraction was successful (else early
-                    #     handoff above)
-                    #   - quota brake still active inside the module
-                    from services.smart_wiring import (
-                        build_smart_clone_provider,
-                    )
-                    _smart_clone_provider = build_smart_clone_provider()
+                    # Per Codex 第二十七轮 P0: real provider stays GATED
+                    # until real quota signal is wired alongside it (the
+                    # three-piece contract). For b3d we keep the b2
+                    # fail-closed stub here — its exception triggers
+                    # PRESET fall-through inside evaluate_voice_review,
+                    # so the smart job still completes end-to-end with
+                    # preset voices instead of cloned ones. When b3e
+                    # lands real quota, this line flips to
+                    # ``build_smart_clone_provider()`` in the same commit.
+                    #
+                    # The b3d work that already landed and STAYS:
+                    #   - per-speaker ffmpeg sample extraction (Piece 1)
+                    #   - validate_sample() + duration ≥10s gate (P1)
+                    #   - validated duration → sample_seconds (P1)
+                    # When b3e lands real quota + real provider together,
+                    # these pieces are immediately usable — no rework.
+                    _smart_clone_provider = _build_b2_not_wired_clone_provider()
 
                     _smart_voice_review = evaluate_voice_review(
                         main_speakers=_smart_main_speakers,
