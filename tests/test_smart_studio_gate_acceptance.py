@@ -1145,6 +1145,38 @@ class TestProcessPyStudioGateWidening:
         # Overlay block typically appears within ~600 chars of the
         # aggregation call.
         overlay_window = smart_block[agg_idx : agg_idx + 800]
+
+        # Codex 第二十四轮 P2: pin the EXACT field name being read.
+        # TranscriptResult only has ``.lines`` — ``.segments`` doesn't
+        # exist and the previous wiring of ``getattr(..., "segments",
+        # None) or []`` silently returned None → aggregation was {} →
+        # every keep_original / mute_or_background speaker overlay
+        # defaulted to "dub". Codex 第二十三轮 P1 fix swapped to
+        # ``.lines``. The functional test in test_smart_business_logic.py
+        # (TestAggregateWithRealTranscriptLineShape) covers the
+        # runtime side; THIS guard pins the source so an anchor-only
+        # refactor that swaps back to ``.segments`` (or any other
+        # non-existent field) is flagged immediately, even before any
+        # functional test runs against real TranscriptLine objects.
+        assert 'getattr(transcript_result, "lines", None)' in overlay_window, (
+            "Aggregation no longer reads from ``transcript_result.lines``. "
+            "TranscriptResult exposes only ``lines: list[TranscriptLine]`` "
+            "(see ``src/services/assemblyai/transcriber.py``); any other "
+            "field name will return None → aggregation {} → all speakers "
+            "default to ``dub`` → keep_original / mute_or_background "
+            "exclusions silently disabled. Codex 第二十三轮 P1 + 第二十四轮 "
+            "P2 anchor guard.\n"
+            f"Overlay window:\n{overlay_window}"
+        )
+        assert 'getattr(transcript_result, "segments", None)' not in overlay_window, (
+            "Aggregation regressed to ``.segments`` field name — "
+            "TranscriptResult has no such field. See "
+            "``src/services/assemblyai/transcriber.py:48``: only "
+            "``lines: list[TranscriptLine]`` is defined. Codex 第二十三轮 "
+            "P1 regression.\n"
+            f"Overlay window:\n{overlay_window}"
+        )
+
         assert '_enriched["dubbing_mode"]' in overlay_window, (
             "Aggregation result not written onto enriched profile dict "
             "as ``dubbing_mode`` — normalise_speaker_stats reads this "
