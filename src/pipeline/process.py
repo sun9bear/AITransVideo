@@ -3050,36 +3050,234 @@ class ProcessPipeline:
                     _unified_review_payload["speaker_name_a"] = speaker_name_a
                     _unified_review_payload["speaker_name_b"] = speaker_name_b
                     _unified_review_payload["effective_speakers"] = effective_speakers
-                    review_state_manager.set_stage(
-                        TRANSLATION_REVIEW_STAGE,
-                        status=REVIEW_STATUS_PENDING,
-                        payload=_unified_review_payload,
-                        activate=True,
-                    )
-                    review_message = "等待在 Web UI 确认翻译稿，再继续 TTS 和对齐。"
-                    print(f"[S3] {review_message}")
-                    state_manager.set_stage(
-                        current_stage_name,
-                        StageStatus.DONE,
-                        self._build_translation_stage_payload(
-                            translation_result=translation_result,
-                            execution_mode=translation_execution_mode,
-                        ),
-                    )
-                    current_stage_name = None
-                    print(
-                        self._build_web_review_marker(
-                            stage=TRANSLATION_REVIEW_STAGE,
+
+                    if job_effective_pipeline_mode == "smart":
+                        # --- Smart inline auto-translation-review path ---
+                        #
+                        # Plan §6.2.2 + Codex F6: deterministic 6-check
+                        # decision auto-approves OR hands off to Studio.
+                        # In-frame: no paused-return on approved; pipeline
+                        # continues to alignment directly (matches the
+                        # voice_selection_review smart branch contract).
+                        #
+                        # Codex 第十八轮 P1-2: gate on
+                        # ``job_effective_pipeline_mode`` not raw
+                        # ``job_service_mode`` so downgraded smart jobs
+                        # don't re-enter the smart branch on resume.
+                        from services.smart.auto_translation_review import (
+                            evaluate_translation_review,
+                        )
+                        from services.smart.handoff import emit_handoff_markers
+                        from services.smart.state import emit_smart_state_marker
+                        from services.gemini.translator import (
+                            check_glossary_preservation,
+                        )
+
+                        # Glossary stats: re-compute locally (the metering
+                        # helper at process.py:938 emits into the metering
+                        # body, not onto translation_result, so we call
+                        # the underlying helper directly). best-effort
+                        # try/except so a glossary check failure routes
+                        # through auto-review's vacuous-pass path (total=0).
+                        try:
+                            _smart_gloss = check_glossary_preservation(
+                                translation_result.segments,
+                                _review_glossary or None,
+                            )
+                        except Exception:
+                            _smart_gloss = {"total_terms": 0, "preserved_terms": 0}
+
+                        # length_overflow / final_spoken_text checksum are
+                        # post-TTS signals. Pass None — auto_translation_review's
+                        # _check_length_budget / _check_text_audio_checksum
+                        # vacuous-pass when None. b3d / future may plumb
+                        # the post-TTS rewind on resume.
+                        _smart_translation_input: dict[str, object] = {
+                            "glossary_total_terms": int(
+                                _smart_gloss.get("total_terms", 0) or 0
+                            ),
+                            "glossary_preserved_terms": int(
+                                _smart_gloss.get("preserved_terms", 0) or 0
+                            ),
+                            "length_overflow_rate": None,
+                            "rewrite_attempted": False,
+                            "subtitle_source_text_sha256": None,
+                            "final_spoken_text_sha256": None,
+                            "segments": [
+                                {
+                                    "segment_id": str(seg.segment_id),
+                                    "speaker_id": seg.speaker_id,
+                                }
+                                for seg in translation_result.segments
+                            ],
+                        }
+
+                        # speaker_stats — derived from
+                        # _speaker_structure_profiles (S2 output).
+                        # uncertain_speaker_duration_share := sum of
+                        # ``fragmented``-role speakers' duration_share
+                        # (matches the simulator definition of
+                        # "uncertain" speakers).
+                        _smart_profiles = _speaker_structure_profiles or {}
+                        _smart_uncertain_share = 0.0
+                        for _p in _smart_profiles.values():
+                            if not isinstance(_p, dict):
+                                continue
+                            if str(_p.get("speaker_role") or "").lower() == "fragmented":
+                                _smart_uncertain_share += float(
+                                    _p.get("speaker_duration_share") or 0.0
+                                )
+                        _smart_speaker_stats: dict[str, object] = {
+                            # Canonical speakers list (consumed by gate's
+                            # main-speaker derivation, not by translation
+                            # review per se, but kept here so any future
+                            # check that references it has a real list).
+                            "speakers": [
+                                {
+                                    "speaker_id": sid,
+                                    "role": p.get("speaker_role"),
+                                    "duration_share": p.get(
+                                        "speaker_duration_share"
+                                    ),
+                                }
+                                for sid, p in _smart_profiles.items()
+                                if isinstance(p, dict)
+                            ],
+                            "uncertain_speaker_duration_share": (
+                                _smart_uncertain_share
+                            ),
+                            "asr_speaker_count": len(_smart_profiles),
+                        }
+
+                        # clone_sample_stats.eligible_speakers — heuristic
+                        # at b3c: count speakers with ≥10s sample (the
+                        # MIN_CLONE_SAMPLE_SECONDS floor in auto_voice_review).
+                        # b3d will replace this with the real Gateway /
+                        # MiniMax account quota + per-speaker ffmpeg
+                        # snapshot (Codex 第二十轮 three-piece contract).
+                        _smart_eligible_count = sum(
+                            1
+                            for p in _smart_profiles.values()
+                            if isinstance(p, dict)
+                            and int(p.get("speaker_duration_ms") or 0) >= 10_000
+                        )
+                        _smart_clone_sample_stats: dict[str, object] = {
+                            "eligible_speakers": _smart_eligible_count,
+                        }
+
+                        _smart_translation_decision = evaluate_translation_review(
+                            translation_result=_smart_translation_input,
+                            speaker_stats=_smart_speaker_stats,
+                            clone_sample_stats=_smart_clone_sample_stats,
+                        )
+
+                        if not _smart_translation_decision.auto_approved:
+                            # Handoff: plan §6.5 three-tuple
+                            # (set_stage + smart_state + web_review_marker).
+                            emit_handoff_markers(
+                                review_state_manager=review_state_manager,
+                                review_stage=TRANSLATION_REVIEW_STAGE,
+                                review_payload=_unified_review_payload,
+                                review_pending_status=REVIEW_STATUS_PENDING,
+                                smart_state_update={
+                                    "status": "downgraded_to_studio",
+                                    "reason": (
+                                        _smart_translation_decision.reason_code
+                                        or "translation_review_auto_rejected"
+                                    ),
+                                    "handoff_stage": TRANSLATION_REVIEW_STAGE,
+                                    "failed_check": (
+                                        _smart_translation_decision.failed_check
+                                    ),
+                                },
+                                project_dir=final_project_dir,
+                                user_message=(
+                                    "智能版自动翻译审核需要人工接管:"
+                                    f" {_smart_translation_decision.reason_code}"
+                                ),
+                                web_review_marker_builder=self._build_web_review_marker,
+                            )
+                            state_manager.set_stage(
+                                current_stage_name,
+                                StageStatus.DONE,
+                                self._build_translation_stage_payload(
+                                    translation_result=translation_result,
+                                    execution_mode=translation_execution_mode,
+                                ),
+                            )
+                            current_stage_name = None
+                            _write_usage_summary(usage_meter)
+                            return self._build_paused_result(
+                                project_dir=final_project_dir,
+                                stage=TRANSLATION_REVIEW_STAGE,
+                                message="智能版自动翻译审核需要人工接管",
+                            )
+
+                        # Auto-approved: set_stage(APPROVED) + intermediate
+                        # smart_state marker + fall through to alignment.
+                        _smart_approved_translation_payload = dict(
+                            _unified_review_payload
+                        )
+                        _smart_approved_translation_payload["auto_approved"] = True
+                        review_state_manager.set_stage(
+                            TRANSLATION_REVIEW_STAGE,
+                            status=REVIEW_STATUS_APPROVED,
+                            payload=_smart_approved_translation_payload,
+                            activate=True,
+                        )
+                        # Codex 第十八轮 P0-1: intermediate marker MUST NOT
+                        # set top-level ``status`` — only the terminal
+                        # marker (helper _emit_smart_terminal_completion_marker
+                        # at happy-path exit) writes editable status.
+                        emit_smart_state_marker(
+                            {
+                                "auto_translation_review": {
+                                    "auto_approved": True,
+                                    "failed_check": None,
+                                    "metrics": (
+                                        _smart_translation_decision.metrics
+                                    ),
+                                },
+                            }
+                        )
+                        print(
+                            "[S3] Smart 自动翻译审核通过,继续 TTS。"
+                        )
+                        # No paused-return — pipeline falls through to
+                        # the legacy state_manager.set_stage(DONE) +
+                        # alignment block immediately below.
+                    else:
+                        # --- Legacy Studio path: pending + paused-return ---
+                        review_state_manager.set_stage(
+                            TRANSLATION_REVIEW_STAGE,
+                            status=REVIEW_STATUS_PENDING,
+                            payload=_unified_review_payload,
+                            activate=True,
+                        )
+                        review_message = "等待在 Web UI 确认翻译稿，再继续 TTS 和对齐。"
+                        print(f"[S3] {review_message}")
+                        state_manager.set_stage(
+                            current_stage_name,
+                            StageStatus.DONE,
+                            self._build_translation_stage_payload(
+                                translation_result=translation_result,
+                                execution_mode=translation_execution_mode,
+                            ),
+                        )
+                        current_stage_name = None
+                        print(
+                            self._build_web_review_marker(
+                                stage=TRANSLATION_REVIEW_STAGE,
+                                project_dir=final_project_dir,
+                                message=review_message,
+                            )
+                        )
+                        _write_usage_summary(usage_meter)
+                        return self._build_paused_result(
                             project_dir=final_project_dir,
+                            stage=TRANSLATION_REVIEW_STAGE,
                             message=review_message,
                         )
-                    )
-                    _write_usage_summary(usage_meter)
-                    return self._build_paused_result(
-                        project_dir=final_project_dir,
-                        stage=TRANSLATION_REVIEW_STAGE,
-                        message=review_message,
-                    )
 
             state_manager.set_stage(
                 current_stage_name,

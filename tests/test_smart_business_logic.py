@@ -1034,6 +1034,319 @@ class TestAutoTranslationReview:
 
 
 # ===================================================================
+# PR#3C-b3c — translation_review integration data shapes
+# ===================================================================
+
+
+class TestTranslationReviewProcessIntegrationShapes:
+    """PR#3C-b3c functional integration tests.
+
+    These mirror the EXACT input dicts process.py's smart
+    auto-translation-review branch builds at runtime, then pipe them
+    through ``evaluate_translation_review`` to verify the decision
+    matches the production contract. The anchor tests in
+    ``test_smart_studio_gate_acceptance.py`` cover the source-level
+    shape (imports + calls + branches); these cover the runtime
+    behaviour with real DubbingSegment / speaker_structure_profiles.
+
+    Without functional tests like these, a refactor that silently
+    changes a field name or dict key (e.g. ``speaker_role`` ↔
+    ``role``) would slip through the anchor guard and surface only as
+    a production smart job always failing or always passing.
+
+    Codex 第二十三轮 P1 style: pin the wiring with REAL objects, not
+    just regex/anchor search.
+    """
+
+    def _build_segments(self, speaker_ids, *, cn_text="测试"):
+        """Build minimal DubbingSegment list."""
+        from services.gemini.translator import DubbingSegment
+
+        return [
+            DubbingSegment(
+                segment_id=i,
+                speaker_id=sid,
+                display_name=sid.upper(),
+                voice_id="voice_x",
+                start_ms=i * 1000,
+                end_ms=(i + 1) * 1000,
+                target_duration_ms=1000,
+                source_text="hello",
+                cn_text=cn_text,
+            )
+            for i, sid in enumerate(speaker_ids)
+        ]
+
+    def _build_smart_translation_input(
+        self, segments, *, glossary_total=0, glossary_preserved=0,
+    ):
+        """Mirror process.py:3070+ smart translation input dict shape."""
+        return {
+            "glossary_total_terms": glossary_total,
+            "glossary_preserved_terms": glossary_preserved,
+            "length_overflow_rate": None,
+            "rewrite_attempted": False,
+            "subtitle_source_text_sha256": None,
+            "final_spoken_text_sha256": None,
+            "segments": [
+                {"segment_id": str(s.segment_id), "speaker_id": s.speaker_id}
+                for s in segments
+            ],
+        }
+
+    def _build_smart_speaker_stats(self, profiles):
+        """Mirror process.py:3120+ speaker_stats dict shape."""
+        uncertain_share = sum(
+            float(p.get("speaker_duration_share") or 0.0)
+            for p in profiles.values()
+            if isinstance(p, dict)
+            and str(p.get("speaker_role") or "").lower() == "fragmented"
+        )
+        return {
+            "speakers": [
+                {
+                    "speaker_id": sid,
+                    "role": p.get("speaker_role"),
+                    "duration_share": p.get("speaker_duration_share"),
+                }
+                for sid, p in profiles.items()
+                if isinstance(p, dict)
+            ],
+            "uncertain_speaker_duration_share": uncertain_share,
+            "asr_speaker_count": len(profiles),
+        }
+
+    def _build_smart_clone_sample_stats(self, profiles):
+        """Mirror process.py:3160+ clone_sample_stats heuristic."""
+        eligible = sum(
+            1
+            for p in profiles.values()
+            if isinstance(p, dict)
+            and int(p.get("speaker_duration_ms") or 0) >= 10_000
+        )
+        return {"eligible_speakers": eligible}
+
+    def test_happy_path_auto_approved_with_two_eligible_speakers(self):
+        """A 2-speaker clean run with glossary preservation rate above
+        threshold + both speakers ≥10s sample → auto_approved."""
+        from services.smart.auto_translation_review import (
+            evaluate_translation_review,
+        )
+
+        segments = self._build_segments(["speaker_a"] * 5 + ["speaker_b"] * 5)
+        translation_input = self._build_smart_translation_input(
+            segments, glossary_total=10, glossary_preserved=9,
+        )
+        profiles = {
+            "speaker_a": {
+                "speaker_role": "primary",
+                "speaker_duration_share": 0.55,
+                "speaker_duration_ms": 25_000,  # 25s >= 10s threshold
+            },
+            "speaker_b": {
+                "speaker_role": "primary",
+                "speaker_duration_share": 0.45,
+                "speaker_duration_ms": 20_000,
+            },
+        }
+        speaker_stats = self._build_smart_speaker_stats(profiles)
+        clone_sample_stats = self._build_smart_clone_sample_stats(profiles)
+
+        decision = evaluate_translation_review(
+            translation_result=translation_input,
+            speaker_stats=speaker_stats,
+            clone_sample_stats=clone_sample_stats,
+        )
+        assert decision.auto_approved is True, (
+            f"Expected auto_approved=True with 2-speaker clean run; "
+            f"got reason={decision.reason_code!r} "
+            f"failed_check={decision.failed_check!r}.\n"
+            f"metrics={decision.metrics}"
+        )
+        assert decision.reason_code is None
+        assert decision.failed_check is None
+
+    def test_glossary_below_threshold_routes_to_pause(self):
+        """Glossary preservation rate < 80% → reject with
+        ``glossary_preservation_low_X.XX`` reason."""
+        from services.smart.auto_translation_review import (
+            evaluate_translation_review,
+        )
+
+        segments = self._build_segments(["speaker_a"] * 4 + ["speaker_b"] * 4)
+        translation_input = self._build_smart_translation_input(
+            segments, glossary_total=10, glossary_preserved=5,  # 50% < 80%
+        )
+        profiles = {
+            "speaker_a": {
+                "speaker_role": "primary",
+                "speaker_duration_share": 0.55,
+                "speaker_duration_ms": 25_000,
+            },
+            "speaker_b": {
+                "speaker_role": "primary",
+                "speaker_duration_share": 0.45,
+                "speaker_duration_ms": 20_000,
+            },
+        }
+        decision = evaluate_translation_review(
+            translation_result=translation_input,
+            speaker_stats=self._build_smart_speaker_stats(profiles),
+            clone_sample_stats=self._build_smart_clone_sample_stats(profiles),
+        )
+        assert decision.auto_approved is False
+        assert decision.reason_code is not None
+        assert decision.reason_code.startswith("glossary_preservation_low_"), (
+            f"Expected glossary_preservation_low_ reason; got "
+            f"{decision.reason_code!r}"
+        )
+        assert decision.failed_check == "glossary_preservation"
+
+    def test_uncertain_speaker_share_too_high_routes_to_pause(self):
+        """High fragmented-speaker share (> 10%) → reject with
+        ``high_uncertain_speaker_share_X.XX``."""
+        from services.smart.auto_translation_review import (
+            evaluate_translation_review,
+        )
+
+        segments = self._build_segments(["speaker_a"] * 6 + ["speaker_b"] * 2)
+        translation_input = self._build_smart_translation_input(
+            segments, glossary_total=0,
+        )
+        profiles = {
+            "speaker_a": {
+                "speaker_role": "primary",
+                "speaker_duration_share": 0.80,
+                "speaker_duration_ms": 40_000,
+            },
+            "speaker_b": {
+                # Fragmented speaker with 20% share → uncertain_share=0.20 > 0.10
+                "speaker_role": "fragmented",
+                "speaker_duration_share": 0.20,
+                "speaker_duration_ms": 8_000,  # < 10s, won't count for clone
+            },
+        }
+        decision = evaluate_translation_review(
+            translation_result=translation_input,
+            speaker_stats=self._build_smart_speaker_stats(profiles),
+            clone_sample_stats=self._build_smart_clone_sample_stats(profiles),
+        )
+        assert decision.auto_approved is False
+        assert decision.reason_code is not None
+        assert decision.reason_code.startswith(
+            "high_uncertain_speaker_share_"
+        ), (
+            f"Expected high_uncertain_speaker_share_ reason; got "
+            f"{decision.reason_code!r}.\n"
+            f"metrics={decision.metrics}"
+        )
+
+    def test_low_clone_eligible_ratio_routes_to_pause(self):
+        """< 50% of ASR speakers with ≥10s sample → reject with
+        ``low_clone_eligible_ratio_X/Y`` (forward slash, matches
+        simulator format per Codex 第九轮 P1-3)."""
+        from services.smart.auto_translation_review import (
+            evaluate_translation_review,
+        )
+
+        segments = self._build_segments(
+            ["speaker_a", "speaker_b", "speaker_c", "speaker_d"]
+        )
+        translation_input = self._build_smart_translation_input(
+            segments, glossary_total=10, glossary_preserved=10,
+        )
+        # 4 speakers; only 1 has ≥10s sample → ratio 1/4 = 0.25 < 0.50.
+        profiles = {
+            "speaker_a": {
+                "speaker_role": "primary",
+                "speaker_duration_share": 0.30,
+                "speaker_duration_ms": 15_000,  # eligible
+            },
+            "speaker_b": {
+                "speaker_role": "primary",
+                "speaker_duration_share": 0.25,
+                "speaker_duration_ms": 8_000,  # NOT eligible
+            },
+            "speaker_c": {
+                "speaker_role": "primary",
+                "speaker_duration_share": 0.25,
+                "speaker_duration_ms": 5_000,  # NOT eligible
+            },
+            "speaker_d": {
+                "speaker_role": "primary",
+                "speaker_duration_share": 0.20,
+                "speaker_duration_ms": 4_000,  # NOT eligible
+            },
+        }
+        decision = evaluate_translation_review(
+            translation_result=translation_input,
+            speaker_stats=self._build_smart_speaker_stats(profiles),
+            clone_sample_stats=self._build_smart_clone_sample_stats(profiles),
+        )
+        assert decision.auto_approved is False
+        assert decision.reason_code is not None
+        assert decision.reason_code.startswith("low_clone_eligible_ratio_"), (
+            f"Expected low_clone_eligible_ratio_ reason; got "
+            f"{decision.reason_code!r}"
+        )
+        # Reason format: "low_clone_eligible_ratio_<eligible>/<asr>"
+        assert "/" in decision.reason_code, (
+            f"reason_code must use forward-slash format "
+            f"(simulator-compatible); got {decision.reason_code!r}"
+        )
+
+    def test_clone_eligible_heuristic_uses_10s_floor(self):
+        """The clone-eligibility heuristic in process.py uses ≥10s
+        sample as the eligibility floor (matches MIN_CLONE_SAMPLE_SECONDS
+        in auto_voice_review). Pin the boundary at exactly 10s."""
+        profiles_boundary = {
+            "speaker_a": {
+                "speaker_role": "primary",
+                "speaker_duration_ms": 10_000,  # exactly 10s — eligible
+            },
+            "speaker_b": {
+                "speaker_role": "primary",
+                "speaker_duration_ms": 9_999,  # just below — NOT eligible
+            },
+        }
+        clone_sample_stats = self._build_smart_clone_sample_stats(
+            profiles_boundary
+        )
+        assert clone_sample_stats == {"eligible_speakers": 1}, (
+            f"Clone-eligibility floor must be ≥10s (10_000ms inclusive); "
+            f"got {clone_sample_stats}"
+        )
+
+    def test_compliance_block_short_circuits_to_pause(self):
+        """compliance_block=True → reject with
+        ``compliance_high_risk`` regardless of other metrics."""
+        from services.smart.auto_translation_review import (
+            evaluate_translation_review,
+        )
+
+        segments = self._build_segments(["speaker_a"] * 5)
+        translation_input = self._build_smart_translation_input(
+            segments, glossary_total=10, glossary_preserved=10,
+        )
+        profiles = {
+            "speaker_a": {
+                "speaker_role": "primary",
+                "speaker_duration_share": 1.0,
+                "speaker_duration_ms": 50_000,
+            },
+        }
+        decision = evaluate_translation_review(
+            translation_result=translation_input,
+            speaker_stats=self._build_smart_speaker_stats(profiles),
+            clone_sample_stats=self._build_smart_clone_sample_stats(profiles),
+            compliance_block=True,
+        )
+        assert decision.auto_approved is False
+        assert decision.reason_code == "compliance_high_risk"
+        assert decision.failed_check == "content_compliance"
+
+
+# ===================================================================
 # retry_budget
 # ===================================================================
 

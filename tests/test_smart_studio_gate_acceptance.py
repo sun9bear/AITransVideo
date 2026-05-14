@@ -1183,3 +1183,181 @@ class TestProcessPyStudioGateWidening:
             "field name verbatim.\n"
             f"Block:\n{overlay_window}"
         )
+
+    # ===================================================================
+    # PR#3C-b3c — translation_review smart-aware inline auto-approve
+    # ===================================================================
+
+    def test_translation_review_smart_branch_present(self):
+        """PR#3C-b3c — translation_review trigger gains a smart inline
+        auto-approve path symmetric to voice_selection_review. Verifies:
+          - gate uses ``job_effective_pipeline_mode == "smart"``
+            (Codex 第十八轮 P1-2 — effective, not raw)
+          - evaluate_translation_review is called
+          - rejection branch fires emit_handoff_markers with
+            TRANSLATION_REVIEW_STAGE and downgraded_to_studio
+          - approved branch sets REVIEW_STATUS_APPROVED and emits
+            intermediate smart_state marker (no top-level status key
+            per Codex 第十八轮 P0-1)
+          - no paused-return on approved (fall through to alignment)
+        """
+        source = self._source()
+
+        # Anchor: comment marker on the smart inline translation branch.
+        anchor = "Smart inline auto-translation-review path"
+        idx = source.find(anchor)
+        assert idx >= 0, (
+            f"PR#3C-b3c anchor {anchor!r} missing — smart translation "
+            f"review branch not added to process.py."
+        )
+        block = source[idx : idx + 16000]
+
+        # Imports — co-located so a future refactor doesn't accidentally
+        # move them outside the smart branch (which would make the
+        # legacy path import them too, no functional harm but signals
+        # confusion about who owns the call).
+        for required in (
+            "from services.smart.auto_translation_review import",
+            "evaluate_translation_review",
+            "from services.smart.handoff import emit_handoff_markers",
+            "from services.smart.state import emit_smart_state_marker",
+            "check_glossary_preservation",
+        ):
+            assert required in block, (
+                f"smart translation-review branch missing required "
+                f"reference {required!r}. Block (first 1200 chars):\n"
+                f"{block[:1200]}"
+            )
+
+        # Gate uses effective mode (P1-2).
+        # We anchor on the if-line BEFORE the comment block.
+        gate_window = source[max(0, idx - 600) : idx + 100]
+        assert 'job_effective_pipeline_mode == "smart"' in gate_window, (
+            "Smart translation-review gate must use "
+            "``job_effective_pipeline_mode == \"smart\"`` (Codex 第十八轮 "
+            "P1-2) so downgraded smart jobs don't re-enter the smart "
+            "branch on resume.\n"
+            f"Window:\n{gate_window}"
+        )
+
+    def test_translation_review_smart_rejection_emits_handoff(self):
+        """Rejection branch — must fire emit_handoff_markers with
+        TRANSLATION_REVIEW_STAGE + downgraded_to_studio + reason_code,
+        then paused-return."""
+        source = self._source()
+        idx = source.find("Smart inline auto-translation-review path")
+        assert idx >= 0
+        block = source[idx : idx + 16000]
+
+        # Find the rejection branch (if not auto_approved).
+        rejection_anchor = "if not _smart_translation_decision.auto_approved:"
+        rej_idx = block.find(rejection_anchor)
+        assert rej_idx >= 0, (
+            "Smart translation-review branch missing the "
+            "``if not auto_approved:`` rejection check.\n"
+            f"Block:\n{block[:2000]}"
+        )
+        rejection_window = block[rej_idx : rej_idx + 2500]
+
+        for required in (
+            "emit_handoff_markers(",
+            "TRANSLATION_REVIEW_STAGE",
+            "REVIEW_STATUS_PENDING",
+            "downgraded_to_studio",
+            "_smart_translation_decision.reason_code",
+            "self._build_paused_result(",
+        ):
+            assert required in rejection_window, (
+                f"Translation-review rejection branch missing required "
+                f"call/reference {required!r}.\n"
+                f"Rejection window:\n{rejection_window}"
+            )
+
+    def test_translation_review_smart_approval_falls_through(self):
+        """Approval branch — must set_stage(APPROVED), emit
+        intermediate smart_state marker (NO ``status`` key per Codex
+        第十八轮 P0-1), and NOT paused-return."""
+        source = self._source()
+        idx = source.find("Smart inline auto-translation-review path")
+        assert idx >= 0
+        block = source[idx : idx + 16000]
+
+        # Approval branch lives AFTER the `if not auto_approved:` return.
+        approval_anchor = "Auto-approved: set_stage(APPROVED) + intermediate"
+        appr_idx = block.find(approval_anchor)
+        assert appr_idx >= 0, (
+            "Smart translation-review branch missing the approval "
+            "anchor comment. Pin so future refactors keep the "
+            "set_stage(APPROVED) + intermediate-marker contract.\n"
+            f"Block:\n{block[:2000]}"
+        )
+        approval_window = block[appr_idx : appr_idx + 1500]
+
+        # set_stage(APPROVED).
+        assert "REVIEW_STATUS_APPROVED" in approval_window, (
+            "Approval branch must set_stage with REVIEW_STATUS_APPROVED.\n"
+            f"Window:\n{approval_window}"
+        )
+        assert "TRANSLATION_REVIEW_STAGE" in approval_window
+        # Intermediate marker — no "status" key.
+        marker_idx = approval_window.find("emit_smart_state_marker(")
+        assert marker_idx >= 0, (
+            "Approval branch must call emit_smart_state_marker for "
+            "the auto_translation_review audit dict.\n"
+            f"Window:\n{approval_window}"
+        )
+        marker_payload = approval_window[marker_idx : marker_idx + 600]
+        assert '"status"' not in marker_payload, (
+            "emit_smart_state_marker in the smart translation-review "
+            "approve branch carries a top-level ``status`` key — "
+            "Codex 第十八轮 P0-1 forbids any non-terminal status here "
+            "because EDITABLE_SMART_STATE_STATUSES only accepts "
+            "``completed`` / ``downgraded_to_studio``. Pollution "
+            "would lock the job out of editing/jianying until the "
+            "terminal-finalize marker lands.\n"
+            f"Marker payload:\n{marker_payload}"
+        )
+
+        # NO paused-return on approval — pipeline must fall through.
+        # Search for ``return self._build_paused_result`` in the
+        # approval window; if present, smart would block the same way
+        # legacy Studio does, defeating the auto-approve story.
+        assert "return self._build_paused_result(" not in approval_window, (
+            "Approval branch has a paused-return — smart inline "
+            "auto-approve MUST fall through to alignment, not pause. "
+            "If you need to pause here for some reason, document why "
+            "in a docstring and pin a separate anchor test for that "
+            "shape; don't silently lose the auto-approve.\n"
+            f"Window:\n{approval_window}"
+        )
+
+    def test_translation_review_legacy_studio_path_still_paused(self):
+        """Regression — the legacy Studio path under the same review
+        trigger must still set_stage(PENDING) + paused-return. This
+        is the non-smart else-branch right after the smart branch."""
+        source = self._source()
+        idx = source.find("Smart inline auto-translation-review path")
+        assert idx >= 0
+
+        # Walk forward from the smart block to find the legacy
+        # ``else:`` branch (anchored on the comment marker).
+        legacy_anchor = "Legacy Studio path: pending + paused-return"
+        legacy_idx = source.find(legacy_anchor, idx)
+        assert legacy_idx >= 0, (
+            f"Legacy Studio translation-review path anchor missing "
+            f"after the smart branch — the else: branch should be "
+            f"preserved verbatim from pre-b3c behaviour."
+        )
+        legacy_window = source[legacy_idx : legacy_idx + 1500]
+
+        for required in (
+            "REVIEW_STATUS_PENDING",
+            "TRANSLATION_REVIEW_STAGE",
+            "等待在 Web UI 确认翻译稿",
+            "self._build_paused_result(",
+        ):
+            assert required in legacy_window, (
+                f"Legacy Studio translation-review path missing "
+                f"required {required!r}.\n"
+                f"Window:\n{legacy_window}"
+            )
