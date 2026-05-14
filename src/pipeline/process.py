@@ -2251,7 +2251,15 @@ class ProcessPipeline:
                             # Migration is best-effort; pipeline continues with
                             # legacy payload (frontend just won't show backups).
                             print(f"[S2.5] payload migration skipped: {exc}")
-            elif config.wait_for_review and job_requires_review and job_service_mode == "studio":
+            elif config.wait_for_review and job_requires_review and job_service_mode in {"studio", "smart"}:
+                # Plan §6.0.5 + §6.2.1 + Codex 第七轮 F2 + 第十六轮 PR#3C-b2.
+                # Smart MUST NOT pause-return here — it inline auto-approves
+                # voice selection via evaluate_voice_review, applying the
+                # per-speaker decision to _speaker_voices/_speaker_providers
+                # in this same frame, then falls through. Only on PAUSED
+                # outcome (consent denial / quota exhaust mid-flight /
+                # provider failure exhausted) does smart emit handoff
+                # markers + pause-return.
                 vs_payload = self._build_voice_selection_review_payload(
                     transcript_result=transcript_result,
                     tts_provider=job_tts_provider,
@@ -2267,47 +2275,190 @@ class ProcessPipeline:
                     probe_segments=_probe_segments or None,
                     speaker_structure_profiles=_speaker_structure_profiles,
                 )
-                review_state_manager.set_stage(
-                    VOICE_SELECTION_REVIEW_STAGE,
-                    status=REVIEW_STATUS_PENDING,
-                    payload=vs_payload,
-                    activate=True,
-                )
-                review_message = "请为每位说话人选择或克隆配音音色"
-                print(f"[S2.5] {review_message}")
-                state_manager.set_stage(
-                    "voice_selection",
-                    StageStatus.RUNNING,
-                    {"execution_mode": "waiting_for_voice_selection"},
-                )
-                current_stage_name = None
-                print(
-                    self._build_web_review_marker(
-                        stage=VOICE_SELECTION_REVIEW_STAGE,
+
+                if job_service_mode == "smart":
+                    # --- Smart inline auto-approve path ---
+                    import uuid as _smart_uuid
+                    from services.smart.auto_voice_review import (
+                        VoiceReviewChoice,
+                        VoiceReviewOutcome,
+                        VoiceReviewSpeakerInput,
+                        evaluate_voice_review,
+                    )
+                    from services.smart.handoff import emit_handoff_markers
+                    from services.smart.state import emit_smart_state_marker
+                    from services.smart_wiring import build_smart_clone_provider
+
+                    smart_consent = _snap("smart_consent", {}) or {}
+
+                    # Construct main_speakers candidates from the freshly-
+                    # built vs_payload. PR#3C-b3 will plug evaluate_eligibility
+                    # in upstream so the list reflects "main configured
+                    # dubbing speakers" per plan §6.1; b2 takes the
+                    # vs_payload speakers verbatim since that's what
+                    # Studio human-review would have seen.
+                    #
+                    # source_audio_path here is the whole-file path —
+                    # per-speaker ffmpeg concat lands in b3 alongside real
+                    # CloneProvider wiring. FakeCloneProvider tests don't
+                    # care; the real adapter will fail loudly when b3
+                    # plumbing is missing.
+                    _smart_main_speakers = [
+                        VoiceReviewSpeakerInput(
+                            speaker_id=sp.get("speaker_id", ""),
+                            speaker_name=sp.get("speaker_name", "") or sp.get("speaker_id", ""),
+                            sample_seconds=float(sp.get("total_duration_s") or 0.0),
+                            source_audio_path=source_audio_path,
+                        )
+                        for sp in (vs_payload.get("speakers") or [])
+                        if isinstance(sp, dict) and sp.get("speaker_id")
+                    ]
+                    _smart_clone_provider = build_smart_clone_provider()
+                    _smart_voice_review = evaluate_voice_review(
+                        main_speakers=_smart_main_speakers,
+                        smart_consent=smart_consent,
+                        clone_provider=_smart_clone_provider,
+                        # b3 will replace this stub with the real Gateway /
+                        # MiniMax account quota snapshot.
+                        voice_library_quota_remaining=100,
+                        smart_decision_id_factory=lambda: _smart_uuid.uuid4().hex,
+                    )
+
+                    if _smart_voice_review.outcome == VoiceReviewOutcome.PAUSED:
+                        # Failure: emit_handoff_markers three-tuple — plan
+                        # §6.0.5 + §6.5 + Codex 第七轮 F1/F2.
+                        emit_handoff_markers(
+                            review_state_manager=review_state_manager,
+                            review_stage=VOICE_SELECTION_REVIEW_STAGE,
+                            review_payload=vs_payload,
+                            review_pending_status=REVIEW_STATUS_PENDING,
+                            smart_state_update={
+                                "status": "downgraded_to_studio",
+                                "reason": _smart_voice_review.pause_reason
+                                or "voice_review_paused",
+                                "handoff_stage": VOICE_SELECTION_REVIEW_STAGE,
+                            },
+                            project_dir=final_project_dir,
+                            user_message=(
+                                "智能版自动音色决策需要人工接管:"
+                                f" {_smart_voice_review.pause_reason or 'paused'}"
+                            ),
+                            web_review_marker_builder=self._build_web_review_marker,
+                        )
+                        state_manager.set_stage(
+                            "voice_selection",
+                            StageStatus.RUNNING,
+                            {"execution_mode": "smart_handoff_voice_review"},
+                        )
+                        current_stage_name = None
+                        _write_usage_summary(usage_meter)
+                        return self._build_paused_result(
+                            project_dir=final_project_dir,
+                            stage=VOICE_SELECTION_REVIEW_STAGE,
+                            message="智能版自动音色决策需要人工接管",
+                        )
+
+                    # Auto-approved: apply per-speaker decisions to
+                    # local _speaker_voices/_speaker_providers AND the
+                    # approved payload so set_stage(APPROVED) snapshots
+                    # the final state. Plan §6.0.5 末段: set_stage alone
+                    # is insufficient — downstream pipeline reads the
+                    # local dicts, not the review state, so we MUST
+                    # apply here in-frame.
+                    _smart_approved_payload = dict(vs_payload)
+                    _smart_approved_payload["auto_approved"] = True
+                    _smart_approved_speakers = list(
+                        _smart_approved_payload.get("speakers") or []
+                    )
+                    _smart_speakers_by_id = {
+                        sp.get("speaker_id"): sp
+                        for sp in _smart_approved_speakers
+                        if isinstance(sp, dict)
+                    }
+                    for _dec in _smart_voice_review.decisions:
+                        _sp_entry = _smart_speakers_by_id.get(_dec.speaker_id)
+                        if not _sp_entry:
+                            continue
+                        if _dec.choice == VoiceReviewChoice.CLONED:
+                            _sp_entry["voice_id"] = _dec.cloned_voice_id
+                            _sp_entry["tts_provider"] = _dec.cloned_provider_name
+                            _sp_entry["auto_decision"] = "cloned"
+                        elif _dec.choice == VoiceReviewChoice.PRESET:
+                            # Auto-matched preset already stamped by
+                            # _build_voice_selection_review_payload via
+                            # _auto_match_for_provider (process.py:4309).
+                            # b3 will plug voice_match_resolver explicitly
+                            # for the resolution; b2 trusts auto_matched_voice.
+                            _sp_entry["voice_id"] = (
+                                _sp_entry.get("auto_matched_voice") or ""
+                            )
+                            _sp_entry["auto_decision"] = "preset"
+                            _sp_entry["smart_clone_skipped_reason"] = _dec.reason_code
+                        _sp_id = _dec.speaker_id
+                        _sp_voice = _sp_entry.get("voice_id")
+                        _sp_prov = _sp_entry.get("tts_provider")
+                        if _sp_id and _sp_voice:
+                            _speaker_voices[_sp_id] = _sp_voice
+                        if _sp_id and _sp_prov:
+                            _speaker_providers[_sp_id] = _sp_prov
+
+                    review_state_manager.set_stage(
+                        VOICE_SELECTION_REVIEW_STAGE,
+                        status=REVIEW_STATUS_APPROVED,
+                        payload=_smart_approved_payload,
+                        activate=True,
+                    )
+                    emit_smart_state_marker(
+                        {
+                            "status": "voice_review_auto_approved",
+                            "decisions_count": len(_smart_voice_review.decisions),
+                        }
+                    )
+                    print(
+                        f"[S2.5] Smart 自动批准 voice_selection_review:"
+                        f" {len(_smart_voice_review.decisions)} 决策"
+                    )
+                    # Fall through to next pipeline stage — NO paused-return.
+                else:
+                    # --- Studio path: original pending-pause behaviour ---
+                    review_state_manager.set_stage(
+                        VOICE_SELECTION_REVIEW_STAGE,
+                        status=REVIEW_STATUS_PENDING,
+                        payload=vs_payload,
+                        activate=True,
+                    )
+                    review_message = "请为每位说话人选择或克隆配音音色"
+                    print(f"[S2.5] {review_message}")
+                    state_manager.set_stage(
+                        "voice_selection",
+                        StageStatus.RUNNING,
+                        {"execution_mode": "waiting_for_voice_selection"},
+                    )
+                    current_stage_name = None
+                    print(
+                        self._build_web_review_marker(
+                            stage=VOICE_SELECTION_REVIEW_STAGE,
+                            project_dir=final_project_dir,
+                            message=review_message,
+                        )
+                    )
+                    _write_usage_summary(usage_meter)
+                    return self._build_paused_result(
                         project_dir=final_project_dir,
+                        stage=VOICE_SELECTION_REVIEW_STAGE,
                         message=review_message,
                     )
-                )
-                _write_usage_summary(usage_meter)
-                return self._build_paused_result(
-                    project_dir=final_project_dir,
-                    stage=VOICE_SELECTION_REVIEW_STAGE,
-                    message=review_message,
-                )
 
             # --- Pre-TTS voice validation (cloned voices, before translation) ---
             #
-            # Plan §4.3 末段 row 4. PR#3C-b1 attempt at widening this gate
-            # to {"studio", "smart"} was reverted in PR#3C-b1-fix per
-            # Codex 第十六轮 P1: the ``expired_voices`` branch below
-            # set_stages PENDING + prints a web review marker + returns
-            # a paused result, but does NOT emit ``[SMART_STATE]`` /
-            # ``emit_handoff_markers()``. Letting smart hit this branch
-            # without the smart_state marker silently re-introduces the
-            # 7th-round F1/F2 blocker (process_runner / Gateway billing
-            # see smart_state=running while job lands waiting_for_review).
-            # Widening + handoff plumbing land together in PR#3C-b2.
-            if config.wait_for_review and job_service_mode == "studio":
+            # Plan §4.3 末段 row 4. PR#3C-b2 widens this gate to also
+            # cover smart jobs — the auto_voice_review-picked cloned
+            # voice could have expired between trigger time and TTS.
+            # When smart hits the expired branch we route through
+            # emit_handoff_markers() three-tuple (Codex 第七轮 F1/F2 +
+            # 第十六轮 P1) so JobRecord.smart_state is mirrored to
+            # Gateway DB before billing reads it.
+            if config.wait_for_review and job_service_mode in {"studio", "smart"}:
                 expired_voices = self._validate_cloned_voices(_speaker_voices)
                 if expired_voices:
                     for ev_id in expired_voices:
@@ -2329,21 +2480,46 @@ class ProcessPipeline:
                     )
                     vs_payload["expired_voice_ids"] = expired_voices
                     vs_payload["validation_error"] = f"检测到 {len(expired_voices)} 个音色已失效，请重新选择"
-                    review_state_manager.set_stage(
-                        VOICE_SELECTION_REVIEW_STAGE,
-                        status=REVIEW_STATUS_PENDING,
-                        payload=vs_payload,
-                        activate=True,
-                    )
                     review_message = f"检测到 {len(expired_voices)} 个音色已失效，请重新选择"
-                    print(f"[S2.5] {review_message}")
-                    print(
-                        self._build_web_review_marker(
-                            stage=VOICE_SELECTION_REVIEW_STAGE,
+
+                    if job_service_mode == "smart":
+                        # Smart expiry → handoff: smart can't auto-recover
+                        # from an externally-revoked clone (admin cleanup,
+                        # account quota turnover). User picks fresh voices
+                        # via Studio human-review.
+                        from services.smart.handoff import emit_handoff_markers
+
+                        emit_handoff_markers(
+                            review_state_manager=review_state_manager,
+                            review_stage=VOICE_SELECTION_REVIEW_STAGE,
+                            review_payload=vs_payload,
+                            review_pending_status=REVIEW_STATUS_PENDING,
+                            smart_state_update={
+                                "status": "downgraded_to_studio",
+                                "reason": "cloned_voice_expired",
+                                "handoff_stage": VOICE_SELECTION_REVIEW_STAGE,
+                                "expired_voice_ids": list(expired_voices),
+                            },
                             project_dir=final_project_dir,
-                            message=review_message,
+                            user_message=review_message,
+                            web_review_marker_builder=self._build_web_review_marker,
                         )
-                    )
+                    else:
+                        # Studio: original behaviour — set_stage + web review marker
+                        review_state_manager.set_stage(
+                            VOICE_SELECTION_REVIEW_STAGE,
+                            status=REVIEW_STATUS_PENDING,
+                            payload=vs_payload,
+                            activate=True,
+                        )
+                        print(f"[S2.5] {review_message}")
+                        print(
+                            self._build_web_review_marker(
+                                stage=VOICE_SELECTION_REVIEW_STAGE,
+                                project_dir=final_project_dir,
+                                message=review_message,
+                            )
+                        )
                     _write_usage_summary(usage_meter)
                     return self._build_paused_result(
                         project_dir=final_project_dir,

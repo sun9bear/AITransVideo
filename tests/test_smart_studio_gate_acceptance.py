@@ -551,32 +551,43 @@ class TestProcessPyStudioGateWidening:
     def _source(self) -> str:
         return _PROCESS_PY.read_text(encoding="utf-8")
 
-    def test_pre_tts_voice_validation_gate_still_literal_studio_pending_handoff(self):
-        """Plan §4.3 末段 row 4. PR#3C-b1's first cut widened this gate
-        to {"studio", "smart"}, but Codex 第十六轮 P1 caught that the
-        ``if expired_voices:`` branch underneath does set_stage(PENDING)
-        + web review marker + paused-return WITHOUT emitting
-        ``[SMART_STATE]`` — re-introducing the 7th-round F1/F2 silent
-        state-mismatch blocker.
-
-        So PR#3C-b1 was reverted to literal Studio-only at this gate.
-        PR#3C-b2 will widen + plumb ``emit_handoff_markers()`` here
-        together. This assertion locks the deferral; when PR#3C-b2
-        lands the widening, update this test to the widened form."""
-        block = _find_anchor_block(
+    def test_pre_tts_voice_validation_gate_widened_with_handoff_for_smart(self):
+        """Plan §4.3 末段 row 4 — PR#3C-b2 lands the widening alongside
+        the matching ``emit_handoff_markers()`` plumbing. The expired-
+        voices branch under this gate now has a smart-specific path
+        that emits the three-marker handoff tuple (set_stage PENDING
+        + ``[SMART_STATE]`` + web review marker) before the paused
+        return, so process_runner / Gateway billing see the consistent
+        smart_state.status=downgraded_to_studio when the smart job
+        lands waiting_for_review."""
+        # Gate itself widened (anchor: the gate's preceding header).
+        gate_block = _find_anchor_block(
             self._source(),
             "Pre-TTS voice validation (cloned voices, before translation)",
-            window=14,
+            window=18,
         )
-        assert 'job_service_mode == "studio"' in block, (
-            "Pre-TTS voice validation gate has been widened without the "
-            "matching smart_state handoff plumbing. PR#3C-b1 left this "
-            "gate literal Studio-only after Codex 第十六轮 P1 caught the "
-            "expired-voices branch was missing emit_handoff_markers(). "
-            "If you widened deliberately, you MUST also emit "
-            "[SMART_STATE] marker (see services.smart.handoff) before "
-            "the paused-return — and update this test. "
-            f"Block:\n{block}"
+        assert 'job_service_mode in {"studio", "smart"}' in gate_block, (
+            "Pre-TTS voice validation gate is no longer widened for smart. "
+            f"Block:\n{gate_block}"
+        )
+
+        # Branch under the gate emits the smart handoff three-tuple
+        # for expired smart jobs — anchor on the smart-branch docstring
+        # comment placed just before the emit_handoff_markers() call.
+        branch_block = _find_anchor_block(
+            self._source(),
+            "Smart expiry → handoff",
+            window=20,
+        )
+        assert "emit_handoff_markers" in branch_block, (
+            "Expired-voices smart branch is missing emit_handoff_markers() "
+            "call — handoff three-tuple was the whole point of this "
+            "PR#3C-b2 widening. Block:\n"
+            f"{branch_block}"
+        )
+        assert '"cloned_voice_expired"' in branch_block, (
+            "smart_state_update reason changed away from cloned_voice_expired. "
+            f"Block:\n{branch_block}"
         )
 
     def test_speed_catalog_lookup_gate_widened_for_smart(self):
@@ -599,27 +610,42 @@ class TestProcessPyStudioGateWidening:
             f"Block:\n{block}"
         )
 
-    def test_voice_selection_review_trigger_still_literal_studio(self):
-        """Plan §4.3 末段 row 3 — this gate REMAINS literal Studio-only
-        until PR#3C-b2 lands the inline auto-approve path. Widening it
-        standalone would force smart jobs into the paused-return Studio
-        flow, breaking the §6.0.5 'smart doesn't pause-return' contract.
-
-        Anchor on the ``elif`` line itself (rather than the section
-        header 90+ lines above) so the window stays tight."""
-        block = _find_anchor_block(
+    def test_voice_selection_review_trigger_widened_with_inline_auto_approve(self):
+        """Plan §4.3 末段 row 3 + §6.0.5 + §6.2.1 — PR#3C-b2 lands the
+        widening AND the smart-inline-auto-approve path together. Smart
+        jobs must NOT pause-return here (§6.0.5 invariant); instead they
+        invoke ``evaluate_voice_review`` and apply per-speaker decisions
+        in the same frame, falling through to the next pipeline stage."""
+        gate_block = _find_anchor_block(
             self._source(),
             "elif config.wait_for_review and job_requires_review and job_service_mode",
             window=1,
         )
-        # PR#3C-b2 territory — still literal Studio.
-        assert 'job_service_mode == "studio"' in block, (
-            "voice_selection_review trigger has been widened. PR#3C-b1 left "
-            "this gate intentionally literal until inline auto-approve "
-            "(PR#3C-b2) lands. If you widened deliberately, update "
-            "test_smart_studio_gate_acceptance.py to reflect the new state. "
-            f"Block:\n{block}"
+        assert 'job_service_mode in {"studio", "smart"}' in gate_block, (
+            "voice_selection_review trigger is no longer widened for smart. "
+            f"Block:\n{gate_block}"
         )
+
+        # Verify smart branch calls evaluate_voice_review + handles
+        # both outcomes (PAUSED → emit_handoff_markers; AUTO_APPROVED →
+        # set_stage(APPROVED) + emit_smart_state_marker + fall through).
+        smart_block = _find_anchor_block(
+            self._source(),
+            "Smart inline auto-approve path",
+            window=140,
+        )
+        for required_call in (
+            "evaluate_voice_review",
+            "VoiceReviewOutcome.PAUSED",
+            "emit_handoff_markers",
+            "REVIEW_STATUS_APPROVED",
+            "emit_smart_state_marker",
+        ):
+            assert required_call in smart_block, (
+                f"smart auto-approve branch missing required call "
+                f"{required_call!r}; the §6.0.5 inline-not-paused-return "
+                f"contract relies on it. Block:\n{smart_block}"
+            )
 
     def test_lazy_migration_gate_still_literal_studio(self):
         """The 'rebuild auto_matched_by_provider' lazy migration sits
