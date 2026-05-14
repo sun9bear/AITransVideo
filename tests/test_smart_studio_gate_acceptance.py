@@ -560,14 +560,16 @@ class TestProcessPyStudioGateWidening:
         return, so process_runner / Gateway billing see the consistent
         smart_state.status=downgraded_to_studio when the smart job
         lands waiting_for_review."""
-        # Gate itself widened (anchor: the gate's preceding header).
+        # Gate itself widened via effective mode (Codex 第十八轮 P1-2:
+        # pipeline-control reads effective, not raw).
         gate_block = _find_anchor_block(
             self._source(),
             "Pre-TTS voice validation (cloned voices, before translation)",
-            window=18,
+            window=24,
         )
-        assert 'job_service_mode in {"studio", "smart"}' in gate_block, (
-            "Pre-TTS voice validation gate is no longer widened for smart. "
+        assert 'job_effective_pipeline_mode in {"studio", "smart"}' in gate_block, (
+            "Pre-TTS voice validation gate is no longer widened for smart "
+            "via job_effective_pipeline_mode (Codex 第十八轮 P1-2). "
             f"Block:\n{gate_block}"
         )
 
@@ -615,14 +617,30 @@ class TestProcessPyStudioGateWidening:
         widening AND the smart-inline-auto-approve path together. Smart
         jobs must NOT pause-return here (§6.0.5 invariant); instead they
         invoke ``evaluate_voice_review`` and apply per-speaker decisions
-        in the same frame, falling through to the next pipeline stage."""
+        in the same frame, falling through to the next pipeline stage.
+
+        PR#3C-b2-fix additionally locks four invariants from Codex 第十八轮:
+          - P1-2: pipeline-control branch reads ``job_effective_pipeline_mode``
+            not raw ``job_service_mode``
+          - P0-2: smart clone path goes through a fail-closed local stub
+            (``_build_b2_not_wired_clone_provider``), NOT the real
+            ``build_smart_clone_provider`` import
+          - P0-1: ``emit_smart_state_marker`` is called WITHOUT setting
+            a top-level ``status`` (intermediate-state pollution would
+            block editing/jianying gates + settle dispatcher)
+          - P1-1: ``cloned_provider_name`` is written as ``clone_provider``
+            audit field, NOT as ``tts_provider`` (clone vendor != TTS
+            provider for routing)
+        """
+        # Codex 第十八轮 P1-2: gate uses effective pipeline mode.
         gate_block = _find_anchor_block(
             self._source(),
-            "elif config.wait_for_review and job_requires_review and job_service_mode",
+            "elif config.wait_for_review and job_requires_review and job_effective_pipeline_mode",
             window=1,
         )
-        assert 'job_service_mode in {"studio", "smart"}' in gate_block, (
-            "voice_selection_review trigger is no longer widened for smart. "
+        assert 'job_effective_pipeline_mode in {"studio", "smart"}' in gate_block, (
+            "voice_selection_review trigger is no longer widened for smart "
+            "via job_effective_pipeline_mode (Codex 第十八轮 P1-2). "
             f"Block:\n{gate_block}"
         )
 
@@ -632,7 +650,7 @@ class TestProcessPyStudioGateWidening:
         smart_block = _find_anchor_block(
             self._source(),
             "Smart inline auto-approve path",
-            window=140,
+            window=210,
         )
         for required_call in (
             "evaluate_voice_review",
@@ -640,12 +658,76 @@ class TestProcessPyStudioGateWidening:
             "emit_handoff_markers",
             "REVIEW_STATUS_APPROVED",
             "emit_smart_state_marker",
+            # Codex 第十八轮 P0-2: fail-closed clone provider
+            "_build_b2_not_wired_clone_provider",
+            # Codex 第十八轮 P1-1: clone vendor recorded as audit, not as
+            # TTS provider override
+            "_sp_entry[\"clone_provider\"]",
         ):
             assert required_call in smart_block, (
                 f"smart auto-approve branch missing required call "
                 f"{required_call!r}; the §6.0.5 inline-not-paused-return "
                 f"contract relies on it. Block:\n{smart_block}"
             )
+
+        # Codex 第十八轮 P0-2: smart branch MUST NOT *import* the real
+        # ``build_smart_clone_provider`` (the call site is what burns
+        # paid API). Comments may still refer to it for context. Detect
+        # the import statement specifically.
+        for forbidden_import in (
+            "from services.smart_wiring import build_smart_clone_provider",
+            "from services.smart_wiring import (\n                        build_smart_clone_provider",
+        ):
+            assert forbidden_import not in smart_block, (
+                "smart branch imports the real build_smart_clone_provider — "
+                "PR#3C-b2-fix routes smart through the fail-closed stub "
+                "_build_b2_not_wired_clone_provider to avoid burning paid "
+                "clone API with stub source_audio_path + stub "
+                "voice_library_quota. Replacing the stub is PR#3C-b3 "
+                "territory (alongside real ffmpeg + quota snapshot)."
+            )
+        # Verify smart actually CALLS the fail-closed stub.
+        assert "_build_b2_not_wired_clone_provider(" in smart_block, (
+            "smart branch should invoke _build_b2_not_wired_clone_provider() "
+            "to obtain the fail-closed CloneProvider stub. Codex 第十八轮 P0-2."
+        )
+
+        # Codex 第十八轮 P0-1: smart_state marker MUST NOT carry a
+        # ``status`` key here — intermediate ``voice_review_auto_approved``
+        # would clobber the editable-state predicate in
+        # services.smart.state until the terminal-finalize marker lands.
+        # Find the emit_smart_state_marker call in this block and verify
+        # the payload doesn't set "status".
+        marker_call_idx = smart_block.find("emit_smart_state_marker(")
+        assert marker_call_idx >= 0, (
+            "emit_smart_state_marker call not found in smart auto-approve "
+            "branch — required to bridge JobRecord.smart_state.\n"
+            f"Block:\n{smart_block}"
+        )
+        # Look at the ~6 lines after the call site; status keys would
+        # appear as ``"status":`` somewhere in the dict literal.
+        marker_payload = smart_block[marker_call_idx:marker_call_idx + 400]
+        assert '"status"' not in marker_payload, (
+            "emit_smart_state_marker in the smart voice-review-approve "
+            "branch carries a top-level ``status`` key — Codex 第十八轮 "
+            "P0-1 forbids any non-terminal status here because "
+            "_SMART_STATE_EDITABLE_STATUSES only accepts ``completed`` / "
+            "``downgraded_to_studio``. Pollution would lock the job out "
+            "of editing/jianying until the terminal-finalize marker "
+            "(PR#3C-b3) lands.\n"
+            f"Marker payload:\n{marker_payload}"
+        )
+
+        # Codex 第十八轮 P1-1: smart MUST NOT touch _speaker_providers
+        # — clone_provider_name is an audit string, not a TTS routing
+        # provider. Find the explicit "deliberately do NOT touch" comment.
+        assert "deliberately do NOT touch _speaker_providers" in smart_block, (
+            "smart auto-approve branch is missing the explicit '_speaker_providers "
+            "NOT touched' guard. Codex 第十八轮 P1-1: cloned_provider_name "
+            "(e.g. 'minimax_voice_clone') is the clone-API vendor, NOT a "
+            "TTS provider for downstream segment routing.\n"
+            f"Block:\n{smart_block}"
+        )
 
     def test_lazy_migration_gate_still_literal_studio(self):
         """The 'rebuild auto_matched_by_provider' lazy migration sits

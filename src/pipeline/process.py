@@ -355,6 +355,55 @@ _SPEAKER_ID_PATTERN = re.compile(r"^speaker_[a-z0-9_]+$")
 # (job_requires_review, job_service_mode).  See run() below.
 
 
+def _build_b2_not_wired_clone_provider():
+    """Fail-closed CloneProvider stub for PR#3C-b2 smart inline auto-approve.
+
+    Codex 第十八轮 P0-2: PR#3C-b2's first cut called
+    ``services.smart_wiring.build_smart_clone_provider()`` directly, which
+    returns the real ``_MiniMaxCloneAdapter``. Combined with stub
+    ``source_audio_path`` (whole-file rather than per-speaker concat)
+    and stub ``voice_library_quota_remaining=100``, that meant every
+    Smart job whose ``smart_consent.auto_voice_clone=True`` AND whose
+    ``total_duration_s >= 10s`` would burn real MiniMax clone API calls
+    — violating CLAUDE.md "付费 API 不能自动调用 / fallback / 兜底".
+
+    The fix routes Smart through a Protocol-conforming stub that raises
+    ``NotImplementedError`` on every ``clone_voice()`` call. The retry
+    loop inside ``evaluate_voice_review`` catches the exception, exhausts
+    the per-speaker retry budget, and falls through to PRESET. Net effect:
+    Smart auto-approve happy path works end-to-end on PRESET decisions,
+    no paid API call leaves the box.
+
+    PR#3C-b3 replaces this stub with the real
+    ``build_smart_clone_provider()`` invocation ONLY when the matching
+    per-speaker ffmpeg sample + real ``voice_library_quota`` snapshot
+    are wired alongside (i.e. all three move together so the safety
+    invariant is preserved).
+    """
+    from pathlib import Path as _Path
+
+    from services.smart.contracts import CloneResult as _CloneResult  # noqa: F401
+
+    class _B2NotWiredCloneProvider:
+        """Always raises — auto_voice_review retry loop catches and
+        falls to PRESET. See _build_b2_not_wired_clone_provider docstring."""
+
+        def clone_voice(
+            self,
+            *,
+            speaker_id: str,
+            speaker_name: str,
+            source_audio_path: _Path,
+        ) -> "_CloneResult":  # type: ignore[name-defined]
+            raise NotImplementedError(
+                "Smart CloneProvider intentionally not wired in PR#3C-b2 — "
+                "per-speaker ffmpeg sample + real quota snapshot land in "
+                "PR#3C-b3. Auto-route to PRESET via the retry-exhaust path."
+            )
+
+    return _B2NotWiredCloneProvider()
+
+
 def _is_valid_speaker_id(value: object) -> bool:
     return isinstance(value, str) and _SPEAKER_ID_PATTERN.match(value.strip()) is not None
 
@@ -2251,15 +2300,21 @@ class ProcessPipeline:
                             # Migration is best-effort; pipeline continues with
                             # legacy payload (frontend just won't show backups).
                             print(f"[S2.5] payload migration skipped: {exc}")
-            elif config.wait_for_review and job_requires_review and job_service_mode in {"studio", "smart"}:
-                # Plan §6.0.5 + §6.2.1 + Codex 第七轮 F2 + 第十六轮 PR#3C-b2.
+            elif config.wait_for_review and job_requires_review and job_effective_pipeline_mode in {"studio", "smart"}:
+                # Plan §6.0.5 + §6.2.1 + §6.0.6 + Codex 第七轮 F2 +
+                # 第十六轮 PR#3C-b2 + 第十八轮 P1-2: this is a pipeline-
+                # control branch so it must read job_effective_pipeline_mode,
+                # not raw job_service_mode. After handoff the effective
+                # mode flips to "studio" so /continue routes through the
+                # Studio human-review pause-return path; raw service_mode
+                # stays "smart" for billing/audit/payload purposes only.
+                #
                 # Smart MUST NOT pause-return here — it inline auto-approves
                 # voice selection via evaluate_voice_review, applying the
-                # per-speaker decision to _speaker_voices/_speaker_providers
-                # in this same frame, then falls through. Only on PAUSED
-                # outcome (consent denial / quota exhaust mid-flight /
-                # provider failure exhausted) does smart emit handoff
-                # markers + pause-return.
+                # per-speaker decision to _speaker_voices in this same frame,
+                # then falls through. Only on PAUSED outcome (consent denial
+                # / quota exhaust mid-flight / provider failure exhausted)
+                # does smart emit handoff markers + pause-return.
                 vs_payload = self._build_voice_selection_review_payload(
                     transcript_result=transcript_result,
                     tts_provider=job_tts_provider,
@@ -2276,7 +2331,7 @@ class ProcessPipeline:
                     speaker_structure_profiles=_speaker_structure_profiles,
                 )
 
-                if job_service_mode == "smart":
+                if job_effective_pipeline_mode == "smart":
                     # --- Smart inline auto-approve path ---
                     import uuid as _smart_uuid
                     from services.smart.auto_voice_review import (
@@ -2287,7 +2342,6 @@ class ProcessPipeline:
                     )
                     from services.smart.handoff import emit_handoff_markers
                     from services.smart.state import emit_smart_state_marker
-                    from services.smart_wiring import build_smart_clone_provider
 
                     smart_consent = _snap("smart_consent", {}) or {}
 
@@ -2298,11 +2352,23 @@ class ProcessPipeline:
                     # vs_payload speakers verbatim since that's what
                     # Studio human-review would have seen.
                     #
-                    # source_audio_path here is the whole-file path —
-                    # per-speaker ffmpeg concat lands in b3 alongside real
-                    # CloneProvider wiring. FakeCloneProvider tests don't
-                    # care; the real adapter will fail loudly when b3
-                    # plumbing is missing.
+                    # Codex 第十八轮 P0-2: source_audio_path is the whole-
+                    # file path (per-speaker ffmpeg concat is b3 work).
+                    # Whole-file would still satisfy the real MiniMax
+                    # clone client's "audio file exists" precondition,
+                    # so paired with build_smart_clone_provider() Smart
+                    # would actually burn paid clone API on every smart
+                    # job whose consent.auto_voice_clone=True. PR#3C-b2-fix
+                    # plugs a fail-closed stub provider (`_b2NotWiredClone`)
+                    # that raises on every clone_voice() call. The retry
+                    # loop in evaluate_voice_review catches the exception,
+                    # exhausts the per-speaker retry budget, and routes
+                    # to PRESET — no real clone API call leaves the box.
+                    #
+                    # PR#3C-b3 will replace the stub with the real
+                    # build_smart_clone_provider() ONCE the per-speaker
+                    # ffmpeg sample + real voice_library_quota snapshot
+                    # are wired alongside. Both move together.
                     _smart_main_speakers = [
                         VoiceReviewSpeakerInput(
                             speaker_id=sp.get("speaker_id", ""),
@@ -2313,7 +2379,7 @@ class ProcessPipeline:
                         for sp in (vs_payload.get("speakers") or [])
                         if isinstance(sp, dict) and sp.get("speaker_id")
                     ]
-                    _smart_clone_provider = build_smart_clone_provider()
+                    _smart_clone_provider = _build_b2_not_wired_clone_provider()
                     _smart_voice_review = evaluate_voice_review(
                         main_speakers=_smart_main_speakers,
                         smart_consent=smart_consent,
@@ -2359,12 +2425,22 @@ class ProcessPipeline:
                         )
 
                     # Auto-approved: apply per-speaker decisions to
-                    # local _speaker_voices/_speaker_providers AND the
-                    # approved payload so set_stage(APPROVED) snapshots
-                    # the final state. Plan §6.0.5 末段: set_stage alone
-                    # is insufficient — downstream pipeline reads the
-                    # local dicts, not the review state, so we MUST
-                    # apply here in-frame.
+                    # local _speaker_voices AND the approved payload so
+                    # set_stage(APPROVED) snapshots the final state.
+                    # Plan §6.0.5 末段: set_stage alone is insufficient —
+                    # downstream pipeline reads the local dicts, not the
+                    # review state, so we MUST apply here in-frame.
+                    #
+                    # Codex 第十八轮 P1-1: cloned_provider_name (e.g.
+                    # "minimax_voice_clone") IS NOT a TTS provider — it
+                    # identifies the clone-API vendor for audit. The
+                    # voice_id from CloneProvider is consumed by the
+                    # configured tts_provider (smart locks to MiniMax
+                    # per §5.0), so we write voice_id only and stash
+                    # the clone-vendor name into a separate audit
+                    # field. ``_speaker_providers`` (the per-speaker
+                    # TTS provider override dict) stays untouched —
+                    # smart jobs ride the job-level tts_provider.
                     _smart_approved_payload = dict(vs_payload)
                     _smart_approved_payload["auto_approved"] = True
                     _smart_approved_speakers = list(
@@ -2381,7 +2457,8 @@ class ProcessPipeline:
                             continue
                         if _dec.choice == VoiceReviewChoice.CLONED:
                             _sp_entry["voice_id"] = _dec.cloned_voice_id
-                            _sp_entry["tts_provider"] = _dec.cloned_provider_name
+                            # AUDIT FIELD ONLY — not a TTS provider.
+                            _sp_entry["clone_provider"] = _dec.cloned_provider_name
                             _sp_entry["auto_decision"] = "cloned"
                         elif _dec.choice == VoiceReviewChoice.PRESET:
                             # Auto-matched preset already stamped by
@@ -2396,11 +2473,13 @@ class ProcessPipeline:
                             _sp_entry["smart_clone_skipped_reason"] = _dec.reason_code
                         _sp_id = _dec.speaker_id
                         _sp_voice = _sp_entry.get("voice_id")
-                        _sp_prov = _sp_entry.get("tts_provider")
                         if _sp_id and _sp_voice:
                             _speaker_voices[_sp_id] = _sp_voice
-                        if _sp_id and _sp_prov:
-                            _speaker_providers[_sp_id] = _sp_prov
+                        # NB: deliberately do NOT touch _speaker_providers.
+                        # Smart auto-decision doesn't override the job-level
+                        # TTS provider per-speaker; the clone vendor name
+                        # is recorded on _sp_entry["clone_provider"] for audit
+                        # but never flows into segment.tts_provider routing.
 
                     review_state_manager.set_stage(
                         VOICE_SELECTION_REVIEW_STAGE,
@@ -2408,10 +2487,29 @@ class ProcessPipeline:
                         payload=_smart_approved_payload,
                         activate=True,
                     )
+                    # Codex 第十八轮 P0-1: do NOT emit
+                    # smart_state.status = "voice_review_auto_approved" —
+                    # the editable-state predicate
+                    # (services.smart.state._SMART_STATE_EDITABLE_STATUSES)
+                    # only accepts ``completed`` and ``downgraded_to_studio``.
+                    # Setting an intermediate status here would merge-overwrite
+                    # the top-level ``status`` on JobRecord.smart_state via
+                    # process_runner's marker handler; if the pipeline then
+                    # crashed before emitting the terminal
+                    # ``{"status": "completed", ...}`` marker, the
+                    # editing.py / jianying gates would refuse to enter
+                    # editing AND the settle dispatcher would fall back to
+                    # the legacy succeeded-branch (skipping
+                    # ``capture_full`` per the smart credits_policy table).
+                    # b3's terminal-finalize step writes the editable
+                    # status; this intermediate marker only stamps audit
+                    # metadata.
                     emit_smart_state_marker(
                         {
-                            "status": "voice_review_auto_approved",
-                            "decisions_count": len(_smart_voice_review.decisions),
+                            "voice_review": {
+                                "auto_approved": True,
+                                "decisions_count": len(_smart_voice_review.decisions),
+                            },
                         }
                     )
                     print(
@@ -2458,7 +2556,11 @@ class ProcessPipeline:
             # emit_handoff_markers() three-tuple (Codex 第七轮 F1/F2 +
             # 第十六轮 P1) so JobRecord.smart_state is mirrored to
             # Gateway DB before billing reads it.
-            if config.wait_for_review and job_service_mode in {"studio", "smart"}:
+            # Codex 第十八轮 P1-2: pipeline-control branch reads
+            # job_effective_pipeline_mode, not raw job_service_mode.
+            # Handoff-state smart jobs (effective=studio) fall into the
+            # studio branch — that's what /continue after handoff expects.
+            if config.wait_for_review and job_effective_pipeline_mode in {"studio", "smart"}:
                 expired_voices = self._validate_cloned_voices(_speaker_voices)
                 if expired_voices:
                     for ev_id in expired_voices:
@@ -2482,7 +2584,7 @@ class ProcessPipeline:
                     vs_payload["validation_error"] = f"检测到 {len(expired_voices)} 个音色已失效，请重新选择"
                     review_message = f"检测到 {len(expired_voices)} 个音色已失效，请重新选择"
 
-                    if job_service_mode == "smart":
+                    if job_effective_pipeline_mode == "smart":
                         # Smart expiry → handoff: smart can't auto-recover
                         # from an externally-revoked clone (admin cleanup,
                         # account quota turnover). User picks fresh voices
