@@ -174,14 +174,18 @@ def _check_uncertain_speaker_share(
 ) -> tuple[bool, str | None, dict[str, Any]]:
     """Plan §6.2.2 step 5 / simulator TRANSLATION_REVIEW_UNCERTAIN_THRESHOLD.
     High uncertain-speaker share means S2 had many ambiguous segments —
-    auto-approve risks compounding ambiguity."""
+    auto-approve risks compounding ambiguity.
+
+    Codex 第九轮 P1-2: missing signal → fail-closed (unevaluable_missing_signals).
+    Mirrors simulator (smart_shadow_sim_simulator.py:187) which returns
+    decision=unevaluable when this field is missing — vacuous-pass would
+    silently auto-approve any job whose upstream collector failed to
+    populate the field.
+    """
     share = speaker_stats.get("uncertain_speaker_duration_share")
     metrics = {"uncertain_speaker_duration_share": share}
     if share is None:
-        # Not computed — record gap, treat as pass (caller can add a
-        # stricter mode later if needed).
-        metrics["uncertain_speaker_share_unknown"] = True
-        return True, None, metrics
+        return False, "unevaluable_missing_uncertain_speaker_share", metrics
     if float(share) > UNCERTAIN_SHARE_THRESHOLD:
         return (
             False,
@@ -198,7 +202,14 @@ def _check_clone_eligible_ratio(
     """Plan §6.2.2 step 6 / simulator TRANSLATION_REVIEW_MIN_CLONE_ELIGIBLE_RATIO.
     < 50% of ASR speakers having sufficient clone samples means the
     voice match downstream will mostly fall to presets — auto-approval
-    of translation is premature when voice quality is at risk."""
+    of translation is premature when voice quality is at risk.
+
+    Codex 第九轮 P1-2: missing signal → fail-closed; same rationale as
+    _check_uncertain_speaker_share. Codex 第九轮 P1-3: reason_code
+    format must mirror simulator exactly — "{eligible}/{asr}" with a
+    forward slash, not "_of_" — so shadow-vs-production diff stays
+    apples-to-apples.
+    """
     asr_count = speaker_stats.get("asr_speaker_count")
     eligible = clone_sample_stats.get("eligible_speakers")
     metrics = {
@@ -206,18 +217,19 @@ def _check_clone_eligible_ratio(
         "eligible_speakers": eligible,
     }
     if asr_count is None or eligible is None:
-        metrics["clone_eligible_ratio_unknown"] = True
-        return True, None, metrics
+        return False, "unevaluable_missing_clone_signals", metrics
     asr = float(asr_count)
     if asr <= 0:
-        # Defensive — div-by-zero guard.
-        return True, None, {**metrics, "clone_eligible_ratio_unknown": True}
+        # Div-by-zero guard. Treat as missing signal (fail-closed) —
+        # 0 ASR speakers is itself an upstream-data anomaly that
+        # shouldn't auto-approve.
+        return False, "unevaluable_zero_asr_speakers", metrics
     ratio = float(eligible) / asr
     metrics["clone_eligible_ratio"] = ratio
     if ratio < CLONE_ELIGIBLE_RATIO_THRESHOLD:
         return (
             False,
-            f"low_clone_eligible_ratio_{int(eligible)}_of_{int(asr)}",
+            f"low_clone_eligible_ratio_{int(eligible)}/{int(asr)}",
             metrics,
         )
     return True, None, metrics

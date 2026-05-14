@@ -199,6 +199,136 @@ class TestEligibilityGate:
         assert "missing_speaker_id" in reasons
 
 
+class TestEligibilityGateInputShapes:
+    """Codex 第九轮 P1-1 — normalize_speaker_stats accepts the three shapes
+    real callers feed it. Without this the production integration in
+    PR#3C would silently treat every speaker as 0-share and approve
+    multi-speaker jobs that should hand off."""
+
+    def test_real_process_speaker_structure_profile_shape(self):
+        """src/pipeline/process.py:4013 emits dict[speaker_id → profile]
+        with field names speaker_role / speaker_duration_share. This is
+        the shape the PR#3C integration layer feeds verbatim."""
+        from services.smart.eligibility_gate import (
+            evaluate_eligibility, normalize_speaker_stats,
+        )
+
+        process_profile = {
+            "speaker_a": {
+                "speaker_role": "primary",
+                "speaker_role_label": "主说话人",
+                "speaker_duration_ms": 600_000,
+                "speaker_duration_share": 0.55,
+                "speaker_segment_count": 80,
+                "speaker_short_segment_count": 5,
+                "speaker_short_segment_rate": 0.0625,
+                "speaker_structure_reason": "top_duration_speaker",
+                "speaker_review_hint": "main",
+            },
+            "speaker_b": {
+                "speaker_role": "primary",
+                "speaker_duration_share": 0.40,
+            },
+            "speaker_c": {
+                "speaker_role": "fragmented",
+                "speaker_duration_share": 0.05,  # < 0.10 threshold
+            },
+        }
+        # First verify normalize handles the rename.
+        canonical = normalize_speaker_stats(process_profile)
+        speakers = canonical["speakers"]
+        assert canonical["_normalize_source"] == "process_speaker_structure_profile"
+        ids = sorted(s["speaker_id"] for s in speakers)
+        assert ids == ["speaker_a", "speaker_b", "speaker_c"]
+        # Field names renormalised.
+        for sp in speakers:
+            assert "duration_share" in sp
+            assert "role" in sp
+
+        # Then verify the end-to-end decision is correct (a + b are main,
+        # c excluded by low-share, count = 2 ≤ 3 → approved).
+        decision = evaluate_eligibility(process_profile)
+        assert decision.approved is True
+        assert decision.main_speaker_count == 2
+        assert set(decision.main_speaker_ids) == {"speaker_a", "speaker_b"}
+
+    def test_real_process_profile_with_four_main_speakers_rejected(self):
+        """The risk codex called out: a 4-main-speaker job in process.py
+        shape was previously approved silently because field names didn't
+        match. After normalize, the limit-exceeded check kicks in."""
+        from services.smart.eligibility_gate import evaluate_eligibility
+
+        process_profile = {
+            f"speaker_{i}": {
+                "speaker_role": "primary",
+                "speaker_duration_share": 0.25,
+            }
+            for i in range(4)
+        }
+        decision = evaluate_eligibility(process_profile)
+        assert decision.approved is False
+        assert decision.main_speaker_count == 4
+        assert decision.reason_code == "main_speaker_count_exceeded"
+
+    def test_simulator_speaker_count_by_threshold_shape(self):
+        """scripts/smart_shadow_sim_simulator.py:121 reads
+        speaker_count_by_threshold["0.10"] as a pre-aggregated count.
+        normalize emits N synthetic speakers so the limit comparison
+        works without exposing real IDs (simulator shape doesn't
+        carry them at this layer)."""
+        from services.smart.eligibility_gate import evaluate_eligibility
+
+        sim_fact = {
+            "speaker_count_by_threshold": {
+                "0.05": 4,
+                "0.10": 2,
+                "0.15": 2,
+            },
+        }
+        decision = evaluate_eligibility(sim_fact, low_share_threshold=0.10)
+        assert decision.approved is True
+        assert decision.main_speaker_count == 2
+
+    def test_simulator_shape_with_4_main_at_threshold_rejected(self):
+        from services.smart.eligibility_gate import evaluate_eligibility
+
+        sim_fact = {"speaker_count_by_threshold": {"0.10": 4}}
+        decision = evaluate_eligibility(sim_fact, low_share_threshold=0.10)
+        assert decision.approved is False
+        assert decision.main_speaker_count == 4
+
+    def test_simulator_shape_missing_count_for_threshold(self):
+        from services.smart.eligibility_gate import evaluate_eligibility
+
+        # Threshold not present in the table — falls through to no-speakers.
+        sim_fact = {"speaker_count_by_threshold": {"0.05": 3}}
+        decision = evaluate_eligibility(sim_fact, low_share_threshold=0.10)
+        assert decision.approved is False
+        assert decision.reason_code == "no_speakers_detected"
+
+    def test_unknown_shape_falls_through_to_no_speakers(self):
+        from services.smart.eligibility_gate import evaluate_eligibility
+
+        decision = evaluate_eligibility({"completely": "different", "shape": 42})
+        assert decision.approved is False
+        assert decision.reason_code == "no_speakers_detected"
+
+    def test_canonical_shape_preserved_through_normalize(self):
+        """Canonical input must pass through normalize untouched so
+        existing tests keep working."""
+        from services.smart.eligibility_gate import normalize_speaker_stats
+
+        canonical = {
+            "speakers": [
+                {"speaker_id": "a", "duration_share": 0.6, "dubbing_mode": "dub"},
+            ]
+        }
+        result = normalize_speaker_stats(canonical)
+        # Same dict — pass-through doesn't add the _normalize_source marker.
+        assert result is canonical
+        assert "_normalize_source" not in result
+
+
 # ===================================================================
 # auto_translation_review
 # ===================================================================
@@ -284,7 +414,10 @@ class TestAutoTranslationReview:
         decision = evaluate_translation_review(**inputs)
         assert decision.auto_approved is False
         assert decision.failed_check == "clone_eligible_ratio"
-        assert decision.reason_code == "low_clone_eligible_ratio_1_of_3"
+        # Codex 第九轮 P1-3: must mirror simulator format exactly —
+        # "{eligible}/{asr}" with forward slash, NOT "_of_". Shadow vs
+        # production diff aggregation depends on this string.
+        assert decision.reason_code == "low_clone_eligible_ratio_1/3"
 
     def test_speaker_mismatch_rejected(self):
         from services.smart.auto_translation_review import evaluate_translation_review
@@ -326,6 +459,10 @@ class TestAutoTranslationReview:
         assert decision.failed_check == "glossary_preservation"
 
     def test_missing_glossary_treated_as_vacuous_pass(self):
+        """Glossary IS spec-defined to be optional (plan §6.2.2 step 1
+        wording: 'Glossary 存在时 ≥80%'). No glossary → vacuously pass.
+        This is NOT fail-open in the Codex P1-2 sense — it's spec-explicit.
+        """
         from services.smart.auto_translation_review import evaluate_translation_review
 
         inputs = self._passing_inputs()
@@ -335,14 +472,52 @@ class TestAutoTranslationReview:
         assert decision.auto_approved is True
         assert decision.metrics["glossary_preservation_rate"] is None
 
-    def test_missing_uncertain_share_treated_as_vacuous_pass(self):
+    def test_missing_uncertain_share_fails_closed(self):
+        """Codex 第九轮 P1-2: missing signal → fail-closed (not vacuous
+        pass). Mirrors simulator's unevaluable / missing_signals
+        behaviour. Otherwise an upstream collector glitch silently
+        auto-approves any job whose uncertain_speaker_duration_share
+        wasn't computed."""
         from services.smart.auto_translation_review import evaluate_translation_review
 
         inputs = self._passing_inputs()
         del inputs["speaker_stats"]["uncertain_speaker_duration_share"]
         decision = evaluate_translation_review(**inputs)
-        assert decision.auto_approved is True
-        assert decision.metrics.get("uncertain_speaker_share_unknown") is True
+        assert decision.auto_approved is False
+        assert decision.reason_code == "unevaluable_missing_uncertain_speaker_share"
+        assert decision.failed_check == "uncertain_speaker_share"
+
+    def test_missing_clone_signals_fails_closed(self):
+        """Codex 第九轮 P1-2: same fail-closed rationale for the
+        clone_eligible_ratio check — missing eligible_speakers OR
+        asr_speaker_count → unevaluable, not vacuous pass."""
+        from services.smart.auto_translation_review import evaluate_translation_review
+
+        # Missing asr_speaker_count
+        inputs = self._passing_inputs()
+        del inputs["speaker_stats"]["asr_speaker_count"]
+        decision = evaluate_translation_review(**inputs)
+        assert decision.auto_approved is False
+        assert decision.reason_code == "unevaluable_missing_clone_signals"
+
+        # Missing eligible_speakers
+        inputs = self._passing_inputs()
+        del inputs["clone_sample_stats"]["eligible_speakers"]
+        decision = evaluate_translation_review(**inputs)
+        assert decision.auto_approved is False
+        assert decision.reason_code == "unevaluable_missing_clone_signals"
+
+    def test_zero_asr_speakers_fails_closed(self):
+        """Defensive: 0 ASR speakers is itself an upstream-data anomaly
+        that shouldn't auto-approve. div-by-zero guard returns
+        unevaluable, not silent pass."""
+        from services.smart.auto_translation_review import evaluate_translation_review
+
+        inputs = self._passing_inputs()
+        inputs["speaker_stats"]["asr_speaker_count"] = 0
+        decision = evaluate_translation_review(**inputs)
+        assert decision.auto_approved is False
+        assert decision.reason_code == "unevaluable_zero_asr_speakers"
 
 
 # ===================================================================
@@ -696,3 +871,101 @@ class TestSidecarEmitter:
             created_at="2026-05-14T12:00:00Z",
         )
         assert (tmp_path / "audit").is_dir()
+
+    def test_emit_mkdir_failure_returns_false_does_not_block(self, tmp_path, monkeypatch):
+        """Codex 第九轮 P1-4: mkdir error inside the path helper used to
+        bubble out of emit_smart_decision and block the user-facing
+        pipeline. Per plan §6.4 末段 emit failure must NOT block. Now
+        path/dir computation lives inside the try; mkdir error returns
+        False with logger.exception."""
+        from services.smart import sidecar_emitter
+
+        original_mkdir = Path.mkdir
+
+        def selective_mkdir_raise(self, *a, **kw):
+            # Raise specifically when audit/ is being created — leaves
+            # other tmp_path operations alone.
+            if self.name == "audit":
+                raise PermissionError("mock permission denied on audit/")
+            return original_mkdir(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "mkdir", selective_mkdir_raise)
+
+        ok = sidecar_emitter.emit_smart_decision(
+            tmp_path,
+            decision_type="speaker_gate",
+            decision="approved",
+            smart_decision_id="dec_mkdir_fail",
+            created_at="2026-05-14T12:00:00Z",
+        )
+        # Returns False, doesn't raise.
+        assert ok is False
+        # No audit/ dir was actually created (the mock raised).
+        assert not (tmp_path / "audit").exists()
+
+    def test_atomic_write_mkdir_failure_returns_false(self, tmp_path, monkeypatch):
+        """Same fail-soft contract for the atomic writers (quality report
+        / cost summary)."""
+        from services.smart import sidecar_emitter
+
+        original_mkdir = Path.mkdir
+
+        def selective_mkdir_raise(self, *a, **kw):
+            if self.name == "audit":
+                raise OSError("mock disk full")
+            return original_mkdir(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "mkdir", selective_mkdir_raise)
+
+        ok = sidecar_emitter.write_smart_quality_report(
+            tmp_path, {"main_speaker_count": 2}
+        )
+        assert ok is False
+
+    def test_quality_report_schema_version_cannot_be_clobbered(self, tmp_path):
+        """Codex 第九轮 P2: payload-supplied schema_version must NOT
+        override the module's authoritative version. Earlier
+        ``{"schema_version": v, **payload}`` form let any caller's
+        ``payload["schema_version"] = 999`` clobber the stamp; renderers
+        downstream that branch on schema_version would break."""
+        from services.smart.sidecar_emitter import (
+            write_smart_quality_report,
+            smart_quality_report_path,
+            SMART_QUALITY_REPORT_SCHEMA_VERSION,
+        )
+
+        # Caller's payload deliberately tries to set schema_version=999.
+        payload = {
+            "schema_version": 999,
+            "main_speaker_count": 2,
+        }
+        ok = write_smart_quality_report(tmp_path, payload)
+        assert ok is True
+
+        with open(smart_quality_report_path(tmp_path), encoding="utf-8") as fp:
+            data = json.load(fp)
+        # Module's authoritative version wins.
+        assert data["schema_version"] == SMART_QUALITY_REPORT_SCHEMA_VERSION
+        assert data["schema_version"] != 999
+        # Payload's other fields still flow through.
+        assert data["main_speaker_count"] == 2
+
+    def test_cost_summary_schema_version_cannot_be_clobbered(self, tmp_path):
+        """Same protection on the cost-summary writer."""
+        from services.smart.sidecar_emitter import (
+            write_smart_cost_summary,
+            smart_cost_summary_path,
+            SMART_COST_SUMMARY_SCHEMA_VERSION,
+        )
+
+        payload = {
+            "schema_version": 42,
+            "llm_input_tokens": 1500,
+        }
+        ok = write_smart_cost_summary(tmp_path, payload)
+        assert ok is True
+
+        with open(smart_cost_summary_path(tmp_path), encoding="utf-8") as fp:
+            data = json.load(fp)
+        assert data["schema_version"] == SMART_COST_SUMMARY_SCHEMA_VERSION
+        assert data["llm_input_tokens"] == 1500

@@ -3,9 +3,27 @@
 Pure-deterministic decision module: given S2 speaker stats, return whether
 this job stays on the Smart auto-decision path or hands off to Studio.
 
-Input: ``speaker_stats`` dict (subset of S2 result schema). Real S2 emits
-much more; this module reads only the keys it needs so the call site can
-swap the source without restructuring.
+Input shapes (Codex 第九轮 P1-1 fix):
+
+  - **canonical** ``{"speakers": [{"speaker_id": ..., "duration_share": ...,
+    "dubbing_mode": ..., "role": ...}, ...]}`` — what this module emits and
+    what tests build directly.
+
+  - **process.py profile** — a dict ``{<speaker_id>: {"speaker_role": ...,
+    "speaker_duration_share": ..., ...}, ...}`` produced by
+    ``src/pipeline/process.py`` (see ``_compute_speaker_structure_profiles``
+    around line 4013). Field names differ (``speaker_role`` /
+    ``speaker_duration_share``) and the structure is dict-of-profiles
+    not list — the integration layer in PR#3C passes this shape verbatim.
+
+  - **simulator** ``{"speaker_count_by_threshold": {"0.10": <int>, ...}}``
+    — what shadow simulator (scripts/smart_shadow_sim_simulator.py:121)
+    consumes. Already pre-aggregated counts at multiple thresholds, no
+    per-speaker access needed.
+
+``normalize_speaker_stats(raw)`` accepts any of the three shapes and emits
+the canonical form so ``evaluate_eligibility`` only deals with one shape.
+Tests cover all three input forms.
 
 Output: ``EligibilityDecision`` dataclass — caller (process.py integration
 in PR#3C) routes to handoff or auto-review based on ``approved``.
@@ -25,7 +43,8 @@ This module does NOT:
   - call any provider or do any I/O
 
 Acceptance tests in tests/test_smart_business_logic.py lock the threshold
-boundaries (1, 2, 3, 4 speaker counts) and the exclusion rules.
+boundaries (1, 2, 3, 4 speaker counts), the exclusion rules, and the
+three input shapes.
 """
 from __future__ import annotations
 
@@ -96,6 +115,102 @@ def _is_main_speaker(
     return True, None
 
 
+def normalize_speaker_stats(
+    raw: Mapping[str, Any],
+    *,
+    low_share_threshold: float = DEFAULT_LOW_SHARE_THRESHOLD,
+) -> Mapping[str, Any]:
+    """Convert any of the three supported input shapes into the canonical
+    ``{"speakers": [...]}`` form expected by ``evaluate_eligibility``.
+
+    Codex 第九轮 P1-1: the production integration layer in PR#3C feeds
+    ``_compute_speaker_structure_profiles()`` output (process.py:4013)
+    which uses ``speaker_role`` / ``speaker_duration_share`` field names
+    and a dict-of-profiles structure. Without normalisation,
+    ``evaluate_eligibility`` would see no ``role`` / ``duration_share``
+    fields and silently treat every speaker as 0-share, approving
+    multi-speaker jobs that should hand off.
+
+    Recognition order:
+      1. ``raw["speakers"]`` is a list → already canonical, copied through
+      2. ``raw["speaker_count_by_threshold"]`` is a dict → simulator
+         shape; emit a synthetic single-bucket "speakers" list whose
+         length matches the count at the requested threshold (for
+         downstream limit comparison only — the synthetic speakers don't
+         carry real IDs since the simulator shape doesn't expose them)
+      3. raw looks like ``{<speaker_id>: {speaker_role: ..., ...}, ...}``
+         → process.py profile shape; renormalise field names
+         (``speaker_role`` → ``role``, ``speaker_duration_share`` →
+         ``duration_share``) and emit list-of-speakers
+
+    Returns the canonical shape; preserves the input on path (1) without
+    copying entries; never raises (returns ``{"speakers": []}`` on
+    unknown shapes so the caller's "no_speakers_detected" sentinel
+    does the right thing).
+    """
+    if not isinstance(raw, Mapping):
+        return {"speakers": []}
+
+    # Shape 1: canonical
+    if isinstance(raw.get("speakers"), list):
+        return raw
+
+    # Shape 2: simulator pre-aggregated counts
+    sct = raw.get("speaker_count_by_threshold")
+    if isinstance(sct, Mapping):
+        key = f"{low_share_threshold:.2f}"
+        count = sct.get(key)
+        if not isinstance(count, int):
+            return {"speakers": [], "_normalize_source": "simulator_missing_count"}
+        # Synthesise N speakers at exactly the threshold so downstream
+        # share + limit comparison works. We don't have real IDs in this
+        # shape, so use index-based synthetic IDs the integration layer
+        # is responsible for replacing if it needs them downstream.
+        return {
+            "speakers": [
+                {
+                    "speaker_id": f"sim_speaker_{i}",
+                    "duration_share": low_share_threshold,
+                    "dubbing_mode": "dub",
+                }
+                for i in range(count)
+            ],
+            "_normalize_source": "simulator_speaker_count_by_threshold",
+        }
+
+    # Shape 3: process.py profile dict (dict[speaker_id → profile])
+    # Heuristic: every value is a dict that has ``speaker_role`` or
+    # ``speaker_duration_share``. Reject if any value isn't a profile-
+    # shaped dict so we don't pick up unrelated dict shapes.
+    items = list(raw.items())
+    if items and all(
+        isinstance(v, Mapping)
+        and ("speaker_role" in v or "speaker_duration_share" in v)
+        for k, v in items
+    ):
+        speakers = []
+        for sid, profile in items:
+            entry: dict[str, Any] = {"speaker_id": str(sid)}
+            # Field-name renormalisation
+            entry["duration_share"] = float(profile.get("speaker_duration_share", 0.0) or 0.0)
+            role = profile.get("speaker_role")
+            if role is not None:
+                entry["role"] = role
+            # process.py uses dubbing_mode at segment level not profile,
+            # so this field is typically absent here. Default "dub" so
+            # the canonical-form _is_main_speaker check doesn't exclude.
+            dubbing_mode = profile.get("dubbing_mode", "dub")
+            entry["dubbing_mode"] = dubbing_mode
+            speakers.append(entry)
+        return {
+            "speakers": speakers,
+            "_normalize_source": "process_speaker_structure_profile",
+        }
+
+    # Unknown shape — fall through to caller's no_speakers_detected.
+    return {"speakers": [], "_normalize_source": "unknown_shape"}
+
+
 def evaluate_eligibility(
     speaker_stats: Mapping[str, Any],
     *,
@@ -122,7 +237,14 @@ def evaluate_eligibility(
     treated as "no speakers detected" → approved=False with a sentinel
     reason_code. The pipeline integration layer can decide whether to
     treat this as a hard failure or a degraded approval.
+
+    Codex 第九轮 P1-1: ``normalize_speaker_stats`` is invoked first so
+    real process.py / simulator inputs are accepted without callers
+    needing to pre-massage them.
     """
+    speaker_stats = normalize_speaker_stats(
+        speaker_stats, low_share_threshold=low_share_threshold
+    )
     raw_speakers = speaker_stats.get("speakers") if isinstance(speaker_stats, Mapping) else None
     if not raw_speakers:
         return EligibilityDecision(
@@ -182,4 +304,5 @@ __all__ = [
     "DEFAULT_MAIN_SPEAKER_LIMIT",
     "EligibilityDecision",
     "evaluate_eligibility",
+    "normalize_speaker_stats",
 ]

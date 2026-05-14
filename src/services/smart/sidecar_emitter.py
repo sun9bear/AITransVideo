@@ -179,9 +179,14 @@ def emit_smart_decision(
                 continue
             line[k] = v
 
-    target = smart_decisions_path(project_dir)
     encoded = json.dumps(line, ensure_ascii=False, sort_keys=True) + "\n"
+    # Codex 第九轮 P1-4: path/dir computation can also fail (mkdir
+    # permission errors, disk full). Pull both into the try so any I/O
+    # failure returns False rather than bubbling up — plan §6.4 末段
+    # explicitly requires "emit failure must NOT block the user-facing
+    # pipeline".
     try:
+        target = smart_decisions_path(project_dir)
         with file_lock(target):
             with open(target, "a", encoding="utf-8") as fp:
                 fp.write(encoded)
@@ -207,16 +212,14 @@ def _atomic_write_json(target: Path, payload: Mapping[str, Any]) -> bool:
 
     Returns True on success, False (with logged exception) on failure.
     """
-    parent = target.parent
-    try:
-        parent.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        logger.exception("sidecar emitter: failed to create parent dir %s", parent)
-        return False
-
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2)
     tmp_path = target.with_suffix(target.suffix + ".tmp")
     try:
+        # Codex 第九轮 P1-4 (atomic-write counterpart): the parent.mkdir
+        # call must also live inside this try so a permission/disk error
+        # returns False rather than bubbling up. Same plan §6.4 末段
+        # rationale as emit_smart_decision.
+        target.parent.mkdir(parents=True, exist_ok=True)
         with file_lock(target):
             with open(tmp_path, "w", encoding="utf-8") as fp:
                 fp.write(encoded)
@@ -235,6 +238,20 @@ def _atomic_write_json(target: Path, payload: Mapping[str, Any]) -> bool:
         return False
 
 
+def _stamp_schema_version(payload: Mapping[str, Any], version: int) -> dict[str, Any]:
+    """Codex 第九轮 P2: schema_version must be authoritative — payload
+    cannot override it. Earlier ``{"schema_version": v, **payload}`` form
+    let callers (accidentally or via shape drift) clobber the version
+    stamp, breaking renderers that branch on it.
+
+    Build the dict with payload first then stamp the version on top so
+    the version is always exactly what this module declared.
+    """
+    final = dict(payload)
+    final["schema_version"] = version
+    return final
+
+
 def write_smart_quality_report(
     project_dir: Path,
     payload: Mapping[str, Any],
@@ -248,8 +265,13 @@ def write_smart_quality_report(
     Returns False on I/O failure; caller emits JobEvent WARNING and the
     QA report renderer downgrades the section per plan §6.4 末段.
     """
-    final = {"schema_version": SMART_QUALITY_REPORT_SCHEMA_VERSION, **dict(payload)}
-    return _atomic_write_json(smart_quality_report_path(project_dir), final)
+    target = _safe_path(project_dir, smart_quality_report_path)
+    if target is None:
+        return False
+    return _atomic_write_json(
+        target,
+        _stamp_schema_version(payload, SMART_QUALITY_REPORT_SCHEMA_VERSION),
+    )
 
 
 def write_smart_cost_summary(
@@ -265,8 +287,31 @@ def write_smart_cost_summary(
     Returns False on I/O failure; caller emits JobEvent WARNING and admin
     dashboard marks ``cost_summary_missing`` per plan §6.4 末段.
     """
-    final = {"schema_version": SMART_COST_SUMMARY_SCHEMA_VERSION, **dict(payload)}
-    return _atomic_write_json(smart_cost_summary_path(project_dir), final)
+    target = _safe_path(project_dir, smart_cost_summary_path)
+    if target is None:
+        return False
+    return _atomic_write_json(
+        target,
+        _stamp_schema_version(payload, SMART_COST_SUMMARY_SCHEMA_VERSION),
+    )
+
+
+def _safe_path(project_dir: Path, path_fn) -> Path | None:
+    """Codex 第九轮 P1-4: defensive wrapper for the path helpers used by
+    the atomic writers. ``smart_*_path()`` calls ``_audit_dir()`` which
+    calls ``mkdir`` — that can raise. Catch here so the writer's caller
+    sees False rather than an unhandled exception.
+
+    Returns None on failure (caller short-circuits to False return).
+    """
+    try:
+        return path_fn(project_dir)
+    except Exception:
+        logger.exception(
+            "sidecar emitter: failed to compute / create audit dir for %s",
+            project_dir,
+        )
+        return None
 
 
 __all__ = [
