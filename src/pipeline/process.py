@@ -479,6 +479,79 @@ def _fetch_smart_user_voice_quota_remaining(user_id: str) -> int | None:
     return remaining
 
 
+def _emit_smart_audit(
+    project_dir: Path,
+    *,
+    decision_type: str,
+    decision: str,
+    reason_code: str | None = None,
+    evidence: dict | None = None,
+    smart_decision_id: str | None = None,
+    extra: dict | None = None,
+) -> None:
+    """Best-effort wrapper around ``services.smart.sidecar_emitter.emit_smart_decision``.
+
+    PR#3C-b3f sidecar instrumentation: every smart decision point (eligibility
+    gate, translation auto-review, voice review batch, per-speaker clone
+    decisions, downgrade handoffs) appends one line to
+    ``{project_dir}/audit/smart_decisions.jsonl`` so the QA report renderer +
+    admin tooling can reconstruct WHAT smart decided and WHY.
+
+    Plan §6.4 末段 contract: sidecar emit failures MUST NOT block the
+    user-facing pipeline. ``emit_smart_decision`` itself returns False on
+    I/O failure (logged internally). This wrapper additionally catches
+    ValueError (enum typo / missing required arg) so a programmer bug at
+    a call site can't crash a smart job — the bug surfaces in test
+    output instead.
+
+    Auto-generates ``smart_decision_id`` (uuid4 hex) when caller doesn't
+    pass one. Sets ``created_at`` to current UTC ISO 8601.
+
+    Args:
+      project_dir: project root; sidecar lives at audit/smart_decisions.jsonl
+      decision_type: one of services.smart.sidecar_emitter._ALLOWED_DECISION_TYPES
+        (speaker_gate / voice_clone / voice_selection_auto_approve /
+        translation_auto_approve / tts_retry / split_proposal /
+        downgrade_handoff / budget_exhausted)
+      decision: "approved" / "rejected" / "deferred"
+      reason_code: required when decision != "approved"; None otherwise
+      evidence: free-form dict of metrics that drove the decision
+        (main_speaker_count, glossary_rate, sample_duration_s, …)
+      smart_decision_id: optional explicit id (e.g. when piping through
+        a per-speaker VoiceReviewDecision.decision_id from auto_voice_review)
+      extra: extra top-level fields (e.g. speaker_id, job_id, user_id,
+        handoff_stage). Won't clobber required schema fields.
+    """
+    import uuid as _uuid_mod
+    from datetime import datetime, timezone
+
+    from services.smart.sidecar_emitter import emit_smart_decision
+
+    try:
+        emit_smart_decision(
+            project_dir,
+            decision_type=decision_type,
+            decision=decision,
+            reason_code=reason_code,
+            evidence=evidence or {},
+            smart_decision_id=smart_decision_id or _uuid_mod.uuid4().hex,
+            created_at=datetime.now(timezone.utc).isoformat(),
+            auto_approved=(decision == "approved"),
+            extra=extra,
+        )
+    except Exception as _exc:
+        # ValueError on enum typo OR any other programming bug. Log
+        # but don't crash — audit sidecar is informational.
+        # process.py uses ``print`` for diagnostic output throughout
+        # (no module-level logger configured); follow the convention.
+        print(
+            f"[smart] sidecar emit failed (call-site bug?): "
+            f"decision_type={decision_type!r} decision={decision!r} "
+            f"err={type(_exc).__name__}: {_exc}",
+            flush=True,
+        )
+
+
 def _register_smart_clone_in_user_voices(
     *,
     user_id: str,
@@ -2544,6 +2617,32 @@ class ProcessPipeline:
                         # reason_codes: ``main_speaker_count_exceeded``
                         # (> 3 main speakers) or ``no_speakers_detected``
                         # (upstream data hole; defensive).
+                        _emit_smart_audit(
+                            final_project_dir,
+                            decision_type="speaker_gate",
+                            decision="rejected",
+                            reason_code=_smart_eligibility.reason_code,
+                            evidence={
+                                "main_speaker_count": (
+                                    _smart_eligibility.main_speaker_count
+                                ),
+                                "main_speaker_ids": list(
+                                    _smart_eligibility.main_speaker_ids
+                                ),
+                                "excluded_speakers": list(
+                                    _smart_eligibility.excluded_speakers
+                                ),
+                                "threshold_used": (
+                                    _smart_eligibility.threshold_used
+                                ),
+                                "limit_used": _smart_eligibility.limit_used,
+                            },
+                            extra={
+                                "job_id": str(_snap("job_id") or ""),
+                                "user_id": str(_snap("user_id") or ""),
+                                "handoff_stage": VOICE_SELECTION_REVIEW_STAGE,
+                            },
+                        )
                         emit_handoff_markers(
                             review_state_manager=review_state_manager,
                             review_stage=VOICE_SELECTION_REVIEW_STAGE,
@@ -2589,6 +2688,32 @@ class ProcessPipeline:
                     # clone retry budget on speakers Studio-human-review
                     # would never have offered to clone.
                     _smart_main_speaker_ids = set(_smart_eligibility.main_speaker_ids)
+
+                    # Sidecar audit: eligibility approved.
+                    _emit_smart_audit(
+                        final_project_dir,
+                        decision_type="speaker_gate",
+                        decision="approved",
+                        evidence={
+                            "main_speaker_count": (
+                                _smart_eligibility.main_speaker_count
+                            ),
+                            "main_speaker_ids": list(
+                                _smart_eligibility.main_speaker_ids
+                            ),
+                            "excluded_speakers": list(
+                                _smart_eligibility.excluded_speakers
+                            ),
+                            "threshold_used": (
+                                _smart_eligibility.threshold_used
+                            ),
+                            "limit_used": _smart_eligibility.limit_used,
+                        },
+                        extra={
+                            "job_id": str(_snap("job_id") or ""),
+                            "user_id": str(_snap("user_id") or ""),
+                        },
+                    )
 
                     # Construct main_speakers candidates filtered through
                     # _smart_main_speaker_ids — only speakers the
@@ -2737,6 +2862,23 @@ class ProcessPipeline:
                         # real provider. Plan §6.5 three-tuple. Cloning
                         # with whole-file or missing audio would waste
                         # MiniMax quota on the wrong sample.
+                        _emit_smart_audit(
+                            final_project_dir,
+                            decision_type="downgrade_handoff",
+                            decision="rejected",
+                            reason_code="clone_sample_extraction_failed",
+                            evidence={
+                                "sample_error": _smart_sample_extraction_error,
+                                "successful_samples_count": len(
+                                    _smart_per_speaker_samples
+                                ),
+                            },
+                            extra={
+                                "job_id": str(_snap("job_id") or ""),
+                                "user_id": str(_snap("user_id") or ""),
+                                "handoff_stage": VOICE_SELECTION_REVIEW_STAGE,
+                            },
+                        )
                         emit_handoff_markers(
                             review_state_manager=review_state_manager,
                             review_stage=VOICE_SELECTION_REVIEW_STAGE,
@@ -2848,6 +2990,22 @@ class ProcessPipeline:
                             # User can re-attempt via the explicit "克隆音色"
                             # button in Studio (which uses Gateway-tracked
                             # capture+reserve credit logic separately).
+                            _emit_smart_audit(
+                                final_project_dir,
+                                decision_type="downgrade_handoff",
+                                decision="rejected",
+                                reason_code="voice_library_quota_unavailable",
+                                evidence={
+                                    "main_speakers_pending": len(
+                                        _smart_main_speakers
+                                    ),
+                                },
+                                extra={
+                                    "job_id": str(_snap("job_id") or ""),
+                                    "user_id": str(_snap("user_id") or ""),
+                                    "handoff_stage": VOICE_SELECTION_REVIEW_STAGE,
+                                },
+                            )
                             emit_handoff_markers(
                                 review_state_manager=review_state_manager,
                                 review_stage=VOICE_SELECTION_REVIEW_STAGE,
@@ -2915,6 +3073,28 @@ class ProcessPipeline:
                     if _smart_voice_review.outcome == VoiceReviewOutcome.PAUSED:
                         # Failure: emit_handoff_markers three-tuple — plan
                         # §6.0.5 + §6.5 + Codex 第七轮 F1/F2.
+                        _emit_smart_audit(
+                            final_project_dir,
+                            decision_type="voice_selection_auto_approve",
+                            decision="rejected",
+                            reason_code=(
+                                _smart_voice_review.pause_reason
+                                or "voice_review_paused"
+                            ),
+                            evidence={
+                                "decisions_count": len(
+                                    _smart_voice_review.decisions
+                                ),
+                                "main_speakers_count": len(
+                                    _smart_main_speakers
+                                ),
+                            },
+                            extra={
+                                "job_id": str(_snap("job_id") or ""),
+                                "user_id": str(_snap("user_id") or ""),
+                                "handoff_stage": VOICE_SELECTION_REVIEW_STAGE,
+                            },
+                        )
                         emit_handoff_markers(
                             review_state_manager=review_state_manager,
                             review_stage=VOICE_SELECTION_REVIEW_STAGE,
@@ -2999,6 +3179,33 @@ class ProcessPipeline:
                             _sp_entry["clone_provider"] = _dec.cloned_provider_name
                             _sp_entry["auto_decision"] = "cloned"
 
+                            # Sidecar audit: per-speaker CLONED success.
+                            # Use the auto_voice_review-generated
+                            # decision_id so this audit line links
+                            # back to the in-process decision record.
+                            _emit_smart_audit(
+                                final_project_dir,
+                                decision_type="voice_clone",
+                                decision="approved",
+                                evidence={
+                                    "voice_id": _dec.cloned_voice_id,
+                                    "clone_provider": (
+                                        _dec.cloned_provider_name
+                                    ),
+                                    "sample_seconds": (
+                                        _smart_per_speaker_sample_seconds.get(
+                                            _dec.speaker_id
+                                        )
+                                    ),
+                                },
+                                smart_decision_id=_dec.decision_id,
+                                extra={
+                                    "speaker_id": _dec.speaker_id,
+                                    "job_id": str(_snap("job_id") or ""),
+                                    "user_id": str(_snap("user_id") or ""),
+                                },
+                            )
+
                             # Codex 第二十九轮 P0: mirror to UserVoice.
                             # MUST happen on every CLONED decision so
                             # next job's quota sees the up-to-date
@@ -3055,6 +3262,29 @@ class ProcessPipeline:
                     # Studio human review gives the user a chance to
                     # manually attach the clone or skip the speaker.
                     if _smart_clone_mirror_failures:
+                        _emit_smart_audit(
+                            final_project_dir,
+                            decision_type="downgrade_handoff",
+                            decision="rejected",
+                            reason_code="clone_library_register_failed",
+                            evidence={
+                                "failed_speakers": list(
+                                    _smart_clone_mirror_failures
+                                ),
+                                "successful_clones": [
+                                    _dec.speaker_id
+                                    for _dec in _smart_voice_review.decisions
+                                    if _dec.choice == VoiceReviewChoice.CLONED
+                                    and _dec.speaker_id
+                                    not in _smart_clone_mirror_failures
+                                ],
+                            },
+                            extra={
+                                "job_id": str(_snap("job_id") or ""),
+                                "user_id": str(_snap("user_id") or ""),
+                                "handoff_stage": VOICE_SELECTION_REVIEW_STAGE,
+                            },
+                        )
                         emit_handoff_markers(
                             review_state_manager=review_state_manager,
                             review_stage=VOICE_SELECTION_REVIEW_STAGE,
@@ -3123,6 +3353,41 @@ class ProcessPipeline:
                             },
                         }
                     )
+
+                    # Sidecar audit: voice_selection batch auto-approved.
+                    # Per-speaker CLONED decisions already wrote their
+                    # own voice_clone events above; this event captures
+                    # the batch-level verdict.
+                    _smart_cloned_count = sum(
+                        1
+                        for _dec in _smart_voice_review.decisions
+                        if _dec.choice == VoiceReviewChoice.CLONED
+                    )
+                    _smart_preset_count = sum(
+                        1
+                        for _dec in _smart_voice_review.decisions
+                        if _dec.choice == VoiceReviewChoice.PRESET
+                    )
+                    _emit_smart_audit(
+                        final_project_dir,
+                        decision_type="voice_selection_auto_approve",
+                        decision="approved",
+                        evidence={
+                            "decisions_count": len(
+                                _smart_voice_review.decisions
+                            ),
+                            "cloned_count": _smart_cloned_count,
+                            "preset_count": _smart_preset_count,
+                            "main_speakers_count": len(
+                                _smart_main_speakers
+                            ),
+                        },
+                        extra={
+                            "job_id": str(_snap("job_id") or ""),
+                            "user_id": str(_snap("user_id") or ""),
+                        },
+                    )
+
                     print(
                         f"[S2.5] Smart 自动批准 voice_selection_review:"
                         f" {len(_smart_voice_review.decisions)} 决策"
@@ -3202,6 +3467,21 @@ class ProcessPipeline:
                         # via Studio human-review.
                         from services.smart.handoff import emit_handoff_markers
 
+                        _emit_smart_audit(
+                            final_project_dir,
+                            decision_type="downgrade_handoff",
+                            decision="rejected",
+                            reason_code="cloned_voice_expired",
+                            evidence={
+                                "expired_voice_ids": list(expired_voices),
+                                "expired_count": len(expired_voices),
+                            },
+                            extra={
+                                "job_id": str(_snap("job_id") or ""),
+                                "user_id": str(_snap("user_id") or ""),
+                                "handoff_stage": VOICE_SELECTION_REVIEW_STAGE,
+                            },
+                        )
                         emit_handoff_markers(
                             review_state_manager=review_state_manager,
                             review_stage=VOICE_SELECTION_REVIEW_STAGE,
@@ -3728,6 +4008,25 @@ class ProcessPipeline:
                         if not _smart_translation_decision.auto_approved:
                             # Handoff: plan §6.5 three-tuple
                             # (set_stage + smart_state + web_review_marker).
+                            _emit_smart_audit(
+                                final_project_dir,
+                                decision_type="translation_auto_approve",
+                                decision="rejected",
+                                reason_code=(
+                                    _smart_translation_decision.reason_code
+                                ),
+                                evidence=dict(
+                                    _smart_translation_decision.metrics or {}
+                                ),
+                                extra={
+                                    "failed_check": (
+                                        _smart_translation_decision.failed_check
+                                    ),
+                                    "job_id": str(_snap("job_id") or ""),
+                                    "user_id": str(_snap("user_id") or ""),
+                                    "handoff_stage": TRANSLATION_REVIEW_STAGE,
+                                },
+                            )
                             emit_handoff_markers(
                                 review_state_manager=review_state_manager,
                                 review_stage=TRANSLATION_REVIEW_STAGE,
@@ -3794,6 +4093,21 @@ class ProcessPipeline:
                                 },
                             }
                         )
+
+                        # Sidecar audit: translation auto-approved.
+                        _emit_smart_audit(
+                            final_project_dir,
+                            decision_type="translation_auto_approve",
+                            decision="approved",
+                            evidence=dict(
+                                _smart_translation_decision.metrics or {}
+                            ),
+                            extra={
+                                "job_id": str(_snap("job_id") or ""),
+                                "user_id": str(_snap("user_id") or ""),
+                            },
+                        )
+
                         print(
                             "[S3] Smart 自动翻译审核通过,继续 TTS。"
                         )

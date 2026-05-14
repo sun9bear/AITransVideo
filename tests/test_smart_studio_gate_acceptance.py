@@ -655,7 +655,7 @@ class TestProcessPyStudioGateWidening:
         smart_block = _find_anchor_block(
             self._source(),
             "Smart inline auto-approve path",
-            window=650,
+            window=800,
         )
         for required_call in (
             "evaluate_voice_review",
@@ -1061,7 +1061,7 @@ class TestProcessPyStudioGateWidening:
         smart_block = _find_anchor_block(
             self._source(),
             "Smart inline auto-approve path",
-            window=650,
+            window=800,
         )
 
         # 1. Helper + gate imported.
@@ -1086,7 +1086,7 @@ class TestProcessPyStudioGateWidening:
         assert eligibility_idx >= 0, (
             "evaluate_eligibility call site missing in smart inline branch."
         )
-        rejection_window = smart_block[eligibility_idx : eligibility_idx + 1200]
+        rejection_window = smart_block[eligibility_idx : eligibility_idx + 3500]
         assert "if not _smart_eligibility.approved" in rejection_window, (
             "Smart inline branch missing eligibility rejection check. "
             "Without it ``evaluate_eligibility`` is decorative — both "
@@ -1155,7 +1155,7 @@ class TestProcessPyStudioGateWidening:
         smart_block = _find_anchor_block(
             self._source(),
             "Smart inline auto-approve path",
-            window=650,
+            window=800,
         )
 
         # The overlay should pull from the aggregation result. Anchor on
@@ -1288,7 +1288,7 @@ class TestProcessPyStudioGateWidening:
             "``if not auto_approved:`` rejection check.\n"
             f"Block:\n{block[:2000]}"
         )
-        rejection_window = block[rej_idx : rej_idx + 2500]
+        rejection_window = block[rej_idx : rej_idx + 4000]
 
         for required in (
             "emit_handoff_markers(",
@@ -1469,7 +1469,7 @@ class TestProcessPyStudioGateWidening:
         smart_block = _find_anchor_block(
             self._source(),
             "Smart inline auto-approve path",
-            window=650,
+            window=800,
         )
 
         assert "_smart_consent_allows_clone" in smart_block, (
@@ -1507,7 +1507,7 @@ class TestProcessPyStudioGateWidening:
         smart_block = _find_anchor_block(
             self._source(),
             "Smart inline auto-approve path",
-            window=650,
+            window=800,
         )
 
         assert "_smart_sample_extraction_error" in smart_block, (
@@ -1528,7 +1528,7 @@ class TestProcessPyStudioGateWidening:
             "with the real provider — paid API leak risk.\n"
             f"Block:\n{smart_block[:3000]}"
         )
-        handoff_window = smart_block[err_check_idx : err_check_idx + 2000]
+        handoff_window = smart_block[err_check_idx : err_check_idx + 3500]
         for required in (
             "emit_handoff_markers(",
             '"clone_sample_extraction_failed"',
@@ -1556,7 +1556,7 @@ class TestProcessPyStudioGateWidening:
         smart_block = _find_anchor_block(
             self._source(),
             "Smart inline auto-approve path",
-            window=650,
+            window=800,
         )
         ms_idx = smart_block.find("_smart_main_speakers = [")
         assert ms_idx >= 0
@@ -1580,7 +1580,7 @@ class TestProcessPyStudioGateWidening:
         smart_block = _find_anchor_block(
             self._source(),
             "Smart inline auto-approve path",
-            window=650,
+            window=800,
         )
         assert "_smart_quota_remaining = " in smart_block, (
             "PR#3C-b3d piece 2: quota signal must be a named "
@@ -1617,7 +1617,7 @@ class TestProcessPyStudioGateWidening:
         smart_block = _find_anchor_block(
             self._source(),
             "Smart inline auto-approve path",
-            window=650,
+            window=800,
         )
 
         # Quota check is in the branch.
@@ -1641,7 +1641,7 @@ class TestProcessPyStudioGateWidening:
 
         # The None branch must include handoff + reason code BEFORE the
         # real provider import.
-        none_branch = smart_block[none_check_idx : none_check_idx + 2000]
+        none_branch = smart_block[none_check_idx : none_check_idx + 3500]
         for required in (
             "emit_handoff_markers(",
             "voice_library_quota_unavailable",
@@ -1680,7 +1680,7 @@ class TestProcessPyStudioGateWidening:
         smart_block = _find_anchor_block(
             self._source(),
             "Smart inline auto-approve path",
-            window=650,
+            window=800,
         )
 
         # validate_sample is invoked.

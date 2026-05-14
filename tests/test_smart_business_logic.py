@@ -1602,11 +1602,11 @@ class TestB3DCloneSampleExtractorContract:
         source = src.read_text(encoding="utf-8")
         idx = source.find("Smart inline auto-approve path")
         assert idx >= 0
-        # Walk ~650 lines (matches anchor tests in
-        # test_smart_studio_gate_acceptance.py — bumped from 550 after
-        # b3e-fix added consent-gating + mirror handling).
+        # Walk ~800 lines (matches anchor tests in
+        # test_smart_studio_gate_acceptance.py — bumped from 650 after
+        # b3f added sidecar audit emits at every decision point).
         lines = source[idx:].splitlines()
-        block = "\n".join(lines[:650])
+        block = "\n".join(lines[:800])
 
         # Piece 2 (real quota): helper must be referenced; placeholder
         # literal must NOT appear inside the smart inline branch.
@@ -1840,7 +1840,7 @@ class TestB3DCloneSampleExtractorContract:
         idx = source.find("Smart inline auto-approve path")
         assert idx >= 0
         lines = source[idx:].splitlines()
-        block = "\n".join(lines[:650])
+        block = "\n".join(lines[:800])
 
         # Find the quota lookup call — must be inside the dual gate.
         quota_call = "_fetch_smart_user_voice_quota_remaining("
@@ -1861,8 +1861,8 @@ class TestB3DCloneSampleExtractorContract:
         )
 
         # The else branch must exist and use stub provider + 0 quota.
-        # Find the matching else within ~4000 chars of the dual gate.
-        gate_block = block[gate_idx : gate_idx + 4000]
+        # Find the matching else within ~6000 chars of the dual gate.
+        gate_block = block[gate_idx : gate_idx + 6000]
         else_idx = gate_block.find("\n                    else:")
         assert else_idx >= 0, (
             "Dual gate has no else: branch — consent=False / empty "
@@ -2012,7 +2012,7 @@ class TestB3DCloneSampleExtractorContract:
         idx = source.find("Smart inline auto-approve path")
         assert idx >= 0
         lines = source[idx:].splitlines()
-        block = "\n".join(lines[:650])
+        block = "\n".join(lines[:800])
 
         # The gate condition must be ``and _smart_main_speakers``.
         assert (
@@ -2100,7 +2100,7 @@ class TestB3DCloneSampleExtractorContract:
         idx = source.find("Smart inline auto-approve path")
         assert idx >= 0
         lines = source[idx:].splitlines()
-        block = "\n".join(lines[:650])
+        block = "\n".join(lines[:800])
 
         # Mirror helper is called from process.py
         assert "_register_smart_clone_in_user_voices(" in block, (
@@ -2119,6 +2119,231 @@ class TestB3DCloneSampleExtractorContract:
             "Smart branch missing clone_library_register_failed reason "
             "code — Codex 第二十九轮 P0: mirror failure must surface "
             "to Studio human review so user can take action."
+        )
+
+    def test_b3f_sidecar_helper_writes_jsonl_line(self, tmp_path):
+        """PR#3C-b3f: ``_emit_smart_audit`` helper appends one JSONL line
+        to ``{project_dir}/audit/smart_decisions.jsonl`` with the
+        expected schema. End-to-end test against real sidecar_emitter."""
+        import json
+
+        from pipeline.process import _emit_smart_audit
+
+        project_dir = tmp_path / "project_x"
+        project_dir.mkdir()
+
+        _emit_smart_audit(
+            project_dir,
+            decision_type="speaker_gate",
+            decision="approved",
+            evidence={
+                "main_speaker_count": 2,
+                "main_speaker_ids": ["speaker_a", "speaker_b"],
+            },
+            extra={
+                "job_id": "job-1",
+                "user_id": "user-1",
+            },
+        )
+
+        sidecar = project_dir / "audit" / "smart_decisions.jsonl"
+        assert sidecar.exists(), (
+            "smart_decisions.jsonl not created by _emit_smart_audit"
+        )
+        lines = sidecar.read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) == 1, (
+            f"Expected 1 sidecar line; got {len(lines)}.\nLines: {lines}"
+        )
+        record = json.loads(lines[0])
+        assert record["decision_type"] == "speaker_gate"
+        assert record["decision"] == "approved"
+        assert record["auto_approved"] is True
+        assert record["evidence"]["main_speaker_count"] == 2
+        assert record["evidence"]["main_speaker_ids"] == [
+            "speaker_a", "speaker_b"
+        ]
+        # Extra fields land at top level.
+        assert record["job_id"] == "job-1"
+        assert record["user_id"] == "user-1"
+        # Schema version + auto-generated fields.
+        assert record["schema_version"] == 1
+        assert isinstance(record["smart_decision_id"], str)
+        assert len(record["smart_decision_id"]) >= 16
+        assert isinstance(record["created_at"], str)
+
+    def test_b3f_sidecar_helper_uses_supplied_decision_id(self, tmp_path):
+        """When the caller passes ``smart_decision_id`` (e.g. piping
+        through a VoiceReviewDecision.decision_id), the helper uses it
+        verbatim instead of generating a new UUID. This keeps audit
+        linkage clean between per-speaker decisions in
+        evaluate_voice_review and the sidecar JSONL."""
+        import json
+
+        from pipeline.process import _emit_smart_audit
+
+        project_dir = tmp_path / "project_y"
+        project_dir.mkdir()
+
+        _emit_smart_audit(
+            project_dir,
+            decision_type="voice_clone",
+            decision="approved",
+            evidence={"voice_id": "vt_xxx"},
+            smart_decision_id="decision-abc-123",
+        )
+
+        record = json.loads(
+            (project_dir / "audit" / "smart_decisions.jsonl")
+            .read_text(encoding="utf-8")
+            .strip()
+        )
+        assert record["smart_decision_id"] == "decision-abc-123"
+        assert record["event_id"] == "decision-abc-123"
+
+    def test_b3f_sidecar_helper_appends_multiple_lines(self, tmp_path):
+        """JSONL is append-only: multiple calls produce multiple lines,
+        each parseable as JSON. Mirrors the audit/ contract — one event
+        per line, never truncating."""
+        import json
+
+        from pipeline.process import _emit_smart_audit
+
+        project_dir = tmp_path / "project_z"
+        project_dir.mkdir()
+
+        _emit_smart_audit(
+            project_dir,
+            decision_type="speaker_gate",
+            decision="approved",
+            evidence={"step": 1},
+        )
+        _emit_smart_audit(
+            project_dir,
+            decision_type="translation_auto_approve",
+            decision="approved",
+            evidence={"step": 2},
+        )
+        _emit_smart_audit(
+            project_dir,
+            decision_type="voice_selection_auto_approve",
+            decision="rejected",
+            reason_code="provider_failure_max_retries_3",
+            evidence={"step": 3},
+        )
+
+        sidecar = project_dir / "audit" / "smart_decisions.jsonl"
+        lines = sidecar.read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) == 3
+        records = [json.loads(line) for line in lines]
+        assert [r["decision_type"] for r in records] == [
+            "speaker_gate",
+            "translation_auto_approve",
+            "voice_selection_auto_approve",
+        ]
+        assert records[-1]["decision"] == "rejected"
+        assert records[-1]["reason_code"] == "provider_failure_max_retries_3"
+        assert records[-1]["auto_approved"] is False
+
+    def test_b3f_sidecar_helper_swallows_invalid_decision_type(
+        self, tmp_path, capsys,
+    ):
+        """Bad decision_type should print a diagnostic but NOT crash
+        the pipeline (plan §6.4 末段). Verifies the wrapper catches
+        the ValueError from emit_smart_decision."""
+        from pipeline.process import _emit_smart_audit
+
+        project_dir = tmp_path / "project_q"
+        project_dir.mkdir()
+
+        # Should not raise.
+        _emit_smart_audit(
+            project_dir,
+            decision_type="not_a_real_type",
+            decision="approved",
+        )
+
+        # Diagnostic printed.
+        captured = capsys.readouterr().out
+        assert "sidecar emit failed" in captured.lower(), (
+            f"Expected stderr diagnostic on enum typo; got: {captured!r}"
+        )
+
+        # No JSONL written (since the emit raised before file write).
+        sidecar = project_dir / "audit" / "smart_decisions.jsonl"
+        assert not sidecar.exists() or (
+            sidecar.read_text(encoding="utf-8").strip() == ""
+        )
+
+    def test_b3f_smart_branch_emits_at_every_decision_point(self):
+        """Source-level anchor: pin that ``_emit_smart_audit`` is
+        called at each smart decision point in the inline branch. If
+        a future refactor drops an emit, the QA report renderer +
+        admin tooling lose visibility into that decision.
+
+        Decision points (PR#3C-b3f):
+          - speaker_gate (rejected / approved)
+          - translation_auto_approve (rejected / approved)
+          - voice_selection_auto_approve (rejected / approved)
+          - voice_clone (approved, per-speaker)
+          - downgrade_handoff (sample_extraction / quota /
+            mirror / cloned_voice_expired)
+        """
+        from pathlib import Path
+
+        src = Path(__file__).resolve().parents[1] / "src" / "pipeline" / "process.py"
+        source = src.read_text(encoding="utf-8")
+        idx = source.find("Smart inline auto-approve path")
+        assert idx >= 0
+        lines = source[idx:].splitlines()
+        block = "\n".join(lines[:1000])  # smart inline branch fits
+
+        # Count distinct _emit_smart_audit call sites by their
+        # decision_type field. Each (decision_type, decision) pair
+        # corresponds to one anchored emit.
+        required_emit_signatures = [
+            # Eligibility gate (b3b)
+            ('decision_type="speaker_gate"', 'decision="rejected"'),
+            ('decision_type="speaker_gate"', 'decision="approved"'),
+            # Voice review batch (b2)
+            ('decision_type="voice_selection_auto_approve"', 'decision="rejected"'),
+            ('decision_type="voice_selection_auto_approve"', 'decision="approved"'),
+            # Per-speaker CLONED (b3d/e)
+            ('decision_type="voice_clone"', 'decision="approved"'),
+            # Downgrade handoff variants
+            ('reason_code="clone_sample_extraction_failed"',),
+            ('reason_code="voice_library_quota_unavailable"',),
+            ('reason_code="clone_library_register_failed"',),
+        ]
+        for required in required_emit_signatures:
+            for token in required:
+                assert token in block, (
+                    f"Smart inline branch missing sidecar emit token "
+                    f"{token!r}. PR#3C-b3f: every smart decision point "
+                    f"must emit one sidecar event so QA report renderer "
+                    f"and admin tooling can reconstruct WHY smart "
+                    f"decided as it did.\n"
+                    f"Block first 4000 chars:\n{block[:4000]}"
+                )
+
+        # Translation review emits also live further down in the
+        # smart branch (S3 trigger). Search the WHOLE file (not just
+        # the inline block) since they're at the translation_review
+        # trigger point which is past the voice_selection block.
+        for required in (
+            'decision_type="translation_auto_approve"',
+        ):
+            assert source.count(required) >= 2, (
+                f"Expected ≥2 occurrences of {required!r} (approved + "
+                f"rejected paths in S3); got "
+                f"{source.count(required)}."
+            )
+
+        # Pre-TTS expiry handoff anchored on cloned_voice_expired
+        # (appears in process.py multiple times; pin that an
+        # _emit_smart_audit call exists with that reason_code).
+        assert 'reason_code="cloned_voice_expired"' in source, (
+            "Pre-TTS expiry handoff missing sidecar emit with "
+            "reason_code='cloned_voice_expired'."
         )
 
     def test_b3d_consent_false_skips_provider_call_entirely(self):
