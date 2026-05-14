@@ -40,6 +40,22 @@ _SMART_HANDOFF_OR_TERMINAL_STATUSES = frozenset(
     {"downgraded_to_studio", "fail_and_refunded"}
 )
 
+# Smart statuses that allow a user-facing handoff into Studio post-edit /
+# Jianying draft (plan §4.3 末段 + §6.6 contract). A smart job is editable
+# when the smart pipeline has either succeeded ("completed") or formally
+# handed off to Studio ("downgraded_to_studio"). Still-running / paused-
+# for-clone / refunded jobs must NOT enter editing.
+_SMART_STATE_EDITABLE_STATUSES = frozenset(
+    {"completed", "downgraded_to_studio"}
+)
+
+# All service_modes that user-facing Studio gates (enter-edit, Jianying
+# draft) MUST accept. Plan §4.3 末段 + Codex 第二轮 F3 + 第六轮 F3.
+# Smart additionally needs the smart_state.status secondary check via
+# ``is_editable_smart_state`` — accepting "smart" in service_mode alone
+# would let in-flight smart jobs into editing.
+EDITABLE_SERVICE_MODES = frozenset({"studio", "smart"})
+
 
 def emit_smart_state_marker(state: Mapping[str, Any]) -> None:
     """Print a ``[SMART_STATE] {json}`` line to stdout.
@@ -136,3 +152,24 @@ def derive_effective_pipeline_mode(record: Any) -> str:
         # control flow now studio (plan §6.0.6 / §6.5).
         return "studio"
     return "smart"
+
+
+def is_editable_smart_state(smart_state: Any) -> bool:
+    """Return whether a smart job's ``smart_state`` allows entering
+    Studio post-edit / Jianying draft (the user-facing editable paths).
+
+    Per plan §4.3 末段 + §6.6:
+      - ``completed`` — smart pipeline succeeded; user CAN enter Studio
+        post-edit for fine-tuning
+      - ``downgraded_to_studio`` — smart auto failed and formally handed
+        off; user CAN take over via Studio human-review
+      - ``running`` / ``clone_blocked_waiting_retry`` / ``fail_and_refunded``
+        / None / missing — user MUST NOT enter editing (job not in a
+        post-edit-ready state)
+
+    Accepts dict (the canonical ``smart_state`` JSON shape) or None;
+    anything else is treated as "no editable state" (fail-closed).
+    """
+    if not isinstance(smart_state, Mapping):
+        return False
+    return smart_state.get("status") in _SMART_STATE_EDITABLE_STATUSES

@@ -119,10 +119,30 @@ def enter_editing(record: JobRecord, store: JobStore) -> JobRecord:
             f"job {record.job_id} can only enter editing from succeeded "
             f"(current status: {record.status})"
         )
-    if record.service_mode != "studio":
+    # Smart MVP P2 (plan §4.3 末段 / §6.6 / Codex 第二轮 F3): smart jobs
+    # that have completed (smart_state.status="completed") OR formally
+    # handed off to Studio (status="downgraded_to_studio") also enter
+    # editing. record.service_mode stays "smart" as audit fact — see
+    # services.smart.state.is_editable_smart_state for the secondary
+    # check that prevents in-flight smart jobs from sneaking in.
+    from services.smart.state import EDITABLE_SERVICE_MODES, is_editable_smart_state
+
+    if record.service_mode not in EDITABLE_SERVICE_MODES:
         raise EditingConflictError(
-            f"job {record.job_id} is not a Studio job "
-            f"(service_mode={record.service_mode}); only Studio supports editing"
+            f"job {record.job_id} service_mode={record.service_mode!r} is not "
+            f"in editable set {sorted(EDITABLE_SERVICE_MODES)}; only Studio "
+            f"and Smart jobs support editing"
+        )
+    if record.service_mode == "smart" and not is_editable_smart_state(record.smart_state):
+        smart_status = (
+            record.smart_state.get("status")
+            if isinstance(record.smart_state, dict)
+            else None
+        )
+        raise EditingConflictError(
+            f"smart job {record.job_id} smart_state.status={smart_status!r} is "
+            f"not editable; only 'completed' or 'downgraded_to_studio' allow "
+            f"entering Studio post-edit"
         )
     if not record.project_dir:
         raise EditingConflictError(

@@ -18,16 +18,20 @@ Public surface:
 """
 from services.smart.handoff import emit_handoff_markers
 from services.smart.state import (
+    EDITABLE_SERVICE_MODES,
     SMART_STATE_MARKER_PREFIX,
     derive_effective_pipeline_mode,
     emit_smart_state_marker,
+    is_editable_smart_state,
     parse_smart_state_marker,
 )
 
 __all__ = [
+    "EDITABLE_SERVICE_MODES",
     "SMART_STATE_MARKER_PREFIX",
     "derive_effective_pipeline_mode",
     "emit_handoff_markers",
     "emit_smart_state_marker",
+    "is_editable_smart_state",
     "parse_smart_state_marker",
 ]

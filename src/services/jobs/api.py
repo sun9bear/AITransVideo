@@ -1455,13 +1455,41 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                             },
                         )
                         return
-                    # Gate: service_mode must be "studio"
-                    if (record.service_mode or "").lower() != "studio":
+                    # Gate: service_mode must be "studio" OR "smart" (with
+                    # smart_state.status in {completed, downgraded_to_studio};
+                    # see plan §4.3 末段 + §6.6 + Codex 第六轮 F3 / 第二轮 F3).
+                    # Smart audit fact preserved on service_mode; the secondary
+                    # is_editable_smart_state check prevents in-flight smart
+                    # jobs from sneaking past this user-facing entry.
+                    from services.smart.state import (
+                        EDITABLE_SERVICE_MODES,
+                        is_editable_smart_state,
+                    )
+                    record_service_mode = (record.service_mode or "").lower()
+                    if record_service_mode not in EDITABLE_SERVICE_MODES:
                         self._write_json(
                             HTTPStatus.FORBIDDEN,
                             {
-                                "code": "service_mode_not_studio",
-                                "message": "Jianying draft is only available for Studio mode jobs.",
+                                "code": "service_mode_not_studio_or_smart",
+                                "message": (
+                                    "Jianying draft is only available for "
+                                    "Studio or Smart mode jobs."
+                                ),
+                            },
+                        )
+                        return
+                    if record_service_mode == "smart" and not is_editable_smart_state(
+                        getattr(record, "smart_state", None)
+                    ):
+                        self._write_json(
+                            HTTPStatus.FORBIDDEN,
+                            {
+                                "code": "smart_state_not_editable",
+                                "message": (
+                                    "Smart job is not in an editable state "
+                                    "(only 'completed' or 'downgraded_to_studio' "
+                                    "allow Jianying draft)."
+                                ),
                             },
                         )
                         return

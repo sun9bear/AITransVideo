@@ -336,12 +336,11 @@ class TestAutoVoiceReviewOrchestration:
         # Raw form preserved in metrics so admin can diagnose source.
         assert d.metrics["sample_seconds_raw"] == "'not a number'"
 
-    def test_sample_numeric_string_routes_to_preset_anomaly(self):
-        """``float("15.0")`` actually works — but a stringly-typed
-        sample_seconds is itself a data-quality signal. Module accepts
-        it (math.isfinite check passes after coerce) since the value
-        IS valid; we don't add extra strictness because float() will
-        also normalise int → float silently.
+    def test_sample_numeric_string_coerces_and_proceeds_to_clone(self):
+        """``float("15.0")`` actually works — coerce succeeds, isfinite
+        passes, value ≥ 10 → clone proceeds. (Renamed per Codex 第十四
+        轮 non-blocking note: previous name said "routes_to_preset" but
+        the assertion is clone, not preset.)
 
         This test documents the intentional permissiveness: float()
         coerce handles valid numeric strings + ints. Strict type

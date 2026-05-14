@@ -380,11 +380,28 @@ class JianyingDraftRunner:
 
         job = self._store.require_job(job_id)  # raises KeyError if not found
 
-        # Gate 1: must be a studio job (cheap pre-check; re-checked inside lock)
-        if job.service_mode != "studio":
+        # Gate 1: must be a studio OR smart job (smart in completed /
+        # downgraded_to_studio state — see plan §4.3 末段 + §6.6 +
+        # Codex 第二/六轮 F3). Smart audit fact preserved on
+        # service_mode; secondary smart_state check prevents in-flight
+        # smart jobs from sneaking in.
+        from services.smart.state import EDITABLE_SERVICE_MODES, is_editable_smart_state
+
+        if job.service_mode not in EDITABLE_SERVICE_MODES:
             raise JianyingNotAllowedError(
-                "service_mode_not_studio",
-                f"Jianying draft is only available for Studio mode jobs (got {job.service_mode!r}).",
+                "service_mode_not_studio_or_smart",
+                f"Jianying draft is only available for Studio or Smart mode "
+                f"jobs (got {job.service_mode!r}).",
+            )
+        if job.service_mode == "smart" and not is_editable_smart_state(
+            getattr(job, "smart_state", None)
+        ):
+            smart_state = getattr(job, "smart_state", None) or {}
+            smart_status = smart_state.get("status") if isinstance(smart_state, dict) else None
+            raise JianyingNotAllowedError(
+                "smart_state_not_editable",
+                f"Smart job smart_state.status={smart_status!r} is not editable; "
+                f"only 'completed' or 'downgraded_to_studio' allow Jianying draft.",
             )
 
         # Gate 2: overall job must be succeeded
