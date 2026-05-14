@@ -2470,19 +2470,39 @@ class ProcessPipeline:
                     # eligibility gate marked "main configured dubbing
                     # speakers" per plan §6.1 reach evaluate_voice_review.
                     #
-                    # PR#3C-b3d (Codex 第二十轮 three-piece contract):
+                    # Codex 第二十轮 three-piece contract:
                     # 1. Real per-speaker ffmpeg sample (VoiceSampleExtractor)
                     # 2. Real voice_library_quota_remaining snapshot
                     # 3. Real CloneProvider (build_smart_clone_provider)
                     #
-                    # All three land together because:
+                    # All three must be wired before the smart path can
+                    # actually clone in production:
                     # - Real provider + stub samples (whole-file path) would
-                    #   burn paid clone API on the wrong audio (every smart
-                    #   job whose consent.auto_voice_clone=True).
-                    # - Real provider + real samples + missing quota would
-                    #   blow past user's MiniMax personal library cap.
-                    # Together they form the safe Smart auto-clone path
-                    # the b2 stub guarded against.
+                    #   burn paid clone API on the wrong audio.
+                    # - Real provider + placeholder quota would blow past
+                    #   user's MiniMax personal library cap (the provider's
+                    #   error is reactive, the §7.3 brake is preventive).
+                    #
+                    # Current state (PR#3C-b3d, after 第二十七轮 P0 revert):
+                    # - Piece 1 LANDED: per-speaker ffmpeg sample below.
+                    # - Piece 1+ LANDED: validate_sample() + duration ≥10s
+                    #   gate (第二十七轮 P1) + validated duration →
+                    #   sample_seconds.
+                    # - Piece 2 PENDING: ``_smart_quota_remaining = 100``
+                    #   is a documented placeholder. Real quota comes
+                    #   from a Gateway internal endpoint that lands in
+                    #   PR#3C-b3e.
+                    # - Piece 3 PENDING: ``_smart_clone_provider`` is the
+                    #   b2 fail-closed stub. Real provider via
+                    #   build_smart_clone_provider() lands in PR#3C-b3e
+                    #   AT THE SAME COMMIT as Piece 2.
+                    #
+                    # b3e atomic invariant: ``_smart_quota_remaining = 100``
+                    # AND ``_build_b2_not_wired_clone_provider()`` must
+                    # both be replaced in a single commit. The regression
+                    # test test_b3d_quota_signal_still_a_placeholder_pending_b3e
+                    # locks this invariant — when b3e flips one without
+                    # the other, the test fails.
 
                     # ── Piece 1: extract per-speaker clone sample ──
                     #

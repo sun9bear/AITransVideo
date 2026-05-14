@@ -1605,10 +1605,11 @@ class TestB3DCloneSampleExtractorContract:
         source = src.read_text(encoding="utf-8")
         idx = source.find("Smart inline auto-approve path")
         assert idx >= 0
-        # Walk ~500 lines (matches anchor tests in
-        # test_smart_studio_gate_acceptance.py).
+        # Walk ~550 lines (matches anchor tests in
+        # test_smart_studio_gate_acceptance.py — bumped from 500 after
+        # b3d/b3e comment expansion).
         lines = source[idx:].splitlines()
-        block = "\n".join(lines[:500])
+        block = "\n".join(lines[:550])
 
         # Pin the placeholder value.
         assert "_smart_quota_remaining = 100" in block, (

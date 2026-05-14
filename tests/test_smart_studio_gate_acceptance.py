@@ -655,7 +655,7 @@ class TestProcessPyStudioGateWidening:
         smart_block = _find_anchor_block(
             self._source(),
             "Smart inline auto-approve path",
-            window=500,
+            window=550,
         )
         for required_call in (
             "evaluate_voice_review",
@@ -1072,7 +1072,7 @@ class TestProcessPyStudioGateWidening:
         smart_block = _find_anchor_block(
             self._source(),
             "Smart inline auto-approve path",
-            window=500,
+            window=550,
         )
 
         # 1. Helper + gate imported.
@@ -1166,7 +1166,7 @@ class TestProcessPyStudioGateWidening:
         smart_block = _find_anchor_block(
             self._source(),
             "Smart inline auto-approve path",
-            window=500,
+            window=550,
         )
 
         # The overlay should pull from the aggregation result. Anchor on
@@ -1480,7 +1480,7 @@ class TestProcessPyStudioGateWidening:
         smart_block = _find_anchor_block(
             self._source(),
             "Smart inline auto-approve path",
-            window=500,
+            window=550,
         )
 
         assert "_smart_consent_allows_clone" in smart_block, (
@@ -1518,7 +1518,7 @@ class TestProcessPyStudioGateWidening:
         smart_block = _find_anchor_block(
             self._source(),
             "Smart inline auto-approve path",
-            window=500,
+            window=550,
         )
 
         assert "_smart_sample_extraction_error" in smart_block, (
@@ -1567,7 +1567,7 @@ class TestProcessPyStudioGateWidening:
         smart_block = _find_anchor_block(
             self._source(),
             "Smart inline auto-approve path",
-            window=500,
+            window=550,
         )
         ms_idx = smart_block.find("_smart_main_speakers = [")
         assert ms_idx >= 0
@@ -1591,7 +1591,7 @@ class TestProcessPyStudioGateWidening:
         smart_block = _find_anchor_block(
             self._source(),
             "Smart inline auto-approve path",
-            window=500,
+            window=550,
         )
         assert "_smart_quota_remaining = " in smart_block, (
             "PR#3C-b3d piece 2: quota signal must be a named "
@@ -1627,7 +1627,7 @@ class TestProcessPyStudioGateWidening:
         smart_block = _find_anchor_block(
             self._source(),
             "Smart inline auto-approve path",
-            window=500,
+            window=550,
         )
 
         # validate_sample is invoked.
