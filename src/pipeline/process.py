@@ -2371,19 +2371,30 @@ class ProcessPipeline:
                     # auto-approve. Inputs:
                     #   - speaker_structure_profiles from S2 (carries
                     #     speaker_role + speaker_duration_share)
-                    #   - segment-level dubbing_mode aggregated to
-                    #     speaker level via fail-closed reducer (mixed /
-                    #     missing → "dub" so the speaker counts toward
-                    #     main_speaker_count limit; codex 第二十二轮
-                    #     warning).
+                    #   - line-level dubbing_mode aggregated to speaker
+                    #     level via fail-closed reducer (mixed / missing →
+                    #     "dub" so the speaker counts toward
+                    #     main_speaker_count limit; Codex 第二十二轮 warning).
                     # ``evaluate_eligibility`` accepts the
                     # speaker_structure_profiles dict shape directly via
                     # ``normalize_speaker_stats`` (PR#3A-fix2 P1-1) and
                     # picks up the per-speaker ``dubbing_mode`` overlay
                     # we attach below.
+                    #
+                    # Codex 第二十三轮 P1: input is ``transcript_result.lines``
+                    # not ``.segments`` — TranscriptResult only carries
+                    # ``lines: list[TranscriptLine]`` (see
+                    # ``src/services/assemblyai/transcriber.py``) and
+                    # each TranscriptLine has ``speaker_id`` +
+                    # ``dubbing_mode``. The earlier ``.segments`` getattr
+                    # always returned None → aggregation was {} → every
+                    # speaker overlay defaulted to "dub" → keep_original
+                    # / mute_or_background exclusions silently disabled.
+                    # Matches the existing _build_speaker_structure_profiles
+                    # call convention at process.py:2055.
                     _smart_speaker_dubbing_modes = (
                         aggregate_segment_dubbing_modes_to_speaker(
-                            getattr(transcript_result, "segments", None) or []
+                            getattr(transcript_result, "lines", None) or []
                         )
                     )
                     # Overlay dubbing_mode onto the speaker_structure_profiles

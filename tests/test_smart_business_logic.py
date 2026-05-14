@@ -626,6 +626,208 @@ class TestAggregateSegmentDubbingModesToSpeaker:
         assert result == {"speaker_a": "keep_original"}
 
 
+class TestAggregateWithRealTranscriptLineShape:
+    """Codex 第二十三轮 P1 — functional integration test.
+
+    The earlier PR#3C-b3b shipped with ``getattr(transcript_result,
+    "segments", None) or []`` in the process.py wiring, but
+    ``TranscriptResult`` has no ``segments`` attribute — only ``lines:
+    list[TranscriptLine]`` (see
+    ``src/services/assemblyai/transcriber.py``). The aggregation
+    silently returned ``{}`` for every job, so every speaker overlay
+    defaulted to ``"dub"`` and the keep_original / mute_or_background
+    exclusions never fired.
+
+    This functional test pins the end-to-end pipeline (aggregate +
+    overlay + evaluate_eligibility) using the REAL TranscriptLine
+    shape, so if anyone ever re-introduces ``.segments`` or any other
+    non-existent field the speaker A (all keep_original) won't be
+    correctly excluded and the assertion fires immediately. The
+    anchor-only test in test_smart_studio_gate_acceptance.py can't
+    catch this — it inspects the source code, not the runtime values.
+    """
+
+    def test_real_transcript_line_objects_drive_eligibility_exclusion(self):
+        from services.assemblyai.transcriber import TranscriptLine
+        from services.smart.eligibility_gate import (
+            aggregate_segment_dubbing_modes_to_speaker, evaluate_eligibility,
+        )
+
+        # Speaker A: 4 keep_original lines, occupies >10% duration
+        # Speaker B: 4 dub lines, occupies >10% duration
+        lines = [
+            TranscriptLine(
+                index=1, start_ms=0, end_ms=2000,
+                speaker_id="speaker_a", speaker_label="A",
+                source_text="hello",
+                dubbing_mode="keep_original",
+            ),
+            TranscriptLine(
+                index=2, start_ms=2000, end_ms=4000,
+                speaker_id="speaker_a", speaker_label="A",
+                source_text="hi",
+                dubbing_mode="keep_original",
+            ),
+            TranscriptLine(
+                index=3, start_ms=4000, end_ms=6000,
+                speaker_id="speaker_b", speaker_label="B",
+                source_text="ok",
+                dubbing_mode="dub",
+            ),
+            TranscriptLine(
+                index=4, start_ms=6000, end_ms=8000,
+                speaker_id="speaker_b", speaker_label="B",
+                source_text="bye",
+                dubbing_mode="dub",
+            ),
+        ]
+
+        # ── Step 1: aggregate lines → speaker-level dubbing_mode
+        aggregated = aggregate_segment_dubbing_modes_to_speaker(lines)
+        assert aggregated == {
+            "speaker_a": "keep_original",
+            "speaker_b": "dub",
+        }, (
+            "Aggregation against real TranscriptLine failed — likely "
+            "the reducer is reading the wrong attribute. Codex 第二十三轮 "
+            "P1 regression."
+        )
+
+        # ── Step 2: overlay onto a speaker_structure_profiles-shaped
+        # dict (the same shape process.py constructs from
+        # _build_speaker_structure_profiles + the loop in the smart
+        # inline branch around process.py:2392-2400).
+        speaker_structure_profiles = {
+            "speaker_a": {
+                "speaker_role": "primary",
+                "speaker_duration_share": 0.55,
+                "speaker_duration_ms": 4000,
+            },
+            "speaker_b": {
+                "speaker_role": "primary",
+                "speaker_duration_share": 0.45,
+                "speaker_duration_ms": 4000,
+            },
+        }
+        eligibility_input: dict[str, dict] = {}
+        for sid, profile in speaker_structure_profiles.items():
+            enriched = dict(profile)
+            enriched["dubbing_mode"] = aggregated.get(sid, "dub")
+            eligibility_input[sid] = enriched
+
+        # ── Step 3: evaluate_eligibility — speaker A must be excluded
+        # (all keep_original), B must be the only main speaker.
+        decision = evaluate_eligibility(eligibility_input)
+        assert decision.approved is True, (
+            f"Expected approved=True with 1 main speaker (B), got "
+            f"approved={decision.approved} count={decision.main_speaker_count} "
+            f"reason={decision.reason_code!r}."
+        )
+        assert decision.main_speaker_count == 1, (
+            f"Expected exactly 1 main speaker after excluding "
+            f"keep_original speaker A; got {decision.main_speaker_count}.\n"
+            f"main_speaker_ids={decision.main_speaker_ids}\n"
+            f"excluded={decision.excluded_speakers}\n"
+            f"This means the aggregation didn't propagate to the gate — "
+            f"likely .segments / .lines / other field-name drift."
+        )
+        assert decision.main_speaker_ids == ("speaker_b",), (
+            f"Speaker B must be the sole main speaker after A excluded; "
+            f"got {decision.main_speaker_ids!r}."
+        )
+        # speaker_a should appear in excluded_speakers with a
+        # dubbing_mode_keep_original reason.
+        excluded_a = [
+            e for e in decision.excluded_speakers
+            if e.get("speaker_id") == "speaker_a"
+        ]
+        assert excluded_a, (
+            f"Speaker A should be in excluded_speakers list. Got: "
+            f"{decision.excluded_speakers}"
+        )
+        assert excluded_a[0]["reason"] == "dubbing_mode_keep_original", (
+            f"Speaker A exclusion reason should record the dubbing_mode; "
+            f"got {excluded_a[0]['reason']!r}."
+        )
+
+    def test_real_transcript_lines_mixed_with_role_excluded_speaker(self):
+        """Mixed scenario: one keep_original speaker + one role-excluded
+        speaker + two real dub speakers → only the two dubs remain as
+        main candidates. Pins that aggregation propagates correctly
+        through the gate's exclusion stack (dubbing_mode AND role)."""
+        from services.assemblyai.transcriber import TranscriptLine
+        from services.smart.eligibility_gate import (
+            aggregate_segment_dubbing_modes_to_speaker, evaluate_eligibility,
+        )
+
+        # 4 speakers: 1 keep_original (A), 1 dub-with-observer-role (B),
+        # 2 real dub mains (C, D). Without the aggregation fix, A would
+        # default to "dub" and the gate would see 4 main speakers
+        # (limit=3) → reject. With the fix, A excluded by dubbing_mode,
+        # B excluded by role → 2 main speakers C+D → approved.
+        lines = []
+        for i, sid in enumerate(["speaker_a", "speaker_a"]):
+            lines.append(TranscriptLine(
+                index=i, start_ms=i * 1000, end_ms=(i + 1) * 1000,
+                speaker_id=sid, speaker_label=sid.upper(),
+                source_text="x", dubbing_mode="keep_original",
+            ))
+        for j, sid in enumerate(["speaker_b", "speaker_c", "speaker_c", "speaker_d"]):
+            lines.append(TranscriptLine(
+                index=10 + j, start_ms=(10 + j) * 1000,
+                end_ms=(11 + j) * 1000,
+                speaker_id=sid, speaker_label=sid.upper(),
+                source_text="x", dubbing_mode="dub",
+            ))
+
+        aggregated = aggregate_segment_dubbing_modes_to_speaker(lines)
+        assert aggregated == {
+            "speaker_a": "keep_original",
+            "speaker_b": "dub",
+            "speaker_c": "dub",
+            "speaker_d": "dub",
+        }
+
+        # Speaker B carries role=observer → excluded by role check
+        # regardless of dubbing_mode. C + D both primary → both main.
+        profiles = {
+            "speaker_a": {
+                "speaker_role": "primary",
+                "speaker_duration_share": 0.25,
+                "dubbing_mode": aggregated["speaker_a"],
+            },
+            "speaker_b": {
+                "speaker_role": "observer",
+                "speaker_duration_share": 0.25,
+                "dubbing_mode": aggregated["speaker_b"],
+            },
+            "speaker_c": {
+                "speaker_role": "primary",
+                "speaker_duration_share": 0.30,
+                "dubbing_mode": aggregated["speaker_c"],
+            },
+            "speaker_d": {
+                "speaker_role": "primary",
+                "speaker_duration_share": 0.20,
+                "dubbing_mode": aggregated["speaker_d"],
+            },
+        }
+        decision = evaluate_eligibility(profiles)
+        assert decision.approved is True, (
+            f"After A (keep_original) + B (observer) excluded, C+D should "
+            f"be the 2 main speakers; got approved={decision.approved} "
+            f"count={decision.main_speaker_count} reason={decision.reason_code!r}."
+        )
+        assert decision.main_speaker_count == 2
+        assert set(decision.main_speaker_ids) == {"speaker_c", "speaker_d"}
+        excluded_reasons = {
+            e["speaker_id"]: e["reason"]
+            for e in decision.excluded_speakers
+        }
+        assert excluded_reasons.get("speaker_a") == "dubbing_mode_keep_original"
+        assert excluded_reasons.get("speaker_b") == "role_observer"
+
+
 # ===================================================================
 # auto_translation_review
 # ===================================================================
