@@ -2819,16 +2819,25 @@ class ProcessPipeline:
                     # PR#3C-b3e (Codex 第二十七轮 P0 atomic): pieces 2+3
                     # MUST move together. PR#3C-b3e-fix (Codex 第二十九轮
                     # P1): both ALSO must be gated on
-                    # ``_smart_consent_allows_clone``. evaluate_voice_review
-                    # short-circuits to PRESET when consent != True,
-                    # never reading quota or provider. So a consent=False
-                    # job (the default for users who didn't opt-in)
-                    # must NOT pay the cost of querying Gateway —
-                    # AND must NOT fail-closed handoff when the quota
-                    # endpoint is transiently unavailable. The unconditional
-                    # version in b3e regressed PRESET-only smart jobs
-                    # to handoff during Gateway hiccups.
-                    if _smart_consent_allows_clone:
+                    # ``_smart_consent_allows_clone``.
+                    # PR#3C-b3e-fix2 (Codex 第三十轮 P1): the gate is
+                    # ALSO conditioned on ``_smart_main_speakers``
+                    # being non-empty. evaluate_voice_review with
+                    # main_speakers=[] returns AUTO_APPROVED + empty
+                    # decisions WITHOUT reading quota or invoking
+                    # provider (locked by
+                    # tests/test_smart_auto_voice_review.py:597). So
+                    # when eligibility excluded every speaker (all
+                    # keep_original, all role-excluded, all low-share),
+                    # consent doesn't matter — there's nothing to
+                    # clone, and a transient Gateway quota failure
+                    # would still incorrectly handoff a job that
+                    # would happily auto-approve as empty.
+                    #
+                    # evaluate_voice_review short-circuits to PRESET
+                    # when consent != True OR when main_speakers is
+                    # empty. So the gate mirrors both conditions.
+                    if _smart_consent_allows_clone and _smart_main_speakers:
                         _smart_quota_remaining = (
                             _fetch_smart_user_voice_quota_remaining(
                                 str(_snap("user_id") or "")

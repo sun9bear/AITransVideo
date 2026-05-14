@@ -1819,18 +1819,19 @@ class TestB3DCloneSampleExtractorContract:
         assert _fetch_smart_user_voice_quota_remaining("u") is None
 
     def test_b3e_fix_consent_false_skips_quota_lookup(self):
-        """Codex 第二十九轮 P1: consent=False jobs must NOT call the
-        Gateway quota endpoint. evaluate_voice_review routes to PRESET
-        without reading quota/sample/provider when consent != True,
-        so a Gateway hiccup must not error-downgrade a PRESET-only
-        smart job to handoff.
+        """Codex 第二十九轮 P1 + 第三十轮 P1: consent=False (or empty
+        main_speakers) jobs must NOT call the Gateway quota endpoint.
+        evaluate_voice_review routes to PRESET / empty-AUTO-APPROVED
+        without reading quota/provider in those cases, so a Gateway
+        hiccup must not error-downgrade them to handoff.
 
         Pin the source-level structure:
-          - Quota lookup is inside an ``if _smart_consent_allows_clone:``
-            gate (the existing gate from b3d sample extraction)
-          - There's an ``else:`` branch that uses stub provider + 0
-            quota so the type signature still satisfies
-            evaluate_voice_review.
+          - Quota lookup is inside the
+            ``if _smart_consent_allows_clone and _smart_main_speakers:``
+            gate (b3e-fix2 condition).
+          - There's an ``else:`` branch using stub provider + 0
+            quota so evaluate_voice_review's type signature is
+            satisfied without reaching the real provider.
         """
         from pathlib import Path
 
@@ -1841,39 +1842,40 @@ class TestB3DCloneSampleExtractorContract:
         lines = source[idx:].splitlines()
         block = "\n".join(lines[:650])
 
-        # Find the quota lookup call — must be inside the consent gate.
+        # Find the quota lookup call — must be inside the dual gate.
         quota_call = "_fetch_smart_user_voice_quota_remaining("
         quota_idx = block.find(quota_call)
         assert quota_idx >= 0
 
         # Walk backward to find the nearest ``if`` — must be the
-        # _smart_consent_allows_clone gate.
+        # consent+main_speakers gate.
         preceding = block[:quota_idx]
-        consent_idx = preceding.rfind("if _smart_consent_allows_clone:")
-        assert consent_idx >= 0, (
-            "Quota lookup must live inside ``if _smart_consent_allows_clone:`` "
-            "— Codex 第二十九轮 P1: consent=False jobs short-circuit "
-            "to PRESET inside evaluate_voice_review and must not pay "
-            "for the Gateway round-trip nor risk fail-closed handoff "
-            "on Gateway hiccups.\n"
-            f"Quota call at offset {quota_idx}, no consent gate found "
+        gate_idx = preceding.rfind(
+            "if _smart_consent_allows_clone and _smart_main_speakers:"
+        )
+        assert gate_idx >= 0, (
+            "Quota lookup must live inside the b3e-fix2 dual gate "
+            "``if _smart_consent_allows_clone and _smart_main_speakers:``.\n"
+            f"Quota call at offset {quota_idx}, no dual gate found "
             f"before it.\nPreceding 2000 chars:\n{preceding[-2000:]}"
         )
 
         # The else branch must exist and use stub provider + 0 quota.
-        # Find the matching else within ~3000 chars of the consent gate.
-        consent_block = block[consent_idx : consent_idx + 4000]
-        else_idx = consent_block.find("\n                    else:")
+        # Find the matching else within ~4000 chars of the dual gate.
+        gate_block = block[gate_idx : gate_idx + 4000]
+        else_idx = gate_block.find("\n                    else:")
         assert else_idx >= 0, (
-            "consent gate has no else: branch — consent=False path "
-            "would crash when evaluate_voice_review reads quota/provider.\n"
-            f"Block:\n{consent_block}"
+            "Dual gate has no else: branch — consent=False / empty "
+            "main_speakers path would crash when evaluate_voice_review "
+            "reads quota/provider.\n"
+            f"Block:\n{gate_block}"
         )
-        else_window = consent_block[else_idx : else_idx + 1500]
+        else_window = gate_block[else_idx : else_idx + 1500]
         assert "_build_b2_not_wired_clone_provider()" in else_window, (
-            "consent=False else branch must use the b2 stub provider — "
-            "evaluate_voice_review won't actually call it but the type "
-            "signature requires a CloneProvider.\n"
+            "consent=False / empty-main-speakers else branch must use "
+            "the b2 stub provider — evaluate_voice_review won't "
+            "actually call it but the type signature requires a "
+            "CloneProvider.\n"
             f"else window:\n{else_window}"
         )
 
@@ -1988,6 +1990,103 @@ class TestB3DCloneSampleExtractorContract:
         assert _register_smart_clone_in_user_voices(
             user_id="u", voice_id="vt", label="x",
         ) is False
+
+    def test_b3e_fix2_consent_true_but_empty_main_speakers_skips_quota(self):
+        """Codex 第三十轮 P1: consent=True + main_speakers=[] is a
+        legal happy path — evaluate_voice_review returns AUTO_APPROVED
+        with empty decisions WITHOUT reading quota or invoking provider.
+        The b3e-fix consent gate alone would still trip the Gateway
+        quota query for this case; a transient Gateway hiccup would
+        then fail-closed handoff a job that should auto-approve as
+        empty.
+
+        Pin two things at the source level:
+          - The gate is ``_smart_consent_allows_clone and _smart_main_speakers``
+            (both conditions, not just consent)
+          - Else branch falls through with stub provider + 0 quota
+        """
+        from pathlib import Path
+
+        src = Path(__file__).resolve().parents[1] / "src" / "pipeline" / "process.py"
+        source = src.read_text(encoding="utf-8")
+        idx = source.find("Smart inline auto-approve path")
+        assert idx >= 0
+        lines = source[idx:].splitlines()
+        block = "\n".join(lines[:650])
+
+        # The gate condition must be ``and _smart_main_speakers``.
+        assert (
+            "if _smart_consent_allows_clone and _smart_main_speakers:"
+            in block
+        ), (
+            "Quota/provider gate must require BOTH consent AND "
+            "non-empty _smart_main_speakers. Codex 第三十轮 P1: "
+            "empty main_speakers is legal happy path "
+            "(evaluate_voice_review trivially auto-approves), and a "
+            "Gateway quota hiccup should not turn this into a handoff.\n"
+            f"Block (first 4000 chars):\n{block[:4000]}"
+        )
+
+        # The bare ``if _smart_consent_allows_clone:`` form is still
+        # legitimately used by the sample extraction gate earlier in
+        # the smart branch (samples must be extracted BEFORE
+        # _smart_main_speakers exists, so that gate only checks
+        # consent). What we forbid is using the bare form for the
+        # quota/provider gate — verified by the positive assertion
+        # above. We also count occurrences to detect drift: today
+        # there's exactly 1 bare-consent-gate site (sample
+        # extraction); a 2nd would mean someone reverted the
+        # main_speakers condition.
+        bare_consent_gate_count = block.count(
+            "if _smart_consent_allows_clone:"
+        )
+        assert bare_consent_gate_count == 1, (
+            f"Expected exactly 1 bare ``if _smart_consent_allows_clone:`` "
+            f"(the sample extraction gate); found {bare_consent_gate_count}. "
+            f"Codex 第三十轮 P1: the quota/provider gate MUST include "
+            f"``and _smart_main_speakers``. If you added a new gate for "
+            f"a different purpose, factor it into a named variable so "
+            f"this guard stays sharp.\n"
+            f"Block (first 4000 chars):\n{block[:4000]}"
+        )
+
+    def test_b3e_fix2_empty_main_speakers_short_circuits_in_evaluate(self):
+        """Functional: evaluate_voice_review with main_speakers=[]
+        returns AUTO_APPROVED + empty decisions WITHOUT invoking the
+        provider. This is the contract the b3e-fix2 gate depends on —
+        if this contract ever changed, the gate would need to too.
+
+        Mirrors tests/test_smart_auto_voice_review.py:597, but pinned
+        here as a b3e-fix2 dependency anchor so the relationship is
+        obvious in code review."""
+        from services.smart.auto_voice_review import (
+            VoiceReviewOutcome, evaluate_voice_review,
+        )
+
+        from tests.fakes.fake_clone_provider import FakeCloneProvider
+
+        fake = FakeCloneProvider(success=True)
+        result = evaluate_voice_review(
+            main_speakers=[],  # empty — eligibility excluded everyone
+            smart_consent={"auto_voice_clone": True},  # consent True but no candidates
+            clone_provider=fake,
+            voice_library_quota_remaining=0,  # would trip water mark if consulted
+            smart_decision_id_factory=lambda: "dec_x",
+        )
+        assert result.outcome is VoiceReviewOutcome.AUTO_APPROVED, (
+            "evaluate_voice_review with empty main_speakers must auto-"
+            "approve regardless of consent / quota — the b3e-fix2 gate "
+            "depends on this. Got outcome={result.outcome!r}, "
+            f"pause_reason={result.pause_reason!r}."
+        )
+        # decisions is a tuple in the dataclass; check via len.
+        assert len(result.decisions) == 0, (
+            f"Expected empty decisions; got {result.decisions!r}"
+        )
+        assert len(fake.calls) == 0, (
+            f"Provider must not be invoked when main_speakers is empty; "
+            f"got {len(fake.calls)} calls: {fake.calls}"
+        )
 
     def test_b3e_fix_clone_decision_processing_calls_mirror(self):
         """Codex 第二十九轮 P0: the CLONED branch of the decision-
