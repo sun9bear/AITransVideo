@@ -2358,20 +2358,109 @@ class ProcessPipeline:
                         VoiceReviewSpeakerInput,
                         evaluate_voice_review,
                     )
+                    from services.smart.eligibility_gate import (
+                        aggregate_segment_dubbing_modes_to_speaker,
+                        evaluate_eligibility,
+                    )
                     from services.smart.handoff import emit_handoff_markers
                     from services.smart.state import emit_smart_state_marker
 
                     smart_consent = _snap("smart_consent", {}) or {}
 
-                    # Construct main_speakers candidates from the freshly-
-                    # built vs_payload. PR#3C-b3 will plug evaluate_eligibility
-                    # in upstream so the list reflects "main configured
-                    # dubbing speakers" per plan §6.1; b2 takes the
-                    # vs_payload speakers verbatim since that's what
-                    # Studio human-review would have seen.
+                    # PR#3C-b3b: eligibility gate runs BEFORE voice
+                    # auto-approve. Inputs:
+                    #   - speaker_structure_profiles from S2 (carries
+                    #     speaker_role + speaker_duration_share)
+                    #   - segment-level dubbing_mode aggregated to
+                    #     speaker level via fail-closed reducer (mixed /
+                    #     missing → "dub" so the speaker counts toward
+                    #     main_speaker_count limit; codex 第二十二轮
+                    #     warning).
+                    # ``evaluate_eligibility`` accepts the
+                    # speaker_structure_profiles dict shape directly via
+                    # ``normalize_speaker_stats`` (PR#3A-fix2 P1-1) and
+                    # picks up the per-speaker ``dubbing_mode`` overlay
+                    # we attach below.
+                    _smart_speaker_dubbing_modes = (
+                        aggregate_segment_dubbing_modes_to_speaker(
+                            getattr(transcript_result, "segments", None) or []
+                        )
+                    )
+                    # Overlay dubbing_mode onto the speaker_structure_profiles
+                    # dict so normalize_speaker_stats's process.py shape
+                    # branch picks it up (default "dub" otherwise).
+                    _smart_eligibility_input: dict[str, dict[str, object]] = {}
+                    for _sid, _profile in (_speaker_structure_profiles or {}).items():
+                        if not isinstance(_profile, dict):
+                            continue
+                        _enriched = dict(_profile)
+                        _enriched["dubbing_mode"] = (
+                            _smart_speaker_dubbing_modes.get(_sid, "dub")
+                        )
+                        _smart_eligibility_input[_sid] = _enriched
+
+                    _smart_eligibility = evaluate_eligibility(
+                        _smart_eligibility_input
+                    )
+
+                    if not _smart_eligibility.approved:
+                        # Eligibility rejection → handoff. Common
+                        # reason_codes: ``main_speaker_count_exceeded``
+                        # (> 3 main speakers) or ``no_speakers_detected``
+                        # (upstream data hole; defensive).
+                        emit_handoff_markers(
+                            review_state_manager=review_state_manager,
+                            review_stage=VOICE_SELECTION_REVIEW_STAGE,
+                            review_payload=vs_payload,
+                            review_pending_status=REVIEW_STATUS_PENDING,
+                            smart_state_update={
+                                "status": "downgraded_to_studio",
+                                "reason": _smart_eligibility.reason_code
+                                or "eligibility_rejected",
+                                "handoff_stage": VOICE_SELECTION_REVIEW_STAGE,
+                                "main_speaker_count": (
+                                    _smart_eligibility.main_speaker_count
+                                ),
+                            },
+                            project_dir=final_project_dir,
+                            user_message=(
+                                "智能版主要说话人超出上限或数据异常,请人工接管:"
+                                f" {_smart_eligibility.reason_code}"
+                            ),
+                            web_review_marker_builder=self._build_web_review_marker,
+                        )
+                        state_manager.set_stage(
+                            "voice_selection",
+                            StageStatus.RUNNING,
+                            {"execution_mode": "smart_handoff_eligibility"},
+                        )
+                        current_stage_name = None
+                        _write_usage_summary(usage_meter)
+                        return self._build_paused_result(
+                            project_dir=final_project_dir,
+                            stage=VOICE_SELECTION_REVIEW_STAGE,
+                            message="智能版资格检查未通过,请人工接管",
+                        )
+
+                    # Eligibility approved: use the eligibility-vetted
+                    # main_speaker_ids as the basis for voice_review,
+                    # filtered down from vs_payload entries. The earlier
+                    # PR#3C-b2 took vs_payload speakers verbatim, but
+                    # that bypassed the keep_original / low_share /
+                    # role-based exclusion the gate enforces — main
+                    # speakers from vs_payload could include speakers
+                    # the gate would have excluded, so smart would burn
+                    # clone retry budget on speakers Studio-human-review
+                    # would never have offered to clone.
+                    _smart_main_speaker_ids = set(_smart_eligibility.main_speaker_ids)
+
+                    # Construct main_speakers candidates filtered through
+                    # _smart_main_speaker_ids — only speakers the
+                    # eligibility gate marked "main configured dubbing
+                    # speakers" per plan §6.1 reach evaluate_voice_review.
                     #
                     # Codex 第十八轮 P0-2: source_audio_path is the whole-
-                    # file path (per-speaker ffmpeg concat is b3 work).
+                    # file path (per-speaker ffmpeg concat is b3d work).
                     # Whole-file would still satisfy the real MiniMax
                     # clone client's "audio file exists" precondition,
                     # so paired with build_smart_clone_provider() Smart
@@ -2383,10 +2472,13 @@ class ProcessPipeline:
                     # exhausts the per-speaker retry budget, and routes
                     # to PRESET — no real clone API call leaves the box.
                     #
-                    # PR#3C-b3 will replace the stub with the real
+                    # PR#3C-b3d will replace the stub with the real
                     # build_smart_clone_provider() ONCE the per-speaker
                     # ffmpeg sample + real voice_library_quota snapshot
-                    # are wired alongside. Both move together.
+                    # are wired alongside. Codex 第二十轮 says these three
+                    # MUST land together — replacing one without the
+                    # others reintroduces the paid-API leak this stub
+                    # guards against.
                     _smart_main_speakers = [
                         VoiceReviewSpeakerInput(
                             speaker_id=sp.get("speaker_id", ""),
@@ -2395,7 +2487,9 @@ class ProcessPipeline:
                             source_audio_path=source_audio_path,
                         )
                         for sp in (vs_payload.get("speakers") or [])
-                        if isinstance(sp, dict) and sp.get("speaker_id")
+                        if isinstance(sp, dict)
+                        and sp.get("speaker_id")
+                        and sp.get("speaker_id") in _smart_main_speaker_ids
                     ]
                     _smart_clone_provider = _build_b2_not_wired_clone_provider()
                     _smart_voice_review = evaluate_voice_review(

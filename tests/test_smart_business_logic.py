@@ -432,6 +432,201 @@ class TestEligibilityGateInputShapes:
 
 
 # ===================================================================
+# aggregate_segment_dubbing_modes_to_speaker (PR#3C-b3b, Codex 第二十二轮)
+# ===================================================================
+
+
+class TestAggregateSegmentDubbingModesToSpeaker:
+    """PR#3C-b3b — fail-closed reducer that lifts per-segment
+    ``dubbing_mode`` to a single per-speaker decision so the eligibility
+    gate's keep_original / mute_or_background exclusion rules can fire.
+
+    Fail-closed rule (Codex 第二十二轮): when in doubt (mixed, unknown,
+    missing field, empty segments) → ``"dub"`` so the speaker COUNTS
+    toward the main_speaker_count limit. Returning ``"keep_original"``
+    on ambiguity would let smart auto-pass jobs that should hand off.
+    """
+
+    def _seg(self, *, speaker_id, dubbing_mode):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(speaker_id=speaker_id, dubbing_mode=dubbing_mode)
+
+    def test_all_keep_original_segments_speaker_is_keep_original(self):
+        from services.smart.eligibility_gate import (
+            aggregate_segment_dubbing_modes_to_speaker,
+        )
+
+        segs = [
+            self._seg(speaker_id="speaker_a", dubbing_mode="keep_original"),
+            self._seg(speaker_id="speaker_a", dubbing_mode="keep_original"),
+        ]
+        result = aggregate_segment_dubbing_modes_to_speaker(segs)
+        assert result == {"speaker_a": "keep_original"}
+
+    def test_all_mute_or_background_speaker_is_mute_or_background(self):
+        from services.smart.eligibility_gate import (
+            aggregate_segment_dubbing_modes_to_speaker,
+        )
+
+        segs = [
+            self._seg(speaker_id="speaker_a", dubbing_mode="mute_or_background"),
+            self._seg(speaker_id="speaker_a", dubbing_mode="mute_or_background"),
+        ]
+        result = aggregate_segment_dubbing_modes_to_speaker(segs)
+        assert result == {"speaker_a": "mute_or_background"}
+
+    def test_all_dub_segments_speaker_is_dub(self):
+        from services.smart.eligibility_gate import (
+            aggregate_segment_dubbing_modes_to_speaker,
+        )
+
+        segs = [
+            self._seg(speaker_id="speaker_a", dubbing_mode="dub"),
+            self._seg(speaker_id="speaker_a", dubbing_mode="dub"),
+        ]
+        result = aggregate_segment_dubbing_modes_to_speaker(segs)
+        assert result == {"speaker_a": "dub"}
+
+    def test_mixed_dub_and_keep_original_speaker_is_dub_failclosed(self):
+        """The KEY fail-closed case: a speaker with some dub + some
+        keep_original segments must NOT count as keep_original. Smart
+        should err toward main-count inclusion → potential handoff."""
+        from services.smart.eligibility_gate import (
+            aggregate_segment_dubbing_modes_to_speaker,
+        )
+
+        segs = [
+            self._seg(speaker_id="speaker_a", dubbing_mode="dub"),
+            self._seg(speaker_id="speaker_a", dubbing_mode="keep_original"),
+        ]
+        result = aggregate_segment_dubbing_modes_to_speaker(segs)
+        assert result == {"speaker_a": "dub"}
+
+    def test_mixed_keep_original_and_mute_speaker_is_dub_failclosed(self):
+        """Mixed non-dub modes must also fail-closed to dub — only
+        homogeneous keep_original / mute_or_background are excluded."""
+        from services.smart.eligibility_gate import (
+            aggregate_segment_dubbing_modes_to_speaker,
+        )
+
+        segs = [
+            self._seg(speaker_id="speaker_a", dubbing_mode="keep_original"),
+            self._seg(speaker_id="speaker_a", dubbing_mode="mute_or_background"),
+        ]
+        result = aggregate_segment_dubbing_modes_to_speaker(segs)
+        assert result == {"speaker_a": "dub"}
+
+    def test_unknown_dubbing_mode_speaker_is_dub_failclosed(self):
+        """Unknown / non-canonical mode values must fail-closed."""
+        from services.smart.eligibility_gate import (
+            aggregate_segment_dubbing_modes_to_speaker,
+        )
+
+        segs = [
+            self._seg(speaker_id="speaker_a", dubbing_mode="something_weird"),
+        ]
+        result = aggregate_segment_dubbing_modes_to_speaker(segs)
+        assert result == {"speaker_a": "dub"}
+
+    def test_missing_dubbing_mode_field_speaker_is_dub_failclosed(self):
+        """Segment with no dubbing_mode attribute must fail-closed; the
+        reducer reads via getattr default None."""
+        from types import SimpleNamespace
+
+        from services.smart.eligibility_gate import (
+            aggregate_segment_dubbing_modes_to_speaker,
+        )
+
+        segs = [SimpleNamespace(speaker_id="speaker_a")]
+        result = aggregate_segment_dubbing_modes_to_speaker(segs)
+        assert result == {"speaker_a": "dub"}
+
+    def test_none_dubbing_mode_speaker_is_dub_failclosed(self):
+        from services.smart.eligibility_gate import (
+            aggregate_segment_dubbing_modes_to_speaker,
+        )
+
+        segs = [self._seg(speaker_id="speaker_a", dubbing_mode=None)]
+        result = aggregate_segment_dubbing_modes_to_speaker(segs)
+        assert result == {"speaker_a": "dub"}
+
+    def test_empty_segments_returns_empty_dict(self):
+        from services.smart.eligibility_gate import (
+            aggregate_segment_dubbing_modes_to_speaker,
+        )
+
+        assert aggregate_segment_dubbing_modes_to_speaker([]) == {}
+        assert aggregate_segment_dubbing_modes_to_speaker(None) == {}
+
+    def test_missing_speaker_id_segment_silently_skipped(self):
+        """Empty / None speaker_id → drop. The eligibility gate already
+        records ``missing_speaker_id`` for anonymous rows separately."""
+        from services.smart.eligibility_gate import (
+            aggregate_segment_dubbing_modes_to_speaker,
+        )
+
+        segs = [
+            self._seg(speaker_id="", dubbing_mode="dub"),
+            self._seg(speaker_id=None, dubbing_mode="keep_original"),
+            self._seg(speaker_id="speaker_a", dubbing_mode="dub"),
+        ]
+        result = aggregate_segment_dubbing_modes_to_speaker(segs)
+        assert result == {"speaker_a": "dub"}
+
+    def test_multiple_speakers_aggregated_independently(self):
+        from services.smart.eligibility_gate import (
+            aggregate_segment_dubbing_modes_to_speaker,
+        )
+
+        segs = [
+            self._seg(speaker_id="speaker_a", dubbing_mode="keep_original"),
+            self._seg(speaker_id="speaker_a", dubbing_mode="keep_original"),
+            self._seg(speaker_id="speaker_b", dubbing_mode="dub"),
+            self._seg(speaker_id="speaker_c", dubbing_mode="mute_or_background"),
+            self._seg(speaker_id="speaker_d", dubbing_mode="dub"),
+            self._seg(speaker_id="speaker_d", dubbing_mode="keep_original"),
+        ]
+        result = aggregate_segment_dubbing_modes_to_speaker(segs)
+        assert result == {
+            "speaker_a": "keep_original",
+            "speaker_b": "dub",
+            "speaker_c": "mute_or_background",
+            "speaker_d": "dub",  # mixed → fail-closed dub
+        }
+
+    def test_dict_shape_segments_accepted(self):
+        """Reducer accepts duck-typed dicts as well as dataclasses /
+        SimpleNamespace, so process.py can pass DubbingSegment or any
+        equivalent shape without explicit conversion."""
+        from services.smart.eligibility_gate import (
+            aggregate_segment_dubbing_modes_to_speaker,
+        )
+
+        segs = [
+            {"speaker_id": "speaker_a", "dubbing_mode": "keep_original"},
+            {"speaker_id": "speaker_a", "dubbing_mode": "keep_original"},
+            {"speaker_id": "speaker_b", "dubbing_mode": "dub"},
+        ]
+        result = aggregate_segment_dubbing_modes_to_speaker(segs)
+        assert result == {"speaker_a": "keep_original", "speaker_b": "dub"}
+
+    def test_case_insensitive_mode_values(self):
+        """``"DUB"`` / ``"Keep_Original"`` etc. normalise to lower-case
+        canonical values so process.py's exact casing isn't load-bearing."""
+        from services.smart.eligibility_gate import (
+            aggregate_segment_dubbing_modes_to_speaker,
+        )
+
+        segs = [
+            self._seg(speaker_id="speaker_a", dubbing_mode="KEEP_ORIGINAL"),
+            self._seg(speaker_id="speaker_a", dubbing_mode="Keep_Original"),
+        ]
+        result = aggregate_segment_dubbing_modes_to_speaker(segs)
+        assert result == {"speaker_a": "keep_original"}
+
+
+# ===================================================================
 # auto_translation_review
 # ===================================================================
 

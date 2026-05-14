@@ -647,10 +647,12 @@ class TestProcessPyStudioGateWidening:
         # Verify smart branch calls evaluate_voice_review + handles
         # both outcomes (PAUSED → emit_handoff_markers; AUTO_APPROVED →
         # set_stage(APPROVED) + emit_smart_state_marker + fall through).
+        # Window 290 to cover the smart block AFTER PR#3C-b3b inserted
+        # the eligibility-gate prelude (~80 extra lines).
         smart_block = _find_anchor_block(
             self._source(),
             "Smart inline auto-approve path",
-            window=210,
+            window=290,
         )
         for required_call in (
             "evaluate_voice_review",
@@ -1010,4 +1012,142 @@ class TestProcessPyStudioGateWidening:
             "this user-approved branch, so widening is dead code; if you "
             "did so deliberately, explain in the diff + update this test. "
             f"Block:\n{block}"
+        )
+
+    def test_eligibility_gate_wired_into_smart_inline_auto_approve(self):
+        """PR#3C-b3b — plan §6.1 eligibility gate runs BEFORE
+        ``evaluate_voice_review`` in process.py's smart inline branch.
+        Without this wiring smart would burn clone retry budget on
+        speakers Studio human-review would have excluded (keep_original /
+        low-share / role-based) and could auto-approve jobs whose main-
+        speaker count exceeds the limit.
+
+        Anchor on the "Smart inline auto-approve path" comment and walk
+        ~290 lines down to cover the entire smart branch (matches the
+        existing ``test_voice_selection_review_trigger_widened_with_inline_auto_approve``
+        anchor window after PR#3C-b3b inserted the eligibility prelude).
+        """
+        smart_block = _find_anchor_block(
+            self._source(),
+            "Smart inline auto-approve path",
+            window=290,
+        )
+
+        # 1. Helper + gate imported.
+        assert "aggregate_segment_dubbing_modes_to_speaker" in smart_block, (
+            "Smart inline branch missing ``aggregate_segment_dubbing_modes_to_speaker`` "
+            "import / call. Without segment→speaker aggregation the eligibility "
+            "gate reads default ``dub`` for every speaker (keep_original / "
+            "mute_or_background never excluded). Codex 第二十二轮 P0.\n"
+            f"Block:\n{smart_block}"
+        )
+        assert "evaluate_eligibility" in smart_block, (
+            "Smart inline branch missing ``evaluate_eligibility`` call. "
+            "PR#3C-b3b plan §6.1 requires the gate run BEFORE voice "
+            "auto-approve so over-limit / no-speakers / role-excluded "
+            "jobs hand off to Studio.\n"
+            f"Block:\n{smart_block}"
+        )
+
+        # 2. Rejection branch wired with handoff three-tuple.
+        # Find the eligibility check + the if-not-approved branch within it.
+        eligibility_idx = smart_block.find("evaluate_eligibility(")
+        assert eligibility_idx >= 0, (
+            "evaluate_eligibility call site missing in smart inline branch."
+        )
+        rejection_window = smart_block[eligibility_idx : eligibility_idx + 1200]
+        assert "if not _smart_eligibility.approved" in rejection_window, (
+            "Smart inline branch missing eligibility rejection check. "
+            "Without it ``evaluate_eligibility`` is decorative — both "
+            "approved + rejected paths would proceed identically.\n"
+            f"Block around eligibility call:\n{rejection_window}"
+        )
+        assert "emit_handoff_markers" in rejection_window, (
+            "Eligibility-rejection branch missing emit_handoff_markers — "
+            "plan §6.5 handoff three-tuple required so process_runner / "
+            "Gateway mirror see the downgraded_to_studio terminal state.\n"
+            f"Block:\n{rejection_window}"
+        )
+        assert "downgraded_to_studio" in rejection_window, (
+            "Eligibility-rejection branch must set smart_state.status to "
+            "``downgraded_to_studio`` so editing/jianying gates admit the "
+            "job into post-edit recovery.\n"
+            f"Block:\n{rejection_window}"
+        )
+        assert "_smart_eligibility.reason_code" in rejection_window, (
+            "Eligibility-rejection branch must propagate reason_code "
+            "(e.g. ``main_speaker_count_exceeded`` / ``no_speakers_detected``) "
+            "to smart_state.reason so audit logs / sidecar can record the "
+            "rejection cause.\n"
+            f"Block:\n{rejection_window}"
+        )
+
+        # 3. Approved branch filters main_speakers by main_speaker_ids.
+        # PR#3C-b2 took vs_payload speakers verbatim, which bypassed the
+        # gate's keep_original / low-share / role exclusions. PR#3C-b3b
+        # filters via ``_smart_main_speaker_ids``.
+        assert "_smart_main_speaker_ids" in smart_block, (
+            "Smart inline branch missing ``_smart_main_speaker_ids`` "
+            "filter variable. Without it ``evaluate_voice_review`` would "
+            "see vs_payload speakers verbatim (the PR#3C-b2 behaviour) "
+            "rather than the eligibility-vetted subset.\n"
+            f"Block:\n{smart_block}"
+        )
+        # The list comp building _smart_main_speakers must include the
+        # eligibility-gate filter clause. Window 900 chars to reach
+        # through the multi-line ``if isinstance / speaker_id / in
+        # _smart_main_speaker_ids`` clause.
+        main_speakers_idx = smart_block.find("_smart_main_speakers = [")
+        assert main_speakers_idx >= 0, (
+            "Smart inline branch lost ``_smart_main_speakers = [`` list "
+            "comprehension — required by evaluate_voice_review."
+        )
+        ms_window = smart_block[main_speakers_idx : main_speakers_idx + 900]
+        assert "_smart_main_speaker_ids" in ms_window, (
+            "``_smart_main_speakers`` list comprehension is NOT filtered "
+            "by ``_smart_main_speaker_ids``. Codex 第二十二轮 P0: the gate's "
+            "exclusions (keep_original / low-share / role) MUST propagate "
+            "to the voice-review candidate set, otherwise smart burns "
+            "clone retry budget on speakers Studio review would have "
+            "excluded.\n"
+            f"_smart_main_speakers block:\n{ms_window}"
+        )
+
+    def test_eligibility_aggregation_uses_segment_dubbing_modes(self):
+        """Plan §6.1 + Codex 第二十二轮 — the aggregation MUST overlay
+        per-speaker dubbing_mode onto the speaker_structure_profiles
+        dict BEFORE calling evaluate_eligibility, otherwise the
+        ``normalize_speaker_stats`` process.py-shape branch defaults
+        every speaker to ``"dub"`` and the keep_original exclusion
+        never fires.
+        """
+        smart_block = _find_anchor_block(
+            self._source(),
+            "Smart inline auto-approve path",
+            window=290,
+        )
+
+        # The overlay should pull from the aggregation result. Anchor on
+        # the comment that explains what's happening.
+        assert "Overlay dubbing_mode onto the speaker_structure_profiles" in smart_block, (
+            "Smart inline branch missing the per-speaker dubbing_mode "
+            "overlay step. Without it ``evaluate_eligibility`` sees no "
+            "dubbing_mode field on the profile dicts and defaults every "
+            "speaker to ``dub``.\n"
+            f"Block:\n{smart_block}"
+        )
+
+        # Verify the aggregation feeds the overlay.
+        agg_idx = smart_block.find("aggregate_segment_dubbing_modes_to_speaker(")
+        assert agg_idx >= 0, (
+            "aggregate_segment_dubbing_modes_to_speaker call missing."
+        )
+        # Overlay block typically appears within ~600 chars of the
+        # aggregation call.
+        overlay_window = smart_block[agg_idx : agg_idx + 800]
+        assert '_enriched["dubbing_mode"]' in overlay_window, (
+            "Aggregation result not written onto enriched profile dict "
+            "as ``dubbing_mode`` — normalise_speaker_stats reads this "
+            "field name verbatim.\n"
+            f"Block:\n{overlay_window}"
         )

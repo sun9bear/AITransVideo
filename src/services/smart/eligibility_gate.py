@@ -72,7 +72,7 @@ three input shapes.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 
 # Threshold constants. Plan §2.3: "low-share" speakers are excluded from
@@ -376,10 +376,88 @@ def evaluate_eligibility(
     )
 
 
+# ---------------------------------------------------------------------------
+# segment dubbing_mode → speaker-level aggregation (PR#3C-b3b)
+# ---------------------------------------------------------------------------
+#
+# Codex 第二十二轮: when smart integrates eligibility, the speaker-level
+# dubbing_mode that ``_is_main_speaker`` reads must reflect per-speaker
+# user intent. process.py operates on segment-level DubbingSegment
+# objects each carrying a dubbing_mode of "dub" / "keep_original" /
+# "mute_or_background". Aggregation must be **fail-closed**: when in
+# doubt (mixed / unknown / missing), the speaker is treated as ``dub``
+# so it COUNTS toward the main-speaker limit. Treating it as
+# ``keep_original`` instead would shrink main_count and let smart
+# auto-pass jobs that should hand off — fail-open.
+
+
+def aggregate_segment_dubbing_modes_to_speaker(
+    segments: "Iterable[Any]",
+) -> dict[str, str]:
+    """Reduce per-segment ``dubbing_mode`` to a per-speaker decision.
+
+    Reads ``segment.speaker_id`` (string) and ``segment.dubbing_mode``
+    (string) from each entry. Accepts dataclasses, dicts, or any
+    duck-typed object with those attributes / keys.
+
+    Aggregation rules (fail-closed favours ``"dub"``):
+      - All segments for the speaker mark ``"keep_original"`` →
+        speaker is ``"keep_original"`` (excluded from main count)
+      - All segments mark ``"mute_or_background"`` →
+        speaker is ``"mute_or_background"`` (excluded)
+      - Any other shape (all dub, mixed dub + keep_original, mixed
+        keep_original + mute_or_background, unknown / missing field,
+        empty segment list for the speaker) →  ``"dub"`` so the speaker
+        COUNTS toward the main limit. This is intentional fail-closed:
+        if smart cannot prove the speaker should be excluded, smart
+        should err toward handoff rather than auto-approve.
+
+    Returns:
+      dict[speaker_id → aggregated dubbing_mode]. Speakers with empty
+      / missing speaker_id are silently skipped (the eligibility gate
+      already records ``missing_speaker_id`` for those).
+
+    Never raises.
+    """
+    by_speaker: dict[str, set[str]] = {}
+    for seg in segments or []:
+        # Read speaker_id (attr or dict key)
+        if isinstance(seg, Mapping):
+            sid_raw = seg.get("speaker_id")
+            dub_raw = seg.get("dubbing_mode")
+        else:
+            sid_raw = getattr(seg, "speaker_id", None)
+            dub_raw = getattr(seg, "dubbing_mode", None)
+        sid = str(sid_raw or "").strip()
+        if not sid:
+            continue
+        mode = str(dub_raw or "").strip().lower() if dub_raw else ""
+        # Empty / missing → record as empty marker, fail-closed
+        # aggregation logic below turns the set into "dub".
+        by_speaker.setdefault(sid, set()).add(mode or "_unknown")
+
+    out: dict[str, str] = {}
+    for sid, modes in by_speaker.items():
+        # Strip the unknown sentinel before checking homogeneity — but
+        # remember it so a "all unknown" speaker stays fail-closed dub.
+        if modes == {"keep_original"}:
+            out[sid] = "keep_original"
+        elif modes == {"mute_or_background"}:
+            out[sid] = "mute_or_background"
+        else:
+            # Mixed, all dub, all unknown, or any other shape → dub.
+            # Fail-closed: assume the speaker contributes to main count
+            # so smart can't auto-pass a job whose dubbing intent we
+            # can't confidently exclude.
+            out[sid] = "dub"
+    return out
+
+
 __all__ = [
     "DEFAULT_LOW_SHARE_THRESHOLD",
     "DEFAULT_MAIN_SPEAKER_LIMIT",
     "EligibilityDecision",
+    "aggregate_segment_dubbing_modes_to_speaker",
     "evaluate_eligibility",
     "normalize_speaker_stats",
 ]
