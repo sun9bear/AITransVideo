@@ -154,6 +154,78 @@ class TestAutoVoiceReviewOrchestration:
         assert result.outcome is VoiceReviewOutcome.AUTO_APPROVED
         assert result.decisions[0].choice is VoiceReviewChoice.CLONED
 
+    def test_sample_nan_never_calls_clone_provider(self):
+        """Codex 第十二轮 P1-2: ``float("nan") < 10.0`` is False (IEEE-754
+        — NaN comparisons are all False), so naive ``< min`` would let
+        NaN samples bypass the guard and burn paid clone API. Module
+        uses isfinite() so NaN lands in the preset branch."""
+        from services.smart.auto_voice_review import (
+            evaluate_voice_review, VoiceReviewChoice,
+        )
+        from tests.fakes import FakeCloneProvider
+
+        fake = FakeCloneProvider()
+        result = evaluate_voice_review(
+            main_speakers=[self._speaker("a", sample_seconds=float("nan"))],
+            smart_consent={"auto_voice_clone": True},
+            clone_provider=fake,
+            voice_library_quota_remaining=100,
+            smart_decision_id_factory=self._id_factory(),
+        )
+        # Provider was NOT called.
+        assert fake.calls == []
+        d = result.decisions[0]
+        assert d.choice is VoiceReviewChoice.PRESET
+        # Distinct reason_code so admin / sidecar can spot data-quality
+        # anomalies separately from genuine short samples.
+        assert d.reason_code.startswith("non_finite_sample_seconds_")
+
+    def test_sample_inf_never_calls_clone_provider(self):
+        """Codex 第十二轮 P1-2: ``float("inf") < 10.0`` is False — inf
+        is greater than any finite value. Naive ``< min`` would let
+        inf samples through. Module uses isfinite() so inf lands in
+        the preset branch."""
+        from services.smart.auto_voice_review import (
+            evaluate_voice_review, VoiceReviewChoice,
+        )
+        from tests.fakes import FakeCloneProvider
+
+        fake = FakeCloneProvider()
+        result = evaluate_voice_review(
+            main_speakers=[self._speaker("a", sample_seconds=float("inf"))],
+            smart_consent={"auto_voice_clone": True},
+            clone_provider=fake,
+            voice_library_quota_remaining=100,
+            smart_decision_id_factory=self._id_factory(),
+        )
+        assert fake.calls == []
+        d = result.decisions[0]
+        assert d.choice is VoiceReviewChoice.PRESET
+        assert d.reason_code.startswith("non_finite_sample_seconds_")
+
+    def test_sample_negative_never_calls_clone_provider(self):
+        """Negative duration is upstream-data corruption — must NOT
+        bypass guard on the basis of being "less than 10". Use the
+        below-threshold reason since the value IS finite."""
+        from services.smart.auto_voice_review import (
+            evaluate_voice_review, VoiceReviewChoice,
+        )
+        from tests.fakes import FakeCloneProvider
+
+        fake = FakeCloneProvider()
+        result = evaluate_voice_review(
+            main_speakers=[self._speaker("a", sample_seconds=-3.0)],
+            smart_consent={"auto_voice_clone": True},
+            clone_provider=fake,
+            voice_library_quota_remaining=100,
+            smart_decision_id_factory=self._id_factory(),
+        )
+        assert fake.calls == []
+        d = result.decisions[0]
+        assert d.choice is VoiceReviewChoice.PRESET
+        assert d.reason_code == "insufficient_sample_seconds_lt_10"
+        assert d.metrics["sample_seconds"] == -3.0
+
     def test_quota_at_safety_water_mark_pauses_all_remaining(self):
         """Plan §7.3: when quota_remaining <= safety water mark (default
         N=3), do NOT issue any more clones. The whole batch becomes
@@ -398,23 +470,44 @@ class TestMiniMaxCloneAdapterMapping:
     def _install_mock_client(self, monkeypatch, *, captured_calls):
         """Replace services.voice_clone.MiniMaxVoiceCloneClient with a
         recording stub. Returns the stub class so the test can assert
-        construction args + call args."""
+        construction args + call args.
+
+        Codex 第十二轮 P1-1: stub uses an EXPLICIT signature mirroring
+        the real ``create_voice_clone`` declaration (NOT ``**kwargs``).
+        ``**kwargs`` would silently absorb any kwarg the adapter passes
+        even if the real method renamed it, defeating the entire point
+        of the mapping test. Explicit kwargs raise TypeError at the
+        Python level if the adapter tries to pass an unknown name.
+        """
         import services.voice_clone as voice_clone_mod
         from services.voice_clone import VoiceCloneResult
 
         class RecordingClient:
             def __init__(self, config):
                 captured_calls["construction_config"] = config
-            def create_voice_clone(self, **kwargs):
+            def create_voice_clone(
+                self,
+                *,
+                speaker_id: str,
+                speaker_name: str,
+                source_audio_path,
+                need_noise_reduction: bool = False,
+            ):
+                kwargs = {
+                    "speaker_id": speaker_id,
+                    "speaker_name": speaker_name,
+                    "source_audio_path": source_audio_path,
+                    "need_noise_reduction": need_noise_reduction,
+                }
                 captured_calls.setdefault("create_voice_clone_calls", []).append(kwargs)
                 # Return a real-shaped VoiceCloneResult so the adapter
                 # can map it into CloneResult without a TypeError.
                 return VoiceCloneResult(
-                    speaker_id=kwargs["speaker_id"],
-                    speaker_name=kwargs["speaker_name"],
-                    source_audio_path=str(kwargs["source_audio_path"]),
+                    speaker_id=speaker_id,
+                    speaker_name=speaker_name,
+                    source_audio_path=str(source_audio_path),
                     uploaded_file_id="real_file_id_xyz",
-                    voice_id=f"vt_{kwargs['speaker_id']}_real",
+                    voice_id=f"vt_{speaker_id}_real",
                     provider_name="minimax_voice_clone",
                     model_name="voice_clone",
                 )
@@ -448,21 +541,30 @@ class TestMiniMaxCloneAdapterMapping:
 
         # 2. create_voice_clone called with exact kwarg names. If the
         # real method renames any of these (e.g. speaker_id → speakerID),
-        # this assertion fails loudly.
+        # the stub's explicit signature (Codex 第十二轮 P1-1 fix) raises
+        # TypeError at the adapter call site — this assertion never runs.
         calls = captured["create_voice_clone_calls"]
         assert len(calls) == 1
         kwargs = calls[0]
         assert kwargs["speaker_id"] == "speaker_a"
         assert kwargs["speaker_name"] == "查理·芒格"
         assert kwargs["source_audio_path"] == sample_path
-        # Adapter MUST NOT pass any unexpected kwargs that would
-        # TypeError against the real signature.
-        assert set(kwargs.keys()) == {
-            "speaker_id", "speaker_name", "source_audio_path",
-        }, (
-            f"Adapter passed unexpected kwargs to create_voice_clone: "
-            f"{set(kwargs.keys())}. Real client signature only accepts "
-            f"speaker_id / speaker_name / source_audio_path / need_noise_reduction."
+        # Adapter MUST pass at least the 3 core kwargs and MUST NOT pass
+        # anything outside the real signature's whitelist. The stub's
+        # explicit signature already enforces "no unknown kwargs"
+        # (TypeError on instantiation before reaching here); this set
+        # check additionally documents the adapter's intent + catches
+        # accidental over-specification of the optional default.
+        REQUIRED = {"speaker_id", "speaker_name", "source_audio_path"}
+        ALLOWED = REQUIRED | {"need_noise_reduction"}
+        keys = set(kwargs.keys())
+        assert REQUIRED.issubset(keys), (
+            f"Adapter missed required kwargs: {REQUIRED - keys}"
+        )
+        unknown = keys - ALLOWED
+        assert not unknown, (
+            f"Adapter passed unknown kwargs to create_voice_clone: {unknown}. "
+            f"Real client signature only accepts {ALLOWED}."
         )
 
         # 3. CloneResult mapped from VoiceCloneResult correctly.
@@ -548,6 +650,56 @@ class TestMiniMaxCloneAdapterMapping:
         assert "inject_for_test" in msg, (
             "Error message should point devs to the inject_for_test() escape "
             "hatch so they know how to run tests without the real env var."
+        )
+
+    def test_real_create_voice_clone_signature_locked(self):
+        """Codex 第十二轮 P1-1: the mapping test must also assert the
+        REAL ``MiniMaxVoiceCloneClient.create_voice_clone`` signature
+        is what the adapter expects. Without this, a rename in
+        voice_clone.py:246 (e.g. speaker_id → speakerID) would still
+        let the mapping test pass against any **kwargs stub.
+
+        Use ``inspect.signature`` to lock the keyword-only parameter
+        set + default value of ``need_noise_reduction``. Any change
+        to the real method declaration that drifts from this contract
+        fails the test loudly at import time.
+        """
+        import inspect
+
+        from services.voice_clone import MiniMaxVoiceCloneClient
+
+        sig = inspect.signature(MiniMaxVoiceCloneClient.create_voice_clone)
+        # All params except 'self' should be KEYWORD_ONLY (real signature
+        # uses ``*,``). This protects against accidentally introducing
+        # positional args that the adapter wouldn't know to pass by name.
+        params = [
+            (name, p) for name, p in sig.parameters.items()
+            if name != "self"
+        ]
+        param_names = [name for name, _ in params]
+        assert param_names == [
+            "speaker_id", "speaker_name", "source_audio_path", "need_noise_reduction",
+        ], (
+            f"Real create_voice_clone params changed: {param_names!r}. "
+            f"Update _MiniMaxCloneAdapter.clone_voice in smart_wiring.py to "
+            f"match, then update this assertion + the RecordingClient stub "
+            f"in this file's _install_mock_client helper."
+        )
+        # All are keyword-only.
+        for name, p in params:
+            assert p.kind == inspect.Parameter.KEYWORD_ONLY, (
+                f"param {name!r} kind changed to {p.kind!r}; adapter expects "
+                f"KEYWORD_ONLY (matches the ``*,`` declaration in voice_clone.py)."
+            )
+        # Default for ``need_noise_reduction`` is False; adapter doesn't
+        # pass it, so the default needs to keep being False or the
+        # behaviour silently changes for cloned voices.
+        assert (
+            sig.parameters["need_noise_reduction"].default is False
+        ), (
+            "need_noise_reduction default changed away from False. Smart "
+            "adapter relies on the default — either pass it explicitly in "
+            "_MiniMaxCloneAdapter.clone_voice or update this assertion."
         )
 
     def test_adapter_satisfies_clone_provider_protocol_with_real_client_path(

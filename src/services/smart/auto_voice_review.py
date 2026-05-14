@@ -59,6 +59,7 @@ Acceptance tests in tests/test_smart_auto_voice_review.py.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -230,13 +231,30 @@ def evaluate_voice_review(
             ))
             continue
 
-        # Rule 2: sample insufficient — never call clone provider
-        if speaker.sample_seconds < min_sample_seconds:
+        # Rule 2: sample insufficient or anomalous — never call clone provider.
+        #
+        # Codex 第十二轮 P1-2: must guard against NaN / inf / non-finite
+        # values, not just ``< min``. Naive ``sample_seconds < 10.0``
+        # returns False for NaN AND inf (NaN comparisons are all False
+        # by IEEE-754; inf isn't less than 10), so a corrupted upstream
+        # value would silently bypass the guard and burn paid clone API.
+        # Use isfinite + reverse condition so anything anomalous lands in
+        # the "insufficient" branch.
+        sample_seconds = float(speaker.sample_seconds)
+        if not (math.isfinite(sample_seconds) and sample_seconds >= min_sample_seconds):
+            # Distinguish "non-finite anomaly" from "below threshold" in
+            # the reason_code so admin / sidecar audit can spot data-
+            # quality issues separately from genuine short samples.
+            reason_code = (
+                f"insufficient_sample_seconds_lt_{int(min_sample_seconds)}"
+                if math.isfinite(sample_seconds)
+                else f"non_finite_sample_seconds_{sample_seconds}"
+            )
             decisions.append(_preset_decision(
                 speaker,
-                f"insufficient_sample_seconds_lt_{int(min_sample_seconds)}",
+                reason_code,
                 smart_decision_id_factory(),
-                metrics={"sample_seconds": speaker.sample_seconds},
+                metrics={"sample_seconds": sample_seconds},
             ))
             continue
 
