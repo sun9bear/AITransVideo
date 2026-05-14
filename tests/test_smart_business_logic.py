@@ -1346,6 +1346,180 @@ class TestTranslationReviewProcessIntegrationShapes:
         assert decision.failed_check == "content_compliance"
 
 
+class TestB3DCloneSampleExtractorContract:
+    """PR#3C-b3d functional contract tests for the three-piece atomic
+    landing (Codex 第二十轮).
+
+    These tests don't run the full process.py pipeline (too heavy) but
+    they pin the contracts that process.py's smart inline branch
+    relies on. If VoiceSampleExtractor's signature drifts or the
+    smart_wiring inject_for_test mechanism breaks, these tests
+    fail BEFORE the production smart job would silently misbehave.
+    """
+
+    def test_voice_sample_extractor_signature_matches_b3d_usage(self):
+        """process.py:2530+ calls ``VoiceSampleExtractor().extract_sample(
+        audio_path=..., speaker_lines=..., output_path=...)``. If any
+        of those kwarg names drift, smart's per-speaker sample
+        extraction breaks at runtime in a hard-to-diagnose way.
+        """
+        import inspect
+
+        from services.voice.sample_extractor import VoiceSampleExtractor
+
+        sig = inspect.signature(VoiceSampleExtractor.extract_sample)
+        params = sig.parameters
+        # b3d uses these three kwargs by name. The function also has
+        # min_duration_s / max_duration_s defaults but b3d doesn't pass
+        # them — pin only that the kwargs we use ARE accepted.
+        for required_kwarg in ("audio_path", "speaker_lines", "output_path"):
+            assert required_kwarg in params, (
+                f"VoiceSampleExtractor.extract_sample signature drift — "
+                f"missing kwarg {required_kwarg!r}. process.py smart "
+                f"branch (PR#3C-b3d) passes it by name. Sig: {sig}"
+            )
+
+    def test_smart_wiring_inject_for_test_replaces_default(self):
+        """PR#3C-b3d piece 3: ``build_smart_clone_provider()`` returns
+        the test override when ``inject_for_test(clone_provider=...)``
+        is active. Tests in process.py smart path rely on this so
+        they can run without burning real MiniMax quota."""
+        from services.smart_wiring import (
+            build_smart_clone_provider, inject_for_test,
+        )
+
+        from tests.fakes.fake_clone_provider import FakeCloneProvider
+
+        fake = FakeCloneProvider(success=True)
+        with inject_for_test(clone_provider=fake):
+            provider = build_smart_clone_provider()
+            assert provider is fake, (
+                "inject_for_test failed to override default — smart "
+                "test infrastructure broken; real provider would be "
+                "invoked in tests."
+            )
+
+        # After the context exits, the override is gone.
+        default_provider = build_smart_clone_provider()
+        assert default_provider is not fake, (
+            "inject_for_test failed to restore default after exit — "
+            "test isolation broken."
+        )
+
+    def test_b3d_per_speaker_sample_path_flows_through_voice_review(self):
+        """Smart's evaluate_voice_review must call the provider with
+        the per-speaker sample path, not whole-file. Pin this by
+        running evaluate_voice_review with a fake provider and
+        per-speaker paths."""
+        from pathlib import Path
+
+        from services.smart.auto_voice_review import (
+            VoiceReviewOutcome, VoiceReviewSpeakerInput, evaluate_voice_review,
+        )
+        from services.smart_wiring import inject_for_test
+
+        from tests.fakes.fake_clone_provider import FakeCloneProvider
+
+        # Two main speakers, each with their own per-speaker sample path.
+        speaker_a_sample = Path("/tmp/fake/smart_clone_samples/speaker_a.wav")
+        speaker_b_sample = Path("/tmp/fake/smart_clone_samples/speaker_b.wav")
+        main_speakers = [
+            VoiceReviewSpeakerInput(
+                speaker_id="speaker_a",
+                speaker_name="A",
+                sample_seconds=20.0,
+                source_audio_path=speaker_a_sample,
+            ),
+            VoiceReviewSpeakerInput(
+                speaker_id="speaker_b",
+                speaker_name="B",
+                sample_seconds=15.0,
+                source_audio_path=speaker_b_sample,
+            ),
+        ]
+        fake = FakeCloneProvider(success=True)
+        with inject_for_test(clone_provider=fake):
+            from services.smart_wiring import build_smart_clone_provider
+
+            result = evaluate_voice_review(
+                main_speakers=main_speakers,
+                smart_consent={"auto_voice_clone": True},
+                clone_provider=build_smart_clone_provider(),
+                voice_library_quota_remaining=100,
+                smart_decision_id_factory=lambda: "dec_x",
+            )
+
+        assert result.outcome is VoiceReviewOutcome.AUTO_APPROVED
+        # Provider received exactly 2 calls, one per main speaker.
+        assert len(fake.calls) == 2, (
+            f"Expected 2 clone calls (one per main speaker); got "
+            f"{len(fake.calls)}.\n{fake.calls}"
+        )
+        # Critically: each call's source_audio_path matches the PER-SPEAKER
+        # sample, not a shared whole-file path. This is the b3d safety
+        # property — real provider must see the right sample.
+        call_paths = {
+            call["speaker_id"]: call["source_audio_path"]
+            for call in fake.calls
+        }
+        assert call_paths["speaker_a"] == str(speaker_a_sample), (
+            f"speaker_a clone got wrong path: {call_paths['speaker_a']!r}, "
+            f"expected {str(speaker_a_sample)!r}"
+        )
+        assert call_paths["speaker_b"] == str(speaker_b_sample), (
+            f"speaker_b clone got wrong path: {call_paths['speaker_b']!r}, "
+            f"expected {str(speaker_b_sample)!r}"
+        )
+        # Negative: NO call got the same path (i.e. nobody used a
+        # whole-file fallback).
+        assert (
+            call_paths["speaker_a"] != call_paths["speaker_b"]
+        ), (
+            "Both speakers got the SAME source_audio_path — likely the "
+            "per-speaker extraction was bypassed and whole-file was "
+            "used. PR#3C-b3d safety property violated.\n"
+            f"calls={fake.calls}"
+        )
+
+    def test_b3d_consent_false_skips_provider_call_entirely(self):
+        """Regression — when consent is False (default for non-clone
+        jobs), evaluate_voice_review routes to PRESET without invoking
+        the provider. This means even if smart_wiring's real provider
+        somehow leaked into test scope, no API call would happen.
+        """
+        from pathlib import Path
+
+        from services.smart.auto_voice_review import (
+            VoiceReviewChoice, VoiceReviewOutcome, VoiceReviewSpeakerInput,
+            evaluate_voice_review,
+        )
+
+        from tests.fakes.fake_clone_provider import FakeCloneProvider
+
+        fake = FakeCloneProvider(success=True)
+        result = evaluate_voice_review(
+            main_speakers=[
+                VoiceReviewSpeakerInput(
+                    speaker_id="speaker_a",
+                    speaker_name="A",
+                    sample_seconds=20.0,
+                    source_audio_path=Path("/tmp/fake/x.wav"),
+                ),
+            ],
+            smart_consent={"auto_voice_clone": False},  # explicit no-consent
+            clone_provider=fake,
+            voice_library_quota_remaining=100,
+            smart_decision_id_factory=lambda: "dec_x",
+        )
+        assert result.outcome is VoiceReviewOutcome.AUTO_APPROVED
+        # PRESET choices — no clone calls.
+        assert all(d.choice is VoiceReviewChoice.PRESET for d in result.decisions)
+        assert len(fake.calls) == 0, (
+            f"consent=False MUST NOT call the provider; got "
+            f"{len(fake.calls)} calls. fake.calls={fake.calls}"
+        )
+
+
 class TestTranslationReviewProcessIntegrationFailClosed:
     """Codex 第二十五轮 — pin the two fail-closed behaviours added in
     PR#3C-b3c-fix.

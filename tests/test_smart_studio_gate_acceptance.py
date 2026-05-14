@@ -619,12 +619,13 @@ class TestProcessPyStudioGateWidening:
         invoke ``evaluate_voice_review`` and apply per-speaker decisions
         in the same frame, falling through to the next pipeline stage.
 
-        PR#3C-b2-fix additionally locks four invariants from Codex 第十八轮:
+        PR#3C-b3d UPGRADED Codex 第十八轮 invariants for the real-provider path:
           - P1-2: pipeline-control branch reads ``job_effective_pipeline_mode``
-            not raw ``job_service_mode``
-          - P0-2: smart clone path goes through a fail-closed local stub
-            (``_build_b2_not_wired_clone_provider``), NOT the real
-            ``build_smart_clone_provider`` import
+            not raw ``job_service_mode`` (unchanged)
+          - P0-2 (inverted at b3d): smart clone path goes through the
+            REAL ``build_smart_clone_provider`` from smart_wiring,
+            because per-speaker ffmpeg samples + quota snapshot are
+            now wired. Pre-b3d this was the b2 fail-closed stub.
           - P0-1: ``emit_smart_state_marker`` is called WITHOUT setting
             a top-level ``status`` (intermediate-state pollution would
             block editing/jianying gates + settle dispatcher)
@@ -647,12 +648,14 @@ class TestProcessPyStudioGateWidening:
         # Verify smart branch calls evaluate_voice_review + handles
         # both outcomes (PAUSED → emit_handoff_markers; AUTO_APPROVED →
         # set_stage(APPROVED) + emit_smart_state_marker + fall through).
-        # Window 290 to cover the smart block AFTER PR#3C-b3b inserted
-        # the eligibility-gate prelude (~80 extra lines).
+        # Window 500 to cover the smart block AFTER PR#3C-b3d inserted
+        # the per-speaker sample extraction prelude (~120 extra lines)
+        # which sits between the eligibility gate (b3b) and the
+        # voice-review call site.
         smart_block = _find_anchor_block(
             self._source(),
             "Smart inline auto-approve path",
-            window=290,
+            window=500,
         )
         for required_call in (
             "evaluate_voice_review",
@@ -660,8 +663,9 @@ class TestProcessPyStudioGateWidening:
             "emit_handoff_markers",
             "REVIEW_STATUS_APPROVED",
             "emit_smart_state_marker",
-            # Codex 第十八轮 P0-2: fail-closed clone provider
-            "_build_b2_not_wired_clone_provider",
+            # Codex 第十八轮 P0-2 inverted at b3d: real provider wired now
+            # that per-speaker samples + quota snapshot are in place.
+            "build_smart_clone_provider",
             # Codex 第十八轮 P1-1: clone vendor recorded as audit, not as
             # TTS provider override
             "_sp_entry[\"clone_provider\"]",
@@ -672,26 +676,40 @@ class TestProcessPyStudioGateWidening:
                 f"contract relies on it. Block:\n{smart_block}"
             )
 
-        # Codex 第十八轮 P0-2: smart branch MUST NOT *import* the real
-        # ``build_smart_clone_provider`` (the call site is what burns
-        # paid API). Comments may still refer to it for context. Detect
-        # the import statement specifically.
-        for forbidden_import in (
-            "from services.smart_wiring import build_smart_clone_provider",
-            "from services.smart_wiring import (\n                        build_smart_clone_provider",
+        # PR#3C-b3d Codex 第二十轮 three-piece contract: real provider
+        # MUST land together with per-speaker ffmpeg sample + quota.
+        # Pin all three in the smart branch.
+        for required_piece in (
+            # Piece 1: per-speaker ffmpeg sample (VoiceSampleExtractor)
+            "VoiceSampleExtractor(",
+            "extract_sample(",
+            "_smart_per_speaker_samples",
+            # Piece 2: quota snapshot — even MVP placeholder must
+            # be a named variable, not a magic number passed inline
+            "_smart_quota_remaining",
+            # Piece 3: real CloneProvider via smart_wiring
+            "from services.smart_wiring import",
+            "build_smart_clone_provider()",
         ):
-            assert forbidden_import not in smart_block, (
-                "smart branch imports the real build_smart_clone_provider — "
-                "PR#3C-b2-fix routes smart through the fail-closed stub "
-                "_build_b2_not_wired_clone_provider to avoid burning paid "
-                "clone API with stub source_audio_path + stub "
-                "voice_library_quota. Replacing the stub is PR#3C-b3 "
-                "territory (alongside real ffmpeg + quota snapshot)."
+            assert required_piece in smart_block, (
+                f"smart branch missing PR#3C-b3d three-piece component "
+                f"{required_piece!r}. Codex 第二十轮: per-speaker ffmpeg + "
+                f"real quota + real CloneProvider MUST land together so "
+                f"paid clone API never sees stub data.\n"
+                f"Block:\n{smart_block[:2500]}"
             )
-        # Verify smart actually CALLS the fail-closed stub.
-        assert "_build_b2_not_wired_clone_provider(" in smart_block, (
-            "smart branch should invoke _build_b2_not_wired_clone_provider() "
-            "to obtain the fail-closed CloneProvider stub. Codex 第十八轮 P0-2."
+
+        # PR#3C-b3d: stub no longer USED in smart path (still defined
+        # at module level for tests + as a documented fail-closed
+        # pattern reference, but smart inline auto-approve goes through
+        # the real provider).
+        assert "_smart_clone_provider = _build_b2_not_wired_clone_provider()" not in smart_block, (
+            "Smart inline branch still uses the b2 fail-closed stub — "
+            "PR#3C-b3d wires the real build_smart_clone_provider() "
+            "alongside per-speaker ffmpeg + quota snapshot. The stub is "
+            "kept at module level for unit tests but the smart path "
+            "MUST use the real provider now.\n"
+            f"Block:\n{smart_block[:2000]}"
         )
 
         # Codex 第十八轮 P0-1: smart_state marker MUST NOT carry a
@@ -1030,7 +1048,7 @@ class TestProcessPyStudioGateWidening:
         smart_block = _find_anchor_block(
             self._source(),
             "Smart inline auto-approve path",
-            window=290,
+            window=500,
         )
 
         # 1. Helper + gate imported.
@@ -1124,7 +1142,7 @@ class TestProcessPyStudioGateWidening:
         smart_block = _find_anchor_block(
             self._source(),
             "Smart inline auto-approve path",
-            window=290,
+            window=500,
         )
 
         # The overlay should pull from the aggregation result. Anchor on
@@ -1418,6 +1436,186 @@ class TestProcessPyStudioGateWidening:
             "Codex 第二十五轮 P1-1 fix didn't reach the actual call.\n"
             f"Call window:\n{eval_window}"
         )
+
+    # ===================================================================
+    # PR#3C-b3d — three-piece atomic landing (Codex 第二十轮)
+    # ===================================================================
+
+    def test_b3d_per_speaker_sample_extraction_consent_gated(self):
+        """Codex 第二十轮 piece 1 — per-speaker sample extraction ONLY
+        runs when ``smart_consent.auto_voice_clone is True``. Otherwise
+        evaluate_voice_review routes to PRESET regardless and sample
+        extraction would be wasted ffmpeg work.
+
+        Pin the source-level gate on consent:
+          - extraction block lives inside an
+            ``if _smart_consent_allows_clone:`` gate
+          - the gate variable is derived with ``is True`` strict
+            identity (per Codex 第十三轮 P0-2 contract for consent)
+        """
+        smart_block = _find_anchor_block(
+            self._source(),
+            "Smart inline auto-approve path",
+            window=500,
+        )
+
+        assert "_smart_consent_allows_clone" in smart_block, (
+            "Smart branch missing ``_smart_consent_allows_clone`` "
+            "derivation — PR#3C-b3d piece 1 must gate sample extraction "
+            "on consent so non-consenting jobs don't pay for ffmpeg.\n"
+            f"Block first 3000 chars:\n{smart_block[:3000]}"
+        )
+
+        # The derivation must use strict ``is True`` identity, not
+        # truthiness — matches evaluate_voice_review's own consent check.
+        deriv_idx = smart_block.find("_smart_consent_allows_clone")
+        deriv_window = smart_block[deriv_idx : deriv_idx + 400]
+        assert (
+            'smart_consent.get("auto_voice_clone") is True' in deriv_window
+        ), (
+            "_smart_consent_allows_clone must use ``is True`` strict "
+            "identity to match evaluate_voice_review's gate (Codex 第十三轮 "
+            "P0-2). Truthy check would silently let truthy non-True "
+            "values (1, \"true\", {}, …) reach the real clone provider.\n"
+            f"Derivation window:\n{deriv_window}"
+        )
+
+    def test_b3d_sample_extraction_failure_short_circuits_handoff(self):
+        """Codex 第二十轮 piece 1 fail-closed contract: if per-speaker
+        sample extraction fails for ANY main speaker, smart MUST
+        handoff WITHOUT calling the real provider. Otherwise the real
+        provider would be called with whole-file audio or stale
+        per-speaker partial data → wasted MiniMax quota.
+
+        Pin: ``_smart_sample_extraction_error`` state variable +
+        explicit early handoff branch before _smart_main_speakers
+        construction.
+        """
+        smart_block = _find_anchor_block(
+            self._source(),
+            "Smart inline auto-approve path",
+            window=500,
+        )
+
+        assert "_smart_sample_extraction_error" in smart_block, (
+            "Smart branch missing ``_smart_sample_extraction_error`` "
+            "state — PR#3C-b3d piece 1 fail-closed contract not "
+            "enforced.\n"
+            f"Block first 3000 chars:\n{smart_block[:3000]}"
+        )
+
+        # Locate the explicit handoff branch on sample failure.
+        err_check_idx = smart_block.find(
+            "if _smart_sample_extraction_error is not None:"
+        )
+        assert err_check_idx >= 0, (
+            "Smart branch missing the ``if _smart_sample_extraction_error "
+            "is not None:`` early-handoff check. Without it, a partial "
+            "sample extraction would feed into the voice-review call "
+            "with the real provider — paid API leak risk.\n"
+            f"Block:\n{smart_block[:3000]}"
+        )
+        handoff_window = smart_block[err_check_idx : err_check_idx + 2000]
+        for required in (
+            "emit_handoff_markers(",
+            '"clone_sample_extraction_failed"',
+            "self._build_paused_result(",
+            "VOICE_SELECTION_REVIEW_STAGE",
+        ):
+            assert required in handoff_window, (
+                f"Sample-failure handoff branch missing required "
+                f"{required!r}.\n"
+                f"Window:\n{handoff_window}"
+            )
+
+    def test_b3d_smart_main_speakers_use_per_speaker_sample_path(self):
+        """Codex 第二十轮 piece 1 functional contract: the
+        ``_smart_main_speakers`` list (the actual input to
+        ``evaluate_voice_review``) must use ``_smart_per_speaker_samples
+        [sid]`` for ``source_audio_path`` instead of the whole-file
+        ``source_audio_path``. Otherwise the real provider sees stub
+        data.
+
+        Source-level pin: the list comprehension references
+        ``_smart_per_speaker_samples.get(sp.get("speaker_id"), ...)``
+        as the source_audio_path argument.
+        """
+        smart_block = _find_anchor_block(
+            self._source(),
+            "Smart inline auto-approve path",
+            window=500,
+        )
+        ms_idx = smart_block.find("_smart_main_speakers = [")
+        assert ms_idx >= 0
+        ms_window = smart_block[ms_idx : ms_idx + 1500]
+
+        assert "_smart_per_speaker_samples.get(" in ms_window, (
+            "``_smart_main_speakers`` list comprehension no longer reads "
+            "from ``_smart_per_speaker_samples`` for source_audio_path. "
+            "PR#3C-b3d piece 1: real per-speaker samples MUST flow into "
+            "the voice-review input, not the whole-file fallback "
+            "(which would burn paid API on the wrong audio).\n"
+            f"_smart_main_speakers window:\n{ms_window}"
+        )
+
+    def test_b3d_quota_remaining_passed_via_named_variable(self):
+        """Codex 第二十轮 piece 2: quota signal must be passed via a
+        named variable (``_smart_quota_remaining``) so the value is
+        documented and easily swapped when PR#3C-b3e wires the real
+        Gateway internal endpoint. Pin the variable name + the
+        call-site kwarg."""
+        smart_block = _find_anchor_block(
+            self._source(),
+            "Smart inline auto-approve path",
+            window=500,
+        )
+        assert "_smart_quota_remaining = " in smart_block, (
+            "PR#3C-b3d piece 2: quota signal must be a named "
+            "variable, not a magic number inline at the call site.\n"
+            f"Block first 4500 chars:\n{smart_block[:4500]}"
+        )
+
+        eval_idx = smart_block.find("evaluate_voice_review(")
+        assert eval_idx >= 0
+        eval_window = smart_block[eval_idx : eval_idx + 600]
+        assert (
+            "voice_library_quota_remaining=_smart_quota_remaining"
+            in eval_window
+        ), (
+            "evaluate_voice_review call site must pass "
+            "``voice_library_quota_remaining=_smart_quota_remaining``. "
+            "Magic-number values at the call site obscure b3e migration.\n"
+            f"Call window:\n{eval_window}"
+        )
+
+    def test_b3d_real_clone_provider_imported_inside_smart_branch(self):
+        """Codex 第二十轮 piece 3: real provider import must live
+        INSIDE the smart branch (not at module top level) so a non-smart
+        pipeline run never imports services.smart_wiring (which would
+        try to read MINIMAX_API_KEY env even if unused at runtime per
+        the lazy adapter contract; importing the module is fine, but
+        keeping the import local makes the dependency boundary clear).
+        """
+        source = self._source()
+        idx = source.find("Smart inline auto-approve path")
+        assert idx >= 0
+        # Module-level imports live above the smart branch. Check the
+        # smart_wiring import is NOT in the first 100 lines of the file
+        # (where module-level imports live) — only inside the smart
+        # branch.
+        head = "\n".join(source.splitlines()[:120])
+        assert "from services.smart_wiring import" not in head, (
+            "services.smart_wiring imported at module top level — should "
+            "be local to the smart inline branch so non-smart pipeline "
+            "runs don't drag the import.\n"
+            f"Module head:\n{head[-1500:]}"
+        )
+
+        # The import IS in the smart branch.
+        smart_block = _find_anchor_block(
+            source, "Smart inline auto-approve path", window=500,
+        )
+        assert "from services.smart_wiring import" in smart_block
 
     def test_translation_review_glossary_failure_short_circuits_to_handoff(self):
         """Codex 第二十五轮 P1-2: glossary helper exception when

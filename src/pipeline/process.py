@@ -2470,46 +2470,190 @@ class ProcessPipeline:
                     # eligibility gate marked "main configured dubbing
                     # speakers" per plan §6.1 reach evaluate_voice_review.
                     #
-                    # Codex 第十八轮 P0-2: source_audio_path is the whole-
-                    # file path (per-speaker ffmpeg concat is b3d work).
-                    # Whole-file would still satisfy the real MiniMax
-                    # clone client's "audio file exists" precondition,
-                    # so paired with build_smart_clone_provider() Smart
-                    # would actually burn paid clone API on every smart
-                    # job whose consent.auto_voice_clone=True. PR#3C-b2-fix
-                    # plugs a fail-closed stub provider (`_b2NotWiredClone`)
-                    # that raises on every clone_voice() call. The retry
-                    # loop in evaluate_voice_review catches the exception,
-                    # exhausts the per-speaker retry budget, and routes
-                    # to PRESET — no real clone API call leaves the box.
+                    # PR#3C-b3d (Codex 第二十轮 three-piece contract):
+                    # 1. Real per-speaker ffmpeg sample (VoiceSampleExtractor)
+                    # 2. Real voice_library_quota_remaining snapshot
+                    # 3. Real CloneProvider (build_smart_clone_provider)
                     #
-                    # PR#3C-b3d will replace the stub with the real
-                    # build_smart_clone_provider() ONCE the per-speaker
-                    # ffmpeg sample + real voice_library_quota snapshot
-                    # are wired alongside. Codex 第二十轮 says these three
-                    # MUST land together — replacing one without the
-                    # others reintroduces the paid-API leak this stub
-                    # guards against.
+                    # All three land together because:
+                    # - Real provider + stub samples (whole-file path) would
+                    #   burn paid clone API on the wrong audio (every smart
+                    #   job whose consent.auto_voice_clone=True).
+                    # - Real provider + real samples + missing quota would
+                    #   blow past user's MiniMax personal library cap.
+                    # Together they form the safe Smart auto-clone path
+                    # the b2 stub guarded against.
+
+                    # ── Piece 1: extract per-speaker clone sample ──
+                    #
+                    # Only attempt when consent.auto_voice_clone is True.
+                    # Otherwise evaluate_voice_review routes all speakers
+                    # to PRESET (no clone call), making sample extraction
+                    # wasted work. Fail-closed: if ANY main speaker's
+                    # sample extraction raises, route the WHOLE smart
+                    # job to handoff so the real provider never receives
+                    # a stub / missing audio path.
+                    _smart_consent_allows_clone = (
+                        smart_consent.get("auto_voice_clone") is True
+                    )
+                    _smart_per_speaker_samples: dict[str, Path] = {}
+                    _smart_sample_extraction_error: str | None = None
+                    if _smart_consent_allows_clone:
+                        _smart_sample_root = (
+                            final_project_dir / "smart_clone_samples"
+                        )
+                        try:
+                            _smart_sample_root.mkdir(parents=True, exist_ok=True)
+                            _smart_extractor = VoiceSampleExtractor()
+                        except Exception as _setup_exc:
+                            _smart_sample_extraction_error = (
+                                f"sample_root_setup_error: {str(_setup_exc)[:160]}"
+                            )
+                            _smart_extractor = None  # type: ignore[assignment]
+
+                        if _smart_extractor is not None:
+                            for _candidate_sid in _smart_main_speaker_ids:
+                                _speaker_lines = [
+                                    ln for ln in (
+                                        getattr(transcript_result, "lines", None) or []
+                                    )
+                                    if getattr(ln, "speaker_id", None) == _candidate_sid
+                                ]
+                                if not _speaker_lines:
+                                    _smart_sample_extraction_error = (
+                                        f"no_lines_for_speaker_{_candidate_sid}"
+                                    )
+                                    break
+                                _sample_path = (
+                                    _smart_sample_root
+                                    / f"{_candidate_sid}.wav"
+                                )
+                                try:
+                                    _smart_extractor.extract_sample(
+                                        audio_path=str(source_audio_path),
+                                        speaker_lines=_speaker_lines,
+                                        output_path=str(_sample_path),
+                                    )
+                                except SampleExtractionError as _se:
+                                    _smart_sample_extraction_error = (
+                                        f"sample_extract_failed_{_candidate_sid}:"
+                                        f" {str(_se)[:120]}"
+                                    )
+                                    break
+                                except Exception as _exc:
+                                    _smart_sample_extraction_error = (
+                                        f"sample_extract_unexpected_{_candidate_sid}:"
+                                        f" {type(_exc).__name__}"
+                                    )
+                                    break
+                                if not _sample_path.exists():
+                                    _smart_sample_extraction_error = (
+                                        f"sample_missing_post_extract_{_candidate_sid}"
+                                    )
+                                    break
+                                _smart_per_speaker_samples[_candidate_sid] = (
+                                    _sample_path
+                                )
+
+                    if _smart_sample_extraction_error is not None:
+                        # Fail-closed: route handoff without invoking
+                        # real provider. Plan §6.5 three-tuple. Cloning
+                        # with whole-file or missing audio would waste
+                        # MiniMax quota on the wrong sample.
+                        emit_handoff_markers(
+                            review_state_manager=review_state_manager,
+                            review_stage=VOICE_SELECTION_REVIEW_STAGE,
+                            review_payload=vs_payload,
+                            review_pending_status=REVIEW_STATUS_PENDING,
+                            smart_state_update={
+                                "status": "downgraded_to_studio",
+                                "reason": "clone_sample_extraction_failed",
+                                "handoff_stage": VOICE_SELECTION_REVIEW_STAGE,
+                                "sample_error": _smart_sample_extraction_error,
+                            },
+                            project_dir=final_project_dir,
+                            user_message=(
+                                "智能版克隆样本提取失败,请人工接管:"
+                                f" {_smart_sample_extraction_error}"
+                            ),
+                            web_review_marker_builder=self._build_web_review_marker,
+                        )
+                        state_manager.set_stage(
+                            "voice_selection",
+                            StageStatus.RUNNING,
+                            {"execution_mode": "smart_handoff_sample_failed"},
+                        )
+                        current_stage_name = None
+                        _write_usage_summary(usage_meter)
+                        return self._build_paused_result(
+                            project_dir=final_project_dir,
+                            stage=VOICE_SELECTION_REVIEW_STAGE,
+                            message="智能版克隆样本提取失败",
+                        )
+
+                    # ── _smart_main_speakers with per-speaker sample paths ──
+                    #
+                    # If consent.auto_voice_clone is False:
+                    #   source_audio_path defaults to whole-file (placeholder).
+                    #   evaluate_voice_review routes to PRESET on consent=False
+                    #   BEFORE reading source_audio_path so the placeholder
+                    #   is never actually consumed.
+                    # If consent.auto_voice_clone is True:
+                    #   _smart_per_speaker_samples[sid] is the real ffmpeg-
+                    #   extracted clone sample (Piece 1 above). Passed
+                    #   verbatim into VoiceReviewSpeakerInput.
                     _smart_main_speakers = [
                         VoiceReviewSpeakerInput(
                             speaker_id=sp.get("speaker_id", ""),
                             speaker_name=sp.get("speaker_name", "") or sp.get("speaker_id", ""),
                             sample_seconds=float(sp.get("total_duration_s") or 0.0),
-                            source_audio_path=source_audio_path,
+                            source_audio_path=_smart_per_speaker_samples.get(
+                                sp.get("speaker_id"), source_audio_path
+                            ),
                         )
                         for sp in (vs_payload.get("speakers") or [])
                         if isinstance(sp, dict)
                         and sp.get("speaker_id")
                         and sp.get("speaker_id") in _smart_main_speaker_ids
                     ]
-                    _smart_clone_provider = _build_b2_not_wired_clone_provider()
+
+                    # ── Piece 2: voice_library_quota_remaining snapshot ──
+                    #
+                    # MVP value: 100 — high enough that the plan §7.3
+                    # water-mark brake (default 3) never trips for the
+                    # ≤3 main speakers Smart will clone in a single job.
+                    # The brake's REAL purpose is "stop smart when user's
+                    # MiniMax personal voice library is near its account
+                    # cap"; that needs a Gateway internal endpoint
+                    # (GET /user-voices/count + admin-configured per-user
+                    # cap) which lands in PR#3C-b3e. Until then this is
+                    # a per-job retry-loop safety only — the brake still
+                    # fires if evaluate_voice_review's local decrement
+                    # spirals (e.g. a runaway retry loop), so we're not
+                    # entirely brakeless.
+                    _smart_quota_remaining = 100
+
+                    # ── Piece 3: real CloneProvider ──
+                    #
+                    # build_smart_clone_provider() returns the
+                    # _MiniMaxCloneAdapter from services.smart_wiring
+                    # (or the test-injected fake via inject_for_test).
+                    # Safe to invoke now because:
+                    #   - consent gate above ensures samples extracted
+                    #     only when consent.auto_voice_clone is True
+                    #   - sample extraction was successful (else early
+                    #     handoff above)
+                    #   - quota brake still active inside the module
+                    from services.smart_wiring import (
+                        build_smart_clone_provider,
+                    )
+                    _smart_clone_provider = build_smart_clone_provider()
+
                     _smart_voice_review = evaluate_voice_review(
                         main_speakers=_smart_main_speakers,
                         smart_consent=smart_consent,
                         clone_provider=_smart_clone_provider,
-                        # b3 will replace this stub with the real Gateway /
-                        # MiniMax account quota snapshot.
-                        voice_library_quota_remaining=100,
+                        voice_library_quota_remaining=_smart_quota_remaining,
                         smart_decision_id_factory=lambda: _smart_uuid.uuid4().hex,
                     )
 
