@@ -509,3 +509,124 @@ class TestStudioLiteralGateAstGuard:
         )
         hits = _find_studio_literal_comparisons(bad)
         assert len(hits) == 1
+
+
+# ===================================================================
+# PR#3C-b1 — process.py pipeline-internal gate widening
+# ===================================================================
+
+
+_PROCESS_PY = _SRC / "pipeline" / "process.py"
+
+
+def _find_anchor_block(source: str, anchor: str, window: int = 6) -> str:
+    """Return ``window`` lines of source starting at the first line that
+    contains ``anchor``. Used to inspect the immediate code below a
+    semantic anchor comment without depending on absolute line numbers."""
+    lines = source.splitlines()
+    for i, line in enumerate(lines):
+        if anchor in line:
+            return "\n".join(lines[i : i + window])
+    raise AssertionError(
+        f"anchor {anchor!r} not found in source; did the comment get removed?"
+    )
+
+
+class TestProcessPyStudioGateWidening:
+    """PR#3C-b1 — two pipeline-internal Studio-only gates widened to
+    accept smart jobs (plan §4.3 末段 rows 4/5).
+
+    Two remaining gates (lazy migration at "rebuild auto_matched_by_provider"
+    + voice_selection_review trigger) intentionally still
+    use ``== "studio"`` literal — they require coordinated changes with
+    PR#3C-b2's inline auto-approve work and would deadlock the smart
+    pause-return contract if widened standalone. This test pins:
+      - the 2 PR#3C-b1 gates ARE widened (set membership with both
+        modes)
+      - the 2 PR#3C-b2 gates are still literal Studio-only
+    Future widening MUST update this test, forcing a conscious
+    decision about smart_state plumbing rather than silent drift.
+    """
+
+    def _source(self) -> str:
+        return _PROCESS_PY.read_text(encoding="utf-8")
+
+    def test_pre_tts_voice_validation_gate_widened_for_smart(self):
+        """Plan §4.3 末段 row 4 — cloned voice expiry validation must run
+        for smart jobs too. anchor: 'Pre-TTS voice validation' header."""
+        block = _find_anchor_block(
+            self._source(),
+            "Pre-TTS voice validation (cloned voices, before translation)",
+            window=12,
+        )
+        # The widened if expression carries both modes via set membership.
+        assert 'job_service_mode in {"studio", "smart"}' in block, (
+            "Pre-TTS voice validation gate is no longer widened for smart. "
+            f"Block:\n{block}"
+        )
+        # And the legacy literal-Studio comparison must NOT appear in
+        # this anchored block.
+        assert 'job_service_mode == "studio"' not in block, (
+            "Pre-TTS voice validation gate regressed to literal Studio-only. "
+            f"Block:\n{block}"
+        )
+
+    def test_speed_catalog_lookup_gate_widened_for_smart(self):
+        """Plan §4.3 末段 row 5 — speed catalog lookup must benefit smart
+        jobs (which select concrete voice_ids via auto_voice_review).
+        anchor: 'Speed catalog lookup' header. Window must reach down
+        past the multi-line comment block to the actual ``if`` (currently
+        ~20 lines below the header)."""
+        block = _find_anchor_block(
+            self._source(),
+            "Speed catalog lookup",
+            window=25,
+        )
+        assert 'job_service_mode in {"studio", "smart"}' in block, (
+            "Speed catalog lookup gate is no longer widened for smart. "
+            f"Block:\n{block}"
+        )
+        assert 'job_service_mode == "studio"' not in block, (
+            "Speed catalog lookup gate regressed to literal Studio-only. "
+            f"Block:\n{block}"
+        )
+
+    def test_voice_selection_review_trigger_still_literal_studio(self):
+        """Plan §4.3 末段 row 3 — this gate REMAINS literal Studio-only
+        until PR#3C-b2 lands the inline auto-approve path. Widening it
+        standalone would force smart jobs into the paused-return Studio
+        flow, breaking the §6.0.5 'smart doesn't pause-return' contract.
+
+        Anchor on the ``elif`` line itself (rather than the section
+        header 90+ lines above) so the window stays tight."""
+        block = _find_anchor_block(
+            self._source(),
+            "elif config.wait_for_review and job_requires_review and job_service_mode",
+            window=1,
+        )
+        # PR#3C-b2 territory — still literal Studio.
+        assert 'job_service_mode == "studio"' in block, (
+            "voice_selection_review trigger has been widened. PR#3C-b1 left "
+            "this gate intentionally literal until inline auto-approve "
+            "(PR#3C-b2) lands. If you widened deliberately, update "
+            "test_smart_studio_gate_acceptance.py to reflect the new state. "
+            f"Block:\n{block}"
+        )
+
+    def test_lazy_migration_gate_still_literal_studio(self):
+        """The 'rebuild auto_matched_by_provider' lazy migration sits
+        inside the user-approved review branch — smart jobs don't reach
+        it (smart auto-approves payloads with full field set). Left
+        as literal Studio for clarity; widening would be dead code.
+        Pin so future drift is conscious."""
+        block = _find_anchor_block(
+            self._source(),
+            "Lazy migration: legacy approved payloads",
+            window=12,
+        )
+        assert 'job_service_mode == "studio"' in block, (
+            "Lazy-migration gate has been widened. Smart jobs don't reach "
+            "this user-approved branch, so widening is dead code; if you "
+            "did so deliberately, explain in the diff + update this test. "
+            f"Block:\n{block}"
+        )

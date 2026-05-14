@@ -2296,7 +2296,15 @@ class ProcessPipeline:
                 )
 
             # --- Pre-TTS voice validation (cloned voices, before translation) ---
-            if config.wait_for_review and job_service_mode == "studio":
+            #
+            # Plan §4.3 末段 row 4 + Codex 第二轮 F4: smart jobs also need
+            # cloned-voice expiry validation. Without this, a Smart job
+            # whose auto_voice_review picked a cloned vt_* voice that
+            # later expired (admin cleanup, account quota turnover) would
+            # publish with a stale voice_id and hit a 400 during TTS.
+            # Widening here is safe — smart_state remains the audit fact;
+            # the validator only inspects _speaker_voices voice_ids.
+            if config.wait_for_review and job_service_mode in {"studio", "smart"}:
                 expired_voices = self._validate_cloned_voices(_speaker_voices)
                 if expired_voices:
                     for ev_id in expired_voices:
@@ -2361,8 +2369,15 @@ class ProcessPipeline:
             # (Studio reruns AFTER translation_review have s3_cache_hit=True
             # but still need correct metering flags).
             # The actual "skip probe" decision below stays gated on cache.
+            # Plan §4.3 末段 row 5 + Codex 第二轮 F5: smart jobs also
+            # benefit from the speed catalog hit path. auto_voice_review
+            # picks concrete voice_ids per main speaker (cloned vt_* or
+            # preset), so the precondition "all voice_ids are concrete
+            # not 'auto'" is satisfied for smart just like studio.
+            # Widening here skips an unnecessary $0.02 probe for smart
+            # jobs that have catalog coverage.
             if (
-                job_service_mode == "studio"
+                job_service_mode in {"studio", "smart"}
                 and _speaker_voices
                 and all(v and v != "auto" for v in _speaker_voices.values())
             ):
