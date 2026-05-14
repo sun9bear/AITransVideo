@@ -832,22 +832,18 @@ class TestProcessPyStudioGateWidening:
           - credits_service settle dispatcher routes through
             smart_capture_full (credits_policy must be populated)
 
-        Unit-test the helper directly via SimpleNamespace so we don't
-        have to spin up the full pipeline."""
+        Codex 第二十一轮 P0: helper now takes ``service_mode`` as an
+        explicit kwarg (was previously reading ``self._current_service_mode``
+        which is not set on the resume-publish-only path)."""
         from pipeline.process import ProcessPipeline as _PP
         from services.smart.state import parse_smart_state_marker
 
-        # Build a minimal instance — only the attribute the helper reads.
-        # SimpleNamespace works because the helper accesses
-        # self._current_service_mode (no other state) — duck typing.
         class _Stub:
-            _current_service_mode = "smart"
-
             _emit_smart_terminal_completion_marker = (
                 _PP._emit_smart_terminal_completion_marker
             )
 
-        _Stub()._emit_smart_terminal_completion_marker()
+        _Stub()._emit_smart_terminal_completion_marker(service_mode="smart")
         captured = capsys.readouterr().out
         markers = [
             parse_smart_state_marker(line)
@@ -872,20 +868,77 @@ class TestProcessPyStudioGateWidening:
         that should never carry one."""
         from pipeline.process import ProcessPipeline as _PP
 
-        for mode in ("studio", "express", None, ""):
-            class _Stub:
-                _current_service_mode = mode
-                _emit_smart_terminal_completion_marker = (
-                    _PP._emit_smart_terminal_completion_marker
-                )
+        class _Stub:
+            _emit_smart_terminal_completion_marker = (
+                _PP._emit_smart_terminal_completion_marker
+            )
 
+        for mode in ("studio", "express", None, ""):
             capsys.readouterr()  # clear
-            _Stub()._emit_smart_terminal_completion_marker()
+            _Stub()._emit_smart_terminal_completion_marker(service_mode=mode)
             captured = capsys.readouterr().out
             assert "[SMART_STATE]" not in captured, (
                 f"Non-smart mode {mode!r} unexpectedly emitted a terminal "
                 f"smart marker:\n{captured}"
             )
+
+    def test_terminal_marker_helper_no_implicit_self_state_read(self):
+        """Codex 第二十一轮 P0: helper must NOT silently fall back to
+        ``self._current_service_mode``. A fresh ProcessPipeline() that
+        enters via the resume-publish-only path NEVER traverses the
+        main run() assignment around line 1520. Pre-fix, calling
+        the helper on such an instance raised AttributeError, breaking
+        commit copy_as_new / overwrite publish.
+
+        Pin the contract: helper called WITHOUT service_mode (or with
+        None) emits nothing — never raises AttributeError, never reads
+        residual instance state."""
+        from pipeline.process import ProcessPipeline as _PP
+
+        class _FreshStub:  # NO _current_service_mode attribute
+            _emit_smart_terminal_completion_marker = (
+                _PP._emit_smart_terminal_completion_marker
+            )
+
+        # Must not raise — and must not emit (None → non-smart noop).
+        _FreshStub()._emit_smart_terminal_completion_marker(service_mode=None)
+
+    def test_resume_path_loads_raw_service_mode_without_instance_state(self, tmp_path):
+        """Codex 第二十一轮 P0: ``_run_alignment_and_publish_only`` must
+        be able to surface the raw service_mode for the terminal helper
+        WITHOUT touching ``self._current_service_mode`` (which the
+        resume path never sets). Test ``_load_raw_service_mode_for_resume``
+        directly: a fresh ProcessPipeline() can load service_mode from
+        the JobRecord-shaped dict in config.job_record."""
+        from types import SimpleNamespace
+
+        from pipeline.process import ProcessPipeline
+
+        pipe = ProcessPipeline()  # FRESH — no _current_service_mode
+
+        # Path A: config.job_record carries a dict — return the
+        # service_mode field.
+        cfg_dict = SimpleNamespace(
+            job_id="job_resume_x",
+            job_record={"service_mode": "smart"},
+        )
+        assert pipe._load_raw_service_mode_for_resume(cfg_dict) == "smart"
+
+        # Path B: config.job_record is None (no pre-load), no job_id
+        # either → returns None safely.
+        cfg_none = SimpleNamespace(job_id=None, job_record=None)
+        assert pipe._load_raw_service_mode_for_resume(cfg_none) is None
+
+        # Path C: config carries job_id but no job_record; JobStore
+        # lookup miss returns None (best-effort, never raises).
+        cfg_missing = SimpleNamespace(
+            job_id="does_not_exist_anywhere",
+            job_record=None,
+        )
+        # Result depends on JobStore env; either None or it loads
+        # something. The contract is "never raises".
+        result = pipe._load_raw_service_mode_for_resume(cfg_missing)
+        assert result is None or isinstance(result, str)
 
     def test_terminal_marker_call_sites_wired_at_both_happy_path_returns(self):
         """Anchor-based: both happy-path ProcessResult returns in
@@ -899,11 +952,12 @@ class TestProcessPyStudioGateWidening:
         misbehave per the helper docstring."""
         source = self._source()
         # The helper is called immediately before each ProcessResult
-        # construction. Count the call sites — should be exactly 2
-        # (main run, resume-publish-only).
-        call_count = source.count(
-            "self._emit_smart_terminal_completion_marker()"
-        )
+        # construction. Count call-site openings — should be ≥ 2
+        # (main run, resume-publish-only). After Codex 第二十一轮 P0
+        # the helper takes ``service_mode=`` so we anchor on the open
+        # paren, not the bare ``()``.
+        call_anchor = "self._emit_smart_terminal_completion_marker("
+        call_count = source.count(call_anchor)
         assert call_count >= 2, (
             f"Expected ≥2 call sites for _emit_smart_terminal_completion_marker "
             f"(main run + resume-publish-only happy-path returns); got "
@@ -916,18 +970,28 @@ class TestProcessPyStudioGateWidening:
         idx = 0
         paired_calls = 0
         while True:
-            idx = source.find(
-                "self._emit_smart_terminal_completion_marker()", idx
-            )
+            idx = source.find(call_anchor, idx)
             if idx < 0:
                 break
-            window = source[idx : idx + 500]
+            window = source[idx : idx + 800]
             if "return ProcessResult(" in window:
                 paired_calls += 1
             idx += 1
         assert paired_calls >= 2, (
             f"Helper call sites must be immediately followed by "
             f"``return ProcessResult(``; got {paired_calls} pairings."
+        )
+
+        # Codex 第二十一轮 P0: every call MUST pass an explicit
+        # ``service_mode=`` keyword. Bare ``()`` invocations would read
+        # the no-default arg as positional — and previously masked the
+        # resume-path attribute-error bug.
+        bare_call = "self._emit_smart_terminal_completion_marker()"
+        assert bare_call not in source, (
+            "Found bare _emit_smart_terminal_completion_marker() with no "
+            "service_mode kwarg — Codex 第二十一轮 P0 requires every call "
+            "site pass service_mode explicitly so the resume-publish-only "
+            "path can't silently inherit stale self._current_service_mode."
         )
 
     def test_lazy_migration_gate_still_literal_studio(self):

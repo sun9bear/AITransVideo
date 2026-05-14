@@ -3458,7 +3458,10 @@ class ProcessPipeline:
         # non-smart jobs; for smart jobs, flips status → "completed" +
         # credits_policy → "capture_full" so editing / jianying gates
         # admit + settle dispatcher routes through smart_capture_full.
-        self._emit_smart_terminal_completion_marker()
+        # service_mode passed explicitly per Codex 第二十一轮 P0.
+        self._emit_smart_terminal_completion_marker(
+            service_mode=self._current_service_mode,
+        )
         return ProcessResult(
             project_dir=str(final_project_dir.resolve(strict=False)),
             dubbed_audio_path=output_result.dubbed_audio_path,
@@ -3706,6 +3709,46 @@ class ProcessPipeline:
                         tmp_path.unlink()
                     except OSError:
                         pass
+
+    def _load_raw_service_mode_for_resume(self, config: ProcessConfig) -> str | None:
+        """Codex 第二十一轮 P0: resume-publish-only path never traverses
+        the main run() ``self._current_service_mode = ...`` assignment
+        around line 1520, so the terminal smart_state helper needs an
+        explicit lookup here.
+
+        Order of precedence:
+          1. ``config.job_record`` if pre-loaded (test paths typically
+             pass this)
+          2. ``JobStore.load_job(config.job_id).service_mode`` if job_id
+             is present
+          3. ``None`` (caller treats as non-smart no-op)
+
+        Never raises — any load failure returns None so the helper
+        skips emission rather than crashing the resume publish path.
+        """
+        jr = getattr(config, "job_record", None)
+        if jr:
+            if isinstance(jr, dict):
+                value = jr.get("service_mode")
+            else:
+                value = getattr(jr, "service_mode", None)
+            if isinstance(value, str) and value:
+                return value
+        if config.job_id:
+            try:
+                from services.jobs.store import JobStore
+
+                store = JobStore(PROJECT_ROOT / "jobs")
+                record = store.load_job(config.job_id)
+                if record is not None:
+                    value = getattr(record, "service_mode", None)
+                    if isinstance(value, str) and value:
+                        return value
+            except Exception:
+                # Best-effort: never block resume publish on JobStore
+                # lookup glitches. None falls through to non-smart noop.
+                return None
+        return None
 
     def _run_alignment_and_publish_only(self, config: ProcessConfig) -> ProcessResult:
         """Resume pipeline at publish — no TTS, no alignment, no Gemini (γ).
@@ -3957,7 +4000,15 @@ class ProcessPipeline:
         # only happy-path return (covers commit copy_as_new + overwrite
         # publish stages). Same rationale as the main run() terminal \u2014
         # see _emit_smart_terminal_completion_marker docstring.
-        self._emit_smart_terminal_completion_marker()
+        # Codex \u7b2c\u4e8c\u5341\u4e00\u8f6e P0: ``self._current_service_mode`` is NOT
+        # initialized on this code path (resume doesn't traverse main
+        # run()'s assignment), so load raw service_mode explicitly via
+        # JobStore lookup and pass it in. Helper is a no-op when None
+        # is returned, keeping non-smart resume paths safe.
+        _resume_service_mode = self._load_raw_service_mode_for_resume(config)
+        self._emit_smart_terminal_completion_marker(
+            service_mode=_resume_service_mode,
+        )
         return ProcessResult(
             project_dir=str(final_project_dir.resolve(strict=False)),
             dubbed_audio_path=output_result.dubbed_audio_path,
@@ -3970,8 +4021,12 @@ class ProcessPipeline:
             needs_review_count=output_result.needs_review_count,
         )
 
-    def _emit_smart_terminal_completion_marker(self) -> None:
-        """Plan §4.3 mapping table + §6.0.5 + Codex 第二十轮.
+    def _emit_smart_terminal_completion_marker(
+        self,
+        *,
+        service_mode: str | None,
+    ) -> None:
+        """Plan §4.3 mapping table + §6.0.5 + Codex 第二十/二十一轮.
 
         When a smart pipeline reaches the happy-path succeeded terminal
         return, emit a terminal ``smart_state`` marker so:
@@ -4010,11 +4065,21 @@ class ProcessPipeline:
         with "completed" + credits_policy="capture_full". This is
         intentional and matches plan §6.3 fail-safe ladder row 4
         ("已开始 clone / TTS, 用户选择 degraded_delivery_with_report
-        且交付当前最佳版本 → 按智能版固定价 100 credits/min capture").
+        且交付当前最佳价本 → 按智能版固定价 100 credits/min capture").
         The "曾经 handoff 过" audit detail lives in smart_decisions.jsonl
         (PR#3C-b3e) — not on the terminal smart_state status.
+
+        Codex 第二十一轮 P0: ``service_mode`` is now passed explicitly
+        rather than read from ``self._current_service_mode``. The main
+        run() path sets that attribute around line 1520, but the
+        resume-publish-only path (commit copy_as_new / overwrite, entered
+        at line 1465) never traverses that assignment. A fresh
+        ``ProcessPipeline()`` invoked for commit publish would have
+        thrown AttributeError on access (or silently inherited a stale
+        value on a re-used instance). Making service_mode an explicit
+        param forces callers to declare what they know — caller responsibility.
         """
-        if self._current_service_mode != "smart":
+        if service_mode != "smart":
             return
         # Lazy import — top-level import order in process.py is fragile
         # and smart pipeline integration intentionally minimises module-
