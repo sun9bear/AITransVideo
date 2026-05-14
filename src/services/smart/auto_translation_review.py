@@ -176,16 +176,16 @@ def _check_uncertain_speaker_share(
     High uncertain-speaker share means S2 had many ambiguous segments —
     auto-approve risks compounding ambiguity.
 
-    Codex 第九轮 P1-2: missing signal → fail-closed (unevaluable_missing_signals).
-    Mirrors simulator (smart_shadow_sim_simulator.py:187) which returns
-    decision=unevaluable when this field is missing — vacuous-pass would
-    silently auto-approve any job whose upstream collector failed to
-    populate the field.
+    Missing signal handled in the unified ``_precheck_missing_signals``
+    pre-pass (called once before the 6 deterministic checks); this
+    function only sees populated values. Codex 第十轮 P2: unifying the
+    missing-signal reason aligns with simulator
+    (smart_shadow_sim_simulator.py:187) which returns a single
+    ``missing_signals`` reason + evidence-listed missing fields rather
+    than per-field unevaluable codes.
     """
     share = speaker_stats.get("uncertain_speaker_duration_share")
     metrics = {"uncertain_speaker_duration_share": share}
-    if share is None:
-        return False, "unevaluable_missing_uncertain_speaker_share", metrics
     if float(share) > UNCERTAIN_SHARE_THRESHOLD:
         return (
             False,
@@ -204,11 +204,10 @@ def _check_clone_eligible_ratio(
     voice match downstream will mostly fall to presets — auto-approval
     of translation is premature when voice quality is at risk.
 
-    Codex 第九轮 P1-2: missing signal → fail-closed; same rationale as
-    _check_uncertain_speaker_share. Codex 第九轮 P1-3: reason_code
-    format must mirror simulator exactly — "{eligible}/{asr}" with a
-    forward slash, not "_of_" — so shadow-vs-production diff stays
-    apples-to-apples.
+    Missing signals handled in the unified pre-pass (see above). Codex
+    第九轮 P1-3: reason_code format must mirror simulator exactly —
+    "{eligible}/{asr}" with a forward slash, not "_of_" — so shadow-vs-
+    production diff stays apples-to-apples.
     """
     asr_count = speaker_stats.get("asr_speaker_count")
     eligible = clone_sample_stats.get("eligible_speakers")
@@ -216,13 +215,11 @@ def _check_clone_eligible_ratio(
         "asr_speaker_count": asr_count,
         "eligible_speakers": eligible,
     }
-    if asr_count is None or eligible is None:
-        return False, "unevaluable_missing_clone_signals", metrics
     asr = float(asr_count)
     if asr <= 0:
-        # Div-by-zero guard. Treat as missing signal (fail-closed) —
-        # 0 ASR speakers is itself an upstream-data anomaly that
-        # shouldn't auto-approve.
+        # Div-by-zero guard. 0 ASR speakers is itself an upstream-data
+        # anomaly that shouldn't auto-approve. Distinct from missing
+        # signal — the field IS populated, just with a degenerate value.
         return False, "unevaluable_zero_asr_speakers", metrics
     ratio = float(eligible) / asr
     metrics["clone_eligible_ratio"] = ratio
@@ -233,6 +230,49 @@ def _check_clone_eligible_ratio(
             metrics,
         )
     return True, None, metrics
+
+
+# ---------------------------------------------------------------------------
+# Missing-signals pre-pass (Codex 第十轮 P2)
+# ---------------------------------------------------------------------------
+#
+# Simulator (scripts/smart_shadow_sim_simulator.py:187) checks all three
+# missing-signal candidates in one go and returns a single
+# ``reason="missing_signals"`` with an evidence list of the missing
+# field names. To keep shadow-vs-production reason aggregation
+# apples-to-apples, do the same here as a pre-pass before the 6
+# deterministic checks. The 6 checks then only deal with populated
+# values, simplifying their bodies.
+
+_MISSING_SIGNAL_REASON = "missing_signals"
+
+_MISSING_SIGNAL_FIELDS = (
+    ("uncertain_speaker_duration_share", "speaker_stats"),
+    ("asr_speaker_count", "speaker_stats"),
+    ("eligible_speakers", "clone_sample_stats"),
+)
+
+
+def _precheck_missing_signals(
+    *,
+    speaker_stats: Mapping[str, Any],
+    clone_sample_stats: Mapping[str, Any],
+) -> tuple[bool, dict[str, Any]]:
+    """Return (ok, evidence). ok=False when any of the three required
+    signals is missing; evidence carries a ``missing`` list with the
+    field names so the caller can attach to TranslationReviewDecision.metrics.
+    """
+    sources = {
+        "speaker_stats": speaker_stats,
+        "clone_sample_stats": clone_sample_stats,
+    }
+    missing: list[str] = []
+    for field_name, source_key in _MISSING_SIGNAL_FIELDS:
+        if sources[source_key].get(field_name) is None:
+            missing.append(field_name)
+    if missing:
+        return False, {"missing": missing}
+    return True, {}
 
 
 def evaluate_translation_review(
@@ -258,6 +298,24 @@ def evaluate_translation_review(
     clone-eligible failure when both trip).
     """
     aggregated_metrics: dict[str, Any] = {}
+
+    # Codex 第十轮 P2: missing-signals pre-pass aligns with simulator
+    # (smart_shadow_sim_simulator.py:187) — single ``missing_signals``
+    # reason + evidence-listed missing fields, instead of per-field
+    # unevaluable codes. Runs BEFORE the 6 deterministic checks so the
+    # check bodies don't have to repeat the missing-signal handling.
+    signals_ok, missing_evidence = _precheck_missing_signals(
+        speaker_stats=speaker_stats,
+        clone_sample_stats=clone_sample_stats,
+    )
+    if not signals_ok:
+        aggregated_metrics.update(missing_evidence)
+        return TranslationReviewDecision(
+            auto_approved=False,
+            reason_code=_MISSING_SIGNAL_REASON,
+            failed_check="missing_signals_precheck",
+            metrics=aggregated_metrics,
+        )
 
     # Run in plan order so the reason_code reflects the FIRST failing
     # check the user / dataset audit will see.

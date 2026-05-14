@@ -21,9 +21,32 @@ Input shapes (Codex 第九轮 P1-1 fix):
     consumes. Already pre-aggregated counts at multiple thresholds, no
     per-speaker access needed.
 
-``normalize_speaker_stats(raw)`` accepts any of the three shapes and emits
-the canonical form so ``evaluate_eligibility`` only deals with one shape.
-Tests cover all three input forms.
+``normalize_speaker_stats(raw)`` accepts any of the three shapes (the
+list shape carries TWO sub-flavours per Codex 第十轮 P1: canonical and
+process-prefixed) and emits the canonical form so ``evaluate_eligibility``
+only deals with one shape. Tests cover all three input forms + the
+list-with-prefixes flavour.
+
+**PR#3C integration contract** (Codex 第十轮 P1 末段):
+
+The voice_selection_review payload form (process.py:4320-4353) does
+NOT carry ``dubbing_mode`` at the speaker level — that field is
+segment-level state. The PR#3C integration layer MUST aggregate
+``segment.dubbing_mode`` → speaker-level BEFORE calling
+``evaluate_eligibility``; otherwise ``keep_original`` speakers will
+count toward the main-speaker limit (because the default is "dub").
+
+Suggested aggregation (PR#3C reference impl):
+
+  speaker_dubbing_mode = (
+      "keep_original" if all(seg.dubbing_mode == "keep_original" for seg in speaker_segments)
+      else "mute_or_background" if all(seg.dubbing_mode == "mute_or_background" for seg in speaker_segments)
+      else "dub"
+  )
+
+Then either pass an enriched canonical-shape dict to evaluate_eligibility,
+or write the aggregated value into the voice_selection_review payload
+entries before forwarding.
 
 Output: ``EligibilityDecision`` dataclass — caller (process.py integration
 in PR#3C) routes to handoff or auto-review based on ``approved``.
@@ -151,9 +174,63 @@ def normalize_speaker_stats(
     if not isinstance(raw, Mapping):
         return {"speakers": []}
 
-    # Shape 1: canonical
-    if isinstance(raw.get("speakers"), list):
-        return raw
+    # Shape 1: canonical / list-with-prefixes (Codex 第十轮 P1 fix)
+    #
+    # ``raw["speakers"]`` is a list — could be either:
+    #   (a) canonical: each entry has ``speaker_id`` + ``duration_share``
+    #       + ``role`` + ``dubbing_mode`` (what tests build directly)
+    #   (b) process.py voice_selection_review payload: each entry has
+    #       ``speaker_id`` + ``speaker_duration_share`` + ``speaker_role``
+    #       (the prefixed field names, see process.py:4320-4353
+    #       _build_voice_selection_review_payload)
+    #
+    # First fix attempt (PR#3A-fix v1) only checked dict-of-profiles
+    # shape — list-with-prefixes was silently pass-through, so
+    # ``speaker.get("duration_share")`` returned 0.0 for every speaker
+    # and main_count was always 0. Codex 第十轮 P1 caught this on a
+    # real voice_selection_review payload.
+    raw_speakers = raw.get("speakers")
+    if isinstance(raw_speakers, list):
+        # Detect: any entry uses prefixed field names → renormalise.
+        # Otherwise pass-through (real canonical input from tests).
+        needs_renorm = any(
+            isinstance(s, Mapping)
+            and ("speaker_role" in s or "speaker_duration_share" in s)
+            for s in raw_speakers
+        )
+        if not needs_renorm:
+            return raw  # canonical — pass-through
+        normalised = []
+        for s in raw_speakers:
+            if not isinstance(s, Mapping):
+                continue
+            entry: dict[str, Any] = {"speaker_id": str(s.get("speaker_id") or "")}
+            # Field-name renormalisation, prefixed wins when both present
+            # (real production data carries the prefixed form).
+            if "speaker_duration_share" in s:
+                entry["duration_share"] = float(s.get("speaker_duration_share") or 0.0)
+            elif "duration_share" in s:
+                entry["duration_share"] = float(s.get("duration_share") or 0.0)
+            else:
+                entry["duration_share"] = 0.0
+            if "speaker_role" in s:
+                entry["role"] = s["speaker_role"]
+            elif "role" in s:
+                entry["role"] = s["role"]
+            # voice_selection_review payload doesn't carry dubbing_mode
+            # at the speaker level — that's segment-level state in
+            # process.py. Default "dub"; the PR#3C integration layer
+            # MUST aggregate segment.dubbing_mode → speaker level
+            # (e.g. "all keep_original segments → speaker is keep_original")
+            # BEFORE calling evaluate_eligibility, otherwise keep_original
+            # speakers will count toward the main-speaker limit. See the
+            # module docstring "PR#3C integration contract" for details.
+            entry["dubbing_mode"] = s.get("dubbing_mode", "dub")
+            normalised.append(entry)
+        return {
+            "speakers": normalised,
+            "_normalize_source": "process_voice_selection_review_speakers_list",
+        }
 
     # Shape 2: simulator pre-aggregated counts
     sct = raw.get("speaker_count_by_threshold")

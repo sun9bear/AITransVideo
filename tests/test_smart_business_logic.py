@@ -328,6 +328,108 @@ class TestEligibilityGateInputShapes:
         assert result is canonical
         assert "_normalize_source" not in result
 
+    def test_real_voice_selection_review_payload_speakers_list_shape(self):
+        """Codex 第十轮 P1 — process.py:4320-4353 _build_voice_selection_review_payload
+        also produces a ``speakers`` list, but each entry uses prefixed
+        field names (speaker_role / speaker_duration_share). PR#3A-fix v1
+        only handled the dict-of-profiles shape; this list-with-prefixes
+        flavour was silently pass-through and produced main_count=0.
+        """
+        from services.smart.eligibility_gate import (
+            evaluate_eligibility, normalize_speaker_stats,
+        )
+
+        # Mirrors the exact dict shape build_voice_selection_review_payload
+        # appends to speakers_payload at process.py:4320-4353.
+        voice_review_payload = {
+            "speakers": [
+                {
+                    "speaker_id": "speaker_a",
+                    "speaker_name": "查理·芒格",
+                    "segment_count": 80,
+                    "total_duration_s": 600.0,
+                    "speaker_role": "primary",
+                    "speaker_role_label": "主说话人",
+                    "speaker_duration_ms": 600_000,
+                    "speaker_duration_share": 0.55,
+                    "speaker_short_segment_count": 5,
+                    "speaker_short_segment_rate": 0.0625,
+                    "speaker_structure_reason": "top_duration_speaker",
+                    "speaker_review_hint": "main",
+                    "auto_matched_voice": "preset_x",
+                    "can_clone": True,
+                    "segments": [],
+                    "probe_texts": [],
+                    "target_chars_per_second": None,
+                },
+                {
+                    "speaker_id": "speaker_b",
+                    "speaker_name": "Warren Buffett",
+                    "speaker_role": "primary",
+                    "speaker_duration_share": 0.40,
+                },
+                {
+                    "speaker_id": "speaker_c",
+                    "speaker_role": "fragmented",
+                    "speaker_duration_share": 0.05,  # < 0.10 threshold
+                },
+            ]
+        }
+        # Verify normalisation detects the prefixed flavour.
+        canonical = normalize_speaker_stats(voice_review_payload)
+        assert canonical["_normalize_source"] == (
+            "process_voice_selection_review_speakers_list"
+        )
+        for sp in canonical["speakers"]:
+            assert "duration_share" in sp
+            assert "role" in sp
+
+        # Then verify end-to-end: a + b are main, c excluded by low_share,
+        # main_count=2 ≤ 3 → approved. Critically NOT the previous-bug
+        # outcome of approved with main_count=0.
+        decision = evaluate_eligibility(voice_review_payload)
+        assert decision.approved is True
+        assert decision.main_speaker_count == 2
+        assert set(decision.main_speaker_ids) == {"speaker_a", "speaker_b"}
+
+    def test_voice_selection_review_payload_with_4_main_speakers_rejected(self):
+        """Same risk codex called out: a 4-main-speaker job in the
+        prefixed list shape was previously approved silently with
+        main_count=0. After the fix, the limit-exceeded check fires."""
+        from services.smart.eligibility_gate import evaluate_eligibility
+
+        payload = {
+            "speakers": [
+                {
+                    "speaker_id": f"speaker_{i}",
+                    "speaker_role": "primary",
+                    "speaker_duration_share": 0.25,
+                }
+                for i in range(4)
+            ]
+        }
+        decision = evaluate_eligibility(payload)
+        assert decision.approved is False
+        assert decision.main_speaker_count == 4
+        assert decision.reason_code == "main_speaker_count_exceeded"
+
+    def test_canonical_list_with_no_prefixes_does_not_get_renamed(self):
+        """Make sure the prefix detection doesn't fire on canonical lists
+        that already use the canonical field names — they should pass
+        through verbatim (canonical entries are dicts with role /
+        duration_share, no speaker_role / speaker_duration_share)."""
+        from services.smart.eligibility_gate import normalize_speaker_stats
+
+        canonical = {
+            "speakers": [
+                {"speaker_id": "a", "role": "primary", "duration_share": 0.7,
+                 "dubbing_mode": "dub"},
+            ]
+        }
+        result = normalize_speaker_stats(canonical)
+        # Pass-through (same dict identity).
+        assert result is canonical
+
 
 # ===================================================================
 # auto_translation_review
@@ -472,40 +574,54 @@ class TestAutoTranslationReview:
         assert decision.auto_approved is True
         assert decision.metrics["glossary_preservation_rate"] is None
 
-    def test_missing_uncertain_share_fails_closed(self):
-        """Codex 第九轮 P1-2: missing signal → fail-closed (not vacuous
-        pass). Mirrors simulator's unevaluable / missing_signals
-        behaviour. Otherwise an upstream collector glitch silently
-        auto-approves any job whose uncertain_speaker_duration_share
-        wasn't computed."""
+    def test_missing_uncertain_share_fails_closed_with_unified_reason(self):
+        """Codex 第十轮 P2: missing-signal reason aligns with simulator
+        (smart_shadow_sim_simulator.py:187) — single ``missing_signals``
+        reason + evidence list of missing fields, NOT per-field
+        unevaluable codes. Critical for shadow-vs-production reason
+        aggregation."""
         from services.smart.auto_translation_review import evaluate_translation_review
 
         inputs = self._passing_inputs()
         del inputs["speaker_stats"]["uncertain_speaker_duration_share"]
         decision = evaluate_translation_review(**inputs)
         assert decision.auto_approved is False
-        assert decision.reason_code == "unevaluable_missing_uncertain_speaker_share"
-        assert decision.failed_check == "uncertain_speaker_share"
+        assert decision.reason_code == "missing_signals"
+        assert decision.failed_check == "missing_signals_precheck"
+        # Evidence carries the specific missing field names.
+        assert decision.metrics["missing"] == ["uncertain_speaker_duration_share"]
 
-    def test_missing_clone_signals_fails_closed(self):
-        """Codex 第九轮 P1-2: same fail-closed rationale for the
-        clone_eligible_ratio check — missing eligible_speakers OR
-        asr_speaker_count → unevaluable, not vacuous pass."""
+    def test_missing_clone_signals_fails_closed_with_unified_reason(self):
+        """Same unified reason format for missing clone signals — and
+        when multiple signals miss, evidence list grows accordingly."""
         from services.smart.auto_translation_review import evaluate_translation_review
 
-        # Missing asr_speaker_count
+        # Missing asr_speaker_count alone
         inputs = self._passing_inputs()
         del inputs["speaker_stats"]["asr_speaker_count"]
         decision = evaluate_translation_review(**inputs)
         assert decision.auto_approved is False
-        assert decision.reason_code == "unevaluable_missing_clone_signals"
+        assert decision.reason_code == "missing_signals"
+        assert decision.metrics["missing"] == ["asr_speaker_count"]
 
-        # Missing eligible_speakers
+        # Missing eligible_speakers alone
         inputs = self._passing_inputs()
         del inputs["clone_sample_stats"]["eligible_speakers"]
         decision = evaluate_translation_review(**inputs)
         assert decision.auto_approved is False
-        assert decision.reason_code == "unevaluable_missing_clone_signals"
+        assert decision.reason_code == "missing_signals"
+        assert decision.metrics["missing"] == ["eligible_speakers"]
+
+        # Multiple missing — evidence captures all of them
+        inputs = self._passing_inputs()
+        del inputs["speaker_stats"]["asr_speaker_count"]
+        del inputs["clone_sample_stats"]["eligible_speakers"]
+        decision = evaluate_translation_review(**inputs)
+        assert decision.auto_approved is False
+        assert decision.reason_code == "missing_signals"
+        assert sorted(decision.metrics["missing"]) == [
+            "asr_speaker_count", "eligible_speakers"
+        ]
 
     def test_zero_asr_speakers_fails_closed(self):
         """Defensive: 0 ASR speakers is itself an upstream-data anomaly
