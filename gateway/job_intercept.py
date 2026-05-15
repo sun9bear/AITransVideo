@@ -741,9 +741,27 @@ async def intercept_create_job(
     except Exception:
         request_data = {}
 
+    # PR#3C-b3g (2026-05-15): "smart" added to whitelist. Smart MVP P2
+    # pipeline code landed in src/services/smart/ + src/pipeline/process.py
+    # but the entry-side gate was never updated — submissions of
+    # service_mode=smart were silently coerced to express, never reaching
+    # the smart inline branch. Plan §4.2 lists smart as the third
+    # supported service_mode alongside express/studio.
     service_mode = request_data.get("service_mode", "express")
-    if service_mode not in ("express", "studio"):
+    if service_mode not in ("express", "studio", "smart"):
         service_mode = "express"
+
+    # --- smart_consent passthrough (PR#3C-b3g) ---
+    # Smart pipeline reads `_snap("smart_consent")` to gate auto-clone /
+    # auto-translation-review. Persist it on JobRecord so process.py sees
+    # it. Defensive: only pass through when service_mode==smart so a
+    # non-smart submission can't smuggle a stale consent payload onto
+    # JobRecord.
+    smart_consent_payload = None
+    if service_mode == "smart":
+        raw_consent = request_data.get("smart_consent")
+        if isinstance(raw_consent, dict):
+            smart_consent_payload = raw_consent
 
     # --- User context ---
     user_role = getattr(user, "role", "user") or "user" if user else "user"
@@ -932,6 +950,13 @@ async def intercept_create_job(
     # Inject user_id so Job API can build user-isolated workspace_dir
     if user is not None:
         request_data["user_id"] = str(user.id)
+    # PR#3C-b3g: forward smart_consent verbatim so Job API persists it
+    # on JobRecord; pipeline reads via _snap("smart_consent"). The
+    # smart_consent_payload was already filtered above (only set when
+    # service_mode==smart and the body field is a dict) — anything
+    # else stays out of the upstream request to keep JobRecord clean.
+    if smart_consent_payload is not None:
+        request_data["smart_consent"] = smart_consent_payload
 
     # Forward to upstream with modified body
     upstream_response = await proxy_request(

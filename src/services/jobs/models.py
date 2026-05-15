@@ -167,6 +167,19 @@ class JobRecord:
     #         "credits_policy": "...", "reserved_credits_per_minute": int, ...}
     smart_state: dict[str, object] | None = None
 
+    # --- Smart MVP P2 entry-input (PR#3C-b3g, 2026-05-15) ---
+    # User's smart-mode consent payload (plan §4.2). Written by Gateway at
+    # job creation from the request body, persisted on JobRecord, read by
+    # pipeline via ``_snap("smart_consent")`` to gate auto-clone /
+    # auto-translation-review / retry-budget paths. Always None for
+    # express/studio jobs.
+    # Shape: {"auto_voice_clone": bool, ...future plan-§4.2 keys}.
+    # NB: ``auto_voice_clone is True`` (strict identity) is the gate
+    # — truthy values that aren't True (1, "true", {}, …) all fall to
+    # PRESET. See ``services.smart.auto_voice_review`` for the contract
+    # and tests/test_smart_auto_voice_review.py:206 for enforcement.
+    smart_consent: dict[str, object] | None = None
+
     def __post_init__(self) -> None:
         self.job_id = str(self.job_id).strip()
         self.job_type = str(self.job_type).strip()
@@ -189,6 +202,7 @@ class JobRecord:
         self.error_summary = _copy_optional_dict(self.error_summary)
         self.fallback_summary = _copy_optional_dict(self.fallback_summary)
         self.smart_state = _copy_optional_dict(self.smart_state)
+        self.smart_consent = _copy_optional_dict(self.smart_consent)
         self.user_id = _normalize_optional_text(self.user_id)
         self.workspace_dir = _normalize_optional_text(self.workspace_dir)
         self.source_content_hash = _normalize_optional_text(self.source_content_hash)
@@ -293,6 +307,8 @@ class JobRecord:
             "jianying_draft_substep": self.jianying_draft_substep,
             # --- Smart MVP P2 skeleton ---
             "smart_state": _serialize_optional_dict(self.smart_state),
+            # --- Smart MVP P2 entry-input (PR#3C-b3g) ---
+            "smart_consent": _serialize_optional_dict(self.smart_consent),
         }
 
     @classmethod
@@ -354,6 +370,8 @@ class JobRecord:
             jianying_draft_substep=payload.get("jianying_draft_substep"),
             # --- Smart MVP P2 skeleton ---
             smart_state=payload.get("smart_state"),
+            # --- Smart MVP P2 entry-input (PR#3C-b3g) ---
+            smart_consent=payload.get("smart_consent"),
         )
 
 

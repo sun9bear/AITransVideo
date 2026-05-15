@@ -176,6 +176,7 @@ class JobService:
         source_content_hash: str | None = None,
         display_name: str | None = None,
         expires_at: str | None = None,
+        smart_consent: dict | None = None,
     ) -> JobRecord:
         normalized_source_type = str(source_type).strip()
         normalized_source_ref = str(source_ref).strip()
@@ -270,6 +271,11 @@ class JobService:
             source_content_hash=source_content_hash,
             display_name=normalized_display_name,
             expires_at=normalized_expires_at,
+            # PR#3C-b3g: smart_consent passthrough — JobRecord persists,
+            # pipeline reads via _snap("smart_consent") to gate
+            # auto-clone / auto-translation-review paths. None for
+            # express/studio jobs (Gateway only forwards when service_mode==smart).
+            smart_consent=smart_consent,
         )
         self.store.save_job(record)
         self.store.append_event(

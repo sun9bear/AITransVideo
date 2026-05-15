@@ -730,6 +730,15 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                         source_content_hash=str(payload["source_content_hash"]).strip() if payload.get("source_content_hash") else None,
                         display_name=str(payload["display_name"]).strip() if payload.get("display_name") else None,
                         expires_at=str(payload["expires_at"]).strip() if payload.get("expires_at") else None,
+                        # PR#3C-b3g: smart_consent passthrough.
+                        # Gateway has already validated this is non-None
+                        # only when service_mode==smart and the body
+                        # field is a dict.
+                        smart_consent=(
+                            payload.get("smart_consent")
+                            if isinstance(payload.get("smart_consent"), dict)
+                            else None
+                        ),
                     )
                     self._write_json(HTTPStatus.ACCEPTED, job.to_dict())
                     return

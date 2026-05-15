@@ -82,7 +82,10 @@ PLANS: dict[str, PlanDefinition] = {
         display_name="Plus",
         max_duration_minutes=45,
         max_concurrent_jobs=3,
-        allowed_service_modes=("express", "studio"),
+        # PR#3C-b3g (2026-05-15): smart auto-decision mode opens to
+        # plus/pro tiers per plan §4.2. Smart is auto-quality-tradeoff,
+        # not strictly heavier than studio — pricing tier matches studio.
+        allowed_service_modes=("express", "studio", "smart"),
         free_quota_total=None,
         price=PlanPrice(
             monthly_cny_fen=9900,      # ¥99 / 月
@@ -96,7 +99,7 @@ PLANS: dict[str, PlanDefinition] = {
         display_name="Pro",
         max_duration_minutes=180,
         max_concurrent_jobs=5,
-        allowed_service_modes=("express", "studio"),
+        allowed_service_modes=("express", "studio", "smart"),
         free_quota_total=None,
         price=PlanPrice(
             monthly_cny_fen=29900,     # ¥299 / 月
