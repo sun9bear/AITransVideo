@@ -1,4 +1,4 @@
-"""Smart inline branch PRESET-decision regression test.
+"""Smart inline branch PRESET-decision regression + behavioral tests.
 
 P3-d E2E discovery (2026-05-15): when smart auto_voice_review picks
 PRESET (e.g. quota brake fallback, low sample seconds, persona-mismatch),
@@ -100,13 +100,125 @@ class TestPresetVoiceIdStringExtraction:
         # auto_matched_voice access (proves caller defends against the
         # dict shape).
         has_extraction = (
-            "isinstance" in body
-            and "auto_matched_voice" in body
+            "_resolve_preset_voice_id" in body
+            or ("isinstance" in body and "auto_matched_voice" in body)
         )
         assert has_extraction, (
-            "PRESET branch must use isinstance() to defensively extract "
-            "voice_id from auto_matched_voice (which can be a dict or "
-            "None). Without the type check the dict flows into "
-            "_speaker_voices and crashes downstream.\n"
+            "PRESET branch must call ``_resolve_preset_voice_id`` (the "
+            "tested helper) OR use isinstance() to defensively extract "
+            "voice_id from auto_matched_voice (which can be a dict). "
+            "Without it the dict flows into _speaker_voices and crashes "
+            "downstream.\n"
             f"PRESET branch body:\n{body}"
         )
+
+
+# ===========================================================================
+# Codex 第三十七轮 Test Gap: behavioral tests for the extraction helper
+# ===========================================================================
+
+
+class TestResolvePresetVoiceIdHelper:
+    """Pure-function tests for ``_resolve_preset_voice_id``. The
+    source-anchor test above only proves "didn't revert to old broken
+    string-pattern"; these tests prove the helper actually returns a
+    string under all the type shapes the smart inline branch may pass
+    in.
+    """
+
+    def test_extracts_voice_id_string_from_auto_match_dict(self):
+        """The canonical case: auto_matched_voice is the dict shape
+        produced by ``_auto_match_for_provider`` (process.py:6509).
+        """
+        from pipeline.process import _resolve_preset_voice_id
+
+        auto_match = {
+            "voice_id": "vt_speaker_a_1778831859758",
+            "label": "Test Voice",
+            "match_confidence": "high",
+            "backup_voices": [],
+        }
+        result = _resolve_preset_voice_id(auto_match)
+        assert isinstance(result, str)
+        assert result == "vt_speaker_a_1778831859758"
+
+    def test_passes_bare_string_through(self):
+        """Defensive backward-compat: if a legacy code path stamps a
+        bare voice_id string, the helper passes it through."""
+        from pipeline.process import _resolve_preset_voice_id
+
+        result = _resolve_preset_voice_id("vt_legacy_abc")
+        assert isinstance(result, str)
+        assert result == "vt_legacy_abc"
+
+    def test_returns_empty_string_for_none(self):
+        """No auto_match available → empty voice_id (downstream
+        ``if _sp_id and _sp_voice`` falsy check skips the speaker)."""
+        from pipeline.process import _resolve_preset_voice_id
+
+        result = _resolve_preset_voice_id(None)
+        assert result == ""
+
+    def test_returns_empty_string_for_empty_dict(self):
+        """Edge: empty dict (no voice_id key) → empty string, NOT crash."""
+        from pipeline.process import _resolve_preset_voice_id
+
+        result = _resolve_preset_voice_id({})
+        assert result == ""
+
+    def test_returns_empty_string_when_dict_voice_id_is_null(self):
+        """Edge: dict present but voice_id=None (auto_match failed
+        partway) → empty string."""
+        from pipeline.process import _resolve_preset_voice_id
+
+        result = _resolve_preset_voice_id({
+            "voice_id": None,
+            "label": "Unknown",
+        })
+        assert result == ""
+
+    def test_returns_empty_string_for_unknown_type(self):
+        """Defensive: unexpected types (list / int) → empty string,
+        not crash."""
+        from pipeline.process import _resolve_preset_voice_id
+
+        assert _resolve_preset_voice_id(["vt_x"]) == ""
+        assert _resolve_preset_voice_id(42) == ""
+
+    def test_smart_inline_speaker_voices_receives_string_in_preset_path(self):
+        """End-to-end shape test: simulate the PRESET branch's
+        speaker_voices assignment using the helper.
+
+        Mirrors process.py PRESET branch state:
+          _sp_entry["voice_id"] = _resolve_preset_voice_id(auto_match)
+          _sp_voice = _sp_entry.get("voice_id")
+          _speaker_voices[speaker_a] = _sp_voice
+
+        Pin: after this flow, _speaker_voices["speaker_a"] is a STRING,
+        never a dict. The original bug had the entire dict in there,
+        crashing downstream voice_id.startswith("vt_") checks.
+        """
+        from pipeline.process import _resolve_preset_voice_id
+
+        auto_match = {
+            "voice_id": "vt_speaker_a_preset_xyz",
+            "label": "Preset Match",
+        }
+        _sp_entry: dict = {
+            "speaker_id": "speaker_a",
+            "auto_matched_voice": auto_match,
+        }
+        _sp_entry["voice_id"] = _resolve_preset_voice_id(
+            _sp_entry.get("auto_matched_voice")
+        )
+
+        _speaker_voices: dict = {}
+        _sp_voice = _sp_entry.get("voice_id")
+        if _sp_entry["speaker_id"] and _sp_voice:
+            _speaker_voices[_sp_entry["speaker_id"]] = _sp_voice
+
+        assert isinstance(_speaker_voices["speaker_a"], str)
+        assert _speaker_voices["speaker_a"] == "vt_speaker_a_preset_xyz"
+        # Critical: this MUST work downstream — the original bug's
+        # symptom was AttributeError here.
+        assert _speaker_voices["speaker_a"].startswith("vt_")

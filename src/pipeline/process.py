@@ -679,6 +679,29 @@ def _emit_smart_cost_summary_from_meter(
     )
 
 
+def _resolve_preset_voice_id(auto_matched_voice) -> str:
+    """Codex 第三十七轮 Test Gap: extract the bare ``voice_id`` STRING
+    from a PRESET decision's ``auto_matched_voice`` value.
+
+    ``_auto_match_for_provider`` returns a dict
+    ``{"voice_id": str, "label": str, "match_confidence": str,
+    "backup_voices": [...]}`` (process.py:6509). The PRESET branch
+    needs the bare string for ``_speaker_voices[speaker_id]`` so
+    downstream TTS / voice-validation code can do
+    ``voice_id.startswith("vt_")`` without crashing.
+
+    Defensive: dict / str / None / unknown all return str — never
+    raises. Pure function so unit tests can validate behavior without
+    standing up the full smart inline branch.
+    """
+    if isinstance(auto_matched_voice, dict):
+        _vid = auto_matched_voice.get("voice_id")
+        return str(_vid) if _vid else ""
+    if isinstance(auto_matched_voice, str):
+        return auto_matched_voice
+    return ""
+
+
 def _aggregate_smart_retry_stats(
     *,
     segments,
@@ -3028,8 +3051,13 @@ class ProcessPipeline:
                             job_id=config.job_id,
                             usage_meter=usage_meter,
                             minutes_processed=(
-                                float(_snap("source_duration_seconds") or 0.0)
-                                / 60.0
+                                # Codex 第三十七轮 P1: prefer ffprobe
+                                # actual_duration_ms over unreliable _snap.
+                                float(actual_duration_ms) / 60000.0
+                                if actual_duration_ms
+                                else float(
+                                    _snap("source_duration_seconds") or 0.0
+                                ) / 60.0
                             ),
                             credits_policy="pending_settle",
                         )
@@ -3272,8 +3300,13 @@ class ProcessPipeline:
                             job_id=config.job_id,
                             usage_meter=usage_meter,
                             minutes_processed=(
-                                float(_snap("source_duration_seconds") or 0.0)
-                                / 60.0
+                                # Codex 第三十七轮 P1: prefer ffprobe
+                                # actual_duration_ms over unreliable _snap.
+                                float(actual_duration_ms) / 60000.0
+                                if actual_duration_ms
+                                else float(
+                                    _snap("source_duration_seconds") or 0.0
+                                ) / 60.0
                             ),
                             credits_policy="pending_settle",
                         )
@@ -3408,8 +3441,13 @@ class ProcessPipeline:
                                 job_id=config.job_id,
                                 usage_meter=usage_meter,
                                 minutes_processed=(
-                                    float(_snap("source_duration_seconds") or 0.0)
-                                    / 60.0
+                                    # Codex 第三十七轮 P1: prefer ffprobe
+                                    # actual_duration_ms over unreliable _snap.
+                                    float(actual_duration_ms) / 60000.0
+                                    if actual_duration_ms
+                                    else float(
+                                        _snap("source_duration_seconds") or 0.0
+                                    ) / 60.0
                                 ),
                                 credits_policy="pending_settle",
                             )
@@ -3510,8 +3548,13 @@ class ProcessPipeline:
                             job_id=config.job_id,
                             usage_meter=usage_meter,
                             minutes_processed=(
-                                float(_snap("source_duration_seconds") or 0.0)
-                                / 60.0
+                                # Codex 第三十七轮 P1: prefer ffprobe
+                                # actual_duration_ms over unreliable _snap.
+                                float(actual_duration_ms) / 60000.0
+                                if actual_duration_ms
+                                else float(
+                                    _snap("source_duration_seconds") or 0.0
+                                ) / 60.0
                             ),
                             credits_policy="pending_settle",
                         )
@@ -3639,33 +3682,19 @@ class ProcessPipeline:
                                     _dec.speaker_id
                                 )
                         elif _dec.choice == VoiceReviewChoice.PRESET:
-                            # Auto-matched preset already stamped by
-                            # _build_voice_selection_review_payload via
-                            # _auto_match_for_provider — which returns a
-                            # DICT ``{"voice_id": ..., "label": ...,
-                            # "match_confidence": ..., "backup_voices":
-                            # [...]}`` (see _auto_match_for_provider
-                            # return shape, process.py:6509). The b2
-                            # comment "trusts auto_matched_voice" + b3's
-                            # intended voice_match_resolver patch never
-                            # extracted the bare voice_id string, so the
-                            # dict flowed straight into
-                            # _speaker_voices and crashed downstream
-                            # with 'dict' object has no attribute
-                            # 'startswith' (P3-d E2E discovery,
-                            # 2026-05-15). Defensive extraction
-                            # below handles dict / str / None.
-                            _auto_matched = _sp_entry.get(
-                                "auto_matched_voice"
+                            # ``auto_matched_voice`` is a DICT shaped
+                            # by ``_auto_match_for_provider`` (see
+                            # process.py:6509 return). Extract bare
+                            # voice_id string via the dedicated helper
+                            # (Codex 第三十七轮 Test Gap: pure function,
+                            # unit-tested for dict / str / None /
+                            # unknown shapes). The original b2 stub
+                            # assigned the dict directly to
+                            # _sp_entry["voice_id"], crashing downstream
+                            # at ``voice_id.startswith("vt_")``.
+                            _sp_entry["voice_id"] = _resolve_preset_voice_id(
+                                _sp_entry.get("auto_matched_voice")
                             )
-                            if isinstance(_auto_matched, dict):
-                                _sp_entry["voice_id"] = (
-                                    _auto_matched.get("voice_id") or ""
-                                )
-                            elif isinstance(_auto_matched, str):
-                                _sp_entry["voice_id"] = _auto_matched
-                            else:
-                                _sp_entry["voice_id"] = ""
                             _sp_entry["auto_decision"] = "preset"
                             _sp_entry["smart_clone_skipped_reason"] = _dec.reason_code
                         _sp_id = _dec.speaker_id
@@ -3745,8 +3774,13 @@ class ProcessPipeline:
                             job_id=config.job_id,
                             usage_meter=usage_meter,
                             minutes_processed=(
-                                float(_snap("source_duration_seconds") or 0.0)
-                                / 60.0
+                                # Codex 第三十七轮 P1: prefer ffprobe
+                                # actual_duration_ms over unreliable _snap.
+                                float(actual_duration_ms) / 60000.0
+                                if actual_duration_ms
+                                else float(
+                                    _snap("source_duration_seconds") or 0.0
+                                ) / 60.0
                             ),
                             credits_policy="pending_settle",
                         )
@@ -3957,8 +3991,13 @@ class ProcessPipeline:
                             job_id=config.job_id,
                             usage_meter=usage_meter,
                             minutes_processed=(
-                                float(_snap("source_duration_seconds") or 0.0)
-                                / 60.0
+                                # Codex 第三十七轮 P1: prefer ffprobe
+                                # actual_duration_ms over unreliable _snap.
+                                float(actual_duration_ms) / 60000.0
+                                if actual_duration_ms
+                                else float(
+                                    _snap("source_duration_seconds") or 0.0
+                                ) / 60.0
                             ),
                             credits_policy="pending_settle",
                         )
@@ -4514,8 +4553,13 @@ class ProcessPipeline:
                                 job_id=config.job_id,
                                 usage_meter=usage_meter,
                                 minutes_processed=(
-                                    float(_snap("source_duration_seconds") or 0.0)
-                                    / 60.0
+                                    # Codex 第三十七轮 P1: prefer ffprobe
+                                    # actual_duration_ms over unreliable _snap.
+                                    float(actual_duration_ms) / 60000.0
+                                    if actual_duration_ms
+                                    else float(
+                                        _snap("source_duration_seconds") or 0.0
+                                    ) / 60.0
                                 ),
                                 credits_policy="pending_settle",
                             )
@@ -5192,6 +5236,14 @@ class ProcessPipeline:
             #   - retry_budget.compute_total_budget_minutes(source_minutes)
             # Best-effort: aggregator failure falls back to zeros via
             # try/except so emit can't block terminal return.
+            #
+            # Codex 第三十七轮 P1: minutes source MUST be the reliable
+            # ``actual_duration_ms`` (ffprobe-derived at line ~2243),
+            # NOT the unreliable ``_snap("source_duration_seconds")``
+            # which observes as 0 at terminal time. Without this fix
+            # the user-visible retry_summary.budget_remaining_minutes
+            # falsely shows 0.0 on every smart job. _snap kept only as
+            # last-resort fallback if actual_duration_ms isn't bound.
             try:
                 _local_post_tts_tracker = locals().get(
                     "post_tts_budget_tracker"
@@ -5204,9 +5256,13 @@ class ProcessPipeline:
                     if _local_translation_result is not None
                     else []
                 )
-                _qr_source_minutes = (
-                    float(_snap("source_duration_seconds") or 0.0) / 60.0
-                )
+                _local_actual_ms = locals().get("actual_duration_ms")
+                if _local_actual_ms:
+                    _qr_source_minutes = float(_local_actual_ms) / 60000.0
+                else:
+                    _qr_source_minutes = (
+                        float(_snap("source_duration_seconds") or 0.0) / 60.0
+                    )
                 _qr_retry_summary = _aggregate_smart_retry_stats(
                     segments=_qr_segments_source,
                     post_tts_budget_tracker=_local_post_tts_tracker,
@@ -5293,9 +5349,20 @@ class ProcessPipeline:
                     flush=True,
                 )
 
-            # Minutes processed from source_duration_seconds snapshot
-            # (the Gateway-stamped duration; matches billing).
-            _cs_minutes = float(_snap("source_duration_seconds") or 0.0) / 60.0
+            # Minutes processed — Codex 第三十七轮 P1: prefer the
+            # reliable ffprobe-derived ``actual_duration_ms`` over the
+            # unreliable ``_snap("source_duration_seconds")`` which
+            # observes as 0 at terminal time. Without this fix admin
+            # sees ``minutes_processed=0`` on every smart cost_summary,
+            # making the file useless for diagnostics. _snap kept only
+            # as last-resort fallback if actual_duration_ms isn't bound
+            # (e.g. resume-publish-only path that re-enters terminal
+            # without going through S0).
+            _local_actual_ms_cs = locals().get("actual_duration_ms")
+            if _local_actual_ms_cs:
+                _cs_minutes = float(_local_actual_ms_cs) / 60000.0
+            else:
+                _cs_minutes = float(_snap("source_duration_seconds") or 0.0) / 60.0
 
             _emit_smart_cost_summary(
                 final_project_dir,

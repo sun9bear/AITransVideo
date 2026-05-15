@@ -380,6 +380,117 @@ class TestTerminalWiringUsesRealRetrySummary:
             f"{pre_qr_region[-1500:]}"
         )
 
+    def test_terminal_uses_actual_duration_ms_for_source_minutes(self):
+        """Codex 第三十七轮 P1: at smart terminal, the source_minutes
+        passed to ``_aggregate_smart_retry_stats`` must come from
+        ``actual_duration_ms`` (the reliable ffprobe-derived duration
+        already in scope from line ~2243) — NOT from the unreliable
+        ``_snap("source_duration_seconds")`` which has been observed to
+        return 0 at terminal time.
+
+        Symptom of using the wrong source: 29-sec real video shows
+        ``budget_remaining_minutes=0.0`` in the user-visible
+        retry_summary, falsely suggesting Smart's retry budget is
+        exhausted.
+
+        Pin: the source-minute computation at terminal references
+        ``actual_duration_ms`` (with _snap as fallback only).
+        """
+        source = self._source()
+        marker_call = "self._emit_smart_terminal_completion_marker("
+        site = source.find(marker_call)
+        assert site >= 0
+
+        lookahead = source[site : site + 12000]
+        agg_idx = lookahead.find("_aggregate_smart_retry_stats(")
+        assert agg_idx >= 0, "aggregator call missing at terminal"
+
+        # The aggregator call's region (200 chars before to capture
+        # the source_minutes kwarg construction).
+        pre_agg = lookahead[max(0, agg_idx - 600) : agg_idx + 400]
+
+        assert "actual_duration_ms" in pre_agg, (
+            "Source-minutes computation at smart terminal must "
+            "prefer ``actual_duration_ms`` over ``_snap('source_"
+            "duration_seconds')`` (Codex 第三十七轮 P1). Without "
+            "this fix, the user-visible budget_remaining_minutes "
+            "shows 0.0 on every smart job.\n"
+            f"Pre-aggregator region:\n{pre_agg}"
+        )
+
+    def test_terminal_cost_summary_minutes_uses_actual_duration_ms(self):
+        """Same fix for cost_summary's ``minutes_processed``: Codex
+        第三十七轮 P1 explicitly called out that both retry_summary
+        AND cost_summary must use the reliable duration source — they
+        share the same upstream bug + admin sees both fields.
+        """
+        source = self._source()
+        marker_call = "self._emit_smart_terminal_completion_marker("
+        site = source.find(marker_call)
+        assert site >= 0
+
+        lookahead = source[site : site + 12000]
+        cs_idx = lookahead.find("_emit_smart_cost_summary(")
+        assert cs_idx >= 0, "cost_summary call missing at terminal"
+
+        # Look back ~800 chars from cost_summary call where _cs_minutes
+        # is constructed.
+        pre_cs = lookahead[max(0, cs_idx - 1200) : cs_idx]
+        assert "actual_duration_ms" in pre_cs, (
+            "cost_summary's minutes_processed at smart terminal must "
+            "prefer ``actual_duration_ms`` over ``_snap`` (Codex 第三"
+            "十七轮 P1). Without this, admin sees minutes_processed=0 "
+            "on every smart job.\n"
+            f"Pre-cost-summary region:\n{pre_cs}"
+        )
+
+    def test_handoff_sites_use_actual_duration_ms_for_cost_summary(self):
+        """The 7 smart handoff sites also feed minutes_processed to
+        cost_summary via ``_emit_smart_cost_summary_from_meter``. Same
+        Codex P1 fix: each handoff site's ``minutes_processed=``
+        kwarg must reference ``actual_duration_ms``, not ``_snap``.
+        """
+        source = self._source()
+        import re
+        handoff_calls = list(re.finditer(
+            r"_emit_smart_cost_summary_from_meter\(",
+            source,
+        ))
+        assert len(handoff_calls) >= 5, (
+            "Expected at least 5 handoff calls; got "
+            f"{len(handoff_calls)}"
+        )
+        # Skip the helper definition itself (first match is the def).
+        # Each callsite passes minutes_processed=... — that expression
+        # must reference actual_duration_ms.
+        missing: list[tuple[int, str]] = []
+        for m in handoff_calls:
+            site = m.start()
+            # Skip if this is a def, not a call.
+            preceding_context = source[max(0, site - 100) : site]
+            if "def _emit_smart_cost_summary_from_meter" in preceding_context:
+                continue
+            # Look at 600 chars after the call open paren for the
+            # minutes_processed kwarg expression.
+            window = source[site : site + 800]
+            mp_idx = window.find("minutes_processed=")
+            if mp_idx < 0:
+                continue  # not a real call site
+            # The next ~250 chars after minutes_processed= contain the
+            # expression for that kwarg.
+            expr_region = window[mp_idx : mp_idx + 250]
+            if "actual_duration_ms" not in expr_region:
+                missing.append((site, expr_region))
+        assert not missing, (
+            "The following smart handoff cost_summary call sites do "
+            "NOT use ``actual_duration_ms`` for minutes_processed "
+            "(Codex 第三十七轮 P1).\n\n"
+            + "\n\n".join(
+                f"Site @ {off}:\n{snippet}"
+                for off, snippet in missing
+            )
+        )
+
     def test_terminal_emits_budget_exhausted_events(self):
         """After alignment + before terminal, smart inline branch must
         scan the budget tracker and emit budget_exhausted events for any

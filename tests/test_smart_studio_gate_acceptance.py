@@ -1247,7 +1247,7 @@ class TestProcessPyStudioGateWidening:
             f"PR#3C-b3c anchor {anchor!r} missing — smart translation "
             f"review branch not added to process.py."
         )
-        block = source[idx : idx + 16000]
+        block = source[idx : idx + 18000]
 
         # Imports — co-located so a future refactor doesn't accidentally
         # move them outside the smart branch (which would make the
@@ -1284,7 +1284,7 @@ class TestProcessPyStudioGateWidening:
         source = self._source()
         idx = source.find("Smart inline auto-translation-review path")
         assert idx >= 0
-        block = source[idx : idx + 16000]
+        block = source[idx : idx + 18000]
 
         # Find the rejection branch (if not auto_approved).
         rejection_anchor = "if not _smart_translation_decision.auto_approved:"
@@ -1294,7 +1294,10 @@ class TestProcessPyStudioGateWidening:
             "``if not auto_approved:`` rejection check.\n"
             f"Block:\n{block[:2000]}"
         )
-        rejection_window = block[rej_idx : rej_idx + 4000]
+        # Codex 第三十七轮 P1: window bumped 4000 → 5000 after handoff
+        # cost_summary + actual_duration_ms priority comments push
+        # paused-return further down.
+        rejection_window = block[rej_idx : rej_idx + 5000]
 
         for required in (
             "emit_handoff_markers(",
@@ -1317,7 +1320,9 @@ class TestProcessPyStudioGateWidening:
         source = self._source()
         idx = source.find("Smart inline auto-translation-review path")
         assert idx >= 0
-        block = source[idx : idx + 16000]
+        # Codex 第三十七轮: block bumped 16000 → 18000 after adding
+        # ``actual_duration_ms`` priority comments at all handoff sites.
+        block = source[idx : idx + 18000]
 
         # Approval branch lives AFTER the `if not auto_approved:` return.
         approval_anchor = "Auto-approved: set_stage(APPROVED) + intermediate"
@@ -1415,7 +1420,7 @@ class TestProcessPyStudioGateWidening:
         source = self._source()
         idx = source.find("Smart inline auto-translation-review path")
         assert idx >= 0
-        block = source[idx : idx + 16000]
+        block = source[idx : idx + 18000]
 
         # _smart_compliance_block must be derived from content_compliance_payload.
         assert "_smart_compliance_block" in block, (
@@ -1534,7 +1539,11 @@ class TestProcessPyStudioGateWidening:
             "with the real provider — paid API leak risk.\n"
             f"Block:\n{smart_block[:3000]}"
         )
-        handoff_window = smart_block[err_check_idx : err_check_idx + 3500]
+        # Codex 第三十七轮 P1: window bumped 3500 → 4500 after adding
+        # cost_summary call at handoff sites (P3-b-fix) + actual_duration_ms
+        # priority comments (P3-d follow-up). The build_paused_result
+        # comes AFTER cost_summary emit + comment block.
+        handoff_window = smart_block[err_check_idx : err_check_idx + 4500]
         for required in (
             "emit_handoff_markers(",
             '"clone_sample_extraction_failed"',
@@ -1647,7 +1656,9 @@ class TestProcessPyStudioGateWidening:
 
         # The None branch must include handoff + reason code BEFORE the
         # real provider import.
-        none_branch = smart_block[none_check_idx : none_check_idx + 3500]
+        # Codex 第三十七轮 P1: window bumped 3500 → 4500 after handoff
+        # cost_summary + actual_duration_ms priority comments.
+        none_branch = smart_block[none_check_idx : none_check_idx + 4500]
         for required in (
             "emit_handoff_markers(",
             "voice_library_quota_unavailable",
@@ -1754,7 +1765,7 @@ class TestProcessPyStudioGateWidening:
         source = self._source()
         idx = source.find("Smart inline auto-translation-review path")
         assert idx >= 0
-        block = source[idx : idx + 16000]
+        block = source[idx : idx + 18000]
 
         assert "_smart_glossary_check_failed" in block, (
             "Smart translation-review branch missing "
