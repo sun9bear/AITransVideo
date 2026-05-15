@@ -680,8 +680,8 @@ def _emit_smart_cost_summary_from_meter(
 
 
 def _resolve_preset_voice_id(auto_matched_voice) -> str:
-    """Codex 第三十七轮 Test Gap: extract the bare ``voice_id`` STRING
-    from a PRESET decision's ``auto_matched_voice`` value.
+    """Codex 第三十七轮 Test Gap + P2: extract the bare ``voice_id``
+    STRING from a PRESET decision's ``auto_matched_voice`` value.
 
     ``_auto_match_for_provider`` returns a dict
     ``{"voice_id": str, "label": str, "match_confidence": str,
@@ -690,13 +690,20 @@ def _resolve_preset_voice_id(auto_matched_voice) -> str:
     downstream TTS / voice-validation code can do
     ``voice_id.startswith("vt_")`` without crashing.
 
+    Strict-string contract (Codex 第三十七轮 P2): only accept inner
+    ``voice_id`` values that are ACTUAL strings — int / list / dict /
+    arbitrary object all return "". Silent ``str()`` coercion would
+    feed invalid voice IDs (``"123"`` / ``"['vt_x']"`` / etc.) into
+    TTS, which then either errors cryptically or — worse — silently
+    picks a fallback voice the user didn't choose.
+
     Defensive: dict / str / None / unknown all return str — never
     raises. Pure function so unit tests can validate behavior without
     standing up the full smart inline branch.
     """
     if isinstance(auto_matched_voice, dict):
         _vid = auto_matched_voice.get("voice_id")
-        return str(_vid) if _vid else ""
+        return _vid if isinstance(_vid, str) else ""
     if isinstance(auto_matched_voice, str):
         return auto_matched_voice
     return ""

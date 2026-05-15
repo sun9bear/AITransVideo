@@ -185,6 +185,46 @@ class TestResolvePresetVoiceIdHelper:
         assert _resolve_preset_voice_id(["vt_x"]) == ""
         assert _resolve_preset_voice_id(42) == ""
 
+    def test_returns_empty_string_when_dict_voice_id_is_int(self):
+        """Codex 第三十七轮 P2 (follow-up): malformed dict where
+        ``voice_id`` is an int (e.g. ``{"voice_id": 123}``) must
+        return "" — NOT coerce to ``"123"``. Silent coercion would
+        feed an invalid voice ID downstream to TTS (provider rejects
+        with cryptic error, or — worse — picks an unrelated voice).
+        """
+        from pipeline.process import _resolve_preset_voice_id
+
+        assert _resolve_preset_voice_id({"voice_id": 123}) == ""
+
+    def test_returns_empty_string_when_dict_voice_id_is_list(self):
+        """Codex 37 P2: ``{"voice_id": ["vt_x"]}`` would otherwise
+        become ``"['vt_x']"`` — also invalid voice id. Return ""."""
+        from pipeline.process import _resolve_preset_voice_id
+
+        assert _resolve_preset_voice_id({"voice_id": ["vt_x"]}) == ""
+
+    def test_returns_empty_string_when_dict_voice_id_is_object(self):
+        """Codex 37 P2: arbitrary object in voice_id → empty string."""
+        from pipeline.process import _resolve_preset_voice_id
+
+        class _FakeId:
+            def __str__(self):
+                return "vt_fake"
+
+        # Even though str(obj) == "vt_fake", we reject because the
+        # field semantics require an actual string, and trusting
+        # __str__ has been a source of cryptic bugs (Codex 37 P2).
+        assert _resolve_preset_voice_id({"voice_id": _FakeId()}) == ""
+
+    def test_returns_empty_string_when_dict_voice_id_is_dict(self):
+        """Codex 37 P2: nested dict in voice_id field → empty string.
+        Defensive against future shape drift in _auto_match_for_provider."""
+        from pipeline.process import _resolve_preset_voice_id
+
+        assert _resolve_preset_voice_id(
+            {"voice_id": {"inner": "vt_x"}}
+        ) == ""
+
     def test_smart_inline_speaker_voices_receives_string_in_preset_path(self):
         """End-to-end shape test: simulate the PRESET branch's
         speaker_voices assignment using the helper.
