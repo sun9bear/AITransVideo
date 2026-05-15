@@ -45,6 +45,7 @@ import {
   AlertTriangle,
   ShieldAlert,
   RefreshCw,
+  HardDrive,
 } from "lucide-react"
 
 type NavItem = {
@@ -98,6 +99,7 @@ const navGroups: NavGroup[] = [
       { label: "安全监控", href: "/admin/security", icon: ShieldAlert },
       { label: "发现优化", href: "/admin/discovery", icon: Search },
       { label: "成本管理", href: "/admin/costs", icon: Calculator },
+      { label: "磁盘管理", href: "/admin/disk", icon: HardDrive },
       { label: "定价管理", href: "/admin/pricing", icon: Wallet },
       { label: "点数校准", href: "/admin/credits-monitor", icon: TrendingUp },
       { label: "客服管理", href: "/admin/support", icon: Headphones },

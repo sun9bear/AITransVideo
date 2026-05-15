@@ -33,7 +33,7 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Files that register one or more APIRouters under ``/api/admin/...``.
-# Each file must have its own ``_require_admin`` (currently 8 distinct
+# Each file must have its own ``_require_admin`` (currently 9 distinct
 # copies — P2-19 will抽 to a shared helper later, but for now this
 # guard is content with the per-file pattern).
 #
@@ -44,6 +44,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 # WIP lands in committed form, add the file here and bump the baseline.
 _ADMIN_FILES = (
     "gateway/admin_settings.py",
+    "gateway/admin_disk_api.py",
     "gateway/admin_job_monitor_api.py",
     "gateway/cost_management.py",
     "gateway/credits_observability.py",
@@ -146,7 +147,7 @@ def test_every_admin_route_has_gate_call():
 
 def test_admin_route_count_baseline():
     """Sanity: the 2026-05-08 audit baseline counted 51 admin routes
-    across the 8 tracked admin files (the user's WIP
+    across the original 8 tracked admin files (the user's WIP
     ``admin_support_api.py`` adds 6 more but is intentionally
     excluded — see _ADMIN_FILES note). If the count drops sharply,
     the _ADMIN_FILES list may be missing a new admin file. If it

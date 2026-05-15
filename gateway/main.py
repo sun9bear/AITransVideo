@@ -13,6 +13,7 @@ from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from admin_settings import router as admin_router
+from admin_disk_api import router as admin_disk_router
 from admin_cost_api import router as admin_cost_router
 from admin_support_api import router as admin_support_router
 from pricing_admin import router as pricing_admin_router
@@ -301,6 +302,7 @@ app.include_router(auth_email_router)
 # --- Admin settings routes (before catch-all) ---
 
 app.include_router(admin_router)
+app.include_router(admin_disk_router)
 app.include_router(admin_cost_router)
 app.include_router(admin_support_router)
 app.include_router(pricing_admin_router)
