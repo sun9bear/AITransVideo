@@ -479,6 +479,72 @@ def _fetch_smart_user_voice_quota_remaining(user_id: str) -> int | None:
     return remaining
 
 
+def _emit_smart_quality_report(
+    project_dir: Path,
+    *,
+    job_id: str,
+    user_id: str,
+    service_mode: str,
+    smart_state_final: dict,
+    speaker_summary: dict,
+    voice_decisions: list[dict],
+    translation_review: dict | None,
+    retry_summary: dict,
+    handoff_history: list[dict],
+) -> bool:
+    """Best-effort wrapper around
+    ``services.smart.sidecar_emitter.write_smart_quality_report``.
+
+    PR#3C-P3-a: collects the per-job decision data into the v1 payload
+    shape (locked by docs/plans/2026-05-15-smart-mvp-p3-decisions.md
+    §1) and delegates to the sidecar emitter for atomic write +
+    schema_version stamping.
+
+    Plan §6.4 末段: emit failure must NOT block the user-facing
+    pipeline. Returns ``True`` on successful write, ``False`` on any
+    failure (logged via print, mirroring _emit_smart_audit).
+
+    Caller convention (see decision log §P3-a "Acceptance"):
+      - Pass freshly-built sections; helper does not introspect
+        process.py state.
+      - For early-handoff jobs (eligibility / sample / quota),
+        ``voice_decisions=[]`` and ``translation_review=None``.
+      - ``handoff_history=[]`` for happy-path; non-empty when the job
+        hit a downgrade.
+      - ``retry_summary`` always populated; zeros when no retries
+        occurred (P3-d will populate real numbers; P3-a writes zeros).
+    """
+    from datetime import datetime, timezone
+
+    from services.smart.sidecar_emitter import write_smart_quality_report
+
+    payload: dict[str, object] = {
+        "job_id": job_id,
+        "user_id": user_id,
+        "service_mode": service_mode,
+        "smart_state_final": dict(smart_state_final),
+        "speaker_summary": dict(speaker_summary),
+        "voice_decisions": list(voice_decisions),
+        "translation_review": (
+            dict(translation_review) if translation_review is not None
+            else None
+        ),
+        "retry_summary": dict(retry_summary),
+        "handoff_history": list(handoff_history),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    try:
+        return bool(write_smart_quality_report(project_dir, payload))
+    except Exception as _exc:
+        print(
+            f"[smart] quality_report emit failed (non-blocking): "
+            f"{type(_exc).__name__}: {_exc}",
+            flush=True,
+        )
+        return False
+
+
 def _emit_smart_audit(
     project_dir: Path,
     *,
@@ -4643,6 +4709,107 @@ class ProcessPipeline:
         self._emit_smart_terminal_completion_marker(
             service_mode=self._current_service_mode,
         )
+
+        # PR#3C-P3-a: terminal quality_report write for smart jobs.
+        # Only happy-path mains-run terminal — resume publish-only
+        # path skips this (preserves original audit; pinned by
+        # tests/test_smart_quality_report_writer.py terminal-wiring
+        # anchor test).
+        # Local-var access via ``locals().get(...)`` defensively
+        # because smart inline branches (eligibility / voice review /
+        # translation review) only run when ``requires_review=True``
+        # AND ``effective_pipeline_mode==smart``. A smart job with
+        # requires_review=False reaches this terminal without those
+        # vars being bound — locals().get() returns None gracefully.
+        if self._current_service_mode == "smart":
+            _local_elig = locals().get("_smart_eligibility")
+            _local_vr = locals().get("_smart_voice_review")
+            _local_tr_dec = locals().get("_smart_translation_decision")
+            _local_mirror_fail = locals().get(
+                "_smart_clone_mirror_failures"
+            ) or []
+            _local_per_speaker_seconds = locals().get(
+                "_smart_per_speaker_sample_seconds"
+            ) or {}
+
+            # Build speaker_summary from eligibility (when available)
+            if _local_elig is not None:
+                _qr_speaker_summary = {
+                    "main_speaker_count": _local_elig.main_speaker_count,
+                    "main_speaker_ids": list(
+                        _local_elig.main_speaker_ids
+                    ),
+                    "excluded_speakers": list(
+                        _local_elig.excluded_speakers
+                    ),
+                }
+            else:
+                _qr_speaker_summary = {
+                    "main_speaker_count": 0,
+                    "main_speaker_ids": [],
+                    "excluded_speakers": [],
+                }
+
+            # Build voice_decisions from voice review (when available)
+            _qr_voice_decisions: list[dict] = []
+            if _local_vr is not None:
+                from services.smart.auto_voice_review import (
+                    VoiceReviewChoice,
+                )
+                for _dec in _local_vr.decisions:
+                    _entry = {
+                        "speaker_id": _dec.speaker_id,
+                        "choice": (
+                            "cloned"
+                            if _dec.choice == VoiceReviewChoice.CLONED
+                            else "preset"
+                        ),
+                        "voice_id": _dec.cloned_voice_id,
+                        "clone_provider": _dec.cloned_provider_name,
+                        "sample_seconds": (
+                            _local_per_speaker_seconds.get(
+                                _dec.speaker_id
+                            )
+                        ),
+                        "smart_decision_id": _dec.smart_decision_id,
+                    }
+                    if _dec.choice != VoiceReviewChoice.CLONED:
+                        _entry["fallback_reason"] = _dec.reason_code
+                    _qr_voice_decisions.append(_entry)
+
+            # Build translation_review from decision (when available)
+            _qr_translation_review = None
+            if _local_tr_dec is not None:
+                _qr_translation_review = {
+                    "auto_approved": _local_tr_dec.auto_approved,
+                    "failed_check": _local_tr_dec.failed_check,
+                    "metrics": dict(_local_tr_dec.metrics or {}),
+                }
+
+            # Retry summary — P3-d will populate real numbers; P3-a
+            # writes zeros so the schema is intact.
+            _qr_retry_summary = {
+                "rewrite_attempts_used": 0,
+                "retts_attempts_used": 0,
+                "budget_remaining_minutes": 0.0,
+            }
+
+            _emit_smart_quality_report(
+                final_project_dir,
+                job_id=config.job_id,
+                user_id=str(_snap("user_id") or ""),
+                service_mode="smart",
+                smart_state_final={
+                    "status": "completed",
+                    "credits_policy": "capture_full",
+                },
+                speaker_summary=_qr_speaker_summary,
+                voice_decisions=_qr_voice_decisions,
+                translation_review=_qr_translation_review,
+                retry_summary=_qr_retry_summary,
+                handoff_history=[],  # happy-path: no handoffs occurred
+            )
+
         return ProcessResult(
             project_dir=str(final_project_dir.resolve(strict=False)),
             dubbed_audio_path=output_result.dubbed_audio_path,

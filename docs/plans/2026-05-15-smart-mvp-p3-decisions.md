@@ -156,24 +156,54 @@ Sequence is **P3-a → P3-b → P3-d → P3-c**: get all three sink data
 flowing first (a/b), then retry budget integration adds the final
 data point (d), then renderer (c) gets a complete dataset.
 
-### P3-a — quality_report write
-- Add `_emit_smart_quality_report(project_dir, ...)` helper in
-  process.py paralleling `_emit_smart_audit`.
-- Call at TWO sites:
-  - `_emit_smart_terminal_completion_marker` (happy path completion)
-  - Each `emit_handoff_markers()` call site (handoff is also terminal
-    from smart's POV)
-- Payload built from:
-  - `_smart_eligibility` decision (b3b)
-  - `_smart_voice_review.decisions` (b3d/e)
-  - `_smart_translation_decision.metrics` (b3c)
-  - `_smart_clone_mirror_failures` (b3e-fix)
-  - retry budget snapshot (will be 0/0 for happy path until P3-d)
+### P3-a — quality_report write (happy-path ONLY)
+
+**Scope-down (2026-05-15, during implementation):** original plan
+called for emission at BOTH terminal AND handoff sites. Reduced to
+happy-path terminal ONLY for these reasons:
+
+  - Handoff sites already emit `downgrade_handoff` JSONL events via
+    PR#3C-b3f sidecar wiring (with full reason + stage + timestamp +
+    job_id audit fields).
+  - Writing quality_report on handoff would be REDUNDANT with JSONL
+    data — most sections (voice_decisions, translation_review) would
+    be empty/None for early-exit jobs.
+  - P3-c renderer naturally handles the bifurcation: read
+    quality_report for happy-path (rich aggregate); fall back to
+    JSONL events for handoff jobs (already structured as
+    `{stage, reason, occurred_at}` triples).
+
+**Implementation:**
+
+- Add `_emit_smart_quality_report(project_dir, ...)` module-level
+  helper in process.py paralleling `_emit_smart_audit`.
+- Call at the MAIN-RUN happy-path return only (line ~4709, right
+  after `_emit_smart_terminal_completion_marker`).
+- Resume publish-only path (line ~5256, post-edit copy_as_new /
+  overwrite) does NOT call — would clobber the original audit with
+  empty re-publish data.
+- Payload built from locals() at terminal:
+  - `_smart_eligibility` (b3b) — speaker_summary
+  - `_smart_voice_review.decisions` (b3d/e) — voice_decisions
+  - `_smart_translation_decision.metrics` (b3c) — translation_review
+  - `_smart_per_speaker_sample_seconds` — sample_seconds per speaker
+  - retry budget zeros (P3-d will populate real values)
+  - `handoff_history=[]` (happy-path; handoff data lives in JSONL)
+- Use `locals().get(...)` for safe access — `requires_review=False`
+  smart jobs reach terminal without smart inline branches having
+  populated those vars.
+
+**Helper schema** still supports the handoff-style payload (with
+populated `handoff_history` + `smart_state_final.reason`); cycle-2
+unit tests pin this as forward-compat for any future caller that
+chooses to also write quality_report on early exit.
 
 **Acceptance**: real E2E (re-submit job_ff21053d... pattern) writes
-non-empty `audit/smart_quality_report.json` with all sections
-populated. Schema-conformance unit test using a frozen
-`SmartQualityReportV1` TypedDict.
+non-empty `audit/smart_quality_report.json` with happy-path sections
+populated. Schema-conformance unit tests in
+`test_smart_quality_report_writer.py` cover both happy-path and
+handoff-shape payloads (latter exercises helper API without
+process.py wiring it at handoff sites).
 
 ### P3-b — cost_summary write
 - Pull from existing UsageMeter at terminal point (UsageMeter already
