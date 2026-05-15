@@ -2173,9 +2173,9 @@ class TestB3DCloneSampleExtractorContract:
 
     def test_b3f_sidecar_helper_uses_supplied_decision_id(self, tmp_path):
         """When the caller passes ``smart_decision_id`` (e.g. piping
-        through a VoiceReviewDecision.decision_id), the helper uses it
-        verbatim instead of generating a new UUID. This keeps audit
-        linkage clean between per-speaker decisions in
+        through a VoiceReviewDecision.smart_decision_id), the helper
+        uses it verbatim instead of generating a new UUID. This keeps
+        audit linkage clean between per-speaker decisions in
         evaluate_voice_review and the sidecar JSONL."""
         import json
 

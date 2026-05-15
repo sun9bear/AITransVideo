@@ -518,7 +518,8 @@ def _emit_smart_audit(
       evidence: free-form dict of metrics that drove the decision
         (main_speaker_count, glossary_rate, sample_duration_s, …)
       smart_decision_id: optional explicit id (e.g. when piping through
-        a per-speaker VoiceReviewDecision.decision_id from auto_voice_review)
+        a per-speaker VoiceReviewDecision.smart_decision_id from
+        auto_voice_review for audit linkage)
       extra: extra top-level fields (e.g. speaker_id, job_id, user_id,
         handoff_stage). Won't clobber required schema fields.
     """
