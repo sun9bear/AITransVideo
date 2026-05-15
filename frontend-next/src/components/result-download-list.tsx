@@ -11,7 +11,7 @@ type ResultDownloadListProps = {
    * docs/plans/2026-04-18-express-studio-output-filter-plan.md），
    * 本层为兜底：即便后端回退仍不会泄露 editor/source 下载入口。
    */
-  serviceMode?: 'express' | 'studio'
+  serviceMode?: 'express' | 'studio' | 'smart'
 }
 
 const primaryDownloadKeys = [

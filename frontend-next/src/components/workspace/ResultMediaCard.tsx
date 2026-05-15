@@ -33,7 +33,7 @@ interface ResultMediaCardProps {
    * "配音视频"下载和"生成视频"fallback。Studio 完整 UI。
    * 见 docs/plans/2026-04-18-express-studio-output-filter-plan.md
    */
-  serviceMode?: 'express' | 'studio'
+  serviceMode?: 'express' | 'studio' | 'smart'
   /**
    * When provided, renders a "修改" shortcut button at the right end of the
    * download row (ml-auto). Lets the projects-list card move 修改 out of the

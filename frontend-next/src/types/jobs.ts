@@ -71,10 +71,12 @@ export interface JobSummary {
   errorSummary: ErrorSummary | null
   fallbackSummary: Record<string, unknown> | null
   /**
-   * Service mode — Express 只暴露配音视频，Studio 全量。
-   * 驱动 ResultMediaCard / ResultDownloadList 的 UI 分支。
+   * Service mode — Express 只暴露配音视频，Studio 全量，Smart 比
+   * Studio 多一个 SmartAutoDecisionPanel（自动决策摘要）。
+   * 驱动 ResultMediaCard / ResultDownloadList / SmartAutoDecisionPanel
+   * 的 UI 分支。
    */
-  serviceMode?: 'express' | 'studio'
+  serviceMode?: 'express' | 'studio' | 'smart'
   /**
    * Post-edit infra fields (plan 2026-04-18 §3.3). All nullable because
    * jobs created before migration 015 have NULL for these columns until
@@ -165,7 +167,7 @@ export interface CreateTranslationJobInput {
    * — falls through to the "上传视频 YYYY-MM-DD NNN" branch if omitted.
    */
   localFileName?: string
-  service_mode?: 'express' | 'studio'
+  service_mode?: 'express' | 'studio' | 'smart'
 }
 
 export const ACTIVE_JOB_STATUSES: readonly JobStatus[] = [

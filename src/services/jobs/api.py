@@ -339,6 +339,70 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                         return
                     self._write_json(HTTPStatus.OK, status)
                     return
+                # --- PR#3C-P3-c: smart quality report (user-facing panel) ---
+                # GET /jobs/{id}/smart-quality-report serves the
+                # ``audit/smart_quality_report.json`` payload (decision
+                # log §3 schema_version=1) to the workspace
+                # ``<SmartAutoDecisionPanel />`` renderer.
+                #
+                # Failure semantics — never expose admin-only data:
+                #   - 404 service_mode_not_smart for non-smart jobs
+                #     (frontend hides the panel cleanly)
+                #   - 404 quality_report_not_written for smart jobs that
+                #     hit handoff before terminal (file doesn't exist)
+                #   - 404 job_not_found delegated to require_job
+                if (
+                    len(path_parts) == 3
+                    and path_parts[0] == "jobs"
+                    and path_parts[2] == "smart-quality-report"
+                ):
+                    job_id = path_parts[1]
+                    record = service.require_job(job_id)
+                    if (record.service_mode or "").lower() != "smart":
+                        self._write_json(
+                            HTTPStatus.NOT_FOUND,
+                            {
+                                "error": "service_mode_not_smart",
+                                "job_id": job_id,
+                            },
+                        )
+                        return
+                    project_dir = _require_project_dir(record)
+                    qr_path = (
+                        Path(project_dir) / "audit" / "smart_quality_report.json"
+                    )
+                    if not qr_path.is_file():
+                        self._write_json(
+                            HTTPStatus.NOT_FOUND,
+                            {
+                                "error": "quality_report_not_written",
+                                "reason": (
+                                    "smart job did not reach happy-path "
+                                    "terminal; quality_report only emitted "
+                                    "at terminal per decision log §P3-a "
+                                    "scope-down. Handoff jobs use sidecar "
+                                    "JSONL events for audit trail."
+                                ),
+                                "job_id": job_id,
+                            },
+                        )
+                        return
+                    try:
+                        payload = json.loads(
+                            qr_path.read_text(encoding="utf-8")
+                        )
+                    except Exception as exc:
+                        self._write_json(
+                            HTTPStatus.INTERNAL_SERVER_ERROR,
+                            {
+                                "error": "quality_report_parse_failed",
+                                "detail": str(exc)[:200],
+                                "job_id": job_id,
+                            },
+                        )
+                        return
+                    self._write_json(HTTPStatus.OK, payload)
+                    return
                 # --- Phase 1: review-state (job-scoped, strict) ---
                 if len(path_parts) == 3 and path_parts[0] == "jobs" and path_parts[2] == "review-state":
                     job_id = path_parts[1]

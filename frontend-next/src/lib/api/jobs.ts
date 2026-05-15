@@ -259,3 +259,54 @@ export async function getJianyingDraftStatus(
   }
   return res.json() as Promise<JianyingDraftStatusResponse>
 }
+
+// =========================================================================
+// PR#3C-P3-c: smart quality report (user-facing SmartAutoDecisionPanel)
+// =========================================================================
+
+import type { SmartQualityReport } from '@/types/smart'
+
+/**
+ * Discriminated-union result so the renderer can branch on shape without
+ * try/catch — 404 service_mode_not_smart is the "hide the panel" signal,
+ * 404 quality_report_not_written is the "smart job paused or in flight"
+ * signal, and a thrown error is for unexpected 5xx / network failure.
+ */
+export type SmartQualityReportResult =
+  | { kind: 'ok'; report: SmartQualityReport }
+  | { kind: 'not_smart' }
+  | { kind: 'not_written' }
+  | { kind: 'not_found' }  // unknown job
+
+/**
+ * Fetch smart_quality_report.json via Job API. Per decision log §3 the
+ * endpoint reads ONLY the quality_report sidecar — no cost data leaks
+ * to the user-facing path.
+ */
+export async function getSmartQualityReport(
+  jobId: string,
+): Promise<SmartQualityReportResult> {
+  const url = buildBackendUrl(
+    resolveJobApiBaseUrl(),
+    `/jobs/${jobId}/smart-quality-report`,
+  )
+  const res = await fetch(url, { credentials: 'include' })
+  if (res.ok) {
+    const report = (await res.json()) as SmartQualityReport
+    return { kind: 'ok', report }
+  }
+  if (res.status === 404) {
+    let errorCode: string | null = null
+    try {
+      const body = (await res.json()) as { error?: string }
+      errorCode = body?.error ?? null
+    } catch {
+      // body not JSON — fall through to not_found
+    }
+    if (errorCode === 'service_mode_not_smart') return { kind: 'not_smart' }
+    if (errorCode === 'quality_report_not_written') return { kind: 'not_written' }
+    return { kind: 'not_found' }
+  }
+  throw new Error(`smart_quality_report fetch failed: HTTP ${res.status}`)
+}
+

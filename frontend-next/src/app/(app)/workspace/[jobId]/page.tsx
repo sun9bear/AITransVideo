@@ -12,7 +12,7 @@ import { StageProgress } from '@/components/stage-progress'
 import { LogViewer } from '@/components/log-viewer'
 import { ResultDownloadList } from '@/components/result-download-list'
 import { ResultMediaCard } from '@/components/workspace/ResultMediaCard'
-import { TranslationReviewPanel, VoiceReviewPanel, VoiceSelectionPanel } from '@/components/workspace'
+import { TranslationReviewPanel, VoiceReviewPanel, VoiceSelectionPanel, SmartAutoDecisionPanel } from '@/components/workspace'
 import {
   getErrorCategory,
   getErrorSummaryMessage,
@@ -362,6 +362,17 @@ export default function WorkspacePage() {
             <Link className="secondary-button" href="/projects?new=1">重新创建任务</Link>
           </div>
         </section>
+      ) : null}
+
+      {/* PR#3C-P3-c: Smart auto-decision summary panel for smart jobs.
+        * Conditional on job.serviceMode === "smart" — the panel does
+        * its own /smart-quality-report fetch and self-hides on
+        * service_mode_not_smart (defense-in-depth in case the prop
+        * lags), so non-smart jobs never see it. Positioned BEFORE
+        * the download list per decision log §3 (between
+        * media/completion banner and downloads). */}
+      {job.serviceMode === 'smart' ? (
+        <SmartAutoDecisionPanel jobId={jobId} />
       ) : null}
 
       {/* Completed: Downloads only (playback + preview is on /projects main page) */}
