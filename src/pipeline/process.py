@@ -3181,8 +3181,17 @@ class ProcessPipeline:
 
                             # Sidecar audit: per-speaker CLONED success.
                             # Use the auto_voice_review-generated
-                            # decision_id so this audit line links
-                            # back to the in-process decision record.
+                            # ``smart_decision_id`` so this audit line
+                            # links back to the in-process decision
+                            # record (Codex 第三十二轮 P0: the field is
+                            # ``smart_decision_id`` not ``decision_id``;
+                            # the wrong attribute name would raise
+                            # AttributeError BEFORE _emit_smart_audit
+                            # is called, so the try/except inside the
+                            # helper cannot rescue it — the entire job
+                            # would crash after a real MiniMax clone
+                            # had already succeeded, reopening the
+                            # mirror P0 from 第二十九轮.)
                             _emit_smart_audit(
                                 final_project_dir,
                                 decision_type="voice_clone",
@@ -3198,7 +3207,7 @@ class ProcessPipeline:
                                         )
                                     ),
                                 },
-                                smart_decision_id=_dec.decision_id,
+                                smart_decision_id=_dec.smart_decision_id,
                                 extra={
                                     "speaker_id": _dec.speaker_id,
                                     "job_id": str(_snap("job_id") or ""),

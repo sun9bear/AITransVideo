@@ -1602,11 +1602,11 @@ class TestB3DCloneSampleExtractorContract:
         source = src.read_text(encoding="utf-8")
         idx = source.find("Smart inline auto-approve path")
         assert idx >= 0
-        # Walk ~800 lines (matches anchor tests in
-        # test_smart_studio_gate_acceptance.py — bumped from 650 after
-        # b3f added sidecar audit emits at every decision point).
+        # Walk ~900 lines (matches anchor tests in
+        # test_smart_studio_gate_acceptance.py — bumped from 800 after
+        # b3f-fix added Codex 第三十二轮 P0 docstring expansion).
         lines = source[idx:].splitlines()
-        block = "\n".join(lines[:800])
+        block = "\n".join(lines[:900])
 
         # Piece 2 (real quota): helper must be referenced; placeholder
         # literal must NOT appear inside the smart inline branch.
@@ -1840,7 +1840,7 @@ class TestB3DCloneSampleExtractorContract:
         idx = source.find("Smart inline auto-approve path")
         assert idx >= 0
         lines = source[idx:].splitlines()
-        block = "\n".join(lines[:800])
+        block = "\n".join(lines[:900])
 
         # Find the quota lookup call — must be inside the dual gate.
         quota_call = "_fetch_smart_user_voice_quota_remaining("
@@ -2012,7 +2012,7 @@ class TestB3DCloneSampleExtractorContract:
         idx = source.find("Smart inline auto-approve path")
         assert idx >= 0
         lines = source[idx:].splitlines()
-        block = "\n".join(lines[:800])
+        block = "\n".join(lines[:900])
 
         # The gate condition must be ``and _smart_main_speakers``.
         assert (
@@ -2100,7 +2100,7 @@ class TestB3DCloneSampleExtractorContract:
         idx = source.find("Smart inline auto-approve path")
         assert idx >= 0
         lines = source[idx:].splitlines()
-        block = "\n".join(lines[:800])
+        block = "\n".join(lines[:900])
 
         # Mirror helper is called from process.py
         assert "_register_smart_clone_in_user_voices(" in block, (
@@ -2272,6 +2272,81 @@ class TestB3DCloneSampleExtractorContract:
         sidecar = project_dir / "audit" / "smart_decisions.jsonl"
         assert not sidecar.exists() or (
             sidecar.read_text(encoding="utf-8").strip() == ""
+        )
+
+    def test_b3f_voice_review_decision_field_name_is_smart_decision_id(self):
+        """Codex 第三十二轮 P0: ``VoiceReviewDecision`` exposes the
+        per-speaker decision identifier as ``smart_decision_id`` —
+        NOT ``decision_id``. Pin this contract so a future rename
+        on either side trips this test, AND so the b3f CLONED-emit
+        wiring can't drift back to the broken ``_dec.decision_id``
+        access (which raises AttributeError BEFORE _emit_smart_audit
+        is called, after a real MiniMax clone has already burned
+        quota — the most expensive crash path possible).
+        """
+        import dataclasses
+
+        from services.smart.auto_voice_review import VoiceReviewDecision
+
+        fields = {f.name for f in dataclasses.fields(VoiceReviewDecision)}
+        assert "smart_decision_id" in fields, (
+            "VoiceReviewDecision must expose ``smart_decision_id`` field. "
+            "If the field is being renamed, update process.py's CLONED "
+            "emit site at the same commit (Codex 第三十二轮 P0)."
+        )
+        assert "decision_id" not in fields, (
+            "VoiceReviewDecision exposes ``decision_id``? Contract drift. "
+            "process.py's CLONED emit site reads ``_dec.smart_decision_id``; "
+            "if you added a ``decision_id`` alias, either rename the access "
+            "in process.py OR drop the alias to keep one source of truth."
+        )
+
+    def test_b3f_cloned_emit_uses_correct_field_name(self):
+        """Codex 第三十二轮 P0 source-level lock: the CLONED emit in
+        process.py MUST read ``_dec.smart_decision_id``, never the
+        non-existent ``_dec.decision_id``. Source-level anchor
+        because the runtime path requires a real ProcessPipeline
+        + FakeCloneProvider + injected wiring to exercise — too
+        heavy for unit-level coverage. The wrong attribute would
+        produce an AttributeError BEFORE the safety wrapper runs.
+        """
+        from pathlib import Path
+
+        src = Path(__file__).resolve().parents[1] / "src" / "pipeline" / "process.py"
+        source = src.read_text(encoding="utf-8")
+        idx = source.find("Smart inline auto-approve path")
+        assert idx >= 0
+        lines = source[idx:].splitlines()
+        block = "\n".join(lines[:900])
+
+        # Locate the CLONED branch in the decision-processing loop.
+        cloned_idx = block.find(
+            "if _dec.choice == VoiceReviewChoice.CLONED:"
+        )
+        assert cloned_idx >= 0, (
+            "CLONED branch missing in smart inline decision loop."
+        )
+        # Window through the CLONED branch (until next elif/else).
+        cloned_window = block[cloned_idx : cloned_idx + 2500]
+
+        assert "smart_decision_id=_dec.smart_decision_id" in cloned_window, (
+            "CLONED emit must pass ``smart_decision_id=_dec.smart_decision_id``. "
+            "VoiceReviewDecision exposes ``smart_decision_id`` (see "
+            "src/services/smart/auto_voice_review.py:148); the wrong "
+            "attribute name would AttributeError BEFORE _emit_smart_audit "
+            "and crash the job AFTER a real MiniMax clone succeeded — "
+            "the most expensive crash path. Codex 第三十二轮 P0.\n"
+            f"CLONED window:\n{cloned_window}"
+        )
+
+        # Defensive: forbid the broken ``_dec.decision_id`` access
+        # anywhere in the smart inline branch so a future copy-paste
+        # can't re-introduce the same bug.
+        assert "_dec.decision_id" not in block, (
+            "Smart inline branch references ``_dec.decision_id`` — "
+            "VoiceReviewDecision has no such field, this would crash "
+            "at runtime. Use ``_dec.smart_decision_id`` instead.\n"
+            f"Block (search): contains '_dec.decision_id'"
         )
 
     def test_b3f_smart_branch_emits_at_every_decision_point(self):
