@@ -207,6 +207,40 @@ class PostTTSBudgetTracker:
             self._usage_by_root[root_id] = used + normalized_amount
             return True
 
+    def usage_summary(self) -> dict:
+        """Public snapshot of consumption state for smart-mode aggregation.
+
+        PR#3C-P3-d: returned dict has the shape::
+
+            {
+                "consumed_roots": {root_id: consumed_count, ...},
+                "total_consumed": int,         # sum across all roots
+                "cap": int,                    # max_extra_tts_per_root
+                "exhausted_root_ids": [...],   # roots where consumed >= cap
+            }
+
+        Lock-protected copy of internal state — callers MUST NOT mutate
+        the returned dicts; treat as read-only. Used by
+        ``pipeline.process._aggregate_smart_retry_stats`` to build the
+        smart quality_report ``retry_summary`` section, and by
+        ``pipeline.process._emit_smart_budget_exhausted_events`` to
+        emit one sidecar event per exhausted root.
+        """
+        with self._lock:
+            consumed_roots = dict(self._usage_by_root)
+            cap = int(self.max_extra_tts_per_root)
+            total_consumed = sum(consumed_roots.values())
+            exhausted_root_ids = [
+                root_id for root_id, used in consumed_roots.items()
+                if used >= cap
+            ]
+        return {
+            "consumed_roots": consumed_roots,
+            "total_consumed": total_consumed,
+            "cap": cap,
+            "exhausted_root_ids": exhausted_root_ids,
+        }
+
 
 class SegmentAligner:
     def __init__(

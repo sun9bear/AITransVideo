@@ -679,6 +679,155 @@ def _emit_smart_cost_summary_from_meter(
     )
 
 
+def _aggregate_smart_retry_stats(
+    *,
+    segments,
+    post_tts_budget_tracker,
+    source_minutes: float,
+) -> dict:
+    """PR#3C-P3-d: build the smart quality_report ``retry_summary`` payload
+    from real alignment-stage data (decision log §P3-d revised scope).
+
+    Replaces the always-zero placeholder. Inputs come from the smart
+    inline branch state at terminal time:
+
+      - ``segments``: iterable of segment objects with optional
+        ``pre_tts_rewrite_retry_attempted`` boolean attr. Pre-TTS
+        rewrite retries (the obvious-overshoot one-pass guard) are
+        counted here.
+      - ``post_tts_budget_tracker``: optional ``PostTTSBudgetTracker``
+        from aligner. Total re-TTS attempts come from
+        ``tracker.usage_summary()['total_consumed']``.
+      - ``source_minutes``: source duration; feeds
+        ``retry_budget.compute_total_budget_minutes`` for the
+        budget_remaining calculation.
+
+    Output shape (matches decision log §1 ``retry_summary``)::
+
+        {
+            "rewrite_attempts_used": int,
+            "retts_attempts_used": int,
+            "budget_remaining_minutes": float (rounded 2dp),
+        }
+
+    ``budget_remaining_minutes`` is approximated: total budget formula
+    (min(1.5 * minutes, minutes + 30)) minus consumed-minutes estimate.
+    Since the tracker counts re-TTS COUNTS not durations, conservatively
+    estimate 0.5 minutes per re-TTS — matches Smart MVP §6.3's "avg
+    per-retry cost" intuition. Phase 2 (P3-d deep wire) can compute
+    actual audio durations from tracker if needed.
+
+    Pure: no I/O, no side effects.
+    """
+    from services.smart.retry_budget import compute_total_budget_minutes
+
+    rewrite_attempts_used = 0
+    for seg in (segments or []):
+        if getattr(seg, "pre_tts_rewrite_retry_attempted", False):
+            rewrite_attempts_used += 1
+
+    retts_attempts_used = 0
+    if post_tts_budget_tracker is not None:
+        try:
+            _summary = post_tts_budget_tracker.usage_summary()
+            retts_attempts_used = int(_summary.get("total_consumed") or 0)
+        except Exception:
+            # Defensive: tracker shape issue must not crash the
+            # quality_report emit. Fall back to zero.
+            retts_attempts_used = 0
+
+    total_budget_minutes = compute_total_budget_minutes(source_minutes)
+    # Conservative consumption estimate: 0.5 minutes per re-TTS attempt.
+    consumed_estimate_minutes = retts_attempts_used * 0.5
+    budget_remaining_minutes = max(
+        0.0, total_budget_minutes - consumed_estimate_minutes
+    )
+
+    return {
+        "rewrite_attempts_used": rewrite_attempts_used,
+        "retts_attempts_used": retts_attempts_used,
+        "budget_remaining_minutes": round(budget_remaining_minutes, 2),
+    }
+
+
+def _emit_smart_budget_exhausted_events(
+    *,
+    project_dir: Path,
+    post_tts_budget_tracker,
+    job_id: str,
+    user_id: str,
+) -> int:
+    """PR#3C-P3-d: emit one ``budget_exhausted`` sidecar event per
+    exhausted root segment in the alignment-stage tracker.
+
+    Decision log §6.3 + §P3-d revised scope: when a segment hits its
+    per-root re-TTS cap, smart's audit trail must record which segment
+    exhausted budget so admin diagnostics + P3-c renderer's "retry
+    history" panel can show what happened.
+
+    Each event is one line in ``audit/smart_decisions.jsonl`` with::
+
+        decision_type    = "budget_exhausted"
+        decision         = "rejected"         # cap reached — further retries rejected
+        reason_code      = "post_tts_per_segment_cap_exhausted"
+        evidence         = {"root_segment_id": ..., "consumed": N, "cap": N}
+        extra            = {"job_id": ..., "user_id": ..., "stage": "alignment"}
+
+    Returns count of events emitted (0 when no roots exhausted /
+    tracker is None / emit fails).
+
+    Best-effort: failures swallow silently (plan §6.4 末段).
+    """
+    if post_tts_budget_tracker is None:
+        return 0
+
+    try:
+        summary = post_tts_budget_tracker.usage_summary()
+    except Exception as _exc:
+        print(
+            f"[smart] budget_exhausted scan tracker.usage_summary() "
+            f"failed (non-blocking): {type(_exc).__name__}: {_exc}",
+            flush=True,
+        )
+        return 0
+
+    exhausted = summary.get("exhausted_root_ids") or []
+    if not exhausted:
+        return 0
+
+    cap = int(summary.get("cap") or 0)
+    consumed_roots = summary.get("consumed_roots") or {}
+
+    emitted = 0
+    for root_id in exhausted:
+        try:
+            _emit_smart_audit(
+                project_dir,
+                decision_type="budget_exhausted",
+                decision="rejected",
+                reason_code="post_tts_per_segment_cap_exhausted",
+                evidence={
+                    "root_segment_id": int(root_id),
+                    "consumed": int(consumed_roots.get(root_id) or 0),
+                    "cap": cap,
+                },
+                extra={
+                    "job_id": job_id,
+                    "user_id": user_id,
+                    "stage": "alignment",
+                },
+            )
+            emitted += 1
+        except Exception as _exc:
+            print(
+                f"[smart] budget_exhausted emit for root={root_id} "
+                f"failed (non-blocking): "
+                f"{type(_exc).__name__}: {_exc}",
+                flush=True,
+            )
+    return emitted
+
+
 def _emit_smart_audit(
     project_dir: Path,
     *,
@@ -3492,12 +3641,31 @@ class ProcessPipeline:
                         elif _dec.choice == VoiceReviewChoice.PRESET:
                             # Auto-matched preset already stamped by
                             # _build_voice_selection_review_payload via
-                            # _auto_match_for_provider (process.py:4309).
-                            # b3 will plug voice_match_resolver explicitly
-                            # for the resolution; b2 trusts auto_matched_voice.
-                            _sp_entry["voice_id"] = (
-                                _sp_entry.get("auto_matched_voice") or ""
+                            # _auto_match_for_provider — which returns a
+                            # DICT ``{"voice_id": ..., "label": ...,
+                            # "match_confidence": ..., "backup_voices":
+                            # [...]}`` (see _auto_match_for_provider
+                            # return shape, process.py:6509). The b2
+                            # comment "trusts auto_matched_voice" + b3's
+                            # intended voice_match_resolver patch never
+                            # extracted the bare voice_id string, so the
+                            # dict flowed straight into
+                            # _speaker_voices and crashed downstream
+                            # with 'dict' object has no attribute
+                            # 'startswith' (P3-d E2E discovery,
+                            # 2026-05-15). Defensive extraction
+                            # below handles dict / str / None.
+                            _auto_matched = _sp_entry.get(
+                                "auto_matched_voice"
                             )
+                            if isinstance(_auto_matched, dict):
+                                _sp_entry["voice_id"] = (
+                                    _auto_matched.get("voice_id") or ""
+                                )
+                            elif isinstance(_auto_matched, str):
+                                _sp_entry["voice_id"] = _auto_matched
+                            else:
+                                _sp_entry["voice_id"] = ""
                             _sp_entry["auto_decision"] = "preset"
                             _sp_entry["smart_clone_skipped_reason"] = _dec.reason_code
                         _sp_id = _dec.speaker_id
@@ -5017,13 +5185,56 @@ class ProcessPipeline:
                     "metrics": dict(_local_tr_dec.metrics or {}),
                 }
 
-            # Retry summary — P3-d will populate real numbers; P3-a
-            # writes zeros so the schema is intact.
-            _qr_retry_summary = {
-                "rewrite_attempts_used": 0,
-                "retts_attempts_used": 0,
-                "budget_remaining_minutes": 0.0,
-            }
+            # Retry summary — PR#3C-P3-d wires the real aggregator
+            # (replaces the always-zero placeholder). Sources:
+            #   - segments[*].pre_tts_rewrite_retry_attempted
+            #   - post_tts_budget_tracker.usage_summary().total_consumed
+            #   - retry_budget.compute_total_budget_minutes(source_minutes)
+            # Best-effort: aggregator failure falls back to zeros via
+            # try/except so emit can't block terminal return.
+            try:
+                _local_post_tts_tracker = locals().get(
+                    "post_tts_budget_tracker"
+                )
+                _local_translation_result = locals().get(
+                    "translation_result"
+                )
+                _qr_segments_source = (
+                    list(_local_translation_result.segments)
+                    if _local_translation_result is not None
+                    else []
+                )
+                _qr_source_minutes = (
+                    float(_snap("source_duration_seconds") or 0.0) / 60.0
+                )
+                _qr_retry_summary = _aggregate_smart_retry_stats(
+                    segments=_qr_segments_source,
+                    post_tts_budget_tracker=_local_post_tts_tracker,
+                    source_minutes=_qr_source_minutes,
+                )
+            except Exception as _exc:
+                print(
+                    f"[smart] retry_summary aggregation failed "
+                    f"(non-blocking): {type(_exc).__name__}: {_exc}",
+                    flush=True,
+                )
+                _qr_retry_summary = {
+                    "rewrite_attempts_used": 0,
+                    "retts_attempts_used": 0,
+                    "budget_remaining_minutes": 0.0,
+                }
+
+            # Emit one budget_exhausted sidecar event per exhausted root.
+            # Renderer (P3-c) reads JSONL for "retry history" panel;
+            # admin diagnostics can see which segments exhausted cap.
+            _emit_smart_budget_exhausted_events(
+                project_dir=final_project_dir,
+                post_tts_budget_tracker=locals().get(
+                    "post_tts_budget_tracker"
+                ),
+                job_id=config.job_id,
+                user_id=str(_snap("user_id") or ""),
+            )
 
             _emit_smart_quality_report(
                 final_project_dir,

@@ -188,14 +188,14 @@ class TestCostSummaryTerminalWiring:
         site = source.find(marker_call)
         assert site >= 0
 
-        lookahead = source[site : site + 9000]
+        lookahead = source[site : site + 12000]
 
         qr_call_idx = lookahead.find("_emit_smart_quality_report(")
         cs_call_idx = lookahead.find("_emit_smart_cost_summary(")
 
         assert qr_call_idx >= 0, "_emit_smart_quality_report wiring missing"
         assert cs_call_idx >= 0, (
-            "_emit_smart_cost_summary call not found within 6500 chars "
+            "_emit_smart_cost_summary call not found within 12000 chars "
             "of main-run terminal marker call. PR#3C-P3-b contract: "
             "every successful smart job's main run must also emit "
             "cost_summary alongside quality_report.\n"
@@ -213,7 +213,7 @@ class TestCostSummaryTerminalWiring:
         marker_call = "self._emit_smart_terminal_completion_marker("
         site = source.find(marker_call)
         assert site >= 0
-        lookahead = source[site : site + 9000]
+        lookahead = source[site : site + 12000]
 
         cs_call_idx = lookahead.find("_emit_smart_cost_summary(")
         assert cs_call_idx >= 0
@@ -251,7 +251,7 @@ class TestCostSummaryTerminalWiring:
 
         # Site 2 = resume publish-only. Must NOT call cost_summary.
         for site in sites[1:]:
-            lookahead = source[site : site + 9000]
+            lookahead = source[site : site + 12000]
             assert "_emit_smart_cost_summary(" not in lookahead, (
                 "Resume publish-only terminal site has a cost_summary "
                 "call — would clobber the original audit. Same "

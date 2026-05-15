@@ -282,21 +282,72 @@ process.py wiring it at handoff sites).
   Gateway settle completes.
 
 ### P3-d — retry budget integration
-- `services/smart/retry_budget.py` is implemented but NOT consumed
-  by process.py rewrite/re-TTS retry loops.
-- Wire 2 call sites:
-  - Pre-TTS rewrite loop (process.py around line ~3530, "S5
-    rewrite" stage)
-  - Re-TTS loop (process.py around line ~5xxx, post-alignment retry)
-- Each retry attempt MUST consume budget; budget exhausted →
-  `emit_smart_decision(decision_type="budget_exhausted", ...)` +
-  fall through to current behavior (no auto-retry, accept the
-  current segment as-is or hand off to user via `needs_review=true`).
 
-**Acceptance**: unit test pinning that retry loops check
-`retry_budget.try_consume()` before each attempt; functional test
-with intentionally over-budget payload triggers
-`budget_exhausted` sidecar event + falls through correctly.
+**Scope-down (2026-05-15, during implementation):** the original
+§P3-d assumed two retry loops in process.py needing
+`retry_budget.try_consume()` wiring. Actual architecture (discovered
+during exploration):
+
+  - **Re-TTS retries live in `SegmentAligner.align_all()`** (aligner.py),
+    not process.py. Gating is done by
+    `PostTTSBudgetTracker.try_consume_for_segment()` with a hard
+    `max_extra_tts_per_root` cap. The smart retry budget formula
+    (`compute_total_budget_minutes`) is conceptually equivalent but
+    not currently consulted.
+  - **Pre-TTS rewrite is `_pre_rewrite_obvious_overshoot_segments_before_tts()`
+    in process.py — a single-pass scan, not a retry loop.** Each segment
+    either gets rewritten once or not at all. There's no "try again"
+    branch to gate.
+  - **`retry_budget.py` exports `evaluate_retry_request(snapshot, kind)`,
+    NOT `try_consume()`.** It's a pure decision function; caller maintains
+    state. Decision log's `try_consume()` reference was wrong.
+
+**Revised scope (P3-d implementation):**
+
+User-visible goal: smart quality_report has REAL `retry_summary` values
+(not always-zero) + `budget_exhausted` sidecar events when alignment-stage
+caps are hit, so renderer (P3-c) shows accurate retry history.
+
+Implementation:
+
+1. Add public `PostTTSBudgetTracker.usage_summary()` method exposing
+   `{consumed_roots: dict[int, int], total_consumed: int, cap: int,
+   exhausted_root_ids: list[int]}` (no more reaching into private
+   `_usage_by_root`).
+2. Add `_aggregate_smart_retry_stats(*, segments, post_tts_budget_tracker,
+   source_minutes) -> dict` helper in process.py that builds
+   `retry_summary` from real data:
+   - `rewrite_attempts_used` — count of segments with
+     `pre_tts_rewrite_retry_attempted=True`
+   - `retts_attempts_used` — total from `usage_summary().total_consumed`
+   - `budget_remaining_minutes` — from
+     `compute_total_budget_minutes(source_minutes)` minus rough estimate
+     of consumed minutes
+3. Add `_emit_smart_budget_exhausted_events(*, project_dir,
+   post_tts_budget_tracker, ...) -> int` helper that emits one
+   `budget_exhausted` sidecar event per exhausted root segment.
+4. Wire both at smart inline branch, AFTER alignment, BEFORE terminal:
+   - Build real `retry_summary` and pass to `_emit_smart_quality_report`
+     (replaces the always-zero placeholder).
+   - Emit `budget_exhausted` events for each exhausted root.
+
+**Deferred (P3-d+ future):**
+
+Deep-wire `retry_budget.evaluate_retry_request()` into
+`SegmentAligner.align_all()` so smart-mode jobs gate on the whole-task
+budget formula in addition to per-segment caps. Current implementation
+relies on PostTTSBudgetTracker's per-segment cap (which is functionally
+similar but doesn't enforce the whole-task `min(1.5*minutes,
+minutes+30)` rule). Defer until E2E shows the per-segment cap is
+insufficient.
+
+**Acceptance**: unit test for `_aggregate_smart_retry_stats` with
+synthetic budget tracker + segments produces correct counts; unit
+test for `_emit_smart_budget_exhausted_events` emits N events for N
+exhausted roots; source-anchor test pins `retry_summary` at smart
+terminal is built from `_aggregate_smart_retry_stats` (not zeros
+hardcoded); E2E real smart job's quality_report has non-zero
+retry counts when alignment had retries.
 
 ### P3-c — QA renderer on workspace page
 - `<SmartAutoDecisionPanel />` component reads
