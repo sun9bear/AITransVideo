@@ -40,11 +40,13 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
     studioStandard: number | null
     studioHigh: number | null
     studioFlagship: number | null
+    smartStandard: number | null
   }>({
     expressStandard: null,
     studioStandard: null,
     studioHigh: null,
     studioFlagship: null,
+    smartStandard: null,
   })
   const [savedVoices, setSavedVoices] = useState<VoiceLibraryEntry[]>([])
   const [activeJobs, setActiveJobs] = useState<JobSummary[]>([])
@@ -63,7 +65,12 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   const concurrencyLimitLabel = isUnlimitedConcurrency ? "无限制" : String(maxConcurrentJobs)
   const activeJobCount = activeJobs.length
   const isBlockedByConcurrency = !isUnlimitedConcurrency && activeJobCount >= maxConcurrentJobs
-  const currentRate = serviceMode === "studio" ? creditRates.studioStandard : creditRates.expressStandard
+  const currentRate =
+    serviceMode === "smart"
+      ? creditRates.smartStandard
+      : serviceMode === "studio"
+        ? creditRates.studioStandard
+        : creditRates.expressStandard
   const balanceLabel = credits ? `${credits.total_available} 点` : "读取中"
   const rateLabel = currentRate != null ? `${currentRate} 点/分钟` : "读取中"
   // For UI display: show the most recent active job if blocked
@@ -107,13 +114,19 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
       getCreditsEstimate(1, "studio", "standard"),
       getCreditsEstimate(1, "studio", "high"),
       getCreditsEstimate(1, "studio", "flagship"),
+      // Smart MVP P2: fixed 100 credits/min per source duration.
+      // Master plan §2.2 — single user-facing price; quality_tier
+      // internally stays "standard" for compat with the 2D pricing
+      // table (Plan §5.1).
+      getCreditsEstimate(1, "smart", "standard").catch(() => null),
     ])
-      .then(([expressStandard, studioStandard, studioHigh, studioFlagship]) => {
+      .then(([expressStandard, studioStandard, studioHigh, studioFlagship, smartStandard]) => {
         setCreditRates({
           expressStandard: expressStandard.estimated_credits,
           studioStandard: studioStandard.estimated_credits,
           studioHigh: studioHigh.estimated_credits,
           studioFlagship: studioFlagship.estimated_credits,
+          smartStandard: smartStandard?.estimated_credits ?? null,
         })
       })
       .catch(() => {})
@@ -317,10 +330,12 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
 
           <div className="h-px bg-muted/40" />
 
-          {/* Service plan selection */}
+          {/* Service plan selection — vertical stack so each option's
+            * description has room to breathe (cramped grid layout
+            * forced 4-char vertical text wrapping on narrow widths). */}
           <div className="space-y-3">
             <span className="text-xs font-medium text-muted-foreground block">任务方案</span>
-            <div className="grid gap-3 sm:grid-cols-3">
+            <div className="grid gap-3">
               {/* Express mode */}
               <button
                 type="button"
@@ -476,6 +491,10 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
             {serviceMode === "express" ? (
               <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
                 快捷版按源视频时长扣点，当前标准为 {rateLabel}。创建任务时会按可识别的时长预扣；点数不足会停止创建并提示充值或升级。
+              </p>
+            ) : serviceMode === "smart" ? (
+              <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                智能版按源视频时长固定扣点，当前标准为 {rateLabel}。AI 自动审核翻译并按需克隆主说话人音色，系统内部的重试、克隆、TTS 调用都计入这个固定价，不会另外扣点。当前阶段限制：主说话人不超过 3 位；若不满足条件会自动降级到工作台版或退点。
               </p>
             ) : (
               <p className="mt-2 text-xs leading-relaxed text-muted-foreground">

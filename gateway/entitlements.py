@@ -42,7 +42,13 @@ async def get_entitlements(
             "limits": {
                 "max_duration_minutes": None,
                 "max_concurrent_jobs": None,
-                "allowed_service_modes": ["express", "studio"],
+                # Smart MVP P2 launch (2026-05-16): admin sees smart in
+                # the frontend mode picker too. Backend gate already
+                # bypasses for admin (job_intercept.py:777
+                # ``if user and not is_admin: ...``), but the frontend
+                # ``smart card visible`` check uses this list and
+                # without smart here the smart button shows as "即将开放".
+                "allowed_service_modes": ["express", "studio", "smart"],
                 "free_jobs_quota_total": None,
                 "free_jobs_quota_used": None,
                 "free_jobs_quota_remaining": None,
