@@ -48,13 +48,13 @@ class TestCostSummaryWriterHappyPath:
             job_id="job_p3b_001",
             service_mode="smart",
             minutes_processed=12.5,
-            credits_charged=1250,
+            pending_credits_charged=1250,
             credits_policy="capture_full",
             asr_seconds=45.2,
             llm_translation_chars=5234,
             tts_chars=8120,
             voice_clone_calls=1,
-            minimax_quota_used_after=1,
+            pending_minimax_quota_used_after=1,
         )
         assert ok is True
 
@@ -70,18 +70,30 @@ class TestCostSummaryWriterHappyPath:
         assert payload["job_id"] == "job_p3b_001"
         assert payload["service_mode"] == "smart"
 
-        # Top-level cost facts
+        # Top-level cost facts. ``pending_credits_charged`` is the
+        # settle-dependent field (Codex 第三十六轮 P2): pipeline writes
+        # the pending value (None until Gateway runs settle_job_credit_ledger
+        # post-pipeline); explicit ``pending_`` prefix prevents admin UI
+        # from mis-reading None as "0 credits charged".
         assert payload["minutes_processed"] == 12.5
-        assert payload["credits_charged"] == 1250
+        assert payload["pending_credits_charged"] == 1250
         assert payload["credits_policy"] == "capture_full"
 
-        # Internal-only breakdown (admin-only display per Codex Q2)
+        # Internal-only breakdown (admin-only display per Codex Q2).
+        # ``pending_minimax_quota_used_after`` similarly pending until
+        # Gateway queries /user-voices/quota post-pipeline.
         breakdown = payload["cost_breakdown_internal_only"]
         assert breakdown["asr_seconds"] == 45.2
         assert breakdown["llm_translation_chars"] == 5234
         assert breakdown["tts_chars"] == 8120
         assert breakdown["voice_clone_calls"] == 1
-        assert breakdown["minimax_quota_used_after"] == 1
+        assert breakdown["pending_minimax_quota_used_after"] == 1
+
+        # Old unprefixed keys MUST NOT appear (regression-pin to keep
+        # admin UI consumers from accidentally still reading the old
+        # names that look settled).
+        assert "credits_charged" not in payload
+        assert "minimax_quota_used_after" not in breakdown
 
         # Auto-stamped generated_at
         assert "generated_at" in payload
@@ -104,19 +116,20 @@ class TestCostSummaryWriterHappyPath:
         ok = _emit_smart_cost_summary(
             project_dir,
             job_id="job_x", service_mode="smart",
-            minutes_processed=0.0, credits_charged=0,
+            minutes_processed=0.0, pending_credits_charged=0,
             credits_policy="capture_full",
             asr_seconds=0.0, llm_translation_chars=0, tts_chars=0,
-            voice_clone_calls=0, minimax_quota_used_after=0,
+            voice_clone_calls=0, pending_minimax_quota_used_after=0,
         )
         assert ok is False
 
     def test_helper_accepts_none_for_settle_dependent_fields(self, tmp_path):
-        """``credits_charged`` + ``minimax_quota_used_after`` are
-        determined by Gateway AFTER pipeline terminal (settle_job_credit_ledger
-        + /user-voices/quota lookup). Pipeline writes None for these
-        and Gateway updates the file post-settle (P3-b follow-up) OR
-        the renderer handles None gracefully (current P3-b scope).
+        """Settle-dependent fields are determined by Gateway AFTER
+        pipeline terminal (settle_job_credit_ledger + /user-voices/quota
+        lookup). Pipeline writes None for these. Codex 第三十六轮 P2:
+        renamed to ``pending_*`` so admin UI clearly sees "this hasn't
+        been settled yet" rather than mis-reading ``credits_charged=None``
+        as "no credits / free job".
         """
         from pipeline.process import _emit_smart_cost_summary
 
@@ -127,11 +140,11 @@ class TestCostSummaryWriterHappyPath:
             project_dir,
             job_id="job_x", service_mode="smart",
             minutes_processed=12.5,
-            credits_charged=None,  # settled later by Gateway
+            pending_credits_charged=None,  # settled later by Gateway
             credits_policy="capture_full",
             asr_seconds=45.2, llm_translation_chars=5234, tts_chars=8120,
             voice_clone_calls=1,
-            minimax_quota_used_after=None,  # queried later by Gateway
+            pending_minimax_quota_used_after=None,  # queried later by Gateway
         )
         assert ok is True
 
@@ -139,9 +152,11 @@ class TestCostSummaryWriterHappyPath:
             (project_dir / "audit" / "smart_cost_summary.json")
             .read_text(encoding="utf-8")
         )
-        assert payload["credits_charged"] is None
+        assert payload["pending_credits_charged"] is None
         assert (
-            payload["cost_breakdown_internal_only"]["minimax_quota_used_after"]
+            payload["cost_breakdown_internal_only"][
+                "pending_minimax_quota_used_after"
+            ]
             is None
         )
 
@@ -242,3 +257,164 @@ class TestCostSummaryTerminalWiring:
                 "call — would clobber the original audit. Same "
                 "scope-down rationale as quality_report (decision log §P3-a)."
             )
+
+
+# ===========================================================================
+# Cycle 3 — Codex 第三十六轮 P1: cost_summary wired at smart handoff sites
+# ===========================================================================
+
+
+class TestCostSummaryWiringAtHandoffSites:
+    """Codex 第三十六轮 P1: decision log §2 explicitly says cost_summary
+    is written for *every smart job, regardless of completion, so admin
+    can retrospectively diagnose handoff jobs*. The pre-fix implementation
+    only wrote at happy-path terminal, leaving quota-brake / sample-
+    failure / eligibility-reject / mirror-failure / translation-review
+    handoff jobs without admin cost visibility (404 on the admin
+    endpoint, which is exactly when admin most needs the data).
+
+    These tests pin that every ``emit_handoff_markers`` call site has a
+    cost_summary emission within the same handoff-return block — so the
+    admin endpoint resolves for *all* smart jobs.
+    """
+
+    def _source(self) -> str:
+        return _PROCESS_PY.read_text(encoding="utf-8")
+
+    def _find_handoff_call_sites(self, source: str) -> list[int]:
+        """Locate every actual ``emit_handoff_markers(`` call (not a
+        comment reference). Returns char offsets in source order."""
+        import re
+
+        # Match real call sites: line starts with whitespace + the call
+        # name. Skip comment lines (starting with #).
+        pattern = re.compile(
+            r"^(?!\s*#)\s*emit_handoff_markers\(",
+            re.MULTILINE,
+        )
+        return [m.start() for m in pattern.finditer(source)]
+
+    def test_every_smart_handoff_site_writes_cost_summary(self):
+        """Each ``emit_handoff_markers(`` call site must have a
+        ``_emit_smart_cost_summary`` reference within 3500 chars after
+        — the typical handoff-return block is:
+
+          emit_handoff_markers(...)            # mark state
+          state_manager.set_stage(...)          # update job stage
+          current_stage_name = None             # housekeeping
+          _write_usage_summary(usage_meter)     # snapshot meter
+          _emit_smart_cost_summary[_from_meter](...)  # NEW (P3-b-fix)
+          return self._build_paused_result(...)  # paused return
+        """
+        source = self._source()
+        sites = self._find_handoff_call_sites(source)
+        assert len(sites) >= 5, (
+            f"Expected ≥5 smart handoff sites (eligibility / sample / "
+            f"quota / voice / mirror / voice-expiry / translation); "
+            f"found {len(sites)}. process.py shape changed unexpectedly."
+        )
+
+        missing = []
+        for i, site in enumerate(sites):
+            window = source[site : site + 3500]
+            if "_emit_smart_cost_summary" not in window:
+                snippet = window[:600]
+                missing.append((i + 1, site, snippet))
+
+        assert not missing, (
+            "Codex 第三十六轮 P1: the following smart handoff sites do "
+            "NOT write cost_summary, violating decision log §2 (every "
+            "smart job, regardless of completion).\n"
+            + "\n\n".join(
+                f"  Site #{idx} @ offset {off}:\n{snip}"
+                for idx, off, snip in missing
+            )
+        )
+
+    def test_handoff_cost_summary_gated_on_smart_mode(self):
+        """The handoff-site cost_summary call must be reached only by
+        smart code. Two ways to prove this for any given site:
+
+        1. Inline explicit gate: ``self._current_service_mode == "smart"``
+           appears between the handoff call and the cost_summary call.
+           Used at the shared-branch sites (voice expiry) where both
+           smart and studio reach the same paused_result.
+        2. Upstream emit_handoff_markers: every ``emit_handoff_markers``
+           call passes ``smart_state_update=`` (required kwarg), and the
+           helper is only called from smart-only code paths. The
+           cost_summary call always comes AFTER the emit_handoff_markers
+           call in the same block, so ``smart_state_update=`` in the
+           pre-call window proves the smart-only context.
+
+        Studio-only sites (e.g. ``_write_usage_summary`` followed by
+        ``return self._build_paused_result(...)`` without an
+        ``emit_handoff_markers`` upstream — like the legacy translation
+        review studio branch) are not iterated by this test (they're
+        not in ``_find_handoff_call_sites``).
+        """
+        source = self._source()
+        sites = self._find_handoff_call_sites(source)
+        assert sites
+
+        for i, site in enumerate(sites):
+            window = source[site : site + 3500]
+            cs_idx = window.find("_emit_smart_cost_summary")
+            if cs_idx < 0:
+                # Tested separately; skip here.
+                continue
+            pre_call = window[:cs_idx]
+            # ``smart_state_update=`` is a required kwarg of every
+            # emit_handoff_markers call — its presence in the pre-call
+            # region (which always contains the handoff call) proves
+            # the cost_summary call is on a smart-only handoff path.
+            # Inline gates ``self._current_service_mode == "smart"`` are
+            # also accepted (used at shared smart/studio sites).
+            has_smart_gate = (
+                "smart_state_update=" in pre_call
+                or 'self._current_service_mode == "smart"' in pre_call
+                or "self._current_service_mode == 'smart'" in pre_call
+            )
+            assert has_smart_gate, (
+                f"Smart handoff cost_summary call at site #{i+1} (offset "
+                f"{site + cs_idx}) is not provably gated to smart-only. "
+                "Studio jobs would incorrectly write cost_summary.\n"
+                f"Pre-call region (last 1500 chars):\n{pre_call[-1500:]}"
+            )
+
+    def test_quota_brake_handoff_writes_cost_summary(self):
+        """Codex 第三十六轮 P1 explicitly called out quota-brake as a
+        failure case. Pin that the quota-unavailable handoff branch
+        (around the ``voice_library_quota_unavailable`` /
+        ``smart_handoff_quota_unavailable`` reason codes) writes
+        cost_summary.
+
+        Sources of truth: handoff site identified by the
+        ``smart_handoff_quota_unavailable`` execution_mode marker
+        downstream + ``voice_library_quota_unavailable`` reason text.
+        """
+        source = self._source()
+
+        # Find the quota-brake handoff region by its unique downstream
+        # marker.
+        quota_anchor = source.find("smart_handoff_quota_unavailable")
+        assert quota_anchor >= 0, (
+            "Quota-brake handoff marker not found; pipeline shape changed."
+        )
+
+        # Walk back to the enclosing emit_handoff_markers call.
+        upstream = source[max(0, quota_anchor - 4000) : quota_anchor]
+        assert "emit_handoff_markers(" in upstream, (
+            "Could not locate emit_handoff_markers call upstream of "
+            "quota-brake marker."
+        )
+
+        # Walk forward from the handoff site through the return.
+        # The cost_summary call must be in the window from the upstream
+        # handoff call to ~500 chars past the quota marker.
+        window = source[max(0, quota_anchor - 4000) : quota_anchor + 1000]
+        assert "_emit_smart_cost_summary" in window, (
+            "Quota-brake handoff branch does not call _emit_smart_cost_summary. "
+            "Codex 第三十六轮 P1 specifically required quota-brake regression "
+            "coverage:\n"
+            f"Window:\n{window}"
+        )

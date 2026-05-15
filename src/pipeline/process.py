@@ -551,13 +551,13 @@ def _emit_smart_cost_summary(
     job_id: str,
     service_mode: str,
     minutes_processed: float,
-    credits_charged: int | None,
+    pending_credits_charged: int | None,
     credits_policy: str,
     asr_seconds: float,
     llm_translation_chars: int,
     tts_chars: int,
     voice_clone_calls: int,
-    minimax_quota_used_after: int | None,
+    pending_minimax_quota_used_after: int | None,
 ) -> bool:
     """Best-effort wrapper around
     ``services.smart.sidecar_emitter.write_smart_cost_summary``.
@@ -573,12 +573,17 @@ def _emit_smart_cost_summary(
     must NOT block the user-facing pipeline. Returns ``True`` on
     successful write, ``False`` on any failure (logged via print).
 
-    Settle-dependent fields (``credits_charged`` +
-    ``minimax_quota_used_after``) are unknown at pipeline terminal —
-    they're set by Gateway's settle_job_credit_ledger AFTER pipeline
-    completes. Pipeline writes ``None`` for these; a follow-up
-    Gateway hook (P3-b-follow-up) updates the file post-settle.
-    Renderer must handle None gracefully in the interim.
+    Settle-dependent fields (``pending_credits_charged`` +
+    ``pending_minimax_quota_used_after``) are unknown at pipeline
+    terminal — they're set by Gateway's settle_job_credit_ledger
+    AFTER pipeline completes. Pipeline writes ``None`` for these;
+    a follow-up Gateway hook (P3-b-follow-up / Phase 2 backfill)
+    updates the file post-settle.
+
+    Codex 第三十六轮 P2: explicit ``pending_`` prefix prevents the
+    admin UI from misreading ``credits_charged=None`` as "no credits
+    charged"; the field name itself signals "settle hasn't happened
+    yet". Renderer treats ``None`` value as "pending" UX state.
     """
     from datetime import datetime, timezone
 
@@ -588,14 +593,14 @@ def _emit_smart_cost_summary(
         "job_id": job_id,
         "service_mode": service_mode,
         "minutes_processed": minutes_processed,
-        "credits_charged": credits_charged,
+        "pending_credits_charged": pending_credits_charged,
         "credits_policy": credits_policy,
         "cost_breakdown_internal_only": {
             "asr_seconds": asr_seconds,
             "llm_translation_chars": llm_translation_chars,
             "tts_chars": tts_chars,
             "voice_clone_calls": voice_clone_calls,
-            "minimax_quota_used_after": minimax_quota_used_after,
+            "pending_minimax_quota_used_after": pending_minimax_quota_used_after,
         },
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -609,6 +614,69 @@ def _emit_smart_cost_summary(
             flush=True,
         )
         return False
+
+
+def _emit_smart_cost_summary_from_meter(
+    project_dir: Path,
+    *,
+    job_id: str,
+    usage_meter: object,
+    minutes_processed: float,
+    credits_policy: str,
+) -> bool:
+    """Codex 第三十六轮 P1: convenience wrapper that probes UsageMeter +
+    delegates to ``_emit_smart_cost_summary``. Used at smart handoff
+    return sites where the verbose meter-probe + emit boilerplate would
+    repeat 7 times.
+
+    Decision log §2 (post-fix wording): cost_summary is written for
+    every smart job, regardless of completion — so handoff jobs get
+    written here. ``pending_credits_charged`` /
+    ``pending_minimax_quota_used_after`` stay ``None`` (Gateway settle
+    runs after pipeline returns); ``credits_policy`` at handoff time
+    is "pending_settle" until Gateway determines refund/capture/partial.
+
+    Best-effort: meter probe failures + emit failures both swallow
+    silently (print only). Cannot block the paused-result return.
+    """
+    _cs_asr_seconds = 0.0
+    _cs_llm_chars = 0
+    _cs_tts_chars = 0
+    _cs_voice_clone_calls = 0
+    try:
+        _meter_summary = usage_meter.summarize()  # type: ignore[attr-defined]
+        _cs_asr_seconds = float(
+            _meter_summary.get("llm_audio_input_seconds") or 0.0
+        )
+        _cs_llm_chars = int(
+            _meter_summary.get("s3_translation_llm_input_tokens") or 0
+        )
+        _cs_tts_chars = int(
+            _meter_summary.get("tts_billed_chars") or 0
+        )
+        _cs_voice_clone_calls = int(
+            _meter_summary.get("voice_clone_success_call_count") or 0
+        )
+    except Exception as _exc:
+        print(
+            f"[smart] cost_summary handoff meter probe failed "
+            f"(non-blocking): {type(_exc).__name__}: {_exc}",
+            flush=True,
+        )
+
+    return _emit_smart_cost_summary(
+        project_dir,
+        job_id=job_id,
+        service_mode="smart",
+        minutes_processed=round(minutes_processed, 3),
+        pending_credits_charged=None,
+        credits_policy=credits_policy,
+        asr_seconds=round(_cs_asr_seconds, 3),
+        llm_translation_chars=_cs_llm_chars,
+        tts_chars=_cs_tts_chars,
+        voice_clone_calls=_cs_voice_clone_calls,
+        pending_minimax_quota_used_after=None,
+    )
 
 
 def _emit_smart_audit(
@@ -2804,6 +2872,18 @@ class ProcessPipeline:
                         )
                         current_stage_name = None
                         _write_usage_summary(usage_meter)
+                        # Codex 第三十六轮 P1: write cost_summary at smart
+                        # handoff returns too (decision log §2 contract).
+                        _emit_smart_cost_summary_from_meter(
+                            final_project_dir,
+                            job_id=config.job_id,
+                            usage_meter=usage_meter,
+                            minutes_processed=(
+                                float(_snap("source_duration_seconds") or 0.0)
+                                / 60.0
+                            ),
+                            credits_policy="pending_settle",
+                        )
                         return self._build_paused_result(
                             project_dir=final_project_dir,
                             stage=VOICE_SELECTION_REVIEW_STAGE,
@@ -3037,6 +3117,17 @@ class ProcessPipeline:
                         )
                         current_stage_name = None
                         _write_usage_summary(usage_meter)
+                        # Codex 第三十六轮 P1: cost_summary at smart handoff.
+                        _emit_smart_cost_summary_from_meter(
+                            final_project_dir,
+                            job_id=config.job_id,
+                            usage_meter=usage_meter,
+                            minutes_processed=(
+                                float(_snap("source_duration_seconds") or 0.0)
+                                / 60.0
+                            ),
+                            credits_policy="pending_settle",
+                        )
                         return self._build_paused_result(
                             project_dir=final_project_dir,
                             stage=VOICE_SELECTION_REVIEW_STAGE,
@@ -3162,6 +3253,17 @@ class ProcessPipeline:
                             )
                             current_stage_name = None
                             _write_usage_summary(usage_meter)
+                            # Codex 第三十六轮 P1: cost_summary at smart handoff.
+                            _emit_smart_cost_summary_from_meter(
+                                final_project_dir,
+                                job_id=config.job_id,
+                                usage_meter=usage_meter,
+                                minutes_processed=(
+                                    float(_snap("source_duration_seconds") or 0.0)
+                                    / 60.0
+                                ),
+                                credits_policy="pending_settle",
+                            )
                             return self._build_paused_result(
                                 project_dir=final_project_dir,
                                 stage=VOICE_SELECTION_REVIEW_STAGE,
@@ -3253,6 +3355,17 @@ class ProcessPipeline:
                         )
                         current_stage_name = None
                         _write_usage_summary(usage_meter)
+                        # Codex 第三十六轮 P1: cost_summary at smart handoff.
+                        _emit_smart_cost_summary_from_meter(
+                            final_project_dir,
+                            job_id=config.job_id,
+                            usage_meter=usage_meter,
+                            minutes_processed=(
+                                float(_snap("source_duration_seconds") or 0.0)
+                                / 60.0
+                            ),
+                            credits_policy="pending_settle",
+                        )
                         return self._build_paused_result(
                             project_dir=final_project_dir,
                             stage=VOICE_SELECTION_REVIEW_STAGE,
@@ -3458,6 +3571,17 @@ class ProcessPipeline:
                         )
                         current_stage_name = None
                         _write_usage_summary(usage_meter)
+                        # Codex 第三十六轮 P1: cost_summary at smart handoff.
+                        _emit_smart_cost_summary_from_meter(
+                            final_project_dir,
+                            job_id=config.job_id,
+                            usage_meter=usage_meter,
+                            minutes_processed=(
+                                float(_snap("source_duration_seconds") or 0.0)
+                                / 60.0
+                            ),
+                            credits_policy="pending_settle",
+                        )
                         return self._build_paused_result(
                             project_dir=final_project_dir,
                             stage=VOICE_SELECTION_REVIEW_STAGE,
@@ -3656,6 +3780,20 @@ class ProcessPipeline:
                             )
                         )
                     _write_usage_summary(usage_meter)
+                    # Codex 第三十六轮 P1: cost_summary at smart handoff.
+                    # Site reached by both smart (handoff) and studio
+                    # (wait-for-review) paths — gate on smart explicitly.
+                    if self._current_service_mode == "smart":
+                        _emit_smart_cost_summary_from_meter(
+                            final_project_dir,
+                            job_id=config.job_id,
+                            usage_meter=usage_meter,
+                            minutes_processed=(
+                                float(_snap("source_duration_seconds") or 0.0)
+                                / 60.0
+                            ),
+                            credits_policy="pending_settle",
+                        )
                     return self._build_paused_result(
                         project_dir=final_project_dir,
                         stage=VOICE_SELECTION_REVIEW_STAGE,
@@ -4202,6 +4340,17 @@ class ProcessPipeline:
                             )
                             current_stage_name = None
                             _write_usage_summary(usage_meter)
+                            # Codex 第三十六轮 P1: cost_summary at smart handoff.
+                            _emit_smart_cost_summary_from_meter(
+                                final_project_dir,
+                                job_id=config.job_id,
+                                usage_meter=usage_meter,
+                                minutes_processed=(
+                                    float(_snap("source_duration_seconds") or 0.0)
+                                    / 60.0
+                                ),
+                                credits_policy="pending_settle",
+                            )
                             return self._build_paused_result(
                                 project_dir=final_project_dir,
                                 stage=TRANSLATION_REVIEW_STAGE,
@@ -4942,13 +5091,13 @@ class ProcessPipeline:
                 job_id=config.job_id,
                 service_mode="smart",
                 minutes_processed=round(_cs_minutes, 3),
-                credits_charged=None,  # settled by Gateway post-pipeline
+                pending_credits_charged=None,  # settled by Gateway post-pipeline
                 credits_policy="capture_full",
                 asr_seconds=round(_cs_asr_seconds, 3),
                 llm_translation_chars=_cs_llm_chars,
                 tts_chars=_cs_tts_chars,
                 voice_clone_calls=_cs_voice_clone_calls,
-                minimax_quota_used_after=None,  # queried by Gateway post-pipeline
+                pending_minimax_quota_used_after=None,  # queried by Gateway post-pipeline
             )
 
         return ProcessResult(

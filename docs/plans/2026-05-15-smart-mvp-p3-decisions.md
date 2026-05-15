@@ -109,18 +109,59 @@ the deliverable; admin gets the full cost picture.
   "job_id": "...",
   "service_mode": "smart",
   "minutes_processed": 12.5,
-  "credits_charged": 1250,
-  "credits_policy": "capture_full",
+  "pending_credits_charged": 1250,    // null until Gateway runs settle
+  "credits_policy": "capture_full" | "pending_settle",
   "cost_breakdown_internal_only": {
     "asr_seconds": 45.2,
     "llm_translation_chars": 5234,
     "tts_chars": 8120,
     "voice_clone_calls": 1,
-    "minimax_quota_used_after": 1
+    "pending_minimax_quota_used_after": 1  // null until Gateway queries quota
   },
   "generated_at": "..."
 }
 ```
+
+**Field rename — Codex 第三十六轮 P2 (2026-05-15, P3-b-fix):**
+
+- `credits_charged` → `pending_credits_charged`
+- `cost_breakdown_internal_only.minimax_quota_used_after` →
+  `cost_breakdown_internal_only.pending_minimax_quota_used_after`
+
+Both fields are determined by Gateway AFTER pipeline terminal
+(`settle_job_credit_ledger` runs post-pipeline; minimax quota is
+queried via `/user-voices/quota`). Pipeline writes `None` for these.
+Without the explicit `pending_` prefix, admin UI consumers may misread
+`credits_charged: null` as "no credits charged" (free job). The prefix
+signals "settle hasn't happened yet, value will appear after
+backfill".
+
+**Phase 2 backfill (P3-b-follow-up, not yet implemented):** Gateway
+mirror_job_terminal_state hook should read the cost_summary.json
+file after settling credit ledger + querying minimax quota, then
+overwrite `pending_credits_charged` and
+`pending_minimax_quota_used_after` with the real values. Until then,
+admin UI must render `null` values as "Pending settle" UX state
+rather than "0" / "—".
+
+**Handoff vs happy-path — Codex 第三十六轮 P1 (2026-05-15, P3-b-fix):**
+
+`credits_policy` values:
+
+- `"capture_full"` — written at happy-path smart terminal (full
+  pipeline ran to completion; user gets billed for full minutes).
+- `"pending_settle"` — written at every smart handoff return site
+  (eligibility reject / sample fail / quota brake / voice review /
+  mirror fail / voice expiry / translation review). Gateway settle
+  determines the actual policy (capture_full / capture_partial /
+  refund_full) based on what work completed; Phase 2 backfill
+  overwrites this field too.
+
+Handoff sites write cost_summary via `_emit_smart_cost_summary_from_meter`
+(meter probe wrapper around `_emit_smart_cost_summary`). All 7
+``emit_handoff_markers`` call sites in process.py are wired —
+regression-pinned by ``test_every_smart_handoff_site_writes_cost_summary``
+and ``test_quota_brake_handoff_writes_cost_summary``.
 
 ---
 
@@ -208,15 +249,37 @@ process.py wiring it at handoff sites).
 ### P3-b — cost_summary write
 - Pull from existing UsageMeter at terminal point (UsageMeter already
   tracks per-stage credit consumption).
-- Same call sites as P3-a (terminal + handoff branches).
+- **Call sites (Codex 第三十六轮 P1, expanded scope):**
+  - Happy-path smart terminal (same gate as quality_report:
+    `service_mode==smart AND effective_pipeline_mode==smart`).
+    `credits_policy="capture_full"`.
+  - **All 7 smart handoff returns** (eligibility / sample / quota /
+    voice review / mirror / voice expiry / translation review).
+    `credits_policy="pending_settle"`.
 - Add `gateway/admin_cost_api.py` thin route: `GET
   /api/admin/jobs/{id}/cost` returns the JSON.
-- Frontend: new `frontend-next/src/app/(app)/admin/jobs/[id]/cost/`
-  page (matches `/admin/disk` pattern).
+- Frontend (P3-c scope): new
+  `frontend-next/src/app/(app)/admin/jobs/[id]/cost/` page
+  (matches `/admin/disk` pattern).
 
-**Acceptance**: real E2E job's cost_summary.json contains non-zero
-credits_charged + matching minimax_quota_used_after value visible
-via /admin/jobs/{id}/cost.
+**Acceptance (Phase 1 — current P3-b-fix):**
+
+- Every smart job (happy-path + handoff) has `audit/smart_cost_summary.json`
+  written.
+- File contains `pending_credits_charged: null` and
+  `pending_minimax_quota_used_after: null` until Phase 2 backfill.
+- Admin endpoint `/api/admin/jobs/{id}/cost` returns 200 + payload
+  for any smart job (no more 404s on handoff jobs).
+- Real E2E verified on quota-brake handoff + happy-path completion.
+
+**Phase 2 follow-up (NOT in P3-b scope):**
+
+- Gateway post-settle hook reads cost_summary.json, overwrites
+  `pending_credits_charged` with `JobRecord.credits_captured` and
+  `pending_minimax_quota_used_after` with `/user-voices/quota`
+  response.
+- Acceptance: settle-dependent fields become non-null after
+  Gateway settle completes.
 
 ### P3-d — retry budget integration
 - `services/smart/retry_budget.py` is implemented but NOT consumed
