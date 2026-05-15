@@ -690,11 +690,13 @@ class TestMiniMaxCloneAdapterMapping:
         from services.smart_wiring import _MiniMaxCloneAdapter
 
         captured = {}
-        # Inject a fake API key so lazy construction doesn't refuse.
-        monkeypatch.setenv("MINIMAX_API_KEY", "fake-key-for-test")
+        # Inject a fake API key via constructor override (post b3g-fix:
+        # _api_key kwarg bypasses the production VoiceCloneConfig.from_env
+        # path, keeping tests independent of autodub.local.json /
+        # AUTODUB_TTS_API_KEY env).
         self._install_mock_client(monkeypatch, captured_calls=captured)
 
-        adapter = _MiniMaxCloneAdapter()
+        adapter = _MiniMaxCloneAdapter(api_key="fake-key-for-test")
         sample_path = tmp_path / "speaker_a.wav"
         result = adapter.clone_voice(
             speaker_id="speaker_a",
@@ -774,9 +776,10 @@ class TestMiniMaxCloneAdapterMapping:
                 )
 
         monkeypatch.setattr(voice_clone_mod, "MiniMaxVoiceCloneClient", CountingClient)
-        monkeypatch.setenv("MINIMAX_API_KEY", "test-key")
 
-        adapter = _MiniMaxCloneAdapter()
+        # Use _api_key constructor override (b3g-fix path that
+        # bypasses VoiceCloneConfig.from_env config-file lookup).
+        adapter = _MiniMaxCloneAdapter(api_key="test-key")
         # Construction has NOT happened yet — instantiating the adapter
         # is cheap.
         assert construction_count[0] == 0
@@ -793,9 +796,18 @@ class TestMiniMaxCloneAdapterMapping:
         # Second call reuses the cached client — does NOT re-construct.
         assert construction_count[0] == 1
 
-    def test_adapter_missing_api_key_raises_actionable_error(self, monkeypatch):
-        """Without MINIMAX_API_KEY, construction must fail with a clear
-        message that points to inject_for_test() as the test path."""
+    def test_adapter_missing_config_raises_actionable_error(self, monkeypatch):
+        """When ``VoiceCloneConfig.from_env`` returns a config that
+        fails validate() (no api_key in autodub.local.json AND no
+        AUTODUB_TTS_API_KEY env), the adapter must surface the error
+        unambiguously so auto_voice_review's retry loop catches it +
+        falls through to PRESET (rather than a misleading 200 response).
+
+        PR#3C-b3g-fix renamed this test from "missing MINIMAX_API_KEY"
+        because the production config path is AUTODUB_TTS_*; the
+        legacy MINIMAX_API_KEY direct read was the b3d wiring gap
+        real-host E2E exposed.
+        """
         import services.voice_clone as voice_clone_mod
         from services.smart_wiring import _MiniMaxCloneAdapter
 
@@ -804,18 +816,40 @@ class TestMiniMaxCloneAdapterMapping:
                 raise AssertionError("must not reach real construction")
 
         monkeypatch.setattr(voice_clone_mod, "MiniMaxVoiceCloneClient", NeverConstructed)
-        monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
+        # Strip any test env that might satisfy from_env's resolution.
+        for env_var in (
+            "AUTODUB_TTS_API_KEY",
+            "AUTODUB_TTS_CLONE_API_KEY",
+            "MINIMAX_API_KEY",
+        ):
+            monkeypatch.delenv(env_var, raising=False)
+
+        # Mock VoiceCloneConfig.from_env to return a config whose
+        # validate() raises VoiceCloneConfigurationError — emulates
+        # an environment with no api_key configured anywhere.
+        from services.voice_clone import (
+            VoiceCloneConfig, VoiceCloneConfigurationError,
+        )
+
+        def _fake_from_env(*a, **kw):
+            cfg = VoiceCloneConfig(api_key=None, base_url=None)
+            return cfg
+
+        monkeypatch.setattr(VoiceCloneConfig, "from_env", _fake_from_env)
 
         adapter = _MiniMaxCloneAdapter()
-        with pytest.raises(RuntimeError) as exc_info:
+        with pytest.raises(VoiceCloneConfigurationError) as exc_info:
             adapter.clone_voice(
                 speaker_id="a", speaker_name="A", source_audio_path=Path("/x"),
             )
-        msg = str(exc_info.value)
-        assert "MINIMAX_API_KEY" in msg
-        assert "inject_for_test" in msg, (
-            "Error message should point devs to the inject_for_test() escape "
-            "hatch so they know how to run tests without the real env var."
+        # The validate() error message points at the env var / config
+        # key the operator should set. Pin that the message names
+        # the production config name (AUTODUB_TTS_* / autodub.local.json)
+        # — the legacy direct MINIMAX_API_KEY mention should be gone.
+        msg = str(exc_info.value).lower()
+        assert "api_key" in msg or "url" in msg or "base_url" in msg, (
+            f"Config validate() message should mention api_key / base_url; "
+            f"got: {exc_info.value!r}"
         )
 
     def test_real_create_voice_clone_signature_locked(self):
@@ -878,10 +912,11 @@ class TestMiniMaxCloneAdapterMapping:
         from services.smart_wiring import _MiniMaxCloneAdapter
 
         captured = {}
-        monkeypatch.setenv("MINIMAX_API_KEY", "test-key")
         self._install_mock_client(monkeypatch, captured_calls=captured)
 
-        adapter = _MiniMaxCloneAdapter()
+        # b3g-fix: use _api_key constructor override so test doesn't
+        # depend on autodub.local.json or AUTODUB_TTS_API_KEY env.
+        adapter = _MiniMaxCloneAdapter(api_key="test-key")
         # Both static (Protocol shape) and runtime (isinstance) checks.
         assert isinstance(adapter, CloneProvider)
 

@@ -60,11 +60,31 @@ class _MiniMaxCloneAdapter:
     Construction is lazy: the real client validates env / config eagerly
     (``VoiceCloneConfig.validate()`` at line ~244 of voice_clone.py),
     so we only build it when the adapter is actually called. This lets
-    test environments without MINIMAX_API_KEY env still import the
-    Smart wiring module without failing.
+    test environments without provider config still import the Smart
+    wiring module without failing.
+
+    Config loading (PR#3C-b3g real-host E2E P0 fix, 2026-05-15):
+      Production reads MiniMax credentials via
+      ``VoiceCloneConfig.from_env(config_path=...)`` which:
+        - reads ``AUTODUB_TTS_*`` env vars (default ``AUTODUB_TTS_API_KEY``)
+        - falls back to ``autodub.local.json`` config file under PROJECT_ROOT
+        - mirrors the same path Studio's Gateway voice-clone endpoint uses
+          (``gateway/voice_selection_api.py:633``)
+      The earlier b3d implementation read ``os.environ["MINIMAX_API_KEY"]``
+      directly — a different env-var name that container deployments
+      don't set. Result: real-host smart submissions raised
+      ``MINIMAX_API_KEY missing`` even though Studio manual-clone on
+      the same container worked fine. The fix routes both through the
+      same ``VoiceCloneConfig.from_env`` so the two clone origins
+      always share credentials.
     """
 
     def __init__(self, *, api_key: str | None = None, base_url: str | None = None):
+        # api_key / base_url overrides remain for explicit DI tests
+        # (e.g. an integration test that wants to point at a sandbox
+        # endpoint). When None (the production case), we defer to
+        # VoiceCloneConfig.from_env so prod config / env vars
+        # take effect.
         self._api_key = api_key
         self._base_url = base_url
         self._client: object | None = None  # lazy
@@ -84,19 +104,26 @@ class _MiniMaxCloneAdapter:
                 MiniMaxVoiceCloneClient,
                 VoiceCloneConfig,
             )
-            import os
+            from services import config_loader
 
-            api_key = self._api_key or os.environ.get("MINIMAX_API_KEY") or ""
-            if not api_key:
-                raise RuntimeError(
-                    "MINIMAX_API_KEY missing — Smart clone path can't proceed. "
-                    "Set the env var or inject a fake provider via "
-                    "smart_wiring.inject_for_test()."
+            if self._api_key is not None:
+                # Explicit override — bypass config loader. Testing path.
+                config = VoiceCloneConfig(
+                    api_key=self._api_key,
+                    base_url=self._base_url or "https://api.minimaxi.com",
                 )
-            config = VoiceCloneConfig(
-                api_key=api_key,
-                base_url=self._base_url or "https://api.minimaxi.com",
-            )
+            else:
+                # Production: use the same config path Studio's Gateway
+                # voice-clone endpoint reads (voice_selection_api.py:633).
+                # This guarantees Smart auto-clone and Studio manual
+                # clone share credentials + base_url + tunables.
+                config = VoiceCloneConfig.from_env(
+                    config_path=config_loader.DEFAULT_AUTODUB_LOCAL_CONFIG_PATH,
+                )
+                # validate() raises with a clear message if api_key /
+                # base_url are missing; let it bubble — auto_voice_review
+                # catches the exception and routes to PRESET fall-through.
+                config.validate()
             self._client = MiniMaxVoiceCloneClient(config)
 
         # Translate Smart Protocol args → real client kwargs, then map
