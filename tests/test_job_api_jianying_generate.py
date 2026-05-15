@@ -228,7 +228,12 @@ class TestGenerateJianyingDraftEndpoint:
             server.shutdown()
 
     # ------------------------------------------------------------------
-    # 4. service_mode != "studio" -> 403
+    # 4. service_mode not in {"studio", "smart"} -> 403
+    #
+    # PR#3C-a (2026-04+) widened this gate from literal "studio" to
+    # {studio, smart} per plan §4.3 末段, and the response code renamed
+    # accordingly: "service_mode_not_studio" → "service_mode_not_studio_or_smart".
+    # Express still gets rejected; the new code reflects the wider gate.
     # ------------------------------------------------------------------
     def test_express_mode_returns_403(self, tmp_path: Path) -> None:
         _, store, server, _, base_url = _start_server(tmp_path)
@@ -241,7 +246,7 @@ class TestGenerateJianyingDraftEndpoint:
                 f"{base_url}/jobs/job_express_403/generate-jianying-draft",
             )
             assert status == 403, f"expected 403 for express mode, got {status}; body={body!r}"
-            assert body.get("code") == "service_mode_not_studio"
+            assert body.get("code") == "service_mode_not_studio_or_smart"
         finally:
             server.shutdown()
 
@@ -259,7 +264,7 @@ class TestGenerateJianyingDraftEndpoint:
                 f"{base_url}/jobs/job_no_mode_403/generate-jianying-draft",
             )
             assert status == 403, f"expected 403 for service_mode=None, got {status}; body={body!r}"
-            assert body.get("code") == "service_mode_not_studio"
+            assert body.get("code") == "service_mode_not_studio_or_smart"
         finally:
             server.shutdown()
 

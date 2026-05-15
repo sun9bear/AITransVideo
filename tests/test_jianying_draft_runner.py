@@ -5,7 +5,7 @@ Covers 12 scenarios:
 2.  trigger(running) -> no new thread, response says still in progress
 3.  trigger(succeeded) -> no new thread, response includes zip path + artifact_key
 4.  trigger(failed) -> clear error, spawn fresh thread, status=running
-5.  trigger with service_mode != "studio" -> JianyingNotAllowedError(service_mode_not_studio)
+5.  trigger with service_mode not in {"studio", "smart"} -> JianyingNotAllowedError(service_mode_not_studio_or_smart)
 6.  trigger with job.status != "succeeded" -> JianyingNotAllowedError(job_not_succeeded)
 7.  trigger with unknown job_id -> KeyError
 8.  background success path (validation_status=ok) -> status=succeeded, zip_path set
@@ -256,7 +256,12 @@ class TestTriggerWhenFailed:
 
 
 # ---------------------------------------------------------------------------
-# Scenario 5: trigger with service_mode != "studio" raises JianyingNotAllowedError
+# Scenario 5: trigger with service_mode not in {"studio", "smart"} raises
+# JianyingNotAllowedError. PR#3C-a (2026-04+) widened the gate from literal
+# "studio" to {studio, smart}; the reason code accordingly renamed from
+# "service_mode_not_studio" to "service_mode_not_studio_or_smart". Smart
+# jobs are gate-1-OK here but get a SECOND check on smart_state.status —
+# see test_smart_studio_gate_acceptance.py for that matrix.
 # ---------------------------------------------------------------------------
 
 
@@ -271,7 +276,7 @@ class TestTriggerServiceModeNotStudio:
         with pytest.raises(JianyingNotAllowedError) as exc_info:
             runner.trigger("job-test-001")
 
-        assert exc_info.value.reason == "service_mode_not_studio"
+        assert exc_info.value.reason == "service_mode_not_studio_or_smart"
 
     def test_trigger_none_service_mode_raises(self, tmp_path):
         store = _make_store(tmp_path)
@@ -283,7 +288,7 @@ class TestTriggerServiceModeNotStudio:
         with pytest.raises(JianyingNotAllowedError) as exc_info:
             runner.trigger("job-test-001")
 
-        assert exc_info.value.reason == "service_mode_not_studio"
+        assert exc_info.value.reason == "service_mode_not_studio_or_smart"
 
 
 # ---------------------------------------------------------------------------
@@ -558,8 +563,14 @@ class TestGetStatus:
 
 class TestJianyingNotAllowedError:
     def test_reason_field_accessible(self):
-        err = JianyingNotAllowedError("service_mode_not_studio", "custom message")
-        assert err.reason == "service_mode_not_studio"
+        # Sample reason string from current gate vocabulary (PR#3C-a
+        # widened "service_mode_not_studio" → "service_mode_not_studio_or_smart").
+        # The exception class itself accepts any reason string; this just
+        # pins the (reason, message) constructor + .reason attr access.
+        err = JianyingNotAllowedError(
+            "service_mode_not_studio_or_smart", "custom message"
+        )
+        assert err.reason == "service_mode_not_studio_or_smart"
         assert "custom message" in str(err)
 
     def test_reason_as_message_when_no_message(self):

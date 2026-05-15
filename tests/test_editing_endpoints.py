@@ -133,11 +133,19 @@ def test_enter_editing_rejects_already_editing(tmp_path: Path) -> None:
 
 
 def test_enter_editing_rejects_express(tmp_path: Path) -> None:
+    # PR#3C-a (2026-04+) widened enter_editing's gate from literal
+    # service_mode == "studio" to ``service_mode in EDITABLE_SERVICE_MODES
+    # (== {"studio", "smart"})`` per plan §4.3 末段. Express still gets
+    # rejected, but the error message now reads "is not in editable set
+    # ['smart', 'studio']; only Studio and Smart jobs support editing"
+    # instead of the legacy "not a Studio job".
     record, store, _ = _build_studio_succeeded_record(tmp_path)
     record = replace(record, service_mode="express")
     store.save_job(record)
 
-    with pytest.raises(EditingConflictError, match="not a Studio job"):
+    with pytest.raises(
+        EditingConflictError, match="is not in editable set"
+    ):
         enter_editing(record, store)
 
 
