@@ -81,17 +81,30 @@ export async function submitTranslationJob(
     source.filename = input.localFileName
   }
 
+  const requestBody: Record<string, unknown> = {
+    job_type: 'localize_video',
+    output_target: 'editor',
+    source,
+    speakers: input.speakers,
+    voice_a: input.voiceA,
+    voice_b: input.voiceB,
+    transcription_method: input.transcriptionMethod ?? 'assemblyai',
+    service_mode: input.service_mode ?? 'express',
+  }
+  // Smart MVP P2 launch (decision log §5.3): smart submissions MUST
+  // carry an explicit ``smart_consent`` payload — Gateway gates
+  // auto-clone / auto-translation-review on it, fail-closed when
+  // absent (Codex 30th-round P1). User selects smart via the UI
+  // mode picker; clicking that button is the implicit consent
+  // (consent terms are shown in the smart card description).
+  if (requestBody.service_mode === 'smart') {
+    requestBody.smart_consent = {
+      auto_voice_clone: true,
+      auto_translation_review: true,
+    }
+  }
   const payload = await apiClient.post<ApiJobRecord>('/jobs', {
-    body: {
-      job_type: 'localize_video',
-      output_target: 'editor',
-      source,
-      speakers: input.speakers,
-      voice_a: input.voiceA,
-      voice_b: input.voiceB,
-      transcription_method: input.transcriptionMethod ?? 'assemblyai',
-      service_mode: input.service_mode ?? 'express',
-    },
+    body: requestBody,
   })
 
   return toJobSummary(payload)

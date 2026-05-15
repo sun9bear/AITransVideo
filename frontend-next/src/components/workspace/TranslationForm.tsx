@@ -32,7 +32,7 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   const [uploadProgress, setUploadProgress] = useState("")
   const [speakers, setSpeakers] = useState<string>("auto")
   const [transcriptionMethod, setTranscriptionMethod] = useState<"assemblyai" | "gemini">("assemblyai")
-  const [serviceMode, setServiceMode] = useState<"express" | "studio">("express")
+  const [serviceMode, setServiceMode] = useState<"express" | "studio" | "smart">("express")
   const [entitlements, setEntitlements] = useState<UserEntitlements | null>(null)
   const [credits, setCredits] = useState<CreditsResponse | null>(null)
   const [creditRates, setCreditRates] = useState<{
@@ -320,7 +320,7 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
           {/* Service plan selection */}
           <div className="space-y-3">
             <span className="text-xs font-medium text-muted-foreground block">任务方案</span>
-            <div className="grid gap-3 sm:grid-cols-2">
+            <div className="grid gap-3 sm:grid-cols-3">
               {/* Express mode */}
               <button
                 type="button"
@@ -397,6 +397,62 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
                       </span>
                     </div>
                     <p className="text-xs text-muted-foreground leading-relaxed">可审核译文、克隆原声音色，更高质量的定制化配音。</p>
+                    <div className="absolute top-3 right-3 rounded-full bg-muted/50 px-2 py-0.5 text-[10px] text-muted-foreground">
+                      {entitlements?.ui.allow_upgrade ? "升级解锁" : "即将开放"}
+                    </div>
+                  </div>
+                )
+              })()}
+
+              {/* Smart mode — locked unless plan allows it. Smart MVP P2:
+                * 100 credits/min fixed price, AI auto-decisions for translation
+                * review + voice cloning. plan_catalog gates plus + pro. */}
+              {(() => {
+                const smartAllowed = entitlements?.limits.allowed_service_modes.includes("smart") ?? false
+                return smartAllowed ? (
+                  <button
+                    type="button"
+                    className={serviceMode === "smart" ? planCardSelectedClass : planCardIdleClass}
+                    style={serviceMode === "smart" ? selectedPlanStyle : undefined}
+                    disabled={isBlockedByConcurrency || submitState === "submitting"}
+                    onClick={() => setServiceMode("smart")}
+                  >
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className="text-sm font-semibold text-foreground">智能版</span>
+                      <span
+                        className="rounded-full px-2 py-0.5 text-[10px] font-semibold"
+                        style={{
+                          backgroundColor: "color-mix(in oklab, var(--primary) 14%, transparent)",
+                          color: "var(--primary)",
+                          border: "1px solid color-mix(in oklab, var(--primary) 32%, transparent)",
+                        }}
+                      >
+                        Smart
+                      </span>
+                    </div>
+                    <p className="text-xs text-muted-foreground leading-relaxed">100 点/分钟固定价，AI 自动审核翻译并自动克隆音色，无需人工操作。</p>
+                    {serviceMode === "smart" && (
+                      <div className="absolute top-3 right-3 h-4 w-4 rounded-full bg-primary flex items-center justify-center">
+                        <svg className="h-2.5 w-2.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                      </div>
+                    )}
+                  </button>
+                ) : (
+                  <div className="relative rounded-xl border border-border bg-muted/20 p-4 text-left opacity-60 cursor-not-allowed">
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className="text-sm font-semibold text-foreground">智能版</span>
+                      <span
+                        className="rounded-full px-2 py-0.5 text-[10px] font-semibold"
+                        style={{
+                          backgroundColor: "color-mix(in oklab, var(--primary) 14%, transparent)",
+                          color: "var(--primary)",
+                          border: "1px solid color-mix(in oklab, var(--primary) 32%, transparent)",
+                        }}
+                      >
+                        Smart
+                      </span>
+                    </div>
+                    <p className="text-xs text-muted-foreground leading-relaxed">100 点/分钟固定价，AI 自动审核翻译并自动克隆音色，无需人工操作。</p>
                     <div className="absolute top-3 right-3 rounded-full bg-muted/50 px-2 py-0.5 text-[10px] text-muted-foreground">
                       {entitlements?.ui.allow_upgrade ? "升级解锁" : "即将开放"}
                     </div>

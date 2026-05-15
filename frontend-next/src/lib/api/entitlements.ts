@@ -1,7 +1,7 @@
 export interface EntitlementsLimits {
   max_duration_minutes: number | null
   max_concurrent_jobs: number | null
-  allowed_service_modes: ('express' | 'studio')[]
+  allowed_service_modes: ('express' | 'studio' | 'smart')[]
   free_jobs_quota_total: number | null
   free_jobs_quota_used: number | null
   free_jobs_quota_remaining: number | null
