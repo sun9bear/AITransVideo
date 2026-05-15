@@ -372,16 +372,38 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                         Path(project_dir) / "audit" / "smart_quality_report.json"
                     )
                     if not qr_path.is_file():
+                        # Codex 第三十八轮 P1: handoff jobs (quota brake /
+                        # sample-too-short / mirror failure / etc.) don't
+                        # write quality_report.json but DO emit
+                        # downgrade_handoff events to smart_decisions.jsonl.
+                        # Synthesize a minimal payload from those events
+                        # so the renderer shows "已转人工 + 原因 + 阶段"
+                        # instead of misleading "处理中" text.
+                        from services.smart.quality_report_synthesizer import (
+                            synthesize_quality_report_from_jsonl,
+                        )
+
+                        audit_dir = Path(project_dir) / "audit"
+                        synthesized = synthesize_quality_report_from_jsonl(
+                            audit_dir,
+                            job_id=job_id,
+                            user_id=str(record.user_id or ""),
+                        )
+                        if synthesized is not None:
+                            self._write_json(HTTPStatus.OK, synthesized)
+                            return
+                        # No quality_report AND no handoff events =>
+                        # truly in-flight (smart job started but hasn't
+                        # reached terminal/handoff). Frontend keeps the
+                        # "处理中" hint for this real case.
                         self._write_json(
                             HTTPStatus.NOT_FOUND,
                             {
                                 "error": "quality_report_not_written",
                                 "reason": (
-                                    "smart job did not reach happy-path "
-                                    "terminal; quality_report only emitted "
-                                    "at terminal per decision log §P3-a "
-                                    "scope-down. Handoff jobs use sidecar "
-                                    "JSONL events for audit trail."
+                                    "smart job not at terminal and no "
+                                    "handoff events yet — likely still "
+                                    "processing"
                                 ),
                                 "job_id": job_id,
                             },

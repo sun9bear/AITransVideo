@@ -96,12 +96,17 @@ export function SmartAutoDecisionPanel({ jobId }: SmartAutoDecisionPanelProps) {
   }
 
   if (state.kind === 'in_flight') {
+    // Codex 第三十八轮 P1: this state now only triggers for truly
+    // in-flight smart jobs (no quality_report.json AND no
+    // downgrade_handoff JSONL events). Handoff jobs flow through the
+    // ``ok`` branch with status=downgraded_to_studio + populated
+    // handoff_history, rendering the actionable "已转人工" view.
     return (
       <section className="surface-card p-6 border border-border">
         <header className="flex items-center gap-2 text-sm text-muted-foreground">
           <Sparkles className="h-4 w-4 text-primary" />
           <span>
-            智能版正在处理中，完成后这里会显示自动决策摘要。
+            智能版尚未到达终态，决策摘要将在完成或转人工后显示。
           </span>
         </header>
       </section>
