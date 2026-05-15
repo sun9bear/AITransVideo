@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING
 
 from credits_service import settle_job_credit_ledger
 from quota import TERMINAL_STATUSES, settle_job_quota
+from cost_summary_backfill import backfill_smart_cost_summary
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -155,6 +156,7 @@ async def mirror_job_terminal_state(
                 "mirror: settle_job_quota failed job=%s status=%s (%s)",
                 db_job.job_id, upstream_status, exc,
             )
+        credit_entries: list = []
         try:
             credit_entries = await settle_job_credit_ledger(db, db_job, upstream_status)
             if credit_entries:
@@ -165,4 +167,78 @@ async def mirror_job_terminal_state(
                 db_job.job_id, upstream_status, exc,
             )
 
+        # Smart MVP Phase 2 (decision log §2): post-settle cost_summary
+        # backfill replaces the two ``pending_*`` fields with real
+        # values. Best-effort — backfill failure must NOT block the
+        # mirror callback (plan §6.4 末段). Skips silently for
+        # non-smart jobs / missing project_dir / missing file.
+        try:
+            await _backfill_smart_cost_summary_post_settle(
+                db, db_job=db_job, credit_entries=credit_entries,
+            )
+        except Exception as exc:
+            logger.warning(
+                "mirror: cost_summary backfill failed job=%s (%s)",
+                getattr(db_job, "job_id", "?"), exc,
+            )
+
     return changed
+
+
+async def _backfill_smart_cost_summary_post_settle(
+    db: "AsyncSession",
+    *,
+    db_job: "Job",
+    credit_entries: list,
+) -> None:
+    """Internal Phase 2 backfill orchestrator: gathers the inputs and
+    delegates to the pure helper.
+
+    Inputs gathered here:
+      - ``service_mode`` / ``project_dir`` from db_job
+      - ``credit_entries`` passed from settle return value
+      - ``quota_used`` = current count of non-expired UserVoice rows
+        for db_job.user_id (matches /api/internal/user-voices/quota
+        ``used`` field semantics)
+
+    Quota lookup uses the same query shape as
+    ``user_voice_api.internal_user_voice_quota`` to keep results
+    consistent across endpoints. Lookup failure → quota_used stays
+    None (fail-closed per Codex 第二十七轮 P0).
+    """
+    service_mode = getattr(db_job, "service_mode", None)
+    if (service_mode or "").lower() != "smart":
+        return
+    project_dir = getattr(db_job, "project_dir", None)
+    if not project_dir:
+        return
+
+    quota_used: int | None = None
+    user_id = getattr(db_job, "user_id", None)
+    if user_id is not None:
+        try:
+            from sqlalchemy import func, select
+            from models import UserVoice
+
+            result = await db.execute(
+                select(func.count())
+                .select_from(UserVoice)
+                .where(
+                    UserVoice.user_id == user_id,
+                    UserVoice.expired_at.is_(None),
+                )
+            )
+            quota_used = int(result.scalar() or 0)
+        except Exception as exc:
+            logger.warning(
+                "backfill: quota lookup failed for user=%s job=%s (%s)",
+                user_id, getattr(db_job, "job_id", "?"), exc,
+            )
+            quota_used = None  # fail-closed: leave field null
+
+    backfill_smart_cost_summary(
+        service_mode=str(service_mode or ""),
+        project_dir=str(project_dir),
+        credit_entries=credit_entries,
+        quota_used=quota_used,
+    )
