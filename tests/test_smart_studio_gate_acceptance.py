@@ -998,17 +998,18 @@ class TestProcessPyStudioGateWidening:
             f"other would silently fail editable / settle invariants."
         )
         # Defensive: each call must be paired with a ``return ProcessResult(``
-        # within the next ~6500 chars (so the marker actually surfaces on
+        # within the next ~9000 chars (so the marker actually surfaces on
         # the terminal frame, not buried in some other path). Window
-        # bumped 800 → 5000 → 6500 (P3-a P1 fix added multi-line dual-gate
-        # at terminal site). Measured gap = 5499 chars at main-run site.
+        # bumped 800 → 5000 → 6500 → 9000 across P3-a (added quality_report
+        # payload-build ~3500 chars) + P3-b (added cost_summary meter-probe
+        # + payload-build ~2800 chars). Measured main-run gap = 8294 chars.
         idx = 0
         paired_calls = 0
         while True:
             idx = source.find(call_anchor, idx)
             if idx < 0:
                 break
-            window = source[idx : idx + 6500]
+            window = source[idx : idx + 9000]
             if "return ProcessResult(" in window:
                 paired_calls += 1
             idx += 1

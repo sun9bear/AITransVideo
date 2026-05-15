@@ -545,6 +545,72 @@ def _emit_smart_quality_report(
         return False
 
 
+def _emit_smart_cost_summary(
+    project_dir: Path,
+    *,
+    job_id: str,
+    service_mode: str,
+    minutes_processed: float,
+    credits_charged: int | None,
+    credits_policy: str,
+    asr_seconds: float,
+    llm_translation_chars: int,
+    tts_chars: int,
+    voice_clone_calls: int,
+    minimax_quota_used_after: int | None,
+) -> bool:
+    """Best-effort wrapper around
+    ``services.smart.sidecar_emitter.write_smart_cost_summary``.
+
+    PR#3C-P3-b: per-job admin-only cost summary (decision log §2).
+    Counterpart to quality_report — same audit/ directory, same
+    schema_version stamping, same fail-safe semantics. Admin-only
+    display per Codex Q2; user-facing workspace MUST NOT show this
+    data (Gateway endpoint at ``/api/admin/jobs/{id}/cost`` is the
+    single authoritative read path).
+
+    Plan §6.4 末段 contract (mirrors quality_report): emit failure
+    must NOT block the user-facing pipeline. Returns ``True`` on
+    successful write, ``False`` on any failure (logged via print).
+
+    Settle-dependent fields (``credits_charged`` +
+    ``minimax_quota_used_after``) are unknown at pipeline terminal —
+    they're set by Gateway's settle_job_credit_ledger AFTER pipeline
+    completes. Pipeline writes ``None`` for these; a follow-up
+    Gateway hook (P3-b-follow-up) updates the file post-settle.
+    Renderer must handle None gracefully in the interim.
+    """
+    from datetime import datetime, timezone
+
+    from services.smart.sidecar_emitter import write_smart_cost_summary
+
+    payload: dict[str, object] = {
+        "job_id": job_id,
+        "service_mode": service_mode,
+        "minutes_processed": minutes_processed,
+        "credits_charged": credits_charged,
+        "credits_policy": credits_policy,
+        "cost_breakdown_internal_only": {
+            "asr_seconds": asr_seconds,
+            "llm_translation_chars": llm_translation_chars,
+            "tts_chars": tts_chars,
+            "voice_clone_calls": voice_clone_calls,
+            "minimax_quota_used_after": minimax_quota_used_after,
+        },
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    try:
+        return bool(write_smart_cost_summary(project_dir, payload))
+    except Exception as _exc:
+        print(
+            f"[smart] cost_summary emit failed (non-blocking): "
+            f"{type(_exc).__name__}: {_exc}",
+            flush=True,
+        )
+        return False
+
+
 def _emit_smart_audit(
     project_dir: Path,
     *,
@@ -4824,6 +4890,65 @@ class ProcessPipeline:
                 translation_review=_qr_translation_review,
                 retry_summary=_qr_retry_summary,
                 handoff_history=[],  # happy-path: no handoffs occurred
+            )
+
+            # PR#3C-P3-b: admin-only cost summary. Same dual-gate as
+            # quality_report. Settle-dependent fields
+            # (credits_charged + minimax_quota_used_after) are unknown
+            # at pipeline terminal — Gateway sets them post-settle
+            # (P3-b follow-up); pipeline writes None for now.
+            #
+            # UsageMeter-derived values (asr / llm / tts / voice_clone):
+            # the meter is in scope as ``usage_meter`` for the smart
+            # branch (created early in run()). Defensive: wrap the
+            # summarize() call in try/except so a meter-internal bug
+            # can't block the user-facing return.
+            _cs_asr_seconds = 0.0
+            _cs_llm_chars = 0
+            _cs_tts_chars = 0
+            _cs_voice_clone_calls = 0
+            try:
+                _meter_summary = usage_meter.summarize()
+                _cs_asr_seconds = float(
+                    _meter_summary.get("llm_audio_input_seconds") or 0.0
+                )
+                # Translation char-count proxy: tts_billed_chars in the
+                # "first" bucket = first-pass-finalized TTS, which is
+                # roughly proportional to translated chars. Decision
+                # log §2 lists "llm_translation_chars" — the closest
+                # proxy at terminal time.
+                _cs_llm_chars = int(
+                    _meter_summary.get("s3_translation_llm_input_tokens") or 0
+                )
+                _cs_tts_chars = int(
+                    _meter_summary.get("tts_billed_chars") or 0
+                )
+                _cs_voice_clone_calls = int(
+                    _meter_summary.get("voice_clone_success_call_count") or 0
+                )
+            except Exception as _exc:
+                print(
+                    f"[smart] cost_summary meter probe failed: "
+                    f"{type(_exc).__name__}: {_exc}",
+                    flush=True,
+                )
+
+            # Minutes processed from source_duration_seconds snapshot
+            # (the Gateway-stamped duration; matches billing).
+            _cs_minutes = float(_snap("source_duration_seconds") or 0.0) / 60.0
+
+            _emit_smart_cost_summary(
+                final_project_dir,
+                job_id=config.job_id,
+                service_mode="smart",
+                minutes_processed=round(_cs_minutes, 3),
+                credits_charged=None,  # settled by Gateway post-pipeline
+                credits_policy="capture_full",
+                asr_seconds=round(_cs_asr_seconds, 3),
+                llm_translation_chars=_cs_llm_chars,
+                tts_chars=_cs_tts_chars,
+                voice_clone_calls=_cs_voice_clone_calls,
+                minimax_quota_used_after=None,  # queried by Gateway post-pipeline
             )
 
         return ProcessResult(

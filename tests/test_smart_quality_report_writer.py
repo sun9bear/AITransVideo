@@ -415,7 +415,7 @@ class TestQualityReportTerminalWiring:
         # locals().get for safe access on requires_review=False
         # smart jobs), so the lookahead has to span it.
         first_site = marker_sites[0]
-        first_lookahead = source[first_site : first_site + 5000]
+        first_lookahead = source[first_site : first_site + 9000]
         assert qr_call in first_lookahead, (
             "Main-run terminal-marker call site is NOT paired with a "
             "_emit_smart_quality_report call within 150 lines. "
@@ -429,7 +429,7 @@ class TestQualityReportTerminalWiring:
         # quality_report (would clobber original audit). Pin the
         # absence so a future PR doesn't accidentally add it.
         for site in marker_sites[1:]:
-            lookahead = source[site : site + 5000]
+            lookahead = source[site : site + 9000]
             assert qr_call not in lookahead, (
                 "Resume-publish-only terminal-marker site has a "
                 "_emit_smart_quality_report call within 30 lines. "
@@ -476,7 +476,7 @@ class TestQualityReportTerminalWiring:
         # The gate that wraps _emit_smart_quality_report at this site
         # must include the effective-mode check. Look ~80 lines below
         # the marker call for the actual quality-report gate.
-        lookahead = source[site : site + 5000]
+        lookahead = source[site : site + 9000]
         qr_call_idx = lookahead.find("_emit_smart_quality_report(")
         assert qr_call_idx >= 0, (
             "_emit_smart_quality_report call not found near main-run "
