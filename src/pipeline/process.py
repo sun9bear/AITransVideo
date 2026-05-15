@@ -4721,7 +4721,23 @@ class ProcessPipeline:
         # AND ``effective_pipeline_mode==smart``. A smart job with
         # requires_review=False reaches this terminal without those
         # vars being bound — locals().get() returns None gracefully.
-        if self._current_service_mode == "smart":
+        #
+        # Codex 第三十五轮 P1: dual-gate on BOTH raw service_mode AND
+        # job_effective_pipeline_mode. A smart job that hit handoff
+        # earlier (smart_state.status="downgraded_to_studio") and was
+        # resumed via Studio /continue still satisfies raw
+        # service_mode=="smart" at terminal, but its
+        # ``job_effective_pipeline_mode`` is "studio" (derived from
+        # smart_state.status via ``derive_effective_pipeline_mode``).
+        # Single-gate would write an EMPTY quality_report.json on that
+        # path (no smart inline locals were populated on the continue
+        # run), and the P3-c renderer would misread the empty file
+        # as a clean happy-path. Per decision log §P3-a scope-down,
+        # handoff-after-continue audits live in JSONL events only.
+        if (
+            self._current_service_mode == "smart"
+            and job_effective_pipeline_mode == "smart"
+        ):
             _local_elig = locals().get("_smart_eligibility")
             _local_vr = locals().get("_smart_voice_review")
             _local_tr_dec = locals().get("_smart_translation_decision")

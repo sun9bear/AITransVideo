@@ -441,6 +441,79 @@ class TestQualityReportTerminalWiring:
                 "filename + sidecar helper."
             )
 
+    def test_handoff_after_continue_terminal_does_not_emit_quality_report(self):
+        """Codex 第三十五轮 P1: a smart job that hit handoff
+        (smart_state.status="downgraded_to_studio") and was resumed
+        via Studio human-review /continue eventually reaches the
+        main-run terminal with:
+          - raw ``service_mode`` STILL "smart" (JobRecord unchanged)
+          - effective pipeline mode derived as "studio" (via
+            ``derive_effective_pipeline_mode`` reading
+            smart_state.status)
+
+        The original gate
+        ``if self._current_service_mode == "smart":``
+        would write an EMPTY quality_report.json on this path
+        (no eligibility/voice/translation locals populated because
+        smart inline branches were skipped on the continue run),
+        with ``handoff_history=[]`` — which the P3-c renderer would
+        misread as a clean happy-path job.
+
+        Per decision log §P3-a scope-down, handoff jobs rely on
+        JSONL events for handoff_history; the quality_report must
+        NOT be written on this path.
+
+        Pin (source-level): the gate must ALSO check
+        ``job_effective_pipeline_mode == "smart"``.
+        """
+        source = self._source()
+
+        # Find the main-run terminal-marker call site
+        marker_call = "self._emit_smart_terminal_completion_marker("
+        site = source.find(marker_call)
+        assert site >= 0
+
+        # The gate that wraps _emit_smart_quality_report at this site
+        # must include the effective-mode check. Look ~80 lines below
+        # the marker call for the actual quality-report gate.
+        lookahead = source[site : site + 5000]
+        qr_call_idx = lookahead.find("_emit_smart_quality_report(")
+        assert qr_call_idx >= 0, (
+            "_emit_smart_quality_report call not found near main-run "
+            "terminal. P3-a wiring missing or relocated."
+        )
+
+        # Find the gating ``if`` that wraps the quality_report call.
+        # Look in the full window from the marker call to the qr_call —
+        # the gate must mention both conditions inside it.
+        gate_region = lookahead[: qr_call_idx]
+        # The gate uses ``self._current_service_mode == "smart"`` plus
+        # the effective-mode check. Both substrings must appear in the
+        # region preceding the qr_call (within the same if-block).
+        assert 'self._current_service_mode == "smart"' in gate_region, (
+            "Expected gate ``self._current_service_mode == \"smart\"`` "
+            "preceding the quality_report call — has it been removed?"
+        )
+        # Codex 第三十五轮 P1: dual condition required.
+        assert (
+            'job_effective_pipeline_mode == "smart"' in gate_region
+            or "job_effective_pipeline_mode == 'smart'" in gate_region
+        ), (
+            "Main-run terminal quality_report gate is single-condition "
+            "``self._current_service_mode == \"smart\"``. Codex 第三十五轮 "
+            "P1: smart jobs that hit handoff AND were resumed by Studio "
+            "human-review still satisfy raw service_mode==smart at the "
+            "terminal, but their EFFECTIVE pipeline mode is studio "
+            "(derive_effective_pipeline_mode reads smart_state.status). "
+            "Writing quality_report on that path produces empty/misleading "
+            "audit data — the renderer (P3-c) would misread as clean "
+            "happy-path.\n\nFix: change the gate to:\n"
+            "  if self._current_service_mode == \"smart\" and "
+            "job_effective_pipeline_mode == \"smart\":\n\n"
+            f"Gate region (between marker call and quality_report call):\n"
+            f"{gate_region[-1500:]}"
+        )
+
     def test_terminal_marker_helper_signature_unchanged(self):
         """Defensive: the terminal-marker helper's signature stays
         ``(self, *, service_mode: str | None)``. PR#3C-P3-a chose to
