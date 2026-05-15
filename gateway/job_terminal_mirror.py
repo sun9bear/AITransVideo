@@ -156,11 +156,19 @@ async def mirror_job_terminal_state(
                 "mirror: settle_job_quota failed job=%s status=%s (%s)",
                 db_job.job_id, upstream_status, exc,
             )
-        credit_entries: list = []
+        # Track whether settle completed cleanly. Codex 第三十九轮 P1:
+        # if settle raises, ``credit_entries`` would have stayed [] and
+        # backfill below would write a misleading
+        # ``pending_credits_charged=0`` plus stamp ``settled_at``,
+        # making admin think the job settled at 0 credits. Skip
+        # backfill on failure so the pre-settle ``pending_*=null``
+        # state is preserved until a successful retry.
+        settle_succeeded = False
         try:
             credit_entries = await settle_job_credit_ledger(db, db_job, upstream_status)
             if credit_entries:
                 changed = True
+            settle_succeeded = True
         except Exception as exc:
             logger.warning(
                 "mirror: settle_job_credit_ledger failed job=%s status=%s (%s)",
@@ -171,10 +179,11 @@ async def mirror_job_terminal_state(
         # backfill replaces the two ``pending_*`` fields with real
         # values. Best-effort — backfill failure must NOT block the
         # mirror callback (plan §6.4 末段). Skips silently for
-        # non-smart jobs / missing project_dir / missing file.
+        # non-smart jobs / missing project_dir / missing file / failed
+        # settle.
         try:
             await _backfill_smart_cost_summary_post_settle(
-                db, db_job=db_job, credit_entries=credit_entries,
+                db, db_job=db_job, settle_succeeded=settle_succeeded,
             )
         except Exception as exc:
             logger.warning(
@@ -189,23 +198,37 @@ async def _backfill_smart_cost_summary_post_settle(
     db: "AsyncSession",
     *,
     db_job: "Job",
-    credit_entries: list,
+    settle_succeeded: bool,
 ) -> None:
-    """Internal Phase 2 backfill orchestrator: gathers the inputs and
+    """Internal Phase 2 backfill orchestrator (Codex 第三十九轮 P1):
+    queries the CANONICAL persisted ``CreditsLedger`` for the job and
     delegates to the pure helper.
 
-    Inputs gathered here:
-      - ``service_mode`` / ``project_dir`` from db_job
-      - ``credit_entries`` passed from settle return value
-      - ``quota_used`` = current count of non-expired UserVoice rows
-        for db_job.user_id (matches /api/internal/user-voices/quota
-        ``used`` field semantics)
+    Gates:
+      - ``settle_succeeded=False`` (settle raised) → return early;
+        leave ``pending_*=null`` so subsequent successful retry can
+        backfill correctly.
+      - ``service_mode != "smart"`` → return early.
+      - ``project_dir`` missing → return early.
+
+    Why query persisted ledger instead of trusting the per-call return:
+      - Mirror is level-triggered; ``settle_job_credit_ledger`` has
+        idempotency guards (``_has_existing_settlement``) that return
+        ``[]`` on subsequent passes even though the job WAS charged.
+        Using the empty return would write
+        ``pending_credits_charged=0`` for already-settled jobs.
+      - Historical jobs settled BEFORE this Phase 2 deploy have ledger
+        rows but never went through the new backfill path. Querying
+        persisted state lets us backfill them on the next level-
+        triggered mirror pass.
 
     Quota lookup uses the same query shape as
-    ``user_voice_api.internal_user_voice_quota`` to keep results
-    consistent across endpoints. Lookup failure → quota_used stays
-    None (fail-closed per Codex 第二十七轮 P0).
+    ``user_voice_api.internal_user_voice_quota``. Failure → quota_used
+    stays None (fail-closed per Codex 第二十七轮 P0).
     """
+    if not settle_succeeded:
+        return  # Codex 39 P1: don't stamp settled_at on failed settle
+
     service_mode = getattr(db_job, "service_mode", None)
     if (service_mode or "").lower() != "smart":
         return
@@ -213,8 +236,32 @@ async def _backfill_smart_cost_summary_post_settle(
     if not project_dir:
         return
 
-    quota_used: int | None = None
+    job_id = getattr(db_job, "job_id", None)
     user_id = getattr(db_job, "user_id", None)
+
+    # Codex 39 P1: query CANONICAL persisted ledger by related_job_id.
+    # Single source of truth regardless of (a) idempotent settle return
+    # of [] or (b) historical jobs settled pre-Phase-2.
+    persisted_entries: list = []
+    try:
+        from sqlalchemy import select
+        from models import CreditsLedger
+
+        result = await db.execute(
+            select(CreditsLedger).where(
+                CreditsLedger.related_job_id == job_id,
+            )
+        )
+        persisted_entries = list(result.scalars().all())
+    except Exception as exc:
+        logger.warning(
+            "backfill: persisted ledger query failed for job=%s (%s) — "
+            "skipping backfill to avoid stamping incomplete settled_at",
+            job_id, exc,
+        )
+        return
+
+    quota_used: int | None = None
     if user_id is not None:
         try:
             from sqlalchemy import func, select
@@ -232,13 +279,13 @@ async def _backfill_smart_cost_summary_post_settle(
         except Exception as exc:
             logger.warning(
                 "backfill: quota lookup failed for user=%s job=%s (%s)",
-                user_id, getattr(db_job, "job_id", "?"), exc,
+                user_id, job_id, exc,
             )
             quota_used = None  # fail-closed: leave field null
 
     backfill_smart_cost_summary(
         service_mode=str(service_mode or ""),
         project_dir=str(project_dir),
-        credit_entries=credit_entries,
+        credit_entries=persisted_entries,
         quota_used=quota_used,
     )

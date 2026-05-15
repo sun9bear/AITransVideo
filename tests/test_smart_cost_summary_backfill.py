@@ -312,3 +312,187 @@ class TestBackfillBestEffort:
             quota_used=1,
         )
         assert ok is False
+
+
+# ===========================================================================
+# Cycle 5 — Codex 第三十九轮 P1: orchestrator queries canonical persisted
+# ledger instead of trusting per-call return; skips on settle failure
+# ===========================================================================
+
+
+import asyncio
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+
+class TestOrchestratorCanonicalLedger:
+    """Codex 第三十九轮 P1 regression tests for
+    ``_backfill_smart_cost_summary_post_settle`` (gateway/job_terminal_mirror.py).
+
+    Two failure modes the pure-helper tests above do NOT cover:
+
+    1. ``settle_job_credit_ledger`` raised → orchestrator's
+       ``credit_entries`` would have stayed ``[]`` (from initialization).
+       Pre-fix code wrote ``pending_credits_charged=0`` + ``settled_at``,
+       misleading admin into thinking the job settled at 0 credits.
+    2. ``settle_job_credit_ledger`` returned ``[]`` because idempotency
+       guard short-circuited (job already settled by previous mirror
+       pass) → same false 0 problem, plus historical jobs settled
+       before Phase 2 deploy can never get backfilled.
+
+    Fix: orchestrator queries CreditsLedger by ``related_job_id`` to get
+    the CANONICAL net charge regardless of what the current call
+    returned. Skips entirely on settle exception.
+    """
+
+    @pytest.mark.asyncio
+    async def test_orchestrator_skips_when_settle_failed(
+        self, monkeypatch, tmp_path,
+    ):
+        """settle raised → orchestrator MUST NOT call backfill_helper
+        (no settled_at stamp, no false 0 in pending_credits_charged)."""
+        from job_terminal_mirror import _backfill_smart_cost_summary_post_settle
+
+        calls: list[dict] = []
+        monkeypatch.setattr(
+            "job_terminal_mirror.backfill_smart_cost_summary",
+            lambda **kwargs: calls.append(kwargs) or True,
+        )
+
+        fake_db = MagicMock()
+        fake_db.execute = AsyncMock(return_value=MagicMock())
+        fake_db_job = MagicMock(
+            service_mode="smart",
+            project_dir=str(tmp_path),
+            job_id="job_x",
+            user_id="user_x",
+        )
+
+        await _backfill_smart_cost_summary_post_settle(
+            fake_db,
+            db_job=fake_db_job,
+            settle_succeeded=False,  # settle raised
+        )
+        assert calls == [], (
+            "Orchestrator wrote backfill despite settle raising — would "
+            "stamp settled_at on incomplete data."
+        )
+
+    @pytest.mark.asyncio
+    async def test_orchestrator_queries_persisted_ledger_when_settle_ok(
+        self, monkeypatch, tmp_path,
+    ):
+        """settle returned []` (idempotent or already settled) BUT
+        persisted ledger has captures → backfill MUST receive persisted
+        entries, not the empty per-call list."""
+        from job_terminal_mirror import _backfill_smart_cost_summary_post_settle
+
+        # Persisted ledger has 2 captures totaling 1500.
+        persisted_entries = [
+            _ledger_entry("capture", 1000, "smart_capture_full"),
+            _ledger_entry("capture", 500, "smart_capture_full"),
+        ]
+
+        # Mock db.execute to return ledger entries on first call (the
+        # CreditsLedger query) and quota result on second.
+        ledger_result = MagicMock()
+        ledger_result.scalars.return_value = MagicMock()
+        ledger_result.scalars.return_value.all.return_value = persisted_entries
+        quota_result = MagicMock()
+        quota_result.scalar.return_value = 5
+
+        fake_db = MagicMock()
+        fake_db.execute = AsyncMock(side_effect=[ledger_result, quota_result])
+
+        calls: list[dict] = []
+        monkeypatch.setattr(
+            "job_terminal_mirror.backfill_smart_cost_summary",
+            lambda **kwargs: calls.append(kwargs) or True,
+        )
+
+        import uuid as _uuid
+        fake_db_job = MagicMock(
+            service_mode="smart",
+            project_dir=str(tmp_path),
+            job_id="job_x",
+            user_id=_uuid.uuid4(),
+        )
+
+        await _backfill_smart_cost_summary_post_settle(
+            fake_db,
+            db_job=fake_db_job,
+            settle_succeeded=True,
+        )
+        assert len(calls) == 1, "backfill helper not called"
+        call_entries = calls[0]["credit_entries"]
+        # Must receive PERSISTED entries (length 2), not the (empty)
+        # current-call return.
+        assert len(call_entries) == 2
+        assert calls[0]["quota_used"] == 5
+
+    @pytest.mark.asyncio
+    async def test_orchestrator_skips_when_ledger_query_fails(
+        self, monkeypatch, tmp_path,
+    ):
+        """DB execute raises → orchestrator returns early, no backfill
+        (don't stamp settled_at on incomplete data)."""
+        from job_terminal_mirror import _backfill_smart_cost_summary_post_settle
+
+        fake_db = MagicMock()
+        fake_db.execute = AsyncMock(side_effect=RuntimeError("db down"))
+
+        calls: list[dict] = []
+        monkeypatch.setattr(
+            "job_terminal_mirror.backfill_smart_cost_summary",
+            lambda **kwargs: calls.append(kwargs) or True,
+        )
+
+        import uuid as _uuid
+        fake_db_job = MagicMock(
+            service_mode="smart",
+            project_dir=str(tmp_path),
+            job_id="job_x",
+            user_id=_uuid.uuid4(),
+        )
+
+        await _backfill_smart_cost_summary_post_settle(
+            fake_db,
+            db_job=fake_db_job,
+            settle_succeeded=True,
+        )
+        assert calls == [], (
+            "Orchestrator called backfill despite ledger query failure"
+        )
+
+    @pytest.mark.asyncio
+    async def test_orchestrator_skips_non_smart(
+        self, monkeypatch, tmp_path,
+    ):
+        """Non-smart job → orchestrator returns early, no DB query, no
+        backfill."""
+        from job_terminal_mirror import _backfill_smart_cost_summary_post_settle
+
+        fake_db = MagicMock()
+        fake_db.execute = AsyncMock()
+
+        calls: list[dict] = []
+        monkeypatch.setattr(
+            "job_terminal_mirror.backfill_smart_cost_summary",
+            lambda **kwargs: calls.append(kwargs) or True,
+        )
+
+        fake_db_job = MagicMock(
+            service_mode="studio",  # NOT smart
+            project_dir=str(tmp_path),
+            job_id="job_x",
+            user_id="user_x",
+        )
+
+        await _backfill_smart_cost_summary_post_settle(
+            fake_db,
+            db_job=fake_db_job,
+            settle_succeeded=True,
+        )
+        assert calls == []
+        fake_db.execute.assert_not_called()
