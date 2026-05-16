@@ -132,7 +132,7 @@ def segment_with_llm(
             contents=prompt,
             config=types.GenerateContentConfig(
                 temperature=0.1,
-                max_output_tokens=65536,
+                max_output_tokens=65535,  # Gemini API accepts [1, 65536) half-open
             ),
         )
         output_text = _extract_text(response)

@@ -1286,7 +1286,7 @@ def _review_pass1_speakers(
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
                     temperature=0.1,
-                    max_output_tokens=65536,
+                    max_output_tokens=65535,  # Gemini API accepts [1, 65536) half-open
                     thinking_config=types.ThinkingConfig(thinking_budget=1024),
                 ),
             )
@@ -1517,7 +1517,7 @@ def _call_text_llm(
     model_name: str,
     api_key: str | None,
     prompt: str,
-    max_output_tokens: int = 65536,
+    max_output_tokens: int = 65535,  # Gemini API accepts [1, 65536) half-open
 ) -> str:
     """Call an LLM for text-only tasks, dispatching by provider.
 
@@ -1630,7 +1630,7 @@ def _review_pass2_text(
     def _attempt_p2(label: str, model: str, key: str | None) -> dict:
         nonlocal response_text
         response_text = _call_text_llm(
-            model_name=model, api_key=key, prompt=prompt, max_output_tokens=65536,
+            model_name=model, api_key=key, prompt=prompt, max_output_tokens=65535,  # Gemini API accepts [1, 65536) half-open
         )
         _record_llm_usage(
             usage_meter,
@@ -2020,7 +2020,7 @@ def review_pass3_voice_profiles(
             resp = client.models.generate_content(
                 model=model_id, contents=contents,
                 config=types.GenerateContentConfig(
-                    response_mime_type="application/json", temperature=0.1, max_output_tokens=65536,
+                    response_mime_type="application/json", temperature=0.1, max_output_tokens=65535,  # Gemini API accepts [1, 65536) half-open
                     thinking_config=types.ThinkingConfig(thinking_budget=1024),
                 ),
             )
@@ -2474,7 +2474,7 @@ def _call_review(
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 temperature=0.1,
-                max_output_tokens=65536,
+                max_output_tokens=65535,  # Gemini API accepts [1, 65536) half-open
                 thinking_config=types.ThinkingConfig(thinking_budget=1024),
             ),
             **generate_kwargs,

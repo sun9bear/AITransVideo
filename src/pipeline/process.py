@@ -3739,11 +3739,22 @@ class ProcessPipeline:
                     )
                     if _smart_consent_allows_clone and _smart_main_speakers:
                         if _smart_needs_new_clone:
-                            _smart_quota_remaining = (
-                                _fetch_smart_user_voice_quota_remaining(
-                                    str(_snap("user_id") or "")
+                            # 2026-05-16: admin role bypasses voice
+                            # library cap (admin_settings.smart_user_voice_clone_cap).
+                            # Smart §7.3 water-mark brake is a safety
+                            # net for end users; admin accounts test /
+                            # demo and should not be quota-blocked.
+                            # Effective infinite quota = max int (well
+                            # above the cap+water-mark threshold).
+                            _smart_role = str(_snap("role_snapshot") or "").lower()
+                            if _smart_role == "admin":
+                                _smart_quota_remaining = 999_999
+                            else:
+                                _smart_quota_remaining = (
+                                    _fetch_smart_user_voice_quota_remaining(
+                                        str(_snap("user_id") or "")
+                                    )
                                 )
-                            )
                             if _smart_quota_remaining is None:
                                 # Fail-closed: quota unknown → handoff to Studio.
                                 # User can re-attempt via the explicit "克隆音色"

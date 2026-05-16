@@ -943,6 +943,65 @@ async def intercept_create_job(
     from plan_catalog import get_effective_plan_gate
     plan_info = get_effective_plan_gate(user) if user else get_legacy_plan_gate_dict().get("free", {})
 
+    # --- Smart MVP §7.3 pre-flight voice library quota check (2026-05-16) ---
+    # Without this, smart jobs that would hit the water-mark brake at
+    # voice_review fail HALFWAY through (after S0/S1/S2 ASR + speaker
+    # review + translation). Better UX per user feedback: reject at job
+    # creation with a clear actionable message so the user can clean up
+    # voice library BEFORE spending time/budget.
+    #
+    # Skipped for admin (testing / demo bypass — matches the same
+    # skip in process.py smart inline branch on role_snapshot=admin).
+    if service_mode == "smart" and user and not is_admin:
+        try:
+            from sqlalchemy import func, select
+            from models import UserVoice
+            from admin_settings import load_settings
+
+            quota_used_result = await db.execute(
+                select(func.count())
+                .select_from(UserVoice)
+                .where(
+                    UserVoice.user_id == user.id,
+                    UserVoice.expired_at.is_(None),
+                )
+            )
+            quota_used = int(quota_used_result.scalar() or 0)
+            admin_settings = load_settings()
+            cap = int(
+                getattr(admin_settings, "smart_user_voice_clone_cap", 30)
+                or 30
+            )
+            remaining = max(0, cap - quota_used)
+            # Water mark matches services.smart.auto_voice_review's
+            # internal threshold (reason_code suffix _le_3 confirmed).
+            water_mark = 3
+            if remaining <= water_mark:
+                return _error_response(
+                    400, "smart_voice_library_at_safety_water_mark",
+                    f"您的个人音色库已接近上限（{quota_used} / {cap} 已用，"
+                    f"剩余 {remaining}）。智能版需要至少 {water_mark + 1} "
+                    f"个剩余位置才能自动克隆主说话人音色。请先清理音色库后重试，"
+                    f"或改用工作台版手动管理音色。",
+                    {
+                        "quota_used": quota_used,
+                        "quota_cap": cap,
+                        "remaining": remaining,
+                        "water_mark": water_mark,
+                    },
+                )
+        except Exception as _quota_check_exc:
+            # Defensive: quota check failure must NOT block submission
+            # entirely (e.g., admin_settings unreadable, DB transient
+            # failure). Log via standard pattern, fall through. The
+            # smart inline branch's runtime quota check will still
+            # fail-closed as fallback.
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "smart pre-flight quota check failed for user=%s: %s",
+                getattr(user, "id", None), _quota_check_exc,
+            )
+
     # --- 1. Validate service_mode ---
     if user and not is_admin:
         if service_mode not in plan_info["allowed_service_modes"]:
