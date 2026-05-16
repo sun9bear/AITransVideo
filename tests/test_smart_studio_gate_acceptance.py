@@ -655,7 +655,10 @@ class TestProcessPyStudioGateWidening:
         smart_block = _find_anchor_block(
             self._source(),
             "Smart inline auto-approve path",
-            window=900,
+            # 2026-05-16: bumped 900 → 950 after adding non-main
+            # speaker auto-match block (~25 lines) between the
+            # main-speaker decision loop and emit_smart_state_marker.
+            window=950,
         )
         for required_call in (
             "evaluate_voice_review",

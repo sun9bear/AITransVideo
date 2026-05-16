@@ -679,6 +679,62 @@ def _emit_smart_cost_summary_from_meter(
     )
 
 
+def _resolve_smart_minor_speaker_voices(
+    *,
+    speakers,
+    main_speaker_ids,
+) -> dict:
+    """Smart MVP (2026-05-16): resolve preset voice IDs for non-main
+    speakers via the existing ``auto_matched_voice`` field.
+
+    Background: ``_smart_voice_review.decisions`` only covers main
+    speakers (filtered by eligibility_gate). Without this helper,
+    non-main speakers (low_share / rank > 3 / etc.) end up with
+    ``segment.voice_id = None`` at TTS time — process.py:7113's
+    "leave voice_id as-is (auto-match)" comment is aspirational, no
+    actual auto-match runs at TTS time.
+
+    Solution: ``vs_payload.speakers`` already carries
+    ``auto_matched_voice`` for ALL speakers (computed at vs_payload
+    build time by ``_build_voice_selection_review_payload`` calling
+    ``services.tts.voice_match_resolver.resolve_voice_match`` per
+    speaker, regardless of main/minor status). This helper extracts
+    those for non-main speakers using the same strict-string
+    contract as ``_resolve_preset_voice_id`` (Codex 第三十七轮 P2).
+
+    Excluded:
+      - Main speakers (already handled by voice_review.decisions)
+      - ``dubbing_mode in {keep_original, mute_or_background}`` —
+        user explicitly kept original; injecting a preset would
+        override their choice
+      - Missing/empty ``auto_matched_voice`` — degraded shape, skip
+        without crash; downstream TTS will see voice_id=None and
+        use provider default
+
+    Returns: ``{speaker_id: voice_id_string}`` for each non-main,
+    dub-able speaker with a valid auto-matched voice.
+
+    Pure function — no I/O, no side effects.
+    """
+    _NON_DUBBED = {"keep_original", "mute_or_background"}
+    main_set = set(main_speaker_ids or [])
+    result: dict[str, str] = {}
+    for sp in speakers or []:
+        if not isinstance(sp, dict):
+            continue
+        sp_id = sp.get("speaker_id")
+        if not sp_id:
+            continue
+        if sp_id in main_set:
+            continue
+        if sp.get("dubbing_mode") in _NON_DUBBED:
+            continue
+        voice_id = _resolve_preset_voice_id(sp.get("auto_matched_voice"))
+        if voice_id:
+            result[sp_id] = voice_id
+    return result
+
+
 def _resolve_preset_voice_id(auto_matched_voice) -> str:
     """Codex 第三十七轮 Test Gap + P2: extract the bare ``voice_id``
     STRING from a PRESET decision's ``auto_matched_voice`` value.
@@ -3714,6 +3770,27 @@ class ProcessPipeline:
                         # is recorded on _sp_entry["clone_provider"] for audit
                         # but never flows into segment.tts_provider routing.
 
+                    # Smart MVP (2026-05-16): non-main speakers also get a
+                    # voice via the existing auto_matched_voice from
+                    # vs_payload (same voice_match_resolver Studio UI uses
+                    # for "推荐音色"). Without this, speaker_c+ ends up
+                    # with segment.voice_id=None at TTS dispatch time
+                    # (process.py:7113 "auto-match" comment is aspirational).
+                    _smart_minor_voice_assignments = (
+                        _resolve_smart_minor_speaker_voices(
+                            speakers=_smart_approved_speakers,
+                            main_speaker_ids=_smart_main_speaker_ids,
+                        )
+                    )
+                    for _minor_sid, _minor_vid in (
+                        _smart_minor_voice_assignments.items()
+                    ):
+                        _speaker_voices[_minor_sid] = _minor_vid
+                        _minor_entry = _smart_speakers_by_id.get(_minor_sid)
+                        if _minor_entry is not None:
+                            _minor_entry["voice_id"] = _minor_vid
+                            _minor_entry["auto_decision"] = "preset_minor_speaker"
+
                     # Codex 第二十九轮 P0: if any mirror failed, hand off
                     # to Studio. The MiniMax voice already exists (and
                     # was paid for) but Gateway doesn't know about it,
@@ -3843,6 +3920,14 @@ class ProcessPipeline:
                         for _dec in _smart_voice_review.decisions
                         if _dec.choice == VoiceReviewChoice.PRESET
                     )
+                    # 2026-05-16: ``minor_preset_count`` captures non-main
+                    # speakers that got auto-matched preset (low_share /
+                    # rank > 3). Admin-visible in the sidecar JSONL so
+                    # rollout audit can answer "how many speakers in this
+                    # job got the minor-auto-match treatment?".
+                    _smart_minor_preset_count = len(
+                        _smart_minor_voice_assignments
+                    )
                     _emit_smart_audit(
                         final_project_dir,
                         decision_type="voice_selection_auto_approve",
@@ -3853,6 +3938,7 @@ class ProcessPipeline:
                             ),
                             "cloned_count": _smart_cloned_count,
                             "preset_count": _smart_preset_count,
+                            "minor_preset_count": _smart_minor_preset_count,
                             "main_speakers_count": len(
                                 _smart_main_speakers
                             ),
