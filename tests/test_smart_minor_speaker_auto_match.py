@@ -98,35 +98,43 @@ class TestMinorSpeakerVoiceResolver:
     def test_non_main_with_keep_original_skipped(self):
         """``dubbing_mode=keep_original`` is the user's explicit choice
         to keep the original audio for that speaker. MUST NOT inject a
-        preset — that would override the user intent."""
+        preset — that would override the user intent.
+
+        Codex 第四十轮 P2.4 update: dubbing_mode is now read from the
+        ``dubbing_mode_by_speaker`` dict (aggregated from segment-level
+        state by ``_aggregate_speaker_dubbing_modes``), not from
+        ``sp["dubbing_mode"]`` — the production vs_payload speaker
+        entries don't carry the field.
+        """
         from pipeline.process import _resolve_smart_minor_speaker_voices
 
         result = _resolve_smart_minor_speaker_voices(
             speakers=[
                 {
                     "speaker_id": "speaker_c",
-                    "dubbing_mode": "keep_original",
                     "auto_matched_voice": {"voice_id": "vt_should_skip"},
                 },
             ],
             main_speaker_ids=set(),
+            dubbing_mode_by_speaker={"speaker_c": "keep_original"},
         )
         assert result == {}
 
     def test_non_main_with_mute_or_background_skipped(self):
         """Same as keep_original — user wants this speaker mute / merged
-        into ambient track, NOT dubbed."""
+        into ambient track, NOT dubbed. Codex 40 P2.4: read aggregated
+        dubbing_mode from the dict, not sp dict."""
         from pipeline.process import _resolve_smart_minor_speaker_voices
 
         result = _resolve_smart_minor_speaker_voices(
             speakers=[
                 {
                     "speaker_id": "speaker_d",
-                    "dubbing_mode": "mute_or_background",
                     "auto_matched_voice": {"voice_id": "vt_should_skip"},
                 },
             ],
             main_speaker_ids=set(),
+            dubbing_mode_by_speaker={"speaker_d": "mute_or_background"},
         )
         assert result == {}
 
@@ -176,7 +184,8 @@ class TestMinorSpeakerVoiceResolver:
 
     def test_mixed_speakers_returns_only_dub_able_minors(self):
         """Realistic mixed scenario: 2 main, 1 keep_original, 1 minor
-        with auto-match, 1 minor without auto-match."""
+        with auto-match, 1 minor without auto-match. Codex 40 P2.4:
+        dubbing_mode comes from the aggregated dict."""
         from pipeline.process import _resolve_smart_minor_speaker_voices
 
         result = _resolve_smart_minor_speaker_voices(
@@ -189,9 +198,8 @@ class TestMinorSpeakerVoiceResolver:
                     "speaker_id": "speaker_b",
                     "auto_matched_voice": {"voice_id": "vt_b"},
                 },
-                {  # excluded — keep original
+                {  # excluded via aggregated dict — keep original
                     "speaker_id": "speaker_c",
-                    "dubbing_mode": "keep_original",
                     "auto_matched_voice": {"voice_id": "vt_c_skip"},
                 },
                 {  # minor — eligible for auto-match
@@ -204,6 +212,13 @@ class TestMinorSpeakerVoiceResolver:
                 },
             ],
             main_speaker_ids={"speaker_a", "speaker_b"},
+            dubbing_mode_by_speaker={
+                "speaker_a": "dub",
+                "speaker_b": "dub",
+                "speaker_c": "keep_original",
+                "speaker_d": "dub",
+                "speaker_e": "dub",
+            },
         )
         assert result == {"speaker_d": "vt_d_minor"}
 

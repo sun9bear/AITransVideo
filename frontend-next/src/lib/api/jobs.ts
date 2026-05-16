@@ -91,16 +91,29 @@ export async function submitTranslationJob(
     transcription_method: input.transcriptionMethod ?? 'assemblyai',
     service_mode: input.service_mode ?? 'express',
   }
-  // Smart MVP P2 launch (decision log §5.3): smart submissions MUST
-  // carry an explicit ``smart_consent`` payload — Gateway gates
-  // auto-clone / auto-translation-review on it, fail-closed when
-  // absent (Codex 30th-round P1). User selects smart via the UI
-  // mode picker; clicking that button is the implicit consent
-  // (consent terms are shown in the smart card description).
+  // Smart MVP master plan §5.3 (hardened Codex 第四十轮 P1.1):
+  // smart submissions MUST carry the complete 6-field consent
+  // payload. Gateway's validate_smart_consent() rejects partial
+  // / malformed shapes with 400 ``smart_consent_invalid``. User
+  // selects smart via the UI mode picker; clicking that button is
+  // the implicit consent for all 6 fields (terms shown in the
+  // smart card description). MVP defaults:
+  //   - auto_voice_clone=true: MVP cloning is core value-add
+  //   - auto_retranslate=false: MVP doesn't re-translate (deferred to P3+ verifier)
+  //   - auto_retts=true: MVP retries failed TTS within budget
+  //   - auto_multimodal_verification=false: verifier is P3+ feature
+  //   - no_extra_charge_without_confirmation=true: fixed-price product promise
+  //   - on_budget_exhausted=degraded_delivery_with_report:
+  //     'fail_and_refund' is currently rejected by validator (partial-
+  //     capture settle path is STUB; Codex 40 P1.2).
   if (requestBody.service_mode === 'smart') {
     requestBody.smart_consent = {
       auto_voice_clone: true,
-      auto_translation_review: true,
+      auto_retranslate: false,
+      auto_retts: true,
+      auto_multimodal_verification: false,
+      no_extra_charge_without_confirmation: true,
+      on_budget_exhausted: 'degraded_delivery_with_report',
     }
   }
   const payload = await apiClient.post<ApiJobRecord>('/jobs', {

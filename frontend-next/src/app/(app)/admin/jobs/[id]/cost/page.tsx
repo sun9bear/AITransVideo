@@ -49,6 +49,9 @@ interface SmartCostSummary {
     pending_minimax_quota_used_after: number | null
   }
   generated_at: string
+  // Codex 第四十轮 P2.5: Phase 2 backfill stamps this after Gateway
+  // settle. When absent → cost summary is still "pending settle".
+  settled_at?: string | null
 }
 
 type FetchState =
@@ -230,8 +233,21 @@ function CostSummaryCard({ cost }: { cost: SmartCostSummary }) {
         </dl>
       </section>
 
-      <footer className="text-xs text-muted-foreground">
-        生成于 {cost.generated_at} · schema_version={cost.schema_version}
+      {/* Codex 第四十轮 P2.5: distinguish pre-settle (生成于) from
+        * post-settle (Gateway 结算于). pending_credits_charged /
+        * pending_minimax_quota_used_after only flip from null to
+        * real values after Gateway runs settle_job_credit_ledger
+        * + backfill. Admin needs to know whether they're looking at
+        * pipeline-emit-time data or post-settle data. */}
+      <footer className="text-xs text-muted-foreground space-y-1">
+        <p>生成于 {cost.generated_at} · schema_version={cost.schema_version}</p>
+        {cost.settled_at ? (
+          <p>Gateway 结算于 {cost.settled_at}（pending_* 字段已回填）</p>
+        ) : (
+          <p className="text-amber-600 dark:text-amber-400">
+            尚未由 Gateway 结算回填，pending_* 字段仍为占位值。
+          </p>
+        )}
       </footer>
     </div>
   )

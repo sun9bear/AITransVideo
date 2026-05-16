@@ -1072,29 +1072,42 @@ async def _settle_smart_job_credit_ledger(
         )
 
     if credits_policy == "capture_actual_cost_capped_at_studio_price":
-        # fail_and_refund three-step (plan §5.2):
-        #   release reserve → refund captured clone → partial capture
-        released = await shadow_release(
-            db,
-            user_id=user_id,
-            job_id=job_id,
-            reason_code="smart_fail_and_refund_release",
-            reserve_reason_code="job_reserve",
+        # Codex 第四十轮 P1.2 hard-gate (2026-05-16): the documented
+        # three-step ``fail_and_refund`` flow (release reserve → refund
+        # captured clone → partial capture) per plan §5.2 cannot run
+        # safely today because:
+        #
+        #   - ``refund_captured_voice_clone`` is a STUB returning [].
+        #     Its own docstring warns "no ledger entries written.
+        #     Skeleton boundary; replace before Smart paths that rely
+        #     on captured clone refunds go live."
+        #   - ``partial_capture_actual_cost`` is similarly stub.
+        #
+        # Pre-hard-gate behavior: dispatcher silently aggregated the
+        # [] returns and the caller's post-settle backfill stamped
+        # ``settled_at`` on bogus accounting state (reservation
+        # released but clone capture never reversed → user's ledger
+        # inconsistent, internal margin tracking wrong).
+        #
+        # Defense in depth: Fix 1's SmartConsent validator
+        # (gateway/smart_consent.py) rejects
+        # ``on_budget_exhausted=fail_and_refund`` at job-creation, so
+        # this branch should never be reached via the normal user
+        # path. If it IS reached (admin override / bug / future
+        # refactor introduced the policy somewhere), log loudly + no
+        # ledger entries. Replace this gate with the real
+        # implementation when refund_captured_voice_clone +
+        # partial_capture_actual_cost are no longer stubs.
+        logger.error(
+            "settle_smart: credits_policy=%r is not implemented yet "
+            "(STUB refund_captured_voice_clone / "
+            "partial_capture_actual_cost). "
+            "job=%s user=%s — returning [] (no ledger entries). "
+            "Replace STUB implementations before re-enabling this policy "
+            "(see refund_captured_voice_clone docstring).",
+            credits_policy, job_id, user_id,
         )
-        clone_refunds = await refund_captured_voice_clone(
-            db,
-            user_id=user_id,
-            job_id=job_id,
-            reason_code="smart_fail_and_refund_clone_reversal",
-        )
-        partial = await partial_capture_actual_cost(
-            db,
-            job=job,
-            user_id=user_id,
-            job_id=job_id,
-            reason_code="smart_fail_and_refund_partial_capture",
-        )
-        return [*released, *clone_refunds, *partial]
+        return []
 
     logger.warning(
         "settle_smart: unrecognised credits_policy=%r for job=%s; "

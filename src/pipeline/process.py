@@ -679,13 +679,57 @@ def _emit_smart_cost_summary_from_meter(
     )
 
 
+def _aggregate_speaker_dubbing_modes(segments) -> dict:
+    """Codex 第四十轮 P2.4: aggregate segment-level ``dubbing_mode`` to
+    speaker-level (the "PR#3C integration contract" flagged in
+    ``services.smart.eligibility_gate`` docstring).
+
+    Rule (per master plan §6.1 + eligibility_gate guidance):
+      - all segments == keep_original → speaker is keep_original
+      - all segments == mute_or_background → speaker is mute_or_background
+      - otherwise (mixed, including any "dub") → speaker is "dub"
+
+    Defensive:
+      - segments without speaker_id are skipped
+      - segments without dubbing_mode default to "dub" (most permissive
+        — undershooting would leave audio holes)
+
+    Returns: ``{speaker_id: aggregated_dubbing_mode}``. Consumed by
+    ``_resolve_smart_minor_speaker_voices`` and (future) by the
+    smart inline branch's eligibility evaluation.
+
+    Pure function — no I/O, no side effects.
+    """
+    by_speaker: dict[str, set[str]] = {}
+    for seg in segments or []:
+        sp_id = getattr(seg, "speaker_id", None)
+        if not sp_id:
+            continue
+        mode = getattr(seg, "dubbing_mode", None)
+        if not mode:
+            mode = "dub"
+        by_speaker.setdefault(sp_id, set()).add(str(mode))
+
+    result: dict[str, str] = {}
+    for sp_id, modes in by_speaker.items():
+        if modes == {"keep_original"}:
+            result[sp_id] = "keep_original"
+        elif modes == {"mute_or_background"}:
+            result[sp_id] = "mute_or_background"
+        else:
+            result[sp_id] = "dub"
+    return result
+
+
 def _resolve_smart_minor_speaker_voices(
     *,
     speakers,
     main_speaker_ids,
+    dubbing_mode_by_speaker=None,
 ) -> dict:
-    """Smart MVP (2026-05-16): resolve preset voice IDs for non-main
-    speakers via the existing ``auto_matched_voice`` field.
+    """Smart MVP (2026-05-16, hardened Codex 第四十轮 P2.4): resolve
+    preset voice IDs for non-main speakers via the existing
+    ``auto_matched_voice`` field.
 
     Background: ``_smart_voice_review.decisions`` only covers main
     speakers (filtered by eligibility_gate). Without this helper,
@@ -704,12 +748,25 @@ def _resolve_smart_minor_speaker_voices(
 
     Excluded:
       - Main speakers (already handled by voice_review.decisions)
-      - ``dubbing_mode in {keep_original, mute_or_background}`` —
-        user explicitly kept original; injecting a preset would
-        override their choice
+      - ``dubbing_mode_by_speaker[sp_id] in {keep_original,
+        mute_or_background}`` — user explicitly kept original;
+        injecting a preset would override their choice. The
+        aggregated dubbing_mode comes from ``_aggregate_speaker_dubbing_modes``
+        (Codex 40 P2.4: cannot rely on ``sp.get("dubbing_mode")`` —
+        ``_build_voice_selection_review_payload`` doesn't put that
+        field on speaker entries).
       - Missing/empty ``auto_matched_voice`` — degraded shape, skip
         without crash; downstream TTS will see voice_id=None and
         use provider default
+
+    Backward-compat: when ``dubbing_mode_by_speaker`` is None or
+    missing a key, defaults to "dub" (= speaker gets a voice). This
+    is intentional — undershooting (skipping a speaker that needed
+    voice) leaves audio holes; overshooting (giving voice to a
+    keep_original speaker) is corrected by TTS-stage
+    ``is_keep_original_dubbing_mode`` filter that skips those
+    segments anyway. The aggregation only fixes the audit /
+    _speaker_voices pollution problem flagged by Codex 40.
 
     Returns: ``{speaker_id: voice_id_string}`` for each non-main,
     dub-able speaker with a valid auto-matched voice.
@@ -718,6 +775,7 @@ def _resolve_smart_minor_speaker_voices(
     """
     _NON_DUBBED = {"keep_original", "mute_or_background"}
     main_set = set(main_speaker_ids or [])
+    modes_map = dubbing_mode_by_speaker or {}
     result: dict[str, str] = {}
     for sp in speakers or []:
         if not isinstance(sp, dict):
@@ -727,7 +785,11 @@ def _resolve_smart_minor_speaker_voices(
             continue
         if sp_id in main_set:
             continue
-        if sp.get("dubbing_mode") in _NON_DUBBED:
+        # Codex 40 P2.4: read aggregated dubbing_mode from the dict
+        # built by _aggregate_speaker_dubbing_modes. Missing → default
+        # to "dub" (give voice; harmless if downstream TTS skips).
+        aggregated_mode = modes_map.get(sp_id, "dub")
+        if aggregated_mode in _NON_DUBBED:
             continue
         voice_id = _resolve_preset_voice_id(sp.get("auto_matched_voice"))
         if voice_id:
@@ -3776,10 +3838,24 @@ class ProcessPipeline:
                     # for "推荐音色"). Without this, speaker_c+ ends up
                     # with segment.voice_id=None at TTS dispatch time
                     # (process.py:7113 "auto-match" comment is aspirational).
+                    #
+                    # Codex 第四十轮 P2.4: aggregate segment-level
+                    # dubbing_mode to speaker-level FIRST. The vs_payload
+                    # speaker entries don't carry dubbing_mode at the
+                    # speaker level (it's segment-level state). Without
+                    # the aggregation, helper's keep_original /
+                    # mute_or_background exclusion is dead code (the
+                    # condition can never match). Pass the aggregated
+                    # dict explicitly so the helper can honor the
+                    # exclusion contract.
+                    _smart_dubbing_modes = _aggregate_speaker_dubbing_modes(
+                        translation_result.segments
+                    )
                     _smart_minor_voice_assignments = (
                         _resolve_smart_minor_speaker_voices(
                             speakers=_smart_approved_speakers,
                             main_speaker_ids=_smart_main_speaker_ids,
+                            dubbing_mode_by_speaker=_smart_dubbing_modes,
                         )
                     )
                     for _minor_sid, _minor_vid in (

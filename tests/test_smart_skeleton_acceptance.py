@@ -320,12 +320,22 @@ class TestSettleDispatchSmartCreditsPolicy:
             role_snapshot="user",
         )
 
-    def test_credits_policy_capture_actual_cost_dispatches_to_three_step(self):
-        """capture_actual_cost_capped_at_studio_price → smart dispatcher
-        runs shadow_release + refund_captured_voice_clone +
-        partial_capture_actual_cost. Even with terminal_status="failed",
-        the dispatcher must NOT take the legacy `failed → release_full`
-        path."""
+    def test_credits_policy_capture_actual_cost_hard_gated_returns_empty(self):
+        """Codex 第四十轮 P1.2 hard-gate: the previously-dispatched
+        three-step ``fail_and_refund`` path (shadow_release +
+        refund_captured_voice_clone + partial_capture_actual_cost)
+        called STUB functions returning [] with WARNING. Net effect
+        was a silent settle-but-no-real-ledger-change that the
+        post-settle backfill stamped ``settled_at`` on — bogus
+        accounting state.
+
+        After hard-gate: dispatcher returns [] WITHOUT invoking any
+        of the three steps + logs an error. Defense in depth alongside
+        the SmartConsent validator (Fix 1) which rejects
+        ``on_budget_exhausted=fail_and_refund`` at job creation.
+
+        Test pins NEW behavior: zero stub calls + empty return.
+        """
         from credits_service import settle_job_credit_ledger
 
         job = self._make_smart_job(
@@ -333,9 +343,6 @@ class TestSettleDispatchSmartCreditsPolicy:
             terminal_status="failed",
         )
 
-        # Mock DB session: the dispatcher's row-lock select returns the
-        # same job; _has_job_credit_reserve short-circuits via the
-        # snapshot's credits_estimated > 0.
         mock_db = AsyncMock()
         mock_lock_result = MagicMock()
         mock_lock_result.scalar_one_or_none = MagicMock(return_value=job)
@@ -347,18 +354,15 @@ class TestSettleDispatchSmartCreditsPolicy:
              patch("credits_service.shadow_capture", new=AsyncMock(return_value=[])) as m_capture, \
              patch("credits_service.should_settle_job_credits", return_value=True), \
              patch("credits_service._has_job_credit_reserve", new=AsyncMock(return_value=True)):
-            _run(settle_job_credit_ledger(mock_db, job, "failed"))
+            result = _run(settle_job_credit_ledger(mock_db, job, "failed"))
 
-        # Smart dispatcher took the three-step path.
-        assert m_release.await_count == 1
-        assert m_refund.await_count == 1
-        assert m_partial.await_count == 1
-        # CRITICAL: the legacy succeeded-branch capture must NOT have run.
-        assert m_capture.await_count == 0
-        # The smart release call carries the smart-distinct reason_code,
-        # not the legacy job_release.
-        release_call = m_release.await_args_list[0]
-        assert release_call.kwargs["reason_code"] == "smart_fail_and_refund_release"
+        # Hard-gate: NONE of the four ledger-mutation functions called.
+        assert m_release.await_count == 0, "hard-gate must not call shadow_release"
+        assert m_refund.await_count == 0, "hard-gate must not call refund_captured_voice_clone (STUB)"
+        assert m_partial.await_count == 0, "hard-gate must not call partial_capture_actual_cost (STUB)"
+        assert m_capture.await_count == 0, "hard-gate must not fall through to legacy capture"
+        # Dispatcher returns empty list (no ledger entries claimed).
+        assert result == [], "hard-gate must return [] — no fake ledger entries"
 
     def test_credits_policy_refund_full_dispatches_to_release_only(self):
         """refund_full (early downgrade / system bug) → just shadow_release

@@ -751,17 +751,27 @@ async def intercept_create_job(
     if service_mode not in ("express", "studio", "smart"):
         service_mode = "express"
 
-    # --- smart_consent passthrough (PR#3C-b3g) ---
-    # Smart pipeline reads `_snap("smart_consent")` to gate auto-clone /
-    # auto-translation-review. Persist it on JobRecord so process.py sees
-    # it. Defensive: only pass through when service_mode==smart so a
-    # non-smart submission can't smuggle a stale consent payload onto
-    # JobRecord.
+    # --- smart_consent validation (PR#3C-b3g, hardened Codex 第四十轮 P1.1) ---
+    # Smart pipeline reads `_snap("smart_consent")` to gate auto-clone
+    # and (future) on_budget_exhausted policy. Master plan §5.3 mandates
+    # a complete 6-field payload — before this validator, Gateway just
+    # passed any dict through, so partial / malformed consent slipped
+    # in. Codex 40 P1.1: validate-or-reject for service_mode=smart.
+    # Defensive: only validate when service_mode==smart so a non-smart
+    # submission can't trigger consent errors.
     smart_consent_payload = None
     if service_mode == "smart":
+        from smart_consent import validate_smart_consent
         raw_consent = request_data.get("smart_consent")
-        if isinstance(raw_consent, dict):
-            smart_consent_payload = raw_consent
+        consent_obj, consent_error = validate_smart_consent(raw_consent)
+        if consent_error is not None:
+            return _error_response(
+                400, "smart_consent_invalid",
+                f"智能版需要完整的同意确认: {consent_error}",
+                {"validator_error": consent_error},
+            )
+        # Persist the canonical 6-field form (no extras leaked through).
+        smart_consent_payload = consent_obj.to_dict()
 
     # --- User context ---
     user_role = getattr(user, "role", "user") or "user" if user else "user"
