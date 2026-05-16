@@ -258,13 +258,14 @@ _PROMPT_KEYS = (
     "probe_translate",
     "content_compliance",
 )
-_MODE_KEYS = ("studio", "express")
+_MODE_KEYS = ("studio", "express", "smart")
 
 # ---------------------------------------------------------------------------
 # Model metadata — single source of truth from llm_registry
 # ---------------------------------------------------------------------------
 from services.llm_registry import (  # noqa: E402
     MODEL_REGISTRY as _MODEL_REGISTRY,
+    _MODE_DEFAULTS as _REGISTRY_MODE_DEFAULTS,
     get_available_models_for_prompt as _available_models_for_prompt,
     get_all_models_with_status as _get_all_models_with_status,
     invalidate_cache as _invalidate_llm_cache,
@@ -301,6 +302,14 @@ _DEFAULT_MODELS = {
         "probe_translate": "deepseek",
         "content_compliance": "gemini_31_flash_lite",
     },
+    # Smart mode defaults — single source of truth lives in
+    # ``services.llm_registry._MODE_DEFAULTS["smart"]``. UI dropdown
+    # default pre-selection MUST match what the runtime resolver picks
+    # (``get_prompt_model("smart", key)``) so admins don't see one model
+    # in the UI and another in the pipeline log. Codex 第四十一轮
+    # (2026-05-16) — all stages default to ``gemini_pro`` per user
+    # request "默认都用 Gemini 3.1 Pro".
+    "smart": dict(_REGISTRY_MODE_DEFAULTS.get("smart", {})),
 }
 
 _PROVIDER_KEY_ENVS = {

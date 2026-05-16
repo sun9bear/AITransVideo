@@ -133,7 +133,10 @@ MODEL_REGISTRY: dict[str, dict[str, Any]] = {
     },
 }
 
-# Default model per prompt key (used when admin hasn't configured)
+# Default model per prompt key (used when admin hasn't configured AND mode
+# has no entry in ``_MODE_DEFAULTS``). Studio/express historically used this
+# flat fallback; smart-mode now goes through ``_MODE_DEFAULTS["smart"]``
+# first (Codex 第四十一轮, 2026-05-16 user request).
 _DEFAULTS: dict[str, str] = {
     "pass1": "gemini_pro",
     "pass2": "gemini",
@@ -149,6 +152,34 @@ _DEFAULTS: dict[str, str] = {
     # when no admin override is set; it does NOT auto-activate the real
     # provider (that requires AVT_SUPPORT_AI_PROVIDER + DEEPSEEK_API_KEY).
     "support_chat": "deepseek",
+}
+
+# Per-mode defaults — overrides flat ``_DEFAULTS`` for the given mode when
+# the admin hasn't saved a per-stage override.
+#
+# Smart mode default = all Gemini 3.1 Pro per user request 2026-05-16
+# ("方案里要用最好的多模态大模型... 默认都用 Gemini 3.1 Pro"). Admin can
+# still override any single stage via the 智能版 tab in the model
+# management UI — the override lands in
+# ``admin_settings.json::prompt_models["smart"]`` and takes precedence
+# over this constant.
+#
+# Studio/express are deliberately NOT added here — adding them would
+# change behavior for the unconfigured-admin case (today they go through
+# the flat ``_DEFAULTS`` fallback, which is what existing deployments
+# expect). If we ever want to consolidate per-mode defaults for studio
+# /express too, that's a separate change that needs explicit testing
+# of cost impact.
+_MODE_DEFAULTS: dict[str, dict[str, str]] = {
+    "smart": {
+        "pass1": "gemini_pro",
+        "pass2": "gemini_pro",
+        "pass3": "gemini_pro",
+        "translate": "gemini_pro",
+        "rewrite": "gemini_pro",
+        "probe_translate": "gemini_pro",
+        "content_compliance": "gemini_pro",
+    },
 }
 
 # ---------------------------------------------------------------------------
@@ -202,10 +233,17 @@ def _get_disabled_models() -> set[str]:
 def get_prompt_model(mode: str, prompt_key: str) -> str:
     """Get the model for a given mode + prompt key.
 
+    Resolution order:
+      1. Admin override in ``admin_settings.json::prompt_models[mode][prompt_key]``
+      2. Per-mode default in ``_MODE_DEFAULTS[mode][prompt_key]`` (smart only today)
+      3. Flat default in ``_DEFAULTS[prompt_key]`` (studio/express historical fallback)
+      4. Hard-coded final fallback ``"gemini"``
+
     Parameters
     ----------
-    mode : "studio" | "express"
-    prompt_key : "pass1" | "pass2" | "pass3" | "translate" | "rewrite" | "content_compliance"
+    mode : "studio" | "express" | "smart"
+    prompt_key : "pass1" | "pass2" | "pass3" | "translate" | "rewrite"
+                | "probe_translate" | "content_compliance"
 
     Returns
     -------
@@ -216,6 +254,9 @@ def get_prompt_model(mode: str, prompt_key: str) -> str:
     model = models.get(prompt_key, "")
     if model and model in MODEL_REGISTRY:
         return model
+    mode_default = _MODE_DEFAULTS.get(mode, {}).get(prompt_key, "")
+    if mode_default and mode_default in MODEL_REGISTRY:
+        return mode_default
     return _DEFAULTS.get(prompt_key, "gemini")
 
 

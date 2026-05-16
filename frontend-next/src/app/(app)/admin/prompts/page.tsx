@@ -29,6 +29,7 @@ interface ModelWithStatus extends ModelOption {
 interface ModelsData {
   studio: Record<string, string>
   express: Record<string, string>
+  smart: Record<string, string>
 }
 
 interface HistoryVersion {
@@ -91,13 +92,13 @@ const EMPTY_PROMPTS: PromptData = { pass1: '', pass2: '', pass3: '', translate: 
 const API_BASE = '/api/admin/review-prompts'
 
 type MainTab = 'models' | 'prompts' | 'keys'
-type ModeTab = 'studio' | 'express'
+type ModeTab = 'studio' | 'express' | 'smart'
 
 export default function PromptsPage() {
   const [prompts, setPrompts] = useState<PromptData>({ ...EMPTY_PROMPTS })
   const [defaults, setDefaults] = useState<PromptData>({ ...EMPTY_PROMPTS })
-  const [models, setModels] = useState<ModelsData>({ studio: {}, express: {} })
-  const [defaultModels, setDefaultModels] = useState<ModelsData>({ studio: {}, express: {} })
+  const [models, setModels] = useState<ModelsData>({ studio: {}, express: {}, smart: {} })
+  const [defaultModels, setDefaultModels] = useState<ModelsData>({ studio: {}, express: {}, smart: {} })
   const [availableModels, setAvailableModels] = useState<Record<string, ModelOption[]>>({})
   const [allModels, setAllModels] = useState<ModelWithStatus[]>([])
   const [providerKeys, setProviderKeys] = useState<Record<string, string>>({})
@@ -117,8 +118,8 @@ export default function PromptsPage() {
     const data = await resp.json()
     setPrompts({ ...EMPTY_PROMPTS, ...data.prompts })
     setDefaults({ ...EMPTY_PROMPTS, ...data.defaults })
-    setModels(data.models || { studio: {}, express: {} })
-    setDefaultModels(data.default_models || { studio: {}, express: {} })
+    setModels(data.models || { studio: {}, express: {}, smart: {} })
+    setDefaultModels(data.default_models || { studio: {}, express: {}, smart: {} })
     setAvailableModels(data.available_models || {})
     setAllModels(data.all_models || [])
     setProviderKeys(data.provider_api_keys || {})
@@ -227,7 +228,11 @@ export default function PromptsPage() {
     }
   }
 
-  const promptKeysForMode = modeTab === 'studio' ? PROMPT_KEYS : EXPRESS_PROMPT_KEYS
+  // Smart mode uses the same 7 prompt keys as Studio (Express also expanded
+  // to match; future smart-specific keys would diverge here). Codex 第四十一轮
+  // 2026-05-16 — 智能版 tab added with all stages defaulting to Gemini 3.1
+  // Pro via _MODE_DEFAULTS["smart"] in services/llm_registry.py.
+  const promptKeysForMode = modeTab === 'express' ? EXPRESS_PROMPT_KEYS : PROMPT_KEYS
 
   if (loading) {
     return (
@@ -307,7 +312,7 @@ export default function PromptsPage() {
           <div className="space-y-4">
             <h2 className="text-lg font-semibold">各阶段模型选择</h2>
             <div className="flex gap-1 rounded-lg border border-border bg-muted p-1 w-fit">
-              {(['studio', 'express'] as const).map(tab => (
+              {(['studio', 'express', 'smart'] as const).map(tab => (
                 <button
                   key={tab}
                   onClick={() => setModeTab(tab)}
@@ -317,7 +322,7 @@ export default function PromptsPage() {
                       : 'text-muted-foreground hover:text-foreground'
                   }`}
                 >
-                  {tab === 'studio' ? '工作台版' : '快捷版'}
+                  {tab === 'studio' ? '工作台版' : tab === 'express' ? '快捷版' : '智能版'}
                 </button>
               ))}
             </div>
