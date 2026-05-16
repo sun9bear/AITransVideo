@@ -4329,6 +4329,38 @@ class ProcessPipeline:
                         f"[S2.5] Smart 自动批准 voice_selection_review:"
                         f" {len(_smart_voice_review.decisions)} 决策"
                     )
+
+                    # 2026-05-16 P0 fix (job_887984b... bug): smart
+                    # auto-approve must propagate the per-speaker voice
+                    # decisions into the ``voice_id_a`` / ``voice_id_b``
+                    # local vars that flow into ``translator.translate()``
+                    # at line ~4623. The Studio path does this at line
+                    # ~3107-3108 (``voice_id_a = _speaker_voices.get(
+                    # "speaker_a", voice_id_a)``); without the parallel
+                    # update here, smart auto-approve stamps
+                    # ``voice_id="auto"`` on every segment and TTS
+                    # silently falls back to preset voices (Wise_Woman /
+                    # Chinese_radio_host_male_vv1 etc.) instead of the
+                    # cloned vt_speaker_* IDs the smart decisions chose.
+                    #
+                    # Real incident: job_887984b... 124-segment Musk
+                    # interview, audit log said reused
+                    # vt_speaker_a_1778930206296 + vt_speaker_b_1778930225912,
+                    # actual TTS dispatched 176 calls with voice_id="auto"
+                    # → all preset voices; user reported "感觉并没有
+                    # 克隆音色". Cloned voice IDs were correctly registered
+                    # in user_voices and counted in metering (reuse
+                    # billing_policy), but never reached the segments
+                    # because of this missing propagation.
+                    #
+                    # NOTE: the >2-speaker path uses ``_speaker_voices``
+                    # via translator's ``speaker_voices=`` kwarg
+                    # (line ~4633), but the 2-speaker default path only
+                    # uses ``voice_id`` / ``voice_id_b`` — that's the
+                    # branch that was completely broken.
+                    voice_id_a = _speaker_voices.get("speaker_a", voice_id_a)
+                    voice_id_b = _speaker_voices.get("speaker_b", voice_id_b)
+
                     # Fall through to next pipeline stage — NO paused-return.
                 else:
                     # --- Studio path: original pending-pause behaviour ---
