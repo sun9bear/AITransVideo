@@ -248,6 +248,118 @@ class TestQuotaEndpointBusinessLogic:
         assert "POST" in methods
 
     @pytest.mark.asyncio
+    async def test_match_endpoint_registered_on_internal_router(self):
+        import user_voice_api
+
+        routes = [
+            (r.path, r.methods)
+            for r in user_voice_api.internal_router.routes
+        ]
+        match_routes = [
+            (path, methods)
+            for path, methods in routes
+            if path.endswith("/user-voices/match")
+        ]
+        assert match_routes, (
+            "POST /api/internal/user-voices/match not registered on "
+            "internal_router. Phase 2 matching must stay internal-only."
+        )
+        path, methods = match_routes[0]
+        assert path == "/api/internal/user-voices/match"
+        assert "POST" in methods
+
+    @pytest.mark.asyncio
+    async def test_match_endpoint_returns_strong_candidate(self, monkeypatch):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock
+
+        import user_voice_api
+        from user_voice_service import UserVoiceMatch
+
+        monkeypatch.setattr(
+            user_voice_api, "_internal_access_error",
+            lambda req: None,
+        )
+        monkeypatch.setattr(
+            user_voice_api,
+            "_voice_to_dict",
+            lambda v: {"voice_id": v.voice_id, "label": v.label},
+        )
+
+        recorded = {}
+
+        async def _fake_match(db, **kwargs):
+            recorded.update(kwargs)
+            return [
+                UserVoiceMatch(
+                    voice=SimpleNamespace(voice_id="vt_match", label="Speaker A · 2026-05-16 14:32"),
+                    confidence="strong",
+                    reason="same_source_content_hash_and_speaker_id",
+                    score=100,
+                )
+            ]
+
+        monkeypatch.setattr(user_voice_api, "match_user_voices", _fake_match)
+        valid_uuid = "00000000-0000-0000-0000-000000000001"
+        body = {
+            "user_id": valid_uuid,
+            "source_content_hash": "youtube:abc",
+            "speaker_id": "speaker_a",
+            "speaker_name": "Speaker A",
+            "provider": "minimax_voice_clone",
+            "tts_provider": "minimax_tts",
+            "platform": "minimax_domestic",
+        }
+        fake_req = MagicMock()
+        fake_req.body = AsyncMock(return_value=__import__("json").dumps(body).encode())
+
+        resp = await user_voice_api.internal_match_user_voice(
+            request=fake_req,
+            db=MagicMock(),
+        )
+
+        import json
+        body_out = json.loads(resp.body.decode("utf-8"))
+        assert body_out["matched"] is True
+        assert body_out["confidence"] == "strong"
+        assert body_out["auto_reuse_allowed"] is True
+        assert body_out["voice"]["voice_id"] == "vt_match"
+        assert body_out["candidates"][0]["voice"]["voice_id"] == "vt_match"
+        assert recorded["user_id"].hex == "00000000000000000000000000000001"
+        assert recorded["source_content_hash"] == "youtube:abc"
+        assert recorded["source_speaker_id"] == "speaker_a"
+        assert recorded["source_speaker_name"] == "Speaker A"
+        assert recorded["provider"] == "minimax_voice_clone"
+        assert recorded["tts_provider"] == "minimax_tts"
+        assert recorded["platform"] == "minimax_domestic"
+
+    @pytest.mark.asyncio
+    async def test_match_endpoint_missing_hash_returns_no_candidate(self, monkeypatch):
+        from unittest.mock import AsyncMock, MagicMock
+
+        import user_voice_api
+
+        monkeypatch.setattr(
+            user_voice_api, "_internal_access_error",
+            lambda req: None,
+        )
+        matcher = AsyncMock(return_value=[])
+        monkeypatch.setattr(user_voice_api, "match_user_voices", matcher)
+        fake_req = MagicMock()
+        fake_req.body = AsyncMock(return_value=b'{"user_id": "00000000-0000-0000-0000-000000000001"}')
+
+        resp = await user_voice_api.internal_match_user_voice(
+            request=fake_req,
+            db=MagicMock(),
+        )
+
+        import json
+        body_out = json.loads(resp.body.decode("utf-8"))
+        assert body_out["matched"] is False
+        assert body_out["reason"] == "missing_source_content_hash"
+        matcher.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_register_smart_endpoint_writes_to_user_voices(
         self, monkeypatch,
     ):
@@ -281,8 +393,17 @@ class TestQuotaEndpointBusinessLogic:
         body = {
             "user_id": valid_uuid,
             "voice_id": "vt_xxx",
-            "label": "Speaker A Clone",
+            "label": "Speaker A · 2026-05-16 14:32",
             "source_speaker_id": "speaker_a",
+            "source_job_id": "job-1",
+            "source_type": "youtube_url",
+            "source_ref": "https://youtu.be/abc",
+            "source_content_hash": "youtube:abc",
+            "source_video_title": "Source Title",
+            "source_speaker_name": "Speaker A",
+            "clone_sample_seconds": 12.5,
+            "clone_sample_segment_ids": [1, 2],
+            "created_from": "smart_auto",
             "notes": "Smart auto-clone from job j-1",
         }
 
@@ -306,8 +427,17 @@ class TestQuotaEndpointBusinessLogic:
         assert call["provider"] == "minimax_voice_clone"
         assert call["tts_provider"] == "minimax_tts"
         assert call["platform"] == "minimax_domestic"
-        assert call["label"] == "Speaker A Clone"
+        assert call["label"] == "Speaker A · 2026-05-16 14:32"
         assert call["source_speaker_id"] == "speaker_a"
+        assert call["source_job_id"] == "job-1"
+        assert call["source_type"] == "youtube_url"
+        assert call["source_ref"] == "https://youtu.be/abc"
+        assert call["source_content_hash"] == "youtube:abc"
+        assert call["source_video_title"] == "Source Title"
+        assert call["source_speaker_name"] == "Speaker A"
+        assert call["clone_sample_seconds"] == 12.5
+        assert call["clone_sample_segment_ids"] == [1, 2]
+        assert call["created_from"] == "smart_auto"
         assert call["notes"] == "Smart auto-clone from job j-1"
         assert call["voice_id"] == "vt_xxx"
 

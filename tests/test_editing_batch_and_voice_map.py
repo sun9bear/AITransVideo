@@ -459,6 +459,42 @@ def test_service_voice_map_get_set_clear(tmp_path: Path) -> None:
     assert service.get_editing_voice_map("job_batch")["voice_map"] == {}
 
 
+def test_service_voice_map_records_non_billable_reuse_audit(tmp_path: Path) -> None:
+    from services.usage_meter import UsageMeter
+
+    service, project_dir = _build_editing_job(tmp_path, n_segments=1)
+
+    service.set_editing_voice_override(
+        "job_batch",
+        "seg_001",
+        provider="minimax",
+        voice_id="vt_existing",
+        voice_reuse=True,
+    )
+    service.set_editing_voice_override(
+        "job_batch",
+        "seg_001",
+        provider="minimax",
+        voice_id="vt_existing",
+        voice_reuse=True,
+    )
+
+    meter = UsageMeter(project_dir, job_id="job_batch")
+    reuse_events = [
+        event for event in meter.events
+        if event.get("event_id") == "voice_reuse_postedit:job_batch:seg_001:vt_existing"
+    ]
+    assert len(reuse_events) == 1
+    event = reuse_events[0]
+    assert event["kind"] == "voice_clone"
+    assert event["model"] == "voice_reuse"
+    assert event["billable"] is False
+    assert event["clone_count"] == 0
+    assert event["reuse"] is True
+    assert event["provider"] == "minimax_voice_clone"
+    assert meter.summarize()["voice_clone_billable_count"] == 0
+
+
 def test_service_voice_map_rejects_non_editing(tmp_path: Path) -> None:
     from dataclasses import replace
 

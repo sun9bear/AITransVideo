@@ -479,6 +479,125 @@ def _fetch_smart_user_voice_quota_remaining(user_id: str) -> int | None:
     return remaining
 
 
+def _match_smart_user_voice(
+    *,
+    user_id: str,
+    source_content_hash: str | None,
+    speaker_id: str,
+    speaker_name: str | None = None,
+) -> dict | None:
+    """Return a strong same-source user voice match for Smart reuse.
+
+    Best-effort optimization only: failures return None so the caller can
+    continue with the existing new-clone path.
+    """
+    import os
+    import requests  # type: ignore[import-not-found]
+
+    user_id = (user_id or "").strip()
+    source_content_hash = (source_content_hash or "").strip()
+    speaker_id = (speaker_id or "").strip()
+    if not user_id or not source_content_hash or not speaker_id:
+        return None
+    api_key = os.environ.get("AVT_INTERNAL_API_KEY", "").strip()
+    if not api_key:
+        return None
+    try:
+        resp = requests.post(
+            "http://127.0.0.1:8880/api/internal/user-voices/match",
+            json={
+                "user_id": user_id,
+                "source_content_hash": source_content_hash,
+                "speaker_id": speaker_id,
+                "speaker_name": speaker_name or "",
+                "provider": "minimax_voice_clone",
+                "tts_provider": "minimax_tts",
+                "platform": "minimax_domestic",
+                "limit": 1,
+            },
+            headers={"X-Internal-Key": api_key},
+            timeout=3.0,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+    except Exception:
+        return None
+    if not data.get("matched") or data.get("confidence") != "strong":
+        return None
+    voice = data.get("voice")
+    if not isinstance(voice, dict) or not str(voice.get("voice_id") or "").strip():
+        return None
+    return {
+        "voice_id": str(voice.get("voice_id") or "").strip(),
+        "provider": str(voice.get("provider") or "") or None,
+        "tts_provider": str(voice.get("tts_provider") or "") or None,
+        "user_voice_id": str(voice.get("id") or "") or None,
+        "confidence": str(data.get("confidence") or ""),
+        "reason": str(data.get("reason") or ""),
+    }
+
+
+def _apply_smart_reused_voice_decision(
+    *,
+    speaker_entry: dict,
+    decision,
+    usage_meter,
+    project_dir: Path,
+    job_id: str,
+    user_id: str,
+) -> None:
+    speaker_entry["voice_id"] = decision.cloned_voice_id
+    speaker_entry["clone_provider"] = decision.cloned_provider_name
+    speaker_entry["auto_decision"] = "reused_user_voice"
+    speaker_entry["voice_reuse"] = True
+    speaker_entry["matched_user_voice_id"] = decision.metrics.get("matched_user_voice_id")
+    speaker_entry["match_confidence"] = decision.metrics.get("match_confidence")
+    speaker_entry["match_reason"] = decision.metrics.get("match_reason")
+    try:
+        usage_meter.record_voice_reuse(
+            provider=decision.cloned_provider_name or "minimax_voice_clone",
+            voice_id=decision.cloned_voice_id or "",
+            speaker_id=decision.speaker_id,
+            source_voice_id=decision.cloned_voice_id or "",
+            match_confidence=str(decision.metrics.get("match_confidence") or ""),
+            match_reason=str(decision.metrics.get("match_reason") or ""),
+            extra={
+                "event_id": (
+                    f"smart_voice_reuse:{job_id}:"
+                    f"{decision.speaker_id}:{decision.cloned_voice_id or ''}"
+                ),
+                "source": "smart_auto_voice_review",
+                "matched_user_voice_id": decision.metrics.get("matched_user_voice_id"),
+            },
+        )
+    except Exception:
+        print(
+            f"[smart] voice reuse usage audit failed speaker={decision.speaker_id}",
+            flush=True,
+        )
+    _emit_smart_audit(
+        project_dir,
+        decision_type="voice_clone",
+        decision="approved",
+        reason_code="reused_user_voice",
+        evidence={
+            "voice_id": decision.cloned_voice_id,
+            "clone_provider": decision.cloned_provider_name,
+            "match_confidence": decision.metrics.get("match_confidence"),
+            "match_reason": decision.metrics.get("match_reason"),
+            "matched_user_voice_id": decision.metrics.get("matched_user_voice_id"),
+        },
+        smart_decision_id=decision.smart_decision_id,
+        extra={
+            "speaker_id": decision.speaker_id,
+            "job_id": job_id,
+            "user_id": user_id,
+            "voice_clone_decision": "reused_user_voice",
+        },
+    )
+
+
 def _emit_smart_quality_report(
     project_dir: Path,
     *,
@@ -1056,6 +1175,15 @@ def _register_smart_clone_in_user_voices(
     voice_id: str,
     label: str,
     source_speaker_id: str | None = None,
+    source_job_id: str | None = None,
+    source_type: str | None = None,
+    source_ref: str | None = None,
+    source_content_hash: str | None = None,
+    source_video_title: str | None = None,
+    source_speaker_name: str | None = None,
+    clone_sample_seconds: float | None = None,
+    clone_sample_segment_ids: object | None = None,
+    created_from: str | None = "smart_auto",
     notes: str | None = None,
 ) -> bool:
     """Mirror a smart-path clone into the Gateway UserVoice table.
@@ -1101,6 +1229,24 @@ def _register_smart_clone_in_user_voices(
     }
     if source_speaker_id:
         payload["source_speaker_id"] = source_speaker_id
+    if source_job_id:
+        payload["source_job_id"] = source_job_id
+    if source_type:
+        payload["source_type"] = source_type
+    if source_ref:
+        payload["source_ref"] = source_ref
+    if source_content_hash:
+        payload["source_content_hash"] = source_content_hash
+    if source_video_title:
+        payload["source_video_title"] = source_video_title
+    if source_speaker_name:
+        payload["source_speaker_name"] = source_speaker_name
+    if clone_sample_seconds is not None:
+        payload["clone_sample_seconds"] = clone_sample_seconds
+    if clone_sample_segment_ids is not None:
+        payload["clone_sample_segment_ids"] = clone_sample_segment_ids
+    if created_from:
+        payload["created_from"] = created_from
     if notes:
         payload["notes"] = notes
     try:
@@ -1133,6 +1279,23 @@ def _default_speaker_display_name(speaker_id: str) -> str:
         if len(suffix) == 1 and suffix.isalpha():
             return f"Speaker {suffix.upper()}"
     return speaker_id
+
+
+def _build_cloned_voice_label(speaker_name: str | None) -> str:
+    from datetime import datetime, timedelta, timezone
+    from zoneinfo import ZoneInfo
+
+    name = (speaker_name or "").strip() or "Speaker"
+    when = datetime.now(timezone.utc)
+    try:
+        when = when.astimezone(ZoneInfo("Asia/Shanghai"))
+    except Exception:
+        when = when.astimezone(timezone(timedelta(hours=8)))
+    timestamp = when.strftime("%Y-%m-%d %H:%M")
+    max_name_len = max(1, 200 - len(" · ") - len(timestamp))
+    if len(name) > max_name_len:
+        name = name[:max_name_len].rstrip()
+    return f"{name} · {timestamp}"
 
 
 def _merge_speaker_name_map(
@@ -3050,6 +3213,7 @@ class ProcessPipeline:
                     import uuid as _smart_uuid
                     from services.smart.auto_voice_review import (
                         VoiceReviewChoice,
+                        VoiceReviewExistingMatch,
                         VoiceReviewOutcome,
                         VoiceReviewSpeakerInput,
                         evaluate_voice_review,
@@ -3272,10 +3436,58 @@ class ProcessPipeline:
                     _smart_consent_allows_clone = (
                         smart_consent.get("auto_voice_clone") is True
                     )
+                    _smart_existing_voice_matches: dict[str, VoiceReviewExistingMatch] = {}
+                    if _smart_consent_allows_clone:
+                        _smart_user_id_for_match = str(_snap("user_id") or "")
+                        _smart_source_hash_for_match = (
+                            str(_snap("source_content_hash") or "") or None
+                        )
+                        for _sp in (vs_payload.get("speakers") or []):
+                            if not isinstance(_sp, dict):
+                                continue
+                            _sid = str(_sp.get("speaker_id") or "").strip()
+                            if not _sid or _sid not in _smart_main_speaker_ids:
+                                continue
+                            _matched_voice = _match_smart_user_voice(
+                                user_id=_smart_user_id_for_match,
+                                source_content_hash=_smart_source_hash_for_match,
+                                speaker_id=_sid,
+                                speaker_name=str(_sp.get("speaker_name") or "") or None,
+                            )
+                            if _matched_voice is None:
+                                continue
+                            _smart_existing_voice_matches[_sid] = VoiceReviewExistingMatch(
+                                voice_id=str(_matched_voice.get("voice_id") or ""),
+                                provider_name=(
+                                    str(_matched_voice.get("provider") or "")
+                                    or None
+                                ),
+                                model_name=(
+                                    str(_matched_voice.get("tts_provider") or "")
+                                    or None
+                                ),
+                                confidence=(
+                                    str(_matched_voice.get("confidence") or "")
+                                    or None
+                                ),
+                                reason=(
+                                    str(_matched_voice.get("reason") or "")
+                                    or None
+                                ),
+                                user_voice_id=(
+                                    str(_matched_voice.get("user_voice_id") or "")
+                                    or None
+                                ),
+                            )
                     _smart_per_speaker_samples: dict[str, Path] = {}
                     _smart_per_speaker_sample_seconds: dict[str, float] = {}
+                    _smart_per_speaker_segment_ids: dict[str, list[int]] = {}
                     _smart_sample_extraction_error: str | None = None
-                    if _smart_consent_allows_clone:
+                    _smart_speaker_ids_requiring_clone = [
+                        _sid for _sid in _smart_main_speaker_ids
+                        if _sid not in _smart_existing_voice_matches
+                    ]
+                    if _smart_consent_allows_clone and _smart_speaker_ids_requiring_clone:
                         _smart_sample_root = (
                             final_project_dir / "smart_clone_samples"
                         )
@@ -3289,7 +3501,7 @@ class ProcessPipeline:
                             _smart_extractor = None  # type: ignore[assignment]
 
                         if _smart_extractor is not None:
-                            for _candidate_sid in _smart_main_speaker_ids:
+                            for _candidate_sid in _smart_speaker_ids_requiring_clone:
                                 _speaker_lines = [
                                     ln for ln in (
                                         getattr(transcript_result, "lines", None) or []
@@ -3370,6 +3582,17 @@ class ProcessPipeline:
                                 )
                                 _smart_per_speaker_sample_seconds[_candidate_sid] = (
                                     _val_duration_s
+                                )
+                                _smart_segment_ids: list[int] = []
+                                for _line in _speaker_lines:
+                                    try:
+                                        _smart_segment_ids.append(
+                                            int(getattr(_line, "index"))
+                                        )
+                                    except (TypeError, ValueError):
+                                        continue
+                                _smart_per_speaker_segment_ids[_candidate_sid] = (
+                                    _smart_segment_ids
                                 )
 
                     if _smart_sample_extraction_error is not None:
@@ -3510,100 +3733,103 @@ class ProcessPipeline:
                     # evaluate_voice_review short-circuits to PRESET
                     # when consent != True OR when main_speakers is
                     # empty. So the gate mirrors both conditions.
+                    _smart_needs_new_clone = bool(
+                        _smart_consent_allows_clone
+                        and _smart_speaker_ids_requiring_clone
+                    )
                     if _smart_consent_allows_clone and _smart_main_speakers:
-                        _smart_quota_remaining = (
-                            _fetch_smart_user_voice_quota_remaining(
-                                str(_snap("user_id") or "")
+                        if _smart_needs_new_clone:
+                            _smart_quota_remaining = (
+                                _fetch_smart_user_voice_quota_remaining(
+                                    str(_snap("user_id") or "")
+                                )
                             )
-                        )
-                        if _smart_quota_remaining is None:
-                            # Fail-closed: quota unknown → handoff to Studio.
-                            # User can re-attempt via the explicit "克隆音色"
-                            # button in Studio (which uses Gateway-tracked
-                            # capture+reserve credit logic separately).
-                            _emit_smart_audit(
-                                final_project_dir,
-                                decision_type="downgrade_handoff",
-                                decision="rejected",
-                                reason_code="voice_library_quota_unavailable",
-                                evidence={
-                                    "main_speakers_pending": len(
-                                        _smart_main_speakers
+                            if _smart_quota_remaining is None:
+                                # Fail-closed: quota unknown → handoff to Studio.
+                                # User can re-attempt via the explicit "克隆音色"
+                                # button in Studio (which uses Gateway-tracked
+                                # capture+reserve credit logic separately).
+                                _emit_smart_audit(
+                                    final_project_dir,
+                                    decision_type="downgrade_handoff",
+                                    decision="rejected",
+                                    reason_code="voice_library_quota_unavailable",
+                                    evidence={
+                                        "main_speakers_pending": len(
+                                            _smart_main_speakers
+                                        ),
+                                    },
+                                    extra={
+                                        "job_id": str(_snap("job_id") or ""),
+                                        "user_id": str(_snap("user_id") or ""),
+                                        "handoff_stage": VOICE_SELECTION_REVIEW_STAGE,
+                                    },
+                                )
+                                emit_handoff_markers(
+                                    review_state_manager=review_state_manager,
+                                    review_stage=VOICE_SELECTION_REVIEW_STAGE,
+                                    review_payload=vs_payload,
+                                    review_pending_status=REVIEW_STATUS_PENDING,
+                                    smart_state_update={
+                                        "status": "downgraded_to_studio",
+                                        "reason": "voice_library_quota_unavailable",
+                                        "handoff_stage": VOICE_SELECTION_REVIEW_STAGE,
+                                    },
+                                    project_dir=final_project_dir,
+                                    user_message=(
+                                        "智能版无法读取音色库容量,请人工接管"
                                     ),
-                                },
-                                extra={
-                                    "job_id": str(_snap("job_id") or ""),
-                                    "user_id": str(_snap("user_id") or ""),
-                                    "handoff_stage": VOICE_SELECTION_REVIEW_STAGE,
-                                },
-                            )
-                            emit_handoff_markers(
-                                review_state_manager=review_state_manager,
-                                review_stage=VOICE_SELECTION_REVIEW_STAGE,
-                                review_payload=vs_payload,
-                                review_pending_status=REVIEW_STATUS_PENDING,
-                                smart_state_update={
-                                    "status": "downgraded_to_studio",
-                                    "reason": "voice_library_quota_unavailable",
-                                    "handoff_stage": VOICE_SELECTION_REVIEW_STAGE,
-                                },
-                                project_dir=final_project_dir,
-                                user_message=(
-                                    "智能版无法读取音色库容量,请人工接管"
-                                ),
-                                web_review_marker_builder=self._build_web_review_marker,
-                            )
-                            state_manager.set_stage(
-                                "voice_selection",
-                                StageStatus.RUNNING,
-                                {"execution_mode": "smart_handoff_quota_unavailable"},
-                            )
-                            current_stage_name = None
-                            _write_usage_summary(usage_meter)
-                            # Codex 第三十六轮 P1: cost_summary at smart handoff.
-                            _emit_smart_cost_summary_from_meter(
-                                final_project_dir,
-                                job_id=config.job_id,
-                                usage_meter=usage_meter,
-                                minutes_processed=(
-                                    # Codex 第三十七轮 P1: prefer ffprobe
-                                    # actual_duration_ms over unreliable _snap.
-                                    float(actual_duration_ms) / 60000.0
-                                    if actual_duration_ms
-                                    else float(
-                                        _snap("source_duration_seconds") or 0.0
-                                    ) / 60.0
-                                ),
-                                credits_policy="pending_settle",
-                            )
-                            return self._build_paused_result(
-                                project_dir=final_project_dir,
-                                stage=VOICE_SELECTION_REVIEW_STAGE,
-                                message="智能版无法读取音色库容量",
-                            )
+                                    web_review_marker_builder=self._build_web_review_marker,
+                                )
+                                state_manager.set_stage(
+                                    "voice_selection",
+                                    StageStatus.RUNNING,
+                                    {"execution_mode": "smart_handoff_quota_unavailable"},
+                                )
+                                current_stage_name = None
+                                _write_usage_summary(usage_meter)
+                                # Codex 第三十六轮 P1: cost_summary at smart handoff.
+                                _emit_smart_cost_summary_from_meter(
+                                    final_project_dir,
+                                    job_id=config.job_id,
+                                    usage_meter=usage_meter,
+                                    minutes_processed=(
+                                        # Codex 第三十七轮 P1: prefer ffprobe
+                                        # actual_duration_ms over unreliable _snap.
+                                        float(actual_duration_ms) / 60000.0
+                                        if actual_duration_ms
+                                        else float(
+                                            _snap("source_duration_seconds") or 0.0
+                                        ) / 60.0
+                                    ),
+                                    credits_policy="pending_settle",
+                                )
+                                return self._build_paused_result(
+                                    project_dir=final_project_dir,
+                                    stage=VOICE_SELECTION_REVIEW_STAGE,
+                                    message="智能版无法读取音色库容量",
+                                )
 
-                        # Piece 3: real CloneProvider.
-                        # Safety chain (all three layers gate any real
-                        # MiniMax API call):
-                        #   1. consent.auto_voice_clone is True (this if)
-                        #   2. _smart_sample_extraction_error is None
-                        #      (real per-speaker WAV ≥10s on disk)
-                        #   3. _smart_quota_remaining is a real int
-                        #      from Gateway (preventive §7.3 brake)
-                        # When all three hold, ``build_smart_clone_provider()``
-                        # returns the real _MiniMaxCloneAdapter (or the
-                        # test-injected fake via inject_for_test).
-                        from services.smart_wiring import (
-                            build_smart_clone_provider,
-                        )
-                        _smart_clone_provider = build_smart_clone_provider()
+                            # Piece 3: real CloneProvider.
+                            from services.smart_wiring import (
+                                build_smart_clone_provider,
+                            )
+                            _smart_clone_provider = build_smart_clone_provider()
+                        else:
+                            _smart_quota_remaining = 0
+                            _smart_clone_provider = (
+                                _build_b2_not_wired_clone_provider()
+                            )
                     else:
                         # consent=False path: evaluate_voice_review
                         # never reads quota or invokes provider — it
                         # short-circuits to PRESET decisions. Pass
                         # sentinel values that won't be consumed but
-                        # satisfy the type contract. NEVER reach the
-                        # real provider here.
+                        # satisfy the type contract. When every main
+                        # speaker already has a strong personal-voice
+                        # match, evaluate_voice_review also never reads
+                        # quota/provider because it emits REUSED first.
+                        # NEVER reach the real provider here.
                         _smart_quota_remaining = 0
                         _smart_clone_provider = (
                             _build_b2_not_wired_clone_provider()
@@ -3615,6 +3841,7 @@ class ProcessPipeline:
                         clone_provider=_smart_clone_provider,
                         voice_library_quota_remaining=_smart_quota_remaining,
                         smart_decision_id_factory=lambda: _smart_uuid.uuid4().hex,
+                        existing_voice_matches_by_speaker_id=_smart_existing_voice_matches,
                     )
 
                     if _smart_voice_review.outcome == VoiceReviewOutcome.PAUSED:
@@ -3724,6 +3951,7 @@ class ProcessPipeline:
                     # If ANY mirror fails, we escalate to handoff so
                     # the user is aware (and so subsequent jobs that
                     # would have hit §7.3 brake don't silently miss it).
+                    # Handoff reason below: clone_library_register_failed.
                     _smart_clone_mirror_failures: list[str] = []
                     _smart_user_id_for_mirror = str(
                         _snap("user_id") or ""
@@ -3793,8 +4021,32 @@ class ProcessPipeline:
                             _mirror_ok = _register_smart_clone_in_user_voices(
                                 user_id=_smart_user_id_for_mirror,
                                 voice_id=_dec.cloned_voice_id or "",
-                                label=f"{_mirror_label} Clone",
+                                label=_build_cloned_voice_label(_mirror_label),
                                 source_speaker_id=_dec.speaker_id,
+                                source_job_id=_smart_job_id_for_mirror or None,
+                                source_type=str(_snap("source_type") or "") or None,
+                                source_ref=str(_snap("source_ref") or "") or None,
+                                source_content_hash=str(_snap("source_content_hash") or "") or None,
+                                source_video_title=(
+                                    str(
+                                        _snap("display_name")
+                                        or _snap("title")
+                                        or ""
+                                    )
+                                    or None
+                                ),
+                                source_speaker_name=str(_mirror_label or "") or None,
+                                clone_sample_seconds=(
+                                    _smart_per_speaker_sample_seconds.get(
+                                        _dec.speaker_id
+                                    )
+                                ),
+                                clone_sample_segment_ids=(
+                                    _smart_per_speaker_segment_ids.get(
+                                        _dec.speaker_id
+                                    )
+                                ),
+                                created_from="smart_auto",
                                 notes=(
                                     f"Smart auto-clone from job "
                                     f"{_smart_job_id_for_mirror}"
@@ -3806,6 +4058,15 @@ class ProcessPipeline:
                                 _smart_clone_mirror_failures.append(
                                     _dec.speaker_id
                                 )
+                        elif _dec.choice == VoiceReviewChoice.REUSED:
+                            _apply_smart_reused_voice_decision(
+                                speaker_entry=_sp_entry,
+                                decision=_dec,
+                                usage_meter=usage_meter,
+                                project_dir=final_project_dir,
+                                job_id=str(_snap("job_id") or ""),
+                                user_id=str(_snap("user_id") or ""),
+                            )
                         elif _dec.choice == VoiceReviewChoice.PRESET:
                             # ``auto_matched_voice`` is a DICT shaped
                             # by ``_auto_match_for_provider`` (see
@@ -3991,6 +4252,11 @@ class ProcessPipeline:
                         for _dec in _smart_voice_review.decisions
                         if _dec.choice == VoiceReviewChoice.CLONED
                     )
+                    _smart_reused_count = sum(
+                        1
+                        for _dec in _smart_voice_review.decisions
+                        if _dec.choice == VoiceReviewChoice.REUSED
+                    )
                     _smart_preset_count = sum(
                         1
                         for _dec in _smart_voice_review.decisions
@@ -4013,6 +4279,7 @@ class ProcessPipeline:
                                 _smart_voice_review.decisions
                             ),
                             "cloned_count": _smart_cloned_count,
+                            "reused_count": _smart_reused_count,
                             "preset_count": _smart_preset_count,
                             "minor_preset_count": _smart_minor_preset_count,
                             "main_speakers_count": len(
@@ -5369,13 +5636,15 @@ class ProcessPipeline:
                     VoiceReviewChoice,
                 )
                 for _dec in _local_vr.decisions:
+                    if _dec.choice == VoiceReviewChoice.CLONED:
+                        _choice = "cloned"
+                    elif _dec.choice == VoiceReviewChoice.REUSED:
+                        _choice = "reused_user_voice"
+                    else:
+                        _choice = "preset"
                     _entry = {
                         "speaker_id": _dec.speaker_id,
-                        "choice": (
-                            "cloned"
-                            if _dec.choice == VoiceReviewChoice.CLONED
-                            else "preset"
-                        ),
+                        "choice": _choice,
                         "voice_id": _dec.cloned_voice_id,
                         "clone_provider": _dec.cloned_provider_name,
                         "sample_seconds": (
@@ -5385,8 +5654,12 @@ class ProcessPipeline:
                         ),
                         "smart_decision_id": _dec.smart_decision_id,
                     }
-                    if _dec.choice != VoiceReviewChoice.CLONED:
+                    if _dec.choice not in (VoiceReviewChoice.CLONED, VoiceReviewChoice.REUSED):
                         _entry["fallback_reason"] = _dec.reason_code
+                    if _dec.choice == VoiceReviewChoice.REUSED:
+                        _entry["match_confidence"] = _dec.metrics.get("match_confidence")
+                        _entry["match_reason"] = _dec.metrics.get("match_reason")
+                        _entry["matched_user_voice_id"] = _dec.metrics.get("matched_user_voice_id")
                     _qr_voice_decisions.append(_entry)
 
             # Build translation_review from decision (when available)

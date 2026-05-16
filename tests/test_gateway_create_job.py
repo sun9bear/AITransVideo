@@ -8,6 +8,7 @@ These import the real gateway functions and mock only:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import sys
 import types
@@ -32,6 +33,8 @@ sys.modules.setdefault("database", _fake_database)
 from fastapi import Response as FastAPIResponse  # noqa: E402
 from job_intercept import (  # noqa: E402
     _build_youtube_probe_command,
+    _compute_source_content_hash,
+    canonicalize_youtube_source_content_hash,
     intercept_create_job,
     update_source_metadata,
     _error_response,
@@ -264,6 +267,112 @@ class TestCreateJobRejections:
 # ===================================================================
 
 class TestCreateJobSuccess:
+    def test_youtube_source_content_hash_canonicalization_contract(self):
+        cases = {
+            "https://www.youtube.com/watch?v=abc&t=10s": "youtube:abc",
+            "https://youtu.be/abc": "youtube:abc",
+            "https://www.youtube.com/shorts/abc": "youtube:abc",
+            "https://m.youtube.com/watch?v=abc": "youtube:abc",
+            "https://www.youtube.com/live/abc": "youtube:abc",
+            "youtu.be/abc": "youtube:abc",
+        }
+
+        for url, expected in cases.items():
+            assert canonicalize_youtube_source_content_hash(url) == expected
+
+    def test_compute_source_content_hash_rejects_path_traversal(self, tmp_path, monkeypatch):
+        project_root = tmp_path / "project"
+        uploads_dir = project_root / "uploads" / "uid-1"
+        uploads_dir.mkdir(parents=True)
+        monkeypatch.setenv("AIVIDEOTRANS_PROJECTS_DIR", str(project_root))
+
+        good_bytes = b"valid upload bytes"
+        good_upload = uploads_dir / "sample.mp4"
+        good_upload.write_bytes(good_bytes)
+        expected_hash = f"sha256:{hashlib.sha256(good_bytes).hexdigest()}"
+        assert _run(_compute_source_content_hash("local_video", "uploads/uid-1/sample.mp4")) == expected_hash
+
+        secret = tmp_path / "secret_outside.txt"
+        secret.write_bytes(b"leak")
+        assert _run(_compute_source_content_hash("local_video", str(secret))) is None
+        assert _run(_compute_source_content_hash("local_video", "../secret_outside.txt")) is None
+        assert _run(_compute_source_content_hash("local_video", "uploads/../../secret_outside.txt")) is None
+
+        symlink = uploads_dir / "escape.mp4"
+        try:
+            symlink.symlink_to(secret)
+        except (OSError, NotImplementedError):
+            return
+        assert _run(_compute_source_content_hash("local_video", "uploads/uid-1/escape.mp4")) is None
+
+    def test_create_job_populates_source_content_hash_youtube_and_upload(self, tmp_path, monkeypatch):
+        captured: dict[str, dict] = {}
+        captured_jobs: dict[str, list] = {}
+
+        async def fake_proxy_youtube(*, request, upstream_base, strip_prefix, override_body=None):
+            if override_body:
+                captured["youtube"] = json.loads(override_body)
+            return _upstream_success("job_youtube_hash")
+
+        youtube_req = _make_request({
+            "service_mode": "express",
+            "source": {"type": "youtube_url", "value": "https://youtu.be/abc?t=10"},
+            "estimated_duration_seconds": 300,
+        })
+        user = _make_user(plan_code="free")
+        youtube_db = _make_db_session(active_job_count=0, user_for_quota=user)
+
+        original_add = youtube_db.add
+
+        def capture_youtube_add(obj):
+            captured_jobs.setdefault("youtube", []).append(obj)
+            return original_add(obj)
+
+        youtube_db.add = capture_youtube_add
+        with patch("job_intercept.proxy_request", side_effect=fake_proxy_youtube):
+            with patch("job_intercept._probe_youtube_metadata", return_value=None):
+                youtube_resp = _run(intercept_create_job(youtube_req, youtube_db, user))
+
+        assert youtube_resp.status_code == 202
+        assert captured["youtube"]["source_content_hash"] == "youtube:abc"
+        from models import Job
+        youtube_job = [o for o in captured_jobs["youtube"] if isinstance(o, Job)][0]
+        assert youtube_job.source_content_hash == "youtube:abc"
+
+        upload_bytes = b"uploaded video bytes"
+        upload_path = tmp_path / "uploads" / "uid-1" / "sample.mp4"
+        upload_path.parent.mkdir(parents=True)
+        upload_path.write_bytes(upload_bytes)
+        monkeypatch.setenv("AIVIDEOTRANS_PROJECTS_DIR", str(tmp_path))
+        expected_upload_hash = f"sha256:{hashlib.sha256(upload_bytes).hexdigest()}"
+
+        async def fake_proxy_upload(*, request, upstream_base, strip_prefix, override_body=None):
+            if override_body:
+                captured["upload"] = json.loads(override_body)
+            return _upstream_success("job_upload_hash")
+
+        upload_req = _make_request({
+            "service_mode": "express",
+            "source": {"type": "local_file", "value": "uploads/uid-1/sample.mp4"},
+            "estimated_duration_seconds": 300,
+        })
+        upload_db = _make_db_session(active_job_count=0, user_for_quota=user)
+        original_upload_add = upload_db.add
+
+        def capture_upload_add(obj):
+            captured_jobs.setdefault("upload", []).append(obj)
+            return original_upload_add(obj)
+
+        upload_db.add = capture_upload_add
+        with patch("job_intercept.proxy_request", side_effect=fake_proxy_upload):
+            upload_resp = _run(intercept_create_job(upload_req, upload_db, user))
+
+        assert upload_resp.status_code == 202
+        assert captured["upload"]["source"]["type"] == "local_video"
+        assert captured["upload"]["source_content_hash"] == expected_upload_hash
+        upload_job = [o for o in captured_jobs["upload"] if isinstance(o, Job)][0]
+        assert upload_job.source_content_hash == expected_upload_hash
+
     def test_snapshot_fields_injected_into_upstream_payload(self):
         """Verify the full snapshot is injected into the payload sent to Job API."""
         captured_body = {}

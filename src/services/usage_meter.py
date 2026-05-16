@@ -249,6 +249,40 @@ class UsageMeter:
                 payload[key] = value
         self.record_event(payload)
 
+    def record_voice_reuse(
+        self,
+        *,
+        provider: str,
+        voice_id: str,
+        speaker_id: str = "",
+        source_voice_id: str = "",
+        match_confidence: str = "",
+        match_reason: str = "",
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        reuse_extra: dict[str, Any] = {
+            "reuse": True,
+            "source_voice_id": str(source_voice_id or voice_id or ""),
+            "match_confidence": str(match_confidence or ""),
+            "match_reason": str(match_reason or ""),
+            "billing_policy": "reuse_existing_user_voice_no_clone_charge",
+        }
+        if extra:
+            reuse_extra.update(extra)
+        self.record_voice_clone(
+            provider=provider,
+            model="voice_reuse",
+            voice_id=voice_id,
+            speaker_id=speaker_id,
+            source_audio_seconds=0.0,
+            source_audio_bytes=0,
+            selected_segment_count=0,
+            clone_count=0,
+            billable=False,
+            success=True,
+            extra=reuse_extra,
+        )
+
     def record_event(self, event: dict[str, Any]) -> None:
         payload = dict(event)
         event_id = str(payload.get("event_id") or uuid.uuid4().hex)

@@ -1044,6 +1044,7 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                             provider=provider,
                             voice_id=voice_id,
                             tts_model_key=tts_model_key,
+                            voice_reuse=payload.get("voice_reuse") is True,
                         )
                     self._write_json(HTTPStatus.OK, {"success": True, **result})
                     return

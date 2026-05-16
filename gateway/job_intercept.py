@@ -11,13 +11,17 @@ The upstream Job API (8877) is the sole backend service.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import hashlib
 import logging
+import os
 import re
 import sys
 import uuid as _uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 # Make src/ importable for any future helpers that legitimately live in
 # ``src/`` and don't drag the ``services.jobs`` package init's pydub chain.
@@ -47,7 +51,7 @@ from auth import require_auth
 from config import settings
 from database import get_db
 from display_name_orchestrator import DisplayNameContext, compute_display_name
-from models import Job, User
+from models import Job, User, UserVoice
 from proxy import proxy_request
 from quota import check_quota, reserve_quota, settle_job_quota
 from credits_service import (
@@ -115,6 +119,128 @@ POST_EDIT_LIMITS: dict[str, dict[str, int | None]] = {
 }
 
 POST_EDIT_BATCH_TRIGGER_STATUSES = {"text_dirty", "voice_dirty", "tts_failed"}
+
+
+def _clean_youtube_video_id(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    cleaned = cleaned.split("?", 1)[0].split("#", 1)[0].strip("/")
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", cleaned):
+        return None
+    return cleaned
+
+
+def canonicalize_youtube_source_content_hash(url: str) -> str | None:
+    """Return the stable source hash for known YouTube URL shapes."""
+    raw_url = (url or "").strip()
+    if raw_url.startswith("youtu.be/"):
+        raw_url = f"https://{raw_url}"
+    try:
+        parsed = urlparse(raw_url)
+    except Exception:
+        return None
+
+    host = (parsed.netloc or "").lower()
+    if not host:
+        return None
+    if host.startswith("www."):
+        host = host[4:]
+    if host.startswith("m."):
+        host = host[2:]
+
+    video_id: str | None = None
+    path_parts = [part for part in parsed.path.split("/") if part]
+    if host == "youtu.be":
+        video_id = _clean_youtube_video_id(path_parts[0] if path_parts else None)
+    elif host in {"youtube.com", "music.youtube.com"} or host.endswith(".youtube.com"):
+        route = path_parts[0].lower() if path_parts else ""
+        if path_parts and route == "watch":
+            video_id = _clean_youtube_video_id(parse_qs(parsed.query).get("v", [None])[0])
+        elif len(path_parts) >= 2 and route in {"shorts", "live", "embed", "v"}:
+            video_id = _clean_youtube_video_id(path_parts[1])
+
+    return f"youtube:{video_id}" if video_id else None
+
+
+def _project_root_for_uploaded_sources() -> Path:
+    return Path(
+        os.environ.get("AIVIDEOTRANS_PROJECTS_DIR", "")
+        or os.environ.get("AIVIDEOTRANS_PROJECT_ROOT", "")
+        or "/opt/aivideotrans/app"
+    ).resolve(strict=False)
+
+
+def _candidate_local_source_paths(source_value: str) -> list[Path]:
+    raw = (source_value or "").strip()
+    if not raw:
+        return []
+    path = Path(raw)
+    candidates: list[Path] = [path]
+    project_root = _project_root_for_uploaded_sources()
+    if not path.is_absolute():
+        candidates.append(project_root / raw)
+    stripped = raw.lstrip("/\\")
+    if stripped != raw or stripped.startswith("uploads/") or stripped.startswith("uploads\\"):
+        candidates.append(project_root / stripped)
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key not in seen:
+            seen.add(key)
+            unique.append(candidate)
+    return unique
+
+
+def _sha256_content_hash_for_file(path: Path) -> str | None:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as file_obj:
+            for chunk in iter(lambda: file_obj.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as exc:
+        logger.warning("source_content_hash: failed to hash local source %s: %s", path, exc)
+        return None
+    return f"sha256:{digest.hexdigest()}"
+
+
+def _resolved_upload_source_path(candidate: Path, uploads_root: Path) -> Path | None:
+    try:
+        resolved = candidate.resolve(strict=False)
+    except OSError:
+        return None
+    if not resolved.is_relative_to(uploads_root):
+        return None
+    try:
+        if candidate.is_symlink() or resolved.is_symlink():
+            return None
+        if not resolved.is_file():
+            return None
+    except OSError:
+        return None
+    return resolved
+
+
+async def _compute_source_content_hash(source_type: str, source_value: str) -> str | None:
+    normalized_type = (source_type or "").strip().lower()
+    if normalized_type == "youtube_url":
+        return canonicalize_youtube_source_content_hash(source_value)
+    if normalized_type == "local_video":
+        uploads_root = (_project_root_for_uploaded_sources() / "uploads").resolve(strict=False)
+        for candidate in _candidate_local_source_paths(source_value):
+            resolved = _resolved_upload_source_path(candidate, uploads_root)
+            if resolved is not None:
+                return await asyncio.to_thread(_sha256_content_hash_for_file, resolved)
+        logger.warning(
+            "source_content_hash: no valid upload found inside %s for %s",
+            uploads_root,
+            source_value,
+        )
+    return None
 
 
 def _parse_job_list_pagination(request: Request) -> tuple[int | None, int]:
@@ -840,6 +966,8 @@ async def intercept_create_job(
         if isinstance(source, dict):
             source["type"] = "local_video"
 
+    source_content_hash = await _compute_source_content_hash(source_type, source_value)
+
     # --- 4. Duration: probe (YouTube) or accept frontend estimate ---
     estimated_duration_seconds = request_data.get("estimated_duration_seconds")
     if estimated_duration_seconds is not None:
@@ -951,6 +1079,8 @@ async def intercept_create_job(
     request_data["estimated_duration_seconds"] = estimated_duration_seconds
     request_data["quota_state"] = "none"
     request_data["create_idempotency_key"] = idempotency_key
+    if source_content_hash:
+        request_data["source_content_hash"] = source_content_hash
     if job_expires_at is not None:
         request_data["expires_at"] = job_expires_at.isoformat()
     else:
@@ -994,6 +1124,7 @@ async def intercept_create_job(
                         user_id=user.id,
                         source_type=job_data.get("source_type", "youtube_url"),
                         source_ref=job_data.get("youtube_url") or job_data.get("source_ref", ""),
+                        source_content_hash=job_data.get("source_content_hash") or source_content_hash,
                         title=job_data.get("title", ""),
                         speakers=job_data.get("speakers", "auto"),
                         status=job_data.get("status", "queued"),
@@ -1814,6 +1945,77 @@ def _aggregate_quality_tier_from_speakers(
     return ("standard", None)
 
 
+async def _record_voice_reuse_events(
+    db: AsyncSession,
+    *,
+    job: Job,
+    speakers: list[dict],
+) -> None:
+    reuse_speakers = [
+        sp for sp in speakers
+        if isinstance(sp, dict) and sp.get("voice_reuse") is True
+    ]
+    if not reuse_speakers or not job.user_id:
+        return
+
+    snap = dict(job.metering_snapshot or {})
+    project_dir_raw = str(snap.get("project_dir") or "").strip()
+    if not project_dir_raw:
+        return
+
+    try:
+        from services.usage_meter import UsageMeter
+        meter = UsageMeter(Path(project_dir_raw), job_id=job.job_id)
+    except Exception:
+        logger.warning("voice reuse audit skipped for %s: UsageMeter unavailable", job.job_id, exc_info=True)
+        return
+
+    existing_event_ids = {str(event.get("event_id") or "") for event in meter.events}
+    for sp in reuse_speakers:
+        speaker_id = str(sp.get("speaker_id") or "").strip()
+        voice_id = str(sp.get("voice_id") or "").strip()
+        if not speaker_id or not voice_id:
+            continue
+        event_id = f"voice_reuse:{job.job_id}:{speaker_id}:{voice_id}"
+        if event_id in existing_event_ids:
+            continue
+
+        try:
+            result = await db.execute(
+                select(UserVoice).where(
+                    UserVoice.user_id == job.user_id,
+                    UserVoice.voice_id == voice_id,
+                    UserVoice.expired_at.is_(None),
+                )
+            )
+            user_voice = result.scalar_one_or_none()
+            if user_voice is None:
+                continue
+            meter.record_voice_reuse(
+                provider=user_voice.provider,
+                voice_id=voice_id,
+                speaker_id=speaker_id,
+                source_voice_id=voice_id,
+                match_confidence="user_confirmed",
+                match_reason="studio_reuse_confirmed",
+                extra={
+                    "event_id": event_id,
+                    "source_user_voice_id": str(user_voice.id),
+                    "source_content_hash": getattr(user_voice, "source_content_hash", None),
+                    "source_speaker_id": getattr(user_voice, "source_speaker_id", None),
+                },
+            )
+            existing_event_ids.add(event_id)
+        except Exception:
+            logger.warning(
+                "voice reuse audit failed for %s/%s/%s",
+                job.job_id,
+                speaker_id,
+                voice_id,
+                exc_info=True,
+            )
+
+
 async def _approve_voice_selection_with_quality_sync(
     request: Request,
     job_id: str,
@@ -1953,6 +2155,8 @@ async def _approve_voice_selection_with_quality_sync(
         if per_speaker_mix:
             snap["per_speaker_provider"] = per_speaker_mix
         job.metering_snapshot = snap
+
+        await _record_voice_reuse_events(db, job=job, speakers=speakers)
 
         # Only overwrite tts_model when a minimax speaker explicitly chose
         # turbo/hd. For jobs using only CosyVoice/VolcEngine, keep whatever

@@ -9,6 +9,21 @@ export interface VoiceLibraryEntry {
   label: string | null
   createdAt: string | null
   notes: string | null
+  sourceJobId: string | null
+  sourceType: string | null
+  sourceRef: string | null
+  sourceContentHash: string | null
+  sourceUploadMd5: string | null
+  sourceVideoTitle: string | null
+  sourceSpeakerName: string | null
+  sourceSpeakerNameKey: string | null
+  sourcePublishedAt: string | null
+  sourceContentSummary: string | null
+  sourceContentEra: string | null
+  sourceContentTags: unknown
+  cloneSampleSeconds: number | null
+  cloneSampleSegmentIds: unknown
+  createdFrom: string | null
   verificationStatus: string | null
   speakerName: string | null
   speakerId: string | null
@@ -175,8 +190,23 @@ function toVoiceLibrarySummaryFromGateway(
       label: asString(v.label),
       createdAt: asString(v.created_at),
       notes: asString(v.notes),
+      sourceJobId: asString(v.source_job_id),
+      sourceType: asString(v.source_type),
+      sourceRef: asString(v.source_ref),
+      sourceContentHash: asString(v.source_content_hash),
+      sourceUploadMd5: asString(v.source_upload_md5),
+      sourceVideoTitle: asString(v.source_video_title),
+      sourceSpeakerName: asString(v.source_speaker_name),
+      sourceSpeakerNameKey: asString(v.source_speaker_name_key),
+      sourcePublishedAt: asString(v.source_published_at),
+      sourceContentSummary: asString(v.source_content_summary),
+      sourceContentEra: asString(v.source_content_era),
+      sourceContentTags: v.source_content_tags ?? null,
+      cloneSampleSeconds: typeof v.clone_sample_seconds === 'number' ? v.clone_sample_seconds : null,
+      cloneSampleSegmentIds: v.clone_sample_segment_ids ?? null,
+      createdFrom: asString(v.created_from),
       verificationStatus: null,
-      speakerName: asString(v.source_speaker_id),
+      speakerName: asString(v.source_speaker_name) ?? asString(v.source_speaker_id),
       speakerId: asString(v.source_speaker_id),
       charsPerSecond: typeof v.chars_per_second === 'number' ? v.chars_per_second : null,
       speedCalibratedAt: asString(v.speed_calibrated_at),

@@ -1907,8 +1907,16 @@ class TestB3DCloneSampleExtractorContract:
         result = _register_smart_clone_in_user_voices(
             user_id="u-1",
             voice_id="vt_xxx",
-            label="Speaker A Clone",
+            label="Speaker A · 2026-05-16 14:32",
             source_speaker_id="speaker_a",
+            source_job_id="j-1",
+            source_type="youtube_url",
+            source_ref="https://youtu.be/abc",
+            source_content_hash="youtube:abc",
+            source_video_title="Source Title",
+            source_speaker_name="Speaker A",
+            clone_sample_seconds=12.5,
+            clone_sample_segment_ids=[1, 2],
             notes="Smart auto-clone from job j-1",
         )
         assert result is True
@@ -1924,8 +1932,17 @@ class TestB3DCloneSampleExtractorContract:
         body = recorded["json"]
         assert body["user_id"] == "u-1"
         assert body["voice_id"] == "vt_xxx"
-        assert body["label"] == "Speaker A Clone"
+        assert body["label"] == "Speaker A · 2026-05-16 14:32"
         assert body["source_speaker_id"] == "speaker_a"
+        assert body["source_job_id"] == "j-1"
+        assert body["source_type"] == "youtube_url"
+        assert body["source_ref"] == "https://youtu.be/abc"
+        assert body["source_content_hash"] == "youtube:abc"
+        assert body["source_video_title"] == "Source Title"
+        assert body["source_speaker_name"] == "Speaker A"
+        assert body["clone_sample_seconds"] == 12.5
+        assert body["clone_sample_segment_ids"] == [1, 2]
+        assert body["created_from"] == "smart_auto"
         assert body["notes"] == "Smart auto-clone from job j-1"
 
     def test_b3e_fix_mirror_helper_returns_false_on_failures(self, monkeypatch):

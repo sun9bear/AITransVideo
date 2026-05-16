@@ -106,6 +106,43 @@ class TestAutoVoiceReviewOrchestration:
         assert all(d.choice is VoiceReviewChoice.PRESET for d in result.decisions)
         assert all(d.reason_code == "consent_denied" for d in result.decisions)
 
+    def test_existing_strong_match_reuses_before_sample_and_quota_checks(self):
+        """Reuse is allowed after consent but before new-clone constraints."""
+        from services.smart.auto_voice_review import (
+            VoiceReviewChoice,
+            VoiceReviewExistingMatch,
+            VoiceReviewOutcome,
+            evaluate_voice_review,
+        )
+        from tests.fakes import FakeCloneProvider
+
+        fake = FakeCloneProvider()
+        result = evaluate_voice_review(
+            main_speakers=[self._speaker("speaker_a", sample_seconds=2.0)],
+            smart_consent={"auto_voice_clone": True},
+            clone_provider=fake,
+            voice_library_quota_remaining=0,
+            smart_decision_id_factory=self._id_factory(),
+            existing_voice_matches_by_speaker_id={
+                "speaker_a": VoiceReviewExistingMatch(
+                    voice_id="vt_existing",
+                    provider_name="minimax_voice_clone",
+                    model_name="minimax_tts",
+                    confidence="strong",
+                    reason="same_source_content_hash_and_speaker_id",
+                    user_voice_id="7",
+                ),
+            },
+        )
+
+        assert result.outcome is VoiceReviewOutcome.AUTO_APPROVED
+        decision = result.decisions[0]
+        assert decision.choice is VoiceReviewChoice.REUSED
+        assert decision.cloned_voice_id == "vt_existing"
+        assert decision.reason_code == "reused_user_voice"
+        assert decision.metrics["match_confidence"] == "strong"
+        assert fake.calls == []
+
     def test_sample_below_10s_never_calls_clone_provider(self):
         """CRITICAL invariant — Codex F5 / plan §6.2.1: 8-10s samples
         would be 400-rejected by the existing voice-clone HTTP endpoint

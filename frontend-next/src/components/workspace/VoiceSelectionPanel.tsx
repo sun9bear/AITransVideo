@@ -11,11 +11,13 @@ import {
   deleteUserVoice,
   getSpeakerAudioSegments,
   getUserVoices,
+  matchVoiceForSelection,
   previewVoice,
   reassignSpeakerAudioSegment,
   type SpeakerAudioSegment,
   type SpeakerAudioReassignResult,
   type UserVoiceEntry,
+  type VoiceReuseMatchResponse,
   type VoiceSelectionSpeakerApproval,
   getVoiceSelectionPricing,
   type VoiceSelectionPricingResponse,
@@ -81,6 +83,7 @@ interface SpeakerVoiceState {
   voiceSource: 'catalog' | 'cloned' | 'auto_matched'
   selectedProvider: string
   minimaxModel: 'turbo' | 'hd'
+  voiceReuse: boolean
   isCloning: boolean
   cloneError: string | null
 }
@@ -115,6 +118,18 @@ function formatTimecode(ms: number): string {
   const minutes = Math.floor(totalSeconds / 60)
   const seconds = totalSeconds % 60
   return `${minutes}:${seconds.toString().padStart(2, '0')}`
+}
+
+function formatReuseConfidence(confidence: VoiceReuseMatchResponse['confidence']): string {
+  if (confidence === 'strong') return '同一视频 / 同一说话人'
+  if (confidence === 'medium') return '同一视频 / 说话人名称相同'
+  if (confidence === 'weak') return '同一视频 / 说话人编号可能变化'
+  return '可复用候选'
+}
+
+function formatSeconds(value: number | null): string | null {
+  if (value == null || !Number.isFinite(value)) return null
+  return `${value.toFixed(1)}s`
 }
 
 /* ---------- Main Component ---------- */
@@ -288,6 +303,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
             voiceSource: autoVoice && !isExpired ? 'auto_matched' : 'catalog',
             selectedProvider: spProvider,
             minimaxModel: 'turbo',
+            voiceReuse: false,
             isCloning: false,
             cloneError: null,
           }
@@ -322,6 +338,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
           selectedProvider: provider,
           voiceId: provMatch?.voiceId ?? '',
           voiceSource: provMatch?.voiceId ? 'auto_matched' : 'catalog',
+          voiceReuse: false,
           cloneError: null,
         },
       }
@@ -331,14 +348,14 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
   const handleVoiceChange = useCallback((speakerId: string, voiceId: string) => {
     setVoiceStates((prev) => ({
       ...prev,
-      [speakerId]: { ...prev[speakerId], voiceId, voiceSource: 'catalog', cloneError: null },
+      [speakerId]: { ...prev[speakerId], voiceId, voiceSource: 'catalog', voiceReuse: false, cloneError: null },
     }))
   }, [])
 
-  const handleCloneComplete = useCallback((speakerId: string, voiceId: string) => {
+  const handleCloneComplete = useCallback((speakerId: string, voiceId: string, options?: { reused?: boolean }) => {
     setVoiceStates((prev) => ({
       ...prev,
-      [speakerId]: { ...prev[speakerId], voiceId, voiceSource: 'cloned', isCloning: false, cloneError: null },
+      [speakerId]: { ...prev[speakerId], voiceId, voiceSource: 'cloned', voiceReuse: options?.reused ?? false, isCloning: false, cloneError: null },
     }))
     setCloneModalSpeaker(null)
     getUserVoices().then(setPersonalVoices).catch(() => {})
@@ -391,7 +408,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
         setPreviewError((p) => ({ ...p, [speakerId]: '音色已失效，请重新选择' }))
         setVoiceStates((prev) => ({
           ...prev,
-          [speakerId]: { ...prev[speakerId], voiceId: '', voiceSource: 'catalog' },
+          [speakerId]: { ...prev[speakerId], voiceId: '', voiceSource: 'catalog', voiceReuse: false },
         }))
         setExpiredVoiceIds((prev) => [...prev, state.voiceId])
         await deleteUserVoice(state.voiceId).catch(() => {})
@@ -480,6 +497,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
           voiceId: st?.voiceId ?? '',
           voiceSource: st?.voiceSource ?? 'catalog',
           ttsProvider,
+          voiceReuse: st?.voiceReuse ?? false,
           // Only meaningful for MiniMax — Gateway 据此聚合 job 级 quality_tier。
           // 非 MiniMax speaker 传 undefined，避免误算成 flagship。
           minimaxModel: ttsProvider === 'minimax' ? (st?.minimaxModel ?? 'turbo') : undefined,
@@ -811,6 +829,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
           jobId={jobId}
           onClose={() => setCloneModalSpeaker(null)}
           onComplete={handleCloneComplete}
+          selectedProvider={voiceStates[selectedCloneSpeaker.speakerId]?.selectedProvider ?? defaultProvider}
           speaker={selectedCloneSpeaker}
         />
       ) : null}
@@ -1057,14 +1076,17 @@ interface VoiceCloneModalProps {
   jobId: string
   speaker: VoiceCloneModalSpeakerRef
   cloneCostCredits: number
+  selectedProvider?: string
   onClose: () => void
-  onComplete: (speakerId: string, voiceId: string) => void
+  onComplete: (speakerId: string, voiceId: string, options?: { reused?: boolean }) => void
 }
 
-export function VoiceCloneModal({ jobId, speaker, cloneCostCredits, onClose, onComplete }: VoiceCloneModalProps) {
+export function VoiceCloneModal({ jobId, speaker, cloneCostCredits, selectedProvider, onClose, onComplete }: VoiceCloneModalProps) {
   const [segments, setSegments] = useState<SpeakerAudioSegment[]>([])
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   const [isLoading, setIsLoading] = useState(true)
+  const [isCheckingReuse, setIsCheckingReuse] = useState(true)
+  const [reuseMatch, setReuseMatch] = useState<VoiceReuseMatchResponse | null>(null)
   const [isCloning, setIsCloning] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
@@ -1086,6 +1108,28 @@ export function VoiceCloneModal({ jobId, speaker, cloneCostCredits, onClose, onC
     load()
     return () => { cancelled = true }
   }, [jobId, speaker.speakerId])
+
+  useEffect(() => {
+    let cancelled = false
+    async function loadReuseMatch() {
+      try {
+        setIsCheckingReuse(true)
+        const result = await matchVoiceForSelection({
+          jobId,
+          speakerId: speaker.speakerId,
+          speakerName: speaker.speakerName,
+          selectedProvider,
+        })
+        if (!cancelled) setReuseMatch(result)
+      } catch {
+        if (!cancelled) setReuseMatch(null)
+      } finally {
+        if (!cancelled) setIsCheckingReuse(false)
+      }
+    }
+    loadReuseMatch()
+    return () => { cancelled = true }
+  }, [jobId, speaker.speakerId, speaker.speakerName, selectedProvider])
 
   const selectedDuration = useMemo(() => {
     return segments.filter((s) => selectedIds.has(s.segmentId)).reduce((sum, s) => sum + s.durationS, 0)
@@ -1140,6 +1184,11 @@ export function VoiceCloneModal({ jobId, speaker, cloneCostCredits, onClose, onC
     }
   }, [isCloning, meetsMinDuration, exceedsMaxDuration, jobId, speaker.speakerId, selectedIds, onComplete])
 
+  const handleReuse = useCallback(() => {
+    if (!reuseMatch?.voice?.voiceId) return
+    onComplete(speaker.speakerId, reuseMatch.voice.voiceId, { reused: true })
+  }, [onComplete, reuseMatch, speaker.speakerId])
+
   useEffect(() => {
     return () => { if (audioRef.current) { audioRef.current.pause(); audioRef.current = null } }
   }, [])
@@ -1153,6 +1202,37 @@ export function VoiceCloneModal({ jobId, speaker, cloneCostCredits, onClose, onC
             <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M6 18L18 6M6 6l12 12" strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} /></svg>
           </button>
         </div>
+        {isCheckingReuse || (reuseMatch?.matched && reuseMatch.voice) ? (
+          <div className="border-b border-border px-4 py-3">
+            {isCheckingReuse ? (
+              <p className="text-xs text-slate-500">正在检查个人音色库...</p>
+            ) : reuseMatch?.matched && reuseMatch.voice ? (
+              <div className="rounded-lg border border-[color:var(--bamboo)]/30 bg-[color:var(--bamboo)]/10 p-3">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0 space-y-1">
+                    <p className="text-sm font-medium text-foreground">发现可复用音色：{reuseMatch.voice.label || reuseMatch.voice.voiceId}</p>
+                    <p className="text-xs text-slate-500">
+                      {formatReuseConfidence(reuseMatch.confidence)}
+                      {reuseMatch.voice.sourceVideoTitle ? ` · ${reuseMatch.voice.sourceVideoTitle}` : ''}
+                    </p>
+                    <p className="text-xs text-slate-500">
+                      复用不会消耗克隆点数
+                      {formatSeconds(reuseMatch.voice.cloneSampleSeconds) ? ` · 原样本 ${formatSeconds(reuseMatch.voice.cloneSampleSeconds)}` : ''}
+                      {reuseMatch.voice.provider ? ` · ${reuseMatch.voice.provider}` : ''}
+                    </p>
+                  </div>
+                  <button
+                    className="h-8 rounded-lg bg-primary px-3 text-xs font-medium text-primary-foreground transition hover:bg-primary/85"
+                    onClick={handleReuse}
+                    type="button"
+                  >
+                    复用此音色
+                  </button>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
         <div className="flex items-center gap-3 p-4 border-b border-slate-100 dark:border-slate-800">
           <button className="h-7 rounded px-3 text-xs font-medium transition border border-[color:var(--cinnabar)]/40 bg-[color:var(--cinnabar)]/10 text-[color:var(--cinnabar)] hover:bg-[color:var(--cinnabar)]/20" onClick={autoSelect} type="button">自动选择</button>
           <span className="text-xs text-slate-400">从最长片段开始自动勾选，总时长 &lt; 300s</span>
@@ -1185,11 +1265,15 @@ export function VoiceCloneModal({ jobId, speaker, cloneCostCredits, onClose, onC
           })}
         </div>
         <div className="flex items-center justify-between p-4 border-t border-border">
-          <span className="text-xs text-slate-400">{cloneCostCredits > 0 ? `克隆费用：${cloneCostCredits} 点` : '扣点信息暂不可用'}</span>
+          <span className="text-xs text-slate-400">
+            {reuseMatch?.matched
+              ? cloneCostCredits > 0 ? `重新克隆会消耗 ${cloneCostCredits} 点` : '重新克隆会消耗克隆点数'
+              : cloneCostCredits > 0 ? `克隆费用：${cloneCostCredits} 点` : '扣点信息暂不可用'}
+          </span>
           <div className="flex items-center gap-2">
             {error ? <span className="text-xs text-[color:var(--cinnabar)] max-w-[200px] truncate">{error}</span> : null}
             <button className="h-8 rounded px-4 text-sm text-slate-500 transition hover:text-foreground" disabled={isCloning} onClick={onClose} type="button">取消</button>
-            <button className="h-8 rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground transition hover:bg-primary/85 disabled:opacity-50 disabled:cursor-not-allowed" disabled={isCloning || !meetsMinDuration || exceedsMaxDuration} onClick={() => { void handleClone() }} type="button">{isCloning ? '克隆中...' : '开始克隆'}</button>
+            <button className="h-8 rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground transition hover:bg-primary/85 disabled:opacity-50 disabled:cursor-not-allowed" disabled={isCloning || !meetsMinDuration || exceedsMaxDuration} onClick={() => { void handleClone() }} type="button">{isCloning ? '克隆中...' : reuseMatch?.matched ? '重新克隆' : '开始克隆'}</button>
           </div>
         </div>
       </div>

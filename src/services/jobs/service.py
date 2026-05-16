@@ -1346,6 +1346,7 @@ class JobService:
         provider: str,
         voice_id: str,
         tts_model_key: str | None = None,
+        voice_reuse: bool = False,
     ) -> dict:
         """Set per-segment voice override + emit
         ``post_edit_voice_override_changed`` audit event (plan 2026-05-04
@@ -1389,6 +1390,33 @@ class JobService:
             logging.getLogger(__name__).exception(
                 "post_edit_voice_override_changed audit emit failed for %s", job_id
             )
+        if voice_reuse:
+            try:
+                from services.usage_meter import UsageMeter
+
+                audit_provider = (
+                    "minimax_voice_clone"
+                    if str(provider or "").strip().lower() in {"minimax", "minimax_tts"}
+                    else provider
+                )
+                UsageMeter(record.project_dir, job_id=job_id).record_voice_reuse(
+                    provider=audit_provider,
+                    voice_id=voice_id,
+                    speaker_id=segment_id,
+                    source_voice_id=voice_id,
+                    match_confidence="user_confirmed",
+                    match_reason="post_edit_reuse_confirmed",
+                    extra={
+                        "event_id": f"voice_reuse_postedit:{job_id}:{segment_id}:{voice_id}",
+                        "source": "post_edit_voice_map",
+                        "segment_id": segment_id,
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                import logging
+                logging.getLogger(__name__).exception(
+                    "post_edit voice reuse audit emit failed for %s", job_id
+                )
         return result
 
     def clear_editing_voice_override(self, job_id: str, segment_id: str) -> dict:

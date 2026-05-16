@@ -95,6 +95,7 @@ class VoiceReviewChoice(Enum):
     """Per-speaker choice. Drives the integration layer's next move."""
 
     CLONED = "cloned"      # voice_id from provider; integration applies directly
+    REUSED = "reused_user_voice"  # existing personal voice_id; no provider call
     PRESET = "preset"      # voice_id=None; integration calls voice_match_resolver
     PAUSED = "paused"      # quota water mark hit; integration pauses task
 
@@ -119,6 +120,18 @@ class VoiceReviewSpeakerInput:
     speaker_name: str
     sample_seconds: float
     source_audio_path: Path  # caller's responsibility to pre-build
+
+
+@dataclass(frozen=True)
+class VoiceReviewExistingMatch:
+    """Existing personal voice candidate supplied by the integration layer."""
+
+    voice_id: str
+    provider_name: str | None = None
+    model_name: str | None = None
+    confidence: str | None = None
+    reason: str | None = None
+    user_voice_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -171,6 +184,7 @@ def evaluate_voice_review(
     clone_provider: CloneProvider,
     voice_library_quota_remaining: int,
     smart_decision_id_factory: Callable[[], str],
+    existing_voice_matches_by_speaker_id: Mapping[str, VoiceReviewExistingMatch] | None = None,
     quota_safety_water_mark: int = DEFAULT_QUOTA_SAFETY_WATER_MARK,
     min_sample_seconds: float = MIN_SAMPLE_SECONDS,
     max_clone_attempts_per_speaker: int = DEFAULT_MAX_CLONE_ATTEMPTS,
@@ -214,6 +228,7 @@ def evaluate_voice_review(
     quota_remaining = voice_library_quota_remaining
     paused_after_speaker: bool = False
     pause_reason: str | None = None
+    existing_voice_matches = dict(existing_voice_matches_by_speaker_id or {})
 
     for speaker in main_speakers:
         # Once we hit a hard pause condition, all remaining speakers
@@ -234,6 +249,15 @@ def evaluate_voice_review(
         if not consent_allows_clone:
             decisions.append(_preset_decision(
                 speaker, "consent_denied", smart_decision_id_factory()
+            ))
+            continue
+
+        existing_match = existing_voice_matches.get(speaker.speaker_id)
+        if existing_match is not None and str(existing_match.voice_id or "").strip():
+            decisions.append(_reused_decision(
+                speaker,
+                existing_match,
+                smart_decision_id_factory(),
             ))
             continue
 
@@ -437,6 +461,28 @@ def _preset_decision(
         reason_code=reason_code,
         smart_decision_id=smart_decision_id,
         metrics=metrics or {},
+    )
+
+
+def _reused_decision(
+    speaker: VoiceReviewSpeakerInput,
+    match: VoiceReviewExistingMatch,
+    smart_decision_id: str,
+) -> VoiceReviewDecision:
+    return VoiceReviewDecision(
+        speaker_id=speaker.speaker_id,
+        speaker_name=speaker.speaker_name,
+        choice=VoiceReviewChoice.REUSED,
+        cloned_voice_id=str(match.voice_id or "").strip(),
+        cloned_provider_name=match.provider_name,
+        cloned_model_name=match.model_name,
+        reason_code="reused_user_voice",
+        smart_decision_id=smart_decision_id,
+        metrics={
+            "match_confidence": match.confidence,
+            "match_reason": match.reason,
+            "matched_user_voice_id": match.user_voice_id,
+        },
     )
 
 

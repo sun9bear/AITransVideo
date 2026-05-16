@@ -169,6 +169,80 @@ class TestCloneLockHelpers:
         assert "cloning" not in speaker
 
 
+class TestVoiceMatchEndpoint:
+    def test_voice_match_for_selection_returns_strong_candidate(self, monkeypatch) -> None:
+        from user_voice_service import UserVoiceMatch
+
+        user = SimpleNamespace(id="user-1")
+        job = SimpleNamespace(
+            job_id="job-match",
+            user_id="user-1",
+            source_content_hash="youtube:abc123",
+        )
+        db = _make_db(job)
+        request = _make_request({
+            "speaker_id": "speaker_a",
+            "speaker_name": "芒格",
+            "selected_provider": "minimax",
+        })
+        voice = SimpleNamespace(
+            id=7,
+            voice_id="vt_reuse_1",
+            voice_type="cloned",
+            provider="minimax_voice_clone",
+            tts_provider="minimax_tts",
+            platform="minimax_domestic",
+            label="芒格 · 2026-05-16 14:32",
+            source_speaker_id="speaker_a",
+            notes=None,
+            expired_at=None,
+            created_at=None,
+            updated_at=None,
+        )
+        matcher = AsyncMock(return_value=[
+            UserVoiceMatch(
+                voice=voice,
+                confidence="strong",
+                reason="same_source_content_hash_and_speaker_id",
+                score=100,
+            )
+        ])
+        monkeypatch.setattr("user_voice_service.match_user_voices", matcher)
+
+        response = _run(voice_selection_api.voice_match_for_selection(request, "job-match", db, user))
+        body = json.loads(response.body.decode("utf-8"))
+
+        assert response.status_code == 200
+        assert body["matched"] is True
+        assert body["auto_reuse_allowed"] is True
+        assert body["voice"]["voice_id"] == "vt_reuse_1"
+        assert body["candidates"][0]["score"] == 100
+        kwargs = matcher.await_args.kwargs
+        assert kwargs["user_id"] == "user-1"
+        assert kwargs["source_content_hash"] == "youtube:abc123"
+        assert kwargs["source_speaker_id"] == "speaker_a"
+        assert kwargs["source_speaker_name"] == "芒格"
+        assert kwargs["provider"] == "minimax_voice_clone"
+        assert kwargs["tts_provider"] == "minimax_tts"
+        assert kwargs["platform"] == "minimax_domestic"
+
+    def test_voice_match_for_selection_missing_hash_skips_matcher(self, monkeypatch) -> None:
+        user = SimpleNamespace(id="user-1")
+        job = SimpleNamespace(job_id="job-no-hash", user_id="user-1", source_content_hash=None)
+        db = _make_db(job)
+        request = _make_request({"speaker_id": "speaker_a", "selected_provider": "minimax"})
+        matcher = AsyncMock(return_value=[])
+        monkeypatch.setattr("user_voice_service.match_user_voices", matcher)
+
+        response = _run(voice_selection_api.voice_match_for_selection(request, "job-no-hash", db, user))
+        body = json.loads(response.body.decode("utf-8"))
+
+        assert response.status_code == 200
+        assert body["matched"] is False
+        assert body["reason"] == "missing_source_content_hash"
+        matcher.assert_not_awaited()
+
+
 class TestVoiceCloneEndpointCloneLock:
     def test_voice_clone_for_selection_returns_409_when_clone_is_in_progress(
         self,

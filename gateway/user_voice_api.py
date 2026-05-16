@@ -23,6 +23,7 @@ from user_voice_service import (
     fetch_user_voice,
     list_user_voices,
     mark_voice_expired,
+    match_user_voices,
     update_user_voice_label,
 )
 
@@ -87,12 +88,55 @@ def _voice_to_dict(v) -> dict:
         "platform": v.platform,
         "label": v.label,
         "source_speaker_id": v.source_speaker_id,
+        "source_job_id": getattr(v, "source_job_id", None),
+        "source_type": getattr(v, "source_type", None),
+        "source_ref": getattr(v, "source_ref", None),
+        "source_content_hash": getattr(v, "source_content_hash", None),
+        "source_upload_md5": getattr(v, "source_upload_md5", None),
+        "source_video_title": getattr(v, "source_video_title", None),
+        "source_speaker_name": getattr(v, "source_speaker_name", None),
+        "source_speaker_name_key": getattr(v, "source_speaker_name_key", None),
+        "source_published_at": (
+            getattr(v, "source_published_at", None).isoformat()
+            if getattr(v, "source_published_at", None)
+            else None
+        ),
+        "source_content_summary": getattr(v, "source_content_summary", None),
+        "source_content_era": getattr(v, "source_content_era", None),
+        "source_content_tags": getattr(v, "source_content_tags", None),
+        "clone_sample_seconds": getattr(v, "clone_sample_seconds", None),
+        "clone_sample_segment_ids": getattr(v, "clone_sample_segment_ids", None),
+        "created_from": getattr(v, "created_from", None),
         "notes": v.notes,
         "expired_at": v.expired_at.isoformat() if v.expired_at else None,
         "created_at": v.created_at.isoformat() if v.created_at else None,
         "chars_per_second": v.chars_per_second,
         "chars_per_second_by_model": v.chars_per_second_by_model,
         "speed_calibrated_at": v.speed_calibrated_at.isoformat() if v.speed_calibrated_at else None,
+    }
+
+
+def _parse_optional_datetime(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return None
+    raw = value.strip()
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _match_to_dict(match) -> dict:
+    voice = _voice_to_dict(match.voice)
+    return {
+        "matched": True,
+        "confidence": match.confidence,
+        "reason": match.reason,
+        "score": match.score,
+        "auto_reuse_allowed": match.auto_reuse_allowed,
+        "voice": voice,
     }
 
 
@@ -128,6 +172,21 @@ async def create_user_voice(
         tts_provider=body.get("tts_provider", "minimax_tts"),
         platform=body.get("platform", "minimax_domestic"),
         source_speaker_id=body.get("source_speaker_id"),
+        source_job_id=body.get("source_job_id"),
+        source_type=body.get("source_type"),
+        source_ref=body.get("source_ref"),
+        source_content_hash=body.get("source_content_hash"),
+        source_upload_md5=body.get("source_upload_md5"),
+        source_video_title=body.get("source_video_title"),
+        source_speaker_name=body.get("source_speaker_name"),
+        source_speaker_name_key=body.get("source_speaker_name_key"),
+        source_published_at=_parse_optional_datetime(body.get("source_published_at")),
+        source_content_summary=body.get("source_content_summary"),
+        source_content_era=body.get("source_content_era"),
+        source_content_tags=body.get("source_content_tags"),
+        clone_sample_seconds=body.get("clone_sample_seconds"),
+        clone_sample_segment_ids=body.get("clone_sample_segment_ids"),
+        created_from=body.get("created_from") or "manual_add",
         notes=body.get("notes"),
     )
     return _json(200, {"ok": True, "voice": _voice_to_dict(voice)})
@@ -773,6 +832,82 @@ async def internal_user_voice_quota(
     })
 
 
+@internal_router.post("/user-voices/match")
+async def internal_match_user_voice(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Find same-source personal voice candidates before cloning.
+
+    Phase 2 exposes matching only as an internal endpoint. It does not
+    mutate jobs, bind voice selections, call clone providers, or charge
+    credits. Future Studio/Smart phases consume this as a read-only
+    decision input.
+    """
+    internal_error = _internal_access_error(request)
+    if internal_error is not None:
+        return internal_error
+
+    body = await _read_body(request)
+    uid = str(body.get("user_id", "") or "").strip()
+    if not uid:
+        return _json(400, {"error": "user_id_required"})
+    try:
+        user_uuid = uuid.UUID(uid)
+    except (ValueError, AttributeError):
+        return _json(400, {"error": "invalid_user_id"})
+
+    source_content_hash = str(body.get("source_content_hash", "") or "").strip()
+    if not source_content_hash:
+        return _json(200, {
+            "matched": False,
+            "confidence": None,
+            "auto_reuse_allowed": False,
+            "reason": "missing_source_content_hash",
+            "voice": None,
+            "candidates": [],
+        })
+
+    try:
+        limit = int(body.get("limit") or 5)
+    except (TypeError, ValueError):
+        limit = 5
+
+    matches = await match_user_voices(
+        db,
+        user_id=user_uuid,
+        source_content_hash=source_content_hash,
+        source_speaker_id=body.get("speaker_id") or body.get("source_speaker_id"),
+        source_speaker_name=body.get("speaker_name") or body.get("source_speaker_name"),
+        source_speaker_name_key=body.get("source_speaker_name_key"),
+        provider=str(body.get("provider") or "minimax_voice_clone"),
+        tts_provider=body.get("tts_provider") or "minimax_tts",
+        platform=body.get("platform") or "minimax_domestic",
+        limit=limit,
+    )
+
+    if not matches:
+        return _json(200, {
+            "matched": False,
+            "confidence": None,
+            "auto_reuse_allowed": False,
+            "reason": "no_candidate",
+            "voice": None,
+            "candidates": [],
+        })
+
+    top = matches[0]
+    candidates = [_match_to_dict(item) for item in matches]
+    return _json(200, {
+        "matched": True,
+        "confidence": top.confidence,
+        "auto_reuse_allowed": top.auto_reuse_allowed,
+        "reason": top.reason,
+        "voice": _voice_to_dict(top.voice),
+        "candidates": candidates,
+    })
+
+
 @internal_router.post("/user-voices/register-smart")
 async def internal_register_smart_clone(
     request: Request,
@@ -825,6 +960,7 @@ async def internal_register_smart_clone(
     label = str(body.get("label") or voice_id)
     source_speaker_id = body.get("source_speaker_id")
     notes = body.get("notes")
+    source_speaker_name = body.get("source_speaker_name")
     # Field defaults mirror the Studio voice-clone path to keep the
     # two clone origins indistinguishable downstream. Callers can
     # override (e.g. for a future cosyvoice clone path) but the
@@ -843,6 +979,21 @@ async def internal_register_smart_clone(
             tts_provider=tts_provider,
             platform=platform,
             source_speaker_id=source_speaker_id,
+            source_job_id=body.get("source_job_id"),
+            source_type=body.get("source_type"),
+            source_ref=body.get("source_ref"),
+            source_content_hash=body.get("source_content_hash"),
+            source_upload_md5=body.get("source_upload_md5"),
+            source_video_title=body.get("source_video_title"),
+            source_speaker_name=source_speaker_name,
+            source_speaker_name_key=body.get("source_speaker_name_key"),
+            source_published_at=_parse_optional_datetime(body.get("source_published_at")),
+            source_content_summary=body.get("source_content_summary"),
+            source_content_era=body.get("source_content_era"),
+            source_content_tags=body.get("source_content_tags"),
+            clone_sample_seconds=body.get("clone_sample_seconds"),
+            clone_sample_segment_ids=body.get("clone_sample_segment_ids"),
+            created_from=body.get("created_from") or "smart_auto",
             notes=notes,
         )
     except Exception as exc:

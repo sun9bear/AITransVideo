@@ -676,6 +676,9 @@ class UserVoice(Base):
     __tablename__ = "user_voices"
     __table_args__ = (
         Index("idx_user_voices_user_id", "user_id"),
+        Index("idx_user_voices_source_hash_speaker_id", "user_id", "source_content_hash", "source_speaker_id"),
+        Index("idx_user_voices_source_hash_speaker_name", "user_id", "source_content_hash", "source_speaker_name_key"),
+        Index("idx_user_voices_source_ref", "user_id", "source_ref"),
         UniqueConstraint("user_id", "voice_id", name="uq_user_voices_user_voice"),
     )
 
@@ -692,6 +695,21 @@ class UserVoice(Base):
     platform: Mapped[str | None] = mapped_column(String(50), nullable=True)
     label: Mapped[str] = mapped_column(String(200), nullable=False, default="")
     source_speaker_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    source_job_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    source_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_content_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    source_upload_md5: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_video_title: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    source_speaker_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    source_speaker_name_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    source_published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    source_content_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_content_era: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    source_content_tags: Mapped[object | None] = mapped_column(JSONB, nullable=True)
+    clone_sample_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    clone_sample_segment_ids: Mapped[object | None] = mapped_column(JSONB, nullable=True)
+    created_from: Mapped[str | None] = mapped_column(String(32), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     expired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

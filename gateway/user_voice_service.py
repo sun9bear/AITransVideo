@@ -2,11 +2,29 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+import logging
+import unicodedata
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import UserVoice
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class UserVoiceMatch:
+    voice: UserVoice
+    confidence: str
+    reason: str
+    score: int
+
+    @property
+    def auto_reuse_allowed(self) -> bool:
+        return self.confidence == "strong"
 
 
 class VoiceNotFoundError(LookupError):
@@ -30,6 +48,60 @@ def _merged_by_model(
     return merged
 
 
+def normalize_speaker_name_key(speaker_name: str | None) -> str | None:
+    """Build the conservative comparison key used for future voice reuse."""
+    if not speaker_name:
+        return None
+    normalized = unicodedata.normalize("NFKC", speaker_name)
+    normalized = " ".join(normalized.split()).strip(" \t\r\n·-_\u00b7")
+    normalized = normalized.lower()
+    return normalized or None
+
+
+def build_cloned_voice_label(
+    speaker_name: str | None,
+    *,
+    cloned_at: datetime | None = None,
+) -> str:
+    """Human-readable cloned-voice label: ``{speaker_name} · {clone_time}``."""
+    name = (speaker_name or "").strip() or "Speaker"
+    when = cloned_at or datetime.now(timezone.utc)
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    try:
+        when = when.astimezone(ZoneInfo("Asia/Shanghai"))
+    except Exception:
+        when = when.astimezone(timezone(timedelta(hours=8)))
+    timestamp = when.strftime("%Y-%m-%d %H:%M")
+    max_name_len = max(1, 200 - len(" · ") - len(timestamp))
+    if len(name) > max_name_len:
+        name = name[:max_name_len].rstrip()
+    return f"{name} · {timestamp}"
+
+
+def _set_if_empty(
+    obj: object,
+    attr: str,
+    value: object | None,
+    *,
+    voice_id: str | None = None,
+) -> None:
+    if value is None:
+        return
+    existing = getattr(obj, attr, None)
+    if existing is None or existing == "":
+        setattr(obj, attr, value)
+        return
+    if existing != value:
+        logger.warning(
+            "user_voice immutable source metadata conflict: attr=%s existing=%r incoming=%r voice_id=%s",
+            attr,
+            existing,
+            value,
+            voice_id,
+        )
+
+
 async def list_user_voices(
     db: AsyncSession,
     user_id: object,
@@ -44,6 +116,135 @@ async def list_user_voices(
     return list(result.scalars().all())
 
 
+def _clean_optional_text(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _voice_provider_compatible(
+    voice: UserVoice,
+    *,
+    provider: str | None,
+    tts_provider: str | None,
+    platform: str | None,
+) -> bool:
+    if provider and voice.provider != provider:
+        return False
+    if tts_provider and voice.tts_provider != tts_provider:
+        return False
+    if platform and voice.platform != platform:
+        return False
+    return True
+
+
+def _score_user_voice_match(
+    voice: UserVoice,
+    *,
+    source_content_hash: str | None,
+    source_speaker_id: str | None,
+    source_speaker_name_key: str | None,
+) -> UserVoiceMatch | None:
+    voice_hash = _clean_optional_text(getattr(voice, "source_content_hash", None))
+    if not source_content_hash or not voice_hash or voice_hash != source_content_hash:
+        return None
+
+    voice_speaker_id = _clean_optional_text(getattr(voice, "source_speaker_id", None))
+    if source_speaker_id and voice_speaker_id and voice_speaker_id == source_speaker_id:
+        return UserVoiceMatch(
+            voice=voice,
+            confidence="strong",
+            reason="same_source_content_hash_and_speaker_id",
+            score=100,
+        )
+
+    voice_name_key = _clean_optional_text(getattr(voice, "source_speaker_name_key", None))
+    if source_speaker_name_key and voice_name_key and voice_name_key == source_speaker_name_key:
+        return UserVoiceMatch(
+            voice=voice,
+            confidence="medium",
+            reason="same_source_content_hash_and_speaker_name",
+            score=70,
+        )
+
+    if source_speaker_id and voice_speaker_id and voice_speaker_id != source_speaker_id:
+        return UserVoiceMatch(
+            voice=voice,
+            confidence="weak",
+            reason="same_source_content_hash_different_speaker_id",
+            score=30,
+        )
+
+    return None
+
+
+async def match_user_voices(
+    db: AsyncSession,
+    *,
+    user_id: object,
+    source_content_hash: str | None,
+    source_speaker_id: str | None = None,
+    source_speaker_name: str | None = None,
+    source_speaker_name_key: str | None = None,
+    provider: str | None = None,
+    tts_provider: str | None = None,
+    platform: str | None = None,
+    limit: int = 5,
+) -> list[UserVoiceMatch]:
+    """Find same-video personal voice candidates for a user.
+
+    Phase 2 deliberately stays conservative: no cross-user lookup, no
+    cross-provider reuse, no ``NULL == NULL`` source hash matching.
+    """
+    clean_hash = _clean_optional_text(source_content_hash)
+    if not clean_hash:
+        return []
+    clean_speaker_id = _clean_optional_text(source_speaker_id)
+    clean_name_key = (
+        _clean_optional_text(source_speaker_name_key)
+        or normalize_speaker_name_key(source_speaker_name)
+    )
+    max_results = max(1, min(int(limit or 5), 20))
+
+    result = await db.execute(
+        select(UserVoice).where(
+            UserVoice.user_id == user_id,
+            UserVoice.expired_at.is_(None),
+            UserVoice.source_content_hash == clean_hash,
+        )
+    )
+    voices = list(result.scalars().all())
+    matches: list[UserVoiceMatch] = []
+    for voice in voices:
+        if getattr(voice, "expired_at", None) is not None:
+            continue
+        if not _voice_provider_compatible(
+            voice,
+            provider=_clean_optional_text(provider),
+            tts_provider=_clean_optional_text(tts_provider),
+            platform=_clean_optional_text(platform),
+        ):
+            continue
+        match = _score_user_voice_match(
+            voice,
+            source_content_hash=clean_hash,
+            source_speaker_id=clean_speaker_id,
+            source_speaker_name_key=clean_name_key,
+        )
+        if match is not None:
+            matches.append(match)
+
+    matches.sort(
+        key=lambda item: (
+            item.score,
+            getattr(item.voice, "created_at", None) or datetime.min.replace(tzinfo=timezone.utc),
+        ),
+        reverse=True,
+    )
+    return matches[:max_results]
+
+
 async def add_user_voice(
     db: AsyncSession,
     *,
@@ -54,8 +255,26 @@ async def add_user_voice(
     tts_provider: str | None = "minimax_tts",
     platform: str | None = "minimax_domestic",
     source_speaker_id: str | None = None,
+    source_job_id: str | None = None,
+    source_type: str | None = None,
+    source_ref: str | None = None,
+    source_content_hash: str | None = None,
+    source_upload_md5: str | None = None,
+    source_video_title: str | None = None,
+    source_speaker_name: str | None = None,
+    source_speaker_name_key: str | None = None,
+    source_published_at: datetime | None = None,
+    source_content_summary: str | None = None,
+    source_content_era: str | None = None,
+    source_content_tags: object | None = None,
+    clone_sample_seconds: float | None = None,
+    clone_sample_segment_ids: object | None = None,
+    created_from: str | None = None,
     notes: str | None = None,
 ) -> UserVoice:
+    if source_speaker_name_key is None:
+        source_speaker_name_key = normalize_speaker_name_key(source_speaker_name)
+
     # Check existing (including expired — revive if re-cloned)
     result = await db.execute(
         select(UserVoice).where(
@@ -69,10 +288,25 @@ async def add_user_voice(
         existing.provider = provider
         existing.tts_provider = tts_provider
         existing.platform = platform
-        existing.source_speaker_id = source_speaker_id
         existing.notes = notes
         existing.expired_at = None
         existing.updated_at = datetime.now(timezone.utc)
+        _set_if_empty(existing, "source_speaker_id", source_speaker_id, voice_id=voice_id)
+        _set_if_empty(existing, "source_job_id", source_job_id, voice_id=voice_id)
+        _set_if_empty(existing, "source_type", source_type, voice_id=voice_id)
+        _set_if_empty(existing, "source_ref", source_ref, voice_id=voice_id)
+        _set_if_empty(existing, "source_content_hash", source_content_hash, voice_id=voice_id)
+        _set_if_empty(existing, "source_upload_md5", source_upload_md5, voice_id=voice_id)
+        _set_if_empty(existing, "source_video_title", source_video_title, voice_id=voice_id)
+        _set_if_empty(existing, "source_speaker_name", source_speaker_name, voice_id=voice_id)
+        _set_if_empty(existing, "source_speaker_name_key", source_speaker_name_key, voice_id=voice_id)
+        _set_if_empty(existing, "source_published_at", source_published_at, voice_id=voice_id)
+        _set_if_empty(existing, "source_content_summary", source_content_summary, voice_id=voice_id)
+        _set_if_empty(existing, "source_content_era", source_content_era, voice_id=voice_id)
+        _set_if_empty(existing, "source_content_tags", source_content_tags, voice_id=voice_id)
+        _set_if_empty(existing, "clone_sample_seconds", clone_sample_seconds, voice_id=voice_id)
+        _set_if_empty(existing, "clone_sample_segment_ids", clone_sample_segment_ids, voice_id=voice_id)
+        _set_if_empty(existing, "created_from", created_from, voice_id=voice_id)
         await db.commit()
         return existing
 
@@ -84,6 +318,21 @@ async def add_user_voice(
         tts_provider=tts_provider,
         platform=platform,
         source_speaker_id=source_speaker_id,
+        source_job_id=source_job_id,
+        source_type=source_type,
+        source_ref=source_ref,
+        source_content_hash=source_content_hash,
+        source_upload_md5=source_upload_md5,
+        source_video_title=source_video_title,
+        source_speaker_name=source_speaker_name,
+        source_speaker_name_key=source_speaker_name_key,
+        source_published_at=source_published_at,
+        source_content_summary=source_content_summary,
+        source_content_era=source_content_era,
+        source_content_tags=source_content_tags,
+        clone_sample_seconds=clone_sample_seconds,
+        clone_sample_segment_ids=clone_sample_segment_ids,
+        created_from=created_from,
         notes=notes,
     )
     db.add(voice)

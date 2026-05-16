@@ -427,13 +427,15 @@ export async function setVoiceOverride(
   provider: string,
   voiceId: string,
   ttsModelKey?: string,
+  voiceReuse = false,
 ): Promise<{ segment_id: string; provider: string; voice_id: string; tts_model_key?: string }> {
-  const body: Record<string, string> = {
+  const body: Record<string, string | boolean> = {
     segment_id: segmentId,
     provider,
     voice_id: voiceId,
   }
   if (ttsModelKey) body.tts_model_key = ttsModelKey
+  if (voiceReuse) body.voice_reuse = true
   return apiClient.post(
     `/jobs/${jobId}/editing/voice-map`,
     { body },

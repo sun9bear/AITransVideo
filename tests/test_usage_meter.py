@@ -156,6 +156,32 @@ def test_usage_meter_deduplicates_event_ids_across_memory_and_reload(tmp_path: P
     assert reloaded.summarize()["tts_billed_chars"] == 10
 
 
+def test_record_voice_reuse_is_non_billable_voice_clone_audit(tmp_path: Path) -> None:
+    meter = UsageMeter(tmp_path, job_id="job-voice-reuse")
+
+    meter.record_voice_reuse(
+        provider="minimax_voice_clone",
+        voice_id="vt_existing",
+        speaker_id="speaker_a",
+        source_voice_id="vt_existing",
+        match_confidence="user_confirmed",
+        match_reason="studio_reuse_confirmed",
+        extra={"event_id": "reuse-1"},
+    )
+
+    event = meter.events[0]
+    assert event["kind"] == "voice_clone"
+    assert event["model"] == "voice_reuse"
+    assert event["billable"] is False
+    assert event["clone_count"] == 0
+    assert event["reuse"] is True
+    summary = meter.summarize()
+    assert summary["voice_clone_call_count"] == 1
+    assert summary["voice_clone_success_call_count"] == 1
+    assert summary["voice_clone_billable_count"] == 0
+    assert summary["voice_clone_count_by_provider"] == {}
+
+
 # ===========================================================================
 # Phase B: record_llm extra dict + failure attempt support
 # (plan 2026-05-03 §B5)

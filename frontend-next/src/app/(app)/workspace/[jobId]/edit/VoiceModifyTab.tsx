@@ -100,6 +100,7 @@ interface SpeakerDraftState {
   voiceId: string
   selectedProvider: string
   voiceSource: "catalog" | "cloned" | "auto_matched"
+  voiceReuse: boolean
   /** 主流程 VoiceSelectionPanel 同款：MiniMax 下的音质档位。
    *  目前和主流程一样是**纯展示**（approve payload / voice_map 都
    *  不带它，下游 TTS 不读），只影响右侧 "30 / 50 点/分钟" 文案。
@@ -441,6 +442,7 @@ export function VoiceModifyTab({
               voiceId: override.voice_id,
               selectedProvider: override.provider,
               voiceSource: "catalog",
+              voiceReuse: false,
               minimaxModel: inferredModel,
             }
             continue
@@ -460,6 +462,7 @@ export function VoiceModifyTab({
               voiceId: baselineVoiceId,
               selectedProvider: baselineProvider || loadedDefaultProvider,
               voiceSource: "catalog",
+              voiceReuse: false,
               minimaxModel: inferredModel,
             }
             continue
@@ -470,6 +473,7 @@ export function VoiceModifyTab({
             voiceId: provMatch?.voiceId ?? "",
             selectedProvider: loadedDefaultProvider,
             voiceSource: provMatch?.voiceId ? "auto_matched" : "catalog",
+            voiceReuse: false,
             minimaxModel: inferredModel,
           }
         }
@@ -518,6 +522,7 @@ export function VoiceModifyTab({
           selectedProvider: provider,
           voiceId: provMatch?.voiceId ?? "",
           voiceSource: provMatch?.voiceId ? "auto_matched" : "catalog",
+          voiceReuse: false,
         },
       }
     })
@@ -531,15 +536,16 @@ export function VoiceModifyTab({
         ...prev[speakerId],
         voiceId,
         voiceSource: "catalog",
+        voiceReuse: false,
       },
     }))
     setPreviewError((p) => ({ ...p, [speakerId]: null }))
   }, [])
 
-  const handleCloneComplete = useCallback((speakerId: string, voiceId: string) => {
+  const handleCloneComplete = useCallback((speakerId: string, voiceId: string, options?: { reused?: boolean }) => {
     setDraftStates((prev) => ({
       ...prev,
-      [speakerId]: { ...prev[speakerId], voiceId, voiceSource: "cloned" },
+      [speakerId]: { ...prev[speakerId], voiceId, voiceSource: "cloned", voiceReuse: options?.reused ?? false },
     }))
     setCloneModalSpeaker(null)
     getUserVoices().then(setPersonalVoices).catch(() => {})
@@ -565,7 +571,7 @@ export function VoiceModifyTab({
         setPreviewError((p) => ({ ...p, [speakerId]: "音色已失效，请重新选择" }))
         setDraftStates((prev) => ({
           ...prev,
-          [speakerId]: { ...prev[speakerId], voiceId: "", voiceSource: "catalog" },
+          [speakerId]: { ...prev[speakerId], voiceId: "", voiceSource: "catalog", voiceReuse: false },
         }))
         setExpiredVoiceIds((prev) => [...prev, state.voiceId])
         await deleteUserVoice(state.voiceId).catch(() => {})
@@ -624,6 +630,7 @@ export function VoiceModifyTab({
             state.selectedProvider,
             state.voiceId,
             ttsModelKey,
+            state.voiceReuse,
           )
           next[seg.segment_id] = {
             provider: state.selectedProvider,
@@ -681,6 +688,7 @@ export function VoiceModifyTab({
             ...prev[speakerId],
             voiceId: provMatch?.voiceId ?? "",
             voiceSource: provMatch?.voiceId ? "auto_matched" : "catalog",
+            voiceReuse: false,
           },
         }))
       }

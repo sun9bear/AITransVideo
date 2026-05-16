@@ -7,6 +7,7 @@ export interface VoiceSelectionSpeakerApproval {
   voiceId: string
   voiceSource: 'catalog' | 'cloned' | 'auto_matched'
   ttsProvider?: string
+  voiceReuse?: boolean
   /** MiniMax 专属：用户在 UI 选择的音质档（turbo=高级 30pts/min, hd=旗舰 50pts/min）。
    * 非 MiniMax provider 可不传。Gateway 据此聚合 job 级 quality_tier + tts_model。 */
   minimaxModel?: 'turbo' | 'hd'
@@ -25,6 +26,7 @@ export async function approveVoiceSelection(
           voice_id: s.voiceId,
           voice_source: s.voiceSource,
           tts_provider: s.ttsProvider ?? '',
+          voice_reuse: s.voiceReuse ?? false,
           minimax_model: s.minimaxModel ?? null,
         })),
       },
@@ -117,15 +119,27 @@ export interface UserVoiceEntry {
   platform: string | null
   label: string
   sourceSpeakerId: string | null
+  sourceJobId: string | null
+  sourceType: string | null
+  sourceRef: string | null
+  sourceContentHash: string | null
+  sourceUploadMd5: string | null
+  sourceVideoTitle: string | null
+  sourceSpeakerName: string | null
+  sourceSpeakerNameKey: string | null
+  sourcePublishedAt: string | null
+  sourceContentSummary: string | null
+  sourceContentEra: string | null
+  sourceContentTags: unknown
+  cloneSampleSeconds: number | null
+  cloneSampleSegmentIds: unknown
+  createdFrom: string | null
   notes: string | null
   createdAt: string | null
 }
 
-export async function getUserVoices(): Promise<UserVoiceEntry[]> {
-  const resp = await fetch('/gateway/user-voices', { credentials: 'include' })
-  if (!resp.ok) return []
-  const data = await resp.json()
-  return (data.voices ?? []).map((v: Record<string, unknown>) => ({
+function mapUserVoiceEntry(v: Record<string, unknown>): UserVoiceEntry {
+  return {
     id: String(v.id ?? ''),
     voiceId: String(v.voice_id ?? ''),
     voiceType: String(v.voice_type ?? 'cloned'),
@@ -134,9 +148,95 @@ export async function getUserVoices(): Promise<UserVoiceEntry[]> {
     platform: v.platform ? String(v.platform) : null,
     label: String(v.label ?? v.voice_id ?? ''),
     sourceSpeakerId: v.source_speaker_id ? String(v.source_speaker_id) : null,
+    sourceJobId: v.source_job_id ? String(v.source_job_id) : null,
+    sourceType: v.source_type ? String(v.source_type) : null,
+    sourceRef: v.source_ref ? String(v.source_ref) : null,
+    sourceContentHash: v.source_content_hash ? String(v.source_content_hash) : null,
+    sourceUploadMd5: v.source_upload_md5 ? String(v.source_upload_md5) : null,
+    sourceVideoTitle: v.source_video_title ? String(v.source_video_title) : null,
+    sourceSpeakerName: v.source_speaker_name ? String(v.source_speaker_name) : null,
+    sourceSpeakerNameKey: v.source_speaker_name_key ? String(v.source_speaker_name_key) : null,
+    sourcePublishedAt: v.source_published_at ? String(v.source_published_at) : null,
+    sourceContentSummary: v.source_content_summary ? String(v.source_content_summary) : null,
+    sourceContentEra: v.source_content_era ? String(v.source_content_era) : null,
+    sourceContentTags: v.source_content_tags ?? null,
+    cloneSampleSeconds: typeof v.clone_sample_seconds === 'number' ? v.clone_sample_seconds : null,
+    cloneSampleSegmentIds: v.clone_sample_segment_ids ?? null,
+    createdFrom: v.created_from ? String(v.created_from) : null,
     notes: v.notes ? String(v.notes) : null,
     createdAt: v.created_at ? String(v.created_at) : null,
-  }))
+  }
+}
+
+export async function getUserVoices(): Promise<UserVoiceEntry[]> {
+  const resp = await fetch('/gateway/user-voices', { credentials: 'include' })
+  if (!resp.ok) return []
+  const data = await resp.json()
+  return (data.voices ?? []).map((v: Record<string, unknown>) => mapUserVoiceEntry(v))
+}
+
+export type VoiceReuseConfidence = 'strong' | 'medium' | 'weak'
+
+export interface VoiceReuseCandidate {
+  matched: true
+  confidence: VoiceReuseConfidence
+  reason: string
+  score: number
+  autoReuseAllowed: boolean
+  voice: UserVoiceEntry
+}
+
+export interface VoiceReuseMatchResponse {
+  matched: boolean
+  confidence: VoiceReuseConfidence | null
+  autoReuseAllowed: boolean
+  reason: string
+  voice: UserVoiceEntry | null
+  candidates: VoiceReuseCandidate[]
+}
+
+export async function matchVoiceForSelection(input: {
+  jobId: string
+  speakerId: string
+  speakerName?: string
+  selectedProvider?: string
+}): Promise<VoiceReuseMatchResponse> {
+  const result = await apiClient.post<{
+    matched: boolean
+    confidence: VoiceReuseConfidence | null
+    auto_reuse_allowed: boolean
+    reason: string
+    voice: Record<string, unknown> | null
+    candidates: Array<{
+      matched: true
+      confidence: VoiceReuseConfidence
+      reason: string
+      score: number
+      auto_reuse_allowed: boolean
+      voice: Record<string, unknown>
+    }>
+  }>(`/jobs/${input.jobId}/voice-match`, {
+    body: {
+      speaker_id: input.speakerId,
+      speaker_name: input.speakerName ?? '',
+      selected_provider: input.selectedProvider ?? '',
+    },
+  })
+  return {
+    matched: Boolean(result.matched),
+    confidence: result.confidence,
+    autoReuseAllowed: Boolean(result.auto_reuse_allowed),
+    reason: String(result.reason ?? ''),
+    voice: result.voice ? mapUserVoiceEntry(result.voice) : null,
+    candidates: (result.candidates ?? []).map((candidate) => ({
+      matched: true,
+      confidence: candidate.confidence,
+      reason: String(candidate.reason ?? ''),
+      score: Number(candidate.score ?? 0),
+      autoReuseAllowed: Boolean(candidate.auto_reuse_allowed),
+      voice: mapUserVoiceEntry(candidate.voice),
+    })),
+  }
 }
 
 export async function deleteUserVoice(voiceId: string): Promise<boolean> {

@@ -30,7 +30,7 @@ from credits_service import (
     shadow_safe,
 )
 from database import get_db
-from models import Job, User
+from models import Job, User, UserVoice
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,79 @@ _SPEAKER_ID_RE = re.compile(r"^speaker_[a-z0-9_]+$")
 _SEGMENT_ID_RE = re.compile(r"^[1-9][0-9]*$")
 _CLONE_LOCK_TIMEOUT_SECONDS = 300
 _VOICE_CLONE_RESERVE_REASON = "voice_clone_reserve"
+
+
+def _iso_or_none(value: object) -> str | None:
+    if hasattr(value, "isoformat"):
+        try:
+            return value.isoformat()  # type: ignore[no-any-return, attr-defined]
+        except Exception:
+            return None
+    return None
+
+
+def _user_voice_to_dict(v: UserVoice) -> dict:
+    return {
+        "id": str(v.id),
+        "voice_id": v.voice_id,
+        "voice_type": v.voice_type,
+        "provider": v.provider,
+        "tts_provider": v.tts_provider,
+        "platform": v.platform,
+        "label": v.label,
+        "source_speaker_id": v.source_speaker_id,
+        "source_job_id": getattr(v, "source_job_id", None),
+        "source_type": getattr(v, "source_type", None),
+        "source_ref": getattr(v, "source_ref", None),
+        "source_content_hash": getattr(v, "source_content_hash", None),
+        "source_upload_md5": getattr(v, "source_upload_md5", None),
+        "source_video_title": getattr(v, "source_video_title", None),
+        "source_speaker_name": getattr(v, "source_speaker_name", None),
+        "source_speaker_name_key": getattr(v, "source_speaker_name_key", None),
+        "source_published_at": _iso_or_none(getattr(v, "source_published_at", None)),
+        "source_content_summary": getattr(v, "source_content_summary", None),
+        "source_content_era": getattr(v, "source_content_era", None),
+        "source_content_tags": getattr(v, "source_content_tags", None),
+        "clone_sample_seconds": getattr(v, "clone_sample_seconds", None),
+        "clone_sample_segment_ids": getattr(v, "clone_sample_segment_ids", None),
+        "created_from": getattr(v, "created_from", None),
+        "notes": v.notes,
+        "expired_at": _iso_or_none(v.expired_at),
+        "created_at": _iso_or_none(v.created_at),
+        "updated_at": _iso_or_none(v.updated_at),
+    }
+
+
+def _match_to_dict(match) -> dict:
+    return {
+        "matched": True,
+        "confidence": match.confidence,
+        "reason": match.reason,
+        "score": match.score,
+        "auto_reuse_allowed": match.auto_reuse_allowed,
+        "voice": _user_voice_to_dict(match.voice),
+    }
+
+
+def _provider_triplet_for_selection_match(data: dict) -> tuple[str | None, str | None, str | None]:
+    provider = str(data.get("provider") or "").strip() or None
+    tts_provider = str(data.get("tts_provider") or "").strip() or None
+    platform = str(data.get("platform") or "").strip() or None
+    selected_provider = str(data.get("selected_provider") or "").strip().lower()
+
+    if selected_provider in {"minimax", "minimax_tts", "minimax_voice_clone"}:
+        return (
+            provider or "minimax_voice_clone",
+            tts_provider or "minimax_tts",
+            platform or "minimax_domestic",
+        )
+    if selected_provider and selected_provider not in {"minimax", "minimax_tts", "minimax_voice_clone"}:
+        return (provider, tts_provider or selected_provider, platform)
+    return (
+        provider or "minimax_voice_clone",
+        tts_provider or "minimax_tts",
+        platform or "minimax_domestic",
+    )
 
 
 def _resolve_speaker_display_name(rs: dict, speaker_id: str) -> str | None:
@@ -262,6 +335,100 @@ async def get_voice_selection_pricing(
         },
         "voice_clone_cost_credits": _get_clone_cost_credits(),
     }
+
+
+async def voice_match_for_selection(
+    request: Request,
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(require_auth),
+) -> Response:
+    """POST /job-api/jobs/{job_id}/voice-match
+
+    Read-only Studio helper used before showing the paid clone action.
+    It never calls the clone provider and never reserves or captures credits.
+    """
+    job = await _verify_job_ownership(job_id, db, user)
+    if job is None:
+        return _json_response(404, {"error": "job_not_found", "message": "任务不存在"})
+
+    body = await request.body()
+    try:
+        data = json.loads(body) if body else {}
+    except Exception:
+        return _json_response(400, {"error": "invalid_body", "message": "请求体格式错误"})
+    if not isinstance(data, dict):
+        return _json_response(400, {"error": "invalid_body", "message": "请求体格式错误"})
+
+    speaker_id = str(data.get("speaker_id", "")).strip()
+    if not _SPEAKER_ID_RE.match(speaker_id):
+        return _json_response(400, {"error": "invalid_speaker_id", "message": f"无效的 speaker_id: {speaker_id}"})
+
+    user_id = getattr(user, "id", None) or getattr(job, "user_id", None)
+    if user_id is None:
+        return _json_response(200, {
+            "matched": False,
+            "confidence": None,
+            "auto_reuse_allowed": False,
+            "reason": "missing_user_id",
+            "voice": None,
+            "candidates": [],
+        })
+
+    source_content_hash = str(getattr(job, "source_content_hash", "") or "").strip()
+    if not source_content_hash:
+        return _json_response(200, {
+            "matched": False,
+            "confidence": None,
+            "auto_reuse_allowed": False,
+            "reason": "missing_source_content_hash",
+            "voice": None,
+            "candidates": [],
+        })
+
+    try:
+        limit = int(data.get("limit") or 5)
+    except (TypeError, ValueError):
+        limit = 5
+    provider, tts_provider, platform = _provider_triplet_for_selection_match(data)
+
+    try:
+        from user_voice_service import match_user_voices
+        matches = await match_user_voices(
+            db,
+            user_id=user_id,
+            source_content_hash=source_content_hash,
+            source_speaker_id=speaker_id,
+            source_speaker_name=data.get("speaker_name"),
+            source_speaker_name_key=data.get("source_speaker_name_key"),
+            provider=provider,
+            tts_provider=tts_provider,
+            platform=platform,
+            limit=limit,
+        )
+    except Exception as exc:
+        logger.warning("voice-match failed for %s/%s: %s", job_id, speaker_id, exc, exc_info=True)
+        return _json_response(500, {"error": "match_failed", "message": "查询可复用音色失败"})
+
+    if not matches:
+        return _json_response(200, {
+            "matched": False,
+            "confidence": None,
+            "auto_reuse_allowed": False,
+            "reason": "no_candidate",
+            "voice": None,
+            "candidates": [],
+        })
+
+    top = matches[0]
+    return _json_response(200, {
+        "matched": True,
+        "confidence": top.confidence,
+        "auto_reuse_allowed": top.auto_reuse_allowed,
+        "reason": top.reason,
+        "voice": _user_voice_to_dict(top.voice),
+        "candidates": [_match_to_dict(match) for match in matches],
+    })
 
 
 async def voice_clone_for_selection(
@@ -501,16 +668,29 @@ async def voice_clone_for_selection(
         added_to_library = False
         if user_id:
             try:
-                from user_voice_service import add_user_voice
+                from user_voice_service import add_user_voice, build_cloned_voice_label
                 await add_user_voice(
                     db,
                     user_id=user_id,
                     voice_id=clone_result,
-                    label=f"{display_speaker_name} Clone",
+                    label=build_cloned_voice_label(display_speaker_name),
                     provider="minimax_voice_clone",
                     tts_provider="minimax_tts",
                     platform="minimax_domestic",
                     source_speaker_id=speaker_id,
+                    source_job_id=job_id,
+                    source_type=getattr(job, "source_type", None) if job is not None else None,
+                    source_ref=getattr(job, "source_ref", None) if job is not None else None,
+                    source_content_hash=getattr(job, "source_content_hash", None) if job is not None else None,
+                    source_video_title=(
+                        getattr(job, "display_name", None)
+                        or getattr(job, "title", None)
+                        if job is not None else None
+                    ),
+                    source_speaker_name=display_speaker_name,
+                    clone_sample_seconds=total_duration_s,
+                    clone_sample_segment_ids=segment_ids,
+                    created_from="studio_manual",
                     notes=f"从任务 {job_id} 克隆",
                 )
                 added_to_library = True
