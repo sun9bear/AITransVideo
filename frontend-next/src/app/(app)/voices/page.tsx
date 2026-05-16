@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import { EmptyState } from "@/components/empty-state"
 import {
   addUserVoice,
@@ -191,13 +191,15 @@ export default function VoiceLibraryPage() {
       {/* Voice list */}
       <div className="space-y-3">
         {summary.voices.map((voice) => {
-          const isCloned = voice.voiceType === "cloned"
           const isRunning = !!running[voice.voiceId]
           const isProbing = !!probing[voice.voiceId]
           const errorMsg = errors[voice.voiceId]
           const audioUrl = audioUrls[voice.voiceId]
           const isCopied = copiedId === voice.voiceId
           const isEditing = editingLabel === voice.voiceId
+          const sourceTitle = getVoiceSourceTitle(voice)
+          const sourceHref = getVoiceSourceHref(voice)
+          const sourceBadges = getVoiceSourceBadges(voice)
 
           return (
             <article
@@ -245,6 +247,41 @@ export default function VoiceLibraryPage() {
                     ) : null}
                     <SpeedBadge cps={voice.charsPerSecond} calibratedAt={voice.speedCalibratedAt} />
                   </div>
+
+                  {sourceTitle || sourceBadges.length > 0 ? (
+                    <div className="space-y-1 pt-1 text-xs text-muted-foreground">
+                      {sourceTitle ? (
+                        <p className="truncate">
+                          <span className="text-muted-foreground/70">来源：</span>
+                          {sourceHref ? (
+                            <a
+                              href={sourceHref}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="hover:text-foreground hover:underline"
+                              title={sourceTitle}
+                            >
+                              {sourceTitle}
+                            </a>
+                          ) : (
+                            <span title={sourceTitle}>{sourceTitle}</span>
+                          )}
+                        </p>
+                      ) : null}
+                      {sourceBadges.length > 0 ? (
+                        <div className="flex flex-wrap gap-1.5">
+                          {sourceBadges.map((badge) => (
+                            <span
+                              key={badge}
+                              className="rounded-full bg-muted/40 px-2 py-0.5 text-[11px] text-muted-foreground"
+                            >
+                              {badge}
+                            </span>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </div>
 
                 {/* Right: action buttons */}
@@ -360,6 +397,74 @@ function relativeAgo(iso: string | null): string | null {
   if (s < 3600) return `${Math.floor(s / 60)}分钟前`
   if (s < 86400) return `${Math.floor(s / 3600)}小时前`
   return `${Math.floor(s / 86400)}天前`
+}
+
+function getVoiceSourceTitle(voice: VoiceLibraryEntry): string | null {
+  const title = voice.sourceVideoTitle?.trim()
+  if (title && !isGeneratedSourceTitle(title)) return title
+  if (voice.sourceType === "youtube_url") return "YouTube 视频"
+  if (voice.sourceType === "local_video") return "上传视频"
+  return null
+}
+
+function getVoiceSourceHref(voice: VoiceLibraryEntry): string | null {
+  const ref = voice.sourceRef?.trim()
+  if (!ref) return null
+  if (voice.sourceType !== "youtube_url") return null
+  if (!/^https?:\/\//i.test(ref)) return null
+  return ref
+}
+
+function getVoiceSourceBadges(voice: VoiceLibraryEntry): string[] {
+  const badges: string[] = []
+  const origin = formatCreatedFrom(voice.createdFrom)
+  if (origin) badges.push(origin)
+
+  const speakerName = voice.sourceSpeakerName?.trim()
+  const label = voice.label?.trim() ?? ""
+  if (speakerName && !label.includes(speakerName)) {
+    badges.push(`说话人：${speakerName}`)
+  }
+
+  const channel = getSourceChannel(voice.sourceContentTags)
+  if (channel) badges.push(`频道：${channel}`)
+  if (voice.sourceContentEra) badges.push(`${voice.sourceContentEra}年`)
+
+  const sample = formatSampleSeconds(voice.cloneSampleSeconds)
+  if (sample) badges.push(sample)
+
+  if (badges.length === 0 && voice.sourceContentHash) {
+    badges.push("可按来源复用")
+  }
+  return badges.slice(0, 5)
+}
+
+function isGeneratedSourceTitle(title: string): boolean {
+  return /^(油管视频|上传视频) \d{4}-\d{2}-\d{2} \d{3}(?:_[a-z0-9]{4})?$/.test(title)
+}
+
+function formatCreatedFrom(value: string | null): string | null {
+  if (value === "smart_auto") return "智能版自动克隆"
+  if (value === "studio_manual") return "工作台克隆"
+  if (value === "manual_add") return "手动添加"
+  return null
+}
+
+function formatSampleSeconds(seconds: number | null): string | null {
+  if (seconds == null || !Number.isFinite(seconds) || seconds <= 0) return null
+  if (seconds >= 60) {
+    const minutes = Math.round(seconds / 60)
+    return `样本 ${minutes} 分钟`
+  }
+  return `样本 ${Math.round(seconds)} 秒`
+}
+
+function getSourceChannel(tags: unknown): string | null {
+  if (!tags || typeof tags !== "object" || Array.isArray(tags)) return null
+  const maybeChannel = (tags as { channel?: unknown }).channel
+  return typeof maybeChannel === "string" && maybeChannel.trim()
+    ? maybeChannel.trim()
+    : null
 }
 
 // ---------------------------------------------------------------------------

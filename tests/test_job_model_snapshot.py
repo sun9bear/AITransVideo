@@ -39,6 +39,11 @@ class TestJobRecordSnapshotFields:
             user_id="42",
             workspace_dir="projects/42/test-001",
             source_content_hash="sha256:abc123",
+            source_video_title="Readable Video Title",
+            source_published_at="2024-05-01T00:00:00+00:00",
+            source_content_summary="频道：Test Channel；简介：A useful source description.",
+            source_content_era="2024",
+            source_content_tags={"channel": "Test Channel", "tags": ["AI"]},
         )
         job = JobRecord.from_dict(payload)
         d = job.to_dict()
@@ -59,6 +64,11 @@ class TestJobRecordSnapshotFields:
         assert d["user_id"] == "42"
         assert d["workspace_dir"] == "projects/42/test-001"
         assert d["source_content_hash"] == "sha256:abc123"
+        assert d["source_video_title"] == "Readable Video Title"
+        assert d["source_published_at"] == "2024-05-01T00:00:00+00:00"
+        assert d["source_content_summary"] == "频道：Test Channel；简介：A useful source description."
+        assert d["source_content_era"] == "2024"
+        assert d["source_content_tags"] == {"channel": "Test Channel", "tags": ["AI"]}
 
     def test_missing_optional_fields_default_correctly(self):
         payload = _make_job()
@@ -73,6 +83,11 @@ class TestJobRecordSnapshotFields:
         assert d["user_id"] is None
         assert d["workspace_dir"] is None
         assert d["source_content_hash"] is None
+        assert d["source_video_title"] is None
+        assert d["source_published_at"] is None
+        assert d["source_content_summary"] is None
+        assert d["source_content_era"] is None
+        assert d["source_content_tags"] is None
 
     def test_quota_state_defaults_to_none(self):
         job = JobRecord.from_dict(_make_job())

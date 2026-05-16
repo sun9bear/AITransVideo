@@ -137,6 +137,11 @@ class JobRecord:
     user_id: str | None = None
     workspace_dir: str | None = None
     source_content_hash: str | None = None
+    source_video_title: str | None = None
+    source_published_at: str | None = None
+    source_content_summary: str | None = None
+    source_content_era: str | None = None
+    source_content_tags: object | None = None
     # --- Post-edit infra (plan 2026-04-18 §3.1) ---
     display_name: str | None = None
     expires_at: str | None = None           # ISO-8601
@@ -206,6 +211,11 @@ class JobRecord:
         self.user_id = _normalize_optional_text(self.user_id)
         self.workspace_dir = _normalize_optional_text(self.workspace_dir)
         self.source_content_hash = _normalize_optional_text(self.source_content_hash)
+        self.source_video_title = _normalize_optional_text(self.source_video_title)
+        self.source_published_at = _normalize_optional_text(self.source_published_at)
+        self.source_content_summary = _normalize_optional_text(self.source_content_summary)
+        self.source_content_era = _normalize_optional_text(self.source_content_era)
+        self.source_content_tags = _copy_optional_json(self.source_content_tags)
         # --- Post-edit fields normalize ---
         self.display_name = _normalize_optional_text(self.display_name)
         self.expires_at = _normalize_optional_text(self.expires_at)
@@ -288,6 +298,11 @@ class JobRecord:
             "user_id": self.user_id,
             "workspace_dir": self.workspace_dir,
             "source_content_hash": self.source_content_hash,
+            "source_video_title": self.source_video_title,
+            "source_published_at": self.source_published_at,
+            "source_content_summary": self.source_content_summary,
+            "source_content_era": self.source_content_era,
+            "source_content_tags": _copy_optional_json(self.source_content_tags),
             # --- Post-edit infra ---
             "display_name": self.display_name,
             "expires_at": self.expires_at,
@@ -351,6 +366,11 @@ class JobRecord:
             user_id=payload.get("user_id"),
             workspace_dir=payload.get("workspace_dir"),
             source_content_hash=payload.get("source_content_hash"),
+            source_video_title=payload.get("source_video_title"),
+            source_published_at=payload.get("source_published_at"),
+            source_content_summary=payload.get("source_content_summary"),
+            source_content_era=payload.get("source_content_era"),
+            source_content_tags=payload.get("source_content_tags"),
             # --- Post-edit infra ---
             display_name=payload.get("display_name"),
             expires_at=payload.get("expires_at"),
@@ -386,6 +406,14 @@ def _copy_optional_dict(value: object) -> dict[str, object] | None:
     if not isinstance(value, dict):
         return None
     return dict(value)
+
+
+def _copy_optional_json(value: object) -> object | None:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, list):
+        return list(value)
+    return None
 
 
 def _serialize_optional_dict(value: dict[str, object] | None) -> dict[str, object] | None:

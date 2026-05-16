@@ -578,6 +578,105 @@ def _extract_youtube_title(meta: dict[str, object] | None) -> str | None:
     return None
 
 
+def _clean_metadata_text(value: object, *, max_chars: int) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = re.sub(r"\s+", " ", value).strip()
+    if not cleaned:
+        return None
+    return cleaned[:max_chars]
+
+
+def _metadata_string_list(value: object, *, limit: int, item_max_chars: int = 80) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        cleaned = _clean_metadata_text(item, max_chars=item_max_chars)
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        result.append(cleaned)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _extract_youtube_published_at(meta: dict[str, object] | None) -> str | None:
+    if not isinstance(meta, dict):
+        return None
+    for key in ("release_timestamp", "timestamp"):
+        raw_ts = meta.get(key)
+        if raw_ts is None:
+            continue
+        try:
+            dt = datetime.fromtimestamp(float(raw_ts), tz=timezone.utc)
+        except (TypeError, ValueError, OSError):
+            continue
+        return dt.isoformat()
+
+    upload_date = meta.get("upload_date")
+    if isinstance(upload_date, str) and re.fullmatch(r"\d{8}", upload_date):
+        try:
+            dt = datetime(
+                int(upload_date[0:4]),
+                int(upload_date[4:6]),
+                int(upload_date[6:8]),
+                tzinfo=timezone.utc,
+            )
+        except ValueError:
+            return None
+        return dt.isoformat()
+    return None
+
+
+def _extract_youtube_source_metadata(meta: dict[str, object] | None) -> dict[str, object]:
+    """Extract deterministic source metadata from yt-dlp JSON.
+
+    This avoids LLM summarisation and uses only metadata already returned by
+    the existing yt-dlp probe: real title, publication year, channel,
+    categories/tags, and a short description excerpt.
+    """
+    if not isinstance(meta, dict):
+        return {}
+
+    title = _extract_youtube_title(meta)
+    channel = (
+        _clean_metadata_text(meta.get("channel"), max_chars=120)
+        or _clean_metadata_text(meta.get("uploader"), max_chars=120)
+    )
+    description = _clean_metadata_text(meta.get("description"), max_chars=240)
+    published_at = _extract_youtube_published_at(meta)
+    era = published_at[:4] if published_at else None
+
+    categories = _metadata_string_list(meta.get("categories"), limit=3)
+    tags = _metadata_string_list(meta.get("tags"), limit=8)
+    source_tags: dict[str, object] = {}
+    if channel:
+        source_tags["channel"] = channel
+    if categories:
+        source_tags["categories"] = categories
+    if tags:
+        source_tags["tags"] = tags
+
+    summary_parts: list[str] = []
+    if channel:
+        summary_parts.append(f"频道：{channel}")
+    if description and description != title:
+        summary_parts.append(f"简介：{description}")
+    if not summary_parts and title:
+        summary_parts.append(f"标题：{title}")
+
+    return {
+        "source_video_title": title,
+        "source_published_at": published_at,
+        "source_content_summary": "；".join(summary_parts)[:500] if summary_parts else None,
+        "source_content_era": era,
+        "source_content_tags": source_tags or None,
+    }
+
+
 _CJK_TEXT_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
 _AUTO_PLACEHOLDER_DISPLAY_NAME_RE = re.compile(
     r"^(?:上传视频|油管视频) \d{4}-\d{2}-\d{2} \d{3}(?:_[a-z0-9]{4})?$"
@@ -1082,9 +1181,15 @@ async def intercept_create_job(
     # display_name starts as a Chinese placeholder and is replaced later by S2
     # review when a content-aware Chinese title is available.
     probed_title: str | None = None
+    source_metadata: dict[str, object] = {}
     if source_type == "youtube_url":
         meta = _probe_youtube_metadata(source_value)
-        probed_title = _extract_youtube_title(meta)
+        source_metadata = _extract_youtube_source_metadata(meta)
+        probed_title = (
+            source_metadata.get("source_video_title")
+            if isinstance(source_metadata.get("source_video_title"), str)
+            else None
+        )
         if estimated_duration_seconds is None and isinstance(meta, dict):
             dur = meta.get("duration")
             if dur is not None:
@@ -1174,6 +1279,14 @@ async def intercept_create_job(
             )
             generated_display_name = None
 
+    # ``display_name`` is the existing user-facing Chinese task title chain:
+    # YouTube gets a temporary Chinese placeholder and then S2 can replace it
+    # with a content-aware Chinese title; local uploads use a Chinese filename
+    # when available, otherwise the upload placeholder. Store it as the fallback
+    # source title so non-YouTube voices also carry useful provenance.
+    if generated_display_name and not source_metadata.get("source_video_title"):
+        source_metadata["source_video_title"] = generated_display_name
+
     # Inject policy + snapshot fields into upstream request
     if policy:
         request_data.update(policy)
@@ -1182,6 +1295,9 @@ async def intercept_create_job(
     request_data["create_idempotency_key"] = idempotency_key
     if source_content_hash:
         request_data["source_content_hash"] = source_content_hash
+    for key, value in source_metadata.items():
+        if value is not None:
+            request_data[key] = value
     if job_expires_at is not None:
         request_data["expires_at"] = job_expires_at.isoformat()
     else:
@@ -1226,7 +1342,13 @@ async def intercept_create_job(
                         source_type=job_data.get("source_type", "youtube_url"),
                         source_ref=job_data.get("youtube_url") or job_data.get("source_ref", ""),
                         source_content_hash=job_data.get("source_content_hash") or source_content_hash,
-                        title=job_data.get("title", ""),
+                        title=str(
+                            job_data.get("source_video_title")
+                            or source_metadata.get("source_video_title")
+                            or job_data.get("display_name")
+                            or generated_display_name
+                            or job_data.get("title", "")
+                        )[:512],
                         speakers=job_data.get("speakers", "auto"),
                         status=job_data.get("status", "queued"),
                         current_stage=job_data.get("current_stage"),

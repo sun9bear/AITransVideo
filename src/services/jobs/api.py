@@ -814,6 +814,15 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                         create_idempotency_key=str(payload["create_idempotency_key"]).strip() if payload.get("create_idempotency_key") else None,
                         user_id=str(payload["user_id"]).strip() if payload.get("user_id") else None,
                         source_content_hash=str(payload["source_content_hash"]).strip() if payload.get("source_content_hash") else None,
+                        source_video_title=str(payload["source_video_title"]).strip() if payload.get("source_video_title") else None,
+                        source_published_at=str(payload["source_published_at"]).strip() if payload.get("source_published_at") else None,
+                        source_content_summary=str(payload["source_content_summary"]).strip() if payload.get("source_content_summary") else None,
+                        source_content_era=str(payload["source_content_era"]).strip() if payload.get("source_content_era") else None,
+                        source_content_tags=(
+                            payload.get("source_content_tags")
+                            if isinstance(payload.get("source_content_tags"), (dict, list))
+                            else None
+                        ),
                         display_name=str(payload["display_name"]).strip() if payload.get("display_name") else None,
                         expires_at=str(payload["expires_at"]).strip() if payload.get("expires_at") else None,
                         # PR#3C-b3g: smart_consent passthrough.

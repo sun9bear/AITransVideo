@@ -1861,8 +1861,10 @@ class TestB3DCloneSampleExtractorContract:
         )
 
         # The else branch must exist and use stub provider + 0 quota.
-        # Find the matching else within ~6000 chars of the dual gate.
-        gate_block = block[gate_idx : gate_idx + 6000]
+        # Find the matching else near the dual gate. Keep this window
+        # generous because quota-unavailable handoff text and audit payloads
+        # make the guarded branch fairly long.
+        gate_block = block[gate_idx : gate_idx + 9000]
         else_idx = gate_block.find("\n                    else:")
         assert else_idx >= 0, (
             "Dual gate has no else: branch — consent=False / empty "
@@ -1914,6 +1916,10 @@ class TestB3DCloneSampleExtractorContract:
             source_ref="https://youtu.be/abc",
             source_content_hash="youtube:abc",
             source_video_title="Source Title",
+            source_published_at="2024-05-01T00:00:00+00:00",
+            source_content_summary="频道：Test Channel",
+            source_content_era="2024",
+            source_content_tags={"channel": "Test Channel", "tags": ["AI"]},
             source_speaker_name="Speaker A",
             clone_sample_seconds=12.5,
             clone_sample_segment_ids=[1, 2],
@@ -1939,6 +1945,10 @@ class TestB3DCloneSampleExtractorContract:
         assert body["source_ref"] == "https://youtu.be/abc"
         assert body["source_content_hash"] == "youtube:abc"
         assert body["source_video_title"] == "Source Title"
+        assert body["source_published_at"] == "2024-05-01T00:00:00+00:00"
+        assert body["source_content_summary"] == "频道：Test Channel"
+        assert body["source_content_era"] == "2024"
+        assert body["source_content_tags"] == {"channel": "Test Channel", "tags": ["AI"]}
         assert body["source_speaker_name"] == "Speaker A"
         assert body["clone_sample_seconds"] == 12.5
         assert body["clone_sample_segment_ids"] == [1, 2]

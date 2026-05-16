@@ -1180,6 +1180,10 @@ def _register_smart_clone_in_user_voices(
     source_ref: str | None = None,
     source_content_hash: str | None = None,
     source_video_title: str | None = None,
+    source_published_at: str | None = None,
+    source_content_summary: str | None = None,
+    source_content_era: str | None = None,
+    source_content_tags: object | None = None,
     source_speaker_name: str | None = None,
     clone_sample_seconds: float | None = None,
     clone_sample_segment_ids: object | None = None,
@@ -1239,6 +1243,14 @@ def _register_smart_clone_in_user_voices(
         payload["source_content_hash"] = source_content_hash
     if source_video_title:
         payload["source_video_title"] = source_video_title
+    if source_published_at:
+        payload["source_published_at"] = source_published_at
+    if source_content_summary:
+        payload["source_content_summary"] = source_content_summary
+    if source_content_era:
+        payload["source_content_era"] = source_content_era
+    if source_content_tags is not None:
+        payload["source_content_tags"] = source_content_tags
     if source_speaker_name:
         payload["source_speaker_name"] = source_speaker_name
     if clone_sample_seconds is not None:
@@ -4041,10 +4053,28 @@ class ProcessPipeline:
                                 source_video_title=(
                                     str(
                                         _snap("display_name")
+                                        or _snap("source_video_title")
                                         or _snap("title")
                                         or ""
                                     )
                                     or None
+                                ),
+                                source_published_at=(
+                                    str(_snap("source_published_at") or "")
+                                    or None
+                                ),
+                                source_content_summary=(
+                                    str(_snap("source_content_summary") or "")
+                                    or None
+                                ),
+                                source_content_era=(
+                                    str(_snap("source_content_era") or "")
+                                    or None
+                                ),
+                                source_content_tags=(
+                                    _snap("source_content_tags")
+                                    if isinstance(_snap("source_content_tags"), (dict, list))
+                                    else None
                                 ),
                                 source_speaker_name=str(_mirror_label or "") or None,
                                 clone_sample_seconds=(

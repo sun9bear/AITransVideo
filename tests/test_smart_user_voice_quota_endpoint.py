@@ -400,6 +400,10 @@ class TestQuotaEndpointBusinessLogic:
             "source_ref": "https://youtu.be/abc",
             "source_content_hash": "youtube:abc",
             "source_video_title": "Source Title",
+            "source_published_at": "2024-05-01T00:00:00+00:00",
+            "source_content_summary": "频道：Test Channel",
+            "source_content_era": "2024",
+            "source_content_tags": {"channel": "Test Channel", "tags": ["AI"]},
             "source_speaker_name": "Speaker A",
             "clone_sample_seconds": 12.5,
             "clone_sample_segment_ids": [1, 2],
@@ -434,6 +438,10 @@ class TestQuotaEndpointBusinessLogic:
         assert call["source_ref"] == "https://youtu.be/abc"
         assert call["source_content_hash"] == "youtube:abc"
         assert call["source_video_title"] == "Source Title"
+        assert call["source_published_at"].isoformat() == "2024-05-01T00:00:00+00:00"
+        assert call["source_content_summary"] == "频道：Test Channel"
+        assert call["source_content_era"] == "2024"
+        assert call["source_content_tags"] == {"channel": "Test Channel", "tags": ["AI"]}
         assert call["source_speaker_name"] == "Speaker A"
         assert call["clone_sample_seconds"] == 12.5
         assert call["clone_sample_segment_ids"] == [1, 2]

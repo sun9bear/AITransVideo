@@ -329,15 +329,35 @@ class TestCreateJobSuccess:
             return original_add(obj)
 
         youtube_db.add = capture_youtube_add
+        youtube_meta = {
+            "title": "Readable Video Title",
+            "upload_date": "20240501",
+            "channel": "Test Channel",
+            "categories": ["Education"],
+            "tags": ["AI", "Voice"],
+            "description": "A useful source description.\nWith a second line.",
+        }
         with patch("job_intercept.proxy_request", side_effect=fake_proxy_youtube):
-            with patch("job_intercept._probe_youtube_metadata", return_value=None):
+            with patch("job_intercept._probe_youtube_metadata", return_value=youtube_meta):
                 youtube_resp = _run(intercept_create_job(youtube_req, youtube_db, user))
 
         assert youtube_resp.status_code == 202
         assert captured["youtube"]["source_content_hash"] == "youtube:abc"
+        assert captured["youtube"]["source_video_title"] == "Readable Video Title"
+        assert captured["youtube"]["source_published_at"] == "2024-05-01T00:00:00+00:00"
+        assert captured["youtube"]["source_content_era"] == "2024"
+        assert captured["youtube"]["source_content_tags"] == {
+            "channel": "Test Channel",
+            "categories": ["Education"],
+            "tags": ["AI", "Voice"],
+        }
+        assert captured["youtube"]["source_content_summary"] == (
+            "频道：Test Channel；简介：A useful source description. With a second line."
+        )
         from models import Job
         youtube_job = [o for o in captured_jobs["youtube"] if isinstance(o, Job)][0]
         assert youtube_job.source_content_hash == "youtube:abc"
+        assert youtube_job.title == "Readable Video Title"
 
         upload_bytes = b"uploaded video bytes"
         upload_path = tmp_path / "uploads" / "uid-1" / "sample.mp4"
@@ -370,8 +390,10 @@ class TestCreateJobSuccess:
         assert upload_resp.status_code == 202
         assert captured["upload"]["source"]["type"] == "local_video"
         assert captured["upload"]["source_content_hash"] == expected_upload_hash
+        assert captured["upload"]["source_video_title"] == captured["upload"]["display_name"]
         upload_job = [o for o in captured_jobs["upload"] if isinstance(o, Job)][0]
         assert upload_job.source_content_hash == expected_upload_hash
+        assert upload_job.title == captured["upload"]["display_name"]
 
     def test_snapshot_fields_injected_into_upstream_payload(self):
         """Verify the full snapshot is injected into the payload sent to Job API."""
