@@ -376,6 +376,40 @@ def compute_job_policy(user, service_mode: str) -> dict:
 
     admin = load_settings()
 
+    # Smart MVP P2 launch fix (2026-05-16): master plan §5.0 + §15 P2
+    # locks smart to MiniMax (smart's clone API + quota model both
+    # MiniMax-specific). Without this branch, smart submissions fell
+    # into the ``else`` (express) branch — got tts_provider=cosyvoice
+    # (admin default), voice_clone_enabled=False, requires_review=False
+    # — user paid 100 credits/min but got express experience.
+    if service_mode == "smart":
+        return {
+            "service_mode": "smart",
+            # Hard-locked to MiniMax — admin's express/studio TTS
+            # settings do NOT override (smart contract requires MiniMax).
+            "tts_provider": "minimax",
+            # Master plan §15 P2: smart uses 高质量 TTS regardless of
+            # user plan tier (the fixed 100 credits/min price covers it).
+            "tts_model": "speech-2.8-hd",
+            # requires_review=True so review_state_manager + gate code
+            # treat smart as a review job; the smart inline branch in
+            # process.py auto-approves the review payloads
+            # without user interaction.
+            "requires_review": True,
+            # smart's whole value proposition. Runtime still gated by
+            # smart_consent.auto_voice_clone via validate_smart_consent
+            # (Codex 第四十轮 P1.1).
+            "voice_clone_enabled": True,
+            # Distinct strategy string for audit clarity; downstream
+            # code can branch on this if needed.
+            "voice_strategy": "smart_auto",
+            "plan_code_snapshot": plan,
+            "role_snapshot": role,
+            # Single-tier smart product; "standard" only for compat with
+            # the 2D (service_mode, quality_tier) pricing table (§5.1).
+            "quality_tier": "standard",
+        }
+
     if service_mode == "studio":
         configured_provider = (admin.studio_tts_provider or "").strip().lower()
         tts_provider = configured_provider if configured_provider in _VALID_STUDIO_PROVIDERS else _DEFAULT_STUDIO_PROVIDER

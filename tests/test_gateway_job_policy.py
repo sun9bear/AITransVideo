@@ -245,3 +245,103 @@ class TestPlanCatalog:
     def test_pro_plan_limits(self):
         assert PLAN_CATALOG["pro"]["max_duration_minutes"] == 180
         assert PLAN_CATALOG["pro"]["max_concurrent_jobs"] == 5
+
+
+# ===================================================================
+# Smart MVP P2 launch — compute_job_policy("smart")
+# ===================================================================
+# Discovery (2026-05-16): smart submissions through real UI silently
+# fell into the ``else`` (express) branch — got tts_provider=cosyvoice
+# (admin default), tts_model=cosyvoice-v3-flash, voice_clone_enabled=False,
+# requires_review=False. User paid 100 credits/min (smart price) but
+# received the express experience. Master plan §5.0 explicitly locks
+# smart to MiniMax + auto-clone. These tests pin the new smart branch.
+
+
+class TestComputeJobPolicySmart:
+
+    def test_smart_locks_minimax_provider_regardless_of_admin_settings(
+        self, monkeypatch,
+    ):
+        """Smart's TTS provider MUST be MiniMax. admin can't override
+        — master plan §5.0 says smart auto-decision relies on MiniMax's
+        clone API + quota model. Any other provider breaks that
+        contract."""
+        import admin_settings as admin_mod
+        original = admin_mod.load_settings
+
+        def fake_load():
+            s = SimpleNamespace()
+            s.studio_tts_provider = "minimax"
+            # Admin set express to cosyvoice; smart MUST NOT inherit
+            s.express_tts_provider = "cosyvoice"
+            return s
+
+        monkeypatch.setattr(admin_mod, "load_settings", fake_load)
+        try:
+            p = compute_job_policy(_make_user(plan_code="plus"), "smart")
+            assert p["service_mode"] == "smart"
+            assert p["tts_provider"] == "minimax", (
+                "smart MUST lock to MiniMax — admin's express setting "
+                "(cosyvoice) MUST NOT bleed through"
+            )
+        finally:
+            monkeypatch.setattr(admin_mod, "load_settings", original)
+
+    def test_smart_uses_speech_2_8_hd_model(self):
+        """Master plan §15 P2: smart selects MiniMax 高质量 TTS
+        (speech-2.8-hd), not the cheaper turbo model used by Plus
+        Studio."""
+        p = compute_job_policy(_make_user(plan_code="plus"), "smart")
+        assert p["tts_model"] == "speech-2.8-hd"
+
+    def test_smart_enables_voice_clone(self):
+        """``voice_clone_enabled`` MUST be True for smart — smart's
+        whole value proposition is auto-clone of main speakers
+        (gated by smart_consent.auto_voice_clone at runtime)."""
+        p = compute_job_policy(_make_user(plan_code="plus"), "smart")
+        assert p["voice_clone_enabled"] is True
+
+    def test_smart_requires_review_flag_true(self):
+        """``requires_review=True`` so the review_state_manager and
+        gate-based code paths see smart as a "review" job; smart
+        inline branch in process.py auto-approves the review payloads
+        without user interaction."""
+        p = compute_job_policy(_make_user(plan_code="plus"), "smart")
+        assert p["requires_review"] is True
+
+    def test_smart_voice_strategy_distinct_from_express_studio(self):
+        """Distinct strategy string for audit clarity. Studio uses
+        ``user_selected``, express uses ``preset_mapping``. Smart
+        gets its own value so downstream code / audit can branch."""
+        p = compute_job_policy(_make_user(plan_code="plus"), "smart")
+        assert p["voice_strategy"] not in ("user_selected", "preset_mapping")
+        # Document expected literal — adjust if implementation picks
+        # a different name (test serves as the source of truth).
+        assert "smart" in p["voice_strategy"].lower()
+
+    def test_smart_quality_tier_standard(self):
+        """Master plan §2.1: smart has a single product tier; internal
+        ``quality_tier`` stays "standard" for compat with the 2D
+        pricing table. NOT exposed to user."""
+        p = compute_job_policy(_make_user(plan_code="plus"), "smart")
+        assert p["quality_tier"] == "standard"
+
+    def test_smart_admin_user_also_gets_minimax_2_8_hd(self):
+        """Admin users get the same smart policy — no per-role
+        downgrade. (Studio's per-plan tts_model picks turbo for non-pro;
+        smart uses HD for all to match the smart product spec.)"""
+        p = compute_job_policy(_make_user(role="admin", plan_code="free"), "smart")
+        assert p["tts_provider"] == "minimax"
+        assert p["tts_model"] == "speech-2.8-hd"
+
+    def test_smart_pro_user_also_gets_speech_2_8_hd(self):
+        """Pro users see the same smart policy as Plus — fixed
+        product spec, not plan-tiered."""
+        p = compute_job_policy(_make_user(plan_code="pro"), "smart")
+        assert p["tts_model"] == "speech-2.8-hd"
+
+    def test_smart_snapshot_fields_present(self):
+        p = compute_job_policy(_make_user(plan_code="plus"), "smart")
+        assert p["plan_code_snapshot"] == "plus"
+        assert p["role_snapshot"] == "user"
