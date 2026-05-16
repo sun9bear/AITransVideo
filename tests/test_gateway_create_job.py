@@ -1139,3 +1139,76 @@ class TestQualityTierTruthChain:
         upstream_record = mirror.await_args.args[2]
         assert upstream_record.job_id == "job-settle-qt"
         assert upstream_record.status == "succeeded"
+
+
+# ===================================================================
+# Regression: intercept_create_job must not shadow module-level
+# sqlalchemy / models imports via inner re-imports (2026-05-16 P0).
+#
+# Background: Fix C added ``from sqlalchemy import func, select`` and
+# ``from models import UserVoice`` inside a try-block guarded by
+# ``if service_mode == "smart" and user and not is_admin:``. Python
+# treats any name assigned anywhere in a function as function-local
+# throughout, so for paths that skip that branch (admin smart /
+# studio / express / no-user), the later ``select(Job)`` PG insert
+# at line ~1213 raises UnboundLocalError. The PG insert is wrapped
+# in ``except Exception`` and logged as "Failed to record job ... in
+# DB", so the upstream JSON-store entry survives but no PG row is
+# created → user task list looks empty → admin task management
+# shows orphan jobs with empty owner fields.
+#
+# This AST-level guard catches any future re-introduction of the
+# same shadowing pattern in intercept_create_job. The shadow itself
+# is what breaks the scope; the runtime symptom is path-dependent
+# and hard to reproduce in unit tests without full DB mocks.
+# ===================================================================
+
+class TestInterceptCreateJobImportShadowingGuard:
+    """AST regression for the 2026-05-16 intercept_create_job orphan bug."""
+
+    _SHADOWED_NAMES = frozenset({"select", "func", "UserVoice", "Job", "User"})
+
+    def _intercept_create_job_function_node(self):
+        import ast
+        import pathlib
+
+        src = pathlib.Path(_gateway_dir, "job_intercept.py").read_text(
+            encoding="utf-8"
+        )
+        tree = ast.parse(src)
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.AsyncFunctionDef)
+                and node.name == "intercept_create_job"
+            ):
+                return node
+        raise AssertionError(
+            "intercept_create_job not found in gateway/job_intercept.py"
+        )
+
+    def test_no_inner_reimport_of_module_level_sqlalchemy_names(self):
+        import ast
+
+        node = self._intercept_create_job_function_node()
+        offenders: list[str] = []
+        for child in ast.walk(node):
+            if isinstance(child, ast.ImportFrom):
+                if child.module in {"sqlalchemy", "models"}:
+                    names = [alias.name for alias in child.names]
+                    bad = [n for n in names if n in self._SHADOWED_NAMES]
+                    if bad:
+                        offenders.append(
+                            f"line {child.lineno}: from {child.module} "
+                            f"import {', '.join(names)} (shadows {bad})"
+                        )
+
+        assert not offenders, (
+            "intercept_create_job re-imports module-level names from "
+            "sqlalchemy/models inside the function body. This shadows the "
+            "top-level imports and makes the names function-local "
+            "throughout, so any code path that skips the import statement "
+            "(e.g. admin smart, studio, express) hits UnboundLocalError "
+            "at the next select(Job) call. Move the imports to module top "
+            "OR rename via ``import X as _local_X``. Offenders:\n  - "
+            + "\n  - ".join(offenders)
+        )

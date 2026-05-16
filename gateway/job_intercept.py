@@ -952,10 +952,18 @@ async def intercept_create_job(
     #
     # Skipped for admin (testing / demo bypass — matches the same
     # skip in process.py smart inline branch on role_snapshot=admin).
+    #
+    # IMPORTANT: do NOT re-import ``select`` / ``func`` / ``UserVoice``
+    # inside this branch. They are already imported at module top
+    # (lines 45 / 54). A local re-import would mark those names
+    # function-local throughout intercept_create_job, so any code path
+    # that SKIPS this branch (admin smart / studio / express / no-user)
+    # hits UnboundLocalError at the next ``select(Job)`` call (e.g. the
+    # PG insert at line ~1213). That's exactly the 2026-05-16 incident
+    # where admin smart submissions left orphan JSON-store jobs with
+    # no PG row → user task list looked empty.
     if service_mode == "smart" and user and not is_admin:
         try:
-            from sqlalchemy import func, select
-            from models import UserVoice
             from admin_settings import load_settings
 
             quota_used_result = await db.execute(
