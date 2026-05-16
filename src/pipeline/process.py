@@ -4120,8 +4120,30 @@ class ProcessPipeline:
                     # condition can never match). Pass the aggregated
                     # dict explicitly so the helper can honor the
                     # exclusion contract.
-                    _smart_dubbing_modes = _aggregate_speaker_dubbing_modes(
+                    #
+                    # 2026-05-16 P0 fix (job_134ee34a... crash): smart inline
+                    # branch runs BEFORE the S3 translate call at line ~4623,
+                    # so on the fresh-run path ``translation_result`` is still
+                    # ``None`` (initialised at line ~2952 for fresh runs;
+                    # only the s3_cache_hit branch fills it in earlier).
+                    # Reading ``translation_result.segments`` crashed with
+                    # ``'NoneType' object has no attribute 'segments'`` after
+                    # the user's S2 review + voice clone work was already
+                    # billed. Source of dubbing_mode at this point is
+                    # ``transcript_result.lines`` (TranscriptLine carries
+                    # ``dubbing_mode: str = "dub"`` since S1+S2 review;
+                    # propagated to translation_result.segments later via
+                    # ``_apply_transcript_dubbing_modes_to_segments``).
+                    # Prefer translation_result.segments on cache-hit re-runs
+                    # (segment-level may have been edited via post-edit), fall
+                    # back to transcript_result.lines on fresh runs.
+                    _dub_source = (
                         translation_result.segments
+                        if translation_result is not None
+                        else transcript_result.lines
+                    )
+                    _smart_dubbing_modes = _aggregate_speaker_dubbing_modes(
+                        _dub_source
                     )
                     _smart_minor_voice_assignments = (
                         _resolve_smart_minor_speaker_voices(

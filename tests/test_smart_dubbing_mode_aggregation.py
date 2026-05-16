@@ -347,3 +347,137 @@ class TestCallSitePassesAggregation:
             "translation_result.segments before invoking the minor helper.\n"
             f"Pre-call window (last 1000 chars):\n{pre_call[-1000:]}"
         )
+
+
+# ===========================================================================
+# Cycle 3 — None-safe input source (2026-05-16 production crash)
+#
+# Background: on the smart fresh-run path, ``translation_result`` is
+# initialised to ``None`` at line ~2952 (before the smart inline branch),
+# and only gets assigned to a real TranslationResult at line ~4623
+# (``translator.translate(...)``). The smart inline auto-approve branch
+# at line ~4123 runs BEFORE the translate call, so reading
+# ``translation_result.segments`` there crashed every smart fresh-run
+# with ``AttributeError: 'NoneType' object has no attribute 'segments'``.
+#
+# Real incident: job_134ee34a245a4dbaa9b0501c74feeb8e (2026-05-16
+# 11:17:18 UTC, admin smart submission). S0/S1/S2 + voice clone all
+# ran to completion + were billed, then crashed at the minor-speaker
+# resolution step. User saw "翻译审核 失败" with cryptic message; lost
+# all the work done before that point.
+#
+# Fix: prefer translation_result.segments when available (post-cache-hit
+# or post-translate paths), fall back to transcript_result.lines (always
+# available, carries dubbing_mode field per TranscriptLine schema).
+# ===========================================================================
+
+
+class TestSmartInlineAggregationSourceNoneSafe:
+    """Pin the None-safe input source pattern for the smart inline aggregator
+    call to prevent regression of the 2026-05-16 production crash."""
+
+    def _source(self) -> str:
+        return _PROCESS_PY.read_text(encoding="utf-8")
+
+    def test_aggregator_accepts_transcript_line_shape(self):
+        """transcript_result.lines (TranscriptLine objects) MUST be a valid
+        input to _aggregate_speaker_dubbing_modes — both ``speaker_id``
+        and ``dubbing_mode`` attributes exist on TranscriptLine, and the
+        helper uses getattr() with safe defaults."""
+        from pipeline.process import _aggregate_speaker_dubbing_modes
+        from services.assemblyai.transcriber import TranscriptLine
+
+        lines = [
+            TranscriptLine(
+                index=1,
+                start_ms=0,
+                end_ms=2000,
+                speaker_id="speaker_a",
+                speaker_label="A",
+                source_text="hello",
+                dubbing_mode="dub",
+            ),
+            TranscriptLine(
+                index=2,
+                start_ms=2000,
+                end_ms=4000,
+                speaker_id="speaker_a",
+                speaker_label="A",
+                source_text="world",
+                dubbing_mode="dub",
+            ),
+            TranscriptLine(
+                index=3,
+                start_ms=4000,
+                end_ms=6000,
+                speaker_id="speaker_b",
+                speaker_label="B",
+                source_text="(music)",
+                dubbing_mode="keep_original",
+            ),
+        ]
+        result = _aggregate_speaker_dubbing_modes(lines)
+        assert result == {"speaker_a": "dub", "speaker_b": "keep_original"}
+
+    def test_call_site_guards_none_translation_result(self):
+        """Smart inline aggregator call MUST guard ``translation_result``
+        with a None check before reading ``.segments``. Otherwise the
+        2026-05-16 smart fresh-run crash returns.
+
+        Acceptable patterns:
+          - ``translation_result is not None`` ternary
+          - ``getattr(translation_result, "segments", ...)`` chain
+          - Any equivalent that prevents NoneType.segments access
+
+        UNACCEPTABLE: bare ``translation_result.segments`` reference
+        inside the smart inline branch where translation_result is not
+        yet bound to a TranslationResult.
+        """
+        source = self._source()
+        anchor = "_aggregate_speaker_dubbing_modes("
+        # Find the first non-def occurrence (the smart inline branch call)
+        idx = 0
+        call_idx = -1
+        while True:
+            idx = source.find(anchor, idx)
+            if idx < 0:
+                break
+            preceding = source[max(0, idx - 20) : idx]
+            if "def " not in preceding:
+                call_idx = idx
+                break
+            idx += 1
+        assert call_idx >= 0, "smart inline aggregator call site not found"
+
+        # The fix is structured as:
+        #   _dub_source = (
+        #       translation_result.segments
+        #       if translation_result is not None
+        #       else transcript_result.lines
+        #   )
+        #   _smart_dubbing_modes = _aggregate_speaker_dubbing_modes(_dub_source)
+        #
+        # Look back ~600 chars for the None-guard pattern. Any of these
+        # patterns satisfy the safety contract:
+        pre_call = source[max(0, call_idx - 800) : call_idx]
+        none_guard_patterns = [
+            "translation_result is not None",
+            "translation_result is None",
+            'getattr(translation_result, "segments"',
+            "getattr(translation_result, 'segments'",
+            # Allow s3_cache_hit-style explicit gate
+            "if s3_cache_hit",
+        ]
+        has_guard = any(p in pre_call for p in none_guard_patterns)
+        assert has_guard, (
+            "Smart inline branch's _aggregate_speaker_dubbing_modes call "
+            "must guard against translation_result being None on the "
+            "fresh-run path (set at line ~2952, only filled in by "
+            "translator.translate at line ~4623 which runs AFTER this "
+            "smart branch). Without the guard, every smart fresh-run "
+            "crashes with AttributeError: 'NoneType' object has no "
+            "attribute 'segments' (real incident: job_134ee34a... on "
+            "2026-05-16). Expected one of:\n  "
+            + "\n  ".join(none_guard_patterns)
+            + f"\nin the 800 chars before the call. Got:\n{pre_call[-600:]}"
+        )
