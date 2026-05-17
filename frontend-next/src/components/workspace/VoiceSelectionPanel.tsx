@@ -11,12 +11,16 @@ import {
   deleteUserVoice,
   getSpeakerAudioSegments,
   getUserVoices,
+  getVoiceCandidates,
   matchVoiceForSelection,
   previewVoice,
   reassignSpeakerAudioSegment,
   type SpeakerAudioSegment,
   type SpeakerAudioReassignResult,
   type UserVoiceEntry,
+  type VoiceCandidate,
+  type VoiceCandidatesResponse,
+  type VoiceMatchScope,
   type VoiceReuseMatchResponse,
   type VoiceSelectionSpeakerApproval,
   getVoiceSelectionPricing,
@@ -132,6 +136,32 @@ function formatSeconds(value: number | null): string | null {
   return `${value.toFixed(1)}s`
 }
 
+/** Phase 2: short badge for personal-voice candidate match scope.
+ *  Strong same-source = "★ 强匹配"; medium same-source = "● 同视频";
+ *  cross-source named = "○ 跨视频同名". */
+function matchScopeBadge(scope: VoiceMatchScope): string {
+  switch (scope) {
+    case 'same_source_strong':
+      return '★ 强匹配'
+    case 'same_source_named':
+      return '● 同视频同名'
+    case 'same_source_speaker_id_changed':
+      return '● 同视频'
+    case 'cross_source_named_person':
+      return '○ 跨视频同名'
+    default:
+      return '○ 可能匹配'
+  }
+}
+
+/** Phase 2: optional trailing source-video hint for candidate options.
+ *  Returns "" when no useful evidence so the caller can render the bare label. */
+function formatCandidateSourceHint(candidate: VoiceCandidate): string {
+  const title = candidate.evidence.sourceVideoTitle
+  if (!title) return ''
+  return ` · ${title}`
+}
+
 /* ---------- Main Component ---------- */
 
 export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelProps) {
@@ -142,6 +172,11 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
   // Backward compat: flat availableVoices for old payloads without all_providers
   const [fallbackVoices, setFallbackVoices] = useState<AvailableVoice[]>([])
   const [voiceStates, setVoiceStates] = useState<Record<string, SpeakerVoiceState>>({})
+  // Phase 2 (plan 2026-05-17): per-speaker personal-voice candidates. Loaded
+  // best-effort after speakers — strong matches are auto-preselected and
+  // emit voice_reuse=true on approval; medium/weak/cross-source show as
+  // "需要确认" entries the user can still pick.
+  const [voiceCandidates, setVoiceCandidates] = useState<Record<string, VoiceCandidatesResponse>>({})
   const [defaultProvider, setDefaultProvider] = useState('')
   const [hasMultiProvider, setHasMultiProvider] = useState(false)
   const [cloneCostCredits, setCloneCostCredits] = useState(0)
@@ -309,9 +344,53 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
           }
         }
 
+        // Phase 2: fetch personal-voice candidates per speaker (best-effort).
+        // Done BEFORE setVoiceStates so strong matches can upgrade the initial
+        // state to voiceSource='cloned' + voiceReuse=true. Failures degrade
+        // silently — the panel still works without candidates. No paid API
+        // calls in this path (read-only registry lookup on Gateway).
+        const candidateMap: Record<string, VoiceCandidatesResponse> = {}
+        await Promise.allSettled(
+          loadedSpeakers.map(async (sp) => {
+            try {
+              const result = await getVoiceCandidates({
+                jobId,
+                speakerId: sp.speakerId,
+                speakerName: sp.speakerName,
+                selectedProvider: loadedDefaultProvider,
+              })
+              candidateMap[sp.speakerId] = result
+            } catch {
+              // Best-effort; skip this speaker's candidates on failure.
+            }
+          }),
+        )
+        if (cancelled) return
+
+        // Upgrade initial state for any speaker with an auto-reuse strong
+        // match (provided the candidate voice isn't on the expired list).
+        // Only fires when initial source is 'auto_matched' or 'catalog' —
+        // we never run AFTER user has explicitly picked something this load
+        // (this hook only runs once on mount per jobId).
+        for (const sp of loadedSpeakers) {
+          const candidate = candidateMap[sp.speakerId]?.autoReuseVoice
+          if (!candidate) continue
+          if (payloadExpired.includes(candidate.voiceId)) continue
+          // MiniMax-only for now (personal voices live in MiniMax registry);
+          // skip if the default provider isn't minimax.
+          if (loadedDefaultProvider && loadedDefaultProvider !== 'minimax') continue
+          initialStates[sp.speakerId] = {
+            ...initialStates[sp.speakerId],
+            voiceId: candidate.voiceId,
+            voiceSource: 'cloned',
+            voiceReuse: true,
+          }
+        }
+
         setSpeakers(loadedSpeakers)
         setVoiceLibrary('voices' in voices ? (voices as { voices: VoiceLibraryEntry[] }).voices : [])
         setPersonalVoices(userVoices)
+        setVoiceCandidates(candidateMap)
         setVoiceStates(initialStates)
       } catch (err) {
         if (!cancelled) setError(getErrorMessage(err))
@@ -346,11 +425,32 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
   }, [speakers])
 
   const handleVoiceChange = useCallback((speakerId: string, voiceId: string) => {
+    // Phase 2: detect whether the picked voice corresponds to a match
+    // candidate (auto-reuse or one of the "需要确认" entries). When it
+    // does, set voiceSource='cloned' + voiceReuse=true so the approve
+    // payload carries the audit flag and the user isn't charged a
+    // clone reserve. Picking a non-matched personal voice still counts
+    // as 'cloned' source (it's a clone-typed voice) but voiceReuse stays
+    // false — voice_reuse semantically means "matched candidate reuse".
+    const candidates = voiceCandidates[speakerId]
+    const matchedCandidate = candidates
+      ? candidates.autoReuseVoice?.voiceId === voiceId
+        ? candidates.autoReuseVoice
+        : candidates.personalVoiceCandidates.find((c) => c.voiceId === voiceId) ?? null
+      : null
+    const isOtherPersonal =
+      !matchedCandidate && personalVoices.some((v) => v.voiceId === voiceId)
     setVoiceStates((prev) => ({
       ...prev,
-      [speakerId]: { ...prev[speakerId], voiceId, voiceSource: 'catalog', voiceReuse: false, cloneError: null },
+      [speakerId]: {
+        ...prev[speakerId],
+        voiceId,
+        voiceSource: matchedCandidate || isOtherPersonal ? 'cloned' : 'catalog',
+        voiceReuse: !!matchedCandidate,
+        cloneError: null,
+      },
     }))
-  }, [])
+  }, [voiceCandidates, personalVoices])
 
   const handleCloneComplete = useCallback((speakerId: string, voiceId: string, options?: { reused?: boolean }) => {
     setVoiceStates((prev) => ({
@@ -651,6 +751,69 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                         value={state?.voiceId ?? ''}
                       >
                         <option value="">-- 选择音色 --</option>
+                        {/* Phase 2 (plan 2026-05-17): personal-voice candidates
+                           ordered above official recommendations per candidate
+                           priority. Only meaningful for MiniMax (personal voices
+                           live there). Three groups, in priority order:
+                           1) 强匹配 — auto-reuse, voice_reuse=true preselected
+                           2) 可能匹配 — requires user confirmation
+                           3) 其他个人音色 — full library minus matched ones */}
+                        {(() => {
+                          if (currentProvider !== 'minimax') return null
+                          const candidates = voiceCandidates[sp.speakerId]
+                          const auto = candidates?.autoReuseVoice ?? null
+                          const showAuto = auto && !expiredVoiceIds.includes(auto.voiceId)
+                          if (!showAuto || !auto) return null
+                          return (
+                            <optgroup label="个人音色 · 强匹配 (不扣点)">
+                              <option value={auto.voiceId}>
+                                {`★ ${auto.label}${formatCandidateSourceHint(auto)}`}
+                              </option>
+                            </optgroup>
+                          )
+                        })()}
+                        {(() => {
+                          if (currentProvider !== 'minimax') return null
+                          const candidates = voiceCandidates[sp.speakerId]
+                          const list = (candidates?.personalVoiceCandidates ?? [])
+                            .filter((c) => c.requiresUserConfirmation
+                              && !expiredVoiceIds.includes(c.voiceId))
+                          if (list.length === 0) return null
+                          return (
+                            <optgroup label="个人音色 · 可能匹配 (需要确认)">
+                              {list.map((c) => (
+                                <option key={`pvc-${c.voiceId}`} value={c.voiceId}>
+                                  {`${matchScopeBadge(c.matchScope)} ${c.label}${formatCandidateSourceHint(c)}`}
+                                </option>
+                              ))}
+                            </optgroup>
+                          )
+                        })()}
+                        {(() => {
+                          if (currentProvider !== 'minimax') return null
+                          const candidates = voiceCandidates[sp.speakerId]
+                          const candidateIds = new Set<string>()
+                          if (candidates?.autoReuseVoice) {
+                            candidateIds.add(candidates.autoReuseVoice.voiceId)
+                          }
+                          for (const c of candidates?.personalVoiceCandidates ?? []) {
+                            candidateIds.add(c.voiceId)
+                          }
+                          const others = personalVoices.filter((v) =>
+                            !expiredVoiceIds.includes(v.voiceId)
+                            && !candidateIds.has(v.voiceId),
+                          )
+                          if (others.length === 0) return null
+                          return (
+                            <optgroup label="其他个人音色">
+                              {others.map((v) => (
+                                <option key={v.voiceId} value={v.voiceId}>
+                                  {v.label || v.voiceId}
+                                </option>
+                              ))}
+                            </optgroup>
+                          )
+                        })()}
                         {/* Smart recommendations (Task 2): top match + backups, pinned to top */}
                         {(() => {
                           const provMatch = sp.autoMatchedByProvider[currentProvider]
@@ -681,18 +844,6 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                             </optgroup>
                           )
                         })()}
-                        {/* MiniMax: personal voices first, then catalog grouped by gender */}
-                        {currentProvider === 'minimax' && personalVoices.filter((v) => !expiredVoiceIds.includes(v.voiceId)).length > 0 ? (
-                          <optgroup label="我的音色">
-                            {personalVoices
-                              .filter((v) => !expiredVoiceIds.includes(v.voiceId))
-                              .map((v) => (
-                                <option key={v.voiceId} value={v.voiceId}>
-                                  {v.label || v.voiceId}
-                                </option>
-                              ))}
-                          </optgroup>
-                        ) : null}
                         {/* All providers: catalog voices grouped by gender */}
                         {(() => {
                           const femaleVoices = voicesForProvider.filter((v) => v.gender === 'female')

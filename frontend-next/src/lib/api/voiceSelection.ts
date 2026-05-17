@@ -239,6 +239,113 @@ export async function matchVoiceForSelection(input: {
   }
 }
 
+/* ---------- Phase 2: Candidate-first voice selection (plan 2026-05-17) ---------- */
+
+export type VoiceMatchScope =
+  | 'same_source_strong'
+  | 'same_source_named'
+  | 'same_source_speaker_id_changed'
+  | 'cross_source_named_person'
+
+export interface VoiceCandidateEvidence {
+  sourceVideoTitle: string | null
+  sourceSpeakerName: string | null
+  cloneSampleSeconds: number | null
+  createdAt: string | null
+}
+
+export interface VoiceCandidate {
+  voiceId: string
+  userVoiceId: string
+  label: string
+  confidence: VoiceReuseConfidence
+  matchScope: VoiceMatchScope
+  requiresUserConfirmation: boolean
+  score: number
+  reason: string
+  evidence: VoiceCandidateEvidence
+}
+
+export interface VoiceCandidatesResponse {
+  speakerId: string
+  sourceContentHash: string | null
+  /** Top "strong" same-source match — preselect this without user confirmation.
+   *  Backend filters to confidence === "strong" + match_scope === "same_source_strong"
+   *  + auto_reuse_allowed === true. */
+  autoReuseVoice: VoiceCandidate | null
+  /** Strong + medium + weak + cross-source candidates. Items with
+   *  requiresUserConfirmation=true should render as "需要确认". */
+  personalVoiceCandidates: VoiceCandidate[]
+  // official_voice_candidates omitted — always [] in Phase 1; frontend continues
+  // to read official voices from review_state.payload (existing path).
+}
+
+function mapVoiceCandidate(raw: Record<string, unknown>): VoiceCandidate {
+  const evidenceRaw = (raw.evidence ?? {}) as Record<string, unknown>
+  return {
+    voiceId: String(raw.voice_id ?? ''),
+    userVoiceId: String(raw.user_voice_id ?? ''),
+    label: String(raw.label ?? raw.voice_id ?? ''),
+    confidence: (raw.confidence ?? 'weak') as VoiceReuseConfidence,
+    matchScope: (raw.match_scope ?? 'cross_source_named_person') as VoiceMatchScope,
+    requiresUserConfirmation: Boolean(raw.requires_user_confirmation),
+    score: Number(raw.score ?? 0),
+    reason: String(raw.reason ?? ''),
+    evidence: {
+      sourceVideoTitle: evidenceRaw.source_video_title
+        ? String(evidenceRaw.source_video_title)
+        : null,
+      sourceSpeakerName: evidenceRaw.source_speaker_name
+        ? String(evidenceRaw.source_speaker_name)
+        : null,
+      cloneSampleSeconds:
+        typeof evidenceRaw.clone_sample_seconds === 'number'
+          ? evidenceRaw.clone_sample_seconds
+          : null,
+      createdAt: evidenceRaw.created_at ? String(evidenceRaw.created_at) : null,
+    },
+  }
+}
+
+export async function getVoiceCandidates(input: {
+  jobId: string
+  speakerId: string
+  speakerName?: string
+  sourceSpeakerNameKey?: string
+  selectedProvider?: string
+  includeCrossSource?: boolean
+  limit?: number
+}): Promise<VoiceCandidatesResponse> {
+  const result = await apiClient.post<{
+    speaker_id: string
+    source_content_hash: string | null
+    auto_reuse_voice: Record<string, unknown> | null
+    personal_voice_candidates: Array<Record<string, unknown>>
+    official_voice_candidates: Array<Record<string, unknown>>
+  }>(`/jobs/${input.jobId}/voice-candidates`, {
+    body: {
+      speaker_id: input.speakerId,
+      speaker_name: input.speakerName ?? '',
+      source_speaker_name_key: input.sourceSpeakerNameKey ?? '',
+      selected_provider: input.selectedProvider ?? '',
+      include_cross_source: input.includeCrossSource ?? true,
+      limit: input.limit ?? 3,
+    },
+  })
+  return {
+    speakerId: String(result.speaker_id ?? ''),
+    sourceContentHash: result.source_content_hash
+      ? String(result.source_content_hash)
+      : null,
+    autoReuseVoice: result.auto_reuse_voice
+      ? mapVoiceCandidate(result.auto_reuse_voice)
+      : null,
+    personalVoiceCandidates: (result.personal_voice_candidates ?? []).map(
+      mapVoiceCandidate,
+    ),
+  }
+}
+
 export async function deleteUserVoice(voiceId: string): Promise<boolean> {
   const resp = await fetch(`/gateway/user-voices/${encodeURIComponent(voiceId)}`, {
     method: 'DELETE',

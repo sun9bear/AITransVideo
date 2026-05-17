@@ -55,9 +55,13 @@ import { getErrorMessage } from "@/lib/api/errors"
 import {
   deleteUserVoice,
   getUserVoices,
+  getVoiceCandidates,
   getVoiceSelectionPricing,
   previewVoice,
   type UserVoiceEntry,
+  type VoiceCandidate,
+  type VoiceCandidatesResponse,
+  type VoiceMatchScope,
   type VoiceSelectionPricingResponse,
 } from "@/lib/api/voiceSelection"
 import { VoiceCloneModal, SpeakerAudioAuditModal } from "@/components/workspace/VoiceSelectionPanel"
@@ -146,6 +150,29 @@ function minimaxModelKey(model: "turbo" | "hd" | undefined): string {
   return model === "hd" ? "speech-2.8-hd" : "speech-2.8-turbo"
 }
 
+/** Phase 2 (plan 2026-05-17): short badge for personal-voice candidate
+ *  match scope — same vocabulary as VoiceSelectionPanel. */
+function matchScopeBadge(scope: VoiceMatchScope): string {
+  switch (scope) {
+    case "same_source_strong":
+      return "★ 强匹配"
+    case "same_source_named":
+      return "● 同视频同名"
+    case "same_source_speaker_id_changed":
+      return "● 同视频"
+    case "cross_source_named_person":
+      return "○ 跨视频同名"
+    default:
+      return "○ 可能匹配"
+  }
+}
+
+function formatCandidateSourceHint(candidate: VoiceCandidate): string {
+  const title = candidate.evidence.sourceVideoTitle
+  if (!title) return ""
+  return ` · ${title}`
+}
+
 /* ---------- Main Component ---------- */
 
 export function VoiceModifyTab({
@@ -185,6 +212,10 @@ export function VoiceModifyTab({
   const [pricing, setPricing] = useState<VoiceSelectionPricingResponse | null>(null)
   const [cloneCostCredits, setCloneCostCredits] = useState(0)
   const [draftStates, setDraftStates] = useState<Record<string, SpeakerDraftState>>({})
+  // Phase 2 (plan 2026-05-17): per-speaker personal-voice candidates loaded
+  // best-effort on mount. Strong matches preselect ONLY when no voice_map
+  // override exists for this speaker — never clobber a user-saved override.
+  const [voiceCandidates, setVoiceCandidates] = useState<Record<string, VoiceCandidatesResponse>>({})
   const [applyingSpeakerIds, setApplyingSpeakerIds] = useState<Set<string>>(new Set())
   const [previewLoading, setPreviewLoading] = useState<Record<string, boolean>>({})
   const [previewError, setPreviewError] = useState<Record<string, string | null>>({})
@@ -407,6 +438,29 @@ export function VoiceModifyTab({
         // Personal voices (clone library)
         setPersonalVoices(userVoices)
 
+        // Phase 2: fetch personal-voice candidates per speaker (best-effort).
+        // Done BEFORE building draft state so we can preselect strong matches
+        // on speakers WITHOUT an existing voice_map override / baseline. Critical:
+        // existing override/baseline must NOT be clobbered — those represent
+        // user / pipeline decisions already in effect. Failures degrade silently.
+        const candidateMap: Record<string, VoiceCandidatesResponse> = {}
+        await Promise.allSettled(
+          loadedSpeakers.map(async (sp) => {
+            try {
+              const result = await getVoiceCandidates({
+                jobId,
+                speakerId: sp.speakerId,
+                speakerName: sp.speakerName,
+                selectedProvider: loadedDefaultProvider,
+              })
+              candidateMap[sp.speakerId] = result
+            } catch {
+              // Best-effort; skip this speaker's candidates on failure.
+            }
+          }),
+        )
+        if (cancelled) return
+
         // Seed draft state per speaker. Precedence:
         //   1. voice_map override (user already changed in this session)
         //   2. Baseline = first segment's voice_id + tts_provider / provider
@@ -414,7 +468,10 @@ export function VoiceModifyTab({
         //      time, including user's original voice pick / cloned voice.
         //      Dropdown default of "★ 自动匹配" would be misleading: it's
         //      just a suggestion, not what's in effect.
-        //   3. Fallback to auto_matched only when baseline is missing
+        //   3. Phase 2: personal-voice strong match (auto-reuse) — only fires
+        //      when no override AND no baseline exists. voice_reuse=true so
+        //      the eventual voice_map write includes the audit flag.
+        //   4. Fallback to auto_matched only when nothing else is set
         //      (e.g. legacy task without voice_id on segments).
         const initial: Record<string, SpeakerDraftState> = {}
         for (const sp of loadedSpeakers) {
@@ -438,6 +495,7 @@ export function VoiceModifyTab({
               : "turbo"
 
           if (override) {
+            // Existing user-saved override — never clobber with auto-reuse.
             initial[sp.speakerId] = {
               voiceId: override.voice_id,
               selectedProvider: override.provider,
@@ -458,11 +516,31 @@ export function VoiceModifyTab({
               : ""
 
           if (baselineVoiceId) {
+            // Pipeline already picked / cloned a voice — keep it. The user
+            // can still pick a candidate manually from the dropdown.
             initial[sp.speakerId] = {
               voiceId: baselineVoiceId,
               selectedProvider: baselineProvider || loadedDefaultProvider,
               voiceSource: "catalog",
               voiceReuse: false,
+              minimaxModel: inferredModel,
+            }
+            continue
+          }
+
+          // Phase 2: no override, no baseline — try preselecting strong match.
+          // MiniMax-only (personal voices live in MiniMax registry).
+          const candidate = candidateMap[sp.speakerId]?.autoReuseVoice
+          const candidateUsable =
+            candidate
+            && !payloadExpired.includes(candidate.voiceId)
+            && (loadedDefaultProvider === "minimax" || !loadedDefaultProvider)
+          if (candidateUsable && candidate) {
+            initial[sp.speakerId] = {
+              voiceId: candidate.voiceId,
+              selectedProvider: "minimax",
+              voiceSource: "cloned",
+              voiceReuse: true,
               minimaxModel: inferredModel,
             }
             continue
@@ -479,6 +557,7 @@ export function VoiceModifyTab({
         }
 
         setSpeakers(loadedSpeakers)
+        setVoiceCandidates(candidateMap)
         setDraftStates(initial)
       } catch (err) {
         if (cancelled) return
@@ -530,17 +609,29 @@ export function VoiceModifyTab({
   }, [speakers])
 
   const handleVoiceChange = useCallback((speakerId: string, voiceId: string) => {
+    // Phase 2: detect candidate match → propagate voice_reuse=true so the
+    // eventual setVoiceOverride() carries the audit flag. Picking a
+    // non-matched personal voice still counts as 'cloned' source but
+    // voiceReuse stays false (semantically "matched candidate reuse").
+    const candidates = voiceCandidates[speakerId]
+    const matchedCandidate = candidates
+      ? candidates.autoReuseVoice?.voiceId === voiceId
+        ? candidates.autoReuseVoice
+        : candidates.personalVoiceCandidates.find((c) => c.voiceId === voiceId) ?? null
+      : null
+    const isOtherPersonal =
+      !matchedCandidate && personalVoices.some((v) => v.voiceId === voiceId)
     setDraftStates((prev) => ({
       ...prev,
       [speakerId]: {
         ...prev[speakerId],
         voiceId,
-        voiceSource: "catalog",
-        voiceReuse: false,
+        voiceSource: matchedCandidate || isOtherPersonal ? "cloned" : "catalog",
+        voiceReuse: !!matchedCandidate,
       },
     }))
     setPreviewError((p) => ({ ...p, [speakerId]: null }))
-  }, [])
+  }, [voiceCandidates, personalVoices])
 
   const handleCloneComplete = useCallback((speakerId: string, voiceId: string, options?: { reused?: boolean }) => {
     setDraftStates((prev) => ({
@@ -950,6 +1041,67 @@ export function VoiceModifyTab({
                             </optgroup>
                           )
                         })()}
+                        {/* Phase 2 (plan 2026-05-17): personal-voice candidate
+                           groups, ordered above official recommendations. Only
+                           meaningful for MiniMax. Order:
+                           1) 强匹配 — auto-reuse (voice_reuse=true preselected)
+                           2) 可能匹配 — requires_user_confirmation
+                           3) 其他个人音色 — full library minus matched ones */}
+                        {(() => {
+                          if (currentProvider !== "minimax") return null
+                          const candidates = voiceCandidates[sp.speakerId]
+                          const auto = candidates?.autoReuseVoice ?? null
+                          if (!auto || expiredVoiceIds.includes(auto.voiceId)) return null
+                          return (
+                            <optgroup label="个人音色 · 强匹配 (不扣点)">
+                              <option value={auto.voiceId}>
+                                {`★ ${auto.label}${formatCandidateSourceHint(auto)}`}
+                              </option>
+                            </optgroup>
+                          )
+                        })()}
+                        {(() => {
+                          if (currentProvider !== "minimax") return null
+                          const candidates = voiceCandidates[sp.speakerId]
+                          const list = (candidates?.personalVoiceCandidates ?? [])
+                            .filter((c) => c.requiresUserConfirmation
+                              && !expiredVoiceIds.includes(c.voiceId))
+                          if (list.length === 0) return null
+                          return (
+                            <optgroup label="个人音色 · 可能匹配 (需要确认)">
+                              {list.map((c) => (
+                                <option key={`pvc-${c.voiceId}`} value={c.voiceId}>
+                                  {`${matchScopeBadge(c.matchScope)} ${c.label}${formatCandidateSourceHint(c)}`}
+                                </option>
+                              ))}
+                            </optgroup>
+                          )
+                        })()}
+                        {(() => {
+                          if (currentProvider !== "minimax") return null
+                          const candidates = voiceCandidates[sp.speakerId]
+                          const candidateIds = new Set<string>()
+                          if (candidates?.autoReuseVoice) {
+                            candidateIds.add(candidates.autoReuseVoice.voiceId)
+                          }
+                          for (const c of candidates?.personalVoiceCandidates ?? []) {
+                            candidateIds.add(c.voiceId)
+                          }
+                          const others = personalVoices.filter((v) =>
+                            !expiredVoiceIds.includes(v.voiceId)
+                            && !candidateIds.has(v.voiceId),
+                          )
+                          if (others.length === 0) return null
+                          return (
+                            <optgroup label="其他个人音色">
+                              {others.map((v) => (
+                                <option key={v.voiceId} value={v.voiceId}>
+                                  {v.label || v.voiceId}
+                                </option>
+                              ))}
+                            </optgroup>
+                          )
+                        })()}
                         {/* Smart recommendations */}
                         {(() => {
                           const provMatch = sp.autoMatchedByProvider[currentProvider]
@@ -979,19 +1131,6 @@ export function VoiceModifyTab({
                             </optgroup>
                           )
                         })()}
-                        {/* Personal voices (MiniMax only) */}
-                        {currentProvider === "minimax"
-                          && personalVoices.filter((v) => !expiredVoiceIds.includes(v.voiceId)).length > 0 && (
-                            <optgroup label="我的音色">
-                              {personalVoices
-                                .filter((v) => !expiredVoiceIds.includes(v.voiceId))
-                                .map((v) => (
-                                  <option key={v.voiceId} value={v.voiceId}>
-                                    {v.label || v.voiceId}
-                                  </option>
-                                ))}
-                            </optgroup>
-                          )}
                         {/* Catalog grouped by gender */}
                         {(() => {
                           const femaleVoices = voicesForProvider.filter((v) => v.gender === "female")
