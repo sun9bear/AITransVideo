@@ -19,6 +19,8 @@ from models import User, UserVoice
 from services.tts.voice_speed_bounds import MAX_VALID_CPS, MIN_VALID_CPS
 from user_voice_service import (
     add_user_voice,
+    auto_reuse_summary_dict,
+    candidate_to_dict,
     delete_user_voice,
     fetch_user_voice,
     list_user_voices,
@@ -145,55 +147,6 @@ def _match_to_dict(match) -> dict:
         "auto_reuse_allowed": match.auto_reuse_allowed,
         "match_scope": getattr(match, "match_scope", None),
         "voice": voice,
-    }
-
-
-def _voice_evidence_dict(voice) -> dict:
-    """Phase 1 candidate evidence — surface human-readable provenance
-    fields without leaking IDs/hashes. Used by the unified candidate
-    endpoint.
-    """
-    created_at = getattr(voice, "created_at", None)
-    return {
-        "source_video_title": getattr(voice, "source_video_title", None),
-        "source_speaker_name": getattr(voice, "source_speaker_name", None),
-        "clone_sample_seconds": getattr(voice, "clone_sample_seconds", None),
-        "created_at": created_at.isoformat() if created_at else None,
-    }
-
-
-def _candidate_to_dict(match) -> dict:
-    """Serialize a :class:`UserVoiceMatch` for the unified candidate
-    endpoint. Adds ``requires_user_confirmation`` (inverse of
-    ``auto_reuse_allowed``) and a curated ``evidence`` block."""
-    voice = match.voice
-    return {
-        "voice_id": getattr(voice, "voice_id", None),
-        "user_voice_id": str(getattr(voice, "id", "") or ""),
-        "label": getattr(voice, "label", None),
-        "confidence": match.confidence,
-        "match_scope": getattr(match, "match_scope", None),
-        "requires_user_confirmation": not match.auto_reuse_allowed,
-        "score": match.score,
-        "reason": match.reason,
-        "evidence": _voice_evidence_dict(voice),
-    }
-
-
-def _auto_reuse_summary_dict(match) -> dict:
-    """Minimal envelope describing the top strong-match auto-reuse
-    target. Mirrors the inline structure consumed by Smart's
-    pipeline path so callers don't have to peek into the full
-    candidate dict."""
-    voice = match.voice
-    return {
-        "voice_id": getattr(voice, "voice_id", None),
-        "user_voice_id": str(getattr(voice, "id", "") or ""),
-        "label": getattr(voice, "label", None),
-        "confidence": match.confidence,
-        "match_scope": getattr(match, "match_scope", None),
-        "auto_reuse_allowed": True,
-        "reason": match.reason,
     }
 
 
@@ -1045,13 +998,13 @@ async def internal_user_voice_candidates(
 
     auto_reuse_voice: dict | None = None
     if matches and matches[0].auto_reuse_allowed:
-        auto_reuse_voice = _auto_reuse_summary_dict(matches[0])
+        auto_reuse_voice = auto_reuse_summary_dict(matches[0])
 
     return _json(200, {
         "speaker_id": speaker_id,
         "source_content_hash": source_content_hash,
         "auto_reuse_voice": auto_reuse_voice,
-        "personal_voice_candidates": [_candidate_to_dict(m) for m in matches],
+        "personal_voice_candidates": [candidate_to_dict(m) for m in matches],
         # Phase 1: official voice picker integration is Phase 2 territory.
         "official_voice_candidates": [],
     })

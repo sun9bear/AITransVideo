@@ -142,10 +142,17 @@ def is_generic_speaker_name_key(key: str | None) -> bool:
     - Length < 2 chars.
     - Single ASCII letter or pure-digit names.
     - "<role>[ _]<digits>" pattern (e.g. ``speaker_1``, ``话者 2``).
+
+    Whitespace-only input is treated like ``None`` and returns
+    ``False``: it carries no information about whether the speaker is
+    a placeholder, so the cross-source filter should not artificially
+    flip to generic on what is effectively a missing value.
     """
     if not key:
         return False
     k = key.strip()
+    if not k:
+        return False
     if len(k) < 2:
         return True
     if _SINGLE_ASCII_RE.match(k):
@@ -260,7 +267,19 @@ def _score_user_voice_match(
         )
 
     voice_name_key = _clean_optional_text(getattr(voice, "source_speaker_name_key", None))
-    if source_speaker_name_key and voice_name_key and voice_name_key == source_speaker_name_key:
+    # Plan §匹配等级 §same_source_named (line 124) requires the speaker
+    # name to NOT be a generic placeholder. Without this filter a
+    # job whose speaker is labelled "Speaker A" would mass-collide
+    # against every other "Speaker A" the user has cloned, blurring
+    # the auto-vs-confirm boundary the candidate UX depends on. Fall
+    # through to the weak ``same_source_speaker_id_changed`` branch
+    # below — that one is honest about its low confidence.
+    if (
+        source_speaker_name_key
+        and voice_name_key
+        and voice_name_key == source_speaker_name_key
+        and not is_generic_speaker_name_key(source_speaker_name_key)
+    ):
         return UserVoiceMatch(
             voice=voice,
             confidence="medium",
@@ -309,6 +328,68 @@ def _score_cross_source_match(
         score=20,
         match_scope="cross_source_named_person",
     )
+
+
+def voice_evidence_dict(voice) -> dict:
+    """Curated provenance fields for the candidate UI.
+
+    Surface human-readable fields only — never IDs / hashes — so the
+    candidate widget can render "what you cloned from" without leaking
+    cross-row identifiers. Shared between the internal
+    ``/api/internal/user-voices/candidates`` and public
+    ``/job-api/jobs/{id}/voice-candidates`` endpoints.
+    """
+    created_at = getattr(voice, "created_at", None)
+    return {
+        "source_video_title": getattr(voice, "source_video_title", None),
+        "source_speaker_name": getattr(voice, "source_speaker_name", None),
+        "clone_sample_seconds": getattr(voice, "clone_sample_seconds", None),
+        "created_at": created_at.isoformat() if created_at else None,
+    }
+
+
+def candidate_to_dict(match: "UserVoiceMatch") -> dict:
+    """Serialize a :class:`UserVoiceMatch` for the Phase 1 unified
+    candidate envelope.
+
+    Output shape mirrors what both the internal candidate route and
+    the public Studio/Post-edit ``voice-candidates`` route emit —
+    they share this helper so the two never drift.
+
+    Includes ``requires_user_confirmation`` (inverse of
+    ``auto_reuse_allowed``) and the curated ``evidence`` block from
+    :func:`voice_evidence_dict`.
+    """
+    voice = match.voice
+    return {
+        "voice_id": getattr(voice, "voice_id", None),
+        "user_voice_id": str(getattr(voice, "id", "") or ""),
+        "label": getattr(voice, "label", None),
+        "confidence": match.confidence,
+        "match_scope": getattr(match, "match_scope", None),
+        "requires_user_confirmation": not match.auto_reuse_allowed,
+        "score": match.score,
+        "reason": match.reason,
+        "evidence": voice_evidence_dict(voice),
+    }
+
+
+def auto_reuse_summary_dict(match: "UserVoiceMatch") -> dict:
+    """Minimal envelope describing the top strong-match auto-reuse
+    target. Mirrors the inline structure consumed by Smart's
+    pipeline path so callers don't have to peek into the full
+    candidate dict. Shared by the internal + public candidate
+    endpoints."""
+    voice = match.voice
+    return {
+        "voice_id": getattr(voice, "voice_id", None),
+        "user_voice_id": str(getattr(voice, "id", "") or ""),
+        "label": getattr(voice, "label", None),
+        "confidence": match.confidence,
+        "match_scope": getattr(match, "match_scope", None),
+        "auto_reuse_allowed": True,
+        "reason": match.reason,
+    }
 
 
 async def match_user_voices(

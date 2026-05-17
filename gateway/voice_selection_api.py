@@ -21,6 +21,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth import require_auth
 from config import settings
+from user_voice_service import (
+    auto_reuse_summary_dict,
+    candidate_to_dict,
+)
 from credits_service import (
     InsufficientCreditsError,
     ensure_credit_buckets_for_user,
@@ -95,48 +99,6 @@ def _match_to_dict(match) -> dict:
         "auto_reuse_allowed": match.auto_reuse_allowed,
         "match_scope": getattr(match, "match_scope", None),
         "voice": _user_voice_to_dict(match.voice),
-    }
-
-
-def _voice_evidence_dict(voice) -> dict:
-    """Curated provenance fields for candidate UI — never leaks IDs/hashes."""
-    created_at = getattr(voice, "created_at", None)
-    return {
-        "source_video_title": getattr(voice, "source_video_title", None),
-        "source_speaker_name": getattr(voice, "source_speaker_name", None),
-        "clone_sample_seconds": getattr(voice, "clone_sample_seconds", None),
-        "created_at": created_at.isoformat() if created_at else None,
-    }
-
-
-def _candidate_to_dict(match) -> dict:
-    """Phase 1 candidate envelope item — mirrors
-    ``user_voice_api._candidate_to_dict`` so the public and internal
-    routes stay schema-compatible."""
-    voice = match.voice
-    return {
-        "voice_id": getattr(voice, "voice_id", None),
-        "user_voice_id": str(getattr(voice, "id", "") or ""),
-        "label": getattr(voice, "label", None),
-        "confidence": match.confidence,
-        "match_scope": getattr(match, "match_scope", None),
-        "requires_user_confirmation": not match.auto_reuse_allowed,
-        "score": match.score,
-        "reason": match.reason,
-        "evidence": _voice_evidence_dict(voice),
-    }
-
-
-def _auto_reuse_summary_dict(match) -> dict:
-    voice = match.voice
-    return {
-        "voice_id": getattr(voice, "voice_id", None),
-        "user_voice_id": str(getattr(voice, "id", "") or ""),
-        "label": getattr(voice, "label", None),
-        "confidence": match.confidence,
-        "match_scope": getattr(match, "match_scope", None),
-        "auto_reuse_allowed": True,
-        "reason": match.reason,
     }
 
 
@@ -566,13 +528,13 @@ async def voice_candidates_for_selection(
 
     auto_reuse_voice = None
     if matches and matches[0].auto_reuse_allowed:
-        auto_reuse_voice = _auto_reuse_summary_dict(matches[0])
+        auto_reuse_voice = auto_reuse_summary_dict(matches[0])
 
     return _json_response(200, {
         "speaker_id": speaker_id,
         "source_content_hash": source_content_hash,
         "auto_reuse_voice": auto_reuse_voice,
-        "personal_voice_candidates": [_candidate_to_dict(match) for match in matches],
+        "personal_voice_candidates": [candidate_to_dict(match) for match in matches],
         # Phase 1: official voice picker integration is Phase 2 territory.
         "official_voice_candidates": [],
     })

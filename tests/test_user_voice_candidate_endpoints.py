@@ -9,15 +9,21 @@ These tests pin:
   strong matches and ``personal_voice_candidates`` for any match.
 - ``official_voice_candidates`` is always returned (empty in Phase 1).
 - ``include_cross_source=True`` flag is honoured.
+- The public ``POST /job-api/jobs/{id}/voice-candidates`` handler
+  validates speaker_id, returns 404 for unknown jobs, and emits the
+  empty envelope when the job lacks a ``source_content_hash``.
 
 Endpoint logic is exercised by calling the handler function directly
 with mocked dependencies — same pattern as
-``test_smart_user_voice_quota_endpoint.py``.
+``test_smart_user_voice_quota_endpoint.py`` /
+``test_voice_selection_clone_lock.TestVoiceMatchEndpoint``.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
+import types
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -29,6 +35,16 @@ _REPO = Path(__file__).resolve().parents[1]
 _GATEWAY = _REPO / "gateway"
 if str(_GATEWAY) not in sys.path:
     sys.path.insert(0, str(_GATEWAY))
+
+# voice_selection_api imports database.get_db at module import time —
+# stub it the same way test_voice_selection_clone_lock does so the
+# public-endpoint tests below can import the module under test without
+# pulling in the real DB engine.
+_fake_database = types.ModuleType("database")
+_fake_database.get_db = MagicMock()
+_fake_database.engine = MagicMock()
+_fake_database.async_session = MagicMock()
+sys.modules.setdefault("database", _fake_database)
 
 
 class TestCandidatesEndpointRegistration:
@@ -266,3 +282,140 @@ class TestInternalCandidatesEndpoint:
             db=MagicMock(),
         )
         assert resp.status_code == 403
+
+
+def _make_public_request(body: dict) -> MagicMock:
+    request = MagicMock()
+    request.body = AsyncMock(return_value=json.dumps(body, ensure_ascii=False).encode("utf-8"))
+    return request
+
+
+def _make_public_db(job: object | None) -> AsyncMock:
+    db = AsyncMock()
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = job
+    db.execute = AsyncMock(return_value=result)
+    return db
+
+
+def _run_public(coro):
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+class TestPublicVoiceCandidatesEndpoint:
+    """Smoke tests for the public-router counterpart in
+    ``voice_selection_api.voice_candidates_for_selection``.
+
+    Mirrors the pattern from
+    ``tests/test_voice_selection_clone_lock.TestVoiceMatchEndpoint``
+    — handlers are invoked directly with mocked DB / auth so we can
+    exercise the request-validation and envelope-shape contracts
+    without spinning up FastAPI."""
+
+    def test_public_endpoint_rejects_invalid_speaker_id(self, monkeypatch) -> None:
+        """``speaker_id`` must match ``_SPEAKER_ID_RE`` — anything else
+        (e.g. ``speaker-A`` with a hyphen) is rejected with 400 +
+        ``error="invalid_speaker_id"`` before the matcher is touched."""
+        import voice_selection_api
+
+        user = SimpleNamespace(id="user-1")
+        job = SimpleNamespace(
+            job_id="job-bad-spk",
+            user_id="user-1",
+            source_content_hash="youtube:abc",
+        )
+        db = _make_public_db(job)
+        request = _make_public_request({"speaker_id": "speaker-A"})
+
+        # If the matcher were to run, this would loudly fail — we want
+        # to assert the handler never reaches it for an invalid
+        # speaker_id.
+        matcher = AsyncMock(return_value=[])
+        monkeypatch.setattr("user_voice_service.match_user_voices", matcher)
+        monkeypatch.setattr(voice_selection_api.settings, "auth_required", False)
+
+        response = _run_public(
+            voice_selection_api.voice_candidates_for_selection(
+                request, "job-bad-spk", db, user,
+            )
+        )
+        body = json.loads(response.body.decode("utf-8"))
+
+        assert response.status_code == 400
+        assert body["error"] == "invalid_speaker_id"
+        matcher.assert_not_awaited()
+
+    def test_public_endpoint_returns_404_for_unknown_job(self, monkeypatch) -> None:
+        """When ``_verify_job_ownership`` returns ``None`` (job_id not
+        found), the public endpoint responds 404 +
+        ``error="job_not_found"`` and never queries voice candidates."""
+        import voice_selection_api
+
+        user = SimpleNamespace(id="user-1")
+        db = _make_public_db(None)  # no Job row
+        request = _make_public_request({"speaker_id": "speaker_a"})
+
+        matcher = AsyncMock(return_value=[])
+        monkeypatch.setattr("user_voice_service.match_user_voices", matcher)
+        monkeypatch.setattr(voice_selection_api.settings, "auth_required", False)
+
+        response = _run_public(
+            voice_selection_api.voice_candidates_for_selection(
+                request, "job-missing", db, user,
+            )
+        )
+        body = json.loads(response.body.decode("utf-8"))
+
+        assert response.status_code == 404
+        assert body["error"] == "job_not_found"
+        matcher.assert_not_awaited()
+
+    def test_public_endpoint_returns_empty_envelope_when_job_has_no_source_content_hash(
+        self, monkeypatch,
+    ) -> None:
+        """A job with ``source_content_hash=None`` and no
+        ``speaker_name`` in the body produces an empty candidate
+        envelope (no same-source candidates, no cross-source
+        candidates) but still 200 with the canonical Phase 1 shape.
+        """
+        import voice_selection_api
+
+        user = SimpleNamespace(id="user-1")
+        job = SimpleNamespace(
+            job_id="job-no-hash",
+            user_id="user-1",
+            source_content_hash=None,
+        )
+        db = _make_public_db(job)
+        request = _make_public_request({"speaker_id": "speaker_a"})
+
+        matcher = AsyncMock(return_value=[])
+        monkeypatch.setattr("user_voice_service.match_user_voices", matcher)
+        monkeypatch.setattr(voice_selection_api.settings, "auth_required", False)
+
+        response = _run_public(
+            voice_selection_api.voice_candidates_for_selection(
+                request, "job-no-hash", db, user,
+            )
+        )
+        body = json.loads(response.body.decode("utf-8"))
+
+        assert response.status_code == 200
+        # Canonical Phase 1 envelope shape, even on the empty path:
+        assert body["speaker_id"] == "speaker_a"
+        assert body["source_content_hash"] is None
+        assert body["auto_reuse_voice"] is None
+        assert body["personal_voice_candidates"] == []
+        assert body["official_voice_candidates"] == []
+        # The matcher is called once with source_content_hash=None —
+        # the handler delegates the "missing hash" decision to
+        # ``match_user_voices`` rather than short-circuiting itself,
+        # since include_cross_source=True can still produce candidates
+        # via name match (per the no-hash cross-source unit test).
+        matcher.assert_awaited_once()
+        kwargs = matcher.await_args.kwargs
+        assert kwargs["source_content_hash"] is None

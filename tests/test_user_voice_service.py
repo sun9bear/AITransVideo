@@ -413,6 +413,9 @@ def test_is_generic_speaker_name_key_filters_placeholder_names():
     # None / empty pass-through: caller may pass a DB-nullable column directly.
     assert is_generic_speaker_name_key(None) is False
     assert is_generic_speaker_name_key("") is False
+    # Whitespace-only carries no info — same semantics as None/"".
+    assert is_generic_speaker_name_key("   ") is False
+    assert is_generic_speaker_name_key("\t") is False
 
 
 def test_match_user_voices_same_source_strong_auto_reuse():
@@ -462,6 +465,47 @@ def test_match_user_voices_same_source_named_requires_confirmation():
     assert m.confidence == "medium"
     assert m.match_scope == "same_source_named"
     assert m.auto_reuse_allowed is False
+
+
+def test_match_user_voices_same_source_named_skips_generic_names():
+    """Plan §匹配等级 §same_source_named (line 124) requires the
+    speaker name to NOT be a generic placeholder. A same-source
+    voice whose speaker_name_key normalises to ``speaker a`` (or any
+    other entry in :func:`is_generic_speaker_name_key`'s blacklist)
+    must NOT surface as a medium ``same_source_named`` candidate —
+    it should fall through to ``same_source_speaker_id_changed`` if
+    applicable, or to no match otherwise.
+    """
+    from user_voice_service import match_user_voices
+
+    # Same source_content_hash, same speaker_name_key ("speaker a"
+    # generic), different speaker_id. Caller passes no
+    # source_speaker_id so the speaker_id-changed weak branch can't
+    # trigger either — this isolates the generic-name skip.
+    matches = _run(
+        match_user_voices(
+            _fake_match_db([
+                _voice(
+                    "vt_generic_named",
+                    source_speaker_id="speaker_b",
+                    source_speaker_name_key="speaker a",
+                ),
+            ]),
+            user_id="user-1",
+            source_content_hash="youtube:abc",
+            source_speaker_id=None,
+            source_speaker_name="Speaker A",
+            provider="minimax_voice_clone",
+            tts_provider="minimax_tts",
+            platform="minimax_domestic",
+        )
+    )
+
+    # No candidate should claim ``same_source_named`` — the generic
+    # name filter blocks the medium branch.
+    assert not any(m.match_scope == "same_source_named" for m in matches), (
+        f"generic speaker name slipped into same_source_named: {matches}"
+    )
 
 
 def test_match_user_voices_same_source_speaker_id_changed_match_scope():
