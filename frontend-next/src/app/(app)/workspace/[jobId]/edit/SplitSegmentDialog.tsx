@@ -1,23 +1,26 @@
 "use client"
 
 /**
- * SplitSegmentDialog — Phase 2a (multi-cut).
+ * SplitSegmentDialog — Phase 2a (multi-cut) + Phase 2b (smart prefill).
  *
  * User picks 1..N cuts in source text; CN cuts auto-mirror proportionally.
  * Each resulting piece gets a speaker assignment.
  *
  * Plan refs:
  *   - §5 modal structure
+ *   - §5.4 smart prefill via word-context endpoint (Phase 2b)
  *   - §5.6 backend split_editing_segment_many + write-ahead journal
- *   - §6.4 close (Phase 1 single-cut hint removed)
  *
- * Backend endpoint (POST /jobs/{id}/segments/{sid}/split-many) wraps
- * atomic 3-file rename in a write-ahead journal; this dialog only
- * collects the user's intent.
+ * Backend endpoints:
+ *   - GET  /jobs/{id}/segments/{sid}/word-context — word-level timing
+ *     data; used at open time to compute suggested cuts (speaker label
+ *     changes + Chinese punctuation). Phase 2b.
+ *   - POST /jobs/{id}/segments/{sid}/split-many — atomic 3-file rename
+ *     wrapped in a write-ahead journal. Phase 2a.
  */
 
 import { useEffect, useMemo, useRef, useState } from "react"
-import { Loader2, RotateCcw, Plus, X } from "lucide-react"
+import { Loader2, RotateCcw, Plus, Sparkles, X } from "lucide-react"
 import {
   Dialog,
   DialogContent,
@@ -26,10 +29,16 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
-import type { EditingSegment } from "@/lib/api/editing"
+import {
+  getSegmentWordContext,
+  type EditingSegment,
+  type WordContextWord,
+} from "@/lib/api/editing"
 
 export interface SplitSegmentDialogProps {
   open: boolean
+  /** Job id needed to fetch word-context (Phase 2b smart prefill). */
+  jobId: string
   segment: EditingSegment | null
   availableSpeakerIds: string[]
   speakerNameMap: Record<string, string>
@@ -43,6 +52,211 @@ export interface SplitSegmentDialogProps {
       speaker_ids: string[]
     },
   ): Promise<void> | void
+}
+
+// ---------- Phase 2b: smart prefill helpers ----------
+
+interface SuggestedSplit {
+  cuts: Array<{ source_index: number; cn_index: number }>
+  speakerIds: string[]
+  speakerChanges: number    // # detected speaker-boundary candidates
+  punctuationCuts: number   // # detected CN punctuation candidates
+}
+
+/** Find the char index in `sourceText` AFTER each word. Best-effort
+ *  match: case-insensitive search forward from current cursor. Falls
+ *  back to cursor += len when not found. Returns parallel array of
+ *  char-end positions, one per word. */
+function mapWordsToSourceChars(
+  sourceText: string,
+  words: ReadonlyArray<{ text: string }>,
+): number[] {
+  const result: number[] = []
+  const lower = sourceText.toLowerCase()
+  let cursor = 0
+  for (const w of words) {
+    const wordText = w.text.trim()
+    if (!wordText) {
+      result.push(cursor)
+      continue
+    }
+    const lowerWord = wordText.toLowerCase()
+    // Search slightly behind cursor to handle minor mismatches (e.g.
+    // punctuation appended by ASR).
+    const searchFrom = Math.max(0, cursor - 5)
+    const pos = lower.indexOf(lowerWord, searchFrom)
+    if (pos >= 0) {
+      cursor = pos + lowerWord.length
+    } else {
+      // Best-effort: assume the ASR text consumed `len + 1` chars
+      // (space). Drift propagates but bounded.
+      cursor += lowerWord.length + 1
+    }
+    result.push(Math.min(cursor, sourceText.length))
+  }
+  return result
+}
+
+/** Detect suggested split positions (plan §5.4 step 2-3 + dedup at
+ *  200ms + cap 5). Source positions are snapped to word boundaries
+ *  via snapSourceCutToWord (already prevents mid-word cuts). CN
+ *  positions auto-mirror proportionally. */
+function detectSuggestedSplits(params: {
+  sourceText: string
+  cnText: string
+  words: ReadonlyArray<{ text: string; start: number; end: number; speaker: string | null }>
+  segmentStartMs: number
+  segmentEndMs: number
+  segmentSpeakerId: string | null
+  availableSpeakerIds: string[]
+}): SuggestedSplit {
+  const {
+    sourceText,
+    cnText,
+    words,
+    segmentStartMs,
+    segmentEndMs,
+    segmentSpeakerId,
+    availableSpeakerIds,
+  } = params
+
+  if (words.length === 0 || sourceText.length === 0) {
+    return { cuts: [], speakerIds: [], speakerChanges: 0, punctuationCuts: 0 }
+  }
+
+  // 1. Speaker change candidates — boundary between word[i-1] and word[i]
+  //    where their speaker labels differ. Cut time = midpoint of the gap.
+  const speakerCutMs: number[] = []
+  for (let i = 1; i < words.length; i++) {
+    const prev = words[i - 1].speaker
+    const cur = words[i].speaker
+    if (prev && cur && prev !== cur) {
+      speakerCutMs.push(Math.floor((words[i - 1].end + words[i].start) / 2))
+    }
+  }
+  const speakerChangesCount = speakerCutMs.length
+
+  // 2. Chinese punctuation candidates. Cut AFTER each punctuation char.
+  const punctRegex = /[。！？]/g
+  const cnPunctCuts: number[] = []
+  let m: RegExpExecArray | null
+  while ((m = punctRegex.exec(cnText)) !== null) {
+    const idx = m.index + 1
+    if (idx > 0 && idx < cnText.length) {
+      cnPunctCuts.push(idx)
+    }
+  }
+  const punctuationCutsCount = cnPunctCuts.length
+
+  // Map CN punctuation positions → estimated ms via proportional
+  // ratio over the segment's time window.
+  const segmentDuration = Math.max(1, segmentEndMs - segmentStartMs)
+  const punctCutMs: number[] = cnPunctCuts.map((cnIdx) =>
+    segmentStartMs + Math.floor((cnIdx / Math.max(1, cnText.length)) * segmentDuration),
+  )
+
+  // 3. Combine + sort + dedupe (200ms tolerance, plan §5.4 step 4).
+  const allCutMs = [...speakerCutMs, ...punctCutMs].sort((a, b) => a - b)
+  const deduped: number[] = []
+  for (const ms of allCutMs) {
+    if (deduped.length === 0 || (ms - deduped[deduped.length - 1]) > 200) {
+      deduped.push(ms)
+    }
+  }
+
+  // 4. Cap at 5 cuts (plan §5.4 step 5).
+  const cappedMs = deduped.slice(0, 5)
+  if (cappedMs.length === 0) {
+    return {
+      cuts: [],
+      speakerIds: [],
+      speakerChanges: speakerChangesCount,
+      punctuationCuts: punctuationCutsCount,
+    }
+  }
+
+  // 5. Convert each cut ms → source char index via the words→chars map.
+  const charEnds = mapWordsToSourceChars(sourceText, words)
+  const cuts: Array<{ source_index: number; cn_index: number }> = []
+  for (const cutMs of cappedMs) {
+    // Find last word that ends at or before this cut ms.
+    let lastBeforeIdx = -1
+    for (let i = 0; i < words.length; i++) {
+      if (words[i].end <= cutMs) {
+        lastBeforeIdx = i
+      } else {
+        break
+      }
+    }
+    if (lastBeforeIdx < 0) continue
+    const rawSourceIdx = charEnds[lastBeforeIdx]
+    const snappedSource = snapSourceCutToWord(sourceText, rawSourceIdx)
+    if (snappedSource <= 0 || snappedSource >= sourceText.length) continue
+    // De-dup against previously accepted cuts.
+    if (cuts.some((c) => c.source_index === snappedSource)) continue
+    const cnRatio = sourceText.length > 0 ? snappedSource / sourceText.length : 0.5
+    const cnIdx = Math.max(1, Math.min(Math.round(cnRatio * cnText.length), cnText.length - 1))
+    cuts.push({ source_index: snappedSource, cn_index: cnIdx })
+  }
+  cuts.sort((a, b) => a.source_index - b.source_index)
+
+  // 6. Assign speaker per piece (plan §5.4 step 6).
+  //    Heuristic: word[0].speaker is the segment's main ASR speaker.
+  //    For each piece, find its dominant ASR speaker. Same as main →
+  //    segment.speaker_id. Different → first OTHER availableSpeakerId.
+  const segMainAsr = words[0]?.speaker ?? null
+  const otherSpeaker =
+    availableSpeakerIds.find((sid) => sid !== segmentSpeakerId)
+    ?? segmentSpeakerId
+    ?? availableSpeakerIds[0]
+    ?? ""
+
+  const pieceBoundariesMs = [segmentStartMs]
+  for (const cut of cuts) {
+    // Approximate cut ms via source ratio (good enough for dominant-speaker check)
+    const r = sourceText.length > 0 ? cut.source_index / sourceText.length : 0.5
+    pieceBoundariesMs.push(segmentStartMs + Math.floor(r * segmentDuration))
+  }
+  pieceBoundariesMs.push(segmentEndMs)
+
+  const speakerIds: string[] = []
+  for (let p = 0; p < pieceBoundariesMs.length - 1; p++) {
+    const pStart = pieceBoundariesMs[p]
+    const pEnd = pieceBoundariesMs[p + 1]
+    const wordsInPiece = words.filter(
+      (w) => w.start >= pStart && w.end <= pEnd && w.speaker,
+    )
+    if (wordsInPiece.length === 0) {
+      speakerIds.push(segmentSpeakerId ?? otherSpeaker)
+      continue
+    }
+    // Dominant ASR speaker
+    const counts = new Map<string, number>()
+    for (const w of wordsInPiece) {
+      const sp = w.speaker as string
+      counts.set(sp, (counts.get(sp) ?? 0) + 1)
+    }
+    let bestAsr = ""
+    let bestN = 0
+    for (const [sp, n] of counts) {
+      if (n > bestN) {
+        bestN = n
+        bestAsr = sp
+      }
+    }
+    if (bestAsr === segMainAsr) {
+      speakerIds.push(segmentSpeakerId ?? otherSpeaker)
+    } else {
+      speakerIds.push(otherSpeaker || segmentSpeakerId || "")
+    }
+  }
+
+  return {
+    cuts,
+    speakerIds,
+    speakerChanges: speakerChangesCount,
+    punctuationCuts: punctuationCutsCount,
+  }
 }
 
 /** Snap a source-text cut position to the nearest word boundary.
@@ -258,6 +472,7 @@ function CutTextBlockMulti({
 
 export function SplitSegmentDialog({
   open,
+  jobId,
   segment,
   availableSpeakerIds,
   speakerNameMap,
@@ -273,6 +488,15 @@ export function SplitSegmentDialog({
   const [speakerIds, setSpeakerIds] = useState<string[]>([])
   const [isSubmitting, setIsSubmitting] = useState(false)
 
+  // Phase 2b smart prefill state.
+  const [isPrefilling, setIsPrefilling] = useState(false)
+  const [prefillResult, setPrefillResult] = useState<{
+    applied: boolean
+    speakerChanges: number
+    punctuationCuts: number
+    contextAvailable: boolean
+  } | null>(null)
+
   // Re-seed when a new segment opens: start with one cut at midpoint.
   useEffect(() => {
     if (!segment || !open) return
@@ -285,7 +509,69 @@ export function SplitSegmentDialog({
       segment.speaker_id ?? fallback,
     ])
     setIsSubmitting(false)
+    setPrefillResult(null)
   }, [segment, open, sourceText.length, cnText.length, availableSpeakerIds])
+
+  // Phase 2b: on open, lazy-load word-context + apply smart prefill.
+  // Runs after the seed effect; cancels via cancelled flag if segment/
+  // dialog state changes mid-flight.
+  useEffect(() => {
+    if (!segment || !open) return
+    let cancelled = false
+    setIsPrefilling(true)
+    ;(async () => {
+      try {
+        const ctx = await getSegmentWordContext(jobId, segment.segment_id)
+        if (cancelled) return
+        if (!ctx.available || ctx.words.length === 0) {
+          setPrefillResult({
+            applied: false,
+            speakerChanges: 0,
+            punctuationCuts: 0,
+            contextAvailable: false,
+          })
+          return
+        }
+        const startMs = typeof segment.start_ms === "number" ? segment.start_ms : 0
+        const endMs = typeof segment.end_ms === "number" ? segment.end_ms : startMs + 1
+        const result = detectSuggestedSplits({
+          sourceText,
+          cnText,
+          words: ctx.words as WordContextWord[],
+          segmentStartMs: startMs,
+          segmentEndMs: endMs,
+          segmentSpeakerId: segment.speaker_id ?? null,
+          availableSpeakerIds,
+        })
+        if (cancelled) return
+        if (result.cuts.length > 0) {
+          setCuts(result.cuts)
+          setSpeakerIds(result.speakerIds)
+        }
+        setPrefillResult({
+          applied: result.cuts.length > 0,
+          speakerChanges: result.speakerChanges,
+          punctuationCuts: result.punctuationCuts,
+          contextAvailable: true,
+        })
+      } catch {
+        // Best-effort: leave the mid-point default if context fetch fails.
+        if (!cancelled) {
+          setPrefillResult({
+            applied: false,
+            speakerChanges: 0,
+            punctuationCuts: 0,
+            contextAvailable: false,
+          })
+        }
+      } finally {
+        if (!cancelled) setIsPrefilling(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [jobId, segment, open, sourceText, cnText, availableSpeakerIds])
 
   const speakerLabel = (sid: string): string => speakerNameMap[sid] || sid
 
@@ -515,6 +801,27 @@ export function SplitSegmentDialog({
           <p className="text-sm text-muted-foreground">无选中段落</p>
         ) : (
           <div className="space-y-4">
+            {/* Phase 2b smart prefill banner */}
+            {isPrefilling ? (
+              <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground inline-flex items-center gap-2">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                正在分析说话人 / 标点切点…
+              </div>
+            ) : prefillResult && (prefillResult.applied || prefillResult.contextAvailable) ? (
+              <div
+                className={
+                  prefillResult.applied
+                    ? "rounded-md border border-[color:var(--ochre)]/40 bg-[color:var(--ochre)]/8 px-3 py-2 text-[11px] text-[color:var(--ochre)] inline-flex items-center gap-2"
+                    : "rounded-md border border-border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground inline-flex items-center gap-2"
+                }
+              >
+                <Sparkles className="h-3 w-3" />
+                {prefillResult.applied
+                  ? `智能预填：检测到 ${prefillResult.speakerChanges} 个说话人切点 + ${prefillResult.punctuationCuts} 个标点切点；可手动调整或重置`
+                  : "无明显切点（已用中点预设；点文字位置可手动加切点）"}
+              </div>
+            ) : null}
+
             {/* Source (English) — click chars to add cuts, × on a bar to remove */}
             <div className="space-y-2">
               <div className="flex items-center justify-between text-xs">

@@ -49,6 +49,7 @@ __all__ = [
     "compute_residual_segment_status",
     "load_editing_segments",
     "load_segment_status",
+    "load_segment_word_context",
     "patch_editing_segment",
     "revert_text_changes_to_audio_baseline",
     "split_editing_segment",
@@ -1758,6 +1759,96 @@ def _apply_split_journal(
         f"all_subs_present={all_subs_present}. "
         f"Operator must reconcile manually."
     )
+
+
+# ---------------------------------------------------------------------------
+# load_segment_word_context — Phase 2b read-only data source for smart
+# split-prefill in the frontend modal (plan 2026-05-17 §5.4).
+#
+# Returns word-level timing + speaker labels for words within the given
+# segment's [start_ms, end_ms]. Schema-trimmed to {text, start, end,
+# speaker} — frontend doesn't need confidence / channel. The full
+# raw_assemblyai.json may be 5-50 MB; this endpoint clips to the segment
+# range so the wire payload stays small (~50 words × 80 bytes typical).
+#
+# Used by GET /jobs/{id}/segments/{sid}/word-context. Read-only; routes
+# through the gateway's generic proxy (Codex round 5 P2 #1 decision
+# documented in plan §8.2 step 5).
+# ---------------------------------------------------------------------------
+
+
+def load_segment_word_context(
+    project_dir: str | Path,
+    segment_id: str,
+) -> dict[str, Any]:
+    """Phase 2b: word-level data for one segment's time range.
+
+    Returns:
+        {
+          "segment_id": str,
+          "words": list of {text, start, end, speaker} dicts,
+          "available": bool — False when transcript/raw_*.json is missing,
+        }
+
+    Raises:
+        EditingConflictError: segment_id not found in editing/segments.json.
+    """
+    validate_segment_id(segment_id)
+    # Raw read — reconcile not needed for this read-only data view.
+    segments = _read_segments_json_raw(project_dir)
+    seg: dict[str, Any] | None = None
+    for s in segments:
+        if isinstance(s, dict) and str(s.get("segment_id")) == segment_id:
+            seg = s
+            break
+    if seg is None:
+        raise EditingConflictError(
+            f"segment_id {segment_id!r} not found in editing/segments.json"
+        )
+    start_ms = int(seg.get("start_ms", 0) or 0)
+    end_ms = int(seg.get("end_ms", start_ms) or start_ms)
+
+    words_all = _load_split_words_data(project_dir)
+    if not words_all:
+        return {
+            "segment_id": segment_id,
+            "words": [],
+            "available": False,
+        }
+
+    filtered: list[dict[str, Any]] = []
+    for w in words_all:
+        if not isinstance(w, dict):
+            continue
+        try:
+            w_start = int(w.get("start", 0) or 0)
+            w_end = int(w.get("end", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if w_start >= start_ms and w_end <= end_ms:
+            filtered.append({
+                "text": str(w.get("text", "")),
+                "start": w_start,
+                "end": w_end,
+                "speaker": w.get("speaker"),
+            })
+
+    # Safety cap. 30s segment typically has ~50 words; 1000 covers any
+    # plausible single-segment edge case while keeping payload well
+    # under 500 KB.
+    cap = 1000
+    if len(filtered) > cap:
+        logger.warning(
+            "word-context: %d words for segment %s; capping to %d",
+            len(filtered), segment_id, cap,
+        )
+        filtered = filtered[:cap]
+
+    return {
+        "segment_id": segment_id,
+        "words": filtered,
+        "available": True,
+    }
 
 
 # ---------------------------------------------------------------------------

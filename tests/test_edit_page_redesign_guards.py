@@ -234,6 +234,35 @@ def test_split_dialog_supports_multi_cut_phase_2a():
     assert "speaker_ids" in text, "Submit body must carry speaker_ids array"
 
 
+def test_split_dialog_phase_2b_smart_prefill():
+    """Phase 2b: dialog must lazy-load word-context on open + run
+    detectSuggestedSplits. Banner shown when prefill applied or no
+    context available."""
+    dialog_path = EDIT_DIR / "SplitSegmentDialog.tsx"
+    text = dialog_path.read_text(encoding="utf-8")
+    assert "getSegmentWordContext" in text, (
+        "SplitSegmentDialog must call getSegmentWordContext (Phase 2b smart prefill)"
+    )
+    assert "detectSuggestedSplits" in text, (
+        "SplitSegmentDialog must implement detectSuggestedSplits heuristic"
+    )
+    assert "智能预填" in text, "Smart prefill banner copy missing"
+    # Prop sig must accept jobId for the API call
+    assert re.search(r"jobId\s*:\s*string", text), (
+        "SplitSegmentDialog must accept jobId prop for word-context fetch"
+    )
+
+
+def test_page_passes_job_id_to_split_dialog():
+    """page.tsx must pass jobId to <SplitSegmentDialog> (Phase 2b)."""
+    text = EDIT_PAGE.read_text(encoding="utf-8")
+    assert re.search(
+        r"<SplitSegmentDialog[^/]*jobId=\{jobId\}",
+        text,
+        re.DOTALL,
+    ), "page.tsx must pass jobId to SplitSegmentDialog"
+
+
 def test_page_uses_split_many_api():
     """page.tsx must import + call splitEditingSegmentMany for Phase 2a
     (the dialog submits multi-cut payload; old splitEditingSegment is

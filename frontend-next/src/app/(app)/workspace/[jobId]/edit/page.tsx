@@ -1443,6 +1443,7 @@ export default function VideoEditPage() {
 
       <SplitSegmentDialog
         open={splitDialogSegmentId !== null}
+        jobId={jobId}
         segment={
           splitDialogSegmentId
             ? resource.segments.find((s) => s.segment_id === splitDialogSegmentId) ?? null
