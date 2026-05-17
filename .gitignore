@@ -72,3 +72,4 @@ npm-debug.log*
 .tmp-job-api-debug/
 build/
 .gitnexus
+.superpowers/
