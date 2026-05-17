@@ -144,30 +144,89 @@ def test_segment_row_responsive_grid():
     )
 
 
+def _extract_split_button_disabled_clause(text: str) -> str:
+    """Find the JSX block for the split button and return its disabled={...} body.
+
+    Locates `onClick={() => onSplit(...)` in the source, then scans forward
+    a small window (≤ 600 chars) for the matching `disabled={` and returns
+    the brace-balanced expression inside. Raises AssertionError with a
+    debug excerpt if either landmark is missing.
+    """
+    onclick_match = re.search(r"onClick=\{[^}]*onSplit\(", text)
+    assert onclick_match, "no onClick={... onSplit(...} found in source"
+    # Search within the next ~600 chars (covers the typical Button JSX block)
+    window = text[onclick_match.start() : onclick_match.start() + 800]
+    dis_match = re.search(r"disabled=\{", window)
+    assert dis_match, f"split button missing disabled={{...}} clause:\n{window[:400]}"
+    # Brace-balanced capture starting at the `{` after `disabled=`
+    body_start = dis_match.end()
+    depth = 1
+    i = body_start
+    while i < len(window) and depth > 0:
+        c = window[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+        i += 1
+    assert depth == 0, "unbalanced braces inside disabled={...}"
+    return window[body_start : i - 1]
+
+
 def test_segment_row_disables_split_during_regen():
-    """Codex round-6 P1: 单段 TTS 进行中点拆分会产生 orphan draft。
-    拆分按钮必须在 isRegenerating / status==='tts_loading' / isSaving 时 disabled。"""
+    """Codex round-6 P1 + round-7 P2 #3: 用 regex 锁定 disabled 块内必须含 3 guards.
+    避免误判 — 仅看文件全文是否含字符串无法证明 guard 真的在 split 按钮上."""
     text = (COMPONENTS_DIR / "SegmentRow.tsx").read_text(encoding="utf-8")
-    # Look for the split button's disabled clause — must include all three guards.
-    # Use a multiline-aware search of the source for the literal expressions.
-    for guard, label in [
-        ("isRegenerating", "isRegenerating"),
-        ('status === "tts_loading"', 'status === "tts_loading"'),
-        ("isSaving", "isSaving"),
-    ]:
-        assert guard in text, (
-            f"SegmentRow must disable split when {label} (race protection per Codex round-6 P1)"
+    clause = _extract_split_button_disabled_clause(text)
+    for guard in ("isRegenerating", 'status === "tts_loading"', "isSaving"):
+        assert guard in clause, (
+            f"SegmentRow split-button disabled clause missing `{guard}`. "
+            f"Actual clause:\n{clause}"
         )
 
 
 def test_current_segment_ops_panel_disables_split_during_regen():
-    """Codex round-6 P1: 同上，CurrentSegmentOpsPanel 拆分按钮也要守护."""
+    """Codex round-6 P1 + round-7 P2 #2/#3: panel 拆分按钮 disabled 块也要锁定."""
     text = (COMPONENTS_DIR / "CurrentSegmentOpsPanel.tsx").read_text(encoding="utf-8")
-    assert "isRegenerating" in text, (
-        "CurrentSegmentOpsPanel must access isRegenerating to gate split"
+    clause = _extract_split_button_disabled_clause(text)
+    for guard in ("isRegenerating", 'status === "tts_loading"', "isSaving"):
+        assert guard in clause, (
+            f"CurrentSegmentOpsPanel split-button disabled clause missing `{guard}`. "
+            f"Actual clause:\n{clause}"
+        )
+
+
+def test_current_segment_ops_panel_receives_is_saving():
+    """Codex round-7 P2 #2: page.tsx 必须 pass isSaving prop 到 panel,
+    panel interface 必须声明 isSaving."""
+    panel = (COMPONENTS_DIR / "CurrentSegmentOpsPanel.tsx").read_text(encoding="utf-8")
+    page = EDIT_PAGE.read_text(encoding="utf-8")
+    assert re.search(r"isSaving\s*:\s*boolean", panel), (
+        "CurrentSegmentOpsPanelProps must declare `isSaving: boolean`"
     )
-    assert 'status === "tts_loading"' in text, (
-        "CurrentSegmentOpsPanel must gate split on tts_loading status"
+    # page.tsx must pass isSaving={...savingSegmentIds...} on the panel JSX
+    assert re.search(
+        r"<CurrentSegmentOpsPanel[^/]*isSaving=\{[^}]*savingSegmentIds",
+        page,
+        re.DOTALL,
+    ), "page.tsx must pass isSaving={... savingSegmentIds ...} to CurrentSegmentOpsPanel"
+
+
+def test_imperative_scrolls_use_sticky_offset_ref():
+    """Codex round-7 P2 #1: handleSplitSegment / scrollToSegment 使用 ref,
+    避免 useCallback 闭包捕获初始 0."""
+    text = EDIT_PAGE.read_text(encoding="utf-8")
+    # ref must exist
+    assert re.search(r"stickyOffsetRef\s*=\s*useRef", text), (
+        "page.tsx must declare stickyOffsetRef to avoid stale closure capture"
+    )
+    # All scrollToId calls outside JSX should read ref.current (not raw stickyOffsetPx
+    # which would be captured by useCallback deps).
+    # Count both safe and unsafe uses.
+    unsafe = re.findall(r"scrollToId\([^)]*stickyOffset\s*:\s*stickyOffsetPx\b", text)
+    assert not unsafe, (
+        f"imperative scrollToId callsites must use stickyOffsetRef.current, "
+        f"not raw stickyOffsetPx (stale closure). Found {len(unsafe)} unsafe usage(s)."
     )
 
 

@@ -189,6 +189,16 @@ export default function VideoEditPage() {
   // sit above the list. Plus a small breathing margin.
   const stickyOffsetPx = isMobileLayout ? stickyVideoHeight + 56 : 0
 
+  // Mirror stickyOffsetPx into a ref so imperative scroll callbacks
+  // (handleSplitSegment, scrollToSegment) always read the LATEST value
+  // without re-creating themselves on every mobile resize. Adding
+  // stickyOffsetPx to those callbacks' deps would cascade re-renders
+  // through every memoized child (Codex round-7 P2 #1).
+  const stickyOffsetRef = useRef(0)
+  useEffect(() => {
+    stickyOffsetRef.current = stickyOffsetPx
+  }, [stickyOffsetPx])
+
   // ---- Bootstrap ----
 
   const loadData = useCallback(async (): Promise<void> => {
@@ -494,7 +504,7 @@ export default function VideoEditPage() {
         const revealFirstNewSegment = () => {
           if (!firstNewSegmentId) return
           window.requestAnimationFrame(() => {
-            virtualListRef.current?.scrollToId(firstNewSegmentId, { align: "start", stickyOffset: stickyOffsetPx })
+            virtualListRef.current?.scrollToId(firstNewSegmentId, { align: "start", stickyOffset: stickyOffsetRef.current })
           })
         }
         setResource((prev) => {
@@ -968,7 +978,7 @@ export default function VideoEditPage() {
     // to raw DOM anchor for non-virtualized layouts (e.g. early render
     // before the list mounts).
     if (virtualListRef.current) {
-      virtualListRef.current.scrollToId(segmentId, { align: "center", stickyOffset: stickyOffsetPx })
+      virtualListRef.current.scrollToId(segmentId, { align: "center", stickyOffset: stickyOffsetRef.current })
       return
     }
     const el = document.getElementById(`segment-card-${segmentId}`)
@@ -1152,6 +1162,9 @@ export default function VideoEditPage() {
               status={activeSegmentStatus}
               isRegenerating={
                 activeSegment ? regeneratingSegmentIds.has(activeSegment.segment_id) : false
+              }
+              isSaving={
+                activeSegment ? savingSegmentIds.has(activeSegment.segment_id) : false
               }
               isBatchRegenerating={isBatchRegenerating}
               speakerName={activeSpeakerName}

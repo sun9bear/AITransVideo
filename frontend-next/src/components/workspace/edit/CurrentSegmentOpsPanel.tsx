@@ -48,6 +48,10 @@ export interface CurrentSegmentOpsPanelProps {
   segment: EditingSegment | null
   status: SegmentStatus | null
   isRegenerating: boolean
+  /** True if the page has a pending patch text/speaker save for this
+   *  segment in flight. Used to gate split (Codex round-7 P2 #2:
+   *  splitting during a patch save races the JSON write). */
+  isSaving: boolean
   isBatchRegenerating: boolean
   /** Friendly name for the segment's speaker_id, resolved at page level. */
   speakerName: string | null
@@ -63,6 +67,7 @@ export function CurrentSegmentOpsPanel({
   segment,
   status,
   isRegenerating,
+  isSaving,
   isBatchRegenerating,
   speakerName,
   onRegenerate,
@@ -209,13 +214,16 @@ export function CurrentSegmentOpsPanel({
             buttonsDisabled
             || isRegenerating
             || status === "tts_loading"
+            || isSaving
             || (segment.source_text ?? "").length < 2
             || (segment.cn_text ?? "").length < 2
           }
           title={
             isRegenerating || status === "tts_loading"
               ? "该段正在合成，拆分不可用（避免 orphan draft）"
-              : "把这段拆成两段"
+              : isSaving
+                ? "正在保存编辑，请稍候"
+                : "把这段拆成两段"
           }
           className="flex-1 h-7 text-[11px]"
         >
