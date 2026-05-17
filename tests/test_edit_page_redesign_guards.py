@@ -98,3 +98,98 @@ def test_segment_virtual_list_has_sticky_offset():
     assert "stickyOffsetForAutoScroll" in text, (
         "SegmentVirtualList missing stickyOffsetForAutoScroll prop"
     )
+
+
+# ---------- Codex round-6 P1+P2 fix verification ----------
+
+def test_page_wires_sticky_offset_to_virtual_list():
+    """Codex round-6 P2: stickyOffset 必须从 page.tsx 真正接入 SegmentVirtualList。
+    plan §8b.1 调用方约定 — 只加 prop 不 wire 等于没修。"""
+    text = EDIT_PAGE.read_text(encoding="utf-8")
+    # 至少 prop 传给 SegmentVirtualList
+    assert "stickyOffsetForAutoScroll" in text, (
+        "page.tsx must pass stickyOffsetForAutoScroll to <SegmentVirtualList>"
+    )
+    # scrollToId 命令式调用也要带 stickyOffset
+    # （非空：page 至少在某处用了 align 同时带 stickyOffset）
+    assert re.search(r"scrollToId\([^)]*stickyOffset", text, re.DOTALL), (
+        "page.tsx scrollToId calls must pass stickyOffset for mobile-occluder compensation"
+    )
+
+
+def test_page_video_sticky_on_mobile_too():
+    """Codex round-6 P2: §2.2 mobile 视频也要 sticky。
+    检查 video 容器有 `sticky top-` 类（不是只有 `lg:sticky`）。"""
+    text = EDIT_PAGE.read_text(encoding="utf-8")
+    # Look for the video sticky container — `sticky top-[...]` without `lg:` prefix.
+    # The data-sticky-video element should carry a base `sticky` class.
+    pattern = re.compile(r'data-sticky-video[^>]*className="[^"]*\bsticky\b')
+    assert pattern.search(text), (
+        "Sticky-video container must carry base `sticky` class so mobile gets "
+        "occlusion behavior (plan §2.2 + §8b.1)."
+    )
+
+
+def test_segment_row_responsive_grid():
+    """Codex round-6 P2: <768px 不能用 `100px_1fr_230px` 固定 3 列，
+    否则 360px 屏幕横向溢出。必须是响应式（默认窄列 + sm 加宽）。"""
+    text = (COMPONENTS_DIR / "SegmentRow.tsx").read_text(encoding="utf-8")
+    # 默认（mobile）应是 2 列 grid，sm 才升到 3 列
+    assert "grid-cols-[70px_1fr]" in text, (
+        "SegmentRow mobile grid must use a compact 2-col layout (e.g. 70px_1fr); "
+        "found no narrow mobile grid template"
+    )
+    assert "sm:grid-cols-[100px_1fr_230px]" in text, (
+        "SegmentRow desktop grid (sm:) must use 100px_1fr_230px"
+    )
+
+
+def test_segment_row_disables_split_during_regen():
+    """Codex round-6 P1: 单段 TTS 进行中点拆分会产生 orphan draft。
+    拆分按钮必须在 isRegenerating / status==='tts_loading' / isSaving 时 disabled。"""
+    text = (COMPONENTS_DIR / "SegmentRow.tsx").read_text(encoding="utf-8")
+    # Look for the split button's disabled clause — must include all three guards.
+    # Use a multiline-aware search of the source for the literal expressions.
+    for guard, label in [
+        ("isRegenerating", "isRegenerating"),
+        ('status === "tts_loading"', 'status === "tts_loading"'),
+        ("isSaving", "isSaving"),
+    ]:
+        assert guard in text, (
+            f"SegmentRow must disable split when {label} (race protection per Codex round-6 P1)"
+        )
+
+
+def test_current_segment_ops_panel_disables_split_during_regen():
+    """Codex round-6 P1: 同上，CurrentSegmentOpsPanel 拆分按钮也要守护."""
+    text = (COMPONENTS_DIR / "CurrentSegmentOpsPanel.tsx").read_text(encoding="utf-8")
+    assert "isRegenerating" in text, (
+        "CurrentSegmentOpsPanel must access isRegenerating to gate split"
+    )
+    assert 'status === "tts_loading"' in text, (
+        "CurrentSegmentOpsPanel must gate split on tts_loading status"
+    )
+
+
+# ---------- 5-state visual mapping ----------
+
+def test_segment_row_implements_five_visual_states():
+    """前端 SegmentRow 必须按 plan §6.1 提供 5 个 regen 按钮文案/颜色变体。
+    Codex round-6 P2: 守卫不能仅停在后端 vocab —— 前端映射本身也要 lock 住。"""
+    text = (COMPONENTS_DIR / "SegmentRow.tsx").read_text(encoding="utf-8")
+    # accepted → "重合成"
+    assert "重合成" in text, "Missing accepted-state label '重合成'"
+    # text_dirty / voice_dirty → "待合成"
+    assert "待合成" in text, "Missing dirty-state label '待合成'"
+    # tts_loading → "合成中…" (Unicode ellipsis)
+    assert "合成中" in text, "Missing loading-state label '合成中'"
+    # tts_dirty → "草稿待审 ↓"
+    assert "草稿待审" in text, "Missing draft-pending label '草稿待审'"
+    # tts_failed → "重试合成"
+    assert "重试合成" in text, "Missing failed-state label '重试合成'"
+    # 5 distinct status arms inside regenVisual / similar branch
+    # crude check — should see status === literals for each
+    for s in ("tts_loading", "tts_dirty", "tts_failed", "text_dirty", "voice_dirty"):
+        assert f'"{s}"' in text or f"'{s}'" in text, (
+            f"SegmentRow does not branch on status '{s}' — visual mapping incomplete"
+        )

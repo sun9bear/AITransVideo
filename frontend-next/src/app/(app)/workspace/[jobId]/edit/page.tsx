@@ -151,6 +151,44 @@ export default function VideoEditPage() {
   // tracks the trigger state but renders no UI.
   const [splitDialogSegmentId, setSplitDialogSegmentId] = useState<string | null>(null)
 
+  // Phase 1 (Task 5 + Codex round-6 fix): track sticky video occluder
+  // height on mobile so SegmentVirtualList.scrollToId can compensate.
+  // On desktop the video is in the left column (not above the list),
+  // so stickyOffset = 0 there. On mobile the video sits above the list
+  // with `sticky top-0`, so we pass its rendered height.
+  const stickyVideoRef = useRef<HTMLDivElement | null>(null)
+  const [isMobileLayout, setIsMobileLayout] = useState(false)
+  const [stickyVideoHeight, setStickyVideoHeight] = useState(0)
+
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    // 1024px matches the `lg` Tailwind breakpoint where the layout
+    // switches from stacked (sticky video on top) to side-by-side.
+    const mq = window.matchMedia("(max-width: 1023px)")
+    const update = () => setIsMobileLayout(mq.matches)
+    update()
+    mq.addEventListener("change", update)
+    return () => mq.removeEventListener("change", update)
+  }, [])
+
+  useEffect(() => {
+    if (!isMobileLayout) {
+      setStickyVideoHeight(0)
+      return
+    }
+    const el = stickyVideoRef.current
+    if (!el) return
+    const sync = () => setStickyVideoHeight(el.offsetHeight)
+    sync()
+    const obs = new ResizeObserver(sync)
+    obs.observe(el)
+    return () => obs.disconnect()
+  }, [isMobileLayout])
+
+  // Sticky compensation: on mobile, the header (~52px) + sticky video
+  // sit above the list. Plus a small breathing margin.
+  const stickyOffsetPx = isMobileLayout ? stickyVideoHeight + 56 : 0
+
   // ---- Bootstrap ----
 
   const loadData = useCallback(async (): Promise<void> => {
@@ -456,7 +494,7 @@ export default function VideoEditPage() {
         const revealFirstNewSegment = () => {
           if (!firstNewSegmentId) return
           window.requestAnimationFrame(() => {
-            virtualListRef.current?.scrollToId(firstNewSegmentId, { align: "start" })
+            virtualListRef.current?.scrollToId(firstNewSegmentId, { align: "start", stickyOffset: stickyOffsetPx })
           })
         }
         setResource((prev) => {
@@ -930,7 +968,7 @@ export default function VideoEditPage() {
     // to raw DOM anchor for non-virtualized layouts (e.g. early render
     // before the list mounts).
     if (virtualListRef.current) {
-      virtualListRef.current.scrollToId(segmentId, { align: "center" })
+      virtualListRef.current.scrollToId(segmentId, { align: "center", stickyOffset: stickyOffsetPx })
       return
     }
     const el = document.getElementById(`segment-card-${segmentId}`)
@@ -1086,10 +1124,18 @@ export default function VideoEditPage() {
           className="space-y-2 lg:sticky lg:top-[72px] lg:self-start"
           aria-label="视频与当前段操作"
         >
-          <div data-sticky-video>
+          {/* Sticky on both mobile (top of page) and desktop (top of left col).
+           *  On mobile the height is measured (ResizeObserver) and passed to
+           *  SegmentVirtualList as stickyOffsetForAutoScroll so the active
+           *  row isn't occluded. Plan §2.2 + §8b.1. */}
+          <div
+            ref={stickyVideoRef}
+            data-sticky-video
+            className="sticky top-[52px] lg:top-0 z-10 lg:z-auto bg-background lg:bg-transparent"
+          >
             <video
               ref={videoRef}
-              className="w-full aspect-video rounded-md bg-black object-contain"
+              className="w-full max-h-[30vh] lg:max-h-none lg:aspect-video rounded-md bg-black object-contain"
               controls
               preload="metadata"
               src={buildStreamUrl(jobId, "video")}
@@ -1270,6 +1316,7 @@ export default function VideoEditPage() {
               items={resource.segments}
               getId={(s) => s.segment_id}
               activeSegmentId={activeSegmentId}
+              stickyOffsetForAutoScroll={stickyOffsetPx}
               estimatedItemHeight={200}
               maxHeight="70vh"
               className="pr-1"

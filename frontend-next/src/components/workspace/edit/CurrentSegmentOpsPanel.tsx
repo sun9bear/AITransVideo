@@ -207,8 +207,15 @@ export function CurrentSegmentOpsPanel({
           onClick={() => onSplit(segment.segment_id)}
           disabled={
             buttonsDisabled
+            || isRegenerating
+            || status === "tts_loading"
             || (segment.source_text ?? "").length < 2
             || (segment.cn_text ?? "").length < 2
+          }
+          title={
+            isRegenerating || status === "tts_loading"
+              ? "该段正在合成，拆分不可用（避免 orphan draft）"
+              : "把这段拆成两段"
           }
           className="flex-1 h-7 text-[11px]"
         >

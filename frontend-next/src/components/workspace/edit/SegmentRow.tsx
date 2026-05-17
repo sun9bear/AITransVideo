@@ -294,7 +294,9 @@ export function SegmentRow({
       aria-current={isActive ? "true" : undefined}
       role="listitem"
       className={[
-        "grid grid-cols-[100px_1fr_230px] gap-3 py-2.5 px-3 border-b border-border last:border-b-0",
+        // Mobile (<768px): 2-col grid (70px meta + 1fr text), actions row spans col 2 below.
+        // Tablet/desktop (≥768px): 3-col grid (100px / 1fr / 230px actions on the right).
+        "grid grid-cols-[70px_1fr] sm:grid-cols-[100px_1fr_230px] gap-2 sm:gap-3 py-2.5 px-3 border-b border-border last:border-b-0",
         isActive
           ? "border-l-2 border-l-primary -ml-[2px] pl-[14px] bg-primary/[0.06]"
           : "border-l-2 border-l-transparent -ml-[2px] pl-[14px]",
@@ -506,8 +508,10 @@ export function SegmentRow({
         )}
       </div>
 
-      {/* ── Right col: persistent action buttons ── */}
-      <div className="flex items-start justify-end gap-1.5 flex-wrap">
+      {/* ── Right col (desktop) / second row (mobile): persistent action buttons ──
+       *   Mobile (<sm): col-start-2 puts buttons in col 2 below text, justify-start.
+       *   Tablet+    : col-auto (3rd col), justify-end. */}
+      <div className="col-start-2 sm:col-auto flex items-start justify-start sm:justify-end gap-1.5 flex-wrap pt-1 sm:pt-0">
         <Button
           type="button"
           size="sm"
@@ -531,11 +535,22 @@ export function SegmentRow({
           onClick={() => onSplit(segment.segment_id)}
           disabled={
             buttonsDisabled
+            || isRegenerating
+            || status === "tts_loading"
+            || isSaving
             || (segment.source_text ?? "").length < 2
             || (segment.cn_text ?? "").length < 2
           }
           aria-label="拆分该段"
-          title={buttonsDisabled ? "正在批量合成，拆分不可用" : "把这段拆成两段"}
+          title={
+            buttonsDisabled
+              ? "正在批量合成，拆分不可用"
+              : isRegenerating || status === "tts_loading"
+                ? "该段正在合成，拆分不可用（避免 orphan draft）"
+                : isSaving
+                  ? "正在保存编辑，请稍候"
+                  : "把这段拆成两段"
+          }
           className="h-7 px-2 text-[10.5px]"
         >
           <Scissors className="h-3 w-3 mr-1" />
