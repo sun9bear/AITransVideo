@@ -55,6 +55,8 @@ import {
   type PlayerSyncSegment,
 } from "@/lib/react/usePlayerSegmentSync"
 import { SegmentRow } from "@/components/workspace/edit/SegmentRow"
+import { CurrentSegmentOpsPanel } from "@/components/workspace/edit/CurrentSegmentOpsPanel"
+import { SplitSegmentDialog } from "./SplitSegmentDialog"
 import {
   SegmentVirtualList,
   type SegmentVirtualListRef,
@@ -1019,13 +1021,31 @@ export default function VideoEditPage() {
     )
   }
 
+  // Phase 1 redesign (Task 5): derive active segment + speaker name for the
+  // left-column CurrentSegmentOpsPanel. activeSegmentId comes from
+  // usePlayerSegmentSync; resolution to a full segment + friendly speaker
+  // name happens at the page level so both left ops panel and right list
+  // see the same source of truth.
+  const activeSegment = activeSegmentId
+    ? resource.segments.find((s) => s.segment_id === activeSegmentId) ?? null
+    : null
+  const activeSegmentStatus = activeSegment
+    ? (resource.segment_status[activeSegment.segment_id] ?? "accepted")
+    : null
+  const activeSpeakerName = (() => {
+    if (!activeSegment?.speaker_id) return null
+    const raw = activeSegment.speaker_id
+    if (speakerNameMap[raw]) return speakerNameMap[raw]
+    const sp = editingSpeakers.find((e) => e.speaker_id === raw)
+    return sp?.display_name || raw
+  })()
+
   return (
-    // §7.9 responsive: desktop 1024+ caps at max-w-5xl (1024px content),
-    // phone/tablet span full width with adjusted padding. Section
-    // `space-y` shrinks on narrow viewports to save vertical space.
-    <div className="space-y-4 sm:space-y-6 max-w-5xl mx-auto px-3 sm:px-0">
+    // Phase 1 redesign: left video + ops panel / right tab + segment list.
+    // Mobile (< 1024px) stacks: header → sticky video → tab + list.
+    <div className="space-y-3 lg:space-y-4 max-w-7xl mx-auto px-3 sm:px-0">
       {/* Header */}
-      <section className="surface-card p-4 flex flex-wrap items-center gap-3">
+      <section className="surface-card p-3 flex flex-wrap items-center gap-3 sticky top-0 z-20 backdrop-blur bg-card/85">
         <Link
           href={`/workspace/${jobId}`}
           className="inline-flex items-center gap-1 rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted/30"
@@ -1033,14 +1053,22 @@ export default function VideoEditPage() {
           <ArrowLeft className="h-3.5 w-3.5" />
           返回
         </Link>
-        <h1 className="text-lg font-bold truncate min-w-0 flex-1">
+        <h1 className="text-base font-bold truncate min-w-0 flex-1">
           {getJobDisplayTitle(job)}
           {resource.edit_generation > 0 && (
-            <span className="ml-2 text-sm text-muted-foreground font-normal">
+            <span className="ml-2 text-xs text-muted-foreground font-normal">
               · 已修改 {resource.edit_generation} 次
             </span>
           )}
         </h1>
+        {dirtyCount > 0 && (
+          <span
+            className="hidden sm:inline-flex items-center gap-1 rounded-full bg-primary/10 px-2.5 py-0.5 text-xs text-primary font-medium"
+            aria-live="polite"
+          >
+            {dirtyCount} 段待处理
+          </span>
+        )}
         <div className="flex items-center gap-2 shrink-0">
           <button
             className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs font-medium text-red-400 hover:bg-red-500/20"
@@ -1055,37 +1083,58 @@ export default function VideoEditPage() {
             disabled={isCommitting}
             type="button"
           >
-            确认修改 ...
+            确认修改 ↗
           </button>
         </div>
       </section>
 
-      {/* Sticky video player — baseline (last-committed) dubbed video
-          so users can audit text edits against the audio they're about
-          to replace. §7.9 responsive: cap height 40vh on phones,
-          45vh elsewhere. */}
-      <aside
-        className="sticky top-2 z-10 surface-card p-2"
-        aria-label="视频预览"
-      >
-        <video
-          ref={videoRef}
-          className="w-full max-h-[40vh] sm:max-h-[45vh] rounded-md bg-black object-contain"
-          controls
-          preload="metadata"
-          src={buildStreamUrl(jobId, "video")}
-          poster={buildStreamUrl(jobId, "poster")}
+      {/* Two-column layout: video+ops on left (sticky on desktop), tab+list on right */}
+      <div className="grid grid-cols-1 lg:grid-cols-[minmax(320px,380px)_1fr] gap-3 lg:gap-4">
+        {/* ── Left column ── */}
+        <aside
+          className="space-y-2 lg:sticky lg:top-[72px] lg:self-start"
+          aria-label="视频与当前段操作"
         >
-          您的浏览器不支持 video 标签
-        </video>
-      </aside>
+          <div data-sticky-video>
+            <video
+              ref={videoRef}
+              className="w-full aspect-video rounded-md bg-black object-contain"
+              controls
+              preload="metadata"
+              src={buildStreamUrl(jobId, "video")}
+              poster={buildStreamUrl(jobId, "poster")}
+              aria-label="译制视频"
+            >
+              您的浏览器不支持 video 标签
+            </video>
+          </div>
+          {activeTab === "text" && (
+            <CurrentSegmentOpsPanel
+              jobId={jobId}
+              segment={activeSegment}
+              status={activeSegmentStatus}
+              isRegenerating={
+                activeSegment ? regeneratingSegmentIds.has(activeSegment.segment_id) : false
+              }
+              isBatchRegenerating={isBatchRegenerating}
+              speakerName={activeSpeakerName}
+              onRegenerate={handleRegenerate}
+              onAcceptDraft={handleAcceptDraft}
+              onDiscardDraft={handleDiscardDraft}
+              onSplit={(sid) => setSplitDialogSegmentId(sid)}
+              onPreviewSource={handlePreviewSource}
+            />
+          )}
+        </aside>
 
-      {/* Tab switcher — full ARIA tabs pattern for screen readers. */}
-      <nav
-        className="flex items-center gap-1 border-b border-border"
-        role="tablist"
-        aria-label="修改阶段切换"
-      >
+        {/* ── Right column ── */}
+        <div className="space-y-3 min-w-0">
+          {/* Tab switcher — full ARIA tabs pattern for screen readers. */}
+          <nav
+            className="flex items-center gap-1 border-b border-border"
+            role="tablist"
+            aria-label="修改阶段切换"
+          >
         <button
           type="button"
           role="tab"
@@ -1278,6 +1327,24 @@ export default function VideoEditPage() {
           />
         </main>
       )}
+        </div>
+      </div>
+
+      <SplitSegmentDialog
+        open={splitDialogSegmentId !== null}
+        segment={
+          splitDialogSegmentId
+            ? resource.segments.find((s) => s.segment_id === splitDialogSegmentId) ?? null
+            : null
+        }
+        availableSpeakerIds={availableSpeakerIds}
+        speakerNameMap={speakerNameMap}
+        maxCuts={1}
+        onClose={() => setSplitDialogSegmentId(null)}
+        onSubmit={async (sid, body) => {
+          await handleSplitSegment(sid, body)
+        }}
+      />
 
       {commitModalOpen && (
         <CommitModal
