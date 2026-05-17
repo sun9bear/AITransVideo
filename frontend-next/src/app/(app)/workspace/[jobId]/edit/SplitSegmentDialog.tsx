@@ -229,7 +229,7 @@ export function SplitSegmentDialog({
 
   return (
     <Dialog open={open} onOpenChange={(o) => { if (!o) onClose() }}>
-      <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+      <DialogContent className="w-[92vw] max-w-3xl lg:max-w-4xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="flex items-baseline gap-2">
             <span>拆分段落</span>
@@ -318,35 +318,40 @@ export function SplitSegmentDialog({
               ].map((piece) => (
                 <div
                   key={piece.num}
-                  className="grid grid-cols-[28px_1fr_140px] gap-3 items-start rounded-md border border-border bg-muted/20 p-3"
+                  className="rounded-md border border-border bg-muted/20 p-3 space-y-2"
                 >
-                  <div className="flex h-7 w-7 items-center justify-center rounded-full bg-primary text-primary-foreground text-xs font-semibold">
-                    {piece.num}
-                  </div>
-                  <div className="min-w-0 space-y-1">
-                    <div className="text-[11px] tabular-nums text-muted-foreground">
+                  {/* Header row: circle + timecode + duration + speaker (all on one line).
+                   *  User feedback 2026-05-17 #3: "说话人和时间、时长占一行" so the
+                   *  bilingual text below gets full row width. */}
+                  <div className="flex items-center gap-3">
+                    <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground text-xs font-semibold">
+                      {piece.num}
+                    </div>
+                    <div className="flex-1 min-w-0 text-[11px] tabular-nums text-muted-foreground">
                       {piece.range}
                       {piece.dur && <span className="ml-1">({piece.dur})</span>}
                     </div>
-                    <div className="text-[11px] text-muted-foreground break-words">
-                      {piece.en || "（空）"}
-                    </div>
-                    <div className="text-sm text-foreground break-words">
-                      {piece.cn || "（空）"}
-                    </div>
+                    <select
+                      className="text-xs rounded border border-border bg-background px-2 py-1 text-foreground max-w-[180px]"
+                      value={piece.speaker}
+                      onChange={(e) => piece.setSpeaker(e.currentTarget.value)}
+                      aria-label={`第 ${piece.num} 段说话人`}
+                    >
+                      {availableSpeakerIds.map((sid) => (
+                        <option key={sid} value={sid}>
+                          {speakerLabel(sid)}
+                        </option>
+                      ))}
+                    </select>
                   </div>
-                  <select
-                    className="text-xs rounded border border-border bg-background px-2 py-1 text-foreground"
-                    value={piece.speaker}
-                    onChange={(e) => piece.setSpeaker(e.currentTarget.value)}
-                    aria-label={`第 ${piece.num} 段说话人`}
-                  >
-                    {availableSpeakerIds.map((sid) => (
-                      <option key={sid} value={sid}>
-                        {speakerLabel(sid)}
-                      </option>
-                    ))}
-                  </select>
+
+                  {/* Body: EN full-width, then CN full-width. */}
+                  <div className="text-[11px] text-muted-foreground break-words leading-relaxed">
+                    {piece.en || "（空）"}
+                  </div>
+                  <div className="text-sm text-foreground break-words leading-relaxed">
+                    {piece.cn || "（空）"}
+                  </div>
                 </div>
               ))}
             </div>

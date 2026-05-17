@@ -29,7 +29,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from "react"
-import { Check, ChevronDown, Loader2, Play, RefreshCw, Scissors, Trash2 } from "lucide-react"
+import { Check, ChevronDown, Loader2, Pause, Play, RefreshCw, Scissors, Trash2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { buildDraftAudioUrl } from "@/lib/api/downloads"
 import type { EditingSegment, EditingSpeaker, SegmentStatus } from "@/lib/api/editing"
@@ -154,21 +154,42 @@ export function SegmentRow({
     setLocalSource(segment.source_text ?? "")
   }, [segment.source_text])
 
-  // ---- source audio preview (lazy) ----
-  const [sourceAudioUrl, setSourceAudioUrl] = useState<string | null>(null)
+  // ---- source audio preview ----
+  // Plan §3.2: row button is a "shortcut" — left ops panel is the
+  // canonical playback surface (full <audio controls>). The row uses
+  // the offscreen Audio API for a click-to-play / click-to-pause
+  // toggle. NOT rendering an inline <audio controls> element here
+  // (it caused SegmentVirtualList height-measure misses → row 01's
+  // audio bar overlaid row 02's text until the user scrolled).
+  const audioInstanceRef = useRef<HTMLAudioElement | null>(null)
   const [isFetchingSource, setIsFetchingSource] = useState(false)
-  const sourceAudioRef = useRef<HTMLAudioElement | null>(null)
+  const [isSourcePlaying, setIsSourcePlaying] = useState(false)
+
+  useEffect(() => {
+    // Clean up when component unmounts so audio doesn't keep playing
+    // after the row leaves the virtualization window.
+    return () => {
+      const inst = audioInstanceRef.current
+      if (inst) {
+        inst.pause()
+        inst.src = ""
+        audioInstanceRef.current = null
+      }
+    }
+  }, [])
 
   const handlePlaySource = async () => {
-    if (sourceAudioUrl) {
+    const inst = audioInstanceRef.current
+    if (inst) {
+      if (!inst.paused) {
+        inst.pause()
+        return
+      }
       try {
-        const el = sourceAudioRef.current
-        if (el) {
-          el.currentTime = 0
-          await el.play()
-        }
+        inst.currentTime = 0
+        await inst.play()
       } catch {
-        // autoplay policy may block; <audio controls> below is fallback
+        // autoplay policy may block
       }
       return
     }
@@ -176,10 +197,12 @@ export function SegmentRow({
     try {
       const url = await onPreviewSource(segment.segment_id)
       if (url) {
-        setSourceAudioUrl(url)
-        setTimeout(() => {
-          sourceAudioRef.current?.play().catch(() => {})
-        }, 50)
+        const audio = new Audio(url)
+        audio.addEventListener("play", () => setIsSourcePlaying(true))
+        audio.addEventListener("pause", () => setIsSourcePlaying(false))
+        audio.addEventListener("ended", () => setIsSourcePlaying(false))
+        audioInstanceRef.current = audio
+        await audio.play().catch(() => {})
       }
     } finally {
       setIsFetchingSource(false)
@@ -452,21 +475,10 @@ export function SegmentRow({
           </div>
         )}
 
-        {/* Source audio inline player (after first preview fetch).
-         *  No height clamp — let the browser-native <audio controls> use
-         *  its natural ~40px so the row expands cleanly instead of
-         *  visually overflowing into the next row. Margin separates it
-         *  from text above + the next row below. */}
-        {sourceAudioUrl && (
-          <audio
-            ref={sourceAudioRef}
-            key={`src-${segment.segment_id}`}
-            controls
-            preload="metadata"
-            className="my-2 w-full max-w-md block"
-            src={sourceAudioUrl}
-          />
-        )}
+        {/* No inline <audio> for source preview — playback happens via
+         *  the offscreen Audio API in handlePlaySource, with full
+         *  controls available in the left CurrentSegmentOpsPanel
+         *  (plan §3.2 "左侧 ops panel = 操作全集，右侧行内按钮 = 快捷方式"). */}
 
         {/* Draft panel — appears inline when tts_dirty (plan §3.3 primary
          *  location). Audio uses natural height; row expands. */}
@@ -532,12 +544,14 @@ export function SegmentRow({
           variant="outline"
           onClick={handlePlaySource}
           disabled={isFetchingSource || buttonsDisabled}
-          aria-label="试听该段原文音频"
-          title="试听原音"
+          aria-label={isSourcePlaying ? "暂停" : "试听该段原文音频"}
+          title={isSourcePlaying ? "暂停" : "试听原音"}
           className="h-7 px-2 text-[10.5px]"
         >
           {isFetchingSource ? (
             <Loader2 className="h-3 w-3 animate-spin" />
+          ) : isSourcePlaying ? (
+            <Pause className="h-3 w-3" />
           ) : (
             <Play className="h-3 w-3" />
           )}

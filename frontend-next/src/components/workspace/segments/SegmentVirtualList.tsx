@@ -117,6 +117,14 @@ function SegmentVirtualListInner<T>(
 ) {
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const itemRefs = useRef<Map<string, HTMLDivElement>>(new Map())
+  // Per-item ResizeObserver registry (2026-05-17 fix): catches async
+  // height changes AFTER the initial render. The useLayoutEffect below
+  // measures synchronously per render, but if an item grows later (e.g.
+  // a <audio> element loads metadata, an image loads, a textarea
+  // autosizes) the heightMap goes stale and downstream offsets cache
+  // wrong values → next row overlaps. ResizeObserver fires on those
+  // late changes and re-syncs heightMap.
+  const itemResizeObservers = useRef<Map<string, ResizeObserver>>(new Map())
   const [heightMap, setHeightMap] = useState<Record<string, number>>({})
   const [scrollTop, setScrollTop] = useState(0)
   const [viewportHeight, setViewportHeight] = useState(600)
@@ -179,6 +187,12 @@ function SegmentVirtualListInner<T>(
       itemRefs.current.set(id, node)
     } else {
       itemRefs.current.delete(id)
+      // Stop observing — node has unmounted (item left virtualization window).
+      const obs = itemResizeObservers.current.get(id)
+      if (obs) {
+        obs.disconnect()
+        itemResizeObservers.current.delete(id)
+      }
     }
   }, [])
 
@@ -192,11 +206,40 @@ function SegmentVirtualListInner<T>(
       if (h > 0 && heightMap[id] !== h) {
         updates[id] = h
       }
+      // Attach a ResizeObserver once per item so post-render height
+      // changes (lazy audio load, async images, etc.) also update the
+      // heightMap. Cleanup is handled when registerItemRef receives null.
+      if (!itemResizeObservers.current.has(id)) {
+        const ro = new ResizeObserver(() => {
+          const live = itemRefs.current.get(id)
+          if (!live) return
+          const liveH = Math.ceil(live.getBoundingClientRect().height)
+          if (liveH > 0) {
+            setHeightMap((prev) => {
+              if (prev[id] === liveH) return prev
+              return { ...prev, [id]: liveH }
+            })
+          }
+        })
+        ro.observe(node)
+        itemResizeObservers.current.set(id, ro)
+      }
     })
     if (Object.keys(updates).length > 0) {
       setHeightMap((prev) => ({ ...prev, ...updates }))
     }
   })
+
+  useEffect(() => {
+    // Tear down all ResizeObservers when the list unmounts. The Map
+    // is captured by closure into the cleanup; per-item disconnect on
+    // ref-detach above handles the steady-state case.
+    const observers = itemResizeObservers.current
+    return () => {
+      observers.forEach((ro) => ro.disconnect())
+      observers.clear()
+    }
+  }, [])
 
   // ---- Imperative handle ----
   useImperativeHandle(ref, () => ({

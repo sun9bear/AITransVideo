@@ -243,6 +243,26 @@ right col: 自然滚动，virtual list 占主要高度
 
 > 为什么不只在左侧？因为用户可能同时有多个 tts_dirty 段，左侧只能聚焦一个；右侧行内能并行展示，列表里一眼看到「N 段草稿待审」。
 
+### 3.4 试听原音的渲染位置（2026-05-17 实施时澄清）
+
+**问题**：原方案里 §3.2 写左 ops panel「▶ 试听原音」，但段落行也有 ▶ 按钮。两边都渲染 `<audio controls>` 会导致 SegmentVirtualList 的高度测量出错（行内 `<audio>` 元素加载 metadata 之前高度 ≈ 0，加载后 ~40px，但虚拟列表 cache 的是初始高度 → 下一行重叠当前行）。
+
+**澄清结论**（按 §3.2 "左侧 ops panel = 操作全集，右侧行内按钮 = 快捷方式" 的原则细化）：
+
+| 入口 | 渲染什么 |
+|------|---------|
+| 左侧 `CurrentSegmentOpsPanel` | **完整 `<audio controls>`** — 用户可以 scrub / pause / seek，宽屏空间充足，无虚拟列表问题 |
+| 右侧 `SegmentRow` 的 ▶ 按钮 | **不渲染 `<audio>` 元素**。点击 → offscreen `new Audio(url)` + `.play()` + 监听 play/pause/ended 切换图标。再点暂停。无可见 controls，无行高变化 |
+
+实施细节（`SegmentRow`）：
+- `audioInstanceRef = useRef<HTMLAudioElement | null>`
+- 第一次点：`onPreviewSource` 拿 url → `new Audio(url)` → 缓存 ref → `play()`
+- 再次点（playing）：`pause()` + 图标变 ▶
+- 再次点（paused）：`currentTime = 0` + `play()` + 图标变 ⏸
+- unmount：`pause()` + 释放 src 避免 leak
+
+**草稿试听**（tts_dirty 状态）仍按 §3.3 行内 `<audio controls>` 渲染——草稿是任务可见状态的一部分，初始 mount 就在 DOM 里，虚拟列表能正确测量。SegmentVirtualList 同步加 per-item ResizeObserver 作为兜底（防止后续动态内容触发同类问题）。
+
 ---
 
 ## 4. 右侧：段落列表
