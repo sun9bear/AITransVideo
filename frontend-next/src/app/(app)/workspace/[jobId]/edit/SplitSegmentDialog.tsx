@@ -97,10 +97,26 @@ function mapWordsToSourceChars(
   return result
 }
 
-/** Detect suggested split positions (plan §5.4 step 2-3 + dedup at
- *  200ms + cap 5). Source positions are snapped to word boundaries
- *  via snapSourceCutToWord (already prevents mid-word cuts). CN
- *  positions auto-mirror proportionally. */
+/** Detect suggested split positions.
+ *
+ *  Authoritative trigger = speaker_label change between adjacent words.
+ *  CN punctuation is used ONLY as a refinement: when a speaker change
+ *  falls within ±500ms of a sentence-ending punctuation, snap the cut
+ *  to the punctuation position for a cleaner break.
+ *
+ *  If the segment has 0 speaker changes (single-speaker monologue),
+ *  this returns an EMPTY cuts list — the dialog will keep the seed
+ *  effect's default mid-point cut. User can still manually click to
+ *  add cuts by punctuation if they want.
+ *
+ *  Rationale (2026-05-17 user feedback): auto-applying every
+ *  punctuation cut shattered single-speaker segments into 6+ pieces,
+ *  which serves no purpose (TTS doesn't benefit from finer chunks for
+ *  monologue, and the user must manually un-split each one).
+ *
+ *  Cap at 5 cuts (plan §5.4 step 5). Source positions snapped to word
+ *  boundaries via snapSourceCutToWord. CN positions auto-mirrored.
+ */
 function detectSuggestedSplits(params: {
   sourceText: string
   cnText: string
@@ -136,7 +152,7 @@ function detectSuggestedSplits(params: {
   }
   const speakerChangesCount = speakerCutMs.length
 
-  // 2. Chinese punctuation candidates. Cut AFTER each punctuation char.
+  // 2. Chinese punctuation candidates (used as refinement only).
   const punctRegex = /[。！？]/g
   const cnPunctCuts: number[] = []
   let m: RegExpExecArray | null
@@ -148,23 +164,50 @@ function detectSuggestedSplits(params: {
   }
   const punctuationCutsCount = cnPunctCuts.length
 
+  // EARLY RETURN — no speaker change → no auto-prefill. Dialog keeps
+  // its default mid-point cut from the seed effect.
+  if (speakerChangesCount === 0) {
+    return {
+      cuts: [],
+      speakerIds: [],
+      speakerChanges: 0,
+      punctuationCuts: punctuationCutsCount,
+    }
+  }
+
   // Map CN punctuation positions → estimated ms via proportional
-  // ratio over the segment's time window.
+  // ratio over the segment's time window. These are CANDIDATES for
+  // refining speaker cuts, not separate cuts.
   const segmentDuration = Math.max(1, segmentEndMs - segmentStartMs)
   const punctCutMs: number[] = cnPunctCuts.map((cnIdx) =>
     segmentStartMs + Math.floor((cnIdx / Math.max(1, cnText.length)) * segmentDuration),
   )
 
-  // 3. Combine + sort + dedupe (200ms tolerance, plan §5.4 step 4).
-  const allCutMs = [...speakerCutMs, ...punctCutMs].sort((a, b) => a - b)
+  // 3. Refine each speaker cut by snapping to nearest punctuation
+  //    within ±500ms. Yields cleaner breaks aligned to sentence ends.
+  const refinedCutMs = speakerCutMs.map((sMs) => {
+    let nearestPunct: number | null = null
+    let nearestDist = Infinity
+    for (const pMs of punctCutMs) {
+      const d = Math.abs(pMs - sMs)
+      if (d < 500 && d < nearestDist) {
+        nearestDist = d
+        nearestPunct = pMs
+      }
+    }
+    return nearestPunct ?? sMs
+  })
+
+  // 4. Sort + dedupe (200ms tolerance, plan §5.4 step 4).
+  const sortedMs = [...refinedCutMs].sort((a, b) => a - b)
   const deduped: number[] = []
-  for (const ms of allCutMs) {
+  for (const ms of sortedMs) {
     if (deduped.length === 0 || (ms - deduped[deduped.length - 1]) > 200) {
       deduped.push(ms)
     }
   }
 
-  // 4. Cap at 5 cuts (plan §5.4 step 5).
+  // 5. Cap at 5 cuts (plan §5.4 step 5).
   const cappedMs = deduped.slice(0, 5)
   if (cappedMs.length === 0) {
     return {
@@ -805,9 +848,9 @@ export function SplitSegmentDialog({
             {isPrefilling ? (
               <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground inline-flex items-center gap-2">
                 <Loader2 className="h-3 w-3 animate-spin" />
-                正在分析说话人 / 标点切点…
+                正在分析说话人切换…
               </div>
-            ) : prefillResult && (prefillResult.applied || prefillResult.contextAvailable) ? (
+            ) : prefillResult ? (
               <div
                 className={
                   prefillResult.applied
@@ -817,8 +860,10 @@ export function SplitSegmentDialog({
               >
                 <Sparkles className="h-3 w-3" />
                 {prefillResult.applied
-                  ? `智能预填：检测到 ${prefillResult.speakerChanges} 个说话人切点 + ${prefillResult.punctuationCuts} 个标点切点；可手动调整或重置`
-                  : "无明显切点（已用中点预设；点文字位置可手动加切点）"}
+                  ? `智能预填：检测到 ${prefillResult.speakerChanges} 处说话人切换；可手动调整或重置`
+                  : !prefillResult.contextAvailable
+                    ? "无词级数据（已用中点预设；点文字加切点）"
+                    : "本段为单说话人，未自动拆分（如需拆分长段落，请点文字位置手动加切点）"}
               </div>
             ) : null}
 
