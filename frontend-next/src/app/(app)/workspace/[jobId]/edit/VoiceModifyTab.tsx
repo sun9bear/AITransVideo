@@ -847,11 +847,14 @@ export function VoiceModifyTab({
             return (
               <div
                 key={sp.speakerId}
-                className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-800/30 p-4"
+                className="rounded-lg border border-border bg-card/60 p-4"
               >
                 <div className="flex items-start gap-3">
-                  {/* Avatar */}
-                  <div className="flex h-10 w-10 items-center justify-center rounded-full bg-slate-200 dark:bg-slate-700 text-sm font-bold text-slate-600 dark:text-slate-300 shrink-0">
+                  {/* Avatar — uses ink palette tokens for consistency with
+                   *  the project's data-theme="ink"/"ink-dark" (user
+                   *  feedback 2026-05-17: slate-grey clashed with cream/
+                   *  charcoal palette). */}
+                  <div className="flex h-10 w-10 items-center justify-center rounded-full bg-primary/10 text-sm font-bold text-primary shrink-0">
                     {String.fromCharCode(65 + index)}
                   </div>
 

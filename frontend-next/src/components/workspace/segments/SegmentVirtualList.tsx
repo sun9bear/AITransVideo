@@ -301,25 +301,10 @@ function SegmentVirtualListInner<T>(
       data-total={items.length}
       data-range={`${startIndex}-${endIndex}`}
     >
-      {/* Sticky header — tells the user at a glance "only a window is
-          mounted" so "为什么 scrollbar handle 这么小" doesn't read as
-          "前端把 200 段全塞 DOM 了". Minimal UI, z-10 keeps it above
-          absolute-positioned items below. */}
-      {items.length > 0 && (
-        <div className="sticky top-0 z-10 px-3 py-1.5 text-xs text-muted-foreground bg-background/85 backdrop-blur border-b border-border/40 flex items-center justify-between">
-          <span>
-            段落 <strong className="text-foreground">{items.length}</strong>
-            <span className="mx-2 text-border">·</span>
-            当前 DOM 已挂载 <strong className="text-foreground">{renderedCount}</strong> 段
-            <span className="ml-2 text-muted-foreground/60">
-              （#{startIndex + 1} – #{endIndex + 1}，其他按需渲染）
-            </span>
-          </span>
-          <span className="text-muted-foreground/60">
-            {totalHeight > 0 && `总高 ${(totalHeight / 1000).toFixed(1)}k px`}
-          </span>
-        </div>
-      )}
+      {/* Phase 1 redesign: removed the debug stats header. The
+       *  virtualization is internal detail; the user doesn't need to
+       *  see "DOM 已挂载 N 段" — it was a debug breadcrumb that leaked
+       *  into prod. Keep data-* attrs on the wrapper for DevTools. */}
       <div
         style={{
           position: "relative",

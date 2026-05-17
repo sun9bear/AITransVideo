@@ -297,9 +297,18 @@ export function SegmentRow({
         // Mobile (<768px): 2-col grid (70px meta + 1fr text), actions row spans col 2 below.
         // Tablet/desktop (≥768px): 3-col grid (100px / 1fr / 230px actions on the right).
         "grid grid-cols-[70px_1fr] sm:grid-cols-[100px_1fr_230px] gap-2 sm:gap-3 py-2.5 px-3 border-b border-border last:border-b-0",
+        // Zebra: even rows get a slightly raised tint so adjacent rows
+        // are visually separable even with bilingual content (user request).
+        // hover: tint primary at very low alpha for the row under cursor.
+        // active overrides both with the cinnabar left-border + bg-primary.
+        "transition-colors",
         isActive
           ? "border-l-2 border-l-primary -ml-[2px] pl-[14px] bg-primary/[0.06]"
-          : "border-l-2 border-l-transparent -ml-[2px] pl-[14px]",
+          : [
+              "border-l-2 border-l-transparent -ml-[2px] pl-[14px]",
+              index % 2 === 1 ? "bg-muted/30" : "bg-transparent",
+              "hover:bg-primary/[0.04]",
+            ].join(" "),
       ].join(" ")}
     >
       {/* ── Left col: index + time (horizontal) + speaker dropdown (below) ── */}
@@ -443,26 +452,31 @@ export function SegmentRow({
           </div>
         )}
 
-        {/* Source audio inline player (after first preview fetch) */}
+        {/* Source audio inline player (after first preview fetch).
+         *  No height clamp — let the browser-native <audio controls> use
+         *  its natural ~40px so the row expands cleanly instead of
+         *  visually overflowing into the next row. Margin separates it
+         *  from text above + the next row below. */}
         {sourceAudioUrl && (
           <audio
             ref={sourceAudioRef}
             key={`src-${segment.segment_id}`}
             controls
             preload="metadata"
-            className="mt-1 w-full max-w-md h-7"
+            className="my-2 w-full max-w-md block"
             src={sourceAudioUrl}
           />
         )}
 
-        {/* Draft panel — appears inline when tts_dirty. Compact: play + duration delta + discard/accept */}
+        {/* Draft panel — appears inline when tts_dirty (plan §3.3 primary
+         *  location). Audio uses natural height; row expands. */}
         {status === "tts_dirty" && (
-          <div className="mt-1 flex items-center gap-2 text-[10.5px] border-l-2 border-[color:var(--ochre)] bg-[color:var(--ochre)]/8 rounded-r pl-2 pr-2 py-1.5">
+          <div className="mt-2 flex flex-wrap items-center gap-2 text-[10.5px] border-l-2 border-[color:var(--ochre)] bg-[color:var(--ochre)]/8 rounded-r pl-2 pr-2 py-1.5">
             <audio
               key={`draft-${segment.segment_id}-${segment.draft_wav_duration_ms ?? ""}`}
               controls
               preload="metadata"
-              className="h-7 flex-shrink-0 max-w-[200px]"
+              className="flex-shrink-0 max-w-[220px]"
               src={buildDraftAudioUrl(jobId, segment.segment_id)}
             />
             <span className="text-[10px] text-muted-foreground">
