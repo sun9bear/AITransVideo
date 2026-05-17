@@ -6,14 +6,10 @@ import { useParams, useRouter } from "next/navigation"
 import { toast } from "sonner"
 import {
   ArrowLeft,
-  Check,
   Loader2,
-  Play,
   PlaySquare,
   RefreshCw,
-  Scissors,
   Sparkles,
-  Trash2,
   X,
 } from "lucide-react"
 
@@ -47,7 +43,7 @@ import {
 } from "@/lib/api/editing"
 import { getJob } from "@/lib/api/jobs"
 import { ApiError, apiClient } from "@/lib/api/client"
-import { buildDraftAudioUrl, buildStreamUrl } from "@/lib/api/downloads"
+import { buildStreamUrl } from "@/lib/api/downloads"
 import { getErrorMessage } from "@/lib/api/errors"
 import { getJobDisplayTitle } from "@/features/jobs/presentation"
 import {
@@ -106,11 +102,6 @@ function hasTtsLengthGuidanceWarning(
   if (!isPreTtsLengthWarningStatus(status)) return false
   const severity = segment.tts_length_guidance?.severity
   return severity === "mild" || severity === "warning" || severity === "severe"
-}
-
-function formatDurationSeconds(ms: number | null | undefined): string {
-  if (typeof ms !== "number" || !Number.isFinite(ms)) return "-"
-  return `${(ms / 1000).toFixed(1)}s`
 }
 
 
@@ -1339,7 +1330,6 @@ export default function VideoEditPage() {
         }
         availableSpeakerIds={availableSpeakerIds}
         speakerNameMap={speakerNameMap}
-        maxCuts={1}
         onClose={() => setSplitDialogSegmentId(null)}
         onSubmit={async (sid, body) => {
           await handleSplitSegment(sid, body)

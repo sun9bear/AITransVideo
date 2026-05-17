@@ -32,8 +32,6 @@ export interface SplitSegmentDialogProps {
   segment: EditingSegment | null
   availableSpeakerIds: string[]
   speakerNameMap: Record<string, string>
-  /** Phase 1 hardcodes maxCuts=1. Phase 2 will lift this. */
-  maxCuts?: number
   onClose(): void
   onSubmit(
     segmentId: string,
@@ -59,7 +57,6 @@ export function SplitSegmentDialog({
   segment,
   availableSpeakerIds,
   speakerNameMap,
-  maxCuts = 1,
   onClose,
   onSubmit,
 }: SplitSegmentDialogProps) {
