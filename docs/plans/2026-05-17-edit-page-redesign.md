@@ -350,23 +350,94 @@ gap: 12px
 - Phase 1 限制：最多 1 个切点（产出 2 段）
 - Phase 2：无切点数量上限（产出 N 段）
 
-### 5.4 智能预填（Phase 2）
+### 5.4 智能识别说话人切点（Phase 2b v2 — LLM-backed 按钮）
 
-**性能约束（Eng review §4 + Codex 二审 #4）**：
-- 不前端拉全文件（30min+ 视频 raw_assemblyai 可达 50MB，浏览器 JSON.parse 慢/卡）
-- **新加后端端点** `GET /jobs/{job_id}/segments/{sid}/word-context` → 返该段时间范围内的 words（最多 500 KB）。modal 打开时调一次即可
-- modal 关闭后释放内存
-- 端点失败 / words 无 speaker_label → 智能提示条文案降级为「检测到 X 个标点切点（未识别说话人）」，不显示「说话人切点」
+> **v1 弃用说明**：原方案（modal 打开时自动调 `GET /word-context` + 基于 ASR
+> word-level `speaker_label` + 中文标点的启发式预填）在测试中把**单说话人段
+> 落**也拆成了 6+ 段（标点 cut 噪声压倒了说话人变化信号），用户明确反馈
+> 「这个智能拆分的逻辑依据是什么？感觉拆很碎啊，不是很合理 …… 一个段落内
+> 没有不同的说话人的话，没必要拆分吧？」。
+>
+> v2 改为**用户显式点按钮触发**：参照 S2 转录审校 Pass 1 的多模态 Gemini
+> 模式（同样的 audio clip + 文本输入 + 同一个 LLM 模型），让模型直接给出
+> 说话人切点建议。语义级判断比启发式可靠得多，避免「单说话人乱拆」。
 
-打开 modal 时：
+**入口**：拆分弹窗内，与「+ 在最长段落中点加切点」按钮并排的「智能识别
+说话人切点」（Sparkles 图标）。Modal 打开时**不自动调用**任何 LLM。
 
-1. 调 `GET /jobs/{job_id}/segments/{sid}/word-context`，拿当前段时间范围内的 words
-2. 检测 speaker_label 切换点 → 加入候选切点列表
-3. 检测中文标点（。！？） → 加入候选切点列表
-4. 去重 + 合并相邻切点（容差 < 200ms）
-5. 切点上限 5 个（避免噪声）；< 1 时不提示
-6. 预填 modal 时间轴，speaker dropdown 按 speaker_label 分配
-7. 智能提示条显示「检测到 X 个说话人切点 + Y 个标点切点」
+**前端流程**：
+
+1. modal 打开 → `GET /jobs/{id}/suggest-split-quota` 拿配额（已用/上限/剩
+   余 + 本任务已分析过的 `segment_ids_used`）
+2. 按钮 disabled 条件：
+   - `quota.segment_ids_used.includes(segment_id)`（本段已分析过 — 每段限 1 次）
+   - `quota.remaining === 0`（本任务已达上限）
+   - `isSuggesting`（正在调用中）
+   - `isSubmitting`（拆分提交中）
+3. 点按钮 → `POST /jobs/{id}/segments/{sid}/suggest-split`，body 携带：
+   - `speaker_name_map`：当前页面 review_state 的 speakerId→display_name
+   - `available_speaker_ids`：当前可选说话人 id 列表
+   - `video_title`（可选）：通过 `getJobDisplayTitle(job)` 传入，给 LLM 视
+     频级语境
+4. 响应处理：
+   - `needs_split: true` + `cuts.length > 0` → 原子替换 `cuts` + `speakerIds`
+     state，toast.success「已应用 N 个建议切点（点重置可撤销）」
+   - `needs_split: false` → 保留 mid-point 默认切点，toast.info「本段为单
+     说话人，无需拆分：{reason}」
+   - 错误码翻译（详见 §5.4.1）
+
+**后端职责**（`src/services/jobs/editing_split_suggest.py`，复用
+`transcript_reviewer._prepare_review_audio_clip` 抽 audio + `_create_review_client` +
+`_resolve_model_id_from_registry` 调 Gemini）：
+
+1. 取段落 `[start_ms, end_ms]` audio 切片（PCM mono 16k WAV，与 S2 Pass 1 同格式）
+2. 拼 prompt：源文本 + 中文译文 + 说话人列表 + `video_title`（可选）
+3. 调用 admin 配置的 Pass 1 模型（默认 Gemini 3.1 Pro，与 S2 共用）
+4. 解析模型输出 → 反查 `speaker_name_map` 把 display_name 映射回 speaker_id
+   （找不到时回落到 `available_speaker_ids` 中除当前段外的第一个）
+5. `at_text` 在源文本中定位：精确匹配 → 小写 → 空白规范化 fuzzy；都失败则
+   丢弃该切点
+6. 写入 `editor/editing/suggest_split_usage.json` 落库记账
+
+#### 5.4.1 错误码契约
+
+| HTTP | code | 触发条件 | 前端文案 |
+|------|------|---------|---------|
+| 409 | `segment_already_analyzed` | 本段已在 `segment_ids_used` 中 | 「本段已识别过，每段限 1 次」 |
+| 429 | `task_cap_exhausted` | `used >= cap` | 「本任务已达识别上限 (used/cap)」 |
+| 422 | `no_source_audio` | `source_audio.wav` 缺失 | 「该任务未保留源音频，无法分析」 |
+| 502 | `llm_failure` | 模型调用异常 / 响应解析失败 | 「分析失败：{reason}」 |
+
+#### 5.4.2 速率限制（付费 API 硬约束守卫）
+
+`get_suggest_split_quota()` 计算 cap：
+
+```python
+cap = MAX(MIN(int(round(total_segments * 0.2)), anomaly_count), 5)
+# anomaly_count = 段落里 alignment_method == "force_dsp" 的数量
+```
+
+- **0.2 × N**：N 段任务最多 20% 段落可使用（防止误触一次性烧账户）
+- **anomaly_count**：异常段落数（force_dsp 通常意味着可能有多说话人）
+- **5 段下限**：保证短任务（< 25 段）也有最少 5 次可用 — 否则全是单说
+  话人短视频时按钮永远 disabled，体验差
+- **每段 1 次**：模型对同一段重复分析无新信息，避免用户连点
+
+成本估算（Gemini 3.1 Pro，~$1 per task 任务级）：
+- 单次调用 ≈ $0.007–0.022（音频 + 文本 + 输出 token 综合）
+- 典型 30 段任务 cap=5 → 最坏 $0.11；50 段任务 cap=10 → $0.22
+- 远低于已有的 S2 review 任务级开销（$0.5+），可控
+
+#### 5.4.3 v1 → v2 迁移
+
+- v1 helper（`detectSuggestedSplits`, `mapWordsToSourceChars`, `interface SuggestedSplit`）
+  已从 `SplitSegmentDialog.tsx` 删除
+- v1 banner copy「智能预填」已删除（toast 取代）
+- `GET /word-context` 端点保留在 backend + `editing.ts` 中（不影响）但 dialog 不再调用
+- 守卫测试 `test_split_dialog_phase_2b_v2_llm_suggest` 强制：
+  - 新按钮 + handler + API 调用都存在
+  - v1 helpers 名字必须不出现在 dialog 文件中（防止回归）
+  - v1 banner copy「智能预填」必须不出现（toast 取代）
 
 ### 5.5 Phase 1 简化
 

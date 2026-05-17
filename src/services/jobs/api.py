@@ -501,6 +501,20 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                         download_name=f"tts_segments_{job_id[:12]}.zip",
                     )
                     return
+                # --- GET /jobs/{id}/editing/suggest-split-quota (Phase 2b v2)
+                # Read-only quota counter for the LLM-backed suggest-split
+                # endpoint. Frontend hits this on modal open to render
+                # remaining count + disable button when cap reached.
+                if (
+                    len(path_parts) == 3
+                    and path_parts[0] == "jobs"
+                    and path_parts[2] == "suggest-split-quota"
+                ):
+                    job_id = path_parts[1]
+                    result = service.get_suggest_split_quota(job_id)
+                    self._write_json(HTTPStatus.OK, {"success": True, **result})
+                    return
+
                 # --- GET /jobs/{id}/segments/{sid}/word-context (Phase 2b)
                 # Read-only word-level timing data for the segment's range.
                 # Feeds the SplitSegmentDialog smart-prefill logic. Read
@@ -979,6 +993,72 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                     )
                     self._write_json(HTTPStatus.OK, {"success": True, **result})
                     return
+                # POST /jobs/{id}/segments/{sid}/suggest-split (Phase 2b v2)
+                # LLM-backed split suggestion. User-explicit-trigger
+                # only. Per-segment cap = 1; per-job cap derived from
+                # segments count + anomaly count. Plan §5.4 v2.
+                if (len(path_parts) == 5 and path_parts[0] == "jobs"
+                        and path_parts[2] == "segments" and path_parts[4] == "suggest-split"):
+                    from services.jobs.editing_split_suggest import (
+                        SplitSuggestCapExhaustedError,
+                        SplitSuggestNoAudioError,
+                        SplitSuggestSegmentUsedError,
+                        SplitSuggestError,
+                    )
+                    job_id = path_parts[1]
+                    segment_id = path_parts[3]
+                    payload = self._read_json_payload()
+                    speaker_name_map_raw = payload.get("speaker_name_map") or {}
+                    if not isinstance(speaker_name_map_raw, dict):
+                        raise ValueError("speaker_name_map must be an object")
+                    speaker_name_map = {
+                        str(k): str(v) for k, v in speaker_name_map_raw.items()
+                    }
+                    available_speaker_ids_raw = payload.get("available_speaker_ids") or []
+                    if not isinstance(available_speaker_ids_raw, list):
+                        raise ValueError("available_speaker_ids must be a list")
+                    available_speaker_ids = [str(s) for s in available_speaker_ids_raw]
+                    video_title = str(payload.get("video_title") or "")
+                    try:
+                        result = service.suggest_split_for_segment(
+                            job_id,
+                            segment_id,
+                            speaker_name_map=speaker_name_map,
+                            available_speaker_ids=available_speaker_ids,
+                            video_title=video_title,
+                        )
+                    except SplitSuggestSegmentUsedError as exc:
+                        self._write_json(
+                            HTTPStatus.CONFLICT,
+                            {"error": "segment_already_analyzed", "message": str(exc)},
+                        )
+                        return
+                    except SplitSuggestCapExhaustedError as exc:
+                        self._write_json(
+                            HTTPStatus.TOO_MANY_REQUESTS,
+                            {
+                                "error": "task_cap_exhausted",
+                                "message": str(exc),
+                                "used": exc.used,
+                                "cap": exc.cap,
+                            },
+                        )
+                        return
+                    except SplitSuggestNoAudioError as exc:
+                        self._write_json(
+                            HTTPStatus.UNPROCESSABLE_ENTITY,
+                            {"error": "no_source_audio", "message": str(exc)},
+                        )
+                        return
+                    except SplitSuggestError as exc:
+                        self._write_json(
+                            HTTPStatus.BAD_GATEWAY,
+                            {"error": "llm_failure", "message": str(exc)},
+                        )
+                        return
+                    self._write_json(HTTPStatus.OK, {"success": True, **result})
+                    return
+
                 # POST /jobs/{id}/segments/{sid}/split-many — atomic multi-cut split
                 # (Phase 2a, plan 2026-05-17 §5.6).
                 if (len(path_parts) == 5 and path_parts[0] == "jobs"

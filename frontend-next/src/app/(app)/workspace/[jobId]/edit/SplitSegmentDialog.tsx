@@ -1,26 +1,30 @@
 "use client"
 
 /**
- * SplitSegmentDialog — Phase 2a (multi-cut) + Phase 2b (smart prefill).
+ * SplitSegmentDialog — Phase 2a (multi-cut) + Phase 2b v2 (LLM suggest).
  *
  * User picks 1..N cuts in source text; CN cuts auto-mirror proportionally.
  * Each resulting piece gets a speaker assignment.
  *
  * Plan refs:
  *   - §5 modal structure
- *   - §5.4 smart prefill via word-context endpoint (Phase 2b)
+ *   - §5.4 v2 LLM-backed "智能识别说话人切点" button (replaces the v1
+ *     heuristic auto-prefill — that approach broke single-speaker
+ *     segments into too many pieces and was user-rejected).
  *   - §5.6 backend split_editing_segment_many + write-ahead journal
  *
  * Backend endpoints:
- *   - GET  /jobs/{id}/segments/{sid}/word-context — word-level timing
- *     data; used at open time to compute suggested cuts (speaker label
- *     changes + Chinese punctuation). Phase 2b.
+ *   - GET  /jobs/{id}/suggest-split-quota — fetch remaining quota for
+ *     this job (rate limit = MAX(MIN(0.2 × N, anomaly_count), 5)).
+ *   - POST /jobs/{id}/segments/{sid}/suggest-split — user-initiated
+ *     multimodal Gemini call (S2 Pass 1 pattern, same audio clip prep).
  *   - POST /jobs/{id}/segments/{sid}/split-many — atomic 3-file rename
  *     wrapped in a write-ahead journal. Phase 2a.
  */
 
 import { useEffect, useMemo, useRef, useState } from "react"
 import { Loader2, RotateCcw, Plus, Sparkles, X } from "lucide-react"
+import { toast } from "sonner"
 import {
   Dialog,
   DialogContent,
@@ -29,19 +33,23 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
+import { ApiError } from "@/lib/api/client"
 import {
-  getSegmentWordContext,
+  getSuggestSplitQuota,
+  suggestSplitForSegment,
   type EditingSegment,
-  type WordContextWord,
+  type SuggestSplitQuota,
 } from "@/lib/api/editing"
 
 export interface SplitSegmentDialogProps {
   open: boolean
-  /** Job id needed to fetch word-context (Phase 2b smart prefill). */
+  /** Job id needed to fetch quota + call suggest-split (Phase 2b v2). */
   jobId: string
   segment: EditingSegment | null
   availableSpeakerIds: string[]
   speakerNameMap: Record<string, string>
+  /** Optional video title passed into the LLM prompt as context. */
+  videoTitle?: string
   onClose(): void
   /** Phase 2a multi-cut payload. cuts strictly increasing; speaker_ids
    *  length = cuts.length + 1. */
@@ -52,254 +60,6 @@ export interface SplitSegmentDialogProps {
       speaker_ids: string[]
     },
   ): Promise<void> | void
-}
-
-// ---------- Phase 2b: smart prefill helpers ----------
-
-interface SuggestedSplit {
-  cuts: Array<{ source_index: number; cn_index: number }>
-  speakerIds: string[]
-  speakerChanges: number    // # detected speaker-boundary candidates
-  punctuationCuts: number   // # detected CN punctuation candidates
-}
-
-/** Find the char index in `sourceText` AFTER each word. Best-effort
- *  match: case-insensitive search forward from current cursor. Falls
- *  back to cursor += len when not found. Returns parallel array of
- *  char-end positions, one per word. */
-function mapWordsToSourceChars(
-  sourceText: string,
-  words: ReadonlyArray<{ text: string }>,
-): number[] {
-  const result: number[] = []
-  const lower = sourceText.toLowerCase()
-  let cursor = 0
-  for (const w of words) {
-    const wordText = w.text.trim()
-    if (!wordText) {
-      result.push(cursor)
-      continue
-    }
-    const lowerWord = wordText.toLowerCase()
-    // Search slightly behind cursor to handle minor mismatches (e.g.
-    // punctuation appended by ASR).
-    const searchFrom = Math.max(0, cursor - 5)
-    const pos = lower.indexOf(lowerWord, searchFrom)
-    if (pos >= 0) {
-      cursor = pos + lowerWord.length
-    } else {
-      // Best-effort: assume the ASR text consumed `len + 1` chars
-      // (space). Drift propagates but bounded.
-      cursor += lowerWord.length + 1
-    }
-    result.push(Math.min(cursor, sourceText.length))
-  }
-  return result
-}
-
-/** Detect suggested split positions.
- *
- *  Authoritative trigger = speaker_label change between adjacent words.
- *  CN punctuation is used ONLY as a refinement: when a speaker change
- *  falls within ±500ms of a sentence-ending punctuation, snap the cut
- *  to the punctuation position for a cleaner break.
- *
- *  If the segment has 0 speaker changes (single-speaker monologue),
- *  this returns an EMPTY cuts list — the dialog will keep the seed
- *  effect's default mid-point cut. User can still manually click to
- *  add cuts by punctuation if they want.
- *
- *  Rationale (2026-05-17 user feedback): auto-applying every
- *  punctuation cut shattered single-speaker segments into 6+ pieces,
- *  which serves no purpose (TTS doesn't benefit from finer chunks for
- *  monologue, and the user must manually un-split each one).
- *
- *  Cap at 5 cuts (plan §5.4 step 5). Source positions snapped to word
- *  boundaries via snapSourceCutToWord. CN positions auto-mirrored.
- */
-function detectSuggestedSplits(params: {
-  sourceText: string
-  cnText: string
-  words: ReadonlyArray<{ text: string; start: number; end: number; speaker: string | null }>
-  segmentStartMs: number
-  segmentEndMs: number
-  segmentSpeakerId: string | null
-  availableSpeakerIds: string[]
-}): SuggestedSplit {
-  const {
-    sourceText,
-    cnText,
-    words,
-    segmentStartMs,
-    segmentEndMs,
-    segmentSpeakerId,
-    availableSpeakerIds,
-  } = params
-
-  if (words.length === 0 || sourceText.length === 0) {
-    return { cuts: [], speakerIds: [], speakerChanges: 0, punctuationCuts: 0 }
-  }
-
-  // 1. Speaker change candidates — boundary between word[i-1] and word[i]
-  //    where their speaker labels differ. Cut time = midpoint of the gap.
-  const speakerCutMs: number[] = []
-  for (let i = 1; i < words.length; i++) {
-    const prev = words[i - 1].speaker
-    const cur = words[i].speaker
-    if (prev && cur && prev !== cur) {
-      speakerCutMs.push(Math.floor((words[i - 1].end + words[i].start) / 2))
-    }
-  }
-  const speakerChangesCount = speakerCutMs.length
-
-  // 2. Chinese punctuation candidates (used as refinement only).
-  const punctRegex = /[。！？]/g
-  const cnPunctCuts: number[] = []
-  let m: RegExpExecArray | null
-  while ((m = punctRegex.exec(cnText)) !== null) {
-    const idx = m.index + 1
-    if (idx > 0 && idx < cnText.length) {
-      cnPunctCuts.push(idx)
-    }
-  }
-  const punctuationCutsCount = cnPunctCuts.length
-
-  // EARLY RETURN — no speaker change → no auto-prefill. Dialog keeps
-  // its default mid-point cut from the seed effect.
-  if (speakerChangesCount === 0) {
-    return {
-      cuts: [],
-      speakerIds: [],
-      speakerChanges: 0,
-      punctuationCuts: punctuationCutsCount,
-    }
-  }
-
-  // Map CN punctuation positions → estimated ms via proportional
-  // ratio over the segment's time window. These are CANDIDATES for
-  // refining speaker cuts, not separate cuts.
-  const segmentDuration = Math.max(1, segmentEndMs - segmentStartMs)
-  const punctCutMs: number[] = cnPunctCuts.map((cnIdx) =>
-    segmentStartMs + Math.floor((cnIdx / Math.max(1, cnText.length)) * segmentDuration),
-  )
-
-  // 3. Refine each speaker cut by snapping to nearest punctuation
-  //    within ±500ms. Yields cleaner breaks aligned to sentence ends.
-  const refinedCutMs = speakerCutMs.map((sMs) => {
-    let nearestPunct: number | null = null
-    let nearestDist = Infinity
-    for (const pMs of punctCutMs) {
-      const d = Math.abs(pMs - sMs)
-      if (d < 500 && d < nearestDist) {
-        nearestDist = d
-        nearestPunct = pMs
-      }
-    }
-    return nearestPunct ?? sMs
-  })
-
-  // 4. Sort + dedupe (200ms tolerance, plan §5.4 step 4).
-  const sortedMs = [...refinedCutMs].sort((a, b) => a - b)
-  const deduped: number[] = []
-  for (const ms of sortedMs) {
-    if (deduped.length === 0 || (ms - deduped[deduped.length - 1]) > 200) {
-      deduped.push(ms)
-    }
-  }
-
-  // 5. Cap at 5 cuts (plan §5.4 step 5).
-  const cappedMs = deduped.slice(0, 5)
-  if (cappedMs.length === 0) {
-    return {
-      cuts: [],
-      speakerIds: [],
-      speakerChanges: speakerChangesCount,
-      punctuationCuts: punctuationCutsCount,
-    }
-  }
-
-  // 5. Convert each cut ms → source char index via the words→chars map.
-  const charEnds = mapWordsToSourceChars(sourceText, words)
-  const cuts: Array<{ source_index: number; cn_index: number }> = []
-  for (const cutMs of cappedMs) {
-    // Find last word that ends at or before this cut ms.
-    let lastBeforeIdx = -1
-    for (let i = 0; i < words.length; i++) {
-      if (words[i].end <= cutMs) {
-        lastBeforeIdx = i
-      } else {
-        break
-      }
-    }
-    if (lastBeforeIdx < 0) continue
-    const rawSourceIdx = charEnds[lastBeforeIdx]
-    const snappedSource = snapSourceCutToWord(sourceText, rawSourceIdx)
-    if (snappedSource <= 0 || snappedSource >= sourceText.length) continue
-    // De-dup against previously accepted cuts.
-    if (cuts.some((c) => c.source_index === snappedSource)) continue
-    const cnRatio = sourceText.length > 0 ? snappedSource / sourceText.length : 0.5
-    const cnIdx = Math.max(1, Math.min(Math.round(cnRatio * cnText.length), cnText.length - 1))
-    cuts.push({ source_index: snappedSource, cn_index: cnIdx })
-  }
-  cuts.sort((a, b) => a.source_index - b.source_index)
-
-  // 6. Assign speaker per piece (plan §5.4 step 6).
-  //    Heuristic: word[0].speaker is the segment's main ASR speaker.
-  //    For each piece, find its dominant ASR speaker. Same as main →
-  //    segment.speaker_id. Different → first OTHER availableSpeakerId.
-  const segMainAsr = words[0]?.speaker ?? null
-  const otherSpeaker =
-    availableSpeakerIds.find((sid) => sid !== segmentSpeakerId)
-    ?? segmentSpeakerId
-    ?? availableSpeakerIds[0]
-    ?? ""
-
-  const pieceBoundariesMs = [segmentStartMs]
-  for (const cut of cuts) {
-    // Approximate cut ms via source ratio (good enough for dominant-speaker check)
-    const r = sourceText.length > 0 ? cut.source_index / sourceText.length : 0.5
-    pieceBoundariesMs.push(segmentStartMs + Math.floor(r * segmentDuration))
-  }
-  pieceBoundariesMs.push(segmentEndMs)
-
-  const speakerIds: string[] = []
-  for (let p = 0; p < pieceBoundariesMs.length - 1; p++) {
-    const pStart = pieceBoundariesMs[p]
-    const pEnd = pieceBoundariesMs[p + 1]
-    const wordsInPiece = words.filter(
-      (w) => w.start >= pStart && w.end <= pEnd && w.speaker,
-    )
-    if (wordsInPiece.length === 0) {
-      speakerIds.push(segmentSpeakerId ?? otherSpeaker)
-      continue
-    }
-    // Dominant ASR speaker
-    const counts = new Map<string, number>()
-    for (const w of wordsInPiece) {
-      const sp = w.speaker as string
-      counts.set(sp, (counts.get(sp) ?? 0) + 1)
-    }
-    let bestAsr = ""
-    let bestN = 0
-    for (const [sp, n] of counts) {
-      if (n > bestN) {
-        bestN = n
-        bestAsr = sp
-      }
-    }
-    if (bestAsr === segMainAsr) {
-      speakerIds.push(segmentSpeakerId ?? otherSpeaker)
-    } else {
-      speakerIds.push(otherSpeaker || segmentSpeakerId || "")
-    }
-  }
-
-  return {
-    cuts,
-    speakerIds,
-    speakerChanges: speakerChangesCount,
-    punctuationCuts: punctuationCutsCount,
-  }
 }
 
 /** Snap a source-text cut position to the nearest word boundary.
@@ -519,6 +279,7 @@ export function SplitSegmentDialog({
   segment,
   availableSpeakerIds,
   speakerNameMap,
+  videoTitle,
   onClose,
   onSubmit,
 }: SplitSegmentDialogProps) {
@@ -531,14 +292,13 @@ export function SplitSegmentDialog({
   const [speakerIds, setSpeakerIds] = useState<string[]>([])
   const [isSubmitting, setIsSubmitting] = useState(false)
 
-  // Phase 2b smart prefill state.
-  const [isPrefilling, setIsPrefilling] = useState(false)
-  const [prefillResult, setPrefillResult] = useState<{
-    applied: boolean
-    speakerChanges: number
-    punctuationCuts: number
-    contextAvailable: boolean
-  } | null>(null)
+  // Phase 2b v2: LLM suggest-split button state.
+  // ``quota`` is fetched once per dialog open; the button reads
+  // ``segment_ids_used`` to disable for already-analyzed segments and
+  // ``remaining`` for the per-job cap. After a successful suggest call
+  // we patch ``quota`` locally rather than re-fetching.
+  const [isSuggesting, setIsSuggesting] = useState(false)
+  const [quota, setQuota] = useState<SuggestSplitQuota | null>(null)
 
   // Re-seed when a new segment opens: start with one cut at midpoint.
   useEffect(() => {
@@ -552,71 +312,105 @@ export function SplitSegmentDialog({
       segment.speaker_id ?? fallback,
     ])
     setIsSubmitting(false)
-    setPrefillResult(null)
   }, [segment, open, sourceText.length, cnText.length, availableSpeakerIds])
 
-  // Phase 2b: on open, lazy-load word-context + apply smart prefill.
-  // Runs after the seed effect; cancels via cancelled flag if segment/
-  // dialog state changes mid-flight.
+  // Phase 2b v2: fetch quota once when the dialog opens. Best-effort —
+  // a failure leaves the button enabled and lets the actual POST be the
+  // error site (backend re-validates the cap, so we can't over-issue).
   useEffect(() => {
-    if (!segment || !open) return
+    if (!open || !jobId) return
     let cancelled = false
-    setIsPrefilling(true)
     ;(async () => {
       try {
-        const ctx = await getSegmentWordContext(jobId, segment.segment_id)
-        if (cancelled) return
-        if (!ctx.available || ctx.words.length === 0) {
-          setPrefillResult({
-            applied: false,
-            speakerChanges: 0,
-            punctuationCuts: 0,
-            contextAvailable: false,
-          })
-          return
-        }
-        const startMs = typeof segment.start_ms === "number" ? segment.start_ms : 0
-        const endMs = typeof segment.end_ms === "number" ? segment.end_ms : startMs + 1
-        const result = detectSuggestedSplits({
-          sourceText,
-          cnText,
-          words: ctx.words as WordContextWord[],
-          segmentStartMs: startMs,
-          segmentEndMs: endMs,
-          segmentSpeakerId: segment.speaker_id ?? null,
-          availableSpeakerIds,
-        })
-        if (cancelled) return
-        if (result.cuts.length > 0) {
-          setCuts(result.cuts)
-          setSpeakerIds(result.speakerIds)
-        }
-        setPrefillResult({
-          applied: result.cuts.length > 0,
-          speakerChanges: result.speakerChanges,
-          punctuationCuts: result.punctuationCuts,
-          contextAvailable: true,
-        })
+        const q = await getSuggestSplitQuota(jobId)
+        if (!cancelled) setQuota(q)
       } catch {
-        // Best-effort: leave the mid-point default if context fetch fails.
-        if (!cancelled) {
-          setPrefillResult({
-            applied: false,
-            speakerChanges: 0,
-            punctuationCuts: 0,
-            contextAvailable: false,
-          })
-        }
-      } finally {
-        if (!cancelled) setIsPrefilling(false)
+        if (!cancelled) setQuota(null)
       }
     })()
     return () => {
       cancelled = true
     }
-  }, [jobId, segment, open, sourceText, cnText, availableSpeakerIds])
+  }, [open, jobId])
 
   const speakerLabel = (sid: string): string => speakerNameMap[sid] || sid
+
+  // Phase 2b v2: user-initiated LLM suggest. The backend enforces both
+  // per-segment (cap=1) and per-job caps; client just disables the
+  // button to avoid the round-trip. Success → replace cuts + speakers
+  // atomically + toast. ``needs_split: false`` → leave the existing
+  // mid-point default in place + info toast.
+  const handleSuggestSplit = async () => {
+    if (!segment || isSuggesting) return
+    setIsSuggesting(true)
+    try {
+      const resp = await suggestSplitForSegment(jobId, segment.segment_id, {
+        speaker_name_map: speakerNameMap,
+        available_speaker_ids: availableSpeakerIds,
+        video_title: videoTitle,
+      })
+      // Patch quota optimistically — backend bumps used + adds this
+      // segment_id to segment_ids_used. Saves a round-trip.
+      setQuota((prev) =>
+        prev
+          ? {
+              ...prev,
+              used: resp.usage.used,
+              cap: resp.usage.cap,
+              remaining: resp.usage.remaining,
+              segment_ids_used: prev.segment_ids_used.includes(segment.segment_id)
+                ? prev.segment_ids_used
+                : [...prev.segment_ids_used, segment.segment_id],
+            }
+          : null,
+      )
+      if (resp.needs_split && resp.cuts.length > 0) {
+        // Replace cuts + speakers atomically. cuts are already sorted
+        // by source_index on the server; speakerIds aligns to N+1
+        // pieces (= the speaker BEFORE each cut + the speaker AFTER
+        // the last cut).
+        const sortedCuts = [...resp.cuts].sort((a, b) => a.source_index - b.source_index)
+        setCuts(sortedCuts.map((c) => ({ source_index: c.source_index, cn_index: c.cn_index })))
+        // N cuts → N+1 pieces. Piece i (0..N-1) takes speaker of cut i
+        // (cut.speaker_id is "speaker AT this cut", semantically the
+        // speaker of the preceding piece). Last piece (i=N) needs an
+        // extra speaker — use segment's current speaker as fallback.
+        const fallback = segment.speaker_id ?? availableSpeakerIds[0] ?? ""
+        const newSpeakers = [
+          ...sortedCuts.map((c) => c.speaker_id || fallback),
+          sortedCuts[sortedCuts.length - 1]?.speaker_id || fallback,
+        ]
+        setSpeakerIds(newSpeakers)
+        toast.success(
+          `已应用 ${sortedCuts.length} 个建议切点（点重置可撤销）`,
+        )
+      } else {
+        toast.info(`本段为单说话人，无需拆分${resp.reason ? `：${resp.reason}` : ""}`)
+      }
+    } catch (e: unknown) {
+      if (e instanceof ApiError) {
+        const payload = (e.payload as { code?: string; reason?: string; used?: number; cap?: number } | null)
+        const code = payload?.code
+        if (e.status === 409 && code === "segment_already_analyzed") {
+          toast.error("本段已识别过，每段限 1 次")
+        } else if (e.status === 429 && code === "task_cap_exhausted") {
+          const used = payload?.used ?? quota?.used ?? 0
+          const cap = payload?.cap ?? quota?.cap ?? 0
+          toast.error(`本任务已达识别上限 (${used}/${cap})`)
+        } else if (e.status === 422 && code === "no_source_audio") {
+          toast.error("该任务未保留源音频，无法分析")
+        } else if (e.status === 502 && code === "llm_failure") {
+          toast.error(`分析失败：${payload?.reason || "模型调用错误"}`)
+        } else {
+          toast.error(`分析失败：${e.message}`)
+        }
+      } else {
+        toast.error("分析失败：网络异常")
+      }
+    } finally {
+      setIsSuggesting(false)
+    }
+  }
 
   /** Add a cut at source_index. Auto-mirror to cn proportionally.
    *  De-dups if a cut already exists at that source position.
@@ -844,29 +638,6 @@ export function SplitSegmentDialog({
           <p className="text-sm text-muted-foreground">无选中段落</p>
         ) : (
           <div className="space-y-4">
-            {/* Phase 2b smart prefill banner */}
-            {isPrefilling ? (
-              <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground inline-flex items-center gap-2">
-                <Loader2 className="h-3 w-3 animate-spin" />
-                正在分析说话人切换…
-              </div>
-            ) : prefillResult ? (
-              <div
-                className={
-                  prefillResult.applied
-                    ? "rounded-md border border-[color:var(--ochre)]/40 bg-[color:var(--ochre)]/8 px-3 py-2 text-[11px] text-[color:var(--ochre)] inline-flex items-center gap-2"
-                    : "rounded-md border border-border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground inline-flex items-center gap-2"
-                }
-              >
-                <Sparkles className="h-3 w-3" />
-                {prefillResult.applied
-                  ? `智能预填：检测到 ${prefillResult.speakerChanges} 处说话人切换；可手动调整或重置`
-                  : !prefillResult.contextAvailable
-                    ? "无词级数据（已用中点预设；点文字加切点）"
-                    : "本段为单说话人，未自动拆分（如需拆分长段落，请点文字位置手动加切点）"}
-              </div>
-            ) : null}
-
             {/* Source (English) — click chars to add cuts, × on a bar to remove */}
             <div className="space-y-2">
               <div className="flex items-center justify-between text-xs">
@@ -906,8 +677,8 @@ export function SplitSegmentDialog({
               />
             </div>
 
-            {/* Add-cut shortcut */}
-            <div>
+            {/* Add-cut shortcuts: midpoint + LLM suggest */}
+            <div className="flex flex-wrap items-center gap-2">
               <Button
                 size="sm"
                 variant="outline"
@@ -917,6 +688,38 @@ export function SplitSegmentDialog({
                 <Plus className="h-3.5 w-3.5 mr-1" />
                 在最长段落中点加切点
               </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleSuggestSplit}
+                disabled={
+                  isSuggesting
+                  || isSubmitting
+                  || !segment
+                  || (quota?.segment_ids_used.includes(segment.segment_id) ?? false)
+                  || (quota?.remaining === 0)
+                }
+                className="text-xs"
+                title={
+                  quota?.segment_ids_used.includes(segment?.segment_id ?? "")
+                    ? "本段已识别过"
+                    : quota?.remaining === 0
+                      ? "本任务已达识别上限"
+                      : "调用多模态大模型分析音频+文本，给出切点建议（每段限 1 次）"
+                }
+              >
+                {isSuggesting ? (
+                  <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
+                ) : (
+                  <Sparkles className="h-3.5 w-3.5 mr-1" />
+                )}
+                智能识别说话人切点
+              </Button>
+              {quota && (
+                <span className="text-[10px] text-muted-foreground tabular-nums">
+                  本任务已用 {quota.used}/{quota.cap}
+                </span>
+              )}
             </div>
 
             {/* Preview cards — N+1 pieces */}

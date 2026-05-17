@@ -2619,6 +2619,11 @@ _POST_EDIT_SEGMENT_ACTIONS: frozenset[str] = frozenset({
     # + voice_map. Routed through this allowlist for feature-flag
     # parity and lock dispatch alignment with peer mutations.
     "split-many",
+    # 2026-05-17 plan §5.4 v2 / Phase 2b v2: LLM-backed split
+    # suggestion. User-explicit trigger (paid Gemini call). Rate
+    # limit enforced inside the kernel (per-segment 1, per-job cap
+    # = MAX(MIN(0.2 × N, anomaly_count), 5)).
+    "suggest-split",
 })
 
 

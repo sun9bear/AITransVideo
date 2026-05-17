@@ -234,23 +234,88 @@ def test_split_dialog_supports_multi_cut_phase_2a():
     assert "speaker_ids" in text, "Submit body must carry speaker_ids array"
 
 
-def test_split_dialog_phase_2b_smart_prefill():
-    """Phase 2b: dialog must lazy-load word-context on open + run
-    detectSuggestedSplits. Banner shown when prefill applied or no
-    context available."""
+def test_split_dialog_phase_2b_v2_llm_suggest():
+    """Phase 2b v2: dialog must expose a user-initiated LLM suggest button
+    ("智能识别说话人切点") instead of the v1 auto-prefill heuristic.
+    Reason: v1 broke single-speaker segments into too many pieces (user
+    explicitly rejected). v2 is opt-in only.
+
+    Guard checks:
+      - Button label is present in JSX
+      - Calls suggest-split API (not the dead v1 word-context API)
+      - The v1 heuristic helpers must be GONE (no regression to auto-cut)
+      - Banner copy "智能预填" must be gone (was the v1 auto-applied indicator)
+    """
     dialog_path = EDIT_DIR / "SplitSegmentDialog.tsx"
     text = dialog_path.read_text(encoding="utf-8")
-    assert "getSegmentWordContext" in text, (
-        "SplitSegmentDialog must call getSegmentWordContext (Phase 2b smart prefill)"
+    # Positive: v2 button + handler.
+    assert "智能识别说话人切点" in text, (
+        "Phase 2b v2: dialog must have the '智能识别说话人切点' button label"
     )
-    assert "detectSuggestedSplits" in text, (
-        "SplitSegmentDialog must implement detectSuggestedSplits heuristic"
+    assert "suggestSplitForSegment" in text, (
+        "Phase 2b v2: dialog must call suggestSplitForSegment API"
     )
-    assert "智能预填" in text, "Smart prefill banner copy missing"
-    # Prop sig must accept jobId for the API call
+    assert "getSuggestSplitQuota" in text, (
+        "Phase 2b v2: dialog must fetch quota via getSuggestSplitQuota"
+    )
+    assert "handleSuggestSplit" in text, (
+        "Phase 2b v2: dialog must define handleSuggestSplit handler"
+    )
+    # Prop sig must still accept jobId (used by the new API too).
     assert re.search(r"jobId\s*:\s*string", text), (
-        "SplitSegmentDialog must accept jobId prop for word-context fetch"
+        "SplitSegmentDialog must accept jobId prop"
     )
+    # Negative: v1 helpers must be gone — they auto-ran on dialog open
+    # and produced bad cuts for single-speaker segments.
+    assert "detectSuggestedSplits" not in text, (
+        "Phase 2b v1 helper `detectSuggestedSplits` must be removed "
+        "(replaced by user-initiated LLM button)"
+    )
+    assert "mapWordsToSourceChars" not in text, (
+        "Phase 2b v1 helper `mapWordsToSourceChars` must be removed"
+    )
+    assert "getSegmentWordContext" not in text, (
+        "Phase 2b v1 word-context API must not be called from the dialog "
+        "(v2 uses suggest-split instead). The export can stay in editing.ts "
+        "for backwards compat but the dialog must not reference it."
+    )
+    assert "智能预填" not in text, (
+        "v1 banner copy '智能预填' must be removed (was the auto-prefill indicator). "
+        "v2 surfaces results via toast notifications, not a persistent banner."
+    )
+
+
+def test_split_dialog_v2_handles_llm_errors():
+    """v2 守卫: dialog must translate the four documented error codes from
+    POST /suggest-split into user-facing toasts. Plan §5.4 v2 lists:
+      - 409 segment_already_analyzed
+      - 429 task_cap_exhausted
+      - 422 no_source_audio
+      - 502 llm_failure
+    Each must appear in the dialog's error-handling branch."""
+    dialog_path = EDIT_DIR / "SplitSegmentDialog.tsx"
+    text = dialog_path.read_text(encoding="utf-8")
+    for code in (
+        "segment_already_analyzed",
+        "task_cap_exhausted",
+        "no_source_audio",
+        "llm_failure",
+    ):
+        assert code in text, (
+            f"v2 dialog must handle error code `{code}` (plan §5.4 v2 contract)"
+        )
+
+
+def test_page_passes_video_title_to_split_dialog():
+    """v2 守卫: page.tsx must pass videoTitle to the dialog so the LLM
+    prompt has video-level context (improves disambiguation when only
+    short snippets are available)."""
+    text = EDIT_PAGE.read_text(encoding="utf-8")
+    assert re.search(
+        r"<SplitSegmentDialog[^/]*videoTitle=\{[^}]*getJobDisplayTitle",
+        text,
+        re.DOTALL,
+    ), "page.tsx must pass videoTitle={getJobDisplayTitle(job) ...} to SplitSegmentDialog"
 
 
 def test_page_passes_job_id_to_split_dialog():

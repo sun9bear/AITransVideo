@@ -1451,6 +1451,7 @@ export default function VideoEditPage() {
         }
         availableSpeakerIds={availableSpeakerIds}
         speakerNameMap={speakerNameMap}
+        videoTitle={job ? getJobDisplayTitle(job) : undefined}
         onClose={() => setSplitDialogSegmentId(null)}
         onSubmit={async (sid, body) => {
           // Phase 2a: dialog always submits multi-cut payload. Backend's

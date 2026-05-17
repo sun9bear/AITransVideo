@@ -313,6 +313,61 @@ export async function getSegmentWordContext(
 }
 
 /**
+ * Phase 2b v2 — LLM-backed split suggestion (plan §5.4 v2).
+ * User-explicit trigger only (button click). Backend enforces:
+ *   - Per-segment cap = 1
+ *   - Per-job cap = MAX(MIN(0.2 × N, anomaly_count), 5)
+ * On 409 → segment_already_analyzed; on 429 → task_cap_exhausted;
+ * on 422 → no_source_audio; on 502 → llm_failure.
+ */
+export interface SuggestSplitCut {
+  source_index: number
+  cn_index: number
+  speaker_id: string
+  at_text: string
+}
+
+export interface SuggestSplitResponse {
+  segment_id: string
+  needs_split: boolean
+  reason: string
+  cuts: SuggestSplitCut[]
+  usage: {
+    used: number
+    cap: number
+    remaining: number
+  }
+}
+
+export async function suggestSplitForSegment(
+  jobId: string,
+  segmentId: string,
+  body: {
+    speaker_name_map: Record<string, string>
+    available_speaker_ids: string[]
+    video_title?: string
+  },
+): Promise<SuggestSplitResponse> {
+  return apiClient.post(
+    `/jobs/${jobId}/segments/${segmentId}/suggest-split`,
+    { body },
+  )
+}
+
+export interface SuggestSplitQuota {
+  used: number
+  cap: number
+  remaining: number
+  segment_ids_used: string[]
+}
+
+export async function getSuggestSplitQuota(
+  jobId: string,
+): Promise<SuggestSplitQuota> {
+  return apiClient.get(`/jobs/${jobId}/suggest-split-quota`)
+}
+
+/**
  * Phase 2a — atomic N-cut split (plan 2026-05-17 §5.6).
  * Backed by a write-ahead journal on the server for all-or-nothing
  * recovery across segments / status / voice_map files. cuts must be

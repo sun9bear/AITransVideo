@@ -959,6 +959,47 @@ class JobService:
             "segment_status": load_segment_status(record.project_dir),
         }
 
+    def suggest_split_for_segment(
+        self,
+        job_id: str,
+        segment_id: str,
+        *,
+        speaker_name_map: dict[str, str],
+        available_speaker_ids: list[str],
+        video_title: str = "",
+    ) -> dict:
+        """Phase 2b v2: LLM-backed split suggestion (plan §5.4 v2).
+
+        User-explicit-trigger only (frontend button click). Per-segment
+        cap = 1; per-job cap = MAX(MIN(0.2 × N, anomaly_count), 5).
+        Reuses admin-configured Pass1 model + audio fallback chain.
+
+        Returns dict with needs_split / reason / cuts / usage. Raises
+        EditingConflictError on bad segment_id; SplitSuggestSegmentUsedError
+        / SplitSuggestCapExhaustedError on rate limit; SplitSuggestNoAudioError
+        on missing audio; SplitSuggestError on LLM failure.
+        """
+        from services.jobs.editing_split_suggest import suggest_split_for_segment as _suggest
+        from services.jobs.input_validators import validate_segment_id
+
+        validate_segment_id(segment_id)
+        record = self._require_editing(job_id)
+        return _suggest(
+            record.project_dir,
+            segment_id,
+            speaker_name_map=speaker_name_map,
+            available_speaker_ids=available_speaker_ids,
+            video_title=video_title,
+        )
+
+    def get_suggest_split_quota(self, job_id: str) -> dict:
+        """Phase 2b v2: read-only quota for split-suggest endpoint.
+        Frontend hits this on modal open to render the counter +
+        disable button when cap reached."""
+        from services.jobs.editing_split_suggest import get_suggest_split_quota as _quota
+        record = self._require_editing(job_id)
+        return _quota(record.project_dir)
+
     def get_segment_word_context(
         self,
         job_id: str,

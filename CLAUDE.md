@@ -314,6 +314,8 @@ commit 管线（alignment / publish 阶段代码）**永不**调用 `tts_generat
 | POST | `/job-api/jobs/{id}/segments/{sid}/discard-draft` | T1-5 | 丢弃 draft |
 | POST | `/job-api/jobs/{id}/segments/{sid}/split` | 2026-04-21 | 单切点拆分（→ 2 段），保留供旧前端调用 |
 | POST | `/job-api/jobs/{id}/segments/{sid}/split-many` | **Phase 2a** | 原子多切点拆分（write-ahead journal 三态 A/B/C 恢复；plan 2026-05-17 §5.6） |
+| GET  | `/job-api/jobs/{id}/suggest-split-quota` | **Phase 2b v2** | 读拆分识别配额（每任务 cap=MAX(MIN(0.2×N, anomaly), 5)；plan 2026-05-17 §5.4 v2） |
+| POST | `/job-api/jobs/{id}/segments/{sid}/suggest-split` | **Phase 2b v2** | 多模态 LLM 识别说话人切点（用户显式点按钮触发；S2 Pass 1 模型复用） |
 | POST | `/job-api/jobs/{id}/regenerate-all-tts` | T1-6 | 批量 re-TTS |
 | GET  | `/job-api/jobs/{id}/editing/voice-map` | T1-6 | 读音色覆盖 |
 | POST | `/job-api/jobs/{id}/editing/voice-map` | T1-6 | set / clear 音色 |
