@@ -74,6 +74,7 @@ from job_intercept import (
 from proxy import close_client, init_client, proxy_request
 from voice_selection_api import (
     get_voice_selection_pricing,
+    voice_candidates_for_selection,
     voice_clone_for_selection,
     voice_match_for_selection,
 )
@@ -381,6 +382,10 @@ app.post(
 )(update_job_metering)
 app.post("/job-api/jobs/{job_id}/voice-clone")(voice_clone_for_selection)
 app.post("/job-api/jobs/{job_id}/voice-match")(voice_match_for_selection)
+# Plan 2026-05-17 §Phase 1: unified candidate endpoint. Defaults
+# include_cross_source=True so Studio sees cross-video same-name
+# candidates without each caller toggling the flag.
+app.post("/job-api/jobs/{job_id}/voice-candidates")(voice_candidates_for_selection)
 app.get("/api/voice-selection/pricing")(get_voice_selection_pricing)
 
 # Job sub-resources: logs, artifacts, result-summary, continue, review/*, download/*, etc.

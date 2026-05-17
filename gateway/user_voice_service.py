@@ -6,13 +6,27 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 import logging
+import re
 import unicodedata
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import UserVoice
 
 logger = logging.getLogger(__name__)
+
+
+# Phase 1 (plan 2026-05-17-user-voice-candidate-first):
+# ``match_scope`` is the new fine-grained taxonomy that lets Studio/
+# Post-edit/Smart distinguish "auto-reusable" from "needs user
+# confirmation". Defaulted so existing callers constructing
+# ``UserVoiceMatch`` directly (older test fixtures) keep working —
+# the default is derived from ``confidence`` in ``__post_init__``.
+_CONFIDENCE_TO_DEFAULT_SCOPE: dict[str, str] = {
+    "strong": "same_source_strong",
+    "medium": "same_source_named",
+    "weak": "same_source_speaker_id_changed",
+}
 
 
 @dataclass(frozen=True)
@@ -21,6 +35,17 @@ class UserVoiceMatch:
     confidence: str
     reason: str
     score: int
+    match_scope: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.match_scope:
+            # ``frozen=True`` blocks attribute assignment; reach in via
+            # object.__setattr__ for the lazy default.
+            object.__setattr__(
+                self,
+                "match_scope",
+                _CONFIDENCE_TO_DEFAULT_SCOPE.get(self.confidence, "same_source_named"),
+            )
 
     @property
     def auto_reuse_allowed(self) -> bool:
@@ -56,6 +81,80 @@ def normalize_speaker_name_key(speaker_name: str | None) -> str | None:
     normalized = " ".join(normalized.split()).strip(" \t\r\n·-_\u00b7")
     normalized = normalized.lower()
     return normalized or None
+
+
+# Cross-source weak matching blacklist. Inputs are expected to have
+# already passed through ``normalize_speaker_name_key`` so they're
+# lowercase, NFKC-normalised, single-space-collapsed, edge-punct
+# stripped. Covers the common Chinese + English placeholder names
+# we see in ASR/speaker-diarisation output today; future languages
+# (jp/kr/fr/es) can be added if false-positives become an issue.
+_GENERIC_SPEAKER_NAME_KEYS: frozenset[str] = frozenset({
+    "speaker_a", "speaker_b", "speaker_c", "speaker_d", "speaker_e",
+    "speaker a", "speaker b", "speaker c", "speaker d", "speaker e",
+    "speaker", "speakers",
+    "unknown", "unknown speaker", "unknown_speaker",
+    "未知说话人",
+    "未知说话人1",
+    "未知说话人2",
+    "未知说话人3",
+    "未知",
+    "说话人",
+    "说话人1",
+    "说话人2",
+    "说话人3",
+    "男声",
+    "女声",
+    "主持人",
+    "嘉宾",
+    "采访者",
+    "受访者",
+    "旁白",
+    "narrator", "host", "guest", "interviewer", "interviewee",
+    "voice", "person", "anonymous",
+    "话者",
+    "话者1",
+    "话者2",
+    "话者3",
+    "人物",
+    "人物1",
+    "人物2",
+    "人物3",
+})
+
+_GENERIC_NUMBERED_RE = re.compile(
+    r"^(speaker|unknown|voice|person|话者|人物|说话人)[ _]?[0-9]+$"
+)
+_PURE_DIGITS_RE = re.compile(r"^[0-9]+$")
+_SINGLE_ASCII_RE = re.compile(r"^[a-z]$")
+
+
+def is_generic_speaker_name_key(key: str | None) -> bool:
+    """Return True when a normalized speaker name is too generic for
+    cross-source matching.
+
+    Accepts ``None`` and returns ``False`` (caller may pass DB-nullable
+    column directly). Input is expected to already be normalized via
+    :func:`normalize_speaker_name_key`.
+
+    Filters:
+    - Hardcoded blacklist of zh/en placeholder names.
+    - Length < 2 chars.
+    - Single ASCII letter or pure-digit names.
+    - "<role>[ _]<digits>" pattern (e.g. ``speaker_1``, ``话者 2``).
+    """
+    if not key:
+        return False
+    k = key.strip()
+    if len(k) < 2:
+        return True
+    if _SINGLE_ASCII_RE.match(k):
+        return True
+    if _PURE_DIGITS_RE.match(k):
+        return True
+    if _GENERIC_NUMBERED_RE.match(k):
+        return True
+    return k in _GENERIC_SPEAKER_NAME_KEYS
 
 
 def build_cloned_voice_label(
@@ -157,6 +256,7 @@ def _score_user_voice_match(
             confidence="strong",
             reason="same_source_content_hash_and_speaker_id",
             score=100,
+            match_scope="same_source_strong",
         )
 
     voice_name_key = _clean_optional_text(getattr(voice, "source_speaker_name_key", None))
@@ -166,6 +266,7 @@ def _score_user_voice_match(
             confidence="medium",
             reason="same_source_content_hash_and_speaker_name",
             score=70,
+            match_scope="same_source_named",
         )
 
     if source_speaker_id and voice_speaker_id and voice_speaker_id != source_speaker_id:
@@ -174,9 +275,40 @@ def _score_user_voice_match(
             confidence="weak",
             reason="same_source_content_hash_different_speaker_id",
             score=30,
+            match_scope="same_source_speaker_id_changed",
         )
 
     return None
+
+
+def _score_cross_source_match(
+    voice: UserVoice,
+    *,
+    source_speaker_name_key: str | None,
+) -> UserVoiceMatch | None:
+    """Cross-source weak candidate: same normalized speaker name across
+    a different source video.
+
+    Phase 1 §"cross_source_named_person": only triggers when caller
+    explicitly opts into ``include_cross_source=True`` in
+    :func:`match_user_voices`. Never auto-reuse-allowed.
+    """
+    if not source_speaker_name_key:
+        return None
+    if is_generic_speaker_name_key(source_speaker_name_key):
+        return None
+    voice_name_key = _clean_optional_text(getattr(voice, "source_speaker_name_key", None))
+    if not voice_name_key or voice_name_key != source_speaker_name_key:
+        return None
+    if is_generic_speaker_name_key(voice_name_key):
+        return None
+    return UserVoiceMatch(
+        voice=voice,
+        confidence="weak",
+        reason="cross_source_same_speaker_name_key",
+        score=20,
+        match_scope="cross_source_named_person",
+    )
 
 
 async def match_user_voices(
@@ -191,49 +323,112 @@ async def match_user_voices(
     tts_provider: str | None = None,
     platform: str | None = None,
     limit: int = 5,
+    include_cross_source: bool = False,
 ) -> list[UserVoiceMatch]:
-    """Find same-video personal voice candidates for a user.
+    """Find personal voice candidates for a user.
 
-    Phase 2 deliberately stays conservative: no cross-user lookup, no
-    cross-provider reuse, no ``NULL == NULL`` source hash matching.
+    Same-source matching is conservative: same user, same provider
+    triplet, same ``source_content_hash``, scored by speaker_id /
+    speaker_name_key / speaker_id-changed.
+
+    Phase 1 (plan 2026-05-17): when ``include_cross_source=True``, also
+    matches cross-source rows by normalized speaker name (gated by
+    :func:`is_generic_speaker_name_key`). Cross-source matches are
+    weak by definition — they cannot auto-reuse.
+
+    Default ``include_cross_source=False`` preserves the legacy
+    behaviour for the old ``voice-match`` and ``internal match``
+    endpoints.
     """
     clean_hash = _clean_optional_text(source_content_hash)
-    if not clean_hash:
-        return []
     clean_speaker_id = _clean_optional_text(source_speaker_id)
     clean_name_key = (
         _clean_optional_text(source_speaker_name_key)
         or normalize_speaker_name_key(source_speaker_name)
     )
+    clean_provider = _clean_optional_text(provider)
+    clean_tts_provider = _clean_optional_text(tts_provider)
+    clean_platform = _clean_optional_text(platform)
     max_results = max(1, min(int(limit or 5), 20))
 
-    result = await db.execute(
-        select(UserVoice).where(
+    # Legacy contract: same-source matching requires non-empty hash.
+    # When the caller doesn't ask for cross-source, return [] now to
+    # avoid issuing a useless query.
+    if not clean_hash and not include_cross_source:
+        return []
+
+    matches: list[UserVoiceMatch] = []
+    seen_voice_ids: set[str] = set()
+
+    if clean_hash:
+        result = await db.execute(
+            select(UserVoice).where(
+                UserVoice.user_id == user_id,
+                UserVoice.expired_at.is_(None),
+                UserVoice.source_content_hash == clean_hash,
+            )
+        )
+        for voice in result.scalars().all():
+            if getattr(voice, "expired_at", None) is not None:
+                continue
+            if not _voice_provider_compatible(
+                voice,
+                provider=clean_provider,
+                tts_provider=clean_tts_provider,
+                platform=clean_platform,
+            ):
+                continue
+            match = _score_user_voice_match(
+                voice,
+                source_content_hash=clean_hash,
+                source_speaker_id=clean_speaker_id,
+                source_speaker_name_key=clean_name_key,
+            )
+            if match is not None:
+                matches.append(match)
+                vid = getattr(voice, "voice_id", None)
+                if vid:
+                    seen_voice_ids.add(vid)
+
+    if include_cross_source and clean_name_key and not is_generic_speaker_name_key(clean_name_key):
+        # Cross-source: same speaker name across different source hash
+        # (or rows with no recorded source hash). Filter via Python so
+        # we keep provider compatibility + expired_at checks in one
+        # place; the DB just narrows by name_key + user_id.
+        cross_where = [
             UserVoice.user_id == user_id,
             UserVoice.expired_at.is_(None),
-            UserVoice.source_content_hash == clean_hash,
-        )
-    )
-    voices = list(result.scalars().all())
-    matches: list[UserVoiceMatch] = []
-    for voice in voices:
-        if getattr(voice, "expired_at", None) is not None:
-            continue
-        if not _voice_provider_compatible(
-            voice,
-            provider=_clean_optional_text(provider),
-            tts_provider=_clean_optional_text(tts_provider),
-            platform=_clean_optional_text(platform),
-        ):
-            continue
-        match = _score_user_voice_match(
-            voice,
-            source_content_hash=clean_hash,
-            source_speaker_id=clean_speaker_id,
-            source_speaker_name_key=clean_name_key,
-        )
-        if match is not None:
-            matches.append(match)
+            UserVoice.source_speaker_name_key == clean_name_key,
+        ]
+        if clean_hash:
+            cross_where.append(
+                or_(
+                    UserVoice.source_content_hash.is_(None),
+                    UserVoice.source_content_hash != clean_hash,
+                )
+            )
+        cross_result = await db.execute(select(UserVoice).where(*cross_where))
+        for voice in cross_result.scalars().all():
+            if getattr(voice, "expired_at", None) is not None:
+                continue
+            vid = getattr(voice, "voice_id", None)
+            if vid and vid in seen_voice_ids:
+                continue
+            if not _voice_provider_compatible(
+                voice,
+                provider=clean_provider,
+                tts_provider=clean_tts_provider,
+                platform=clean_platform,
+            ):
+                continue
+            cross_match = _score_cross_source_match(
+                voice,
+                source_speaker_name_key=clean_name_key,
+            )
+            if cross_match is not None:
+                matches.append(cross_match)
+                if vid:
+                    seen_voice_ids.add(vid)
 
     matches.sort(
         key=lambda item: (

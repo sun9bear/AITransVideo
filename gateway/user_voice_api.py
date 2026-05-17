@@ -129,6 +129,13 @@ def _parse_optional_datetime(value: object) -> datetime | None:
 
 
 def _match_to_dict(match) -> dict:
+    """Serialize a :class:`UserVoiceMatch` for the legacy endpoints.
+
+    Phase 1 additive: also includes ``match_scope`` so consumers ready
+    for the new taxonomy can read it. Old consumers ignore unknown
+    fields (the frontend uses optional chaining), so this is
+    backward-safe.
+    """
     voice = _voice_to_dict(match.voice)
     return {
         "matched": True,
@@ -136,7 +143,57 @@ def _match_to_dict(match) -> dict:
         "reason": match.reason,
         "score": match.score,
         "auto_reuse_allowed": match.auto_reuse_allowed,
+        "match_scope": getattr(match, "match_scope", None),
         "voice": voice,
+    }
+
+
+def _voice_evidence_dict(voice) -> dict:
+    """Phase 1 candidate evidence — surface human-readable provenance
+    fields without leaking IDs/hashes. Used by the unified candidate
+    endpoint.
+    """
+    created_at = getattr(voice, "created_at", None)
+    return {
+        "source_video_title": getattr(voice, "source_video_title", None),
+        "source_speaker_name": getattr(voice, "source_speaker_name", None),
+        "clone_sample_seconds": getattr(voice, "clone_sample_seconds", None),
+        "created_at": created_at.isoformat() if created_at else None,
+    }
+
+
+def _candidate_to_dict(match) -> dict:
+    """Serialize a :class:`UserVoiceMatch` for the unified candidate
+    endpoint. Adds ``requires_user_confirmation`` (inverse of
+    ``auto_reuse_allowed``) and a curated ``evidence`` block."""
+    voice = match.voice
+    return {
+        "voice_id": getattr(voice, "voice_id", None),
+        "user_voice_id": str(getattr(voice, "id", "") or ""),
+        "label": getattr(voice, "label", None),
+        "confidence": match.confidence,
+        "match_scope": getattr(match, "match_scope", None),
+        "requires_user_confirmation": not match.auto_reuse_allowed,
+        "score": match.score,
+        "reason": match.reason,
+        "evidence": _voice_evidence_dict(voice),
+    }
+
+
+def _auto_reuse_summary_dict(match) -> dict:
+    """Minimal envelope describing the top strong-match auto-reuse
+    target. Mirrors the inline structure consumed by Smart's
+    pipeline path so callers don't have to peek into the full
+    candidate dict."""
+    voice = match.voice
+    return {
+        "voice_id": getattr(voice, "voice_id", None),
+        "user_voice_id": str(getattr(voice, "id", "") or ""),
+        "label": getattr(voice, "label", None),
+        "confidence": match.confidence,
+        "match_scope": getattr(match, "match_scope", None),
+        "auto_reuse_allowed": True,
+        "reason": match.reason,
     }
 
 
@@ -905,6 +962,98 @@ async def internal_match_user_voice(
         "reason": top.reason,
         "voice": _voice_to_dict(top.voice),
         "candidates": candidates,
+    })
+
+
+@internal_router.post("/user-voices/candidates")
+async def internal_user_voice_candidates(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Unified personal-voice candidate endpoint (plan 2026-05-17 §Phase 1).
+
+    Returns a structured envelope with:
+    - ``auto_reuse_voice``: the top strong match (or ``None`` when no
+      strong candidate exists).
+    - ``personal_voice_candidates``: ordered list of personal-voice
+      candidates (strong + needs-confirmation + cross-source named).
+    - ``official_voice_candidates``: always ``[]`` in Phase 1. Phase 2
+      wires the official voice picker.
+
+    Unlike the legacy ``/user-voices/match`` endpoint, this one
+    defaults ``include_cross_source=True`` so Studio/Post-edit/Smart
+    see cross-video same-name candidates without each caller having
+    to set the flag.
+
+    Auth: ``X-Internal-Key`` only. Public-facing entrypoint is
+    ``POST /job-api/jobs/{job_id}/voice-candidates`` (Phase 2).
+    """
+    internal_error = _internal_access_error(request)
+    if internal_error is not None:
+        return internal_error
+
+    body = await _read_body(request)
+    uid = str(body.get("user_id", "") or "").strip()
+    if not uid:
+        return _json(400, {"error": "user_id_required"})
+    try:
+        user_uuid = uuid.UUID(uid)
+    except (ValueError, AttributeError):
+        return _json(400, {"error": "invalid_user_id"})
+
+    speaker_id = body.get("speaker_id") or body.get("source_speaker_id")
+    speaker_name = body.get("speaker_name") or body.get("source_speaker_name")
+    source_content_hash = (
+        str(body.get("source_content_hash") or "").strip() or None
+    )
+    source_speaker_name_key = body.get("source_speaker_name_key")
+
+    try:
+        limit = int(body.get("limit") or 3)
+    except (TypeError, ValueError):
+        limit = 3
+
+    include_cross_source = body.get("include_cross_source")
+    if include_cross_source is None:
+        include_cross_source = True
+    include_cross_source = bool(include_cross_source)
+
+    provider = str(body.get("provider") or "minimax_voice_clone")
+    tts_provider = body.get("tts_provider") or "minimax_tts"
+    platform = body.get("platform") or "minimax_domestic"
+
+    try:
+        matches = await match_user_voices(
+            db,
+            user_id=user_uuid,
+            source_content_hash=source_content_hash,
+            source_speaker_id=speaker_id,
+            source_speaker_name=speaker_name,
+            source_speaker_name_key=source_speaker_name_key,
+            provider=provider,
+            tts_provider=tts_provider,
+            platform=platform,
+            limit=limit,
+            include_cross_source=include_cross_source,
+        )
+    except Exception as exc:
+        logger.warning(
+            "user-voices/candidates failed for user=%s speaker_id=%s: %s",
+            uid, speaker_id, exc, exc_info=True,
+        )
+        return _json(500, {"error": "candidate_lookup_failed"})
+
+    auto_reuse_voice: dict | None = None
+    if matches and matches[0].auto_reuse_allowed:
+        auto_reuse_voice = _auto_reuse_summary_dict(matches[0])
+
+    return _json(200, {
+        "speaker_id": speaker_id,
+        "source_content_hash": source_content_hash,
+        "auto_reuse_voice": auto_reuse_voice,
+        "personal_voice_candidates": [_candidate_to_dict(m) for m in matches],
+        # Phase 1: official voice picker integration is Phase 2 territory.
+        "official_voice_candidates": [],
     })
 
 

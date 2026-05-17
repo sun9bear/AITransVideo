@@ -82,13 +82,61 @@ def _user_voice_to_dict(v: UserVoice) -> dict:
 
 
 def _match_to_dict(match) -> dict:
+    """Serialize a :class:`UserVoiceMatch` for the legacy ``voice-match``
+    endpoint. Phase 1 (plan 2026-05-17) added ``match_scope`` so the
+    frontend can distinguish strong-auto-reuse from needs-confirmation;
+    older frontend builds ignore the unknown field.
+    """
     return {
         "matched": True,
         "confidence": match.confidence,
         "reason": match.reason,
         "score": match.score,
         "auto_reuse_allowed": match.auto_reuse_allowed,
+        "match_scope": getattr(match, "match_scope", None),
         "voice": _user_voice_to_dict(match.voice),
+    }
+
+
+def _voice_evidence_dict(voice) -> dict:
+    """Curated provenance fields for candidate UI — never leaks IDs/hashes."""
+    created_at = getattr(voice, "created_at", None)
+    return {
+        "source_video_title": getattr(voice, "source_video_title", None),
+        "source_speaker_name": getattr(voice, "source_speaker_name", None),
+        "clone_sample_seconds": getattr(voice, "clone_sample_seconds", None),
+        "created_at": created_at.isoformat() if created_at else None,
+    }
+
+
+def _candidate_to_dict(match) -> dict:
+    """Phase 1 candidate envelope item — mirrors
+    ``user_voice_api._candidate_to_dict`` so the public and internal
+    routes stay schema-compatible."""
+    voice = match.voice
+    return {
+        "voice_id": getattr(voice, "voice_id", None),
+        "user_voice_id": str(getattr(voice, "id", "") or ""),
+        "label": getattr(voice, "label", None),
+        "confidence": match.confidence,
+        "match_scope": getattr(match, "match_scope", None),
+        "requires_user_confirmation": not match.auto_reuse_allowed,
+        "score": match.score,
+        "reason": match.reason,
+        "evidence": _voice_evidence_dict(voice),
+    }
+
+
+def _auto_reuse_summary_dict(match) -> dict:
+    voice = match.voice
+    return {
+        "voice_id": getattr(voice, "voice_id", None),
+        "user_voice_id": str(getattr(voice, "id", "") or ""),
+        "label": getattr(voice, "label", None),
+        "confidence": match.confidence,
+        "match_scope": getattr(match, "match_scope", None),
+        "auto_reuse_allowed": True,
+        "reason": match.reason,
     }
 
 
@@ -428,6 +476,105 @@ async def voice_match_for_selection(
         "reason": top.reason,
         "voice": _user_voice_to_dict(top.voice),
         "candidates": [_match_to_dict(match) for match in matches],
+    })
+
+
+async def voice_candidates_for_selection(
+    request: Request,
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(require_auth),
+) -> Response:
+    """POST /job-api/jobs/{job_id}/voice-candidates
+
+    Unified candidate endpoint for Studio + Post-edit. Returns the
+    structured envelope defined in plan 2026-05-17 §Phase 1:
+
+    - ``auto_reuse_voice``: top strong match (or ``None``).
+    - ``personal_voice_candidates``: ordered list of personal-voice
+      candidates (strong + needs-confirmation + cross-source named).
+    - ``official_voice_candidates``: always ``[]`` in Phase 1; Phase 2
+      wires the official voice picker.
+
+    Like :func:`voice_match_for_selection` this is read-only — it
+    never calls the clone provider and never reserves credits. It
+    differs by defaulting ``include_cross_source=True`` so the
+    frontend sees cross-video same-name candidates as well.
+    """
+    job = await _verify_job_ownership(job_id, db, user)
+    if job is None:
+        return _json_response(404, {"error": "job_not_found", "message": "任务不存在"})
+
+    body = await request.body()
+    try:
+        data = json.loads(body) if body else {}
+    except Exception:
+        return _json_response(400, {"error": "invalid_body", "message": "请求体格式错误"})
+    if not isinstance(data, dict):
+        return _json_response(400, {"error": "invalid_body", "message": "请求体格式错误"})
+
+    speaker_id = str(data.get("speaker_id", "")).strip()
+    if not _SPEAKER_ID_RE.match(speaker_id):
+        return _json_response(400, {"error": "invalid_speaker_id", "message": f"无效的 speaker_id: {speaker_id}"})
+
+    user_id = getattr(user, "id", None) or getattr(job, "user_id", None)
+    if user_id is None:
+        # No user context — can't query a per-user library. Empty envelope.
+        return _json_response(200, {
+            "speaker_id": speaker_id,
+            "source_content_hash": None,
+            "auto_reuse_voice": None,
+            "personal_voice_candidates": [],
+            "official_voice_candidates": [],
+        })
+
+    source_content_hash = str(getattr(job, "source_content_hash", "") or "").strip() or None
+
+    try:
+        limit = int(data.get("limit") or 3)
+    except (TypeError, ValueError):
+        limit = 3
+
+    include_cross_source = data.get("include_cross_source")
+    if include_cross_source is None:
+        include_cross_source = True
+    include_cross_source = bool(include_cross_source)
+
+    provider, tts_provider, platform = _provider_triplet_for_selection_match(data)
+
+    try:
+        from user_voice_service import match_user_voices
+        matches = await match_user_voices(
+            db,
+            user_id=user_id,
+            source_content_hash=source_content_hash,
+            source_speaker_id=speaker_id,
+            source_speaker_name=data.get("speaker_name"),
+            source_speaker_name_key=data.get("source_speaker_name_key"),
+            provider=provider,
+            tts_provider=tts_provider,
+            platform=platform,
+            limit=limit,
+            include_cross_source=include_cross_source,
+        )
+    except Exception as exc:
+        logger.warning(
+            "voice-candidates failed for %s/%s: %s",
+            job_id, speaker_id, exc, exc_info=True,
+        )
+        return _json_response(500, {"error": "candidate_lookup_failed", "message": "查询个人音色候选失败"})
+
+    auto_reuse_voice = None
+    if matches and matches[0].auto_reuse_allowed:
+        auto_reuse_voice = _auto_reuse_summary_dict(matches[0])
+
+    return _json_response(200, {
+        "speaker_id": speaker_id,
+        "source_content_hash": source_content_hash,
+        "auto_reuse_voice": auto_reuse_voice,
+        "personal_voice_candidates": [_candidate_to_dict(match) for match in matches],
+        # Phase 1: official voice picker integration is Phase 2 territory.
+        "official_voice_candidates": [],
     })
 
 
