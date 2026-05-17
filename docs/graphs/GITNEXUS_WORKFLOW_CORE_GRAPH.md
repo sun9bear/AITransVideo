@@ -8,8 +8,10 @@
 
 - `SemanticBlock` 仍然是 TTS / 对齐 / 字幕的基本处理单元
 - 主对齐路径仍然是 `DSP-first alignment`
+- Smart inline branch 已经在 `process.py` 内实装，包含 eligibility、voice review、translation review、handoff、terminal reports
+- Smart 创建入口现在先经过 Gateway policy / consent 校验；pipeline 内部优先复用同源个人音色，再决定是否 clone
 - paid fallback、force DSP、whisper deliverable sidecar 仍然受明确控制
-- `derive_effective_pipeline_mode(...)` 现在决定 Smart job 是否继续走自动层
+- `derive_effective_pipeline_mode(...)` 决定 Smart job 是否继续走自动层，还是回到 Studio 控制流
 
 ## 2. 主图
 
@@ -17,30 +19,60 @@
 graph TD
     Entry["process.py / ProjectWorkflow"] --> Snapshot["JobRecord snapshot"]
     Snapshot --> Effective["derive_effective_pipeline_mode"]
-    Effective --> SmartMode["effective smart"]
-    Effective --> StudioMode["effective studio"]
+    Effective --> SmartMode["effective mode = smart"]
+    Effective --> StudioMode["effective mode = studio"]
 
     Entry --> Ingestion["Input ingest"]
     Ingestion --> Media["Media understanding"]
     Media --> Compliance["Content compliance"]
     Compliance --> Transcript["Transcript / speaker prep"]
 
-    Transcript --> SmartMode
-    SmartMode --> SmartGraph["Smart auto review subgraph"]
-    SmartGraph --> Handoff["handoff to Studio review"]
-    Handoff --> StudioMode
+    Transcript --> VoiceReviewGate["wait_for_review + job_requires_review"]
+    VoiceReviewGate --> SmartVoice["Smart voice review branch"]
+    VoiceReviewGate --> StudioVoice["Studio voice selection review"]
 
-    StudioMode --> Translation["Translation"]
-    Translation --> Blocks["SemanticBlock chunking"]
+    SmartMode --> SmartVoice
+    SmartMode --> SmartConsent["Gateway smart_consent + policy accepted"]
+    SmartConsent --> SmartVoice
+    SmartVoice --> Eligibility["evaluate_eligibility"]
+    Eligibility --> Reuse["same-source UserVoice match"]
+    Reuse --> ReusedVoice["reused_user_voice decision"]
+    Reuse --> Quota["user voice quota snapshot"]
+    Quota --> Provider["smart_wiring MiniMax clone provider"]
+    Provider --> VoiceDecision["clone / preset / pause"]
+    ReusedVoice --> VoiceDecision
+    VoiceDecision --> MinorPreset["minor speaker preset auto-match"]
+    VoiceDecision --> DubbingMode["aggregate speaker dubbing_mode"]
+    VoiceDecision --> VoiceHandoff["voice-stage handoff"]
+    MinorPreset --> ApprovedVoicePayload["auto-approved voice payload"]
+    DubbingMode --> ApprovedVoicePayload
+    ApprovedVoicePayload --> VoiceIdPropagation["propagate _speaker_voices to voice_id_a/b"]
+
+    StudioVoice --> ReviewPause["waiting_for_review"]
+    VoiceHandoff --> ReviewPause
+    ReviewPause --> StudioMode
+
+    VoiceIdPropagation --> Translation["Translation"]
+    StudioMode --> Translation
+    Translation --> SmartLLM["translator._service_mode -> llm_registry smart defaults"]
+    SmartLLM --> SmartTranslation["Smart translation auto review"]
+    SmartTranslation --> TranslationHandoff["translation-stage handoff"]
+    SmartTranslation --> Blocks["SemanticBlock chunking"]
+    TranslationHandoff --> ReviewPause
+
     Blocks --> TTS["TTS"]
     TTS --> Alignment["DSP-first alignment"]
     Alignment --> Parallel["ThreadPoolExecutor + paid_fallback semaphore"]
-    Parallel --> ForceDSP["force_dsp / capped_dsp_underflow<br/>review severity"]
+    Parallel --> ForceDSP["force_dsp / capped_dsp_underflow review severity"]
 
-    ForceDSP --> CueGate["cue_pipeline.py<br/>window-first timing + sync guard"]
+    ForceDSP --> CueGate["cue_pipeline.py window-first timing + sync guard"]
     CueGate --> Validator["cue_validator.py"]
     Validator --> SRT["srt_writer.py"]
     SRT --> Editor["EditorPackageWriter / manifest"]
+
+    Editor --> TerminalSmart["terminal smart_state marker"]
+    TerminalSmart --> Quality["smart_quality_report.json"]
+    TerminalSmart --> Cost["smart_cost_summary.json"]
 
     WhisperCap[".[whisper] + INSTALL_WHISPER + HF_HOME"] --> WhisperGate["env + admin + trigger context"]
     CueGate --> WhisperGate
@@ -54,19 +86,41 @@ graph TD
 ### 3.1 `SemanticBlock` 仍然是主处理单元
 
 - `process.py`、`output_dispatcher.py` 仍围绕 `aligned_blocks`、`captions`、`artifact_index` 组织输出。
+- Smart 自动审核只决定是否继续、降级、clone/preset、是否转人工，不改变 TTS 单元。
 - deliverable-time whisper helper 也是从 editor state 重建 block/cue，再走 deterministic cue pipeline。
 
-结论：Smart 与 R2 的新增面没有改变“不要按 subtitle line 做 TTS / 对齐”的核心不变量。
+结论：Smart、R2、Admin/Ops 的新增面没有改变“不要按 subtitle line 做 TTS / 对齐”的核心不变量。
 
-### 3.2 effective mode 是 Smart / Studio 控制流的新入口
+### 3.2 effective mode 是 Smart / Studio 控制流入口
 
 - `process.py` 在加载 `JobRecord` 后调用 `derive_effective_pipeline_mode(...)`。
-- `record.service_mode` 继续保留真实审计身份。
+- `record.service_mode` 继续保留真实审计身份，用于计费、审计、Job API 响应。
 - `job_effective_pipeline_mode` 是 pipeline 内部决定是否进入 Smart 自动层的控制值。
+- `downgraded_to_studio` 的 Smart job 后续 `/continue` 走 Studio 逻辑，不会重复进入 Smart auto-review。
 
-结论：Smart job 降级后不会再次触发自动审核循环，pipeline 内部会按 Studio 逻辑继续。
+结论：Smart job 降级后继续保留 Smart 审计事实，但控制流回到 Studio。
 
-### 3.3 主对齐策略依然是 DSP-first
+### 3.3 Smart voice review 已经进入 workflow 主干
+
+- eligibility gate 在 voice selection 阶段前执行，先筛出主说话人与被排除说话人。
+- consent 允许自动克隆时，pipeline 会抽样、校验样本、查询 user voice quota，再构造真实 `CloneProvider`。
+- 克隆前会先按 `source_content_hash` 查询同用户同源 `UserVoice`；强匹配可以直接 `reused_user_voice`，不再消耗 clone 点数。
+- quota 不可用、样本失败、provider pause、clone mirror 失败都会 fail-closed handoff。
+- 非主说话人通过 `_resolve_smart_minor_speaker_voices(...)` 从 `auto_matched_voice` 解析 preset voice，并先聚合 segment-level `dubbing_mode`，避免 keep-original / mute-or-background 说话人被错误配音。
+- Smart 自动通过后会把 `_speaker_voices` 明确写回 `voice_id_a / voice_id_b`，避免 translator/TTS 仍使用 `auto`。
+
+结论：Smart voice review 现在是 workflow 内部的正式分支，不再只是服务模块骨架。
+
+### 3.4 Smart translation review 是 deterministic guard
+
+- translation review 仍检查术语保留、speaker assignment、一致性、长度预算、checksum、不确定 speaker 占比、clone sample ratio。
+- glossary check 异常会直接 handoff，而不是假装通过。
+- auto-approved translation 会继续落到 alignment/TTS 链路。
+- translator 会带上 `_service_mode`，让 `llm_registry.get_prompt_model("smart", prompt_key)` 读取 Smart 专属默认模型或 admin override。
+
+结论：Smart translation review 是 deterministic quality gate，不把最终判断交给 LLM。
+
+### 3.5 主对齐策略依然是 DSP-first
 
 - `src/services/alignment/aligner.py` 显式使用 `ThreadPoolExecutor`。
 - paid fallback 由 semaphore 控制，不随线程数无限扩张。
@@ -74,14 +128,15 @@ graph TD
 
 结论：timing authority 仍在 deterministic 对齐链上，不交给 LLM。
 
-### 3.4 rewrite 只负责文本修正
+### 3.6 terminal 阶段写 Smart reports
 
-- `process.py` 会把 `strict_retry_reason` 传给 rewriter。
-- `src/services/gemini/rewriter.py` 用它解释压缩失败原因。
+- happy-path Smart job 终态会写 `smart_quality_report.json` 和 `smart_cost_summary.json`。
+- handoff 早退路径会尽量写 cost summary，并把 handoff 原因记录到 `smart_decisions.jsonl`。
+- quality report 写入失败不阻断主流程，但用户侧可通过 JSONL synthesizer 看到 handoff 摘要。
 
-结论：LLM 可帮助文本更适合合成，但不拥有最终 timing 决策。
+结论：Smart reporting 已经是 workflow terminal 与 handoff 路径的一部分。
 
-### 3.5 whisper gate 仍然是部署能力 + admin policy + trigger context
+### 3.7 whisper gate 仍然是部署能力 + admin policy + trigger context
 
 - 部署能力：`.[whisper]`、`INSTALL_WHISPER`、`HF_HOME`
 - admin policy：`whisper_alignment_enabled / trigger / skip_cache / model`
@@ -92,13 +147,28 @@ graph TD
 ## 4. 关键证据
 
 - `src/pipeline/process.py`
-  - JobRecord snapshot
   - `derive_effective_pipeline_mode`
-  - `UsageMeter`
-  - `SemanticBlock` 输出链
+  - `_fetch_smart_reusable_voice_match`
+  - `_apply_smart_reused_voice_decision`
+  - `_aggregate_speaker_dubbing_modes`
+  - `_fetch_smart_user_voice_quota_remaining`
+  - `_resolve_smart_minor_speaker_voices`
+  - `_register_smart_clone_in_user_voices`
+  - `_emit_smart_quality_report`
+  - `_emit_smart_cost_summary`
+- `gateway/smart_consent.py`
+  - Smart consent schema validator
+- `src/services/llm_registry.py`
+  - Smart mode prompt model defaults and overrides
 - `src/services/smart/state.py`
   - effective mode
   - editable Smart state
+- `src/services/smart/eligibility_gate.py`
+  - main speaker gate
+- `src/services/smart/auto_voice_review.py`
+  - clone / preset / pause orchestration
+- `src/services/smart/auto_translation_review.py`
+  - deterministic translation checks
 - `src/services/alignment/aligner.py`
   - parallel alignment
   - paid fallback semaphore
@@ -112,5 +182,6 @@ graph TD
 
 - 想改 `process.py` 主流水线
 - 想改 Smart job 在 `/continue` 后走 Smart 还是 Studio
+- 想改 Smart voice review、同源音色复用、translation review、handoff、terminal report
 - 想改 DSP / paid fallback / force_dsp review 语义
 - 想改 cue pipeline、SRT、deliverable-time whisper

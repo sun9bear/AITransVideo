@@ -4,42 +4,71 @@
 
 ## 1. 范围
 
-这张子图只看 Smart MVP P2 的自动审核与降级链路，重点是：
+这张子图只看 Smart MVP 的自动审核、降级、报告与成本审计链路，重点是：
 
+- Smart 提交入口与 consent payload
+- Gateway `compute_job_policy("smart")` 与 `smart_consent` schema lock
 - speaker eligibility gate
 - translation auto review
-- voice clone / preset / pause orchestration
-- provider Protocol 与真实 provider wiring 边界
+- same-source user voice reuse / voice clone / preset / pause orchestration
+- user voice quota 与真实 provider wiring
+- minor speaker preset auto-match
 - handoff 到 Studio human review
-- `[SMART_STATE]` marker、sidecar audit、credits policy
+- `[SMART_STATE]` marker、`smart_decisions.jsonl`、quality report、admin cost summary、credits policy
 
 ## 2. 主图
 
 ```mermaid
 graph TD
-    JobRecord["JobRecord service_mode=smart"] --> Process["process.py"]
+    Form["TranslationForm service_mode=smart"] --> Submit["submitTranslationJob smart_consent"]
+    Submit --> GatewayPolicy["job_intercept compute_job_policy"]
+    GatewayPolicy --> ConsentValidator["smart_consent.py schema validator"]
+    ConsentValidator --> PreflightQuota["pre-flight UserVoice quota safety water mark"]
+    PreflightQuota --> JobRecord["JobRecord service_mode=smart"]
+    GatewayPolicy --> SmartLock["MiniMax + speech-2.8-hd + requires_review"]
+    SmartLock --> JobRecord
+    JobRecord --> Process["process.py"]
     Process --> Effective["derive_effective_pipeline_mode"]
     Effective --> SmartPath["effective mode = smart"]
     Effective --> StudioPath["effective mode = studio after handoff"]
 
     SmartPath --> Eligibility["eligibility_gate.py"]
-    Eligibility --> Approved["main speakers <= limit"]
-    Eligibility --> GateFail["main_speaker_count_exceeded"]
+    Eligibility --> GatePass["main speakers within limit"]
+    Eligibility --> GateFail["eligibility rejected"]
 
-    Approved --> Translation["auto_translation_review.py"]
+    GatePass --> Consent["smart_consent.auto_voice_clone"]
+    Consent --> ReuseMatch["GET /api/internal/user-voices/match"]
+    ReuseMatch --> ReuseHit["strong same-source UserVoice reuse"]
+    ReuseMatch --> Samples["VoiceSampleExtractor per main speaker"]
+    Samples --> Quota["GET /api/internal/user-voices/quota"]
+    Quota --> Provider["smart_wiring.py build_smart_clone_provider"]
+    Provider --> VoiceReview["auto_voice_review.py"]
+    ReuseHit --> VoiceReview
+    VoiceReview --> Cloned["CLONED"]
+    VoiceReview --> Reused["REUSED_USER_VOICE"]
+    VoiceReview --> Preset["PRESET"]
+    VoiceReview --> Paused["PAUSED"]
+    Cloned --> Register["POST /api/internal/user-voices/register-smart"]
+    Register --> SourceMeta["source metadata + clone sample metadata"]
+    SourceMeta --> MirrorOk["UserVoice mirror ok"]
+    Register --> MirrorFail["mirror failed"]
+    Preset --> VoicePayload["auto-approved voice payload"]
+    Reused --> VoicePayload
+    MirrorOk --> VoicePayload
+    VoicePayload --> DubbingMode["speaker-level dubbing_mode aggregation"]
+    DubbingMode --> MinorPreset["minor speakers auto_matched_voice -> preset voice_id"]
+    MinorPreset --> VoiceIdProp["propagate _speaker_voices to voice_id_a/b"]
+
+    VoiceIdProp --> Translation["auto_translation_review.py"]
+    Process --> SmartLLM["translator._service_mode -> llm_registry smart defaults"]
+    SmartLLM --> Translation
     Translation --> TranslationPass["translation_auto_approve"]
     Translation --> TranslationFail["translation handoff reason"]
 
-    TranslationPass --> Voice["auto_voice_review.py"]
-    Voice --> CloneProvider["CloneProvider Protocol"]
-    CloneProvider --> Wiring["smart_wiring.py MiniMax adapter"]
-    Voice --> Cloned["CLONED"]
-    Voice --> Preset["PRESET"]
-    Voice --> Paused["PAUSED quota/watermark"]
-
     GateFail --> Handoff["emit_handoff_markers"]
-    TranslationFail --> Handoff
     Paused --> Handoff
+    MirrorFail --> Handoff
+    TranslationFail --> Handoff
 
     Handoff --> ReviewState["review_state pending"]
     Handoff --> SmartMarker["[SMART_STATE] marker"]
@@ -48,38 +77,70 @@ graph TD
     SmartMarker --> Runner
     Runner --> Waiting["JOB_STATUS_WAITING_FOR_REVIEW"]
     Runner --> StoreState["JobRecord.smart_state"]
+    StoreState --> StudioPath
 
-    StoreState --> GatewayMirror["job_intercept / job_terminal_mirror"]
-    GatewayMirror --> Credits["credits_service smart credits_policy"]
+    Eligibility --> Decisions["smart_decisions.jsonl"]
+    ReuseHit --> Decisions
+    VoiceReview --> Decisions
+    Register --> Decisions
+    Translation --> Decisions
+    Handoff --> Decisions
 
-    Eligibility --> Sidecar["smart_decisions.jsonl"]
-    Translation --> Sidecar
-    Voice --> Sidecar
-    Sidecar --> Quality["smart_quality_report.json"]
-    Sidecar --> Cost["smart_cost_summary.json"]
-    Sidecar --> Shadow["smart_shadow_eval / sim"]
+    TranslationPass --> Downstream["downstream TTS / alignment / deliverables"]
+    Downstream --> Terminal["happy-path terminal"]
+    Terminal --> Quality["smart_quality_report.json"]
+    Terminal --> Cost["smart_cost_summary.json"]
+    Handoff --> HandoffCost["handoff cost_summary best effort"]
+    Decisions --> Synth["quality_report_synthesizer for handoff"]
+    Synth --> UserQuality["Job API smart-quality-report"]
+    Quality --> UserQuality
+    Cost --> AdminCost["GET /api/admin/jobs/{id}/cost"]
+    StoreState --> Credits["credits_service smart credits_policy"]
 ```
 
 ## 3. 当前核心认知
 
-### 3.1 Smart 决策层是 deterministic-first
+### 3.1 Smart 入口已经接到前端提交流
+
+- `TranslationForm.tsx` 支持 `serviceMode` 为 `express / studio / smart`。
+- Smart 按 Gateway entitlements 判断是否可用，前端不自建 allowed service mode 真源。
+- credits estimate 用 `service_mode=smart` 与 `quality_tier=standard` 获取用户侧固定价。
+- submit payload 包含 Smart consent；Gateway 会先用 `smart_consent.py` 校验 6 字段 schema，缺字段、错类型或不支持的 `on_budget_exhausted` 会返回 `smart_consent_invalid`。
+- Gateway `compute_job_policy("smart")` 会锁定 Smart 为 MiniMax、`speech-2.8-hd`、`requires_review=True`、`voice_clone_enabled=True`、`quality_tier=standard`，避免落回 Express 策略。
+
+结论：Smart 不是隐藏后端模式，已经是受 Gateway 权益控制的用户可选服务模式。
+
+### 3.2 Smart 决策层仍是 deterministic-first
 
 - `eligibility_gate.py` 只做 speaker structure 归一化和主说话人计数。
-- `auto_translation_review.py` 固化 6 项检查：术语保留、speaker assignment、一致性、长度预算、text/audio checksum、不确定 speaker 占比、clone eligible ratio。
-- `auto_voice_review.py` 负责 per-speaker clone / preset / pause，不做 UI 写入，不直接写 review state。
+- `auto_translation_review.py` 固化术语、speaker assignment、一致性、长度预算、checksum、不确定 speaker 占比、clone sample ratio 等检查。
+- `auto_voice_review.py` 负责 per-speaker clone / preset / pause，不写 UI，不直接写 review state。
 
-结论：Smart MVP 当前不是“让 LLM 自动审核”，而是 deterministic policy 执行层。
+结论：Smart MVP 不是“让 LLM 自动审核”，而是 deterministic policy 执行层。
 
-### 3.2 provider 边界由 Protocol + composition root 约束
+### 3.3 voice reuse / clone 现在有真实生产边界
 
-- `src/services/smart/contracts.py` 定义 `CloneProvider / TTSProvider / LLMProvider`。
-- `src/services/smart/auto_voice_review.py` 只依赖 `CloneProvider`。
-- `src/services/smart_wiring.py` 是真实 MiniMax clone adapter 的唯一 wiring 点。
-- `tests/test_smart_skeleton_protocol_guards.py` 保护 `src/services/smart/**` 不直接导入真实 provider。
+- Smart 只有在 `smart_consent.auto_voice_clone is True` 且存在主说话人时才进入复用或克隆路径。
+- pipeline 会先按 `source_content_hash` 调 Gateway internal match endpoint；同用户、同源、同 speaker 的强匹配会记为 `reused_user_voice`，不产生 clone 扣点。
+- Gateway create path 对非 admin 先做 voice library quota 安全水位预检；pipeline runtime 仍保留 fail-closed quota check。
+- `_fetch_smart_user_voice_quota_remaining(...)` 调 Gateway internal quota endpoint，失败或无 internal key 会 fail-closed handoff。
+- `src/services/smart_wiring.py` 是真实 MiniMax clone adapter 的 composition root。
+- `_register_smart_clone_in_user_voices(...)` 把 clone 成功结果连同源内容、speaker、样本秒数、样本 segment ids 等 metadata 镜像进 Gateway UserVoice；镜像失败会 handoff，避免后续 quota stale。
 
-结论：Smart 自动 clone 可以接真实 provider，但真实 provider 入口被集中在 package 外的 composition root。
+结论：Smart auto clone 的正确性依赖 consent、同源复用判定、quota snapshot、provider wiring、UserVoice mirror 五件事同时成立。
 
-### 3.3 handoff 必须同时发三个信号
+### 3.4 非主说话人自动 preset 修复了潜在多说话人缺口
+
+- eligibility 只把主说话人交给 `auto_voice_review`。
+- `_aggregate_speaker_dubbing_modes(...)` 会先把 segment-level dubbing mode 汇总到 speaker 层。
+- 非主说话人的 `auto_matched_voice` 由 `_resolve_smart_minor_speaker_voices(...)` 解析。
+- keep-original / mute-or-background 的非主说话人不会被强行配 preset voice。
+- 解析结果写入 `_speaker_voices` 和 approved payload，并标记 `auto_decision = preset_minor_speaker`。
+- 自动通过后会把 `_speaker_voices` 写回 `voice_id_a / voice_id_b`，保证 translator / TTS 不再看到 `auto`。
+
+结论：低占比或 excluded speaker 不再因为没有进入 main-speaker review 而留下空 `voice_id`，且主说话人的 cloned/reused voice_id 会真实进入 TTS。
+
+### 3.5 handoff 必须同时发三个信号
 
 `src/services/smart/handoff.py` 把降级到 Studio 的动作打包成三件事：
 
@@ -87,9 +148,35 @@ graph TD
 - `emit_smart_state_marker(...)`
 - `print(web_review_marker_builder(...))`
 
-结论：缺少 `[WEB_REVIEW]` 会让 runner 把任务错误地 finalise 为 `succeeded`，所以 handoff helper 是必要边界。
+结论：缺少 `[WEB_REVIEW]` 会让 runner 错误 finalise；缺少 `[SMART_STATE]` 会让 Gateway 和 settlement 看不到降级事实。
 
-### 3.4 smart_state 是跨进程状态通道
+### 3.6 quality report 是用户解释层，不是成本层
+
+- happy-path terminal Smart job 写 `audit/smart_quality_report.json`。
+- handoff job 如果没有 report，Job API 会从 `smart_decisions.jsonl` 合成最小 quality report。
+- `SmartAutoDecisionPanel` 默认展开，显示状态、计费策略标签、speaker summary、voice decisions、translation review、retry summary、handoff history。
+- TypeScript `SmartQualityReport` 不包含内部成本字段。
+
+结论：用户可以看到“系统自动做了什么和为什么转人工”，但看不到 provider 成本。
+
+### 3.7 cost summary 是 admin-only 审计层
+
+- pipeline 写 `audit/smart_cost_summary.json`，字段包含 `cost_breakdown_internal_only`。
+- `gateway/admin_cost_api.py` 只在 `/api/admin/jobs/{job_id}/cost` 暴露，并做 admin role check。
+- `gateway/cost_summary_backfill.py` 在 settlement 后回填 `pending_credits_charged` 与 quota usage。
+- 前端 admin 成本页把 cost type 放在 admin route 内，避免用户 workspace 泄漏。
+
+结论：Smart 成本数据有正式读路径，但只属于管理员安全域。
+
+### 3.8 Smart LLM 模型选择进入 admin 可控面
+
+- `src/services/llm_registry.py` 为 `smart` mode 的 `pass1 / pass2 / pass3 / translate / rewrite / probe_translate` 默认选择 Gemini 3.1 Pro。
+- `gateway/admin_settings.py` 暴露 `prompt_models[mode][prompt_key]`，Smart 可被 admin override。
+- pipeline 给 translator 写入 `_service_mode = job_service_mode`，让 prompt model resolution 能区分 Smart / Studio / Express。
+
+结论：Smart translation 仍是 deterministic review gate，但底层 LLM 模型选择不再误用平铺默认值。
+
+### 3.9 smart_state 是跨进程状态通道
 
 - pipeline 只能通过 stdout 发 `[SMART_STATE] {...}`。
 - `process_runner.py` 先解析 Smart marker，再解析 web review marker。
@@ -98,53 +185,59 @@ graph TD
 
 结论：`smart_state` 是 pipeline / runner / Gateway / settlement 之间的正式桥，不是只给前端展示的备注字段。
 
-### 3.5 effective mode 防止 handoff 后重复进 Smart
-
-- `derive_effective_pipeline_mode(record)` 保留 `record.service_mode="smart"` 作为审计事实。
-- 当 `smart_state.status` 是 `downgraded_to_studio` 或 `fail_and_refunded` 时，pipeline 内部 effective mode 返回 `studio`。
-- `is_editable_smart_state(...)` 只允许 `completed` 或 `downgraded_to_studio` 进入 editing / Jianying draft。
-
-结论：Smart job 降级后继续保持 Smart 计费/审计身份，但控制流回到 Studio。
-
-### 3.6 Smart credits policy 优先于 legacy terminal settlement
-
-- `gateway/credits_service.py::settle_job_credit_ledger(...)` 在 succeeded/failed legacy branch 前先读取 `smart_state.credits_policy`。
-- 当前 policy 分支包括：
-  - `refund_full`
-  - `capture_full`
-  - `capture_actual_cost_capped_at_studio_price`
-- clone refund 与 partial capture 仍是 stub，日志明确警告不能在真实依赖这些分支的生产路径里静默使用。
-
-结论：Smart 结算策略已经有调度边界，但部分真实结算能力仍处于骨架阶段。
-
 ## 4. 关键证据
 
+- `frontend-next/src/components/workspace/TranslationForm.tsx`
+  - Smart service mode selector
+  - entitlement gate
+  - smart fixed price estimate
+- `src/pipeline/process.py`
+  - Smart inline branch
+  - same-source voice reuse
+  - quota lookup
+  - clone provider construction
+  - UserVoice mirror with source metadata
+  - minor speaker preset resolver
+  - voice_id propagation before translate
+  - quality/cost summary emitters
+- `gateway/job_intercept.py`
+  - Smart compute_job_policy
+  - create-job consent validation
+  - pre-flight Smart voice quota safety water mark
+- `gateway/smart_consent.py`
+  - Smart consent schema lock
 - `src/services/smart/eligibility_gate.py`
   - `normalize_speaker_stats(...)`
   - `evaluate_eligibility(...)`
 - `src/services/smart/auto_translation_review.py`
-  - deterministic 6-check verdict
+  - deterministic review verdict
 - `src/services/smart/auto_voice_review.py`
   - `VoiceReviewChoice`
   - `VoiceReviewOutcome`
   - `evaluate_voice_review(...)`
 - `src/services/smart/handoff.py`
   - review_state + smart_state + web_review marker triple
-- `src/services/smart/state.py`
-  - marker parse/emit
-  - effective mode
-  - editable Smart state
 - `src/services/smart/sidecar_emitter.py`
   - `smart_decisions.jsonl`
   - `smart_quality_report.json`
   - `smart_cost_summary.json`
-- `gateway/credits_service.py`
-  - Smart credits policy dispatcher
+- `src/services/llm_registry.py`
+  - mode-aware prompt model defaults
+- `src/services/smart/quality_report_synthesizer.py`
+  - handoff report synthesis from JSONL
+- `gateway/user_voice_api.py`
+  - internal quota, match, register-smart endpoints
+- `gateway/admin_cost_api.py`
+  - admin-only cost summary endpoint
+- `gateway/cost_summary_backfill.py`
+  - post-settle backfill
 
 ## 5. 什么时候优先看这张图
 
 - 想改 Smart 自动审核是否能直接通过
 - 想改 Smart 降级到 Studio 的状态机
 - 想接真实 clone / TTS / LLM provider 到 Smart
-- 想排查 Smart job 为什么不能进入 editing
-- 想改 Smart 失败退款、部分扣费、sidecar 审计
+- 想排查 Smart 为什么复用了已有个人音色、为什么没克隆、为什么 clone 被 quota 拦住
+- 想排查 Smart job 为什么没有 quality report 或为什么显示转人工
+- 想排查 Smart 扣费、退款、成本摘要、sidecar 审计
+- 想改多说话人 Smart voice assignment
