@@ -285,6 +285,32 @@ export async function splitEditingSegment(
 }
 
 /**
+ * Phase 2a — atomic N-cut split (plan 2026-05-17 §5.6).
+ * Backed by a write-ahead journal on the server for all-or-nothing
+ * recovery across segments / status / voice_map files. cuts must be
+ * strictly increasing in both indices; speaker_ids length must equal
+ * cuts.length + 1 (one speaker per resulting piece).
+ */
+export async function splitEditingSegmentMany(
+  jobId: string,
+  segmentId: string,
+  body: {
+    cuts: Array<{ source_index: number; cn_index: number }>
+    speaker_ids: string[]
+  },
+): Promise<{
+  replaced_segment_id: string
+  new_segments: EditingSegment[]
+  total_count: number
+  segment_status: Record<string, SegmentStatus>
+}> {
+  return apiClient.post(
+    `/jobs/${jobId}/segments/${segmentId}/split-many`,
+    { body },
+  )
+}
+
+/**
  * Base64-encoded WAV slice of the source audio for one editing segment.
  * Response is small enough (10-30 KB per 1-5s of mono 16k audio) to inline
  * into a ``data:audio/wav;base64,...`` URL on the browser side.

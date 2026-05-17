@@ -212,6 +212,41 @@ def test_current_segment_ops_panel_receives_is_saving():
     ), "page.tsx must pass isSaving={... savingSegmentIds ...} to CurrentSegmentOpsPanel"
 
 
+def test_split_dialog_supports_multi_cut_phase_2a():
+    """Phase 2a unlock: SplitSegmentDialog must track cuts as an ARRAY
+    (not single source/cn pos) and submit via the new split-many endpoint."""
+    dialog_path = EDIT_DIR / "SplitSegmentDialog.tsx"
+    text = dialog_path.read_text(encoding="utf-8")
+    # State shape must be cuts[] instead of split{Source,Cn}Pos scalars
+    assert re.search(r"cuts.*Array<", text) or re.search(r"cuts\s*:\s*Array<", text), (
+        "SplitSegmentDialog must store cuts as an array (Phase 2a multi-cut)"
+    )
+    # Old single-cut field names must be gone (plan §5.5 → §5.6 migration)
+    assert "splitSourcePos" not in text, (
+        "Phase 2a removed splitSourcePos scalar state"
+    )
+    assert "splitCnPos" not in text, (
+        "Phase 2a removed splitCnPos scalar state"
+    )
+    # speaker_ids array (instead of speaker_a / speaker_b)
+    assert "speakerIds" in text, "Multi-cut needs speakerIds array"
+    # onSubmit payload shape switched to {cuts, speaker_ids}
+    assert "speaker_ids" in text, "Submit body must carry speaker_ids array"
+
+
+def test_page_uses_split_many_api():
+    """page.tsx must import + call splitEditingSegmentMany for Phase 2a
+    (the dialog submits multi-cut payload; old splitEditingSegment is
+    kept for backward compat but the new dialog should not route to it)."""
+    text = EDIT_PAGE.read_text(encoding="utf-8")
+    assert "splitEditingSegmentMany" in text, (
+        "page.tsx must import + use splitEditingSegmentMany (Phase 2a)"
+    )
+    assert "handleSplitSegmentMany" in text, (
+        "page.tsx must define handleSplitSegmentMany handler"
+    )
+
+
 def test_imperative_scrolls_use_sticky_offset_ref():
     """Codex round-7 P2 #1: handleSplitSegment / scrollToSegment 使用 ref,
     避免 useCallback 闭包捕获初始 0."""

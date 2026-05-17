@@ -1,26 +1,23 @@
 "use client"
 
 /**
- * SplitSegmentDialog — Phase 1 (single-cut).
+ * SplitSegmentDialog — Phase 2a (multi-cut).
  *
- * Replaces the inline split panel that lived inside SegmentCard. Opens
- * when the user clicks 拆分 on a segment row or current-segment ops
- * panel.
+ * User picks 1..N cuts in source text; CN cuts auto-mirror proportionally.
+ * Each resulting piece gets a speaker assignment.
  *
- * Phase 1:  splits one segment into exactly 2 halves via existing
- *           POST /jobs/{id}/segments/{sid}/split. No backend change.
- * Phase 2:  multi-cut + smart-prefill (deferred).
+ * Plan refs:
+ *   - §5 modal structure
+ *   - §5.6 backend split_editing_segment_many + write-ahead journal
+ *   - §6.4 close (Phase 1 single-cut hint removed)
  *
- * Visual: closer to mockup split-ux.html Option A — the text panel
- * shows the cut as a red dashed vertical bar mid-text (not just an
- * "A: ... B: ..." rectangle), and the preview is a 2-card stack with
- * circle index + timecode + bilingual snippets + speaker dropdown.
- *
- * Plan refs: §5 (modal structure) + §5.5 (Phase 1 simplification + hint).
+ * Backend endpoint (POST /jobs/{id}/segments/{sid}/split-many) wraps
+ * atomic 3-file rename in a write-ahead journal; this dialog only
+ * collects the user's intent.
  */
 
 import { useEffect, useMemo, useState } from "react"
-import { Loader2, RotateCcw } from "lucide-react"
+import { Loader2, RotateCcw, Plus, X } from "lucide-react"
 import {
   Dialog,
   DialogContent,
@@ -37,13 +34,13 @@ export interface SplitSegmentDialogProps {
   availableSpeakerIds: string[]
   speakerNameMap: Record<string, string>
   onClose(): void
+  /** Phase 2a multi-cut payload. cuts strictly increasing; speaker_ids
+   *  length = cuts.length + 1. */
   onSubmit(
     segmentId: string,
     body: {
-      split_source_index: number
-      split_cn_index: number
-      speaker_a: string
-      speaker_b: string
+      cuts: Array<{ source_index: number; cn_index: number }>
+      speaker_ids: string[]
     },
   ): Promise<void> | void
 }
@@ -62,16 +59,18 @@ function durationLabel(startMs: number | undefined, endMs: number | undefined): 
   return `${sec.toFixed(1)}s`
 }
 
-/** Text block with an inline red-dashed cut marker placed at `cutIndex`.
- *  Click anywhere on a character to position the cut on its boundary. */
-function CutTextBlock({
+/** Render text with N cut bars inline. Clicking any character adds a
+ *  cut just after that char; clicking the × on an existing cut removes it. */
+function CutTextBlockMulti({
   text,
-  cutIndex,
-  onSetCut,
+  cuts,
+  onAddCut,
+  onRemoveCut,
 }: {
   text: string
-  cutIndex: number
-  onSetCut(i: number): void
+  cuts: number[]  // sorted ascending, in (0, text.length)
+  onAddCut(charIndexAfter: number): void
+  onRemoveCut(cutArrayIndex: number): void
 }) {
   if (!text) {
     return (
@@ -80,41 +79,52 @@ function CutTextBlock({
       </div>
     )
   }
-  const before = text.slice(0, cutIndex)
-  const after = text.slice(cutIndex)
+  // Compute piece boundaries [0, c1, c2, ..., text.length]
+  const boundaries = [0, ...cuts, text.length]
   return (
     <div className="rounded-md border border-border bg-muted/20 p-3 text-sm leading-relaxed select-none">
-      <span>
-        {before.split("").map((ch, i) => (
-          <span
-            key={`b-${i}`}
-            className="cursor-pointer hover:bg-primary/20 rounded-sm"
-            onClick={() => onSetCut(i + 1)}
-            title={`在第 ${i + 1} 字处切分`}
-          >
-            {ch}
+      {boundaries.slice(0, -1).map((start, pieceIdx) => {
+        const end = boundaries[pieceIdx + 1]
+        const piece = text.slice(start, end)
+        return (
+          <span key={`piece-${pieceIdx}`}>
+            {piece.split("").map((ch, j) => {
+              const absIndex = start + j
+              return (
+                <span
+                  key={`c-${absIndex}`}
+                  className="cursor-pointer hover:bg-primary/20 rounded-sm"
+                  onClick={() => onAddCut(absIndex + 1)}
+                  title={`在第 ${absIndex + 1} 字处加切点`}
+                >
+                  {ch}
+                </span>
+              )
+            })}
+            {/* Cut bar between this piece and the next (if not last) */}
+            {pieceIdx < boundaries.length - 2 && (
+              <span
+                className="inline-flex items-center mx-1 align-middle"
+                aria-hidden="true"
+              >
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onRemoveCut(pieceIdx)
+                  }}
+                  className="inline-flex items-center justify-center h-4 w-4 -mr-[2px] rounded-full bg-primary text-primary-foreground hover:bg-primary/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-1"
+                  title="删除此切点"
+                  aria-label="删除此切点"
+                >
+                  <X className="h-2.5 w-2.5" />
+                </button>
+                <span className="inline-block w-[2px] h-4 bg-primary" />
+              </span>
+            )}
           </span>
-        ))}
-      </span>
-      <span
-        className="inline-block align-middle mx-0.5"
-        aria-hidden="true"
-        title="切点"
-      >
-        <span className="inline-block w-[2px] h-4 bg-primary align-middle" />
-      </span>
-      <span>
-        {after.split("").map((ch, i) => (
-          <span
-            key={`a-${i}`}
-            className="cursor-pointer hover:bg-primary/20 rounded-sm"
-            onClick={() => onSetCut(cutIndex + i + 1)}
-            title={`在第 ${cutIndex + i + 1} 字处切分`}
-          >
-            {ch}
-          </span>
-        ))}
-      </span>
+        )
+      })}
     </div>
   )
 }
@@ -130,101 +140,183 @@ export function SplitSegmentDialog({
   const sourceText = segment?.source_text ?? ""
   const cnText = segment?.cn_text ?? ""
 
-  const [splitSourcePos, setSplitSourcePos] = useState(0)
-  const [splitCnPos, setSplitCnPos] = useState(0)
-  const [speakerA, setSpeakerA] = useState("")
-  const [speakerB, setSpeakerB] = useState("")
+  // Phase 2a state: arbitrary N cuts. Each cut has matched source+cn
+  // indices. cuts[].source_index strictly increasing.
+  const [cuts, setCuts] = useState<Array<{ source_index: number; cn_index: number }>>([])
+  const [speakerIds, setSpeakerIds] = useState<string[]>([])
   const [isSubmitting, setIsSubmitting] = useState(false)
 
-  // Re-seed when a new segment opens.
+  // Re-seed when a new segment opens: start with one cut at midpoint.
   useEffect(() => {
     if (!segment || !open) return
     const srcMid = Math.max(1, Math.floor(sourceText.length / 2))
     const cnMid = Math.max(1, Math.floor(cnText.length / 2))
-    setSplitSourcePos(srcMid)
-    setSplitCnPos(cnMid)
+    setCuts([{ source_index: srcMid, cn_index: cnMid }])
     const fallback = availableSpeakerIds[0] ?? ""
-    setSpeakerA(segment.speaker_id ?? fallback)
-    setSpeakerB(segment.speaker_id ?? fallback)
+    setSpeakerIds([
+      segment.speaker_id ?? fallback,
+      segment.speaker_id ?? fallback,
+    ])
     setIsSubmitting(false)
   }, [segment, open, sourceText.length, cnText.length, availableSpeakerIds])
 
   const speakerLabel = (sid: string): string => speakerNameMap[sid] || sid
 
-  // Auto-mirror CN cut position when source cut changes (proportional).
-  const handleSourceCutChange = (i: number) => {
-    const clamped = Math.max(1, Math.min(i, sourceText.length - 1))
-    setSplitSourcePos(clamped)
-    if (sourceText.length > 0 && cnText.length > 0) {
-      const ratio = clamped / sourceText.length
-      const mirrored = Math.max(1, Math.min(Math.round(ratio * cnText.length), cnText.length - 1))
-      setSplitCnPos(mirrored)
-    }
+  /** Add a cut at source_index. Auto-mirror to cn proportionally.
+   *  De-dups if a cut already exists at that source position. */
+  const handleAddSourceCut = (sourceIndex: number) => {
+    if (sourceIndex <= 0 || sourceIndex >= sourceText.length) return
+    setCuts((prev) => {
+      // De-dup
+      if (prev.some((c) => c.source_index === sourceIndex)) return prev
+      // Auto-mirror to cn
+      const cnRatio = sourceText.length > 0 ? sourceIndex / sourceText.length : 0.5
+      const cnIndex = Math.max(1, Math.min(Math.round(cnRatio * cnText.length), cnText.length - 1))
+      // Insert + sort
+      const next = [...prev, { source_index: sourceIndex, cn_index: cnIndex }]
+        .sort((a, b) => a.source_index - b.source_index)
+      // Reject if any consecutive duplicates emerged from the mirror
+      // (rare: CN much shorter than source, two source cuts map to same CN).
+      // Caller can adjust manually below the text.
+      return next
+    })
+    setSpeakerIds((prev) => {
+      const fallback = availableSpeakerIds[0] ?? ""
+      return [...prev, segment?.speaker_id ?? fallback]
+    })
   }
-  const handleCnCutChange = (i: number) => {
-    setSplitCnPos(Math.max(1, Math.min(i, cnText.length - 1)))
+
+  /** Add a cut at cn_index. Auto-mirror to source proportionally. */
+  const handleAddCnCut = (cnIndex: number) => {
+    if (cnIndex <= 0 || cnIndex >= cnText.length) return
+    setCuts((prev) => {
+      if (prev.some((c) => c.cn_index === cnIndex)) return prev
+      const srcRatio = cnText.length > 0 ? cnIndex / cnText.length : 0.5
+      const sourceIndex = Math.max(1, Math.min(Math.round(srcRatio * sourceText.length), sourceText.length - 1))
+      if (prev.some((c) => c.source_index === sourceIndex)) return prev
+      return [...prev, { source_index: sourceIndex, cn_index: cnIndex }]
+        .sort((a, b) => a.source_index - b.source_index)
+    })
+    setSpeakerIds((prev) => {
+      const fallback = availableSpeakerIds[0] ?? ""
+      return [...prev, segment?.speaker_id ?? fallback]
+    })
+  }
+
+  /** Remove cut at cutArrayIndex; also drops one corresponding speaker. */
+  const handleRemoveCut = (cutArrayIndex: number) => {
+    if (cuts.length <= 1) return  // keep at least 1 cut → 2 pieces
+    setCuts((prev) => prev.filter((_, i) => i !== cutArrayIndex))
+    setSpeakerIds((prev) => {
+      // Drop the speaker AFTER the removed cut (piece cutArrayIndex+1)
+      // — merges that piece into the preceding one which keeps its speaker.
+      if (prev.length <= 2) return prev
+      const next = [...prev]
+      next.splice(cutArrayIndex + 1, 1)
+      return next
+    })
   }
 
   const handleReset = () => {
     if (!segment) return
     const srcMid = Math.max(1, Math.floor(sourceText.length / 2))
     const cnMid = Math.max(1, Math.floor(cnText.length / 2))
-    setSplitSourcePos(srcMid)
-    setSplitCnPos(cnMid)
+    setCuts([{ source_index: srcMid, cn_index: cnMid }])
     const fallback = availableSpeakerIds[0] ?? ""
-    setSpeakerA(segment.speaker_id ?? fallback)
-    setSpeakerB(segment.speaker_id ?? fallback)
+    setSpeakerIds([
+      segment.speaker_id ?? fallback,
+      segment.speaker_id ?? fallback,
+    ])
   }
 
-  const valid =
-    !!segment
-    && splitSourcePos > 0
-    && splitSourcePos < sourceText.length
-    && splitCnPos > 0
-    && splitCnPos < cnText.length
-    && !!speakerA
-    && !!speakerB
+  // Validity: cuts strictly monotonic in BOTH indices, in-bounds,
+  // speaker_ids count = cuts.length + 1, no empty speaker.
+  const valid = useMemo(() => {
+    if (!segment) return false
+    if (cuts.length < 1) return false
+    if (speakerIds.length !== cuts.length + 1) return false
+    let prevSi = 0
+    let prevCi = 0
+    for (const c of cuts) {
+      if (!(c.source_index > prevSi && c.source_index < sourceText.length)) return false
+      if (!(c.cn_index > prevCi && c.cn_index < cnText.length)) return false
+      prevSi = c.source_index
+      prevCi = c.cn_index
+    }
+    if (speakerIds.some((s) => !s || !s.trim())) return false
+    return true
+  }, [segment, cuts, speakerIds, sourceText.length, cnText.length])
 
-  const aSrc = sourceText.slice(0, splitSourcePos)
-  const bSrc = sourceText.slice(splitSourcePos)
-  const aCn = cnText.slice(0, splitCnPos)
-  const bCn = cnText.slice(splitCnPos)
+  // Build per-piece preview from cuts.
+  const pieces = useMemo(() => {
+    const sourceBounds = [0, ...cuts.map((c) => c.source_index), sourceText.length]
+    const cnBounds = [0, ...cuts.map((c) => c.cn_index), cnText.length]
+    const startMs = segment?.start_ms
+    const endMs = segment?.end_ms
+    const hasTime =
+      typeof startMs === "number" && typeof endMs === "number" && endMs > startMs
+    return sourceBounds.slice(0, -1).map((sStart, i) => {
+      const sEnd = sourceBounds[i + 1]
+      const cStart = cnBounds[i]
+      const cEnd = cnBounds[i + 1]
+      let pieceRange = ""
+      let pieceDur = ""
+      if (hasTime && sourceText.length > 0) {
+        const ratioStart = sStart / sourceText.length
+        const ratioEnd = sEnd / sourceText.length
+        const ms0 = Math.round((startMs as number) + (endMs as number - (startMs as number)) * ratioStart)
+        const ms1 = Math.round((startMs as number) + (endMs as number - (startMs as number)) * ratioEnd)
+        pieceRange = `${formatMs(ms0)} – ${formatMs(ms1)}`
+        pieceDur = durationLabel(ms0, ms1)
+      }
+      return {
+        num: i + 1,
+        en: sourceText.slice(sStart, sEnd),
+        cn: cnText.slice(cStart, cEnd),
+        range: pieceRange,
+        dur: pieceDur,
+      }
+    })
+  }, [cuts, sourceText, cnText, segment?.start_ms, segment?.end_ms])
 
   const totalLabel = useMemo(() => {
     if (!segment) return ""
     return `${formatMs(segment.start_ms)} – ${formatMs(segment.end_ms)}`
   }, [segment])
 
-  // Linear time split — A gets the same source/cn ratio of the original
-  // time window. Matches backend behavior of word-boundary-aligned splits.
-  const splitTimeLabel = useMemo(() => {
-    if (!segment || segment.start_ms === undefined || segment.end_ms === undefined) {
-      return { aRange: "", aDur: "", bRange: "", bDur: "" }
-    }
-    const ratio = sourceText.length > 0 ? splitSourcePos / sourceText.length : 0.5
-    const midMs = Math.round(segment.start_ms + (segment.end_ms - segment.start_ms) * ratio)
-    return {
-      aRange: `${formatMs(segment.start_ms)} – ${formatMs(midMs)}`,
-      aDur: durationLabel(segment.start_ms, midMs),
-      bRange: `${formatMs(midMs)} – ${formatMs(segment.end_ms)}`,
-      bDur: durationLabel(midMs, segment.end_ms),
-    }
-  }, [segment, sourceText.length, splitSourcePos])
-
   const handleSubmit = async () => {
     if (!segment || !valid || isSubmitting) return
     setIsSubmitting(true)
     try {
       await onSubmit(segment.segment_id, {
-        split_source_index: splitSourcePos,
-        split_cn_index: splitCnPos,
-        speaker_a: speakerA,
-        speaker_b: speakerB,
+        cuts: cuts.map((c) => ({ source_index: c.source_index, cn_index: c.cn_index })),
+        speaker_ids: speakerIds,
       })
       onClose()
     } finally {
       setIsSubmitting(false)
     }
+  }
+
+  /** Add a cut at midpoint of the longest piece (for users who can't
+   *  click precisely). */
+  const handleAddCutAtMidpoint = () => {
+    // Find the longest current piece (by source-text length).
+    const sourceBounds = [0, ...cuts.map((c) => c.source_index), sourceText.length]
+    let longestStart = 0
+    let longestEnd = sourceText.length
+    let longestLen = 0
+    for (let i = 0; i < sourceBounds.length - 1; i++) {
+      const len = sourceBounds[i + 1] - sourceBounds[i]
+      if (len > longestLen) {
+        longestLen = len
+        longestStart = sourceBounds[i]
+        longestEnd = sourceBounds[i + 1]
+      }
+    }
+    if (longestLen < 4) return  // too short to split
+    const mid = Math.floor((longestStart + longestEnd) / 2)
+    handleAddSourceCut(mid)
   }
 
   return (
@@ -245,84 +337,66 @@ export function SplitSegmentDialog({
           <p className="text-sm text-muted-foreground">无选中段落</p>
         ) : (
           <div className="space-y-4">
-            {/* Source (English) — clickable text + slider */}
+            {/* Source (English) — click chars to add cuts, × on a bar to remove */}
             <div className="space-y-2">
               <div className="flex items-center justify-between text-xs">
-                <label className="text-muted-foreground">英文原文 · 点击文字位置设置切点</label>
+                <label className="text-muted-foreground">
+                  英文原文 · 点击文字位置加切点 · 点切点 × 删除
+                </label>
                 <span className="font-mono text-[color:var(--ochre)] tabular-nums">
-                  {splitSourcePos} / {sourceText.length}
+                  {cuts.length} 个切点
                 </span>
               </div>
-              <CutTextBlock
+              <CutTextBlockMulti
                 text={sourceText}
-                cutIndex={splitSourcePos}
-                onSetCut={handleSourceCutChange}
-              />
-              <input
-                type="range"
-                min={1}
-                max={Math.max(1, sourceText.length - 1)}
-                value={splitSourcePos}
-                onChange={(e) => handleSourceCutChange(parseInt(e.currentTarget.value, 10))}
-                className="w-full accent-primary"
-                aria-label="原文切点位置"
+                cuts={cuts.map((c) => c.source_index)}
+                onAddCut={handleAddSourceCut}
+                onRemoveCut={handleRemoveCut}
               />
             </div>
 
-            {/* CN — same UI */}
+            {/* CN — independent click-to-add (also auto-mirrored when adding
+             *  on source side) */}
             <div className="space-y-2">
               <div className="flex items-center justify-between text-xs">
-                <label className="text-muted-foreground">中文译文 · 点击文字位置设置切点</label>
-                <span className="font-mono text-[color:var(--ochre)] tabular-nums">
-                  {splitCnPos} / {cnText.length}
+                <label className="text-muted-foreground">
+                  中文译文 · 点击文字位置加切点
+                </label>
+                <span className="text-[10px] text-muted-foreground">
+                  切点跟英文自动联动
                 </span>
               </div>
-              <CutTextBlock
+              <CutTextBlockMulti
                 text={cnText}
-                cutIndex={splitCnPos}
-                onSetCut={handleCnCutChange}
-              />
-              <input
-                type="range"
-                min={1}
-                max={Math.max(1, cnText.length - 1)}
-                value={splitCnPos}
-                onChange={(e) => handleCnCutChange(parseInt(e.currentTarget.value, 10))}
-                className="w-full accent-primary"
-                aria-label="译文切点位置"
+                cuts={cuts.map((c) => c.cn_index)}
+                onAddCut={handleAddCnCut}
+                onRemoveCut={handleRemoveCut}
               />
             </div>
 
-            {/* Preview cards — circle index + time range + bilingual + speaker dropdown */}
+            {/* Add-cut shortcut */}
+            <div>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleAddCutAtMidpoint}
+                className="text-xs"
+              >
+                <Plus className="h-3.5 w-3.5 mr-1" />
+                在最长段落中点加切点
+              </Button>
+            </div>
+
+            {/* Preview cards — N+1 pieces */}
             <div className="space-y-2">
-              <div className="text-xs text-muted-foreground">将拆分为 2 段</div>
-              {[
-                {
-                  num: 1,
-                  range: splitTimeLabel.aRange,
-                  dur: splitTimeLabel.aDur,
-                  en: aSrc,
-                  cn: aCn,
-                  speaker: speakerA,
-                  setSpeaker: setSpeakerA,
-                },
-                {
-                  num: 2,
-                  range: splitTimeLabel.bRange,
-                  dur: splitTimeLabel.bDur,
-                  en: bSrc,
-                  cn: bCn,
-                  speaker: speakerB,
-                  setSpeaker: setSpeakerB,
-                },
-              ].map((piece) => (
+              <div className="text-xs text-muted-foreground">
+                将拆分为 {pieces.length} 段
+              </div>
+              {pieces.map((piece, pieceIdx) => (
                 <div
-                  key={piece.num}
+                  key={pieceIdx}
                   className="rounded-md border border-border bg-muted/20 p-3 space-y-2"
                 >
-                  {/* Header row: circle + timecode + duration + speaker (all on one line).
-                   *  User feedback 2026-05-17 #3: "说话人和时间、时长占一行" so the
-                   *  bilingual text below gets full row width. */}
                   <div className="flex items-center gap-3">
                     <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground text-xs font-semibold">
                       {piece.num}
@@ -333,8 +407,15 @@ export function SplitSegmentDialog({
                     </div>
                     <select
                       className="text-xs rounded border border-border bg-background px-2 py-1 text-foreground max-w-[180px]"
-                      value={piece.speaker}
-                      onChange={(e) => piece.setSpeaker(e.currentTarget.value)}
+                      value={speakerIds[pieceIdx] ?? ""}
+                      onChange={(e) => {
+                        const v = e.currentTarget.value
+                        setSpeakerIds((prev) => {
+                          const next = [...prev]
+                          next[pieceIdx] = v
+                          return next
+                        })
+                      }}
                       aria-label={`第 ${piece.num} 段说话人`}
                     >
                       {availableSpeakerIds.map((sid) => (
@@ -344,8 +425,6 @@ export function SplitSegmentDialog({
                       ))}
                     </select>
                   </div>
-
-                  {/* Body: EN full-width, then CN full-width. */}
                   <div className="text-[11px] text-muted-foreground break-words leading-relaxed">
                     {piece.en || "（空）"}
                   </div>
@@ -355,11 +434,6 @@ export function SplitSegmentDialog({
                 </div>
               ))}
             </div>
-
-            {/* Phase 1 hint */}
-            <p className="text-[10.5px] text-muted-foreground bg-muted/30 rounded px-2 py-1.5 border border-border/40">
-              当前支持拆分为 2 段。一段内有多个说话人时，多段一次性拆分将在下个版本支持。
-            </p>
           </div>
         )}
 
@@ -387,7 +461,7 @@ export function SplitSegmentDialog({
             disabled={!valid || isSubmitting}
           >
             {isSubmitting && <Loader2 className="h-3.5 w-3.5 animate-spin mr-1" />}
-            拆分为 2 段
+            拆分为 {Math.max(2, cuts.length + 1)} 段
           </Button>
         </DialogFooter>
       </DialogContent>

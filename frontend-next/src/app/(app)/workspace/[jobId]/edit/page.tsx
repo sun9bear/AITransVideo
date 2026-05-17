@@ -33,6 +33,7 @@ import {
   getRegenerateAllStatus,
   cancelRegenerateAll,
   splitEditingSegment,
+  splitEditingSegmentMany,
   type CommitStrategy,
   type EditingSegment,
   type EditingSegmentsResponse,
@@ -529,6 +530,65 @@ export default function VideoEditPage() {
           revealFirstNewSegment()
         } catch {
           // Keep the optimistic split visible; the next normal reload will resync.
+        }
+        toast.success(`拆分完成：${result.new_segments.length} 段，共 ${result.total_count} 段`)
+      } catch (error) {
+        toast.error(`拆分失败: ${getErrorMessage(error)}`)
+      } finally {
+        setSavingSegmentIds((prev) => {
+          const next = new Set(prev)
+          next.delete(segmentId)
+          return next
+        })
+      }
+    },
+    [jobId],
+  )
+
+  // ---- Split segment (Phase 2a multi-cut) ----
+  // Plan §5.6: atomic N-cut split via POST /split-many. Backend uses
+  // write-ahead journal; cuts strictly increasing in both indices;
+  // speaker_ids length = cuts.length + 1.
+  const handleSplitSegmentMany = useCallback(
+    async (
+      segmentId: string,
+      body: {
+        cuts: Array<{ source_index: number; cn_index: number }>
+        speaker_ids: string[]
+      },
+    ) => {
+      setSavingSegmentIds((prev) => new Set(prev).add(segmentId))
+      try {
+        const result = await splitEditingSegmentMany(jobId, segmentId, body)
+        const firstNewSegmentId = result.new_segments[0]?.segment_id
+        const revealFirstNewSegment = () => {
+          if (!firstNewSegmentId) return
+          window.requestAnimationFrame(() => {
+            virtualListRef.current?.scrollToId(firstNewSegmentId, { align: "start", stickyOffset: stickyOffsetRef.current })
+          })
+        }
+        setResource((prev) => {
+          if (!prev) return prev
+          const index = prev.segments.findIndex(
+            (s) => s.segment_id === segmentId,
+          )
+          if (index < 0) return prev
+          const nextSegments = [...prev.segments]
+          nextSegments.splice(index, 1, ...result.new_segments)
+          return {
+            ...prev,
+            segments: nextSegments,
+            segment_status: result.segment_status,
+            total: result.total_count,
+          }
+        })
+        revealFirstNewSegment()
+        try {
+          const refreshed = await getEditingSegments(jobId)
+          setResource(refreshed)
+          revealFirstNewSegment()
+        } catch {
+          // Keep optimistic; next normal reload will resync.
         }
         toast.success(`拆分完成：${result.new_segments.length} 段，共 ${result.total_count} 段`)
       } catch (error) {
@@ -1392,7 +1452,9 @@ export default function VideoEditPage() {
         speakerNameMap={speakerNameMap}
         onClose={() => setSplitDialogSegmentId(null)}
         onSubmit={async (sid, body) => {
-          await handleSplitSegment(sid, body)
+          // Phase 2a: dialog always submits multi-cut payload. Backend's
+          // split-many endpoint handles 1-cut (= 2 pieces) case fine.
+          await handleSplitSegmentMany(sid, body)
         }}
       />
 
