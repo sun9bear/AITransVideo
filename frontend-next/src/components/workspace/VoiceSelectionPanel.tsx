@@ -360,8 +360,9 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                 selectedProvider: loadedDefaultProvider,
               })
               candidateMap[sp.speakerId] = result
-            } catch {
+            } catch (err) {
               // Best-effort; skip this speaker's candidates on failure.
+              console.warn('getVoiceCandidates failed for speaker', sp.speakerId, err)
             }
           }),
         )
