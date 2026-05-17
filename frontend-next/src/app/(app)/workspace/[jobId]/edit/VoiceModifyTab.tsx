@@ -763,7 +763,7 @@ export function VoiceModifyTab({
         <div className="flex items-start justify-between gap-3">
           <div className="space-y-1 flex-1 min-w-0">
             <h2 className="text-lg font-semibold text-foreground">音色修改</h2>
-            <p className="text-sm text-slate-500">
+            <p className="text-sm text-muted-foreground">
               修改某个说话人的音色后，点击&ldquo;应用到此说话人&rdquo;即覆盖该说话人所有段的音色。
               覆盖后需要回到&ldquo;翻译修改&rdquo;Tab 点击&ldquo;一键重新合成&rdquo;才会生效。
             </p>
@@ -842,7 +842,7 @@ export function VoiceModifyTab({
               : "原音色"
             const statusColor = hasOverride
               ? "text-[color:var(--ochre)]"
-              : "text-slate-500"
+              : "text-muted-foreground"
 
             return (
               <div
@@ -862,8 +862,8 @@ export function VoiceModifyTab({
                     {/* Name + status */}
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="font-medium text-foreground text-sm">{sp.speakerName || sp.speakerId}</span>
-                      <span className="text-xs text-slate-400">{sp.speakerId}</span>
-                      <span className="text-xs text-slate-400">
+                      <span className="text-xs text-muted-foreground">{sp.speakerId}</span>
+                      <span className="text-xs text-muted-foreground">
                         {ownSegments.length} 段 · {sp.totalDurationS.toFixed(1)}s
                       </span>
                       <span className={`text-xs font-medium ${statusColor}`}>{statusLabel}</span>
@@ -907,7 +907,7 @@ export function VoiceModifyTab({
                               className={`h-7 rounded-md px-3 text-xs font-medium transition ${
                                 isActive
                                   ? "bg-primary text-primary-foreground"
-                                  : "bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700"
+                                  : "bg-muted text-muted-foreground hover:bg-muted/70 hover:text-foreground"
                               }`}
                               onClick={() => handleProviderChange(sp.speakerId, prov)}
                               disabled={applying}
@@ -922,7 +922,7 @@ export function VoiceModifyTab({
                     {/* Voice select + preview + clone */}
                     <div className="flex items-center gap-2 flex-wrap">
                       <select
-                        className="h-8 rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-2 text-sm text-foreground w-[220px] truncate disabled:opacity-50"
+                        className="h-8 rounded border border-border bg-background px-2 text-sm text-foreground w-[220px] truncate disabled:opacity-50"
                         onChange={(e) => handleVoiceChange(sp.speakerId, e.target.value)}
                         value={state?.voiceId ?? ""}
                         disabled={applying}
@@ -1037,7 +1037,7 @@ export function VoiceModifyTab({
                       {state?.voiceId && (
                         <button
                           type="button"
-                          className="h-8 rounded border border-slate-300 dark:border-slate-600 px-3 text-xs font-medium text-slate-500 dark:text-slate-400 transition hover:bg-slate-100 dark:hover:bg-slate-700 disabled:opacity-50"
+                          className="h-8 rounded border border-border px-3 text-xs font-medium text-muted-foreground transition hover:text-foreground hover:bg-muted/60 disabled:opacity-50"
                           disabled={previewLoading[sp.speakerId] || applying}
                           onClick={() => {
                             void handlePreview(sp.speakerId)
@@ -1053,7 +1053,7 @@ export function VoiceModifyTab({
                           后端这俩端点会 409)。 */}
                       <button
                         type="button"
-                        className="h-8 rounded border border-slate-300 dark:border-slate-600 px-3 text-xs font-medium text-slate-500 dark:text-slate-400 transition hover:bg-slate-100 dark:hover:bg-slate-700 disabled:opacity-50"
+                        className="h-8 rounded border border-border px-3 text-xs font-medium text-muted-foreground transition hover:text-foreground hover:bg-muted/60 disabled:opacity-50"
                         disabled={ownSegments.length <= 0 || applying}
                         onClick={() => setAuditModalSpeaker(sp.speakerId)}
                       >
@@ -1095,7 +1095,7 @@ export function VoiceModifyTab({
                       {hasOverride && (
                         <button
                           type="button"
-                          className="h-8 rounded border border-slate-300 dark:border-slate-600 px-3 text-xs font-medium text-slate-500 transition hover:text-foreground hover:bg-slate-100 dark:hover:bg-slate-700 disabled:opacity-50"
+                          className="h-8 rounded border border-border px-3 text-xs font-medium text-muted-foreground transition hover:text-foreground hover:bg-muted/60 disabled:opacity-50"
                           disabled={applying}
                           onClick={() => void handleRestoreSpeaker(sp.speakerId)}
                         >
@@ -1124,7 +1124,7 @@ export function VoiceModifyTab({
                                 className={`flex h-3.5 w-3.5 items-center justify-center rounded-full border-2 ${
                                   model === "turbo"
                                     ? "border-[color:var(--cinnabar)]"
-                                    : "border-slate-400 dark:border-slate-600"
+                                    : "border-border"
                                 }`}
                               >
                                 {model === "turbo" && (
@@ -1132,7 +1132,7 @@ export function VoiceModifyTab({
                                 )}
                               </span>
                               <span className="text-xs text-foreground">高级音质</span>
-                              <span className="text-xs text-slate-400">{cpm.minimax_turbo} 点/分钟</span>
+                              <span className="text-xs text-muted-foreground">{cpm.minimax_turbo} 点/分钟</span>
                             </label>
                             <label
                               className="flex items-center gap-1.5 cursor-pointer"
@@ -1145,7 +1145,7 @@ export function VoiceModifyTab({
                                 className={`flex h-3.5 w-3.5 items-center justify-center rounded-full border-2 ${
                                   model === "hd"
                                     ? "border-[color:var(--cinnabar)]"
-                                    : "border-slate-400 dark:border-slate-600"
+                                    : "border-border"
                                 }`}
                               >
                                 {model === "hd" && (
@@ -1153,7 +1153,7 @@ export function VoiceModifyTab({
                                 )}
                               </span>
                               <span className="text-xs text-foreground">旗舰音质</span>
-                              <span className="text-xs text-slate-400">{cpm.minimax_hd} 点/分钟</span>
+                              <span className="text-xs text-muted-foreground">{cpm.minimax_hd} 点/分钟</span>
                             </label>
                           </div>
                         )
@@ -1169,7 +1169,7 @@ export function VoiceModifyTab({
                             <span className="h-1.5 w-1.5 rounded-full bg-[color:var(--cinnabar)]" />
                           </span>
                           <span className="text-xs text-foreground">标准音质</span>
-                          <span className="text-xs text-slate-400">{pts} 点/分钟</span>
+                          <span className="text-xs text-muted-foreground">{pts} 点/分钟</span>
                         </div>
                       ) : null
                     })()}

@@ -154,20 +154,21 @@ export function SegmentRow({
     setLocalSource(segment.source_text ?? "")
   }, [segment.source_text])
 
-  // ---- source audio preview ----
-  // Plan §3.2: row button is a "shortcut" — left ops panel is the
-  // canonical playback surface (full <audio controls>). The row uses
-  // the offscreen Audio API for a click-to-play / click-to-pause
-  // toggle. NOT rendering an inline <audio controls> element here
-  // (it caused SegmentVirtualList height-measure misses → row 01's
-  // audio bar overlaid row 02's text until the user scrolled).
+  // ---- source audio preview (offscreen Audio API per plan §3.4) ----
   const audioInstanceRef = useRef<HTMLAudioElement | null>(null)
   const [isFetchingSource, setIsFetchingSource] = useState(false)
   const [isSourcePlaying, setIsSourcePlaying] = useState(false)
 
+  // ---- draft audio (also Audio API, custom compact controls per
+  // user feedback 2026-05-17: native <audio controls> too tall/ugly) ----
+  const draftAudioRef = useRef<HTMLAudioElement | null>(null)
+  const [isDraftPlaying, setIsDraftPlaying] = useState(false)
+  const [draftCurTime, setDraftCurTime] = useState(0)
+  const [draftTotalTime, setDraftTotalTime] = useState(0)
+
   useEffect(() => {
-    // Clean up when component unmounts so audio doesn't keep playing
-    // after the row leaves the virtualization window.
+    // Clean up source audio when component unmounts so audio doesn't
+    // keep playing after the row leaves the virtualization window.
     return () => {
       const inst = audioInstanceRef.current
       if (inst) {
@@ -175,8 +176,70 @@ export function SegmentRow({
         inst.src = ""
         audioInstanceRef.current = null
       }
+      const dr = draftAudioRef.current
+      if (dr) {
+        dr.pause()
+        dr.src = ""
+        draftAudioRef.current = null
+      }
     }
   }, [])
+
+  // Lazy-load draft audio when segment enters tts_dirty. Re-init on
+  // draft duration change (i.e., user re-regenerated → new wav).
+  useEffect(() => {
+    if (status !== "tts_dirty") {
+      // Tear down draft player when leaving tts_dirty (accept / discard).
+      const prev = draftAudioRef.current
+      if (prev) {
+        prev.pause()
+        prev.src = ""
+        draftAudioRef.current = null
+      }
+      setIsDraftPlaying(false)
+      setDraftCurTime(0)
+      setDraftTotalTime(0)
+      return
+    }
+    const url = buildDraftAudioUrl(jobId, segment.segment_id)
+    const audio = new Audio(url)
+    audio.preload = "metadata"
+    const onMeta = () => setDraftTotalTime(audio.duration || 0)
+    const onPlay = () => setIsDraftPlaying(true)
+    const onPause = () => setIsDraftPlaying(false)
+    const onEnd = () => {
+      setIsDraftPlaying(false)
+      setDraftCurTime(0)
+    }
+    const onTime = () => setDraftCurTime(audio.currentTime)
+    audio.addEventListener("loadedmetadata", onMeta)
+    audio.addEventListener("play", onPlay)
+    audio.addEventListener("pause", onPause)
+    audio.addEventListener("ended", onEnd)
+    audio.addEventListener("timeupdate", onTime)
+    draftAudioRef.current = audio
+    return () => {
+      audio.pause()
+      audio.removeEventListener("loadedmetadata", onMeta)
+      audio.removeEventListener("play", onPlay)
+      audio.removeEventListener("pause", onPause)
+      audio.removeEventListener("ended", onEnd)
+      audio.removeEventListener("timeupdate", onTime)
+      audio.src = ""
+      draftAudioRef.current = null
+    }
+    // Re-init on new draft wav (duration changes after re-regenerate).
+  }, [status, jobId, segment.segment_id, segment.draft_wav_duration_ms])
+
+  const toggleDraftPlay = () => {
+    const a = draftAudioRef.current
+    if (!a) return
+    if (a.paused) {
+      a.play().catch(() => {})
+    } else {
+      a.pause()
+    }
+  }
 
   const handlePlaySource = async () => {
     const inst = audioInstanceRef.current
@@ -481,18 +544,29 @@ export function SegmentRow({
          *  (plan §3.2 "左侧 ops panel = 操作全集，右侧行内按钮 = 快捷方式"). */}
 
         {/* Draft panel — appears inline when tts_dirty (plan §3.3 primary
-         *  location). Audio uses natural height; row expands. */}
+         *  location). Custom compact controls instead of native
+         *  <audio controls> (user feedback 2026-05-17: native bar too
+         *  tall/ugly + brought volume slider / kebab menu noise). */}
         {status === "tts_dirty" && (
           <div className="mt-2 flex flex-wrap items-center gap-2 text-[10.5px] border-l-2 border-[color:var(--ochre)] bg-[color:var(--ochre)]/8 rounded-r pl-2 pr-2 py-1.5">
-            <audio
-              key={`draft-${segment.segment_id}-${segment.draft_wav_duration_ms ?? ""}`}
-              controls
-              preload="metadata"
-              className="flex-shrink-0 max-w-[220px]"
-              src={buildDraftAudioUrl(jobId, segment.segment_id)}
-            />
-            <span className="text-[10px] text-muted-foreground">
-              新草稿{draft !== null ? ` · ${(draft / 1000).toFixed(1)}s` : ""}
+            <button
+              type="button"
+              onClick={toggleDraftPlay}
+              disabled={buttonsDisabled}
+              aria-label={isDraftPlaying ? "暂停草稿" : "播放草稿"}
+              className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[color:var(--ochre)] text-primary-foreground hover:bg-[color:var(--ochre)]/90 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ochre)] focus-visible:ring-offset-1"
+            >
+              {isDraftPlaying ? <Pause className="h-3 w-3" /> : <Play className="h-3 w-3 ml-[1px]" />}
+            </button>
+            <span className="text-[10.5px] font-medium text-[color:var(--ochre)]">
+              新草稿
+            </span>
+            <span className="text-[10px] text-muted-foreground tabular-nums">
+              {draftTotalTime > 0
+                ? `${draftCurTime.toFixed(1)} / ${draftTotalTime.toFixed(1)}s`
+                : draft !== null
+                  ? `${(draft / 1000).toFixed(1)}s`
+                  : "…"}
             </span>
             <div className="ml-auto inline-flex items-center gap-1">
               <Button

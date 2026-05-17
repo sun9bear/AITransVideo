@@ -21,10 +21,11 @@
  *   tts_failed        → error message + 重试合成
  */
 
-import { useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import {
   Check,
   Loader2,
+  Pause,
   Play,
   RefreshCw,
   Scissors,
@@ -78,6 +79,75 @@ export function CurrentSegmentOpsPanel({
 }: CurrentSegmentOpsPanelProps) {
   const [sourceAudioUrl, setSourceAudioUrl] = useState<string | null>(null)
   const [isFetchingSource, setIsFetchingSource] = useState(false)
+
+  // Draft audio: custom compact controls (matches row inline player) —
+  // native <audio controls> was visually inconsistent with project's
+  // ink palette (user feedback 2026-05-17).
+  const draftAudioRef = useRef<HTMLAudioElement | null>(null)
+  const [isDraftPlaying, setIsDraftPlaying] = useState(false)
+  const [draftCurTime, setDraftCurTime] = useState(0)
+  const [draftTotalTime, setDraftTotalTime] = useState(0)
+
+  useEffect(() => {
+    // Tear down on unmount.
+    return () => {
+      const dr = draftAudioRef.current
+      if (dr) {
+        dr.pause()
+        dr.src = ""
+        draftAudioRef.current = null
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!segment || status !== "tts_dirty") {
+      const prev = draftAudioRef.current
+      if (prev) {
+        prev.pause()
+        prev.src = ""
+        draftAudioRef.current = null
+      }
+      setIsDraftPlaying(false)
+      setDraftCurTime(0)
+      setDraftTotalTime(0)
+      return
+    }
+    const url = buildDraftAudioUrl(jobId, segment.segment_id)
+    const audio = new Audio(url)
+    audio.preload = "metadata"
+    const onMeta = () => setDraftTotalTime(audio.duration || 0)
+    const onPlay = () => setIsDraftPlaying(true)
+    const onPause = () => setIsDraftPlaying(false)
+    const onEnd = () => {
+      setIsDraftPlaying(false)
+      setDraftCurTime(0)
+    }
+    const onTime = () => setDraftCurTime(audio.currentTime)
+    audio.addEventListener("loadedmetadata", onMeta)
+    audio.addEventListener("play", onPlay)
+    audio.addEventListener("pause", onPause)
+    audio.addEventListener("ended", onEnd)
+    audio.addEventListener("timeupdate", onTime)
+    draftAudioRef.current = audio
+    return () => {
+      audio.pause()
+      audio.removeEventListener("loadedmetadata", onMeta)
+      audio.removeEventListener("play", onPlay)
+      audio.removeEventListener("pause", onPause)
+      audio.removeEventListener("ended", onEnd)
+      audio.removeEventListener("timeupdate", onTime)
+      audio.src = ""
+      draftAudioRef.current = null
+    }
+  }, [jobId, segment, status])
+
+  const toggleDraftPlay = () => {
+    const a = draftAudioRef.current
+    if (!a) return
+    if (a.paused) a.play().catch(() => {})
+    else a.pause()
+  }
 
   if (!segment || !status) {
     return (
@@ -139,19 +209,28 @@ export function CurrentSegmentOpsPanel({
         </p>
       )}
 
-      {/* Draft inline audio (tts_dirty) */}
+      {/* Draft inline audio (tts_dirty) — custom compact controls. */}
       {status === "tts_dirty" && (
-        <div className="space-y-1">
-          <p className="text-[11px] text-[color:var(--ochre)]">
-            新草稿{draftDuration ? ` · ${draftDuration}` : ""}
-          </p>
-          <audio
-            key={`current-draft-${segment.segment_id}-${segment.draft_wav_duration_ms ?? ""}`}
-            controls
-            preload="metadata"
-            className="w-full h-8"
-            src={buildDraftAudioUrl(jobId, segment.segment_id)}
-          />
+        <div className="space-y-2 rounded-md border border-[color:var(--ochre)]/40 bg-[color:var(--ochre)]/8 p-2">
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={toggleDraftPlay}
+              disabled={buttonsDisabled}
+              aria-label={isDraftPlaying ? "暂停草稿" : "播放草稿"}
+              className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[color:var(--ochre)] text-primary-foreground hover:bg-[color:var(--ochre)]/90 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--ochre)] focus-visible:ring-offset-1"
+            >
+              {isDraftPlaying ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5 ml-[1px]" />}
+            </button>
+            <span className="text-[11px] font-medium text-[color:var(--ochre)]">
+              新草稿
+            </span>
+            <span className="ml-auto text-[10px] text-muted-foreground tabular-nums">
+              {draftTotalTime > 0
+                ? `${draftCurTime.toFixed(1)} / ${draftTotalTime.toFixed(1)}s`
+                : draftDuration || "…"}
+            </span>
+          </div>
           <div className="flex gap-1.5">
             <Button
               size="sm"
