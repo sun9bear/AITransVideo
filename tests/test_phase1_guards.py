@@ -299,6 +299,8 @@ def test_gateway_knows_every_post_edit_endpoint() -> None:
         "accept-draft",
         "discard-draft",
         "split",
+        "split-many",       # Phase 2a — atomic N-cut split
+        "suggest-split",    # Phase 2b v2 — LLM-backed split suggest
         "preview-source",
     })
 

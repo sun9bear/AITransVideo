@@ -515,23 +515,6 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                     self._write_json(HTTPStatus.OK, {"success": True, **result})
                     return
 
-                # --- GET /jobs/{id}/segments/{sid}/word-context (Phase 2b)
-                # Read-only word-level timing data for the segment's range.
-                # Feeds the SplitSegmentDialog smart-prefill logic. Read
-                # protected by service._require_editing — non-editing jobs
-                # 409. Plan 2026-05-17 §5.4 + Codex round 5 P2 #1.
-                if (
-                    len(path_parts) == 5
-                    and path_parts[0] == "jobs"
-                    and path_parts[2] == "segments"
-                    and path_parts[4] == "word-context"
-                ):
-                    job_id = path_parts[1]
-                    segment_id = path_parts[3]
-                    result = service.get_segment_word_context(job_id, segment_id)
-                    self._write_json(HTTPStatus.OK, {"success": True, **result})
-                    return
-
                 # --- GET /jobs/{id}/segments/{sid}/preview-source-audio ---
                 # Range-aware stream of the cached WAV prepared by the
                 # companion POST /segments/{sid}/preview-source handler.

@@ -1000,23 +1000,6 @@ class JobService:
         record = self._require_editing(job_id)
         return _quota(record.project_dir)
 
-    def get_segment_word_context(
-        self,
-        job_id: str,
-        segment_id: str,
-    ) -> dict:
-        """Phase 2b: read-only word-level timing data for smart
-        split-prefill (plan 2026-05-17 §5.4). Read-only; requires
-        editing state so we don't leak post-edit data on non-editing
-        jobs. Feature-flag gate stays frontend-side (Codex round 5
-        P2 #1 decision)."""
-        from services.jobs.editing_segments import load_segment_word_context
-        from services.jobs.input_validators import validate_segment_id
-
-        validate_segment_id(segment_id)
-        record = self._require_editing(job_id)
-        return load_segment_word_context(record.project_dir, segment_id)
-
     def split_editing_segment_many(
         self,
         job_id: str,

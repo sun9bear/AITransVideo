@@ -285,34 +285,6 @@ export async function splitEditingSegment(
 }
 
 /**
- * Phase 2b — word-level timing data for smart split-prefill (plan §5.4).
- * Returns words whose [start, end] falls within the segment's range.
- * `available: false` when the project doesn't have a raw transcript
- * file (degrade to mid-point default).
- */
-export interface WordContextWord {
-  text: string
-  start: number  // ms
-  end: number    // ms
-  speaker: string | null  // ASR speaker label (A/B/C/...)
-}
-
-export interface WordContextResponse {
-  segment_id: string
-  words: WordContextWord[]
-  available: boolean
-}
-
-export async function getSegmentWordContext(
-  jobId: string,
-  segmentId: string,
-): Promise<WordContextResponse> {
-  return apiClient.get(
-    `/jobs/${jobId}/segments/${segmentId}/word-context`,
-  )
-}
-
-/**
  * Phase 2b v2 — LLM-backed split suggestion (plan §5.4 v2).
  * User-explicit trigger only (button click). Backend enforces:
  *   - Per-segment cap = 1

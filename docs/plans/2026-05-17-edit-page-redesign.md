@@ -433,11 +433,17 @@ cap = MAX(MIN(int(round(total_segments * 0.2)), anomaly_count), 5)
 - v1 helper（`detectSuggestedSplits`, `mapWordsToSourceChars`, `interface SuggestedSplit`）
   已从 `SplitSegmentDialog.tsx` 删除
 - v1 banner copy「智能预填」已删除（toast 取代）
-- `GET /word-context` 端点保留在 backend + `editing.ts` 中（不影响）但 dialog 不再调用
+- v1 `GET /word-context` 端点已**完全删除**（后续清理阶段）：
+  - `editing_segments.load_segment_word_context()` — 已删
+  - `JobService.get_segment_word_context()` — 已删
+  - `GET /jobs/{id}/segments/{sid}/word-context` Job API handler — 已删
+  - 前端 `getSegmentWordContext` / `WordContextWord` / `WordContextResponse` — 已删
+  - `tests/test_word_context.py` — 已删
 - 守卫测试 `test_split_dialog_phase_2b_v2_llm_suggest` 强制：
   - 新按钮 + handler + API 调用都存在
   - v1 helpers 名字必须不出现在 dialog 文件中（防止回归）
   - v1 banner copy「智能预填」必须不出现（toast 取代）
+  - `getSegmentWordContext` 必须不出现（端点已删，调用即死链）
 
 ### 5.5 Phase 1 简化
 
