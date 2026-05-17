@@ -16,7 +16,7 @@
  * collects the user's intent.
  */
 
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { Loader2, RotateCcw, Plus, X } from "lucide-react"
 import {
   Dialog,
@@ -60,18 +60,74 @@ function durationLabel(startMs: number | undefined, endMs: number | undefined): 
 }
 
 /** Render text with N cut bars inline. Clicking any character adds a
- *  cut just after that char; clicking the × on an existing cut removes it. */
+ *  cut just after that char; clicking × above a cut bar removes it;
+ *  mousedown on a cut bar starts drag-to-reposition.
+ *
+ *  Layout: × badge floats ABOVE the vertical bar (absolute positioning)
+ *  so it doesn't visually overlap the line. Bar itself is clickable +
+ *  draggable; cursor switches to ew-resize on hover.
+ */
 function CutTextBlockMulti({
   text,
   cuts,
   onAddCut,
   onRemoveCut,
+  onMoveCut,
 }: {
   text: string
   cuts: number[]  // sorted ascending, in (0, text.length)
   onAddCut(charIndexAfter: number): void
   onRemoveCut(cutArrayIndex: number): void
+  onMoveCut?(cutArrayIndex: number, newCutPos: number): void
 }) {
+  // Track active drag — refs avoid re-renders during mousemove storm.
+  const draggingRef = useRef<number | null>(null)
+
+  const startDrag = (cutArrayIndex: number) => (e: React.MouseEvent) => {
+    if (!onMoveCut) return
+    e.preventDefault()
+    e.stopPropagation()
+    draggingRef.current = cutArrayIndex
+    const prevUserSelect = document.body.style.userSelect
+    const prevCursor = document.body.style.cursor
+    document.body.style.userSelect = "none"
+    document.body.style.cursor = "ew-resize"
+
+    const handleMove = (ev: MouseEvent) => {
+      if (draggingRef.current === null) return
+      const el = document.elementFromPoint(ev.clientX, ev.clientY) as HTMLElement | null
+      if (!el) return
+      // Walk up to find the nearest element with data-char-idx (the
+      // char span). elementFromPoint may return a child like the
+      // hover bg wrapper.
+      let node: HTMLElement | null = el
+      while (node && node.dataset?.charIdx === undefined) {
+        node = node.parentElement
+        if (!node || node === document.body) {
+          node = null
+          break
+        }
+      }
+      if (!node) return
+      const charIdxStr = node.dataset.charIdx
+      if (charIdxStr === undefined) return
+      const charIdx = parseInt(charIdxStr, 10)
+      if (Number.isNaN(charIdx)) return
+      onMoveCut(draggingRef.current, charIdx + 1)
+    }
+
+    const handleUp = () => {
+      draggingRef.current = null
+      document.body.style.userSelect = prevUserSelect
+      document.body.style.cursor = prevCursor
+      document.removeEventListener("mousemove", handleMove)
+      document.removeEventListener("mouseup", handleUp)
+    }
+
+    document.addEventListener("mousemove", handleMove)
+    document.addEventListener("mouseup", handleUp)
+  }
+
   if (!text) {
     return (
       <div className="rounded-md border border-border bg-muted/30 p-3 text-xs text-muted-foreground">
@@ -82,7 +138,8 @@ function CutTextBlockMulti({
   // Compute piece boundaries [0, c1, c2, ..., text.length]
   const boundaries = [0, ...cuts, text.length]
   return (
-    <div className="rounded-md border border-border bg-muted/20 p-3 text-sm leading-relaxed select-none">
+    // pt-4 leaves room for the × badges that sit above the cut bars.
+    <div className="rounded-md border border-border bg-muted/20 pt-4 pb-3 px-3 text-sm leading-relaxed select-none">
       {boundaries.slice(0, -1).map((start, pieceIdx) => {
         const end = boundaries[pieceIdx + 1]
         const piece = text.slice(start, end)
@@ -93,6 +150,7 @@ function CutTextBlockMulti({
               return (
                 <span
                   key={`c-${absIndex}`}
+                  data-char-idx={absIndex}
                   className="cursor-pointer hover:bg-primary/20 rounded-sm"
                   onClick={() => onAddCut(absIndex + 1)}
                   title={`在第 ${absIndex + 1} 字处加切点`}
@@ -101,25 +159,38 @@ function CutTextBlockMulti({
                 </span>
               )
             })}
-            {/* Cut bar between this piece and the next (if not last) */}
+            {/* Cut marker between this piece and the next (if not last):
+             *  × button floats ABOVE the vertical bar so the bar reads
+             *  cleanly. Bar is draggable (cursor: ew-resize). */}
             {pieceIdx < boundaries.length - 2 && (
               <span
-                className="inline-flex items-center mx-1 align-middle"
+                className="relative inline-block align-middle"
+                style={{ width: "10px", height: "20px" }}
                 aria-hidden="true"
               >
+                {/* × badge — absolutely positioned, above the bar */}
                 <button
                   type="button"
+                  onMouseDown={(e) => e.stopPropagation()}
                   onClick={(e) => {
                     e.stopPropagation()
                     onRemoveCut(pieceIdx)
                   }}
-                  className="inline-flex items-center justify-center h-4 w-4 -mr-[2px] rounded-full bg-primary text-primary-foreground hover:bg-primary/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-1"
+                  className="absolute -top-3 left-1/2 -translate-x-1/2 z-10 inline-flex items-center justify-center h-4 w-4 rounded-full bg-primary text-primary-foreground hover:bg-primary/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-1"
                   title="删除此切点"
                   aria-label="删除此切点"
                 >
                   <X className="h-2.5 w-2.5" />
                 </button>
-                <span className="inline-block w-[2px] h-4 bg-primary" />
+                {/* Vertical bar — drag handle (8px hit-target wraps a 2px visual line) */}
+                <span
+                  role="separator"
+                  onMouseDown={startDrag(pieceIdx)}
+                  className="absolute top-0 left-1/2 -translate-x-1/2 flex items-center justify-center w-2 h-5 cursor-ew-resize"
+                  title={onMoveCut ? "拖动调整切点位置" : "切点位置"}
+                >
+                  <span className="block w-[2px] h-full bg-primary rounded-sm" />
+                </span>
               </span>
             )}
           </span>
@@ -200,6 +271,56 @@ export function SplitSegmentDialog({
     setSpeakerIds((prev) => {
       const fallback = availableSpeakerIds[0] ?? ""
       return [...prev, segment?.speaker_id ?? fallback]
+    })
+  }
+
+  /** Move a source-side cut to a new char position. Clamped between
+   *  the previous and next cuts so the cuts array stays strictly
+   *  monotonic without needing a re-sort (which would break the
+   *  positional speaker_ids mapping). CN cut auto-mirrored
+   *  proportionally + clamped to its own neighbor range. */
+  const handleMoveSourceCut = (cutArrayIndex: number, newSourceIndex: number) => {
+    setCuts((prev) => {
+      if (cutArrayIndex < 0 || cutArrayIndex >= prev.length) return prev
+      const lo = (cutArrayIndex > 0 ? prev[cutArrayIndex - 1].source_index : 0) + 1
+      const hi = (cutArrayIndex < prev.length - 1 ? prev[cutArrayIndex + 1].source_index : sourceText.length) - 1
+      if (lo > hi) return prev
+      const clampedSource = Math.max(lo, Math.min(hi, newSourceIndex))
+      const cnRatio = sourceText.length > 0 ? clampedSource / sourceText.length : 0.5
+      const cnLo = (cutArrayIndex > 0 ? prev[cutArrayIndex - 1].cn_index : 0) + 1
+      const cnHi = (cutArrayIndex < prev.length - 1 ? prev[cutArrayIndex + 1].cn_index : cnText.length) - 1
+      const cnTarget = Math.round(cnRatio * cnText.length)
+      const clampedCn = Math.max(cnLo, Math.min(cnHi, cnTarget))
+      if (
+        prev[cutArrayIndex].source_index === clampedSource
+        && prev[cutArrayIndex].cn_index === clampedCn
+      ) return prev
+      const next = [...prev]
+      next[cutArrayIndex] = { source_index: clampedSource, cn_index: clampedCn }
+      return next
+    })
+  }
+
+  /** Move a cn-side cut. Mirrors source proportionally + clamps both. */
+  const handleMoveCnCut = (cutArrayIndex: number, newCnIndex: number) => {
+    setCuts((prev) => {
+      if (cutArrayIndex < 0 || cutArrayIndex >= prev.length) return prev
+      const cnLo = (cutArrayIndex > 0 ? prev[cutArrayIndex - 1].cn_index : 0) + 1
+      const cnHi = (cutArrayIndex < prev.length - 1 ? prev[cutArrayIndex + 1].cn_index : cnText.length) - 1
+      if (cnLo > cnHi) return prev
+      const clampedCn = Math.max(cnLo, Math.min(cnHi, newCnIndex))
+      const srcRatio = cnText.length > 0 ? clampedCn / cnText.length : 0.5
+      const srcLo = (cutArrayIndex > 0 ? prev[cutArrayIndex - 1].source_index : 0) + 1
+      const srcHi = (cutArrayIndex < prev.length - 1 ? prev[cutArrayIndex + 1].source_index : sourceText.length) - 1
+      const srcTarget = Math.round(srcRatio * sourceText.length)
+      const clampedSource = Math.max(srcLo, Math.min(srcHi, srcTarget))
+      if (
+        prev[cutArrayIndex].source_index === clampedSource
+        && prev[cutArrayIndex].cn_index === clampedCn
+      ) return prev
+      const next = [...prev]
+      next[cutArrayIndex] = { source_index: clampedSource, cn_index: clampedCn }
+      return next
     })
   }
 
@@ -341,7 +462,7 @@ export function SplitSegmentDialog({
             <div className="space-y-2">
               <div className="flex items-center justify-between text-xs">
                 <label className="text-muted-foreground">
-                  英文原文 · 点击文字位置加切点 · 点切点 × 删除
+                  英文原文 · 点击文字加切点 · 拖动切线微调 · 切点 × 删除
                 </label>
                 <span className="font-mono text-[color:var(--ochre)] tabular-nums">
                   {cuts.length} 个切点
@@ -352,6 +473,7 @@ export function SplitSegmentDialog({
                 cuts={cuts.map((c) => c.source_index)}
                 onAddCut={handleAddSourceCut}
                 onRemoveCut={handleRemoveCut}
+                onMoveCut={handleMoveSourceCut}
               />
             </div>
 
@@ -360,7 +482,7 @@ export function SplitSegmentDialog({
             <div className="space-y-2">
               <div className="flex items-center justify-between text-xs">
                 <label className="text-muted-foreground">
-                  中文译文 · 点击文字位置加切点
+                  中文译文 · 点击文字位置加切点 · 拖动切线微调
                 </label>
                 <span className="text-[10px] text-muted-foreground">
                   切点跟英文自动联动
@@ -371,6 +493,7 @@ export function SplitSegmentDialog({
                 cuts={cuts.map((c) => c.cn_index)}
                 onAddCut={handleAddCnCut}
                 onRemoveCut={handleRemoveCut}
+                onMoveCut={handleMoveCnCut}
               />
             </div>
 
