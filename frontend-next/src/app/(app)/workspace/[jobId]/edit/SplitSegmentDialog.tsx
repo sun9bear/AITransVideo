@@ -45,6 +45,62 @@ export interface SplitSegmentDialogProps {
   ): Promise<void> | void
 }
 
+/** Snap a source-text cut position to the nearest word boundary.
+ *
+ *  English doesn't break inside words — splitting "hyperscalers" into
+ *  "hyperscal" + "ers" produces gibberish chunks and bad TTS input.
+ *  Clicks / drags inside a word land at the closest space / punctuation
+ *  boundary instead.
+ *
+ *  "Word char" = letters, digits, apostrophe (so "I'll" stays one word).
+ *  Hyphen counts as non-word so "self-improvement" can split on the hyphen.
+ *
+ *  Falls back to the raw position when the text contains no boundaries
+ *  inside it (single-word text — only happens for very short segments).
+ *
+ *  Not applied to Chinese text — Chinese has no word boundaries to enforce.
+ */
+function snapSourceCutToWord(text: string, cutPos: number): number {
+  if (text.length < 2) return cutPos
+  if (cutPos <= 0 || cutPos >= text.length) return cutPos
+
+  const isWordChar = (c: string) => /[\w']/.test(c)
+  const charBefore = text[cutPos - 1]
+  const charAt = text[cutPos]
+
+  // Already at a boundary (one side is non-word).
+  if (!isWordChar(charBefore) || !isWordChar(charAt)) {
+    return cutPos
+  }
+
+  // Scan left + right for nearest boundary (where text[i-1] is non-word
+  // OR text[i] is non-word).
+  let left = cutPos
+  while (left > 0 && isWordChar(text[left - 1]) && isWordChar(text[left])) {
+    left--
+  }
+  let right = cutPos
+  while (right < text.length && isWordChar(text[right - 1]) && isWordChar(text[right])) {
+    right++
+  }
+
+  // 0 / text.length are not valid cuts (produce empty piece). If a side
+  // hits the edge, prefer the other.
+  const leftValid = left > 0 && left < text.length
+  const rightValid = right > 0 && right < text.length
+  if (!leftValid && !rightValid) {
+    // Text is one giant word with no boundaries — fall back.
+    return cutPos
+  }
+  if (!leftValid) return right
+  if (!rightValid) return left
+
+  const leftDist = cutPos - left
+  const rightDist = right - cutPos
+  // Tie → right (after the word reads more naturally as next piece's start).
+  return leftDist < rightDist ? left : right
+}
+
 function formatMs(ms: number | undefined): string {
   if (ms === undefined) return ""
   const total = Math.floor(ms / 1000)
@@ -234,21 +290,20 @@ export function SplitSegmentDialog({
   const speakerLabel = (sid: string): string => speakerNameMap[sid] || sid
 
   /** Add a cut at source_index. Auto-mirror to cn proportionally.
-   *  De-dups if a cut already exists at that source position. */
+   *  De-dups if a cut already exists at that source position.
+   *  English clicks snap to nearest word boundary (no mid-word cuts). */
   const handleAddSourceCut = (sourceIndex: number) => {
-    if (sourceIndex <= 0 || sourceIndex >= sourceText.length) return
+    const snapped = snapSourceCutToWord(sourceText, sourceIndex)
+    if (snapped <= 0 || snapped >= sourceText.length) return
     setCuts((prev) => {
-      // De-dup
-      if (prev.some((c) => c.source_index === sourceIndex)) return prev
-      // Auto-mirror to cn
-      const cnRatio = sourceText.length > 0 ? sourceIndex / sourceText.length : 0.5
+      // De-dup against snapped position (multiple clicks inside the
+      // same word all collapse to the same boundary).
+      if (prev.some((c) => c.source_index === snapped)) return prev
+      // Auto-mirror to cn from the snapped (not raw) source position.
+      const cnRatio = sourceText.length > 0 ? snapped / sourceText.length : 0.5
       const cnIndex = Math.max(1, Math.min(Math.round(cnRatio * cnText.length), cnText.length - 1))
-      // Insert + sort
-      const next = [...prev, { source_index: sourceIndex, cn_index: cnIndex }]
+      const next = [...prev, { source_index: snapped, cn_index: cnIndex }]
         .sort((a, b) => a.source_index - b.source_index)
-      // Reject if any consecutive duplicates emerged from the mirror
-      // (rare: CN much shorter than source, two source cuts map to same CN).
-      // Caller can adjust manually below the text.
       return next
     })
     setSpeakerIds((prev) => {
@@ -278,14 +333,16 @@ export function SplitSegmentDialog({
    *  the previous and next cuts so the cuts array stays strictly
    *  monotonic without needing a re-sort (which would break the
    *  positional speaker_ids mapping). CN cut auto-mirrored
-   *  proportionally + clamped to its own neighbor range. */
+   *  proportionally + clamped to its own neighbor range.
+   *  Source position is snapped to nearest word boundary first. */
   const handleMoveSourceCut = (cutArrayIndex: number, newSourceIndex: number) => {
     setCuts((prev) => {
       if (cutArrayIndex < 0 || cutArrayIndex >= prev.length) return prev
       const lo = (cutArrayIndex > 0 ? prev[cutArrayIndex - 1].source_index : 0) + 1
       const hi = (cutArrayIndex < prev.length - 1 ? prev[cutArrayIndex + 1].source_index : sourceText.length) - 1
       if (lo > hi) return prev
-      const clampedSource = Math.max(lo, Math.min(hi, newSourceIndex))
+      const snapped = snapSourceCutToWord(sourceText, newSourceIndex)
+      const clampedSource = Math.max(lo, Math.min(hi, snapped))
       const cnRatio = sourceText.length > 0 ? clampedSource / sourceText.length : 0.5
       const cnLo = (cutArrayIndex > 0 ? prev[cutArrayIndex - 1].cn_index : 0) + 1
       const cnHi = (cutArrayIndex < prev.length - 1 ? prev[cutArrayIndex + 1].cn_index : cnText.length) - 1
