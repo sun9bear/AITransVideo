@@ -291,6 +291,30 @@ POST /job-api/jobs/{job_id}/voice-candidates
 }
 ```
 
+### 批量化与降级说明
+
+理想情况下，前端应该用一次请求拿到该 job 全部主说话人的候选列表，而不是 N 个 speaker × N 次 HTTP。可选实现路径：
+
+1. 新增 `POST /job-api/jobs/{job_id}/voice-candidates-batch`，请求体带 speaker 列表，一次返回 `Record<speaker_id, VoiceCandidatesResponse>`。
+2. 把候选直接挂到 `review_state.voice_selection_review.payload.speakers[]` 里，前端读 review payload 时顺便拿到候选。
+
+**当前 MVP 实现降级**：Phase 2 落地时维持 N speakers × N HTTP（典型 1–3 个 speaker，~150ms 串行成本可接受），原因是：
+
+- Studio voice-selection 页只在 panel mount 时加载一次候选，不在每次 render 重新拉。
+- 候选 endpoint 是 read-only，对 Gateway 没有写压力。
+- 多说话人任务（>3 speakers）目前不是主流场景。
+
+未来如果出现以下信号，应推进真正的批量化：
+
+- 用户反馈 voice selection 页"卡顿"或"加载等候时间长"。
+- 多说话人任务比例显著上升（如人物访谈类，6+ speakers）。
+- 试听对比 UI（Phase 5）引入大量候选预加载需求。
+
+降级期间硬性约束：
+
+- 单个 speaker 的候选请求失败必须 best-effort（`Promise.allSettled` + 单条 catch + console.warn），不能因一个 speaker 失败阻塞整页加载。
+- 切换 provider 时只对单个 speaker 重新查询（不全量重拉）。
+
 ### 兼容现有接口
 
 短期可以保留现有：
