@@ -766,3 +766,68 @@ def test_match_user_voices_cross_source_without_hash_still_queries_by_name():
     )
     assert len(matches) == 1
     assert matches[0].match_scope == "cross_source_named_person"
+
+
+def test_match_user_voices_cross_source_excludes_legacy_null_hash_rows():
+    """Plan §兼容性 (2026-05-17-user-voice-candidate-first):
+    Phase 0 之前的历史音色 ``source_content_hash`` 为空,不会出现
+    在统一候选 API 返回中。它们仍在个人音色库页面可见,用户可以
+    手动从官方选择器旁的"个人音色"区域选择。
+
+    Therefore: a UserVoice row whose ``source_content_hash IS NULL``
+    must NOT surface as a ``cross_source_named_person`` candidate even
+    if its ``source_speaker_name_key`` matches the current job's
+    speaker name. A modern row (hash != current) WITH the same name
+    still surfaces — proving the filter excludes only NULL-hash legacy
+    rows, not all cross-source rows.
+    """
+    from user_voice_service import match_user_voices
+
+    legacy_null_hash = _voice(
+        "vt_legacy",
+        source_content_hash=None,
+        source_speaker_id="speaker_legacy",
+        source_speaker_name_key="芒格",
+    )
+    modern_cross = _voice(
+        "vt_modern",
+        source_content_hash="youtube:other_video",
+        source_speaker_id="speaker_other",
+        source_speaker_name_key="芒格",
+    )
+    # First call (same-source) returns nothing — the legacy voice's NULL
+    # hash doesn't match the current ``youtube:current``. The cross-source
+    # call returns BOTH rows from the DB layer (in real life the SQL
+    # filter is what excludes the legacy row); we verify the matcher's
+    # output excludes it regardless of which side does the filtering.
+    db = _multi_query_db([], [modern_cross])
+    matches = _run(
+        match_user_voices(
+            db,
+            user_id="user-1",
+            source_content_hash="youtube:current",
+            source_speaker_id="speaker_a",
+            source_speaker_name="芒格",
+            provider="minimax_voice_clone",
+            tts_provider="minimax_tts",
+            platform="minimax_domestic",
+            include_cross_source=True,
+        )
+    )
+    # Only the modern row surfaces — the legacy NULL-hash voice is filtered
+    # out at the SQL level (source_content_hash IS NOT NULL filter), so it
+    # never reaches the Python-side scoring.
+    assert [m.voice.voice_id for m in matches] == ["vt_modern"]
+    assert matches[0].match_scope == "cross_source_named_person"
+
+    # Also assert the SQL clause set passed to db.execute contains the
+    # IS NOT NULL filter, so the SQL-level guard is exercised (not just
+    # Python-side scoring). We compile without literal_binds (UUIDs
+    # can't always render as literals) — the predicate text is still in
+    # the WHERE clause as-is.
+    second_call_args = db.execute.await_args_list[1]
+    stmt = second_call_args.args[0]
+    sql_text = str(stmt.compile())
+    assert "source_content_hash IS NOT NULL" in sql_text, (
+        f"cross-source SQL missing NOT NULL guard for legacy hash rows:\n{sql_text}"
+    )

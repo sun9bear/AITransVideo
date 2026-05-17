@@ -607,13 +607,38 @@ export function VoiceModifyTab({
       }
     })
     setPreviewError((p) => ({ ...p, [speakerId]: null }))
-  }, [speakers])
+
+    // Phase 2 follow-up (plan 2026-05-17 review P2-4): candidates were
+    // fetched once on mount with the default provider. Personal voices
+    // are provider-isolated (a MiniMax clone never appears in the
+    // CosyVoice candidate set), so switching providers mid-session used
+    // to leave the candidate optgroups stale or empty. Refetch for this
+    // speaker only — best-effort, log on failure.
+    const sp = displaySpeakers.find((s) => s.speakerId === speakerId)
+    if (!sp) return
+    void (async () => {
+      try {
+        const result = await getVoiceCandidates({
+          jobId,
+          speakerId,
+          speakerName: sp.speakerName,
+          selectedProvider: provider,
+        })
+        setVoiceCandidates((prev) => ({ ...prev, [speakerId]: result }))
+      } catch (err) {
+        console.warn("getVoiceCandidates refetch failed for speaker", speakerId, err)
+      }
+    })()
+  }, [displaySpeakers, jobId])
 
   const handleVoiceChange = useCallback((speakerId: string, voiceId: string) => {
-    // Phase 2: detect candidate match → propagate voice_reuse=true so the
-    // eventual setVoiceOverride() carries the audit flag. Picking a
-    // non-matched personal voice still counts as 'cloned' source but
-    // voiceReuse stays false (semantically "matched candidate reuse").
+    // Phase 2 (plan 2026-05-17): both matched candidates AND voices
+    // picked from "其他个人音色" optgroup are reuse events — no clone
+    // provider call, no clone points. Both must carry voiceReuse=true
+    // so the gateway's setVoiceOverride() write feeds the post-edit
+    // audit trail (``_record_voice_reuse_events`` filter
+    // ``voice_reuse is True``) uniformly. Without this, picking an
+    // arbitrary personal voice silently skips the audit row.
     const candidates = voiceCandidates[speakerId]
     const matchedCandidate = candidates
       ? candidates.autoReuseVoice?.voiceId === voiceId
@@ -622,13 +647,14 @@ export function VoiceModifyTab({
       : null
     const isOtherPersonal =
       !matchedCandidate && personalVoices.some((v) => v.voiceId === voiceId)
+    const isPersonalVoice = !!matchedCandidate || isOtherPersonal
     setDraftStates((prev) => ({
       ...prev,
       [speakerId]: {
         ...prev[speakerId],
         voiceId,
-        voiceSource: matchedCandidate || isOtherPersonal ? "cloned" : "catalog",
-        voiceReuse: !!matchedCandidate,
+        voiceSource: isPersonalVoice ? "cloned" : "catalog",
+        voiceReuse: isPersonalVoice,
       },
     }))
     setPreviewError((p) => ({ ...p, [speakerId]: null }))

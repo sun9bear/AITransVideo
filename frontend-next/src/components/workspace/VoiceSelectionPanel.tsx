@@ -423,16 +423,40 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
         },
       }
     })
-  }, [speakers])
+
+    // Phase 2 follow-up (plan 2026-05-17 review P2-4): candidates were
+    // fetched once on mount with the default provider. Personal voices
+    // are provider-isolated (a MiniMax clone never appears in the
+    // CosyVoice candidate set), so switching from CosyVoice → MiniMax
+    // mid-session used to leave the candidate optgroups stale or empty.
+    // Refetch for this speaker only — best-effort, log on failure.
+    const sp = speakers.find((s) => s.speakerId === speakerId)
+    if (!sp) return
+    void (async () => {
+      try {
+        const result = await getVoiceCandidates({
+          jobId,
+          speakerId,
+          speakerName: sp.speakerName,
+          selectedProvider: provider,
+        })
+        setVoiceCandidates((prev) => ({ ...prev, [speakerId]: result }))
+      } catch (err) {
+        console.warn('getVoiceCandidates refetch failed for speaker', speakerId, err)
+      }
+    })()
+  }, [speakers, jobId])
 
   const handleVoiceChange = useCallback((speakerId: string, voiceId: string) => {
-    // Phase 2: detect whether the picked voice corresponds to a match
-    // candidate (auto-reuse or one of the "需要确认" entries). When it
-    // does, set voiceSource='cloned' + voiceReuse=true so the approve
-    // payload carries the audit flag and the user isn't charged a
-    // clone reserve. Picking a non-matched personal voice still counts
-    // as 'cloned' source (it's a clone-typed voice) but voiceReuse stays
-    // false — voice_reuse semantically means "matched candidate reuse".
+    // Phase 2 (plan 2026-05-17): detect whether the picked voice
+    // corresponds to a match candidate (auto-reuse or one of the
+    // "需要确认" entries) OR is one of the user's other personal
+    // voices ("其他个人音色" optgroup). Both cases reuse an
+    // existing cloned voice — no clone provider call, no clone
+    // points — and BOTH must carry voiceReuse=true so the gateway
+    // audit (``_record_voice_reuse_events``) records the reuse.
+    // Otherwise picks from "其他个人音色" silently bypass the audit
+    // even though they ARE a reuse event.
     const candidates = voiceCandidates[speakerId]
     const matchedCandidate = candidates
       ? candidates.autoReuseVoice?.voiceId === voiceId
@@ -441,13 +465,14 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
       : null
     const isOtherPersonal =
       !matchedCandidate && personalVoices.some((v) => v.voiceId === voiceId)
+    const isPersonalVoice = !!matchedCandidate || isOtherPersonal
     setVoiceStates((prev) => ({
       ...prev,
       [speakerId]: {
         ...prev[speakerId],
         voiceId,
-        voiceSource: matchedCandidate || isOtherPersonal ? 'cloned' : 'catalog',
-        voiceReuse: !!matchedCandidate,
+        voiceSource: isPersonalVoice ? 'cloned' : 'catalog',
+        voiceReuse: isPersonalVoice,
         cloneError: null,
       },
     }))

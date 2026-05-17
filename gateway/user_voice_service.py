@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 import logging
 import re
 import unicodedata
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import UserVoice
@@ -472,22 +472,25 @@ async def match_user_voices(
                     seen_voice_ids.add(vid)
 
     if include_cross_source and clean_name_key and not is_generic_speaker_name_key(clean_name_key):
-        # Cross-source: same speaker name across different source hash
-        # (or rows with no recorded source hash). Filter via Python so
-        # we keep provider compatibility + expired_at checks in one
-        # place; the DB just narrows by name_key + user_id.
+        # Cross-source: same speaker name across a DIFFERENT source video.
+        # Filter via Python so we keep provider compatibility + expired_at
+        # checks in one place; the DB just narrows by name_key + user_id.
+        #
+        # Plan §兼容性和历史音色 (2026-05-17-user-voice-candidate-first):
+        # "Phase 0 之前的历史音色 source_content_hash 为空, 不会出现在
+        # 统一候选 API 返回中。它们仍在个人音色库页面可见,用户可以
+        # 手动从官方选择器旁的'个人音色'区域选择。"
+        # → Exclude NULL-hash legacy rows at the SQL level so they never
+        # surface as a cross-source candidate. The user can still pick
+        # them via the "其他个人音色" optgroup on the frontend.
         cross_where = [
             UserVoice.user_id == user_id,
             UserVoice.expired_at.is_(None),
             UserVoice.source_speaker_name_key == clean_name_key,
+            UserVoice.source_content_hash.is_not(None),
         ]
         if clean_hash:
-            cross_where.append(
-                or_(
-                    UserVoice.source_content_hash.is_(None),
-                    UserVoice.source_content_hash != clean_hash,
-                )
-            )
+            cross_where.append(UserVoice.source_content_hash != clean_hash)
         cross_result = await db.execute(select(UserVoice).where(*cross_where))
         for voice in cross_result.scalars().all():
             if getattr(voice, "expired_at", None) is not None:
