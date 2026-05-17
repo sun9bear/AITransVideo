@@ -49,6 +49,26 @@ import { ACTIVE_JOB_STATUSES, type JobSummary, type JobStatus } from "@/types/jo
 // disabled so Phase 0 ships without exposing any Phase 1 surface to end users.
 const POST_EDIT_ENABLED = process.env.NEXT_PUBLIC_ENABLE_POST_EDIT === "1"
 
+// Service modes the post-edit flow accepts. Backend source of truth lives in
+// ``src/services/smart/state.py::EDITABLE_SERVICE_MODES`` and
+// ``src/services/jobs/editing.py::enter_editing`` (which also runs a
+// secondary ``is_editable_smart_state`` check for smart jobs — that one is
+// handled server-side, so the frontend just needs to surface the entry).
+// Master plan §6.2 ("Smart 成功交付后应允许进入 Studio post-edit 二次精修")
+// is the source for adding "smart" here on 2026-05-16.
+const EDITABLE_SERVICE_MODES: ReadonlySet<JobSummary["serviceMode"]> = new Set([
+  "studio",
+  "smart",
+])
+
+function isJobEditEligible(job: JobSummary): boolean {
+  return (
+    POST_EDIT_ENABLED &&
+    EDITABLE_SERVICE_MODES.has(job.serviceMode) &&
+    job.status === "succeeded"
+  )
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -631,8 +651,7 @@ function ProjectCard({
   const expiry = computeExpiryInfo(job)
   const isNonExpiring = isAdminView || job.roleSnapshot === "admin"
   const expiryText = isNonExpiring ? "永不过期" : expiryLabel(expiry)
-  const showEditShortcut =
-    POST_EDIT_ENABLED && job.serviceMode === "studio" && job.status === "succeeded"
+  const showEditShortcut = isJobEditEligible(job)
 
   return (
     <Card size="sm" className="overflow-visible">
@@ -723,13 +742,9 @@ function ExpandedContent({
   onReCreate: () => void
   isCancelling: boolean
 }) {
-  // Edit shortcut is gated on the same predicate that the collapsed-row
-  // shortcut used (Studio + succeeded + post-edit feature flag). Passing
-  // undefined when ineligible keeps ResultMediaCard from rendering the button.
-  const editShortcutHref =
-    POST_EDIT_ENABLED && job.serviceMode === "studio" && job.status === "succeeded"
-      ? `/workspace/${job.id}/edit`
-      : undefined
+  const editShortcutHref = isJobEditEligible(job)
+    ? `/workspace/${job.id}/edit`
+    : undefined
 
   switch (job.status) {
     case "succeeded":
