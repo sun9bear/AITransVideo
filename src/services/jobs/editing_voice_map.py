@@ -104,6 +104,14 @@ def _atomic_write_json(path: Path, payload: object) -> None:
 
 
 def load_voice_map(project_dir: str | Path) -> dict[str, dict[str, Any]]:
+    # Phase 2a: reconcile any pending split journals before reading
+    # (plan §5.6 state A/B/C). Late import avoids potential circular dep.
+    from services.jobs.editing_segments import _reconcile_split_journal_if_needed
+    _reconcile_split_journal_if_needed(project_dir)
+    return _load_voice_map_raw(project_dir)
+
+
+def _load_voice_map_raw(project_dir: str | Path) -> dict[str, dict[str, Any]]:
     """Return the current voice_map dict. Missing file → {}."""
     path = _voice_map_path(project_dir)
     if not path.is_file():

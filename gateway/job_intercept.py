@@ -2612,6 +2612,13 @@ _POST_EDIT_SEGMENT_ACTIONS: frozenset[str] = frozenset({
     # on this allowlist ties them to the feature flag + editing
     # lock dispatch rather than leaking through the generic proxy.
     "split", "preview-source",
+    # 2026-05-17 plan §5.6 / Phase 2a: atomic multi-cut split. Same
+    # editing-gate semantics as single split; backend kernel
+    # (split_editing_segment_many) uses a write-ahead journal for
+    # all-or-nothing semantics across segments.json + segment_status
+    # + voice_map. Routed through this allowlist for feature-flag
+    # parity and lock dispatch alignment with peer mutations.
+    "split-many",
 })
 
 

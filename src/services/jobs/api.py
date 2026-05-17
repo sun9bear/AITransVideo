@@ -962,6 +962,44 @@ def _build_job_api_handler(*, service: JobService, jianying_runner: object) -> t
                     )
                     self._write_json(HTTPStatus.OK, {"success": True, **result})
                     return
+                # POST /jobs/{id}/segments/{sid}/split-many — atomic multi-cut split
+                # (Phase 2a, plan 2026-05-17 §5.6).
+                if (len(path_parts) == 5 and path_parts[0] == "jobs"
+                        and path_parts[2] == "segments" and path_parts[4] == "split-many"):
+                    job_id = path_parts[1]
+                    segment_id = path_parts[3]
+                    payload = self._read_json_payload()
+                    cuts_raw = payload.get("cuts")
+                    speaker_ids_raw = payload.get("speaker_ids")
+                    if not isinstance(cuts_raw, list) or not cuts_raw:
+                        raise ValueError("cuts must be a non-empty list of {source_index, cn_index}")
+                    if not isinstance(speaker_ids_raw, list):
+                        raise ValueError("speaker_ids must be a list")
+                    # Coerce + normalize cuts. Detailed shape validation
+                    # happens in the kernel; here we just ensure the
+                    # over-the-wire shape is what we expect.
+                    cuts: list[dict[str, int]] = []
+                    for i, c in enumerate(cuts_raw):
+                        if not isinstance(c, dict):
+                            raise ValueError(f"cuts[{i}] must be an object")
+                        try:
+                            cuts.append({
+                                "source_index": int(c.get("source_index")),
+                                "cn_index": int(c.get("cn_index")),
+                            })
+                        except (TypeError, ValueError) as exc:
+                            raise ValueError(
+                                f"cuts[{i}] source_index/cn_index must be integers: {exc}"
+                            )
+                    speaker_ids = [str(sp).strip() for sp in speaker_ids_raw]
+                    result = service.split_editing_segment_many(
+                        job_id,
+                        segment_id,
+                        cuts=cuts,
+                        speaker_ids=speaker_ids,
+                    )
+                    self._write_json(HTTPStatus.OK, {"success": True, **result})
+                    return
                 # POST /jobs/{id}/segments/{sid}/status — explicit status change (T1-2)
                 if (len(path_parts) == 5 and path_parts[0] == "jobs"
                         and path_parts[2] == "segments" and path_parts[4] == "status"):

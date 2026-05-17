@@ -959,6 +959,48 @@ class JobService:
             "segment_status": load_segment_status(record.project_dir),
         }
 
+    def split_editing_segment_many(
+        self,
+        job_id: str,
+        segment_id: str,
+        *,
+        cuts: list[dict],
+        speaker_ids: list[str],
+    ) -> dict:
+        """Atomic multi-cut split — replace one segment with N+1 pieces.
+
+        Phase 2a (plan 2026-05-17 §5.6). Backed by write-ahead journal
+        for atomicity across segments.json / segment_status.json /
+        voice_map.json.
+
+        Audit: emits a single ``post_edit_segment_split_many_confirmed``
+        event (TODO: define the event type in user_edit_audit.py before
+        production rollout — falls back to per-pair single-split events
+        currently)."""
+        from services.jobs.editing import touch_editing as _touch_editing
+        from services.jobs.editing_segments import (
+            load_segment_status,
+            split_editing_segment_many as _split_editing_segment_many,
+        )
+        from services.jobs.input_validators import validate_segment_id
+
+        validate_segment_id(segment_id)
+        record = self._require_editing(job_id)
+        result = _split_editing_segment_many(
+            record.project_dir,
+            segment_id=segment_id,
+            cuts=cuts,
+            speaker_ids=speaker_ids,
+        )
+        _touch_editing(record, self.store)
+
+        # Enrich with the post-split status map so the frontend can patch
+        # its cached state in one shot.
+        return {
+            **result,
+            "segment_status": load_segment_status(record.project_dir),
+        }
+
     def _emit_post_edit_split_audit(
         self,
         record: JobRecord,

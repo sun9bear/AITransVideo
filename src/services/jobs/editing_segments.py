@@ -45,12 +45,14 @@ __all__ = [
     "SEGMENT_STATUS_TTS_LOADING",
     "SUPPORTED_SEGMENT_STATUSES",
     "PATCHABLE_SEGMENT_FIELDS",
+    "EditingCorruptionError",
     "compute_residual_segment_status",
     "load_editing_segments",
     "load_segment_status",
     "patch_editing_segment",
     "revert_text_changes_to_audio_baseline",
     "split_editing_segment",
+    "split_editing_segment_many",
     "slice_source_audio_for_editing_segment",
     "mark_segment_status",
     "editing_payload",
@@ -200,6 +202,10 @@ def _atomic_write_json(path: Path, payload: object) -> None:
 def load_editing_segments(project_dir: str | Path) -> list[dict[str, Any]]:
     """Return the editing/segments.json list. Empty list if file missing
     (which can happen if enter_editing ran on a project without a baseline)."""
+    # Phase 2a: reconcile any pending split journals before reading. This
+    # is idempotent + cheap (no-op when no journal). See plan §5.6
+    # write-ahead journal recovery (state A/B/C).
+    _reconcile_split_journal_if_needed(project_dir)
     path = _segments_path(project_dir)
     if not path.is_file():
         return []
@@ -234,6 +240,8 @@ def load_editing_segments_for_audit(
 
 def load_segment_status(project_dir: str | Path) -> dict[str, str]:
     """Return the segment_status map. Missing file → {} (all accepted)."""
+    # Phase 2a: reconcile any pending split journals before reading.
+    _reconcile_split_journal_if_needed(project_dir)
     path = _segment_status_path(project_dir)
     if not path.is_file():
         return {}
@@ -1185,6 +1193,571 @@ def split_editing_segment(
             "new_segments": [seg_a, seg_b],
             "total_count": len(new_segments),
         }
+
+
+# ---------------------------------------------------------------------------
+# split_editing_segment_many — N cuts → N+1 segments
+#
+# Input:  original segment + N cuts (source_idx, cn_idx) + N+1 speaker_ids
+# Output: N+1 segments, ids = <base>_a, <base>_b, ... (collision: <base>_s1a)
+#
+# Atomicity (plan 2026-05-17 §5.6 + Codex round-6/7 P1 #1 fix):
+#   write-ahead journal recovery with three-state reconcile.
+#
+#   ┌───────────┐  validate    ┌─────────┐  write    ┌──────────┐
+#   │ baseline  │ ──cuts──→    │ journal │ ────→     │ 3 files  │
+#   │ segments. │  ✗ → 422     │ written │  os.      │ replaced │
+#   │ json + .. │  unchanged   │ atomic  │  replace  │  delete  │
+#   └───────────┘              └─────────┘           │  journal │
+#                                                    └──────────┘
+#
+#   On any failure between "journal written" and "delete journal":
+#   the journal stays. Next call to load_editing_segments /
+#   load_segment_status / load_voice_map triggers
+#   _reconcile_split_journal_if_needed which classifies state:
+#     - A: parent_sid still in segments.json  → apply journal (fresh)
+#     - B: parent gone + all sub-segs present → backfill missing
+#          status/voice_map entries; DO NOT overwrite user's later edits
+#     - C: mixed (some sub-segs missing or partial) → EditingCorruptionError
+#
+# Time alignment: cuts must fall on word boundaries. estimate_split_ms
+# snaps off-boundary positions to the nearest word end ms.
+# ---------------------------------------------------------------------------
+
+
+SPLIT_JOURNAL_SCHEMA_VERSION = 1
+
+
+class EditingCorruptionError(EditingConflictError):
+    """Raised by the split-journal reconciler when editor/editing/ is in
+    a mixed/inconsistent state that cannot be auto-recovered (state C in
+    plan §5.6). Operator must inspect before further edits.
+
+    Subclass of EditingConflictError so api.py's 409 path catches it.
+    """
+
+
+def _split_journal_path(project_dir: str | Path, parent_sid: str) -> Path:
+    """Path for the journal of a split keyed by parent segment_id.
+
+    Parent_sid is already segment_id-validated by callers (regex
+    ^[a-z0-9_]{1,64}$) so safe to embed in filename verbatim.
+    """
+    return _editing_dir(project_dir) / f".split_journal_{parent_sid}.json"
+
+
+def _list_split_journals(project_dir: str | Path) -> list[Path]:
+    editing_dir = _editing_dir(project_dir)
+    if not editing_dir.is_dir():
+        return []
+    return sorted(editing_dir.glob(".split_journal_*.json"))
+
+
+def _derive_split_ids_many(
+    base_id: str,
+    n: int,
+    existing_ids: set[str],
+) -> list[str]:
+    """Pick N unique segment_ids derived from ``base_id``. Mirrors
+    ``_derive_split_ids`` but produces N suffixes instead of two.
+
+    Scheme: ``_a, _b, ..., _<letter_N>`` if all free; on collision
+    fall back to ``_s1a, _s1b, ...``, then ``_s2a, ...``.
+    """
+    letters = "abcdefghijklmnopqrstuvwxyz"
+    if n <= 0:
+        raise ValueError("n must be ≥ 1")
+    if n <= len(letters):
+        candidates = [f"{base_id}_{letters[i]}" for i in range(n)]
+        if not any(c in existing_ids for c in candidates):
+            return candidates
+    counter = 1
+    while True:
+        candidates = [f"{base_id}_s{counter}{letters[i]}" for i in range(n)]
+        if not any(c in existing_ids for c in candidates):
+            return candidates
+        counter += 1
+
+
+def _validate_many_cuts(
+    cuts: list[dict[str, Any]],
+    speaker_ids: list[str],
+    source_text: str,
+    cn_text: str,
+) -> None:
+    """Raise ValueError on any invariant violation.
+
+    Invariants:
+      - len(cuts) ≥ 1
+      - len(speaker_ids) == len(cuts) + 1
+      - all cut indices in (0, len(text))
+      - strictly monotonic in BOTH source_index and cn_index
+      - all speakers non-empty strings
+    """
+    if not isinstance(cuts, list) or not cuts:
+        raise ValueError("cuts must be a non-empty list")
+    if not isinstance(speaker_ids, list):
+        raise ValueError("speaker_ids must be a list")
+    expected = len(cuts) + 1
+    if len(speaker_ids) != expected:
+        raise ValueError(
+            f"speaker_ids count {len(speaker_ids)} must equal cuts+1 ({expected})"
+        )
+    src_len = len(source_text)
+    cn_len = len(cn_text)
+    prev_si = 0
+    prev_ci = 0
+    for i, c in enumerate(cuts):
+        if not isinstance(c, dict):
+            raise ValueError(f"cut {i} must be an object")
+        try:
+            si = int(c.get("source_index"))
+            ci = int(c.get("cn_index"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"cut {i} indices must be ints: {exc}")
+        if not (0 < si < src_len):
+            raise ValueError(
+                f"cut {i}: source_index {si} not in (0, {src_len})"
+            )
+        if not (0 < ci < cn_len):
+            raise ValueError(
+                f"cut {i}: cn_index {ci} not in (0, {cn_len})"
+            )
+        if si <= prev_si:
+            raise ValueError(
+                f"cut {i}: source_index {si} must be strictly greater than previous ({prev_si})"
+            )
+        if ci <= prev_ci:
+            raise ValueError(
+                f"cut {i}: cn_index {ci} must be strictly greater than previous ({prev_ci})"
+            )
+        prev_si, prev_ci = si, ci
+    for i, sp in enumerate(speaker_ids):
+        if not isinstance(sp, str) or not sp.strip():
+            raise ValueError(f"speaker_ids[{i}] is empty / not a string")
+
+
+def _build_many_new_segments(
+    original: dict[str, Any],
+    cuts: list[dict[str, Any]],
+    speaker_ids: list[str],
+    new_ids: list[str],
+    project_dir: str | Path,
+) -> list[dict[str, Any]]:
+    """Build the N+1 sub-segment dicts inheriting metadata from original.
+
+    Time boundaries computed via estimate_split_ms (same word-boundary
+    snapping as single split) — see split_editing_segment.
+    """
+    from services.transcript_reviewer import estimate_split_ms
+
+    source_text = str(original.get("source_text") or "")
+    cn_text = str(original.get("cn_text") or "")
+    start_ms = int(original.get("start_ms", 0) or 0)
+    end_ms = int(original.get("end_ms", start_ms) or start_ms)
+
+    words_data = _load_split_words_data(project_dir)
+
+    # Compute midpoint ms for each cut.
+    mid_ms_list: list[int] = []
+    for c in cuts:
+        mid = estimate_split_ms(
+            start_ms=start_ms,
+            end_ms=end_ms,
+            source_text=source_text,
+            split_char_pos=int(c["source_index"]),
+            words_data=words_data,
+        )
+        mid_ms_list.append(mid)
+
+    # Build time boundaries [start, mid_1, mid_2, ..., mid_N, end]
+    boundaries = [start_ms] + mid_ms_list + [end_ms]
+    for i in range(len(boundaries) - 1):
+        if boundaries[i + 1] <= boundaries[i]:
+            raise ValueError(
+                "split would produce a zero/negative-duration piece "
+                f"(boundary {i}: {boundaries[i]} → {boundaries[i + 1]}). "
+                "Segment too short or cut positions too close together."
+            )
+
+    # Source/CN text slices: [0..s_1), [s_1..s_2), ..., [s_N..end)
+    src_indices = [0] + [int(c["source_index"]) for c in cuts] + [len(source_text)]
+    cn_indices = [0] + [int(c["cn_index"]) for c in cuts] + [len(cn_text)]
+
+    pieces: list[dict[str, Any]] = []
+    for i in range(len(new_ids)):
+        piece = dict(original)
+        seg_start = boundaries[i]
+        seg_end = boundaries[i + 1]
+        piece.update(
+            segment_id=new_ids[i],
+            source_text=source_text[src_indices[i]:src_indices[i + 1]],
+            cn_text=cn_text[cn_indices[i]:cn_indices[i + 1]],
+            speaker_id=str(speaker_ids[i]).strip() or original.get("speaker_id"),
+            start_ms=seg_start,
+            end_ms=seg_end,
+            target_duration_ms=max(0, seg_end - seg_start),
+        )
+        if "duration_target_ms" in piece:
+            piece["duration_target_ms"] = max(0, seg_end - seg_start)
+        pieces.append(piece)
+    return pieces
+
+
+def split_editing_segment_many(
+    project_dir: str | Path,
+    *,
+    segment_id: str,
+    cuts: list[dict[str, Any]],
+    speaker_ids: list[str],
+) -> dict[str, Any]:
+    """Atomic multi-cut split — replace one segment with N+1 pieces.
+
+    Args:
+        project_dir: project root (contains editor/editing/).
+        segment_id: id of the segment being split.
+        cuts: ordered list of {source_index, cn_index} dicts (strictly
+            increasing in both indices). At least 1 cut.
+        speaker_ids: per-piece speaker assignment; length = len(cuts) + 1.
+
+    Returns:
+        {
+          "replaced_segment_id": <orig_id>,
+          "new_segments": [seg_1, ..., seg_N+1],
+          "total_count": <total segment count after split>,
+        }
+
+    Raises:
+        EditingConflictError: segment_id not found.
+        ValueError: cut validation failure (empty piece, non-monotonic,
+            out of bounds, zero-duration piece in ms-space).
+
+    Atomicity: write-ahead journal (.split_journal_<parent>.json) is
+    laid down BEFORE any of segments/segment_status/voice_map .json get
+    replaced. Failure between journal-write and journal-delete is
+    recovered by the next loader call via
+    ``_reconcile_split_journal_if_needed``.
+    """
+    validate_segment_id(segment_id)
+    _ensure_editing_dir(project_dir)
+
+    # Late import to avoid circular dep (editing_voice_map imports us).
+    from services.jobs.editing_voice_map import (
+        _voice_map_path,
+    )
+
+    with file_lock(_editing_lock_anchor(project_dir)):
+        # First reconcile any leftover journal so we start from clean state.
+        _reconcile_split_journal_if_needed(project_dir)
+
+        segments = _read_segments_json_raw(project_dir)
+        target = str(segment_id)
+        index: int | None = None
+        for i, seg in enumerate(segments):
+            if isinstance(seg, dict) and str(seg.get("segment_id")) == target:
+                index = i
+                break
+        if index is None:
+            raise EditingConflictError(
+                f"segment_id {segment_id!r} not found in editing/segments.json"
+            )
+
+        original = dict(segments[index])
+        source_text = str(original.get("source_text") or "")
+        cn_text = str(original.get("cn_text") or "")
+        _validate_many_cuts(cuts, speaker_ids, source_text, cn_text)
+
+        # Reserve new ids
+        existing_ids: set[str] = {
+            str(s.get("segment_id"))
+            for s in segments
+            if isinstance(s, dict) and s.get("segment_id") is not None
+        }
+        existing_ids.discard(target)
+        n_pieces = len(speaker_ids)
+        new_ids = _derive_split_ids_many(target, n_pieces, existing_ids)
+
+        # Build new sub-segment dicts (raises ValueError on zero-duration).
+        new_pieces = _build_many_new_segments(
+            original, cuts, speaker_ids, new_ids, project_dir,
+        )
+
+        # ── Compose proposed new state for all three files ──
+        new_segments = list(segments)
+        new_segments[index : index + 1] = new_pieces
+
+        # Status map: pop old id, add all new ids as text_dirty.
+        old_status = _read_segment_status_json_raw(project_dir)
+        new_status = dict(old_status)
+        new_status.pop(target, None)
+        for nid in new_ids:
+            new_status[nid] = SEGMENT_STATUS_TEXT_DIRTY
+
+        # Voice_map: copy parent override (if any) to ALL N+1 sub-segs
+        # (mirrors single-split P0-8 pattern at editing_segments.py:1145).
+        old_vm = _read_voice_map_json_raw(project_dir)
+        new_voice_map = dict(old_vm)
+        if target in new_voice_map:
+            override = dict(new_voice_map.pop(target))
+            for nid in new_ids:
+                new_voice_map[nid] = dict(override)
+
+        # ── Write-ahead journal ── plan §5.6 step 4
+        journal_payload = {
+            "schema_version": SPLIT_JOURNAL_SCHEMA_VERSION,
+            "parent_sid": target,
+            "new_sub_segment_ids": new_ids,
+            "new_segments": new_segments,
+            "new_status": new_status,
+            "new_voice_map": new_voice_map,
+        }
+        journal_path = _split_journal_path(project_dir, target)
+        _atomic_write_json(journal_path, journal_payload)
+
+        # ── Now write the three files (atomic per-file, not transactional
+        #    across the three; journal is the recovery anchor). ──
+        try:
+            _atomic_write_json(_segments_path(project_dir), new_segments)
+            _atomic_write_json(_segment_status_path(project_dir), new_status)
+            _atomic_write_json(_voice_map_path(project_dir), new_voice_map)
+        except Exception:
+            # Any rename failure → journal stays. Next loader reconciles.
+            logger.exception(
+                "split_many: file-rename phase failed for parent=%s; "
+                "journal preserved for next-load reconcile",
+                target,
+            )
+            raise
+
+        # ── Cleanup parent's draft wav (P1-16 pattern: orphan draft would
+        #    otherwise be picked up by commit's draft-promotion phase). ──
+        parent_draft = _editing_dir(project_dir) / "tts_segments_draft" / f"{target}.wav"
+        if parent_draft.exists():
+            try:
+                parent_draft.unlink()
+            except OSError:
+                logger.warning(
+                    "split_many: failed to cleanup parent draft wav %s; "
+                    "may leave orphan",
+                    parent_draft,
+                )
+
+        # ── Success — delete journal. If this fails the journal becomes
+        # stale; reconciler classifies as state B and cleans up. ──
+        try:
+            journal_path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning(
+                "split_many: failed to delete journal %s; "
+                "reconciler will clean on next load",
+                journal_path,
+            )
+
+        return {
+            "replaced_segment_id": target,
+            "new_segments": new_pieces,
+            "total_count": len(new_segments),
+        }
+
+
+# ---------------------------------------------------------------------------
+# Raw read helpers — bypass _reconcile_split_journal_if_needed to avoid
+# infinite recursion when the reconciler itself needs to inspect current
+# state. Public loaders always go through the reconciling path.
+# ---------------------------------------------------------------------------
+
+
+def _read_segments_json_raw(project_dir: str | Path) -> list[dict[str, Any]]:
+    path = _segments_path(project_dir)
+    if not path.is_file():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    return data if isinstance(data, list) else []
+
+
+def _read_segment_status_json_raw(project_dir: str | Path) -> dict[str, str]:
+    path = _segment_status_path(project_dir)
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(k): str(v) for k, v in data.items()}
+
+
+def _read_voice_map_json_raw(project_dir: str | Path) -> dict[str, dict[str, Any]]:
+    from services.jobs.editing_voice_map import _voice_map_path
+
+    path = _voice_map_path(project_dir)
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        str(k): (dict(v) if isinstance(v, dict) else {})
+        for k, v in data.items()
+    }
+
+
+# ---------------------------------------------------------------------------
+# _reconcile_split_journal_if_needed — three-state recovery (plan §5.6)
+# ---------------------------------------------------------------------------
+
+
+def _reconcile_split_journal_if_needed(project_dir: str | Path) -> None:
+    """Detect + apply any pending split journals. Idempotent; no-op when
+    no journal file exists. Called by load_editing_segments /
+    load_segment_status / load_voice_map at their top.
+
+    Three-state classification (plan §5.6 step d):
+      State A: parent_sid still present in segments.json
+               → journal is fresh, apply it (overwrite three files).
+      State B: parent_sid absent + all sub-segment_ids present
+               → split was committed but journal-delete failed (and
+               possibly user has edited sub-segs since). Backfill ONLY
+               missing status/voice_map entries; do NOT overwrite
+               existing entries (would lose user edits).
+      State C: any other mix → EditingCorruptionError. Operator must
+               inspect; no auto-recovery.
+
+    All apply paths take the editing_lock_anchor file_lock to coordinate
+    with concurrent split_many calls. Reads outside the lock are fine
+    because os.replace makes each file's state binary.
+    """
+    journals = _list_split_journals(project_dir)
+    if not journals:
+        return
+
+    # Slow path: take the lock to coordinate with any in-flight split.
+    with file_lock(_editing_lock_anchor(project_dir)):
+        # Re-glob inside the lock — another writer may have cleaned up.
+        journals = _list_split_journals(project_dir)
+        for journal_path in journals:
+            try:
+                payload = json.loads(journal_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                # Corrupt journal — delete it (operator must redo split).
+                logger.warning(
+                    "reconcile: corrupt journal %s; deleting", journal_path,
+                )
+                try:
+                    journal_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                continue
+            try:
+                _apply_split_journal(project_dir, payload, journal_path)
+            except EditingCorruptionError:
+                # Surface to caller; journal stays for operator inspection.
+                raise
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "reconcile: unexpected error applying journal %s; "
+                    "leaving for retry",
+                    journal_path,
+                )
+                # Don't delete — next load tries again.
+
+
+def _apply_split_journal(
+    project_dir: str | Path,
+    payload: dict[str, Any],
+    journal_path: Path,
+) -> None:
+    """Apply one journal payload. Caller holds file_lock."""
+    if not isinstance(payload, dict):
+        raise EditingCorruptionError(
+            f"split journal {journal_path.name} is not an object"
+        )
+    parent_sid = payload.get("parent_sid")
+    new_sub_ids = payload.get("new_sub_segment_ids", [])
+    new_segments = payload.get("new_segments")
+    new_status = payload.get("new_status", {})
+    new_voice_map = payload.get("new_voice_map", {})
+    if not isinstance(parent_sid, str) or not parent_sid:
+        raise EditingCorruptionError(
+            f"split journal {journal_path.name} missing parent_sid"
+        )
+    if not isinstance(new_sub_ids, list) or not new_sub_ids:
+        raise EditingCorruptionError(
+            f"split journal {journal_path.name} missing new_sub_segment_ids"
+        )
+    if not isinstance(new_segments, list):
+        raise EditingCorruptionError(
+            f"split journal {journal_path.name} missing new_segments"
+        )
+
+    # Classify state by reading current segments.json (raw, no reconcile).
+    current_segments = _read_segments_json_raw(project_dir)
+    current_ids = {
+        str(s.get("segment_id"))
+        for s in current_segments
+        if isinstance(s, dict) and s.get("segment_id") is not None
+    }
+    parent_present = parent_sid in current_ids
+    all_subs_present = all(sid in current_ids for sid in new_sub_ids)
+
+    if parent_present and not all_subs_present:
+        # State A: journal is fresh — split's file-rename phase didn't
+        # complete. Apply full state.
+        logger.info(
+            "reconcile state A: parent=%s present, applying journal", parent_sid,
+        )
+        _atomic_write_json(_segments_path(project_dir), new_segments)
+        _atomic_write_json(_segment_status_path(project_dir), dict(new_status))
+        from services.jobs.editing_voice_map import _voice_map_path
+        _atomic_write_json(_voice_map_path(project_dir), dict(new_voice_map))
+        journal_path.unlink(missing_ok=True)
+        return
+
+    if (not parent_present) and all_subs_present:
+        # State B: split was committed. Journal is stale (delete-step
+        # failed previously). Backfill ONLY missing entries — do NOT
+        # overwrite existing status/voice_map (would clobber user edits
+        # made between split-commit and reconcile).
+        logger.info(
+            "reconcile state B: split committed, backfilling missing entries (parent=%s)",
+            parent_sid,
+        )
+        cur_status = _read_segment_status_json_raw(project_dir)
+        cur_vm = _read_voice_map_json_raw(project_dir)
+        changed_status = False
+        changed_vm = False
+        if isinstance(new_status, dict):
+            for sid in new_sub_ids:
+                if sid not in cur_status and sid in new_status:
+                    cur_status[sid] = str(new_status[sid])
+                    changed_status = True
+        if isinstance(new_voice_map, dict):
+            for sid in new_sub_ids:
+                if sid not in cur_vm and sid in new_voice_map:
+                    cur_vm[sid] = dict(new_voice_map[sid])
+                    changed_vm = True
+        if changed_status:
+            _atomic_write_json(_segment_status_path(project_dir), cur_status)
+        if changed_vm:
+            from services.jobs.editing_voice_map import _voice_map_path
+            _atomic_write_json(_voice_map_path(project_dir), cur_vm)
+        journal_path.unlink(missing_ok=True)
+        return
+
+    # State C: mixed — operator must inspect. Don't auto-recover.
+    raise EditingCorruptionError(
+        f"split journal {journal_path.name}: inconsistent state — "
+        f"parent_sid={parent_sid!r} present={parent_present}, "
+        f"all_subs_present={all_subs_present}. "
+        f"Operator must reconcile manually."
+    )
 
 
 # ---------------------------------------------------------------------------
