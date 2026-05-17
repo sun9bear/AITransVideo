@@ -38,8 +38,14 @@ import {
 export interface SegmentVirtualListRef {
   /** Imperatively scroll until the item with the given id is in view.
    *  Opts.align='center' (default) mirrors scrollIntoView behaviour.
+   *  Opts.stickyOffset (px) shifts the target up so an externally-sticky
+   *  element above this list (e.g. mobile video region) doesn't occlude
+   *  the scrolled-to item. Default 0 preserves prior desktop behavior.
    *  Falls back to no-op when id isn't in the current items list. */
-  scrollToId(id: string, opts?: { align?: "center" | "start" }): void
+  scrollToId(
+    id: string,
+    opts?: { align?: "center" | "start"; stickyOffset?: number },
+  ): void
 }
 
 interface SegmentVirtualListProps<T> {
@@ -57,6 +63,10 @@ interface SegmentVirtualListProps<T> {
   /** When this id changes, the list auto-scrolls the corresponding item
    *  into center view (respects prefers-reduced-motion). */
   activeSegmentId?: string | null
+  /** px to subtract from the auto-scroll target so items aren't occluded
+   *  by an externally-sticky region above the list (e.g. mobile sticky
+   *  video). Default 0 (no compensation). Plan §8a.1. */
+  stickyOffsetForAutoScroll?: number
   /** Render callback for a single item. MUST return a single block
    *  element whose outer box lives inside the absolutely-positioned
    *  wrapper the list controls. */
@@ -98,6 +108,7 @@ function SegmentVirtualListInner<T>(
     estimatedItemHeight = DEFAULT_ESTIMATED_HEIGHT,
     overscan = DEFAULT_OVERSCAN,
     activeSegmentId,
+    stickyOffsetForAutoScroll = 0,
     renderItem,
     className = "",
     maxHeight = "70vh",
@@ -197,10 +208,15 @@ function SegmentVirtualListInner<T>(
       const offset = offsets[idx]
       const itemHeight = heightMap[id] ?? estimatedItemHeight
       const align = opts?.align ?? "center"
+      const stickyOffset = opts?.stickyOffset ?? 0
       let target = offset
       if (align === "center") {
         target = offset - (container.clientHeight - itemHeight) / 2
       }
+      // Phase 1 mobile compensation: lift target so item isn't occluded
+      // by a sticky region above this list. Caller passes the occluder's
+      // height (typically the sticky <video> element on < 1024px).
+      target -= stickyOffset
       target = Math.max(0, Math.min(target, totalHeight - container.clientHeight))
       container.scrollTo({
         top: target,
@@ -224,7 +240,7 @@ function SegmentVirtualListInner<T>(
     const target = Math.max(
       0,
       Math.min(
-        offset - (container.clientHeight - itemHeight) / 2,
+        offset - (container.clientHeight - itemHeight) / 2 - stickyOffsetForAutoScroll,
         totalHeight - container.clientHeight,
       ),
     )
