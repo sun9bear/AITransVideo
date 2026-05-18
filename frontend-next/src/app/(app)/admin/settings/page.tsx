@@ -36,6 +36,15 @@ interface AdminSettings {
   whisper_alignment_trigger: string  // "publish" | "deliverable" | "manual"
   whisper_alignment_skip_cache: boolean
   whisper_alignment_model: string    // "tiny" | "base" | "small" | "medium" | "large-v3"
+  // --- Smart MVP P2 (pre-Phase-3): per-user MiniMax voice library cap ---
+  // Drives Smart auto_voice_review's quota water mark (default 30).
+  smart_user_voice_clone_cap: number
+  // --- Phase 3 (plan 2026-05-17-user-voice-candidate-first) ---
+  // Three independent admin policy switches. Default truth-table preserves
+  // legacy Smart behavior (allow clone + reuse, ignore weak candidates).
+  smart_auto_clone_enabled: boolean
+  smart_reuse_user_voice_enabled: boolean
+  smart_pause_on_possible_user_voice_match: boolean
 }
 
 const DEFAULT_SETTINGS: AdminSettings = {
@@ -58,6 +67,10 @@ const DEFAULT_SETTINGS: AdminSettings = {
   whisper_alignment_trigger: 'deliverable',
   whisper_alignment_skip_cache: false,
   whisper_alignment_model: 'small',
+  smart_user_voice_clone_cap: 30,
+  smart_auto_clone_enabled: true,
+  smart_reuse_user_voice_enabled: true,
+  smart_pause_on_possible_user_voice_match: false,
 }
 
 const WHISPER_TRIGGER_OPTIONS = [
@@ -414,6 +427,96 @@ export default function AdminSettingsPage() {
               <span className="text-[color:var(--ochre)]">默认关闭：建议先观察 metrics（speed_param_distribution + first_pass_error_pct）一段真实数据再启用。</span>
             </p>
           </div>
+        </label>
+      </SettingSection>
+
+      {/* Phase 3 (plan 2026-05-17): Smart 个人音色策略 */}
+      <SettingSection
+        title="智能版个人音色策略"
+        description="控制智能版自动决策时如何使用用户的个人音色库（克隆音色）"
+      >
+        {/* Toggle 1: smart_reuse_user_voice_enabled */}
+        <label className="flex items-center gap-3 rounded-xl border border-border bg-muted/30 p-4 cursor-pointer hover:bg-muted/50 transition">
+          <input
+            type="checkbox"
+            checked={settings.smart_reuse_user_voice_enabled}
+            onChange={(e) => setSettings((s) => ({ ...s, smart_reuse_user_voice_enabled: e.target.checked }))}
+            className="h-4 w-4 rounded border-border"
+          />
+          <div>
+            <p className="text-sm font-medium text-foreground">允许智能版复用已有个人音色</p>
+            <p className="text-xs text-muted-foreground mt-1">
+              开启后（默认），智能版会先查询用户的个人音色库，命中同源强匹配时直接复用，不调用克隆 provider、不扣克隆点数。
+              关闭后，智能版不查询个人音色，只走新克隆或官方音色。
+            </p>
+          </div>
+        </label>
+
+        {/* Toggle 2: smart_auto_clone_enabled */}
+        <label className="flex items-center gap-3 rounded-xl border border-border bg-muted/30 p-4 cursor-pointer hover:bg-muted/50 transition">
+          <input
+            type="checkbox"
+            checked={settings.smart_auto_clone_enabled}
+            onChange={(e) => setSettings((s) => ({ ...s, smart_auto_clone_enabled: e.target.checked }))}
+            className="h-4 w-4 rounded border-border"
+          />
+          <div>
+            <p className="text-sm font-medium text-foreground">允许智能版自动新克隆音色</p>
+            <p className="text-xs text-muted-foreground mt-1">
+              开启后（默认），智能版在用户同意（smart_consent.auto_voice_clone=True）的前提下，可自动为主说话人克隆新音色。
+              关闭后只禁止新克隆，强匹配复用仍然生效——例如 MiniMax 账户余额接近上限时建议关闭。
+            </p>
+          </div>
+        </label>
+
+        {/* Toggle 3: smart_pause_on_possible_user_voice_match */}
+        <label className="flex items-center gap-3 rounded-xl border border-border bg-muted/30 p-4 cursor-pointer hover:bg-muted/50 transition">
+          <input
+            type="checkbox"
+            checked={settings.smart_pause_on_possible_user_voice_match}
+            onChange={(e) => setSettings((s) => ({ ...s, smart_pause_on_possible_user_voice_match: e.target.checked }))}
+            className="h-4 w-4 rounded border-border"
+          />
+          <div>
+            <p className="text-sm font-medium text-foreground">
+              弱匹配确认模式
+              <span className="ml-2 inline-block rounded bg-[color:var(--ochre)]/20 px-1.5 py-0.5 text-[10px] text-[color:var(--ochre)]">
+                Phase 4 · 默认关闭
+              </span>
+            </p>
+            <p className="text-xs text-muted-foreground mt-1">
+              开启后，智能版任务遇到“可能匹配”的个人音色（同视频同名但 speaker_id 不一致、或跨视频同名）时，
+              会暂停到音色审核页面，等用户确认是否复用。
+              <strong className="text-[color:var(--ochre)]">提醒：开启后所有提交智能版的用户会在提交页看到警示</strong>，
+              他们的任务可能不会全自动跑完。默认关闭以避免破坏“智能版=全自动”的产品预期。
+            </p>
+          </div>
+        </label>
+
+        {/* Number input: smart_user_voice_clone_cap */}
+        <label className="flex flex-col gap-2 rounded-xl border border-border bg-muted/30 p-4">
+          <div>
+            <p className="text-sm font-medium text-foreground">个人音色库每用户上限</p>
+            <p className="text-xs text-muted-foreground mt-1">
+              单个用户在 MiniMax 账户里最多保留多少个克隆音色。智能版自动克隆前会查 user_voices 表中该用户的非过期行数，
+              距离上限 ≤ 3（安全水位线）时不再自动新克隆，引导用户先清理音色库。
+              默认 30，建议 5-200 之间。
+            </p>
+          </div>
+          <input
+            type="number"
+            min={1}
+            max={500}
+            step={1}
+            value={settings.smart_user_voice_clone_cap}
+            onChange={(e) => {
+              const v = parseInt(e.target.value, 10)
+              if (Number.isFinite(v) && v >= 1 && v <= 500) {
+                setSettings((s) => ({ ...s, smart_user_voice_clone_cap: v }))
+              }
+            }}
+            className="w-32 rounded-lg border border-border bg-background px-3 py-1.5 text-sm"
+          />
         </label>
       </SettingSection>
 
