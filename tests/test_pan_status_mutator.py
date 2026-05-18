@@ -313,3 +313,86 @@ def test_status_mutator_module_has_documented_no_mirror_rationale():
     doc = (sm.__doc__ or '').lower()
     assert 'mirror' in doc
     assert 'not' in doc or 'does not' in doc or "doesn't" in doc.replace("'", "'")
+
+
+# --- CodeX P1: rowcount guard against split-brain on 0-row UPDATE ---
+
+
+def test_set_archive_status_raises_on_zero_row_update(tmp_path, monkeypatch):
+    """If the (user_id, job_id) pair doesn't match any row, raise BEFORE
+    touching JSON. Without this guard, a mismatched call could update a
+    stale JSON while PG was untouched → PG/JSON split-brain (CodeX P1)."""
+    from gateway.pan.status_mutator import set_archive_status
+
+    real_job_id = 'job_real'
+    real_user = uuid.uuid4()
+
+    # WRONG ids passed to set_archive_status — should raise.
+    wrong_job_id = 'job_does_not_exist'
+    wrong_user = uuid.uuid4()
+
+    monkeypatch.setenv('AIVIDEOTRANS_JOBS_DIR', str(tmp_path))
+
+    # CRUCIAL: pre-create a JSON file for the wrong_job_id to make sure
+    # the function does NOT write it when PG UPDATE found 0 rows.
+    stale_json = tmp_path / f'{wrong_job_id}.json'
+    stale_json.write_text(json.dumps({
+        'job_id': wrong_job_id, 'status': 'untouched',
+    }), encoding='utf-8')
+
+    async def _go() -> None:
+        engine = await _setup_engine_with_job(job_id=real_job_id, user_id=real_user)
+        try:
+            async with engine.connect() as conn:
+                async with conn.begin():
+                    with pytest.raises(RuntimeError, match='no Job matched'):
+                        await set_archive_status(
+                            wrong_user, wrong_job_id, 'archiving', conn=conn,
+                        )
+        finally:
+            await engine.dispose()
+
+    _run(_go())
+
+    # Stale JSON must NOT have been mutated.
+    record = json.loads(stale_json.read_text(encoding='utf-8'))
+    assert record['status'] == 'untouched', \
+        f"JSON mirror was written despite PG UPDATE hitting 0 rows: {record}"
+
+
+def test_set_archive_status_raises_on_user_id_mismatch_same_job_id(
+    tmp_path, monkeypatch,
+):
+    """Real-world risk: two users with the same job_id naming (unlikely but
+    not impossible). Passing the wrong user_id must NOT update the wrong
+    user's row — the (user_id, job_id) WHERE clause filters, and a
+    0-row UPDATE must raise."""
+    from gateway.pan.status_mutator import set_archive_status
+
+    job_id = 'job_shared_name'
+    user_a = uuid.uuid4()
+    user_b = uuid.uuid4()  # the wrong user
+
+    monkeypatch.setenv('AIVIDEOTRANS_JOBS_DIR', str(tmp_path))
+    stale_json = tmp_path / f'{job_id}.json'
+    stale_json.write_text(json.dumps({
+        'job_id': job_id, 'status': 'pristine',
+    }), encoding='utf-8')
+
+    async def _go() -> None:
+        # Insert Job for user_a; we'll try to update with user_b's id.
+        engine = await _setup_engine_with_job(job_id=job_id, user_id=user_a)
+        try:
+            async with engine.connect() as conn:
+                async with conn.begin():
+                    with pytest.raises(RuntimeError, match='no Job matched'):
+                        await set_archive_status(
+                            user_b, job_id, 'archiving', conn=conn,
+                        )
+        finally:
+            await engine.dispose()
+
+    _run(_go())
+
+    record = json.loads(stale_json.read_text(encoding='utf-8'))
+    assert record['status'] == 'pristine'

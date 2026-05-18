@@ -58,6 +58,12 @@ async def set_archive_status(
     Caller is responsible for transaction scope around `conn` — typically
     `async with conn.begin(): await set_archive_status(...)`.
 
+    The PG UPDATE MUST hit exactly one row. If it hits zero (user_id/job_id
+    doesn't match any row) we raise RuntimeError BEFORE touching the JSON
+    mirror — otherwise a mismatched call could update a stale JSON file
+    while PG was unchanged, creating a split-brain between source-of-truth
+    (PG) and best-effort mirror (JSON).
+
     The JSON mirror is best-effort: if the JSON file is missing we skip
     (PG is authoritative for archive states); if the read/write fails we
     log a warning and return success (do NOT rollback PG).
@@ -66,11 +72,19 @@ async def set_archive_status(
     # for the contract test that checks no mirror import path exists).
     from models import Job
 
-    await conn.execute(
+    result = await conn.execute(
         update(Job)
         .where(Job.user_id == user_id, Job.job_id == job_id)
         .values(status=new_status)
     )
+    # Guard against silent 0-row UPDATE. job_id is unique so > 1 shouldn't
+    # happen, but we accept >= 1 defensively — it would still mean the
+    # intended row was updated.
+    if result.rowcount == 0:
+        raise RuntimeError(
+            f"set_archive_status: no Job matched user_id={user_id} "
+            f"job_id={job_id!r} — refusing to write JSON mirror."
+        )
 
     jobs_dir = Path(os.environ.get(
         'AIVIDEOTRANS_JOBS_DIR', '/opt/aivideotrans/app/jobs'
