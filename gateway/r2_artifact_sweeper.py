@@ -97,8 +97,18 @@ LEASE_S = 300
 
 
 def _is_enabled() -> bool:
-    """Both gates must be set for the sweeper to do anything."""
-    if os.environ.get("AVT_DOWNLOAD_REDIRECT_BACKEND", "local") != "r2":
+    """Both gates must be set for the sweeper to do anything.
+
+    Use ``storage.backend_router.is_r2_enabled()`` (which reads from
+    ``settings``) instead of raw env so we respect the startup safety
+    net applied by ``validate_r2_backend()`` when R2 credentials are
+    missing.  The push flag is not downgraded at startup so it stays
+    env-based.
+
+    CodeX P2-4 (2026-05-18).
+    """
+    from storage.backend_router import is_r2_enabled
+    if not is_r2_enabled():
         return False
     return (
         os.environ.get("AVT_R2_PROACTIVE_PUSH_ENABLED", "false").lower()
