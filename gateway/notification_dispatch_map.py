@@ -44,6 +44,13 @@ EVENT_SUBSCRIPTION_ACTIVATED = "billing.subscription_activated"
 EVENT_SUPPORT_HUMAN_REPLIED = "support.human_replied"
 EVENT_SUPPORT_HANDOFF_CLOSED = "support.handoff_closed"
 
+# Pan backup (Phase 6 §T6.3-T6.4; CodeX 2026-05-18 P1-2: previously
+# auth.py dispatched 'pan_credentials_revoked' but no recipe existed —
+# silent drop). The token_refresh background task fires this when a
+# refresh attempt fails (network / Baidu rejection / token rotation
+# race that lost), marking the credential 'revoked' in PG.
+EVENT_PAN_TOKEN_REVOKED = "pan.token_revoked"
+
 
 DISPATCH_MAP: dict[str, dict[str, Any]] = {
     EVENT_JOB_SUCCEEDED: {
@@ -142,6 +149,14 @@ DISPATCH_MAP: dict[str, dict[str, Any]] = {
         "body": "你的客服工单已处理完成。如还有问题可重新发起咨询。",
         "action_url": "/notifications",
         "related_type": "support_handoff",
+    },
+    EVENT_PAN_TOKEN_REVOKED: {
+        "scope": "user",
+        "topic": "account",
+        "severity": "warning",
+        "title": "网盘授权已失效",
+        "body": "你的网盘授权已失效,需要重新连接才能继续备份/恢复。",
+        "action_url": "/admin/pan/dashboard",
     },
 }
 

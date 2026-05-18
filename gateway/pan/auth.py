@@ -289,13 +289,25 @@ async def pan_token_refresh_tick(
             PanCredentials.access_token_expires_at < deadline,
         )
     )).all()
+    # Close the read transaction so each per-row UPDATE below sees fresh
+    # committed state. CodeX P1-1: without this, SQLite (test) snapshot
+    # isolation can mask the conditional WHERE refresh_token_encrypted
+    # match — the UPDATE would fire against the snapshot's stale value
+    # and we'd revoke a credential another tick had already rotated.
+    # PG READ COMMITTED already gets fresh state per statement, so this
+    # commit is a harmless no-op there; it normalizes both backends.
+    await db.commit()
 
-    stats = {'checked': len(rows), 'refreshed': 0, 'revoked': 0}
+    stats = {'checked': len(rows), 'refreshed': 0, 'revoked': 0,
+             'skipped_race': 0}
     client = factory()
 
     for row in rows:
+        # Capture the OLD encrypted bytes so we can do a race-safe
+        # conditional update on either branch (CodeX P1-1).
+        old_refresh_encrypted = row.refresh_token_encrypted
         try:
-            old_refresh = decrypt_token(row.refresh_token_encrypted)
+            old_refresh = decrypt_token(old_refresh_encrypted)
             new_tokens = client.refresh(old_refresh)
             # ⚠️ Baidu rotates refresh_token — must persist the NEW one.
             await db.execute(
@@ -322,19 +334,38 @@ async def pan_token_refresh_tick(
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "pan_token_refresh failed cred=%s user=%s err=%s — "
-                "marking revoked",
+                "pan_token_refresh failed cred=%s user=%s err=%s",
                 row.id, row.user_id, exc,
             )
-            await db.execute(
+            # CodeX P1-1: conditional revoke. If another tick already
+            # rotated this credential's refresh_token, our exception is
+            # because we used a stale token — NOT because the credential
+            # is dead. The WHERE guard makes the UPDATE a no-op in that
+            # case; rowcount=0 → skip the notification too.
+            result = await db.execute(
                 update(PanCredentials)
-                .where(PanCredentials.id == row.id)
+                .where(
+                    PanCredentials.id == row.id,
+                    PanCredentials.refresh_token_encrypted == old_refresh_encrypted,
+                    PanCredentials.status == 'active',
+                )
                 .values(status='revoked')
             )
+            if result.rowcount == 0:
+                # Another worker won the race. The credential is fine.
+                await db.commit()
+                stats['skipped_race'] += 1
+                logger.info(
+                    "pan_token_refresh: skip revoke cred=%s — refresh_token "
+                    "already rotated by concurrent tick (race-safe guard)",
+                    row.id,
+                )
+                continue
+
             try:
                 await dispatch_event(
                     db,
-                    event_type='pan_credentials_revoked',
+                    event_type='pan.token_revoked',
                     user_id=row.user_id,
                     payload={
                         'cred_id': str(row.id),

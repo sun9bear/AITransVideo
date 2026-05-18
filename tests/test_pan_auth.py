@@ -424,7 +424,9 @@ def test_refresh_tick_skips_credentials_far_from_expiry(monkeypatch):
                     db, client_factory=lambda: fake_client,
                 )
 
-            assert stats == {'checked': 0, 'refreshed': 0, 'revoked': 0}
+            assert stats['checked'] == 0
+            assert stats['refreshed'] == 0
+            assert stats['revoked'] == 0
             assert fake_client.refresh_calls == []
 
     run_async(_go())
@@ -459,7 +461,10 @@ def test_refresh_tick_refreshes_within_window(monkeypatch):
                     db, client_factory=lambda: fake_client,
                 )
 
-            assert stats == {'checked': 1, 'refreshed': 1, 'revoked': 0}
+            assert stats['checked'] == 1
+            assert stats['refreshed'] == 1
+            assert stats['revoked'] == 0
+            assert stats.get('skipped_race', 0) == 0
             # Baidu.refresh called with OLD refresh token.
             assert fake_client.refresh_calls == [{'refresh_token': 'OLD_refresh'}]
 
@@ -482,33 +487,35 @@ def test_refresh_tick_refreshes_within_window(monkeypatch):
     run_async(_go())
 
 
-def test_refresh_tick_marks_revoked_on_failure_and_dispatches_notification(
+def test_refresh_tick_marks_revoked_on_failure_and_dispatches_real_notification(
     monkeypatch,
 ):
-    """Refresh failure → status='revoked' + dispatch_event called."""
-    from models import PanCredentials
-    from pan import auth as auth_mod
+    """Refresh failure → status='revoked' + a REAL UserNotification row
+    in user_notifications. CodeX P1-2: the old test monkeypatched
+    dispatch_event and only verified "called" — but dispatch_event
+    silently drops unknown event_types, so a misnamed event_type would
+    have masked the real bug (notification never landed in DB).
+
+    This test exercises the actual notifications_service.dispatch_event
+    code path and asserts the persisted UserNotification row carries
+    the registered recipe's title/body/severity."""
+    from models import PanCredentials, UserNotification
     from pan.auth import pan_token_refresh_tick
 
     setup_pan_token_env(monkeypatch)
-
     user_id = uuid.uuid4()
-
-    # Capture dispatch_event invocations.
-    dispatched: list[dict] = []
-
-    async def fake_dispatch(db, **kwargs):
-        dispatched.append(kwargs)
-        return None
-
-    monkeypatch.setattr(auth_mod, 'dispatch_event', fake_dispatch)
 
     class FailingClient(FakeBaiduPanClient):
         def refresh(self, refresh_token):
             raise RuntimeError('synthetic refresh failure')
 
     async def _go():
+        # Extend engine with UserNotification table for real dispatch.
         async with auth_test_engine() as engine:
+            async with engine.begin() as conn:
+                await conn.run_sync(
+                    lambda c: UserNotification.__table__.create(c),
+                )
             await insert_sample_pan_credentials(
                 engine, user_id=user_id, status='active',
             )
@@ -524,7 +531,10 @@ def test_refresh_tick_marks_revoked_on_failure_and_dispatches_notification(
                     db, client_factory=lambda: client,
                 )
 
-            assert stats == {'checked': 1, 'refreshed': 0, 'revoked': 1}
+            assert stats['checked'] == 1
+            assert stats['refreshed'] == 0
+            assert stats['revoked'] == 1
+            assert stats['skipped_race'] == 0
 
             # status='revoked' persisted.
             async with Session() as db:
@@ -534,12 +544,23 @@ def test_refresh_tick_marks_revoked_on_failure_and_dispatches_notification(
                 )).scalar_one()
             assert status == 'revoked'
 
-            # Notification dispatched with the right event_type + user_id.
-            assert len(dispatched) == 1
-            evt = dispatched[0]
-            assert evt['event_type'] == 'pan_credentials_revoked'
-            assert evt['user_id'] == user_id
-            assert 'synthetic refresh failure' in evt['payload']['reason']
+            # Real UserNotification row landed in DB (not silently dropped
+            # by an unknown-event_type code path).
+            async with Session() as db:
+                notif = (await db.execute(
+                    select(
+                        UserNotification.title,
+                        UserNotification.body,
+                        UserNotification.severity,
+                        UserNotification.action_url,
+                        UserNotification.topic,
+                    ).where(UserNotification.user_id == user_id)
+                )).one()
+            assert notif.title == "网盘授权已失效"
+            assert "重新连接" in notif.body
+            assert notif.severity == 'warning'
+            assert notif.action_url == '/admin/pan/dashboard'
+            assert notif.topic == 'account'
 
     run_async(_go())
 
@@ -588,6 +609,116 @@ def test_refresh_tick_dispatch_event_failure_does_not_block_revoke(monkeypatch):
                     .where(PanCredentials.user_id == user_id)
                 )).scalar_one()
             assert status == 'revoked'
+
+    run_async(_go())
+
+
+def test_refresh_tick_concurrent_rotation_does_not_revoke_winner(
+    monkeypatch, tmp_path,
+):
+    """CodeX P1-1: two refresh ticks both select the same row. Tick A
+    wins (Baidu rotates refresh_token + PG row updated). Tick B has the
+    stale refresh_token in memory; Baidu rejects it. The conditional
+    UPDATE guard MUST detect refresh_token_encrypted no longer matches
+    the captured old value and SKIP the revoke — the credential is
+    healthy.
+
+    Implementation: file-based SQLite so a SYNC sqlite3 connection from
+    inside client.refresh() can mutate the same DB the async tick reads.
+    Inside refresh(): simulate "winner rotated the row" then raise."""
+    from models import (
+        BackupRecord, Job, PanCredentials, PanOauthState,
+    )
+    from pan.auth import pan_token_refresh_tick
+    from pan.token_crypto import encrypt_token
+    from sqlalchemy.ext.asyncio import (
+        async_sessionmaker, create_async_engine, AsyncSession,
+    )
+
+    setup_pan_token_env(monkeypatch)
+    user_id = uuid.uuid4()
+    db_file = tmp_path / 'race_test.db'
+
+    class RaceWinnerClient(FakeBaiduPanClient):
+        """When called, simulate "Tick A already rotated this row in the
+        DB" via a SYNC sqlite3 connection, then raise to enter our
+        failure path."""
+
+        def __init__(self, db_path):
+            super().__init__()
+            self._db_path = db_path
+
+        def refresh(self, refresh_token):
+            self.refresh_calls.append({'refresh_token': refresh_token})
+            # Tick A's effect: rotate the row's refresh_token_encrypted
+            # so the row no longer matches what we captured.
+            import sqlite3
+            new_enc = encrypt_token('NEW_after_race')
+            conn = sqlite3.connect(self._db_path)
+            try:
+                # SQLAlchemy's UUID-as-CHAR(36) compiles to hex storage
+                # WITHOUT hyphens on SQLite. Use .hex (32 chars) to match
+                # what the row actually stores.
+                rc = conn.execute(
+                    "UPDATE pan_credentials SET refresh_token_encrypted = ? "
+                    "WHERE user_id = ?",
+                    (new_enc, user_id.hex),
+                ).rowcount
+                conn.commit()
+                assert rc == 1, (
+                    f"sync mutation must affect 1 row to simulate the race "
+                    f"correctly; got rowcount={rc}"
+                )
+            finally:
+                conn.close()
+            # Now Baidu rejects our stale token.
+            raise RuntimeError('synthetic stale token rejection from Baidu')
+
+    async def _go():
+        engine = create_async_engine(
+            f"sqlite+aiosqlite:///{db_file}",
+            connect_args={"check_same_thread": False},
+        )
+        try:
+            async with engine.begin() as conn:
+                for t in (Job, BackupRecord, PanCredentials, PanOauthState):
+                    await conn.run_sync(
+                        lambda c, _t=t: _t.__table__.create(c),
+                    )
+
+            await insert_sample_pan_credentials(
+                engine, user_id=user_id, status='active',
+                refresh_token='STALE_old_refresh',
+            )
+            await _set_expires(
+                engine, user_id=user_id,
+                expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+            )
+
+            Session = async_sessionmaker(
+                engine, class_=AsyncSession, expire_on_commit=False,
+            )
+            client = RaceWinnerClient(str(db_file))
+            async with Session() as db:
+                stats = await pan_token_refresh_tick(
+                    db, client_factory=lambda: client,
+                )
+
+            # Losing tick's revoke was a no-op via conditional UPDATE.
+            assert stats['checked'] == 1
+            assert stats['refreshed'] == 0
+            assert stats['revoked'] == 0
+            assert stats['skipped_race'] == 1
+
+            # Credential is STILL active (winner's row preserved).
+            async with Session() as db:
+                status = (await db.execute(
+                    select(PanCredentials.status)
+                    .where(PanCredentials.user_id == user_id)
+                )).scalar_one()
+            assert status == 'active'
+        finally:
+            await engine.dispose()
 
     run_async(_go())
 
@@ -670,7 +801,9 @@ def test_refresh_tick_skips_already_revoked_credentials(monkeypatch):
                     db, client_factory=lambda: fake_client,
                 )
 
-            assert stats == {'checked': 0, 'refreshed': 0, 'revoked': 0}
+            assert stats['checked'] == 0
+            assert stats['refreshed'] == 0
+            assert stats['revoked'] == 0
             assert fake_client.refresh_calls == []
 
     run_async(_go())
