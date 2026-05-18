@@ -127,6 +127,36 @@ def test_build_manifest_r2_artifacts_is_a_copy_not_alias(tmp_path: Path):
     assert len(m['r2_artifacts_snapshot']) == 1
 
 
+def test_build_manifest_deepcopies_nested_dicts(tmp_path: Path):
+    """job_record and r2_artifacts entries must be deep-copied — mutating
+    a nested key on the caller's reference must not leak into the
+    persisted snapshot (CodeX P3, "snapshot" semantic alignment)."""
+    project = tmp_path / 'job_dc'
+    project.mkdir()
+    (project / 'x.txt').write_text('x')
+
+    from gateway.pan.manifest import build_manifest
+
+    job_record = {'job_id': 'job_dc', 'status': 'archiving', 'meta': {'count': 1}}
+    r2 = [{'artifact_key': 'publish.dubbed_video', 'tags': ['cn']}]
+
+    m = build_manifest(project_dir=project, job_record=job_record, r2_artifacts=r2)
+
+    # Mutate ALL the way down on the caller side.
+    job_record['status'] = 'MUTATED'
+    job_record['meta']['count'] = 999
+    job_record['new_key'] = 'leaked'
+    r2[0]['artifact_key'] = 'MUTATED'
+    r2[0]['tags'].append('leaked_tag')
+
+    # Snapshot must be pristine.
+    assert m['job_record']['status'] == 'archiving'
+    assert m['job_record']['meta']['count'] == 1
+    assert 'new_key' not in m['job_record']
+    assert m['r2_artifacts_snapshot'][0]['artifact_key'] == 'publish.dubbed_video'
+    assert m['r2_artifacts_snapshot'][0]['tags'] == ['cn']
+
+
 def test_build_manifest_empty_project_dir(tmp_path: Path):
     """Empty project_dir yields empty file_inventory but full manifest shape."""
     project = tmp_path / 'job_empty'

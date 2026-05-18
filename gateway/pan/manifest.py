@@ -6,6 +6,7 @@ Plan 2026-05-13 §4.4. Manifest stored in TWO places (redundancy):
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import io
 import json
@@ -90,13 +91,19 @@ def build_manifest(*, project_dir: Path, job_record: dict, r2_artifacts: list[di
 
     The returned dict is what gets persisted to PG `backup_records.manifest_json`
     AND embedded as `manifest.json` inside the tar.gz (redundant by design).
+
+    job_record and r2_artifacts are DEEP-COPIED to honor "snapshot" semantics:
+    if the caller mutates a nested dict (e.g. adds a key to job_record after
+    receiving the manifest), the persisted snapshot must not follow. Shallow
+    copy via `list(...)` was insufficient — outer list was independent but
+    inner dicts were aliased to the caller's references.
     """
     return {
         'backup_format_version': 1,
         'created_at_utc': datetime.now(timezone.utc).isoformat(),
         'source_host': socket.gethostname(),
-        'job_record': job_record,
-        'r2_artifacts_snapshot': list(r2_artifacts),
+        'job_record': copy.deepcopy(job_record),
+        'r2_artifacts_snapshot': copy.deepcopy(list(r2_artifacts)),
         'file_inventory': walk_project_dir_inventory(project_dir),
     }
 
