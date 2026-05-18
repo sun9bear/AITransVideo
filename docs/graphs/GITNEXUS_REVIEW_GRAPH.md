@@ -11,7 +11,7 @@
 - `TranslationReviewPanel / VoiceReviewPanel / VoiceSelectionPanel`
 - Smart handoff 后如何重新进入 Studio review
 - Smart 完成或 handoff 后如何显示用户可见决策摘要
-- voice selection approve 前的同源音色复用、克隆锁与 calibration preflight
+- voice selection approve 前的 candidate-first 音色候选、同源音色复用、克隆锁与 calibration preflight
 
 ## 2. 主图
 
@@ -43,9 +43,16 @@ graph TD
     VoicePanel --> ReviewApi
     ReviewApi --> ReviewActions["review_actions.py"]
 
+    VoiceSelectPanel --> CandidateApi["getVoiceCandidates / voice-candidates"]
+    CandidateApi --> StrongReuse["强匹配 autoReuseVoice"]
+    CandidateApi --> PossibleCandidates["可能匹配 requires confirmation"]
+    CandidateApi --> OtherPersonal["其他个人音色"]
+    StrongReuse --> ReuseApprove["voice_reuse approve payload"]
+    PossibleCandidates --> ReuseApprove
+    OtherPersonal --> ReuseApprove
     VoiceSelectPanel --> VoiceMatch["matchVoiceForSelection / voice-match"]
     VoiceMatch --> ReuseCard["VoiceCloneModal reusable UserVoice"]
-    ReuseCard --> ReuseApprove["voice_reuse approve payload"]
+    ReuseCard --> ReuseApprove
     VoiceSelectPanel --> CloneModal["VoiceCloneModal explicit clone"]
     CloneModal --> CloneLock["Gateway per-speaker clone lock"]
     CloneLock --> CloneResult["UserVoice source metadata + auto calibration"]
@@ -54,6 +61,7 @@ graph TD
     CloneResult --> VoiceApi
     VoiceApi --> VoiceGateway["voice_selection_api.py + job_intercept.py"]
     VoiceGateway --> QualitySync["quality_tier + final_minimax_model"]
+    VoiceGateway --> CandidateAudit["voice_reuse / voice_candidate_rejected audit"]
     QualitySync --> Preflight["voice_calibration_review_preflight.py"]
     Preflight --> CalibTask["run_calibration_task / inflight dedupe"]
     Preflight --> Proxy["proxy_request -> Job API"]
@@ -124,14 +132,18 @@ tab 映射仍然是：
 
 结论：translation review 仍然是 speaker 纠偏的关键写侧。
 
-## 8. Voice selection 先做复用 / 克隆前置确认
+## 8. Voice selection 先做 candidate-first 复用 / 克隆前置确认
 
 在进入 calibration preflight 前，voice selection 现在还有一层“复用优先、显式克隆”的前置协作：
 
-- `VoiceCloneModal` 打开时调用 `matchVoiceForSelection(jobId, speakerId)`，按同用户、同源内容、同 speaker 查可复用 UserVoice。
-- 命中强匹配时 UI 显示“发现可复用音色”，用户可以选择“复用此音色”；该路径提交 `voice_reuse`，不消耗 clone 点。
+- `VoiceSelectionPanel` 加载 speaker 后逐个调用 `getVoiceCandidates(...)`，这是只读 registry lookup，不调用 clone provider、不预留点数。
+- UI 按“个人音色 · 强匹配 (不扣点) / 个人音色 · 可能匹配 (需要确认) / 其他个人音色”分组展示。
+- 命中强匹配时会自动预选 `autoReuseVoice`，提交 `voice_reuse=true`，不消耗 clone 点。
+- 可能匹配包含 same-source named、same-source speaker-id changed、cross-source named；用户选中后也是复用事件，不是新克隆。
+- `VoiceCloneModal` 打开时仍调用 `matchVoiceForSelection(jobId, speakerId)`，用于显式 clone 流程里的可复用提示。
 - 用户仍可显式触发 clone；Gateway 用 `review_state` 中的 per-speaker `cloning.started_at` 做短期 clone lock，重复点击返回 `clone_in_progress`。
 - clone 成功后写入 UserVoice source metadata，并通过 calibration hook 触发速度校准。
+- 如果 Smart 因弱匹配暂停写入了 `smart_offered_candidates`，用户最后选择候选以外的 voice，Gateway 会记录非计费 `voice_candidate_rejected` usage event。
 
 结论：voice selection 现在把“复用已有个人音色”和“新克隆”放在同一个人工确认入口里，避免重复克隆。
 
@@ -159,18 +171,27 @@ tab 映射仍然是：
 - `frontend-next/src/components/workspace/SmartAutoDecisionPanel.tsx`
   - Smart 决策摘要 UI
 - `frontend-next/src/components/workspace/VoiceSelectionPanel.tsx`
+  - `getVoiceCandidates(...)`
   - `matchVoiceForSelection(jobId, speakerId)`
   - `VoiceCloneModal` reuse / clone UI
   - `approveVoiceSelection(jobId, approvals)`
 - `frontend-next/src/lib/api/voiceSelection.ts`
+  - `VoiceCandidatesResponse`
+  - `VoiceCandidate`
   - `voiceReuse`
   - `VoiceReuseMatchResponse`
 - `gateway/voice_calibration_review_preflight.py`
   - review-submit calibration preflight
 - `gateway/voice_selection_api.py`
+  - `/job-api/jobs/{job_id}/voice-candidates`
   - `/job-api/jobs/{job_id}/voice-match`
   - per-speaker clone lock
   - source metadata on clone
+- `gateway/job_intercept.py`
+  - `_record_voice_reuse_events`
+  - `_record_voice_candidate_rejection_events`
+- `gateway/user_voice_service.py`
+  - same-source / cross-source candidate scopes
 - `src/services/jobs/review_actions.py`
   - review submit 与 resume
 - `src/services/jobs/api.py`
@@ -182,6 +203,7 @@ tab 映射仍然是：
 - Smart 降级后为什么进入 Studio 审核
 - Smart 决策摘要从哪里读取，为什么 handoff 也能显示
 - translation review 能否改 speaker 名称和 segment speaker
-- voice selection 为什么提示可复用音色、为什么 clone 按钮被锁住
+- voice selection 为什么提示强匹配/可能匹配/其他个人音色、为什么 clone 按钮被锁住
+- Smart 弱匹配暂停后，用户确认或拒绝候选分别如何审计
 - review submit 前为什么会先跑 voice calibration
 - pipeline 怎样进入 `waiting_for_review`，又怎样恢复

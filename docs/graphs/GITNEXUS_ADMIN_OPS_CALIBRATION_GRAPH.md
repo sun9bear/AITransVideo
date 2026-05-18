@@ -8,10 +8,12 @@
 
 - alignment / whisper / paid fallback settings
 - Smart prompt model settings
+- Smart voice candidate / clone / weak-match policy settings
 - voice calibration control plane
 - user voice quota、same-source match、Smart clone mirror 与 source metadata
 - support admin、traffic analytics、cost management
 - admin disk overview 与受控清理
+- admin disk resize hint 与 loopback resize helper
 - cleanup、R2 sweeper、R2 parity、observability
 - Smart state、quality report、admin cost summary 与 terminal settlement 诊断
 
@@ -32,14 +34,17 @@ graph TD
     Settings --> AlignPolicy["force_dsp_alignment + paid_fallback"]
     Settings --> WhisperPolicy["whisper policy fields"]
     Settings --> PromptModels["prompt_models studio/express/smart"]
+    Settings --> SmartVoicePolicy["smart_auto_clone / reuse / pause_on_possible"]
     PromptModels --> LLMRegistry["llm_registry mode defaults + admin override"]
+    SmartVoicePolicy --> SmartRuntime["process.py read_admin_setting"]
     OpsEnv["INSTALL_WHISPER + .[whisper] + HF_HOME"] --> WhisperCap["runtime capability"]
     WhisperCap --> WhisperPolicy
 
     VoiceOps --> Manual["/user-voices/{voice_id}/calibrate-speed"]
+    VoiceCandidates["voice-candidates API"] --> MatchApi["internal /user-voices/candidates"]
     CloneFlow["voice clone success"] --> Hook["voice_calibration_hook.py"]
     ReviewApprove["voice-selection approve"] --> Preflight["voice_calibration_review_preflight.py"]
-    ReviewMatch["voice-match / smart match"] --> MatchApi["internal /user-voices/match"]
+    ReviewMatch["voice-match / smart match"] --> LegacyMatch["internal /user-voices/match"]
     SmartClone["Smart clone success"] --> RegisterSmart["internal /user-voices/register-smart"]
     SmartQuota["Smart quota check"] --> QuotaApi["internal /user-voices/quota"]
     Manual --> Inflight["run_calibration_task + inflight dedupe"]
@@ -49,6 +54,7 @@ graph TD
     RegisterSmart --> SourceMeta["source metadata / sample metadata"]
     SourceMeta --> UserVoiceStore["UserVoice table"]
     MatchApi --> UserVoiceStore
+    LegacyMatch --> UserVoiceStore
     QuotaApi --> UserVoiceStore
     UserVoiceStore --> SourceIndexes["source_content_hash indexes"]
 
@@ -69,6 +75,10 @@ graph TD
     DiskOverview --> Protected["protected_expired_dirs"]
     AdminDisk --> CleanupOrphans["cleanup-orphans by job_id"]
     AdminDisk --> CleanupExpired["cleanup-expired via project_cleanup"]
+    AdminDisk --> ResizeHint["resize_hint"]
+    ResizeHint --> ResizeApi["POST /resize-filesystem"]
+    ResizeApi --> ResizeHelper["disk_resize_helper.py loopback"]
+    ResizeHelper --> Resize2fs["resize2fs guarded by token + confirm"]
     CleanupOrphans --> SafeRoot["safe project root check"]
     CleanupExpired --> Cleanup
 
@@ -79,6 +89,7 @@ graph TD
     SupportAdmin --> Handoff["handoff / WeChat QR / ops email"]
     Traffic --> Categories["human / search / AI crawler / scanner"]
     Costs --> CostRows["LLM / TTS / voice_clone / smart policy / margin rows"]
+    CostCatalog["cost_management RMB-direct catalog"] --> Costs
 
     SmartState --> Costs
     Settle --> Costs
@@ -127,7 +138,16 @@ graph TD
 
 结论：voice speed calibration 仍是覆盖手动、clone、review 的正式控制平面。
 
-### 3.5 UserVoice source metadata 成为复用与诊断主键
+### 3.5 Smart voice policy 进入 admin settings
+
+- `gateway/admin_settings.py` 新增 `smart_auto_clone_enabled`、`smart_reuse_user_voice_enabled`、`smart_pause_on_possible_user_voice_match`。
+- `frontend-next/src/app/(app)/admin/settings/page.tsx` 暴露三个开关，其中弱匹配确认默认关闭。
+- pipeline 使用 app-side `services.admin_settings.read_admin_setting` 读取这些字段，避免 runtime 误用 Gateway-only settings loader。
+- Gateway create path 的 Smart quota preflight 与 runtime 保持一致：只有 consent 允许克隆且 admin clone enabled 时才检查 clone quota。
+
+结论：Smart 的“复用、克隆、弱匹配暂停”不再是硬编码策略，而是进入 admin 控制面。
+
+### 3.6 UserVoice source metadata 成为复用与诊断主键
 
 - `gateway/alembic/versions/028_user_voice_source_metadata.py` 给 `UserVoice` 增加 `source_job_id / source_type / source_ref / source_content_hash / source_upload_md5 / source_video_title / source_speaker_name / source_speaker_name_key / clone_sample_seconds / clone_sample_segment_ids / created_from` 等字段。
 - `gateway/user_voice_service.py` 的 `match_user_voices(...)` 以同用户、同 `source_content_hash` 为前提，再按 `source_speaker_id` 或 `source_speaker_name_key` 判强/中/弱匹配。
@@ -136,16 +156,18 @@ graph TD
 
 结论：音色复用不是按 voice_id 猜测，而是以可审计的来源内容和 speaker metadata 为依据。
 
-### 3.6 Smart clone 增加 UserVoice quota、match 与 mirror 入口
+### 3.7 Smart clone 增加 UserVoice quota、candidate、match 与 mirror 入口
 
 - `gateway/user_voice_api.py` 提供 internal quota endpoint 给 pipeline 查询剩余额度。
 - `gateway/user_voice_api.py` 提供 internal match endpoint 给 pipeline 和人工审核/后编辑查询同源可复用音色。
+- `gateway/user_voice_api.py` 还提供 internal candidates endpoint，输出 strong auto-reuse、requires-confirmation、cross-source named candidates。
+- `gateway/voice_selection_api.py` 暴露 public `/job-api/jobs/{job_id}/voice-candidates` 给 Studio 和 post-edit UI。
 - clone 成功后 pipeline 调 internal `register-smart` 将新 voice 写入 UserVoice。
 - 若 mirror 失败，pipeline fail-closed handoff，避免下一次 quota 读到 stale used count。
 
 结论：Smart clone 的 ops 诊断不能只看 provider 成功，还要看 Gateway UserVoice 是否复用、登记、索引和校准成功。
 
-### 3.7 Smart prompt model 配置进入 admin settings
+### 3.8 Smart prompt model 配置进入 admin settings
 
 - `gateway/admin_settings.py` 管理 `prompt_models[mode][prompt_key]`，mode 覆盖 `studio / express / smart`。
 - `src/services/llm_registry.py` 对 Smart 的 `pass1 / pass2 / pass3 / translate / rewrite / probe_translate` 默认指向 Gemini 3.1 Pro。
@@ -153,7 +175,7 @@ graph TD
 
 结论：Smart 的 LLM 成本与质量诊断要同时看 admin setting、registry default、pipeline service mode 三处。
 
-### 3.8 Smart state 进入 terminal mirror 与 settlement 诊断面
+### 3.9 Smart state 进入 terminal mirror 与 settlement 诊断面
 
 - `job_terminal_mirror.py` 在 terminal settle 前合并 upstream `smart_state`。
 - `credits_service.py` 在 legacy terminal branch 前优先读取 `smart_state.credits_policy`。
@@ -161,7 +183,17 @@ graph TD
 
 结论：排查 Smart 扣费、退款、降级时，必须同时看 Job API JSON store、Gateway PG mirror、credit ledger 和 cost summary。
 
-### 3.9 cleanup 仍可要求 R2 parity
+### 3.10 Admin disk resize 是受控运维动作
+
+- `admin_disk_api.py` 在 overview 中返回 `resize_hint`，包括 feature flag、device、mount source、device/fs size、`resize2fs/tune2fs` availability、can/needs resize。
+- `POST /api/admin/disk/resize-filesystem` 要求 admin、feature enabled、`can_resize=True`、`confirm=true`，并通过 `_resize_lock` 串行化。
+- `disk_resize_helper.py` 独立进程绑定 loopback，要求 bearer token；只有它能看到 raw block device。
+- Compose 将 `AVT_ADMIN_DISK_RESIZE_DEVICE` 只挂给 `disk-resize-helper`，Gateway 通过 `AVT_ADMIN_DISK_RESIZE_HELPER_URL/TOKEN` 调 helper。
+- helper 只允许 ext4 `resize2fs`，通过 `tune2fs` 判断文件系统容量，支持 dry-run，执行失败会返回 before/after/output。
+
+结论：一键扩容不是让 Gateway 容器直接拿裸设备，而是经过 helper、token、confirm、ext4、lock 的受控路径。
+
+### 3.11 cleanup 仍可要求 R2 parity
 
 - `AVT_CLEANUP_REQUIRES_R2_PARITY=true` 时，`project_cleanup.py` 会在删除项目目录前调用 `r2_parity_ok(...)`。
 - `r2_parity_ok(...)` 检查 registry entry、generation、状态值、R2 HEAD。
@@ -170,7 +202,15 @@ graph TD
 
 结论：磁盘释放策略已经和 R2 交付可靠性绑定。
 
-### 3.10 alignment / whisper 控制面仍是两层
+### 3.12 cost catalog 改为 RMB-direct
+
+- `gateway/cost_management.py` 的默认价格目录版本为 `2026-05-18-rmb-direct-pricing`。
+- LLM rate 直接使用 `input_per_million_rmb / output_per_million_rmb / audio_input_per_million_rmb`，`usd_to_rmb` 只保留兼容旧 override。
+- Gemini 3.1 Pro 按官方 ≤200K tier 折成人民币：input ¥9/M、output ¥72/M、audio input ¥9/M，避免 admin margin 被旧 USD 估算高估。
+
+结论：成本管理面现在以人民币价格为主事实，减少汇率漂移。
+
+### 3.13 alignment / whisper 控制面仍是两层
 
 - 运行时 policy 由 `gateway/admin_settings.py` 暴露。
 - 部署 capability 由 `pyproject.toml` 的 `.[whisper]`、`Dockerfile` 的 `INSTALL_WHISPER`、`docker-compose.yml` 的 `HF_HOME` 决定。
@@ -183,9 +223,15 @@ graph TD
   - disk overview
   - orphan cleanup
   - expired cleanup
+  - resize hint
+  - resize-filesystem proxy
   - safe root boundary
+- `gateway/disk_resize_helper.py`
+  - loopback resize helper
+  - token + confirm + resize lock
 - `frontend-next/src/app/(app)/admin/disk/page.tsx`
   - admin disk UI
+  - resize filesystem UI
 - `gateway/admin_cost_api.py`
   - admin-only Smart cost endpoint
 - `frontend-next/src/app/(app)/admin/jobs/[id]/cost/page.tsx`
@@ -196,6 +242,7 @@ graph TD
   - manual calibration entry
   - internal quota endpoint
   - internal match endpoint
+  - internal candidates endpoint
   - internal register-smart endpoint
 - `gateway/user_voice_service.py`
   - same-source voice matching
@@ -213,8 +260,11 @@ graph TD
   - Smart credits policy dispatcher
 - `gateway/admin_settings.py`
   - prompt model settings
+  - Smart voice policy settings
 - `src/services/llm_registry.py`
   - mode-aware LLM defaults
+- `gateway/cost_management.py`
+  - RMB-direct provider cost catalog
 - `gateway/project_cleanup.py`
   - cleanup parity gate
 - `src/services/r2_publisher_lib/r2_parity.py`
@@ -229,6 +279,8 @@ graph TD
 - 想排查 Smart 成本摘要、settlement backfill、admin cost page
 - 想改 voice calibration 行为或入口
 - 想排查 Smart prompt model 为什么选了某个模型
+- 想排查 Smart voice policy 为什么允许/禁止复用、克隆或弱匹配暂停
 - 想排查 Smart clone quota / match / register-smart / UserVoice mirror
+- 想排查 admin disk 为什么显示可以或不能扩容
 - 想排查 cleanup 为什么没有 purge 某个过期项目
 - 想看 R2 fallback / redirect 的统计口径

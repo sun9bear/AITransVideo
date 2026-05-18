@@ -9,7 +9,7 @@
 - `SemanticBlock` 仍然是 TTS / 对齐 / 字幕的基本处理单元
 - 主对齐路径仍然是 `DSP-first alignment`
 - Smart inline branch 已经在 `process.py` 内实装，包含 eligibility、voice review、translation review、handoff、terminal reports
-- Smart 创建入口现在先经过 Gateway policy / consent 校验；pipeline 内部优先复用同源个人音色，再决定是否 clone
+- Smart 创建入口现在先经过 Gateway policy / consent 校验；pipeline 内部读取 app-safe admin policy，优先使用个人音色候选，再决定是否 clone 或暂停确认
 - paid fallback、force DSP、whisper deliverable sidecar 仍然受明确控制
 - `derive_effective_pipeline_mode(...)` 决定 Smart job 是否继续走自动层，还是回到 Studio 控制流
 
@@ -35,11 +35,20 @@ graph TD
     SmartMode --> SmartConsent["Gateway smart_consent + policy accepted"]
     SmartConsent --> SmartVoice
     SmartVoice --> Eligibility["evaluate_eligibility"]
-    Eligibility --> Reuse["same-source UserVoice match"]
-    Reuse --> ReusedVoice["reused_user_voice decision"]
-    Reuse --> Quota["user voice quota snapshot"]
+    SmartVoice --> AdminPolicy["read_admin_setting Smart voice policy"]
+    AdminPolicy --> CandidateGate["reuse / clone / weak-pause gates"]
+    Eligibility --> Candidates["UserVoice candidates endpoint"]
+    CandidateGate --> Candidates
+    Candidates --> ReusedVoice["strong reused_user_voice decision"]
+    Candidates --> PossibleMatch["possible personal-voice candidates"]
+    PossibleMatch --> WeakPause["pause for user confirmation"]
+    WeakPause --> ReviewPause
+    Candidates --> Quota["user voice quota snapshot"]
+    AdminPolicy --> Quota
     Quota --> Provider["smart_wiring MiniMax clone provider"]
+    Provider --> CloneMeter["record_voice_clone usage event"]
     Provider --> VoiceDecision["clone / preset / pause"]
+    CloneMeter --> VoiceDecision
     ReusedVoice --> VoiceDecision
     VoiceDecision --> MinorPreset["minor speaker preset auto-match"]
     VoiceDecision --> DubbingMode["aggregate speaker dubbing_mode"]
@@ -103,8 +112,11 @@ graph TD
 ### 3.3 Smart voice review 已经进入 workflow 主干
 
 - eligibility gate 在 voice selection 阶段前执行，先筛出主说话人与被排除说话人。
-- consent 允许自动克隆时，pipeline 会抽样、校验样本、查询 user voice quota，再构造真实 `CloneProvider`。
-- 克隆前会先按 `source_content_hash` 查询同用户同源 `UserVoice`；强匹配可以直接 `reused_user_voice`，不再消耗 clone 点数。
+- pipeline 通过 app-safe `read_admin_setting` 读取 `smart_auto_clone_enabled`、`smart_reuse_user_voice_enabled`、`smart_pause_on_possible_user_voice_match`，避免 app runtime 直接依赖 Gateway-only settings loader。
+- consent 与 admin policy 同时允许自动克隆时，pipeline 会抽样、校验样本、查询 user voice quota，再构造真实 `CloneProvider`。
+- 克隆前会调用内部 `/api/internal/user-voices/candidates`，强匹配可以直接 `reused_user_voice`，不再消耗 clone 点数。
+- admin 开启弱匹配暂停时，possible personal voice candidates 会写入 review payload，等待用户确认，而不是继续静默 clone。
+- Smart 自动克隆成功后会写 `UsageMeter.record_voice_clone(...)`，避免 terminal cost summary 漏掉 pipeline 内真实克隆成本。
 - quota 不可用、样本失败、provider pause、clone mirror 失败都会 fail-closed handoff。
 - 非主说话人通过 `_resolve_smart_minor_speaker_voices(...)` 从 `auto_matched_voice` 解析 preset voice，并先聚合 segment-level `dubbing_mode`，避免 keep-original / mute-or-background 说话人被错误配音。
 - Smart 自动通过后会把 `_speaker_voices` 明确写回 `voice_id_a / voice_id_b`，避免 translator/TTS 仍使用 `auto`。
@@ -156,6 +168,14 @@ graph TD
   - `_register_smart_clone_in_user_voices`
   - `_emit_smart_quality_report`
   - `_emit_smart_cost_summary`
+- `src/services/admin_settings.py`
+  - app-safe admin policy reads
+- `gateway/user_voice_api.py`
+  - internal UserVoice match and candidates endpoints
+- `gateway/user_voice_service.py`
+  - match scopes and candidate confidence
+- `src/services/usage_meter.py`
+  - Smart auto clone usage recording
 - `gateway/smart_consent.py`
   - Smart consent schema validator
 - `src/services/llm_registry.py`
@@ -182,6 +202,6 @@ graph TD
 
 - 想改 `process.py` 主流水线
 - 想改 Smart job 在 `/continue` 后走 Smart 还是 Studio
-- 想改 Smart voice review、同源音色复用、translation review、handoff、terminal report
+- 想改 Smart voice review、个人音色候选、弱匹配暂停、同源音色复用、translation review、handoff、terminal report
 - 想改 DSP / paid fallback / force_dsp review 语义
 - 想改 cue pipeline、SRT、deliverable-time whisper

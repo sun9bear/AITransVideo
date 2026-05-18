@@ -9,7 +9,8 @@
 - `UsageMeter`
 - attempt-level LLM / TTS audit
 - provider/model 维度 TTS 与 post-edit re-synthesis 计量
-- voice clone / voice reuse 计量
+- voice clone / voice reuse / voice candidate rejection 计量
+- RMB-direct provider/model cost catalog
 - Smart sidecar trio
 - Smart handoff quality report synthesis
 - Smart admin-only cost summary 与 settlement backfill
@@ -26,6 +27,7 @@ graph TD
     Translator["gemini/translator.py"] --> Usage
     VoiceClone["Smart / manual voice clone"] --> Usage
     VoiceReuse["same-source UserVoice reuse"] --> Usage
+    VoiceReject["possible UserVoice candidate rejected"] --> Usage
     PostEditResynth["post-edit re-synthesis"] --> Usage
     Review["translation review / voice selection"] --> UserAudit["user_edit_events.jsonl"]
     PostEdit["editing actions / commit"] --> UserAudit
@@ -47,8 +49,9 @@ graph TD
     Backfill --> SmartCost
 
     Usage --> ProviderModel["tts provider/model breakdown"]
-    Usage --> VoiceMetrics["voice_clone / voice_reuse metrics"]
+    Usage --> VoiceMetrics["voice_clone / voice_reuse / candidate_rejected metrics"]
     Usage --> PostEditMetrics["post_edit_resynth metrics"]
+    CostCatalog["gateway cost_management RMB-direct catalog"] --> CostRead["cost / quality / provider read models"]
     ProviderModel --> CostRead["cost / quality / provider read models"]
     VoiceMetrics --> CostRead
     PostEditMetrics --> CostRead
@@ -129,13 +132,15 @@ graph TD
 
 结论：成本面不只是 token/char 总量，而是带尝试级失败与回退证据。
 
-### 3.7 voice clone / reuse 成本语义分离
+### 3.7 voice clone / reuse / candidate rejection 成本语义分离
 
 - `record_voice_clone(...)` 支持 `clone_count`、`billable` 和 `extra`，可以区分 provider 调用、成功调用、可计费克隆数。
 - `record_voice_reuse(...)` 记录 `model=voice_reuse`、`clone_count=0`、`billable=False`，并写入 `billing_policy="reuse_existing_user_voice_no_clone_charge"`。
+- `record_voice_candidate_rejected(...)` 记录 `model=voice_candidate_rejected`、`billable=False`、`clone_count=0`，用于审计“系统给过个人音色候选，但用户选择了别的音色”。
+- Smart 自动克隆成功后现在也会写入 `UsageMeter`，避免 admin margin 只看到复用而漏掉 pipeline 内真实发生的 auto clone 成本。
 - summary 输出 `voice_clone_call_count`、`voice_clone_success_call_count`、`voice_clone_billable_count`、`voice_clone_count_by_provider`、`voice_clone_source_audio_seconds`。
 
-结论：复用已有个人音色不会被误算成新克隆，clone 成本也能按 provider 和样本量追踪。
+结论：复用已有个人音色不会被误算成新克隆，拒绝候选不会被误算成克隆，真实发生的 Smart auto clone 也能进入成本面。
 
 ### 3.8 post-edit re-synthesis 有独立成本桶
 
@@ -145,7 +150,15 @@ graph TD
 
 结论：后编辑带来的 TTS 追加调用可以被独立追踪，不污染主流水线成本。
 
-### 3.9 Smart credits policy 进入 terminal settlement
+### 3.9 provider/model 成本目录改为 RMB-direct 事实
+
+- `gateway/cost_management.py` 默认 catalog version 为 `2026-05-18-rmb-direct-pricing`，以人民币字段作为主要事实。
+- LLM 成本字段使用 `input_per_million_rmb / output_per_million_rmb / audio_input_per_million_rmb`，`usd_to_rmb` 只作为旧目录兼容 fallback。
+- Gemini 3.1 Pro official ≤200K tier 直接记录人民币单价与音频 token 速率，避免 admin 成本页再依赖美元汇率换算。
+
+结论：admin 成本分析现在优先读 RMB-direct 目录，汇率字段不再是新目录的主路径。
+
+### 3.10 Smart credits policy 进入 terminal settlement
 
 - `settle_job_credit_ledger(...)` 会先看 `smart_state.credits_policy`。
 - `refund_full`、`capture_full`、`capture_actual_cost_capped_at_studio_price` 是当前 dispatcher 分支。
@@ -154,7 +167,7 @@ graph TD
 
 结论：Smart 的结算策略有审计入口，但真实财务动作必须以 Gateway ledger 为准。
 
-### 3.10 `effective_marker.marked_event_ids` 仍是行为归因主键
+### 3.11 `effective_marker.marked_event_ids` 仍是行为归因主键
 
 - `user_edit_audit.py` 采用 append-only JSONL。
 - `effective_marker` 表示最终存活的 prior intent。
@@ -162,7 +175,7 @@ graph TD
 
 结论：用户行为分析仍以 survivor-intent join 为核心。
 
-### 3.11 `smart_shadow_eval / sim` 是离线验证闭环
+### 3.12 `smart_shadow_eval / sim` 是离线验证闭环
 
 - collector 汇总 review state、editor segments、subtitle cues、usage events、user edit events、Smart decisions。
 - simulator 对 eligibility、voice sample、translation auto approval、TTS duration repair、subtitle sync policy 做离线决策。
@@ -184,9 +197,17 @@ graph TD
   - budget exhausted decision events
 - `src/services/usage_meter.py`
   - attempt-level usage
-  - voice clone / voice reuse metrics
+  - voice clone / voice reuse / voice candidate rejected metrics
   - provider/model TTS summary
   - post-edit re-synthesis bucket
+- `gateway/cost_management.py`
+  - RMB-direct provider/model cost catalog
+  - backward-compatible USD conversion fallback
+- `gateway/job_intercept.py`
+  - voice reuse event recording
+  - rejected personal-voice candidate audit
+- `gateway/voice_selection_api.py`
+  - manual voice clone usage recording
 - `gateway/smart_consent.py`
   - budget exhaustion policy guard
 - `gateway/admin_cost_api.py`
@@ -209,9 +230,10 @@ graph TD
 
 ## 5. 什么时候优先读这张图
 
-- 想做 LLM / TTS / voice clone / voice reuse / post-edit resynth 成本或失败率分析
+- 想做 LLM / TTS / voice clone / voice reuse / voice candidate rejection / post-edit resynth 成本或失败率分析
 - 想做 Smart 自动审核质量分析
 - 想改 Smart sidecar、quality report、cost summary
+- 想改 provider/model RMB 成本目录或 admin 成本读模型
 - 想改 Smart quality report 的 handoff 合成逻辑
 - 想改 admin-only 成本暴露或 settlement backfill
 - 想改 Smart credits policy 或 terminal settlement

@@ -7,7 +7,10 @@
 这张子图聚焦 `editing` 状态下的修改、重生成、speaker 生命周期、提交与 lineage 行为，重点是：
 
 - editing speakers registry
+- edit page left-video / ops-panel / segment-row redesign
 - speaker voice profile inference
+- multi-cut split 与 write-ahead journal
+- user-explicit LLM suggest-split
 - `preview-source` cache 与 stream endpoint
 - single segment re-TTS 与 batch re-TTS
 - `overwrite / copy_as_new`
@@ -24,10 +27,14 @@ graph TD
     EditHref --> EditEntry["enter-edit"]
     EditEntry --> ModeGate["service_mode + smart_state editable gate"]
     ModeGate --> EditPage["VideoEditPage"]
+    EditPage --> SegmentRow["SegmentRow right list"]
+    EditPage --> OpsPanel["CurrentSegmentOpsPanel left video ops"]
+    EditPage --> SplitDialog["SplitSegmentDialog"]
     EditPage --> Segments["editing/segments.json + voice_map.json"]
     EditPage --> Speakers["editor/editing/speakers.json"]
     EditPage --> VoiceModify["VoiceModifyTab"]
-    VoiceModify --> ReuseMatch["matchVoiceForSelection"]
+    VoiceModify --> CandidateApi["voice-candidates candidate-first"]
+    VoiceModify --> ReuseMatch["matchVoiceForSelection legacy reuse check"]
     VoiceModify --> CloneModal["VoiceCloneModal reuse / explicit clone"]
     VoiceModify --> AudioAudit["SpeakerAudioAuditModal"]
     CloneModal --> VoiceOverride["apply voice override + voice_reuse"]
@@ -43,6 +50,11 @@ graph TD
     Segments --> BatchTTS["editing_batch.py regenerate_all_dirty_segments"]
     Segments --> PreviewSource["preview-source cache + stream endpoint"]
     Segments --> Structural["split / speaker / text edits"]
+    SplitDialog --> SuggestSplit["GET quota + POST suggest-split"]
+    SuggestSplit --> LLMSuggest["editing_split_suggest.py LLM audio+text"]
+    SplitDialog --> SplitMany["POST split-many cuts[]"]
+    SplitMany --> Journal["write-ahead split journal"]
+    Journal --> Segments
 
     VoiceOverride --> SingleTTS
     Structural --> Audit["user_edit_events.jsonl"]
@@ -86,12 +98,21 @@ graph TD
 
 - `VoiceModifyTab.tsx` 复用 `VoiceCloneModal` 和 `SpeakerAudioAuditModal`，避免编辑页自建第二套 clone / 审听逻辑。
 - modal 打开时同样查询 `voice-match`，可直接复用同源 UserVoice；需要新 clone 时仍要求用户显式点击。
+- `VoiceModifyTab.tsx` 也调用 `voice-candidates`，按强匹配、可能匹配、其他个人音色分组展示，和 Studio voice selection 保持一致。
 - approve payload 可以带 `voice_reuse`，让 Gateway 区分复用已有音色与新克隆。
 - clone 不是进入编辑页后的自动动作，仍受 clone lock、source metadata、calibration hook 约束。
 
 结论：后编辑音色修改已经接回主审核流的复用/克隆安全边界，不做后台自动克隆。
 
-### 3.3 editing speaker 仍然是独立实体
+### 3.3 编辑页已经拆成左视频操作面 + 右段落列表
+
+- `SegmentRow.tsx` 承接右侧每个 segment 的展示、说话人选择、状态按钮、draft TTS inline panel。
+- `CurrentSegmentOpsPanel.tsx` 承接左侧当前段的完整操作面，handlers 与 `SegmentRow` 共用，不维护第二套业务逻辑。
+- `SplitSegmentDialog.tsx` 从行内 split UI 独立出来，统一处理切点、speaker assignment、智能建议和提交。
+
+结论：编辑页结构从单页内联组件推进到可测试、可替换的三个明确组件。
+
+### 3.4 editing speaker 仍然是独立实体
 
 - `editing_speakers.py` 把编辑态 speakers 持久化到 `editor/editing/speakers.json`。
 - 创建 speaker 通过 `file_lock(editing_speakers_path(project_dir))` 保护。
@@ -99,7 +120,27 @@ graph TD
 
 结论：editing speaker 是编辑态正式模型，不是临时 UI 字段。
 
-### 3.4 batch re-TTS 只扫 dirty segment
+### 3.5 split-many 是正式分割内核
+
+- `split_editing_segment_many(...)` 支持一个 segment 的 1..N 个 cuts，输出 N+1 个新 segment。
+- cuts 必须在 `source_index` 和 `cn_index` 上严格单调，且不能产生空片段。
+- backend 用 write-ahead journal 保护 `segments.json / segment_status.json / voice_map.json` 三文件一致性。
+- 读 `segments / status / voice_map` 时会先 reconcile journal，处理中断态 A/B/C。
+- 分割后新段标记为 `text_dirty`，父段 draft wav 会被清理，旧 voice override 会迁移到新段。
+
+结论：多切点分割已经是编辑态数据模型的一部分，不能当作纯前端操作。
+
+### 3.6 智能切点是用户显式触发的付费 LLM 功能
+
+- `editing_split_suggest.py` 使用单段 audio clip + source/CN 文本 + video title 调 Gemini multimodal。
+- 入口是 `POST /jobs/{id}/segments/{sid}/suggest-split`，前端按钮为“智能识别说话人切点”。
+- per-segment cap = 1，per-job cap = `MAX(MIN(0.2 × N, anomaly_count), 5)`；前端通过 `GET /suggest-split-quota` 显示剩余额度。
+- LLM 返回 `at_text`，后端再精确映射到 `source_index`，无法定位时降级为 `needs_split=false`。
+- 该能力不自动 fallback、不批量调用、不从异常兜底路径触发。
+
+结论：智能切点是显式用户操作，不是后台自动修复。
+
+### 3.7 batch re-TTS 只扫 dirty segment
 
 - `src/services/jobs/editing_batch.py` 扫描 `segment_status.json`。
 - 触发状态是 `text_dirty / voice_dirty / tts_failed`。
@@ -108,7 +149,7 @@ graph TD
 
 结论：批量重合成是用户编辑后的显式处理面，不会自动覆盖用户尚未接受的 draft。
 
-### 3.5 preview-source cache 继续作为独立回放侧路
+### 3.8 preview-source cache 继续作为独立回放侧路
 
 - `POST /jobs/{jobId}/segments/{segmentId}/preview-source`
 - `GET /job-api/jobs/{jobId}/segments/{segmentId}/preview-source-audio`
@@ -116,7 +157,7 @@ graph TD
 
 结论：编辑页继续区分“试听 draft TTS”和“回放原始分段音频”。
 
-### 3.6 commit 仍然有 text/audio sync hard gate
+### 3.9 commit 仍然有 text/audio sync hard gate
 
 - `_find_text_edits_without_tts(project_dir)` 检测文本改动但没有重新合成音频的 segment。
 - 命中时抛 `EditingAudioSyncRequiredError`。
@@ -124,7 +165,7 @@ graph TD
 
 结论：post-edit text/audio sync 是提交硬约束。
 
-### 3.7 overwrite 仍会主动退休旧交付物身份
+### 3.10 overwrite 仍会主动退休旧交付物身份
 
 - overwrite 会清空旧 `jianying_draft_attempt_id / substep / fingerprint`。
 - 网关侧会调用 `invalidate_materials_pack_for_job(...)`。
@@ -132,7 +173,7 @@ graph TD
 
 结论：post-edit 后旧草稿、旧打包物、旧 R2 generation 都被视作 stale。
 
-### 3.8 post-edit re-synthesis 有单独 usage bucket
+### 3.11 post-edit re-synthesis 有单独 usage bucket
 
 - `UsageMeter` 增加 `TTS_BUCKET_POST_EDIT_RESYNTH`。
 - post-edit 单段或批量重合成可以与主流程 TTS 分开统计 provider/model、字符数、调用次数和失败。
@@ -150,10 +191,25 @@ graph TD
 - `frontend-next/src/app/(app)/projects/page.tsx`
   - Studio/Smart edit eligibility
 - `frontend-next/src/app/(app)/workspace/[jobId]/edit/VoiceModifyTab.tsx`
-  - Voice modify reuse / clone entry
+  - Voice modify candidate-first reuse / clone entry
+- `frontend-next/src/app/(app)/workspace/[jobId]/edit/SplitSegmentDialog.tsx`
+  - multi-cut split UI
+  - explicit LLM suggest-split button
+- `frontend-next/src/components/workspace/edit/SegmentRow.tsx`
+  - right-side segment row
+- `frontend-next/src/components/workspace/edit/CurrentSegmentOpsPanel.tsx`
+  - active segment operation panel
 - `frontend-next/src/components/workspace/VoiceSelectionPanel.tsx`
   - shared `VoiceCloneModal`
   - shared `SpeakerAudioAuditModal`
+- `frontend-next/src/lib/api/editing.ts`
+  - suggest-split API
+  - split-many API
+- `src/services/jobs/editing_segments.py`
+  - `split_editing_segment_many`
+  - split journal reconcile
+- `src/services/jobs/editing_split_suggest.py`
+  - LLM-backed split suggestion
 - `src/services/jobs/editing_batch.py`
   - dirty segment batch regenerate
 - `src/services/jobs/editing_speakers.py`
@@ -172,6 +228,8 @@ graph TD
 - 想改 Smart job 是否能进入 editing
 - 想改项目列表是否展示“修改”入口
 - 想改 editing 中音色复用、clone、审听入口
+- 想改编辑页布局、段落行、左侧当前段操作面
+- 想改 split-many、智能切点、切点拖动或 source/cn index 规则
 - 想改批量 re-TTS 或 segment status
 - 想改 editing speakers 创建、profile 推断、retry-profile
 - 想判断为什么某次 commit 报 `editing_audio_sync_required`
