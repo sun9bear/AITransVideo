@@ -585,9 +585,11 @@ def test_r2_artifacts_deleted_after_commit(monkeypatch, tmp_path):
     run_async(_go())
 
 
-def test_r2_delete_failure_does_not_block_archived(monkeypatch, tmp_path):
-    """Plan §7 step k: post-commit R2 failure → log, continue. Job still
-    flips to 'archived'."""
+def test_r2_delete_failure_keeps_archiving_for_retry(monkeypatch, tmp_path):
+    """CodeX P0-3: post-commit R2 failure → log + leave Job at 'archiving'
+    + r2_artifacts INTACT. The old behavior (set status='archived' anyway
+    + clear r2_artifacts) destroyed the link residue_cleanup needs to
+    find the orphan R2 keys."""
     from models import Job
 
     setup_pan_token_env(monkeypatch)
@@ -600,18 +602,19 @@ def test_r2_delete_failure_does_not_block_archived(monkeypatch, tmp_path):
     async def _go():
         async with pan_test_engine() as engine:
             project = make_project_dir(tmp_path, job_id=job_id)
+            r2_artifacts = [
+                {'artifact_key': 'publish.dubbed_video',
+                 'r2_key': 'jobs/x/v.mp4'},
+            ]
             await insert_sample_job(
                 engine, user_id=user_id, job_id=job_id,
                 project_dir=str(project),
-                r2_artifacts=[
-                    {'artifact_key': 'publish.dubbed_video',
-                     'r2_key': 'jobs/x/v.mp4'},
-                ],
+                r2_artifacts=r2_artifacts,
             )
             await insert_sample_pan_credentials(engine, user_id=user_id)
 
             client = FakeBaiduPanClient()
-            # Should NOT raise even with R2 failure.
+            # Should NOT raise (failure is post-commit, log+continue).
             await _run_executor(
                 {'job_id': job_id, 'user_id': str(user_id)},
                 engine=engine, client=client,
@@ -619,10 +622,68 @@ def test_r2_delete_failure_does_not_block_archived(monkeypatch, tmp_path):
             )
 
             async with engine.connect() as conn:
-                status = (await conn.execute(
-                    select(Job.status).where(Job.job_id == job_id)
-                )).scalar_one()
-            assert status == 'archived'
+                row = (await conn.execute(
+                    select(Job.status, Job.r2_artifacts)
+                    .where(Job.job_id == job_id)
+                )).one()
+            # Status stays 'archiving' for residue_cleanup retry.
+            assert row.status == 'archiving'
+            # r2_artifacts INTACT — residue_cleanup needs this to find the
+            # orphan R2 keys.
+            artifacts_out = row.r2_artifacts
+            if isinstance(artifacts_out, str):
+                import json as _json
+                artifacts_out = _json.loads(artifacts_out)
+            assert artifacts_out == r2_artifacts
+
+    run_async(_go())
+
+
+def test_rmtree_failure_keeps_archiving_for_retry(monkeypatch, tmp_path):
+    """CodeX P0-3: post-commit rmtree failure → log + leave Job at 'archiving'.
+    Same rationale: residue_cleanup needs the chance to retry."""
+    from models import Job
+
+    setup_pan_token_env(monkeypatch)
+    user_id = uuid.uuid4()
+    job_id = 'job_rmtree_fail'
+
+    def failing_rmtree(path) -> None:
+        raise OSError('synthetic permission denied')
+
+    async def _go():
+        async with pan_test_engine() as engine:
+            project = make_project_dir(tmp_path, job_id=job_id)
+            await insert_sample_job(
+                engine, user_id=user_id, job_id=job_id,
+                project_dir=str(project),
+                r2_artifacts=[{'r2_key': 'k1'}],
+            )
+            await insert_sample_pan_credentials(engine, user_id=user_id)
+
+            client = FakeBaiduPanClient()
+            await _run_executor(
+                {'job_id': job_id, 'user_id': str(user_id)},
+                engine=engine, client=client,
+                rmtree_fn=failing_rmtree,
+            )
+
+            async with engine.connect() as conn:
+                row = (await conn.execute(
+                    select(Job.status, Job.r2_artifacts)
+                    .where(Job.job_id == job_id)
+                )).one()
+            assert row.status == 'archiving'
+            # r2_artifacts intact (we never even got to step k because
+            # we don't bail — but step l doesn't run because rmtree failed).
+            # Actually step k DOES still run after rmtree fails. But the
+            # FakeBaiduPanClient default r2_delete_fn is _noop_r2_delete,
+            # so it succeeded. Only rmtree failed → status stays archiving.
+            artifacts_out = row.r2_artifacts
+            if isinstance(artifacts_out, str):
+                import json as _json
+                artifacts_out = _json.loads(artifacts_out)
+            assert artifacts_out == [{'r2_key': 'k1'}]
 
     run_async(_go())
 

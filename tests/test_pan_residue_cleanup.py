@@ -270,9 +270,10 @@ def test_cleanup_is_idempotent(monkeypatch, tmp_path):
 # =========================================================================
 
 
-def test_cleanup_tolerates_rmtree_failure(monkeypatch, tmp_path):
-    """rmtree exception → log, continue. Job still flips to 'archived'
-    even if local residue couldn't be cleared — next pass retries."""
+def test_cleanup_rmtree_failure_keeps_archiving_for_next_pass(monkeypatch, tmp_path):
+    """CodeX P0-3: rmtree failure → log + leave Job at 'archiving' +
+    r2_artifacts INTACT. Old behavior (set 'archived' anyway) destroyed
+    the link the next stale_reaper pass needs."""
     from models import Job
 
     setup_pan_token_env(monkeypatch)
@@ -288,6 +289,7 @@ def test_cleanup_tolerates_rmtree_failure(monkeypatch, tmp_path):
             await insert_sample_job(
                 engine, user_id=user_id, job_id=job_id,
                 status='archiving', project_dir=str(project),
+                r2_artifacts=[{'r2_key': 'jobs/x/k.mp4'}],
             )
             await insert_sample_backup_record(
                 engine, user_id=user_id, job_id=job_id, status='uploaded',
@@ -299,16 +301,25 @@ def test_cleanup_tolerates_rmtree_failure(monkeypatch, tmp_path):
             )
 
             async with engine.connect() as conn:
-                status = (await conn.execute(
-                    select(Job.status).where(Job.job_id == job_id)
-                )).scalar_one()
-            assert status == 'archived'
+                row = (await conn.execute(
+                    select(Job.status, Job.r2_artifacts)
+                    .where(Job.job_id == job_id)
+                )).one()
+            assert row.status == 'archiving'
+            # r2_artifacts MUST stay intact so we can find the keys
+            # on the next pass.
+            artifacts_out = row.r2_artifacts
+            if isinstance(artifacts_out, str):
+                import json as _json
+                artifacts_out = _json.loads(artifacts_out)
+            assert artifacts_out == [{'r2_key': 'jobs/x/k.mp4'}]
 
     run_async(_go())
 
 
-def test_cleanup_tolerates_r2_delete_failure(monkeypatch, tmp_path):
-    """R2 delete failure → log + continue. Some keys may succeed, others fail."""
+def test_cleanup_r2_delete_failure_keeps_archiving_for_next_pass(monkeypatch, tmp_path):
+    """CodeX P0-3: partial R2 delete failure → log + leave at 'archiving'
+    so next pass retries the failed keys."""
     from models import Job
 
     setup_pan_token_env(monkeypatch)
@@ -324,13 +335,14 @@ def test_cleanup_tolerates_r2_delete_failure(monkeypatch, tmp_path):
     async def _go():
         async with pan_test_engine() as engine:
             project = make_project_dir(tmp_path, job_id=job_id)
+            r2_artifacts = [
+                {'r2_key': 'jobs/x/ok.mp4'},
+                {'r2_key': 'jobs/x/fail.mp4'},
+            ]
             await insert_sample_job(
                 engine, user_id=user_id, job_id=job_id,
                 status='archiving', project_dir=str(project),
-                r2_artifacts=[
-                    {'r2_key': 'jobs/x/ok.mp4'},
-                    {'r2_key': 'jobs/x/fail.mp4'},
-                ],
+                r2_artifacts=r2_artifacts,
             )
             await insert_sample_backup_record(
                 engine, user_id=user_id, job_id=job_id, status='uploaded',
@@ -342,10 +354,19 @@ def test_cleanup_tolerates_r2_delete_failure(monkeypatch, tmp_path):
             )
 
             async with engine.connect() as conn:
-                status = (await conn.execute(
-                    select(Job.status).where(Job.job_id == job_id)
-                )).scalar_one()
-            assert status == 'archived'
+                row = (await conn.execute(
+                    select(Job.status, Job.r2_artifacts)
+                    .where(Job.job_id == job_id)
+                )).one()
+            assert row.status == 'archiving'
+            # Critical: r2_artifacts still has ALL entries (including the
+            # one that succeeded) so next pass tries them again. R2 delete
+            # is idempotent, so retrying the already-deleted one is OK.
+            artifacts_out = row.r2_artifacts
+            if isinstance(artifacts_out, str):
+                import json as _json
+                artifacts_out = _json.loads(artifacts_out)
+            assert artifacts_out == r2_artifacts
 
     run_async(_go())
 

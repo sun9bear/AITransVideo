@@ -310,16 +310,20 @@ async def _execute_pan_backup_impl(
                 # cleanup will pick up any residual project_dir / R2 / Job
                 # state and reconcile.
 
-                # --- Step j: rmtree project_dir (post-commit) ---
+                # --- Step j: rmtree project_dir (post-commit, tracked) ---
+                rmtree_ok = True
                 try:
                     await asyncio.to_thread(rmtree_fn, project_dir)
                 except Exception as exc:  # noqa: BLE001
+                    rmtree_ok = False
                     logger.warning(
-                        "pan_backup rmtree failed (residue): job=%s path=%s err=%s",
+                        "pan_backup rmtree failed: job=%s path=%s err=%s — "
+                        "leaving Job at 'archiving' for residue_cleanup retry",
                         job_id, project_dir, exc,
                     )
 
-                # --- Step k: delete R2 artifacts (post-commit) ---
+                # --- Step k: delete R2 artifacts (post-commit, tracked) ---
+                r2_failures: list[str] = []
                 for artifact in r2_artifacts:
                     r2_key = artifact.get('r2_key') if isinstance(artifact, dict) else None
                     if not r2_key:
@@ -327,27 +331,44 @@ async def _execute_pan_backup_impl(
                     try:
                         await asyncio.to_thread(r2_delete_fn, r2_key)
                     except Exception as exc:  # noqa: BLE001
+                        r2_failures.append(r2_key)
                         logger.warning(
-                            "pan_backup R2 delete failed (residue): job=%s "
-                            "r2_key=%s err=%s",
-                            job_id, r2_key, exc,
+                            "pan_backup R2 delete failed: job=%s r2_key=%s "
+                            "err=%s — leaving Job at 'archiving' for residue "
+                            "cleanup retry", job_id, r2_key, exc,
                         )
 
-                # --- Step l: Job.status='archived' + clear r2_artifacts ---
-                try:
-                    async with conn.begin():
-                        await set_archive_status(
-                            user_id, job_id, 'archived', conn=conn,
+                # --- Step l: Job.status='archived' (CONDITIONAL on cleanup OK) ---
+                # CodeX P0-3: only finalize if both rmtree + all R2 deletes
+                # succeeded. Otherwise Job stays at 'archiving' and
+                # r2_artifacts intact — residue_cleanup picks it up later.
+                # Finalizing with residue would (a) clear r2_artifacts and
+                # destroy our way to find the orphan keys, (b) make
+                # residue_cleanup think the job is done.
+                if rmtree_ok and not r2_failures:
+                    try:
+                        async with conn.begin():
+                            await set_archive_status(
+                                user_id, job_id, 'archived', conn=conn,
+                            )
+                            await conn.execute(
+                                update(Job)
+                                .where(
+                                    Job.user_id == user_id,
+                                    Job.job_id == job_id,
+                                )
+                                .values(r2_artifacts=None)
+                            )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "pan_backup status='archived' write failed: "
+                            "job=%s err=%s", job_id, exc,
                         )
-                        await conn.execute(
-                            update(Job)
-                            .where(Job.user_id == user_id, Job.job_id == job_id)
-                            .values(r2_artifacts=None)
-                        )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "pan_backup status='archived' write failed: job=%s err=%s",
-                        job_id, exc,
+                else:
+                    logger.info(
+                        "pan_backup not finalizing job=%s: rmtree_ok=%s "
+                        "r2_failures=%s — residue_cleanup will retry",
+                        job_id, rmtree_ok, r2_failures,
                     )
 
             except Exception:

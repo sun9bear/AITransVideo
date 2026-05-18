@@ -137,20 +137,23 @@ async def _execute_pan_residue_cleanup_impl(
                 project_dir_str = job_row.project_dir
                 r2_artifacts = job_row.r2_artifacts or []
 
-            # --- idempotent rmtree (best effort) ---
+            # --- idempotent rmtree (best effort, tracked) ---
+            rmtree_ok = True
             if project_dir_str:
                 project_dir = Path(project_dir_str)
                 if project_dir.exists():
                     try:
                         await asyncio.to_thread(rmtree_fn, project_dir)
                     except Exception as exc:  # noqa: BLE001
+                        rmtree_ok = False
                         logger.warning(
                             "pan_residue_cleanup rmtree failed job=%s path=%s "
-                            "err=%s — leaving residue for next pass",
+                            "err=%s — leaving for next pass",
                             job_id, project_dir, exc,
                         )
 
-            # --- idempotent R2 delete ---
+            # --- idempotent R2 delete (tracked) ---
+            r2_failures: list[str] = []
             for artifact in r2_artifacts:
                 r2_key = artifact.get('r2_key') if isinstance(artifact, dict) else None
                 if not r2_key:
@@ -158,32 +161,47 @@ async def _execute_pan_residue_cleanup_impl(
                 try:
                     await asyncio.to_thread(r2_delete_fn, r2_key)
                 except Exception as exc:  # noqa: BLE001
+                    r2_failures.append(r2_key)
                     logger.warning(
                         "pan_residue_cleanup R2 delete failed job=%s key=%s "
-                        "err=%s — leaving residue for next pass",
+                        "err=%s — leaving for next pass",
                         job_id, r2_key, exc,
                     )
 
-            # --- finalize Job.status='archived' + clear r2_artifacts ---
-            try:
-                async with conn.begin():
-                    await set_archive_status(
-                        user_id, job_id, 'archived', conn=conn,
+            # --- finalize (CONDITIONAL on cleanup OK) ---
+            # CodeX P0-3: only finalize if both rmtree + all R2 deletes
+            # succeeded. Otherwise Job stays at 'archiving' and r2_artifacts
+            # remains intact for the next stale_reaper pass. Finalizing
+            # with residue would destroy our way to find orphan R2 keys.
+            if rmtree_ok and not r2_failures:
+                try:
+                    async with conn.begin():
+                        await set_archive_status(
+                            user_id, job_id, 'archived', conn=conn,
+                        )
+                        await conn.execute(
+                            update(Job)
+                            .where(
+                                Job.user_id == user_id,
+                                Job.job_id == job_id,
+                            )
+                            .values(r2_artifacts=None)
+                        )
+                    logger.info(
+                        "pan_residue_cleanup: forward-resolved job=%s to 'archived'",
+                        job_id,
                     )
-                    await conn.execute(
-                        update(Job)
-                        .where(Job.user_id == user_id, Job.job_id == job_id)
-                        .values(r2_artifacts=None)
+                except Exception as exc:  # noqa: BLE001
+                    logger.error(
+                        "pan_residue_cleanup: finalize status='archived' "
+                        "failed job=%s err=%s — will retry on next pass",
+                        job_id, exc,
                     )
+            else:
                 logger.info(
-                    "pan_residue_cleanup: forward-resolved job=%s to 'archived'",
-                    job_id,
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "pan_residue_cleanup: finalize status='archived' failed "
-                    "job=%s err=%s — will retry on next stale_reaper pass",
-                    job_id, exc,
+                    "pan_residue_cleanup: not finalizing job=%s — rmtree_ok=%s "
+                    "r2_failures=%s — next stale_reaper pass will retry",
+                    job_id, rmtree_ok, r2_failures,
                 )
 
         finally:
