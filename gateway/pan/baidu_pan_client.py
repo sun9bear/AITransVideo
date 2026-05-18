@@ -73,4 +73,28 @@ class BaiduPanClient:
         }
 
     def refresh(self, refresh_token: str) -> dict:
-        raise NotImplementedError("T3.3")
+        """Refresh access_token. Baidu **rotates refresh_token on every call**;
+        caller MUST persist the new refresh_token from response.
+
+        Plan §9 step 3-4.
+        """
+        resp = requests.post(
+            f"{self.OAUTH_BASE}/token",
+            data={
+                'grant_type': 'refresh_token',
+                'refresh_token': refresh_token,
+                'client_id': self.appkey,
+                'client_secret': self.appsecret,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        if 'error' in body:
+            raise RuntimeError(f"Baidu OAuth refresh failed: {body}")
+        return {
+            'access_token': body['access_token'],
+            'refresh_token': body['refresh_token'],
+            'expires_in': body['expires_in'],
+            'scope': body.get('scope', ''),
+        }
