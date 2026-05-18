@@ -50,9 +50,16 @@ DELEGATE_RMTREE_TO_GATEWAY = (
 # that the two mechanisms don't race.
 # Mirrors src/services/jobs/models.ACTIVE_JOB_STATUSES minus the expected
 # no-worker-is-fine distinction of ``waiting_for_review`` — we skip both.
-_CLEANUP_PROTECTED_STATUSES = frozenset(
-    {"queued", "running", "waiting_for_review", "editing"}
-)
+_CLEANUP_PROTECTED_STATUSES = frozenset({
+    "queued",
+    "running",
+    "waiting_for_review",
+    "editing",
+    # Pan backup transient states (plan 2026-05-14 Task 1.4). archived NOT here:
+    # by time job is archived, backup_executor already removed project_dir.
+    "archiving",
+    "restoring",
+})
 
 # 2026-04-21 regression guard: the original code did a bare
 # ``shutil.rmtree(Path(project_dir))`` with no path validation, which
