@@ -120,11 +120,15 @@ async def _execute_pan_backup_impl(
     from gateway.pan.status_mutator import set_archive_status
     from gateway.pan.token_crypto import decrypt_token
 
+    from gateway.pan._lock_keys import pan_lock_key
+
     job_id: str = payload['job_id']
     user_id: _uuid.UUID = _uuid.UUID(payload['user_id'])
     provider: str = payload.get('provider', 'baidu_pan')
-    # 64-bit signed positive integer for pg_advisory_lock argument.
-    lock_key = hash((str(user_id), job_id)) & 0x7FFFFFFFFFFFFFFF
+    # Stable cross-process lock key (CodeX P0-1) — Python builtin hash()
+    # was randomized per process so multi-worker Gateway couldn't share
+    # the advisory lock.
+    lock_key = pan_lock_key(user_id, job_id)
 
     # === Single-connection long-hold ===
     async with engine.connect() as conn:

@@ -80,9 +80,11 @@ async def _execute_pan_residue_cleanup_impl(
     from models import Job, BackupRecord
     from gateway.pan.status_mutator import set_archive_status
 
+    from gateway.pan._lock_keys import pan_lock_key
+
     job_id: str = payload['job_id']
     user_id: _uuid.UUID = _uuid.UUID(payload['user_id'])
-    lock_key = hash((str(user_id), job_id)) & 0x7FFFFFFFFFFFFFFF
+    lock_key = pan_lock_key(user_id, job_id)  # stable across processes (CodeX P0-1)
 
     async with engine.connect() as conn:
         got_lock = await _try_advisory_lock(conn, lock_key)

@@ -111,10 +111,12 @@ async def _execute_pan_restore_impl(
         _release_advisory_lock,
     )
 
+    from gateway.pan._lock_keys import pan_lock_key
+
     job_id: str = payload['job_id']
     user_id: _uuid.UUID = _uuid.UUID(payload['user_id'])
     provider: str = payload.get('provider', 'baidu_pan')
-    lock_key = hash((str(user_id), job_id)) & 0x7FFFFFFFFFFFFFFF
+    lock_key = pan_lock_key(user_id, job_id)  # stable across processes (CodeX P0-1)
 
     async with engine.connect() as conn:
         # --- precondition ---
