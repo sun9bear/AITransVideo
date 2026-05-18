@@ -237,7 +237,16 @@ class BaiduPanClient:
         ]
 
     def delete(self, remote_path: str, *, access_token: str) -> None:
-        """Delete a single file. Idempotent: 404-like errno -9 = no-op success."""
+        """Delete a single file. Idempotent: errno -9 (file not found) at
+        either top level OR per-file `info[]` → no-op success.
+
+        Baidu filemanager has two-layer error reporting:
+          - top-level errno: API-level (auth, malformed request, etc.)
+          - info[].errno: per-file (file not found, locked, permission, etc.)
+        Both must be checked: top-level=0 with info[0].errno=-7 means the
+        file was NOT deleted, but a top-level-only check would think it was.
+        That would leave orphan files in user pan while DB marks "deleted".
+        """
         resp = requests.post(
             f"{self.XPAN_BASE}/file",
             params={'method': 'filemanager', 'access_token': access_token, 'opera': 'delete'},
@@ -246,8 +255,16 @@ class BaiduPanClient:
         )
         resp.raise_for_status()
         body = resp.json()
-        if body.get('errno', 0) not in (0, -9):
-            raise RuntimeError(f"Baidu delete failed: {body}")
+        top_errno = body.get('errno', 0)
+        if top_errno not in (0, -9):
+            raise RuntimeError(f"Baidu delete failed (top errno={top_errno}): {body}")
+        # Per-file info[] check — Baidu may return top=0 with per-file failure.
+        for entry in (body.get('info') or []):
+            per_errno = entry.get('errno', 0)
+            if per_errno not in (0, -9):
+                raise RuntimeError(
+                    f"Baidu delete failed (per-file errno={per_errno}): {body}"
+                )
 
     def get_quota(self, *, access_token: str) -> dict:
         resp = requests.get(

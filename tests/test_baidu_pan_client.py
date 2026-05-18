@@ -431,6 +431,62 @@ def test_delete_raises_on_other_errno(monkeypatch):
         c.delete('/bad', access_token='at')
 
 
+def test_delete_raises_on_per_file_errno(monkeypatch):
+    """top errno=0 but info[0].errno=-7 must still raise — would otherwise
+    leave orphan remote files while DB marks deleted (CodeX P1)."""
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+    import requests
+
+    def mock_post(url, params=None, data=None, **kw):
+        class R:
+            status_code = 200
+
+            def json(self):
+                return {
+                    'errno': 0,  # 顶层报"全成功"
+                    'info': [{
+                        'path': '/apps/AIVideoTrans/backups/locked.tar.gz',
+                        'errno': -7,  # 单文件失败:权限/路径问题
+                    }],
+                }
+
+            def raise_for_status(self):
+                pass
+
+        return R()
+
+    monkeypatch.setattr(requests, 'post', mock_post)
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    with pytest.raises(RuntimeError, match='per-file errno|=-7'):
+        c.delete('/apps/AIVideoTrans/backups/locked.tar.gz', access_token='at')
+
+
+def test_delete_idempotent_on_per_file_minus_9(monkeypatch):
+    """top errno=0 + info[0].errno=-9 (file not found) is also idempotent success."""
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+    import requests
+
+    def mock_post(url, params=None, data=None, **kw):
+        class R:
+            status_code = 200
+
+            def json(self):
+                return {
+                    'errno': 0,
+                    'info': [{'path': '/x.tar.gz', 'errno': -9}],
+                }
+
+            def raise_for_status(self):
+                pass
+
+        return R()
+
+    monkeypatch.setattr(requests, 'post', mock_post)
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    # 不抛
+    c.delete('/x.tar.gz', access_token='at')
+
+
 # --- T3.6: chunked upload ---
 
 
