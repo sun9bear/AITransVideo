@@ -4,6 +4,8 @@ Plan 2026-05-14 Phase 3. All tests mock requests — no real Baidu calls.
 """
 from __future__ import annotations
 
+import json as _json
+
 import pytest
 
 
@@ -427,3 +429,248 @@ def test_delete_raises_on_other_errno(monkeypatch):
     c = BaiduPanClient(appkey='ak', appsecret='as')
     with pytest.raises(RuntimeError, match='Baidu delete failed|-7'):
         c.delete('/bad', access_token='at')
+
+
+# --- T3.6: chunked upload ---
+
+
+def _make_upload_mocker(monkeypatch, expected_size: int):
+    """Helper: install requests.post mock that handles precreate / chunk / finalize.
+
+    Returns (requests_made list, restore-noop). Reuses mock pattern from plan T3.6.
+    """
+    import requests
+
+    requests_made = []
+
+    def mock_post(url, **kw):
+        params = kw.get('params') or {}
+        method = params.get('method', '')
+        requests_made.append({
+            'url': url,
+            'params': params,
+            'data': kw.get('data'),
+            'files': kw.get('files'),
+        })
+
+        class R:
+            status_code = 200
+
+            def __init__(self, body):
+                self._body = body
+
+            def json(self):
+                return self._body
+
+            def raise_for_status(self):
+                pass
+
+        if method == 'precreate':
+            return R({'errno': 0, 'uploadid': 'upload_abc'})
+        if 'pcs.baidu.com' in url:
+            return R({'errno': 0, 'md5': f"chunk_md5_{params.get('partseq', 0)}"})
+        if method == 'create':
+            return R({
+                'errno': 0,
+                'fs_id': 12345,
+                'size': expected_size,
+                'md5': 'final_full_md5',
+            })
+        return R({'errno': 0})
+
+    monkeypatch.setattr(requests, 'post', mock_post)
+    return requests_made
+
+
+def test_upload_full_flow_5mb_two_chunks(monkeypatch, tmp_path):
+    """5MB file with 4MB chunk size → 2 chunks (4MB + 1MB) + precreate + finalize."""
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+
+    test_file = tmp_path / 'test.tar.gz'
+    test_file.write_bytes(b'A' * (5 * 1024 * 1024))
+
+    requests_made = _make_upload_mocker(monkeypatch, expected_size=5 * 1024 * 1024)
+
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    result = c.upload(test_file, '/apps/AIVideoTrans/backups/test.tar.gz', access_token='at')
+
+    assert result['size'] == 5 * 1024 * 1024
+    assert result['md5'] == 'final_full_md5'
+    assert result['fs_id'] == 12345
+
+    # Verify three-phase orchestration: precreate + N chunks + finalize.
+    precreate_calls = [r for r in requests_made if (r['params'].get('method') == 'precreate')]
+    chunk_calls = [r for r in requests_made if 'pcs.baidu.com' in r['url']]
+    finalize_calls = [r for r in requests_made if (r['params'].get('method') == 'create')]
+
+    assert len(precreate_calls) == 1
+    assert len(chunk_calls) == 2  # 5MB / 4MB chunks = 2
+    assert len(finalize_calls) == 1
+
+    # block_list (per-chunk md5s) must be propagated to precreate AND finalize.
+    pre_block = _json.loads(precreate_calls[0]['data']['block_list'])
+    fin_block = _json.loads(finalize_calls[0]['data']['block_list'])
+    assert pre_block == fin_block
+    assert len(pre_block) == 2  # 2 md5s, one per chunk
+    # Each md5 is a 32-hex-char string.
+    for md5 in pre_block:
+        assert len(md5) == 32
+
+    # partseq must be sequential 0, 1.
+    partseqs = sorted([r['params']['partseq'] for r in chunk_calls])
+    assert partseqs == [0, 1]
+
+
+def test_upload_single_chunk_for_small_file(monkeypatch, tmp_path):
+    """File smaller than chunk size → 1 chunk."""
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+
+    test_file = tmp_path / 'small.tar.gz'
+    test_file.write_bytes(b'X' * (100 * 1024))  # 100 KB
+
+    requests_made = _make_upload_mocker(monkeypatch, expected_size=100 * 1024)
+
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    result = c.upload(test_file, '/apps/AIVideoTrans/small.tar.gz', access_token='at')
+    assert result['size'] == 100 * 1024
+
+    chunk_calls = [r for r in requests_made if 'pcs.baidu.com' in r['url']]
+    assert len(chunk_calls) == 1
+
+
+def test_upload_precreate_failure_propagates(monkeypatch, tmp_path):
+    """If precreate returns errno != 0 → RuntimeError, no chunk uploads attempted."""
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+    import requests
+
+    chunk_attempts = []
+
+    def mock_post(url, **kw):
+        params = kw.get('params') or {}
+        if params.get('method') == 'precreate':
+            class R:
+                status_code = 200
+
+                def json(self):
+                    return {'errno': 31203, 'errmsg': 'quota exhausted'}
+
+                def raise_for_status(self):
+                    pass
+            return R()
+        if 'pcs.baidu.com' in url:
+            chunk_attempts.append(params.get('partseq'))
+
+        class Empty:
+            status_code = 200
+
+            def json(self):
+                return {'errno': 0}
+
+            def raise_for_status(self):
+                pass
+        return Empty()
+
+    monkeypatch.setattr(requests, 'post', mock_post)
+    test_file = tmp_path / 'f.tar.gz'
+    test_file.write_bytes(b'X' * 1024)
+
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    with pytest.raises(RuntimeError, match='Baidu precreate|31203|quota'):
+        c.upload(test_file, '/x.tar.gz', access_token='at')
+    # 关键:precreate 失败后没尝试上传 chunk
+    assert chunk_attempts == []
+
+
+def test_upload_chunk_missing_md5_raises(monkeypatch, tmp_path):
+    """If chunk PUT response missing 'md5', upload raises (data integrity).
+    """
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+    import requests
+
+    def mock_post(url, **kw):
+        params = kw.get('params') or {}
+        method = params.get('method', '')
+
+        class R:
+            status_code = 200
+
+            def __init__(self, body):
+                self._body = body
+
+            def json(self):
+                return self._body
+
+            def raise_for_status(self):
+                pass
+
+        if method == 'precreate':
+            return R({'errno': 0, 'uploadid': 'u1'})
+        if 'pcs.baidu.com' in url:
+            return R({'errno': 0})  # missing md5
+        return R({'errno': 0, 'fs_id': 1, 'size': 0, 'md5': ''})
+
+    monkeypatch.setattr(requests, 'post', mock_post)
+    test_file = tmp_path / 'f.tar.gz'
+    test_file.write_bytes(b'X' * 1024)
+
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    with pytest.raises(RuntimeError, match='chunk PUT failed|no md5'):
+        c.upload(test_file, '/x.tar.gz', access_token='at')
+
+
+def test_upload_finalize_failure_raises(monkeypatch, tmp_path):
+    """Finalize errno != 0 → RuntimeError."""
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+    import requests
+
+    def mock_post(url, **kw):
+        params = kw.get('params') or {}
+        method = params.get('method', '')
+
+        class R:
+            status_code = 200
+
+            def __init__(self, body):
+                self._body = body
+
+            def json(self):
+                return self._body
+
+            def raise_for_status(self):
+                pass
+
+        if method == 'precreate':
+            return R({'errno': 0, 'uploadid': 'u1'})
+        if 'pcs.baidu.com' in url:
+            return R({'errno': 0, 'md5': 'cm'})
+        if method == 'create':
+            return R({'errno': 31363, 'errmsg': 'block list inconsistent'})
+        return R({'errno': 0})
+
+    monkeypatch.setattr(requests, 'post', mock_post)
+    test_file = tmp_path / 'f.tar.gz'
+    test_file.write_bytes(b'X' * 1024)
+
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    with pytest.raises(RuntimeError, match='Baidu finalize|31363'):
+        c.upload(test_file, '/x.tar.gz', access_token='at')
+
+
+def test_compute_chunk_md5s_deterministic(tmp_path):
+    """Sanity: md5 list + file md5 are computed correctly for known input."""
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+
+    test_file = tmp_path / 'known.bin'
+    payload = b'A' * (4 * 1024 * 1024) + b'B' * 1024
+    test_file.write_bytes(payload)
+
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    chunk_md5s, file_md5 = c._compute_chunk_md5s(test_file, 4 * 1024 * 1024)
+
+    import hashlib as _h
+    expected_chunk0 = _h.md5(b'A' * (4 * 1024 * 1024)).hexdigest()
+    expected_chunk1 = _h.md5(b'B' * 1024).hexdigest()
+    expected_file = _h.md5(payload).hexdigest()
+
+    assert chunk_md5s == [expected_chunk0, expected_chunk1]
+    assert file_md5 == expected_file

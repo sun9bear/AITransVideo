@@ -10,8 +10,10 @@ Reference: https://pan.baidu.com/union/document
 """
 from __future__ import annotations
 
+import hashlib
 import json as _json
 from pathlib import Path
+from typing import Iterator
 
 import requests
 
@@ -29,9 +31,115 @@ class BaiduPanClient:
         self.appkey = appkey
         self.appsecret = appsecret
 
-    # --- placeholder methods, filled in by 后续 task ---
+    # --- T3.6: chunked upload internals ---
+    def _chunk_file(self, path: Path, chunk_bytes: int) -> Iterator[tuple[int, bytes]]:
+        """Yield (index, chunk_bytes_blob) pairs."""
+        with path.open('rb') as f:
+            idx = 0
+            while True:
+                chunk = f.read(chunk_bytes)
+                if not chunk:
+                    break
+                yield idx, chunk
+                idx += 1
+
+    def _compute_chunk_md5s(self, path: Path, chunk_bytes: int) -> tuple[list[str], str]:
+        """Returns (per-chunk md5s, file-level md5). Walks file twice for clarity."""
+        chunk_md5s = []
+        for _, chunk in self._chunk_file(path, chunk_bytes):
+            chunk_md5s.append(hashlib.md5(chunk).hexdigest())
+
+        file_md5 = hashlib.md5()
+        with path.open('rb') as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b''):
+                file_md5.update(chunk)
+        return chunk_md5s, file_md5.hexdigest()
+
+    def _precreate(self, remote_path: str, size: int, chunk_md5s: list[str], access_token: str) -> str:
+        """Declare upload intent. Returns uploadid."""
+        resp = requests.post(
+            f"{self.XPAN_BASE}/file",
+            params={'method': 'precreate', 'access_token': access_token},
+            data={
+                'path': remote_path,
+                'size': size,
+                'isdir': 0,
+                'autoinit': 1,
+                'block_list': _json.dumps(chunk_md5s),
+                'rtype': 3,  # 3 = 覆盖同名
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        if body.get('errno', 0) != 0:
+            raise RuntimeError(f"Baidu precreate failed: {body}")
+        return body['uploadid']
+
+    def _upload_chunk(self, path: Path, chunk_idx: int, chunk_data: bytes,
+                      remote_path: str, uploadid: str, access_token: str) -> None:
+        """PUT one 4MB chunk via superfile2.
+
+        `path` retained in signature for future use (e.g. retry-by-offset reads);
+        currently unused — chunk bytes are passed directly to avoid double-reading.
+        """
+        del path  # silence linters
+        resp = requests.post(
+            f"{self.PCS_BASE}/superfile2",
+            params={
+                'method': 'upload',
+                'access_token': access_token,
+                'type': 'tmpfile',
+                'path': remote_path,
+                'uploadid': uploadid,
+                'partseq': chunk_idx,
+            },
+            files={'file': chunk_data},
+            timeout=300,  # 大 chunk 跨境慢
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        if 'md5' not in body:
+            raise RuntimeError(f"Baidu chunk PUT failed (no md5 returned): {body}")
+
+    def _create_finalize(self, remote_path: str, size: int, chunk_md5s: list[str],
+                         uploadid: str, access_token: str) -> dict:
+        """Finalize the multipart upload, returns server-final {fs_id, size, md5}."""
+        resp = requests.post(
+            f"{self.XPAN_BASE}/file",
+            params={'method': 'create', 'access_token': access_token},
+            data={
+                'path': remote_path,
+                'size': size,
+                'isdir': 0,
+                'uploadid': uploadid,
+                'block_list': _json.dumps(chunk_md5s),
+                'rtype': 3,
+            },
+            timeout=60,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        if body.get('errno', 0) != 0:
+            raise RuntimeError(f"Baidu finalize failed: {body}")
+        return {'fs_id': body['fs_id'], 'size': body['size'], 'md5': body['md5']}
+
     def upload(self, local_path: Path, remote_path: str, *, access_token: str) -> dict:
-        raise NotImplementedError("T3.6")
+        """Full upload flow: precreate → chunked PUT → finalize.
+
+        Plan §7 steps g-h. Returns server-confirmed dict for caller to compare.
+        """
+        from config import settings
+        chunk_bytes = settings.pan_upload_chunk_bytes
+
+        size = local_path.stat().st_size
+        chunk_md5s, _file_md5 = self._compute_chunk_md5s(local_path, chunk_bytes)
+
+        uploadid = self._precreate(remote_path, size, chunk_md5s, access_token)
+        for idx, chunk in self._chunk_file(local_path, chunk_bytes):
+            self._upload_chunk(local_path, idx, chunk, remote_path, uploadid, access_token)
+
+        return self._create_finalize(remote_path, size, chunk_md5s, uploadid, access_token)
 
     def download(self, remote_path: str, local_path: Path, *, access_token: str) -> dict:
         raise NotImplementedError("T3.8")
