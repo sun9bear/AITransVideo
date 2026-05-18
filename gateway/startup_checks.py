@@ -127,3 +127,43 @@ def validate_r2_backend(
         r2_endpoint,
     )
     return "r2"
+
+
+def validate_pan_backup_config(settings) -> None:
+    """Validate pan backup env if feature enabled. CRITICAL at startup.
+
+    Plan 2026-05-13 design §5.3 / 2026-05-14 impl T2.2.
+
+    If AVT_ENABLE_PAN_BACKUP=false (default): no-op. Otherwise, all 4 of
+    appkey / appsecret / redirect_uri / Fernet key must be set AND the Fernet
+    key must decode as a valid 32-byte base64-encoded key.
+
+    Raises:
+        RuntimeError with actionable message naming the missing env var(s).
+    """
+    if not settings.enable_pan_backup:
+        return
+
+    required = [
+        ("AVT_BAIDU_PAN_APPKEY", settings.baidu_pan_appkey),
+        ("AVT_BAIDU_PAN_APPSECRET", settings.baidu_pan_appsecret),
+        ("AVT_BAIDU_PAN_REDIRECT_URI", settings.baidu_pan_redirect_uri),
+        ("AVT_PAN_TOKEN_ENCRYPTION_KEY", settings.pan_token_encryption_key),
+    ]
+    missing = [name for name, value in required if not value]
+    if missing:
+        raise RuntimeError(
+            f"AVT_ENABLE_PAN_BACKUP=true but required env vars missing: {missing}. "
+            f"Either set them in .env or AVT_ENABLE_PAN_BACKUP=false."
+        )
+
+    # Verify Fernet key is a real 32-byte url-safe base64 key
+    try:
+        from cryptography.fernet import Fernet
+        Fernet(settings.pan_token_encryption_key.encode())
+    except Exception as exc:
+        raise RuntimeError(
+            f"AVT_PAN_TOKEN_ENCRYPTION_KEY is not a valid Fernet key: {exc}. "
+            f"Generate one with: python -c \"from cryptography.fernet import Fernet; "
+            f"print(Fernet.generate_key().decode())\""
+        )

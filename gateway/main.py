@@ -55,6 +55,7 @@ from models import Base
 from startup_checks import (
     is_startup_recovery_schema_missing_error,
     validate_internal_api_key,
+    validate_pan_backup_config,
     validate_production_safety,
     validate_r2_backend,
 )
@@ -105,6 +106,11 @@ async def lifespan(app: FastAPI):
         settings.r2_access_key_id,
         settings.r2_secret_access_key,
     )
+    # Pan backup (plan 2026-05-14 T2.2) — refuse startup if
+    # AVT_ENABLE_PAN_BACKUP=true but any required OAuth credential or
+    # Fernet key is missing/invalid. Fails hard (RuntimeError) so
+    # misconfigured deploys surface immediately with a clear message.
+    validate_pan_backup_config(settings)
     # T3 — DB credentials are resolved and engine is built here. Raises if
     # neither AVT_PG_PASSWORD nor AVT_DATABASE_URL is set (no more hardcoded
     # avt:avt fallback).
