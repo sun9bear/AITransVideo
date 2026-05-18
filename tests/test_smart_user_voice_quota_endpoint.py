@@ -183,6 +183,81 @@ class TestAdminSettingsSmartVoicePolicyPhase3:
         assert dump["smart_reuse_user_voice_enabled"] is True
         assert dump["smart_pause_on_possible_user_voice_match"] is False
 
+    def test_post_settings_with_missing_phase3_fields_resets_them_to_defaults(
+        self, tmp_path, monkeypatch,
+    ):
+        """CONTRACT-LOCK TEST — pins current full-body POST semantics.
+
+        Phase 3 follow-up P2 (Codex review of commit 4073886): this test
+        documents that the current POST /api/admin/settings endpoint
+        treats the request body as a complete ``AdminSettings`` Pydantic
+        model. Any field absent from the request body is populated with
+        the Pydantic default, and ``save_settings`` then merges all
+        fields (defaults included) into admin_settings.json. As a
+        result, a stale admin form / API caller that doesn't know about
+        Phase 3 fields will silently RESET those fields to defaults.
+
+        This is NOT aspirational behavior — it's the current contract.
+        The test exists so a future PR that adds PATCH semantics or an
+        admin UI sync MUST consciously break this test (and choose to
+        update the contract or migrate callers). Until then, admin
+        operators must send the full AdminSettings shape including the
+        Phase 3 fields.
+
+        See plan ``docs/plans/2026-05-17-user-voice-candidate-first-plan.md``
+        §Phase 3 finding P2 for the rationale.
+        """
+        monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+        import importlib
+        import admin_settings as gw_admin_settings
+        importlib.reload(gw_admin_settings)
+        AdminSettings = gw_admin_settings.AdminSettings
+        save_settings = gw_admin_settings.save_settings
+        load_settings = gw_admin_settings.load_settings
+
+        # Step 1: seed the file with NON-default Phase 3 values so we
+        # can observe whether they survive a partial save.
+        s_initial = AdminSettings(
+            smart_auto_clone_enabled=False,
+            smart_reuse_user_voice_enabled=False,
+            smart_pause_on_possible_user_voice_match=True,
+        )
+        save_settings(s_initial)
+        seeded = load_settings()
+        assert seeded.smart_auto_clone_enabled is False
+        assert seeded.smart_reuse_user_voice_enabled is False
+        assert seeded.smart_pause_on_possible_user_voice_match is True
+
+        # Step 2: simulate a stale admin POST that only knows about
+        # whisper_alignment_enabled — it omits the Phase 3 fields.
+        # The endpoint constructs the full AdminSettings from the body
+        # (Pydantic fills missing fields with their defaults), then
+        # save_settings merges the dump into admin_settings.json.
+        stale_body = {"whisper_alignment_enabled": True}
+        body_model = AdminSettings(**stale_body)
+        save_settings(body_model)
+
+        # Step 3: reload and assert the Phase 3 fields were silently
+        # reset to their Pydantic defaults. If this assertion ever
+        # changes, the contract changed — confirm intentional.
+        loaded = load_settings()
+        assert loaded.smart_auto_clone_enabled is True, (
+            "Contract change detected: smart_auto_clone_enabled "
+            "survived a partial POST. If you intended PATCH semantics, "
+            "update plan §Phase 3 finding P2 and rewrite this test."
+        )
+        assert loaded.smart_reuse_user_voice_enabled is True, (
+            "Contract change detected: smart_reuse_user_voice_enabled "
+            "survived a partial POST. Update plan + this test."
+        )
+        assert loaded.smart_pause_on_possible_user_voice_match is False, (
+            "Contract change detected: "
+            "smart_pause_on_possible_user_voice_match survived a "
+            "partial POST. Update plan + this test."
+        )
+        # And the field that WAS in the partial body went through.
+        assert loaded.whisper_alignment_enabled is True
+
 
 class TestQuotaEndpointRegistration:
     """PR#3C-b3e: ``GET /api/internal/user-voices/quota`` must be wired

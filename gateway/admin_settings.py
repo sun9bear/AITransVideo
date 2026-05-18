@@ -262,6 +262,29 @@ async def update_admin_settings(
     body: AdminSettings,
     user: User | None = Depends(get_current_user),
 ) -> dict:
+    """Update admin settings — FULL BODY SEMANTICS.
+
+    The request body is parsed as a complete ``AdminSettings`` Pydantic
+    model. Any field absent from the request body is populated with the
+    Pydantic default, then ``save_settings`` merges all fields (defaults
+    included) into ``admin_settings.json``. As a result, a stale admin
+    form / API caller that doesn't know about newly-added fields will
+    silently RESET those fields to their Pydantic defaults.
+
+    Operational implication: Phase 3 (plan 2026-05-17-user-voice-
+    candidate-first §后台策略字段) added three smart-voice toggles —
+    ``smart_auto_clone_enabled`` / ``smart_reuse_user_voice_enabled`` /
+    ``smart_pause_on_possible_user_voice_match``. Any admin tool that
+    POSTs a partial body without these fields WILL reset them. Until a
+    PATCH endpoint or admin UI sync lands, admin operators MUST send
+    the full ``AdminSettings`` shape including new fields.
+
+    See plan ``docs/plans/2026-05-17-user-voice-candidate-first-plan.md``
+    §Phase 3 finding P2 for the rationale and ``tests/
+    test_smart_user_voice_quota_endpoint.py::
+    test_post_settings_with_missing_phase3_fields_resets_them_to_defaults``
+    for the contract-lock regression.
+    """
     _require_admin(user)
     save_settings(body)
     return {"settings": body.model_dump()}

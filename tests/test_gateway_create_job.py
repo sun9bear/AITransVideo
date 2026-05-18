@@ -79,6 +79,8 @@ def _make_db_session(
     existing_display_names: set[str] | None = None,
     branch4_sequence_today: int = 0,
     credit_available: int = 1_000_000,
+    user_voice_count: int = 0,
+    track_user_voice_query: list | None = None,
 ):
     """Create a mock AsyncSession.
 
@@ -89,9 +91,17 @@ def _make_db_session(
       4. SELECT Job by job_id (existing job check)        → no_job_result
       5. SELECT User by id (reserve_quota lookup)         → user_result
 
+    Smart-only (Phase 3 plan 2026-05-17 quota preflight):
+      0. COUNT user_voices (smart voice-library quota)    → user_voice_count_result
+
     Queries 2 + 3 are new (display_name orchestrator). Dispatch is by SQL
     content rather than call index, so adding / removing a query in either
     order doesn't silently mis-wire the old ``call_count`` scheme.
+
+    ``track_user_voice_query`` — optional list that records the count of
+    times the ``user_voices`` quota SQL ran. Tests use it to assert the
+    Phase 3 gate skips the DB query when consent/admin gates are closed
+    (P1 Codex finding: preflight must not fire when runtime won't clone).
     """
     db = AsyncMock()
 
@@ -111,6 +121,9 @@ def _make_db_session(
 
     branch4_result = MagicMock()
     branch4_result.scalar.return_value = branch4_sequence_today
+
+    user_voice_count_result = MagicMock()
+    user_voice_count_result.scalar.return_value = user_voice_count
 
     credit_bucket = SimpleNamespace(
         id=uuid.uuid4(),
@@ -147,6 +160,10 @@ def _make_db_session(
             return names_result  # existing_names SELECT
         if "display_name like" in sql_text:
             return branch4_result  # branch-4 COUNT(*)
+        if "user_voices" in sql_text:
+            if track_user_voice_query is not None:
+                track_user_voice_query.append(sql_text)
+            return user_voice_count_result
         if "credits_buckets" in sql_text:
             return credits_result
         if "subscriptions" in sql_text:
@@ -1233,4 +1250,205 @@ class TestInterceptCreateJobImportShadowingGuard:
             "at the next select(Job) call. Move the imports to module top "
             "OR rename via ``import X as _local_X``. Offenders:\n  - "
             + "\n  - ".join(offenders)
+        )
+
+
+# ===================================================================
+# Phase 3 (plan 2026-05-17-user-voice-candidate-first §Consent × Admin
+# 决策矩阵) — smart voice-library quota preflight must gate on BOTH
+# consent.auto_voice_clone AND admin.smart_auto_clone_enabled. When
+# either gate is closed, the runtime falls to REUSE or PRESET without
+# consuming a clone slot, so the near-cap preflight rejection becomes
+# a false negative product-level inconsistency (admin says "no new
+# clones", system still blocks user for "clone quota exhausted").
+# ===================================================================
+
+
+class TestSmartVoiceQuotaPreflightGates:
+    """Phase 3 follow-up: quota preflight respects consent + admin gates."""
+
+    _FULL_CONSENT_BOTH_ALLOW = {
+        "auto_voice_clone": True,
+        "auto_retranslate": True,
+        "auto_retts": True,
+        "auto_multimodal_verification": True,
+        "no_extra_charge_without_confirmation": True,
+        "on_budget_exhausted": "degraded_delivery_with_report",
+    }
+
+    _FULL_CONSENT_USER_BLOCKS_CLONE = {
+        "auto_voice_clone": False,
+        "auto_retranslate": True,
+        "auto_retts": True,
+        "auto_multimodal_verification": True,
+        "no_extra_charge_without_confirmation": True,
+        "on_budget_exhausted": "degraded_delivery_with_report",
+    }
+
+    # In-test plan_gate that lets ``plus`` use ``smart``. The runtime
+    # pricing payload in the test sandbox doesn't include smart in
+    # plus.allowed_service_modes (pricing_runtime fallback predates
+    # PR#3C-b3g), so we override the gate to mirror the canonical
+    # plan_catalog.py PLANS definition that does include smart.
+    _PLUS_SMART_GATE = {
+        "max_duration_minutes": 45,
+        "max_concurrent_jobs": 3,
+        "allowed_service_modes": ["express", "studio", "smart"],
+    }
+
+    def _smart_request_body(self, consent: dict) -> dict:
+        return {
+            "service_mode": "smart",
+            "source": {
+                "type": "youtube_url",
+                "value": "https://youtube.com/watch?v=smart_test",
+            },
+            "estimated_duration_seconds": 120,
+            "smart_consent": consent,
+        }
+
+    def test_create_smart_job_skips_voice_quota_preflight_when_admin_auto_clone_disabled(self):
+        """Admin gate False → preflight must NOT query user_voices and
+        MUST NOT reject near-cap users with smart_voice_library_at_safety_water_mark.
+
+        Setup matches the breakage in plan §Consent × Admin 决策矩阵:
+        - user_voice_count=28 (remaining=2 < water_mark=3 → would reject
+          if preflight fired)
+        - admin.smart_auto_clone_enabled=False (kill-switch for new clones)
+        - consent.auto_voice_clone=True (user is OK with cloning)
+        Runtime would PRESET safely (no clone slot consumed). Preflight
+        must respect the admin gate and skip.
+        """
+        import admin_settings as admin_mod
+
+        async def fake_proxy(*, request, upstream_base, strip_prefix, override_body=None):
+            return _upstream_success()
+
+        track_queries: list = []
+        req = _make_request(
+            self._smart_request_body(dict(self._FULL_CONSENT_BOTH_ALLOW))
+        )
+        user = _make_user(plan_code="plus")
+        db = _make_db_session(
+            active_job_count=0,
+            user_for_quota=user,
+            user_voice_count=28,
+            track_user_voice_query=track_queries,
+        )
+
+        original_load = admin_mod.load_settings
+
+        def mock_load():
+            s = original_load()
+            s.smart_auto_clone_enabled = False
+            return s
+
+        with patch("job_intercept.proxy_request", side_effect=fake_proxy):
+            with patch("job_intercept._probe_youtube_metadata", return_value=None):
+                with patch.object(admin_mod, "load_settings", mock_load):
+                    with patch(
+                        "plan_catalog.get_effective_plan_gate",
+                        return_value=self._PLUS_SMART_GATE,
+                    ):
+                        resp = _run(intercept_create_job(req, db, user))
+
+        assert resp.status_code == 202, (
+            f"Expected job creation success when admin disables auto-clone; "
+            f"got {resp.status_code}, body={resp.body!r}. Preflight must "
+            f"skip when admin.smart_auto_clone_enabled=False (plan §Consent × "
+            f"Admin 决策矩阵 rows 5/6/7/8)."
+        )
+        assert track_queries == [], (
+            f"user_voices quota query MUST be skipped when admin disables "
+            f"auto-clone. The DB roundtrip is wasteful when the runtime "
+            f"won't clone. Got query log: {track_queries!r}"
+        )
+
+    def test_create_smart_job_skips_voice_quota_preflight_when_consent_disables_auto_clone(self):
+        """User gate False → preflight must skip.
+
+        Setup:
+        - user_voice_count=28 (would reject if preflight fired)
+        - admin.smart_auto_clone_enabled=True (admin allows clones)
+        - consent.auto_voice_clone=False (user opted out of cloning)
+        Runtime falls to REUSE/PRESET without consuming a clone slot.
+        """
+        async def fake_proxy(*, request, upstream_base, strip_prefix, override_body=None):
+            return _upstream_success()
+
+        track_queries: list = []
+        req = _make_request(
+            self._smart_request_body(dict(self._FULL_CONSENT_USER_BLOCKS_CLONE))
+        )
+        user = _make_user(plan_code="plus")
+        db = _make_db_session(
+            active_job_count=0,
+            user_for_quota=user,
+            user_voice_count=28,
+            track_user_voice_query=track_queries,
+        )
+
+        with patch("job_intercept.proxy_request", side_effect=fake_proxy):
+            with patch("job_intercept._probe_youtube_metadata", return_value=None):
+                with patch(
+                    "plan_catalog.get_effective_plan_gate",
+                    return_value=self._PLUS_SMART_GATE,
+                ):
+                    resp = _run(intercept_create_job(req, db, user))
+
+        assert resp.status_code == 202, (
+            f"Expected job creation success when consent.auto_voice_clone "
+            f"is False; got {resp.status_code}, body={resp.body!r}. "
+            f"Preflight must skip when user did not consent to cloning "
+            f"(plan §Consent × Admin 决策矩阵 rows 2/3)."
+        )
+        assert track_queries == [], (
+            f"user_voices quota query MUST be skipped when consent denies "
+            f"auto-clone. Got query log: {track_queries!r}"
+        )
+
+    def test_create_smart_job_still_quota_blocks_when_both_gates_allow_clone(self):
+        """Existing behavior preserved: when BOTH gates allow new clone
+        and the user is near cap, the preflight still rejects so the
+        user can clean up the library before spending S0/S1/S2 budget.
+        """
+        async def fake_proxy(*, request, upstream_base, strip_prefix, override_body=None):
+            return _upstream_success()
+
+        track_queries: list = []
+        req = _make_request(
+            self._smart_request_body(dict(self._FULL_CONSENT_BOTH_ALLOW))
+        )
+        user = _make_user(plan_code="plus")
+        db = _make_db_session(
+            active_job_count=0,
+            user_for_quota=user,
+            user_voice_count=28,
+            track_user_voice_query=track_queries,
+        )
+
+        # Both gates open (admin default is True, consent set True).
+        with patch("job_intercept.proxy_request", side_effect=fake_proxy):
+            with patch("job_intercept._probe_youtube_metadata", return_value=None):
+                with patch(
+                    "plan_catalog.get_effective_plan_gate",
+                    return_value=self._PLUS_SMART_GATE,
+                ):
+                    resp = _run(intercept_create_job(req, db, user))
+
+        body = json.loads(resp.body)
+        assert resp.status_code == 400, (
+            f"Expected 400 smart_voice_library_at_safety_water_mark when "
+            f"both gates allow clone and user is near cap; got "
+            f"{resp.status_code}, body={body!r}"
+        )
+        assert body["error"] == "smart_voice_library_at_safety_water_mark"
+        # Sanity: detail carries the quota arithmetic so frontend can
+        # render an actionable message.
+        assert body["detail"]["quota_used"] == 28
+        assert body["detail"]["quota_cap"] == 30
+        assert body["detail"]["remaining"] == 2
+        assert body["detail"]["water_mark"] == 3
+        assert track_queries, (
+            "user_voices quota query MUST run when both gates allow clone."
         )

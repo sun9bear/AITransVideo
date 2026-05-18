@@ -1065,38 +1065,61 @@ async def intercept_create_job(
         try:
             from admin_settings import load_settings
 
-            quota_used_result = await db.execute(
-                select(func.count())
-                .select_from(UserVoice)
-                .where(
-                    UserVoice.user_id == user.id,
-                    UserVoice.expired_at.is_(None),
-                )
-            )
-            quota_used = int(quota_used_result.scalar() or 0)
+            # Phase 3 (plan 2026-05-17-user-voice-candidate-first
+            # §Consent × Admin 决策矩阵): voice-library quota only
+            # matters when the runtime will ACTUALLY clone. Both gates
+            # must allow new clone for the preflight to apply:
+            #   - smart_consent.auto_voice_clone (user-side gate)
+            #   - admin.smart_auto_clone_enabled (admin-side gate)
+            # When either gate is closed, smart REUSES (strong match
+            # in user voice library) or falls to PRESET — no clone
+            # slot consumed, so a near-cap library does NOT block the
+            # submission. Matrix rows 2/3/5/6/7/8 all expect runtime
+            # to skip new clone; the preflight must skip in lockstep
+            # to avoid product-level inconsistency ("admin disabled
+            # clones, why does it still complain about clone quota?").
+            # Defensive: if admin_settings unreadable, fall back to
+            # admin_clone_enabled=True (mirrors process.py:3457-3470).
             admin_settings = load_settings()
-            cap = int(
-                getattr(admin_settings, "smart_user_voice_clone_cap", 30)
-                or 30
+            admin_clone_enabled = bool(
+                getattr(admin_settings, "smart_auto_clone_enabled", True)
             )
-            remaining = max(0, cap - quota_used)
-            # Water mark matches services.smart.auto_voice_review's
-            # internal threshold (reason_code suffix _le_3 confirmed).
-            water_mark = 3
-            if remaining <= water_mark:
-                return _error_response(
-                    400, "smart_voice_library_at_safety_water_mark",
-                    f"您的个人音色库已接近上限（{quota_used} / {cap} 已用，"
-                    f"剩余 {remaining}）。智能版需要至少 {water_mark + 1} "
-                    f"个剩余位置才能自动克隆主说话人音色。请先清理音色库后重试，"
-                    f"或改用工作台版手动管理音色。",
-                    {
-                        "quota_used": quota_used,
-                        "quota_cap": cap,
-                        "remaining": remaining,
-                        "water_mark": water_mark,
-                    },
+            consent_allows_clone = (
+                smart_consent_payload is not None
+                and smart_consent_payload.get("auto_voice_clone") is True
+            )
+            if consent_allows_clone and admin_clone_enabled:
+                quota_used_result = await db.execute(
+                    select(func.count())
+                    .select_from(UserVoice)
+                    .where(
+                        UserVoice.user_id == user.id,
+                        UserVoice.expired_at.is_(None),
+                    )
                 )
+                quota_used = int(quota_used_result.scalar() or 0)
+                cap = int(
+                    getattr(admin_settings, "smart_user_voice_clone_cap", 30)
+                    or 30
+                )
+                remaining = max(0, cap - quota_used)
+                # Water mark matches services.smart.auto_voice_review's
+                # internal threshold (reason_code suffix _le_3 confirmed).
+                water_mark = 3
+                if remaining <= water_mark:
+                    return _error_response(
+                        400, "smart_voice_library_at_safety_water_mark",
+                        f"您的个人音色库已接近上限（{quota_used} / {cap} 已用，"
+                        f"剩余 {remaining}）。智能版需要至少 {water_mark + 1} "
+                        f"个剩余位置才能自动克隆主说话人音色。请先清理音色库后重试，"
+                        f"或改用工作台版手动管理音色。",
+                        {
+                            "quota_used": quota_used,
+                            "quota_cap": cap,
+                            "remaining": remaining,
+                            "water_mark": water_mark,
+                        },
+                    )
         except Exception as _quota_check_exc:
             # Defensive: quota check failure must NOT block submission
             # entirely (e.g., admin_settings unreadable, DB transient
