@@ -152,3 +152,47 @@ def read_manifest_from_tar(tar_path: Path) -> dict:
                 f"tar at {tar_path}: manifest.json is a directory entry"
             )
         return json.loads(f.read().decode('utf-8'))
+
+
+def safe_extract_tar(tar_path: Path, dest: Path) -> None:
+    """Safe tar extraction that rejects path traversal / absolute paths / links.
+
+    Python 3.12+ has tarfile.data_filter; 3.11 needs DIY (CodeX Q-B).
+
+    Pass 1 validates EVERY member name before any extraction starts — partial
+    extraction of a malicious tar is itself a security hazard (an early entry
+    could plant a file that an extraction-blocking later entry doesn't undo).
+
+    Rejection categories (all surface as RuntimeError with a discriminating
+    substring so callers / tests can branch):
+      - absolute path (name starts with '/')  → 'unsafe absolute path'
+      - .. path traversal segment             → 'unsafe .. path traversal'
+      - symlink / hardlink entry              → 'unsafe symlink/hardlink'
+      - resolved path falls outside dest      → 'unsafe resolved outside dest'
+        (catches Windows-drive-prefixed names, exotic encodings, and any
+        absolute-path bypass the first check might miss)
+    """
+    dest = dest.resolve()
+    dest.mkdir(parents=True, exist_ok=True)
+
+    with tarfile.open(tar_path, 'r:gz') as tf:
+        members = tf.getmembers()
+        # Pass 1: validate every member.
+        for m in members:
+            if m.name.startswith('/'):
+                raise RuntimeError(f"unsafe absolute path in tar: {m.name!r}")
+            if '..' in Path(m.name).parts:
+                raise RuntimeError(f"unsafe .. path traversal: {m.name!r}")
+            if m.issym() or m.islnk():
+                raise RuntimeError(
+                    f"unsafe symlink/hardlink: {m.name!r} → {m.linkname!r}"
+                )
+            target = (dest / m.name).resolve()
+            try:
+                target.relative_to(dest)
+            except ValueError:
+                raise RuntimeError(
+                    f"unsafe resolved outside dest: {m.name!r} → {target}"
+                )
+        # Pass 2: extract — all validated.
+        tf.extractall(dest)
