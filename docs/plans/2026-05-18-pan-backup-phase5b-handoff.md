@@ -20,13 +20,14 @@
 ## 2. 当前 git 状态(验证用)
 
 ```bash
-git log --oneline -5
-# 期望(最近 5,从 5a 起):
+git log --oneline -6
+# 期望(最近 6,Phase 5a + handoff + 2 CodeX 修):
+#   84553c7 fix(pan-backup): set_archive_status raises on 0-row UPDATE (CodeX P1)
+#   4cc8913 fix(pan-backup): safe_extract_tar strict type-byte allowlist (CodeX P1)
+#   abf842e docs(pan-backup): Phase 5b session handoff doc
 #   9b84807 feat(pan-backup): T5.1 set_archive_status (PG + JSON, no mirror)
 #   fd6c84b feat(pan-backup): T5.11.5 safe_extract_tar (reject ../ /abs/ symlink/hardlink)
 #   1b56b75 fix(pan-backup): deepcopy snapshot fields in build_manifest (CodeX P3)
-#   d3c9d1f test(pan-backup): lock tar/inventory path contract for Phase 5 (CodeX P2)
-#   427f0fe fix(pan-backup): reject symlinks in inventory + tar (CodeX P1)
 
 git fetch origin
 git rev-list --count HEAD..origin/main  # 应为 0
@@ -127,17 +128,32 @@ C2 修订要求"单连接长持" — 这跟 SQLite 兼容。`async with engine.c
 
 **asyncio.to_thread:**
 
-测试时 mock 阻塞 I/O 为 no-op,用 `to_thread` 不需要真后台线程开销。pattern:
+测试时 mock 阻塞 I/O 必须用 **同步函数**(`def` 不是 `async def`)。
+`asyncio.to_thread(callable, *args)` 调用 `callable(*args)` 在线程池里跑;
+如果 `callable` 是 `async def`,调用它只产生 coroutine object 不执行它,
+然后 `await asyncio.to_thread(async_fn, ...)` 拿到的是 coroutine 而**不是 result**,
+测试会拿到怪状态或 hang(CodeX P2 找到的错误 pattern)。
 
 ```python
-async def fake_upload(*args, **kw):
-    # 直接同步 return,不去 to_thread
+def fake_upload(*args, **kw):
+    # 同步函数,被 asyncio.to_thread 包后正常返回值
     return {'size': 100, 'md5': 'fakemd5', 'fs_id': 'fakefs'}
 
 monkeypatch.setattr(client, 'upload', fake_upload)
+# production code: result = await asyncio.to_thread(client.upload, tar_path, ...)
+# 测试时 to_thread 真的跑 fake_upload 同步,返回 dict
 ```
 
-但 production code 必须用 `await asyncio.to_thread(client.upload, ...)`,否则 sync requests 冻 event loop 10+ 小时。
+或者完全绕过 `to_thread`,直接 monkeypatch `asyncio.to_thread` 自己:
+
+```python
+async def passthrough_to_thread(fn, *args, **kw):
+    return fn(*args, **kw)
+monkeypatch.setattr('asyncio.to_thread', passthrough_to_thread)
+```
+
+但 production code 必须用 `await asyncio.to_thread(client.upload, ...)`,
+否则 sync requests 冻 event loop 10+ 小时。
 
 ---
 
@@ -209,21 +225,21 @@ async with engine.connect() as conn:
     async with conn.begin():
         # SELECT job + cred
         ...
-    
+
     # advisory lock(本 conn 持有,session-level lock 才有效)
     await conn.execute(text("SELECT pg_advisory_lock(:k)"), {'k': lock_key})
     try:
         # 一堆短 txn(均 begin() ... commit())
         async with conn.begin():
             await set_archive_status(..., conn=conn)
-        
+
         async with conn.begin():
             # INSERT backup_records
             ...
-        
+
         # 阻塞 I/O via to_thread,不动 conn
         await asyncio.to_thread(...)
-        
+
         # COMMIT POINT
         async with conn.begin():
             # UPDATE backup_records.status='uploaded'
