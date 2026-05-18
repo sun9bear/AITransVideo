@@ -132,93 +132,103 @@ async def _execute_pan_backup_impl(
 
     # === Single-connection long-hold ===
     async with engine.connect() as conn:
-        # --- Step 0: precondition (short txn) ---
-        async with conn.begin():
-            job_row = (await conn.execute(
-                select(
-                    Job.status, Job.edit_generation, Job.project_dir,
-                    Job.r2_artifacts,
-                ).where(Job.user_id == user_id, Job.job_id == job_id)
-            )).one_or_none()
-            if job_row is None:
-                raise RuntimeError(
-                    f"Job not found: user={user_id} job_id={job_id!r}"
-                )
-            if job_row.status != 'succeeded':
-                raise RuntimeError(
-                    f"Job status {job_row.status!r}, need 'succeeded' (412)"
-                )
-
-            cred_row = (await conn.execute(
-                select(
-                    PanCredentials.access_token_encrypted,
-                    PanCredentials.status,
-                ).where(
-                    PanCredentials.user_id == user_id,
-                    PanCredentials.provider == provider,
-                )
-            )).one_or_none()
-            if cred_row is None:
-                raise RuntimeError(
-                    f"Pan credentials missing for user={user_id} provider={provider}"
-                )
-            if cred_row.status != 'active':
-                raise RuntimeError(
-                    f"Pan credentials status {cred_row.status!r}, need 'active'"
-                )
-
-            edit_generation = job_row.edit_generation
-            project_dir_str = job_row.project_dir
-            r2_artifacts = job_row.r2_artifacts or []
-            access_token_enc = cred_row.access_token_encrypted
-
-        if not project_dir_str:
-            raise RuntimeError(f"Job {job_id!r} has no project_dir set")
-        project_dir = Path(project_dir_str).resolve()
-        _verify_project_dir_safety(project_dir, projects_root_env)
-
-        # --- Step a: advisory lock (PG only; SQLite no-op) ---
+        # --- Step a: advisory lock FIRST (PG only; SQLite no-op) ---
+        # CodeX P0-2: take the lock BEFORE reading Job state. The previous
+        # ordering (read → lock → use stale snapshot) allowed a concurrent
+        # worker to archive the same job between read and lock; the failure
+        # path would then "roll back" an already-archived Job from
+        # 'archived' to 'succeeded'. Lock-then-read closes the TOCTOU window.
         await _acquire_advisory_lock(conn, lock_key)
 
-        access_token = decrypt_token(access_token_enc)
-        client = client_factory()
         br_id: _uuid.UUID | None = None
         tar_path: Path | None = None
         heartbeat_task: asyncio.Task | None = None
 
         try:
-            # --- Step b: status='archiving' (short txn) ---
+            # --- Step 0: precondition (POST-lock — authoritative snapshot) ---
             async with conn.begin():
-                await set_archive_status(user_id, job_id, 'archiving', conn=conn)
-
-            # --- Step c: INSERT backup_records ---
-            async with conn.begin():
-                br_id = _uuid.uuid4()
-                await conn.execute(
-                    BackupRecord.__table__.insert().values(
-                        id=br_id,
-                        user_id=user_id,
-                        job_id=job_id,
-                        job_edit_generation=edit_generation,
-                        provider=provider,
-                        remote_path='',
-                        size_bytes=0,
-                        sha256='',
-                        md5='',
-                        manifest_json={},
-                        status='uploading',
-                        heartbeat_at=datetime.now(timezone.utc),
-                        created_at=datetime.now(timezone.utc),
+                job_row = (await conn.execute(
+                    select(
+                        Job.status, Job.edit_generation, Job.project_dir,
+                        Job.r2_artifacts,
+                    ).where(Job.user_id == user_id, Job.job_id == job_id)
+                )).one_or_none()
+                if job_row is None:
+                    raise RuntimeError(
+                        f"Job not found: user={user_id} job_id={job_id!r}"
                     )
-                )
+                if job_row.status != 'succeeded':
+                    raise RuntimeError(
+                        f"Job status {job_row.status!r}, need 'succeeded' (412)"
+                    )
 
-            # --- Start heartbeat loop (best effort) ---
-            if heartbeat_enabled:
-                heartbeat_task = asyncio.create_task(
-                    _heartbeat_loop(engine, br_id, heartbeat_interval_s)
-                )
+                cred_row = (await conn.execute(
+                    select(
+                        PanCredentials.access_token_encrypted,
+                        PanCredentials.status,
+                    ).where(
+                        PanCredentials.user_id == user_id,
+                        PanCredentials.provider == provider,
+                    )
+                )).one_or_none()
+                if cred_row is None:
+                    raise RuntimeError(
+                        f"Pan credentials missing for user={user_id} "
+                        f"provider={provider}"
+                    )
+                if cred_row.status != 'active':
+                    raise RuntimeError(
+                        f"Pan credentials status {cred_row.status!r}, "
+                        f"need 'active'"
+                    )
+
+                edit_generation = job_row.edit_generation
+                project_dir_str = job_row.project_dir
+                r2_artifacts = job_row.r2_artifacts or []
+                access_token_enc = cred_row.access_token_encrypted
+
+            if not project_dir_str:
+                raise RuntimeError(f"Job {job_id!r} has no project_dir set")
+            project_dir = Path(project_dir_str).resolve()
+            _verify_project_dir_safety(project_dir, projects_root_env)
+
+            access_token = decrypt_token(access_token_enc)
+            client = client_factory()
 
             try:
+                # --- Step b: status='archiving' (short txn) ---
+                async with conn.begin():
+                    await set_archive_status(
+                        user_id, job_id, 'archiving', conn=conn,
+                    )
+
+                # --- Step c: INSERT backup_records ---
+                async with conn.begin():
+                    br_id = _uuid.uuid4()
+                    await conn.execute(
+                        BackupRecord.__table__.insert().values(
+                            id=br_id,
+                            user_id=user_id,
+                            job_id=job_id,
+                            job_edit_generation=edit_generation,
+                            provider=provider,
+                            remote_path='',
+                            size_bytes=0,
+                            sha256='',
+                            md5='',
+                            manifest_json={},
+                            status='uploading',
+                            heartbeat_at=datetime.now(timezone.utc),
+                            created_at=datetime.now(timezone.utc),
+                        )
+                    )
+
+                # --- Start heartbeat loop (best effort) ---
+                if heartbeat_enabled:
+                    heartbeat_task = asyncio.create_task(
+                        _heartbeat_loop(engine, br_id, heartbeat_interval_s)
+                    )
+
                 # --- Steps d-f: build manifest + tar.gz + checksums ---
                 job_record_snapshot = {
                     'job_id': job_id,

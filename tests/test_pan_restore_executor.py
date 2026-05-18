@@ -547,6 +547,80 @@ def test_verify_inventory_raises_on_size_mismatch(tmp_path):
         _verify_inventory(staged, inventory)
 
 
+def test_post_lock_re_read_detects_concurrent_state_change(monkeypatch, tmp_path):
+    """CodeX P0-2 regression: restore must read Job state AFTER acquiring
+    the lock. A concurrent worker that flips status away from 'archived'
+    while we wait must be visible — without this, we'd proceed with
+    stale snapshot and corrupt state."""
+    import shutil
+    from models import Job
+    from gateway.pan import restore_executor as re_mod
+
+    setup_pan_token_env(monkeypatch)
+    user_id = uuid.uuid4()
+    job_id = 'job_restore_toctou'
+    project = make_project_dir(tmp_path, job_id=job_id)
+
+    # restore_executor imports _acquire_advisory_lock function-locally
+    # from backup_executor, so we patch the source module — the function
+    # re-imports on each call and will see the patch.
+    from gateway.pan import backup_executor as be_mod
+    real_acquire = be_mod._acquire_advisory_lock
+    engine_holder: list = []
+
+    async def lock_then_mutate(conn, key):
+        await real_acquire(conn, key)
+        engine_inner = engine_holder[0]
+        async with engine_inner.begin() as side_conn:
+            await side_conn.execute(
+                Job.__table__.update()
+                .where(Job.job_id == job_id)
+                .values(status='succeeded')  # concurrent restore just finished
+            )
+
+    async def _go():
+        async with pan_test_engine() as engine:
+            engine_holder.append(engine)
+            await insert_sample_job(
+                engine, user_id=user_id, job_id=job_id,
+                status='succeeded', project_dir=str(project),
+            )
+            await insert_sample_pan_credentials(engine, user_id=user_id)
+
+            # Set up state where restore would normally succeed.
+            client = FakeBaiduPanClient()
+            await _run_backup(
+                {'job_id': job_id, 'user_id': str(user_id)},
+                engine=engine, client=client, rmtree_fn=shutil.rmtree,
+            )
+
+            # Now patch the lock to simulate concurrent restore happening
+            # during our wait. After this, Job.status will be 'succeeded'
+            # by the time our restore acquires the lock.
+            monkeypatch.setattr(be_mod, '_acquire_advisory_lock', lock_then_mutate)
+
+            with pytest.raises(RuntimeError, match="not 'archived'|412"):
+                await _run_restore(
+                    {'job_id': job_id, 'user_id': str(user_id)},
+                    engine=engine, client=client,
+                    staging_root=tmp_path / '_staging',
+                )
+
+            # Project_dir must NOT have been re-created by this stale restore.
+            # (The concurrent restore that flipped status to 'succeeded'
+            # would have already created it, but the side-conn update we
+            # used didn't actually restore files, so project_dir is gone.
+            # The key assertion: status is still 'succeeded' — our stale
+            # restore did NOT roll it back to 'archived'.)
+            async with engine.connect() as conn:
+                status = (await conn.execute(
+                    select(Job.status).where(Job.job_id == job_id)
+                )).scalar_one()
+            assert status == 'succeeded'
+
+    run_async(_go())
+
+
 def test_verify_inventory_raises_on_sha256_mismatch(tmp_path):
     from gateway.pan.restore_executor import _verify_inventory
 

@@ -751,6 +751,78 @@ def test_happy_path_full_integration(monkeypatch, tmp_path):
     run_async(_go())
 
 
+def test_post_lock_re_read_detects_concurrent_archive(monkeypatch, tmp_path):
+    """CodeX P0-2 regression: if Job.status changes from 'succeeded' to
+    'archived' WHILE backup_executor is waiting on the advisory lock
+    (concurrent worker finished first), the post-lock re-read must
+    detect this and refuse — NOT proceed with the stale snapshot.
+
+    Without this guard, the failure path would 'roll back' the
+    already-archived Job from 'archived' back to 'succeeded'. The
+    instrumented _acquire_advisory_lock here simulates the concurrent
+    archive happening between caller-side scheduling and actual lock
+    acquisition.
+    """
+    from gateway.pan import backup_executor as be_mod
+    from models import Job, BackupRecord
+
+    setup_pan_token_env(monkeypatch)
+    user_id = uuid.uuid4()
+    job_id = 'job_toctou'
+
+    real_acquire = be_mod._acquire_advisory_lock
+    engine_holder = []
+
+    async def lock_then_mutate(conn, key):
+        await real_acquire(conn, key)
+        # Simulate "while we waited for the lock, a concurrent worker
+        # finished archiving the same job".
+        engine_inner = engine_holder[0]
+        async with engine_inner.begin() as side_conn:
+            await side_conn.execute(
+                Job.__table__.update()
+                .where(Job.job_id == job_id)
+                .values(status='archived')
+            )
+
+    monkeypatch.setattr(be_mod, '_acquire_advisory_lock', lock_then_mutate)
+
+    async def _go():
+        async with pan_test_engine() as engine:
+            engine_holder.append(engine)
+            project = make_project_dir(tmp_path, job_id=job_id)
+            await insert_sample_job(
+                engine, user_id=user_id, job_id=job_id,
+                status='succeeded', project_dir=str(project),
+            )
+            await insert_sample_pan_credentials(engine, user_id=user_id)
+
+            client = FakeBaiduPanClient()
+            # Expect the post-lock re-read to detect 'archived' and raise.
+            with pytest.raises(RuntimeError, match="not 'succeeded'|412"):
+                await _run_executor(
+                    {'job_id': job_id, 'user_id': str(user_id)},
+                    engine=engine, client=client,
+                )
+
+            # No upload attempted, no BackupRecord row created.
+            assert client.upload_calls == []
+            async with engine.connect() as conn:
+                br_id = (await conn.execute(
+                    select(BackupRecord.id).where(BackupRecord.job_id == job_id)
+                )).first()
+                # Critically: status MUST still be 'archived' — executor
+                # did NOT roll it back to 'succeeded' (which would have
+                # been the bug pre-fix).
+                status = (await conn.execute(
+                    select(Job.status).where(Job.job_id == job_id)
+                )).scalar_one()
+            assert br_id is None
+            assert status == 'archived'
+
+    run_async(_go())
+
+
 def test_payload_provider_override(monkeypatch, tmp_path):
     """payload['provider'] is honored — credentials lookup uses it."""
     setup_pan_token_env(monkeypatch)

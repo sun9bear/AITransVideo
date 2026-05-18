@@ -119,97 +119,100 @@ async def _execute_pan_restore_impl(
     lock_key = pan_lock_key(user_id, job_id)  # stable across processes (CodeX P0-1)
 
     async with engine.connect() as conn:
-        # --- precondition ---
-        async with conn.begin():
-            job_row = (await conn.execute(
-                select(Job.status, Job.project_dir)
-                .where(Job.user_id == user_id, Job.job_id == job_id)
-            )).one_or_none()
-            if job_row is None:
-                raise RuntimeError(
-                    f"Job not found: user={user_id} job_id={job_id!r}"
-                )
-            if job_row.status != 'archived':
-                raise RuntimeError(
-                    f"Job status {job_row.status!r}, need 'archived' (412)"
-                )
-            project_dir_str = job_row.project_dir
-            if not project_dir_str:
-                raise RuntimeError(
-                    f"Job {job_id!r} has no project_dir set (cannot restore)"
-                )
-
-            cred_row = (await conn.execute(
-                select(
-                    PanCredentials.access_token_encrypted,
-                    PanCredentials.status,
-                ).where(
-                    PanCredentials.user_id == user_id,
-                    PanCredentials.provider == provider,
-                )
-            )).one_or_none()
-            if cred_row is None:
-                raise RuntimeError(
-                    f"Pan credentials missing for user={user_id} "
-                    f"provider={provider}"
-                )
-            if cred_row.status != 'active':
-                raise RuntimeError(
-                    f"Pan credentials status {cred_row.status!r}, "
-                    f"need 'active'"
-                )
-
-            # Pick the LATEST uploaded BackupRecord for this job.
-            br_row = (await conn.execute(
-                select(
-                    BackupRecord.id, BackupRecord.remote_path,
-                    BackupRecord.sha256, BackupRecord.md5,
-                    BackupRecord.size_bytes, BackupRecord.manifest_json,
-                ).where(
-                    BackupRecord.user_id == user_id,
-                    BackupRecord.job_id == job_id,
-                    BackupRecord.status == 'uploaded',
-                ).order_by(desc(BackupRecord.created_at))
-                .limit(1)
-            )).one_or_none()
-            if br_row is None:
-                raise RuntimeError(
-                    f"No 'uploaded' BackupRecord found for job_id={job_id!r}"
-                )
-
-            access_token_enc = cred_row.access_token_encrypted
-
-        project_dir = Path(project_dir_str).resolve()
-        remote_path = br_row.remote_path
-        expected_sha = br_row.sha256
-        manifest_persisted = br_row.manifest_json
-        if isinstance(manifest_persisted, str):
-            import json as _json
-            manifest_persisted = _json.loads(manifest_persisted)
-
-        # --- advisory lock ---
+        # --- advisory lock FIRST (CodeX P0-2) ---
+        # Read Job/Credentials/BackupRecord only AFTER acquiring the lock.
+        # Pre-lock read would let a concurrent restore see a stale snapshot
+        # and corrupt state on the failure path.
         await _acquire_advisory_lock(conn, lock_key)
 
-        access_token = decrypt_token(access_token_enc)
-        client = client_factory()
-
-        # Staging area. Default: $TMPDIR/pan_restore_{job}_{ts}/
-        if staging_root is None:
-            staging_root = Path(
-                os.environ.get('TMPDIR', '/tmp')
-            ) / f'pan_restore_{job_id}_{int(time.time())}'
-        else:
-            staging_root = Path(staging_root)
-        tar_path: Path | None = None
-
         try:
-            # --- status='restoring' ---
+            # --- precondition (POST-lock — authoritative snapshot) ---
             async with conn.begin():
-                await set_archive_status(
-                    user_id, job_id, 'restoring', conn=conn,
-                )
+                job_row = (await conn.execute(
+                    select(Job.status, Job.project_dir)
+                    .where(Job.user_id == user_id, Job.job_id == job_id)
+                )).one_or_none()
+                if job_row is None:
+                    raise RuntimeError(
+                        f"Job not found: user={user_id} job_id={job_id!r}"
+                    )
+                if job_row.status != 'archived':
+                    raise RuntimeError(
+                        f"Job status {job_row.status!r}, need 'archived' (412)"
+                    )
+                project_dir_str = job_row.project_dir
+                if not project_dir_str:
+                    raise RuntimeError(
+                        f"Job {job_id!r} has no project_dir set (cannot restore)"
+                    )
+
+                cred_row = (await conn.execute(
+                    select(
+                        PanCredentials.access_token_encrypted,
+                        PanCredentials.status,
+                    ).where(
+                        PanCredentials.user_id == user_id,
+                        PanCredentials.provider == provider,
+                    )
+                )).one_or_none()
+                if cred_row is None:
+                    raise RuntimeError(
+                        f"Pan credentials missing for user={user_id} "
+                        f"provider={provider}"
+                    )
+                if cred_row.status != 'active':
+                    raise RuntimeError(
+                        f"Pan credentials status {cred_row.status!r}, "
+                        f"need 'active'"
+                    )
+
+                # Pick the LATEST uploaded BackupRecord for this job.
+                br_row = (await conn.execute(
+                    select(
+                        BackupRecord.id, BackupRecord.remote_path,
+                        BackupRecord.sha256, BackupRecord.md5,
+                        BackupRecord.size_bytes, BackupRecord.manifest_json,
+                    ).where(
+                        BackupRecord.user_id == user_id,
+                        BackupRecord.job_id == job_id,
+                        BackupRecord.status == 'uploaded',
+                    ).order_by(desc(BackupRecord.created_at))
+                    .limit(1)
+                )).one_or_none()
+                if br_row is None:
+                    raise RuntimeError(
+                        f"No 'uploaded' BackupRecord found for job_id={job_id!r}"
+                    )
+
+                access_token_enc = cred_row.access_token_encrypted
+
+            project_dir = Path(project_dir_str).resolve()
+            remote_path = br_row.remote_path
+            expected_sha = br_row.sha256
+            manifest_persisted = br_row.manifest_json
+            if isinstance(manifest_persisted, str):
+                import json as _json
+                manifest_persisted = _json.loads(manifest_persisted)
+
+            access_token = decrypt_token(access_token_enc)
+            client = client_factory()
+
+            # Staging area. Default: $TMPDIR/pan_restore_{job}_{ts}/
+            if staging_root is None:
+                staging_root = Path(
+                    os.environ.get('TMPDIR', '/tmp')
+                ) / f'pan_restore_{job_id}_{int(time.time())}'
+            else:
+                staging_root = Path(staging_root)
+            tar_path: Path | None = None
 
             try:
+                # --- status='restoring' ---
+                async with conn.begin():
+                    await set_archive_status(
+                        user_id, job_id, 'restoring', conn=conn,
+                    )
+
                 # --- download tar.gz ---
                 staging_root.mkdir(parents=True, exist_ok=True)
                 tar_path = staging_root / 'backup.tar.gz'
