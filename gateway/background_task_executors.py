@@ -371,18 +371,22 @@ async def execute_pan_backup_dispatched(
     project_dir: Path,  # noqa: ARG001 — re-read from Job row inside executor
     params: dict[str, Any],
 ) -> None:
-    """Dispatcher adapter for `pan_backup` task type."""
-    from pan.backup_executor import execute_pan_backup
+    """Dispatcher adapter for `pan_backup` task type.
 
-    payload = {
-        'job_id': job_id,
-        'user_id': str(params['user_id']),
-        'provider': params.get('provider', 'baidu_pan'),
-    }
+    CodeX P2: payload construction is INSIDE the try block so KeyError
+    on a malformed `params` surfaces as queue.mark_failed instead of an
+    unhandled async-task exception.
+    """
+    from pan.backup_executor import execute_pan_backup
 
     async with async_session() as db:
         await queue.mark_running(db, task_id)
     try:
+        payload = {
+            'job_id': job_id,
+            'user_id': str(params['user_id']),
+            'provider': params.get('provider', 'baidu_pan'),
+        }
         await execute_pan_backup(payload)
     except Exception as exc:  # noqa: BLE001
         async with async_session() as db:
@@ -399,18 +403,18 @@ async def execute_pan_restore_dispatched(
     project_dir: Path,  # noqa: ARG001
     params: dict[str, Any],
 ) -> None:
-    """Dispatcher adapter for `pan_restore` task type."""
+    """Dispatcher adapter for `pan_restore` task type. CodeX P2: same
+    inside-try payload construction as backup dispatcher."""
     from pan.restore_executor import execute_pan_restore
-
-    payload = {
-        'job_id': job_id,
-        'user_id': str(params['user_id']),
-        'provider': params.get('provider', 'baidu_pan'),
-    }
 
     async with async_session() as db:
         await queue.mark_running(db, task_id)
     try:
+        payload = {
+            'job_id': job_id,
+            'user_id': str(params['user_id']),
+            'provider': params.get('provider', 'baidu_pan'),
+        }
         await execute_pan_restore(payload)
     except Exception as exc:  # noqa: BLE001
         async with async_session() as db:
@@ -432,23 +436,27 @@ async def execute_pan_residue_cleanup_dispatched(
     params must include 'backup_id' (CodeX P2) — picking "latest uploaded"
     by (user_id, job_id) is ambiguous when prior failed attempts left
     multiple BackupRecord rows.
+
+    Missing-backup_id validation runs INSIDE the mark_running try block
+    so a malformed payload surfaces as queue.mark_failed (with the
+    ValueError message) rather than an unhandled exception escaping
+    into the event loop while the BackgroundTask row sits at 'pending'.
     """
     from pan.residue_cleanup import execute_pan_residue_cleanup
-
-    if 'backup_id' not in params:
-        raise ValueError(
-            "pan_residue_cleanup task params missing required 'backup_id'."
-        )
-    payload = {
-        'job_id': job_id,
-        'user_id': str(params['user_id']),
-        'provider': params.get('provider', 'baidu_pan'),
-        'backup_id': str(params['backup_id']),
-    }
 
     async with async_session() as db:
         await queue.mark_running(db, task_id)
     try:
+        if 'backup_id' not in params:
+            raise ValueError(
+                "pan_residue_cleanup task params missing required 'backup_id'."
+            )
+        payload = {
+            'job_id': job_id,
+            'user_id': str(params['user_id']),
+            'provider': params.get('provider', 'baidu_pan'),
+            'backup_id': str(params['backup_id']),
+        }
         await execute_pan_residue_cleanup(payload)
     except Exception as exc:  # noqa: BLE001
         async with async_session() as db:

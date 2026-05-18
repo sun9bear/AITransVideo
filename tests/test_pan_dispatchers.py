@@ -301,20 +301,38 @@ def test_residue_cleanup_dispatcher_translates_signature_to_payload(tmp_path):
     _run(_go())
 
 
-def test_residue_cleanup_dispatcher_rejects_missing_backup_id(tmp_path):
-    """CodeX P2: dispatcher refuses if params lacks 'backup_id'. Phase 8
-    stale_reaper MUST include the specific BackupRecord row to act on."""
+def test_residue_cleanup_dispatcher_marks_failed_on_missing_backup_id(tmp_path):
+    """CodeX P2: missing 'backup_id' is surfaced as queue.mark_failed
+    (not an unhandled async exception). Validation runs INSIDE the
+    mark_running try block — without that, the BackgroundTask row would
+    sit at 'pending' while an unhandled exception flies into the event
+    loop."""
+    import background_task_queue as queue_mod
     import background_task_executors as bte
 
     async def _go():
         Session = await _setup_db()
         user_id = uuid.uuid4()
+        async with Session() as db:
+            task_id, _ = await queue_mod.create_task(
+                db, job_id='job_bad', user_id=user_id,
+                task_type='pan_residue_cleanup',
+                params={'user_id': str(user_id)},  # no backup_id
+            )
+            await db.commit()
+
         with patch.object(bte, 'async_session', Session):
-            with pytest.raises(ValueError, match='backup_id'):
-                await bte.execute_pan_residue_cleanup_dispatched(
-                    task_id=uuid.uuid4(), job_id='job_X',
-                    project_dir=tmp_path / 'x',
-                    params={'user_id': str(user_id)},  # no backup_id
-                )
+            # MUST NOT raise — dispatcher swallows the ValueError after
+            # marking the task failed.
+            await bte.execute_pan_residue_cleanup_dispatched(
+                task_id=task_id, job_id='job_bad',
+                project_dir=tmp_path / 'x',
+                params={'user_id': str(user_id)},
+            )
+
+        async with Session() as db:
+            task = await queue_mod.get_task(db, task_id=task_id, user_id=user_id)
+            assert task['status'] == 'failed', task
+            assert 'backup_id' in (task.get('error') or '')
 
     _run(_go())
