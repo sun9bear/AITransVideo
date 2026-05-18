@@ -257,6 +257,15 @@ async def _execute_pan_restore_impl(
                 staging_root = Path(staging_root)
             tar_path: Path | None = None
             heartbeat_task: asyncio.Task | None = None
+            # CodeX P1: after _move_into_place succeeds, project_dir is
+            # restored on disk — past this point the user-visible "did
+            # restore happen" answer is YES. Any subsequent DB finalize
+            # failure must NOT roll Job.status back to 'archived',
+            # otherwise the next restore attempt refuses ("project_dir
+            # already exists") and the operator is stuck. moved=True
+            # signals "leave status='restoring' for stale_reaper
+            # forward-resolve."
+            moved = False
 
             try:
                 # --- Flip BackupRecord.status to 'restoring' (lifecycle
@@ -327,6 +336,11 @@ async def _execute_pan_restore_impl(
                 await asyncio.to_thread(
                     _move_into_place, staged_project, project_dir,
                 )
+                # Past this point the restore is observably complete:
+                # the user's project_dir is on disk with verified contents.
+                # Any failure below is finalize-only (DB writes) — do NOT
+                # roll back via the except branch.
+                moved = True
 
                 # --- status='succeeded' + BackupRecord.status='restored' ---
                 async with conn.begin():
@@ -344,24 +358,44 @@ async def _execute_pan_restore_impl(
                 logger.info("pan_restore succeeded: job=%s br=%s", job_id, br_id)
 
             except Exception:
-                # Failure path: revert BOTH Job.status (→ 'archived') AND
-                # BackupRecord.status (→ 'uploaded' so the next attempt
-                # can re-pick this row). staging cleanup in finally.
-                try:
-                    async with conn.begin():
-                        await set_archive_status(
-                            user_id, job_id, 'archived', conn=conn,
-                        )
-                        await conn.execute(
-                            update(BackupRecord)
-                            .where(BackupRecord.id == br_id)
-                            .values(status='uploaded')
-                        )
-                except Exception as inner_exc:  # noqa: BLE001
+                if moved:
+                    # CodeX P1: hidden commit point — data is restored on
+                    # disk. DB finalize failed but rolling back to
+                    # 'archived' would create "restored on disk + DB
+                    # says archived" stuck state that the next restore
+                    # attempt refuses (project_dir already exists).
+                    # Leave Job + BackupRecord at 'restoring' for stale
+                    # reaper forward-resolve in Phase 8.
                     logger.error(
-                        "pan_restore status rollback failed (job=%s br=%s): %s",
-                        job_id, br_id, inner_exc,
+                        "pan_restore data was restored to disk but DB "
+                        "finalize failed (job=%s br=%s). project_dir is "
+                        "present and verified. Leaving status='restoring' "
+                        "for stale_reaper forward-resolve. Manual "
+                        "finalize: UPDATE jobs SET status='succeeded' "
+                        "WHERE job_id=%r; UPDATE backup_records SET "
+                        "status='restored', completed_at=NOW() WHERE "
+                        "id=%r;", job_id, br_id, job_id, str(br_id),
                     )
+                else:
+                    # Pre-move failure: revert BOTH Job.status (→ 'archived')
+                    # AND BackupRecord.status (→ 'uploaded' so the next
+                    # attempt can re-pick this row). staging cleanup in finally.
+                    try:
+                        async with conn.begin():
+                            await set_archive_status(
+                                user_id, job_id, 'archived', conn=conn,
+                            )
+                            await conn.execute(
+                                update(BackupRecord)
+                                .where(BackupRecord.id == br_id)
+                                .values(status='uploaded')
+                            )
+                    except Exception as inner_exc:  # noqa: BLE001
+                        logger.error(
+                            "pan_restore status rollback failed "
+                            "(job=%s br=%s): %s",
+                            job_id, br_id, inner_exc,
+                        )
                 raise
 
             finally:

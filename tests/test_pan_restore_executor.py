@@ -660,6 +660,90 @@ def test_default_staging_root_is_next_to_project_dir(monkeypatch, tmp_path):
     run_async(_go())
 
 
+def test_restore_does_not_rollback_after_successful_move(monkeypatch, tmp_path):
+    """CodeX P1: post-move DB finalize failure must NOT roll Job.status
+    back to 'archived'. The data has been restored to disk; rolling back
+    leaves a "restored on disk + DB says archived" stuck state — the
+    next restore attempt would refuse ("project_dir already exists")
+    and the operator is stuck. Leave status='restoring' for Phase 8
+    stale_reaper forward-resolve."""
+    import shutil
+    from models import Job, BackupRecord
+    from gateway.pan import status_mutator as sm_mod
+
+    setup_pan_token_env(monkeypatch)
+    user_id = uuid.uuid4()
+    job_id = 'job_post_move_fail'
+    project = make_project_dir(tmp_path, job_id=job_id, monkeypatch=monkeypatch)
+    original_snapshot = _snapshot_dir(project)
+
+    async def _go():
+        async with pan_test_engine() as engine:
+            await insert_sample_job(
+                engine, user_id=user_id, job_id=job_id,
+                status='succeeded', project_dir=str(project),
+            )
+            await insert_sample_pan_credentials(engine, user_id=user_id)
+
+            client = FakeBaiduPanClient()
+            await _run_backup(
+                {'job_id': job_id, 'user_id': str(user_id)},
+                engine=engine, client=client, rmtree_fn=shutil.rmtree,
+            )
+            # Post-backup: project_dir is gone, Job at 'archived',
+            # BackupRecord at 'uploaded'.
+
+            # Patch set_archive_status to fail when it tries to flip to
+            # 'succeeded' (post-move). The 'restoring' flip (pre-move)
+            # must succeed; the 'succeeded' flip must fail.
+            real_set = sm_mod.set_archive_status
+
+            async def patched(user_id_arg, job_id_arg, status_arg, *, conn):
+                if status_arg == 'succeeded':
+                    raise RuntimeError(
+                        'synthetic DB finalize failure after move'
+                    )
+                return await real_set(
+                    user_id_arg, job_id_arg, status_arg, conn=conn,
+                )
+
+            monkeypatch.setattr(sm_mod, 'set_archive_status', patched)
+
+            with pytest.raises(RuntimeError, match='synthetic DB finalize'):
+                await _run_restore(
+                    {'job_id': job_id, 'user_id': str(user_id)},
+                    engine=engine, client=client,
+                    staging_root=tmp_path / '_staging',
+                )
+
+            # ASSERTIONS:
+            # 1. project_dir is RESTORED on disk (the move succeeded).
+            assert project.exists()
+            assert _snapshot_dir(project) == original_snapshot
+
+            # 2. Job.status remains 'restoring' (NOT rolled back to 'archived').
+            #    The except branch must NOT call set_archive_status('archived')
+            #    when moved=True.
+            async with engine.connect() as conn:
+                job_status = (await conn.execute(
+                    select(Job.status).where(Job.job_id == job_id)
+                )).scalar_one()
+                br_status = (await conn.execute(
+                    select(BackupRecord.status)
+                    .where(BackupRecord.job_id == job_id)
+                )).scalar_one()
+            assert job_status == 'restoring', (
+                f"expected Job stuck at 'restoring' for stale_reaper "
+                f"forward-resolve, got {job_status!r}"
+            )
+            assert br_status == 'restoring', (
+                f"expected BackupRecord stuck at 'restoring' "
+                f"(matching Job state), got {br_status!r}"
+            )
+
+    run_async(_go())
+
+
 def test_restore_refuses_when_project_dir_outside_safe_root(monkeypatch, tmp_path):
     """CodeX P0: restore MUST refuse if Job.project_dir is not under any
     safe root, even when AIVIDEOTRANS_PROJECTS_DIR is unset (production
