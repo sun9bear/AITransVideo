@@ -301,6 +301,74 @@ def test_residue_cleanup_dispatcher_translates_signature_to_payload(tmp_path):
     _run(_go())
 
 
+@pytest.mark.parametrize('task_type,dispatcher_name,extra_params', [
+    ('pan_backup', 'execute_pan_backup_dispatched', {}),
+    ('pan_restore', 'execute_pan_restore_dispatched', {}),
+    # residue_cleanup also requires backup_id; provide it so the KeyError
+    # on user_id is the one we observe (not the earlier ValueError on
+    # missing backup_id — that's already covered by its own test).
+    ('pan_residue_cleanup', 'execute_pan_residue_cleanup_dispatched',
+     {'_backup_id_placeholder': True}),
+])
+def test_dispatcher_marks_failed_on_missing_user_id(
+    task_type, dispatcher_name, extra_params, tmp_path,
+):
+    """CodeX 2026-05-18 P2 strengthening: payload construction lives
+    INSIDE the mark_running try block, so KeyError on missing 'user_id'
+    must surface as queue.mark_failed (not an unhandled async exception
+    leaking into the event loop while BackgroundTask stays 'pending').
+
+    Parametrized across all three pan dispatchers — locks the contract
+    uniformly so a future refactor that hoists payload construction
+    above the try fails CI immediately."""
+    import background_task_queue as queue_mod
+    import background_task_executors as bte
+
+    async def _go():
+        Session = await _setup_db()
+        author_id = uuid.uuid4()
+        # Build params WITHOUT user_id. residue_cleanup additionally needs
+        # backup_id (otherwise its earlier ValueError fires before
+        # the KeyError we want to test).
+        params: dict = {}
+        if extra_params.get('_backup_id_placeholder'):
+            params['backup_id'] = str(uuid.uuid4())
+
+        async with Session() as db:
+            task_id, _ = await queue_mod.create_task(
+                db, job_id='job_no_uid', user_id=author_id,
+                task_type=task_type,
+                params=params,
+            )
+            await db.commit()
+
+        dispatcher = getattr(bte, dispatcher_name)
+
+        with patch.object(bte, 'async_session', Session):
+            # MUST NOT raise — KeyError is caught and routed to mark_failed.
+            await dispatcher(
+                task_id=task_id, job_id='job_no_uid',
+                project_dir=tmp_path / 'x',
+                params=params,
+            )
+
+        async with Session() as db:
+            task = await queue_mod.get_task(
+                db, task_id=task_id, user_id=author_id,
+            )
+            assert task['status'] == 'failed', (
+                f"{dispatcher_name}: expected 'failed', got {task}"
+            )
+            # KeyError repr contains 'user_id'.
+            err = task.get('error') or ''
+            assert 'user_id' in err, (
+                f"{dispatcher_name}: expected 'user_id' in error message, "
+                f"got {err!r}"
+            )
+
+    _run(_go())
+
+
 def test_residue_cleanup_dispatcher_marks_failed_on_missing_backup_id(tmp_path):
     """CodeX P2: missing 'backup_id' is surfaced as queue.mark_failed
     (not an unhandled async exception). Validation runs INSIDE the
