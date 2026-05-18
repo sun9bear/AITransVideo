@@ -19,7 +19,7 @@ import pytest
 
 def test_pan_lock_key_is_deterministic_within_process():
     """Same input → same output within a single Python process."""
-    from gateway.pan._lock_keys import pan_lock_key
+    from pan._lock_keys import pan_lock_key
     user_id = uuid.UUID('12345678-1234-1234-1234-1234567890ab')
     job_id = 'job_xyz'
     k1 = pan_lock_key(user_id, job_id)
@@ -39,7 +39,7 @@ def test_pan_lock_key_is_deterministic_across_processes():
     script = (
         "import sys, uuid\n"
         f"sys.path.insert(0, {str(Path(__file__).resolve().parent.parent / 'gateway')!r})\n"
-        "from gateway.pan._lock_keys import pan_lock_key\n"
+        "from pan._lock_keys import pan_lock_key\n"
         f"k = pan_lock_key(uuid.UUID({str(user_id)!r}), {job_id!r})\n"
         "print(k)\n"
     )
@@ -50,7 +50,7 @@ def test_pan_lock_key_is_deterministic_across_processes():
     assert proc.returncode == 0, f"subprocess failed: {proc.stderr}"
     subprocess_value = int(proc.stdout.strip())
 
-    from gateway.pan._lock_keys import pan_lock_key
+    from pan._lock_keys import pan_lock_key
     in_process_value = pan_lock_key(user_id, job_id)
 
     assert subprocess_value == in_process_value, (
@@ -63,7 +63,7 @@ def test_pan_lock_key_is_deterministic_across_processes():
 def test_pan_lock_key_fits_signed_int64():
     """pg_advisory_lock(bigint) requires the key be representable as
     signed int64. Range check on a few sample inputs."""
-    from gateway.pan._lock_keys import pan_lock_key
+    from pan._lock_keys import pan_lock_key
     INT64_MIN = -(2 ** 63)
     INT64_MAX = 2 ** 63 - 1
     samples = [
@@ -77,7 +77,7 @@ def test_pan_lock_key_fits_signed_int64():
 def test_pan_lock_key_different_inputs_yield_different_keys():
     """Sanity: distinct (user_id, job_id) pairs should yield distinct
     keys (very high probability with sha256-derived bits)."""
-    from gateway.pan._lock_keys import pan_lock_key
+    from pan._lock_keys import pan_lock_key
     inputs = [(uuid.uuid4(), f'job_{i}') for i in range(50)]
     keys = {pan_lock_key(u, j) for u, j in inputs}
     assert len(keys) == len(inputs), "unexpected collision in lock keys"
@@ -85,7 +85,7 @@ def test_pan_lock_key_different_inputs_yield_different_keys():
 
 def test_pan_lock_key_changes_when_user_or_job_changes():
     """Changing either user_id or job_id changes the key."""
-    from gateway.pan._lock_keys import pan_lock_key
+    from pan._lock_keys import pan_lock_key
     u1 = uuid.UUID('11111111-1111-1111-1111-111111111111')
     u2 = uuid.UUID('22222222-2222-2222-2222-222222222222')
 
@@ -104,7 +104,7 @@ def test_pan_lock_key_pinned_value_for_regression_lockdown():
     Production deployments will have advisory locks built around this
     key — changing it would mean ongoing backups suddenly stop
     serializing with each other after deploy."""
-    from gateway.pan._lock_keys import pan_lock_key
+    from pan._lock_keys import pan_lock_key
     user_id = uuid.UUID('12345678-1234-1234-1234-1234567890ab')
     job_id = 'pinned_regression_job'
     # Computed once and recorded — DO NOT change unless deliberately

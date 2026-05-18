@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from cryptography.fernet import Fernet
 
-from gateway.config import settings
+from config import settings
 
 
 def _cipher() -> Fernet:

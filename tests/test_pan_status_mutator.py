@@ -88,7 +88,7 @@ async def _setup_engine_with_job(
 def test_set_archive_status_writes_pg(tmp_path):
     """conn.execute(UPDATE Job.status) lands on the PG row."""
     from models import Job
-    from gateway.pan.status_mutator import set_archive_status
+    from pan.status_mutator import set_archive_status
 
     job_id = 'job_pg_update'
     user_id = uuid.uuid4()
@@ -116,7 +116,7 @@ def test_set_archive_status_writes_pg(tmp_path):
 def test_set_archive_status_supports_all_three_new_statuses(tmp_path):
     """archiving / archived / restoring all writable (plan §3.1 triplet)."""
     from models import Job
-    from gateway.pan.status_mutator import set_archive_status
+    from pan.status_mutator import set_archive_status
 
     async def _go() -> None:
         for new_status in ('archiving', 'archived', 'restoring'):
@@ -144,7 +144,7 @@ def test_set_archive_status_supports_all_three_new_statuses(tmp_path):
 
 def test_set_archive_status_writes_json_mirror(tmp_path, monkeypatch):
     """If {jobs_dir}/{job_id}.json exists, status field is updated in place."""
-    from gateway.pan.status_mutator import set_archive_status
+    from pan.status_mutator import set_archive_status
 
     job_id = 'job_json_mirror'
     user_id = uuid.uuid4()
@@ -177,7 +177,7 @@ def test_set_archive_status_skips_missing_json(tmp_path, monkeypatch):
     """If JSON file doesn't exist, function returns silently (no exception).
     Gateway-only states (archiving/archived/restoring) may not have a JSON
     counterpart; PG is authoritative."""
-    from gateway.pan.status_mutator import set_archive_status
+    from pan.status_mutator import set_archive_status
 
     job_id = 'job_no_json'
     user_id = uuid.uuid4()
@@ -203,7 +203,7 @@ def test_set_archive_status_logs_but_doesnt_raise_on_json_corrupt(
 ):
     """JSON read/write failure → log WARNING, do NOT raise. Backup records
     are the source of truth; JSON mirror is best-effort."""
-    from gateway.pan.status_mutator import set_archive_status
+    from pan.status_mutator import set_archive_status
     import logging
 
     job_id = 'job_json_corrupt'
@@ -234,7 +234,7 @@ def test_set_archive_status_logs_but_doesnt_raise_on_json_corrupt(
 
 def test_set_archive_status_preserves_unicode_in_json(tmp_path, monkeypatch):
     """Non-ASCII fields survive read-modify-write round-trip."""
-    from gateway.pan.status_mutator import set_archive_status
+    from pan.status_mutator import set_archive_status
 
     job_id = 'job_unicode'
     user_id = uuid.uuid4()
@@ -309,7 +309,7 @@ def test_status_mutator_does_not_import_mirror_module():
 def test_status_mutator_module_has_documented_no_mirror_rationale():
     """The docstring must explicitly document the "no mirror" rule so future
     readers know it's intentional. Lock the rationale alongside the code."""
-    from gateway.pan import status_mutator as sm
+    from pan import status_mutator as sm
     doc = (sm.__doc__ or '').lower()
     assert 'mirror' in doc
     assert 'not' in doc or 'does not' in doc or "doesn't" in doc.replace("'", "'")
@@ -322,7 +322,7 @@ def test_set_archive_status_raises_on_zero_row_update(tmp_path, monkeypatch):
     """If the (user_id, job_id) pair doesn't match any row, raise BEFORE
     touching JSON. Without this guard, a mismatched call could update a
     stale JSON while PG was untouched → PG/JSON split-brain (CodeX P1)."""
-    from gateway.pan.status_mutator import set_archive_status
+    from pan.status_mutator import set_archive_status
 
     real_job_id = 'job_real'
     real_user = uuid.uuid4()
@@ -367,7 +367,7 @@ def test_set_archive_status_raises_on_user_id_mismatch_same_job_id(
     not impossible). Passing the wrong user_id must NOT update the wrong
     user's row — the (user_id, job_id) WHERE clause filters, and a
     0-row UPDATE must raise."""
-    from gateway.pan.status_mutator import set_archive_status
+    from pan.status_mutator import set_archive_status
 
     job_id = 'job_shared_name'
     user_a = uuid.uuid4()

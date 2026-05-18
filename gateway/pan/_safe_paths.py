@@ -29,7 +29,7 @@ def safe_project_roots() -> tuple[Path, ...]:
 
     Returns: tuple of ``Path`` objects, never empty.
     """
-    from gateway.project_cleanup import DEFAULT_SAFE_PROJECT_ROOTS
+    from project_cleanup import DEFAULT_SAFE_PROJECT_ROOTS
 
     env_root = (os.environ.get('AIVIDEOTRANS_PROJECTS_DIR') or '').strip()
     if env_root:
@@ -52,7 +52,7 @@ def verify_project_dir_safe(project_dir: Path) -> None:
     Used by backup_executor (pre-COMMIT step e), restore_executor (before
     os.replace into project_dir), and residue_cleanup (before rmtree).
     """
-    from gateway.project_cleanup import _is_safe_project_dir
+    from project_cleanup import _is_safe_project_dir
 
     roots = safe_project_roots()
     if not _is_safe_project_dir(project_dir, safe_roots=roots):

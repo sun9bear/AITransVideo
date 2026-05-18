@@ -93,9 +93,9 @@ async def _execute_pan_residue_cleanup_impl(
       6. Release lock
     """
     from models import Job, BackupRecord
-    from gateway.pan.status_mutator import set_archive_status
+    from pan.status_mutator import set_archive_status
 
-    from gateway.pan._lock_keys import pan_lock_key
+    from pan._lock_keys import pan_lock_key
 
     job_id: str = payload['job_id']
     user_id: _uuid.UUID = _uuid.UUID(payload['user_id'])
@@ -194,7 +194,7 @@ async def _execute_pan_residue_cleanup_impl(
             # used by TTL cleanup + backup_executor. The previous code had
             # NO safety check here — directly rmtree'd whatever Job.project_dir
             # pointed at (a poisoned row could have cascaded).
-            from gateway.pan._safe_paths import verify_project_dir_safe
+            from pan._safe_paths import verify_project_dir_safe
             rmtree_ok = True
             if project_dir_str:
                 project_dir = Path(project_dir_str).resolve()
@@ -300,6 +300,6 @@ async def _release_advisory_lock(conn: AsyncConnection, key: int) -> None:
 def _default_r2_delete(r2_key: str) -> None:
     """Production R2 delete via shared boto3 client (idempotent on 404)."""
     from config import settings  # noqa: PLC0415
-    from gateway.storage.r2_client import _get_client  # noqa: PLC0415
+    from storage.r2_client import _get_client  # noqa: PLC0415
     client = _get_client()
     client.delete_object(Bucket=settings.r2_artifacts_bucket, Key=r2_key)

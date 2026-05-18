@@ -116,7 +116,7 @@ def test_insert_sample_job_accepts_custom_status_and_artifacts():
 
 def test_insert_sample_pan_credentials_round_trip(monkeypatch):
     """Tokens encrypt on insert + decrypt back via token_crypto."""
-    from gateway.pan.token_crypto import decrypt_token
+    from pan.token_crypto import decrypt_token
     from models import PanCredentials
 
     setup_pan_token_env(monkeypatch)

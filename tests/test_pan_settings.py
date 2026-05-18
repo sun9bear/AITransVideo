@@ -10,7 +10,7 @@ from cryptography.fernet import Fernet
 
 def _reload_settings_module():
     """Force re-import so env var changes take effect."""
-    import gateway.config as cfg
+    import config as cfg
     importlib.reload(cfg)
     return cfg
 

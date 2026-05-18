@@ -24,7 +24,7 @@ def test_walk_project_dir_inventory(tmp_path: Path):
     (project / 'tts').mkdir()
     (project / 'tts' / 'seg_0.wav').write_bytes(b'\x00' * 1024)
 
-    from gateway.pan.manifest import walk_project_dir_inventory
+    from pan.manifest import walk_project_dir_inventory
     inventory = walk_project_dir_inventory(project)
 
     paths = sorted(item['path'] for item in inventory)
@@ -43,7 +43,7 @@ def test_inventory_skips_empty_dirs_and_uses_posix_separators(tmp_path: Path):
     (project / 'sub' / 'deep').mkdir(parents=True)
     (project / 'sub' / 'deep' / 'leaf.bin').write_bytes(b'leaf')
 
-    from gateway.pan.manifest import walk_project_dir_inventory
+    from pan.manifest import walk_project_dir_inventory
     inventory = walk_project_dir_inventory(project)
 
     assert len(inventory) == 1
@@ -60,7 +60,7 @@ def test_inventory_is_sorted_for_determinism(tmp_path: Path):
     (project / 'a_first.txt').write_text('a')
     (project / 'm_middle.txt').write_text('m')
 
-    from gateway.pan.manifest import walk_project_dir_inventory
+    from pan.manifest import walk_project_dir_inventory
     inventory = walk_project_dir_inventory(project)
     paths = [i['path'] for i in inventory]
     assert paths == sorted(paths)
@@ -75,7 +75,7 @@ def test_inventory_sha256_streamed_for_large_file(tmp_path: Path):
     payload = b'X' * (3 * 1024 * 1024 + 7)  # 3MB + 7 bytes, crosses chunk boundary
     (project / 'big.bin').write_bytes(payload)
 
-    from gateway.pan.manifest import walk_project_dir_inventory
+    from pan.manifest import walk_project_dir_inventory
     inventory = walk_project_dir_inventory(project)
 
     assert len(inventory) == 1
@@ -91,7 +91,7 @@ def test_build_manifest_includes_all_required_fields(tmp_path: Path):
     (project / 'transcript').mkdir(parents=True)
     (project / 'transcript' / 'review.json').write_text('{}')
 
-    from gateway.pan.manifest import build_manifest
+    from pan.manifest import build_manifest
     job_record_snapshot = {'job_id': 'job_abc', 'status': 'archiving', 'edit_generation': 0}
     r2_artifacts = [{
         'artifact_key': 'publish.dubbed_video',
@@ -119,7 +119,7 @@ def test_build_manifest_r2_artifacts_is_a_copy_not_alias(tmp_path: Path):
     project.mkdir()
     (project / 'noop.txt').write_text('x')
 
-    from gateway.pan.manifest import build_manifest
+    from pan.manifest import build_manifest
     r2 = [{'artifact_key': 'a', 'r2_key': 'k1'}]
     m = build_manifest(project_dir=project, job_record={'job_id': 'job_d'}, r2_artifacts=r2)
     r2.append({'artifact_key': 'b', 'r2_key': 'k2'})
@@ -135,7 +135,7 @@ def test_build_manifest_deepcopies_nested_dicts(tmp_path: Path):
     project.mkdir()
     (project / 'x.txt').write_text('x')
 
-    from gateway.pan.manifest import build_manifest
+    from pan.manifest import build_manifest
 
     job_record = {'job_id': 'job_dc', 'status': 'archiving', 'meta': {'count': 1}}
     r2 = [{'artifact_key': 'publish.dubbed_video', 'tags': ['cn']}]
@@ -162,7 +162,7 @@ def test_build_manifest_empty_project_dir(tmp_path: Path):
     project = tmp_path / 'job_empty'
     project.mkdir()
 
-    from gateway.pan.manifest import build_manifest
+    from pan.manifest import build_manifest
     m = build_manifest(project_dir=project, job_record={'job_id': 'job_empty'},
                        r2_artifacts=[])
 
@@ -178,7 +178,7 @@ def test_build_manifest_created_at_is_recent_utc(tmp_path: Path):
     project = tmp_path / 'job_t'
     project.mkdir()
 
-    from gateway.pan.manifest import build_manifest
+    from pan.manifest import build_manifest
     m = build_manifest(project_dir=project, job_record={}, r2_artifacts=[])
 
     parsed = dt.datetime.fromisoformat(m['created_at_utc'])
@@ -198,7 +198,7 @@ def test_write_tar_with_manifest_first_entry(tmp_path: Path):
     project.mkdir()
     (project / 'a.txt').write_text('hello')
 
-    from gateway.pan.manifest import write_tar_with_manifest
+    from pan.manifest import write_tar_with_manifest
     write_tar_with_manifest(tar_path, manifest, project)
 
     with tarfile.open(tar_path, 'r:gz') as tf:
@@ -220,7 +220,7 @@ def test_write_tar_preserves_project_dir_layout(tmp_path: Path):
     (project / 'tts').mkdir()
     (project / 'tts' / 'a.wav').write_bytes(b'\x00\x01')
 
-    from gateway.pan.manifest import write_tar_with_manifest
+    from pan.manifest import write_tar_with_manifest
     write_tar_with_manifest(tar_path, {'backup_format_version': 1}, project)
 
     with tarfile.open(tar_path, 'r:gz') as tf:
@@ -243,7 +243,7 @@ def test_write_tar_handles_unicode_in_manifest(tmp_path: Path):
         'backup_format_version': 1,
         'job_record': {'job_id': 'job_u', 'note': '配音任务 ✨'},
     }
-    from gateway.pan.manifest import write_tar_with_manifest
+    from pan.manifest import write_tar_with_manifest
     write_tar_with_manifest(tar_path, manifest, project)
 
     with tarfile.open(tar_path, 'r:gz') as tf:
@@ -257,7 +257,7 @@ def test_write_tar_handles_unicode_in_manifest(tmp_path: Path):
 
 def test_read_manifest_round_trip(tmp_path: Path):
     """Write a tar, read manifest back — should deep-equal the original."""
-    from gateway.pan.manifest import write_tar_with_manifest, read_manifest_from_tar
+    from pan.manifest import write_tar_with_manifest, read_manifest_from_tar
     tar_path = tmp_path / 'backup.tar.gz'
     project = tmp_path / 'job_xyz'
     project.mkdir()
@@ -282,7 +282,7 @@ def test_read_manifest_missing_raises(tmp_path: Path):
         info.size = 5
         tf.addfile(info, io.BytesIO(b'hello'))
 
-    from gateway.pan.manifest import read_manifest_from_tar
+    from pan.manifest import read_manifest_from_tar
     with pytest.raises(RuntimeError, match='manifest.json'):
         read_manifest_from_tar(tar_path)
 
@@ -296,7 +296,7 @@ def test_read_manifest_directory_entry_raises(tmp_path: Path):
         info.type = tarfile.DIRTYPE
         tf.addfile(info)
 
-    from gateway.pan.manifest import read_manifest_from_tar
+    from pan.manifest import read_manifest_from_tar
     with pytest.raises(RuntimeError, match='directory entry'):
         read_manifest_from_tar(tar_path)
 
@@ -311,7 +311,7 @@ def test_read_manifest_invalid_json_propagates(tmp_path: Path):
         info.size = len(body)
         tf.addfile(info, io.BytesIO(body))
 
-    from gateway.pan.manifest import read_manifest_from_tar
+    from pan.manifest import read_manifest_from_tar
     with pytest.raises(json.JSONDecodeError):
         read_manifest_from_tar(tar_path)
 
@@ -345,7 +345,7 @@ def test_inventory_rejects_file_symlink(tmp_path: Path):
     if not _try_make_symlink(target, link):
         pytest.skip('symlink creation not supported on this platform')
 
-    from gateway.pan.manifest import walk_project_dir_inventory
+    from pan.manifest import walk_project_dir_inventory
     with pytest.raises(RuntimeError, match='symlink|link entry'):
         walk_project_dir_inventory(project)
 
@@ -362,7 +362,7 @@ def test_inventory_rejects_symlink_to_outside_project(tmp_path: Path):
     if not _try_make_symlink(outside, link):
         pytest.skip('symlink creation not supported on this platform')
 
-    from gateway.pan.manifest import walk_project_dir_inventory
+    from pan.manifest import walk_project_dir_inventory
     with pytest.raises(RuntimeError, match='symlink'):
         walk_project_dir_inventory(project)
 
@@ -378,7 +378,7 @@ def test_inventory_rejects_dangling_symlink(tmp_path: Path):
     if not _try_make_symlink(nonexistent, link):
         pytest.skip('symlink creation not supported on this platform')
 
-    from gateway.pan.manifest import walk_project_dir_inventory
+    from pan.manifest import walk_project_dir_inventory
     with pytest.raises(RuntimeError, match='symlink'):
         walk_project_dir_inventory(project)
 
@@ -403,7 +403,7 @@ def test_write_tar_rejects_symlink_defense_in_depth(tmp_path: Path):
     # divergence between manifest computation and tar writing).
     fake_manifest = {'backup_format_version': 1, 'file_inventory': []}
 
-    from gateway.pan.manifest import write_tar_with_manifest
+    from pan.manifest import write_tar_with_manifest
     with pytest.raises(RuntimeError, match='symlink'):
         write_tar_with_manifest(tar_path, fake_manifest, project)
 
@@ -427,7 +427,7 @@ def test_tar_paths_strip_to_inventory_paths(tmp_path: Path):
     silently skip all files (no match found) and pass on a damaged restore.
     This test locks the contract NOW so a future verifier mistake fails loud.
     """
-    from gateway.pan.manifest import build_manifest, write_tar_with_manifest
+    from pan.manifest import build_manifest, write_tar_with_manifest
 
     project = tmp_path / 'job_contract'
     (project / 'transcript').mkdir(parents=True)
@@ -468,7 +468,7 @@ def test_tar_paths_strip_to_inventory_paths(tmp_path: Path):
 def test_tar_paths_include_dir_entries_but_inventory_does_not(tmp_path: Path):
     """Side-contract: tar also contains directory entries (transcript/, tts/),
     but file_inventory MUST NOT — verifier should never try to sha256 a dir."""
-    from gateway.pan.manifest import build_manifest, write_tar_with_manifest
+    from pan.manifest import build_manifest, write_tar_with_manifest
 
     project = tmp_path / 'job_dirs'
     (project / 'subdir').mkdir(parents=True)

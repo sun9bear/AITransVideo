@@ -41,7 +41,7 @@ async def _run_backup(
     payload, *, engine, client, rmtree_fn=_noop_rmtree,
     r2_delete_fn=_noop_r2_delete,
 ):
-    from gateway.pan.backup_executor import _execute_pan_backup_impl
+    from pan.backup_executor import _execute_pan_backup_impl
 
     await _execute_pan_backup_impl(
         payload,
@@ -54,7 +54,7 @@ async def _run_backup(
 
 
 async def _run_restore(payload, *, engine, client, staging_root=None):
-    from gateway.pan.restore_executor import _execute_pan_restore_impl
+    from pan.restore_executor import _execute_pan_restore_impl
 
     await _execute_pan_restore_impl(
         payload,
@@ -356,7 +356,7 @@ def test_status_rolls_back_on_inventory_verify_failure(monkeypatch, tmp_path):
     project = make_project_dir(tmp_path, job_id=job_id, monkeypatch=monkeypatch)
 
     # Patch _verify_inventory to raise.
-    from gateway.pan import restore_executor as re_mod
+    from pan import restore_executor as re_mod
 
     def fake_verify(staged, inv):
         raise RuntimeError('synthetic inventory failure')
@@ -604,7 +604,7 @@ def test_default_staging_root_is_next_to_project_dir(monkeypatch, tmp_path):
     move with partial-destination on failure.
     """
     import shutil
-    from gateway.pan import restore_executor as re_mod
+    from pan import restore_executor as re_mod
 
     setup_pan_token_env(monkeypatch)
     user_id = uuid.uuid4()
@@ -669,7 +669,7 @@ def test_restore_does_not_rollback_after_successful_move(monkeypatch, tmp_path):
     stale_reaper forward-resolve."""
     import shutil
     from models import Job, BackupRecord
-    from gateway.pan import status_mutator as sm_mod
+    from pan import status_mutator as sm_mod
 
     setup_pan_token_env(monkeypatch)
     user_id = uuid.uuid4()
@@ -784,7 +784,7 @@ def test_restore_refuses_when_project_dir_outside_safe_root(monkeypatch, tmp_pat
 def test_move_into_place_refuses_when_project_dir_exists(tmp_path):
     """CodeX P1-2: refuse to overwrite an existing project_dir. Forces
     operator inspection rather than blindly destroying state."""
-    from gateway.pan.restore_executor import _move_into_place
+    from pan.restore_executor import _move_into_place
 
     project = tmp_path / 'job_existing'
     project.mkdir()
@@ -861,7 +861,7 @@ def test_restore_rejects_mismatched_edit_generation(monkeypatch, tmp_path):
 def test_verify_inventory_passes_on_correct_files(tmp_path):
     """Happy path: inventory matches actual files."""
     import hashlib
-    from gateway.pan.restore_executor import _verify_inventory
+    from pan.restore_executor import _verify_inventory
 
     staged = tmp_path / 'job_x'
     (staged / 'sub').mkdir(parents=True)
@@ -877,7 +877,7 @@ def test_verify_inventory_passes_on_correct_files(tmp_path):
 
 
 def test_verify_inventory_raises_on_missing_file(tmp_path):
-    from gateway.pan.restore_executor import _verify_inventory
+    from pan.restore_executor import _verify_inventory
 
     staged = tmp_path / 'job_x'
     staged.mkdir()
@@ -891,7 +891,7 @@ def test_verify_inventory_raises_on_missing_file(tmp_path):
 
 
 def test_verify_inventory_raises_on_size_mismatch(tmp_path):
-    from gateway.pan.restore_executor import _verify_inventory
+    from pan.restore_executor import _verify_inventory
 
     staged = tmp_path / 'job_x'
     staged.mkdir()
@@ -913,7 +913,7 @@ def test_post_lock_re_read_detects_concurrent_state_change(monkeypatch, tmp_path
     stale snapshot and corrupt state."""
     import shutil
     from models import Job
-    from gateway.pan import restore_executor as re_mod
+    from pan import restore_executor as re_mod
 
     setup_pan_token_env(monkeypatch)
     user_id = uuid.uuid4()
@@ -923,7 +923,7 @@ def test_post_lock_re_read_detects_concurrent_state_change(monkeypatch, tmp_path
     # restore_executor imports _acquire_advisory_lock function-locally
     # from backup_executor, so we patch the source module — the function
     # re-imports on each call and will see the patch.
-    from gateway.pan import backup_executor as be_mod
+    from pan import backup_executor as be_mod
     real_acquire = be_mod._acquire_advisory_lock
     engine_holder: list = []
 
@@ -981,7 +981,7 @@ def test_post_lock_re_read_detects_concurrent_state_change(monkeypatch, tmp_path
 
 
 def test_verify_inventory_raises_on_sha256_mismatch(tmp_path):
-    from gateway.pan.restore_executor import _verify_inventory
+    from pan.restore_executor import _verify_inventory
 
     staged = tmp_path / 'job_x'
     staged.mkdir()

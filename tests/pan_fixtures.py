@@ -120,7 +120,7 @@ def setup_pan_token_env(monkeypatch) -> str:
     monkeypatch.setenv('AVT_PAN_TOKEN_ENCRYPTION_KEY', test_key)
 
     # 1. Dotted form — gateway.pan.token_crypto, gateway.pan.status_mutator, …
-    from gateway.config import settings as gw_settings
+    from config import settings as gw_settings
     monkeypatch.setattr(gw_settings, 'pan_token_encryption_key', test_key,
                         raising=False)
 
@@ -184,7 +184,7 @@ async def insert_sample_pan_credentials(
     setup_pan_token_env() MUST be called first so token_crypto can encrypt.
     """
     from models import PanCredentials
-    from gateway.pan.token_crypto import encrypt_token
+    from pan.token_crypto import encrypt_token
 
     row_id = uuid.uuid4()
     access_enc = encrypt_token(access_token)

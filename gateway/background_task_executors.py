@@ -372,7 +372,7 @@ async def execute_pan_backup_dispatched(
     params: dict[str, Any],
 ) -> None:
     """Dispatcher adapter for `pan_backup` task type."""
-    from gateway.pan.backup_executor import execute_pan_backup
+    from pan.backup_executor import execute_pan_backup
 
     payload = {
         'job_id': job_id,
@@ -400,7 +400,7 @@ async def execute_pan_restore_dispatched(
     params: dict[str, Any],
 ) -> None:
     """Dispatcher adapter for `pan_restore` task type."""
-    from gateway.pan.restore_executor import execute_pan_restore
+    from pan.restore_executor import execute_pan_restore
 
     payload = {
         'job_id': job_id,
@@ -433,7 +433,7 @@ async def execute_pan_residue_cleanup_dispatched(
     by (user_id, job_id) is ambiguous when prior failed attempts left
     multiple BackupRecord rows.
     """
-    from gateway.pan.residue_cleanup import execute_pan_residue_cleanup
+    from pan.residue_cleanup import execute_pan_residue_cleanup
 
     if 'backup_id' not in params:
         raise ValueError(

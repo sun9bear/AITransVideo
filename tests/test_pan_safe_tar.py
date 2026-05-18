@@ -51,7 +51,7 @@ def _make_tar_with_member(
 def test_safe_extract_rejects_dotdot_path(tmp_path: Path):
     tar = tmp_path / 'malicious.tar.gz'
     _make_tar_with_member(tar, '../etc/passwd', content=b'evil')
-    from gateway.pan.manifest import safe_extract_tar
+    from pan.manifest import safe_extract_tar
     dest = tmp_path / 'extract'
     with pytest.raises(RuntimeError, match=r'unsafe.*\.\.'):
         safe_extract_tar(tar, dest)
@@ -64,7 +64,7 @@ def test_safe_extract_rejects_deep_dotdot_in_middle(tmp_path: Path):
     """`a/../../b` traversal — `..` in middle of path is still unsafe."""
     tar = tmp_path / 'mal.tar.gz'
     _make_tar_with_member(tar, 'a/../../escaped.bin', content=b'evil')
-    from gateway.pan.manifest import safe_extract_tar
+    from pan.manifest import safe_extract_tar
     dest = tmp_path / 'extract'
     with pytest.raises(RuntimeError, match=r'unsafe.*\.\.'):
         safe_extract_tar(tar, dest)
@@ -73,7 +73,7 @@ def test_safe_extract_rejects_deep_dotdot_in_middle(tmp_path: Path):
 def test_safe_extract_rejects_absolute_path(tmp_path: Path):
     tar = tmp_path / 'malicious.tar.gz'
     _make_tar_with_member(tar, '/etc/passwd', content=b'evil')
-    from gateway.pan.manifest import safe_extract_tar
+    from pan.manifest import safe_extract_tar
     dest = tmp_path / 'extract'
     with pytest.raises(RuntimeError, match='unsafe.*absolute'):
         safe_extract_tar(tar, dest)
@@ -84,7 +84,7 @@ def test_safe_extract_rejects_symlink(tmp_path: Path):
     _make_tar_with_member(
         tar, 'link_to_root', is_symlink=True, link_target='/etc/passwd'
     )
-    from gateway.pan.manifest import safe_extract_tar
+    from pan.manifest import safe_extract_tar
     dest = tmp_path / 'extract'
     with pytest.raises(RuntimeError, match='unsafe.*symlink'):
         safe_extract_tar(tar, dest)
@@ -96,7 +96,7 @@ def test_safe_extract_rejects_hardlink(tmp_path: Path):
     _make_tar_with_member(
         tar, 'hard_link', is_hardlink=True, link_target='/etc/passwd'
     )
-    from gateway.pan.manifest import safe_extract_tar
+    from pan.manifest import safe_extract_tar
     dest = tmp_path / 'extract'
     with pytest.raises(RuntimeError, match='unsafe.*(symlink|hardlink)'):
         safe_extract_tar(tar, dest)
@@ -105,7 +105,7 @@ def test_safe_extract_rejects_hardlink(tmp_path: Path):
 def test_safe_extract_allows_normal_files(tmp_path: Path):
     tar = tmp_path / 'good.tar.gz'
     _make_tar_with_member(tar, 'transcript/seg.json', content=b'{}')
-    from gateway.pan.manifest import safe_extract_tar
+    from pan.manifest import safe_extract_tar
     dest = tmp_path / 'extract'
     safe_extract_tar(tar, dest)
     assert (dest / 'transcript' / 'seg.json').read_bytes() == b'{}'
@@ -113,7 +113,7 @@ def test_safe_extract_allows_normal_files(tmp_path: Path):
 
 def test_safe_extract_allows_nested_directory_layout(tmp_path: Path):
     """The realistic backup tar layout (manifest.json + job_xyz/*) extracts cleanly."""
-    from gateway.pan.manifest import (
+    from pan.manifest import (
         build_manifest,
         write_tar_with_manifest,
         safe_extract_tar,
@@ -153,7 +153,7 @@ def test_safe_extract_aborts_before_any_byte_written(tmp_path: Path):
         mal_info.size = 4
         tf.addfile(mal_info, io.BytesIO(b'evil'))
 
-    from gateway.pan.manifest import safe_extract_tar
+    from pan.manifest import safe_extract_tar
     dest = tmp_path / 'extract'
     with pytest.raises(RuntimeError, match=r'unsafe.*\.\.'):
         safe_extract_tar(tar, dest)
@@ -166,7 +166,7 @@ def test_safe_extract_creates_dest_if_missing(tmp_path: Path):
     """If dest doesn't exist yet, safe_extract_tar creates it (parents too)."""
     tar = tmp_path / 'g.tar.gz'
     _make_tar_with_member(tar, 'inner/x.txt', content=b'x')
-    from gateway.pan.manifest import safe_extract_tar
+    from pan.manifest import safe_extract_tar
     dest = tmp_path / 'newly' / 'made' / 'dest'
     safe_extract_tar(tar, dest)
     assert (dest / 'inner' / 'x.txt').read_bytes() == b'x'
@@ -180,7 +180,7 @@ def test_safe_extract_rejects_character_device(tmp_path: Path):
     isfile()/isdir() allowlist — CodeX P1."""
     tar = tmp_path / 'chr.tar.gz'
     _make_tar_with_member(tar, 'evil_char_dev', type_override=tarfile.CHRTYPE)
-    from gateway.pan.manifest import safe_extract_tar
+    from pan.manifest import safe_extract_tar
     dest = tmp_path / 'extract'
     with pytest.raises(RuntimeError, match='unsafe entry type'):
         safe_extract_tar(tar, dest)
@@ -191,7 +191,7 @@ def test_safe_extract_rejects_block_device(tmp_path: Path):
     """BLKTYPE entries (block device nodes) — CodeX P1."""
     tar = tmp_path / 'blk.tar.gz'
     _make_tar_with_member(tar, 'evil_block_dev', type_override=tarfile.BLKTYPE)
-    from gateway.pan.manifest import safe_extract_tar
+    from pan.manifest import safe_extract_tar
     dest = tmp_path / 'extract'
     with pytest.raises(RuntimeError, match='unsafe entry type'):
         safe_extract_tar(tar, dest)
@@ -201,7 +201,7 @@ def test_safe_extract_rejects_fifo(tmp_path: Path):
     """FIFOTYPE entries (named pipes) — CodeX P1."""
     tar = tmp_path / 'fifo.tar.gz'
     _make_tar_with_member(tar, 'evil_fifo', type_override=tarfile.FIFOTYPE)
-    from gateway.pan.manifest import safe_extract_tar
+    from pan.manifest import safe_extract_tar
     dest = tmp_path / 'extract'
     with pytest.raises(RuntimeError, match='unsafe entry type'):
         safe_extract_tar(tar, dest)
@@ -213,7 +213,7 @@ def test_safe_extract_rejects_contiguous_file(tmp_path: Path):
     blocked by the same isfile()/isdir() check."""
     tar = tmp_path / 'cont.tar.gz'
     _make_tar_with_member(tar, 'cont_file', type_override=tarfile.CONTTYPE)
-    from gateway.pan.manifest import safe_extract_tar
+    from pan.manifest import safe_extract_tar
     dest = tmp_path / 'extract'
     with pytest.raises(RuntimeError, match='unsafe entry type'):
         safe_extract_tar(tar, dest)
@@ -234,7 +234,7 @@ def test_safe_extract_allows_explicit_directory_entry(tmp_path: Path):
         file_info.size = 4
         tf.addfile(file_info, io.BytesIO(b'data'))
 
-    from gateway.pan.manifest import safe_extract_tar
+    from pan.manifest import safe_extract_tar
     dest = tmp_path / 'extract'
     safe_extract_tar(tar, dest)
     assert (dest / 'somedir' / 'file.txt').read_bytes() == b'data'

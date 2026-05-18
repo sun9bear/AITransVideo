@@ -115,11 +115,11 @@ async def _execute_pan_backup_impl(
     — stale_reaper / residue_cleanup will pick up the residue.
     """
     from models import Job, BackupRecord, PanCredentials
-    from gateway.pan.manifest import build_manifest, write_tar_with_manifest
-    from gateway.pan.status_mutator import set_archive_status
-    from gateway.pan.token_crypto import decrypt_token
+    from pan.manifest import build_manifest, write_tar_with_manifest
+    from pan.status_mutator import set_archive_status
+    from pan.token_crypto import decrypt_token
 
-    from gateway.pan._lock_keys import pan_lock_key
+    from pan._lock_keys import pan_lock_key
 
     job_id: str = payload['job_id']
     user_id: _uuid.UUID = _uuid.UUID(payload['user_id'])
@@ -194,7 +194,7 @@ async def _execute_pan_backup_impl(
             # the previous env-only guard that no-op'd when the env var was
             # absent. Production now ALWAYS has DEFAULT_SAFE_PROJECT_ROOTS
             # as fallback; AIVIDEOTRANS_PROJECTS_DIR (when set) prepends.
-            from gateway.pan._safe_paths import verify_project_dir_safe
+            from pan._safe_paths import verify_project_dir_safe
             verify_project_dir_safe(project_dir)
 
             access_token = decrypt_token(access_token_enc)
@@ -488,7 +488,7 @@ async def _heartbeat_loop(
 def _default_client_factory():
     """Production factory: real BaiduPanClient from settings."""
     from config import settings  # noqa: PLC0415
-    from gateway.pan.baidu_pan_client import BaiduPanClient
+    from pan.baidu_pan_client import BaiduPanClient
     return BaiduPanClient(
         appkey=settings.baidu_pan_appkey,
         appsecret=settings.baidu_pan_appsecret,
@@ -499,6 +499,6 @@ def _default_r2_delete(r2_key: str) -> None:
     """Production R2 delete via the shared boto3 client. Idempotent
     (boto3 delete_object returns 204 even on missing keys)."""
     from config import settings  # noqa: PLC0415
-    from gateway.storage.r2_client import _get_client  # noqa: PLC0415
+    from storage.r2_client import _get_client  # noqa: PLC0415
     client = _get_client()
     client.delete_object(Bucket=settings.r2_artifacts_bucket, Key=r2_key)

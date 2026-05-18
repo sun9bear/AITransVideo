@@ -113,19 +113,19 @@ async def _execute_pan_restore_impl(
     can pin it under tmp_path for inspection.
     """
     from models import Job, BackupRecord, PanCredentials
-    from gateway.pan.manifest import (
+    from pan.manifest import (
         read_manifest_from_tar,
         safe_extract_tar,
     )
-    from gateway.pan.status_mutator import set_archive_status
-    from gateway.pan.token_crypto import decrypt_token
-    from gateway.pan.backup_executor import (
+    from pan.status_mutator import set_archive_status
+    from pan.token_crypto import decrypt_token
+    from pan.backup_executor import (
         _acquire_advisory_lock,
         _release_advisory_lock,
         _heartbeat_loop,
     )
 
-    from gateway.pan._lock_keys import pan_lock_key
+    from pan._lock_keys import pan_lock_key
 
     job_id: str = payload['job_id']
     user_id: _uuid.UUID = _uuid.UUID(payload['user_id'])
@@ -231,7 +231,7 @@ async def _execute_pan_restore_impl(
             # and residue_cleanup use. Restore writes to project_dir via
             # os.replace, so if project_dir is somehow pointed outside the
             # trusted roots we refuse before any side effect.
-            from gateway.pan._safe_paths import verify_project_dir_safe
+            from pan._safe_paths import verify_project_dir_safe
             verify_project_dir_safe(project_dir)
             remote_path = br_row.remote_path
             expected_sha = br_row.sha256
@@ -493,7 +493,7 @@ def _move_into_place(staged_dir: Path, project_dir: Path) -> None:
 def _default_client_factory():
     """Production factory: real BaiduPanClient from settings."""
     from config import settings  # noqa: PLC0415
-    from gateway.pan.baidu_pan_client import BaiduPanClient
+    from pan.baidu_pan_client import BaiduPanClient
     return BaiduPanClient(
         appkey=settings.baidu_pan_appkey,
         appsecret=settings.baidu_pan_appsecret,

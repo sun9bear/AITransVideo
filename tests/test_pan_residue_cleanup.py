@@ -38,7 +38,7 @@ async def _run_cleanup(
     payload, *, engine,
     rmtree_fn=_noop_rmtree, r2_delete_fn=_noop_r2_delete,
 ):
-    from gateway.pan.residue_cleanup import _execute_pan_residue_cleanup_impl
+    from pan.residue_cleanup import _execute_pan_residue_cleanup_impl
     await _execute_pan_residue_cleanup_impl(
         payload, engine=engine, rmtree_fn=rmtree_fn, r2_delete_fn=r2_delete_fn,
     )

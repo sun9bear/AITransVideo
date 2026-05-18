@@ -74,7 +74,7 @@ def test_all_three_pan_executors_registered_in_dispatch_table():
     """gateway.background_task_executors.TASK_EXECUTORS must include the
     three pan task types. Phase 7 admin API checks against this dict to
     accept incoming task_type values."""
-    from gateway.background_task_executors import TASK_EXECUTORS
+    from background_task_executors import TASK_EXECUTORS
     assert 'pan_backup' in TASK_EXECUTORS
     assert 'pan_restore' in TASK_EXECUTORS
     assert 'pan_residue_cleanup' in TASK_EXECUTORS
@@ -92,7 +92,7 @@ def test_dispatcher_signature_matches_convention(name):
     """All three adapters must be keyword-only (task_id, job_id,
     project_dir, params) — the convention background_task_api.py:98
     calls executors with."""
-    from gateway import background_task_executors as bte
+    import background_task_executors as bte
     fn = getattr(bte, name)
     sig = inspect.signature(fn)
     expected = {'task_id', 'job_id', 'project_dir', 'params'}
@@ -109,8 +109,8 @@ def test_backup_dispatcher_translates_signature_to_payload(tmp_path):
     the payload dict the pan backup_executor consumes. params['user_id']
     becomes payload['user_id']; provider defaults to 'baidu_pan'."""
     import background_task_queue as queue_mod
-    from gateway import background_task_executors as bte
-    import gateway.pan.backup_executor as be_mod
+    import background_task_executors as bte
+    import pan.backup_executor as be_mod
 
     captured: list[dict] = []
 
@@ -155,8 +155,8 @@ def test_backup_dispatcher_translates_signature_to_payload(tmp_path):
 def test_backup_dispatcher_propagates_provider_override(tmp_path):
     """params['provider'] overrides the default 'baidu_pan'."""
     import background_task_queue as queue_mod
-    from gateway import background_task_executors as bte
-    import gateway.pan.backup_executor as be_mod
+    import background_task_executors as bte
+    import pan.backup_executor as be_mod
 
     captured: list[dict] = []
 
@@ -192,8 +192,8 @@ def test_backup_dispatcher_marks_failed_on_executor_exception(tmp_path):
     and SWALLOWS the exception (background_task_api.py creates an
     asyncio task — re-raising would just go to the event loop unheard)."""
     import background_task_queue as queue_mod
-    from gateway import background_task_executors as bte
-    import gateway.pan.backup_executor as be_mod
+    import background_task_executors as bte
+    import pan.backup_executor as be_mod
 
     async def boom(payload):
         raise RuntimeError('synthetic executor failure')
@@ -232,8 +232,8 @@ def test_backup_dispatcher_marks_failed_on_executor_exception(tmp_path):
 
 def test_restore_dispatcher_translates_signature_to_payload(tmp_path):
     import background_task_queue as queue_mod
-    from gateway import background_task_executors as bte
-    import gateway.pan.restore_executor as re_mod
+    import background_task_executors as bte
+    import pan.restore_executor as re_mod
 
     captured: list[dict] = []
 
@@ -265,8 +265,8 @@ def test_restore_dispatcher_translates_signature_to_payload(tmp_path):
 
 def test_residue_cleanup_dispatcher_translates_signature_to_payload(tmp_path):
     import background_task_queue as queue_mod
-    from gateway import background_task_executors as bte
-    import gateway.pan.residue_cleanup as rc_mod
+    import background_task_executors as bte
+    import pan.residue_cleanup as rc_mod
 
     captured: list[dict] = []
 
@@ -304,7 +304,7 @@ def test_residue_cleanup_dispatcher_translates_signature_to_payload(tmp_path):
 def test_residue_cleanup_dispatcher_rejects_missing_backup_id(tmp_path):
     """CodeX P2: dispatcher refuses if params lacks 'backup_id'. Phase 8
     stale_reaper MUST include the specific BackupRecord row to act on."""
-    from gateway import background_task_executors as bte
+    import background_task_executors as bte
 
     async def _go():
         Session = await _setup_db()

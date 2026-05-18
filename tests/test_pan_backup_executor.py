@@ -44,7 +44,7 @@ async def _run_executor(
     r2_delete_fn=_noop_r2_delete,
 ):
     """Convenience: call _execute_pan_backup_impl with test defaults."""
-    from gateway.pan.backup_executor import _execute_pan_backup_impl
+    from pan.backup_executor import _execute_pan_backup_impl
 
     await _execute_pan_backup_impl(
         payload,
@@ -824,7 +824,7 @@ def test_post_lock_re_read_detects_concurrent_archive(monkeypatch, tmp_path):
     archive happening between caller-side scheduling and actual lock
     acquisition.
     """
-    from gateway.pan import backup_executor as be_mod
+    from pan import backup_executor as be_mod
     from models import Job, BackupRecord
 
     setup_pan_token_env(monkeypatch)
