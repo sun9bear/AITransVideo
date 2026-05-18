@@ -592,6 +592,59 @@ def test_refresh_tick_dispatch_event_failure_does_not_block_revoke(monkeypatch):
     run_async(_go())
 
 
+# =========================================================================
+# T6.5 — router registration in gateway/main.py
+# =========================================================================
+
+
+def test_pan_auth_router_registered_in_main():
+    """T6.5: gateway/main.py imports pan.auth.router and calls
+    app.include_router(pan_auth_router). Without both lines the
+    endpoints aren't reachable from production. AST scan rather than
+    full main.py import (which would require DB engine wired)."""
+    import ast
+    from pathlib import Path
+
+    main_py = (
+        Path(__file__).resolve().parent.parent / 'gateway' / 'main.py'
+    )
+    text = main_py.read_text(encoding='utf-8')
+    tree = ast.parse(text)
+
+    # 1. Import: `from pan.auth import router as pan_auth_router` (or
+    #    re-binding it under any name).
+    imported_as: str | None = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == 'pan.auth':
+            for alias in node.names:
+                if alias.name == 'router':
+                    imported_as = alias.asname or 'router'
+                    break
+    assert imported_as is not None, (
+        "gateway/main.py must import the pan auth router: "
+        "`from pan.auth import router as pan_auth_router`"
+    )
+
+    # 2. app.include_router(imported_as) call must exist.
+    found_include = False
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == 'include_router'
+            and len(node.args) >= 1
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id == imported_as
+        ):
+            found_include = True
+            break
+    assert found_include, (
+        f"gateway/main.py must call app.include_router({imported_as}). "
+        "Without this, /api/admin/pan/connect and /callback are "
+        "unreachable in production."
+    )
+
+
 def test_refresh_tick_skips_already_revoked_credentials(monkeypatch):
     """Credentials with status='revoked' must NOT be refreshed (would
     re-activate a credential admin had marked dead)."""
