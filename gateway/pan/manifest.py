@@ -154,20 +154,44 @@ def read_manifest_from_tar(tar_path: Path) -> dict:
         return json.loads(f.read().decode('utf-8'))
 
 
+# Strict allowlist of tar entry types permitted by safe_extract_tar.
+# REGTYPE   = b'0'    — regular file (canonical)
+# AREGTYPE  = b'\x00' — regular file (pre-POSIX, written by old tars)
+# DIRTYPE   = b'5'    — directory
+# Everything else (symlink, hardlink, char/block device, FIFO,
+# CONTTYPE=b'7', GNUTYPE_SPARSE=b'S', future types, …) rejected.
+_ALLOWED_TAR_TYPES: frozenset[bytes] = frozenset((
+    tarfile.REGTYPE,
+    tarfile.AREGTYPE,
+    tarfile.DIRTYPE,
+))
+
+
 def safe_extract_tar(tar_path: Path, dest: Path) -> None:
-    """Safe tar extraction that rejects path traversal / absolute paths / links.
+    """Safe tar extraction with an ALLOWLIST of member types.
 
     Python 3.12+ has tarfile.data_filter; 3.11 needs DIY (CodeX Q-B).
 
-    Pass 1 validates EVERY member name before any extraction starts — partial
-    extraction of a malicious tar is itself a security hazard (an early entry
-    could plant a file that an extraction-blocking later entry doesn't undo).
+    Pass 1 validates EVERY tar member before any extraction starts — partial
+    extraction of a malicious tar is itself a hazard (an early entry could
+    plant a file that a later validation failure wouldn't undo).
+
+    **Allowlist (not blocklist):** ONLY regular files and directories are
+    permitted. Any other tar type (symlink, hardlink, char/block device,
+    FIFO, contiguous file, sparse, …) is rejected. This is stricter than
+    a blocklist and protects against future tar types we haven't enumerated.
+
+    Backup contract per plan §4.4: backups contain only regular files
+    (walk_project_dir_inventory + _reject_link_entries already enforce
+    this at archive time). safe_extract_tar is the corresponding restore-
+    side gate — if a tar somehow contains a non-allowed type, refuse it.
 
     Rejection categories (all surface as RuntimeError with a discriminating
     substring so callers / tests can branch):
       - absolute path (name starts with '/')  → 'unsafe absolute path'
       - .. path traversal segment             → 'unsafe .. path traversal'
       - symlink / hardlink entry              → 'unsafe symlink/hardlink'
+      - char/block/FIFO/other special entry   → 'unsafe entry type'
       - resolved path falls outside dest      → 'unsafe resolved outside dest'
         (catches Windows-drive-prefixed names, exotic encodings, and any
         absolute-path bypass the first check might miss)
@@ -186,6 +210,17 @@ def safe_extract_tar(tar_path: Path, dest: Path) -> None:
             if m.issym() or m.islnk():
                 raise RuntimeError(
                     f"unsafe symlink/hardlink: {m.name!r} → {m.linkname!r}"
+                )
+            # Allowlist by explicit type byte. We do NOT use m.isfile()
+            # because tarfile.REGULAR_TYPES is permissive (it includes
+            # CONTTYPE=b'7' and GNUTYPE_SPARSE=b'S' alongside the two
+            # genuine regular-file types REGTYPE=b'0' / AREGTYPE=b'\x00').
+            # A strict explicit allowlist protects against future tarfile
+            # additions and any exotic type a real-world tar might carry.
+            if m.type not in _ALLOWED_TAR_TYPES:
+                raise RuntimeError(
+                    f"unsafe entry type for {m.name!r}: type={m.type!r} "
+                    f"(only regular files and directories allowed)"
                 )
             target = (dest / m.name).resolve()
             try:

@@ -20,8 +20,13 @@ def _make_tar_with_member(
     is_symlink: bool = False,
     is_hardlink: bool = False,
     link_target: str = '',
+    type_override: bytes | None = None,
 ) -> None:
-    """Build a tar containing one custom member to probe extractor rejection."""
+    """Build a tar containing one custom member to probe extractor rejection.
+
+    `type_override` (e.g. tarfile.CHRTYPE / BLKTYPE / FIFOTYPE) lets the
+    test fixture insert non-file/non-dir entries that real-world tars
+    could carry. devmajor / devminor default to 0 for char/block tests."""
     with tarfile.open(tar_path, 'w:gz') as tf:
         info = tarfile.TarInfo(name=name)
         if is_symlink:
@@ -31,6 +36,12 @@ def _make_tar_with_member(
         elif is_hardlink:
             info.type = tarfile.LNKTYPE
             info.linkname = link_target
+            tf.addfile(info)
+        elif type_override is not None:
+            info.type = type_override
+            if type_override in (tarfile.CHRTYPE, tarfile.BLKTYPE):
+                info.devmajor = 1
+                info.devminor = 3
             tf.addfile(info)
         else:
             info.size = len(content)
@@ -159,3 +170,71 @@ def test_safe_extract_creates_dest_if_missing(tmp_path: Path):
     dest = tmp_path / 'newly' / 'made' / 'dest'
     safe_extract_tar(tar, dest)
     assert (dest / 'inner' / 'x.txt').read_bytes() == b'x'
+
+
+# --- CodeX P1: allowlist (only isfile() / isdir()) — reject special types ---
+
+
+def test_safe_extract_rejects_character_device(tmp_path: Path):
+    """CHRTYPE entries (character device nodes) must be rejected by the
+    isfile()/isdir() allowlist — CodeX P1."""
+    tar = tmp_path / 'chr.tar.gz'
+    _make_tar_with_member(tar, 'evil_char_dev', type_override=tarfile.CHRTYPE)
+    from gateway.pan.manifest import safe_extract_tar
+    dest = tmp_path / 'extract'
+    with pytest.raises(RuntimeError, match='unsafe entry type'):
+        safe_extract_tar(tar, dest)
+    assert not (dest / 'evil_char_dev').exists()
+
+
+def test_safe_extract_rejects_block_device(tmp_path: Path):
+    """BLKTYPE entries (block device nodes) — CodeX P1."""
+    tar = tmp_path / 'blk.tar.gz'
+    _make_tar_with_member(tar, 'evil_block_dev', type_override=tarfile.BLKTYPE)
+    from gateway.pan.manifest import safe_extract_tar
+    dest = tmp_path / 'extract'
+    with pytest.raises(RuntimeError, match='unsafe entry type'):
+        safe_extract_tar(tar, dest)
+
+
+def test_safe_extract_rejects_fifo(tmp_path: Path):
+    """FIFOTYPE entries (named pipes) — CodeX P1."""
+    tar = tmp_path / 'fifo.tar.gz'
+    _make_tar_with_member(tar, 'evil_fifo', type_override=tarfile.FIFOTYPE)
+    from gateway.pan.manifest import safe_extract_tar
+    dest = tmp_path / 'extract'
+    with pytest.raises(RuntimeError, match='unsafe entry type'):
+        safe_extract_tar(tar, dest)
+
+
+def test_safe_extract_rejects_contiguous_file(tmp_path: Path):
+    """CONTTYPE (contiguous file, Solaris/old-style) — allowlist catches
+    even this rare type. Future tar types we haven't enumerated are also
+    blocked by the same isfile()/isdir() check."""
+    tar = tmp_path / 'cont.tar.gz'
+    _make_tar_with_member(tar, 'cont_file', type_override=tarfile.CONTTYPE)
+    from gateway.pan.manifest import safe_extract_tar
+    dest = tmp_path / 'extract'
+    with pytest.raises(RuntimeError, match='unsafe entry type'):
+        safe_extract_tar(tar, dest)
+
+
+def test_safe_extract_allows_explicit_directory_entry(tmp_path: Path):
+    """DIRTYPE entries (explicit directory members) ARE allowed — they're
+    in the allowlist alongside regular files. write_tar_with_manifest
+    produces them when project_dir has subdirs."""
+    tar = tmp_path / 'dir.tar.gz'
+    with tarfile.open(tar, 'w:gz') as tf:
+        # Explicit DIRTYPE entry
+        dir_info = tarfile.TarInfo(name='somedir')
+        dir_info.type = tarfile.DIRTYPE
+        tf.addfile(dir_info)
+        # A file inside it
+        file_info = tarfile.TarInfo(name='somedir/file.txt')
+        file_info.size = 4
+        tf.addfile(file_info, io.BytesIO(b'data'))
+
+    from gateway.pan.manifest import safe_extract_tar
+    dest = tmp_path / 'extract'
+    safe_extract_tar(tar, dest)
+    assert (dest / 'somedir' / 'file.txt').read_bytes() == b'data'
