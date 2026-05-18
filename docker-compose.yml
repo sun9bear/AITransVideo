@@ -321,6 +321,20 @@ services:
       # Lazy-upload wall clock budget (s). If the first-download upload
       # can't finish inside this, backend_router falls back to local.
       AVT_R2_UPLOAD_TIMEOUT_S: "${AVT_R2_UPLOAD_TIMEOUT_S:-60}"
+      # --- Pan backup (plan 2026-05-14 Task 2.5) ---
+      AVT_ENABLE_PAN_BACKUP: "${AVT_ENABLE_PAN_BACKUP:-false}"
+      AVT_PAN_AUTO_ARCHIVE_ENABLED: "${AVT_PAN_AUTO_ARCHIVE_ENABLED:-false}"
+      AVT_PAN_AUTO_ARCHIVE_DAYS: "${AVT_PAN_AUTO_ARCHIVE_DAYS:-30}"
+      AVT_PAN_AUTO_ARCHIVE_HOUR_BJT: "${AVT_PAN_AUTO_ARCHIVE_HOUR_BJT:-3}"
+      AVT_PAN_AUTO_ARCHIVE_MAX_PER_RUN: "${AVT_PAN_AUTO_ARCHIVE_MAX_PER_RUN:-5}"
+      AVT_PAN_AUTO_ARCHIVE_DRY_RUN: "${AVT_PAN_AUTO_ARCHIVE_DRY_RUN:-true}"
+      AVT_PAN_ORPHAN_CLEANUP_WEEKDAY: "${AVT_PAN_ORPHAN_CLEANUP_WEEKDAY:-5}"
+      AVT_PAN_UPLOAD_CHUNK_BYTES: "${AVT_PAN_UPLOAD_CHUNK_BYTES:-4194304}"
+      AVT_PAN_TASK_STALE_HOURS: "${AVT_PAN_TASK_STALE_HOURS:-4}"
+      AVT_BAIDU_PAN_APPKEY: "${AVT_BAIDU_PAN_APPKEY:-}"
+      AVT_BAIDU_PAN_APPSECRET: "${AVT_BAIDU_PAN_APPSECRET:-}"
+      AVT_BAIDU_PAN_REDIRECT_URI: "${AVT_BAIDU_PAN_REDIRECT_URI:-}"
+      AVT_PAN_TOKEN_ENCRYPTION_KEY: "${AVT_PAN_TOKEN_ENCRYPTION_KEY:-}"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8880/gateway/health')"]
       interval: 15s
