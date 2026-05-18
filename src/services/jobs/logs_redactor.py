@@ -70,6 +70,31 @@ _JOB_ID_LABEL_RE = re.compile(
 
 _WHITESPACE_RUN_RE = re.compile(r"\s+")
 
+# Sensitive key=value / key: value patterns whose *values* must be redacted.
+# Covers JSON ("key": "value"), form-encoded (key=value), and plain-text
+# (key=value or key: value) shapes.  Value ends at whitespace, quote,
+# comma, or end-of-string.  Keys added here (pan-backup T2.4):
+#   access_token, refresh_token — Baidu Pan OAuth bearer/refresh credentials
+#   appsecret                   — our config field name for the OAuth app secret
+#   client_secret               — OAuth standard field name for the app secret
+_SENSITIVE_KV_KEYS = (
+    "access_token",
+    "refresh_token",
+    "appsecret",
+    "client_secret",
+)
+_SENSITIVE_KV_RE = re.compile(
+    r'(?<!\w)('
+    + "|".join(re.escape(k) for k in _SENSITIVE_KV_KEYS)
+    # Optional closing quote of JSON key, then separator (= or :), then
+    # optional opening quote of value.  Handles:
+    #   JSON:         "access_token": "value"
+    #   form-encoded: access_token=value
+    #   plain text:   access_token: value
+    + r')(["\']?\s*[:=]\s*["\']?)([^"\',\s}{&]+)',
+    re.IGNORECASE,
+)
+
 
 class Redactor:
     """Redacts provider / tool / UUID tokens from a log message.
@@ -107,6 +132,9 @@ class Redactor:
         if not message:
             return message
         out = message
+        # Redact key=value / key: value sensitive credential pairs first so
+        # that token-level patterns below don't leave the key name orphaned.
+        out = _SENSITIVE_KV_RE.sub(r"\1\2" + REDACTED_PLACEHOLDER, out)
         for pattern in self._patterns:
             out = pattern.sub(REDACTED_PLACEHOLDER, out)
         return _WHITESPACE_RUN_RE.sub(" ", out).strip()
