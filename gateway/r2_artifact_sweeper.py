@@ -176,10 +176,14 @@ async def sweep_once(now: datetime | None = None) -> int:
             # P1-A (CodeX 4): pass JSON snapshot to _run_publish so the
             # eventual UPDATE can validate that the row hasn't been
             # overwrite-bumped while the in-flight publish was running.
+            # CodeX P1-2 (2026-05-18): legacy JSON rows have edit_generation=None.
+            # Default to 0 so dispatch/compare matches PG's server_default='0' for
+            # legacy Job rows. Without this, sweeper loops forever taking lease but
+            # never publishing for any pre-edit-generation task.
             asyncio.create_task(
                 _run_publish(
                     json_rec.job_id,
-                    expected_generation=json_rec.edit_generation,
+                    expected_generation=(json_rec.edit_generation or 0),
                     jianying_draft_zip_path=json_rec.jianying_draft_zip_path,
                 ),
                 name=f"r2-publish-{json_rec.job_id}",
@@ -253,6 +257,12 @@ async def _run_publish(
     legitimate path, not an error.
     """
     from services.r2_publisher_lib.r2_publisher import publish_artifacts
+
+    # CodeX P1-2 (2026-05-18): legacy JSON rows have edit_generation=None.
+    # Normalise once here so every downstream use — the early-return comparison,
+    # the publish_artifacts call, the conditional UPDATE WHERE clause, and the
+    # log format strings — all see an int rather than None.
+    expected_generation = expected_generation or 0
 
     async with async_session() as db:
         result = await db.execute(select(Job).where(Job.job_id == job_id))

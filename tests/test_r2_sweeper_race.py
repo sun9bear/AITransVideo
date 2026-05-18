@@ -351,3 +351,115 @@ def test_run_publish_conditional_update_has_required_clauses():
         "race-protection clauses in the _run_publish UPDATE — the WHERE "
         f"chain is no longer race-safe. Missing tokens: {missing}"
     )
+
+
+# ---- E. Legacy-job None edit_generation (CodeX P1-2) -----------------------
+#
+# Legacy JSON store rows created before edit_generation was introduced carry
+# edit_generation=None.  PG rows for the same jobs have edit_generation=0
+# (the server_default).  Before the fix, dispatch passed None through to
+# _run_publish where the comparison became ``0 != None`` → True → skip.
+# The sweeper would take a 5-min lease every iteration and never publish.
+#
+# After the fix both sides default None → 0 and the comparison succeeds.
+
+
+def test_run_publish_publishes_legacy_job_with_none_edit_generation(monkeypatch):
+    """CodeX P1-2: _run_publish called with expected_generation=None must
+    publish successfully when the DB row has edit_generation=0 (the PG default
+    for legacy jobs).
+
+    Before fix: ``0 (live) != None (expected)`` → publish skipped, registry
+    stays NULL forever, sweeper loops infinitely.
+
+    After fix: both sides treat None as 0, comparison passes, registry is
+    written with at least one 'pushed' entry.
+    """
+    async def _go():
+        Session = await _make_session()
+        _patch_session(monkeypatch, Session)
+        _patch_publisher_to_return_one_entry(monkeypatch, expected_gen=0)
+
+        # Legacy job: DB default is edit_generation=0, r2_artifacts=None.
+        await _insert_job(
+            Session, job_id="job_legacy_none", edit_generation=0, r2_artifacts=None,
+        )
+
+        # Sweeper JSON snapshot has edit_generation=None for this legacy row.
+        await sweeper._run_publish(
+            "job_legacy_none",
+            expected_generation=None,   # ← the legacy None value
+            jianying_draft_zip_path=None,
+        )
+
+        artifacts = await _read_artifacts(Session, "job_legacy_none")
+        assert artifacts is not None, (
+            "CodeX P1-2 regression: sweeper must publish legacy job whose "
+            "JSON row has edit_generation=None. Registry is still NULL — "
+            "the None/0 comparison guard is broken."
+        )
+        assert any(e.get("state") == "pushed" for e in artifacts), (
+            "CodeX P1-2: expected at least one entry with state='pushed' "
+            f"after publish, got: {artifacts}"
+        )
+
+    _run(_go())
+
+
+def test_run_publish_treats_none_generation_as_zero_unit(monkeypatch):
+    """Unit-level: _run_publish must NOT skip when expected_generation=None
+    and DB edit_generation=0 — both must be treated as equivalent to 0.
+
+    This test specifically validates the comparison branch (line ~264) so a
+    future refactor that moves the or-0 default elsewhere still gets caught.
+    """
+    skipped: list[str] = []
+
+    async def _go():
+        Session = await _make_session()
+        _patch_session(monkeypatch, Session)
+
+        # Insert at gen=0, status=succeeded.
+        await _insert_job(
+            Session, job_id="job_legacy_unit", edit_generation=0, r2_artifacts=None,
+        )
+
+        # Instrument publish_artifacts to detect whether it was called.
+        from services.r2_publisher_lib.r2_publisher import (
+            ArtifactRegistryEntry,
+            PublishResult,
+        )
+        called: list[bool] = []
+
+        def fake_publish(**kwargs):
+            called.append(True)
+            return PublishResult(entries=[
+                ArtifactRegistryEntry(
+                    artifact_key="publish.dubbed_video",
+                    edit_generation=0,
+                    state="pushed",
+                    r2_key="jobs/job_legacy_unit/g0/publish.dubbed_video.mp4",
+                    filename="vid.mp4",
+                    content_type="video/mp4",
+                    size=64,
+                    source_mtime_ns=0,
+                    pushed_at="2026-05-08T00:00:00+00:00",
+                ),
+            ])
+
+        import services.r2_publisher_lib.r2_publisher as pub_mod
+        monkeypatch.setattr(pub_mod, "publish_artifacts", fake_publish)
+
+        await sweeper._run_publish(
+            "job_legacy_unit",
+            expected_generation=None,   # ← legacy None
+            jianying_draft_zip_path=None,
+        )
+
+        assert called, (
+            "CodeX P1-2 unit: publish_artifacts was never called — "
+            "_run_publish incorrectly skipped the legacy job. "
+            "The None/0 equivalence in the generation comparison is broken."
+        )
+
+    _run(_go())
