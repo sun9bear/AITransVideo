@@ -141,6 +141,57 @@ class BaiduPanClient:
 
         return self._create_finalize(remote_path, size, chunk_md5s, uploadid, access_token)
 
+    # --- T3.7: read-back probe (3rd gate per design §7) ---
+    def _get_dlink(self, remote_path: str, access_token: str) -> str:
+        """Get the time-limited download link for a file.
+
+        NOTE: the plan code stubs path-based lookup via /xpan/multimedia with
+        fsids='[]'; real Baidu API expects fsids[] from a prior list() call.
+        For MVP this is exercised against mocks only; production wiring will
+        chain list → fsid → multimedia.
+        """
+        resp = requests.get(
+            f"{self.XPAN_BASE}/multimedia",
+            params={
+                'method': 'filemetas',
+                'access_token': access_token,
+                'fsids': '[]',  # 用 path 不用 fs_id 时需要不同 endpoint
+                'path': remote_path,
+                'dlink': 1,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        items = body.get('list', [])
+        if not items:
+            raise RuntimeError(f"No metadata returned for {remote_path}")
+        return items[0]['dlink'] + f'&access_token={access_token}'
+
+    def verify_remote_tail(self, local_path: Path, remote_path: str, size: int, *,
+                           access_token: str, probe_bytes: int = 64 * 1024) -> bool:
+        """Read-back probe: pull last `probe_bytes` of remote file and compare
+        with local file's tail. Used as 3rd gate in §7 step h.
+
+        Returns True if matched, False otherwise. Caller decides whether to
+        raise or fall back.
+        """
+        if size < probe_bytes:
+            probe_bytes = size  # smaller files probe entirety
+
+        # local tail
+        with local_path.open('rb') as f:
+            f.seek(-probe_bytes, 2)  # 2 = end
+            local_tail = f.read(probe_bytes)
+
+        # remote tail via Range
+        range_header = {'Range': f'bytes={size - probe_bytes}-{size - 1}'}
+        # download link for the remote file
+        dlink = self._get_dlink(remote_path, access_token)
+        resp = requests.get(dlink, headers=range_header, timeout=30)
+        resp.raise_for_status()
+        return resp.content == local_tail
+
     def download(self, remote_path: str, local_path: Path, *, access_token: str) -> dict:
         raise NotImplementedError("T3.8")
 

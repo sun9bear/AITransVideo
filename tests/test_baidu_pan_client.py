@@ -674,3 +674,136 @@ def test_compute_chunk_md5s_deterministic(tmp_path):
 
     assert chunk_md5s == [expected_chunk0, expected_chunk1]
     assert file_md5 == expected_file
+
+
+# --- T3.7: read-back probe ---
+
+
+def _make_dlink_mocker(monkeypatch, *, tail_bytes: bytes, status: int = 206):
+    """Helper: mock both /multimedia (returns dlink) and the dlink GET (returns tail bytes)."""
+    import requests
+
+    requests_made = []
+
+    def mock_get(url, params=None, headers=None, **kw):
+        requests_made.append({'url': url, 'params': params, 'headers': headers})
+
+        # /xpan/multimedia returns JSON with dlink
+        if 'multimedia' in url:
+            class JR:
+                status_code = 200
+
+                def json(self):
+                    return {'list': [{'dlink': 'https://example.com/dl?token=fake'}]}
+
+                def raise_for_status(self):
+                    pass
+            return JR()
+
+        # actual dlink fetch returns tail bytes
+        class BR:
+            def __init__(self):
+                self.status_code = status
+                self.content = tail_bytes
+
+            def raise_for_status(self):
+                pass
+        return BR()
+
+    monkeypatch.setattr(requests, 'get', mock_get)
+    return requests_made
+
+
+def test_read_back_probe_matches_tail(monkeypatch, tmp_path):
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+
+    test_file = tmp_path / 'probe.tar.gz'
+    payload = b'X' * 200_000  # 200KB
+    test_file.write_bytes(payload)
+
+    # Mock returns the same tail as local (last 64KB = b'X' * 65536)
+    _make_dlink_mocker(monkeypatch, tail_bytes=b'X' * 65_536)
+
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    ok = c.verify_remote_tail(test_file, '/apps/AIVideoTrans/probe.tar.gz',
+                              size=200_000, access_token='at')
+    assert ok is True
+
+
+def test_read_back_probe_detects_tampering(monkeypatch, tmp_path):
+    """If remote tail differs from local → return False (no exception)."""
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+
+    test_file = tmp_path / 'probe.tar.gz'
+    test_file.write_bytes(b'X' * 200_000)
+
+    # Mock returns 'Y' bytes — won't match local 'X' tail.
+    _make_dlink_mocker(monkeypatch, tail_bytes=b'Y' * 65_536)
+
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    ok = c.verify_remote_tail(test_file, '/apps/AIVideoTrans/probe.tar.gz',
+                              size=200_000, access_token='at')
+    assert ok is False
+
+
+def test_read_back_probe_small_file_probes_entirety(monkeypatch, tmp_path):
+    """File smaller than default probe_bytes (64KB) → probe == size."""
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+
+    test_file = tmp_path / 'tiny.tar.gz'
+    test_file.write_bytes(b'Z' * 1000)  # only 1KB
+
+    requests_made = _make_dlink_mocker(monkeypatch, tail_bytes=b'Z' * 1000)
+
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    ok = c.verify_remote_tail(test_file, '/apps/AIVideoTrans/tiny.tar.gz',
+                              size=1000, access_token='at')
+    assert ok is True
+
+    # Range header should be bytes=0-999 (full file).
+    dlink_calls = [r for r in requests_made if 'multimedia' not in r['url']]
+    assert dlink_calls, 'expected at least one dlink GET call'
+    range_header = dlink_calls[0]['headers']['Range']
+    assert range_header == 'bytes=0-999'
+
+
+def test_read_back_probe_uses_correct_range_for_large_file(monkeypatch, tmp_path):
+    """Range header must be bytes=(size-probe)-(size-1)."""
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+
+    test_file = tmp_path / 'large.tar.gz'
+    size = 5_000_000
+    test_file.write_bytes(b'M' * size)
+
+    requests_made = _make_dlink_mocker(monkeypatch, tail_bytes=b'M' * 65_536)
+
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    c.verify_remote_tail(test_file, '/x', size=size, access_token='at')
+
+    dlink_calls = [r for r in requests_made if 'multimedia' not in r['url']]
+    range_header = dlink_calls[0]['headers']['Range']
+    expected_start = size - 65_536
+    expected_end = size - 1
+    assert range_header == f'bytes={expected_start}-{expected_end}'
+
+
+def test_get_dlink_raises_when_no_metadata(monkeypatch):
+    """If /multimedia returns empty list → RuntimeError."""
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+    import requests
+
+    def mock_get(url, params=None, **kw):
+        class R:
+            status_code = 200
+
+            def json(self):
+                return {'list': []}
+
+            def raise_for_status(self):
+                pass
+        return R()
+
+    monkeypatch.setattr(requests, 'get', mock_get)
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    with pytest.raises(RuntimeError, match='No metadata returned'):
+        c._get_dlink('/nonexistent.tar.gz', access_token='at')
