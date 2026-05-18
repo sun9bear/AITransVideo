@@ -1,9 +1,19 @@
 """Pan restore executor (Phase 5b T5.11).
 
-Plan §8. Pulls the latest 'uploaded' BackupRecord for an 'archived' job,
-downloads + verifies the tar.gz, safe-extracts to staging, verifies the
-file inventory entry-by-entry, then atomically moves into place at the
-original project_dir.
+Plan §8. Pulls the latest 'uploaded' BackupRecord for an 'archived' job
+(with matching job_edit_generation per plan §8), downloads + verifies
+the tar.gz, safe-extracts to staging, verifies the file inventory
+entry-by-entry, then atomically moves into place at the original
+project_dir.
+
+## BackupRecord lifecycle (CodeX P1-1)
+
+  uploaded → restoring → restored   (happy)
+            → uploaded             (failure → revert; retryable)
+
+heartbeat_at is updated every interval_s while in 'restoring' so
+stale_reaper can detect dead restores via the same mechanism as
+backup_executor.
 
 ## State machine
 
@@ -81,6 +91,7 @@ async def execute_pan_restore(payload: dict) -> None:
         payload,
         engine=engine,
         client_factory=_default_client_factory,
+        heartbeat_enabled=True,
     )
 
 
@@ -93,6 +104,8 @@ async def _execute_pan_restore_impl(
     engine: AsyncEngine,
     client_factory: Callable[[], Any],
     staging_root: Path | None = None,
+    heartbeat_enabled: bool = True,
+    heartbeat_interval_s: int = 60,
 ) -> None:
     """Real restore executor. Plan §8 steps.
 
@@ -109,6 +122,7 @@ async def _execute_pan_restore_impl(
     from gateway.pan.backup_executor import (
         _acquire_advisory_lock,
         _release_advisory_lock,
+        _heartbeat_loop,
     )
 
     from gateway.pan._lock_keys import pan_lock_key
@@ -129,7 +143,7 @@ async def _execute_pan_restore_impl(
             # --- precondition (POST-lock — authoritative snapshot) ---
             async with conn.begin():
                 job_row = (await conn.execute(
-                    select(Job.status, Job.project_dir)
+                    select(Job.status, Job.project_dir, Job.edit_generation)
                     .where(Job.user_id == user_id, Job.job_id == job_id)
                 )).one_or_none()
                 if job_row is None:
@@ -145,6 +159,7 @@ async def _execute_pan_restore_impl(
                     raise RuntimeError(
                         f"Job {job_id!r} has no project_dir set (cannot restore)"
                     )
+                job_edit_generation = job_row.edit_generation
 
                 cred_row = (await conn.execute(
                     select(
@@ -166,25 +181,50 @@ async def _execute_pan_restore_impl(
                         f"need 'active'"
                     )
 
-                # Pick the LATEST uploaded BackupRecord for this job.
+                # Pick the LATEST uploaded BackupRecord for this job WITH
+                # matching job_edit_generation (plan §8 + CodeX P1-1). If
+                # Job got edited between archive and restore (unlikely but
+                # possible), we must NOT restore a stale generation onto
+                # a newer Job.
                 br_row = (await conn.execute(
                     select(
                         BackupRecord.id, BackupRecord.remote_path,
                         BackupRecord.sha256, BackupRecord.md5,
                         BackupRecord.size_bytes, BackupRecord.manifest_json,
+                        BackupRecord.job_edit_generation,
                     ).where(
                         BackupRecord.user_id == user_id,
                         BackupRecord.job_id == job_id,
                         BackupRecord.status == 'uploaded',
+                        BackupRecord.job_edit_generation == job_edit_generation,
                     ).order_by(desc(BackupRecord.created_at))
                     .limit(1)
                 )).one_or_none()
                 if br_row is None:
+                    # Distinguish "no matching gen" from "no uploaded row".
+                    any_uploaded = (await conn.execute(
+                        select(BackupRecord.job_edit_generation)
+                        .where(
+                            BackupRecord.user_id == user_id,
+                            BackupRecord.job_id == job_id,
+                            BackupRecord.status == 'uploaded',
+                        ).order_by(desc(BackupRecord.created_at)).limit(1)
+                    )).scalar_one_or_none()
+                    if any_uploaded is None:
+                        raise RuntimeError(
+                            f"No 'uploaded' BackupRecord found for "
+                            f"job_id={job_id!r}"
+                        )
                     raise RuntimeError(
-                        f"No 'uploaded' BackupRecord found for job_id={job_id!r}"
+                        f"No 'uploaded' BackupRecord with "
+                        f"job_edit_generation={job_edit_generation} for "
+                        f"job_id={job_id!r} (latest uploaded has gen="
+                        f"{any_uploaded}). Refusing to restore mismatched "
+                        f"generation."
                     )
 
                 access_token_enc = cred_row.access_token_encrypted
+                br_id = br_row.id
 
             project_dir = Path(project_dir_str).resolve()
             remote_path = br_row.remote_path
@@ -205,12 +245,29 @@ async def _execute_pan_restore_impl(
             else:
                 staging_root = Path(staging_root)
             tar_path: Path | None = None
+            heartbeat_task: asyncio.Task | None = None
 
             try:
-                # --- status='restoring' ---
+                # --- Flip BackupRecord.status to 'restoring' (lifecycle
+                # tracking per CodeX P1-1) + Job.status to 'restoring' ---
                 async with conn.begin():
                     await set_archive_status(
                         user_id, job_id, 'restoring', conn=conn,
+                    )
+                    await conn.execute(
+                        update(BackupRecord)
+                        .where(BackupRecord.id == br_id)
+                        .values(
+                            status='restoring',
+                            heartbeat_at=datetime.now(timezone.utc),
+                        )
+                    )
+
+                # --- Start heartbeat loop (so stale_reaper can detect
+                # dead restores via the same mechanism as backup) ---
+                if heartbeat_enabled:
+                    heartbeat_task = asyncio.create_task(
+                        _heartbeat_loop(engine, br_id, heartbeat_interval_s)
                     )
 
                 # --- download tar.gz ---
@@ -260,28 +317,49 @@ async def _execute_pan_restore_impl(
                     _move_into_place, staged_project, project_dir,
                 )
 
-                # --- status='succeeded' ---
+                # --- status='succeeded' + BackupRecord.status='restored' ---
                 async with conn.begin():
                     await set_archive_status(
                         user_id, job_id, 'succeeded', conn=conn,
                     )
-                logger.info("pan_restore succeeded: job=%s", job_id)
+                    await conn.execute(
+                        update(BackupRecord)
+                        .where(BackupRecord.id == br_id)
+                        .values(
+                            status='restored',
+                            completed_at=datetime.now(timezone.utc),
+                        )
+                    )
+                logger.info("pan_restore succeeded: job=%s br=%s", job_id, br_id)
 
             except Exception:
-                # Failure path: status back to 'archived', staging cleanup.
+                # Failure path: revert BOTH Job.status (→ 'archived') AND
+                # BackupRecord.status (→ 'uploaded' so the next attempt
+                # can re-pick this row). staging cleanup in finally.
                 try:
                     async with conn.begin():
                         await set_archive_status(
                             user_id, job_id, 'archived', conn=conn,
                         )
+                        await conn.execute(
+                            update(BackupRecord)
+                            .where(BackupRecord.id == br_id)
+                            .values(status='uploaded')
+                        )
                 except Exception as inner_exc:  # noqa: BLE001
                     logger.error(
-                        "pan_restore status rollback to 'archived' failed: %s",
-                        inner_exc,
+                        "pan_restore status rollback failed (job=%s br=%s): %s",
+                        job_id, br_id, inner_exc,
                     )
                 raise
 
             finally:
+                if heartbeat_task is not None:
+                    heartbeat_task.cancel()
+                    try:
+                        await heartbeat_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
                 if tar_path is not None:
                     try:
                         await asyncio.to_thread(

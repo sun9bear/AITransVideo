@@ -61,6 +61,7 @@ async def _run_restore(payload, *, engine, client, staging_root=None):
         engine=engine,
         client_factory=lambda: client,
         staging_root=staging_root,
+        heartbeat_enabled=False,  # no 60s waits in tests
     )
 
 
@@ -497,6 +498,158 @@ def test_restore_picks_latest_uploaded_backup_record(monkeypatch, tmp_path):
 # =========================================================================
 # _verify_inventory unit tests
 # =========================================================================
+
+
+def test_restore_flips_backup_record_status_to_restored(monkeypatch, tmp_path):
+    """CodeX P1-1: BackupRecord.status moves uploaded → restoring → restored
+    over the lifecycle. Heartbeat updates while in 'restoring'."""
+    import shutil
+    from models import BackupRecord
+
+    setup_pan_token_env(monkeypatch)
+    user_id = uuid.uuid4()
+    job_id = 'job_br_lifecycle'
+
+    project = make_project_dir(tmp_path, job_id=job_id)
+
+    async def _go():
+        async with pan_test_engine() as engine:
+            await insert_sample_job(
+                engine, user_id=user_id, job_id=job_id,
+                status='succeeded', project_dir=str(project),
+            )
+            await insert_sample_pan_credentials(engine, user_id=user_id)
+
+            client = FakeBaiduPanClient()
+            await _run_backup(
+                {'job_id': job_id, 'user_id': str(user_id)},
+                engine=engine, client=client, rmtree_fn=shutil.rmtree,
+            )
+
+            # Pre-restore: BackupRecord status='uploaded'.
+            async with engine.connect() as conn:
+                status_before = (await conn.execute(
+                    select(BackupRecord.status).where(BackupRecord.job_id == job_id)
+                )).scalar_one()
+            assert status_before == 'uploaded'
+
+            await _run_restore(
+                {'job_id': job_id, 'user_id': str(user_id)},
+                engine=engine, client=client,
+                staging_root=tmp_path / '_staging',
+            )
+
+            # Post-restore: BackupRecord status='restored', completed_at set.
+            async with engine.connect() as conn:
+                row = (await conn.execute(
+                    select(BackupRecord.status, BackupRecord.completed_at)
+                    .where(BackupRecord.job_id == job_id)
+                )).one()
+            assert row.status == 'restored'
+            assert row.completed_at is not None
+
+    run_async(_go())
+
+
+def test_restore_reverts_backup_record_to_uploaded_on_failure(monkeypatch, tmp_path):
+    """CodeX P1-1: failure path reverts BackupRecord.status='restoring' back
+    to 'uploaded' so the next restore attempt can re-pick this row."""
+    import shutil
+    from models import BackupRecord
+
+    setup_pan_token_env(monkeypatch)
+    user_id = uuid.uuid4()
+    job_id = 'job_br_revert'
+
+    project = make_project_dir(tmp_path, job_id=job_id)
+
+    async def _go():
+        async with pan_test_engine() as engine:
+            await insert_sample_job(
+                engine, user_id=user_id, job_id=job_id,
+                status='succeeded', project_dir=str(project),
+            )
+            await insert_sample_pan_credentials(engine, user_id=user_id)
+
+            client = FakeBaiduPanClient()
+            await _run_backup(
+                {'job_id': job_id, 'user_id': str(user_id)},
+                engine=engine, client=client, rmtree_fn=shutil.rmtree,
+            )
+
+            client.inject_download_failure(RuntimeError('synthetic dl'))
+            with pytest.raises(RuntimeError, match='synthetic dl'):
+                await _run_restore(
+                    {'job_id': job_id, 'user_id': str(user_id)},
+                    engine=engine, client=client,
+                    staging_root=tmp_path / '_staging',
+                )
+
+            # BackupRecord reverted to 'uploaded' — next attempt re-picks it.
+            async with engine.connect() as conn:
+                status = (await conn.execute(
+                    select(BackupRecord.status).where(BackupRecord.job_id == job_id)
+                )).scalar_one()
+            assert status == 'uploaded'
+
+    run_async(_go())
+
+
+def test_restore_rejects_mismatched_edit_generation(monkeypatch, tmp_path):
+    """CodeX P1-1 + plan §8: restore must NOT pick a BackupRecord whose
+    job_edit_generation doesn't match the current Job.edit_generation.
+    Restoring an older snapshot onto a newer Job would corrupt state."""
+    import shutil
+    from models import Job, BackupRecord
+
+    setup_pan_token_env(monkeypatch)
+    user_id = uuid.uuid4()
+    job_id = 'job_gen_mismatch'
+
+    project = make_project_dir(tmp_path, job_id=job_id)
+
+    async def _go():
+        async with pan_test_engine() as engine:
+            # Insert Job at edit_generation=3 to start.
+            await insert_sample_job(
+                engine, user_id=user_id, job_id=job_id,
+                status='succeeded', project_dir=str(project),
+                edit_generation=3,
+            )
+            await insert_sample_pan_credentials(engine, user_id=user_id)
+
+            # Backup captures gen=3.
+            client = FakeBaiduPanClient()
+            await _run_backup(
+                {'job_id': job_id, 'user_id': str(user_id)},
+                engine=engine, client=client, rmtree_fn=shutil.rmtree,
+            )
+
+            # Simulate Job getting edited AFTER archive (would have to be
+            # via some recovery flow — pretend admin tooling bumped it).
+            async with engine.begin() as conn:
+                await conn.execute(
+                    Job.__table__.update()
+                    .where(Job.job_id == job_id)
+                    .values(edit_generation=5)
+                )
+
+            # Restore must refuse — generations don't match.
+            with pytest.raises(RuntimeError, match='job_edit_generation=5|gen=3'):
+                await _run_restore(
+                    {'job_id': job_id, 'user_id': str(user_id)},
+                    engine=engine, client=client,
+                    staging_root=tmp_path / '_staging',
+                )
+
+            # BackupRecord stays at 'uploaded' (we never started restoring).
+            async with engine.connect() as conn:
+                status = (await conn.execute(
+                    select(BackupRecord.status).where(BackupRecord.job_id == job_id)
+                )).scalar_one()
+            assert status == 'uploaded'
+
+    run_async(_go())
 
 
 def test_verify_inventory_passes_on_correct_files(tmp_path):
