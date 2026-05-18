@@ -481,7 +481,22 @@ export function SplitSegmentDialog({
     })
   }
 
-  /** Move a cn-side cut. Mirrors source proportionally + clamps both. */
+  /** Move a cn-side cut. ASYMMETRIC vs handleMoveSourceCut: only cn_index
+   *  changes; source_index is **frozen** at its current value.
+   *
+   *  Rationale (user-requested 2026-05-17):
+   *    English cut positions are anchored to ASR word-level audio timing —
+   *    those are "true". CN cut positions are byte offsets in the
+   *    translation, only proportionally related to audio. When the user
+   *    moves an English cut, mirroring to CN by ratio is a useful default
+   *    (the user can then nudge CN independently to fix translation drift).
+   *    But moving CN to nudge translation alignment should NOT drag the
+   *    English cut along — that would destroy the audio-correct anchor
+   *    the user just decided to keep.
+   *
+   *  Invariant preservation: source_index unchanged → its monotonicity
+   *  vs neighbors is unaffected (it was monotonic before, still is). We
+   *  only clamp cn_index between neighbor cn_index bounds. */
   const handleMoveCnCut = (cutArrayIndex: number, newCnIndex: number) => {
     setCuts((prev) => {
       if (cutArrayIndex < 0 || cutArrayIndex >= prev.length) return prev
@@ -489,17 +504,13 @@ export function SplitSegmentDialog({
       const cnHi = (cutArrayIndex < prev.length - 1 ? prev[cutArrayIndex + 1].cn_index : cnText.length) - 1
       if (cnLo > cnHi) return prev
       const clampedCn = Math.max(cnLo, Math.min(cnHi, newCnIndex))
-      const srcRatio = cnText.length > 0 ? clampedCn / cnText.length : 0.5
-      const srcLo = (cutArrayIndex > 0 ? prev[cutArrayIndex - 1].source_index : 0) + 1
-      const srcHi = (cutArrayIndex < prev.length - 1 ? prev[cutArrayIndex + 1].source_index : sourceText.length) - 1
-      const srcTarget = Math.round(srcRatio * sourceText.length)
-      const clampedSource = Math.max(srcLo, Math.min(srcHi, srcTarget))
-      if (
-        prev[cutArrayIndex].source_index === clampedSource
-        && prev[cutArrayIndex].cn_index === clampedCn
-      ) return prev
+      if (prev[cutArrayIndex].cn_index === clampedCn) return prev
       const next = [...prev]
-      next[cutArrayIndex] = { source_index: clampedSource, cn_index: clampedCn }
+      // Preserve source_index — only the cn_index moves.
+      next[cutArrayIndex] = {
+        source_index: prev[cutArrayIndex].source_index,
+        cn_index: clampedCn,
+      }
       return next
     })
   }
@@ -657,15 +668,18 @@ export function SplitSegmentDialog({
               />
             </div>
 
-            {/* CN — independent click-to-add (also auto-mirrored when adding
-             *  on source side) */}
+            {/* CN — independent click-to-add (auto-mirrored when adding on
+             *  source side). 2026-05-17: drag-move on CN cut only moves the
+             *  CN index — source_index stays put (audio anchor preserved).
+             *  Reverse direction still mirrors (English drag → CN follows
+             *  by ratio as a starting guess). */}
             <div className="space-y-2">
               <div className="flex items-center justify-between text-xs">
                 <label className="text-muted-foreground">
-                  中文译文 · 点击文字位置加切点 · 拖动切线微调
+                  中文译文 · 点击文字位置加切点 · 拖动切线只移动中文
                 </label>
                 <span className="text-[10px] text-muted-foreground">
-                  切点跟英文自动联动
+                  英文切点不会跟随
                 </span>
               </div>
               <CutTextBlockMulti
