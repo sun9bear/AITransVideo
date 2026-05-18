@@ -128,6 +128,28 @@ class AdminSettings(BaseModel):
     # user's library beyond a chosen threshold. Default 30 mirrors
     # MiniMax's commonly-stated per-account voice quota.
     smart_user_voice_clone_cap: int = 30
+    # --- Phase 3 (plan 2026-05-17-user-voice-candidate-first §后台策略字段) ---
+    # Smart MVP candidate-first voice policy. These 3 toggles control how
+    # Smart treats personal-voice candidates and new clones independently.
+    # Plan §Consent × Admin 决策矩阵 documents the 8-row truth table.
+    #
+    # Defaults preserve existing Smart behavior:
+    #   smart_auto_clone_enabled=True    — Smart may auto-clone when
+    #     consent allows. Set False to disable new clone for ALL users
+    #     (e.g. when MiniMax account is low on credits).
+    #   smart_reuse_user_voice_enabled=True — Smart queries personal-
+    #     voice candidates before clone. Set False to skip reuse path
+    #     entirely (e.g. for debugging or per-user library lockdown).
+    #   smart_pause_on_possible_user_voice_match=False — weak/medium
+    #     matches do NOT pause smart pipeline (Phase 4 enforces this;
+    #     Phase 3 only reserves the field). Default off so existing
+    #     Smart users don't get surprise pauses.
+    #
+    # Plan §核心不变量: smart_auto_clone_enabled=False only blocks new
+    # clones; strong-match reuse still fires when reuse is enabled.
+    smart_auto_clone_enabled: bool = True
+    smart_reuse_user_voice_enabled: bool = True
+    smart_pause_on_possible_user_voice_match: bool = False
 
     @field_validator("whisper_alignment_trigger")
     @classmethod

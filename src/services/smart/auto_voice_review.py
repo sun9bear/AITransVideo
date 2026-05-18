@@ -27,10 +27,22 @@ Outputs (caller applies; this module doesn't write anywhere):
     ``src/services/tts/`` which is import-forbidden for the smart
     package per §8.2 #1; PR#3C integration layer calls it).
 
-Decision rules per plan §6.2.1 + §7.3:
-  1. ``smart_consent.auto_voice_clone is False`` → PRESET with reason
-     ``consent_denied`` (defensive — Gateway create gate should already
-     have rejected, but module fails closed if anyone bypasses it).
+Decision rules per plan §6.2.1 + §7.3 + Phase 3 (2026-05-17 user-voice-
+candidate-first §Consent × Admin 决策矩阵):
+  0. Existing strong personal-voice match for the speaker → REUSED with
+     reason ``reused_user_voice``. Reuse fires regardless of consent OR
+     ``admin_clone_enabled`` — reuse doesn't call provider, doesn't
+     consume clone quota, and doesn't burn account stock, so neither
+     gate applies (plan §核心不变量).
+  1. ``smart_consent.auto_voice_clone is False`` OR
+     ``admin_clone_enabled is False`` (no existing match) → PRESET
+     with one of three reason_codes (plan §审计 reason_codes):
+       - ``new_clone_blocked_by_consent`` — consent denied only
+       - ``new_clone_blocked_by_admin`` — admin disabled only
+       - ``new_clone_blocked_by_consent_and_admin`` — both gates closed
+     Defensive — Gateway create gate should reject consent denials, but
+     module fails closed if anyone bypasses it. Provider is NEVER called
+     when either gate is closed.
   2. ``sample_seconds < 10.0`` → PRESET with reason
      ``insufficient_sample_seconds_lt_10``. Per Codex F5: 8-10s samples
      would be 400-rejected by the existing voice-clone HTTP endpoint
@@ -40,11 +52,11 @@ Decision rules per plan §6.2.1 + §7.3:
      integration layer treats the whole VoiceReviewResult as PAUSED and
      emits a smart_state marker so the user can decide whether to retry
      later.
-  4. consent OK + sample OK + quota OK → invoke ``clone_provider.clone_voice``
-     up to ``max_clone_attempts_per_speaker`` (plan §7.3). On success
-     → CLONED with the returned voice_id. On exhausted retries → PRESET
-     with reason ``provider_failure_max_retries_<N>``. On quota error
-     mid-flight → switch to PAUSED for remaining speakers.
+  4. consent OK + admin OK + sample OK + quota OK → invoke
+     ``clone_provider.clone_voice`` up to ``max_clone_attempts_per_speaker``
+     (plan §7.3). On success → CLONED with the returned voice_id. On
+     exhausted retries → PRESET with reason ``provider_failure_max_retries_<N>``.
+     On quota error mid-flight → switch to PAUSED for remaining speakers.
 
 This module is pure orchestration:
   - No I/O (sidecar emit happens via the integration layer calling
@@ -188,6 +200,7 @@ def evaluate_voice_review(
     quota_safety_water_mark: int = DEFAULT_QUOTA_SAFETY_WATER_MARK,
     min_sample_seconds: float = MIN_SAMPLE_SECONDS,
     max_clone_attempts_per_speaker: int = DEFAULT_MAX_CLONE_ATTEMPTS,
+    admin_clone_enabled: bool = True,
 ) -> VoiceReviewResult:
     """Orchestrate the per-main-speaker auto voice decision.
 
@@ -204,6 +217,12 @@ def evaluate_voice_review(
         quota concurrently — that's not a Smart MVP concern)
       smart_decision_id_factory: callable producing fresh decision IDs
         (e.g. ``uuid4().hex``); injected so tests can pin IDs
+      admin_clone_enabled: Phase 3 (plan 2026-05-17-user-voice-candidate-
+        first §后台策略字段) admin policy switch. When False, no new clone
+        is issued — speakers without an existing strong match fall to
+        PRESET. Defaults to True to preserve legacy 1-axis behavior for
+        callers that don't pass the kwarg. Strong-match REUSED decisions
+        are unaffected (plan §核心不变量).
 
     Returns:
       VoiceReviewResult capturing top-level outcome + per-speaker
@@ -224,6 +243,20 @@ def evaluate_voice_review(
     # bool that Gateway should deliver) is allowed through. Anything
     # else — None, missing, "true" string, 1 int, etc. — falls to PRESET.
     consent_allows_clone = smart_consent.get("auto_voice_clone") is True
+    # Phase 3 (plan 2026-05-17 §Consent × Admin 决策矩阵): admin policy
+    # is the second independent axis. Default True to keep legacy 1-axis
+    # callers working unchanged. Strict bool() coercion is fine here
+    # because the call site (process.py) reads from a Pydantic-validated
+    # AdminSettings.smart_auto_clone_enabled (bool), not a stringly-typed
+    # payload — but we still pin the type defensively.
+    admin_allows_new_clone = bool(admin_clone_enabled)
+    # Pre-compute the new-clone-blocked reason_code so the loop below
+    # doesn't repeat the branch. Three reasons distinguish which gate
+    # closed (plan §审计 reason_codes).
+    new_clone_blocked_reason = _new_clone_blocked_reason(
+        consent_allows_clone=consent_allows_clone,
+        admin_allows_new_clone=admin_allows_new_clone,
+    )
     decisions: list[VoiceReviewDecision] = []
     quota_remaining = voice_library_quota_remaining
     paused_after_speaker: bool = False
@@ -245,19 +278,26 @@ def evaluate_voice_review(
             ))
             continue
 
-        # Rule 1: consent denied
-        if not consent_allows_clone:
-            decisions.append(_preset_decision(
-                speaker, "consent_denied", smart_decision_id_factory()
-            ))
-            continue
-
+        # Strong-match reuse runs BEFORE the new-clone gates. Plan
+        # §核心不变量: reuse doesn't consume clone quota, doesn't call
+        # provider, doesn't burn account stock — so neither consent nor
+        # admin_clone_enabled apply. A speaker with an existing strong
+        # match reuses regardless of consent / admin policy.
         existing_match = existing_voice_matches.get(speaker.speaker_id)
         if existing_match is not None and str(existing_match.voice_id or "").strip():
             decisions.append(_reused_decision(
                 speaker,
                 existing_match,
                 smart_decision_id_factory(),
+            ))
+            continue
+
+        # Rule 1 (Phase 3): new clone blocked by consent and/or admin.
+        # No existing match means we'd need a new clone, which is what
+        # either gate blocks. Provider is NEVER called here.
+        if new_clone_blocked_reason is not None:
+            decisions.append(_preset_decision(
+                speaker, new_clone_blocked_reason, smart_decision_id_factory()
             ))
             continue
 
@@ -504,6 +544,28 @@ def _paused_decision(
         smart_decision_id=smart_decision_id,
         metrics=metrics or {},
     )
+
+
+def _new_clone_blocked_reason(
+    *,
+    consent_allows_clone: bool,
+    admin_allows_new_clone: bool,
+) -> str | None:
+    """Phase 3 (plan 2026-05-17 §审计 reason_codes) — return a reason
+    code identifying which gate(s) blocked new clone, or None if both
+    gates allow it.
+
+    Three distinct codes so the audit log can trace whether the user
+    revoked consent, an admin disabled the policy switch, or both —
+    a key signal for support / billing dispute traceability.
+    """
+    if not consent_allows_clone and not admin_allows_new_clone:
+        return "new_clone_blocked_by_consent_and_admin"
+    if not consent_allows_clone:
+        return "new_clone_blocked_by_consent"
+    if not admin_allows_new_clone:
+        return "new_clone_blocked_by_admin"
+    return None
 
 
 def _looks_like_quota_error(exc: BaseException) -> bool:

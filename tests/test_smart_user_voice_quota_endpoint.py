@@ -57,6 +57,133 @@ class TestAdminSettingsSmartVoiceCloneCap:
         assert s.smart_user_voice_clone_cap == 10
 
 
+class TestAdminSettingsSmartVoicePolicyPhase3:
+    """Phase 3 (plan 2026-05-17-user-voice-candidate-first §后台策略字段):
+    three independent admin toggles for Smart's voice candidate / clone
+    policy. Defaults preserve existing Smart behavior (reuse + clone
+    both allowed, no pause on possible match)."""
+
+    def test_defaults_for_smart_voice_policy(self):
+        """Plan §后台策略字段 defaults:
+          - smart_auto_clone_enabled = True
+          - smart_reuse_user_voice_enabled = True
+          - smart_pause_on_possible_user_voice_match = False
+
+        Default values matter because Phase 3 is rolled out to existing
+        Smart users. Drifting any default would silently change behavior
+        on the first restart after a Phase 3 deploy."""
+        from admin_settings import AdminSettings
+
+        s = AdminSettings()
+        assert hasattr(s, "smart_auto_clone_enabled"), (
+            "AdminSettings missing smart_auto_clone_enabled — Phase 3 "
+            "gate field. process.py reads this; absence falls back to "
+            "True via getattr but masks deploy drift."
+        )
+        assert hasattr(s, "smart_reuse_user_voice_enabled"), (
+            "AdminSettings missing smart_reuse_user_voice_enabled."
+        )
+        assert hasattr(s, "smart_pause_on_possible_user_voice_match"), (
+            "AdminSettings missing smart_pause_on_possible_user_voice_match."
+        )
+        assert s.smart_auto_clone_enabled is True
+        assert s.smart_reuse_user_voice_enabled is True
+        assert s.smart_pause_on_possible_user_voice_match is False
+
+    def test_fields_accept_admin_override(self):
+        """All three toggles accept explicit overrides via constructor
+        (mirrors the POST /api/admin/settings payload)."""
+        from admin_settings import AdminSettings
+
+        s = AdminSettings(
+            smart_auto_clone_enabled=False,
+            smart_reuse_user_voice_enabled=False,
+            smart_pause_on_possible_user_voice_match=True,
+        )
+        assert s.smart_auto_clone_enabled is False
+        assert s.smart_reuse_user_voice_enabled is False
+        assert s.smart_pause_on_possible_user_voice_match is True
+
+    def test_save_load_round_trip_preserves_smart_voice_policy(
+        self, tmp_path, monkeypatch,
+    ):
+        """save_settings → load_settings round-trips all three fields
+        verbatim. Catches schema drift between the save merge logic
+        and the parse path."""
+        monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+        import importlib
+        import admin_settings as gw_admin_settings
+        importlib.reload(gw_admin_settings)
+        AdminSettings = gw_admin_settings.AdminSettings
+        save_settings = gw_admin_settings.save_settings
+        load_settings = gw_admin_settings.load_settings
+
+        s = AdminSettings(
+            smart_auto_clone_enabled=False,
+            smart_reuse_user_voice_enabled=False,
+            smart_pause_on_possible_user_voice_match=True,
+        )
+        save_settings(s)
+
+        loaded = load_settings()
+        assert loaded.smart_auto_clone_enabled is False
+        assert loaded.smart_reuse_user_voice_enabled is False
+        assert loaded.smart_pause_on_possible_user_voice_match is True
+
+    def test_save_smart_voice_policy_preserves_existing_smart_cap(
+        self, tmp_path, monkeypatch,
+    ):
+        """Phase 3 save must NOT clobber the existing
+        ``smart_user_voice_clone_cap`` field — the save merge logic
+        already preserves unrelated keys, and this verifies the new
+        fields don't accidentally overwrite siblings."""
+        import json
+        monkeypatch.setenv("AIVIDEOTRANS_CONFIG_DIR", str(tmp_path))
+        import importlib
+        import admin_settings as gw_admin_settings
+        importlib.reload(gw_admin_settings)
+        AdminSettings = gw_admin_settings.AdminSettings
+        save_settings = gw_admin_settings.save_settings
+        load_settings = gw_admin_settings.load_settings
+
+        # Step 1: save with a custom cap.
+        s = AdminSettings(smart_user_voice_clone_cap=50)
+        save_settings(s)
+        first_loaded = load_settings()
+        assert first_loaded.smart_user_voice_clone_cap == 50
+
+        # Step 2: save Phase 3 fields; the cap must persist.
+        s2 = AdminSettings(
+            smart_user_voice_clone_cap=50,
+            smart_auto_clone_enabled=False,
+            smart_reuse_user_voice_enabled=False,
+        )
+        save_settings(s2)
+        loaded = load_settings()
+        assert loaded.smart_user_voice_clone_cap == 50, (
+            "Phase 3 save clobbered smart_user_voice_clone_cap."
+        )
+        assert loaded.smart_auto_clone_enabled is False
+        assert loaded.smart_reuse_user_voice_enabled is False
+        # Defaults still hold for the un-touched field.
+        assert loaded.smart_pause_on_possible_user_voice_match is False
+
+    def test_get_settings_response_includes_phase3_fields(self):
+        """GET /api/admin/settings returns model_dump(), so any new
+        AdminSettings field is auto-exposed. Verify the three Phase 3
+        fields are in the dump (and have correct default values)."""
+        from admin_settings import AdminSettings
+
+        dump = AdminSettings().model_dump()
+        assert "smart_auto_clone_enabled" in dump
+        assert "smart_reuse_user_voice_enabled" in dump
+        assert "smart_pause_on_possible_user_voice_match" in dump
+        # Default shape matches plan §后台策略字段.
+        assert dump["smart_auto_clone_enabled"] is True
+        assert dump["smart_reuse_user_voice_enabled"] is True
+        assert dump["smart_pause_on_possible_user_voice_match"] is False
+
+
 class TestQuotaEndpointRegistration:
     """PR#3C-b3e: ``GET /api/internal/user-voices/quota`` must be wired
     into the internal_router so the Caddyfile @internal_block can

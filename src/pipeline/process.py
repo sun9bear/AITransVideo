@@ -3438,8 +3438,9 @@ class ProcessPipeline:
 
                     # ── Piece 1: extract per-speaker clone sample ──
                     #
-                    # Only attempt when consent.auto_voice_clone is True.
-                    # Otherwise evaluate_voice_review routes all speakers
+                    # Only attempt when consent.auto_voice_clone is True
+                    # AND admin policy allows new clone. Otherwise
+                    # evaluate_voice_review routes all (no-match) speakers
                     # to PRESET (no clone call), making sample extraction
                     # wasted work. Fail-closed: if ANY main speaker's
                     # sample extraction raises, route the WHOLE smart
@@ -3448,8 +3449,34 @@ class ProcessPipeline:
                     _smart_consent_allows_clone = (
                         smart_consent.get("auto_voice_clone") is True
                     )
+                    # Phase 3 (plan 2026-05-17-user-voice-candidate-first
+                    # §后台策略字段): read admin policy switches. Defaults
+                    # preserve legacy behavior (reuse + clone both allowed)
+                    # so missing / malformed admin_settings.json doesn't
+                    # surprise existing Smart users.
+                    _smart_admin_clone_enabled = True
+                    _smart_admin_reuse_enabled = True
+                    try:
+                        from admin_settings import load_settings as _load_admin_settings
+                        _admin = _load_admin_settings()
+                        _smart_admin_clone_enabled = bool(_admin.smart_auto_clone_enabled)
+                        _smart_admin_reuse_enabled = bool(_admin.smart_reuse_user_voice_enabled)
+                    except Exception as _admin_exc:
+                        print(
+                            f"[smart] failed to load admin smart-voice policy "
+                            f"(using defaults reuse=True clone=True): "
+                            f"{type(_admin_exc).__name__}: {_admin_exc}",
+                            flush=True,
+                        )
                     _smart_existing_voice_matches: dict[str, VoiceReviewExistingMatch] = {}
-                    if _smart_consent_allows_clone:
+                    # Phase 3 §Consent × Admin 矩阵: reuse query is gated
+                    # by admin policy ALONE, NOT consent. Consent gates
+                    # new-clone (which DOES call paid provider); reuse
+                    # doesn't call provider or consume quota, so consent
+                    # doesn't apply. Admin can still disable the reuse
+                    # path entirely via smart_reuse_user_voice_enabled
+                    # (e.g. for debugging or per-library lockdown).
+                    if _smart_admin_reuse_enabled:
                         _smart_user_id_for_match = str(_snap("user_id") or "")
                         _smart_source_hash_for_match = (
                             str(_snap("source_content_hash") or "") or None
@@ -3499,7 +3526,15 @@ class ProcessPipeline:
                         _sid for _sid in _smart_main_speaker_ids
                         if _sid not in _smart_existing_voice_matches
                     ]
-                    if _smart_consent_allows_clone and _smart_speaker_ids_requiring_clone:
+                    # Phase 3: sample extraction is wasted work when EITHER
+                    # consent OR admin disallows new clone. Skip the
+                    # ffmpeg concat work so the pipeline doesn't burn I/O
+                    # on samples evaluate_voice_review will ignore.
+                    if (
+                        _smart_consent_allows_clone
+                        and _smart_admin_clone_enabled
+                        and _smart_speaker_ids_requiring_clone
+                    ):
                         _smart_sample_root = (
                             final_project_dir / "smart_clone_samples"
                         )
@@ -3742,14 +3777,28 @@ class ProcessPipeline:
                     # would still incorrectly handoff a job that
                     # would happily auto-approve as empty.
                     #
+                    # Phase 3 (plan 2026-05-17 §Consent × Admin 决策矩阵):
+                    # admin policy adds a second AND gate. When
+                    # smart_auto_clone_enabled=False, we must NOT wire
+                    # the real CloneProvider (= MiniMax adapter). Routing
+                    # the smart job through the not-wired stub means
+                    # evaluate_voice_review's PRESET fall-through fires
+                    # without ever calling provider, mirroring the
+                    # consent=False path.
+                    #
                     # evaluate_voice_review short-circuits to PRESET
-                    # when consent != True OR when main_speakers is
-                    # empty. So the gate mirrors both conditions.
+                    # when EITHER gate is closed OR when main_speakers
+                    # is empty. The gate below mirrors all conditions.
                     _smart_needs_new_clone = bool(
                         _smart_consent_allows_clone
+                        and _smart_admin_clone_enabled
                         and _smart_speaker_ids_requiring_clone
                     )
-                    if _smart_consent_allows_clone and _smart_main_speakers:
+                    if (
+                        _smart_consent_allows_clone
+                        and _smart_admin_clone_enabled
+                        and _smart_main_speakers
+                    ):
                         if _smart_needs_new_clone:
                             # 2026-05-16: admin role bypasses voice
                             # library cap (admin_settings.smart_user_voice_clone_cap).
@@ -3844,10 +3893,12 @@ class ProcessPipeline:
                                 _build_b2_not_wired_clone_provider()
                             )
                     else:
-                        # consent=False path: evaluate_voice_review
-                        # never reads quota or invokes provider — it
-                        # short-circuits to PRESET decisions. Pass
-                        # sentinel values that won't be consumed but
+                        # consent=False OR admin_clone_enabled=False
+                        # OR empty main_speakers path:
+                        # evaluate_voice_review never reads quota or
+                        # invokes provider — it short-circuits to PRESET
+                        # for any speaker without a strong reuse match.
+                        # Pass sentinel values that won't be consumed but
                         # satisfy the type contract. When every main
                         # speaker already has a strong personal-voice
                         # match, evaluate_voice_review also never reads
@@ -3865,6 +3916,7 @@ class ProcessPipeline:
                         voice_library_quota_remaining=_smart_quota_remaining,
                         smart_decision_id_factory=lambda: _smart_uuid.uuid4().hex,
                         existing_voice_matches_by_speaker_id=_smart_existing_voice_matches,
+                        admin_clone_enabled=_smart_admin_clone_enabled,
                     )
 
                     if _smart_voice_review.outcome == VoiceReviewOutcome.PAUSED:

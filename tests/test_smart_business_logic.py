@@ -1819,16 +1819,18 @@ class TestB3DCloneSampleExtractorContract:
         assert _fetch_smart_user_voice_quota_remaining("u") is None
 
     def test_b3e_fix_consent_false_skips_quota_lookup(self):
-        """Codex 第二十九轮 P1 + 第三十轮 P1: consent=False (or empty
-        main_speakers) jobs must NOT call the Gateway quota endpoint.
+        """Codex 第二十九轮 P1 + 第三十轮 P1 + Phase 3 (2026-05-17): jobs
+        whose consent=False, admin disabled new clone, or empty
+        main_speakers must NOT call the Gateway quota endpoint.
         evaluate_voice_review routes to PRESET / empty-AUTO-APPROVED
         without reading quota/provider in those cases, so a Gateway
         hiccup must not error-downgrade them to handoff.
 
         Pin the source-level structure:
-          - Quota lookup is inside the
-            ``if _smart_consent_allows_clone and _smart_main_speakers:``
-            gate (b3e-fix2 condition).
+          - Quota lookup is inside the triple gate
+            ``_smart_consent_allows_clone and _smart_admin_clone_enabled
+              and _smart_main_speakers`` (Phase 3 adds admin axis to
+            the original b3e-fix2 dual gate).
           - There's an ``else:`` branch using stub provider + 0
             quota so evaluate_voice_review's type signature is
             satisfied without reaching the real provider.
@@ -1840,44 +1842,56 @@ class TestB3DCloneSampleExtractorContract:
         idx = source.find("Smart inline auto-approve path")
         assert idx >= 0
         lines = source[idx:].splitlines()
-        block = "\n".join(lines[:900])
+        # Phase 3 added ~50 lines of admin policy comments + gate
+        # additions; bump window from 900 to 1200 to keep covering
+        # quota-unavailable handoff branch.
+        block = "\n".join(lines[:1200])
 
-        # Find the quota lookup call — must be inside the dual gate.
+        # Find the quota lookup call — must be inside the triple gate.
         quota_call = "_fetch_smart_user_voice_quota_remaining("
         quota_idx = block.find(quota_call)
         assert quota_idx >= 0
 
-        # Walk backward to find the nearest ``if`` — must be the
-        # consent+main_speakers gate.
+        # Walk backward to find the nearest ``if`` — must be the Phase 3
+        # triple gate (consent + admin_clone_enabled + main_speakers).
+        # The gate is now a multi-line ``if (...)`` block; search the
+        # core conjunction substring that uniquely identifies it.
         preceding = block[:quota_idx]
         gate_idx = preceding.rfind(
-            "if _smart_consent_allows_clone and _smart_main_speakers:"
+            "_smart_consent_allows_clone\n                        "
+            "and _smart_admin_clone_enabled\n                        "
+            "and _smart_main_speakers"
         )
         assert gate_idx >= 0, (
-            "Quota lookup must live inside the b3e-fix2 dual gate "
-            "``if _smart_consent_allows_clone and _smart_main_speakers:``.\n"
-            f"Quota call at offset {quota_idx}, no dual gate found "
+            "Quota lookup must live inside the Phase 3 triple gate "
+            "``_smart_consent_allows_clone and _smart_admin_clone_enabled "
+            "and _smart_main_speakers``. Plan 2026-05-17-user-voice-"
+            "candidate-first §Consent × Admin 决策矩阵 — when admin "
+            "disabled new clone, the smart job must not even query "
+            "the Gateway quota endpoint.\n"
+            f"Quota call at offset {quota_idx}, no triple gate found "
             f"before it.\nPreceding 2000 chars:\n{preceding[-2000:]}"
         )
 
         # The else branch must exist and use stub provider + 0 quota.
-        # Find the matching else near the dual gate. Keep this window
+        # Find the matching else near the triple gate. Keep this window
         # generous because quota-unavailable handoff text and audit payloads
         # make the guarded branch fairly long.
         gate_block = block[gate_idx : gate_idx + 9000]
         else_idx = gate_block.find("\n                    else:")
         assert else_idx >= 0, (
-            "Dual gate has no else: branch — consent=False / empty "
-            "main_speakers path would crash when evaluate_voice_review "
-            "reads quota/provider.\n"
+            "Triple gate has no else: branch — consent=False / "
+            "admin_clone_enabled=False / empty main_speakers path "
+            "would crash when evaluate_voice_review reads "
+            "quota/provider.\n"
             f"Block:\n{gate_block}"
         )
         else_window = gate_block[else_idx : else_idx + 1500]
         assert "_build_b2_not_wired_clone_provider()" in else_window, (
-            "consent=False / empty-main-speakers else branch must use "
-            "the b2 stub provider — evaluate_voice_review won't "
-            "actually call it but the type signature requires a "
-            "CloneProvider.\n"
+            "consent=False / admin disabled / empty-main-speakers else "
+            "branch must use the b2 stub provider — "
+            "evaluate_voice_review won't actually call it but the type "
+            "signature requires a CloneProvider.\n"
             f"else window:\n{else_window}"
         )
 
@@ -2019,18 +2033,23 @@ class TestB3DCloneSampleExtractorContract:
         ) is False
 
     def test_b3e_fix2_consent_true_but_empty_main_speakers_skips_quota(self):
-        """Codex 第三十轮 P1: consent=True + main_speakers=[] is a
-        legal happy path — evaluate_voice_review returns AUTO_APPROVED
-        with empty decisions WITHOUT reading quota or invoking provider.
-        The b3e-fix consent gate alone would still trip the Gateway
-        quota query for this case; a transient Gateway hiccup would
-        then fail-closed handoff a job that should auto-approve as
-        empty.
+        """Codex 第三十轮 P1 + Phase 3 (2026-05-17 user-voice-candidate-
+        first §Consent × Admin 决策矩阵): consent=True + admin clone
+        allowed + main_speakers=[] is a legal happy path —
+        evaluate_voice_review returns AUTO_APPROVED with empty decisions
+        WITHOUT reading quota or invoking provider. The b3e-fix
+        consent gate alone would still trip the Gateway quota query for
+        this case; a transient Gateway hiccup would then fail-closed
+        handoff a job that should auto-approve as empty.
+
+        Phase 3 also requires admin policy on the gate so an admin
+        disabling smart_auto_clone_enabled doesn't waste a quota lookup.
 
         Pin two things at the source level:
-          - The gate is ``_smart_consent_allows_clone and _smart_main_speakers``
-            (both conditions, not just consent)
-          - Else branch falls through with stub provider + 0 quota
+          - The gate is the Phase 3 triple
+            ``_smart_consent_allows_clone and _smart_admin_clone_enabled
+            and _smart_main_speakers`` (all three conditions).
+          - Else branch falls through with stub provider + 0 quota.
         """
         from pathlib import Path
 
@@ -2039,42 +2058,109 @@ class TestB3DCloneSampleExtractorContract:
         idx = source.find("Smart inline auto-approve path")
         assert idx >= 0
         lines = source[idx:].splitlines()
-        block = "\n".join(lines[:900])
+        # Phase 3 added admin policy gate + comments; window expanded
+        # to match test_b3e_fix_consent_false_skips_quota_lookup.
+        block = "\n".join(lines[:1200])
 
-        # The gate condition must be ``and _smart_main_speakers``.
-        assert (
-            "if _smart_consent_allows_clone and _smart_main_speakers:"
-            in block
-        ), (
-            "Quota/provider gate must require BOTH consent AND "
-            "non-empty _smart_main_speakers. Codex 第三十轮 P1: "
-            "empty main_speakers is legal happy path "
-            "(evaluate_voice_review trivially auto-approves), and a "
-            "Gateway quota hiccup should not turn this into a handoff.\n"
+        # The gate condition must include all three axes. The Phase 3
+        # gate is a multi-line ``if (...)`` block so we search the
+        # core conjunction substring spanning the three conditions.
+        triple_gate = (
+            "_smart_consent_allows_clone\n                        "
+            "and _smart_admin_clone_enabled\n                        "
+            "and _smart_main_speakers"
+        )
+        assert triple_gate in block, (
+            "Quota/provider gate must require ALL THREE: consent, "
+            "admin_clone_enabled, and non-empty main_speakers. Plan "
+            "2026-05-17-user-voice-candidate-first §Consent × Admin "
+            "决策矩阵 — when ANY of consent / admin clone / "
+            "main_speakers excludes new clone, the Gateway quota "
+            "endpoint must not be called.\n"
             f"Block (first 4000 chars):\n{block[:4000]}"
         )
 
-        # The bare ``if _smart_consent_allows_clone:`` form is still
-        # legitimately used by the sample extraction gate earlier in
-        # the smart branch (samples must be extracted BEFORE
-        # _smart_main_speakers exists, so that gate only checks
-        # consent). What we forbid is using the bare form for the
-        # quota/provider gate — verified by the positive assertion
-        # above. We also count occurrences to detect drift: today
-        # there's exactly 1 bare-consent-gate site (sample
-        # extraction); a 2nd would mean someone reverted the
-        # main_speakers condition.
+        # The bare ``if _smart_consent_allows_clone:`` form is no
+        # longer used anywhere — Phase 3 replaced the sample
+        # extraction gate with a triple conjunction too. Count
+        # occurrences to detect drift: 0 expected.
         bare_consent_gate_count = block.count(
             "if _smart_consent_allows_clone:"
         )
-        assert bare_consent_gate_count == 1, (
-            f"Expected exactly 1 bare ``if _smart_consent_allows_clone:`` "
-            f"(the sample extraction gate); found {bare_consent_gate_count}. "
-            f"Codex 第三十轮 P1: the quota/provider gate MUST include "
-            f"``and _smart_main_speakers``. If you added a new gate for "
-            f"a different purpose, factor it into a named variable so "
-            f"this guard stays sharp.\n"
+        assert bare_consent_gate_count == 0, (
+            f"Expected zero bare ``if _smart_consent_allows_clone:`` "
+            f"gates after Phase 3 (sample extraction now also gates on "
+            f"admin); found {bare_consent_gate_count}. If you added a "
+            f"new gate for a different purpose, factor it into a "
+            f"named variable so this guard stays sharp.\n"
             f"Block (first 4000 chars):\n{block[:4000]}"
+        )
+
+    def test_phase3_reuse_query_gated_on_admin_alone_not_consent(self):
+        """Phase 3 (plan 2026-05-17 §Consent × Admin 决策矩阵): the
+        personal-voice reuse query loop must run when
+        ``_smart_admin_reuse_enabled is True``, regardless of consent.
+        Plan invariant: consent only gates new clone (paid API);
+        reuse is free of paid API, so consent doesn't apply.
+
+        Pin two source-level anchors:
+          - ``_smart_admin_reuse_enabled`` is loaded from admin settings
+            with default True (so a missing JSON file keeps reuse on).
+          - The match-query loop is wrapped in
+            ``if _smart_admin_reuse_enabled:`` — NOT a consent check.
+        """
+        from pathlib import Path
+
+        src = Path(__file__).resolve().parents[1] / "src" / "pipeline" / "process.py"
+        source = src.read_text(encoding="utf-8")
+        idx = source.find("Smart inline auto-approve path")
+        assert idx >= 0
+        lines = source[idx:].splitlines()
+        block = "\n".join(lines[:1200])
+
+        # Anchor 1: admin-policy variable is read with a fail-open
+        # default so missing admin_settings.json doesn't disable reuse.
+        assert "_smart_admin_reuse_enabled = True" in block, (
+            "Phase 3: process.py must default _smart_admin_reuse_enabled "
+            "to True so a missing/corrupt admin_settings.json preserves "
+            "the legacy reuse-enabled behavior.\n"
+            f"Block (first 4000 chars):\n{block[:4000]}"
+        )
+        # The admin field is read off the loaded settings object.
+        assert "smart_reuse_user_voice_enabled" in block, (
+            "Phase 3: process.py must read AdminSettings."
+            "smart_reuse_user_voice_enabled to honor the admin policy."
+        )
+
+        # Anchor 2: the match-query loop is gated on admin-policy,
+        # NOT consent. Find the _match_smart_user_voice call site
+        # and walk backward to confirm the nearest gate.
+        match_call = "_match_smart_user_voice("
+        match_idx = block.find(match_call)
+        assert match_idx >= 0, (
+            "Phase 3: _match_smart_user_voice call must still exist "
+            "inside the smart inline branch — reuse is the entire point "
+            "of the candidate-first plan."
+        )
+        preceding = block[:match_idx]
+        # The reuse query gate must be the admin-only form.
+        reuse_gate_idx = preceding.rfind("if _smart_admin_reuse_enabled:")
+        assert reuse_gate_idx >= 0, (
+            "Phase 3: reuse query loop must be wrapped in "
+            "``if _smart_admin_reuse_enabled:``. Consent must NOT gate "
+            "reuse — plan §核心不变量 reuse doesn't burn paid API.\n"
+            f"Preceding 2000 chars:\n{preceding[-2000:]}"
+        )
+        # And NO ``if _smart_consent_allows_clone:`` should appear
+        # between that admin gate and the _match_smart_user_voice
+        # call (i.e. the reuse query is NOT consent-gated).
+        between = preceding[reuse_gate_idx:]
+        assert "if _smart_consent_allows_clone" not in between, (
+            "Phase 3: reuse query loop must not be inside a consent "
+            "gate. Plan §Consent × Admin 决策矩阵 — consent only gates "
+            "new clone, never reuse. Found consent gate between "
+            "admin gate and _match_smart_user_voice call.\n"
+            f"Between:\n{between}"
         )
 
     def test_b3e_fix2_empty_main_speakers_short_circuits_in_evaluate(self):
@@ -2397,7 +2483,11 @@ class TestB3DCloneSampleExtractorContract:
         idx = source.find("Smart inline auto-approve path")
         assert idx >= 0
         lines = source[idx:].splitlines()
-        block = "\n".join(lines[:1000])  # smart inline branch fits
+        # Phase 3 (plan 2026-05-17) added admin policy gate +
+        # comments (~50 lines). Bump window from 1000 → 1200 to keep
+        # all downgrade_handoff branches in scope, including
+        # clone_library_register_failed which now sits at ~line 1040.
+        block = "\n".join(lines[:1200])
 
         # Count distinct _emit_smart_audit call sites by their
         # decision_type field. Each (decision_type, decision) pair

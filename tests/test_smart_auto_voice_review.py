@@ -85,7 +85,11 @@ class TestAutoVoiceReviewOrchestration:
         clone_provider when smart_consent.auto_voice_clone is False.
         Defensive check (Gateway create gate should catch first), but
         a misroute here means burning user quota on a path the user
-        didn't agree to."""
+        didn't agree to.
+
+        Phase 3 (plan 2026-05-17 §审计 reason_codes): reason_code emits
+        ``new_clone_blocked_by_consent`` to distinguish from
+        ``new_clone_blocked_by_admin``."""
         from services.smart.auto_voice_review import (
             evaluate_voice_review, VoiceReviewChoice, VoiceReviewOutcome,
         )
@@ -101,10 +105,13 @@ class TestAutoVoiceReviewOrchestration:
         )
         # NOT a single clone call.
         assert fake.calls == []
-        # All speakers fall to preset with consent_denied reason.
+        # All speakers fall to preset with the Phase 3 reason_code.
         assert result.outcome is VoiceReviewOutcome.AUTO_APPROVED
         assert all(d.choice is VoiceReviewChoice.PRESET for d in result.decisions)
-        assert all(d.reason_code == "consent_denied" for d in result.decisions)
+        assert all(
+            d.reason_code == "new_clone_blocked_by_consent"
+            for d in result.decisions
+        )
 
     def test_existing_strong_match_reuses_before_sample_and_quota_checks(self):
         """Reuse is allowed after consent but before new-clone constraints."""
@@ -142,6 +149,229 @@ class TestAutoVoiceReviewOrchestration:
         assert decision.reason_code == "reused_user_voice"
         assert decision.metrics["match_confidence"] == "strong"
         assert fake.calls == []
+
+    # ===================================================================
+    # Phase 3 (plan 2026-05-17-user-voice-candidate-first §Consent × Admin
+    # 决策矩阵) — admin policy switches gate new clone independently from
+    # consent. Strong-match reuse stays unaffected by either gate.
+    # ===================================================================
+
+    def test_strong_reuse_works_when_admin_clone_disabled(self):
+        """Plan §核心不变量: ``smart_auto_clone_enabled=false`` only blocks
+        NEW clone, it must not block strong-match reuse. Reuse doesn't
+        call the clone provider, doesn't consume clone quota, and doesn't
+        burn account stock — so it stays allowed regardless of the
+        admin's new-clone policy.
+
+        Matrix row covered: consent=T, reuse=T, clone=F (also row
+        consent=F, reuse=T, clone=F covered by adjacent test)."""
+        from services.smart.auto_voice_review import (
+            VoiceReviewChoice,
+            VoiceReviewExistingMatch,
+            VoiceReviewOutcome,
+            evaluate_voice_review,
+        )
+        from tests.fakes import FakeCloneProvider
+
+        fake = FakeCloneProvider()
+        result = evaluate_voice_review(
+            main_speakers=[self._speaker("speaker_a", sample_seconds=2.0)],
+            smart_consent={"auto_voice_clone": True},
+            clone_provider=fake,
+            voice_library_quota_remaining=0,
+            smart_decision_id_factory=self._id_factory(),
+            existing_voice_matches_by_speaker_id={
+                "speaker_a": VoiceReviewExistingMatch(
+                    voice_id="vt_existing_strong",
+                    provider_name="minimax_voice_clone",
+                    model_name="minimax_tts",
+                    confidence="strong",
+                    reason="same_source_content_hash_and_speaker_id",
+                    user_voice_id="42",
+                ),
+            },
+            admin_clone_enabled=False,  # admin disabled new clone
+        )
+
+        assert result.outcome is VoiceReviewOutcome.AUTO_APPROVED
+        decision = result.decisions[0]
+        # Strong reuse fires regardless of admin_clone_enabled.
+        assert decision.choice is VoiceReviewChoice.REUSED
+        assert decision.cloned_voice_id == "vt_existing_strong"
+        # Provider untouched — invariant.
+        assert fake.calls == []
+
+    def test_strong_reuse_works_when_consent_denied(self):
+        """Plan §Consent × Admin 矩阵 row consent=F, reuse=T, clone=T:
+        consent only gates NEW clone; reuse of an existing personal
+        voice doesn't consume clone quota / burn provider calls so it
+        stays allowed even with consent=False."""
+        from services.smart.auto_voice_review import (
+            VoiceReviewChoice,
+            VoiceReviewExistingMatch,
+            VoiceReviewOutcome,
+            evaluate_voice_review,
+        )
+        from tests.fakes import FakeCloneProvider
+
+        fake = FakeCloneProvider()
+        result = evaluate_voice_review(
+            main_speakers=[self._speaker("speaker_a", sample_seconds=2.0)],
+            smart_consent={"auto_voice_clone": False},  # consent denied
+            clone_provider=fake,
+            voice_library_quota_remaining=0,
+            smart_decision_id_factory=self._id_factory(),
+            existing_voice_matches_by_speaker_id={
+                "speaker_a": VoiceReviewExistingMatch(
+                    voice_id="vt_reuse_under_consent_false",
+                    provider_name="minimax_voice_clone",
+                    model_name="minimax_tts",
+                    confidence="strong",
+                    reason="same_source_content_hash_and_speaker_id",
+                    user_voice_id="99",
+                ),
+            },
+            admin_clone_enabled=True,
+        )
+
+        assert result.outcome is VoiceReviewOutcome.AUTO_APPROVED
+        decision = result.decisions[0]
+        assert decision.choice is VoiceReviewChoice.REUSED
+        assert decision.cloned_voice_id == "vt_reuse_under_consent_false"
+        # Critical paid-API invariant: provider untouched.
+        assert fake.calls == []
+
+    def test_admin_clone_disabled_falls_to_preset_with_admin_reason(self):
+        """Plan §Consent × Admin 矩阵 row consent=T, reuse=T, clone=F
+        (no existing match): no reuse + new clone blocked by admin →
+        preset fallback with reason_code=new_clone_blocked_by_admin
+        so audit can distinguish from a consent denial."""
+        from services.smart.auto_voice_review import (
+            evaluate_voice_review,
+            VoiceReviewChoice,
+            VoiceReviewOutcome,
+        )
+        from tests.fakes import FakeCloneProvider
+
+        fake = FakeCloneProvider()
+        result = evaluate_voice_review(
+            main_speakers=[
+                self._speaker("a", sample_seconds=20.0),
+                self._speaker("b", sample_seconds=15.0),
+            ],
+            smart_consent={"auto_voice_clone": True},
+            clone_provider=fake,
+            voice_library_quota_remaining=100,
+            smart_decision_id_factory=self._id_factory(),
+            admin_clone_enabled=False,
+        )
+
+        # CRITICAL invariant: provider never called.
+        assert fake.calls == []
+        assert result.outcome is VoiceReviewOutcome.AUTO_APPROVED
+        for d in result.decisions:
+            assert d.choice is VoiceReviewChoice.PRESET
+            assert d.reason_code == "new_clone_blocked_by_admin"
+
+    def test_consent_denied_and_admin_disabled_emits_combined_reason(self):
+        """Plan §Consent × Admin 矩阵 row consent=F, reuse=T, clone=F
+        (no existing match): both gates closed → preset fallback with
+        the combined reason_code so audit can trace either gate
+        independently."""
+        from services.smart.auto_voice_review import (
+            evaluate_voice_review,
+            VoiceReviewChoice,
+            VoiceReviewOutcome,
+        )
+        from tests.fakes import FakeCloneProvider
+
+        fake = FakeCloneProvider()
+        result = evaluate_voice_review(
+            main_speakers=[
+                self._speaker("a", sample_seconds=20.0),
+                self._speaker("b", sample_seconds=15.0),
+            ],
+            smart_consent={"auto_voice_clone": False},
+            clone_provider=fake,
+            voice_library_quota_remaining=100,
+            smart_decision_id_factory=self._id_factory(),
+            admin_clone_enabled=False,
+        )
+
+        assert fake.calls == []
+        assert result.outcome is VoiceReviewOutcome.AUTO_APPROVED
+        for d in result.decisions:
+            assert d.choice is VoiceReviewChoice.PRESET
+            assert d.reason_code == "new_clone_blocked_by_consent_and_admin"
+
+    def test_admin_clone_disabled_then_strong_reuse_mixed_batch(self):
+        """Mixed: speaker_a has strong match (REUSED), speaker_b has
+        no match (PRESET with admin reason). Phase 3 isolates the two
+        gates so a single batch can have both outcomes."""
+        from services.smart.auto_voice_review import (
+            VoiceReviewChoice,
+            VoiceReviewExistingMatch,
+            VoiceReviewOutcome,
+            evaluate_voice_review,
+        )
+        from tests.fakes import FakeCloneProvider
+
+        fake = FakeCloneProvider()
+        result = evaluate_voice_review(
+            main_speakers=[
+                self._speaker("a", sample_seconds=20.0),
+                self._speaker("b", sample_seconds=15.0),
+            ],
+            smart_consent={"auto_voice_clone": True},
+            clone_provider=fake,
+            voice_library_quota_remaining=100,
+            smart_decision_id_factory=self._id_factory(),
+            existing_voice_matches_by_speaker_id={
+                "a": VoiceReviewExistingMatch(
+                    voice_id="vt_a_existing",
+                    provider_name="minimax_voice_clone",
+                    confidence="strong",
+                    reason="same_source",
+                    user_voice_id="1",
+                ),
+            },
+            admin_clone_enabled=False,
+        )
+
+        assert fake.calls == []
+        assert result.outcome is VoiceReviewOutcome.AUTO_APPROVED
+        decisions_by_id = {d.speaker_id: d for d in result.decisions}
+        assert decisions_by_id["a"].choice is VoiceReviewChoice.REUSED
+        assert decisions_by_id["a"].cloned_voice_id == "vt_a_existing"
+        assert decisions_by_id["b"].choice is VoiceReviewChoice.PRESET
+        assert decisions_by_id["b"].reason_code == "new_clone_blocked_by_admin"
+
+    def test_admin_clone_enabled_default_preserves_existing_behavior(self):
+        """``admin_clone_enabled`` defaults to True so existing callers
+        that don't pass the kwarg get the legacy 1-axis behavior. With
+        consent=True + sample OK + quota OK and admin defaulted, clone
+        proceeds normally."""
+        from services.smart.auto_voice_review import (
+            evaluate_voice_review,
+            VoiceReviewChoice,
+            VoiceReviewOutcome,
+        )
+        from tests.fakes import FakeCloneProvider
+
+        fake = FakeCloneProvider()
+        # NOTE: deliberately NOT passing admin_clone_enabled — verifies
+        # default value (True) preserves the legacy code path.
+        result = evaluate_voice_review(
+            main_speakers=[self._speaker("a", sample_seconds=20.0)],
+            smart_consent={"auto_voice_clone": True},
+            clone_provider=fake,
+            voice_library_quota_remaining=100,
+            smart_decision_id_factory=self._id_factory(),
+        )
+
+        assert result.outcome is VoiceReviewOutcome.AUTO_APPROVED
+        assert len(fake.calls) == 1
+        assert result.decisions[0].choice is VoiceReviewChoice.CLONED
 
     def test_sample_below_10s_never_calls_clone_provider(self):
         """CRITICAL invariant — Codex F5 / plan §6.2.1: 8-10s samples
@@ -273,7 +503,7 @@ class TestAutoVoiceReviewOrchestration:
                 f"strict only."
             )
             assert result.decisions[0].choice is VoiceReviewChoice.PRESET
-            assert result.decisions[0].reason_code == "consent_denied"
+            assert result.decisions[0].reason_code == "new_clone_blocked_by_consent"
 
     def test_consent_exact_true_proceeds_to_clone(self):
         """Counterpart: exact bool ``True`` IS the only value that
@@ -312,7 +542,7 @@ class TestAutoVoiceReviewOrchestration:
         )
         assert fake.calls == []
         assert result.decisions[0].choice is VoiceReviewChoice.PRESET
-        assert result.decisions[0].reason_code == "consent_denied"
+        assert result.decisions[0].reason_code == "new_clone_blocked_by_consent"
 
     def test_sample_none_never_calls_clone_provider(self):
         """Codex 第十三轮 P2: ``float(None)`` raises TypeError. Module
