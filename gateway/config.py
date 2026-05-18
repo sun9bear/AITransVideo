@@ -151,6 +151,32 @@ class GatewaySettings(BaseSettings):
     # requests for too long on a bad day.
     r2_upload_timeout_s: int = 60
 
+    # --- Pan backup (plan 2026-05-13 design / 2026-05-14 implementation) ---
+    # Primary feature flag. OFF: all /admin/pan/* endpoints return 404,
+    # scanner does not enqueue, OAuth Web Flow rejected at startup gate.
+    enable_pan_backup: bool = False
+    # 30d-auto-archive sub-flag. Independent of main flag — turn main flag ON
+    # first + manual smoke for 1 week, THEN flip this so 30d cron starts.
+    pan_auto_archive_enabled: bool = False
+    pan_auto_archive_days: int = 30                  # threshold for auto-archive
+    pan_auto_archive_hour_bjt: int = 3               # cron trigger hour (BJT)
+    pan_auto_archive_max_per_run: int = 5            # per-cron enqueue cap
+    pan_auto_archive_dry_run: bool = True            # log candidates only, no enqueue
+    pan_orphan_cleanup_weekday: int = 5              # 0=Mon ... 5=Sat
+    pan_upload_chunk_bytes: int = 4 * 1024 * 1024    # Baidu Pan 4MB chunk size
+    pan_task_stale_hours: int = 4                    # heartbeat staleness threshold
+
+    # Baidu Pan OAuth credentials (env names automatically prefixed AVT_).
+    baidu_pan_appkey: str = ""
+    baidu_pan_appsecret: str = ""
+    baidu_pan_redirect_uri: str = ""
+
+    # Fernet key for encrypting pan_credentials tokens at rest (32B base64).
+    # Generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    # Loss of key = total token data loss (re-authorize required).
+    # See design spec §13: backup primary in 1Password + physical paper.
+    pan_token_encryption_key: str = ""
+
     model_config = {"env_prefix": "AVT_", "populate_by_name": True}
 
 
