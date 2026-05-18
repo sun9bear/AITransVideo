@@ -34,48 +34,68 @@ JOB_TTS_BUCKETS = {
 }
 
 DEFAULT_PRICE_CATALOG: dict[str, Any] = {
-    "version": "2026-05-05-minimax-voice-clone-default",
+    "version": "2026-05-18-rmb-direct-pricing",
     "currency": "RMB",
+    # Retained for backward compat — ``_rate_to_rmb`` still honors
+    # ``_per_million_usd`` fields if present (multiplies by this rate).
+    # All new entries should use ``_per_million_rmb`` directly so the
+    # admin cost view shows the same currency the user is billed in
+    # (no exchange-rate drift between admin reporting and pricing
+    # updates). USD fields kept for any legacy override files.
     "usd_to_rmb": 7.2,
     "notes": (
         "Gateway-side estimate catalog. Override with "
-        "AVT_COST_PRICE_CATALOG_PATH when provider prices change."
+        "AVT_COST_PRICE_CATALOG_PATH when provider prices change. "
+        "2026-05-18 audit: LLM rates switched from USD to direct RMB "
+        "to match billing currency. Gemini 3.1 Pro tuned to Google "
+        "official ≤200K tier (was over-estimated at 2.0/12.0 USD)."
     ),
     "llm": {
-        # Official DeepSeek pricing page, current discounted Pro rate.
+        # DeepSeek 直接 RMB 计价。把原 USD 报价乘以基准汇率 7.2
+        # 一次性固化下来，避免「美元单价 × 浮动汇率」让 admin 视图
+        # 跟服务商账单飘移。如未来 DeepSeek 改 RMB 官方挂牌价，
+        # 直接覆盖这里即可。
+        # https://api.deepseek.com/pricing
         "deepseek:deepseek-v4-flash": {
-            "input_per_million_usd": 0.14,
-            "output_per_million_usd": 0.28,
-            "cached_input_per_million_usd": 0.0028,
-            "source": "deepseek_official_pricing_2026-04-29",
+            "input_per_million_rmb": 1.008,
+            "output_per_million_rmb": 2.016,
+            "cached_input_per_million_rmb": 0.02016,
+            "source": "deepseek_pricing_2026-04-29_pinned_at_72cny_per_usd",
         },
         "deepseek:deepseek-v4-pro": {
-            "input_per_million_usd": 0.435,
-            "output_per_million_usd": 0.87,
-            "cached_input_per_million_usd": 0.003625,
-            "source": "deepseek_official_discount_pricing_2026-04-29",
+            "input_per_million_rmb": 3.132,
+            "output_per_million_rmb": 6.264,
+            "cached_input_per_million_rmb": 0.0261,
+            "source": "deepseek_pricing_2026-04-29_pinned_at_72cny_per_usd",
         },
-        # Official Google Gemini API pricing page.
+        # Google Gemini 3.1 Pro 官方定价（2026 年版）：
+        #   - ≤200K input tokens: input $1.25/M, output $10/M
+        #   - >200K input tokens: input $2.50/M, output $15/M
+        # 视频翻译场景几乎全是小上下文（单次 ≤200K），按 ≤200K tier
+        # 折成 RMB（× 7.2 实时汇率）。
+        # 此前配置的 $2.0/$12.0 介于两个 tier，对 ≤200K 调用偏高
+        # 约 28%，导致 admin cost view 高估 LLM 成本、低估毛利。
+        # https://ai.google.dev/gemini-api/docs/pricing
         "gemini:gemini-3.1-pro-preview": {
-            "input_per_million_usd": 2.0,
-            "output_per_million_usd": 12.0,
-            "audio_input_per_million_usd": 2.0,
+            "input_per_million_rmb": 9.0,
+            "output_per_million_rmb": 72.0,
+            "audio_input_per_million_rmb": 9.0,
             "audio_tokens_per_second": 25,
-            "source": "google_gemini_official_pricing_2026-04-29",
+            "source": "google_gemini_official_le200k_tier_rmb_2026-05-18",
         },
         "gemini:gemini-2.5-flash-lite": {
-            "input_per_million_usd": 0.10,
-            "output_per_million_usd": 0.40,
-            "audio_input_per_million_usd": 0.30,
+            "input_per_million_rmb": 0.72,
+            "output_per_million_rmb": 2.88,
+            "audio_input_per_million_rmb": 2.16,
             "audio_tokens_per_second": 25,
-            "source": "google_gemini_official_pricing_2026-04-29",
+            "source": "google_gemini_official_rmb_2026-05-18",
         },
         "gemini:gemini-3.1-flash-lite-preview": {
-            "input_per_million_usd": 0.25,
-            "output_per_million_usd": 1.50,
-            "audio_input_per_million_usd": 0.50,
+            "input_per_million_rmb": 1.80,
+            "output_per_million_rmb": 10.80,
+            "audio_input_per_million_rmb": 3.60,
             "audio_tokens_per_second": 25,
-            "source": "google_gemini_official_pricing_2026-04-29",
+            "source": "google_gemini_official_rmb_2026-05-18",
         },
     },
     "tts": {

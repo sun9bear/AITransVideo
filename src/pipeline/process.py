@@ -4312,6 +4312,63 @@ class ProcessPipeline:
                                 },
                             )
 
+                            # 2026-05-18 cost-accounting fix: record the
+                            # NEW clone to UsageMeter so the admin cost
+                            # view (/admin/jobs/{id}/cost) and metering
+                            # rollups reflect the real MiniMax charge
+                            # (¥9.9/clone per pricing_runtime). Previously
+                            # only the REUSED path (record_voice_reuse,
+                            # billable=False) recorded anything; fresh
+                            # auto-clones silently incurred provider
+                            # charges that never showed in admin cost
+                            # data → admin saw inflated margins (e.g.
+                            # job_14989c5e... reported 86.7% margin but
+                            # missing 2 × ¥9.9 = ¥19.80 of clone cost).
+                            #
+                            # Three sinks now all record the same clone:
+                            #   1. audit/smart_decisions.jsonl (above)
+                            #   2. metering/usage_events.jsonl (NEW here)
+                            #   3. user_voices DB mirror (below)
+                            try:
+                                usage_meter.record_voice_clone(
+                                    provider=str(
+                                        _dec.cloned_provider_name or ""
+                                    ),
+                                    model=str(
+                                        _dec.cloned_model_name
+                                        or "voice_clone"
+                                    ),
+                                    voice_id=str(
+                                        _dec.cloned_voice_id or ""
+                                    ),
+                                    speaker_id=_dec.speaker_id,
+                                    source_audio_seconds=float(
+                                        _smart_per_speaker_sample_seconds.get(
+                                            _dec.speaker_id
+                                        ) or 0.0
+                                    ),
+                                    clone_count=1,
+                                    billable=True,
+                                    success=True,
+                                    extra={
+                                        "smart_decision_id": _dec.smart_decision_id,
+                                        "source": "smart_auto_voice_review",
+                                        "job_id": str(_snap("job_id") or ""),
+                                        "user_id": str(_snap("user_id") or ""),
+                                    },
+                                )
+                            except Exception as _meter_exc:
+                                # Metering failure must NOT block the
+                                # pipeline (cost view is admin-only,
+                                # user-facing delivery is the priority).
+                                print(
+                                    f"[smart] voice_clone usage record "
+                                    f"failed speaker={_dec.speaker_id}: "
+                                    f"{type(_meter_exc).__name__}: "
+                                    f"{_meter_exc}",
+                                    flush=True,
+                                )
+
                             # Codex 第二十九轮 P0: mirror to UserVoice.
                             # MUST happen on every CLONED decision so
                             # next job's quota sees the up-to-date
