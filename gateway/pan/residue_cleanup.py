@@ -14,6 +14,21 @@ is a no-op. The cleanup uses pg_try_advisory_lock (NOT pg_advisory_lock)
 so if a real backup_executor is still alive on the same lock_key, the
 cleanup yields rather than blocking.
 
+## Payload contract (CodeX P2)
+
+  payload = {
+    'job_id': str,
+    'user_id': str(UUID),
+    'backup_id': str(UUID),         # REQUIRED — which BackupRecord to clean
+    'provider': str = 'baidu_pan',  # informational only
+  }
+
+Stale_reaper produces one task per stale BackupRecord row, so backup_id
+is always available. Querying by (user_id, job_id, status='uploaded')
+alone was sloppy — multiple BackupRecord rows can exist for one job
+(failed prior attempts), and picking "latest" risks acting on the wrong
+generation. backup_id + job_edit_generation match closes both holes.
+
 Plan §10 stale_reaper forward-resolve branch.
 """
 from __future__ import annotations
@@ -84,6 +99,15 @@ async def _execute_pan_residue_cleanup_impl(
 
     job_id: str = payload['job_id']
     user_id: _uuid.UUID = _uuid.UUID(payload['user_id'])
+    backup_id_raw = payload.get('backup_id')
+    if not backup_id_raw:
+        raise ValueError(
+            "pan_residue_cleanup payload missing required 'backup_id'. "
+            "Stale_reaper must include the specific BackupRecord.id to "
+            "clean — picking 'latest uploaded' by (user_id, job_id) is "
+            "ambiguous when multiple BackupRecord rows exist (CodeX P2)."
+        )
+    backup_id: _uuid.UUID = _uuid.UUID(str(backup_id_raw))
     lock_key = pan_lock_key(user_id, job_id)  # stable across processes (CodeX P0-1)
 
     async with engine.connect() as conn:
@@ -96,11 +120,14 @@ async def _execute_pan_residue_cleanup_impl(
             return
 
         try:
-            # --- state verification ---
+            # --- state verification (CodeX P2: query by backup_id +
+            # generation match instead of "latest uploaded") ---
             async with conn.begin():
                 job_row = (await conn.execute(
-                    select(Job.status, Job.project_dir, Job.r2_artifacts)
-                    .where(Job.user_id == user_id, Job.job_id == job_id)
+                    select(
+                        Job.status, Job.project_dir, Job.r2_artifacts,
+                        Job.edit_generation,
+                    ).where(Job.user_id == user_id, Job.job_id == job_id)
                 )).one_or_none()
                 if job_row is None:
                     logger.info(
@@ -110,27 +137,52 @@ async def _execute_pan_residue_cleanup_impl(
                     return
                 if job_row.status != 'archiving':
                     logger.info(
-                        "pan_residue_cleanup: job %s status=%r (not 'archiving'),"
-                        " state moved on — no-op", job_id, job_row.status,
+                        "pan_residue_cleanup: job %s status=%r (not "
+                        "'archiving'), state moved on — no-op",
+                        job_id, job_row.status,
                     )
                     return
 
-                # Must have a committed 'uploaded' BackupRecord — otherwise
-                # this isn't a forward-resolve scenario.
+                # Look up the SPECIFIC BackupRecord row stale_reaper
+                # picked, not "latest uploaded". Multiple BackupRecord
+                # rows can coexist for one job (failed prior attempts).
                 br_row = (await conn.execute(
-                    select(BackupRecord.id, BackupRecord.status)
-                    .where(
+                    select(
+                        BackupRecord.id, BackupRecord.status,
+                        BackupRecord.job_edit_generation,
+                    ).where(
+                        BackupRecord.id == backup_id,
                         BackupRecord.user_id == user_id,
                         BackupRecord.job_id == job_id,
-                        BackupRecord.status == 'uploaded',
-                    ).order_by(desc(BackupRecord.created_at))
-                    .limit(1)
+                    )
                 )).one_or_none()
                 if br_row is None:
                     logger.info(
-                        "pan_residue_cleanup: no 'uploaded' BackupRecord for "
-                        "job=%s — not a forward-resolve case, skipping",
-                        job_id,
+                        "pan_residue_cleanup: BackupRecord %s not found "
+                        "for user=%s job=%s — skipping",
+                        backup_id, user_id, job_id,
+                    )
+                    return
+                if br_row.status != 'uploaded':
+                    logger.info(
+                        "pan_residue_cleanup: BackupRecord %s status=%r "
+                        "(not 'uploaded') — not a forward-resolve case, "
+                        "skipping", backup_id, br_row.status,
+                    )
+                    return
+
+                # Generation match. Plan §8: BackupRecord.job_edit_generation
+                # must equal Job.edit_generation. If Job got edited past
+                # the captured generation (rare but possible via admin
+                # tooling), this BackupRecord is no longer the current
+                # state — refuse to act on it.
+                if br_row.job_edit_generation != job_row.edit_generation:
+                    logger.info(
+                        "pan_residue_cleanup: BackupRecord %s "
+                        "job_edit_generation=%d but Job.edit_generation=%d "
+                        "— generations diverged, skipping (manual review)",
+                        backup_id, br_row.job_edit_generation,
+                        job_row.edit_generation,
                     )
                     return
 

@@ -79,12 +79,13 @@ def test_cleanup_forward_resolves_stuck_archiving(monkeypatch, tmp_path):
                      'r2_key': f'jobs/{job_id}/v.mp4'},
                 ],
             )
-            await insert_sample_backup_record(
+            br = await insert_sample_backup_record(
                 engine, user_id=user_id, job_id=job_id, status='uploaded',
             )
 
             await _run_cleanup(
-                {'job_id': job_id, 'user_id': str(user_id)},
+                {'job_id': job_id, 'user_id': str(user_id),
+                 'backup_id': str(br['id'])},
                 engine=engine,
                 rmtree_fn=rec_rmtree, r2_delete_fn=rec_r2,
             )
@@ -128,12 +129,13 @@ def test_cleanup_noop_when_job_already_archived(monkeypatch, tmp_path):
                 status='archived',
                 project_dir=str(tmp_path / job_id),
             )
-            await insert_sample_backup_record(
+            br = await insert_sample_backup_record(
                 engine, user_id=user_id, job_id=job_id, status='uploaded',
             )
 
             await _run_cleanup(
-                {'job_id': job_id, 'user_id': str(user_id)},
+                {'job_id': job_id, 'user_id': str(user_id),
+                 'backup_id': str(br['id'])},
                 engine=engine,
                 rmtree_fn=lambda p: rmtree_calls.append(p),
                 r2_delete_fn=lambda k: r2_deleted.append(k),
@@ -170,12 +172,13 @@ def test_cleanup_noop_when_no_uploaded_backup_record(monkeypatch, tmp_path):
                 engine, user_id=user_id, job_id=job_id,
                 status='archiving', project_dir=str(project),
             )
-            await insert_sample_backup_record(
+            br = await insert_sample_backup_record(
                 engine, user_id=user_id, job_id=job_id, status='uploading',
             )
 
             await _run_cleanup(
-                {'job_id': job_id, 'user_id': str(user_id)},
+                {'job_id': job_id, 'user_id': str(user_id),
+                 'backup_id': str(br['id'])},
                 engine=engine,
                 rmtree_fn=lambda p: rmtree_calls.append(p),
                 r2_delete_fn=lambda k: r2_deleted.append(k),
@@ -201,9 +204,27 @@ def test_cleanup_noop_when_job_missing(monkeypatch):
     async def _go():
         async with pan_test_engine() as engine:
             await _run_cleanup(
-                {'job_id': 'ghost_job', 'user_id': str(uuid.uuid4())},
+                {'job_id': 'ghost_job', 'user_id': str(uuid.uuid4()),
+                 'backup_id': str(uuid.uuid4())},
                 engine=engine,
             )
+
+    run_async(_go())
+
+
+def test_cleanup_rejects_payload_missing_backup_id(monkeypatch):
+    """CodeX P2: 'backup_id' is required in payload — picking 'latest
+    uploaded' by (user_id, job_id) was ambiguous when multiple
+    BackupRecord rows existed."""
+    setup_pan_token_env(monkeypatch)
+
+    async def _go():
+        async with pan_test_engine() as engine:
+            with pytest.raises(ValueError, match='backup_id'):
+                await _run_cleanup(
+                    {'job_id': 'x', 'user_id': str(uuid.uuid4())},
+                    engine=engine,
+                )
 
     run_async(_go())
 
@@ -233,11 +254,12 @@ def test_cleanup_is_idempotent(monkeypatch, tmp_path):
                 status='archiving', project_dir=str(project),
                 r2_artifacts=[{'r2_key': 'jobs/x/v.mp4'}],
             )
-            await insert_sample_backup_record(
+            br = await insert_sample_backup_record(
                 engine, user_id=user_id, job_id=job_id, status='uploaded',
             )
 
-            payload = {'job_id': job_id, 'user_id': str(user_id)}
+            payload = {'job_id': job_id, 'user_id': str(user_id),
+                       'backup_id': str(br['id'])}
             await _run_cleanup(
                 payload, engine=engine,
                 rmtree_fn=lambda p: rmtree_calls.append(p),
@@ -291,12 +313,13 @@ def test_cleanup_rmtree_failure_keeps_archiving_for_next_pass(monkeypatch, tmp_p
                 status='archiving', project_dir=str(project),
                 r2_artifacts=[{'r2_key': 'jobs/x/k.mp4'}],
             )
-            await insert_sample_backup_record(
+            br = await insert_sample_backup_record(
                 engine, user_id=user_id, job_id=job_id, status='uploaded',
             )
 
             await _run_cleanup(
-                {'job_id': job_id, 'user_id': str(user_id)},
+                {'job_id': job_id, 'user_id': str(user_id),
+                 'backup_id': str(br['id'])},
                 engine=engine, rmtree_fn=failing_rmtree,
             )
 
@@ -344,12 +367,13 @@ def test_cleanup_r2_delete_failure_keeps_archiving_for_next_pass(monkeypatch, tm
                 status='archiving', project_dir=str(project),
                 r2_artifacts=r2_artifacts,
             )
-            await insert_sample_backup_record(
+            br = await insert_sample_backup_record(
                 engine, user_id=user_id, job_id=job_id, status='uploaded',
             )
 
             await _run_cleanup(
-                {'job_id': job_id, 'user_id': str(user_id)},
+                {'job_id': job_id, 'user_id': str(user_id),
+                 'backup_id': str(br['id'])},
                 engine=engine, r2_delete_fn=selective_r2_delete,
             )
 
@@ -394,12 +418,13 @@ def test_cleanup_handles_missing_project_dir_on_disk(monkeypatch, tmp_path):
                 status='archiving',
                 project_dir=str(tmp_path / 'never_existed'),
             )
-            await insert_sample_backup_record(
+            br = await insert_sample_backup_record(
                 engine, user_id=user_id, job_id=job_id, status='uploaded',
             )
 
             await _run_cleanup(
-                {'job_id': job_id, 'user_id': str(user_id)},
+                {'job_id': job_id, 'user_id': str(user_id),
+                 'backup_id': str(br['id'])},
                 engine=engine,
                 rmtree_fn=lambda p: rmtree_calls.append(p),
             )
@@ -487,6 +512,97 @@ def test_restore_executor_does_not_reference_background_tasks_model():
     )
 
 
+def test_cleanup_noop_when_backup_id_generation_drifted(monkeypatch, tmp_path):
+    """CodeX P2: BackupRecord.job_edit_generation must match the current
+    Job.edit_generation. If admin tooling bumped Job after archive (rare
+    but possible), the BackupRecord is no longer the current state —
+    residue_cleanup must NOT proceed. Leave for manual review."""
+    from models import Job
+
+    setup_pan_token_env(monkeypatch)
+    user_id = uuid.uuid4()
+    job_id = 'job_gen_drift'
+
+    rmtree_calls = []
+
+    async def _go():
+        async with pan_test_engine() as engine:
+            project = make_project_dir(tmp_path, job_id=job_id,
+                                       monkeypatch=monkeypatch)
+            await insert_sample_job(
+                engine, user_id=user_id, job_id=job_id,
+                status='archiving', project_dir=str(project),
+                edit_generation=5,  # Job at gen 5
+            )
+            # BackupRecord captured at gen 3 — generations diverged.
+            br = await insert_sample_backup_record(
+                engine, user_id=user_id, job_id=job_id, status='uploaded',
+                job_edit_generation=3,
+            )
+
+            await _run_cleanup(
+                {'job_id': job_id, 'user_id': str(user_id),
+                 'backup_id': str(br['id'])},
+                engine=engine,
+                rmtree_fn=lambda p: rmtree_calls.append(p),
+            )
+
+            # No-op: no rmtree, status untouched.
+            assert rmtree_calls == []
+            async with engine.connect() as conn:
+                status = (await conn.execute(
+                    select(Job.status).where(Job.job_id == job_id)
+                )).scalar_one()
+            assert status == 'archiving'  # left for manual review
+
+    run_async(_go())
+
+
+def test_cleanup_noop_when_backup_id_does_not_match(monkeypatch, tmp_path):
+    """CodeX P2: If payload's backup_id doesn't refer to any existing
+    BackupRecord row (or matches a different status), cleanup is a no-op.
+    Previously the executor would have picked a different 'latest'
+    uploaded row and acted on it — sloppy."""
+    from models import Job
+
+    setup_pan_token_env(monkeypatch)
+    user_id = uuid.uuid4()
+    job_id = 'job_wrong_id'
+
+    rmtree_calls = []
+
+    async def _go():
+        async with pan_test_engine() as engine:
+            project = make_project_dir(tmp_path, job_id=job_id,
+                                       monkeypatch=monkeypatch)
+            await insert_sample_job(
+                engine, user_id=user_id, job_id=job_id,
+                status='archiving', project_dir=str(project),
+            )
+            # Insert one BackupRecord, but call cleanup with a DIFFERENT id.
+            await insert_sample_backup_record(
+                engine, user_id=user_id, job_id=job_id, status='uploaded',
+            )
+            bogus_id = uuid.uuid4()
+
+            await _run_cleanup(
+                {'job_id': job_id, 'user_id': str(user_id),
+                 'backup_id': str(bogus_id)},
+                engine=engine,
+                rmtree_fn=lambda p: rmtree_calls.append(p),
+            )
+
+            # No-op — bogus backup_id not found.
+            assert rmtree_calls == []
+            async with engine.connect() as conn:
+                status = (await conn.execute(
+                    select(Job.status).where(Job.job_id == job_id)
+                )).scalar_one()
+            assert status == 'archiving'
+
+    run_async(_go())
+
+
 def test_cleanup_refuses_rmtree_when_project_dir_outside_safe_root(
     monkeypatch, tmp_path,
 ):
@@ -512,12 +628,13 @@ def test_cleanup_refuses_rmtree_when_project_dir_outside_safe_root(
                 status='archiving',
                 project_dir=str(tmp_path / 'rogue_dir'),
             )
-            await insert_sample_backup_record(
+            br = await insert_sample_backup_record(
                 engine, user_id=user_id, job_id=job_id, status='uploaded',
             )
 
             await _run_cleanup(
-                {'job_id': job_id, 'user_id': str(user_id)},
+                {'job_id': job_id, 'user_id': str(user_id),
+                 'backup_id': str(br['id'])},
                 engine=engine,
                 rmtree_fn=lambda p: rmtree_calls.append(p),
             )

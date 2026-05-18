@@ -427,13 +427,23 @@ async def execute_pan_residue_cleanup_dispatched(
     project_dir: Path,  # noqa: ARG001
     params: dict[str, Any],
 ) -> None:
-    """Dispatcher adapter for `pan_residue_cleanup` task type."""
+    """Dispatcher adapter for `pan_residue_cleanup` task type.
+
+    params must include 'backup_id' (CodeX P2) — picking "latest uploaded"
+    by (user_id, job_id) is ambiguous when prior failed attempts left
+    multiple BackupRecord rows.
+    """
     from gateway.pan.residue_cleanup import execute_pan_residue_cleanup
 
+    if 'backup_id' not in params:
+        raise ValueError(
+            "pan_residue_cleanup task params missing required 'backup_id'."
+        )
     payload = {
         'job_id': job_id,
         'user_id': str(params['user_id']),
         'provider': params.get('provider', 'baidu_pan'),
+        'backup_id': str(params['backup_id']),
     }
 
     async with async_session() as db:
