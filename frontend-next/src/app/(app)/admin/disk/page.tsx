@@ -59,8 +59,18 @@ type DiskOverview = {
   largest_files: Array<{ size_gib: number; size_bytes: number; path: string }>
   resize_hint: {
     enabled: boolean
+    feature_enabled?: boolean
+    can_resize?: boolean
+    needs_resize?: boolean
     reason: string
     commands: string[]
+    device?: string
+    mount_source?: string
+    device_visible?: boolean
+    resize2fs_available?: boolean
+    tune2fs_available?: boolean
+    device_gib?: number
+    filesystem_gib?: number
   }
 }
 
@@ -78,6 +88,22 @@ function formatDate(iso?: string) {
   } catch {
     return iso
   }
+}
+
+function apiErrorMessage(data: unknown, fallback: string) {
+  const payload = data as { detail?: unknown; message?: unknown } | null
+  const detail = payload?.detail
+  if (typeof detail === "string") return detail
+  if (
+    detail &&
+    typeof detail === "object" &&
+    "message" in detail &&
+    typeof detail.message === "string"
+  ) {
+    return detail.message
+  }
+  if (typeof payload?.message === "string") return payload.message
+  return fallback
 }
 
 function StatCard({
@@ -284,6 +310,35 @@ export default function AdminDiskPage() {
     }
   }, [loadOverview, overview?.categories.expired_dirs.length])
 
+  const resizeFilesystem = useCallback(async () => {
+    if (!overview?.resize_hint.enabled) return
+    const device = overview.resize_hint.device || "/dev/sdb"
+    if (
+      !window.confirm(
+        `确认对 ${device} 执行 resize2fs？该操作只会在检测到块设备大于 ext4 文件系统时执行。`,
+      )
+    ) {
+      return
+    }
+    setActing("resize")
+    try {
+      const res = await fetch("/api/admin/disk/resize-filesystem", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dry_run: false, confirm: true }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(apiErrorMessage(data, `HTTP ${res.status}`))
+      toast.success(data?.after?.reason || "文件系统扩展完成")
+      await loadOverview()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "扩展文件系统失败")
+    } finally {
+      setActing(null)
+    }
+  }, [loadOverview, overview?.resize_hint.device, overview?.resize_hint.enabled])
+
   if (forbidden) {
     return (
       <main className="p-6">
@@ -442,15 +497,37 @@ export default function AdminDiskPage() {
           </section>
 
           <section className="rounded-lg border bg-card p-4">
-            <div className="flex items-center gap-2 text-sm font-medium">
-              <HardDrive className="h-4 w-4" />
-              扩容状态
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2 text-sm font-medium">
+                <HardDrive className="h-4 w-4" />
+                扩容状态
+              </div>
+              <Button
+                disabled={!overview.resize_hint.enabled || acting === "resize"}
+                size="sm"
+                variant={overview.resize_hint.enabled ? "default" : "outline"}
+                onClick={() => void resizeFilesystem()}
+              >
+                {acting === "resize" ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                ) : (
+                  <HardDrive className="mr-2 h-4 w-4" />
+                )}
+                扩展文件系统
+              </Button>
             </div>
             <div className="mt-3 grid gap-2 text-sm text-muted-foreground md:grid-cols-2">
               <div>挂载源：{overview.mount.source || "-"}</div>
               <div>文件系统：{overview.mount.fstype || "-"}</div>
               <div>挂载大小：{overview.mount.size || "-"}</div>
               <div>挂载可用：{overview.mount.avail || "-"}</div>
+              <div>配置设备：{overview.resize_hint.device || "-"}</div>
+              <div>后端可见设备：{overview.resize_hint.device_visible ? "是" : "否"}</div>
+              <div>块设备容量：{formatGiB(overview.resize_hint.device_gib)}</div>
+              <div>ext4 容量：{formatGiB(overview.resize_hint.filesystem_gib)}</div>
+            </div>
+            <div className="mt-3 rounded border bg-muted/40 p-3 text-sm text-muted-foreground">
+              {overview.resize_hint.reason}
             </div>
             <div className="mt-3 rounded border bg-muted/40 p-3 font-mono text-xs text-muted-foreground">
               {overview.resize_hint.commands.join("  |  ")}

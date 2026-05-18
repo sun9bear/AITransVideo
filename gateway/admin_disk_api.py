@@ -14,16 +14,20 @@ whitelist used by ``project_cleanup.py`` before any rmtree.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import re
 import shutil
 import subprocess
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
@@ -44,6 +48,7 @@ from project_cleanup import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/admin/disk", tags=["admin-disk"])
+_resize_lock = asyncio.Lock()
 
 _JOB_ID_RE = re.compile(r"^job_[A-Za-z0-9_-]{8,128}$")
 _DEFAULT_SCAN_ROOTS = (
@@ -73,6 +78,11 @@ class OrphanCleanupRequest(BaseModel):
 
 class ExpiredCleanupRequest(BaseModel):
     dry_run: bool = True
+
+
+class ResizeFilesystemRequest(BaseModel):
+    dry_run: bool = False
+    confirm: bool = False
 
 
 def _is_admin(user: User) -> bool:
@@ -191,6 +201,180 @@ def _mount_info(path: Path) -> dict:
         "avail": parts[4] if len(parts) > 4 else "",
         "target": parts[5] if len(parts) > 5 else str(path),
     }
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _configured_resize_device() -> str:
+    return os.environ.get("AVT_ADMIN_DISK_RESIZE_DEVICE", "/dev/sdb").strip() or "/dev/sdb"
+
+
+def _configured_resize_helper_url() -> str:
+    return os.environ.get(
+        "AVT_ADMIN_DISK_RESIZE_HELPER_URL",
+        "http://127.0.0.1:8891",
+    ).strip().rstrip("/")
+
+
+def _configured_resize_helper_token() -> str:
+    return os.environ.get("AVT_ADMIN_DISK_RESIZE_HELPER_TOKEN", "").strip()
+
+
+def _configured_resize_timeout() -> int:
+    try:
+        return max(30, int(os.environ.get("AVT_ADMIN_DISK_RESIZE_TIMEOUT_SECONDS", "300")))
+    except ValueError:
+        return 300
+
+
+def _normalize_mount_source(source: str | None) -> str:
+    if not source:
+        return ""
+    return source.split("[", 1)[0]
+
+
+def _json_http_error_reason(exc: urllib.error.HTTPError) -> str:
+    try:
+        data = json.loads(exc.read().decode("utf-8", errors="replace"))
+    except Exception:
+        return f"helper HTTP {exc.code}"
+    detail = data.get("detail")
+    if isinstance(detail, dict):
+        message = detail.get("message")
+        if isinstance(message, str):
+            return message
+    if isinstance(detail, str):
+        return detail
+    message = data.get("message")
+    return message if isinstance(message, str) else f"helper HTTP {exc.code}"
+
+
+def _get_resize_helper_status() -> dict:
+    token = _configured_resize_helper_token()
+    if not token:
+        return {"available": False, "reason": "未配置磁盘扩容 helper token。"}
+    request = urllib.request.Request(
+        f"{_configured_resize_helper_url()}/status",
+        headers={"Authorization": f"Bearer {token}"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        return {"available": False, "reason": _json_http_error_reason(exc)}
+    except Exception as exc:
+        return {"available": False, "reason": f"无法连接磁盘扩容 helper: {exc}"}
+    if not isinstance(payload, dict):
+        return {"available": False, "reason": "磁盘扩容 helper 返回格式无效。"}
+    payload["available"] = True
+    return payload
+
+
+def _build_resize_hint(root: Path, mount: dict | None = None) -> dict:
+    mount = mount or _mount_info(root)
+    device = _configured_resize_device()
+    mount_source = _normalize_mount_source(mount.get("source"))
+    feature_enabled = _env_flag("AVT_ADMIN_DISK_RESIZE_ENABLED", default=False)
+    helper = _get_resize_helper_status() if feature_enabled else {}
+    helper_device = helper.get("device") if isinstance(helper.get("device"), str) else device
+    device_visible = bool(helper.get("device_visible"))
+    resize2fs_available = bool(helper.get("resize2fs_available"))
+    tune2fs_available = bool(helper.get("tune2fs_available"))
+    device_bytes = helper.get("device_bytes") if isinstance(helper.get("device_bytes"), int) else None
+    filesystem_bytes = (
+        helper.get("filesystem_bytes")
+        if isinstance(helper.get("filesystem_bytes"), int)
+        else None
+    )
+    needs_resize = False
+    can_resize = False
+
+    commands = [
+        f"lsblk -o NAME,KNAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS,MODEL {helper_device}",
+        f"df -hT {root}",
+        f"resize2fs {helper_device}",
+    ]
+
+    reason = "后台未启用一键扩展文件系统。"
+    if not feature_enabled:
+        pass
+    elif not helper.get("available"):
+        reason = str(helper.get("reason") or "磁盘扩容 helper 不可用。")
+    elif not mount.get("available"):
+        reason = "无法识别项目数据盘挂载信息。"
+    elif (mount.get("fstype") or "").lower() != "ext4":
+        reason = f"当前文件系统是 {mount.get('fstype') or 'unknown'}，仅允许 ext4。"
+    elif mount_source and mount_source != helper_device:
+        reason = f"挂载源是 {mount_source}，与配置设备 {helper_device} 不一致。"
+    elif not device_visible:
+        reason = f"磁盘扩容 helper 看不到 {helper_device}。"
+    elif not resize2fs_available:
+        reason = "磁盘扩容 helper 缺少 resize2fs。"
+    elif not tune2fs_available:
+        reason = "磁盘扩容 helper 缺少 tune2fs，无法安全判断 ext4 当前大小。"
+    else:
+        if not device_bytes:
+            reason = f"无法读取 {helper_device} 的块设备大小。"
+        elif not filesystem_bytes:
+            reason = f"无法读取 {helper_device} 的 ext4 文件系统大小。"
+        else:
+            # resize2fs grows ext4 to the block device size.  Use tune2fs block
+            # counts instead of df totals because df excludes ext4 metadata and
+            # reserved blocks, which would make a fully resized filesystem look
+            # smaller than the device.
+            min_delta = int(os.environ.get("AVT_ADMIN_DISK_RESIZE_MIN_DELTA_BYTES", 16 * 1024 * 1024))
+            needs_resize = device_bytes > filesystem_bytes + min_delta
+            can_resize = needs_resize
+            reason = (
+                "块设备容量大于 ext4 文件系统容量，可以执行 resize2fs。"
+                if needs_resize
+                else "文件系统已使用当前块设备容量。"
+            )
+
+    return {
+        "enabled": bool(feature_enabled and can_resize),
+        "feature_enabled": feature_enabled,
+        "can_resize": can_resize,
+        "needs_resize": needs_resize,
+        "reason": reason,
+        "commands": commands,
+        "device": helper_device,
+        "helper_available": bool(helper.get("available")),
+        "mount_source": mount_source,
+        "device_visible": device_visible,
+        "resize2fs_available": resize2fs_available,
+        "tune2fs_available": tune2fs_available,
+        "device_bytes": device_bytes,
+        "device_gib": _bytes_to_gib(device_bytes),
+        "filesystem_bytes": filesystem_bytes,
+        "filesystem_gib": _bytes_to_gib(filesystem_bytes),
+    }
+
+
+def _is_allowed_scan_root(root: Path) -> bool:
+    try:
+        resolved = root.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return False
+    for safe_root in DEFAULT_SAFE_PROJECT_ROOTS:
+        try:
+            resolved_safe = safe_root.resolve(strict=False)
+        except (OSError, RuntimeError):
+            continue
+        if resolved == resolved_safe:
+            return True
+        try:
+            resolved.relative_to(resolved_safe)
+        except ValueError:
+            continue
+        return True
+    return False
 
 
 def _as_aware_utc(dt: datetime | None) -> datetime | None:
@@ -432,23 +616,16 @@ async def build_disk_overview(
         summary[f"{key}_bytes"] = total
         summary[f"{key}_gib"] = _bytes_to_gib(total)
 
+    mount = _mount_info(root)
     return {
         "scanned_at": now.isoformat(),
         "project_root": str(root),
         "filesystem": _disk_usage(root),
-        "mount": _mount_info(root),
+        "mount": mount,
         "summary": summary,
         "categories": buckets,
         "largest_files": _find_largest_files(root),
-        "resize_hint": {
-            "enabled": False,
-            "reason": "块设备扩容需要宿主机权限，后台默认只展示检测与操作建议。",
-            "commands": [
-                "lsblk -o NAME,KNAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS,MODEL /dev/sdb",
-                "df -hT /mnt/HC_Volume_105524101",
-                "resize2fs /dev/sdb",
-            ],
-        },
+        "resize_hint": _build_resize_hint(root, mount),
     }
 
 
@@ -466,10 +643,20 @@ async def cleanup_orphan_dirs(
     job_ids: list[str],
     dry_run: bool,
     project_root: Path | None = None,
+    safe_roots: tuple[Path, ...] | None = None,
+    enforce_safe_root: bool = True,
 ) -> dict:
     if not job_ids:
         raise HTTPException(status_code=400, detail="至少选择一个 job_id")
     root = project_root or _resolve_scan_root()
+    if enforce_safe_root and not _is_allowed_scan_root(root):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "扫描根目录不在允许的项目数据目录内，已禁止删除操作",
+                "project_root": str(root),
+            },
+        )
     unique_ids = list(dict.fromkeys(job_ids))
 
     result = await db.execute(select(Job.job_id).where(Job.job_id.in_(unique_ids)))
@@ -483,7 +670,7 @@ async def cleanup_orphan_dirs(
             },
         )
 
-    safe_roots = _effective_safe_roots(root)
+    safe_roots = safe_roots or DEFAULT_SAFE_PROJECT_ROOTS
     paths_by_job = _find_job_dirs_for_ids(root, set(unique_ids))
     items: list[dict] = []
     freed = 0
@@ -526,6 +713,75 @@ async def cleanup_orphan_dirs(
     }
 
 
+async def _post_resize_helper(*, dry_run: bool, confirm: bool, timeout: int) -> dict:
+    token = _configured_resize_helper_token()
+    if not token:
+        raise HTTPException(status_code=403, detail="未配置磁盘扩容 helper token")
+    try:
+        async with httpx.AsyncClient(timeout=timeout + 5) as client:
+            response = await client.post(
+                f"{_configured_resize_helper_url()}/resize",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"dry_run": dry_run, "confirm": confirm},
+            )
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"无法连接磁盘扩容 helper: {exc}",
+        ) from exc
+
+    payload = response.json() if response.content else {}
+    if response.status_code >= 400:
+        detail = payload.get("detail") if isinstance(payload, dict) else None
+        raise HTTPException(status_code=502, detail=detail or payload or "磁盘扩容 helper 执行失败")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=502, detail="磁盘扩容 helper 返回格式无效")
+    return payload
+
+
+async def resize_filesystem(
+    *,
+    dry_run: bool,
+    confirm: bool,
+    project_root: Path | None = None,
+) -> dict:
+    async with _resize_lock:
+        root = project_root or _resolve_scan_root()
+        before = _build_resize_hint(root)
+        if not before.get("feature_enabled"):
+            raise HTTPException(status_code=403, detail="后台未启用一键扩展文件系统")
+        if not before.get("can_resize"):
+            raise HTTPException(
+                status_code=409,
+                detail={"message": before.get("reason") or "当前不能扩展文件系统", "resize_hint": before},
+            )
+        if dry_run:
+            return {"dry_run": True, "ran": False, "before": before, "after": before, "output": ""}
+        if not confirm:
+            raise HTTPException(status_code=400, detail="需要 confirm=true")
+
+        timeout = _configured_resize_timeout()
+        helper_result = await _post_resize_helper(
+            dry_run=False,
+            confirm=True,
+            timeout=timeout,
+        )
+        after = _build_resize_hint(root)
+        logger.info(
+            "admin disk resize helper ran device=%s before_device=%s before_fs=%s after_device=%s after_fs=%s",
+            before.get("device"),
+            before.get("device_bytes"),
+            before.get("filesystem_bytes"),
+            after.get("device_bytes"),
+            after.get("filesystem_bytes"),
+        )
+        return {
+            **helper_result,
+            "before": before,
+            "after": after,
+        }
+
+
 @router.get("/overview")
 async def get_disk_overview(
     user: User | None = Depends(get_current_user),
@@ -558,3 +814,12 @@ async def post_cleanup_expired(
     _require_admin(user)
     purged = await cleanup_expired_projects(db, dry_run=body.dry_run)
     return {"dry_run": body.dry_run, "purged_count": purged}
+
+
+@router.post("/resize-filesystem")
+async def post_resize_filesystem(
+    body: ResizeFilesystemRequest,
+    user: User | None = Depends(get_current_user),
+) -> dict:
+    _require_admin(user)
+    return await resize_filesystem(dry_run=body.dry_run, confirm=body.confirm)

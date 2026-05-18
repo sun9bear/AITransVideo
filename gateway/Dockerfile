@@ -3,9 +3,10 @@ FROM python:3.12-slim-bookworm
 WORKDIR /opt/gateway
 
 # ffmpeg is required by voice_selection_api.py:_concat_segments_ffmpeg
-# (voice clone path). slim image doesn't include it.
+# (voice clone path). e2fsprogs provides resize2fs/tune2fs for the guarded
+# admin disk expansion endpoint.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
+    && apt-get install -y --no-install-recommends ffmpeg e2fsprogs \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

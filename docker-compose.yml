@@ -216,6 +216,8 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      disk-resize-helper:
+        condition: service_healthy
     env_file:
       # Shared with app — provides AUTODUB_TTS_API_KEY,
       # AUTODUB_TTS_CLONE_BASE_URL, AUTODUB_TTS_BASE_URL etc. that
@@ -229,6 +231,10 @@ services:
       AVT_GATEWAY_HOST: "127.0.0.1"
       AVT_GATEWAY_PORT: "8880"
       AIVIDEOTRANS_RUNTIME_LOGS_DIR: "/opt/aivideotrans/data/runtime_logs"
+      AVT_ADMIN_DISK_RESIZE_ENABLED: "${AVT_ADMIN_DISK_RESIZE_ENABLED:-false}"
+      AVT_ADMIN_DISK_RESIZE_DEVICE: "${AVT_ADMIN_DISK_RESIZE_DEVICE:-/dev/sdb}"
+      AVT_ADMIN_DISK_RESIZE_HELPER_URL: "http://127.0.0.1:8891"
+      AVT_ADMIN_DISK_RESIZE_HELPER_TOKEN: "${AVT_ADMIN_DISK_RESIZE_HELPER_TOKEN:-}"
       AVT_AUTH_REQUIRED: "true"
       # GEO canonical origin — used by gateway/notifications.py to build
       # email links to /workspace/{job_id}. MUST equal frontend
@@ -318,6 +324,31 @@ services:
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8880/gateway/health')"]
       interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  disk-resize-helper:
+    image: aivideotrans-gateway:latest
+    container_name: aivideotrans-disk-resize-helper
+    network_mode: host
+    restart: unless-stopped
+    command: ["python", "disk_resize_helper.py"]
+    env_file:
+      - /opt/aivideotrans/config/.env
+    environment:
+      AVT_ADMIN_DISK_RESIZE_ENABLED: "${AVT_ADMIN_DISK_RESIZE_ENABLED:-false}"
+      AVT_ADMIN_DISK_RESIZE_DEVICE: "${AVT_ADMIN_DISK_RESIZE_DEVICE:-/dev/null}"
+      AVT_ADMIN_DISK_RESIZE_HELPER_HOST: "127.0.0.1"
+      AVT_ADMIN_DISK_RESIZE_HELPER_PORT: "8891"
+      AVT_ADMIN_DISK_RESIZE_HELPER_TOKEN: "${AVT_ADMIN_DISK_RESIZE_HELPER_TOKEN:-}"
+    devices:
+      # Keep the raw block device out of the main Gateway container. The helper
+      # exposes only fixed-device status/resize endpoints on 127.0.0.1.
+      - "${AVT_ADMIN_DISK_RESIZE_DEVICE:-/dev/null}:${AVT_ADMIN_DISK_RESIZE_DEVICE:-/dev/null}"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8891/health', timeout=3).read()"]
+      interval: 30s
       timeout: 5s
       retries: 3
       start_period: 10s

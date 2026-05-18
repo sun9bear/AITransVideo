@@ -162,6 +162,8 @@ def test_cleanup_orphan_dirs_rechecks_db_and_deletes_only_absent_jobs(tmp_path):
                     job_ids=["job_orphan_abcdef12", "job_db_abcdef12"],
                     dry_run=False,
                     project_root=root,
+                    safe_roots=(root,),
+                    enforce_safe_root=False,
                 )
         assert exc.value.status_code == 409
         assert orphan.exists()
@@ -173,6 +175,8 @@ def test_cleanup_orphan_dirs_rechecks_db_and_deletes_only_absent_jobs(tmp_path):
                 job_ids=["job_orphan_abcdef12"],
                 dry_run=True,
                 project_root=root,
+                safe_roots=(root,),
+                enforce_safe_root=False,
             )
         assert dry["items"][0]["status"] == "would_delete"
         assert orphan.exists()
@@ -183,9 +187,101 @@ def test_cleanup_orphan_dirs_rechecks_db_and_deletes_only_absent_jobs(tmp_path):
                 job_ids=["job_orphan_abcdef12"],
                 dry_run=False,
                 project_root=root,
+                safe_roots=(root,),
+                enforce_safe_root=False,
             )
         assert done["freed_bytes"] > 0
         assert not orphan.exists()
         assert db_backed.exists()
 
     _run(run())
+
+
+def test_cleanup_orphan_dirs_rejects_unsafe_scan_root_by_default(tmp_path):
+    root = tmp_path / "projects"
+    _job_dir(root, "user-1", "job_orphan_unsafe12", b"orphan")
+
+    async def run():
+        Session = await _make_session()
+        async with Session() as db:
+            with pytest.raises(HTTPException) as exc:
+                await admin_disk_api.cleanup_orphan_dirs(
+                    db,
+                    job_ids=["job_orphan_unsafe12"],
+                    dry_run=False,
+                    project_root=root,
+                )
+        assert exc.value.status_code == 400
+        assert (root / "user-1" / "job_orphan_unsafe12").exists()
+
+    _run(run())
+
+
+def test_resize_filesystem_rejects_when_feature_disabled(tmp_path, monkeypatch):
+    monkeypatch.delenv("AVT_ADMIN_DISK_RESIZE_ENABLED", raising=False)
+    root = tmp_path / "projects"
+    root.mkdir()
+
+    async def run():
+        with pytest.raises(HTTPException) as exc:
+            await admin_disk_api.resize_filesystem(
+                dry_run=False,
+                confirm=True,
+                project_root=root,
+            )
+        assert exc.value.status_code == 403
+
+    _run(run())
+
+
+def test_resize_filesystem_delegates_to_helper_under_lock(tmp_path, monkeypatch):
+    root = tmp_path / "projects"
+    root.mkdir()
+    before = {
+        "feature_enabled": True,
+        "can_resize": True,
+        "needs_resize": True,
+        "device": "/dev/testdisk",
+        "device_bytes": 200,
+        "filesystem_bytes": 100,
+        "reason": "needs resize",
+    }
+    after = {
+        **before,
+        "can_resize": False,
+        "needs_resize": False,
+        "filesystem_bytes": 200,
+        "reason": "done",
+    }
+    statuses = [before, after]
+    calls: list[dict] = []
+
+    def fake_status(path):
+        assert path == root
+        return statuses.pop(0)
+
+    async def fake_helper(*, dry_run, confirm, timeout):  # noqa: ARG001
+        calls.append({"dry_run": dry_run, "confirm": confirm})
+        return {
+            "dry_run": False,
+            "ran": True,
+            "device": "/dev/testdisk",
+            "output": "resize2fs ok",
+        }
+
+    monkeypatch.setenv("AVT_ADMIN_DISK_RESIZE_ENABLED", "true")
+    monkeypatch.setattr(admin_disk_api, "_build_resize_hint", fake_status)
+    monkeypatch.setattr(admin_disk_api, "_post_resize_helper", fake_helper)
+
+    async def run():
+        result = await admin_disk_api.resize_filesystem(
+            dry_run=False,
+            confirm=True,
+            project_root=root,
+        )
+        assert result["ran"] is True
+        assert result["device"] == "/dev/testdisk"
+        assert result["after"]["reason"] == "done"
+
+    _run(run())
+    assert calls == [{"dry_run": False, "confirm": True}]
