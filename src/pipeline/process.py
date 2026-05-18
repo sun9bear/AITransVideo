@@ -3544,28 +3544,45 @@ class ProcessPipeline:
                     # preserve legacy behavior (reuse + clone both allowed)
                     # so missing / malformed admin_settings.json doesn't
                     # surprise existing Smart users.
-                    _smart_admin_clone_enabled = True
-                    _smart_admin_reuse_enabled = True
+                    # 2026-05-18 cleanup: previously did ``from admin_settings
+                    # import load_settings``, which only resolves inside the
+                    # gateway container (gateway/admin_settings.py defines a
+                    # FastAPI router + pydantic model; that module is not on
+                    # the app container's sys.path). Every fresh-clone Smart
+                    # job on app side logged ``ModuleNotFoundError: No
+                    # module named 'admin_settings'`` and fell through to
+                    # the same defaults below — wasted noise + a misleading
+                    # warning that suggested admin policy wasn't loading
+                    # when in reality it just couldn't.
+                    #
+                    # Switch to ``services.admin_settings.read_admin_setting``,
+                    # which is the canonical app-side reader (fail-safe,
+                    # bind-mount-aware, no pydantic dep). Reads the SAME
+                    # JSON file the gateway writes via load_settings /
+                    # save_settings, so admin UI changes are picked up
+                    # next call (the helper re-reads on every call —
+                    # no module-level cache).
+                    from services.admin_settings import read_admin_setting
+                    _smart_admin_clone_enabled = bool(
+                        read_admin_setting(
+                            "smart_auto_clone_enabled", default=True
+                        )
+                    )
+                    _smart_admin_reuse_enabled = bool(
+                        read_admin_setting(
+                            "smart_reuse_user_voice_enabled", default=True
+                        )
+                    )
                     # Phase 4 (plan 2026-05-17 §Smart 弱匹配暂停): admin
                     # toggle. Default False so existing users see no
                     # behavior change; admin must opt in to get pauses
                     # when possible (non-strong) candidates exist.
-                    _smart_admin_pause_on_possible = False
-                    try:
-                        from admin_settings import load_settings as _load_admin_settings
-                        _admin = _load_admin_settings()
-                        _smart_admin_clone_enabled = bool(_admin.smart_auto_clone_enabled)
-                        _smart_admin_reuse_enabled = bool(_admin.smart_reuse_user_voice_enabled)
-                        _smart_admin_pause_on_possible = bool(
-                            getattr(_admin, "smart_pause_on_possible_user_voice_match", False)
+                    _smart_admin_pause_on_possible = bool(
+                        read_admin_setting(
+                            "smart_pause_on_possible_user_voice_match",
+                            default=False,
                         )
-                    except Exception as _admin_exc:
-                        print(
-                            f"[smart] failed to load admin smart-voice policy "
-                            f"(using defaults reuse=True clone=True pause=False): "
-                            f"{type(_admin_exc).__name__}: {_admin_exc}",
-                            flush=True,
-                        )
+                    )
                     _smart_existing_voice_matches: dict[str, VoiceReviewExistingMatch] = {}
                     # Phase 4 (plan 2026-05-17 §Phase 4): possible (non-strong)
                     # candidates per speaker, used by evaluate_voice_review
