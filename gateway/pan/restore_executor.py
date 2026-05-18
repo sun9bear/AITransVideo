@@ -237,11 +237,16 @@ async def _execute_pan_restore_impl(
             access_token = decrypt_token(access_token_enc)
             client = client_factory()
 
-            # Staging area. Default: $TMPDIR/pan_restore_{job}_{ts}/
+            # Staging area. Default: SIBLING of project_dir so the final
+            # move into place is os.replace() (atomic rename, same FS).
+            # CodeX P1-2: $TMPDIR default risks crossing filesystem
+            # boundaries, which would degrade shutil.move to copy+delete
+            # with partial dst on failure.
             if staging_root is None:
-                staging_root = Path(
-                    os.environ.get('TMPDIR', '/tmp')
-                ) / f'pan_restore_{job_id}_{int(time.time())}'
+                staging_root = (
+                    project_dir.parent
+                    / f'.pan_restore_staging_{job_id}_{int(time.time())}'
+                )
             else:
                 staging_root = Path(staging_root)
             tar_path: Path | None = None
@@ -416,16 +421,33 @@ def _verify_inventory(staged_dir: Path, file_inventory: list[dict]) -> None:
 
 
 def _move_into_place(staged_dir: Path, project_dir: Path) -> None:
-    """Atomically place the extracted staged_dir at project_dir.
+    """Atomically rename staged_dir → project_dir on the same filesystem.
 
-    If project_dir already exists (rare — backup should have rmtree'd it),
-    we rm it first. Then shutil.move is the atomic step. Parents of
-    project_dir are mkdir-p'd defensively.
+    Uses os.replace, which is atomic on POSIX and Windows when both paths
+    are on the same filesystem (the caller's responsibility — the default
+    staging_root computation puts staging next to project_dir to ensure
+    this).
+
+    Pre-condition: project_dir must NOT exist. Backup deletes project_dir
+    before flipping to 'archived', and restore precondition requires
+    Job.status='archived'. If project_dir exists here, something is off
+    (manual recovery in progress, parallel restore, etc.) and forcing
+    the operator to intervene is safer than blind overwrite.
+
+    CodeX P1-2: previous shutil.move could degrade to copy+delete across
+    filesystems with a partial-destination window on failure.
     """
-    project_dir.parent.mkdir(parents=True, exist_ok=True)
     if project_dir.exists():
-        shutil.rmtree(project_dir)
-    shutil.move(str(staged_dir), str(project_dir))
+        raise RuntimeError(
+            f"refuse to restore: project_dir already exists at "
+            f"{project_dir} — backup should have removed it. Inspect and "
+            f"clean up manually before retrying."
+        )
+    project_dir.parent.mkdir(parents=True, exist_ok=True)
+    # os.replace is atomic when src and dst are on the same FS. Caller
+    # ensures this via the default staging_root next to project_dir.parent.
+    import os as _os
+    _os.replace(staged_dir, project_dir)
 
 
 def _default_client_factory():

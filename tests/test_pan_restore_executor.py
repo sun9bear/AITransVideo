@@ -595,6 +595,87 @@ def test_restore_reverts_backup_record_to_uploaded_on_failure(monkeypatch, tmp_p
     run_async(_go())
 
 
+def test_default_staging_root_is_next_to_project_dir(monkeypatch, tmp_path):
+    """CodeX P1-2: default staging_root is `.pan_restore_staging_*` next
+    to project_dir.parent — same filesystem so os.replace is atomic.
+    Previous default (under $TMPDIR) risked cross-filesystem degraded
+    move with partial-destination on failure.
+    """
+    import shutil
+    from gateway.pan import restore_executor as re_mod
+
+    setup_pan_token_env(monkeypatch)
+    user_id = uuid.uuid4()
+    job_id = 'job_default_staging'
+    # Project_dir parent dir must exist for staging sibling to land.
+    projects_root = tmp_path / 'projects'
+    projects_root.mkdir()
+    project = make_project_dir(projects_root, job_id=job_id)
+
+    captured_staging: list[Path] = []
+
+    real_move = re_mod._move_into_place
+
+    def capture_move(staged_dir, project_dir):
+        # The staged_dir is under staging_root/extracted/project_name.
+        # Capture its grandparent (= staging_root) for inspection.
+        captured_staging.append(staged_dir.parent.parent)
+        return real_move(staged_dir, project_dir)
+
+    monkeypatch.setattr(re_mod, '_move_into_place', capture_move)
+
+    async def _go():
+        async with pan_test_engine() as engine:
+            await insert_sample_job(
+                engine, user_id=user_id, job_id=job_id,
+                status='succeeded', project_dir=str(project),
+            )
+            await insert_sample_pan_credentials(engine, user_id=user_id)
+
+            client = FakeBaiduPanClient()
+            await _run_backup(
+                {'job_id': job_id, 'user_id': str(user_id)},
+                engine=engine, client=client, rmtree_fn=shutil.rmtree,
+            )
+            # Don't pass staging_root — use default (sibling of project_dir).
+            await _run_restore(
+                {'job_id': job_id, 'user_id': str(user_id)},
+                engine=engine, client=client,
+            )
+
+            # Default staging_root must be a sibling of project_dir (same FS).
+            assert len(captured_staging) == 1
+            staging_root_used = captured_staging[0].resolve()
+            expected_parent = project.parent.resolve()
+            assert staging_root_used.parent.resolve() == expected_parent, (
+                f"staging_root {staging_root_used} not under project_dir.parent "
+                f"{expected_parent} — cross-FS move risk"
+            )
+            assert staging_root_used.name.startswith('.pan_restore_staging_')
+
+    run_async(_go())
+
+
+def test_move_into_place_refuses_when_project_dir_exists(tmp_path):
+    """CodeX P1-2: refuse to overwrite an existing project_dir. Forces
+    operator inspection rather than blindly destroying state."""
+    from gateway.pan.restore_executor import _move_into_place
+
+    project = tmp_path / 'job_existing'
+    project.mkdir()
+    (project / 'precious.txt').write_text('do_not_overwrite')
+
+    staged = tmp_path / 'staged'
+    staged.mkdir()
+    (staged / 'replacement.txt').write_text('would_overwrite')
+
+    with pytest.raises(RuntimeError, match='already exists'):
+        _move_into_place(staged, project)
+
+    # Existing files untouched.
+    assert (project / 'precious.txt').read_text() == 'do_not_overwrite'
+
+
 def test_restore_rejects_mismatched_edit_generation(monkeypatch, tmp_path):
     """CodeX P1-1 + plan §8: restore must NOT pick a BackupRecord whose
     job_edit_generation doesn't match the current Job.edit_generation.
