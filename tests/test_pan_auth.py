@@ -1,0 +1,623 @@
+"""Tests for gateway/pan/auth.py.
+
+Plan 2026-05-14 Phase 6 §T6.1-T6.4. Exercises:
+  - state token helpers (generate / insert / consume one-shot + expiry)
+  - _pan_callback_impl with mock client_factory (UPSERT pan_credentials)
+  - pan_token_refresh_tick happy path + rotation + failure → revoked +
+    notification dispatch
+"""
+from __future__ import annotations
+
+import asyncio
+import uuid
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
+
+import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import create_async_engine
+
+# Set up sys.path + stub database before any pan imports.
+from tests.pan_fixtures import (  # noqa: F401
+    FakeBaiduPanClient,
+    insert_sample_pan_credentials,
+    pan_test_engine,
+    run_async,
+    setup_pan_token_env,
+)
+
+
+# Extend pan_test_engine with PanOauthState table for these tests.
+@asynccontextmanager
+async def auth_test_engine():
+    """In-memory SQLite with all 4 pan-related tables."""
+    from models import (
+        BackupRecord, Job, PanCredentials, PanOauthState,
+    )
+
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+    )
+    try:
+        async with engine.begin() as conn:
+            for table_cls in (Job, BackupRecord, PanCredentials, PanOauthState):
+                await conn.run_sync(lambda c, t=table_cls: t.__table__.create(c))
+        yield engine
+    finally:
+        await engine.dispose()
+
+
+async def _session(engine):
+    """Open a SQLAlchemy AsyncSession wrapper around the engine.
+
+    The pan/auth.py helpers call db.commit() etc. on an AsyncSession. We
+    bind one fresh via sessionmaker."""
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+    return async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+
+# =========================================================================
+# T6.1 — state token helpers
+# =========================================================================
+
+
+def test_generate_state_token_unique():
+    from pan.auth import generate_state_token
+    tokens = {generate_state_token() for _ in range(1000)}
+    assert len(tokens) == 1000
+
+
+def test_generate_state_token_url_safe_length():
+    """secrets.token_urlsafe(32) yields ~43 chars (no '=' padding when
+    nbytes is a multiple of 3). Must fit in PanOauthState.token String(64)."""
+    from pan.auth import generate_state_token
+    t = generate_state_token()
+    assert 40 <= len(t) <= 64
+    # URL-safe alphabet: A-Z a-z 0-9 - _
+    assert all(c.isalnum() or c in '-_' for c in t)
+
+
+def test_insert_state_token_persists_with_ttl():
+    from models import PanOauthState
+    from pan.auth import insert_state_token, STATE_TTL_SECONDS
+
+    user_id = uuid.uuid4()
+
+    async def _go():
+        async with auth_test_engine() as engine:
+            Session = await _session(engine)
+            async with Session() as db:
+                token = await insert_state_token(db, user_id=user_id)
+
+            async with Session() as db:
+                row = (await db.execute(
+                    select(
+                        PanOauthState.user_id, PanOauthState.expires_at,
+                    ).where(PanOauthState.token == token)
+                )).one()
+            assert row.user_id == user_id
+            # SQLite stores naive datetime — normalize for comparison.
+            expires = row.expires_at
+            if expires.tzinfo is None:
+                expires = expires.replace(tzinfo=timezone.utc)
+            delta_seconds = (expires - datetime.now(timezone.utc)).total_seconds()
+            assert STATE_TTL_SECONDS - 60 < delta_seconds <= STATE_TTL_SECONDS
+
+    run_async(_go())
+
+
+def test_consume_state_token_happy_path():
+    """Valid + non-expired state token → returns user_id and DELETEs row."""
+    from models import PanOauthState
+    from pan.auth import consume_state_token, insert_state_token
+
+    user_id = uuid.uuid4()
+
+    async def _go():
+        async with auth_test_engine() as engine:
+            Session = await _session(engine)
+            async with Session() as db:
+                token = await insert_state_token(db, user_id=user_id)
+
+            async with Session() as db:
+                returned = await consume_state_token(db, token)
+            assert returned == user_id
+
+            # Row deleted.
+            async with Session() as db:
+                row = (await db.execute(
+                    select(PanOauthState.token)
+                    .where(PanOauthState.token == token)
+                )).one_or_none()
+            assert row is None
+
+    run_async(_go())
+
+
+def test_consume_state_token_rejects_unknown():
+    from pan.auth import consume_state_token
+
+    async def _go():
+        async with auth_test_engine() as engine:
+            Session = await _session(engine)
+            async with Session() as db:
+                returned = await consume_state_token(db, 'never_existed')
+            assert returned is None
+
+    run_async(_go())
+
+
+def test_consume_state_token_rejects_expired():
+    """Token past expires_at → consume returns None AND deletes the row."""
+    from models import PanOauthState
+    from pan.auth import consume_state_token, insert_state_token
+
+    user_id = uuid.uuid4()
+
+    async def _go():
+        async with auth_test_engine() as engine:
+            Session = await _session(engine)
+            # Insert with NEGATIVE ttl → already expired.
+            async with Session() as db:
+                token = await insert_state_token(
+                    db, user_id=user_id, ttl_seconds=-1,
+                )
+
+            async with Session() as db:
+                returned = await consume_state_token(db, token)
+            assert returned is None
+
+            # Expired row also cleaned up.
+            async with Session() as db:
+                row = (await db.execute(
+                    select(PanOauthState.token)
+                    .where(PanOauthState.token == token)
+                )).one_or_none()
+            assert row is None
+
+    run_async(_go())
+
+
+def test_consume_state_token_is_one_shot():
+    """A second consume with the same token after success returns None."""
+    from pan.auth import consume_state_token, insert_state_token
+
+    user_id = uuid.uuid4()
+
+    async def _go():
+        async with auth_test_engine() as engine:
+            Session = await _session(engine)
+            async with Session() as db:
+                token = await insert_state_token(db, user_id=user_id)
+
+            async with Session() as db:
+                first = await consume_state_token(db, token)
+            assert first == user_id
+
+            async with Session() as db:
+                second = await consume_state_token(db, token)
+            assert second is None
+
+    run_async(_go())
+
+
+# =========================================================================
+# T6.2 — callback flow
+# =========================================================================
+
+
+def test_callback_exchanges_code_and_inserts_credentials(monkeypatch):
+    from models import PanCredentials
+    from pan.auth import _pan_callback_impl, insert_state_token
+    from pan.token_crypto import decrypt_token
+
+    setup_pan_token_env(monkeypatch)
+    monkeypatch.setattr(
+        'config.settings.baidu_pan_appkey', 'test_appkey', raising=False,
+    )
+    monkeypatch.setattr(
+        'config.settings.baidu_pan_appsecret', 'test_secret', raising=False,
+    )
+    monkeypatch.setattr(
+        'config.settings.baidu_pan_redirect_uri',
+        'https://aitrans.video/api/admin/pan/callback',
+        raising=False,
+    )
+
+    user_id = uuid.uuid4()
+    fake_client = FakeBaiduPanClient(appkey='test_appkey', appsecret='test_secret')
+
+    async def _go():
+        async with auth_test_engine() as engine:
+            Session = await _session(engine)
+            async with Session() as db:
+                state = await insert_state_token(db, user_id=user_id)
+
+            async with Session() as db:
+                response = await _pan_callback_impl(
+                    code='auth_code_xyz',
+                    state=state,
+                    db=db,
+                    client_factory=lambda: fake_client,
+                )
+
+            # 302 to dashboard.
+            assert response.status_code == 302
+            assert response.headers['location'] == '/admin/pan/dashboard'
+
+            # PanCredentials INSERTed with encrypted tokens.
+            async with Session() as db:
+                row = (await db.execute(
+                    select(
+                        PanCredentials.user_id,
+                        PanCredentials.provider,
+                        PanCredentials.access_token_encrypted,
+                        PanCredentials.refresh_token_encrypted,
+                        PanCredentials.status,
+                        PanCredentials.access_token_expires_at,
+                    ).where(PanCredentials.user_id == user_id)
+                )).one()
+
+            assert row.user_id == user_id
+            assert row.provider == 'baidu_pan'
+            assert row.status == 'active'
+            # Encrypted tokens decrypt back to FakeBaiduPanClient.exchange_code
+            # canned response.
+            assert decrypt_token(row.access_token_encrypted) == 'fake_access'
+            assert decrypt_token(row.refresh_token_encrypted) == 'fake_refresh'
+            # exchange_code returns expires_in=2592000 (~30d).
+            expires = row.access_token_expires_at
+            if expires.tzinfo is None:
+                expires = expires.replace(tzinfo=timezone.utc)
+            delta = (expires - datetime.now(timezone.utc)).total_seconds()
+            # 30 days = 2,592,000 s. Allow 5 min slop.
+            assert 2_591_500 < delta < 2_592_500
+
+            # exchange_code called with the right args.
+            assert fake_client.exchange_code_calls == [{
+                'code': 'auth_code_xyz',
+                'redirect_uri': 'https://aitrans.video/api/admin/pan/callback',
+            }]
+
+    run_async(_go())
+
+
+def test_callback_rejects_invalid_state(monkeypatch):
+    """Unknown state token → HTTP 400."""
+    from fastapi import HTTPException
+    from pan.auth import _pan_callback_impl
+
+    setup_pan_token_env(monkeypatch)
+    monkeypatch.setattr(
+        'config.settings.baidu_pan_appkey', 'ak', raising=False,
+    )
+    monkeypatch.setattr(
+        'config.settings.baidu_pan_appsecret', 'as', raising=False,
+    )
+
+    fake_client = FakeBaiduPanClient()
+
+    async def _go():
+        async with auth_test_engine() as engine:
+            Session = await _session(engine)
+            async with Session() as db:
+                with pytest.raises(HTTPException) as exc_info:
+                    await _pan_callback_impl(
+                        code='some_code',
+                        state='never_issued',
+                        db=db,
+                        client_factory=lambda: fake_client,
+                    )
+            assert exc_info.value.status_code == 400
+            # exchange_code must NOT have been called for an invalid state.
+            assert fake_client.exchange_code_calls == []
+
+    run_async(_go())
+
+
+def test_callback_replaces_existing_credentials(monkeypatch):
+    """Re-connect (admin runs OAuth flow again) UPDATEs existing row in place,
+    flips status='revoked' back to 'active', keeps same row id."""
+    from models import PanCredentials
+    from pan.auth import _pan_callback_impl, insert_state_token
+    from pan.token_crypto import decrypt_token
+
+    setup_pan_token_env(monkeypatch)
+    monkeypatch.setattr(
+        'config.settings.baidu_pan_appkey', 'ak', raising=False,
+    )
+    monkeypatch.setattr(
+        'config.settings.baidu_pan_appsecret', 'as', raising=False,
+    )
+    monkeypatch.setattr(
+        'config.settings.baidu_pan_redirect_uri', 'https://x/cb', raising=False,
+    )
+
+    user_id = uuid.uuid4()
+
+    async def _go():
+        async with auth_test_engine() as engine:
+            Session = await _session(engine)
+            # Pre-existing revoked credentials for this user.
+            async with Session() as db:
+                pass  # use insert_sample_pan_credentials below
+            await insert_sample_pan_credentials(
+                engine, user_id=user_id,
+                access_token='OLD_access', refresh_token='OLD_refresh',
+                status='revoked',
+            )
+
+            async with Session() as db:
+                row_before = (await db.execute(
+                    select(PanCredentials.id).where(
+                        PanCredentials.user_id == user_id,
+                    )
+                )).scalar_one()
+                state = await insert_state_token(db, user_id=user_id)
+
+            fake_client = FakeBaiduPanClient()
+            async with Session() as db:
+                await _pan_callback_impl(
+                    code='new_code', state=state, db=db,
+                    client_factory=lambda: fake_client,
+                )
+
+            # Same row id, updated to active with new tokens.
+            async with Session() as db:
+                row_after = (await db.execute(
+                    select(
+                        PanCredentials.id,
+                        PanCredentials.status,
+                        PanCredentials.access_token_encrypted,
+                    ).where(PanCredentials.user_id == user_id)
+                )).one()
+            assert row_after.id == row_before
+            assert row_after.status == 'active'
+            assert decrypt_token(row_after.access_token_encrypted) == 'fake_access'
+
+    run_async(_go())
+
+
+# =========================================================================
+# T6.3 + T6.4 — refresh tick
+# =========================================================================
+
+
+def _set_expires(engine, *, user_id, expires_at):
+    """Helper: directly mutate the PanCredentials.access_token_expires_at
+    field to simulate "about to expire" scenarios."""
+    from models import PanCredentials
+    from sqlalchemy import update as _update
+
+    async def _go():
+        async with engine.begin() as conn:
+            await conn.execute(
+                _update(PanCredentials)
+                .where(PanCredentials.user_id == user_id)
+                .values(access_token_expires_at=expires_at)
+            )
+
+    return _go()
+
+
+def test_refresh_tick_skips_credentials_far_from_expiry(monkeypatch):
+    """access_token_expires_at > now + 24h → NOT refreshed."""
+    from pan.auth import pan_token_refresh_tick
+
+    setup_pan_token_env(monkeypatch)
+
+    user_id = uuid.uuid4()
+
+    async def _go():
+        async with auth_test_engine() as engine:
+            await insert_sample_pan_credentials(
+                engine, user_id=user_id, status='active',
+            )
+            # Default insert sets expires_at to now + 30 days — well beyond
+            # the 24h window.
+
+            Session = await _session(engine)
+            fake_client = FakeBaiduPanClient()
+            async with Session() as db:
+                stats = await pan_token_refresh_tick(
+                    db, client_factory=lambda: fake_client,
+                )
+
+            assert stats == {'checked': 0, 'refreshed': 0, 'revoked': 0}
+            assert fake_client.refresh_calls == []
+
+    run_async(_go())
+
+
+def test_refresh_tick_refreshes_within_window(monkeypatch):
+    """access_token_expires_at within 24h → refresh + UPDATE rotated tokens."""
+    from models import PanCredentials
+    from pan.auth import pan_token_refresh_tick
+    from pan.token_crypto import decrypt_token
+
+    setup_pan_token_env(monkeypatch)
+
+    user_id = uuid.uuid4()
+
+    async def _go():
+        async with auth_test_engine() as engine:
+            await insert_sample_pan_credentials(
+                engine, user_id=user_id, status='active',
+                access_token='OLD_access', refresh_token='OLD_refresh',
+            )
+            # Push expires_at to 1h from now → inside the 24h window.
+            await _set_expires(
+                engine, user_id=user_id,
+                expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+            )
+
+            Session = await _session(engine)
+            fake_client = FakeBaiduPanClient()
+            async with Session() as db:
+                stats = await pan_token_refresh_tick(
+                    db, client_factory=lambda: fake_client,
+                )
+
+            assert stats == {'checked': 1, 'refreshed': 1, 'revoked': 0}
+            # Baidu.refresh called with OLD refresh token.
+            assert fake_client.refresh_calls == [{'refresh_token': 'OLD_refresh'}]
+
+            # New rotated tokens persisted (FakeBaiduPanClient.refresh
+            # canned response: NEW_access / NEW_refresh).
+            async with Session() as db:
+                row = (await db.execute(
+                    select(
+                        PanCredentials.access_token_encrypted,
+                        PanCredentials.refresh_token_encrypted,
+                        PanCredentials.status,
+                        PanCredentials.last_refreshed_at,
+                    ).where(PanCredentials.user_id == user_id)
+                )).one()
+            assert decrypt_token(row.access_token_encrypted) == 'new_access'
+            assert decrypt_token(row.refresh_token_encrypted) == 'new_refresh'
+            assert row.status == 'active'
+            assert row.last_refreshed_at is not None
+
+    run_async(_go())
+
+
+def test_refresh_tick_marks_revoked_on_failure_and_dispatches_notification(
+    monkeypatch,
+):
+    """Refresh failure → status='revoked' + dispatch_event called."""
+    from models import PanCredentials
+    from pan import auth as auth_mod
+    from pan.auth import pan_token_refresh_tick
+
+    setup_pan_token_env(monkeypatch)
+
+    user_id = uuid.uuid4()
+
+    # Capture dispatch_event invocations.
+    dispatched: list[dict] = []
+
+    async def fake_dispatch(db, **kwargs):
+        dispatched.append(kwargs)
+        return None
+
+    monkeypatch.setattr(auth_mod, 'dispatch_event', fake_dispatch)
+
+    class FailingClient(FakeBaiduPanClient):
+        def refresh(self, refresh_token):
+            raise RuntimeError('synthetic refresh failure')
+
+    async def _go():
+        async with auth_test_engine() as engine:
+            await insert_sample_pan_credentials(
+                engine, user_id=user_id, status='active',
+            )
+            await _set_expires(
+                engine, user_id=user_id,
+                expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+            )
+
+            Session = await _session(engine)
+            client = FailingClient()
+            async with Session() as db:
+                stats = await pan_token_refresh_tick(
+                    db, client_factory=lambda: client,
+                )
+
+            assert stats == {'checked': 1, 'refreshed': 0, 'revoked': 1}
+
+            # status='revoked' persisted.
+            async with Session() as db:
+                status = (await db.execute(
+                    select(PanCredentials.status)
+                    .where(PanCredentials.user_id == user_id)
+                )).scalar_one()
+            assert status == 'revoked'
+
+            # Notification dispatched with the right event_type + user_id.
+            assert len(dispatched) == 1
+            evt = dispatched[0]
+            assert evt['event_type'] == 'pan_credentials_revoked'
+            assert evt['user_id'] == user_id
+            assert 'synthetic refresh failure' in evt['payload']['reason']
+
+    run_async(_go())
+
+
+def test_refresh_tick_dispatch_event_failure_does_not_block_revoke(monkeypatch):
+    """If dispatch_event itself raises, the credential is still marked revoked.
+    Notification is best-effort; PG is source of truth for status."""
+    from models import PanCredentials
+    from pan import auth as auth_mod
+    from pan.auth import pan_token_refresh_tick
+
+    setup_pan_token_env(monkeypatch)
+
+    user_id = uuid.uuid4()
+
+    async def failing_dispatch(db, **kwargs):
+        raise RuntimeError('synthetic notification failure')
+
+    monkeypatch.setattr(auth_mod, 'dispatch_event', failing_dispatch)
+
+    class FailingClient(FakeBaiduPanClient):
+        def refresh(self, refresh_token):
+            raise RuntimeError('refresh boom')
+
+    async def _go():
+        async with auth_test_engine() as engine:
+            await insert_sample_pan_credentials(
+                engine, user_id=user_id, status='active',
+            )
+            await _set_expires(
+                engine, user_id=user_id,
+                expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+            )
+
+            Session = await _session(engine)
+            async with Session() as db:
+                stats = await pan_token_refresh_tick(
+                    db, client_factory=lambda: FailingClient(),
+                )
+
+            assert stats['revoked'] == 1
+            # Even though dispatch_event raised, status is revoked.
+            async with Session() as db:
+                status = (await db.execute(
+                    select(PanCredentials.status)
+                    .where(PanCredentials.user_id == user_id)
+                )).scalar_one()
+            assert status == 'revoked'
+
+    run_async(_go())
+
+
+def test_refresh_tick_skips_already_revoked_credentials(monkeypatch):
+    """Credentials with status='revoked' must NOT be refreshed (would
+    re-activate a credential admin had marked dead)."""
+    from pan.auth import pan_token_refresh_tick
+
+    setup_pan_token_env(monkeypatch)
+    user_id = uuid.uuid4()
+
+    async def _go():
+        async with auth_test_engine() as engine:
+            await insert_sample_pan_credentials(
+                engine, user_id=user_id, status='revoked',
+            )
+            await _set_expires(
+                engine, user_id=user_id,
+                expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+            )
+
+            Session = await _session(engine)
+            fake_client = FakeBaiduPanClient()
+            async with Session() as db:
+                stats = await pan_token_refresh_tick(
+                    db, client_factory=lambda: fake_client,
+                )
+
+            assert stats == {'checked': 0, 'refreshed': 0, 'revoked': 0}
+            assert fake_client.refresh_calls == []
+
+    run_async(_go())

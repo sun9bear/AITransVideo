@@ -1,0 +1,352 @@
+"""Baidu Pan OAuth web flow + token refresh background task.
+
+Plan 2026-05-14 Phase 6 §T6.1-T6.5.
+
+## Endpoints (admin-only)
+
+  POST /api/admin/pan/connect
+    → Generate state token, INSERT pan_oauth_states (TTL 10min),
+      302 redirect to Baidu OAuth authorize URL with state in query.
+
+  GET  /api/admin/pan/callback
+    → Baidu redirects here after user grants permission. Verify state
+      (one-shot DELETE), exchange code via BaiduPanClient.exchange_code,
+      encrypt tokens, UPSERT pan_credentials, 302 to /admin/pan/dashboard.
+
+## State token lifecycle
+
+  - secrets.token_urlsafe(32) — 32 bytes random → ~43 char base64
+  - INSERT pan_oauth_states with expires_at = now + 10min
+  - DELETE on successful callback OR on expiry detection (no separate sweep
+    needed; consume_state_token deletes expired rows it encounters)
+
+## Token refresh (Phase 8 scheduler ticks this)
+
+  pan_token_refresh_tick(): SELECT credentials where status='active' AND
+  expires_at < now()+24h, decrypt → BaiduPanClient.refresh → re-encrypt
+  → UPDATE. Failure → status='revoked' + notifications_service.dispatch_event.
+
+  Baidu rotates refresh_token on EVERY successful refresh — the caller
+  MUST persist the new refresh_token from the response (we do).
+"""
+from __future__ import annotations
+
+import logging
+import secrets
+import uuid as _uuid
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable
+from urllib.parse import urlencode
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import RedirectResponse
+from sqlalchemy import delete, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from auth import get_current_user
+from config import settings
+from database import get_db
+from models import PanCredentials, PanOauthState, User
+from notifications_service import dispatch_event
+
+from pan.baidu_pan_client import BaiduPanClient
+from pan.token_crypto import decrypt_token, encrypt_token
+
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/admin/pan", tags=["admin-pan-auth"])
+
+STATE_TTL_SECONDS = 10 * 60  # plan §6.1
+BAIDU_AUTHORIZE_URL = "https://openapi.baidu.com/oauth/2.0/authorize"
+BAIDU_SCOPE = "basic netdisk"
+DASHBOARD_REDIRECT_URL = "/admin/pan/dashboard"
+
+
+# --- admin gate (local copy to avoid cross-router private import) ---
+
+
+def _is_admin(user: User) -> bool:
+    return (getattr(user, "role", None) or "user") == "admin"
+
+
+def _require_admin(user: User | None) -> User:
+    if user is None:
+        raise HTTPException(status_code=401, detail="未登录")
+    if not _is_admin(user):
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+    return user
+
+
+# --- state token helpers ---
+
+
+def generate_state_token() -> str:
+    """32-byte URL-safe random → ~43 char base64. Fits PanOauthState.token
+    String(64)."""
+    return secrets.token_urlsafe(32)
+
+
+async def insert_state_token(
+    db: AsyncSession,
+    *,
+    user_id: _uuid.UUID,
+    ttl_seconds: int = STATE_TTL_SECONDS,
+) -> str:
+    """Generate state + INSERT pan_oauth_states with TTL. Returns token."""
+    token = generate_state_token()
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
+    await db.execute(
+        PanOauthState.__table__.insert().values(
+            token=token, user_id=user_id, expires_at=expires_at,
+        )
+    )
+    await db.commit()
+    return token
+
+
+async def consume_state_token(
+    db: AsyncSession,
+    token: str,
+) -> _uuid.UUID | None:
+    """Atomic one-shot validate + DELETE.
+
+    Returns user_id on success. Returns None if:
+      - token doesn't exist
+      - token has expired (also cleaned up)
+    """
+    row = (await db.execute(
+        select(PanOauthState.user_id, PanOauthState.expires_at)
+        .where(PanOauthState.token == token)
+    )).one_or_none()
+    if row is None:
+        return None
+
+    expires_at = row.expires_at
+    if expires_at.tzinfo is None:
+        # SQLite tests store naive UTC; PG stores aware.
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+    now = datetime.now(timezone.utc)
+    # Always delete after first lookup (one-shot semantics — even expired
+    # rows shouldn't accumulate).
+    await db.execute(
+        delete(PanOauthState).where(PanOauthState.token == token)
+    )
+    await db.commit()
+
+    if expires_at < now:
+        return None
+    return row.user_id
+
+
+# --- endpoints ---
+
+
+@router.post("/connect")
+async def pan_connect(
+    user: User | None = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> RedirectResponse:
+    """Admin clicks "Connect Pan". Generate state → 302 to Baidu OAuth."""
+    admin = _require_admin(user)
+    if not settings.baidu_pan_appkey or not settings.baidu_pan_redirect_uri:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Pan OAuth 未配置:AVT_BAIDU_PAN_APPKEY / "
+                "AVT_BAIDU_PAN_REDIRECT_URI 缺失"
+            ),
+        )
+    token = await insert_state_token(db, user_id=admin.id)
+    qs = urlencode({
+        "response_type": "code",
+        "client_id": settings.baidu_pan_appkey,
+        "redirect_uri": settings.baidu_pan_redirect_uri,
+        "scope": BAIDU_SCOPE,
+        "state": token,
+    })
+    return RedirectResponse(
+        url=f"{BAIDU_AUTHORIZE_URL}?{qs}", status_code=302,
+    )
+
+
+@router.get("/callback")
+async def pan_callback(
+    code: str = Query(..., description="OAuth authorization code"),
+    state: str = Query(..., description="State token we issued at /connect"),
+    db: AsyncSession = Depends(get_db),
+) -> RedirectResponse:
+    """Baidu redirects here after user authorizes. Verify state, exchange
+    code, UPSERT pan_credentials, 302 to UI dashboard."""
+    return await _pan_callback_impl(
+        code=code, state=state, db=db,
+        client_factory=_default_client_factory,
+    )
+
+
+async def _pan_callback_impl(
+    *,
+    code: str,
+    state: str,
+    db: AsyncSession,
+    client_factory: Callable[[], Any],
+) -> RedirectResponse:
+    """Real callback logic with client_factory injection seam (tests)."""
+    user_id = await consume_state_token(db, state)
+    if user_id is None:
+        raise HTTPException(status_code=400, detail="state 无效或已过期")
+    if not settings.baidu_pan_appkey or not settings.baidu_pan_appsecret:
+        raise HTTPException(status_code=503, detail="Pan OAuth 未配置")
+
+    client = client_factory()
+    # exchange_code is sync (requests-based); for now we call inline. If
+    # backup_executor's asyncio.to_thread pattern needs to apply here it's
+    # a one-shot — OAuth bandwidth dominates over thread overhead anyway.
+    tokens = client.exchange_code(code, settings.baidu_pan_redirect_uri)
+
+    access_enc = encrypt_token(tokens['access_token'])
+    refresh_enc = encrypt_token(tokens['refresh_token'])
+    expires_at = datetime.now(timezone.utc) + timedelta(
+        seconds=int(tokens['expires_in']),
+    )
+    scope = tokens.get('scope', '')
+
+    # UPSERT (user_id, provider) — re-connecting overwrites stale tokens
+    # and clears any 'revoked' status.
+    existing_id = (await db.execute(
+        select(PanCredentials.id).where(
+            PanCredentials.user_id == user_id,
+            PanCredentials.provider == 'baidu_pan',
+        )
+    )).scalar_one_or_none()
+
+    if existing_id is None:
+        await db.execute(PanCredentials.__table__.insert().values(
+            id=_uuid.uuid4(),
+            user_id=user_id,
+            provider='baidu_pan',
+            access_token_encrypted=access_enc,
+            refresh_token_encrypted=refresh_enc,
+            access_token_expires_at=expires_at,
+            scope=scope,
+            status='active',
+            connected_at=datetime.now(timezone.utc),
+        ))
+    else:
+        await db.execute(
+            update(PanCredentials)
+            .where(PanCredentials.id == existing_id)
+            .values(
+                access_token_encrypted=access_enc,
+                refresh_token_encrypted=refresh_enc,
+                access_token_expires_at=expires_at,
+                scope=scope,
+                status='active',
+                last_refreshed_at=datetime.now(timezone.utc),
+            )
+        )
+    await db.commit()
+    return RedirectResponse(url=DASHBOARD_REDIRECT_URL, status_code=302)
+
+
+def _default_client_factory() -> BaiduPanClient:
+    return BaiduPanClient(
+        appkey=settings.baidu_pan_appkey,
+        appsecret=settings.baidu_pan_appsecret,
+    )
+
+
+# --- T6.3: token refresh tick ---
+
+
+async def pan_token_refresh_tick(
+    db: AsyncSession,
+    *,
+    client_factory: Callable[[], Any] | None = None,
+    window_hours: int = 24,
+) -> dict:
+    """One iteration of the refresh background task.
+
+    Refreshes pan_credentials whose access_token_expires_at is within
+    `window_hours` from now. On Baidu refresh success: UPDATE all four
+    fields (access/refresh/expires/scope). On failure: status='revoked'
+    + dispatch user notification.
+
+    Returns: {'checked': int, 'refreshed': int, 'revoked': int}
+    """
+    factory = client_factory or _default_client_factory
+    now = datetime.now(timezone.utc)
+    deadline = now + timedelta(hours=window_hours)
+
+    rows = (await db.execute(
+        select(
+            PanCredentials.id,
+            PanCredentials.user_id,
+            PanCredentials.refresh_token_encrypted,
+        ).where(
+            PanCredentials.status == 'active',
+            PanCredentials.access_token_expires_at < deadline,
+        )
+    )).all()
+
+    stats = {'checked': len(rows), 'refreshed': 0, 'revoked': 0}
+    client = factory()
+
+    for row in rows:
+        try:
+            old_refresh = decrypt_token(row.refresh_token_encrypted)
+            new_tokens = client.refresh(old_refresh)
+            # ⚠️ Baidu rotates refresh_token — must persist the NEW one.
+            await db.execute(
+                update(PanCredentials)
+                .where(PanCredentials.id == row.id)
+                .values(
+                    access_token_encrypted=encrypt_token(
+                        new_tokens['access_token'],
+                    ),
+                    refresh_token_encrypted=encrypt_token(
+                        new_tokens['refresh_token'],
+                    ),
+                    access_token_expires_at=datetime.now(timezone.utc)
+                    + timedelta(seconds=int(new_tokens['expires_in'])),
+                    scope=new_tokens.get('scope', ''),
+                    last_refreshed_at=datetime.now(timezone.utc),
+                )
+            )
+            await db.commit()
+            stats['refreshed'] += 1
+            logger.info(
+                "pan_token_refresh: refreshed cred=%s user=%s",
+                row.id, row.user_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "pan_token_refresh failed cred=%s user=%s err=%s — "
+                "marking revoked",
+                row.id, row.user_id, exc,
+            )
+            await db.execute(
+                update(PanCredentials)
+                .where(PanCredentials.id == row.id)
+                .values(status='revoked')
+            )
+            try:
+                await dispatch_event(
+                    db,
+                    event_type='pan_credentials_revoked',
+                    user_id=row.user_id,
+                    payload={
+                        'cred_id': str(row.id),
+                        'reason': str(exc)[:200],
+                    },
+                )
+            except Exception as note_exc:  # noqa: BLE001
+                logger.error(
+                    "pan_token_refresh: dispatch_event failed cred=%s: %s",
+                    row.id, note_exc,
+                )
+            await db.commit()
+            stats['revoked'] += 1
+
+    return stats
