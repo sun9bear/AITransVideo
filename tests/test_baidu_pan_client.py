@@ -217,3 +217,135 @@ def test_refresh_error_in_body_raises(monkeypatch):
     c = BaiduPanClient(appkey='ak', appsecret='as')
     with pytest.raises(RuntimeError, match='expired_token|Baidu OAuth refresh'):
         c.refresh(refresh_token='RT')
+
+
+# --- T3.4: list + get_quota ---
+
+
+def test_list_files_under_prefix(monkeypatch):
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+    import requests
+
+    def mock_get(url, params=None, **kw):
+        class R:
+            status_code = 200
+
+            def json(self):
+                return {
+                    'errno': 0,
+                    'list': [
+                        {'path': '/apps/AIVideoTrans/backups/job_a.tar.gz', 'size': 1000, 'fs_id': 1, 'isdir': 0},
+                        {'path': '/apps/AIVideoTrans/backups/job_b.tar.gz', 'size': 2000, 'fs_id': 2, 'isdir': 0},
+                    ],
+                }
+
+            def raise_for_status(self):
+                pass
+
+        return R()
+
+    monkeypatch.setattr(requests, 'get', mock_get)
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    files = c.list('/apps/AIVideoTrans/backups/', access_token='at_xyz')
+    assert len(files) == 2
+    assert files[0]['path'] == '/apps/AIVideoTrans/backups/job_a.tar.gz'
+    assert files[0]['size'] == 1000
+
+
+def test_list_filters_directories(monkeypatch):
+    """list should skip isdir=1 entries."""
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+    import requests
+
+    def mock_get(url, params=None, **kw):
+        class R:
+            status_code = 200
+
+            def json(self):
+                return {
+                    'errno': 0,
+                    'list': [
+                        {'path': '/apps/AIVideoTrans/backups/file.tar.gz', 'size': 1, 'fs_id': 1, 'isdir': 0},
+                        {'path': '/apps/AIVideoTrans/backups/subdir', 'size': 0, 'fs_id': 2, 'isdir': 1},
+                    ],
+                }
+
+            def raise_for_status(self):
+                pass
+
+        return R()
+
+    monkeypatch.setattr(requests, 'get', mock_get)
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    files = c.list('/apps/AIVideoTrans/backups/', access_token='at')
+    assert len(files) == 1
+    assert files[0]['path'].endswith('file.tar.gz')
+
+
+def test_list_raises_on_errno(monkeypatch):
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+    import requests
+
+    def mock_get(url, params=None, **kw):
+        class R:
+            status_code = 200
+
+            def json(self):
+                return {'errno': -7, 'errmsg': 'invalid path'}
+
+            def raise_for_status(self):
+                pass
+
+        return R()
+
+    monkeypatch.setattr(requests, 'get', mock_get)
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    with pytest.raises(RuntimeError, match='Baidu list failed|-7'):
+        c.list('/bogus', access_token='at')
+
+
+def test_get_quota(monkeypatch):
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+    import requests
+
+    def mock_get(url, params=None, **kw):
+        class R:
+            status_code = 200
+
+            def json(self):
+                return {'total': 2 * 10**12, 'used': 500 * 10**9}
+
+            def raise_for_status(self):
+                pass
+
+        return R()
+
+    monkeypatch.setattr(requests, 'get', mock_get)
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    q = c.get_quota(access_token='at_xyz')
+    assert q['total'] == 2 * 10**12
+    assert q['used'] == 500 * 10**9
+    assert q['free'] == q['total'] - q['used']
+
+
+def test_get_quota_default_zero_when_missing(monkeypatch):
+    """If Baidu omits total/used, default to zero (free=0). Avoid KeyError crash."""
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+    import requests
+
+    def mock_get(url, params=None, **kw):
+        class R:
+            status_code = 200
+
+            def json(self):
+                return {}
+
+            def raise_for_status(self):
+                pass
+
+        return R()
+
+    monkeypatch.setattr(requests, 'get', mock_get)
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    q = c.get_quota(access_token='at')
+    assert q == {'total': 0, 'used': 0, 'free': 0}

@@ -36,13 +36,41 @@ class BaiduPanClient:
         raise NotImplementedError("T3.8")
 
     def list(self, prefix: str, *, access_token: str) -> list[dict]:
-        raise NotImplementedError("T3.4")
+        """List files under prefix. Pagination not supported in MVP — assume single page."""
+        resp = requests.get(
+            f"{self.XPAN_BASE}/file",
+            params={
+                'method': 'list',
+                'access_token': access_token,
+                'dir': prefix,
+                'limit': 1000,
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        if body.get('errno', 0) != 0:
+            raise RuntimeError(f"Baidu list failed: {body}")
+        return [
+            {'path': item['path'], 'size': item['size'], 'fs_id': item['fs_id']}
+            for item in body.get('list', [])
+            if not item.get('isdir')
+        ]
 
     def delete(self, remote_path: str, *, access_token: str) -> None:
         raise NotImplementedError("T3.5")
 
     def get_quota(self, *, access_token: str) -> dict:
-        raise NotImplementedError("T3.4")
+        resp = requests.get(
+            'https://pan.baidu.com/api/quota',
+            params={'access_token': access_token, 'checkfree': 1, 'checkexpire': 1},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        total = body.get('total', 0)
+        used = body.get('used', 0)
+        return {'total': total, 'used': used, 'free': total - used}
 
     def exchange_code(self, code: str, redirect_uri: str) -> dict:
         """Exchange OAuth code for tokens (one-shot, code expires fast).
