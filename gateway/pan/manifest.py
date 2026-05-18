@@ -62,3 +62,26 @@ def build_manifest(*, project_dir: Path, job_record: dict, r2_artifacts: list[di
         'r2_artifacts_snapshot': list(r2_artifacts),
         'file_inventory': walk_project_dir_inventory(project_dir),
     }
+
+
+def write_tar_with_manifest(tar_path: Path, manifest: dict, project_dir: Path) -> None:
+    """Stream tar.gz with manifest.json as FIRST entry + project_dir contents.
+
+    Writing manifest first lets the restore path peek at metadata via
+    `read_manifest_from_tar` without fully extracting — useful when the
+    tar is large or possibly corrupt past the header.
+
+    Uses 'w:gz' streaming mode so RAM stays bounded regardless of project
+    size. project_dir contents are stored under arcname=project_dir.name
+    (typically the job_id), keeping a clean root inside the archive.
+    """
+    with tarfile.open(tar_path, 'w:gz') as tf:
+        # 1. manifest first
+        manifest_bytes = json.dumps(manifest, ensure_ascii=False, indent=2).encode('utf-8')
+        info = tarfile.TarInfo(name='manifest.json')
+        info.size = len(manifest_bytes)
+        info.mtime = int(datetime.now(timezone.utc).timestamp())
+        tf.addfile(info, io.BytesIO(manifest_bytes))
+
+        # 2. project_dir contents (recursive, arcname keeps a clean root)
+        tf.add(project_dir, arcname=project_dir.name)

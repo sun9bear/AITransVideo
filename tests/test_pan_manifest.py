@@ -155,3 +155,68 @@ def test_build_manifest_created_at_is_recent_utc(tmp_path: Path):
     assert parsed.tzinfo is not None
     now = dt.datetime.now(dt.timezone.utc)
     assert abs((now - parsed).total_seconds()) < 5
+
+
+# --- T4.3: write_tar_with_manifest ---
+
+
+def test_write_tar_with_manifest_first_entry(tmp_path: Path):
+    """Manifest must be the FIRST tar entry — restore reads it before extraction."""
+    tar_path = tmp_path / 'backup.tar.gz'
+    manifest = {'backup_format_version': 1, 'created_at_utc': '2026-05-14T00:00:00+00:00'}
+    project = tmp_path / 'job_xyz'
+    project.mkdir()
+    (project / 'a.txt').write_text('hello')
+
+    from gateway.pan.manifest import write_tar_with_manifest
+    write_tar_with_manifest(tar_path, manifest, project)
+
+    with tarfile.open(tar_path, 'r:gz') as tf:
+        names = tf.getnames()
+        assert names[0] == 'manifest.json'  # 第一条
+        assert any(n.endswith('a.txt') for n in names)
+
+        first = tf.extractfile('manifest.json').read()
+        assert json.loads(first.decode()) == manifest
+
+
+def test_write_tar_preserves_project_dir_layout(tmp_path: Path):
+    """project_dir is stored under arcname=project_dir.name so the archive
+    has a clean root (e.g. job_xyz/transcript/foo.json)."""
+    tar_path = tmp_path / 'b.tar.gz'
+    project = tmp_path / 'job_layout'
+    (project / 'transcript').mkdir(parents=True)
+    (project / 'transcript' / 'foo.json').write_text('{}')
+    (project / 'tts').mkdir()
+    (project / 'tts' / 'a.wav').write_bytes(b'\x00\x01')
+
+    from gateway.pan.manifest import write_tar_with_manifest
+    write_tar_with_manifest(tar_path, {'backup_format_version': 1}, project)
+
+    with tarfile.open(tar_path, 'r:gz') as tf:
+        names = set(tf.getnames())
+
+    # job_layout root + the two files (paths normalized by tar to use /)
+    assert 'manifest.json' in names
+    assert 'job_layout/transcript/foo.json' in names
+    assert 'job_layout/tts/a.wav' in names
+
+
+def test_write_tar_handles_unicode_in_manifest(tmp_path: Path):
+    """Manifest with non-ASCII bytes (中文 / emoji) round-trips correctly."""
+    tar_path = tmp_path / 'u.tar.gz'
+    project = tmp_path / 'job_u'
+    project.mkdir()
+    (project / 'x.txt').write_text('x')
+
+    manifest = {
+        'backup_format_version': 1,
+        'job_record': {'job_id': 'job_u', 'note': '配音任务 ✨'},
+    }
+    from gateway.pan.manifest import write_tar_with_manifest
+    write_tar_with_manifest(tar_path, manifest, project)
+
+    with tarfile.open(tar_path, 'r:gz') as tf:
+        first = tf.extractfile('manifest.json').read()
+        decoded = json.loads(first.decode('utf-8'))
+    assert decoded['job_record']['note'] == '配音任务 ✨'
