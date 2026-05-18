@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import requests
+
 
 class BaiduPanClient:
     """Implements PanProvider protocol for Baidu Pan."""
@@ -43,7 +45,32 @@ class BaiduPanClient:
         raise NotImplementedError("T3.4")
 
     def exchange_code(self, code: str, redirect_uri: str) -> dict:
-        raise NotImplementedError("T3.2")
+        """Exchange OAuth code for tokens (one-shot, code expires fast).
+
+        Plan §9.3. Baidu doc: pan.baidu.com/union/doc/Fl1d4dx7t
+        """
+        resp = requests.post(
+            f"{self.OAUTH_BASE}/token",
+            data={
+                'grant_type': 'authorization_code',
+                'code': code,
+                'client_id': self.appkey,
+                'client_secret': self.appsecret,
+                'redirect_uri': redirect_uri,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        if 'error' in body:
+            raise RuntimeError(f"Baidu OAuth code exchange failed: {body}")
+        # Baidu returns scope as space-separated string
+        return {
+            'access_token': body['access_token'],
+            'refresh_token': body['refresh_token'],
+            'expires_in': body['expires_in'],
+            'scope': body.get('scope', ''),
+        }
 
     def refresh(self, refresh_token: str) -> dict:
         raise NotImplementedError("T3.3")

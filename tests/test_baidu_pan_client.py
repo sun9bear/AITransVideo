@@ -31,3 +31,96 @@ def test_client_rejects_empty_credentials():
         BaiduPanClient(appkey='', appsecret='x')
     with pytest.raises(ValueError):
         BaiduPanClient(appkey='x', appsecret='')
+
+
+# --- T3.2: exchange_code ---
+
+
+def test_exchange_code_happy_path(monkeypatch):
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+    import requests
+
+    calls = []
+
+    def mock_post(url, data=None, **kw):
+        calls.append((url, data))
+
+        class R:
+            def __init__(self, body):
+                self._body = body
+                self.status_code = 200
+
+            def json(self):
+                return self._body
+
+            def raise_for_status(self):
+                pass
+
+        return R({
+            'access_token': 'access_xyz',
+            'refresh_token': 'refresh_xyz',
+            'expires_in': 2592000,
+            'scope': 'basic netdisk',
+        })
+
+    monkeypatch.setattr(requests, 'post', mock_post)
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    result = c.exchange_code(code='abc123', redirect_uri='https://aitrans.video/cb')
+    assert result['access_token'] == 'access_xyz'
+    assert result['refresh_token'] == 'refresh_xyz'
+    assert result['expires_in'] == 2592000
+
+    # 验证请求参数
+    url, data = calls[0]
+    assert 'oauth/2.0/token' in url
+    assert data['grant_type'] == 'authorization_code'
+    assert data['code'] == 'abc123'
+    assert data['client_id'] == 'ak'
+    assert data['client_secret'] == 'as'
+    assert data['redirect_uri'] == 'https://aitrans.video/cb'
+
+
+def test_exchange_code_invalid_code_raises(monkeypatch):
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+    import requests
+
+    def mock_post(url, data=None, **kw):
+        class R:
+            status_code = 400
+
+            def json(self):
+                return {'error': 'invalid_grant', 'error_description': 'bad code'}
+
+            def raise_for_status(self):
+                from requests import HTTPError
+                raise HTTPError('400')
+
+        return R()
+
+    monkeypatch.setattr(requests, 'post', mock_post)
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    with pytest.raises(Exception, match='invalid_grant|bad code|400'):
+        c.exchange_code(code='bad', redirect_uri='https://aitrans.video/cb')
+
+
+def test_exchange_code_error_in_body_raises(monkeypatch):
+    """If Baidu returns 200 but body has 'error' field, treat as failure."""
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+    import requests
+
+    def mock_post(url, data=None, **kw):
+        class R:
+            status_code = 200
+
+            def json(self):
+                return {'error': 'invalid_client', 'error_description': 'bad appkey'}
+
+            def raise_for_status(self):
+                pass
+
+        return R()
+
+    monkeypatch.setattr(requests, 'post', mock_post)
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    with pytest.raises(RuntimeError, match='invalid_client|Baidu OAuth code exchange'):
+        c.exchange_code(code='x', redirect_uri='https://x.example/cb')
