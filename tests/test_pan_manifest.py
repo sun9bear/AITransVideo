@@ -81,3 +81,77 @@ def test_inventory_sha256_streamed_for_large_file(tmp_path: Path):
     assert len(inventory) == 1
     assert inventory[0]['size'] == len(payload)
     assert inventory[0]['sha256'] == hashlib.sha256(payload).hexdigest()
+
+
+# --- T4.2: build_manifest ---
+
+
+def test_build_manifest_includes_all_required_fields(tmp_path: Path):
+    project = tmp_path / 'job_abc'
+    (project / 'transcript').mkdir(parents=True)
+    (project / 'transcript' / 'review.json').write_text('{}')
+
+    from gateway.pan.manifest import build_manifest
+    job_record_snapshot = {'job_id': 'job_abc', 'status': 'archiving', 'edit_generation': 0}
+    r2_artifacts = [{
+        'artifact_key': 'publish.dubbed_video',
+        'edit_generation': 0,
+        'state': 'pushed',
+        'r2_key': 'jobs/job_abc/publish.dubbed_video.mp4',
+    }]
+
+    m = build_manifest(project_dir=project, job_record=job_record_snapshot,
+                       r2_artifacts=r2_artifacts)
+
+    assert m['backup_format_version'] == 1
+    assert m['created_at_utc'].endswith('+00:00')
+    assert m['source_host']  # populated
+    assert m['job_record']['job_id'] == 'job_abc'
+    assert m['r2_artifacts_snapshot'] == r2_artifacts
+    assert len(m['file_inventory']) == 1
+    assert m['file_inventory'][0]['path'] == 'transcript/review.json'
+
+
+def test_build_manifest_r2_artifacts_is_a_copy_not_alias(tmp_path: Path):
+    """Caller modifying the input list after build_manifest must not mutate
+    the persisted manifest snapshot."""
+    project = tmp_path / 'job_d'
+    project.mkdir()
+    (project / 'noop.txt').write_text('x')
+
+    from gateway.pan.manifest import build_manifest
+    r2 = [{'artifact_key': 'a', 'r2_key': 'k1'}]
+    m = build_manifest(project_dir=project, job_record={'job_id': 'job_d'}, r2_artifacts=r2)
+    r2.append({'artifact_key': 'b', 'r2_key': 'k2'})
+    # 内嵌 snapshot 不受外部 mutation 影响
+    assert len(m['r2_artifacts_snapshot']) == 1
+
+
+def test_build_manifest_empty_project_dir(tmp_path: Path):
+    """Empty project_dir yields empty file_inventory but full manifest shape."""
+    project = tmp_path / 'job_empty'
+    project.mkdir()
+
+    from gateway.pan.manifest import build_manifest
+    m = build_manifest(project_dir=project, job_record={'job_id': 'job_empty'},
+                       r2_artifacts=[])
+
+    assert m['file_inventory'] == []
+    assert m['r2_artifacts_snapshot'] == []
+    assert m['backup_format_version'] == 1
+    assert m['source_host']
+
+
+def test_build_manifest_created_at_is_recent_utc(tmp_path: Path):
+    """created_at_utc must be parseable and within ~5s of now."""
+    import datetime as dt
+    project = tmp_path / 'job_t'
+    project.mkdir()
+
+    from gateway.pan.manifest import build_manifest
+    m = build_manifest(project_dir=project, job_record={}, r2_artifacts=[])
+
+    parsed = dt.datetime.fromisoformat(m['created_at_utc'])
+    assert parsed.tzinfo is not None
+    now = dt.datetime.now(dt.timezone.utc)
+    assert abs((now - parsed).total_seconds()) < 5

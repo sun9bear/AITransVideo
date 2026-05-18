@@ -38,3 +38,27 @@ def walk_project_dir_inventory(project_dir: Path) -> list[dict]:
             'sha256': sha.hexdigest(),
         })
     return inventory
+
+
+def build_manifest(*, project_dir: Path, job_record: dict, r2_artifacts: list[dict]) -> dict:
+    """Assemble the full manifest dict per plan §4.4.
+
+    Fields:
+      - backup_format_version: int, bump when wire format changes
+      - created_at_utc: ISO-8601 with explicit +00:00 offset
+      - source_host: socket.gethostname() — useful for triage
+      - job_record: serialized JobRecord snapshot at archive time
+      - r2_artifacts_snapshot: list of R2 artifact rows for this job
+      - file_inventory: walk_project_dir_inventory(project_dir) output
+
+    The returned dict is what gets persisted to PG `backup_records.manifest_json`
+    AND embedded as `manifest.json` inside the tar.gz (redundant by design).
+    """
+    return {
+        'backup_format_version': 1,
+        'created_at_utc': datetime.now(timezone.utc).isoformat(),
+        'source_host': socket.gethostname(),
+        'job_record': job_record,
+        'r2_artifacts_snapshot': list(r2_artifacts),
+        'file_inventory': walk_project_dir_inventory(project_dir),
+    }
