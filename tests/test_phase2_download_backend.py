@@ -616,6 +616,11 @@ def stream_fresh_modules(monkeypatch, tmp_path):
     monkeypatch.setattr(
         r2_client, "generate_presigned_stream_url", _fake_stream_presign,
     )
+    # CodeX P1-1 fix (2026-05-18): _resolve_r2_stream_redirect now calls
+    # head_artifact before presigning. Stub it as True (object present) so
+    # existing happy-path tests continue to exercise the presign path. Tests
+    # that need HEAD to return False / raise patch it locally after setup.
+    monkeypatch.setattr(r2_client, "head_artifact", lambda key: True)
     return calls
 
 
@@ -812,6 +817,200 @@ def test_r2_client_stream_presign_uses_no_content_disposition(monkeypatch, tmp_p
     )
     assert captured["Params"]["ResponseContentType"] == "video/mp4"
     assert captured["ExpiresIn"] == 1800
+
+
+# ============================================================================
+# CodeX P1-1 tests (2026-05-18): registry path HEAD-check before presign
+#
+# Both _resolve_r2_redirect (download) and _resolve_r2_stream_redirect (stream)
+# had a bug: after finding a registry entry in state "pushed"/"already_present",
+# they called generate_presigned_*_url directly without verifying the R2 object
+# still exists. S3 presign API never checks object existence, so if the R2
+# object was deleted (lifecycle / manual / pan-backup archive), the user would
+# get a gateway 302 followed by R2 404 — violating the "R2 errors invisible"
+# invariant. Fix: HEAD-check before presign; fall back to local on miss or exc.
+# ============================================================================
+
+
+def _download_registry_entry(artifact_key="publish.dubbed_video", *, gen=0,
+                              state="pushed", r2_key=None):
+    d = {
+        "artifact_key": artifact_key,
+        "edit_generation": gen,
+        "state": state,
+    }
+    if state in ("pushed", "already_present"):
+        d["r2_key"] = r2_key or f"jobs/job_dl_test/g{gen}/{artifact_key}.mp4"
+        d["filename"] = f"video_{artifact_key}.mp4"
+        d["content_type"] = "video/mp4"
+    return d
+
+
+@pytest.mark.asyncio
+async def test_download_registry_path_falls_back_when_r2_object_missing(
+    monkeypatch, tmp_path,
+):
+    """CodeX P1 finding (2026-05-18): registry path must HEAD-check before
+    302, or user gets 404 when R2 object was deleted post-registry-write."""
+    for mod in ("storage", "storage.r2_client", "storage.backend_router", "config"):
+        sys.modules.pop(mod, None)
+    config = importlib.import_module("config")
+    monkeypatch.setattr(config.settings, "download_redirect_backend", "r2")
+    monkeypatch.setattr(config.settings, "r2_endpoint", "https://fake.r2/")
+    monkeypatch.setattr(config.settings, "r2_access_key_id", "ak")
+    monkeypatch.setattr(config.settings, "r2_secret_access_key", "sk")
+    monkeypatch.setattr(config.settings, "r2_artifacts_bucket", "avt-artifacts")
+    monkeypatch.setattr(config.settings, "r2_presigned_expires_s", 120)
+    monkeypatch.setattr(config.settings, "r2_upload_timeout_s", 60)
+    monkeypatch.setattr(config.settings, "jobs_dir", str(tmp_path))
+
+    r2_client = importlib.import_module("storage.r2_client")
+    # head_artifact returns False → object gone from R2
+    monkeypatch.setattr(r2_client, "head_artifact", lambda key: False)
+    presign_called = []
+    monkeypatch.setattr(r2_client, "generate_presigned_download_url",
+                        lambda *a, **kw: presign_called.append(a) or "should-not-reach")
+
+    from job_intercept import _resolve_r2_redirect
+    registry = [_download_registry_entry("publish.dubbed_video")]
+    db = _StreamFakeDB(_StreamFakeJob(
+        job_id="job_dl_test",
+        r2_artifacts=registry,
+    ))
+
+    url, kind = await _resolve_r2_redirect(db, "job_dl_test",
+                                           artifact_key="publish.dubbed_video")
+    assert url is None, f"expected None (fallback to local), got url={url!r}"
+    assert kind == ""
+    assert presign_called == [], "presign must NOT be called when HEAD returns False"
+
+
+@pytest.mark.asyncio
+async def test_download_registry_path_falls_back_when_head_raises(
+    monkeypatch, tmp_path,
+):
+    """If head_artifact raises (network blip, auth error), also fall back to
+    local — never 302 to a presigned URL we can't confirm exists."""
+    for mod in ("storage", "storage.r2_client", "storage.backend_router", "config"):
+        sys.modules.pop(mod, None)
+    config = importlib.import_module("config")
+    monkeypatch.setattr(config.settings, "download_redirect_backend", "r2")
+    monkeypatch.setattr(config.settings, "r2_endpoint", "https://fake.r2/")
+    monkeypatch.setattr(config.settings, "r2_access_key_id", "ak")
+    monkeypatch.setattr(config.settings, "r2_secret_access_key", "sk")
+    monkeypatch.setattr(config.settings, "r2_artifacts_bucket", "avt-artifacts")
+    monkeypatch.setattr(config.settings, "r2_presigned_expires_s", 120)
+    monkeypatch.setattr(config.settings, "r2_upload_timeout_s", 60)
+    monkeypatch.setattr(config.settings, "jobs_dir", str(tmp_path))
+
+    r2_client = importlib.import_module("storage.r2_client")
+
+    def _raising_head(key):
+        raise RuntimeError("simulated R2 outage")
+
+    monkeypatch.setattr(r2_client, "head_artifact", _raising_head)
+    presign_called = []
+    monkeypatch.setattr(r2_client, "generate_presigned_download_url",
+                        lambda *a, **kw: presign_called.append(a) or "should-not-reach")
+
+    from job_intercept import _resolve_r2_redirect
+    registry = [_download_registry_entry("publish.dubbed_video")]
+    db = _StreamFakeDB(_StreamFakeJob(
+        job_id="job_dl_test",
+        r2_artifacts=registry,
+    ))
+
+    url, kind = await _resolve_r2_redirect(db, "job_dl_test",
+                                           artifact_key="publish.dubbed_video")
+    assert url is None
+    assert kind == ""
+    assert presign_called == []
+
+
+@pytest.mark.asyncio
+async def test_download_registry_path_presigns_when_head_confirms_present(
+    monkeypatch, tmp_path,
+):
+    """Regression / happy path: HEAD returns True → presign still happens,
+    ensuring the new HEAD check doesn't break the normal registry flow."""
+    for mod in ("storage", "storage.r2_client", "storage.backend_router", "config"):
+        sys.modules.pop(mod, None)
+    config = importlib.import_module("config")
+    monkeypatch.setattr(config.settings, "download_redirect_backend", "r2")
+    monkeypatch.setattr(config.settings, "r2_endpoint", "https://fake.r2/")
+    monkeypatch.setattr(config.settings, "r2_access_key_id", "ak")
+    monkeypatch.setattr(config.settings, "r2_secret_access_key", "sk")
+    monkeypatch.setattr(config.settings, "r2_artifacts_bucket", "avt-artifacts")
+    monkeypatch.setattr(config.settings, "r2_presigned_expires_s", 120)
+    monkeypatch.setattr(config.settings, "r2_upload_timeout_s", 60)
+    monkeypatch.setattr(config.settings, "jobs_dir", str(tmp_path))
+
+    r2_client = importlib.import_module("storage.r2_client")
+    monkeypatch.setattr(r2_client, "head_artifact", lambda key: True)
+    monkeypatch.setattr(r2_client, "generate_presigned_download_url",
+                        lambda key, filename, content_type="video/mp4": f"https://fake.r2/{key}?sig=dl")
+
+    from job_intercept import _resolve_r2_redirect
+    registry = [_download_registry_entry("publish.dubbed_video")]
+    db = _StreamFakeDB(_StreamFakeJob(
+        job_id="job_dl_test",
+        r2_artifacts=registry,
+    ))
+
+    url, kind = await _resolve_r2_redirect(db, "job_dl_test",
+                                           artifact_key="publish.dubbed_video")
+    assert kind == "registry"
+    assert url is not None and "sig=dl" in url
+
+
+@pytest.mark.asyncio
+async def test_stream_registry_path_falls_back_when_r2_object_missing(
+    stream_fresh_modules, monkeypatch,
+):
+    """CodeX P1 finding (2026-05-18): stream registry path must HEAD-check
+    before 302, identical invariant to the download path."""
+    r2_client = importlib.import_module("storage.r2_client")
+    # head_artifact returns False → object gone from R2
+    monkeypatch.setattr(r2_client, "head_artifact", lambda key: False)
+
+    from job_intercept import _resolve_r2_stream_redirect
+    registry = [_stream_entry(
+        "publish.dubbed_video", content_type="video/mp4",
+        r2_key="jobs/job_stream_test/g0/publish.dubbed_video.mp4",
+    )]
+    db = _StreamFakeDB(_StreamFakeJob(r2_artifacts=registry))
+
+    url, kind = await _resolve_r2_stream_redirect(db, "job_stream_test",
+                                                   stream_kind="video")
+    assert url is None, f"expected None (fallback to local), got url={url!r}"
+    assert kind == ""
+    # presign helper in stream_fresh_modules must NOT have been called
+    assert stream_fresh_modules == [], (
+        f"presign must not be called when HEAD returns False; calls={stream_fresh_modules}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_stream_registry_path_falls_back_when_head_raises(
+    stream_fresh_modules, monkeypatch,
+):
+    """If head_artifact raises on the stream registry path, fall back to local."""
+    r2_client = importlib.import_module("storage.r2_client")
+
+    def _raising_head(key):
+        raise RuntimeError("simulated R2 outage")
+
+    monkeypatch.setattr(r2_client, "head_artifact", _raising_head)
+
+    from job_intercept import _resolve_r2_stream_redirect
+    registry = [_stream_entry("publish.dubbed_video")]
+    db = _StreamFakeDB(_StreamFakeJob(r2_artifacts=registry))
+
+    url, kind = await _resolve_r2_stream_redirect(db, "job_stream_test",
+                                                   stream_kind="video")
+    assert url is None
+    assert kind == ""
+    assert stream_fresh_modules == []
 
 
 def test_stream_event_types_in_sync():

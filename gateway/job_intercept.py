@@ -1848,6 +1848,17 @@ async def _resolve_r2_redirect(
             if r2_key:
                 try:
                     from storage import r2_client
+                    # Verify R2 object actually exists. R2 lifecycle / manual
+                    # delete / pan-backup archive may have removed it after the
+                    # registry entry was written. Presign API never checks
+                    # existence — skip HEAD and we 302 to a guaranteed 404.
+                    if not r2_client.head_artifact(r2_key):
+                        logger.warning(
+                            "r2 redirect: registry HEAD miss job=%s key=%s r2_key=%s"
+                            " — falling back to local",
+                            job_id, artifact_key, r2_key,
+                        )
+                        return None, ""
                     url = r2_client.generate_presigned_download_url(
                         r2_key, filename, content_type=content_type,
                     )
@@ -2031,6 +2042,17 @@ async def _resolve_r2_stream_redirect(
     )
     try:
         from storage import r2_client
+        # Verify R2 object actually exists. R2 lifecycle / manual
+        # delete / pan-backup archive may have removed it after the
+        # registry entry was written. Presign API never checks
+        # existence — skip HEAD and we 302 to a guaranteed 404.
+        if not r2_client.head_artifact(r2_key):
+            logger.warning(
+                "stream r2 redirect: registry HEAD miss job=%s kind=%s r2_key=%s"
+                " — falling back to local",
+                job_id, stream_kind, r2_key,
+            )
+            return None, ""
         url = r2_client.generate_presigned_stream_url(
             r2_key, content_type=content_type,
         )
