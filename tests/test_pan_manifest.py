@@ -220,3 +220,67 @@ def test_write_tar_handles_unicode_in_manifest(tmp_path: Path):
         first = tf.extractfile('manifest.json').read()
         decoded = json.loads(first.decode('utf-8'))
     assert decoded['job_record']['note'] == '配音任务 ✨'
+
+
+# --- T4.4: read_manifest_from_tar ---
+
+
+def test_read_manifest_round_trip(tmp_path: Path):
+    """Write a tar, read manifest back — should deep-equal the original."""
+    from gateway.pan.manifest import write_tar_with_manifest, read_manifest_from_tar
+    tar_path = tmp_path / 'backup.tar.gz'
+    project = tmp_path / 'job_xyz'
+    project.mkdir()
+    (project / 'a.txt').write_text('hi')
+
+    manifest_in = {
+        'backup_format_version': 1,
+        'job_record': {'job_id': 'job_xyz'},
+        'file_inventory': [{'path': 'a.txt', 'size': 2, 'sha256': 'fakehash'}],
+    }
+    write_tar_with_manifest(tar_path, manifest_in, project)
+
+    manifest_out = read_manifest_from_tar(tar_path)
+    assert manifest_out == manifest_in
+
+
+def test_read_manifest_missing_raises(tmp_path: Path):
+    """tar without manifest.json should raise with a clear message."""
+    tar_path = tmp_path / 'bad.tar.gz'
+    with tarfile.open(tar_path, 'w:gz') as tf:
+        info = tarfile.TarInfo(name='something_else.txt')
+        info.size = 5
+        tf.addfile(info, io.BytesIO(b'hello'))
+
+    from gateway.pan.manifest import read_manifest_from_tar
+    with pytest.raises(RuntimeError, match='manifest.json'):
+        read_manifest_from_tar(tar_path)
+
+
+def test_read_manifest_directory_entry_raises(tmp_path: Path):
+    """A tar where manifest.json is a DIRECTORY entry (corrupt) must raise
+    a distinct error message, not a silent None return."""
+    tar_path = tmp_path / 'dir.tar.gz'
+    with tarfile.open(tar_path, 'w:gz') as tf:
+        info = tarfile.TarInfo(name='manifest.json')
+        info.type = tarfile.DIRTYPE
+        tf.addfile(info)
+
+    from gateway.pan.manifest import read_manifest_from_tar
+    with pytest.raises(RuntimeError, match='directory entry'):
+        read_manifest_from_tar(tar_path)
+
+
+def test_read_manifest_invalid_json_propagates(tmp_path: Path):
+    """If manifest.json is not valid JSON, JSONDecodeError surfaces directly
+    so the caller can distinguish from "no manifest" vs "unparseable"."""
+    tar_path = tmp_path / 'mal.tar.gz'
+    with tarfile.open(tar_path, 'w:gz') as tf:
+        body = b'this is not json {'
+        info = tarfile.TarInfo(name='manifest.json')
+        info.size = len(body)
+        tf.addfile(info, io.BytesIO(body))
+
+    from gateway.pan.manifest import read_manifest_from_tar
+    with pytest.raises(json.JSONDecodeError):
+        read_manifest_from_tar(tar_path)

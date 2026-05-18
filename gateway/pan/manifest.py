@@ -85,3 +85,24 @@ def write_tar_with_manifest(tar_path: Path, manifest: dict, project_dir: Path) -
 
         # 2. project_dir contents (recursive, arcname keeps a clean root)
         tf.add(project_dir, arcname=project_dir.name)
+
+
+def read_manifest_from_tar(tar_path: Path) -> dict:
+    """Read manifest.json from tar without full extraction.
+
+    Raises RuntimeError if manifest.json is missing or is a directory entry
+    (both signal a corrupt or wrong-format tar). JSON decode errors surface
+    as-is so callers can distinguish "no manifest" from "manifest unparseable".
+    """
+    with tarfile.open(tar_path, 'r:gz') as tf:
+        try:
+            f = tf.extractfile('manifest.json')
+        except KeyError:
+            raise RuntimeError(
+                f"tar at {tar_path} has no manifest.json — corrupt or wrong format"
+            )
+        if f is None:
+            raise RuntimeError(
+                f"tar at {tar_path}: manifest.json is a directory entry"
+            )
+        return json.loads(f.read().decode('utf-8'))
