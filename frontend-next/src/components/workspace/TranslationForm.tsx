@@ -529,8 +529,8 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
             <section
               className="rounded-xl border p-4 text-xs leading-relaxed"
               style={{
-                backgroundColor: "color-mix(in oklab, var(--amber-500, #f59e0b) 8%, transparent)",
-                borderColor: "color-mix(in oklab, var(--amber-500, #f59e0b) 40%, transparent)",
+                backgroundColor: "color-mix(in oklab, var(--ochre) 8%, transparent)",
+                borderColor: "color-mix(in oklab, var(--ochre) 40%, transparent)",
                 color: "var(--foreground)",
               }}
               role="status"
