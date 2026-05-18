@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -1207,4 +1207,97 @@ class UserNotification(Base):
         DateTime(timezone=True),
         nullable=False,
         default=lambda: datetime.now(timezone.utc),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Pan Backup — admin network-disk backup feature (migration 029, 2026-05-14)
+# Plan: docs/plans/2026-05-14-admin-pan-backup-implementation-plan.md T1.2
+# ---------------------------------------------------------------------------
+
+
+class PanCredentials(Base):
+    __tablename__ = "pan_credentials"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    access_token_encrypted: Mapped[bytes] = mapped_column(nullable=False)
+    refresh_token_encrypted: Mapped[bytes] = mapped_column(nullable=False)
+    access_token_expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+    )
+    scope: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="active",
+    )  # 'active' | 'revoked'
+    connected_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("NOW()"),
+    )
+    last_refreshed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "provider", name="uq_pan_credentials_user_provider"),
+    )
+
+
+class BackupRecord(Base):
+    __tablename__ = "backup_records"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # NOT FK to jobs.job_id — backup row must survive jobs row deletion.
+    job_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    job_edit_generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0",
+    )
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    remote_path: Mapped[str] = mapped_column(Text, nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    md5: Mapped[str] = mapped_column(String(32), nullable=False)
+    manifest_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    # uploading | uploaded | failed | restoring | restored | deleted
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("NOW()"),
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class PanOauthState(Base):
+    __tablename__ = "pan_oauth_states"
+
+    token: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
     )
