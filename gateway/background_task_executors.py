@@ -344,7 +344,114 @@ def _extract_error(response: httpx.Response) -> str | None:
 # Dispatch table
 # -----------------------------------------------------------------------------
 
+# -----------------------------------------------------------------------------
+# Pan backup / restore / residue cleanup — dispatcher adapters (CodeX P2)
+# -----------------------------------------------------------------------------
+#
+# The pan executors in gateway/pan/{backup,restore,residue_cleanup}.py use
+# a payload-dict signature for clean injection-seam testing. The
+# background_task_queue dispatcher (background_task_api.py:98) invokes
+# executors as `executor(task_id=..., job_id=..., project_dir=..., params=...)`,
+# so these adapters do the signature translation + drive BackgroundTask
+# lifecycle (mark_running / mark_completed / mark_failed) for UI consistency.
+#
+# Production payloads (params):
+#   pan_backup / pan_restore / pan_residue_cleanup:
+#     {'user_id': str(UUID), 'provider': str?}
+#
+# Per the T5.11.6 source-of-truth split, `BackupRecord.status` is
+# authoritative for backup/restore lifecycle. BackgroundTask.status is
+# scheduling-only — UI reads from `backup_records` for definitive state.
+
+
+async def execute_pan_backup_dispatched(
+    *,
+    task_id: str,
+    job_id: str,
+    project_dir: Path,  # noqa: ARG001 — re-read from Job row inside executor
+    params: dict[str, Any],
+) -> None:
+    """Dispatcher adapter for `pan_backup` task type."""
+    from gateway.pan.backup_executor import execute_pan_backup
+
+    payload = {
+        'job_id': job_id,
+        'user_id': str(params['user_id']),
+        'provider': params.get('provider', 'baidu_pan'),
+    }
+
+    async with async_session() as db:
+        await queue.mark_running(db, task_id)
+    try:
+        await execute_pan_backup(payload)
+    except Exception as exc:  # noqa: BLE001
+        async with async_session() as db:
+            await queue.mark_failed(db, task_id, str(exc)[:500])
+        return
+    async with async_session() as db:
+        await queue.mark_completed(db, task_id, {'pan_backup': 'ok'})
+
+
+async def execute_pan_restore_dispatched(
+    *,
+    task_id: str,
+    job_id: str,
+    project_dir: Path,  # noqa: ARG001
+    params: dict[str, Any],
+) -> None:
+    """Dispatcher adapter for `pan_restore` task type."""
+    from gateway.pan.restore_executor import execute_pan_restore
+
+    payload = {
+        'job_id': job_id,
+        'user_id': str(params['user_id']),
+        'provider': params.get('provider', 'baidu_pan'),
+    }
+
+    async with async_session() as db:
+        await queue.mark_running(db, task_id)
+    try:
+        await execute_pan_restore(payload)
+    except Exception as exc:  # noqa: BLE001
+        async with async_session() as db:
+            await queue.mark_failed(db, task_id, str(exc)[:500])
+        return
+    async with async_session() as db:
+        await queue.mark_completed(db, task_id, {'pan_restore': 'ok'})
+
+
+async def execute_pan_residue_cleanup_dispatched(
+    *,
+    task_id: str,
+    job_id: str,
+    project_dir: Path,  # noqa: ARG001
+    params: dict[str, Any],
+) -> None:
+    """Dispatcher adapter for `pan_residue_cleanup` task type."""
+    from gateway.pan.residue_cleanup import execute_pan_residue_cleanup
+
+    payload = {
+        'job_id': job_id,
+        'user_id': str(params['user_id']),
+        'provider': params.get('provider', 'baidu_pan'),
+    }
+
+    async with async_session() as db:
+        await queue.mark_running(db, task_id)
+    try:
+        await execute_pan_residue_cleanup(payload)
+    except Exception as exc:  # noqa: BLE001
+        async with async_session() as db:
+            await queue.mark_failed(db, task_id, str(exc)[:500])
+        return
+    async with async_session() as db:
+        await queue.mark_completed(db, task_id, {'pan_residue_cleanup': 'ok'})
+
+
 TASK_EXECUTORS = {
     "materials_pack": execute_materials_pack,
     "generate_video": execute_generate_video,
+    "pan_backup": execute_pan_backup_dispatched,
+    "pan_restore": execute_pan_restore_dispatched,
+    "pan_residue_cleanup": execute_pan_residue_cleanup_dispatched,
 }
