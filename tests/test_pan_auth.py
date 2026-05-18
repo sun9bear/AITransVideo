@@ -202,6 +202,41 @@ def test_consume_state_token_is_one_shot():
     run_async(_go())
 
 
+def test_consume_state_token_concurrent_callbacks_only_one_wins():
+    """CodeX P2: two callbacks racing on the same state token must see
+    EXACTLY ONE win and one rejection. The SELECT-then-DELETE pattern
+    would have allowed both to pass validation, then both to exchange
+    code (Baidu would reject the second, but only AFTER an unnecessary
+    round-trip + state confusion). DELETE ... RETURNING makes the
+    consume atomic at the DB layer."""
+    import asyncio as _asyncio
+    from pan.auth import consume_state_token, insert_state_token
+
+    user_id = uuid.uuid4()
+
+    async def _go():
+        async with auth_test_engine() as engine:
+            Session = await _session(engine)
+            async with Session() as db:
+                token = await insert_state_token(db, user_id=user_id)
+
+            # Two concurrent consume calls in separate sessions.
+            async def _attempt():
+                async with Session() as db:
+                    return await consume_state_token(db, token)
+
+            results = await _asyncio.gather(_attempt(), _attempt())
+
+            wins = [r for r in results if r == user_id]
+            losses = [r for r in results if r is None]
+            assert len(wins) == 1, (
+                f"exactly one consume must win, got results={results}"
+            )
+            assert len(losses) == 1
+
+    run_async(_go())
+
+
 # =========================================================================
 # T6.2 — callback flow
 # =========================================================================

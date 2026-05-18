@@ -109,34 +109,36 @@ async def consume_state_token(
     db: AsyncSession,
     token: str,
 ) -> _uuid.UUID | None:
-    """Atomic one-shot validate + DELETE.
+    """Atomic one-shot validate + DELETE via `DELETE ... RETURNING`.
+
+    CodeX P2: previous SELECT-then-DELETE had a window where two
+    concurrent callbacks could both pass validation against the same
+    state token. `DELETE ... RETURNING` is atomic — exactly one caller
+    gets the row, the other sees no match. Works on PG natively + on
+    SQLite 3.35+ (we use SQLite 3.40+ in dev / aiosqlite 0.19+).
 
     Returns user_id on success. Returns None if:
-      - token doesn't exist
-      - token has expired (also cleaned up)
+      - token doesn't exist (never issued, or already consumed)
+      - token has expired (deletion happens here too — one-shot
+        semantics drop expired rows incidentally)
     """
-    row = (await db.execute(
-        select(PanOauthState.user_id, PanOauthState.expires_at)
+    now = datetime.now(timezone.utc)
+    result = await db.execute(
+        delete(PanOauthState)
         .where(PanOauthState.token == token)
-    )).one_or_none()
+        .returning(PanOauthState.user_id, PanOauthState.expires_at)
+    )
+    row = result.one_or_none()
+    await db.commit()
     if row is None:
-        return None
+        return None  # token never existed OR a concurrent caller won the race
 
     expires_at = row.expires_at
     if expires_at.tzinfo is None:
         # SQLite tests store naive UTC; PG stores aware.
         expires_at = expires_at.replace(tzinfo=timezone.utc)
-
-    now = datetime.now(timezone.utc)
-    # Always delete after first lookup (one-shot semantics — even expired
-    # rows shouldn't accumulate).
-    await db.execute(
-        delete(PanOauthState).where(PanOauthState.token == token)
-    )
-    await db.commit()
-
     if expires_at < now:
-        return None
+        return None  # token existed but was expired; the DELETE cleaned up
     return row.user_id
 
 
