@@ -69,7 +69,7 @@ def test_cleanup_forward_resolves_stuck_archiving(monkeypatch, tmp_path):
 
     async def _go():
         async with pan_test_engine() as engine:
-            project = make_project_dir(tmp_path, job_id=job_id)
+            project = make_project_dir(tmp_path, job_id=job_id, monkeypatch=monkeypatch)
             await insert_sample_job(
                 engine, user_id=user_id, job_id=job_id,
                 status='archiving',  # ← stuck
@@ -165,7 +165,7 @@ def test_cleanup_noop_when_no_uploaded_backup_record(monkeypatch, tmp_path):
 
     async def _go():
         async with pan_test_engine() as engine:
-            project = make_project_dir(tmp_path, job_id=job_id)
+            project = make_project_dir(tmp_path, job_id=job_id, monkeypatch=monkeypatch)
             await insert_sample_job(
                 engine, user_id=user_id, job_id=job_id,
                 status='archiving', project_dir=str(project),
@@ -227,7 +227,7 @@ def test_cleanup_is_idempotent(monkeypatch, tmp_path):
 
     async def _go():
         async with pan_test_engine() as engine:
-            project = make_project_dir(tmp_path, job_id=job_id)
+            project = make_project_dir(tmp_path, job_id=job_id, monkeypatch=monkeypatch)
             await insert_sample_job(
                 engine, user_id=user_id, job_id=job_id,
                 status='archiving', project_dir=str(project),
@@ -285,7 +285,7 @@ def test_cleanup_rmtree_failure_keeps_archiving_for_next_pass(monkeypatch, tmp_p
 
     async def _go():
         async with pan_test_engine() as engine:
-            project = make_project_dir(tmp_path, job_id=job_id)
+            project = make_project_dir(tmp_path, job_id=job_id, monkeypatch=monkeypatch)
             await insert_sample_job(
                 engine, user_id=user_id, job_id=job_id,
                 status='archiving', project_dir=str(project),
@@ -334,7 +334,7 @@ def test_cleanup_r2_delete_failure_keeps_archiving_for_next_pass(monkeypatch, tm
 
     async def _go():
         async with pan_test_engine() as engine:
-            project = make_project_dir(tmp_path, job_id=job_id)
+            project = make_project_dir(tmp_path, job_id=job_id, monkeypatch=monkeypatch)
             r2_artifacts = [
                 {'r2_key': 'jobs/x/ok.mp4'},
                 {'r2_key': 'jobs/x/fail.mp4'},
@@ -378,6 +378,9 @@ def test_cleanup_handles_missing_project_dir_on_disk(monkeypatch, tmp_path):
     from models import Job
 
     setup_pan_token_env(monkeypatch)
+    # CodeX P0: tmp_path must be registered as a safe root so the
+    # non-existent path (still under it) passes the safety check.
+    monkeypatch.setenv('AIVIDEOTRANS_PROJECTS_DIR', str(tmp_path))
     user_id = uuid.uuid4()
     job_id = 'job_disk_gone'
 
@@ -482,6 +485,53 @@ def test_restore_executor_does_not_reference_background_tasks_model():
         "restore_executor.py code must not reference BackgroundTask:\n"
         + "\n".join(suspect)
     )
+
+
+def test_cleanup_refuses_rmtree_when_project_dir_outside_safe_root(
+    monkeypatch, tmp_path,
+):
+    """CodeX P0: residue_cleanup MUST refuse rmtree when project_dir is
+    not under any safe root, even when AIVIDEOTRANS_PROJECTS_DIR is unset.
+    Previously residue_cleanup had no guard at all — a poisoned Job.project_dir
+    would have cascaded into arbitrary rmtree."""
+    from models import Job
+
+    setup_pan_token_env(monkeypatch)
+    # Deliberately do NOT set AIVIDEOTRANS_PROJECTS_DIR. tmp_path is
+    # outside /opt/aivideotrans/{data,app}/projects so the safety check
+    # fires.
+    user_id = uuid.uuid4()
+    job_id = 'job_unsafe_path'
+
+    rmtree_calls: list = []
+
+    async def _go():
+        async with pan_test_engine() as engine:
+            await insert_sample_job(
+                engine, user_id=user_id, job_id=job_id,
+                status='archiving',
+                project_dir=str(tmp_path / 'rogue_dir'),
+            )
+            await insert_sample_backup_record(
+                engine, user_id=user_id, job_id=job_id, status='uploaded',
+            )
+
+            await _run_cleanup(
+                {'job_id': job_id, 'user_id': str(user_id)},
+                engine=engine,
+                rmtree_fn=lambda p: rmtree_calls.append(p),
+            )
+
+            # rmtree refused — no calls.
+            assert rmtree_calls == []
+            # Status stays at 'archiving' — finalize gated on rmtree_ok.
+            async with engine.connect() as conn:
+                status = (await conn.execute(
+                    select(Job.status).where(Job.job_id == job_id)
+                )).scalar_one()
+            assert status == 'archiving'
+
+    run_async(_go())
 
 
 def test_residue_cleanup_does_not_reference_background_tasks_model():

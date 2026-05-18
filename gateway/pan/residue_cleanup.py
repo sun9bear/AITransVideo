@@ -138,19 +138,34 @@ async def _execute_pan_residue_cleanup_impl(
                 r2_artifacts = job_row.r2_artifacts or []
 
             # --- idempotent rmtree (best effort, tracked) ---
+            # CodeX P0: gate rmtree behind the same safe-roots whitelist
+            # used by TTL cleanup + backup_executor. The previous code had
+            # NO safety check here — directly rmtree'd whatever Job.project_dir
+            # pointed at (a poisoned row could have cascaded).
+            from gateway.pan._safe_paths import verify_project_dir_safe
             rmtree_ok = True
             if project_dir_str:
-                project_dir = Path(project_dir_str)
-                if project_dir.exists():
-                    try:
-                        await asyncio.to_thread(rmtree_fn, project_dir)
-                    except Exception as exc:  # noqa: BLE001
-                        rmtree_ok = False
-                        logger.warning(
-                            "pan_residue_cleanup rmtree failed job=%s path=%s "
-                            "err=%s — leaving for next pass",
-                            job_id, project_dir, exc,
-                        )
+                project_dir = Path(project_dir_str).resolve()
+                try:
+                    verify_project_dir_safe(project_dir)
+                except RuntimeError as exc:
+                    rmtree_ok = False
+                    logger.error(
+                        "pan_residue_cleanup REFUSING rmtree (unsafe path): "
+                        "job=%s path=%s err=%s — leaving for manual review",
+                        job_id, project_dir, exc,
+                    )
+                else:
+                    if project_dir.exists():
+                        try:
+                            await asyncio.to_thread(rmtree_fn, project_dir)
+                        except Exception as exc:  # noqa: BLE001
+                            rmtree_ok = False
+                            logger.warning(
+                                "pan_residue_cleanup rmtree failed job=%s "
+                                "path=%s err=%s — leaving for next pass",
+                                job_id, project_dir, exc,
+                            )
 
             # --- idempotent R2 delete (tracked) ---
             r2_failures: list[str] = []

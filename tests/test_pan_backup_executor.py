@@ -93,7 +93,7 @@ def test_precondition_rejects_missing_credentials(monkeypatch, tmp_path):
 
     async def _go():
         async with pan_test_engine() as engine:
-            project = make_project_dir(tmp_path, job_id=job_id)
+            project = make_project_dir(tmp_path, job_id=job_id, monkeypatch=monkeypatch)
             await insert_sample_job(
                 engine, user_id=user_id, job_id=job_id,
                 project_dir=str(project),
@@ -117,7 +117,7 @@ def test_precondition_rejects_revoked_credentials(monkeypatch, tmp_path):
 
     async def _go():
         async with pan_test_engine() as engine:
-            project = make_project_dir(tmp_path, job_id=job_id)
+            project = make_project_dir(tmp_path, job_id=job_id, monkeypatch=monkeypatch)
             await insert_sample_job(
                 engine, user_id=user_id, job_id=job_id,
                 project_dir=str(project),
@@ -192,7 +192,7 @@ def test_inserts_backup_record_with_uploading_status(monkeypatch, tmp_path):
 
     async def _go():
         async with pan_test_engine() as engine:
-            project = make_project_dir(tmp_path, job_id=job_id)
+            project = make_project_dir(tmp_path, job_id=job_id, monkeypatch=monkeypatch)
             await insert_sample_job(
                 engine, user_id=user_id, job_id=job_id,
                 project_dir=str(project), edit_generation=3,
@@ -240,7 +240,7 @@ def test_gate_size_mismatch_raises_and_rolls_back(monkeypatch, tmp_path):
 
     async def _go():
         async with pan_test_engine() as engine:
-            project = make_project_dir(tmp_path, job_id=job_id)
+            project = make_project_dir(tmp_path, job_id=job_id, monkeypatch=monkeypatch)
             await insert_sample_job(
                 engine, user_id=user_id, job_id=job_id,
                 project_dir=str(project),
@@ -283,7 +283,7 @@ def test_gate_md5_mismatch_raises_and_rolls_back(monkeypatch, tmp_path):
 
     async def _go():
         async with pan_test_engine() as engine:
-            project = make_project_dir(tmp_path, job_id=job_id)
+            project = make_project_dir(tmp_path, job_id=job_id, monkeypatch=monkeypatch)
             await insert_sample_job(
                 engine, user_id=user_id, job_id=job_id,
                 project_dir=str(project),
@@ -347,7 +347,7 @@ def test_gate_read_back_probe_failure_raises_and_rolls_back(monkeypatch, tmp_pat
 
     async def _go():
         async with pan_test_engine() as engine:
-            project = make_project_dir(tmp_path, job_id=job_id)
+            project = make_project_dir(tmp_path, job_id=job_id, monkeypatch=monkeypatch)
             await insert_sample_job(
                 engine, user_id=user_id, job_id=job_id,
                 project_dir=str(project),
@@ -397,7 +397,7 @@ def test_commit_point_writes_full_metadata(monkeypatch, tmp_path):
 
     async def _go():
         async with pan_test_engine() as engine:
-            project = make_project_dir(tmp_path, job_id=job_id)
+            project = make_project_dir(tmp_path, job_id=job_id, monkeypatch=monkeypatch)
             await insert_sample_job(
                 engine, user_id=user_id, job_id=job_id,
                 project_dir=str(project), edit_generation=1,
@@ -467,7 +467,7 @@ def test_rmtree_safety_refuses_project_dir_outside_projects_root(
             await insert_sample_pan_credentials(engine, user_id=user_id)
 
             client = FakeBaiduPanClient()
-            with pytest.raises(RuntimeError, match='not inside projects_root'):
+            with pytest.raises(RuntimeError, match='not under any safe root'):
                 await _run_executor(
                     {'job_id': job_id, 'user_id': str(user_id)},
                     engine=engine, client=client,
@@ -499,7 +499,7 @@ def test_rmtree_safety_refuses_project_dir_equals_projects_root(
             await insert_sample_pan_credentials(engine, user_id=user_id)
 
             client = FakeBaiduPanClient()
-            with pytest.raises(RuntimeError, match='equals projects_root'):
+            with pytest.raises(RuntimeError, match='not under any safe root'):
                 await _run_executor(
                     {'job_id': job_id, 'user_id': str(user_id)},
                     engine=engine, client=client,
@@ -521,7 +521,7 @@ def test_rmtree_invoked_after_commit_point(monkeypatch, tmp_path):
 
     async def _go():
         async with pan_test_engine() as engine:
-            project = make_project_dir(tmp_path, job_id=job_id)
+            project = make_project_dir(tmp_path, job_id=job_id, monkeypatch=monkeypatch)
             await insert_sample_job(
                 engine, user_id=user_id, job_id=job_id,
                 project_dir=str(project),
@@ -558,7 +558,7 @@ def test_r2_artifacts_deleted_after_commit(monkeypatch, tmp_path):
 
     async def _go():
         async with pan_test_engine() as engine:
-            project = make_project_dir(tmp_path, job_id=job_id)
+            project = make_project_dir(tmp_path, job_id=job_id, monkeypatch=monkeypatch)
             await insert_sample_job(
                 engine, user_id=user_id, job_id=job_id,
                 project_dir=str(project),
@@ -601,7 +601,7 @@ def test_r2_delete_failure_keeps_archiving_for_retry(monkeypatch, tmp_path):
 
     async def _go():
         async with pan_test_engine() as engine:
-            project = make_project_dir(tmp_path, job_id=job_id)
+            project = make_project_dir(tmp_path, job_id=job_id, monkeypatch=monkeypatch)
             r2_artifacts = [
                 {'artifact_key': 'publish.dubbed_video',
                  'r2_key': 'jobs/x/v.mp4'},
@@ -653,7 +653,7 @@ def test_rmtree_failure_keeps_archiving_for_retry(monkeypatch, tmp_path):
 
     async def _go():
         async with pan_test_engine() as engine:
-            project = make_project_dir(tmp_path, job_id=job_id)
+            project = make_project_dir(tmp_path, job_id=job_id, monkeypatch=monkeypatch)
             await insert_sample_job(
                 engine, user_id=user_id, job_id=job_id,
                 project_dir=str(project),
@@ -703,7 +703,7 @@ def test_archived_status_set_after_success(monkeypatch, tmp_path):
 
     async def _go():
         async with pan_test_engine() as engine:
-            project = make_project_dir(tmp_path, job_id=job_id)
+            project = make_project_dir(tmp_path, job_id=job_id, monkeypatch=monkeypatch)
             await insert_sample_job(
                 engine, user_id=user_id, job_id=job_id,
                 project_dir=str(project),
@@ -755,7 +755,7 @@ def test_happy_path_full_integration(monkeypatch, tmp_path):
 
     async def _go():
         async with pan_test_engine() as engine:
-            project = make_project_dir(tmp_path, job_id=job_id)
+            project = make_project_dir(tmp_path, job_id=job_id, monkeypatch=monkeypatch)
             await insert_sample_job(
                 engine, user_id=user_id, job_id=job_id,
                 project_dir=str(project), edit_generation=5,
@@ -851,7 +851,7 @@ def test_post_lock_re_read_detects_concurrent_archive(monkeypatch, tmp_path):
     async def _go():
         async with pan_test_engine() as engine:
             engine_holder.append(engine)
-            project = make_project_dir(tmp_path, job_id=job_id)
+            project = make_project_dir(tmp_path, job_id=job_id, monkeypatch=monkeypatch)
             await insert_sample_job(
                 engine, user_id=user_id, job_id=job_id,
                 status='succeeded', project_dir=str(project),
@@ -892,7 +892,7 @@ def test_payload_provider_override(monkeypatch, tmp_path):
 
     async def _go():
         async with pan_test_engine() as engine:
-            project = make_project_dir(tmp_path, job_id=job_id)
+            project = make_project_dir(tmp_path, job_id=job_id, monkeypatch=monkeypatch)
             await insert_sample_job(
                 engine, user_id=user_id, job_id=job_id,
                 project_dir=str(project),

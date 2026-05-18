@@ -227,6 +227,12 @@ async def _execute_pan_restore_impl(
                 br_id = br_row.id
 
             project_dir = Path(project_dir_str).resolve()
+            # CodeX P0 unification: same safe-roots whitelist that backup
+            # and residue_cleanup use. Restore writes to project_dir via
+            # os.replace, so if project_dir is somehow pointed outside the
+            # trusted roots we refuse before any side effect.
+            from gateway.pan._safe_paths import verify_project_dir_safe
+            verify_project_dir_safe(project_dir)
             remote_path = br_row.remote_path
             expected_sha = br_row.sha256
             manifest_persisted = br_row.manifest_json

@@ -246,7 +246,12 @@ async def insert_sample_backup_record(
 
 # --- file system fixtures ---
 
-def make_project_dir(parent: Path, job_id: str = 'job_test') -> Path:
+def make_project_dir(
+    parent: Path,
+    job_id: str = 'job_test',
+    *,
+    monkeypatch=None,
+) -> Path:
     """Create a realistic project_dir layout under `parent` (typically tmp_path).
 
     Layout:
@@ -254,7 +259,15 @@ def make_project_dir(parent: Path, job_id: str = 'job_test') -> Path:
           transcript/review.json
           tts/seg_0.wav
           publish/dubbed.mp4
+
+    When `monkeypatch` is provided, registers `parent` as a safe project
+    root via AIVIDEOTRANS_PROJECTS_DIR — required for tests that hit
+    backup_executor / restore_executor / residue_cleanup, since those
+    now enforce the gateway.project_cleanup safe-root whitelist
+    (CodeX P0 unification).
     """
+    if monkeypatch is not None:
+        monkeypatch.setenv('AIVIDEOTRANS_PROJECTS_DIR', str(parent))
     project = parent / job_id
     (project / 'transcript').mkdir(parents=True)
     (project / 'transcript' / 'review.json').write_text(

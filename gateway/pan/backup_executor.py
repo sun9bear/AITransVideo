@@ -107,7 +107,6 @@ async def _execute_pan_backup_impl(
     r2_delete_fn: Callable[[str], None],
     heartbeat_enabled: bool = True,
     heartbeat_interval_s: int = 60,
-    projects_root_env: str = 'AIVIDEOTRANS_PROJECTS_DIR',
 ) -> None:
     """Real backup executor. Plan §7 steps 0..l.
 
@@ -190,7 +189,13 @@ async def _execute_pan_backup_impl(
             if not project_dir_str:
                 raise RuntimeError(f"Job {job_id!r} has no project_dir set")
             project_dir = Path(project_dir_str).resolve()
-            _verify_project_dir_safety(project_dir, projects_root_env)
+            # CodeX P0 unification: reuse project_cleanup safe-root whitelist
+            # via gateway/pan/_safe_paths.verify_project_dir_safe instead of
+            # the previous env-only guard that no-op'd when the env var was
+            # absent. Production now ALWAYS has DEFAULT_SAFE_PROJECT_ROOTS
+            # as fallback; AIVIDEOTRANS_PROJECTS_DIR (when set) prepends.
+            from gateway.pan._safe_paths import verify_project_dir_safe
+            verify_project_dir_safe(project_dir)
 
             access_token = decrypt_token(access_token_enc)
             client = client_factory()
@@ -440,31 +445,12 @@ async def _release_advisory_lock(conn: AsyncConnection, key: int) -> None:
         )
 
 
-def _verify_project_dir_safety(
-    project_dir: Path, projects_root_env: str = 'AIVIDEOTRANS_PROJECTS_DIR',
-) -> None:
-    """Refuse to operate on a project_dir that's NOT inside projects_root,
-    or that IS projects_root itself. Defense against config drift /
-    malformed Job.project_dir values that would let rmtree wipe the
-    wrong directory.
-
-    No-op (does NOT raise) if projects_root_env is unset — admin still
-    has to opt in to backup, so the practical lever is via env wiring.
-    """
-    root_str = os.environ.get(projects_root_env, '')
-    if not root_str:
-        return
-    projects_root = Path(root_str).resolve()
-    if project_dir == projects_root:
-        raise RuntimeError(
-            f"project_dir {project_dir} equals projects_root — refuse"
-        )
-    try:
-        project_dir.relative_to(projects_root)
-    except ValueError:
-        raise RuntimeError(
-            f"project_dir {project_dir} not inside projects_root {projects_root}"
-        )
+# NOTE: _verify_project_dir_safety was removed in favor of
+# gateway.pan._safe_paths.verify_project_dir_safe (CodeX P0 unification).
+# The new helper reuses project_cleanup._is_safe_project_dir + the same
+# DEFAULT_SAFE_PROJECT_ROOTS whitelist that TTL cleanup uses, so all
+# destructive operations across the codebase share one path-safety
+# contract instead of three reinvented ones.
 
 
 def _compute_tar_checksums(tar_path: Path) -> tuple[str, str]:

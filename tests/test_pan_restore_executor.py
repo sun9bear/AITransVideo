@@ -78,7 +78,7 @@ def test_precondition_rejects_non_archived_job(monkeypatch, tmp_path):
 
     async def _go():
         async with pan_test_engine() as engine:
-            project = make_project_dir(tmp_path, job_id=job_id)
+            project = make_project_dir(tmp_path, job_id=job_id, monkeypatch=monkeypatch)
             await insert_sample_job(
                 engine, user_id=user_id, job_id=job_id,
                 status='succeeded', project_dir=str(project),
@@ -192,7 +192,7 @@ def test_round_trip_backup_then_restore(monkeypatch, tmp_path):
     import shutil
 
     # Capture original snapshot before backup.
-    project = make_project_dir(tmp_path, job_id=job_id)
+    project = make_project_dir(tmp_path, job_id=job_id, monkeypatch=monkeypatch)
     original_snapshot = _snapshot_dir(project)
 
     async def _go():
@@ -245,6 +245,8 @@ def test_round_trip_chinese_filenames_and_content(monkeypatch, tmp_path):
     import shutil
 
     setup_pan_function_env_helper(monkeypatch)
+    # CodeX P0: tmp_path must be registered as a safe project root.
+    monkeypatch.setenv('AIVIDEOTRANS_PROJECTS_DIR', str(tmp_path))
     user_id = uuid.uuid4()
     job_id = 'job_unicode'
 
@@ -296,7 +298,7 @@ def test_sha256_mismatch_rolls_back_to_archived(monkeypatch, tmp_path):
     user_id = uuid.uuid4()
     job_id = 'job_sha_drift'
 
-    project = make_project_dir(tmp_path, job_id=job_id)
+    project = make_project_dir(tmp_path, job_id=job_id, monkeypatch=monkeypatch)
 
     async def _go():
         async with pan_test_engine() as engine:
@@ -351,7 +353,7 @@ def test_status_rolls_back_on_inventory_verify_failure(monkeypatch, tmp_path):
     setup_pan_token_env(monkeypatch)
     user_id = uuid.uuid4()
     job_id = 'job_inv_fail'
-    project = make_project_dir(tmp_path, job_id=job_id)
+    project = make_project_dir(tmp_path, job_id=job_id, monkeypatch=monkeypatch)
 
     # Patch _verify_inventory to raise.
     from gateway.pan import restore_executor as re_mod
@@ -403,7 +405,7 @@ def test_status_rolls_back_on_download_failure(monkeypatch, tmp_path):
     setup_pan_token_env(monkeypatch)
     user_id = uuid.uuid4()
     job_id = 'job_dl_fail'
-    project = make_project_dir(tmp_path, job_id=job_id)
+    project = make_project_dir(tmp_path, job_id=job_id, monkeypatch=monkeypatch)
 
     async def _go():
         async with pan_test_engine() as engine:
@@ -452,7 +454,7 @@ def test_restore_picks_latest_uploaded_backup_record(monkeypatch, tmp_path):
     user_id = uuid.uuid4()
     job_id = 'job_multi_br'
 
-    project = make_project_dir(tmp_path, job_id=job_id)
+    project = make_project_dir(tmp_path, job_id=job_id, monkeypatch=monkeypatch)
     original_snapshot = _snapshot_dir(project)
 
     async def _go():
@@ -510,7 +512,7 @@ def test_restore_flips_backup_record_status_to_restored(monkeypatch, tmp_path):
     user_id = uuid.uuid4()
     job_id = 'job_br_lifecycle'
 
-    project = make_project_dir(tmp_path, job_id=job_id)
+    project = make_project_dir(tmp_path, job_id=job_id, monkeypatch=monkeypatch)
 
     async def _go():
         async with pan_test_engine() as engine:
@@ -561,7 +563,7 @@ def test_restore_reverts_backup_record_to_uploaded_on_failure(monkeypatch, tmp_p
     user_id = uuid.uuid4()
     job_id = 'job_br_revert'
 
-    project = make_project_dir(tmp_path, job_id=job_id)
+    project = make_project_dir(tmp_path, job_id=job_id, monkeypatch=monkeypatch)
 
     async def _go():
         async with pan_test_engine() as engine:
@@ -610,6 +612,8 @@ def test_default_staging_root_is_next_to_project_dir(monkeypatch, tmp_path):
     # Project_dir parent dir must exist for staging sibling to land.
     projects_root = tmp_path / 'projects'
     projects_root.mkdir()
+    # CodeX P0: register projects_root so verify_project_dir_safe accepts it.
+    monkeypatch.setenv('AIVIDEOTRANS_PROJECTS_DIR', str(projects_root))
     project = make_project_dir(projects_root, job_id=job_id)
 
     captured_staging: list[Path] = []
@@ -656,6 +660,43 @@ def test_default_staging_root_is_next_to_project_dir(monkeypatch, tmp_path):
     run_async(_go())
 
 
+def test_restore_refuses_when_project_dir_outside_safe_root(monkeypatch, tmp_path):
+    """CodeX P0: restore MUST refuse if Job.project_dir is not under any
+    safe root, even when AIVIDEOTRANS_PROJECTS_DIR is unset (production
+    defaults to /opt/aivideotrans/{data,app}/projects). Same guard as
+    backup + residue_cleanup."""
+    from models import Job, BackupRecord
+    import shutil
+
+    setup_pan_token_env(monkeypatch)
+    # Do NOT set AIVIDEOTRANS_PROJECTS_DIR — tmp_path is outside defaults.
+    user_id = uuid.uuid4()
+    job_id = 'job_restore_unsafe'
+
+    # Insert minimal state for restore precondition checks.
+    async def _go():
+        async with pan_test_engine() as engine:
+            await insert_sample_job(
+                engine, user_id=user_id, job_id=job_id,
+                status='archived',
+                project_dir=str(tmp_path / 'rogue_dir'),
+            )
+            await insert_sample_pan_credentials(engine, user_id=user_id)
+            await insert_sample_backup_record(
+                engine, user_id=user_id, job_id=job_id, status='uploaded',
+            )
+
+            client = FakeBaiduPanClient()
+            with pytest.raises(RuntimeError, match='not under any safe root'):
+                await _run_restore(
+                    {'job_id': job_id, 'user_id': str(user_id)},
+                    engine=engine, client=client,
+                    staging_root=tmp_path / '_staging',
+                )
+
+    run_async(_go())
+
+
 def test_move_into_place_refuses_when_project_dir_exists(tmp_path):
     """CodeX P1-2: refuse to overwrite an existing project_dir. Forces
     operator inspection rather than blindly destroying state."""
@@ -687,7 +728,7 @@ def test_restore_rejects_mismatched_edit_generation(monkeypatch, tmp_path):
     user_id = uuid.uuid4()
     job_id = 'job_gen_mismatch'
 
-    project = make_project_dir(tmp_path, job_id=job_id)
+    project = make_project_dir(tmp_path, job_id=job_id, monkeypatch=monkeypatch)
 
     async def _go():
         async with pan_test_engine() as engine:
@@ -793,7 +834,7 @@ def test_post_lock_re_read_detects_concurrent_state_change(monkeypatch, tmp_path
     setup_pan_token_env(monkeypatch)
     user_id = uuid.uuid4()
     job_id = 'job_restore_toctou'
-    project = make_project_dir(tmp_path, job_id=job_id)
+    project = make_project_dir(tmp_path, job_id=job_id, monkeypatch=monkeypatch)
 
     # restore_executor imports _acquire_advisory_lock function-locally
     # from backup_executor, so we patch the source module — the function
