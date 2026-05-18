@@ -114,14 +114,34 @@ class TestCloneCostFromRuntimePricing:
             result = _get_clone_cost_credits()
         assert result == 500
 
-    def test_no_admin_settings_import_in_pricing_endpoint(self) -> None:
-        """get_voice_selection_pricing should NOT reference admin_settings for clone cost."""
+    def test_pricing_endpoint_does_not_read_admin_settings_for_clone_cost(self) -> None:
+        """``get_voice_selection_pricing`` must use ``_get_clone_cost_credits``
+        (which reads from ``pricing_runtime``) for ``voice_clone_cost_credits``,
+        NOT from ``admin_settings``.
+
+        Phase 4 (plan 2026-05-17): the endpoint MAY read admin_settings for
+        the ``smart_pause_warning_enabled`` flag, but the clone cost path
+        must stay on the runtime pricing source. This test pins the
+        contract that admin_settings is NOT reached on the clone-cost line.
+        """
         import inspect
         from voice_selection_api import get_voice_selection_pricing
 
         source = inspect.getsource(get_voice_selection_pricing)
-        assert "load_settings" not in source
-        assert "admin_settings" not in source
+        # The clone cost line must use _get_clone_cost_credits — the
+        # runtime pricing path.
+        assert "_get_clone_cost_credits()" in source
+        # admin_settings appears ONLY for the smart_pause_warning_enabled
+        # field. Inspect that any line that mentions admin_settings is
+        # NOT also a clone-cost line.
+        for line in source.splitlines():
+            if "admin_settings" in line or "load_settings" in line:
+                # The only legitimate use of admin_settings in this
+                # endpoint is for the smart_pause_warning flag.
+                assert "clone" not in line.lower(), (
+                    "admin_settings must not be referenced on clone-cost "
+                    f"lines. Offending line: {line!r}"
+                )
 
     def test_no_admin_settings_import_for_clone_cost_in_clone_endpoint(self) -> None:
         """voice_clone_for_selection should use _get_clone_cost_credits, not admin_settings."""

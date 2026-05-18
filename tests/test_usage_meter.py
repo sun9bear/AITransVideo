@@ -182,6 +182,111 @@ def test_record_voice_reuse_is_non_billable_voice_clone_audit(tmp_path: Path) ->
     assert summary["voice_clone_count_by_provider"] == {}
 
 
+def test_record_voice_candidate_rejected_emits_non_billable_audit(tmp_path: Path) -> None:
+    """Phase 4 (plan 2026-05-17-user-voice-candidate-first §计费和审计):
+    when the pipeline offered a possible (non-strong) personal-voice
+    candidate but the user picked a different voice, write a
+    non-billable audit event so the support / dispute path can trace
+    what was offered and rejected.
+
+    Mirrors ``record_voice_reuse`` in:
+      - billable=False
+      - clone_count=0
+      - kind=voice_clone (so existing summary aggregator catches it)
+      - reuse=False (distinguishing from reuse path)
+      - user_action=rejected (plan §计费和审计 enum)
+    """
+    meter = UsageMeter(tmp_path, job_id="job-voice-candidate-reject")
+
+    meter.record_voice_candidate_rejected(
+        provider="minimax_voice_clone",
+        rejected_voice_id="vt_possible_one",
+        speaker_id="speaker_a",
+        rejected_match_confidence="weak",
+        rejected_match_reason="cross_source_named_speaker_match",
+        chosen_voice_id="moss_audio_official_zh",
+        extra={
+            "event_id": "voice_candidate_rejected:job-1:speaker_a:vt_possible_one",
+            "source_user_voice_id": "7",
+            "source_content_hash": "hash-xyz",
+            "match_scope": "cross_source_named",
+        },
+    )
+
+    event = meter.events[0]
+    assert event["kind"] == "voice_clone"
+    assert event["model"] == "voice_candidate_rejected"
+    assert event["voice_id"] == "vt_possible_one"
+    assert event["speaker_id"] == "speaker_a"
+    assert event["billable"] is False
+    assert event["clone_count"] == 0
+    assert event["reuse"] is False
+    assert event["user_action"] == "rejected"
+    assert event["rejected_voice_id"] == "vt_possible_one"
+    assert event["rejected_match_confidence"] == "weak"
+    assert event["rejected_match_reason"] == "cross_source_named_speaker_match"
+    assert event["chosen_voice_id"] == "moss_audio_official_zh"
+    assert (
+        event["billing_policy"] == "candidate_rejected_no_clone_charge"
+    )
+    # extra payload survives
+    assert event["source_user_voice_id"] == "7"
+    assert event["source_content_hash"] == "hash-xyz"
+    assert event["match_scope"] == "cross_source_named"
+    assert (
+        event["event_id"]
+        == "voice_candidate_rejected:job-1:speaker_a:vt_possible_one"
+    )
+    # Non-billable: audit event is recorded but doesn't move the
+    # billable counter. The aggregate counter still ticks (this is
+    # a voice_clone-bucketed event) so support can spot rejections
+    # easily, but the billable count stays at 0.
+    summary = meter.summarize()
+    assert summary["voice_clone_call_count"] == 1
+    assert summary["voice_clone_billable_count"] == 0
+
+
+def test_record_voice_candidate_rejected_extra_cannot_clobber_payload_invariants(tmp_path: Path) -> None:
+    """``record_voice_clone`` enforces ``if key in payload: continue``
+    so extra cannot overwrite the core voice_clone payload — billable,
+    clone_count, kind, voice_id, speaker_id, model, etc. This matches
+    the existing ``record_voice_reuse`` contract (audit fields are
+    intentionally caller-overridable on the wrapper helper, but the
+    primary event invariants are locked)."""
+    meter = UsageMeter(tmp_path, job_id="job-voice-candidate-reject-extra")
+
+    meter.record_voice_candidate_rejected(
+        provider="minimax_voice_clone",
+        rejected_voice_id="vt_possible_two",
+        speaker_id="speaker_b",
+        rejected_match_confidence="medium",
+        rejected_match_reason="same_source_other_speaker",
+        chosen_voice_id="",
+        # Attempt to spoof the core payload — must NOT succeed.
+        extra={
+            "billable": True,
+            "clone_count": 99,
+            "kind": "spoof",
+            "model": "spoof_model",
+            "voice_id": "spoofed_voice",
+            "speaker_id": "spoofed_speaker",
+            "event_id": "rej-2",
+        },
+    )
+
+    event = meter.events[0]
+    # Core voice_clone payload invariants are locked by record_voice_clone.
+    assert event["billable"] is False
+    assert event["clone_count"] == 0
+    assert event["kind"] == "voice_clone"
+    assert event["model"] == "voice_candidate_rejected"
+    assert event["voice_id"] == "vt_possible_two"
+    assert event["speaker_id"] == "speaker_b"
+    # event_id is not in the primary payload dict, so it flows through
+    # via the extra-merge and gets used as the dedup key.
+    assert event["event_id"] == "rej-2"
+
+
 # ===========================================================================
 # Phase B: record_llm extra dict + failure attempt support
 # (plan 2026-05-03 §B5)

@@ -881,6 +881,235 @@ class TestAutoVoiceReviewOrchestration:
         assert result.decisions == ()
         assert fake.calls == []
 
+    # ===================================================================
+    # Phase 4 (plan 2026-05-17-user-voice-candidate-first §Smart 弱匹配
+    # 暂停 + §推荐决策顺序 step 3) — when admin enables
+    # smart_pause_on_possible_user_voice_match, possible (weak / medium /
+    # cross-source) candidates pause Smart to voice review instead of
+    # being silently ignored. Strong match REUSED still wins before any
+    # pause check. The pause cascade mirrors quota water-mark behavior.
+    # ===================================================================
+
+    def test_possible_match_pauses_when_admin_pause_enabled(self):
+        """Plan §Phase 4 acceptance: admin toggle on + speaker has a
+        possible (non-strong) candidate → PAUSED with reason_code
+        ``possible_user_voice_match_requires_confirmation``. Provider
+        is NEVER called — pause means user confirms reuse, not new clone."""
+        from services.smart.auto_voice_review import (
+            evaluate_voice_review,
+            VoiceReviewChoice,
+            VoiceReviewOutcome,
+        )
+        from tests.fakes import FakeCloneProvider
+
+        fake = FakeCloneProvider()
+        result = evaluate_voice_review(
+            main_speakers=[self._speaker("a", sample_seconds=20.0)],
+            smart_consent={"auto_voice_clone": True},
+            clone_provider=fake,
+            voice_library_quota_remaining=100,
+            smart_decision_id_factory=self._id_factory(),
+            possible_voice_matches_by_speaker_id={
+                "a": [
+                    {
+                        "voice_id": "vt_possible_one",
+                        "label": "查理·芒格(其他视频)",
+                        "match_scope": "cross_source_named",
+                        "confidence": "weak",
+                    },
+                ],
+            },
+            admin_pause_on_possible_match=True,
+        )
+
+        assert fake.calls == [], (
+            "Possible-match pause must NOT call clone provider — pause "
+            "exists so user decides whether to reuse or clone."
+        )
+        assert result.outcome is VoiceReviewOutcome.PAUSED
+        decision = result.decisions[0]
+        assert decision.choice is VoiceReviewChoice.PAUSED
+        assert decision.reason_code == (
+            "possible_user_voice_match_requires_confirmation"
+        )
+        assert decision.metrics["possible_match_count"] == 1
+        assert decision.metrics["top_candidate_voice_id"] == "vt_possible_one"
+        assert decision.metrics["top_candidate_confidence"] == "weak"
+        assert (
+            result.pause_reason
+            == "possible_user_voice_match_requires_confirmation"
+        )
+
+    def test_possible_match_ignored_when_admin_pause_disabled(self):
+        """Plan §Phase 4 acceptance: admin toggle off (default) →
+        possible candidates are silently ignored, the pipeline continues
+        with the existing sample / quota / clone-or-preset flow. This
+        preserves Phase 3 behavior for callers that don't opt in."""
+        from services.smart.auto_voice_review import (
+            evaluate_voice_review,
+            VoiceReviewChoice,
+            VoiceReviewOutcome,
+        )
+        from tests.fakes import FakeCloneProvider
+
+        fake = FakeCloneProvider()
+        result = evaluate_voice_review(
+            main_speakers=[self._speaker("a", sample_seconds=20.0)],
+            smart_consent={"auto_voice_clone": True},
+            clone_provider=fake,
+            voice_library_quota_remaining=100,
+            smart_decision_id_factory=self._id_factory(),
+            possible_voice_matches_by_speaker_id={
+                "a": [
+                    {
+                        "voice_id": "vt_possible_one",
+                        "label": "查理·芒格(其他视频)",
+                        "match_scope": "cross_source_named",
+                        "confidence": "weak",
+                    },
+                ],
+            },
+            # admin_pause_on_possible_match defaults to False — explicit
+            # for clarity, but the default must preserve Phase 3 flow.
+            admin_pause_on_possible_match=False,
+        )
+
+        # Pause toggle off → existing clone path proceeds normally.
+        assert result.outcome is VoiceReviewOutcome.AUTO_APPROVED
+        assert len(fake.calls) == 1
+        assert result.decisions[0].choice is VoiceReviewChoice.CLONED
+
+    def test_strong_match_still_reuses_even_with_possible_pause_enabled(self):
+        """Plan §核心不变量: strong match REUSED runs BEFORE the possible-
+        match pause check. A speaker with both a strong match and a
+        possible candidate must REUSE the strong one (no pause), because
+        reuse is free of paid API and the user explicitly already
+        approved this voice for this same source."""
+        from services.smart.auto_voice_review import (
+            evaluate_voice_review,
+            VoiceReviewChoice,
+            VoiceReviewExistingMatch,
+            VoiceReviewOutcome,
+        )
+        from tests.fakes import FakeCloneProvider
+
+        fake = FakeCloneProvider()
+        result = evaluate_voice_review(
+            main_speakers=[self._speaker("a", sample_seconds=20.0)],
+            smart_consent={"auto_voice_clone": True},
+            clone_provider=fake,
+            voice_library_quota_remaining=100,
+            smart_decision_id_factory=self._id_factory(),
+            existing_voice_matches_by_speaker_id={
+                "a": VoiceReviewExistingMatch(
+                    voice_id="vt_strong_match",
+                    provider_name="minimax_voice_clone",
+                    model_name="minimax_tts",
+                    confidence="strong",
+                    reason="same_source_content_hash_and_speaker_id",
+                    user_voice_id="7",
+                ),
+            },
+            possible_voice_matches_by_speaker_id={
+                # Same speaker also has a weak cross-source candidate —
+                # must be ignored because strong reuse fires first.
+                "a": [
+                    {
+                        "voice_id": "vt_other_weak",
+                        "label": "查理·芒格(其他视频)",
+                        "match_scope": "cross_source_named",
+                        "confidence": "weak",
+                    },
+                ],
+            },
+            admin_pause_on_possible_match=True,
+        )
+
+        # Strong reuse wins — no pause, no provider call.
+        assert result.outcome is VoiceReviewOutcome.AUTO_APPROVED
+        decision = result.decisions[0]
+        assert decision.choice is VoiceReviewChoice.REUSED
+        assert decision.cloned_voice_id == "vt_strong_match"
+        assert fake.calls == []
+
+    def test_possible_match_pause_propagates_to_subsequent_speakers(self):
+        """Plan §Phase 4: once possible-match pause fires for one speaker,
+        all subsequent main speakers also pause (mirrors quota water-mark
+        propagation at process.py:274). Outcome is PAUSED globally."""
+        from services.smart.auto_voice_review import (
+            evaluate_voice_review,
+            VoiceReviewChoice,
+            VoiceReviewOutcome,
+        )
+        from tests.fakes import FakeCloneProvider
+
+        fake = FakeCloneProvider()
+        result = evaluate_voice_review(
+            main_speakers=[
+                self._speaker("a", sample_seconds=20.0),
+                # speaker_b has NO possible candidate — but pause
+                # propagation still catches it.
+                self._speaker("b", sample_seconds=20.0),
+            ],
+            smart_consent={"auto_voice_clone": True},
+            clone_provider=fake,
+            voice_library_quota_remaining=100,
+            smart_decision_id_factory=self._id_factory(),
+            possible_voice_matches_by_speaker_id={
+                "a": [
+                    {
+                        "voice_id": "vt_possible_one",
+                        "label": "演讲者A(其他视频)",
+                        "match_scope": "cross_source_named",
+                        "confidence": "weak",
+                    },
+                ],
+                # speaker_b intentionally absent from this dict.
+            },
+            admin_pause_on_possible_match=True,
+        )
+
+        assert fake.calls == []
+        assert result.outcome is VoiceReviewOutcome.PAUSED
+        assert result.decisions[0].choice is VoiceReviewChoice.PAUSED
+        assert result.decisions[0].reason_code == (
+            "possible_user_voice_match_requires_confirmation"
+        )
+        # speaker_b caught in propagation cascade.
+        assert result.decisions[1].choice is VoiceReviewChoice.PAUSED
+        # Plan: propagation reason uses the "paused_after_prior_..." style
+        # so audit can distinguish trigger from cascade.
+        assert (
+            result.decisions[1].reason_code
+            == "paused_after_prior_possible_match_confirmation"
+        )
+
+    def test_possible_match_kwargs_default_preserves_phase3_behavior(self):
+        """Backward compatibility: callers that don't pass the Phase 4
+        kwargs (``possible_voice_matches_by_speaker_id`` /
+        ``admin_pause_on_possible_match``) get exactly the Phase 3 flow.
+        This protects every existing test in this file."""
+        from services.smart.auto_voice_review import (
+            evaluate_voice_review,
+            VoiceReviewChoice,
+            VoiceReviewOutcome,
+        )
+        from tests.fakes import FakeCloneProvider
+
+        fake = FakeCloneProvider()
+        # NOTE: deliberately NOT passing any Phase 4 kwargs.
+        result = evaluate_voice_review(
+            main_speakers=[self._speaker("a", sample_seconds=20.0)],
+            smart_consent={"auto_voice_clone": True},
+            clone_provider=fake,
+            voice_library_quota_remaining=100,
+            smart_decision_id_factory=self._id_factory(),
+        )
+
+        assert result.outcome is VoiceReviewOutcome.AUTO_APPROVED
+        assert len(fake.calls) == 1
+        assert result.decisions[0].choice is VoiceReviewChoice.CLONED
+
 
 # ===================================================================
 # _MiniMaxCloneAdapter call-mapping — Codex 第八轮 末段

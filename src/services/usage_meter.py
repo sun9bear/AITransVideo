@@ -283,6 +283,60 @@ class UsageMeter:
             extra=reuse_extra,
         )
 
+    def record_voice_candidate_rejected(
+        self,
+        *,
+        provider: str,
+        rejected_voice_id: str,
+        speaker_id: str = "",
+        rejected_match_confidence: str = "",
+        rejected_match_reason: str = "",
+        chosen_voice_id: str = "",
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        """Phase 4 audit (plan 2026-05-17-user-voice-candidate-first
+        §计费和审计 ``smart_possible_user_voice_match_rejected`` /
+        ``studio_user_voice_candidate_rejected``): record that the
+        pipeline offered a possible (non-strong) personal-voice
+        candidate but the user picked a different voice (official
+        catalog OR a new clone).
+
+        Non-billable (mirrors ``record_voice_reuse``): this is an
+        audit trail of the user's explicit rejection, NOT a billable
+        event. ``billing_policy`` is set to
+        ``candidate_rejected_no_clone_charge`` so the audit ledger
+        consumer can distinguish from the reuse path.
+
+        Provider arg is the personal-voice's clone provider (whatever
+        ``UserVoice.provider`` holds), not the picked voice's
+        provider, so the audit links back to the candidate that was
+        offered.
+        """
+        reject_extra: dict[str, Any] = {
+            "reuse": False,
+            "rejected_voice_id": str(rejected_voice_id or ""),
+            "rejected_match_confidence": str(rejected_match_confidence or ""),
+            "rejected_match_reason": str(rejected_match_reason or ""),
+            "chosen_voice_id": str(chosen_voice_id or ""),
+            "user_action": "rejected",
+            "billing_policy": "candidate_rejected_no_clone_charge",
+        }
+        if extra:
+            reject_extra.update(extra)
+        self.record_voice_clone(
+            provider=provider,
+            model="voice_candidate_rejected",
+            voice_id=rejected_voice_id,
+            speaker_id=speaker_id,
+            source_audio_seconds=0.0,
+            source_audio_bytes=0,
+            selected_segment_count=0,
+            clone_count=0,
+            billable=False,
+            success=True,
+            extra=reject_extra,
+        )
+
     def record_event(self, event: dict[str, Any]) -> None:
         payload = dict(event)
         event_id = str(payload.get("event_id") or uuid.uuid4().hex)

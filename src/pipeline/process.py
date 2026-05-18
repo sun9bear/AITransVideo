@@ -485,11 +485,34 @@ def _match_smart_user_voice(
     source_content_hash: str | None,
     speaker_id: str,
     speaker_name: str | None = None,
+    include_possible: bool = False,
 ) -> dict | None:
-    """Return a strong same-source user voice match for Smart reuse.
+    """Return Smart's personal-voice match envelope for one speaker.
 
-    Best-effort optimization only: failures return None so the caller can
-    continue with the existing new-clone path.
+    Phase 3 contract (``include_possible=False``, default): returns the
+    legacy single-strong-match shape — dict with keys ``voice_id`` /
+    ``provider`` / ``tts_provider`` / ``user_voice_id`` / ``confidence``
+    / ``reason``, or None when no strong match exists.
+
+    Phase 4 extension (``include_possible=True``, plan 2026-05-17 §Phase
+    1 unified candidate endpoint): switches to the
+    ``/api/internal/user-voices/candidates`` endpoint and returns a
+    structured envelope::
+
+        {
+          "auto_reuse": <legacy single-strong-match dict or None>,
+          "possible":   <list of non-strong candidate dicts>,
+        }
+
+    The auto-reuse subdict mirrors the legacy shape so the Phase 3
+    REUSED path code is identical. ``possible`` carries the
+    non-strong personal-voice candidates (medium / weak / cross-source-
+    named) for the Phase 4 pause decision. Both fields may be empty
+    (``auto_reuse=None``, ``possible=[]``) on an empty library.
+
+    Best-effort optimization only: failures return None so the caller
+    can continue with the existing new-clone path. The function MUST
+    NOT raise — Smart pipeline relies on safe fail-open behavior.
     """
     import os
     import requests  # type: ignore[import-not-found]
@@ -497,24 +520,41 @@ def _match_smart_user_voice(
     user_id = (user_id or "").strip()
     source_content_hash = (source_content_hash or "").strip()
     speaker_id = (speaker_id or "").strip()
-    if not user_id or not source_content_hash or not speaker_id:
+    if not user_id or not speaker_id:
+        return None
+    # Same-source matching requires a content hash; cross-source named
+    # matching (Phase 1 ``include_cross_source=True``) tolerates an
+    # empty hash, but only the candidates endpoint supports it. For the
+    # legacy strong-match path, hash is still required so we don't
+    # waste an HTTP call.
+    if not include_possible and not source_content_hash:
         return None
     api_key = os.environ.get("AVT_INTERNAL_API_KEY", "").strip()
     if not api_key:
         return None
+    endpoint = (
+        "/api/internal/user-voices/candidates"
+        if include_possible
+        else "/api/internal/user-voices/match"
+    )
+    payload: dict[str, Any] = {
+        "user_id": user_id,
+        "source_content_hash": source_content_hash or None,
+        "speaker_id": speaker_id,
+        "speaker_name": speaker_name or "",
+        "provider": "minimax_voice_clone",
+        "tts_provider": "minimax_tts",
+        "platform": "minimax_domestic",
+        "limit": 3,
+    }
+    if include_possible:
+        # candidates endpoint defaults include_cross_source=True; we
+        # set it explicitly so the contract is obvious at the call site.
+        payload["include_cross_source"] = True
     try:
         resp = requests.post(
-            "http://127.0.0.1:8880/api/internal/user-voices/match",
-            json={
-                "user_id": user_id,
-                "source_content_hash": source_content_hash,
-                "speaker_id": speaker_id,
-                "speaker_name": speaker_name or "",
-                "provider": "minimax_voice_clone",
-                "tts_provider": "minimax_tts",
-                "platform": "minimax_domestic",
-                "limit": 1,
-            },
+            f"http://127.0.0.1:8880{endpoint}",
+            json=payload,
             headers={"X-Internal-Key": api_key},
             timeout=3.0,
         )
@@ -523,19 +563,69 @@ def _match_smart_user_voice(
         data = resp.json()
     except Exception:
         return None
-    if not data.get("matched") or data.get("confidence") != "strong":
-        return None
-    voice = data.get("voice")
-    if not isinstance(voice, dict) or not str(voice.get("voice_id") or "").strip():
-        return None
-    return {
-        "voice_id": str(voice.get("voice_id") or "").strip(),
-        "provider": str(voice.get("provider") or "") or None,
-        "tts_provider": str(voice.get("tts_provider") or "") or None,
-        "user_voice_id": str(voice.get("id") or "") or None,
-        "confidence": str(data.get("confidence") or ""),
-        "reason": str(data.get("reason") or ""),
-    }
+
+    if not include_possible:
+        # Legacy /user-voices/match shape — preserve Phase 3 behavior.
+        if not data.get("matched") or data.get("confidence") != "strong":
+            return None
+        voice = data.get("voice")
+        if not isinstance(voice, dict) or not str(voice.get("voice_id") or "").strip():
+            return None
+        return {
+            "voice_id": str(voice.get("voice_id") or "").strip(),
+            "provider": str(voice.get("provider") or "") or None,
+            "tts_provider": str(voice.get("tts_provider") or "") or None,
+            "user_voice_id": str(voice.get("id") or "") or None,
+            "confidence": str(data.get("confidence") or ""),
+            "reason": str(data.get("reason") or ""),
+        }
+
+    # Phase 4: candidates endpoint envelope.
+    auto_reuse_voice = data.get("auto_reuse_voice")
+    auto_reuse: dict | None = None
+    if isinstance(auto_reuse_voice, dict):
+        v_id = str(auto_reuse_voice.get("voice_id") or "").strip()
+        if v_id:
+            auto_reuse = {
+                "voice_id": v_id,
+                # The candidates endpoint normalizes provider/tts_provider
+                # at match time; the public envelope only carries voice_id
+                # / label / confidence / scope / reason. Provider/tts
+                # default to the request triplet because the matcher
+                # restricts to it (provider=minimax_voice_clone +
+                # tts_provider=minimax_tts).
+                "provider": "minimax_voice_clone",
+                "tts_provider": "minimax_tts",
+                "user_voice_id": (
+                    str(auto_reuse_voice.get("user_voice_id") or "") or None
+                ),
+                "confidence": str(auto_reuse_voice.get("confidence") or ""),
+                "reason": str(auto_reuse_voice.get("reason") or ""),
+            }
+
+    raw_candidates = data.get("personal_voice_candidates") or []
+    possible: list[dict] = []
+    if isinstance(raw_candidates, list):
+        for cand in raw_candidates:
+            if not isinstance(cand, dict):
+                continue
+            # Skip strong matches in the possible list — they're the
+            # auto_reuse path. The candidates endpoint includes them
+            # in personal_voice_candidates, so filter explicitly.
+            if str(cand.get("confidence") or "") == "strong":
+                continue
+            v_id = str(cand.get("voice_id") or "").strip()
+            if not v_id:
+                continue
+            possible.append({
+                "voice_id": v_id,
+                "user_voice_id": cand.get("user_voice_id"),
+                "label": cand.get("label"),
+                "confidence": cand.get("confidence"),
+                "match_scope": cand.get("match_scope"),
+                "reason": cand.get("reason"),
+            })
+    return {"auto_reuse": auto_reuse, "possible": possible}
 
 
 def _apply_smart_reused_voice_decision(
@@ -3456,19 +3546,36 @@ class ProcessPipeline:
                     # surprise existing Smart users.
                     _smart_admin_clone_enabled = True
                     _smart_admin_reuse_enabled = True
+                    # Phase 4 (plan 2026-05-17 §Smart 弱匹配暂停): admin
+                    # toggle. Default False so existing users see no
+                    # behavior change; admin must opt in to get pauses
+                    # when possible (non-strong) candidates exist.
+                    _smart_admin_pause_on_possible = False
                     try:
                         from admin_settings import load_settings as _load_admin_settings
                         _admin = _load_admin_settings()
                         _smart_admin_clone_enabled = bool(_admin.smart_auto_clone_enabled)
                         _smart_admin_reuse_enabled = bool(_admin.smart_reuse_user_voice_enabled)
+                        _smart_admin_pause_on_possible = bool(
+                            getattr(_admin, "smart_pause_on_possible_user_voice_match", False)
+                        )
                     except Exception as _admin_exc:
                         print(
                             f"[smart] failed to load admin smart-voice policy "
-                            f"(using defaults reuse=True clone=True): "
+                            f"(using defaults reuse=True clone=True pause=False): "
                             f"{type(_admin_exc).__name__}: {_admin_exc}",
                             flush=True,
                         )
                     _smart_existing_voice_matches: dict[str, VoiceReviewExistingMatch] = {}
+                    # Phase 4 (plan 2026-05-17 §Phase 4): possible (non-strong)
+                    # candidates per speaker, used by evaluate_voice_review
+                    # to pause Smart when admin pause toggle is on. Stays
+                    # empty when the toggle is off — no waste of HTTP cycles
+                    # parsing candidates we'd ignore. Plan §候选源优先级:
+                    # reuse-disabled admin policy short-circuits the whole
+                    # candidate query, so this dict only fills when admin
+                    # reuse AND admin pause are both True.
+                    _smart_possible_voice_matches: dict[str, list[dict]] = {}
                     # Phase 3 §Consent × Admin 矩阵: reuse query is gated
                     # by admin policy ALONE, NOT consent. Consent gates
                     # new-clone (which DOES call paid provider); reuse
@@ -3481,6 +3588,16 @@ class ProcessPipeline:
                         _smart_source_hash_for_match = (
                             str(_snap("source_content_hash") or "") or None
                         )
+                        # Phase 4: when admin enabled pause on possible,
+                        # switch to the /candidates envelope which gives
+                        # us BOTH the strong match (auto_reuse) AND the
+                        # non-strong list (possible) in one HTTP call.
+                        # When pause is off, stay on the legacy /match
+                        # endpoint to keep the wire shape minimal — we'd
+                        # ignore the possible list anyway.
+                        _smart_use_candidates_endpoint = (
+                            _smart_admin_pause_on_possible
+                        )
                         for _sp in (vs_payload.get("speakers") or []):
                             if not isinstance(_sp, dict):
                                 continue
@@ -3492,29 +3609,46 @@ class ProcessPipeline:
                                 source_content_hash=_smart_source_hash_for_match,
                                 speaker_id=_sid,
                                 speaker_name=str(_sp.get("speaker_name") or "") or None,
+                                include_possible=_smart_use_candidates_endpoint,
                             )
                             if _matched_voice is None:
                                 continue
+                            # Normalize envelope: legacy /match path returns
+                            # the strong-match dict directly; /candidates
+                            # returns {"auto_reuse": ..., "possible": [...]}.
+                            if _smart_use_candidates_endpoint:
+                                _strong = _matched_voice.get("auto_reuse")
+                                _possible_list = _matched_voice.get("possible") or []
+                                if _possible_list:
+                                    _smart_possible_voice_matches[_sid] = (
+                                        list(_possible_list)
+                                    )
+                            else:
+                                _strong = _matched_voice
+                            if not isinstance(_strong, dict):
+                                continue
+                            if not str(_strong.get("voice_id") or "").strip():
+                                continue
                             _smart_existing_voice_matches[_sid] = VoiceReviewExistingMatch(
-                                voice_id=str(_matched_voice.get("voice_id") or ""),
+                                voice_id=str(_strong.get("voice_id") or ""),
                                 provider_name=(
-                                    str(_matched_voice.get("provider") or "")
+                                    str(_strong.get("provider") or "")
                                     or None
                                 ),
                                 model_name=(
-                                    str(_matched_voice.get("tts_provider") or "")
+                                    str(_strong.get("tts_provider") or "")
                                     or None
                                 ),
                                 confidence=(
-                                    str(_matched_voice.get("confidence") or "")
+                                    str(_strong.get("confidence") or "")
                                     or None
                                 ),
                                 reason=(
-                                    str(_matched_voice.get("reason") or "")
+                                    str(_strong.get("reason") or "")
                                     or None
                                 ),
                                 user_voice_id=(
-                                    str(_matched_voice.get("user_voice_id") or "")
+                                    str(_strong.get("user_voice_id") or "")
                                     or None
                                 ),
                             )
@@ -3916,7 +4050,9 @@ class ProcessPipeline:
                         voice_library_quota_remaining=_smart_quota_remaining,
                         smart_decision_id_factory=lambda: _smart_uuid.uuid4().hex,
                         existing_voice_matches_by_speaker_id=_smart_existing_voice_matches,
+                        possible_voice_matches_by_speaker_id=_smart_possible_voice_matches,
                         admin_clone_enabled=_smart_admin_clone_enabled,
+                        admin_pause_on_possible_match=_smart_admin_pause_on_possible,
                     )
 
                     if _smart_voice_review.outcome == VoiceReviewOutcome.PAUSED:
@@ -3944,6 +4080,84 @@ class ProcessPipeline:
                                 "handoff_stage": VOICE_SELECTION_REVIEW_STAGE,
                             },
                         )
+                        # Phase 4 (plan 2026-05-17 §Phase 4 验收 #4):
+                        # per-speaker audit for the possible-match
+                        # pause path. Only emits for the new Phase 4
+                        # reason codes — quota pauses already have
+                        # their own audit trail via the clone-attempt
+                        # branch above, so don't double-log those.
+                        _phase4_pause_reasons = {
+                            "possible_user_voice_match_requires_confirmation",
+                            "paused_after_prior_possible_match_confirmation",
+                        }
+                        for _paused_dec in _smart_voice_review.decisions:
+                            if _paused_dec.choice is not VoiceReviewChoice.PAUSED:
+                                continue
+                            if _paused_dec.reason_code not in _phase4_pause_reasons:
+                                continue
+                            _emit_smart_audit(
+                                final_project_dir,
+                                decision_type="voice_clone_possible_match_pause",
+                                decision="rejected",
+                                reason_code=_paused_dec.reason_code,
+                                evidence=dict(_paused_dec.metrics or {}),
+                                smart_decision_id=_paused_dec.smart_decision_id,
+                                extra={
+                                    "speaker_id": _paused_dec.speaker_id,
+                                    "job_id": str(_snap("job_id") or ""),
+                                    "user_id": str(_snap("user_id") or ""),
+                                },
+                            )
+
+                        # Phase 4 (plan 2026-05-17 §Smart 弱匹配暂停 +
+                        # §计费和审计 ``smart_possible_user_voice_match_
+                        # rejected``): write the per-speaker offered
+                        # candidate list into vs_payload BEFORE
+                        # emit_handoff_markers so that:
+                        #   - frontend can render "AI offered these
+                        #     candidates" hint banner (Phase 2 panel
+                        #     reads the candidate API directly, but a
+                        #     small marker in payload lets the UI show
+                        #     "AI 暂停了决策" hint without an extra
+                        #     fetch)
+                        #   - Gateway approve handler can detect
+                        #     rejection (user picks something else)
+                        #     and write the
+                        #     ``voice_candidate_rejected`` audit.
+                        # Only fires for the triggering speaker (the
+                        # one that holds the actual offered list);
+                        # cascade entries don't have candidates of
+                        # their own.
+                        if _smart_possible_voice_matches:
+                            vs_payload["smart_paused_reason"] = (
+                                _smart_voice_review.pause_reason
+                                or "voice_review_paused"
+                            )
+                            for _sp in (vs_payload.get("speakers") or []):
+                                if not isinstance(_sp, dict):
+                                    continue
+                                _sid = str(_sp.get("speaker_id") or "").strip()
+                                if not _sid:
+                                    continue
+                                _offered = _smart_possible_voice_matches.get(_sid)
+                                if not _offered:
+                                    continue
+                                # Drop into the speaker entry under a
+                                # clearly Smart-namespaced key so the
+                                # legacy voice_match payload stays the
+                                # source of truth for picker UI.
+                                _sp["smart_offered_candidates"] = [
+                                    {
+                                        "voice_id": _c.get("voice_id"),
+                                        "user_voice_id": _c.get("user_voice_id"),
+                                        "label": _c.get("label"),
+                                        "confidence": _c.get("confidence"),
+                                        "match_scope": _c.get("match_scope"),
+                                        "reason": _c.get("reason"),
+                                    }
+                                    for _c in _offered
+                                    if isinstance(_c, dict) and _c.get("voice_id")
+                                ]
                         emit_handoff_markers(
                             review_state_manager=review_state_manager,
                             review_stage=VOICE_SELECTION_REVIEW_STAGE,

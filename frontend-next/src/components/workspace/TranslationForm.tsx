@@ -11,6 +11,7 @@ import { getEntitlements, type UserEntitlements } from "@/lib/api/entitlements"
 import { listJobs, submitTranslationJob } from "@/lib/api/jobs"
 import { getCreditsEstimate, getMyCredits, type CreditsResponse } from "@/lib/billing/get-credits"
 import { getVoiceLibrary, type VoiceLibraryEntry } from "@/lib/api/voiceLibrary"
+import { getVoiceSelectionPricing } from "@/lib/api/voiceSelection"
 import { usePollingTask } from "@/lib/react/usePollingTask"
 import { ACTIVE_JOB_STATUSES, type JobSummary } from "@/types/jobs"
 
@@ -52,6 +53,12 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
   const [activeJobs, setActiveJobs] = useState<JobSummary[]>([])
   const [isLoadingGuard, setIsLoadingGuard] = useState(true)
   const [submitState, setSubmitState] = useState<"error" | "idle" | "submitting" | "success">("idle")
+  // Phase 4 (plan 2026-05-17-user-voice-candidate-first §Smart 弱匹配
+  // 暂停): when admin enables smart_pause_on_possible_user_voice_match,
+  // Smart jobs may pause for human confirmation if a possible
+  // personal-voice candidate is found. Surface this in the submission
+  // UI so users aren't surprised by a mid-job pause.
+  const [smartPauseWarningEnabled, setSmartPauseWarningEnabled] = useState(false)
 
   const validationError =
     sourceType === "youtube_url"
@@ -130,6 +137,15 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
         })
       })
       .catch(() => {})
+    // Phase 4: read admin smart_pause_warning_enabled off the pricing
+    // endpoint. The flag piggybacks on this endpoint to avoid a new
+    // public admin-policy endpoint. Defaults to false (no warning)
+    // if the field is absent or the call fails.
+    getVoiceSelectionPricing()
+      .then((pricing) => {
+        setSmartPauseWarningEnabled(Boolean(pricing.smart_pause_warning_enabled))
+      })
+      .catch(() => setSmartPauseWarningEnabled(false))
   }, [])
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -502,6 +518,29 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
               </p>
             )}
           </section>
+
+          {/* Phase 4 (plan 2026-05-17-user-voice-candidate-first §Smart 弱匹配暂停):
+              warn the user when admin has enabled the "weak match confirmation"
+              mode and they're picking Smart. Without this, a Smart job that
+              hits a possible (non-strong) personal voice candidate would
+              pause for human confirmation and surprise the user who expected
+              full automation. */}
+          {serviceMode === "smart" && smartPauseWarningEnabled ? (
+            <section
+              className="rounded-xl border p-4 text-xs leading-relaxed"
+              style={{
+                backgroundColor: "color-mix(in oklab, var(--amber-500, #f59e0b) 8%, transparent)",
+                borderColor: "color-mix(in oklab, var(--amber-500, #f59e0b) 40%, transparent)",
+                color: "var(--foreground)",
+              }}
+              role="status"
+            >
+              <p className="font-medium">弱匹配确认模式已开启</p>
+              <p className="mt-1 text-muted-foreground">
+                管理员已开启“弱匹配确认”策略：如果系统在你的个人音色库中发现可能匹配的音色（但相似度不够强），任务会暂停在音色审核页面，等你确认是否复用，再继续后续步骤。复用个人音色不消耗克隆点；如果不想复用，可以选择官方音色或重新克隆。
+              </p>
+            </section>
+          ) : null}
 
           {/* Advanced options (转录方案 / 说话人数) — temporarily hidden per
               user request: 目前暂时用不到. The selects stay mounted so their

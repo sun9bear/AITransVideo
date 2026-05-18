@@ -2163,6 +2163,84 @@ class TestB3DCloneSampleExtractorContract:
             f"Between:\n{between}"
         )
 
+    def test_phase4_admin_pause_threaded_into_evaluate_voice_review(self):
+        """Phase 4 (plan 2026-05-17 §Phase 4 + §Smart 弱匹配暂停):
+        process.py must:
+          1. Read ``smart_pause_on_possible_user_voice_match`` from
+             admin_settings into ``_smart_admin_pause_on_possible``
+             (default False).
+          2. Pass both ``possible_voice_matches_by_speaker_id`` and
+             ``admin_pause_on_possible_match`` kwargs to
+             ``evaluate_voice_review``.
+          3. When admin pause is on AND admin reuse is on, switch the
+             ``_match_smart_user_voice`` call to ``include_possible=True``
+             so the /candidates endpoint replaces /match — required to
+             surface non-strong candidates.
+
+        Without this threading, a Smart job would NEVER pause on a
+        possible match because the orchestrator runs with empty defaults.
+        Source-level pinning so a refactor that drops any of these
+        wires fails immediately."""
+        from pathlib import Path
+
+        src = Path(__file__).resolve().parents[1] / "src" / "pipeline" / "process.py"
+        source = src.read_text(encoding="utf-8")
+        idx = source.find("Smart inline auto-approve path")
+        assert idx >= 0
+        lines = source[idx:].splitlines()
+        block = "\n".join(lines[:1500])
+
+        # Anchor 1: admin field is loaded with a fail-closed default.
+        assert "_smart_admin_pause_on_possible = False" in block, (
+            "Phase 4: process.py must initialize "
+            "_smart_admin_pause_on_possible = False before reading "
+            "admin_settings so a missing/corrupt JSON keeps Smart in "
+            "the legacy (no surprise pause) behavior.\n"
+            f"Block (first 4000 chars):\n{block[:4000]}"
+        )
+        # Anchor 2: the admin field name is read off the settings object.
+        assert "smart_pause_on_possible_user_voice_match" in block, (
+            "Phase 4: process.py must read AdminSettings."
+            "smart_pause_on_possible_user_voice_match to honor the "
+            "admin pause toggle."
+        )
+
+        # Anchor 3: evaluate_voice_review receives both Phase 4 kwargs.
+        # Search the exact kwarg lines used at the call site so any
+        # refactor that drops them fails this guard.
+        assert (
+            "possible_voice_matches_by_speaker_id=_smart_possible_voice_matches"
+            in block
+        ), (
+            "Phase 4: evaluate_voice_review call must receive "
+            "possible_voice_matches_by_speaker_id="
+            "_smart_possible_voice_matches. Without it, "
+            "evaluate_voice_review can't see the candidate list and "
+            "the pause never fires.\n"
+            f"Block (first 4000 chars):\n{block[:4000]}"
+        )
+        assert (
+            "admin_pause_on_possible_match=_smart_admin_pause_on_possible"
+            in block
+        ), (
+            "Phase 4: evaluate_voice_review call must receive "
+            "admin_pause_on_possible_match=_smart_admin_pause_on_possible. "
+            "Without it, the admin toggle is silently ignored.\n"
+            f"Block (first 4000 chars):\n{block[:4000]}"
+        )
+
+        # Anchor 4: the matcher call must include the include_possible
+        # flag (wired off the admin pause toggle) so the candidates
+        # endpoint is queried when admin opts in. The legacy /match
+        # endpoint only returns strong matches and is structurally
+        # incapable of carrying the possible list.
+        assert "include_possible=" in block, (
+            "Phase 4: _match_smart_user_voice call must pass "
+            "include_possible=<flag> to switch to the /candidates "
+            "endpoint when admin enabled the pause toggle.\n"
+            f"Block (first 4000 chars):\n{block[:4000]}"
+        )
+
     def test_b3e_fix2_empty_main_speakers_short_circuits_in_evaluate(self):
         """Functional: evaluate_voice_review with main_speakers=[]
         returns AUTO_APPROVED + empty decisions WITHOUT invoking the
@@ -2213,7 +2291,11 @@ class TestB3DCloneSampleExtractorContract:
         idx = source.find("Smart inline auto-approve path")
         assert idx >= 0
         lines = source[idx:].splitlines()
-        block = "\n".join(lines[:900])
+        # Phase 4 (2026-05-17) added per-speaker possible-match pause
+        # audit loop + admin policy read, pushing the CLONED branch
+        # past the previous 900-line window. Bumped to 1100 to keep
+        # covering the mirror call without inflating it indefinitely.
+        block = "\n".join(lines[:1100])
 
         # Mirror helper is called from process.py
         assert "_register_smart_clone_in_user_voices(" in block, (
@@ -2430,7 +2512,9 @@ class TestB3DCloneSampleExtractorContract:
         idx = source.find("Smart inline auto-approve path")
         assert idx >= 0
         lines = source[idx:].splitlines()
-        block = "\n".join(lines[:900])
+        # Phase 4 (2026-05-17): see test_b3e_fix_clone_decision_processing_calls_mirror
+        # for the window-bump rationale.
+        block = "\n".join(lines[:1100])
 
         # Locate the CLONED branch in the decision-processing loop.
         cloned_idx = block.find(

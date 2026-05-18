@@ -2262,6 +2262,182 @@ async def _record_voice_reuse_events(
             )
 
 
+async def _record_voice_candidate_rejection_events(
+    db: AsyncSession,
+    *,
+    job: Job,
+    speakers: list[dict],
+) -> None:
+    """Phase 4 (plan 2026-05-17-user-voice-candidate-first §计费和审计
+    ``smart_possible_user_voice_match_rejected``): when Smart pipeline
+    paused with a possible (non-strong) personal-voice candidate, and
+    the user picked a different voice (official catalog or new clone),
+    write a non-billable audit event so support / dispute review can
+    trace what was offered vs picked.
+
+    Detection rule: per speaker, look up ``smart_offered_candidates``
+    in the review_state.json voice_selection_review payload (written
+    by the pipeline at pause time). For each offered candidate whose
+    ``voice_id`` differs from the picked voice ``sp.get("voice_id")``
+    AND the speaker is NOT marked ``voice_reuse: true``, emit the
+    rejection event.
+
+    Skips:
+      - speakers with ``voice_reuse=true``: that's the confirmation
+        path, audited by ``_record_voice_reuse_events`` instead.
+      - speakers without offered candidates: there's nothing to
+        "reject" against.
+      - missing project_dir / missing review_state.json: best-effort,
+        log and bail.
+    """
+    if not speakers or not job.user_id:
+        return
+
+    snap = dict(job.metering_snapshot or {})
+    project_dir_raw = str(snap.get("project_dir") or "").strip()
+    if not project_dir_raw:
+        return
+
+    # Read offered candidates from review_state.json — pipeline wrote
+    # them under voice_selection_review.payload.speakers[].smart_offered_candidates
+    # at pause time (process.py Phase 4 mutation).
+    try:
+        from services.review_state import (
+            VOICE_SELECTION_REVIEW_STAGE,
+            ReviewStateManager,
+        )
+        review_state_path = Path(project_dir_raw) / "review_state.json"
+        if not review_state_path.exists():
+            return
+        manager = ReviewStateManager(review_state_path)
+        stage = manager.get_stage(VOICE_SELECTION_REVIEW_STAGE)
+    except Exception:
+        logger.warning(
+            "voice candidate rejection audit: failed to load review_state for %s",
+            job.job_id, exc_info=True,
+        )
+        return
+    if not stage:
+        return
+    payload = stage.get("payload") or {}
+    if not isinstance(payload, dict):
+        return
+    offered_speakers = payload.get("speakers")
+    if not isinstance(offered_speakers, list):
+        return
+    offered_by_speaker_id: dict[str, list[dict]] = {}
+    for offered_sp in offered_speakers:
+        if not isinstance(offered_sp, dict):
+            continue
+        sid = str(offered_sp.get("speaker_id") or "").strip()
+        candidates = offered_sp.get("smart_offered_candidates")
+        if not sid or not isinstance(candidates, list) or not candidates:
+            continue
+        offered_by_speaker_id[sid] = [c for c in candidates if isinstance(c, dict)]
+    if not offered_by_speaker_id:
+        return
+
+    try:
+        from services.usage_meter import UsageMeter
+        meter = UsageMeter(Path(project_dir_raw), job_id=job.job_id)
+    except Exception:
+        logger.warning(
+            "voice candidate rejection audit skipped for %s: UsageMeter unavailable",
+            job.job_id, exc_info=True,
+        )
+        return
+
+    existing_event_ids = {str(event.get("event_id") or "") for event in meter.events}
+    for sp in speakers:
+        if not isinstance(sp, dict):
+            continue
+        # Skip reuse path — that's already audited.
+        if sp.get("voice_reuse") is True:
+            continue
+        speaker_id = str(sp.get("speaker_id") or "").strip()
+        chosen_voice_id = str(sp.get("voice_id") or "").strip()
+        if not speaker_id:
+            continue
+        offered = offered_by_speaker_id.get(speaker_id)
+        if not offered:
+            continue
+        for offered_candidate in offered:
+            offered_voice_id = str(offered_candidate.get("voice_id") or "").strip()
+            if not offered_voice_id:
+                continue
+            # If the chosen voice IS one of the offered candidates,
+            # this is a confirmation, not a rejection. The
+            # voice_reuse=true short-circuit above should already
+            # have caught it, but defensively guard here too.
+            if chosen_voice_id and chosen_voice_id == offered_voice_id:
+                continue
+            event_id = (
+                f"voice_candidate_rejected:{job.job_id}:"
+                f"{speaker_id}:{offered_voice_id}"
+            )
+            if event_id in existing_event_ids:
+                continue
+            try:
+                result = await db.execute(
+                    select(UserVoice).where(
+                        UserVoice.user_id == job.user_id,
+                        UserVoice.voice_id == offered_voice_id,
+                        UserVoice.expired_at.is_(None),
+                    )
+                )
+                user_voice = result.scalar_one_or_none()
+                # If the voice has since been deleted, still emit the
+                # audit (provider falls back to the offered metadata),
+                # because the rejection happened and we want the
+                # ledger record. Plan §计费和审计: the event records
+                # the user_action, not the voice's continued existence.
+                provider = (
+                    user_voice.provider if user_voice is not None
+                    else "minimax_voice_clone"
+                )
+                meter.record_voice_candidate_rejected(
+                    provider=provider,
+                    rejected_voice_id=offered_voice_id,
+                    speaker_id=speaker_id,
+                    rejected_match_confidence=str(
+                        offered_candidate.get("confidence") or ""
+                    ),
+                    rejected_match_reason=str(
+                        offered_candidate.get("reason")
+                        or offered_candidate.get("match_scope")
+                        or ""
+                    ),
+                    chosen_voice_id=chosen_voice_id,
+                    extra={
+                        "event_id": event_id,
+                        "match_scope": offered_candidate.get("match_scope"),
+                        "source_user_voice_id": str(
+                            user_voice.id if user_voice is not None
+                            else offered_candidate.get("user_voice_id") or ""
+                        ),
+                        "source_content_hash": (
+                            getattr(user_voice, "source_content_hash", None)
+                            if user_voice is not None
+                            else None
+                        ),
+                        "source_speaker_id": (
+                            getattr(user_voice, "source_speaker_id", None)
+                            if user_voice is not None
+                            else None
+                        ),
+                    },
+                )
+                existing_event_ids.add(event_id)
+            except Exception:
+                logger.warning(
+                    "voice candidate rejection audit failed for %s/%s/%s",
+                    job.job_id,
+                    speaker_id,
+                    offered_voice_id,
+                    exc_info=True,
+                )
+
+
 async def _approve_voice_selection_with_quality_sync(
     request: Request,
     job_id: str,
@@ -2403,6 +2579,14 @@ async def _approve_voice_selection_with_quality_sync(
         job.metering_snapshot = snap
 
         await _record_voice_reuse_events(db, job=job, speakers=speakers)
+        # Phase 4 (plan 2026-05-17-user-voice-candidate-first §计费和审计
+        # ``smart_possible_user_voice_match_rejected``): when Smart
+        # paused on a possible candidate and the user picked a
+        # different voice, write a non-billable audit event. This is
+        # the sibling of voice_reuse audit on the rejection branch.
+        await _record_voice_candidate_rejection_events(
+            db, job=job, speakers=speakers,
+        )
 
         # Only overwrite tts_model when a minimax speaker explicitly chose
         # turbo/hd. For jobs using only CosyVoice/VolcEngine, keep whatever

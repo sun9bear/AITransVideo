@@ -197,10 +197,12 @@ def evaluate_voice_review(
     voice_library_quota_remaining: int,
     smart_decision_id_factory: Callable[[], str],
     existing_voice_matches_by_speaker_id: Mapping[str, VoiceReviewExistingMatch] | None = None,
+    possible_voice_matches_by_speaker_id: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
     quota_safety_water_mark: int = DEFAULT_QUOTA_SAFETY_WATER_MARK,
     min_sample_seconds: float = MIN_SAMPLE_SECONDS,
     max_clone_attempts_per_speaker: int = DEFAULT_MAX_CLONE_ATTEMPTS,
     admin_clone_enabled: bool = True,
+    admin_pause_on_possible_match: bool = False,
 ) -> VoiceReviewResult:
     """Orchestrate the per-main-speaker auto voice decision.
 
@@ -223,6 +225,23 @@ def evaluate_voice_review(
         PRESET. Defaults to True to preserve legacy 1-axis behavior for
         callers that don't pass the kwarg. Strong-match REUSED decisions
         are unaffected (plan §核心不变量).
+      possible_voice_matches_by_speaker_id: Phase 4 (plan 2026-05-17 §Smart
+        弱匹配暂停 + §推荐决策顺序 step 3) — per-speaker list of
+        non-strong personal-voice candidate dicts (medium / weak /
+        cross-source-named). Each dict should carry at least
+        ``voice_id`` / ``label`` / ``match_scope`` / ``confidence`` —
+        used for the audit metrics on pause decisions. Defaults to
+        empty so Phase 3 callers see no behavior change.
+      admin_pause_on_possible_match: Phase 4 admin policy switch. When
+        True AND a speaker has any entry in
+        ``possible_voice_matches_by_speaker_id``, that speaker (and all
+        subsequent ones via propagation) pauses with reason_code
+        ``possible_user_voice_match_requires_confirmation`` so the user
+        can confirm reuse vs new clone. Defaults to False so existing
+        Smart users don't get surprise pauses (matches admin_settings
+        default ``smart_pause_on_possible_user_voice_match=False``).
+        Strong-match REUSED decisions still run BEFORE this check —
+        the pause only fires for speakers without a strong match.
 
     Returns:
       VoiceReviewResult capturing top-level outcome + per-speaker
@@ -261,7 +280,23 @@ def evaluate_voice_review(
     quota_remaining = voice_library_quota_remaining
     paused_after_speaker: bool = False
     pause_reason: str | None = None
+    # Track what kind of pause first fired so the propagation cascade
+    # can use a reason_code that links each downstream speaker to the
+    # triggering cause (mirrors plan §Phase 4 — distinct propagation
+    # reason for possible-match pause vs the original quota pause).
+    pause_propagation_reason: str = "paused_after_prior_quota_exhaust"
     existing_voice_matches = dict(existing_voice_matches_by_speaker_id or {})
+    # Phase 4 (plan 2026-05-17 §推荐决策顺序 step 3) — normalize the
+    # possible-candidates map: copy + skip falsy entries so an upstream
+    # ``{"a": []}`` doesn't masquerade as "speaker_a has candidates".
+    possible_voice_matches: dict[str, list[Mapping[str, Any]]] = {}
+    if possible_voice_matches_by_speaker_id:
+        for _spk_id, _candidates in possible_voice_matches_by_speaker_id.items():
+            if not _candidates:
+                continue
+            _filtered = [c for c in _candidates if c]
+            if _filtered:
+                possible_voice_matches[_spk_id] = _filtered
 
     for speaker in main_speakers:
         # Once we hit a hard pause condition, all remaining speakers
@@ -273,7 +308,7 @@ def evaluate_voice_review(
         # the original triggering cause for the integration layer.
         if paused_after_speaker:
             decisions.append(_paused_decision(
-                speaker, "paused_after_prior_quota_exhaust",
+                speaker, pause_propagation_reason,
                 smart_decision_id_factory()
             ))
             continue
@@ -291,6 +326,52 @@ def evaluate_voice_review(
                 smart_decision_id_factory(),
             ))
             continue
+
+        # Phase 4 (plan 2026-05-17 §推荐决策顺序 step 3) — possible-match
+        # pause runs AFTER strong-match REUSED but BEFORE the new-clone
+        # gates and any provider call. When admin enables
+        # smart_pause_on_possible_user_voice_match AND this speaker has
+        # any non-strong candidate (medium / weak / cross-source-named),
+        # pause the WHOLE job to voice review so the user can confirm
+        # reuse vs new clone. Cascade to subsequent speakers via the
+        # same propagation mechanism as the quota water mark.
+        #
+        # Critical invariants:
+        #   - Strong REUSED still wins (the ``existing_match`` block
+        #     above ``continue``s before we reach here).
+        #   - Provider is NEVER called on this path — pause means the
+        #     user decides. CLAUDE.md §付费 API 不能自动调用 satisfied
+        #     by skipping the clone attempt entirely.
+        #   - admin_pause_on_possible_match defaults False so existing
+        #     Smart users see no behavior change.
+        if admin_pause_on_possible_match:
+            speaker_possible = possible_voice_matches.get(speaker.speaker_id)
+            if speaker_possible:
+                top_candidate = speaker_possible[0] or {}
+                pause_metrics: dict[str, Any] = {
+                    "possible_match_count": len(speaker_possible),
+                    "top_candidate_voice_id": top_candidate.get("voice_id"),
+                    "top_candidate_label": top_candidate.get("label"),
+                    "top_candidate_match_scope": top_candidate.get("match_scope"),
+                    "top_candidate_confidence": top_candidate.get("confidence"),
+                }
+                paused_after_speaker = True
+                pause_reason = (
+                    "possible_user_voice_match_requires_confirmation"
+                )
+                # Distinct propagation reason so audit can tell cascade
+                # entries from the triggering speaker (parallels the
+                # quota-exhaust propagation pattern below).
+                pause_propagation_reason = (
+                    "paused_after_prior_possible_match_confirmation"
+                )
+                decisions.append(_paused_decision(
+                    speaker,
+                    pause_reason,
+                    smart_decision_id_factory(),
+                    metrics=pause_metrics,
+                ))
+                continue
 
         # Rule 1 (Phase 3): new clone blocked by consent and/or admin.
         # No existing match means we'd need a new clone, which is what

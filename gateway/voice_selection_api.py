@@ -331,10 +331,33 @@ async def get_voice_selection_pricing(
 
     Values come from Gateway truth sources (pricing_runtime + DEBIT_RATES),
     never from frontend hardcoded constants.
+
+    Phase 4 (plan 2026-05-17-user-voice-candidate-first §Smart 弱匹配
+    暂停): includes ``smart_pause_warning_enabled`` so the Smart job
+    submission UI can show a banner when admin has enabled the weak-
+    match pause mode (otherwise users would be surprised by a mid-job
+    pause). The flag is read-only — admin still mutates via the admin
+    endpoints. Failing closed: any load error reads as False (no
+    warning), which is the safer default than spurious warnings.
     """
     from credits_service import _get_runtime_debit_rates
 
     rates = _get_runtime_debit_rates()
+    smart_pause_warning_enabled = False
+    try:
+        from admin_settings import load_settings as _load_admin_settings
+        _admin = _load_admin_settings()
+        smart_pause_warning_enabled = bool(
+            getattr(_admin, "smart_pause_on_possible_user_voice_match", False)
+        )
+    except Exception:
+        # Best-effort — log via fall-through to default False. Don't
+        # break the pricing endpoint over an admin-policy read failure.
+        logger.warning(
+            "voice-selection/pricing: failed to read admin smart_pause "
+            "policy; defaulting smart_pause_warning_enabled=False",
+            exc_info=True,
+        )
     return {
         "service_mode": "studio",
         "credits_per_minute": {
@@ -344,6 +367,7 @@ async def get_voice_selection_pricing(
             "minimax_hd": rates.get(("studio", "flagship"), 50),
         },
         "voice_clone_cost_credits": _get_clone_cost_credits(),
+        "smart_pause_warning_enabled": smart_pause_warning_enabled,
     }
 
 
