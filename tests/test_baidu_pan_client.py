@@ -807,3 +807,133 @@ def test_get_dlink_raises_when_no_metadata(monkeypatch):
     c = BaiduPanClient(appkey='ak', appsecret='as')
     with pytest.raises(RuntimeError, match='No metadata returned'):
         c._get_dlink('/nonexistent.tar.gz', access_token='at')
+
+
+# --- T3.8: streaming download ---
+
+
+def test_download_streams_to_local(monkeypatch, tmp_path):
+    """Happy path: dlink → stream chunks → write file → return size+sha256."""
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+    import requests
+
+    dst = tmp_path / 'downloaded.tar.gz'
+    test_content = b'TARGZ_CONTENT' * 1000  # 13000 bytes
+
+    class StreamResponse:
+        status_code = 200
+        headers: dict = {}
+
+        def iter_content(self, chunk_size):
+            # Yield in two chunks to exercise the loop.
+            half = len(test_content) // 2
+            yield test_content[:half]
+            yield test_content[half:]
+
+        def raise_for_status(self):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def mock_get(url, params=None, headers=None, stream=False, **kw):
+        if 'multimedia' in url:
+            class JR:
+                status_code = 200
+
+                def json(self):
+                    return {'list': [{'dlink': 'https://example.com/file?token=x'}]}
+
+                def raise_for_status(self):
+                    pass
+            return JR()
+        # actual dlink GET — must be the context manager response.
+        return StreamResponse()
+
+    monkeypatch.setattr(requests, 'get', mock_get)
+
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    result = c.download('/apps/AIVideoTrans/backups/test.tar.gz', dst, access_token='at')
+
+    assert dst.read_bytes() == test_content
+    assert result['size'] == len(test_content)
+
+    import hashlib as _h
+    expected_sha = _h.sha256(test_content).hexdigest()
+    assert result['sha256'] == expected_sha
+    assert result['md5'] == ''  # caller responsibility per docstring
+
+
+def test_download_handles_empty_chunks_in_stream(monkeypatch, tmp_path):
+    """If iter_content yields empty bytes between data chunks, ignore them."""
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+    import requests
+
+    dst = tmp_path / 'out.bin'
+    payload = b'HELLO_WORLD' * 50
+
+    class StreamResponse:
+        status_code = 200
+        headers: dict = {}
+
+        def iter_content(self, chunk_size):
+            yield b''
+            yield payload
+            yield b''
+
+        def raise_for_status(self):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def mock_get(url, params=None, headers=None, stream=False, **kw):
+        if 'multimedia' in url:
+            class JR:
+                status_code = 200
+
+                def json(self):
+                    return {'list': [{'dlink': 'https://example.com/file'}]}
+
+                def raise_for_status(self):
+                    pass
+            return JR()
+        return StreamResponse()
+
+    monkeypatch.setattr(requests, 'get', mock_get)
+
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    result = c.download('/x.bin', dst, access_token='at')
+    assert dst.read_bytes() == payload
+    assert result['size'] == len(payload)
+
+
+def test_download_propagates_dlink_failure(monkeypatch, tmp_path):
+    """If _get_dlink raises (empty metadata), download propagates."""
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+    import requests
+
+    def mock_get(url, params=None, **kw):
+        class R:
+            status_code = 200
+
+            def json(self):
+                return {'list': []}  # no items
+
+            def raise_for_status(self):
+                pass
+        return R()
+
+    monkeypatch.setattr(requests, 'get', mock_get)
+
+    dst = tmp_path / 'never.bin'
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    with pytest.raises(RuntimeError, match='No metadata returned'):
+        c.download('/gone.tar.gz', dst, access_token='at')
+    assert not dst.exists()

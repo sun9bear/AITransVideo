@@ -193,7 +193,26 @@ class BaiduPanClient:
         return resp.content == local_tail
 
     def download(self, remote_path: str, local_path: Path, *, access_token: str) -> dict:
-        raise NotImplementedError("T3.8")
+        """Stream download to local_path. Computes sha256 + size locally.
+
+        Returns {size, sha256, md5} — md5 left empty (server doesn't include
+        it in the streamed body); caller verifies against the value stored
+        in BackupRecord at upload time.
+        """
+        dlink = self._get_dlink(remote_path, access_token)
+
+        sha = hashlib.sha256()
+        size = 0
+        with requests.get(dlink, stream=True, timeout=300) as r:
+            r.raise_for_status()
+            with local_path.open('wb') as f:
+                for chunk in r.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
+                        sha.update(chunk)
+                        size += len(chunk)
+
+        return {'size': size, 'sha256': sha.hexdigest(), 'md5': ''}  # md5 由 caller 验
 
     def list(self, prefix: str, *, access_token: str) -> list[dict]:
         """List files under prefix. Pagination not supported in MVP — assume single page."""
