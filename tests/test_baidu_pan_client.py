@@ -349,3 +349,81 @@ def test_get_quota_default_zero_when_missing(monkeypatch):
     c = BaiduPanClient(appkey='ak', appsecret='as')
     q = c.get_quota(access_token='at')
     assert q == {'total': 0, 'used': 0, 'free': 0}
+
+
+# --- T3.5: delete (idempotent on errno -9) ---
+
+
+def test_delete_calls_filemanager_delete(monkeypatch):
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+    import requests
+
+    calls = []
+
+    def mock_post(url, params=None, data=None, **kw):
+        calls.append((url, params, data))
+
+        class R:
+            status_code = 200
+
+            def json(self):
+                return {'errno': 0}
+
+            def raise_for_status(self):
+                pass
+
+        return R()
+
+    monkeypatch.setattr(requests, 'post', mock_post)
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    c.delete('/apps/AIVideoTrans/backups/job_x.tar.gz', access_token='at')
+    url, params, data = calls[0]
+    assert 'filemanager' in str(params)
+    assert params['opera'] == 'delete'
+    assert '/apps/AIVideoTrans/backups/job_x.tar.gz' in data['filelist']
+
+
+def test_delete_idempotent_on_404(monkeypatch):
+    """Deleting already-gone file (errno -9) should not raise."""
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+    import requests
+
+    def mock_post(url, params=None, data=None, **kw):
+        class R:
+            status_code = 200
+
+            def json(self):
+                return {'errno': -9, 'info': [{'errno': -9}]}  # file not found
+
+            def raise_for_status(self):
+                pass
+
+        return R()
+
+    monkeypatch.setattr(requests, 'post', mock_post)
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    # 不抛
+    c.delete('/apps/AIVideoTrans/backups/missing.tar.gz', access_token='at')
+
+
+def test_delete_raises_on_other_errno(monkeypatch):
+    """Non-zero non-(-9) errno → RuntimeError."""
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+    import requests
+
+    def mock_post(url, params=None, data=None, **kw):
+        class R:
+            status_code = 200
+
+            def json(self):
+                return {'errno': -7, 'errmsg': 'invalid filelist'}
+
+            def raise_for_status(self):
+                pass
+
+        return R()
+
+    monkeypatch.setattr(requests, 'post', mock_post)
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    with pytest.raises(RuntimeError, match='Baidu delete failed|-7'):
+        c.delete('/bad', access_token='at')

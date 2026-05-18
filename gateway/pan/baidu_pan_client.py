@@ -10,6 +10,7 @@ Reference: https://pan.baidu.com/union/document
 """
 from __future__ import annotations
 
+import json as _json
 from pathlib import Path
 
 import requests
@@ -58,7 +59,17 @@ class BaiduPanClient:
         ]
 
     def delete(self, remote_path: str, *, access_token: str) -> None:
-        raise NotImplementedError("T3.5")
+        """Delete a single file. Idempotent: 404-like errno -9 = no-op success."""
+        resp = requests.post(
+            f"{self.XPAN_BASE}/file",
+            params={'method': 'filemanager', 'access_token': access_token, 'opera': 'delete'},
+            data={'async': 0, 'filelist': _json.dumps([remote_path])},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        if body.get('errno', 0) not in (0, -9):
+            raise RuntimeError(f"Baidu delete failed: {body}")
 
     def get_quota(self, *, access_token: str) -> dict:
         resp = requests.get(
