@@ -22,9 +22,27 @@ def walk_project_dir_inventory(project_dir: Path) -> list[dict]:
     Order: lexicographic by relative path (sorted rglob output). Directories
     are skipped — only regular files appear in the inventory. sha256 is
     streamed in 1MB chunks so large files do not load fully into RAM.
+
+    Symbolic links are REJECTED with RuntimeError. The backup/restore
+    contract requires regular files only: if inventory followed a symlink
+    and hashed its target, but write_tar_with_manifest stored the symlink
+    AS a symlink entry, the three commit-point gates would still pass —
+    yet restore would refuse the link entry, leaving the user with no
+    way to recover after the local copy is purged. Reject early so the
+    archive operator gets a loud failure instead of silent data loss.
     """
     inventory = []
     for f in sorted(project_dir.rglob('*')):
+        # Reject BEFORE is_file() (which follows symlinks). Path.is_symlink()
+        # returns True for the link itself, not the target.
+        if f.is_symlink():
+            rel = f.relative_to(project_dir).as_posix()
+            raise RuntimeError(
+                f"Refusing to inventory symlink: {rel}. "
+                f"Backup requires regular files only "
+                f"(symlink would be archived as link entry but inventory "
+                f"would record target content — restore would fail)."
+            )
         if not f.is_file():
             continue
         rel = f.relative_to(project_dir).as_posix()
@@ -38,6 +56,25 @@ def walk_project_dir_inventory(project_dir: Path) -> list[dict]:
             'sha256': sha.hexdigest(),
         })
     return inventory
+
+
+def _reject_link_entries(tarinfo: tarfile.TarInfo) -> tarfile.TarInfo:
+    """tarfile.add() filter: refuse symbolic and hard link entries.
+
+    Defense in depth: walk_project_dir_inventory already raises on symlinks,
+    but write_tar_with_manifest may be invoked with a project_dir that did
+    not go through inventory (or with a manifest computed earlier and a
+    project_dir mutated between then and now). Catching here protects the
+    invariant on a different code path (tarfile.add walks via os.walk;
+    inventory walks via Path.rglob).
+    """
+    if tarinfo.issym() or tarinfo.islnk():
+        kind = 'symlink' if tarinfo.issym() else 'hardlink'
+        raise RuntimeError(
+            f"Refusing to archive {kind} entry: {tarinfo.name}. "
+            f"Backup requires regular files only."
+        )
+    return tarinfo
 
 
 def build_manifest(*, project_dir: Path, job_record: dict, r2_artifacts: list[dict]) -> dict:
@@ -83,8 +120,10 @@ def write_tar_with_manifest(tar_path: Path, manifest: dict, project_dir: Path) -
         info.mtime = int(datetime.now(timezone.utc).timestamp())
         tf.addfile(info, io.BytesIO(manifest_bytes))
 
-        # 2. project_dir contents (recursive, arcname keeps a clean root)
-        tf.add(project_dir, arcname=project_dir.name)
+        # 2. project_dir contents (recursive, arcname keeps a clean root).
+        # filter= rejects sym/hardlink entries — backup contract requires
+        # regular files only (see _reject_link_entries docstring).
+        tf.add(project_dir, arcname=project_dir.name, filter=_reject_link_entries)
 
 
 def read_manifest_from_tar(tar_path: Path) -> dict:

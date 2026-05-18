@@ -284,3 +284,95 @@ def test_read_manifest_invalid_json_propagates(tmp_path: Path):
     from gateway.pan.manifest import read_manifest_from_tar
     with pytest.raises(json.JSONDecodeError):
         read_manifest_from_tar(tar_path)
+
+
+# --- CodeX P1: symlink reject (both inventory + tar add) ---
+
+
+def _try_make_symlink(target: Path, link: Path) -> bool:
+    """Helper: create a symlink, return True on success, False on platform
+    rejection (Windows without dev mode / sandbox without privilege)."""
+    import os
+    try:
+        os.symlink(target, link)
+        return True
+    except (OSError, NotImplementedError):
+        return False
+
+
+def test_inventory_rejects_file_symlink(tmp_path: Path):
+    """Symlink to a regular file → walk_project_dir_inventory raises.
+
+    Without this guard, the inventory would record the TARGET's sha256
+    while write_tar_with_manifest archives a SYMTYPE entry — silent data
+    loss after restore refuses the link entry (CodeX P1)."""
+    project = tmp_path / 'job_sym'
+    project.mkdir()
+    target = project / 'real.bin'
+    target.write_bytes(b'real_content' * 100)
+    link = project / 'linked.bin'
+
+    if not _try_make_symlink(target, link):
+        pytest.skip('symlink creation not supported on this platform')
+
+    from gateway.pan.manifest import walk_project_dir_inventory
+    with pytest.raises(RuntimeError, match='symlink|link entry'):
+        walk_project_dir_inventory(project)
+
+
+def test_inventory_rejects_symlink_to_outside_project(tmp_path: Path):
+    """Symlink whose target is OUTSIDE project_dir — still rejected.
+    (Reject is uniform, no special-casing of internal vs external.)"""
+    project = tmp_path / 'job_ext'
+    project.mkdir()
+    outside = tmp_path / 'outside.bin'
+    outside.write_bytes(b'outside')
+    link = project / 'links_out.bin'
+
+    if not _try_make_symlink(outside, link):
+        pytest.skip('symlink creation not supported on this platform')
+
+    from gateway.pan.manifest import walk_project_dir_inventory
+    with pytest.raises(RuntimeError, match='symlink'):
+        walk_project_dir_inventory(project)
+
+
+def test_inventory_rejects_dangling_symlink(tmp_path: Path):
+    """Symlink whose target doesn't exist — still rejected before is_file()
+    can deal with the broken link."""
+    project = tmp_path / 'job_dangle'
+    project.mkdir()
+    link = project / 'dangling.bin'
+    nonexistent = tmp_path / 'never_existed.bin'
+
+    if not _try_make_symlink(nonexistent, link):
+        pytest.skip('symlink creation not supported on this platform')
+
+    from gateway.pan.manifest import walk_project_dir_inventory
+    with pytest.raises(RuntimeError, match='symlink'):
+        walk_project_dir_inventory(project)
+
+
+def test_write_tar_rejects_symlink_defense_in_depth(tmp_path: Path):
+    """write_tar_with_manifest must also reject symlinks even if called
+    with a pre-built manifest that didn't go through walk first.
+
+    Inventory walker and tarfile use different traversal code paths;
+    defense in depth says BOTH must reject."""
+    project = tmp_path / 'job_dod'
+    project.mkdir()
+    real = project / 'a.bin'
+    real.write_bytes(b'a')
+    link = project / 'b.bin'
+
+    if not _try_make_symlink(real, link):
+        pytest.skip('symlink creation not supported on this platform')
+
+    tar_path = tmp_path / 'b.tar.gz'
+    # Pre-built manifest that doesn't include the symlink (simulates
+    # divergence between manifest computation and tar writing).
+    fake_manifest = {'backup_format_version': 1, 'file_inventory': []}
+
+    from gateway.pan.manifest import write_tar_with_manifest
+    with pytest.raises(RuntimeError, match='symlink'):
+        write_tar_with_manifest(tar_path, fake_manifest, project)
