@@ -31,6 +31,10 @@ const STATUS_TONE: Record<string, Tone> = {
   purged: "muted",
   idle: "muted",
   stopping: "muted",
+  // Pan backup statuses (plan 2026-05-14 Task 1.7)
+  archiving: "ochre",   // transient upload to pan — warm in-progress
+  archived: "muted",    // terminal, data on pan only — cold/inactive
+  restoring: "ochre",   // transient download from pan — warm in-progress
 }
 
 function toneStyle(tone: Tone): CSSProperties {
