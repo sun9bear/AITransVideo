@@ -207,7 +207,16 @@ async def cleanup_expired_projects(
                 # let the sweeper retry until R2 has the artifacts, then
                 # the next cleanup pass will succeed. ``continue`` here
                 # leaves the row exactly as we found it.
-                if REQUIRES_R2_PARITY:
+                #
+                # CodeX P2-3 fix (2026-05-18): only run the parity gate
+                # when there is actually data on disk to protect.  If
+                # project_dir is already gone (Job API cleanup, admin
+                # manual rm, or Stage A publisher paths ran ahead), parity
+                # is moot — we have nothing to lose by flipping the row.
+                # Blocking on parity when the disk is empty just produces
+                # ghost rows that linger forever.
+                disk_data_present = project_dir.is_dir()
+                if disk_data_present and REQUIRES_R2_PARITY:
                     json_rec = find_record(job.job_id)
                     has_jianying = bool(
                         json_rec and json_rec.jianying_draft_zip_path

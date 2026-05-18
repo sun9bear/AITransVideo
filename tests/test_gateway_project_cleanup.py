@@ -458,6 +458,144 @@ def test_cleanup_is_idempotent(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# CodeX P2-3 (2026-05-18): ghost row + parity gate enabled
+#
+# When project_dir is already gone, parity is moot: there is no on-disk
+# data to protect. The cleanup MUST flip status to 'purged' regardless of
+# what r2_parity_ok returns.  Only when project_dir IS on disk should a
+# parity=False cause a skip.
+# ---------------------------------------------------------------------------
+
+
+def test_ghost_row_flips_purged_when_project_dir_absent_even_if_parity_false(
+    tmp_path, monkeypatch
+):
+    """CodeX P2-3: parity=false + dir-gone → should flip to purged.
+
+    Before fix: REQUIRES_R2_PARITY=true + parity=false + no dir
+    caused `continue` → row stuck as succeeded forever.
+    After fix: dir-gone skips parity gate → falls through → purged.
+    """
+    root = tmp_path / "data" / "projects"
+    # Note: we deliberately do NOT create the directory on disk.
+    nonexistent = str(root / "user-1" / "job_ghost_parity")
+
+    async def _fake_r2_parity_false(db, job_id, *, has_jianying_draft=False):
+        return False
+
+    async def run():
+        monkeypatch.setattr(project_cleanup, "REQUIRES_R2_PARITY", True)
+        monkeypatch.setattr(project_cleanup, "find_record", lambda job_id: None)
+        # Patch r2_parity_ok at the import point inside project_cleanup
+        import services.r2_publisher_lib.r2_parity as _parity_mod
+        monkeypatch.setattr(_parity_mod, "r2_parity_ok", _fake_r2_parity_false)
+
+        Session = await _make_session()
+        await _insert_job(
+            Session,
+            job_id="job_ghost_parity",
+            status="succeeded",
+            project_dir=nonexistent,
+            expires_hours_ago=1,
+        )
+        async with Session() as db:
+            count = await project_cleanup.cleanup_expired_projects(
+                db, safe_roots=(root,)
+            )
+        assert count == 1, "ghost row should be counted as purged"
+        new_status = await _load_status(Session, "job_ghost_parity")
+        assert new_status == "purged", (
+            "ghost row (dir already gone) must flip to purged even "
+            "when REQUIRES_R2_PARITY=true and parity returns False"
+        )
+
+    _run(run())
+
+
+def test_parity_gate_still_blocks_when_project_dir_exists_and_parity_false(
+    tmp_path, monkeypatch
+):
+    """Regression guard (CodeX P2-3): parity=false + dir EXISTS → skip.
+
+    The parity gate exists to prevent deleting on-disk data whose R2
+    backup is incomplete. When the directory IS present and parity returns
+    False, cleanup must bail (no rmtree, no status flip).
+    """
+    root = tmp_path / "data" / "projects"
+    project = root / "user-1" / "job_parity_protect"
+    project.mkdir(parents=True)
+    (project / "important.mp4").write_text("precious data")
+
+    async def _fake_r2_parity_false(db, job_id, *, has_jianying_draft=False):
+        return False
+
+    async def run():
+        monkeypatch.setattr(project_cleanup, "REQUIRES_R2_PARITY", True)
+        monkeypatch.setattr(project_cleanup, "find_record", lambda job_id: None)
+        import services.r2_publisher_lib.r2_parity as _parity_mod
+        monkeypatch.setattr(_parity_mod, "r2_parity_ok", _fake_r2_parity_false)
+
+        Session = await _make_session()
+        await _insert_job(
+            Session,
+            job_id="job_parity_protect",
+            status="succeeded",
+            project_dir=str(project),
+            expires_hours_ago=1,
+        )
+        async with Session() as db:
+            count = await project_cleanup.cleanup_expired_projects(
+                db, safe_roots=(root,)
+            )
+        assert count == 0, "row with on-disk data + parity=false must be skipped"
+        assert project.exists(), "directory must NOT be deleted when parity=false"
+        assert (project / "important.mp4").exists()
+        new_status = await _load_status(Session, "job_parity_protect")
+        assert new_status == "succeeded", (
+            "status must stay succeeded when parity gate blocks cleanup"
+        )
+
+    _run(run())
+
+
+def test_ghost_row_with_parity_true_flips_purged(tmp_path, monkeypatch):
+    """CodeX P2-3 corner case: dir-gone + parity=true → purged.
+
+    Parity check passes (maybe R2 has everything) but disk is already
+    empty. Should still flip to purged (this is likely already working;
+    test locks it in as a regression guard).
+    """
+    root = tmp_path / "data" / "projects"
+    nonexistent = str(root / "user-1" / "job_ghost_parity_true")
+
+    async def _fake_r2_parity_true(db, job_id, *, has_jianying_draft=False):
+        return True
+
+    async def run():
+        monkeypatch.setattr(project_cleanup, "REQUIRES_R2_PARITY", True)
+        monkeypatch.setattr(project_cleanup, "find_record", lambda job_id: None)
+        import services.r2_publisher_lib.r2_parity as _parity_mod
+        monkeypatch.setattr(_parity_mod, "r2_parity_ok", _fake_r2_parity_true)
+
+        Session = await _make_session()
+        await _insert_job(
+            Session,
+            job_id="job_ghost_parity_true",
+            status="succeeded",
+            project_dir=nonexistent,
+            expires_hours_ago=1,
+        )
+        async with Session() as db:
+            count = await project_cleanup.cleanup_expired_projects(
+                db, safe_roots=(root,)
+            )
+        assert count == 1
+        assert await _load_status(Session, "job_ghost_parity_true") == "purged"
+
+    _run(run())
+
+
 def test_cleanup_dry_run_does_not_delete_or_commit(tmp_path):
     root = tmp_path / "data" / "projects"
     project = root / "user-1" / "job_dry"
