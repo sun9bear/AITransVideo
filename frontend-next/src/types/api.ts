@@ -7,6 +7,10 @@ export type ApiJobStatus =
   | 'running'
   | 'succeeded'
   | 'waiting_for_review'
+  // Pan backup statuses (plan 2026-05-14 Task 1.5)
+  | 'archiving'
+  | 'archived'
+  | 'restoring'
 
 export type ApiJobEventType = 'log' | 'status'
 

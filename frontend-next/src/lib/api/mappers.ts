@@ -293,4 +293,8 @@ const statusMap = {
   running: 'running',
   succeeded: 'succeeded',
   waiting_for_review: 'waiting_for_review',
+  // Pan backup statuses (plan 2026-05-14 Task 1.5)
+  archiving: 'archiving',
+  archived: 'archived',
+  restoring: 'restoring',
 } as const satisfies Record<string, JobStatus>

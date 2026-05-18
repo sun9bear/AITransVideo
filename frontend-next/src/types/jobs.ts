@@ -9,6 +9,10 @@ export const JOB_STATUS_LABELS = {
   // 2026-04-21: gateway project_cleanup 7d TTL soft-delete. DB 记录
   // 保留做历史；project_dir 已在磁盘清理。下载 / 修改入口应当禁用。
   purged: '已清理',
+  // Pan backup statuses (plan 2026-05-14 Task 1.5 / design 2026-05-13 §4.1)
+  archiving: '归档中',
+  archived: '已归档',
+  restoring: '恢复中',
 } as const
 
 export type JobStatus = keyof typeof JOB_STATUS_LABELS
