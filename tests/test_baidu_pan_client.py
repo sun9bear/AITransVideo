@@ -331,7 +331,8 @@ def test_get_quota(monkeypatch):
 
 
 def test_get_quota_default_zero_when_missing(monkeypatch):
-    """If Baidu omits total/used, default to zero (free=0). Avoid KeyError crash."""
+    """If Baidu omits total/used but errno=0, default to zero (free=0).
+    Defensive against malformed-but-success-shaped responses."""
     from gateway.pan.baidu_pan_client import BaiduPanClient
     import requests
 
@@ -340,7 +341,7 @@ def test_get_quota_default_zero_when_missing(monkeypatch):
             status_code = 200
 
             def json(self):
-                return {}
+                return {}  # errno missing → default 0 → no raise
 
             def raise_for_status(self):
                 pass
@@ -351,6 +352,30 @@ def test_get_quota_default_zero_when_missing(monkeypatch):
     c = BaiduPanClient(appkey='ak', appsecret='as')
     q = c.get_quota(access_token='at')
     assert q == {'total': 0, 'used': 0, 'free': 0}
+
+
+def test_get_quota_raises_on_body_errno(monkeypatch):
+    """Body-level errno != 0 → raise. Prevents silent "empty account"
+    UX when token is expired or revoked (CodeX P2)."""
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+    import requests
+
+    def mock_get(url, params=None, **kw):
+        class R:
+            status_code = 200
+
+            def json(self):
+                return {'errno': 2, 'errmsg': 'invalid token'}
+
+            def raise_for_status(self):
+                pass
+
+        return R()
+
+    monkeypatch.setattr(requests, 'get', mock_get)
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    with pytest.raises(RuntimeError, match='Baidu get_quota|errno=2'):
+        c.get_quota(access_token='expired_token')
 
 
 # --- T3.5: delete (idempotent on errno -9) ---

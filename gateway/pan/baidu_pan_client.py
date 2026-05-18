@@ -267,6 +267,12 @@ class BaiduPanClient:
                 )
 
     def get_quota(self, *, access_token: str) -> dict:
+        """Return {'total', 'used', 'free'} in bytes.
+
+        Body-level errno non-zero → raise (e.g. errno=2 = invalid token).
+        Without this check, an auth failure would silently return 0/0/0,
+        looking like an empty account instead of an auth error.
+        """
         resp = requests.get(
             'https://pan.baidu.com/api/quota',
             params={'access_token': access_token, 'checkfree': 1, 'checkexpire': 1},
@@ -274,6 +280,9 @@ class BaiduPanClient:
         )
         resp.raise_for_status()
         body = resp.json()
+        errno = body.get('errno', 0)
+        if errno != 0:
+            raise RuntimeError(f"Baidu get_quota failed (errno={errno}): {body}")
         total = body.get('total', 0)
         used = body.get('used', 0)
         return {'total': total, 'used': used, 'free': total - used}
