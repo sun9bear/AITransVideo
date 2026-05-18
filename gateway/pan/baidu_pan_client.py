@@ -143,20 +143,37 @@ class BaiduPanClient:
 
     # --- T3.7: read-back probe (3rd gate per design §7) ---
     def _get_dlink(self, remote_path: str, access_token: str) -> str:
-        """Get the time-limited download link for a file.
+        """Get a time-limited download link for a single remote file.
 
-        NOTE: the plan code stubs path-based lookup via /xpan/multimedia with
-        fsids='[]'; real Baidu API expects fsids[] from a prior list() call.
-        For MVP this is exercised against mocks only; production wiring will
-        chain list → fsid → multimedia.
+        Chains: list(parent_dir) → match path → fs_id → filemetas(fsids=[fs_id])
+        → dlink. Baidu's /multimedia?method=filemetas API requires fs_id (path
+        is NOT a valid lookup key on that endpoint), so we discover fs_id
+        from a list() call against the file's parent directory.
+
+        Raises RuntimeError when the file is missing from the parent listing
+        or when filemetas returns no items.
         """
+        # Compute parent dir. "/apps/X/job.tar.gz" -> "/apps/X/"
+        # Root-level file "/job.tar.gz" -> "/"
+        head, _, _tail = remote_path.rpartition('/')
+        parent = head if head else '/'
+        if not parent.endswith('/'):
+            parent = parent + '/'
+
+        entries = self.list(parent, access_token=access_token)
+        matched = next((e for e in entries if e.get('path') == remote_path), None)
+        if matched is None:
+            raise RuntimeError(
+                f"Remote file not found in listing of {parent}: {remote_path}"
+            )
+        fs_id = matched['fs_id']
+
         resp = requests.get(
             f"{self.XPAN_BASE}/multimedia",
             params={
                 'method': 'filemetas',
                 'access_token': access_token,
-                'fsids': '[]',  # 用 path 不用 fs_id 时需要不同 endpoint
-                'path': remote_path,
+                'fsids': _json.dumps([fs_id]),
                 'dlink': 1,
             },
             timeout=15,
@@ -165,7 +182,9 @@ class BaiduPanClient:
         body = resp.json()
         items = body.get('list', [])
         if not items:
-            raise RuntimeError(f"No metadata returned for {remote_path}")
+            raise RuntimeError(
+                f"No metadata returned for fs_id={fs_id} (path={remote_path})"
+            )
         return items[0]['dlink'] + f'&access_token={access_token}'
 
     def verify_remote_tail(self, local_path: Path, remote_path: str, size: int, *,

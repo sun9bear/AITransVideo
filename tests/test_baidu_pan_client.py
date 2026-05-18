@@ -760,16 +760,44 @@ def test_compute_chunk_md5s_deterministic(tmp_path):
 # --- T3.7: read-back probe ---
 
 
-def _make_dlink_mocker(monkeypatch, *, tail_bytes: bytes, status: int = 206):
-    """Helper: mock both /multimedia (returns dlink) and the dlink GET (returns tail bytes)."""
+def _make_dlink_mocker(monkeypatch, *, tail_bytes: bytes, remote_path: str,
+                       file_size: int, fs_id: int = 999, status: int = 206):
+    """Helper: mock the three-step _get_dlink chain (list → filemetas →
+    dlink Range GET) + the actual tail fetch.
+
+    Step 1: /xpan/file?method=list → returns the file entry with fs_id.
+    Step 2: /xpan/multimedia?method=filemetas → returns dlink for fs_id.
+    Step 3: Range GET on the dlink → returns tail_bytes.
+    """
     import requests
 
     requests_made = []
 
     def mock_get(url, params=None, headers=None, **kw):
         requests_made.append({'url': url, 'params': params, 'headers': headers})
+        p = params or {}
 
-        # /xpan/multimedia returns JSON with dlink
+        # Step 1: list() for fs_id discovery
+        if p.get('method') == 'list':
+            class LR:
+                status_code = 200
+
+                def json(self):
+                    return {
+                        'errno': 0,
+                        'list': [{
+                            'path': remote_path,
+                            'size': file_size,
+                            'fs_id': fs_id,
+                            'isdir': 0,
+                        }],
+                    }
+
+                def raise_for_status(self):
+                    pass
+            return LR()
+
+        # Step 2: filemetas → dlink
         if 'multimedia' in url:
             class JR:
                 status_code = 200
@@ -781,7 +809,7 @@ def _make_dlink_mocker(monkeypatch, *, tail_bytes: bytes, status: int = 206):
                     pass
             return JR()
 
-        # actual dlink fetch returns tail bytes
+        # Step 3: actual dlink Range GET → tail bytes
         class BR:
             def __init__(self):
                 self.status_code = status
@@ -802,12 +830,13 @@ def test_read_back_probe_matches_tail(monkeypatch, tmp_path):
     payload = b'X' * 200_000  # 200KB
     test_file.write_bytes(payload)
 
+    remote = '/apps/AIVideoTrans/probe.tar.gz'
     # Mock returns the same tail as local (last 64KB = b'X' * 65536)
-    _make_dlink_mocker(monkeypatch, tail_bytes=b'X' * 65_536)
+    _make_dlink_mocker(monkeypatch, tail_bytes=b'X' * 65_536,
+                       remote_path=remote, file_size=200_000)
 
     c = BaiduPanClient(appkey='ak', appsecret='as')
-    ok = c.verify_remote_tail(test_file, '/apps/AIVideoTrans/probe.tar.gz',
-                              size=200_000, access_token='at')
+    ok = c.verify_remote_tail(test_file, remote, size=200_000, access_token='at')
     assert ok is True
 
 
@@ -818,12 +847,13 @@ def test_read_back_probe_detects_tampering(monkeypatch, tmp_path):
     test_file = tmp_path / 'probe.tar.gz'
     test_file.write_bytes(b'X' * 200_000)
 
+    remote = '/apps/AIVideoTrans/probe.tar.gz'
     # Mock returns 'Y' bytes — won't match local 'X' tail.
-    _make_dlink_mocker(monkeypatch, tail_bytes=b'Y' * 65_536)
+    _make_dlink_mocker(monkeypatch, tail_bytes=b'Y' * 65_536,
+                       remote_path=remote, file_size=200_000)
 
     c = BaiduPanClient(appkey='ak', appsecret='as')
-    ok = c.verify_remote_tail(test_file, '/apps/AIVideoTrans/probe.tar.gz',
-                              size=200_000, access_token='at')
+    ok = c.verify_remote_tail(test_file, remote, size=200_000, access_token='at')
     assert ok is False
 
 
@@ -834,17 +864,19 @@ def test_read_back_probe_small_file_probes_entirety(monkeypatch, tmp_path):
     test_file = tmp_path / 'tiny.tar.gz'
     test_file.write_bytes(b'Z' * 1000)  # only 1KB
 
-    requests_made = _make_dlink_mocker(monkeypatch, tail_bytes=b'Z' * 1000)
+    remote = '/apps/AIVideoTrans/tiny.tar.gz'
+    requests_made = _make_dlink_mocker(monkeypatch, tail_bytes=b'Z' * 1000,
+                                       remote_path=remote, file_size=1000)
 
     c = BaiduPanClient(appkey='ak', appsecret='as')
-    ok = c.verify_remote_tail(test_file, '/apps/AIVideoTrans/tiny.tar.gz',
-                              size=1000, access_token='at')
+    ok = c.verify_remote_tail(test_file, remote, size=1000, access_token='at')
     assert ok is True
 
     # Range header should be bytes=0-999 (full file).
-    dlink_calls = [r for r in requests_made if 'multimedia' not in r['url']]
-    assert dlink_calls, 'expected at least one dlink GET call'
-    range_header = dlink_calls[0]['headers']['Range']
+    # Range GET is the only call WITH a Range header (list/filemetas don't set it).
+    range_calls = [r for r in requests_made if r['headers'] and 'Range' in r['headers']]
+    assert range_calls, 'expected at least one Range GET call'
+    range_header = range_calls[0]['headers']['Range']
     assert range_header == 'bytes=0-999'
 
 
@@ -856,50 +888,202 @@ def test_read_back_probe_uses_correct_range_for_large_file(monkeypatch, tmp_path
     size = 5_000_000
     test_file.write_bytes(b'M' * size)
 
-    requests_made = _make_dlink_mocker(monkeypatch, tail_bytes=b'M' * 65_536)
+    remote = '/large.tar.gz'
+    requests_made = _make_dlink_mocker(monkeypatch, tail_bytes=b'M' * 65_536,
+                                       remote_path=remote, file_size=size)
 
     c = BaiduPanClient(appkey='ak', appsecret='as')
-    c.verify_remote_tail(test_file, '/x', size=size, access_token='at')
+    c.verify_remote_tail(test_file, remote, size=size, access_token='at')
 
-    dlink_calls = [r for r in requests_made if 'multimedia' not in r['url']]
-    range_header = dlink_calls[0]['headers']['Range']
+    range_calls = [r for r in requests_made if r['headers'] and 'Range' in r['headers']]
+    range_header = range_calls[0]['headers']['Range']
     expected_start = size - 65_536
     expected_end = size - 1
     assert range_header == f'bytes={expected_start}-{expected_end}'
 
 
-def test_get_dlink_raises_when_no_metadata(monkeypatch):
-    """If /multimedia returns empty list → RuntimeError."""
+def test_get_dlink_chains_list_then_filemetas(monkeypatch):
+    """Happy-path contract: _get_dlink calls list(parent) first, finds fs_id,
+    then calls filemetas with the fsids JSON array (NOT path-based stub)."""
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+    import requests
+
+    calls = []
+
+    def mock_get(url, params=None, **kw):
+        calls.append({'url': url, 'params': params})
+        p = params or {}
+
+        if p.get('method') == 'list':
+            class LR:
+                status_code = 200
+
+                def json(self):
+                    return {
+                        'errno': 0,
+                        'list': [{
+                            'path': '/apps/AIVideoTrans/backups/foo.tar.gz',
+                            'size': 12345,
+                            'fs_id': 7777,
+                            'isdir': 0,
+                        }],
+                    }
+
+                def raise_for_status(self):
+                    pass
+            return LR()
+
+        if 'multimedia' in url:
+            class JR:
+                status_code = 200
+
+                def json(self):
+                    return {'list': [{'dlink': 'https://example.com/dl'}]}
+
+                def raise_for_status(self):
+                    pass
+            return JR()
+
+        raise AssertionError(f"unexpected GET to {url}")
+
+    monkeypatch.setattr(requests, 'get', mock_get)
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    dlink = c._get_dlink('/apps/AIVideoTrans/backups/foo.tar.gz', access_token='at')
+
+    # Final dlink contains access_token suffix
+    assert dlink == 'https://example.com/dl&access_token=at'
+
+    # Verify correct chain: list call first, then filemetas with fsids=[7777]
+    list_calls = [c for c in calls if c['params'].get('method') == 'list']
+    meta_calls = [c for c in calls if c['params'].get('method') == 'filemetas']
+    assert len(list_calls) == 1
+    assert len(meta_calls) == 1
+    assert list_calls[0]['params']['dir'] == '/apps/AIVideoTrans/backups/'
+    # fsids must be JSON-encoded list containing the discovered fs_id.
+    fsids_value = meta_calls[0]['params']['fsids']
+    assert _json.loads(fsids_value) == [7777]
+
+
+def test_get_dlink_raises_when_path_missing_from_listing(monkeypatch):
+    """If parent listing exists but doesn't contain the target path → raise.
+    Replaces the prior path-based-stub no-metadata test."""
     from gateway.pan.baidu_pan_client import BaiduPanClient
     import requests
 
     def mock_get(url, params=None, **kw):
-        class R:
-            status_code = 200
+        if (params or {}).get('method') == 'list':
+            class LR:
+                status_code = 200
 
-            def json(self):
-                return {'list': []}
+                def json(self):
+                    return {
+                        'errno': 0,
+                        'list': [
+                            {'path': '/x/other.tar.gz', 'size': 1, 'fs_id': 1, 'isdir': 0},
+                        ],
+                    }
 
-            def raise_for_status(self):
-                pass
-        return R()
+                def raise_for_status(self):
+                    pass
+            return LR()
+        raise AssertionError("filemetas should not be called when listing has no match")
 
     monkeypatch.setattr(requests, 'get', mock_get)
     c = BaiduPanClient(appkey='ak', appsecret='as')
-    with pytest.raises(RuntimeError, match='No metadata returned'):
-        c._get_dlink('/nonexistent.tar.gz', access_token='at')
+    with pytest.raises(RuntimeError, match='not found in listing'):
+        c._get_dlink('/x/target.tar.gz', access_token='at')
+
+
+def test_get_dlink_raises_when_filemetas_empty(monkeypatch):
+    """fs_id discovered via list, but filemetas returns no items → raise."""
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+    import requests
+
+    def mock_get(url, params=None, **kw):
+        p = params or {}
+        if p.get('method') == 'list':
+            class LR:
+                status_code = 200
+
+                def json(self):
+                    return {
+                        'errno': 0,
+                        'list': [{'path': '/x.tar.gz', 'size': 1, 'fs_id': 42, 'isdir': 0}],
+                    }
+
+                def raise_for_status(self):
+                    pass
+            return LR()
+        if 'multimedia' in url:
+            class JR:
+                status_code = 200
+
+                def json(self):
+                    return {'list': []}
+
+                def raise_for_status(self):
+                    pass
+            return JR()
+        raise AssertionError(f"unexpected GET to {url}")
+
+    monkeypatch.setattr(requests, 'get', mock_get)
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    with pytest.raises(RuntimeError, match='No metadata returned for fs_id=42'):
+        c._get_dlink('/x.tar.gz', access_token='at')
+
+
+def test_get_dlink_parent_dir_for_root_file(monkeypatch):
+    """Root-level file '/foo.tar.gz' → parent is '/', not '' or error."""
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+    import requests
+
+    list_dir_seen = []
+
+    def mock_get(url, params=None, **kw):
+        p = params or {}
+        if p.get('method') == 'list':
+            list_dir_seen.append(p.get('dir'))
+
+            class LR:
+                status_code = 200
+
+                def json(self):
+                    return {
+                        'errno': 0,
+                        'list': [{'path': '/foo.tar.gz', 'size': 1, 'fs_id': 9, 'isdir': 0}],
+                    }
+
+                def raise_for_status(self):
+                    pass
+            return LR()
+
+        class JR:
+            status_code = 200
+
+            def json(self):
+                return {'list': [{'dlink': 'https://x/d'}]}
+
+            def raise_for_status(self):
+                pass
+        return JR()
+
+    monkeypatch.setattr(requests, 'get', mock_get)
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    c._get_dlink('/foo.tar.gz', access_token='at')
+    assert list_dir_seen == ['/']
 
 
 # --- T3.8: streaming download ---
 
 
 def test_download_streams_to_local(monkeypatch, tmp_path):
-    """Happy path: dlink → stream chunks → write file → return size+sha256."""
+    """Happy path: list→fs_id→filemetas→dlink stream → write file + sha256."""
     from gateway.pan.baidu_pan_client import BaiduPanClient
     import requests
 
     dst = tmp_path / 'downloaded.tar.gz'
     test_content = b'TARGZ_CONTENT' * 1000  # 13000 bytes
+    remote = '/apps/AIVideoTrans/backups/test.tar.gz'
 
     class StreamResponse:
         status_code = 200
@@ -921,6 +1105,25 @@ def test_download_streams_to_local(monkeypatch, tmp_path):
             return False
 
     def mock_get(url, params=None, headers=None, stream=False, **kw):
+        p = params or {}
+        if p.get('method') == 'list':
+            class LR:
+                status_code = 200
+
+                def json(self):
+                    return {
+                        'errno': 0,
+                        'list': [{
+                            'path': remote,
+                            'size': len(test_content),
+                            'fs_id': 555,
+                            'isdir': 0,
+                        }],
+                    }
+
+                def raise_for_status(self):
+                    pass
+            return LR()
         if 'multimedia' in url:
             class JR:
                 status_code = 200
@@ -937,7 +1140,7 @@ def test_download_streams_to_local(monkeypatch, tmp_path):
     monkeypatch.setattr(requests, 'get', mock_get)
 
     c = BaiduPanClient(appkey='ak', appsecret='as')
-    result = c.download('/apps/AIVideoTrans/backups/test.tar.gz', dst, access_token='at')
+    result = c.download(remote, dst, access_token='at')
 
     assert dst.read_bytes() == test_content
     assert result['size'] == len(test_content)
@@ -975,6 +1178,20 @@ def test_download_handles_empty_chunks_in_stream(monkeypatch, tmp_path):
             return False
 
     def mock_get(url, params=None, headers=None, stream=False, **kw):
+        p = params or {}
+        if p.get('method') == 'list':
+            class LR:
+                status_code = 200
+
+                def json(self):
+                    return {
+                        'errno': 0,
+                        'list': [{'path': '/x.bin', 'size': len(payload), 'fs_id': 1, 'isdir': 0}],
+                    }
+
+                def raise_for_status(self):
+                    pass
+            return LR()
         if 'multimedia' in url:
             class JR:
                 status_code = 200
@@ -996,16 +1213,17 @@ def test_download_handles_empty_chunks_in_stream(monkeypatch, tmp_path):
 
 
 def test_download_propagates_dlink_failure(monkeypatch, tmp_path):
-    """If _get_dlink raises (empty metadata), download propagates."""
+    """If _get_dlink raises (path not in listing), download propagates."""
     from gateway.pan.baidu_pan_client import BaiduPanClient
     import requests
 
     def mock_get(url, params=None, **kw):
+        # list() returns nothing → _get_dlink raises "not found in listing"
         class R:
             status_code = 200
 
             def json(self):
-                return {'list': []}  # no items
+                return {'errno': 0, 'list': []}
 
             def raise_for_status(self):
                 pass
@@ -1015,6 +1233,6 @@ def test_download_propagates_dlink_failure(monkeypatch, tmp_path):
 
     dst = tmp_path / 'never.bin'
     c = BaiduPanClient(appkey='ak', appsecret='as')
-    with pytest.raises(RuntimeError, match='No metadata returned'):
+    with pytest.raises(RuntimeError, match='not found in listing|No metadata'):
         c.download('/gone.tar.gz', dst, access_token='at')
     assert not dst.exists()
