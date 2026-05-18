@@ -40,6 +40,13 @@ JOB_STATUS_EDITING = "editing"  # Post-edit workflow (plan 2026-04-18, D21)
 # once the 7d retention window elapses. Kept in DB so the user retains a
 # history entry ("过期已清理任务 X"); project_dir on disk is gone.
 JOB_STATUS_PURGED = "purged"
+# Pan backup statuses (plan 2026-05-14 Task 1.3 / design 2026-05-13 §4.1).
+# archiving = transient: backup_executor uploading to pan
+# archived  = terminal: tar.gz on pan, local + R2 deleted
+# restoring = transient: restore_executor downloading from pan + extracting
+JOB_STATUS_ARCHIVING = "archiving"
+JOB_STATUS_ARCHIVED = "archived"
+JOB_STATUS_RESTORING = "restoring"
 SUPPORTED_JOB_STATUSES = {
     JOB_STATUS_QUEUED,
     JOB_STATUS_RUNNING,
@@ -49,12 +56,17 @@ SUPPORTED_JOB_STATUSES = {
     JOB_STATUS_FAILED,
     JOB_STATUS_CANCELLED,
     JOB_STATUS_PURGED,
+    JOB_STATUS_ARCHIVING,
+    JOB_STATUS_ARCHIVED,
+    JOB_STATUS_RESTORING,
 }
 ACTIVE_JOB_STATUSES = {
     JOB_STATUS_QUEUED,
     JOB_STATUS_RUNNING,
     JOB_STATUS_WAITING_FOR_REVIEW,
     JOB_STATUS_EDITING,  # editing is active — cleanup / list-page polling must see it
+    JOB_STATUS_ARCHIVING,   # pan transient
+    JOB_STATUS_RESTORING,   # pan transient
 }
 # Subset of ACTIVE_JOB_STATUSES that require a live worker process. Reap-stale
 # logic uses this (NOT ACTIVE_JOB_STATUSES) so that editing/waiting_for_review
