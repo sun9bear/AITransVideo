@@ -376,3 +376,87 @@ def test_write_tar_rejects_symlink_defense_in_depth(tmp_path: Path):
     from gateway.pan.manifest import write_tar_with_manifest
     with pytest.raises(RuntimeError, match='symlink'):
         write_tar_with_manifest(tar_path, fake_manifest, project)
+
+
+# --- CodeX P2: tar/inventory path contract (preemptive for Phase 5 verifier) ---
+
+
+def test_tar_paths_strip_to_inventory_paths(tmp_path: Path):
+    """Pin the contract between tar member names and file_inventory entries.
+
+    Tar entries (excluding manifest.json) are prefixed with `{project_dir.name}/`;
+    file_inventory entries are NOT — they are RELATIVE to project_dir.
+
+    Phase 5 restore verifier must therefore:
+      1. extract tar into some {dest_root}/
+      2. iterate file_inventory entries
+      3. for each entry e, hash the file at {dest_root}/{project_dir.name}/{e['path']}
+      4. compare to e['sha256']
+
+    Mis-aligning the {project_dir.name}/ prefix would make the verifier
+    silently skip all files (no match found) and pass on a damaged restore.
+    This test locks the contract NOW so a future verifier mistake fails loud.
+    """
+    from gateway.pan.manifest import build_manifest, write_tar_with_manifest
+
+    project = tmp_path / 'job_contract'
+    (project / 'transcript').mkdir(parents=True)
+    (project / 'transcript' / 'review.json').write_text('{"k": 1}')
+    (project / 'tts').mkdir()
+    (project / 'tts' / 'seg_0.wav').write_bytes(b'\x00\x01\x02')
+    (project / 'root_file.txt').write_text('top')
+
+    manifest = build_manifest(project_dir=project, job_record={}, r2_artifacts=[])
+    tar_path = tmp_path / 'contract.tar.gz'
+    write_tar_with_manifest(tar_path, manifest, project)
+
+    inventory_paths = sorted(e['path'] for e in manifest['file_inventory'])
+
+    with tarfile.open(tar_path, 'r:gz') as tf:
+        members = tf.getmembers()
+    # Only regular file entries — tarfile.getmembers() also returns dir
+    # entries (without trailing slash in the name) which would derail
+    # the contract check below.
+    tar_file_names = sorted(m.name for m in members
+                            if m.isfile() and m.name != 'manifest.json')
+
+    # The root prefix is project.name. Every tar file entry must start with it.
+    prefix = project.name + '/'
+    assert all(n.startswith(prefix) for n in tar_file_names), \
+        f"tar entries must all be under {prefix!r}: {tar_file_names}"
+
+    # Stripping the prefix yields exactly the inventory paths.
+    stripped = sorted(n[len(prefix):] for n in tar_file_names)
+    assert stripped == inventory_paths, (
+        f"Path contract broken between tar and inventory.\n"
+        f"  tar (stripped of {prefix!r}): {stripped}\n"
+        f"  inventory:                    {inventory_paths}\n"
+        f"  Phase 5 verifier must use {{dest}}/{{project_dir.name}}/{{path}}."
+    )
+
+
+def test_tar_paths_include_dir_entries_but_inventory_does_not(tmp_path: Path):
+    """Side-contract: tar also contains directory entries (transcript/, tts/),
+    but file_inventory MUST NOT — verifier should never try to sha256 a dir."""
+    from gateway.pan.manifest import build_manifest, write_tar_with_manifest
+
+    project = tmp_path / 'job_dirs'
+    (project / 'subdir').mkdir(parents=True)
+    (project / 'subdir' / 'leaf.txt').write_text('leaf')
+
+    manifest = build_manifest(project_dir=project, job_record={}, r2_artifacts=[])
+    tar_path = tmp_path / 'd.tar.gz'
+    write_tar_with_manifest(tar_path, manifest, project)
+
+    # Inventory has 1 file only (the leaf), no dir entry.
+    assert len(manifest['file_inventory']) == 1
+    assert manifest['file_inventory'][0]['path'] == 'subdir/leaf.txt'
+
+    with tarfile.open(tar_path, 'r:gz') as tf:
+        members = tf.getmembers()
+    dir_members = [m for m in members if m.isdir()]
+    file_members = [m for m in members if m.isfile() and m.name != 'manifest.json']
+    # tarfile typically stores dir entries for traversed dirs.
+    assert dir_members, 'tar should contain directory entries for traversed dirs'
+    assert len(file_members) == 1
+    assert file_members[0].name == f'{project.name}/subdir/leaf.txt'
