@@ -488,7 +488,16 @@ function BackupTimelineEntry({ backup }: { backup: BackupRecord }) {
         className={`absolute -left-[31px] mt-1 size-3 rounded-full ring-4 ${toneClass}`}
       />
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-        <code className="text-sm font-medium">{backup.job_id}</code>
+        {backup.job_display_name ? (
+          <span
+            className="text-sm font-medium text-foreground"
+            title={backup.job_id}
+          >
+            {backup.job_display_name}
+          </span>
+        ) : (
+          <code className="text-sm font-medium">{backup.job_id}</code>
+        )}
         <span
           className={`rounded px-1.5 py-0.5 text-xs ${
             tone === "success"

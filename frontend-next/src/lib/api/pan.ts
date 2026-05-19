@@ -43,6 +43,13 @@ export type BackupRecordStatus =
 export interface BackupRecord {
   id: string
   job_id: string
+  /**
+   * User-facing job label resolved by the backend (Job.display_name →
+   * Job.title → null). When null, frontend should fall back to job_id.
+   * Null commonly means the source Job was deleted (FK is intentionally
+   * absent so backup tarballs survive job deletion).
+   */
+  job_display_name: string | null
   job_edit_generation: number
   provider: string
   remote_path: string

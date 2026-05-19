@@ -554,12 +554,31 @@ function BackupRow({
       <td className="px-4 py-3">
         <Link
           href={`/workspace/${row.job_id}`}
-          className="font-mono text-xs hover:underline"
+          className="block hover:underline"
+          title={row.job_id}
         >
-          {row.job_id}
+          {/* Prefer the user-facing display name when available; fall back
+              to job_id (mono, smaller) so deleted-Job rows still link. */}
+          {row.job_display_name ? (
+            <span className="block max-w-[260px] truncate text-sm text-foreground">
+              {row.job_display_name}
+            </span>
+          ) : (
+            <span className="block font-mono text-xs text-muted-foreground">
+              {row.job_id}
+            </span>
+          )}
         </Link>
-        <div className="text-xs text-muted-foreground">
-          gen {row.job_edit_generation}
+        <div className="mt-0.5 flex items-center gap-2 text-xs text-muted-foreground">
+          <span>gen {row.job_edit_generation}</span>
+          {row.job_display_name && (
+            <span
+              className="font-mono"
+              title="任务 ID(完整可在 URL 看到)"
+            >
+              · {row.job_id.slice(0, 8)}…
+            </span>
+          )}
         </div>
       </td>
       <td className="px-4 py-3">
@@ -686,7 +705,7 @@ function ManifestDialog({
       <DialogContent className="max-h-[80vh] max-w-3xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle>
-            Manifest · {backup?.job_id ?? "—"}
+            Manifest · {backup?.job_display_name ?? backup?.job_id ?? "—"}
           </DialogTitle>
           <DialogDescription>
             备份包内 manifest.json 的解析结果。文件列表由 tar 内部为准

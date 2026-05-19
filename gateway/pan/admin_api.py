@@ -103,13 +103,27 @@ def _client_factory() -> BaiduPanClient:
     )
 
 
-def _serialize_backup_record(br: BackupRecord) -> dict[str, Any]:
+def _serialize_backup_record(
+    br: BackupRecord,
+    *,
+    job_display_name: str | None = None,
+) -> dict[str, Any]:
     """Public-facing JSON serialization. manifest_json is omitted from
-    list responses — fetch via /backups/{id}/manifest if needed."""
+    list responses — fetch via /backups/{id}/manifest if needed.
+
+    ``job_display_name`` is the user-facing label resolved via the
+    list_backups bulk lookup (Job.display_name → Job.title → None).
+    When None the frontend falls back to ``job_id`` so deleted-job
+    rows still show something. NOT looked up from the BackupRecord
+    itself — there's no FK between backup_records.job_id and jobs.job_id
+    (intentional, plan §1) so the Job row can be deleted while keeping
+    the backup tar.gz on pan.
+    """
     return {
         "id": str(br.id),
         "user_id": str(br.user_id),
         "job_id": br.job_id,
+        "job_display_name": job_display_name,
         "job_edit_generation": br.job_edit_generation,
         "provider": br.provider,
         "remote_path": br.remote_path,
@@ -260,8 +274,32 @@ async def list_backups(
 
     stmt = stmt.order_by(desc(BackupRecord.created_at)).limit(limit).offset(offset)
     rows = (await db.execute(stmt)).scalars().all()
+
+    # Bulk-resolve job_id → display_name (or fallback to title) for the
+    # current page only — keeps the main count() query simple and avoids
+    # JOIN on every list call. Map omits jobs that have been deleted
+    # (FK is intentionally absent per plan §1, so backup tarballs survive
+    # job deletion); the serializer falls back to job_id in that case.
+    page_job_ids = {r.job_id for r in rows}
+    display_names: dict[str, str] = {}
+    if page_job_ids:
+        job_rows = (await db.execute(
+            select(Job.job_id, Job.display_name, Job.title)
+            .where(Job.job_id.in_(page_job_ids))
+        )).all()
+        for jrow in job_rows:
+            # Same precedence as gateway/pan/_events.py::dispatch_pan_failure_notification:
+            # display_name (Studio-editable) > title (source video) > None
+            # (frontend falls back to job_id when None).
+            resolved = jrow.display_name or jrow.title or None
+            if resolved:
+                display_names[jrow.job_id] = resolved
+
     return {
-        "items": [_serialize_backup_record(r) for r in rows],
+        "items": [
+            _serialize_backup_record(r, job_display_name=display_names.get(r.job_id))
+            for r in rows
+        ],
         "total": total,
         "limit": limit,
         "offset": offset,
