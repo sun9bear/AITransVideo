@@ -108,6 +108,13 @@ STREAM_LOCAL_SERVED = frozenset({
 
 # Pan 内部分组 — 用 "结果" 维度切,方便 dashboard 看成功率。token_revoked
 # 是 auth 层副作用,放到 OTHER 桶里单独显示。
+#
+# CodeX 2026-05-19 P2: started 桶**只是 `*.started` 事件计数**,不是 "现在
+# 进行中的操作数"。后者需要按 backup_id / job_id 配对 started→terminal
+# 算未配对者,本脚本不做这种状态机重建。所以一个 backup.started +
+# backup.succeeded 序列会显示 started=1, succeeded=1 —— 这是事件计数语义,
+# 不是当下快照。要看 "现在卡住了多少",查 backup_records.status='uploading'
+# 的行。
 PAN_SUCCESS = frozenset({
     "pan.backup.succeeded",
     "pan.restore.succeeded",
@@ -117,7 +124,7 @@ PAN_FAILURE = frozenset({
     "pan.backup.failed",
     "pan.restore.failed",
 })
-PAN_IN_FLIGHT = frozenset({
+PAN_STARTED = frozenset({
     "pan.backup.started",
     "pan.restore.started",
 })
@@ -258,7 +265,7 @@ def render_text(
     pan_total = sum(counter[t] for t in PAN_EVENT_TYPES)
     pan_succ = sum(counter[t] for t in PAN_SUCCESS)
     pan_fail = sum(counter[t] for t in PAN_FAILURE)
-    pan_flight = sum(counter[t] for t in PAN_IN_FLIGHT)
+    pan_started = sum(counter[t] for t in PAN_STARTED)
 
     lines = []
     lines.append(f"=== R2 灰度观察 (since={since_label}) ===")
@@ -289,11 +296,18 @@ def render_text(
     lines.append("")
 
     # Plan 2026-05-14 §Phase 9 T9.4: admin pan backup section.
+    # CodeX 2026-05-19 P2: "已开始 (started)" counts pan.*.started events,
+    # NOT currently-in-progress operations. A succeeded backup contributes
+    # to both started=1 and 完成=1. To see "stuck right now", query
+    # backup_records.status in ('uploading','restoring').
     lines.append("--- Pan Backup (网盘备份/恢复) ---")
-    lines.append(f"  总数:           {pan_total}")
+    lines.append(f"  事件总数:       {pan_total}")
     lines.append(f"  完成:           {pan_succ:>6}  {_pct(pan_succ, pan_total)}")
     lines.append(f"  失败:           {pan_fail:>6}  {_pct(pan_fail, pan_total)}")
-    lines.append(f"  进行中:         {pan_flight:>6}  {_pct(pan_flight, pan_total)}")
+    lines.append(
+        f"  已开始 (started事件):  {pan_started:>6}  "
+        f"{_pct(pan_started, pan_total)}"
+    )
     for t in sorted(PAN_EVENT_TYPES):
         lines.append(
             f"    {t:<40} {counter[t]:>6}  {_pct(counter[t], pan_total)}"
@@ -376,11 +390,16 @@ def render_json(
             },
         },
         # Plan 2026-05-14 §Phase 9 T9.4: admin pan backup observability.
+        # CodeX 2026-05-19 P2: "started" is the count of pan.*.started
+        # events seen in the window, NOT currently-in-progress ops. A
+        # succeeded backup contributes 1 to both started and succeeded.
+        # For "what's stuck right now" the dashboard caller should query
+        # backup_records.status in ('uploading','restoring') directly.
         "pan": {
             "total": pan_total,
             "succeeded": sum(counter[t] for t in PAN_SUCCESS),
             "failed": sum(counter[t] for t in PAN_FAILURE),
-            "in_flight": sum(counter[t] for t in PAN_IN_FLIGHT),
+            "started": sum(counter[t] for t in PAN_STARTED),
             "by_event_type": {
                 t: counter[t] for t in sorted(PAN_EVENT_TYPES)
             },

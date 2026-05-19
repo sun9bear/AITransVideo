@@ -312,7 +312,7 @@ def test_script_event_vocab_in_sync_with_jobs_events() -> None:
         f"r2_observability.py missing pan.* types known to "
         f"services.jobs.events: {sorted(missing_pan)}. "
         f"Add them to PAN_EVENT_TYPES (and likely PAN_SUCCESS / PAN_FAILURE "
-        f"/ PAN_IN_FLIGHT / PAN_OTHER)."
+        f"/ PAN_STARTED / PAN_OTHER)."
     )
     assert not extra_pan, (
         f"r2_observability.py has unknown pan.* types: "
