@@ -1,6 +1,6 @@
 "use client"
 
-import { Suspense, useCallback, useEffect, useRef, useState } from "react"
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import Link from "next/link"
 import { useRouter, useSearchParams } from "next/navigation"
 import { toast } from "sonner"
@@ -16,7 +16,11 @@ import {
   XCircle,
   RefreshCw,
   Pencil,
+  Cloud,
+  X,
+  Loader2,
 } from "lucide-react"
+import { enqueueBackupBatch } from "@/lib/api/pan"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import {
@@ -156,6 +160,13 @@ function ProjectsContent() {
   // pre-fill title so the Modal can open over any card without re-sorting.
   const [renamingJob, setRenamingJob] = useState<JobSummary | null>(null)
   const [renameSubmitting, setRenameSubmitting] = useState(false)
+
+  // Bulk pan-backup selection (admin only — UI gated below by isAdminView
+  // and per-card checkboxes only show on status='succeeded' rows).
+  const [selectedBackupIds, setSelectedBackupIds] = useState<Set<string>>(
+    () => new Set(),
+  )
+  const [bulkBackingUp, setBulkBackingUp] = useState(false)
 
   const initialExpandDone = useRef(false)
   const prevJobIdsRef = useRef<Set<string>>(new Set())
@@ -393,6 +404,79 @@ function ProjectsContent() {
     [renamingJob, updateJobs],
   )
 
+  // ---- Bulk pan-backup helpers (admin only) ----
+  // Backend: POST /api/admin/pan/backups/batch (Phase 7a).
+  // Eligibility: only status='succeeded' rows. Selection auto-prunes when
+  // a job is deleted or its status moves out of 'succeeded' (polling).
+
+  const eligibleBackupIds = useMemo(
+    () => jobs.filter((j) => j.status === "succeeded").map((j) => j.id),
+    [jobs],
+  )
+
+  useEffect(() => {
+    setSelectedBackupIds((prev) => {
+      if (prev.size === 0) return prev
+      const allowed = new Set(eligibleBackupIds)
+      const next = new Set<string>()
+      for (const id of prev) if (allowed.has(id)) next.add(id)
+      return next.size === prev.size ? prev : next
+    })
+  }, [eligibleBackupIds])
+
+  const toggleBackupSelect = useCallback((jobId: string) => {
+    setSelectedBackupIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(jobId)) next.delete(jobId)
+      else next.add(jobId)
+      return next
+    })
+  }, [])
+
+  const clearBackupSelection = useCallback(
+    () => setSelectedBackupIds(new Set()),
+    [],
+  )
+
+  const handleBulkBackup = useCallback(async () => {
+    if (selectedBackupIds.size === 0) return
+    const ids = Array.from(selectedBackupIds)
+    if (
+      !window.confirm(
+        `确认将 ${ids.length} 个已完成任务批量备份到百度网盘?\n\n` +
+          "每个任务会:\n" +
+          "• 打包工程目录为 tar.gz\n" +
+          "• 跨境上传到 admin 网盘 (1GB 任务约 15-30 分钟)\n" +
+          "• 成功后任务状态变为「已归档」, 本地原文件被删除\n\n" +
+          "失败任务可在 /admin/pan/backups 单独重试。",
+      )
+    )
+      return
+    setBulkBackingUp(true)
+    try {
+      const r = await enqueueBackupBatch(ids)
+      const okN = r.succeeded?.length ?? 0
+      const failN = r.failed?.length ?? 0
+      if (failN === 0) {
+        toast.success(`已入队 ${okN} 个备份任务`)
+      } else if (okN === 0) {
+        toast.error(`全部 ${failN} 个失败:${r.failed[0]?.reason ?? "未知错误"}`)
+      } else {
+        toast.warning(
+          `${okN} 个入队成功 · ${failN} 个失败 (${r.failed
+            .slice(0, 2)
+            .map((f) => f.job_id.slice(0, 8))
+            .join(", ")}${failN > 2 ? "…" : ""})`,
+        )
+      }
+      if (okN > 0) clearBackupSelection()
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "批量备份入队失败")
+    } finally {
+      setBulkBackingUp(false)
+    }
+  }, [selectedBackupIds, clearBackupSelection])
+
   // ---- Derived state ----
 
   const activeTask = selectActiveTaskJob(jobs)
@@ -506,6 +590,43 @@ function ProjectsContent() {
         </p>
       </div>
 
+      {/* Admin-only bulk pan backup toolbar — shows when ≥ 1 succeeded job
+          is selected. Sticky so it stays visible while scrolling cards.
+          Not rendered for regular users (isAdminView=false) because the
+          backend rejects /api/admin/pan/* without role=admin. */}
+      {isAdminView && selectedBackupIds.size > 0 && (
+        <div className="sticky top-0 z-10 flex flex-wrap items-center gap-3 rounded-xl border border-[color:var(--cinnabar)]/30 bg-[color:var(--cinnabar)]/5 px-4 py-3 shadow-sm">
+          <span className="text-sm text-foreground">
+            已选 <strong>{selectedBackupIds.size}</strong> 个已完成项目
+          </span>
+          <div className="ml-auto flex items-center gap-2">
+            <button
+              type="button"
+              disabled={bulkBackingUp}
+              onClick={handleBulkBackup}
+              className="flex items-center gap-1.5 rounded-lg bg-[color:var(--cinnabar)] px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50"
+            >
+              {bulkBackingUp ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Cloud className="h-3.5 w-3.5" />
+              )}
+              批量备份到网盘
+            </button>
+            <button
+              type="button"
+              onClick={clearBackupSelection}
+              disabled={bulkBackingUp}
+              className="flex items-center gap-1 rounded-lg border border-border px-2 py-1.5 text-xs text-muted-foreground hover:bg-muted/40 disabled:opacity-50"
+              title="清空选择"
+            >
+              <X className="h-3.5 w-3.5" />
+              清空
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="grid gap-3 grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
         {sorted.map((job) => {
           // D19: 副本卡片标题下显示 "· 派生自 <源名>"。源 job 多半在同一
@@ -530,6 +651,9 @@ function ProjectsContent() {
               isDeleting={deletingId === job.id}
               isCancelling={cancellingId === job.id}
               isAdminView={isAdminView}
+              backupSelectable={isAdminView && job.status === "succeeded"}
+              isBackupSelected={selectedBackupIds.has(job.id)}
+              onToggleBackupSelect={toggleBackupSelect}
             />
           )
         })}
@@ -633,6 +757,9 @@ function ProjectCard({
   isDeleting,
   isCancelling,
   isAdminView,
+  backupSelectable,
+  isBackupSelected,
+  onToggleBackupSelect,
 }: {
   job: JobSummary
   /** D19: 显示"派生自 <源名>"时的源 job 标题。null = 非副本或源已被清理。 */
@@ -646,6 +773,10 @@ function ProjectCard({
   isDeleting: boolean
   isCancelling: boolean
   isAdminView: boolean
+  /** True when admin + job.status='succeeded'. False hides the checkbox entirely. */
+  backupSelectable: boolean
+  isBackupSelected: boolean
+  onToggleBackupSelect: (jobId: string) => void
 }) {
   const router = useRouter()
   const expiry = computeExpiryInfo(job)
@@ -654,18 +785,41 @@ function ProjectCard({
   const showEditShortcut = isJobEditEligible(job)
 
   return (
-    <Card size="sm" className="overflow-visible">
+    <Card
+      size="sm"
+      className={`overflow-visible ${
+        isBackupSelected
+          ? "ring-2 ring-[color:var(--cinnabar)]/40 bg-[color:var(--cinnabar)]/5"
+          : ""
+      }`}
+    >
       {/* Card header — clickable to expand/collapse */}
-      <button
-        type="button"
-        onClick={onToggle}
-        className="flex w-full items-center gap-3 px-4 py-3 text-left transition hover:bg-muted/30"
-      >
-        {isExpanded ? (
-          <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
-        ) : (
-          <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+      <div className="flex items-center gap-3 px-4 py-3">
+        {backupSelectable && (
+          <label
+            className="flex shrink-0 cursor-pointer items-center"
+            onClick={(e) => e.stopPropagation()}
+            title="勾选以批量备份到网盘"
+          >
+            <input
+              type="checkbox"
+              aria-label={`选择项目 ${getJobDisplayTitle(job)} 加入批量备份`}
+              checked={isBackupSelected}
+              onChange={() => onToggleBackupSelect(job.id)}
+              className="h-4 w-4 cursor-pointer accent-[color:var(--cinnabar)]"
+            />
+          </label>
         )}
+        <button
+          type="button"
+          onClick={onToggle}
+          className="flex flex-1 items-center gap-3 text-left transition hover:bg-muted/30 -mx-2 px-2 py-1 rounded"
+        >
+          {isExpanded ? (
+            <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
+          ) : (
+            <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+          )}
 
         <div className="min-w-0 flex-1 space-y-0.5">
           <div className="flex items-center gap-2">
@@ -710,7 +864,8 @@ function ProjectCard({
             isCancelling={isCancelling}
           />
         </div>
-      </button>
+        </button>
+      </div>
 
       {/* Expanded content */}
       {isExpanded && (
