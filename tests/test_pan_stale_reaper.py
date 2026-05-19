@@ -140,9 +140,75 @@ def test_reaper_reaps_uploading_with_stale_heartbeat(monkeypatch):
     run_async(_go())
 
 
+def test_reaper_forward_resolves_restoring_when_project_dir_exists(
+    monkeypatch, tmp_path,
+):
+    """CodeX P0-2: restoring + stale heartbeat + project_dir EXISTS on
+    disk → restore_executor.os.replace already succeeded (moved=True
+    scenario), only DB finalize failed. Forward-resolve: Job='succeeded'
+    + BR='restored'. Blindly rolling back here would create the "data
+    on disk + DB says archived" stuck state Phase 5 P1 specifically
+    prevents — next restore would refuse because project_dir exists."""
+    from models import BackupRecord, Job
+    from pan.stale_reaper import run_stale_reaper_tick
+
+    setup_pan_token_env(monkeypatch)
+    user_id = uuid.uuid4()
+    # project_dir REAL on disk to simulate post-move state.
+    project_dir = tmp_path / 'restored_project'
+    project_dir.mkdir()
+    (project_dir / 'data.json').write_text('{"restored": true}')
+
+    async def _go():
+        async with reaper_test_engine() as engine:
+            await insert_sample_job(
+                engine, user_id=user_id, job_id='post_move',
+                status='restoring',
+                project_dir=str(project_dir),
+            )
+            br = await insert_sample_backup_record(
+                engine, user_id=user_id, job_id='post_move',
+                status='restoring',
+            )
+            await _set_heartbeat(
+                engine, br['id'],
+                datetime.now(timezone.utc) - timedelta(hours=5),
+            )
+
+            stats = await run_stale_reaper_tick(engine)
+            assert stats['in_flight_reaped'] == 1
+
+            Session = async_sessionmaker(engine, class_=AsyncSession,
+                                         expire_on_commit=False)
+            async with Session() as db:
+                job_status = (await db.execute(
+                    select(Job.status).where(Job.job_id == 'post_move')
+                )).scalar_one()
+                br_row = (await db.execute(
+                    select(
+                        BackupRecord.status, BackupRecord.error_message,
+                        BackupRecord.completed_at,
+                    ).where(BackupRecord.id == br['id'])
+                )).one()
+            # Forward-resolved — NOT rolled back to archived/uploaded.
+            assert job_status == 'succeeded'
+            assert br_row.status == 'restored'
+            assert 'post-move' in (br_row.error_message or '')
+            assert 'forward-resolved' in (br_row.error_message or '')
+            assert br_row.completed_at is not None
+
+            # project_dir UNTOUCHED — reaper does NOT rmtree it.
+            assert project_dir.exists()
+            assert (project_dir / 'data.json').read_text() == '{"restored": true}'
+
+    run_async(_go())
+
+
 def test_reaper_reaps_restoring_with_stale_heartbeat(monkeypatch):
-    """restoring + heartbeat > 4h → reap: BR.status='uploaded' (revert
-    to recoverable), Job.status='archived' (revert from restoring)."""
+    """restoring + heartbeat > 4h + project_dir does NOT exist (pre-move
+    failure: download/extract/verify died before os.replace) →
+    rollback: BR.status='uploaded' (recoverable, tar still in pan),
+    Job.status='archived'."""
     from models import BackupRecord, Job
     from pan.stale_reaper import run_stale_reaper_tick
 

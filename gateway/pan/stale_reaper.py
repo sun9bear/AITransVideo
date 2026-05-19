@@ -14,10 +14,18 @@ scan two classes of stuck pan operations and reconcile them:
       uploading  → BackupRecord.status='failed' + Job.status back to
                    'succeeded' (data is still in project_dir; no remote
                    tar yet, or partial — orphan_cleanup sweeps next)
-      restoring  → BackupRecord.status='uploaded' (revert to recoverable
-                   state) + Job.status back to 'archived' (tar still in
-                   pan, project_dir might be in staging dir which the
-                   restore executor's finally cleaned)
+      restoring  → CHECK project_dir.exists() (CodeX P0-2):
+                     ⌐ exists (moved=True scenario from restore_executor
+                       — os.replace succeeded but DB finalize failed)
+                       → forward-resolve to Job.status='succeeded' +
+                         BackupRecord.status='restored'. Blindly
+                         rolling back would create the "data on disk
+                         + DB says archived" stuck state that Phase 5
+                         P1 specifically prevents.
+                     ⌐ doesn't exist (move never happened — failure
+                       was during download / extract / verify)
+                       → BackupRecord.status='uploaded' (revert to
+                         recoverable) + Job.status back to 'archived'.
   - lock NOT acquired → real executor is still alive (PG advisory locks
                         are session-bound) → skip this row, try next tick
 
@@ -140,16 +148,25 @@ async def run_stale_reaper_tick(
                     row.id,
                 )
                 continue
+            # CodeX P1-3: `SELECT pg_try_advisory_lock(...)` auto-begins
+            # a transaction on PG. The reap helpers below open their
+            # own `async with conn.begin()` and would error
+            # "already in transaction". Flush the lock-acquire txn now;
+            # the advisory lock itself is session-scoped (pg_try_advisory_lock
+            # without _xact_), so commit doesn't release it.
+            await conn.commit()
             try:
                 if row.status == 'uploading':
                     await _reap_uploading(conn, row)
+                    reap_label = 'rollback-uploading'
                 elif row.status == 'restoring':
-                    await _reap_restoring(conn, row)
-                await conn.commit()
+                    reap_label = await _reap_restoring(conn, row)
+                else:
+                    reap_label = 'unknown'
                 stats['in_flight_reaped'] += 1
                 logger.info(
-                    "pan_stale_reaper: reaped %s br=%s user=%s job=%s",
-                    row.status, row.id, row.user_id, row.job_id,
+                    "pan_stale_reaper: reaped %s br=%s user=%s job=%s mode=%s",
+                    row.status, row.id, row.user_id, row.job_id, reap_label,
                 )
             except Exception as exc:  # noqa: BLE001
                 try:
@@ -203,6 +220,10 @@ async def run_stale_reaper_tick(
                     row.job_id,
                 )
                 continue
+            # CodeX P1-3: flush the auto-begin txn from
+            # `SELECT pg_try_advisory_lock(...)` before opening explicit
+            # begin() blocks below.
+            await conn.commit()
             try:
                 # Forward-resolve to archived.
                 async with conn.begin():
@@ -210,28 +231,26 @@ async def run_stale_reaper_tick(
                         row.user_id, row.job_id, 'archived', conn=conn,
                     )
 
-                # Enqueue residue cleanup to retry rmtree + R2 delete.
-                # Use a fresh session because queue.create_task expects
-                # AsyncSession (not AsyncConnection).
+                # Enqueue residue cleanup via the shared helper that
+                # creates the BackgroundTask row AND launches the
+                # executor (CodeX P0-1). Use a fresh session because
+                # the helper expects AsyncSession (not the AsyncConnection
+                # we hold the advisory lock on).
                 from sqlalchemy.ext.asyncio import (
                     AsyncSession as _AsyncSession, async_sessionmaker,
                 )
-                import background_task_queue as queue
+                from pan._enqueue import enqueue_pan_task
                 Session = async_sessionmaker(
                     engine, class_=_AsyncSession, expire_on_commit=False,
                 )
                 async with Session() as bg_db:
-                    await queue.create_task(
+                    await enqueue_pan_task(
                         bg_db,
-                        job_id=row.job_id,
                         user_id=row.user_id,
+                        job_id=row.job_id,
                         task_type='pan_residue_cleanup',
-                        params={
-                            'user_id': str(row.user_id),
-                            'backup_id': str(row.br_id),
-                        },
+                        extra_params={'backup_id': str(row.br_id)},
                     )
-                    await bg_db.commit()
 
                 stats['post_commit_forwarded'] += 1
                 stats['residue_cleanup_enqueued'] += 1
@@ -257,7 +276,6 @@ async def run_stale_reaper_tick(
 async def _reap_uploading(conn: AsyncConnection, row) -> None:
     """Pre-COMMIT-POINT executor died. backup_records → 'failed',
     Job.status → 'succeeded' (data still in project_dir)."""
-    # set_archive_status uses its own short txn; we open an outer one.
     async with conn.begin():
         await set_archive_status(
             row.user_id, row.job_id, 'succeeded', conn=conn,
@@ -273,10 +291,63 @@ async def _reap_uploading(conn: AsyncConnection, row) -> None:
         )
 
 
-async def _reap_restoring(conn: AsyncConnection, row) -> None:
-    """Restore executor died mid-download. backup_records → 'uploaded'
-    (recoverable — tar still in pan), Job.status → 'archived' (revert
-    to pre-restore state)."""
+async def _reap_restoring(conn: AsyncConnection, row) -> str:
+    """Restore executor died mid-flight. CodeX P0-2: must distinguish
+    pre-move vs post-move failure:
+
+      - post-move (os.replace already moved staging→project_dir, only
+        DB finalize failed): project_dir exists with restored data.
+        Forward-resolve: Job.status='succeeded' + BR.status='restored'.
+        Blindly rolling back to 'archived' here would create the "data
+        on disk + DB says archived" stuck state that next restore
+        refuses (project_dir already exists), defeating Phase 5 P1's
+        moved=True commit-point fix.
+      - pre-move (download / extract / verify failed before os.replace):
+        project_dir doesn't exist. Rollback: BR.status='uploaded' +
+        Job.status='archived' (tar still in pan, retry possible).
+
+    Returns a label for logging ('forward-resolve' / 'rollback').
+    """
+    # Look up project_dir to decide which branch.
+    job_row = (await conn.execute(
+        select(Job.project_dir).where(
+            Job.user_id == row.user_id, Job.job_id == row.job_id,
+        )
+    )).one_or_none()
+
+    project_exists = False
+    if job_row is not None and job_row.project_dir:
+        from pathlib import Path
+        try:
+            project_dir = Path(job_row.project_dir).resolve()
+            project_exists = project_dir.exists() and project_dir.is_dir()
+        except (OSError, RuntimeError):
+            project_exists = False
+    # commit the SELECT's auto-begin so the explicit begin() below works.
+    await conn.commit()
+
+    now = datetime.now(timezone.utc)
+    if project_exists:
+        # Post-move: data is on disk. Forward-resolve.
+        async with conn.begin():
+            await set_archive_status(
+                row.user_id, row.job_id, 'succeeded', conn=conn,
+            )
+            await conn.execute(
+                update(BackupRecord)
+                .where(BackupRecord.id == row.id)
+                .values(
+                    status='restored',
+                    error_message=(
+                        'reaped: heartbeat stale post-move '
+                        '(forward-resolved to succeeded/restored)'
+                    ),
+                    completed_at=now,
+                )
+            )
+        return 'forward-resolve'
+
+    # Pre-move: rollback as before.
     async with conn.begin():
         await set_archive_status(
             row.user_id, row.job_id, 'archived', conn=conn,
@@ -286,6 +357,7 @@ async def _reap_restoring(conn: AsyncConnection, row) -> None:
             .where(BackupRecord.id == row.id)
             .values(
                 status='uploaded',
-                error_message='reaped: heartbeat stale (restoring phase)',
+                error_message='reaped: heartbeat stale (restoring, pre-move)',
             )
         )
+    return 'rollback'
