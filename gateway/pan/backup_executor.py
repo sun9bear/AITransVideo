@@ -305,10 +305,50 @@ async def _execute_pan_backup_impl(
                         f"Gate 1 (size) failed: server {upload_result.get('size')} "
                         f"!= local {local_size}"
                     )
-                if upload_result.get('md5') != md5:
-                    raise RuntimeError(
-                        f"Gate 2 (md5) failed: server {upload_result.get('md5')!r} "
-                        f"!= local {md5!r}"
+
+                # Gate 2 (md5) — Production 2026-05-19: Baidu's
+                # `pan/file?method=create` returns a 32-char `md5` that is
+                # NOT always raw hex. Real cases observed:
+                #   server: '6d3a845fevc7f34602947bd7d978bef1'  (note the
+                #           'v' at position 11 — non-hex)
+                #   local:  '500ee15350281f0f459b0cbdf0d06503'  (valid hex)
+                # Baidu obfuscates the md5 for some upload paths (e.g.
+                # rapid-upload hits, large-file paths, undocumented data-
+                # security trigger). Strict equality fails on every such
+                # upload even when the content is byte-identical.
+                #
+                # We still have layered guarantees WITHOUT this gate:
+                #  - block_list verification: precreate + per-chunk upload
+                #    rely on chunk md5s we computed locally. Baidu's
+                #    finalize step rejects (errno != 0) if the merged
+                #    content doesn't reconstruct the declared block list.
+                #  - Gate 1 (size) ensures byte count matches.
+                #  - Gate 3 (read-back probe) re-reads the tail of the
+                #    remote file and checks against the local tail.
+                #
+                # Decision: only enforce Gate 2 when the server md5 looks
+                # like raw hex (32 lowercase hex chars). Non-hex returns
+                # are logged at INFO and treated as best-effort confirmation;
+                # the layered guarantees above carry the safety.
+                server_md5_raw = upload_result.get('md5') or ''
+                server_md5_looks_hex = (
+                    isinstance(server_md5_raw, str)
+                    and len(server_md5_raw) == 32
+                    and all(c in '0123456789abcdef' for c in server_md5_raw.lower())
+                )
+                if server_md5_looks_hex:
+                    if server_md5_raw.lower() != md5.lower():
+                        raise RuntimeError(
+                            f"Gate 2 (md5) failed: server {server_md5_raw!r} "
+                            f"!= local {md5!r}"
+                        )
+                else:
+                    logger.info(
+                        "pan_backup: Gate 2 (md5) — Baidu returned non-hex "
+                        "md5=%r, treating as obfuscated (rapid-upload / "
+                        "data-security). Skipping strict equality; relying "
+                        "on block_list + size + read-back probe gates. "
+                        "job=%s br=%s", server_md5_raw, job_id, br_id,
                     )
                 read_back_ok = await asyncio.to_thread(
                     client.verify_remote_tail, tar_path, remote_path,
@@ -433,6 +473,11 @@ async def _execute_pan_backup_impl(
                 # Pre-COMMIT-POINT failure path. Mark backup_records=failed
                 # and roll Job.status back to 'succeeded' so the row isn't
                 # stuck in 'archiving'. THEN re-raise.
+                # Production 2026-05-19: capture primary_exc as
+                # error_message — previously left null/'' which made the
+                # admin UI's failure column unhelpful. 500-char truncate
+                # for Text column safety.
+                failure_reason = str(primary_exc)[:500] or 'unknown'
                 if br_id is not None:
                     try:
                         async with conn.begin():
@@ -442,6 +487,7 @@ async def _execute_pan_backup_impl(
                                 .values(
                                     status='failed',
                                     completed_at=datetime.now(timezone.utc),
+                                    error_message=failure_reason,
                                 )
                             )
                     except Exception as inner_exc:  # noqa: BLE001

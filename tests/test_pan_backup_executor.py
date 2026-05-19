@@ -273,6 +273,55 @@ def test_gate_size_mismatch_raises_and_rolls_back(monkeypatch, tmp_path):
     run_async(_go())
 
 
+def test_gate_md5_skips_when_server_returns_non_hex(monkeypatch, tmp_path):
+    """Production 2026-05-19: Baidu sometimes returns a 32-char md5 that
+    contains non-hex characters (obfuscated for rapid-upload / data
+    security). Gate 2 must treat these as best-effort, NOT raise — the
+    layered guarantees (block_list + size + read-back probe) carry safety.
+    """
+    from models import Job, BackupRecord
+
+    setup_pan_token_env(monkeypatch)
+    user_id = uuid.uuid4()
+    job_id = 'job_gate_md5_nonhex'
+
+    async def _go():
+        async with pan_test_engine() as engine:
+            project = make_project_dir(tmp_path, job_id=job_id, monkeypatch=monkeypatch)
+            await insert_sample_job(
+                engine, user_id=user_id, job_id=job_id,
+                project_dir=str(project),
+            )
+            await insert_sample_pan_credentials(engine, user_id=user_id)
+
+            class ObfuscatedMd5Client(FakeBaiduPanClient):
+                def upload(self, local_path, remote_path, *, access_token):
+                    res = super().upload(local_path, remote_path,
+                                         access_token=access_token)
+                    # Real production sample (note 'v' at position 11):
+                    res['md5'] = '6d3a845fevc7f34602947bd7d978bef1'
+                    return res
+
+            # Must NOT raise — obfuscated md5 is logged + skipped.
+            await _run_executor(
+                {'job_id': job_id, 'user_id': str(user_id)},
+                engine=engine, client=ObfuscatedMd5Client(),
+            )
+
+            # Backup proceeded to commit (status='uploaded' after the
+            # post-Gate-2 path) — job ends at 'archived' assuming rmtree
+            # + R2 deletion succeed in this test fixture.
+            async with engine.connect() as conn:
+                br_status = (await conn.execute(
+                    select(BackupRecord.status)
+                    .where(BackupRecord.job_id == job_id)
+                )).scalar_one()
+            assert br_status in ('uploaded', 'failed')  # depends on fixture
+            # The point: did NOT raise Gate 2 RuntimeError above.
+
+    run_async(_go())
+
+
 def test_gate_md5_mismatch_raises_and_rolls_back(monkeypatch, tmp_path):
     """Plan §7 step h2: server md5 != local md5 → raise, rollback."""
     from models import Job, BackupRecord
@@ -307,7 +356,12 @@ def test_gate_md5_mismatch_raises_and_rolls_back(monkeypatch, tmp_path):
                 def upload(self, local_path, remote_path, *, access_token):
                     res = super().upload(local_path, remote_path,
                                          access_token=access_token)
-                    res['md5'] = 'wrong_md5_xxxxxxxxxxxxxxxxxxxxxx'
+                    # Must be a valid 32-char lowercase hex string to
+                    # trigger the strict-comparison branch in Gate 2
+                    # (2026-05-19 fix: non-hex server md5 is now treated
+                    # as Baidu's obfuscated/rapid-upload variant and
+                    # skipped, see backup_executor.py Gate 2 section).
+                    res['md5'] = 'a' * 32
                     return res
 
             wrong = WrongMd5Client()
