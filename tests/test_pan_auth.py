@@ -600,6 +600,89 @@ def test_refresh_tick_marks_revoked_on_failure_and_dispatches_real_notification(
     run_async(_go())
 
 
+def test_refresh_tick_commit_failure_skips_jsonl_emit_and_stats(monkeypatch):
+    """CodeX 2026-05-19 P1c: if db.commit() raises on the revoke path,
+    the credential stays 'active' in PG (transaction rolled back), the
+    notification row isn't visible, and we MUST NOT write a
+    pan.token_revoked JSONL row or bump stats['revoked']. Otherwise
+    r2_observability would show a false-positive revocation event.
+    """
+    from models import PanCredentials
+    from pan import auth as auth_mod
+    from pan.auth import pan_token_refresh_tick
+
+    setup_pan_token_env(monkeypatch)
+
+    user_id = uuid.uuid4()
+    jsonl_emits: list[dict] = []
+
+    def capture_emit(**kwargs):
+        jsonl_emits.append(kwargs)
+
+    monkeypatch.setattr(auth_mod, '_emit_pan_event_safe', capture_emit)
+
+    class FailingClient(FakeBaiduPanClient):
+        def refresh(self, refresh_token):
+            raise RuntimeError('refresh boom — force revoke path')
+
+    async def _go():
+        async with auth_test_engine() as engine:
+            await insert_sample_pan_credentials(
+                engine, user_id=user_id, status='active',
+            )
+            await _set_expires(
+                engine, user_id=user_id,
+                expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+            )
+
+            Session = await _session(engine)
+            async with Session() as db:
+                # pan_token_refresh_tick's commit call ordering for a
+                # row whose refresh() fails:
+                #   1. line 304 — lookup-close commit (normalizes SQLite
+                #      snapshot isolation, CodeX P1-1)
+                #   2. line 413 — revoke commit (the one this test
+                #      targets)
+                # So fail the 2nd commit call. Note: if SQLAlchemy
+                # surfaces internal commit() calls on flush() they'd
+                # also count, but the tick doesn't call flush directly.
+                original_commit = db.commit
+                commit_calls = [0]
+
+                async def synthetic_commit_failure():
+                    commit_calls[0] += 1
+                    if commit_calls[0] == 2:
+                        raise RuntimeError('synthetic revoke commit failure')
+                    return await original_commit()
+
+                monkeypatch.setattr(db, 'commit', synthetic_commit_failure)
+
+                stats = await pan_token_refresh_tick(
+                    db, client_factory=lambda: FailingClient(),
+                )
+
+            # No revoke counted because commit failed.
+            assert stats['revoked'] == 0
+            # No JSONL emit attempted.
+            assert jsonl_emits == [], (
+                f"JSONL emit must NOT fire on commit failure; "
+                f"saw {len(jsonl_emits)}: {jsonl_emits}"
+            )
+
+            # Credential is back at 'active' because the revoke txn
+            # rolled back.
+            async with Session() as db:
+                status = (await db.execute(
+                    select(PanCredentials.status)
+                    .where(PanCredentials.user_id == user_id)
+                )).scalar_one()
+            assert status == 'active', (
+                f"expected status='active' after commit rollback, got {status!r}"
+            )
+
+    run_async(_go())
+
+
 def test_refresh_tick_dispatch_event_failure_does_not_block_revoke(monkeypatch):
     """If dispatch_event itself raises, the credential is still marked revoked.
     Notification is best-effort; PG is source of truth for status."""

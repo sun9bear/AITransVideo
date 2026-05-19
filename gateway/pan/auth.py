@@ -401,9 +401,31 @@ async def pan_token_refresh_tick(
                     "pan_token_refresh: dispatch_event failed cred=%s: %s",
                     row.id, note_exc,
                 )
-            # Phase 9 §T9.4 (CodeX 2026-05-19 P1b): also emit to JSONL so
-            # r2_observability dashboards see token revocations. The
-            # event is user-scoped not job-scoped, so we use a synthetic
+            # CodeX 2026-05-19 P1c: commit BEFORE writing the JSONL +
+            # bumping the counter. If the commit fails the credential
+            # remains 'active' in PG, the notification row is rolled
+            # back, and we MUST NOT leave a `pan.token_revoked` line in
+            # r2_observability or count it in stats — that would be a
+            # false-positive observation of a revocation that didn't
+            # actually happen. On commit failure, swallow + continue
+            # so the rest of the tick still processes other rows.
+            try:
+                await db.commit()
+            except Exception as commit_exc:  # noqa: BLE001
+                logger.error(
+                    "pan_token_refresh: commit revoke failed cred=%s: %s "
+                    "(no JSONL emit, no stats counter)",
+                    row.id, commit_exc,
+                )
+                try:
+                    await db.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+                continue
+
+            # Phase 9 §T9.4 (CodeX 2026-05-19 P1b): emit JSONL AFTER
+            # commit so dashboards only see real revocations. The event
+            # is user-scoped not job-scoped, so we use a synthetic
             # filename ``pan-cred-{cred_id}.events.jsonl`` — clearly
             # distinguishable from real job_id files (which are short
             # hashes), still picked up by the dashboard's
@@ -422,7 +444,6 @@ async def pan_token_refresh_tick(
                 },
                 level='warn',
             )
-            await db.commit()
             stats['revoked'] += 1
 
     return stats
