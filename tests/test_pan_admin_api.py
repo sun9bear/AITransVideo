@@ -1058,6 +1058,250 @@ def test_delete_backup_allowed_when_job_not_archived(monkeypatch):
     run_async(_go())
 
 
+def test_delete_backup_409_when_uploading(monkeypatch):
+    """CodeX P0: DELETE while backup_executor is mid-write (status=
+    'uploading') must 409. Otherwise we'd let admin destroy a partial
+    upload AND any subsequent successful executor commit would write
+    to a remote_path that's been deleted."""
+    from fastapi import HTTPException
+    from models import BackupRecord
+
+    setup_pan_token_env(monkeypatch)
+    admin = _admin_user()
+
+    remote_deletes: list[str] = []
+
+    class TrackClient(FakeBaiduPanClient):
+        def delete(self, remote_path, *, access_token):
+            remote_deletes.append(remote_path)
+            return super().delete(remote_path, access_token=access_token)
+
+    async def _go():
+        async with admin_api_engine() as engine:
+            br = await insert_sample_backup_record(
+                engine, user_id=admin.id, job_id='live',
+                status='uploading',  # backup_executor in progress
+                remote_path='/apps/AIVideoTrans/backups/inflight.tar.gz',
+            )
+            await insert_sample_pan_credentials(engine, user_id=admin.id)
+            Session = await _session(engine)
+            async with Session() as db:
+                with pytest.raises(HTTPException) as exc:
+                    await _run_delete(
+                        monkeypatch, str(br['id']), admin, db,
+                        client_cls=TrackClient,
+                    )
+            assert exc.value.status_code == 409
+            assert 'uploading' in str(exc.value.detail)
+
+            # NO remote delete attempted.
+            assert remote_deletes == []
+
+            # Row state unchanged.
+            async with Session() as db:
+                status = (await db.execute(
+                    select(BackupRecord.status)
+                    .where(BackupRecord.id == br['id'])
+                )).scalar_one()
+            assert status == 'uploading'
+
+    run_async(_go())
+
+
+def test_delete_backup_409_when_restoring(monkeypatch):
+    """CodeX P0 (data safety): DELETE during restore must 409. restore_
+    executor sets status='restoring' then DOWNLOADS the remote tar; if
+    DELETE wiped the remote tar mid-restore, the executor would fail
+    AND its rollback to status='uploaded' would leave the row pointing
+    at a dead remote_path — permanently broken state."""
+    from fastapi import HTTPException
+    from models import BackupRecord
+
+    setup_pan_token_env(monkeypatch)
+    admin = _admin_user()
+
+    remote_deletes: list[str] = []
+
+    class TrackClient(FakeBaiduPanClient):
+        def delete(self, remote_path, *, access_token):
+            remote_deletes.append(remote_path)
+            return super().delete(remote_path, access_token=access_token)
+
+    async def _go():
+        async with admin_api_engine() as engine:
+            br = await insert_sample_backup_record(
+                engine, user_id=admin.id, job_id='restoring_job',
+                status='restoring',
+                remote_path='/apps/AIVideoTrans/backups/being_restored.tar.gz',
+            )
+            await insert_sample_pan_credentials(engine, user_id=admin.id)
+            Session = await _session(engine)
+            async with Session() as db:
+                with pytest.raises(HTTPException) as exc:
+                    await _run_delete(
+                        monkeypatch, str(br['id']), admin, db,
+                        client_cls=TrackClient,
+                    )
+            assert exc.value.status_code == 409
+            assert 'restoring' in str(exc.value.detail)
+            assert remote_deletes == [], (
+                "remote tar MUST NOT be deleted during restore"
+            )
+
+    run_async(_go())
+
+
+def test_delete_backup_allowed_on_terminal_states(monkeypatch):
+    """Terminal states ('failed', 'restored') allow soft-delete.
+    'uploaded' goes through the §6 412 guard (covered separately).
+    'deleted' is idempotent 204 (covered separately).
+
+    Parametrize across the two clear-cut "allowed" terminal states.
+    """
+    from models import BackupRecord
+
+    setup_pan_token_env(monkeypatch)
+    admin = _admin_user()
+
+    for terminal_status in ('failed', 'restored'):
+        async def _go(status=terminal_status):
+            async with admin_api_engine() as engine:
+                br = await insert_sample_backup_record(
+                    engine, user_id=admin.id, job_id=f'job_{status}',
+                    status=status,
+                    remote_path=f'/apps/AIVideoTrans/backups/{status}.tar.gz',
+                )
+                await insert_sample_pan_credentials(engine, user_id=admin.id)
+                Session = await _session(engine)
+                async with Session() as db:
+                    resp = await _run_delete(
+                        monkeypatch, str(br['id']), admin, db,
+                    )
+                assert resp.status_code == 204, (
+                    f"DELETE on terminal status={status!r} should succeed"
+                )
+                async with Session() as db:
+                    new_status = (await db.execute(
+                        select(BackupRecord.status)
+                        .where(BackupRecord.id == br['id'])
+                    )).scalar_one()
+                assert new_status == 'deleted'
+
+        run_async(_go())
+
+
+def test_list_backups_status_filter_is_query_param_not_body():
+    """CodeX P1: `status` MUST be registered as a query parameter, NOT a
+    request body. With plain `list[str] | None = None`, FastAPI defaults
+    list types to body — production GET /backups?status=uploaded would
+    NOT filter. Annotated[list[str] | None, Query()] keeps direct-call
+    default as None AND registers as multi-value query.
+
+    Inspect the route's DependantNode to lock the contract."""
+    from pan.admin_api import router
+
+    list_route = next(
+        r for r in router.routes
+        if getattr(r, 'path', '') == '/api/admin/pan/backups'
+        and 'GET' in getattr(r, 'methods', set())
+    )
+    query_param_names = {p.name for p in list_route.dependant.query_params}
+    body_param_names = {p.name for p in list_route.dependant.body_params}
+
+    # 'status' MUST be query, not body.
+    assert 'status' in query_param_names, (
+        f"`status` must be registered as a query parameter, got "
+        f"query={query_param_names}, body={body_param_names}"
+    )
+    assert 'status' not in body_param_names, (
+        f"`status` must NOT be registered as a body parameter"
+    )
+    # Other filters also query (auto-detected from simple types).
+    assert 'user_id' in query_param_names
+    assert 'job_id' in query_param_names
+    assert 'limit' in query_param_names
+    assert 'offset' in query_param_names
+
+
+def test_list_backups_status_filter_works_via_test_client():
+    """Integration sanity: real FastAPI TestClient with ?status=X&status=Y
+    actually filters. The previous bug (status as body) wouldn't have
+    been caught by direct-call tests — only HTTP-level integration
+    exercises the query parsing."""
+    from fastapi.testclient import TestClient
+    from fastapi import FastAPI
+    from pan.admin_api import router
+    from pan import admin_api as api_mod
+
+    app = FastAPI()
+    app.include_router(router)
+
+    admin = _admin_user()
+
+    # Override admin auth + DB deps via FastAPI's dependency_overrides.
+    from auth import get_current_user
+    from database import get_db
+
+    async def fake_user():
+        return admin
+
+    captured_filters: list[dict] = []
+
+    # Stub list_backups handler by patching the underlying SQL — but
+    # easier: mock the SQLAlchemy session to capture the resulting query.
+    # Simplest: patch the handler to capture its args, run via TestClient.
+    real_handler = api_mod.list_backups
+
+    async def capturing_handler(
+        user=None, db=None,
+        status=None, user_id=None, job_id=None, limit=50, offset=0,
+    ):
+        captured_filters.append({
+            'status': status, 'user_id': user_id, 'job_id': job_id,
+            'limit': limit, 'offset': offset,
+        })
+        return {"items": [], "total": 0, "limit": limit, "offset": offset}
+
+    async def fake_db():
+        yield None
+
+    app.dependency_overrides[get_current_user] = fake_user
+    app.dependency_overrides[get_db] = fake_db
+
+    # Swap the handler reference on the route's endpoint.
+    for r in app.routes:
+        if getattr(r, 'path', '') == '/api/admin/pan/backups' \
+                and 'GET' in getattr(r, 'methods', set()):
+            r.endpoint = capturing_handler
+            r.dependant.call = capturing_handler
+
+    try:
+        client = TestClient(app)
+        resp = client.get(
+            "/api/admin/pan/backups?status=uploaded&status=deleted&limit=10",
+        )
+        assert resp.status_code == 200, resp.text
+    finally:
+        # Restore the real handler so other tests in the module aren't
+        # affected (shouldn't matter since router is per-import-once,
+        # but defensive).
+        for r in app.routes:
+            if getattr(r, 'path', '') == '/api/admin/pan/backups' \
+                    and 'GET' in getattr(r, 'methods', set()):
+                r.endpoint = real_handler
+
+    # The CRUCIAL assertion: `status` got parsed as a 2-element list,
+    # NOT as None (which is what happens if FastAPI treats it as a
+    # missing body field).
+    assert len(captured_filters) == 1
+    cap = captured_filters[0]
+    assert cap['status'] == ['uploaded', 'deleted'], (
+        f"?status=uploaded&status=deleted should parse to "
+        f"['uploaded', 'deleted'], got {cap['status']!r}"
+    )
+    assert cap['limit'] == 10
+
+
 def test_admin_pan_router_registered_in_main():
     """T7 wire-up: gateway/main.py imports pan.admin_api.router and
     calls app.include_router(pan_admin_router). Without both lines the

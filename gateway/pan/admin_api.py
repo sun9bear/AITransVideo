@@ -28,7 +28,7 @@ import asyncio
 import logging
 import uuid as _uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Path as PathParam, Query
 from fastapi.responses import Response
@@ -217,10 +217,17 @@ async def get_pan_status(
 async def list_backups(
     user: User | None = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-    # Plain Python defaults (NOT Query()) so direct test calls don't end
-    # up with a fastapi.params.Query placeholder leaking into the SQL
-    # WHERE clause. FastAPI still auto-detects these as query params.
-    status: list[str] | None = None,
+    # CodeX P1: `status` MUST be Annotated[..., Query()] — without the
+    # explicit Query() marker, FastAPI sees `list[str] | None = None`
+    # and registers it as a REQUEST BODY param (FastAPI default for
+    # list types is body, not query). Result: ?status=uploaded had no
+    # effect in production. Annotated[..., Query()] keeps the direct-
+    # call default as None (so tests passing user/db work) AND
+    # registers `?status=X&status=Y` as a multi-value query.
+    #
+    # Simpler `str | int` defaults auto-detect as query without the
+    # annotation; only list-typed params need it explicitly.
+    status: Annotated[list[str] | None, Query()] = None,
     user_id: str | None = None,
     job_id: str | None = None,
     limit: int = 50,
@@ -517,6 +524,21 @@ async def _delete_backup_impl(
     if br.status == 'deleted':
         # Idempotent.
         return Response(status_code=204)
+
+    # CodeX P0: refuse DELETE while a backup/restore is in flight.
+    # 'uploading' = backup_executor mid-write (no remote tar to delete
+    # yet OR a partial tar that's about to be replaced). 'restoring' =
+    # restore_executor reading the remote tar; deleting it now would
+    # break the in-flight restore + the executor's failure-path
+    # rollback to 'uploaded' would leave the row pointing at a
+    # remote_path that no longer exists.
+    if br.status in ('uploading', 'restoring'):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"无法删除处于 {br.status!r} 状态的备份;请等待当前操作结束后再试。"
+            ),
+        )
 
     # 412 guard: protect the unique recoverable copy of an archived job.
     if br.status == 'uploaded':
