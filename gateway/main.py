@@ -150,8 +150,13 @@ async def lifespan(app: FastAPI):
         import background_task_queue as _bg_queue
         import background_task_reconciler as _bg_reconciler
         from database import async_session as _async_session
-        from datetime import datetime as _dt_now, timezone as _tz_utc
-        startup_dt = _dt_now.now(_tz_utc)
+        # Production 2026-05-19 hotfix: sub-agent wrote ``timezone as _tz_utc``
+        # which aliases the timezone CLASS, not the timezone.utc INSTANCE.
+        # ``datetime.now(timezone)`` raises ``TypeError: tzinfo argument must be
+        # None or of a tzinfo subclass, not type 'type'``. Alias the module to
+        # ``_tz`` and call ``.utc`` on it to grab the instance.
+        from datetime import datetime as _dt_now, timezone as _tz
+        startup_dt = _dt_now.now(_tz.utc)
         async with _async_session() as db:
             stats = await _bg_reconciler.reconcile_pending_tasks(db)
             logger.info(
