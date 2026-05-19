@@ -146,6 +146,13 @@ async def _execute_pan_restore_impl(
         # Pre-lock read would let a concurrent restore see a stale snapshot
         # and corrupt state on the failure path.
         await _acquire_advisory_lock(conn, lock_key)
+        # Production 2026-05-19 hotfix: pg_advisory_lock auto-begins
+        # SQLAlchemy txn; flush it so the explicit `async with conn.begin()`
+        # below doesn't raise "already initialized a Transaction".
+        # Lock is session-scoped, commit doesn't release it.
+        # See backup_executor.py for the same fix.
+        if conn.dialect.name == 'postgresql':
+            await conn.commit()
 
         try:
             # --- precondition (POST-lock — authoritative snapshot) ---

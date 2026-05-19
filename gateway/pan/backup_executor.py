@@ -138,6 +138,16 @@ async def _execute_pan_backup_impl(
         # path would then "roll back" an already-archived Job from
         # 'archived' to 'succeeded'. Lock-then-read closes the TOCTOU window.
         await _acquire_advisory_lock(conn, lock_key)
+        # Production 2026-05-19 hotfix: `SELECT pg_advisory_lock(...)`
+        # auto-begins a txn under SQLAlchemy. The first `async with
+        # conn.begin()` below would then raise
+        # "This connection has already initialized a SQLAlchemy
+        # Transaction() object via begin() or autobegin". Flush the
+        # auto-begin txn now — the advisory lock itself is session-scoped
+        # (pg_advisory_lock without _xact_), so commit doesn't release it.
+        # Same fix pattern as stale_reaper Phase 8 CodeX P1-3.
+        if conn.dialect.name == 'postgresql':
+            await conn.commit()
 
         br_id: _uuid.UUID | None = None
         tar_path: Path | None = None
