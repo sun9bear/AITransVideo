@@ -77,6 +77,11 @@ for _candidate in (_REPO_SRC, Path("/opt/aivideotrans/app/src")):
 logger = logging.getLogger(__name__)
 
 
+# Phase 9 §T9.4 (CodeX 2026-05-19 P1b): pan JSONL emitter shared with
+# backup_executor / residue_cleanup / auth (gateway/pan/_events.py).
+from pan._events import emit_pan_event_safe as _emit_pan_event_safe  # noqa: E402
+
+
 # --- public entry ---
 
 
@@ -290,6 +295,22 @@ async def _execute_pan_restore_impl(
                         _heartbeat_loop(engine, br_id, heartbeat_interval_s)
                     )
 
+                # Phase 9 §T9.4: emit started event for observability.
+                _emit_pan_event_safe(
+                    job_id=job_id,
+                    event_type='pan.restore.started',
+                    message=(
+                        f"pan restore started: user={user_id} "
+                        f"br={br_id}"
+                    ),
+                    payload={
+                        'user_id': str(user_id),
+                        'backup_id': str(br_id),
+                        'provider': provider,
+                        'remote_path': remote_path,
+                    },
+                )
+
                 # --- download tar.gz ---
                 staging_root.mkdir(parents=True, exist_ok=True)
                 tar_path = staging_root / 'backup.tar.gz'
@@ -357,7 +378,23 @@ async def _execute_pan_restore_impl(
                     )
                 logger.info("pan_restore succeeded: job=%s br=%s", job_id, br_id)
 
-            except Exception:
+                # Phase 9 §T9.4: emit succeeded event. Past this point
+                # both data on disk + DB finalize are complete.
+                _emit_pan_event_safe(
+                    job_id=job_id,
+                    event_type='pan.restore.succeeded',
+                    message=(
+                        f"pan restore succeeded: user={user_id} "
+                        f"br={br_id}"
+                    ),
+                    payload={
+                        'user_id': str(user_id),
+                        'backup_id': str(br_id),
+                        'provider': provider,
+                    },
+                )
+
+            except Exception as primary_exc:
                 if moved:
                     # CodeX P1: hidden commit point — data is restored on
                     # disk. DB finalize failed but rolling back to
@@ -396,6 +433,23 @@ async def _execute_pan_restore_impl(
                             "(job=%s br=%s): %s",
                             job_id, br_id, inner_exc,
                         )
+                # Phase 9 §T9.4: emit failed event for BOTH moved=True and
+                # moved=False branches. Even when data is on disk, finalize
+                # failure is a real failure from the observability POV.
+                reason = str(primary_exc)[:200]
+                _emit_pan_event_safe(
+                    job_id=job_id,
+                    event_type='pan.restore.failed',
+                    message=f"pan restore failed: {reason}",
+                    payload={
+                        'user_id': str(user_id),
+                        'backup_id': str(br_id) if br_id else None,
+                        'provider': provider,
+                        'reason': reason,
+                        'moved': moved,
+                    },
+                    level='error',
+                )
                 raise
 
             finally:

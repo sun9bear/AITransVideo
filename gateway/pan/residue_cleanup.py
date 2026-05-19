@@ -55,6 +55,11 @@ for _candidate in (_REPO_SRC, Path("/opt/aivideotrans/app/src")):
 logger = logging.getLogger(__name__)
 
 
+# Phase 9 §T9.4 (CodeX 2026-05-19 P1b): pan JSONL emitter shared with
+# backup_executor / restore_executor / auth (gateway/pan/_events.py).
+from pan._events import emit_pan_event_safe as _emit_pan_event_safe  # noqa: E402
+
+
 # --- public entry ---
 
 
@@ -257,6 +262,22 @@ async def _execute_pan_residue_cleanup_impl(
                     logger.info(
                         "pan_residue_cleanup: forward-resolved job=%s to 'archived'",
                         job_id,
+                    )
+                    # Phase 9 §T9.4: emit completed event only on
+                    # successful finalize. Partial cleanup loops back
+                    # for retry on the next stale_reaper Pass-2 forward
+                    # pass — no event yet because residue isn't fully
+                    # gone from the dashboard's perspective.
+                    _emit_pan_event_safe(
+                        job_id=job_id,
+                        event_type='pan.residue_cleanup.completed',
+                        message=(
+                            f"pan residue cleanup completed: br={backup_id}"
+                        ),
+                        payload={
+                            'user_id': str(user_id),
+                            'backup_id': str(backup_id),
+                        },
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.error(

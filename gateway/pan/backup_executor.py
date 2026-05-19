@@ -234,6 +234,24 @@ async def _execute_pan_backup_impl(
                         _heartbeat_loop(engine, br_id, heartbeat_interval_s)
                     )
 
+                # Phase 9 §T9.4: emit started event for observability.
+                # Stage='pan' so r2_observability buckets it correctly.
+                # Best-effort — write failure must NOT abort the backup.
+                _emit_pan_event_safe(
+                    job_id=job_id,
+                    event_type='pan.backup.started',
+                    message=(
+                        f"pan backup started: user={user_id} "
+                        f"edit_gen={edit_generation}"
+                    ),
+                    payload={
+                        'user_id': str(user_id),
+                        'backup_id': str(br_id),
+                        'provider': provider,
+                        'edit_generation': edit_generation,
+                    },
+                )
+
                 # --- Steps d-f: build manifest + tar.gz + checksums ---
                 job_record_snapshot = {
                     'job_id': job_id,
@@ -351,6 +369,7 @@ async def _execute_pan_backup_impl(
                 # destroy our way to find the orphan keys, (b) make
                 # residue_cleanup think the job is done.
                 if rmtree_ok and not r2_failures:
+                    archived_finalized = False
                     try:
                         async with conn.begin():
                             await set_archive_status(
@@ -364,10 +383,34 @@ async def _execute_pan_backup_impl(
                                 )
                                 .values(r2_artifacts=None)
                             )
+                        archived_finalized = True
                     except Exception as exc:  # noqa: BLE001
                         logger.warning(
                             "pan_backup status='archived' write failed: "
                             "job=%s err=%s", job_id, exc,
+                        )
+
+                    # Phase 9 §T9.4: emit succeeded event only if we
+                    # actually finalized. Partial finalize (rmtree+R2 ok
+                    # but status flip failed) leaves residue_cleanup to
+                    # retry — no event yet because the backup isn't done
+                    # from the dashboard's perspective.
+                    if archived_finalized:
+                        _emit_pan_event_safe(
+                            job_id=job_id,
+                            event_type='pan.backup.succeeded',
+                            message=(
+                                f"pan backup succeeded: user={user_id} "
+                                f"size={local_size}"
+                            ),
+                            payload={
+                                'user_id': str(user_id),
+                                'backup_id': str(br_id),
+                                'provider': provider,
+                                'remote_path': remote_path,
+                                'size_bytes': local_size,
+                                'sha256': sha256,
+                            },
                         )
                 else:
                     logger.info(
@@ -376,7 +419,7 @@ async def _execute_pan_backup_impl(
                         job_id, rmtree_ok, r2_failures,
                     )
 
-            except Exception:
+            except Exception as primary_exc:
                 # Pre-COMMIT-POINT failure path. Mark backup_records=failed
                 # and roll Job.status back to 'succeeded' so the row isn't
                 # stuck in 'archiving'. THEN re-raise.
@@ -406,6 +449,23 @@ async def _execute_pan_backup_impl(
                         "pan_backup Job.status rollback to 'succeeded' failed: %s",
                         inner_exc,
                     )
+                # Phase 9 §T9.4: emit failed event AFTER rollback so the
+                # event accurately reflects post-rollback state. Reason is
+                # truncated to 200 chars — notifications_service further
+                # constrains via _PAYLOAD_ALLOWLIST.
+                reason = str(primary_exc)[:200]
+                _emit_pan_event_safe(
+                    job_id=job_id,
+                    event_type='pan.backup.failed',
+                    message=f"pan backup failed: {reason}",
+                    payload={
+                        'user_id': str(user_id),
+                        'backup_id': str(br_id) if br_id else None,
+                        'provider': provider,
+                        'reason': reason,
+                    },
+                    level='error',
+                )
                 raise
 
             finally:
@@ -502,3 +562,8 @@ def _default_r2_delete(r2_key: str) -> None:
     from storage.r2_client import _get_client  # noqa: PLC0415
     client = _get_client()
     client.delete_object(Bucket=settings.r2_artifacts_bucket, Key=r2_key)
+
+
+# Phase 9 §T9.4 (CodeX 2026-05-19 P1b): pan JSONL emitter shared with
+# restore_executor / residue_cleanup / auth (gateway/pan/_events.py).
+from pan._events import emit_pan_event_safe as _emit_pan_event_safe  # noqa: E402

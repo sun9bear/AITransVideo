@@ -51,6 +51,9 @@ from notifications_service import dispatch_event
 
 from pan.baidu_pan_client import BaiduPanClient
 from pan.token_crypto import decrypt_token, encrypt_token
+# Phase 9 §T9.4 (CodeX 2026-05-19 P1b): pan JSONL emitter shared with
+# backup_executor / restore_executor / residue_cleanup.
+from pan._events import emit_pan_event_safe as _emit_pan_event_safe
 
 
 logger = logging.getLogger(__name__)
@@ -398,6 +401,27 @@ async def pan_token_refresh_tick(
                     "pan_token_refresh: dispatch_event failed cred=%s: %s",
                     row.id, note_exc,
                 )
+            # Phase 9 §T9.4 (CodeX 2026-05-19 P1b): also emit to JSONL so
+            # r2_observability dashboards see token revocations. The
+            # event is user-scoped not job-scoped, so we use a synthetic
+            # filename ``pan-cred-{cred_id}.events.jsonl`` — clearly
+            # distinguishable from real job_id files (which are short
+            # hashes), still picked up by the dashboard's
+            # ``*.events.jsonl`` glob.
+            _emit_pan_event_safe(
+                job_id=f"pan-cred-{row.id}",
+                event_type='pan.token_revoked',
+                message=(
+                    f"pan token revoked: user={row.user_id} "
+                    f"cred={row.id} reason={str(exc)[:100]}"
+                ),
+                payload={
+                    'user_id': str(row.user_id),
+                    'cred_id': str(row.id),
+                    'reason': str(exc)[:200],
+                },
+                level='warn',
+            )
             await db.commit()
             stats['revoked'] += 1
 

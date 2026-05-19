@@ -91,25 +91,47 @@ def emit_download_event(
     message: str,
     payload: Mapping[str, object],
     jobs_dir: str | Path | None = None,
+    stage: str = "download",
+    level: str = "info",
 ) -> None:
-    """Append one download event line to ``{jobs_dir}/{job_id}.events.jsonl``.
+    """Append one event line to ``{jobs_dir}/{job_id}.events.jsonl``.
+
+    Despite the historical name, this is now the gateway's general-purpose
+    JSONL append for any non-pipeline event type (download.* / stream.* /
+    pan.*). The function name is retained per plan §3.2 for git-blame
+    continuity — see ``_DOWNLOAD_EVENT_TYPES`` docstring above.
 
     Parameters
     ----------
     job_id
         Gateway-level job identifier. Must be non-empty after strip.
     event_type
-        One of the three download.* types. Values outside the allow-list
-        are *still written* (we don't want to drop audit data for a typo),
-        but a WARNING is logged so tests / ops can catch drift.
+        One of the allow-listed types in ``_DOWNLOAD_EVENT_TYPES``.
+        Values outside the allow-list are *still written* (we don't
+        want to drop audit data for a typo), but a WARNING is logged
+        so tests / ops can catch drift.
     message
         Human-readable summary. ``None`` / empty → stored as ``null``.
     payload
-        Free-form dict. Callers currently pass ``artifact_key`` + ``backend``.
+        Free-form dict. Download callers pass ``artifact_key`` +
+        ``backend``; pan callers pass ``user_id`` + ``backup_id`` +
+        provider-specific fields.
     jobs_dir
-        Override the default ``settings.jobs_dir`` — useful for tests that
-        want an isolated directory. In production, callers always pass
-        ``None`` (or omit) so the single source of truth is ``settings``.
+        Override the default ``settings.jobs_dir`` — useful for tests
+        that want an isolated directory. In production, callers always
+        pass ``None`` (or omit) so the single source of truth is
+        ``settings``.
+    stage
+        Plan 2026-05-14 §Phase 9: stage label for the event row. Mirrors
+        ``JobEvent.stage`` semantics in ``services.jobs.events``. Existing
+        download/stream callers default to "download"; pan callers pass
+        "pan" so the dashboards / logs renderer can group by stage.
+    level
+        ``info`` / ``warn`` / ``error`` / ``critical`` (mirrors
+        ``services.jobs.events.SUPPORTED_EVENT_LEVELS``). Defaults to
+        ``info`` to preserve existing download path. Pan failure events
+        should pass ``"error"``; ``pan.token_revoked`` typically uses
+        ``"warn"``.
 
     Never raises — all exceptions are caught and logged at WARNING.
     """
@@ -133,9 +155,9 @@ def emit_download_event(
             "event_type": normalized_type,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "message": (str(message).strip() or None) if message else None,
-            "stage": "download",
+            "stage": str(stage).strip() or "download",
             "status": None,
-            "level": "info",
+            "level": str(level).strip() or "info",
             "payload": dict(payload or {}),
         }
 
