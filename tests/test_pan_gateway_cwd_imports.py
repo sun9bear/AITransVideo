@@ -105,6 +105,8 @@ def test_gateway_cwd_import_smoke():
         "import pan.baidu_pan_client  # noqa: F401\n"
         "import pan.provider_protocol  # noqa: F401\n"
         "import pan.status_mutator  # noqa: F401\n"
+        "import pan.auth  # noqa: F401\n"
+        "import pan.admin_api  # noqa: F401\n"
         "\n"
         "from background_task_executors import TASK_EXECUTORS\n"
         "assert 'pan_backup' in TASK_EXECUTORS\n"
