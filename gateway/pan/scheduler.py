@@ -62,106 +62,161 @@ def _seconds_until_next_weekly(dow: int, hour: int, minute: int) -> float:
     return max(60.0, (target - now).total_seconds())
 
 
+# BJT → UTC offset. Beijing is UTC+8, so HH BJT = (HH-8) UTC mod 24.
+_BJT_OFFSET_HOURS = 8
+
+
+def _bjt_hour_to_utc(hour_bjt: int) -> int:
+    return (hour_bjt - _BJT_OFFSET_HOURS) % 24
+
+
+def _settings():
+    """Lazy access — tests can monkeypatch attributes on the singleton."""
+    from config import settings
+    return settings
+
+
 async def _archive_scanner_loop() -> None:
-    """Daily 03:30 BJT (19:30 UTC) archive candidate scan + enqueue."""
+    """Daily archive candidate scan. Honors:
+      - settings.enable_pan_backup            (off → skip every tick)
+      - settings.pan_auto_archive_enabled     (off → skip)
+      - settings.pan_auto_archive_dry_run     (passed into tick)
+      - settings.pan_auto_archive_days        (age threshold)
+      - settings.pan_auto_archive_max_per_run (limit)
+      - settings.pan_auto_archive_hour_bjt    (cron hour in BJT)
+    """
     # Initial offset 240s to spread load with other startup sweepers.
     await asyncio.sleep(240)
     while True:
-        try:
-            from database import async_session as _session
-            from pan.archive_scanner import run_archive_scanner_tick
+        s = _settings()
+        if not s.enable_pan_backup or not s.pan_auto_archive_enabled:
+            # Flag off → tick is no-op. Still sleep until next slot so
+            # turning the flag on mid-day picks up at the next cron.
+            logger.debug(
+                "pan_archive_scanner: skipped tick "
+                "(enable_pan_backup=%s, auto_archive_enabled=%s)",
+                s.enable_pan_backup, s.pan_auto_archive_enabled,
+            )
+        else:
+            try:
+                from database import async_session as _session
+                from pan.archive_scanner import run_archive_scanner_tick
 
-            async with _session() as db:
-                result = await run_archive_scanner_tick(db)
-                if result['enqueued']:
-                    logger.info(
-                        "pan_archive_scanner tick: enqueued %d (candidates %d)",
-                        result['enqueued'], len(result['candidates']),
+                async with _session() as db:
+                    result = await run_archive_scanner_tick(
+                        db,
+                        age_days=s.pan_auto_archive_days,
+                        max_per_run=s.pan_auto_archive_max_per_run,
+                        dry_run=s.pan_auto_archive_dry_run,
                     )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("pan_archive_scanner tick failed: %s", exc)
+                    if result.get('enqueued') or result.get('candidates'):
+                        logger.info(
+                            "pan_archive_scanner tick: enqueued=%d "
+                            "candidates=%d dry_run=%s",
+                            result.get('enqueued', 0),
+                            len(result.get('candidates', [])),
+                            result.get('dry_run'),
+                        )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("pan_archive_scanner tick failed: %s", exc)
 
         sleep_s = _seconds_until_next_daily(
-            ARCHIVE_SCANNER_HOUR_UTC, ARCHIVE_SCANNER_MINUTE_UTC,
+            _bjt_hour_to_utc(s.pan_auto_archive_hour_bjt), 30,
         )
         await asyncio.sleep(sleep_s)
 
 
 async def _token_refresh_loop() -> None:
-    """Every 6h pan token refresh (pan.auth.pan_token_refresh_tick)."""
+    """Every 6h pan token refresh. Gated by settings.enable_pan_backup."""
     await asyncio.sleep(300)  # 5 min initial offset
     while True:
-        try:
-            from database import async_session as _session
-            from pan.auth import pan_token_refresh_tick
+        s = _settings()
+        if not s.enable_pan_backup:
+            logger.debug("pan_token_refresh: skipped (enable_pan_backup off)")
+        else:
+            try:
+                from database import async_session as _session
+                from pan.auth import pan_token_refresh_tick
 
-            async with _session() as db:
-                stats = await pan_token_refresh_tick(db)
-                if stats['refreshed'] or stats['revoked']:
-                    logger.info(
-                        "pan_token_refresh: checked=%d refreshed=%d revoked=%d",
-                        stats['checked'], stats['refreshed'],
-                        stats['revoked'],
-                    )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("pan_token_refresh tick failed: %s", exc)
+                async with _session() as db:
+                    stats = await pan_token_refresh_tick(db)
+                    if stats['refreshed'] or stats['revoked']:
+                        logger.info(
+                            "pan_token_refresh: checked=%d refreshed=%d "
+                            "revoked=%d",
+                            stats['checked'], stats['refreshed'],
+                            stats['revoked'],
+                        )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("pan_token_refresh tick failed: %s", exc)
 
         await asyncio.sleep(TOKEN_REFRESH_INTERVAL_S)
 
 
 async def _orphan_cleanup_loop() -> None:
-    """Weekly Saturday 04:00 BJT (= 20:00 UTC Friday) — 3-pass cleanup."""
-    # Wait initial — orphan_cleanup runs weekly, no need to fire immediately
-    # on startup; first tick aligns to the next scheduled slot.
+    """Weekly orphan cleanup. Gated by settings.enable_pan_backup. Weekday
+    + BJT hour from settings."""
+    s = _settings()
     sleep_s = _seconds_until_next_weekly(
-        ORPHAN_CLEANUP_DOW_UTC,
-        ORPHAN_CLEANUP_HOUR_UTC, ORPHAN_CLEANUP_MINUTE_UTC,
+        s.pan_orphan_cleanup_weekday,
+        _bjt_hour_to_utc(4), 0,
     )
     await asyncio.sleep(sleep_s)
     while True:
-        try:
-            from database import engine as _engine
-            from pan.orphan_cleanup import run_orphan_cleanup_tick
+        s = _settings()
+        if not s.enable_pan_backup:
+            logger.debug("pan_orphan_cleanup: skipped (enable_pan_backup off)")
+        else:
+            try:
+                from database import engine as _engine
+                from pan.orphan_cleanup import run_orphan_cleanup_tick
 
-            stats = await run_orphan_cleanup_tick(_engine)
-            logger.info(
-                "pan_orphan_cleanup tick: A_deleted=%d B_keys=%d C_states=%d",
-                stats['pass_a']['deleted'],
-                stats['pass_b']['keys_deleted'],
-                stats['pass_c']['states_deleted'],
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("pan_orphan_cleanup tick failed: %s", exc)
+                stats = await run_orphan_cleanup_tick(_engine)
+                logger.info(
+                    "pan_orphan_cleanup tick: A_deleted=%d B_keys=%d C_states=%d",
+                    stats['pass_a']['deleted'],
+                    stats['pass_b']['keys_deleted'],
+                    stats['pass_c']['states_deleted'],
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("pan_orphan_cleanup tick failed: %s", exc)
 
+        s = _settings()
         sleep_s = _seconds_until_next_weekly(
-            ORPHAN_CLEANUP_DOW_UTC,
-            ORPHAN_CLEANUP_HOUR_UTC, ORPHAN_CLEANUP_MINUTE_UTC,
+            s.pan_orphan_cleanup_weekday,
+            _bjt_hour_to_utc(4), 0,
         )
         await asyncio.sleep(sleep_s)
 
 
 async def _stale_reaper_loop() -> None:
-    """Every 30 min — reap stuck pan operations."""
+    """Every 30 min — reap stuck pan operations. Gated by enable_pan_backup."""
     await asyncio.sleep(120)  # 2 min initial offset
     while True:
-        try:
-            from database import engine as _engine
-            from pan.stale_reaper import run_stale_reaper_tick
+        s = _settings()
+        if not s.enable_pan_backup:
+            logger.debug("pan_stale_reaper: skipped (enable_pan_backup off)")
+        else:
+            try:
+                from database import engine as _engine
+                from pan.stale_reaper import run_stale_reaper_tick
 
-            stats = await run_stale_reaper_tick(_engine)
-            if (stats['in_flight_reaped'] or stats['post_commit_forwarded']
-                    or stats['in_flight_skipped_locked']
-                    or stats['post_commit_skipped_locked']):
-                logger.info(
-                    "pan_stale_reaper tick: reaped=%d forwarded=%d "
-                    "skipped_locked=%d",
-                    stats['in_flight_reaped'],
-                    stats['post_commit_forwarded'],
-                    stats['in_flight_skipped_locked']
-                    + stats['post_commit_skipped_locked'],
+                stats = await run_stale_reaper_tick(
+                    _engine, stale_hours=s.pan_task_stale_hours,
                 )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("pan_stale_reaper tick failed: %s", exc)
+                if (stats['in_flight_reaped'] or stats['post_commit_forwarded']
+                        or stats['in_flight_skipped_locked']
+                        or stats['post_commit_skipped_locked']):
+                    logger.info(
+                        "pan_stale_reaper tick: reaped=%d forwarded=%d "
+                        "skipped_locked=%d",
+                        stats['in_flight_reaped'],
+                        stats['post_commit_forwarded'],
+                        stats['in_flight_skipped_locked']
+                        + stats['post_commit_skipped_locked'],
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("pan_stale_reaper tick failed: %s", exc)
 
         await asyncio.sleep(STALE_REAPER_INTERVAL_S)
 

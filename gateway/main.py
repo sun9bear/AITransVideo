@@ -271,7 +271,17 @@ async def lifespan(app: FastAPI):
     yield
     # Stop periodic cleaner tasks cleanly so shutdown doesn't hang on
     # their asyncio.sleep() inside the loops.
-    for attr in ("pack_cleanup_task", "project_cleanup_task", "r2_artifact_sweeper_task"):
+    for attr in (
+        "pack_cleanup_task",
+        "project_cleanup_task",
+        "r2_artifact_sweeper_task",
+        # Phase 8 §T8.4 pan schedulers (CodeX P2-5: previously omitted,
+        # causing potential race with engine.dispose() on shutdown).
+        "pan_archive_scanner_task",
+        "pan_token_refresh_task",
+        "pan_orphan_cleanup_task",
+        "pan_stale_reaper_task",
+    ):
         handle = getattr(app.state, attr, None)
         if handle is not None:
             handle.cancel()

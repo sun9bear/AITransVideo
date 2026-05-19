@@ -189,6 +189,207 @@ def test_register_pan_schedulers_failure_does_not_raise():
 # =========================================================================
 
 
+# =========================================================================
+# CodeX P1-4: scheduler honors enable_pan_backup / auto_archive / dry_run
+# =========================================================================
+
+
+def test_archive_scanner_loop_skips_when_enable_pan_backup_off(monkeypatch):
+    """If settings.enable_pan_backup is False, scanner tick must NOT run.
+    Production default IS False — scheduler shouldn't auto-archive."""
+    from pan import scheduler as sched_mod
+
+    # Track whether run_archive_scanner_tick is called.
+    tick_calls: list = []
+
+    async def fake_tick(db, **kwargs):
+        tick_calls.append(kwargs)
+        return {'candidates': [], 'enqueued': 0, 'enqueued_task_ids': [],
+                'failed_enqueue': [], 'dry_run': True}
+
+    # Make sleeps fast so the loop iterates once + we can cancel.
+    sleep_count = [0]
+
+    async def quick_sleep(s):
+        sleep_count[0] += 1
+        if sleep_count[0] > 2:  # let the loop body run once
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(sched_mod.asyncio, 'sleep', quick_sleep)
+    monkeypatch.setattr(
+        'pan.archive_scanner.run_archive_scanner_tick', fake_tick,
+    )
+
+    # Disable enable_pan_backup.
+    from config import settings
+    monkeypatch.setattr(settings, 'enable_pan_backup', False, raising=False)
+    monkeypatch.setattr(
+        settings, 'pan_auto_archive_enabled', True, raising=False,
+    )
+
+    async def _go():
+        with pytest.raises(asyncio.CancelledError):
+            await sched_mod._archive_scanner_loop()
+        # The tick was NEVER called because the flag was off.
+        assert tick_calls == []
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(_go())
+    finally:
+        loop.close()
+
+
+def test_archive_scanner_loop_passes_settings_to_tick(monkeypatch):
+    """When both flags ON, the loop forwards settings as
+    age_days / max_per_run / dry_run keyword args to the tick."""
+    from pan import scheduler as sched_mod
+
+    captured: list[dict] = []
+
+    async def fake_tick(db, **kwargs):
+        captured.append(kwargs)
+        return {'candidates': [], 'enqueued': 0, 'enqueued_task_ids': [],
+                'failed_enqueue': [], 'dry_run': kwargs.get('dry_run')}
+
+    sleep_count = [0]
+
+    async def quick_sleep(s):
+        sleep_count[0] += 1
+        if sleep_count[0] > 2:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(sched_mod.asyncio, 'sleep', quick_sleep)
+    monkeypatch.setattr(
+        'pan.archive_scanner.run_archive_scanner_tick', fake_tick,
+    )
+
+    # Stub the async_session contextmanager so the loop body doesn't
+    # need a real DB.
+    class FakeSession:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, *_):
+            return False
+
+    monkeypatch.setattr(
+        'database.async_session', lambda: FakeSession(),
+    )
+
+    from config import settings
+    monkeypatch.setattr(settings, 'enable_pan_backup', True, raising=False)
+    monkeypatch.setattr(
+        settings, 'pan_auto_archive_enabled', True, raising=False,
+    )
+    monkeypatch.setattr(settings, 'pan_auto_archive_days', 45, raising=False)
+    monkeypatch.setattr(
+        settings, 'pan_auto_archive_max_per_run', 7, raising=False,
+    )
+    monkeypatch.setattr(settings, 'pan_auto_archive_dry_run', True, raising=False)
+
+    async def _go():
+        with pytest.raises(asyncio.CancelledError):
+            await sched_mod._archive_scanner_loop()
+        # Settings forwarded.
+        assert len(captured) >= 1
+        kw = captured[0]
+        assert kw['age_days'] == 45
+        assert kw['max_per_run'] == 7
+        assert kw['dry_run'] is True
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(_go())
+    finally:
+        loop.close()
+
+
+def test_stale_reaper_loop_passes_stale_hours(monkeypatch):
+    """Loop forwards settings.pan_task_stale_hours to the tick."""
+    from pan import scheduler as sched_mod
+
+    captured: list[dict] = []
+
+    async def fake_tick(engine, **kwargs):
+        captured.append(kwargs)
+        return {
+            'in_flight_reaped': 0, 'in_flight_skipped_locked': 0,
+            'post_commit_forwarded': 0, 'post_commit_skipped_locked': 0,
+            'residue_cleanup_enqueued': 0, 'dry_run': False,
+        }
+
+    sleep_count = [0]
+
+    async def quick_sleep(s):
+        sleep_count[0] += 1
+        if sleep_count[0] > 2:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(sched_mod.asyncio, 'sleep', quick_sleep)
+    monkeypatch.setattr('pan.stale_reaper.run_stale_reaper_tick', fake_tick)
+    monkeypatch.setattr('database.engine', object())
+
+    from config import settings
+    monkeypatch.setattr(settings, 'enable_pan_backup', True, raising=False)
+    monkeypatch.setattr(settings, 'pan_task_stale_hours', 8, raising=False)
+
+    async def _go():
+        with pytest.raises(asyncio.CancelledError):
+            await sched_mod._stale_reaper_loop()
+        assert captured[0]['stale_hours'] == 8
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(_go())
+    finally:
+        loop.close()
+
+
+# =========================================================================
+# CodeX P2-5: shutdown cancellation in main.py
+# =========================================================================
+
+
+def test_main_shutdown_cancels_all_four_pan_scheduler_tasks():
+    """main.py lifespan shutdown MUST cancel + await the 4 pan task
+    attrs (pan_archive_scanner_task, pan_token_refresh_task,
+    pan_orphan_cleanup_task, pan_stale_reaper_task). Without this,
+    sleeping tasks race with engine.dispose() on shutdown."""
+    import ast
+    from pathlib import Path
+
+    main_py = (
+        Path(__file__).resolve().parent.parent / 'gateway' / 'main.py'
+    )
+    text = main_py.read_text(encoding='utf-8')
+
+    required_attrs = {
+        'pan_archive_scanner_task',
+        'pan_token_refresh_task',
+        'pan_orphan_cleanup_task',
+        'pan_stale_reaper_task',
+    }
+    # Find the shutdown cancellation list — look for the for-loop that
+    # iterates task attrs and calls handle.cancel().
+    tree = ast.parse(text)
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.For):
+            # The iter is a tuple/list of string constants.
+            iter_node = node.iter
+            if isinstance(iter_node, (ast.Tuple, ast.List)):
+                for elt in iter_node.elts:
+                    if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                        if elt.value in required_attrs:
+                            found.add(elt.value)
+    missing = required_attrs - found
+    assert not missing, (
+        f"main.py shutdown loop must include all 4 pan scheduler task "
+        f"attrs; missing: {missing}"
+    )
+
+
 def test_pan_scheduler_registered_in_main():
     """gateway/main.py MUST `from pan.scheduler import register_pan_schedulers`
     AND call `register_pan_schedulers(app)`. Without both, the 4 loops
