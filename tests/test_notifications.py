@@ -98,6 +98,137 @@ def test_payload_sanitizer_handles_none():
     from gateway.notifications_service import _sanitized_payload
 
     assert _sanitized_payload(None) == {}
+
+
+# ---------------------------------------------------------------------------
+# CodeX 2026-05-19 P1a: 'reason' must be in _PAYLOAD_ALLOWLIST so the
+# pan.backup.failed / pan.restore.failed recipes' "{reason}" template
+# token actually interpolates. Without it, _sanitized_payload drops
+# reason → format() raises KeyError → dispatcher falls back to raw
+# template → users would see literal "「X」备份到网盘失败:{reason}".
+# ---------------------------------------------------------------------------
+
+
+def test_payload_sanitizer_keeps_reason_key():
+    """Phase 9 §T9.3 + CodeX P1a regression."""
+    from gateway.notifications_service import _sanitized_payload
+
+    safe = _sanitized_payload({
+        "display_name": "测试任务",
+        "reason": "Baidu API 429 rate limited",
+    })
+    assert safe.get("reason") == "Baidu API 429 rate limited"
+    assert safe.get("display_name") == "测试任务"
+
+
+def test_dispatch_event_interpolates_reason_in_pan_backup_failed(monkeypatch):
+    """End-to-end: dispatching pan.backup.failed with {reason} payload
+    must produce a body containing the actual reason string — not the
+    literal template token. Catches the bug where someone removes
+    'reason' from _PAYLOAD_ALLOWLIST."""
+    import asyncio
+    import uuid
+
+    from gateway.notification_dispatch_map import EVENT_PAN_BACKUP_FAILED
+    import gateway.notifications_service as notifications_service
+
+    class FakeNotification:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class FakeDb:
+        def __init__(self):
+            self.rows = []
+
+        def add(self, row):
+            self.rows.append(row)
+
+        async def flush(self):
+            return None
+
+    monkeypatch.setattr(
+        notifications_service, "UserNotification", FakeNotification,
+    )
+
+    async def run():
+        db = FakeDb()
+        notif = await notifications_service.dispatch_event(
+            db,
+            event_type=EVENT_PAN_BACKUP_FAILED,
+            user_id=uuid.UUID("00000000-0000-0000-0000-000000000001"),
+            job_id="job_pan_fail",
+            payload={
+                "display_name": "测试任务",
+                "reason": "Baidu API 429 rate limited",
+            },
+        )
+        # Body must contain the substituted reason — NOT the literal
+        # "{reason}" token.
+        assert notif is db.rows[0]
+        assert "Baidu API 429 rate limited" in notif.body
+        assert "{reason}" not in notif.body
+        assert "测试任务" in notif.body
+        assert "{display_name}" not in notif.body
+        # Sanity: severity + scope from the recipe.
+        assert notif.severity == "error"
+        assert notif.scope == "job"
+
+    asyncio.run(run())
+
+
+def test_dispatch_event_interpolates_reason_in_pan_restore_failed(monkeypatch):
+    """Same contract for pan.restore.failed — covered separately so
+    each recipe gets its own regression."""
+    import asyncio
+    import uuid
+
+    from gateway.notification_dispatch_map import EVENT_PAN_RESTORE_FAILED
+    import gateway.notifications_service as notifications_service
+
+    class FakeNotification:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class FakeDb:
+        def __init__(self):
+            self.rows = []
+
+        def add(self, row):
+            self.rows.append(row)
+
+        async def flush(self):
+            return None
+
+    monkeypatch.setattr(
+        notifications_service, "UserNotification", FakeNotification,
+    )
+
+    async def run():
+        db = FakeDb()
+        notif = await notifications_service.dispatch_event(
+            db,
+            event_type=EVENT_PAN_RESTORE_FAILED,
+            user_id=uuid.UUID("00000000-0000-0000-0000-000000000001"),
+            job_id="job_pan_restore",
+            payload={
+                "display_name": "恢复任务",
+                "reason": "tar manifest sha256 mismatch",
+            },
+        )
+        assert "tar manifest sha256 mismatch" in notif.body
+        assert "{reason}" not in notif.body
+        assert "恢复任务" in notif.body
+        assert notif.severity == "error"
+
+    asyncio.run(run())
+
+
+def test_payload_sanitizer_handles_empty_dict():
+    """Restored from original test_payload_sanitizer_handles_none —
+    splitting None / {} into separate test functions for clarity
+    (after CodeX P1a edit, 2026-05-19)."""
+    from gateway.notifications_service import _sanitized_payload
+
     assert _sanitized_payload({}) == {}
 
 

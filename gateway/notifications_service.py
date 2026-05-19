@@ -46,6 +46,15 @@ _PAYLOAD_ALLOWLIST = {
     "amount",
     "topic",
     "summary",
+    # Phase 9 §T9.3 (CodeX 2026-05-19 P1a): pan.backup.failed /
+    # pan.restore.failed recipes interpolate the executor's error_message
+    # via {reason}. Without this key in the allowlist, _sanitized_payload
+    # drops it, format() raises KeyError, and the dispatcher falls back to
+    # the raw template — users would see literal "「{display_name}」备份
+    # 到网盘失败:{reason}". Reason strings come from
+    # gateway/pan/{backup,restore}_executor.py error paths; they must be
+    # pre-sanitized by the caller (truncate + redact secrets).
+    "reason",
 }
 
 
