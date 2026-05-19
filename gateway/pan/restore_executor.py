@@ -79,7 +79,10 @@ logger = logging.getLogger(__name__)
 
 # Phase 9 §T9.4 (CodeX 2026-05-19 P1b): pan JSONL emitter shared with
 # backup_executor / residue_cleanup / auth (gateway/pan/_events.py).
-from pan._events import emit_pan_event_safe as _emit_pan_event_safe  # noqa: E402
+from pan._events import (  # noqa: E402
+    emit_pan_event_safe as _emit_pan_event_safe,
+    dispatch_pan_failure_notification as _dispatch_pan_failure_notification,
+)
 
 
 # --- public entry ---
@@ -450,6 +453,21 @@ async def _execute_pan_restore_impl(
                     },
                     level='error',
                 )
+                # CodeX 2026-05-19 P1d: also surface as user notification
+                # — same best-effort contract as backup_executor.
+                try:
+                    await _dispatch_pan_failure_notification(
+                        engine,
+                        event_type='pan.restore.failed',
+                        user_id=user_id,
+                        job_id=job_id,
+                        reason=reason,
+                    )
+                except Exception as note_exc:  # noqa: BLE001
+                    logger.warning(
+                        "pan_restore notification dispatch failed: %s",
+                        note_exc,
+                    )
                 raise
 
             finally:

@@ -24,7 +24,10 @@ unopinionated.
 from __future__ import annotations
 
 import logging
+import uuid as _uuid
 from typing import Any
+
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 logger = logging.getLogger(__name__)
 
@@ -78,5 +81,78 @@ def emit_pan_event_safe(
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "pan event emit failed (best-effort) job=%s type=%s err=%s",
+            job_id, event_type, exc,
+        )
+
+
+async def dispatch_pan_failure_notification(
+    engine: AsyncEngine,
+    *,
+    event_type: str,
+    user_id: _uuid.UUID,
+    job_id: str,
+    reason: str,
+) -> None:
+    """Insert a user_notifications row for a pan backup/restore failure.
+
+    CodeX 2026-05-19 P1d: the pan.backup.failed / pan.restore.failed
+    DISPATCH_MAP recipes (added in Phase 9 T9.3) were never reached
+    from production — executors only emitted JSONL. This helper closes
+    that loop:
+
+      1. Opens a fresh ``AsyncSession`` from the engine because pan
+         executors hold an ``AsyncConnection`` (single-conn long-hold
+         pattern for advisory locks), not a session.
+      2. Fetches the Job's title (mapped to ``display_name`` for the
+         recipe template). Falls back to ``job_id`` if title is empty
+         or the row is missing.
+      3. Calls ``notifications_service.dispatch_event`` with the
+         appropriate payload. ``reason`` is already truncated to ≤200
+         chars by the caller.
+      4. Commits the notification insert.
+
+    Best-effort: any exception is logged at WARNING and swallowed.
+    Pan executor flow must NEVER abort because notification dispatch
+    failed.
+
+    The reason this isn't a sync wrapper around the JSONL helper:
+    notifications need a real PG session + recipe lookup + sanitized
+    payload format, all of which require the existing
+    notifications_service machinery.
+    """
+    from sqlalchemy.ext.asyncio import (  # noqa: PLC0415
+        AsyncSession, async_sessionmaker,
+    )
+    from sqlalchemy import select  # noqa: PLC0415
+
+    try:
+        from models import Job  # noqa: PLC0415
+        from notifications_service import dispatch_event  # noqa: PLC0415
+
+        Session = async_sessionmaker(
+            engine, class_=AsyncSession, expire_on_commit=False,
+        )
+        async with Session() as db:
+            row = (await db.execute(
+                select(Job.title).where(Job.job_id == job_id)
+            )).one_or_none()
+            display_name = (
+                row.title if row is not None and row.title else job_id
+            )
+            await dispatch_event(
+                db,
+                event_type=event_type,
+                user_id=user_id,
+                job_id=job_id,
+                payload={
+                    'display_name': display_name,
+                    'reason': reason,
+                },
+            )
+            await db.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "pan failure notification dispatch failed (best-effort) "
+            "job=%s type=%s err=%s",
             job_id, event_type, exc,
         )

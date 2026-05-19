@@ -466,6 +466,26 @@ async def _execute_pan_backup_impl(
                     },
                     level='error',
                 )
+                # CodeX 2026-05-19 P1d: also surface the failure as a
+                # user notification so admins don't have to poll the
+                # dashboard. Best-effort — wrapped helper swallows all
+                # exceptions; dispatch failure must never block the
+                # raise below.
+                try:
+                    await _dispatch_pan_failure_notification(
+                        engine,
+                        event_type='pan.backup.failed',
+                        user_id=user_id,
+                        job_id=job_id,
+                        reason=reason,
+                    )
+                except Exception as note_exc:  # noqa: BLE001
+                    # Already swallowed inside the helper, but defensive
+                    # second catch keeps the raise below clean.
+                    logger.warning(
+                        "pan_backup notification dispatch failed: %s",
+                        note_exc,
+                    )
                 raise
 
             finally:
@@ -566,4 +586,7 @@ def _default_r2_delete(r2_key: str) -> None:
 
 # Phase 9 §T9.4 (CodeX 2026-05-19 P1b): pan JSONL emitter shared with
 # restore_executor / residue_cleanup / auth (gateway/pan/_events.py).
-from pan._events import emit_pan_event_safe as _emit_pan_event_safe  # noqa: E402
+from pan._events import (  # noqa: E402
+    emit_pan_event_safe as _emit_pan_event_safe,
+    dispatch_pan_failure_notification as _dispatch_pan_failure_notification,
+)
