@@ -1,13 +1,14 @@
 "use client"
 
-import { useState, useCallback, useRef, useEffect } from "react"
-import { Loader2, ClipboardList, Sparkles, ChevronDown } from "lucide-react"
+import { useState, useCallback, useRef, useEffect, useMemo } from "react"
+import { Loader2, ClipboardList, Sparkles, ChevronDown, Cloud, X } from "lucide-react"
 import { toast } from "sonner"
 import { usePollingTask } from "@/lib/react/usePollingTask"
 import { LogViewer } from "@/components/log-viewer"
 import { toJobLogEntries } from "@/lib/api/mappers"
 import type { ApiJobEvent } from "@/types/api"
 import type { JobLogEntry } from "@/types/jobs"
+import { enqueueBackupBatch } from "@/lib/api/pan"
 
 type AdminJob = {
   job_id: string
@@ -117,6 +118,12 @@ export default function AdminJobsPage() {
   const [forbidden, setForbidden] = useState(false)
   const [acting, setActing] = useState<string | null>(null)
 
+  // Bulk backup selection state (Phase 7b: 用户要求任务列表批量备份入口).
+  // Only `status === 'succeeded'` rows are eligible — backend enforces the
+  // same 412 + per-row failed[] reporting via POST /api/admin/pan/backups/batch.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
+  const [bulkBackingUp, setBulkBackingUp] = useState(false)
+
   // Log expansion state
   const [expandedJobId, setExpandedJobId] = useState<string | null>(null)
   const [logs, setLogs] = useState<JobLogEntry[]>([])
@@ -152,6 +159,87 @@ export default function AdminJobsPage() {
 
   // Initial non-silent load (toggles loading spinner)
   useEffect(() => { loadJobs() }, [loadJobs])
+
+  // ---- bulk-backup helpers ---------------------------------------------
+  // Memoize the set of eligible (succeeded) job ids so toggle-all + the
+  // visible badge stay in sync without recomputing on every render.
+  const succeededJobIds = useMemo(
+    () => jobs.filter((j) => j.status === "succeeded").map((j) => j.job_id),
+    [jobs],
+  )
+
+  // After polling refresh, drop selections that no longer point at an
+  // eligible row (job got deleted, or status moved out of succeeded).
+  useEffect(() => {
+    setSelectedIds((prev) => {
+      if (prev.size === 0) return prev
+      const eligible = new Set(succeededJobIds)
+      const next = new Set<string>()
+      for (const id of prev) if (eligible.has(id)) next.add(id)
+      return next.size === prev.size ? prev : next
+    })
+  }, [succeededJobIds])
+
+  const toggleSelect = useCallback((jobId: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(jobId)) next.delete(jobId)
+      else next.add(jobId)
+      return next
+    })
+  }, [])
+
+  const toggleSelectAll = useCallback(() => {
+    setSelectedIds((prev) =>
+      prev.size === succeededJobIds.length && succeededJobIds.length > 0
+        ? new Set()
+        : new Set(succeededJobIds),
+    )
+  }, [succeededJobIds])
+
+  const clearSelection = useCallback(() => setSelectedIds(new Set()), [])
+
+  const handleBulkBackup = useCallback(async () => {
+    if (selectedIds.size === 0) return
+    const ids = Array.from(selectedIds)
+    if (
+      !window.confirm(
+        `确认将 ${ids.length} 个已完成任务批量备份到百度网盘?\n\n` +
+          "每个任务会:\n" +
+          "• 打包工程目录为 tar.gz\n" +
+          "• 跨境上传到 admin 网盘 (1GB 任务约 15-30 分钟)\n" +
+          "• 成功后任务状态变为「已归档」, 本地原文件被删除\n\n" +
+          "失败任务会单独在结果中列出,可后续单独重试。",
+      )
+    )
+      return
+
+    setBulkBackingUp(true)
+    try {
+      const r = await enqueueBackupBatch(ids)
+      const okN = r.succeeded?.length ?? 0
+      const failN = r.failed?.length ?? 0
+      if (failN === 0) {
+        toast.success(`已入队 ${okN} 个备份任务`)
+      } else if (okN === 0) {
+        toast.error(`全部 ${failN} 个失败:${r.failed[0]?.reason ?? "未知错误"}`)
+      } else {
+        toast.warning(
+          `${okN} 个入队成功 · ${failN} 个失败 (${r.failed
+            .slice(0, 2)
+            .map((f) => f.job_id.slice(0, 8))
+            .join(", ")}${failN > 2 ? "…" : ""})`,
+        )
+      }
+      if (okN > 0) clearSelection()
+      // Refresh task list so newly-archiving rows reflect status change.
+      void loadJobs(true)
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "批量备份入队失败")
+    } finally {
+      setBulkBackingUp(false)
+    }
+  }, [selectedIds, loadJobs, clearSelection])
   // Subsequent silent polling (no spinner flicker)
   usePollingTask(() => loadJobs(true), { intervalMs: 10000, immediate: false })
 
@@ -307,9 +395,44 @@ export default function AdminJobsPage() {
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold text-foreground">任务管理</h1>
         <span className="text-sm text-muted-foreground">
-          共 {jobs.length} 个任务
+          共 {jobs.length} 个任务 · {succeededJobIds.length} 个可备份
         </span>
       </div>
+
+      {/* Bulk-action toolbar — renders only when ≥ 1 succeeded job is selected.
+          Sticky to the top of the table so long lists scroll under it. */}
+      {selectedIds.size > 0 && (
+        <div className="sticky top-0 z-10 flex items-center gap-3 rounded-xl border border-[color:var(--cinnabar)]/30 bg-[color:var(--cinnabar)]/5 px-4 py-3 shadow-sm">
+          <span className="text-sm text-foreground">
+            已选 <strong>{selectedIds.size}</strong> 个已完成任务
+          </span>
+          <div className="ml-auto flex items-center gap-2">
+            <button
+              type="button"
+              disabled={bulkBackingUp}
+              onClick={handleBulkBackup}
+              className="flex items-center gap-1.5 rounded-lg bg-[color:var(--cinnabar)] px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50"
+            >
+              {bulkBackingUp ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Cloud className="h-3.5 w-3.5" />
+              )}
+              批量备份到网盘
+            </button>
+            <button
+              type="button"
+              onClick={clearSelection}
+              disabled={bulkBackingUp}
+              className="flex items-center gap-1 rounded-lg border border-border px-2 py-1.5 text-xs text-muted-foreground hover:bg-muted/40 disabled:opacity-50"
+              title="清空选择"
+            >
+              <X className="h-3.5 w-3.5" />
+              清空
+            </button>
+          </div>
+        </div>
+      )}
 
       {jobs.length === 0 ? (
         <div className="rounded-2xl border border-border bg-card p-12 text-center">
@@ -321,6 +444,28 @@ export default function AdminJobsPage() {
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-border text-left text-muted-foreground">
+                <th className="pb-3 pr-2 font-medium w-8">
+                  {/* Select-all checkbox — only meaningful when ≥ 1 succeeded
+                      job exists. Indeterminate state when some but not all
+                      succeeded rows are selected. */}
+                  <input
+                    type="checkbox"
+                    aria-label="选择全部已完成任务"
+                    disabled={succeededJobIds.length === 0}
+                    checked={
+                      succeededJobIds.length > 0 &&
+                      selectedIds.size === succeededJobIds.length
+                    }
+                    ref={(el) => {
+                      if (el)
+                        el.indeterminate =
+                          selectedIds.size > 0 &&
+                          selectedIds.size < succeededJobIds.length
+                    }}
+                    onChange={toggleSelectAll}
+                    className="h-4 w-4 cursor-pointer accent-[color:var(--cinnabar)] disabled:cursor-not-allowed disabled:opacity-30"
+                  />
+                </th>
                 <th className="pb-3 pr-4 font-medium">Job ID</th>
                 <th className="pb-3 pr-4 font-medium">视频标题</th>
                 <th className="pb-3 pr-4 font-medium">用户</th>
@@ -337,6 +482,8 @@ export default function AdminJobsPage() {
                   job={job}
                   isExpanded={expandedJobId === job.job_id}
                   acting={acting}
+                  isSelected={selectedIds.has(job.job_id)}
+                  onToggleSelect={toggleSelect}
                   logs={expandedJobId === job.job_id ? logs : []}
                   logsLoading={expandedJobId === job.job_id && logsLoading}
                   analysis={expandedJobId === job.job_id ? analysis : null}
@@ -364,6 +511,8 @@ function JobRow({
   job,
   isExpanded,
   acting,
+  isSelected,
+  onToggleSelect,
   logs,
   logsLoading,
   analysis,
@@ -377,6 +526,8 @@ function JobRow({
   job: AdminJob
   isExpanded: boolean
   acting: string | null
+  isSelected: boolean
+  onToggleSelect: (jobId: string) => void
   logs: JobLogEntry[]
   logsLoading: boolean
   analysis: AnalysisResult | null
@@ -387,12 +538,33 @@ function JobRow({
   onCancel: (jobId: string) => void
   onDelete: (jobId: string) => void
 }) {
+  const eligibleForBackup = job.status === "succeeded"
   return (
     <>
       <tr
-        className="border-b border-border cursor-pointer transition-colors hover:bg-muted/20"
+        className={`border-b border-border cursor-pointer transition-colors hover:bg-muted/20 ${
+          isSelected ? "bg-[color:var(--cinnabar)]/5" : ""
+        }`}
         onClick={() => onRowClick(job.job_id)}
       >
+        <td
+          className="py-3 pr-2 w-8"
+          onClick={(e) => e.stopPropagation()}
+          title={
+            eligibleForBackup
+              ? "勾选以加入批量备份"
+              : "仅「已完成」状态的任务可备份"
+          }
+        >
+          <input
+            type="checkbox"
+            aria-label={`选择任务 ${job.job_id}`}
+            disabled={!eligibleForBackup}
+            checked={isSelected}
+            onChange={() => onToggleSelect(job.job_id)}
+            className="h-4 w-4 cursor-pointer accent-[color:var(--cinnabar)] disabled:cursor-not-allowed disabled:opacity-30"
+          />
+        </td>
         <td className="py-3 pr-4 font-mono text-xs text-muted-foreground">
           <span className="flex items-center gap-1">
             <ChevronDown
@@ -443,7 +615,7 @@ function JobRow({
       </tr>
       {isExpanded && (
         <tr>
-          <td colSpan={7} className="p-0">
+          <td colSpan={8} className="p-0">
             <div className="border-b border-border bg-muted/5 px-5 py-4 space-y-4">
               {/* Phase 2 Task 0 — Metrics panel */}
               <MeteringPanel snapshot={job.metering_snapshot} />
