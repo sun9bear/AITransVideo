@@ -39,6 +39,15 @@ interface ProbeText {
   cnText: string
 }
 
+interface SmartOfferedCandidate {
+  voiceId: string
+  userVoiceId?: string | null
+  label?: string | null
+  confidence?: string | null
+  matchScope?: string | null
+  reason?: string | null
+}
+
 interface SpeakerPayload {
   speakerId: string
   speakerName: string
@@ -62,6 +71,13 @@ interface SpeakerPayload {
   // Target chars/sec for this speaker (source_english_words_per_second × 1.8).
   // Used to warn when the selected voice's cps deviates >30%.
   targetCharsPerSecond: number | null
+  // Phase 4 follow-up (plan 2026-05-17): when Smart pipeline pauses on a
+  // weak/cross-source personal-voice match, the backend writes a list of
+  // offered candidates into vs_payload.speakers[i].smart_offered_candidates.
+  // The first entry (highest-ranked candidate) becomes the default
+  // selection so the user sees the recommendation without having to
+  // scroll through the dropdown. Empty/absent for non-paused jobs.
+  smartOfferedCandidates: SmartOfferedCandidate[]
 }
 
 interface AvailableVoice {
@@ -251,6 +267,28 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
             }
           }
 
+          // Phase 4 follow-up (plan 2026-05-17): smart_offered_candidates
+          // is written by src/pipeline/process.py when Smart pipeline
+          // pauses on weak/cross-source personal-voice matches. Each
+          // item shape (per process.py:4166-4177):
+          //   { voice_id, user_voice_id, label, confidence,
+          //     match_scope, reason }
+          // Filter to entries with a non-empty voice_id so the
+          // pre-select tier-2 logic below can trust [0] is selectable.
+          const rawOfferedCandidates = Array.isArray(s.smart_offered_candidates)
+            ? (s.smart_offered_candidates as Record<string, unknown>[])
+            : []
+          const smartOfferedCandidates: SmartOfferedCandidate[] = rawOfferedCandidates
+            .map((c) => ({
+              voiceId: String(c.voice_id ?? ''),
+              userVoiceId: c.user_voice_id != null ? String(c.user_voice_id) : null,
+              label: c.label != null ? String(c.label) : null,
+              confidence: c.confidence != null ? String(c.confidence) : null,
+              matchScope: c.match_scope != null ? String(c.match_scope) : null,
+              reason: c.reason != null ? String(c.reason) : null,
+            }))
+            .filter((c) => c.voiceId)
+
           return {
             speakerId: String(s.speaker_id ?? ''),
             speakerName: String(s.speaker_name ?? s.speaker_id ?? ''),
@@ -272,6 +310,7 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
                   cnText: String(pt.cn_text ?? ''),
                 }))
               : [],
+            smartOfferedCandidates,
           }
         }).filter((s: SpeakerPayload) => s.speakerId)
 
@@ -368,23 +407,57 @@ export function VoiceSelectionPanel({ jobId, onAdvanced }: VoiceSelectionPanelPr
         )
         if (cancelled) return
 
-        // Upgrade initial state for any speaker with an auto-reuse strong
-        // match (provided the candidate voice isn't on the expired list).
-        // Only fires when initial source is 'auto_matched' or 'catalog' —
-        // we never run AFTER user has explicitly picked something this load
-        // (this hook only runs once on mount per jobId).
+        // Upgrade initial state per layered priority (plan 2026-05-17
+        // §候选源优先级). Only runs once on mount per jobId, so it never
+        // overrides a user pick mid-session.
+        //
+        //   Tier 1: Phase 2 strong-match preselect (autoReuseVoice)
+        //   Tier 2: Phase 4 smart-offered candidate (only when Smart paused
+        //           specifically for this speaker because the candidate
+        //           was weak/cross-source — the backend already decided
+        //           it was worth user confirmation, so we surface it as
+        //           the default instead of forcing the user to dig in
+        //           the dropdown)
+        //   Tier 3: keep the auto_matched / catalog fallback already set
+        //           above (no upgrade)
         for (const sp of loadedSpeakers) {
-          const candidate = candidateMap[sp.speakerId]?.autoReuseVoice
-          if (!candidate) continue
-          if (payloadExpired.includes(candidate.voiceId)) continue
-          // MiniMax-only for now (personal voices live in MiniMax registry);
-          // skip if the default provider isn't minimax.
-          if (loadedDefaultProvider && loadedDefaultProvider !== 'minimax') continue
-          initialStates[sp.speakerId] = {
-            ...initialStates[sp.speakerId],
-            voiceId: candidate.voiceId,
-            voiceSource: 'cloned',
-            voiceReuse: true,
+          const tier1 = candidateMap[sp.speakerId]?.autoReuseVoice
+          const tier1Usable =
+            !!tier1 &&
+            !payloadExpired.includes(tier1.voiceId) &&
+            // MiniMax-only for now (personal voices live in MiniMax
+            // registry); skip if the default provider isn't minimax.
+            (!loadedDefaultProvider || loadedDefaultProvider === 'minimax')
+          if (tier1Usable && tier1) {
+            initialStates[sp.speakerId] = {
+              ...initialStates[sp.speakerId],
+              voiceId: tier1.voiceId,
+              voiceSource: 'cloned',
+              voiceReuse: true,
+            }
+            continue
+          }
+          // Tier 2: smart paused on a weak/cross-source candidate for
+          // this speaker. Pipeline writes the offered list ranked by
+          // confidence; pick the head. Skip if expired (defence-in-depth
+          // — pipeline shouldn't offer an expired voice but the
+          // expired_voice_ids guard is the contract we trust). Also skip
+          // when the picked provider isn't MiniMax — Phase 4 personal
+          // voice candidates only exist in MiniMax registry today,
+          // mirroring the tier-1 provider gate.
+          const tier2 = sp.smartOfferedCandidates[0]
+          const tier2Usable =
+            !!tier2 &&
+            !!tier2.voiceId &&
+            !payloadExpired.includes(tier2.voiceId) &&
+            (!loadedDefaultProvider || loadedDefaultProvider === 'minimax')
+          if (tier2Usable && tier2) {
+            initialStates[sp.speakerId] = {
+              ...initialStates[sp.speakerId],
+              voiceId: tier2.voiceId,
+              voiceSource: 'cloned',
+              voiceReuse: true,
+            }
           }
         }
 
