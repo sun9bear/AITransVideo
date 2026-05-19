@@ -70,6 +70,39 @@ def _bjt_hour_to_utc(hour_bjt: int) -> int:
     return (hour_bjt - _BJT_OFFSET_HOURS) % 24
 
 
+def _bjt_weekly_to_utc(
+    weekday_bjt: int, hour_bjt: int, minute_bjt: int,
+) -> tuple[int, int, int]:
+    """Convert (weekday, HH:MM) in Beijing to (weekday, HH:MM) in UTC.
+
+    CodeX P2 (2026-05-19): the orphan cleanup cron is specified as
+    Saturday 04:00 BJT (plan §10). Naively passing
+    ``(pan_orphan_cleanup_weekday=5, hour_utc=20)`` to a UTC weekly
+    helper schedules UTC Sat 20:00, which is BJT Sun 04:00 — one day
+    late.
+
+    The hour shift (-8h) often crosses midnight in UTC, which means
+    the weekday also shifts. We compute the conversion holistically:
+
+        bjt_minute_of_week  = wd_bjt * 1440 + hr_bjt * 60 + min_bjt
+        utc_minute_of_week  = (bjt_minute_of_week - 8 * 60) mod 10080
+        wd_utc, hr_utc, min_utc = unpack utc_minute_of_week
+
+    Example: BJT Sat(5) 04:00 → minute_of_week = 5*1440 + 240 = 7440.
+    minus 480 = 6960. 6960 // 1440 = 4 (Friday) ✓.  rem 1200 → 20:00.
+    So BJT Sat 04:00 → UTC Fri 20:00. ✓
+
+    weekday convention: 0=Monday ... 6=Sunday (datetime.weekday).
+    """
+    bjt_minute = weekday_bjt * 24 * 60 + hour_bjt * 60 + minute_bjt
+    utc_minute = (bjt_minute - _BJT_OFFSET_HOURS * 60) % (7 * 24 * 60)
+    weekday_utc = utc_minute // (24 * 60)
+    rem = utc_minute % (24 * 60)
+    hour_utc = rem // 60
+    minute_utc = rem % 60
+    return weekday_utc, hour_utc, minute_utc
+
+
 def _settings():
     """Lazy access — tests can monkeypatch attributes on the singleton."""
     from config import settings
@@ -157,10 +190,14 @@ async def _orphan_cleanup_loop() -> None:
     """Weekly orphan cleanup. Gated by settings.enable_pan_backup. Weekday
     + BJT hour from settings."""
     s = _settings()
-    sleep_s = _seconds_until_next_weekly(
-        s.pan_orphan_cleanup_weekday,
-        _bjt_hour_to_utc(4), 0,
+    # CodeX P2 (2026-05-19): weekday must convert BJT→UTC alongside the
+    # hour. BJT Sat 04:00 = UTC Fri 20:00 (one day earlier in UTC).
+    # Just translating hour without weekday would land on UTC Sat 20:00,
+    # which equals BJT Sun 04:00.
+    wd_utc, hr_utc, min_utc = _bjt_weekly_to_utc(
+        s.pan_orphan_cleanup_weekday, 4, 0,
     )
+    sleep_s = _seconds_until_next_weekly(wd_utc, hr_utc, min_utc)
     await asyncio.sleep(sleep_s)
     while True:
         s = _settings()
@@ -182,10 +219,12 @@ async def _orphan_cleanup_loop() -> None:
                 logger.warning("pan_orphan_cleanup tick failed: %s", exc)
 
         s = _settings()
-        sleep_s = _seconds_until_next_weekly(
-            s.pan_orphan_cleanup_weekday,
-            _bjt_hour_to_utc(4), 0,
+        # CodeX P2 (2026-05-19): same BJT-weekday correction as the
+        # initial-sleep helper above.
+        wd_utc, hr_utc, min_utc = _bjt_weekly_to_utc(
+            s.pan_orphan_cleanup_weekday, 4, 0,
         )
+        sleep_s = _seconds_until_next_weekly(wd_utc, hr_utc, min_utc)
         await asyncio.sleep(sleep_s)
 
 

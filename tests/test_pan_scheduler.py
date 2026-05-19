@@ -81,6 +81,90 @@ def test_seconds_until_next_weekly_picks_correct_dow():
 
 
 # =========================================================================
+# CodeX P2 (2026-05-19): _bjt_weekly_to_utc — BJT (wd, HH:MM) → UTC tuple
+# =========================================================================
+
+
+def test_bjt_weekly_to_utc_saturday_0400_bjt_is_friday_2000_utc():
+    """Plan §10 specifies orphan cleanup at Sat 04:00 BJT. The UTC
+    equivalent is Fri 20:00 UTC — weekday shifts AND hour shifts.
+    A naive ``_bjt_hour_to_utc(4)=20`` combined with weekday=5 (Sat)
+    would schedule Sat 20:00 UTC = Sun 04:00 BJT (one day late)."""
+    from pan.scheduler import _bjt_weekly_to_utc
+
+    wd, hr, mn = _bjt_weekly_to_utc(weekday_bjt=5, hour_bjt=4, minute_bjt=0)
+    assert (wd, hr, mn) == (4, 20, 0)  # Friday 20:00 UTC
+
+
+def test_bjt_weekly_to_utc_midday_bjt_same_day():
+    """BJT noon Tuesday (wd=1, 12:00) → UTC Tuesday 04:00 — same day."""
+    from pan.scheduler import _bjt_weekly_to_utc
+
+    wd, hr, mn = _bjt_weekly_to_utc(weekday_bjt=1, hour_bjt=12, minute_bjt=0)
+    assert (wd, hr, mn) == (1, 4, 0)
+
+
+def test_bjt_weekly_to_utc_monday_0000_bjt_is_sunday_1600_utc():
+    """BJT Monday midnight (wd=0, 00:00) → UTC Sunday 16:00."""
+    from pan.scheduler import _bjt_weekly_to_utc
+
+    wd, hr, mn = _bjt_weekly_to_utc(weekday_bjt=0, hour_bjt=0, minute_bjt=0)
+    assert (wd, hr, mn) == (6, 16, 0)  # Sunday 16:00 UTC
+
+
+def test_bjt_weekly_to_utc_minute_preserved():
+    """Minute offset passes through (no DST in BJT, so no wrap)."""
+    from pan.scheduler import _bjt_weekly_to_utc
+
+    wd, hr, mn = _bjt_weekly_to_utc(weekday_bjt=3, hour_bjt=10, minute_bjt=30)
+    assert (wd, hr, mn) == (3, 2, 30)
+
+
+def test_orphan_cleanup_loop_initial_sleep_lands_on_saturday_0400_bjt(
+    monkeypatch,
+):
+    """End-to-end: with pan_orphan_cleanup_weekday=5 (Sat BJT) the
+    initial-sleep computation must target Fri 20:00 UTC (= Sat 04:00 BJT).
+    Regression test for CodeX P2 2026-05-19."""
+    from pan import scheduler as sched_mod
+
+    captured_sleeps: list[float] = []
+
+    async def capture_then_cancel(sec):
+        captured_sleeps.append(sec)
+        # Bail immediately so the test stays fast.
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(sched_mod.asyncio, 'sleep', capture_then_cancel)
+    from config import settings
+    monkeypatch.setattr(settings, 'enable_pan_backup', True, raising=False)
+    monkeypatch.setattr(
+        settings, 'pan_orphan_cleanup_weekday', 5, raising=False,
+    )
+
+    async def _go():
+        with pytest.raises(asyncio.CancelledError):
+            await sched_mod._orphan_cleanup_loop()
+        assert len(captured_sleeps) == 1
+        # The sleep must land on Fri 20:00 UTC. Verify by adding to "now".
+        fire_at = datetime.now(timezone.utc) + timedelta(
+            seconds=captured_sleeps[0],
+        )
+        assert fire_at.weekday() == 4, (
+            f"expected Friday (weekday=4) but got weekday={fire_at.weekday()}"
+        )
+        assert fire_at.hour == 20, (
+            f"expected 20:00 UTC but got {fire_at.hour}:{fire_at.minute}"
+        )
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(_go())
+    finally:
+        loop.close()
+
+
+# =========================================================================
 # register_pan_schedulers — task creation + app.state stashing
 # =========================================================================
 
