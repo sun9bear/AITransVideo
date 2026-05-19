@@ -312,33 +312,21 @@ async def _enqueue_pan_task(
     job_id: str,
     task_type: str,
 ) -> str:
-    """Create a BackgroundTask + dispatch the executor coroutine.
+    """Create a BackgroundTask + dispatch the executor coroutine via the
+    shared `pan._enqueue.enqueue_pan_task` helper.
 
-    Returns task_id. Raises HTTPException on the validation-level issues
-    so the caller endpoints can pass through.
+    CodeX P0-1 unification: archive_scanner and stale_reaper go through
+    the same path so all three callers actually launch executors (not
+    just create pending BackgroundTask rows that would be marked
+    'failed' by recover_stale on next gateway restart).
     """
-    if task_type not in TASK_EXECUTORS:
-        raise HTTPException(status_code=400, detail=f"未知任务类型: {task_type}")
-    task_id, _created = await queue.create_task(
-        db, job_id=job_id, user_id=user_id, task_type=task_type,
-        params={"user_id": str(user_id)},
-    )
-    await db.commit()
-
-    # Dispatch in background — same shape as background_task_api._launch_executor
-    # but no semaphore (pan ops are not ffmpeg-heavy).
-    executor = TASK_EXECUTORS[task_type]
-    from pathlib import Path as _Path
-    asyncio.create_task(
-        executor(
-            task_id=task_id,
-            job_id=job_id,
-            project_dir=_Path("/"),  # ignored by pan executors (re-read from Job row)
-            params={"user_id": str(user_id)},
-        ),
-        name=f"bgtask-{task_type}-{task_id}",
-    )
-    return task_id
+    from pan._enqueue import enqueue_pan_task
+    try:
+        return await enqueue_pan_task(
+            db, user_id=user_id, job_id=job_id, task_type=task_type,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @router.post("/backups", status_code=202)

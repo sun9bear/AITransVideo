@@ -136,25 +136,23 @@ async def run_archive_scanner_tick(
         )
         return result
 
-    # Enqueue background tasks. Per-candidate try/except so one bad row
-    # doesn't kill the rest of the batch.
-    import background_task_queue as queue
+    # Enqueue background tasks via the shared helper that BOTH creates
+    # the BackgroundTask row AND launches asyncio.create_task(executor(...))
+    # — CodeX P0-1: previous code only did the former, leaving tasks
+    # stuck at 'pending' until they'd be marked 'failed' by
+    # recover_stale on the next gateway restart.
+    from pan._enqueue import enqueue_pan_task
+
     for c in candidates:
         try:
-            task_id, _ = await queue.create_task(
+            task_id = await enqueue_pan_task(
                 db,
-                job_id=c['job_id'],
                 user_id=_uuid.UUID(c['user_id']),
+                job_id=c['job_id'],
                 task_type='pan_backup',
-                params={'user_id': c['user_id']},
             )
-            await db.commit()
             result['enqueued'] += 1
             result['enqueued_task_ids'].append(task_id)
-            logger.info(
-                "pan_archive_scanner: enqueued backup task=%s job=%s user=%s",
-                task_id, c['job_id'], c['user_id'],
-            )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "pan_archive_scanner: enqueue failed job=%s user=%s err=%s",
@@ -165,7 +163,6 @@ async def run_archive_scanner_tick(
                 'user_id': c['user_id'],
                 'error': str(exc)[:200],
             })
-            # Don't commit failed rows — rollback the partial state.
             try:
                 await db.rollback()
             except Exception:  # noqa: BLE001
