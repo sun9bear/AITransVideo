@@ -247,6 +247,20 @@ async def lifespan(app: FastAPI):
         # the no-op behavior of an unscheduled task.
         logger.exception("Failed to start r2_artifact_sweeper; continuing without proactive push")
 
+    # Phase 8 §T8.4: pan backup background schedulers.
+    # 4 loops: archive_scanner (daily 03:30 BJT), token_refresh (6h),
+    # orphan_cleanup (Sat 04:00 BJT), stale_reaper (30 min).
+    # Same fail-safe pattern as the r2_sweeper above — failure does not
+    # block startup, just leaves pan automation off.
+    try:
+        from pan.scheduler import register_pan_schedulers
+        register_pan_schedulers(app)
+    except Exception:
+        logger.exception(
+            "Failed to register pan schedulers; "
+            "pan auto-archive / refresh / reap / orphan-cleanup will be OFF",
+        )
+
     # Seed pricing runtime
     try:
         from pricing_runtime import get_runtime_pricing
