@@ -147,8 +147,16 @@ async def insert_sample_job(
     edit_generation: int = 0,
     project_dir: str | None = None,
     r2_artifacts: list[dict] | None = None,
+    title: str | None = None,
+    display_name: str | None = None,
 ) -> dict:
-    """INSERT a Job row. Returns dict snapshot of inserted values."""
+    """INSERT a Job row. Returns dict snapshot of inserted values.
+
+    ``title`` is the source-video title (Job.title, default ""); when
+    not supplied stays empty. ``display_name`` is the user-editable
+    workspace label (Job.display_name, nullable). Both default to NULL
+    behavior so tests that don't care don't need to pass them.
+    """
     from models import Job
 
     row_id = uuid.uuid4()
@@ -163,6 +171,10 @@ async def insert_sample_job(
         values['project_dir'] = project_dir
     if r2_artifacts is not None:
         values['r2_artifacts'] = r2_artifacts
+    if title is not None:
+        values['title'] = title
+    if display_name is not None:
+        values['display_name'] = display_name
 
     async with engine.begin() as conn:
         await conn.execute(Job.__table__.insert().values(**values))

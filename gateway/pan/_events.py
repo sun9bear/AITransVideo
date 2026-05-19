@@ -103,9 +103,11 @@ async def dispatch_pan_failure_notification(
       1. Opens a fresh ``AsyncSession`` from the engine because pan
          executors hold an ``AsyncConnection`` (single-conn long-hold
          pattern for advisory locks), not a session.
-      2. Fetches the Job's title (mapped to ``display_name`` for the
-         recipe template). Falls back to ``job_id`` if title is empty
-         or the row is missing.
+      2. Resolves the recipe's ``{display_name}`` token (CodeX 2026-05-19
+         P2a: ``Job.display_name`` is the user-visible field — it's the
+         Studio edit label, shown in workspace UI. ``Job.title`` is the
+         scraped source video title and may be in a different language
+         or empty. Order: display_name → title → job_id.
       3. Calls ``notifications_service.dispatch_event`` with the
          appropriate payload. ``reason`` is already truncated to ≤200
          chars by the caller.
@@ -134,11 +136,19 @@ async def dispatch_pan_failure_notification(
         )
         async with Session() as db:
             row = (await db.execute(
-                select(Job.title).where(Job.job_id == job_id)
+                select(Job.display_name, Job.title)
+                .where(Job.job_id == job_id)
             )).one_or_none()
-            display_name = (
-                row.title if row is not None and row.title else job_id
-            )
+            # Prefer Studio's user-editable display_name; fall back to
+            # the source video title (Job.title) if user hasn't set one;
+            # final fallback to the opaque job_id so the notification is
+            # never empty / mangled.
+            display_name = job_id
+            if row is not None:
+                if row.display_name:
+                    display_name = row.display_name
+                elif row.title:
+                    display_name = row.title
             await dispatch_event(
                 db,
                 event_type=event_type,

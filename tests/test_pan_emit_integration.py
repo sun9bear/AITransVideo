@@ -163,9 +163,14 @@ def test_backup_failure_emits_failed_and_dispatches_notification(
                 )
 
             project = make_project_dir(tmp_path, job_id=job_id, monkeypatch=monkeypatch)
+            # CodeX 2026-05-19 P2a: insert with BOTH source title and
+            # user-editable display_name so the test verifies the
+            # resolver picks display_name (the user-visible one).
             await insert_sample_job(
                 engine, user_id=user_id, job_id=job_id,
                 project_dir=str(project),
+                title='Original Source Video Title',
+                display_name='我的中文配音任务',
             )
             await insert_sample_pan_credentials(engine, user_id=user_id)
 
@@ -207,6 +212,75 @@ def test_backup_failure_emits_failed_and_dispatches_notification(
             assert 'upload boom' in n.body
             assert '{reason}' not in n.body
             assert '{display_name}' not in n.body
+            # CodeX 2026-05-19 P2a: notification body must show the
+            # user-editable display_name (not Job.title or job_id).
+            assert '我的中文配音任务' in n.body, (
+                f"expected display_name in body, got: {n.body!r}"
+            )
+            # Source title must NOT leak through when display_name is set.
+            assert 'Original Source Video Title' not in n.body
+
+    run_async(_go())
+
+
+def test_failure_notification_falls_back_to_title_when_display_name_empty(
+    monkeypatch, tmp_path,
+):
+    """CodeX 2026-05-19 P2a: if Job.display_name is NULL, the fallback
+    chain uses Job.title. Only when BOTH are empty does it fall back
+    to job_id."""
+    from models import UserNotification
+
+    setup_pan_token_env(monkeypatch)
+    _patch_jobs_dir(monkeypatch, tmp_path)
+
+    user_id = uuid.uuid4()
+    job_id = "job_fallback_title"
+
+    class FailingClient(FakeBaiduPanClient):
+        def upload(self, *args, **kwargs):
+            raise RuntimeError("forced fail for fallback test")
+
+    async def _go():
+        async with pan_test_engine() as engine:
+            async with engine.begin() as conn:
+                await conn.run_sync(
+                    lambda c: UserNotification.__table__.create(c, checkfirst=True),
+                )
+
+            project = make_project_dir(tmp_path, job_id=job_id, monkeypatch=monkeypatch)
+            # Only title, no display_name.
+            await insert_sample_job(
+                engine, user_id=user_id, job_id=job_id,
+                project_dir=str(project),
+                title='YouTube Source Video Title',
+                # display_name omitted → NULL.
+            )
+            await insert_sample_pan_credentials(engine, user_id=user_id)
+
+            from pan.backup_executor import _execute_pan_backup_impl
+            with pytest.raises(RuntimeError):
+                await _execute_pan_backup_impl(
+                    {'job_id': job_id, 'user_id': str(user_id)},
+                    engine=engine, client_factory=lambda: FailingClient(),
+                    rmtree_fn=_noop_rmtree, r2_delete_fn=_noop_r2_delete,
+                    heartbeat_enabled=False,
+                )
+
+            from sqlalchemy.ext.asyncio import (
+                AsyncSession, async_sessionmaker,
+            )
+            Session = async_sessionmaker(
+                engine, class_=AsyncSession, expire_on_commit=False,
+            )
+            async with Session() as db:
+                notifs = (await db.execute(
+                    select(UserNotification)
+                    .where(UserNotification.user_id == user_id)
+                )).scalars().all()
+            assert len(notifs) == 1
+            # title is the fallback when display_name is NULL.
+            assert 'YouTube Source Video Title' in notifs[0].body
 
     run_async(_go())
 
@@ -305,5 +379,148 @@ def test_restore_failure_emits_failed_event(monkeypatch, tmp_path):
             assert len(notifs) == 1
             assert 'sha256 mismatch' in notifs[0].body
             assert notifs[0].severity == 'error'
+
+    run_async(_go())
+
+
+# =========================================================================
+# Residue cleanup finalize → completed event (CodeX 2026-05-19 P2b)
+# =========================================================================
+
+
+def test_residue_cleanup_finalize_emits_completed(monkeypatch, tmp_path):
+    """Residue cleanup successfully forward-resolving a stuck 'archiving'
+    job to 'archived' must emit pan.residue_cleanup.completed JSONL.
+
+    Coverage gap fixed in CodeX 2026-05-19 P2b: the file docstring
+    promised this scenario but it wasn't actually implemented.
+    """
+    from models import Job
+
+    setup_pan_token_env(monkeypatch)
+    jobs_dir = _patch_jobs_dir(monkeypatch, tmp_path)
+
+    user_id = uuid.uuid4()
+    job_id = "job_residue_finalize"
+
+    rmtree_calls: list[Path] = []
+    r2_deleted: list[str] = []
+
+    def rec_rmtree(p):
+        rmtree_calls.append(Path(p))
+
+    def rec_r2(k):
+        r2_deleted.append(k)
+
+    async def _go():
+        async with pan_test_engine() as engine:
+            project = make_project_dir(
+                tmp_path, job_id=job_id, monkeypatch=monkeypatch,
+            )
+            # Stuck state: Job 'archiving' + BackupRecord 'uploaded' + an
+            # r2_artifacts entry to verify cleanup hits the R2 path too.
+            await insert_sample_job(
+                engine, user_id=user_id, job_id=job_id,
+                status='archiving',
+                project_dir=str(project),
+                r2_artifacts=[
+                    {'artifact_key': 'publish.dubbed_video',
+                     'r2_key': f'jobs/{job_id}/v.mp4'},
+                ],
+            )
+            br = await insert_sample_backup_record(
+                engine, user_id=user_id, job_id=job_id, status='uploaded',
+            )
+
+            from pan.residue_cleanup import _execute_pan_residue_cleanup_impl
+            await _execute_pan_residue_cleanup_impl(
+                {
+                    'job_id': job_id,
+                    'user_id': str(user_id),
+                    'backup_id': str(br['id']),
+                },
+                engine=engine,
+                rmtree_fn=rec_rmtree,
+                r2_delete_fn=rec_r2,
+            )
+
+            # Cleanup ran.
+            assert rmtree_calls == [project]
+            assert r2_deleted == [f'jobs/{job_id}/v.mp4']
+
+            # DB finalized.
+            async with engine.connect() as conn:
+                row = (await conn.execute(
+                    select(Job.status, Job.r2_artifacts)
+                    .where(Job.job_id == job_id)
+                )).one()
+            assert row.status == 'archived'
+            assert row.r2_artifacts is None
+
+            # JSONL emit landed.
+            events = _read_events(jobs_dir, job_id)
+            types = [e['event_type'] for e in events]
+            assert 'pan.residue_cleanup.completed' in types, (
+                f"residue cleanup must emit pan.residue_cleanup.completed; "
+                f"got {types}"
+            )
+            completed = next(
+                e for e in events
+                if e['event_type'] == 'pan.residue_cleanup.completed'
+            )
+            assert completed['stage'] == 'pan'
+            assert completed['payload']['backup_id'] == str(br['id'])
+
+    run_async(_go())
+
+
+def test_residue_cleanup_partial_failure_skips_completed_emit(
+    monkeypatch, tmp_path,
+):
+    """If rmtree fails partway, the finalize branch is skipped and
+    pan.residue_cleanup.completed must NOT emit (the cleanup didn't
+    actually complete — next stale_reaper pass retries).
+    """
+    setup_pan_token_env(monkeypatch)
+    jobs_dir = _patch_jobs_dir(monkeypatch, tmp_path)
+
+    user_id = uuid.uuid4()
+    job_id = "job_residue_partial"
+
+    def failing_rmtree(p):
+        raise OSError("simulated permission denied")
+
+    async def _go():
+        async with pan_test_engine() as engine:
+            project = make_project_dir(
+                tmp_path, job_id=job_id, monkeypatch=monkeypatch,
+            )
+            await insert_sample_job(
+                engine, user_id=user_id, job_id=job_id,
+                status='archiving', project_dir=str(project),
+            )
+            br = await insert_sample_backup_record(
+                engine, user_id=user_id, job_id=job_id, status='uploaded',
+            )
+
+            from pan.residue_cleanup import _execute_pan_residue_cleanup_impl
+            await _execute_pan_residue_cleanup_impl(
+                {
+                    'job_id': job_id,
+                    'user_id': str(user_id),
+                    'backup_id': str(br['id']),
+                },
+                engine=engine,
+                rmtree_fn=failing_rmtree,
+                r2_delete_fn=lambda k: None,
+            )
+
+            # Cleanup did NOT finalize. No completed emit.
+            events = _read_events(jobs_dir, job_id)
+            types = [e['event_type'] for e in events]
+            assert 'pan.residue_cleanup.completed' not in types, (
+                f"completed event must NOT fire when rmtree failed; "
+                f"got {types}"
+            )
 
     run_async(_go())
