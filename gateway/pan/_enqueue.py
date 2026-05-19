@@ -48,11 +48,21 @@ async def enqueue_pan_task(
     task_type: str,
     extra_params: dict[str, Any] | None = None,
 ) -> str:
-    """Create a BackgroundTask row AND launch the executor coroutine.
+    """Create a BackgroundTask row and launch its executor coroutine.
 
-    Returns task_id. Caller's session is committed inside (the task row
-    needs to be visible to the spawned coroutine, which uses its own
+    Returns task_id. The caller's session is committed inside (the task
+    row must be visible to the spawned coroutine, which uses its own
     session).
+
+    CodeX P1 (2026-05-19): `queue.create_task` returns ``(task_id,
+    created)`` and ``created=False`` means an existing pending/running
+    task with the same fingerprint was reused (idempotency).
+    We MUST NOT launch a second executor for the same task_id —
+    two concurrent executors would race and the loser could overwrite
+    the winner's terminal status (e.g. flip a ``completed`` row back
+    to ``failed``). The dispatcher path in
+    ``background_task_api.create_task_endpoint`` already gates on
+    ``created``; this helper mirrors that contract.
 
     Raises ValueError on unknown task_type. Admin API callers translate
     that to HTTPException 400; scanner/reaper just log + skip.
@@ -69,11 +79,22 @@ async def enqueue_pan_task(
     if extra_params:
         params.update(extra_params)
 
-    task_id, _ = await queue.create_task(
+    task_id, created = await queue.create_task(
         db, job_id=job_id, user_id=user_id,
         task_type=task_type, params=params,
     )
     await db.commit()
+
+    if not created:
+        # Deduped to an existing active task — the original executor is
+        # either still running or about to be (whoever first inserted the
+        # row will have launched it). Launching again would race.
+        logger.info(
+            "pan_enqueue: reused active task=%s type=%s job=%s user=%s "
+            "(no executor launch)",
+            task_id, task_type, job_id, user_id,
+        )
+        return task_id
 
     executor = TASK_EXECUTORS[task_type]
     # Pan executors re-read project_dir from the Job row inside the

@@ -206,3 +206,85 @@ def test_enqueue_accepts_all_three_pan_task_types(monkeypatch, task_type):
             assert task_type in launched[0]['name']
 
     run_async(_go())
+
+
+# =========================================================================
+# CodeX P1 (2026-05-19): created=False MUST NOT launch a second executor
+# =========================================================================
+
+
+def test_enqueue_returns_existing_without_relaunch(monkeypatch):
+    """If queue.create_task dedupes to an existing active task
+    (same fingerprint), enqueue_pan_task MUST NOT call _launch_coroutine
+    again. Two concurrent executors on the same task_id would race
+    each other to mark terminal status — the loser would overwrite
+    the winner's completed/failed.
+    """
+    from pan._enqueue import enqueue_pan_task
+
+    setup_pan_token_env(monkeypatch)
+    launched = _install_launch_capture(monkeypatch)
+
+    user_id = uuid.uuid4()
+    job_id = 'dedupe_job'
+
+    async def _go():
+        async with enqueue_test_engine() as engine:
+            Session = await _session(engine)
+
+            # First enqueue: creates row + launches.
+            async with Session() as db:
+                task_id_1 = await enqueue_pan_task(
+                    db, user_id=user_id, job_id=job_id,
+                    task_type='pan_backup',
+                )
+            assert len(launched) == 1, "first enqueue must launch"
+            assert launched[0]['name'].startswith('bgtask-pan_backup-')
+
+            # Second enqueue with identical params: dedupe path.
+            # queue.create_task returns (existing_task_id, False).
+            # Helper must return the same task_id WITHOUT launching again.
+            async with Session() as db:
+                task_id_2 = await enqueue_pan_task(
+                    db, user_id=user_id, job_id=job_id,
+                    task_type='pan_backup',
+                )
+            assert task_id_2 == task_id_1, "dedupe must return same task_id"
+            assert len(launched) == 1, (
+                "second enqueue MUST NOT launch — dedupe path"
+            )
+
+    run_async(_go())
+
+
+def test_enqueue_no_relaunch_when_queue_returns_created_false(monkeypatch):
+    """Direct unit test: monkeypatch queue.create_task to return
+    (existing_id, False) regardless of inputs, then verify the helper
+    skips _launch_coroutine.
+    """
+    import background_task_queue as queue
+    from pan._enqueue import enqueue_pan_task
+
+    setup_pan_token_env(monkeypatch)
+    launched = _install_launch_capture(monkeypatch)
+
+    async def fake_create_task(db, **kwargs):
+        # Simulate dedupe — task already exists for this fingerprint.
+        return ('existing_task_abc', False)
+
+    monkeypatch.setattr(queue, 'create_task', fake_create_task)
+
+    async def _go():
+        async with enqueue_test_engine() as engine:
+            Session = await _session(engine)
+            async with Session() as db:
+                task_id = await enqueue_pan_task(
+                    db, user_id=uuid.uuid4(), job_id='j',
+                    task_type='pan_backup',
+                )
+            assert task_id == 'existing_task_abc'
+            assert launched == [], (
+                "_launch_coroutine MUST NOT be called when created=False"
+            )
+
+    run_async(_go())
