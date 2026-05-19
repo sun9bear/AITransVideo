@@ -514,7 +514,13 @@ function BackupTimelineEntry({ backup }: { backup: BackupRecord }) {
           {label}
         </span>
         <span className="text-xs text-muted-foreground">
-          {formatBytesGB(backup.size_bytes)} ·{" "}
+          {/* size_bytes=0 + uploading means we're in the tar build phase
+              (backup_executor hasn't written the real size yet). Show
+              "准备中…" instead of "0 GB" so admin sees a meaningful
+              status. Switches to actual size once chunks start. */}
+          {backup.status === "uploading" && backup.size_bytes === 0
+            ? "准备中…"
+            : formatBytesGB(backup.size_bytes)} ·{" "}
           {formatTimestamp(backup.completed_at || backup.created_at)}
         </span>
       </div>

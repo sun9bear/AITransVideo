@@ -288,6 +288,29 @@ async def _execute_pan_backup_impl(
                     _compute_tar_checksums, tar_path,
                 )
 
+                # Production 2026-05-20: surface the final tar size to the
+                # dashboard as soon as we know it (post-tar, pre-upload).
+                # Without this, BackupRecord.size_bytes stays at the
+                # placeholder 0 throughout the entire upload phase (often
+                # 15-30 min cross-border) and admin sees "0 GB 上传中"
+                # which is uninformative. Now they see "1.26 GB 上传中"
+                # the moment chunking starts.
+                tar_size_for_display = tar_path.stat().st_size
+                try:
+                    async with conn.begin():
+                        await conn.execute(
+                            update(BackupRecord)
+                            .where(BackupRecord.id == br_id)
+                            .values(size_bytes=tar_size_for_display)
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    # Best-effort — size will be re-written at commit point
+                    # anyway, this is just to brighten the UI.
+                    logger.warning(
+                        "pan_backup: mid-flight size_bytes update failed "
+                        "(non-fatal): %s", exc,
+                    )
+
                 # --- Step g: upload (cross-border slowest) ---
                 remote_path = (
                     f'/apps/AIVideoTrans/backups/'

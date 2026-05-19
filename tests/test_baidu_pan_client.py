@@ -1236,3 +1236,226 @@ def test_download_propagates_dlink_failure(monkeypatch, tmp_path):
     with pytest.raises(RuntimeError, match='not found in listing|No metadata'):
         c.download('/gone.tar.gz', dst, access_token='at')
     assert not dst.exists()
+
+
+# --- Production 2026-05-20: chunk upload retry on transient network failures ---
+
+
+def test_upload_chunk_retries_on_timeout(monkeypatch, tmp_path):
+    """First 2 chunk uploads time out, 3rd succeeds. Backup completes
+    without surfacing the transient failure to the caller.
+
+    Real-world driver: ``HTTPSConnectionPool(host='bjbgp01.baidupcs.com',
+    port=443): Read timed out. (read timeout=30)`` from cross-border
+    flake. Pre-2026-05-20 the chunk upload had no retry — single hiccup
+    failed the whole backup. This test pins the retry contract.
+    """
+    import requests
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+
+    # Speed up the test — no real backoff sleep.
+    monkeypatch.setattr(
+        'gateway.pan.baidu_pan_client.time.sleep', lambda s: None,
+    )
+
+    test_file = tmp_path / 'tiny.tar.gz'
+    test_file.write_bytes(b'B' * 1024)  # single chunk path
+
+    attempts = {'chunk': 0}
+
+    class FakeResp:
+        status_code = 200
+
+        def __init__(self, body):
+            self._body = body
+
+        def json(self):
+            return self._body
+
+        def raise_for_status(self):
+            pass
+
+    def mock_post(url, **kw):
+        params = kw.get('params') or {}
+        method = params.get('method', '')
+        if method == 'precreate':
+            return FakeResp({'errno': 0, 'uploadid': 'up_retry_test'})
+        if 'pcs.baidu.com' in url:
+            attempts['chunk'] += 1
+            if attempts['chunk'] <= 2:
+                # First 2 attempts: timeout (real production symptom)
+                raise requests.Timeout(
+                    "HTTPSConnectionPool(host='bjbgp01.baidupcs.com', "
+                    "port=443): Read timed out. (read timeout=30)"
+                )
+            return FakeResp({'errno': 0, 'md5': 'chunk_md5_0'})
+        if method == 'create':
+            return FakeResp({
+                'errno': 0, 'fs_id': 11, 'size': 1024, 'md5': 'final_md5',
+            })
+        return FakeResp({'errno': 0})
+
+    monkeypatch.setattr(requests, 'post', mock_post)
+
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    result = c.upload(test_file, '/apps/AIVideoTrans/retry.tar.gz', access_token='at')
+
+    # 1 precreate + 3 chunk attempts (2 fail + 1 success) + 1 create = 5
+    assert attempts['chunk'] == 3, (
+        f"expected 3 chunk attempts (2 fail + 1 ok), got {attempts['chunk']}"
+    )
+    assert result['md5'] == 'final_md5'
+    assert result['size'] == 1024
+
+
+def test_upload_chunk_gives_up_after_max_attempts(monkeypatch, tmp_path):
+    """All 3 chunk attempts time out → raise Timeout up to caller.
+    Backup_executor's pre-COMMIT-POINT except branch then marks
+    BackupRecord status='failed' with the timeout message."""
+    import requests
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+
+    monkeypatch.setattr(
+        'gateway.pan.baidu_pan_client.time.sleep', lambda s: None,
+    )
+
+    test_file = tmp_path / 'doomed.tar.gz'
+    test_file.write_bytes(b'C' * 512)
+
+    attempts = {'chunk': 0}
+
+    class FakeResp:
+        status_code = 200
+
+        def __init__(self, body):
+            self._body = body
+
+        def json(self):
+            return self._body
+
+        def raise_for_status(self):
+            pass
+
+    def mock_post(url, **kw):
+        params = kw.get('params') or {}
+        method = params.get('method', '')
+        if method == 'precreate':
+            return FakeResp({'errno': 0, 'uploadid': 'up_doomed'})
+        if 'pcs.baidu.com' in url:
+            attempts['chunk'] += 1
+            raise requests.Timeout("read timeout=30")
+        return FakeResp({'errno': 0})
+
+    monkeypatch.setattr(requests, 'post', mock_post)
+
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    with pytest.raises(requests.Timeout, match='read timeout=30'):
+        c.upload(test_file, '/apps/AIVideoTrans/doomed.tar.gz', access_token='at')
+
+    # All 3 attempts consumed.
+    assert attempts['chunk'] == 3
+
+
+def test_upload_chunk_does_not_retry_on_4xx(monkeypatch, tmp_path):
+    """4xx (auth / quota / bad request) is NOT transient — no point
+    retrying same payload, just fail fast so the caller can surface
+    the real error (token revoked, quota full, etc.)."""
+    import requests
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+
+    monkeypatch.setattr(
+        'gateway.pan.baidu_pan_client.time.sleep', lambda s: None,
+    )
+
+    test_file = tmp_path / 'fourohone.tar.gz'
+    test_file.write_bytes(b'D' * 256)
+
+    attempts = {'chunk': 0}
+
+    class FakeResp:
+        def __init__(self, status, body):
+            self.status_code = status
+            self._body = body
+
+        def json(self):
+            return self._body
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise requests.HTTPError(
+                    f"{self.status_code} Unauthorized", response=self,
+                )
+
+    def mock_post(url, **kw):
+        params = kw.get('params') or {}
+        method = params.get('method', '')
+        if method == 'precreate':
+            return FakeResp(200, {'errno': 0, 'uploadid': 'up_401'})
+        if 'pcs.baidu.com' in url:
+            attempts['chunk'] += 1
+            return FakeResp(401, {'errno': -6, 'errmsg': 'auth failed'})
+        return FakeResp(200, {'errno': 0})
+
+    monkeypatch.setattr(requests, 'post', mock_post)
+
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    with pytest.raises(requests.HTTPError, match='401'):
+        c.upload(test_file, '/apps/AIVideoTrans/401.tar.gz', access_token='at')
+
+    # Only 1 attempt — 4xx is NOT retried (auth / quota / bad request).
+    assert attempts['chunk'] == 1
+
+
+def test_upload_chunk_retries_on_5xx(monkeypatch, tmp_path):
+    """5xx is server-side transient → retry. Pin the contract."""
+    import requests
+    from gateway.pan.baidu_pan_client import BaiduPanClient
+
+    monkeypatch.setattr(
+        'gateway.pan.baidu_pan_client.time.sleep', lambda s: None,
+    )
+
+    test_file = tmp_path / 'fivexx.tar.gz'
+    test_file.write_bytes(b'E' * 256)
+
+    attempts = {'chunk': 0}
+
+    class FakeResp:
+        def __init__(self, status, body):
+            self.status_code = status
+            self._body = body
+
+        def json(self):
+            return self._body
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise requests.HTTPError(
+                    f"{self.status_code}", response=self,
+                )
+
+    def mock_post(url, **kw):
+        params = kw.get('params') or {}
+        method = params.get('method', '')
+        if method == 'precreate':
+            return FakeResp(200, {'errno': 0, 'uploadid': 'up_5xx'})
+        if 'pcs.baidu.com' in url:
+            attempts['chunk'] += 1
+            # First attempt 503, second attempt 200
+            if attempts['chunk'] == 1:
+                return FakeResp(503, {'errmsg': 'service unavailable'})
+            return FakeResp(200, {'errno': 0, 'md5': 'chunk_md5_0'})
+        if method == 'create':
+            return FakeResp(200, {
+                'errno': 0, 'fs_id': 99, 'size': 256, 'md5': 'final_md5',
+            })
+        return FakeResp(200, {'errno': 0})
+
+    monkeypatch.setattr(requests, 'post', mock_post)
+
+    c = BaiduPanClient(appkey='ak', appsecret='as')
+    result = c.upload(test_file, '/apps/AIVideoTrans/5xx.tar.gz', access_token='at')
+
+    # 503 then 200 — 2 attempts total, retry triggered.
+    assert attempts['chunk'] == 2
+    assert result['md5'] == 'final_md5'

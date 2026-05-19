@@ -597,7 +597,17 @@ function BackupRow({
         )}
       </td>
       <td className="px-4 py-3 text-right font-mono text-xs">
-        {formatBytesGB(row.size_bytes)}
+        {/* Production 2026-05-20: backup_executor now updates size_bytes
+            as soon as the local tar is built (post-checksum, pre-upload),
+            so admin sees the real size while chunks are still going up.
+            size_bytes=0 + status=uploading means we're still in the tar
+            build / manifest phase — show a "准备中" affordance instead
+            of the misleading "0 GB". */}
+        {row.status === "uploading" && row.size_bytes === 0 ? (
+          <span className="text-muted-foreground">准备中…</span>
+        ) : (
+          formatBytesGB(row.size_bytes)
+        )}
       </td>
       <td className="px-4 py-3 text-xs">
         {formatTimestamp(row.completed_at || row.created_at)}

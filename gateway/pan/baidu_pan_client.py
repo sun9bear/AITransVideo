@@ -12,10 +12,23 @@ from __future__ import annotations
 
 import hashlib
 import json as _json
+import logging
+import time
 from pathlib import Path
 from typing import Iterator
 
 import requests
+
+logger = logging.getLogger(__name__)
+
+# Production 2026-05-20: cross-border (US gateway → Baidu PCS) 4MB chunk
+# uploads occasionally hit urllib3's default 30s read-timeout when the
+# Baidu CDN edge is congested or briefly throttles. Single attempt fails
+# the whole backup. Retry on transient network failures (Timeout +
+# ConnectionError + 5xx) with exponential backoff. HTTP 4xx is auth /
+# permission and NOT retried.
+_CHUNK_UPLOAD_MAX_ATTEMPTS = 3
+_CHUNK_UPLOAD_BACKOFF_BASE_S = 1.0  # → 1s, 2s, 4s
 
 
 class BaiduPanClient:
@@ -78,29 +91,100 @@ class BaiduPanClient:
 
     def _upload_chunk(self, path: Path, chunk_idx: int, chunk_data: bytes,
                       remote_path: str, uploadid: str, access_token: str) -> None:
-        """PUT one 4MB chunk via superfile2.
+        """PUT one 4MB chunk via superfile2 with retry on transient failures.
 
         `path` retained in signature for future use (e.g. retry-by-offset reads);
         currently unused — chunk bytes are passed directly to avoid double-reading.
+
+        Production 2026-05-20: cross-border to Baidu PCS occasionally fails
+        with ``read timeout=30`` (urllib3 default) when the CDN edge is
+        congested. Each chunk now retries up to 3 times with exponential
+        backoff (1s, 2s, 4s). Idempotency note: per Baidu Pan docs,
+        re-uploading the same (uploadid, partseq) with identical content
+        is a no-op on the server side — the partseq slot just keeps the
+        last successfully received bytes.
+
+        Retried exceptions:
+            requests.Timeout       — read timeout / connect timeout
+            requests.ConnectionError — TCP reset, DNS hiccup, etc.
+            5xx HTTPError          — server-side transient
+        NOT retried:
+            4xx HTTPError          — auth (401/403) / bad request / quota (429)
+            RuntimeError           — Baidu errno!=0 (business-level reject)
         """
         del path  # silence linters
-        resp = requests.post(
-            f"{self.PCS_BASE}/superfile2",
-            params={
-                'method': 'upload',
-                'access_token': access_token,
-                'type': 'tmpfile',
-                'path': remote_path,
-                'uploadid': uploadid,
-                'partseq': chunk_idx,
-            },
-            files={'file': chunk_data},
-            timeout=300,  # 大 chunk 跨境慢
-        )
-        resp.raise_for_status()
-        body = resp.json()
-        if 'md5' not in body:
-            raise RuntimeError(f"Baidu chunk PUT failed (no md5 returned): {body}")
+        last_exc: Exception | None = None
+        for attempt in range(_CHUNK_UPLOAD_MAX_ATTEMPTS):
+            try:
+                resp = requests.post(
+                    f"{self.PCS_BASE}/superfile2",
+                    params={
+                        'method': 'upload',
+                        'access_token': access_token,
+                        'type': 'tmpfile',
+                        'path': remote_path,
+                        'uploadid': uploadid,
+                        'partseq': chunk_idx,
+                    },
+                    files={'file': chunk_data},
+                    # Tuple form is explicit: (connect, read). 30s to handshake,
+                    # 300s for the whole-chunk read (large chunks on slow links
+                    # can take a couple of minutes). Same total as before, but
+                    # we now retry instead of giving up on the first hiccup.
+                    timeout=(30, 300),
+                )
+                # 5xx → retry; 4xx → raise (auth / bad request, no point retrying)
+                if 500 <= resp.status_code < 600:
+                    raise requests.HTTPError(
+                        f"PCS chunk upload returned 5xx {resp.status_code}",
+                        response=resp,
+                    )
+                resp.raise_for_status()
+                body = resp.json()
+                if 'md5' not in body:
+                    raise RuntimeError(
+                        f"Baidu chunk PUT failed (no md5 returned): {body}"
+                    )
+                if attempt > 0:
+                    logger.info(
+                        "PCS chunk upload succeeded on attempt %d/%d "
+                        "(partseq=%d uploadid=%s)",
+                        attempt + 1, _CHUNK_UPLOAD_MAX_ATTEMPTS,
+                        chunk_idx, uploadid,
+                    )
+                return
+            except (requests.Timeout, requests.ConnectionError) as exc:
+                last_exc = exc
+                if attempt + 1 >= _CHUNK_UPLOAD_MAX_ATTEMPTS:
+                    break
+                sleep_s = _CHUNK_UPLOAD_BACKOFF_BASE_S * (2 ** attempt)
+                logger.warning(
+                    "PCS chunk upload transient failure (partseq=%d "
+                    "attempt=%d/%d): %s — retrying in %.1fs",
+                    chunk_idx, attempt + 1, _CHUNK_UPLOAD_MAX_ATTEMPTS,
+                    exc, sleep_s,
+                )
+                time.sleep(sleep_s)
+            except requests.HTTPError as exc:
+                # 5xx caught above; 4xx fall here → raise immediately.
+                if (exc.response is not None
+                        and 500 <= exc.response.status_code < 600
+                        and attempt + 1 < _CHUNK_UPLOAD_MAX_ATTEMPTS):
+                    last_exc = exc
+                    sleep_s = _CHUNK_UPLOAD_BACKOFF_BASE_S * (2 ** attempt)
+                    logger.warning(
+                        "PCS chunk upload 5xx (partseq=%d attempt=%d/%d): "
+                        "%s — retrying in %.1fs",
+                        chunk_idx, attempt + 1, _CHUNK_UPLOAD_MAX_ATTEMPTS,
+                        exc, sleep_s,
+                    )
+                    time.sleep(sleep_s)
+                    continue
+                raise
+        # Exhausted retries — raise the last network exception so backup_executor
+        # can mark the BackupRecord failed with the actual cause.
+        assert last_exc is not None  # we only break out of loop after setting it
+        raise last_exc
 
     def _create_finalize(self, remote_path: str, size: int, chunk_md5s: list[str],
                          uploadid: str, access_token: str) -> dict:
