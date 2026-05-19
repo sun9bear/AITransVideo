@@ -24,6 +24,24 @@ EVENT_TYPE_STREAM_REDIRECT_R2 = "stream.redirect.r2"
 EVENT_TYPE_STREAM_REDIRECT_R2_REGISTRY = "stream.redirect.r2_registry"
 EVENT_TYPE_STREAM_FALLBACK_LOCAL = "stream.fallback.local"
 EVENT_TYPE_STREAM_LOCAL_DIRECT = "stream.local.direct"
+# Plan 2026-05-14 §Phase 9 (admin pan backup): pan.* event vocabulary.
+# 8 events cover the full backup → archive → restore → cleanup lifecycle.
+# Like download.* / stream.*, these are routing/lifecycle events — they
+# answer "what stage did the operation reach?" not "did the user perceive
+# the result?" Notification recipes for the *.failed and *.token_revoked
+# variants live in gateway/notification_dispatch_map.py.
+#
+# Contract: gateway/storage/event_log.py::_DOWNLOAD_EVENT_TYPES must
+# include the same pan.* names — tests/test_pan_event_vocab_in_sync.py
+# (Phase 9 T9.6) locks them in lockstep so a one-sided edit fails CI.
+EVENT_TYPE_PAN_BACKUP_STARTED = "pan.backup.started"
+EVENT_TYPE_PAN_BACKUP_SUCCEEDED = "pan.backup.succeeded"
+EVENT_TYPE_PAN_BACKUP_FAILED = "pan.backup.failed"
+EVENT_TYPE_PAN_RESTORE_STARTED = "pan.restore.started"
+EVENT_TYPE_PAN_RESTORE_SUCCEEDED = "pan.restore.succeeded"
+EVENT_TYPE_PAN_RESTORE_FAILED = "pan.restore.failed"
+EVENT_TYPE_PAN_TOKEN_REVOKED = "pan.token_revoked"
+EVENT_TYPE_PAN_RESIDUE_CLEANUP_COMPLETED = "pan.residue_cleanup.completed"
 SUPPORTED_EVENT_TYPES = {
     EVENT_TYPE_LOG,
     EVENT_TYPE_STATUS,
@@ -35,6 +53,14 @@ SUPPORTED_EVENT_TYPES = {
     EVENT_TYPE_STREAM_REDIRECT_R2_REGISTRY,
     EVENT_TYPE_STREAM_FALLBACK_LOCAL,
     EVENT_TYPE_STREAM_LOCAL_DIRECT,
+    EVENT_TYPE_PAN_BACKUP_STARTED,
+    EVENT_TYPE_PAN_BACKUP_SUCCEEDED,
+    EVENT_TYPE_PAN_BACKUP_FAILED,
+    EVENT_TYPE_PAN_RESTORE_STARTED,
+    EVENT_TYPE_PAN_RESTORE_SUCCEEDED,
+    EVENT_TYPE_PAN_RESTORE_FAILED,
+    EVENT_TYPE_PAN_TOKEN_REVOKED,
+    EVENT_TYPE_PAN_RESIDUE_CLEANUP_COMPLETED,
 }
 
 EVENT_LEVEL_INFO = "info"

@@ -69,6 +69,23 @@ STREAM_EVENT_TYPES = frozenset({
     "stream.local.direct",
 })
 
+# Plan 2026-05-14 §Phase 9 T9.4: admin pan backup lifecycle events.
+# Like download.* / stream.* this set is inlined here — the script
+# must stay stdlib-only (gateway container has no pydub, so it can't
+# import services.jobs.events). Contract test
+# tests/test_r2_observability.py::test_script_event_vocab_in_sync_with_jobs_events
+# locks all three sets in sync with SUPPORTED_EVENT_TYPES.
+PAN_EVENT_TYPES = frozenset({
+    "pan.backup.started",
+    "pan.backup.succeeded",
+    "pan.backup.failed",
+    "pan.restore.started",
+    "pan.restore.succeeded",
+    "pan.restore.failed",
+    "pan.token_revoked",
+    "pan.residue_cleanup.completed",
+})
+
 # 命中 R2 = 走了 302 重定向(无论 registry 还是 lazy)。
 DOWNLOAD_R2_SERVED = frozenset({
     "download.redirect.r2",
@@ -89,7 +106,26 @@ STREAM_LOCAL_SERVED = frozenset({
     "stream.local.direct",
 })
 
-ALL_TRACKED = DOWNLOAD_EVENT_TYPES | STREAM_EVENT_TYPES
+# Pan 内部分组 — 用 "结果" 维度切,方便 dashboard 看成功率。token_revoked
+# 是 auth 层副作用,放到 OTHER 桶里单独显示。
+PAN_SUCCESS = frozenset({
+    "pan.backup.succeeded",
+    "pan.restore.succeeded",
+    "pan.residue_cleanup.completed",
+})
+PAN_FAILURE = frozenset({
+    "pan.backup.failed",
+    "pan.restore.failed",
+})
+PAN_IN_FLIGHT = frozenset({
+    "pan.backup.started",
+    "pan.restore.started",
+})
+PAN_OTHER = frozenset({
+    "pan.token_revoked",
+})
+
+ALL_TRACKED = DOWNLOAD_EVENT_TYPES | STREAM_EVENT_TYPES | PAN_EVENT_TYPES
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +255,10 @@ def render_text(
     dl_local = sum(counter[t] for t in DOWNLOAD_LOCAL_SERVED)
     st_r2 = sum(counter[t] for t in STREAM_R2_SERVED)
     st_local = sum(counter[t] for t in STREAM_LOCAL_SERVED)
+    pan_total = sum(counter[t] for t in PAN_EVENT_TYPES)
+    pan_succ = sum(counter[t] for t in PAN_SUCCESS)
+    pan_fail = sum(counter[t] for t in PAN_FAILURE)
+    pan_flight = sum(counter[t] for t in PAN_IN_FLIGHT)
 
     lines = []
     lines.append(f"=== R2 灰度观察 (since={since_label}) ===")
@@ -248,11 +288,25 @@ def render_text(
         )
     lines.append("")
 
+    # Plan 2026-05-14 §Phase 9 T9.4: admin pan backup section.
+    lines.append("--- Pan Backup (网盘备份/恢复) ---")
+    lines.append(f"  总数:           {pan_total}")
+    lines.append(f"  完成:           {pan_succ:>6}  {_pct(pan_succ, pan_total)}")
+    lines.append(f"  失败:           {pan_fail:>6}  {_pct(pan_fail, pan_total)}")
+    lines.append(f"  进行中:         {pan_flight:>6}  {_pct(pan_flight, pan_total)}")
+    for t in sorted(PAN_EVENT_TYPES):
+        lines.append(
+            f"    {t:<40} {counter[t]:>6}  {_pct(counter[t], pan_total)}"
+        )
+    lines.append("")
+
     # Highlight fallback events — these are what drive Phase 2b decisions.
     dl_fallback = counter["download.fallback.local"]
     st_fallback = counter["stream.fallback.local"]
-    if dl_fallback or st_fallback:
-        lines.append("--- 关注 (R2 路径失败后回落 local) ---")
+    pan_failure = pan_fail
+    pan_revoked = counter["pan.token_revoked"]
+    if dl_fallback or st_fallback or pan_failure or pan_revoked:
+        lines.append("--- 关注 ---")
         if dl_fallback:
             lines.append(
                 f"  download.fallback.local: {dl_fallback} 次 "
@@ -263,6 +317,16 @@ def render_text(
                 f"  stream.fallback.local:   {st_fallback} 次 "
                 f"— 检查 registry 缺失 / edit_gen drift / R2 网络抖动"
             )
+        if pan_failure:
+            lines.append(
+                f"  pan.backup/restore.failed: {pan_failure} 次 "
+                f"— 看 backup_records.error_message + Baidu API 端日志"
+            )
+        if pan_revoked:
+            lines.append(
+                f"  pan.token_revoked:       {pan_revoked} 次 "
+                f"— admin 需重新 OAuth 授权; refresh 是否被 Baidu 拒"
+            )
         # Phase 2b threshold reminder (plan §11.5).
         st_fallback_pct = 100 * st_fallback / st_total if st_total else 0
         if st_fallback_pct >= 5:
@@ -271,7 +335,7 @@ def render_text(
                 f"接近 Phase 2b CF Custom Domain 触发判据"
             )
     else:
-        lines.append("--- 无 R2 fallback (路径都按预期工作) ---")
+        lines.append("--- 无 R2 fallback / pan 故障 (路径都按预期工作) ---")
 
     return "\n".join(lines)
 
@@ -286,6 +350,7 @@ def render_json(
 ) -> str:
     dl_total = sum(counter[t] for t in DOWNLOAD_EVENT_TYPES)
     st_total = sum(counter[t] for t in STREAM_EVENT_TYPES)
+    pan_total = sum(counter[t] for t in PAN_EVENT_TYPES)
     payload = {
         "since": since_label,
         "files": {
@@ -308,6 +373,16 @@ def render_json(
             "local_served": sum(counter[t] for t in STREAM_LOCAL_SERVED),
             "by_event_type": {
                 t: counter[t] for t in sorted(STREAM_EVENT_TYPES)
+            },
+        },
+        # Plan 2026-05-14 §Phase 9 T9.4: admin pan backup observability.
+        "pan": {
+            "total": pan_total,
+            "succeeded": sum(counter[t] for t in PAN_SUCCESS),
+            "failed": sum(counter[t] for t in PAN_FAILURE),
+            "in_flight": sum(counter[t] for t in PAN_IN_FLIGHT),
+            "by_event_type": {
+                t: counter[t] for t in sorted(PAN_EVENT_TYPES)
             },
         },
     }

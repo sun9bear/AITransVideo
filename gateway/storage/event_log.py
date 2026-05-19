@@ -57,6 +57,13 @@ logger = logging.getLogger(__name__)
 # (Plan 2026-05-07 §11.3 C6 / Stage C: ``stream.*`` mirrors download.*
 # for /stream/{kind} R2 redirect. The name is kept (_DOWNLOAD_EVENT_TYPES)
 # for git-blame continuity; the contents now cover both surfaces.)
+# (Plan 2026-05-14 §Phase 9 T9.2: ``pan.*`` covers admin pan backup
+# lifecycle. Symbol name kept as ``_DOWNLOAD_EVENT_TYPES`` for git-blame
+# continuity per plan §3.2 — the original Phase 2 R2 download writer
+# was the first caller; this set is now the gateway-side allow-list
+# for **all** non-pipeline event types. Contract test
+# tests/test_pan_event_vocab_in_sync.py asserts the pan slice of this
+# set matches the pan slice of SUPPORTED_EVENT_TYPES exactly.)
 _DOWNLOAD_EVENT_TYPES = frozenset({
     "download.redirect.r2",
     "download.redirect.r2_registry",
@@ -66,6 +73,14 @@ _DOWNLOAD_EVENT_TYPES = frozenset({
     "stream.redirect.r2_registry",
     "stream.fallback.local",
     "stream.local.direct",
+    "pan.backup.started",
+    "pan.backup.succeeded",
+    "pan.backup.failed",
+    "pan.restore.started",
+    "pan.restore.succeeded",
+    "pan.restore.failed",
+    "pan.token_revoked",
+    "pan.residue_cleanup.completed",
 })
 
 

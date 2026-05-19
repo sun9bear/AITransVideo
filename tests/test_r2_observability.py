@@ -257,13 +257,16 @@ def test_parse_since_rejects_garbage() -> None:
 
 def test_script_event_vocab_in_sync_with_jobs_events() -> None:
     """If services.jobs.events.SUPPORTED_EVENT_TYPES grows a new
-    download.* / stream.* member, this script's inlined sets must learn
-    about it too — otherwise the new type would silently disappear from
-    R2 observability output.
+    download.* / stream.* / pan.* member, this script's inlined sets must
+    learn about it too — otherwise the new type would silently disappear
+    from R2 observability output.
 
-    The script intentionally only tracks download.* and stream.* (log /
-    status / future top-level types are out of scope), so we filter by
-    prefix when comparing.
+    The script intentionally only tracks download.* / stream.* / pan.*
+    (log / status / future top-level types are out of scope), so we
+    filter by prefix when comparing.
+
+    Plan 2026-05-14 §Phase 9 T9.5: extended from download/stream to
+    download/stream/pan tri-prefix sync.
     """
     from services.jobs.events import SUPPORTED_EVENT_TYPES
 
@@ -273,11 +276,16 @@ def test_script_event_vocab_in_sync_with_jobs_events() -> None:
     upstream_stream = frozenset(
         t for t in SUPPORTED_EVENT_TYPES if t.startswith("stream.")
     )
+    upstream_pan = frozenset(
+        t for t in SUPPORTED_EVENT_TYPES if t.startswith("pan.")
+    )
 
     missing_download = upstream_download - r2obs.DOWNLOAD_EVENT_TYPES
     extra_download = r2obs.DOWNLOAD_EVENT_TYPES - upstream_download
     missing_stream = upstream_stream - r2obs.STREAM_EVENT_TYPES
     extra_stream = r2obs.STREAM_EVENT_TYPES - upstream_stream
+    missing_pan = upstream_pan - r2obs.PAN_EVENT_TYPES
+    extra_pan = r2obs.PAN_EVENT_TYPES - upstream_pan
 
     assert not missing_download, (
         f"r2_observability.py missing download.* types known to "
@@ -299,6 +307,17 @@ def test_script_event_vocab_in_sync_with_jobs_events() -> None:
     assert not extra_stream, (
         f"r2_observability.py has unknown stream.* types: "
         f"{sorted(extra_stream)}."
+    )
+    assert not missing_pan, (
+        f"r2_observability.py missing pan.* types known to "
+        f"services.jobs.events: {sorted(missing_pan)}. "
+        f"Add them to PAN_EVENT_TYPES (and likely PAN_SUCCESS / PAN_FAILURE "
+        f"/ PAN_IN_FLIGHT / PAN_OTHER)."
+    )
+    assert not extra_pan, (
+        f"r2_observability.py has unknown pan.* types: "
+        f"{sorted(extra_pan)}. Either fix the typo or add them to "
+        f"services.jobs.events SUPPORTED_EVENT_TYPES."
     )
 
 

@@ -391,15 +391,21 @@ def _assert_emit_writes_expected(
 
 
 def test_emit_download_event_supported_types_in_sync_with_jobs_events():
-    """Cross-module contract: the redirect event types the gateway writer
-    accepts without a drift warning must match the
-    ``services.jobs.events`` SUPPORTED_EVENT_TYPES set for both
-    ``download.*`` and ``stream.*`` families. Catches the case where
-    someone adds a new event type to one side without the other.
+    """Cross-module contract: the event types the gateway writer accepts
+    without a drift warning must match the ``services.jobs.events``
+    SUPPORTED_EVENT_TYPES set for the ``download.*``, ``stream.*``, and
+    ``pan.*`` families. Catches the case where someone adds a new event
+    type to one side without the other.
 
     Plan 2026-05-07 §11.3 C6 (Stage C, 2026-05-12): ``_DOWNLOAD_EVENT_TYPES``
     was extended to include ``stream.*`` keeping the same variable name
-    for git-blame continuity; the assertion below covers both families.
+    for git-blame continuity.
+
+    Plan 2026-05-14 §Phase 9 T9.2: ``_DOWNLOAD_EVENT_TYPES`` further
+    extended to include ``pan.*`` — same variable name retained for
+    git-blame continuity (it's now the gateway's allow-list for
+    non-pipeline event types, not just download). Regex below extended
+    to match all three families.
     """
     # Scrub cache — other fixtures muck with sys.modules["config"].
     for mod in ("storage", "storage.event_log"):
@@ -410,10 +416,12 @@ def test_emit_download_event_supported_types_in_sync_with_jobs_events():
     # Pull SUPPORTED_EVENT_TYPES from the Job API side via AST — importing
     # services.jobs.events would pull pydub and defeat the point.
     events_src = (SRC_DIR / "services" / "jobs" / "events.py").read_text(encoding="utf-8")
-    # Extract every (download|stream).* string literal assigned to an
+    # Extract every (download|stream|pan).* string literal assigned to an
     # EVENT_TYPE_* constant. Robust enough for this small, stable file.
     import re
-    literals = set(re.findall(r'"((?:download|stream)\.[a-z0-9_.]+)"', events_src))
+    literals = set(re.findall(
+        r'"((?:download|stream|pan)\.[a-z0-9_.]+)"', events_src,
+    ))
 
     assert gateway_types == literals, (
         f"Event-type drift between gateway/storage/event_log.py and "

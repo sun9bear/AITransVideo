@@ -50,6 +50,11 @@ EVENT_SUPPORT_HANDOFF_CLOSED = "support.handoff_closed"
 # refresh attempt fails (network / Baidu rejection / token rotation
 # race that lost), marking the credential 'revoked' in PG.
 EVENT_PAN_TOKEN_REVOKED = "pan.token_revoked"
+# Phase 9 §T9.3: surface user-actionable backup/restore failures so the
+# admin doesn't have to poll /admin/pan/dashboard to notice — the dashboard
+# is consulted *because* of the notification, not the other way around.
+EVENT_PAN_BACKUP_FAILED = "pan.backup.failed"
+EVENT_PAN_RESTORE_FAILED = "pan.restore.failed"
 
 
 DISPATCH_MAP: dict[str, dict[str, Any]] = {
@@ -156,6 +161,27 @@ DISPATCH_MAP: dict[str, dict[str, Any]] = {
         "severity": "warning",
         "title": "网盘授权已失效",
         "body": "你的网盘授权已失效,需要重新连接才能继续备份/恢复。",
+        "action_url": "/admin/pan/dashboard",
+    },
+    # Phase 9 §T9.3 — pan backup/restore failure notifications.
+    # ``display_name`` is the job's user-facing title (same field already
+    # used by EVENT_JOB_* recipes); ``reason`` is the executor's
+    # error_message (truncated / redacted by notifications_service before
+    # interpolation). Severity=error matches EVENT_JOB_FAILED tier.
+    EVENT_PAN_BACKUP_FAILED: {
+        "scope": "job",
+        "topic": "artifact",
+        "severity": "error",
+        "title": "网盘备份失败",
+        "body": "「{display_name}」备份到网盘失败:{reason}。可在管理后台查看详情或重试。",
+        "action_url": "/admin/pan/dashboard",
+    },
+    EVENT_PAN_RESTORE_FAILED: {
+        "scope": "job",
+        "topic": "artifact",
+        "severity": "error",
+        "title": "网盘恢复失败",
+        "body": "「{display_name}」从网盘恢复失败:{reason}。原始 tar 仍在网盘,可在管理后台重试。",
         "action_url": "/admin/pan/dashboard",
     },
 }
