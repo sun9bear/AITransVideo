@@ -443,3 +443,46 @@ class FakeBaiduPanClient:
             'expires_in': 2592000,
             'scope': 'basic netdisk',
         }
+
+
+# ---------------------------------------------------------------------------
+# CodeX P2 (2026-05-19): launch isolation for pan tests
+# ---------------------------------------------------------------------------
+#
+# Phase 8 tests for scanner/reaper trigger ``run_archive_scanner_tick`` /
+# ``run_stale_reaper_tick`` which call into ``pan._enqueue.enqueue_pan_task``.
+# The helper does ``asyncio.create_task(executor(...))`` which schedules the
+# REAL backup_executor / residue_cleanup coroutine. Those executors then run
+# against the fake ``database`` MagicMock and hit ``async with conn.begin()``,
+# producing ``RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call'
+# was never awaited``. The warnings are harmless (the coroutine is
+# immediately GC'd) but they pollute the test output and could hide other
+# real warnings.
+#
+# Use ``install_no_launch(monkeypatch)`` in any test that goes through
+# ``enqueue_pan_task`` and doesn't itself assert on the launched coroutine.
+# The patch replaces ``pan._enqueue._launch_coroutine`` with a record-only
+# stub that calls ``coro.close()`` to suppress the warning.
+
+
+def install_no_launch(monkeypatch) -> list[dict]:
+    """Block the real executor coroutine from running in pan tests.
+
+    Returns a list that captures every launch attempt as
+    ``{'name': str, 'coro_qualname': str}`` so individual tests can still
+    assert how many enqueues happened.
+
+    Pattern lifted from tests/test_pan_enqueue.py._install_launch_capture
+    so all pan tests share one strategy. Keep them in sync.
+    """
+    from pan import _enqueue as mod
+
+    launched: list[dict] = []
+
+    def fake_launch(coro, name: str):
+        launched.append({'name': name, 'coro_qualname': coro.__qualname__})
+        coro.close()  # avoid RuntimeWarning: coroutine never awaited
+        return None
+
+    monkeypatch.setattr(mod, '_launch_coroutine', fake_launch)
+    return launched

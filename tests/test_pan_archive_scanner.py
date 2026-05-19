@@ -16,6 +16,7 @@ from tests.pan_fixtures import (  # noqa: F401
     insert_sample_backup_record,
     insert_sample_job,
     insert_sample_pan_credentials,
+    install_no_launch,
     run_async,
     setup_pan_token_env,
 )
@@ -118,6 +119,10 @@ def test_scanner_enqueues_pan_backup_tasks(monkeypatch):
     from pan.archive_scanner import run_archive_scanner_tick
 
     setup_pan_token_env(monkeypatch)
+    # CodeX P2: block real backup_executor from being scheduled —
+    # the enqueue path goes through pan._enqueue and we don't have
+    # a real event loop / executor wiring here.
+    launched = install_no_launch(monkeypatch)
     admin_id = uuid.uuid4()
     old = datetime.now(timezone.utc) - timedelta(days=40)
 
@@ -145,6 +150,10 @@ def test_scanner_enqueues_pan_backup_tasks(monkeypatch):
             assert len(tasks) == 3
             assert all(t.task_type == 'pan_backup' for t in tasks)
             assert sorted(t.job_id for t in tasks) == ['a', 'b', 'c']
+
+            # Bonus: each row got a launch attempt (one per candidate).
+            assert len(launched) == 3
+            assert all('pan_backup' in entry['name'] for entry in launched)
 
     run_async(_go())
 
@@ -372,6 +381,8 @@ def test_scanner_per_candidate_enqueue_failure_continues_batch(monkeypatch):
     import background_task_queue as queue
 
     setup_pan_token_env(monkeypatch)
+    # CodeX P2: block real executor launches.
+    install_no_launch(monkeypatch)
     admin_id = uuid.uuid4()
     old = datetime.now(timezone.utc) - timedelta(days=40)
 

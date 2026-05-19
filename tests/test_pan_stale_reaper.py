@@ -16,6 +16,7 @@ from tests.pan_fixtures import (  # noqa: F401
     insert_sample_backup_record,
     insert_sample_job,
     insert_sample_pan_credentials,
+    install_no_launch,
     run_async,
     setup_pan_token_env,
 )
@@ -327,6 +328,9 @@ def test_reaper_forward_resolves_post_commit_stuck(monkeypatch):
     from pan.stale_reaper import run_stale_reaper_tick
 
     setup_pan_token_env(monkeypatch)
+    # CodeX P2: block real residue_cleanup executor from running —
+    # this test only verifies the row was enqueued + status flips.
+    install_no_launch(monkeypatch)
     user_id = uuid.uuid4()
 
     async def _go():
@@ -438,6 +442,9 @@ def test_reaper_handles_mixed_workload(monkeypatch):
     from pan.stale_reaper import run_stale_reaper_tick
 
     setup_pan_token_env(monkeypatch)
+    # CodeX P2: Pass-2 forward path enqueues residue_cleanup — block
+    # the real executor from running.
+    install_no_launch(monkeypatch)
     user_id = uuid.uuid4()
 
     async def _go():
