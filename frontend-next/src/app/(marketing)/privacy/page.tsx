@@ -272,6 +272,54 @@ export default function PrivacyPage() {
         <p>
           第三方服务由其独立运营，其数据处理规则不受本隐私政策直接约束。您在使用第三方服务前，应自行查阅其相关条款和隐私政策。
         </p>
+
+        <div className="mt-4">
+          <h3 className="text-base font-semibold text-foreground">
+            10.1 管理员侧第三方网盘授权（百度网盘开放平台）
+          </h3>
+          <p className="mt-2">
+            为支持长期归档与跨地域容灾，本服务的管理后台提供一项「将已完成的任务工程包归档至管理员个人百度网盘」的备份功能。该功能仅向具有管理员权限的账号开放，普通用户不会接触到该流程，也不会向第三方网盘传输普通用户的任何身份信息。
+          </p>
+          <p className="mt-2">
+            管理员首次启用该功能时，会被引导至百度网盘开放平台完成 OAuth 2.0 授权（仅请求
+            <code className="mx-1 rounded bg-muted px-1 py-0.5 text-xs">basic</code>
+            与
+            <code className="mx-1 rounded bg-muted px-1 py-0.5 text-xs">netdisk</code>
+            两个权限范围）。授权后我们将获得：
+          </p>
+          <LegalClauseList
+            items={[
+              "在管理员个人网盘 /apps/AIVideoTrans/backups/ 目录下创建、列出、读取和删除文件的能力；",
+              "查询该网盘的存储配额；",
+              "通过 access_token / refresh_token 在 6 小时刷新一次以维持长期可用。",
+            ]}
+          />
+          <p className="mt-2">
+            我们对授权 token 的处理遵循以下原则：
+          </p>
+          <LegalClauseList
+            items={[
+              "access_token 与 refresh_token 在我们的数据库中以对称加密方式存储，加密密钥独立保管，不与数据库同地存放；",
+              "不会向任何第三方共享授权 token 或上传至百度网盘以外的位置；",
+              "管理员可在管理后台随时点击「断开授权」，断开后我们将立即清除存储的 token，并由后台自动通知百度网盘开放平台撤销授权；",
+              "我们仅在管理员主动触发「备份/恢复」或我们的后台定期归档任务真正发起请求时调用百度接口，不进行任何隐式后台扫描；",
+              "备份产物存储在管理员自己的百度网盘账户内（我们仅在上述受限目录下有写入与读取能力，无法访问该账户其他文件）。",
+            ]}
+          />
+          <p className="mt-2">
+            百度网盘开放平台对该 OAuth
+            流程及其调用接口的处理规则受其
+            <a
+              href="https://pan.baidu.com/disclaimer/privacy.html"
+              target="_blank"
+              rel="noreferrer"
+              className="mx-1 text-foreground underline-offset-4 hover:underline"
+            >
+              《百度网盘隐私政策》
+            </a>
+            约束，您在该平台进行授权操作时应自行阅读并接受。
+          </p>
+        </div>
       </LegalSection>
 
       <LegalSection number="11" title="隐私政策的更新">

@@ -261,6 +261,21 @@ export default function TermsPage() {
           10.3
           因第三方服务故障、限制、中断、调整、停止或政策变化引发的问题，我们将在合理范围内协助处理，但不因此当然承担超出法定义务范围的责任。
         </p>
+        <p>
+          10.4
+          管理后台提供的「网盘归档备份」功能依赖百度网盘开放平台的 OAuth
+          授权与 API
+          能力。该功能仅向管理员账号开放，授权范围限于在管理员个人网盘的指定目录下创建、列出、读取与删除文件，以及查询配额。我们不对百度网盘账户的存储容量限制、限速、单文件大小上限、风控策略、限流或其他百度方面的运营策略负责。请管理员在使用该功能前自行阅读
+          <a
+            href="https://pan.baidu.com/disclaimer/policy.html"
+            target="_blank"
+            rel="noreferrer"
+            className="mx-1 text-foreground underline-offset-4 hover:underline"
+          >
+            《百度网盘服务协议》
+          </a>
+          。
+        </p>
       </LegalSection>
 
       <LegalSection number="11" title="服务中断、变更与终止">
