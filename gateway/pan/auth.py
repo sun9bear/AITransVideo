@@ -312,9 +312,20 @@ async def pan_token_refresh_tick(
             old_refresh = decrypt_token(old_refresh_encrypted)
             new_tokens = client.refresh(old_refresh)
             # ⚠️ Baidu rotates refresh_token — must persist the NEW one.
-            await db.execute(
+            # CodeX P1: success path needs the SAME stale-token guard as
+            # the failure path below. If two ticks both reach Baidu and
+            # both succeed (Baidu grace window, or admin reconnect between
+            # our SELECT and our refresh), the later-finishing tick would
+            # otherwise overwrite the newer credential. Conditional UPDATE
+            # → rowcount=0 means another tick already rotated this row;
+            # our tokens are stale even though Baidu accepted them.
+            success_result = await db.execute(
                 update(PanCredentials)
-                .where(PanCredentials.id == row.id)
+                .where(
+                    PanCredentials.id == row.id,
+                    PanCredentials.refresh_token_encrypted == old_refresh_encrypted,
+                    PanCredentials.status == 'active',
+                )
                 .values(
                     access_token_encrypted=encrypt_token(
                         new_tokens['access_token'],
@@ -329,6 +340,14 @@ async def pan_token_refresh_tick(
                 )
             )
             await db.commit()
+            if success_result.rowcount == 0:
+                stats['skipped_race'] += 1
+                logger.info(
+                    "pan_token_refresh: skip stale-success write cred=%s — "
+                    "row already rotated by concurrent tick or admin "
+                    "reconnect (race-safe guard)", row.id,
+                )
+                continue
             stats['refreshed'] += 1
             logger.info(
                 "pan_token_refresh: refreshed cred=%s user=%s",

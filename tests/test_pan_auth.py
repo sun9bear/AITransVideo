@@ -648,6 +648,121 @@ def test_refresh_tick_dispatch_event_failure_does_not_block_revoke(monkeypatch):
     run_async(_go())
 
 
+def test_refresh_tick_success_path_does_not_overwrite_newer_token(
+    monkeypatch, tmp_path,
+):
+    """CodeX 2026-05-18 P1 (round 2): the SUCCESS path must also be
+    race-safe. If two ticks both reach Baidu and Baidu accepts both
+    (grace window for the previous refresh_token, or admin reconnect
+    between our SELECT and our successful refresh), the later-finishing
+    tick must NOT overwrite the newer credential.
+
+    Simulation mirrors the failure-path race test: file-based SQLite,
+    inside refresh() rotate the row via sync sqlite3 to simulate
+    "winner already wrote NEWER tokens", then let refresh() succeed.
+    Conditional UPDATE rowcount=0 → skipped_race incremented, the
+    winner's NEWER row stays intact."""
+    from models import (
+        BackupRecord, Job, PanCredentials, PanOauthState,
+    )
+    from pan.auth import pan_token_refresh_tick
+    from pan.token_crypto import decrypt_token, encrypt_token
+    from sqlalchemy.ext.asyncio import (
+        async_sessionmaker, create_async_engine, AsyncSession,
+    )
+
+    setup_pan_token_env(monkeypatch)
+    user_id = uuid.uuid4()
+    db_file = tmp_path / 'race_success.db'
+
+    class RaceWinnerSucceedClient(FakeBaiduPanClient):
+        """Tick A already rotated the row + we then return success too.
+        The conditional UPDATE must catch us as stale."""
+
+        def __init__(self, db_path):
+            super().__init__()
+            self._db_path = db_path
+            self.winner_access = encrypt_token('WINNER_access')
+            self.winner_refresh = encrypt_token('WINNER_refresh')
+
+        def refresh(self, refresh_token):
+            self.refresh_calls.append({'refresh_token': refresh_token})
+            # Tick A wrote NEW tokens. Our async tick still has the
+            # OLD refresh_token_encrypted captured.
+            import sqlite3
+            conn = sqlite3.connect(self._db_path)
+            try:
+                rc = conn.execute(
+                    "UPDATE pan_credentials SET refresh_token_encrypted = ?, "
+                    "access_token_encrypted = ? WHERE user_id = ?",
+                    (self.winner_refresh, self.winner_access, user_id.hex),
+                ).rowcount
+                conn.commit()
+                assert rc == 1
+            finally:
+                conn.close()
+            # Baidu happens to accept our (now stale) token in a grace
+            # window — return canned success.
+            return {
+                'access_token': 'OUR_stale_access',
+                'refresh_token': 'OUR_stale_refresh',
+                'expires_in': 2592000,
+                'scope': 'basic netdisk',
+            }
+
+    async def _go():
+        engine = create_async_engine(
+            f"sqlite+aiosqlite:///{db_file}",
+            connect_args={"check_same_thread": False},
+        )
+        try:
+            async with engine.begin() as conn:
+                for t in (Job, BackupRecord, PanCredentials, PanOauthState):
+                    await conn.run_sync(
+                        lambda c, _t=t: _t.__table__.create(c),
+                    )
+
+            await insert_sample_pan_credentials(
+                engine, user_id=user_id, status='active',
+                refresh_token='STALE_old_refresh',
+            )
+            await _set_expires(
+                engine, user_id=user_id,
+                expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+            )
+
+            Session = async_sessionmaker(
+                engine, class_=AsyncSession, expire_on_commit=False,
+            )
+            client = RaceWinnerSucceedClient(str(db_file))
+            async with Session() as db:
+                stats = await pan_token_refresh_tick(
+                    db, client_factory=lambda: client,
+                )
+
+            # We "succeeded" at Baidu but our row write was a no-op.
+            assert stats['checked'] == 1
+            assert stats['refreshed'] == 0
+            assert stats['revoked'] == 0
+            assert stats['skipped_race'] == 1
+
+            # Winner's tokens preserved — NOT overwritten by our stale
+            # success.
+            async with Session() as db:
+                row = (await db.execute(
+                    select(
+                        PanCredentials.access_token_encrypted,
+                        PanCredentials.refresh_token_encrypted,
+                    ).where(PanCredentials.user_id == user_id)
+                )).one()
+            assert decrypt_token(row.access_token_encrypted) == 'WINNER_access'
+            assert decrypt_token(row.refresh_token_encrypted) == 'WINNER_refresh'
+        finally:
+            await engine.dispose()
+
+    run_async(_go())
+
+
 def test_refresh_tick_concurrent_rotation_does_not_revoke_winner(
     monkeypatch, tmp_path,
 ):

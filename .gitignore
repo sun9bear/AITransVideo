@@ -65,6 +65,12 @@ ssh_upload.py
 .DS_Store
 Thumbs.db
 
+# SQLite test artifacts (diagnostic scripts may produce *.db files in
+# the repo root; tests should always use tmp_path/*.db).
+test_*.db
+*.sqlite3
+*-test.db
+
 # Logs
 *.log
 npm-debug.log*
