@@ -140,22 +140,37 @@ async def lifespan(app: FastAPI):
         else:
             logger.exception("Failed to recover stale label tasks during gateway startup")
 
-    # Recover stale background tasks (materials_pack / generate_video)
+    # Reconcile + recover background tasks (materials_pack / generate_video
+    # / pan_*). Order matters: reconciler runs FIRST so it can re-launch
+    # recent pending rows (closing the "process crashed between create_task
+    # and asyncio.create_task" gap, CodeX 2026-05-19). The reconciler calls
+    # mark_running on each launched row, bumping updated_at past startup_dt
+    # so the subsequent recover_stale pass leaves them alone.
     try:
         import background_task_queue as _bg_queue
+        import background_task_reconciler as _bg_reconciler
         from database import async_session as _async_session
+        from datetime import datetime as _dt_now, timezone as _tz_utc
+        startup_dt = _dt_now.now(_tz_utc)
         async with _async_session() as db:
-            recovered_bg = await _bg_queue.recover_stale(db)
+            stats = await _bg_reconciler.reconcile_pending_tasks(db)
+            logger.info(
+                "Pending-task reconciler scanned %d rows: launched=%d failed=%d "
+                "skipped_duplicate=%d",
+                stats["total"], stats["launched"], stats["failed"],
+                stats["skipped_duplicate"],
+            )
+            recovered_bg = await _bg_queue.recover_stale(db, cutoff_dt=startup_dt)
             if recovered_bg:
                 logger.info("Recovered %d stale background tasks", recovered_bg)
     except Exception as exc:
         if is_startup_recovery_schema_missing_error(exc):
             logger.warning(
-                "Skipped stale background task recovery because the database schema is not ready: %s",
+                "Skipped background-task reconcile/recovery because the database schema is not ready: %s",
                 exc,
             )
         else:
-            logger.exception("Failed to recover stale background tasks during gateway startup")
+            logger.exception("Failed to reconcile/recover background tasks during gateway startup")
 
     # Periodic cleanup of expired materials_pack zips (24h retention, plan
     # 2026-04-21). Disk pressure is the concern — the US host sits at 82%

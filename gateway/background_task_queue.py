@@ -405,20 +405,39 @@ async def cleanup_expired_pack_zips(
     return expired_count
 
 
-async def recover_stale(db: AsyncSession) -> int:
-    """Mark running/pending tasks as failed on startup.
+async def recover_stale(
+    db: AsyncSession, *, cutoff_dt: datetime | None = None,
+) -> int:
+    """Mark stale running/pending tasks as failed on startup.
 
     Both states are fatal after restart: ``pending`` means the
     ``asyncio.create_task`` coroutine was never scheduled by the now-dead
     process; ``running`` means it was mid-execution and lost.
+
+    ``cutoff_dt`` (typical: process start time, captured by ``main.py``
+    lifespan BEFORE any reconciliation/recovery work begins) filters out
+    rows whose ``updated_at`` is at-or-after the cutoff. This lets
+    ``background_task_reconciler.reconcile_pending_tasks`` re-launch
+    recent pending rows first (calling ``mark_running`` which bumps
+    ``updated_at`` past the cutoff) so the subsequent ``recover_stale``
+    pass leaves those rows alone. Ancient pending rows and any pending
+    rows the reconciler couldn't dispatch still fall through here.
+
+    Default ``cutoff_dt=None`` resolves to ``datetime.now(timezone.utc)``
+    inside the call, preserving the pre-reconciler behavior of "kill
+    every pending+running on startup" — kept so unit tests and any
+    out-of-lifespan callers don't break.
     """
+    now = datetime.now(timezone.utc)
+    cutoff_dt = cutoff_dt if cutoff_dt is not None else now
     result = await db.execute(
         update(BackgroundTask)
         .where(BackgroundTask.status.in_(["running", "pending"]))
+        .where(BackgroundTask.updated_at < cutoff_dt)
         .values(
             status="failed",
             error="Gateway 重启，任务中断",
-            updated_at=datetime.now(timezone.utc),
+            updated_at=now,
         )
     )
     await db.commit()
