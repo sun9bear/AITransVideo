@@ -121,8 +121,10 @@ export default function PanBackupsPage() {
         limit: PAGE_SIZE,
         offset: page * PAGE_SIZE,
       })
-      setRows(r.backups)
-      setTotal(r.total ?? r.backups.length)
+      // Backend key is `items` not `backups` (see pan.ts comment).
+      const items = r.items ?? []
+      setRows(items)
+      setTotal(r.total ?? items.length)
     } catch (e) {
       setError(e instanceof Error ? e.message : "加载失败")
     } finally {

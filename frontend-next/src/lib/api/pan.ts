@@ -57,8 +57,19 @@ export interface BackupRecord {
 }
 
 export interface BackupListResponse {
-  backups: BackupRecord[]
+  /**
+   * NOTE: Backend returns this key as `items`, NOT `backups`. The shape
+   * is defined in gateway/pan/admin_api.py::list_backups (response 263-268):
+   *   { "items": [...], "total": N, "limit": L, "offset": O }
+   * Aligning the TS contract to the source of truth (Phase 7b 2026-05-19
+   * production bug: I had originally typed this as `backups` and Dashboard
+   * crashed with "Cannot read property 'length' of undefined" right after
+   * a successful OAuth callback).
+   */
+  items: BackupRecord[]
   total: number
+  limit?: number
+  offset?: number
 }
 
 export interface BackupManifest {

@@ -74,7 +74,9 @@ export default function PanDashboardPage() {
       if (s.connected && s.status === "active") {
         try {
           const list = await listBackups({ limit: 5 })
-          setRecentBackups(list.backups)
+          // Backend key is `items` not `backups` (see pan.ts comment).
+          // Defensive `?? []` guards against future shape regressions.
+          setRecentBackups(list.items ?? [])
         } catch (e) {
           // Status loaded but list failed — keep status visible, just
           // show empty timeline.
