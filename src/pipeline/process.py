@@ -3968,70 +3968,48 @@ class ProcessPipeline:
                                     )
                                 )
                             if _smart_quota_remaining is None:
-                                # Fail-closed: quota unknown → handoff to Studio.
-                                # User can re-attempt via the explicit "克隆音色"
-                                # button in Studio (which uses Gateway-tracked
-                                # capture+reserve credit logic separately).
+                                # 2026-05-20 spec change (smart 全自动化原则):
+                                # 之前是 fail-closed handoff —— quota 查询失败
+                                # 就停下来让用户接管。但 quota 查询失败几乎全是
+                                # transient infra（DB 暂时不通 / Gateway 临时
+                                # 错误），不应该卡用户。改为 log warning +
+                                # 按「无配额限制」继续。
+                                #
+                                # 风险分析：极端情况下可能让用户超 admin 配的
+                                # smart_user_voice_clone_cap 一两个 clone。
+                                # MiniMax 账户那边仍然有自己的硬上限，所以不会
+                                # 真无限。下一次任务读 quota 成功后会重新生效
+                                # safety water-mark 阻挡。
+                                print(
+                                    "[smart] voice library quota lookup "
+                                    "failed (transient) — treating as "
+                                    "unlimited and continuing pipeline; "
+                                    "MiniMax provider quota still enforces "
+                                    "real upper bound. Audit:",
+                                    flush=True,
+                                )
                                 _emit_smart_audit(
                                     final_project_dir,
-                                    decision_type="downgrade_handoff",
-                                    decision="rejected",
-                                    reason_code="voice_library_quota_unavailable",
+                                    decision_type="quota_lookup_degraded",
+                                    decision="approved",
+                                    reason_code="quota_lookup_failed_continuing",
                                     evidence={
                                         "main_speakers_pending": len(
                                             _smart_main_speakers
                                         ),
+                                        "fallback_quota_remaining": 999_999,
                                     },
                                     extra={
                                         "job_id": str(_snap("job_id") or ""),
                                         "user_id": str(_snap("user_id") or ""),
-                                        "handoff_stage": VOICE_SELECTION_REVIEW_STAGE,
                                     },
                                 )
-                                emit_handoff_markers(
-                                    review_state_manager=review_state_manager,
-                                    review_stage=VOICE_SELECTION_REVIEW_STAGE,
-                                    review_payload=vs_payload,
-                                    review_pending_status=REVIEW_STATUS_PENDING,
-                                    smart_state_update={
-                                        "status": "downgraded_to_studio",
-                                        "reason": "voice_library_quota_unavailable",
-                                        "handoff_stage": VOICE_SELECTION_REVIEW_STAGE,
-                                    },
-                                    project_dir=final_project_dir,
-                                    user_message=(
-                                        "智能版无法读取音色库容量,请人工接管"
-                                    ),
-                                    web_review_marker_builder=self._build_web_review_marker,
-                                )
-                                state_manager.set_stage(
-                                    "voice_selection",
-                                    StageStatus.RUNNING,
-                                    {"execution_mode": "smart_handoff_quota_unavailable"},
-                                )
-                                current_stage_name = None
-                                _write_usage_summary(usage_meter)
-                                # Codex 第三十六轮 P1: cost_summary at smart handoff.
-                                _emit_smart_cost_summary_from_meter(
-                                    final_project_dir,
-                                    job_id=config.job_id,
-                                    usage_meter=usage_meter,
-                                    minutes_processed=(
-                                        # Codex 第三十七轮 P1: prefer ffprobe
-                                        # actual_duration_ms over unreliable _snap.
-                                        float(actual_duration_ms) / 60000.0
-                                        if actual_duration_ms
-                                        else float(
-                                            _snap("source_duration_seconds") or 0.0
-                                        ) / 60.0
-                                    ),
-                                    credits_policy="pending_settle",
-                                )
-                                return self._build_paused_result(
-                                    project_dir=final_project_dir,
-                                    stage=VOICE_SELECTION_REVIEW_STAGE,
-                                    message="智能版无法读取音色库容量",
-                                )
+                                # Safe fallback: pretend quota is unlimited
+                                # so evaluate_voice_review proceeds. Provider
+                                # quota error mid-flight (real MiniMax limit
+                                # hit) is still handled via the PAUSED
+                                # decision in _attempt_clone_with_retries.
+                                _smart_quota_remaining = 999_999
 
                             # Piece 3: real CloneProvider.
                             from services.smart_wiring import (
@@ -4531,18 +4509,33 @@ class ProcessPipeline:
                             _minor_entry["voice_id"] = _minor_vid
                             _minor_entry["auto_decision"] = "preset_minor_speaker"
 
-                    # Codex 第二十九轮 P0: if any mirror failed, hand off
-                    # to Studio. The MiniMax voice already exists (and
-                    # was paid for) but Gateway doesn't know about it,
-                    # so subsequent jobs' quota lookups would be stale.
-                    # Studio human review gives the user a chance to
-                    # manually attach the clone or skip the speaker.
+                    # 2026-05-20 spec change (smart 全自动化原则):
+                    # 之前是 fail-closed handoff —— MiniMax 克隆成功但
+                    # Gateway 音色库登记失败就停下来让用户接管。
+                    # 现在改为 log warning + 继续 pipeline，让用户拿到
+                    # 配音视频。Gateway DB 同步的最终一致性靠后台
+                    # sweeper 在下次任务/手动 admin 操作时补登记。
+                    #
+                    # Codex 第二十九轮 P0 关注的"下次任务配额 stale"
+                    # 风险仍然存在，但用户体感 > infra 同步精度。
+                    # 后台 sweeper（待补 P5 follow-up）扫
+                    # smart_decisions.jsonl 的 voice_clone 决策与
+                    # user_voices DB 差异，自动补录。
                     if _smart_clone_mirror_failures:
+                        print(
+                            f"[smart] clone library register failed for "
+                            f"{len(_smart_clone_mirror_failures)} speaker(s): "
+                            f"{','.join(_smart_clone_mirror_failures)} — "
+                            "continuing pipeline; voice already exists at "
+                            "MiniMax provider, Gateway DB sync will need "
+                            "manual reconciliation.",
+                            flush=True,
+                        )
                         _emit_smart_audit(
                             final_project_dir,
-                            decision_type="downgrade_handoff",
-                            decision="rejected",
-                            reason_code="clone_library_register_failed",
+                            decision_type="clone_mirror_degraded",
+                            decision="approved",
+                            reason_code="clone_register_failed_continuing",
                             evidence={
                                 "failed_speakers": list(
                                     _smart_clone_mirror_failures
@@ -4558,61 +4551,15 @@ class ProcessPipeline:
                             extra={
                                 "job_id": str(_snap("job_id") or ""),
                                 "user_id": str(_snap("user_id") or ""),
-                                "handoff_stage": VOICE_SELECTION_REVIEW_STAGE,
+                                "reconcile_needed": True,
                             },
                         )
-                        emit_handoff_markers(
-                            review_state_manager=review_state_manager,
-                            review_stage=VOICE_SELECTION_REVIEW_STAGE,
-                            review_payload=vs_payload,
-                            review_pending_status=REVIEW_STATUS_PENDING,
-                            smart_state_update={
-                                "status": "downgraded_to_studio",
-                                "reason": "clone_library_register_failed",
-                                "handoff_stage": VOICE_SELECTION_REVIEW_STAGE,
-                                "failed_speakers": list(
-                                    _smart_clone_mirror_failures
-                                ),
-                            },
-                            project_dir=final_project_dir,
-                            user_message=(
-                                "智能版克隆已完成但音色库登记失败,请人工接管:"
-                                f" {','.join(_smart_clone_mirror_failures)}"
-                            ),
-                            web_review_marker_builder=self._build_web_review_marker,
-                        )
-                        state_manager.set_stage(
-                            "voice_selection",
-                            StageStatus.RUNNING,
-                            {
-                                "execution_mode": (
-                                    "smart_handoff_mirror_failed"
-                                ),
-                            },
-                        )
-                        current_stage_name = None
-                        _write_usage_summary(usage_meter)
-                        # Codex 第三十六轮 P1: cost_summary at smart handoff.
-                        _emit_smart_cost_summary_from_meter(
-                            final_project_dir,
-                            job_id=config.job_id,
-                            usage_meter=usage_meter,
-                            minutes_processed=(
-                                # Codex 第三十七轮 P1: prefer ffprobe
-                                # actual_duration_ms over unreliable _snap.
-                                float(actual_duration_ms) / 60000.0
-                                if actual_duration_ms
-                                else float(
-                                    _snap("source_duration_seconds") or 0.0
-                                ) / 60.0
-                            ),
-                            credits_policy="pending_settle",
-                        )
-                        return self._build_paused_result(
-                            project_dir=final_project_dir,
-                            stage=VOICE_SELECTION_REVIEW_STAGE,
-                            message="智能版克隆音色库登记失败",
-                        )
+                        # Continue with the clone — voice_id is already
+                        # set on _sp_entry / _speaker_voices earlier in
+                        # the CLONED branch; TTS dispatch will use the
+                        # vt_speaker_* IDs successfully because MiniMax
+                        # provider has the voice. Only the cross-job
+                        # quota tracker is stale.
 
                     review_state_manager.set_stage(
                         VOICE_SELECTION_REVIEW_STAGE,

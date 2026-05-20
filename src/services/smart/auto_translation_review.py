@@ -283,42 +283,41 @@ def evaluate_translation_review(
     speaker_diff: Mapping[str, Any] | None = None,
     compliance_block: bool = False,
 ) -> TranslationReviewDecision:
-    """Run all 6 + compliance checks in plan order; first failure wins.
+    """Run all 6 deterministic checks for AUDIT METRICS ONLY.
 
-    ``compliance_block``: short-circuit when the existing content-compliance
-    pipeline has already flagged the translation as high-risk. Caller
-    is responsible for plumbing the existing compliance signal in.
+    == 2026-05-20 spec change (user request) ==
 
-    Returns ``TranslationReviewDecision`` whose ``reason_code`` mirrors
-    ``smart_shadow_sim_simulator.py`` so offline-vs-production diff is
-    apples-to-apples.
+    Smart mode 的初衷是「全自动」。除了下列硬限制以外，所有翻译审核期
+    检查不再阻挡 pipeline：
 
-    Order matters: the test suite asserts on first-failure semantics
-    (e.g. uncertain-share failure must take precedence over a downstream
-    clone-eligible failure when both trip).
+      - eligibility / sample / clone quota / clone expiry / weak match —
+        外部硬限制或 admin opt-in，保留
+      - **content compliance** — 法律/安全风险，移到 S1 后早期 gate
+        统一处理（pipeline 退出 + 退款），不再在此模块判定
+
+    本函数保留所有 6 个检查的调用纯粹是为了**填 metrics**（让
+    smart_quality_report 仍然展示 glossary 保留率、speaker 一致性等
+    审计信号），但**永远返回 auto_approved=True**。
+
+    历史行为（plan §6.2.2 first-failure）已废弃。如果未来想恢复严格
+    模式，让某项 metric 变回硬 gate，那时再加一个 admin 开关，但
+    默认必须是 auto-pass。
+
+    ``compliance_block`` 参数保留以兼容旧调用方，但**不再读取** —
+    合规阻挡的责任已经搬到 process.py 早期 gate。
     """
     aggregated_metrics: dict[str, Any] = {}
 
-    # Codex 第十轮 P2: missing-signals pre-pass aligns with simulator
-    # (smart_shadow_sim_simulator.py:187) — single ``missing_signals``
-    # reason + evidence-listed missing fields, instead of per-field
-    # unevaluable codes. Runs BEFORE the 6 deterministic checks so the
-    # check bodies don't have to repeat the missing-signal handling.
+    # 跑 missing-signals precheck，只为采集 evidence；不再返回 False。
     signals_ok, missing_evidence = _precheck_missing_signals(
         speaker_stats=speaker_stats,
         clone_sample_stats=clone_sample_stats,
     )
     if not signals_ok:
         aggregated_metrics.update(missing_evidence)
-        return TranslationReviewDecision(
-            auto_approved=False,
-            reason_code=_MISSING_SIGNAL_REASON,
-            failed_check="missing_signals_precheck",
-            metrics=aggregated_metrics,
-        )
+        aggregated_metrics["missing_signals_advisory"] = True
 
-    # Run in plan order so the reason_code reflects the FIRST failing
-    # check the user / dataset audit will see.
+    # 跑 6 个检查只为填 metrics；忽略 ok/reason 结果。
     checks = (
         ("glossary_preservation", _check_glossary_preservation, (translation_result,)),
         (
@@ -340,29 +339,23 @@ def evaluate_translation_review(
         ),
     )
     for label, fn, args in checks:
-        ok, reason, metrics = fn(*args)
+        try:
+            ok, reason, metrics = fn(*args)
+        except Exception:
+            # Audit-only — failure to compute a metric must not block
+            # the pipeline. Just skip and move on.
+            continue
         aggregated_metrics.update(metrics)
         if not ok:
-            return TranslationReviewDecision(
-                auto_approved=False,
-                reason_code=reason,
-                failed_check=label,
-                metrics=aggregated_metrics,
-            )
+            # Annotate which advisory check would have failed under
+            # the OLD strict policy, so admin QA can post-hoc review.
+            aggregated_metrics[f"{label}_advisory_reason"] = reason
 
-    # Compliance is a single-bit signal from the existing pipeline path
-    # (Smart MVP doesn't add new compliance models per plan §13). Short-
-    # circuit AFTER the deterministic checks so audit metrics still get
-    # populated (callers might want to see "would have passed deterministic
-    # but compliance blocked").
-    if compliance_block:
-        aggregated_metrics["compliance_block"] = True
-        return TranslationReviewDecision(
-            auto_approved=False,
-            reason_code="compliance_high_risk",
-            failed_check="content_compliance",
-            metrics=aggregated_metrics,
-        )
+    # NOTE: compliance_block kwarg is intentionally ignored. The early-
+    # pipeline gate in process.py (post-S1 transcript, pre-S3 translate)
+    # exits the pipeline outright on content_compliance_payload.status
+    # == "blocked", so by the time we reach translation review the
+    # job has already been admitted past the legal gate.
 
     return TranslationReviewDecision(
         auto_approved=True,

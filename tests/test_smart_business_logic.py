@@ -834,7 +834,23 @@ class TestAggregateWithRealTranscriptLineShape:
 
 
 class TestAutoTranslationReview:
-    """Plan §6.2.2 + Codex F6 — six checks + compliance + first-failure semantics."""
+    """2026-05-20 spec change: smart 全自动化原则.
+
+    Previously this module ran 6 deterministic checks + compliance and
+    short-circuited to ``auto_approved=False`` on first failure. Per
+    user feedback after job_88bdca (Google I/O 2026, hit
+    ``uncertain_speaker_share`` 78% handoff despite 100% glossary),
+    the smart product promise is "fully automatic except external
+    limits + opt-in weak-match confirmation". So translation_review
+    is now AUDIT-ONLY: checks still run to populate metrics, but
+    never block.
+
+    Compliance is now handled at an early-pipeline gate (post-S1,
+    pre-S3) — content_compliance.ContentPolicyViolationError raised
+    by ``_run_content_compliance_review`` exits the pipeline before
+    we waste S3 / TTS / clone budget. The ``compliance_block`` kwarg
+    here is retained for backward-compat but ignored.
+    """
 
     def _passing_inputs(self):
         return {
@@ -856,69 +872,72 @@ class TestAutoTranslationReview:
             "clone_sample_stats": {"eligible_speakers": 2},
         }
 
-    def test_all_checks_pass_returns_auto_approved(self):
+    def test_clean_inputs_auto_approved_with_full_metrics(self):
         from services.smart.auto_translation_review import evaluate_translation_review
 
         decision = evaluate_translation_review(**self._passing_inputs())
         assert decision.auto_approved is True
         assert decision.reason_code is None
         assert decision.failed_check is None
+        # Metrics still populated for audit (quality_report renderer
+        # depends on these).
         assert decision.metrics["glossary_preservation_rate"] == pytest.approx(0.9)
 
-    def test_glossary_preservation_below_threshold_rejected(self):
+    def test_glossary_below_threshold_still_auto_approved_but_advisory_recorded(self):
+        """Old spec: reject. New spec: auto-pass + advisory annotation."""
         from services.smart.auto_translation_review import evaluate_translation_review
 
         inputs = self._passing_inputs()
         inputs["translation_result"]["glossary_preserved_terms"] = 6  # 60% < 80%
         decision = evaluate_translation_review(**inputs)
-        assert decision.auto_approved is False
-        assert decision.failed_check == "glossary_preservation"
-        assert "glossary_preservation_low" in decision.reason_code
+        assert decision.auto_approved is True
+        assert decision.failed_check is None
+        # Advisory: the check that would have failed under old spec
+        # is annotated for admin QA visibility.
+        assert "glossary_preservation_advisory_reason" in decision.metrics
+        assert decision.metrics["glossary_preservation_rate"] == pytest.approx(0.6)
 
-    def test_length_budget_overflow_rejected(self):
+    def test_length_budget_overflow_still_auto_approved(self):
         from services.smart.auto_translation_review import evaluate_translation_review
 
         inputs = self._passing_inputs()
         inputs["translation_result"]["length_overflow_rate"] = 0.20  # 20% > 15%
         decision = evaluate_translation_review(**inputs)
-        assert decision.auto_approved is False
-        assert decision.failed_check == "length_budget"
-        assert "length_overflow_post_rewrite" in decision.reason_code
+        assert decision.auto_approved is True
+        assert "length_budget_advisory_reason" in decision.metrics
 
-    def test_text_audio_checksum_mismatch_rejected(self):
+    def test_text_audio_checksum_mismatch_still_auto_approved(self):
         from services.smart.auto_translation_review import evaluate_translation_review
 
         inputs = self._passing_inputs()
         inputs["translation_result"]["final_spoken_text_sha256"] = "different"
         decision = evaluate_translation_review(**inputs)
-        assert decision.auto_approved is False
-        assert decision.reason_code == "text_audio_checksum_mismatch"
+        assert decision.auto_approved is True
+        assert "text_audio_checksum_advisory_reason" in decision.metrics
 
-    def test_uncertain_speaker_share_above_threshold_rejected(self):
+    def test_uncertain_speaker_share_above_threshold_still_auto_approved(self):
+        """Real production incident (job_88bdca Google I/O 2026): 78%
+        uncertain share caused handoff despite perfect glossary. This
+        test pins that the new spec NEVER hands off on this condition."""
         from services.smart.auto_translation_review import evaluate_translation_review
 
         inputs = self._passing_inputs()
-        inputs["speaker_stats"]["uncertain_speaker_duration_share"] = 0.15
+        inputs["speaker_stats"]["uncertain_speaker_duration_share"] = 0.78
         decision = evaluate_translation_review(**inputs)
-        assert decision.auto_approved is False
-        assert decision.failed_check == "uncertain_speaker_share"
-        assert decision.reason_code == "high_uncertain_speaker_share_0.15"
+        assert decision.auto_approved is True
+        assert "uncertain_speaker_share_advisory_reason" in decision.metrics
 
-    def test_clone_eligible_ratio_below_threshold_rejected(self):
+    def test_clone_eligible_ratio_low_still_auto_approved(self):
         from services.smart.auto_translation_review import evaluate_translation_review
 
         inputs = self._passing_inputs()
         inputs["clone_sample_stats"]["eligible_speakers"] = 1  # 1/3 < 0.5
         inputs["speaker_stats"]["asr_speaker_count"] = 3
         decision = evaluate_translation_review(**inputs)
-        assert decision.auto_approved is False
-        assert decision.failed_check == "clone_eligible_ratio"
-        # Codex 第九轮 P1-3: must mirror simulator format exactly —
-        # "{eligible}/{asr}" with forward slash, NOT "_of_". Shadow vs
-        # production diff aggregation depends on this string.
-        assert decision.reason_code == "low_clone_eligible_ratio_1/3"
+        assert decision.auto_approved is True
+        assert "clone_eligible_ratio_advisory_reason" in decision.metrics
 
-    def test_speaker_mismatch_rejected(self):
+    def test_speaker_mismatch_still_auto_approved(self):
         from services.smart.auto_translation_review import evaluate_translation_review
 
         inputs = self._passing_inputs()
@@ -926,42 +945,44 @@ class TestAutoTranslationReview:
             **inputs,
             speaker_diff={"s1": "speaker_b"},  # translation says speaker_a
         )
-        assert decision.auto_approved is False
-        assert decision.failed_check == "speaker_assignment"
+        assert decision.auto_approved is True
+        assert "speaker_assignment_advisory_reason" in decision.metrics
 
-    def test_compliance_block_rejects_after_deterministic_pass(self):
-        """compliance_block short-circuits, but only AFTER the 6 checks
-        — so audit metrics still get populated for the would-have-
-        passed deterministic state."""
+    def test_compliance_block_kwarg_is_ignored(self):
+        """compliance_block kwarg retained for backward-compat but no
+        longer drives the decision. Compliance is enforced at the
+        early-pipeline gate in process.py (post-S1, pre-S3) via
+        ContentPolicyViolationError, NOT here."""
         from services.smart.auto_translation_review import evaluate_translation_review
 
         decision = evaluate_translation_review(
             **self._passing_inputs(),
             compliance_block=True,
         )
-        assert decision.auto_approved is False
-        assert decision.reason_code == "compliance_high_risk"
-        # Deterministic metrics still captured.
-        assert decision.metrics["compliance_block"] is True
+        assert decision.auto_approved is True
+        assert decision.reason_code is None
+        # Audit metrics still populated regardless of compliance flag.
         assert decision.metrics["glossary_preservation_rate"] == pytest.approx(0.9)
 
-    def test_first_failure_wins_when_multiple_violations(self):
-        """If glossary fails AND uncertain-share fails, glossary wins
-        (it's earlier in plan order). Lets ops triage the most-
-        actionable failure first."""
+    def test_multiple_advisory_failures_all_recorded(self):
+        """When multiple checks would have failed under old spec, all
+        their advisory reasons get annotated (not just the first).
+        Lets admin QA see the full failure picture, not just the
+        leading reason."""
         from services.smart.auto_translation_review import evaluate_translation_review
 
         inputs = self._passing_inputs()
         inputs["translation_result"]["glossary_preserved_terms"] = 1  # fail glossary
         inputs["speaker_stats"]["uncertain_speaker_duration_share"] = 0.99  # fail uncertain
         decision = evaluate_translation_review(**inputs)
-        assert decision.failed_check == "glossary_preservation"
+        assert decision.auto_approved is True
+        # Both advisory annotations present (no first-failure short-circuit).
+        assert "glossary_preservation_advisory_reason" in decision.metrics
+        assert "uncertain_speaker_share_advisory_reason" in decision.metrics
 
-    def test_missing_glossary_treated_as_vacuous_pass(self):
-        """Glossary IS spec-defined to be optional (plan §6.2.2 step 1
-        wording: 'Glossary 存在时 ≥80%'). No glossary → vacuously pass.
-        This is NOT fail-open in the Codex P1-2 sense — it's spec-explicit.
-        """
+    def test_missing_glossary_is_vacuous_pass(self):
+        """No glossary configured → no advisory annotation. Vacuous
+        pass remains the same as before (spec-explicit, not failure)."""
         from services.smart.auto_translation_review import evaluate_translation_review
 
         inputs = self._passing_inputs()
@@ -970,67 +991,32 @@ class TestAutoTranslationReview:
         decision = evaluate_translation_review(**inputs)
         assert decision.auto_approved is True
         assert decision.metrics["glossary_preservation_rate"] is None
+        assert "glossary_preservation_advisory_reason" not in decision.metrics
 
-    def test_missing_uncertain_share_fails_closed_with_unified_reason(self):
-        """Codex 第十轮 P2: missing-signal reason aligns with simulator
-        (smart_shadow_sim_simulator.py:187) — single ``missing_signals``
-        reason + evidence list of missing fields, NOT per-field
-        unevaluable codes. Critical for shadow-vs-production reason
-        aggregation."""
+    def test_missing_signals_still_auto_approved_with_advisory(self):
+        """Old spec: hard fail. New spec: auto-pass with
+        ``missing_signals_advisory=True`` marker so admin can see
+        that audit metrics are incomplete."""
         from services.smart.auto_translation_review import evaluate_translation_review
 
         inputs = self._passing_inputs()
         del inputs["speaker_stats"]["uncertain_speaker_duration_share"]
         decision = evaluate_translation_review(**inputs)
-        assert decision.auto_approved is False
-        assert decision.reason_code == "missing_signals"
-        assert decision.failed_check == "missing_signals_precheck"
-        # Evidence carries the specific missing field names.
+        assert decision.auto_approved is True
+        assert decision.metrics.get("missing_signals_advisory") is True
+        # Evidence still carries the specific missing field names.
         assert decision.metrics["missing"] == ["uncertain_speaker_duration_share"]
 
-    def test_missing_clone_signals_fails_closed_with_unified_reason(self):
-        """Same unified reason format for missing clone signals — and
-        when multiple signals miss, evidence list grows accordingly."""
-        from services.smart.auto_translation_review import evaluate_translation_review
-
-        # Missing asr_speaker_count alone
-        inputs = self._passing_inputs()
-        del inputs["speaker_stats"]["asr_speaker_count"]
-        decision = evaluate_translation_review(**inputs)
-        assert decision.auto_approved is False
-        assert decision.reason_code == "missing_signals"
-        assert decision.metrics["missing"] == ["asr_speaker_count"]
-
-        # Missing eligible_speakers alone
-        inputs = self._passing_inputs()
-        del inputs["clone_sample_stats"]["eligible_speakers"]
-        decision = evaluate_translation_review(**inputs)
-        assert decision.auto_approved is False
-        assert decision.reason_code == "missing_signals"
-        assert decision.metrics["missing"] == ["eligible_speakers"]
-
-        # Multiple missing — evidence captures all of them
-        inputs = self._passing_inputs()
-        del inputs["speaker_stats"]["asr_speaker_count"]
-        del inputs["clone_sample_stats"]["eligible_speakers"]
-        decision = evaluate_translation_review(**inputs)
-        assert decision.auto_approved is False
-        assert decision.reason_code == "missing_signals"
-        assert sorted(decision.metrics["missing"]) == [
-            "asr_speaker_count", "eligible_speakers"
-        ]
-
-    def test_zero_asr_speakers_fails_closed(self):
-        """Defensive: 0 ASR speakers is itself an upstream-data anomaly
-        that shouldn't auto-approve. div-by-zero guard returns
-        unevaluable, not silent pass."""
+    def test_zero_asr_speakers_still_auto_approved(self):
+        """Old spec: ``unevaluable_zero_asr_speakers``. New spec:
+        still auto-approve. Pipeline downstream handles 0-speaker
+        edge cases (it produces no TTS audio rather than crashing)."""
         from services.smart.auto_translation_review import evaluate_translation_review
 
         inputs = self._passing_inputs()
         inputs["speaker_stats"]["asr_speaker_count"] = 0
         decision = evaluate_translation_review(**inputs)
-        assert decision.auto_approved is False
-        assert decision.reason_code == "unevaluable_zero_asr_speakers"
+        assert decision.auto_approved is True
 
 
 # ===================================================================
@@ -1166,9 +1152,10 @@ class TestTranslationReviewProcessIntegrationShapes:
         assert decision.reason_code is None
         assert decision.failed_check is None
 
-    def test_glossary_below_threshold_routes_to_pause(self):
-        """Glossary preservation rate < 80% → reject with
-        ``glossary_preservation_low_X.XX`` reason."""
+    def test_glossary_below_threshold_still_auto_approved(self):
+        """New spec: smart never pauses on glossary. Process-shape
+        integration test using real DubbingSegment + speaker profiles
+        confirms the end-to-end auto-pass."""
         from services.smart.auto_translation_review import (
             evaluate_translation_review,
         )
@@ -1194,17 +1181,14 @@ class TestTranslationReviewProcessIntegrationShapes:
             speaker_stats=self._build_smart_speaker_stats(profiles),
             clone_sample_stats=self._build_smart_clone_sample_stats(profiles),
         )
-        assert decision.auto_approved is False
-        assert decision.reason_code is not None
-        assert decision.reason_code.startswith("glossary_preservation_low_"), (
-            f"Expected glossary_preservation_low_ reason; got "
-            f"{decision.reason_code!r}"
-        )
-        assert decision.failed_check == "glossary_preservation"
+        assert decision.auto_approved is True
+        # Advisory still recorded for admin QA.
+        assert "glossary_preservation_advisory_reason" in decision.metrics
 
-    def test_uncertain_speaker_share_too_high_routes_to_pause(self):
-        """High fragmented-speaker share (> 10%) → reject with
-        ``high_uncertain_speaker_share_X.XX``."""
+    def test_uncertain_speaker_share_too_high_still_auto_approved(self):
+        """Real production incident replayed: Google I/O 2026 keynote
+        had 78% uncertain share due to 9 distinct speakers. Under old
+        spec this was a hard handoff; new spec auto-passes."""
         from services.smart.auto_translation_review import (
             evaluate_translation_review,
         )
@@ -1216,14 +1200,17 @@ class TestTranslationReviewProcessIntegrationShapes:
         profiles = {
             "speaker_a": {
                 "speaker_role": "primary",
-                "speaker_duration_share": 0.80,
+                "speaker_duration_share": 0.22,
                 "speaker_duration_ms": 40_000,
             },
-            "speaker_b": {
-                # Fragmented speaker with 20% share → uncertain_share=0.20 > 0.10
-                "speaker_role": "fragmented",
-                "speaker_duration_share": 0.20,
-                "speaker_duration_ms": 8_000,  # < 10s, won't count for clone
+            # 8 other fragmented speakers → uncertain_share approaches 0.78
+            **{
+                f"speaker_{c}": {
+                    "speaker_role": "fragmented",
+                    "speaker_duration_share": 0.0975,
+                    "speaker_duration_ms": 8_000,
+                }
+                for c in "bcdefghi"
             },
         }
         decision = evaluate_translation_review(
@@ -1231,20 +1218,16 @@ class TestTranslationReviewProcessIntegrationShapes:
             speaker_stats=self._build_smart_speaker_stats(profiles),
             clone_sample_stats=self._build_smart_clone_sample_stats(profiles),
         )
-        assert decision.auto_approved is False
-        assert decision.reason_code is not None
-        assert decision.reason_code.startswith(
-            "high_uncertain_speaker_share_"
-        ), (
-            f"Expected high_uncertain_speaker_share_ reason; got "
-            f"{decision.reason_code!r}.\n"
-            f"metrics={decision.metrics}"
+        assert decision.auto_approved is True, (
+            f"Google I/O scenario MUST auto-pass under new spec; "
+            f"got reason={decision.reason_code!r}"
         )
+        assert "uncertain_speaker_share_advisory_reason" in decision.metrics
 
-    def test_low_clone_eligible_ratio_routes_to_pause(self):
-        """< 50% of ASR speakers with ≥10s sample → reject with
-        ``low_clone_eligible_ratio_X/Y`` (forward slash, matches
-        simulator format per Codex 第九轮 P1-3)."""
+    def test_low_clone_eligible_ratio_still_auto_approved(self):
+        """Old spec: < 50% clone-eligible → handoff. New spec:
+        auto-pass; downstream pipeline will preset-match the
+        ineligible speakers."""
         from services.smart.auto_translation_review import (
             evaluate_translation_review,
         )
@@ -1255,27 +1238,26 @@ class TestTranslationReviewProcessIntegrationShapes:
         translation_input = self._build_smart_translation_input(
             segments, glossary_total=10, glossary_preserved=10,
         )
-        # 4 speakers; only 1 has ≥10s sample → ratio 1/4 = 0.25 < 0.50.
         profiles = {
             "speaker_a": {
                 "speaker_role": "primary",
                 "speaker_duration_share": 0.30,
-                "speaker_duration_ms": 15_000,  # eligible
+                "speaker_duration_ms": 15_000,
             },
             "speaker_b": {
                 "speaker_role": "primary",
                 "speaker_duration_share": 0.25,
-                "speaker_duration_ms": 8_000,  # NOT eligible
+                "speaker_duration_ms": 8_000,
             },
             "speaker_c": {
                 "speaker_role": "primary",
                 "speaker_duration_share": 0.25,
-                "speaker_duration_ms": 5_000,  # NOT eligible
+                "speaker_duration_ms": 5_000,
             },
             "speaker_d": {
                 "speaker_role": "primary",
                 "speaker_duration_share": 0.20,
-                "speaker_duration_ms": 4_000,  # NOT eligible
+                "speaker_duration_ms": 4_000,
             },
         }
         decision = evaluate_translation_review(
@@ -1283,22 +1265,13 @@ class TestTranslationReviewProcessIntegrationShapes:
             speaker_stats=self._build_smart_speaker_stats(profiles),
             clone_sample_stats=self._build_smart_clone_sample_stats(profiles),
         )
-        assert decision.auto_approved is False
-        assert decision.reason_code is not None
-        assert decision.reason_code.startswith("low_clone_eligible_ratio_"), (
-            f"Expected low_clone_eligible_ratio_ reason; got "
-            f"{decision.reason_code!r}"
-        )
-        # Reason format: "low_clone_eligible_ratio_<eligible>/<asr>"
-        assert "/" in decision.reason_code, (
-            f"reason_code must use forward-slash format "
-            f"(simulator-compatible); got {decision.reason_code!r}"
-        )
+        assert decision.auto_approved is True
+        assert "clone_eligible_ratio_advisory_reason" in decision.metrics
 
     def test_clone_eligible_heuristic_uses_10s_floor(self):
-        """The clone-eligibility heuristic in process.py uses ≥10s
-        sample as the eligibility floor (matches MIN_CLONE_SAMPLE_SECONDS
-        in auto_voice_review). Pin the boundary at exactly 10s."""
+        """Heuristic-shape pin (unchanged by spec change): the 10s
+        floor in ``_build_smart_clone_sample_stats`` matches the
+        ``MIN_CLONE_SAMPLE_SECONDS`` constant elsewhere."""
         profiles_boundary = {
             "speaker_a": {
                 "speaker_role": "primary",
@@ -1312,14 +1285,13 @@ class TestTranslationReviewProcessIntegrationShapes:
         clone_sample_stats = self._build_smart_clone_sample_stats(
             profiles_boundary
         )
-        assert clone_sample_stats == {"eligible_speakers": 1}, (
-            f"Clone-eligibility floor must be ≥10s (10_000ms inclusive); "
-            f"got {clone_sample_stats}"
-        )
+        assert clone_sample_stats == {"eligible_speakers": 1}
 
-    def test_compliance_block_short_circuits_to_pause(self):
-        """compliance_block=True → reject with
-        ``compliance_high_risk`` regardless of other metrics."""
+    def test_compliance_block_kwarg_ignored_in_integration_shape(self):
+        """End-to-end pin: compliance_block=True passed via the
+        integration shape still yields auto_approved=True. The
+        compliance enforcement has moved to the early-pipeline gate
+        (post-S1) in process.py."""
         from services.smart.auto_translation_review import (
             evaluate_translation_review,
         )
@@ -1341,9 +1313,7 @@ class TestTranslationReviewProcessIntegrationShapes:
             clone_sample_stats=self._build_smart_clone_sample_stats(profiles),
             compliance_block=True,
         )
-        assert decision.auto_approved is False
-        assert decision.reason_code == "compliance_high_risk"
-        assert decision.failed_check == "content_compliance"
+        assert decision.auto_approved is True
 
 
 class TestB3DCloneSampleExtractorContract:
@@ -1648,16 +1618,25 @@ class TestB3DCloneSampleExtractorContract:
             "(provider) together, or revert BOTH together."
         )
 
-        # Fail-closed branch: quota=None must short-circuit to handoff
-        # BEFORE invoking the real provider.
-        assert "voice_library_quota_unavailable" in block, (
-            "Smart branch missing the fail-closed handoff for quota "
-            "lookup failure. PR#3C-b3e contract: if "
-            "_fetch_smart_user_voice_quota_remaining returns None "
-            "(network / auth / parse failure), smart MUST handoff "
-            "with reason='voice_library_quota_unavailable' BEFORE "
-            "importing or calling the real provider.\n"
+        # 2026-05-20 spec change: quota=None NO LONGER hands off.
+        # Smart 全自动化原则 — quota lookup failure is transient
+        # infra, not user-blocking. Branch now logs + uses safe
+        # fallback (_smart_quota_remaining = 999_999) + continues.
+        # The MiniMax provider's own quota error mid-flight still
+        # routes through PAUSED in _attempt_clone_with_retries, so
+        # the real external quota gate is preserved.
+        assert "quota_lookup_degraded" in block, (
+            "Smart branch missing the new soft-fallback audit marker "
+            "for quota lookup failure. After 2026-05-20 spec change, "
+            "quota=None should emit a 'quota_lookup_degraded' audit "
+            "event and continue with safe fallback (NOT handoff).\n"
             f"Block (first 3000 chars):\n{block[:3000]}"
+        )
+        assert "voice_library_quota_unavailable" not in block, (
+            "Smart branch still contains 'voice_library_quota_unavailable' "
+            "anchor — this was the old handoff reason. 2026-05-20 spec: "
+            "quota lookup failure no longer hands off. If you re-added "
+            "this handoff path, also update test_smart_full_auto_spec_2026_05_20.py"
         )
 
     def test_b3e_quota_helper_returns_none_on_no_api_key(self, monkeypatch):
@@ -2567,17 +2546,22 @@ class TestB3DCloneSampleExtractorContract:
         idx = source.find("Smart inline auto-approve path")
         assert idx >= 0
         lines = source[idx:].splitlines()
-        # Phase 3 (plan 2026-05-17) added admin policy gate +
-        # comments (~50 lines). Bump window from 1000 → 1200 to keep
-        # all downgrade_handoff branches in scope, including
-        # clone_library_register_failed which now sits at ~line 1040.
-        block = "\n".join(lines[:1200])
+        # Window history:
+        #   1000 → 1200 (Phase 3 admin policy gate, +50 lines)
+        #   1200 → 1450 (2026-05-20 spec change added verbose
+        #   spec-justification comments + degraded audit emits at
+        #   the old handoff sites; clone_mirror_degraded now sits
+        #   at ~line 1250 from anchor).
+        block = "\n".join(lines[:1450])
 
         # Count distinct _emit_smart_audit call sites by their
         # decision_type field. Each (decision_type, decision) pair
-        # corresponds to one anchored emit.
+        # corresponds to one anchored emit. After 2026-05-20 spec
+        # change, the OLD reason_codes for quota/mirror handoffs
+        # have been replaced by *_degraded audit events (log+continue
+        # instead of handoff).
         required_emit_signatures = [
-            # Eligibility gate (b3b)
+            # Eligibility gate (b3b) — still hands off (>3 main speakers)
             ('decision_type="speaker_gate"', 'decision="rejected"'),
             ('decision_type="speaker_gate"', 'decision="approved"'),
             # Voice review batch (b2)
@@ -2585,10 +2569,12 @@ class TestB3DCloneSampleExtractorContract:
             ('decision_type="voice_selection_auto_approve"', 'decision="approved"'),
             # Per-speaker CLONED (b3d/e)
             ('decision_type="voice_clone"', 'decision="approved"'),
-            # Downgrade handoff variants
+            # Pre-paid clone gates still hand off (real money risk)
             ('reason_code="clone_sample_extraction_failed"',),
-            ('reason_code="voice_library_quota_unavailable"',),
-            ('reason_code="clone_library_register_failed"',),
+            # 2026-05-20: defensive handoffs softened to log+continue.
+            # Audit events now use *_degraded decision_types instead.
+            ('decision_type="quota_lookup_degraded"',),
+            ('decision_type="clone_mirror_degraded"',),
         ]
         for required in required_emit_signatures:
             for token in required:
@@ -2601,22 +2587,17 @@ class TestB3DCloneSampleExtractorContract:
                     f"Block first 4000 chars:\n{block[:4000]}"
                 )
 
-        # Translation review emits also live further down in the
-        # smart branch (S3 trigger). Search the WHOLE file (not just
-        # the inline block) since they're at the translation_review
-        # trigger point which is past the voice_selection block.
-        for required in (
-            'decision_type="translation_auto_approve"',
-        ):
-            assert source.count(required) >= 2, (
-                f"Expected ≥2 occurrences of {required!r} (approved + "
-                f"rejected paths in S3); got "
-                f"{source.count(required)}."
-            )
+        # 2026-05-20 spec change: translation_review now ALWAYS
+        # auto-approves (smart 全自动化). Only the "approved" emit
+        # path survives; the rejected emit path is dead code.
+        # Pin the approved emit specifically.
+        assert 'decision_type="translation_auto_approve"' in source, (
+            "translation_auto_approve audit missing — should still emit "
+            "the approved decision so audit trail covers the review."
+        )
 
         # Pre-TTS expiry handoff anchored on cloned_voice_expired
-        # (appears in process.py multiple times; pin that an
-        # _emit_smart_audit call exists with that reason_code).
+        # (external provider state, still legitimate handoff).
         assert 'reason_code="cloned_voice_expired"' in source, (
             "Pre-TTS expiry handoff missing sidecar emit with "
             "reason_code='cloned_voice_expired'."
@@ -2700,20 +2681,29 @@ class TestTranslationReviewProcessIntegrationFailClosed:
         ]
 
     def test_compliance_block_derivation_from_payload(self):
-        """``content_compliance_payload["status"] == "blocked"`` →
-        compliance_block=True → evaluate_translation_review returns
-        ``compliance_high_risk``. This mirrors what process.py does
-        inline at the smart branch (Codex 第二十五轮 P1-1)."""
+        """2026-05-20 spec change: compliance is now an early-pipeline
+        gate (post-S1) — non-admin compliance block raises
+        ``ContentPolicyViolationError`` in
+        ``_run_content_compliance_review`` and exits the pipeline.
+        The legacy ``compliance_block`` kwarg on
+        ``evaluate_translation_review`` is now ignored.
+
+        We still pin the payload-derivation logic (admin tooling
+        + future hookups may still consume the ``status=="blocked"``
+        signal), but the downstream effect on evaluate_translation_review
+        is now: auto-approve regardless. The actual user-facing exit
+        happens at the raise site, not here.
+        """
         from services.smart.auto_translation_review import (
             evaluate_translation_review,
         )
 
-        # Mirror the inline derivation logic from process.py:
+        # Derivation logic still pinned (no behavior change).
         for status, expected_block in (
             ("blocked", True),
             ("passed", False),
             ("skipped", False),
-            ("needs_manual_review", False),  # only "blocked" trips
+            ("needs_manual_review", False),
             ("error", False),
             (None, False),
         ):
@@ -2727,8 +2717,9 @@ class TestTranslationReviewProcessIntegrationFailClosed:
                 f"got {compliance_block}, expected {expected_block}"
             )
 
-        # End-to-end: a "blocked" payload → reject with
-        # compliance_high_risk regardless of other metrics being clean.
+        # End-to-end: compliance_block=True kwarg is now IGNORED;
+        # evaluate_translation_review auto-approves anyway. The legal
+        # gate has moved to ContentPolicyViolationError raised earlier.
         segments = self._build_segments(["speaker_a"] * 5)
         translation_input = {
             "glossary_total_terms": 10,
@@ -2763,22 +2754,29 @@ class TestTranslationReviewProcessIntegrationFailClosed:
             translation_result=translation_input,
             speaker_stats=speaker_stats,
             clone_sample_stats=clone_sample_stats,
-            compliance_block=True,  # what process.py derives + passes
+            compliance_block=True,  # NOW IGNORED
         )
-        assert decision.auto_approved is False
-        assert decision.reason_code == "compliance_high_risk"
-        assert decision.failed_check == "content_compliance"
+        assert decision.auto_approved is True, (
+            "evaluate_translation_review must auto-approve regardless "
+            "of compliance_block kwarg per 2026-05-20 spec. The legal "
+            "gate is now ContentPolicyViolationError raised in "
+            "_run_content_compliance_review (early pipeline, post-S1)."
+        )
+        assert decision.reason_code is None
 
-    def test_compliance_block_admin_override_still_blocks_smart(self):
-        """Even when admin overrode the legacy compliance gate
-        (admin_override=True), the smart path must still defer to
-        Studio because the content was flagged. Pin the contract:
-        compliance_block depends ONLY on status, never on
-        admin_override (admin override is for the legacy human gate,
-        smart needs the user to re-confirm in context)."""
-        # Admin-override payload still carries status="blocked"
-        # (see process.py:7769-7779 where _dc_replace only changes
-        # message, not status).
+    def test_compliance_block_admin_override_still_continues_smart(self):
+        """2026-05-20 spec: admin compliance override no longer
+        re-prompts at translation_review. Admin already gave consent
+        at compliance time; smart auto-pipeline must not double-confirm.
+
+        Non-admin behavior unchanged: ContentPolicyViolationError
+        raised in _run_content_compliance_review still exits pipeline
+        (legal gate is the raise site, not this module)."""
+        from services.smart.auto_translation_review import (
+            evaluate_translation_review,
+        )
+
+        # Derivation logic unchanged: any "blocked" status → True
         payload = {
             "status": "blocked",
             "admin_override": True,
@@ -2788,10 +2786,33 @@ class TestTranslationReviewProcessIntegrationFailClosed:
             isinstance(payload, dict)
             and payload.get("status") == "blocked"
         )
-        assert compliance_block is True, (
-            "Admin override must NOT bypass smart's compliance gate. "
-            "compliance_block depends only on status, not admin_override."
+        assert compliance_block is True
+
+        # But downstream effect on evaluate_translation_review:
+        # the kwarg is ignored → auto-approve.
+        segments = self._build_segments(["speaker_a"] * 5)
+        translation_input = {
+            "glossary_total_terms": 10,
+            "glossary_preserved_terms": 10,
+            "length_overflow_rate": None,
+            "rewrite_attempted": False,
+            "subtitle_source_text_sha256": None,
+            "final_spoken_text_sha256": None,
+            "segments": [
+                {"segment_id": str(s.segment_id), "speaker_id": s.speaker_id}
+                for s in segments
+            ],
+        }
+        decision = evaluate_translation_review(
+            translation_result=translation_input,
+            speaker_stats={
+                "uncertain_speaker_duration_share": 0.0,
+                "asr_speaker_count": 1,
+            },
+            clone_sample_stats={"eligible_speakers": 1},
+            compliance_block=True,
         )
+        assert decision.auto_approved is True
 
     def test_glossary_check_error_synthesizes_handoff_decision(self):
         """Codex 第二十五轮 P1-2: a broken glossary helper on a

@@ -1619,18 +1619,27 @@ class TestProcessPyStudioGateWidening:
             f"Call window:\n{eval_window}"
         )
 
-    def test_b3e_quota_unavailable_short_circuits_handoff(self):
-        """PR#3C-b3e contract: when ``_fetch_smart_user_voice_quota_remaining``
-        returns None (network / auth / parse failure), smart MUST
-        handoff to Studio BEFORE invoking the real provider. Codex
-        第二十七轮 P0: any path that lets the real provider run with
-        unknown quota is forbidden.
+    def test_b3e_quota_unavailable_continues_with_safe_fallback(self):
+        """2026-05-20 spec change (smart 全自动化原则): quota lookup
+        failure is now a transient infra issue — log warning + use
+        safe default + continue, NOT handoff. Quota helper returning
+        None is overwhelmingly DB transient (Gateway internal endpoint
+        unreachable / network blip), not a permanent failure.
 
-        Pin the source-level structure:
-          - quota helper return value checked against None
-          - on None: emit_handoff_markers + paused-return BEFORE the
-            real CloneProvider import
-          - reason_code: voice_library_quota_unavailable
+        Previously (Codex 第二十七轮 P0): unknown quota → handoff to
+        Studio. That meant any DB hiccup blocked the entire smart
+        pipeline. After Google I/O 2026 handoff incident, user spec
+        is "smart 全自动 except external limits + opt-in weak-match".
+        Quota lookup failure isn't an external limit — it's our own
+        infra — so it must not block users.
+
+        New contract:
+          - quota helper return value still checked against None
+          - on None: print warning + emit smart_audit "degraded"
+          - set _smart_quota_remaining = 999_999 (unlimited)
+          - continue to provider — MiniMax provider quota (real
+            external limit) still fires PAUSED if hit mid-flight,
+            preserving the legitimate quota-protection path
         """
         smart_block = _find_anchor_block(
             self._source(),
@@ -1638,52 +1647,50 @@ class TestProcessPyStudioGateWidening:
             window=900,
         )
 
-        # Quota check is in the branch.
+        # Quota check still happens.
         helper_idx = smart_block.find(
             "_fetch_smart_user_voice_quota_remaining("
         )
         assert helper_idx >= 0, (
             "Smart branch missing call to "
-            "_fetch_smart_user_voice_quota_remaining. PR#3C-b3e Piece 2."
+            "_fetch_smart_user_voice_quota_remaining. The quota query "
+            "stays even though failure mode changed to log+continue."
         )
 
-        # The branch checks for None and short-circuits BEFORE importing
-        # the real provider.
+        # The branch still checks for None.
         none_check_idx = smart_block.find("if _smart_quota_remaining is None:")
         assert none_check_idx >= 0, (
             "Smart branch missing ``if _smart_quota_remaining is None:`` "
-            "fail-closed check. Codex 第二十七轮 P0: unknown quota MUST "
-            "route to handoff, not default to a permissive value.\n"
+            "check. The None handling changed (was handoff, now "
+            "log+continue), but the check itself must remain.\n"
             f"Block (first 3000 chars):\n{smart_block[:3000]}"
         )
 
-        # The None branch must include handoff + reason code BEFORE the
-        # real provider import.
-        # Codex 第三十七轮 P1: window bumped 3500 → 4500 after handoff
-        # cost_summary + actual_duration_ms priority comments.
+        # The None branch MUST NOT call emit_handoff_markers (the old
+        # behavior). Pin the change so any regression to handoff is
+        # caught.
         none_branch = smart_block[none_check_idx : none_check_idx + 4500]
-        for required in (
+        for forbidden in (
             "emit_handoff_markers(",
             "voice_library_quota_unavailable",
             "self._build_paused_result(",
         ):
-            assert required in none_branch, (
-                f"Quota-unavailable branch missing required {required!r}.\n"
-                f"Branch:\n{none_branch}"
+            assert forbidden not in none_branch, (
+                f"Quota-unavailable branch contains forbidden "
+                f"{forbidden!r} — this would re-introduce the handoff "
+                f"behavior. Per 2026-05-20 spec, quota lookup failure "
+                f"must log + continue with safe fallback, not handoff."
             )
 
-        # The real provider import must appear AFTER the None check, not
-        # before. If a future refactor moves it above, the gate is gone.
-        import_idx = smart_block.find(
-            "from services.smart_wiring import"
-        )
-        assert import_idx > none_check_idx, (
-            "services.smart_wiring is imported BEFORE the quota None "
-            "check — that defeats the fail-closed gate. The import + "
-            "real CloneProvider call must live AFTER the quota check.\n"
-            f"smart_wiring import at offset {import_idx}; "
-            f"quota None check at offset {none_check_idx}."
-        )
+        # The None branch MUST contain the new safe-fallback markers.
+        for required in (
+            "quota_lookup_degraded",
+            "999_999",  # fallback "unlimited" value
+        ):
+            assert required in none_branch, (
+                f"Quota-unavailable branch missing required {required!r}.\n"
+                f"Branch:\n{none_branch[:2000]}"
+            )
 
     def test_b3d_sample_validation_after_extract(self):
         """Codex 第二十七轮 P1: ``VoiceSampleExtractor.extract_sample()``
