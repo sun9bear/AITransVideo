@@ -8,7 +8,7 @@
 
 - `SemanticBlock` 仍然是 TTS / 对齐 / 字幕的基本处理单元
 - 主对齐路径仍然是 `DSP-first alignment`
-- Smart inline branch 已经在 `process.py` 内实装，包含 eligibility、voice review、translation review、handoff、terminal reports
+- Smart inline branch 已经在 `process.py` 内实装，包含 eligibility、voice review、translation audit metrics、handoff、terminal reports
 - Smart 创建入口现在先经过 Gateway policy / consent 校验；pipeline 内部读取 app-safe admin policy，优先使用个人音色候选，再决定是否 clone 或暂停确认
 - paid fallback、force DSP、whisper deliverable sidecar 仍然受明确控制
 - `derive_effective_pipeline_mode(...)` 决定 Smart job 是否继续走自动层，还是回到 Studio 控制流
@@ -64,10 +64,10 @@ graph TD
     VoiceIdPropagation --> Translation["Translation"]
     StudioMode --> Translation
     Translation --> SmartLLM["translator._service_mode -> llm_registry smart defaults"]
-    SmartLLM --> SmartTranslation["Smart translation auto review"]
-    SmartTranslation --> TranslationHandoff["translation-stage handoff"]
+    SmartLLM --> SmartTranslation["Smart translation audit metrics"]
+    SmartTranslation --> Advisory["old strict failures become advisory reasons"]
     SmartTranslation --> Blocks["SemanticBlock chunking"]
-    TranslationHandoff --> ReviewPause
+    Advisory --> Blocks
 
     Blocks --> TTS["TTS"]
     TTS --> Alignment["DSP-first alignment"]
@@ -123,14 +123,15 @@ graph TD
 
 结论：Smart voice review 现在是 workflow 内部的正式分支，不再只是服务模块骨架。
 
-### 3.4 Smart translation review 是 deterministic guard
+### 3.4 Smart translation review 现在是 audit-only metrics
 
 - translation review 仍检查术语保留、speaker assignment、一致性、长度预算、checksum、不确定 speaker 占比、clone sample ratio。
-- glossary check 异常会直接 handoff，而不是假装通过。
+- 2026-05-20 后，这些检查的失败只写入 advisory metrics，不再把 Smart 拉回人工审核。
+- 内容合规已经前移到 early gate：非 admin blocked 直接失败退出，admin blocked 只发通知并继续。
 - auto-approved translation 会继续落到 alignment/TTS 链路。
 - translator 会带上 `_service_mode`，让 `llm_registry.get_prompt_model("smart", prompt_key)` 读取 Smart 专属默认模型或 admin override。
 
-结论：Smart translation review 是 deterministic quality gate，不把最终判断交给 LLM。
+结论：Smart translation review 仍是 deterministic 质量观测点，但默认不是 human gate；Smart 全自动承诺优先。
 
 ### 3.5 主对齐策略依然是 DSP-first
 
@@ -160,6 +161,8 @@ graph TD
 
 - `src/pipeline/process.py`
   - `derive_effective_pipeline_mode`
+  - early content compliance gate
+  - admin compliance notify-only branch
   - `_fetch_smart_reusable_voice_match`
   - `_apply_smart_reused_voice_decision`
   - `_aggregate_speaker_dubbing_modes`
@@ -188,7 +191,8 @@ graph TD
 - `src/services/smart/auto_voice_review.py`
   - clone / preset / pause orchestration
 - `src/services/smart/auto_translation_review.py`
-  - deterministic translation checks
+  - audit-only translation metrics
+  - full-auto default
 - `src/services/alignment/aligner.py`
   - parallel alignment
   - paid fallback semaphore

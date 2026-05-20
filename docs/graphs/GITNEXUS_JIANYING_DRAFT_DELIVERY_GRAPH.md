@@ -12,12 +12,16 @@
 - `user_draft_root`
 - deliverable-time subtitle alignment
 - Smart job 的 user-facing Studio gate
+- archived job 先通过 Pan restore 回到 `succeeded` 再进入草稿生成
 
 ## 2. 主图
 
 ```mermaid
 graph TD
     ResultUI["Workspace result"] --> Trigger["generate-jianying-draft"]
+    Archived["status=archived"] --> Restore["Pan restore"]
+    Restore --> Restored["status=succeeded + project_dir restored"]
+    Restored --> ResultUI
     Trigger --> ApiPreflight["Job API preflight"]
     ApiPreflight --> ModeGate["EDITABLE_SERVICE_MODES"]
     ModeGate --> Studio["service_mode=studio"]
@@ -114,6 +118,14 @@ graph TD
 
 结论：草稿内部路径和外部下载协议是两层，不应混写。
 
+### 3.9 archived job 需要先 restore 再生成草稿
+
+- Pan backup 成功后会清理本地 `project_dir` 与 R2 交付物，并把 `Job.status` 推到 `archived`。
+- Jianying draft runner 仍依赖恢复后的本地项目目录、字幕和素材事实，不应直接对 archived 状态生成草稿。
+- `restore_executor.py` 成功恢复后把任务推进回 `succeeded`，再进入结果页和草稿生成入口。
+
+结论：网盘归档是交付物生命周期的外层冷存储；剪映草稿生成仍发生在恢复后的热项目目录上。
+
 ## 4. 关键证据
 
 - `src/services/jobs/api.py`
@@ -131,6 +143,10 @@ graph TD
 - `src/modules/output/jianying/jianying_draft_writer.py`
   - user draft root
   - zip writer
+- `gateway/pan/backup_executor.py`
+  - archive clears local project and R2 artifacts after verified upload
+- `gateway/pan/restore_executor.py`
+  - restore archived job back to succeeded project state
 - `tests/test_smart_studio_gate_acceptance.py`
   - Smart completed/downgraded jobs accepted by Jianying gate
   - non-editable Smart state rejected
@@ -142,3 +158,4 @@ graph TD
 - 想改 runner claim guard、substep、fingerprint、cache hit
 - 想改 `user_draft_root` 或 zip 交付路径
 - 想改 post-edit overwrite 对旧草稿的失效策略
+- 想排查 archived 任务为什么需要先恢复再生成剪映草稿

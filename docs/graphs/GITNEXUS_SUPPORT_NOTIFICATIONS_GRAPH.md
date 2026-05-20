@@ -11,6 +11,8 @@
 - FAQ / plan facts / sanitized job context 回答链
 - human handoff / presence / WeChat QR
 - system announcements / live audiences / popup notifications
+- pan backup / restore failure and token notification recipes
+- admin compliance override notification
 
 ## 2. 主图
 
@@ -39,6 +41,11 @@ graph TD
     Announcements --> UserNotif
     AuthPhone["complete-registration"] --> LiveDispatch["dispatch_announcements_for_new_user"]
     LiveDispatch --> UserNotif
+
+    PanEvents["pan.backup.failed / pan.restore.failed / pan.token_revoked"] --> DispatchMap["notification_dispatch_map"]
+    ComplianceEvent["content compliance admin override"] --> DispatchMap
+    DispatchMap --> NotifSvc["notifications_service"]
+    NotifSvc --> UserNotif
 
     UserNotif --> Bell["NotificationBell / unread count"]
     UserNotif --> Popup["NotificationPopupModal"]
@@ -127,6 +134,14 @@ graph TD
 
 结论：系统公告、通知中心、注册后 onboarding 已经连成一条用户触达链。
 
+### 3.7 Pan 与 admin compliance 已进入通知投影
+
+- `notification_dispatch_map.py` 注册 `pan.token_revoked`、`pan.backup.failed`、`pan.restore.failed`，用于把网盘凭证和备份/恢复失败推到通知中心。
+- Pan executor 会在失败路径调用 dispatch，错误原因经过 allowlist 后进入通知文案。
+- Admin 内容合规命中 blocked 时不会阻断 pipeline，但会派发 warning/popup 通知，提醒管理员该任务有合规风险。
+
+结论：通知中心现在覆盖运营公告、客服消息之外的运维风险事件。
+
 ## 4. 关键证据
 
 - `gateway/support_api.py`
@@ -148,6 +163,13 @@ graph TD
   - bell / feed / popup API
 - `gateway/notifications_service.py`
   - event-driven notification rows
+- `gateway/notification_dispatch_map.py`
+  - pan failure / token revoked recipes
+  - admin compliance override recipe
+- `gateway/pan/backup_executor.py`
+  - backup failure notification dispatch
+- `gateway/pan/restore_executor.py`
+  - restore failure notification dispatch
 - `frontend-next/src/components/app-shell.tsx`
   - `SupportWidget`
   - `NotificationBell`
@@ -161,3 +183,4 @@ graph TD
 - 想判断 support 消息到底什么时候走 FAQ、什么时候走 LLM、什么时候强制转人工
 - 想接入或修改 WeChat QR / email / chatwoot / wechat_kf handoff
 - 想做系统公告、popup 触达、或新注册用户 onboarding 通知
+- 想接入 pan.* 或 admin compliance 这类运维/风险通知

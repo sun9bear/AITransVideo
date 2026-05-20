@@ -14,6 +14,7 @@
 - support admin、traffic analytics、cost management
 - admin disk overview 与受控清理
 - admin disk resize hint 与 loopback resize helper
+- admin pan backup dashboard / schedulers / cleanup
 - cleanup、R2 sweeper、R2 parity、observability
 - Smart state、quality report、admin cost summary 与 terminal settlement 诊断
 
@@ -29,6 +30,7 @@ graph TD
     Gateway --> Costs["credits observability / cost management"]
     Gateway --> AdminCost["/api/admin/jobs/{id}/cost"]
     Gateway --> AdminDisk["/api/admin/disk/*"]
+    Gateway --> PanAdmin["/api/admin/pan/*"]
     Gateway --> Cleanup["cleanup / purge / sweeper"]
 
     Settings --> AlignPolicy["force_dsp_alignment + paid_fallback"]
@@ -59,6 +61,8 @@ graph TD
     UserVoiceStore --> SourceIndexes["source_content_hash indexes"]
 
     MainLife["gateway/main.py lifespan"] --> Sweeper["r2_artifact_sweeper"]
+    MainLife --> Reconciler["background_task_reconciler"]
+    MainLife --> PanSchedulers["pan scheduler loops"]
     Sweeper --> Mirror["job_terminal_mirror"]
     Mirror --> SmartState["smart_state mirror"]
     Mirror --> Settle["credit/quota settle"]
@@ -90,11 +94,20 @@ graph TD
     Traffic --> Categories["human / search / AI crawler / scanner"]
     Costs --> CostRows["LLM / TTS / voice_clone / smart policy / margin rows"]
     CostCatalog["cost_management RMB-direct catalog"] --> Costs
+    PanAdmin --> PanStatus["status / quota / credentials"]
+    PanAdmin --> PanBackups["backup list / manifest / restore / delete"]
+    PanAdmin --> PanBatch["single + batch backup enqueue"]
+    PanBatch --> PanTasks["BackgroundTask pan_*"]
+    Reconciler --> PanTasks
+    PanSchedulers --> PanTasks
+    PanSchedulers --> PanCleanup["archive scanner / stale reaper / orphan cleanup"]
+    PanCleanup --> R2Obs["pan.* observability"]
 
     SmartState --> Costs
     Settle --> Costs
     AdminCost --> AdminUI
     AdminDisk --> AdminUI
+    PanAdmin --> AdminUI
     Categories --> AdminUI
     CostRows --> AdminUI
     AdminDecision --> AdminUI
@@ -204,9 +217,9 @@ graph TD
 
 ### 3.12 cost catalog 改为 RMB-direct
 
-- `gateway/cost_management.py` 的默认价格目录版本为 `2026-05-18-rmb-direct-pricing`。
+- `gateway/cost_management.py` 的默认价格目录版本为 RMB-direct catalog。
 - LLM rate 直接使用 `input_per_million_rmb / output_per_million_rmb / audio_input_per_million_rmb`，`usd_to_rmb` 只保留兼容旧 override。
-- Gemini 3.1 Pro 按官方 ≤200K tier 折成人民币：input ¥9/M、output ¥72/M、audio input ¥9/M，避免 admin margin 被旧 USD 估算高估。
+- 当前工作区成本目录按 2026-05-20 价格固化 Gemini 3.1 Pro：input ¥14.4/M、output ¥86.4/M、audio input ¥14.4/M，并新增 Gemini 3.5 Flash 价格项。
 
 结论：成本管理面现在以人民币价格为主事实，减少汇率漂移。
 
@@ -216,6 +229,16 @@ graph TD
 - 部署 capability 由 `pyproject.toml` 的 `.[whisper]`、`Dockerfile` 的 `INSTALL_WHISPER`、`docker-compose.yml` 的 `HF_HOME` 决定。
 
 结论：管理员打开 whisper 开关不代表部署层一定具备可运行能力。
+
+### 3.14 Pan backup 进入 admin 运维面
+
+- `gateway/pan/admin_api.py` 暴露 `/api/admin/pan/status`、`/backups`、`/backups/{id}/manifest`、`/backups/batch`、`/restores`、credentials disconnect 和 backup soft-delete。
+- `gateway/pan/auth.py` 负责 Baidu OAuth connect/callback、state token、token refresh，凭证加密存入 `PanCredentials`。
+- `gateway/main.py` lifespan 会注册 pan scheduler，并在启动时先跑 `background_task_reconciler` 补启动 pending task。
+- `frontend-next/src/app/(app)/admin/pan/dashboard/page.tsx` 与 `.../backups/page.tsx` 提供连接状态、quota、备份列表、manifest、恢复和删除操作。
+- 项目列表与 admin jobs 页增加批量备份入口，后台仍由 `/api/admin/pan/backups/batch` 统一校验。
+
+结论：Pan backup 是 admin 归档/恢复控制面，和 disk cleanup、R2 sweeper 一样属于运维工具链。
 
 ## 4. 关键证据
 
@@ -234,6 +257,18 @@ graph TD
   - resize filesystem UI
 - `gateway/admin_cost_api.py`
   - admin-only Smart cost endpoint
+- `gateway/pan/admin_api.py`
+  - admin Pan status / backups / restore / delete APIs
+- `gateway/pan/auth.py`
+  - Baidu OAuth and token refresh
+- `gateway/pan/scheduler.py`
+  - archive scanner / token refresh / orphan cleanup / stale reaper
+- `gateway/background_task_reconciler.py`
+  - startup pending task relaunch
+- `frontend-next/src/app/(app)/admin/pan/dashboard/page.tsx`
+  - admin pan dashboard
+- `frontend-next/src/app/(app)/admin/pan/backups/page.tsx`
+  - backup list / manifest / restore / delete UI
 - `frontend-next/src/app/(app)/admin/jobs/[id]/cost/page.tsx`
   - admin Smart cost UI
 - `gateway/cost_summary_backfill.py`
@@ -270,7 +305,7 @@ graph TD
 - `src/services/r2_publisher_lib/r2_parity.py`
   - registry + R2 HEAD check
 - `scripts/r2_observability.py`
-  - download / stream observability
+  - download / stream / pan observability
 
 ## 5. 什么时候优先看这张图
 
@@ -282,5 +317,6 @@ graph TD
 - 想排查 Smart voice policy 为什么允许/禁止复用、克隆或弱匹配暂停
 - 想排查 Smart clone quota / match / register-smart / UserVoice mirror
 - 想排查 admin disk 为什么显示可以或不能扩容
+- 想改 admin 网盘备份、恢复、Pan OAuth、auto archive、stale/orphan cleanup
 - 想排查 cleanup 为什么没有 purge 某个过期项目
 - 想看 R2 fallback / redirect 的统计口径

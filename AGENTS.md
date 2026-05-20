@@ -23,6 +23,7 @@ Build a Python workflow that outputs Jianying draft projects rather than rendere
 - Support / Notifications / Announcements: `docs/graphs/GITNEXUS_SUPPORT_NOTIFICATIONS_GRAPH.md`
 - Admin / Ops / Calibration: `docs/graphs/GITNEXUS_ADMIN_OPS_CALIBRATION_GRAPH.md`
 - Benchmark / Quality / Cost: `docs/graphs/GITNEXUS_BENCHMARK_QUALITY_COST_GRAPH.md`
+- Pan Backup / Archive / Restore: `docs/graphs/GITNEXUS_PAN_BACKUP_GRAPH.md`
 - Use these graph docs as the fast orientation layer before deeper code reads when the task is architecture-sensitive or the codebase is unfamiliar.
 
 ## Current execution-phase rules

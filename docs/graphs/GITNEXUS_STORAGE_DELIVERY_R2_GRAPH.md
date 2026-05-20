@@ -12,6 +12,7 @@
 - `r2_artifacts` registry
 - proactive publish、registry redirect、lazy fallback
 - terminal mirror、R2 parity、cleanup 与 observability
+- Pan archive 后的本地 project_dir / R2 artifacts 删除与恢复边界
 
 ## 2. 主图
 
@@ -50,7 +51,21 @@ graph TD
     Head --> Purge["rmtree + status purged"]
     Parity --> Skip["skip cleanup, sweeper retries"]
 
-    EventLog["download.* / stream.* events"] --> R2Obs["scripts/r2_observability.py"]
+    PanBackup["pan backup_executor"] --> PanUploaded["BackupRecord uploaded commit point"]
+    PanUploaded --> PanLocalDelete["delete project_dir"]
+    PanUploaded --> PanR2Delete["delete r2_artifacts"]
+    PanLocalDelete --> PanArchived["Job.status=archived"]
+    PanR2Delete --> PanArchived
+    PanArchived --> PanRestore["pan restore_executor"]
+    PanRestore --> RestoredProject["project_dir restored from tar"]
+    PanR2Delete --> Registry
+    PanResidue["pan residue_cleanup / stale_reaper"] --> PanLocalDelete
+    PanResidue --> PanR2Delete
+
+    EventLog["download.* / stream.* / pan.* events"] --> R2Obs["scripts/r2_observability.py"]
+    PanBackup --> EventLog
+    PanRestore --> EventLog
+    PanResidue --> EventLog
     R2Obs --> Ops["ops rollout decision"]
 
     EditCommit["editing/commit overwrite"] --> Invalidate["invalidate materials_pack + stale jianying identity"]
@@ -96,10 +111,19 @@ graph TD
 ### 3.5 download / stream observability 成为灰度判断工具
 
 - `scripts/r2_observability.py` 聚合 `download.redirect.r2_registry`、`download.fallback.local`、`stream.redirect.r2_registry`、`stream.fallback.local` 等事件。
+- 同一脚本现在也聚合 pan event group：backup / restore / token / residue cleanup，用来观察归档与恢复健康度。
 - 脚本是 stdlib-only，面向 Gateway / app 容器共享 jobs dir。
 - 输出用于 rollout 判断，不能把 redirect 计数误解为下载成功率。
 
 结论：R2 可观测性现在从手工 grep 升级为可重复脚本。
+
+### 3.6 Pan archive 会主动退休本地和 R2 副本
+
+- `backup_executor` 在 `BackupRecord.status=uploaded` 且三重校验通过后，才删除本地 `project_dir` 和 `Job.r2_artifacts` 指向的 R2 objects。
+- 删除本地或 R2 失败不会把 Job 伪装成 `archived`；Job 留在 `archiving`，由 `residue_cleanup` 或 `stale_reaper` 补偿。
+- `restore_executor` 只恢复本地 `project_dir`，不会自动重建 R2 registry；恢复后的交付再发布需要走既有发布/生成路径。
+
+结论：R2 是在线交付缓存，Pan 是 admin 归档副本，两者不是同一个存储 backend。
 
 ## 4. 关键证据
 
@@ -116,10 +140,17 @@ graph TD
 - `gateway/project_cleanup.py`
   - `AVT_CLEANUP_REQUIRES_R2_PARITY`
 - `scripts/r2_observability.py`
-  - download / stream event aggregation
+  - download / stream / pan event aggregation
 - `gateway/storage/backend_router.py`
   - registry redirect
   - lazy fallback
+- `gateway/pan/backup_executor.py`
+  - archive commit point
+  - local + R2 deletion after uploaded
+- `gateway/pan/restore_executor.py`
+  - restore from pan tar
+- `gateway/pan/residue_cleanup.py`
+  - idempotent local/R2 cleanup retry
 
 ## 5. 什么时候优先看这张图
 
@@ -128,3 +159,5 @@ graph TD
 - 想排查为什么成功任务没有被主动推上 R2
 - 想判断 cleanup 为什么没有删除某个过期项目
 - 想看 R2 redirect / fallback 的观测口径
+- 想判断 Pan 归档后为什么本地或 R2 还没删除
+- 想判断 archived 任务恢复后为什么 R2 registry 没自动回来

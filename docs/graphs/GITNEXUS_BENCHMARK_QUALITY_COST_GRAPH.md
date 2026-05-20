@@ -18,6 +18,7 @@
 - `effective_marker.marked_event_ids`
 - `smart_shadow_eval / smart_shadow_sim`
 - Smart credits policy 与 terminal settlement
+- pan.* event observability
 
 ## 2. 主图
 
@@ -32,6 +33,7 @@ graph TD
     Review["translation review / voice selection"] --> UserAudit["user_edit_events.jsonl"]
     PostEdit["editing actions / commit"] --> UserAudit
     Runner["process_runner / Job API"] --> JobEvents["JobEvent stream"]
+    PanExec["pan backup / restore / cleanup"] --> PanEvents["pan.* event_log"]
 
     Smart["Smart auto review"] --> SmartDecision["smart_decisions.jsonl"]
     Smart --> SmartQuality["smart_quality_report.json"]
@@ -58,6 +60,8 @@ graph TD
     UserAudit --> Marker["effective_marker + marked_event_ids"]
     Marker --> Behavior["survivor-intent dataset / offline joins"]
     JobEvents --> Lifecycle["ops / lifecycle diagnosis"]
+    PanEvents --> Lifecycle
+    PanEvents --> PanObs["r2_observability pan group"]
 
     Artifacts["projects_root + jobs_root artifacts"] --> Collector["smart_shadow_eval_collector"]
     Usage --> Collector
@@ -75,6 +79,7 @@ graph TD
     Lifecycle --> Admin
     Analyzer --> Reports["quality / cost / whisper coverage report"]
     Aggregator --> Reports
+    PanObs --> Reports
 ```
 
 ## 3. 当前核心认知
@@ -152,13 +157,22 @@ graph TD
 
 ### 3.9 provider/model 成本目录改为 RMB-direct 事实
 
-- `gateway/cost_management.py` 默认 catalog version 为 `2026-05-18-rmb-direct-pricing`，以人民币字段作为主要事实。
+- `gateway/cost_management.py` 默认 catalog 以人民币字段作为主要事实。
 - LLM 成本字段使用 `input_per_million_rmb / output_per_million_rmb / audio_input_per_million_rmb`，`usd_to_rmb` 只作为旧目录兼容 fallback。
-- Gemini 3.1 Pro official ≤200K tier 直接记录人民币单价与音频 token 速率，避免 admin 成本页再依赖美元汇率换算。
+- 当前工作区成本目录把 Gemini 3.1 Pro official ≤200K tier 固化为 input ¥14.4/M、output ¥86.4/M、audio input ¥14.4/M。
+- Gemini 3.5 Flash 也进入 RMB-direct catalog，作为 admin 可选但非默认的 Smart 模型候选。
 
 结论：admin 成本分析现在优先读 RMB-direct 目录，汇率字段不再是新目录的主路径。
 
-### 3.10 Smart credits policy 进入 terminal settlement
+### 3.10 pan.* events 进入运维观测
+
+- `gateway/storage/event_log.py` 允许 `pan.backup.started/succeeded/failed`、`pan.restore.started/succeeded/failed`、`pan.token_revoked`、`pan.residue_cleanup.completed`。
+- `scripts/r2_observability.py` 将 pan event group 汇总为备份、恢复、token 和 residue cleanup 维度。
+- Pan 事件用于判断归档/恢复健康度，不应和普通 download redirect 成功率混算。
+
+结论：网盘备份的质量/可靠性分析已经有独立事件面。
+
+### 3.11 Smart credits policy 进入 terminal settlement
 
 - `settle_job_credit_ledger(...)` 会先看 `smart_state.credits_policy`。
 - `refund_full`、`capture_full`、`capture_actual_cost_capped_at_studio_price` 是当前 dispatcher 分支。
@@ -167,7 +181,7 @@ graph TD
 
 结论：Smart 的结算策略有审计入口，但真实财务动作必须以 Gateway ledger 为准。
 
-### 3.11 `effective_marker.marked_event_ids` 仍是行为归因主键
+### 3.12 `effective_marker.marked_event_ids` 仍是行为归因主键
 
 - `user_edit_audit.py` 采用 append-only JSONL。
 - `effective_marker` 表示最终存活的 prior intent。
@@ -175,7 +189,7 @@ graph TD
 
 结论：用户行为分析仍以 survivor-intent join 为核心。
 
-### 3.12 `smart_shadow_eval / sim` 是离线验证闭环
+### 3.13 `smart_shadow_eval / sim` 是离线验证闭环
 
 - collector 汇总 review state、editor segments、subtitle cues、usage events、user edit events、Smart decisions。
 - simulator 对 eligibility、voice sample、translation auto approval、TTS duration repair、subtitle sync policy 做离线决策。
@@ -227,6 +241,10 @@ graph TD
   - stage decisions
 - `scripts/smart_shadow_sim_aggregator.py`
   - aggregate verdict / readiness
+- `gateway/storage/event_log.py`
+  - pan.* event vocabulary
+- `scripts/r2_observability.py`
+  - pan group observability
 
 ## 5. 什么时候优先读这张图
 
@@ -234,6 +252,7 @@ graph TD
 - 想做 Smart 自动审核质量分析
 - 想改 Smart sidecar、quality report、cost summary
 - 想改 provider/model RMB 成本目录或 admin 成本读模型
+- 想看 pan backup / restore / token / residue cleanup 的事件观测口径
 - 想改 Smart quality report 的 handoff 合成逻辑
 - 想改 admin-only 成本暴露或 settlement backfill
 - 想改 Smart credits policy 或 terminal settlement

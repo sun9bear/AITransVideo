@@ -18,6 +18,7 @@
 - Smart job 是否允许进入 editing
 - Smart/Studio 项目列表“修改”入口
 - editing 内音色复用、显式 clone、审听与 post-edit re-synthesis 计量
+- `edit_generation` 与 Pan backup/restore 的当前代约束
 
 ## 2. 主图
 
@@ -74,9 +75,12 @@ graph TD
     Overwrite --> Stamp["stamp tts_input_cn_text"]
     Overwrite --> Marker["effective_marker.marked_event_ids"]
     Overwrite --> Retire["clear stale jianying identity"]
+    Overwrite --> EditGen["advance edit_generation"]
     Stamp --> Reset["invalidate jianying draft + materials_pack"]
     Marker --> Reset
     Retire --> Reset
+    EditGen --> Reset
+    EditGen --> PanBoundary["Pan backup restore requires current generation"]
     Reset --> Resume["resume_from=alignment"]
 
     CopyNew --> Prepare["prepare_copy_project_dir / hardlinks / path rewrite"]
@@ -170,6 +174,7 @@ graph TD
 - overwrite 会清空旧 `jianying_draft_attempt_id / substep / fingerprint`。
 - 网关侧会调用 `invalidate_materials_pack_for_job(...)`。
 - `edit_generation` 推进后，R2 交付也切到新的 generation key 空间。
+- Pan 归档记录使用 `BackupRecord.job_edit_generation` 绑定备份代际，restore 只接受与当前 `Job.edit_generation` 匹配的已上传备份。
 
 结论：post-edit 后旧草稿、旧打包物、旧 R2 generation 都被视作 stale。
 
@@ -222,6 +227,11 @@ graph TD
   - stale deliverable invalidation
 - `src/services/usage_meter.py`
   - post-edit re-synthesis bucket
+- `gateway/models.py`
+  - `Job.edit_generation`
+  - `BackupRecord.job_edit_generation`
+- `gateway/pan/restore_executor.py`
+  - restore generation guard
 
 ## 5. 什么时候优先看这张图
 
@@ -234,3 +244,4 @@ graph TD
 - 想改 editing speakers 创建、profile 推断、retry-profile
 - 想判断为什么某次 commit 报 `editing_audio_sync_required`
 - 想改 post-edit 后交付物失效策略
+- 想改 post-edit、归档备份、恢复之间的 generation 一致性约束

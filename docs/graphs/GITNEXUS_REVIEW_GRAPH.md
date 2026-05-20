@@ -10,6 +10,7 @@
 - `WorkspacePage` 如何决定当前审核 UI
 - `TranslationReviewPanel / VoiceReviewPanel / VoiceSelectionPanel`
 - Smart handoff 后如何重新进入 Studio review
+- Smart full-auto 后 translation review 不再默认成为人工 gate
 - Smart 完成或 handoff 后如何显示用户可见决策摘要
 - voice selection approve 前的 candidate-first 音色候选、同源音色复用、克隆锁与 calibration preflight
 
@@ -124,13 +125,14 @@ tab 映射仍然是：
 
 结论：Smart 用户能看到自动决策结果与转人工原因，但不会看到内部 provider 成本。
 
-## 7. Translation review 仍然是 speaker 写侧入口
+## 7. Translation review 仍然是 Studio speaker 写侧入口
 
 - `TranslationReviewPanel` 继续维护 `segmentSpeakers`、`speakerNames`、`segments`。
 - approve payload 会把文本修改、speaker 归属、speaker 名称一并提交。
 - `review_actions.py:approve_translation(...)` 会先应用 speaker names 与 segment speaker 变更，再保存 translation review submission。
+- 2026-05-20 后，Smart translation review 的旧 deterministic checks 只写 advisory metrics，不再自动把 Smart job 拉到 `translation_review` 人工确认页。
 
-结论：translation review 仍然是 speaker 纠偏的关键写侧。
+结论：translation review 仍然是 Studio / handoff 后人工纠偏的关键写侧，但不是 Smart 全自动 happy path 的默认暂停点。
 
 ## 8. Voice selection 先做 candidate-first 复用 / 克隆前置确认
 
@@ -139,6 +141,7 @@ tab 映射仍然是：
 - `VoiceSelectionPanel` 加载 speaker 后逐个调用 `getVoiceCandidates(...)`，这是只读 registry lookup，不调用 clone provider、不预留点数。
 - UI 按“个人音色 · 强匹配 (不扣点) / 个人音色 · 可能匹配 (需要确认) / 其他个人音色”分组展示。
 - 命中强匹配时会自动预选 `autoReuseVoice`，提交 `voice_reuse=true`，不消耗 clone 点。
+- 如果 Smart Phase 4 弱匹配暂停已经在 review payload 写了 `smart_offered_candidates`，UI 会优先预选该候选，减少用户二次查找。
 - 可能匹配包含 same-source named、same-source speaker-id changed、cross-source named；用户选中后也是复用事件，不是新克隆。
 - `VoiceCloneModal` 打开时仍调用 `matchVoiceForSelection(jobId, speakerId)`，用于显式 clone 流程里的可复用提示。
 - 用户仍可显式触发 clone；Gateway 用 `review_state` 中的 per-speaker `cloning.started_at` 做短期 clone lock，重复点击返回 `clone_in_progress`。
@@ -172,6 +175,7 @@ tab 映射仍然是：
   - Smart 决策摘要 UI
 - `frontend-next/src/components/workspace/VoiceSelectionPanel.tsx`
   - `getVoiceCandidates(...)`
+  - smart-offered candidate pre-select
   - `matchVoiceForSelection(jobId, speakerId)`
   - `VoiceCloneModal` reuse / clone UI
   - `approveVoiceSelection(jobId, approvals)`
@@ -203,6 +207,7 @@ tab 映射仍然是：
 - Smart 降级后为什么进入 Studio 审核
 - Smart 决策摘要从哪里读取，为什么 handoff 也能显示
 - translation review 能否改 speaker 名称和 segment speaker
+- 为什么 Smart 全自动任务不再因为 translation review advisory metrics 进入人工确认
 - voice selection 为什么提示强匹配/可能匹配/其他个人音色、为什么 clone 按钮被锁住
 - Smart 弱匹配暂停后，用户确认或拒绝候选分别如何审计
 - review submit 前为什么会先跑 voice calibration

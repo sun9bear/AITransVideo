@@ -1,6 +1,6 @@
 # GitNexus 项目图谱
 
-新会话建议先读本文件，再按任务进入对应子图。生成时间：`2026-05-18`
+新会话建议先读本文件，再按任务进入对应子图。生成时间：`2026-05-20`
 
 生成方式：基于 GitNexus 最新索引、Git 历史 diff 与源代码交叉整理。
 
@@ -8,30 +8,26 @@
 
 | 指标 | 数值 |
 | --- | ---: |
-| 文件数 | 1305 |
-| 节点数 | 23,717 |
-| 关系数 | 53,596 |
-| 聚类数 | 874 |
+| 文件数 | 1368 |
+| 节点数 | 24,820 |
+| 关系数 | 56,380 |
+| 聚类数 | 921 |
 | 流程数 | 300 |
-| 索引提交 | `68077dc` |
+| 索引提交 | `5dacc96` |
 | 索引状态 | `up-to-date` |
 
 本轮最需要反映的结构变化：
 
-- Smart 已进入更严格的 P2 launch 形态：`smart_consent.py` 锁定 6 字段 consent，`compute_job_policy("smart")` 锁定 MiniMax + `speech-2.8-hd`，Gateway create path 在 consent 与 admin clone policy 都允许时做提交前 UserVoice quota 水位检查。
-- Smart voice path 从“直接 clone”推进到“先查同源个人音色复用，再必要时 clone”：UserVoice 增加 source metadata，Gateway 暴露 internal match，pipeline 和 VoiceSelection UI 都能消费复用候选。
-- Smart voice_id 传播修复已落地：reused/cloned/preset 决策写入 `_speaker_voices` 后，会回写 `voice_id_a / voice_id_b`，避免 2-speaker path 仍把 `auto` 传给 translator。
-- 非主说话人不再遗留空 voice_id，Smart 会从 `auto_matched_voice` 自动解析 preset voice，并结合 segment-level `dubbing_mode` 聚合跳过 keep-original speaker。
-- Smart handoff job 不一定有 `smart_quality_report.json`，Job API 会从 `smart_decisions.jsonl` 合成最小 quality report，让 Workspace 显示“已转人工 + 原因 + 阶段”。
-- Smart cost summary 永远是 admin-only surface，pipeline 写 `audit/smart_cost_summary.json`，Gateway settlement 后通过 `cost_summary_backfill.py` 回填实际扣点和 quota 使用量。
-- Smart 成功或已降级任务现在可从项目列表进入 post-edit 修改；前端入口包含 `smart`，后端仍通过 `is_editable_smart_state` 限制只允许 `completed / downgraded_to_studio`。
-- Smart LLM 默认模型进入 admin 模型配置体系，未配置时 Smart mode 各 prompt 默认 Gemini 3.1 Pro。
-- Voice selection 从单点 `voice-match` 进入 candidate-first：统一 `voice-candidates` API 返回 strong auto-reuse、requires-confirmation、cross-source named candidate，Studio 和 post-edit 共享这套候选优先 UI。
-- Smart voice policy 由 admin settings 控制：`smart_auto_clone_enabled`、`smart_reuse_user_voice_enabled`、`smart_pause_on_possible_user_voice_match` 分别控制新克隆、复用查询和弱匹配暂停。
-- Editing 页面进入 Phase 2：左视频 + ops panel / 右侧 segment list 重构，`SplitSegmentDialog` 支持 1..N cuts，后端 `split_editing_segment_many` 用 write-ahead journal 保护 `segments/status/voice_map` 三文件一致性。
-- 智能切点变为用户显式触发的 LLM 功能：`suggest-split` 每段最多一次、每任务有 cap，LLM 返回 `at_text` 后再映射到 `source_index`，不再使用已移除的 v1 word-context 自动预填。
-- 成本审计修正：Smart auto-clone 成功会进入 `UsageMeter.record_voice_clone`，用户拒绝候选会进入非计费 `voice_candidate_rejected`，LLM price catalog 改为 RMB-direct。
-- Admin/Ops 新增磁盘扩容安全面：`admin_disk_api.py` 生成 `resize_hint`，`disk_resize_helper.py` 独立持有 raw block device，只通过 loopback + bearer token 执行 `resize2fs`。
+- 网盘备份成为新的完整子系统：`gateway/pan/*` 覆盖 Baidu OAuth、token 加密、admin API、BackgroundTask、backup/restore/residue/stale 状态机、scheduler、Admin UI、observability 和部署 runbook。
+- Job 生命周期扩展到 `archiving / archived / restoring`；`BackupRecord` 是备份生命周期真源，`BackgroundTask` 只代表调度状态。
+- 备份成功以 `BackupRecord.status=uploaded` 为 commit point，之后才删除本地 project dir 和 R2 artifacts；post-commit 残留由 `residue_cleanup` / `stale_reaper` 补偿。
+- 恢复流程从 `uploaded` tar 安全解包到 staging 后再 move into place；`moved=True` 后 DB finalize 失败不能回滚到 archived，而是留给 stale reaper forward-resolve。
+- Admin UI 新增 `/admin/pan/dashboard`、`/admin/pan/backups`，项目列表和任务管理页支持管理员批量备份。
+- Pan 事件进入 `gateway/storage/event_log.py`：backup/restore started/succeeded/failed、token_revoked、residue_cleanup.completed，并被 `r2_observability.py` 和通知 dispatch map 消费。
+- Smart 2026-05-20 语义改为全自动：translation review 的 glossary、speaker、length、checksum、uncertain speaker、clone eligible 检查只做审计 metrics，不再 handoff。
+- Smart 仍保留硬 gate：>3 主说话人、样本不足、音色库水位、MiniMax quota、clone expiry、弱个人音色确认、内容合规。
+- Admin 内容合规命中变成 notify-only，不影响 pipeline；非 admin 仍由早期合规 gate 失败退出。
+- 成本/模型配置继续推进：Smart 默认 Gemini 3.1 Pro，当前工作区成本目录新增 Gemini 3.5 Flash，并以 RMB-direct 字段固化 Gemini 价格。
 
 ## 2. 关键基座
 
@@ -48,6 +44,7 @@
 | Calibration | manual / clone-after / review-preflight / Smart clone mirror / candidate matching / source metadata | `gateway/user_voice_api.py`, `gateway/user_voice_service.py`, `gateway/voice_calibration_hook.py`, `gateway/voice_calibration_review_preflight.py` |
 | Admin/Ops | settings, Smart LLM defaults, Smart voice policy, traffic, support, cost, disk cleanup/resize, R2 sweeper | `gateway/admin_settings.py`, `src/services/llm_registry.py`, `gateway/admin_disk_api.py`, `gateway/disk_resize_helper.py`, `gateway/admin_cost_api.py`, `gateway/main.py` |
 | Metering & Settlement | `UsageMeter`, voice reuse/clone/rejection meter, RMB-direct pricing, Smart credits policy, terminal settle, cost backfill | `src/services/usage_meter.py`, `gateway/cost_management.py`, `gateway/credits_service.py`, `gateway/job_terminal_mirror.py`, `gateway/cost_summary_backfill.py` |
+| Pan Backup | admin-only Baidu Pan archive/restore, BackupRecord state machine, schedulers, residue cleanup, observability | `gateway/pan/*`, `gateway/background_task_reconciler.py`, `frontend-next/src/lib/api/pan.ts`, `scripts/r2_observability.py` |
 | Offline Evaluation | `smart_shadow_eval / sim`, quality/cost reports | `scripts/smart_shadow_eval_collector.py`, `scripts/smart_shadow_sim_aggregator.py` |
 
 ## 3. 子图入口
@@ -63,6 +60,7 @@
 - 支持 / 通知图：`docs/graphs/GITNEXUS_SUPPORT_NOTIFICATIONS_GRAPH.md`
 - Admin / Ops / Calibration 图：`docs/graphs/GITNEXUS_ADMIN_OPS_CALIBRATION_GRAPH.md`
 - Benchmark / Quality / Cost 图：`docs/graphs/GITNEXUS_BENCHMARK_QUALITY_COST_GRAPH.md`
+- 网盘备份图：`docs/graphs/GITNEXUS_PAN_BACKUP_GRAPH.md`
 
 ## 4. 仓库结构图
 
@@ -77,6 +75,7 @@ graph TD
     EditUI["Post-edit UI"] --> FrontApi
     AppShell["Bell / popup / support / admin entry"] --> FrontApi
     AdminUI["Admin / Ops UI"] --> FrontApi
+    PanUI["Admin Pan dashboard / backups / bulk backup"] --> FrontApi
 
     PlansSSR --> Gateway["Gateway truth + control"]
     AuthFront --> Gateway
@@ -89,6 +88,7 @@ graph TD
     Gateway --> SupportPlane["support / notifications / announcements"]
     Gateway --> Ops["settings / Smart voice policy / LLM models / costs / disk cleanup + resize"]
     Gateway --> CalibrationPlane["voice calibration + user voice quota + candidates + source metadata"]
+    Gateway --> PanPlane["Pan backup admin API + OAuth"]
     Gateway --> Proxy["ownership + subresource proxy"]
 
     JobApi --> Workflow["process.py / ProjectWorkflow"]
@@ -158,6 +158,23 @@ graph TD
     Publisher --> Registry
     Registry --> Delivery
 
+    PanPlane --> PanAuth["Baidu OAuth + encrypted credentials"]
+    PanPlane --> PanAdminApi["/api/admin/pan/*"]
+    PanAdminApi --> PanQueue["BackgroundTask pan_backup / pan_restore / pan_residue_cleanup"]
+    PanQueue --> PanBackup["backup_executor"]
+    PanQueue --> PanRestore["restore_executor"]
+    PanQueue --> PanResidue["residue_cleanup"]
+    PanBackup --> PanRecord["BackupRecord upload/uploaded state"]
+    PanBackup --> ArchivedStatus["Job.status archiving -> archived"]
+    PanBackup --> PanDeleteLocal["delete project_dir"]
+    PanBackup --> PanDeleteR2["delete r2_artifacts"]
+    PanRestore --> RestoredStatus["archived -> restoring -> succeeded"]
+    PanResidue --> ArchivedStatus
+    PanSchedulers["pan schedulers + startup reconciler"] --> PanQueue
+    PanSchedulers --> PanAuth
+    PanEvents["pan.* event_log"] --> R2Obs["r2_observability pan group"]
+    PanEvents --> UserNotifications["pan failure / token notifications"]
+
     Cleanup["project_cleanup"] --> Parity["r2_parity_ok"]
     AdminDisk["admin_disk_api"] --> Cleanup
     AdminDisk --> ResizeHint["resize_hint"]
@@ -189,7 +206,7 @@ graph TD
 - `frontend-next/src/components/workspace/TranslationForm.tsx` 暴露 `serviceMode = "smart"`，读取 entitlements 判断是否可用，并用 credits estimate 获取智能版单价。
 - `gateway/smart_consent.py` 强制 Smart 提交携带完整 6 字段 consent，并暂时拒绝未实现的 `fail_and_refund` 结算策略。
 - `gateway/job_intercept.py::compute_job_policy(...)` 对 Smart 固定 MiniMax、`speech-2.8-hd`、`requires_review=True` 和 `voice_strategy=smart_auto`。
-- `src/pipeline/process.py` 在 Smart effective mode 下执行 eligibility、voice review、translation review、handoff、quality report、cost summary。
+- `src/pipeline/process.py` 在 Smart effective mode 下执行 eligibility、voice review、translation audit metrics、handoff、quality report、cost summary。
 - `src/pipeline/process.py` 通过 `services.admin_settings.read_admin_setting` 读取 Smart voice policy，避免 Gateway-only settings loader 在 app runtime 中失效。
 - `frontend-next/src/components/workspace/SmartAutoDecisionPanel.tsx` 用户侧只渲染 quality report，不包含任何内部成本字段。
 
@@ -258,7 +275,18 @@ graph TD
 
 结论：项目目录清理、受控扩容、Smart LLM 模型选择和 Smart voice policy 都进入 Gateway admin 控制平面。
 
-### 5.8 Gateway 继续是商业事实真源
+### 5.8 Pan backup 是独立 admin 归档系统
+
+- `gateway/pan/auth.py` 负责 Baidu OAuth connect/callback、state token、token refresh，token 通过 Fernet 加密落到 `PanCredentials`。
+- `gateway/pan/admin_api.py` 暴露 status、backup list、manifest、single/batch backup、restore、delete credentials、delete backup。
+- `gateway/pan/backup_executor.py` 将 `succeeded` job 打包为带 manifest 的 tar.gz，上传百度网盘并通过 size/md5/tail probe 三重 gate 后写 `BackupRecord.status=uploaded`。
+- `gateway/pan/restore_executor.py` 从 `archived + uploaded backup` 恢复到本地 project dir，move 完成后的 DB finalize 失败由 `stale_reaper` 处理，不能盲目回滚。
+- `gateway/pan/scheduler.py` 和 `background_task_reconciler.py` 共同处理自动归档、token refresh、orphan cleanup、stale reaper 与启动时 pending task 补启动。
+- `gateway/storage/event_log.py`、`scripts/r2_observability.py`、`notification_dispatch_map.py` 已接入 pan.* 事件。
+
+结论：网盘备份不是 R2 的另一个 backend，而是 admin-only 归档/恢复控制平面。
+
+### 5.9 Gateway 继续是商业事实真源
 
 - `gateway/plan_catalog.py`、`gateway/entitlements.py`、`gateway/credits_service.py` 管理 plan、allowed service modes、fixed price、credit estimate。
 - 前端只消费 Gateway facts，不能把智能版可用性或价格固化成第二套真源。
@@ -274,3 +302,4 @@ graph TD
 - 要看 Smart sidecar、UsageMeter、voice reuse/clone/rejection metering、RMB-direct pricing、shadow eval、质量与成本，读 `GITNEXUS_BENCHMARK_QUALITY_COST_GRAPH.md`
 - 要看 review UI、candidate-first voice selection、Smart 弱匹配暂停与决策摘要，读 `GITNEXUS_REVIEW_GRAPH.md`
 - 要看 workflow 内核、DSP-first 对齐、voice_id 传播与 cue pipeline，读 `GITNEXUS_WORKFLOW_CORE_GRAPH.md`
+- 要看百度网盘归档/恢复、Pan OAuth、BackupRecord 状态机、调度器、stale/residue/orphan cleanup，读 `GITNEXUS_PAN_BACKUP_GRAPH.md`

@@ -9,8 +9,10 @@
 - Smart 提交入口与 consent payload
 - Gateway `compute_job_policy("smart")` 与 `smart_consent` schema lock
 - admin Smart voice policy: auto-clone / reuse / weak-match pause
+- Smart 2026-05-20 full-auto contract
+- admin compliance notify-only / non-admin compliance hard fail
 - speaker eligibility gate
-- translation auto review
+- translation review audit metrics
 - candidate-first user voice reuse / weak-match confirmation / voice clone / preset / pause orchestration
 - user voice quota 与真实 provider wiring
 - minor speaker preset auto-match
@@ -34,6 +36,9 @@ graph TD
     Effective --> StudioPath["effective mode = studio after handoff"]
 
     SmartPath --> Eligibility["eligibility_gate.py"]
+    SmartPath --> Compliance["early content compliance gate"]
+    Compliance --> AdminNotify["admin blocked -> notify only"]
+    Compliance --> NonAdminFail["non-admin blocked -> pipeline failed"]
     Eligibility --> GatePass["main speakers within limit"]
     Eligibility --> GateFail["eligibility rejected"]
 
@@ -64,17 +69,16 @@ graph TD
     DubbingMode --> MinorPreset["minor speakers auto_matched_voice -> preset voice_id"]
     MinorPreset --> VoiceIdProp["propagate _speaker_voices to voice_id_a/b"]
 
-    VoiceIdProp --> Translation["auto_translation_review.py"]
+    VoiceIdProp --> Translation["auto_translation_review.py audit metrics"]
     Process --> SmartLLM["translator._service_mode -> llm_registry smart defaults"]
     SmartLLM --> Translation
-    Translation --> TranslationPass["translation_auto_approve"]
-    Translation --> TranslationFail["translation handoff reason"]
+    Translation --> TranslationPass["always auto-approved after hard gates"]
+    Translation --> TranslationAdvisory["old strict failures recorded as advisory metrics"]
 
     GateFail --> Handoff["emit_handoff_markers"]
     Paused --> Handoff
     WeakPause --> Handoff
     MirrorFail --> Handoff
-    TranslationFail --> Handoff
 
     Handoff --> ReviewState["review_state pending"]
     Handoff --> OfferedCandidates["smart_offered_candidates in review payload"]
@@ -92,6 +96,7 @@ graph TD
     VoiceReview --> Decisions
     Register --> Decisions
     Translation --> Decisions
+    TranslationAdvisory --> Decisions
     Handoff --> Decisions
 
     TranslationPass --> Downstream["downstream TTS / alignment / deliverables"]
@@ -122,15 +127,25 @@ graph TD
 
 结论：Smart 不是隐藏后端模式，已经是受 Gateway 权益控制的用户可选服务模式。
 
-### 3.2 Smart 决策层仍是 deterministic-first
+### 3.2 Smart 现在是 full-auto-first，deterministic checks 主要进入审计
 
 - `eligibility_gate.py` 只做 speaker structure 归一化和主说话人计数。
-- `auto_translation_review.py` 固化术语、speaker assignment、一致性、长度预算、checksum、不确定 speaker 占比、clone sample ratio 等检查。
+- 2026-05-20 后，`auto_translation_review.py` 仍计算术语、speaker assignment、一致性、长度预算、checksum、不确定 speaker 占比、clone sample ratio 等 6 类 metrics，但这些不再阻塞 pipeline。
+- 旧严格策略下会 handoff 的 glossary 低、speaker 冲突、长度溢出、checksum mismatch、uncertain speaker 高、clone eligible ratio 低、missing signals，现在只记录 `*_advisory_reason`。
 - `auto_voice_review.py` 负责 per-speaker clone / preset / pause，不写 UI，不直接写 review state。
 
-结论：Smart MVP 不是“让 LLM 自动审核”，而是 deterministic policy 执行层。
+结论：Smart 不是“让 LLM 审核”，也不再默认把 translation review 变成人工确认点；deterministic checks 主要服务质量解释和 admin QA。
 
-### 3.3 voice reuse / clone 现在有真实生产边界
+### 3.3 admin compliance 是通知，不是 pipeline block
+
+- 内容合规硬 gate 已前移到 `_run_content_compliance_review(...)`。
+- 非 admin 命中 `blocked` 时仍抛 `ContentPolicyViolationError`，任务失败退出，这是法律/安全边界。
+- Admin 命中 `blocked` 时走 `admin_override_applied` 分支：派发任务通知、写日志，然后 `return payload` 继续流程。
+- `evaluate_translation_review(..., compliance_block=True)` 保留兼容参数，但明确忽略该参数，避免 admin Smart job 再被 translation review 拉回人工。
+
+结论：合规风险对普通用户仍是硬阻断；admin 自测/运维任务只提醒，不改变 pipeline 进度。
+
+### 3.4 voice reuse / clone 现在有真实生产边界
 
 - Smart 只有在 `smart_consent.auto_voice_clone is True` 且存在主说话人时才进入复用或克隆路径。
 - pipeline 会先按 admin policy 决定是否查询候选：`smart_reuse_user_voice_enabled=False` 时跳过复用路径。
@@ -145,7 +160,7 @@ graph TD
 
 结论：Smart auto voice 的正确性依赖 consent、admin policy、候选匹配、quota snapshot、provider wiring、UserVoice mirror、UsageMeter 成本记录共同成立。
 
-### 3.4 非主说话人自动 preset 修复了潜在多说话人缺口
+### 3.5 非主说话人自动 preset 修复了潜在多说话人缺口
 
 - eligibility 只把主说话人交给 `auto_voice_review`。
 - `_aggregate_speaker_dubbing_modes(...)` 会先把 segment-level dubbing mode 汇总到 speaker 层。
@@ -156,7 +171,7 @@ graph TD
 
 结论：低占比或 excluded speaker 不再因为没有进入 main-speaker review 而留下空 `voice_id`，且主说话人的 cloned/reused voice_id 会真实进入 TTS。
 
-### 3.5 handoff 必须同时发三个信号
+### 3.6 handoff 必须同时发三个信号
 
 `src/services/smart/handoff.py` 把降级到 Studio 的动作打包成三件事：
 
@@ -164,9 +179,11 @@ graph TD
 - `emit_smart_state_marker(...)`
 - `print(web_review_marker_builder(...))`
 
-结论：缺少 `[WEB_REVIEW]` 会让 runner 错误 finalise；缺少 `[SMART_STATE]` 会让 Gateway 和 settlement 看不到降级事实。
+当前仍允许 handoff / pause 的 Smart 场景是：speaker eligibility 超限、样本不足、voice library 水位或 quota 不可用、clone provider 外部限制、clone mirror fail、clone expiry、弱个人音色候选确认。
 
-### 3.6 弱匹配暂停会把候选写进审核态
+结论：缺少 `[WEB_REVIEW]` 会让 runner 错误 finalise；缺少 `[SMART_STATE]` 会让 Gateway 和 settlement 看不到降级事实。但 translation review advisory metrics 本身不再触发 handoff。
+
+### 3.7 弱匹配暂停会把候选写进审核态
 
 - `evaluate_voice_review(..., possible_voice_matches_by_speaker_id=..., admin_pause_on_possible_match=True)` 会在强匹配复用之后、新克隆之前执行。
 - 触发 speaker 的 reason code 是 `possible_user_voice_match_requires_confirmation`。
@@ -176,7 +193,7 @@ graph TD
 
 结论：弱匹配暂停不是失败，而是把“可能是同一个人”的音色候选转成可审计的人类确认点。
 
-### 3.7 quality report 是用户解释层，不是成本层
+### 3.8 quality report 是用户解释层，不是成本层
 
 - happy-path terminal Smart job 写 `audit/smart_quality_report.json`。
 - handoff job 如果没有 report，Job API 会从 `smart_decisions.jsonl` 合成最小 quality report。
@@ -185,7 +202,7 @@ graph TD
 
 结论：用户可以看到“系统自动做了什么和为什么转人工”，但看不到 provider 成本。
 
-### 3.8 cost summary 是 admin-only 审计层
+### 3.9 cost summary 是 admin-only 审计层
 
 - pipeline 写 `audit/smart_cost_summary.json`，字段包含 `cost_breakdown_internal_only`。
 - `gateway/admin_cost_api.py` 只在 `/api/admin/jobs/{job_id}/cost` 暴露，并做 admin role check。
@@ -194,7 +211,7 @@ graph TD
 
 结论：Smart 成本数据有正式读路径，但只属于管理员安全域。
 
-### 3.9 Smart LLM 模型选择进入 admin 可控面
+### 3.10 Smart LLM 模型选择进入 admin 可控面
 
 - `src/services/llm_registry.py` 为 `smart` mode 的 `pass1 / pass2 / pass3 / translate / rewrite / probe_translate` 默认选择 Gemini 3.1 Pro。
 - `gateway/admin_settings.py` 暴露 `prompt_models[mode][prompt_key]`，Smart 可被 admin override。
@@ -202,7 +219,7 @@ graph TD
 
 结论：Smart translation 仍是 deterministic review gate，但底层 LLM 模型选择不再误用平铺默认值。
 
-### 3.10 smart_state 是跨进程状态通道
+### 3.11 smart_state 是跨进程状态通道
 
 - pipeline 只能通过 stdout 发 `[SMART_STATE] {...}`。
 - `process_runner.py` 先解析 Smart marker，再解析 web review marker。
@@ -219,6 +236,7 @@ graph TD
   - smart fixed price estimate
 - `src/pipeline/process.py`
   - Smart inline branch
+  - content compliance admin notify-only branch
   - candidate-first voice reuse
   - weak-match pause payload
   - quota lookup
@@ -235,6 +253,13 @@ graph TD
   - voice reuse / candidate rejection audit
 - `gateway/smart_consent.py`
   - Smart consent schema lock
+- `src/services/smart/auto_translation_review.py`
+  - full-auto translation review audit metrics
+  - ignored `compliance_block` compatibility parameter
+- `tests/test_smart_full_auto_spec_2026_05_20.py`
+  - full-auto contract pin
+- `tests/test_admin_compliance_notify_only.py`
+  - admin compliance notify-only contract
 - `src/services/smart/eligibility_gate.py`
   - `normalize_speaker_stats(...)`
   - `evaluate_eligibility(...)`

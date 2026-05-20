@@ -12,8 +12,10 @@
 - Smart service mode 入口与固定价
 - Smart consent schema、预算耗尽策略与固定价承诺边界
 - Smart voice policy、弱匹配暂停提示与候选音色确认边界
+- Smart 全自动产品承诺
 - entitlements 与 allowed service modes
 - trial 发放边界
+- privacy / terms pages for third-party platform review
 - 新注册用户 onboarding 公告
 - SEO 与 auth noindex 边界
 
@@ -25,6 +27,7 @@ graph TD
     Pricing --> FAQ["faq / product proof"]
     FAQ --> FaqLd["FaqJsonLd / FAQPage"]
     Home --> SiteLd["SiteJsonLd"]
+    Home --> Legal["privacy / terms pages"]
 
     Robots["robots.ts"] --> Crawlers["search + AI crawlers"]
     Sitemap["sitemap.ts"] --> Crawlers
@@ -57,6 +60,7 @@ graph TD
     Estimate --> SmartPrice["smart standard fixed user price"]
     Workspace --> SmartPricingMeta["getVoiceSelectionPricing metadata"]
     SmartPricingMeta --> WeakMatchWarning["smart_pause_warning_enabled notice"]
+    Smart --> FullAuto["full-auto product promise"]
     Smart --> Consent["smart_consent payload"]
     Consent --> Submit["submitTranslationJob"]
     Submit --> ConsentValidator["Gateway smart_consent.py validator"]
@@ -105,6 +109,7 @@ graph TD
 - Smart 当前面向用户展示固定价，内部仍保留 `quality_tier=standard` 兼容二维定价表。
 - pipeline 内部的 retry、clone、TTS 调用被产品文案归入固定价，不在前端拆成第二套成本规则。
 - voice reuse 与 rejected candidate 会记录为非 billable 使用事件；clone 是否发生属于内部执行事实，不改变用户侧 fixed price。
+- 2026-05-20 后，Smart translation review 的旧严格检查只做 audit metrics，不再要求用户确认；这与“智能版全部自动完成”的产品承诺保持一致。
 
 结论：用户侧价格来自 Gateway estimate，内部成本只进入 admin cost summary。
 
@@ -135,7 +140,14 @@ graph TD
 
 结论：候选优先是降低重复克隆和误匹配风险的产品机制，不是前端新增一套价格体系。
 
-### 3.7 phone auth 仍是完整生命周期流
+### 3.7 privacy / terms 是第三方平台审核依赖
+
+- `frontend-next/src/app/(marketing)/privacy/page.tsx` 和 `terms/page.tsx` 已补齐，用于 Baidu 开放平台审核和基础合规展示。
+- 网盘备份仍是 admin-only 能力，商业化真源不迁移到 Baidu Pan；普通用户价格、试用、权益仍由 Gateway 控制。
+
+结论：法律页面服务外部平台审核与用户信任，不改变 plan / entitlement source-of-truth。
+
+### 3.8 phone auth 仍是完整生命周期流
 
 - `POST /auth/phone/send-code`
 - `POST /auth/phone/verify-code`
@@ -144,7 +156,7 @@ graph TD
 
 核心边界仍然是：验证码通过不等于注册完成，trial 只在 `complete-registration` 成功后发放。
 
-### 3.8 email auth 已经并入同一注册模型
+### 3.9 email auth 已经并入同一注册模型
 
 - `gateway/auth_email.py` 挂载在 `/auth/email`。
 - registration 分两步：`verify-registration-code` 产出 registration token，`complete-registration` 设置密码、创建用户、创建 session。
@@ -153,7 +165,7 @@ graph TD
 
 结论：email auth 与 phone auth 保持同样的“验证通过后再完成注册”边界。
 
-### 3.9 新注册用户仍进入 live announcement 生命周期
+### 3.10 新注册用户仍进入 live announcement 生命周期
 
 - phone complete registration 和 email complete registration 都会接入新用户生命周期。
 - 系统公告以 `UserNotification` 进入 bell / popup feed。
@@ -185,6 +197,12 @@ graph TD
   - entitlement gate
   - Smart fixed price estimate
   - Smart weak-match pause warning
+- `frontend-next/src/app/(marketing)/privacy/page.tsx`
+  - privacy page for platform review
+- `frontend-next/src/app/(marketing)/terms/page.tsx`
+  - terms page for platform review
+- `src/services/smart/auto_translation_review.py`
+  - Smart full-auto translation audit metrics
 - `tests/test_smart_entry_wiring.py`
   - Smart consent and Gateway whitelist guards
 - `gateway/auth_email.py`
@@ -210,6 +228,8 @@ graph TD
 - 想改 Smart 可售入口、固定价、allowed service modes
 - 想改 Smart consent、预算耗尽策略、admin voice policy、voice library quota 预检
 - 想改候选音色确认、弱匹配暂停提示、非计费候选拒绝审计
+- 想确认 Smart 全自动产品承诺与 translation review audit-only 的边界
+- 想改 privacy / terms 等平台审核页面
 - 想改 phone 或 email 注册登录
 - 想改验证码、captcha、rate limit、registration token
 - 想把新注册用户接入公告或其他 onboarding 触点
