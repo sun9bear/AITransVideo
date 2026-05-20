@@ -651,20 +651,50 @@ def _new_clone_blocked_reason(
 
 def _looks_like_quota_error(exc: BaseException) -> bool:
     """Heuristic — treat any exception whose class name OR message
-    mentions "quota" as a quota-exhaustion signal so the orchestrator
-    pauses rather than treating it as a generic clone failure.
+    mentions a quota / billing / balance exhaustion signal as a
+    provider-side exhaustion so the orchestrator pauses rather than
+    treating it as a generic clone failure.
 
-    Matches FakeCloneQuotaError (used by tests) and the production
-    MiniMax error messages which surface "quota" / "quota_low" /
-    "quota_exceeded" in the body. Conservative: false positives just
-    mean we pause earlier than necessary, which is the safe direction
-    (plan §7.3 — quota exhaustion is the one error class where
-    fall-through to preset is wrong).
+    Matches:
+      - ``FakeCloneQuotaError`` (used by tests; class name carries "quota")
+      - MiniMax production messages: "quota" / "quota_low" / "quota_exceeded"
+      - MiniMax balance exhaustion: status_code=1008
+        "insufficient balance" (real incident 2026-05-20
+        job_f2abf73878b... Stanford communication video — 3 wasted
+        retry attempts before fallback to preset, because the old
+        heuristic only matched "quota" substring).
+      - Generic provider billing signals: "balance", "insufficient_balance",
+        "余额不足", "balance_exhausted", "payment_required"
+
+    Conservative: false positives just mean we pause earlier than
+    necessary, which is the safe direction (plan §7.3 — provider
+    exhaustion is the one error class where fall-through to preset
+    is wrong because clone audio is already paid for / wasted).
+
+    User spec (2026-05-20): provider quota / balance exhaustion is
+    one of the 7 acceptable handoff sites for smart mode. The user
+    must be informed so they can top up the account or wait, NOT
+    silently delivered with preset voice as if everything succeeded.
     """
     name = type(exc).__name__.lower()
-    if "quota" in name:
+    if "quota" in name or "balance" in name:
         return True
-    return "quota" in str(exc).lower()
+    message = str(exc).lower()
+    # Match a small set of provider-side billing/exhaustion signals.
+    # Each substring corresponds to a known provider error mode.
+    # We accept a fairly broad set — false positives just mean we
+    # pause earlier (per the docstring's "conservative direction").
+    signal_substrings = (
+        "quota",
+        "balance",  # covers "insufficient balance", "low balance",
+                    # "your balance is below ...", etc.
+        "余额不足",
+        "payment_required",
+        "payment required",
+        # MiniMax specific: status_code=1008 in error body
+        "1008",
+    )
+    return any(signal in message for signal in signal_substrings)
 
 
 __all__ = [
