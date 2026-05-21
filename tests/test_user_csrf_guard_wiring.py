@@ -136,6 +136,9 @@ def test_direct_main_write_routes_have_same_origin_guard():
         ("POST", "/job-api/jobs/{job_id}/voice-match"),
         ("POST", "/job-api/jobs/{job_id}/voice-candidates"),
         ("POST", "/job-api/jobs/{job_id}/{subpath:path}"),
+        ("PUT", "/job-api/{path:path}"),
+        ("PATCH", "/job-api/{path:path}"),
+        ("DELETE", "/job-api/{path:path}"),
     }
     found = set()
     missing_guard = []

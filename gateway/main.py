@@ -494,6 +494,7 @@ app.api_route(
 @app.api_route(
     "/job-api/{path:path}",
     methods=["GET", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    dependencies=[Depends(require_same_origin_state_change)],
 )
 async def proxy_job_api_other(
     request: Request,

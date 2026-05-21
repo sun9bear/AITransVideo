@@ -26,12 +26,10 @@
 | `POST /internal/notifications/dispatch` | Internal API，走 internal key |
 | `POST /job-api/jobs/{job_id}/source-metadata` | Internal API，已有 `_require_internal_access` |
 | `POST /job-api/jobs/{job_id}/metering` | Internal API，已有 `_require_internal_access` |
-| `PUT/PATCH/DELETE /job-api/{path:path}` | 非 jobs 透明代理，需 subpath-level inventory 后再决定 |
 
 ## 下一步建议
 
-1. 单独盘点 `/job-api/{path:path}` 当前实际可达 subpath，再决定是加 guard、拆路由，还是保留代理豁免。
-2. 支付 webhook 继续走 provider signature / idempotency，不接入 session CSRF guard。
+1. 支付 webhook 继续走 provider signature / idempotency，不接入 session CSRF guard。
 
 ## Phase 1G 更新
 
@@ -42,3 +40,7 @@ Support anonymous visitor cookie 已在后续 Phase 1G 独立覆盖：
 - `POST /api/support/conversations/{id}/handoff`
 
 这些入口不再属于剩余未挂 guard 清单。
+
+## Phase 1H 更新
+
+`/job-api/{path:path}` 已在后续 Phase 1H 覆盖：非 jobs 透明代理只发现 `GET /job-api/voice-library` 这类读路径仍在使用，前端写路径已经集中在 `/job-api/jobs/*` 或 `/gateway/*`。因此 catch-all 已接入 `require_same_origin_state_change`；该 helper 对 GET/OPTIONS no-op，仅对 PUT/PATCH/DELETE 拦截跨站来源。
