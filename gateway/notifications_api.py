@@ -30,6 +30,7 @@ from sqlalchemy import select
 
 from auth import require_auth
 from config import settings
+from csrf import require_same_origin_state_change
 from database import get_db
 from models import User, UserNotification
 from notifications_service import (
@@ -52,7 +53,11 @@ from support_models import (
 logger = logging.getLogger(__name__)
 
 
-router = APIRouter(prefix="/api/notifications", tags=["notifications"])
+router = APIRouter(
+    prefix="/api/notifications",
+    tags=["notifications"],
+    dependencies=[Depends(require_same_origin_state_change)],
+)
 internal_router = APIRouter(prefix="/internal/notifications", tags=["notifications-internal"])
 
 

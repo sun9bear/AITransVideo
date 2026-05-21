@@ -1,0 +1,93 @@
+from __future__ import annotations
+
+import sys
+import importlib.util
+from pathlib import Path
+
+_repo_dir = Path(__file__).resolve().parent.parent
+_gateway_dir = str(Path(__file__).resolve().parent.parent / "gateway")
+if _gateway_dir not in sys.path:
+    sys.path.insert(0, _gateway_dir)
+
+import background_task_api  # noqa: E402
+import notifications_api  # noqa: E402
+import user_voice_api  # noqa: E402
+from csrf import require_same_origin_state_change  # noqa: E402
+
+
+_STATE_CHANGING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+_SESSION_USER_ROUTERS = [
+    ("background_task_api", background_task_api.router),
+    ("notifications_api", notifications_api.router),
+    ("user_voice_api", user_voice_api.router),
+]
+
+
+def _route_has_csrf_dependency(route) -> bool:
+    return any(
+        dependency.call is require_same_origin_state_change
+        for dependency in route.dependant.dependencies
+    )
+
+
+def _load_gateway_main():
+    spec = importlib.util.spec_from_file_location(
+        "gateway_main_for_csrf_wiring",
+        _repo_dir / "gateway" / "main.py",
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_priority_session_user_write_routers_have_same_origin_guard():
+    gaps: list[str] = []
+    for label, router in _SESSION_USER_ROUTERS:
+        for route in router.routes:
+            write_methods = sorted(
+                set(getattr(route, "methods", set())) & _STATE_CHANGING_METHODS
+            )
+            if not write_methods:
+                continue
+            if _route_has_csrf_dependency(route):
+                continue
+            gaps.append(
+                f"{label}: {','.join(write_methods)} "
+                f"{getattr(route, 'path', '?')}"
+            )
+
+    assert gaps == []
+
+
+def test_internal_user_write_routers_are_not_given_session_csrf_guard():
+    for router in [
+        notifications_api.internal_router,
+        user_voice_api.internal_router,
+    ]:
+        for route in router.routes:
+            assert not _route_has_csrf_dependency(route)
+
+
+def test_voice_selection_main_post_routes_have_same_origin_guard():
+    gateway_main = _load_gateway_main()
+    expected_paths = {
+        "/job-api/jobs/{job_id}/voice-clone",
+        "/job-api/jobs/{job_id}/voice-match",
+        "/job-api/jobs/{job_id}/voice-candidates",
+    }
+    found = set()
+    missing_guard = []
+
+    for route in gateway_main.app.routes:
+        path = getattr(route, "path", "")
+        if path not in expected_paths or "POST" not in getattr(route, "methods", set()):
+            continue
+        found.add(path)
+        if not _route_has_csrf_dependency(route):
+            missing_guard.append(path)
+
+    assert found == expected_paths
+    assert missing_guard == []

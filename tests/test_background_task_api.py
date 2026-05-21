@@ -154,7 +154,7 @@ def app_client(project_dir):
     app.state._orig_launch = api_mod._launch_executor
     api_mod._launch_executor = lambda **kwargs: None  # noqa: ARG005
 
-    client = TestClient(app)
+    client = TestClient(app, headers={"origin": "http://testserver"})
     try:
         yield app, client, job_id, owner
     finally:

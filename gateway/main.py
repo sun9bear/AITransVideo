@@ -52,6 +52,7 @@ from auth import (
 import logging
 
 from config import settings
+from csrf import require_same_origin_state_change
 from database import engine, init_db
 from models import Base
 from startup_checks import (
@@ -434,12 +435,21 @@ app.post(
     "/job-api/jobs/{job_id}/metering",
     dependencies=[Depends(_require_internal_access)],
 )(update_job_metering)
-app.post("/job-api/jobs/{job_id}/voice-clone")(voice_clone_for_selection)
-app.post("/job-api/jobs/{job_id}/voice-match")(voice_match_for_selection)
+app.post(
+    "/job-api/jobs/{job_id}/voice-clone",
+    dependencies=[Depends(require_same_origin_state_change)],
+)(voice_clone_for_selection)
+app.post(
+    "/job-api/jobs/{job_id}/voice-match",
+    dependencies=[Depends(require_same_origin_state_change)],
+)(voice_match_for_selection)
 # Plan 2026-05-17 §Phase 1: unified candidate endpoint. Defaults
 # include_cross_source=True so Studio sees cross-video same-name
 # candidates without each caller toggling the flag.
-app.post("/job-api/jobs/{job_id}/voice-candidates")(voice_candidates_for_selection)
+app.post(
+    "/job-api/jobs/{job_id}/voice-candidates",
+    dependencies=[Depends(require_same_origin_state_change)],
+)(voice_candidates_for_selection)
 app.get("/api/voice-selection/pricing")(get_voice_selection_pricing)
 
 # Job sub-resources: logs, artifacts, result-summary, continue, review/*, download/*, etc.

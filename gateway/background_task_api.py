@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import background_task_queue as queue
 from auth import require_auth
 from background_task_executors import TASK_EXECUTORS
+from csrf import require_same_origin_state_change
 from database import async_session, get_db
 from models import Job, User
 
@@ -40,7 +41,7 @@ logger = logging.getLogger(__name__)
 # event loop is single-threaded so no separate lock needed.
 _BACKGROUND_TASK_SEMAPHORE = asyncio.Semaphore(2)
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_same_origin_state_change)])
 
 
 # ---- request/response models ------------------------------------------------

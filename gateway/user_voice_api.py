@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 import risk_control
 from auth import require_auth
+from csrf import require_same_origin_state_change
 from database import get_db
 from models import User, UserVoice
 from services.tts.voice_speed_bounds import MAX_VALID_CPS, MIN_VALID_CPS
@@ -31,7 +32,11 @@ from user_voice_service import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/gateway", tags=["user-voices"])
+router = APIRouter(
+    prefix="/gateway",
+    tags=["user-voices"],
+    dependencies=[Depends(require_same_origin_state_change)],
+)
 # P0-2b (audit 2026-05-07): prefix changed from /internal → /api/internal so the
 # Caddyfile @internal_block (which only blocks /api/internal/*) properly shields
 # these endpoints from public ingress. Callers in src/services/tts/voice_speed_catalog.py
