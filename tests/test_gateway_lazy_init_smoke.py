@@ -178,3 +178,44 @@ def test_compose_defaults_gateway_env_to_production():
         "(e.g. ${AVT_ENV:-production}) so forgetting to set it in the "
         "external .env doesn't silently disable the T6 safety guard."
     )
+
+
+def test_next_healthcheck_uses_dedicated_static_file():
+    root = Path(__file__).resolve().parent.parent
+    compose = root / "docker-compose.yml"
+    src = compose.read_text(encoding="utf-8")
+    health_file = root / "frontend-next" / "public" / "healthz.txt"
+    middleware = (root / "frontend-next" / "src" / "middleware.ts").read_text(
+        encoding="utf-8"
+    )
+    public_exact_block = middleware.split("const publicExactPaths = [", 1)[1].split(
+        "]",
+        1,
+    )[0]
+
+    assert "http://127.0.0.1:3000/healthz.txt" in src, (
+        "Next healthcheck should target a dedicated static file, not a dynamic "
+        "SSR route or scaffold asset that may be removed."
+    )
+    assert health_file.read_text(encoding="utf-8").strip() == "ok"
+    assert '"/healthz.txt"' in public_exact_block, (
+        "Next middleware must allow /healthz.txt without auth; otherwise the "
+        "container healthcheck still depends on the login page."
+    )
+
+
+def test_gitattributes_preserve_linux_entrypoint_line_endings():
+    root = Path(__file__).resolve().parent.parent
+    attrs = (root / ".gitattributes").read_text(encoding="utf-8")
+
+    assert "scripts/** text eol=lf" in attrs
+    assert "*.sh text eol=lf" in attrs
+    assert "Dockerfile text eol=lf" in attrs
+    assert "frontend-next/public/healthz.txt text eol=lf" in attrs
+
+
+def test_compose_disables_forwarded_host_csrf_trust_by_default():
+    compose = Path(__file__).resolve().parent.parent / "docker-compose.yml"
+    src = compose.read_text(encoding="utf-8")
+
+    assert 'AVT_CSRF_TRUST_FORWARDED_HOST: "${AVT_CSRF_TRUST_FORWARDED_HOST:-false}"' in src

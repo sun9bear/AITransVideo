@@ -30,6 +30,8 @@ const publicExactPaths = [
   // §3.3 / §7.0.
   "/sitemap.xml",
   "/robots.txt",
+  // Dedicated Docker healthcheck target; keep it independent from auth pages.
+  "/healthz.txt",
 ]
 
 export function middleware(request: NextRequest) {

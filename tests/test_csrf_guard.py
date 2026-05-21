@@ -33,6 +33,8 @@ class _Request:
 
 @pytest.fixture(autouse=True)
 def _reset_origin_config(monkeypatch):
+    monkeypatch.delenv("AVT_ENV", raising=False)
+    monkeypatch.delenv("AVT_CSRF_TRUST_FORWARDED_HOST", raising=False)
     monkeypatch.delenv("SITE_URL", raising=False)
     monkeypatch.delenv("NEXT_PUBLIC_SITE_URL", raising=False)
     monkeypatch.setattr(settings, "cors_origins", "https://aivideotrans.site")
@@ -44,7 +46,7 @@ def test_allows_origin_matching_request_host():
     require_same_origin_state_change(req)
 
 
-def test_allows_origin_matching_forwarded_public_host():
+def test_allows_origin_matching_forwarded_public_host_in_non_production():
     req = _Request(
         scheme="http",
         host="127.0.0.1:8880",
@@ -53,6 +55,53 @@ def test_allows_origin_matching_forwarded_public_host():
             "x-forwarded-proto": "https",
             "x-forwarded-host": "aitrans.video",
         },
+    )
+
+    require_same_origin_state_change(req)
+
+
+def test_rejects_forwarded_public_host_in_production_by_default(monkeypatch):
+    monkeypatch.setenv("AVT_ENV", "production")
+    req = _Request(
+        scheme="http",
+        host="127.0.0.1:8880",
+        headers={
+            "origin": "https://aitrans.video",
+            "x-forwarded-proto": "https",
+            "x-forwarded-host": "aitrans.video",
+        },
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        require_same_origin_state_change(req)
+
+    assert exc.value.status_code == 403
+    assert exc.value.detail == "csrf_origin_rejected"
+
+
+def test_allows_forwarded_public_host_in_production_when_explicitly_trusted(monkeypatch):
+    monkeypatch.setenv("AVT_ENV", "production")
+    monkeypatch.setenv("AVT_CSRF_TRUST_FORWARDED_HOST", "true")
+    req = _Request(
+        scheme="http",
+        host="127.0.0.1:8880",
+        headers={
+            "origin": "https://aitrans.video",
+            "x-forwarded-proto": "https",
+            "x-forwarded-host": "aitrans.video",
+        },
+    )
+
+    require_same_origin_state_change(req)
+
+
+def test_allows_configured_site_origin_in_production_without_forwarded_host(monkeypatch):
+    monkeypatch.setenv("AVT_ENV", "production")
+    monkeypatch.setenv("SITE_URL", "https://aitrans.video")
+    req = _Request(
+        scheme="http",
+        host="127.0.0.1:8880",
+        headers={"origin": "https://aitrans.video"},
     )
 
     require_same_origin_state_change(req)
@@ -84,7 +133,7 @@ def test_rejects_cross_origin_state_change():
     assert exc.value.detail == "csrf_origin_rejected"
 
 
-def test_rejects_present_invalid_origin_without_referer_fallback():
+def test_origin_null_does_not_fall_back_to_referer():
     req = _Request(
         headers={
             "origin": "null",

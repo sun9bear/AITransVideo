@@ -57,6 +57,7 @@ from database import engine, init_db
 from models import Base
 from startup_checks import (
     is_startup_recovery_schema_missing_error,
+    validate_environment_name,
     validate_internal_api_key,
     validate_pan_backup_config,
     validate_production_safety,
@@ -91,6 +92,9 @@ from notifications_api import router as notifications_router
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup-time validations and init:
+    # Refuse unknown AVT_ENV values so typos do not silently fall back to
+    # development semantics in production-sensitive guards.
+    settings.env = validate_environment_name(settings.env)
     # T6 — refuse prod + no-auth combination. Fail fast BEFORE touching DB
     # so misconfigured deploys surface immediately with a clear message.
     validate_production_safety(settings.env, settings.auth_required)

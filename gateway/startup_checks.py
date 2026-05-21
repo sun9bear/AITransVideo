@@ -11,6 +11,26 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+_KNOWN_ENVS = {"dev", "test", "staging", "prod", "production"}
+_PRODUCTION_ENVS = {"prod", "production"}
+
+
+def validate_environment_name(env: str) -> str:
+    """Validate and normalize AVT_ENV.
+
+    Unknown environment names are dangerous because feature gates often default
+    to development semantics. Fail at startup instead of letting typos such as
+    ``prd`` silently bypass production-only guards.
+    """
+    normalized = (env or "").strip().lower()
+    if normalized not in _KNOWN_ENVS:
+        allowed = ", ".join(sorted(_KNOWN_ENVS))
+        raise RuntimeError(
+            f"Gateway startup refused: AVT_ENV must be one of {{{allowed}}}; "
+            f"got {env!r}."
+        )
+    return normalized
+
 
 def validate_production_safety(env: str, auth_required: bool) -> None:
     """Pure check: refuse to start if production mode has auth disabled.
@@ -18,9 +38,10 @@ def validate_production_safety(env: str, auth_required: bool) -> None:
     Standalone function so tests can call directly without reloading
     gateway.main (which triggers FastAPI app re-construction side effects).
     """
-    if env == "production" and not auth_required:
+    normalized_env = validate_environment_name(env)
+    if normalized_env in _PRODUCTION_ENVS and not auth_required:
         raise RuntimeError(
-            "Refusing to start: AVT_ENV=production requires AVT_AUTH_REQUIRED=true. "
+            f"Refusing to start: AVT_ENV={normalized_env} requires AVT_AUTH_REQUIRED=true. "
             "Disabling auth in production would expose all jobs to anonymous access."
         )
 

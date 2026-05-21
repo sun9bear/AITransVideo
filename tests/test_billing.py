@@ -224,6 +224,13 @@ class TestProviderRegistry:
         assert is_fake_payment_enabled() is True
         assert is_provider_operational("fake") is True
 
+    def test_fake_is_disabled_for_unknown_environment(self, monkeypatch):
+        monkeypatch.setenv("AVT_ENV", "prd")
+        monkeypatch.setenv("AVT_ENABLE_FAKE_PAYMENT", "true")
+
+        assert is_fake_payment_enabled() is False
+        assert is_provider_operational("fake") is False
+
     def test_stubs_are_not_operational(self):
         assert is_provider_operational("stripe") is False
         assert is_provider_operational("alipay") is False

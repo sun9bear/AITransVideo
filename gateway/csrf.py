@@ -12,6 +12,9 @@ from config import settings
 
 _STATE_CHANGING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _SITE_ORIGIN_ENV_KEYS = ("SITE_URL", "NEXT_PUBLIC_SITE_URL")
+_PRODUCTION_ENVS = {"prod", "production"}
+_TRUTHY = {"1", "true", "yes", "on"}
+_FALSEY = {"0", "false", "no", "off"}
 
 
 def _first_header_value(value: str | None) -> str | None:
@@ -60,6 +63,36 @@ def _normalize_origin(value: str | None) -> str | None:
     return f"{scheme}://{_origin_netloc(host, port, scheme)}"
 
 
+def _env_flag(name: str, *, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in _TRUTHY:
+        return True
+    if normalized in _FALSEY:
+        return False
+    return default
+
+
+def _is_production_env() -> bool:
+    return (os.getenv("AVT_ENV") or settings.env or "dev").strip().lower() in _PRODUCTION_ENVS
+
+
+def _trust_forwarded_host() -> bool:
+    """Return whether proxy-supplied public host headers may define same-origin.
+
+    In production, canonical origins should come from SITE_URL /
+    NEXT_PUBLIC_SITE_URL or AVT_CORS_ORIGINS. Trusting request-supplied
+    X-Forwarded-Host is only safe when the Gateway is reachable exclusively
+    through a reverse proxy that overwrites those headers.
+    """
+    return _env_flag(
+        "AVT_CSRF_TRUST_FORWARDED_HOST",
+        default=not _is_production_env(),
+    )
+
+
 def _iter_configured_origins() -> Iterable[str]:
     for key in _SITE_ORIGIN_ENV_KEYS:
         origin = _normalize_origin(os.getenv(key))
@@ -74,8 +107,12 @@ def _iter_configured_origins() -> Iterable[str]:
 
 def _request_public_origin(request: Request) -> str | None:
     headers = request.headers
-    proto = _first_header_value(_header(headers, "x-forwarded-proto"))
-    host = _first_header_value(_header(headers, "x-forwarded-host"))
+    trust_forwarded = _trust_forwarded_host()
+    proto = None
+    host = None
+    if trust_forwarded:
+        proto = _first_header_value(_header(headers, "x-forwarded-proto"))
+        host = _first_header_value(_header(headers, "x-forwarded-host"))
 
     if not proto:
         proto = getattr(request.url, "scheme", None)

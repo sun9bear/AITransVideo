@@ -23,13 +23,30 @@ import pytest
 
 from startup_checks import (
     is_startup_recovery_schema_missing_error,
+    validate_environment_name,
     validate_production_safety,
 )
+
+
+@pytest.mark.parametrize("env", ["dev", "test", "staging", "prod", "production", "Production"])
+def test_known_environment_names_are_accepted(env):
+    assert validate_environment_name(env) == env.strip().lower()
+
+
+@pytest.mark.parametrize("env", ["", "prd", "local", "productionn"])
+def test_unknown_environment_names_raise(env):
+    with pytest.raises(RuntimeError, match="AVT_ENV must be one of"):
+        validate_environment_name(env)
 
 
 def test_production_with_auth_disabled_raises():
     with pytest.raises(RuntimeError, match="production requires"):
         validate_production_safety(env="production", auth_required=False)
+
+
+def test_prod_alias_with_auth_disabled_raises():
+    with pytest.raises(RuntimeError, match="prod requires"):
+        validate_production_safety(env="prod", auth_required=False)
 
 
 def test_production_with_auth_enabled_ok():

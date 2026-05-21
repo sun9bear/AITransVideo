@@ -274,6 +274,7 @@ _PROVIDERS: dict[str, PaymentProvider] = {}
 
 
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+_KNOWN_ENVS = {"dev", "test", "staging", "prod", "production"}
 _PRODUCTION_ENVS = {"prod", "production"}
 
 
@@ -292,6 +293,8 @@ def is_fake_payment_enabled() -> bool:
     deliberately for a controlled smoke test with AVT_ENABLE_FAKE_PAYMENT=true.
     """
     env = (os.environ.get("AVT_ENV") or "dev").strip().lower()
+    if env not in _KNOWN_ENVS:
+        return False
     if env in _PRODUCTION_ENVS:
         return _env_flag("AVT_ENABLE_FAKE_PAYMENT", default=False)
     return True

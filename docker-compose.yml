@@ -149,7 +149,7 @@ services:
       # generate at request time, not build time).
       NEXT_PUBLIC_SITE_URL: "${NEXT_PUBLIC_SITE_URL:-https://aitrans.video}"
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/file.svg"]
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/healthz.txt"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -243,6 +243,10 @@ services:
       # at. Single override in .env propagates to both. See
       # docs/plans/2026-05-03-geo-optimization-plan.md §6.4.
       SITE_URL: "${SITE_URL:-https://aitrans.video}"
+      # CSRF origin guard should use SITE_URL / AVT_CORS_ORIGINS in production.
+      # Only enable this when the Gateway is exclusively behind a proxy that
+      # overwrites X-Forwarded-Host.
+      AVT_CSRF_TRUST_FORWARDED_HOST: "${AVT_CSRF_TRUST_FORWARDED_HOST:-false}"
       # T6 — default to production so the validate_production_safety startup
       # guard fires by default. Local dev sets `AVT_ENV=dev` in their own
       # .env to override (safe: the guard only refuses auth-disabled prod).
