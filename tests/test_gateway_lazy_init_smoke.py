@@ -130,8 +130,16 @@ def test_list_jobs_mirrors_project_dir_from_upstream():
         "intercept_list_jobs must mirror upstream project_dir so background_task_api "
         "and materials_api don't 404 on jobs where the create-time write was NULL."
     )
-    assert "db_job.project_dir = upstream_project_dir" in src, (
-        "upstream_project_dir value is read but never assigned — the mirror is broken."
+    assert "project_dir=upstream_project_dir" in src, (
+        "upstream_project_dir value is read but never passed into the shared "
+        "mirror helper — the mirror is broken."
+    )
+
+    mirror_src = (Path(_gateway_dir) / "job_terminal_mirror.py").read_text(
+        encoding="utf-8"
+    )
+    assert "db_job.project_dir = upstream.project_dir" in mirror_src, (
+        "shared mirror helper must write upstream project_dir onto Job.project_dir."
     )
 
 
