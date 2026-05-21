@@ -1350,7 +1350,7 @@ def test_gemini_translator_uses_gemini_alias_model_before_cross_provider_fallbac
 
         def get_model_config(self, alias: str) -> dict[str, object]:
             if alias == "gemini_3_1_flash_lite_preview":
-                return {"provider": "gemini", "model_name": "gemini-3.1-flash-lite-preview"}
+                return {"provider": "gemini", "model_name": "gemini-3.1-flash-lite"}
             return {}
 
         def generate_via_alias(self, alias: str, *, prompt: str, json_mode: bool = False) -> str:
@@ -1380,7 +1380,7 @@ def test_gemini_translator_uses_gemini_alias_model_before_cross_provider_fallbac
         voice_id="voice_demo_001",
     )
 
-    assert observed_model_names == ["gemini-3.1-flash-lite-preview"]
+    assert observed_model_names == ["gemini-3.1-flash-lite"]
     assert result.segments[0].cn_text == "Gemini alias translation."
 
 

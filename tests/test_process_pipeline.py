@@ -1011,7 +1011,7 @@ def _install_config_mocks(monkeypatch: pytest.MonkeyPatch) -> None:
                 "deepseek_chat": {"provider": "deepseek", "model_name": "deepseek-chat"},
                 "gemini_3_1_flash_lite_preview": {
                     "provider": "gemini",
-                    "model_name": "gemini-3.1-flash-lite-preview",
+                    "model_name": "gemini-3.1-flash-lite",
                 },
                 "gemini_25_flash": {"provider": "gemini", "model_name": "gemini-2.5-flash"},
                 "gpt_41_mini": {"provider": "openai", "model_name": "gpt-4.1-mini"},

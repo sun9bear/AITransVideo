@@ -152,3 +152,20 @@ class TestSmartModeDefaults:
         assert all(v == "gemini_pro" for v in smart_defaults.values()), (
             f"All smart-mode defaults must be gemini_pro: {smart_defaults}"
         )
+
+    def test_gemini_35_flash_is_selectable_audio_capable_model(self):
+        """Gemini 3.5 Flash is opt-in via admin model selection."""
+        import importlib
+        import services.llm_registry as llm_registry
+        llm_registry = importlib.reload(llm_registry)
+
+        model = llm_registry.MODEL_REGISTRY["gemini_35_flash"]
+        assert model["api_model_id"] == "gemini-3.5-flash"
+        assert model["provider"] == "gemini"
+        assert model["supports_audio"] is True
+
+        pass1_options = {
+            item["value"]
+            for item in llm_registry.get_available_models_for_prompt("pass1")
+        }
+        assert "gemini_35_flash" in pass1_options

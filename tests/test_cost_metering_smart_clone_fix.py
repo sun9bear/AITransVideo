@@ -15,10 +15,10 @@ two systemic gaps:
    pay MiniMax real money (¥9.9/clone). Admin /cost view showed
    ¥0 voice-clone cost → margin inflated ~10pp.
 
-2. **Gemini 3.1 Pro priced too HIGH (user thought "too low",
-   reality was opposite).** Configured at $2/$12 per M tokens; the
-   actual Google official ≤200K-token tier is $1.25/$10. Most of
-   our calls are well within 200K, so we over-estimated costs ~28%.
+2. **Gemini 3.1 Pro pricing must stay pinned to current official
+   pricing.** The 2026-05-19 Google pricing page lists $2/$12 for the
+   standard <=200K-token tier, and this catalog stores the RMB value
+   directly.
 
 3. **USD-priced LLM rates create exchange-rate drift.** Cost view
    computed RMB by multiplying USD config × usd_to_rmb at render
@@ -36,7 +36,8 @@ A. Process.py smart CLONED branch calls ``usage_meter.record_voice_clone``
 
 B. cost_management._FALLBACK_CATALOG / DEFAULT_PRICE_CATALOG has
    RMB-direct fields (``_per_million_rmb``) for all USD-priced
-   models. Gemini 3.1 Pro tuned to Google ≤200K tier.
+   models. Gemini 3.1 Pro and Gemini 3.5 Flash are pinned to Google's
+   2026-05-19 standard pricing.
 """
 from __future__ import annotations
 
@@ -137,15 +138,37 @@ class TestRmbDirectPricing:
         rate = self._catalog()["llm"]["gemini:gemini-3.1-pro-preview"]
         assert "input_per_million_rmb" in rate
         assert "output_per_million_rmb" in rate
-        # Tuned to Google official ≤200K tier ($1.25/$10) × 7.2 = ¥9/¥72
-        assert rate["input_per_million_rmb"] == 9.0, (
-            f"Gemini 3.1 Pro input price should be ¥9.0/M (Google "
-            f"≤200K tier $1.25 × 7.2). Got {rate['input_per_million_rmb']}"
+        # Google official standard <=200K tier ($2/$12) * 7.2 = ¥14.4/¥86.4.
+        assert rate["input_per_million_rmb"] == 14.4, (
+            f"Gemini 3.1 Pro input price should be ¥14.4/M (Google "
+            f"<=200K tier $2 * 7.2). Got {rate['input_per_million_rmb']}"
         )
-        assert rate["output_per_million_rmb"] == 72.0, (
-            f"Gemini 3.1 Pro output price should be ¥72.0/M "
-            f"($10 × 7.2). Got {rate['output_per_million_rmb']}"
+        assert rate["output_per_million_rmb"] == 86.4, (
+            f"Gemini 3.1 Pro output price should be ¥86.4/M "
+            f"($12 * 7.2). Got {rate['output_per_million_rmb']}"
         )
+
+    def test_gemini_3_5_flash_uses_rmb_direct(self):
+        rate = self._catalog()["llm"]["gemini:gemini-3.5-flash"]
+        assert rate["input_per_million_rmb"] == 10.8
+        assert rate["output_per_million_rmb"] == 64.8
+        assert rate["audio_input_per_million_rmb"] == 10.8
+        assert rate["cached_input_per_million_rmb"] == 1.08
+        assert rate["audio_tokens_per_second"] == 32
+
+    def test_gemini_3_1_flash_lite_ga_and_preview_history_rates_exist(self):
+        llm = self._catalog()["llm"]
+        ga_rate = llm["gemini:gemini-3.1-flash-lite"]
+        preview_rate = llm["gemini:gemini-3.1-flash-lite-preview"]
+
+        assert ga_rate["input_per_million_rmb"] == 1.80
+        assert ga_rate["output_per_million_rmb"] == 10.80
+        assert ga_rate["audio_input_per_million_rmb"] == 3.60
+        assert ga_rate["audio_tokens_per_second"] == 32
+
+        # Historical rows recorded before the GA migration should still price.
+        assert preview_rate["input_per_million_rmb"] == ga_rate["input_per_million_rmb"]
+        assert preview_rate["output_per_million_rmb"] == ga_rate["output_per_million_rmb"]
 
     def test_all_llm_models_have_rmb_direct_fields(self):
         """No LLM model should rely SOLELY on USD fields anymore.
@@ -183,18 +206,18 @@ class TestRmbDirectPricing:
     def test_gemini_3_1_pro_audio_input_priced(self):
         """Smart S2 Pass 1/3 send audio chunks to Gemini Pro. Audio
         input pricing must be present so the cost view reflects
-        multimodal cost. Audio is billed per audio-token = 25/s."""
+        multimodal cost. Audio understanding is estimated at 32 tokens/s."""
         rate = self._catalog()["llm"]["gemini:gemini-3.1-pro-preview"]
         assert "audio_input_per_million_rmb" in rate
         assert "audio_tokens_per_second" in rate
-        assert rate["audio_tokens_per_second"] == 25
+        assert rate["audio_tokens_per_second"] == 32
 
     def test_concrete_recomputation_matches_expected_rmb(self):
         """Sanity: recompute the largest LLM row from job_14989c5e
         with new pricing.
 
-        Original (USD config): ¥3.82 for 14 calls 69,955/32,519 tokens.
-        New (RMB config ≤200K tier): expected ¥2.97.
+        Pinned to 2026-05-19 official standard <=200K tier:
+        $2/$12 * 7.2 = RMB 14.4/86.4.
         """
         from cost_management import _rate_to_rmb
 
@@ -206,9 +229,9 @@ class TestRmbDirectPricing:
         output_cost = 32_519 * output_price / 1_000_000
         total = input_cost + output_cost
 
-        # Expected ≈ 9.0 × 69955/1M + 72.0 × 32519/1M
-        #         = 0.6296 + 2.3414 = 2.971
-        assert 2.90 <= total <= 3.05, (
+        # Expected ~= 14.4 * 69955/1M + 86.4 * 32519/1M
+        #          = 1.0074 + 2.8096 = 3.817.
+        assert 3.75 <= total <= 3.90, (
             f"Recomputed Gemini Pro cost for 69955 in / 32519 out "
-            f"should be ~¥2.97 (down from old ¥3.82). Got ¥{total:.2f}"
+            f"should be ~¥3.82. Got ¥{total:.2f}"
         )

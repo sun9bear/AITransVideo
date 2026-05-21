@@ -67,7 +67,7 @@ def _write_test_config(path: Path) -> None:
                     },
                     "gemini_3_1_flash_lite_preview": {
                         "provider": "gemini",
-                        "model_name": "gemini-3.1-flash-lite-preview",
+                        "model_name": "gemini-3.1-flash-lite",
                     },
                     "gpt_41": {
                         "provider": "openai",

@@ -13,7 +13,7 @@ from services.content_compliance import (
     MainlandChinaContentComplianceReviewer,
     validate_content_compliance_llm_response,
 )
-from services.llm_registry import get_prompt_model, invalidate_cache
+from services.llm_registry import get_prompt_model, invalidate_cache, resolve_model_id
 
 
 def _line(text: str) -> TranscriptLine:
@@ -55,6 +55,7 @@ def test_content_compliance_default_model_is_gemini_31_flash_lite(
     invalidate_cache()
 
     assert get_prompt_model("studio", "content_compliance") == "gemini_31_flash_lite"
+    assert resolve_model_id("gemini_31_flash_lite") == "gemini-3.1-flash-lite"
 
 
 def test_content_compliance_llm_retry_uses_primary_retry() -> None:
