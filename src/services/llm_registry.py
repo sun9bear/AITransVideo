@@ -38,6 +38,17 @@ MODEL_REGISTRY: dict[str, dict[str, Any]] = {
         "label": "Gemini 3.1 Pro（高质量）",
         "cost_hint": "¥2.4/h 音频",
     },
+    "gemini_35_flash": {
+        "api_model_id": "gemini-3.5-flash",
+        "provider": "gemini",
+        "supports_audio": True,
+        "auth": "client_factory",
+        # Same broad tier as gemini_pro so this new selectable model does not
+        # silently change Pro fallback behavior.
+        "cost_rank": 5,
+        "label": "Gemini 3.5 Flash（稳定）",
+        "cost_hint": "¥10.8/¥64.8 每百万 token",
+    },
     "gemini": {
         "api_model_id": "gemini-2.5-flash-lite",
         "provider": "gemini",
@@ -48,7 +59,7 @@ MODEL_REGISTRY: dict[str, dict[str, Any]] = {
         "cost_hint": "¥0.27/h 音频",
     },
     "gemini_31_flash_lite": {
-        "api_model_id": "gemini-3.1-flash-lite-preview",
+        "api_model_id": "gemini-3.1-flash-lite",
         "provider": "gemini",
         "supports_audio": True,
         "auth": "client_factory",

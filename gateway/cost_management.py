@@ -34,7 +34,7 @@ JOB_TTS_BUCKETS = {
 }
 
 DEFAULT_PRICE_CATALOG: dict[str, Any] = {
-    "version": "2026-05-18-rmb-direct-pricing",
+    "version": "2026-05-21-gemini-31-flash-lite-ga",
     "currency": "RMB",
     # Retained for backward compat — ``_rate_to_rmb`` still honors
     # ``_per_million_usd`` fields if present (multiplies by this rate).
@@ -47,8 +47,9 @@ DEFAULT_PRICE_CATALOG: dict[str, Any] = {
         "Gateway-side estimate catalog. Override with "
         "AVT_COST_PRICE_CATALOG_PATH when provider prices change. "
         "2026-05-18 audit: LLM rates switched from USD to direct RMB "
-        "to match billing currency. Gemini 3.1 Pro tuned to Google "
-        "official ≤200K tier (was over-estimated at 2.0/12.0 USD)."
+        "to match billing currency. 2026-05-20: Gemini 3.5 Flash added; "
+        "2026-05-21: Gemini 3.1 Flash Lite preview migrated to the GA "
+        "gemini-3.1-flash-lite endpoint."
     ),
     "llm": {
         # DeepSeek 直接 RMB 计价。把原 USD 报价乘以基准汇率 7.2
@@ -68,34 +69,45 @@ DEFAULT_PRICE_CATALOG: dict[str, Any] = {
             "cached_input_per_million_rmb": 0.0261,
             "source": "deepseek_pricing_2026-04-29_pinned_at_72cny_per_usd",
         },
-        # Google Gemini 3.1 Pro 官方定价（2026 年版）：
-        #   - ≤200K input tokens: input $1.25/M, output $10/M
-        #   - >200K input tokens: input $2.50/M, output $15/M
-        # 视频翻译场景几乎全是小上下文（单次 ≤200K），按 ≤200K tier
-        # 折成 RMB（× 7.2 实时汇率）。
-        # 此前配置的 $2.0/$12.0 介于两个 tier，对 ≤200K 调用偏高
-        # 约 28%，导致 admin cost view 高估 LLM 成本、低估毛利。
-        # https://ai.google.dev/gemini-api/docs/pricing
+        # Current entries below are pinned to Google official 2026-05-19
+        # standard pricing; audio understanding fallback uses 32 tokens/s.
         "gemini:gemini-3.1-pro-preview": {
-            "input_per_million_rmb": 9.0,
-            "output_per_million_rmb": 72.0,
-            "audio_input_per_million_rmb": 9.0,
-            "audio_tokens_per_second": 25,
-            "source": "google_gemini_official_le200k_tier_rmb_2026-05-18",
+            "input_per_million_rmb": 14.4,
+            "output_per_million_rmb": 86.4,
+            "audio_input_per_million_rmb": 14.4,
+            "audio_tokens_per_second": 32,
+            "source": "google_gemini_official_standard_le200k_tier_rmb_2026-05-20",
+        },
+        "gemini:gemini-3.5-flash": {
+            "input_per_million_rmb": 10.8,
+            "output_per_million_rmb": 64.8,
+            "audio_input_per_million_rmb": 10.8,
+            "cached_input_per_million_rmb": 1.08,
+            "audio_tokens_per_second": 32,
+            "source": "google_gemini_official_standard_rmb_2026-05-20",
         },
         "gemini:gemini-2.5-flash-lite": {
             "input_per_million_rmb": 0.72,
             "output_per_million_rmb": 2.88,
             "audio_input_per_million_rmb": 2.16,
-            "audio_tokens_per_second": 25,
-            "source": "google_gemini_official_rmb_2026-05-18",
+            "audio_tokens_per_second": 32,
+            "source": "google_gemini_official_rmb_2026-05-20",
         },
+        "gemini:gemini-3.1-flash-lite": {
+            "input_per_million_rmb": 1.80,
+            "output_per_million_rmb": 10.80,
+            "audio_input_per_million_rmb": 3.60,
+            "audio_tokens_per_second": 32,
+            "source": "google_gemini_official_ga_rmb_2026-05-21",
+        },
+        # Keep the retiring preview key so historical metering rows still
+        # render with a configured rate after the runtime migrates to GA.
         "gemini:gemini-3.1-flash-lite-preview": {
             "input_per_million_rmb": 1.80,
             "output_per_million_rmb": 10.80,
             "audio_input_per_million_rmb": 3.60,
-            "audio_tokens_per_second": 25,
-            "source": "google_gemini_official_rmb_2026-05-18",
+            "audio_tokens_per_second": 32,
+            "source": "google_gemini_preview_history_compat_rmb_2026-05-21",
         },
     },
     "tts": {

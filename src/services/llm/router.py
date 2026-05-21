@@ -41,7 +41,9 @@ DEFAULT_DEEPSEEK_MODEL_NAME = "deepseek-v4-flash"
 DEFAULT_GPT_41_MINI_MODEL_NAME = "gpt-4.1-mini"
 DEFAULT_GPT_54_MODEL_NAME = "gpt-5.4"
 DEFAULT_GEMINI_25_FLASH_MODEL_NAME = "gemini-2.5-flash"
-DEFAULT_GEMINI_3_1_FLASH_LITE_PREVIEW_MODEL_NAME = "gemini-3.1-flash-lite-preview"
+# Alias name retained for legacy autodub.local.json compatibility. The API
+# model is the GA endpoint; the preview endpoint is scheduled for retirement.
+DEFAULT_GEMINI_3_1_FLASH_LITE_PREVIEW_MODEL_NAME = "gemini-3.1-flash-lite"
 DEFAULT_DEFAULT_LLM_ALIAS = "default_llm"
 LEGACY_GEMINI_CURRENT_ALIAS = "gemini_current"
 DEFAULT_TEMPERATURE = 0.3
