@@ -105,12 +105,14 @@ def test_direct_main_write_routes_have_same_origin_guard():
         ("POST", "/auth/logout"),
         ("POST", "/api/account/change-password"),
         ("POST", "/api/account/bind-email"),
+        ("POST", "/gateway/upload-video"),
         ("PATCH", "/gateway/jobs/{job_id}"),
         ("POST", "/job-api/jobs"),
         ("DELETE", "/job-api/jobs/{job_id}"),
         ("POST", "/job-api/jobs/{job_id}/voice-clone"),
         ("POST", "/job-api/jobs/{job_id}/voice-match"),
         ("POST", "/job-api/jobs/{job_id}/voice-candidates"),
+        ("POST", "/job-api/jobs/{job_id}/{subpath:path}"),
     }
     found = set()
     missing_guard = []

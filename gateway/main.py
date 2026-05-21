@@ -421,7 +421,10 @@ async def _gateway_upload_video(
 ) -> Response:
     return await handle_upload_video(request, user=_user)
 
-app.post("/gateway/upload-video")(_gateway_upload_video)
+app.post(
+    "/gateway/upload-video",
+    dependencies=[Depends(require_same_origin_state_change)],
+)(_gateway_upload_video)
 
 # Rename a job's user-visible display_name (plan §6.5 / D16). Lives on
 # the /gateway/* namespace, not /job-api/*, because the collision +
@@ -480,6 +483,7 @@ app.get("/api/voice-selection/pricing")(get_voice_selection_pricing)
 app.api_route(
     "/job-api/jobs/{job_id}/{subpath:path}",
     methods=["GET", "POST"],
+    dependencies=[Depends(require_same_origin_state_change)],
 )(intercept_job_subresource)
 
 
