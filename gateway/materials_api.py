@@ -26,6 +26,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth import require_auth
+from csrf import require_same_origin_state_change
 from database import get_db
 from materials_pack_common import (
     MAX_ZIP_SIZE_BYTES,
@@ -36,7 +37,7 @@ from models import Job, User
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_same_origin_state_change)])
 
 
 class MaterialsPackRequest(BaseModel):

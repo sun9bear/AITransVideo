@@ -25,6 +25,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth import get_current_user
+from csrf import require_same_origin_state_change
 from database import get_db
 from payment_provider_alipay import (
     detect_checkout_surface,
@@ -75,7 +76,7 @@ class CreateOrderRequest(BaseModel):
 
 # --- Order creation (provider-dispatched) ---
 
-@router.post("/orders")
+@router.post("/orders", dependencies=[Depends(require_same_origin_state_change)])
 async def create_order(
     body: CreateOrderRequest,
     db: AsyncSession = Depends(get_db),

@@ -12,6 +12,8 @@ if _gateway_dir not in sys.path:
 import background_task_api  # noqa: E402
 import auth_email  # noqa: E402
 import auth_phone  # noqa: E402
+import billing  # noqa: E402
+import materials_api  # noqa: E402
 import notifications_api  # noqa: E402
 import user_voice_api  # noqa: E402
 from csrf import require_same_origin_state_change  # noqa: E402
@@ -21,6 +23,7 @@ _STATE_CHANGING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 _SESSION_USER_ROUTERS = [
     ("background_task_api", background_task_api.router),
+    ("materials_api", materials_api.router),
     ("notifications_api", notifications_api.router),
     ("user_voice_api", user_voice_api.router),
 ]
@@ -36,6 +39,13 @@ def _route_has_csrf_dependency(route) -> bool:
         dependency.call is require_same_origin_state_change
         for dependency in route.dependant.dependencies
     )
+
+
+def _find_route(router, method: str, path: str):
+    for route in router.routes:
+        if path == getattr(route, "path", "") and method in getattr(route, "methods", set()):
+            return route
+    raise AssertionError(f"route not found: {method} {path}")
 
 
 def _load_gateway_main():
@@ -95,6 +105,19 @@ def test_auth_flow_write_routers_have_same_origin_guard():
             )
 
     assert gaps == []
+
+
+def test_billing_order_has_guard_but_callbacks_stay_exempt():
+    assert _route_has_csrf_dependency(
+        _find_route(billing.router, "POST", "/api/billing/orders")
+    )
+
+    exempt_routes = [
+        ("POST", "/api/billing/fake-pay/{order_id}"),
+        ("POST", "/api/billing/webhooks/{provider_name}"),
+    ]
+    for method, path in exempt_routes:
+        assert not _route_has_csrf_dependency(_find_route(billing.router, method, path))
 
 
 def test_direct_main_write_routes_have_same_origin_guard():
