@@ -38,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth import get_current_user
 from config import settings
+from csrf import require_same_origin_state_change
 from database import get_db
 from models import BackupRecord, Job, PanCredentials, User
 
@@ -50,7 +51,11 @@ from pan.token_crypto import decrypt_token
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/admin/pan", tags=["admin-pan"])
+router = APIRouter(
+    prefix="/api/admin/pan",
+    tags=["admin-pan"],
+    dependencies=[Depends(require_same_origin_state_change)],
+)
 
 
 # --- admin gate (local copy keeps this module loosely coupled) ---

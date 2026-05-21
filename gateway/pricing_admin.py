@@ -12,13 +12,18 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth import get_current_user
+from csrf import require_same_origin_state_change
 from database import async_session
 from models import PricingConfigVersion, User
 from pricing_schema import PricingPayload, build_default_pricing_payload, detect_frozen_field_changes
 from pricing_runtime import write_runtime_snapshot, invalidate_runtime_pricing_cache
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/admin/pricing", tags=["admin-pricing"])
+router = APIRouter(
+    prefix="/api/admin/pricing",
+    tags=["admin-pricing"],
+    dependencies=[Depends(require_same_origin_state_change)],
+)
 
 
 # ---------------------------------------------------------------------------

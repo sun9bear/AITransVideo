@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth import get_current_user
 from config import settings
+from csrf import require_same_origin_state_change
 from database import get_db
 from internal_auth import internal_headers as _internal_headers
 from models import User
@@ -43,7 +44,11 @@ from voice_catalog_service import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/admin/voices", tags=["voice-catalog"])
+router = APIRouter(
+    prefix="/api/admin/voices",
+    tags=["voice-catalog"],
+    dependencies=[Depends(require_same_origin_state_change)],
+)
 
 
 def _require_admin(user: User | None) -> User:

@@ -13,12 +13,17 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from auth import get_current_user
 from config import settings
+from csrf import require_same_origin_state_change
 from internal_auth import internal_headers
 from models import User
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/admin", tags=["admin-job-monitor"])
+router = APIRouter(
+    prefix="/api/admin",
+    tags=["admin-job-monitor"],
+    dependencies=[Depends(require_same_origin_state_change)],
+)
 
 # Job API upstream URL comes from gateway/config.py (env var AVT_JOB_API_UPSTREAM).
 # No module-level constant for the URL — always read settings.job_api_upstream

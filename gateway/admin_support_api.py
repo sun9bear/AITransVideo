@@ -38,6 +38,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth import get_current_user
+from csrf import require_same_origin_state_change
 from database import get_db
 from models import (
     SupportAIUsage,
@@ -97,7 +98,11 @@ from support_wechat_qr import (
 logger = logging.getLogger(__name__)
 
 
-router = APIRouter(prefix="/api/admin/support", tags=["admin-support"])
+router = APIRouter(
+    prefix="/api/admin/support",
+    tags=["admin-support"],
+    dependencies=[Depends(require_same_origin_state_change)],
+)
 
 
 # Reuse the gateway-wide admin gate from admin_settings.

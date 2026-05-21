@@ -45,6 +45,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth import get_current_user
 from config import settings
+from csrf import require_same_origin_state_change
 from database import get_db
 from models import PanCredentials, PanOauthState, User
 from notifications_service import dispatch_event
@@ -58,7 +59,11 @@ from pan._events import emit_pan_event_safe as _emit_pan_event_safe
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/admin/pan", tags=["admin-pan-auth"])
+router = APIRouter(
+    prefix="/api/admin/pan",
+    tags=["admin-pan-auth"],
+    dependencies=[Depends(require_same_origin_state_change)],
+)
 
 STATE_TTL_SECONDS = 10 * 60  # plan §6.1
 BAIDU_AUTHORIZE_URL = "https://openapi.baidu.com/oauth/2.0/authorize"

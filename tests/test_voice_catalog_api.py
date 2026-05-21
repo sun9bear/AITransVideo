@@ -133,7 +133,7 @@ def voice_app():
 
 @pytest.fixture
 def client(voice_app):
-    return TestClient(voice_app)
+    return TestClient(voice_app, headers={"origin": "http://testserver"})
 
 
 # ---------------------------------------------------------------------------
