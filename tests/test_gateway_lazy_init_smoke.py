@@ -51,6 +51,26 @@ def test_alembic_env_uses_resolve_database_url(monkeypatch):
     )
 
 
+def test_alembic_env_registers_sibling_model_tables():
+    """Autogenerate must see tables declared outside gateway/models.py.
+
+    Without these imports, Alembic can think still-live tables disappeared
+    and propose dangerous ``op.drop_table`` operations.
+    """
+    env_py = Path(_gateway_dir) / "alembic" / "env.py"
+    src = env_py.read_text(encoding="utf-8")
+    required_imports = [
+        "import voice_catalog_models",
+        "import background_task_models",
+        "import label_task_models",
+    ]
+    missing = [imp for imp in required_imports if imp not in src]
+    assert missing == [], (
+        "Alembic env.py must import sibling model modules before assigning "
+        "target_metadata=Base.metadata. Missing:\n  " + "\n  ".join(missing)
+    )
+
+
 def test_migrate_jobs_calls_init_db():
     """gateway/migrate_jobs.py is a standalone script — it must explicitly
     call init_db() before using the `engine` / `async_session` proxies.

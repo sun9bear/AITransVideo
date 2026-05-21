@@ -34,6 +34,9 @@ jobs:
           tests/test_metering_payload_builder.py
           tests/test_process_pipeline.py::test_report_job_metering_sends_internal_key
           tests/test_job_metering_writeback.py::TestReportJobMeteringCallback
+          tests/test_user_voice_internal_access.py
+          tests/test_gateway_lazy_init_smoke.py::test_alembic_env_registers_sibling_model_tables
+          tests/test_p0_8_split_audio_sync.py
           tests/test_gateway_editing_commit_sync.py::test_consume_post_edit_tts_usage_records_trial_allowance
           tests/test_gateway_editing_commit_sync.py::test_consume_post_edit_tts_usage_accumulates_existing_usage
           tests/test_gateway_editing_commit_sync.py::test_consume_post_edit_tts_usage_rejects_segment_limit_without_increment

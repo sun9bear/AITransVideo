@@ -37,6 +37,7 @@ router = APIRouter(prefix="/gateway", tags=["user-voices"])
 # these endpoints from public ingress. Callers in src/services/tts/voice_speed_catalog.py
 # and src/pipeline/process.py have been updated to match.
 internal_router = APIRouter(prefix="/api/internal", tags=["user-voices-internal"])
+_INTERNAL_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
 # Calibration uses the cheaper turbo tier per provider (MiniMax CNY 2/万
 # vs HD 3.5/万) — cps precision is for the speed_decision estimator and
@@ -77,6 +78,9 @@ def _internal_access_error(request: Request) -> Response | None:
         return _json(503, {"error": "internal_endpoint_misconfigured"})
     if request.headers.get("X-Internal-Key", "") != key:
         return _json(403, {"error": "invalid_internal_key"})
+    client_host = (request.client.host if request.client else "") or ""
+    if client_host not in _INTERNAL_LOOPBACK_HOSTS:
+        return _json(403, {"error": "non_loopback_client_not_allowed"})
     return None
 
 
