@@ -26,6 +26,7 @@ from sqlalchemy import select, delete as sa_delete
 
 from auth import get_current_user
 from config import settings as app_settings
+from csrf import require_same_origin_state_change
 from database import async_session, get_db
 from internal_auth import internal_headers
 
@@ -257,7 +258,7 @@ async def get_admin_settings(
     return {"settings": load_settings().model_dump()}
 
 
-@router.post("/settings")
+@router.post("/settings", dependencies=[Depends(require_same_origin_state_change)])
 async def update_admin_settings(
     body: AdminSettings,
     user: User | None = Depends(get_current_user),
@@ -761,7 +762,7 @@ async def get_review_prompts(
     }
 
 
-@router.post("/review-prompts")
+@router.post("/review-prompts", dependencies=[Depends(require_same_origin_state_change)])
 async def update_review_prompts(
     body: dict,
     user: User | None = Depends(get_current_user),
@@ -891,7 +892,7 @@ async def update_review_prompts(
     }
 
 
-@router.post("/model-toggle")
+@router.post("/model-toggle", dependencies=[Depends(require_same_origin_state_change)])
 async def toggle_model(
     body: dict,
     user: User | None = Depends(get_current_user),
@@ -939,7 +940,7 @@ async def toggle_model(
     return {"all_models": _get_all_models_with_status()}
 
 
-@router.post("/review-prompts/restore")
+@router.post("/review-prompts/restore", dependencies=[Depends(require_same_origin_state_change)])
 async def restore_review_prompts(
     body: dict,
     user: User | None = Depends(get_current_user),
@@ -965,7 +966,10 @@ async def restore_review_prompts(
     return await update_review_prompts(restore_body, user=user)
 
 
-@router.delete("/review-prompts/history/{index}")
+@router.delete(
+    "/review-prompts/history/{index}",
+    dependencies=[Depends(require_same_origin_state_change)],
+)
 async def delete_prompt_history(
     index: int,
     user: User | None = Depends(get_current_user),
@@ -1079,7 +1083,7 @@ def _remove_project_dir_if_safe(project_dir: str | None, *, job_id: str) -> bool
     return True
 
 
-@router.post("/jobs/{job_id}/cancel")
+@router.post("/jobs/{job_id}/cancel", dependencies=[Depends(require_same_origin_state_change)])
 async def cancel_job(
     job_id: str,
     user: User | None = Depends(get_current_user),
@@ -1127,7 +1131,7 @@ async def cancel_job(
     return {"success": True, "job_id": job_id}
 
 
-@router.post("/jobs/{job_id}/delete")
+@router.post("/jobs/{job_id}/delete", dependencies=[Depends(require_same_origin_state_change)])
 async def delete_job(
     job_id: str,
     user: User | None = Depends(get_current_user),
@@ -1242,7 +1246,10 @@ class UpdateEntitlementsRequest(BaseModel):
     free_jobs_quota_used: int | None = None
 
 
-@router.patch("/users/{user_id}/entitlements")
+@router.patch(
+    "/users/{user_id}/entitlements",
+    dependencies=[Depends(require_same_origin_state_change)],
+)
 async def update_user_entitlements(
     user_id: str,
     body: UpdateEntitlementsRequest,

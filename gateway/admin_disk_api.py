@@ -34,6 +34,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth import get_current_user
+from csrf import require_same_origin_state_change
 from database import get_db
 from models import Job, User
 from project_cleanup import (
@@ -791,7 +792,7 @@ async def get_disk_overview(
     return await build_disk_overview(db)
 
 
-@router.post("/cleanup-orphans")
+@router.post("/cleanup-orphans", dependencies=[Depends(require_same_origin_state_change)])
 async def post_cleanup_orphans(
     body: OrphanCleanupRequest,
     user: User | None = Depends(get_current_user),
@@ -805,7 +806,7 @@ async def post_cleanup_orphans(
     )
 
 
-@router.post("/cleanup-expired")
+@router.post("/cleanup-expired", dependencies=[Depends(require_same_origin_state_change)])
 async def post_cleanup_expired(
     body: ExpiredCleanupRequest,
     user: User | None = Depends(get_current_user),
@@ -816,7 +817,7 @@ async def post_cleanup_expired(
     return {"dry_run": body.dry_run, "purged_count": purged}
 
 
-@router.post("/resize-filesystem")
+@router.post("/resize-filesystem", dependencies=[Depends(require_same_origin_state_change)])
 async def post_resize_filesystem(
     body: ResizeFilesystemRequest,
     user: User | None = Depends(get_current_user),
