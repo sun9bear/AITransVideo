@@ -289,7 +289,7 @@ export function ResultMediaCard({ jobId, serviceMode, editHref }: ResultMediaCar
              *  超过 24h 的已完成 pack task 会被 cleanup_expired_pack_zips
              *  标记为 expired 并删除磁盘文件。前端应告知用户保留窗口。 */}
             <p className="text-xs text-muted-foreground">
-              素材包仅保存 24 小时，请及时下载；超时后可重新打包。
+              素材包仅保存 24 小时，请及时下载；超时后可重新打包，不额外扣点。
             </p>
           </div>
         )}
@@ -360,10 +360,10 @@ function MaterialsPackButton({
         size="sm"
         className="gap-2 border-amber-500/60 text-amber-500"
         onClick={onOpenDialog}
-        title="素材包已过保留期（24 小时）被自动清理，请重新打包"
+        title="素材包已过保留期（24 小时）被自动清理，重新打包不再扣点"
       >
         <RotateCcw className="h-4 w-4" />
-        素材包已过期 · 重新打包
+        素材包已过期 · 重新打包不扣点
       </Button>
     )
   }

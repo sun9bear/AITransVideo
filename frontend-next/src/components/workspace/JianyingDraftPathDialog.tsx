@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { toast } from "sonner"
 import {
   Dialog,
   DialogContent,
@@ -12,6 +13,21 @@ import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 
 const LS_KEY = "avt:jianying_draft_root"
+
+// Path templates rendered in the help block + copied on demand.
+// String.raw keeps Windows backslashes literal without double-escaping.
+const WINDOWS_PATH = String.raw`%LocalAppData%\JianyingPro\User Data\Projects\com.lveditor.draft`
+const MAC_PATH = "~/Movies/JianyingPro/User Data/Projects/com.lveditor.draft"
+
+async function copyToClipboard(text: string, label: string) {
+  try {
+    await navigator.clipboard.writeText(text)
+    toast.success(`已复制 ${label} 路径`)
+  } catch {
+    // navigator.clipboard rejects on: 非 HTTPS 上下文 / 权限被拒 / 老 webview
+    toast.error("复制失败，请手动选中复制")
+  }
+}
 
 function readStoredPath(): string {
   if (typeof window === "undefined") return ""
@@ -111,15 +127,39 @@ function DialogBody({ onOpenChange, onConfirm, errorMessage }: DialogBodyProps) 
               打开剪映 → 设置 → 草稿位置，将该路径复制到上方输入框
             </p>
             <div className="space-y-1">
-              <p className="font-medium text-foreground/70">Windows 默认路径：</p>
+              <div className="flex items-center justify-between">
+                <p className="font-medium text-foreground/70">Windows 默认路径：</p>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 px-2 text-[10px]"
+                  onClick={() => copyToClipboard(WINDOWS_PATH, "Windows")}
+                  aria-label="复制 Windows 路径"
+                >
+                  复制
+                </Button>
+              </div>
               <code className="block break-all font-mono text-[11px] text-foreground/60">
-                %LocalAppData%\JianyingPro\User Data\Projects\com.lveditor.draft
+                {WINDOWS_PATH}
               </code>
             </div>
             <div className="space-y-1">
-              <p className="font-medium text-foreground/70">Mac 默认路径：</p>
+              <div className="flex items-center justify-between">
+                <p className="font-medium text-foreground/70">Mac 默认路径：</p>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 px-2 text-[10px]"
+                  onClick={() => copyToClipboard(MAC_PATH, "Mac")}
+                  aria-label="复制 Mac 路径"
+                >
+                  复制
+                </Button>
+              </div>
               <code className="block break-all font-mono text-[11px] text-foreground/60">
-                ~/Movies/JianyingPro/User Data/Projects/com.lveditor.draft
+                {MAC_PATH}
               </code>
             </div>
           </div>

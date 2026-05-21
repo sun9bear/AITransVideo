@@ -283,13 +283,15 @@ export function SegmentRow({
       : null
   const draftRatio =
     target !== null && draft !== null && target > 0 ? draft / target : null
-  const hasDraftMismatch = draftRatio !== null && (draftRatio < 0.8 || draftRatio > 1.2)
-  const draftMismatchSeverity =
-    draftRatio === null
-      ? null
-      : draftRatio < 0.67 || draftRatio > 1.5
-        ? "severe"
-        : "mild"
+  // Tension bar 双色分阶（plan 2026-05-21 §3.3）。
+  // ARIA spec 要求 aria-valuenow 落在 [valuemin, valuemax] 区间内。
+  // 视觉宽度也按 ±20% clamp，超限时条带触底由颜色表达"超限"语义。
+  // 文本仍显示真实 deviationPct（屏幕阅读器会读到文本节点）。
+  const deviationPct =
+    draftRatio !== null ? Math.round((draftRatio - 1) * 100) : 0
+  const clampedDeviationPct = Math.max(-20, Math.min(20, deviationPct))
+  const showTensionBar = draftRatio !== null && Math.abs(deviationPct) >= 5
+  const isSevere = Math.abs(deviationPct) > 20
 
   const ttsLengthGuidance = segment.tts_length_guidance
   const hasTtsLengthWarning = hasTtsLengthGuidanceWarning(segment, status)
@@ -512,29 +514,51 @@ export function SegmentRow({
           </div>
         )}
 
-        {/* Force-DSP / draft-mismatch indicator — compact one-liner */}
-        {(isAnomalous || hasDraftMismatch) && (
-          <div
-            className={
-              draftMismatchSeverity === "severe" || isAnomalous
-                ? "text-[10px] text-destructive"
-                : "text-[10px] text-[color:var(--ochre)]"
-            }
-          >
-            {isAnomalous && (
-              <span>
-                ⚠ 时长异常
-                {segment.duration_diff_ratio !== undefined && (
-                  <span className="ml-1">（{Math.round(segment.duration_diff_ratio * 100)}%）</span>
-                )}
-              </span>
-            )}
-            {hasDraftMismatch && draftRatio !== null && target !== null && draft !== null && (
-              <span className={isAnomalous ? "ml-2" : ""}>
-                ⚠ 新 TTS {(draft / 1000).toFixed(1)}s / 目标 {(target / 1000).toFixed(1)}s
-                （{draftRatio > 1 ? "+" : ""}{((draftRatio - 1) * 100).toFixed(0)}%）
-              </span>
-            )}
+        {/* Force-DSP indicator — 张力偏差由下方双色 progress bar 负责 */}
+        {isAnomalous && (
+          <div className="text-[10px] text-destructive">
+            <span>
+              ⚠ 时长异常
+              {segment.duration_diff_ratio !== undefined && (
+                <span className="ml-1">（{Math.round(segment.duration_diff_ratio * 100)}%）</span>
+              )}
+            </span>
+          </div>
+        )}
+
+        {/* Tension bar — 替换原 hasDraftMismatch 单行文本（plan 2026-05-21 §3.3）。
+         *  5%-20%: 灰色非警示刻度；>20%: 朱砂警示。视觉宽度与 aria 用 clamp 值，
+         *  文本仍显示真实 deviationPct，屏幕阅读器读文本节点。
+         *  禁止任何 @keyframes / blur / backdrop-filter 动画（plan §1.5 硬约束）。 */}
+        {showTensionBar && (
+          <div className="flex items-center gap-2 mt-1">
+            <div
+              className="relative h-[3px] flex-1 rounded-full bg-muted/50 overflow-hidden"
+              role="meter"
+              aria-valuenow={clampedDeviationPct}
+              aria-valuemin={-20}
+              aria-valuemax={20}
+              aria-label="新 TTS 时长偏差（百分比）"
+            >
+              <div
+                className={`absolute top-0 h-full ${
+                  isSevere ? "bg-[color:var(--cinnabar)]" : "bg-[color:var(--ink-gray-3)]"
+                }`}
+                style={{
+                  left: clampedDeviationPct >= 0 ? "50%" : `${50 + clampedDeviationPct * 2.5}%`,
+                  width: `${Math.abs(clampedDeviationPct) * 2.5}%`,
+                }}
+              />
+              <div className="absolute top-0 left-1/2 h-full w-px bg-border" />
+            </div>
+            <span
+              className={`text-[10px] tabular-nums ${
+                isSevere ? "text-[color:var(--cinnabar)]" : "text-muted-foreground"
+              }`}
+              title="新 TTS 与目标时长的偏差"
+            >
+              {deviationPct > 0 ? "+" : ""}{deviationPct}%
+            </span>
           </div>
         )}
 
