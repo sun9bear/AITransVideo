@@ -59,10 +59,6 @@ def test_remaining_unguarded_state_changing_routes_are_explicitly_classified():
         (("POST",), "/internal/notifications/dispatch"),
         (("POST",), "/job-api/jobs/{job_id}/source-metadata"),
         (("POST",), "/job-api/jobs/{job_id}/metering"),
-        # Anonymous customer-support widget uses a distinct visitor cookie.
-        (("POST",), "/api/support/conversations"),
-        (("POST",), "/api/support/conversations/{conversation_id}/messages"),
-        (("POST",), "/api/support/conversations/{conversation_id}/handoff"),
         # Transparent non-jobs Job API proxy needs subpath-level audit before
         # applying session CSRF broadly.
         (("DELETE", "PATCH", "PUT"), "/job-api/{path:path}"),

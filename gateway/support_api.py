@@ -35,6 +35,7 @@ from datetime import datetime, timezone
 from fastapi.responses import FileResponse, Response
 
 from auth import get_current_user
+from csrf import require_same_origin_state_change
 from database import get_db
 from models import (
     SupportConversation,
@@ -64,7 +65,11 @@ from support_wechat_qr import existing_qr_path, get_qr_metadata, public_url as q
 logger = logging.getLogger(__name__)
 
 
-router = APIRouter(prefix="/api/support", tags=["support"])
+router = APIRouter(
+    prefix="/api/support",
+    tags=["support"],
+    dependencies=[Depends(require_same_origin_state_change)],
+)
 
 # Anonymous device cookie. Distinct from the auth session cookie so that
 # logged-out visitors get a stable identity for rate limiting / threading

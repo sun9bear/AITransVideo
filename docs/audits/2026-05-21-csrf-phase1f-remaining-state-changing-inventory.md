@@ -26,13 +26,19 @@
 | `POST /internal/notifications/dispatch` | Internal API，走 internal key |
 | `POST /job-api/jobs/{job_id}/source-metadata` | Internal API，已有 `_require_internal_access` |
 | `POST /job-api/jobs/{job_id}/metering` | Internal API，已有 `_require_internal_access` |
-| `POST /api/support/conversations` | 匿名客服入口，使用独立 visitor cookie |
-| `POST /api/support/conversations/{id}/messages` | 匿名/登录客服会话混合入口，需独立评估 visitor-cookie CSRF 策略 |
-| `POST /api/support/conversations/{id}/handoff` | 匿名/登录客服会话混合入口，需独立评估 visitor-cookie CSRF 策略 |
 | `PUT/PATCH/DELETE /job-api/{path:path}` | 非 jobs 透明代理，需 subpath-level inventory 后再决定 |
 
 ## 下一步建议
 
-1. 单独做 Support anonymous visitor cookie 的 CSRF 策略，不把它和登录 session 混在一起。
-2. 单独盘点 `/job-api/{path:path}` 当前实际可达 subpath，再决定是加 guard、拆路由，还是保留代理豁免。
-3. 支付 webhook 继续走 provider signature / idempotency，不接入 session CSRF guard。
+1. 单独盘点 `/job-api/{path:path}` 当前实际可达 subpath，再决定是加 guard、拆路由，还是保留代理豁免。
+2. 支付 webhook 继续走 provider signature / idempotency，不接入 session CSRF guard。
+
+## Phase 1G 更新
+
+Support anonymous visitor cookie 已在后续 Phase 1G 独立覆盖：
+
+- `POST /api/support/conversations`
+- `POST /api/support/conversations/{id}/messages`
+- `POST /api/support/conversations/{id}/handoff`
+
+这些入口不再属于剩余未挂 guard 清单。
