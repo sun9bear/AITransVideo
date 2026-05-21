@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from dataclasses import dataclass
 from typing import Protocol
@@ -65,7 +66,10 @@ class PaymentProvider(Protocol):
 
 class FakeProvider:
     name = "fake"
-    operational = True
+
+    @property
+    def operational(self) -> bool:
+        return is_fake_payment_enabled()
 
     def create_checkout(
         self,
@@ -77,6 +81,8 @@ class FakeProvider:
         checkout_surface: str = "pc_web",
     ) -> CheckoutResult:
         del amount_cny, target_plan_code, billing_period, checkout_surface
+        if not is_fake_payment_enabled():
+            raise RuntimeError("fake payment provider is disabled")
         return CheckoutResult(
             checkout_url=f"/api/billing/fake-pay/{order_id}",
             provider_order_id=f"fake_ord_{uuid.uuid4().hex[:12]}",
@@ -265,6 +271,30 @@ class WechatPayProvider(_StubProvider):
 
 
 _PROVIDERS: dict[str, PaymentProvider] = {}
+
+
+_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+_PRODUCTION_ENVS = {"prod", "production"}
+
+
+def _env_flag(name: str, *, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in _TRUE_ENV_VALUES
+
+
+def is_fake_payment_enabled() -> bool:
+    """Return whether the local fake payment provider may settle orders.
+
+    Fake checkout is useful for local and test loops, but production should not
+    expose a provider that settles by order id alone. Production can still opt in
+    deliberately for a controlled smoke test with AVT_ENABLE_FAKE_PAYMENT=true.
+    """
+    env = (os.environ.get("AVT_ENV") or "dev").strip().lower()
+    if env in _PRODUCTION_ENVS:
+        return _env_flag("AVT_ENABLE_FAKE_PAYMENT", default=False)
+    return True
 
 
 def _init_registry() -> None:

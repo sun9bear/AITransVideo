@@ -20,7 +20,7 @@
 
 | Endpoint | 原因 |
 | --- | --- |
-| `POST /api/billing/fake-pay/{order_id}` | 支付/测试回调语义，不按 session CSRF 处理 |
+| `POST /api/billing/fake-pay/{order_id}` | 支付/测试回调语义，不按 session CSRF 处理；Phase 1I 已加生产默认禁用 gate |
 | `POST /api/billing/webhooks/{provider_name}` | Provider webhook，走签名/幂等模型 |
 | `POST /api/internal/user-voices/*` | Internal API，走 internal key / loopback 保护 |
 | `POST /internal/notifications/dispatch` | Internal API，走 internal key |
@@ -44,3 +44,7 @@ Support anonymous visitor cookie 已在后续 Phase 1G 独立覆盖：
 ## Phase 1H 更新
 
 `/job-api/{path:path}` 已在后续 Phase 1H 覆盖：非 jobs 透明代理只发现 `GET /job-api/voice-library` 这类读路径仍在使用，前端写路径已经集中在 `/job-api/jobs/*` 或 `/gateway/*`。因此 catch-all 已接入 `require_same_origin_state_change`；该 helper 对 GET/OPTIONS no-op，仅对 PUT/PATCH/DELETE 拦截跨站来源。
+
+## Phase 1I 更新
+
+Fake payment 已加生产 gate：`AVT_ENV=production` 时，fake provider 默认 non-operational，`POST /api/billing/fake-pay/{order_id}` 返回 403，`GET /api/billing/fake-pay/{order_id}` 重定向回 billing error 状态；只有显式设置 `AVT_ENABLE_FAKE_PAYMENT=true` 才允许生产 smoke test。

@@ -39,7 +39,12 @@ from models import (
     PaymentWebhookEvent,
     User,
 )
-from payment_providers import get_provider, is_provider_operational, list_providers
+from payment_providers import (
+    get_provider,
+    is_fake_payment_enabled,
+    is_provider_operational,
+    list_providers,
+)
 from plan_catalog import (
     VALID_BILLING_PERIODS as _CATALOG_BILLING_PERIODS,
     get_legacy_price_table,
@@ -307,7 +312,10 @@ async def get_checkout_config(
     - every known provider is listed with its `operational` flag
     - `default_provider` is the first operational provider in preference order
       [alipay, wechatpay, stripe, fake]
-    - if nothing else is operational, `fake` is the default (local dev safety)
+    - fake is operational in dev/test; production must explicitly opt in with
+      AVT_ENABLE_FAKE_PAYMENT=true
+    - if nothing is operational, `fake` is returned as a compatibility fallback
+      but remains non-operational
 
     Pricing facts are NOT returned here. Prices continue to come from
     `/api/plans`. This endpoint is strictly about "can we currently charge a
@@ -425,6 +433,16 @@ async def _run_fake_payment(order_id: str, db: AsyncSession) -> dict:
     Returns a dict with `{ok, settled, order_id, already_settled, not_found}`.
     Callers translate that into JSON (POST) or a redirect (GET).
     """
+    if not is_fake_payment_enabled():
+        return {
+            "ok": False,
+            "settled": False,
+            "order_id": order_id,
+            "not_found": False,
+            "already_settled": False,
+            "fake_payment_disabled": True,
+        }
+
     result = await db.execute(select(PaymentOrder).where(PaymentOrder.id == order_id))
     order = result.scalar_one_or_none()
     if order is None:
@@ -434,6 +452,7 @@ async def _run_fake_payment(order_id: str, db: AsyncSession) -> dict:
             "order_id": order_id,
             "not_found": True,
             "already_settled": False,
+            "fake_payment_disabled": False,
         }
     if order.status not in ("created", "pending"):
         # Non-fatal for the browser flow — a duplicate click on the checkout
@@ -446,6 +465,7 @@ async def _run_fake_payment(order_id: str, db: AsyncSession) -> dict:
             "order_id": str(order.id),
             "not_found": False,
             "already_settled": True,
+            "fake_payment_disabled": False,
         }
 
     fake_event_id = f"fake_evt_{uuid.uuid4().hex[:12]}"
@@ -465,6 +485,7 @@ async def _run_fake_payment(order_id: str, db: AsyncSession) -> dict:
         "order_id": str(order.id),
         "not_found": False,
         "already_settled": False,
+        "fake_payment_disabled": False,
     }
 
 
@@ -480,6 +501,8 @@ async def fake_pay(
     scripts) still see structured errors.
     """
     result = await _run_fake_payment(order_id, db)
+    if result.get("fake_payment_disabled"):
+        raise HTTPException(status_code=403, detail="fake payment provider is disabled")
     if result["not_found"]:
         raise HTTPException(status_code=404, detail="订单不存在")
     if result["already_settled"]:
@@ -513,6 +536,11 @@ async def fake_pay_browser(
     the correct redirect for a GET that performs a write-then-navigate.
     """
     result = await _run_fake_payment(order_id, db)
+    if result.get("fake_payment_disabled"):
+        return RedirectResponse(
+            url="/settings/billing?status=error&reason=fake_payment_disabled",
+            status_code=303,
+        )
     if result["not_found"]:
         return RedirectResponse(
             url="/settings/billing?status=error&reason=order_not_found",

@@ -26,13 +26,13 @@
 | Payment webhook | 否 | 用 provider signature / event idempotency |
 | Gateway internal API | 否 | 用 `X-Internal-Key` + loopback / Caddy block |
 | OAuth callback GET | 否，使用 OAuth state | 外部跳转入口，通用 same-origin guard 会误杀 |
-| Dev/test fake provider endpoint | 不应生产暴露 | GET 副作用需单独治理 |
+| Dev/test fake provider endpoint | 不应生产暴露 | Phase 1I 已加生产默认禁用 gate |
 
 ## GET 副作用例外
 
 | Endpoint | 状态变更 | 当前防护 | 风险判断 | 建议 |
 | --- | --- | --- | --- | --- |
-| `GET /api/billing/fake-pay/{order_id}` | settle fake payment order | order id + fake provider path，无 session guard | **需标记**。这是浏览器友好的 dev/test 回跳，但 GET 有副作用；若 fake provider 在生产可用，会被外部链接触发 | 限制到 dev/test，或要求 fake provider 不在生产 operational；不纳入通用 CSRF guard |
+| `GET /api/billing/fake-pay/{order_id}` | settle fake payment order | `AVT_ENV=production` 默认禁用；需显式 `AVT_ENABLE_FAKE_PAYMENT=true` | 合理例外。它服务 local/test 浏览器回跳，但生产默认不可结算 | 不纳入通用 CSRF guard；保持 fake provider 生产 gate |
 | `GET /api/admin/pan/callback` | 兑换 OAuth code，写 `pan_credentials` | one-shot OAuth `state` token | 合理例外。它必须接受 Baidu 外部跳转，不能套同源 Origin guard | 保持 OAuth state；测试 state 过期/重放/缺失 |
 
 除上述两类外，本轮没有发现明显的“普通业务 GET 直接改用户状态”入口。后续 Phase 1 可继续用测试守卫防止新增副作用 GET。
@@ -74,8 +74,8 @@
 | Endpoint | State change | Current guard | CSRF guard 建议 |
 | --- | --- | --- | --- |
 | `POST /api/billing/orders` | 创建 payment order | `get_current_user` required in handler | **纳入** |
-| `POST /api/billing/fake-pay/{order_id}` | fake provider settle | order id only | dev/test only；生产禁用或 same-origin + provider gating |
-| `GET /api/billing/fake-pay/{order_id}` | fake provider settle + redirect | order id only | **GET 副作用例外**；生产禁用或强约束 fake provider |
+| `POST /api/billing/fake-pay/{order_id}` | fake provider settle | `AVT_ENV=production` 默认禁用；需显式 `AVT_ENABLE_FAKE_PAYMENT=true` | dev/test only；不纳入 session CSRF |
+| `GET /api/billing/fake-pay/{order_id}` | fake provider settle + redirect | `AVT_ENV=production` 默认禁用；需显式 `AVT_ENABLE_FAKE_PAYMENT=true` | **GET 副作用例外**；由 fake provider 生产 gate 约束 |
 | `POST /api/billing/webhooks/{provider_name}` | 处理支付 webhook / settle order | provider signature + idempotency | **不纳入**；保持 provider signature |
 
 ## User Voice / Voice Selection

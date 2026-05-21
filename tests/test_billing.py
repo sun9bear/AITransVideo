@@ -25,6 +25,7 @@ _fake_database = types.ModuleType("database")
 _fake_database.get_db = MagicMock()
 _fake_database.engine = MagicMock()
 _fake_database.async_session = MagicMock()
+_fake_database.init_db = MagicMock()
 sys.modules.setdefault("database", _fake_database)
 
 from billing import (  # noqa: E402
@@ -45,6 +46,7 @@ from payment_providers import (  # noqa: E402
     WechatPayProvider,
     get_provider,
     list_providers,
+    is_fake_payment_enabled,
     is_provider_operational,
     NormalizedWebhookEvent,
     CheckoutResult,
@@ -107,6 +109,12 @@ def _make_db():
     db.flush = AsyncMock()
     db.refresh = AsyncMock()
     return db
+
+
+@pytest.fixture(autouse=True)
+def _default_payment_env(monkeypatch):
+    monkeypatch.setenv("AVT_ENV", "dev")
+    monkeypatch.delenv("AVT_ENABLE_FAKE_PAYMENT", raising=False)
 
 
 def _set_alipay_env(monkeypatch):
@@ -202,6 +210,20 @@ class TestProviderRegistry:
     def test_fake_is_operational(self):
         assert is_provider_operational("fake") is True
 
+    def test_fake_is_disabled_in_production_by_default(self, monkeypatch):
+        monkeypatch.setenv("AVT_ENV", "production")
+        monkeypatch.delenv("AVT_ENABLE_FAKE_PAYMENT", raising=False)
+
+        assert is_fake_payment_enabled() is False
+        assert is_provider_operational("fake") is False
+
+    def test_fake_can_be_explicitly_enabled_in_production(self, monkeypatch):
+        monkeypatch.setenv("AVT_ENV", "production")
+        monkeypatch.setenv("AVT_ENABLE_FAKE_PAYMENT", "true")
+
+        assert is_fake_payment_enabled() is True
+        assert is_provider_operational("fake") is True
+
     def test_stubs_are_not_operational(self):
         assert is_provider_operational("stripe") is False
         assert is_provider_operational("alipay") is False
@@ -222,6 +244,16 @@ class TestFakeProvider:
         assert isinstance(result, CheckoutResult)
         assert "/api/billing/fake-pay/ord-123" in result.checkout_url
         assert result.provider_order_id is not None
+
+    def test_create_checkout_rejects_when_disabled(self, monkeypatch):
+        monkeypatch.setenv("AVT_ENV", "production")
+        monkeypatch.delenv("AVT_ENABLE_FAKE_PAYMENT", raising=False)
+
+        with pytest.raises(RuntimeError, match="fake payment provider is disabled"):
+            FakeProvider().create_checkout(
+                order_id="ord-123", amount_cny=6900,
+                target_plan_code="plus", billing_period="monthly",
+            )
 
     def test_verify_signature_always_true(self):
         assert FakeProvider().verify_signature(b"{}", {}) is True
@@ -308,6 +340,22 @@ class TestCreateOrder:
         assert result["provider"] == "fake"
         # Only one commit — no double-commit from old code
         assert db.commit.await_count == 1
+
+    def test_fake_provider_rejected_in_production_without_explicit_flag(self, monkeypatch):
+        from fastapi import HTTPException
+        user = _make_user(plan_code="free")
+        db = self._make_order_db()
+
+        monkeypatch.setenv("AVT_ENV", "production")
+        monkeypatch.delenv("AVT_ENABLE_FAKE_PAYMENT", raising=False)
+
+        body = CreateOrderRequest(target_plan_code="plus", provider="fake")
+        with pytest.raises(HTTPException) as exc_info:
+            _run(create_order(body, db, user))
+
+        assert exc_info.value.status_code == 501
+        db.add.assert_not_called()
+        db.commit.assert_not_awaited()
 
     def test_stub_provider_returns_501(self):
         from fastapi import HTTPException
@@ -688,6 +736,26 @@ class TestCheckoutConfig:
             if entry["code"] == "alipay":
                 assert entry["operational"] is False
 
+    def test_fake_is_non_operational_in_production_checkout_config(self, monkeypatch):
+        import payment_providers
+        for var in (
+            "AVT_ALIPAY_APP_ID",
+            "AVT_ALIPAY_APP_PRIVATE_KEY",
+            "AVT_ALIPAY_PUBLIC_KEY",
+            "AVT_ALIPAY_NOTIFY_URL",
+            "AVT_ALIPAY_RETURN_URL",
+            "AVT_ALIPAY_GATEWAY_URL",
+        ):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("AVT_ENV", "production")
+        monkeypatch.delenv("AVT_ENABLE_FAKE_PAYMENT", raising=False)
+        payment_providers._PROVIDERS = {}
+
+        user = _make_user(plan_code="free")
+        result = self._run_get_config(user=user)
+        fake_entry = next(p for p in result["providers"] if p["code"] == "fake")
+        assert fake_entry["operational"] is False
+
     def test_alipay_becomes_default_when_env_is_complete(self, monkeypatch):
         import payment_providers
 
@@ -873,6 +941,29 @@ class TestFakePayBrowserRedirect:
         assert isinstance(resp2, RedirectResponse)
         assert resp2.status_code == 303
         assert "already_settled" in resp2.headers["location"]
+
+    def test_fake_pay_routes_disabled_in_production_without_explicit_flag(self, monkeypatch):
+        from fastapi import HTTPException
+        from fastapi.responses import RedirectResponse
+        from billing import fake_pay_browser
+
+        monkeypatch.setenv("AVT_ENV", "production")
+        monkeypatch.delenv("AVT_ENABLE_FAKE_PAYMENT", raising=False)
+
+        post_db = _make_db()
+        with pytest.raises(HTTPException) as exc_info:
+            _run(fake_pay("order-1", post_db))
+        assert exc_info.value.status_code == 403
+        post_db.execute.assert_not_called()
+
+        get_db = _make_db()
+        response = _run(fake_pay_browser("order-1", get_db))
+        assert isinstance(response, RedirectResponse)
+        assert response.status_code == 303
+        assert response.headers["location"] == (
+            "/settings/billing?status=error&reason=fake_payment_disabled"
+        )
+        get_db.execute.assert_not_called()
 
     def test_post_handler_still_returns_json_for_programmatic_callers(self):
         """POST path preserves its original JSON contract.
