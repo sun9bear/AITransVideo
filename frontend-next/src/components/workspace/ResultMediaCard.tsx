@@ -472,7 +472,6 @@ const JIANYING_DEFAULT_STATE: JianyingDraftStatusResponse = {
   draft_zip_path: null,
   draft_zip_size_bytes: null,
   artifact_key: null,
-  compatibility_report_path: null,
 }
 
 /**

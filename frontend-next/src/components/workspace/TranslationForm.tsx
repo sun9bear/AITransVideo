@@ -595,7 +595,7 @@ export function TranslationForm({ onCreated, mode, initialSourceUrl }: Translati
           <button
             type="submit"
             disabled={Boolean(validationError) || isBlockedByConcurrency || submitState === "submitting" || isLoadingGuard}
-            className="inline-flex w-full items-center justify-center gap-2 rounded-full border border-transparent bg-gradient-to-r from-primary to-primary/80 px-6 py-2.5 text-sm font-semibold text-white shadow-lg shadow-primary/25 transition hover:shadow-primary/40 hover:brightness-110 disabled:cursor-not-allowed disabled:border-border disabled:bg-muted disabled:bg-none disabled:text-muted-foreground disabled:shadow-none disabled:hover:brightness-100 disabled:hover:shadow-none sm:w-auto"
+            className="inline-flex w-full items-center justify-center gap-2 rounded-[var(--radius)] border border-transparent bg-gradient-to-r from-primary to-primary/80 px-6 py-2.5 text-sm font-semibold text-white shadow-lg shadow-primary/25 transition hover:shadow-primary/40 hover:brightness-110 disabled:cursor-not-allowed disabled:border-border disabled:bg-muted disabled:bg-none disabled:text-muted-foreground disabled:shadow-none disabled:hover:brightness-100 disabled:hover:shadow-none sm:w-auto"
           >
             {submitState === "submitting" ? "创建中…" : "创建任务"}
           </button>
@@ -653,7 +653,7 @@ function ConcurrencyActionLink({
 
   return (
     <a
-      className="inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-primary to-primary/80 px-5 py-2 text-sm font-semibold text-white shadow-lg shadow-primary/25 transition hover:shadow-primary/40 hover:brightness-110"
+      className="inline-flex items-center gap-2 rounded-[var(--radius)] bg-gradient-to-r from-primary to-primary/80 px-5 py-2 text-sm font-semibold text-white shadow-lg shadow-primary/25 transition hover:shadow-primary/40 hover:brightness-110"
       href={href}
     >
       {label}

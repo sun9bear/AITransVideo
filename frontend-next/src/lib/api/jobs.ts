@@ -217,7 +217,6 @@ export interface JianyingDraftStatusResponse {
   draft_zip_path: string | null
   draft_zip_size_bytes: number | null
   artifact_key: 'editor.jianying_draft_zip' | null
-  compatibility_report_path: string | null
 }
 
 /**

@@ -402,3 +402,59 @@ def test_caddyfile_has_internal_block_rule():
 #
 # See docs/plans/2026-04-17-legacy-migration-cleanup.md §4 (Task 4.1) for
 # the design rationale.
+
+
+# ---------------------------------------------------------------------------
+# Contract: client-side billing estimator stays deleted (2026-05-21)
+# ---------------------------------------------------------------------------
+
+def test_frontend_no_client_side_billing_estimator():
+    """estimator.ts deleted 2026-05-21; prevent silent revival.
+
+    ``frontend-next/src/lib/cost/estimator.ts`` contained a hardcoded
+    client-side billing table (MiniMax / AssemblyAI / Gemini rates and
+    USD→CNY conversion) and had zero call sites at the time of deletion.
+    Reviving it — even with updated rates — would violate the CLAUDE.md
+    invariant that Gateway is the sole billing truth source.
+
+    Three independent guard layers, by design wide-net:
+      1. File does not exist
+      2. Containing directory does not exist (different filename can't
+         smuggle the table back in under cost/)
+      3. String scan: no .ts/.tsx anywhere in frontend-next/src imports
+         the deleted module by any path shape (alias / relative / absolute)
+    """
+    # 1. File gone
+    assert not (REPO / "frontend-next/src/lib/cost/estimator.ts").exists(), (
+        "estimator.ts came back — was deleted 2026-05-21 to enforce Gateway "
+        "as sole billing truth source."
+    )
+    # 2. Containing dir gone
+    assert not (REPO / "frontend-next/src/lib/cost").exists(), (
+        "frontend-next/src/lib/cost/ came back. If you need a new helper "
+        "under this name, put billing-related logic behind a Gateway call "
+        "and pick a different directory."
+    )
+    # 3. No imports of the deleted module — three patterns to defeat
+    # alias-vs-relative-path workarounds
+    forbidden_patterns = (
+        "@/lib/cost",           # tsconfig path alias
+        "lib/cost/estimator",   # relative or absolute fragment
+        "/cost/estimator",      # any trailing segment match
+    )
+    src_root = REPO / "frontend-next" / "src"
+    if not src_root.exists():
+        return  # frontend not present in this checkout — skip
+    offenders: list[str] = []
+    for ts_path in src_root.rglob("*.ts*"):
+        try:
+            text = ts_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        for pat in forbidden_patterns:
+            if pat in text:
+                offenders.append(f"{ts_path.relative_to(REPO)}: {pat!r}")
+    assert offenders == [], (
+        "Found imports referencing the deleted client-side billing "
+        "estimator:\n  " + "\n  ".join(offenders)
+    )
