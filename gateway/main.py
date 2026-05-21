@@ -345,12 +345,27 @@ async def health():
 
 # --- Auth routes ---
 
-app.post("/auth/register")(register_handler)
-app.post("/auth/login")(login_handler)
-app.post("/auth/logout")(logout_handler)
+app.post(
+    "/auth/register",
+    dependencies=[Depends(require_same_origin_state_change)],
+)(register_handler)
+app.post(
+    "/auth/login",
+    dependencies=[Depends(require_same_origin_state_change)],
+)(login_handler)
+app.post(
+    "/auth/logout",
+    dependencies=[Depends(require_same_origin_state_change)],
+)(logout_handler)
 app.get("/auth/me")(me_handler)
-app.post("/api/account/change-password")(change_password_handler)
-app.post("/api/account/bind-email")(bind_email_handler)
+app.post(
+    "/api/account/change-password",
+    dependencies=[Depends(require_same_origin_state_change)],
+)(change_password_handler)
+app.post(
+    "/api/account/bind-email",
+    dependencies=[Depends(require_same_origin_state_change)],
+)(bind_email_handler)
 app.include_router(auth_phone_router)
 app.include_router(auth_email_router)
 # P1-10b / S-HIGH-2: ``captcha_router`` removed along with the dead
@@ -411,7 +426,10 @@ app.post("/gateway/upload-video")(_gateway_upload_video)
 # Rename a job's user-visible display_name (plan §6.5 / D16). Lives on
 # the /gateway/* namespace, not /job-api/*, because the collision +
 # ownership logic is gateway-level rather than a transparent proxy.
-app.patch("/gateway/jobs/{job_id}")(intercept_rename_job)
+app.patch(
+    "/gateway/jobs/{job_id}",
+    dependencies=[Depends(require_same_origin_state_change)],
+)(intercept_rename_job)
 
 # Suggested "save as new copy" name for the edit-page modal (plan §6.4 / D17).
 # Pure read; the user may edit the suggestion before committing.
@@ -424,9 +442,15 @@ app.get("/gateway/jobs/{job_id}/suggested-copy-name")(intercept_suggested_copy_n
 # swallowing the specific routes (FastAPI {path:path} bug).
 
 app.get("/job-api/jobs")(intercept_list_jobs)
-app.post("/job-api/jobs")(intercept_create_job)
+app.post(
+    "/job-api/jobs",
+    dependencies=[Depends(require_same_origin_state_change)],
+)(intercept_create_job)
 app.get("/job-api/jobs/{job_id}")(intercept_get_job)
-app.delete("/job-api/jobs/{job_id}")(intercept_delete_job_v2)
+app.delete(
+    "/job-api/jobs/{job_id}",
+    dependencies=[Depends(require_same_origin_state_change)],
+)(intercept_delete_job_v2)
 app.post(
     "/job-api/jobs/{job_id}/source-metadata",
     dependencies=[Depends(_require_internal_access)],

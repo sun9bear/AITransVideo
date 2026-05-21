@@ -10,6 +10,8 @@ if _gateway_dir not in sys.path:
     sys.path.insert(0, _gateway_dir)
 
 import background_task_api  # noqa: E402
+import auth_email  # noqa: E402
+import auth_phone  # noqa: E402
 import notifications_api  # noqa: E402
 import user_voice_api  # noqa: E402
 from csrf import require_same_origin_state_change  # noqa: E402
@@ -21,6 +23,11 @@ _SESSION_USER_ROUTERS = [
     ("background_task_api", background_task_api.router),
     ("notifications_api", notifications_api.router),
     ("user_voice_api", user_voice_api.router),
+]
+
+_AUTH_FLOW_ROUTERS = [
+    ("auth_email", auth_email.router),
+    ("auth_phone", auth_phone.router),
 ]
 
 
@@ -71,23 +78,53 @@ def test_internal_user_write_routers_are_not_given_session_csrf_guard():
             assert not _route_has_csrf_dependency(route)
 
 
-def test_voice_selection_main_post_routes_have_same_origin_guard():
+def test_auth_flow_write_routers_have_same_origin_guard():
+    gaps: list[str] = []
+    for label, router in _AUTH_FLOW_ROUTERS:
+        for route in router.routes:
+            write_methods = sorted(
+                set(getattr(route, "methods", set())) & _STATE_CHANGING_METHODS
+            )
+            if not write_methods:
+                continue
+            if _route_has_csrf_dependency(route):
+                continue
+            gaps.append(
+                f"{label}: {','.join(write_methods)} "
+                f"{getattr(route, 'path', '?')}"
+            )
+
+    assert gaps == []
+
+
+def test_direct_main_write_routes_have_same_origin_guard():
     gateway_main = _load_gateway_main()
-    expected_paths = {
-        "/job-api/jobs/{job_id}/voice-clone",
-        "/job-api/jobs/{job_id}/voice-match",
-        "/job-api/jobs/{job_id}/voice-candidates",
+    expected_routes = {
+        ("POST", "/auth/register"),
+        ("POST", "/auth/login"),
+        ("POST", "/auth/logout"),
+        ("POST", "/api/account/change-password"),
+        ("POST", "/api/account/bind-email"),
+        ("PATCH", "/gateway/jobs/{job_id}"),
+        ("POST", "/job-api/jobs"),
+        ("DELETE", "/job-api/jobs/{job_id}"),
+        ("POST", "/job-api/jobs/{job_id}/voice-clone"),
+        ("POST", "/job-api/jobs/{job_id}/voice-match"),
+        ("POST", "/job-api/jobs/{job_id}/voice-candidates"),
     }
     found = set()
     missing_guard = []
 
     for route in gateway_main.app.routes:
         path = getattr(route, "path", "")
-        if path not in expected_paths or "POST" not in getattr(route, "methods", set()):
-            continue
-        found.add(path)
-        if not _route_has_csrf_dependency(route):
-            missing_guard.append(path)
+        methods = set(getattr(route, "methods", set()))
+        for item in expected_routes:
+            method, expected_path = item
+            if path != expected_path or method not in methods:
+                continue
+            found.add(item)
+            if not _route_has_csrf_dependency(route):
+                missing_guard.append(f"{method} {path}")
 
-    assert found == expected_paths
+    assert found == expected_routes
     assert missing_guard == []

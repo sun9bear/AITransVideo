@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth import create_session, hash_password
 from config import settings
+from csrf import require_same_origin_state_change
 from database import get_db
 from models import PhoneVerificationChallenge, User
 import risk_control
@@ -41,7 +42,11 @@ import sms_provider
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/auth/phone", tags=["auth-phone"])
+router = APIRouter(
+    prefix="/auth/phone",
+    tags=["auth-phone"],
+    dependencies=[Depends(require_same_origin_state_change)],
+)
 
 
 # ---------------------------------------------------------------------------

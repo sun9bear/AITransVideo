@@ -18,12 +18,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth import create_session, hash_password, verify_password
 from config import settings
+from csrf import require_same_origin_state_change
 from database import get_db
 from models import EmailVerificationChallenge, User
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/auth/email", tags=["auth-email"])
+router = APIRouter(
+    prefix="/auth/email",
+    tags=["auth-email"],
+    dependencies=[Depends(require_same_origin_state_change)],
+)
 
 MAX_VERIFY_ATTEMPTS = 3
 REGISTRATION_PURPOSE = "registration"
