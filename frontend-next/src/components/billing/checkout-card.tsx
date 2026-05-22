@@ -133,7 +133,7 @@ export function CheckoutCard({
       // payment URL from the gateway.
       toast.success("正在跳转到支付页…")
       await new Promise((r) => setTimeout(r, 300))
-      window.location.href = result.checkout_url
+      window.location.assign(result.checkout_url)
     } catch (err) {
       const message = err instanceof Error ? err.message : "创建订单失败"
       toast.error(message)
