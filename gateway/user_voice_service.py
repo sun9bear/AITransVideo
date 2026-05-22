@@ -24,6 +24,12 @@ logger = logging.getLogger(__name__)
 # the default is derived from ``confidence`` in ``__post_init__``.
 _CONFIDENCE_TO_DEFAULT_SCOPE: dict[str, str] = {
     "strong": "same_source_strong",
+    # 2026-05-21 spec: cross-source named unique-in-library matches get
+    # auto-reuse via the new "strong_named" tier — score 60 (below
+    # same-source-strong 100 / same-source-named-medium 70) but high
+    # enough to bypass the user pause-confirm step. Promotion happens
+    # at match_user_voices() post-processing, not _score_cross_source_match.
+    "strong_named": "cross_source_named_unique",
     "medium": "same_source_named",
     "weak": "same_source_speaker_id_changed",
 }
@@ -49,7 +55,13 @@ class UserVoiceMatch:
 
     @property
     def auto_reuse_allowed(self) -> bool:
-        return self.confidence == "strong"
+        # 2026-05-21: ``strong_named`` joins ``strong`` as auto-reuse
+        # tier. ``strong_named`` only fires when the user library has
+        # EXACTLY ONE voice with the matching non-generic name_key —
+        # deterministic uniqueness, not name-length heuristic. 2+
+        # same-name candidates stay weak so smart pauses for user
+        # to pick which one.
+        return self.confidence in {"strong", "strong_named"}
 
 
 class VoiceNotFoundError(LookupError):
@@ -476,21 +488,32 @@ async def match_user_voices(
         # Filter via Python so we keep provider compatibility + expired_at
         # checks in one place; the DB just narrows by name_key + user_id.
         #
-        # Plan §兼容性和历史音色 (2026-05-17-user-voice-candidate-first):
-        # "Phase 0 之前的历史音色 source_content_hash 为空, 不会出现在
-        # 统一候选 API 返回中。它们仍在个人音色库页面可见,用户可以
-        # 手动从官方选择器旁的'个人音色'区域选择。"
-        # → Exclude NULL-hash legacy rows at the SQL level so they never
-        # surface as a cross-source candidate. The user can still pick
-        # them via the "其他个人音色" optgroup on the frontend.
+        # 2026-05-21 spec change: previously excluded NULL-hash legacy
+        # rows here via ``source_content_hash.is_not(None)`` (per old
+        # plan §兼容性和历史音色). User feedback after Stanford job
+        # (job_f2abf73878b...) — Matt voice from 2026-04-26 with NULL
+        # hash but matching name_key was silently excluded, smart
+        # then fresh-cloned again creating library duplicates. The
+        # filter is now removed so 100+ legacy named voices become
+        # cross-source candidates.
+        #
+        # Safety net: NULL-hash voices still need a non-generic
+        # name_key (filtered by ``is_generic_speaker_name_key`` above)
+        # to surface, so old "speaker_a" / "主持人" placeholder voices
+        # don't pollute candidates.
         cross_where = [
             UserVoice.user_id == user_id,
             UserVoice.expired_at.is_(None),
             UserVoice.source_speaker_name_key == clean_name_key,
-            UserVoice.source_content_hash.is_not(None),
         ]
         if clean_hash:
-            cross_where.append(UserVoice.source_content_hash != clean_hash)
+            # Only exclude same-source rows when we have a current hash;
+            # NULL-hash voices pass through (they came from a different
+            # source by definition — we just don't know which).
+            cross_where.append(
+                (UserVoice.source_content_hash != clean_hash)
+                | (UserVoice.source_content_hash.is_(None))
+            )
         cross_result = await db.execute(select(UserVoice).where(*cross_where))
         for voice in cross_result.scalars().all():
             if getattr(voice, "expired_at", None) is not None:
@@ -513,6 +536,34 @@ async def match_user_voices(
                 matches.append(cross_match)
                 if vid:
                     seen_voice_ids.add(vid)
+
+        # 2026-05-21 spec: promote unique cross-source named match to
+        # ``strong_named`` so smart auto-reuses without pausing for
+        # user confirmation. Uniqueness gates it — if user library has
+        # 2+ voices with the same name (e.g., re-cloned same speaker
+        # from different videos creating duplicate entries), all stay
+        # weak so smart pauses and lets user pick which one.
+        #
+        # Rationale: a non-generic speaker name (filtered by
+        # ``is_generic_speaker_name_key`` above) is strong evidence
+        # the cloned voice IS the same person — celebrity name + only
+        # one in user's library = high-confidence auto-reuse. The
+        # uniqueness criterion is more conservative than "name length
+        # heuristic" because it adapts to each user's actual library.
+        cross_source_matches = [
+            m for m in matches
+            if m.match_scope == "cross_source_named_person"
+        ]
+        if len(cross_source_matches) == 1:
+            only = cross_source_matches[0]
+            idx = matches.index(only)
+            matches[idx] = UserVoiceMatch(
+                voice=only.voice,
+                confidence="strong_named",
+                reason="cross_source_unique_specific_name",
+                score=60,
+                match_scope="cross_source_named_unique",
+            )
 
     matches.sort(
         key=lambda item: (

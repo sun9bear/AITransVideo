@@ -537,6 +537,12 @@ def test_match_user_voices_same_source_speaker_id_changed_match_scope():
 
 
 def test_match_user_voices_cross_source_named_person_when_include_cross_source():
+    """2026-05-21 spec update: single cross-source named match is now
+    PROMOTED to strong_named (auto-reuse-allowed). Pre-change
+    behavior (kept weak) is asserted in
+    test_two_cross_source_named_both_stay_weak in
+    tests/test_strong_named_auto_reuse.py — when 2+ candidates exist
+    for the same name, all stay weak so user picks one."""
     from user_voice_service import match_user_voices
 
     cross_voice = _voice(
@@ -563,10 +569,12 @@ def test_match_user_voices_cross_source_named_person_when_include_cross_source()
 
     assert len(matches) == 1
     m = matches[0]
-    assert m.match_scope == "cross_source_named_person"
-    assert m.confidence == "weak"
-    assert m.auto_reuse_allowed is False
-    assert m.reason == "cross_source_same_speaker_name_key"
+    # Single cross-source unique match → promoted to strong_named
+    assert m.match_scope == "cross_source_named_unique"
+    assert m.confidence == "strong_named"
+    assert m.auto_reuse_allowed is True
+    assert m.reason == "cross_source_unique_specific_name"
+    assert m.score == 60
 
     # Without the flag, the second query does not run and the cross row
     # is invisible.
@@ -741,6 +749,9 @@ def test_match_user_voices_cross_source_without_hash_still_queries_by_name():
     """When source_content_hash is missing AND include_cross_source=True,
     matcher must still attempt cross-source-by-name (so post-edit
     flows on jobs that never recorded a hash still see candidates).
+
+    2026-05-21 spec update: single cross-source unique match is now
+    promoted to strong_named scope ``cross_source_named_unique``.
     """
     from user_voice_service import match_user_voices
 
@@ -765,21 +776,25 @@ def test_match_user_voices_cross_source_without_hash_still_queries_by_name():
         )
     )
     assert len(matches) == 1
-    assert matches[0].match_scope == "cross_source_named_person"
+    # Single unique cross-source named → promoted scope
+    assert matches[0].match_scope == "cross_source_named_unique"
 
 
-def test_match_user_voices_cross_source_excludes_legacy_null_hash_rows():
-    """Plan §兼容性 (2026-05-17-user-voice-candidate-first):
-    Phase 0 之前的历史音色 ``source_content_hash`` 为空,不会出现
-    在统一候选 API 返回中。它们仍在个人音色库页面可见,用户可以
-    手动从官方选择器旁的"个人音色"区域选择。
+def test_match_user_voices_cross_source_includes_legacy_null_hash_rows():
+    """2026-05-21 spec change: pre-2026-05-16 legacy voices with
+    ``source_content_hash IS NULL`` but backfilled
+    ``source_speaker_name_key`` MUST surface as cross-source
+    candidates (and be promoted to strong_named when unique).
 
-    Therefore: a UserVoice row whose ``source_content_hash IS NULL``
-    must NOT surface as a ``cross_source_named_person`` candidate even
-    if its ``source_speaker_name_key`` matches the current job's
-    speaker name. A modern row (hash != current) WITH the same name
-    still surfaces — proving the filter excludes only NULL-hash legacy
-    rows, not all cross-source rows.
+    Real incident: Stanford communication video. User had Matt
+    Abrahams voice in library (2026-04-26, NULL hash) but it never
+    surfaced — old SQL filter ``IS NOT NULL`` excluded it. Smart
+    then fresh-cloned Matt again, creating library duplicate. User
+    feedback drove the filter removal.
+
+    Pin both:
+      1. Output includes legacy NULL-hash voice (no longer excluded)
+      2. SQL no longer carries the ``IS NOT NULL`` predicate
     """
     from user_voice_service import match_user_voices
 
@@ -795,12 +810,8 @@ def test_match_user_voices_cross_source_excludes_legacy_null_hash_rows():
         source_speaker_id="speaker_other",
         source_speaker_name_key="芒格",
     )
-    # First call (same-source) returns nothing — the legacy voice's NULL
-    # hash doesn't match the current ``youtube:current``. The cross-source
-    # call returns BOTH rows from the DB layer (in real life the SQL
-    # filter is what excludes the legacy row); we verify the matcher's
-    # output excludes it regardless of which side does the filtering.
-    db = _multi_query_db([], [modern_cross])
+    # DB layer returns BOTH rows now that the SQL filter is gone.
+    db = _multi_query_db([], [legacy_null_hash, modern_cross])
     matches = _run(
         match_user_voices(
             db,
@@ -814,20 +825,21 @@ def test_match_user_voices_cross_source_excludes_legacy_null_hash_rows():
             include_cross_source=True,
         )
     )
-    # Only the modern row surfaces — the legacy NULL-hash voice is filtered
-    # out at the SQL level (source_content_hash IS NOT NULL filter), so it
-    # never reaches the Python-side scoring.
-    assert [m.voice.voice_id for m in matches] == ["vt_modern"]
-    assert matches[0].match_scope == "cross_source_named_person"
+    # Both rows surface. 2+ candidates → both stay weak (per uniqueness
+    # criterion: smart pauses for user to pick).
+    surfaced_voice_ids = sorted(m.voice.voice_id for m in matches)
+    assert surfaced_voice_ids == ["vt_legacy", "vt_modern"]
+    for m in matches:
+        assert m.match_scope == "cross_source_named_person"
+        assert m.confidence == "weak"
+        assert m.auto_reuse_allowed is False
 
-    # Also assert the SQL clause set passed to db.execute contains the
-    # IS NOT NULL filter, so the SQL-level guard is exercised (not just
-    # Python-side scoring). We compile without literal_binds (UUIDs
-    # can't always render as literals) — the predicate text is still in
-    # the WHERE clause as-is.
+    # Pin SQL no longer has the IS NOT NULL guard.
     second_call_args = db.execute.await_args_list[1]
     stmt = second_call_args.args[0]
     sql_text = str(stmt.compile())
-    assert "source_content_hash IS NOT NULL" in sql_text, (
-        f"cross-source SQL missing NOT NULL guard for legacy hash rows:\n{sql_text}"
+    assert "source_content_hash IS NOT NULL" not in sql_text, (
+        f"cross-source SQL re-introduced IS NOT NULL guard — that "
+        f"excludes legacy NULL-hash voices (Stanford / Matt scenario):\n"
+        f"{sql_text}"
     )

@@ -606,13 +606,16 @@ def _match_smart_user_voice(
     raw_candidates = data.get("personal_voice_candidates") or []
     possible: list[dict] = []
     if isinstance(raw_candidates, list):
+        # 2026-05-21: ``strong_named`` joins ``strong`` as auto-reuse-
+        # tier (cross-source unique-in-library named match). Both go to
+        # ``auto_reuse``, neither belongs in the ``possible`` (pause-
+        # for-confirm) list. Without this filter strong_named would
+        # appear in BOTH, double-counted in admin UI + audit.
+        _auto_reuse_confidences = {"strong", "strong_named"}
         for cand in raw_candidates:
             if not isinstance(cand, dict):
                 continue
-            # Skip strong matches in the possible list — they're the
-            # auto_reuse path. The candidates endpoint includes them
-            # in personal_voice_candidates, so filter explicitly.
-            if str(cand.get("confidence") or "") == "strong":
+            if str(cand.get("confidence") or "") in _auto_reuse_confidences:
                 continue
             v_id = str(cand.get("voice_id") or "").strip()
             if not v_id:
