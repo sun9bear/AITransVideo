@@ -32,6 +32,7 @@ from services.llm_registry import (
     resolve_model_id as _resolve_model_id_from_registry,
     get_fallback_candidates,
 )
+from utils.env_flags import env_flag
 
 _MIMO_OMNI_API_URL = "https://api.xiaomimimo.com/v1/chat/completions"
 
@@ -539,12 +540,34 @@ def _write_review_debug_artifacts(
         encoding="utf-8",
     )
 
-    return {
+    debug_artifacts = {
         "raw_response_path": str(raw_response_path),
         "speaker_diff_path": str(speaker_diff_path),
         "result_path": str(result_path),
         "audit_path": str(audit_path),
     }
+    if env_flag("AVT_SPEAKER_EVIDENCE"):
+        try:
+            from services.speaker_evidence import (
+                build_speaker_evidence_from_snapshots,
+                speaker_evidence_path,
+                write_speaker_evidence_jsonl,
+            )
+
+            project_dir = output_root.parent if output_root.name == "transcript" else output_root
+            evidence_path = speaker_evidence_path(project_dir)
+            evidence_rows = build_speaker_evidence_from_snapshots(
+                original_snapshot=original_snapshot,
+                final_snapshot=final_snapshot,
+                review_model=review_model,
+                has_audio=has_audio,
+            )
+            if write_speaker_evidence_jsonl(evidence_path, evidence_rows):
+                debug_artifacts["speaker_evidence_path"] = str(evidence_path)
+        except Exception:
+            logger.exception("speaker evidence sidecar write failed; continuing")
+
+    return debug_artifacts
 
 
 # ---------------------------------------------------------------------------

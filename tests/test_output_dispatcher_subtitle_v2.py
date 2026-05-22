@@ -190,6 +190,44 @@ def test_dispatcher_registers_subtitle_artifacts(tmp_path: Path) -> None:
     assert report_artifact.endswith("subtitle_quality_report.json")
 
 
+def test_subtitle_width_report_is_flagged_and_not_registered(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aligned_audio = tmp_path / "aligned.wav"
+    aligned_audio.write_bytes(b"RIFF")
+    project = _build_localized_project(aligned_audio)
+    long_text = "abcdefghijklmnopqrstuvwxyz0123456789"
+    project.semantic_blocks[0].merged_cn_text = long_text
+    project.captions[0].cn_text = long_text
+    artifact_index = ArtifactIndex()
+    fake_backend = _FakeEditorBackend(tmp_path)
+
+    dispatcher = OutputDispatcher(editor_backend=fake_backend)
+    dispatcher.dispatch(
+        project,
+        artifact_index,
+        OutputRequest(targets=[OutputTarget.EDITOR], output_dir=str(tmp_path)),
+    )
+    assert not (tmp_path / "reports" / "subtitle_width_report.json").exists()
+
+    monkeypatch.setenv("AVT_SUBTITLE_WIDTH_REPORT", "1")
+    dispatcher.dispatch(
+        project,
+        artifact_index,
+        OutputRequest(targets=[OutputTarget.EDITOR], output_dir=str(tmp_path)),
+    )
+
+    report_path = tmp_path / "reports" / "subtitle_width_report.json"
+    assert report_path.exists()
+    payload = json.loads(report_path.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "subtitle_width_report_v1"
+    assert payload["advisory_only"] is True
+    assert payload["issue_count"] >= 1
+    assert payload["issues"][0]["jianying_font_size_used"] is None
+    assert artifact_index.get("reports.subtitle_width_report") is None
+
+
 # ---------------------------------------------------------------------------
 # Scenario 4: Feature flag AVT_DISABLE_SUBTITLE_CUES_V2=1 disables cue generation
 # ---------------------------------------------------------------------------

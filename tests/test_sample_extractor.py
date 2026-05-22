@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from pydub import AudioSegment
@@ -136,6 +137,48 @@ def test_sample_extractor_accumulates_toward_max_duration_when_more_audio_exists
 
     sample = AudioSegment.from_wav(output_path)
     assert len(sample) == 300_000
+
+
+def test_sample_extractor_writes_manifest_only_when_flag_enabled(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    audio_path = _build_timeline_audio(
+        tmp_path / "audio" / "original.wav",
+        [
+            (0, 10_000, 0),
+            (12_000, 22_000, 0),
+        ],
+    )
+    lines = [
+        _line(1, 0, 10_000),
+        _line(2, 12_000, 22_000),
+    ]
+
+    output_path = tmp_path / "speaker_b.wav"
+    VoiceSampleExtractor().extract_sample(
+        str(audio_path),
+        lines,
+        str(output_path),
+    )
+    assert not output_path.with_suffix(".manifest.json").exists()
+
+    monkeypatch.setenv("AVT_VOICE_SAMPLE_MANIFEST", "1")
+    VoiceSampleExtractor().extract_sample(
+        str(audio_path),
+        lines,
+        str(output_path),
+    )
+
+    manifest_path = output_path.with_suffix(".manifest.json")
+    assert manifest_path.exists()
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "voice_sample_manifest_v1"
+    assert payload["advisory_only"] is True
+    assert payload["speaker_id"] == "speaker_b"
+    assert payload["selected_sample_path"] == "speaker_b.wav"
+    assert payload["selected_interval_count"] == 2
+    assert payload["selected_line_ids"] == [1, 2]
 
 
 def test_sample_extractor_validate_sample_reports_duration_and_rms(tmp_path: Path) -> None:
