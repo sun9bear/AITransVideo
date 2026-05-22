@@ -46,7 +46,6 @@ export function NotificationBell({ isAuthenticated }: { isAuthenticated: boolean
   // Poll unread count.
   useEffect(() => {
     if (!isAuthenticated) {
-      setCount(0)
       return
     }
     let cancelled = false
@@ -160,7 +159,6 @@ export function useNotificationUnreadCount(isAuthenticated: boolean) {
 
   useEffect(() => {
     if (!isAuthenticated) {
-      setCount(0)
       return
     }
     let cancelled = false
@@ -190,5 +188,5 @@ export function useNotificationUnreadCount(isAuthenticated: boolean) {
     }
   }, [isAuthenticated])
 
-  return count
+  return isAuthenticated ? count : 0
 }

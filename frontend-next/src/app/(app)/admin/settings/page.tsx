@@ -396,7 +396,7 @@ export default function AdminSettingsPage() {
             </p>
             <p className="text-xs text-muted-foreground mt-1">
               开启后，<b>S5 对齐阶段跳过 rewrite</b>，所有 TTS 段直接 DSP 拉伸/压缩到原英文时长。
-              一定能对齐，但语速差异大的段落会有 atempo 拉伸失真。适合"宁可有点怪也要严格同步"的内容
+              一定能对齐，但语速差异大的段落会有 atempo 拉伸失真。适合“宁可有点怪也要严格同步”的内容
               （字幕同步/口型对齐），或者上游翻译字数控制不可靠时的兜底方案。
               <br />
               <span className="text-[color:var(--ochre)]">注意：开启后 rewrite 完全不生效，需复核率会变成 0%（因为强制对齐了），但音质需主观判断。</span>

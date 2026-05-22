@@ -79,7 +79,7 @@ export function PainPoints() {
         </ol>
 
         <p className="mx-auto mt-12 max-w-3xl text-center zh-body text-foreground/85">
-          爱译视频不是只做"一键生成"，而是把<strong className="text-foreground">长视频翻译、AI 配音、多格式交付和逐句修改</strong>放进同一个工作台。
+          爱译视频不是只做“一键生成”，而是把<strong className="text-foreground">长视频翻译、AI 配音、多格式交付和逐句修改</strong>放进同一个工作台。
         </p>
       </div>
     </section>

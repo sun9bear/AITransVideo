@@ -63,7 +63,7 @@ export function Features() {
             为什么选择爱译视频
           </p>
           <h2 className="ink-display mt-3 text-3xl text-foreground sm:text-4xl">
-            把"翻译"做完，把"能发布"做对
+            把“翻译”做完，把“能发布”做对
           </h2>
           <p className="mt-4 zh-body text-muted-foreground">
             AI 第一版只是起点。我们把长视频处理、多格式交付、逐句修改和增量重生成一起做对。

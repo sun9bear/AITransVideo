@@ -304,7 +304,6 @@ function DetailDrawer({ jobId, onClose }: { jobId: string; onClose: () => void }
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    setLoading(true)
     fetchJobDetail(jobId)
       .then(setDetail)
       .catch((err) => toast.error(err.message))

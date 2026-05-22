@@ -34,13 +34,12 @@ export function useAdminHeartbeat({
   const [status, setStatusState] = useState<PresenceStatus>("online")
   const [loaded, setLoaded] = useState(false)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const lastVisibleRef = useRef<number>(Date.now())
+  const lastVisibleRef = useRef<number | null>(null)
 
   // Initial: fetch existing status (so a page reload doesn't reset
   // a paused admin back to online).
   useEffect(() => {
     if (!enabled) {
-      setLoaded(true)
       return
     }
     let cancelled = false
@@ -72,7 +71,8 @@ export function useAdminHeartbeat({
 
     const tick = async () => {
       // Throttle: if tab has been hidden for > 60s, don't waste a request.
-      const hiddenFor = Date.now() - lastVisibleRef.current
+      const now = Date.now()
+      const hiddenFor = now - (lastVisibleRef.current ?? now)
       if (typeof document !== "undefined" && document.hidden && hiddenFor > 60_000) {
         return
       }
@@ -97,6 +97,7 @@ export function useAdminHeartbeat({
   // Track tab visibility so we don't ping while in background.
   useEffect(() => {
     if (typeof document === "undefined") return
+    lastVisibleRef.current = Date.now()
     const handler = () => {
       if (!document.hidden) {
         lastVisibleRef.current = Date.now()
@@ -121,5 +122,5 @@ export function useAdminHeartbeat({
     }
   }, [])
 
-  return { status, setStatus, loaded }
+  return { status, setStatus, loaded: !enabled || loaded }
 }
