@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import subprocess
 import tempfile
@@ -12,6 +13,8 @@ from pydub import AudioSegment
 from services.assemblyai.transcriber import TranscriptLine
 from utils.env_flags import env_flag
 
+
+logger = logging.getLogger(__name__)
 
 MIN_SEGMENT_DURATION_MS = 5_000
 FALLBACK_SEGMENT_DURATION_MS = 1_000
@@ -497,4 +500,9 @@ def _write_sample_manifest(
             encoding="utf-8",
         )
     except OSError:
+        logger.warning(
+            "voice sample manifest sidecar write failed; continuing: %s",
+            manifest_path,
+            exc_info=True,
+        )
         return

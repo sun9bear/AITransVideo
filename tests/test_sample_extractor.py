@@ -1,4 +1,5 @@
 import json
+import logging
 from pathlib import Path
 
 from pydub import AudioSegment
@@ -230,6 +231,27 @@ def test_sample_manifest_records_only_emitted_slices(
             "end_ms": 10_000,
         }
     ]
+
+
+def test_sample_manifest_write_failure_warns_without_raising(
+    tmp_path: Path,
+    caplog,
+) -> None:
+    caplog.set_level(logging.WARNING, logger="services.voice.sample_extractor")
+
+    sample_extractor._write_sample_manifest(  # noqa: SLF001
+        output_file=tmp_path / "missing_parent" / "speaker_b.wav",
+        source_path=tmp_path / "audio" / "original.wav",
+        speaker_lines=[_line(1, 0, 10_000)],
+        all_candidates=[],
+        extract_plan=[(0, 10_000)],
+        selected_line_ids=[1],
+        total_ms=10_000,
+        min_duration_ms=10_000,
+        max_duration_ms=300_000,
+    )
+
+    assert "voice sample manifest sidecar write failed" in caplog.text
 
 
 def test_sample_extractor_validate_sample_reports_duration_and_rms(tmp_path: Path) -> None:

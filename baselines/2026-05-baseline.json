@@ -1,0 +1,92 @@
+{
+  "schema_version": "phase1a_observability_baseline_v1",
+  "created_at": "2026-05-22",
+  "status": "historical_fixture_baseline",
+  "scope": "speaker_tts_subtitle_alignment_phase1a",
+  "source_fixture": "tests/fixtures/baseline_jobs.json",
+  "source_benchmark_manifest": "tests/fixtures/benchmark/video_translation_quality/manifest.json",
+  "notes": [
+    "This baseline pins the pre-Phase-1b behavioral metrics from the existing offline video_translation_quality fixture.",
+    "Phase 1a observability flags are expected to keep these metrics unchanged because they only write sidecars/reports.",
+    "Before enabling Phase 1b behavior flags, rerun the same fixture set or replace this file with a calibrated live-job baseline approved by the project owner."
+  ],
+  "dataset": {
+    "job_count": 12,
+    "source_job_hashes_redacted": true,
+    "providers": {
+      "cosyvoice": 2,
+      "minimax": 5,
+      "unknown": 3,
+      "volcengine": 2
+    },
+    "coverage": {
+      "pre_tts_contradiction_jobs": 4,
+      "speaker_correction_jobs": 6,
+      "low_rewrite_control_jobs": 5
+    }
+  },
+  "aggregate_metrics": {
+    "segment_count": 993,
+    "rewrite_count": 295,
+    "rewrite_segment_rate": 0.2971,
+    "capped_dsp_count": 186,
+    "needs_review_segments": 186,
+    "needs_review_rate": 0.1873,
+    "pre_tts_events": 87,
+    "pre_tts_contradictions": 61,
+    "speaker_corrections": 58
+  },
+  "tracked_metrics": {
+    "rewrite_count": {
+      "baseline": 295,
+      "direction": "lower_or_equal",
+      "source": "sum(jobs[].metrics.rewrite_count)"
+    },
+    "capped_dsp_count": {
+      "baseline": 186,
+      "direction": "lower_or_equal",
+      "source": "sum(jobs[].metrics.force_dsp_segments)"
+    },
+    "needs_review_segments": {
+      "baseline": 186,
+      "direction": "lower_or_equal",
+      "source": "sum(jobs[].metrics.needs_review_segments)"
+    },
+    "speaker_corrections": {
+      "baseline": 58,
+      "direction": "informational",
+      "source": "sum(jobs[].metrics.speaker_corrections)"
+    },
+    "subtitle_fallback_rate": {
+      "baseline": null,
+      "direction": "lower_or_equal",
+      "source": "not available in this historical fixture; must be populated by Phase 1b calibration rerun"
+    },
+    "average_speed_ratio": {
+      "baseline": null,
+      "direction": "closer_to_1_or_equal",
+      "source": "not available in this historical fixture; must be populated by Phase 1b calibration rerun"
+    },
+    "clone_sample_validation_warnings": {
+      "baseline": null,
+      "direction": "lower_or_equal",
+      "source": "not available in this historical fixture; must be populated by Phase 1b calibration rerun"
+    }
+  },
+  "rerun_contract": {
+    "same_fixture_required": true,
+    "behavior_flags_that_require_diff": [
+      "AVT_TRANSLATION_SCRIPT_GATE",
+      "AVT_TRANSLATION_SCRIPT_GATE_RETRY",
+      "AVT_VOICE_SAMPLE_SCORING",
+      "AVT_AUDIO_TAIL_TRIM",
+      "AVT_WHISPER_QUALITY_GATE"
+    ],
+    "phase1a_observability_flags_expected_no_change": [
+      "AVT_SPEAKER_EVIDENCE",
+      "AVT_VOICE_SAMPLE_MANIFEST",
+      "AVT_SUBTITLE_WIDTH_REPORT"
+    ],
+    "failure_policy": "If a behavior flag worsens a lower_or_equal metric without an explicit approved tradeoff, keep the flag off and investigate before wider rollout."
+  }
+}

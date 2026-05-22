@@ -1,0 +1,208 @@
+{
+  "schema_version": "phase1a_baseline_jobs_v1",
+  "created_at": "2026-05-22",
+  "source_benchmark_manifest": "tests/fixtures/benchmark/video_translation_quality/manifest.json",
+  "selection_policy": {
+    "min_jobs": 10,
+    "selected_jobs": 12,
+    "purpose": "Freeze a pre-Phase-1b regression set for speaker, TTS alignment, and subtitle observability work.",
+    "notes": [
+      "The fixture uses redacted benchmark ids and relative artifact paths only.",
+      "It is suitable for local tests and offline diffing; live historical job selection can replace it after owner review."
+    ]
+  },
+  "jobs": [
+    {
+      "benchmark_id": "bench_001",
+      "fixture_dir": "tests/fixtures/benchmark/video_translation_quality/jobs/bench_001",
+      "provider": "minimax",
+      "tts_model": "speech-2.8-turbo",
+      "service_mode": "studio",
+      "metrics": {
+        "segment_count": 256,
+        "rewrite_count": 49,
+        "force_dsp_segments": 0,
+        "needs_review_segments": 0,
+        "pre_tts_events": 49,
+        "pre_tts_contradictions": 35,
+        "speaker_corrections": 0
+      }
+    },
+    {
+      "benchmark_id": "bench_002",
+      "fixture_dir": "tests/fixtures/benchmark/video_translation_quality/jobs/bench_002",
+      "provider": "minimax",
+      "tts_model": "speech-2.8-hd",
+      "service_mode": "studio",
+      "metrics": {
+        "segment_count": 72,
+        "rewrite_count": 31,
+        "force_dsp_segments": 0,
+        "needs_review_segments": 0,
+        "pre_tts_events": 26,
+        "pre_tts_contradictions": 19,
+        "speaker_corrections": 0
+      }
+    },
+    {
+      "benchmark_id": "bench_003",
+      "fixture_dir": "tests/fixtures/benchmark/video_translation_quality/jobs/bench_003",
+      "provider": "minimax",
+      "tts_model": "speech-2.8-turbo",
+      "service_mode": "studio",
+      "metrics": {
+        "segment_count": 16,
+        "rewrite_count": 12,
+        "force_dsp_segments": 3,
+        "needs_review_segments": 3,
+        "pre_tts_events": 7,
+        "pre_tts_contradictions": 6,
+        "speaker_corrections": 1
+      }
+    },
+    {
+      "benchmark_id": "bench_004",
+      "fixture_dir": "tests/fixtures/benchmark/video_translation_quality/jobs/bench_004",
+      "provider": "cosyvoice",
+      "tts_model": "cosyvoice-v3-flash",
+      "service_mode": "express",
+      "metrics": {
+        "segment_count": 10,
+        "rewrite_count": 11,
+        "force_dsp_segments": 5,
+        "needs_review_segments": 5,
+        "pre_tts_events": 5,
+        "pre_tts_contradictions": 1,
+        "speaker_corrections": 1
+      }
+    },
+    {
+      "benchmark_id": "bench_005",
+      "fixture_dir": "tests/fixtures/benchmark/video_translation_quality/jobs/bench_005",
+      "provider": "unknown",
+      "tts_model": null,
+      "service_mode": null,
+      "metrics": {
+        "segment_count": 51,
+        "rewrite_count": 0,
+        "force_dsp_segments": 0,
+        "needs_review_segments": 0,
+        "pre_tts_events": 0,
+        "pre_tts_contradictions": 0,
+        "speaker_corrections": 47
+      }
+    },
+    {
+      "benchmark_id": "bench_006",
+      "fixture_dir": "tests/fixtures/benchmark/video_translation_quality/jobs/bench_006",
+      "provider": "unknown",
+      "tts_model": null,
+      "service_mode": null,
+      "metrics": {
+        "segment_count": 11,
+        "rewrite_count": 0,
+        "force_dsp_segments": 0,
+        "needs_review_segments": 0,
+        "pre_tts_events": 0,
+        "pre_tts_contradictions": 0,
+        "speaker_corrections": 4
+      }
+    },
+    {
+      "benchmark_id": "bench_007",
+      "fixture_dir": "tests/fixtures/benchmark/video_translation_quality/jobs/bench_007",
+      "provider": "unknown",
+      "tts_model": null,
+      "service_mode": null,
+      "metrics": {
+        "segment_count": 0,
+        "rewrite_count": 0,
+        "force_dsp_segments": 0,
+        "needs_review_segments": 0,
+        "pre_tts_events": 0,
+        "pre_tts_contradictions": 0,
+        "speaker_corrections": 4
+      }
+    },
+    {
+      "benchmark_id": "bench_008",
+      "fixture_dir": "tests/fixtures/benchmark/video_translation_quality/jobs/bench_008",
+      "provider": "minimax",
+      "tts_model": null,
+      "service_mode": null,
+      "metrics": {
+        "segment_count": 243,
+        "rewrite_count": 96,
+        "force_dsp_segments": 89,
+        "needs_review_segments": 89,
+        "pre_tts_events": 0,
+        "pre_tts_contradictions": 0,
+        "speaker_corrections": 0
+      }
+    },
+    {
+      "benchmark_id": "bench_009",
+      "fixture_dir": "tests/fixtures/benchmark/video_translation_quality/jobs/bench_009",
+      "provider": "volcengine",
+      "tts_model": null,
+      "service_mode": null,
+      "metrics": {
+        "segment_count": 16,
+        "rewrite_count": 0,
+        "force_dsp_segments": 0,
+        "needs_review_segments": 0,
+        "pre_tts_events": 0,
+        "pre_tts_contradictions": 0,
+        "speaker_corrections": 1
+      }
+    },
+    {
+      "benchmark_id": "bench_010",
+      "fixture_dir": "tests/fixtures/benchmark/video_translation_quality/jobs/bench_010",
+      "provider": "cosyvoice",
+      "tts_model": null,
+      "service_mode": null,
+      "metrics": {
+        "segment_count": 12,
+        "rewrite_count": 0,
+        "force_dsp_segments": 0,
+        "needs_review_segments": 0,
+        "pre_tts_events": 0,
+        "pre_tts_contradictions": 0,
+        "speaker_corrections": 0
+      }
+    },
+    {
+      "benchmark_id": "bench_011",
+      "fixture_dir": "tests/fixtures/benchmark/video_translation_quality/jobs/bench_011",
+      "provider": "volcengine",
+      "tts_model": null,
+      "service_mode": null,
+      "metrics": {
+        "segment_count": 63,
+        "rewrite_count": 0,
+        "force_dsp_segments": 0,
+        "needs_review_segments": 0,
+        "pre_tts_events": 0,
+        "pre_tts_contradictions": 0,
+        "speaker_corrections": 0
+      }
+    },
+    {
+      "benchmark_id": "bench_012",
+      "fixture_dir": "tests/fixtures/benchmark/video_translation_quality/jobs/bench_012",
+      "provider": "minimax",
+      "tts_model": null,
+      "service_mode": null,
+      "metrics": {
+        "segment_count": 243,
+        "rewrite_count": 96,
+        "force_dsp_segments": 89,
+        "needs_review_segments": 89,
+        "pre_tts_events": 0,
+        "pre_tts_contradictions": 0,
+        "speaker_corrections": 0
+      }
+    }
+  ]
+}

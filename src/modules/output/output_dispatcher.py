@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -14,7 +15,12 @@ from modules.output.manifest_writer import ManifestWriter
 from modules.output.output_models import OutputBundleResult, OutputRequest
 from modules.output.publish.publish_backend import PublishBackend
 from modules.output.publish.publish_models import PublishRequest, PublishResult
-from utils.env_flags import env_flag
+from utils.env_flags import env_flag, env_int
+
+
+logger = logging.getLogger(__name__)
+
+_DEFAULT_SUBTITLE_WIDTH_MAX = 32
 
 
 class OutputDispatcher:
@@ -411,12 +417,27 @@ class OutputDispatcher:
         try:
             from modules.subtitles.quality import write_subtitle_width_report
 
-            write_subtitle_width_report(
+            ok = write_subtitle_width_report(
                 project_root / "reports" / "subtitle_width_report.json",
                 project_id=project_id,
                 cues=cues,
-                max_display_width=32,
+                max_display_width=env_int(
+                    "AVT_SUBTITLE_WIDTH_MAX",
+                    default=_DEFAULT_SUBTITLE_WIDTH_MAX,
+                    min_value=1,
+                    max_value=200,
+                ),
             )
+            if not ok:
+                logger.warning(
+                    "subtitle width report sidecar write failed; continuing",
+                    extra={"project_id": project_id},
+                )
         except Exception:
             # Advisory sidecar: never block editor/publish output.
+            logger.warning(
+                "subtitle width report sidecar write failed; continuing",
+                exc_info=True,
+                extra={"project_id": project_id},
+            )
             return

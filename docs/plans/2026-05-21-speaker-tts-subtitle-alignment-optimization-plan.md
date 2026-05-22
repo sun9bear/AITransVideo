@@ -618,6 +618,12 @@ Phase 1a 路径说明：
 - 该 manifest 不通过 `/jobs/{job_id}/reports` 枚举，也不进入 R2、剪映 zip 或 `artifact_index`。
 - 后续如果需要 UI/API 统一读取，再单独设计 per-speaker manifest list API；不要把单文件 reports API 硬扩成多文件目录读取。
 
+schema 演进约束：
+
+- Phase 1a 已落地的 manifest schema 固定为 `voice_sample_manifest_v1`，只表达“实际产出了哪些 sample slice”和基本上下文，不表达样本质量排序。
+- Phase 1b 如启用 `AVT_VOICE_SAMPLE_SCORING`，必须显式升级到 `voice_sample_manifest_v2`，新增 `score`、`rms_dbfs`、`silence_ratio`、`boundary_gap_ms`、`hard_reject_reasons`、`warnings` 等字段。
+- v1 保留只读兼容，v2 由 scoring 路径写出；不要在 v1 中悄悄追加行为语义字段，避免审核 UI / admin tooling 做隐式 schema 猜测。
+
 hard reject 行为必须写死：
 
 - 如果所有候选都进入 `hard_reject_reasons`，extractor 返回 `None` 或抛出明确异常。
@@ -996,6 +1002,7 @@ def find_subtitle_width_issues(
 | TTS tail trim | `AVT_AUDIO_TAIL_TRIM` | 无 | off | `fit_audio_to_slot()` 保持现状 |
 | Whisper 质量门 | `AVT_WHISPER_QUALITY_GATE` | `NEXT_PUBLIC_ALIGNMENT_WARNINGS` | off | 现有 `_block_is_in_sync` 和 fallback 逻辑不变 |
 | 字幕宽度报告 | `AVT_SUBTITLE_WIDTH_REPORT` | `NEXT_PUBLIC_SUBTITLE_WIDTH_WARNINGS` | off | 不写宽度报告，不显示宽度 warning |
+| 字幕宽度阈值 | `AVT_SUBTITLE_WIDTH_MAX` | 无 | 32 | 仅改变报告 warning 阈值，不改变字幕切分或 timing |
 
 上线原则：
 
@@ -1018,6 +1025,13 @@ def find_subtitle_width_issues(
   - clone sample validation warnings
   - subtitle fallback rate
 - Phase 1/2 完成后使用同一任务集重跑，核心指标应改善或持平；如恶化，需要保留 feature flag 关闭路径。
+
+当前执行状态（2026-05-22）：
+
+- 已补 `tests/fixtures/baseline_jobs.json`，复用现有 `tests/fixtures/benchmark/video_translation_quality/manifest.json` 中 12 个脱敏历史任务作为 Phase 1b 前的离线回归集合。
+- 已补 `baselines/2026-05-baseline.json`，记录当前聚合指标：`segment_count=993`、`rewrite_count=295`、`capped_dsp_count=186`、`needs_review_segments=186`、`speaker_corrections=58`。
+- 该 baseline 是历史 fixture baseline，不等价于最终线上校准；Phase 1b/Phase 2 行为 flag 灰度前仍应使用同一集合或经项目 owner 确认的新集合重跑 diff。
+- `subtitle_fallback_rate`、`average_speed_ratio`、`clone_sample_validation_warnings` 当前历史 fixture 不具备完整来源，暂为 `null`，后续校准 rerun 必须补齐。
 
 ### Phase 1a：纯 sidecar/report/manifest，零行为变更
 

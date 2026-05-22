@@ -24,4 +24,25 @@ def env_flag(name: str, *, default: bool = False) -> bool:
     return default
 
 
-__all__ = ["env_flag"]
+def env_int(
+    name: str,
+    *,
+    default: int,
+    min_value: int | None = None,
+    max_value: int | None = None,
+) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw.strip())
+    except (TypeError, ValueError):
+        return default
+    if min_value is not None and value < min_value:
+        return default
+    if max_value is not None and value > max_value:
+        return default
+    return value
+
+
+__all__ = ["env_flag", "env_int"]

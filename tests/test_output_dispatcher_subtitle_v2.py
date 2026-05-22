@@ -11,6 +11,7 @@ Covers 5 scenarios per the T9 task spec:
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -223,9 +224,39 @@ def test_subtitle_width_report_is_flagged_and_not_registered(
     payload = json.loads(report_path.read_text(encoding="utf-8"))
     assert payload["schema_version"] == "subtitle_width_report_v1"
     assert payload["advisory_only"] is True
+    assert payload["max_display_width"] == 32
     assert payload["issue_count"] >= 1
     assert payload["issues"][0]["jianying_font_size_used"] is None
     assert artifact_index.get("reports.subtitle_width_report") is None
+
+    monkeypatch.setenv("AVT_SUBTITLE_WIDTH_MAX", "12")
+    dispatcher.dispatch(
+        project,
+        artifact_index,
+        OutputRequest(targets=[OutputTarget.EDITOR], output_dir=str(tmp_path)),
+    )
+
+    payload = json.loads(report_path.read_text(encoding="utf-8"))
+    assert payload["max_display_width"] == 12
+    assert payload["issues"][0]["max_units"] == 12
+
+
+def test_subtitle_width_report_write_failure_warns_without_raising(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("AVT_SUBTITLE_WIDTH_REPORT", "1")
+    caplog.set_level(logging.WARNING, logger="modules.output.output_dispatcher")
+    (tmp_path / "reports").write_text("not a directory", encoding="utf-8")
+
+    OutputDispatcher._maybe_write_subtitle_width_report(  # noqa: SLF001
+        project_root=tmp_path,
+        project_id="project_warning",
+        cues=[],
+    )
+
+    assert "subtitle width report sidecar write failed" in caplog.text
 
 
 # ---------------------------------------------------------------------------
