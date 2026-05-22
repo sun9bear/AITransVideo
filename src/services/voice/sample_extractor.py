@@ -98,7 +98,7 @@ class VoiceSampleExtractor:
         # truncating the last one if total would exceed max_duration_ms.
         # Each interval produces one ffmpeg slice file, then we concat.
         extract_plan: list[tuple[int, int]] = []  # [(start_ms, duration_ms), ...]
-        selected_line_ids: list[int] = []
+        extract_plan_line_ids: list[int | None] = []
         total_ms = 0
         for candidate in candidates:
             if total_ms >= max_duration_ms:
@@ -112,10 +112,10 @@ class VoiceSampleExtractor:
                     break
                 take_ms = min(interval_ms, remaining_ms)
                 extract_plan.append((start_ms, take_ms))
+                line_index: int | None = None
                 if interval_index < len(candidate.line_indices):
                     line_index = candidate.line_indices[interval_index]
-                    if line_index is not None:
-                        selected_line_ids.append(line_index)
+                extract_plan_line_ids.append(line_index)
                 total_ms += take_ms
 
         if total_ms <= 0 or not extract_plan:
@@ -131,6 +131,8 @@ class VoiceSampleExtractor:
         with tempfile.TemporaryDirectory(prefix="voice_sample_") as temp_root:
             temp_dir = Path(temp_root)
             slice_paths: list[Path] = []
+            emitted_extract_plan: list[tuple[int, int]] = []
+            emitted_line_ids: list[int] = []
             for idx, (start_ms, take_ms) in enumerate(extract_plan):
                 slice_path = temp_dir / f"slice_{idx:04d}.wav"
                 _ffmpeg_extract_slice(
@@ -141,6 +143,11 @@ class VoiceSampleExtractor:
                 )
                 if slice_path.exists() and slice_path.stat().st_size > 0:
                     slice_paths.append(slice_path)
+                    emitted_extract_plan.append((start_ms, take_ms))
+                    if idx < len(extract_plan_line_ids):
+                        line_index = extract_plan_line_ids[idx]
+                        if line_index is not None:
+                            emitted_line_ids.append(line_index)
 
             if not slice_paths:
                 raise SampleExtractionError("样本提取失败，没有可用切片。")
@@ -157,9 +164,9 @@ class VoiceSampleExtractor:
                 source_path=source_path,
                 speaker_lines=speaker_lines,
                 all_candidates=all_candidates,
-                extract_plan=extract_plan,
-                selected_line_ids=selected_line_ids,
-                total_ms=total_ms,
+                extract_plan=emitted_extract_plan,
+                selected_line_ids=emitted_line_ids,
+                total_ms=sum(duration_ms for _start_ms, duration_ms in emitted_extract_plan),
                 min_duration_ms=min_duration_ms,
                 max_duration_ms=max_duration_ms,
             )

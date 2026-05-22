@@ -5,6 +5,7 @@ from pydub import AudioSegment
 from pydub.generators import Sine
 
 from services.assemblyai.transcriber import TranscriptLine
+import services.voice.sample_extractor as sample_extractor
 from services.voice.sample_extractor import VoiceSampleExtractor
 
 
@@ -179,6 +180,56 @@ def test_sample_extractor_writes_manifest_only_when_flag_enabled(
     assert payload["selected_sample_path"] == "speaker_b.wav"
     assert payload["selected_interval_count"] == 2
     assert payload["selected_line_ids"] == [1, 2]
+
+
+def test_sample_manifest_records_only_emitted_slices(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    audio_path = _build_timeline_audio(
+        tmp_path / "audio" / "original.wav",
+        [
+            (0, 10_000, 0),
+            (12_000, 22_000, 0),
+        ],
+    )
+    lines = [
+        _line(1, 0, 10_000),
+        _line(2, 12_000, 22_000),
+    ]
+    original_extract_slice = sample_extractor._ffmpeg_extract_slice  # noqa: SLF001
+
+    def extract_first_slice_only(**kwargs):
+        if kwargs["start_ms"] == 0:
+            original_extract_slice(**kwargs)
+
+    monkeypatch.setattr(
+        sample_extractor,
+        "_ffmpeg_extract_slice",
+        extract_first_slice_only,
+    )
+    monkeypatch.setenv("AVT_VOICE_SAMPLE_MANIFEST", "1")
+
+    output_path = tmp_path / "speaker_b.wav"
+    VoiceSampleExtractor().extract_sample(
+        str(audio_path),
+        lines,
+        str(output_path),
+    )
+
+    payload = json.loads(
+        output_path.with_suffix(".manifest.json").read_text(encoding="utf-8")
+    )
+    assert payload["selected_interval_count"] == 1
+    assert payload["total_duration_ms"] == 10_000
+    assert payload["selected_line_ids"] == [1]
+    assert payload["selected_intervals"] == [
+        {
+            "start_ms": 0,
+            "duration_ms": 10_000,
+            "end_ms": 10_000,
+        }
+    ]
 
 
 def test_sample_extractor_validate_sample_reports_duration_and_rms(tmp_path: Path) -> None:
