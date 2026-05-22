@@ -95,6 +95,7 @@ const navGroups: NavGroup[] = [
       { label: "音色管理", href: "/admin/voices", icon: AudioLines },
       { label: "模型管理", href: "/admin/prompts", icon: MessageSquareText },
       { label: "审校监控", href: "/admin/s2-monitor", icon: Activity },
+      { label: "智能版监控", href: "/admin/smart-analytics", icon: BarChart3 },
       { label: "访问监控", href: "/admin/traffic", icon: Globe2 },
       { label: "转化监控", href: "/admin/conversions", icon: TrendingUp },
       { label: "安全监控", href: "/admin/security", icon: ShieldAlert },
