@@ -417,6 +417,12 @@ def write_speaker_evidence_jsonl(path: Path, rows: list[SpeakerEvidence]) -> Non
 - 在 `src/pipeline/process.py` 中，`_build_speaker_structure_profiles()` 后补充 `speaker_role`、`speaker_duration_share`、low-support 状态。
 - split/merge 必须保留 `source_line_ids`、`parent_line_id`、`semantic_block_id`、`final_segment_id`、`merge_group_id`、`stage`，保证最终 segment 可以追溯到原 transcript line。
 
+Phase 1a 范围说明：
+
+- Phase 1a 先采用粗粒度 diff 法：在 transcript reviewer 的统一 debug artifact 出口比较 `original_snapshot` 与 `final_snapshot`，生成 `kept`、`changed`、`kept_uncertain` 级别的证据链。
+- Phase 1a 的 `stage` 可以先统一为 `s2_review`，不要求拆到 pass1/pass2/pass3/verifier。
+- pass1/pass2/verifier 分阶段 evidence、speaker role/duration share 回填、split/merge lineage 细化属于 Phase 1b 子任务。
+
 Artifact contract：
 
 - 不写仓库级松散 `artifacts/` 目录。
@@ -605,6 +611,12 @@ VOICE_CLONE_SAMPLE_POLICIES = {
 4. 提取选中的 interval。
 5. 写 manifest。
 6. 继续跑现有 `validate_sample()` 作为最终 gate。
+
+Phase 1a 路径说明：
+
+- Phase 1a 的 voice sample manifest 是 `sample.wav` 的同目录 sidecar，即 `output_file.with_suffix(".manifest.json")`。
+- 该 manifest 不通过 `/jobs/{job_id}/reports` 枚举，也不进入 R2、剪映 zip 或 `artifact_index`。
+- 后续如果需要 UI/API 统一读取，再单独设计 per-speaker manifest list API；不要把单文件 reports API 硬扩成多文件目录读取。
 
 hard reject 行为必须写死：
 
@@ -1123,7 +1135,7 @@ Phase 1b 会改变 prompt、解析、样本选择或降级路径，必须在 sid
 
 - `<project_dir>/reports/speaker_evidence.jsonl`
 - `<project_dir>/reports/subtitle_quality.json`
-- `<project_dir>/smart_clone_samples/<speaker_id>.manifest.json`
+- 与 voice sample wav 同目录的 `<sample_name>.manifest.json` sidecar，例如 `<project_dir>/smart_clone_samples/<speaker_id>.manifest.json`
 
 Artifact lifecycle 约束：
 
@@ -1148,7 +1160,7 @@ Artifact lifecycle 约束：
 8. 所有新增能力必须有 feature flag，行为变更默认关闭。
 9. 本轮 i18n 收缩到 zh-CN 主链路，不把 `cn_text` 暗改成泛化 target text 架构。
 10. 所有 clone sample hard reject 时只能降级/审核，不能自动重试付费 clone API。
-11. 新报告和 manifest 使用 `<project_dir>` 下 job-scoped storage，不上传 R2，不进入剪映 zip。
+11. 新报告和 manifest 使用 `<project_dir>` 下 job-scoped storage，不上传 R2，不进入剪映 zip；voice sample manifest 第一版与 sample wav 同目录，不通过 `/reports` API 暴露。
 12. `<project_dir>/reports/` 由 Job API 暴露：`GET /jobs/{job_id}/reports` 返回白名单报告目录，`GET /jobs/{job_id}/reports/{name}` 只读取白名单报告文件；Gateway 继续通过 `/job-api/jobs/{job_id}/{subpath}` 做用户归属校验，不新增独立权限体系。
 
 ## 11. 剩余待确认问题
@@ -1161,7 +1173,7 @@ Artifact lifecycle 约束：
 
 优先实施 Phase 1a：
 
-1. 定义 `<project_dir>/reports/` 和 `<project_dir>/smart_clone_samples/` 的 artifact contract。
+1. 定义 `<project_dir>/reports/` 和 voice sample 同目录 `.manifest.json` 的 artifact contract。
 2. 增加 `speaker_evidence.jsonl` sidecar。
 3. 增加 voice clone sample manifest，但不改变样本选择。
 4. 增加 subtitle width report，但只 advisory。
